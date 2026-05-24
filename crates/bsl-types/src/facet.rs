@@ -186,6 +186,52 @@ pub enum FormBindingTargetFacet {
     Attribute { ty: TypeId },
 }
 
+// Deterministic raw-id ordering only (NOT semantic), required while
+// `hir_def::ty::Ty::FormControl` embeds `FormBindingFacet` and derives
+// `Ord`. Removable once `Ty` is deleted (§4.E.6h) — the kernel orders
+// types by interned `TypeId`, never structurally. Mirrors the
+// transitional `impl Ord for SdblProjection` in `hir-def`.
+impl Ord for MdoRefFacet {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.mdo_type.cmp(&other.mdo_type).then_with(|| self.name.cmp(&other.name))
+    }
+}
+impl PartialOrd for MdoRefFacet {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for FormBindingTargetFacet {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        use FormBindingTargetFacet::*;
+        match (self, other) {
+            (
+                TabularSection { mdo_ref: a, section: sa },
+                TabularSection { mdo_ref: b, section: sb },
+            ) => a.cmp(b).then_with(|| sa.cmp(sb)),
+            (Attribute { ty: a }, Attribute { ty: b }) => a.raw().cmp(&b.raw()),
+            (TabularSection { .. }, Attribute { .. }) => Ordering::Less,
+            (Attribute { .. }, TabularSection { .. }) => Ordering::Greater,
+        }
+    }
+}
+impl PartialOrd for FormBindingTargetFacet {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for FormBindingFacet {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.path.cmp(&other.path).then_with(|| self.target.cmp(&other.target))
+    }
+}
+impl PartialOrd for FormBindingFacet {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 // ── Collection facets ────────────────────────────────────────
 
 /// Source tag for a `ValueTable` projection — provenance only,

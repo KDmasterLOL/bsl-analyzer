@@ -6,15 +6,14 @@ use bsl_config::ConfigId;
 use bsl_metadata::MdoType;
 use bsl_types::builders::Builders;
 use bsl_types::facet::{
-    ArgArity, ArrayFacet, DateComponent, DefaultValue, FormBindingFacet, FormBindingTargetFacet,
-    FormDataFacet, FunctionFacet, FunctionOrigin, MapFacet, MdoRefFacet, ParamPassing, ParamSpec,
-    ProjectionFacet, ProjectionFieldSource, ProjectionSource, StructureFacet, TableFacet,
-    TableSource,
+    ArgArity, ArrayFacet, DateComponent, DefaultValue, FormDataFacet, FunctionFacet,
+    FunctionOrigin, MapFacet, MdoRefFacet, ParamPassing, ParamSpec, ProjectionFacet,
+    ProjectionFieldSource, ProjectionSource, StructureFacet, TableFacet, TableSource,
 };
 use bsl_types::intern::TypeKernelDb;
 use bsl_types::kind::{LiteralValue, MetadataKind, Projection, ProjectionOrigin, TypeId, TypeKind};
 use bsl_types::testing::RootConfigCtx;
-use hir_def::ty::{FormDataBinding, FormDataKind, FormDataTarget, SdblProjection, Ty};
+use hir_def::ty::{FormDataKind, SdblProjection, Ty};
 use hir_def::Name;
 
 pub fn ty_to_typeid(db: &dyn TypeKernelDb, ty: &Ty) -> TypeId {
@@ -65,9 +64,7 @@ pub fn ty_to_typeid(db: &dyn TypeKernelDb, ty: &Ty) -> TypeId {
             form_data_kind_to_facet(*kind),
             underlying.as_ref().map(owner_to_mdo_ref),
         ),
-        Ty::FormControl { kind, binding } => {
-            db.mk_form_control(*kind, binding.as_ref().map(|b| form_binding_to_facet(db, b)))
-        }
+        Ty::FormControl { kind, binding } => db.mk_form_control(*kind, binding.clone()),
         Ty::Function { params, defaults, max_args, ret } => {
             db.function(function_to_facet(db, params, defaults, *max_args, ret))
         }
@@ -224,10 +221,9 @@ pub fn typeid_to_ty(db: &dyn TypeKernelDb, id: TypeId) -> Ty {
             kind: form_data_facet_to_kind(kind),
             underlying: underlying.as_ref().map(mdo_ref_to_owner),
         },
-        TypeKind::FormControl { kind, binding } => Ty::FormControl {
-            kind: *kind,
-            binding: binding.as_ref().and_then(|b| form_binding_from_facet(db, b)),
-        },
+        TypeKind::FormControl { kind, binding } => {
+            Ty::FormControl { kind: *kind, binding: binding.clone() }
+        }
         TypeKind::ThisObject { config_id, owner } => {
             if *config_id != ConfigId::Root {
                 debug_loss("K→T", "ThisObject", "dropping non-Root config_id");
@@ -364,56 +360,6 @@ fn projection_facet_to_sdbl_projection(
         // loss-ok: Ty query result variants carry projection only per §3.6.
     }
     facet.projection.as_ref().map(|p| projection_to_sdbl_projection(db, p))
-}
-
-pub(crate) fn form_binding_to_facet(
-    db: &dyn TypeKernelDb,
-    binding: &FormDataBinding,
-) -> FormBindingFacet {
-    let path = binding.path().iter().map(|name| ty_name_to_kernel(name, "FormControl")).collect();
-    let target = match binding.target() {
-        FormDataTarget::TabularSection { mdo_type, owner, section } => {
-            FormBindingTargetFacet::TabularSection {
-                mdo_ref: make_mdo_ref_facet(*mdo_type, ty_name_to_kernel(owner, "FormControl")),
-                section: ty_name_to_kernel(section, "FormControl"),
-            }
-        }
-        FormDataTarget::Attribute { ty } => {
-            FormBindingTargetFacet::Attribute { ty: ty_to_typeid(db, ty) }
-        }
-    };
-    make_form_binding_facet(path, target)
-}
-
-fn form_binding_from_facet(
-    db: &dyn TypeKernelDb,
-    binding: &FormBindingFacet,
-) -> Option<FormDataBinding> {
-    let path: Box<[Name]> = binding.path.iter().map(kernel_name_to_ty).collect();
-    let target = match &binding.target {
-        FormBindingTargetFacet::TabularSection { mdo_ref, section } => {
-            FormDataTarget::TabularSection {
-                mdo_type: mdo_ref.mdo_type,
-                owner: kernel_name_to_ty(&mdo_ref.name),
-                section: kernel_name_to_ty(section),
-            }
-        }
-        FormBindingTargetFacet::Attribute { ty } => {
-            FormDataTarget::Attribute { ty: Box::new(typeid_to_ty(db, *ty)) }
-        }
-        future => {
-            debug_loss("K→T", "FormControl", "dropping future form binding target");
-            // loss-ok: external match on #[non_exhaustive] target must remain forward-compatible.
-            let _ = future;
-            return None;
-        }
-    };
-    let out = FormDataBinding::new(path, target);
-    if out.is_none() {
-        debug_loss("K→T", "FormControl", "dropping empty form binding path");
-        // loss-ok: FormDataBinding enforces non-empty paths; empty kernel paths are unrepresentable.
-    }
-    out
 }
 
 fn function_to_facet(
@@ -623,13 +569,6 @@ fn make_mdo_ref_facet(mdo_type: MdoType, name: bsl_metadata::Name) -> MdoRefFace
     MdoRefFacet::new(mdo_type, name)
 }
 
-fn make_form_binding_facet(
-    path: Arc<[bsl_metadata::Name]>,
-    target: FormBindingTargetFacet,
-) -> FormBindingFacet {
-    FormBindingFacet::new(path, target)
-}
-
 fn make_param_spec(
     name: bsl_metadata::Name,
     ty: TypeId,
@@ -654,7 +593,9 @@ fn make_function_facet(
 mod tests {
     use super::*;
     use bsl_metadata::FormElementKind;
-    use bsl_types::facet::{FormBindingTargetFacet, NumberFacet, ProjectionSource, StringFacet};
+    use bsl_types::facet::{
+        FormBindingFacet, FormBindingTargetFacet, NumberFacet, ProjectionSource, StringFacet,
+    };
     use bsl_types::testing::InMemoryDb;
 
     fn db() -> InMemoryDb {
@@ -688,12 +629,11 @@ mod tests {
         })
     }
 
-    fn binding_attr() -> FormDataBinding {
-        FormDataBinding::new(
-            Box::new([name("Объект"), name("Дата")]),
-            FormDataTarget::Attribute { ty: Box::new(Ty::Date) },
+    fn binding_attr(db: &dyn TypeKernelDb) -> FormBindingFacet {
+        FormBindingFacet::new(
+            Arc::from(["Объект".to_string(), "Дата".to_string()]),
+            FormBindingTargetFacet::Attribute { ty: ty_to_typeid(db, &Ty::Date) },
         )
-        .unwrap()
     }
 
     macro_rules! rt_test {
@@ -757,10 +697,13 @@ mod tests {
             underlying: Some((MdoType::Catalog, name("Номенклатура"))),
         }
     );
-    rt_test!(
-        rt_form_control,
-        Ty::FormControl { kind: FormElementKind::Table, binding: Some(binding_attr()) }
-    );
+    #[test]
+    fn rt_form_control() {
+        round_trip_with_db(|db| Ty::FormControl {
+            kind: FormElementKind::Table,
+            binding: Some(binding_attr(db)),
+        });
+    }
     rt_test!(
         rt_function,
         Ty::Function {
@@ -817,15 +760,13 @@ mod tests {
 
     #[test]
     fn form_binding_tabular_section_preserves_shape() {
-        let binding = FormDataBinding::new(
-            Box::new([name("Объект"), name("Товары")]),
-            FormDataTarget::TabularSection {
-                mdo_type: MdoType::Document,
-                owner: name("Заказ"),
-                section: name("Товары"),
+        let binding = FormBindingFacet::new(
+            Arc::from(["Объект".to_string(), "Товары".to_string()]),
+            FormBindingTargetFacet::TabularSection {
+                mdo_ref: MdoRefFacet::new(MdoType::Document, "Заказ".to_string()),
+                section: "Товары".to_string(),
             },
-        )
-        .unwrap();
+        );
         round_trip(Ty::FormControl { kind: FormElementKind::Table, binding: Some(binding) });
     }
 
@@ -867,23 +808,6 @@ mod tests {
         let element = ty_to_typeid(&db, &Ty::String);
         let id = db.intern_type(TypeKind::ValueList(Some(element)));
         assert_eq!(typeid_to_ty(&db, id), Ty::ValueList);
-    }
-
-    #[test]
-    fn k_form_control_empty_path_binding_drops_binding() {
-        let db = db();
-        let binding = make_form_binding_facet(
-            Arc::new([]),
-            FormBindingTargetFacet::Attribute { ty: ty_to_typeid(&db, &Ty::Number) },
-        );
-        let id = db.intern_type(TypeKind::FormControl {
-            kind: FormElementKind::Field,
-            binding: Some(binding),
-        });
-        assert_eq!(
-            typeid_to_ty(&db, id),
-            Ty::FormControl { kind: FormElementKind::Field, binding: None }
-        );
     }
 
     #[test]

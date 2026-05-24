@@ -69,8 +69,8 @@ pub use field_lookup::lookup_field;
 pub use form_items::{is_form_items_collection_ty, FORM_ITEMS_TYPE_EN, FORM_ITEMS_TYPE_RU};
 pub use hir_def::ty::{
     form_control_platform_type_chain, form_control_platform_type_name, form_element_kind_label,
-    form_element_kind_sort_band, FormDataBinding, FormDataKind, FormDataTarget, FormElementKind,
-    FunctionSignature, MetadataKind, Ty,
+    form_element_kind_sort_band, FormDataKind, FormElementKind, FunctionSignature, MetadataKind,
+    Ty,
 };
 pub use hir_def::type_ref::{BuiltinTypeRef, TypeRef};
 pub use hir_def::ConfigsDatabase;

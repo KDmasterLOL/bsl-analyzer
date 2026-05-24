@@ -1301,18 +1301,16 @@ mod tests {
     // FormTable platform pull-up is non-empty and includes the refined
     // members so the user-visible completion stays informative.
 
-    fn form_table_binding() -> hir::FormDataBinding {
+    fn form_table_binding() -> hir::FormBindingFacet {
         use bsl_metadata::MdoType;
-        use hir::{FormDataBinding, FormDataTarget, Name};
-        FormDataBinding::new(
-            Box::new([Name::new("Объект"), Name::new("Переприемка")]),
-            FormDataTarget::TabularSection {
-                mdo_type: MdoType::Document,
-                owner: Name::new("ПКО"),
-                section: Name::new("Переприемка"),
+        use hir::{FormBindingFacet, FormBindingTargetFacet, MdoRefFacet};
+        FormBindingFacet::new(
+            std::sync::Arc::from(["Объект".to_string(), "Переприемка".to_string()]),
+            FormBindingTargetFacet::TabularSection {
+                mdo_ref: MdoRefFacet::new(MdoType::Document, "ПКО".to_string()),
+                section: "Переприемка".to_string(),
             },
         )
-        .expect("non-empty path")
     }
 
     fn make_db_with_file() -> (ide_db::RootDatabaseImpl, vfs::FileId) {

@@ -165,12 +165,12 @@ pub use hir_ty::proc_signature;
 // tests (`ide/tests/`) and the upcoming method-graph queries (O.8+)
 // can construct a body-scoped inference context via the `hir` frontend
 // layer without going through `infer_query`.
+pub use bsl_types::facet::{FormBindingFacet, FormBindingTargetFacet, MdoRefFacet};
 pub use hir_ty::{
     form_control_platform_type_chain, form_control_platform_type_name, form_element_kind_label,
-    form_element_kind_sort_band, BodyInferenceResult, CallArgBinding, FormDataBinding,
-    FormDataTarget, FormElementKind, InferOwnerResult, InferenceContext, InferenceDiagnostic,
-    InferenceResult, MetadataKind, ModuleCodeInferenceResult, ParamsShape, Ty,
-    UnresolvedMethodKind,
+    form_element_kind_sort_band, BodyInferenceResult, CallArgBinding, FormElementKind,
+    InferOwnerResult, InferenceContext, InferenceDiagnostic, InferenceResult, MetadataKind,
+    ModuleCodeInferenceResult, ParamsShape, Ty, UnresolvedMethodKind,
 };
 
 use bsl_types::builders::Builders;

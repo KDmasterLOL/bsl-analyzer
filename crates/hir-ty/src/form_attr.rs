@@ -49,8 +49,12 @@ use crate::field_enum::{attribute_type_to_ty, attribute_type_to_typeid};
 /// Split out from [`resolve_form_attribute`] so the lowering rules
 /// (MainAttribute → `FormData::Structure`, columns → `FormData::Collection`,
 /// otherwise generic [`attribute_type_to_ty`]) can be unit-tested without
-/// spinning up a Salsa database. The full resolver path layers the
-/// managed-form gate and the metadata read on top of this function.
+/// spinning up a Salsa database.
+///
+/// Test-only after §4.E.6c: every production caller now goes through the
+/// kernel-native [`lower_form_attribute_to_typeid`]. Retained alongside
+/// [`attribute_type_to_ty`] until the §4.E.6g test sweep migrates the
+/// shape-asserting unit tests to kernel builders.
 pub fn lower_form_attribute_to_ty(attr: &FormAttribute, configs: &[VisibleConfig]) -> Ty {
     let has_columns = !attr.columns.is_empty();
 

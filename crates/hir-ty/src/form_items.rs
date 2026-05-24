@@ -33,22 +33,25 @@
 //!   which already routes `Ty::FormControl` through the per-kind
 //!   platform table.
 
+use std::sync::Arc;
+
 use bsl_config::VisibleConfig;
 use bsl_metadata::{Form, FormElement};
 use bsl_types::builders::Builders;
-use bsl_types::facet::{FormBindingTargetFacet, FormElementFacet};
+use bsl_types::facet::{
+    FormBindingFacet, FormBindingTargetFacet, FormDataFacet, FormElementFacet, MdoRefFacet,
+};
 use bsl_types::intern::TypeKernelDb;
 use bsl_types::kind::{TypeId, TypeKind};
 use bsl_types::testing::RootConfigCtx;
 use hir_def::resolver::Resolver;
-use hir_def::ty::{FormDataBinding, FormDataKind, FormDataTarget, MetadataKind, Ty};
+use hir_def::ty::MetadataKind;
 use hir_def::Name;
 
 use crate::db::HirDatabase;
 use crate::field_enum::{FieldInfo, FieldOrigin};
 use crate::field_lookup;
-use crate::form_attr::lower_form_attribute_to_ty;
-use crate::ty_bridge::form_binding_to_facet;
+use crate::form_attr::lower_form_attribute_to_typeid;
 
 /// Russian platform type name for the form-elements collection.
 pub const FORM_ITEMS_TYPE_RU: &str = "ВсеЭлементыФормы";
@@ -139,16 +142,11 @@ pub(crate) fn lower_form_element(
     element: &FormElement,
     configs: &[VisibleConfig],
 ) -> TypeId {
-    // `resolve_data_path` is still `Ty`-native (its `FormDataBinding`
-    // provenance types are `hir_def::ty` and die with `Ty` in §4.E.6);
-    // convert its result to the kernel `FormBindingFacet` at this
-    // boundary via the existing bridge.
     let binding = element
         .data_path
         .as_deref()
         .filter(|dp| !dp.starts_with('~'))
-        .and_then(|dp| resolve_data_path(db, dp, form, configs))
-        .map(|b| form_binding_to_facet(db, &b));
+        .and_then(|dp| resolve_data_path(db, dp, form, configs));
     db.mk_form_control(element.kind, binding)
 }
 
@@ -251,25 +249,26 @@ pub(crate) fn refine_form_control_property(
 }
 
 /// Walk `<DataPath>` segment-by-segment to recover the binding's
-/// provenance: the chain itself ([`FormDataBinding::path`]) and the
+/// provenance: the chain itself ([`FormBindingFacet::path`]) and the
 /// resolved target type at the chain's tail
-/// ([`FormDataTarget::TabularSection`] / [`FormDataTarget::Attribute`]).
+/// ([`FormBindingTargetFacet::TabularSection`] /
+/// [`FormBindingTargetFacet::Attribute`]).
 ///
 /// Resolution flow:
-/// 1. Split `data_path` on `.`. The chain is **always** at least one
-///    segment ([`FormDataBinding::new`] enforces this on the way out).
+/// 1. Split `data_path` on `.`. `split_first` guarantees the chain is
+///    **always** at least one segment (we return `None` otherwise).
 /// 2. The first segment must match a form attribute by name
 ///    (`Form::find_attribute`, case-insensitive). Forms typically
 ///    contain `Объект` (the main attribute) plus user-declared
 ///    attributes; both are eligible — the first segment is **not**
 ///    restricted to the main attribute.
 /// 3. Subsequent segments traverse `field_lookup::lookup_field` from
-///    the previous segment's resolved Ty. This reuses the same
+///    the previous segment's resolved `TypeId`. This reuses the same
 ///    machinery that powers `Объект.Дата` resolution inside the form
 ///    module — no second resolution pass.
-/// 4. Decide the target shape from the tail Ty: a tabular-section
-///    `Ty::MetadataRef` carries `(parent: MdoType, name: "Owner.Section")`,
-///    which we split into structured `(mdo_type, owner, section)`;
+/// 4. Decide the target shape from the tail `TypeKind`: a tabular-section
+///    `MetadataRef` carries `(parent: MdoType, name: "Owner.Section")`,
+///    which we split into a structured `TabularSection` facet;
 ///    everything else collapses to a scalar `Attribute { ty }`.
 ///
 /// Returns `None` for unresolvable paths (unknown first segment,
@@ -280,21 +279,20 @@ fn resolve_data_path(
     data_path: &str,
     form: &Form,
     configs: &[VisibleConfig],
-) -> Option<FormDataBinding> {
+) -> Option<FormBindingFacet> {
     let segments: Vec<Name> =
         data_path.split('.').filter(|s| !s.is_empty()).map(Name::new).collect();
     let (head, rest) = segments.split_first()?;
 
     let attr = form.find_attribute(head.as_str())?;
-    let mut current_ty = lower_form_attribute_to_ty(attr, configs);
+    let mut current_id = lower_form_attribute_to_typeid(db, attr, configs);
 
     for seg in rest {
-        let receiver_id = crate::ty_bridge::ty_to_typeid(db, &current_ty);
-        let info = field_lookup::lookup_field(db, configs, receiver_id, seg)?;
-        current_ty = crate::ty_bridge::typeid_to_ty(db, info.ty);
+        let info = field_lookup::lookup_field(db, configs, current_id, seg)?;
+        current_id = info.ty;
     }
 
-    let target = match &current_ty {
+    let target = match db.lookup_type(current_id) {
         // MDO tabular-section reference: both the object-module surface
         // (`MetadataRef{TabularSection}`) and the managed-form surface
         // (`FormData{Collection}`) store the qualified name as
@@ -303,41 +301,38 @@ fn resolve_data_path(
         //
         // Scope note: `<Columns>`-backed form attributes (e.g. an
         // attribute typed as `v8:ValueTable` with a `<Columns>`
-        // schema) lower to `Ty::FormData{Collection, None}` rather
-        // than `Ty::MetadataRef{TabularSection,_}`. Those land in the
-        // `other` arm below as `Attribute{FormData(Collection)}` and
-        // are NOT promoted to `TabularSection` — Phase 5 row-aware
-        // refinement only covers MDO tabular sections. If
-        // `<Columns>`-based row schemas need refining later, this is
-        // where the dedicated `FormDataTarget::Columns(...)` variant
-        // would land.
-        Ty::MetadataRef { kind: MetadataKind::TabularSection { parent }, name } => {
-            let raw = name.as_str();
-            let (owner, section) = raw.rsplit_once('.')?;
-            FormDataTarget::TabularSection {
-                mdo_type: *parent,
-                owner: Name::new(owner),
-                section: Name::new(section),
+        // schema) lower to `FormData{Collection, None}` rather than
+        // `MetadataRef{TabularSection,_}`. Those land in the
+        // `Attribute` arm below and are NOT promoted to
+        // `TabularSection` — Phase 5 row-aware refinement only covers
+        // MDO tabular sections.
+        TypeKind::MetadataRef(facet) => match &facet.kind {
+            MetadataKind::TabularSection { parent } => {
+                let (owner, section) = facet.name.as_str().rsplit_once('.')?;
+                FormBindingTargetFacet::TabularSection {
+                    mdo_ref: MdoRefFacet::new(*parent, owner.to_string()),
+                    section: section.to_string(),
+                }
             }
-        }
-        Ty::FormData { kind: FormDataKind::Collection, underlying: Some((mdo_type, name)) } => {
-            let raw = name.as_str();
-            let (owner, section) = raw.rsplit_once('.')?;
-            FormDataTarget::TabularSection {
-                mdo_type: *mdo_type,
-                owner: Name::new(owner),
-                section: Name::new(section),
+            _ => FormBindingTargetFacet::Attribute { ty: current_id },
+        },
+        TypeKind::FormData { kind: FormDataFacet::Collection, underlying: Some(mdo_ref) } => {
+            let (owner, section) = mdo_ref.name.as_str().rsplit_once('.')?;
+            FormBindingTargetFacet::TabularSection {
+                mdo_ref: MdoRefFacet::new(mdo_ref.mdo_type, owner.to_string()),
+                section: section.to_string(),
             }
         }
         // Path resolved but the tail is not a tabular-section ref.
-        // Surface the resolved Ty as the bound type rather than
+        // Surface the resolved type as the bound type rather than
         // dropping the provenance entirely — hover still shows the
         // path (debugging aid), and refined lookup gracefully
         // degrades to the kind-specific platform table.
-        other => FormDataTarget::Attribute { ty: Box::new(other.clone()) },
+        _ => FormBindingTargetFacet::Attribute { ty: current_id },
     };
 
-    FormDataBinding::new(segments.into_boxed_slice(), target)
+    let path: Arc<[String]> = segments.iter().map(|n| n.as_str().to_string()).collect();
+    Some(FormBindingFacet::new(path, target))
 }
 
 #[cfg(test)]
@@ -384,8 +379,7 @@ mod tests {
         AttributeType, Configuration, Form, FormAttribute, FormElement, FormElementKind, FormType,
         MdoType, MetadataObject,
     };
-    use hir_def::ty::FormDataKind;
-    use std::sync::Arc;
+    use hir_def::ty::{FormDataKind, Ty};
     use uuid::Uuid;
 
     fn empty_form(name: &str) -> Form {
@@ -490,13 +484,16 @@ mod tests {
             FormElementKind::Field,
             None,
         );
-        let ty = lower_form_element(&form, &element, &[]);
-        match ty {
-            Ty::FormControl { kind: FormElementKind::Field, binding: Some(b) } => {
-                assert_eq!(b.path().len(), 1);
-                assert_eq!(b.path()[0].as_str(), "Замечание");
-                match b.target() {
-                    FormDataTarget::Attribute { ty } => assert_eq!(**ty, Ty::String),
+        let db = InMemoryDb::new();
+        let id = super::lower_form_element(&db, &form, &element, &[]);
+        match db.lookup_type(id) {
+            TypeKind::FormControl { kind: FormElementFacet::Field, binding: Some(b) } => {
+                assert_eq!(b.path.len(), 1);
+                assert_eq!(b.path[0].as_str(), "Замечание");
+                match &b.target {
+                    FormBindingTargetFacet::Attribute { ty } => {
+                        assert_eq!(crate::ty_bridge::typeid_to_ty(&db, *ty), Ty::String)
+                    }
                     other => panic!("expected Attribute{{String}}, got {other:?}"),
                 }
             }
@@ -537,16 +534,17 @@ mod tests {
             FormElementKind::Table,
             None,
         );
-        let ty = lower_form_element(&form, &element, &configs);
-        match ty {
-            Ty::FormControl { kind: FormElementKind::Table, binding: Some(b) } => {
-                assert_eq!(b.path().len(), 2);
-                assert_eq!(b.path()[0].as_str(), "Объект");
-                assert_eq!(b.path()[1].as_str(), "Переприемка");
-                match b.target() {
-                    FormDataTarget::TabularSection { mdo_type, owner, section } => {
-                        assert_eq!(*mdo_type, MdoType::Document);
-                        assert_eq!(owner.as_str(), "ПКО");
+        let db = InMemoryDb::new();
+        let id = super::lower_form_element(&db, &form, &element, &configs);
+        match db.lookup_type(id) {
+            TypeKind::FormControl { kind: FormElementFacet::Table, binding: Some(b) } => {
+                assert_eq!(b.path.len(), 2);
+                assert_eq!(b.path[0].as_str(), "Объект");
+                assert_eq!(b.path[1].as_str(), "Переприемка");
+                match &b.target {
+                    FormBindingTargetFacet::TabularSection { mdo_ref, section } => {
+                        assert_eq!(mdo_ref.mdo_type, MdoType::Document);
+                        assert_eq!(mdo_ref.name.as_str(), "ПКО");
                         assert_eq!(section.as_str(), "Переприемка");
                     }
                     other => panic!("expected TabularSection target, got {other:?}"),
@@ -608,16 +606,14 @@ mod tests {
 
     // ---- Phase 5: refine_form_control_property ----
 
-    fn binding_to(mdo: MdoType, owner: &str, section: &str) -> FormDataBinding {
-        FormDataBinding::new(
-            Box::new([Name::new(owner), Name::new(section)]),
-            FormDataTarget::TabularSection {
-                mdo_type: mdo,
-                owner: Name::new(owner),
-                section: Name::new(section),
+    fn binding_to(mdo: MdoType, owner: &str, section: &str) -> FormBindingFacet {
+        FormBindingFacet::new(
+            Arc::from([owner.to_string(), section.to_string()]),
+            FormBindingTargetFacet::TabularSection {
+                mdo_ref: MdoRefFacet::new(mdo, owner.to_string()),
+                section: section.to_string(),
             },
         )
-        .expect("non-empty path")
     }
 
     #[test]
@@ -803,14 +799,15 @@ mod tests {
         // Until a dedicated `FormDataTarget::Columns` variant lands,
         // refinement must NOT fire on Attribute targets — the row Ty
         // would be wrong.
-        let attr_binding = FormDataBinding::new(
-            Box::new([Name::new("ТабличнаяЧасть")]),
-            FormDataTarget::Attribute { ty: Box::new(Ty::ValueTable { projection: None }) },
-        )
-        .unwrap();
-        let receiver =
-            Ty::FormControl { kind: FormElementKind::Table, binding: Some(attr_binding) };
-        assert!(refine_form_control_property(&receiver, &Name::new("ВыделенныеСтроки")).is_none());
+        let db = InMemoryDb::new();
+        let attr_ty = ty_to_typeid(&db, &Ty::ValueTable { projection: None });
+        let attr_binding = FormBindingFacet::new(
+            Arc::from(["ТабличнаяЧасть".to_string()]),
+            FormBindingTargetFacet::Attribute { ty: attr_ty },
+        );
+        let receiver = db.mk_form_control(FormElementFacet::Table, Some(attr_binding));
+        assert!(super::refine_form_control_property(&db, receiver, &Name::new("ВыделенныеСтроки"))
+            .is_none());
     }
 
     #[test]
@@ -839,21 +836,24 @@ mod tests {
             FormElementKind::Field,
             None,
         );
-        let ty = lower_form_element(&form, &element, &[]);
-        match ty {
-            Ty::FormControl { kind: FormElementKind::Field, binding: Some(b) } => {
-                assert_eq!(b.path().len(), 1);
-                match b.target() {
-                    FormDataTarget::Attribute { ty: inner } => match inner.as_ref() {
-                        Ty::FormData {
-                            kind: FormDataKind::Structure,
-                            underlying: Some((mdo, name)),
-                        } => {
-                            assert_eq!(*mdo, MdoType::Document);
-                            assert_eq!(name.as_str(), "ПКО");
+        let db = InMemoryDb::new();
+        let id = super::lower_form_element(&db, &form, &element, &[]);
+        match db.lookup_type(id) {
+            TypeKind::FormControl { kind: FormElementFacet::Field, binding: Some(b) } => {
+                assert_eq!(b.path.len(), 1);
+                match &b.target {
+                    FormBindingTargetFacet::Attribute { ty: inner } => {
+                        match crate::ty_bridge::typeid_to_ty(&db, *inner) {
+                            Ty::FormData {
+                                kind: FormDataKind::Structure,
+                                underlying: Some((mdo, name)),
+                            } => {
+                                assert_eq!(mdo, MdoType::Document);
+                                assert_eq!(name.as_str(), "ПКО");
+                            }
+                            other => panic!("expected FormData{{Structure}}, got {other:?}"),
                         }
-                        other => panic!("expected FormData{{Structure}}, got {other:?}"),
-                    },
+                    }
                     other => panic!("expected Attribute target, got {other:?}"),
                 }
             }

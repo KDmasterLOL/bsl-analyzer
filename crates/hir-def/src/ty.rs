@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 pub use bsl_metadata::FormElementKind;
 use bsl_metadata::MdoType;
+use bsl_types::facet::FormBindingFacet;
 use bsl_types::kind::TypeId;
 use syntax::ast::{self, AstNode};
 use syntax::SyntaxKind;
@@ -253,7 +254,7 @@ pub enum Ty {
         /// table for the control.
         kind: FormElementKind,
         /// Optional resolved DataPath provenance for row-aware refinement.
-        binding: Option<FormDataBinding>,
+        binding: Option<FormBindingFacet>,
     },
 
     /// Function or procedure type — used internally to carry a
@@ -454,81 +455,6 @@ impl FormDataKind {
             Self::StructureWithCollection => "ДанныеФормыСтруктураСКоллекцией",
         }
     }
-}
-
-/// Resolved DataPath provenance for a [`Ty::FormControl`] — the chain
-/// of segments and what the chain's tail actually points at.
-///
-/// Constructed only by `hir-ty::form_items::resolve_data_path` after
-/// walking `<DataPath>` through `Form::find_attribute` + `lookup_field`.
-/// `path` is the original chain (case-preserving but case-insensitively
-/// equal under [`Name`] folding); `target` is the lowering of the tail.
-///
-/// Carrying both lets hover render `«ТаблицаФормы (Объект.Переприемка)»`
-/// without a second resolution pass, and lets Phase 5 row-aware lookup
-/// distinguish `Объект.Переприемка` (TabularSection) from `Объект.Дата`
-/// (scalar Attribute) without re-parsing the path.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct FormDataBinding {
-    /// Segments of the original `<DataPath>`, in declaration order.
-    /// **Invariant:** always non-empty. Enforced by the only
-    /// constructor [`Self::new`]; the field is private so callers can
-    /// not bypass it via struct-literal syntax.
-    path: Box<[crate::Name]>,
-    /// What the chain's tail resolves to.
-    target: FormDataTarget,
-}
-
-impl FormDataBinding {
-    /// Construct a binding, enforcing the non-empty-`path` invariant.
-    /// Returns `None` for an empty path so callers must surface
-    /// `binding: None` on the enclosing [`Ty::FormControl`] rather
-    /// than carry a vacuous binding — `TyDisplay` would then render
-    /// a bare `«ТаблицаФормы ()»` with no provenance.
-    ///
-    /// This is the **only** constructor: the struct's fields are
-    /// private to keep the invariant enforced from every call site,
-    /// including future ones in `hir-ty` and tests.
-    pub fn new(path: Box<[crate::Name]>, target: FormDataTarget) -> Option<Self> {
-        if path.is_empty() {
-            None
-        } else {
-            Some(Self { path, target })
-        }
-    }
-
-    /// Resolved DataPath segments, in declaration order. Always
-    /// non-empty per the [`Self::new`] invariant.
-    pub fn path(&self) -> &[crate::Name] {
-        &self.path
-    }
-
-    /// What the path's tail resolves to (tabular section / scalar
-    /// attribute Ty).
-    pub fn target(&self) -> &FormDataTarget {
-        &self.target
-    }
-}
-
-/// What a [`FormDataBinding::path`] resolves to at its tail.
-///
-/// Discriminates the two row-aware cases Phase 5 cares about:
-/// - [`Self::TabularSection`] — the path ends in a tabular section
-///   (`Объект.Переприемка`); refined `.ВыделенныеСтроки` returns
-///   `Ty::TypedArray(row)` where row is the section's row Ty.
-/// - [`Self::Attribute`] — the path ends in a scalar attribute
-///   (`Объект.Дата`, `Замечание`); the bound type is whatever
-///   `lookup_field` produced for the path tail.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum FormDataTarget {
-    /// DataPath terminates at a tabular section of an MDO. `mdo_type` /
-    /// `owner` identify the MDO carrying the section; `section` is the
-    /// section name (e.g. `(Document, "ПКО", "Переприемка")`).
-    TabularSection { mdo_type: MdoType, owner: crate::Name, section: crate::Name },
-    /// DataPath terminates at a scalar attribute. `ty` is the resolved
-    /// attribute type — `Ty::String`, `Ty::Number`, `Ty::MetadataRef{…}`,
-    /// or any other Ty `lookup_field` produces.
-    Attribute { ty: Box<Ty> },
 }
 
 /// Ordered chain of platform type names for the control's property and
@@ -1739,15 +1665,14 @@ mod tests {
         // Binding renders as `«ТаблицаФормы (Объект.Переприемка)»` —
         // path joined by `.` so hover shows which form attribute the
         // control is bound to without a second resolution pass.
-        let binding = FormDataBinding::new(
-            Box::new([crate::Name::new("Объект"), crate::Name::new("Переприемка")]),
-            FormDataTarget::TabularSection {
-                mdo_type: MdoType::Document,
-                owner: crate::Name::new("ПКО"),
-                section: crate::Name::new("Переприемка"),
+        use bsl_types::facet::{FormBindingTargetFacet, MdoRefFacet};
+        let binding = FormBindingFacet::new(
+            Arc::from(["Объект".to_string(), "Переприемка".to_string()]),
+            FormBindingTargetFacet::TabularSection {
+                mdo_ref: MdoRefFacet::new(MdoType::Document, "ПКО".to_string()),
+                section: "Переприемка".to_string(),
             },
-        )
-        .expect("path is non-empty");
+        );
         let ty = Ty::FormControl { kind: FormElementKind::Table, binding: Some(binding) };
         assert_eq!(ty.display(Locale::Ru).to_string(), "ТаблицаФормы (Объект.Переприемка)");
         assert_eq!(ty.display(Locale::En).to_string(), "ТаблицаФормы (Объект.Переприемка)");
@@ -1792,59 +1717,34 @@ mod tests {
 
     #[test]
     fn form_data_binding_hash_stable_for_salsa_keys() {
-        // `FormDataBinding` participates in Ty's `Hash` derivation.
-        // Equal bindings must hash equally so Salsa-cached lookups on
-        // `Ty::FormControl{kind, Some(binding)}` collide on a single
-        // cache entry. A bug here surfaces as cache thrashing, not a
-        // wrong answer — easy to miss without an explicit pin.
+        // The form binding ([`FormBindingFacet`]) participates in Ty's
+        // `Hash` derivation. Equal bindings must hash equally so
+        // Salsa-cached lookups on `Ty::FormControl{kind, Some(binding)}`
+        // collide on a single cache entry. A bug here surfaces as cache
+        // thrashing, not a wrong answer — easy to miss without a pin.
+        use bsl_types::facet::{FormBindingFacet, FormBindingTargetFacet, MdoRefFacet};
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
-        fn h(b: &FormDataBinding) -> u64 {
+        fn h(b: &FormBindingFacet) -> u64 {
             let mut s = DefaultHasher::new();
             b.hash(&mut s);
             s.finish()
         }
 
         let mk = || {
-            FormDataBinding::new(
-                Box::new([crate::Name::new("Объект"), crate::Name::new("Переприемка")]),
-                FormDataTarget::TabularSection {
-                    mdo_type: MdoType::Document,
-                    owner: crate::Name::new("ПКО"),
-                    section: crate::Name::new("Переприемка"),
+            FormBindingFacet::new(
+                Arc::from(["Объект".to_string(), "Переприемка".to_string()]),
+                FormBindingTargetFacet::TabularSection {
+                    mdo_ref: MdoRefFacet::new(MdoType::Document, "ПКО".to_string()),
+                    section: "Переприемка".to_string(),
                 },
             )
-            .expect("path is non-empty")
         };
 
         let a = mk();
         let b = mk();
         assert_eq!(a, b);
         assert_eq!(h(&a), h(&b));
-    }
-
-    #[test]
-    fn form_data_binding_new_rejects_empty_path() {
-        // Empty path is meaningless — the enclosing `Ty::FormControl`
-        // should carry `binding: None` instead. Pinning this guards
-        // against Phase 4 accidentally producing vacuous `Some(...)`
-        // bindings that render as `ТаблицаФормы ()` in hover.
-        let target = FormDataTarget::Attribute { ty: Box::new(Ty::Unknown) };
-        assert!(FormDataBinding::new(Box::new([]), target.clone()).is_none());
-        let ok = FormDataBinding::new(Box::new([crate::Name::new("Объект")]), target);
-        assert!(ok.is_some());
-    }
-
-    #[test]
-    fn form_data_target_attribute_carries_resolved_ty() {
-        // Scalar attribute branch — Phase 4 will produce these for
-        // `Замечание` (String) or `Объект.Code` (String) via
-        // `lookup_field` on each path segment.
-        let target = FormDataTarget::Attribute { ty: Box::new(Ty::String) };
-        match target {
-            FormDataTarget::Attribute { ty } => assert_eq!(*ty, Ty::String),
-            other => panic!("expected Attribute, got {other:?}"),
-        }
     }
 }
