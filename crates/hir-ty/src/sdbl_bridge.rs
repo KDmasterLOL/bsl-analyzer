@@ -78,21 +78,51 @@
 use std::sync::Arc;
 
 use bsl_metadata::MdoType;
+use bsl_types::builders::Builders;
+use bsl_types::facet::{DateComponent, TableSource};
 use bsl_types::intern::TypeKernelDb;
 use bsl_types::kind::TypeId;
+use bsl_types::testing::RootConfigCtx;
 use hir_def::ty::{MetadataKind, SdblProjection, SdblTypeShadow, Ty};
 use hir_def::Name;
 
-use crate::ty_bridge::ty_to_typeid;
-
 /// Kernel-native counterpart of [`sdbl_type_to_ty`].
 ///
-/// §4.B shim — bridges through the §4.A `Ty` → `TypeId` translator.
-/// §4.D-§4.E will rewrite this to construct `TypeKind` directly once
-/// `infer.rs`/`field_lookup.rs` consumers stop reading `Ty`.
-#[allow(dead_code, reason = "Phase 3 §4.B producer — callers migrate in 4.C-4.E")]
+/// Mints the `TypeId` directly through the kernel [`Builders`], mirroring
+/// [`sdbl_type_to_ty`] arm-for-arm. The mapping is **lossy-structural** —
+/// SDBL precision/scale/length facets drop (they live on the
+/// [`SdblTypeShadow`] display shadow), so each arm is byte-identical to
+/// `ty_to_typeid(db, &sdbl_type_to_ty(t))` (asserted by the drift test).
+#[allow(dead_code, reason = "Phase 3 §4.C producer — projection callers migrate in 4.C.2")]
 pub fn sdbl_type_to_typeid(db: &dyn TypeKernelDb, t: &sdbl_hir::SdblType) -> TypeId {
-    ty_to_typeid(db, &sdbl_type_to_ty(t))
+    use sdbl_hir::SdblType as S;
+    match t {
+        S::Boolean => db.boolean(),
+        S::String { .. } => db.string(None, false),
+        S::Number { .. } => db.number(None, None),
+        S::Date | S::DateTime => db.date(DateComponent::DateTime),
+        S::Ref(mdo) => mdo_ref_to_typeid(db, mdo),
+        S::AnyRef => db.unknown(),
+        S::AnyObjectRef { mdo_type } => db.any_metadata_ref(*mdo_type),
+        S::Uuid => db.platform_object("УникальныйИдентификатор".to_string()),
+        S::ValueStorage => db.platform_object("ХранилищеЗначения".to_string()),
+        S::DefinedType { underlying_type, .. } => underlying_type
+            .as_deref()
+            .map(|inner| sdbl_type_to_typeid(db, inner))
+            .unwrap_or_else(|| db.unknown()),
+        S::ValueTable => db.value_table(None, TableSource::Unknown),
+        S::Null => db.null(),
+        S::Aggregate(inner) => sdbl_type_to_typeid(db, inner),
+        S::Composite { types } => {
+            db.union(types.iter().map(|t| sdbl_type_to_typeid(db, t)).collect())
+        }
+        S::TabularSectionRef { parent_mdo_type, parent_mdo_name, ts_name } => db.metadata_ref(
+            MetadataKind::TabularSection { parent: *parent_mdo_type },
+            format!("{parent_mdo_name}.{ts_name}"),
+            &RootConfigCtx,
+        ),
+        S::Unknown | S::Error => db.unknown(),
+    }
 }
 
 /// Map a single SDBL field type to its BSL counterpart.
@@ -162,6 +192,17 @@ fn mdo_ref_to_metadata_ref(mdo: &sdbl_hir::MdoRef) -> Ty {
     match ref_kind_for(mdo.mdo_type) {
         Some(kind) => Ty::MetadataRef { kind, name: Name::new(&mdo.name) },
         None => Ty::AnyMetadataRef { mdo_type: mdo.mdo_type },
+    }
+}
+
+/// Kernel-native counterpart of [`mdo_ref_to_metadata_ref`] — mints the
+/// `MetadataRef` id via `db.metadata_ref(.., &RootConfigCtx)` (the same
+/// builder + config fallback the bridge uses) or falls back to
+/// `db.any_metadata_ref` for MDO families without a `*Ref` companion.
+fn mdo_ref_to_typeid(db: &dyn TypeKernelDb, mdo: &sdbl_hir::MdoRef) -> TypeId {
+    match ref_kind_for(mdo.mdo_type) {
+        Some(kind) => db.metadata_ref(kind, mdo.name.clone(), &RootConfigCtx),
+        None => db.any_metadata_ref(mdo.mdo_type),
     }
 }
 
@@ -363,7 +404,6 @@ pub fn package_to_projections(pkg: &sdbl_hir::SdblPackage) -> Vec<Option<Arc<Sdb
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ty_bridge::typeid_to_ty;
     use bsl_types::testing::InMemoryDb;
     use sdbl_hir::SdblType;
 
@@ -371,14 +411,55 @@ mod tests {
         Box::new(SdblType::Number { precision: Some(15), scale: Some(2) })
     }
 
-    /// §4.B drift-detector: kernel-native shim mirrors the Ty path.
+    /// §4.C drift-detector: native minting must produce the *same interned
+    /// id* as bridging the legacy `Ty` path. Guards §4.C.2 (the
+    /// `SdblProjection.fields` flip) — and ultimately the `Ty`-path deletion
+    /// — against any divergence. Covers precision/scale + string length
+    /// (must drop), unknown/error, composite-with-unknown, and the ref
+    /// fallback (MDO family without a `*Ref` companion).
     #[test]
-    fn sdbl_typeid_round_trips_via_ty() {
+    fn sdbl_typeid_matches_bridge() {
+        use crate::ty_bridge::ty_to_typeid;
         let db = InMemoryDb::new();
-        let t = SdblType::Boolean;
-        let via_ty = sdbl_type_to_ty(&t);
-        let via_typeid = sdbl_type_to_typeid(&db, &t);
-        assert_eq!(typeid_to_ty(&db, via_typeid), via_ty);
+        let cases = vec![
+            SdblType::Boolean,
+            SdblType::string(),
+            SdblType::string_with_length(50),
+            SdblType::Number { precision: Some(15), scale: Some(2) },
+            SdblType::Date,
+            SdblType::DateTime,
+            SdblType::Null,
+            SdblType::ValueTable,
+            SdblType::Uuid,
+            SdblType::ValueStorage,
+            SdblType::AnyRef,
+            SdblType::Unknown,
+            SdblType::Error,
+            SdblType::AnyObjectRef { mdo_type: MdoType::Catalog },
+            SdblType::Ref(sdbl_hir::MdoRef::new(MdoType::Catalog, "Товары")),
+            // Ref fallback: CommonModule has no `*Ref` companion → any_metadata_ref.
+            SdblType::Ref(sdbl_hir::MdoRef::new(MdoType::CommonModule, "Х")),
+            SdblType::DefinedType {
+                name: "Деньги".to_string(),
+                underlying_type: Some(boxed_number()),
+            },
+            SdblType::Aggregate(boxed_number()),
+            SdblType::Composite {
+                types: vec![SdblType::Number { precision: None, scale: None }, SdblType::Unknown],
+            },
+            SdblType::TabularSectionRef {
+                parent_mdo_type: MdoType::Catalog,
+                parent_mdo_name: "Номенклатура".to_string(),
+                ts_name: "Товары".to_string(),
+            },
+        ];
+        for t in &cases {
+            assert_eq!(
+                sdbl_type_to_typeid(&db, t),
+                ty_to_typeid(&db, &sdbl_type_to_ty(t)),
+                "drift for {t:?}"
+            );
+        }
     }
 
     #[test]
