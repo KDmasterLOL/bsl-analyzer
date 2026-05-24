@@ -193,6 +193,56 @@ fn completion_on_projection_selection_lists_columns_and_platform_members() {
 }
 
 #[test]
+fn completion_on_inline_query_union_receiver_lists_projection_columns() {
+    // Phase 3 §4.D.4b regression: `Выполнить()` returns a union that
+    // includes `Undefined`; after the walk moved to kernel TypeId,
+    // union canonicalisation happens immediately. The following
+    // `.Выбрать().<dot>` access is in the same expression, so it
+    // observes that canonicalized receiver directly. Completion must
+    // still see the concrete query-result arm and list projection
+    // fields plus platform members.
+    let items = complete(
+        r#"//- /test.bsl
+Функция Тест()
+    Возврат Новый Запрос("ВЫБРАТЬ ""abc"" КАК Имя").Выполнить().Выбрать().$0;
+КонецФункции
+"#,
+    );
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+    assert!(
+        labels.contains(&"Имя"),
+        "inline union receiver must preserve projection column completion, got {labels:?}",
+    );
+    assert!(
+        labels.contains(&"Следующий"),
+        "inline union receiver must preserve selection platform methods, got {labels:?}",
+    );
+}
+
+#[test]
+fn hover_on_inline_query_union_receiver_field_renders_type() {
+    // Same timing hazard as the completion test, but through field
+    // lookup: `Выполнить()` produces a union receiver, `.Выбрать()`
+    // resolves against the query-result arm, and `.Имя` must still
+    // resolve in the same body without relying on a later output
+    // bridge to defer union canonicalisation.
+    let fixture = r#"//- /test.bsl
+Функция Тест()
+    Возврат Новый Запрос("ВЫБРАТЬ ""abc"" КАК Имя").Выполнить().Выбрать().Им$0я;
+КонецФункции
+"#;
+    let (analysis, file_id, offset) = hover_baseline_setup(fixture);
+    let hover = analysis
+        .hover(file_id, offset, ide::Locale::Ru)
+        .expect("hover must resolve the inline projection field");
+    assert!(
+        hover.markup.contains("Строка") || hover.markup.contains("String"),
+        "hover on inline union receiver field must render string type, got: {}",
+        hover.markup,
+    );
+}
+
+#[test]
 fn hover_on_projection_none_omits_fields_block() {
     // Pin the negative: when refinement fails (no projection
     // captured at the constructor, no successful Phase D walk), the

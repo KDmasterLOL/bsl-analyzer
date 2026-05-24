@@ -5,10 +5,10 @@
 //! wire shape instead of duplicating name-resolution and type-dispatch rules.
 
 use crate::{Definition, Name, NameClass, ReferenceScope, Semantics};
+use bsl_types::builders::Builders;
 use bsl_types::kind::{TypeId, TypeKind};
 use hir_def::{DefDatabase, DefWithBodyId, ExprId, MethodId, ModuleId};
-use hir_ty::ty_bridge::ty_to_typeid;
-use hir_ty::{db::HirDatabase, ImplicitLocalInfo, Ty};
+use hir_ty::{db::HirDatabase, ImplicitLocalInfo};
 use syntax::{TextRange, TextSize};
 use vfs::FileId;
 
@@ -218,13 +218,14 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
         // the file-wide `infer_query` aggregate.
         let routed = crate::infer_owner(self.db, file_id, owner);
         let implicit = routed.implicit_locals().get(&name_lower)?;
-        // Phase 3 §4.D: accessor bridges stored `TypeId` → owned `Ty`.
-        let occurrence_ty = routed.type_of_expr(self.db, occurrence_expr).unwrap_or(Ty::Unknown);
+        let unknown = self.db.unknown();
+        let occurrence_ty = routed.type_id_of_expr(occurrence_expr).unwrap_or(unknown);
         let (declaration, range, ty) = select_implicit_local_declaration(
             &source_map,
             implicit,
             token.text_range(),
             occurrence_ty,
+            unknown,
         )?;
         Some(SemanticSymbol {
             key: SemanticSymbolKey::ImplicitLocal { file_id, owner, name_lower, declaration },
@@ -237,10 +238,7 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
                 name: implicit.name.clone(),
                 kind: SemanticSymbolKind::Variable,
             }),
-            // Phase 3 §4.G.5b: `select_implicit_local_declaration` works in
-            // `Ty` space (ImplicitLocalInfo is internal, Phase 4); intern at
-            // this boundary so the public symbol carries a kernel id.
-            ty: Some(ty_to_typeid(self.db, &ty)),
+            ty: Some(ty),
         })
     }
 
@@ -279,9 +277,10 @@ fn select_implicit_local_declaration(
     source_map: &hir_def::BodySourceMap,
     implicit: &ImplicitLocalInfo,
     occurrence_range: TextRange,
-    occurrence_ty: Ty,
-) -> Option<(ExprId, TextRange, Ty)> {
-    if !occurrence_ty.is_unknown() {
+    occurrence_ty: TypeId,
+    unknown: TypeId,
+) -> Option<(ExprId, TextRange, TypeId)> {
+    if occurrence_ty != unknown {
         let typed_preceding = implicit
             .assignments
             .iter()
@@ -295,7 +294,7 @@ fn select_implicit_local_declaration(
             .next_back();
 
         if let Some((assignment, range)) = typed_preceding {
-            return Some((assignment.target, range, assignment.ty.clone()));
+            return Some((assignment.target, range, assignment.ty));
         }
     }
 
@@ -309,11 +308,11 @@ fn select_implicit_local_declaration(
         .next_back();
 
     if let Some((assignment, range)) = preceding {
-        return Some((assignment.target, range, assignment.ty.clone()));
+        return Some((assignment.target, range, assignment.ty));
     }
 
     let range = source_map.expr_range(implicit.first_assignment)?;
-    Some((implicit.first_assignment, range, implicit.ty.clone()))
+    Some((implicit.first_assignment, range, implicit.ty))
 }
 
 fn symbol_from_definition(
