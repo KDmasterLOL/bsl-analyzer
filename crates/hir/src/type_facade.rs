@@ -24,6 +24,7 @@
 
 use bsl_metadata::MdoType;
 use bsl_platform::{PlatformData, PlatformMethod};
+use bsl_types::display::{display_name as kernel_display, Locale as KernelLocale, PlainDisplayCtx};
 use bsl_types::intern::TypeKernelDb;
 use bsl_types::kind::{TypeId, TypeKind};
 use hir_def::configs::ConfigsDatabase;
@@ -163,18 +164,22 @@ impl<'db, DB: ConfigsDatabase + TypeKernelDb> Type<'db, DB> {
 
     /// Short human-readable name in the given locale, e.g.
     /// `"Number"` / `"Число"`, `"Number | String"` / `"Число | Строка"` for
-    /// a union. Delegates to [`Ty::display_name`] and owns a fresh `String`
-    /// so callers can format freely.
+    /// a union. Phase 3 §4.G.5d: rendered through the type kernel
+    /// ([`bsl_types::display`]) — the single source of display truth.
     pub fn display_name(&self, locale: base_db::Locale) -> String {
-        self.ty().display_name(locale).to_string()
+        kernel_type_label(self.db, self.id, locale, false)
     }
 
-    /// Stable English machine-name; equivalent to
-    /// `display_name(Locale::En)`. Use in tests, logs, and any other
-    /// context where the canonical English label is intentional rather
-    /// than locale-dependent.
+    /// English type label; equivalent to `display_name(Locale::En)`. Use in
+    /// tests, logs, and any other context where the English rendering is
+    /// intentional rather than locale-dependent.
+    ///
+    /// Phase 3 §4.G.5d: rendered through the type kernel
+    /// ([`bsl_types::display`]); manager-shaped types may differ from the
+    /// legacy `Ty::canonical_name` platform machine-names until the Phase 4
+    /// manager-display polish lands.
     pub fn canonical_name(&self) -> String {
-        self.ty().canonical_name().to_string()
+        kernel_type_label(self.db, self.id, base_db::Locale::En, false)
     }
 
     /// `true` for types that carry an MDO reference — `CatalogRef`,
@@ -455,6 +460,28 @@ impl<'db, DB: ConfigsDatabase + TypeKernelDb> Type<'db, DB> {
             _ => None,
         }
     }
+}
+
+/// Kernel-display label for `id` (Phase 3 §4.G.5d).
+///
+/// Renders through the type kernel's locale-aware
+/// [`bsl_types::display::display_name`] — the single source of display
+/// truth. `precision = true` → hover-style (precision / scale / length and
+/// projection column shapes shown); `false` → completion-style bare name.
+/// IDE features call this at the display boundary instead of the legacy
+/// `Ty::display` / `Ty::display_name`.
+pub fn kernel_type_label(
+    db: &dyn TypeKernelDb,
+    id: TypeId,
+    locale: base_db::Locale,
+    precision: bool,
+) -> String {
+    let kernel_locale = match locale {
+        base_db::Locale::Ru => KernelLocale::Ru,
+        base_db::Locale::En => KernelLocale::En,
+    };
+    let ctx = PlainDisplayCtx { locale: kernel_locale, precision_visible: precision };
+    kernel_display(db.lookup_type(id), &ctx, db)
 }
 
 /// Project a kernel [`FieldInfo`] into the hir [`Field`] DTO.

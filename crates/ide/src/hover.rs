@@ -10,7 +10,9 @@ use bsl_platform::{
     ContextAvailability, MethodLookupInput, PlatformDataInner, PlatformMethod, PlatformProperty,
     TypeNameInput,
 };
-use hir::{classify_token, Field, NameClass, Semantics, Ty, Type as HirType};
+use hir::{
+    classify_token, kernel_type_label, Field, NameClass, Semantics, Ty, Type as HirType, TypeId,
+};
 use ide_db::base_db::Locale;
 use ide_db::RootDatabase;
 use symbol_info::{from_global_function, from_platform_method, render_hover_markdown, Lang};
@@ -172,30 +174,22 @@ fn render_mdo_field_hover<DB: RootDatabase>(
     locale: Locale,
 ) -> HoverResult {
     let mut markup = format!("**{}**\n\n", name);
-    // Phase 3 §4.G.5c: `Field.ty`/`value_ty` are kernel ids; bridge to `Ty`
-    // for the still-`Ty` render helpers (those flip to kernel display in 5d).
-    let field_ty = hir::ty_bridge::typeid_to_ty(db, field.ty);
-    let detail = if let Some(value_ty) = &field.value_ty {
+    let detail = if let Some(value_ty) = field.value_ty {
         format!(
             "{} → {}",
-            render_hover_ty_detail(&field_ty, locale),
-            render_hover_ty_detail(&hir::ty_bridge::typeid_to_ty(db, *value_ty), locale),
+            render_hover_ty_detail(db, field.ty, locale),
+            render_hover_ty_detail(db, value_ty, locale),
         )
     } else {
-        render_hover_ty_detail(&field_ty, locale)
+        render_hover_ty_detail(db, field.ty, locale)
     };
     markup.push_str(&format!("**Тип:** {detail}\n\n"));
     HoverResult { markup, range: Some(range) }
 }
 
-fn render_hover_ty_detail(ty: &Ty, locale: Locale) -> String {
-    match ty {
-        Ty::MetadataRef { kind, name } => {
-            format!("{}.{}", kind.display_label(locale), name.as_str())
-        }
-        Ty::Union(_) => ty.display(locale).to_string(),
-        _ => ty.display_name(locale).to_string(),
-    }
+fn render_hover_ty_detail<DB: RootDatabase>(db: &DB, id: TypeId, locale: Locale) -> String {
+    // Phase 3 §4.G.5d: kernel display is the single source of rendering truth.
+    kernel_type_label(db, id, locale, true)
 }
 
 /// Hover for a name in a `FreeName` slot.
@@ -807,6 +801,10 @@ fn ty_info_markup<DB: RootDatabase>(db: &DB, ty: &Ty, locale: Locale) -> Option<
         return Some(block);
     }
 
+    // Phase 3 §4.G.5d: this receiver-type block stays `Ty`-rendered — kernel
+    // display does not yet reproduce the rich `ManagerCollection` / MDO-plural
+    // workspace shape (it falls back to a bare `MdoType` label). Deferred to
+    // Phase 4 alongside polishing `bsl_types::display` for manager shapes.
     Some(format!("**Тип:** {}\n\n", ty.display(locale)))
 }
 

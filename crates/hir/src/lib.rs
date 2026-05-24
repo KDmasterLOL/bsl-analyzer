@@ -19,7 +19,7 @@ pub use name_classify::{classify_token, NameClass};
 pub use semantic_symbol::{
     SemanticSymbol, SemanticSymbolKey, SemanticSymbolKind, SymbolDeclaration,
 };
-pub use type_facade::{module_implicit_fields, Field, HirFieldOrigin, Type};
+pub use type_facade::{kernel_type_label, module_implicit_fields, Field, HirFieldOrigin, Type};
 
 // Re-export core types
 pub use hir_def::{all_sdbl_in_file_query, sdbl_hir_for_file_query, SdblHirEntries, SdblInFile};

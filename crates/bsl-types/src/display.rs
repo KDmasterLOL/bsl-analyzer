@@ -16,7 +16,7 @@ use crate::facet::{
     StringFacet, StructureFacet, TableFacet,
 };
 use crate::intern::TypeKernelDb;
-use crate::kind::{MetadataKind, Projection, TypeId, TypeKind};
+use crate::kind::{Projection, TypeId, TypeKind};
 
 /// Locale for user-visible labels. Russian is the BSL native; English
 /// is the alias surface (used for hover-in-EN clients, doc-comment
@@ -365,69 +365,34 @@ fn render_projection_suffix(
         }
         buf.push_str(&field.name);
         buf.push_str(": ");
-        render(db.lookup_type(field.ty), ctx, db, buf);
+        // Phase 3 §4.G.5d: prefer the SDBL display shadow when captured —
+        // it carries precision/scale/length (`Число(15, 2)`, `Строка(50)`)
+        // that the interned `field.ty` drops. Falls back to kernel rendering
+        // of `field.ty` when no shadow is present (`raw_sdbl_types` is `None`,
+        // or indices don't line up).
+        match proj.raw_sdbl_types.as_deref().and_then(|shadows| shadows.get(i)) {
+            Some(shadow) => buf.push_str(&shadow.display),
+            None => render(db.lookup_type(field.ty), ctx, db, buf),
+        }
     }
     buf.push_str(" }");
 }
 
 fn render_meta_ref(facet: &MetaRefFacet, ctx: &dyn DisplayCtx, buf: &mut String) {
-    let prefix = match (ctx.locale(), facet.kind) {
-        (Locale::Ru, MetadataKind::CatalogRef) => "СправочникСсылка",
-        (Locale::Ru, MetadataKind::DocumentRef) => "ДокументСсылка",
-        (Locale::Ru, MetadataKind::EnumRef) => "ПеречислениеСсылка",
-        (Locale::Ru, MetadataKind::TaskRef) => "ЗадачаСсылка",
-        (Locale::Ru, MetadataKind::BusinessProcessRef) => "БизнесПроцессСсылка",
-        (Locale::Ru, MetadataKind::ExchangePlanRef) => "ПланОбменаСсылка",
-        (Locale::Ru, MetadataKind::ChartOfAccountsRef) => "ПланСчетовСсылка",
-        (Locale::En, MetadataKind::CatalogRef) => "CatalogRef",
-        (Locale::En, MetadataKind::DocumentRef) => "DocumentRef",
-        (Locale::En, MetadataKind::EnumRef) => "EnumRef",
-        (Locale::En, MetadataKind::TaskRef) => "TaskRef",
-        (Locale::En, MetadataKind::BusinessProcessRef) => "BusinessProcessRef",
-        (Locale::En, MetadataKind::ExchangePlanRef) => "ExchangePlanRef",
-        (Locale::En, MetadataKind::ChartOfAccountsRef) => "ChartOfAccountsRef",
-        // Fallback for variants we haven't pinned a bilingual label for
-        // yet; Debug shape is good enough for hover. Pre-existing tests
-        // pin the curated labels; new ones lower-priority MetadataKinds
-        // route through this branch.
-        _ => "",
-    };
-    if !prefix.is_empty() {
-        buf.push_str(prefix);
-        buf.push('.');
-        buf.push_str(&facet.name);
-    } else {
-        write!(buf, "{:?}.{}", facet.kind, facet.name).unwrap();
-    }
+    // Phase 3 §4.G.5d: `MetadataKind::display_label` is the exhaustive
+    // bilingual label source — no `Debug` leak for kinds (TabularSection,
+    // register refs, …) the old curated match didn't pin.
+    buf.push_str(facet.kind.display_label(ctx.locale()));
+    buf.push('.');
+    buf.push_str(&facet.name);
 }
 
 fn render_meta_obj(facet: &MetaObjFacet, ctx: &dyn DisplayCtx, buf: &mut String) {
-    let prefix = match (ctx.locale(), facet.kind) {
-        (Locale::Ru, MetadataKind::CatalogObject) => "СправочникОбъект",
-        (Locale::Ru, MetadataKind::DocumentObject) => "ДокументОбъект",
-        (Locale::Ru, MetadataKind::TaskObject) => "ЗадачаОбъект",
-        (Locale::Ru, MetadataKind::BusinessProcessObject) => "БизнесПроцессОбъект",
-        (Locale::Ru, MetadataKind::DataProcessorObject) => "ОбработкаОбъект",
-        (Locale::Ru, MetadataKind::ReportObject) => "ОтчётОбъект",
-        (Locale::Ru, MetadataKind::ExchangePlanObject) => "ПланОбменаОбъект",
-        (Locale::Ru, MetadataKind::ChartOfAccountsObject) => "ПланСчетовОбъект",
-        (Locale::En, MetadataKind::CatalogObject) => "CatalogObject",
-        (Locale::En, MetadataKind::DocumentObject) => "DocumentObject",
-        (Locale::En, MetadataKind::TaskObject) => "TaskObject",
-        (Locale::En, MetadataKind::BusinessProcessObject) => "BusinessProcessObject",
-        (Locale::En, MetadataKind::DataProcessorObject) => "DataProcessorObject",
-        (Locale::En, MetadataKind::ReportObject) => "ReportObject",
-        (Locale::En, MetadataKind::ExchangePlanObject) => "ExchangePlanObject",
-        (Locale::En, MetadataKind::ChartOfAccountsObject) => "ChartOfAccountsObject",
-        _ => "",
-    };
-    if !prefix.is_empty() {
-        buf.push_str(prefix);
-        buf.push('.');
-        buf.push_str(&facet.name);
-    } else {
-        write!(buf, "{:?}.{}", facet.kind, facet.name).unwrap();
-    }
+    // Phase 3 §4.G.5d: exhaustive bilingual label via `display_label`
+    // (no `Debug` leak for unlisted object kinds).
+    buf.push_str(facet.kind.display_label(ctx.locale()));
+    buf.push('.');
+    buf.push_str(&facet.name);
 }
 
 fn render_mdo_ref(facet: &MdoRefFacet, ctx: &dyn DisplayCtx, buf: &mut String) {
@@ -543,7 +508,7 @@ mod tests {
         DateComponent, FormBindingFacet, FormBindingTargetFacet, FormDataFacet, FormElementFacet,
         MdoRefFacet,
     };
-    use crate::kind::{ConfigId, ProjectionFieldSource, ProjectionOrigin};
+    use crate::kind::{ConfigId, MetadataKind, ProjectionFieldSource, ProjectionOrigin};
     use crate::testing::{InMemoryDb, RootConfigCtx};
 
     fn ru() -> PlainDisplayCtx {
@@ -608,6 +573,24 @@ mod tests {
         let cat = db.metadata_ref(MetadataKind::CatalogRef, "Номенклатура".to_string(), &cfg);
         expect!["СправочникСсылка.Номенклатура"].assert_eq(&show(&db, cat, &ru()));
         expect!["CatalogRef.Номенклатура"].assert_eq(&show(&db, cat, &en()));
+    }
+
+    #[test]
+    fn metadata_ref_tabular_section_uses_label_not_debug() {
+        // §4.G.5d regression guard: kinds the old curated match didn't pin
+        // (TabularSection, register refs, …) must render through
+        // `MetadataKind::display_label`, NOT the Rust `Debug` shape. A
+        // non-generic name (`Товары`) ensures we're checking the kind label,
+        // not a fixture name that coincidentally contains the expected word.
+        let db = InMemoryDb::new();
+        let cfg = RootConfigCtx;
+        let ts = db.metadata_ref(
+            MetadataKind::TabularSection { parent: MdoType::Catalog },
+            "Номенклатура.Товары".to_string(),
+            &cfg,
+        );
+        expect!["ТабличнаяЧасть.Номенклатура.Товары"].assert_eq(&show(&db, ts, &ru()));
+        expect!["TabularSection.Номенклатура.Товары"].assert_eq(&show(&db, ts, &en()));
     }
 
     #[test]
@@ -685,6 +668,31 @@ mod tests {
 
         // Completion mode hides projection.
         expect!["РезультатЗапроса"].assert_eq(&show(&db, qr, &PlainDisplayCtx::completion_ru()));
+    }
+
+    #[test]
+    fn projection_prefers_sdbl_display_shadow() {
+        // §4.G.5d: when `raw_sdbl_types` is captured, the hover suffix must
+        // use the pre-rendered SDBL label (precision/scale/length) rather
+        // than the interned `field.ty` (which drops them). Here `field.ty`
+        // is a bare `Число` (no precision) but the shadow says `Число(15, 2)`.
+        use crate::facet::SdblTypeShadowFacet;
+        use crate::kind::{Projection, ProjectionField};
+
+        let db = InMemoryDb::new();
+        let bare_number = db.number(None, None);
+        let fields: Arc<[ProjectionField]> = Arc::from([ProjectionField::new(
+            "Цена".to_string(),
+            bare_number,
+            ProjectionFieldSource::Column,
+        )]);
+        let shadows: Arc<[SdblTypeShadowFacet]> =
+            Arc::from([SdblTypeShadowFacet::new("Число(15, 2)".to_string())]);
+        let proj = Arc::new(Projection::new(fields, ProjectionOrigin::SdblQuery, Some(shadows)));
+        let qr = db.query_result(Some(proj), crate::facet::ProjectionSource::Sdbl);
+
+        // Shadow wins over the bare interned `field.ty` (`Число`).
+        expect!["РезультатЗапроса { Цена: Число(15, 2) }"].assert_eq(&show(&db, qr, &ru()));
     }
 
     #[test]

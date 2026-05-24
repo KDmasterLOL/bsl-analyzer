@@ -11,6 +11,7 @@ use bsl_platform::{
 };
 use hir::{
     Field, HirFieldOrigin, MethodSymbol, Name, Semantics, Ty, TyLoweringContext, Type as HirType,
+    TypeId,
 };
 use ide_db::RootDatabase;
 use symbol_info::{
@@ -212,7 +213,7 @@ pub(super) fn platform_completions<DB: RootDatabase>(
 
     if let Some(type_name) = receiver_ty.platform_type_name() {
         tracing::debug!(type_name = ?type_name, "Platform type for completion");
-        let mut items = projection_column_items(&receiver_ty);
+        let mut items = projection_column_items(db, &receiver_ty, position.locale);
         items.extend(complete_platform_methods(db, type_name, position.locale));
         return Some(apply_prefix_filter(items, &prefix, db));
     }
@@ -231,7 +232,7 @@ pub(super) fn platform_completions<DB: RootDatabase>(
             // Per-arm projection columns: a union arm shaped like
             // `Ty::QueryResultSelection{Some(p)}` (e.g. a nullable
             // chain return) still surfaces its SELECT columns.
-            for item in projection_column_items(m) {
+            for item in projection_column_items(db, m, position.locale) {
                 if seen_labels.insert(item.label.clone()) {
                     items.push(item);
                 }
@@ -827,11 +828,15 @@ pub(super) fn render_platform_property(
 /// `НомерСтроки` / `СледующаяСтрока` / `Уровень` on the same popup.
 ///
 /// Each item uses `SdblTypeShadow.display` (`"Число(15,2)"`,
-/// `"Строка(50)"`) when the bridge captured it; otherwise the
-/// bridged `Ty.canonical_name()` is the fallback label. `sort_text`
-/// is `"0_<name>"` so projection columns surface above the platform
-/// members in alphabetical order.
-fn projection_column_items(receiver_ty: &Ty) -> Vec<CompletionItem> {
+/// `"Строка(50)"`) when the bridge captured it; otherwise the column
+/// type is rendered through kernel display (§4.G.5d) in the caller's
+/// locale. `sort_text` is `"0_<name>"` so projection columns surface
+/// above the platform members in alphabetical order.
+fn projection_column_items<DB: RootDatabase>(
+    db: &DB,
+    receiver_ty: &Ty,
+    locale: ide_db::base_db::Locale,
+) -> Vec<CompletionItem> {
     let projection = match receiver_ty {
         Ty::QueryResultSelection { projection: Some(p) }
         | Ty::ValueTable { projection: Some(p) }
@@ -845,10 +850,14 @@ fn projection_column_items(receiver_ty: &Ty) -> Vec<CompletionItem> {
         .enumerate()
         .map(|(i, (name, ty))| {
             let label = name.as_str().to_string();
+            // Phase 3 §4.G.5d: shadow wins (precision/scale); fall back to
+            // kernel display of the column type at the boundary.
             let detail = shadows
                 .and_then(|s| s.get(i))
                 .map(|shadow| shadow.display.clone())
-                .unwrap_or_else(|| ty.canonical_name().to_string());
+                .unwrap_or_else(|| {
+                    hir::kernel_type_label(db, hir::ty_bridge::ty_to_typeid(db, ty), locale, false)
+                });
             CompletionItem {
                 label: label.clone(),
                 detail: Some(detail),
@@ -980,17 +989,14 @@ fn render_field_detail<DB: RootDatabase>(
     field: &Field,
     locale: ide_db::base_db::Locale,
 ) -> String {
-    // Phase 3 §4.G.5c: bridge the kernel field ids to `Ty` for the still-`Ty`
-    // `render_ty_detail` helper (flips to kernel display in 5d).
-    let field_ty = hir::ty_bridge::typeid_to_ty(db, field.ty);
-    let mut body = if let Some(value_ty) = &field.value_ty {
+    let mut body = if let Some(value_ty) = field.value_ty {
         format!(
             "{} → {}",
-            render_ty_detail(&field_ty, locale),
-            render_ty_detail(&hir::ty_bridge::typeid_to_ty(db, *value_ty), locale)
+            render_ty_detail(db, field.ty, locale),
+            render_ty_detail(db, value_ty, locale)
         )
     } else {
-        render_ty_detail(&field_ty, locale)
+        render_ty_detail(db, field.ty, locale)
     };
     match field.origin {
         HirFieldOrigin::FormAttribute => body.push_str(" (реквизит формы)"),
@@ -1004,19 +1010,14 @@ fn render_field_detail<DB: RootDatabase>(
     }
 }
 
-fn render_ty_detail(ty: &Ty, locale: ide_db::base_db::Locale) -> String {
-    use hir::MetadataKind;
-    match ty {
-        Ty::MetadataRef { kind, name } => {
-            if matches!(kind, MetadataKind::TabularSection { .. }) {
-                kind.display_label(locale).to_string()
-            } else {
-                format!("{}.{}", kind.display_label(locale), name.as_str())
-            }
-        }
-        Ty::Union(_) => ty.display(locale).to_string(),
-        _ => ty.display_name(locale).to_string(),
-    }
+fn render_ty_detail<DB: RootDatabase>(
+    db: &DB,
+    id: TypeId,
+    locale: ide_db::base_db::Locale,
+) -> String {
+    // Phase 3 §4.G.5d: kernel display is the single source of rendering truth
+    // (completion = bare name, precision suffix hidden).
+    hir::kernel_type_label(db, id, locale, false)
 }
 
 /// Locale-aware "[Только чтение]" / "[Read-only]" marker shared by
