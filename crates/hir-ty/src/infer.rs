@@ -2243,8 +2243,7 @@ impl<'db> InferenceContext<'db> {
             // through the same `(MdoType, name)` pair the platform
             // path would see.
             let workspace_receiver_ty =
-                crate::this_object::coerce_to_metadata_ref(&typeid_to_ty(self.db, receiver_ty))
-                    .map(|ty| ty_to_typeid(self.db, &ty))
+                crate::this_object::coerce_to_metadata_ref_id(self.db, receiver_ty)
                     .unwrap_or(receiver_ty);
             let workspace_receiver_kind = self.db.lookup_type(workspace_receiver_ty);
             if let TypeKind::MetadataRef(facet) = workspace_receiver_kind {
@@ -2429,8 +2428,7 @@ impl<'db> InferenceContext<'db> {
             // a future `Ty::ThisManager { kind: Constant, .. }` would
             // skip both refinement and Phase A.
             let manager_receiver_ty =
-                crate::this_object::coerce_to_metadata_ref(&typeid_to_ty(self.db, receiver_ty))
-                    .map(|ty| ty_to_typeid(self.db, &ty))
+                crate::this_object::coerce_to_metadata_ref_id(self.db, receiver_ty)
                     .unwrap_or(receiver_ty);
             let manager_receiver_kind = self.db.lookup_type(manager_receiver_ty);
             if let TypeKind::ObjectManager(facet) = manager_receiver_kind {

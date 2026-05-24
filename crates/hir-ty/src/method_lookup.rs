@@ -63,7 +63,7 @@ use vfs::FileId;
 
 use crate::db::HirDatabase;
 use crate::lower::type_string::{lower_param_type_string_typeid, lower_return_type_string_typeid};
-use crate::ty_bridge::{ty_to_typeid, typeid_to_ty};
+use crate::ty_bridge::ty_to_typeid;
 
 /// Result of a successful method lookup — kernel-native surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,13 +128,9 @@ fn lookup_method_inner(
     method_name: &Name,
     refine_ctx: Option<&RefineCtx<'_>>,
 ) -> Option<MethodInfo> {
-    // `coerce_to_metadata_ref` remains legacy-Ty until §4.E.4. Bridge at
-    // this one dispatch boundary; this loses non-root config ids through
-    // the Ty round-trip and should disappear with the §4.E.4 flip.
-    let eff_id = match crate::this_object::coerce_to_metadata_ref(&typeid_to_ty(db, receiver)) {
-        Some(coerced) => ty_to_typeid(db, &coerced),
-        None => receiver,
-    };
+    // §4.E.4a: kernel-native coercion preserves the `config_id` carried
+    // by `ThisObject` / `ThisManager` (the old Ty round-trip lost it).
+    let eff_id = crate::this_object::coerce_to_metadata_ref_id(db, receiver).unwrap_or(receiver);
 
     let info = match db.lookup_type(eff_id) {
         TypeKind::Union(arms) => return union_lookup(db, arms, method_name, refine_ctx),

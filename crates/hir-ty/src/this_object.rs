@@ -50,9 +50,30 @@
 //! instead of two.
 
 use bsl_metadata::{MdoType, ModuleType};
+use bsl_types::builders::{Builders, ConfigCtx};
+use bsl_types::intern::TypeKernelDb;
+use bsl_types::kind::{ConfigId, TypeId, TypeKind};
 use hir_def::resolver::Resolver;
 use hir_def::ty::{MetadataKind, Ty};
 use hir_def::{DefDatabase, Name};
+
+/// [`ConfigCtx`] that forces a fixed, already-resolved [`ConfigId`].
+///
+/// Used by [`coerce_to_metadata_ref_id`] to carry the `config_id` from a
+/// native `ThisObject` / `ThisManager` facet straight onto the coerced
+/// `MetadataRef` / `ObjectManager`, instead of re-resolving (the `Ty`
+/// path loses it to `Root`).
+struct FixedConfigCtx(ConfigId);
+
+impl ConfigCtx for FixedConfigCtx {
+    fn resolve_config_id(&self, _kind: MetadataKind, _name: &bsl_metadata::Name) -> ConfigId {
+        self.0.clone()
+    }
+
+    fn resolve_manager_config_id(&self, _mdo: MdoType, _name: &bsl_metadata::Name) -> ConfigId {
+        self.0.clone()
+    }
+}
 
 /// Coerce `ЭтотОбъект` receivers to their dispatch-ready Ty.
 ///
@@ -85,6 +106,33 @@ pub fn coerce_to_metadata_ref(receiver_ty: &Ty) -> Option<Ty> {
             // for an MDO without a manager surface.
             kind.manager_type_prefix()?;
             Some(Ty::ObjectManager { kind: *kind, name: name.clone() })
+        }
+        _ => None,
+    }
+}
+
+/// Kernel-native [`coerce_to_metadata_ref`].
+///
+/// Same coercion (`ThisObject` → `MetadataRef { *Object, name }`,
+/// `ThisManager` → `ObjectManager { mdo, name }`), computed directly on
+/// the type kernel. Unlike the `Ty` path — which round-trips through a
+/// config-less `Ty` and defaults `config_id` to `Root` — this preserves
+/// the `config_id` carried by the native `ThisObject` / `ThisManager`
+/// facet, so a CFE-scoped `ЭтотОбъект` keeps its extension config.
+///
+/// Returns `None` for non-`This*` receivers and for `This*` kinds with
+/// no dispatch counterpart (same coverage gate as the `Ty` version).
+pub fn coerce_to_metadata_ref_id(db: &dyn TypeKernelDb, receiver: TypeId) -> Option<TypeId> {
+    match db.lookup_type(receiver) {
+        TypeKind::ThisObject { config_id, owner } => {
+            let kind = MetadataKind::object_kind_for(owner.mdo_type)?;
+            let cfg = FixedConfigCtx(config_id.clone());
+            Some(db.metadata_ref(kind, owner.name.clone(), &cfg))
+        }
+        TypeKind::ThisManager { config_id, owner } => {
+            owner.mdo_type.manager_type_prefix()?;
+            let cfg = FixedConfigCtx(config_id.clone());
+            Some(db.object_manager(owner.mdo_type, owner.name.clone(), &cfg))
         }
         _ => None,
     }

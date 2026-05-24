@@ -123,16 +123,13 @@ pub fn is_assignable(db: &dyn TypeKernelDb, from: TypeId, to: TypeId) -> bool {
     // the provenance signal used by `RedundantAccessToObject` stays
     // meaningful.
     //
-    // Phase 3 §4.E: the coercion table lives on legacy `Ty` (config
-    // axis still flows through the `Ty ↔ TypeId` bridge). We bridge the
-    // narrow `from` value through `coerce_this_object_to_metadata_ref`
-    // and re-intern, so the comparison stays faithful to the canonical
-    // form `to` was produced from. §4.F replaces this with a native
-    // kernel coercion once `ThisObject` owners carry resolved configs.
+    // §4.E.4a: native kernel coercion — `ThisObject` / `ThisManager`
+    // owners carry resolved configs, so coerce + compare directly (no Ty
+    // round-trip; `config_id` preserved). Gated on the discriminant so
+    // the common non-`This*` path pays no extra `lookup_type`.
     if matches!(from_kind, TypeKind::ThisObject { .. } | TypeKind::ThisManager { .. }) {
-        let from_ty = crate::ty_bridge::typeid_to_ty(db, from);
-        if let Some(coerced) = crate::coerce_this_object_to_metadata_ref(&from_ty) {
-            if crate::ty_bridge::ty_to_typeid(db, &coerced) == to {
+        if let Some(coerced) = crate::this_object::coerce_to_metadata_ref_id(db, from) {
+            if coerced == to {
                 return true;
             }
         }
