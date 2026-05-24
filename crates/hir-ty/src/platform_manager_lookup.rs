@@ -40,7 +40,7 @@ use bsl_metadata::MdoType;
 use bsl_platform::{find_prefixed_method, PlatformMethod};
 use bsl_types::intern::TypeKernelDb;
 use bsl_types::kind::TypeId;
-use hir_def::ty::{FunctionSignature, MetadataKind, Ty};
+use hir_def::ty::{FunctionSignatureTy, MetadataKind, Ty};
 use hir_def::Name;
 
 use crate::lower::type_string::{lower_param_type_string, lower_platform_type_name};
@@ -58,7 +58,7 @@ use crate::ty_bridge::ty_to_typeid;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlatformMethodResolution {
     /// Signature lowered to `Ty`s (parameter types + return type).
-    pub signature: FunctionSignature,
+    pub signature: FunctionSignatureTy,
     /// Convenience clone of `signature.ret` — matches the shape of
     /// `MethodResolution.return_type` so inference call-sites can
     /// read without dereferencing the `Box`.
@@ -163,7 +163,7 @@ pub(crate) fn build_resolution(
         })
         .unwrap_or(Ty::Undefined);
 
-    let signature = FunctionSignature::new_with_defaults(params, defaults, return_ty.clone());
+    let signature = FunctionSignatureTy::new_with_defaults(params, defaults, return_ty.clone());
     PlatformMethodResolution { signature, return_ty, overloads: lower_overloads(method) }
 }
 
@@ -354,7 +354,7 @@ mod tests {
     fn platform_manager_typeid_round_trips_via_ty() {
         let db = InMemoryDb::new();
         let res = PlatformMethodResolution {
-            signature: FunctionSignature::function(Vec::new(), Ty::Number),
+            signature: FunctionSignatureTy::function(Vec::new(), Ty::Number),
             return_ty: Ty::Number,
             overloads: vec![vec![Ty::String]],
         };

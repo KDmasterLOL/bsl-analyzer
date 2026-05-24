@@ -16,7 +16,7 @@
 //! platform-idiomatic `<имя>1-<имя><цифра>` last-parameter naming
 //! (e.g. `Значение1-Значение10` → `max_args = 1 + 10` for `СтрШаблон`).
 
-use hir_def::ty::{FunctionSignature, Ty};
+use hir_def::ty::{FunctionSignatureTy, Ty};
 use rustc_hash::FxHashMap;
 use std::sync::OnceLock;
 
@@ -38,27 +38,27 @@ pub fn builtin_functions() -> &'static BuiltinFunctions {
 /// Both the Russian (`нстр`) and English (`nstr`) keys point at the same
 /// signature list.
 ///
-/// **Multi-overload model.** Each name maps to a `Vec<FunctionSignature>`. The
+/// **Multi-overload model.** Each name maps to a `Vec<FunctionSignatureTy>`. The
 /// vast majority of platform functions have a single-element vector, but a
 /// handful (`ПодключитьВнешнююКомпоненту`, `Дата`, `ОткрытьФорму`, …) declare
 /// several `<p class="V8SH_chapter">Вариант синтаксиса:</p>` sections in
-/// the HBK source — those become one [`FunctionSignature`] per overload. A
+/// the HBK source — those become one [`FunctionSignatureTy`] per overload. A
 /// call is accepted as soon as ANY overload's arity / type-check accepts it
 /// (see consumers in `infer.rs`).
 #[derive(Debug)]
 pub struct BuiltinFunctions {
     /// Overload sets indexed by lowercase function name.
-    signatures: FxHashMap<String, Vec<FunctionSignature>>,
+    signatures: FxHashMap<String, Vec<FunctionSignatureTy>>,
 }
 
 impl BuiltinFunctions {
     /// Create and populate the built-in functions registry.
     fn new() -> Self {
-        let mut signatures: FxHashMap<String, Vec<FunctionSignature>> = FxHashMap::default();
+        let mut signatures: FxHashMap<String, Vec<FunctionSignatureTy>> = FxHashMap::default();
 
         // 1. Adapt every platform global function from the JSON-backed
         //    `bsl-platform` registry into a list of typed
-        //    `FunctionSignature`s — one entry for single-overload
+        //    `FunctionSignatureTy`s — one entry for single-overload
         //    functions, one per variant for multi-overload pages.
         let platform = bsl_platform::PlatformData::instance();
         for func in platform.all_global_functions() {
@@ -84,14 +84,14 @@ impl BuiltinFunctions {
     /// Returns the full overload list — callers that only need the first
     /// signature can use `.first()`. For multi-overload functions an arity /
     /// type check accepts the call when ANY overload accepts it.
-    pub fn get(&self, name: &str) -> Option<&[FunctionSignature]> {
+    pub fn get(&self, name: &str) -> Option<&[FunctionSignatureTy]> {
         let name_lower = name.to_lowercase();
         self.signatures.get(&name_lower).map(|v| v.as_slice())
     }
 }
 
 /// Convert a [`bsl_platform::GlobalFunction`] into one or more typed
-/// [`FunctionSignature`]s — one per declared syntax variant.
+/// [`FunctionSignatureTy`]s — one per declared syntax variant.
 ///
 /// Mapping rules (per signature):
 /// - Each parameter's `param_type` is run through
@@ -118,7 +118,9 @@ impl BuiltinFunctions {
 /// signatures accepts it. When `func.variants` is empty, a single
 /// signature is built from the legacy flat `func.parameters` list — the
 /// pre-overload behaviour.
-fn signatures_from_global_function(func: &bsl_platform::GlobalFunction) -> Vec<FunctionSignature> {
+fn signatures_from_global_function(
+    func: &bsl_platform::GlobalFunction,
+) -> Vec<FunctionSignatureTy> {
     let ret = match &func.return_type {
         None => Ty::Undefined,
         Some(s) => lower_return_type_string(s.as_str()),
@@ -130,7 +132,7 @@ fn signatures_from_global_function(func: &bsl_platform::GlobalFunction) -> Vec<F
     func.variants.iter().map(|v| signature_from_params(&v.parameters, ret.clone())).collect()
 }
 
-/// Build a single [`FunctionSignature`] from a flat parameter list and a
+/// Build a single [`FunctionSignatureTy`] from a flat parameter list and a
 /// pre-mapped return type. Shared between single-overload and per-variant
 /// paths.
 ///
@@ -151,7 +153,7 @@ fn signatures_from_global_function(func: &bsl_platform::GlobalFunction) -> Vec<F
 pub(crate) fn signature_from_params(
     params_in: &[bsl_platform::MethodParam],
     ret: Ty,
-) -> FunctionSignature {
+) -> FunctionSignatureTy {
     let mut params = Vec::with_capacity(params_in.len());
     let mut defaults = Vec::with_capacity(params_in.len());
     for param in params_in {
@@ -175,7 +177,7 @@ pub(crate) fn signature_from_params(
         Some(params.len() as u32)
     };
 
-    FunctionSignature::new_with_defaults(params, defaults, ret).with_max_args(max_args)
+    FunctionSignatureTy::new_with_defaults(params, defaults, ret).with_max_args(max_args)
 }
 
 /// Split a capped-variadic name idiom into `(head, tail)` around either
@@ -267,12 +269,12 @@ fn variadic_param_max(name: &str) -> Option<u32> {
 ///
 /// Each entry is a separate insert so future drift (a name appearing in
 /// platform JSON later) is easy to audit and remove.
-fn register_fallbacks(sigs: &mut FxHashMap<String, Vec<FunctionSignature>>) {
+fn register_fallbacks(sigs: &mut FxHashMap<String, Vec<FunctionSignatureTy>>) {
     // `Новый` is the constructor keyword (`Новый Массив`, `Новый Запрос`).
     // Real call sites are handled in `infer_new_expr`; the signature here
     // exists purely so the resolver / completion treat the bare token as
     // a known builtin name. Not a regular call — typed permissively.
-    insert_pair(sigs, ("новый", "new"), FunctionSignature::function(vec![Ty::Type], Ty::Unknown));
+    insert_pair(sigs, ("новый", "new"), FunctionSignatureTy::function(vec![Ty::Type], Ty::Unknown));
 
     // `ОписаниеТипов(<Типы>, [<СписокИсключаемыхТипов>], [<Квалификаторы…>])`
     // is both a type name (class for `Новый ОписаниеТипов(...)`) and a
@@ -283,7 +285,7 @@ fn register_fallbacks(sigs: &mut FxHashMap<String, Vec<FunctionSignature>>) {
     insert_pair(
         sigs,
         ("описаниетипов", "typedescription"),
-        FunctionSignature::new_with_defaults(vec![Ty::Unknown], vec![false], Ty::Unknown)
+        FunctionSignatureTy::new_with_defaults(vec![Ty::Unknown], vec![false], Ty::Unknown)
             .with_max_args(None),
     );
 }
@@ -297,9 +299,9 @@ fn register_fallbacks(sigs: &mut FxHashMap<String, Vec<FunctionSignature>>) {
 /// is single-overload by design — when a name matters enough to be
 /// hand-curated, we have a specific shape in mind.
 fn insert_pair(
-    sigs: &mut FxHashMap<String, Vec<FunctionSignature>>,
+    sigs: &mut FxHashMap<String, Vec<FunctionSignatureTy>>,
     (ru, en): (&str, &str),
-    sig: FunctionSignature,
+    sig: FunctionSignatureTy,
 ) {
     sigs.entry(ru.to_string()).or_insert_with(|| vec![sig.clone()]);
     sigs.entry(en.to_string()).or_insert_with(|| vec![sig]);
@@ -322,7 +324,7 @@ mod tests {
     /// Helper: assert the lookup returns a single-element overload set and
     /// hand back the lone signature for further assertions. The vast majority
     /// of platform functions go through this path.
-    fn single_signature<'a>(builtins: &'a BuiltinFunctions, name: &str) -> &'a FunctionSignature {
+    fn single_signature<'a>(builtins: &'a BuiltinFunctions, name: &str) -> &'a FunctionSignatureTy {
         let sigs = builtins.get(name).unwrap_or_else(|| panic!("{name} should exist"));
         assert_eq!(sigs.len(), 1, "{name} should be single-overload, got {} overloads", sigs.len());
         &sigs[0]
@@ -555,12 +557,12 @@ mod tests {
         // overwrite. We construct a scratch map, prime it with a sentinel
         // overload set under both lowercase keys, then ask `insert_pair`
         // to register a different signature for the same pair.
-        let mut sigs: FxHashMap<String, Vec<FunctionSignature>> = FxHashMap::default();
-        let json_like = FunctionSignature::function(vec![Ty::Number, Ty::Number], Ty::Number);
+        let mut sigs: FxHashMap<String, Vec<FunctionSignatureTy>> = FxHashMap::default();
+        let json_like = FunctionSignatureTy::function(vec![Ty::Number, Ty::Number], Ty::Number);
         sigs.insert("foo".into(), vec![json_like.clone()]);
         sigs.insert("bar".into(), vec![json_like.clone()]);
 
-        let fallback = FunctionSignature::function(vec![Ty::String], Ty::String);
+        let fallback = FunctionSignatureTy::function(vec![Ty::String], Ty::String);
         insert_pair(&mut sigs, ("foo", "bar"), fallback);
 
         // Both keys keep the JSON-like overload set, not the fallback.

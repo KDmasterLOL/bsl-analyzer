@@ -1624,7 +1624,7 @@ impl<'db> InferenceContext<'db> {
                 //
                 // Resolves the platform constructors for the bare type name
                 // (case-insensitive, bilingual via `constructors_by_type`).
-                // Each overload becomes a `FunctionSignature` through the
+                // Each overload becomes a `FunctionSignatureTy` through the
                 // same adapter that handles global functions, so the
                 // PR1/PR2/PR3 `is_variadic` precedence applies uniformly:
                 // explicit JSON flag → `,...,<X>N` name idiom → `<X>N-<X>M`
@@ -1645,7 +1645,7 @@ impl<'db> InferenceContext<'db> {
                         bsl_platform::PlatformDataInner::instance().get_constructors(name.as_str());
                     if !ctors.is_empty() {
                         let arg_count = args.len();
-                        let sigs: Vec<hir_def::ty::FunctionSignature> = ctors
+                        let sigs: Vec<hir_def::ty::FunctionSignatureTy> = ctors
                             .iter()
                             .map(|ctor| {
                                 builtin::signature_from_params(&ctor.parameters, Ty::Unknown)
@@ -2299,12 +2299,17 @@ impl<'db> InferenceContext<'db> {
                         self.record_call_arg_binding(
                             callee,
                             args,
-                            ParamsShape::Single(Arc::<[Ty]>::from(
-                                &resolution.signature.params[..],
-                            )),
+                            ParamsShape::Single(
+                                resolution
+                                    .signature
+                                    .params
+                                    .iter()
+                                    .map(|id| typeid_to_ty(self.db, *id))
+                                    .collect(),
+                            ),
                         );
                         self.expr_types.insert(callee, Ty::Unknown);
-                        return resolution.return_type;
+                        return typeid_to_ty(self.db, resolution.return_type);
                     }
                     Err(UnresolvedMethodKind::MethodNotFound) => {
                         // Workspace exhausted (or strict-filter reject
@@ -2384,12 +2389,17 @@ impl<'db> InferenceContext<'db> {
                         self.record_call_arg_binding(
                             callee,
                             args,
-                            ParamsShape::Single(Arc::<[Ty]>::from(
-                                &resolution.signature.params[..],
-                            )),
+                            ParamsShape::Single(
+                                resolution
+                                    .signature
+                                    .params
+                                    .iter()
+                                    .map(|id| typeid_to_ty(self.db, *id))
+                                    .collect(),
+                            ),
                         );
                         self.expr_types.insert(callee, Ty::Unknown);
-                        return resolution.return_type;
+                        return typeid_to_ty(self.db, resolution.return_type);
                     }
                     Err(UnresolvedMethodKind::MethodNotFound) => {
                         // Strict-filter reject (non-register-record
@@ -2477,12 +2487,17 @@ impl<'db> InferenceContext<'db> {
                         self.record_call_arg_binding(
                             callee,
                             args,
-                            ParamsShape::Single(Arc::<[Ty]>::from(
-                                &resolution.signature.params[..],
-                            )),
+                            ParamsShape::Single(
+                                resolution
+                                    .signature
+                                    .params
+                                    .iter()
+                                    .map(|id| typeid_to_ty(self.db, *id))
+                                    .collect(),
+                            ),
                         );
                         self.expr_types.insert(callee, Ty::Unknown);
-                        return resolution.return_type;
+                        return typeid_to_ty(self.db, resolution.return_type);
                     }
                     Err(UnresolvedMethodKind::MethodNotFound) => {
                         // Workspace exhausted → fall through to platform.
@@ -2923,8 +2938,9 @@ impl<'db> InferenceContext<'db> {
                             let sig = crate::method_resolution::materialise_signature_enriched(
                                 self.db, method.id, method,
                             );
-                            if !matches!(*sig.ret, Ty::Unknown) {
-                                return (*sig.ret).clone();
+                            let ret = typeid_to_ty(self.db, sig.ret);
+                            if !matches!(ret, Ty::Unknown) {
+                                return ret;
                             }
                         }
                     }
@@ -2995,11 +3011,18 @@ impl<'db> InferenceContext<'db> {
                 self.record_call_arg_binding(
                     call_expr,
                     args,
-                    ParamsShape::Single(Arc::<[Ty]>::from(&resolution.signature.params[..])),
+                    ParamsShape::Single(
+                        resolution
+                            .signature
+                            .params
+                            .iter()
+                            .map(|id| typeid_to_ty(self.db, *id))
+                            .collect(),
+                    ),
                 );
 
                 // Return method's return type
-                resolution.return_type
+                typeid_to_ty(self.db, resolution.return_type)
             }
             Err(kind) => {
                 // Workspace miss — try the platform global-context catalogue
@@ -3321,10 +3344,17 @@ impl<'db> InferenceContext<'db> {
                 self.record_call_arg_binding(
                     call_expr,
                     args,
-                    ParamsShape::Single(Arc::<[Ty]>::from(&resolution.signature.params[..])),
+                    ParamsShape::Single(
+                        resolution
+                            .signature
+                            .params
+                            .iter()
+                            .map(|id| typeid_to_ty(self.db, *id))
+                            .collect(),
+                    ),
                 );
 
-                resolution.return_type
+                typeid_to_ty(self.db, resolution.return_type)
             }
             Err(UnresolvedMethodKind::MethodNotFound) => {
                 // Workspace lookup missed — fall back to the platform
@@ -4122,7 +4152,7 @@ mod tests {
     fn first_sig<'a>(
         builtins: &'a builtin::BuiltinFunctions,
         name: &str,
-    ) -> &'a hir_def::ty::FunctionSignature {
+    ) -> &'a hir_def::ty::FunctionSignatureTy {
         let sigs = builtins.get(name).unwrap_or_else(|| panic!("{name} should exist"));
         &sigs[0]
     }

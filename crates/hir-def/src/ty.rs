@@ -1087,11 +1087,11 @@ impl std::fmt::Display for TyDisplay<'_> {
     }
 }
 
-/// Function or procedure signature.
+/// Function or procedure signature in legacy `Ty` form.
 ///
 /// Contains parameter types and return type. For procedures, the return type is `Undefined`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct FunctionSignature {
+pub struct FunctionSignatureTy {
     /// Parameter types in declaration order.
     pub params: Box<[Ty]>,
 
@@ -1128,7 +1128,7 @@ pub struct FunctionSignature {
     pub max_args: Option<u32>,
 }
 
-impl FunctionSignature {
+impl FunctionSignatureTy {
     /// Create a new function signature with all parameters required and a
     /// fixed-arity upper bound (`max_args = Some(params.len())`).
     pub fn new(params: Vec<Ty>, ret: Ty) -> Self {
@@ -1180,6 +1180,29 @@ impl FunctionSignature {
     /// equals `params.len()`; for all-optional signatures it is `0`.
     /// Non-standard mixed orders (e.g. `(А, Б = ..., В)`) yield the
     /// strictly-correct `3`, not `1`.
+    pub fn required_count(&self) -> usize {
+        self.defaults.iter().rposition(|has_default| !has_default).map_or(0, |i| i + 1)
+    }
+}
+
+/// Function or procedure signature in type-kernel form.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FunctionSignature {
+    /// Parameter types in declaration order.
+    pub params: Box<[bsl_types::kind::TypeId]>,
+
+    /// Per-parameter "has default value" flag (parallel to `params`).
+    pub defaults: Box<[bool]>,
+
+    /// Return type (`Undefined` for procedures).
+    pub ret: bsl_types::kind::TypeId,
+
+    /// Maximum number of arguments the caller may supply.
+    pub max_args: Option<u32>,
+}
+
+impl FunctionSignature {
+    /// Number of arguments that the caller MUST supply.
     pub fn required_count(&self) -> usize {
         self.defaults.iter().rposition(|has_default| !has_default).map_or(0, |i| i + 1)
     }

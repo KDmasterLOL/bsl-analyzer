@@ -29,9 +29,10 @@
 //! reaching gate 3, so this function is invoked only when the
 //! receiver positively resolves to a workspace CommonModule.
 
+use bsl_types::kind::TypeId;
 use hir_def::resolver::{QualifiedMethodError, Resolver};
 use hir_def::symbol_tree::MethodSymbol;
-use hir_def::ty::{FunctionSignature, Ty};
+use hir_def::ty::{FunctionSignature, FunctionSignatureTy, Ty};
 use hir_def::{MethodId, Name};
 
 use crate::db::HirDatabase;
@@ -55,19 +56,16 @@ pub struct MethodResolution {
     pub is_export: bool,
 
     /// Function signature (parameter types + return type).
-    ///
-    /// Phase 3: Return type is Ty::Unknown for most methods
-    /// Phase 4+: Actual return types from JSDoc or inference
     pub signature: FunctionSignature,
 
     /// Return type (convenience field, same as signature.ret).
-    pub return_type: Ty,
+    pub return_type: TypeId,
 }
 
 impl MethodResolution {
     /// Create a new method resolution result.
     pub fn new(method_id: MethodId, is_export: bool, signature: FunctionSignature) -> Self {
-        let return_type = (*signature.ret).clone();
+        let return_type = signature.ret;
         Self { method_id, is_export, signature, return_type }
     }
 }
@@ -498,7 +496,7 @@ pub fn resolve_aliased_manager_call(
 /// Lowering runs through [`TyLoweringContext`] so the JSDoc `TypeRef`
 /// lookups share a single path with `Expr::New` and XML metadata: adding
 /// a new prefix or a future `Ty::Union` is a one-place edit.
-fn materialise_signature(method_symbol: &MethodSymbol) -> FunctionSignature {
+fn materialise_signature(method_symbol: &MethodSymbol) -> FunctionSignatureTy {
     let ctx = TyLoweringContext::new();
 
     let param_types: Vec<Ty> = method_symbol
@@ -514,7 +512,7 @@ fn materialise_signature(method_symbol: &MethodSymbol) -> FunctionSignature {
         .map(|t| ctx.lower_type_ref(t))
         .unwrap_or_else(|| method_symbol.return_type.clone());
 
-    FunctionSignature::new_with_defaults(param_types, defaults, ret)
+    FunctionSignatureTy::new_with_defaults(param_types, defaults, ret)
 }
 
 /// Phase O.11 — materialise a method signature with body-inferred
@@ -549,42 +547,45 @@ pub(crate) fn materialise_signature_enriched(
     method_id: hir_def::MethodId,
     method_symbol: &MethodSymbol,
 ) -> FunctionSignature {
-    let mut sig = materialise_signature(method_symbol);
-    if !matches!(*sig.ret, Ty::Unknown) {
-        return sig;
+    let mut sig: FunctionSignatureTy = materialise_signature(method_symbol);
+    if matches!(*sig.ret, Ty::Unknown) {
+        let method_input = hir_def::MethodIdInput::new(db, method_id);
+        let inferred = crate::method_graph::method_return_type_query(db, method_input);
+        if !matches!(inferred, Ty::Unknown) {
+            *sig.ret = inferred;
+        }
     }
 
-    let method_input = hir_def::MethodIdInput::new(db, method_id);
-    let inferred = crate::method_graph::method_return_type_query(db, method_input);
-    if matches!(inferred, Ty::Unknown) {
-        return sig;
-    }
-
-    sig.ret = Box::new(inferred);
-    sig
+    crate::ty_bridge::function_signature_ty_to_kernel(db, &sig)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ty_bridge::{function_signature_ty_to_kernel, typeid_to_ty};
+    use bsl_types::testing::InMemoryDb;
 
     #[test]
     fn test_method_resolution_new() {
+        let db = InMemoryDb::new();
         let method_id = MethodId { module: hir_def::ModuleId { file_id: FileId(0) }, local_id: 0 };
-        let signature = FunctionSignature::new(vec![Ty::String], Ty::Number);
+        let signature_ty = FunctionSignatureTy::new(vec![Ty::String], Ty::Number);
+        let signature = function_signature_ty_to_kernel(&db, &signature_ty);
 
         let resolution = MethodResolution::new(method_id, true, signature.clone());
 
         assert_eq!(resolution.method_id, method_id);
         assert!(resolution.is_export);
-        assert_eq!(resolution.return_type, Ty::Number);
+        assert_eq!(typeid_to_ty(&db, resolution.return_type), Ty::Number);
         assert_eq!(resolution.signature, signature);
     }
 
     #[test]
     fn test_method_resolution_not_export() {
+        let db = InMemoryDb::new();
         let method_id = MethodId { module: hir_def::ModuleId { file_id: FileId(0) }, local_id: 0 };
-        let signature = FunctionSignature::new(vec![], Ty::Undefined);
+        let signature_ty = FunctionSignatureTy::new(vec![], Ty::Undefined);
+        let signature = function_signature_ty_to_kernel(&db, &signature_ty);
 
         let resolution = MethodResolution::new(method_id, false, signature);
 
