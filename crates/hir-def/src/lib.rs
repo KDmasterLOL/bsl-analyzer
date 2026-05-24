@@ -79,7 +79,7 @@ pub use path::{PathResolution, QualifiedName};
 pub use region_tree::{RegionData, RegionIdx, RegionTree};
 pub use sdbl_cache::{all_sdbl_in_file_query, sdbl_hir_for_file_query, SdblHirEntries, SdblInFile};
 pub use symbol_tree::{MethodSymbol, ParamSymbol, SymbolTree, VariableSymbol};
-pub use ty::{FunctionSignature, FunctionSignatureTy, Ty};
+pub use ty::{FunctionSignature, Ty};
 pub use type_ref::{BuiltinTypeRef, TypeRef};
 pub use workspace::{is_bsl_source, CommonModuleInfo, WorkspaceSymbols};
 pub use workspace_index::{SymbolInfo, SymbolKind, WorkspaceIndex};

@@ -62,6 +62,7 @@ use crate::method_lookup::{
     build_tabular_section_method_info, platform_type_key, to_method_info, MethodInfo,
 };
 use crate::platform_manager_lookup::{build_resolution, metadata_kind_to_prefix_and_mdo};
+use crate::ty_bridge::typeid_to_ty;
 
 /// Stable identity of a single platform method.
 ///
@@ -229,7 +230,16 @@ impl ResolvedPlatformMethod {
 /// without a platform surface), and for method names not present in
 /// the resolved table.
 pub fn resolve_method(
-    db: &dyn salsa::Database,
+    db: &dyn crate::db::HirDatabase,
+    receiver_ty: &Ty,
+    method_name: &Name,
+) -> Option<ResolvedPlatformMethod> {
+    resolve_method_inner(db, db, receiver_ty, method_name)
+}
+
+fn resolve_method_inner(
+    salsa_db: &dyn salsa::Database,
+    kernel_db: &dyn TypeKernelDb,
     receiver_ty: &Ty,
     method_name: &Name,
 ) -> Option<ResolvedPlatformMethod> {
@@ -245,7 +255,7 @@ pub fn resolve_method(
         // successful branch's handle / params / overloads wholesale;
         // later branches contribute only their return types.
         for member in live {
-            if let Some(res) = resolve_method(db, member, method_name) {
+            if let Some(res) = resolve_method_inner(salsa_db, kernel_db, member, method_name) {
                 returns.push(res.return_ty.clone());
                 if chosen.is_none() {
                     chosen = Some(res);
@@ -261,8 +271,8 @@ pub fn resolve_method(
     match receiver_ty {
         Ty::ObjectManager { kind, name } => {
             let prefix = kind.manager_type_prefix()?;
-            let method = lookup_prefixed(db, prefix, method_name.as_str())?;
-            let resolution = build_resolution(&method, *kind, name);
+            let method = lookup_prefixed(salsa_db, prefix, method_name.as_str())?;
+            let resolution = build_resolution(kernel_db, &method, *kind, name);
             Some(ResolvedPlatformMethod {
                 handle: PlatformMethodHandle {
                     method_id: method.id,
@@ -272,15 +282,26 @@ pub fn resolve_method(
                         mdo_name: name.clone(),
                     },
                 },
-                return_ty: resolution.return_ty,
-                params: resolution.signature.params.to_vec(),
-                overloads: resolution.overloads,
+                return_ty: typeid_to_ty(kernel_db, resolution.return_ty),
+                params: resolution
+                    .signature
+                    .params
+                    .iter()
+                    .map(|id| typeid_to_ty(kernel_db, *id))
+                    .collect(),
+                overloads: resolution
+                    .overloads
+                    .iter()
+                    .map(|row| row.iter().map(|id| typeid_to_ty(kernel_db, *id)).collect())
+                    .collect(),
             })
         }
-        Ty::MetadataRef { kind, name } => resolve_metadata_ref(db, *kind, name, method_name),
+        Ty::MetadataRef { kind, name } => {
+            resolve_metadata_ref(salsa_db, kernel_db, *kind, name, method_name)
+        }
         _ => {
             let key = platform_type_key(receiver_ty)?;
-            let method = lookup_scalar(db, key, method_name.as_str())?;
+            let method = lookup_scalar(salsa_db, key, method_name.as_str())?;
             let info = to_method_info(&method);
             Some(ResolvedPlatformMethod {
                 handle: PlatformMethodHandle {
@@ -296,7 +317,8 @@ pub fn resolve_method(
 }
 
 fn resolve_metadata_ref(
-    db: &dyn salsa::Database,
+    salsa_db: &dyn salsa::Database,
+    kernel_db: &dyn TypeKernelDb,
     kind: MetadataKind,
     mdo_name: &Name,
     method_name: &Name,
@@ -305,7 +327,7 @@ fn resolve_metadata_ref(
     // `"Tabular section"` type_name, with row-generic rebinding for
     // chained accessors (`ТЧ.Получить(0).<row attr>`).
     if let MetadataKind::TabularSection { parent } = kind {
-        let method = lookup_scalar(db, "Tabular section", method_name.as_str())?;
+        let method = lookup_scalar(salsa_db, "Tabular section", method_name.as_str())?;
         let info = build_tabular_section_method_info(&method, parent, mdo_name);
         return Some(ResolvedPlatformMethod {
             handle: PlatformMethodHandle {
@@ -323,8 +345,8 @@ fn resolve_metadata_ref(
     // Composite-prefix path — covers all 16 kinds with
     // `platform_prefix() = Some(prefix)`.
     if let Some((prefix, parent_mdo)) = metadata_kind_to_prefix_and_mdo(kind) {
-        if let Some(method) = lookup_prefixed(db, prefix, method_name.as_str()) {
-            let resolution = build_resolution(&method, parent_mdo, mdo_name);
+        if let Some(method) = lookup_prefixed(salsa_db, prefix, method_name.as_str()) {
+            let resolution = build_resolution(kernel_db, &method, parent_mdo, mdo_name);
             return Some(ResolvedPlatformMethod {
                 handle: PlatformMethodHandle {
                     method_id: method.id,
@@ -334,16 +356,25 @@ fn resolve_metadata_ref(
                         mdo_name: mdo_name.clone(),
                     },
                 },
-                return_ty: resolution.return_ty,
-                params: resolution.signature.params.to_vec(),
-                overloads: resolution.overloads,
+                return_ty: typeid_to_ty(kernel_db, resolution.return_ty),
+                params: resolution
+                    .signature
+                    .params
+                    .iter()
+                    .map(|id| typeid_to_ty(kernel_db, *id))
+                    .collect(),
+                overloads: resolution
+                    .overloads
+                    .iter()
+                    .map(|row| row.iter().map(|id| typeid_to_ty(kernel_db, *id)).collect())
+                    .collect(),
             });
         }
     }
 
     // Synthetic-scalar fallback (e.g. `RegisterFilter` → `"Filter"`).
     if let Some(scalar_key) = kind.scalar_platform_key() {
-        if let Some(method) = lookup_scalar(db, scalar_key, method_name.as_str()) {
+        if let Some(method) = lookup_scalar(salsa_db, scalar_key, method_name.as_str()) {
             let info = to_method_info(&method);
             return Some(ResolvedPlatformMethod {
                 handle: PlatformMethodHandle {
@@ -423,6 +454,15 @@ mod tests {
         TestDatabase::default()
     }
 
+    fn resolve_for_test(
+        db: &TestDatabase,
+        receiver_ty: &Ty,
+        method_name: &Name,
+    ) -> Option<ResolvedPlatformMethod> {
+        let kernel_db = InMemoryDb::new();
+        resolve_method_inner(db, &kernel_db, receiver_ty, method_name)
+    }
+
     #[test]
     fn metadata_ref_record_set_resolves_with_prefixed_handle() {
         let db = db();
@@ -430,7 +470,7 @@ mod tests {
             kind: MetadataKind::InformationRegisterRecordSet,
             name: Name::new("Курсы"),
         };
-        let res = resolve_method(&db, &ty, &Name::new("Прочитать"));
+        let res = resolve_for_test(&db, &ty, &Name::new("Прочитать"));
         let Some(res) = res else {
             // Skip when running without platform data (CI without HBK).
             println!("Skipping: no platform data available");
@@ -460,7 +500,7 @@ mod tests {
             kind: MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
             name: Name::new("Курсы"),
         };
-        let res = resolve_method(&db, &ty, &Name::new("Сбросить"));
+        let res = resolve_for_test(&db, &ty, &Name::new("Сбросить"));
         let Some(res) = res else {
             println!("Skipping: no platform data available");
             return;
@@ -507,7 +547,7 @@ mod tests {
             kind: MetadataKind::InformationRegisterRecordSet,
             name: Name::new("Курсы"),
         };
-        let res = resolve_method(&db, &ty, &Name::new("НесуществующийМетод"));
+        let res = resolve_for_test(&db, &ty, &Name::new("НесуществующийМетод"));
         assert!(res.is_none());
     }
 
@@ -520,8 +560,8 @@ mod tests {
             kind: MetadataKind::InformationRegisterRecordSet,
             name: Name::new("Курсы"),
         };
-        let ru = resolve_method(&db, &ty, &Name::new("Прочитать"));
-        let en = resolve_method(&db, &ty, &Name::new("Read"));
+        let ru = resolve_for_test(&db, &ty, &Name::new("Прочитать"));
+        let en = resolve_for_test(&db, &ty, &Name::new("Read"));
         match (ru, en) {
             (Some(r), Some(e)) => assert_eq!(r.handle.method_id, e.handle.method_id),
             (None, None) => println!("Skipping: no platform data available"),
@@ -544,7 +584,7 @@ mod tests {
         let db = db();
         let ty =
             Ty::ObjectManager { kind: MdoType::InformationRegister, name: Name::new("Курсы") };
-        let res = resolve_method(&db, &ty, &Name::new("Получить"));
+        let res = resolve_for_test(&db, &ty, &Name::new("Получить"));
         let Some(res) = res else {
             println!("Skipping: no platform data available");
             return;
@@ -570,7 +610,7 @@ mod tests {
         let ty = Ty::ObjectManager {
             kind: MdoType::Catalog, name: Name::new("Номенклатура")
         };
-        let res = resolve_method(&db, &ty, &Name::new("СоздатьЭлемент"));
+        let res = resolve_for_test(&db, &ty, &Name::new("СоздатьЭлемент"));
         let Some(res) = res else {
             println!("Skipping: no platform data available");
             return;
@@ -608,8 +648,8 @@ mod tests {
         let db = db();
         let happy = Ty::PlatformObject(Name::new("РезультатЗапроса"));
         let union = Ty::union(vec![happy.clone(), Ty::Undefined]);
-        let direct = resolve_method(&db, &happy, &Name::new("Выгрузить"));
-        let through_union = resolve_method(&db, &union, &Name::new("Выгрузить"));
+        let direct = resolve_for_test(&db, &happy, &Name::new("Выгрузить"));
+        let through_union = resolve_for_test(&db, &union, &Name::new("Выгрузить"));
         match (direct, through_union) {
             (Some(direct_res), Some(union_res)) => {
                 // First-branch handle: same id and origin.
@@ -633,7 +673,7 @@ mod tests {
         // stripping (no instance methods on Undefined / Null).
         let db = db();
         let dead = Ty::union(vec![Ty::Undefined, Ty::Null]);
-        let res = resolve_method(&db, &dead, &Name::new("ЛюбоеИмя"));
+        let res = resolve_for_test(&db, &dead, &Name::new("ЛюбоеИмя"));
         assert!(res.is_none());
     }
 

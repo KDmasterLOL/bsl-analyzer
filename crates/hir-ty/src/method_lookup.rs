@@ -61,7 +61,9 @@ use hir_def::{DefWithBodyId, ExprId, Name};
 use vfs::FileId;
 
 use crate::db::HirDatabase;
-use crate::lower::type_string::{lower_param_type_string, lower_return_type_string};
+use crate::lower::type_string::{
+    lower_param_type_string, lower_param_type_string_typeid, lower_return_type_string,
+};
 use crate::ty_bridge::{ty_to_typeid, typeid_to_ty};
 
 /// Result of a successful method lookup.
@@ -177,12 +179,13 @@ pub fn lookup_method_with_refinement(
     // `SdblProjection`); they flip together at §4.G when `Ty` is
     // deleted. Bridge in at entry, bridge the result out.
     let receiver_ty = typeid_to_ty(db, receiver);
-    let info = lookup_method_with_refinement_ty(&receiver_ty, method_name, refine_ctx)?;
+    let info = lookup_method_with_refinement_ty(db, &receiver_ty, method_name, refine_ctx)?;
     Some(method_info_ty_to_kernel(db, info))
 }
 
 /// Internal `Ty`-native resolver — the pre-§4.E pipeline body.
 fn lookup_method_with_refinement_ty(
+    db: &dyn TypeKernelDb,
     receiver_ty: &Ty,
     method_name: &Name,
     refine_ctx: Option<&RefineCtx<'_>>,
@@ -196,12 +199,12 @@ fn lookup_method_with_refinement_ty(
     let receiver_ty = coerced.as_ref().unwrap_or(receiver_ty);
 
     if let Ty::Union(members) = receiver_ty {
-        return union_lookup(members, method_name, refine_ctx);
+        return union_lookup(db, members, method_name, refine_ctx);
     }
 
     let info = match receiver_ty {
-        Ty::ObjectManager { kind, name } => lookup_on_object_manager(*kind, name, method_name),
-        Ty::MetadataRef { kind, name } => lookup_on_metadata_ref(*kind, name, method_name),
+        Ty::ObjectManager { kind, name } => lookup_on_object_manager(db, *kind, name, method_name),
+        Ty::MetadataRef { kind, name } => lookup_on_metadata_ref(db, *kind, name, method_name),
         Ty::FormControl { kind, .. } => lookup_on_form_control(*kind, method_name),
         _ => lookup_scalar_receiver(receiver_ty, method_name),
     }?;
@@ -904,19 +907,25 @@ fn lookup_scalar_receiver(receiver_ty: &Ty, method_name: &Name) -> Option<Method
 /// / aliased-manager shapes, where there is no CFE resolver to
 /// consult.
 fn lookup_on_object_manager(
+    db: &dyn TypeKernelDb,
     mdo_type: MdoType,
     name: &Name,
     method_name: &Name,
 ) -> Option<MethodInfoTy> {
     let res = crate::platform_manager_lookup::resolve_platform_manager_method(
+        db,
         mdo_type,
         name,
         method_name,
     )?;
     Some(MethodInfoTy {
-        return_ty: res.return_ty,
-        params: res.signature.params.to_vec(),
-        overloads: res.overloads,
+        return_ty: typeid_to_ty(db, res.return_ty),
+        params: res.signature.params.iter().map(|id| typeid_to_ty(db, *id)).collect(),
+        overloads: res
+            .overloads
+            .iter()
+            .map(|row| row.iter().map(|id| typeid_to_ty(db, *id)).collect())
+            .collect(),
     })
 }
 
@@ -946,6 +955,7 @@ fn lookup_on_object_manager(
 /// `None`. Row methods do not exist in HBK data — `Удалить(Индекс)` and
 /// friends are methods on the section, not on rows.
 fn lookup_on_metadata_ref(
+    db: &dyn TypeKernelDb,
     kind: MetadataKind,
     name: &Name,
     method_name: &Name,
@@ -956,14 +966,19 @@ fn lookup_on_metadata_ref(
         return Some(build_tabular_section_method_info(method, parent, name));
     }
     if let Some(res) = crate::platform_manager_lookup::resolve_platform_metadata_ref_method(
+        db,
         kind,
         name,
         method_name,
     ) {
         return Some(MethodInfoTy {
-            return_ty: res.return_ty,
-            params: res.signature.params.to_vec(),
-            overloads: res.overloads,
+            return_ty: typeid_to_ty(db, res.return_ty),
+            params: res.signature.params.iter().map(|id| typeid_to_ty(db, *id)).collect(),
+            overloads: res
+                .overloads
+                .iter()
+                .map(|row| row.iter().map(|id| typeid_to_ty(db, *id)).collect())
+                .collect(),
         });
     }
     if let Some(scalar_key) = kind.scalar_platform_key() {
@@ -1009,6 +1024,7 @@ fn lookup_on_form_control(
 /// FIRST successful branch's signature is bound wholesale; later
 /// branches only contribute to the return-type union.
 fn union_lookup(
+    db: &dyn TypeKernelDb,
     members: &[Ty],
     method_name: &Name,
     refine_ctx: Option<&RefineCtx<'_>>,
@@ -1025,7 +1041,7 @@ fn union_lookup(
         // gate (`receiver_needs_refinement`) silently skips arms that
         // are already-projected or non-Query, so non-SDBL unions pay
         // only the cheap discriminant check.
-        if let Some(info) = lookup_method_with_refinement_ty(m, method_name, refine_ctx) {
+        if let Some(info) = lookup_method_with_refinement_ty(db, m, method_name, refine_ctx) {
             hit_any = true;
             returns.push(info.return_ty);
             if chosen_signature.is_none() {
@@ -1225,6 +1241,28 @@ pub(crate) fn lower_overloads(method: &PlatformMethod) -> Vec<Vec<Ty>> {
                 .iter()
                 .map(|p| {
                     p.param_type.as_ref().map(|t| lower_param_type_string(t)).unwrap_or(Ty::Unknown)
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Kernel-native counterpart of [`lower_overloads`].
+pub(crate) fn lower_overloads_typeid(
+    db: &dyn TypeKernelDb,
+    method: &PlatformMethod,
+) -> Vec<Vec<TypeId>> {
+    method
+        .variants
+        .iter()
+        .map(|v| {
+            v.parameters
+                .iter()
+                .map(|p| {
+                    p.param_type
+                        .as_ref()
+                        .map(|t| lower_param_type_string_typeid(db, t))
+                        .unwrap_or(db.unknown())
                 })
                 .collect()
         })

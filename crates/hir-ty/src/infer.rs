@@ -3335,24 +3335,20 @@ impl<'db> InferenceContext<'db> {
                 let plat_res: Option<PlatformMethodResolution> = mdo_type_opt
                     .filter(|mdo_type| self.mdo_declared(*mdo_type, mdo_name))
                     .and_then(|mdo_type| {
-                        resolve_platform_manager_method(mdo_type, mdo_name, method_name)
+                        resolve_platform_manager_method(self.db, mdo_type, mdo_name, method_name)
                     });
                 if let Some(mut res) = plat_res {
                     if mdo_type_opt == Some(bsl_metadata::MdoType::Constant) {
-                        let mut return_ty = res.return_typeid(self.db);
-                        let mut params = res.signature_params_typeid(self.db);
+                        let mut return_ty = res.return_ty;
+                        let mut params: Vec<TypeId> = res.signature.params.to_vec();
                         self.refine_constant_method(
                             mdo_name,
                             method_name,
                             &mut return_ty,
                             &mut params,
                         );
-                        res.return_ty = typeid_to_ty(self.db, return_ty);
-                        res.signature.params = params
-                            .iter()
-                            .map(|id| typeid_to_ty(self.db, *id))
-                            .collect::<Vec<_>>()
-                            .into_boxed_slice();
+                        res.return_ty = return_ty;
+                        res.signature.params = params.into_boxed_slice();
                     }
                     let total = res.signature.params.len();
                     let required = res.signature.required_count();
@@ -3367,9 +3363,9 @@ impl<'db> InferenceContext<'db> {
                     self.record_call_arg_binding(
                         call_expr,
                         args,
-                        ParamsShape::Single(res.signature_params_typeid(self.db).into()),
+                        ParamsShape::Single(res.signature.params.to_vec().into()),
                     );
-                    return res.return_typeid(self.db);
+                    return res.return_ty;
                 }
 
                 self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedMethodCall {
