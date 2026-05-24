@@ -478,7 +478,7 @@ impl hir::HirDatabase for RootDatabaseImpl {
         file_id: FileId,
         owner: hir::DefWithBodyId,
         expr: hir::ExprId,
-    ) -> hir::Ty {
+    ) -> hir::TypeId {
         hir::type_of_expr_query(self, file_id, owner, expr)
     }
 

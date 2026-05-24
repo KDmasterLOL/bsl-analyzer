@@ -27,6 +27,7 @@
 //! - Diagnostic collection (UnresolvedMethodCall, MismatchedArgCount)
 
 use base_db::FileIdInput;
+use bsl_types::builders::Builders;
 use bsl_types::intern::TypeKernelDb;
 use bsl_types::kind::TypeId;
 use cfg_types::{BindingId, IdConversion};
@@ -3922,20 +3923,20 @@ pub fn infer_module_code_query<'db>(
 ///
 /// # Returns
 ///
-/// - The inferred type for `(owner, expr)` if present.
-/// - `Ty::Unknown` if inference produced no entry for that pair.
+/// - The interned [`TypeId`] for `(owner, expr)` if present.
+/// - The kernel `Unknown` id if inference produced no entry for that pair.
 pub fn type_of_expr_query(
     db: &dyn HirDatabase,
     file_id: FileId,
     owner: DefWithBodyId,
     expr: ExprId,
-) -> Ty {
+) -> TypeId {
     // Phase O.17: route through per-owner Salsa cell instead of the
     // file-wide `infer_query` aggregate. Warm hits become a single
     // Arc::clone on the `infer_method` / `infer_module_code` cell.
-    // Phase 3 §4.D: per-owner accessor now bridges `TypeId` → `Ty`
-    // via the type kernel; takes `db` and returns owned `Ty`.
-    infer_owner(db, file_id, owner).type_of_expr(db, expr).unwrap_or(Ty::Unknown)
+    // Phase 3 §4.G.5a: the public boundary is kernel-native — return the
+    // interned `TypeId` directly, no `Ty` bridge at the query.
+    infer_owner(db, file_id, owner).type_id_of_expr(expr).unwrap_or_else(|| db.unknown())
 }
 
 #[cfg(test)]

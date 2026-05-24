@@ -1,5 +1,6 @@
 //! Salsa database trait for type inference queries.
 
+use bsl_types::kind::TypeId;
 use hir_def::{ConfigsDatabase, DefWithBodyId, ExprId, MethodIdInput};
 use std::sync::Arc;
 use vfs::FileId;
@@ -9,7 +10,6 @@ use crate::infer::{
 };
 use crate::narrow::NarrowState;
 use crate::proc_signature::ProcSignature;
-use crate::Ty;
 
 /// Database trait for HIR type inference.
 ///
@@ -57,12 +57,12 @@ pub trait HirDatabase: ConfigsDatabase + bsl_types::intern::TypeKernelDb {
     ///
     /// # Returns
     ///
-    /// - The inferred type for `(owner, expr)`.
-    /// - `Ty::Unknown` if inference produced no entry for that pair.
+    /// - The interned [`TypeId`] for `(owner, expr)`.
+    /// - The kernel `Unknown` id if inference produced no entry for that pair.
     ///
     /// # Implementation
     /// Should delegate to [`crate::infer::type_of_expr_query`].
-    fn type_of_expr(&self, file_id: FileId, owner: DefWithBodyId, expr: ExprId) -> Ty;
+    fn type_of_expr(&self, file_id: FileId, owner: DefWithBodyId, expr: ExprId) -> TypeId;
 
     /// Run narrowing analysis on a single body (ADR-01 Option A).
     ///

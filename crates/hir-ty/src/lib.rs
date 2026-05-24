@@ -28,7 +28,7 @@
 //! // a single `Body`, so callers must identify the body with
 //! // `DefWithBodyId::Method(local_id)` or `DefWithBodyId::ModuleCode`.
 //! let owner = DefWithBodyId::Method(local_id);
-//! let ty = db.type_of_expr(file_id, owner, expr_id);
+//! let type_id = db.type_of_expr(file_id, owner, expr_id);
 //! ```
 
 pub mod arg_diagnostics;
