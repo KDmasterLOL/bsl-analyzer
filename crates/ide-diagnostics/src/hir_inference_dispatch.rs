@@ -168,13 +168,13 @@ fn dispatch_inference_diagnostic(
             )
         }
         InferenceDiagnostic::TypeMismatch { expected, actual, .. } => {
-            handlers::type_mismatch::from_hir(expected, actual, range, ctx)
+            handlers::type_mismatch::from_hir(*expected, *actual, range, ctx)
         }
         InferenceDiagnostic::UnresolvedField { receiver_ty, field_name, .. } => {
-            handlers::unresolved_field::from_hir(receiver_ty, field_name, range, ctx)
+            handlers::unresolved_field::from_hir(*receiver_ty, field_name, range, ctx)
         }
         InferenceDiagnostic::ReadOnlyPropertyAssignment { receiver_ty, field_name, .. } => {
-            handlers::read_only_property::from_hir(receiver_ty, field_name, range, ctx)
+            handlers::read_only_property::from_hir(*receiver_ty, field_name, range, ctx)
         }
         InferenceDiagnostic::RedundantAccessToObjectTwoLevel { module, .. } => {
             // Reuse the existing handler that already validates against

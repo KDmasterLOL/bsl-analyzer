@@ -48,6 +48,10 @@ impl<'a> DiagnosticsContext<'a> {
         self.config.locale
     }
 
+    pub fn kernel_type_display(&self, id: hir::TypeId, locale: base_db::Locale) -> String {
+        self.provider.kernel_type_display(id, locale)
+    }
+
     /// Load **main** configuration metadata.
     ///
     /// Returns the main configuration only — extension (CFE) configurations

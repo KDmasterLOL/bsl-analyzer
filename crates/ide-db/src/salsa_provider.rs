@@ -112,6 +112,10 @@ impl AnalysisProvider for SalsaProvider<'_> {
         resolver.resolve_assignment_target(self.db, &Name::new(name))
     }
 
+    fn kernel_type_display(&self, id: bsl_types::kind::TypeId, locale: base_db::Locale) -> String {
+        hir::kernel_type_label(self.db, id, locale, false)
+    }
+
     fn parse(&self, file_id: FileId) -> Parse<SyntaxNode> {
         self.db.parse(file_id)
     }

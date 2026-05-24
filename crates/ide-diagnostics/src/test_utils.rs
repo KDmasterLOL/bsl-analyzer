@@ -530,6 +530,10 @@ impl ide_db::provider::AnalysisProvider for MetadataTestProvider {
         self.db.module_index(source_root_id)
     }
 
+    fn kernel_type_display(&self, id: hir::TypeId, locale: base_db::Locale) -> String {
+        hir::kernel_type_label(&self.db, id, locale, false)
+    }
+
     fn parse(&self, file_id: vfs::FileId) -> syntax::Parse<syntax::SyntaxNode> {
         use ide_db::base_db::RootQueryDb;
         self.db.parse(file_id)

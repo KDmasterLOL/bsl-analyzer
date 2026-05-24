@@ -421,16 +421,13 @@ fn emit_single(
     owner: DefWithBodyId,
 ) {
     for ((arg_id, &arg_ty), &param_id) in args.iter().zip(arg_types.iter()).zip(params.iter()) {
-        // Phase 3 §4.D.4a: params are now kernel `TypeId`s too. The
-        // `TypeMismatch` diagnostic still carries `Ty`, so bridge the
-        // message payloads back out until §4.D.4c.
         if !crate::subtype::is_coercible_to(db, arg_ty, param_id) {
             out.push((
                 owner,
                 InferenceDiagnostic::TypeMismatch {
                     expr: *arg_id,
-                    expected: crate::ty_bridge::typeid_to_ty(db, param_id),
-                    actual: crate::ty_bridge::typeid_to_ty(db, arg_ty),
+                    expected: param_id,
+                    actual: arg_ty,
                 },
             ));
         }

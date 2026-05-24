@@ -85,9 +85,10 @@ fn type_mismatches(db: &RootDatabaseImpl, file_id: FileId) -> Vec<(Ty, Ty)> {
         .iter()
         .chain(db.arg_diagnostics(file_id).iter())
         .filter_map(|(_, d)| match d {
-            InferenceDiagnostic::TypeMismatch { expected, actual, .. } => {
-                Some((expected.clone(), actual.clone()))
-            }
+            InferenceDiagnostic::TypeMismatch { expected, actual, .. } => Some((
+                hir::ty_bridge::typeid_to_ty(db, *expected),
+                hir::ty_bridge::typeid_to_ty(db, *actual),
+            )),
             _ => None,
         })
         .collect()

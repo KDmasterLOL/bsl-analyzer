@@ -260,9 +260,10 @@ fn catalog_find_by_code_string_arg_does_not_fire_type_mismatch() {
         .arg_diagnostics(file_id)
         .iter()
         .filter_map(|(_, d)| match d {
-            InferenceDiagnostic::TypeMismatch { expected, actual, .. } => {
-                Some((expected.clone(), actual.clone()))
-            }
+            InferenceDiagnostic::TypeMismatch { expected, actual, .. } => Some((
+                hir::ty_bridge::typeid_to_ty(&db, *expected),
+                hir::ty_bridge::typeid_to_ty(&db, *actual),
+            )),
             _ => None,
         })
         .collect();

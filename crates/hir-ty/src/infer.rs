@@ -313,7 +313,7 @@ pub enum InferenceDiagnostic {
     ///
     /// Emitted when expression type doesn't match expected type
     /// (e.g., assigning String to Number variable).
-    TypeMismatch { expr: ExprId, expected: Ty, actual: Ty },
+    TypeMismatch { expr: ExprId, expected: TypeId, actual: TypeId },
 
     /// Field access on a typed receiver did not resolve.
     ///
@@ -327,7 +327,7 @@ pub enum InferenceDiagnostic {
     /// `receiver_ty` captures the type as seen at the access site so the
     /// IDE layer can render `<CatalogRef.Номенклатура>.НеСуществует` in
     /// the diagnostic message without re-running inference.
-    UnresolvedField { expr: ExprId, receiver_ty: Ty, field_name: Name },
+    UnresolvedField { expr: ExprId, receiver_ty: TypeId, field_name: Name },
 
     /// Assignment to a field whose platform-property entry carries
     /// `is_readonly = true` in HBK (`Использование:` chapter reads
@@ -341,7 +341,7 @@ pub enum InferenceDiagnostic {
     /// `lhs` anchors the diagnostic to the field-access expression so the
     /// editor underlines `.Параметры` rather than the whole statement;
     /// `receiver_ty` and `field_name` feed the message body.
-    ReadOnlyPropertyAssignment { lhs: ExprId, receiver_ty: Ty, field_name: Name },
+    ReadOnlyPropertyAssignment { lhs: ExprId, receiver_ty: TypeId, field_name: Name },
 
     /// Redundant `<CommonModule>.<Method>()` self-quoted call inside the
     /// owning CommonModule body — counterpart to `BodyDiagnostic::
@@ -924,10 +924,6 @@ impl<'db> InferenceContext<'db> {
         id == self.db.unknown()
     }
 
-    fn to_diag_ty(&self, id: TypeId) -> Ty {
-        typeid_to_ty(self.db, id)
-    }
-
     /// Finish inference and return the per-body output.
     pub fn finish(self) -> BodyInferenceResult {
         BodyInferenceResult {
@@ -1086,7 +1082,7 @@ impl<'db> InferenceContext<'db> {
                                     self.push_inference_diagnostic(
                                         InferenceDiagnostic::ReadOnlyPropertyAssignment {
                                             lhs: ExprId::from_idx(*target),
-                                            receiver_ty: self.to_diag_ty(form_ty),
+                                            receiver_ty: form_ty,
                                             field_name: name.clone(),
                                         },
                                     );
@@ -1157,7 +1153,7 @@ impl<'db> InferenceContext<'db> {
                                 self.push_inference_diagnostic(
                                     InferenceDiagnostic::ReadOnlyPropertyAssignment {
                                         lhs: ExprId::from_idx(*target),
-                                        receiver_ty: self.to_diag_ty(base_ty),
+                                        receiver_ty: base_ty,
                                         field_name: field.clone(),
                                     },
                                 );
@@ -1558,7 +1554,7 @@ impl<'db> InferenceContext<'db> {
                         // shape after qualified-manager indexing.
                         self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedField {
                             expr: expr_id,
-                            receiver_ty: self.to_diag_ty(base_ty),
+                            receiver_ty: base_ty,
                             field_name: field.clone(),
                         });
                     }
@@ -4060,14 +4056,15 @@ mod tests {
     #[test]
     fn test_type_mismatch_diagnostic() {
         // Test that TypeMismatch diagnostic is created correctly
+        let db = InMemoryDb::new();
         let expr_id = ExprId::from_raw(la_arena::RawIdx::from_u32(0));
-        let expected_ty = Ty::Number;
-        let actual_ty = Ty::String;
+        let expected_ty = ty_to_typeid(&db, &Ty::Number);
+        let actual_ty = ty_to_typeid(&db, &Ty::String);
 
         let diag = InferenceDiagnostic::TypeMismatch {
             expr: expr_id,
-            expected: expected_ty.clone(),
-            actual: actual_ty.clone(),
+            expected: expected_ty,
+            actual: actual_ty,
         };
 
         match diag {
@@ -4085,16 +4082,20 @@ mod tests {
         // Test that UnresolvedField diagnostic carries the receiver type
         // and field name verbatim, so the ide-diagnostics layer can render
         // `<ReceiverType>.<field_name>` without re-running inference.
+        let db = InMemoryDb::new();
         let expr_id = ExprId::from_raw(la_arena::RawIdx::from_u32(0));
-        let receiver_ty = Ty::MetadataRef {
-            kind: hir_def::ty::MetadataKind::CatalogRef,
-            name: Name::new("Номенклатура"),
-        };
+        let receiver_ty = ty_to_typeid(
+            &db,
+            &Ty::MetadataRef {
+                kind: hir_def::ty::MetadataKind::CatalogRef,
+                name: Name::new("Номенклатура"),
+            },
+        );
         let field_name = Name::new("НесуществующееПоле");
 
         let diag = InferenceDiagnostic::UnresolvedField {
             expr: expr_id,
-            receiver_ty: receiver_ty.clone(),
+            receiver_ty,
             field_name: field_name.clone(),
         };
 
@@ -4244,8 +4245,8 @@ mod tests {
         body.expr_types.insert(make_expr(3), ty_to_typeid(&db, &Ty::Boolean));
         body.diagnostics.push(InferenceDiagnostic::TypeMismatch {
             expr: make_expr(4),
-            expected: Ty::String,
-            actual: Ty::Number,
+            expected: ty_to_typeid(&db, &Ty::String),
+            actual: ty_to_typeid(&db, &Ty::Number),
         });
 
         let lifted = ModuleCodeInferenceResult::from_body(body);

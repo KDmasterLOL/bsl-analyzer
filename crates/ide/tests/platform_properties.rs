@@ -46,7 +46,7 @@ fn readonly_diagnostics(db: &RootDatabaseImpl, file_id: FileId) -> Vec<(Name, Ty
         .iter()
         .filter_map(|(_, d)| match d {
             InferenceDiagnostic::ReadOnlyPropertyAssignment { receiver_ty, field_name, .. } => {
-                Some((field_name.clone(), receiver_ty.clone()))
+                Some((field_name.clone(), hir::ty_bridge::typeid_to_ty(db, *receiver_ty)))
             }
             _ => None,
         })

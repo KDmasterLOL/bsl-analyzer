@@ -168,7 +168,7 @@ fn infer_this_object_unknown_field_stays_unknown() {
         .iter()
         .filter_map(|(_, d)| match d {
             InferenceDiagnostic::UnresolvedField { receiver_ty, field_name, .. } => {
-                Some((receiver_ty.clone(), field_name.clone()))
+                Some((hir::ty_bridge::typeid_to_ty(&db, *receiver_ty), field_name.clone()))
             }
             _ => None,
         })

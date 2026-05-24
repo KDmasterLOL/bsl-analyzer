@@ -116,6 +116,11 @@ pub trait AnalysisProvider {
         AssignmentResolution::Unknown
     }
 
+    /// Render a kernel `TypeId` to a localized display string. Used by
+    /// inference-diagnostic handlers (§4.D.4c). Only meaningfully reached
+    /// under Salsa mode — streaming mode does not run inference.
+    fn kernel_type_display(&self, id: bsl_types::kind::TypeId, locale: base_db::Locale) -> String;
+
     // ========================================================================
     // Per-file Data
     // ========================================================================

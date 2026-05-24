@@ -163,6 +163,16 @@ impl AnalysisProvider for StreamingProvider {
         Arc::new(ModuleBodies::from_parse(&parse, module_id))
     }
 
+    fn kernel_type_display(
+        &self,
+        _id: bsl_types::kind::TypeId,
+        _locale: base_db::Locale,
+    ) -> String {
+        // Streaming mode does not run inference (see `infer`), so no
+        // TypeId-bearing inference diagnostic ever reaches this provider.
+        String::new()
+    }
+
     fn infer(&self, _file_id: FileId) -> Arc<InferenceResult> {
         // Streaming mode does not run type inference today. Returning the
         // default explicitly documents the opt-out rather than relying on
