@@ -5,12 +5,12 @@
 //! consumers go through [`super::TyLoweringContext`] so adding a new primitive
 //! means touching one file.
 
+use bsl_types::builders::Builders;
+use bsl_types::facet::{DateComponent, TableSource};
 use bsl_types::intern::TypeKernelDb;
 use bsl_types::kind::TypeId;
 use hir_def::ty::Ty;
 use hir_def::type_ref::{BuiltinTypeRef, TypeRef};
-
-use crate::ty_bridge::ty_to_typeid;
 
 /// Lower a resolved [`BuiltinTypeRef`] into its semantic [`Ty`].
 ///
@@ -35,12 +35,23 @@ pub(super) fn builtin_to_ty(b: BuiltinTypeRef) -> Ty {
 
 /// Kernel-native counterpart of [`builtin_to_ty`].
 ///
-/// Bridges through the §4.A `Ty` → `TypeId` translator. §4.D-§4.E will
-/// rewrite this to construct `TypeKind` directly when consumers stop
-/// reading the legacy `Ty` enum.
-#[allow(dead_code, reason = "Phase 3 §4.B producer — callers migrate in 4.C-4.E")]
+/// Mints the `TypeId` directly via [`Builders`] — no `Ty` intermediate. Each
+/// arm is byte-identical to `ty_to_typeid(db, &builtin_to_ty(b))` (asserted by
+/// the drift-detector test below), which is what lets §4.A.4 delete the `Ty`
+/// path without changing any interned id.
 pub(super) fn builtin_to_typeid(db: &dyn TypeKernelDb, b: BuiltinTypeRef) -> TypeId {
-    ty_to_typeid(db, &builtin_to_ty(b))
+    match b {
+        BuiltinTypeRef::Number => db.number(None, None),
+        BuiltinTypeRef::String => db.string(None, false),
+        BuiltinTypeRef::Boolean => db.boolean(),
+        BuiltinTypeRef::Date => db.date(DateComponent::DateTime),
+        BuiltinTypeRef::Undefined => db.undefined(),
+        BuiltinTypeRef::Null => db.null(),
+        BuiltinTypeRef::Structure => db.structure(None),
+        BuiltinTypeRef::ValueTable => db.value_table(None, TableSource::Unknown),
+        BuiltinTypeRef::ValueList => db.value_list(None),
+        BuiltinTypeRef::Type => db.type_descriptor(),
+    }
 }
 
 /// Map a bare type-name token to its canonical [`Ty`], or `Ty::Unknown` for
@@ -67,25 +78,53 @@ pub fn ty_from_bare_name(name: &str) -> Ty {
 }
 
 /// Kernel-native counterpart of [`ty_from_bare_name`].
+///
+/// Mints the `TypeId` directly via [`Builders`], mirroring `ty_from_bare_name`
+/// arm-for-arm (Array → `db.array(None)`, Map → `db.map(None, None)`, Builtin →
+/// [`builtin_to_typeid`], otherwise → `db.unknown()`).
 pub fn bare_name_to_typeid(db: &dyn TypeKernelDb, name: &str) -> TypeId {
-    ty_to_typeid(db, &ty_from_bare_name(name))
+    match TypeRef::from_bare_name(name) {
+        Some(TypeRef::Array(_)) => db.array(None),
+        Some(TypeRef::Map(_)) => db.map(None, None),
+        Some(TypeRef::Builtin(b)) => builtin_to_typeid(db, b),
+        Some(_) | None => db.unknown(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ty_bridge::typeid_to_ty;
+    use crate::ty_bridge::ty_to_typeid;
     use bsl_types::testing::InMemoryDb;
 
-    /// §4.B drift-detector: if the kernel-native shim ever stops mirroring
-    /// the Ty path, this fails — surfacing the divergence at §4.D-§4.E.
+    /// §4.A drift-detector: native minting must produce the *same interned id*
+    /// as bridging the legacy `Ty` path. This is the guard that lets §4.A.4
+    /// delete `builtin_to_ty` / `ty_from_bare_name` without moving any id.
     #[test]
-    fn builtin_typeid_round_trips_via_ty() {
+    fn builtin_typeid_matches_bridge() {
         let db = InMemoryDb::new();
-        for b in [BuiltinTypeRef::Number, BuiltinTypeRef::Boolean, BuiltinTypeRef::ValueTable] {
-            let via_ty = builtin_to_ty(b);
-            let via_typeid = builtin_to_typeid(&db, b);
-            assert_eq!(typeid_to_ty(&db, via_typeid), via_ty);
+        for b in [
+            BuiltinTypeRef::Number,
+            BuiltinTypeRef::String,
+            BuiltinTypeRef::Boolean,
+            BuiltinTypeRef::Date,
+            BuiltinTypeRef::Undefined,
+            BuiltinTypeRef::Null,
+            BuiltinTypeRef::Structure,
+            BuiltinTypeRef::ValueTable,
+            BuiltinTypeRef::ValueList,
+            BuiltinTypeRef::Type,
+        ] {
+            assert_eq!(builtin_to_typeid(&db, b), ty_to_typeid(&db, &builtin_to_ty(b)));
+        }
+    }
+
+    #[test]
+    fn bare_name_typeid_matches_bridge() {
+        let db = InMemoryDb::new();
+        for name in ["Число", "Строка", "Массив", "Соответствие", "ТаблицаЗначений", "Запрос", ""]
+        {
+            assert_eq!(bare_name_to_typeid(&db, name), ty_to_typeid(&db, &ty_from_bare_name(name)));
         }
     }
 }
