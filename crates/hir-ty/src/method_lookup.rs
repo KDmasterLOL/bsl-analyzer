@@ -50,8 +50,10 @@ use std::sync::Arc;
 
 use bsl_metadata::MdoType;
 use bsl_platform::{PlatformData, PlatformMethod};
+use bsl_types::builders::Builders;
+use bsl_types::facet::{ProjectionSource, TableSource};
 use bsl_types::intern::TypeKernelDb;
-use bsl_types::kind::TypeId;
+use bsl_types::kind::{Projection, TypeId, TypeKind};
 use hir_def::body::Body;
 use hir_def::hir::Expr;
 use hir_def::ty::{MetadataKind, SdblProjection, Ty};
@@ -510,6 +512,7 @@ pub(crate) fn receiver_needs_refinement(ty: &Ty) -> bool {
 /// returns `Массив` which lowers to the structural [`Ty::Array`]
 /// variant, not `PlatformObject("Массив")` — so the matcher needs
 /// both shapes.
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ChainTarget {
     /// Match `Ty::PlatformObject(name)` where `name` is bilingually
     /// equal to either the Russian or English canonical spelling.
@@ -629,7 +632,11 @@ fn projection_of_query_result_receiver(ty: &Ty) -> Option<Option<Arc<SdblProject
 /// the user can write into a `Новый <Name>` lift through to the same
 /// methods will also match here.
 pub(crate) fn is_platform_name(name: &Name, ru: &str, en: &str) -> bool {
-    let lower = name.as_str().to_lowercase();
+    is_platform_name_str(name.as_str(), ru, en)
+}
+
+fn is_platform_name_str(name: &str, ru: &str, en: &str) -> bool {
+    let lower = name.to_lowercase();
     lower == ru.to_lowercase() || lower == en.to_lowercase()
 }
 
@@ -668,6 +675,196 @@ fn rewrite_chain_arm_in_return(return_ty: Ty, target: ChainTarget, replacement: 
         }
         other => other,
     }
+}
+
+#[allow(dead_code, reason = "kernel-native twin, wired in Phase 4 §4.E.3c")]
+fn is_value_table_arm_id(db: &dyn TypeKernelDb, id: TypeId) -> bool {
+    matches!(db.lookup_type(id), TypeKind::ValueTable(_))
+        || matches!(db.lookup_type(id), TypeKind::PlatformObject(f) if is_platform_name_str(&f.name, "ТаблицаЗначений", "ValueTable"))
+}
+
+#[allow(dead_code, reason = "kernel-native twin, wired in Phase 4 §4.E.3c")]
+fn is_value_tree_arm_id(db: &dyn TypeKernelDb, id: TypeId) -> bool {
+    matches!(db.lookup_type(id), TypeKind::PlatformObject(f) if is_platform_name_str(&f.name, "ДеревоЗначений", "ValueTree"))
+}
+
+#[allow(dead_code, reason = "kernel-native twin, wired in Phase 4 §4.E.3c")]
+fn is_query_result_receiver_id(db: &dyn TypeKernelDb, id: TypeId) -> bool {
+    match db.lookup_type(id) {
+        TypeKind::QueryResult(_) => true,
+        TypeKind::PlatformObject(f) => {
+            is_platform_name_str(&f.name, "РезультатЗапроса", "QueryResult")
+        }
+        _ => false,
+    }
+}
+
+#[allow(dead_code, reason = "kernel-native twin, wired in Phase 4 §4.E.3c")]
+fn receiver_needs_refinement_id(db: &dyn TypeKernelDb, id: TypeId) -> bool {
+    match db.lookup_type(id) {
+        TypeKind::PlatformObject(f) => is_platform_name_str(&f.name, "Запрос", "Query"),
+        TypeKind::Query { projections } => match projections.last() {
+            None | Some(None) => true,
+            Some(Some(_)) => false,
+        },
+        _ => false,
+    }
+}
+
+#[allow(dead_code, reason = "kernel-native twin, wired in Phase 4 §4.E.3c")]
+fn projection_of_query_receiver_id(
+    db: &dyn TypeKernelDb,
+    id: TypeId,
+) -> Option<Option<Arc<Projection>>> {
+    match db.lookup_type(id) {
+        TypeKind::Query { projections } => Some(projections.last().cloned().flatten()),
+        TypeKind::PlatformObject(f) if is_platform_name_str(&f.name, "Запрос", "Query") => {
+            Some(None)
+        }
+        _ => None,
+    }
+}
+
+#[allow(dead_code, reason = "kernel-native twin, wired in Phase 4 §4.E.3c")]
+fn projections_of_query_receiver_id(
+    db: &dyn TypeKernelDb,
+    id: TypeId,
+) -> Option<Arc<[Option<Arc<Projection>>]>> {
+    match db.lookup_type(id) {
+        TypeKind::Query { projections } => Some(projections.clone()),
+        TypeKind::PlatformObject(f) if is_platform_name_str(&f.name, "Запрос", "Query") => {
+            Some(Arc::from([]))
+        }
+        _ => None,
+    }
+}
+
+#[allow(dead_code, reason = "kernel-native twin, wired in Phase 4 §4.E.3c")]
+fn projection_of_query_result_receiver_id(
+    db: &dyn TypeKernelDb,
+    id: TypeId,
+) -> Option<Option<Arc<Projection>>> {
+    match db.lookup_type(id) {
+        TypeKind::QueryResult(facet) => Some(facet.projection.clone()),
+        TypeKind::PlatformObject(f)
+            if is_platform_name_str(&f.name, "РезультатЗапроса", "QueryResult") =>
+        {
+            Some(None)
+        }
+        _ => None,
+    }
+}
+
+#[allow(dead_code, reason = "kernel-native twin, wired in Phase 4 §4.E.3c")]
+fn pick_chain_rewrite_id(
+    db: &dyn TypeKernelDb,
+    recv_id: TypeId,
+    method_name: &str,
+) -> Option<(ChainTarget, TypeId)> {
+    let lower = method_name.to_lowercase();
+    match lower.as_str() {
+        "выполнить" | "execute" => {
+            let projection = projection_of_query_receiver_id(db, recv_id)?;
+            Some((
+                ChainTarget::PlatformObjectNamed {
+                    ru: "РезультатЗапроса", en: "QueryResult"
+                },
+                db.query_result(projection, ProjectionSource::Unknown),
+            ))
+        }
+        "выбрать" | "choose" => {
+            let projection = projection_of_query_result_receiver_id(db, recv_id)?;
+            Some((
+                ChainTarget::PlatformObjectNamed {
+                    ru: "ВыборкаИзРезультатаЗапроса",
+                    en: "QueryResultSelection",
+                },
+                db.query_result_selection(projection, ProjectionSource::Unknown),
+            ))
+        }
+        "выполнитьпакет" | "executebatch" => {
+            let projections = projections_of_query_receiver_id(db, recv_id)?;
+            Some((ChainTarget::AnyArray, db.query_batch_result(projections)))
+        }
+        _ => None,
+    }
+}
+
+#[allow(dead_code, reason = "kernel-native twin, wired in Phase 4 §4.E.3c")]
+fn rewrite_chain_arm_in_return_id(
+    db: &dyn TypeKernelDb,
+    return_id: TypeId,
+    target: ChainTarget,
+    replacement: TypeId,
+) -> TypeId {
+    let matches_target = |arm_id: TypeId| -> bool {
+        match (&target, db.lookup_type(arm_id)) {
+            (ChainTarget::PlatformObjectNamed { ru, en }, TypeKind::PlatformObject(f)) => {
+                is_platform_name_str(&f.name, ru, en)
+            }
+            (ChainTarget::AnyArray, TypeKind::Array(_)) => true,
+            _ => false,
+        }
+    };
+
+    if matches_target(return_id) {
+        return replacement;
+    }
+    match db.lookup_type(return_id) {
+        TypeKind::Union(arms) => {
+            let new_arms: Vec<TypeId> = arms
+                .iter()
+                .map(|&arm| if matches_target(arm) { replacement } else { arm })
+                .collect();
+            db.union(new_arms)
+        }
+        _ => return_id,
+    }
+}
+
+#[allow(dead_code, reason = "kernel-native twin, wired in Phase 4 §4.E.3c")]
+fn attach_projection_to_value_table_id(
+    db: &dyn TypeKernelDb,
+    id: TypeId,
+    projection: Option<Arc<Projection>>,
+) -> TypeId {
+    let Some(projection) = projection else { return id };
+    let upgrade = |arm_id: TypeId| -> Option<TypeId> {
+        match db.lookup_type(arm_id) {
+            TypeKind::ValueTable(f) if f.projection.is_none() => {
+                Some(db.value_table(Some(projection.clone()), TableSource::Unknown))
+            }
+            _ => None,
+        }
+    };
+    if let Some(upgraded) = upgrade(id) {
+        return upgraded;
+    }
+    match db.lookup_type(id) {
+        TypeKind::Union(arms) => {
+            let rebuilt: Vec<TypeId> =
+                arms.iter().map(|&arm| upgrade(arm).unwrap_or(arm)).collect();
+            db.union(rebuilt)
+        }
+        _ => id,
+    }
+}
+
+#[allow(dead_code, reason = "kernel-native twin, wired in Phase 4 §4.E.3c")]
+fn drop_union_arm_id(
+    db: &dyn TypeKernelDb,
+    id: TypeId,
+    unwanted: impl Fn(&dyn TypeKernelDb, TypeId) -> bool,
+) -> TypeId {
+    let TypeKind::Union(arms) = db.lookup_type(id) else { return id };
+    let kept: Vec<TypeId> = arms.iter().copied().filter(|&arm| !unwanted(db, arm)).collect();
+    if kept.is_empty() {
+        return id;
+    }
+    if kept.len() == 1 {
+        return kept.into_iter().next().unwrap();
+    }
+    db.union(kept)
 }
 
 /// Resolve a method on any receiver served by the bilingual scalar
@@ -1216,6 +1413,62 @@ mod tests {
         })
     }
 
+    fn query_ty(projections: Vec<Option<Arc<SdblProjection>>>) -> Ty {
+        Ty::Query { projections: Arc::from(projections) }
+    }
+
+    fn projection(db: &dyn TypeKernelDb) -> Arc<SdblProjection> {
+        Arc::new(SdblProjection {
+            fields: Arc::new([
+                (Name::new("Номер"), ty_to_typeid(db, &Ty::Number)),
+                (Name::new("Имя"), ty_to_typeid(db, &Ty::String)),
+            ]),
+            raw_sdbl_types: None,
+        })
+    }
+
+    fn kernel_projection_from_query_result(
+        db: &dyn TypeKernelDb,
+        projection: &Arc<SdblProjection>,
+    ) -> Arc<Projection> {
+        let id = ty_to_typeid(db, &Ty::QueryResult { projection: Some(projection.clone()) });
+        match db.lookup_type(id) {
+            TypeKind::QueryResult(facet) => {
+                facet.projection.clone().expect("bridged QueryResult must carry projection")
+            }
+            other => panic!("expected kernel QueryResult, got {other:?}"),
+        }
+    }
+
+    fn projection_result_id(
+        db: &dyn TypeKernelDb,
+        projection: Option<Option<Arc<Projection>>>,
+    ) -> Option<TypeId> {
+        projection.map(|projection| db.query_result(projection, ProjectionSource::Unknown))
+    }
+
+    fn projection_result_expected_id(
+        db: &dyn TypeKernelDb,
+        projection: Option<Option<Arc<SdblProjection>>>,
+    ) -> Option<TypeId> {
+        projection.map(|projection| ty_to_typeid(db, &Ty::QueryResult { projection }))
+    }
+
+    fn projection_selection_id(
+        db: &dyn TypeKernelDb,
+        projection: Option<Option<Arc<Projection>>>,
+    ) -> Option<TypeId> {
+        projection
+            .map(|projection| db.query_result_selection(projection, ProjectionSource::Unknown))
+    }
+
+    fn projection_selection_expected_id(
+        db: &dyn TypeKernelDb,
+        projection: Option<Option<Arc<SdblProjection>>>,
+    ) -> Option<TypeId> {
+        projection.map(|projection| ty_to_typeid(db, &Ty::QueryResultSelection { projection }))
+    }
+
     fn test_method(return_type: Option<&str>, param_type: Option<&str>) -> PlatformMethod {
         PlatformMethod {
             id: 0,
@@ -1233,6 +1486,257 @@ mod tests {
             min_version: None,
             context: None,
         }
+    }
+
+    #[test]
+    fn kernel_native_predicate_twins_match_ty_helpers() {
+        let db = InMemoryDb::new();
+        let projection = projection(&db);
+        let cases = vec![
+            Ty::ValueTable { projection: None },
+            Ty::ValueTable { projection: Some(projection.clone()) },
+            Ty::PlatformObject(Name::new("ТаблицаЗначений")),
+            Ty::PlatformObject(Name::new("ДеревоЗначений")),
+            Ty::QueryResult { projection: None },
+            Ty::QueryResult { projection: Some(projection.clone()) },
+            Ty::PlatformObject(Name::new("РезультатЗапроса")),
+            Ty::PlatformObject(Name::new("Запрос")),
+            Ty::Undefined,
+        ];
+
+        for ty in cases {
+            let id = ty_to_typeid(&db, &ty);
+            assert_eq!(is_value_table_arm_id(&db, id), is_value_table_arm(&ty), "{ty:?}");
+            assert_eq!(is_value_tree_arm_id(&db, id), is_value_tree_arm(&ty), "{ty:?}");
+            assert_eq!(
+                is_query_result_receiver_id(&db, id),
+                is_query_result_receiver(&ty),
+                "{ty:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn kernel_native_receiver_refinement_twin_matches_ty_helper() {
+        let db = InMemoryDb::new();
+        let projection = projection(&db);
+        let cases = vec![
+            query_ty(vec![None]),
+            query_ty(vec![Some(projection)]),
+            query_ty(Vec::new()),
+            Ty::PlatformObject(Name::new("Запрос")),
+            Ty::PlatformObject(Name::new("РезультатЗапроса")),
+            Ty::Undefined,
+        ];
+
+        for ty in cases {
+            let id = ty_to_typeid(&db, &ty);
+            assert_eq!(receiver_needs_refinement_id(&db, id), receiver_needs_refinement(&ty));
+        }
+    }
+
+    #[test]
+    fn kernel_native_projection_reader_twins_match_ty_helpers() {
+        let db = InMemoryDb::new();
+        let projection = projection(&db);
+        let query_cases = vec![
+            query_ty(vec![None]),
+            query_ty(vec![Some(projection.clone())]),
+            Ty::PlatformObject(Name::new("Запрос")),
+            Ty::Undefined,
+        ];
+
+        for ty in query_cases {
+            let id = ty_to_typeid(&db, &ty);
+            assert_eq!(
+                projection_result_id(&db, projection_of_query_receiver_id(&db, id)),
+                projection_result_expected_id(&db, projection_of_query_receiver(&ty)),
+                "{ty:?}"
+            );
+            assert_eq!(
+                projections_of_query_receiver_id(&db, id)
+                    .map(|projections| db.query_batch_result(projections)),
+                projections_of_query_receiver(&ty)
+                    .map(|per_query| ty_to_typeid(&db, &Ty::QueryBatchResult { per_query })),
+                "{ty:?}"
+            );
+        }
+
+        let result_cases = vec![
+            Ty::QueryResult { projection: None },
+            Ty::QueryResult { projection: Some(projection) },
+            Ty::PlatformObject(Name::new("РезультатЗапроса")),
+            Ty::Undefined,
+        ];
+
+        for ty in result_cases {
+            let id = ty_to_typeid(&db, &ty);
+            assert_eq!(
+                projection_selection_id(&db, projection_of_query_result_receiver_id(&db, id)),
+                projection_selection_expected_id(&db, projection_of_query_result_receiver(&ty)),
+                "{ty:?}"
+            );
+        }
+    }
+
+    fn assert_pick_chain_rewrite_twin_matches_ty(
+        db: &dyn TypeKernelDb,
+        receiver: Ty,
+        method_name: &str,
+    ) {
+        let actual = pick_chain_rewrite_id(db, ty_to_typeid(db, &receiver), method_name);
+        let expected = pick_chain_rewrite(&receiver, method_name);
+        match (actual, expected) {
+            (Some((actual_target, actual_replacement)), Some((expected_target, expected_ty))) => {
+                assert_eq!(actual_target, expected_target);
+                assert_eq!(actual_replacement, ty_to_typeid(db, &expected_ty));
+            }
+            (None, None) => {}
+            (actual, expected) => {
+                panic!("pick_chain_rewrite drift for {receiver:?}.{method_name}: {actual:?} vs {expected:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn kernel_native_pick_chain_rewrite_twin_matches_ty_helper() {
+        let db = InMemoryDb::new();
+        let projection = projection(&db);
+
+        assert_pick_chain_rewrite_twin_matches_ty(
+            &db,
+            query_ty(vec![Some(projection.clone())]),
+            "Выполнить",
+        );
+        assert_pick_chain_rewrite_twin_matches_ty(
+            &db,
+            Ty::PlatformObject(Name::new("Запрос")),
+            "execute",
+        );
+        assert_pick_chain_rewrite_twin_matches_ty(
+            &db,
+            Ty::QueryResult { projection: Some(projection.clone()) },
+            "Выбрать",
+        );
+        assert_pick_chain_rewrite_twin_matches_ty(
+            &db,
+            Ty::PlatformObject(Name::new("РезультатЗапроса")),
+            "choose",
+        );
+        assert_pick_chain_rewrite_twin_matches_ty(
+            &db,
+            query_ty(vec![None, Some(projection)]),
+            "ВыполнитьПакет",
+        );
+        assert_pick_chain_rewrite_twin_matches_ty(
+            &db,
+            Ty::PlatformObject(Name::new("Запрос")),
+            "executebatch",
+        );
+        assert_pick_chain_rewrite_twin_matches_ty(
+            &db,
+            Ty::PlatformObject(Name::new("Запрос")),
+            "Колонки",
+        );
+    }
+
+    fn assert_rewrite_chain_arm_twin_matches_ty(
+        db: &dyn TypeKernelDb,
+        return_ty: Ty,
+        target: ChainTarget,
+        replacement: Ty,
+    ) {
+        let actual = rewrite_chain_arm_in_return_id(
+            db,
+            ty_to_typeid(db, &return_ty),
+            target.clone(),
+            ty_to_typeid(db, &replacement),
+        );
+        let expected = rewrite_chain_arm_in_return(return_ty, target, &replacement);
+        assert_eq!(actual, ty_to_typeid(db, &expected));
+    }
+
+    #[test]
+    fn kernel_native_rewrite_chain_arm_twin_matches_ty_helper() {
+        let db = InMemoryDb::new();
+        assert_rewrite_chain_arm_twin_matches_ty(
+            &db,
+            Ty::union(vec![Ty::PlatformObject(Name::new("РезультатЗапроса")), Ty::Undefined]),
+            ChainTarget::PlatformObjectNamed {
+                ru: "РезультатЗапроса", en: "QueryResult"
+            },
+            Ty::QueryResult { projection: None },
+        );
+        assert_rewrite_chain_arm_twin_matches_ty(
+            &db,
+            Ty::Array,
+            ChainTarget::AnyArray,
+            Ty::QueryBatchResult { per_query: Arc::from([]) },
+        );
+        assert_rewrite_chain_arm_twin_matches_ty(
+            &db,
+            Ty::TypedArray(Box::new(Ty::String)),
+            ChainTarget::AnyArray,
+            Ty::QueryBatchResult { per_query: Arc::from([]) },
+        );
+    }
+
+    #[test]
+    fn kernel_native_attach_projection_to_value_table_twin_matches_ty_helper() {
+        let db = InMemoryDb::new();
+        let projection = projection(&db);
+        let kernel_projection = kernel_projection_from_query_result(&db, &projection);
+        let cases = vec![
+            Ty::ValueTable { projection: None },
+            Ty::union(vec![
+                Ty::ValueTable { projection: None },
+                Ty::PlatformObject(Name::new("ДеревоЗначений")),
+            ]),
+            Ty::Union(Arc::from([
+                Ty::ValueTable { projection: None },
+                Ty::ValueTable { projection: None },
+            ])),
+        ];
+
+        for ty in cases {
+            let actual = attach_projection_to_value_table_id(
+                &db,
+                ty_to_typeid(&db, &ty),
+                Some(kernel_projection.clone()),
+            );
+            let expected = attach_projection_to_value_table(ty, Some(projection.clone()));
+            assert_eq!(actual, ty_to_typeid(&db, &expected));
+        }
+
+        let no_projection_input = Ty::ValueTable { projection: None };
+        assert_eq!(
+            attach_projection_to_value_table_id(&db, ty_to_typeid(&db, &no_projection_input), None),
+            ty_to_typeid(&db, &attach_projection_to_value_table(no_projection_input, None))
+        );
+    }
+
+    #[test]
+    fn kernel_native_drop_union_arm_twin_matches_ty_helper() {
+        let db = InMemoryDb::new();
+        let input = Ty::union(vec![
+            Ty::ValueTable { projection: None },
+            Ty::PlatformObject(Name::new("ДеревоЗначений")),
+        ]);
+
+        assert_eq!(
+            drop_union_arm_id(&db, ty_to_typeid(&db, &input), is_value_tree_arm_id),
+            ty_to_typeid(&db, &drop_union_arm(input.clone(), is_value_tree_arm))
+        );
+        assert_eq!(
+            drop_union_arm_id(&db, ty_to_typeid(&db, &input), is_value_table_arm_id),
+            ty_to_typeid(&db, &drop_union_arm(input.clone(), is_value_table_arm))
+        );
+
+        let non_union = Ty::ValueTable { projection: None };
+        assert_eq!(
+            drop_union_arm_id(&db, ty_to_typeid(&db, &non_union), is_value_tree_arm_id),
+            ty_to_typeid(&db, &drop_union_arm(non_union, is_value_tree_arm))
+        );
     }
 
     #[test]
