@@ -30,7 +30,7 @@ use bsl_types::kind::{TypeId, TypeKind};
 use hir_def::configs::ConfigsDatabase;
 use hir_def::ty::{MetadataKind, Ty};
 use hir_def::Name;
-use hir_ty::lower::type_string::{lower_param_type_string, lower_return_type_string};
+use hir_ty::lower::type_string::{lower_param_type_string_typeid, lower_return_type_string_typeid};
 use hir_ty::ty_bridge::{ty_to_typeid, typeid_to_ty};
 use hir_ty::{
     enumerate_fields, is_assignable, is_ref_ty, lookup_field, lookup_method, FieldInfo, FieldOrigin,
@@ -551,19 +551,16 @@ fn method_dto_from_platform(db: &dyn TypeKernelDb, method: &PlatformMethod) -> M
         .iter()
         .map(|param| MethodParam {
             name: Name::new(param.name.as_str()),
-            // Phase 3 §4.G.5c: the DTO is kernel-native; intern the lowered
-            // `Ty` at this boundary (`type_string` lowering stays internal).
-            ty: param.param_type.as_ref().map(|ty| ty_to_typeid(db, &lower_param_type_string(ty))),
+            // Phase 3 §4.A.4: the DTO is kernel-native and so is the lowering —
+            // mint the param type directly through the native type-string path.
+            ty: param.param_type.as_ref().map(|ty| lower_param_type_string_typeid(db, ty)),
             optional: param.is_optional,
         })
         .collect();
     Method {
         name: Name::new(method.name.as_str()),
         english_name: fallback_name(method.english_name.as_str(), method.name.as_str()),
-        return_ty: method
-            .return_type
-            .as_ref()
-            .map(|ret| ty_to_typeid(db, &lower_return_type_string(ret))),
+        return_ty: method.return_type.as_ref().map(|ret| lower_return_type_string_typeid(db, ret)),
         params,
     }
 }
