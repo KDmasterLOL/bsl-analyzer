@@ -179,7 +179,10 @@ pub(super) fn platform_completions<DB: RootDatabase>(
     // `Semantics::form` is the only entry point — IDE never reads
     // `module_metadata` directly (Clean Architecture, plan v3.1
     // decision #4).
-    if hir::is_form_items_collection_ty(&receiver_ty) {
+    // §4.E.5b: the predicate is kernel-native; the prefix cascade still
+    // carries a `Ty` receiver (flips in §4.E.5c-completion), so bridge at
+    // the call site for now.
+    if hir::is_form_items_collection_ty(db, hir::ty_bridge::ty_to_typeid(db, &receiver_ty)) {
         if let Some(items) =
             complete_form_elements_collection(db, position.file_id, position.locale)
         {
@@ -1469,27 +1472,26 @@ mod tests {
 
     #[test]
     fn is_form_items_collection_ty_round_trips_bilingual() {
-        // `Элементы.|` resolves to `Ty::PlatformObject("ВсеЭлементыФормы")`
+        // `Элементы.|` resolves to `PlatformObject("ВсеЭлементыФормы")`
         // by Phase 4 wiring. The completion entry-gate uses the same
         // predicate the field-resolution path uses — single source of
         // truth (`hir::is_form_items_collection_ty`). Pinning here so a
         // future rename of the platform key breaks the build instead of
         // silently disabling completion.
-        assert!(hir::is_form_items_collection_ty(&hir::Ty::PlatformObject(hir::Name::new(
-            hir::FORM_ITEMS_TYPE_RU
-        ))));
-        assert!(hir::is_form_items_collection_ty(&hir::Ty::PlatformObject(hir::Name::new(
-            hir::FORM_ITEMS_TYPE_EN
-        ))));
+        let db = ide_db::RootDatabaseImpl::new();
+        let platform_object = |n: &str| {
+            hir::ty_bridge::ty_to_typeid(&db, &hir::Ty::PlatformObject(hir::Name::new(n)))
+        };
+        assert!(hir::is_form_items_collection_ty(&db, platform_object(hir::FORM_ITEMS_TYPE_RU)));
+        assert!(hir::is_form_items_collection_ty(&db, platform_object(hir::FORM_ITEMS_TYPE_EN)));
         // Cyrillic case-insensitive — confirms predicate is bilingual
         // AND case-folded for Cyrillic (not just ASCII).
-        assert!(hir::is_form_items_collection_ty(&hir::Ty::PlatformObject(hir::Name::new(
-            "всеЭлементыФормы"
-        ))));
+        assert!(hir::is_form_items_collection_ty(&db, platform_object("всеЭлементыФормы")));
         // Non-form-items receivers must NOT match.
-        assert!(!hir::is_form_items_collection_ty(&hir::Ty::PlatformObject(hir::Name::new(
-            "Запрос"
-        ))));
-        assert!(!hir::is_form_items_collection_ty(&hir::Ty::Number));
+        assert!(!hir::is_form_items_collection_ty(&db, platform_object("Запрос")));
+        assert!(!hir::is_form_items_collection_ty(
+            &db,
+            hir::ty_bridge::ty_to_typeid(&db, &hir::Ty::Number)
+        ));
     }
 }

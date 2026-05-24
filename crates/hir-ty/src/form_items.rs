@@ -56,12 +56,17 @@ pub const FORM_ITEMS_TYPE_RU: &str = "ВсеЭлементыФормы";
 pub const FORM_ITEMS_TYPE_EN: &str = "FormAllItems";
 
 /// `true` if `ty` is the form-elements collection (`Элементы` / `Items`
-/// receiver). Mirrors the receiver gate used by [`lookup_form_item_field`]
-/// so completion can offer the same suggestion list that the field-access
+/// receiver). The receiver gate used by [`lookup_form_item_field`] delegates
+/// here so completion offers the same suggestion list that the field-access
 /// pipeline resolves against — single source of truth, no IDE-side
 /// duplicate of the bilingual case-folding rule.
-pub fn is_form_items_collection_ty(ty: &Ty) -> bool {
-    let Ty::PlatformObject(name) = ty else { return false };
+pub fn is_form_items_collection_ty(db: &dyn HirDatabase, ty: TypeId) -> bool {
+    let TypeKind::PlatformObject(facet) = db.lookup_type(ty) else { return false };
+    // BSL identifiers are case-insensitive AND the platform names are
+    // Cyrillic — ASCII case folding does NOT cover Cyrillic, so
+    // `Name::eq_ignore_case` lowercases both sides via the same
+    // Unicode-aware path the rest of the resolver uses.
+    let name = Name::new(facet.name.as_str());
     name.eq_ignore_case(&Name::new(FORM_ITEMS_TYPE_RU))
         || name.eq_ignore_case(&Name::new(FORM_ITEMS_TYPE_EN))
 }
@@ -69,8 +74,9 @@ pub fn is_form_items_collection_ty(ty: &Ty) -> bool {
 /// Resolve `Элементы.<field>` against the form's XML element table.
 ///
 /// Returns `Some(FieldInfo)` only when **all** are true:
-/// 1. `base_ty` is `Ty::PlatformObject("ВсеЭлементыФормы" | "FormAllItems")`
-///    (case-insensitive, bilingual);
+/// 1. `receiver` is the form-elements collection
+///    (`PlatformObject("ВсеЭлементыФормы" | "FormAllItems")`, case-insensitive,
+///    bilingual — gated by [`is_form_items_collection_ty`]);
 /// 2. the resolver's enclosing module is a managed form
 ///    ([`this_object::is_managed_form_module`] gate — strict, ordinary forms and
 ///    forms without a loaded `Form.xml` payload return `false`);
@@ -92,20 +98,7 @@ pub(crate) fn lookup_form_item_field(
     receiver: TypeId,
     field: &Name,
 ) -> Option<FieldInfo> {
-    // BSL identifiers are case-insensitive AND the platform names are
-    // Cyrillic — ASCII case folding does NOT cover Cyrillic, so a
-    // mixed-case spelling like `вСеЭлементыФормы` would silently miss.
-    // `Name::eq_ignore_case` lowercases both sides via the same
-    // Unicode-aware path the rest of the resolver uses.
-    let is_form_items_receiver = match db.lookup_type(receiver) {
-        TypeKind::PlatformObject(facet) => {
-            let name = Name::new(facet.name.as_str());
-            name.eq_ignore_case(&Name::new(FORM_ITEMS_TYPE_RU))
-                || name.eq_ignore_case(&Name::new(FORM_ITEMS_TYPE_EN))
-        }
-        _ => false,
-    };
-    if !is_form_items_receiver {
+    if !is_form_items_collection_ty(db, receiver) {
         return None;
     }
     if !crate::this_object::is_managed_form_module(db, resolver) {
