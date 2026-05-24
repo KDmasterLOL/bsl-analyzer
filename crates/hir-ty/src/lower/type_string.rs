@@ -24,13 +24,13 @@
 //! every typed sink.
 
 use bsl_platform::{split_type_alternatives, PlatformData};
+use bsl_types::builders::Builders;
 use bsl_types::intern::TypeKernelDb;
 use bsl_types::kind::TypeId;
 use hir_def::ty::Ty;
 use hir_def::Name;
 
-use super::builtin_names::ty_from_bare_name;
-use crate::ty_bridge::ty_to_typeid;
+use super::builtin_names::{bare_name_to_typeid, ty_from_bare_name};
 
 /// Lower a raw HBK parameter-type string to a [`Ty`].
 ///
@@ -139,44 +139,100 @@ pub fn is_arbitrary_type_name(name: &str) -> bool {
     trimmed.eq_ignore_ascii_case("Arbitrary") || trimmed.to_lowercase() == "произвольный"
 }
 
-// ── §4.B kernel-native counterparts ──────────────────────────
+// ── §4.A kernel-native counterparts ──────────────────────────
 //
-// Shim through the §4.A `Ty` → `TypeId` bridge. §4.D-§4.E will
-// rewrite these to construct `TypeKind` unions directly once
-// consumers stop reading the legacy `Ty` enum.
+// Mint `TypeId` unions directly via [`Builders`], mirroring the `Ty`
+// entry points arm-for-arm. Byte-identical to bridging the `Ty` path
+// (asserted by the drift-detector tests), which lets §4.A.4 delete the
+// `Ty` variants without moving any interned id.
 
 /// Kernel-native counterpart of [`lower_param_type_string`].
-#[allow(dead_code, reason = "Phase 3 §4.B producer — callers migrate in 4.C-4.E")]
 pub fn lower_param_type_string_typeid(db: &dyn TypeKernelDb, raw: &str) -> TypeId {
-    ty_to_typeid(db, &lower_param_type_string(raw))
+    let segments = split_type_alternatives(raw);
+    if segments.is_empty() {
+        return db.unknown();
+    }
+    if segments.iter().any(|s| is_arbitrary_type_name(s)) {
+        return db.unknown();
+    }
+    if segments.len() == 1 {
+        return bare_name_to_typeid(db, segments[0]);
+    }
+    if segments.iter().all(|s| segment_is_valid_type(s)) {
+        db.union(segments.iter().map(|s| lower_platform_type_name_typeid(db, s)).collect())
+    } else {
+        db.unknown()
+    }
 }
 
 /// Kernel-native counterpart of [`lower_return_type_string`].
-#[allow(dead_code, reason = "Phase 3 §4.B producer — callers migrate in 4.C-4.E")]
 pub fn lower_return_type_string_typeid(db: &dyn TypeKernelDb, raw: &str) -> TypeId {
-    ty_to_typeid(db, &lower_return_type_string(raw))
+    let segments = split_type_alternatives(raw);
+    if segments.is_empty() {
+        return db.unknown();
+    }
+    if segments.iter().any(|s| is_arbitrary_type_name(s)) {
+        return db.unknown();
+    }
+    if segments.iter().all(|s| segment_is_valid_type(s)) {
+        db.union(segments.iter().map(|s| lower_platform_type_name_typeid(db, s)).collect())
+    } else {
+        lower_platform_type_name_typeid(db, raw)
+    }
 }
 
 /// Kernel-native counterpart of [`lower_platform_type_name`].
-#[allow(dead_code, reason = "Phase 3 §4.B producer — callers migrate in 4.C-4.E")]
 pub fn lower_platform_type_name_typeid(db: &dyn TypeKernelDb, name: &str) -> TypeId {
-    ty_to_typeid(db, &lower_platform_type_name(name))
+    if is_arbitrary_type_name(name) {
+        return db.unknown();
+    }
+    let id = bare_name_to_typeid(db, name);
+    if id == db.unknown() {
+        db.platform_object(name.to_string())
+    } else {
+        id
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ty_bridge::typeid_to_ty;
+    use crate::ty_bridge::ty_to_typeid;
     use bsl_types::testing::InMemoryDb;
 
-    /// §4.B drift-detector: kernel-native shim mirrors the Ty path.
+    /// §4.A drift-detector: native minting must produce the *same interned id*
+    /// as bridging the legacy `Ty` path, across every branch (empty, arbitrary,
+    /// single primitive, single unknown, all-valid union, prose-with-commas
+    /// fallback). Guards §4.A.4 deletion of the `Ty` entry points.
     #[test]
-    fn type_string_typeid_round_trips_via_ty() {
+    fn type_string_typeid_matches_bridge() {
         let db = InMemoryDb::new();
-        let raw = "Число, Строка";
-        let via_ty = lower_param_type_string(raw);
-        let via_typeid = lower_param_type_string_typeid(&db, raw);
-        assert_eq!(typeid_to_ty(&db, via_typeid), via_ty);
+        for raw in [
+            "",
+            "Произвольный",
+            "Число",
+            "Строка табличной части",
+            "Число, Строка",
+            "Число; Строка",
+            "Ссылка на объект, либо",
+            "Запрос",
+        ] {
+            assert_eq!(
+                lower_param_type_string_typeid(&db, raw),
+                ty_to_typeid(&db, &lower_param_type_string(raw)),
+                "param mismatch for {raw:?}"
+            );
+            assert_eq!(
+                lower_return_type_string_typeid(&db, raw),
+                ty_to_typeid(&db, &lower_return_type_string(raw)),
+                "return mismatch for {raw:?}"
+            );
+            assert_eq!(
+                lower_platform_type_name_typeid(&db, raw),
+                ty_to_typeid(&db, &lower_platform_type_name(raw)),
+                "platform-name mismatch for {raw:?}"
+            );
+        }
     }
 
     #[test]
