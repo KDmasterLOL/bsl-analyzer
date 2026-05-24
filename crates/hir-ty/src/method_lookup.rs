@@ -882,7 +882,11 @@ pub(crate) fn platform_type_key(ty: &Ty) -> Option<&str> {
     }
 }
 
-pub(crate) fn platform_type_key_id(db: &dyn TypeKernelDb, id: TypeId) -> Option<String> {
+/// Scalar platform-type key for `id` (`"Array"`, `"Запрос"`, …), or
+/// `None` for receivers dispatched through composite manager/MDO prefixes
+/// rather than the scalar platform table. Public so the `hir` type facade
+/// can route method/property lookup through the same key (§4.E.5).
+pub fn platform_type_key_id(db: &dyn TypeKernelDb, id: TypeId) -> Option<String> {
     match db.lookup_type(id) {
         TypeKind::Array(_) => Some("Array".to_string()),
         TypeKind::Structure(_) => Some("Structure".to_string()),

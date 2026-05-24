@@ -212,6 +212,23 @@ pub trait Builders: TypeKernelDb {
         self.intern_type(TypeKind::ObjectManager(ManagerFacet { mdo, name, config_id }))
     }
 
+    /// `ObjectManager` from an already-resolved [`ConfigId`].
+    ///
+    /// Mirrors [`Builders::object_manager`] but takes the `config_id`
+    /// directly instead of consulting a [`ConfigCtx`] oracle — for
+    /// callers that derive the manager from a receiver whose config
+    /// identity is already known (e.g. the `manager()` facade promoting
+    /// a `MetadataRef`'s `config_id`), so the manager stays bound to the
+    /// same config rather than collapsing to [`ConfigId::Root`].
+    fn object_manager_with_config(
+        &self,
+        mdo: bsl_metadata::MdoType,
+        name: Name,
+        config_id: ConfigId,
+    ) -> TypeId {
+        self.intern_type(TypeKind::ObjectManager(ManagerFacet { mdo, name, config_id }))
+    }
+
     // ── Metadata inner shapes ─────────────────────────────────
 
     /// Tabular section of an MDO. `parent` identifies the owner MDO
