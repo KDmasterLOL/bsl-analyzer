@@ -35,6 +35,9 @@ use hir_def::hir::Expr;
 use hir_def::{DefWithBodyId, ExprId, IdConversion, ModuleId};
 use vfs::FileId;
 
+use bsl_types::builders::Builders;
+use bsl_types::kind::TypeId;
+
 use crate::db::HirDatabase;
 use crate::infer::{InferenceDiagnostic, ParamsShape};
 use crate::narrow::{narrowed_type_at, NarrowState};
@@ -182,13 +185,14 @@ pub fn arg_diagnostics_query(
         let narrow = cached_narrow.as_deref();
 
         let narrow_arg_start = Instant::now();
-        let arg_types: Vec<Ty> = binding
+        let arg_types: Vec<TypeId> = binding
             .args
             .iter()
             .map(|arg_id| {
-                // Phase 3 §4.D: accessor now bridges the stored `TypeId`
-                // back to `Ty`; takes `db` and returns an owned value.
-                let base = infer.type_of_expr_in(db, binding.owner, *arg_id).unwrap_or(Ty::Unknown);
+                // Phase 3 §4.G.4: stay in kernel `TypeId` space — read the
+                // interned per-expr type directly and narrow it without a
+                // round-trip through `Ty`.
+                let base = infer.type_id_of_expr_in(binding.owner, *arg_id).unwrap_or(db.unknown());
                 narrow_arg(db, narrow, body, *arg_id, base)
             })
             .collect();
@@ -378,21 +382,15 @@ fn narrow_arg(
     narrow: Option<&dataflow::DataflowResult<NarrowState>>,
     body: &Body,
     expr_id: ExprId,
-    base: Ty,
-) -> Ty {
+    base: TypeId,
+) -> TypeId {
     let Some(result) = narrow else {
         return base;
     };
     let Expr::Path(name) = body.expr(expr_id) else {
         return base;
     };
-    // Phase 3 §4.G.3: `narrowed_type_at` now returns a kernel `TypeId`
-    // (and `None` when the overlay carries no narrowing). Bridge back to
-    // `Ty` here; the full TypeId flip of `arg_types` lands in §4.G.4.
-    match narrowed_type_at(db, result, expr_id.to_idx(), name) {
-        Some(id) => crate::ty_bridge::typeid_to_ty(db, id),
-        None => base,
-    }
+    narrowed_type_at(db, result, expr_id.to_idx(), name).unwrap_or(base)
 }
 
 /// Resolve the [`Body`] for a recorded binding's owner.
@@ -418,23 +416,24 @@ fn resolve_body(module_bodies: &hir_def::ModuleBodies, owner: DefWithBodyId) -> 
 fn emit_single(
     db: &dyn HirDatabase,
     args: &[ExprId],
-    arg_types: &[Ty],
+    arg_types: &[TypeId],
     params: &[Ty],
     out: &mut Vec<(DefWithBodyId, InferenceDiagnostic)>,
     owner: DefWithBodyId,
 ) {
-    for ((arg_id, arg_ty), param_ty) in args.iter().zip(arg_types.iter()).zip(params.iter()) {
-        // Phase 3 §4.E: `is_coercible_to` is kernel-native; bridge the
-        // `Ty` arg / param to interned ids at the call boundary.
-        let arg_id_ty = crate::ty_bridge::ty_to_typeid(db, arg_ty);
+    for ((arg_id, &arg_ty), param_ty) in args.iter().zip(arg_types.iter()).zip(params.iter()) {
+        // Phase 3 §4.G.4: `arg_ty` is already a kernel `TypeId`; only the
+        // `Ty`-typed param needs interning. The `TypeMismatch` diagnostic
+        // still carries `Ty`, so bridge `actual` back out (flips in a
+        // later slice that touches `InferenceDiagnostic`).
         let param_id_ty = crate::ty_bridge::ty_to_typeid(db, param_ty);
-        if !crate::subtype::is_coercible_to(db, arg_id_ty, param_id_ty) {
+        if !crate::subtype::is_coercible_to(db, arg_ty, param_id_ty) {
             out.push((
                 owner,
                 InferenceDiagnostic::TypeMismatch {
                     expr: *arg_id,
                     expected: param_ty.clone(),
-                    actual: arg_ty.clone(),
+                    actual: crate::ty_bridge::typeid_to_ty(db, arg_ty),
                 },
             ));
         }
@@ -456,7 +455,7 @@ fn emit_single(
 fn emit_overloaded(
     db: &dyn HirDatabase,
     args: &[ExprId],
-    arg_types: &[Ty],
+    arg_types: &[TypeId],
     flat: &[Ty],
     overloads: &[Arc<[Ty]>],
     out: &mut Vec<(DefWithBodyId, InferenceDiagnostic)>,
@@ -471,14 +470,10 @@ fn emit_overloaded(
         if args.len() > params.len() {
             return false;
         }
-        // Phase 3 §4.E: bridge each pair to interned ids before the
-        // kernel-native coercion check.
-        arg_types.iter().zip(params.iter()).all(|(a, p)| {
-            crate::subtype::is_coercible_to(
-                db,
-                crate::ty_bridge::ty_to_typeid(db, a),
-                crate::ty_bridge::ty_to_typeid(db, p),
-            )
+        // Phase 3 §4.G.4: `arg_types` are kernel ids; only the `Ty`-typed
+        // overload params need interning before the coercion check.
+        arg_types.iter().zip(params.iter()).all(|(&a, p)| {
+            crate::subtype::is_coercible_to(db, a, crate::ty_bridge::ty_to_typeid(db, p))
         })
     });
     if any_accepts {
