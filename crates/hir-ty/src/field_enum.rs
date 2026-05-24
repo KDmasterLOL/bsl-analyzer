@@ -130,7 +130,17 @@ pub(crate) fn enumerate_fields_inner(
     }
     let shape = match db.lookup_type(ty) {
         TypeKind::Union(arms) => Shape::Union(arms.to_vec()),
+        // `MetadataObject` enumerates the same attribute / tabular-section
+        // surface as its `MetadataRef` companion (an object exposes the
+        // MDO's fields). The legacy `Ty` bridge collapsed `MetadataObject`
+        // into `Ty::MetadataRef` before reaching here, so handling both
+        // arms identically preserves that behavior.
         TypeKind::MetadataRef(facet) => Shape::MetadataRef {
+            kind: facet.kind,
+            name: Name::new(facet.name.as_str()),
+            config_id: facet.config_id.clone(),
+        },
+        TypeKind::MetadataObject(facet) => Shape::MetadataRef {
             kind: facet.kind,
             name: Name::new(facet.name.as_str()),
             config_id: facet.config_id.clone(),

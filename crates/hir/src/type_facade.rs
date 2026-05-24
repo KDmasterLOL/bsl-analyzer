@@ -886,6 +886,28 @@ mod tests {
     }
 
     #[test]
+    fn fields_on_metadata_object_receiver_surface_attributes() {
+        // Regression pin (§4.E.5c-completion): a native kernel
+        // `MetadataObject` receiver must enumerate the same MDO fields as
+        // its `MetadataRef` companion. Completion routes such receivers
+        // through `HirType::from_id(...).fields()`; before the
+        // `enumerate_fields_inner` MetadataObject arm they came back empty.
+        use bsl_types::testing::RootConfigCtx;
+        let (db, file_id) = db_with_configuration(designer_fixture_path());
+        let id = db.metadata_object(
+            MetadataKind::CatalogObject,
+            "Справочник1".to_string(),
+            &RootConfigCtx,
+        );
+        let fields = Type::from_id(&db, file_id, id).fields();
+        assert!(
+            fields.iter().any(|f| f.name == Name::new("Реквизит2")),
+            "MetadataObject receiver must surface MDO custom attributes; got {:?}",
+            fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
     fn fields_include_tabular_sections_from_configuration() {
         let (db, file_id) = db_with_configuration(designer_fixture_path());
         let cat = Type::new(
