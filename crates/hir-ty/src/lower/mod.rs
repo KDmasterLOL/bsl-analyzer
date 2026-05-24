@@ -33,6 +33,10 @@ pub mod type_string;
 use std::collections::HashSet;
 
 use bsl_metadata::{resolve_defined_type_terminal, MdoType, MetadataResolver};
+use bsl_types::builders::Builders;
+use bsl_types::intern::TypeKernelDb;
+use bsl_types::kind::TypeId;
+use bsl_types::testing::RootConfigCtx;
 use hir_def::path::QualifiedName;
 use hir_def::ty::{MetadataKind, Ty};
 use hir_def::type_ref::TypeRef;
@@ -242,6 +246,126 @@ impl<'a> TyLoweringContext<'a> {
         match metadata_kind_from_prefix(prefix) {
             Some(kind) => Ty::MetadataRef { kind, name: qname.last().clone() },
             None => Ty::Unknown,
+        }
+    }
+
+    // ── §4.A kernel-native recursion ─────────────────────────────
+    //
+    // Mirror of the `Ty`-returning entry points above, minting `TypeId`
+    // directly through the kernel [`Builders`] instead of building a `Ty`
+    // and bridging. `db` is the interning sink, passed per-call — the
+    // context itself stays a db-free resolver holder. Each arm is
+    // byte-identical to `ty_to_typeid(db, &<Ty path>)` (asserted by the
+    // drift-detector tests), which lets §4.A.4 delete the `Ty` path.
+
+    /// Kernel-native counterpart of [`Self::lower_type_ref`].
+    pub fn lower_type_ref_id(&self, db: &dyn TypeKernelDb, type_ref: &TypeRef) -> TypeId {
+        let mut visited = HashSet::new();
+        self.lower_type_ref_id_inner(db, type_ref, &mut visited)
+    }
+
+    fn lower_type_ref_id_inner(
+        &self,
+        db: &dyn TypeKernelDb,
+        type_ref: &TypeRef,
+        visited: &mut HashSet<String>,
+    ) -> TypeId {
+        match type_ref {
+            TypeRef::Builtin(b) => builtin_names::builtin_to_typeid(db, *b),
+            TypeRef::Array(Some(elem)) => {
+                db.array(Some(self.lower_type_ref_id_inner(db, elem, visited)))
+            }
+            TypeRef::Array(None) => db.array(None),
+            TypeRef::Map(_) => db.map(None, None),
+            TypeRef::Name(qname) => match qname.len() {
+                0 => db.unknown(),
+                1 => self.lower_bare_name_id(db, qname.first()),
+                _ => self.lower_qualified_id_inner(db, qname, visited),
+            },
+            TypeRef::Union(parts) => {
+                let lowered: Vec<TypeId> =
+                    parts.iter().map(|t| self.lower_type_ref_id_inner(db, t, visited)).collect();
+                db.union(lowered)
+            }
+            TypeRef::AnyRef | TypeRef::Unknown => db.unknown(),
+        }
+    }
+
+    /// Kernel-native counterpart of [`Self::lower_bare_name`].
+    pub fn lower_bare_name_id(&self, db: &dyn TypeKernelDb, name: &Name) -> TypeId {
+        let raw = name.as_str();
+
+        if let Some(tref) = TypeRef::from_bare_name(raw) {
+            return self.lower_type_ref_id(db, &tref);
+        }
+
+        // MDO plural (`Документы` → manager collection). Gated on
+        // `manager_type_prefix` exactly like `Ty::manager_collection`.
+        if let Some(mdo) = MdoType::from_plural(raw) {
+            if mdo.manager_type_prefix().is_some() {
+                return db.manager_collection(mdo);
+            }
+        }
+
+        // Bare metadata-reference prefix without an object name stays
+        // `Unknown` — mirrors the `Ty::Unknown` guard.
+        if metadata_kind_from_prefix(raw).is_some() {
+            return db.unknown();
+        }
+
+        db.platform_object(raw.to_string())
+    }
+
+    /// Kernel-native counterpart of [`Self::lower_qualified`].
+    pub fn lower_qualified_id(&self, db: &dyn TypeKernelDb, qname: &QualifiedName) -> TypeId {
+        let mut visited = HashSet::new();
+        self.lower_qualified_id_inner(db, qname, &mut visited)
+    }
+
+    fn lower_qualified_id_inner(
+        &self,
+        db: &dyn TypeKernelDb,
+        qname: &QualifiedName,
+        visited: &mut HashSet<String>,
+    ) -> TypeId {
+        if qname.len() != 2 {
+            return db.unknown();
+        }
+
+        let prefix = qname.first().as_str();
+
+        if is_defined_type_prefix(prefix) {
+            let Some(resolver) = self.resolver else {
+                return db.unknown();
+            };
+            let name = qname.last().as_str();
+            let key = name.to_lowercase();
+
+            if !visited.insert(key.clone()) {
+                return db.unknown();
+            }
+
+            let mut chain_visited = HashSet::new();
+            let result = resolve_defined_type_terminal(resolver, name, &mut chain_visited)
+                .map(|underlying| {
+                    let tref = TypeRef::from_attribute_type(underlying);
+                    self.lower_type_ref_id_inner(db, &tref, visited)
+                })
+                .unwrap_or_else(|| db.unknown());
+
+            visited.remove(&key);
+            return result;
+        }
+
+        // Every MetadataKind prefix mints a plain `MetadataRef` via
+        // `db.metadata_ref(.., &RootConfigCtx)` — the SAME builder + config
+        // fallback the bridge uses (ty_bridge.rs), so the interned id matches
+        // `ty_to_typeid(Ty::MetadataRef { kind, name })` exactly. Never
+        // `metadata_object` / `register_*` here — those are richer kinds the
+        // `Ty` path does not produce from a qualified name.
+        match metadata_kind_from_prefix(prefix) {
+            Some(kind) => db.metadata_ref(kind, qname.last().as_str().to_string(), &RootConfigCtx),
+            None => db.unknown(),
         }
     }
 }
@@ -868,5 +992,106 @@ mod tests {
         let lowering = TyLoweringContext::with_resolver(&resolver);
         let qname = QualifiedName::from_segments([Name::new("DefinedType"), Name::new("X")]);
         assert_eq!(lowering.lower_qualified(&qname), Ty::Boolean);
+    }
+
+    // ── §4.A.3 native-recursion drift-detector ───────────────────
+    //
+    // The native `lower_*_id` recursion must mint the SAME interned id as
+    // bridging the `Ty` path. TypeId equality across the representative
+    // TypeRef set is the guard that lets §4.A.4 delete the `Ty` path
+    // without moving any id.
+
+    #[test]
+    fn lower_type_ref_id_matches_bridge_resolver_free() {
+        use crate::ty_bridge::ty_to_typeid;
+        use bsl_types::testing::InMemoryDb;
+
+        let db = InMemoryDb::new();
+        let lowering = ctx();
+
+        let name = |s: &str| TypeRef::Name(QualifiedName::from_segments([Name::new(s)]));
+        let qual = |a: &str, b: &str| {
+            TypeRef::Name(QualifiedName::from_segments([Name::new(a), Name::new(b)]))
+        };
+
+        let cases = vec![
+            TypeRef::Builtin(BuiltinTypeRef::Number),
+            TypeRef::Builtin(BuiltinTypeRef::ValueTable),
+            TypeRef::Array(Some(Box::new(TypeRef::Builtin(BuiltinTypeRef::String)))),
+            TypeRef::Array(None),
+            TypeRef::Map(Some((
+                Box::new(TypeRef::Builtin(BuiltinTypeRef::String)),
+                Box::new(TypeRef::Builtin(BuiltinTypeRef::Number)),
+            ))),
+            TypeRef::AnyRef,
+            TypeRef::Unknown,
+            // bare names: builtin, MDO plural, RefPrefix-without-name guard,
+            // platform-object fallback.
+            name("Число"),
+            name("Документы"),
+            name("СправочникСсылка"),
+            name("Запрос"),
+            // qualified: MetadataRef prefix, non-metadata prefix, DefinedType
+            // (no resolver → Unknown), 3-segment overflow.
+            qual("СправочникСсылка", "Товары"),
+            qual("ОбщийМодуль", "Х"),
+            qual("ОпределяемыйТип", "ДенежнаяСумма"),
+            TypeRef::Name(QualifiedName::from_segments([
+                Name::new("Документы"),
+                Name::new("ПКО"),
+                Name::new("Создать"),
+            ])),
+            // unions: concrete arms, arm with Unknown, all-Unknown, dup arms.
+            TypeRef::Union(vec![
+                TypeRef::Builtin(BuiltinTypeRef::Number),
+                TypeRef::Builtin(BuiltinTypeRef::String),
+            ]),
+            TypeRef::Union(vec![TypeRef::Builtin(BuiltinTypeRef::Number), TypeRef::Unknown]),
+            TypeRef::Union(vec![TypeRef::Unknown, TypeRef::AnyRef]),
+            TypeRef::Union(vec![
+                TypeRef::Builtin(BuiltinTypeRef::Boolean),
+                TypeRef::Builtin(BuiltinTypeRef::Boolean),
+            ]),
+        ];
+
+        for tr in &cases {
+            assert_eq!(
+                lowering.lower_type_ref_id(&db, tr),
+                ty_to_typeid(&db, &lowering.lower_type_ref(tr)),
+                "drift for {tr:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn lower_qualified_id_matches_bridge_with_resolver() {
+        use crate::ty_bridge::ty_to_typeid;
+        use bsl_types::testing::InMemoryDb;
+
+        let db = InMemoryDb::new();
+        let resolver = MockResolver::with(&[
+            ("ДенежнаяСумма", AttributeType::Number { precision: 15, scale: 2 }),
+            ("A", AttributeType::DefinedType { name: "B".to_string() }),
+            ("B", AttributeType::String { length: Some(64) }),
+            (
+                "ЛюбоеЧислоИлиСтрока",
+                AttributeType::Composite {
+                    types: vec![
+                        AttributeType::Number { precision: 10, scale: 0 },
+                        AttributeType::String { length: None },
+                    ],
+                },
+            ),
+        ]);
+        let lowering = TyLoweringContext::with_resolver(&resolver);
+
+        for nm in ["ДенежнаяСумма", "A", "ЛюбоеЧислоИлиСтрока"] {
+            let qname = QualifiedName::from_segments([Name::new("ОпределяемыйТип"), Name::new(nm)]);
+            assert_eq!(
+                lowering.lower_qualified_id(&db, &qname),
+                ty_to_typeid(&db, &lowering.lower_qualified(&qname)),
+                "drift for DefinedType.{nm}"
+            );
+        }
     }
 }
