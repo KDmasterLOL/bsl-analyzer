@@ -26,7 +26,7 @@ use hir_def::Name;
 
 use crate::lower::metadata_resolver::ConfigsResolver;
 use crate::lower::TyLoweringContext;
-use crate::ty_bridge::ty_to_typeid;
+use crate::ty_bridge::{ty_to_typeid, typeid_to_ty};
 
 /// Where a field came from.
 ///
@@ -280,7 +280,7 @@ fn push_platform_prefix_properties(
             // honour that absence, not paper over it from HBK.
             continue;
         }
-        let res = crate::platform_property_lookup::to_resolution(prop);
+        let res = crate::platform_property_lookup::to_resolution(db, prop);
         // HBK declares self-typed properties (`ЭтотОбъект` →
         // `ДокументОбъект`, `Ссылка` → `ДокументСсылка`, …) with the
         // base platform-type name, not the composite `<Prefix>.<MDO>`
@@ -289,9 +289,12 @@ fn push_platform_prefix_properties(
         // `Док.ЭтотОбъект.Записать()` would not see `Записать` because
         // the receiver type lost its MDO anchor. Specialize the
         // self-base name back to a concrete `MetadataRef` pinned to
-        // this receiver's `mdo_name` so the chain stays typed.
-        let specialized = specialize_self_ref_ty(mdo_type, mdo_name, &res.return_ty);
-        let ty = ty_override(prop.name.as_str()).or(specialized).unwrap_or(res.return_ty);
+        // this receiver's `mdo_name` so the chain stays typed. Bridge
+        // the kernel `return_ty` to `Ty` for the still-`Ty`-native
+        // `specialize_self_ref_ty` (flips at §4.E.4d).
+        let return_ty = typeid_to_ty(db, res.return_ty);
+        let specialized = specialize_self_ref_ty(mdo_type, mdo_name, &return_ty);
+        let ty = ty_override(prop.name.as_str()).or(specialized).unwrap_or(return_ty);
         let info = FieldInfo {
             name: Name::new(prop.name.as_str()),
             // english_name shape: `<Type>.<Name>.<Property>` (composite).
@@ -844,13 +847,14 @@ fn enumerate_tabular_row_fields(
     });
     if !already_defined {
         if let Some(prop) = crate::platform_property_lookup::lookup_platform_property_by_type(
+            db,
             "Line of a tabular section",
             &nr_name,
         ) {
             out.push(FieldInfo {
                 name: nr_name,
                 name_en: Some(nr_name_en),
-                ty: ty_to_typeid(db, &prop.return_ty),
+                ty: prop.return_ty,
                 value_ty: None,
                 is_readonly: prop.is_readonly,
                 origin: FieldOrigin::PlatformProperty,

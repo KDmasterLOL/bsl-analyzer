@@ -49,14 +49,13 @@
 //! it does not own.
 
 use bsl_platform::{PlatformData, PlatformProperty};
+use bsl_types::builders::Builders;
 use bsl_types::intern::TypeKernelDb;
-use bsl_types::kind::TypeId;
-use hir_def::ty::Ty;
+use bsl_types::kind::{TypeId, TypeKind};
 use hir_def::Name;
 
-use crate::lower::type_string::lower_platform_type_name;
-use crate::method_lookup::platform_type_key;
-use crate::ty_bridge::ty_to_typeid;
+use crate::lower::type_string::lower_platform_type_name_typeid;
+use crate::method_lookup::platform_type_key_id;
 
 /// Result of a successful platform-property lookup.
 ///
@@ -68,38 +67,28 @@ use crate::ty_bridge::ty_to_typeid;
 pub struct PlatformPropertyResolution {
     /// Resolved value type. Derived from `PlatformProperty::property_types`
     /// via [`map_property_type_list`]: single-element lists collapse to the
-    /// matching scalar `Ty`, multi-element lists become `Ty::Union(...)`.
-    /// Empty lists map to `Ty::Unknown` (the HBK page omitted the `Тип:`
+    /// matching scalar type, multi-element lists become a `Union`. Empty
+    /// lists map to `db.unknown()` (the HBK page omitted the `Тип:`
     /// marker — free-prose description only).
-    pub return_ty: Ty,
+    pub return_ty: TypeId,
     /// `true` when `Использование:` reads `"Только чтение"` on the property
     /// page. Feeds the `ReadOnlyPropertyAssignment` diagnostic.
     pub is_readonly: bool,
 }
 
-impl PlatformPropertyResolution {
-    /// Kernel-native projection of [`Self::return_ty`].
-    ///
-    /// §4.C accessor — bridges via §4.A `ty_to_typeid`.
-    #[allow(dead_code, reason = "Phase 3 §4.C — consumers migrate in 4.D-4.E")]
-    pub fn return_typeid(&self, db: &dyn TypeKernelDb) -> TypeId {
-        ty_to_typeid(db, &self.return_ty)
-    }
-}
-
 /// Resolve `receiver.prop_name` against the platform-property catalogue.
 ///
 /// Returns `None` when:
-/// - the receiver is not keyed by [`platform_type_key`] (managers, metadata
-///   refs, unions, primitives, `Ty::Unknown`);
+/// - the receiver is not keyed by [`platform_type_key_id`] (managers,
+///   metadata refs, unions, primitives, `Unknown`);
 /// - the platform type has no property with this name.
 ///
 /// Uses the `PlatformData::instance()` singleton the same way
-/// [`crate::method_lookup::lookup_method`] does, so callers stay `db`-free
-/// (a Salsa wrapper lives in `bsl-platform` and is used by IDE completion
-/// where `db` is already available).
+/// [`crate::method_lookup::lookup_method`] does; `db` is only needed to
+/// read the receiver shape and intern the resolved value type.
 pub fn lookup_platform_property(
-    receiver_ty: &Ty,
+    db: &dyn TypeKernelDb,
+    receiver: TypeId,
     prop_name: &Name,
 ) -> Option<PlatformPropertyResolution> {
     // Form-control receivers carry an ordered platform-type chain
@@ -107,62 +96,71 @@ pub fn lookup_platform_property(
     // группы формы для страниц"]`). The reverse-walk precedence
     // (extension overrides base, single-entry chains collapse, `Other`
     // is empty → `None`) is shared with method_lookup and lives in
-    // [`hir_def::ty::form_control_chain_first_hit`].
-    if let Ty::FormControl { kind, .. } = receiver_ty {
-        return hir_def::ty::form_control_chain_first_hit(*kind, |type_name| {
-            lookup_platform_property_by_type(type_name, prop_name)
+    // [`hir_def::ty::form_control_chain_first_hit`]. Extract `kind`
+    // (Copy) so the `&TypeKind` borrow is released before the callback
+    // re-borrows `db`.
+    let form_kind = match db.lookup_type(receiver) {
+        TypeKind::FormControl { kind, .. } => Some(*kind),
+        _ => None,
+    };
+    if let Some(kind) = form_kind {
+        return hir_def::ty::form_control_chain_first_hit(kind, |type_name| {
+            lookup_platform_property_by_type(db, type_name, prop_name)
         });
     }
-    let type_key = platform_type_key(receiver_ty)?;
-    lookup_platform_property_by_type(type_key, prop_name)
+    let type_key = platform_type_key_id(db, receiver)?;
+    lookup_platform_property_by_type(db, &type_key, prop_name)
 }
 
 /// Same as [`lookup_platform_property`] but keyed directly by an English
 /// platform `type_name`. Used by callers whose receiver type does not map
-/// to a `platform_type_key` (e.g. `Ty::MetadataRef { TabularSectionRow, .. }`
-/// borrowing the standard row properties from
-/// `"Line of a tabular section"`).
+/// to a `platform_type_key_id` (e.g. `TabularSectionRow` borrowing the
+/// standard row properties from `"Line of a tabular section"`).
 pub(crate) fn lookup_platform_property_by_type(
+    db: &dyn TypeKernelDb,
     type_name: &str,
     prop_name: &Name,
 ) -> Option<PlatformPropertyResolution> {
     let data = PlatformData::instance();
     let prop = data.get_property(type_name, prop_name.as_str())?;
-    Some(to_resolution(prop))
+    Some(to_resolution(db, prop))
 }
 
 /// Convert a `PlatformProperty` into the semantic [`PlatformPropertyResolution`].
 ///
 /// Mirrors `method_lookup::to_method_info` in shape — same path through
-/// `lower_platform_type_name` for each declared value type, then
-/// `Ty::union` when the HBK page declared more than one (e.g.
+/// `lower_platform_type_name_typeid` for each declared value type, then
+/// `db.union` when the HBK page declared more than one (e.g.
 /// `МенеджерВременныхТаблиц, Неопределено`).
-pub(crate) fn to_resolution(prop: &PlatformProperty) -> PlatformPropertyResolution {
+pub(crate) fn to_resolution(
+    db: &dyn TypeKernelDb,
+    prop: &PlatformProperty,
+) -> PlatformPropertyResolution {
     PlatformPropertyResolution {
-        return_ty: map_property_type_list(&prop.property_types),
+        return_ty: map_property_type_list(db, &prop.property_types),
         is_readonly: prop.is_readonly,
     }
 }
 
-/// Map the parsed list of declared property types to a `Ty`.
+/// Map the parsed list of declared property types to a [`TypeId`].
 ///
 /// - **0 entries** — the HBK page didn't carry a `Тип:` marker. Return
-///   `Ty::Unknown` so downstream inference doesn't claim a type we don't
+///   `db.unknown()` so downstream inference doesn't claim a type we don't
 ///   actually know.
-/// - **1 entry** — direct `lower_platform_type_name` call (the same
+/// - **1 entry** — direct `lower_platform_type_name_typeid` call (the same
 ///   mapper method returns use).
-/// - **2+ entries** — `Ty::union(...)` of each mapped type. Ensures the
-///   TempTablesManager-style `"…, Неопределено"` declarations become
-///   `Ty::Union({МенеджерВременныхТаблиц, Неопределено})` instead of a
-///   single stringly-typed `PlatformObject("…, Неопределено")`.
-fn map_property_type_list(types: &[smol_str::SmolStr]) -> Ty {
+/// - **2+ entries** — `db.union(...)` of each mapped type. Ensures the
+///   TempTablesManager-style `"…, Неопределено"` declarations become a
+///   `Union({МенеджерВременныхТаблиц, Неопределено})` instead of a single
+///   stringly-typed `PlatformObject("…, Неопределено")`.
+fn map_property_type_list(db: &dyn TypeKernelDb, types: &[smol_str::SmolStr]) -> TypeId {
     match types.len() {
-        0 => Ty::Unknown,
-        1 => lower_platform_type_name(types[0].as_str()),
+        0 => db.unknown(),
+        1 => lower_platform_type_name_typeid(db, types[0].as_str()),
         _ => {
-            let mapped: Vec<Ty> =
-                types.iter().map(|s| lower_platform_type_name(s.as_str())).collect();
-            Ty::union(mapped)
+            let mapped: Vec<TypeId> =
+                types.iter().map(|s| lower_platform_type_name_typeid(db, s.as_str())).collect();
+            db.union(mapped)
         }
     }
 }
@@ -170,15 +168,25 @@ fn map_property_type_list(types: &[smol_str::SmolStr]) -> Ty {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ty_bridge::typeid_to_ty;
+    use crate::ty_bridge::{ty_to_typeid, typeid_to_ty};
     use bsl_types::testing::InMemoryDb;
+    use hir_def::ty::Ty;
 
-    /// §4.C drift-detector: kernel-native accessor mirrors return_ty.
-    #[test]
-    fn platform_property_typeid_round_trips_via_ty() {
+    /// Test shim: build a readable `Ty` receiver, intern it, run the
+    /// kernel-native lookup, and bridge the result back to `Ty` so the
+    /// assertions below read in the source type language.
+    struct ResolvedForTest {
+        return_ty: Ty,
+        is_readonly: bool,
+    }
+
+    fn lookup_platform_property(receiver: &Ty, prop_name: &Name) -> Option<ResolvedForTest> {
         let db = InMemoryDb::new();
-        let res = PlatformPropertyResolution { return_ty: Ty::String, is_readonly: false };
-        assert_eq!(typeid_to_ty(&db, res.return_typeid(&db)), res.return_ty);
+        let receiver_id = ty_to_typeid(&db, receiver);
+        super::lookup_platform_property(&db, receiver_id, prop_name).map(|res| ResolvedForTest {
+            return_ty: typeid_to_ty(&db, res.return_ty),
+            is_readonly: res.is_readonly,
+        })
     }
 
     #[test]

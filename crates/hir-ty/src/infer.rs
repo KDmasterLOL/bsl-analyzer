@@ -1920,7 +1920,7 @@ impl<'db> InferenceContext<'db> {
                 crate::form_self::resolve_form_self_property(self.db, &resolver, name)
             {
                 trace!("resolved {} as managed-form Self property", name);
-                return ty_to_typeid(self.db, &resolution.return_ty);
+                return resolution.return_ty;
             }
         }
 

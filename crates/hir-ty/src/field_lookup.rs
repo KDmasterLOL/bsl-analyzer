@@ -342,11 +342,12 @@ fn lookup_field_via_platform_property(
     receiver_ty: &Ty,
     field_name: &Name,
 ) -> Option<FieldInfo> {
-    let res = crate::platform_property_lookup::lookup_platform_property(receiver_ty, field_name)?;
+    let receiver = ty_to_typeid(db, receiver_ty);
+    let res = crate::platform_property_lookup::lookup_platform_property(db, receiver, field_name)?;
     Some(FieldInfo {
         name: field_name.clone(),
         name_en: None,
-        ty: ty_to_typeid(db, &res.return_ty),
+        ty: res.return_ty,
         value_ty: None,
         is_readonly: res.is_readonly,
         origin: crate::field_enum::FieldOrigin::PlatformProperty,

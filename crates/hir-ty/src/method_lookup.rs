@@ -882,7 +882,7 @@ pub(crate) fn platform_type_key(ty: &Ty) -> Option<&str> {
     }
 }
 
-fn platform_type_key_id(db: &dyn TypeKernelDb, id: TypeId) -> Option<String> {
+pub(crate) fn platform_type_key_id(db: &dyn TypeKernelDb, id: TypeId) -> Option<String> {
     match db.lookup_type(id) {
         TypeKind::Array(_) => Some("Array".to_string()),
         TypeKind::Structure(_) => Some("Structure".to_string()),
