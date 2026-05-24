@@ -7,9 +7,11 @@ pub mod name_classify;
 mod semantic_symbol;
 pub mod type_facade;
 
-pub use bsl_types::kind::TypeId;
+pub use bsl_types::intern::TypeKernelDb;
+pub use bsl_types::kind::{TypeId, TypeKind};
 pub use definition::{Definition, ReferenceScope};
 pub use hir_ty::coerce_this_object_to_metadata_ref;
+pub use hir_ty::method_lookup::platform_type_key_id;
 pub use hir_ty::resolve_platform_global_property_type;
 pub use hir_ty::ty_bridge;
 pub use hir_ty::TyLoweringContext;
@@ -171,7 +173,6 @@ pub use hir_ty::{
 };
 
 use bsl_types::builders::Builders;
-use bsl_types::kind::TypeKind;
 use syntax::{ast::AstNode, TextRange};
 use vfs::FileId;
 
@@ -875,10 +876,7 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
         }
 
         let method_name = Name::new(token.text());
-        // Phase 3 §4.G.5b: `resolve_method` is internal hir-ty API still on
-        // `Ty` (Phase 4) — bridge the kernel id at this call boundary.
-        let receiver_ty = hir_ty::ty_bridge::typeid_to_ty(self.db, receiver_id);
-        let resolution = hir_ty::resolve_method(self.db, &receiver_ty, &method_name)?;
+        let resolution = hir_ty::resolve_method(self.db, receiver_id, &method_name)?;
 
         Some(Definition::BuiltinMethodHandle { handle: resolution.handle, method_name })
     }

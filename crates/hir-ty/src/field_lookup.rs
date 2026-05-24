@@ -39,7 +39,7 @@ use crate::field_enum::enumerate_fields_inner;
 /// like the MDO's attributes — `Объект.Дата` inside a document form must
 /// reach the document's `Дата` declaration, not the form-data wrapper's
 /// platform members. Methods are routed differently (see
-/// [`crate::method_lookup::platform_type_key`]); that's why the projection
+/// [`crate::method_lookup::platform_type_key_id`]); that's why the projection
 /// lives here, in `field_lookup`, not inside a global coercion.
 ///
 /// Returns:

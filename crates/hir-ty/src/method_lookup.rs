@@ -612,7 +612,7 @@ fn drop_union_arm_id(
 /// Covers `Ty::PlatformObject`, `Ty::Array`, `Ty::TypedArray`,
 /// `Ty::Map`, `Ty::Structure`, `Ty::ValueTable`, `Ty::ValueList`,
 /// `Ty::Type`, and `Ty::FormData` — everything that
-/// [`platform_type_key`] resolves to a single English type-name key.
+/// [`platform_type_key_id`] resolves to a single English type-name key.
 ///
 /// Post-step: for `Ty::FormData { kind: Collection, .. }`, the generic
 /// `ДанныеФормыЭлементКоллекции` return is rewritten to the document /
@@ -789,97 +789,6 @@ fn union_lookup(
     }
     let (params, overloads) = chosen_signature.unwrap_or_default();
     hit_any.then(|| MethodInfo { return_ty: db.union(returns), params, overloads })
-}
-
-/// Pick the `PlatformData::get_method` key for a scalar receiver.
-///
-/// The platform-data index uses **English** type names keyed through a
-/// bilingual map, so passing the English canonical name resolves methods
-/// whose `name` is Russian (and vice versa).
-///
-/// `Ty::ObjectManager` / `Ty::MetadataRef` are **not** routed through
-/// this key — their platform entries carry composite
-/// `type_name = "CatalogManager.<Имя>"` with placeholder per-method
-/// `name = "<Имя"`, which the scalar index cannot serve. Those
-/// receivers are handled upstream in [`lookup_method`] via
-/// [`crate::platform_manager_lookup`].
-///
-/// Primitives (`Ty::Number | String | Boolean | Date`) return `None`
-/// because BSL exposes no instance methods on them — string/date
-/// "methods" are global functions (`СтрДлина`, `ДобавитьМесяц`) reachable
-/// only through free-function syntax, not `receiver.method()`.
-pub(crate) fn platform_type_key(ty: &Ty) -> Option<&str> {
-    match ty {
-        // Value types — English canonical names hit the bilingual index.
-        // `TypedArray` shares the platform method table with `Array`:
-        // method lookup is structural (`.Добавить()`, `.Количество()`,
-        // …), the element type only refines field/iteration surfaces.
-        Ty::Array | Ty::TypedArray(_) => Some("Array"),
-        Ty::Structure => Some("Structure"),
-        Ty::Map => Some("Map"),
-        Ty::ValueTable { .. } => Some("ValueTable"),
-        Ty::ValueTableRow { .. } => Some("ValueTableRow"),
-        Ty::ValueList => Some("ValueList"),
-        Ty::Type => Some("Type"),
-        // Platform object name is stored as-authored in the `Ty` and the
-        // bilingual index translates it.
-        Ty::PlatformObject(name) => Some(name.as_str()),
-        // Manager / ref receivers are resolved earlier in
-        // [`lookup_method`] via `platform_manager_lookup` — this arm
-        // is unreachable in practice, returning `None` preserves the
-        // invariant "scalar key only" for any future fall-through.
-        Ty::ObjectManager { .. }
-        | Ty::MetadataRef { .. }
-        | Ty::Number
-        | Ty::String
-        | Ty::Boolean
-        | Ty::Date
-        | Ty::ManagerCollection(_)
-        | Ty::Union(_)
-        | Ty::Unknown
-        | Ty::Undefined
-        | Ty::Null
-        | Ty::Function { .. } => None,
-        // `ThisObject` is coerced to its matching `Ty::MetadataRef`
-        // companion at the entry of [`lookup_method`] (see
-        // `crate::this_object::coerce_to_metadata_ref`), which the
-        // `MetadataRef` branch above then routes through
-        // `platform_manager_lookup`. A receiver that still lands here
-        // did not match a coercible MDO kind — `None` is the safe
-        // fallback. Same posture for `ThisManager`, whose coercion
-        // target is `Ty::ObjectManager`.
-        Ty::ThisObject { .. } | Ty::ThisManager { .. } => None,
-        // Managed-form attribute receivers route methods through the
-        // platform form-data wrappers (`ДанныеФормыСтруктура` /
-        // `ДанныеФормыКоллекция` / `ДанныеФормыСтруктураСКоллекцией`),
-        // **not** through `underlying`. The wrapper deliberately hides
-        // object-level methods like `Записать()` that don't apply to a
-        // form-data projection — see [`Ty::FormData`] docs.
-        Ty::FormData { kind, .. } => Some(kind.platform_type_name()),
-        // Form-control receivers (`Элементы.<имя>`) route through the
-        // per-kind platform tables (`ТаблицаФормы` / `ПолеФормы` /
-        // `КнопкаФормы` / `ГруппаФормы` / `ДекорацияФормы` /
-        // `ДополнениеЭлементаФормы`). `binding` is irrelevant for
-        // method dispatch — it only refines a handful of properties
-        // (`.ВыделенныеСтроки`, `.ТекущаяСтрока`) handled in
-        // `field_lookup`. `Other` returns `None`: unrecognised XML tag,
-        // no platform table to query.
-        Ty::FormControl { kind, .. } => hir_def::ty::form_control_platform_type_name(*kind),
-        // Projection-typed receivers alias to the same platform
-        // method tables `Ty::PlatformObject(...)` reaches today. Phase 0
-        // carries no projection payload, so method dispatch resolves
-        // identically to the legacy `Ty::PlatformObject("Запрос")` etc.
-        // shapes (tests at `method_lookup.rs:706-729` pin this).
-        Ty::Query { .. } => Some("Запрос"),
-        Ty::QueryResult { .. } => Some("РезультатЗапроса"),
-        Ty::QueryResultSelection { .. } => Some("ВыборкаИзРезультатаЗапроса"),
-        // Batch result iterates / counts like `Массив` — share the table.
-        Ty::QueryBatchResult { .. } => Some("Array"),
-        // `AnyMetadataRef` mirrors `ManagerCollection` in Phase 0 — no
-        // scalar platform key (manager dispatch routes through
-        // `platform_manager_lookup`, not the scalar table).
-        Ty::AnyMetadataRef { .. } => None,
-    }
 }
 
 /// Scalar platform-type key for `id` (`"Array"`, `"Запрос"`, …), or

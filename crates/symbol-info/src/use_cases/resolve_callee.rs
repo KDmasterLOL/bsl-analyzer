@@ -7,7 +7,7 @@ use bsl_metadata::MdoType;
 use bsl_platform::{
     global_function_query, platform_method_query, MethodLookupInput, TypeNameInput,
 };
-use hir::{ManagerType, ModuleId, Name, Resolver, Semantics, Ty};
+use hir::{platform_type_key_id, ManagerType, ModuleId, Name, Resolver, Semantics, TypeKind};
 use ide_db::RootDatabase;
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken, TextSize};
 use vfs::FileId;
@@ -68,21 +68,18 @@ pub fn resolve_callee_at<DB: RootDatabase>(
 
     if let Some((receiver_name, receiver_node)) = receiver {
         // Inferred-type platform method (primary): mirrors the completion
-        // pipeline in `ide::completion::platform_completion` — same Ty
-        // lookup, same `platform_type_name()` bridge. Runs **before** the
+        // pipeline in `ide::completion::platform_completion` — same
+        // `type_of_expr` + `platform_type_key_id` lookup. Runs **before** the
         // bare text-name check below because BSL happily lets a variable
         // shadow a platform type (`Массив = Новый СписокЗначений;`), and
         // `platform_method_query("Массив", "Добавить")` would otherwise
         // return the wrong overload for the shadowed receiver.
         let sema = Semantics::new(db);
-        // Phase 3 §4.G.5b: `Semantics::type_of_expr` is kernel-native; bridge
-        // to `Ty` for the still-`Ty` `platform_type_name`/`Union` matching
-        // below (those move to the kernel in Phase 4).
-        let ty = hir::ty_bridge::typeid_to_ty(db, sema.type_of_expr(file_id, &receiver_node));
-        if let Some(type_name) = ty.platform_type_name() {
+        let receiver_id = sema.type_of_expr(file_id, &receiver_node);
+        if let Some(type_name) = platform_type_key_id(db, receiver_id) {
             if platform_method_query(
                 db,
-                MethodLookupInput::new(db, type_name.to_string(), callee_name.clone()),
+                MethodLookupInput::new(db, type_name.clone(), callee_name.clone()),
             )
             .is_some()
             {
@@ -98,17 +95,21 @@ pub fn resolve_callee_at<DB: RootDatabase>(
 
         // Union receivers (typical shape: `Запрос.Выполнить()` →
         // `Union(РезультатЗапроса, Неопределено)`) have no single
-        // `platform_type_name()`. Mirror the completion pipeline in
+        // platform key. Mirror the completion pipeline in
         // `ide::completion::platform_completion`: skip `Undefined`/`Null`
         // sentinels and pick the first arm that owns the method. The
         // first match wins because signature help is a single-overload
         // surface — there is no UX way to render two competing arms.
-        if let Ty::Union(members) = &ty {
-            for member in members.iter().filter(|m| !matches!(m, Ty::Undefined | Ty::Null)) {
-                let Some(type_name) = member.platform_type_name() else { continue };
+        if let TypeKind::Union(members) = db.lookup_type(receiver_id) {
+            for member in members
+                .iter()
+                .copied()
+                .filter(|m| !matches!(db.lookup_type(*m), TypeKind::Undefined | TypeKind::Null))
+            {
+                let Some(type_name) = platform_type_key_id(db, member) else { continue };
                 if platform_method_query(
                     db,
-                    MethodLookupInput::new(db, type_name.to_string(), callee_name.clone()),
+                    MethodLookupInput::new(db, type_name.clone(), callee_name.clone()),
                 )
                 .is_some()
                 {

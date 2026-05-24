@@ -430,32 +430,34 @@ mod tests {
     ///   (`platform_type_key` adapter at `method_lookup.rs:307`).
     #[test]
     fn form_data_structure_blocks_object_methods() {
-        use crate::method_lookup::platform_type_key;
+        use crate::method_lookup::platform_type_key_id;
+        use crate::ty_bridge::ty_to_typeid;
+        use bsl_types::testing::InMemoryDb;
+
+        let db = InMemoryDb::new();
+        // `platform_type_key_id` is the entry point method-lookup uses to
+        // pick the platform method table for a non-MDO receiver. For form
+        // data it returns the wrapper name — NOT the underlying MDO key —
+        // so `lookup_method` looks up methods on `ДанныеФормыСтруктура`,
+        // where `Записать` is absent.
+        let key = |ty: &Ty| platform_type_key_id(&db, ty_to_typeid(&db, ty));
 
         let main_obj = Ty::FormData {
             kind: FormDataKind::Structure,
             underlying: Some((MdoType::Document, Name::new("Заказ"))),
         };
-        // `platform_type_key` is the entry point method-lookup uses to pick
-        // the platform method table for a non-MDO receiver. For form data
-        // it returns the wrapper name — NOT the underlying MDO key — so
-        // `lookup_method` will look up methods on
-        // `ДанныеФормыСтруктура`, where `Записать` is absent.
-        assert_eq!(platform_type_key(&main_obj), Some("ДанныеФормыСтруктура"));
+        assert_eq!(key(&main_obj).as_deref(), Some("ДанныеФормыСтруктура"));
 
         // The composite-wrapper variant is symmetrically routed.
         let main_obj_with_columns = Ty::FormData {
             kind: FormDataKind::StructureWithCollection,
             underlying: Some((MdoType::Document, Name::new("Заказ"))),
         };
-        assert_eq!(
-            platform_type_key(&main_obj_with_columns),
-            Some("ДанныеФормыСтруктураСКоллекцией")
-        );
+        assert_eq!(key(&main_obj_with_columns).as_deref(), Some("ДанныеФормыСтруктураСКоллекцией"));
 
         // And Collection lands on the form-data collection wrapper.
         let table = Ty::FormData { kind: FormDataKind::Collection, underlying: None };
-        assert_eq!(platform_type_key(&table), Some("ДанныеФормыКоллекция"));
+        assert_eq!(key(&table).as_deref(), Some("ДанныеФормыКоллекция"));
 
         // Same invariant for the four new MDO families: DataProcessor /
         // Report / BusinessProcess / Task — methods route through the
@@ -473,7 +475,7 @@ mod tests {
                 underlying: Some((mdo, Name::new(name))),
             };
             assert_eq!(
-                platform_type_key(&receiver),
+                key(&receiver).as_deref(),
                 Some("ДанныеФормыСтруктура"),
                 "FormData wrapper for {:?} must NOT route through {:?}'s HBK surface",
                 mdo,

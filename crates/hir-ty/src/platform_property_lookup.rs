@@ -28,7 +28,7 @@
 //! - **Primitives** (`Ty::Number`, `Ty::String`, `Ty::Boolean`, `Ty::Date`)
 //!   — `None`. BSL primitives have no declared properties; returning `None`
 //!   here keeps the "scalar key only" invariant of
-//!   [`crate::method_lookup::platform_type_key`] intact.
+//!   [`crate::method_lookup::platform_type_key_id`] intact.
 //!
 //! `Ty::MetadataRef` is deliberately **not** routed through
 //! [`lookup_platform_property`] — metadata-ref property access goes
