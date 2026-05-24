@@ -302,15 +302,19 @@ fn resolve_method_inner(
         _ => {
             let key = platform_type_key(receiver_ty)?;
             let method = lookup_scalar(salsa_db, key, method_name.as_str())?;
-            let info = to_method_info(&method);
+            let info = to_method_info(kernel_db, &method);
             Some(ResolvedPlatformMethod {
                 handle: PlatformMethodHandle {
                     method_id: method.id,
                     origin: PlatformMethodOrigin::Scalar { type_name: SmolStr::from(key) },
                 },
-                return_ty: info.return_ty,
-                params: info.params,
-                overloads: info.overloads,
+                return_ty: typeid_to_ty(kernel_db, info.return_ty),
+                params: info.params.iter().map(|id| typeid_to_ty(kernel_db, *id)).collect(),
+                overloads: info
+                    .overloads
+                    .iter()
+                    .map(|row| row.iter().map(|id| typeid_to_ty(kernel_db, *id)).collect())
+                    .collect(),
             })
         }
     }
@@ -328,7 +332,7 @@ fn resolve_metadata_ref(
     // chained accessors (`ТЧ.Получить(0).<row attr>`).
     if let MetadataKind::TabularSection { parent } = kind {
         let method = lookup_scalar(salsa_db, "Tabular section", method_name.as_str())?;
-        let info = build_tabular_section_method_info(&method, parent, mdo_name);
+        let info = build_tabular_section_method_info(kernel_db, &method, parent, mdo_name);
         return Some(ResolvedPlatformMethod {
             handle: PlatformMethodHandle {
                 method_id: method.id,
@@ -336,9 +340,13 @@ fn resolve_metadata_ref(
                     type_name: SmolStr::from("Tabular section"),
                 },
             },
-            return_ty: info.return_ty,
-            params: info.params,
-            overloads: info.overloads,
+            return_ty: typeid_to_ty(kernel_db, info.return_ty),
+            params: info.params.iter().map(|id| typeid_to_ty(kernel_db, *id)).collect(),
+            overloads: info
+                .overloads
+                .iter()
+                .map(|row| row.iter().map(|id| typeid_to_ty(kernel_db, *id)).collect())
+                .collect(),
         });
     }
 
@@ -375,15 +383,19 @@ fn resolve_metadata_ref(
     // Synthetic-scalar fallback (e.g. `RegisterFilter` → `"Filter"`).
     if let Some(scalar_key) = kind.scalar_platform_key() {
         if let Some(method) = lookup_scalar(salsa_db, scalar_key, method_name.as_str()) {
-            let info = to_method_info(&method);
+            let info = to_method_info(kernel_db, &method);
             return Some(ResolvedPlatformMethod {
                 handle: PlatformMethodHandle {
                     method_id: method.id,
                     origin: PlatformMethodOrigin::Scalar { type_name: SmolStr::from(scalar_key) },
                 },
-                return_ty: info.return_ty,
-                params: info.params,
-                overloads: info.overloads,
+                return_ty: typeid_to_ty(kernel_db, info.return_ty),
+                params: info.params.iter().map(|id| typeid_to_ty(kernel_db, *id)).collect(),
+                overloads: info
+                    .overloads
+                    .iter()
+                    .map(|row| row.iter().map(|id| typeid_to_ty(kernel_db, *id)).collect())
+                    .collect(),
             });
         }
     }

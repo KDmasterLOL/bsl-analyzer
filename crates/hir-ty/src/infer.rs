@@ -1828,8 +1828,7 @@ impl<'db> InferenceContext<'db> {
             // produce a receiver that `apply_sdbl_chain_rewrite` then
             // skips (already-projected receivers short-circuit).
             let ty_id = *ty;
-            let ty_for_refinement = typeid_to_ty(self.db, ty_id);
-            if crate::method_lookup::receiver_needs_refinement(&ty_for_refinement) {
+            if crate::method_lookup::receiver_needs_refinement_id(self.db, ty_id) {
                 if let Some(projections) = crate::query_text_dataflow::refine_query_at_use_site(
                     self.db,
                     self.file_id,

@@ -51,9 +51,10 @@ use std::sync::Arc;
 use bsl_metadata::MdoType;
 use bsl_platform::{PlatformData, PlatformMethod};
 use bsl_types::builders::Builders;
-use bsl_types::facet::{ProjectionSource, TableSource};
+use bsl_types::facet::{FormDataFacet, ProjectionSource, TableSource};
 use bsl_types::intern::TypeKernelDb;
 use bsl_types::kind::{Projection, TypeId, TypeKind};
+use bsl_types::testing::RootConfigCtx;
 use hir_def::body::Body;
 use hir_def::hir::Expr;
 use hir_def::ty::{MetadataKind, SdblProjection, Ty};
@@ -61,33 +62,10 @@ use hir_def::{DefWithBodyId, ExprId, Name};
 use vfs::FileId;
 
 use crate::db::HirDatabase;
-use crate::lower::type_string::{
-    lower_param_type_string, lower_param_type_string_typeid, lower_return_type_string,
-};
+use crate::lower::type_string::{lower_param_type_string_typeid, lower_return_type_string_typeid};
 use crate::ty_bridge::{ty_to_typeid, typeid_to_ty};
 
-/// Result of a successful method lookup.
-///
-/// `params` holds the typed parameter list — empty `Vec` means "method
-/// takes no arguments". `Ty::Unknown` slots appear when the platform
-/// parameter type is omitted or not recognised; inference should treat
-/// them as "any".
-///
-/// `overloads` carries per-variant parameter lists for multi-overload
-/// methods — populated when the platform JSON declares multiple
-/// `Вариант синтаксиса:` sections (e.g. `ЧтениеXML.ПолучитьАтрибут`,
-/// `ТаблицаЗначений.Скопировать`). Empty otherwise — the single
-/// signature lives in `params`. Argument-type checks accept the call
-/// when ANY overload accepts it.
 /// Result of a successful method lookup — kernel-native surface.
-///
-/// Phase 3 §4.E.2a: the public `MethodInfo` now carries interned
-/// [`TypeId`]s. The public entry points are kernel-native
-/// (`receiver: TypeId`) as of §4.E.2b-ii. Internal resolution still
-/// runs on legacy [`Ty`] via the private [`MethodInfoTy`] (see below),
-/// bridged in/out at the boundary; that internal pipeline + the SDBL
-/// chain machinery flip to kernel-native at §4.G (they depend on
-/// out-of-§4.E `Ty`/`SdblProjection` helpers that flip together then).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MethodInfo {
     /// Return type id. `Undefined` for procedures (platform methods with
@@ -99,35 +77,6 @@ pub struct MethodInfo {
     pub params: Vec<TypeId>,
     /// Per-overload parameter id lists. Empty for single-overload methods.
     pub overloads: Vec<Vec<TypeId>>,
-}
-
-/// Internal legacy-`Ty` resolution result.
-///
-/// Phase 3 §4.E.2a: the resolution pipeline (`lookup_*`, `union_lookup`,
-/// `apply_sdbl_chain_rewrite`, …) continues to operate on `Ty`; this is
-/// the struct it threads. The public [`MethodInfo`] is produced from it
-/// by [`method_info_ty_to_kernel`] at the boundary. §4.G deletes this
-/// and runs the pipeline directly on `TypeId` once the out-of-§4.E
-/// `Ty`/`SdblProjection` helpers it leans on flip together.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct MethodInfoTy {
-    pub(crate) return_ty: Ty,
-    pub(crate) params: Vec<Ty>,
-    pub(crate) overloads: Vec<Vec<Ty>>,
-}
-
-/// Bridge an internal [`MethodInfoTy`] to the public kernel-native
-/// [`MethodInfo`].
-fn method_info_ty_to_kernel(db: &dyn TypeKernelDb, info: MethodInfoTy) -> MethodInfo {
-    MethodInfo {
-        return_ty: ty_to_typeid(db, &info.return_ty),
-        params: info.params.iter().map(|t| ty_to_typeid(db, t)).collect(),
-        overloads: info
-            .overloads
-            .iter()
-            .map(|row| row.iter().map(|t| ty_to_typeid(db, t)).collect())
-            .collect(),
-    }
 }
 
 /// Resolve a method call on a typed receiver (refinement-free entry).
@@ -169,44 +118,37 @@ pub fn lookup_method_with_refinement(
     method_name: &Name,
     refine_ctx: Option<&RefineCtx<'_>>,
 ) -> Option<MethodInfo> {
-    // Phase 3 §4.E.2b-ii (boundary-flip): the public surface is now
-    // kernel-native (`receiver: TypeId`, returns `MethodInfo`). The
-    // receiver bridge is lossless after §4.E.2b-i gave `ObjectManager`
-    // a faithful `ManagerFacet { mdo: MdoType, .. }`. The internal
-    // resolution pipeline + SDBL chain machinery still run on `Ty`
-    // (they depend on out-of-§4.E helpers — `this_object::coerce_*`,
-    // `lower::type_string`, `query_text_dataflow` — that speak `Ty` /
-    // `SdblProjection`); they flip together at §4.G when `Ty` is
-    // deleted. Bridge in at entry, bridge the result out.
-    let receiver_ty = typeid_to_ty(db, receiver);
-    let info = lookup_method_with_refinement_ty(db, &receiver_ty, method_name, refine_ctx)?;
-    Some(method_info_ty_to_kernel(db, info))
+    lookup_method_inner(db, receiver, method_name, refine_ctx)
 }
 
-/// Internal `Ty`-native resolver — the pre-§4.E pipeline body.
-fn lookup_method_with_refinement_ty(
+/// Internal kernel-native resolver.
+fn lookup_method_inner(
     db: &dyn TypeKernelDb,
-    receiver_ty: &Ty,
+    receiver: TypeId,
     method_name: &Name,
     refine_ctx: Option<&RefineCtx<'_>>,
-) -> Option<MethodInfoTy> {
-    // `Ty::ThisObject` and `Ty::ThisManager` are coerced to dispatch-
-    // ready receivers at adapter entry — `ThisObject` → `MetadataRef
-    // { *Object, .. }` (hits the metadata-ref branch); `ThisManager`
-    // → `ObjectManager { .. }` (hits the manager branch). See
-    // [`crate::this_object`].
-    let coerced = crate::this_object::coerce_to_metadata_ref(receiver_ty);
-    let receiver_ty = coerced.as_ref().unwrap_or(receiver_ty);
+) -> Option<MethodInfo> {
+    // `coerce_to_metadata_ref` remains legacy-Ty until §4.E.4. Bridge at
+    // this one dispatch boundary; this loses non-root config ids through
+    // the Ty round-trip and should disappear with the §4.E.4 flip.
+    let eff_id = match crate::this_object::coerce_to_metadata_ref(&typeid_to_ty(db, receiver)) {
+        Some(coerced) => ty_to_typeid(db, &coerced),
+        None => receiver,
+    };
 
-    if let Ty::Union(members) = receiver_ty {
-        return union_lookup(db, members, method_name, refine_ctx);
-    }
-
-    let info = match receiver_ty {
-        Ty::ObjectManager { kind, name } => lookup_on_object_manager(db, *kind, name, method_name),
-        Ty::MetadataRef { kind, name } => lookup_on_metadata_ref(db, *kind, name, method_name),
-        Ty::FormControl { kind, .. } => lookup_on_form_control(*kind, method_name),
-        _ => lookup_scalar_receiver(receiver_ty, method_name),
+    let info = match db.lookup_type(eff_id) {
+        TypeKind::Union(arms) => return union_lookup(db, arms, method_name, refine_ctx),
+        TypeKind::ObjectManager(facet) => {
+            lookup_on_object_manager(db, facet.mdo, &Name::new(&facet.name), method_name)
+        }
+        TypeKind::MetadataRef(facet) => {
+            lookup_on_metadata_ref(db, facet.kind, &Name::new(&facet.name), method_name)
+        }
+        TypeKind::MetadataObject(facet) => {
+            lookup_on_metadata_ref(db, facet.kind, &Name::new(&facet.name), method_name)
+        }
+        TypeKind::FormControl { kind, .. } => lookup_on_form_control(db, *kind, method_name),
+        _ => lookup_scalar_receiver(db, eff_id, method_name),
     }?;
 
     // SDBL chain rewrite — `Запрос.Выполнить()`, `.Выбрать()`,
@@ -216,7 +158,7 @@ fn lookup_method_with_refinement_ty(
     // that doesn't exist on the receiver) and is gated by
     // [`is_sdbl_chain_method`] so unrelated method calls pay only a
     // hashset-membership check.
-    Some(apply_sdbl_chain_rewrite(receiver_ty, method_name, info, refine_ctx))
+    Some(apply_sdbl_chain_rewrite(db, eff_id, method_name, info, refine_ctx))
 }
 
 /// Per-dispatch context for [`lookup_method_with_refinement`].
@@ -289,106 +231,40 @@ fn is_unload_method(name: &str) -> bool {
 /// (those declare a single-typed `ТаблицаЗначений` return — narrowing
 /// is a no-op there but would still cost the union walk).
 fn narrow_unload_return(
-    receiver_ty: &Ty,
-    info: MethodInfoTy,
+    db: &dyn TypeKernelDb,
+    receiver: TypeId,
+    info: MethodInfo,
     refine_ctx: Option<&RefineCtx<'_>>,
-) -> MethodInfoTy {
-    if !is_query_result_receiver(receiver_ty) {
+) -> MethodInfo {
+    if !is_query_result_receiver_id(db, receiver) {
         return info;
     }
     // Slice 1b — extract the receiver's projection so the kept
     // `Ty::ValueTable` arm can carry it through `.Выгрузить()`. None
     // is the legacy `Ty::PlatformObject("РезультатЗапроса")` shape;
     // chain still narrows but the table arm stays projection-less.
-    let projection = projection_of_query_result_receiver(receiver_ty).flatten();
+    let projection = projection_of_query_result_receiver_id(db, receiver).flatten();
     let return_ty = if let Some(ctx) = refine_ctx {
         use crate::query_unload_refinement::{classify_unload_arg, UnloadIteration};
         let decision = classify_unload_arg(ctx.body, ctx.call_args);
         let narrowed = match decision {
             UnloadIteration::Dynamic => info.return_ty,
-            UnloadIteration::Linear => drop_union_arm(info.return_ty, is_value_tree_arm),
-            UnloadIteration::Hierarchical => drop_union_arm(info.return_ty, is_value_table_arm),
-        };
-        attach_projection_to_value_table(narrowed, projection)
-    } else {
-        attach_projection_to_value_table(info.return_ty, projection)
-    };
-    MethodInfoTy { return_ty, params: info.params, overloads: info.overloads }
-}
-
-/// Walk `ty` and replace every `Ty::ValueTable { projection: None }`
-/// arm with `Ty::ValueTable { projection }`. Other arms pass through.
-///
-/// Operates on the bare type and inside `Ty::Union` arms. Receivers
-/// that already carry a non-None projection are intentionally left
-/// alone — projection refinement is only ever an *upgrade*. None
-/// receiver projection short-circuits to identity so the rewrite
-/// stays free for legacy code paths.
-fn attach_projection_to_value_table(ty: Ty, projection: Option<Arc<SdblProjection>>) -> Ty {
-    let Some(projection) = projection else { return ty };
-    let upgrade = |arm: &Ty| -> Option<Ty> {
-        match arm {
-            Ty::ValueTable { projection: None } => {
-                Some(Ty::ValueTable { projection: Some(projection.clone()) })
+            UnloadIteration::Linear => drop_union_arm_id(db, info.return_ty, is_value_tree_arm_id),
+            UnloadIteration::Hierarchical => {
+                drop_union_arm_id(db, info.return_ty, is_value_table_arm_id)
             }
-            _ => None,
-        }
+        };
+        attach_projection_to_value_table_id(db, narrowed, projection)
+    } else {
+        attach_projection_to_value_table_id(db, info.return_ty, projection)
     };
-    if let Some(upgraded) = upgrade(&ty) {
-        return upgraded;
-    }
-    let Ty::Union(members) = ty else { return ty };
-    let rebuilt: Vec<Ty> =
-        members.iter().map(|arm| upgrade(arm).unwrap_or_else(|| arm.clone())).collect();
-    Ty::Union(rebuilt.into())
-}
-
-/// `ТаблицаЗначений` shows up as the dedicated [`Ty::ValueTable`]
-/// variant (or `{ projection: .. }` once Slice 2 lands); the legacy
-/// `Ty::PlatformObject("ТаблицаЗначений")` is also accepted in case
-/// platform-string lowering ever produces it.
-fn is_value_table_arm(ty: &Ty) -> bool {
-    matches!(ty, Ty::ValueTable { .. })
-        || matches!(ty, Ty::PlatformObject(n) if is_platform_name(n, "ТаблицаЗначений", "ValueTable"))
-}
-
-/// `ДеревоЗначений` has no dedicated `Ty` variant today, so we match
-/// the bilingual `Ty::PlatformObject` shape only.
-fn is_value_tree_arm(ty: &Ty) -> bool {
-    matches!(ty, Ty::PlatformObject(n) if is_platform_name(n, "ДеревоЗначений", "ValueTree"))
-}
-
-/// Receiver gate for [`narrow_unload_return`].
-fn is_query_result_receiver(ty: &Ty) -> bool {
-    match ty {
-        Ty::QueryResult { .. } => true,
-        Ty::PlatformObject(n) => is_platform_name(n, "РезультатЗапроса", "QueryResult"),
-        _ => false,
-    }
-}
-
-/// Walk a `Ty::Union` and drop arms matching `unwanted`. Non-Union
-/// inputs pass through.
-///
-/// If dropping leaves a single arm, collapse to that arm directly. If
-/// dropping would empty the union, return the original (defensive —
-/// the platform signature should always have at least the kept arm).
-fn drop_union_arm(ty: Ty, unwanted: impl Fn(&Ty) -> bool) -> Ty {
-    let Ty::Union(members) = ty else { return ty };
-    let kept: Vec<Ty> = members.iter().filter(|t| !unwanted(t)).cloned().collect();
-    if kept.is_empty() {
-        return Ty::Union(members);
-    }
-    if kept.len() == 1 {
-        return kept.into_iter().next().unwrap();
-    }
-    Ty::Union(kept.into())
+    MethodInfo { return_ty, params: info.params, overloads: info.overloads }
 }
 
 /// Rewrite the return type of an SDBL chain method to the matching
 /// projection-typed `Ty::Query*` variant.
 ///
-/// Operates on the already-resolved [`MethodInfoTy`] so the receiver-side
+/// Operates on the already-resolved [`MethodInfo`] so the receiver-side
 /// signature (`params`, `overloads`) is untouched — only the return
 /// type changes. The bilingual method-name filter
 /// [`is_sdbl_chain_method`] short-circuits unrelated calls before any
@@ -410,11 +286,12 @@ fn drop_union_arm(ty: Ty, unwanted: impl Fn(&Ty) -> bool) -> Ty {
 /// adds constructor-arg projection synthesis; Phase D adds variable
 /// refinement so the projection survives a `.Текст = "..."` assignment.
 fn apply_sdbl_chain_rewrite(
-    receiver_ty: &Ty,
+    db: &dyn TypeKernelDb,
+    receiver: TypeId,
     method_name: &Name,
-    info: MethodInfoTy,
+    info: MethodInfo,
     refine_ctx: Option<&RefineCtx<'_>>,
-) -> MethodInfoTy {
+) -> MethodInfo {
     // Phase H — `QueryResult.Выгрузить(ТипОбхода)` argument-driven
     // narrowing. The platform signature declares the return as
     // `Union([ТаблицаЗначений, ДеревоЗначений])`; runtime shape is
@@ -422,24 +299,27 @@ fn apply_sdbl_chain_rewrite(
     // (default = `Прямой` → `ТаблицаЗначений`). The narrower drops
     // the wrong arm whenever the arg shape is statically recognisable.
     if is_unload_method(method_name.as_str()) {
-        return narrow_unload_return(receiver_ty, info, refine_ctx);
+        return narrow_unload_return(db, receiver, info, refine_ctx);
     }
 
     if !is_sdbl_chain_method(method_name.as_str()) {
         return info;
     }
-    let refined_ty = refine_ctx
-        .and_then(|ctx| try_refine_receiver(ctx, receiver_ty))
-        .map(|projections| Ty::Query { projections });
-    let effective_ty = refined_ty.as_ref().unwrap_or(receiver_ty);
+    let refined = refine_ctx.and_then(|ctx| try_refine_receiver(db, ctx, receiver));
+    let effective = refined.unwrap_or(receiver);
 
     let Some((target_platform_name, replacement)) =
-        pick_chain_rewrite(effective_ty, method_name.as_str())
+        pick_chain_rewrite_id(db, effective, method_name.as_str())
     else {
         return info;
     };
-    MethodInfoTy {
-        return_ty: rewrite_chain_arm_in_return(info.return_ty, target_platform_name, &replacement),
+    MethodInfo {
+        return_ty: rewrite_chain_arm_in_return_id(
+            db,
+            info.return_ty,
+            target_platform_name,
+            replacement,
+        ),
         params: info.params,
         overloads: info.overloads,
     }
@@ -460,10 +340,11 @@ fn apply_sdbl_chain_rewrite(
 /// `.Выполнить()` reads the last entry, `.ВыполнитьПакет()[i]` indexes
 /// by position.
 fn try_refine_receiver(
+    db: &dyn TypeKernelDb,
     ctx: &RefineCtx<'_>,
-    receiver_ty: &Ty,
-) -> Option<Arc<[Option<Arc<SdblProjection>>]>> {
-    if !receiver_needs_refinement(receiver_ty) {
+    receiver: TypeId,
+) -> Option<TypeId> {
+    if !receiver_needs_refinement_id(db, receiver) {
         return None;
     }
     // Receiver must be `Expr::Path(name)` for the dataflow walk to
@@ -474,36 +355,34 @@ fn try_refine_receiver(
     let Expr::Path(receiver_name) = ctx.body.expr(ctx.receiver_expr_id) else {
         return None;
     };
-    crate::query_text_dataflow::refine_query_at_use_site(
+    let projections = crate::query_text_dataflow::refine_query_at_use_site(
         ctx.db,
         ctx.file_id,
         ctx.owner,
         ctx.dispatch_expr_id,
         receiver_name,
         ctx.body,
+    )?;
+    Some(
+        db.query(
+            projections
+                .iter()
+                .map(|p| p.as_ref().map(|p| sdbl_projection_to_projection_via_bridge(db, p)))
+                .collect(),
+        ),
     )
 }
 
-/// Whether `receiver_ty` is a Query-shape that still has no
-/// projection — the precondition for Phase D refinement.
-///
-/// Mirrors the union of the two arms accepted by
-/// [`projection_of_query_receiver`] that produce `Some(None)`:
-/// legacy `Ty::PlatformObject("Запрос")` and the empty / last-arm-None
-/// flavours of `Ty::Query`. Receivers that already carry a non-None
-/// last projection (the entry `.Выполнить()` will read) are
-/// intentionally left alone — refinement is only ever an *upgrade*.
-///
-/// `pub(crate)` so [`crate::infer`] can share the gate at
-/// `infer_path_name` for Phase F (binding-type refinement).
-pub(crate) fn receiver_needs_refinement(ty: &Ty) -> bool {
-    match ty {
-        Ty::PlatformObject(n) => is_platform_name(n, "Запрос", "Query"),
-        Ty::Query { projections } => match projections.last() {
-            None | Some(None) => true,
-            Some(Some(_)) => false,
-        },
-        _ => false,
+fn sdbl_projection_to_projection_via_bridge(
+    db: &dyn TypeKernelDb,
+    projection: &Arc<SdblProjection>,
+) -> Arc<Projection> {
+    let bridged = ty_to_typeid(db, &Ty::QueryResult { projection: Some(projection.clone()) });
+    match db.lookup_type(bridged) {
+        TypeKind::QueryResult(facet) => {
+            facet.projection.clone().expect("bridged QueryResult must carry a projection")
+        }
+        _ => unreachable!("Ty::QueryResult must bridge to TypeKind::QueryResult"),
     }
 }
 
@@ -526,105 +405,6 @@ enum ChainTarget {
     /// Match `Ty::Array` (or `Ty::TypedArray(_)` — same platform
     /// method table) for `ВыполнитьПакет → Массив`-style returns.
     AnyArray,
-}
-
-/// Pick the (target-arm, replacement-Ty) pair for a given receiver +
-/// method name, or `None` when the call is not a recognised SDBL chain
-/// entry.
-///
-/// Receiver-shape guards prevent collisions with other types that share
-/// a method name — `.Выбрать()` exists on dialogs, file pickers, mail,
-/// and standard-settings-storage managers, so the rewrite must only
-/// fire when the receiver is a `Ty::QueryResult` / `Ty::PlatformObject
-/// ("РезультатЗапроса")`. Same posture for `.Выполнить()` /
-/// `.ВыполнитьПакет()`.
-fn pick_chain_rewrite(receiver_ty: &Ty, method_name: &str) -> Option<(ChainTarget, Ty)> {
-    let lower = method_name.to_lowercase();
-    match lower.as_str() {
-        "выполнить" | "execute" => {
-            let projection = projection_of_query_receiver(receiver_ty)?;
-            Some((
-                ChainTarget::PlatformObjectNamed {
-                    ru: "РезультатЗапроса", en: "QueryResult"
-                },
-                Ty::QueryResult { projection },
-            ))
-        }
-        "выбрать" | "choose" => {
-            let projection = projection_of_query_result_receiver(receiver_ty)?;
-            Some((
-                ChainTarget::PlatformObjectNamed {
-                    ru: "ВыборкаИзРезультатаЗапроса",
-                    en: "QueryResultSelection",
-                },
-                Ty::QueryResultSelection { projection },
-            ))
-        }
-        "выполнитьпакет" | "executebatch" => {
-            // Receiver must be Query-shape; the slice carried by
-            // `Ty::Query.projections` is exactly what
-            // `Ty::QueryBatchResult.per_query` consumes — copy by Arc
-            // clone (cheap).
-            let projections = projections_of_query_receiver(receiver_ty)?;
-            Some((ChainTarget::AnyArray, Ty::QueryBatchResult { per_query: projections }))
-        }
-        _ => None,
-    }
-}
-
-/// Read the last sub-query's projection off a Query-shape receiver.
-///
-/// `.Выполнить()` is single-result and 1С returns the **last** query
-/// in a batched package (`ВЫБРАТЬ … ПОМЕСТИТЬ Т; ВЫБРАТЬ … ИЗ Т`
-/// gives the second SELECT's rows — the `ПОМЕСТИТЬ` stages produce
-/// no result). Empty slice and legacy `Ty::PlatformObject("Запрос")`
-/// both yield `Some(None)` — the receiver is a query but no projection
-/// is available; chain rewrite still fires but produces
-/// `Ty::QueryResult{None}`.
-///
-/// Returns `None` when the receiver is not a query at all, gating
-/// accidental rewrites of unrelated `.Выполнить()` calls on dialogs,
-/// file pickers, etc.
-fn projection_of_query_receiver(ty: &Ty) -> Option<Option<Arc<SdblProjection>>> {
-    match ty {
-        Ty::Query { projections } => Some(projections.last().cloned().flatten()),
-        Ty::PlatformObject(n) if is_platform_name(n, "Запрос", "Query") => Some(None),
-        _ => None,
-    }
-}
-
-/// Read the per-sub-query projection slice off a Query-shape receiver.
-///
-/// `.ВыполнитьПакет()` returns `Ty::QueryBatchResult` whose `per_query`
-/// field has the same shape, so this just hands the slice through.
-/// Empty slice and legacy `Ty::PlatformObject("Запрос")` both yield
-/// `Some(Arc::from([]))` so the chain rewrite still fires (gating
-/// remains intact) but the resulting batch carries no projection.
-fn projections_of_query_receiver(ty: &Ty) -> Option<Arc<[Option<Arc<SdblProjection>>]>> {
-    match ty {
-        Ty::Query { projections } => Some(projections.clone()),
-        Ty::PlatformObject(n) if is_platform_name(n, "Запрос", "Query") => {
-            Some(Arc::from([]))
-        }
-        _ => None,
-    }
-}
-
-/// Sibling of [`projection_of_query_receiver`] for `.Выбрать()`.
-///
-/// Accepts both the new `Ty::QueryResult{projection}` and the legacy
-/// `Ty::PlatformObject("РезультатЗапроса")` / `Ty::PlatformObject
-/// ("QueryResult")`. The `Ty::QueryResultSelection` it returns inherits
-/// the projection unchanged — `.Выбрать()` is a cursor over the same
-/// result schema.
-fn projection_of_query_result_receiver(ty: &Ty) -> Option<Option<Arc<SdblProjection>>> {
-    match ty {
-        Ty::QueryResult { projection } => Some(projection.clone()),
-        Ty::PlatformObject(n) if is_platform_name(n, "РезультатЗапроса", "QueryResult") => {
-            Some(None)
-        }
-        _ => None,
-    }
 }
 
 /// Case-insensitive bilingual name match against the platform's
@@ -651,47 +431,15 @@ fn is_platform_name_str(name: &str, ru: &str, en: &str) -> bool {
 /// `Ty::Union([Ty::PlatformObject("РезультатЗапроса"), Ty::Undefined])`
 /// — replacing only the matching arm keeps the `Undefined` companion
 /// intact so callers that pattern-match nullability still see it.
-fn rewrite_chain_arm_in_return(return_ty: Ty, target: ChainTarget, replacement: &Ty) -> Ty {
-    let matches_target = |arm: &Ty| -> bool {
-        match (&target, arm) {
-            (ChainTarget::PlatformObjectNamed { ru, en }, Ty::PlatformObject(n)) => {
-                is_platform_name(n, ru, en)
-            }
-            (ChainTarget::AnyArray, Ty::Array | Ty::TypedArray(_)) => true,
-            _ => false,
-        }
-    };
-
-    if matches_target(&return_ty) {
-        return replacement.clone();
-    }
-    match return_ty {
-        Ty::Union(arms) => {
-            let new_arms: Vec<Ty> = arms
-                .iter()
-                .map(|arm| if matches_target(arm) { replacement.clone() } else { arm.clone() })
-                .collect();
-            // `Ty::union` re-canonicalises (flatten + sort + dedup) so
-            // a one-element result collapses correctly when the
-            // original union had only the rewritten arm.
-            Ty::union(new_arms)
-        }
-        other => other,
-    }
-}
-
-#[allow(dead_code, reason = "kernel-native twin, wired in Phase 4 §4.E.3c")]
 fn is_value_table_arm_id(db: &dyn TypeKernelDb, id: TypeId) -> bool {
     matches!(db.lookup_type(id), TypeKind::ValueTable(_))
         || matches!(db.lookup_type(id), TypeKind::PlatformObject(f) if is_platform_name_str(&f.name, "ТаблицаЗначений", "ValueTable"))
 }
 
-#[allow(dead_code, reason = "kernel-native twin, wired in Phase 4 §4.E.3c")]
 fn is_value_tree_arm_id(db: &dyn TypeKernelDb, id: TypeId) -> bool {
     matches!(db.lookup_type(id), TypeKind::PlatformObject(f) if is_platform_name_str(&f.name, "ДеревоЗначений", "ValueTree"))
 }
 
-#[allow(dead_code, reason = "kernel-native twin, wired in Phase 4 §4.E.3c")]
 fn is_query_result_receiver_id(db: &dyn TypeKernelDb, id: TypeId) -> bool {
     match db.lookup_type(id) {
         TypeKind::QueryResult(_) => true,
@@ -702,8 +450,7 @@ fn is_query_result_receiver_id(db: &dyn TypeKernelDb, id: TypeId) -> bool {
     }
 }
 
-#[allow(dead_code, reason = "kernel-native twin, wired in Phase 4 §4.E.3c")]
-fn receiver_needs_refinement_id(db: &dyn TypeKernelDb, id: TypeId) -> bool {
+pub(crate) fn receiver_needs_refinement_id(db: &dyn TypeKernelDb, id: TypeId) -> bool {
     match db.lookup_type(id) {
         TypeKind::PlatformObject(f) => is_platform_name_str(&f.name, "Запрос", "Query"),
         TypeKind::Query { projections } => match projections.last() {
@@ -714,7 +461,6 @@ fn receiver_needs_refinement_id(db: &dyn TypeKernelDb, id: TypeId) -> bool {
     }
 }
 
-#[allow(dead_code, reason = "kernel-native twin, wired in Phase 4 §4.E.3c")]
 fn projection_of_query_receiver_id(
     db: &dyn TypeKernelDb,
     id: TypeId,
@@ -728,7 +474,6 @@ fn projection_of_query_receiver_id(
     }
 }
 
-#[allow(dead_code, reason = "kernel-native twin, wired in Phase 4 §4.E.3c")]
 fn projections_of_query_receiver_id(
     db: &dyn TypeKernelDb,
     id: TypeId,
@@ -742,7 +487,6 @@ fn projections_of_query_receiver_id(
     }
 }
 
-#[allow(dead_code, reason = "kernel-native twin, wired in Phase 4 §4.E.3c")]
 fn projection_of_query_result_receiver_id(
     db: &dyn TypeKernelDb,
     id: TypeId,
@@ -758,7 +502,6 @@ fn projection_of_query_result_receiver_id(
     }
 }
 
-#[allow(dead_code, reason = "kernel-native twin, wired in Phase 4 §4.E.3c")]
 fn pick_chain_rewrite_id(
     db: &dyn TypeKernelDb,
     recv_id: TypeId,
@@ -793,7 +536,6 @@ fn pick_chain_rewrite_id(
     }
 }
 
-#[allow(dead_code, reason = "kernel-native twin, wired in Phase 4 §4.E.3c")]
 fn rewrite_chain_arm_in_return_id(
     db: &dyn TypeKernelDb,
     return_id: TypeId,
@@ -825,7 +567,6 @@ fn rewrite_chain_arm_in_return_id(
     }
 }
 
-#[allow(dead_code, reason = "kernel-native twin, wired in Phase 4 §4.E.3c")]
 fn attach_projection_to_value_table_id(
     db: &dyn TypeKernelDb,
     id: TypeId,
@@ -853,7 +594,6 @@ fn attach_projection_to_value_table_id(
     }
 }
 
-#[allow(dead_code, reason = "kernel-native twin, wired in Phase 4 §4.E.3c")]
 fn drop_union_arm_id(
     db: &dyn TypeKernelDb,
     id: TypeId,
@@ -883,13 +623,17 @@ fn drop_union_arm_id(
 /// catalog row receiver so the chain
 /// `<коллекция>.Получить(0).Атрибут` continues resolving via
 /// `field_lookup::lookup_on_tabular_row`.
-fn lookup_scalar_receiver(receiver_ty: &Ty, method_name: &Name) -> Option<MethodInfoTy> {
-    let type_key = platform_type_key(receiver_ty)?;
-    let method = PlatformData::instance().get_method(type_key, method_name.as_str())?;
-    let mut info = to_method_info(method);
-    if let Some(row) = form_data_collection_row_ty(receiver_ty) {
+fn lookup_scalar_receiver(
+    db: &dyn TypeKernelDb,
+    receiver: TypeId,
+    method_name: &Name,
+) -> Option<MethodInfo> {
+    let type_key = platform_type_key_id(db, receiver)?;
+    let method = PlatformData::instance().get_method(&type_key, method_name.as_str())?;
+    let mut info = to_method_info(db, method);
+    if let Some(row) = form_data_collection_row_ty(db, receiver) {
         info.return_ty =
-            rewrite_form_data_collection_item_return(info.return_ty, &row, method.name.as_str());
+            rewrite_form_data_collection_item_return(db, info.return_ty, row, method.name.as_str());
     }
     Some(info)
 }
@@ -911,21 +655,17 @@ fn lookup_on_object_manager(
     mdo_type: MdoType,
     name: &Name,
     method_name: &Name,
-) -> Option<MethodInfoTy> {
+) -> Option<MethodInfo> {
     let res = crate::platform_manager_lookup::resolve_platform_manager_method(
         db,
         mdo_type,
         name,
         method_name,
     )?;
-    Some(MethodInfoTy {
-        return_ty: typeid_to_ty(db, res.return_ty),
-        params: res.signature.params.iter().map(|id| typeid_to_ty(db, *id)).collect(),
-        overloads: res
-            .overloads
-            .iter()
-            .map(|row| row.iter().map(|id| typeid_to_ty(db, *id)).collect())
-            .collect(),
+    Some(MethodInfo {
+        return_ty: res.return_ty,
+        params: res.signature.params.to_vec(),
+        overloads: res.overloads,
     })
 }
 
@@ -959,11 +699,11 @@ fn lookup_on_metadata_ref(
     kind: MetadataKind,
     name: &Name,
     method_name: &Name,
-) -> Option<MethodInfoTy> {
+) -> Option<MethodInfo> {
     if let MetadataKind::TabularSection { parent } = kind {
         let method =
             PlatformData::instance().get_method("Tabular section", method_name.as_str())?;
-        return Some(build_tabular_section_method_info(method, parent, name));
+        return Some(build_tabular_section_method_info(db, method, parent, name));
     }
     if let Some(res) = crate::platform_manager_lookup::resolve_platform_metadata_ref_method(
         db,
@@ -971,20 +711,16 @@ fn lookup_on_metadata_ref(
         name,
         method_name,
     ) {
-        return Some(MethodInfoTy {
-            return_ty: typeid_to_ty(db, res.return_ty),
-            params: res.signature.params.iter().map(|id| typeid_to_ty(db, *id)).collect(),
-            overloads: res
-                .overloads
-                .iter()
-                .map(|row| row.iter().map(|id| typeid_to_ty(db, *id)).collect())
-                .collect(),
+        return Some(MethodInfo {
+            return_ty: res.return_ty,
+            params: res.signature.params.to_vec(),
+            overloads: res.overloads,
         });
     }
     if let Some(scalar_key) = kind.scalar_platform_key() {
         if let Some(method) = PlatformData::instance().get_method(scalar_key, method_name.as_str())
         {
-            return Some(to_method_info(method));
+            return Some(to_method_info(db, method));
         }
     }
     None
@@ -999,11 +735,14 @@ fn lookup_on_metadata_ref(
 /// reduce to one `get_method` call. `Other` chain is empty → immediate
 /// `None`.
 fn lookup_on_form_control(
+    db: &dyn TypeKernelDb,
     kind: hir_def::ty::FormElementKind,
     method_name: &Name,
-) -> Option<MethodInfoTy> {
+) -> Option<MethodInfo> {
     hir_def::ty::form_control_chain_first_hit(kind, |type_name| {
-        PlatformData::instance().get_method(type_name, method_name.as_str()).map(to_method_info)
+        PlatformData::instance()
+            .get_method(type_name, method_name.as_str())
+            .map(|method| to_method_info(db, method))
     })
 }
 
@@ -1025,14 +764,17 @@ fn lookup_on_form_control(
 /// branches only contribute to the return-type union.
 fn union_lookup(
     db: &dyn TypeKernelDb,
-    members: &[Ty],
+    members: &[TypeId],
     method_name: &Name,
     refine_ctx: Option<&RefineCtx<'_>>,
-) -> Option<MethodInfoTy> {
-    let live: Vec<&Ty> =
-        members.iter().filter(|m| !matches!(m, Ty::Undefined | Ty::Null)).collect();
-    let mut returns: Vec<Ty> = Vec::with_capacity(live.len());
-    let mut chosen_signature: Option<(Vec<Ty>, Vec<Vec<Ty>>)> = None;
+) -> Option<MethodInfo> {
+    let live: Vec<TypeId> = members
+        .iter()
+        .copied()
+        .filter(|id| !matches!(db.lookup_type(*id), TypeKind::Undefined | TypeKind::Null))
+        .collect();
+    let mut returns: Vec<TypeId> = Vec::with_capacity(live.len());
+    let mut chosen_signature: Option<(Vec<TypeId>, Vec<Vec<TypeId>>)> = None;
     let mut hit_any = false;
     for m in live {
         // Per-arm refinement: `Ty::Union([Запрос, Undefined])` reaches
@@ -1041,7 +783,7 @@ fn union_lookup(
         // gate (`receiver_needs_refinement`) silently skips arms that
         // are already-projected or non-Query, so non-SDBL unions pay
         // only the cheap discriminant check.
-        if let Some(info) = lookup_method_with_refinement_ty(db, m, method_name, refine_ctx) {
+        if let Some(info) = lookup_method_inner(db, m, method_name, refine_ctx) {
             hit_any = true;
             returns.push(info.return_ty);
             if chosen_signature.is_none() {
@@ -1050,7 +792,7 @@ fn union_lookup(
         }
     }
     let (params, overloads) = chosen_signature.unwrap_or_default();
-    hit_any.then(|| MethodInfoTy { return_ty: Ty::union(returns), params, overloads })
+    hit_any.then(|| MethodInfo { return_ty: db.union(returns), params, overloads })
 }
 
 /// Pick the `PlatformData::get_method` key for a scalar receiver.
@@ -1144,36 +886,96 @@ pub(crate) fn platform_type_key(ty: &Ty) -> Option<&str> {
     }
 }
 
-fn form_data_collection_row_ty(receiver_ty: &Ty) -> Option<Ty> {
-    let Ty::FormData {
-        kind: hir_def::ty::FormDataKind::Collection,
-        underlying: Some((mdo_type, section_name)),
-    } = receiver_ty
+fn platform_type_key_id(db: &dyn TypeKernelDb, id: TypeId) -> Option<String> {
+    match db.lookup_type(id) {
+        TypeKind::Array(_) => Some("Array".to_string()),
+        TypeKind::Structure(_) => Some("Structure".to_string()),
+        TypeKind::Map(_) => Some("Map".to_string()),
+        TypeKind::ValueTable(_) => Some("ValueTable".to_string()),
+        TypeKind::ValueTableRow(_) => Some("ValueTableRow".to_string()),
+        TypeKind::ValueList(_) => Some("ValueList".to_string()),
+        TypeKind::TypeDescriptor => Some("Type".to_string()),
+        TypeKind::PlatformObject(f) => Some(f.name.clone()),
+        TypeKind::FormData { kind, .. } => Some(
+            match kind {
+                FormDataFacet::Structure => "ДанныеФормыСтруктура",
+                FormDataFacet::Collection => "ДанныеФормыКоллекция",
+                FormDataFacet::StructureWithCollection => "ДанныеФормыСтруктураСКоллекцией",
+            }
+            .to_string(),
+        ),
+        TypeKind::FormControl { kind, .. } => {
+            hir_def::ty::form_control_platform_type_name(*kind).map(ToString::to_string)
+        }
+        TypeKind::Query { .. } => Some("Запрос".to_string()),
+        TypeKind::QueryResult(_) => Some("РезультатЗапроса".to_string()),
+        TypeKind::QueryResultSelection(_) => Some("ВыборкаИзРезультатаЗапроса".to_string()),
+        TypeKind::QueryBatchResult { .. } => Some("Array".to_string()),
+        TypeKind::Unknown
+        | TypeKind::Never
+        | TypeKind::Any
+        | TypeKind::Number(_)
+        | TypeKind::String(_)
+        | TypeKind::Date(_)
+        | TypeKind::Boolean
+        | TypeKind::Null
+        | TypeKind::Undefined => None,
+        TypeKind::Uuid => Some("УникальныйИдентификатор".to_string()),
+        TypeKind::ValueStorage => Some("ХранилищеЗначения".to_string()),
+        TypeKind::MetadataRef(_)
+        | TypeKind::AnyMetadataRef { .. }
+        | TypeKind::MetadataObject(_)
+        | TypeKind::TabularSection { .. }
+        | TypeKind::TabularSectionRow { .. }
+        | TypeKind::RegisterDimension { .. }
+        | TypeKind::RegisterResource { .. }
+        | TypeKind::RegisterAttribute { .. }
+        | TypeKind::RegisterFilter { .. }
+        | TypeKind::Attribute { .. }
+        | TypeKind::ThisObject { .. }
+        | TypeKind::ThisManager { .. }
+        | TypeKind::Union(_)
+        | TypeKind::ManagerCollection(_)
+        | TypeKind::ObjectManager(_)
+        | TypeKind::Function(_)
+        | _ => None,
+    }
+}
+
+fn form_data_collection_row_ty(db: &dyn TypeKernelDb, receiver: TypeId) -> Option<TypeId> {
+    let TypeKind::FormData { kind: FormDataFacet::Collection, underlying: Some(underlying) } =
+        db.lookup_type(receiver)
     else {
         return None;
     };
-    if !section_name.as_str().contains('.') {
+    if !underlying.name.contains('.') {
         return None;
     }
-    Some(Ty::MetadataRef {
-        kind: MetadataKind::TabularSectionRow { parent: *mdo_type },
-        name: section_name.clone(),
-    })
+    Some(db.metadata_ref(
+        MetadataKind::TabularSectionRow { parent: underlying.mdo_type },
+        underlying.name.clone(),
+        &RootConfigCtx,
+    ))
 }
 
-fn rewrite_form_data_collection_item_return(ty: Ty, row: &Ty, method_name: &str) -> Ty {
-    match ty {
-        Ty::PlatformObject(ref name) if is_form_data_collection_item_type_name(name.as_str()) => {
-            row.clone()
-        }
-        Ty::Union(members) => Ty::union(
+fn rewrite_form_data_collection_item_return(
+    db: &dyn TypeKernelDb,
+    id: TypeId,
+    row: TypeId,
+    method_name: &str,
+) -> TypeId {
+    match db.lookup_type(id) {
+        TypeKind::PlatformObject(f) if is_form_data_collection_item_type_name(&f.name) => row,
+        TypeKind::Union(members) => db.union(
             members
                 .iter()
-                .map(|m| rewrite_form_data_collection_item_return(m.clone(), row, method_name))
+                .map(|m| rewrite_form_data_collection_item_return(db, *m, row, method_name))
                 .collect(),
         ),
-        Ty::Array if is_row_array_method(method_name) => Ty::TypedArray(Box::new(row.clone())),
-        other => other,
+        TypeKind::Array(f) if f.element.is_none() && is_row_array_method(method_name) => {
+            db.array(Some(row))
+        }
+        _ => id,
     }
 }
 
@@ -1182,7 +984,7 @@ fn is_form_data_collection_item_type_name(name: &str) -> bool {
     lc == "данныеформыэлементколлекции" || lc == "formdatacollectionitem"
 }
 
-/// Convert a `PlatformMethod` entry into the semantic `MethodInfoTy`.
+/// Convert a `PlatformMethod` entry into the semantic `MethodInfo`.
 ///
 /// - `return_type = Some("Число")` → `Ty::Number` (via
 ///   `ty_from_bare_name`); unrecognised names fall back to
@@ -1198,53 +1000,30 @@ fn is_form_data_collection_item_type_name(name: &str) -> bool {
 /// - Parameter types are kept as raw scalars for now; malformed comma-heavy
 ///   HBK prose stays a single `Ty::PlatformObject(...)` instead of poisoning
 ///   argument checks with bogus union members.
-pub(crate) fn to_method_info(method: &PlatformMethod) -> MethodInfoTy {
+pub(crate) fn to_method_info(db: &dyn TypeKernelDb, method: &PlatformMethod) -> MethodInfo {
     let return_ty = method
         .return_type
         .as_ref()
-        .map(|ret| lower_return_type_string(ret))
-        .unwrap_or(Ty::Undefined);
+        .map(|ret| lower_return_type_string_typeid(db, ret))
+        .unwrap_or_else(|| db.undefined());
 
-    let params: Vec<Ty> = method
+    let params: Vec<TypeId> = method
         .parameters
         .iter()
-        .map(|p| p.param_type.as_ref().map(|t| lower_param_type_string(t)).unwrap_or(Ty::Unknown))
+        .map(|p| {
+            p.param_type
+                .as_ref()
+                .map(|t| lower_param_type_string_typeid(db, t))
+                .unwrap_or_else(|| db.unknown())
+        })
         .collect();
 
     // Per-overload param lists for multi-overload methods
     // (`ЧтениеXML.ПолучитьАтрибут` etc.). Empty when the platform JSON
     // declares a single signature — `params` already covers it.
-    let overloads = lower_overloads(method);
+    let overloads = lower_overloads_typeid(db, method);
 
-    MethodInfoTy { return_ty, params, overloads }
-}
-
-/// Lower per-variant parameter lists for multi-overload methods.
-///
-/// Mirrors [`to_method_info`]'s overload computation but exposed as a
-/// stand-alone helper so the unified `resolve_method` use case and the
-/// composite-prefix `build_resolution` adapter can share one
-/// implementation.
-///
-/// Returns an empty `Vec` when the platform JSON declares a single
-/// signature; populated when multiple `Вариант синтаксиса:` sections
-/// exist (e.g. `Array.Найти`, `ЧтениеXML.ПолучитьАтрибут`,
-/// `InformationRegisterManager.Get`, `AccountingRegisterRecordSet.Move`,
-/// `BusinessProcessManager.FindByNumber`). Argument-type checks accept
-/// the call when ANY overload accepts it.
-pub(crate) fn lower_overloads(method: &PlatformMethod) -> Vec<Vec<Ty>> {
-    method
-        .variants
-        .iter()
-        .map(|v| {
-            v.parameters
-                .iter()
-                .map(|p| {
-                    p.param_type.as_ref().map(|t| lower_param_type_string(t)).unwrap_or(Ty::Unknown)
-                })
-                .collect()
-        })
-        .collect()
+    MethodInfo { return_ty, params, overloads }
 }
 
 /// Kernel-native counterpart of [`lower_overloads`].
@@ -1269,7 +1048,7 @@ pub(crate) fn lower_overloads_typeid(
         .collect()
 }
 
-/// Build a `MethodInfoTy` from a `PlatformData["Tabular section"]` entry,
+/// Build a `MethodInfo` from a `PlatformData["Tabular section"]` entry,
 /// rebinding the generic `"Строка табличной части"` (or its English alias
 /// `"Line of a tabular section"`) **in the return type** to the concrete
 /// `Ty::MetadataRef { TabularSectionRow { parent }, section_name.clone() }`
@@ -1293,15 +1072,21 @@ pub(crate) fn lower_overloads_typeid(
 /// argument (`ТЧ.Индекс(ТЧ.Найти(...))`) would be falsely rejected. The
 /// gradual-typing rule (`Unknown ≤ A`) keeps these calls quiet.
 pub(crate) fn build_tabular_section_method_info(
+    db: &dyn TypeKernelDb,
     method: &PlatformMethod,
     parent: MdoType,
     section_name: &Name,
-) -> MethodInfoTy {
+) -> MethodInfo {
     let return_ty = method
         .return_type
         .as_ref()
         .map(|ret| {
-            let lowered = rewrite_row_generic(lower_return_type_string(ret), parent, section_name);
+            let lowered = rewrite_row_generic(
+                db,
+                lower_return_type_string_typeid(db, ret),
+                parent,
+                section_name,
+            );
             // Methods like `НайтиСтроки` / `FindRows` carry a HBK return
             // string of `"Массив"` with no element-type schema — the
             // platform JSON has no slot for typed-array witnesses. The
@@ -1311,30 +1096,30 @@ pub(crate) fn build_tabular_section_method_info(
             // when the method is one of the row-array-returning kind so
             // chained access (`ТЧ.НайтиСтроки(От)[0].Колонка`,
             // iteration body field-access) stays typed.
-            rewrite_row_array_for_method(lowered, method.name.as_str(), parent, section_name)
+            rewrite_row_array_for_method(db, lowered, method.name.as_str(), parent, section_name)
         })
-        .unwrap_or(Ty::Undefined);
+        .unwrap_or_else(|| db.undefined());
 
     // Same conservative param lowering as `to_method_info` — see
     // [`lower_param_type_string`] for the multi-type-vs-single-type
     // asymmetry rationale. We deliberately do NOT pipe through
     // `rewrite_row_generic` for params (function-doc on
     // `build_tabular_section_method_info` above explains why).
-    let params: Vec<Ty> = method
+    let params: Vec<TypeId> = method
         .parameters
         .iter()
         .map(|p| {
             p.param_type
                 .as_ref()
-                .map(|t| lower_param_type_string(t.as_str()))
-                .unwrap_or(Ty::Unknown)
+                .map(|t| lower_param_type_string_typeid(db, t.as_str()))
+                .unwrap_or_else(|| db.unknown())
         })
         .collect();
 
     // Tabular-section methods can also be multi-overload
     // (e.g. `ТаблицаЗначений.Скопировать` has 4 variants). Same
     // conservative lowering — no row-generic rebinding for params.
-    let overloads: Vec<Vec<Ty>> = method
+    let overloads: Vec<Vec<TypeId>> = method
         .variants
         .iter()
         .map(|v| {
@@ -1343,26 +1128,32 @@ pub(crate) fn build_tabular_section_method_info(
                 .map(|p| {
                     p.param_type
                         .as_ref()
-                        .map(|t| lower_param_type_string(t.as_str()))
-                        .unwrap_or(Ty::Unknown)
+                        .map(|t| lower_param_type_string_typeid(db, t.as_str()))
+                        .unwrap_or_else(|| db.unknown())
                 })
                 .collect()
         })
         .collect();
 
-    MethodInfoTy { return_ty, params, overloads }
+    MethodInfo { return_ty, params, overloads }
 }
 
-fn rewrite_row_generic(ty: Ty, parent: MdoType, section_name: &Name) -> Ty {
-    match ty {
-        Ty::PlatformObject(ref n) if is_tabular_row_type_name(n.as_str()) => Ty::MetadataRef {
-            kind: MetadataKind::TabularSectionRow { parent },
-            name: section_name.clone(),
-        },
-        Ty::Union(members) => Ty::union(
-            members.iter().map(|m| rewrite_row_generic(m.clone(), parent, section_name)).collect(),
+fn rewrite_row_generic(
+    db: &dyn TypeKernelDb,
+    id: TypeId,
+    parent: MdoType,
+    section_name: &Name,
+) -> TypeId {
+    match db.lookup_type(id) {
+        TypeKind::PlatformObject(f) if is_tabular_row_type_name(&f.name) => db.metadata_ref(
+            MetadataKind::TabularSectionRow { parent },
+            section_name.as_str().to_string(),
+            &RootConfigCtx,
         ),
-        other => other,
+        TypeKind::Union(members) => db.union(
+            members.iter().map(|m| rewrite_row_generic(db, *m, parent, section_name)).collect(),
+        ),
+        _ => id,
     }
 }
 
@@ -1385,23 +1176,23 @@ fn rewrite_row_generic(ty: Ty, parent: MdoType, section_name: &Name) -> Ty {
 /// chained `.<row-field>` access on them correctly stays `Unknown`
 /// rather than being rebound to a row schema that wouldn't apply.
 fn rewrite_row_array_for_method(
-    ty: Ty,
+    db: &dyn TypeKernelDb,
+    id: TypeId,
     method_name: &str,
     parent: MdoType,
     section_name: &Name,
-) -> Ty {
+) -> TypeId {
     if !is_row_array_method(method_name) {
-        return ty;
+        return id;
     }
-    let row = Ty::MetadataRef {
-        kind: MetadataKind::TabularSectionRow { parent },
-        name: section_name.clone(),
-    };
-    match ty {
-        Ty::Array => Ty::TypedArray(Box::new(row)),
-        // Already typed by the JSON / earlier rewrite — leave it.
-        Ty::TypedArray(_) => ty,
-        other => other,
+    let row = db.metadata_ref(
+        MetadataKind::TabularSectionRow { parent },
+        section_name.as_str().to_string(),
+        &RootConfigCtx,
+    );
+    match db.lookup_type(id) {
+        TypeKind::Array(f) if f.element.is_none() => db.array(Some(row)),
+        _ => id,
     }
 }
 
@@ -1430,17 +1221,17 @@ mod tests {
     use bsl_types::testing::InMemoryDb;
     use hir_def::ty::MetadataKind;
 
-    /// Phase 3 §4.E.2b-ii test shim: the public `lookup_method` now takes
-    /// `db` + an interned `TypeId` receiver and returns a kernel-native
-    /// `MethodInfo`. These tests build readable `Ty` fixtures, so this
-    /// helper interns the `&Ty` receiver and bridges the kernel *result*
-    /// back to the `Ty`-typed [`MethodInfoTy`] the assertions inspect. A
-    /// fresh sandbox [`InMemoryDb`] per call is fine — platform lookup is
-    /// stateless w.r.t. the intern table.
-    fn lookup(recv: &Ty, method: &Name) -> Option<MethodInfoTy> {
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct TyMethodInfo {
+        return_ty: Ty,
+        params: Vec<Ty>,
+        overloads: Vec<Vec<Ty>>,
+    }
+
+    fn lookup(recv: &Ty, method: &Name) -> Option<TyMethodInfo> {
         let db = InMemoryDb::new();
         let info = super::lookup_method(&db, ty_to_typeid(&db, recv), method)?;
-        Some(MethodInfoTy {
+        Some(TyMethodInfo {
             return_ty: typeid_to_ty(&db, info.return_ty),
             params: info.params.iter().map(|id| typeid_to_ty(&db, *id)).collect(),
             overloads: info
@@ -1526,55 +1317,65 @@ mod tests {
         }
     }
 
-    #[test]
-    fn kernel_native_predicate_twins_match_ty_helpers() {
+    fn to_ty_method_info(method: &PlatformMethod) -> TyMethodInfo {
         let db = InMemoryDb::new();
-        let projection = projection(&db);
-        let cases = vec![
-            Ty::ValueTable { projection: None },
-            Ty::ValueTable { projection: Some(projection.clone()) },
-            Ty::PlatformObject(Name::new("ТаблицаЗначений")),
-            Ty::PlatformObject(Name::new("ДеревоЗначений")),
-            Ty::QueryResult { projection: None },
-            Ty::QueryResult { projection: Some(projection.clone()) },
-            Ty::PlatformObject(Name::new("РезультатЗапроса")),
-            Ty::PlatformObject(Name::new("Запрос")),
-            Ty::Undefined,
-        ];
-
-        for ty in cases {
-            let id = ty_to_typeid(&db, &ty);
-            assert_eq!(is_value_table_arm_id(&db, id), is_value_table_arm(&ty), "{ty:?}");
-            assert_eq!(is_value_tree_arm_id(&db, id), is_value_tree_arm(&ty), "{ty:?}");
-            assert_eq!(
-                is_query_result_receiver_id(&db, id),
-                is_query_result_receiver(&ty),
-                "{ty:?}"
-            );
+        let info = to_method_info(&db, method);
+        TyMethodInfo {
+            return_ty: typeid_to_ty(&db, info.return_ty),
+            params: info.params.iter().map(|id| typeid_to_ty(&db, *id)).collect(),
+            overloads: info
+                .overloads
+                .iter()
+                .map(|row| row.iter().map(|id| typeid_to_ty(&db, *id)).collect())
+                .collect(),
         }
     }
 
     #[test]
-    fn kernel_native_receiver_refinement_twin_matches_ty_helper() {
+    fn kernel_native_predicates_match_expected_shapes() {
         let db = InMemoryDb::new();
         let projection = projection(&db);
-        let cases = vec![
-            query_ty(vec![None]),
-            query_ty(vec![Some(projection)]),
-            query_ty(Vec::new()),
-            Ty::PlatformObject(Name::new("Запрос")),
-            Ty::PlatformObject(Name::new("РезультатЗапроса")),
-            Ty::Undefined,
+        let cases = [
+            (Ty::ValueTable { projection: None }, true, false, false),
+            (Ty::ValueTable { projection: Some(projection.clone()) }, true, false, false),
+            (Ty::PlatformObject(Name::new("ТаблицаЗначений")), true, false, false),
+            (Ty::PlatformObject(Name::new("ДеревоЗначений")), false, true, false),
+            (Ty::QueryResult { projection: None }, false, false, true),
+            (Ty::QueryResult { projection: Some(projection.clone()) }, false, false, true),
+            (Ty::PlatformObject(Name::new("РезультатЗапроса")), false, false, true),
+            (Ty::PlatformObject(Name::new("Запрос")), false, false, false),
+            (Ty::Undefined, false, false, false),
         ];
 
-        for ty in cases {
+        for (ty, is_table, is_tree, is_result) in cases {
             let id = ty_to_typeid(&db, &ty);
-            assert_eq!(receiver_needs_refinement_id(&db, id), receiver_needs_refinement(&ty));
+            assert_eq!(is_value_table_arm_id(&db, id), is_table, "{ty:?}");
+            assert_eq!(is_value_tree_arm_id(&db, id), is_tree, "{ty:?}");
+            assert_eq!(is_query_result_receiver_id(&db, id), is_result, "{ty:?}");
         }
     }
 
     #[test]
-    fn kernel_native_projection_reader_twins_match_ty_helpers() {
+    fn kernel_native_receiver_refinement_matches_expected_shapes() {
+        let db = InMemoryDb::new();
+        let projection = projection(&db);
+        let cases = [
+            (query_ty(vec![None]), true),
+            (query_ty(vec![Some(projection)]), false),
+            (query_ty(Vec::new()), true),
+            (Ty::PlatformObject(Name::new("Запрос")), true),
+            (Ty::PlatformObject(Name::new("РезультатЗапроса")), false),
+            (Ty::Undefined, false),
+        ];
+
+        for (ty, expected) in cases {
+            let id = ty_to_typeid(&db, &ty);
+            assert_eq!(receiver_needs_refinement_id(&db, id), expected, "{ty:?}");
+        }
+    }
+
+    #[test]
+    fn kernel_native_projection_readers_match_expected_shapes() {
         let db = InMemoryDb::new();
         let projection = projection(&db);
         let query_cases = vec![
@@ -1588,14 +1389,33 @@ mod tests {
             let id = ty_to_typeid(&db, &ty);
             assert_eq!(
                 projection_result_id(&db, projection_of_query_receiver_id(&db, id)),
-                projection_result_expected_id(&db, projection_of_query_receiver(&ty)),
+                projection_result_expected_id(
+                    &db,
+                    match &ty {
+                        Ty::Query { projections } => Some(projections.last().cloned().flatten()),
+                        Ty::PlatformObject(n) if is_platform_name(n, "Запрос", "Query") => {
+                            Some(None)
+                        }
+                        _ => None,
+                    },
+                ),
                 "{ty:?}"
             );
             assert_eq!(
                 projections_of_query_receiver_id(&db, id)
                     .map(|projections| db.query_batch_result(projections)),
-                projections_of_query_receiver(&ty)
-                    .map(|per_query| ty_to_typeid(&db, &Ty::QueryBatchResult { per_query })),
+                match &ty {
+                    Ty::Query { projections } => {
+                        Some(ty_to_typeid(
+                            &db,
+                            &Ty::QueryBatchResult { per_query: projections.clone() },
+                        ))
+                    }
+                    Ty::PlatformObject(n) if is_platform_name(n, "Запрос", "Query") => {
+                        Some(ty_to_typeid(&db, &Ty::QueryBatchResult { per_query: Arc::from([]) }))
+                    }
+                    _ => None,
+                },
                 "{ty:?}"
             );
         }
@@ -1611,7 +1431,18 @@ mod tests {
             let id = ty_to_typeid(&db, &ty);
             assert_eq!(
                 projection_selection_id(&db, projection_of_query_result_receiver_id(&db, id)),
-                projection_selection_expected_id(&db, projection_of_query_result_receiver(&ty)),
+                projection_selection_expected_id(
+                    &db,
+                    match &ty {
+                        Ty::QueryResult { projection } => Some(projection.clone()),
+                        Ty::PlatformObject(n)
+                            if is_platform_name(n, "РезультатЗапроса", "QueryResult") =>
+                        {
+                            Some(None)
+                        }
+                        _ => None,
+                    },
+                ),
                 "{ty:?}"
             );
         }
@@ -1621,9 +1452,9 @@ mod tests {
         db: &dyn TypeKernelDb,
         receiver: Ty,
         method_name: &str,
+        expected: Option<(ChainTarget, Ty)>,
     ) {
         let actual = pick_chain_rewrite_id(db, ty_to_typeid(db, &receiver), method_name);
-        let expected = pick_chain_rewrite(&receiver, method_name);
         match (actual, expected) {
             (Some((actual_target, actual_replacement)), Some((expected_target, expected_ty))) => {
                 assert_eq!(actual_target, expected_target);
@@ -1645,36 +1476,69 @@ mod tests {
             &db,
             query_ty(vec![Some(projection.clone())]),
             "Выполнить",
+            Some((
+                ChainTarget::PlatformObjectNamed {
+                    ru: "РезультатЗапроса", en: "QueryResult"
+                },
+                Ty::QueryResult { projection: Some(projection.clone()) },
+            )),
         );
         assert_pick_chain_rewrite_twin_matches_ty(
             &db,
             Ty::PlatformObject(Name::new("Запрос")),
             "execute",
+            Some((
+                ChainTarget::PlatformObjectNamed {
+                    ru: "РезультатЗапроса", en: "QueryResult"
+                },
+                Ty::QueryResult { projection: None },
+            )),
         );
         assert_pick_chain_rewrite_twin_matches_ty(
             &db,
             Ty::QueryResult { projection: Some(projection.clone()) },
             "Выбрать",
+            Some((
+                ChainTarget::PlatformObjectNamed {
+                    ru: "ВыборкаИзРезультатаЗапроса",
+                    en: "QueryResultSelection",
+                },
+                Ty::QueryResultSelection { projection: Some(projection.clone()) },
+            )),
         );
         assert_pick_chain_rewrite_twin_matches_ty(
             &db,
             Ty::PlatformObject(Name::new("РезультатЗапроса")),
             "choose",
+            Some((
+                ChainTarget::PlatformObjectNamed {
+                    ru: "ВыборкаИзРезультатаЗапроса",
+                    en: "QueryResultSelection",
+                },
+                Ty::QueryResultSelection { projection: None },
+            )),
         );
+        let batch_projection = projection.clone();
         assert_pick_chain_rewrite_twin_matches_ty(
             &db,
             query_ty(vec![None, Some(projection)]),
             "ВыполнитьПакет",
+            Some((
+                ChainTarget::AnyArray,
+                Ty::QueryBatchResult { per_query: Arc::from([None, Some(batch_projection)]) },
+            )),
         );
         assert_pick_chain_rewrite_twin_matches_ty(
             &db,
             Ty::PlatformObject(Name::new("Запрос")),
             "executebatch",
+            Some((ChainTarget::AnyArray, Ty::QueryBatchResult { per_query: Arc::from([]) })),
         );
         assert_pick_chain_rewrite_twin_matches_ty(
             &db,
             Ty::PlatformObject(Name::new("Запрос")),
             "Колонки",
+            None,
         );
     }
 
@@ -1690,8 +1554,29 @@ mod tests {
             target.clone(),
             ty_to_typeid(db, &replacement),
         );
-        let expected = rewrite_chain_arm_in_return(return_ty, target, &replacement);
-        assert_eq!(actual, ty_to_typeid(db, &expected));
+        let expected = ty_to_typeid(db, &replacement);
+        if matches!(return_ty, Ty::Union(_)) {
+            let expected_return = match return_ty {
+                Ty::Union(arms) => Ty::union(
+                    arms.iter()
+                        .map(|arm| match (&target, arm) {
+                            (
+                                ChainTarget::PlatformObjectNamed { ru, en },
+                                Ty::PlatformObject(name),
+                            ) if is_platform_name(name, ru, en) => replacement.clone(),
+                            (ChainTarget::AnyArray, Ty::Array | Ty::TypedArray(_)) => {
+                                replacement.clone()
+                            }
+                            _ => arm.clone(),
+                        })
+                        .collect(),
+                ),
+                _ => unreachable!(),
+            };
+            assert_eq!(actual, ty_to_typeid(db, &expected_return));
+        } else {
+            assert_eq!(actual, expected);
+        }
     }
 
     #[test]
@@ -1742,14 +1627,30 @@ mod tests {
                 ty_to_typeid(&db, &ty),
                 Some(kernel_projection.clone()),
             );
-            let expected = attach_projection_to_value_table(ty, Some(projection.clone()));
+            let expected = match ty {
+                Ty::ValueTable { projection: None } => {
+                    Ty::ValueTable { projection: Some(projection.clone()) }
+                }
+                Ty::Union(members) => Ty::Union(
+                    members
+                        .iter()
+                        .map(|arm| match arm {
+                            Ty::ValueTable { projection: None } => {
+                                Ty::ValueTable { projection: Some(projection.clone()) }
+                            }
+                            _ => arm.clone(),
+                        })
+                        .collect(),
+                ),
+                other => other,
+            };
             assert_eq!(actual, ty_to_typeid(&db, &expected));
         }
 
         let no_projection_input = Ty::ValueTable { projection: None };
         assert_eq!(
             attach_projection_to_value_table_id(&db, ty_to_typeid(&db, &no_projection_input), None),
-            ty_to_typeid(&db, &attach_projection_to_value_table(no_projection_input, None))
+            ty_to_typeid(&db, &no_projection_input)
         );
     }
 
@@ -1763,17 +1664,17 @@ mod tests {
 
         assert_eq!(
             drop_union_arm_id(&db, ty_to_typeid(&db, &input), is_value_tree_arm_id),
-            ty_to_typeid(&db, &drop_union_arm(input.clone(), is_value_tree_arm))
+            ty_to_typeid(&db, &Ty::ValueTable { projection: None })
         );
         assert_eq!(
             drop_union_arm_id(&db, ty_to_typeid(&db, &input), is_value_table_arm_id),
-            ty_to_typeid(&db, &drop_union_arm(input.clone(), is_value_table_arm))
+            ty_to_typeid(&db, &Ty::PlatformObject(Name::new("ДеревоЗначений")))
         );
 
         let non_union = Ty::ValueTable { projection: None };
         assert_eq!(
             drop_union_arm_id(&db, ty_to_typeid(&db, &non_union), is_value_tree_arm_id),
-            ty_to_typeid(&db, &drop_union_arm(non_union, is_value_tree_arm))
+            ty_to_typeid(&db, &non_union)
         );
     }
 
@@ -1899,7 +1800,8 @@ mod tests {
         // `Ty::Unknown` so the call-site `is_assignable` check accepts
         // any actual via gradual typing rather than false-firing
         // structural-equality `TypeMismatch`.
-        let info = to_method_info(&test_method(Some("Число, Неопределено"), Some("Метаданные,")));
+        let info =
+            to_ty_method_info(&test_method(Some("Число, Неопределено"), Some("Метаданные,")));
         assert_eq!(info.return_ty, Ty::union(vec![Ty::Number, Ty::Undefined]));
         assert_eq!(
             info.params,
@@ -1917,7 +1819,7 @@ mod tests {
         // segment fails type validation, so we collapse to
         // `Ty::Unknown` rather than a strict
         // `Ty::PlatformObject("Ссылка на объект, либо …")`.
-        let info = to_method_info(&test_method(None, Some("Ссылка на объект, либо")));
+        let info = to_ty_method_info(&test_method(None, Some("Ссылка на объект, либо")));
         assert_eq!(info.params, vec![Ty::Unknown]);
     }
 
@@ -1929,7 +1831,7 @@ mod tests {
         // call-site argument check. Routing this through
         // `lower_return_type_string` would lift to a structural
         // `PlatformObject`, falsely rejecting valid args.
-        let info = to_method_info(&test_method(None, Some("Строка табличной части")));
+        let info = to_ty_method_info(&test_method(None, Some("Строка табличной части")));
         assert_eq!(info.params, vec![Ty::Unknown]);
     }
 
@@ -1941,7 +1843,7 @@ mod tests {
         // `is_assignable` check at the call site accepts a `Ty::String`
         // arg without false-firing `TypeMismatch`.
         let info =
-            to_method_info(&test_method(None, Some("Число, Строка, КолонкаТаблицыЗначений")));
+            to_ty_method_info(&test_method(None, Some("Число, Строка, КолонкаТаблицыЗначений")));
         match &info.params[..] {
             [Ty::Union(members)] => {
                 assert!(members.contains(&Ty::Number));
@@ -1962,7 +1864,7 @@ mod tests {
         // surface as `Ty::Unknown` through `to_method_info`, so that
         // call-site argument checks against it stay quiet under the
         // gradual rule.
-        let info = to_method_info(&test_method(Some("Произвольный"), None));
+        let info = to_ty_method_info(&test_method(Some("Произвольный"), None));
         assert_eq!(info.return_ty, Ty::Unknown);
     }
 
@@ -2521,13 +2423,16 @@ mod tests {
         // arm must remain untouched.
         let input =
             Ty::union(vec![Ty::PlatformObject(Name::new("РезультатЗапроса")), Ty::Undefined]);
-        let rewritten = rewrite_chain_arm_in_return(
-            input,
+        let db = InMemoryDb::new();
+        let rewritten_id = rewrite_chain_arm_in_return_id(
+            &db,
+            ty_to_typeid(&db, &input),
             ChainTarget::PlatformObjectNamed {
                 ru: "РезультатЗапроса", en: "QueryResult"
             },
-            &Ty::QueryResult { projection: None },
+            ty_to_typeid(&db, &Ty::QueryResult { projection: None }),
         );
+        let rewritten = typeid_to_ty(&db, rewritten_id);
         match rewritten {
             Ty::Union(arms) => {
                 assert_eq!(arms.len(), 2);
