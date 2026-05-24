@@ -41,12 +41,13 @@
 
 use bsl_config::VisibleConfig;
 use bsl_metadata::{MdoType, MetadataObject};
+use bsl_types::builders::Builders;
 use bsl_types::intern::TypeKernelDb;
-use bsl_types::kind::TypeId;
-use hir_def::ty::{MetadataKind, Ty};
+use bsl_types::kind::{ConfigId, MetadataKind, TypeId, TypeKind};
+use bsl_types::testing::RootConfigCtx;
 use hir_def::Name;
 
-use crate::ty_bridge::{ty_to_typeid, typeid_to_ty};
+use crate::this_object::FixedConfigCtx;
 
 /// Result of a successful manager-member lookup.
 ///
@@ -73,20 +74,37 @@ pub fn lookup_manager_field(
     receiver: TypeId,
     member: &Name,
 ) -> Option<ManagerMemberInfo> {
-    let base_ty = typeid_to_ty(db, receiver);
-    lookup_manager_field_inner(db, configs, &base_ty, member)
+    lookup_manager_field_inner(db, configs, receiver, member)
 }
 
 fn lookup_manager_field_inner(
     db: &dyn TypeKernelDb,
     configs: &[VisibleConfig],
-    base_ty: &Ty,
+    receiver: TypeId,
     member: &Name,
 ) -> Option<ManagerMemberInfo> {
-    match base_ty {
-        Ty::ManagerCollection(kind) => promote_collection_member(db, configs, *kind, member),
-        Ty::ObjectManager { kind, name } => lookup_predefined(db, configs, *kind, name, member),
-        _ => None,
+    // Extract owned receiver data before any config walk / builder
+    // callback re-borrows `db`.
+    enum Shape {
+        Collection(MdoType),
+        Manager { mdo: MdoType, name: String, config_id: ConfigId },
+        Other,
+    }
+    let shape = match db.lookup_type(receiver) {
+        TypeKind::ManagerCollection(kind) => Shape::Collection(*kind),
+        TypeKind::ObjectManager(facet) => Shape::Manager {
+            mdo: facet.mdo,
+            name: facet.name.clone(),
+            config_id: facet.config_id.clone(),
+        },
+        _ => Shape::Other,
+    };
+    match shape {
+        Shape::Collection(kind) => promote_collection_member(db, configs, kind, member),
+        Shape::Manager { mdo, name, config_id } => {
+            lookup_predefined(db, configs, mdo, &name, member, &config_id)
+        }
+        Shape::Other => None,
     }
 }
 
@@ -111,8 +129,13 @@ fn promote_collection_member(
     });
 
     exists.then(|| {
-        let ty = Ty::ObjectManager { kind, name: mdo_name.clone() };
-        ManagerMemberInfo { ty: ty_to_typeid(db, &ty) }
+        // `ManagerCollection` carries no `config_id`, so the promoted
+        // `ObjectManager` resolves under `Root` — faithful to the prior
+        // `Ty` bridge default. Config-lossy for CFE managers; revisited
+        // if `ManagerCollection` ever gains a config carrier.
+        ManagerMemberInfo {
+            ty: db.object_manager(kind, mdo_name.as_str().to_string(), &RootConfigCtx),
+        }
     })
 }
 
@@ -129,11 +152,12 @@ pub(crate) fn lookup_predefined(
     db: &dyn TypeKernelDb,
     configs: &[VisibleConfig],
     kind: MdoType,
-    owner_name: &Name,
+    owner_name: &str,
     member_name: &Name,
+    config_id: &ConfigId,
 ) -> Option<ManagerMemberInfo> {
     let ref_kind = predefined_ref_kind_for(kind)?;
-    let mdo = find_mdo(configs, kind, owner_name.as_str())?;
+    let mdo = find_mdo(configs, kind, owner_name)?;
     let hit = match kind {
         MdoType::Enum => mdo.find_enum_value(member_name.as_str()).is_some(),
         MdoType::Catalog | MdoType::ChartOfAccounts => {
@@ -143,8 +167,11 @@ pub(crate) fn lookup_predefined(
     };
 
     hit.then(|| {
-        let ty = Ty::MetadataRef { kind: ref_kind, name: owner_name.clone() };
-        ManagerMemberInfo { ty: ty_to_typeid(db, &ty) }
+        // The receiver `ObjectManager` facet carried a `config_id`; thread
+        // it onto the resolved ref so a CFE-scoped manager keeps its
+        // extension config (the old `Ty` path defaulted to `Root`).
+        let cfg = FixedConfigCtx(config_id.clone());
+        ManagerMemberInfo { ty: db.metadata_ref(ref_kind, owner_name.to_string(), &cfg) }
     })
 }
 
@@ -177,9 +204,11 @@ fn find_mdo<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ty_bridge::{ty_to_typeid, typeid_to_ty};
     use bsl_config::VisibleConfig;
     use bsl_metadata::metadata_object::{EnumValue, PredefinedItem};
     use bsl_metadata::Configuration;
+    use hir_def::ty::Ty;
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct ManagerMemberInfoForTest {
