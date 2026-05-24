@@ -63,7 +63,7 @@ use hir_def::{DefDatabase, Name};
 /// native `ThisObject` / `ThisManager` facet straight onto the coerced
 /// `MetadataRef` / `ObjectManager`, instead of re-resolving (the `Ty`
 /// path loses it to `Root`).
-struct FixedConfigCtx(ConfigId);
+pub(crate) struct FixedConfigCtx(pub(crate) ConfigId);
 
 impl ConfigCtx for FixedConfigCtx {
     fn resolve_config_id(&self, _kind: MetadataKind, _name: &bsl_metadata::Name) -> ConfigId {

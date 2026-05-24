@@ -18,15 +18,17 @@ use bsl_metadata::{AttributeType, MdoType, MetadataObject, RegisterPeriodicity};
 use bsl_platform::{
     standard_attributes_for, MdoTemplateKind, ObjectView, PlatformData, StandardKind,
 };
+use bsl_types::builders::Builders;
 use bsl_types::intern::TypeKernelDb;
-use bsl_types::kind::TypeId;
+use bsl_types::kind::{ConfigId, TypeId, TypeKind};
 use hir_def::ty::{MetadataKind, Ty};
 use hir_def::type_ref::TypeRef;
 use hir_def::Name;
 
 use crate::lower::metadata_resolver::ConfigsResolver;
 use crate::lower::TyLoweringContext;
-use crate::ty_bridge::{ty_to_typeid, typeid_to_ty};
+use crate::this_object::FixedConfigCtx;
+use crate::ty_bridge::ty_to_typeid;
 
 /// Where a field came from.
 ///
@@ -90,72 +92,96 @@ pub fn enumerate_fields(
     configs: &[VisibleConfig],
     receiver_ty: &Ty,
 ) -> Vec<FieldInfo> {
-    enumerate_fields_inner(db, configs, receiver_ty)
+    // §4.E.4d: public boundary stays `&Ty` (external callers in
+    // module_implicit/type_facade not flipped yet). Intern at the edge
+    // and delegate to the kernel-native inner.
+    enumerate_fields_inner(db, configs, ty_to_typeid(db, receiver_ty))
 }
 
 pub(crate) fn enumerate_fields_inner(
     db: &dyn TypeKernelDb,
     configs: &[VisibleConfig],
-    receiver_ty: &Ty,
+    receiver: TypeId,
 ) -> Vec<FieldInfo> {
-    // Symmetric with `lookup_field`: `Ty::FormData{Structure | StructureWithCollection,
+    // Symmetric with `lookup_field`: `FormData{Structure | StructureWithCollection,
     // underlying: Some((mdo, name))}` projects to `MetadataRef{*Object, name}`
     // so the MDO's attributes/tabular sections are enumerable for hover and
     // completion on `Объект.|`. Without this projection `Type::fields()`
     // would return empty for FormData receivers, and IDE would only see the
     // bare `ДанныеФормыСтруктура` platform properties.
-    let projected_form_data = crate::field_lookup::project_form_data_for_fields(receiver_ty);
-    let receiver_ty = projected_form_data.as_ref().unwrap_or(receiver_ty);
+    let projected_form_data = crate::field_lookup::project_form_data_for_fields_id(db, receiver);
+    let receiver = projected_form_data.unwrap_or(receiver);
 
-    let coerced = crate::this_object::coerce_to_metadata_ref(receiver_ty);
-    let ty = coerced.as_ref().unwrap_or(receiver_ty);
+    let ty = crate::this_object::coerce_to_metadata_ref_id(db, receiver).unwrap_or(receiver);
 
-    // `Ty::ThisManager` coerces to `Ty::ObjectManager`, which has no
-    // enumerable attribute table here (managers only expose predefined
-    // items via the `ManagerCollection` indexing path, not via field
-    // lookup). The match below short-circuits non-MetadataRef receivers
-    // to an empty Vec — same shape `Документы.ПКО` enumeration returned
-    // pre-Step-J. Predefined-item enumeration is a separate enhancement.
+    // `ThisManager` coerces to `ObjectManager`, which has no enumerable
+    // attribute table here (managers only expose predefined items via the
+    // `ManagerCollection` indexing path, not via field lookup). The match
+    // below short-circuits non-MetadataRef receivers to an empty Vec —
+    // same shape `Документы.ПКО` enumeration returned pre-Step-J.
 
-    if let Some(infos) = enumerate_projection_fields(ty) {
+    if let Some(infos) = enumerate_projection_fields(db, ty) {
         return infos;
     }
 
-    if let Ty::Union(arms) = ty {
-        let mut out: Vec<FieldInfo> = Vec::new();
-        let mut seen: std::collections::HashSet<Name> = std::collections::HashSet::new();
-        for arm in arms.iter().filter(|t| !matches!(t, Ty::Undefined | Ty::Null)) {
-            for info in enumerate_fields_inner(db, configs, arm) {
-                push_unique(&mut out, &mut seen, info);
-            }
-        }
-        return out;
+    // Extract owned receiver data before any recursion / builder callback
+    // (the `&TypeKind` borrow from `lookup_type` cannot be held across
+    // a recursive `enumerate_fields_inner` or a `db.metadata_ref`).
+    enum Shape {
+        Union(Vec<TypeId>),
+        MetadataRef { kind: MetadataKind, name: Name, config_id: ConfigId },
+        Other,
     }
-
-    let Ty::MetadataRef { kind, name } = ty else {
-        return Vec::new();
+    let shape = match db.lookup_type(ty) {
+        TypeKind::Union(arms) => Shape::Union(arms.to_vec()),
+        TypeKind::MetadataRef(facet) => Shape::MetadataRef {
+            kind: facet.kind,
+            name: Name::new(facet.name.as_str()),
+            config_id: facet.config_id.clone(),
+        },
+        _ => Shape::Other,
     };
 
-    if let Some(mdo_type) = mdo_type_for_kind(*kind) {
-        return enumerate_mdo_fields(db, configs, *kind, mdo_type, name);
+    match shape {
+        Shape::Union(arms) => {
+            let mut out: Vec<FieldInfo> = Vec::new();
+            let mut seen: std::collections::HashSet<Name> = std::collections::HashSet::new();
+            for arm in arms {
+                if matches!(db.lookup_type(arm), TypeKind::Undefined | TypeKind::Null) {
+                    continue;
+                }
+                for info in enumerate_fields_inner(db, configs, arm) {
+                    push_unique(&mut out, &mut seen, info);
+                }
+            }
+            out
+        }
+        Shape::MetadataRef { kind, name, config_id } => {
+            if let Some(mdo_type) = mdo_type_for_kind(kind) {
+                return enumerate_mdo_fields(db, configs, kind, mdo_type, &name, &config_id);
+            }
+            if let Some(parent) = register_parent_for_kind(kind) {
+                return enumerate_register_fields(db, configs, kind, parent, &name, &config_id);
+            }
+            if let MetadataKind::RegisterFilter { parent } = kind {
+                return enumerate_filter_fields(db, configs, parent, &name);
+            }
+            if let MetadataKind::TabularSectionRow { parent } = kind {
+                let Some((parent_name, section_name)) = split_parent_section(name.as_str()) else {
+                    return Vec::new();
+                };
+                return enumerate_tabular_row_fields(
+                    db,
+                    configs,
+                    parent,
+                    parent_name,
+                    section_name,
+                );
+            }
+            Vec::new()
+        }
+        Shape::Other => Vec::new(),
     }
-
-    if let Some(parent) = register_parent_for_kind(*kind) {
-        return enumerate_register_fields(db, configs, *kind, parent, name);
-    }
-
-    if let MetadataKind::RegisterFilter { parent } = kind {
-        return enumerate_filter_fields(db, configs, *parent, name);
-    }
-
-    if let MetadataKind::TabularSectionRow { parent } = kind {
-        let Some((parent_name, section_name)) = split_parent_section(name.as_str()) else {
-            return Vec::new();
-        };
-        return enumerate_tabular_row_fields(db, configs, *parent, parent_name, section_name);
-    }
-
-    Vec::new()
 }
 
 /// Surface the SDBL projection columns of a
@@ -179,23 +205,22 @@ pub(crate) fn enumerate_fields_inner(
 /// resolves a single named column on the same shape — the projection
 /// arm is the IDE-completion sibling of the inference-time field
 /// lookup.
-fn enumerate_projection_fields(ty: &Ty) -> Option<Vec<FieldInfo>> {
-    let projection = match ty {
-        Ty::QueryResultSelection { projection: Some(p) } => p,
-        // Phase H Slice 3 — projected `Ty::ValueTableRow` surfaces
-        // its columns through the same completion / hover pipe as
-        // `Ty::QueryResultSelection`, keeping the SDBL projection
-        // visible after the `.Выгрузить()` chain.
-        Ty::ValueTableRow { projection: Some(p) } => p,
+fn enumerate_projection_fields(db: &dyn TypeKernelDb, ty: TypeId) -> Option<Vec<FieldInfo>> {
+    let projection = match db.lookup_type(ty) {
+        TypeKind::QueryResultSelection(facet) => facet.projection.clone()?,
+        // Phase H Slice 3 — projected `ValueTableRow` surfaces its columns
+        // through the same completion / hover pipe as `QueryResultSelection`,
+        // keeping the SDBL projection visible after the `.Выгрузить()` chain.
+        TypeKind::ValueTableRow(facet) => facet.projection.clone()?,
         _ => return None,
     };
     let fields = projection
         .fields
         .iter()
-        .map(|(name, field_ty)| FieldInfo {
-            name: name.clone(),
+        .map(|f| FieldInfo {
+            name: Name::new(f.name.as_str()),
             name_en: None,
-            ty: *field_ty,
+            ty: f.ty,
             value_ty: None,
             is_readonly: true,
             origin: FieldOrigin::UserAttribute,
@@ -256,14 +281,16 @@ fn is_record_kind(kind: MetadataKind) -> bool {
 /// / standard attribute always wins on a name collision (`push_unique`
 /// keeps the first push). This preserves the priority `mdo.attributes`
 /// → tabular sections → HBK platform properties.
+#[allow(clippy::too_many_arguments)]
 fn push_platform_prefix_properties(
     db: &dyn TypeKernelDb,
     kind: MetadataKind,
     mdo_type: MdoType,
     mdo_name: &Name,
+    config_id: &ConfigId,
     out: &mut Vec<FieldInfo>,
     seen: &mut std::collections::HashSet<Name>,
-    mut ty_override: impl FnMut(&str) -> Option<Ty>,
+    mut ty_override: impl FnMut(&str) -> Option<TypeId>,
 ) {
     let Some(prefix) = kind.platform_prefix() else {
         return;
@@ -285,16 +312,14 @@ fn push_platform_prefix_properties(
         // `ДокументОбъект`, `Ссылка` → `ДокументСсылка`, …) with the
         // base platform-type name, not the composite `<Prefix>.<MDO>`
         // shape. `to_resolution` therefore yields a generic
-        // `Ty::PlatformObject(base)`, which kills chain typing:
+        // `PlatformObject(base)`, which kills chain typing:
         // `Док.ЭтотОбъект.Записать()` would not see `Записать` because
         // the receiver type lost its MDO anchor. Specialize the
-        // self-base name back to a concrete `MetadataRef` pinned to
-        // this receiver's `mdo_name` so the chain stays typed. Bridge
-        // the kernel `return_ty` to `Ty` for the still-`Ty`-native
-        // `specialize_self_ref_ty` (flips at §4.E.4d).
-        let return_ty = typeid_to_ty(db, res.return_ty);
-        let specialized = specialize_self_ref_ty(mdo_type, mdo_name, &return_ty);
-        let ty = ty_override(prop.name.as_str()).or(specialized).unwrap_or(return_ty);
+        // self-base name back to a concrete `MetadataRef` pinned to this
+        // receiver's `mdo_name` (and its `config_id`) so the chain stays
+        // typed.
+        let specialized = specialize_self_ref_ty(db, mdo_type, mdo_name, config_id, res.return_ty);
+        let ty = ty_override(prop.name.as_str()).or(specialized).unwrap_or(res.return_ty);
         let info = FieldInfo {
             name: Name::new(prop.name.as_str()),
             // english_name shape: `<Type>.<Name>.<Property>` (composite).
@@ -303,7 +328,7 @@ fn push_platform_prefix_properties(
             // A dot-free `english_name` returns itself via `rsplit`,
             // matching the bilingual-key convention used elsewhere.
             name_en: Some(Name::new(en_tail)),
-            ty: ty_to_typeid(db, &ty),
+            ty,
             value_ty: None,
             is_readonly: res.is_readonly,
             origin: FieldOrigin::PlatformProperty,
@@ -334,17 +359,27 @@ fn push_platform_prefix_properties(
 /// a Catalog points at the *owner* catalog, not self — those are
 /// configurator-conditional and handled by the spec's `HasOwners`
 /// path, not by this cascade).
-fn specialize_self_ref_ty(mdo_type: MdoType, mdo_name: &Name, ty: &Ty) -> Option<Ty> {
-    let Ty::PlatformObject(base) = ty else {
+fn specialize_self_ref_ty(
+    db: &dyn TypeKernelDb,
+    mdo_type: MdoType,
+    mdo_name: &Name,
+    config_id: &ConfigId,
+    ty: TypeId,
+) -> Option<TypeId> {
+    let TypeKind::PlatformObject(facet) = db.lookup_type(ty) else {
         return None;
     };
-    let base = base.as_str();
+    let base = facet.name.as_str().to_string();
     let candidates = [MetadataKind::object_kind_for(mdo_type), ref_kind_for_mdo(mdo_type)];
     for candidate in candidates.into_iter().flatten() {
         let ru = candidate.display_label(base_db::Locale::Ru);
         let en = candidate.display_label(base_db::Locale::En);
-        if eq_yo_insensitive(base, ru) || base == en {
-            return Some(Ty::MetadataRef { kind: candidate, name: mdo_name.clone() });
+        if eq_yo_insensitive(&base, ru) || base == en {
+            // Preserve the receiver's `config_id` so a CFE-scoped self-ref
+            // keeps its extension config (the old `Ty` path defaulted to
+            // `Root`). Mirrors §4.E.4a's `coerce_to_metadata_ref_id`.
+            let cfg = FixedConfigCtx(config_id.clone());
+            return Some(db.metadata_ref(candidate, mdo_name.as_str().to_string(), &cfg));
         }
     }
     None
@@ -439,6 +474,7 @@ fn enumerate_mdo_fields(
     kind: MetadataKind,
     mdo_type: MdoType,
     mdo_name: &Name,
+    config_id: &ConfigId,
 ) -> Vec<FieldInfo> {
     for cfg in configs.iter().rev() {
         let Some(mdo) = cfg.configuration.find_metadata_object(mdo_type, mdo_name.as_str()) else {
@@ -502,9 +538,16 @@ fn enumerate_mdo_fields(
         // (`ЭтотОбъект` → `ДокументОбъект`, `Ссылка` → `ДокументСсылка`,
         // …) can be re-typed to a concrete `MetadataRef` anchored on
         // this receiver, restoring chain typing.
-        push_platform_prefix_properties(db, kind, mdo_type, mdo_name, &mut out, &mut seen, |_| {
-            None
-        });
+        push_platform_prefix_properties(
+            db,
+            kind,
+            mdo_type,
+            mdo_name,
+            config_id,
+            &mut out,
+            &mut seen,
+            |_| None,
+        );
 
         return out;
     }
@@ -517,6 +560,7 @@ fn enumerate_register_fields(
     kind: MetadataKind,
     parent: MdoType,
     register_name: &Name,
+    config_id: &ConfigId,
 ) -> Vec<FieldInfo> {
     for cfg in configs.iter().rev() {
         let Some(register) =
@@ -633,11 +677,12 @@ fn enumerate_register_fields(
             kind,
             parent,
             register_name,
+            config_id,
             &mut out,
             &mut seen,
             |prop_name| {
                 if is_record_kind(kind) && is_recorder_name(prop_name) {
-                    recorder_union_ty(configs, parent, register_name)
+                    recorder_union_ty(configs, parent, register_name).map(|t| ty_to_typeid(db, &t))
                 } else {
                     None
                 }
