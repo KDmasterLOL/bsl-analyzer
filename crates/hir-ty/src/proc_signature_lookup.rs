@@ -42,11 +42,11 @@ use bsl_types::kind::TypeId;
 pub fn resolve_workspace_method(db: &dyn HirDatabase, method_id: MethodId) -> MethodInfo {
     let method_input = MethodIdInput::new(db, method_id);
     let signature = proc_signature_query(db, method_input);
-    // Phase 3 §4.E.2a: the public `MethodInfo` is kernel-native; bridge
-    // the workspace signature's `Ty` return / params to interned ids.
+    // Phase 3 §4.B: `ProcSignature` is kernel-native — its fields are already
+    // interned ids, so the `MethodInfo` slots copy through with no bridge.
     MethodInfo {
-        return_ty: crate::ty_bridge::ty_to_typeid(db, &signature.return_ty),
-        params: signature.params.iter().map(|t| crate::ty_bridge::ty_to_typeid(db, t)).collect(),
+        return_ty: signature.return_ty,
+        params: signature.params.clone(),
         overloads: Vec::new(),
     }
 }
@@ -55,11 +55,10 @@ pub fn resolve_workspace_method(db: &dyn HirDatabase, method_id: MethodId) -> Me
 /// handy when callers want the return type and want to skip the
 /// per-parameter `clone`.
 ///
-/// Phase 3 §4.G.5a: kernel-native return — interns the workspace
-/// signature's still-`Ty` `return_ty` at this boundary. `ProcSignature`
-/// itself stays `Ty` until the Phase 4 internal-core migration.
+/// Phase 3 §4.B: `ProcSignature::return_ty` is a kernel-native id, so this
+/// returns it directly — the §4.G.5a bridge is gone.
 pub fn resolve_workspace_return_ty(db: &dyn HirDatabase, method_id: MethodId) -> TypeId {
     let method_input = MethodIdInput::new(db, method_id);
     let signature = proc_signature_query(db, method_input);
-    crate::ty_bridge::ty_to_typeid(db, &signature.return_ty)
+    signature.return_ty
 }

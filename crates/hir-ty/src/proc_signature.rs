@@ -33,6 +33,7 @@
 
 use std::sync::Arc;
 
+use bsl_types::builders::Builders;
 use bsl_types::intern::TypeKernelDb;
 use bsl_types::kind::TypeId;
 use hir_def::docs::{MethodDocs, ParameterDoc};
@@ -40,9 +41,7 @@ use hir_def::symbol_tree::ParamSymbol;
 use hir_def::{MethodIdInput, Name};
 
 use crate::db::HirDatabase;
-use crate::lower::type_string::{lower_param_type_string, lower_return_type_string};
-use crate::ty_bridge::ty_to_typeid;
-use crate::Ty;
+use crate::lower::type_string::{lower_param_type_string_typeid, lower_return_type_string_typeid};
 
 /// Lowered signature of a workspace-defined procedure / function.
 ///
@@ -52,35 +51,18 @@ use crate::Ty;
 /// that platform methods use today.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcSignature {
-    /// Parameter types, in declaration order. Slots that the docstring
-    /// omits stay `Ty::Unknown` so call-site `is_assignable` accepts any
-    /// actual via gradual typing.
-    pub params: Vec<Ty>,
-    /// Return type. `Ty::Unknown` when the docstring omits the
-    /// `Возвращаемое значение:` section. Body-walked return-from-`Возврат`
-    /// inference was dropped in Phase O.16b to break the
-    /// `proc_signature_query → infer_query → infer_method →
-    /// proc_signature_query` self-edge introduced by O.16a; cascade
-    /// typing recovers the same precision via
-    /// [`crate::method_graph::method_return_type_query`] at the call
-    /// site.
-    pub return_ty: Ty,
-}
-
-impl ProcSignature {
-    /// Kernel-native projection of [`Self::return_ty`].
-    ///
-    /// §4.C accessor — bridges via §4.A `ty_to_typeid`.
-    #[allow(dead_code, reason = "Phase 3 §4.C — consumers migrate in 4.D-4.E")]
-    pub fn return_typeid(&self, db: &dyn TypeKernelDb) -> TypeId {
-        ty_to_typeid(db, &self.return_ty)
-    }
-
-    /// Kernel-native projection of [`Self::params`].
-    #[allow(dead_code, reason = "Phase 3 §4.C — consumers migrate in 4.D-4.E")]
-    pub fn params_typeid(&self, db: &dyn TypeKernelDb) -> Vec<TypeId> {
-        self.params.iter().map(|t| ty_to_typeid(db, t)).collect()
-    }
+    /// Parameter types (interned ids), in declaration order. Slots that
+    /// the docstring omits stay `db.unknown()` so call-site `is_assignable`
+    /// accepts any actual via gradual typing.
+    pub params: Vec<TypeId>,
+    /// Return type (interned id). `db.unknown()` when the docstring omits
+    /// the `Возвращаемое значение:` section. Body-walked
+    /// return-from-`Возврат` inference was dropped in Phase O.16b to break
+    /// the `proc_signature_query → infer_query → infer_method →
+    /// proc_signature_query` self-edge introduced by O.16a; cascade typing
+    /// recovers the same precision via
+    /// [`crate::method_graph::method_return_type_query`] at the call site.
+    pub return_ty: TypeId,
 }
 
 /// Salsa-tracked query: lower a workspace method's signature.
@@ -104,32 +86,32 @@ pub fn proc_signature_query<'db>(
 
     let symbol_tree = db.symbol_tree(method_id.module);
     let Some(method_symbol) = symbol_tree.find_method_by_id(method_id) else {
-        return Arc::new(ProcSignature { params: Vec::new(), return_ty: Ty::Unknown });
+        return Arc::new(ProcSignature { params: Vec::new(), return_ty: db.unknown() });
     };
 
     let docs = method_symbol.docs.as_deref();
-    let params = lower_params(method_symbol.params.as_slice(), docs);
+    let params = lower_params(db, method_symbol.params.as_slice(), docs);
 
     // Procedures never carry a return type — match the platform-method
-    // path (`return_type: None` → `Ty::Undefined`) so consumers can
-    // use a single sentinel for "no return".
+    // path (`return_type: None` → `Undefined`) so consumers can use a
+    // single sentinel for "no return".
     let return_ty = if !method_symbol.is_function {
-        Ty::Undefined
-    } else if let Some(docs_return_ty) = docs.and_then(lower_return_from_docs) {
+        db.undefined()
+    } else if let Some(docs_return_ty) = docs.and_then(|d| lower_return_from_docs(db, d)) {
         // Docstring `Возвращаемое значение:` is present — its lowered
-        // type wins, even when it lowers to `Ty::Unknown` (the user
-        // wrote `Произвольный` and we honour that gradual claim
-        // instead of second-guessing via body inference).
+        // type wins, even when it lowers to `Unknown` (the user wrote
+        // `Произвольный` and we honour that gradual claim instead of
+        // second-guessing via body inference).
         docs_return_ty
     } else {
-        // Phase O.16b: docstring-less return drops to `Ty::Unknown`.
+        // Phase O.16b: docstring-less return drops to `Unknown`.
         // The previous body-walk path (`db.infer(file_id)` →
         // `expr_types_by_body[Method(local_id)]` → union over
         // `Stmt::Return`s) was a self-edge through the O.16a
         // `infer_query` wrapper. Cascade typing recovers the same
         // precision at the call site via
         // [`crate::method_graph::method_return_type_query`].
-        Ty::Unknown
+        db.unknown()
     };
 
     Arc::new(ProcSignature { params, return_ty })
@@ -152,12 +134,16 @@ fn collect_return_value_exprs(body: &hir_def::Body) -> Vec<hir_def::ExprId> {
         .collect()
 }
 
-fn lower_params(decl_params: &[ParamSymbol], docs: Option<&MethodDocs>) -> Vec<Ty> {
+fn lower_params(
+    db: &dyn TypeKernelDb,
+    decl_params: &[ParamSymbol],
+    docs: Option<&MethodDocs>,
+) -> Vec<TypeId> {
     decl_params
         .iter()
         .map(|p| match docs.and_then(|d| find_param_doc(d, &p.name)) {
-            Some(param_doc) => lower_one_param_doc(param_doc),
-            None => Ty::Unknown,
+            Some(param_doc) => lower_one_param_doc(db, param_doc),
+            None => db.unknown(),
         })
         .collect()
 }
@@ -168,12 +154,12 @@ fn find_param_doc<'a>(docs: &'a MethodDocs, name: &Name) -> Option<&'a Parameter
     docs.parameters.iter().find(|p| p.name.to_lowercase() == needle)
 }
 
-fn lower_one_param_doc(param: &ParameterDoc) -> Ty {
+fn lower_one_param_doc(db: &dyn TypeKernelDb, param: &ParameterDoc) -> TypeId {
     if param.types.is_empty() {
-        return Ty::Unknown;
+        return db.unknown();
     }
     if param.types.len() == 1 {
-        return lower_param_type_string(&param.types[0].name);
+        return lower_param_type_string_typeid(db, &param.types[0].name);
     }
     // Multiple `TypeDoc` entries are already a parsed union per the
     // doc grammar. Re-joining with `, ` and routing through the
@@ -182,22 +168,22 @@ fn lower_one_param_doc(param: &ParameterDoc) -> Ty {
     // the `Произвольный` collapse in one place rather than
     // re-implementing them here.
     let joined = param.types.iter().map(|t| t.name.as_str()).collect::<Vec<_>>().join(", ");
-    lower_param_type_string(&joined)
+    lower_param_type_string_typeid(db, &joined)
 }
 
 /// Lower the docstring's `Возвращаемое значение:` section.
 ///
 /// Returns `None` when the section is absent — that's the signal the
 /// caller uses to fall through to body-walk inference. Returns
-/// `Some(ty)` whenever the section is present, even when `ty` collapses
-/// to `Ty::Unknown` (e.g., the user wrote `Произвольный`): an explicit
+/// `Some(id)` whenever the section is present, even when it collapses to
+/// `db.unknown()` (e.g., the user wrote `Произвольный`): an explicit
 /// "any" claim is still the user's claim and wins over body inference.
-fn lower_return_from_docs(docs: &MethodDocs) -> Option<Ty> {
+fn lower_return_from_docs(db: &dyn TypeKernelDb, docs: &MethodDocs) -> Option<TypeId> {
     if docs.returned_value.is_empty() {
         return None;
     }
     let joined = docs.returned_value.iter().map(|t| t.name.as_str()).collect::<Vec<_>>().join(", ");
-    Some(lower_return_type_string(&joined))
+    Some(lower_return_type_string_typeid(db, &joined))
 }
 
 #[cfg(test)]
@@ -206,17 +192,14 @@ mod tests {
     use crate::ty_bridge::typeid_to_ty;
     use bsl_types::testing::InMemoryDb;
     use hir_def::docs::TypeDoc;
+    use hir_def::ty::Ty;
     use hir_def::{Body, ExprId, IdConversion, Stmt};
 
-    /// §4.C drift-detector: kernel-native accessor mirrors the Ty fields.
-    #[test]
-    fn proc_signature_typeid_round_trips_via_ty() {
-        let db = InMemoryDb::new();
-        let sig = ProcSignature { params: vec![Ty::Number, Ty::String], return_ty: Ty::Boolean };
-        assert_eq!(typeid_to_ty(&db, sig.return_typeid(&db)), sig.return_ty);
-        let pids = sig.params_typeid(&db);
-        let pids_via_ty: Vec<Ty> = pids.iter().map(|id| typeid_to_ty(&db, *id)).collect();
-        assert_eq!(pids_via_ty, sig.params);
+    /// Bridge interned param ids back to `Ty` for readable assertions. The
+    /// minting is byte-exact with the legacy `Ty` path (§4.A.2 drift tests),
+    /// so the round-trip is lossless for these primitive/union cases.
+    fn as_ty(db: &InMemoryDb, ids: &[TypeId]) -> Vec<Ty> {
+        ids.iter().map(|id| typeid_to_ty(db, *id)).collect()
     }
 
     fn typedoc(name: &str) -> TypeDoc {
@@ -252,8 +235,9 @@ mod tests {
 
     #[test]
     fn no_decl_params_yields_empty_signature() {
+        let db = InMemoryDb::new();
         let d = docs(Vec::new(), Vec::new());
-        assert_eq!(lower_params(&[], Some(&d)), Vec::<Ty>::new());
+        assert!(lower_params(&db, &[], Some(&d)).is_empty());
     }
 
     #[test]
@@ -261,54 +245,62 @@ mod tests {
         // Headline contract: declaration drives arity. The doc has nothing
         // for `Б`, so slot index 1 must be `Ty::Unknown`, not collapse the
         // signature.
+        let db = InMemoryDb::new();
         let d = docs(vec![param_doc("А", vec![typedoc("Число")])], Vec::new());
-        let params = lower_params(&[decl_param("А"), decl_param("Б")], Some(&d));
-        assert_eq!(params, vec![Ty::Number, Ty::Unknown]);
+        let params = lower_params(&db, &[decl_param("А"), decl_param("Б")], Some(&d));
+        assert_eq!(as_ty(&db, &params), vec![Ty::Number, Ty::Unknown]);
     }
 
     #[test]
     fn out_of_order_doc_matches_by_name_not_position() {
+        let db = InMemoryDb::new();
         let d = docs(
             vec![param_doc("Б", vec![typedoc("Строка")]), param_doc("А", vec![typedoc("Число")])],
             Vec::new(),
         );
-        let params = lower_params(&[decl_param("А"), decl_param("Б")], Some(&d));
-        assert_eq!(params, vec![Ty::Number, Ty::String]);
+        let params = lower_params(&db, &[decl_param("А"), decl_param("Б")], Some(&d));
+        assert_eq!(as_ty(&db, &params), vec![Ty::Number, Ty::String]);
     }
 
     #[test]
     fn name_match_is_case_insensitive() {
         // BSL identifiers are case-insensitive; the matcher follows.
+        let db = InMemoryDb::new();
         let d = docs(vec![param_doc("ПАРАМЕТР", vec![typedoc("Число")])], Vec::new());
-        let params = lower_params(&[decl_param("параметр")], Some(&d));
-        assert_eq!(params, vec![Ty::Number]);
+        let params = lower_params(&db, &[decl_param("параметр")], Some(&d));
+        assert_eq!(as_ty(&db, &params), vec![Ty::Number]);
     }
 
     #[test]
     fn no_docs_at_all_keeps_every_slot_unknown() {
-        let params = lower_params(&[decl_param("А"), decl_param("Б")], None);
-        assert_eq!(params, vec![Ty::Unknown, Ty::Unknown]);
+        let db = InMemoryDb::new();
+        let params = lower_params(&db, &[decl_param("А"), decl_param("Б")], None);
+        assert_eq!(as_ty(&db, &params), vec![Ty::Unknown, Ty::Unknown]);
     }
 
     #[test]
     fn single_unrecognised_param_stays_unknown_for_gradual_typing() {
         // Same asymmetry as the platform-method path.
+        let db = InMemoryDb::new();
         let d = docs(vec![param_doc("X", vec![typedoc("СтрокаТабличнойЧасти")])], Vec::new());
-        let params = lower_params(&[decl_param("X")], Some(&d));
-        assert_eq!(params, vec![Ty::Unknown]);
+        let params = lower_params(&db, &[decl_param("X")], Some(&d));
+        assert_eq!(as_ty(&db, &params), vec![Ty::Unknown]);
     }
 
     #[test]
     fn multi_typedoc_param_joins_into_union() {
+        let db = InMemoryDb::new();
         let d = docs(vec![param_doc("X", vec![typedoc("Число"), typedoc("Строка")])], Vec::new());
-        let params = lower_params(&[decl_param("X")], Some(&d));
-        assert_eq!(params, vec![Ty::union(vec![Ty::Number, Ty::String])]);
+        let params = lower_params(&db, &[decl_param("X")], Some(&d));
+        assert_eq!(as_ty(&db, &params), vec![Ty::union(vec![Ty::Number, Ty::String])]);
     }
 
     #[test]
     fn return_section_lowers_through_return_pipeline() {
+        let db = InMemoryDb::new();
         let d = docs(Vec::new(), vec![typedoc("Булево"), typedoc("Неопределено")]);
-        assert_eq!(lower_return_from_docs(&d), Some(Ty::union(vec![Ty::Boolean, Ty::Undefined])),);
+        let ret = lower_return_from_docs(&db, &d).map(|id| typeid_to_ty(&db, id));
+        assert_eq!(ret, Some(Ty::union(vec![Ty::Boolean, Ty::Undefined])));
     }
 
     #[test]
@@ -317,16 +309,19 @@ mod tests {
         // collapses to `Ty::Unknown`, but the section IS present —
         // wrap in `Some` so the caller knows not to fall through to
         // body inference.
+        let db = InMemoryDb::new();
         let d = docs(Vec::new(), vec![typedoc("Произвольный"), typedoc("Неопределено")]);
-        assert_eq!(lower_return_from_docs(&d), Some(Ty::Unknown));
+        let ret = lower_return_from_docs(&db, &d).map(|id| typeid_to_ty(&db, id));
+        assert_eq!(ret, Some(Ty::Unknown));
     }
 
     #[test]
     fn return_section_absent_returns_none() {
         // No `Возвращаемое значение:` line in the docstring — the
         // caller falls through to body inference.
+        let db = InMemoryDb::new();
         let d = docs(Vec::new(), Vec::new());
-        assert_eq!(lower_return_from_docs(&d), None);
+        assert_eq!(lower_return_from_docs(&db, &d), None);
     }
 
     #[test]
