@@ -11,7 +11,8 @@ use bsl_platform::{
     TypeNameInput,
 };
 use hir::{
-    classify_token, kernel_type_label, Field, NameClass, Semantics, Ty, Type as HirType, TypeId,
+    classify_token, kernel_type_label, platform_type_key_id, Field, NameClass, Semantics, Ty,
+    Type as HirType, TypeId, TypeKind,
 };
 use ide_db::base_db::Locale;
 use ide_db::RootDatabase;
@@ -87,14 +88,11 @@ fn hover_field<DB: RootDatabase>(
     locale: Locale,
 ) -> Option<HoverResult> {
     let sema = Semantics::new(db);
-    // Phase 3 §4.G.5b: `Semantics::type_of_expr` is kernel-native; bridge to
-    // `Ty` for the still-`Ty` hover helpers below (those move to the kernel
-    // in Phase 4).
-    let receiver_ty = hir::ty_bridge::typeid_to_ty(db, sema.type_of_expr(file_id, receiver));
+    let receiver_id = sema.type_of_expr(file_id, receiver);
     let name = token.text();
     let range = token.text_range();
 
-    let property = || hover_platform_property_on_ty(db, &receiver_ty, name, range);
+    let property = || hover_platform_property_on_ty(db, receiver_id, name, range);
     let method = || hover_platform_method_on_token(db, &sema, file_id, token);
 
     if is_call {
@@ -113,7 +111,7 @@ fn hover_field<DB: RootDatabase>(
         }
     }
 
-    if let Some(field) = mdo_field_on_ty(db, file_id, &receiver_ty, name) {
+    if let Some(field) = mdo_field_on_id(db, file_id, receiver_id, name) {
         if field.value_ty.is_some() {
             return Some(render_mdo_field_hover(db, &field, name, range, locale));
         }
@@ -153,14 +151,14 @@ fn hover_field<DB: RootDatabase>(
     None
 }
 
-fn mdo_field_on_ty<DB: RootDatabase>(
+fn mdo_field_on_id<DB: RootDatabase>(
     db: &DB,
     file_id: FileId,
-    receiver_ty: &Ty,
+    receiver: TypeId,
     field_name: &str,
 ) -> Option<Field> {
     let needle = field_name.to_lowercase();
-    HirType::new(db, file_id, receiver_ty.clone()).fields().into_iter().find(|field| {
+    HirType::from_id(db, file_id, receiver).fields().into_iter().find(|field| {
         field.name.as_str().to_lowercase() == needle
             || field.english_name.as_str().to_lowercase() == needle
     })
@@ -337,23 +335,21 @@ fn append_hbk_mdo_plural_metadata(markup: &mut String, mdo_type: bsl_metadata::M
     append_availability(markup, prop.context.as_ref());
 }
 
-/// Look up a property on `receiver_ty` and render its hover markup.
+/// Look up a property on `receiver` and render its hover markup.
 /// No-op for unknown receivers or non-platform-value type shapes.
 fn hover_platform_property_on_ty<DB: RootDatabase>(
     db: &DB,
-    receiver_ty: &Ty,
+    receiver: TypeId,
     prop_name: &str,
     range: TextRange,
 ) -> Option<HoverResult> {
-    if receiver_ty.is_unknown() {
-        return None;
-    }
     // Form-control receivers carry an ordered platform-type chain
     // `[base, extension?]` — walk reversed (extension first) so
     // hover for `<Pages>.ТекущаяСтраница` finds the extension docs,
     // and falls back to base for shared properties (`Видимость`, …).
-    if let Ty::FormControl { kind, .. } = receiver_ty {
-        for type_name in hir::form_control_platform_type_chain(*kind).iter().rev() {
+    if let TypeKind::FormControl { kind, .. } = db.lookup_type(receiver) {
+        let kind = *kind;
+        for type_name in hir::form_control_platform_type_chain(kind).iter().rev() {
             let input = MethodLookupInput::new(db, type_name.to_string(), prop_name.to_string());
             if let Some(prop) = platform_property_query(db, input) {
                 return Some(render_property_hover(&prop, range));
@@ -361,8 +357,9 @@ fn hover_platform_property_on_ty<DB: RootDatabase>(
         }
         return None;
     }
-    let type_key = receiver_ty.platform_type_name()?;
-    let input = MethodLookupInput::new(db, type_key.to_string(), prop_name.to_string());
+    // Unknown / non-platform-value receivers have no scalar key → no-op.
+    let type_key = platform_type_key_id(db, receiver)?;
+    let input = MethodLookupInput::new(db, type_key, prop_name.to_string());
     let prop = platform_property_query(db, input)?;
     Some(render_property_hover(&prop, range))
 }
