@@ -170,6 +170,8 @@ pub use hir_ty::{
     UnresolvedMethodKind,
 };
 
+use bsl_types::builders::Builders;
+use bsl_types::kind::TypeKind;
 use syntax::{ast::AstNode, TextRange};
 use vfs::FileId;
 
@@ -732,9 +734,9 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
     ///   expressions live in successor BasicBlocks whose IN has the
     ///   narrowing applied).
     ///
-    /// Returns [`Ty::Unknown`] when the node isn't an expression (no
-    /// `ExprId` binding) or when inference produced no entry for it.
-    pub fn type_of_expr(&self, file_id: FileId, node: &syntax::SyntaxNode) -> Ty {
+    /// Returns the kernel `Unknown` id when the node isn't an expression
+    /// (no `ExprId` binding) or when inference produced no entry for it.
+    pub fn type_of_expr(&self, file_id: FileId, node: &syntax::SyntaxNode) -> TypeId {
         let module_id = ModuleId::new(file_id);
         let module_bodies = self.db.module_bodies(module_id);
         let range = node.text_range();
@@ -750,17 +752,11 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
             if let Some(expr_id) = result.source_map.expr_at_range(range) {
                 let owner = DefWithBodyId::ModuleCode;
                 let routed = infer_owner(self.db, file_id, owner);
-                // Phase 3 §4.D: accessor bridges `TypeId` → owned `Ty`
-                // via the type kernel; the `Semantics` boundary keeps
-                // its `Ty` surface intact.
-                let base = routed.type_of_expr(self.db, expr_id).unwrap_or(Ty::Unknown);
-                // Phase 3 §4.G.3: `narrow_or_base` operates in kernel
-                // `TypeId` space; bridge in/out so `Semantics` keeps its
-                // `Ty` surface. The full TypeId flip lands in §4.G.5.
-                let base_id = hir_ty::ty_bridge::ty_to_typeid(self.db, &base);
-                let narrowed =
-                    narrow_or_base(self.db, file_id, owner, &result.body, expr_id, base_id);
-                return hir_ty::ty_bridge::typeid_to_ty(self.db, narrowed);
+                // Phase 3 §4.G.5b: the `Semantics` boundary is kernel-native.
+                // Read the raw interned base id and let `narrow_or_base`
+                // overlay the narrowed arm-set — all in `TypeId` space.
+                let base_id = routed.type_id_of_expr(expr_id).unwrap_or_else(|| self.db.unknown());
+                return narrow_or_base(self.db, file_id, owner, &result.body, expr_id, base_id);
             }
         }
 
@@ -772,15 +768,12 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
             if let Some(expr_id) = source_map.expr_at_range(range) {
                 let owner = DefWithBodyId::Method(local_id);
                 let routed = infer_owner(self.db, file_id, owner);
-                let base = routed.type_of_expr(self.db, expr_id).unwrap_or(Ty::Unknown);
-                // Phase 3 §4.G.3: bridge through kernel `TypeId` space.
-                let base_id = hir_ty::ty_bridge::ty_to_typeid(self.db, &base);
-                let narrowed = narrow_or_base(self.db, file_id, owner, body, expr_id, base_id);
-                return hir_ty::ty_bridge::typeid_to_ty(self.db, narrowed);
+                let base_id = routed.type_id_of_expr(expr_id).unwrap_or_else(|| self.db.unknown());
+                return narrow_or_base(self.db, file_id, owner, body, expr_id, base_id);
             }
         }
 
-        Ty::Unknown
+        self.db.unknown()
     }
 
     /// Resolve a syntax range to the inferred [`Ty`] of the binding declared
@@ -805,7 +798,7 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
     /// of `file_id`, or when inference produced no entry for the
     /// binding (e.g. a bare `Перем X` with no subsequent assignment, or
     /// a parameter — those aren't pinned by the declaration-site arms).
-    pub fn type_of_binding_at(&self, file_id: FileId, range: TextRange) -> Option<Ty> {
+    pub fn type_of_binding_at(&self, file_id: FileId, range: TextRange) -> Option<TypeId> {
         let module_id = ModuleId::new(file_id);
         let module_bodies = self.db.module_bodies(module_id);
 
@@ -814,15 +807,15 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
         if let Some(result) = module_bodies.module_code_result() {
             if let Some(binding_id) = result.source_map.binding_at_range(range) {
                 let routed = infer_owner(self.db, file_id, DefWithBodyId::ModuleCode);
-                // Phase 3 §4.D: accessor bridges `TypeId` → owned `Ty`.
-                return routed.type_of_binding(self.db, binding_id);
+                // Phase 3 §4.G.5b: kernel-native boundary — return the raw id.
+                return routed.type_id_of_binding(binding_id);
             }
         }
 
         for (local_id, _body, source_map) in module_bodies.method_bodies() {
             if let Some(binding_id) = source_map.binding_at_range(range) {
                 let routed = infer_owner(self.db, file_id, DefWithBodyId::Method(local_id));
-                return routed.type_of_binding(self.db, binding_id);
+                return routed.type_id_of_binding(binding_id);
             }
         }
 
@@ -876,12 +869,15 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
         }
 
         let receiver_node = field_name_receiver(token)?;
-        let receiver_ty = self.type_of_expr(file_id, &receiver_node);
-        if matches!(receiver_ty, Ty::Unknown) {
+        let receiver_id = self.type_of_expr(file_id, &receiver_node);
+        if matches!(self.db.lookup_type(receiver_id), TypeKind::Unknown) {
             return None;
         }
 
         let method_name = Name::new(token.text());
+        // Phase 3 §4.G.5b: `resolve_method` is internal hir-ty API still on
+        // `Ty` (Phase 4) — bridge the kernel id at this call boundary.
+        let receiver_ty = hir_ty::ty_bridge::typeid_to_ty(self.db, receiver_id);
         let resolution = hir_ty::resolve_method(self.db, &receiver_ty, &method_name)?;
 
         Some(Definition::BuiltinMethodHandle { handle: resolution.handle, method_name })

@@ -5,7 +5,9 @@
 //! wire shape instead of duplicating name-resolution and type-dispatch rules.
 
 use crate::{Definition, Name, NameClass, ReferenceScope, Semantics};
+use bsl_types::kind::{TypeId, TypeKind};
 use hir_def::{DefDatabase, DefWithBodyId, ExprId, MethodId, ModuleId};
+use hir_ty::ty_bridge::ty_to_typeid;
 use hir_ty::{db::HirDatabase, ImplicitLocalInfo, Ty};
 use syntax::{TextRange, TextSize};
 use vfs::FileId;
@@ -40,7 +42,7 @@ pub struct SemanticSymbol {
     pub kind: SemanticSymbolKind,
     pub definition: Option<Definition>,
     pub declaration: Option<SymbolDeclaration>,
-    pub ty: Option<Ty>,
+    pub ty: Option<TypeId>,
 }
 
 impl SemanticSymbol {
@@ -148,14 +150,13 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
         receiver: &syntax::SyntaxNode,
         token: &syntax::SyntaxToken,
     ) -> Option<SemanticSymbol> {
-        let receiver_ty = self.type_of_expr(file_id, receiver);
-        if receiver_ty.is_unknown() {
+        let receiver_id = self.type_of_expr(file_id, receiver);
+        if matches!(self.db.lookup_type(receiver_id), TypeKind::Unknown) {
             return None;
         }
 
         let configs = self.db.configurations(file_id);
         let name = Name::new(token.text());
-        let receiver_id = hir_ty::ty_bridge::ty_to_typeid(self.db, &receiver_ty);
         let field = hir_ty::lookup_field(self.db, &configs, receiver_id, &name)?;
         Some(SemanticSymbol {
             key: SemanticSymbolKey::TypedMember { file_id, range: token.text_range() },
@@ -163,7 +164,7 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
             kind: SemanticSymbolKind::Property,
             definition: None,
             declaration: None,
-            ty: Some(hir_ty::ty_bridge::typeid_to_ty(self.db, field.ty)),
+            ty: Some(field.ty),
         })
     }
 
@@ -236,7 +237,10 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
                 name: implicit.name.clone(),
                 kind: SemanticSymbolKind::Variable,
             }),
-            ty: Some(ty),
+            // Phase 3 §4.G.5b: `select_implicit_local_declaration` works in
+            // `Ty` space (ImplicitLocalInfo is internal, Phase 4); intern at
+            // this boundary so the public symbol carries a kernel id.
+            ty: Some(ty_to_typeid(self.db, &ty)),
         })
     }
 
@@ -315,7 +319,7 @@ fn select_implicit_local_declaration(
 fn symbol_from_definition(
     db: &dyn hir_def::DefDatabase,
     definition: Definition,
-    ty: Option<Ty>,
+    ty: Option<TypeId>,
 ) -> SemanticSymbol {
     let name = definition.name(db).unwrap_or_else(Name::missing);
     let kind = kind_for_definition(&definition);

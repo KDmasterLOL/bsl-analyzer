@@ -75,7 +75,10 @@ pub fn resolve_callee_at<DB: RootDatabase>(
         // `platform_method_query("Массив", "Добавить")` would otherwise
         // return the wrong overload for the shadowed receiver.
         let sema = Semantics::new(db);
-        let ty = sema.type_of_expr(file_id, &receiver_node);
+        // Phase 3 §4.G.5b: `Semantics::type_of_expr` is kernel-native; bridge
+        // to `Ty` for the still-`Ty` `platform_type_name`/`Union` matching
+        // below (those move to the kernel in Phase 4).
+        let ty = hir::ty_bridge::typeid_to_ty(db, sema.type_of_expr(file_id, &receiver_node));
         if let Some(type_name) = ty.platform_type_name() {
             if platform_method_query(
                 db,

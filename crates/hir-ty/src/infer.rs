@@ -2045,9 +2045,12 @@ impl<'db> InferenceContext<'db> {
         // 4 platform) so both the bare-IDENT and the typed-receiver
         // paths agree on user-shadows-platform.
         if !user_shadows && !workspace_owns_common_module {
-            if let Some(ty) =
-                crate::platform_global_lookup::resolve_platform_global_property_type(name)
+            // Phase 3 §4.G.5b: the helper is kernel-native now; bridge the
+            // id back into this still-`Ty` inference path (Phase 4 removes it).
+            if let Some(id) =
+                crate::platform_global_lookup::resolve_platform_global_property_type(self.db, name)
             {
+                let ty = typeid_to_ty(self.db, id);
                 trace!("resolved {} as platform global → {:?}", name, ty);
                 return ty;
             }

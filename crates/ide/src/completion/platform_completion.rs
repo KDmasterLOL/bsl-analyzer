@@ -73,7 +73,12 @@ pub(super) fn platform_completions<DB: RootDatabase>(
     // completion no longer dips into `PlatformData::instance()` for
     // receiver resolution.
     let sema = Semantics::new(db);
-    let mut receiver_ty = sema.type_of_expr(position.file_id, &receiver_expr);
+    // Phase 3 §4.G.5b: `Semantics::type_of_expr` is kernel-native; bridge to
+    // `Ty` for the still-`Ty` receiver cascade below (FormControl matching,
+    // `lower_bare_name`, prefix-method helpers — all move to the kernel in
+    // Phase 4).
+    let mut receiver_ty =
+        hir::ty_bridge::typeid_to_ty(db, sema.type_of_expr(position.file_id, &receiver_expr));
 
     // Fallback: a bare identifier that HIR couldn't resolve — typically
     // a literal type name (`Строка.`) or a platform constructor name
@@ -141,8 +146,8 @@ pub(super) fn platform_completions<DB: RootDatabase>(
             // Routed through the shared `hir::resolve_platform_global_property_type`
             // facade so the IDE doesn't dip into `PlatformDataInner::instance()`
             // directly; same helper drives `infer.rs::infer_path_name` step 6.
-            if let Some(ty) = hir::resolve_platform_global_property_type(&name_node) {
-                receiver_ty = ty;
+            if let Some(id) = hir::resolve_platform_global_property_type(db, &name_node) {
+                receiver_ty = hir::ty_bridge::typeid_to_ty(db, id);
             }
             if receiver_ty.is_unknown() {
                 receiver_ty = TyLoweringContext::new().lower_bare_name(&name_node);

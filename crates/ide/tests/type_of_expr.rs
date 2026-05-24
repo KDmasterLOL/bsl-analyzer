@@ -146,7 +146,7 @@ fn type_of_call_expr_matches_infer() {
         root.descendants().filter_map(ast::Literal::cast).next().expect("fixture has a literal");
 
     assert_eq!(
-        sema.type_of_expr(file_id, literal.syntax()),
+        hir::ty_bridge::typeid_to_ty(&db, sema.type_of_expr(file_id, literal.syntax())),
         Ty::Number,
         "Semantics::type_of_expr must return Ty::Number for literal `42`"
     );
@@ -186,7 +186,7 @@ fn type_of_module_level_expr_resolves() {
         root.descendants().filter_map(ast::Literal::cast).next().expect("fixture has a literal");
 
     assert_eq!(
-        sema.type_of_expr(file_id, literal.syntax()),
+        hir::ty_bridge::typeid_to_ty(&db, sema.type_of_expr(file_id, literal.syntax())),
         Ty::Number,
         "Semantics::type_of_expr must resolve the module-level `42` literal"
     );
@@ -237,7 +237,7 @@ fn type_of_field_expr_matches_infer() {
     let field = first_field_expr(&root, "Реквизит2").expect("fixture has С.Реквизит2");
 
     assert_eq!(
-        sema.type_of_expr(file_id, field.syntax()),
+        hir::ty_bridge::typeid_to_ty(&db, sema.type_of_expr(file_id, field.syntax())),
         Ty::Number,
         "Semantics::type_of_expr on a field access must agree with inference (Ty::Number)"
     );
@@ -277,7 +277,7 @@ fn type_of_expr_unknown_for_non_expression_node() {
     let sema = Semantics::new(&db);
     let parse = db.parse(file_id);
     let root = parse.syntax_node();
-    assert_eq!(sema.type_of_expr(file_id, &root), Ty::Unknown);
+    assert_eq!(hir::ty_bridge::typeid_to_ty(&db, sema.type_of_expr(file_id, &root)), Ty::Unknown);
 }
 
 #[test]
@@ -306,7 +306,7 @@ fn type_of_expr_covers_call_site() {
     let root = parse.syntax_node();
     let call = first_call_expr(&root, "Сумма").expect("fixture has a Сумма() call");
     assert_eq!(
-        sema.type_of_expr(file_id, call.syntax()),
+        hir::ty_bridge::typeid_to_ty(&db, sema.type_of_expr(file_id, call.syntax())),
         Ty::Number,
         "type_of_expr on a CallExpr must reflect the JSDoc-lowered return type"
     );

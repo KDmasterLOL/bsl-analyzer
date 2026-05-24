@@ -29,6 +29,8 @@
 //!   platform return types are bare type names without form / mdo
 //!   context, so the empty context is sufficient.
 
+use bsl_types::intern::TypeKernelDb;
+use bsl_types::kind::TypeId;
 use hir_def::ty::Ty;
 use hir_def::Name;
 
@@ -115,13 +117,20 @@ pub(crate) fn try_resolve_platform_global_member(
 /// this helper both call sites lowered through identical inline code
 /// against the same singleton, easy to drift.
 ///
-/// Pure function — no `db` dependency, same `PlatformDataInner` singleton
-/// the rest of this module reads.
-pub fn resolve_platform_global_property_type(name: &Name) -> Option<Ty> {
+/// Reads the same `PlatformDataInner` singleton as the rest of this module;
+/// takes `db` only to intern the lowered result into the type kernel
+/// (Phase 3 §4.G.5b — kernel-native public boundary).
+pub fn resolve_platform_global_property_type(db: &dyn TypeKernelDb, name: &Name) -> Option<TypeId> {
     let prop = bsl_platform::PlatformDataInner::instance().get_global_property(name.as_str())?;
     let declared = prop.property_types.first()?;
+    // Phase 3 §4.G.5b: kernel-native public boundary. The lowering still
+    // runs in `Ty` space (TyLoweringContext is internal, Phase 4); intern
+    // the result at this leaf so callers get a kernel id.
     let lowering = crate::lower::TyLoweringContext::new();
-    Some(lowering.lower_bare_name(&Name::new(declared.as_str())))
+    Some(crate::ty_bridge::ty_to_typeid(
+        db,
+        &lowering.lower_bare_name(&Name::new(declared.as_str())),
+    ))
 }
 
 #[cfg(test)]
@@ -139,8 +148,10 @@ mod tests {
         // analyzer (`crates/bsl-platform/data/platform_data.json`). If
         // it's missing the whole inference layer is non-functional, so
         // this test should fail loudly rather than silently pass.
-        let ty = resolve_platform_global_property_type(&Name::new("Метаданные"))
+        let db = bsl_types::testing::InMemoryDb::default();
+        let id = resolve_platform_global_property_type(&db, &Name::new("Метаданные"))
             .expect("`Метаданные` must resolve via platform data");
+        let ty = crate::ty_bridge::typeid_to_ty(&db, id);
         assert!(!matches!(ty, Ty::Unknown), "expected non-Unknown Ty, got {ty:?}");
     }
 
@@ -149,9 +160,11 @@ mod tests {
         // Names that aren't platform globals must return `None` so the
         // caller's cascade falls through to the next gate (e.g. the
         // `PlatformObject(name)` fallback in completion).
-        let result = resolve_platform_global_property_type(&Name::new(
-            "ЗаведомоНеСуществуетГлобалПлатформы",
-        ));
+        let db = bsl_types::testing::InMemoryDb::default();
+        let result = resolve_platform_global_property_type(
+            &db,
+            &Name::new("ЗаведомоНеСуществуетГлобалПлатформы"),
+        );
         assert!(result.is_none());
     }
 }

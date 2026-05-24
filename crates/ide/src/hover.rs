@@ -85,7 +85,10 @@ fn hover_field<DB: RootDatabase>(
     locale: Locale,
 ) -> Option<HoverResult> {
     let sema = Semantics::new(db);
-    let receiver_ty = sema.type_of_expr(file_id, receiver);
+    // Phase 3 §4.G.5b: `Semantics::type_of_expr` is kernel-native; bridge to
+    // `Ty` for the still-`Ty` hover helpers below (those move to the kernel
+    // in Phase 4).
+    let receiver_ty = hir::ty_bridge::typeid_to_ty(db, sema.type_of_expr(file_id, receiver));
     let name = token.text();
     let range = token.text_range();
 
@@ -120,7 +123,7 @@ fn hover_field<DB: RootDatabase>(
     // resolve. The `field_name_receiver` guard on the same function
     // returns `None` only after the qualified-name branch fired, so we
     // get the cross-module hover for free.
-    let inferred_ty = type_of_token(&sema, file_id, token);
+    let inferred_ty = type_of_token(db, &sema, file_id, token);
     if let Some(definition) = sema.resolve_name_to_definition(file_id, token) {
         return definition_to_hover(db, &definition, range, inferred_ty.as_ref(), locale);
     }
@@ -135,7 +138,7 @@ fn hover_field<DB: RootDatabase>(
     // fallback hover would silently say "No information available" on
     // every form-element name.
     if let Some(parent) = token.parent() {
-        let ty = sema.type_of_expr(file_id, &parent);
+        let ty = hir::ty_bridge::typeid_to_ty(db, sema.type_of_expr(file_id, &parent));
         if !ty.is_unknown() {
             let mut markup = format!("**{}**\n\n", name);
             if let Some(type_block) = ty_info_markup(db, &ty, locale) {
@@ -212,7 +215,7 @@ fn hover_free_name<DB: RootDatabase>(
     locale: Locale,
 ) -> Option<HoverResult> {
     let sema = Semantics::new(db);
-    let inferred_ty = type_of_token(&sema, file_id, token);
+    let inferred_ty = type_of_token(db, &sema, file_id, token);
 
     if let Some(definition) = sema.resolve_name_to_definition(file_id, token) {
         if let Some(r) =
@@ -402,6 +405,7 @@ fn hover_platform_method_on_token<DB: RootDatabase>(
 /// callers treat that the same as "no info", which preserves the existing
 /// fallbacks (`hover_platform`, `hover_keyword`).
 fn type_of_token<DB: RootDatabase>(
+    db: &DB,
     sema: &Semantics<'_, DB>,
     file_id: FileId,
     token: &SyntaxToken,
@@ -409,7 +413,9 @@ fn type_of_token<DB: RootDatabase>(
     let token_range = token.text_range();
     let mut node = token.parent()?;
     while node.text_range() == token_range {
-        let ty = sema.type_of_expr(file_id, &node);
+        // Phase 3 §4.G.5b: kernel-native boundary; bridge to `Ty` for the
+        // still-`Ty` hover rendering (Phase 4 removes the bridge).
+        let ty = hir::ty_bridge::typeid_to_ty(db, sema.type_of_expr(file_id, &node));
         if !ty.is_unknown() {
             return Some(ty);
         }
@@ -423,7 +429,7 @@ fn type_of_token<DB: RootDatabase>(
     // the per-body `var_types` (M3 Task 9 sibling map) by range and
     // surface the loop-element / counter / param type so hover on the
     // declaration matches hover at the use site.
-    sema.type_of_binding_at(file_id, token_range)
+    sema.type_of_binding_at(file_id, token_range).map(|id| hir::ty_bridge::typeid_to_ty(db, id))
 }
 
 /// Converts a Definition to HoverResult.

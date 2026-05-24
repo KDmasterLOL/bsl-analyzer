@@ -170,7 +170,7 @@ fn narrowed_type_at_then_body_returns_narrowed_ty() {
     // overlay entry over the inferred base type when it is non-Unknown.
     let sema = Semantics::new(&db);
     assert_eq!(
-        sema.type_of_expr(file_id, &then_rhs),
+        ty_bridge::typeid_to_ty(&db, sema.type_of_expr(file_id, &then_rhs)),
         Ty::String,
         "Semantics::type_of_expr merges the narrowed overlay onto the base"
     );
@@ -222,7 +222,7 @@ fn narrowed_type_at_guard_receiver_returns_pre_narrow_reaching_ty() {
 
     let sema = Semantics::new(&db);
     assert_eq!(
-        sema.type_of_expr(file_id, &receiver),
+        ty_bridge::typeid_to_ty(&db, sema.type_of_expr(file_id, &receiver)),
         Ty::Number,
         "hover on guard receiver returns the pre-narrow Number"
     );
@@ -365,7 +365,7 @@ fn narrow_is_case_insensitive_across_guard_and_hover() {
 
     let sema = Semantics::new(&db);
     assert_eq!(
-        sema.type_of_expr(file_id, &then_rhs),
+        ty_bridge::typeid_to_ty(&db, sema.type_of_expr(file_id, &then_rhs)),
         Ty::String,
         "hover under Semantics::type_of_expr must see the case-folded narrowing"
     );
@@ -419,7 +419,7 @@ fn narrow_query_handles_module_code_body() {
     // the hover for top-level code must also return the narrowed type.
     let sema = Semantics::new(&db);
     assert_eq!(
-        sema.type_of_expr(file_id, &then_rhs),
+        ty_bridge::typeid_to_ty(&db, sema.type_of_expr(file_id, &then_rhs)),
         Ty::String,
         "Semantics::type_of_expr on module-level then-body must merge the ModuleCode narrowing"
     );
@@ -481,7 +481,7 @@ fn narrowed_type_at_else_body_inherits_reaching_when_complement_degrades() {
     // missing from the suite.
     let sema = Semantics::new(&db);
     assert_eq!(
-        sema.type_of_expr(file_id, &else_rhs),
+        ty_bridge::typeid_to_ty(&db, sema.type_of_expr(file_id, &else_rhs)),
         Ty::Number,
         "Semantics::type_of_expr on else-body must merge the else-IN overlay (Number)"
     );
@@ -548,7 +548,7 @@ fn type_narrowing_enabled_by_default() {
 
     let sema = Semantics::new(&db);
     assert_eq!(
-        sema.type_of_expr(file_id, &then_rhs),
+        ty_bridge::typeid_to_ty(&db, sema.type_of_expr(file_id, &then_rhs)),
         Ty::String,
         "with default flags the narrowing overlay is applied — then-body `Х` sees `Ty::String`"
     );
@@ -586,7 +586,7 @@ fn type_narrowing_disabled_skips_overlay() {
 
     let sema = Semantics::new(&db);
     assert_eq!(
-        sema.type_of_expr(file_id, &then_rhs),
+        ty_bridge::typeid_to_ty(&db, sema.type_of_expr(file_id, &then_rhs)),
         Ty::Number,
         "with narrowing disabled, the then-body `Х` falls back to the base `Ty::Number`"
     );
@@ -597,7 +597,7 @@ fn type_narrowing_disabled_skips_overlay() {
     db.set_type_narrowing_enabled(true);
     let sema = Semantics::new(&db);
     assert_eq!(
-        sema.type_of_expr(file_id, &then_rhs),
+        ty_bridge::typeid_to_ty(&db, sema.type_of_expr(file_id, &then_rhs)),
         Ty::String,
         "re-enabling the flag restores the narrowed `Ty::String` without DB rebuild"
     );
@@ -639,7 +639,7 @@ fn is_assignable_to_sees_narrowed_ty_from_semantics() {
     let then_rhs = nth_ident_expr_at_distinct_position(&root, "Х", 1);
 
     let sema = Semantics::new(&db);
-    let narrowed_ty = sema.type_of_expr(file_id, &then_rhs);
+    let narrowed_ty = ty_bridge::typeid_to_ty(&db, sema.type_of_expr(file_id, &then_rhs));
     assert_eq!(
         narrowed_ty,
         Ty::String,
