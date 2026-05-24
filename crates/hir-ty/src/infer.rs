@@ -2618,6 +2618,7 @@ impl<'db> InferenceContext<'db> {
                         if let Expr::Path(receiver_path_name) = base_expr {
                             if matches!(
                                 crate::platform_global_lookup::try_resolve_platform_global_member(
+                                    self.db,
                                     &receiver_path_name,
                                     &method_name,
                                 ),
@@ -3026,11 +3027,12 @@ impl<'db> InferenceContext<'db> {
                         if let crate::platform_global_lookup::PlatformGlobalLookup::Resolved(
                             return_ty,
                         ) = crate::platform_global_lookup::try_resolve_platform_global_member(
+                            self.db,
                             module_name,
                             method_name,
                         ) {
                             self.expr_types.insert(call_expr, self.db.unknown());
-                            return ty_to_typeid(self.db, &return_ty);
+                            return return_ty;
                         }
                     }
                 }
@@ -3203,6 +3205,7 @@ impl<'db> InferenceContext<'db> {
         // the user just typo'd the method); `NotAContainer` falls through
         // to gate 5's `ReceiverNotResolved`.
         match crate::platform_global_lookup::try_resolve_platform_global_member(
+            self.db,
             module_name,
             method_name,
         ) {
@@ -3211,7 +3214,7 @@ impl<'db> InferenceContext<'db> {
                     self.infer_expr(*arg);
                 }
                 self.expr_types.insert(call_expr, self.db.unknown());
-                return Some(ty_to_typeid(self.db, &return_ty));
+                return Some(return_ty);
             }
             crate::platform_global_lookup::PlatformGlobalLookup::KnownContainerMissingMember => {
                 for arg in args {

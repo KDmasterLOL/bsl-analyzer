@@ -29,10 +29,12 @@
 //! reaching gate 3, so this function is invoked only when the
 //! receiver positively resolves to a workspace CommonModule.
 
+use bsl_types::builders::Builders;
+use bsl_types::intern::TypeKernelDb;
 use bsl_types::kind::TypeId;
 use hir_def::resolver::{QualifiedMethodError, Resolver};
 use hir_def::symbol_tree::MethodSymbol;
-use hir_def::ty::{FunctionSignature, FunctionSignatureTy, Ty};
+use hir_def::ty::FunctionSignature;
 use hir_def::{MethodId, Name};
 
 use crate::db::HirDatabase;
@@ -496,23 +498,26 @@ pub fn resolve_aliased_manager_call(
 /// Lowering runs through [`TyLoweringContext`] so the JSDoc `TypeRef`
 /// lookups share a single path with `Expr::New` and XML metadata: adding
 /// a new prefix or a future `Ty::Union` is a one-place edit.
-fn materialise_signature(method_symbol: &MethodSymbol) -> FunctionSignatureTy {
+fn materialise_signature(db: &dyn TypeKernelDb, method_symbol: &MethodSymbol) -> FunctionSignature {
     let ctx = TyLoweringContext::new();
 
-    let param_types: Vec<Ty> = method_symbol
+    let params: Box<[TypeId]> = method_symbol
         .params
         .iter()
-        .map(|p| p.type_ref.as_ref().map(|t| ctx.lower_type_ref(t)).unwrap_or(Ty::Unknown))
+        .map(|p| p.type_ref.as_ref().map(|t| ctx.lower_type_ref_id(db, t)).unwrap_or(db.unknown()))
         .collect();
-    let defaults: Vec<bool> = method_symbol.params.iter().map(|p| p.has_default).collect();
+    let defaults: Box<[bool]> = method_symbol.params.iter().map(|p| p.has_default).collect();
 
+    // The `return_type` default (set during symbol-tree construction) is
+    // still `Ty` (`hir_def::symbol_tree`, db-free); bridge it here.
     let ret = method_symbol
         .return_type_ref
         .as_ref()
-        .map(|t| ctx.lower_type_ref(t))
-        .unwrap_or_else(|| method_symbol.return_type.clone());
+        .map(|t| ctx.lower_type_ref_id(db, t))
+        .unwrap_or_else(|| crate::ty_bridge::ty_to_typeid(db, &method_symbol.return_type));
 
-    FunctionSignatureTy::new_with_defaults(param_types, defaults, ret)
+    let max_args = Some(params.len() as u32);
+    FunctionSignature { params, defaults, ret, max_args }
 }
 
 /// Phase O.11 — materialise a method signature with body-inferred
@@ -547,41 +552,42 @@ pub(crate) fn materialise_signature_enriched(
     method_id: hir_def::MethodId,
     method_symbol: &MethodSymbol,
 ) -> FunctionSignature {
-    let mut sig: FunctionSignatureTy = materialise_signature(method_symbol);
-    if matches!(*sig.ret, Ty::Unknown) {
+    let mut sig: FunctionSignature = materialise_signature(db, method_symbol);
+    if sig.ret == db.unknown() {
         let method_input = hir_def::MethodIdInput::new(db, method_id);
-        // `method_return_type_query` is kernel-native (§4.D.3); bridge its
-        // `TypeId` back into the still-`Ty` `FunctionSignatureTy.ret`.
-        let inferred = crate::ty_bridge::typeid_to_ty(
-            db,
-            crate::method_graph::method_return_type_query(db, method_input),
-        );
-        if !matches!(inferred, Ty::Unknown) {
-            *sig.ret = inferred;
+        // `method_return_type_query` is kernel-native (§4.D.3); when the
+        // docstring-derived return is `Unknown`, prefer the body-inferred
+        // type (cascade-typing).
+        let inferred = crate::method_graph::method_return_type_query(db, method_input);
+        if inferred != db.unknown() {
+            sig.ret = inferred;
         }
     }
 
-    crate::ty_bridge::function_signature_ty_to_kernel(db, &sig)
+    sig
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ty_bridge::{function_signature_ty_to_kernel, typeid_to_ty};
     use bsl_types::testing::InMemoryDb;
 
     #[test]
     fn test_method_resolution_new() {
         let db = InMemoryDb::new();
         let method_id = MethodId { module: hir_def::ModuleId { file_id: FileId(0) }, local_id: 0 };
-        let signature_ty = FunctionSignatureTy::new(vec![Ty::String], Ty::Number);
-        let signature = function_signature_ty_to_kernel(&db, &signature_ty);
+        let signature = FunctionSignature {
+            params: Box::new([db.string(None, false)]),
+            defaults: Box::new([false]),
+            ret: db.number(None, None),
+            max_args: Some(1),
+        };
 
         let resolution = MethodResolution::new(method_id, true, signature.clone());
 
         assert_eq!(resolution.method_id, method_id);
         assert!(resolution.is_export);
-        assert_eq!(typeid_to_ty(&db, resolution.return_type), Ty::Number);
+        assert_eq!(resolution.return_type, db.number(None, None));
         assert_eq!(resolution.signature, signature);
     }
 
@@ -589,8 +595,12 @@ mod tests {
     fn test_method_resolution_not_export() {
         let db = InMemoryDb::new();
         let method_id = MethodId { module: hir_def::ModuleId { file_id: FileId(0) }, local_id: 0 };
-        let signature_ty = FunctionSignatureTy::new(vec![], Ty::Undefined);
-        let signature = function_signature_ty_to_kernel(&db, &signature_ty);
+        let signature = FunctionSignature {
+            params: Box::new([]),
+            defaults: Box::new([]),
+            ret: db.undefined(),
+            max_args: Some(0),
+        };
 
         let resolution = MethodResolution::new(method_id, false, signature);
 

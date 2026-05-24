@@ -14,10 +14,7 @@ use bsl_types::facet::{
 use bsl_types::intern::TypeKernelDb;
 use bsl_types::kind::{LiteralValue, MetadataKind, Projection, ProjectionOrigin, TypeId, TypeKind};
 use bsl_types::testing::RootConfigCtx;
-use hir_def::ty::{
-    FormDataBinding, FormDataKind, FormDataTarget, FunctionSignature, FunctionSignatureTy,
-    SdblProjection, Ty,
-};
+use hir_def::ty::{FormDataBinding, FormDataKind, FormDataTarget, SdblProjection, Ty};
 use hir_def::Name;
 
 pub fn ty_to_typeid(db: &dyn TypeKernelDb, ty: &Ty) -> TypeId {
@@ -97,18 +94,6 @@ pub fn ty_to_typeid(db: &dyn TypeKernelDb, ty: &Ty) -> TypeId {
                 .collect(),
         ),
         Ty::AnyMetadataRef { mdo_type } => db.any_metadata_ref(*mdo_type),
-    }
-}
-
-pub(crate) fn function_signature_ty_to_kernel(
-    db: &dyn TypeKernelDb,
-    sig: &FunctionSignatureTy,
-) -> FunctionSignature {
-    FunctionSignature {
-        params: sig.params.iter().map(|t| ty_to_typeid(db, t)).collect(),
-        defaults: sig.defaults.clone(),
-        ret: ty_to_typeid(db, &sig.ret),
-        max_args: sig.max_args,
     }
 }
 

@@ -29,9 +29,9 @@
 //!   platform return types are bare type names without form / mdo
 //!   context, so the empty context is sufficient.
 
+use bsl_types::builders::Builders;
 use bsl_types::intern::TypeKernelDb;
 use bsl_types::kind::TypeId;
-use hir_def::ty::Ty;
 use hir_def::Name;
 
 /// Outcome of a platform global-member lookup.
@@ -53,7 +53,7 @@ use hir_def::Name;
 ///   all. The cascade gate falls through to its terminal
 ///   `ReceiverNotResolved` arm.
 pub(crate) enum PlatformGlobalLookup {
-    Resolved(Ty),
+    Resolved(TypeId),
     KnownContainerMissingMember,
     NotAContainer,
 }
@@ -64,12 +64,13 @@ pub(crate) enum PlatformGlobalLookup {
 /// distinguish "method missing on a known global container" from
 /// "receiver isn't a known container at all".
 ///
-/// Pure function (no `db` dependency) — `PlatformDataInner` is a
-/// singleton seeded at startup. Callers that need to gate on
+/// `PlatformDataInner` is a singleton seeded at startup; `db` is needed
+/// only to intern the resolved return type. Callers that need to gate on
 /// workspace-vs-platform precedence (e.g. `infer_qualified_call`) must
 /// perform the `module_index().resolve_common_module()` probe
 /// themselves before calling this helper.
 pub(crate) fn try_resolve_platform_global_member(
+    db: &dyn TypeKernelDb,
     receiver_name: &Name,
     method_name: &Name,
 ) -> PlatformGlobalLookup {
@@ -83,9 +84,9 @@ pub(crate) fn try_resolve_platform_global_member(
             .as_ref()
             .map(|s| {
                 let lowering = crate::lower::TyLoweringContext::new();
-                lowering.lower_bare_name(&Name::new(s.as_str()))
+                lowering.lower_bare_name_id(db, &Name::new(s.as_str()))
             })
-            .unwrap_or(Ty::Unknown);
+            .unwrap_or(db.unknown());
         return PlatformGlobalLookup::Resolved(return_ty);
     }
 
@@ -148,8 +149,7 @@ mod tests {
         let db = bsl_types::testing::InMemoryDb::default();
         let id = resolve_platform_global_property_type(&db, &Name::new("Метаданные"))
             .expect("`Метаданные` must resolve via platform data");
-        let ty = crate::ty_bridge::typeid_to_ty(&db, id);
-        assert!(!matches!(ty, Ty::Unknown), "expected non-Unknown Ty, got {ty:?}");
+        assert_ne!(id, db.unknown(), "expected non-Unknown type id");
     }
 
     #[test]
