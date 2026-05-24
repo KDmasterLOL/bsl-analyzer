@@ -58,7 +58,7 @@ fn projection_fields_visible_via_hir_type_accessors() {
 "#;
     let (db, file_id) = setup(fixture);
     let ty = var_ty(&db, file_id, "выборка").expect("выборка must be inferred");
-    let type_facade = Type::new(&db, file_id, ty);
+    let type_facade = Type::from_id(&db, file_id, hir::ty_bridge::ty_to_typeid(&db, &ty));
     assert!(type_facade.is_query_projection(), "is_query_projection must return true");
     let fields =
         type_facade.projection_fields().expect("projection_fields must surface the column slice");
@@ -82,7 +82,7 @@ fn projection_fields_surface_in_enumerate_fields() {
 "#;
     let (db, file_id) = setup(fixture);
     let ty = var_ty(&db, file_id, "выборка").expect("выборка must be inferred");
-    let type_facade = Type::new(&db, file_id, ty);
+    let type_facade = Type::from_id(&db, file_id, hir::ty_bridge::ty_to_typeid(&db, &ty));
     let fields = type_facade.fields();
     let names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
     assert!(

@@ -180,10 +180,11 @@ fn single_method_lookup_path_agrees_across_infer_and_facade() {
         .expect("Массив.Количество() must produce a var_type entry");
 
     // Path B: hir::Type facade (the API IDE completion uses after M3).
-    let facade_ty = hir::Type::new(&db, file_id, Ty::Array)
+    let array_id = hir::ty_bridge::ty_to_typeid(&db, &Ty::Array);
+    let facade_ret = hir::Type::from_id(&db, file_id, array_id)
         .method_return_type(&Name::new("Количество"))
-        .ty()
-        .clone();
+        .id();
+    let facade_ty = hir::ty_bridge::typeid_to_ty(&db, facade_ret);
 
     assert_eq!(
         infer_ty, facade_ty,
@@ -245,8 +246,10 @@ fn single_field_lookup_path_agrees_across_infer_and_facade() {
         kind: MetadataKind::CatalogRef,
         name: Name::new("Справочник1"),
     };
-    let facade_ty =
-        hir::Type::new(&db, file_id, receiver_ty).field_type(&Name::new("Реквизит2")).ty().clone();
+    let receiver_id = hir::ty_bridge::ty_to_typeid(&db, &receiver_ty);
+    let facade_field_id =
+        hir::Type::from_id(&db, file_id, receiver_id).field_type(&Name::new("Реквизит2")).id();
+    let facade_ty = hir::ty_bridge::typeid_to_ty(&db, facade_field_id);
 
     assert_eq!(
         infer_ty, facade_ty,

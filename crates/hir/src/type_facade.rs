@@ -33,7 +33,7 @@ use hir_def::ty::{MetadataKind, Ty};
 use hir_def::Name;
 use hir_ty::lower::type_string::{lower_param_type_string_typeid, lower_return_type_string_typeid};
 use hir_ty::method_lookup::platform_type_key_id;
-use hir_ty::ty_bridge::{ty_to_typeid, typeid_to_ty};
+use hir_ty::ty_bridge::ty_to_typeid;
 use hir_ty::{
     enumerate_fields, is_assignable, is_ref_ty, lookup_field, lookup_method, FieldInfo, FieldOrigin,
 };
@@ -129,20 +129,6 @@ pub struct Type<'db, DB> {
 }
 
 impl<'db, DB: ConfigsDatabase + TypeKernelDb> Type<'db, DB> {
-    /// Wrap a raw [`Ty`] in the facade.
-    ///
-    /// Phase 3 §4.F: the facade is backed by an interned [`TypeId`]; the
-    /// `Ty`-accepting constructor bridges at the boundary so existing IDE
-    /// callers stay source-compatible while the deep `Ty` removal lands.
-    /// New kernel-native callers should prefer [`Type::from_id`].
-    ///
-    /// `file_id` anchors the lookup in a specific file's visible
-    /// configurations — swapping it changes which extensions' MDOs the
-    /// facade sees (matches the Salsa invalidation graph).
-    pub fn new(db: &'db DB, file_id: FileId, ty: Ty) -> Self {
-        Self { db, file_id, id: ty_to_typeid(db, &ty) }
-    }
-
     /// Wrap an interned [`TypeId`] in the facade (kernel-native entry).
     pub fn from_id(db: &'db DB, file_id: FileId, id: TypeId) -> Self {
         Self { db, file_id, id }
@@ -156,13 +142,6 @@ impl<'db, DB: ConfigsDatabase + TypeKernelDb> Type<'db, DB> {
     /// Borrow the kernel [`TypeKind`] backing this facade.
     pub fn kind(&self) -> &TypeKind {
         self.db.lookup_type(self.id)
-    }
-
-    /// Underlying [`Ty`] — escape hatch for callers that need the raw
-    /// variant (e.g. union narrowing in M4). Bridged from the interned
-    /// id; §4.G removes this once all callers consume [`Type::kind`].
-    pub fn ty(&self) -> Ty {
-        typeid_to_ty(self.db, self.id)
     }
 
     /// Short human-readable name in the given locale, e.g.
@@ -546,6 +525,7 @@ fn fallback_name(name: &str, fallback: &str) -> Name {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hir_ty::ty_bridge::typeid_to_ty;
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
     use ide_db::RootDatabaseImpl;
     use std::fs;
@@ -683,7 +663,7 @@ mod tests {
         // facade must agree with `Ty::display_name(Ru)`.
         use base_db::Locale;
         let (db, file_id) = empty_db();
-        let t = Type::new(&db, file_id, Ty::Number);
+        let t = t(&db, file_id, Ty::Number);
         assert_eq!(t.display_name(Locale::En), Ty::Number.display_name(Locale::En));
         assert_eq!(t.display_name(Locale::Ru), Ty::Number.display_name(Locale::Ru));
         assert_eq!(t.canonical_name(), Ty::Number.canonical_name());
@@ -695,21 +675,21 @@ mod tests {
         // must report as a ref type; non-ref MetadataKinds
         // (`CatalogObject`, `TabularSection`) must not.
         let (db, file_id) = empty_db();
-        let catalog = Type::new(
+        let catalog = t(
             &db,
             file_id,
             Ty::MetadataRef { kind: MetadataKind::CatalogRef, name: Name::new("X") },
         );
         assert!(catalog.is_ref_type());
 
-        let catalog_obj = Type::new(
+        let catalog_obj = t(
             &db,
             file_id,
             Ty::MetadataRef { kind: MetadataKind::CatalogObject, name: Name::new("X") },
         );
         assert!(!catalog_obj.is_ref_type(), "CatalogObject is not a ref type (it is an object)");
 
-        let row = Type::new(
+        let row = t(
             &db,
             file_id,
             Ty::MetadataRef {
@@ -719,7 +699,7 @@ mod tests {
         );
         assert!(!row.is_ref_type());
 
-        assert!(!Type::new(&db, file_id, Ty::Number).is_ref_type());
+        assert!(!t(&db, file_id, Ty::Number).is_ref_type());
     }
 
     #[test]
@@ -727,7 +707,7 @@ mod tests {
         // CatalogRef.X → ObjectManager(Catalog, "X"). Proves the
         // kind-to-MdoType translation and the name carry-over.
         let (db, file_id) = empty_db();
-        let cat = Type::new(
+        let cat = t(
             &db,
             file_id,
             Ty::MetadataRef {
@@ -735,7 +715,7 @@ mod tests {
             },
         );
         let manager = cat.manager().expect("CatalogRef has a manager form");
-        match manager.ty() {
+        match typeid_to_ty(&db, manager.id()) {
             Ty::ObjectManager { kind, name } => {
                 assert_eq!(kind, MdoType::Catalog);
                 assert_eq!(name.as_str(), "Номенклатура");
@@ -750,20 +730,20 @@ mod tests {
         // register managers, so keep one real non-ref and one
         // collection receiver to pin the fall-through branch.
         let (db, file_id) = empty_db();
-        assert!(Type::new(&db, file_id, Ty::Number).manager().is_none());
-        assert!(Type::new(&db, file_id, Ty::Array).manager().is_none());
+        assert!(t(&db, file_id, Ty::Number).manager().is_none());
+        assert!(t(&db, file_id, Ty::Array).manager().is_none());
     }
 
     #[test]
     fn manager_from_register_ref_types() {
         let (db, file_id) = empty_db();
-        let reg = Type::new(
+        let reg = t(
             &db,
             file_id,
             Ty::MetadataRef { kind: MetadataKind::AccumulationRegisterRef, name: Name::new("X") },
         );
         let manager = reg.manager().expect("register ref has a manager form");
-        match manager.ty() {
+        match typeid_to_ty(&db, manager.id()) {
             Ty::ObjectManager { kind, name } => {
                 assert_eq!(kind, MdoType::AccumulationRegister);
                 assert_eq!(name.as_str(), "X");
@@ -788,7 +768,7 @@ mod tests {
         let manager = Type::from_id(&db, file_id, id)
             .manager()
             .expect("MetadataObject receiver has a manager form");
-        match manager.ty() {
+        match typeid_to_ty(&db, manager.id()) {
             Ty::ObjectManager { kind, name } => {
                 assert_eq!(kind, MdoType::Catalog);
                 assert_eq!(name.as_str(), "Номенклатура");
@@ -803,11 +783,11 @@ mod tests {
         // lives in PlatformData under type_name "Array". Smoke-tests
         // the full pipeline `lookup_method → return_ty → Self::new`.
         let (db, file_id) = empty_db();
-        let arr = Type::new(&db, file_id, Ty::Array);
+        let arr = t(&db, file_id, Ty::Array);
         let ret = arr.method_return_type(&Name::new("Добавить"));
         // `Добавить` is a procedure — `lookup_method` returns
         // `Ty::Undefined`.
-        assert_eq!(ret.ty(), Ty::Undefined);
+        assert_eq!(typeid_to_ty(&db, ret.id()), Ty::Undefined);
     }
 
     #[test]
@@ -815,9 +795,9 @@ mod tests {
         // Missing method → Unknown (no fabrication of a non-existent
         // return type).
         let (db, file_id) = empty_db();
-        let arr = Type::new(&db, file_id, Ty::Array);
+        let arr = t(&db, file_id, Ty::Array);
         let ret = arr.method_return_type(&Name::new("НеСуществует"));
-        assert_eq!(ret.ty(), Ty::Unknown);
+        assert_eq!(typeid_to_ty(&db, ret.id()), Ty::Unknown);
     }
 
     #[test]
@@ -826,7 +806,7 @@ mod tests {
         // Wrapped with `.iter().any(...)` so the test doesn't need to
         // know the exact count — platform data may grow.
         let (db, file_id) = empty_db();
-        let arr = Type::new(&db, file_id, Ty::Array);
+        let arr = t(&db, file_id, Ty::Array);
         let methods = arr.methods();
         assert!(!methods.is_empty(), "Ty::Array must expose at least one platform method");
         assert!(
@@ -841,13 +821,13 @@ mod tests {
         // Ref / register / tabular types return an empty method list at
         // M3 — manager methods are the M4 adapter's job.
         let (db, file_id) = empty_db();
-        let cat = Type::new(
+        let cat = t(
             &db,
             file_id,
             Ty::MetadataRef { kind: MetadataKind::CatalogRef, name: Name::new("X") },
         );
         assert!(cat.methods().is_empty());
-        assert!(Type::new(&db, file_id, Ty::Number).methods().is_empty());
+        assert!(t(&db, file_id, Ty::Number).methods().is_empty());
     }
 
     #[test]
@@ -857,7 +837,7 @@ mod tests {
         // so `fields()` returns an empty list rather than panicking.
         // Pins the deferred-gap contract.
         let (db, file_id) = empty_db();
-        let cat = Type::new(
+        let cat = t(
             &db,
             file_id,
             Ty::MetadataRef { kind: MetadataKind::CatalogRef, name: Name::new("X") },
@@ -868,7 +848,7 @@ mod tests {
     #[test]
     fn fields_include_custom_attributes_from_configuration() {
         let (db, file_id) = db_with_configuration(designer_fixture_path());
-        let cat = Type::new(
+        let cat = t(
             &db,
             file_id,
             Ty::MetadataRef {
@@ -910,7 +890,7 @@ mod tests {
     #[test]
     fn fields_include_tabular_sections_from_configuration() {
         let (db, file_id) = db_with_configuration(designer_fixture_path());
-        let cat = Type::new(
+        let cat = t(
             &db,
             file_id,
             Ty::MetadataRef {
@@ -943,7 +923,7 @@ mod tests {
         // how `FieldLookup::lookup_on_register` resolves the same part
         // but through the completion-surface API instead.
         let (db, file_id) = db_with_configuration(designer_fixture_path());
-        let reg = Type::new(
+        let reg = t(
             &db,
             file_id,
             Ty::MetadataRef {
@@ -1044,7 +1024,7 @@ mod tests {
     // --- is_assignable_to (Task 7) --------------------------------
 
     fn t(db: &RootDatabaseImpl, file_id: FileId, ty: Ty) -> Type<'_, RootDatabaseImpl> {
-        Type::new(db, file_id, ty)
+        Type::from_id(db, file_id, ty_to_typeid(db, &ty))
     }
 
     #[test]
@@ -1357,7 +1337,7 @@ mod tests {
     fn fields_deduplicate_duplicate_names_preferring_attributes() {
         let fixture = TempFixture::duplicated_field();
         let (db, file_id) = db_with_configuration(fixture.path());
-        let cat = Type::new(
+        let cat = t(
             &db,
             file_id,
             Ty::MetadataRef {

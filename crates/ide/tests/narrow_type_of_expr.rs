@@ -646,9 +646,9 @@ fn is_assignable_to_sees_narrowed_ty_from_semantics() {
         "precondition: narrowing overlay must reach the then-body `Х` before we start the assignability probe",
     );
 
-    let narrowed = Type::new(&db, file_id, narrowed_ty);
-    let expect_string = Type::new(&db, file_id, Ty::String);
-    let expect_number = Type::new(&db, file_id, Ty::Number);
+    let narrowed = Type::from_id(&db, file_id, sema.type_of_expr(file_id, &then_rhs));
+    let expect_string = Type::from_id(&db, file_id, ty_bridge::ty_to_typeid(&db, &Ty::String));
+    let expect_number = Type::from_id(&db, file_id, ty_bridge::ty_to_typeid(&db, &Ty::Number));
 
     assert!(
         narrowed.is_assignable_to(&expect_string),
