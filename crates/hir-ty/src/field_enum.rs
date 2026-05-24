@@ -68,34 +68,30 @@ pub struct FieldInfo {
     pub origin: FieldOrigin,
 }
 
-/// Enumerate every field exposed by `receiver_ty` against the visible
+/// Enumerate every field exposed by `receiver` against the visible
 /// configurations.
 ///
 /// Configuration iteration: `configs.iter().rev()` — extensions override
 /// main on `(MdoType, name)` collisions.
 ///
-/// `Ty::ThisObject` is coerced to its matching `*Object` `MetadataRef` at
+/// `ThisObject` is coerced to its matching `*Object` `MetadataRef` at
 /// the start, so callers do not need to handle it separately.
 ///
-/// `Ty::Union` is descended into: each non-`Undefined`/`Null` arm is
+/// `Union` is descended into: each non-`Undefined`/`Null` arm is
 /// enumerated and the results are merged with a name-based dedup. This
 /// matches receiver shapes produced by upstream inference such as
 /// `НайтиСтроки(...)` returning `Union(TabularSectionRow, Undefined)`,
 /// so completion / lookup on the union keeps working.
 ///
 /// Returns an empty `Vec` for receivers that have no field surface
-/// (`Ty::Unknown`, primitives, `Ty::PlatformObject`, managers, plain
+/// (`Unknown`, primitives, `PlatformObject`, managers, plain
 /// `TabularSection` collection receivers).
-///
 pub fn enumerate_fields(
     db: &dyn TypeKernelDb,
     configs: &[VisibleConfig],
-    receiver_ty: &Ty,
+    receiver: TypeId,
 ) -> Vec<FieldInfo> {
-    // §4.E.4d: public boundary stays `&Ty` (external callers in
-    // module_implicit/type_facade not flipped yet). Intern at the edge
-    // and delegate to the kernel-native inner.
-    enumerate_fields_inner(db, configs, ty_to_typeid(db, receiver_ty))
+    enumerate_fields_inner(db, configs, receiver)
 }
 
 pub(crate) fn enumerate_fields_inner(
@@ -1146,7 +1142,7 @@ mod tests {
 
     fn enumerate_fields(configs: &[VisibleConfig], receiver_ty: &Ty) -> Vec<FieldInfoForTest> {
         let db = InMemoryDb::new();
-        super::enumerate_fields(&db, configs, receiver_ty)
+        super::enumerate_fields(&db, configs, ty_to_typeid(&db, receiver_ty))
             .into_iter()
             .map(|info| FieldInfoForTest {
                 name: info.name,

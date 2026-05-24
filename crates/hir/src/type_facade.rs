@@ -24,17 +24,20 @@
 
 use bsl_metadata::MdoType;
 use bsl_platform::{PlatformData, PlatformMethod};
+use bsl_types::builders::Builders;
 use bsl_types::display::{display_name as kernel_display, Locale as KernelLocale, PlainDisplayCtx};
 use bsl_types::intern::TypeKernelDb;
-use bsl_types::kind::{TypeId, TypeKind};
+use bsl_types::kind::{Projection, TypeId, TypeKind};
 use hir_def::configs::ConfigsDatabase;
 use hir_def::ty::{MetadataKind, Ty};
 use hir_def::Name;
 use hir_ty::lower::type_string::{lower_param_type_string_typeid, lower_return_type_string_typeid};
+use hir_ty::method_lookup::platform_type_key_id;
 use hir_ty::ty_bridge::{ty_to_typeid, typeid_to_ty};
 use hir_ty::{
     enumerate_fields, is_assignable, is_ref_ty, lookup_field, lookup_method, FieldInfo, FieldOrigin,
 };
+use std::sync::Arc;
 use vfs::FileId;
 
 /// Lightweight DTO for a method exposed by a [`Type`].
@@ -225,13 +228,10 @@ impl<'db, DB: ConfigsDatabase + TypeKernelDb> Type<'db, DB> {
     /// [`NarrowState`]: hir_ty::narrow::NarrowState
     /// [`HirDatabase::narrow`]: hir_ty::HirDatabase::narrow
     pub fn is_assignable_to(&self, other: &Self) -> bool {
-        // `TypeId` is db-local, so `other.id` is only meaningful in
-        // `other.db`. Re-intern `other` into `self.db` before comparing
-        // so a cross-db pair (the old `Ty`-based facade was db-agnostic)
-        // can't misclassify or panic. Same-db pairs round-trip through a
-        // canonical id, so the result is unchanged.
-        let other_id = ty_to_typeid(self.db, &other.ty());
-        is_assignable(self.db, self.id, other_id)
+        // `TypeId` is db-local, so `self` and `other` must share the same
+        // kernel db — every caller builds both facades from one
+        // `Semantics`/db, so their ids are directly comparable.
+        is_assignable(self.db, self.id, other.id)
     }
 
     /// The corresponding manager type — e.g. `CatalogRef.Товары` →
@@ -244,64 +244,76 @@ impl<'db, DB: ConfigsDatabase + TypeKernelDb> Type<'db, DB> {
     /// (primitives, collections, unions, platform objects, tabular
     /// sections / rows, register record-set / record-manager receivers).
     pub fn manager(&self) -> Option<Self> {
-        let (mdo_type, name) = match self.ty() {
-            Ty::MetadataRef { kind, name } => {
-                let mdo = match kind {
-                    MetadataKind::CatalogRef | MetadataKind::CatalogObject => MdoType::Catalog,
-                    MetadataKind::DocumentRef | MetadataKind::DocumentObject => MdoType::Document,
-                    MetadataKind::EnumRef => MdoType::Enum,
-                    // *Object companions of MDOs reach the same Manager
-                    // (`Обработки.X`, `Отчёты.X`, `БизнесПроцессы.X`,
-                    // `Задачи.X`) — the form-attribute projection lands
-                    // on `MetadataRef{*Object}` and the user may then
-                    // navigate `Объект.Manager`-style paths through the
-                    // facade. Mapping to MDO here is symmetric with the
-                    // *Ref / *Object union arms for Catalog / Document.
-                    MetadataKind::TaskRef | MetadataKind::TaskObject => MdoType::Task,
-                    MetadataKind::BusinessProcessRef | MetadataKind::BusinessProcessObject => {
-                        MdoType::BusinessProcess
-                    }
-                    MetadataKind::DataProcessorObject => MdoType::DataProcessor,
-                    MetadataKind::ReportObject => MdoType::Report,
-                    MetadataKind::ExchangePlanRef | MetadataKind::ExchangePlanObject => {
-                        MdoType::ExchangePlan
-                    }
-                    MetadataKind::ChartOfAccountsRef | MetadataKind::ChartOfAccountsObject => {
-                        MdoType::ChartOfAccounts
-                    }
-                    MetadataKind::InformationRegisterRef => MdoType::InformationRegister,
-                    MetadataKind::AccumulationRegisterRef => MdoType::AccumulationRegister,
-                    MetadataKind::AccountingRegisterRef => MdoType::AccountingRegister,
-                    MetadataKind::CalculationRegisterRef => MdoType::CalculationRegister,
-                    // No-manager kinds: enumerated explicitly (no wildcard)
-                    // so a new `MetadataKind` variant becomes a compile
-                    // error here instead of silently returning None.
-                    // Tabular sections, register parts, and the Filter
-                    // synthetic don't have a Manager surface; record-set
-                    // and record-manager kinds reach managers through
-                    // their parent register, not the kind directly.
-                    MetadataKind::InformationRegisterRecordManager
-                    | MetadataKind::InformationRegisterRecordSet
-                    | MetadataKind::InformationRegisterRecord
-                    | MetadataKind::AccumulationRegisterRecordSet
-                    | MetadataKind::AccumulationRegisterRecord
-                    | MetadataKind::AccountingRegisterRecordSet
-                    | MetadataKind::AccountingRegisterRecord
-                    | MetadataKind::CalculationRegisterRecordSet
-                    | MetadataKind::CalculationRegisterRecord
-                    | MetadataKind::RegisterDimension { .. }
-                    | MetadataKind::RegisterResource { .. }
-                    | MetadataKind::RegisterAttribute { .. }
-                    | MetadataKind::RegisterFilter { .. }
-                    | MetadataKind::TabularSection { .. }
-                    | MetadataKind::TabularSectionRow { .. } => return None,
-                };
-                (mdo, name.clone())
+        // Extract owned facet data before the `object_manager_with_config`
+        // builder call — the `&TypeKind` borrow from `kind()` cannot be
+        // held across a `db` method that re-borrows the kernel.
+        //
+        // Both `MetadataRef` and `MetadataObject` carry the same
+        // `kind/name/config_id` and must route here: the legacy `Ty` path
+        // collapsed `MetadataObject` into `Ty::MetadataRef` before the
+        // manager arms, so a native `MetadataObject` receiver reached them.
+        let (kind, name, config_id) = match self.kind() {
+            TypeKind::MetadataRef(facet) => {
+                (facet.kind, facet.name.clone(), facet.config_id.clone())
+            }
+            TypeKind::MetadataObject(facet) => {
+                (facet.kind, facet.name.clone(), facet.config_id.clone())
             }
             _ => return None,
         };
+        let mdo_type = match kind {
+            MetadataKind::CatalogRef | MetadataKind::CatalogObject => MdoType::Catalog,
+            MetadataKind::DocumentRef | MetadataKind::DocumentObject => MdoType::Document,
+            MetadataKind::EnumRef => MdoType::Enum,
+            // *Object companions of MDOs reach the same Manager
+            // (`Обработки.X`, `Отчёты.X`, `БизнесПроцессы.X`,
+            // `Задачи.X`) — the form-attribute projection lands
+            // on `MetadataRef{*Object}` and the user may then
+            // navigate `Объект.Manager`-style paths through the
+            // facade. Mapping to MDO here is symmetric with the
+            // *Ref / *Object union arms for Catalog / Document.
+            MetadataKind::TaskRef | MetadataKind::TaskObject => MdoType::Task,
+            MetadataKind::BusinessProcessRef | MetadataKind::BusinessProcessObject => {
+                MdoType::BusinessProcess
+            }
+            MetadataKind::DataProcessorObject => MdoType::DataProcessor,
+            MetadataKind::ReportObject => MdoType::Report,
+            MetadataKind::ExchangePlanRef | MetadataKind::ExchangePlanObject => {
+                MdoType::ExchangePlan
+            }
+            MetadataKind::ChartOfAccountsRef | MetadataKind::ChartOfAccountsObject => {
+                MdoType::ChartOfAccounts
+            }
+            MetadataKind::InformationRegisterRef => MdoType::InformationRegister,
+            MetadataKind::AccumulationRegisterRef => MdoType::AccumulationRegister,
+            MetadataKind::AccountingRegisterRef => MdoType::AccountingRegister,
+            MetadataKind::CalculationRegisterRef => MdoType::CalculationRegister,
+            // No-manager kinds: enumerated explicitly (no wildcard)
+            // so a new `MetadataKind` variant becomes a compile
+            // error here instead of silently returning None.
+            // Tabular sections, register parts, and the Filter
+            // synthetic don't have a Manager surface; record-set
+            // and record-manager kinds reach managers through
+            // their parent register, not the kind directly.
+            MetadataKind::InformationRegisterRecordManager
+            | MetadataKind::InformationRegisterRecordSet
+            | MetadataKind::InformationRegisterRecord
+            | MetadataKind::AccumulationRegisterRecordSet
+            | MetadataKind::AccumulationRegisterRecord
+            | MetadataKind::AccountingRegisterRecordSet
+            | MetadataKind::AccountingRegisterRecord
+            | MetadataKind::CalculationRegisterRecordSet
+            | MetadataKind::CalculationRegisterRecord
+            | MetadataKind::RegisterDimension { .. }
+            | MetadataKind::RegisterResource { .. }
+            | MetadataKind::RegisterAttribute { .. }
+            | MetadataKind::RegisterFilter { .. }
+            | MetadataKind::TabularSection { .. }
+            | MetadataKind::TabularSectionRow { .. } => return None,
+        };
 
-        Some(Self::new(self.db, self.file_id, Ty::ObjectManager { kind: mdo_type, name }))
+        let id = self.db.object_manager_with_config(mdo_type, name, config_id);
+        Some(Self::from_id(self.db, self.file_id, id))
     }
 
     /// Resolve a method call `x.method_name(...)` to its return type.
@@ -325,14 +337,13 @@ impl<'db, DB: ConfigsDatabase + TypeKernelDb> Type<'db, DB> {
     /// hover / completion on attributes correctly invalidate when the
     /// MDO's XML changes.
     pub fn field_type(&self, field_name: &Name) -> Self {
-        // §4.G.1: `lookup_field` now takes the kernel receiver `TypeId`
-        // directly (we already hold `self.id`); its `FieldInfo.ty` is still
-        // `Ty` (flips in §4.G.2), so the result bridges back out.
+        // `lookup_field` takes and returns kernel ids, so the receiver and
+        // the resolved `FieldInfo.ty` flow through without bridging.
         let configs = self.db.configurations(self.file_id);
-        let ty = lookup_field(self.db, &configs, self.id, field_name)
-            .map(|info| typeid_to_ty(self.db, info.ty))
-            .unwrap_or(Ty::Unknown);
-        Self::new(self.db, self.file_id, ty)
+        let id = lookup_field(self.db, &configs, self.id, field_name)
+            .map(|info| info.ty)
+            .unwrap_or_else(|| self.db.unknown());
+        Self::from_id(self.db, self.file_id, id)
     }
 
     /// Enumerate methods callable on the receiver.
@@ -352,8 +363,7 @@ impl<'db, DB: ConfigsDatabase + TypeKernelDb> Type<'db, DB> {
         // extension members (`<UsualGroup>.Скрыть`, …) appear next to
         // shared base methods. Single-entry chains reduce to one
         // platform-data lookup, identical to the pre-chain shape.
-        let receiver = self.ty();
-        if let Ty::FormControl { kind, .. } = &receiver {
+        if let TypeKind::FormControl { kind, .. } = self.kind() {
             let chain = hir_def::ty::form_control_platform_type_chain(*kind);
             let mut methods: Vec<Method> = Vec::new();
             let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -370,11 +380,11 @@ impl<'db, DB: ConfigsDatabase + TypeKernelDb> Type<'db, DB> {
             return methods;
         }
 
-        let Some(type_key) = platform_type_key(&receiver) else {
+        let Some(type_key) = platform_type_key_id(self.db, self.id) else {
             return Vec::new();
         };
         PlatformData::instance()
-            .get_type_methods(type_key)
+            .get_type_methods(&type_key)
             .into_iter()
             .map(|m| method_dto_from_platform(self.db, m))
             .collect()
@@ -392,8 +402,7 @@ impl<'db, DB: ConfigsDatabase + TypeKernelDb> Type<'db, DB> {
     /// so callers do not need to prepare the receiver.
     pub fn fields(&self) -> Vec<Field> {
         let configs = self.db.configurations(self.file_id);
-        let receiver = self.ty();
-        enumerate_fields(self.db, &configs, &receiver)
+        enumerate_fields(self.db, &configs, self.id)
             .into_iter()
             .map(|info| Field {
                 name: info.name.clone(),
@@ -414,12 +423,20 @@ impl<'db, DB: ConfigsDatabase + TypeKernelDb> Type<'db, DB> {
     /// pretty-printer instead of the generic platform docs only when
     /// this returns `true`.
     pub fn is_query_projection(&self) -> bool {
-        matches!(
-            self.ty(),
-            Ty::QueryResultSelection { projection: Some(_) }
-                | Ty::ValueTable { projection: Some(_) }
-                | Ty::ValueTableRow { projection: Some(_) }
-        )
+        self.projection().is_some()
+    }
+
+    /// The SDBL projection carried by a `QueryResultSelection` /
+    /// `ValueTable` / `ValueTableRow` receiver, if any. Cloned (cheap `Arc`)
+    /// so the `kind()` borrow is released for downstream `db` calls.
+    fn projection(&self) -> Option<Arc<Projection>> {
+        match self.kind() {
+            TypeKind::QueryResultSelection(facet) => facet.projection.clone(),
+            TypeKind::ValueTable(facet) | TypeKind::ValueTableRow(facet) => {
+                facet.projection.clone()
+            }
+            _ => None,
+        }
     }
 
     /// Per-column `(name, type)` pairs from the SDBL projection.
@@ -430,14 +447,8 @@ impl<'db, DB: ConfigsDatabase + TypeKernelDb> Type<'db, DB> {
     /// directly). Callers that need the IDE facade `Type` for a column can
     /// wrap the id via [`Type::from_id`] with the same `db` / `file_id`.
     pub fn projection_fields(&self) -> Option<Vec<(Name, TypeId)>> {
-        match self.ty() {
-            Ty::QueryResultSelection { projection: Some(p) }
-            | Ty::ValueTable { projection: Some(p) }
-            | Ty::ValueTableRow { projection: Some(p) } => {
-                Some(p.fields.iter().map(|(name, ty)| (name.clone(), *ty)).collect())
-            }
-            _ => None,
-        }
+        let p = self.projection()?;
+        Some(p.fields.iter().map(|f| (Name::new(f.name.as_str()), f.ty)).collect())
     }
 
     /// Per-column SDBL display labels (`"Число(15,2)"`, `"Строка(50)"`)
@@ -448,14 +459,13 @@ impl<'db, DB: ConfigsDatabase + TypeKernelDb> Type<'db, DB> {
     /// (some bridge entry points skip it). Hover uses these to render
     /// SDBL precision/scale that the bridged `Ty` drops.
     pub fn projection_field_displays(&self) -> Option<Vec<hir_def::ty::SdblTypeShadow>> {
-        match self.ty() {
-            Ty::QueryResultSelection { projection: Some(p) }
-            | Ty::ValueTable { projection: Some(p) }
-            | Ty::ValueTableRow { projection: Some(p) } => {
-                p.raw_sdbl_types.as_deref().map(<[_]>::to_vec)
-            }
-            _ => None,
-        }
+        let p = self.projection()?;
+        p.raw_sdbl_types.as_ref().map(|shadows| {
+            shadows
+                .iter()
+                .map(|s| hir_def::ty::SdblTypeShadow { display: s.display.clone() })
+                .collect()
+        })
     }
 }
 
@@ -497,43 +507,6 @@ fn field_from_info(info: FieldInfo) -> Field {
 
 pub fn module_implicit_fields<DB: hir_ty::db::HirDatabase>(db: &DB, file_id: FileId) -> Vec<Field> {
     hir_ty::module_implicit_fields(db, file_id).into_iter().map(field_from_info).collect()
-}
-
-/// Pick the `PlatformData` key for a receiver, matching
-/// `method_lookup::platform_type_key`. Returning the same keys here
-/// keeps `.methods()` and `.method_return_type()` consistent.
-fn platform_type_key(ty: &Ty) -> Option<&str> {
-    match ty {
-        // `TypedArray` shares the platform method/property surface with
-        // `Array` (`.Добавить`, `.Количество`, …) — the element type
-        // refines field/iteration only.
-        Ty::Array | Ty::TypedArray(_) => Some("Array"),
-        Ty::Structure => Some("Structure"),
-        Ty::Map => Some("Map"),
-        Ty::ValueTable { .. } => Some("ValueTable"),
-        Ty::ValueTableRow { .. } => Some("ValueTableRow"),
-        Ty::ValueList => Some("ValueList"),
-        Ty::Type => Some("Type"),
-        Ty::PlatformObject(name) => Some(name.as_str()),
-        // FormData / FormControl wrap per-kind platform tables — same
-        // routing as `method_lookup::platform_type_key`. Without these
-        // arms, `.methods()` would return empty on a `Ty::FormData`
-        // receiver that `lookup_method` already serves correctly.
-        Ty::FormData { kind, .. } => Some(kind.platform_type_name()),
-        Ty::FormControl { kind, .. } => hir_def::ty::form_control_platform_type_name(*kind),
-        // Projection-typed receivers alias to the same platform method
-        // tables `method_lookup::platform_type_key` reaches — without
-        // these arms `Type::methods()` would silently disagree with
-        // `lookup_method` once Phase 1 starts synthesizing the variants.
-        // `AnyMetadataRef` mirrors `ManagerCollection` (manager dispatch
-        // routes through MDO-specific tables, not the scalar key).
-        Ty::Query { .. } => Some("Запрос"),
-        Ty::QueryResult { .. } => Some("РезультатЗапроса"),
-        Ty::QueryResultSelection { .. } => Some("ВыборкаИзРезультатаЗапроса"),
-        Ty::QueryBatchResult { .. } => Some("Array"),
-        Ty::AnyMetadataRef { .. } => None,
-        _ => None,
-    }
 }
 
 /// Convert a `PlatformMethod` into the facade's `Method` DTO.
@@ -794,6 +767,31 @@ mod tests {
             Ty::ObjectManager { kind, name } => {
                 assert_eq!(kind, MdoType::AccumulationRegister);
                 assert_eq!(name.as_str(), "X");
+            }
+            other => panic!("expected ObjectManager, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn manager_from_metadata_object_receiver() {
+        // A native kernel `MetadataObject` receiver (not reachable through
+        // the `Ty` bridge, which collapses it to `MetadataRef`) must still
+        // resolve its manager. Regression pin for the §4.E.5a `.kind()`
+        // flip, which originally matched only `MetadataRef`.
+        use bsl_types::testing::RootConfigCtx;
+        let (db, file_id) = empty_db();
+        let id = db.metadata_object(
+            MetadataKind::CatalogObject,
+            "Номенклатура".to_string(),
+            &RootConfigCtx,
+        );
+        let manager = Type::from_id(&db, file_id, id)
+            .manager()
+            .expect("MetadataObject receiver has a manager form");
+        match manager.ty() {
+            Ty::ObjectManager { kind, name } => {
+                assert_eq!(kind, MdoType::Catalog);
+                assert_eq!(name.as_str(), "Номенклатура");
             }
             other => panic!("expected ObjectManager, got {other:?}"),
         }
