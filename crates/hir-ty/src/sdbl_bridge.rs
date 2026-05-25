@@ -22,11 +22,11 @@
 //! | `AnyObjectRef { mdo_type }`   | `Ty::AnyMetadataRef { mdo_type }`         |
 //! | `Uuid`                        | `Ty::PlatformObject("УникальныйИдентификатор")` |
 //! | `ValueStorage`                | `Ty::PlatformObject("ХранилищеЗначения")` |
-//! | `DefinedType { underlying: Some(t) }` | `sdbl_type_to_ty(t)`              |
+//! | `DefinedType { underlying: Some(t) }` | `sdbl_type_to_typeid(t)`          |
 //! | `DefinedType { underlying: None }` | `Ty::Unknown`                        |
 //! | `ValueTable`                  | `Ty::ValueTable`                          |
 //! | `Null`                        | `Ty::Null`                                |
-//! | `Aggregate(inner)`            | `sdbl_type_to_ty(inner)`                  |
+//! | `Aggregate(inner)`            | `sdbl_type_to_typeid(inner)`              |
 //! | `Composite { types }`         | `Ty::union(types.iter().map(...))`        |
 //! | `TabularSectionRef { … }`     | `Ty::MetadataRef { TabularSection, name }`|
 //! | `Unknown` / `Error`           | `Ty::Unknown`                             |
@@ -86,16 +86,15 @@ use bsl_types::kind::{
     Projection, ProjectionField, ProjectionFieldSource, ProjectionOrigin, TypeId,
 };
 use bsl_types::testing::RootConfigCtx;
-use hir_def::ty::{MetadataKind, Ty};
+use hir_def::ty::MetadataKind;
 use hir_def::Name;
 
-/// Kernel-native counterpart of [`sdbl_type_to_ty`].
+/// Map a single SDBL field type to its kernel `TypeId`.
 ///
-/// Mints the `TypeId` directly through the kernel [`Builders`], mirroring
-/// [`sdbl_type_to_ty`] arm-for-arm. The mapping is **lossy-structural** —
-/// SDBL precision/scale/length facets drop (they live on the
-/// [`SdblTypeShadowFacet`] display shadow), so each arm is byte-identical to
-/// `ty_to_typeid(db, &sdbl_type_to_ty(t))` (asserted by the drift test).
+/// Mints the `TypeId` directly through the kernel [`Builders`]. The
+/// mapping is **lossy-structural** — SDBL precision/scale/length facets
+/// drop (they live on the [`SdblTypeShadowFacet`] display shadow). See
+/// the module-level mapping table for the per-variant contract.
 #[allow(dead_code, reason = "Phase 3 §4.C producer — projection callers migrate in 4.C.2")]
 pub fn sdbl_type_to_typeid(db: &dyn TypeKernelDb, t: &sdbl_hir::SdblType) -> TypeId {
     use sdbl_hir::SdblType as S;
@@ -128,80 +127,21 @@ pub fn sdbl_type_to_typeid(db: &dyn TypeKernelDb, t: &sdbl_hir::SdblType) -> Typ
     }
 }
 
-/// Map a single SDBL field type to its BSL counterpart.
+/// Map a single SDBL `MdoRef` (reference cell) onto a `MetadataRef`
+/// `TypeId` whose kind is the matching `*Ref` variant for the MDO family.
 ///
-/// Pure function — see the module-level mapping table for the contract.
-pub fn sdbl_type_to_ty(t: &sdbl_hir::SdblType) -> Ty {
-    use sdbl_hir::SdblType as S;
-    match t {
-        S::Boolean => Ty::Boolean,
-        // Length / precision / scale are display-only enrichments —
-        // they drop out of `Ty` (which is structural) and live on
-        // [`SdblTypeShadowFacet.display`] for hover.
-        S::String { .. } => Ty::String,
-        S::Number { .. } => Ty::Number,
-        S::Date | S::DateTime => Ty::Date,
-        S::Ref(mdo) => mdo_ref_to_metadata_ref(mdo),
-        // `AnyRef` is the SDBL "any MDO reference" cell — no useful
-        // refinement available without context, so the bridge collapses
-        // to `Unknown`. Field lookup falls through to the platform
-        // fallback for any caller that needs `.Ссылка` / `.UUID` etc.
-        S::AnyRef => Ty::Unknown,
-        S::AnyObjectRef { mdo_type } => Ty::AnyMetadataRef { mdo_type: *mdo_type },
-        // Platform value wrappers — the bilingual platform-data index
-        // resolves their Russian names case-insensitively.
-        S::Uuid => Ty::PlatformObject(Name::new("УникальныйИдентификатор")),
-        S::ValueStorage => Ty::PlatformObject(Name::new("ХранилищеЗначения")),
-        S::DefinedType { underlying_type, .. } => underlying_type
-            .as_deref()
-            .map(sdbl_type_to_ty)
-            // Unresolved `ОпределяемыйТип` — hir-def-side resolver
-            // expansion is a Phase-1+ extension; for now the bridge
-            // surfaces `Unknown` so callers don't false-positive a
-            // type-error on an opaque user-defined type.
-            .unwrap_or(Ty::Unknown),
-        S::ValueTable => Ty::ValueTable { projection: None },
-        S::Null => Ty::Null,
-        // SDBL `SUM(Number) → Aggregate(Number)` — strip the wrapper
-        // and bridge the inner type. The aggregate marker is irrelevant
-        // to BSL inference.
-        S::Aggregate(inner) => sdbl_type_to_ty(inner),
-        S::Composite { types } => Ty::union(types.iter().map(sdbl_type_to_ty).collect()),
-        S::TabularSectionRef { parent_mdo_type, parent_mdo_name, ts_name } => Ty::MetadataRef {
-            kind: MetadataKind::TabularSection { parent: *parent_mdo_type },
-            // Name convention is "<Parent>.<Section>", mirroring the
-            // `hir-def::MetadataKind::TabularSection` doc.
-            name: Name::new(&format!("{}.{}", parent_mdo_name, ts_name)),
-        },
-        S::Unknown | S::Error => Ty::Unknown,
-    }
-}
-
-/// Map a single SDBL `MdoRef` (reference cell) onto a `Ty::MetadataRef`
-/// whose kind is the matching `*Ref` variant for the MDO family.
-///
-/// When the MDO family has no `*Ref` companion in [`MetadataKind`]
-/// (`ChartOfCharacteristicTypes`, `ChartOfCalculationTypes`, etc.),
-/// falls back to [`Ty::AnyMetadataRef { mdo_type }`]. That preserves
-/// the MDO kind (so receivers like `<ref>.Метаданные()` and family-wide
-/// completion still work) at the cost of losing the specific name —
-/// a strict improvement over `Ty::Unknown` which would silently swallow
-/// the SDBL provenance.
+/// Mints the id via `db.metadata_ref(.., &RootConfigCtx)`. When the MDO
+/// family has no `*Ref` companion in [`MetadataKind`]
+/// (`ChartOfCharacteristicTypes`, `ChartOfCalculationTypes`, etc.), falls
+/// back to `db.any_metadata_ref(mdo_type)`. That preserves the MDO kind
+/// (so receivers like `<ref>.Метаданные()` and family-wide completion
+/// still work) at the cost of losing the specific name — a strict
+/// improvement over `Unknown` which would silently swallow the SDBL
+/// provenance.
 ///
 /// Extending [`MetadataKind`] with the missing `*Ref` variants
 /// (`ChartOfCharacteristicTypesRef`, `ChartOfCalculationTypesRef`, …)
 /// is the proper fix and a deferred follow-up.
-fn mdo_ref_to_metadata_ref(mdo: &sdbl_hir::MdoRef) -> Ty {
-    match ref_kind_for(mdo.mdo_type) {
-        Some(kind) => Ty::MetadataRef { kind, name: Name::new(&mdo.name) },
-        None => Ty::AnyMetadataRef { mdo_type: mdo.mdo_type },
-    }
-}
-
-/// Kernel-native counterpart of [`mdo_ref_to_metadata_ref`] — mints the
-/// `MetadataRef` id via `db.metadata_ref(.., &RootConfigCtx)` (the same
-/// builder + config fallback the bridge uses) or falls back to
-/// `db.any_metadata_ref` for MDO families without a `*Ref` companion.
 fn mdo_ref_to_typeid(db: &dyn TypeKernelDb, mdo: &sdbl_hir::MdoRef) -> TypeId {
     match ref_kind_for(mdo.mdo_type) {
         Some(kind) => db.metadata_ref(kind, mdo.name.clone(), &RootConfigCtx),
@@ -213,8 +153,8 @@ fn mdo_ref_to_typeid(db: &dyn TypeKernelDb, mdo: &sdbl_hir::MdoRef) -> TypeId {
 ///
 /// Companion to [`MetadataKind::object_kind_for`] which picks `*Object`;
 /// this one picks `*Ref`. Kept private to the bridge module — public
-/// callers can route through [`sdbl_type_to_ty`] / [`mdo_ref_to_metadata_ref`]
-/// without needing to know the mapping themselves.
+/// callers route through [`sdbl_type_to_typeid`] without needing to know
+/// the mapping themselves.
 fn ref_kind_for(mdo: MdoType) -> Option<MetadataKind> {
     Some(match mdo {
         MdoType::Catalog => MetadataKind::CatalogRef,
@@ -230,8 +170,8 @@ fn ref_kind_for(mdo: MdoType) -> Option<MetadataKind> {
         MdoType::CalculationRegister => MetadataKind::CalculationRegisterRef,
         // MDOs without a `*Ref` companion in `MetadataKind` (common
         // modules, dimensions, constants, …) — SDBL does not put these
-        // in a reference cell, so the bridge returns `None` and the
-        // caller falls back to `Ty::Unknown`.
+        // in a reference cell, so this returns `None` and the caller
+        // (`mdo_ref_to_typeid`) falls back to `db.any_metadata_ref`.
         _ => return None,
     })
 }
@@ -430,146 +370,181 @@ mod tests {
         Box::new(SdblType::Number { precision: Some(15), scale: Some(2) })
     }
 
-    /// §4.C drift-detector: native minting must produce the *same interned
-    /// id* as bridging the legacy `Ty` path. Guards §4.C.2 (the
-    /// `Projection.fields` flip) — and ultimately the `Ty`-path deletion
-    /// — against any divergence. Covers precision/scale + string length
-    /// (must drop), unknown/error, composite-with-unknown, and the ref
-    /// fallback (MDO family without a `*Ref` companion).
+    /// Pins the per-variant kernel mapping for `sdbl_type_to_typeid`.
+    /// Covers precision/scale + string length (must drop), unknown/error,
+    /// composite-with-unknown (Unknown absorbed by the union
+    /// constructor → bare `Number`), and the ref fallback (MDO family
+    /// without a `*Ref` companion → `any_metadata_ref`).
     #[test]
-    fn sdbl_typeid_matches_bridge() {
-        use crate::ty_bridge::ty_to_typeid;
+    fn sdbl_typeid_covers_all_variants() {
         let db = InMemoryDb::new();
-        let cases = vec![
-            SdblType::Boolean,
-            SdblType::string(),
-            SdblType::string_with_length(50),
-            SdblType::Number { precision: Some(15), scale: Some(2) },
-            SdblType::Date,
-            SdblType::DateTime,
-            SdblType::Null,
-            SdblType::ValueTable,
-            SdblType::Uuid,
-            SdblType::ValueStorage,
-            SdblType::AnyRef,
-            SdblType::Unknown,
-            SdblType::Error,
-            SdblType::AnyObjectRef { mdo_type: MdoType::Catalog },
-            SdblType::Ref(sdbl_hir::MdoRef::new(MdoType::Catalog, "Товары")),
+        let cases: Vec<(SdblType, TypeId)> = vec![
+            (SdblType::Boolean, db.boolean()),
+            (SdblType::string(), db.string(None, false)),
+            (SdblType::string_with_length(50), db.string(None, false)),
+            (SdblType::Number { precision: Some(15), scale: Some(2) }, db.number(None, None)),
+            (SdblType::Date, db.date(DateComponent::DateTime)),
+            (SdblType::DateTime, db.date(DateComponent::DateTime)),
+            (SdblType::Null, db.null()),
+            (SdblType::ValueTable, db.value_table(None, TableSource::Unknown)),
+            (SdblType::Uuid, db.platform_object("УникальныйИдентификатор".to_string())),
+            (SdblType::ValueStorage, db.platform_object("ХранилищеЗначения".to_string())),
+            (SdblType::AnyRef, db.unknown()),
+            (SdblType::Unknown, db.unknown()),
+            (SdblType::Error, db.unknown()),
+            (
+                SdblType::AnyObjectRef { mdo_type: MdoType::Catalog },
+                db.any_metadata_ref(MdoType::Catalog),
+            ),
+            (
+                SdblType::Ref(sdbl_hir::MdoRef::new(MdoType::Catalog, "Товары")),
+                db.metadata_ref(MetadataKind::CatalogRef, "Товары".to_string(), &RootConfigCtx),
+            ),
             // Ref fallback: CommonModule has no `*Ref` companion → any_metadata_ref.
-            SdblType::Ref(sdbl_hir::MdoRef::new(MdoType::CommonModule, "Х")),
-            SdblType::DefinedType {
-                name: "Деньги".to_string(),
-                underlying_type: Some(boxed_number()),
-            },
-            SdblType::Aggregate(boxed_number()),
-            SdblType::Composite {
-                types: vec![SdblType::Number { precision: None, scale: None }, SdblType::Unknown],
-            },
-            SdblType::TabularSectionRef {
-                parent_mdo_type: MdoType::Catalog,
-                parent_mdo_name: "Номенклатура".to_string(),
-                ts_name: "Товары".to_string(),
-            },
+            (
+                SdblType::Ref(sdbl_hir::MdoRef::new(MdoType::CommonModule, "Х")),
+                db.any_metadata_ref(MdoType::CommonModule),
+            ),
+            (
+                SdblType::DefinedType {
+                    name: "Деньги".to_string(),
+                    underlying_type: Some(boxed_number()),
+                },
+                db.number(None, None),
+            ),
+            (SdblType::Aggregate(boxed_number()), db.number(None, None)),
+            // Composite{Number, Unknown}: the union constructor absorbs
+            // Unknown, collapsing to the lone Number arm.
+            (
+                SdblType::Composite {
+                    types: vec![
+                        SdblType::Number { precision: None, scale: None },
+                        SdblType::Unknown,
+                    ],
+                },
+                db.number(None, None),
+            ),
+            (
+                SdblType::TabularSectionRef {
+                    parent_mdo_type: MdoType::Catalog,
+                    parent_mdo_name: "Номенклатура".to_string(),
+                    ts_name: "Товары".to_string(),
+                },
+                db.metadata_ref(
+                    MetadataKind::TabularSection { parent: MdoType::Catalog },
+                    "Номенклатура.Товары".to_string(),
+                    &RootConfigCtx,
+                ),
+            ),
         ];
-        for t in &cases {
-            assert_eq!(
-                sdbl_type_to_typeid(&db, t),
-                ty_to_typeid(&db, &sdbl_type_to_ty(t)),
-                "drift for {t:?}"
-            );
+        for (t, expected) in &cases {
+            assert_eq!(sdbl_type_to_typeid(&db, t), *expected, "mapping for {t:?}");
         }
     }
 
     #[test]
     fn primitives_bridge_to_structural_ty() {
         // Display-only attributes (length / precision / scale) drop out
-        // of `Ty` — the shadow path preserves them; here we only check
-        // the structural projection.
-        assert_eq!(sdbl_type_to_ty(&SdblType::Boolean), Ty::Boolean);
-        assert_eq!(sdbl_type_to_ty(&SdblType::string()), Ty::String);
-        assert_eq!(sdbl_type_to_ty(&SdblType::string_with_length(50)), Ty::String);
+        // of the structural kernel type — the shadow path preserves them;
+        // here we only check the structural projection.
+        let db = InMemoryDb::new();
+        assert_eq!(sdbl_type_to_typeid(&db, &SdblType::Boolean), db.boolean());
+        assert_eq!(sdbl_type_to_typeid(&db, &SdblType::string()), db.string(None, false));
         assert_eq!(
-            sdbl_type_to_ty(&SdblType::Number { precision: Some(15), scale: Some(2) }),
-            Ty::Number,
+            sdbl_type_to_typeid(&db, &SdblType::string_with_length(50)),
+            db.string(None, false)
         );
-        assert_eq!(sdbl_type_to_ty(&SdblType::Date), Ty::Date);
-        assert_eq!(sdbl_type_to_ty(&SdblType::DateTime), Ty::Date);
-        assert_eq!(sdbl_type_to_ty(&SdblType::Null), Ty::Null);
-        assert_eq!(sdbl_type_to_ty(&SdblType::ValueTable), Ty::ValueTable { projection: None });
-        assert_eq!(sdbl_type_to_ty(&SdblType::AnyRef), Ty::Unknown);
-        assert_eq!(sdbl_type_to_ty(&SdblType::Unknown), Ty::Unknown);
-        assert_eq!(sdbl_type_to_ty(&SdblType::Error), Ty::Unknown);
+        assert_eq!(
+            sdbl_type_to_typeid(&db, &SdblType::Number { precision: Some(15), scale: Some(2) }),
+            db.number(None, None),
+        );
+        assert_eq!(sdbl_type_to_typeid(&db, &SdblType::Date), db.date(DateComponent::DateTime));
+        assert_eq!(sdbl_type_to_typeid(&db, &SdblType::DateTime), db.date(DateComponent::DateTime));
+        assert_eq!(sdbl_type_to_typeid(&db, &SdblType::Null), db.null());
+        assert_eq!(
+            sdbl_type_to_typeid(&db, &SdblType::ValueTable),
+            db.value_table(None, TableSource::Unknown)
+        );
+        assert_eq!(sdbl_type_to_typeid(&db, &SdblType::AnyRef), db.unknown());
+        assert_eq!(sdbl_type_to_typeid(&db, &SdblType::Unknown), db.unknown());
+        assert_eq!(sdbl_type_to_typeid(&db, &SdblType::Error), db.unknown());
     }
 
     #[test]
     fn uuid_and_value_storage_lower_to_platform_objects() {
         // The bilingual platform-data index resolves both Russian and
         // English names — Russian is the canonical SDBL-side spelling.
+        let db = InMemoryDb::new();
         assert_eq!(
-            sdbl_type_to_ty(&SdblType::Uuid),
-            Ty::PlatformObject(Name::new("УникальныйИдентификатор")),
+            sdbl_type_to_typeid(&db, &SdblType::Uuid),
+            db.platform_object("УникальныйИдентификатор".to_string()),
         );
         assert_eq!(
-            sdbl_type_to_ty(&SdblType::ValueStorage),
-            Ty::PlatformObject(Name::new("ХранилищеЗначения")),
+            sdbl_type_to_typeid(&db, &SdblType::ValueStorage),
+            db.platform_object("ХранилищеЗначения".to_string()),
         );
     }
 
     #[test]
     fn ref_bridges_to_matching_metadata_ref_kind() {
+        let db = InMemoryDb::new();
         let r = SdblType::Ref(sdbl_hir::MdoRef::new(MdoType::Catalog, "Товары"));
         assert_eq!(
-            sdbl_type_to_ty(&r),
-            Ty::MetadataRef { kind: MetadataKind::CatalogRef, name: Name::new("Товары") },
+            sdbl_type_to_typeid(&db, &r),
+            db.metadata_ref(MetadataKind::CatalogRef, "Товары".to_string(), &RootConfigCtx),
         );
 
         let r = SdblType::Ref(sdbl_hir::MdoRef::new(MdoType::Document, "ПКО"));
         assert_eq!(
-            sdbl_type_to_ty(&r),
-            Ty::MetadataRef { kind: MetadataKind::DocumentRef, name: Name::new("ПКО") },
+            sdbl_type_to_typeid(&db, &r),
+            db.metadata_ref(MetadataKind::DocumentRef, "ПКО".to_string(), &RootConfigCtx),
         );
     }
 
     #[test]
     fn any_object_ref_lowers_to_dedicated_variant() {
         // `AnyObjectRef { Catalog }` is the "some catalog reference, no
-        // specific name" cell — distinct from `Ty::ManagerCollection`
+        // specific name" cell — distinct from `ManagerCollection`
         // which models the global manager container.
+        let db = InMemoryDb::new();
         let t = SdblType::AnyObjectRef { mdo_type: MdoType::Catalog };
-        assert_eq!(sdbl_type_to_ty(&t), Ty::AnyMetadataRef { mdo_type: MdoType::Catalog });
+        assert_eq!(sdbl_type_to_typeid(&db, &t), db.any_metadata_ref(MdoType::Catalog));
     }
 
     #[test]
     fn defined_type_with_underlying_recurses() {
+        let db = InMemoryDb::new();
         let t = SdblType::DefinedType {
             name: "Деньги".to_string(),
             underlying_type: Some(boxed_number()),
         };
-        assert_eq!(sdbl_type_to_ty(&t), Ty::Number);
+        assert_eq!(sdbl_type_to_typeid(&db, &t), db.number(None, None));
     }
 
     #[test]
     fn defined_type_without_underlying_falls_to_unknown() {
         // No hir-def-side resolver expansion in Phase 1; bridge surfaces
         // `Unknown` so callers don't false-positive a type-error.
+        let db = InMemoryDb::new();
         let t = SdblType::DefinedType { name: "Деньги".to_string(), underlying_type: None };
-        assert_eq!(sdbl_type_to_ty(&t), Ty::Unknown);
+        assert_eq!(sdbl_type_to_typeid(&db, &t), db.unknown());
     }
 
     #[test]
     fn aggregate_strips_wrapper() {
         // `SUM(Number) → Aggregate(Number)` — the aggregate marker has
         // no BSL counterpart, so the bridge strips it.
+        let db = InMemoryDb::new();
         let t = SdblType::Aggregate(boxed_number());
-        assert_eq!(sdbl_type_to_ty(&t), Ty::Number);
+        assert_eq!(sdbl_type_to_typeid(&db, &t), db.number(None, None));
     }
 
     #[test]
-    fn composite_lowers_via_ty_union() {
-        // The smart constructor sorts + dedups via `Ord` on `Ty`;
-        // bridge correctness here is "every arm is bridged once". Order
-        // is irrelevant — `Ty::union` is commutative under `PartialEq`.
+    fn composite_lowers_via_union() {
+        // The union constructor sorts + dedups; bridge correctness here
+        // is "every arm is bridged once". Order is irrelevant — building
+        // the expected union with the same builder canonicalises both.
+        let db = InMemoryDb::new();
         let t = SdblType::Composite {
             types: vec![
                 SdblType::Boolean,
@@ -577,31 +552,27 @@ mod tests {
                 SdblType::Number { precision: None, scale: None },
             ],
         };
-        let ty = sdbl_type_to_ty(&t);
-        match ty {
-            Ty::Union(arms) => {
-                assert_eq!(arms.len(), 3, "expected 3 distinct arms after dedup, got {arms:?}");
-                assert!(arms.contains(&Ty::Boolean));
-                assert!(arms.contains(&Ty::String));
-                assert!(arms.contains(&Ty::Number));
-            }
-            other => panic!("expected Ty::Union, got {other:?}"),
-        }
+        assert_eq!(
+            sdbl_type_to_typeid(&db, &t),
+            db.union(vec![db.boolean(), db.string(None, false), db.number(None, None)]),
+        );
     }
 
     #[test]
     fn tabular_section_ref_carries_parent_pair() {
+        let db = InMemoryDb::new();
         let t = SdblType::TabularSectionRef {
             parent_mdo_type: MdoType::Document,
             parent_mdo_name: "ПКО".to_string(),
             ts_name: "Товары".to_string(),
         };
         assert_eq!(
-            sdbl_type_to_ty(&t),
-            Ty::MetadataRef {
-                kind: MetadataKind::TabularSection { parent: MdoType::Document },
-                name: Name::new("ПКО.Товары"),
-            },
+            sdbl_type_to_typeid(&db, &t),
+            db.metadata_ref(
+                MetadataKind::TabularSection { parent: MdoType::Document },
+                "ПКО.Товары".to_string(),
+                &RootConfigCtx,
+            ),
         );
     }
 
@@ -621,13 +592,14 @@ mod tests {
         // completion still works) by routing through `Ty::AnyMetadataRef`
         // — strictly better than dropping to `Ty::Unknown` and losing
         // the SDBL provenance.
+        let db = InMemoryDb::new();
         let r = SdblType::Ref(sdbl_hir::MdoRef::new(
             MdoType::ChartOfCharacteristicTypes,
             "ВидыНоменклатуры",
         ));
         assert_eq!(
-            sdbl_type_to_ty(&r),
-            Ty::AnyMetadataRef { mdo_type: MdoType::ChartOfCharacteristicTypes },
+            sdbl_type_to_typeid(&db, &r),
+            db.any_metadata_ref(MdoType::ChartOfCharacteristicTypes),
         );
     }
 
@@ -1087,15 +1059,16 @@ mod tests {
         // `SUM(Number)` lowers to `Aggregate(Number)` which the bridge
         // strips to `Number`. A composite of `[Number, Aggregate(Number)]`
         // must dedup down to a single `Number` after bridging — the
-        // smart `Ty::union` constructor is responsible for the fold;
-        // this test pins the contract end-to-end so a future refactor
-        // that reorders aggregate handling can't silently break it.
+        // union constructor is responsible for the fold; this test pins
+        // the contract end-to-end so a future refactor that reorders
+        // aggregate handling can't silently break it.
+        let db = InMemoryDb::new();
         let t = SdblType::Composite {
             types: vec![
                 SdblType::Number { precision: None, scale: None },
                 SdblType::Aggregate(Box::new(SdblType::Number { precision: None, scale: None })),
             ],
         };
-        assert_eq!(sdbl_type_to_ty(&t), Ty::Number);
+        assert_eq!(sdbl_type_to_typeid(&db, &t), db.number(None, None));
     }
 }
