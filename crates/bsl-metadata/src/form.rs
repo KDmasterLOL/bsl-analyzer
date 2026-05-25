@@ -65,6 +65,32 @@ pub enum FormElementKind {
     ButtonGroup = 11,
 }
 
+impl FormElementKind {
+    /// Base (non-extension) platform type name for this control kind —
+    /// `ТаблицаФормы` / `ПолеФормы` / `ГруппаФормы` / …. Locale-independent:
+    /// these are platform-data keys, not localized labels. `Other` has no
+    /// platform wrapper and returns `None`.
+    ///
+    /// Single source of truth for the wrapper name shared by kernel display
+    /// (`bsl_types::display`) and the `hir-def` form-control type chain.
+    pub fn base_platform_type_name(self) -> Option<&'static str> {
+        Some(match self {
+            Self::Table => "ТаблицаФормы",
+            Self::Group
+            | Self::UsualGroup
+            | Self::Pages
+            | Self::Page
+            | Self::CommandBar
+            | Self::ButtonGroup => "ГруппаФормы",
+            Self::Field => "ПолеФормы",
+            Self::Button => "КнопкаФормы",
+            Self::Decoration => "ДекорацияФормы",
+            Self::Addition => "ДополнениеЭлементаФормы",
+            Self::Other => return None,
+        })
+    }
+}
+
 /// Form element with data path information.
 ///
 /// Represents form controls (InputField, LabelField, CheckBoxField, etc.)

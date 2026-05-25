@@ -17,6 +17,18 @@ use crate::facet::{
 };
 use crate::intern::TypeKernelDb;
 use crate::kind::{Projection, TypeId, TypeKind};
+use bsl_metadata::MdoType;
+
+/// Manager-collection label for an MDO family — `СправочникМенеджер` /
+/// `CatalogManager`, falling back to the generic collection label when the
+/// MDO has no manager-prefix form. Shared by `ManagerCollection` and
+/// `AnyMetadataRef` (Phase 0 aliases the latter to the former's shape).
+fn manager_collection_label(mdo: MdoType, locale: Locale) -> &'static str {
+    match locale {
+        Locale::Ru => mdo.manager_type_prefix_ru().unwrap_or("МенеджерКоллекция"),
+        Locale::En => mdo.manager_type_prefix().unwrap_or("ManagerCollection"),
+    }
+}
 
 /// Locale for user-visible labels. Russian is the BSL native; English
 /// is the alias surface (used for hover-in-EN clients, doc-comment
@@ -138,13 +150,17 @@ fn render(kind: &TypeKind, ctx: &dyn DisplayCtx, db: &dyn TypeKernelDb, buf: &mu
         TypeKind::MetadataRef(facet) => render_meta_ref(facet, ctx, buf),
         TypeKind::MetadataObject(facet) => render_meta_obj(facet, ctx, buf),
         TypeKind::AnyMetadataRef { mdo_type } => {
-            write!(buf, "{:?}", mdo_type).unwrap();
+            buf.push_str(manager_collection_label(*mdo_type, ctx.locale()));
         }
         TypeKind::ManagerCollection(mdo_type) => {
-            write!(buf, "{:?}", mdo_type).unwrap();
+            buf.push_str(manager_collection_label(*mdo_type, ctx.locale()));
         }
         TypeKind::ObjectManager(facet) => {
-            buf.push_str(&facet.name);
+            let kind_label = match ctx.locale() {
+                Locale::Ru => facet.mdo.russian_name(),
+                Locale::En => facet.mdo.english_name(),
+            };
+            write!(buf, "{}.{}", kind_label, facet.name).unwrap();
         }
         TypeKind::TabularSection { name, .. } => {
             buf.push_str(match ctx.locale() {
@@ -188,21 +204,24 @@ fn render(kind: &TypeKind, ctx: &dyn DisplayCtx, db: &dyn TypeKernelDb, buf: &mu
             Locale::En => "Filter",
         }),
         TypeKind::Attribute { name, .. } => buf.push_str(name),
-        TypeKind::FormData { underlying, .. } => {
-            buf.push_str(match ctx.locale() {
-                Locale::Ru => "ДанныеФормы",
-                Locale::En => "FormData",
-            });
+        TypeKind::FormData { kind, underlying } => {
+            // Concrete platform wrapper (`ДанныеФормыСтруктура` /
+            // `…Коллекция` / `…СтруктураСКоллекцией`) — locale-independent
+            // platform key, mirroring `Ty::display`'s wrapper.
+            buf.push_str(kind.platform_type_name());
             if let Some(owner) = underlying {
                 buf.push(':');
                 render_mdo_ref(owner, ctx, buf);
             }
         }
-        TypeKind::FormControl { binding, .. } => {
-            buf.push_str(match ctx.locale() {
+        TypeKind::FormControl { kind, binding } => {
+            // Per-kind platform wrapper name (`ПолеФормы`, `ТаблицаФормы`,
+            // …) — locale-independent platform key. `Other` has no wrapper;
+            // fall back to the generic localized label.
+            buf.push_str(kind.base_platform_type_name().unwrap_or(match ctx.locale() {
                 Locale::Ru => "ЭлементФормы",
                 Locale::En => "FormControl",
-            });
+            }));
             if let Some(binding) = binding {
                 render_form_binding(binding, ctx, db, buf);
             }
@@ -228,7 +247,7 @@ fn render(kind: &TypeKind, ctx: &dyn DisplayCtx, db: &dyn TypeKernelDb, buf: &mu
         TypeKind::QueryResult(facet) => render_query_result(facet, ctx, db, buf),
         TypeKind::QueryResultSelection(facet) => {
             buf.push_str(match ctx.locale() {
-                Locale::Ru => "ВыборкаИзРезультата",
+                Locale::Ru => "ВыборкаИзРезультатаЗапроса",
                 Locale::En => "QueryResultSelection",
             });
             render_projection_suffix(&facet.projection, ctx, db, buf);
@@ -735,20 +754,38 @@ mod tests {
             MdoRefFacet { mdo_type: MdoType::Catalog, name: "Контрагенты".to_string() };
         let form_data =
             db.mk_form_data(FormDataFacet::StructureWithCollection, Some(owner.clone()));
-        expect!["ДанныеФормы:Справочник.Контрагенты"].assert_eq(&show(&db, form_data, &ru()));
-        expect!["FormData:Catalog.Контрагенты"].assert_eq(&show(&db, form_data, &en()));
+        expect!["ДанныеФормыСтруктураСКоллекцией:Справочник.Контрагенты"].assert_eq(&show(
+            &db,
+            form_data,
+            &ru(),
+        ));
+        expect!["ДанныеФормыСтруктураСКоллекцией:Catalog.Контрагенты"].assert_eq(&show(
+            &db,
+            form_data,
+            &en(),
+        ));
+
+        // The concrete wrapper distinguishes the three form-data shapes.
+        let structure = db.mk_form_data(FormDataFacet::Structure, Some(owner.clone()));
+        expect!["ДанныеФормыСтруктура:Справочник.Контрагенты"].assert_eq(&show(
+            &db,
+            structure,
+            &ru(),
+        ));
+        let collection = db.mk_form_data(FormDataFacet::Collection, None);
+        expect!["ДанныеФормыКоллекция"].assert_eq(&show(&db, collection, &ru()));
 
         let binding = FormBindingFacet {
             path: Arc::from(["Объект".to_string(), "Наименование".to_string()]),
             target: FormBindingTargetFacet::Attribute { ty: db.string(Some(50), false) },
         };
         let control = db.mk_form_control(FormElementFacet::Field, Some(binding));
-        expect!["ЭлементФормы:Объект.Наименование -> Строка(50)"].assert_eq(&show(
+        expect!["ПолеФормы:Объект.Наименование -> Строка(50)"].assert_eq(&show(
             &db,
             control,
             &ru(),
         ));
-        expect!["FormControl:Объект.Наименование -> String(50)"].assert_eq(&show(
+        expect!["ПолеФормы:Объект.Наименование -> String(50)"].assert_eq(&show(
             &db,
             control,
             &en(),
@@ -784,12 +821,12 @@ mod tests {
         };
         let control = db.mk_form_control(FormElementFacet::Table, Some(binding));
 
-        expect!["ЭлементФормы:Объект.Товары -> Справочник.Контрагенты.Товары"].assert_eq(&show(
+        expect!["ТаблицаФормы:Объект.Товары -> Справочник.Контрагенты.Товары"].assert_eq(&show(
             &db,
             control,
             &ru(),
         ));
-        expect!["FormControl:Объект.Товары -> Catalog.Контрагенты.Товары"].assert_eq(&show(
+        expect!["ТаблицаФормы:Объект.Товары -> Catalog.Контрагенты.Товары"].assert_eq(&show(
             &db,
             control,
             &en(),

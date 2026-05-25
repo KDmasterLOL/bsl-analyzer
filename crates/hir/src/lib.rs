@@ -173,7 +173,7 @@ pub use hir_ty::{
     ModuleCodeInferenceResult, ParamsShape, Ty, UnresolvedMethodKind,
 };
 
-use bsl_types::builders::Builders;
+pub use bsl_types::builders::Builders;
 use syntax::{ast::AstNode, TextRange};
 use vfs::FileId;
 

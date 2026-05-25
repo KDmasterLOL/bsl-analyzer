@@ -147,6 +147,20 @@ pub enum FormDataFacet {
     StructureWithCollection,
 }
 
+impl FormDataFacet {
+    /// Concrete platform wrapper name (`ДанныеФормыСтруктура` /
+    /// `ДанныеФормыКоллекция` / `ДанныеФормыСтруктураСКоллекцией`).
+    /// Locale-independent — these are platform-data keys, not localized
+    /// labels.
+    pub fn platform_type_name(&self) -> &'static str {
+        match self {
+            Self::Structure => "ДанныеФормыСтруктура",
+            Self::Collection => "ДанныеФормыКоллекция",
+            Self::StructureWithCollection => "ДанныеФормыСтруктураСКоллекцией",
+        }
+    }
+}
+
 /// Coarse taxonomy of form controls.
 pub use bsl_metadata::FormElementKind as FormElementFacet;
 
