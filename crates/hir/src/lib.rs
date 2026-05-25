@@ -10,7 +10,6 @@ pub mod type_facade;
 pub use bsl_types::intern::TypeKernelDb;
 pub use bsl_types::kind::{TypeId, TypeKind};
 pub use definition::{Definition, ReferenceScope};
-pub use hir_ty::coerce_this_object_to_metadata_ref;
 pub use hir_ty::method_lookup::platform_type_key_id;
 pub use hir_ty::resolve_platform_global_property_type;
 pub use hir_ty::this_object::coerce_to_metadata_ref_id;

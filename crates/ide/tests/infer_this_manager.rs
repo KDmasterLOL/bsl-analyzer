@@ -114,7 +114,7 @@ fn infer_this_manager_resolves_in_information_register_module() {
     // Pins the register-axis claim explicitly. `InformationRegister`'s
     // `manager_type_prefix() = Some("InformationRegisterManager")` is
     // the gate `this_object::resolve_this_manager_owner` and
-    // `coerce_to_metadata_ref` share, so a register's
+    // `coerce_to_metadata_ref_id` share, so a register's
     // `ManagerModule.bsl` must produce `Ty::ThisManager { (Register,
     // name) }` exactly the same way Catalog does. A regression that
     // narrows the gate to a hand-picked subset of `MdoType` (instead

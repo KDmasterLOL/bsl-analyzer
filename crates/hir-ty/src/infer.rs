@@ -2210,7 +2210,7 @@ impl<'db> InferenceContext<'db> {
             // fall through to `lookup_method` (their platform path).
             //
             // `ThisObject` is coerced upfront — `lookup_method` does
-            // the same coercion (`crate::this_object::coerce_to_metadata_ref`),
+            // the same coercion (`crate::this_object::coerce_to_metadata_ref_id`),
             // so doing it here mirrors that contract. After coercion
             // `ЭтотОбъект.МойМетод()` enters the workspace resolver
             // through the same `(MdoType, name)` pair the platform
@@ -2302,7 +2302,7 @@ impl<'db> InferenceContext<'db> {
             // composite typenames via `MetadataKind::platform_prefix`).
             //
             // Note: `ThisObject` cannot reach this branch because
-            // `coerce_to_metadata_ref` only produces `*Object` kinds —
+            // `coerce_to_metadata_ref_id` only produces `*Object` kinds —
             // there is no `ThisObject → *RecordSet` coercion in BSL
             // semantics today. So we match on `receiver_ty` directly
             // here, not on `workspace_receiver_ty`.

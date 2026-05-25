@@ -93,4 +93,3 @@ pub use platform_resolution::{
     resolve_method, PlatformMethodHandle, PlatformMethodOrigin, ResolvedPlatformMethod,
 };
 pub use subtype::{is_assignable, is_coercible_to, is_ref_ty};
-pub use this_object::coerce_to_metadata_ref as coerce_this_object_to_metadata_ref;

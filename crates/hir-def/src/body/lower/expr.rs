@@ -1034,7 +1034,7 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
 ///   SymbolTree). Returns `None` so the body keeps its original
 ///   `Expr::Call { callee: Expr::Field, args }` shape — inference
 ///   then routes the `Ty::ThisObject` receiver through
-///   `coerce_to_metadata_ref` → `resolve_object_module_call`.
+///   `coerce_to_metadata_ref_id` → `resolve_object_module_call`.
 ///   `RedundantAccessToObject::ThisObject` is already pushed by
 ///   `lower_field_expr`.
 ///
@@ -1082,7 +1082,7 @@ fn maybe_lower_as_qualified_call(
                 // the body would give for a bare `Method()` callee.
                 // Inference's Field path then routes the
                 // `Expr::Field { base: Path("ЭтотОбъект"), … }` shape
-                // through `coerce_to_metadata_ref` →
+                // through `coerce_to_metadata_ref_id` →
                 // `resolve_object_module_call` for typing and
                 // `MethodNotExport` checks. `RedundantAccessToObject::ThisObject`
                 // is already emitted by `lower_field_expr`.

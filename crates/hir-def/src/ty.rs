@@ -187,7 +187,7 @@ pub enum Ty {
     /// (`Ty::MetadataRef { CatalogManager, … }` is *not* a thing in
     /// this codebase — manager dispatch goes through `ObjectManager`
     /// keyed on `MdoType` directly, see
-    /// [`hir_ty::this_object::coerce_to_metadata_ref`]). The plan
+    /// [`hir_ty::this_object::coerce_to_metadata_ref_id`]). The plan
     /// (`linear-tumbling-noodle.md` §2.5) had drift here.
     ThisManager {
         /// `(kind, name)` of the MDO whose `ManagerModule.bsl` encloses

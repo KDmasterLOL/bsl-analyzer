@@ -54,7 +54,7 @@ use bsl_types::builders::{Builders, ConfigCtx};
 use bsl_types::intern::TypeKernelDb;
 use bsl_types::kind::{ConfigId, TypeId, TypeKind};
 use hir_def::resolver::Resolver;
-use hir_def::ty::{MetadataKind, Ty};
+use hir_def::ty::MetadataKind;
 use hir_def::{DefDatabase, Name};
 
 /// [`ConfigCtx`] that forces a fixed, already-resolved [`ConfigId`].
@@ -75,53 +75,22 @@ impl ConfigCtx for FixedConfigCtx {
     }
 }
 
-/// Coerce `ЭтотОбъект` receivers to their dispatch-ready Ty.
+/// Coerce `ЭтотОбъект` receivers to their dispatch-ready type.
 ///
-/// Returns `Some(coerced)` for both [`Ty::ThisObject`] (→
-/// `Ty::MetadataRef { *Object, name }`) and [`Ty::ThisManager`] (→
-/// `Ty::ObjectManager { kind, name }`); `None` for everything else
-/// **and** for `This*` receivers whose MDO kind has no dispatch
-/// counterpart (e.g. `ThisObject` for a register flavour).
-///
-/// Callers should treat a `Some(coerced)` result as the receiver for
-/// the rest of the lookup: `let receiver = coerce_to_metadata_ref(ty)
-/// .as_ref().unwrap_or(ty);`.
-///
-/// The function name retains the historical "_to_metadata_ref" suffix
-/// even though `ThisManager` coerces to `Ty::ObjectManager` (not
-/// `Ty::MetadataRef`) — the original naming reflects the
-/// `ObjectModule`-only world before Step J. Renaming is a separate
-/// cleanup; the contract is "receiver-position coercion to a
-/// dispatch-ready Ty" and that has not changed.
-pub fn coerce_to_metadata_ref(receiver_ty: &Ty) -> Option<Ty> {
-    match receiver_ty {
-        Ty::ThisObject { owner: (kind, name) } => {
-            let object_kind = MetadataKind::object_kind_for(*kind)?;
-            Some(Ty::MetadataRef { kind: object_kind, name: name.clone() })
-        }
-        Ty::ThisManager { owner: (kind, name) } => {
-            // Gate on the same table `resolve_this_manager_owner` uses, so
-            // an unreachable case here would only fire if a caller
-            // bypassed the resolver and synthesised a `ThisManager`
-            // for an MDO without a manager surface.
-            kind.manager_type_prefix()?;
-            Some(Ty::ObjectManager { kind: *kind, name: name.clone() })
-        }
-        _ => None,
-    }
-}
-
-/// Kernel-native [`coerce_to_metadata_ref`].
-///
-/// Same coercion (`ThisObject` → `MetadataRef { *Object, name }`,
-/// `ThisManager` → `ObjectManager { mdo, name }`), computed directly on
-/// the type kernel. Unlike the `Ty` path — which round-trips through a
-/// config-less `Ty` and defaults `config_id` to `Root` — this preserves
-/// the `config_id` carried by the native `ThisObject` / `ThisManager`
-/// facet, so a CFE-scoped `ЭтотОбъект` keeps its extension config.
+/// Same coercion for both `This*` facets, computed directly on the type
+/// kernel: `ThisObject` → `MetadataRef { *Object, name }`, `ThisManager`
+/// → `ObjectManager { mdo, name }`. Preserves the `config_id` carried by
+/// the native `ThisObject` / `ThisManager` facet, so a CFE-scoped
+/// `ЭтотОбъект` keeps its extension config.
 ///
 /// Returns `None` for non-`This*` receivers and for `This*` kinds with
-/// no dispatch counterpart (same coverage gate as the `Ty` version).
+/// no dispatch counterpart (e.g. `ThisObject` for a register flavour).
+///
+/// The function name retains the historical "_to_metadata_ref" suffix
+/// even though `ThisManager` coerces to `ObjectManager` (not
+/// `MetadataRef`) — the original naming reflects the `ObjectModule`-only
+/// world before Step J. The contract is "receiver-position coercion to a
+/// dispatch-ready type" and that has not changed.
 pub fn coerce_to_metadata_ref_id(db: &dyn TypeKernelDb, receiver: TypeId) -> Option<TypeId> {
     match db.lookup_type(receiver) {
         TypeKind::ThisObject { config_id, owner } => {
@@ -287,29 +256,44 @@ pub fn is_managed_form_module(db: &dyn DefDatabase, resolver: &Resolver) -> bool
 mod tests {
     use super::*;
     use bsl_metadata::MdoType;
-    use hir_def::Name;
+    use bsl_types::facet::MdoRefFacet;
+    use bsl_types::kind::ConfigId;
+    use bsl_types::testing::{InMemoryDb, RootConfigCtx};
+
+    fn this_object(db: &InMemoryDb, mdo_type: MdoType, name: &str) -> TypeId {
+        db.mk_this_object(ConfigId::Root, MdoRefFacet::new(mdo_type, name.to_string()))
+    }
+
+    fn this_manager(db: &InMemoryDb, mdo_type: MdoType, name: &str) -> TypeId {
+        db.mk_this_manager(ConfigId::Root, MdoRefFacet::new(mdo_type, name.to_string()))
+    }
 
     #[test]
     fn coerces_catalog_this_object_to_catalog_object() {
         // The canonical case — `ЭтотОбъект` inside a Catalog
         // ObjectModule yields a `CatalogObject` ref.
-        let owner = (MdoType::Catalog, Name::new("Номенклатура"));
-        let coerced = coerce_to_metadata_ref(&Ty::ThisObject { owner }).expect("catalog coerces");
+        let db = InMemoryDb::new();
+        let coerced =
+            coerce_to_metadata_ref_id(&db, this_object(&db, MdoType::Catalog, "Номенклатура"))
+                .expect("catalog coerces");
         assert_eq!(
             coerced,
-            Ty::MetadataRef {
-                kind: MetadataKind::CatalogObject, name: Name::new("Номенклатура")
-            }
+            db.metadata_ref(
+                MetadataKind::CatalogObject,
+                "Номенклатура".to_string(),
+                &RootConfigCtx
+            )
         );
     }
 
     #[test]
     fn coerces_document_this_object_to_document_object() {
-        let owner = (MdoType::Document, Name::new("ПКО"));
-        let coerced = coerce_to_metadata_ref(&Ty::ThisObject { owner }).expect("document coerces");
+        let db = InMemoryDb::new();
+        let coerced = coerce_to_metadata_ref_id(&db, this_object(&db, MdoType::Document, "ПКО"))
+            .expect("document coerces");
         assert_eq!(
             coerced,
-            Ty::MetadataRef { kind: MetadataKind::DocumentObject, name: Name::new("ПКО") }
+            db.metadata_ref(MetadataKind::DocumentObject, "ПКО".to_string(), &RootConfigCtx)
         );
     }
 
@@ -318,26 +302,29 @@ mod tests {
         // Task 2b added `ExchangePlanObject` — proves the coercion
         // table tracks the full `*Object` set, not just Catalog /
         // Document.
-        let owner = (MdoType::ExchangePlan, Name::new("Обмен"));
-        let coerced = coerce_to_metadata_ref(&Ty::ThisObject { owner }).expect("exchange plan");
+        let db = InMemoryDb::new();
+        let coerced =
+            coerce_to_metadata_ref_id(&db, this_object(&db, MdoType::ExchangePlan, "Обмен"))
+                .expect("exchange plan");
         assert_eq!(
             coerced,
-            Ty::MetadataRef {
-                kind: MetadataKind::ExchangePlanObject, name: Name::new("Обмен")
-            }
+            db.metadata_ref(MetadataKind::ExchangePlanObject, "Обмен".to_string(), &RootConfigCtx)
         );
     }
 
     #[test]
     fn coerces_chart_of_accounts_this_object_to_chart_of_accounts_object() {
-        let owner = (MdoType::ChartOfAccounts, Name::new("Основной"));
-        let coerced = coerce_to_metadata_ref(&Ty::ThisObject { owner }).expect("chart of accounts");
+        let db = InMemoryDb::new();
+        let coerced =
+            coerce_to_metadata_ref_id(&db, this_object(&db, MdoType::ChartOfAccounts, "Основной"))
+                .expect("chart of accounts");
         assert_eq!(
             coerced,
-            Ty::MetadataRef {
-                kind: MetadataKind::ChartOfAccountsObject,
-                name: Name::new("Основной"),
-            }
+            db.metadata_ref(
+                MetadataKind::ChartOfAccountsObject,
+                "Основной".to_string(),
+                &RootConfigCtx
+            )
         );
     }
 
@@ -347,6 +334,7 @@ mod tests {
         // `*Object`, and `MetadataKind::object_kind_for` rejects them.
         // The coercion must stay `None` until a dedicated receiver
         // surface lands.
+        let db = InMemoryDb::new();
         for mdo in [
             MdoType::InformationRegister,
             MdoType::AccumulationRegister,
@@ -354,9 +342,8 @@ mod tests {
             MdoType::CalculationRegister,
             MdoType::Enum,
         ] {
-            let owner = (mdo, Name::new("X"));
             assert!(
-                coerce_to_metadata_ref(&Ty::ThisObject { owner }).is_none(),
+                coerce_to_metadata_ref_id(&db, this_object(&db, mdo, "X")).is_none(),
                 "expected no coercion for {mdo:?}"
             );
         }
@@ -368,18 +355,18 @@ mod tests {
         // form `Объект` projection: each must coerce to its `*Object`
         // MetadataRef so field/method dispatch works inside ObjectModule
         // and through the FormData wrapper.
+        let db = InMemoryDb::new();
         for (mdo, expected_kind) in [
             (MdoType::BusinessProcess, MetadataKind::BusinessProcessObject),
             (MdoType::Task, MetadataKind::TaskObject),
             (MdoType::DataProcessor, MetadataKind::DataProcessorObject),
             (MdoType::Report, MetadataKind::ReportObject),
         ] {
-            let owner = (mdo, Name::new("X"));
-            let coerced = coerce_to_metadata_ref(&Ty::ThisObject { owner })
+            let coerced = coerce_to_metadata_ref_id(&db, this_object(&db, mdo, "X"))
                 .unwrap_or_else(|| panic!("must coerce {mdo:?}"));
             assert_eq!(
                 coerced,
-                Ty::MetadataRef { kind: expected_kind, name: Name::new("X") },
+                db.metadata_ref(expected_kind, "X".to_string(), &RootConfigCtx),
                 "{mdo:?} must coerce to {expected_kind:?}"
             );
         }
@@ -387,24 +374,25 @@ mod tests {
 
     #[test]
     fn no_coercion_for_non_this_object_receivers() {
-        // The helper must stay a no-op for every other `Ty` — it is
+        // The helper must stay a no-op for every other receiver — it is
         // called at every adapter entry, so a stray `Some(_)` here
         // would silently rewrite receivers the adapters are supposed
         // to handle directly.
-        assert!(coerce_to_metadata_ref(&Ty::Number).is_none());
-        assert!(coerce_to_metadata_ref(&Ty::Unknown).is_none());
-        assert!(coerce_to_metadata_ref(&Ty::MetadataRef {
-            kind: MetadataKind::CatalogRef,
-            name: Name::new("X"),
-        })
+        let db = InMemoryDb::new();
+        assert!(coerce_to_metadata_ref_id(&db, db.number(None, None)).is_none());
+        assert!(coerce_to_metadata_ref_id(&db, db.unknown()).is_none());
+        assert!(coerce_to_metadata_ref_id(
+            &db,
+            db.metadata_ref(MetadataKind::CatalogRef, "X".to_string(), &RootConfigCtx)
+        )
         .is_none());
-        // `Ty::ObjectManager` is itself a coercion target — a stray
+        // `ObjectManager` is itself a coercion target — a stray
         // `Some(_)` here would mean we coerce a manager-receiver back
         // to itself in a way that confuses the dispatch chain.
-        assert!(coerce_to_metadata_ref(&Ty::ObjectManager {
-            kind: MdoType::Catalog,
-            name: Name::new("X"),
-        })
+        assert!(coerce_to_metadata_ref_id(
+            &db,
+            db.object_manager(MdoType::Catalog, "X".to_string(), &RootConfigCtx)
+        )
         .is_none());
     }
 
@@ -415,28 +403,30 @@ mod tests {
     #[test]
     fn coerces_catalog_this_manager_to_object_manager() {
         // The canonical case — `ЭтотОбъект` inside a Catalog
-        // ManagerModule yields a `Ty::ObjectManager` keyed on
+        // ManagerModule yields an `ObjectManager` keyed on
         // `MdoType::Catalog`. Method dispatch then routes through
         // `bsl_platform::get_manager_methods` and the workspace
         // `ManagerModule.bsl` resolver — *not* through any
         // `MetadataKind::CatalogManager` arm (no such arm exists).
-        let owner = (MdoType::Catalog, Name::new("Номенклатура"));
+        let db = InMemoryDb::new();
         let coerced =
-            coerce_to_metadata_ref(&Ty::ThisManager { owner }).expect("catalog manager coerces");
+            coerce_to_metadata_ref_id(&db, this_manager(&db, MdoType::Catalog, "Номенклатура"))
+                .expect("catalog manager coerces");
         assert_eq!(
             coerced,
-            Ty::ObjectManager {
-                kind: MdoType::Catalog, name: Name::new("Номенклатура")
-            }
+            db.object_manager(MdoType::Catalog, "Номенклатура".to_string(), &RootConfigCtx)
         );
     }
 
     #[test]
     fn coerces_document_this_manager_to_object_manager() {
-        let owner = (MdoType::Document, Name::new("ПКО"));
-        let coerced =
-            coerce_to_metadata_ref(&Ty::ThisManager { owner }).expect("document manager coerces");
-        assert_eq!(coerced, Ty::ObjectManager { kind: MdoType::Document, name: Name::new("ПКО") });
+        let db = InMemoryDb::new();
+        let coerced = coerce_to_metadata_ref_id(&db, this_manager(&db, MdoType::Document, "ПКО"))
+            .expect("document manager coerces");
+        assert_eq!(
+            coerced,
+            db.object_manager(MdoType::Document, "ПКО".to_string(), &RootConfigCtx)
+        );
     }
 
     #[test]
@@ -445,13 +435,14 @@ mod tests {
         // but no `*Object` companion — so they coerce as `ThisManager`
         // here while `ThisObject` for the same MDO would correctly stay
         // `None`. This is the asymmetry that makes a single-discriminator
-        // Ty insufficient (Step J architectural choice).
-        let owner = (MdoType::InformationRegister, Name::new("Курс"));
+        // type insufficient (Step J architectural choice).
+        let db = InMemoryDb::new();
         let coerced =
-            coerce_to_metadata_ref(&Ty::ThisManager { owner }).expect("register manager coerces");
+            coerce_to_metadata_ref_id(&db, this_manager(&db, MdoType::InformationRegister, "Курс"))
+                .expect("register manager coerces");
         assert_eq!(
             coerced,
-            Ty::ObjectManager { kind: MdoType::InformationRegister, name: Name::new("Курс") }
+            db.object_manager(MdoType::InformationRegister, "Курс".to_string(), &RootConfigCtx)
         );
         // And `ThisObject` for the same kind must NOT coerce — the
         // resolver's `resolve_this_object_owner` already gates on
@@ -459,10 +450,8 @@ mod tests {
         // the second wall of defence: a synthesised `ThisObject` on a
         // register kind has no dispatch target.
         assert!(
-            coerce_to_metadata_ref(&Ty::ThisObject {
-                owner: (MdoType::InformationRegister, Name::new("Курс"))
-            })
-            .is_none(),
+            coerce_to_metadata_ref_id(&db, this_object(&db, MdoType::InformationRegister, "Курс"))
+                .is_none(),
             "register kind has no `*Object` companion"
         );
     }
@@ -471,15 +460,15 @@ mod tests {
     fn coerces_business_process_and_task_and_data_processor_and_report_this_manager() {
         // The four MDO kinds that joined the *Object set together also
         // have managers; verify both axes coerce on the same MDO.
+        let db = InMemoryDb::new();
         for mdo in
             [MdoType::BusinessProcess, MdoType::Task, MdoType::DataProcessor, MdoType::Report]
         {
-            let owner = (mdo, Name::new("X"));
-            let coerced = coerce_to_metadata_ref(&Ty::ThisManager { owner })
+            let coerced = coerce_to_metadata_ref_id(&db, this_manager(&db, mdo, "X"))
                 .unwrap_or_else(|| panic!("must coerce manager for {mdo:?}"));
             assert_eq!(
                 coerced,
-                Ty::ObjectManager { kind: mdo, name: Name::new("X") },
+                db.object_manager(mdo, "X".to_string(), &RootConfigCtx),
                 "{mdo:?} ThisManager must coerce to its own ObjectManager"
             );
         }
@@ -496,9 +485,9 @@ mod tests {
         // hierarchy at all, since `Constant`, `Form`, `HTTPService` etc.
         // never *have* a `ManagerModule.bsl` directory; the test still
         // pins the algebraic invariant.)
-        let owner = (MdoType::CommonModule, Name::new("X"));
+        let db = InMemoryDb::new();
         assert!(
-            coerce_to_metadata_ref(&Ty::ThisManager { owner }).is_none(),
+            coerce_to_metadata_ref_id(&db, this_manager(&db, MdoType::CommonModule, "X")).is_none(),
             "kinds without a manager surface must not coerce"
         );
     }
