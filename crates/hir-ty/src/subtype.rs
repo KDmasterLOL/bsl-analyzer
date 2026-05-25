@@ -255,47 +255,61 @@ mod tests {
     //! fixture surface) and bridge them to `TypeId` via `id(&db, …)`
     //! before invoking the kernel-native `is_assignable`.
     use super::*;
-    use crate::ty_bridge::ty_to_typeid;
+    use bsl_types::builders::Builders;
+    use bsl_types::facet::{ArgArity, FunctionFacet, FunctionOrigin, ParamPassing, ParamSpec};
     use bsl_types::testing::InMemoryDb;
-    use hir_def::ty::{MetadataKind as TyMetadataKind, Ty};
+    use std::sync::Arc;
 
-    fn id(db: &InMemoryDb, ty: &Ty) -> TypeId {
-        ty_to_typeid(db, ty)
+    fn fn_ty(db: &dyn TypeKernelDb, params: Vec<TypeId>, ret: TypeId) -> TypeId {
+        let params: Arc<[ParamSpec]> = params
+            .into_iter()
+            .enumerate()
+            .map(|(idx, ty)| {
+                ParamSpec::new(format!("p{}", idx + 1), ty, ParamPassing::ByRef, false)
+            })
+            .collect();
+        db.function(FunctionFacet::new(
+            params.clone(),
+            vec![None; params.len()].into(),
+            params.len() as u16,
+            ArgArity::Fixed(params.len() as u16),
+            ret,
+            FunctionOrigin::Unknown,
+        ))
     }
 
-    fn fn_ty(params: Vec<Ty>, ret: Ty) -> Ty {
-        let max_args = Some(params.len() as u32);
-        let defaults = vec![false; params.len()].into_boxed_slice();
-        Ty::Function { params: params.into_boxed_slice(), defaults, max_args, ret: Box::new(ret) }
+    fn metadata_ref_id(db: &dyn TypeKernelDb, kind: MetadataKind, name: &str) -> TypeId {
+        db.metadata_ref(kind, name.to_string(), &bsl_types::testing::RootConfigCtx)
     }
 
     #[test]
     fn function_reflexive() {
         let db = InMemoryDb::new();
-        let f = fn_ty(vec![Ty::Number, Ty::String], Ty::Boolean);
-        assert!(is_assignable(&db, id(&db, &f), id(&db, &f)));
+        let f = fn_ty(&db, vec![db.number(None, None), db.string(None, false)], db.boolean());
+        assert!(is_assignable(&db, f, f));
     }
 
     #[test]
     fn function_arity_mismatch_is_rejected() {
         let db = InMemoryDb::new();
-        let one = fn_ty(vec![Ty::Number], Ty::Boolean);
-        let two = fn_ty(vec![Ty::Number, Ty::String], Ty::Boolean);
-        assert!(!is_assignable(&db, id(&db, &one), id(&db, &two)));
-        assert!(!is_assignable(&db, id(&db, &two), id(&db, &one)));
+        let one = fn_ty(&db, vec![db.number(None, None)], db.boolean());
+        let two = fn_ty(&db, vec![db.number(None, None), db.string(None, false)], db.boolean());
+        assert!(!is_assignable(&db, one, two));
+        assert!(!is_assignable(&db, two, one));
     }
 
     #[test]
     fn function_covariant_return_widens() {
         let db = InMemoryDb::new();
-        let narrow = fn_ty(vec![], Ty::Number);
-        let wide = fn_ty(vec![], Ty::union(vec![Ty::Number, Ty::String]));
+        let narrow = fn_ty(&db, vec![], db.number(None, None));
+        let wide =
+            fn_ty(&db, vec![], db.union(vec![db.number(None, None), db.string(None, false)]));
         assert!(
-            is_assignable(&db, id(&db, &narrow), id(&db, &wide)),
+            is_assignable(&db, narrow, wide),
             "Number return ≤ Union return (covariant widening)"
         );
         assert!(
-            !is_assignable(&db, id(&db, &wide), id(&db, &narrow)),
+            !is_assignable(&db, wide, narrow),
             "Union return ≤ Number return must fail — String leg cannot satisfy Number callers"
         );
     }
@@ -303,14 +317,18 @@ mod tests {
     #[test]
     fn function_contravariant_param_widens() {
         let db = InMemoryDb::new();
-        let wide_param = fn_ty(vec![Ty::union(vec![Ty::Number, Ty::String])], Ty::Boolean);
-        let narrow_param = fn_ty(vec![Ty::Number], Ty::Boolean);
+        let wide_param = fn_ty(
+            &db,
+            vec![db.union(vec![db.number(None, None), db.string(None, false)])],
+            db.boolean(),
+        );
+        let narrow_param = fn_ty(&db, vec![db.number(None, None)], db.boolean());
         assert!(
-            is_assignable(&db, id(&db, &wide_param), id(&db, &narrow_param)),
+            is_assignable(&db, wide_param, narrow_param),
             "Fn(Union) ≤ Fn(Number) (contravariant — wider accepting subtype)"
         );
         assert!(
-            !is_assignable(&db, id(&db, &narrow_param), id(&db, &wide_param)),
+            !is_assignable(&db, narrow_param, wide_param),
             "Fn(Number) ≤ Fn(Union) must fail — String callers would slip through"
         );
     }
@@ -318,111 +336,133 @@ mod tests {
     #[test]
     fn function_mixed_variance() {
         let db = InMemoryDb::new();
-        let from = fn_ty(vec![Ty::union(vec![Ty::Number, Ty::String])], Ty::Number);
-        let to = fn_ty(vec![Ty::Number], Ty::union(vec![Ty::Number, Ty::String]));
-        assert!(is_assignable(&db, id(&db, &from), id(&db, &to)));
-        assert!(!is_assignable(&db, id(&db, &to), id(&db, &from)));
+        let from = fn_ty(
+            &db,
+            vec![db.union(vec![db.number(None, None), db.string(None, false)])],
+            db.number(None, None),
+        );
+        let to = fn_ty(
+            &db,
+            vec![db.number(None, None)],
+            db.union(vec![db.number(None, None), db.string(None, false)]),
+        );
+        assert!(is_assignable(&db, from, to));
+        assert!(!is_assignable(&db, to, from));
     }
 
     #[test]
     fn tabular_row_metadata_ref_assignable_to_platform_object() {
         let db = InMemoryDb::new();
-        let row = Ty::MetadataRef {
-            kind: TyMetadataKind::TabularSectionRow { parent: bsl_metadata::MdoType::Catalog },
-            name: hir_def::Name::new("X.Y"),
-        };
-        let generic_ru = Ty::PlatformObject(hir_def::Name::new("Строка табличной части"));
-        let generic_en = Ty::PlatformObject(hir_def::Name::new("Line of a tabular section"));
-        assert!(is_assignable(&db, id(&db, &row), id(&db, &generic_ru)));
-        assert!(is_assignable(&db, id(&db, &row), id(&db, &generic_en)));
+        let row = metadata_ref_id(
+            &db,
+            MetadataKind::TabularSectionRow { parent: bsl_metadata::MdoType::Catalog },
+            "X.Y",
+        );
+        let generic_ru = db.platform_object("Строка табличной части".to_string());
+        let generic_en = db.platform_object("Line of a tabular section".to_string());
+        assert!(is_assignable(&db, row, generic_ru));
+        assert!(is_assignable(&db, row, generic_en));
     }
 
     #[test]
     fn tabular_row_platform_object_assignable_to_metadata_ref() {
         let db = InMemoryDb::new();
-        let row = Ty::MetadataRef {
-            kind: TyMetadataKind::TabularSectionRow { parent: bsl_metadata::MdoType::Document },
-            name: hir_def::Name::new("X.Y"),
-        };
-        let generic = Ty::PlatformObject(hir_def::Name::new("Строка табличной части"));
-        assert!(is_assignable(&db, id(&db, &generic), id(&db, &row)));
+        let row = metadata_ref_id(
+            &db,
+            MetadataKind::TabularSectionRow { parent: bsl_metadata::MdoType::Document },
+            "X.Y",
+        );
+        let generic = db.platform_object("Строка табличной части".to_string());
+        assert!(is_assignable(&db, generic, row));
     }
 
     #[test]
     fn tabular_row_bridge_does_not_open_unrelated_platform_objects() {
         let db = InMemoryDb::new();
-        let row = Ty::MetadataRef {
-            kind: TyMetadataKind::TabularSectionRow { parent: bsl_metadata::MdoType::Catalog },
-            name: hir_def::Name::new("X.Y"),
-        };
-        let unrelated = Ty::PlatformObject(hir_def::Name::new("ТаблицаЗначений"));
-        assert!(!is_assignable(&db, id(&db, &row), id(&db, &unrelated)));
-        assert!(!is_assignable(&db, id(&db, &unrelated), id(&db, &row)));
+        let row = metadata_ref_id(
+            &db,
+            MetadataKind::TabularSectionRow { parent: bsl_metadata::MdoType::Catalog },
+            "X.Y",
+        );
+        let unrelated = db.platform_object("ТаблицаЗначений".to_string());
+        assert!(!is_assignable(&db, row, unrelated));
+        assert!(!is_assignable(&db, unrelated, row));
     }
 
     #[test]
     fn coercible_anything_to_string() {
         let db = InMemoryDb::new();
-        assert!(is_coercible_to(&db, id(&db, &Ty::Number), id(&db, &Ty::String)));
-        assert!(is_coercible_to(&db, id(&db, &Ty::Date), id(&db, &Ty::String)));
-        assert!(is_coercible_to(&db, id(&db, &Ty::Boolean), id(&db, &Ty::String)));
-        assert!(is_coercible_to(&db, id(&db, &Ty::Null), id(&db, &Ty::String)));
-        assert!(is_coercible_to(&db, id(&db, &Ty::Undefined), id(&db, &Ty::String)));
+        assert!(is_coercible_to(&db, db.number(None, None), db.string(None, false)));
         assert!(is_coercible_to(
             &db,
-            id(&db, &Ty::union(vec![Ty::Number, Ty::Date])),
-            id(&db, &Ty::String)
+            db.date(bsl_types::facet::DateComponent::DateTime),
+            db.string(None, false)
+        ));
+        assert!(is_coercible_to(&db, db.boolean(), db.string(None, false)));
+        assert!(is_coercible_to(&db, db.null(), db.string(None, false)));
+        assert!(is_coercible_to(&db, db.undefined(), db.string(None, false)));
+        assert!(is_coercible_to(
+            &db,
+            db.union(vec![
+                db.number(None, None),
+                db.date(bsl_types::facet::DateComponent::DateTime)
+            ]),
+            db.string(None, false)
         ));
     }
 
     #[test]
     fn coercion_does_not_open_reverse_direction() {
         let db = InMemoryDb::new();
-        assert!(!is_coercible_to(&db, id(&db, &Ty::String), id(&db, &Ty::Number)));
-        assert!(!is_coercible_to(&db, id(&db, &Ty::String), id(&db, &Ty::Date)));
-        assert!(!is_coercible_to(&db, id(&db, &Ty::String), id(&db, &Ty::Boolean)));
+        assert!(!is_coercible_to(&db, db.string(None, false), db.number(None, None)));
+        assert!(!is_coercible_to(
+            &db,
+            db.string(None, false),
+            db.date(bsl_types::facet::DateComponent::DateTime)
+        ));
+        assert!(!is_coercible_to(&db, db.string(None, false), db.boolean()));
     }
 
     #[test]
     fn coercion_does_not_leak_into_is_assignable() {
         let db = InMemoryDb::new();
-        assert!(!is_assignable(&db, id(&db, &Ty::Number), id(&db, &Ty::String)));
-        assert!(!is_assignable(&db, id(&db, &Ty::Date), id(&db, &Ty::String)));
+        assert!(!is_assignable(&db, db.number(None, None), db.string(None, false)));
         assert!(!is_assignable(
             &db,
-            id(&db, &Ty::union(vec![Ty::Number, Ty::Date])),
-            id(&db, &Ty::String)
+            db.date(bsl_types::facet::DateComponent::DateTime),
+            db.string(None, false)
+        ));
+        assert!(!is_assignable(
+            &db,
+            db.union(vec![
+                db.number(None, None),
+                db.date(bsl_types::facet::DateComponent::DateTime)
+            ]),
+            db.string(None, false)
         ));
     }
 
     #[test]
     fn typed_array_assignable_to_unparameterised_array() {
         let db = InMemoryDb::new();
-        let typed = Ty::TypedArray(Box::new(Ty::String));
-        assert!(is_assignable(&db, id(&db, &typed), id(&db, &Ty::Array)));
+        let typed = db.array(Some(db.string(None, false)));
+        assert!(is_assignable(&db, typed, db.array(None)));
     }
 
     #[test]
     fn unparameterised_array_assignable_to_typed_array_gradual() {
         let db = InMemoryDb::new();
-        assert!(is_assignable(
-            &db,
-            id(&db, &Ty::Array),
-            id(&db, &Ty::TypedArray(Box::new(Ty::Number)))
-        ));
+        assert!(is_assignable(&db, db.array(None), db.array(Some(db.number(None, None)))));
     }
 
     #[test]
     fn typed_array_covariant_on_element() {
         let db = InMemoryDb::new();
-        let narrow = Ty::TypedArray(Box::new(Ty::Number));
-        let wide = Ty::TypedArray(Box::new(Ty::union(vec![Ty::Number, Ty::String])));
+        let narrow = db.array(Some(db.number(None, None)));
+        let wide = db.array(Some(db.union(vec![db.number(None, None), db.string(None, false)])));
+        assert!(is_assignable(&db, narrow, wide), "TypedArray covariant: Number ≤ Number|String");
         assert!(
-            is_assignable(&db, id(&db, &narrow), id(&db, &wide)),
-            "TypedArray covariant: Number ≤ Number|String"
-        );
-        assert!(
-            !is_assignable(&db, id(&db, &wide), id(&db, &narrow)),
+            !is_assignable(&db, wide, narrow),
             "TypedArray covariant: Number|String ≰ Number — String leg cannot satisfy Number callers"
         );
     }
@@ -430,49 +470,42 @@ mod tests {
     #[test]
     fn typed_array_unrelated_elements_rejected() {
         let db = InMemoryDb::new();
-        let str_arr = Ty::TypedArray(Box::new(Ty::String));
-        let num_arr = Ty::TypedArray(Box::new(Ty::Number));
-        assert!(!is_assignable(&db, id(&db, &str_arr), id(&db, &num_arr)));
-        assert!(!is_assignable(&db, id(&db, &num_arr), id(&db, &str_arr)));
+        let str_arr = db.array(Some(db.string(None, false)));
+        let num_arr = db.array(Some(db.number(None, None)));
+        assert!(!is_assignable(&db, str_arr, num_arr));
+        assert!(!is_assignable(&db, num_arr, str_arr));
     }
 
     #[test]
     fn typed_array_reflexivity_holds() {
         let db = InMemoryDb::new();
-        let ta = Ty::TypedArray(Box::new(Ty::String));
-        assert!(is_assignable(&db, id(&db, &ta), id(&db, &ta)));
+        let ta = db.array(Some(db.string(None, false)));
+        assert!(is_assignable(&db, ta, ta));
     }
 
     #[test]
     fn typed_array_bridge_does_not_open_unrelated_ty_pairs() {
         let db = InMemoryDb::new();
-        assert!(!is_assignable(&db, id(&db, &Ty::String), id(&db, &Ty::Array)));
-        assert!(!is_assignable(&db, id(&db, &Ty::Array), id(&db, &Ty::String)));
-        assert!(!is_assignable(
-            &db,
-            id(&db, &Ty::Number),
-            id(&db, &Ty::TypedArray(Box::new(Ty::Number)))
-        ));
+        assert!(!is_assignable(&db, db.string(None, false), db.array(None)));
+        assert!(!is_assignable(&db, db.array(None), db.string(None, false)));
+        assert!(!is_assignable(&db, db.number(None, None), db.array(Some(db.number(None, None)))));
     }
 
     #[test]
     fn function_unknown_short_circuit_wins_over_variance() {
         let db = InMemoryDb::new();
-        let f = fn_ty(vec![Ty::Number], Ty::Boolean);
-        assert!(is_assignable(&db, id(&db, &Ty::Unknown), id(&db, &f)));
-        assert!(is_assignable(&db, id(&db, &f), id(&db, &Ty::Unknown)));
+        let f = fn_ty(&db, vec![db.number(None, None)], db.boolean());
+        assert!(is_assignable(&db, db.unknown(), f));
+        assert!(is_assignable(&db, f, db.unknown()));
     }
 
     #[test]
     fn null_assignable_to_ref_types() {
         let db = InMemoryDb::new();
-        let cat_ref = Ty::MetadataRef {
-            kind: TyMetadataKind::CatalogRef,
-            name: hir_def::Name::new("Контрагенты"),
-        };
-        assert!(is_assignable(&db, id(&db, &Ty::Null), id(&db, &cat_ref)));
+        let cat_ref = metadata_ref_id(&db, MetadataKind::CatalogRef, "Контрагенты");
+        assert!(is_assignable(&db, db.null(), cat_ref));
         // Null is NOT assignable to a non-ref primitive.
-        assert!(!is_assignable(&db, id(&db, &Ty::Null), id(&db, &Ty::Number)));
+        assert!(!is_assignable(&db, db.null(), db.number(None, None)));
     }
 
     #[test]
@@ -482,7 +515,7 @@ mod tests {
         // we intern directly. Both `A ≤ Any` and `Any ≤ A` hold.
         let db = InMemoryDb::new();
         let any = db.any();
-        let number = id(&db, &Ty::Number);
+        let number = db.number(None, None);
         assert!(is_assignable(&db, number, any), "A ≤ Any (universal top)");
         assert!(is_assignable(&db, any, number), "Any ≤ A (universal, gradual)");
     }
@@ -493,7 +526,7 @@ mod tests {
         // every `A`, but `A ≤ Never` is false unless reflexive.
         let db = InMemoryDb::new();
         let never = db.never();
-        let number = id(&db, &Ty::Number);
+        let number = db.number(None, None);
         assert!(is_assignable(&db, never, number), "Never ≤ A (bottom)");
         assert!(!is_assignable(&db, number, never), "A ≤ Never must fail (not reflexive)");
         assert!(is_assignable(&db, never, never), "Never ≤ Never (reflexive)");

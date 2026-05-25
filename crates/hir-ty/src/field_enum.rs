@@ -1129,39 +1129,139 @@ fn push_unique(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ty_bridge::ty_to_typeid;
-    use hir_def::ty::Ty;
+    use bsl_types::facet::MdoRefFacet;
+    use std::rc::Rc;
 
-    #[derive(Debug, Clone, PartialEq, Eq)]
+    #[derive(Clone)]
     struct FieldInfoForTest {
         name: Name,
-        name_en: Option<Name>,
-        ty: Ty,
-        value_ty: Option<Ty>,
+        ty: ActualType,
+        value_ty: Option<ActualType>,
         is_readonly: bool,
         origin: FieldOrigin,
     }
 
-    fn enumerate_fields(configs: &[VisibleConfig], receiver_ty: &Ty) -> Vec<FieldInfoForTest> {
-        let db = InMemoryDb::new();
-        super::enumerate_fields(&db, configs, ty_to_typeid(&db, receiver_ty))
+    #[derive(Clone)]
+    struct ActualType {
+        db: Rc<InMemoryDb>,
+        id: TypeId,
+    }
+
+    impl std::fmt::Debug for ActualType {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            self.db.lookup_type(self.id).fmt(f)
+        }
+    }
+
+    #[derive(Clone)]
+    struct TypeFixture {
+        label: String,
+        intern: Rc<dyn Fn(&InMemoryDb) -> TypeId>,
+    }
+
+    impl TypeFixture {
+        fn new(label: impl Into<String>, intern: impl Fn(&InMemoryDb) -> TypeId + 'static) -> Self {
+            Self { label: label.into(), intern: Rc::new(intern) }
+        }
+
+        fn intern(&self, db: &InMemoryDb) -> TypeId {
+            (self.intern)(db)
+        }
+    }
+
+    impl std::fmt::Debug for TypeFixture {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(&self.label)
+        }
+    }
+
+    impl PartialEq<TypeFixture> for ActualType {
+        fn eq(&self, other: &TypeFixture) -> bool {
+            self.id == other.intern(&self.db)
+        }
+    }
+
+    impl PartialEq for ActualType {
+        fn eq(&self, other: &Self) -> bool {
+            self.db.lookup_type(self.id) == other.db.lookup_type(other.id)
+        }
+    }
+
+    fn enumerate_fields(
+        configs: &[VisibleConfig],
+        receiver_ty: &TypeFixture,
+    ) -> Vec<FieldInfoForTest> {
+        let db = Rc::new(InMemoryDb::new());
+        let receiver = receiver_ty.intern(&db);
+        super::enumerate_fields(db.as_ref(), configs, receiver)
             .into_iter()
             .map(|info| FieldInfoForTest {
                 name: info.name,
-                name_en: info.name_en,
-                ty: typeid_to_ty(&db, info.ty),
-                value_ty: info.value_ty.map(|ty| typeid_to_ty(&db, ty)),
+                ty: ActualType { db: Rc::clone(&db), id: info.ty },
+                value_ty: info.value_ty.map(|id| ActualType { db: Rc::clone(&db), id }),
                 is_readonly: info.is_readonly,
                 origin: info.origin,
             })
             .collect()
     }
-    use crate::ty_bridge::typeid_to_ty;
     use bsl_metadata::tabular_section::{TabularSection, TabularSectionAttribute};
     use bsl_metadata::{Attribute, Configuration};
     use bsl_types::testing::InMemoryDb;
     use std::sync::Arc;
     use uuid::Uuid;
+
+    fn metadata_ref(kind: MetadataKind, name: &str) -> TypeFixture {
+        let name = Name::new(name);
+        TypeFixture::new(format!("MetadataRef({kind:?}, {name})"), move |db| {
+            db.metadata_ref(kind, name.to_string(), &RootConfigCtx)
+        })
+    }
+
+    fn this_object(mdo_type: MdoType, name: &str) -> TypeFixture {
+        let name = Name::new(name);
+        TypeFixture::new(format!("ThisObject({mdo_type:?}, {name})"), move |db| {
+            db.mk_this_object(ConfigId::Root, MdoRefFacet::new(mdo_type, name.to_string()))
+        })
+    }
+
+    fn union(parts: Vec<TypeFixture>) -> TypeFixture {
+        TypeFixture::new("Union", move |db| {
+            db.union(parts.iter().map(|part| part.intern(db)).collect())
+        })
+    }
+
+    fn number() -> TypeFixture {
+        TypeFixture::new("Number", |db| db.number(None, None))
+    }
+
+    fn string() -> TypeFixture {
+        TypeFixture::new("String", |db| db.string(None, false))
+    }
+
+    fn boolean() -> TypeFixture {
+        TypeFixture::new("Boolean", |db| db.boolean())
+    }
+
+    fn date() -> TypeFixture {
+        TypeFixture::new("Date", |db| db.date(DateComponent::DateTime))
+    }
+
+    fn array() -> TypeFixture {
+        TypeFixture::new("Array", |db| db.array(None))
+    }
+
+    fn unknown() -> TypeFixture {
+        TypeFixture::new("Unknown", |db| db.unknown())
+    }
+
+    fn undefined() -> TypeFixture {
+        TypeFixture::new("Undefined", |db| db.undefined())
+    }
+
+    fn assert_value_ty(field: &FieldInfoForTest, expected: TypeFixture) {
+        let actual = field.value_ty.as_ref().expect("expected value_ty");
+        assert_eq!(actual, &expected);
+    }
 
     #[test]
     fn attribute_typeid_lowers_defined_type_to_underlying_kernel_type() {
@@ -1245,7 +1345,7 @@ mod tests {
     #[test]
     fn enumerate_unknown_receiver_returns_empty_vec() {
         let configs = wrap(Configuration::new("Test"));
-        for ty in [Ty::Unknown, Ty::Number, Ty::String, Ty::Array, Ty::Undefined] {
+        for ty in [unknown(), number(), string(), array(), undefined()] {
             assert!(enumerate_fields(&configs, &ty).is_empty(), "no fields on {ty:?}");
         }
     }
@@ -1261,8 +1361,7 @@ mod tests {
         ));
         let configs = wrap(config);
 
-        let this_obj =
-            Ty::ThisObject { owner: (MdoType::Catalog, Name::new("Номенклатура")) };
+        let this_obj = this_object(MdoType::Catalog, "Номенклатура");
         let fields = enumerate_fields(&configs, &this_obj);
         assert!(!fields.is_empty(), "ThisObject must coerce and enumerate fields");
         assert!(fields.iter().any(|f| f.name.as_str() == "Цена"), "Цена must appear");
@@ -1284,10 +1383,7 @@ mod tests {
         ));
         let configs = wrap(config);
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::CatalogRef,
-            name: Name::new("Номенклатура"),
-        };
+        let receiver = metadata_ref(MetadataKind::CatalogRef, "Номенклатура");
         let fields = enumerate_fields(&configs, &receiver);
         assert!(!fields.is_empty());
 
@@ -1334,10 +1430,7 @@ mod tests {
         config.add_metadata_object(cat);
         let configs = wrap(config);
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::CatalogRef,
-            name: Name::new("Справочник1"),
-        };
+        let receiver = metadata_ref(MetadataKind::CatalogRef, "Справочник1");
         let fields = enumerate_fields(&configs, &receiver);
 
         let by_name = |n: &str| fields.iter().find(|f| f.name.as_str() == n).cloned();
@@ -1368,8 +1461,7 @@ mod tests {
         config.add_metadata_object(doc);
         let configs = wrap(config);
 
-        let receiver =
-            Ty::MetadataRef { kind: MetadataKind::DocumentRef, name: Name::new("ПКО") };
+        let receiver = metadata_ref(MetadataKind::DocumentRef, "ПКО");
         let fields = enumerate_fields(&configs, &receiver);
 
         let date_field =
@@ -1387,10 +1479,7 @@ mod tests {
         assert_eq!(ts_field.origin, FieldOrigin::TabularSection);
         assert_eq!(
             ts_field.ty,
-            Ty::MetadataRef {
-                kind: MetadataKind::TabularSection { parent: MdoType::Document },
-                name: Name::new("ПКО.Товары"),
-            }
+            metadata_ref(MetadataKind::TabularSection { parent: MdoType::Document }, "ПКО.Товары")
         );
     }
 
@@ -1410,10 +1499,10 @@ mod tests {
         config.add_metadata_object(cat);
         let configs = wrap(config);
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::TabularSectionRow { parent: MdoType::Catalog },
-            name: Name::new("Номенклатура.Услуги"),
-        };
+        let receiver = metadata_ref(
+            MetadataKind::TabularSectionRow { parent: MdoType::Catalog },
+            "Номенклатура.Услуги",
+        );
         let fields = enumerate_fields(&configs, &receiver);
 
         let qty = fields
@@ -1421,7 +1510,7 @@ mod tests {
             .find(|f| f.name.as_str() == "Количество")
             .expect("Количество must appear");
         assert_eq!(qty.origin, FieldOrigin::TabularSectionRowColumn);
-        assert_eq!(qty.ty, Ty::Number);
+        assert_eq!(qty.ty, number());
 
         let nr = fields
             .iter()
@@ -1429,7 +1518,7 @@ mod tests {
             .expect("НомерСтроки must appear via platform fall-through");
         assert_eq!(nr.origin, FieldOrigin::PlatformProperty);
         assert!(nr.is_readonly);
-        assert_eq!(nr.ty, Ty::Number);
+        assert_eq!(nr.ty, number());
     }
 
     #[test]
@@ -1449,10 +1538,7 @@ mod tests {
         ));
         let configs = wrap(config);
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::InformationRegisterRef,
-            name: Name::new("РегистрСведений1"),
-        };
+        let receiver = metadata_ref(MetadataKind::InformationRegisterRef, "РегистрСведений1");
         let fields = enumerate_fields(&configs, &receiver);
 
         let dim = fields
@@ -1464,14 +1550,14 @@ mod tests {
         let res =
             fields.iter().find(|f| f.name.as_str() == "Количество").expect("resource must appear");
         assert_eq!(res.origin, FieldOrigin::RegisterResource);
-        assert_eq!(res.ty, Ty::Number);
+        assert_eq!(res.ty, number());
 
         let att = fields
             .iter()
             .find(|f| f.name.as_str() == "Комментарий")
             .expect("attribute must appear");
         assert_eq!(att.origin, FieldOrigin::RegisterAttribute);
-        assert_eq!(att.ty, Ty::String);
+        assert_eq!(att.ty, string());
     }
 
     #[test]
@@ -1495,10 +1581,7 @@ mod tests {
         ));
         let configs = wrap(config);
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::InformationRegisterRecord,
-            name: Name::new("РегистрСведений1"),
-        };
+        let receiver = metadata_ref(MetadataKind::InformationRegisterRecord, "РегистрСведений1");
         let fields = enumerate_fields(&configs, &receiver);
         let recorder = fields
             .iter()
@@ -1507,13 +1590,9 @@ mod tests {
 
         assert_eq!(
             recorder.ty,
-            Ty::union(vec![
-                Ty::MetadataRef {
-                    kind: MetadataKind::DocumentRef, name: Name::new("Документ1")
-                },
-                Ty::MetadataRef {
-                    kind: MetadataKind::DocumentRef, name: Name::new("Документ2")
-                },
+            union(vec![
+                metadata_ref(MetadataKind::DocumentRef, "Документ1"),
+                metadata_ref(MetadataKind::DocumentRef, "Документ2"),
             ]),
         );
     }
@@ -1537,22 +1616,14 @@ mod tests {
         ));
         let configs = wrap(config);
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::InformationRegisterRecord,
-            name: Name::new("РегистрСведений1"),
-        };
+        let receiver = metadata_ref(MetadataKind::InformationRegisterRecord, "РегистрСведений1");
         let fields = enumerate_fields(&configs, &receiver);
         let recorder = fields
             .iter()
             .find(|f| f.name.as_str() == "регистратор")
             .expect("регистратор must appear on register record");
 
-        assert_eq!(
-            recorder.ty,
-            Ty::MetadataRef {
-                kind: MetadataKind::DocumentRef, name: Name::new("Документ1")
-            },
-        );
+        assert_eq!(recorder.ty, metadata_ref(MetadataKind::DocumentRef, "Документ1"),);
     }
 
     #[test]
@@ -1586,23 +1657,22 @@ mod tests {
             VisibleConfig { name: Some("Extension".to_string()), configuration: Arc::new(ext) },
         ];
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::InformationRegisterRecord,
-            name: Name::new("РегистрСведений1"),
-        };
+        let receiver = metadata_ref(MetadataKind::InformationRegisterRecord, "РегистрСведений1");
         let fields = enumerate_fields(&configs, &receiver);
         let recorder = fields
             .iter()
             .find(|f| f.name.as_str() == "Регистратор")
             .expect("Регистратор must appear on register record");
 
-        let Ty::Union(parts) = &recorder.ty else {
-            panic!("expected Ty::Union for cross-config recorders, got {:?}", recorder.ty);
+        let TypeKind::Union(parts) = recorder.ty.db.lookup_type(recorder.ty.id) else {
+            panic!("expected TypeKind::Union for cross-config recorders, got {:?}", recorder.ty);
         };
         let names: std::collections::HashSet<&str> = parts
             .iter()
-            .filter_map(|t| match t {
-                Ty::MetadataRef { kind: MetadataKind::DocumentRef, name } => Some(name.as_str()),
+            .filter_map(|id| match recorder.ty.db.lookup_type(*id) {
+                TypeKind::MetadataRef(facet) if facet.kind == MetadataKind::DocumentRef => {
+                    Some(facet.name.as_str())
+                }
                 _ => None,
             })
             .collect();
@@ -1623,10 +1693,10 @@ mod tests {
         ));
         let configs = wrap(config);
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::RegisterFilter { parent: MdoType::AccumulationRegister },
-            name: Name::new("РегистрНакопления1"),
-        };
+        let receiver = metadata_ref(
+            MetadataKind::RegisterFilter { parent: MdoType::AccumulationRegister },
+            "РегистрНакопления1",
+        );
         let fields = enumerate_fields(&configs, &receiver);
 
         for key in ["Период", "Регистратор", "НомерСтроки", "Активность"]
@@ -1666,25 +1736,20 @@ mod tests {
         config.add_register(register);
         let configs = wrap(config);
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
-            name: Name::new("Курсы"),
-        };
+        let receiver = metadata_ref(
+            MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
+            "Курсы",
+        );
         let fields = enumerate_fields(&configs, &receiver);
 
         let period = fields.iter().find(|f| f.name.as_str() == "Период").expect("Период");
-        assert_eq!(period.value_ty, Some(Ty::Date));
+        assert_value_ty(period, date());
         let active = fields.iter().find(|f| f.name.as_str() == "Активность").expect("Активность");
-        assert_eq!(active.value_ty, Some(Ty::Boolean));
+        assert_value_ty(active, boolean());
         let currency = fields.iter().find(|f| f.name.as_str() == "Валюта").expect("Валюта");
-        assert_eq!(
-            currency.value_ty,
-            Some(Ty::MetadataRef {
-                kind: MetadataKind::CatalogRef, name: Name::new("Валюты")
-            }),
-        );
+        assert_value_ty(currency, metadata_ref(MetadataKind::CatalogRef, "Валюты"));
         let price = fields.iter().find(|f| f.name.as_str() == "Цена").expect("Цена");
-        assert_eq!(price.value_ty, Some(Ty::Number));
+        assert_value_ty(price, number());
     }
 
     #[test]
@@ -1702,21 +1767,15 @@ mod tests {
         ));
         let configs = wrap(config);
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::RegisterFilter { parent: MdoType::AccumulationRegister },
-            name: Name::new("Остатки"),
-        };
+        let receiver = metadata_ref(
+            MetadataKind::RegisterFilter { parent: MdoType::AccumulationRegister },
+            "Остатки",
+        );
         let fields = enumerate_fields(&configs, &receiver);
 
         let recorder =
             fields.iter().find(|f| f.name.as_str() == "Регистратор").expect("Регистратор");
-        assert_eq!(
-            recorder.value_ty,
-            Some(Ty::MetadataRef {
-                kind: MetadataKind::DocumentRef,
-                name: Name::new("Поступление"),
-            }),
-        );
+        assert_value_ty(recorder, metadata_ref(MetadataKind::DocumentRef, "Поступление"));
     }
 
     #[test]
@@ -1734,15 +1793,15 @@ mod tests {
         config.add_register(register);
         let configs = wrap(config);
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
-            name: Name::new("Срез"),
-        };
+        let receiver = metadata_ref(
+            MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
+            "Срез",
+        );
         let fields = enumerate_fields(&configs, &receiver);
         let period = fields.iter().find(|f| f.name.as_str() == "Период").expect("Период");
 
         assert_eq!(period.origin, FieldOrigin::RegisterDimension);
-        assert_eq!(period.value_ty, Some(Ty::Number));
+        assert_value_ty(period, number());
     }
 
     #[test]
@@ -1757,10 +1816,10 @@ mod tests {
         ));
         let configs = wrap(config);
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::RegisterFilter { parent: MdoType::CalculationRegister },
-            name: Name::new("РегистрРасчета1"),
-        };
+        let receiver = metadata_ref(
+            MetadataKind::RegisterFilter { parent: MdoType::CalculationRegister },
+            "РегистрРасчета1",
+        );
         let fields = enumerate_fields(&configs, &receiver);
         let names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
 
@@ -1788,10 +1847,10 @@ mod tests {
         config.add_register(register);
         let configs = wrap(config);
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
-            name: Name::new("ПозицияРегистратора"),
-        };
+        let receiver = metadata_ref(
+            MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
+            "ПозицияРегистратора",
+        );
         let fields = enumerate_fields(&configs, &receiver);
         let names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
 
@@ -1812,10 +1871,10 @@ mod tests {
         };
         let configs = wrap(config);
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
-            name: Name::new("ПериодическийРегистр"),
-        };
+        let receiver = metadata_ref(
+            MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
+            "ПериодическийРегистр",
+        );
         let fields = enumerate_fields(&configs, &receiver);
 
         assert!(fields.iter().any(|f| f.name.as_str() == "Период"));
@@ -1843,11 +1902,11 @@ mod tests {
         config.add_metadata_object(doc);
         let configs = wrap(config);
 
-        let row = Ty::MetadataRef {
-            kind: MetadataKind::TabularSectionRow { parent: MdoType::Document },
-            name: Name::new("ПКО.Товары"),
-        };
-        let receiver = Ty::Union(vec![row, Ty::Undefined].into());
+        let row = metadata_ref(
+            MetadataKind::TabularSectionRow { parent: MdoType::Document },
+            "ПКО.Товары",
+        );
+        let receiver = union(vec![row, undefined()]);
         let fields = enumerate_fields(&configs, &receiver);
         assert!(
             fields.iter().any(|f| f.name.as_str() == "Номенклатура"),
@@ -1887,14 +1946,13 @@ mod tests {
         });
         let configs = wrap(config);
 
-        let receiver =
-            Ty::MetadataRef { kind: MetadataKind::DocumentRef, name: Name::new("ПКО") };
+        let receiver = metadata_ref(MetadataKind::DocumentRef, "ПКО");
         let fields = enumerate_fields(&configs, &receiver);
         let sum =
             fields.iter().find(|f| f.name.as_str() == "СуммаДокумента").expect("СуммаДокумента");
         assert_eq!(
             sum.ty,
-            Ty::Number,
+            number(),
             "DefinedType-typed attribute must resolve to its underlying `Ty::Number`"
         );
     }
@@ -1918,13 +1976,10 @@ mod tests {
             VisibleConfig { name: Some("Ext".into()), configuration: Arc::new(ext) },
         ];
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::CatalogRef,
-            name: Name::new("Номенклатура"),
-        };
+        let receiver = metadata_ref(MetadataKind::CatalogRef, "Номенклатура");
         let fields = enumerate_fields(&configs, &receiver);
         let цена = fields.iter().find(|f| f.name.as_str() == "Цена").expect("Цена must appear");
-        assert_eq!(цена.ty, Ty::String, "extension type must win over main config");
+        assert_eq!(цена.ty, string(), "extension type must win over main config");
     }
 
     /// HBK 8.3.27 documents the platform method `МоментВремени()`

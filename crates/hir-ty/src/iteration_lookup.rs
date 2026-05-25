@@ -248,76 +248,73 @@ fn resolve_one_template(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bsl_types::testing::InMemoryDb;
-    use hir_def::ty::Ty;
-
-    use crate::ty_bridge::{ty_to_typeid, typeid_to_ty};
+    use bsl_types::testing::{InMemoryDb, RootConfigCtx};
 
     /// Phase 3 §4.E.4 test shim: the public `resolve_iter_element_ty`
     /// now takes `db` + an interned `TypeId` and returns `Option<TypeId>`.
-    /// Tests build readable `Ty` fixtures, so this interns the collection
-    /// and bridges the kernel result back to `Ty`. A fresh sandbox
-    /// [`InMemoryDb`] per call is fine — platform lookup is stateless
-    /// w.r.t. the intern table.
-    fn resolve(collection: &Ty) -> Option<Ty> {
-        let db = InMemoryDb::new();
-        super::resolve_iter_element_ty(&db, ty_to_typeid(&db, collection))
-            .map(|id| typeid_to_ty(&db, id))
+    fn resolve(db: &InMemoryDb, collection: TypeId) -> Option<TypeId> {
+        super::resolve_iter_element_ty(db, collection)
+    }
+
+    fn metadata_ref_id(db: &dyn TypeKernelDb, kind: MetadataKind, name: &str) -> TypeId {
+        db.metadata_ref(kind, name.to_string(), &RootConfigCtx)
     }
 
     #[test]
     fn array_yields_unknown_per_platform_arbitrary() {
         // Per HBK, `Массив` iterates `Произвольный`, which lowers to
         // `Ty::Unknown` via `lower_platform_type_name`.
-        let elem = resolve(&Ty::Array);
-        assert_eq!(elem, Some(Ty::Unknown));
+        let db = InMemoryDb::new();
+        let elem = resolve(&db, db.array(None));
+        assert_eq!(elem, Some(db.unknown()));
     }
 
     #[test]
     fn map_yields_kluch_i_znachenie() {
         // `Соответствие` iterates `КлючИЗначение`.
-        let elem = resolve(&Ty::Map);
-        assert_eq!(elem, Some(Ty::PlatformObject(Name::new("КлючИЗначение"))));
+        let db = InMemoryDb::new();
+        let elem = resolve(&db, db.map(None, None));
+        assert_eq!(elem, Some(db.platform_object("КлючИЗначение".to_string())));
     }
 
     #[test]
     fn value_table_yields_row() {
         // `ТаблицаЗначений` iterates `СтрокаТаблицыЗначений`.
-        let elem = resolve(&Ty::ValueTable { projection: None });
-        assert_eq!(elem, Some(Ty::PlatformObject(Name::new("СтрокаТаблицыЗначений"))));
+        let db = InMemoryDb::new();
+        let elem = resolve(&db, db.value_table(None, TableSource::Unknown));
+        assert_eq!(elem, Some(db.platform_object("СтрокаТаблицыЗначений".to_string())));
     }
 
     #[test]
     fn information_register_record_set_yields_record_with_mdo_name() {
         // `Ty::MetadataRef { InformationRegisterRecordSet, "БУС_..." }`
         // iterates `Ty::MetadataRef { InformationRegisterRecord, "БУС_..." }`.
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::InformationRegisterRecordSet,
-            name: Name::new("БУС_ЗаполнениеКаталога"),
-        };
-        let elem = resolve(&receiver);
+        let db = InMemoryDb::new();
+        let receiver = metadata_ref_id(
+            &db,
+            MetadataKind::InformationRegisterRecordSet,
+            "БУС_ЗаполнениеКаталога",
+        );
+        let elem = resolve(&db, receiver);
         assert_eq!(
             elem,
-            Some(Ty::MetadataRef {
-                kind: MetadataKind::InformationRegisterRecord,
-                name: Name::new("БУС_ЗаполнениеКаталога"),
-            })
+            Some(metadata_ref_id(
+                &db,
+                MetadataKind::InformationRegisterRecord,
+                "БУС_ЗаполнениеКаталога"
+            ))
         );
     }
 
     #[test]
     fn accumulation_register_record_set_yields_record_with_mdo_name() {
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::AccumulationRegisterRecordSet,
-            name: Name::new("ОстаткиТоваров"),
-        };
-        let elem = resolve(&receiver);
+        let db = InMemoryDb::new();
+        let receiver =
+            metadata_ref_id(&db, MetadataKind::AccumulationRegisterRecordSet, "ОстаткиТоваров");
+        let elem = resolve(&db, receiver);
         assert_eq!(
             elem,
-            Some(Ty::MetadataRef {
-                kind: MetadataKind::AccumulationRegisterRecord,
-                name: Name::new("ОстаткиТоваров"),
-            })
+            Some(metadata_ref_id(&db, MetadataKind::AccumulationRegisterRecord, "ОстаткиТоваров"))
         );
     }
 
@@ -327,8 +324,9 @@ mod tests {
         // table (which only declares `"Произвольный"` for `Массив`) and
         // surfaces `t` directly. This is the whole point of carrying
         // the element type through the new variant.
-        let elem = resolve(&Ty::TypedArray(Box::new(Ty::String)));
-        assert_eq!(elem, Some(Ty::String));
+        let db = InMemoryDb::new();
+        let elem = resolve(&db, db.array(Some(db.string(None, false))));
+        assert_eq!(elem, Some(db.string(None, false)));
     }
 
     #[test]
@@ -343,10 +341,10 @@ mod tests {
         // type collapses to the concrete `Ty::String` arm rather than
         // the legacy `Union(Unknown, String)` the `Ty`-native smart
         // constructor produced.
-        let arms: Vec<Ty> = vec![Ty::Array, Ty::TypedArray(Box::new(Ty::String))];
-        let union = Ty::Union(std::sync::Arc::from(arms.into_boxed_slice()));
-        let elem = resolve(&union);
-        assert_eq!(elem, Some(Ty::String));
+        let db = InMemoryDb::new();
+        let union = db.union(vec![db.array(None), db.array(Some(db.string(None, false)))]);
+        let elem = resolve(&db, union);
+        assert_eq!(elem, Some(db.string(None, false)));
     }
 
     #[test]
@@ -359,34 +357,36 @@ mod tests {
         // that the `Ty`-native `resolve_union` returned (it treated the
         // live `Unknown` arm as a blocking non-iterable). Consistent
         // with gradual typing: the `Unknown` arm adds no constraint.
-        let arms: Vec<Ty> = vec![Ty::Unknown, Ty::Array];
-        let union = Ty::Union(std::sync::Arc::from(arms.into_boxed_slice()));
-        assert_eq!(resolve(&union), Some(Ty::Unknown));
+        let db = InMemoryDb::new();
+        let union = db.union(vec![db.unknown(), db.array(None)]);
+        assert_eq!(resolve(&db, union), Some(db.unknown()));
 
         // Same rule with a typed concrete arm: `Unknown | TypedArray(String)`
         // collapses to `TypedArray(String)` and iterates to `String`.
-        let arms: Vec<Ty> = vec![Ty::Unknown, Ty::TypedArray(Box::new(Ty::String))];
-        let union = Ty::Union(std::sync::Arc::from(arms.into_boxed_slice()));
-        assert_eq!(resolve(&union), Some(Ty::String));
+        let union = db.union(vec![db.unknown(), db.array(Some(db.string(None, false)))]);
+        assert_eq!(resolve(&db, union), Some(db.string(None, false)));
     }
 
     #[test]
     fn typed_array_with_metadata_ref_element_passes_through_unchanged() {
         // The element can be any `Ty`. Iteration must not touch it —
         // the wrapper only owns the array semantics.
-        let row = Ty::MetadataRef {
-            kind: MetadataKind::TabularSectionRow { parent: MdoType::Document },
-            name: Name::new("ПКО.Товары"),
-        };
-        let collection = Ty::TypedArray(Box::new(row.clone()));
-        let elem = resolve(&collection);
+        let db = InMemoryDb::new();
+        let row = metadata_ref_id(
+            &db,
+            MetadataKind::TabularSectionRow { parent: MdoType::Document },
+            "ПКО.Товары",
+        );
+        let collection = db.array(Some(row));
+        let elem = resolve(&db, collection);
         assert_eq!(elem, Some(row));
     }
 
     #[test]
     fn non_iterable_string_returns_none() {
         // Plain strings have no `Элементы коллекции:` chapter.
-        let elem = resolve(&Ty::String);
+        let db = InMemoryDb::new();
+        let elem = resolve(&db, db.string(None, false));
         assert_eq!(elem, None);
     }
 
@@ -395,19 +395,19 @@ mod tests {
         // `Массив | Undefined` is iterable on its live arm; the
         // `Undefined` is dead for iteration. Element stays `Ty::Unknown`
         // (Произвольный) — the live arm's element.
-        let arms: Vec<Ty> = vec![Ty::Array, Ty::Undefined];
-        let union = Ty::Union(std::sync::Arc::from(arms.into_boxed_slice()));
-        let elem = resolve(&union);
-        assert_eq!(elem, Some(Ty::Unknown));
+        let db = InMemoryDb::new();
+        let union = db.union(vec![db.array(None), db.undefined()]);
+        let elem = resolve(&db, union);
+        assert_eq!(elem, Some(db.unknown()));
     }
 
     #[test]
     fn union_with_non_iterable_arm_returns_none() {
         // `Массив | Строка` mixes iterable and non-iterable arms —
         // overinference would be wrong, so the answer is `None`.
-        let arms: Vec<Ty> = vec![Ty::Array, Ty::String];
-        let union = Ty::Union(std::sync::Arc::from(arms.into_boxed_slice()));
-        let elem = resolve(&union);
+        let db = InMemoryDb::new();
+        let union = db.union(vec![db.array(None), db.string(None, false)]);
+        let elem = resolve(&db, union);
         assert_eq!(elem, None);
     }
 }
