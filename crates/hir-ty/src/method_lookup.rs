@@ -1103,36 +1103,19 @@ fn is_tabular_row_type_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ty_bridge::{ty_to_typeid, typeid_to_ty};
-    use bsl_metadata::MdoType;
+    use bsl_metadata::{FormElementKind, MdoType};
     use bsl_platform::MethodParam;
-    use bsl_types::kind::{ProjectionField, ProjectionFieldSource, ProjectionOrigin};
-    use bsl_types::testing::InMemoryDb;
-    use hir_def::ty::{MetadataKind, Ty};
+    use bsl_types::facet::MdoRefFacet;
+    use bsl_types::kind::{ProjectionField, ProjectionFieldSource, ProjectionOrigin, TypeKind};
+    use bsl_types::testing::{InMemoryDb, RootConfigCtx};
+    use hir_def::ty::MetadataKind;
 
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    struct TyMethodInfo {
-        return_ty: Ty,
-        params: Vec<Ty>,
-        overloads: Vec<Vec<Ty>>,
+    fn lookup(db: &dyn TypeKernelDb, recv: TypeId, method: &Name) -> Option<MethodInfo> {
+        super::lookup_method(db, recv, method)
     }
 
-    fn lookup(recv: &Ty, method: &Name) -> Option<TyMethodInfo> {
-        let db = InMemoryDb::new();
-        let info = super::lookup_method(&db, ty_to_typeid(&db, recv), method)?;
-        Some(TyMethodInfo {
-            return_ty: typeid_to_ty(&db, info.return_ty),
-            params: info.params.iter().map(|id| typeid_to_ty(&db, *id)).collect(),
-            overloads: info
-                .overloads
-                .iter()
-                .map(|row| row.iter().map(|id| typeid_to_ty(&db, *id)).collect())
-                .collect(),
-        })
-    }
-
-    fn query_ty(projections: Vec<Option<Arc<Projection>>>) -> Ty {
-        Ty::Query { projections: Arc::from(projections) }
+    fn query_id(db: &dyn TypeKernelDb, projections: Vec<Option<Arc<Projection>>>) -> TypeId {
+        db.query(Arc::from(projections))
     }
 
     fn projection(db: &dyn TypeKernelDb) -> Arc<Projection> {
@@ -1140,12 +1123,12 @@ mod tests {
             Arc::from([
                 ProjectionField::new(
                     "Номер".to_string(),
-                    ty_to_typeid(db, &Ty::Number),
+                    db.number(None, None),
                     ProjectionFieldSource::Column,
                 ),
                 ProjectionField::new(
                     "Имя".to_string(),
-                    ty_to_typeid(db, &Ty::String),
+                    db.string(None, false),
                     ProjectionFieldSource::Column,
                 ),
             ]),
@@ -1165,7 +1148,7 @@ mod tests {
         db: &dyn TypeKernelDb,
         projection: Option<Option<Arc<Projection>>>,
     ) -> Option<TypeId> {
-        projection.map(|projection| ty_to_typeid(db, &Ty::QueryResult { projection }))
+        projection.map(|projection| db.query_result(projection, ProjectionSource::Unknown))
     }
 
     fn projection_selection_id(
@@ -1180,7 +1163,63 @@ mod tests {
         db: &dyn TypeKernelDb,
         projection: Option<Option<Arc<Projection>>>,
     ) -> Option<TypeId> {
-        projection.map(|projection| ty_to_typeid(db, &Ty::QueryResultSelection { projection }))
+        projection
+            .map(|projection| db.query_result_selection(projection, ProjectionSource::Unknown))
+    }
+
+    fn value_table_id(db: &dyn TypeKernelDb, projection: Option<Arc<Projection>>) -> TypeId {
+        db.value_table(projection, TableSource::Unknown)
+    }
+
+    fn platform_id(db: &dyn TypeKernelDb, name: &str) -> TypeId {
+        db.platform_object(name.to_string())
+    }
+
+    fn metadata_ref_id(db: &dyn TypeKernelDb, kind: MetadataKind, name: &str) -> TypeId {
+        db.metadata_ref(kind, name.to_string(), &RootConfigCtx)
+    }
+
+    fn object_manager_id(db: &dyn TypeKernelDb, kind: MdoType, name: &str) -> TypeId {
+        db.object_manager(kind, name.to_string(), &RootConfigCtx)
+    }
+
+    fn form_control_id(db: &dyn TypeKernelDb, kind: FormElementKind) -> TypeId {
+        db.mk_form_control(kind, None)
+    }
+
+    fn form_data_id(
+        db: &dyn TypeKernelDb,
+        kind: FormDataFacet,
+        underlying: Option<(MdoType, Name)>,
+    ) -> TypeId {
+        db.mk_form_data(
+            kind,
+            underlying.map(|(mdo_type, name)| MdoRefFacet::new(mdo_type, name.to_string())),
+        )
+    }
+
+    fn assert_metadata_ref(
+        db: &dyn TypeKernelDb,
+        id: TypeId,
+        expected_kind: MetadataKind,
+        expected_name: &str,
+    ) {
+        match db.lookup_type(id) {
+            TypeKind::MetadataRef(facet) => {
+                assert_eq!(facet.kind, expected_kind);
+                assert_eq!(facet.name.as_str(), expected_name);
+            }
+            other => panic!("expected MetadataRef, got {other:?}"),
+        }
+    }
+
+    fn assert_query_result_selection_none(db: &dyn TypeKernelDb, id: TypeId) {
+        match db.lookup_type(id) {
+            TypeKind::QueryResultSelection(facet) => {
+                assert!(facet.projection.is_none());
+            }
+            other => panic!("expected QueryResultSelection{{None}}, got {other:?}"),
+        }
     }
 
     fn test_method(return_type: Option<&str>, param_type: Option<&str>) -> PlatformMethod {
@@ -1202,18 +1241,8 @@ mod tests {
         }
     }
 
-    fn to_ty_method_info(method: &PlatformMethod) -> TyMethodInfo {
-        let db = InMemoryDb::new();
-        let info = to_method_info(&db, method);
-        TyMethodInfo {
-            return_ty: typeid_to_ty(&db, info.return_ty),
-            params: info.params.iter().map(|id| typeid_to_ty(&db, *id)).collect(),
-            overloads: info
-                .overloads
-                .iter()
-                .map(|row| row.iter().map(|id| typeid_to_ty(&db, *id)).collect())
-                .collect(),
-        }
+    fn to_type_method_info(db: &dyn TypeKernelDb, method: &PlatformMethod) -> MethodInfo {
+        to_method_info(db, method)
     }
 
     #[test]
@@ -1221,22 +1250,26 @@ mod tests {
         let db = InMemoryDb::new();
         let projection = projection(&db);
         let cases = [
-            (Ty::ValueTable { projection: None }, true, false, false),
-            (Ty::ValueTable { projection: Some(projection.clone()) }, true, false, false),
-            (Ty::PlatformObject(Name::new("ТаблицаЗначений")), true, false, false),
-            (Ty::PlatformObject(Name::new("ДеревоЗначений")), false, true, false),
-            (Ty::QueryResult { projection: None }, false, false, true),
-            (Ty::QueryResult { projection: Some(projection.clone()) }, false, false, true),
-            (Ty::PlatformObject(Name::new("РезультатЗапроса")), false, false, true),
-            (Ty::PlatformObject(Name::new("Запрос")), false, false, false),
-            (Ty::Undefined, false, false, false),
+            (value_table_id(&db, None), true, false, false),
+            (value_table_id(&db, Some(projection.clone())), true, false, false),
+            (platform_id(&db, "ТаблицаЗначений"), true, false, false),
+            (platform_id(&db, "ДеревоЗначений"), false, true, false),
+            (db.query_result(None, ProjectionSource::Unknown), false, false, true),
+            (
+                db.query_result(Some(projection.clone()), ProjectionSource::Unknown),
+                false,
+                false,
+                true,
+            ),
+            (platform_id(&db, "РезультатЗапроса"), false, false, true),
+            (platform_id(&db, "Запрос"), false, false, false),
+            (db.undefined(), false, false, false),
         ];
 
-        for (ty, is_table, is_tree, is_result) in cases {
-            let id = ty_to_typeid(&db, &ty);
-            assert_eq!(is_value_table_arm_id(&db, id), is_table, "{ty:?}");
-            assert_eq!(is_value_tree_arm_id(&db, id), is_tree, "{ty:?}");
-            assert_eq!(is_query_result_receiver_id(&db, id), is_result, "{ty:?}");
+        for (id, is_table, is_tree, is_result) in cases {
+            assert_eq!(is_value_table_arm_id(&db, id), is_table, "{:?}", db.lookup_type(id));
+            assert_eq!(is_value_tree_arm_id(&db, id), is_tree, "{:?}", db.lookup_type(id));
+            assert_eq!(is_query_result_receiver_id(&db, id), is_result, "{:?}", db.lookup_type(id));
         }
     }
 
@@ -1245,17 +1278,16 @@ mod tests {
         let db = InMemoryDb::new();
         let projection = projection(&db);
         let cases = [
-            (query_ty(vec![None]), true),
-            (query_ty(vec![Some(projection)]), false),
-            (query_ty(Vec::new()), true),
-            (Ty::PlatformObject(Name::new("Запрос")), true),
-            (Ty::PlatformObject(Name::new("РезультатЗапроса")), false),
-            (Ty::Undefined, false),
+            (query_id(&db, vec![None]), true),
+            (query_id(&db, vec![Some(projection)]), false),
+            (query_id(&db, Vec::new()), true),
+            (platform_id(&db, "Запрос"), true),
+            (platform_id(&db, "РезультатЗапроса"), false),
+            (db.undefined(), false),
         ];
 
-        for (ty, expected) in cases {
-            let id = ty_to_typeid(&db, &ty);
-            assert_eq!(receiver_needs_refinement_id(&db, id), expected, "{ty:?}");
+        for (id, expected) in cases {
+            assert_eq!(receiver_needs_refinement_id(&db, id), expected, "{:?}", db.lookup_type(id));
         }
     }
 
@@ -1264,90 +1296,70 @@ mod tests {
         let db = InMemoryDb::new();
         let projection = projection(&db);
         let query_cases = vec![
-            query_ty(vec![None]),
-            query_ty(vec![Some(projection.clone())]),
-            Ty::PlatformObject(Name::new("Запрос")),
-            Ty::Undefined,
+            (query_id(&db, vec![None]), Some(None), Some(Arc::from([None]))),
+            (
+                query_id(&db, vec![Some(projection.clone())]),
+                Some(Some(projection.clone())),
+                Some(Arc::from([Some(projection.clone())])),
+            ),
+            (platform_id(&db, "Запрос"), Some(None), Some(Arc::from([]))),
+            (db.undefined(), None, None),
         ];
 
-        for ty in query_cases {
-            let id = ty_to_typeid(&db, &ty);
+        for (id, expected_projection, expected_projections) in query_cases {
             assert_eq!(
                 projection_result_id(&db, projection_of_query_receiver_id(&db, id)),
-                projection_result_expected_id(
-                    &db,
-                    match &ty {
-                        Ty::Query { projections } => Some(projections.last().cloned().flatten()),
-                        Ty::PlatformObject(n) if is_platform_name(n, "Запрос", "Query") => {
-                            Some(None)
-                        }
-                        _ => None,
-                    },
-                ),
-                "{ty:?}"
+                projection_result_expected_id(&db, expected_projection),
+                "{:?}",
+                db.lookup_type(id)
             );
             assert_eq!(
                 projections_of_query_receiver_id(&db, id)
                     .map(|projections| db.query_batch_result(projections)),
-                match &ty {
-                    Ty::Query { projections } => {
-                        Some(ty_to_typeid(
-                            &db,
-                            &Ty::QueryBatchResult { per_query: projections.clone() },
-                        ))
-                    }
-                    Ty::PlatformObject(n) if is_platform_name(n, "Запрос", "Query") => {
-                        Some(ty_to_typeid(&db, &Ty::QueryBatchResult { per_query: Arc::from([]) }))
-                    }
-                    _ => None,
-                },
-                "{ty:?}"
+                expected_projections.map(|projections| db.query_batch_result(projections)),
+                "{:?}",
+                db.lookup_type(id)
             );
         }
 
         let result_cases = vec![
-            Ty::QueryResult { projection: None },
-            Ty::QueryResult { projection: Some(projection) },
-            Ty::PlatformObject(Name::new("РезультатЗапроса")),
-            Ty::Undefined,
+            (db.query_result(None, ProjectionSource::Unknown), Some(None)),
+            (
+                db.query_result(Some(projection.clone()), ProjectionSource::Unknown),
+                Some(Some(projection)),
+            ),
+            (platform_id(&db, "РезультатЗапроса"), Some(None)),
+            (db.undefined(), None),
         ];
 
-        for ty in result_cases {
-            let id = ty_to_typeid(&db, &ty);
+        for (id, expected_projection) in result_cases {
             assert_eq!(
                 projection_selection_id(&db, projection_of_query_result_receiver_id(&db, id)),
-                projection_selection_expected_id(
-                    &db,
-                    match &ty {
-                        Ty::QueryResult { projection } => Some(projection.clone()),
-                        Ty::PlatformObject(n)
-                            if is_platform_name(n, "РезультатЗапроса", "QueryResult") =>
-                        {
-                            Some(None)
-                        }
-                        _ => None,
-                    },
-                ),
-                "{ty:?}"
+                projection_selection_expected_id(&db, expected_projection),
+                "{:?}",
+                db.lookup_type(id)
             );
         }
     }
 
-    fn assert_pick_chain_rewrite_twin_matches_ty(
+    fn assert_pick_chain_rewrite_twin_matches_kernel(
         db: &dyn TypeKernelDb,
-        receiver: Ty,
+        receiver: TypeId,
         method_name: &str,
-        expected: Option<(ChainTarget, Ty)>,
+        expected: Option<(ChainTarget, TypeId)>,
     ) {
-        let actual = pick_chain_rewrite_id(db, ty_to_typeid(db, &receiver), method_name);
+        let actual = pick_chain_rewrite_id(db, receiver, method_name);
         match (actual, expected) {
-            (Some((actual_target, actual_replacement)), Some((expected_target, expected_ty))) => {
+            (Some((actual_target, actual_replacement)), Some((expected_target, expected_id))) => {
                 assert_eq!(actual_target, expected_target);
-                assert_eq!(actual_replacement, ty_to_typeid(db, &expected_ty));
+                assert_eq!(actual_replacement, expected_id);
             }
             (None, None) => {}
             (actual, expected) => {
-                panic!("pick_chain_rewrite drift for {receiver:?}.{method_name}: {actual:?} vs {expected:?}")
+                panic!(
+                    "pick_chain_rewrite drift for {:?}.{method_name}: {actual:?} vs {expected:?}",
+                    db.lookup_type(receiver)
+                )
             }
         }
     }
@@ -1357,135 +1369,112 @@ mod tests {
         let db = InMemoryDb::new();
         let projection = projection(&db);
 
-        assert_pick_chain_rewrite_twin_matches_ty(
+        assert_pick_chain_rewrite_twin_matches_kernel(
             &db,
-            query_ty(vec![Some(projection.clone())]),
+            query_id(&db, vec![Some(projection.clone())]),
             "Выполнить",
             Some((
                 ChainTarget::PlatformObjectNamed {
                     ru: "РезультатЗапроса", en: "QueryResult"
                 },
-                Ty::QueryResult { projection: Some(projection.clone()) },
+                db.query_result(Some(projection.clone()), ProjectionSource::Unknown),
             )),
         );
-        assert_pick_chain_rewrite_twin_matches_ty(
+        assert_pick_chain_rewrite_twin_matches_kernel(
             &db,
-            Ty::PlatformObject(Name::new("Запрос")),
+            platform_id(&db, "Запрос"),
             "execute",
             Some((
                 ChainTarget::PlatformObjectNamed {
                     ru: "РезультатЗапроса", en: "QueryResult"
                 },
-                Ty::QueryResult { projection: None },
+                db.query_result(None, ProjectionSource::Unknown),
             )),
         );
-        assert_pick_chain_rewrite_twin_matches_ty(
+        assert_pick_chain_rewrite_twin_matches_kernel(
             &db,
-            Ty::QueryResult { projection: Some(projection.clone()) },
+            db.query_result(Some(projection.clone()), ProjectionSource::Unknown),
             "Выбрать",
             Some((
                 ChainTarget::PlatformObjectNamed {
                     ru: "ВыборкаИзРезультатаЗапроса",
                     en: "QueryResultSelection",
                 },
-                Ty::QueryResultSelection { projection: Some(projection.clone()) },
+                db.query_result_selection(Some(projection.clone()), ProjectionSource::Unknown),
             )),
         );
-        assert_pick_chain_rewrite_twin_matches_ty(
+        assert_pick_chain_rewrite_twin_matches_kernel(
             &db,
-            Ty::PlatformObject(Name::new("РезультатЗапроса")),
+            platform_id(&db, "РезультатЗапроса"),
             "choose",
             Some((
                 ChainTarget::PlatformObjectNamed {
                     ru: "ВыборкаИзРезультатаЗапроса",
                     en: "QueryResultSelection",
                 },
-                Ty::QueryResultSelection { projection: None },
+                db.query_result_selection(None, ProjectionSource::Unknown),
             )),
         );
         let batch_projection = projection.clone();
-        assert_pick_chain_rewrite_twin_matches_ty(
+        assert_pick_chain_rewrite_twin_matches_kernel(
             &db,
-            query_ty(vec![None, Some(projection)]),
+            query_id(&db, vec![None, Some(projection)]),
             "ВыполнитьПакет",
             Some((
                 ChainTarget::AnyArray,
-                Ty::QueryBatchResult { per_query: Arc::from([None, Some(batch_projection)]) },
+                db.query_batch_result(Arc::from([None, Some(batch_projection)])),
             )),
         );
-        assert_pick_chain_rewrite_twin_matches_ty(
+        assert_pick_chain_rewrite_twin_matches_kernel(
             &db,
-            Ty::PlatformObject(Name::new("Запрос")),
+            platform_id(&db, "Запрос"),
             "executebatch",
-            Some((ChainTarget::AnyArray, Ty::QueryBatchResult { per_query: Arc::from([]) })),
+            Some((ChainTarget::AnyArray, db.query_batch_result(Arc::from([])))),
         );
-        assert_pick_chain_rewrite_twin_matches_ty(
+        assert_pick_chain_rewrite_twin_matches_kernel(
             &db,
-            Ty::PlatformObject(Name::new("Запрос")),
+            platform_id(&db, "Запрос"),
             "Колонки",
             None,
         );
     }
 
-    fn assert_rewrite_chain_arm_twin_matches_ty(
+    fn assert_rewrite_chain_arm_twin_matches_kernel(
         db: &dyn TypeKernelDb,
-        return_ty: Ty,
+        return_ty: TypeId,
         target: ChainTarget,
-        replacement: Ty,
+        replacement: TypeId,
+        expected: TypeId,
     ) {
-        let actual = rewrite_chain_arm_in_return_id(
-            db,
-            ty_to_typeid(db, &return_ty),
-            target.clone(),
-            ty_to_typeid(db, &replacement),
-        );
-        let expected = ty_to_typeid(db, &replacement);
-        if matches!(return_ty, Ty::Union(_)) {
-            let expected_return = match return_ty {
-                Ty::Union(arms) => Ty::union(
-                    arms.iter()
-                        .map(|arm| match (&target, arm) {
-                            (
-                                ChainTarget::PlatformObjectNamed { ru, en },
-                                Ty::PlatformObject(name),
-                            ) if is_platform_name(name, ru, en) => replacement.clone(),
-                            (ChainTarget::AnyArray, Ty::Array | Ty::TypedArray(_)) => {
-                                replacement.clone()
-                            }
-                            _ => arm.clone(),
-                        })
-                        .collect(),
-                ),
-                _ => unreachable!(),
-            };
-            assert_eq!(actual, ty_to_typeid(db, &expected_return));
-        } else {
-            assert_eq!(actual, expected);
-        }
+        let actual = rewrite_chain_arm_in_return_id(db, return_ty, target.clone(), replacement);
+        assert_eq!(actual, expected);
     }
 
     #[test]
     fn kernel_native_rewrite_chain_arm_twin_matches_ty_helper() {
         let db = InMemoryDb::new();
-        assert_rewrite_chain_arm_twin_matches_ty(
+        assert_rewrite_chain_arm_twin_matches_kernel(
             &db,
-            Ty::union(vec![Ty::PlatformObject(Name::new("РезультатЗапроса")), Ty::Undefined]),
+            db.union(vec![platform_id(&db, "РезультатЗапроса"), db.undefined()]),
             ChainTarget::PlatformObjectNamed {
                 ru: "РезультатЗапроса", en: "QueryResult"
             },
-            Ty::QueryResult { projection: None },
+            db.query_result(None, ProjectionSource::Unknown),
+            db.union(vec![db.query_result(None, ProjectionSource::Unknown), db.undefined()]),
         );
-        assert_rewrite_chain_arm_twin_matches_ty(
+        assert_rewrite_chain_arm_twin_matches_kernel(
             &db,
-            Ty::Array,
+            db.array(None),
             ChainTarget::AnyArray,
-            Ty::QueryBatchResult { per_query: Arc::from([]) },
+            db.query_batch_result(Arc::from([])),
+            db.query_batch_result(Arc::from([])),
         );
-        assert_rewrite_chain_arm_twin_matches_ty(
+        assert_rewrite_chain_arm_twin_matches_kernel(
             &db,
-            Ty::TypedArray(Box::new(Ty::String)),
+            db.array(Some(db.string(None, false))),
             ChainTarget::AnyArray,
-            Ty::QueryBatchResult { per_query: Arc::from([]) },
+            db.query_batch_result(Arc::from([])),
+            db.query_batch_result(Arc::from([])),
         );
     }
 
@@ -1495,82 +1484,57 @@ mod tests {
         let projection = projection(&db);
         let kernel_projection = projection.clone();
         let cases = vec![
-            Ty::ValueTable { projection: None },
-            Ty::union(vec![
-                Ty::ValueTable { projection: None },
-                Ty::PlatformObject(Name::new("ДеревоЗначений")),
-            ]),
-            Ty::Union(Arc::from([
-                Ty::ValueTable { projection: None },
-                Ty::ValueTable { projection: None },
-            ])),
+            (value_table_id(&db, None), value_table_id(&db, Some(projection.clone()))),
+            (
+                db.union(vec![value_table_id(&db, None), platform_id(&db, "ДеревоЗначений")]),
+                db.union(vec![
+                    value_table_id(&db, Some(projection.clone())),
+                    platform_id(&db, "ДеревоЗначений"),
+                ]),
+            ),
+            (
+                db.union(vec![value_table_id(&db, None), value_table_id(&db, None)]),
+                value_table_id(&db, Some(projection.clone())),
+            ),
         ];
 
-        for ty in cases {
-            let actual = attach_projection_to_value_table_id(
-                &db,
-                ty_to_typeid(&db, &ty),
-                Some(kernel_projection.clone()),
-            );
-            let expected = match ty {
-                Ty::ValueTable { projection: None } => {
-                    Ty::ValueTable { projection: Some(projection.clone()) }
-                }
-                Ty::Union(members) => Ty::Union(
-                    members
-                        .iter()
-                        .map(|arm| match arm {
-                            Ty::ValueTable { projection: None } => {
-                                Ty::ValueTable { projection: Some(projection.clone()) }
-                            }
-                            _ => arm.clone(),
-                        })
-                        .collect(),
-                ),
-                other => other,
-            };
-            assert_eq!(actual, ty_to_typeid(&db, &expected));
+        for (input, expected) in cases {
+            let actual =
+                attach_projection_to_value_table_id(&db, input, Some(kernel_projection.clone()));
+            assert_eq!(actual, expected);
         }
 
-        let no_projection_input = Ty::ValueTable { projection: None };
+        let no_projection_input = value_table_id(&db, None);
         assert_eq!(
-            attach_projection_to_value_table_id(&db, ty_to_typeid(&db, &no_projection_input), None),
-            ty_to_typeid(&db, &no_projection_input)
+            attach_projection_to_value_table_id(&db, no_projection_input, None),
+            no_projection_input
         );
     }
 
     #[test]
     fn kernel_native_drop_union_arm_twin_matches_ty_helper() {
         let db = InMemoryDb::new();
-        let input = Ty::union(vec![
-            Ty::ValueTable { projection: None },
-            Ty::PlatformObject(Name::new("ДеревоЗначений")),
-        ]);
+        let input = db.union(vec![value_table_id(&db, None), platform_id(&db, "ДеревоЗначений")]);
 
+        assert_eq!(drop_union_arm_id(&db, input, is_value_tree_arm_id), value_table_id(&db, None));
         assert_eq!(
-            drop_union_arm_id(&db, ty_to_typeid(&db, &input), is_value_tree_arm_id),
-            ty_to_typeid(&db, &Ty::ValueTable { projection: None })
-        );
-        assert_eq!(
-            drop_union_arm_id(&db, ty_to_typeid(&db, &input), is_value_table_arm_id),
-            ty_to_typeid(&db, &Ty::PlatformObject(Name::new("ДеревоЗначений")))
+            drop_union_arm_id(&db, input, is_value_table_arm_id),
+            platform_id(&db, "ДеревоЗначений")
         );
 
-        let non_union = Ty::ValueTable { projection: None };
-        assert_eq!(
-            drop_union_arm_id(&db, ty_to_typeid(&db, &non_union), is_value_tree_arm_id),
-            ty_to_typeid(&db, &non_union)
-        );
+        let non_union = value_table_id(&db, None);
+        assert_eq!(drop_union_arm_id(&db, non_union, is_value_tree_arm_id), non_union);
     }
 
     #[test]
     fn method_lookup_platform_type_hit() {
         // `Массив.Добавить` is a staple platform method — proves the
         // type-name key resolves through `PlatformData::get_method`.
-        let info = lookup(&Ty::Array, &Name::new("Добавить"))
+        let db = InMemoryDb::new();
+        let info = lookup(&db, db.array(None), &Name::new("Добавить"))
             .expect("Массив.Добавить must resolve in platform data");
         // Returns nothing (procedure) in platform data.
-        assert_eq!(info.return_ty, Ty::Undefined);
+        assert_eq!(info.return_ty, db.undefined());
     }
 
     #[test]
@@ -1578,40 +1542,44 @@ mod tests {
         // `Ty::TypedArray(_)` keys through the same `"Array"` page as
         // `Ty::Array` — the element type only refines field/iteration,
         // method dispatch is structural.
-        let receiver = Ty::TypedArray(Box::new(Ty::String));
-        let info = lookup(&receiver, &Name::new("Добавить"))
+        let db = InMemoryDb::new();
+        let receiver = db.array(Some(db.string(None, false)));
+        let info = lookup(&db, receiver, &Name::new("Добавить"))
             .expect("TypedArray must expose Массив.Добавить through the Array platform page");
-        assert_eq!(info.return_ty, Ty::Undefined);
+        assert_eq!(info.return_ty, db.undefined());
 
         // `.Количество()` returns Число — proves arithmetic-friendly
         // chaining (`.ВыделенныеСтроки.Количество()` in the form-control
         // refinement targeted by Phase 5) survives the new variant.
-        let count = lookup(&receiver, &Name::new("Количество"))
+        let count = lookup(&db, receiver, &Name::new("Количество"))
             .expect("TypedArray.Количество must resolve via the Array platform page");
-        assert_eq!(count.return_ty, Ty::Number);
+        assert_eq!(count.return_ty, db.number(None, None));
     }
 
     #[test]
     fn method_lookup_unknown_method_returns_none() {
         // A nonsensical method name never hits — the lookup is None, not a
         // poisoned `Ty::Unknown` signature.
-        assert!(lookup(&Ty::Array, &Name::new("НеСуществуетТакогоМетода")).is_none());
+        let db = InMemoryDb::new();
+        assert!(lookup(&db, db.array(None), &Name::new("НеСуществуетТакогоМетода")).is_none());
     }
 
     #[test]
     fn method_lookup_returns_none_for_unknown_receiver() {
         // Unknown receiver has no method table.
-        assert!(lookup(&Ty::Unknown, &Name::new("Любой")).is_none());
-        assert!(lookup(&Ty::Undefined, &Name::new("Любой")).is_none());
-        assert!(lookup(&Ty::Null, &Name::new("Любой")).is_none());
+        let db = InMemoryDb::new();
+        assert!(lookup(&db, db.unknown(), &Name::new("Любой")).is_none());
+        assert!(lookup(&db, db.undefined(), &Name::new("Любой")).is_none());
+        assert!(lookup(&db, db.null(), &Name::new("Любой")).is_none());
     }
 
     #[test]
     fn method_lookup_returns_none_for_union_without_live_method() {
         // Primitives expose no instance methods → union of primitives still
         // returns `None` for any method name (every branch misses).
-        let u = Ty::union(vec![Ty::Number, Ty::String]);
-        assert!(lookup(&u, &Name::new("Любой")).is_none());
+        let db = InMemoryDb::new();
+        let u = db.union(vec![db.number(None, None), db.string(None, false)]);
+        assert!(lookup(&db, u, &Name::new("Любой")).is_none());
     }
 
     #[test]
@@ -1621,22 +1589,25 @@ mod tests {
         // `.Выгрузить()` must resolve against the live branch (QueryResult
         // has a `Выгрузить` method in platform data) — the `Undefined`
         // sentinel is stripped before dispatch so the chain survives.
-        let u = Ty::union(vec![Ty::PlatformObject(Name::new("РезультатЗапроса")), Ty::Undefined]);
-        let info = lookup(&u, &Name::new("Выгрузить")).expect(
+        let db = InMemoryDb::new();
+        let u = db.union(vec![platform_id(&db, "РезультатЗапроса"), db.undefined()]);
+        let info = lookup(&db, u, &Name::new("Выгрузить")).expect(
             "Union([QueryResult, Undefined]).Выгрузить must resolve through the live branch",
         );
         // HBK declares `QueryResult.Выгрузить` as `"ТаблицаЗначений,
         // ДеревоЗначений"` — the narrowing must at least preserve
         // `Ty::ValueTable` in the result so chained `.Добавить()` works.
-        let contains_value_table = match &info.return_ty {
-            Ty::ValueTable { .. } => true,
-            Ty::Union(members) => members.iter().any(|m| matches!(m, Ty::ValueTable { .. })),
+        let contains_value_table = match db.lookup_type(info.return_ty) {
+            TypeKind::ValueTable(_) => true,
+            TypeKind::Union(members) => {
+                members.iter().any(|id| matches!(db.lookup_type(*id), TypeKind::ValueTable(_)))
+            }
             _ => false,
         };
         assert!(
             contains_value_table,
-            "return type must include Ty::ValueTable, got {:?}",
-            info.return_ty,
+            "return type must include ValueTable, got {:?}",
+            db.lookup_type(info.return_ty),
         );
     }
 
@@ -1646,7 +1617,8 @@ mod tests {
         // resolve — the receiver shape that inference produces when
         // `Зап = Новый Запрос`. If this asserts None while the bilingual
         // test below passes, inference is hitting a different code path.
-        let info = lookup(&Ty::PlatformObject(Name::new("Запрос")), &Name::new("Выполнить"));
+        let db = InMemoryDb::new();
+        let info = lookup(&db, platform_id(&db, "Запрос"), &Name::new("Выполнить"));
         assert!(info.is_some(), "PlatformObject(Запрос).Выполнить must resolve");
     }
 
@@ -1658,20 +1630,23 @@ mod tests {
         // (Phase 1.3) replaces the `РезультатЗапроса` arm with
         // `Ty::QueryResult{None}`, both branches must still be present
         // for any downstream chain to nullability-check.
-        let info = lookup(&Ty::PlatformObject(Name::new("Запрос")), &Name::new("Выполнить"))
+        let db = InMemoryDb::new();
+        let info = lookup(&db, platform_id(&db, "Запрос"), &Name::new("Выполнить"))
             .expect("Запрос.Выполнить must resolve in platform data");
-        match info.return_ty {
-            Ty::Union(members) => {
+        match db.lookup_type(info.return_ty) {
+            TypeKind::Union(members) => {
                 assert!(
-                    members.iter().any(|m| matches!(m, Ty::QueryResult { projection: None })),
-                    "union must include Ty::QueryResult{{None}} (the rewritten РезультатЗапроса arm), got {members:?}",
+                    members
+                        .iter()
+                        .any(|id| matches!(db.lookup_type(*id), TypeKind::QueryResult(facet) if facet.projection.is_none())),
+                    "union must include QueryResult{{None}} (the rewritten РезультатЗапроса arm), got {members:?}",
                 );
                 assert!(
-                    members.iter().any(|m| matches!(m, Ty::Undefined)),
-                    "union must include Ty::Undefined, got {members:?}",
+                    members.iter().any(|id| matches!(db.lookup_type(*id), TypeKind::Undefined)),
+                    "union must include Undefined, got {members:?}",
                 );
             }
-            other => panic!("expected Ty::Union, got {other:?}"),
+            other => panic!("expected Union, got {other:?}"),
         }
     }
 
@@ -1685,12 +1660,15 @@ mod tests {
         // `Ty::Unknown` so the call-site `is_assignable` check accepts
         // any actual via gradual typing rather than false-firing
         // structural-equality `TypeMismatch`.
-        let info =
-            to_ty_method_info(&test_method(Some("Число, Неопределено"), Some("Метаданные,")));
-        assert_eq!(info.return_ty, Ty::union(vec![Ty::Number, Ty::Undefined]));
+        let db = InMemoryDb::new();
+        let info = to_type_method_info(
+            &db,
+            &test_method(Some("Число, Неопределено"), Some("Метаданные,")),
+        );
+        assert_eq!(info.return_ty, db.union(vec![db.number(None, None), db.undefined()]));
         assert_eq!(
             info.params,
-            vec![Ty::Unknown],
+            vec![db.unknown()],
             "garbage param strings stay Unknown for gradual typing",
         );
     }
@@ -1704,8 +1682,9 @@ mod tests {
         // segment fails type validation, so we collapse to
         // `Ty::Unknown` rather than a strict
         // `Ty::PlatformObject("Ссылка на объект, либо …")`.
-        let info = to_ty_method_info(&test_method(None, Some("Ссылка на объект, либо")));
-        assert_eq!(info.params, vec![Ty::Unknown]);
+        let db = InMemoryDb::new();
+        let info = to_type_method_info(&db, &test_method(None, Some("Ссылка на объект, либо")));
+        assert_eq!(info.params, vec![db.unknown()]);
     }
 
     #[test]
@@ -1716,8 +1695,9 @@ mod tests {
         // call-site argument check. Routing this through
         // `lower_return_type_string` would lift to a structural
         // `PlatformObject`, falsely rejecting valid args.
-        let info = to_ty_method_info(&test_method(None, Some("Строка табличной части")));
-        assert_eq!(info.params, vec![Ty::Unknown]);
+        let db = InMemoryDb::new();
+        let info = to_type_method_info(&db, &test_method(None, Some("Строка табличной части")));
+        assert_eq!(info.params, vec![db.unknown()]);
     }
 
     #[test]
@@ -1727,17 +1707,23 @@ mod tests {
         // multi-type lowering fix, it surfaces as a `Ty::Union` so the
         // `is_assignable` check at the call site accepts a `Ty::String`
         // arg without false-firing `TypeMismatch`.
-        let info =
-            to_ty_method_info(&test_method(None, Some("Число, Строка, КолонкаТаблицыЗначений")));
+        let db = InMemoryDb::new();
+        let info = to_type_method_info(
+            &db,
+            &test_method(None, Some("Число, Строка, КолонкаТаблицыЗначений")),
+        );
         match &info.params[..] {
-            [Ty::Union(members)] => {
-                assert!(members.contains(&Ty::Number));
-                assert!(members.contains(&Ty::String));
-                assert!(members.iter().any(
-                    |m| matches!(m, Ty::PlatformObject(n) if n.as_str() == "КолонкаТаблицыЗначений")
+            [param] => match db.lookup_type(*param) {
+                TypeKind::Union(members) => {
+                    assert!(members.contains(&db.number(None, None)));
+                    assert!(members.contains(&db.string(None, false)));
+                    assert!(members.iter().any(
+                    |id| matches!(db.lookup_type(*id), TypeKind::PlatformObject(facet) if facet.name.as_str() == "КолонкаТаблицыЗначений")
                 ));
-            }
-            other => panic!("expected single Ty::Union param, got {other:?}"),
+                }
+                other => panic!("expected single Union param, got {other:?}"),
+            },
+            other => panic!("expected single Union param, got {other:?}"),
         }
     }
 
@@ -1749,8 +1735,9 @@ mod tests {
         // surface as `Ty::Unknown` through `to_method_info`, so that
         // call-site argument checks against it stay quiet under the
         // gradual rule.
-        let info = to_ty_method_info(&test_method(Some("Произвольный"), None));
-        assert_eq!(info.return_ty, Ty::Unknown);
+        let db = InMemoryDb::new();
+        let info = to_type_method_info(&db, &test_method(Some("Произвольный"), None));
+        assert_eq!(info.return_ty, db.unknown());
     }
 
     #[test]
@@ -1758,9 +1745,9 @@ mod tests {
         // Collectives (`Документы`) expose iteration, not per-object
         // methods — until collective methods land in bsl-platform this
         // returns None.
-        let doc =
-            Ty::manager_collection(MdoType::Document).expect("Document has a manager collection");
-        assert!(lookup(&doc, &Name::new("Любой")).is_none());
+        let db = InMemoryDb::new();
+        let doc = db.manager_collection(MdoType::Document);
+        assert!(lookup(&db, doc, &Name::new("Любой")).is_none());
     }
 
     #[test]
@@ -1773,9 +1760,10 @@ mod tests {
         // `display_name()` fallback, and the Task 5 draft used
         // `"ТаблицаЗначений"` — both miss because platform-data stores
         // English).
-        let info = lookup(&Ty::ValueTable { projection: None }, &Name::new("Добавить"))
+        let db = InMemoryDb::new();
+        let info = lookup(&db, value_table_id(&db, None), &Name::new("Добавить"))
             .expect("ValueTable.Добавить must resolve via bilingual platform index");
-        assert!(!matches!(info.return_ty, Ty::Unknown));
+        assert!(!matches!(db.lookup_type(info.return_ty), TypeKind::Unknown));
     }
 
     #[test]
@@ -1784,16 +1772,13 @@ mod tests {
         // routes through `platform_manager_lookup` — the generic
         // `СправочникОбъект` return must rebind to
         // `MetadataRef { CatalogObject, "Номенклатура" }`.
-        let om = Ty::ObjectManager {
-            kind: MdoType::Catalog, name: Name::new("Номенклатура")
-        };
-        let info = lookup(&om, &Name::new("СоздатьЭлемент"))
+        let db = InMemoryDb::new();
+        let om = object_manager_id(&db, MdoType::Catalog, "Номенклатура");
+        let info = lookup(&db, om, &Name::new("СоздатьЭлемент"))
             .expect("ObjectManager.СоздатьЭлемент must resolve via platform adapter");
         assert_eq!(
             info.return_ty,
-            Ty::MetadataRef {
-                kind: MetadataKind::CatalogObject, name: Name::new("Номенклатура")
-            }
+            metadata_ref_id(&db, MetadataKind::CatalogObject, "Номенклатура")
         );
     }
 
@@ -1801,10 +1786,9 @@ mod tests {
     fn method_lookup_object_manager_unknown_method_returns_none() {
         // Fabricated method — no platform entry, lookup still returns
         // `None` so the caller emits `UnresolvedMethodCall`.
-        let om = Ty::ObjectManager {
-            kind: MdoType::Catalog, name: Name::new("Номенклатура")
-        };
-        assert!(lookup(&om, &Name::new("НетТакогоМетода")).is_none());
+        let db = InMemoryDb::new();
+        let om = object_manager_id(&db, MdoType::Catalog, "Номенклатура");
+        assert!(lookup(&db, om, &Name::new("НетТакогоМетода")).is_none());
     }
 
     #[test]
@@ -1812,13 +1796,11 @@ mod tests {
         // `MetadataRef { CatalogObject, .. }.Записать()` routes to the
         // CatalogObject platform method (procedure — return is
         // `Ty::Undefined`).
-        let r = Ty::MetadataRef {
-            kind: MetadataKind::CatalogObject,
-            name: Name::new("Номенклатура"),
-        };
-        let info = lookup(&r, &Name::new("Записать"))
+        let db = InMemoryDb::new();
+        let r = metadata_ref_id(&db, MetadataKind::CatalogObject, "Номенклатура");
+        let info = lookup(&db, r, &Name::new("Записать"))
             .expect("MetadataRef CatalogObject.Записать must resolve");
-        assert_eq!(info.return_ty, Ty::Undefined);
+        assert_eq!(info.return_ty, db.undefined());
     }
 
     #[test]
@@ -1829,14 +1811,16 @@ mod tests {
         // there so `<recordSet>.Отбор.<method>()` resolves for
         // inference. Pinned because regressing this would break the
         // user-facing `НаборЗаписей.Отбор.Сбросить()` snippet.
-        let r = Ty::MetadataRef {
-            kind: MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
-            name: Name::new("РегистрСведений1"),
-        };
-        let info = lookup(&r, &Name::new("Сбросить"))
+        let db = InMemoryDb::new();
+        let r = metadata_ref_id(
+            &db,
+            MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
+            "РегистрСведений1",
+        );
+        let info = lookup(&db, r, &Name::new("Сбросить"))
             .expect("Filter.Сбросить must resolve through scalar-key fallback");
         // `Сбросить()` is a procedure → `Ty::Undefined`.
-        assert_eq!(info.return_ty, Ty::Undefined);
+        assert_eq!(info.return_ty, db.undefined());
     }
 
     // Hover/goto coverage for the `Filter.Сбросить` scalar-key fallback
@@ -1859,9 +1843,9 @@ mod tests {
         // only and false-fired on legitimate alternative call shapes.
         // Pin the fix here — the IDE-side equivalent lives in
         // `platform_resolution::tests::composite_multi_overload_method_populates_overloads`.
-        let r =
-            Ty::ObjectManager { kind: MdoType::InformationRegister, name: Name::new("Курсы") };
-        let Some(info) = lookup(&r, &Name::new("Получить")) else {
+        let db = InMemoryDb::new();
+        let r = object_manager_id(&db, MdoType::InformationRegister, "Курсы");
+        let Some(info) = lookup(&db, r, &Name::new("Получить")) else {
             // Skip when running without platform data.
             println!("Skipping: no platform data available");
             return;
@@ -1875,8 +1859,8 @@ mod tests {
         );
     }
 
-    fn ts_receiver(parent: MdoType, name: &str) -> Ty {
-        Ty::MetadataRef { kind: MetadataKind::TabularSection { parent }, name: Name::new(name) }
+    fn ts_receiver(db: &dyn TypeKernelDb, parent: MdoType, name: &str) -> TypeId {
+        metadata_ref_id(db, MetadataKind::TabularSection { parent }, name)
     }
 
     #[test]
@@ -1884,33 +1868,37 @@ mod tests {
         // `Добавить()` rebinds the generic `Строка табличной части`
         // return to a `TabularSectionRow` receiver pinned to the
         // section's parent MDO and qualified name.
-        let r = ts_receiver(MdoType::Catalog, "Номенклатура.Услуги");
-        let info = lookup(&r, &Name::new("Добавить")).expect(
+        let db = InMemoryDb::new();
+        let r = ts_receiver(&db, MdoType::Catalog, "Номенклатура.Услуги");
+        let info = lookup(&db, r, &Name::new("Добавить")).expect(
             "TabularSection.Добавить must resolve through PlatformData[\"Tabular section\"]",
         );
         assert_eq!(
             info.return_ty,
-            Ty::MetadataRef {
-                kind: MetadataKind::TabularSectionRow { parent: MdoType::Catalog },
-                name: Name::new("Номенклатура.Услуги"),
-            }
+            metadata_ref_id(
+                &db,
+                MetadataKind::TabularSectionRow { parent: MdoType::Catalog },
+                "Номенклатура.Услуги"
+            )
         );
     }
 
     #[test]
     fn method_lookup_tabular_section_count_returns_number() {
-        let r = ts_receiver(MdoType::Catalog, "X.Y");
-        let info =
-            lookup(&r, &Name::new("Количество")).expect("TabularSection.Количество must resolve");
-        assert_eq!(info.return_ty, Ty::Number);
+        let db = InMemoryDb::new();
+        let r = ts_receiver(&db, MdoType::Catalog, "X.Y");
+        let info = lookup(&db, r, &Name::new("Количество"))
+            .expect("TabularSection.Количество must resolve");
+        assert_eq!(info.return_ty, db.number(None, None));
     }
 
     #[test]
     fn method_lookup_tabular_section_unload_returns_value_table() {
-        let r = ts_receiver(MdoType::Catalog, "X.Y");
+        let db = InMemoryDb::new();
+        let r = ts_receiver(&db, MdoType::Catalog, "X.Y");
         let info =
-            lookup(&r, &Name::new("Выгрузить")).expect("TabularSection.Выгрузить must resolve");
-        assert_eq!(info.return_ty, Ty::ValueTable { projection: None });
+            lookup(&db, r, &Name::new("Выгрузить")).expect("TabularSection.Выгрузить must resolve");
+        assert_eq!(info.return_ty, value_table_id(&db, None));
     }
 
     #[test]
@@ -1919,25 +1907,25 @@ mod tests {
         // → `Ty::Union([TabularSectionRow, Undefined])`. Pin the
         // member ordering / membership rather than equality so
         // future Ty::union flattening tweaks don't break the test.
-        let r = ts_receiver(MdoType::Catalog, "X.Y");
-        let info = lookup(&r, &Name::new("Найти")).expect("TabularSection.Найти must resolve");
-        let members = match info.return_ty {
-            Ty::Union(ref m) => m.clone(),
-            other => panic!("expected Ty::Union, got {other:?}"),
+        let db = InMemoryDb::new();
+        let r = ts_receiver(&db, MdoType::Catalog, "X.Y");
+        let info = lookup(&db, r, &Name::new("Найти")).expect("TabularSection.Найти must resolve");
+        let members = match db.lookup_type(info.return_ty) {
+            TypeKind::Union(m) => m.clone(),
+            other => panic!("expected Union, got {other:?}"),
         };
         assert!(
-            members.iter().any(|m| matches!(
-                m,
-                Ty::MetadataRef {
-                    kind: MetadataKind::TabularSectionRow { parent: MdoType::Catalog },
-                    name,
-                } if name.as_str() == "X.Y"
+            members.iter().any(|id| matches!(
+                db.lookup_type(*id),
+                TypeKind::MetadataRef(facet)
+                    if facet.kind == MetadataKind::TabularSectionRow { parent: MdoType::Catalog }
+                        && facet.name.as_str() == "X.Y"
             )),
             "Найти union must include TabularSectionRow {{ parent: Catalog, name: \"X.Y\" }}, got {members:?}",
         );
         assert!(
-            members.iter().any(|m| matches!(m, Ty::Undefined)),
-            "Найти union must include Ty::Undefined, got {members:?}",
+            members.iter().any(|id| matches!(db.lookup_type(*id), TypeKind::Undefined)),
+            "Найти union must include Undefined, got {members:?}",
         );
     }
 
@@ -1947,36 +1935,43 @@ mod tests {
         // `build_tabular_section_method_info` rebinds that to
         // `TypedArray(Row)` so chained `НайтиСтроки(...)[0].Колонка`
         // resolves the column instead of falling into Unknown.
-        let r = ts_receiver(MdoType::Catalog, "X.Y");
-        let info =
-            lookup(&r, &Name::new("НайтиСтроки")).expect("TabularSection.НайтиСтроки must resolve");
-        match info.return_ty {
-            Ty::TypedArray(elem) => match *elem {
-                Ty::MetadataRef {
-                    kind: MetadataKind::TabularSectionRow { parent: MdoType::Catalog },
-                    ref name,
-                } => assert_eq!(name.as_str(), "X.Y"),
-                other => panic!(
-                    "expected TypedArray(MetadataRef{{TabularSectionRow,X.Y}}), got element {other:?}"
-                ),
-            },
+        let db = InMemoryDb::new();
+        let r = ts_receiver(&db, MdoType::Catalog, "X.Y");
+        let info = lookup(&db, r, &Name::new("НайтиСтроки"))
+            .expect("TabularSection.НайтиСтроки must resolve");
+        match db.lookup_type(info.return_ty) {
+            TypeKind::Array(facet) => {
+                let elem = facet.element.expect("FindRows must return a typed array");
+                assert_metadata_ref(
+                    &db,
+                    elem,
+                    MetadataKind::TabularSectionRow { parent: MdoType::Catalog },
+                    "X.Y",
+                );
+            }
             other => panic!("expected TypedArray, got {other:?}"),
         }
     }
 
     #[test]
     fn method_lookup_tabular_section_findrows_english_alias_typed_array() {
-        let r = ts_receiver(MdoType::Document, "ПКО.Товары");
-        let info = lookup(&r, &Name::new("FindRows"))
+        let db = InMemoryDb::new();
+        let r = ts_receiver(&db, MdoType::Document, "ПКО.Товары");
+        let info = lookup(&db, r, &Name::new("FindRows"))
             .expect("TabularSection.FindRows must resolve via bilingual platform index");
-        assert!(matches!(
-            info.return_ty,
-            Ty::TypedArray(ref elem)
-                if matches!(**elem, Ty::MetadataRef {
-                    kind: MetadataKind::TabularSectionRow { parent: MdoType::Document },
-                    ..
-                }),
-        ));
+        match db.lookup_type(info.return_ty) {
+            TypeKind::Array(facet) => {
+                let elem = facet.element.expect("FindRows must return a typed array");
+                assert!(matches!(
+                    db.lookup_type(elem),
+                    TypeKind::MetadataRef(meta)
+                        if meta.kind == MetadataKind::TabularSectionRow {
+                            parent: MdoType::Document
+                        }
+                ));
+            }
+            other => panic!("expected TypedArray, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1985,15 +1980,14 @@ mod tests {
         // `Табличная часть` and the method `Добавить` ↔ `Add`. Asking
         // by the English method name on the Russian-conventional
         // English type key still resolves through the same row rebind.
-        let r = ts_receiver(MdoType::Catalog, "X.Y");
-        let info = lookup(&r, &Name::new("Add"))
+        let db = InMemoryDb::new();
+        let r = ts_receiver(&db, MdoType::Catalog, "X.Y");
+        let info = lookup(&db, r, &Name::new("Add"))
             .expect("TabularSection.Add must resolve via bilingual platform index");
         assert!(matches!(
-            info.return_ty,
-            Ty::MetadataRef {
-                kind: MetadataKind::TabularSectionRow { parent: MdoType::Catalog },
-                ..
-            },
+            db.lookup_type(info.return_ty),
+            TypeKind::MetadataRef(facet)
+                if facet.kind == MetadataKind::TabularSectionRow { parent: MdoType::Catalog },
         ));
     }
 
@@ -2001,35 +1995,40 @@ mod tests {
     fn method_lookup_tabular_section_unknown_method_returns_none() {
         // A miss must return `None` so `UnresolvedMethodCall` can
         // surface — ТЧ no longer silently swallows typos.
-        let r = ts_receiver(MdoType::Catalog, "X.Y");
-        assert!(lookup(&r, &Name::new("НетТакогоМетодаНаТЧ")).is_none());
+        let db = InMemoryDb::new();
+        let r = ts_receiver(&db, MdoType::Catalog, "X.Y");
+        assert!(lookup(&db, r, &Name::new("НетТакогоМетодаНаТЧ")).is_none());
     }
 
     #[test]
     fn method_lookup_tabular_section_parent_propagates_document() {
-        let r = ts_receiver(MdoType::Document, "ПКО.Товары");
-        let info = lookup(&r, &Name::new("Добавить"))
+        let db = InMemoryDb::new();
+        let r = ts_receiver(&db, MdoType::Document, "ПКО.Товары");
+        let info = lookup(&db, r, &Name::new("Добавить"))
             .expect("Document TabularSection.Добавить must resolve");
         assert_eq!(
             info.return_ty,
-            Ty::MetadataRef {
-                kind: MetadataKind::TabularSectionRow { parent: MdoType::Document },
-                name: Name::new("ПКО.Товары"),
-            }
+            metadata_ref_id(
+                &db,
+                MetadataKind::TabularSectionRow { parent: MdoType::Document },
+                "ПКО.Товары"
+            )
         );
     }
 
     #[test]
     fn method_lookup_tabular_section_parent_propagates_exchange_plan() {
-        let r = ts_receiver(MdoType::ExchangePlan, "ПО.Состав");
-        let info = lookup(&r, &Name::new("Добавить"))
+        let db = InMemoryDb::new();
+        let r = ts_receiver(&db, MdoType::ExchangePlan, "ПО.Состав");
+        let info = lookup(&db, r, &Name::new("Добавить"))
             .expect("ExchangePlan TabularSection.Добавить must resolve");
         assert_eq!(
             info.return_ty,
-            Ty::MetadataRef {
-                kind: MetadataKind::TabularSectionRow { parent: MdoType::ExchangePlan },
-                name: Name::new("ПО.Состав"),
-            }
+            metadata_ref_id(
+                &db,
+                MetadataKind::TabularSectionRow { parent: MdoType::ExchangePlan },
+                "ПО.Состав"
+            )
         );
     }
 
@@ -2040,12 +2039,13 @@ mod tests {
         // It must stay `Ty::Unknown` so subtype checks accept any
         // argument — narrowing it to `Ty::PlatformObject("Произвольный")`
         // would reject every real call site.
-        let r = ts_receiver(MdoType::Catalog, "X.Y");
-        let info = lookup(&r, &Name::new("Найти")).expect("TabularSection.Найти must resolve");
+        let db = InMemoryDb::new();
+        let r = ts_receiver(&db, MdoType::Catalog, "X.Y");
+        let info = lookup(&db, r, &Name::new("Найти")).expect("TabularSection.Найти must resolve");
         assert_eq!(
             info.params,
-            vec![Ty::Unknown, Ty::String],
-            "Произвольный must stay Ty::Unknown; only the row generic is rebound",
+            vec![db.unknown(), db.string(None, false)],
+            "Произвольный must stay Unknown; only the row generic is rebound",
         );
     }
 
@@ -2062,26 +2062,30 @@ mod tests {
         // `Ty::Union` results (`ТЧ.Индекс(ТЧ.Найти(…))`) would be
         // falsely rejected. Gradual typing (`Unknown ≤ A`) keeps the
         // diagnostic quiet.
-        let r = ts_receiver(MdoType::Catalog, "X.Y");
-        let info = lookup(&r, &Name::new("Индекс")).expect("TabularSection.Индекс must resolve");
+        let db = InMemoryDb::new();
+        let r = ts_receiver(&db, MdoType::Catalog, "X.Y");
+        let info =
+            lookup(&db, r, &Name::new("Индекс")).expect("TabularSection.Индекс must resolve");
         assert_eq!(
             info.params,
-            vec![Ty::Unknown],
-            "Индекс param must stay Ty::Unknown — rebinding would false-reject valid args",
+            vec![db.unknown()],
+            "Индекс param must stay Unknown — rebinding would false-reject valid args",
         );
     }
 
     #[test]
     fn method_lookup_tabular_section_parent_propagates_chart_of_accounts() {
-        let r = ts_receiver(MdoType::ChartOfAccounts, "Основной.ВидыСубконто");
-        let info = lookup(&r, &Name::new("Добавить"))
+        let db = InMemoryDb::new();
+        let r = ts_receiver(&db, MdoType::ChartOfAccounts, "Основной.ВидыСубконто");
+        let info = lookup(&db, r, &Name::new("Добавить"))
             .expect("ChartOfAccounts TabularSection.Добавить must resolve");
         assert_eq!(
             info.return_ty,
-            Ty::MetadataRef {
-                kind: MetadataKind::TabularSectionRow { parent: MdoType::ChartOfAccounts },
-                name: Name::new("Основной.ВидыСубконто"),
-            }
+            metadata_ref_id(
+                &db,
+                MetadataKind::TabularSectionRow { parent: MdoType::ChartOfAccounts },
+                "Основной.ВидыСубконто"
+            )
         );
     }
 
@@ -2094,14 +2098,14 @@ mod tests {
         // NOT on the shared `ГруппаФормы` base. Without the chain walk
         // method dispatch would miss; chain.iter().rev() hits the
         // extension first.
-        use hir_def::ty::FormElementKind;
-        let receiver = Ty::FormControl { kind: FormElementKind::UsualGroup, binding: None };
+        let db = InMemoryDb::new();
+        let receiver = form_control_id(&db, FormElementKind::UsualGroup);
         assert!(
-            lookup(&receiver, &Name::new("Скрыть")).is_some(),
+            lookup(&db, receiver, &Name::new("Скрыть")).is_some(),
             "<UsualGroup>.Скрыть must resolve via the usual-group extension chain entry"
         );
         assert!(
-            lookup(&receiver, &Name::new("Показать")).is_some(),
+            lookup(&db, receiver, &Name::new("Показать")).is_some(),
             "<UsualGroup>.Показать must resolve via the usual-group extension chain entry"
         );
     }
@@ -2111,10 +2115,10 @@ mod tests {
         // `Скрыть`/`Показать` are scoped to the UsualGroup extension.
         // A `<Pages>` receiver carries the Pages extension only — its
         // chain must NOT surface UsualGroup methods.
-        use hir_def::ty::FormElementKind;
-        let receiver = Ty::FormControl { kind: FormElementKind::Pages, binding: None };
+        let db = InMemoryDb::new();
+        let receiver = form_control_id(&db, FormElementKind::Pages);
         assert!(
-            lookup(&receiver, &Name::new("Скрыть")).is_none(),
+            lookup(&db, receiver, &Name::new("Скрыть")).is_none(),
             "Pages chain must not borrow UsualGroup-extension methods"
         );
     }
@@ -2123,9 +2127,9 @@ mod tests {
     fn method_lookup_form_control_other_with_empty_chain_returns_none() {
         // `Other` chain is empty → the rev-walk loop runs zero
         // iterations and we return None safely without panicking.
-        use hir_def::ty::FormElementKind;
-        let receiver = Ty::FormControl { kind: FormElementKind::Other, binding: None };
-        assert!(lookup(&receiver, &Name::new("Скрыть")).is_none());
+        let db = InMemoryDb::new();
+        let receiver = form_control_id(&db, FormElementKind::Other);
+        assert!(lookup(&db, receiver, &Name::new("Скрыть")).is_none());
     }
 
     #[test]
@@ -2140,10 +2144,15 @@ mod tests {
         // signatures match), but if the cohesion rule ever flips to
         // "last wins", a future overload divergence between Array and
         // ValueTable would silently re-bind callers' arg-checks.
-        let u = Ty::union(vec![Ty::Array, Ty::ValueTable { projection: None }]);
-        let info = lookup(&u, &Name::new("Количество"))
+        let db = InMemoryDb::new();
+        let u = db.union(vec![db.array(None), value_table_id(&db, None)]);
+        let info = lookup(&db, u, &Name::new("Количество"))
             .expect("Union(Array, ValueTable).Количество must resolve through both branches");
-        assert_eq!(info.return_ty, Ty::Number, "Количество returns Число on both branches");
+        assert_eq!(
+            info.return_ty,
+            db.number(None, None),
+            "Количество returns Число on both branches"
+        );
         // Cohesion sanity: a single signature was bound — neither
         // params nor overloads were merged across branches.
         assert!(
@@ -2165,19 +2174,20 @@ mod tests {
         // must rebind that return to the document's tabular-section
         // row receiver, so the chain `<коллекция>.Получить(0).Атрибут`
         // resolves via `field_lookup::lookup_on_tabular_row`.
-        let receiver = Ty::FormData {
-            kind: hir_def::ty::FormDataKind::Collection,
-            underlying: Some((MdoType::Document, Name::new("Док.Товары"))),
-        };
-        let info = lookup(&receiver, &Name::new("Получить"))
+        let db = InMemoryDb::new();
+        let receiver = form_data_id(
+            &db,
+            FormDataFacet::Collection,
+            Some((MdoType::Document, Name::new("Док.Товары"))),
+        );
+        let info = lookup(&db, receiver, &Name::new("Получить"))
             .expect("FormDataCollection.Получить must resolve in platform data");
-        match info.return_ty {
-            Ty::MetadataRef {
-                kind: MetadataKind::TabularSectionRow { parent: MdoType::Document },
-                name,
-            } => assert_eq!(name.as_str(), "Док.Товары"),
-            other => panic!("expected TabularSectionRow{{Document}} rewrite, got {other:?}"),
-        }
+        assert_metadata_ref(
+            &db,
+            info.return_ty,
+            MetadataKind::TabularSectionRow { parent: MdoType::Document },
+            "Док.Товары",
+        );
     }
 
     #[test]
@@ -2186,19 +2196,19 @@ mod tests {
         // walk to one `get_method` call — identical pre-chain
         // behaviour. Pinning it as a non-regression for kinds that
         // weren't split.
-        use hir_def::ty::FormElementKind;
-        let receiver = Ty::FormControl { kind: FormElementKind::Table, binding: None };
+        let db = InMemoryDb::new();
+        let receiver = form_control_id(&db, FormElementKind::Table);
         // ТаблицаФормы has documented platform method `ОбновитьСтроки`
         // (per platform_data; this is a stable canary). If the data
         // ever drops it, swap for any other `ТаблицаФормы` method.
-        let _ = lookup(&receiver, &Name::new("ОбновитьСтроки"));
+        let _ = lookup(&db, receiver, &Name::new("ОбновитьСтроки"));
     }
 
     // ============================================================
     // SDBL chain rewrite (Phase 1.3 Slice 1)
     // ============================================================
 
-    fn assert_query_result_in_return(return_ty: &Ty) {
+    fn assert_query_result_in_return(db: &dyn TypeKernelDb, return_ty: TypeId) {
         // `Query.Execute` in platform_data returns
         // `Union([РезультатЗапроса, Неопределено])`. After rewrite we
         // expect the `РезультатЗапроса` arm to become
@@ -2206,14 +2216,21 @@ mod tests {
         // stays unchanged. Either single-arm form (legacy
         // platform data without the Union) or two-arm union are
         // acceptable — the rewrite is shape-preserving.
-        let has_query_result = match return_ty {
-            Ty::QueryResult { projection: None } => true,
-            Ty::Union(arms) => {
-                arms.iter().any(|a| matches!(a, Ty::QueryResult { projection: None }))
-            }
+        let has_query_result = match db.lookup_type(return_ty) {
+            TypeKind::QueryResult(facet) if facet.projection.is_none() => true,
+            TypeKind::Union(arms) => arms.iter().any(|id| {
+                matches!(
+                    db.lookup_type(*id),
+                    TypeKind::QueryResult(facet) if facet.projection.is_none()
+                )
+            }),
             _ => false,
         };
-        assert!(has_query_result, "expected Ty::QueryResult{{None}} in return, got {return_ty:?}",);
+        assert!(
+            has_query_result,
+            "expected QueryResult{{None}} in return, got {:?}",
+            db.lookup_type(return_ty),
+        );
     }
 
     #[test]
@@ -2221,10 +2238,11 @@ mod tests {
         // `Запрос.Выполнить()` — receiver `Ty::PlatformObject("Запрос")`
         // (legacy first-step lift, since Phase 1.3b hasn't yet
         // promoted `Новый Запрос` to `Ty::Query`).
-        let receiver = Ty::PlatformObject(Name::new("Запрос"));
-        let info = lookup(&receiver, &Name::new("Выполнить"))
+        let db = InMemoryDb::new();
+        let receiver = platform_id(&db, "Запрос");
+        let info = lookup(&db, receiver, &Name::new("Выполнить"))
             .expect("Запрос.Выполнить must resolve in platform data");
-        assert_query_result_in_return(&info.return_ty);
+        assert_query_result_in_return(&db, info.return_ty);
     }
 
     #[test]
@@ -2232,10 +2250,11 @@ mod tests {
         // English `Execute` on the same receiver — bilingual platform
         // index resolves the method, our rewrite must match the
         // English form too.
-        let receiver = Ty::PlatformObject(Name::new("Запрос"));
-        let info = lookup(&receiver, &Name::new("Execute"))
+        let db = InMemoryDb::new();
+        let receiver = platform_id(&db, "Запрос");
+        let info = lookup(&db, receiver, &Name::new("Execute"))
             .expect("Запрос.Execute must resolve in platform data");
-        assert_query_result_in_return(&info.return_ty);
+        assert_query_result_in_return(&db, info.return_ty);
     }
 
     #[test]
@@ -2243,13 +2262,11 @@ mod tests {
         // `РезультатЗапроса.Выбрать()` — receiver currently surfaces
         // as `Ty::PlatformObject("РезультатЗапроса")` until Phase 1.3
         // wires the `.Выполнить()` lift to produce `Ty::QueryResult`.
-        let receiver = Ty::PlatformObject(Name::new("РезультатЗапроса"));
-        let info = lookup(&receiver, &Name::new("Выбрать"))
+        let db = InMemoryDb::new();
+        let receiver = platform_id(&db, "РезультатЗапроса");
+        let info = lookup(&db, receiver, &Name::new("Выбрать"))
             .expect("РезультатЗапроса.Выбрать must resolve in platform data");
-        match info.return_ty {
-            Ty::QueryResultSelection { projection: None } => {}
-            other => panic!("expected QueryResultSelection{{None}}, got {other:?}"),
-        }
+        assert_query_result_selection_none(&db, info.return_ty);
     }
 
     #[test]
@@ -2260,13 +2277,11 @@ mod tests {
         // (which aliases `Ty::QueryResult` to "РезультатЗапроса" per
         // Phase 0's match-fanout) so the rewrite should fire the same
         // way.
-        let receiver = Ty::QueryResult { projection: None };
-        let info = lookup(&receiver, &Name::new("Выбрать"))
-            .expect("Ty::QueryResult.Выбрать must resolve via platform alias");
-        match info.return_ty {
-            Ty::QueryResultSelection { projection: None } => {}
-            other => panic!("expected QueryResultSelection{{None}}, got {other:?}"),
-        }
+        let db = InMemoryDb::new();
+        let receiver = db.query_result(None, ProjectionSource::Unknown);
+        let info = lookup(&db, receiver, &Name::new("Выбрать"))
+            .expect("QueryResult.Выбрать must resolve via platform alias");
+        assert_query_result_selection_none(&db, info.return_ty);
     }
 
     #[test]
@@ -2276,23 +2291,25 @@ mod tests {
         // from firing on those — they keep their platform return type.
         // `СтандартноеПериод.Выбрать()` is one example: the platform
         // returns `Булево`, not `ВыборкаИзРезультатаЗапроса`.
-        let receiver = Ty::PlatformObject(Name::new("СтандартныйПериод"));
-        if let Some(info) = lookup(&receiver, &Name::new("Выбрать")) {
+        let db = InMemoryDb::new();
+        let receiver = platform_id(&db, "СтандартныйПериод");
+        if let Some(info) = lookup(&db, receiver, &Name::new("Выбрать")) {
             assert!(
-                !matches!(info.return_ty, Ty::QueryResultSelection { .. }),
+                !matches!(db.lookup_type(info.return_ty), TypeKind::QueryResultSelection(_)),
                 "rewrite must not fire on non-query receivers — got {:?}",
-                info.return_ty,
+                db.lookup_type(info.return_ty),
             );
         }
     }
 
     #[test]
     fn sdbl_chain_rewrite_execute_batch() {
-        let receiver = Ty::PlatformObject(Name::new("Запрос"));
-        let info = lookup(&receiver, &Name::new("ВыполнитьПакет"))
+        let db = InMemoryDb::new();
+        let receiver = platform_id(&db, "Запрос");
+        let info = lookup(&db, receiver, &Name::new("ВыполнитьПакет"))
             .expect("Запрос.ВыполнитьПакет must resolve in platform data");
-        match info.return_ty {
-            Ty::QueryBatchResult { ref per_query } => {
+        match db.lookup_type(info.return_ty) {
+            TypeKind::QueryBatchResult { per_query } => {
                 assert!(per_query.is_empty(), "Slice 1 leaves per_query empty; Phase 3 fills it",);
             }
             other => panic!("expected QueryBatchResult, got {other:?}"),
@@ -2306,25 +2323,23 @@ mod tests {
         // After our rewrite walks the union, the `РезультатЗапроса`
         // arm should become `Ty::QueryResult{None}`, the `Undefined`
         // arm must remain untouched.
-        let input =
-            Ty::union(vec![Ty::PlatformObject(Name::new("РезультатЗапроса")), Ty::Undefined]);
         let db = InMemoryDb::new();
+        let input = db.union(vec![platform_id(&db, "РезультатЗапроса"), db.undefined()]);
         let rewritten_id = rewrite_chain_arm_in_return_id(
             &db,
-            ty_to_typeid(&db, &input),
+            input,
             ChainTarget::PlatformObjectNamed {
                 ru: "РезультатЗапроса", en: "QueryResult"
             },
-            ty_to_typeid(&db, &Ty::QueryResult { projection: None }),
+            db.query_result(None, ProjectionSource::Unknown),
         );
-        let rewritten = typeid_to_ty(&db, rewritten_id);
-        match rewritten {
-            Ty::Union(arms) => {
+        match db.lookup_type(rewritten_id) {
+            TypeKind::Union(arms) => {
                 assert_eq!(arms.len(), 2);
-                assert!(arms.contains(&Ty::QueryResult { projection: None }));
-                assert!(arms.contains(&Ty::Undefined));
+                assert!(arms.contains(&db.query_result(None, ProjectionSource::Unknown)));
+                assert!(arms.contains(&db.undefined()));
             }
-            other => panic!("expected Ty::Union, got {other:?}"),
+            other => panic!("expected Union, got {other:?}"),
         }
     }
 
