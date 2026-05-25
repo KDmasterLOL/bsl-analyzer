@@ -8,7 +8,7 @@
 //! # Helper migration
 //!
 //! The low-level helpers (`mdo_type_for_kind`, `register_parent_for_kind`,
-//! `find_mdo`, `attribute_type_to_ty`, `register_part_ty`,
+//! `find_mdo`, `attribute_type_to_typeid`, `register_part_typeid`,
 //! `split_parent_section`) were previously duplicated between
 //! `field_lookup.rs` and `type_facade.rs`. They now live here as
 //! `pub(crate)` so both modules use the single canonical copy.
@@ -23,7 +23,7 @@ use bsl_types::facet::DateComponent;
 use bsl_types::intern::TypeKernelDb;
 use bsl_types::kind::{ConfigId, TypeId, TypeKind};
 use bsl_types::testing::RootConfigCtx;
-use hir_def::ty::{MetadataKind, Ty};
+use hir_def::ty::MetadataKind;
 use hir_def::type_ref::TypeRef;
 use hir_def::Name;
 
@@ -1027,20 +1027,6 @@ pub(crate) fn find_mdo<'a>(
     configs.iter().rev().find_map(|cfg| cfg.configuration.find_metadata_object(mdo_type, name))
 }
 
-/// Lower an [`AttributeType`] to a [`Ty`] through [`TyLoweringContext`].
-///
-/// `configs` is forwarded so `ОпределяемыйТип`-typed attributes can be
-/// expanded to their underlying `Ty` (e.g. `СуммаДокумента` typed as
-/// `cfg:DefinedType.ДенежнаяСуммаЛюбогоЗнака` lowers to `Ty::Number`).
-/// Without the visible configurations the resolver could not look up
-/// the DefinedType chain — every field-enumeration call site already has
-/// `&[VisibleConfig]` in scope, so the dependency is thread-through, not new.
-pub(crate) fn attribute_type_to_ty(attr_type: &AttributeType, configs: &[VisibleConfig]) -> Ty {
-    let type_ref = TypeRef::from_attribute_type(attr_type);
-    let resolver = ConfigsResolver(configs);
-    TyLoweringContext::with_resolver(&resolver).lower_type_ref(&type_ref)
-}
-
 /// Kernel-native attribute-type lowering — mints a [`TypeId`] directly via
 /// the §4.A `lower_type_ref_id` producer (no `Ty` round-trip).
 pub(crate) fn attribute_type_to_typeid(
@@ -1144,6 +1130,7 @@ fn push_unique(
 mod tests {
     use super::*;
     use crate::ty_bridge::ty_to_typeid;
+    use hir_def::ty::Ty;
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct FieldInfoForTest {
@@ -1176,18 +1163,21 @@ mod tests {
     use std::sync::Arc;
     use uuid::Uuid;
 
-    /// §4.B drift-detector: kernel-native attribute shim mirrors the Ty path.
     #[test]
-    fn attribute_typeid_round_trips_via_ty() {
+    fn attribute_typeid_lowers_defined_type_to_underlying_kernel_type() {
         let db = InMemoryDb::new();
-        let configs: Vec<VisibleConfig> = Vec::new();
-        let attr_type = AttributeType::String { length: Some(10) };
-        let via_ty = attribute_type_to_ty(&attr_type, &configs);
-        let via_typeid = attribute_type_to_typeid(&db, &attr_type, &configs);
-        // Compare in TypeId space (not via typeid_to_ty, which would drop
-        // config/facet precision): the native producer must intern to the
-        // exact same id as the legacy `Ty` → bridge path.
-        assert_eq!(via_typeid, ty_to_typeid(&db, &via_ty));
+        let mut config = Configuration::new("main");
+        config.add_defined_type(
+            bsl_metadata::DefinedType::builder()
+                .uuid(Uuid::new_v4())
+                .name("ДенежнаяСумма")
+                .underlying_type(AttributeType::Number { precision: 15, scale: 2 })
+                .build(),
+        );
+        let configs = wrap(config);
+        let attr_type =
+            AttributeType::DefinedType { name: "ДенежнаяСумма".to_string() };
+        assert_eq!(attribute_type_to_typeid(&db, &attr_type, &configs), db.number(None, None));
     }
 
     fn wrap(config: Configuration) -> Vec<VisibleConfig> {
