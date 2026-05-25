@@ -42,7 +42,7 @@ use bsl_types::builders::Builders;
 use bsl_types::intern::TypeKernelDb;
 use bsl_types::kind::TypeId;
 use bsl_types::testing::RootConfigCtx;
-use hir_def::ty::{FunctionSignature, MetadataKind, Ty};
+use hir_def::ty::{FunctionSignature, MetadataKind};
 use hir_def::Name;
 
 use crate::lower::type_string::{lower_param_type_string_typeid, lower_platform_type_name_typeid};
@@ -164,11 +164,8 @@ pub(crate) fn map_generic_metadata_return_type_typeid(
     mdo_type: MdoType,
     mdo_name: &Name,
 ) -> Option<TypeId> {
-    let ty = map_generic_metadata_return_type(raw, mdo_type, mdo_name)?;
-    let Ty::MetadataRef { kind, name } = ty else {
-        unreachable!("generic metadata return mapper only produces MetadataRef")
-    };
-    Some(db.metadata_ref(kind, name.as_str().to_string(), &RootConfigCtx))
+    let kind = map_generic_metadata_return_type(raw, mdo_type)?;
+    Some(db.metadata_ref(kind, mdo_name.as_str().to_string(), &RootConfigCtx))
 }
 
 /// Map a `MetadataKind` to `(prefix, parent_mdo)` for platform lookup.
@@ -255,8 +252,7 @@ pub(crate) fn metadata_kind_to_prefix_and_mdo(
 pub(crate) fn map_generic_metadata_return_type(
     raw: &str,
     mdo_type: MdoType,
-    mdo_name: &Name,
-) -> Option<Ty> {
+) -> Option<MetadataKind> {
     let kind = match (raw, mdo_type) {
         ("СправочникОбъект" | "CatalogObject", MdoType::Catalog) => {
             MetadataKind::CatalogObject
@@ -344,7 +340,7 @@ pub(crate) fn map_generic_metadata_return_type(
         }
         _ => return None,
     };
-    Some(Ty::MetadataRef { kind, name: mdo_name.clone() })
+    Some(kind)
 }
 
 #[cfg(test)]
@@ -353,6 +349,7 @@ mod tests {
     use crate::ty_bridge::typeid_to_ty;
     use bsl_types::builders::Builders;
     use bsl_types::testing::InMemoryDb;
+    use hir_def::ty::Ty;
 
     fn ret_ty(db: &InMemoryDb, res: &PlatformMethodResolution) -> Ty {
         typeid_to_ty(db, res.return_ty)

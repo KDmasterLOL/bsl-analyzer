@@ -1862,7 +1862,7 @@ impl<'db> InferenceContext<'db> {
         //    would lose their `Ty::ManagerCollection` shape and the existing
         //    `resolve_three_level_call` machinery would no longer see them.
         if let Some(mdo_type) = bsl_metadata::MdoType::from_plural(name.as_str()) {
-            if Ty::manager_collection(mdo_type).is_some() {
+            if mdo_type.manager_type_prefix().is_some() {
                 trace!("resolved {} as manager collection {:?}", name, mdo_type);
                 return self.db.manager_collection(mdo_type);
             }
