@@ -1090,6 +1090,7 @@ fn sort_key_for_origin(origin: HirFieldOrigin) -> &'static str {
 mod tests {
     use super::*;
     use bsl_platform::{ContextAvailability, MethodParam, PlatformMethod};
+    use hir::Builders;
 
     fn create_test_method() -> PlatformMethod {
         PlatformMethod {
@@ -1337,17 +1338,10 @@ mod tests {
         // control receiver — those columns belong on the row Ty, surfaced
         // only via `вСтрока.|` / `.ТекущаяСтрока.|` / `.ВыделенныеСтроки[i].|`.
         let (db, file_id) = make_db_with_file();
-        let ty = hir::Ty::FormControl {
-            kind: hir::FormElementKind::Table,
-            binding: Some(form_table_binding()),
-        };
+        let ty = db.mk_form_control(hir::FormElementKind::Table, Some(form_table_binding()));
 
-        let result = complete_prefix_methods_for_receiver(
-            &db,
-            hir::ty_bridge::ty_to_typeid(&db, &ty),
-            file_id,
-            ide_db::base_db::Locale::Ru,
-        );
+        let result =
+            complete_prefix_methods_for_receiver(&db, ty, file_id, ide_db::base_db::Locale::Ru);
         assert!(
             result.is_none(),
             "FormControl{{Table, Some(_)}} must not trigger MDO-field completion; got {:?}",
@@ -1362,14 +1356,10 @@ mod tests {
         // through to the platform `ТаблицаФормы` properties — never to
         // an MDO branch.
         let (db, file_id) = make_db_with_file();
-        let ty = hir::Ty::FormControl { kind: hir::FormElementKind::Table, binding: None };
+        let ty = db.mk_form_control(hir::FormElementKind::Table, None);
 
-        let result = complete_prefix_methods_for_receiver(
-            &db,
-            hir::ty_bridge::ty_to_typeid(&db, &ty),
-            file_id,
-            ide_db::base_db::Locale::Ru,
-        );
+        let result =
+            complete_prefix_methods_for_receiver(&db, ty, file_id, ide_db::base_db::Locale::Ru);
         assert!(
             result.is_none(),
             "FormControl{{Table, None}} must not trigger MDO-field completion"
@@ -1385,16 +1375,11 @@ mod tests {
         // (`Количество`, `Получить`, …), never the row schema directly.
         // Iteration / indexing is what unwraps to the row Ty.
         let (db, file_id) = make_db_with_file();
-        let ty = hir::Ty::TypedArray(Box::new(hir::Ty::PlatformObject(hir::Name::new(
-            "СтрокаТаблицыФормы",
-        ))));
+        let element = db.platform_object("СтрокаТаблицыФормы".to_string());
+        let ty = db.array(Some(element));
 
-        let result = complete_prefix_methods_for_receiver(
-            &db,
-            hir::ty_bridge::ty_to_typeid(&db, &ty),
-            file_id,
-            ide_db::base_db::Locale::Ru,
-        );
+        let result =
+            complete_prefix_methods_for_receiver(&db, ty, file_id, ide_db::base_db::Locale::Ru);
         assert!(result.is_none(), "TypedArray(_) must not trigger MDO-field completion");
     }
 
@@ -1522,9 +1507,7 @@ mod tests {
         // future rename of the platform key breaks the build instead of
         // silently disabling completion.
         let db = ide_db::RootDatabaseImpl::new();
-        let platform_object = |n: &str| {
-            hir::ty_bridge::ty_to_typeid(&db, &hir::Ty::PlatformObject(hir::Name::new(n)))
-        };
+        let platform_object = |n: &str| db.platform_object(n.to_string());
         assert!(hir::is_form_items_collection_ty(&db, platform_object(hir::FORM_ITEMS_TYPE_RU)));
         assert!(hir::is_form_items_collection_ty(&db, platform_object(hir::FORM_ITEMS_TYPE_EN)));
         // Cyrillic case-insensitive — confirms predicate is bilingual
@@ -1532,9 +1515,6 @@ mod tests {
         assert!(hir::is_form_items_collection_ty(&db, platform_object("всеЭлементыФормы")));
         // Non-form-items receivers must NOT match.
         assert!(!hir::is_form_items_collection_ty(&db, platform_object("Запрос")));
-        assert!(!hir::is_form_items_collection_ty(
-            &db,
-            hir::ty_bridge::ty_to_typeid(&db, &hir::Ty::Number)
-        ));
+        assert!(!hir::is_form_items_collection_ty(&db, db.number(None, None)));
     }
 }

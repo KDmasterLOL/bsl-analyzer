@@ -520,8 +520,11 @@ fn fallback_name(name: &str, fallback: &str) -> Name {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hir_def::ty::Ty;
-    use hir_ty::ty_bridge::{ty_to_typeid, typeid_to_ty};
+    use bsl_config::ConfigId;
+    use bsl_types::facet::{
+        ArgArity, FunctionFacet, FunctionOrigin, MdoRefFacet, ParamPassing, ParamSpec,
+    };
+    use bsl_types::testing::RootConfigCtx;
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
     use ide_db::RootDatabaseImpl;
     use std::fs;
@@ -659,10 +662,10 @@ mod tests {
         // facade must agree with `Ty::display_name(Ru)`.
         use base_db::Locale;
         let (db, file_id) = empty_db();
-        let t = t(&db, file_id, Ty::Number);
-        assert_eq!(t.display_name(Locale::En), Ty::Number.display_name(Locale::En));
-        assert_eq!(t.display_name(Locale::Ru), Ty::Number.display_name(Locale::Ru));
-        assert_eq!(t.canonical_name(), Ty::Number.canonical_name());
+        let t = t(&db, file_id, db.number(None, None));
+        assert_eq!(t.display_name(Locale::En), "Number");
+        assert_eq!(t.display_name(Locale::Ru), "Число");
+        assert_eq!(t.canonical_name(), "Number");
     }
 
     #[test]
@@ -671,31 +674,24 @@ mod tests {
         // must report as a ref type; non-ref MetadataKinds
         // (`CatalogObject`, `TabularSection`) must not.
         let (db, file_id) = empty_db();
-        let catalog = t(
-            &db,
-            file_id,
-            Ty::MetadataRef { kind: MetadataKind::CatalogRef, name: Name::new("X") },
-        );
+        let catalog = t(&db, file_id, metadata_ref(&db, MetadataKind::CatalogRef, "X"));
         assert!(catalog.is_ref_type());
 
-        let catalog_obj = t(
-            &db,
-            file_id,
-            Ty::MetadataRef { kind: MetadataKind::CatalogObject, name: Name::new("X") },
-        );
+        let catalog_obj = t(&db, file_id, metadata_ref(&db, MetadataKind::CatalogObject, "X"));
         assert!(!catalog_obj.is_ref_type(), "CatalogObject is not a ref type (it is an object)");
 
         let row = t(
             &db,
             file_id,
-            Ty::MetadataRef {
-                kind: MetadataKind::TabularSectionRow { parent: MdoType::Document },
-                name: Name::new("X.Section"),
-            },
+            metadata_ref(
+                &db,
+                MetadataKind::TabularSectionRow { parent: MdoType::Document },
+                "X.Section",
+            ),
         );
         assert!(!row.is_ref_type());
 
-        assert!(!t(&db, file_id, Ty::Number).is_ref_type());
+        assert!(!t(&db, file_id, db.number(None, None)).is_ref_type());
     }
 
     #[test]
@@ -703,18 +699,12 @@ mod tests {
         // CatalogRef.X → ObjectManager(Catalog, "X"). Proves the
         // kind-to-MdoType translation and the name carry-over.
         let (db, file_id) = empty_db();
-        let cat = t(
-            &db,
-            file_id,
-            Ty::MetadataRef {
-                kind: MetadataKind::CatalogRef, name: Name::new("Номенклатура")
-            },
-        );
+        let cat = t(&db, file_id, metadata_ref(&db, MetadataKind::CatalogRef, "Номенклатура"));
         let manager = cat.manager().expect("CatalogRef has a manager form");
-        match typeid_to_ty(&db, manager.id()) {
-            Ty::ObjectManager { kind, name } => {
-                assert_eq!(kind, MdoType::Catalog);
-                assert_eq!(name.as_str(), "Номенклатура");
+        match db.lookup_type(manager.id()) {
+            TypeKind::ObjectManager(facet) => {
+                assert_eq!(facet.mdo, MdoType::Catalog);
+                assert_eq!(facet.name.as_str(), "Номенклатура");
             }
             other => panic!("expected ObjectManager, got {other:?}"),
         }
@@ -726,23 +716,19 @@ mod tests {
         // register managers, so keep one real non-ref and one
         // collection receiver to pin the fall-through branch.
         let (db, file_id) = empty_db();
-        assert!(t(&db, file_id, Ty::Number).manager().is_none());
-        assert!(t(&db, file_id, Ty::Array).manager().is_none());
+        assert!(t(&db, file_id, db.number(None, None)).manager().is_none());
+        assert!(t(&db, file_id, db.array(None)).manager().is_none());
     }
 
     #[test]
     fn manager_from_register_ref_types() {
         let (db, file_id) = empty_db();
-        let reg = t(
-            &db,
-            file_id,
-            Ty::MetadataRef { kind: MetadataKind::AccumulationRegisterRef, name: Name::new("X") },
-        );
+        let reg = t(&db, file_id, metadata_ref(&db, MetadataKind::AccumulationRegisterRef, "X"));
         let manager = reg.manager().expect("register ref has a manager form");
-        match typeid_to_ty(&db, manager.id()) {
-            Ty::ObjectManager { kind, name } => {
-                assert_eq!(kind, MdoType::AccumulationRegister);
-                assert_eq!(name.as_str(), "X");
+        match db.lookup_type(manager.id()) {
+            TypeKind::ObjectManager(facet) => {
+                assert_eq!(facet.mdo, MdoType::AccumulationRegister);
+                assert_eq!(facet.name.as_str(), "X");
             }
             other => panic!("expected ObjectManager, got {other:?}"),
         }
@@ -764,10 +750,10 @@ mod tests {
         let manager = Type::from_id(&db, file_id, id)
             .manager()
             .expect("MetadataObject receiver has a manager form");
-        match typeid_to_ty(&db, manager.id()) {
-            Ty::ObjectManager { kind, name } => {
-                assert_eq!(kind, MdoType::Catalog);
-                assert_eq!(name.as_str(), "Номенклатура");
+        match db.lookup_type(manager.id()) {
+            TypeKind::ObjectManager(facet) => {
+                assert_eq!(facet.mdo, MdoType::Catalog);
+                assert_eq!(facet.name.as_str(), "Номенклатура");
             }
             other => panic!("expected ObjectManager, got {other:?}"),
         }
@@ -779,11 +765,11 @@ mod tests {
         // lives in PlatformData under type_name "Array". Smoke-tests
         // the full pipeline `lookup_method → return_ty → Self::new`.
         let (db, file_id) = empty_db();
-        let arr = t(&db, file_id, Ty::Array);
+        let arr = t(&db, file_id, db.array(None));
         let ret = arr.method_return_type(&Name::new("Добавить"));
         // `Добавить` is a procedure — `lookup_method` returns
         // `Ty::Undefined`.
-        assert_eq!(typeid_to_ty(&db, ret.id()), Ty::Undefined);
+        assert_eq!(ret.id(), db.undefined());
     }
 
     #[test]
@@ -791,9 +777,9 @@ mod tests {
         // Missing method → Unknown (no fabrication of a non-existent
         // return type).
         let (db, file_id) = empty_db();
-        let arr = t(&db, file_id, Ty::Array);
+        let arr = t(&db, file_id, db.array(None));
         let ret = arr.method_return_type(&Name::new("НеСуществует"));
-        assert_eq!(typeid_to_ty(&db, ret.id()), Ty::Unknown);
+        assert_eq!(ret.id(), db.unknown());
     }
 
     #[test]
@@ -802,12 +788,12 @@ mod tests {
         // Wrapped with `.iter().any(...)` so the test doesn't need to
         // know the exact count — platform data may grow.
         let (db, file_id) = empty_db();
-        let arr = t(&db, file_id, Ty::Array);
+        let arr = t(&db, file_id, db.array(None));
         let methods = arr.methods();
-        assert!(!methods.is_empty(), "Ty::Array must expose at least one platform method");
+        assert!(!methods.is_empty(), "Array must expose at least one platform method");
         assert!(
             methods.iter().any(|m| m.name.as_str() == "Добавить"),
-            "Ty::Array methods must include Добавить — got {:?}",
+            "Array methods must include Добавить — got {:?}",
             methods.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
         );
     }
@@ -817,13 +803,9 @@ mod tests {
         // Ref / register / tabular types return an empty method list at
         // M3 — manager methods are the M4 adapter's job.
         let (db, file_id) = empty_db();
-        let cat = t(
-            &db,
-            file_id,
-            Ty::MetadataRef { kind: MetadataKind::CatalogRef, name: Name::new("X") },
-        );
+        let cat = t(&db, file_id, metadata_ref(&db, MetadataKind::CatalogRef, "X"));
         assert!(cat.methods().is_empty());
-        assert!(t(&db, file_id, Ty::Number).methods().is_empty());
+        assert!(t(&db, file_id, db.number(None, None)).methods().is_empty());
     }
 
     #[test]
@@ -833,24 +815,14 @@ mod tests {
         // so `fields()` returns an empty list rather than panicking.
         // Pins the deferred-gap contract.
         let (db, file_id) = empty_db();
-        let cat = t(
-            &db,
-            file_id,
-            Ty::MetadataRef { kind: MetadataKind::CatalogRef, name: Name::new("X") },
-        );
+        let cat = t(&db, file_id, metadata_ref(&db, MetadataKind::CatalogRef, "X"));
         assert!(cat.fields().is_empty());
     }
 
     #[test]
     fn fields_include_custom_attributes_from_configuration() {
         let (db, file_id) = db_with_configuration(designer_fixture_path());
-        let cat = t(
-            &db,
-            file_id,
-            Ty::MetadataRef {
-                kind: MetadataKind::CatalogRef, name: Name::new("Справочник1")
-            },
-        );
+        let cat = t(&db, file_id, metadata_ref(&db, MetadataKind::CatalogRef, "Справочник1"));
 
         let fields = cat.fields();
         let attr = fields
@@ -858,7 +830,7 @@ mod tests {
             .find(|field| field.name == Name::new("Реквизит2"))
             .expect("custom attribute must be present");
         assert_eq!(attr.english_name, Name::new("Реквизит2"));
-        assert_eq!(typeid_to_ty(&db, attr.ty), Ty::Number);
+        assert_eq!(attr.ty, db.number(None, None));
     }
 
     #[test]
@@ -886,13 +858,7 @@ mod tests {
     #[test]
     fn fields_include_tabular_sections_from_configuration() {
         let (db, file_id) = db_with_configuration(designer_fixture_path());
-        let cat = t(
-            &db,
-            file_id,
-            Ty::MetadataRef {
-                kind: MetadataKind::CatalogRef, name: Name::new("Справочник1")
-            },
-        );
+        let cat = t(&db, file_id, metadata_ref(&db, MetadataKind::CatalogRef, "Справочник1"));
 
         let fields = cat.fields();
         let section = fields
@@ -901,11 +867,12 @@ mod tests {
             .expect("tabular section must be present");
         assert_eq!(section.english_name, Name::new("ТабличнаяЧасть1"));
         assert_eq!(
-            typeid_to_ty(&db, section.ty),
-            Ty::MetadataRef {
-                kind: MetadataKind::TabularSection { parent: MdoType::Catalog },
-                name: Name::new("Справочник1.ТабличнаяЧасть1"),
-            }
+            section.ty,
+            metadata_ref(
+                &db,
+                MetadataKind::TabularSection { parent: MdoType::Catalog },
+                "Справочник1.ТабличнаяЧасть1",
+            )
         );
     }
 
@@ -922,10 +889,7 @@ mod tests {
         let reg = t(
             &db,
             file_id,
-            Ty::MetadataRef {
-                kind: MetadataKind::InformationRegisterRef,
-                name: Name::new("РегистрСведений1"),
-            },
+            metadata_ref(&db, MetadataKind::InformationRegisterRef, "РегистрСведений1"),
         );
 
         let fields = reg.fields();
@@ -934,10 +898,8 @@ mod tests {
             .find(|field| field.name == Name::new("Справочник1"))
             .expect("register dimension must appear in .fields()");
         assert_eq!(
-            typeid_to_ty(&db, dim.ty),
-            Ty::MetadataRef {
-                kind: MetadataKind::CatalogRef, name: Name::new("Справочник1")
-            },
+            dim.ty,
+            metadata_ref(&db, MetadataKind::CatalogRef, "Справочник1"),
             "typed dimension must lower through TyLoweringContext, not fall back to symbolic",
         );
     }
@@ -954,7 +916,7 @@ mod tests {
             .find(|field| field.name == Name::new("АдресСайта"))
             .expect("object module must expose owner MDO attributes as bare identifiers");
 
-        assert_eq!(typeid_to_ty(&db, attr.ty), Ty::String);
+        assert_eq!(attr.ty, db.string(None, false));
     }
 
     #[test]
@@ -1019,8 +981,30 @@ mod tests {
 
     // --- is_assignable_to (Task 7) --------------------------------
 
-    fn t(db: &RootDatabaseImpl, file_id: FileId, ty: Ty) -> Type<'_, RootDatabaseImpl> {
-        Type::from_id(db, file_id, ty_to_typeid(db, &ty))
+    fn t(db: &RootDatabaseImpl, file_id: FileId, id: TypeId) -> Type<'_, RootDatabaseImpl> {
+        Type::from_id(db, file_id, id)
+    }
+
+    fn metadata_ref(db: &RootDatabaseImpl, kind: MetadataKind, name: &str) -> TypeId {
+        db.metadata_ref(kind, name.to_string(), &RootConfigCtx)
+    }
+
+    fn fixed_function(db: &RootDatabaseImpl, params: Vec<TypeId>, returns: TypeId) -> TypeId {
+        let params: Arc<[ParamSpec]> = params
+            .into_iter()
+            .enumerate()
+            .map(|(idx, ty)| ParamSpec::new(format!("p{idx}"), ty, ParamPassing::ByRef, false))
+            .collect();
+        let arity = u16::try_from(params.len()).expect("test function arity fits u16");
+        let defaults = vec![None; params.len()].into();
+        db.function(FunctionFacet::new(
+            params,
+            defaults,
+            arity,
+            ArgArity::Fixed(arity),
+            returns,
+            FunctionOrigin::Unknown,
+        ))
     }
 
     #[test]
@@ -1028,10 +1012,22 @@ mod tests {
         // `A ≤ A` — the most basic rule. Pins that reflexivity works
         // for primitives where `Ty` implements `PartialEq` trivially.
         let (db, file_id) = empty_db();
-        assert!(t(&db, file_id, Ty::Number).is_assignable_to(&t(&db, file_id, Ty::Number)));
-        assert!(t(&db, file_id, Ty::String).is_assignable_to(&t(&db, file_id, Ty::String)));
-        assert!(t(&db, file_id, Ty::Boolean).is_assignable_to(&t(&db, file_id, Ty::Boolean)));
-        assert!(!t(&db, file_id, Ty::Number).is_assignable_to(&t(&db, file_id, Ty::String)));
+        assert!(t(&db, file_id, db.number(None, None)).is_assignable_to(&t(
+            &db,
+            file_id,
+            db.number(None, None)
+        )));
+        assert!(t(&db, file_id, db.string(None, false)).is_assignable_to(&t(
+            &db,
+            file_id,
+            db.string(None, false)
+        )));
+        assert!(t(&db, file_id, db.boolean()).is_assignable_to(&t(&db, file_id, db.boolean())));
+        assert!(!t(&db, file_id, db.number(None, None)).is_assignable_to(&t(
+            &db,
+            file_id,
+            db.string(None, false)
+        )));
     }
 
     #[test]
@@ -1040,9 +1036,9 @@ mod tests {
         // the Name-equality path of the structural comparison. A ref
         // to a different catalog must *not* be assignable.
         let (db, file_id) = empty_db();
-        let cat_x = Ty::MetadataRef { kind: MetadataKind::CatalogRef, name: Name::new("X") };
-        let cat_y = Ty::MetadataRef { kind: MetadataKind::CatalogRef, name: Name::new("Y") };
-        assert!(t(&db, file_id, cat_x.clone()).is_assignable_to(&t(&db, file_id, cat_x.clone())));
+        let cat_x = metadata_ref(&db, MetadataKind::CatalogRef, "X");
+        let cat_y = metadata_ref(&db, MetadataKind::CatalogRef, "Y");
+        assert!(t(&db, file_id, cat_x).is_assignable_to(&t(&db, file_id, cat_x)));
         assert!(!t(&db, file_id, cat_x).is_assignable_to(&t(&db, file_id, cat_y)));
     }
 
@@ -1052,9 +1048,17 @@ mod tests {
         // extension — prevents false `TypeMismatch`es on inferences
         // that bailed out to `Unknown`).
         let (db, file_id) = empty_db();
-        assert!(t(&db, file_id, Ty::Number).is_assignable_to(&t(&db, file_id, Ty::Unknown)));
-        assert!(t(&db, file_id, Ty::Unknown).is_assignable_to(&t(&db, file_id, Ty::Number)));
-        assert!(t(&db, file_id, Ty::Unknown).is_assignable_to(&t(&db, file_id, Ty::Unknown)));
+        assert!(t(&db, file_id, db.number(None, None)).is_assignable_to(&t(
+            &db,
+            file_id,
+            db.unknown()
+        )));
+        assert!(t(&db, file_id, db.unknown()).is_assignable_to(&t(
+            &db,
+            file_id,
+            db.number(None, None)
+        )));
+        assert!(t(&db, file_id, db.unknown()).is_assignable_to(&t(&db, file_id, db.unknown())));
     }
 
     #[test]
@@ -1063,7 +1067,7 @@ mod tests {
         // hold for `CatalogObject` (object, not ref) or for non-MDO
         // primitives.
         let (db, file_id) = empty_db();
-        let null = t(&db, file_id, Ty::Null);
+        let null = t(&db, file_id, db.null());
         for kind in [
             MetadataKind::CatalogRef,
             MetadataKind::DocumentRef,
@@ -1077,17 +1081,13 @@ mod tests {
             MetadataKind::AccountingRegisterRef,
             MetadataKind::CalculationRegisterRef,
         ] {
-            let target = t(&db, file_id, Ty::MetadataRef { kind, name: Name::new("X") });
+            let target = t(&db, file_id, metadata_ref(&db, kind, "X"));
             assert!(null.is_assignable_to(&target), "Null should be assignable to {kind:?}");
         }
         // Objects are not refs — must reject.
-        let cat_obj = t(
-            &db,
-            file_id,
-            Ty::MetadataRef { kind: MetadataKind::CatalogObject, name: Name::new("X") },
-        );
+        let cat_obj = t(&db, file_id, metadata_ref(&db, MetadataKind::CatalogObject, "X"));
         assert!(!null.is_assignable_to(&cat_obj));
-        assert!(!null.is_assignable_to(&t(&db, file_id, Ty::Number)));
+        assert!(!null.is_assignable_to(&t(&db, file_id, db.number(None, None))));
     }
 
     #[test]
@@ -1095,18 +1095,22 @@ mod tests {
         // `A ≤ Union(…, A, …)` — the union-right rule. Element lives
         // in the union → assignable; element does not → rejected.
         let (db, file_id) = empty_db();
-        let number_or_string = Ty::union(vec![Ty::Number, Ty::String]);
-        assert!(t(&db, file_id, Ty::Number).is_assignable_to(&t(
+        let number_or_string = db.union(vec![db.number(None, None), db.string(None, false)]);
+        assert!(t(&db, file_id, db.number(None, None)).is_assignable_to(&t(
             &db,
             file_id,
-            number_or_string.clone()
+            number_or_string
         )));
-        assert!(t(&db, file_id, Ty::String).is_assignable_to(&t(
+        assert!(t(&db, file_id, db.string(None, false)).is_assignable_to(&t(
             &db,
             file_id,
-            number_or_string.clone()
+            number_or_string
         )));
-        assert!(!t(&db, file_id, Ty::Boolean).is_assignable_to(&t(&db, file_id, number_or_string)));
+        assert!(!t(&db, file_id, db.boolean()).is_assignable_to(&t(
+            &db,
+            file_id,
+            number_or_string
+        )));
     }
 
     #[test]
@@ -1116,17 +1120,17 @@ mod tests {
         // `Union(Number, Number)` collapses to `Number` (smart
         // constructor), so test with two genuinely distinct types.
         let (db, file_id) = empty_db();
-        let ns = Ty::union(vec![Ty::Number, Ty::String]);
+        let ns = db.union(vec![db.number(None, None), db.string(None, false)]);
         // Neither `Number` nor `String` alone covers the whole union.
-        assert!(!t(&db, file_id, ns.clone()).is_assignable_to(&t(&db, file_id, Ty::Number)));
-        assert!(!t(&db, file_id, ns.clone()).is_assignable_to(&t(&db, file_id, Ty::String)));
+        assert!(!t(&db, file_id, ns).is_assignable_to(&t(&db, file_id, db.number(None, None))));
+        assert!(!t(&db, file_id, ns).is_assignable_to(&t(&db, file_id, db.string(None, false))));
 
         // `Union(A, B) ≤ Union(A, B)` (reflexivity after `Ty::union`
         // normalisation) — and `Union(Number, String) ≤
         // Union(Number, String, Boolean)` via every component matching
         // some component of the target.
-        let nsb = Ty::union(vec![Ty::Number, Ty::String, Ty::Boolean]);
-        assert!(t(&db, file_id, ns.clone()).is_assignable_to(&t(&db, file_id, ns.clone())));
+        let nsb = db.union(vec![db.number(None, None), db.string(None, false), db.boolean()]);
+        assert!(t(&db, file_id, ns).is_assignable_to(&t(&db, file_id, ns)));
         assert!(t(&db, file_id, ns).is_assignable_to(&t(&db, file_id, nsb)));
     }
 
@@ -1139,24 +1143,19 @@ mod tests {
         // etc.), so an arbitrary `CatalogObject.X` must not satisfy a
         // `ЭтотОбъект` slot.
         let (db, file_id) = empty_db();
-        let this_cat = Ty::ThisObject { owner: (MdoType::Catalog, Name::new("Товары")) };
-        let cat_object =
-            Ty::MetadataRef { kind: MetadataKind::CatalogObject, name: Name::new("Товары") };
-        assert!(t(&db, file_id, this_cat.clone()).is_assignable_to(&t(
-            &db,
-            file_id,
-            cat_object.clone()
-        )));
+        let this_cat = db.mk_this_object(
+            ConfigId::Root,
+            MdoRefFacet::new(MdoType::Catalog, "Товары".to_string()),
+        );
+        let cat_object = metadata_ref(&db, MetadataKind::CatalogObject, "Товары");
+        assert!(t(&db, file_id, this_cat).is_assignable_to(&t(&db, file_id, cat_object)));
         assert!(
-            !t(&db, file_id, cat_object).is_assignable_to(&t(&db, file_id, this_cat.clone())),
+            !t(&db, file_id, cat_object).is_assignable_to(&t(&db, file_id, this_cat)),
             "reverse *Object → ThisObject direction must be rejected — preserves provenance"
         );
 
         // Mismatched owner must still fail even in the accepted direction.
-        let cat_other = Ty::MetadataRef {
-            kind: MetadataKind::CatalogObject,
-            name: Name::new("Номенклатура"),
-        };
+        let cat_other = metadata_ref(&db, MetadataKind::CatalogObject, "Номенклатура");
         assert!(!t(&db, file_id, this_cat).is_assignable_to(&t(&db, file_id, cat_other)));
     }
 
@@ -1166,18 +1165,13 @@ mod tests {
         // `CatalogRef.Товары ≤ Union(CatalogRef.Товары, DocumentRef.Заказ)`
         // must hold; a third ref absent from the union must fail.
         let (db, file_id) = empty_db();
-        let cat_t =
-            Ty::MetadataRef { kind: MetadataKind::CatalogRef, name: Name::new("Товары") };
-        let doc_z =
-            Ty::MetadataRef { kind: MetadataKind::DocumentRef, name: Name::new("Заказ") };
-        let cat_o = Ty::MetadataRef {
-            kind: MetadataKind::CatalogRef,
-            name: Name::new("Номенклатура"),
-        };
-        let target = Ty::union(vec![cat_t.clone(), doc_z.clone()]);
+        let cat_t = metadata_ref(&db, MetadataKind::CatalogRef, "Товары");
+        let doc_z = metadata_ref(&db, MetadataKind::DocumentRef, "Заказ");
+        let cat_o = metadata_ref(&db, MetadataKind::CatalogRef, "Номенклатура");
+        let target = db.union(vec![cat_t, doc_z]);
 
-        assert!(t(&db, file_id, cat_t).is_assignable_to(&t(&db, file_id, target.clone())));
-        assert!(t(&db, file_id, doc_z).is_assignable_to(&t(&db, file_id, target.clone())));
+        assert!(t(&db, file_id, cat_t).is_assignable_to(&t(&db, file_id, target)));
+        assert!(t(&db, file_id, doc_z).is_assignable_to(&t(&db, file_id, target)));
         assert!(
             !t(&db, file_id, cat_o).is_assignable_to(&t(&db, file_id, target)),
             "concrete ref not present in union must be rejected"
@@ -1189,14 +1183,14 @@ mod tests {
         // Composition: `Null` + union-right. `Null ≤ CatalogRef.X` and
         // union-right accepts the `Null`-compatible member.
         let (db, file_id) = empty_db();
-        let cat_x = Ty::MetadataRef { kind: MetadataKind::CatalogRef, name: Name::new("X") };
-        let doc_y = Ty::MetadataRef { kind: MetadataKind::DocumentRef, name: Name::new("Y") };
-        let target = Ty::union(vec![cat_x, doc_y]);
-        assert!(t(&db, file_id, Ty::Null).is_assignable_to(&t(&db, file_id, target)));
+        let cat_x = metadata_ref(&db, MetadataKind::CatalogRef, "X");
+        let doc_y = metadata_ref(&db, MetadataKind::DocumentRef, "Y");
+        let target = db.union(vec![cat_x, doc_y]);
+        assert!(t(&db, file_id, db.null()).is_assignable_to(&t(&db, file_id, target)));
 
         // Null into a union with no ref members must fail.
-        let ns = Ty::union(vec![Ty::Number, Ty::String]);
-        assert!(!t(&db, file_id, Ty::Null).is_assignable_to(&t(&db, file_id, ns)));
+        let ns = db.union(vec![db.number(None, None), db.string(None, false)]);
+        assert!(!t(&db, file_id, db.null()).is_assignable_to(&t(&db, file_id, ns)));
     }
 
     #[test]
@@ -1205,14 +1199,14 @@ mod tests {
         // every component must fit individually. `Null ≤ ref` passes,
         // reflexivity passes → true.
         let (db, file_id) = empty_db();
-        let cat_x = Ty::MetadataRef { kind: MetadataKind::CatalogRef, name: Name::new("X") };
-        let nullable_cat = Ty::union(vec![Ty::Null, cat_x.clone()]);
-        assert!(t(&db, file_id, nullable_cat).is_assignable_to(&t(&db, file_id, cat_x.clone())));
+        let cat_x = metadata_ref(&db, MetadataKind::CatalogRef, "X");
+        let nullable_cat = db.union(vec![db.null(), cat_x]);
+        assert!(t(&db, file_id, nullable_cat).is_assignable_to(&t(&db, file_id, cat_x)));
 
         // And the key negative composition case Codex flagged:
         // `Union(Null, String) ≤ CatalogRef.X` — `Null ≤ ref` true,
         // `String ≤ CatalogRef.X` false → whole union rejected.
-        let null_or_string = Ty::union(vec![Ty::Null, Ty::String]);
+        let null_or_string = db.union(vec![db.null(), db.string(None, false)]);
         assert!(
             !t(&db, file_id, null_or_string).is_assignable_to(&t(&db, file_id, cat_x)),
             "union-left must reject when any component fails"
@@ -1239,16 +1233,23 @@ mod tests {
 
         // `Union(Unknown, String)` canonicalises to `String`, so
         // `String ≤ String` (reflexivity) → still true.
-        let unknown_or_string = Ty::union(vec![Ty::Unknown, Ty::String]);
-        assert!(t(&db, file_id, unknown_or_string).is_assignable_to(&t(&db, file_id, Ty::String)));
+        let unknown_or_string = db.union(vec![db.unknown(), db.string(None, false)]);
+        assert_eq!(unknown_or_string, db.string(None, false));
+        assert!(t(&db, file_id, unknown_or_string).is_assignable_to(&t(
+            &db,
+            file_id,
+            db.string(None, false)
+        )));
 
         // `Union(Number, Unknown)` canonicalises to `Number`, so the
         // target is just `Number`. `String ≤ Number` → FALSE. Under the
         // legacy union-preserves-Unknown rule this returned true via the
         // gradual `String ≤ Unknown` arm; the kernel drops that arm.
-        let number_or_unknown = Ty::union(vec![Ty::Number, Ty::Unknown]);
+        let number_or_unknown = db.union(vec![db.number(None, None), db.unknown()]);
+        assert_eq!(number_or_unknown, db.number(None, None));
         assert!(
-            !t(&db, file_id, Ty::String).is_assignable_to(&t(&db, file_id, number_or_unknown)),
+            !t(&db, file_id, db.string(None, false))
+                .is_assignable_to(&t(&db, file_id, number_or_unknown)),
             "kernel absorbs Unknown: Number|Unknown collapses to Number, so String is not assignable"
         );
     }
@@ -1265,41 +1266,15 @@ mod tests {
         // stays narrow so the facade catches any accidental
         // short-circuit before the branch runs.
         let (db, file_id) = empty_db();
-        let f_num_to_str = Ty::Function {
-            params: vec![Ty::Number].into(),
-            defaults: Box::new([false]),
-            max_args: Some(1),
-            ret: Box::new(Ty::String),
-        };
-        let f_num_to_str_2 = Ty::Function {
-            params: vec![Ty::Number].into(),
-            defaults: Box::new([false]),
-            max_args: Some(1),
-            ret: Box::new(Ty::String),
-        };
-        let f_str_to_str = Ty::Function {
-            params: vec![Ty::String].into(),
-            defaults: Box::new([false]),
-            max_args: Some(1),
-            ret: Box::new(Ty::String),
-        };
-        let f_num_to_num = Ty::Function {
-            params: vec![Ty::Number].into(),
-            defaults: Box::new([false]),
-            max_args: Some(1),
-            ret: Box::new(Ty::Number),
-        };
+        let f_num_to_str = fixed_function(&db, vec![db.number(None, None)], db.string(None, false));
+        let f_num_to_str_2 =
+            fixed_function(&db, vec![db.number(None, None)], db.string(None, false));
+        let f_str_to_str =
+            fixed_function(&db, vec![db.string(None, false)], db.string(None, false));
+        let f_num_to_num = fixed_function(&db, vec![db.number(None, None)], db.number(None, None));
 
-        assert!(t(&db, file_id, f_num_to_str.clone()).is_assignable_to(&t(
-            &db,
-            file_id,
-            f_num_to_str_2
-        )));
-        assert!(!t(&db, file_id, f_num_to_str.clone()).is_assignable_to(&t(
-            &db,
-            file_id,
-            f_str_to_str
-        )));
+        assert!(t(&db, file_id, f_num_to_str).is_assignable_to(&t(&db, file_id, f_num_to_str_2)));
+        assert!(!t(&db, file_id, f_num_to_str).is_assignable_to(&t(&db, file_id, f_str_to_str)));
         assert!(!t(&db, file_id, f_num_to_str).is_assignable_to(&t(&db, file_id, f_num_to_num)));
     }
 
@@ -1313,19 +1288,10 @@ mod tests {
         // narrowing, both in a single function signature. Detailed
         // axis-by-axis assertions live in `hir_ty::subtype::tests`.
         let (db, file_id) = empty_db();
-        let from = Ty::Function {
-            params: vec![Ty::union(vec![Ty::Number, Ty::String])].into(),
-            defaults: Box::new([false]),
-            max_args: Some(1),
-            ret: Box::new(Ty::Number),
-        };
-        let to = Ty::Function {
-            params: vec![Ty::Number].into(),
-            defaults: Box::new([false]),
-            max_args: Some(1),
-            ret: Box::new(Ty::union(vec![Ty::Number, Ty::String])),
-        };
-        assert!(t(&db, file_id, from.clone()).is_assignable_to(&t(&db, file_id, to.clone())));
+        let number_or_string = db.union(vec![db.number(None, None), db.string(None, false)]);
+        let from = fixed_function(&db, vec![number_or_string], db.number(None, None));
+        let to = fixed_function(&db, vec![db.number(None, None)], number_or_string);
+        assert!(t(&db, file_id, from).is_assignable_to(&t(&db, file_id, to)));
         assert!(!t(&db, file_id, to).is_assignable_to(&t(&db, file_id, from)));
     }
 
@@ -1333,22 +1299,12 @@ mod tests {
     fn fields_deduplicate_duplicate_names_preferring_attributes() {
         let fixture = TempFixture::duplicated_field();
         let (db, file_id) = db_with_configuration(fixture.path());
-        let cat = t(
-            &db,
-            file_id,
-            Ty::MetadataRef {
-                kind: MetadataKind::CatalogRef, name: Name::new("Справочник1")
-            },
-        );
+        let cat = t(&db, file_id, metadata_ref(&db, MetadataKind::CatalogRef, "Справочник1"));
 
         let fields = cat.fields();
         let matches: Vec<_> =
             fields.iter().filter(|field| field.name == Name::new("Реквизит2")).collect();
         assert_eq!(matches.len(), 1, "duplicate Russian names must be deduplicated");
-        assert_eq!(
-            typeid_to_ty(&db, matches[0].ty),
-            Ty::Number,
-            "attribute must win over tabular section"
-        );
+        assert_eq!(matches[0].ty, db.number(None, None), "attribute must win over tabular section");
     }
 }
