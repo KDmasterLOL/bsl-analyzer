@@ -30,7 +30,7 @@
 //! cover the remaining parts at e2e level is a future-PR chore —
 //! shared-fixture edits affect every other test that reads it.
 
-use hir::{HirDatabase, Name, Ty};
+use hir::{HirDatabase, MetadataKind, TypeId, TypeKernelDb, TypeKind};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
 use std::path::PathBuf;
@@ -65,9 +65,26 @@ fn setup(fixture_text: &str) -> (RootDatabaseImpl, FileId) {
     (db, test_file)
 }
 
-fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<Ty> {
-    let id = db.infer(file_id).var_types.get(var_lower).copied()?;
-    Some(hir::ty_bridge::typeid_to_ty(db, id))
+fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<TypeId> {
+    db.infer(file_id).var_types.get(var_lower).copied()
+}
+
+fn assert_metadata_ref(
+    db: &RootDatabaseImpl,
+    actual: Option<TypeId>,
+    kind: MetadataKind,
+    name: &str,
+) {
+    let actual = actual.expect("expected metadata ref type");
+    assert!(
+        matches!(
+            db.lookup_type(actual),
+            TypeKind::MetadataRef(facet)
+                if facet.kind == kind && facet.name.as_str() == name
+        ),
+        "expected MetadataRef({kind:?}, {name}), got {:?}",
+        db.lookup_type(actual)
+    );
 }
 
 #[test]
@@ -95,14 +112,7 @@ fn infer_register_dimension_resolves_to_catalog_ref() {
 КонецФункции
 "#;
     let (db, file_id) = setup(fixture);
-    assert_eq!(
-        var_ty(&db, file_id, "с"),
-        Some(Ty::MetadataRef {
-            kind: hir::MetadataKind::CatalogRef,
-            name: Name::new("Справочник1"),
-        }),
-        "dimension with attr_type=Ref{{Catalog,\"Справочник1\"}} must lower to CatalogRef.Справочник1",
-    );
+    assert_metadata_ref(&db, var_ty(&db, file_id, "с"), MetadataKind::CatalogRef, "Справочник1");
 }
 
 #[test]
@@ -131,13 +141,11 @@ fn infer_for_each_over_record_set_yields_record_kind() {
 КонецПроцедуры
 "#;
     let (db, file_id) = setup(fixture);
-    assert_eq!(
+    assert_metadata_ref(
+        &db,
         var_ty(&db, file_id, "запись"),
-        Some(Ty::MetadataRef {
-            kind: hir::MetadataKind::InformationRegisterRecord,
-            name: Name::new("РегистрСведений1"),
-        }),
-        "Для Каждого X Из <RecordSet> must bind X to InformationRegisterRecord.<Имя>",
+        MetadataKind::InformationRegisterRecord,
+        "РегистрСведений1",
     );
 }
 
@@ -164,14 +172,7 @@ fn infer_register_record_dimension_resolves_through_field_lookup() {
 КонецПроцедуры
 "#;
     let (db, file_id) = setup(fixture);
-    assert_eq!(
-        var_ty(&db, file_id, "с"),
-        Some(Ty::MetadataRef {
-            kind: hir::MetadataKind::CatalogRef,
-            name: Name::new("Справочник1"),
-        }),
-        "dimension access on *Record must resolve through register_parent_for_kind",
-    );
+    assert_metadata_ref(&db, var_ty(&db, file_id, "с"), MetadataKind::CatalogRef, "Справочник1");
 }
 
 #[test]
@@ -196,14 +197,7 @@ fn infer_record_set_dimension_regression() {
 КонецФункции
 "#;
     let (db, file_id) = setup(fixture);
-    assert_eq!(
-        var_ty(&db, file_id, "с"),
-        Some(Ty::MetadataRef {
-            kind: hir::MetadataKind::CatalogRef,
-            name: Name::new("Справочник1"),
-        }),
-        "*RecordSet dimension regression: must still resolve",
-    );
+    assert_metadata_ref(&db, var_ty(&db, file_id, "с"), MetadataKind::CatalogRef, "Справочник1");
 }
 
 #[test]

@@ -18,7 +18,10 @@
 //! these tests still pass (Unknown) because infer does not yet
 //! consult the per-method return-type query.
 
-use hir::{method_return_type_query, DefDatabase, MethodId, MethodIdInput, ModuleId, Name, Ty};
+use hir::{
+    method_return_type_query, Builders, DefDatabase, MethodId, MethodIdInput, ModuleId, Name,
+    TypeId, TypeKernelDb, TypeKind,
+};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
 use test_fixture::Fixture;
@@ -53,12 +56,10 @@ fn find_method(db: &RootDatabaseImpl, file_id: FileId, name: &str) -> MethodId {
         .id
 }
 
-fn return_ty_for(db: &RootDatabaseImpl, file_id: FileId, name: &str) -> Ty {
+fn return_ty_for(db: &RootDatabaseImpl, file_id: FileId, name: &str) -> TypeId {
     let mid = find_method(db, file_id, name);
     let input = MethodIdInput::new(db, mid);
-    // `method_return_type_query` is kernel-native (§4.D.3); bridge back to
-    // `Ty` so the behavioural assertions stay readable.
-    hir::ty_bridge::typeid_to_ty(db, method_return_type_query(db, input))
+    method_return_type_query(db, input)
 }
 
 // ---------------------------------------------------------------------
@@ -74,7 +75,7 @@ fn single_return_yields_inferred_ty() {
 КонецФункции
 "#,
     );
-    assert_eq!(return_ty_for(&db, fid, "F"), Ty::String);
+    assert_eq!(return_ty_for(&db, fid, "F"), db.string(None, false));
 }
 
 // ---------------------------------------------------------------------
@@ -90,7 +91,7 @@ fn no_return_yields_unknown() {
 КонецПроцедуры
 "#,
     );
-    assert_eq!(return_ty_for(&db, fid, "P"), Ty::Unknown);
+    assert_eq!(return_ty_for(&db, fid, "P"), db.unknown());
 }
 
 // ---------------------------------------------------------------------
@@ -111,7 +112,7 @@ fn multiple_same_return_tys_unify() {
 КонецФункции
 "#,
     );
-    assert_eq!(return_ty_for(&db, fid, "F"), Ty::String);
+    assert_eq!(return_ty_for(&db, fid, "F"), db.string(None, false));
 }
 
 // ---------------------------------------------------------------------
@@ -131,11 +132,11 @@ fn mixed_return_tys_yield_union() {
 КонецФункции
 "#,
     );
-    match return_ty_for(&db, fid, "F") {
-        Ty::Union(variants) => {
+    match db.lookup_type(return_ty_for(&db, fid, "F")) {
+        TypeKind::Union(variants) => {
             assert_eq!(variants.len(), 2, "Union must have exactly String and Number");
-            assert!(variants.iter().any(|t| matches!(t, Ty::String)));
-            assert!(variants.iter().any(|t| matches!(t, Ty::Number)));
+            assert!(variants.contains(&db.string(None, false)));
+            assert!(variants.contains(&db.number(None, None)));
         }
         other => panic!("expected Ty::Union, got {other:?}"),
     }
@@ -155,7 +156,7 @@ fn bare_return_yields_unknown() {
 КонецПроцедуры
 "#,
     );
-    assert_eq!(return_ty_for(&db, fid, "P"), Ty::Unknown);
+    assert_eq!(return_ty_for(&db, fid, "P"), db.unknown());
 }
 
 // ---------------------------------------------------------------------
@@ -174,7 +175,7 @@ fn nested_return_in_for_loop() {
 КонецФункции
 "#,
     );
-    assert_eq!(return_ty_for(&db, fid, "F"), Ty::String);
+    assert_eq!(return_ty_for(&db, fid, "F"), db.string(None, false));
 }
 
 // ---------------------------------------------------------------------
@@ -195,7 +196,7 @@ fn self_recursion_yields_unknown() {
 КонецФункции
 "#,
     );
-    assert_eq!(return_ty_for(&db, fid, "M"), Ty::Unknown);
+    assert_eq!(return_ty_for(&db, fid, "M"), db.unknown());
 }
 
 // ---------------------------------------------------------------------
@@ -219,5 +220,5 @@ fn return_type_caches_via_salsa() {
     let first = method_return_type_query(&db, input);
     let second = method_return_type_query(&db, input);
     assert_eq!(first, second);
-    assert_eq!(hir::ty_bridge::typeid_to_ty(&db, first), Ty::String);
+    assert_eq!(first, db.string(None, false));
 }

@@ -8,7 +8,7 @@
 //! otherwise. When the receiver carries an SDBL projection, the kept
 //! `Ty::ValueTable` arm inherits it via Slice 1b's chain rewrite.
 
-use hir::{DefDatabase, HirDatabase, ModuleId, Ty};
+use hir::{DefDatabase, HirDatabase, ModuleId, TypeId, TypeKernelDb, TypeKind};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
 use test_fixture::Fixture;
@@ -36,9 +36,8 @@ fn setup(fixture_text: &str) -> (RootDatabaseImpl, FileId) {
     (db, test_file)
 }
 
-fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<Ty> {
-    let id = db.infer(file_id).var_types.get(var_lower).copied()?;
-    Some(hir::ty_bridge::typeid_to_ty(db, id))
+fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<TypeId> {
+    db.infer(file_id).var_types.get(var_lower).copied()
 }
 
 /// `ТаблицаЗначений` shows up as the dedicated `Ty::ValueTable`
@@ -46,17 +45,21 @@ fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<Ty>
 /// Both shapes are accepted here so the assertion is robust against
 /// future lowering tweaks (e.g. if `ДеревоЗначений` gains a dedicated
 /// variant).
-fn is_value_table(ty: &Ty) -> bool {
-    matches!(ty, Ty::ValueTable { .. })
-        || matches!(ty, Ty::PlatformObject(n) if n.as_str().eq_ignore_ascii_case("ТаблицаЗначений"))
+fn is_value_table(db: &RootDatabaseImpl, ty: TypeId) -> bool {
+    matches!(db.lookup_type(ty), TypeKind::ValueTable(_))
+        || matches!(db.lookup_type(ty), TypeKind::PlatformObject(facet) if facet.name.as_str().eq_ignore_ascii_case("ТаблицаЗначений"))
 }
 
-fn is_value_tree(ty: &Ty) -> bool {
-    matches!(ty, Ty::PlatformObject(n) if n.as_str().eq_ignore_ascii_case("ДеревоЗначений"))
+fn is_value_tree(db: &RootDatabaseImpl, ty: TypeId) -> bool {
+    matches!(db.lookup_type(ty), TypeKind::PlatformObject(facet) if facet.name.as_str().eq_ignore_ascii_case("ДеревоЗначений"))
 }
 
-fn union_has(ty: &Ty, predicate: impl Fn(&Ty) -> bool) -> bool {
-    matches!(ty, Ty::Union(members) if members.iter().any(predicate))
+fn union_has(
+    db: &RootDatabaseImpl,
+    ty: TypeId,
+    predicate: impl Fn(&RootDatabaseImpl, TypeId) -> bool,
+) -> bool {
+    matches!(db.lookup_type(ty), TypeKind::Union(members) if members.iter().any(|member| predicate(db, *member)))
 }
 
 #[test]
@@ -70,7 +73,10 @@ fn no_arg_narrows_to_value_table() {
 "#;
     let (db, file_id) = setup(fixture);
     let ty = var_ty(&db, file_id, "тз").expect("ТЗ must be inferred");
-    assert!(is_value_table(&ty), "no-arg .Выгрузить() must narrow to ТаблицаЗначений — got {ty:?}",);
+    assert!(
+        is_value_table(&db, ty),
+        "no-arg .Выгрузить() must narrow to ТаблицаЗначений — got {ty:?}",
+    );
 }
 
 #[test]
@@ -85,7 +91,7 @@ fn direct_iteration_narrows_to_value_table() {
     let (db, file_id) = setup(fixture);
     let ty = var_ty(&db, file_id, "тз").expect("ТЗ must be inferred");
     assert!(
-        is_value_table(&ty),
+        is_value_table(&db, ty),
         ".Выгрузить(ОбходРезультатаЗапроса.Прямой) must narrow to ТаблицаЗначений — got {ty:?}",
     );
 }
@@ -102,7 +108,7 @@ fn by_groups_narrows_to_value_tree() {
     let (db, file_id) = setup(fixture);
     let ty = var_ty(&db, file_id, "результат").expect("Результат must be inferred");
     assert!(
-        is_value_tree(&ty),
+        is_value_tree(&db, ty),
         ".Выгрузить(ОбходРезультатаЗапроса.ПоГруппировкам) must narrow to ДеревоЗначений — got {ty:?}",
     );
 }
@@ -119,7 +125,7 @@ fn by_groups_with_hierarchy_narrows_to_value_tree() {
     let (db, file_id) = setup(fixture);
     let ty = var_ty(&db, file_id, "результат").expect("Результат must be inferred");
     assert!(
-        is_value_tree(&ty),
+        is_value_tree(&db, ty),
         ".Выгрузить(ОбходРезультатаЗапроса.ПоГруппировкамСИерархией) must narrow to ДеревоЗначений — got {ty:?}",
     );
 }
@@ -136,7 +142,7 @@ fn english_linear_narrows_to_value_table() {
     let (db, file_id) = setup(fixture);
     let ty = var_ty(&db, file_id, "тз").expect("ТЗ must be inferred");
     assert!(
-        is_value_table(&ty),
+        is_value_table(&db, ty),
         "English QueryResultIteration.Linear must narrow to ТаблицаЗначений — got {ty:?}",
     );
 }
@@ -153,7 +159,7 @@ fn english_by_groups_with_hierarchy_narrows_to_value_tree() {
     let (db, file_id) = setup(fixture);
     let ty = var_ty(&db, file_id, "результат").expect("Результат must be inferred");
     assert!(
-        is_value_tree(&ty),
+        is_value_tree(&db, ty),
         "QueryResultIteration.ByGroupsWithHierarchy must narrow to ДеревоЗначений — got {ty:?}",
     );
 }
@@ -173,7 +179,7 @@ fn dynamic_arg_keeps_union() {
     let (db, file_id) = setup(fixture);
     let ty = var_ty(&db, file_id, "результат").expect("Результат must be inferred");
     assert!(
-        union_has(&ty, is_value_table) && union_has(&ty, is_value_tree),
+        union_has(&db, ty, is_value_table) && union_has(&db, ty, is_value_tree),
         "dynamic arg must preserve union — got {ty:?}",
     );
 }
@@ -192,8 +198,9 @@ fn projection_carries_into_narrowed_value_table() {
 "#;
     let (db, file_id) = setup(fixture);
     let ty = var_ty(&db, file_id, "тз").expect("ТЗ must be inferred");
-    match ty {
-        Ty::ValueTable { projection: Some(p) } => {
+    match db.lookup_type(ty) {
+        TypeKind::ValueTable(facet) if facet.projection.is_some() => {
+            let p = facet.projection.as_ref().expect("checked above");
             assert_eq!(
                 p.fields.iter().map(|f| f.name.clone()).collect::<Vec<_>>(),
                 vec!["Имя".to_string()],
@@ -218,9 +225,10 @@ fn projection_carries_through_direct_iteration_arg() {
 "#;
     let (db, file_id) = setup(fixture);
     let ty = var_ty(&db, file_id, "тз").expect("ТЗ must be inferred");
-    let Ty::ValueTable { projection: Some(p) } = ty else {
-        panic!("expected Ty::ValueTable {{ projection: Some(..) }}, got {ty:?}");
+    let TypeKind::ValueTable(facet) = db.lookup_type(ty) else {
+        panic!("expected Ty::ValueTable {{ projection: Some(..) }}, got {:?}", db.lookup_type(ty));
     };
+    let p = facet.projection.as_ref().expect("ValueTable must carry projection");
     let names: Vec<_> = p.fields.iter().map(|f| f.name.clone()).collect();
     assert_eq!(names, vec!["Поле1".to_string(), "Поле2".to_string()]);
 }

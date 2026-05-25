@@ -20,7 +20,7 @@
 //! it — a dedicated enum/predefined fixture is a future-PR chore.
 
 use bsl_metadata::MdoType;
-use hir::{HirDatabase, Name, Ty};
+use hir::{HirDatabase, TypeId, TypeKernelDb, TypeKind};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
 use std::path::PathBuf;
@@ -55,9 +55,8 @@ fn setup(fixture_text: &str) -> (RootDatabaseImpl, FileId) {
     (db, test_file)
 }
 
-fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<Ty> {
-    let id = db.infer(file_id).var_types.get(var_lower).copied()?;
-    Some(hir::ty_bridge::typeid_to_ty(db, id))
+fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<TypeId> {
+    db.infer(file_id).var_types.get(var_lower).copied()
 }
 
 #[test]
@@ -76,11 +75,15 @@ fn infer_manager_collection_promotes_to_object_manager() {
 КонецФункции
 "#;
     let (db, file_id) = setup(fixture);
-    assert_eq!(
-        var_ty(&db, file_id, "м"),
-        Some(Ty::ObjectManager {
-            kind: MdoType::Catalog, name: Name::new("Справочник1")
-        }),
+    let ty = var_ty(&db, file_id, "м").expect("M must carry a type");
+    assert!(
+        matches!(
+            db.lookup_type(ty),
+            TypeKind::ObjectManager(facet)
+                if facet.mdo == MdoType::Catalog && facet.name.as_str() == "Справочник1"
+        ),
+        "expected ObjectManager(Catalog, Справочник1), got {:?}",
+        db.lookup_type(ty)
     );
 }
 
@@ -129,10 +132,10 @@ fn infer_manager_chain_catalog_ref_attribute() {
     // a dedicated assertion so a regression that swaps `kind` for a
     // different `MdoType` variant flags here too).
     let ty = var_ty(&db, file_id, "м").expect("M must carry a type");
-    match ty {
-        Ty::ObjectManager { kind, name } => {
-            assert_eq!(kind, MdoType::Catalog);
-            assert_eq!(name, Name::new("Справочник1"));
+    match db.lookup_type(ty) {
+        TypeKind::ObjectManager(facet) => {
+            assert_eq!(facet.mdo, MdoType::Catalog);
+            assert_eq!(facet.name.as_str(), "Справочник1");
         }
         other => panic!("expected ObjectManager(Catalog, Справочник1), got {other:?}"),
     }

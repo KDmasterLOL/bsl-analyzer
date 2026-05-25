@@ -20,7 +20,7 @@
 //! Salsa boundary (Phase B synthesis + Phase D variable-state refinement
 //! + Phase J method-graph cascade).
 
-use hir::{DefDatabase, HirDatabase, ModuleId, Ty};
+use hir::{Builders, DefDatabase, HirDatabase, ModuleId, TypeId};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
 use test_fixture::Fixture;
@@ -48,9 +48,8 @@ fn setup(fixture_text: &str) -> (RootDatabaseImpl, FileId) {
     (db, test_file)
 }
 
-fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<Ty> {
-    let id = db.infer(file_id).var_types.get(var_lower).copied()?;
-    Some(hir::ty_bridge::typeid_to_ty(db, id))
+fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<TypeId> {
+    db.infer(file_id).var_types.get(var_lower).copied()
 }
 
 #[test]
@@ -77,7 +76,7 @@ fn helper_returning_refined_query_propagates_projection_to_caller() {
     let (db, file_id) = setup(fixture);
     assert_eq!(
         var_ty(&db, file_id, "х"),
-        Some(Ty::String),
+        Some(db.string(None, false)),
         "Phase F target: dataflow-refined query projection propagates through helper return",
     );
 }
@@ -101,7 +100,7 @@ fn helper_with_constructor_literal_propagates_projection() {
     let (db, file_id) = setup(fixture);
     assert_eq!(
         var_ty(&db, file_id, "х"),
-        Some(Ty::String),
+        Some(db.string(None, false)),
         "constructor-time projection must propagate through helper's return type",
     );
 }
@@ -231,7 +230,7 @@ fn loop_carried_text_append_recovers_to_projection() {
     let (db, file_id) = setup(fixture);
     assert_eq!(
         var_ty(&db, file_id, "х"),
-        Some(Ty::String),
+        Some(db.string(None, false)),
         "Phase F follow-up target: loop-append builder recovers projection",
     );
 }
@@ -260,7 +259,7 @@ fn parameter_query_with_text_write_in_caller_propagates() {
     let (db, file_id) = setup(fixture);
     assert_eq!(
         var_ty(&db, file_id, "х"),
-        Some(Ty::String),
+        Some(db.string(None, false)),
         "Phase F follow-up target: param-as-Query refinement across call boundary",
     );
 }
@@ -289,7 +288,7 @@ fn cfe_shadowed_binding_refines_through_local_only() {
     let (db, file_id) = setup(fixture);
     assert_eq!(
         var_ty(&db, file_id, "х"),
-        Some(Ty::String),
+        Some(db.string(None, false)),
         "Phase F follow-up: refinement under name shadowing CFE-visible globals",
     );
 }
@@ -328,7 +327,7 @@ fn batched_text_assignment_picks_last_query_projection() {
     let (db, file_id) = setup(fixture);
     assert_eq!(
         var_ty(&db, file_id, "х"),
-        Some(Ty::String),
+        Some(db.string(None, false)),
         "batched query: last-SELECT's `КАК Имя` projection must reach the iteration row",
     );
 }

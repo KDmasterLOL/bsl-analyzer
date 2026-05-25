@@ -20,7 +20,7 @@
 //! fixture's `Configuration.xml`, matching the convention used by
 //! `infer_field_lookup` / `infer_this_object`.
 
-use hir::{HirDatabase, InferenceDiagnostic, Ty};
+use hir::{Builders, HirDatabase, InferenceDiagnostic, TypeId};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
 use std::path::PathBuf;
@@ -71,7 +71,7 @@ fn setup_impl(fixture_text: &str, attach_designer_config: bool) -> (RootDatabase
     (db, test_file)
 }
 
-fn mismatches(db: &RootDatabaseImpl, file_id: FileId) -> Vec<(Ty, Ty)> {
+fn mismatches(db: &RootDatabaseImpl, file_id: FileId) -> Vec<(TypeId, TypeId)> {
     // Argument-`TypeMismatch` diagnostics live in `arg_diagnostics` after
     // the narrowing-aware split (M4). Inference itself only retains
     // non-argument `TypeMismatch` shapes (today: none — the variant is
@@ -83,10 +83,9 @@ fn mismatches(db: &RootDatabaseImpl, file_id: FileId) -> Vec<(Ty, Ty)> {
         .iter()
         .chain(db.arg_diagnostics(file_id).iter())
         .filter_map(|(_, d)| match d {
-            InferenceDiagnostic::TypeMismatch { expected, actual, .. } => Some((
-                hir::ty_bridge::typeid_to_ty(db, *expected),
-                hir::ty_bridge::typeid_to_ty(db, *actual),
-            )),
+            InferenceDiagnostic::TypeMismatch { expected, actual, .. } => {
+                Some((*expected, *actual))
+            }
             _ => None,
         })
         .collect()
@@ -125,7 +124,7 @@ fn type_mismatch_fires_on_concrete_mismatch() {
     let mm = mismatches(&db, file_id);
     assert_eq!(
         mm,
-        vec![(Ty::Number, Ty::String)],
+        vec![(db.number(None, None), db.string(None, false))],
         "concrete Number param + String arg must fire exactly one mismatch"
     );
 }
@@ -251,7 +250,7 @@ fn type_mismatch_fires_on_three_level_manager_call() {
     let (db, file_id) = setup_vfs_only(fixture);
     assert_eq!(
         mismatches(&db, file_id),
-        vec![(Ty::Number, Ty::String)],
+        vec![(db.number(None, None), db.string(None, false))],
         "3-level manager call must emit TypeMismatch through infer_three_level_call"
     );
 }
@@ -280,7 +279,7 @@ fn type_mismatch_fires_on_fluent_method_call() {
     let (db, file_id) = setup_vfs_only(fixture);
     assert_eq!(
         mismatches(&db, file_id),
-        vec![(Ty::Number, Ty::String)],
+        vec![(db.number(None, None), db.string(None, false))],
         "fluent method call with wrong-typed arg must fire TypeMismatch via Expr::Field callee branch"
     );
 }
@@ -400,7 +399,7 @@ fn type_mismatch_still_fires_on_string_to_number() {
     let (db, file_id) = setup(&fixture);
     assert_eq!(
         mismatches(&db, file_id),
-        vec![(Ty::Number, Ty::String)],
+        vec![(db.number(None, None), db.string(None, false))],
         "String arg flowing into a Number param must still fire — coercion is one-way"
     );
 }

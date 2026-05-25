@@ -18,7 +18,7 @@
 //! КонецПроцедуры
 //! ```
 
-use hir::{DefDatabase, HirDatabase, ModuleId, Ty};
+use hir::{Builders, DefDatabase, HirDatabase, ModuleId, TypeId, TypeKernelDb, TypeKind};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
 use test_fixture::Fixture;
@@ -46,9 +46,8 @@ fn setup(fixture_text: &str) -> (RootDatabaseImpl, FileId) {
     (db, test_file)
 }
 
-fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<Ty> {
-    let id = db.infer(file_id).var_types.get(var_lower).copied()?;
-    Some(hir::ty_bridge::typeid_to_ty(db, id))
+fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<TypeId> {
+    db.infer(file_id).var_types.get(var_lower).copied()
 }
 
 #[test]
@@ -64,9 +63,13 @@ fn for_each_over_projected_value_table_yields_projected_row() {
 "#;
     let (db, file_id) = setup(fixture);
     let row_ty = var_ty(&db, file_id, "стр").expect("Стр must be inferred");
-    let Ty::ValueTableRow { projection: Some(p) } = row_ty else {
-        panic!("Стр must be Ty::ValueTableRow {{ projection: Some(..) }}, got {row_ty:?}");
+    let TypeKind::ValueTableRow(facet) = db.lookup_type(row_ty) else {
+        panic!(
+            "Стр must be Ty::ValueTableRow {{ projection: Some(..) }}, got {:?}",
+            db.lookup_type(row_ty)
+        );
     };
+    let p = facet.projection.as_ref().expect("Стр must carry projection");
     assert_eq!(
         p.fields.iter().map(|f| f.name.clone()).collect::<Vec<_>>(),
         vec!["Имя".to_string()],
@@ -90,7 +93,7 @@ fn projected_row_column_resolves_via_projection() {
     let (db, file_id) = setup(fixture);
     let x_ty = var_ty(&db, file_id, "х").expect("Х must be inferred");
     assert!(
-        matches!(x_ty, Ty::String),
+        x_ty == db.string(None, false),
         "Стр.Имя must resolve to Ty::String via projection — got {x_ty:?}",
     );
 }
@@ -117,7 +120,7 @@ fn helper_function_propagates_projection_through_unload_and_iteration() {
     let (db, file_id) = setup(fixture);
     let x_ty = var_ty(&db, file_id, "х").expect("Х must be inferred");
     assert!(
-        matches!(x_ty, Ty::String),
+        x_ty == db.string(None, false),
         "helper-returned ТЗ's row.Имя must resolve via projection — got {x_ty:?}",
     );
 }
@@ -141,12 +144,12 @@ fn projection_less_value_table_keeps_platform_row() {
     // The legacy path returns `Ty::PlatformObject("СтрокаТаблицыЗначений")`
     // (platform-template iteration). The contract is "platform row,
     // no projection enrichment".
-    match row_ty {
-        Ty::PlatformObject(ref n) if n.as_str() == "СтрокаТаблицыЗначений" => {}
+    match db.lookup_type(row_ty) {
+        TypeKind::PlatformObject(facet) if facet.name.as_str() == "СтрокаТаблицыЗначений" => {}
         // If a future refactor wires projection-None ValueTable to
         // `Ty::ValueTableRow { None }` directly, that's also acceptable
         // — the field surface would still match through `platform_type_name`.
-        Ty::ValueTableRow { projection: None } => {}
+        TypeKind::ValueTableRow(facet) if facet.projection.is_none() => {}
         other => panic!(
             "non-projected ТЗ row must be platform СтрокаТаблицыЗначений (or its dedicated variant), got {other:?}",
         ),

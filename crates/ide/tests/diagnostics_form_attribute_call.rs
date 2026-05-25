@@ -24,7 +24,10 @@
 //! silent in the inference diagnostic surface.
 
 use bsl_platform::PlatformDataInner;
-use hir::{InferenceDiagnostic, MetadataKind, Name, Ty, UnresolvedMethodKind};
+use hir::{
+    Builders, InferenceDiagnostic, MetadataKind, TypeId, TypeKernelDb, TypeKind,
+    UnresolvedMethodKind,
+};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
 use std::path::PathBuf;
@@ -67,10 +70,16 @@ fn unresolved_kinds(db: &RootDatabaseImpl, file_id: FileId) -> Vec<UnresolvedMet
         .collect()
 }
 
-fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<Ty> {
+fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<TypeId> {
     use hir::HirDatabase;
-    let id = db.infer(file_id).var_types.get(var_lower).copied()?;
-    Some(hir::ty_bridge::typeid_to_ty(db, id))
+    db.infer(file_id).var_types.get(var_lower).copied()
+}
+
+fn is_metadata_ref(db: &RootDatabaseImpl, ty: TypeId, kind: MetadataKind, name: &str) -> bool {
+    matches!(
+        db.lookup_type(ty),
+        TypeKind::MetadataRef(facet) if facet.kind == kind && facet.name.as_str() == name
+    )
 }
 
 #[test]
@@ -130,18 +139,25 @@ fn form_data_collection_find_by_id_silent_and_preserves_row_schema() {
         kinds
     );
 
-    let row = Ty::MetadataRef {
-        kind: MetadataKind::TabularSectionRow { parent: bsl_metadata::MdoType::DataProcessor },
-        name: Name::new("ТестоваяОбработка.НастройкиЭксель"),
-    };
-    assert_eq!(
-        var_ty(&db, file_id, "строка"),
-        Some(Ty::union(vec![row, Ty::Undefined])),
-        "FindByID must rebind FormDataCollectionItem to the concrete tabular-section row",
+    let row = var_ty(&db, file_id, "строка").expect("строка must be typed");
+    assert!(
+        matches!(db.lookup_type(row), TypeKind::Union(members)
+            if members.contains(&db.undefined())
+                && members.iter().any(|member| is_metadata_ref(
+                    &db,
+                    *member,
+                    MetadataKind::TabularSectionRow {
+                        parent: bsl_metadata::MdoType::DataProcessor
+                    },
+                    "ТестоваяОбработка.НастройкиЭксель",
+                ))
+        ),
+        "FindByID must rebind FormDataCollectionItem to the concrete tabular-section row, got {:?}",
+        db.lookup_type(row),
     );
     assert_eq!(
         var_ty(&db, file_id, "итогактивна"),
-        Some(Ty::Boolean),
+        Some(db.boolean()),
         "row column access after FindByID must keep the tabular-section schema",
     );
 }

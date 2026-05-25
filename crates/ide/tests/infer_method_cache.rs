@@ -25,7 +25,7 @@
 
 use std::sync::Arc;
 
-use hir::{infer_method_query, DefDatabase, MethodId, MethodIdInput, ModuleId, Name};
+use hir::{infer_method_query, Builders, DefDatabase, MethodId, MethodIdInput, ModuleId, Name};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
 use test_fixture::Fixture;
@@ -134,12 +134,9 @@ fn edit_in_one_method_keeps_other_methods_infer_cell_warm() {
          Salsa skipped re-execution incorrectly."
     );
 
-    // Bonus: confirm B's new body produces the expected literal type.
-    // Phase 3 §4.D: var_types stores TypeId; bridge to Ty for the pattern.
-    let b_after_var =
-        b_after.var_types.get("y").copied().map(|tid| hir::ty_bridge::typeid_to_ty(&db, tid));
+    let b_after_var = b_after.var_types.get("y").copied();
     assert!(
-        matches!(b_after_var, Some(hir::Ty::Number)),
+        matches!(b_after_var, Some(ty) if ty == db.number(None, None)),
         "B's edited body should still infer Y = <Number>; got {b_after_var:?}"
     );
 }

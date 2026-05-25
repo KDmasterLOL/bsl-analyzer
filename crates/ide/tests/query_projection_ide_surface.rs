@@ -11,7 +11,7 @@
 //!   block with SDBL display labels (precision / scale / length).
 
 use expect_test::{expect, Expect};
-use hir::{DefDatabase, HirDatabase, ModuleId, Ty, Type};
+use hir::{Builders, DefDatabase, HirDatabase, ModuleId, Type, TypeId};
 use ide::{Analysis, CompletionItem};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
@@ -40,9 +40,8 @@ fn setup(fixture_text: &str) -> (RootDatabaseImpl, FileId) {
     (db, test_file)
 }
 
-fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<Ty> {
-    let id = db.infer(file_id).var_types.get(var_lower).copied()?;
-    Some(hir::ty_bridge::typeid_to_ty(db, id))
+fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<TypeId> {
+    db.infer(file_id).var_types.get(var_lower).copied()
 }
 
 #[test]
@@ -58,13 +57,13 @@ fn projection_fields_visible_via_hir_type_accessors() {
 "#;
     let (db, file_id) = setup(fixture);
     let ty = var_ty(&db, file_id, "выборка").expect("выборка must be inferred");
-    let type_facade = Type::from_id(&db, file_id, hir::ty_bridge::ty_to_typeid(&db, &ty));
+    let type_facade = Type::from_id(&db, file_id, ty);
     assert!(type_facade.is_query_projection(), "is_query_projection must return true");
     let fields =
         type_facade.projection_fields().expect("projection_fields must surface the column slice");
     assert_eq!(fields.len(), 1, "single-column SELECT yields one projection field");
     assert_eq!(fields[0].0.as_str(), "Имя");
-    assert_eq!(hir::ty_bridge::typeid_to_ty(&db, fields[0].1), Ty::String);
+    assert_eq!(fields[0].1, db.string(None, false));
 }
 
 #[test]
@@ -82,7 +81,7 @@ fn projection_fields_surface_in_enumerate_fields() {
 "#;
     let (db, file_id) = setup(fixture);
     let ty = var_ty(&db, file_id, "выборка").expect("выборка must be inferred");
-    let type_facade = Type::from_id(&db, file_id, hir::ty_bridge::ty_to_typeid(&db, &ty));
+    let type_facade = Type::from_id(&db, file_id, ty);
     let fields = type_facade.fields();
     let names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
     assert!(

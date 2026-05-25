@@ -18,8 +18,8 @@
 use std::sync::Arc;
 
 use hir::{
-    infer_method_query, infer_module_code_query, infer_query, DefDatabase, DefWithBodyId,
-    MethodIdInput, ModuleId, Name, Ty,
+    infer_method_query, infer_module_code_query, infer_query, Builders, DefDatabase, DefWithBodyId,
+    MethodIdInput, ModuleId, Name,
 };
 use ide_db::base_db::{FileIdInput, SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
@@ -230,8 +230,6 @@ fn wrapper_clones_per_body_maps_into_aggregate() {
     // Specifically pin Ty::Number from the literal RHS — proves the
     // fold isn't silently dropping entries.
     //
-    // Phase 3 §4.D: var_types stores TypeId; bridge before comparing.
-    let agg_x =
-        aggregate.var_types.get("х").copied().map(|id| hir::ty_bridge::typeid_to_ty(&db, id));
-    assert_eq!(agg_x, Some(Ty::Number));
+    let agg_x = aggregate.var_types.get("х").copied();
+    assert_eq!(agg_x, Some(db.number(None, None)));
 }

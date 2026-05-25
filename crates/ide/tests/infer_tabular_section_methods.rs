@@ -16,7 +16,11 @@
 //! `infer_field_lookup.rs` — so the test does not depend on the manager
 //! 3-segment call path.
 
-use hir::{HirDatabase, InferenceDiagnostic, MetadataKind, Name, Ty, UnresolvedMethodKind};
+use bsl_metadata::MdoType;
+use hir::{
+    Builders, HirDatabase, InferenceDiagnostic, MetadataKind, TypeId, TypeKernelDb, TypeKind,
+    UnresolvedMethodKind,
+};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
 use std::path::PathBuf;
@@ -49,9 +53,26 @@ fn setup(fixture_text: &str) -> (RootDatabaseImpl, FileId) {
     (db, test_file)
 }
 
-fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<Ty> {
-    let id = db.infer(file_id).var_types.get(var_lower).copied()?;
-    Some(hir::ty_bridge::typeid_to_ty(db, id))
+fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<TypeId> {
+    db.infer(file_id).var_types.get(var_lower).copied()
+}
+
+fn assert_metadata_ref(
+    db: &RootDatabaseImpl,
+    actual: Option<TypeId>,
+    kind: MetadataKind,
+    name: &str,
+) {
+    let actual = actual.expect("expected metadata ref type");
+    assert!(
+        matches!(
+            db.lookup_type(actual),
+            TypeKind::MetadataRef(facet)
+                if facet.kind == kind && facet.name.as_str() == name
+        ),
+        "expected MetadataRef({kind:?}, {name}), got {:?}",
+        db.lookup_type(actual)
+    );
 }
 
 const OBJECT_RETURNING_MODULE: &str = r#"
@@ -87,37 +108,32 @@ fn infer_full_tabular_section_chain() {
     );
     let (db, file_id) = setup(&fixture);
 
-    assert_eq!(
+    assert_metadata_ref(
+        &db,
         var_ty(&db, file_id, "объектспр"),
-        Some(Ty::MetadataRef {
-            kind: MetadataKind::CatalogObject, name: Name::new("Справочник1")
-        }),
-        "ОбъектСпр must carry CatalogObject — JSDoc-typed receiver is the entry point",
+        MetadataKind::CatalogObject,
+        "Справочник1",
     );
-    assert_eq!(
+    assert_metadata_ref(
+        &db,
         var_ty(&db, file_id, "тч"),
-        Some(Ty::MetadataRef {
-            kind: MetadataKind::TabularSection { parent: bsl_metadata::MdoType::Catalog },
-            name: Name::new("Справочник1.ТабличнаяЧасть1"),
-        }),
-        "field-lookup must promote ТабличнаяЧасть1 to TabularSection",
+        MetadataKind::TabularSection { parent: MdoType::Catalog },
+        "Справочник1.ТабличнаяЧасть1",
     );
-    assert_eq!(
+    assert_metadata_ref(
+        &db,
         var_ty(&db, file_id, "новаястрока"),
-        Some(Ty::MetadataRef {
-            kind: MetadataKind::TabularSectionRow { parent: bsl_metadata::MdoType::Catalog },
-            name: Name::new("Справочник1.ТабличнаяЧасть1"),
-        }),
-        "Добавить() must rebind to TabularSectionRow with parent: Catalog",
+        MetadataKind::TabularSectionRow { parent: MdoType::Catalog },
+        "Справочник1.ТабличнаяЧасть1",
     );
     assert_eq!(
         var_ty(&db, file_id, "кол"),
-        Some(Ty::Number),
+        Some(db.number(None, None)),
         "row attribute Реквизит2 must resolve to Number",
     );
     assert_eq!(
         var_ty(&db, file_id, "номстр"),
-        Some(Ty::Number),
+        Some(db.number(None, None)),
         "platform standard row property НомерСтроки must resolve to Number",
     );
 }
@@ -135,7 +151,7 @@ fn infer_tabular_section_count_returns_number() {
 "#
     );
     let (db, file_id) = setup(&fixture);
-    assert_eq!(var_ty(&db, file_id, "кол"), Some(Ty::Number));
+    assert_eq!(var_ty(&db, file_id, "кол"), Some(db.number(None, None)));
 }
 
 #[test]
@@ -151,7 +167,12 @@ fn infer_tabular_section_unload_returns_value_table() {
 "#
     );
     let (db, file_id) = setup(&fixture);
-    assert_eq!(var_ty(&db, file_id, "тз"), Some(Ty::ValueTable { projection: None }));
+    let actual = var_ty(&db, file_id, "тз").expect("ТЗ must be inferred");
+    assert!(
+        matches!(db.lookup_type(actual), TypeKind::ValueTable(facet) if facet.projection.is_none()),
+        "Выгрузить() must return unprojected ValueTable, got {:?}",
+        db.lookup_type(actual)
+    );
 }
 
 #[test]

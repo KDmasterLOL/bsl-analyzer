@@ -1,6 +1,9 @@
 use bsl_metadata::MdoType;
 use bsl_platform::PlatformDataInner;
-use hir::{HirDatabase, InferenceDiagnostic, MetadataKind, Name, Ty, UnresolvedMethodKind};
+use hir::{
+    Builders, HirDatabase, InferenceDiagnostic, MetadataKind, TypeId, TypeKernelDb, TypeKind,
+    UnresolvedMethodKind,
+};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
 use std::path::PathBuf;
@@ -50,9 +53,26 @@ fn has_platform_data() -> bool {
     !PlatformDataInner::instance().all_methods().is_empty()
 }
 
-fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<Ty> {
-    let id = db.infer(file_id).var_types.get(var_lower).copied()?;
-    Some(hir::ty_bridge::typeid_to_ty(db, id))
+fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<TypeId> {
+    db.infer(file_id).var_types.get(var_lower).copied()
+}
+
+fn assert_metadata_ref(
+    db: &RootDatabaseImpl,
+    actual: Option<TypeId>,
+    kind: MetadataKind,
+    name: &str,
+) {
+    let actual = actual.expect("expected metadata ref type");
+    assert!(
+        matches!(
+            db.lookup_type(actual),
+            TypeKind::MetadataRef(facet)
+                if facet.kind == kind && facet.name.as_str() == name
+        ),
+        "expected MetadataRef({kind:?}, {name}), got {:?}",
+        db.lookup_type(actual)
+    );
 }
 
 fn unresolved_method_kinds(db: &RootDatabaseImpl, file_id: FileId) -> Vec<UnresolvedMethodKind> {
@@ -69,7 +89,7 @@ fn unresolved_method_kinds(db: &RootDatabaseImpl, file_id: FileId) -> Vec<Unreso
 fn assert_unknown_var(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) {
     let ty = var_ty(db, file_id, var_lower);
     assert!(
-        ty.as_ref().is_none_or(Ty::is_unknown),
+        ty.is_none_or(|ty| matches!(db.lookup_type(ty), TypeKind::Unknown)),
         "{var_lower} must stay Unknown or absent from var_types, got {ty:?}"
     );
 }
@@ -83,12 +103,11 @@ fn implicit_tabular_section_value_position() {
 КонецФункции
 "#;
     let (db, file_id) = setup_data_processor(text);
-    assert_eq!(
+    assert_metadata_ref(
+        &db,
         var_ty(&db, file_id, "р"),
-        Some(Ty::MetadataRef {
-            kind: MetadataKind::TabularSection { parent: MdoType::DataProcessor },
-            name: Name::new("ТестоваяОбработка.НастройкиЭксель"),
-        }),
+        MetadataKind::TabularSection { parent: MdoType::DataProcessor },
+        "ТестоваяОбработка.НастройкиЭксель",
     );
 }
 
@@ -101,7 +120,7 @@ fn implicit_attribute_value_position() {
 КонецФункции
 "#;
     let (db, file_id) = setup_data_processor(text);
-    assert_eq!(var_ty(&db, file_id, "р"), Some(Ty::String));
+    assert_eq!(var_ty(&db, file_id, "р"), Some(db.string(None, false)));
 }
 
 #[test]
@@ -113,12 +132,7 @@ fn implicit_standard_attribute_ссылка_value_position() {
 КонецФункции
 "#;
     let (db, file_id) = setup_catalog(text);
-    assert_eq!(
-        var_ty(&db, file_id, "р"),
-        Some(Ty::MetadataRef {
-            kind: MetadataKind::CatalogRef, name: Name::new("Справочник1")
-        }),
-    );
+    assert_metadata_ref(&db, var_ty(&db, file_id, "р"), MetadataKind::CatalogRef, "Справочник1");
 }
 
 #[test]
@@ -170,7 +184,7 @@ fn implicit_self_wins_over_platform_global() {
 КонецФункции
 "#;
     let (db, file_id) = setup_data_processor(text);
-    assert_ne!(var_ty(&db, file_id, "р"), Some(Ty::Unknown));
+    assert_ne!(var_ty(&db, file_id, "р"), Some(db.unknown()));
 }
 
 #[test]
@@ -188,7 +202,12 @@ fn implicit_tabular_section_method_dispatches() {
 "#;
     let (db, file_id) = setup_data_processor(text);
     assert!(unresolved_method_kinds(&db, file_id).is_empty());
-    assert_eq!(var_ty(&db, file_id, "тз"), Some(Ty::ValueTable { projection: None }));
+    let actual = var_ty(&db, file_id, "тз").expect("ТЗ must be inferred");
+    assert!(
+        matches!(db.lookup_type(actual), TypeKind::ValueTable(facet) if facet.projection.is_none()),
+        "Выгрузить() must return unprojected ValueTable, got {:?}",
+        db.lookup_type(actual)
+    );
 }
 
 #[test]
@@ -240,12 +259,11 @@ fn implicit_tabular_section_for_each() {
 КонецПроцедуры
 "#;
     let (db, file_id) = setup_data_processor(text);
-    assert_eq!(
+    assert_metadata_ref(
+        &db,
         var_ty(&db, file_id, "стр"),
-        Some(Ty::MetadataRef {
-            kind: MetadataKind::TabularSectionRow { parent: MdoType::DataProcessor },
-            name: Name::new("ТестоваяОбработка.НастройкиЭксель"),
-        }),
+        MetadataKind::TabularSectionRow { parent: MdoType::DataProcessor },
+        "ТестоваяОбработка.НастройкиЭксель",
     );
 }
 
@@ -265,7 +283,10 @@ fn implicit_field_access_without_call() {
 "#;
     let (db, file_id) = setup_data_processor(text);
     let ty = var_ty(&db, file_id, "к");
-    assert!(ty.as_ref().is_some_and(|ty| !ty.is_unknown()), "К must be typed, got {ty:?}");
+    assert!(
+        ty.is_some_and(|ty| !matches!(db.lookup_type(ty), TypeKind::Unknown)),
+        "К must be typed, got {ty:?}"
+    );
 }
 
 #[test]
@@ -290,6 +311,9 @@ fn form_module_does_not_get_object_implicit_self() {
 КонецФункции
 "#;
     let (db, file_id) = setup_at(data_processor_form_module_path(), text);
-    assert!(matches!(var_ty(&db, file_id, "ф"), Some(Ty::FormData { underlying: Some(_), .. })));
+    assert!(matches!(
+        var_ty(&db, file_id, "ф").map(|ty| db.lookup_type(ty)),
+        Some(TypeKind::FormData { underlying: Some(_), .. })
+    ));
     assert_unknown_var(&db, file_id, "р");
 }
