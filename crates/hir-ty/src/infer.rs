@@ -3842,40 +3842,33 @@ pub fn type_of_expr_query(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ty_bridge::{ty_to_typeid, typeid_to_ty};
     use bsl_types::testing::InMemoryDb;
-    use hir_def::ty::Ty;
 
     /// `ParamsShape` stores kernel ids directly; bridge back only when a
     /// legacy `Ty` view is needed by an assertion or downstream payload.
     #[test]
     fn params_shape_typeids_round_trip_via_ty() {
         let db = InMemoryDb::new();
+        let number = db.number(None, None);
+        let string = db.string(None, false);
 
-        let single = ParamsShape::Single(Arc::from([
-            ty_to_typeid(&db, &Ty::Number),
-            ty_to_typeid(&db, &Ty::String),
-        ]));
+        let single = ParamsShape::Single(Arc::from([number, string]));
         match single {
             ParamsShape::Single(ids) => {
-                let via_ty: Vec<Ty> = ids.iter().map(|id| typeid_to_ty(&db, *id)).collect();
-                assert_eq!(via_ty, vec![Ty::Number, Ty::String]);
+                assert_eq!(ids.as_ref(), &[number, string]);
             }
             _ => panic!("expected Single"),
         }
 
         let overloaded = ParamsShape::Overloaded {
-            flat: Arc::from([ty_to_typeid(&db, &Ty::Number)]),
-            overloads: Arc::from([Arc::from([ty_to_typeid(&db, &Ty::Number)]) as Arc<[TypeId]>]),
+            flat: Arc::from([number]),
+            overloads: Arc::from([Arc::from([number]) as Arc<[TypeId]>]),
         };
         match overloaded {
             ParamsShape::Overloaded { flat, overloads } => {
-                let flat_via_ty: Vec<Ty> = flat.iter().map(|id| typeid_to_ty(&db, *id)).collect();
-                assert_eq!(flat_via_ty, vec![Ty::Number]);
+                assert_eq!(flat.as_ref(), &[number]);
                 assert_eq!(overloads.len(), 1);
-                let row_via_ty: Vec<Ty> =
-                    overloads[0].iter().map(|id| typeid_to_ty(&db, *id)).collect();
-                assert_eq!(row_via_ty, vec![Ty::Number]);
+                assert_eq!(overloads[0].as_ref(), &[number]);
             }
             _ => panic!("expected Overloaded"),
         }
@@ -3951,8 +3944,8 @@ mod tests {
         // Test that TypeMismatch diagnostic is created correctly
         let db = InMemoryDb::new();
         let expr_id = ExprId::from_raw(la_arena::RawIdx::from_u32(0));
-        let expected_ty = ty_to_typeid(&db, &Ty::Number);
-        let actual_ty = ty_to_typeid(&db, &Ty::String);
+        let expected_ty = db.number(None, None);
+        let actual_ty = db.string(None, false);
 
         let diag = InferenceDiagnostic::TypeMismatch {
             expr: expr_id,
@@ -3977,12 +3970,10 @@ mod tests {
         // `<ReceiverType>.<field_name>` without re-running inference.
         let db = InMemoryDb::new();
         let expr_id = ExprId::from_raw(la_arena::RawIdx::from_u32(0));
-        let receiver_ty = ty_to_typeid(
-            &db,
-            &Ty::MetadataRef {
-                kind: hir_def::ty::MetadataKind::CatalogRef,
-                name: Name::new("Номенклатура"),
-            },
+        let receiver_ty = db.metadata_ref(
+            hir_def::ty::MetadataKind::CatalogRef,
+            "Номенклатура".to_string(),
+            &RootConfigCtx,
         );
         let field_name = Name::new("НесуществующееПоле");
 
@@ -4120,25 +4111,19 @@ mod tests {
         // sandbox kernel to populate the payload.
         let db = InMemoryDb::new();
         let mut body = BodyInferenceResult::empty_for(DefWithBodyId::ModuleCode);
-        body.var_types.insert("х".to_string(), ty_to_typeid(&db, &Ty::String));
-        body.expr_types.insert(make_expr(3), ty_to_typeid(&db, &Ty::Boolean));
+        body.var_types.insert("х".to_string(), db.string(None, false));
+        body.expr_types.insert(make_expr(3), db.boolean());
         body.diagnostics.push(InferenceDiagnostic::TypeMismatch {
             expr: make_expr(4),
-            expected: ty_to_typeid(&db, &Ty::String),
-            actual: ty_to_typeid(&db, &Ty::Number),
+            expected: db.string(None, false),
+            actual: db.number(None, None),
         });
 
         let lifted = ModuleCodeInferenceResult::from_body(body);
 
         assert_eq!(lifted.owner, DefWithBodyId::ModuleCode);
-        assert_eq!(
-            lifted.var_types.get("х").copied().map(|id| typeid_to_ty(&db, id)),
-            Some(Ty::String),
-        );
-        assert_eq!(
-            lifted.expr_types.get(&make_expr(3)).copied().map(|id| typeid_to_ty(&db, id)),
-            Some(Ty::Boolean),
-        );
+        assert_eq!(lifted.var_types.get("х").copied(), Some(db.string(None, false)),);
+        assert_eq!(lifted.expr_types.get(&make_expr(3)).copied(), Some(db.boolean()),);
         assert_eq!(lifted.diagnostics.len(), 1);
     }
 
@@ -4146,21 +4131,15 @@ mod tests {
     fn infer_owner_result_method_accessors_route_to_method_payload() {
         let db = InMemoryDb::new();
         let mut body = BodyInferenceResult::empty_for(DefWithBodyId::Method(2));
-        body.var_types.insert("х".to_string(), ty_to_typeid(&db, &Ty::Number));
-        body.expr_types.insert(make_expr(5), ty_to_typeid(&db, &Ty::String));
+        body.var_types.insert("х".to_string(), db.number(None, None));
+        body.expr_types.insert(make_expr(5), db.string(None, false));
 
         let routed = InferOwnerResult::Method(Arc::new(body));
 
         assert_eq!(routed.owner(), DefWithBodyId::Method(2));
-        assert_eq!(
-            routed.type_id_of_expr(make_expr(5)).map(|id| typeid_to_ty(&db, id)),
-            Some(Ty::String)
-        );
+        assert_eq!(routed.type_id_of_expr(make_expr(5)), Some(db.string(None, false)));
         assert_eq!(routed.type_id_of_expr(make_expr(99)), None);
-        assert_eq!(
-            routed.var_types().get("х").copied().map(|id| typeid_to_ty(&db, id)),
-            Some(Ty::Number),
-        );
+        assert_eq!(routed.var_types().get("х").copied(), Some(db.number(None, None)),);
         assert!(routed.implicit_locals().is_empty());
         assert!(routed.binding_types().is_empty());
     }
@@ -4169,19 +4148,13 @@ mod tests {
     fn infer_owner_result_module_code_accessors_route_to_module_payload() {
         let db = InMemoryDb::new();
         let mut mc = ModuleCodeInferenceResult::default();
-        mc.var_types.insert("у".to_string(), ty_to_typeid(&db, &Ty::Boolean));
-        mc.expr_types.insert(make_expr(1), ty_to_typeid(&db, &Ty::Date));
+        mc.var_types.insert("у".to_string(), db.boolean());
+        mc.expr_types.insert(make_expr(1), db.date(DateComponent::DateTime));
 
         let routed = InferOwnerResult::ModuleCode(Arc::new(mc));
 
         assert_eq!(routed.owner(), DefWithBodyId::ModuleCode);
-        assert_eq!(
-            routed.type_id_of_expr(make_expr(1)).map(|id| typeid_to_ty(&db, id)),
-            Some(Ty::Date)
-        );
-        assert_eq!(
-            routed.var_types().get("у").copied().map(|id| typeid_to_ty(&db, id)),
-            Some(Ty::Boolean),
-        );
+        assert_eq!(routed.type_id_of_expr(make_expr(1)), Some(db.date(DateComponent::DateTime)));
+        assert_eq!(routed.var_types().get("у").copied(), Some(db.boolean()),);
     }
 }

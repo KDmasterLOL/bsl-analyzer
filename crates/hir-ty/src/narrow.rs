@@ -1297,13 +1297,8 @@ fn expr_covers_expr(body: &Body, root: ExprIdx, target: ExprIdx) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ty_bridge::{ty_to_typeid, typeid_to_ty};
     use bsl_types::testing::InMemoryDb;
     use hir_def::hir::UnaryOp;
-    // Test-only legacy `Ty` usage: the assertions below keep their
-    // readable `Ty::X` expectations and bridge through the kernel. The
-    // `Ty` enum (and these helpers) are purged in Phase 3 §4.G.6.
-    use hir_def::ty::Ty;
 
     /// Fresh sandbox kernel db for a single test. All `TypeId`s within a
     /// test must come from the same db instance (ids are db-local).
@@ -1313,33 +1308,27 @@ mod tests {
 
     /// Build the canonical arm-set for a list of `Ty`s — the expected
     /// shape of an overlay entry.
-    fn arm_set(db: &dyn TypeKernelDb, tys: Vec<Ty>) -> Box<[TypeId]> {
-        normalize_arms(db, tys.into_iter().map(|t| ty_to_typeid(db, &t)).collect())
+    fn arm_set(db: &dyn TypeKernelDb, ids: Vec<TypeId>) -> Box<[TypeId]> {
+        normalize_arms(db, ids)
     }
 
     /// Read an overlay entry back as a legacy `Ty` (interning the
     /// arm-set, then bridging) so assertions can keep their readable
     /// `Ty::X` expectations.
-    fn overlay_ty(db: &dyn TypeKernelDb, s: &NarrowState, name: &str) -> Option<Ty> {
+    fn overlay_type_id(db: &dyn TypeKernelDb, s: &NarrowState, name: &str) -> Option<TypeId> {
         let arms = s.get(&Name::new(name))?;
-        Some(typeid_to_ty(db, db.union(arms.to_vec())))
-    }
-
-    /// Bridge a `narrowed_type_at` result back to a legacy `Ty` for
-    /// readable assertions.
-    fn read_ty(db: &dyn TypeKernelDb, id: Option<TypeId>) -> Option<Ty> {
-        id.map(|id| typeid_to_ty(db, id))
+        Some(db.union(arms.to_vec()))
     }
 
     /// Intern an arm-set and bridge it back to a legacy `Ty` for the
     /// `ty_difference*` unit tests. An empty arm-set (the "no
     /// narrowing" residual) maps to `Ty::Unknown`, matching the legacy
     /// non-union fallback those tests assert on.
-    fn ty_of_arms(db: &dyn TypeKernelDb, arms: &[TypeId]) -> Ty {
+    fn type_id_of_arms(db: &dyn TypeKernelDb, arms: &[TypeId]) -> TypeId {
         if arms.is_empty() {
-            return Ty::Unknown;
+            return db.unknown();
         }
-        typeid_to_ty(db, db.union(arms.to_vec()))
+        db.union(arms.to_vec())
     }
 
     /// Tiny builder that hand-rolls a `Body` with just enough expressions
@@ -1821,15 +1810,15 @@ mod tests {
     // Analysis tests (Task 6.2)
     // =====================================================================
 
-    fn state_with(db: &dyn TypeKernelDb, entries: &[(&str, Ty)]) -> NarrowState {
+    fn state_with(db: &dyn TypeKernelDb, entries: &[(&str, TypeId)]) -> NarrowState {
         let mut s = NarrowState::new();
-        for (n, t) in entries {
+        for (n, id) in entries {
             // Fold the key to match the production invariant: every
             // overlay write in `NarrowingTransfer` routes through
             // `fold_name`, so the test helper must not short-circuit
             // that — otherwise case-insensitivity regressions would
             // hide behind raw `Name::new(...)` keys.
-            let arms = arm_set(db, vec![t.clone()]);
+            let arms = arm_set(db, vec![*id]);
             if !arms.is_empty() {
                 s.narrowed.insert(fold_name(&Name::new(n)), arms);
             }
@@ -1857,7 +1846,7 @@ mod tests {
         // Number` past КонецЕсли. Dropping the entry degrades to the
         // base type, which is sound.
         let db = kdb();
-        let a = state_with(&db, &[("Х", Ty::String)]);
+        let a = state_with(&db, &[("Х", db.string(None, false))]);
         let b = NarrowState::new();
         let joined = a.join(&b);
         assert_eq!(joined.get(&Name::new("Х")), None);
@@ -1874,10 +1863,10 @@ mod tests {
         // fixed-point convergence — if join introduced spurious
         // Union(String, String) it would never stabilise.
         let db = kdb();
-        let a = state_with(&db, &[("Х", Ty::String)]);
-        let b = state_with(&db, &[("Х", Ty::String)]);
+        let a = state_with(&db, &[("Х", db.string(None, false))]);
+        let b = state_with(&db, &[("Х", db.string(None, false))]);
         let joined = a.join(&b);
-        assert_eq!(overlay_ty(&db, &joined, "Х"), Some(Ty::String));
+        assert_eq!(overlay_type_id(&db, &joined, "Х"), Some(db.string(None, false)));
     }
 
     #[test]
@@ -1886,11 +1875,11 @@ mod tests {
         // `Ty::union` canonicalises, so the order inside the union
         // should be deterministic across runs — pin it explicitly.
         let db = kdb();
-        let a = state_with(&db, &[("Х", Ty::String)]);
-        let b = state_with(&db, &[("Х", Ty::Number)]);
+        let a = state_with(&db, &[("Х", db.string(None, false))]);
+        let b = state_with(&db, &[("Х", db.number(None, None))]);
         let joined = a.join(&b);
-        let expected = Ty::union(vec![Ty::String, Ty::Number]);
-        assert_eq!(overlay_ty(&db, &joined, "Х"), Some(expected));
+        let expected = db.union(vec![db.string(None, false), db.number(None, None)]);
+        assert_eq!(overlay_type_id(&db, &joined, "Х"), Some(expected));
     }
 
     #[test]
@@ -1917,15 +1906,15 @@ mod tests {
     /// false-branch `ty_difference`.
     fn transfer_with_bases<'a>(
         db: &'a dyn TypeKernelDb,
-        entries: &[(&str, Ty)],
+        entries: &[(&str, TypeId)],
     ) -> NarrowingTransfer<'a> {
         let mut bases = FxHashMap::default();
-        for (name, ty) in entries {
+        for (name, id) in entries {
             // Match the production seed: `build_base_types_for_body`
             // folds every key before inserting, so tests that read via
             // `complement_of` (which also folds) need the same spelling
             // on the way in.
-            bases.insert(fold_name(&Name::new(name)), ty_to_typeid(db, ty));
+            bases.insert(fold_name(&Name::new(name)), *id);
         }
         NarrowingTransfer::new(db, bases)
     }
@@ -1943,7 +1932,7 @@ mod tests {
             &Guard::TypeCheck { var: Name::new("Х"), type_name: "Строка".to_string() },
             true,
         );
-        assert_eq!(overlay_ty(&db, &s, "Х"), Some(Ty::String));
+        assert_eq!(overlay_type_id(&db, &s, "Х"), Some(db.string(None, false)));
     }
 
     #[test]
@@ -1955,14 +1944,14 @@ mod tests {
         // the refinement the overlay would clobber the element type
         // and iteration inside the branch would lose `String`.
         let db = kdb();
-        let tr = transfer_with_bases(&db, &[("М", Ty::TypedArray(Box::new(Ty::String)))]);
+        let tr = transfer_with_bases(&db, &[("М", db.array(Some(db.string(None, false))))]);
         let mut s = NarrowState::new();
         tr.apply_guard(
             &mut s,
             &Guard::TypeCheck { var: Name::new("М"), type_name: "Массив".to_string() },
             true,
         );
-        assert_eq!(overlay_ty(&db, &s, "М"), Some(Ty::TypedArray(Box::new(Ty::String))));
+        assert_eq!(overlay_type_id(&db, &s, "М"), Some(db.array(Some(db.string(None, false)))));
     }
 
     #[test]
@@ -1974,15 +1963,15 @@ mod tests {
         // lose element info on every `Если ТипЗнч(…) = Тип("Массив")`
         // probe.
         let db = kdb();
-        let typed = Ty::TypedArray(Box::new(Ty::Number));
-        let tr = transfer_with_bases(&db, &[("М", Ty::union(vec![typed.clone(), Ty::Undefined]))]);
+        let typed = db.array(Some(db.number(None, None)));
+        let tr = transfer_with_bases(&db, &[("М", db.union(vec![typed, db.undefined()]))]);
         let mut s = NarrowState::new();
         tr.apply_guard(
             &mut s,
             &Guard::TypeCheck { var: Name::new("М"), type_name: "Массив".to_string() },
             true,
         );
-        assert_eq!(overlay_ty(&db, &s, "М"), Some(typed));
+        assert_eq!(overlay_type_id(&db, &s, "М"), Some(typed));
     }
 
     #[test]
@@ -1994,10 +1983,10 @@ mod tests {
         // un-witnessed array, leading iteration to emit a
         // fictitious element type.
         let db = kdb();
-        let typed = Ty::TypedArray(Box::new(Ty::String));
+        let typed = db.array(Some(db.string(None, false)));
         let tr = transfer_with_bases(
             &db,
-            &[("М", Ty::union(vec![typed.clone(), Ty::Array, Ty::Number]))],
+            &[("М", db.union(vec![typed, db.array(None), db.number(None, None)]))],
         );
         let mut s = NarrowState::new();
         tr.apply_guard(
@@ -2005,8 +1994,8 @@ mod tests {
             &Guard::TypeCheck { var: Name::new("М"), type_name: "Массив".to_string() },
             true,
         );
-        let expected = Ty::union(vec![typed, Ty::Array]);
-        assert_eq!(overlay_ty(&db, &s, "М"), Some(expected));
+        let expected = db.union(vec![typed, db.array(None)]);
+        assert_eq!(overlay_type_id(&db, &s, "М"), Some(expected));
     }
 
     #[test]
@@ -2018,15 +2007,15 @@ mod tests {
         // surfacing "definitely a typed array of strings" to
         // consumers who asked for "definitely not an array."
         let db = kdb();
-        let typed = Ty::TypedArray(Box::new(Ty::String));
-        let tr = transfer_with_bases(&db, &[("М", Ty::union(vec![typed, Ty::Number]))]);
+        let typed = db.array(Some(db.string(None, false)));
+        let tr = transfer_with_bases(&db, &[("М", db.union(vec![typed, db.number(None, None)]))]);
         let mut s = NarrowState::new();
         tr.apply_guard(
             &mut s,
             &Guard::TypeCheck { var: Name::new("М"), type_name: "Массив".to_string() },
             false,
         );
-        assert_eq!(overlay_ty(&db, &s, "М"), Some(Ty::Number));
+        assert_eq!(overlay_type_id(&db, &s, "М"), Some(db.number(None, None)));
     }
 
     #[test]
@@ -2036,7 +2025,7 @@ mod tests {
         // `ty_difference` already returned Unknown for non-union
         // bases — preserve the existing dead-branch behaviour.
         let db = kdb();
-        let typed = Ty::TypedArray(Box::new(Ty::String));
+        let typed = db.array(Some(db.string(None, false)));
         let tr = transfer_with_bases(&db, &[("М", typed)]);
         let mut s = NarrowState::new();
         tr.apply_guard(
@@ -2054,14 +2043,17 @@ mod tests {
         // exclusively to Array ↔ TypedArray and does not perturb
         // other narrowing paths.
         let db = kdb();
-        let tr = transfer_with_bases(&db, &[("М", Ty::union(vec![Ty::Number, Ty::String]))]);
+        let tr = transfer_with_bases(
+            &db,
+            &[("М", db.union(vec![db.number(None, None), db.string(None, false)]))],
+        );
         let mut s = NarrowState::new();
         tr.apply_guard(
             &mut s,
             &Guard::TypeCheck { var: Name::new("М"), type_name: "Массив".to_string() },
             true,
         );
-        assert_eq!(overlay_ty(&db, &s, "М"), Some(Ty::Array));
+        assert_eq!(overlay_type_id(&db, &s, "М"), Some(db.array(None)));
     }
 
     #[test]
@@ -2087,14 +2079,17 @@ mod tests {
         // = Number`. The smart-constructor must collapse the residual
         // single-element union down to the non-union singleton.
         let db = kdb();
-        let tr = transfer_with_bases(&db, &[("Х", Ty::union(vec![Ty::Number, Ty::String]))]);
+        let tr = transfer_with_bases(
+            &db,
+            &[("Х", db.union(vec![db.number(None, None), db.string(None, false)]))],
+        );
         let mut s = NarrowState::new();
         tr.apply_guard(
             &mut s,
             &Guard::TypeCheck { var: Name::new("Х"), type_name: "Строка".to_string() },
             false,
         );
-        assert_eq!(overlay_ty(&db, &s, "Х"), Some(Ty::Number));
+        assert_eq!(overlay_type_id(&db, &s, "Х"), Some(db.number(None, None)));
     }
 
     #[test]
@@ -2103,16 +2098,25 @@ mod tests {
         // — multi-member residue stays a union, canonicalised by
         // `Ty::union` (deterministic sort + dedup).
         let db = kdb();
-        let tr =
-            transfer_with_bases(&db, &[("Х", Ty::union(vec![Ty::Number, Ty::String, Ty::Date]))]);
+        let tr = transfer_with_bases(
+            &db,
+            &[(
+                "Х",
+                db.union(vec![
+                    db.number(None, None),
+                    db.string(None, false),
+                    db.date(DateComponent::DateTime),
+                ]),
+            )],
+        );
         let mut s = NarrowState::new();
         tr.apply_guard(
             &mut s,
             &Guard::TypeCheck { var: Name::new("Х"), type_name: "Строка".to_string() },
             false,
         );
-        let expected = Ty::union(vec![Ty::Number, Ty::Date]);
-        assert_eq!(overlay_ty(&db, &s, "Х"), Some(expected));
+        let expected = db.union(vec![db.number(None, None), db.date(DateComponent::DateTime)]);
+        assert_eq!(overlay_type_id(&db, &s, "Х"), Some(expected));
     }
 
     #[test]
@@ -2123,7 +2127,7 @@ mod tests {
         // By the overlay contract, Ty::Unknown is a no-op — overlay
         // stays absent and readers fall back to the base type.
         let db = kdb();
-        let tr = transfer_with_bases(&db, &[("Х", Ty::String)]);
+        let tr = transfer_with_bases(&db, &[("Х", db.string(None, false))]);
         let mut s = NarrowState::new();
         tr.apply_guard(
             &mut s,
@@ -2144,15 +2148,15 @@ mod tests {
         // guards would routinely destroy outer precision.
         let db = kdb();
         let tr = transfer_no_bases(&db);
-        let mut s = state_with(&db, &[("Х", Ty::String)]);
+        let mut s = state_with(&db, &[("Х", db.string(None, false))]);
         tr.apply_guard(
             &mut s,
             &Guard::TypeCheck { var: Name::new("Х"), type_name: "Число".to_string() },
             false,
         );
         assert_eq!(
-            overlay_ty(&db, &s, "Х"),
-            Some(Ty::String),
+            overlay_type_id(&db, &s, "Х"),
+            Some(db.string(None, false)),
             "imprecise refinement must leave prior narrowing intact"
         );
     }
@@ -2163,7 +2167,7 @@ mod tests {
         let tr = transfer_no_bases(&db);
         let mut s = NarrowState::new();
         tr.apply_guard(&mut s, &Guard::IsUndefined { var: Name::new("Х") }, true);
-        assert_eq!(overlay_ty(&db, &s, "Х"), Some(Ty::Undefined));
+        assert_eq!(overlay_type_id(&db, &s, "Х"), Some(db.undefined()));
     }
 
     #[test]
@@ -2171,10 +2175,13 @@ mod tests {
         // `Х = Неопределено` on the false branch knows Х ≠ Undefined.
         // Over `Union(String, Undefined)` that leaves just `String`.
         let db = kdb();
-        let tr = transfer_with_bases(&db, &[("Х", Ty::union(vec![Ty::String, Ty::Undefined]))]);
+        let tr = transfer_with_bases(
+            &db,
+            &[("Х", db.union(vec![db.string(None, false), db.undefined()]))],
+        );
         let mut s = NarrowState::new();
         tr.apply_guard(&mut s, &Guard::IsUndefined { var: Name::new("Х") }, false);
-        assert_eq!(overlay_ty(&db, &s, "Х"), Some(Ty::String));
+        assert_eq!(overlay_type_id(&db, &s, "Х"), Some(db.string(None, false)));
     }
 
     #[test]
@@ -2186,7 +2193,7 @@ mod tests {
         let tr = transfer_no_bases(&db);
         let mut s = NarrowState::new();
         tr.apply_guard(&mut s, &Guard::IsNotUndefined { var: Name::new("Х") }, false);
-        assert_eq!(overlay_ty(&db, &s, "Х"), Some(Ty::Undefined));
+        assert_eq!(overlay_type_id(&db, &s, "Х"), Some(db.undefined()));
     }
 
     #[test]
@@ -2195,10 +2202,13 @@ mod tests {
         // check narrows to the non-null union member" shape. Must
         // strip Undefined from the pre-narrow union.
         let db = kdb();
-        let tr = transfer_with_bases(&db, &[("Х", Ty::union(vec![Ty::String, Ty::Undefined]))]);
+        let tr = transfer_with_bases(
+            &db,
+            &[("Х", db.union(vec![db.string(None, false), db.undefined()]))],
+        );
         let mut s = NarrowState::new();
         tr.apply_guard(&mut s, &Guard::IsNotUndefined { var: Name::new("Х") }, true);
-        assert_eq!(overlay_ty(&db, &s, "Х"), Some(Ty::String));
+        assert_eq!(overlay_type_id(&db, &s, "Х"), Some(db.string(None, false)));
     }
 
     #[test]
@@ -2209,11 +2219,11 @@ mod tests {
         let db = kdb();
         let tr = transfer_with_bases(
             &db,
-            &[("Х", Ty::union(vec![Ty::String, Ty::Undefined, Ty::Null]))],
+            &[("Х", db.union(vec![db.string(None, false), db.undefined(), db.null()]))],
         );
         let mut s = NarrowState::new();
         tr.apply_guard(&mut s, &Guard::ValueFilled { var: Name::new("Х") }, true);
-        assert_eq!(overlay_ty(&db, &s, "Х"), Some(Ty::String));
+        assert_eq!(overlay_type_id(&db, &s, "Х"), Some(db.string(None, false)));
     }
 
     #[test]
@@ -2221,10 +2231,11 @@ mod tests {
         // Base without `Undefined` — `Null` alone is also an unfilled
         // witness and must be removed.
         let db = kdb();
-        let tr = transfer_with_bases(&db, &[("Х", Ty::union(vec![Ty::Number, Ty::Null]))]);
+        let tr =
+            transfer_with_bases(&db, &[("Х", db.union(vec![db.number(None, None), db.null()]))]);
         let mut s = NarrowState::new();
         tr.apply_guard(&mut s, &Guard::ValueFilled { var: Name::new("Х") }, true);
-        assert_eq!(overlay_ty(&db, &s, "Х"), Some(Ty::Number));
+        assert_eq!(overlay_type_id(&db, &s, "Х"), Some(db.number(None, None)));
     }
 
     #[test]
@@ -2236,7 +2247,7 @@ mod tests {
         let db = kdb();
         let tr = transfer_with_bases(
             &db,
-            &[("Х", Ty::union(vec![Ty::String, Ty::Undefined, Ty::Null]))],
+            &[("Х", db.union(vec![db.string(None, false), db.undefined(), db.null()]))],
         );
         let mut s = NarrowState::new();
         tr.apply_guard(&mut s, &Guard::ValueFilled { var: Name::new("Х") }, false);
@@ -2251,8 +2262,8 @@ mod tests {
         // clobber any prior precise narrowing on the same variable.
         // No overlay entry is the canonical "no claim" shape.
         let db = kdb();
-        let base = Ty::union(vec![Ty::Number, Ty::String]);
-        let tr = transfer_with_bases(&db, &[("Х", base.clone())]);
+        let base = db.union(vec![db.number(None, None), db.string(None, false)]);
+        let tr = transfer_with_bases(&db, &[("Х", base)]);
         let mut s = NarrowState::new();
         tr.apply_guard(&mut s, &Guard::ValueFilled { var: Name::new("Х") }, true);
         assert_eq!(s.get(&Name::new("Х")), None);
@@ -2266,12 +2277,12 @@ mod tests {
         // short-circuit the unchanged base would clobber the prior
         // String into the broader Union, widening the overlay.
         let db = kdb();
-        let base = Ty::union(vec![Ty::Number, Ty::String]);
+        let base = db.union(vec![db.number(None, None), db.string(None, false)]);
         let tr = transfer_with_bases(&db, &[("Х", base)]);
         let mut s = NarrowState::new();
-        s.narrowed.insert(fold_name(&Name::new("Х")), arm_set(&db, vec![Ty::String]));
+        s.narrowed.insert(fold_name(&Name::new("Х")), arm_set(&db, vec![db.string(None, false)]));
         tr.apply_guard(&mut s, &Guard::ValueFilled { var: Name::new("Х") }, true);
-        assert_eq!(overlay_ty(&db, &s, "Х"), Some(Ty::String));
+        assert_eq!(overlay_type_id(&db, &s, "Х"), Some(db.string(None, false)));
     }
 
     // --- ty_difference pure unit tests --------------------------------------
@@ -2279,28 +2290,31 @@ mod tests {
     #[test]
     fn ty_difference_union_minus_member_collapses_to_singleton() {
         let db = kdb();
-        let base = ty_to_typeid(&db, &Ty::union(vec![Ty::Number, Ty::String]));
-        let arms = ty_difference(&db, base, ty_to_typeid(&db, &Ty::String));
-        assert_eq!(ty_of_arms(&db, &arms), Ty::Number);
+        let base = db.union(vec![db.number(None, None), db.string(None, false)]);
+        let arms = ty_difference(&db, base, db.string(None, false));
+        assert_eq!(type_id_of_arms(&db, &arms), db.number(None, None));
     }
 
     #[test]
     fn ty_difference_union_minus_missing_member_returns_whole_union() {
         // `Union(A, B) \ C` when C ∉ {A, B} is the whole union.
         let db = kdb();
-        let base = Ty::union(vec![Ty::Number, Ty::String]);
-        let base_id = ty_to_typeid(&db, &base);
-        let arms = ty_difference(&db, base_id, ty_to_typeid(&db, &Ty::Date));
-        assert_eq!(ty_of_arms(&db, &arms), base);
+        let base = db.union(vec![db.number(None, None), db.string(None, false)]);
+        let arms = ty_difference(&db, base, db.date(DateComponent::DateTime));
+        assert_eq!(type_id_of_arms(&db, &arms), base);
     }
 
     #[test]
     fn ty_difference_multi_member_union_keeps_residue_as_union() {
         let db = kdb();
-        let base = ty_to_typeid(&db, &Ty::union(vec![Ty::Number, Ty::String, Ty::Date]));
-        let arms = ty_difference(&db, base, ty_to_typeid(&db, &Ty::String));
-        let expected = Ty::union(vec![Ty::Number, Ty::Date]);
-        assert_eq!(ty_of_arms(&db, &arms), expected);
+        let base = db.union(vec![
+            db.number(None, None),
+            db.string(None, false),
+            db.date(DateComponent::DateTime),
+        ]);
+        let arms = ty_difference(&db, base, db.string(None, false));
+        let expected = db.union(vec![db.number(None, None), db.date(DateComponent::DateTime)]);
+        assert_eq!(type_id_of_arms(&db, &arms), expected);
     }
 
     #[test]
@@ -2310,17 +2324,20 @@ mod tests {
         // sound conservative answer (empty arm-set → `Ty::Unknown`) so
         // callers read the base type via fall-through.
         let db = kdb();
-        let s = ty_to_typeid(&db, &Ty::String);
-        let n = ty_to_typeid(&db, &Ty::Number);
-        assert_eq!(ty_of_arms(&db, &ty_difference(&db, s, s)), Ty::Unknown);
-        assert_eq!(ty_of_arms(&db, &ty_difference(&db, s, n)), Ty::Unknown);
+        let s = db.string(None, false);
+        let n = db.number(None, None);
+        assert_eq!(type_id_of_arms(&db, &ty_difference(&db, s, s)), db.unknown());
+        assert_eq!(type_id_of_arms(&db, &ty_difference(&db, s, n)), db.unknown());
     }
 
     #[test]
     fn ty_difference_unfilled_witnesses_strips_both_undefined_and_null() {
         let db = kdb();
-        let base = ty_to_typeid(&db, &Ty::union(vec![Ty::String, Ty::Undefined, Ty::Null]));
-        assert_eq!(ty_of_arms(&db, &ty_difference_unfilled_witnesses(&db, base)), Ty::String);
+        let base = db.union(vec![db.string(None, false), db.undefined(), db.null()]);
+        assert_eq!(
+            type_id_of_arms(&db, &ty_difference_unfilled_witnesses(&db, base)),
+            db.string(None, false)
+        );
     }
 
     #[test]
@@ -2328,10 +2345,14 @@ mod tests {
         // String and Number stay in the residual; only `Undefined`
         // and `Null` are dropped.
         let db = kdb();
-        let base =
-            ty_to_typeid(&db, &Ty::union(vec![Ty::Number, Ty::String, Ty::Undefined, Ty::Null]));
-        let expected = Ty::union(vec![Ty::Number, Ty::String]);
-        assert_eq!(ty_of_arms(&db, &ty_difference_unfilled_witnesses(&db, base)), expected);
+        let base = db.union(vec![
+            db.number(None, None),
+            db.string(None, false),
+            db.undefined(),
+            db.null(),
+        ]);
+        let expected = db.union(vec![db.number(None, None), db.string(None, false)]);
+        assert_eq!(type_id_of_arms(&db, &ty_difference_unfilled_witnesses(&db, base)), expected);
     }
 
     #[test]
@@ -2340,21 +2361,21 @@ mod tests {
         // bases — the caller's `apply_guard` short-circuit reads the
         // base type via fall-through.
         let db = kdb();
-        let s = ty_to_typeid(&db, &Ty::String);
-        let u = ty_to_typeid(&db, &Ty::Undefined);
-        assert_eq!(ty_of_arms(&db, &ty_difference_unfilled_witnesses(&db, s)), Ty::Unknown);
-        assert_eq!(ty_of_arms(&db, &ty_difference_unfilled_witnesses(&db, u)), Ty::Unknown);
+        let s = db.string(None, false);
+        let u = db.undefined();
+        assert_eq!(type_id_of_arms(&db, &ty_difference_unfilled_witnesses(&db, s)), db.unknown());
+        assert_eq!(type_id_of_arms(&db, &ty_difference_unfilled_witnesses(&db, u)), db.unknown());
     }
 
     #[test]
     fn is_unfilled_witness_recognizes_only_undefined_and_null() {
         let db = kdb();
-        assert!(is_unfilled_witness(&db, ty_to_typeid(&db, &Ty::Undefined)));
-        assert!(is_unfilled_witness(&db, ty_to_typeid(&db, &Ty::Null)));
+        assert!(is_unfilled_witness(&db, db.undefined()));
+        assert!(is_unfilled_witness(&db, db.null()));
         // Value-level "empty" shapes are NOT type-level witnesses.
-        assert!(!is_unfilled_witness(&db, ty_to_typeid(&db, &Ty::String)));
-        assert!(!is_unfilled_witness(&db, ty_to_typeid(&db, &Ty::Number)));
-        assert!(!is_unfilled_witness(&db, ty_to_typeid(&db, &Ty::Date)));
+        assert!(!is_unfilled_witness(&db, db.string(None, false)));
+        assert!(!is_unfilled_witness(&db, db.number(None, None)));
+        assert!(!is_unfilled_witness(&db, db.date(DateComponent::DateTime)));
     }
 
     #[test]
@@ -2364,12 +2385,12 @@ mod tests {
         // the second subtraction hits the non-union fallback and
         // returns the empty arm-set (sound — caller reads the base).
         let db = kdb();
-        let base = ty_to_typeid(&db, &Ty::union(vec![Ty::Number, Ty::String]));
-        let step1 = ty_difference(&db, base, ty_to_typeid(&db, &Ty::Number));
-        assert_eq!(ty_of_arms(&db, &step1), Ty::String);
+        let base = db.union(vec![db.number(None, None), db.string(None, false)]);
+        let step1 = ty_difference(&db, base, db.number(None, None));
+        assert_eq!(type_id_of_arms(&db, &step1), db.string(None, false));
         let step1_id = db.union(step1.to_vec());
-        let step2 = ty_difference(&db, step1_id, ty_to_typeid(&db, &Ty::String));
-        assert_eq!(ty_of_arms(&db, &step2), Ty::Unknown);
+        let step2 = ty_difference(&db, step1_id, db.string(None, false));
+        assert_eq!(type_id_of_arms(&db, &step2), db.unknown());
     }
 
     #[test]
@@ -2414,7 +2435,7 @@ mod tests {
         state.pending_guard =
             Some(Guard::TypeCheck { var: Name::new("Х"), type_name: "Число".to_string() });
         let out = tr.transfer_edge(CfgEdgeType::TrueBranch, &state);
-        assert_eq!(overlay_ty(&db, &out, "Х"), Some(Ty::Number));
+        assert_eq!(overlay_type_id(&db, &out, "Х"), Some(db.number(None, None)));
         assert!(out.pending_guard.is_none(), "guard must be consumed");
     }
 
@@ -2426,7 +2447,7 @@ mod tests {
         let mut state = NarrowState::new();
         state.pending_guard = Some(Guard::IsNotUndefined { var: Name::new("Х") });
         let out = tr.transfer_edge(CfgEdgeType::FalseBranch, &state);
-        assert_eq!(overlay_ty(&db, &out, "Х"), Some(Ty::Undefined));
+        assert_eq!(overlay_type_id(&db, &out, "Х"), Some(db.undefined()));
         assert!(out.pending_guard.is_none());
     }
 
@@ -2438,10 +2459,14 @@ mod tests {
         // applying is the correct behaviour — the state is identity.
         let db = kdb();
         let tr = transfer_no_bases(&db);
-        let mut state = state_with(&db, &[("Х", Ty::String)]);
+        let mut state = state_with(&db, &[("Х", db.string(None, false))]);
         state.pending_guard = Some(Guard::IsUndefined { var: Name::new("Х") });
         let out = tr.transfer_edge(CfgEdgeType::Direct, &state);
-        assert_eq!(overlay_ty(&db, &out, "Х"), Some(Ty::String), "narrowing must be untouched");
+        assert_eq!(
+            overlay_type_id(&db, &out, "Х"),
+            Some(db.string(None, false)),
+            "narrowing must be untouched"
+        );
         assert!(out.pending_guard.is_none(), "guard must be cleared on Direct edge");
     }
 
@@ -2459,7 +2484,7 @@ mod tests {
 
         let db = kdb();
         let tr = transfer_no_bases(&db);
-        let state_in = state_with(&db, &[("Х", Ty::String)]);
+        let state_in = state_with(&db, &[("Х", db.string(None, false))]);
         let state_out = tr.transfer_stmt(assign.into_raw(), &state_in, &b.body);
         assert_eq!(state_out.get(&Name::new("Х")), None);
     }
@@ -2478,9 +2503,9 @@ mod tests {
 
         let db = kdb();
         let tr = transfer_no_bases(&db);
-        let state_in = state_with(&db, &[("Х", Ty::String)]);
+        let state_in = state_with(&db, &[("Х", db.string(None, false))]);
         let state_out = tr.transfer_stmt(assign.into_raw(), &state_in, &b.body);
-        assert_eq!(overlay_ty(&db, &state_out, "Х"), Some(Ty::String));
+        assert_eq!(overlay_type_id(&db, &state_out, "Х"), Some(db.string(None, false)));
     }
 
     // --- Task 6.4: reassignment-locality (rhs inference) --------------------
@@ -2497,9 +2522,9 @@ mod tests {
         // Outer narrowing (Х: String) must be OVERWRITTEN by the
         // reassignment, not joined with it — assignment is
         // destructive.
-        let state_in = state_with(&db, &[("Х", Ty::String)]);
+        let state_in = state_with(&db, &[("Х", db.string(None, false))]);
         let state_out = tr.transfer_stmt(assign.into_raw(), &state_in, &b.body);
-        assert_eq!(overlay_ty(&db, &state_out, "Х"), Some(Ty::Number));
+        assert_eq!(overlay_type_id(&db, &state_out, "Х"), Some(db.number(None, None)));
     }
 
     #[test]
@@ -2512,7 +2537,7 @@ mod tests {
         let db = kdb();
         let tr = transfer_no_bases(&db);
         let state_out = tr.transfer_stmt(assign.into_raw(), &NarrowState::new(), &b.body);
-        assert_eq!(overlay_ty(&db, &state_out, "Х"), Some(Ty::String));
+        assert_eq!(overlay_type_id(&db, &state_out, "Х"), Some(db.string(None, false)));
     }
 
     #[test]
@@ -2529,7 +2554,7 @@ mod tests {
         let db = kdb();
         let tr = transfer_no_bases(&db);
         let state_out = tr.transfer_stmt(assign.into_raw(), &NarrowState::new(), &b.body);
-        assert_eq!(overlay_ty(&db, &state_out, "Х"), Some(Ty::Undefined));
+        assert_eq!(overlay_type_id(&db, &state_out, "Х"), Some(db.undefined()));
     }
 
     #[test]
@@ -2541,7 +2566,7 @@ mod tests {
         let db = kdb();
         let tr = transfer_no_bases(&db);
         let out = tr.transfer_stmt(assign.into_raw(), &NarrowState::new(), &b.body);
-        assert_eq!(overlay_ty(&db, &out, "Х"), Some(Ty::Boolean));
+        assert_eq!(overlay_type_id(&db, &out, "Х"), Some(db.boolean()));
     }
 
     #[test]
@@ -2553,7 +2578,7 @@ mod tests {
         let db = kdb();
         let tr = transfer_no_bases(&db);
         let out = tr.transfer_stmt(assign.into_raw(), &NarrowState::new(), &b.body);
-        assert_eq!(overlay_ty(&db, &out, "Х"), Some(Ty::Date));
+        assert_eq!(overlay_type_id(&db, &out, "Х"), Some(db.date(DateComponent::DateTime)));
     }
 
     #[test]
@@ -2565,7 +2590,7 @@ mod tests {
         let db = kdb();
         let tr = transfer_no_bases(&db);
         let out = tr.transfer_stmt(assign.into_raw(), &NarrowState::new(), &b.body);
-        assert_eq!(overlay_ty(&db, &out, "Х"), Some(Ty::Null));
+        assert_eq!(overlay_type_id(&db, &out, "Х"), Some(db.null()));
     }
 
     #[test]
@@ -2579,9 +2604,9 @@ mod tests {
         let assign = b.assign(x_tgt, y_val);
 
         let db = kdb();
-        let tr = transfer_with_bases(&db, &[("Y", Ty::Number)]);
+        let tr = transfer_with_bases(&db, &[("Y", db.number(None, None))]);
         let state_out = tr.transfer_stmt(assign.into_raw(), &NarrowState::new(), &b.body);
-        assert_eq!(overlay_ty(&db, &state_out, "Х"), Some(Ty::Number));
+        assert_eq!(overlay_type_id(&db, &state_out, "Х"), Some(db.number(None, None)));
     }
 
     #[test]
@@ -2596,10 +2621,13 @@ mod tests {
         let assign = b.assign(x_tgt, y_val);
 
         let db = kdb();
-        let tr = transfer_with_bases(&db, &[("Y", Ty::union(vec![Ty::Number, Ty::String]))]);
-        let state_in = state_with(&db, &[("Y", Ty::String)]);
+        let tr = transfer_with_bases(
+            &db,
+            &[("Y", db.union(vec![db.number(None, None), db.string(None, false)]))],
+        );
+        let state_in = state_with(&db, &[("Y", db.string(None, false))]);
         let state_out = tr.transfer_stmt(assign.into_raw(), &state_in, &b.body);
-        assert_eq!(overlay_ty(&db, &state_out, "Х"), Some(Ty::String));
+        assert_eq!(overlay_type_id(&db, &state_out, "Х"), Some(db.string(None, false)));
     }
 
     #[test]
@@ -2617,7 +2645,7 @@ mod tests {
 
         let db = kdb();
         let tr = transfer_no_bases(&db);
-        let state_in = state_with(&db, &[("Х", Ty::String)]);
+        let state_in = state_with(&db, &[("Х", db.string(None, false))]);
         let state_out = tr.transfer_stmt(assign.into_raw(), &state_in, &b.body);
         assert_eq!(state_out.get(&Name::new("Х")), None);
     }
@@ -2632,10 +2660,10 @@ mod tests {
 
         let db = kdb();
         let tr = transfer_no_bases(&db);
-        let state_in = state_with(&db, &[("Х", Ty::String), ("Y", Ty::Boolean)]);
+        let state_in = state_with(&db, &[("Х", db.string(None, false)), ("Y", db.boolean())]);
         let state_out = tr.transfer_stmt(assign.into_raw(), &state_in, &b.body);
-        assert_eq!(overlay_ty(&db, &state_out, "Y"), Some(Ty::Boolean));
-        assert_eq!(overlay_ty(&db, &state_out, "Х"), Some(Ty::Number));
+        assert_eq!(overlay_type_id(&db, &state_out, "Y"), Some(db.boolean()));
+        assert_eq!(overlay_type_id(&db, &state_out, "Х"), Some(db.number(None, None)));
     }
 
     #[test]
@@ -2710,8 +2738,8 @@ mod tests {
             .block_in(then_block_idx)
             .expect("then-block must have an IN state after solving");
         assert_eq!(
-            overlay_ty(&db, then_in, "Х"),
-            Some(Ty::String),
+            overlay_type_id(&db, then_in, "Х"),
+            Some(db.string(None, false)),
             "IN[then-block] must carry Х → String after TrueBranch narrowing, got {then_in:?}"
         );
     }
@@ -2763,7 +2791,7 @@ mod tests {
         let mut bases = FxHashMap::default();
         bases.insert(
             fold_name(&Name::new("Х")),
-            ty_to_typeid(&db, &Ty::union(vec![Ty::Number, Ty::String])),
+            db.union(vec![db.number(None, None), db.string(None, false)]),
         );
         let result = narrow_body(&db, body, bases).expect("narrowing analysis must converge");
         let cfg = result.cfg();
@@ -2785,8 +2813,8 @@ mod tests {
             .block_in(else_block_idx)
             .expect("else-block must have an IN state after solving");
         assert_eq!(
-            overlay_ty(&db, else_in, "Х"),
-            Some(Ty::Number),
+            overlay_type_id(&db, else_in, "Х"),
+            Some(db.number(None, None)),
             "IN[else-block] must carry Х → Number (= Union(Number, String) \\ String), got {else_in:?}"
         );
     }
@@ -2847,8 +2875,8 @@ mod tests {
             .block_in(then_block_idx)
             .expect("then-block must have an IN state after solving");
         assert_eq!(
-            overlay_ty(&db, then_in, "Х"),
-            Some(Ty::String),
+            overlay_type_id(&db, then_in, "Х"),
+            Some(db.string(None, false)),
             "IN[then-block] carries guard narrowing, got {then_in:?}"
         );
 
@@ -2856,8 +2884,8 @@ mod tests {
             .block_out(then_block_idx)
             .expect("then-block must have an OUT state after solving");
         assert_eq!(
-            overlay_ty(&db, then_out, "Х"),
-            Some(Ty::Number),
+            overlay_type_id(&db, then_out, "Х"),
+            Some(db.number(None, None)),
             "OUT[then-block] must reflect the Х = 42 reassignment, got {then_out:?}"
         );
     }
@@ -2935,12 +2963,11 @@ mod tests {
         else_body_path: Option<ExprIdx>,
     }
 
-    fn build_probe_if_then_else(bases: &[(&str, Ty)]) -> NarrowProbe {
+    fn build_probe_if_then_else(
+        bases: impl FnOnce(&dyn TypeKernelDb) -> FxHashMap<Name, TypeId>,
+    ) -> NarrowProbe {
         let db = kdb();
-        let bases: FxHashMap<Name, TypeId> = bases
-            .iter()
-            .map(|(name, ty)| (fold_name(&Name::new(name)), ty_to_typeid(&db, ty)))
-            .collect();
+        let bases = bases(&db);
         let mut b = ExprBuilder::new();
 
         let receiver = b.path("Х");
@@ -3050,8 +3077,8 @@ mod tests {
             narrow_body(&db, body, FxHashMap::default()).expect("narrowing analysis must converge");
 
         assert_eq!(
-            read_ty(&db, narrowed_type_at(&db, &result, receiver, &Name::new("Х"))),
-            Some(Ty::Number),
+            narrowed_type_at(&db, &result, receiver, &Name::new("Х")),
+            Some(db.number(None, None)),
             "receiver must see pre-narrow overlay (Х → Number from prior assign), NOT the post-narrow String from the guard"
         );
 
@@ -3059,8 +3086,8 @@ mod tests {
         // narrowing. Pinning this in the same test guards against a
         // future regression that disables narrowing wholesale.
         assert_eq!(
-            read_ty(&db, narrowed_type_at(&db, &result, then_rhs, &Name::new("Х"))),
-            Some(Ty::String),
+            narrowed_type_at(&db, &result, then_rhs, &Name::new("Х")),
+            Some(db.string(None, false)),
             "then-body Х must see the guard's narrowing to Строка"
         );
     }
@@ -3072,13 +3099,11 @@ mod tests {
         // user-facing win of narrowing: hover on `Х` inside `Если
         // ТипЗнч(Х) = Тип("Строка") Тогда … КонецЕсли` reports
         // `Строка`, not the original union / unknown.
-        let probe = build_probe_if_then_else(&[]);
+        let probe = build_probe_if_then_else(|_| FxHashMap::default());
+        let expected = probe.db.string(None, false);
         assert_eq!(
-            read_ty(
-                &probe.db,
-                narrowed_type_at(&probe.db, &probe.result, probe.then_body_path, &Name::new("Х"))
-            ),
-            Some(Ty::String),
+            narrowed_type_at(&probe.db, &probe.result, probe.then_body_path, &Name::new("Х")),
+            Some(expected),
             "then-body Х must carry the TrueBranch narrowing Х → Строка"
         );
     }
@@ -3089,11 +3114,18 @@ mod tests {
         // FalseBranch of `ТипЗнч(Х) = Тип("Строка")`, Task 6.3's
         // `ty_difference` collapses the union to the remaining
         // member, so the else-block's IN state pins Х → Number.
-        let probe = build_probe_if_then_else(&[("Х", Ty::union(vec![Ty::Number, Ty::String]))]);
+        let probe = build_probe_if_then_else(|db| {
+            let mut bases = FxHashMap::default();
+            bases.insert(
+                fold_name(&Name::new("Х")),
+                db.union(vec![db.number(None, None), db.string(None, false)]),
+            );
+            bases
+        });
         let else_expr = probe.else_body_path.expect("else branch is present");
         assert_eq!(
-            read_ty(&probe.db, narrowed_type_at(&probe.db, &probe.result, else_expr, &Name::new("Х"))),
-            Some(Ty::Number),
+            narrowed_type_at(&probe.db, &probe.result, else_expr, &Name::new("Х")),
+            Some(probe.db.number(None, None)),
             "else-body Х must carry the FalseBranch complement Union(Number,String) \\ String = Number"
         );
     }
@@ -3104,7 +3136,7 @@ mod tests {
         // `None` at every position — even in positions where *other*
         // names are narrowed. Protects against accidentally leaking
         // one variable's overlay to another.
-        let probe = build_probe_if_then_else(&[]);
+        let probe = build_probe_if_then_else(|_| FxHashMap::default());
         assert_eq!(
             narrowed_type_at(&probe.db, &probe.result, probe.then_body_path, &Name::new("Y")),
             None,
@@ -3148,7 +3180,7 @@ mod tests {
         // (here, a stray expression we allocate but never wire into
         // any statement or vertex), `narrowed_type_at` must return
         // `None` rather than panicking or picking a random vertex.
-        let probe = build_probe_if_then_else(&[]);
+        let probe = build_probe_if_then_else(|_| FxHashMap::default());
         let stray_expr = Idx::<Expr>::from_raw(RawIdx::from(u32::MAX - 1));
         assert_eq!(
             narrowed_type_at(&probe.db, &probe.result, stray_expr, &Name::new("Х")),
@@ -3208,21 +3240,21 @@ mod tests {
         let mut bases = FxHashMap::default();
         bases.insert(
             fold_name(&Name::new("Х")),
-            ty_to_typeid(&db, &Ty::union(vec![Ty::Number, Ty::String])),
+            db.union(vec![db.number(None, None), db.string(None, false)]),
         );
         let result = narrow_body(&db, body, bases).expect("narrowing analysis must converge");
 
         assert_eq!(
-            read_ty(&db, narrowed_type_at(&db, &result, elsif_receiver, &Name::new("Х"))),
-            Some(Ty::Number),
+            narrowed_type_at(&db, &result, elsif_receiver, &Name::new("Х")),
+            Some(db.number(None, None)),
             "elsif-condition receiver must see the FalseBranch-complement from the first Conditional (Number), not its own elsif narrowing target (Дата)"
         );
 
         // Control: inside the elsif's then-body, the overlay is
         // narrowed to the elsif's target type (Дата).
         assert_eq!(
-            read_ty(&db, narrowed_type_at(&db, &result, elsif_rhs, &Name::new("Х"))),
-            Some(Ty::Date),
+            narrowed_type_at(&db, &result, elsif_rhs, &Name::new("Х")),
+            Some(db.date(DateComponent::DateTime)),
             "elsif then-body Х must see the TrueBranch narrowing to Дата"
         );
     }
@@ -3272,16 +3304,16 @@ mod tests {
             narrow_body(&db, body, FxHashMap::default()).expect("narrowing analysis must converge");
 
         assert_eq!(
-            read_ty(&db, narrowed_type_at(&db, &result, receiver, &Name::new("Х"))),
-            Some(Ty::union(vec![Ty::Number, Ty::String])),
+            narrowed_type_at(&db, &result, receiver, &Name::new("Х")),
+            Some(db.union(vec![db.number(None, None), db.string(None, false)])),
             "while-condition receiver must see the merged pre-narrow overlay Union(Number, String), not either side in isolation"
         );
 
         // Control: inside the loop body, the guard's narrowing to
         // Строка is visible through the TrueBranch edge.
         assert_eq!(
-            read_ty(&db, narrowed_type_at(&db, &result, body_rhs, &Name::new("Х"))),
-            Some(Ty::String),
+            narrowed_type_at(&db, &result, body_rhs, &Name::new("Х")),
+            Some(db.string(None, false)),
             "while-body Х must see the TrueBranch narrowing to Строка"
         );
     }
