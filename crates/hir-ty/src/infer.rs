@@ -37,7 +37,6 @@ use hir_def::body::Body;
 use hir_def::hir::{BinaryOp, Expr, ExprIdx, Literal, Stmt, StmtIdx, UnaryOp};
 use hir_def::resolver::Resolver;
 use hir_def::ty::FunctionSignature;
-use hir_def::ty::Ty;
 use hir_def::{sdbl_hir_for_file_query, DefWithBodyId, ExprId, MethodIdInput, Name, SdblExprId};
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
@@ -49,7 +48,6 @@ use crate::db::HirDatabase;
 use crate::lower::TyLoweringContext;
 use crate::method_resolution;
 use crate::platform_manager_lookup::{resolve_platform_manager_method, PlatformMethodResolution};
-use crate::ty_bridge::typeid_to_ty;
 
 /// Result of type inference for a file/module.
 ///
@@ -70,9 +68,7 @@ pub struct InferenceResult {
     /// map = that body's `ExprId -> TypeId`.
     ///
     /// Phase 3 §4.D: inner value storage migrated from `Ty` to `TypeId`.
-    /// Callers needing the `Ty` view bridge via [`Self::type_of_expr_in`]
-    /// (which takes `db` and returns owned `Ty`), or convert raw `TypeId`
-    /// values through [`crate::ty_bridge::typeid_to_ty`].
+    /// Read raw entries via [`Self::type_id_of_expr_in`].
     ///
     /// Shape note: M3 ships this as a nested map, not a flat
     /// `FxHashMap<(DefWithBodyId, ExprId), TypeId>`. No current caller uses
@@ -96,7 +92,7 @@ pub struct InferenceResult {
     /// name). Useful for name-based completion which has no body context.
     /// For binding-anchored lookups (hover on `Для Каждого X Из …`
     /// declaration site, classic-for counter, parameter), prefer
-    /// [`InferenceResult::binding_type_in`]: this map collides on
+    /// [`InferenceResult::type_id_of_binding_in`]: this map collides on
     /// shadowing (same name across procedures or repeated within one
     /// body), `binding_types_by_body` does not.
     pub var_types: FxHashMap<String, TypeId>,
@@ -183,56 +179,23 @@ pub struct ImplicitLocalAssignment {
 }
 
 impl InferenceResult {
-    /// Get the type of an expression in a specific body.
+    /// Type of an expression in a specific body, as a kernel `TypeId`.
     ///
     /// `owner` identifies the body — `DefWithBodyId::Method(local_id)`
     /// for a procedure / function, `DefWithBodyId::ModuleCode` for
-    /// module-level code. Returns `None` if inference produced no entry
+    /// module-level code. Returns `None` when no inference entry exists
     /// for that `(owner, expr)` pair.
-    ///
-    /// Phase 3 §4.D: bridges the stored `TypeId` to owned `Ty` via the
-    /// kernel; signature now takes `db` and returns `Option<Ty>` (owned)
-    /// instead of `Option<&Ty>`. Internal callers that already hold the
-    /// `TypeId` should read the raw map (`expr_types_by_body`) directly.
-    pub fn type_of_expr_in(
-        &self,
-        db: &dyn TypeKernelDb,
-        owner: DefWithBodyId,
-        expr: ExprId,
-    ) -> Option<Ty> {
-        let id = *self.expr_types_by_body.get(&owner)?.get(&expr)?;
-        Some(typeid_to_ty(db, id))
-    }
-
-    /// Raw `TypeId` view of the per-(owner, expr) entry. Cheaper than
-    /// [`Self::type_of_expr_in`] for callers that can stay in the
-    /// kernel space (no bridge round-trip). Returns `None` when no
-    /// inference entry exists.
     pub fn type_id_of_expr_in(&self, owner: DefWithBodyId, expr: ExprId) -> Option<TypeId> {
         self.expr_types_by_body.get(&owner)?.get(&expr).copied()
     }
 
-    /// Get the inferred type of a specific binding in `owner`'s body.
+    /// Inferred type of a specific binding in `owner`'s body, as a kernel
+    /// `TypeId`.
     ///
     /// Used by hover on declaration-site identifiers (loop variables,
     /// classic-for counters, parameters) to avoid name shadowing across
     /// or within bodies — two bindings with the same lowercase name
     /// resolve to distinct entries here.
-    ///
-    /// Phase 3 §4.D: see [`Self::type_of_expr_in`] for the signature
-    /// rationale.
-    pub fn binding_type_in(
-        &self,
-        db: &dyn TypeKernelDb,
-        owner: DefWithBodyId,
-        id: BindingId,
-    ) -> Option<Ty> {
-        let typeid = *self.binding_types_by_body.get(&owner)?.get(&id)?;
-        Some(typeid_to_ty(db, typeid))
-    }
-
-    /// Raw `TypeId` view of the per-(owner, binding) entry. Kernel-native
-    /// counterpart to [`Self::binding_type_in`].
     pub fn type_id_of_binding_in(&self, owner: DefWithBodyId, id: BindingId) -> Option<TypeId> {
         self.binding_types_by_body.get(&owner)?.get(&id).copied()
     }
@@ -519,7 +482,7 @@ pub struct InferenceContext<'db> {
     /// Per-binding types written by declaration-site arms
     /// (`Stmt::ForEach`, `Stmt::For`). Keyed by `BindingId` so name
     /// shadowing within the body does not collide. Surfaced through
-    /// [`InferenceResult::binding_type_in`] for hover.
+    /// [`InferenceResult::type_id_of_binding_in`] for hover.
     binding_types: FxHashMap<BindingId, TypeId>,
 
     /// Per-body `ExprId -> Ty` cache. Doubles as the memoisation table
@@ -717,20 +680,8 @@ impl InferOwnerResult {
         }
     }
 
-    /// Type of expression `expr` within this owner's body, if inference
-    /// recorded one. Bridges the stored `TypeId` to owned `Ty` via the
-    /// type kernel.
-    ///
-    /// Phase 3 §4.D: signature takes `db` and returns `Option<Ty>`
-    /// (owned) instead of `Option<&Ty>`. Callers that can stay in
-    /// kernel space should use [`Self::type_id_of_expr`].
-    pub fn type_of_expr(&self, db: &dyn TypeKernelDb, expr: ExprId) -> Option<Ty> {
-        let id = self.type_id_of_expr(expr)?;
-        Some(typeid_to_ty(db, id))
-    }
-
-    /// Raw `TypeId` view of `expr` within this owner's body — kernel-native
-    /// counterpart to [`Self::type_of_expr`].
+    /// Type of expression `expr` within this owner's body as a kernel
+    /// `TypeId`, if inference recorded one.
     pub fn type_id_of_expr(&self, expr: ExprId) -> Option<TypeId> {
         match self {
             InferOwnerResult::Method(r) => r.expr_types.get(&expr).copied(),
@@ -753,19 +704,9 @@ impl InferOwnerResult {
         }
     }
 
-    /// Type of `binding` within this owner's body, if inference
-    /// recorded one. Equivalent to
-    /// `InferenceResult::binding_type_in(owner, binding)` but reads
-    /// directly from the per-owner payload.
-    ///
-    /// Phase 3 §4.D: see [`Self::type_of_expr`] for the signature
-    /// rationale.
-    pub fn type_of_binding(&self, db: &dyn TypeKernelDb, binding: BindingId) -> Option<Ty> {
-        let id = self.type_id_of_binding(binding)?;
-        Some(typeid_to_ty(db, id))
-    }
-
-    /// Raw `TypeId` view of `binding` within this owner's body.
+    /// Type of `binding` within this owner's body as a kernel `TypeId`,
+    /// if inference recorded one. Reads directly from the per-owner
+    /// payload (no body-keyed indirection).
     pub fn type_id_of_binding(&self, binding: BindingId) -> Option<TypeId> {
         match self {
             InferOwnerResult::Method(r) => r.binding_types.get(&binding).copied(),
@@ -3903,6 +3844,7 @@ mod tests {
     use super::*;
     use crate::ty_bridge::{ty_to_typeid, typeid_to_ty};
     use bsl_types::testing::InMemoryDb;
+    use hir_def::ty::Ty;
 
     /// `ParamsShape` stores kernel ids directly; bridge back only when a
     /// legacy `Ty` view is needed by an assertion or downstream payload.
@@ -4210,8 +4152,11 @@ mod tests {
         let routed = InferOwnerResult::Method(Arc::new(body));
 
         assert_eq!(routed.owner(), DefWithBodyId::Method(2));
-        assert_eq!(routed.type_of_expr(&db, make_expr(5)), Some(Ty::String));
-        assert_eq!(routed.type_of_expr(&db, make_expr(99)), None);
+        assert_eq!(
+            routed.type_id_of_expr(make_expr(5)).map(|id| typeid_to_ty(&db, id)),
+            Some(Ty::String)
+        );
+        assert_eq!(routed.type_id_of_expr(make_expr(99)), None);
         assert_eq!(
             routed.var_types().get("х").copied().map(|id| typeid_to_ty(&db, id)),
             Some(Ty::Number),
@@ -4230,7 +4175,10 @@ mod tests {
         let routed = InferOwnerResult::ModuleCode(Arc::new(mc));
 
         assert_eq!(routed.owner(), DefWithBodyId::ModuleCode);
-        assert_eq!(routed.type_of_expr(&db, make_expr(1)), Some(Ty::Date));
+        assert_eq!(
+            routed.type_id_of_expr(make_expr(1)).map(|id| typeid_to_ty(&db, id)),
+            Some(Ty::Date)
+        );
         assert_eq!(
             routed.var_types().get("у").copied().map(|id| typeid_to_ty(&db, id)),
             Some(Ty::Boolean),

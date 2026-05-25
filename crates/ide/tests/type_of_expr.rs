@@ -82,7 +82,7 @@ fn first_field_expr(root: &syntax::SyntaxNode, field_name: &str) -> Option<ast::
 fn type_of_expr_resolves_across_bodies() {
     // Two different method bodies each produce their own expr_types
     // map. Before Task 9 the merged `InferenceResult` dropped both, so
-    // `type_of_expr_in` returned None on either. This test asserts both
+    // `type_id_of_expr_in` returned None on either. This test asserts both
     // maps survived the merge.
     let fixture = r#"
 //- /test.bsl
@@ -161,7 +161,9 @@ fn type_of_call_expr_matches_infer() {
         })
         .expect("BodySourceMap must locate the literal ExprId");
     assert_eq!(
-        infer.type_of_expr_in(&db, owner_match, expr_match),
+        infer
+            .type_id_of_expr_in(owner_match, expr_match)
+            .map(|id| hir::ty_bridge::typeid_to_ty(&db, id)),
         Some(Ty::Number),
         "direct expr_types_by_body lookup must agree with Semantics::type_of_expr"
     );
@@ -203,7 +205,9 @@ fn type_of_module_level_expr_resolves() {
         .expect("module-level BodySourceMap must locate the literal");
     let infer = db.infer(file_id);
     assert_eq!(
-        infer.type_of_expr_in(&db, DefWithBodyId::ModuleCode, expr_id),
+        infer
+            .type_id_of_expr_in(DefWithBodyId::ModuleCode, expr_id)
+            .map(|id| hir::ty_bridge::typeid_to_ty(&db, id)),
         Some(Ty::Number),
         "direct ModuleCode lookup must agree with Semantics::type_of_expr"
     );
@@ -258,7 +262,7 @@ fn type_of_field_expr_matches_infer() {
         .expect("BodySourceMap must locate the field-expr ExprId");
     let infer = db.infer(file_id);
     assert_eq!(
-        infer.type_of_expr_in(&db, owner, expr_id),
+        infer.type_id_of_expr_in(owner, expr_id).map(|id| hir::ty_bridge::typeid_to_ty(&db, id)),
         Some(Ty::Number),
         "direct expr_types_by_body lookup must agree with Semantics::type_of_expr"
     );
