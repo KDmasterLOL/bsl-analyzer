@@ -273,7 +273,7 @@ impl SdblType {
 impl SdblType {
     /// Locale-aware human-readable rendering of this query-language type.
     ///
-    /// Mirrors [`hir_def::ty::Ty::display_name`] for the BSL side: lets a
+    /// Mirrors the BSL-side type display: lets a
     /// future SDBL-diagnostic frame substitute Russian or English type
     /// names per `[output] display_language` without re-parsing the
     /// `Display`-formatted output. Today's [`std::fmt::Display`] impl on
@@ -310,6 +310,7 @@ impl SdblType {
                 };
                 match (precision, scale) {
                     (Some(p), Some(s)) => format!("{head}({p}, {s})"),
+                    (Some(p), None) => format!("{head}({p})"),
                     _ => head.into(),
                 }
             }
@@ -411,8 +412,10 @@ impl std::fmt::Display for SdblType {
             }
             Self::Number { precision, scale } => {
                 write!(f, "Число")?;
-                if let (Some(p), Some(s)) = (precision, scale) {
-                    write!(f, "({}, {})", p, s)?;
+                match (precision, scale) {
+                    (Some(p), Some(s)) => write!(f, "({}, {})", p, s)?,
+                    (Some(p), None) => write!(f, "({})", p)?,
+                    _ => {}
                 }
                 Ok(())
             }
@@ -490,6 +493,8 @@ mod tests {
         assert_eq!(SdblType::string_with_length(17).to_string(), "Строка(17)");
         assert_eq!(SdblType::number().to_string(), "Число");
         assert_eq!(SdblType::number_with_precision(10, 2).to_string(), "Число(10, 2)");
+        // Precision-only Number renders the lone parenthesised arg.
+        assert_eq!(SdblType::Number { precision: Some(15), scale: None }.to_string(), "Число(15)");
         assert_eq!(SdblType::Date.to_string(), "Дата");
         assert_eq!(SdblType::AnyRef.to_string(), "ЛюбаяСсылка");
         assert_eq!(SdblType::AnyObjectRef { mdo_type: MdoType::Catalog }.to_string(), "Справочник");
@@ -536,6 +541,15 @@ mod tests {
         assert_eq!(
             SdblType::number_with_precision(10, 2).display_name(Locale::En),
             "Number(10, 2)"
+        );
+        // Precision-only Number renders the lone arg in either locale.
+        assert_eq!(
+            SdblType::Number { precision: Some(15), scale: None }.display_name(Locale::Ru),
+            "Число(15)"
+        );
+        assert_eq!(
+            SdblType::Number { precision: Some(15), scale: None }.display_name(Locale::En),
+            "Number(15)"
         );
 
         // MDO ref: label switches per locale, source-declared `name` stays

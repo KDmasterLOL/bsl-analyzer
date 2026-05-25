@@ -4,7 +4,7 @@
 //! These tests use the shared Designer fixture and inject only module text into
 //! the salsa database. The fixture directory itself is never written.
 
-use hir::{HirDatabase, MetadataKind, Name, Ty};
+use hir::{Builders, HirDatabase, MetadataKind, TypeId, TypeKernelDb, TypeKind};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
 use std::fs;
@@ -60,8 +60,29 @@ fn setup_at_with_config(
     (db, file_id)
 }
 
-fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<Ty> {
-    db.infer(file_id).var_types.get(var_lower).cloned()
+fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<TypeId> {
+    db.infer(file_id).var_types.get(var_lower).copied()
+}
+
+fn is_metadata_ref(db: &RootDatabaseImpl, ty: TypeId, kind: MetadataKind, name: &str) -> bool {
+    matches!(
+        db.lookup_type(ty),
+        TypeKind::MetadataRef(facet) if facet.kind == kind && facet.name.as_str() == name
+    )
+}
+
+fn assert_metadata_ref(
+    db: &RootDatabaseImpl,
+    actual: Option<TypeId>,
+    kind: MetadataKind,
+    name: &str,
+) {
+    let actual = actual.expect("expected metadata ref type");
+    assert!(
+        is_metadata_ref(db, actual, kind, name),
+        "expected MetadataRef({kind:?}, {name}), got {:?}",
+        db.lookup_type(actual)
+    );
 }
 
 fn temp_designer_config_with_register_recorders() -> PathBuf {
@@ -149,12 +170,11 @@ fn infer_this_record_set_resolves_in_information_register_module() {
 КонецФункции
 "#;
     let (db, file_id) = setup_at(register_recordset_module_path(), text);
-    assert_eq!(
+    assert_metadata_ref(
+        &db,
         var_ty(&db, file_id, "набор"),
-        Some(Ty::MetadataRef {
-            kind: MetadataKind::InformationRegisterRecordSet,
-            name: Name::new("РегистрСведений1"),
-        }),
+        MetadataKind::InformationRegisterRecordSet,
+        "РегистрСведений1",
     );
 }
 
@@ -162,12 +182,11 @@ fn infer_this_record_set_resolves_in_information_register_module() {
 fn infer_this_record_set_english_spelling() {
     let text = "Функция Тест()\n    T = ThisObject;\n    Return T;\nКонецФункции";
     let (db, file_id) = setup_at(register_recordset_module_path(), text);
-    assert_eq!(
+    assert_metadata_ref(
+        &db,
         var_ty(&db, file_id, "t"),
-        Some(Ty::MetadataRef {
-            kind: MetadataKind::InformationRegisterRecordSet,
-            name: Name::new("РегистрСведений1"),
-        }),
+        MetadataKind::InformationRegisterRecordSet,
+        "РегистрСведений1",
     );
 }
 
@@ -181,12 +200,11 @@ fn for_each_yields_information_register_record_kind() {
 КонецПроцедуры
 "#;
     let (db, file_id) = setup_at(register_recordset_module_path(), text);
-    assert_eq!(
+    assert_metadata_ref(
+        &db,
         var_ty(&db, file_id, "з"),
-        Some(Ty::MetadataRef {
-            kind: MetadataKind::InformationRegisterRecord,
-            name: Name::new("РегистрСведений1"),
-        }),
+        MetadataKind::InformationRegisterRecord,
+        "РегистрСведений1",
     );
 }
 
@@ -200,12 +218,7 @@ fn record_dimension_resolves() {
 КонецПроцедуры
 "#;
     let (db, file_id) = setup_at(register_recordset_module_path(), text);
-    assert_eq!(
-        var_ty(&db, file_id, "р"),
-        Some(Ty::MetadataRef {
-            kind: MetadataKind::CatalogRef, name: Name::new("Справочник1")
-        }),
-    );
+    assert_metadata_ref(&db, var_ty(&db, file_id, "р"), MetadataKind::CatalogRef, "Справочник1");
 }
 
 #[test]
@@ -227,7 +240,12 @@ fn record_standard_period_resolves() {
 "#;
     let (db, file_id) =
         setup_at_with_config(temp_register_recordset_module_path(&config_path), config_path, text);
-    assert_eq!(var_ty(&db, file_id, "п"), Some(Ty::Date));
+    let actual = var_ty(&db, file_id, "п").expect("П must be inferred");
+    assert!(
+        matches!(db.lookup_type(actual), TypeKind::Date(_)),
+        "Период must resolve to Date, got {:?}",
+        db.lookup_type(actual)
+    );
 }
 
 #[test]
@@ -240,7 +258,7 @@ fn record_standard_active_resolves() {
 КонецПроцедуры
 "#;
     let (db, file_id) = setup_at(register_recordset_module_path(), text);
-    assert_eq!(var_ty(&db, file_id, "а"), Some(Ty::Boolean));
+    assert_eq!(var_ty(&db, file_id, "а"), Some(db.boolean()));
 }
 
 #[test]
@@ -255,16 +273,17 @@ fn record_recorder_resolves_to_union_of_recorders() {
 "#;
     let (db, file_id) =
         setup_at_with_config(temp_register_recordset_module_path(&config_path), config_path, text);
-    assert_eq!(
-        var_ty(&db, file_id, "р"),
-        Some(Ty::union(vec![
-            Ty::MetadataRef {
-                kind: MetadataKind::DocumentRef, name: Name::new("ДокументE2E1")
-            },
-            Ty::MetadataRef {
-                kind: MetadataKind::DocumentRef, name: Name::new("ДокументE2E2")
-            },
-        ])),
+    let actual = var_ty(&db, file_id, "р").expect("Регистратор must be inferred");
+    assert!(
+        matches!(db.lookup_type(actual), TypeKind::Union(members)
+            if members.iter().any(|member| {
+                is_metadata_ref(&db, *member, MetadataKind::DocumentRef, "ДокументE2E1")
+            }) && members.iter().any(|member| {
+                is_metadata_ref(&db, *member, MetadataKind::DocumentRef, "ДокументE2E2")
+            })
+        ),
+        "Регистратор must resolve to union of recorder refs, got {:?}",
+        db.lookup_type(actual),
     );
 }
 
@@ -281,7 +300,7 @@ fn filter_recorder_resolves_to_filter_item() {
         config_path,
         text,
     );
-    assert_eq!(var_ty(&db, file_id, "э"), Some(Ty::PlatformObject(Name::new("ЭлементОтбора"))),);
+    assert_eq!(var_ty(&db, file_id, "э"), Some(db.platform_object("ЭлементОтбора".to_string())),);
 }
 
 #[test]
@@ -297,7 +316,7 @@ fn filter_calculation_register_recorder_resolves() {
         config_path,
         text,
     );
-    assert_eq!(var_ty(&db, file_id, "э"), Some(Ty::PlatformObject(Name::new("ЭлементОтбора"))),);
+    assert_eq!(var_ty(&db, file_id, "э"), Some(db.platform_object("ЭлементОтбора".to_string())),);
 }
 
 #[test]
@@ -310,7 +329,7 @@ fn filter_period_resolves_for_periodic_inforeg() {
 "#;
     let (db, file_id) =
         setup_at_with_config(temp_register_recordset_module_path(&config_path), config_path, text);
-    assert_eq!(var_ty(&db, file_id, "э"), Some(Ty::PlatformObject(Name::new("ЭлементОтбора"))),);
+    assert_eq!(var_ty(&db, file_id, "э"), Some(db.platform_object("ЭлементОтбора".to_string())),);
 }
 
 #[test]
@@ -322,7 +341,7 @@ fn additional_properties_implicit_bare_resolves() {
 КонецФункции
 "#;
     let (db, file_id) = setup_at(register_recordset_module_path(), text);
-    assert_eq!(var_ty(&db, file_id, "с"), Some(Ty::Structure));
+    assert_eq!(var_ty(&db, file_id, "с"), Some(db.structure(None)));
 }
 
 #[test]
@@ -337,13 +356,17 @@ fn object_module_does_not_produce_record_set_metadata_ref() {
     assert!(
         !matches!(
             var_ty(&db, file_id, "х"),
-            Some(Ty::MetadataRef {
-                kind: MetadataKind::InformationRegisterRecordSet
+            Some(ty) if matches!(
+                db.lookup_type(ty),
+                TypeKind::MetadataRef(facet)
+                    if matches!(
+                        facet.kind,
+                        MetadataKind::InformationRegisterRecordSet
                     | MetadataKind::AccumulationRegisterRecordSet
                     | MetadataKind::AccountingRegisterRecordSet
-                    | MetadataKind::CalculationRegisterRecordSet,
-                ..
-            })
+                    | MetadataKind::CalculationRegisterRecordSet
+                    )
+            )
         ),
         "Catalog ObjectModule must not infer any *RecordSet kind",
     );
@@ -360,16 +383,17 @@ fn common_module_does_not_produce_record_set_metadata_ref() {
     let (db, file_id) = setup_at(common_module_path(), text);
 
     let infer = db.infer(file_id);
-    let has_record_set = infer.var_types.values().any(|ty| {
+    let has_record_set = infer.var_types.values().any(|tid| {
         matches!(
-            ty,
-            Ty::MetadataRef {
-                kind: MetadataKind::InformationRegisterRecordSet
+            db.lookup_type(*tid),
+            TypeKind::MetadataRef(facet)
+                if matches!(
+                    facet.kind,
+                    MetadataKind::InformationRegisterRecordSet
                     | MetadataKind::AccumulationRegisterRecordSet
                     | MetadataKind::AccountingRegisterRecordSet
-                    | MetadataKind::CalculationRegisterRecordSet,
-                ..
-            }
+                    | MetadataKind::CalculationRegisterRecordSet
+                )
         )
     });
     assert!(!has_record_set);

@@ -25,7 +25,7 @@
 //! end-to-end with `InformationRegister`.
 
 use bsl_metadata::MdoType;
-use hir::{HirDatabase, InferenceDiagnostic, Name, Ty};
+use hir::{HirDatabase, InferenceDiagnostic, TypeId, TypeKernelDb, TypeKind};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
 use std::path::PathBuf;
@@ -66,8 +66,20 @@ fn setup_at(path: PathBuf, text: &str) -> (RootDatabaseImpl, FileId) {
     (db, file_id)
 }
 
-fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<Ty> {
-    db.infer(file_id).var_types.get(var_lower).cloned()
+fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<TypeId> {
+    db.infer(file_id).var_types.get(var_lower).copied()
+}
+
+fn assert_this_manager(db: &RootDatabaseImpl, actual: TypeId, mdo_type: MdoType, name: &str) {
+    assert!(
+        matches!(
+            db.lookup_type(actual),
+            TypeKind::ThisManager { owner, .. }
+                if owner.mdo_type == mdo_type && owner.name.as_str() == name
+        ),
+        "expected ThisManager({mdo_type:?}, {name}), got {:?}",
+        db.lookup_type(actual)
+    );
 }
 
 #[test]
@@ -86,10 +98,8 @@ fn infer_this_manager_resolves_to_catalog_owner() {
 КонецФункции
 "#;
     let (db, file_id) = setup_at(catalog_manager_module_path(), text);
-    assert_eq!(
-        var_ty(&db, file_id, "э"),
-        Some(Ty::ThisManager { owner: (MdoType::Catalog, Name::new("Справочник1")) }),
-    );
+    let actual = var_ty(&db, file_id, "э").expect("э must be inferred");
+    assert_this_manager(&db, actual, MdoType::Catalog, "Справочник1");
 }
 
 #[test]
@@ -102,18 +112,16 @@ fn infer_this_manager_english_spelling() {
 КонецФункции
 "#;
     let (db, file_id) = setup_at(catalog_manager_module_path(), text);
-    assert_eq!(
-        var_ty(&db, file_id, "t"),
-        Some(Ty::ThisManager { owner: (MdoType::Catalog, Name::new("Справочник1")) }),
-    );
+    let actual = var_ty(&db, file_id, "t").expect("t must be inferred");
+    assert_this_manager(&db, actual, MdoType::Catalog, "Справочник1");
 }
 
 #[test]
 fn infer_this_manager_resolves_in_information_register_module() {
     // Pins the register-axis claim explicitly. `InformationRegister`'s
     // `manager_type_prefix() = Some("InformationRegisterManager")` is
-    // the gate `Resolver::resolve_this_manager` and
-    // `coerce_to_metadata_ref` share, so a register's
+    // the gate `this_object::resolve_this_manager_owner` and
+    // `coerce_to_metadata_ref_id` share, so a register's
     // `ManagerModule.bsl` must produce `Ty::ThisManager { (Register,
     // name) }` exactly the same way Catalog does. A regression that
     // narrows the gate to a hand-picked subset of `MdoType` (instead
@@ -127,19 +135,13 @@ fn infer_this_manager_resolves_in_information_register_module() {
 КонецФункции
 "#;
     let (db, file_id) = setup_at(register_manager_module_path(), text);
-    assert_eq!(
-        var_ty(&db, file_id, "э"),
-        Some(Ty::ThisManager {
-            owner: (MdoType::InformationRegister, Name::new("РегистрСведений1"))
-        }),
-        "InformationRegister's `ЭтотОбъект` must produce Ty::ThisManager — \
-         no MdoType-narrowing regression in the gate"
-    );
+    let actual = var_ty(&db, file_id, "э").expect("э must be inferred");
+    assert_this_manager(&db, actual, MdoType::InformationRegister, "РегистрСведений1");
 }
 
 #[test]
 fn infer_this_manager_in_common_module_stays_unknown() {
-    // Non-`ManagerModule` files where `resolve_this_manager` returns
+    // Non-`ManagerModule` files where `resolve_this_manager_owner` returns
     // `None` must not produce `Ty::ThisManager`. Common module is the
     // canonical case; pinning it here guards the gate's "manager
     // module only" contract symmetrically to `ThisObject`'s
@@ -152,9 +154,15 @@ fn infer_this_manager_in_common_module_stays_unknown() {
     let (db, file_id) = setup_at(common_module_path(), text);
 
     let infer = db.infer(file_id);
-    let has_this_manager = infer.var_types.values().any(|ty| matches!(ty, Ty::ThisManager { .. }));
+    let has_this_manager = infer
+        .var_types
+        .values()
+        .any(|tid| matches!(db.lookup_type(*tid), TypeKind::ThisManager { .. }));
     assert!(!has_this_manager, "common module must not produce Ty::ThisManager");
-    let has_this_object = infer.var_types.values().any(|ty| matches!(ty, Ty::ThisObject { .. }));
+    let has_this_object = infer
+        .var_types
+        .values()
+        .any(|tid| matches!(db.lookup_type(*tid), TypeKind::ThisObject { .. }));
     assert!(!has_this_object, "common module must not produce Ty::ThisObject either");
 }
 

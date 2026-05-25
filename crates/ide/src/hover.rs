@@ -10,7 +10,10 @@ use bsl_platform::{
     ContextAvailability, MethodLookupInput, PlatformDataInner, PlatformMethod, PlatformProperty,
     TypeNameInput,
 };
-use hir::{classify_token, Field, NameClass, Semantics, Ty, Type as HirType};
+use hir::{
+    classify_token, kernel_type_label, platform_type_key_id, Builders, Field, NameClass, Semantics,
+    Type as HirType, TypeId, TypeKind,
+};
 use ide_db::base_db::Locale;
 use ide_db::RootDatabase;
 use symbol_info::{from_global_function, from_platform_method, render_hover_markdown, Lang};
@@ -85,11 +88,11 @@ fn hover_field<DB: RootDatabase>(
     locale: Locale,
 ) -> Option<HoverResult> {
     let sema = Semantics::new(db);
-    let receiver_ty = sema.type_of_expr(file_id, receiver);
+    let receiver_id = sema.type_of_expr(file_id, receiver);
     let name = token.text();
     let range = token.text_range();
 
-    let property = || hover_platform_property_on_ty(db, &receiver_ty, name, range);
+    let property = || hover_platform_property_on_ty(db, receiver_id, name, range);
     let method = || hover_platform_method_on_token(db, &sema, file_id, token);
 
     if is_call {
@@ -108,9 +111,9 @@ fn hover_field<DB: RootDatabase>(
         }
     }
 
-    if let Some(field) = mdo_field_on_ty(db, file_id, &receiver_ty, name) {
+    if let Some(field) = mdo_field_on_id(db, file_id, receiver_id, name) {
         if field.value_ty.is_some() {
-            return Some(render_mdo_field_hover(&field, name, range, locale));
+            return Some(render_mdo_field_hover(db, &field, name, range, locale));
         }
     }
 
@@ -120,9 +123,9 @@ fn hover_field<DB: RootDatabase>(
     // resolve. The `field_name_receiver` guard on the same function
     // returns `None` only after the qualified-name branch fired, so we
     // get the cross-module hover for free.
-    let inferred_ty = type_of_token(&sema, file_id, token);
+    let inferred_ty = type_of_token(db, &sema, file_id, token);
     if let Some(definition) = sema.resolve_name_to_definition(file_id, token) {
-        return definition_to_hover(db, &definition, range, inferred_ty.as_ref(), locale);
+        return definition_to_hover(db, &definition, range, inferred_ty, locale);
     }
 
     // Final fallback: ask `type_of_expr` on the surrounding FieldExpr
@@ -135,10 +138,10 @@ fn hover_field<DB: RootDatabase>(
     // fallback hover would silently say "No information available" on
     // every form-element name.
     if let Some(parent) = token.parent() {
-        let ty = sema.type_of_expr(file_id, &parent);
-        if !ty.is_unknown() {
+        let id = sema.type_of_expr(file_id, &parent);
+        if !matches!(db.lookup_type(id), TypeKind::Unknown) {
             let mut markup = format!("**{}**\n\n", name);
-            if let Some(type_block) = ty_info_markup(db, &ty, locale) {
+            if let Some(type_block) = ty_info_markup(db, id, locale) {
                 markup.push_str(&type_block);
                 return Some(HoverResult { markup, range: Some(range) });
             }
@@ -148,47 +151,43 @@ fn hover_field<DB: RootDatabase>(
     None
 }
 
-fn mdo_field_on_ty<DB: RootDatabase>(
+fn mdo_field_on_id<DB: RootDatabase>(
     db: &DB,
     file_id: FileId,
-    receiver_ty: &Ty,
+    receiver: TypeId,
     field_name: &str,
 ) -> Option<Field> {
     let needle = field_name.to_lowercase();
-    HirType::new(db, file_id, receiver_ty.clone()).fields().into_iter().find(|field| {
+    HirType::from_id(db, file_id, receiver).fields().into_iter().find(|field| {
         field.name.as_str().to_lowercase() == needle
             || field.english_name.as_str().to_lowercase() == needle
     })
 }
 
-fn render_mdo_field_hover(
+fn render_mdo_field_hover<DB: RootDatabase>(
+    db: &DB,
     field: &Field,
     name: &str,
     range: TextRange,
     locale: Locale,
 ) -> HoverResult {
     let mut markup = format!("**{}**\n\n", name);
-    let detail = if let Some(value_ty) = &field.value_ty {
+    let detail = if let Some(value_ty) = field.value_ty {
         format!(
             "{} → {}",
-            render_hover_ty_detail(&field.ty, locale),
-            render_hover_ty_detail(value_ty, locale),
+            render_hover_ty_detail(db, field.ty, locale),
+            render_hover_ty_detail(db, value_ty, locale),
         )
     } else {
-        render_hover_ty_detail(&field.ty, locale)
+        render_hover_ty_detail(db, field.ty, locale)
     };
     markup.push_str(&format!("**Тип:** {detail}\n\n"));
     HoverResult { markup, range: Some(range) }
 }
 
-fn render_hover_ty_detail(ty: &Ty, locale: Locale) -> String {
-    match ty {
-        Ty::MetadataRef { kind, name } => {
-            format!("{}.{}", kind.display_label(locale), name.as_str())
-        }
-        Ty::Union(_) => ty.display(locale).to_string(),
-        _ => ty.display_name(locale).to_string(),
-    }
+fn render_hover_ty_detail<DB: RootDatabase>(db: &DB, id: TypeId, locale: Locale) -> String {
+    // Phase 3 §4.G.5d: kernel display is the single source of rendering truth.
+    kernel_type_label(db, id, locale, true)
 }
 
 /// Hover for a name in a `FreeName` slot.
@@ -212,11 +211,11 @@ fn hover_free_name<DB: RootDatabase>(
     locale: Locale,
 ) -> Option<HoverResult> {
     let sema = Semantics::new(db);
-    let inferred_ty = type_of_token(&sema, file_id, token);
+    let inferred_ty = type_of_token(db, &sema, file_id, token);
 
     if let Some(definition) = sema.resolve_name_to_definition(file_id, token) {
         if let Some(r) =
-            definition_to_hover(db, &definition, token.text_range(), inferred_ty.as_ref(), locale)
+            definition_to_hover(db, &definition, token.text_range(), inferred_ty, locale)
         {
             return Some(r);
         }
@@ -229,16 +228,12 @@ fn hover_free_name<DB: RootDatabase>(
         // so an earlier `infer.rs` cascade step (var_types, form-self,
         // form-attr, ThisObject, MDO plural) keeps its workspace-specific
         // markup — see `hover_for_global_property` for the full rule.
-        if let Some(r) = hover_for_global_property(
-            db,
-            file_id,
-            token.text(),
-            token.text_range(),
-            inferred_ty.as_ref(),
-        ) {
+        if let Some(r) =
+            hover_for_global_property(db, file_id, token.text(), token.text_range(), inferred_ty)
+        {
             return Some(r);
         }
-        if let Some(ty) = inferred_ty.as_ref() {
+        if let Some(ty) = inferred_ty {
             // Implicit variable (no `Перем`) — surface its inferred type.
             let mut markup = format!("**{}**\n\n", token.text());
             if let Some(type_block) = ty_info_markup(db, ty, locale) {
@@ -272,7 +267,7 @@ fn hover_for_global_property<DB: RootDatabase>(
     file_id: FileId,
     name: &str,
     range: TextRange,
-    inferred_ty: Option<&Ty>,
+    inferred_ty: Option<TypeId>,
 ) -> Option<HoverResult> {
     if bsl_metadata::MdoType::from_plural(name).is_some() {
         return None;
@@ -282,19 +277,19 @@ fn hover_for_global_property<DB: RootDatabase>(
         return None;
     }
     let prop = PlatformDataInner::instance().get_global_property(name)?;
-    if let Some(ty) = inferred_ty {
-        // `infer.rs:1500` lowers `prop.property_types.first()` via
-        // `TyLoweringContext::lower_bare_name`. Replay the same lowering
-        // here and compare exactly — primitive declared types (`Число`,
-        // `Строка`, `Булево`) lift to `Ty::Number` / `Ty::String` /
-        // `Ty::Boolean`, none of which carry a `platform_type_name()`
-        // string matching `Число` directly. A string-equality gate would
-        // false-negative those; full `Ty` equality is what `infer.rs`
-        // step 6 actually produces, so it's the right comparison.
+    if let Some(id) = inferred_ty {
+        // `infer.rs::infer_path_name` lowers `prop.property_types.first()`
+        // via `TyLoweringContext::lower_bare_name_id`. Replay the same
+        // lowering here and compare interned ids — primitive declared
+        // types (`Число`, `Строка`, `Булево`) lift to the kernel number /
+        // string / boolean types, none of which carry a
+        // `platform_type_name()` string matching `Число` directly. A
+        // string-equality gate would false-negative those; interned-id
+        // equality is exactly what `infer.rs` step 6 produces.
         if let Some(declared) = prop.property_types.first() {
-            let expected =
-                hir::TyLoweringContext::new().lower_bare_name(&hir::Name::new(declared.as_str()));
-            if *ty != expected {
+            let expected = hir::TyLoweringContext::new()
+                .lower_bare_name_id(db, &hir::Name::new(declared.as_str()));
+            if id != expected {
                 return None;
             }
         }
@@ -336,23 +331,21 @@ fn append_hbk_mdo_plural_metadata(markup: &mut String, mdo_type: bsl_metadata::M
     append_availability(markup, prop.context.as_ref());
 }
 
-/// Look up a property on `receiver_ty` and render its hover markup.
+/// Look up a property on `receiver` and render its hover markup.
 /// No-op for unknown receivers or non-platform-value type shapes.
 fn hover_platform_property_on_ty<DB: RootDatabase>(
     db: &DB,
-    receiver_ty: &Ty,
+    receiver: TypeId,
     prop_name: &str,
     range: TextRange,
 ) -> Option<HoverResult> {
-    if receiver_ty.is_unknown() {
-        return None;
-    }
     // Form-control receivers carry an ordered platform-type chain
     // `[base, extension?]` — walk reversed (extension first) so
     // hover for `<Pages>.ТекущаяСтраница` finds the extension docs,
     // and falls back to base for shared properties (`Видимость`, …).
-    if let Ty::FormControl { kind, .. } = receiver_ty {
-        for type_name in hir::form_control_platform_type_chain(*kind).iter().rev() {
+    if let TypeKind::FormControl { kind, .. } = db.lookup_type(receiver) {
+        let kind = *kind;
+        for type_name in hir::form_control_platform_type_chain(kind).iter().rev() {
             let input = MethodLookupInput::new(db, type_name.to_string(), prop_name.to_string());
             if let Some(prop) = platform_property_query(db, input) {
                 return Some(render_property_hover(&prop, range));
@@ -360,8 +353,9 @@ fn hover_platform_property_on_ty<DB: RootDatabase>(
         }
         return None;
     }
-    let type_key = receiver_ty.platform_type_name()?;
-    let input = MethodLookupInput::new(db, type_key.to_string(), prop_name.to_string());
+    // Unknown / non-platform-value receivers have no scalar key → no-op.
+    let type_key = platform_type_key_id(db, receiver)?;
+    let input = MethodLookupInput::new(db, type_key, prop_name.to_string());
     let prop = platform_property_query(db, input)?;
     Some(render_property_hover(&prop, range))
 }
@@ -381,7 +375,7 @@ fn hover_platform_method_on_token<DB: RootDatabase>(
     hover_for_platform_method(db, &handle, token.text_range())
 }
 
-/// Resolve the inferred [`Ty`] of a single identifier token.
+/// Resolve the inferred `TypeId` of a single identifier token.
 ///
 /// Walks upward only through same-range wrappers (an IdentExpr / EXPR shell
 /// whose `text_range()` equals the token's), stopping as soon as an
@@ -402,16 +396,17 @@ fn hover_platform_method_on_token<DB: RootDatabase>(
 /// callers treat that the same as "no info", which preserves the existing
 /// fallbacks (`hover_platform`, `hover_keyword`).
 fn type_of_token<DB: RootDatabase>(
+    db: &DB,
     sema: &Semantics<'_, DB>,
     file_id: FileId,
     token: &SyntaxToken,
-) -> Option<Ty> {
+) -> Option<TypeId> {
     let token_range = token.text_range();
     let mut node = token.parent()?;
     while node.text_range() == token_range {
-        let ty = sema.type_of_expr(file_id, &node);
-        if !ty.is_unknown() {
-            return Some(ty);
+        let id = sema.type_of_expr(file_id, &node);
+        if !matches!(db.lookup_type(id), TypeKind::Unknown) {
+            return Some(id);
         }
         node = node.parent()?;
     }
@@ -437,7 +432,7 @@ fn definition_to_hover<DB: RootDatabase>(
     db: &DB,
     definition: &hir::Definition,
     range: TextRange,
-    inferred_ty: Option<&Ty>,
+    inferred_ty: Option<TypeId>,
     locale: Locale,
 ) -> Option<HoverResult> {
     let mut markup = String::new();
@@ -584,20 +579,21 @@ fn definition_to_hover<DB: RootDatabase>(
             // only the rebound shape via `ty_info_markup`.
             let inferred_disagrees = match inferred_ty {
                 None => false,
-                Some(ty) if ty.is_unknown() => false,
-                Some(Ty::ManagerCollection(t)) if t == mdo_type => false,
-                Some(_) => true,
+                Some(id) => match db.lookup_type(id) {
+                    TypeKind::Unknown => false,
+                    TypeKind::ManagerCollection(t) if t == mdo_type => false,
+                    _ => true,
+                },
             };
             if inferred_disagrees {
-                if let Some(ty) = inferred_ty {
-                    if let Some(block) = ty_info_markup(db, ty, locale) {
+                if let Some(id) = inferred_ty {
+                    if let Some(block) = ty_info_markup(db, id, locale) {
                         markup.push_str(&block);
                     }
                 }
             } else if let Some(prop) = mdo_type.hbk_global_property() {
                 markup.push_str(&format!("**{} ({})**\n\n", prop.name, prop.english_name));
-                if let Some(ty_block) =
-                    ty_info_markup(db, &Ty::ManagerCollection(*mdo_type), locale)
+                if let Some(ty_block) = ty_info_markup(db, db.manager_collection(*mdo_type), locale)
                 {
                     markup.push_str(&ty_block);
                 }
@@ -709,7 +705,7 @@ fn hover_for_platform_type<DB: RootDatabase>(
 ///
 /// Shared between [`hover_for_platform_type`] (whose caller already owns the
 /// hover range) and [`ty_info_markup`], which appends this block to
-/// bindings whose inferred [`Ty`] resolves to a platform object.
+/// bindings whose inferred `TypeId` resolves to a platform object.
 fn platform_type_markup<DB: RootDatabase>(db: &DB, type_name: &str) -> Option<String> {
     let input = TypeNameInput::new(db, type_name.to_string());
     let platform_type = platform_type_query(db, input)?;
@@ -743,7 +739,7 @@ fn platform_type_markup<DB: RootDatabase>(db: &DB, type_name: &str) -> Option<St
     Some(markup)
 }
 
-/// Format an inferred [`Ty`] as hover markdown.
+/// Format an inferred `TypeId` as hover markdown.
 ///
 /// - `Ty::Unknown` → `None` (hover stays silent rather than printing a
 ///   useless "Unknown" label).
@@ -752,24 +748,125 @@ fn platform_type_markup<DB: RootDatabase>(db: &DB, type_name: &str) -> Option<St
 ///   bare `**Тип:** name` line when the platform data has no entry for
 ///   `name`, so IDE output stays informative even if the index is
 ///   incomplete.
+/// - `Ty::Query` / `Ty::QueryResult` / `Ty::QueryResultSelection` /
+///   `Ty::QueryBatchResult` (projection-typed receivers seeded by the
+///   SDBL ↔ Ty bridge) → routed through [`platform_type_markup`] using
+///   the same `Запрос` / `РезультатЗапроса` / `ВыборкаИзРезультатаЗапроса`
+///   / `Массив` keys their `Ty::PlatformObject` counterparts use. The
+///   projection payload is not yet rendered inline — Phase 1.5+ will
+///   surface field names from `Projection.fields` when present.
 /// - Anything else → single locale-aware `**Тип:** <label>` line via
-///   [`Ty::display`]. Renders unions, MDO refs, manager refs, and
+///   the kernel display (`bsl_types::display`). Renders unions, MDO refs, manager refs, and
 ///   form-data wrappers richly (`СправочникСсылка.Товары` /
 ///   `CatalogRef.Товары`, `Справочник.Товары` / `Catalog.Товары`,
 ///   `ДанныеФормыСтруктура (ДокументОбъект.ПКО)`).
-fn ty_info_markup<DB: RootDatabase>(db: &DB, ty: &Ty, locale: Locale) -> Option<String> {
-    if ty.is_unknown() {
+fn ty_info_markup<DB: RootDatabase>(db: &DB, id: TypeId, locale: Locale) -> Option<String> {
+    let kind = db.lookup_type(id);
+    if matches!(kind, TypeKind::Unknown) {
         return None;
     }
 
-    if let Ty::PlatformObject(name) = ty {
-        if let Some(block) = platform_type_markup(db, name.as_str()) {
+    if let TypeKind::PlatformObject(facet) = kind {
+        if let Some(block) = platform_type_markup(db, facet.name.as_str()) {
             return Some(block);
         }
-        return Some(format!("**Тип:** {}\n\n", name.as_str()));
+        return Some(format!("**Тип:** {}\n\n", facet.name.as_str()));
     }
 
-    Some(format!("**Тип:** {}\n\n", ty.display(locale)))
+    // Route projection-typed receivers through the same platform docs
+    // their `PlatformObject("Запрос" / "РезультатЗапроса" / …)`
+    // equivalents would reach. Without this branch, hovering over a
+    // `Новый Запрос` site would silently fall to the bare `**Тип:**`
+    // line and lose the rich platform docs.
+    if let Some(platform_key) = query_variant_platform_key(kind) {
+        let mut block = platform_type_markup(db, platform_key).unwrap_or_else(|| {
+            format!("**Тип:** {}\n\n", kernel_type_label(db, id, locale, false))
+        });
+        // Phase E enrichment — if this is a `QueryResultSelection` with a
+        // resolved SDBL projection, append the per-column shape so the
+        // user sees the schema directly on hover. Uses
+        // `SdblTypeShadowFacet.display` when present (`Строка(50)` /
+        // `Число(15,2)`) and falls back to kernel display otherwise.
+        if let Some(fields_block) = projection_fields_markup(db, id, locale) {
+            block.push_str(&fields_block);
+        }
+        return Some(block);
+    }
+
+    Some(format!("**Тип:** {}\n\n", kernel_type_label(db, id, locale, false)))
+}
+
+/// Render the SDBL projection of a `TypeKind::QueryResultSelection` as a
+/// trailing `**Поля:** ...` markup block, or `None` when the receiver
+/// is not projection-typed.
+///
+/// Format: a single bold heading followed by a comma-separated list
+/// `Имя: Строка(50), Цена: Число(15,2), …`. Per-column labels prefer
+/// the SDBL shadow when the bridge captured it (precision / scale /
+/// length survive); otherwise fall back to kernel rendering of the
+/// interned field type in the caller's locale.
+fn projection_fields_markup<DB: RootDatabase>(
+    db: &DB,
+    id: TypeId,
+    locale: Locale,
+) -> Option<String> {
+    let projection = match db.lookup_type(id) {
+        TypeKind::QueryResultSelection(facet) => facet.projection.as_ref(),
+        TypeKind::ValueTable(facet) | TypeKind::ValueTableRow(facet) => facet.projection.as_ref(),
+        _ => return None,
+    }?;
+    if projection.fields.is_empty() {
+        return None;
+    }
+    // Lead with a blank-line separator: the upstream
+    // `platform_type_markup` block doesn't always end with one (e.g.
+    // the "и еще N методов" trailer is non-terminated), and without
+    // the separator the projection heading collides with the
+    // preceding line in the rendered markup.
+    let mut out = String::from("\n\n**Поля:** ");
+    let shadows = projection.raw_sdbl_types.as_deref();
+    for (i, field) in projection.fields.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(field.name.as_str());
+        out.push_str(": ");
+        let label = shadows
+            .and_then(|s| s.get(i))
+            .map(|shadow| shadow.display.clone())
+            .unwrap_or_else(|| hir::kernel_type_label(db, field.ty, locale, false));
+        out.push_str(&label);
+    }
+    out.push_str("\n\n");
+    Some(out)
+}
+
+/// Map a projection-typed `Ty` to the platform-data key under which its
+/// methods and docs are indexed.
+///
+/// Mirrors `hir_ty::method_lookup::platform_type_key` for the four
+/// projection variants seeded in Phase 0 — once Phase 1.3 starts
+/// synthesizing these, hover must reach the same `bsl-platform` row
+/// `method_lookup` reaches, or the IDE shows different surfaces for a
+/// chained `.Выполнить()` value vs a freshly-typed `Новый Запрос`.
+fn query_variant_platform_key(kind: &TypeKind) -> Option<&'static str> {
+    match kind {
+        TypeKind::Query { .. } => Some("Запрос"),
+        TypeKind::QueryResult(_) => Some("РезультатЗапроса"),
+        TypeKind::QueryResultSelection(_) => Some("ВыборкаИзРезультатаЗапроса"),
+        // `ВыполнитьПакет()` returns an array of `РезультатЗапроса` —
+        // share the `Array` table for iteration / `.Количество()` so
+        // chained access stays consistent.
+        TypeKind::QueryBatchResult { .. } => Some("Массив"),
+        // Phase H — projected `ValueTable` / `ValueTableRow` route to the
+        // same `ТаблицаЗначений` / `СтрокаТаблицыЗначений` platform docs
+        // their projection-less counterparts use. The projection block is
+        // then appended by [`projection_fields_markup`] for the `Some(p)`
+        // shape.
+        TypeKind::ValueTable(_) => Some("ТаблицаЗначений"),
+        TypeKind::ValueTableRow(_) => Some("СтрокаТаблицыЗначений"),
+        _ => None,
+    }
 }
 
 /// Generates hover information for platform methods.

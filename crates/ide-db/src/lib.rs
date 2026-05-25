@@ -32,6 +32,7 @@ pub mod queries;
 pub mod root_db;
 pub mod salsa_provider;
 pub mod streaming;
+pub mod type_kernel;
 pub mod types;
 pub(crate) mod vfs_helpers;
 
@@ -40,7 +41,8 @@ pub(crate) mod vfs_helpers;
 // ========================================================================
 
 // Core types
-pub use types::{SdblHirEntries, SymbolKind};
+pub use hir::SdblHirEntries;
+pub use types::SymbolKind;
 
 // Port: RootDatabase trait
 pub use root_db::RootDatabase;
@@ -59,9 +61,10 @@ pub use streaming::{
 };
 
 // Salsa query functions
+pub use hir::{all_sdbl_in_file_query, sdbl_hir_for_file_query};
 pub use queries::{
-    all_sdbl_in_file_query, configuration_path_for_file, line_index_query, liveness_analysis_query,
-    method_cfg_query, module_metadata_query, reaching_definitions_query, sdbl_hir_in_file_query,
+    configuration_path_for_file, line_index_query, liveness_analysis_query, method_cfg_query,
+    module_metadata_query, reaching_definitions_query,
 };
 
 // Track 2 §1.4b — security/effect Salsa wrappers

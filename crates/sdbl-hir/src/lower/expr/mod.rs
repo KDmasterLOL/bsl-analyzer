@@ -392,10 +392,16 @@ impl LoweringContext {
             }
         };
 
-        // Infer return type
+        // Infer return type. CAST consumes the `SDBL_TYPE` child node
+        // for a precise target type; everything else goes through the
+        // generic kind-based inference.
         // Note: QueryNestedFieldsByDot for CAST with 2+ member_access is checked
         // in post-lowering phase (check_nested_fields_by_dot)
-        let ty = self.infer_function_return_type(&function, &args);
+        let ty = if matches!(function, FunctionKind::Cast) {
+            self.resolve_cast_target(node)
+        } else {
+            self.infer_function_return_type(&function, &args)
+        };
 
         ExprHir::FunctionCall { function, args, member_access, ty, range: node.text_range() }
     }
@@ -466,6 +472,74 @@ impl LoweringContext {
             // Unknown function
             FunctionKind::Unknown(_) => SdblType::Unknown,
         }
+    }
+
+    /// Resolve the target type of a `ВЫРАЗИТЬ(value КАК <SDBL_TYPE>)` call.
+    ///
+    /// Walks the `SDBL_TYPE` child of `SDBL_FUNCTION_CALL` and produces a
+    /// precise [`SdblType`]:
+    ///
+    /// * Single-identifier primitives with optional numeric params:
+    ///   `Число(P, S)`, `Число(P)`, `Строка(L)`, `Дата`, `Булево` (bilingual,
+    ///   case-insensitive).
+    /// * Two-identifier MDO paths: `Справочник.Товары` →
+    ///   `SdblType::Ref(MdoRef { Catalog, "Товары" })`.
+    /// * Anything else (missing `SDBL_TYPE`, composite/unrecognised paths,
+    ///   length-only DECIMAL out of `u32` range) → `SdblType::Unknown`.
+    ///
+    /// MDO-ref resolution does not consult `self.metadata` here — the goal
+    /// is a syntactic target reading. Validating existence belongs to a
+    /// separate diagnostic pass.
+    ///
+    /// TODO(Phase G follow-up): composite CAST targets
+    /// (`ВЫРАЗИТЬ(X КАК Число | Строка)`) require parser grammar lift —
+    /// `crates/parser/src/grammar/sdbl/expressions.rs:1192` accepts only a
+    /// single IDENT chain today.
+    fn resolve_cast_target(&self, node: &syntax::SyntaxNode) -> SdblType {
+        let Some(type_node) = node.children().find(|c| c.kind() == syntax::SyntaxKind::SDBL_TYPE)
+        else {
+            return SdblType::Unknown;
+        };
+
+        let mut name_parts: Vec<String> = Vec::new();
+        let mut decimals: Vec<u32> = Vec::new();
+        let mut in_parens = false;
+
+        for child in type_node.children_with_tokens() {
+            let Some(token) = child.into_token() else { continue };
+            match token.kind() {
+                syntax::SyntaxKind::IDENT if !in_parens => {
+                    name_parts.push(token.text().to_string());
+                }
+                syntax::SyntaxKind::L_PAREN => in_parens = true,
+                syntax::SyntaxKind::R_PAREN => in_parens = false,
+                syntax::SyntaxKind::DECIMAL if in_parens => {
+                    if let Ok(n) = token.text().parse::<u32>() {
+                        decimals.push(n);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if name_parts.is_empty() {
+            return SdblType::Unknown;
+        }
+
+        if name_parts.len() == 1 {
+            return classify_primitive_cast_target(&name_parts[0], &decimals);
+        }
+
+        // Multi-segment path: try first segment as MDO type (Справочник,
+        // Документ, …); anything past two segments is out of grammar
+        // scope today.
+        if name_parts.len() == 2 {
+            if let Ok(mdo_type) = name_parts[0].parse::<bsl_metadata::MdoType>() {
+                return SdblType::reference(mdo_type, &name_parts[1]);
+            }
+        }
+
+        SdblType::Unknown
     }
 
     /// Lower parameter expression.
@@ -642,5 +716,25 @@ impl LoweringContext {
             .collect();
 
         ExprHir::Tuple { elements, range: node.text_range() }
+    }
+}
+
+/// Map a single-identifier CAST target (e.g. `Число`, `Строка`, `Дата`,
+/// `Булево`) to its [`SdblType`]. Bilingual, case-insensitive.
+///
+/// `decimals` are the in-parens DECIMAL tokens already harvested from
+/// the `SDBL_TYPE` node; `Число` consumes up to two, `Строка` up to one,
+/// the rest ignore them. Out-of-`u8`-range precision/scale collapses to
+/// `None` for that slot rather than failing the whole cast.
+fn classify_primitive_cast_target(name: &str, decimals: &[u32]) -> SdblType {
+    match name.to_uppercase().as_str() {
+        "ЧИСЛО" | "NUMBER" => SdblType::Number {
+            precision: decimals.first().and_then(|n| u8::try_from(*n).ok()),
+            scale: decimals.get(1).and_then(|n| u8::try_from(*n).ok()),
+        },
+        "СТРОКА" | "STRING" => SdblType::String { length: decimals.first().copied() },
+        "ДАТА" | "DATE" => SdblType::Date,
+        "БУЛЕВО" | "BOOLEAN" => SdblType::Boolean,
+        _ => SdblType::Unknown,
     }
 }

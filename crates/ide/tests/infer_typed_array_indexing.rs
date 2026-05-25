@@ -12,7 +12,7 @@
 //! refinement by using JSDoc `Массив из <T>` to land a `TypedArray(T)`
 //! binding directly — no Form.xml fixture required.
 
-use hir::{HirDatabase, Name, Ty};
+use hir::{Builders, HirDatabase, MetadataKind, TypeId, TypeKernelDb, TypeKind};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
 use test_fixture::Fixture;
@@ -39,8 +39,26 @@ fn setup(fixture_text: &str) -> (RootDatabaseImpl, FileId) {
     (db, test_file)
 }
 
-fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<Ty> {
-    db.infer(file_id).var_types.get(var_lower).cloned()
+fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<TypeId> {
+    db.infer(file_id).var_types.get(var_lower).copied()
+}
+
+fn assert_metadata_ref(
+    db: &RootDatabaseImpl,
+    actual: Option<TypeId>,
+    kind: MetadataKind,
+    name: &str,
+) {
+    let actual = actual.expect("expected metadata ref type");
+    assert!(
+        matches!(
+            db.lookup_type(actual),
+            TypeKind::MetadataRef(facet)
+                if facet.kind == kind && facet.name.as_str() == name
+        ),
+        "expected MetadataRef({kind:?}, {name}), got {:?}",
+        db.lookup_type(actual)
+    );
 }
 
 #[test]
@@ -65,7 +83,12 @@ fn indexing_typed_array_of_string_returns_string() {
     );
 
     let ty = var_ty(&db, file_id, "элемент");
-    assert_eq!(ty, Some(Ty::String), "TypedArray(String)[i] must yield String, got {:?}", ty);
+    assert_eq!(
+        ty,
+        Some(db.string(None, false)),
+        "TypedArray(String)[i] must yield String, got {:?}",
+        ty
+    );
 }
 
 #[test]
@@ -94,14 +117,7 @@ fn indexing_typed_array_of_metadata_ref_returns_ref() {
     );
 
     let ty = var_ty(&db, file_id, "элемент");
-    assert_eq!(
-        ty,
-        Some(Ty::MetadataRef {
-            kind: hir::MetadataKind::CatalogRef, name: Name::new("Товары")
-        }),
-        "TypedArray(CatalogRef.Товары)[i] must yield the ref Ty, got {:?}",
-        ty
-    );
+    assert_metadata_ref(&db, ty, MetadataKind::CatalogRef, "Товары");
 }
 
 #[test]
@@ -127,8 +143,9 @@ fn indexing_unparameterised_array_stays_unknown() {
     // Asserting `None` (rather than `Some(Ty::Unknown)`) matches the
     // existing convention in `var_types`: unresolved bindings are
     // simply absent.
+    let actual = var_ty(&db, file_id, "элемент");
     assert!(
-        matches!(var_ty(&db, file_id, "элемент"), None | Some(Ty::Unknown)),
+        actual.is_none_or(|ty| matches!(db.lookup_type(ty), TypeKind::Unknown)),
         "bare Новый Массив indexing must not invent an element type"
     );
 }

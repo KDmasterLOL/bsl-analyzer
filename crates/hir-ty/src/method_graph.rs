@@ -8,7 +8,8 @@
 
 use std::sync::Arc;
 
-use hir_def::ty::Ty;
+use bsl_types::builders::Builders;
+use bsl_types::kind::TypeId;
 use hir_def::MethodIdInput;
 
 use crate::db::HirDatabase;
@@ -69,7 +70,10 @@ use crate::infer::{BodyInferenceResult, InferenceContext};
     cycle_fn = method_return_type_cycle,
     cycle_initial = method_return_type_initial,
 )]
-pub fn method_return_type_query<'db>(db: &'db dyn HirDatabase, method: MethodIdInput<'db>) -> Ty {
+pub fn method_return_type_query<'db>(
+    db: &'db dyn HirDatabase,
+    method: MethodIdInput<'db>,
+) -> TypeId {
     let mid = method.method_id(db);
     let _span = tracing::info_span!(
         "method_return_type",
@@ -83,24 +87,24 @@ pub fn method_return_type_query<'db>(db: &'db dyn HirDatabase, method: MethodIdI
     ctx.infer_all();
     let result = ctx.finish();
 
-    // Preserve precision via `Ty::union`. The smart constructor at
-    // `crates/hir-def/src/ty.rs:1005-1017` flattens nested unions,
-    // sorts (Ty: Ord), dedupes, and collapses singletons. Empty input
-    // collapses to `Ty::Unknown`.
+    // Preserve precision via `db.union`, the kernel intern gateway:
+    // `canonicalise_union` flattens nested unions, dedupes, sorts by
+    // `TypeId::raw()`, and collapses singletons. Empty input → `db.unknown()`.
     //
-    // Explicit absence semantics: a missing entry in `expr_types`
-    // contributes `Ty::Unknown`; we filter Unknown entries before
-    // unioning so the union does not accidentally collapse to Unknown
-    // (e.g. a function with `Возврат X;` where X did not infer to a
-    // concrete type).
-    let return_tys: Vec<Ty> = result
+    // Explicit absence semantics: a missing entry in `expr_types` (or a
+    // present `db.unknown()` one) contributes Unknown; we drop those before
+    // unioning so the union does not collapse to Unknown (e.g. a function
+    // with `Возврат X;` where X did not infer to a concrete type). Since
+    // §4.D, `expr_types` already stores `TypeId` — no bridge needed.
+    let unknown = db.unknown();
+    let return_tys: Vec<TypeId> = result
         .return_expr_ids
         .iter()
-        .map(|id| result.expr_types.get(id).cloned().unwrap_or(Ty::Unknown))
-        .filter(|t| !matches!(t, Ty::Unknown))
+        .filter_map(|id| result.expr_types.get(id).copied())
+        .filter(|tid| *tid != unknown)
         .collect();
 
-    let ty = if return_tys.is_empty() { Ty::Unknown } else { Ty::union(return_tys) };
+    let ty = if return_tys.is_empty() { unknown } else { db.union(return_tys) };
 
     tracing::debug!(
         ?mid,
@@ -112,15 +116,15 @@ pub fn method_return_type_query<'db>(db: &'db dyn HirDatabase, method: MethodIdI
 }
 
 /// Cycle-recovery seed for [`method_return_type_query`]. Lattice
-/// bottom is `Ty::Unknown` — the cycle iteration ascends from there
+/// bottom is `db.unknown()` — the cycle iteration ascends from there
 /// to the body-inferred type on subsequent iterations.
 #[allow(clippy::needless_lifetimes)] // Salsa attr requires explicit signature
 pub fn method_return_type_initial<'db>(
-    _db: &'db dyn HirDatabase,
+    db: &'db dyn HirDatabase,
     _id: salsa::Id,
     _method: MethodIdInput<'db>,
-) -> Ty {
-    Ty::Unknown
+) -> TypeId {
+    db.unknown()
 }
 
 /// Cycle-iteration step for [`method_return_type_query`].
@@ -131,34 +135,38 @@ pub fn method_return_type_initial<'db>(
 /// detect convergence via structural equality.
 ///
 /// Cases:
-/// * `value == Ty::Unknown`            → keep `last_provisional`
+/// * `value == db.unknown()`            → keep `last_provisional`
 ///   (no information demotion: ⊥ ⊔ x = x).
-/// * `last_provisional == Ty::Unknown` → adopt `value` (same rule
+/// * `last_provisional == db.unknown()` → adopt `value` (same rule
 ///   from the other side: x ⊔ ⊥ = x).
-/// * `last_provisional == value`       → fixed point reached.
-/// * **distinct concrete Tys**         → `Ty::union(vec![..])`. This
+/// * `last_provisional == value`        → fixed point reached.
+/// * **distinct concrete TypeIds**      → `db.union(vec![..])`. This
 ///   prevents oscillation between two concrete provisionals (e.g.
-///   `Ty::String` ↔ `Ty::Number` flipping between cycle iterations);
-///   the union strictly grows the type lattice so the next iteration
-///   either matches it (converged) or grows further.
+///   `Число` ↔ `Строка` flipping between cycle iterations); the union
+///   strictly grows the type lattice so the next iteration either
+///   matches it (converged) or grows further.
 ///
-/// `Ty::union` (`crates/hir-def/src/ty.rs:1005-1021`) flattens nested
-/// unions, sorts via the structural `Ord` derive, dedupes, and
-/// collapses singletons — output is deterministic across iterations,
-/// which is what salsa needs to recognise a fixed point.
+/// `db.union` (kernel `canonicalise_union`) flattens nested unions,
+/// dedupes, sorts by `TypeId::raw()`, and collapses singletons — output
+/// is a deterministic interned `TypeId` across iterations, which is what
+/// salsa needs to recognise a fixed point (cheap `TypeId` equality).
+/// Unknown never enters `db.union` here (the explicit cases above handle
+/// it), so the kernel's Unknown-absorption rule does not perturb the
+/// fixpoint.
 #[allow(clippy::needless_lifetimes)] // Salsa attr requires explicit signature
 pub fn method_return_type_cycle<'db>(
-    _db: &'db dyn HirDatabase,
+    db: &'db dyn HirDatabase,
     _cycle: &salsa::Cycle,
-    last_provisional: &Ty,
-    value: Ty,
+    last_provisional: &TypeId,
+    value: TypeId,
     _method: MethodIdInput<'db>,
-) -> Ty {
-    match (last_provisional, &value) {
-        (_, Ty::Unknown) => last_provisional.clone(),
-        (Ty::Unknown, _) => value,
-        (last, v) if last == v => value,
-        (last, _) => Ty::union(vec![last.clone(), value]),
+) -> TypeId {
+    let unknown = db.unknown();
+    match (*last_provisional, value) {
+        (_, v) if v == unknown => *last_provisional,
+        (l, _) if l == unknown => value,
+        (l, v) if l == v => value,
+        (l, v) => db.union(vec![l, v]),
     }
 }
 

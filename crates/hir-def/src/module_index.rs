@@ -42,8 +42,8 @@ pub struct ModuleIndex {
     /// Object modules: (MdoType, lowercase object name) → FileId
     /// (`<MDO>/Ext/ObjectModule.bsl`).
     ///
-    /// Keyed on [`MdoType`] (not [`ManagerType`]) to match
-    /// [`crate::ty::Ty::ObjectManager.kind`] and the strict
+    /// Keyed on [`MdoType`] (not [`ManagerType`]) to match the
+    /// object-manager type's `kind` and the strict
     /// `MetadataKind → MdoType` filter on the call site (Phase B). Not
     /// every `ManagerType` has a paired `*Object` `MetadataKind`
     /// (registers, charts of calculation types, business processes,

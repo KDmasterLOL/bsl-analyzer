@@ -35,10 +35,12 @@ use hir_def::hir::Expr;
 use hir_def::{DefWithBodyId, ExprId, IdConversion, ModuleId};
 use vfs::FileId;
 
+use bsl_types::builders::Builders;
+use bsl_types::kind::TypeId;
+
 use crate::db::HirDatabase;
 use crate::infer::{InferenceDiagnostic, ParamsShape};
 use crate::narrow::{narrowed_type_at, NarrowState};
-use crate::Ty;
 
 /// Salsa query: emit `TypeMismatch` diagnostics for call arguments,
 /// applying the narrowing overlay before each per-arg assignability
@@ -182,13 +184,15 @@ pub fn arg_diagnostics_query(
         let narrow = cached_narrow.as_deref();
 
         let narrow_arg_start = Instant::now();
-        let arg_types: Vec<Ty> = binding
+        let arg_types: Vec<TypeId> = binding
             .args
             .iter()
             .map(|arg_id| {
-                let base =
-                    infer.type_of_expr_in(binding.owner, *arg_id).cloned().unwrap_or(Ty::Unknown);
-                narrow_arg(narrow, body, *arg_id, base)
+                // Phase 3 §4.G.4: stay in kernel `TypeId` space — read the
+                // interned per-expr type directly and narrow it without a
+                // round-trip through `Ty`.
+                let base = infer.type_id_of_expr_in(binding.owner, *arg_id).unwrap_or(db.unknown());
+                narrow_arg(db, narrow, body, *arg_id, base)
             })
             .collect();
         narrow_arg_ns += narrow_arg_start.elapsed().as_nanos();
@@ -196,11 +200,17 @@ pub fn arg_diagnostics_query(
         let emit_start = Instant::now();
         match &binding.params {
             ParamsShape::Single(params) => {
-                emit_single(&binding.args, &arg_types, params, &mut out, binding.owner)
+                emit_single(db, &binding.args, &arg_types, params, &mut out, binding.owner)
             }
-            ParamsShape::Overloaded { flat, overloads } => {
-                emit_overloaded(&binding.args, &arg_types, flat, overloads, &mut out, binding.owner)
-            }
+            ParamsShape::Overloaded { flat, overloads } => emit_overloaded(
+                db,
+                &binding.args,
+                &arg_types,
+                flat,
+                overloads,
+                &mut out,
+                binding.owner,
+            ),
         }
         emit_ns += emit_start.elapsed().as_nanos();
     }
@@ -367,21 +377,19 @@ fn log_owner_stats(
 /// `arg_diagnostics_query` would otherwise re-pay the lookup cost
 /// once per arg.
 fn narrow_arg(
+    db: &dyn HirDatabase,
     narrow: Option<&dataflow::DataflowResult<NarrowState>>,
     body: &Body,
     expr_id: ExprId,
-    base: Ty,
-) -> Ty {
+    base: TypeId,
+) -> TypeId {
     let Some(result) = narrow else {
         return base;
     };
     let Expr::Path(name) = body.expr(expr_id) else {
         return base;
     };
-    match narrowed_type_at(result, expr_id.to_idx(), name) {
-        Some(narrowed) if !matches!(narrowed, Ty::Unknown) => narrowed,
-        _ => base,
-    }
+    narrowed_type_at(db, result, expr_id.to_idx(), name).unwrap_or(base)
 }
 
 /// Resolve the [`Body`] for a recorded binding's owner.
@@ -405,20 +413,21 @@ fn resolve_body(module_bodies: &hir_def::ModuleBodies, owner: DefWithBodyId) -> 
 /// Walks `min(args.len(), params.len())` so an unpaired tail (caught
 /// separately by `MismatchedArgCount`) doesn't double-fire.
 fn emit_single(
+    db: &dyn HirDatabase,
     args: &[ExprId],
-    arg_types: &[Ty],
-    params: &[Ty],
+    arg_types: &[TypeId],
+    params: &[TypeId],
     out: &mut Vec<(DefWithBodyId, InferenceDiagnostic)>,
     owner: DefWithBodyId,
 ) {
-    for ((arg_id, arg_ty), param_ty) in args.iter().zip(arg_types.iter()).zip(params.iter()) {
-        if !crate::subtype::is_coercible_to(arg_ty, param_ty) {
+    for ((arg_id, &arg_ty), &param_id) in args.iter().zip(arg_types.iter()).zip(params.iter()) {
+        if !crate::subtype::is_coercible_to(db, arg_ty, param_id) {
             out.push((
                 owner,
                 InferenceDiagnostic::TypeMismatch {
                     expr: *arg_id,
-                    expected: param_ty.clone(),
-                    actual: arg_ty.clone(),
+                    expected: param_id,
+                    actual: arg_ty,
                 },
             ));
         }
@@ -438,15 +447,16 @@ fn emit_single(
 /// "what's accepted" and "what the message says is wrong" and reopen
 /// the false-positive bug this query exists to fix.
 fn emit_overloaded(
+    db: &dyn HirDatabase,
     args: &[ExprId],
-    arg_types: &[Ty],
-    flat: &[Ty],
-    overloads: &[Arc<[Ty]>],
+    arg_types: &[TypeId],
+    flat: &[TypeId],
+    overloads: &[Arc<[TypeId]>],
     out: &mut Vec<(DefWithBodyId, InferenceDiagnostic)>,
     owner: DefWithBodyId,
 ) {
     if overloads.is_empty() {
-        emit_single(args, arg_types, flat, out, owner);
+        emit_single(db, args, arg_types, flat, out, owner);
         return;
     }
 
@@ -454,16 +464,19 @@ fn emit_overloaded(
         if args.len() > params.len() {
             return false;
         }
-        arg_types.iter().zip(params.iter()).all(|(a, p)| crate::subtype::is_coercible_to(a, p))
+        arg_types
+            .iter()
+            .zip(params.iter())
+            .all(|(&a, &p)| crate::subtype::is_coercible_to(db, a, p))
     });
     if any_accepts {
         return;
     }
 
-    let chosen: &[Ty] = overloads
+    let chosen: &[TypeId] = overloads
         .iter()
         .min_by_key(|params| params.len().abs_diff(args.len()))
         .map(|p| p.as_ref())
         .unwrap_or(flat);
-    emit_single(args, arg_types, chosen, out, owner);
+    emit_single(db, args, arg_types, chosen, out, owner);
 }

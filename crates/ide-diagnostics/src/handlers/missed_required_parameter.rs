@@ -272,7 +272,7 @@ fn find_manager_module_file(
     // object lives in exactly one configuration — so the first hit wins
     // unambiguously.
     for visible in ctx.visible_configurations() {
-        if !visible.configuration.has_metadata_object(mdo_type, mdo_name) {
+        if !visible.config.configuration.has_metadata_object(mdo_type, mdo_name) {
             continue;
         }
         let full_path = visible.root.join(&manager_module_path);

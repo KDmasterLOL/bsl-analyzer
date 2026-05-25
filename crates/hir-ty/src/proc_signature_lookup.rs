@@ -26,7 +26,7 @@ use hir_def::{MethodId, MethodIdInput};
 use crate::db::HirDatabase;
 use crate::method_lookup::MethodInfo;
 use crate::proc_signature::proc_signature_query;
-use crate::Ty;
+use bsl_types::kind::TypeId;
 
 /// Lower a workspace-defined method's signature into a [`MethodInfo`]
 /// in the same shape the platform-method path produces.
@@ -42,17 +42,23 @@ use crate::Ty;
 pub fn resolve_workspace_method(db: &dyn HirDatabase, method_id: MethodId) -> MethodInfo {
     let method_input = MethodIdInput::new(db, method_id);
     let signature = proc_signature_query(db, method_input);
+    // Phase 3 §4.B: `ProcSignature` is kernel-native — its fields are already
+    // interned ids, so the `MethodInfo` slots copy through with no bridge.
     MethodInfo {
-        return_ty: signature.return_ty.clone(),
+        return_ty: signature.return_ty,
         params: signature.params.clone(),
         overloads: Vec::new(),
     }
 }
 
-/// Like [`resolve_workspace_method`] but yields `Ty::Unknown` slots when
-/// the workspace method has no docstring entries — handy when callers
-/// only need the return type and want to skip the per-parameter `clone`.
-pub fn resolve_workspace_return_ty(db: &dyn HirDatabase, method_id: MethodId) -> Ty {
+/// Like [`resolve_workspace_method`] but yields only the return slot —
+/// handy when callers want the return type and want to skip the
+/// per-parameter `clone`.
+///
+/// Phase 3 §4.B: `ProcSignature::return_ty` is a kernel-native id, so this
+/// returns it directly — the §4.G.5a bridge is gone.
+pub fn resolve_workspace_return_ty(db: &dyn HirDatabase, method_id: MethodId) -> TypeId {
     let method_input = MethodIdInput::new(db, method_id);
-    proc_signature_query(db, method_input).return_ty.clone()
+    let signature = proc_signature_query(db, method_input);
+    signature.return_ty
 }

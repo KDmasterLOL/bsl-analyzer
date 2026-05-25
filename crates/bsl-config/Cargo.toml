@@ -1,0 +1,12 @@
+[package]
+name = "bsl-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Layer 0.5 — visible configurations and ConfigId for the bsl-analyzer type kernel"
+
+[dependencies]
+bsl-metadata.workspace = true
+
+[dev-dependencies]

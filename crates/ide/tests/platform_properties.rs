@@ -18,7 +18,7 @@
 //! crate init, so property data is always available even without
 //! metadata-object configs.
 
-use hir::{HirDatabase, InferenceDiagnostic, Name, Ty};
+use hir::{Builders, HirDatabase, InferenceDiagnostic, Name, TypeId, TypeKernelDb, TypeKind};
 use ide::{Analysis, CompletionItem, CompletionItemKind};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
@@ -35,17 +35,17 @@ fn setup_inline(code: &str) -> (RootDatabaseImpl, FileId) {
     (db, file_id)
 }
 
-fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<Ty> {
-    db.infer(file_id).var_types.get(var_lower).cloned()
+fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<TypeId> {
+    db.infer(file_id).var_types.get(var_lower).copied()
 }
 
-fn readonly_diagnostics(db: &RootDatabaseImpl, file_id: FileId) -> Vec<(Name, Ty)> {
+fn readonly_diagnostics(db: &RootDatabaseImpl, file_id: FileId) -> Vec<(Name, TypeId)> {
     db.infer(file_id)
         .diagnostics
         .iter()
         .filter_map(|(_, d)| match d {
             InferenceDiagnostic::ReadOnlyPropertyAssignment { receiver_ty, field_name, .. } => {
-                Some((field_name.clone(), receiver_ty.clone()))
+                Some((field_name.clone(), *receiver_ty))
             }
             _ => None,
         })
@@ -75,7 +75,7 @@ fn new_query_text_field_infers_to_string() {
     let (db, file_id) = setup_inline(code);
     assert_eq!(
         var_ty(&db, file_id, "т"),
-        Some(Ty::String),
+        Some(db.string(None, false)),
         "Т must carry Ty::String via property inference, not Ty::Unknown"
     );
 }
@@ -94,7 +94,7 @@ fn new_query_parameters_field_infers_to_structure() {
     let (db, file_id) = setup_inline(code);
     assert_eq!(
         var_ty(&db, file_id, "п"),
-        Some(Ty::Structure),
+        Some(db.structure(None)),
         "Зап.Параметры must carry Ty::Structure via property inference"
     );
 }
@@ -151,8 +151,9 @@ fn read_only_property_assignment_emits_diagnostic() {
     let (field, recv) = &diags[0];
     assert_eq!(field.as_str(), "Параметры");
     assert!(
-        matches!(recv, Ty::PlatformObject(n) if n.as_str().eq_ignore_ascii_case("Запрос")),
-        "receiver_ty must be Ty::PlatformObject(\"Запрос\"), got {recv:?}"
+        matches!(db.lookup_type(*recv), TypeKind::Query { .. }),
+        "receiver_ty must be Ty::Query, got {:?}",
+        db.lookup_type(*recv)
     );
 }
 
@@ -289,8 +290,13 @@ fn query_execute_unload_chain_infers_value_table() {
     // which would flunk the `contains_value_table` check below.
     let ty = var_ty(&db, file_id, "таблица");
     let contains_value_table = match &ty {
-        Some(Ty::ValueTable) => true,
-        Some(Ty::Union(members)) => members.iter().any(|m| matches!(m, Ty::ValueTable)),
+        Some(id) => match db.lookup_type(*id) {
+            TypeKind::ValueTable(_) => true,
+            TypeKind::Union(members) => members
+                .iter()
+                .any(|member| matches!(db.lookup_type(*member), TypeKind::ValueTable(_))),
+            _ => false,
+        },
         _ => false,
     };
     assert!(

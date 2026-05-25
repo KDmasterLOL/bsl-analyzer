@@ -3,7 +3,7 @@
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir::{Name, Ty};
+use hir::{Name, TypeId};
 use ide_db::TextRange;
 
 // Major/Error is appropriate here because the emit side is intentionally
@@ -24,17 +24,15 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 
 /// Creates a diagnostic from `InferenceDiagnostic::UnresolvedField`.
 pub fn from_hir(
-    receiver_ty: &Ty,
+    receiver_ty: TypeId,
     field_name: &Name,
     range: TextRange,
     ctx: &DiagnosticsContext,
 ) -> Option<Diagnostic> {
-    // `display(locale)` expands `Ty::Union` to `A | B` so the message
-    // names the actual member types instead of the coarse `Составной` label.
     let message = format!(
         "Поле '{}' не найдено у типа '{}'",
         field_name.as_str(),
-        receiver_ty.display(ctx.locale())
+        ctx.kernel_type_display(receiver_ty, ctx.locale())
     );
     crate::simple_hir_diagnostic(DiagnosticCode::UnresolvedField, message, range, ctx)
 }

@@ -8,7 +8,9 @@
 //! JSDoc-annotated method, calls it from `/test.bsl`, and asserts the
 //! resulting `Ty`.
 
-use hir::{DefDatabase, HirDatabase, MetadataKind, ModuleId, Name, Ty};
+use hir::{
+    Builders, DefDatabase, HirDatabase, MetadataKind, ModuleId, TypeId, TypeKernelDb, TypeKind,
+};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
 use test_fixture::Fixture;
@@ -36,8 +38,26 @@ fn setup(fixture_text: &str) -> (RootDatabaseImpl, FileId) {
     (db, test_file)
 }
 
-fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<Ty> {
-    db.infer(file_id).var_types.get(var_lower).cloned()
+fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<TypeId> {
+    db.infer(file_id).var_types.get(var_lower).copied()
+}
+
+fn assert_metadata_ref(
+    db: &RootDatabaseImpl,
+    actual: Option<TypeId>,
+    kind: MetadataKind,
+    name: &str,
+) {
+    let actual = actual.expect("expected metadata ref type");
+    assert!(
+        matches!(
+            db.lookup_type(actual),
+            TypeKind::MetadataRef(facet)
+                if facet.kind == kind && facet.name.as_str() == name
+        ),
+        "expected MetadataRef({kind:?}, {name}), got {:?}",
+        db.lookup_type(actual)
+    );
 }
 
 #[test]
@@ -62,7 +82,7 @@ fn jsdoc_return_type_primitive_flows_into_var_types() {
     let (db, file_id) = setup(fixture);
     assert_eq!(
         var_ty(&db, file_id, "х"),
-        Some(Ty::String),
+        Some(db.string(None, false)),
         "JSDoc `Возвращаемое значение: Строка` must lower into Ty::String"
     );
 }
@@ -90,12 +110,11 @@ fn jsdoc_catalog_ref_return_lowers_to_metadata_ref() {
 КонецФункции
 "#;
     let (db, file_id) = setup(fixture);
-    assert_eq!(
+    assert_metadata_ref(
+        &db,
         var_ty(&db, file_id, "ссылка"),
-        Some(Ty::MetadataRef {
-            kind: MetadataKind::CatalogRef, name: Name::new("Номенклатура")
-        }),
-        "JSDoc qualified return must lower to Ty::MetadataRef{{ CatalogRef, Номенклатура }}"
+        MetadataKind::CatalogRef,
+        "Номенклатура",
     );
 }
 
@@ -129,7 +148,7 @@ fn missing_jsdoc_surfaces_body_inferred_return() {
     let (db, file_id) = setup(fixture);
     assert_eq!(
         var_ty(&db, file_id, "х"),
-        Some(hir::Ty::Boolean),
+        Some(db.boolean()),
         "cascade typing must surface `Возврат Истина` as Ty::Boolean through `materialise_signature_enriched`"
     );
     let infer = db.infer(file_id);
@@ -163,11 +182,11 @@ fn jsdoc_union_return_lowers_to_ty_union() {
 "#;
     let (db, file_id) = setup(fixture);
     let ty = var_ty(&db, file_id, "р").expect("var_types must track union return");
-    match ty {
-        Ty::Union(ref parts) => {
+    match db.lookup_type(ty) {
+        TypeKind::Union(parts) => {
             assert_eq!(parts.len(), 2, "Union should have exactly 2 members");
-            assert!(parts.contains(&Ty::Number));
-            assert!(parts.contains(&Ty::String));
+            assert!(parts.contains(&db.number(None, None)));
+            assert!(parts.contains(&db.string(None, false)));
         }
         other => panic!("expected Ty::Union, got {other:?}"),
     }
@@ -194,9 +213,5 @@ fn jsdoc_three_level_return_lowers_through_manager_chain() {
 КонецФункции
 "#;
     let (db, file_id) = setup(fixture);
-    assert_eq!(
-        var_ty(&db, file_id, "ссылка"),
-        Some(Ty::MetadataRef { kind: MetadataKind::DocumentRef, name: Name::new("ПКО") }),
-        "3-level call must lower JSDoc `ДокументСсылка.ПКО` to Ty::MetadataRef"
-    );
+    assert_metadata_ref(&db, var_ty(&db, file_id, "ссылка"), MetadataKind::DocumentRef, "ПКО");
 }

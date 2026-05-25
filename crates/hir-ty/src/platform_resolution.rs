@@ -23,14 +23,16 @@
 //!
 //! ## Routing summary
 //!
-//! - [`Ty::ThisObject`] → coerced via [`crate::this_object::coerce_to_metadata_ref`]
-//!   into the matching `*Object` `Ty::MetadataRef` before any other lookup.
-//! - [`Ty::Union`] — recurse on each non-`Undefined`/`Null` member,
+//! The receiver is a kernel [`TypeId`]; the routing dispatches on its
+//! [`TypeKind`]:
+//! - `ThisObject` → coerced via [`crate::this_object::coerce_to_metadata_ref_id`]
+//!   into the matching `*Object` `MetadataRef` before any other lookup.
+//! - `Union` — recurse on each non-`Undefined`/`Null` member,
 //!   bind handle / params / overloads to the **first** successful
 //!   branch (cohesion rule mirrors `lookup_method`), union return types.
-//! - [`Ty::ObjectManager { kind, name }`] — composite-prefix lookup
-//!   under `kind.manager_type_prefix()` via [`bsl_platform::prefixed_method_query`].
-//! - [`Ty::MetadataRef { kind, name }`]:
+//! - `ObjectManager(facet)` — composite-prefix lookup under
+//!   `facet.mdo.manager_type_prefix()` via [`bsl_platform::prefixed_method_query`].
+//! - `MetadataRef(facet)`:
 //!   * `MetadataKind::TabularSection { parent }` — scalar lookup under
 //!     the flat `"Tabular section"` `type_name` with row-receiver
 //!     rebinding via
@@ -43,7 +45,7 @@
 //!     `key` (synthetic `Filter` receiver on register record-set
 //!     `<Набор>.Отбор.Сбросить()`).
 //! - All other receivers — scalar lookup keyed by
-//!   [`crate::method_lookup::platform_type_key`].
+//!   [`crate::method_lookup::platform_type_key_id`].
 
 use std::hash::{Hash, Hasher};
 
@@ -52,12 +54,14 @@ use bsl_platform::{
     platform_method_query, prefixed_method_query, MethodLookupInput, PlatformMethod,
     PrefixedMethodLookupInput,
 };
-use hir_def::ty::{MetadataKind, Ty};
+use bsl_types::builders::Builders;
+use bsl_types::intern::TypeKernelDb;
+use bsl_types::kind::{MetadataKind, TypeId, TypeKind};
 use hir_def::Name;
 use smol_str::SmolStr;
 
 use crate::method_lookup::{
-    build_tabular_section_method_info, platform_type_key, to_method_info, MethodInfo,
+    build_tabular_section_method_info, platform_type_key_id, to_method_info, MethodInfo,
 };
 use crate::platform_manager_lookup::{build_resolution, metadata_kind_to_prefix_and_mdo};
 
@@ -172,13 +176,16 @@ impl PlatformMethodHandle {
 #[derive(Debug, Clone)]
 pub struct ResolvedPlatformMethod {
     pub handle: PlatformMethodHandle,
-    pub return_ty: Ty,
-    pub params: Vec<Ty>,
-    pub overloads: Vec<Vec<Ty>>,
+    pub return_ty: TypeId,
+    pub params: Vec<TypeId>,
+    pub overloads: Vec<Vec<TypeId>>,
 }
 
 impl ResolvedPlatformMethod {
     /// Drop the handle and keep just the inference-shaped projection.
+    ///
+    /// [`MethodInfo`] shares the kernel-native shape, so this is a plain
+    /// field move.
     pub fn into_method_info(self) -> MethodInfo {
         MethodInfo { return_ty: self.return_ty, params: self.params, overloads: self.overloads }
     }
@@ -193,59 +200,78 @@ impl ResolvedPlatformMethod {
 /// without a platform surface), and for method names not present in
 /// the resolved table.
 pub fn resolve_method(
-    db: &dyn salsa::Database,
-    receiver_ty: &Ty,
+    db: &dyn crate::db::HirDatabase,
+    receiver: TypeId,
     method_name: &Name,
 ) -> Option<ResolvedPlatformMethod> {
-    let coerced = crate::this_object::coerce_to_metadata_ref(receiver_ty);
-    let receiver_ty = coerced.as_ref().unwrap_or(receiver_ty);
+    resolve_method_inner(db, db, receiver, method_name)
+}
 
-    if let Ty::Union(members) = receiver_ty {
-        let live: Vec<&Ty> =
-            members.iter().filter(|m| !matches!(m, Ty::Undefined | Ty::Null)).collect();
-        let mut returns: Vec<Ty> = Vec::with_capacity(live.len());
+fn resolve_method_inner(
+    salsa_db: &dyn salsa::Database,
+    kernel_db: &dyn TypeKernelDb,
+    receiver: TypeId,
+    method_name: &Name,
+) -> Option<ResolvedPlatformMethod> {
+    let receiver =
+        crate::this_object::coerce_to_metadata_ref_id(kernel_db, receiver).unwrap_or(receiver);
+
+    if let TypeKind::Union(members) = kernel_db.lookup_type(receiver) {
+        let live: Vec<TypeId> = members
+            .iter()
+            .copied()
+            .filter(|m| !matches!(kernel_db.lookup_type(*m), TypeKind::Undefined | TypeKind::Null))
+            .collect();
+        let mut returns: Vec<TypeId> = Vec::with_capacity(live.len());
         let mut chosen: Option<ResolvedPlatformMethod> = None;
         // Cohesion rule mirrors `lookup_method`: bind the FIRST
         // successful branch's handle / params / overloads wholesale;
         // later branches contribute only their return types.
         for member in live {
-            if let Some(res) = resolve_method(db, member, method_name) {
-                returns.push(res.return_ty.clone());
+            if let Some(res) = resolve_method_inner(salsa_db, kernel_db, member, method_name) {
+                returns.push(res.return_ty);
                 if chosen.is_none() {
                     chosen = Some(res);
                 }
             }
         }
         return chosen.map(|mut r| {
-            r.return_ty = Ty::union(returns);
+            r.return_ty = kernel_db.union(returns);
             r
         });
     }
 
-    match receiver_ty {
-        Ty::ObjectManager { kind, name } => {
-            let prefix = kind.manager_type_prefix()?;
-            let method = lookup_prefixed(db, prefix, method_name.as_str())?;
-            let resolution = build_resolution(&method, *kind, name);
+    match kernel_db.lookup_type(receiver) {
+        TypeKind::ObjectManager(facet) => {
+            let prefix = facet.mdo.manager_type_prefix()?;
+            let method = lookup_prefixed(salsa_db, prefix, method_name.as_str())?;
+            let mdo_name = Name::new(facet.name.as_str());
+            let resolution = build_resolution(kernel_db, &method, facet.mdo, &mdo_name);
             Some(ResolvedPlatformMethod {
                 handle: PlatformMethodHandle {
                     method_id: method.id,
                     origin: PlatformMethodOrigin::Prefixed {
                         prefix: SmolStr::from(prefix),
-                        mdo_type: *kind,
-                        mdo_name: name.clone(),
+                        mdo_type: facet.mdo,
+                        mdo_name,
                     },
                 },
                 return_ty: resolution.return_ty,
                 params: resolution.signature.params.to_vec(),
-                overloads: resolution.overloads,
+                overloads: resolution.overloads.clone(),
             })
         }
-        Ty::MetadataRef { kind, name } => resolve_metadata_ref(db, *kind, name, method_name),
+        TypeKind::MetadataRef(facet) => resolve_metadata_ref(
+            salsa_db,
+            kernel_db,
+            facet.kind,
+            &Name::new(facet.name.as_str()),
+            method_name,
+        ),
         _ => {
-            let key = platform_type_key(receiver_ty)?;
-            let method = lookup_scalar(db, key, method_name.as_str())?;
-            let info = to_method_info(&method);
+            let key = platform_type_key_id(kernel_db, receiver)?;
+            let method = lookup_scalar(salsa_db, &key, method_name.as_str())?;
+            let info = to_method_info(kernel_db, &method);
             Some(ResolvedPlatformMethod {
                 handle: PlatformMethodHandle {
                     method_id: method.id,
@@ -260,7 +286,8 @@ pub fn resolve_method(
 }
 
 fn resolve_metadata_ref(
-    db: &dyn salsa::Database,
+    salsa_db: &dyn salsa::Database,
+    kernel_db: &dyn TypeKernelDb,
     kind: MetadataKind,
     mdo_name: &Name,
     method_name: &Name,
@@ -269,8 +296,8 @@ fn resolve_metadata_ref(
     // `"Tabular section"` type_name, with row-generic rebinding for
     // chained accessors (`ТЧ.Получить(0).<row attr>`).
     if let MetadataKind::TabularSection { parent } = kind {
-        let method = lookup_scalar(db, "Tabular section", method_name.as_str())?;
-        let info = build_tabular_section_method_info(&method, parent, mdo_name);
+        let method = lookup_scalar(salsa_db, "Tabular section", method_name.as_str())?;
+        let info = build_tabular_section_method_info(kernel_db, &method, parent, mdo_name);
         return Some(ResolvedPlatformMethod {
             handle: PlatformMethodHandle {
                 method_id: method.id,
@@ -287,8 +314,8 @@ fn resolve_metadata_ref(
     // Composite-prefix path — covers all 16 kinds with
     // `platform_prefix() = Some(prefix)`.
     if let Some((prefix, parent_mdo)) = metadata_kind_to_prefix_and_mdo(kind) {
-        if let Some(method) = lookup_prefixed(db, prefix, method_name.as_str()) {
-            let resolution = build_resolution(&method, parent_mdo, mdo_name);
+        if let Some(method) = lookup_prefixed(salsa_db, prefix, method_name.as_str()) {
+            let resolution = build_resolution(kernel_db, &method, parent_mdo, mdo_name);
             return Some(ResolvedPlatformMethod {
                 handle: PlatformMethodHandle {
                     method_id: method.id,
@@ -300,15 +327,15 @@ fn resolve_metadata_ref(
                 },
                 return_ty: resolution.return_ty,
                 params: resolution.signature.params.to_vec(),
-                overloads: resolution.overloads,
+                overloads: resolution.overloads.clone(),
             });
         }
     }
 
     // Synthetic-scalar fallback (e.g. `RegisterFilter` → `"Filter"`).
     if let Some(scalar_key) = kind.scalar_platform_key() {
-        if let Some(method) = lookup_scalar(db, scalar_key, method_name.as_str()) {
-            let info = to_method_info(&method);
+        if let Some(method) = lookup_scalar(salsa_db, scalar_key, method_name.as_str()) {
+            let info = to_method_info(kernel_db, &method);
             return Some(ResolvedPlatformMethod {
                 handle: PlatformMethodHandle {
                     method_id: method.id,
@@ -345,6 +372,7 @@ fn lookup_prefixed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bsl_types::testing::{InMemoryDb, RootConfigCtx};
 
     // Minimal Salsa database for unit tests in this crate. Mirrors
     // `bsl_platform::db::tests::TestDatabase` and avoids pulling
@@ -361,14 +389,25 @@ mod tests {
         TestDatabase::default()
     }
 
+    fn resolve_for_test(
+        db: &TestDatabase,
+        kdb: &InMemoryDb,
+        receiver: TypeId,
+        method_name: &Name,
+    ) -> Option<ResolvedPlatformMethod> {
+        resolve_method_inner(db, kdb, receiver, method_name)
+    }
+
     #[test]
     fn metadata_ref_record_set_resolves_with_prefixed_handle() {
         let db = db();
-        let ty = Ty::MetadataRef {
-            kind: MetadataKind::InformationRegisterRecordSet,
-            name: Name::new("Курсы"),
-        };
-        let res = resolve_method(&db, &ty, &Name::new("Прочитать"));
+        let kdb = InMemoryDb::new();
+        let receiver = kdb.metadata_ref(
+            MetadataKind::InformationRegisterRecordSet,
+            "Курсы".to_string(),
+            &RootConfigCtx,
+        );
+        let res = resolve_for_test(&db, &kdb, receiver, &Name::new("Прочитать"));
         let Some(res) = res else {
             // Skip when running without platform data (CI without HBK).
             println!("Skipping: no platform data available");
@@ -385,8 +424,8 @@ mod tests {
                 panic!("composite prefix kind must use Prefixed origin");
             }
         }
-        // `Прочитать()` is a procedure → return is `Ty::Undefined`.
-        assert_eq!(res.return_ty, Ty::Undefined);
+        // `Прочитать()` is a procedure → return is `Undefined`.
+        assert_eq!(res.return_ty, kdb.undefined());
     }
 
     #[test]
@@ -394,11 +433,13 @@ mod tests {
         // RegisterFilter has scalar_platform_key = Some("Filter") and no
         // composite prefix; resolve_method must reach the scalar fallback.
         let db = db();
-        let ty = Ty::MetadataRef {
-            kind: MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
-            name: Name::new("Курсы"),
-        };
-        let res = resolve_method(&db, &ty, &Name::new("Сбросить"));
+        let kdb = InMemoryDb::new();
+        let receiver = kdb.metadata_ref(
+            MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
+            "Курсы".to_string(),
+            &RootConfigCtx,
+        );
+        let res = resolve_for_test(&db, &kdb, receiver, &Name::new("Сбросить"));
         let Some(res) = res else {
             println!("Skipping: no platform data available");
             return;
@@ -441,11 +482,13 @@ mod tests {
     #[test]
     fn unknown_method_returns_none_not_panic() {
         let db = db();
-        let ty = Ty::MetadataRef {
-            kind: MetadataKind::InformationRegisterRecordSet,
-            name: Name::new("Курсы"),
-        };
-        let res = resolve_method(&db, &ty, &Name::new("НесуществующийМетод"));
+        let kdb = InMemoryDb::new();
+        let receiver = kdb.metadata_ref(
+            MetadataKind::InformationRegisterRecordSet,
+            "Курсы".to_string(),
+            &RootConfigCtx,
+        );
+        let res = resolve_for_test(&db, &kdb, receiver, &Name::new("НесуществующийМетод"));
         assert!(res.is_none());
     }
 
@@ -454,12 +497,14 @@ mod tests {
         // Bilingual lookup: passing the English method name (`Read`)
         // must find the same method as the Russian (`Прочитать`).
         let db = db();
-        let ty = Ty::MetadataRef {
-            kind: MetadataKind::InformationRegisterRecordSet,
-            name: Name::new("Курсы"),
-        };
-        let ru = resolve_method(&db, &ty, &Name::new("Прочитать"));
-        let en = resolve_method(&db, &ty, &Name::new("Read"));
+        let kdb = InMemoryDb::new();
+        let receiver = kdb.metadata_ref(
+            MetadataKind::InformationRegisterRecordSet,
+            "Курсы".to_string(),
+            &RootConfigCtx,
+        );
+        let ru = resolve_for_test(&db, &kdb, receiver, &Name::new("Прочитать"));
+        let en = resolve_for_test(&db, &kdb, receiver, &Name::new("Read"));
         match (ru, en) {
             (Some(r), Some(e)) => assert_eq!(r.handle.method_id, e.handle.method_id),
             (None, None) => println!("Skipping: no platform data available"),
@@ -480,9 +525,10 @@ mod tests {
         // it so a regression of either the helper or `build_resolution`
         // surfaces here.
         let db = db();
-        let ty =
-            Ty::ObjectManager { kind: MdoType::InformationRegister, name: Name::new("Курсы") };
-        let res = resolve_method(&db, &ty, &Name::new("Получить"));
+        let kdb = InMemoryDb::new();
+        let receiver =
+            kdb.object_manager(MdoType::InformationRegister, "Курсы".to_string(), &RootConfigCtx);
+        let res = resolve_for_test(&db, &kdb, receiver, &Name::new("Получить"));
         let Some(res) = res else {
             println!("Skipping: no platform data available");
             return;
@@ -505,10 +551,10 @@ mod tests {
         // same Prefixed origin shape as the MetadataRef composite-prefix
         // arm.
         let db = db();
-        let ty = Ty::ObjectManager {
-            kind: MdoType::Catalog, name: Name::new("Номенклатура")
-        };
-        let res = resolve_method(&db, &ty, &Name::new("СоздатьЭлемент"));
+        let kdb = InMemoryDb::new();
+        let receiver =
+            kdb.object_manager(MdoType::Catalog, "Номенклатура".to_string(), &RootConfigCtx);
+        let res = resolve_for_test(&db, &kdb, receiver, &Name::new("СоздатьЭлемент"));
         let Some(res) = res else {
             println!("Skipping: no platform data available");
             return;
@@ -528,9 +574,11 @@ mod tests {
         // concrete `Ty::MetadataRef { CatalogObject, "Номенклатура" }`.
         assert_eq!(
             res.return_ty,
-            Ty::MetadataRef {
-                kind: MetadataKind::CatalogObject, name: Name::new("Номенклатура")
-            }
+            kdb.metadata_ref(
+                MetadataKind::CatalogObject,
+                "Номенклатура".to_string(),
+                &RootConfigCtx,
+            )
         );
     }
 
@@ -544,10 +592,11 @@ mod tests {
         // `Запрос.Выполнить().Выгрузить()` whose receiver is
         // `Ty::Union([QueryResult, Undefined])`.
         let db = db();
-        let happy = Ty::PlatformObject(Name::new("РезультатЗапроса"));
-        let union = Ty::union(vec![happy.clone(), Ty::Undefined]);
-        let direct = resolve_method(&db, &happy, &Name::new("Выгрузить"));
-        let through_union = resolve_method(&db, &union, &Name::new("Выгрузить"));
+        let kdb = InMemoryDb::new();
+        let happy = kdb.platform_object("РезультатЗапроса".to_string());
+        let union = kdb.union(vec![happy, kdb.undefined()]);
+        let direct = resolve_for_test(&db, &kdb, happy, &Name::new("Выгрузить"));
+        let through_union = resolve_for_test(&db, &kdb, union, &Name::new("Выгрузить"));
         match (direct, through_union) {
             (Some(direct_res), Some(union_res)) => {
                 // First-branch handle: same id and origin.
@@ -570,25 +619,32 @@ mod tests {
         // of the method name. Mirrors `lookup_method`'s sentinel
         // stripping (no instance methods on Undefined / Null).
         let db = db();
-        let dead = Ty::union(vec![Ty::Undefined, Ty::Null]);
-        let res = resolve_method(&db, &dead, &Name::new("ЛюбоеИмя"));
+        let kdb = InMemoryDb::new();
+        let dead = kdb.union(vec![kdb.undefined(), kdb.null()]);
+        let res = resolve_for_test(&db, &kdb, dead, &Name::new("ЛюбоеИмя"));
         assert!(res.is_none());
     }
 
     #[test]
     fn into_method_info_drops_handle() {
+        let db = InMemoryDb::new();
+        let return_ty = db.number(None, None);
+        let params = vec![db.string(None, false)];
+        let overloads = vec![vec![db.boolean()]];
         let res = ResolvedPlatformMethod {
             handle: PlatformMethodHandle {
                 method_id: 1,
                 origin: PlatformMethodOrigin::Scalar { type_name: SmolStr::from("X") },
             },
-            return_ty: Ty::Number,
-            params: vec![Ty::String],
-            overloads: vec![vec![Ty::Boolean]],
+            return_ty,
+            params: params.clone(),
+            overloads: overloads.clone(),
         };
+        // `into_method_info` is a plain field move onto the kernel-native
+        // `MethodInfo` — the ids must survive unchanged.
         let info = res.into_method_info();
-        assert_eq!(info.return_ty, Ty::Number);
-        assert_eq!(info.params, vec![Ty::String]);
-        assert_eq!(info.overloads, vec![vec![Ty::Boolean]]);
+        assert_eq!(info.return_ty, return_ty);
+        assert_eq!(info.params, params);
+        assert_eq!(info.overloads, overloads);
     }
 }

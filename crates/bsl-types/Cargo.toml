@@ -1,0 +1,19 @@
+[package]
+name = "bsl-types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Type kernel for bsl-analyzer — single source of truth for BSL/SDBL/form/doc types"
+
+[dependencies]
+bsl-config.workspace = true
+bsl-metadata.workspace = true
+intern.workspace = true
+smol_str.workspace = true
+rustc-hash.workspace = true
+tracing.workspace = true
+elsa.workspace = true
+
+[dev-dependencies]
+expect-test.workspace = true

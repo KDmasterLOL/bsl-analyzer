@@ -11,8 +11,8 @@
 //!
 //! Output is a [`TypeRef`] — the *syntactic* layer. Downstream callers
 //! (e.g. `hir-ty::method_resolution::materialise_signature`) run it through
-//! [`hir_ty::TyLoweringContext::lower_type_ref`] to obtain the semantic
-//! [`crate::ty::Ty`]. Keeping the parser at the TypeRef level means JSDoc
+//! `hir_ty::TyLoweringContext::lower_type_ref_id` to obtain the semantic
+//! `TypeId`. Keeping the parser at the TypeRef level means JSDoc
 //! and XML attributes share a single lowering pipeline, and adding a new
 //! primitive or a qualified pattern (`Массив из Число`) only requires one
 //! edit in `TyLoweringContext`.
@@ -218,8 +218,8 @@ fn is_continuation_line(line: &str) -> bool {
 /// only returns it for the explicit `Произвольный` / `Any` / `Arbitrary`
 /// gradual-top opt-in (or for syntactically empty input, which we filter
 /// here). Dropping it would silently erase an author's deliberate "or
-/// anything else" alternative; [`crate::Ty::union`] preserves `Unknown`
-/// inside unions on purpose, see its doc comment.
+/// anything else" alternative, so the gradual-top opt-in is kept as an
+/// explicit union member at the syntactic `TypeRef` layer.
 fn parse_continuation_line(line: &str) -> Option<TypeRef> {
     let after_dash = line.strip_prefix("- ")?.trim();
     if after_dash.is_empty() {
@@ -244,8 +244,8 @@ fn parse_continuation_line(line: &str) -> Option<TypeRef> {
 /// Fold `addition` into `existing` as an additional union alternative.
 ///
 /// Preserves the smart-constructor invariant for unions at the syntactic
-/// layer: nesting and dedup happen at lowering time via [`crate::Ty::union`].
-/// Here we just append.
+/// layer: nesting and dedup happen at lowering time via the kernel union
+/// builder. Here we just append.
 fn fold_into_union(existing: &mut TypeRef, addition: TypeRef) {
     let prev = std::mem::replace(existing, TypeRef::Unknown);
     *existing = match prev {

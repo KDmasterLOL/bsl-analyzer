@@ -18,7 +18,7 @@
 
 use std::sync::Arc;
 
-use hir::{infer_module_code_query, DefWithBodyId, HirDatabase, Ty};
+use hir::{infer_module_code_query, Builders, DefWithBodyId, HirDatabase};
 use ide_db::base_db::{FileIdInput, SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
 use test_fixture::Fixture;
@@ -83,7 +83,7 @@ fn module_level_implicit_local_assignment_populates_var_types() {
     let input = FileIdInput::new(&db, fid);
     let result = infer_module_code_query(&db, input);
     assert_eq!(result.owner, DefWithBodyId::ModuleCode);
-    assert_eq!(result.var_types.get("х"), Some(&Ty::String));
+    assert_eq!(result.var_types.get("х").copied(), Some(db.string(None, false)),);
 }
 
 /// Two consecutive calls inside the same Salsa revision return the

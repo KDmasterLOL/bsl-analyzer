@@ -11,7 +11,7 @@
 //! map that *is* merged. Feeding the names through `X = Foo(...)` turns the
 //! return type of `Foo` into `var_types["x"]`, which is observable.
 
-use hir::{DefDatabase, HirDatabase, ModuleId, Ty};
+use hir::{Builders, DefDatabase, HirDatabase, ModuleId, TypeId};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
 use test_fixture::Fixture;
@@ -41,8 +41,8 @@ fn setup(fixture_text: &str) -> (RootDatabaseImpl, FileId) {
     (db, test_file)
 }
 
-fn var_type(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<Ty> {
-    db.infer(file_id).var_types.get(var_lower).cloned()
+fn var_type(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<TypeId> {
+    db.infer(file_id).var_types.get(var_lower).copied()
 }
 
 // ---------- platform-global builtin via Resolver + hir-ty signature ----------
@@ -62,7 +62,7 @@ fn path_resolves_platform_builtin_via_resolver() {
     let (db, file_id) = setup(fixture);
     assert_eq!(
         var_type(&db, file_id, "х"),
-        Some(Ty::Number),
+        Some(db.number(None, None)),
         "platform builtin call must type `Х` as Number (СтрДлина ret type)"
     );
 }
@@ -89,7 +89,7 @@ fn implicit_local_assignment_shadows_module_procedure() {
     let (db, file_id) = setup(fixture);
     assert_eq!(
         var_type(&db, file_id, "рез"),
-        Some(Ty::Number),
+        Some(db.number(None, None)),
         "implicit local must shadow module procedure; `Рез` should inherit Number"
     );
 }
@@ -110,7 +110,7 @@ fn implicit_local_assignment_shadows_builtin_in_value_position() {
     let (db, file_id) = setup(fixture);
     assert_eq!(
         var_type(&db, file_id, "рез"),
-        Some(Ty::Number),
+        Some(db.number(None, None)),
         "implicit local named like a builtin must win in value position"
     );
 }

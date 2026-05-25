@@ -13,7 +13,7 @@
 //! `db.infer(file_id)` so the wiring is observable via standard
 //! `InferenceResult.var_types` / `expr_types_by_body`.
 
-use hir::{DefDatabase, DefWithBodyId, HirDatabase, ModuleId, Name, Ty};
+use hir::{Builders, DefDatabase, DefWithBodyId, HirDatabase, ModuleId, Name};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
 use test_fixture::Fixture;
@@ -40,10 +40,10 @@ fn setup(fixture_text: &str) -> (RootDatabaseImpl, FileId) {
     (db, test_file)
 }
 
-fn var_ty(db: &RootDatabaseImpl, fid: FileId, name: &str) -> Ty {
+fn var_ty(db: &RootDatabaseImpl, fid: FileId, name: &str) -> hir::TypeId {
     let result = db.infer(fid);
     let key = name.to_lowercase();
-    result.var_types.get(&key).cloned().unwrap_or(Ty::Unknown)
+    result.var_types.get(&key).copied().unwrap_or_else(|| db.unknown())
 }
 
 /// Bare same-module fn-call cascade: `Х = ЛокФн();` where `ЛокФн`
@@ -63,7 +63,7 @@ fn bare_fn_cascade_string() {
 КонецПроцедуры
 "#,
     );
-    assert_eq!(var_ty(&db, fid, "Х"), Ty::String);
+    assert_eq!(var_ty(&db, fid, "Х"), db.string(None, false));
 }
 
 /// Two-step cascade: `f` returns `g()`, `g` returns `"x"`. After O.11
@@ -88,7 +88,7 @@ fn bare_fn_cascade_two_step_chain() {
 КонецПроцедуры
 "#,
     );
-    assert_eq!(var_ty(&db, fid, "Х"), Ty::String);
+    assert_eq!(var_ty(&db, fid, "Х"), db.string(None, false));
 }
 
 /// Body-binding shadow: a parameter named the same as a module method
@@ -113,7 +113,7 @@ fn bare_fn_cascade_respects_param_shadow() {
     // The parameter `Foo` shadows the module method — its type is
     // Unknown (no annotation), so calling it yields Unknown rather
     // than cascading through to the module method.
-    assert_eq!(var_ty(&db, fid, "Х"), Ty::Unknown);
+    assert_eq!(var_ty(&db, fid, "Х"), db.unknown());
 }
 
 /// Cycle scaffolding now reachable: `f` returns `f()`. The cascade
@@ -138,7 +138,7 @@ fn self_recursion_under_cascade_yields_unknown() {
 КонецПроцедуры
 "#,
     );
-    assert_eq!(var_ty(&db, fid, "Х"), Ty::Unknown);
+    assert_eq!(var_ty(&db, fid, "Х"), db.unknown());
 }
 
 /// The cascade also fires through `Stmt::Return`: a function `Wrap`
@@ -182,12 +182,15 @@ fn return_statement_propagates_cascade() {
 
     // Sanity: `Wrap` and `Inner` are distinct keys in `expr_types_by_body`.
     assert_ne!(wrap_owner, inner_owner, "Wrap and Inner must lower to distinct DefWithBodyId");
+    // Phase 3 §4.D: per-body `expr_types` now stores `TypeId`; bridge
+    // through the kernel to keep the structural `matches!` assertion.
+    let has_string = |tid: &hir::TypeId| *tid == db.string(None, false);
     // Inner contains the literal — confirms `expr_types_by_body[Inner]` sees a String.
-    assert!(inner_exprs.values().any(|t| matches!(t, Ty::String)));
+    assert!(inner_exprs.values().any(has_string));
     // The actual cascade assertion: `Wrap`'s OWN body sees the
     // call-to-`Inner` expression typed `Ty::String` via O.11.
     assert!(
-        wrap_exprs.values().any(|t| matches!(t, Ty::String)),
+        wrap_exprs.values().any(has_string),
         "Wrap's body must contain a Ty::String entry for `Inner()` via the O.11 cascade \
          (entries: {:?})",
         wrap_exprs.values().collect::<Vec<_>>(),

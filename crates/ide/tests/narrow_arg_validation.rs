@@ -26,7 +26,7 @@
 //!    same database recomputes `arg_diagnostics` instead of returning
 //!    a stale cache.
 
-use hir::{HirDatabase, InferenceDiagnostic, Ty};
+use hir::{Builders, HirDatabase, InferenceDiagnostic, TypeId};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
 use std::path::PathBuf;
@@ -61,12 +61,12 @@ fn setup(fixture_text: &str) -> (RootDatabaseImpl, FileId) {
 }
 
 /// Collect `(expected, actual)` pairs from `arg_diagnostics_query`.
-fn arg_mismatches(db: &RootDatabaseImpl, file_id: FileId) -> Vec<(Ty, Ty)> {
+fn arg_mismatches(db: &RootDatabaseImpl, file_id: FileId) -> Vec<(TypeId, TypeId)> {
     db.arg_diagnostics(file_id)
         .iter()
         .filter_map(|(_, d)| match d {
             InferenceDiagnostic::TypeMismatch { expected, actual, .. } => {
-                Some((expected.clone(), actual.clone()))
+                Some((*expected, *actual))
             }
             _ => None,
         })
@@ -147,11 +147,11 @@ fn unnarrowed_arg_outside_guard_still_fires_mismatch() {
          got {mm:?}"
     );
     let (expected, actual) = &mm[0];
-    assert_eq!(expected, &Ty::Number, "expected param type Number");
+    assert_eq!(*expected, db.number(None, None), "expected param type Number");
     // `actual` is the union — exact union shape is incidental, just
     // assert it isn't `Number` (i.e. no narrowing happened here).
     assert!(
-        !matches!(actual, Ty::Number),
+        *actual != db.number(None, None),
         "actual must be the unnarrowed union, not Number — got {actual:?}"
     );
 }

@@ -10,7 +10,8 @@ use bsl_platform::{
     PlatformMethod, PlatformProperty, TypeNameInput,
 };
 use hir::{
-    Field, HirFieldOrigin, MethodSymbol, Name, Semantics, Ty, TyLoweringContext, Type as HirType,
+    coerce_to_metadata_ref_id, platform_type_key_id, Field, HirFieldOrigin, MethodSymbol, Name,
+    Semantics, TyLoweringContext, Type as HirType, TypeId, TypeKind,
 };
 use ide_db::RootDatabase;
 use symbol_info::{
@@ -73,7 +74,7 @@ pub(super) fn platform_completions<DB: RootDatabase>(
     // completion no longer dips into `PlatformData::instance()` for
     // receiver resolution.
     let sema = Semantics::new(db);
-    let mut receiver_ty = sema.type_of_expr(position.file_id, &receiver_expr);
+    let mut receiver_id = sema.type_of_expr(position.file_id, &receiver_expr);
 
     // Fallback: a bare identifier that HIR couldn't resolve — typically
     // a literal type name (`Строка.`) or a platform constructor name
@@ -83,7 +84,7 @@ pub(super) fn platform_completions<DB: RootDatabase>(
     // `Ty::PlatformObject(name)` so `platform_type_name()` below can
     // ask `type_methods_query` for matching methods (empty result is
     // safe — completion just shows nothing).
-    if receiver_ty.is_unknown() {
+    if matches!(db.lookup_type(receiver_id), TypeKind::Unknown) {
         if let Some(name) = extract_receiver_ident(&receiver_expr) {
             // If the receiver is a real workspace CommonModule, the fast
             // path `complete_common_module_methods` already had its turn
@@ -137,20 +138,21 @@ pub(super) fn platform_completions<DB: RootDatabase>(
             // name>)`. Without this branch the next fallback would index
             // `type_methods_query` with the property name and surface
             // zero methods.
-            if let Some(prop) =
-                bsl_platform::PlatformDataInner::instance().get_global_property(&name)
-            {
-                if let Some(declared) = prop.property_types.first() {
-                    receiver_ty = Ty::PlatformObject(Name::new(declared.as_str()));
-                }
+            //
+            // Routed through the shared `hir::resolve_platform_global_property_type`
+            // facade so the IDE doesn't dip into `PlatformDataInner::instance()`
+            // directly; same helper drives `infer.rs::infer_path_name` step 6.
+            if let Some(id) = hir::resolve_platform_global_property_type(db, &name_node) {
+                receiver_id = id;
             }
-            if receiver_ty.is_unknown() {
-                receiver_ty = TyLoweringContext::new().lower_bare_name(&Name::new(&name));
+            if matches!(db.lookup_type(receiver_id), TypeKind::Unknown) {
+                // Syntactic kernel-native lowerer (no Ty round-trip).
+                receiver_id = TyLoweringContext::new().lower_bare_name_id(db, &name_node);
             }
         }
     }
 
-    tracing::debug!(receiver_ty = ?receiver_ty, "Resolved receiver type");
+    tracing::debug!(receiver_id = ?receiver_id, "Resolved receiver type");
 
     // Manager / metadata-ref receivers are not indexed under a scalar
     // type key — their platform methods live behind composite
@@ -158,7 +160,7 @@ pub(super) fn platform_completions<DB: RootDatabase>(
     // …). Route them through `manager_methods_query` with the
     // `bsl-metadata` / `hir::MetadataKind` prefix tables.
     if let Some(items) =
-        complete_prefix_methods_for_receiver(db, &receiver_ty, position.file_id, position.locale)
+        complete_prefix_methods_for_receiver(db, receiver_id, position.file_id, position.locale)
     {
         return Some(apply_prefix_filter(items, &prefix, db));
     }
@@ -173,7 +175,7 @@ pub(super) fn platform_completions<DB: RootDatabase>(
     // `Semantics::form` is the only entry point — IDE never reads
     // `module_metadata` directly (Clean Architecture, plan v3.1
     // decision #4).
-    if hir::is_form_items_collection_ty(&receiver_ty) {
+    if hir::is_form_items_collection_ty(db, receiver_id) {
         if let Some(items) =
             complete_form_elements_collection(db, position.file_id, position.locale)
         {
@@ -189,7 +191,7 @@ pub(super) fn platform_completions<DB: RootDatabase>(
     // Extension labels win over base labels on a tie (rev iteration +
     // case-insensitive `seen` set), matching the precedence
     // `lookup_platform_property` enforces for type resolution.
-    if let Ty::FormControl { kind, .. } = &receiver_ty {
+    if let TypeKind::FormControl { kind, .. } = db.lookup_type(receiver_id) {
         let chain = hir::form_control_platform_type_chain(*kind);
         if !chain.is_empty() {
             let mut items: Vec<CompletionItem> = Vec::new();
@@ -205,9 +207,10 @@ pub(super) fn platform_completions<DB: RootDatabase>(
         }
     }
 
-    if let Some(type_name) = receiver_ty.platform_type_name() {
+    if let Some(type_name) = platform_type_key_id(db, receiver_id) {
         tracing::debug!(type_name = ?type_name, "Platform type for completion");
-        let items = complete_platform_methods(db, type_name, position.locale);
+        let mut items = projection_column_items(db, receiver_id, position.locale);
+        items.extend(complete_platform_methods(db, &type_name, position.locale));
         return Some(apply_prefix_filter(items, &prefix, db));
     }
 
@@ -218,12 +221,24 @@ pub(super) fn platform_completions<DB: RootDatabase>(
     // sentinels — they have no instance members — and merge the surviving
     // branches' completion lists. Labels are deduped so members shared
     // across branches (e.g. `Количество`) surface once.
-    if let Ty::Union(members) = &receiver_ty {
+    if let TypeKind::Union(members) = db.lookup_type(receiver_id) {
+        let members = members.to_vec();
         let mut items: Vec<CompletionItem> = Vec::new();
         let mut seen_labels: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for m in members.iter().filter(|m| !matches!(m, Ty::Undefined | Ty::Null)) {
-            let Some(type_name) = m.platform_type_name() else { continue };
-            for item in complete_platform_methods(db, type_name, position.locale) {
+        for m in members
+            .into_iter()
+            .filter(|m| !matches!(db.lookup_type(*m), TypeKind::Undefined | TypeKind::Null))
+        {
+            // Per-arm projection columns: a union arm shaped like
+            // `QueryResultSelection{Some(p)}` (e.g. a nullable chain
+            // return) still surfaces its SELECT columns.
+            for item in projection_column_items(db, m, position.locale) {
+                if seen_labels.insert(item.label.clone()) {
+                    items.push(item);
+                }
+            }
+            let Some(type_name) = platform_type_key_id(db, m) else { continue };
+            for item in complete_platform_methods(db, &type_name, position.locale) {
                 if seen_labels.insert(item.label.clone()) {
                     items.push(item);
                 }
@@ -253,7 +268,7 @@ pub(super) fn platform_completions<DB: RootDatabase>(
 /// Returns `None` for every other receiver shape.
 fn complete_prefix_methods_for_receiver<DB: RootDatabase>(
     db: &DB,
-    receiver_ty: &Ty,
+    receiver: TypeId,
     file_id: FileId,
     locale: ide_db::base_db::Locale,
 ) -> Option<Vec<CompletionItem>> {
@@ -266,15 +281,35 @@ fn complete_prefix_methods_for_receiver<DB: RootDatabase>(
     // once here. `ThisObject` lands as `MetadataRef { *Object, .. }`,
     // `ThisManager` as `ObjectManager { kind, name }` — both then route
     // through their existing branches with no extra special-casing.
-    let coerced = hir::coerce_this_object_to_metadata_ref(receiver_ty);
-    let effective_ty = coerced.as_ref().unwrap_or(receiver_ty);
+    let effective = coerce_to_metadata_ref_id(db, receiver).unwrap_or(receiver);
+
+    // Determine the receiver shape once (owned discriminants), releasing
+    // the `lookup_type` borrow before the `db` re-borrows below.
+    let (is_manager, is_metadata_ref, is_union_with_metadata_ref, is_form_data_with_underlying) =
+        match db.lookup_type(effective) {
+            TypeKind::ObjectManager(_) | TypeKind::ManagerCollection(_) => {
+                (true, false, false, false)
+            }
+            TypeKind::MetadataRef(_) | TypeKind::MetadataObject(_) => (false, true, false, false),
+            TypeKind::Union(arms) => {
+                let has_ref = arms.iter().any(|a| {
+                    matches!(
+                        db.lookup_type(*a),
+                        TypeKind::MetadataRef(_) | TypeKind::MetadataObject(_)
+                    )
+                });
+                (false, false, has_ref, false)
+            }
+            TypeKind::FormData { underlying: Some(_), .. } => (false, false, false, true),
+            _ => (false, false, false, false),
+        };
 
     // Fast path: ObjectManager / ManagerCollection have no MDO fields.
-    // After coercion this also catches `Ty::ThisManager` → `ObjectManager`,
+    // After coercion this also catches `ThisManager` → `ObjectManager`,
     // which is what makes `ЭтотОбъект.|` in a ManagerModule offer the
     // same platform manager-method set as `Справочники.<X>.|`.
-    if matches!(effective_ty, Ty::ObjectManager { .. } | Ty::ManagerCollection(_)) {
-        return collect_platform_items_or_none(db, effective_ty, locale);
+    if is_manager {
+        return collect_platform_items_or_none(db, effective, locale);
     }
 
     // MDO-field branch fires for direct `MetadataRef` receivers and for
@@ -282,32 +317,25 @@ fn complete_prefix_methods_for_receiver<DB: RootDatabase>(
     // `Найти(...) → Union(TabularSectionRow, Undefined)`). For unions
     // we still want to enumerate fields per arm (handled inside
     // `Type::fields()` via `enumerate_fields`).
-    let is_union_with_metadata_ref = match effective_ty {
-        Ty::Union(arms) => arms.iter().any(|a| matches!(a, Ty::MetadataRef { .. })),
-        _ => false,
-    };
-    let is_metadata_ref = matches!(effective_ty, Ty::MetadataRef { .. });
-    // `Ty::FormData{Structure | StructureWithCollection, underlying: Some(..)}`
+    //
+    // `FormData{Structure | StructureWithCollection, underlying: Some(..)}`
     // routes here too: `Type::fields()` projects it to `MetadataRef{*Object,..}`
     // and enumerates the underlying MDO's attributes (`Объект.<attr>` in a
-    // managed form). Platform members come from the FormData wrapper's
-    // `platform_type_name()` (`ДанныеФормыСтруктура` etc.) via the existing
+    // managed form). Platform members come from the FormData wrapper via the
     // `collect_platform_items_for_effective` path below.
-    let is_form_data_with_underlying =
-        matches!(effective_ty, Ty::FormData { underlying: Some(_), .. });
     if !is_metadata_ref && !is_union_with_metadata_ref && !is_form_data_with_underlying {
         return None;
     }
 
-    let mdo_fields = HirType::new(db, file_id, effective_ty.clone()).fields();
-    let platform_items = collect_platform_items_for_effective(db, effective_ty, locale);
+    let mdo_fields = HirType::from_id(db, file_id, effective).fields();
+    let platform_items = collect_platform_items_for_effective(db, effective, locale);
 
     if mdo_fields.is_empty() && platform_items.is_empty() {
         return None;
     }
 
     let mut items: Vec<CompletionItem> =
-        mdo_fields.iter().map(|f| render_mdo_field(f, locale)).collect();
+        mdo_fields.iter().map(|f| render_mdo_field(db, f, locale)).collect();
     // Dedup keyed on the visible Russian label only. An MDO attribute and
     // a platform method are conceptually distinct symbols even when they
     // share an English alias (the platform method's English form is not
@@ -334,15 +362,19 @@ fn complete_prefix_methods_for_receiver<DB: RootDatabase>(
 /// pass straight through.
 fn collect_platform_items_for_effective<DB: RootDatabase>(
     db: &DB,
-    effective_ty: &Ty,
+    effective: TypeId,
     locale: ide_db::base_db::Locale,
 ) -> Vec<CompletionItem> {
-    let Ty::Union(arms) = effective_ty else {
-        return collect_platform_items(db, effective_ty, locale);
+    let TypeKind::Union(arms) = db.lookup_type(effective) else {
+        return collect_platform_items(db, effective, locale);
     };
+    let arms = arms.to_vec();
     let mut out: Vec<CompletionItem> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for arm in arms.iter().filter(|t| !matches!(t, Ty::Undefined | Ty::Null)) {
+    for arm in arms
+        .into_iter()
+        .filter(|t| !matches!(db.lookup_type(*t), TypeKind::Undefined | TypeKind::Null))
+    {
         for item in collect_platform_items(db, arm, locale) {
             if seen.insert(item.label.to_lowercase()) {
                 out.push(item);
@@ -365,30 +397,48 @@ fn collect_platform_items_for_effective<DB: RootDatabase>(
 ///   manager prefix.
 fn collect_platform_items<DB: RootDatabase>(
     db: &DB,
-    receiver_ty: &Ty,
+    receiver: TypeId,
     locale: ide_db::base_db::Locale,
 ) -> Vec<CompletionItem> {
-    if let Ty::MetadataRef { kind, .. } = receiver_ty {
-        if let Some(scalar_key) = tabular_section_scalar_key(*kind) {
-            tracing::debug!(scalar_key, "Tabular section scalar completion");
-            return complete_platform_methods(db, scalar_key, locale);
-        }
-        if let Some(scalar_key) = kind.scalar_platform_key() {
-            tracing::debug!(scalar_key, "Synthetic-kind scalar completion");
-            return complete_platform_methods(db, scalar_key, locale);
-        }
+    // Extract owned discriminants before any `db` re-borrow. `MetadataRef`
+    // and `MetadataObject` share the kind-driven dispatch (the legacy `Ty`
+    // path collapsed the latter into `MetadataRef`).
+    enum Shape {
+        MetaKind(hir::MetadataKind),
+        FormData,
+        Manager(bsl_metadata::MdoType),
+        Other,
     }
-    // FormData receivers carry a flat platform name (`ДанныеФормыСтруктура`
-    // etc.) — wrapper methods come from the scalar `complete_platform_methods`
-    // path, not the manager-prefix table. Field projection happens elsewhere
-    // (via `Type::fields()` on the projected MetadataRef).
-    if let Ty::FormData { kind, .. } = receiver_ty {
-        return complete_platform_methods(db, kind.platform_type_name(), locale);
-    }
-    let prefix = match receiver_ty {
-        Ty::ObjectManager { kind, .. } => kind.manager_type_prefix(),
-        Ty::MetadataRef { kind, .. } => kind.platform_prefix(),
-        _ => None,
+    let shape = match db.lookup_type(receiver) {
+        TypeKind::MetadataRef(f) => Shape::MetaKind(f.kind),
+        TypeKind::MetadataObject(f) => Shape::MetaKind(f.kind),
+        TypeKind::FormData { .. } => Shape::FormData,
+        TypeKind::ObjectManager(f) => Shape::Manager(f.mdo),
+        _ => Shape::Other,
+    };
+
+    let prefix = match shape {
+        Shape::MetaKind(kind) => {
+            if let Some(scalar_key) = tabular_section_scalar_key(kind) {
+                tracing::debug!(scalar_key, "Tabular section scalar completion");
+                return complete_platform_methods(db, scalar_key, locale);
+            }
+            if let Some(scalar_key) = kind.scalar_platform_key() {
+                tracing::debug!(scalar_key, "Synthetic-kind scalar completion");
+                return complete_platform_methods(db, scalar_key, locale);
+            }
+            kind.platform_prefix()
+        }
+        // FormData receivers carry a flat platform name (`ДанныеФормыСтруктура`
+        // etc.) — wrapper methods come from the scalar `complete_platform_methods`
+        // path, not the manager-prefix table. Field projection happens elsewhere
+        // (via `Type::fields()` on the projected MetadataRef).
+        Shape::FormData => {
+            let Some(type_key) = platform_type_key_id(db, receiver) else { return Vec::new() };
+            return complete_platform_methods(db, &type_key, locale);
+        }
+        Shape::Manager(mdo) => mdo.manager_type_prefix(),
+        Shape::Other => None,
     };
     let Some(prefix) = prefix else { return Vec::new() };
     tracing::debug!(prefix, "Prefix-based completion for manager / metadata-ref receiver");
@@ -402,10 +452,10 @@ fn collect_platform_items<DB: RootDatabase>(
 /// stays identical to the pre-Phase-3 path (where no MDO branch ran).
 fn collect_platform_items_or_none<DB: RootDatabase>(
     db: &DB,
-    receiver_ty: &Ty,
+    receiver: TypeId,
     locale: ide_db::base_db::Locale,
 ) -> Option<Vec<CompletionItem>> {
-    let items = collect_platform_items(db, receiver_ty, locale);
+    let items = collect_platform_items(db, receiver, locale);
     if items.is_empty() {
         None
     } else {
@@ -802,6 +852,62 @@ pub(super) fn render_platform_property(
     }
 }
 
+/// Render each column of a `Ty::QueryResultSelection { projection:
+/// Some(p) }` receiver as a `CompletionItem`.
+///
+/// Returns an empty `Vec` for any receiver shape that doesn't carry
+/// a resolved SDBL projection — including projection-less
+/// `QueryResultSelection { projection: None }`. The caller mixes
+/// these items with the platform-property / platform-method output
+/// so the user sees both the SELECT aliases AND the platform
+/// `НомерСтроки` / `СледующаяСтрока` / `Уровень` on the same popup.
+///
+/// Each item uses `SdblTypeShadowFacet.display` (`"Число(15,2)"`,
+/// `"Строка(50)"`) when the bridge captured it; otherwise the column
+/// type is rendered through kernel display (§4.G.5d) in the caller's
+/// locale. `sort_text` is `"0_<name>"` so projection columns surface
+/// above the platform members in alphabetical order.
+fn projection_column_items<DB: RootDatabase>(
+    db: &DB,
+    receiver: TypeId,
+    locale: ide_db::base_db::Locale,
+) -> Vec<CompletionItem> {
+    let projection = match db.lookup_type(receiver) {
+        TypeKind::QueryResultSelection(facet) => facet.projection.clone(),
+        TypeKind::ValueTable(facet) | TypeKind::ValueTableRow(facet) => facet.projection.clone(),
+        _ => None,
+    };
+    let Some(projection) = projection else { return Vec::new() };
+    let shadows = projection.raw_sdbl_types.as_deref();
+    projection
+        .fields
+        .iter()
+        .enumerate()
+        .map(|(i, field)| {
+            let (name, ty) = (&field.name, field.ty);
+            let label = name.as_str().to_string();
+            // Phase 3 §4.G.5d: shadow wins (precision/scale); fall back to
+            // kernel display of the column type at the boundary.
+            let detail = shadows
+                .and_then(|s| s.get(i))
+                .map(|shadow| shadow.display.clone())
+                .unwrap_or_else(|| hir::kernel_type_label(db, ty, locale, false));
+            CompletionItem {
+                label: label.clone(),
+                detail: Some(detail),
+                kind: CompletionItemKind::Field,
+                insert_text: label.clone(),
+                documentation: None,
+                // `0_` prefix sorts SELECT columns above the platform
+                // members (whose default sort is alphabetic, no prefix).
+                sort_text: Some(format!("0_{label}")),
+                filter_text: None,
+                source: None,
+            }
+        })
+        .collect()
+}
+
 /// Surface the form's own elements (Pages / Tables / Buttons / Fields /
 /// Decorations / Additions) plus the platform `ВсеЭлементыФормы`
 /// member list as a single completion popup for `Элементы.|`.
@@ -882,11 +988,15 @@ fn render_form_element(
 /// - `sort_text` uses a short prefix (`"10_"`, `"20_"`, …) so MDO fields
 ///   sort before platform methods in the popup: user attributes first, then
 ///   tabular sections, then standard attributes, then register parts.
-pub(super) fn render_mdo_field(field: &Field, locale: ide_db::base_db::Locale) -> CompletionItem {
+pub(super) fn render_mdo_field<DB: RootDatabase>(
+    db: &DB,
+    field: &Field,
+    locale: ide_db::base_db::Locale,
+) -> CompletionItem {
     let filter_text = format!("{} {}", field.name, field.english_name);
     CompletionItem {
         label: field.name.to_string(),
-        detail: Some(render_field_detail(field, locale)),
+        detail: Some(render_field_detail(db, field, locale)),
         kind: CompletionItemKind::Field,
         insert_text: field.name.to_string(),
         documentation: None,
@@ -908,11 +1018,19 @@ pub(super) fn render_mdo_field(field: &Field, locale: ide_db::base_db::Locale) -
 ///   in the chosen locale.
 /// - Appends `" [Только чтение]"` / `" [Read-only]"` for read-only
 ///   fields, mirroring the marker [`render_platform_property`] uses.
-fn render_field_detail(field: &Field, locale: ide_db::base_db::Locale) -> String {
-    let mut body = if let Some(value_ty) = &field.value_ty {
-        format!("{} → {}", render_ty_detail(&field.ty, locale), render_ty_detail(value_ty, locale))
+fn render_field_detail<DB: RootDatabase>(
+    db: &DB,
+    field: &Field,
+    locale: ide_db::base_db::Locale,
+) -> String {
+    let mut body = if let Some(value_ty) = field.value_ty {
+        format!(
+            "{} → {}",
+            render_ty_detail(db, field.ty, locale),
+            render_ty_detail(db, value_ty, locale)
+        )
     } else {
-        render_ty_detail(&field.ty, locale)
+        render_ty_detail(db, field.ty, locale)
     };
     match field.origin {
         HirFieldOrigin::FormAttribute => body.push_str(" (реквизит формы)"),
@@ -926,19 +1044,14 @@ fn render_field_detail(field: &Field, locale: ide_db::base_db::Locale) -> String
     }
 }
 
-fn render_ty_detail(ty: &Ty, locale: ide_db::base_db::Locale) -> String {
-    use hir::MetadataKind;
-    match ty {
-        Ty::MetadataRef { kind, name } => {
-            if matches!(kind, MetadataKind::TabularSection { .. }) {
-                kind.display_label(locale).to_string()
-            } else {
-                format!("{}.{}", kind.display_label(locale), name.as_str())
-            }
-        }
-        Ty::Union(_) => ty.display(locale).to_string(),
-        _ => ty.display_name(locale).to_string(),
-    }
+fn render_ty_detail<DB: RootDatabase>(
+    db: &DB,
+    id: TypeId,
+    locale: ide_db::base_db::Locale,
+) -> String {
+    // Phase 3 §4.G.5d: kernel display is the single source of rendering truth
+    // (completion = bare name, precision suffix hidden).
+    hir::kernel_type_label(db, id, locale, false)
 }
 
 /// Locale-aware "[Только чтение]" / "[Read-only]" marker shared by
@@ -977,6 +1090,7 @@ fn sort_key_for_origin(origin: HirFieldOrigin) -> &'static str {
 mod tests {
     use super::*;
     use bsl_platform::{ContextAvailability, MethodParam, PlatformMethod};
+    use hir::Builders;
 
     fn create_test_method() -> PlatformMethod {
         PlatformMethod {
@@ -1188,18 +1302,16 @@ mod tests {
     // FormTable platform pull-up is non-empty and includes the refined
     // members so the user-visible completion stays informative.
 
-    fn form_table_binding() -> hir::FormDataBinding {
+    fn form_table_binding() -> hir::FormBindingFacet {
         use bsl_metadata::MdoType;
-        use hir::{FormDataBinding, FormDataTarget, Name};
-        FormDataBinding::new(
-            Box::new([Name::new("Объект"), Name::new("Переприемка")]),
-            FormDataTarget::TabularSection {
-                mdo_type: MdoType::Document,
-                owner: Name::new("ПКО"),
-                section: Name::new("Переприемка"),
+        use hir::{FormBindingFacet, FormBindingTargetFacet, MdoRefFacet};
+        FormBindingFacet::new(
+            std::sync::Arc::from(["Объект".to_string(), "Переприемка".to_string()]),
+            FormBindingTargetFacet::TabularSection {
+                mdo_ref: MdoRefFacet::new(MdoType::Document, "ПКО".to_string()),
+                section: "Переприемка".to_string(),
             },
         )
-        .expect("non-empty path")
     }
 
     fn make_db_with_file() -> (ide_db::RootDatabaseImpl, vfs::FileId) {
@@ -1226,13 +1338,10 @@ mod tests {
         // control receiver — those columns belong on the row Ty, surfaced
         // only via `вСтрока.|` / `.ТекущаяСтрока.|` / `.ВыделенныеСтроки[i].|`.
         let (db, file_id) = make_db_with_file();
-        let ty = hir::Ty::FormControl {
-            kind: hir::FormElementKind::Table,
-            binding: Some(form_table_binding()),
-        };
+        let ty = db.mk_form_control(hir::FormElementKind::Table, Some(form_table_binding()));
 
         let result =
-            complete_prefix_methods_for_receiver(&db, &ty, file_id, ide_db::base_db::Locale::Ru);
+            complete_prefix_methods_for_receiver(&db, ty, file_id, ide_db::base_db::Locale::Ru);
         assert!(
             result.is_none(),
             "FormControl{{Table, Some(_)}} must not trigger MDO-field completion; got {:?}",
@@ -1247,10 +1356,10 @@ mod tests {
         // through to the platform `ТаблицаФормы` properties — never to
         // an MDO branch.
         let (db, file_id) = make_db_with_file();
-        let ty = hir::Ty::FormControl { kind: hir::FormElementKind::Table, binding: None };
+        let ty = db.mk_form_control(hir::FormElementKind::Table, None);
 
         let result =
-            complete_prefix_methods_for_receiver(&db, &ty, file_id, ide_db::base_db::Locale::Ru);
+            complete_prefix_methods_for_receiver(&db, ty, file_id, ide_db::base_db::Locale::Ru);
         assert!(
             result.is_none(),
             "FormControl{{Table, None}} must not trigger MDO-field completion"
@@ -1266,12 +1375,11 @@ mod tests {
         // (`Количество`, `Получить`, …), never the row schema directly.
         // Iteration / indexing is what unwraps to the row Ty.
         let (db, file_id) = make_db_with_file();
-        let ty = hir::Ty::TypedArray(Box::new(hir::Ty::PlatformObject(hir::Name::new(
-            "СтрокаТаблицыФормы",
-        ))));
+        let element = db.platform_object("СтрокаТаблицыФормы".to_string());
+        let ty = db.array(Some(element));
 
         let result =
-            complete_prefix_methods_for_receiver(&db, &ty, file_id, ide_db::base_db::Locale::Ru);
+            complete_prefix_methods_for_receiver(&db, ty, file_id, ide_db::base_db::Locale::Ru);
         assert!(result.is_none(), "TypedArray(_) must not trigger MDO-field completion");
     }
 
@@ -1392,27 +1500,21 @@ mod tests {
 
     #[test]
     fn is_form_items_collection_ty_round_trips_bilingual() {
-        // `Элементы.|` resolves to `Ty::PlatformObject("ВсеЭлементыФормы")`
+        // `Элементы.|` resolves to `PlatformObject("ВсеЭлементыФормы")`
         // by Phase 4 wiring. The completion entry-gate uses the same
         // predicate the field-resolution path uses — single source of
         // truth (`hir::is_form_items_collection_ty`). Pinning here so a
         // future rename of the platform key breaks the build instead of
         // silently disabling completion.
-        assert!(hir::is_form_items_collection_ty(&hir::Ty::PlatformObject(hir::Name::new(
-            hir::FORM_ITEMS_TYPE_RU
-        ))));
-        assert!(hir::is_form_items_collection_ty(&hir::Ty::PlatformObject(hir::Name::new(
-            hir::FORM_ITEMS_TYPE_EN
-        ))));
+        let db = ide_db::RootDatabaseImpl::new();
+        let platform_object = |n: &str| db.platform_object(n.to_string());
+        assert!(hir::is_form_items_collection_ty(&db, platform_object(hir::FORM_ITEMS_TYPE_RU)));
+        assert!(hir::is_form_items_collection_ty(&db, platform_object(hir::FORM_ITEMS_TYPE_EN)));
         // Cyrillic case-insensitive — confirms predicate is bilingual
         // AND case-folded for Cyrillic (not just ASCII).
-        assert!(hir::is_form_items_collection_ty(&hir::Ty::PlatformObject(hir::Name::new(
-            "всеЭлементыФормы"
-        ))));
+        assert!(hir::is_form_items_collection_ty(&db, platform_object("всеЭлементыФормы")));
         // Non-form-items receivers must NOT match.
-        assert!(!hir::is_form_items_collection_ty(&hir::Ty::PlatformObject(hir::Name::new(
-            "Запрос"
-        ))));
-        assert!(!hir::is_form_items_collection_ty(&hir::Ty::Number));
+        assert!(!hir::is_form_items_collection_ty(&db, platform_object("Запрос")));
+        assert!(!hir::is_form_items_collection_ty(&db, db.number(None, None)));
     }
 }

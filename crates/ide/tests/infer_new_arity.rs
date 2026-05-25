@@ -3,7 +3,7 @@
 //!
 //! Pins the PR3 contract: `Expr::New` arity-checks against
 //! [`bsl_platform::PlatformDataInner::get_constructors`] using the
-//! same `signature_from_params` adapter and multi-overload "accept-if-
+//! same `descriptor_from_params` adapter and multi-overload "accept-if-
 //! any" loop that PR1/PR2 already used for global functions. Variadic
 //! tails are honoured through three sources, all transparent to the
 //! caller:

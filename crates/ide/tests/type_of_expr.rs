@@ -15,7 +15,7 @@
 //!
 //! These are the load-bearing acceptance tests from the M3 plan Task 9.
 
-use hir::{DefDatabase, DefWithBodyId, HirDatabase, ModuleId, Semantics, Ty};
+use hir::{Builders, DefDatabase, DefWithBodyId, HirDatabase, ModuleId, Semantics};
 use ide_db::base_db::{RootQueryDb, SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
 use syntax::ast::{self, AstNode};
@@ -82,7 +82,7 @@ fn first_field_expr(root: &syntax::SyntaxNode, field_name: &str) -> Option<ast::
 fn type_of_expr_resolves_across_bodies() {
     // Two different method bodies each produce their own expr_types
     // map. Before Task 9 the merged `InferenceResult` dropped both, so
-    // `type_of_expr_in` returned None on either. This test asserts both
+    // `type_id_of_expr_in` returned None on either. This test asserts both
     // maps survived the merge.
     let fixture = r#"
 //- /test.bsl
@@ -147,7 +147,7 @@ fn type_of_call_expr_matches_infer() {
 
     assert_eq!(
         sema.type_of_expr(file_id, literal.syntax()),
-        Ty::Number,
+        db.number(None, None),
         "Semantics::type_of_expr must return Ty::Number for literal `42`"
     );
 
@@ -161,8 +161,8 @@ fn type_of_call_expr_matches_infer() {
         })
         .expect("BodySourceMap must locate the literal ExprId");
     assert_eq!(
-        infer.type_of_expr_in(owner_match, expr_match).cloned(),
-        Some(Ty::Number),
+        infer.type_id_of_expr_in(owner_match, expr_match),
+        Some(db.number(None, None)),
         "direct expr_types_by_body lookup must agree with Semantics::type_of_expr"
     );
 }
@@ -187,7 +187,7 @@ fn type_of_module_level_expr_resolves() {
 
     assert_eq!(
         sema.type_of_expr(file_id, literal.syntax()),
-        Ty::Number,
+        db.number(None, None),
         "Semantics::type_of_expr must resolve the module-level `42` literal"
     );
 
@@ -203,8 +203,8 @@ fn type_of_module_level_expr_resolves() {
         .expect("module-level BodySourceMap must locate the literal");
     let infer = db.infer(file_id);
     assert_eq!(
-        infer.type_of_expr_in(DefWithBodyId::ModuleCode, expr_id).cloned(),
-        Some(Ty::Number),
+        infer.type_id_of_expr_in(DefWithBodyId::ModuleCode, expr_id),
+        Some(db.number(None, None)),
         "direct ModuleCode lookup must agree with Semantics::type_of_expr"
     );
 }
@@ -238,7 +238,7 @@ fn type_of_field_expr_matches_infer() {
 
     assert_eq!(
         sema.type_of_expr(file_id, field.syntax()),
-        Ty::Number,
+        db.number(None, None),
         "Semantics::type_of_expr on a field access must agree with inference (Ty::Number)"
     );
 
@@ -258,8 +258,8 @@ fn type_of_field_expr_matches_infer() {
         .expect("BodySourceMap must locate the field-expr ExprId");
     let infer = db.infer(file_id);
     assert_eq!(
-        infer.type_of_expr_in(owner, expr_id).cloned(),
-        Some(Ty::Number),
+        infer.type_id_of_expr_in(owner, expr_id),
+        Some(db.number(None, None)),
         "direct expr_types_by_body lookup must agree with Semantics::type_of_expr"
     );
 }
@@ -277,7 +277,7 @@ fn type_of_expr_unknown_for_non_expression_node() {
     let sema = Semantics::new(&db);
     let parse = db.parse(file_id);
     let root = parse.syntax_node();
-    assert_eq!(sema.type_of_expr(file_id, &root), Ty::Unknown);
+    assert_eq!(sema.type_of_expr(file_id, &root), db.unknown());
 }
 
 #[test]
@@ -307,7 +307,7 @@ fn type_of_expr_covers_call_site() {
     let call = first_call_expr(&root, "Сумма").expect("fixture has a Сумма() call");
     assert_eq!(
         sema.type_of_expr(file_id, call.syntax()),
-        Ty::Number,
+        db.number(None, None),
         "type_of_expr on a CallExpr must reflect the JSDoc-lowered return type"
     );
 }

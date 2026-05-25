@@ -11,7 +11,7 @@
 //! Each scenario asserts the lower-cased loop variable name maps to the
 //! element type the platform syntax help declares for the receiver.
 
-use hir::{HirDatabase, Name, Ty};
+use hir::{Builders, HirDatabase, TypeId};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
 use test_fixture::Fixture;
@@ -38,8 +38,8 @@ fn setup(fixture_text: &str) -> (RootDatabaseImpl, FileId) {
     (db, test_file)
 }
 
-fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<Ty> {
-    db.infer(file_id).var_types.get(var_lower).cloned()
+fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<TypeId> {
+    db.infer(file_id).var_types.get(var_lower).copied()
 }
 
 #[test]
@@ -63,7 +63,7 @@ fn for_each_over_map_yields_kluch_i_znachenie() {
     let ty = var_ty(&db, file_id, "кз");
     assert_eq!(
         ty,
-        Some(Ty::PlatformObject(Name::new("КлючИЗначение"))),
+        Some(db.platform_object("КлючИЗначение".to_string())),
         "loop var over Соответствие must be КлючИЗначение, got {:?}",
         ty
     );
@@ -87,7 +87,7 @@ fn for_each_over_value_table_yields_row() {
     let ty = var_ty(&db, file_id, "стр");
     assert_eq!(
         ty,
-        Some(Ty::PlatformObject(Name::new("СтрокаТаблицыЗначений"))),
+        Some(db.platform_object("СтрокаТаблицыЗначений".to_string())),
         "loop var over ТаблицаЗначений must be СтрокаТаблицыЗначений, got {:?}",
         ty
     );
@@ -111,7 +111,7 @@ fn for_each_over_value_list_yields_list_item() {
     let ty = var_ty(&db, file_id, "эл");
     assert_eq!(
         ty,
-        Some(Ty::PlatformObject(Name::new("ЭлементСпискаЗначений"))),
+        Some(db.platform_object("ЭлементСпискаЗначений".to_string())),
         "loop var over СписокЗначений must be ЭлементСпискаЗначений, got {:?}",
         ty
     );
@@ -140,7 +140,7 @@ fn for_each_over_array_overwrites_prior_binding_with_unknown() {
 
     // Prior `Эл = 1` set var_types["эл"] = Number; the loop overwrote
     // it with the iteration element type (Unknown for Произвольный).
-    assert_eq!(var_ty(&db, file_id, "эл"), Some(Ty::Unknown));
+    assert_eq!(var_ty(&db, file_id, "эл"), Some(db.unknown()));
 }
 
 #[test]

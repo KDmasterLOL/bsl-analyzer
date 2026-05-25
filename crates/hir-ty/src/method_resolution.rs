@@ -29,9 +29,12 @@
 //! reaching gate 3, so this function is invoked only when the
 //! receiver positively resolves to a workspace CommonModule.
 
+use bsl_types::builders::Builders;
+use bsl_types::intern::TypeKernelDb;
+use bsl_types::kind::TypeId;
 use hir_def::resolver::{QualifiedMethodError, Resolver};
 use hir_def::symbol_tree::MethodSymbol;
-use hir_def::ty::{FunctionSignature, Ty};
+use hir_def::ty::FunctionSignature;
 use hir_def::{MethodId, Name};
 
 use crate::db::HirDatabase;
@@ -55,19 +58,16 @@ pub struct MethodResolution {
     pub is_export: bool,
 
     /// Function signature (parameter types + return type).
-    ///
-    /// Phase 3: Return type is Ty::Unknown for most methods
-    /// Phase 4+: Actual return types from JSDoc or inference
     pub signature: FunctionSignature,
 
     /// Return type (convenience field, same as signature.ret).
-    pub return_type: Ty,
+    pub return_type: TypeId,
 }
 
 impl MethodResolution {
     /// Create a new method resolution result.
     pub fn new(method_id: MethodId, is_export: bool, signature: FunctionSignature) -> Self {
-        let return_type = (*signature.ret).clone();
+        let return_type = signature.ret;
         Self { method_id, is_export, signature, return_type }
     }
 }
@@ -344,7 +344,7 @@ fn record_set_kind_to_mdo(kind: hir_def::ty::MetadataKind) -> Option<bsl_metadat
 /// Resolve a 2-shape RecordSetModule method call like
 /// `НЗ = РегистрыСведений.X.СоздатьМенеджерЗаписи(); НЗ.МойМетод()`
 /// where `НЗ` carries
-/// [`Ty::MetadataRef { InformationRegisterRecordManager, .. }`][MetadataRef].
+/// `TypeKind::MetadataRef`.
 ///
 /// Mirrors [`resolve_object_module_call`] but routes the workspace
 /// lookup to [`Resolver::resolve_record_set_module_method`]. The
@@ -354,7 +354,6 @@ fn record_set_kind_to_mdo(kind: hir_def::ty::MetadataKind) -> Option<bsl_metadat
 /// `Err(MethodNotFound)` immediately and the call site's
 /// platform-fallback path takes over.
 ///
-/// [MetadataRef]: hir_def::ty::Ty::MetadataRef
 pub fn resolve_record_set_module_call(
     db: &dyn HirDatabase,
     kind: hir_def::ty::MetadataKind,
@@ -384,7 +383,7 @@ pub fn resolve_record_set_module_call(
 
 /// Resolve a 2-shape ObjectModule method call like
 /// `Об = Справочники.X.СоздатьЭлемент(); Об.МойМетод()` where `Об`
-/// carries [`Ty::MetadataRef { *Object, .. }`][MetadataRef].
+/// carries `TypeKind::MetadataRef`.
 ///
 /// Mirrors [`resolve_aliased_manager_call`] but routes the workspace
 /// lookup to [`Resolver::resolve_object_module_method`]. The strict
@@ -404,7 +403,6 @@ pub fn resolve_record_set_module_call(
 ///   - No `<MDO>/Ext/ObjectModule.bsl` for `(MdoType, name)`.
 ///   - Object module exists but does not contain `method_name`.
 ///
-/// [MetadataRef]: hir_def::ty::Ty::MetadataRef
 pub fn resolve_object_module_call(
     db: &dyn HirDatabase,
     kind: hir_def::ty::MetadataKind,
@@ -434,7 +432,7 @@ pub fn resolve_object_module_call(
 
 /// Resolve a 2-shape aliased manager method call like
 /// `М = Справочники.X; М.МойМетод()` where `М` carries
-/// [`Ty::ObjectManager`].
+/// `TypeKind::ObjectManager`.
 ///
 /// Mirrors [`resolve_three_level_call`]: delegates the workspace
 /// lookup (with the CFE visibility gate and Salsa invalidation) to
@@ -490,31 +488,33 @@ pub fn resolve_aliased_manager_call(
 /// `resolve_three_level_call` (3-segment): both resolve a method by name
 /// and then need to hand the caller typed parameters / return type. The
 /// cascade walks the JSDoc-derived `TypeRef` first (when present), then
-/// falls back to `Ty::Unknown` for parameters and to the
-/// `MethodSymbol::return_type` default for the return type — `Ty::Undefined`
-/// for procedures and `Ty::Unknown` for functions without a
-/// `// Возвращаемое значение:` block.
+/// falls back to `Unknown` for parameters and, for the return type, to a
+/// kernel sentinel derived from `is_function` — `Undefined` for procedures
+/// and `Unknown` for functions without a `// Возвращаемое значение:` block.
 ///
 /// Lowering runs through [`TyLoweringContext`] so the JSDoc `TypeRef`
 /// lookups share a single path with `Expr::New` and XML metadata: adding
 /// a new prefix or a future `Ty::Union` is a one-place edit.
-fn materialise_signature(method_symbol: &MethodSymbol) -> FunctionSignature {
+fn materialise_signature(db: &dyn TypeKernelDb, method_symbol: &MethodSymbol) -> FunctionSignature {
     let ctx = TyLoweringContext::new();
 
-    let param_types: Vec<Ty> = method_symbol
+    let params: Box<[TypeId]> = method_symbol
         .params
         .iter()
-        .map(|p| p.type_ref.as_ref().map(|t| ctx.lower_type_ref(t)).unwrap_or(Ty::Unknown))
+        .map(|p| p.type_ref.as_ref().map(|t| ctx.lower_type_ref_id(db, t)).unwrap_or(db.unknown()))
         .collect();
-    let defaults: Vec<bool> = method_symbol.params.iter().map(|p| p.has_default).collect();
+    let defaults: Box<[bool]> = method_symbol.params.iter().map(|p| p.has_default).collect();
 
+    // No docstring return type → kernel sentinel keyed on `is_function`:
+    // functions get `Unknown` (inference may refine), procedures `Undefined`.
     let ret = method_symbol
         .return_type_ref
         .as_ref()
-        .map(|t| ctx.lower_type_ref(t))
-        .unwrap_or_else(|| method_symbol.return_type.clone());
+        .map(|t| ctx.lower_type_ref_id(db, t))
+        .unwrap_or_else(|| if method_symbol.is_function { db.unknown() } else { db.undefined() });
 
-    FunctionSignature::new_with_defaults(param_types, defaults, ret)
+    let max_args = Some(params.len() as u32);
+    FunctionSignature { params, defaults, ret, max_args }
 }
 
 /// Phase O.11 — materialise a method signature with body-inferred
@@ -549,42 +549,55 @@ pub(crate) fn materialise_signature_enriched(
     method_id: hir_def::MethodId,
     method_symbol: &MethodSymbol,
 ) -> FunctionSignature {
-    let mut sig = materialise_signature(method_symbol);
-    if !matches!(*sig.ret, Ty::Unknown) {
-        return sig;
+    let mut sig: FunctionSignature = materialise_signature(db, method_symbol);
+    if sig.ret == db.unknown() {
+        let method_input = hir_def::MethodIdInput::new(db, method_id);
+        // `method_return_type_query` is kernel-native (§4.D.3); when the
+        // docstring-derived return is `Unknown`, prefer the body-inferred
+        // type (cascade-typing).
+        let inferred = crate::method_graph::method_return_type_query(db, method_input);
+        if inferred != db.unknown() {
+            sig.ret = inferred;
+        }
     }
 
-    let method_input = hir_def::MethodIdInput::new(db, method_id);
-    let inferred = crate::method_graph::method_return_type_query(db, method_input);
-    if matches!(inferred, Ty::Unknown) {
-        return sig;
-    }
-
-    sig.ret = Box::new(inferred);
     sig
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bsl_types::testing::InMemoryDb;
 
     #[test]
     fn test_method_resolution_new() {
+        let db = InMemoryDb::new();
         let method_id = MethodId { module: hir_def::ModuleId { file_id: FileId(0) }, local_id: 0 };
-        let signature = FunctionSignature::new(vec![Ty::String], Ty::Number);
+        let signature = FunctionSignature {
+            params: Box::new([db.string(None, false)]),
+            defaults: Box::new([false]),
+            ret: db.number(None, None),
+            max_args: Some(1),
+        };
 
         let resolution = MethodResolution::new(method_id, true, signature.clone());
 
         assert_eq!(resolution.method_id, method_id);
         assert!(resolution.is_export);
-        assert_eq!(resolution.return_type, Ty::Number);
+        assert_eq!(resolution.return_type, db.number(None, None));
         assert_eq!(resolution.signature, signature);
     }
 
     #[test]
     fn test_method_resolution_not_export() {
+        let db = InMemoryDb::new();
         let method_id = MethodId { module: hir_def::ModuleId { file_id: FileId(0) }, local_id: 0 };
-        let signature = FunctionSignature::new(vec![], Ty::Undefined);
+        let signature = FunctionSignature {
+            params: Box::new([]),
+            defaults: Box::new([]),
+            ret: db.undefined(),
+            max_args: Some(0),
+        };
 
         let resolution = MethodResolution::new(method_id, false, signature);
 

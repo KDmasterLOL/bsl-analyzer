@@ -2943,3 +2943,117 @@ fn test_parse_table_name_keeps_soft_keyword_part_literal_kw() {
     );
     assert_eq!(table.parts[1].as_str(), "Истина");
 }
+
+#[test]
+fn asterisk_qualifier_lowers_bare_star_as_none() {
+    // Bare `*` carries no qualifier — `asterisk_qualifier == None`. The
+    // bridge interprets that as "expand every table in scope".
+    let hir = lower_query("ВЫБРАТЬ * ИЗ Справочник.Товары");
+    let field = &hir.select.fields[0];
+    assert!(field.is_asterisk);
+    assert_eq!(field.asterisk_qualifier, None);
+}
+
+#[test]
+fn asterisk_qualifier_lowers_aliased_star() {
+    // `Т.*` — qualifier is the single alias identifier, preserved
+    // case-exact. Bridge does case-insensitive matching against the
+    // table's `effective_name()`.
+    let hir = lower_query("ВЫБРАТЬ Т.* ИЗ Справочник.Товары КАК Т");
+    let field = &hir.select.fields[0];
+    assert!(field.is_asterisk);
+    assert_eq!(field.asterisk_qualifier.as_deref(), Some("Т"));
+}
+
+// Multi-segment qualifiers (e.g. `Справочник.Товары.*` without an alias)
+// are deliberately NOT recognised by the parser's
+// `is_asterisk_start` gate — they fall through to expression parsing
+// (see `crates/parser/src/grammar/sdbl/select.rs:383`). The bridge's
+// expand_asterisk supports multi-segment matches for forward-compat
+// if a future parser hand-off reaches `asterisk_field` directly, but
+// the end-to-end path from BSL source today is alias-only `Т.*`.
+
+// Phase G — CAST/ВЫРАЗИТЬ target-type lowering.
+//
+// `ВЫРАЗИТЬ(value КАК <SDBL_TYPE>)` resolves the target spec node into a
+// precise `SdblType` (primitive with optional precision/length, or MDO
+// reference) and stores it on the resulting `ExprHir::FunctionCall.ty`,
+// which the SELECT lowerer copies to `FieldHir.ty`. The bridge then
+// renders `SdblTypeShadowFacet.display` via `SdblType::Display`.
+
+fn cast_field_ty(sdbl: &str) -> crate::types::SdblType {
+    let hir = lower_query(sdbl);
+    let field = hir.select.fields.first().expect("CAST query must yield a SELECT field");
+    field.ty.clone()
+}
+
+#[test]
+fn cast_number_precision_and_scale_lowers_to_full_number() {
+    use crate::types::SdblType;
+    let ty = cast_field_ty("ВЫБРАТЬ ВЫРАЗИТЬ(0 КАК Число(15, 2)) КАК Цена");
+    assert_eq!(ty, SdblType::Number { precision: Some(15), scale: Some(2) });
+    assert_eq!(ty.to_string(), "Число(15, 2)");
+}
+
+#[test]
+fn cast_number_precision_only_lowers_to_partial_number() {
+    use crate::types::SdblType;
+    let ty = cast_field_ty("ВЫБРАТЬ ВЫРАЗИТЬ(0 КАК Число(15)) КАК Цена");
+    assert_eq!(ty, SdblType::Number { precision: Some(15), scale: None });
+    // Display extension on `Number { Some(p), None }` — Phase G Slice 2.
+    assert_eq!(ty.to_string(), "Число(15)");
+}
+
+#[test]
+fn cast_string_length_lowers_to_sized_string() {
+    use crate::types::SdblType;
+    let ty = cast_field_ty("ВЫБРАТЬ ВЫРАЗИТЬ(\"\" КАК Строка(50)) КАК Имя");
+    assert_eq!(ty, SdblType::String { length: Some(50) });
+    assert_eq!(ty.to_string(), "Строка(50)");
+}
+
+#[test]
+fn cast_date_and_boolean_lower_to_primitive_variants() {
+    use crate::types::SdblType;
+    assert_eq!(cast_field_ty("ВЫБРАТЬ ВЫРАЗИТЬ(0 КАК Дата) КАК Д"), SdblType::Date);
+    assert_eq!(cast_field_ty("ВЫБРАТЬ ВЫРАЗИТЬ(0 КАК Булево) КАК Б"), SdblType::Boolean);
+}
+
+#[test]
+fn cast_english_primitive_names_are_recognised() {
+    use crate::types::SdblType;
+    assert_eq!(
+        cast_field_ty("ВЫБРАТЬ ВЫРАЗИТЬ(0 КАК NUMBER(10, 4)) КАК X"),
+        SdblType::Number { precision: Some(10), scale: Some(4) }
+    );
+    assert_eq!(
+        cast_field_ty("ВЫБРАТЬ ВЫРАЗИТЬ(\"\" КАК STRING(20)) КАК S"),
+        SdblType::String { length: Some(20) }
+    );
+    assert_eq!(cast_field_ty("ВЫБРАТЬ ВЫРАЗИТЬ(0 КАК DATE) КАК D"), SdblType::Date);
+    assert_eq!(cast_field_ty("ВЫБРАТЬ ВЫРАЗИТЬ(0 КАК BOOLEAN) КАК B"), SdblType::Boolean);
+}
+
+#[test]
+fn cast_mdo_reference_lowers_to_ref_type() {
+    use crate::types::{MdoRef, SdblType};
+    use bsl_metadata::MdoType;
+    let ty = cast_field_ty("ВЫБРАТЬ ВЫРАЗИТЬ(0 КАК Справочник.Товары) КАК Ссылка");
+    assert_eq!(ty, SdblType::Ref(MdoRef { mdo_type: MdoType::Catalog, name: "Товары".into() }));
+}
+
+#[test]
+fn cast_unrecognised_primitive_name_collapses_to_unknown() {
+    use crate::types::SdblType;
+    // Single-segment IDENT that doesn't match a known primitive — keeps the
+    // pre-Phase-G fallback so we don't pretend to know a made-up type.
+    assert_eq!(cast_field_ty("ВЫБРАТЬ ВЫРАЗИТЬ(0 КАК Несуществующий) КАК X"), SdblType::Unknown);
+}
+
+#[test]
+fn cast_unknown_mdo_qualifier_collapses_to_unknown() {
+    use crate::types::SdblType;
+    // First segment isn't a valid MdoType — collapses to Unknown rather
+    // than guessing at the prefix.
+    assert_eq!(cast_field_ty("ВЫБРАТЬ ВЫРАЗИТЬ(0 КАК Foo.Bar) КАК X"), SdblType::Unknown);
+}

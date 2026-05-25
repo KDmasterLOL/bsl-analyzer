@@ -65,7 +65,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let privileged_modules: FxHashSet<String> = ctx
         .visible_configurations()
         .iter()
-        .flat_map(|vc| vc.configuration.common_modules().to_vec())
+        .flat_map(|vc| vc.config.configuration.common_modules().to_vec())
         .filter(|m| m.is_privileged())
         .map(|m| m.name().to_lowercase())
         .collect();

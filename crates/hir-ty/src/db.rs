@@ -1,5 +1,6 @@
 //! Salsa database trait for type inference queries.
 
+use bsl_types::kind::TypeId;
 use hir_def::{ConfigsDatabase, DefWithBodyId, ExprId, MethodIdInput};
 use std::sync::Arc;
 use vfs::FileId;
@@ -9,7 +10,6 @@ use crate::infer::{
 };
 use crate::narrow::NarrowState;
 use crate::proc_signature::ProcSignature;
-use crate::Ty;
 
 /// Database trait for HIR type inference.
 ///
@@ -28,7 +28,7 @@ use crate::Ty;
 /// }
 /// ```
 #[salsa::db]
-pub trait HirDatabase: ConfigsDatabase {
+pub trait HirDatabase: ConfigsDatabase + bsl_types::intern::TypeKernelDb {
     /// Infer types for all expressions in a file.
     ///
     /// This is the main entry point for type inference. It runs type inference
@@ -57,12 +57,12 @@ pub trait HirDatabase: ConfigsDatabase {
     ///
     /// # Returns
     ///
-    /// - The inferred type for `(owner, expr)`.
-    /// - `Ty::Unknown` if inference produced no entry for that pair.
+    /// - The interned [`TypeId`] for `(owner, expr)`.
+    /// - The kernel `Unknown` id if inference produced no entry for that pair.
     ///
     /// # Implementation
     /// Should delegate to [`crate::infer::type_of_expr_query`].
-    fn type_of_expr(&self, file_id: FileId, owner: DefWithBodyId, expr: ExprId) -> Ty;
+    fn type_of_expr(&self, file_id: FileId, owner: DefWithBodyId, expr: ExprId) -> TypeId;
 
     /// Run narrowing analysis on a single body (ADR-01 Option A).
     ///
@@ -163,4 +163,20 @@ pub trait HirDatabase: ConfigsDatabase {
     /// purposes (Codex Round 4 C3); the real Salsa-tracked query body
     /// is wired in O.14.
     fn infer_module_code(&self, file_id: FileId) -> Arc<ModuleCodeInferenceResult>;
+
+    /// Per-module reaching-definitions collection (Phase D port).
+    ///
+    /// Mirrors the same-named ide-db query on `RootDatabase` but is
+    /// addressable through the lower `HirDatabase` trait so hir-ty
+    /// can consume reaching-defs without a cross-crate upcall. The
+    /// returned `ModuleReachingDefs` keys results by method `local_id`;
+    /// callers slice it for the method they're refining.
+    ///
+    /// Phase D consumer: [`crate::query_text_dataflow::refine_query_at_dispatch`]
+    /// reads `defs_for_var_at_stmt("var.Текст", stmt_id)` to resolve a
+    /// `Зап.Текст = "..."` literal back to its `ExprId`.
+    fn module_reaching_definitions(
+        &self,
+        file_id: FileId,
+    ) -> Arc<dataflow::reaching_defs::ModuleReachingDefs>;
 }

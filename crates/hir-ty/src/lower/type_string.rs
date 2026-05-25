@@ -1,4 +1,4 @@
-//! Single source of truth for lowering raw HBK type-strings to [`Ty`].
+//! Single source of truth for lowering raw HBK type-strings to `TypeId`.
 //!
 //! The platform JSON encodes parameter, return, and property types as
 //! free-form strings: `"Число"`, `"Булево, Неопределено"`,
@@ -24,96 +24,15 @@
 //! every typed sink.
 
 use bsl_platform::{split_type_alternatives, PlatformData};
-use hir_def::ty::Ty;
-use hir_def::Name;
+use bsl_types::builders::Builders;
+use bsl_types::intern::TypeKernelDb;
+use bsl_types::kind::TypeId;
+use hir_def::type_ref::TypeRef;
 
-use super::builtin_names::ty_from_bare_name;
-
-/// Lower a raw HBK parameter-type string to a [`Ty`].
-///
-/// 1. Empty / whitespace-only string → `Ty::Unknown` (no claim).
-/// 2. Any segment is the `Произвольный` placeholder → `Ty::Unknown`
-///    (any-value collapses every union).
-/// 3. Single segment → [`ty_from_bare_name`]: primitives become their
-///    canonical variant, anything else stays `Ty::Unknown` so gradual
-///    typing accepts any actual at the call site (the asymmetry).
-/// 4. Multi-segment with every segment validated → `Ty::union(...)` of
-///    [`lower_platform_type_name`] per segment.
-/// 5. Multi-segment with any segment failing validation (prose-with-commas
-///    or scraper garbage like `"Ссылка на объект, либо"`) → `Ty::Unknown`.
-pub fn lower_param_type_string(raw: &str) -> Ty {
-    let segments = split_type_alternatives(raw);
-    if segments.is_empty() {
-        return Ty::Unknown;
-    }
-    if segments.iter().any(|s| is_arbitrary_type_name(s)) {
-        return Ty::Unknown;
-    }
-    if segments.len() == 1 {
-        return ty_from_bare_name(segments[0]);
-    }
-    if segments.iter().all(|s| segment_is_valid_type(s)) {
-        Ty::union(segments.iter().copied().map(lower_platform_type_name).collect())
-    } else {
-        Ty::Unknown
-    }
-}
-
-/// Lower a raw HBK return-type string to a [`Ty`].
-///
-/// Mirrors [`lower_param_type_string`] but with three differences anchored
-/// in the param/return asymmetry:
-///
-/// 1. Single segment is routed through [`lower_platform_type_name`], so
-///    an unrecognised name lifts to `Ty::PlatformObject(name)` rather
-///    than `Ty::Unknown` — chained receivers stay typed.
-/// 2. Multi-segment with every segment validated → `Ty::union(...)` of
-///    [`lower_platform_type_name`] per segment (same as the param path).
-/// 3. Multi-segment with any segment failing validation → fallback to
-///    `lower_platform_type_name(raw)` so the whole prose-with-commas
-///    becomes a single `Ty::PlatformObject(<full raw>)`. This matches
-///    the legacy `resolve_platform_type_union` fallback.
-pub fn lower_return_type_string(raw: &str) -> Ty {
-    let segments = split_type_alternatives(raw);
-    if segments.is_empty() {
-        return Ty::Unknown;
-    }
-    if segments.iter().any(|s| is_arbitrary_type_name(s)) {
-        return Ty::Unknown;
-    }
-    if segments.iter().all(|s| segment_is_valid_type(s)) {
-        Ty::union(segments.iter().copied().map(lower_platform_type_name).collect())
-    } else {
-        lower_platform_type_name(raw)
-    }
-}
-
-/// Lower a single bare type-name token to a [`Ty`].
-///
-/// Primitives / collections (`"Число"`, `"Массив"`) take their canonical
-/// variant via [`ty_from_bare_name`]; anything else lifts to
-/// `Ty::PlatformObject(name)` so chained dispatch on platform objects
-/// (`Запрос.Выполнить().Выбрать()`) keeps resolving.
-///
-/// `"Произвольный"` / `"Arbitrary"` collapses to [`Ty::Unknown`] — the
-/// BSL "any value" placeholder must satisfy gradual typing in any typed
-/// slot, and lifting it to `PlatformObject("Произвольный")` would let
-/// structural equality false-fire `TypeMismatch` (see
-/// [`crate::subtype::is_assignable`]).
-pub fn lower_platform_type_name(name: &str) -> Ty {
-    if is_arbitrary_type_name(name) {
-        return Ty::Unknown;
-    }
-    let ty = ty_from_bare_name(name);
-    if ty.is_unknown() {
-        Ty::PlatformObject(Name::new(name))
-    } else {
-        ty
-    }
-}
+use super::builtin_names::bare_name_to_typeid;
 
 /// `true` when the trimmed segment is a primitive / collection / sentinel
-/// recognised by [`ty_from_bare_name`], or a registered platform type.
+/// recognised by [`TypeRef::from_bare_name`], or a registered platform type.
 ///
 /// Used by both lowering entry points to gate union-versus-fallback —
 /// a multi-segment string with even one invalid segment is
@@ -122,8 +41,7 @@ pub fn segment_is_valid_type(s: &str) -> bool {
     if s.is_empty() {
         return false;
     }
-    let ty = ty_from_bare_name(s);
-    !ty.is_unknown() || PlatformData::instance().get_type(s).is_some()
+    TypeRef::from_bare_name(s).is_some() || PlatformData::instance().get_type(s).is_some()
 }
 
 /// `true` when the trimmed name is the BSL "any value" placeholder.
@@ -136,9 +54,83 @@ pub fn is_arbitrary_type_name(name: &str) -> bool {
     trimmed.eq_ignore_ascii_case("Arbitrary") || trimmed.to_lowercase() == "произвольный"
 }
 
+// ── §4.A kernel-native counterparts ──────────────────────────
+//
+// Mint `TypeId` unions directly via [`Builders`].
+
+/// Lower a raw HBK parameter-type string directly into a kernel [`TypeId`].
+pub fn lower_param_type_string_typeid(db: &dyn TypeKernelDb, raw: &str) -> TypeId {
+    let segments = split_type_alternatives(raw);
+    if segments.is_empty() {
+        return db.unknown();
+    }
+    if segments.iter().any(|s| is_arbitrary_type_name(s)) {
+        return db.unknown();
+    }
+    if segments.len() == 1 {
+        return bare_name_to_typeid(db, segments[0]);
+    }
+    if segments.iter().all(|s| segment_is_valid_type(s)) {
+        db.union(segments.iter().map(|s| lower_platform_type_name_typeid(db, s)).collect())
+    } else {
+        db.unknown()
+    }
+}
+
+/// Lower a raw HBK return-type string directly into a kernel [`TypeId`].
+pub fn lower_return_type_string_typeid(db: &dyn TypeKernelDb, raw: &str) -> TypeId {
+    let segments = split_type_alternatives(raw);
+    if segments.is_empty() {
+        return db.unknown();
+    }
+    if segments.iter().any(|s| is_arbitrary_type_name(s)) {
+        return db.unknown();
+    }
+    if segments.iter().all(|s| segment_is_valid_type(s)) {
+        db.union(segments.iter().map(|s| lower_platform_type_name_typeid(db, s)).collect())
+    } else {
+        lower_platform_type_name_typeid(db, raw)
+    }
+}
+
+/// Lower a single bare type-name token directly into a kernel [`TypeId`].
+pub fn lower_platform_type_name_typeid(db: &dyn TypeKernelDb, name: &str) -> TypeId {
+    if is_arbitrary_type_name(name) {
+        return db.unknown();
+    }
+    let id = bare_name_to_typeid(db, name);
+    if id == db.unknown() {
+        db.platform_object(name.to_string())
+    } else {
+        id
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bsl_types::testing::InMemoryDb;
+
+    #[test]
+    fn type_string_typeid_covers_core_branches() {
+        let db = InMemoryDb::new();
+        assert_eq!(lower_param_type_string_typeid(&db, ""), db.unknown());
+        assert_eq!(lower_param_type_string_typeid(&db, "Произвольный"), db.unknown());
+        assert_eq!(lower_param_type_string_typeid(&db, "Число"), db.number(None, None));
+        assert_eq!(lower_param_type_string_typeid(&db, "Строка табличной части"), db.unknown());
+        assert_eq!(
+            lower_param_type_string_typeid(&db, "Число, Строка"),
+            db.union(vec![db.number(None, None), db.string(None, false)])
+        );
+        assert_eq!(
+            lower_return_type_string_typeid(&db, "Ссылка на объект, либо"),
+            db.platform_object("Ссылка на объект, либо".to_string())
+        );
+        assert_eq!(
+            lower_platform_type_name_typeid(&db, "Запрос"),
+            db.platform_object("Запрос".to_string())
+        );
+    }
 
     #[test]
     fn split_handles_comma_semicolon_and_trailing_garbage() {
@@ -154,8 +146,9 @@ mod tests {
 
     #[test]
     fn lower_param_single_primitive() {
-        assert_eq!(lower_param_type_string("Число"), Ty::Number);
-        assert_eq!(lower_param_type_string("Number"), Ty::Number);
+        let db = InMemoryDb::new();
+        assert_eq!(lower_param_type_string_typeid(&db, "Число"), db.number(None, None));
+        assert_eq!(lower_param_type_string_typeid(&db, "Number"), db.number(None, None));
     }
 
     #[test]
@@ -164,27 +157,33 @@ mod tests {
         // `PlatformObject("Строка табличной части")` would let structural
         // equality false-fire `TypeMismatch` against legitimately looser
         // actuals at the call site.
-        assert_eq!(lower_param_type_string("Строка табличной части"), Ty::Unknown);
+        let db = InMemoryDb::new();
+        assert_eq!(lower_param_type_string_typeid(&db, "Строка табличной части"), db.unknown());
     }
 
     #[test]
     fn lower_param_arbitrary_collapses_to_unknown() {
-        assert_eq!(lower_param_type_string("Произвольный"), Ty::Unknown);
-        assert_eq!(lower_param_type_string("Произвольный, Неопределено"), Ty::Unknown);
-        assert_eq!(lower_param_type_string("Arbitrary, Undefined"), Ty::Unknown);
+        let db = InMemoryDb::new();
+        assert_eq!(lower_param_type_string_typeid(&db, "Произвольный"), db.unknown());
+        assert_eq!(lower_param_type_string_typeid(&db, "Произвольный, Неопределено"), db.unknown());
+        assert_eq!(lower_param_type_string_typeid(&db, "Arbitrary, Undefined"), db.unknown());
     }
 
     #[test]
     fn lower_param_multi_with_invalid_segment_collapses() {
         // Prose-with-commas (`"Ссылка на объект, либо"`) → not a real
         // union, gradual typing wins.
-        assert_eq!(lower_param_type_string("Ссылка на объект, либо"), Ty::Unknown);
+        let db = InMemoryDb::new();
+        assert_eq!(lower_param_type_string_typeid(&db, "Ссылка на объект, либо"), db.unknown());
     }
 
     #[test]
     fn lower_param_multi_all_valid_lowers_to_union() {
-        let ty = lower_param_type_string("Число, Строка");
-        assert_eq!(ty, Ty::union(vec![Ty::Number, Ty::String]));
+        let db = InMemoryDb::new();
+        assert_eq!(
+            lower_param_type_string_typeid(&db, "Число, Строка"),
+            db.union(vec![db.number(None, None), db.string(None, false)])
+        );
     }
 
     #[test]
@@ -192,8 +191,11 @@ mod tests {
         // Headline `;`-activation: 1С HBK uses `;` as a sibling of `,`
         // for alternatives. Before unification this whole string lowered
         // to `Ty::Unknown`; now it surfaces as a real union.
-        let ty = lower_param_type_string("Число; Строка");
-        assert_eq!(ty, Ty::union(vec![Ty::Number, Ty::String]));
+        let db = InMemoryDb::new();
+        assert_eq!(
+            lower_param_type_string_typeid(&db, "Число; Строка"),
+            db.union(vec![db.number(None, None), db.string(None, false)])
+        );
     }
 
     #[test]
@@ -202,15 +204,22 @@ mod tests {
         // shape the HBK scraper actually emits. With `;`-aware splitting
         // and trailing-empty filtering, the four real segments survive —
         // assuming all are validated against `PlatformData`.
-        let ty = lower_param_type_string("Число, Строка, Булево ;");
-        assert_eq!(ty, Ty::union(vec![Ty::Number, Ty::String, Ty::Boolean]));
+        let db = InMemoryDb::new();
+        assert_eq!(
+            lower_param_type_string_typeid(&db, "Число, Строка, Булево ;"),
+            db.union(vec![db.number(None, None), db.string(None, false), db.boolean()])
+        );
     }
 
     #[test]
     fn lower_return_single_unrecognised_lifts_to_platform_object() {
         // Asymmetry vs param: returns lift to PlatformObject so chained
         // receivers (`Запрос.Выполнить().Выбрать()`) keep typing.
-        assert_eq!(lower_return_type_string("Запрос"), Ty::PlatformObject(Name::new("Запрос")),);
+        let db = InMemoryDb::new();
+        assert_eq!(
+            lower_return_type_string_typeid(&db, "Запрос"),
+            db.platform_object("Запрос".to_string())
+        );
     }
 
     #[test]
@@ -218,8 +227,11 @@ mod tests {
         // Prose-with-commas in returns → lift the WHOLE raw string as a
         // single PlatformObject, mirroring legacy
         // `resolve_platform_type_union` fallback.
-        let ty = lower_return_type_string("Ссылка на объект, либо");
-        assert_eq!(ty, Ty::PlatformObject(Name::new("Ссылка на объект, либо")));
+        let db = InMemoryDb::new();
+        assert_eq!(
+            lower_return_type_string_typeid(&db, "Ссылка на объект, либо"),
+            db.platform_object("Ссылка на объект, либо".to_string())
+        );
     }
 
     #[test]
@@ -232,7 +244,8 @@ mod tests {
         // `resolve_platform_type_union_falls_back_for_prose_commas` test
         // covered before consolidation.
         let raw = "ТабличныйДокумент, ТекстовыйДокумент; другой объект";
-        assert_eq!(lower_return_type_string(raw), Ty::PlatformObject(Name::new(raw)));
+        let db = InMemoryDb::new();
+        assert_eq!(lower_return_type_string_typeid(&db, raw), db.platform_object(raw.to_string()));
     }
 
     #[test]
@@ -240,35 +253,52 @@ mod tests {
         // Same raw string as the return test, but param-side: the asymmetry
         // gives `Ty::Unknown` (gradual typing wins for prose).
         let raw = "ТабличныйДокумент, ТекстовыйДокумент; другой объект";
-        assert_eq!(lower_param_type_string(raw), Ty::Unknown);
+        let db = InMemoryDb::new();
+        assert_eq!(lower_param_type_string_typeid(&db, raw), db.unknown());
     }
 
     #[test]
     fn lower_return_multi_all_valid_lowers_to_union() {
-        let ty = lower_return_type_string("Булево, Неопределено");
-        assert_eq!(ty, Ty::union(vec![Ty::Boolean, Ty::Undefined]));
+        let db = InMemoryDb::new();
+        assert_eq!(
+            lower_return_type_string_typeid(&db, "Булево, Неопределено"),
+            db.union(vec![db.boolean(), db.undefined()])
+        );
     }
 
     #[test]
     fn lower_return_arbitrary_collapses() {
-        assert_eq!(lower_return_type_string("Произвольный, Неопределено"), Ty::Unknown);
-        assert_eq!(lower_return_type_string("  Произвольный  ,  Неопределено"), Ty::Unknown);
+        let db = InMemoryDb::new();
+        assert_eq!(
+            lower_return_type_string_typeid(&db, "Произвольный, Неопределено"),
+            db.unknown()
+        );
+        assert_eq!(
+            lower_return_type_string_typeid(&db, "  Произвольный  ,  Неопределено"),
+            db.unknown()
+        );
     }
 
     #[test]
     fn lower_platform_type_name_arbitrary_to_unknown() {
-        assert_eq!(lower_platform_type_name("Произвольный"), Ty::Unknown);
-        assert_eq!(lower_platform_type_name("Arbitrary"), Ty::Unknown);
+        let db = InMemoryDb::new();
+        assert_eq!(lower_platform_type_name_typeid(&db, "Произвольный"), db.unknown());
+        assert_eq!(lower_platform_type_name_typeid(&db, "Arbitrary"), db.unknown());
     }
 
     #[test]
     fn lower_platform_type_name_unknown_lifts_to_platform_object() {
-        assert_eq!(lower_platform_type_name("Запрос"), Ty::PlatformObject(Name::new("Запрос")),);
+        let db = InMemoryDb::new();
+        assert_eq!(
+            lower_platform_type_name_typeid(&db, "Запрос"),
+            db.platform_object("Запрос".to_string())
+        );
     }
 
     #[test]
     fn lower_platform_type_name_primitive_returns_canonical() {
-        assert_eq!(lower_platform_type_name("Число"), Ty::Number);
+        let db = InMemoryDb::new();
+        assert_eq!(lower_platform_type_name_typeid(&db, "Число"), db.number(None, None));
     }
 
     /// Audit: walk every `;`-bearing `param_type` / `return_type` in the
@@ -299,7 +329,8 @@ mod tests {
                     if let Some(pt) = &param.param_type {
                         if pt.contains(';') {
                             total += 1;
-                            if !matches!(lower_param_type_string(pt), Ty::Unknown) {
+                            let db = InMemoryDb::new();
+                            if lower_param_type_string_typeid(&db, pt) != db.unknown() {
                                 non_unknown += 1;
                             }
                         }
@@ -308,7 +339,8 @@ mod tests {
                 if let Some(ret) = &method.return_type {
                     if ret.contains(';') {
                         total += 1;
-                        if !matches!(lower_return_type_string(ret), Ty::Unknown) {
+                        let db = InMemoryDb::new();
+                        if lower_return_type_string_typeid(&db, ret) != db.unknown() {
                             non_unknown += 1;
                         }
                     }

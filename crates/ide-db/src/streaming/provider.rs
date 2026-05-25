@@ -12,7 +12,7 @@ use rustc_hash::FxHashMap;
 use syntax::{Parse, SyntaxNode};
 use vfs::FileId;
 
-use crate::provider::{AnalysisProvider, VisibleConfig};
+use crate::provider::{AnalysisProvider, VisibleConfigWithRoot};
 
 use super::global_context::GlobalContext;
 use super::shared_state::SharedState;
@@ -58,13 +58,16 @@ impl AnalysisProvider for StreamingProvider {
         self.global.configuration.clone()
     }
 
-    fn visible_configurations(&self, _file_id: FileId) -> Vec<VisibleConfig> {
+    fn visible_configurations(&self, _file_id: FileId) -> Vec<VisibleConfigWithRoot> {
         let (Some(configuration), Some(root)) =
             (self.global.configuration.clone(), self.global.config_root.clone())
         else {
             return Vec::new();
         };
-        vec![VisibleConfig { name: None, root, configuration }]
+        vec![VisibleConfigWithRoot {
+            config: bsl_config::VisibleConfig { name: None, configuration },
+            root,
+        }]
     }
 
     fn workspace_symbols(&self, _source_root_id: SourceRootId) -> Arc<WorkspaceSymbols> {
@@ -158,6 +161,16 @@ impl AnalysisProvider for StreamingProvider {
         // Fallback - compute on-the-fly
         let parse = self.parse(module_id.file_id);
         Arc::new(ModuleBodies::from_parse(&parse, module_id))
+    }
+
+    fn kernel_type_display(
+        &self,
+        _id: bsl_types::kind::TypeId,
+        _locale: base_db::Locale,
+    ) -> String {
+        // Streaming mode does not run inference (see `infer`), so no
+        // TypeId-bearing inference diagnostic ever reaches this provider.
+        String::new()
     }
 
     fn infer(&self, _file_id: FileId) -> Arc<InferenceResult> {

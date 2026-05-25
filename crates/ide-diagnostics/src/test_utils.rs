@@ -503,12 +503,14 @@ impl ide_db::provider::AnalysisProvider for MetadataTestProvider {
     fn visible_configurations(
         &self,
         _file_id: vfs::FileId,
-    ) -> Vec<ide_db::provider::VisibleConfig> {
+    ) -> Vec<ide_db::provider::VisibleConfigWithRoot> {
         match &self.configuration {
-            Some(cfg) => vec![ide_db::provider::VisibleConfig {
-                name: None,
+            Some(cfg) => vec![ide_db::provider::VisibleConfigWithRoot {
+                config: bsl_config::VisibleConfig {
+                    name: None,
+                    configuration: std::sync::Arc::clone(cfg),
+                },
                 root: std::path::PathBuf::from("/test"),
-                configuration: std::sync::Arc::clone(cfg),
             }],
             None => Vec::new(),
         }
@@ -526,6 +528,10 @@ impl ide_db::provider::AnalysisProvider for MetadataTestProvider {
         source_root_id: ide_db::base_db::SourceRootId,
     ) -> std::sync::Arc<hir::ModuleIndex> {
         self.db.module_index(source_root_id)
+    }
+
+    fn kernel_type_display(&self, id: hir::TypeId, locale: base_db::Locale) -> String {
+        hir::kernel_type_label(&self.db, id, locale, false)
     }
 
     fn parse(&self, file_id: vfs::FileId) -> syntax::Parse<syntax::SyntaxNode> {
@@ -596,7 +602,12 @@ impl ide_db::provider::AnalysisProvider for MetadataTestProvider {
         use ide_db::base_db::FileIdInput;
         use ide_db::RootDatabase;
         let input = FileIdInput::new(&self.db, file_id);
-        self.db.module_reaching_definitions(input)
+        // UFCS — same disambiguation pattern as in `ide-db/src/queries.rs`
+        // and `ide-db/src/salsa_provider.rs`. `HirDatabase` exposes a
+        // same-name port taking `FileId`; the explicit trait selector
+        // keeps this caller stable against future `use hir::HirDatabase`
+        // imports landing in the surrounding scope.
+        <ide_db::RootDatabaseImpl as RootDatabase>::module_reaching_definitions(&self.db, input)
     }
 
     fn reaching_definitions(

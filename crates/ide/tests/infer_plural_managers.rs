@@ -6,7 +6,8 @@
 //! `Документы = 42;` to rebind the identifier, and the inference cascade
 //! must honour that.
 
-use hir::{DefDatabase, HirDatabase, ModuleId, Ty};
+use bsl_metadata::MdoType;
+use hir::{Builders, DefDatabase, HirDatabase, ModuleId, TypeId};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
 use test_fixture::Fixture;
@@ -34,8 +35,8 @@ fn setup(fixture_text: &str) -> (RootDatabaseImpl, FileId) {
     (db, test_file)
 }
 
-fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<Ty> {
-    db.infer(file_id).var_types.get(var_lower).cloned()
+fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<TypeId> {
+    db.infer(file_id).var_types.get(var_lower).copied()
 }
 
 #[test]
@@ -52,7 +53,7 @@ fn bare_documenty_yields_manager_collection() {
     let (db, file_id) = setup(fixture);
     assert_eq!(
         var_ty(&db, file_id, "м"),
-        Some(Ty::ManagerCollection(bsl_metadata::MdoType::Document)),
+        Some(db.manager_collection(MdoType::Document)),
         "`Документы` must lower to Ty::ManagerCollection(Document)"
     );
 }
@@ -70,7 +71,7 @@ fn bare_spravochniki_yields_manager_collection() {
     let (db, file_id) = setup(fixture);
     assert_eq!(
         var_ty(&db, file_id, "с"),
-        Some(Ty::ManagerCollection(bsl_metadata::MdoType::Catalog)),
+        Some(db.manager_collection(MdoType::Catalog)),
         "`Справочники` must lower to Ty::ManagerCollection(Catalog)"
     );
 }
@@ -91,7 +92,7 @@ fn implicit_local_shadows_manager_plural() {
     let (db, file_id) = setup(fixture);
     assert_eq!(
         var_ty(&db, file_id, "м"),
-        Some(Ty::Number),
+        Some(db.number(None, None)),
         "local `Документы = 42` must shadow the manager collective"
     );
 }

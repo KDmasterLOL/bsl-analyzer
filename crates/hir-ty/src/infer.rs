@@ -27,12 +27,17 @@
 //! - Diagnostic collection (UnresolvedMethodCall, MismatchedArgCount)
 
 use base_db::FileIdInput;
+use bsl_types::builders::Builders;
+use bsl_types::facet::{ArgArity, DateComponent, FormDataFacet, MdoRefFacet, ProjectionSource};
+use bsl_types::intern::TypeKernelDb;
+use bsl_types::kind::{ConfigId, Projection, TypeId, TypeKind};
+use bsl_types::testing::RootConfigCtx;
 use cfg_types::{BindingId, IdConversion};
 use hir_def::body::Body;
-use hir_def::hir::{BinaryOp, Expr, Literal, Stmt, StmtIdx, UnaryOp};
+use hir_def::hir::{BinaryOp, Expr, ExprIdx, Literal, Stmt, StmtIdx, UnaryOp};
 use hir_def::resolver::Resolver;
-use hir_def::ty::Ty;
-use hir_def::{DefWithBodyId, ExprId, MethodIdInput, Name};
+use hir_def::ty::FunctionSignature;
+use hir_def::{sdbl_hir_for_file_query, DefWithBodyId, ExprId, MethodIdInput, Name, SdblExprId};
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 use tracing::{debug, info, trace};
@@ -60,16 +65,19 @@ pub struct InferenceResult {
     /// Per-body inferred expression types.
     ///
     /// Outer key = body owner (`Method(local_id)` or `ModuleCode`), inner
-    /// map = that body's `ExprId -> Ty`.
+    /// map = that body's `ExprId -> TypeId`.
+    ///
+    /// Phase 3 §4.D: inner value storage migrated from `Ty` to `TypeId`.
+    /// Read raw entries via [`Self::type_id_of_expr_in`].
     ///
     /// Shape note: M3 ships this as a nested map, not a flat
-    /// `FxHashMap<(DefWithBodyId, ExprId), Ty>`. No current caller uses
+    /// `FxHashMap<(DefWithBodyId, ExprId), TypeId>`. No current caller uses
     /// the "grab the whole body's map in one lookup" shortcut the nesting
     /// would enable (`Semantics::type_of_expr` does a single point
     /// lookup), but the nested shape stays open for Tasks 10-12 hooks
     /// (body-scoped completion, narrowing) that need per-body iteration.
     /// If those never materialise, a later cleanup can flatten.
-    pub expr_types_by_body: FxHashMap<DefWithBodyId, FxHashMap<ExprId, Ty>>,
+    pub expr_types_by_body: FxHashMap<DefWithBodyId, FxHashMap<ExprId, TypeId>>,
 
     /// Variable types inferred from assignments.
     ///
@@ -77,14 +85,17 @@ pub struct InferenceResult {
     /// Populated by tracking `Stmt::Assign { target: Path(name), value }` during inference.
     /// Used by completion to resolve receiver types for method lookup.
     ///
+    /// Phase 3 §4.D: stores `TypeId` (interned via the type kernel); inspect
+    /// a stored id with `db.lookup_type`.
+    ///
     /// File-global merge across all bodies (last-write-wins on lowercase
     /// name). Useful for name-based completion which has no body context.
     /// For binding-anchored lookups (hover on `Для Каждого X Из …`
     /// declaration site, classic-for counter, parameter), prefer
-    /// [`InferenceResult::binding_type_in`]: this map collides on
+    /// [`InferenceResult::type_id_of_binding_in`]: this map collides on
     /// shadowing (same name across procedures or repeated within one
     /// body), `binding_types_by_body` does not.
-    pub var_types: FxHashMap<String, Ty>,
+    pub var_types: FxHashMap<String, TypeId>,
 
     /// Per-body, per-binding inferred types.
     ///
@@ -97,7 +108,9 @@ pub struct InferenceResult {
     /// [`InferenceResult::var_types`] from `Stmt::ForEach` and
     /// `Stmt::For`. Mirrors the per-body shape of
     /// [`InferenceResult::expr_types_by_body`].
-    pub binding_types_by_body: FxHashMap<DefWithBodyId, FxHashMap<BindingId, Ty>>,
+    ///
+    /// Phase 3 §4.D: inner storage migrated from `Ty` to `TypeId`.
+    pub binding_types_by_body: FxHashMap<DefWithBodyId, FxHashMap<BindingId, TypeId>>,
 
     /// Per-body implicit locals introduced by simple assignments.
     ///
@@ -146,7 +159,7 @@ pub struct ImplicitLocalInfo {
     /// HIR expression id of the first assignment target.
     pub first_assignment: ExprId,
     /// Best inferred type observed for the local in this body.
-    pub ty: Ty,
+    pub ty: TypeId,
     /// All simple-name assignment sites for this implicit local.
     ///
     /// A single BSL body may reuse the same implicit variable name for
@@ -162,28 +175,29 @@ pub struct ImplicitLocalAssignment {
     /// HIR expression id of the assignment target.
     pub target: ExprId,
     /// Inferred type of the assignment value.
-    pub ty: Ty,
+    pub ty: TypeId,
 }
 
 impl InferenceResult {
-    /// Get the type of an expression in a specific body.
+    /// Type of an expression in a specific body, as a kernel `TypeId`.
     ///
     /// `owner` identifies the body — `DefWithBodyId::Method(local_id)`
     /// for a procedure / function, `DefWithBodyId::ModuleCode` for
-    /// module-level code. Returns `None` if inference produced no entry
+    /// module-level code. Returns `None` when no inference entry exists
     /// for that `(owner, expr)` pair.
-    pub fn type_of_expr_in(&self, owner: DefWithBodyId, expr: ExprId) -> Option<&Ty> {
-        self.expr_types_by_body.get(&owner)?.get(&expr)
+    pub fn type_id_of_expr_in(&self, owner: DefWithBodyId, expr: ExprId) -> Option<TypeId> {
+        self.expr_types_by_body.get(&owner)?.get(&expr).copied()
     }
 
-    /// Get the inferred type of a specific binding in `owner`'s body.
+    /// Inferred type of a specific binding in `owner`'s body, as a kernel
+    /// `TypeId`.
     ///
     /// Used by hover on declaration-site identifiers (loop variables,
     /// classic-for counters, parameters) to avoid name shadowing across
     /// or within bodies — two bindings with the same lowercase name
     /// resolve to distinct entries here.
-    pub fn binding_type_in(&self, owner: DefWithBodyId, id: BindingId) -> Option<&Ty> {
-        self.binding_types_by_body.get(&owner)?.get(&id)
+    pub fn type_id_of_binding_in(&self, owner: DefWithBodyId, id: BindingId) -> Option<TypeId> {
+        self.binding_types_by_body.get(&owner)?.get(&id).copied()
     }
 
     /// Check if there are any diagnostics.
@@ -259,21 +273,21 @@ pub enum InferenceDiagnostic {
     ///
     /// Emitted when expression type doesn't match expected type
     /// (e.g., assigning String to Number variable).
-    TypeMismatch { expr: ExprId, expected: Ty, actual: Ty },
+    TypeMismatch { expr: ExprId, expected: TypeId, actual: TypeId },
 
     /// Field access on a typed receiver did not resolve.
     ///
     /// Emitted from `Expr::Field` when [`crate::field_lookup::lookup_field`]
     /// returns `None` **and** the receiver carries enough type information
     /// for the gap to be user-actionable — i.e. the receiver is not
-    /// [`Ty::Unknown`] (no type info to disagree with) and not a
-    /// [`Ty::Union`] (field lookup on unions defers to M4 narrowing, so a
+    /// `TypeKind::Unknown` (no type info to disagree with) and not a
+    /// `TypeKind::Union` (field lookup on unions defers to M4 narrowing, so a
     /// `None` there is "can't decide yet", not "field does not exist").
     ///
     /// `receiver_ty` captures the type as seen at the access site so the
     /// IDE layer can render `<CatalogRef.Номенклатура>.НеСуществует` in
     /// the diagnostic message without re-running inference.
-    UnresolvedField { expr: ExprId, receiver_ty: Ty, field_name: Name },
+    UnresolvedField { expr: ExprId, receiver_ty: TypeId, field_name: Name },
 
     /// Assignment to a field whose platform-property entry carries
     /// `is_readonly = true` in HBK (`Использование:` chapter reads
@@ -287,7 +301,7 @@ pub enum InferenceDiagnostic {
     /// `lhs` anchors the diagnostic to the field-access expression so the
     /// editor underlines `.Параметры` rather than the whole statement;
     /// `receiver_ty` and `field_name` feed the message body.
-    ReadOnlyPropertyAssignment { lhs: ExprId, receiver_ty: Ty, field_name: Name },
+    ReadOnlyPropertyAssignment { lhs: ExprId, receiver_ty: TypeId, field_name: Name },
 
     /// Redundant `<CommonModule>.<Method>()` self-quoted call inside the
     /// owning CommonModule body — counterpart to `BodyDiagnostic::
@@ -377,7 +391,7 @@ pub struct CallArgBinding {
 
 /// Parameter-list shape captured per call site.
 ///
-/// `Arc<[Ty]>` is used (instead of `Vec<Ty>`) so that the same signature
+/// `Arc<[TypeId]>` is used (instead of `Vec<TypeId>`) so that the same signature
 /// can be shared across many call sites of the same method without
 /// re-allocating the parameter list per record.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -385,7 +399,7 @@ pub enum ParamsShape {
     /// Single parameter list — covers plain functions, workspace
     /// `CommonModule.Method`, three-segment manager calls,
     /// non-overloaded receiver methods, and `Ty::Function` callees.
-    Single(Arc<[Ty]>),
+    Single(Arc<[TypeId]>),
 
     /// Multi-overload signature.
     ///
@@ -396,7 +410,7 @@ pub enum ParamsShape {
     /// the call when any entry's per-arg `is_assignable` check passes,
     /// and falls back to the closest-by-arity overload for the
     /// diagnostic message otherwise.
-    Overloaded { flat: Arc<[Ty]>, overloads: Arc<[Arc<[Ty]>]> },
+    Overloaded { flat: Arc<[TypeId]>, overloads: Arc<[Arc<[TypeId]>]> },
 }
 
 /// Context for type inference.
@@ -433,7 +447,7 @@ pub struct InferenceContext<'db> {
     /// this field — it only matters for the per-method cascade query.
     return_expr_ids: Vec<ExprId>,
 
-    /// Variable types tracked from assignments (lowercase name → Ty).
+    /// Variable types tracked from assignments (lowercase name → TypeId).
     ///
     /// **Conservative**: an `X = …` whose RHS infers to `Ty::Unknown`
     /// is NOT inserted here — keeping the entry from a previous,
@@ -442,7 +456,7 @@ pub struct InferenceContext<'db> {
     /// [`Self::assigned_var_names`] set is the cheap probe for
     /// "is this name an implicit local at all?", regardless of
     /// whether we have a useful type for it.
-    var_types: FxHashMap<String, Ty>,
+    var_types: FxHashMap<String, TypeId>,
 
     /// Implicit locals introduced by simple assignments in this body.
     implicit_locals: FxHashMap<String, ImplicitLocalInfo>,
@@ -468,13 +482,13 @@ pub struct InferenceContext<'db> {
     /// Per-binding types written by declaration-site arms
     /// (`Stmt::ForEach`, `Stmt::For`). Keyed by `BindingId` so name
     /// shadowing within the body does not collide. Surfaced through
-    /// [`InferenceResult::binding_type_in`] for hover.
-    binding_types: FxHashMap<BindingId, Ty>,
+    /// [`InferenceResult::type_id_of_binding_in`] for hover.
+    binding_types: FxHashMap<BindingId, TypeId>,
 
     /// Per-body `ExprId -> Ty` cache. Doubles as the memoisation table
     /// (`infer_expr` short-circuits when the entry already exists) and
     /// as the payload we hand to the merged result keyed by `owner`.
-    expr_types: FxHashMap<ExprId, Ty>,
+    expr_types: FxHashMap<ExprId, TypeId>,
 
     /// Diagnostics collected while inferring this body.
     diagnostics: Vec<InferenceDiagnostic>,
@@ -503,15 +517,22 @@ pub struct InferenceContext<'db> {
 pub struct BodyInferenceResult {
     /// Owner of the body that produced this output.
     pub owner: DefWithBodyId,
-    /// Variable types discovered during inference (lowercase name → Ty).
-    pub var_types: FxHashMap<String, Ty>,
+    /// Variable types discovered during inference (lowercase name → `TypeId`).
+    ///
+    /// Phase 3 §4.D: storage migrated from `Ty` to `TypeId`; inspect a
+    /// stored id with `db.lookup_type`.
+    pub var_types: FxHashMap<String, TypeId>,
     /// Implicit locals introduced by simple assignments in this body.
     pub implicit_locals: FxHashMap<String, ImplicitLocalInfo>,
     /// Per-binding inferred types (declaration-site arms). Folded into
     /// [`InferenceResult::binding_types_by_body`] keyed by `owner`.
-    pub binding_types: FxHashMap<BindingId, Ty>,
+    ///
+    /// Phase 3 §4.D: storage migrated from `Ty` to `TypeId`.
+    pub binding_types: FxHashMap<BindingId, TypeId>,
     /// Expression types keyed by body-local `ExprId`.
-    pub expr_types: FxHashMap<ExprId, Ty>,
+    ///
+    /// Phase 3 §4.D: storage migrated from `Ty` to `TypeId`.
+    pub expr_types: FxHashMap<ExprId, TypeId>,
     /// Diagnostics collected during inference.
     pub diagnostics: Vec<InferenceDiagnostic>,
     /// Call-site arg/param bindings collected during inference, to be
@@ -564,14 +585,20 @@ pub struct ModuleCodeInferenceResult {
     /// Always [`DefWithBodyId::ModuleCode`]. Kept explicit so the
     /// struct can be inspected uniformly with `BodyInferenceResult`.
     pub owner: DefWithBodyId,
-    /// Variable types discovered during inference (lowercase name → Ty).
-    pub var_types: FxHashMap<String, Ty>,
+    /// Variable types discovered during inference (lowercase name → `TypeId`).
+    ///
+    /// Phase 3 §4.D: storage migrated from `Ty` to `TypeId`.
+    pub var_types: FxHashMap<String, TypeId>,
     /// Implicit locals introduced by simple assignments in module code.
     pub implicit_locals: FxHashMap<String, ImplicitLocalInfo>,
     /// Per-binding inferred types (declaration-site arms).
-    pub binding_types: FxHashMap<BindingId, Ty>,
+    ///
+    /// Phase 3 §4.D: storage migrated from `Ty` to `TypeId`.
+    pub binding_types: FxHashMap<BindingId, TypeId>,
     /// Expression types keyed by body-local `ExprId`.
-    pub expr_types: FxHashMap<ExprId, Ty>,
+    ///
+    /// Phase 3 §4.D: storage migrated from `Ty` to `TypeId`.
+    pub expr_types: FxHashMap<ExprId, TypeId>,
     /// Diagnostics collected during inference.
     pub diagnostics: Vec<InferenceDiagnostic>,
     /// Call-site arg/param bindings collected during inference.
@@ -653,41 +680,43 @@ impl InferOwnerResult {
         }
     }
 
-    /// Type of expression `expr` within this owner's body, if inference
-    /// recorded one. Equivalent to
-    /// `InferenceResult::type_of_expr_in(owner, expr)` but reads
-    /// directly from the per-owner payload.
-    pub fn type_of_expr(&self, expr: ExprId) -> Option<&Ty> {
+    /// Type of expression `expr` within this owner's body as a kernel
+    /// `TypeId`, if inference recorded one.
+    pub fn type_id_of_expr(&self, expr: ExprId) -> Option<TypeId> {
         match self {
-            InferOwnerResult::Method(r) => r.expr_types.get(&expr),
-            InferOwnerResult::ModuleCode(r) => r.expr_types.get(&expr),
+            InferOwnerResult::Method(r) => r.expr_types.get(&expr).copied(),
+            InferOwnerResult::ModuleCode(r) => r.expr_types.get(&expr).copied(),
         }
     }
 
-    /// Full `ExprId -> Ty` map for this owner's body. Callers that
-    /// need bulk access (e.g. `narrow_query` building a
-    /// `base_types` overlay across all expressions in the body) use
-    /// this in preference to repeated [`Self::type_of_expr`] calls.
-    pub fn expr_types(&self) -> &FxHashMap<ExprId, Ty> {
+    /// Full `ExprId -> TypeId` map for this owner's body. Callers that
+    /// need bulk access (e.g. `narrow_query` building a `base_types`
+    /// overlay across all expressions in the body) use this in
+    /// preference to repeated [`Self::type_id_of_expr`] calls.
+    ///
+    /// Phase 3 §4.D: map values migrated from `Ty` to `TypeId`; inspect an
+    /// entry with `db.lookup_type`.
+    pub fn expr_types(&self) -> &FxHashMap<ExprId, TypeId> {
         match self {
             InferOwnerResult::Method(r) => &r.expr_types,
             InferOwnerResult::ModuleCode(r) => &r.expr_types,
         }
     }
 
-    /// Type of `binding` within this owner's body, if inference
-    /// recorded one. Equivalent to
-    /// `InferenceResult::binding_type_in(owner, binding)` but reads
-    /// directly from the per-owner payload.
-    pub fn type_of_binding(&self, binding: BindingId) -> Option<&Ty> {
+    /// Type of `binding` within this owner's body as a kernel `TypeId`,
+    /// if inference recorded one. Reads directly from the per-owner
+    /// payload (no body-keyed indirection).
+    pub fn type_id_of_binding(&self, binding: BindingId) -> Option<TypeId> {
         match self {
-            InferOwnerResult::Method(r) => r.binding_types.get(&binding),
-            InferOwnerResult::ModuleCode(r) => r.binding_types.get(&binding),
+            InferOwnerResult::Method(r) => r.binding_types.get(&binding).copied(),
+            InferOwnerResult::ModuleCode(r) => r.binding_types.get(&binding).copied(),
         }
     }
 
-    /// Variable types map (lowercase name → Ty) for this owner.
-    pub fn var_types(&self) -> &FxHashMap<String, Ty> {
+    /// Variable types map (lowercase name → `TypeId`) for this owner.
+    ///
+    /// Phase 3 §4.D: map values migrated to `TypeId`.
+    pub fn var_types(&self) -> &FxHashMap<String, TypeId> {
         match self {
             InferOwnerResult::Method(r) => &r.var_types,
             InferOwnerResult::ModuleCode(r) => &r.var_types,
@@ -705,7 +734,9 @@ impl InferOwnerResult {
 
     /// Per-binding inferred types for declaration-site identifiers
     /// (loop variables, classic-for counters, parameters).
-    pub fn binding_types(&self) -> &FxHashMap<BindingId, Ty> {
+    ///
+    /// Phase 3 §4.D: map values migrated to `TypeId`.
+    pub fn binding_types(&self) -> &FxHashMap<BindingId, TypeId> {
         match self {
             InferOwnerResult::Method(r) => &r.binding_types,
             InferOwnerResult::ModuleCode(r) => &r.binding_types,
@@ -824,6 +855,10 @@ impl<'db> InferenceContext<'db> {
             return;
         }
         self.diagnostics.push(diag);
+    }
+
+    fn is_unknown(&self, id: TypeId) -> bool {
+        id == self.db.unknown()
     }
 
     /// Finish inference and return the per-body output.
@@ -978,9 +1013,9 @@ impl<'db> InferenceContext<'db> {
                         match form_self_resolution {
                             Some(prop) => {
                                 if prop.is_readonly {
-                                    let form_ty = Ty::PlatformObject(hir_def::Name::new(
-                                        crate::form_self::FORM_TYPE_NAME,
-                                    ));
+                                    let form_ty = self.db.platform_object(
+                                        crate::form_self::FORM_TYPE_NAME.to_string(),
+                                    );
                                     self.push_inference_diagnostic(
                                         InferenceDiagnostic::ReadOnlyPropertyAssignment {
                                             lhs: ExprId::from_idx(*target),
@@ -998,27 +1033,28 @@ impl<'db> InferenceContext<'db> {
                                 // the RHS yields no useful type info).
                                 self.assigned_var_names.insert(key.clone());
                                 let target_id = ExprId::from_idx(*target);
+                                let unknown = self.db.unknown();
                                 self.implicit_locals
                                     .entry(key.clone())
                                     .and_modify(|info| {
                                         info.assignments.push(ImplicitLocalAssignment {
                                             target: target_id,
-                                            ty: value_ty.clone(),
+                                            ty: value_ty,
                                         });
-                                        if info.ty.is_unknown() && !value_ty.is_unknown() {
-                                            info.ty = value_ty.clone();
+                                        if info.ty == unknown && value_ty != unknown {
+                                            info.ty = value_ty;
                                         }
                                     })
                                     .or_insert_with(|| ImplicitLocalInfo {
                                         name: name.clone(),
                                         first_assignment: target_id,
-                                        ty: value_ty.clone(),
+                                        ty: value_ty,
                                         assignments: vec![ImplicitLocalAssignment {
                                             target: target_id,
-                                            ty: value_ty.clone(),
+                                            ty: value_ty,
                                         }],
                                     });
-                                if !value_ty.is_unknown() {
+                                if !self.is_unknown(value_ty) {
                                     self.var_types.insert(key, value_ty);
                                 }
                             }
@@ -1040,9 +1076,11 @@ impl<'db> InferenceContext<'db> {
                         let configs = self.db.configurations(self.file_id);
                         let resolver = self.get_resolver();
                         let info = crate::form_items::lookup_form_item_field(
-                            self.db, &resolver, &base_ty, field,
+                            self.db, &resolver, base_ty, field,
                         )
-                        .or_else(|| crate::field_lookup::lookup_field(&configs, &base_ty, field));
+                        .or_else(|| {
+                            crate::field_lookup::lookup_field(self.db, &configs, base_ty, field)
+                        });
                         if let Some(info) = info {
                             if info.is_readonly {
                                 self.push_inference_diagnostic(
@@ -1105,19 +1143,22 @@ impl<'db> InferenceContext<'db> {
                 // counter must shadow any prior binding for the
                 // duration of the loop and the trailing tail.
                 let var_name = self.body.binding_idx(*var).name.as_str().to_lowercase();
-                self.var_types.insert(var_name, Ty::Number);
+                let number = self.db.number(None, None);
+                self.var_types.insert(var_name, number);
                 // Per-binding pin for declaration-site hover. The
                 // `BindingId` is fresh for each `Для I = … По …`, so
                 // hover on a specific `I` declaration cannot pick up
                 // another loop's stored type even when the lowercase
                 // name collides.
-                self.binding_types.insert(BindingId::from_idx(*var), Ty::Number);
+                self.binding_types.insert(BindingId::from_idx(*var), number);
                 self.infer_stmts(body);
             }
 
             Stmt::ForEach { var, collection, body } => {
                 let coll_ty = self.infer_expr(ExprId::from_idx(*collection));
-                if let Some(elem_ty) = crate::iteration_lookup::resolve_iter_element_ty(&coll_ty) {
+                if let Some(elem_ty) =
+                    crate::iteration_lookup::resolve_iter_element_ty(self.db, coll_ty)
+                {
                     // BSL semantics: `Для каждого X Из Y Цикл` rebinds
                     // X to elements of Y for the duration of the body
                     // and leaves it as the last yielded element (or
@@ -1130,7 +1171,7 @@ impl<'db> InferenceContext<'db> {
                     // prior binding cannot leak into the loop body or
                     // the trailing tail.
                     let var_name = self.body.binding_idx(*var).name.as_str().to_lowercase();
-                    self.var_types.insert(var_name, elem_ty.clone());
+                    self.var_types.insert(var_name, elem_ty);
                     // Per-binding pin: each `Для каждого X` allocates a
                     // fresh `BindingId`, so two loops with the same
                     // lowercase name (or one shadowing a prior `Перем
@@ -1186,14 +1227,53 @@ impl<'db> InferenceContext<'db> {
         }
     }
 
+    /// Project every sub-query of `Новый Запрос("<literal>")`'s
+    /// string-literal arg through the SDBL ↔ Ty bridge.
+    ///
+    /// Returns a non-empty index-aligned slice when `args[0]` is a
+    /// string literal whose `SdblExprId` resolves to an `SdblPackage`:
+    /// `result[i]` is the projection of the i-th sub-query, `Some`
+    /// when the bridge resolved it, `None` for unresolvable ones
+    /// (asterisk against an unresolved table, parse errors, etc.).
+    /// Empty slice for no args / dynamic text / unrecognised literals
+    /// — the caller then types as `Ty::Query{projections: empty}`,
+    /// which downstream dispatch treats the same as the legacy
+    /// `Ty::PlatformObject("Запрос")` shape.
+    ///
+    /// Carrying the full per-sub-query slice (not just `queries[0]`)
+    /// is what lets `.ВыполнитьПакет()[i]` recover the i-th
+    /// sub-query's projection without re-fetching the package at
+    /// chain-rewrite time — the rewrite hook stays pure.
+    ///
+    /// The `matches!` guard is belt-and-suspenders — by construction
+    /// every `ExprId` in `body.sdbl_exprs` is a string literal today,
+    /// but the explicit check prevents a future lowerer change from
+    /// quietly producing projections for non-literal expressions.
+    fn try_synthesise_query_projections(&self, args: &[ExprIdx]) -> Arc<[Option<Arc<Projection>>]> {
+        let Some(arg_idx) = args.first().copied() else {
+            return Arc::from([]);
+        };
+        let arg_id = ExprId::from_idx(arg_idx);
+        if !matches!(self.body.expr(arg_id), Expr::Literal(Literal::String(_))) {
+            return Arc::from([]);
+        }
+        let sdbl_expr_id = SdblExprId { owner: self.owner, expr_id: arg_id };
+        let file_id_input = FileIdInput::new(self.db, self.file_id);
+        let entries = sdbl_hir_for_file_query(self.db, file_id_input);
+        let Some((_, pkg)) = entries.iter().find(|(id, _)| *id == sdbl_expr_id) else {
+            return Arc::from([]);
+        };
+        crate::sdbl_bridge::package_to_projections(self.db, pkg).into()
+    }
+
     /// Infer the type of an expression.
     ///
     /// This is the core type inference function. It pattern-matches on the expression
     /// kind and dispatches to specialized inference functions.
-    fn infer_expr(&mut self, expr_id: ExprId) -> Ty {
+    fn infer_expr(&mut self, expr_id: ExprId) -> TypeId {
         // Check if already inferred (avoid re-inference)
         if let Some(ty) = self.expr_types.get(&expr_id) {
-            return ty.clone();
+            return *ty;
         }
 
         // Clone the expression to avoid borrow checker issues
@@ -1202,11 +1282,11 @@ impl<'db> InferenceContext<'db> {
         trace!("inferring expr {:?}: {:?}", expr_id, expr);
 
         let ty = match &expr {
-            Expr::Missing => Ty::Unknown,
+            Expr::Missing => self.db.unknown(),
 
             Expr::Literal(lit) => self.infer_literal(lit),
 
-            Expr::Path(name) => self.infer_path_name(name),
+            Expr::Path(name) => self.infer_path_name(name, expr_id),
 
             Expr::QualifiedPath(_path) => {
                 // Standalone qualified paths never reach this branch in
@@ -1223,7 +1303,7 @@ impl<'db> InferenceContext<'db> {
                 // into `QualifiedPath`, Ty resolution lives in the call
                 // site already (`infer_two_segment_qualified_path`
                 // analogue must be added here, gated on arity == 2).
-                Ty::Unknown
+                self.db.unknown()
             }
 
             Expr::BinaryOp { lhs, rhs, op } => {
@@ -1242,7 +1322,7 @@ impl<'db> InferenceContext<'db> {
                 if then_ty == else_ty {
                     then_ty
                 } else {
-                    Ty::Unknown
+                    self.db.unknown()
                 }
             }
 
@@ -1266,9 +1346,13 @@ impl<'db> InferenceContext<'db> {
                 // previous "best effort" semantics by emitting
                 // `Ty::Unknown` — chain continuation still typechecks
                 // structurally, it just doesn't carry a concrete type.
-                crate::method_lookup::lookup_method(&receiver_ty, method)
+                // Phase 3 §4.E.2b-ii: `lookup_method` is kernel-native
+                // (`receiver: TypeId`, returns `MethodInfo`). Inference
+                // still works in `Ty`, so bridge the receiver in and the
+                // return id back out (transitional until infer flips).
+                crate::method_lookup::lookup_method(self.db, receiver_ty, method)
                     .map(|info| info.return_ty)
-                    .unwrap_or(Ty::Unknown)
+                    .unwrap_or_else(|| self.db.unknown())
             }
 
             Expr::Index { base, index } => {
@@ -1293,9 +1377,24 @@ impl<'db> InferenceContext<'db> {
                 // surfaced by `iteration_lookup`, which is a different
                 // axis from indexing and is not parameterised at the
                 // `Ty` level today.
-                match base_ty {
-                    Ty::TypedArray(elem) => *elem,
-                    _ => Ty::Unknown,
+                let base_kind = self.db.lookup_type(base_ty);
+                match base_kind {
+                    TypeKind::Array(facet) => facet.element.unwrap_or_else(|| self.db.unknown()),
+                    // `Зап.ВыполнитьПакет()[i]` — when the index is a
+                    // bare numeric literal, recover the i-th sub-query's
+                    // projection from the batch result's `per_query`
+                    // slice. Dynamic / arithmetic / out-of-range indices
+                    // degrade to `Ty::QueryResult{None}`, matching the
+                    // platform behaviour of "an in-bounds query result,
+                    // schema unknown".
+                    TypeKind::QueryBatchResult { per_query } => {
+                        let index_expr = self.body.expr(ExprId::from_idx(*index));
+                        let projection = const_eval_literal_index(index_expr)
+                            .and_then(|i| per_query.get(i).cloned())
+                            .flatten();
+                        self.db.query_result(projection, ProjectionSource::Unknown)
+                    }
+                    _ => self.db.unknown(),
                 }
             }
 
@@ -1323,15 +1422,15 @@ impl<'db> InferenceContext<'db> {
                 let configs = self.db.configurations(self.file_id);
                 let resolver = self.get_resolver();
                 if let Some(info) =
-                    crate::form_items::lookup_form_item_field(self.db, &resolver, &base_ty, field)
+                    crate::form_items::lookup_form_item_field(self.db, &resolver, base_ty, field)
                 {
                     info.ty
                 } else if let Some(info) =
-                    crate::field_lookup::lookup_field(&configs, &base_ty, field)
+                    crate::field_lookup::lookup_field(self.db, &configs, base_ty, field)
                 {
                     info.ty
                 } else if let Some(info) =
-                    crate::manager_lookup::lookup_manager_field(&configs, &base_ty, field)
+                    crate::manager_lookup::lookup_manager_field(self.db, &configs, base_ty, field)
                 {
                     info.ty
                 } else {
@@ -1360,7 +1459,8 @@ impl<'db> InferenceContext<'db> {
                     // items) stay silent here; a follow-up can make
                     // them authoritative once the method surface on
                     // `ObjectManager` lands too.
-                    if matches!(base_ty, Ty::MetadataRef { .. } | Ty::ThisObject { .. }) {
+                    let base_kind = self.db.lookup_type(base_ty);
+                    if matches!(base_kind, TypeKind::MetadataRef(_) | TypeKind::ThisObject { .. }) {
                         // `Ty::ThisManager` is intentionally **not**
                         // authoritative here: it coerces to
                         // `Ty::ObjectManager`, and `lookup_field` /
@@ -1384,7 +1484,7 @@ impl<'db> InferenceContext<'db> {
                             field_name: field.clone(),
                         });
                     }
-                    Ty::Unknown
+                    self.db.unknown()
                 }
             }
 
@@ -1398,8 +1498,9 @@ impl<'db> InferenceContext<'db> {
                 //
                 // Resolves the platform constructors for the bare type name
                 // (case-insensitive, bilingual via `constructors_by_type`).
-                // Each overload becomes a `FunctionSignature` through the
-                // same adapter that handles global functions, so the
+                // Each overload becomes a `BuiltinSignature` descriptor
+                // through the same adapter that handles global functions
+                // (arity only — `Новый` never type-checks args), so the
                 // PR1/PR2/PR3 `is_variadic` precedence applies uniformly:
                 // explicit JSON flag → `,...,<X>N` name idiom → `<X>N-<X>M`
                 // capped name → fixed arity. Diagnostic fires only when
@@ -1419,10 +1520,16 @@ impl<'db> InferenceContext<'db> {
                         bsl_platform::PlatformDataInner::instance().get_constructors(name.as_str());
                     if !ctors.is_empty() {
                         let arg_count = args.len();
-                        let sigs: Vec<hir_def::ty::FunctionSignature> = ctors
+                        // Constructor arity uses the db-free descriptor
+                        // view only — `Новый` never type-checks args, so no
+                        // kernel lowering is needed here.
+                        let sigs: Vec<builtin::BuiltinSignature> = ctors
                             .iter()
                             .map(|ctor| {
-                                builtin::signature_from_params(&ctor.parameters, Ty::Unknown)
+                                builtin::descriptor_from_params(
+                                    &ctor.parameters,
+                                    builtin::ReturnTypeSpec::Unknown,
+                                )
                             })
                             .collect();
 
@@ -1431,17 +1538,17 @@ impl<'db> InferenceContext<'db> {
                         let mut best_distance = usize::MAX;
                         for (idx, sig) in sigs.iter().enumerate() {
                             let required = sig
-                                .defaults
+                                .defaults()
                                 .iter()
                                 .rposition(|has_default| !*has_default)
                                 .map_or(0, |i| i + 1);
                             let too_few = arg_count < required;
-                            let too_many = sig.max_args.is_some_and(|m| arg_count > m as usize);
+                            let too_many = sig.max_args().is_some_and(|m| arg_count > m as usize);
                             if !too_few && !too_many {
                                 arity_match = Some(idx);
                                 break;
                             }
-                            let upper = sig.max_args.map_or(arg_count, |m| m as usize);
+                            let upper = sig.max_args().map_or(arg_count, |m| m as usize);
                             let distance = if too_few {
                                 required - arg_count
                             } else {
@@ -1456,7 +1563,7 @@ impl<'db> InferenceContext<'db> {
                         if arity_match.is_none() {
                             let sig = &sigs[best_idx];
                             let required = sig
-                                .defaults
+                                .defaults()
                                 .iter()
                                 .rposition(|has_default| !*has_default)
                                 .map_or(0, |i| i + 1);
@@ -1464,7 +1571,7 @@ impl<'db> InferenceContext<'db> {
                                 InferenceDiagnostic::MismatchedArgCount {
                                     call_expr: expr_id,
                                     required_count: required,
-                                    total_count: sig.params.len(),
+                                    total_count: sig.param_count(),
                                     found: arg_count,
                                 },
                             );
@@ -1472,15 +1579,31 @@ impl<'db> InferenceContext<'db> {
                     }
                 }
 
-                // Lower the constructor name through the shared TypeRef →
-                // Ty adapter. The cascade (builtin → MDO plural → platform
-                // object fallback) moved into `lower_bare_name`, so every
-                // syntactic source of type info (`Новый X`, `Тип("…")`,
-                // JSDoc) now takes the same path — editing the fallback
-                // rules in one place is enough.
-                match type_name {
-                    Some(name) => TyLoweringContext::new().lower_bare_name(name),
-                    None => Ty::Unknown,
+                // `Новый Запрос(<text>)` always produces `Ty::Query{..}`
+                // (bilingual `Новый Query` too) — never the legacy
+                // `Ty::PlatformObject("Запрос")` shape. That stable
+                // receiver lets chain rewrites (`.Выполнить()`,
+                // `.ВыполнитьПакет()`) carry the projection forward
+                // without enumerating two query-shapes. Legacy property
+                // lookups (`Зап.Параметры`, `Зап.Текст`) still resolve
+                // because `platform_type_key` keys `Ty::Query → "Запрос"`.
+                let is_query_ctor = type_name.as_ref().is_some_and(|name| {
+                    crate::method_lookup::is_platform_name(name, "Запрос", "Query")
+                });
+                if is_query_ctor {
+                    let projections = self.try_synthesise_query_projections(args);
+                    self.db.query(projections.iter().cloned().collect())
+                } else {
+                    // Lower the constructor name through the shared TypeRef →
+                    // Ty adapter. The cascade (builtin → MDO plural → platform
+                    // object fallback) moved into `lower_bare_name`, so every
+                    // syntactic source of type info (`Новый X`, `Тип("…")`,
+                    // JSDoc) now takes the same path — editing the fallback
+                    // rules in one place is enough.
+                    match type_name {
+                        Some(name) => TyLoweringContext::new().lower_bare_name_id(self.db, name),
+                        None => self.db.unknown(),
+                    }
                 }
             }
 
@@ -1490,7 +1613,7 @@ impl<'db> InferenceContext<'db> {
                     self.infer_expr(ExprId::from_idx(elem));
                 }
 
-                Ty::Array
+                self.db.array(None)
             }
 
             Expr::Await { expr } => {
@@ -1500,11 +1623,11 @@ impl<'db> InferenceContext<'db> {
         };
 
         // Store the inferred type
-        self.expr_types.insert(expr_id, ty.clone());
+        self.expr_types.insert(expr_id, ty);
         ty
     }
 
-    /// Resolve a bare `Expr::Path` identifier to a [`Ty`].
+    /// Resolve a bare `Expr::Path` identifier to a `TypeId`.
     ///
     /// Lookup order mirrors BSL visibility:
     ///
@@ -1513,7 +1636,11 @@ impl<'db> InferenceContext<'db> {
     ///    inference context captures those types in [`Self::var_types`]
     ///    as [`Stmt::Assign`] is walked in [`Self::infer_stmts`].
     ///    In value / receiver position, implicit locals shadow module-level,
-    ///    manager, form, platform, and builtin names.
+    ///    manager, form, platform, and builtin names. Phase F upgrades a
+    ///    projection-less `Ty::Query{[None]}` / `Ty::PlatformObject("Запрос")`
+    ///    here via reaching-defs on `<name>.Текст` writes so bare-name
+    ///    references (e.g. `Возврат Зап;` from a helper) inherit the
+    ///    projection that Phase D used to compute only at chain dispatch.
     /// 2. **Declared locals / parameters / module symbols** — returned as
     ///    `Unknown` today when no type was inferred yet, but they still
     ///    shadow platform builtins in value position. Builtin functions are
@@ -1522,7 +1649,13 @@ impl<'db> InferenceContext<'db> {
     /// 3. **Module-level methods / variables** — returned as `Unknown`
     ///    today (no signature carrier yet); Task 2.x will synthesise
     ///    `Ty::Function` from `MethodId`.
-    fn infer_path_name(&mut self, name: &hir_def::Name) -> Ty {
+    ///
+    /// `expr_id` is the use-site ExprId. Phase F's dataflow refinement
+    /// asks "what reaching definitions of `<name>.Текст` reach the
+    /// enclosing statement of this expression?" — the answer depends on
+    /// where the path is referenced (a `Возврат Зап;` mid-procedure
+    /// sees different reaching defs than a `Зап.Выполнить()` later).
+    fn infer_path_name(&mut self, name: &hir_def::Name, expr_id: ExprId) -> TypeId {
         use hir_def::resolver::Resolution;
 
         let resolver = self.get_resolver();
@@ -1540,9 +1673,12 @@ impl<'db> InferenceContext<'db> {
         //    through to the normal cascade and become `Ty::Unknown`.
         let name_lower = name.as_str().to_lowercase();
         if name_lower == "этотобъект" || name_lower == "thisobject" {
-            if let Some(owner) = resolver.resolve_this_object(self.db) {
+            if let Some(owner) = crate::this_object::resolve_this_object_owner(self.db, &resolver) {
                 trace!("resolved {} as ThisObject {{ owner: {:?} }}", name, owner);
-                return Ty::ThisObject { owner };
+                return self.db.mk_this_object(
+                    ConfigId::Root,
+                    MdoRefFacet::new(owner.0, owner.1.as_str().to_string()),
+                );
             }
             // Manager-module: same identifier, different receiver shape.
             // `ЭтотОбъект` inside `<MDO>/Ext/ManagerModule.bsl` names the
@@ -1550,9 +1686,13 @@ impl<'db> InferenceContext<'db> {
             // chain then coerces `Ty::ThisManager` to
             // `Ty::ObjectManager` — see Step J in plan
             // `linear-tumbling-noodle.md` §2.5.
-            if let Some(owner) = resolver.resolve_this_manager(self.db) {
+            if let Some(owner) = crate::this_object::resolve_this_manager_owner(self.db, &resolver)
+            {
                 trace!("resolved {} as ThisManager {{ owner: {:?} }}", name, owner);
-                return Ty::ThisManager { owner };
+                return self.db.mk_this_manager(
+                    ConfigId::Root,
+                    MdoRefFacet::new(owner.0, owner.1.as_str().to_string()),
+                );
             }
             // Record-set module: `ЭтотОбъект` is the record set itself
             // (`MetadataRef{*RecordSet, name}`). One-to-one mapping per
@@ -1561,7 +1701,9 @@ impl<'db> InferenceContext<'db> {
             // variant — `*RecordSet` has no sibling kind to disambiguate the
             // way `Ty::ThisObject` disambiguates *Object from *Ref for
             // catalog/document/etc. modules.
-            if let Some((mdo, name)) = resolver.resolve_this_record_set(self.db) {
+            if let Some((mdo, name)) =
+                crate::this_object::resolve_this_record_set_owner(self.db, &resolver)
+            {
                 if let Some(kind) = hir_def::ty::MetadataKind::record_set_kind_for(mdo) {
                     trace!(
                         "resolved {} as record-set MetadataRef {{ {:?}, {} }}",
@@ -1569,7 +1711,7 @@ impl<'db> InferenceContext<'db> {
                         kind,
                         name
                     );
-                    return Ty::MetadataRef { kind, name };
+                    return self.db.metadata_ref(kind, name.as_str().to_string(), &RootConfigCtx);
                 }
             }
             // Managed-form fallback: `ЭтотОбъект` in a managed form module
@@ -1579,9 +1721,9 @@ impl<'db> InferenceContext<'db> {
             // platform type directly. Subsequent `.Элементы` / `.Найти(…)`
             // chains then route through the existing platform-property /
             // platform-method adapters with no special-case code.
-            if resolver.resolve_this_form(self.db) {
+            if crate::this_object::is_managed_form_module(self.db, &resolver) {
                 trace!("resolved {} as managed form Self", name);
-                return Ty::PlatformObject(hir_def::Name::new(crate::form_self::FORM_TYPE_NAME));
+                return self.db.platform_object(crate::form_self::FORM_TYPE_NAME.to_string());
             }
             // Fall through: record-set / ordinary-form / common-module
             // `ЭтотОбъект` stays Unknown.
@@ -1595,7 +1737,30 @@ impl<'db> InferenceContext<'db> {
         //    cannot be a function value in BSL.
         if let Some(ty) = self.var_types.get(&name.as_str().to_lowercase()) {
             trace!("resolved {} via var_types = {:?}", name, ty);
-            return ty.clone();
+            // Phase F — projection-less Query bindings get upgraded
+            // via reaching-defs on `<name>.Текст` writes so bare-name
+            // references (e.g. `Возврат Зап;` from a helper body)
+            // carry the projection forward through the cross-method
+            // return-type cascade. The eligibility gate matches
+            // chain-dispatch Phase D so a path resolved here will
+            // produce a receiver that `apply_sdbl_chain_rewrite` then
+            // skips (already-projected receivers short-circuit).
+            let ty_id = *ty;
+            if crate::method_lookup::receiver_needs_refinement_id(self.db, ty_id) {
+                if let Some(projections) = crate::query_text_dataflow::refine_query_at_use_site(
+                    self.db,
+                    self.file_id,
+                    self.owner,
+                    expr_id,
+                    name,
+                    &self.body,
+                ) {
+                    let refined = self.db.query(projections.iter().cloned().collect());
+                    trace!("Phase F refined {} to {:?}", name, refined);
+                    return refined;
+                }
+            }
+            return ty_id;
         }
 
         let user_shadows =
@@ -1609,7 +1774,7 @@ impl<'db> InferenceContext<'db> {
         //    receiver, while the builtin `Строка(...)` remains available in
         //    call position through `infer_call`.
         if user_shadows || body_binding_shadows {
-            return Ty::Unknown;
+            return self.db.unknown();
         }
 
         // 3. Builtins — union of Resolver's platform-global view and the
@@ -1620,7 +1785,7 @@ impl<'db> InferenceContext<'db> {
         let resolver_says_builtin = matches!(resolved, Some(Resolution::Builtin(_)));
         let hir_sig = builtin::builtin_functions().get(name.as_str());
         if resolver_says_builtin || hir_sig.is_some() {
-            return Ty::Unknown;
+            return self.db.unknown();
         }
 
         // 4. MDO plural globals (`Документы`, `Справочники`, …) lower into
@@ -1637,9 +1802,9 @@ impl<'db> InferenceContext<'db> {
         //    would lose their `Ty::ManagerCollection` shape and the existing
         //    `resolve_three_level_call` machinery would no longer see them.
         if let Some(mdo_type) = bsl_metadata::MdoType::from_plural(name.as_str()) {
-            if let Some(ty) = Ty::manager_collection(mdo_type) {
+            if mdo_type.manager_type_prefix().is_some() {
                 trace!("resolved {} as manager collection {:?}", name, mdo_type);
-                return ty;
+                return self.db.manager_collection(mdo_type);
             }
         }
 
@@ -1693,7 +1858,7 @@ impl<'db> InferenceContext<'db> {
         //       the form happens to declare an attribute with that name.
         //
         //     Cheap-first probe: `resolve_form_attribute` opens with the
-        //     same `resolve_this_form` gate `form_self` uses, so non-form
+        //     same `is_managed_form_module` gate `form_self` uses, so non-form
         //     modules pay nothing.
         if !user_shadows && !body_binding_shadows {
             if let Some(ty) = crate::form_attr::resolve_form_attribute(self.db, &resolver, name) {
@@ -1707,7 +1872,7 @@ impl<'db> InferenceContext<'db> {
         // 5c. ObjectModule implicit ЭтотОбъект.<name> — bare attribute,
         //     standard attribute, or tabular section of the owning MDO.
         //     Symmetric to 5b (form attribute) but gated on
-        //     Resolver::resolve_this_object, which is None outside an
+        //     this_object::resolve_this_object_owner, which is None outside an
         //     ObjectModule of an MDO with an *Object companion
         //     (MetadataKind::object_kind_for). Extra workspace_owns_common_module
         //     guard so a user CommonModule with the same name wins (mirrors
@@ -1728,7 +1893,7 @@ impl<'db> InferenceContext<'db> {
         //     `user_shadows` / `body_binding_shadows` gates (see step 2),
         //     so we only reach here for field-shaped lookups.
         //     Symmetric to 5c (ObjectModule) but gated on
-        //     Resolver::resolve_this_record_set, which is None outside a
+        //     this_object::resolve_this_record_set_owner, which is None outside a
         //     RecordSetModule of one of the four register flavours.
         if !user_shadows && !body_binding_shadows && !workspace_owns_common_module {
             if let Some(ty) =
@@ -1768,42 +1933,41 @@ impl<'db> InferenceContext<'db> {
         // 4 platform) so both the bare-IDENT and the typed-receiver
         // paths agree on user-shadows-platform.
         if !user_shadows && !workspace_owns_common_module {
-            if let Some(prop) =
-                bsl_platform::PlatformDataInner::instance().get_global_property(name.as_str())
+            // Phase 3 §4.G.5b: the helper is kernel-native now; bridge the
+            // id back into this still-`Ty` inference path (Phase 4 removes it).
+            if let Some(id) =
+                crate::platform_global_lookup::resolve_platform_global_property_type(self.db, name)
             {
-                if let Some(declared) = prop.property_types.first() {
-                    trace!("resolved {} as platform global → {}", name, declared);
-                    let lowering = crate::lower::TyLoweringContext::new();
-                    return lowering.lower_bare_name(&hir_def::Name::new(declared.as_str()));
-                }
+                trace!("resolved {} as platform global → {:?}", name, id);
+                return id;
             }
         }
 
         // 7. Module-level methods / variables (Unknown today; Task 2.x
         //    will synthesise Ty::Function from MethodId).
         match resolved {
-            Some(Resolution::Method(_)) | Some(Resolution::Variable(_)) => Ty::Unknown,
+            Some(Resolution::Method(_)) | Some(Resolution::Variable(_)) => self.db.unknown(),
             // `Local` is unreachable here because `get_resolver` does not
             // push an ExprScope; any local-looking name already returned
             // from the `var_types` branch above.
-            Some(Resolution::Builtin(_)) | Some(Resolution::Local(_)) | None => Ty::Unknown,
+            Some(Resolution::Builtin(_)) | Some(Resolution::Local(_)) | None => self.db.unknown(),
         }
     }
 
     /// Infer type from a literal.
-    fn infer_literal(&self, lit: &Literal) -> Ty {
+    fn infer_literal(&self, lit: &Literal) -> TypeId {
         match lit {
-            Literal::Number(_) => Ty::Number,
-            Literal::String(_) => Ty::String,
-            Literal::Date(_) => Ty::Date,
-            Literal::Bool(_) => Ty::Boolean,
-            Literal::Undefined => Ty::Undefined,
-            Literal::Null => Ty::Null,
+            Literal::Number(_) => self.db.number(None, None),
+            Literal::String(_) => self.db.string(None, false),
+            Literal::Date(_) => self.db.date(DateComponent::DateTime),
+            Literal::Bool(_) => self.db.boolean(),
+            Literal::Undefined => self.db.undefined(),
+            Literal::Null => self.db.null(),
         }
     }
 
     /// Infer type from a binary operation.
-    fn infer_binary_op(&mut self, lhs: ExprId, rhs: ExprId, op: BinaryOp) -> Ty {
+    fn infer_binary_op(&mut self, lhs: ExprId, rhs: ExprId, op: BinaryOp) -> TypeId {
         let lhs_ty = self.infer_expr(lhs);
         let rhs_ty = self.infer_expr(rhs);
 
@@ -1811,13 +1975,20 @@ impl<'db> InferenceContext<'db> {
             // Arithmetic operations: Number op Number → Number
             BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod => {
                 // Special case: String + Any → String (concatenation)
-                if op == BinaryOp::Add && (lhs_ty == Ty::String || rhs_ty == Ty::String) {
-                    Ty::String
-                } else if lhs_ty == Ty::Number && rhs_ty == Ty::Number {
-                    Ty::Number
+                let lhs_kind = self.db.lookup_type(lhs_ty);
+                let rhs_kind = self.db.lookup_type(rhs_ty);
+                if op == BinaryOp::Add
+                    && (matches!(lhs_kind, TypeKind::String(_))
+                        || matches!(rhs_kind, TypeKind::String(_)))
+                {
+                    self.db.string(None, false)
+                } else if matches!(lhs_kind, TypeKind::Number(_))
+                    && matches!(rhs_kind, TypeKind::Number(_))
+                {
+                    self.db.number(None, None)
                 } else {
                     // Unknown operand types
-                    Ty::Unknown
+                    self.db.unknown()
                 }
             }
 
@@ -1827,35 +1998,36 @@ impl<'db> InferenceContext<'db> {
             | BinaryOp::Lt
             | BinaryOp::Le
             | BinaryOp::Gt
-            | BinaryOp::Ge => Ty::Boolean,
+            | BinaryOp::Ge => self.db.boolean(),
 
             // Logical operations: Boolean op Boolean → Boolean
-            BinaryOp::And | BinaryOp::Or => Ty::Boolean,
+            BinaryOp::And | BinaryOp::Or => self.db.boolean(),
         }
     }
 
     /// Infer type from a unary operation.
-    fn infer_unary_op(&mut self, expr: ExprId, op: UnaryOp) -> Ty {
+    fn infer_unary_op(&mut self, expr: ExprId, op: UnaryOp) -> TypeId {
         let expr_ty = self.infer_expr(expr);
 
         match op {
             UnaryOp::Neg | UnaryOp::Plus => {
                 // Numeric negation/plus
-                if expr_ty == Ty::Number {
-                    Ty::Number
+                let kind = self.db.lookup_type(expr_ty);
+                if matches!(kind, TypeKind::Number(_)) {
+                    self.db.number(None, None)
                 } else {
-                    Ty::Unknown
+                    self.db.unknown()
                 }
             }
             UnaryOp::Not => {
                 // Logical NOT
-                Ty::Boolean
+                self.db.boolean()
             }
         }
     }
 
     /// Infer type from a function call.
-    fn infer_call(&mut self, callee: ExprId, args: &[ExprId]) -> Ty {
+    fn infer_call(&mut self, callee: ExprId, args: &[ExprId]) -> TypeId {
         // Qualified callees come from body lowering only for
         // three-segment manager calls (`Документы.ПКО.Метод()`).
         // Two-segment `Module.Method()` was lifted out of `QualifiedPath`
@@ -1943,13 +2115,13 @@ impl<'db> InferenceContext<'db> {
             // separately at the `lookup_method` miss site below
             // (look for `try_resolve_platform_global_member` next to
             // `receiver_display_name`).
-            if matches!(receiver_ty, Ty::Unknown) {
+            if self.is_unknown(receiver_ty) {
                 let base_expr = self.body.expr(base_id).clone();
                 if let Expr::Path(path_name) = base_expr {
                     if let Some(return_ty) =
                         self.dispatch_bare_ident_field_call(&path_name, &method_name, args, callee)
                     {
-                        self.expr_types.insert(callee, Ty::Unknown);
+                        self.expr_types.insert(callee, self.db.unknown());
                         return return_ty;
                     }
                 }
@@ -1978,24 +2150,28 @@ impl<'db> InferenceContext<'db> {
             // fall through to `lookup_method` (their platform path).
             //
             // `ThisObject` is coerced upfront — `lookup_method` does
-            // the same coercion (`crate::this_object::coerce_to_metadata_ref`),
+            // the same coercion (`crate::this_object::coerce_to_metadata_ref_id`),
             // so doing it here mirrors that contract. After coercion
             // `ЭтотОбъект.МойМетод()` enters the workspace resolver
             // through the same `(MdoType, name)` pair the platform
             // path would see.
-            let workspace_receiver_ty = crate::this_object::coerce_to_metadata_ref(&receiver_ty)
-                .unwrap_or_else(|| receiver_ty.clone());
-            if let Ty::MetadataRef { kind, name: mdo_name } = &workspace_receiver_ty {
+            let workspace_receiver_ty =
+                crate::this_object::coerce_to_metadata_ref_id(self.db, receiver_ty)
+                    .unwrap_or(receiver_ty);
+            let workspace_receiver_kind = self.db.lookup_type(workspace_receiver_ty);
+            if let TypeKind::MetadataRef(facet) = workspace_receiver_kind {
+                let kind = facet.kind;
+                let mdo_name = hir_def::Name::new(&facet.name);
                 let resolver = self.get_resolver();
                 match crate::method_resolution::resolve_object_module_call(
                     self.db,
-                    *kind,
-                    mdo_name,
+                    kind,
+                    &mdo_name,
                     &method_name,
                     &resolver,
                 ) {
                     Ok(resolution) => {
-                        let receiver_name = receiver_display_name(&workspace_receiver_ty)
+                        let receiver_name = receiver_display_name(self.db, workspace_receiver_ty)
                             .unwrap_or_else(|| mdo_name.clone());
                         if !resolution.is_export {
                             self.push_inference_diagnostic(
@@ -2022,11 +2198,11 @@ impl<'db> InferenceContext<'db> {
                         self.record_call_arg_binding(
                             callee,
                             args,
-                            ParamsShape::Single(Arc::<[Ty]>::from(
-                                &resolution.signature.params[..],
-                            )),
+                            ParamsShape::Single(
+                                resolution.signature.params.iter().copied().collect(),
+                            ),
                         );
-                        self.expr_types.insert(callee, Ty::Unknown);
+                        self.expr_types.insert(callee, self.db.unknown());
                         return resolution.return_type;
                     }
                     Err(UnresolvedMethodKind::MethodNotFound) => {
@@ -2066,22 +2242,25 @@ impl<'db> InferenceContext<'db> {
             // composite typenames via `MetadataKind::platform_prefix`).
             //
             // Note: `ThisObject` cannot reach this branch because
-            // `coerce_to_metadata_ref` only produces `*Object` kinds —
+            // `coerce_to_metadata_ref_id` only produces `*Object` kinds —
             // there is no `ThisObject → *RecordSet` coercion in BSL
             // semantics today. So we match on `receiver_ty` directly
             // here, not on `workspace_receiver_ty`.
-            if let Ty::MetadataRef { kind, name: mdo_name } = &receiver_ty {
+            let receiver_kind = self.db.lookup_type(receiver_ty);
+            if let TypeKind::MetadataRef(facet) = receiver_kind {
+                let kind = facet.kind;
+                let mdo_name = hir_def::Name::new(&facet.name);
                 let resolver = self.get_resolver();
                 match crate::method_resolution::resolve_record_set_module_call(
                     self.db,
-                    *kind,
-                    mdo_name,
+                    kind,
+                    &mdo_name,
                     &method_name,
                     &resolver,
                 ) {
                     Ok(resolution) => {
-                        let receiver_name =
-                            receiver_display_name(&receiver_ty).unwrap_or_else(|| mdo_name.clone());
+                        let receiver_name = receiver_display_name(self.db, receiver_ty)
+                            .unwrap_or_else(|| mdo_name.clone());
                         if !resolution.is_export {
                             self.push_inference_diagnostic(
                                 InferenceDiagnostic::UnresolvedMethodCall {
@@ -2107,11 +2286,11 @@ impl<'db> InferenceContext<'db> {
                         self.record_call_arg_binding(
                             callee,
                             args,
-                            ParamsShape::Single(Arc::<[Ty]>::from(
-                                &resolution.signature.params[..],
-                            )),
+                            ParamsShape::Single(
+                                resolution.signature.params.iter().copied().collect(),
+                            ),
                         );
-                        self.expr_types.insert(callee, Ty::Unknown);
+                        self.expr_types.insert(callee, self.db.unknown());
                         return resolution.return_type;
                     }
                     Err(UnresolvedMethodKind::MethodNotFound) => {
@@ -2161,20 +2340,24 @@ impl<'db> InferenceContext<'db> {
             // both checked the original `receiver_ty`; without coercion
             // a future `Ty::ThisManager { kind: Constant, .. }` would
             // skip both refinement and Phase A.
-            let manager_receiver_ty = crate::this_object::coerce_to_metadata_ref(&receiver_ty)
-                .unwrap_or_else(|| receiver_ty.clone());
-            if let Ty::ObjectManager { kind: mdo_type, name: mdo_name } = &manager_receiver_ty {
+            let manager_receiver_ty =
+                crate::this_object::coerce_to_metadata_ref_id(self.db, receiver_ty)
+                    .unwrap_or(receiver_ty);
+            let manager_receiver_kind = self.db.lookup_type(manager_receiver_ty);
+            if let TypeKind::ObjectManager(facet) = manager_receiver_kind {
+                let mdo_type = facet.mdo;
+                let mdo_name = hir_def::Name::new(&facet.name);
                 let resolver = self.get_resolver();
                 match crate::method_resolution::resolve_aliased_manager_call(
                     self.db,
-                    *mdo_type,
-                    mdo_name,
+                    mdo_type,
+                    &mdo_name,
                     &method_name,
                     &resolver,
                 ) {
                     Ok(resolution) => {
-                        let receiver_name =
-                            receiver_display_name(&receiver_ty).unwrap_or_else(|| mdo_name.clone());
+                        let receiver_name = receiver_display_name(self.db, receiver_ty)
+                            .unwrap_or_else(|| mdo_name.clone());
                         if !resolution.is_export {
                             self.push_inference_diagnostic(
                                 InferenceDiagnostic::UnresolvedMethodCall {
@@ -2200,11 +2383,11 @@ impl<'db> InferenceContext<'db> {
                         self.record_call_arg_binding(
                             callee,
                             args,
-                            ParamsShape::Single(Arc::<[Ty]>::from(
-                                &resolution.signature.params[..],
-                            )),
+                            ParamsShape::Single(
+                                resolution.signature.params.iter().copied().collect(),
+                            ),
                         );
-                        self.expr_types.insert(callee, Ty::Unknown);
+                        self.expr_types.insert(callee, self.db.unknown());
                         return resolution.return_type;
                     }
                     Err(UnresolvedMethodKind::MethodNotFound) => {
@@ -2232,8 +2415,32 @@ impl<'db> InferenceContext<'db> {
                 }
             }
 
-            let result = match crate::method_lookup::lookup_method(&receiver_ty, &method_name) {
-                Some(mut info) => {
+            // Phase D — variable-state refinement for SDBL chain
+            // receivers. The ctx is passed by reference so non-SDBL
+            // method lookups (the vast majority) bail out of the
+            // `is_sdbl_chain_method` filter before touching it; only
+            // `Запрос.Выполнить()` / `.Выбрать()` / `.ВыполнитьПакет()`
+            // on a projection-less receiver consult the dataflow walk.
+            let refine_ctx = crate::method_lookup::RefineCtx {
+                db: self.db,
+                file_id: self.file_id,
+                owner: self.owner,
+                body: &self.body,
+                dispatch_expr_id: callee,
+                receiver_expr_id: base_id,
+                call_args: args,
+            };
+            let result = match crate::method_lookup::lookup_method_with_refinement(
+                self.db,
+                receiver_ty,
+                &method_name,
+                Some(&refine_ctx),
+            ) {
+                Some(info) => {
+                    let mut return_ty = info.return_ty;
+                    let mut params: Vec<TypeId> = info.params.to_vec();
+                    let overloads: Vec<Arc<[TypeId]>> =
+                        info.overloads.iter().cloned().map(Arc::from).collect();
                     // Argument type check (M4 Task 7 follow-up): the
                     // fluent-chain path historically skipped both arg-
                     // count and arg-type diagnostics. Emit the type
@@ -2242,35 +2449,30 @@ impl<'db> InferenceContext<'db> {
                     // Use the post-coercion shape so a future
                     // `Ty::ThisManager { kind: Constant, .. }` (lands
                     // when ValueManagerModule support is added — see
-                    // `Resolver::resolve_this_manager`) routes through
+                    // `this_object::resolve_this_manager_owner`) routes through
                     // the same refinement as the qualified-path
                     // `Константы.X.Имя()` shape.
-                    if let Ty::ObjectManager {
-                        kind: bsl_metadata::MdoType::Constant,
-                        name: mdo_name,
-                    } = &manager_receiver_ty
-                    {
-                        self.refine_constant_method(
-                            mdo_name,
-                            &method_name,
-                            &mut info.return_ty,
-                            &mut info.params,
-                        );
+                    let manager_receiver_kind = self.db.lookup_type(manager_receiver_ty);
+                    if let TypeKind::ObjectManager(facet) = manager_receiver_kind {
+                        if facet.mdo == bsl_metadata::MdoType::Constant {
+                            let mdo_name = hir_def::Name::new(&facet.name);
+                            self.refine_constant_method(
+                                &mdo_name,
+                                &method_name,
+                                &mut return_ty,
+                                &mut params,
+                            );
+                        }
                     }
                     self.record_call_arg_binding(
                         callee,
                         args,
                         ParamsShape::Overloaded {
-                            flat: Arc::<[Ty]>::from(&info.params[..]),
-                            overloads: info
-                                .overloads
-                                .iter()
-                                .map(|ov| Arc::<[Ty]>::from(&ov[..]))
-                                .collect::<Vec<Arc<[Ty]>>>()
-                                .into(),
+                            flat: params.into(),
+                            overloads: overloads.into(),
                         },
                     );
-                    info.return_ty
+                    return_ty
                 }
                 None => {
                     // Authoritative-receiver gate. `MetadataRef` and
@@ -2289,14 +2491,17 @@ impl<'db> InferenceContext<'db> {
                     // can't tell yet" rather than "method does not
                     // exist". `receiver_display_name` enforces this gate
                     // by returning `None` for such receivers.
-                    if let Some(receiver_name) = receiver_display_name(&receiver_ty) {
+                    if let Some(receiver_name) = receiver_display_name(self.db, receiver_ty) {
                         self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedMethodCall {
                             expr: callee,
                             receiver_name,
                             method_name: method_name.clone(),
                             kind: UnresolvedMethodKind::MethodNotFound,
                         });
-                    } else if let Ty::PlatformObject(_) = &receiver_ty {
+                    } else if matches!(
+                        self.db.lookup_type(receiver_ty),
+                        TypeKind::PlatformObject(_)
+                    ) {
                         // PlatformObject bridge — replaces the Phase 1
                         // legacy `MissingCommonModuleMethod` coverage
                         // for `<Global>.<Method>` shapes where
@@ -2323,6 +2528,7 @@ impl<'db> InferenceContext<'db> {
                         if let Expr::Path(receiver_path_name) = base_expr {
                             if matches!(
                                 crate::platform_global_lookup::try_resolve_platform_global_member(
+                                    self.db,
                                     &receiver_path_name,
                                     &method_name,
                                 ),
@@ -2339,7 +2545,7 @@ impl<'db> InferenceContext<'db> {
                             }
                         }
                     }
-                    Ty::Unknown
+                    self.db.unknown()
                 }
             };
             // Cache the callee `Expr::Field`'s type so `infer_all`'s
@@ -2349,7 +2555,7 @@ impl<'db> InferenceContext<'db> {
             // method name. BSL has no first-class method references —
             // the meaningful value type belongs to the surrounding
             // `Expr::Call`, which is cached at the call site.
-            self.expr_types.insert(callee, Ty::Unknown);
+            self.expr_types.insert(callee, self.db.unknown());
             return result;
         }
 
@@ -2369,14 +2575,20 @@ impl<'db> InferenceContext<'db> {
                     "BuiltinFunctions::get must never return an empty overload set"
                 );
 
+                // Lower the db-free descriptors to kernel signatures once
+                // for this call site. (Body inference is Salsa-cached, so a
+                // given builtin's strings are re-lowered at most once per
+                // body revision.)
+                let sigs: Vec<FunctionSignature> = sigs.iter().map(|s| s.lower(self.db)).collect();
+
                 for arg in args {
                     self.infer_expr(*arg);
                 }
 
                 let arg_count = args.len();
-                let inferred: Vec<Ty> = args
+                let inferred: Vec<TypeId> = args
                     .iter()
-                    .map(|a| self.expr_types.get(a).cloned().unwrap_or(Ty::Unknown))
+                    .map(|a| self.expr_types.get(a).copied().unwrap_or_else(|| self.db.unknown()))
                     .collect();
 
                 // Two-stage overload selection — must consider BOTH arity
@@ -2393,11 +2605,7 @@ impl<'db> InferenceContext<'db> {
                 let mut best_idx = 0usize;
                 let mut best_distance = usize::MAX;
                 for (idx, sig) in sigs.iter().enumerate() {
-                    let required = sig
-                        .defaults
-                        .iter()
-                        .rposition(|has_default| !*has_default)
-                        .map_or(0, |i| i + 1);
+                    let required = sig.required_count();
                     let too_few = arg_count < required;
                     let too_many = sig.max_args.is_some_and(|m| arg_count > m as usize);
                     if !too_few && !too_many {
@@ -2405,11 +2613,11 @@ impl<'db> InferenceContext<'db> {
                             arity_match = Some(idx);
                         }
                         // Type check: zip arg types against this overload's
-                        // params; `is_assignable` treats `Ty::Unknown` on
-                        // either side as permissive.
+                        // params; `is_assignable` treats `Unknown` on either
+                        // side as permissive.
                         let types_ok =
                             inferred.iter().zip(sig.params.iter()).all(|(actual, expected)| {
-                                crate::subtype::is_assignable(actual, expected)
+                                crate::subtype::is_assignable(self.db, *actual, *expected)
                             });
                         if types_ok && full_match.is_none() {
                             full_match = Some(idx);
@@ -2432,11 +2640,7 @@ impl<'db> InferenceContext<'db> {
                     Some(idx) => &sigs[idx],
                     None => {
                         let sig = &sigs[best_idx];
-                        let required = sig
-                            .defaults
-                            .iter()
-                            .rposition(|has_default| !*has_default)
-                            .map_or(0, |i| i + 1);
+                        let required = sig.required_count();
                         self.push_inference_diagnostic(InferenceDiagnostic::MismatchedArgCount {
                             call_expr: callee,
                             required_count: required,
@@ -2468,16 +2672,16 @@ impl<'db> InferenceContext<'db> {
                 // the base-time `chosen` so a "no overload accepts"
                 // failure renders the message against the same overload
                 // the legacy emitter would have picked.
-                let overloads_arc: Arc<[Arc<[Ty]>]> = sigs
+                let overloads_arc: Arc<[Arc<[TypeId]>]> = sigs
                     .iter()
-                    .map(|s| Arc::<[Ty]>::from(&s.params[..]))
+                    .map(|s| s.params.iter().copied().collect())
                     .collect::<Vec<_>>()
                     .into();
                 self.record_call_arg_binding(
                     callee,
                     args,
                     ParamsShape::Overloaded {
-                        flat: Arc::<[Ty]>::from(&chosen.params[..]),
+                        flat: chosen.params.iter().copied().collect(),
                         overloads: overloads_arc,
                     },
                 );
@@ -2488,15 +2692,15 @@ impl<'db> InferenceContext<'db> {
                 // (e.g. `Булево` for AttachAddIn), so the union path is a
                 // future-proof default.
                 let ret = if sigs.len() == 1 {
-                    (*chosen.ret).clone()
+                    chosen.ret
                 } else {
-                    Ty::union(sigs.iter().map(|s| (*s.ret).clone()).collect())
+                    self.db.union(sigs.iter().map(|s| s.ret).collect())
                 };
                 // Pin the bare callee's cached type so the second pass
                 // in `infer_all` doesn't re-enter `Expr::Path` on the
                 // function-name token. Mirrors the `Expr::Field`
                 // callee fix above.
-                self.expr_types.insert(callee, Ty::Unknown);
+                self.expr_types.insert(callee, self.db.unknown());
                 return ret;
             }
         }
@@ -2520,19 +2724,23 @@ impl<'db> InferenceContext<'db> {
         }
 
         // Check if callee is a function type
-        match callee_ty {
-            Ty::Function { ref params, ref defaults, max_args, ref ret } => {
+        let callee_kind = self.db.lookup_type(callee_ty);
+        match callee_kind {
+            TypeKind::Function(facet) => {
                 // Arity check honours per-parameter defaults and the
                 // documented `max_args` cap. The lower bound is the count
                 // of required (non-default) leading parameters. The upper
                 // bound is `max_args` (e.g. `Some(11)` for `СтрШаблон`,
                 // `Some(2)` for `НСтр`, `None` for genuinely unbounded
                 // variadics like the `ОписаниеТипов` fallback).
-                let total = params.len();
-                let required =
-                    defaults.iter().rposition(|has_default| !*has_default).map_or(0, |i| i + 1);
+                let total = facet.params.len();
+                let required = facet.min_args as usize;
                 let too_few = args.len() < required;
-                let too_many = max_args.is_some_and(|m| args.len() > m as usize);
+                let too_many = match facet.max_args {
+                    ArgArity::Fixed(n) => args.len() > n as usize,
+                    ArgArity::Variadic => false,
+                    _ => false,
+                };
                 if too_few || too_many {
                     self.push_inference_diagnostic(InferenceDiagnostic::MismatchedArgCount {
                         call_expr: callee,
@@ -2553,13 +2761,13 @@ impl<'db> InferenceContext<'db> {
                 self.record_call_arg_binding(
                     callee,
                     args,
-                    ParamsShape::Single(Arc::<[Ty]>::from(&params[..])),
+                    ParamsShape::Single(facet.params.iter().map(|p| p.ty).collect()),
                 );
 
                 // Return function's return type
-                (**ret).clone()
+                facet.returns
             }
-            Ty::Unknown => {
+            TypeKind::Unknown => {
                 // Phase O.11 — same-module bare-fn cascade. When the
                 // callee is a bare `Expr::Path(name)` that resolves
                 // through the enclosing module's symbol_tree to a
@@ -2607,18 +2815,19 @@ impl<'db> InferenceContext<'db> {
                             let sig = crate::method_resolution::materialise_signature_enriched(
                                 self.db, method.id, method,
                             );
-                            if !matches!(*sig.ret, Ty::Unknown) {
-                                return (*sig.ret).clone();
+                            let ret = sig.ret;
+                            if !self.is_unknown(ret) {
+                                return ret;
                             }
                         }
                     }
                 }
-                Ty::Unknown
+                self.db.unknown()
             }
             _ => {
                 // Callee is not a function type
                 // Phase 2+: Could emit diagnostic here
-                Ty::Unknown
+                self.db.unknown()
             }
         }
     }
@@ -2632,7 +2841,7 @@ impl<'db> InferenceContext<'db> {
         method_name: &Name,
         args: &[ExprId],
         call_expr: ExprId,
-    ) -> Ty {
+    ) -> TypeId {
         // Infer argument types first
         for arg in args {
             self.infer_expr(*arg);
@@ -2679,7 +2888,7 @@ impl<'db> InferenceContext<'db> {
                 self.record_call_arg_binding(
                     call_expr,
                     args,
-                    ParamsShape::Single(Arc::<[Ty]>::from(&resolution.signature.params[..])),
+                    ParamsShape::Single(resolution.signature.params.iter().copied().collect()),
                 );
 
                 // Return method's return type
@@ -2728,10 +2937,11 @@ impl<'db> InferenceContext<'db> {
                         if let crate::platform_global_lookup::PlatformGlobalLookup::Resolved(
                             return_ty,
                         ) = crate::platform_global_lookup::try_resolve_platform_global_member(
+                            self.db,
                             module_name,
                             method_name,
                         ) {
-                            self.expr_types.insert(call_expr, Ty::Unknown);
+                            self.expr_types.insert(call_expr, self.db.unknown());
                             return return_ty;
                         }
                     }
@@ -2745,7 +2955,7 @@ impl<'db> InferenceContext<'db> {
                     kind,
                 });
 
-                Ty::Unknown
+                self.db.unknown()
             }
         }
     }
@@ -2804,7 +3014,7 @@ impl<'db> InferenceContext<'db> {
         method_name: &Name,
         args: &[ExprId],
         call_expr: ExprId,
-    ) -> Option<Ty> {
+    ) -> Option<TypeId> {
         use hir_def::resolver::Resolution;
 
         let resolver = self.get_resolver();
@@ -2905,6 +3115,7 @@ impl<'db> InferenceContext<'db> {
         // the user just typo'd the method); `NotAContainer` falls through
         // to gate 5's `ReceiverNotResolved`.
         match crate::platform_global_lookup::try_resolve_platform_global_member(
+            self.db,
             module_name,
             method_name,
         ) {
@@ -2912,7 +3123,7 @@ impl<'db> InferenceContext<'db> {
                 for arg in args {
                     self.infer_expr(*arg);
                 }
-                self.expr_types.insert(call_expr, Ty::Unknown);
+                self.expr_types.insert(call_expr, self.db.unknown());
                 return Some(return_ty);
             }
             crate::platform_global_lookup::PlatformGlobalLookup::KnownContainerMissingMember => {
@@ -2925,7 +3136,7 @@ impl<'db> InferenceContext<'db> {
                     method_name: method_name.clone(),
                     kind: UnresolvedMethodKind::MethodNotFound,
                 });
-                return Some(Ty::Unknown);
+                return Some(self.db.unknown());
             }
             crate::platform_global_lookup::PlatformGlobalLookup::NotAContainer => {}
         }
@@ -2943,7 +3154,7 @@ impl<'db> InferenceContext<'db> {
             method_name: method_name.clone(),
             kind: UnresolvedMethodKind::ReceiverNotResolved,
         });
-        Some(Ty::Unknown)
+        Some(self.db.unknown())
     }
 
     /// Infer type from a three-segment manager-chain call
@@ -2964,7 +3175,7 @@ impl<'db> InferenceContext<'db> {
         method_name: &Name,
         args: &[ExprId],
         call_expr: ExprId,
-    ) -> Ty {
+    ) -> TypeId {
         for arg in args {
             self.infer_expr(*arg);
         }
@@ -3005,7 +3216,7 @@ impl<'db> InferenceContext<'db> {
                 self.record_call_arg_binding(
                     call_expr,
                     args,
-                    ParamsShape::Single(Arc::<[Ty]>::from(&resolution.signature.params[..])),
+                    ParamsShape::Single(resolution.signature.params.iter().copied().collect()),
                 );
 
                 resolution.return_type
@@ -3034,16 +3245,20 @@ impl<'db> InferenceContext<'db> {
                 let plat_res: Option<PlatformMethodResolution> = mdo_type_opt
                     .filter(|mdo_type| self.mdo_declared(*mdo_type, mdo_name))
                     .and_then(|mdo_type| {
-                        resolve_platform_manager_method(mdo_type, mdo_name, method_name)
+                        resolve_platform_manager_method(self.db, mdo_type, mdo_name, method_name)
                     });
                 if let Some(mut res) = plat_res {
                     if mdo_type_opt == Some(bsl_metadata::MdoType::Constant) {
+                        let mut return_ty = res.return_ty;
+                        let mut params: Vec<TypeId> = res.signature.params.to_vec();
                         self.refine_constant_method(
                             mdo_name,
                             method_name,
-                            &mut res.return_ty,
-                            &mut res.signature.params,
+                            &mut return_ty,
+                            &mut params,
                         );
+                        res.return_ty = return_ty;
+                        res.signature.params = params.into_boxed_slice();
                     }
                     let total = res.signature.params.len();
                     let required = res.signature.required_count();
@@ -3058,7 +3273,7 @@ impl<'db> InferenceContext<'db> {
                     self.record_call_arg_binding(
                         call_expr,
                         args,
-                        ParamsShape::Single(Arc::<[Ty]>::from(&res.signature.params[..])),
+                        ParamsShape::Single(res.signature.params.to_vec().into()),
                     );
                     return res.return_ty;
                 }
@@ -3069,7 +3284,7 @@ impl<'db> InferenceContext<'db> {
                     method_name: method_name.clone(),
                     kind: UnresolvedMethodKind::MethodNotFound,
                 });
-                Ty::Unknown
+                self.db.unknown()
             }
             Err(kind) => {
                 self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedMethodCall {
@@ -3078,7 +3293,7 @@ impl<'db> InferenceContext<'db> {
                     method_name: method_name.clone(),
                     kind,
                 });
-                Ty::Unknown
+                self.db.unknown()
             }
         }
     }
@@ -3130,7 +3345,7 @@ impl<'db> InferenceContext<'db> {
     /// `Ty::Unknown` after the M4 `Произвольный` fix in
     /// [`crate::method_lookup::resolve_platform_type_name`], which the
     /// gradual rule then accepts in any typed slot.
-    fn resolve_constant_value_type(&self, mdo_name: &Name) -> Option<Ty> {
+    fn resolve_constant_value_type(&self, mdo_name: &Name) -> Option<TypeId> {
         let configs = self.db.configurations(self.file_id);
         if configs.is_empty() {
             return None;
@@ -3151,7 +3366,7 @@ impl<'db> InferenceContext<'db> {
             };
             return mdo.constant_type.as_ref().map(|attr| {
                 let type_ref = hir_def::TypeRef::from_attribute_type(attr);
-                TyLoweringContext::new().lower_type_ref(&type_ref)
+                TyLoweringContext::new().lower_type_ref_id(self.db, &type_ref)
             });
         }
         None
@@ -3181,8 +3396,8 @@ impl<'db> InferenceContext<'db> {
         &self,
         mdo_name: &Name,
         method_name: &Name,
-        return_ty: &mut Ty,
-        params: &mut [Ty],
+        return_ty: &mut TypeId,
+        params: &mut [TypeId],
     ) {
         let lc = method_name.as_str().to_lowercase();
         let is_get = lc == "получить" || lc == "get";
@@ -3190,8 +3405,8 @@ impl<'db> InferenceContext<'db> {
         if !is_get && !is_set {
             return;
         }
-        let needs_override = (is_get && matches!(return_ty, Ty::Unknown))
-            || (is_set && matches!(params.first(), Some(Ty::Unknown)));
+        let needs_override = (is_get && self.is_unknown(*return_ty))
+            || (is_set && params.first().is_some_and(|id| self.is_unknown(*id)));
         if !needs_override {
             return;
         }
@@ -3232,26 +3447,45 @@ impl<'db> InferenceContext<'db> {
 ///
 /// The user-visible form matches the 3-segment path's `<Plural>.<MDO>`
 /// convention rendered by `unresolved_method_call::from_hir`.
-fn receiver_display_name(receiver_ty: &Ty) -> Option<hir_def::Name> {
-    match receiver_ty {
-        Ty::MetadataRef { kind, name } => {
-            let plural = mdo_kind_to_plural(*kind)?;
-            Some(hir_def::Name::new(&format!("{}.{}", plural, name.as_str())))
+/// Evaluate a bare numeric literal as a non-negative integer index.
+///
+/// Used by `Expr::Index` on `Ty::QueryBatchResult` to extract the
+/// i-th sub-query's projection. Deliberately rejects anything that
+/// isn't a positive integer literal — negative values are
+/// `Expr::UnaryOp { op: Minus, .. }`, named locals are `Expr::Local`,
+/// arithmetic is `Expr::BinaryOp`. None of those carry a statically
+/// known index at this layer, so they degrade to `None` (which
+/// surfaces as `Ty::QueryResult{None}`, mirroring the
+/// platform-runtime behaviour of "the call returned a result of
+/// unknown schema").
+fn const_eval_literal_index(expr: &Expr) -> Option<usize> {
+    let Expr::Literal(Literal::Number(n)) = expr else {
+        return None;
+    };
+    let f = n.into_inner();
+    if !f.is_finite() || f < 0.0 || f.fract() != 0.0 {
+        return None;
+    }
+    Some(f as usize)
+}
+
+fn receiver_display_name(db: &dyn TypeKernelDb, receiver_ty: TypeId) -> Option<hir_def::Name> {
+    match db.lookup_type(receiver_ty) {
+        TypeKind::MetadataRef(facet) => {
+            let plural = mdo_kind_to_plural(facet.kind)?;
+            Some(hir_def::Name::new(&format!("{}.{}", plural, facet.name.as_str())))
         }
-        Ty::ThisObject { owner: (mdo_type, name) }
-        | Ty::ThisManager { owner: (mdo_type, name) } => {
-            let plural = mdo_type_to_plural(*mdo_type)?;
-            Some(hir_def::Name::new(&format!("{}.{}", plural, name.as_str())))
+        TypeKind::ThisObject { owner, .. } | TypeKind::ThisManager { owner, .. } => {
+            let plural = mdo_type_to_plural(owner.mdo_type)?;
+            Some(hir_def::Name::new(&format!("{}.{}", plural, owner.name.as_str())))
         }
-        Ty::ObjectManager { kind: mdo_type, name } => {
-            let plural = mdo_type_to_plural(*mdo_type)?;
-            Some(hir_def::Name::new(&format!("{}.{}", plural, name.as_str())))
+        TypeKind::ObjectManager(facet) => {
+            let plural = mdo_type_to_plural(facet.mdo)?;
+            Some(hir_def::Name::new(&format!("{}.{}", plural, facet.name.as_str())))
         }
-        Ty::FormData {
-            kind: hir_def::ty::FormDataKind::Collection,
-            underlying: Some((mdo_type, name)),
-        } => {
-            let plural = mdo_type_to_plural(*mdo_type)?;
+        TypeKind::FormData { kind: FormDataFacet::Collection, underlying: Some(underlying) } => {
+            let plural = mdo_type_to_plural(underlying.mdo_type)?;
+            let name = &underlying.name;
             Some(hir_def::Name::new(&format!("{}.{}", plural, name.as_str())))
         }
         _ => None,
@@ -3463,7 +3697,7 @@ pub fn infer_query<'db>(
         // `var_types` stays file-global: completion matches variables by
         // name across bodies. Iteration is fixed by ModuleBodies' IndexMap
         // backing, so last-write-wins outcome is deterministic.
-        result.var_types.extend(body_result.var_types.iter().map(|(k, v)| (k.clone(), v.clone())));
+        result.var_types.extend(body_result.var_types.iter().map(|(k, v)| (k.clone(), *v)));
         result.implicit_locals_by_body.insert(owner, body_result.implicit_locals.clone());
         // `diagnostics` is flat file-wide but each entry is paired with
         // its `DefWithBodyId` owner so ide-diagnostics can resolve the
@@ -3483,7 +3717,7 @@ pub fn infer_query<'db>(
         let owner = module_code.owner;
         result.expr_types_by_body.insert(owner, module_code.expr_types.clone());
         result.binding_types_by_body.insert(owner, module_code.binding_types.clone());
-        result.var_types.extend(module_code.var_types.iter().map(|(k, v)| (k.clone(), v.clone())));
+        result.var_types.extend(module_code.var_types.iter().map(|(k, v)| (k.clone(), *v)));
         result.implicit_locals_by_body.insert(owner, module_code.implicit_locals.clone());
         result.diagnostics.extend(module_code.diagnostics.iter().map(|d| (owner, d.clone())));
         result.call_arg_bindings.extend(module_code.call_arg_bindings.iter().cloned());
@@ -3588,23 +3822,56 @@ pub fn infer_module_code_query<'db>(
 ///
 /// # Returns
 ///
-/// - The inferred type for `(owner, expr)` if present.
-/// - `Ty::Unknown` if inference produced no entry for that pair.
+/// - The interned [`TypeId`] for `(owner, expr)` if present.
+/// - The kernel `Unknown` id if inference produced no entry for that pair.
 pub fn type_of_expr_query(
     db: &dyn HirDatabase,
     file_id: FileId,
     owner: DefWithBodyId,
     expr: ExprId,
-) -> Ty {
+) -> TypeId {
     // Phase O.17: route through per-owner Salsa cell instead of the
     // file-wide `infer_query` aggregate. Warm hits become a single
     // Arc::clone on the `infer_method` / `infer_module_code` cell.
-    infer_owner(db, file_id, owner).type_of_expr(expr).cloned().unwrap_or(Ty::Unknown)
+    // Phase 3 §4.G.5a: the public boundary is kernel-native — return the
+    // interned `TypeId` directly, no `Ty` bridge at the query.
+    infer_owner(db, file_id, owner).type_id_of_expr(expr).unwrap_or_else(|| db.unknown())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bsl_types::testing::InMemoryDb;
+
+    /// `ParamsShape` stores kernel ids directly; bridge back only when a
+    /// legacy `Ty` view is needed by an assertion or downstream payload.
+    #[test]
+    fn params_shape_typeids_round_trip_via_ty() {
+        let db = InMemoryDb::new();
+        let number = db.number(None, None);
+        let string = db.string(None, false);
+
+        let single = ParamsShape::Single(Arc::from([number, string]));
+        match single {
+            ParamsShape::Single(ids) => {
+                assert_eq!(ids.as_ref(), &[number, string]);
+            }
+            _ => panic!("expected Single"),
+        }
+
+        let overloaded = ParamsShape::Overloaded {
+            flat: Arc::from([number]),
+            overloads: Arc::from([Arc::from([number]) as Arc<[TypeId]>]),
+        };
+        match overloaded {
+            ParamsShape::Overloaded { flat, overloads } => {
+                assert_eq!(flat.as_ref(), &[number]);
+                assert_eq!(overloads.len(), 1);
+                assert_eq!(overloads[0].as_ref(), &[number]);
+            }
+            _ => panic!("expected Overloaded"),
+        }
+    }
 
     #[test]
     fn test_inference_result_default() {
@@ -3674,14 +3941,15 @@ mod tests {
     #[test]
     fn test_type_mismatch_diagnostic() {
         // Test that TypeMismatch diagnostic is created correctly
+        let db = InMemoryDb::new();
         let expr_id = ExprId::from_raw(la_arena::RawIdx::from_u32(0));
-        let expected_ty = Ty::Number;
-        let actual_ty = Ty::String;
+        let expected_ty = db.number(None, None);
+        let actual_ty = db.string(None, false);
 
         let diag = InferenceDiagnostic::TypeMismatch {
             expr: expr_id,
-            expected: expected_ty.clone(),
-            actual: actual_ty.clone(),
+            expected: expected_ty,
+            actual: actual_ty,
         };
 
         match diag {
@@ -3699,16 +3967,18 @@ mod tests {
         // Test that UnresolvedField diagnostic carries the receiver type
         // and field name verbatim, so the ide-diagnostics layer can render
         // `<ReceiverType>.<field_name>` without re-running inference.
+        let db = InMemoryDb::new();
         let expr_id = ExprId::from_raw(la_arena::RawIdx::from_u32(0));
-        let receiver_ty = Ty::MetadataRef {
-            kind: hir_def::ty::MetadataKind::CatalogRef,
-            name: Name::new("Номенклатура"),
-        };
+        let receiver_ty = db.metadata_ref(
+            hir_def::ty::MetadataKind::CatalogRef,
+            "Номенклатура".to_string(),
+            &RootConfigCtx,
+        );
         let field_name = Name::new("НесуществующееПоле");
 
         let diag = InferenceDiagnostic::UnresolvedField {
             expr: expr_id,
-            receiver_ty: receiver_ty.clone(),
+            receiver_ty,
             field_name: field_name.clone(),
         };
 
@@ -3745,76 +4015,62 @@ mod tests {
     /// `BuiltinFunctions::get` returns a slice (multi-overload aware) — for
     /// the single-overload functions exercised here, the lone signature is
     /// at index 0.
-    fn first_sig<'a>(
-        builtins: &'a builtin::BuiltinFunctions,
+    fn first_sig(
+        db: &dyn bsl_types::intern::TypeKernelDb,
+        builtins: &builtin::BuiltinFunctions,
         name: &str,
-    ) -> &'a hir_def::ty::FunctionSignature {
+    ) -> FunctionSignature {
         let sigs = builtins.get(name).unwrap_or_else(|| panic!("{name} should exist"));
-        &sigs[0]
+        sigs[0].lower(db)
     }
 
     #[test]
     fn test_builtin_function_lookup() {
         // Verify builtin functions are accessible for inference.
         // The actual integration happens in infer_expr() for Expr::Path.
+        let db = bsl_types::testing::InMemoryDb::new();
         let builtins = builtin::builtin_functions();
 
         // Test that СтрДлина returns Number
-        let strlen_sig = first_sig(builtins, "стрдлина");
-        assert_eq!(*strlen_sig.ret, Ty::Number);
+        let strlen_sig = first_sig(&db, builtins, "стрдлина");
+        assert_eq!(strlen_sig.ret, db.number(None, None));
         assert_eq!(strlen_sig.params.len(), 1);
-        assert_eq!(strlen_sig.params[0], Ty::String);
+        assert_eq!(strlen_sig.params[0], db.string(None, false));
 
         // Test English variant
-        let strlen_en = first_sig(builtins, "strlen");
-        assert_eq!(*strlen_en.ret, Ty::Number);
+        let strlen_en = first_sig(&db, builtins, "strlen");
+        assert_eq!(strlen_en.ret, db.number(None, None));
 
         // Test case-insensitive lookup
         let upper_case = builtins.get("СТРДЛИНА");
         assert!(upper_case.is_some(), "Lookup should be case-insensitive");
-
-        // Test that the resolved type would be correct
-        // When Expr::Path("СтрДлина") is inferred, it should return:
-        // Ty::Function { params: [Ty::String], ret: Ty::Number }
-        let sig = first_sig(builtins, "стрдлина");
-        let ty = Ty::Function {
-            params: sig.params.clone(),
-            defaults: sig.defaults.clone(),
-            max_args: sig.max_args,
-            ret: sig.ret.clone(),
-        };
-        match ty {
-            Ty::Function { params, ret, .. } => {
-                assert_eq!(params.len(), 1);
-                assert_eq!(*ret, Ty::Number);
-            }
-            _ => panic!("Expected Function type"),
-        }
     }
 
     #[test]
     fn test_builtin_date_function() {
+        let db = bsl_types::testing::InMemoryDb::new();
         let builtins = builtin::builtin_functions();
 
         // ТекущаяДата() -> Дата
-        let current_date = first_sig(builtins, "текущаядата");
-        assert_eq!(*current_date.ret, Ty::Date);
+        let current_date = first_sig(&db, builtins, "текущаядата");
+        assert_eq!(current_date.ret, db.date(bsl_types::facet::DateComponent::DateTime));
         assert!(current_date.params.is_empty());
 
         // Год(Дата) -> Число
-        let year = first_sig(builtins, "год");
-        assert_eq!(*year.ret, Ty::Number);
+        let year = first_sig(&db, builtins, "год");
+        assert_eq!(year.ret, db.number(None, None));
         assert_eq!(year.params.len(), 1);
-        assert_eq!(year.params[0], Ty::Date);
+        assert_eq!(year.params[0], db.date(bsl_types::facet::DateComponent::DateTime));
     }
 
     #[test]
     fn test_builtin_type_function() {
+        let db = bsl_types::testing::InMemoryDb::new();
         let builtins = builtin::builtin_functions();
 
         // ТипЗнч(Any) -> Type
-        let type_of = first_sig(builtins, "типзнч");
-        assert_eq!(*type_of.ret, Ty::Type);
+        let type_of = first_sig(&db, builtins, "типзнч");
+        assert_eq!(type_of.ret, db.type_descriptor());
     }
 
     // ----- Phase O.13 (Lni.1–Lni.3) type-lift unit tests -----
@@ -3850,49 +4106,54 @@ mod tests {
 
     #[test]
     fn module_code_inference_result_from_body_preserves_fields() {
+        // Phase 3 §4.D: result-struct maps store `TypeId`; intern via a
+        // sandbox kernel to populate the payload.
+        let db = InMemoryDb::new();
         let mut body = BodyInferenceResult::empty_for(DefWithBodyId::ModuleCode);
-        body.var_types.insert("х".to_string(), Ty::String);
-        body.expr_types.insert(make_expr(3), Ty::Boolean);
+        body.var_types.insert("х".to_string(), db.string(None, false));
+        body.expr_types.insert(make_expr(3), db.boolean());
         body.diagnostics.push(InferenceDiagnostic::TypeMismatch {
             expr: make_expr(4),
-            expected: Ty::String,
-            actual: Ty::Number,
+            expected: db.string(None, false),
+            actual: db.number(None, None),
         });
 
         let lifted = ModuleCodeInferenceResult::from_body(body);
 
         assert_eq!(lifted.owner, DefWithBodyId::ModuleCode);
-        assert_eq!(lifted.var_types.get("х"), Some(&Ty::String));
-        assert_eq!(lifted.expr_types.get(&make_expr(3)), Some(&Ty::Boolean));
+        assert_eq!(lifted.var_types.get("х").copied(), Some(db.string(None, false)),);
+        assert_eq!(lifted.expr_types.get(&make_expr(3)).copied(), Some(db.boolean()),);
         assert_eq!(lifted.diagnostics.len(), 1);
     }
 
     #[test]
     fn infer_owner_result_method_accessors_route_to_method_payload() {
+        let db = InMemoryDb::new();
         let mut body = BodyInferenceResult::empty_for(DefWithBodyId::Method(2));
-        body.var_types.insert("х".to_string(), Ty::Number);
-        body.expr_types.insert(make_expr(5), Ty::String);
+        body.var_types.insert("х".to_string(), db.number(None, None));
+        body.expr_types.insert(make_expr(5), db.string(None, false));
 
         let routed = InferOwnerResult::Method(Arc::new(body));
 
         assert_eq!(routed.owner(), DefWithBodyId::Method(2));
-        assert_eq!(routed.type_of_expr(make_expr(5)), Some(&Ty::String));
-        assert_eq!(routed.type_of_expr(make_expr(99)), None);
-        assert_eq!(routed.var_types().get("х"), Some(&Ty::Number));
+        assert_eq!(routed.type_id_of_expr(make_expr(5)), Some(db.string(None, false)));
+        assert_eq!(routed.type_id_of_expr(make_expr(99)), None);
+        assert_eq!(routed.var_types().get("х").copied(), Some(db.number(None, None)),);
         assert!(routed.implicit_locals().is_empty());
         assert!(routed.binding_types().is_empty());
     }
 
     #[test]
     fn infer_owner_result_module_code_accessors_route_to_module_payload() {
+        let db = InMemoryDb::new();
         let mut mc = ModuleCodeInferenceResult::default();
-        mc.var_types.insert("у".to_string(), Ty::Boolean);
-        mc.expr_types.insert(make_expr(1), Ty::Date);
+        mc.var_types.insert("у".to_string(), db.boolean());
+        mc.expr_types.insert(make_expr(1), db.date(DateComponent::DateTime));
 
         let routed = InferOwnerResult::ModuleCode(Arc::new(mc));
 
         assert_eq!(routed.owner(), DefWithBodyId::ModuleCode);
-        assert_eq!(routed.type_of_expr(make_expr(1)), Some(&Ty::Date));
-        assert_eq!(routed.var_types().get("у"), Some(&Ty::Boolean));
+        assert_eq!(routed.type_id_of_expr(make_expr(1)), Some(db.date(DateComponent::DateTime)));
+        assert_eq!(routed.var_types().get("у").copied(), Some(db.boolean()),);
     }
 }

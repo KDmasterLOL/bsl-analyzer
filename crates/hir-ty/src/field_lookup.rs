@@ -22,18 +22,24 @@
 
 pub use crate::field_enum::FieldInfo;
 
-use hir_def::configs::VisibleConfig;
-use hir_def::ty::{FormDataKind, MetadataKind, Ty};
+use bsl_config::VisibleConfig;
+use bsl_types::builders::Builders;
+use bsl_types::facet::FormDataFacet;
+use bsl_types::intern::TypeKernelDb;
+use bsl_types::kind::{MetadataKind, TypeId, TypeKind};
+use bsl_types::testing::RootConfigCtx;
 use hir_def::Name;
 
-/// Project a [`Ty::FormData`] receiver to the underlying MDO for **field**
+use crate::field_enum::enumerate_fields_inner;
+
+/// Project a `TypeKind::FormData` receiver to the underlying MDO for **field**
 /// resolution.
 ///
 /// Fields on a managed-form attribute that wraps an `*Object` MDO behave
 /// like the MDO's attributes — `Объект.Дата` inside a document form must
 /// reach the document's `Дата` declaration, not the form-data wrapper's
 /// platform members. Methods are routed differently (see
-/// [`crate::method_lookup::platform_type_key`]); that's why the projection
+/// [`crate::method_lookup::platform_type_key_id`]); that's why the projection
 /// lives here, in `field_lookup`, not inside a global coercion.
 ///
 /// Returns:
@@ -43,32 +49,42 @@ use hir_def::Name;
 /// - `None` for `Collection` (no name-keyed fields), for `Structure`s with
 ///   no `underlying` (e.g. `ValueTable` attribute without an MDO), and for
 ///   underlying MDO kinds without an `*Object` surface.
-pub(crate) fn project_form_data_for_fields(ty: &Ty) -> Option<Ty> {
-    let Ty::FormData { kind, underlying: Some((mdo, name)) } = ty else {
+pub(crate) fn project_form_data_for_fields_id(db: &dyn TypeKernelDb, ty: TypeId) -> Option<TypeId> {
+    // §4.E.4d: `FormData` carries no `config_id` (its `underlying`
+    // `MdoRefFacet` is `{mdo_type, name}` only), so the projected
+    // `MetadataRef` resolves under `Root`. This is faithful to the prior
+    // `Ty` bridge (which also lost config here) but config-lossy for
+    // CFE-contributed forms — §4.E.4f revisits if FormData gains a
+    // config carrier.
+    let TypeKind::FormData { kind, underlying: Some(owner) } = db.lookup_type(ty) else {
         return None;
     };
-    if !matches!(kind, FormDataKind::Structure | FormDataKind::StructureWithCollection) {
+    if !matches!(kind, FormDataFacet::Structure | FormDataFacet::StructureWithCollection) {
         return None;
     }
-    let object_kind = MetadataKind::object_kind_for(*mdo)?;
-    Some(Ty::MetadataRef { kind: object_kind, name: name.clone() })
+    let object_kind = MetadataKind::object_kind_for(owner.mdo_type)?;
+    Some(db.metadata_ref(object_kind, owner.name.clone(), &RootConfigCtx))
 }
 
 fn lookup_form_data_tabular_section_field(
+    db: &dyn TypeKernelDb,
     configs: &[VisibleConfig],
-    receiver_ty: &Ty,
+    receiver: TypeId,
     field_name: &Name,
 ) -> Option<FieldInfo> {
-    let Ty::FormData { kind, underlying: Some((mdo_type, mdo_name)) } = receiver_ty else {
-        return None;
+    // Extract owned `(mdo_type, mdo_name)` before the config walk / builder
+    // callback re-borrows `db`.
+    let (mdo_type, mdo_name) = match db.lookup_type(receiver) {
+        TypeKind::FormData {
+            kind: FormDataFacet::Structure | FormDataFacet::StructureWithCollection,
+            underlying: Some(owner),
+        } => (owner.mdo_type, owner.name.clone()),
+        _ => return None,
     };
-    if !matches!(kind, FormDataKind::Structure | FormDataKind::StructureWithCollection) {
-        return None;
-    }
 
     let needle = field_name.as_str().to_lowercase();
     for cfg in configs.iter().rev() {
-        let Some(mdo) = cfg.configuration.find_metadata_object(*mdo_type, mdo_name.as_str()) else {
+        let Some(mdo) = cfg.configuration.find_metadata_object(mdo_type, mdo_name.as_str()) else {
             continue;
         };
         let Some(ts) = mdo.tabular_sections.iter().find(|ts| {
@@ -78,14 +94,15 @@ fn lookup_form_data_tabular_section_field(
             continue;
         };
 
-        let qualified = Name::new(&format!("{}.{}", mdo_name.as_str(), ts.name()));
+        let qualified = format!("{}.{}", mdo_name.as_str(), ts.name());
+        let ty = db.mk_form_data(
+            FormDataFacet::Collection,
+            Some(bsl_types::facet::MdoRefFacet::new(mdo_type, qualified)),
+        );
         return Some(FieldInfo {
             name: Name::new(ts.name()),
             name_en: ts.name_en().filter(|s| !s.is_empty()).map(Name::new),
-            ty: Ty::FormData {
-                kind: FormDataKind::Collection,
-                underlying: Some((*mdo_type, qualified)),
-            },
+            ty,
             value_ty: None,
             is_readonly: false,
             origin: crate::field_enum::FieldOrigin::TabularSection,
@@ -107,123 +124,369 @@ fn lookup_form_data_tabular_section_field(
 ///
 /// `configs` should be the visible configurations for the receiver's file
 /// (`db.configurations(file_id)`).
+///
 pub fn lookup_field(
+    db: &dyn TypeKernelDb,
     configs: &[VisibleConfig],
-    receiver_ty: &Ty,
+    receiver: TypeId,
     field_name: &Name,
 ) -> Option<FieldInfo> {
-    if let Some(info) = lookup_form_data_tabular_section_field(configs, receiver_ty, field_name) {
+    lookup_field_inner(db, configs, receiver, field_name)
+}
+
+fn lookup_field_inner(
+    db: &dyn TypeKernelDb,
+    configs: &[VisibleConfig],
+    receiver: TypeId,
+    field_name: &Name,
+) -> Option<FieldInfo> {
+    // SDBL projection branch — when `QueryResultSelection` carries a
+    // resolved projection (Phase 1.3b+ synthesises it), field lookup
+    // consults the projection's `(Name, TypeId)` table BEFORE falling
+    // through to the platform `ВыборкаИзРезультатаЗапроса` surface. A miss
+    // in the projection does NOT short-circuit — it falls through so
+    // platform properties like `.НомерСтроки` / `.СледующаяСтрока` still
+    // resolve.
+    if let Some(info) = lookup_field_in_query_projection(db, receiver, field_name) {
+        return Some(info);
+    }
+
+    if let Some(info) = lookup_form_data_tabular_section_field(db, configs, receiver, field_name) {
         return Some(info);
     }
 
     // Managed-form attribute projection happens BEFORE `ThisObject`
-    // coercion: a `Ty::FormData { Structure | StructureWithCollection,
+    // coercion: a `FormData { Structure | StructureWithCollection,
     // underlying: Some((mdo, n)) }` walks the MDO's attribute table for
     // field lookup (`Объект.Дата` must reach the document's `Дата`).
-    // Method lookup deliberately doesn't do this — see
-    // [`Ty::FormData`] docs.
-    let projected_form_data = project_form_data_for_fields(receiver_ty);
-    let projected_ty = projected_form_data.as_ref().unwrap_or(receiver_ty);
+    // Method lookup deliberately doesn't do this — see `FormData` docs.
+    let projected_ty = project_form_data_for_fields_id(db, receiver).unwrap_or(receiver);
 
-    // `Ty::ThisObject` / `Ty::ThisManager` coercion and dispatch split:
-    //   - `MetadataRef { *Object, .. }` (from `ThisObject`) → enumerator below;
+    // `ThisObject` / `ThisManager` coercion and dispatch split:
+    //   - `MetadataRef { *Object, .. }` (from `ThisObject`) → enumerator;
     //   - `ObjectManager { kind, name }` (from `ThisManager`) → no
     //     attribute table here, falls through to the platform-property
-    //     adapter (which itself returns `None` for `ObjectManager` —
-    //     `Ty::platform_type_name` is `None` for managers). This matches
-    //     the pre-Step-J behaviour of `Документы.ПКО.SomeField`: managers
-    //     don't expose attributes through the field-lookup channel. The
-    //     manager-flavoured "field" surface (predefined items reached as
-    //     `Справочники.Mgr.PredefinedName`) lives on `ManagerCollection`
-    //     indexing, not here. Adding predefined-item resolution under
-    //     `ObjectManager` is a separate enhancement (out of Step J's
-    //     scope — Step J only wires `ЭтотОбъект` provenance through to
-    //     the same dispatch shape qualified manager access already had).
+    //     adapter (which returns `None` for `ObjectManager`). Managers
+    //     don't expose attributes through the field-lookup channel; the
+    //     manager-flavoured surface lives on `ManagerCollection` indexing.
     //   - Union → intersection over live arms (handled below);
     //   - everything else → platform-property adapter.
-    let coerced = crate::this_object::coerce_to_metadata_ref(projected_ty);
-    let effective_ty = coerced.as_ref().unwrap_or(projected_ty);
+    let effective_ty =
+        crate::this_object::coerce_to_metadata_ref_id(db, projected_ty).unwrap_or(projected_ty);
 
-    // Union receivers (e.g. `НайтиСтроки(...) → Union(TabularSectionRow,
-    // Undefined)`). Skip nullish arms (consistent with `enumerate_fields`
-    // and `method_lookup`), then require the field to be present in every
-    // remaining arm — that's the safe semantic for `x: A | B`. The
-    // resulting [`Ty`] is the union of per-arm field types via
-    // [`Ty::union`]; `is_readonly` is the disjunction (writeable only if
-    // every arm is writeable).
-    if let Ty::Union(arms) = effective_ty {
-        let live: Vec<&Ty> =
-            arms.iter().filter(|t| !matches!(t, Ty::Undefined | Ty::Null)).collect();
-        if live.is_empty() {
-            return None;
+    match db.lookup_type(effective_ty) {
+        TypeKind::Union(arms) => {
+            let arms = arms.to_vec();
+            return lookup_field_in_union_intersection(db, configs, &arms, field_name);
         }
-        if live.len() == 1 {
-            return lookup_field(configs, live[0], field_name);
+        TypeKind::MetadataRef(_) => {
+            return lookup_field_on_metadata_ref(db, configs, effective_ty, field_name);
         }
-        let mut per_arm: Vec<FieldInfo> = Vec::with_capacity(live.len());
-        for arm in &live {
-            let info = lookup_field(configs, arm, field_name)?;
-            per_arm.push(info);
-        }
-        let first = &per_arm[0];
-        let merged_ty = Ty::union(per_arm.iter().map(|f| f.ty.clone()).collect());
-        let merged_readonly = per_arm.iter().any(|f| f.is_readonly);
-        return Some(FieldInfo {
-            name: first.name.clone(),
-            name_en: first.name_en.clone(),
-            ty: merged_ty,
-            value_ty: None,
-            is_readonly: merged_readonly,
-            origin: first.origin,
-        });
+        _ => {}
     }
-
-    if matches!(effective_ty, Ty::MetadataRef { .. }) {
-        let needle = field_name.as_str().to_lowercase();
-        return crate::field_enum::enumerate_fields(configs, effective_ty).into_iter().find(|f| {
-            f.name.as_str().to_lowercase() == needle
-                || f.name_en.as_ref().is_some_and(|en| en.as_str().to_lowercase() == needle)
-        });
-    }
-
-    // Phase 5 row-aware refinement on `Ty::FormControl{Table, Some(b)}`:
-    // `.ВыделенныеСтроки` / `.ТекущаяСтрока` / `.ТекущиеДанные` and
-    // their English aliases override the platform's bare `Массив`
-    // (or row-shaped) property types with `TypedArray(row)` / `row`.
-    // Non-refined properties (`.Видимость`, `.Заголовок`,
-    // `.УсловноеОформление`, …) fall through to the platform-property
-    // adapter below, which resolves them through `ТаблицаФормы` via
-    // [`Ty::platform_type_name`].
-    if let Some(refined) = crate::form_items::refine_form_control_property(receiver_ty, field_name)
+    // Phase 5 row-aware refinement on `FormControl{Table, Some(b)}`:
+    // `.ВыделенныеСтроки` / `.ТекущаяСтрока` / `.ТекущиеДанные` and their
+    // English aliases override the platform's bare `Массив` (or row-shaped)
+    // property types. Non-refined properties fall through to the
+    // platform-property adapter below. Both run on the ORIGINAL receiver
+    // (not `effective_ty`) — FormControl never gets FormData projection or
+    // ThisObject coercion applied.
+    if let Some(refined) = crate::form_items::refine_form_control_property(db, receiver, field_name)
     {
         return Some(refined);
     }
+    lookup_field_via_platform_property(db, receiver, field_name)
+}
 
-    // Every other receiver type delegates to the platform-property adapter.
-    // `lookup_platform_property` decides whether the shape is supported
-    // (primitives return `None`), so we can safely call it for any
-    // non-MetadataRef receiver.
-    crate::platform_property_lookup::lookup_platform_property(receiver_ty, field_name).map(|res| {
-        use crate::field_enum::FieldOrigin;
+/// Resolve a field on a `TypeKind::Union` receiver via **intersection** over
+/// live arms.
+///
+/// Contract — distinct from [`crate::method_lookup::union_lookup`] which
+/// uses first-hit semantics:
+///
+/// - `Undefined` / `Null` arms are stripped (consistent with
+///   [`crate::field_enum::enumerate_fields`] and method lookup).
+/// - If **any** live arm is missing the field, the entire lookup returns
+///   `None`. Safe semantic for `x: A | B`: the field is reachable only
+///   if it exists on every possible runtime shape.
+/// - Single live arm short-circuits via a recursive `lookup_field` call
+///   so the arm's full dispatch pipeline (FormData projection,
+///   ThisObject coercion, FormControl refinement, …) runs again — the
+///   helper deliberately does not bypass the orchestrator for the
+///   degenerate one-arm case.
+/// - Multi-arm result merges per-arm `TypeId` via [`TypeKernelDb::union`]; the first
+///   arm's `name`/`name_en`/`origin` win (cohesion: the surface text
+///   stays stable). `is_readonly` is the **disjunction** —
+///   writeable iff EVERY arm is writeable, i.e. a single read-only arm
+///   makes the union read-only.
+fn lookup_field_in_union_intersection(
+    db: &dyn TypeKernelDb,
+    configs: &[VisibleConfig],
+    arms: &[TypeId],
+    field_name: &Name,
+) -> Option<FieldInfo> {
+    let live: Vec<TypeId> = arms
+        .iter()
+        .copied()
+        .filter(|t| !matches!(db.lookup_type(*t), TypeKind::Undefined | TypeKind::Null))
+        .collect();
+    if live.is_empty() {
+        return None;
+    }
+    if live.len() == 1 {
+        return lookup_field_inner(db, configs, live[0], field_name);
+    }
+    let mut per_arm: Vec<FieldInfo> = Vec::with_capacity(live.len());
+    for arm in &live {
+        let info = lookup_field_inner(db, configs, *arm, field_name)?;
+        per_arm.push(info);
+    }
+    let first = &per_arm[0];
+    let merged_ty = db.union(per_arm.iter().map(|f| f.ty).collect());
+    let merged_readonly = per_arm.iter().any(|f| f.is_readonly);
+    Some(FieldInfo {
+        name: first.name.clone(),
+        name_en: first.name_en.clone(),
+        ty: merged_ty,
+        value_ty: None,
+        is_readonly: merged_readonly,
+        origin: first.origin,
+    })
+}
+
+/// Resolve a field on a `TypeKind::MetadataRef` receiver via bilingual
+/// case-insensitive match over [`crate::field_enum::enumerate_fields`].
+///
+/// The enumerator is the source of truth for "what fields does an MDO
+/// receiver expose?" (standard + user attributes, tabular sections,
+/// register parts, `НомерСтроки` fall-through). This helper is the
+/// thin filter that turns the enumeration into a point lookup.
+///
+/// Caller is expected to pre-coerce `ThisObject` / project `FormData`
+/// before passing the receiver — see [`lookup_field`] orchestrator.
+fn lookup_field_on_metadata_ref(
+    db: &dyn TypeKernelDb,
+    configs: &[VisibleConfig],
+    effective_ty: TypeId,
+    field_name: &Name,
+) -> Option<FieldInfo> {
+    let needle = field_name.as_str().to_lowercase();
+    enumerate_fields_inner(db, configs, effective_ty).into_iter().find(|f| {
+        f.name.as_str().to_lowercase() == needle
+            || f.name_en.as_ref().is_some_and(|en| en.as_str().to_lowercase() == needle)
+    })
+}
+
+/// Resolve `<field>` on a `Ty::QueryResultSelection { projection: Some(_) }`
+/// receiver against the SDBL projection table.
+///
+/// Returns `None` when:
+/// - the receiver is not a projection-typed `QueryResultSelection`,
+/// - the projection is `None` (no SDBL trace available — falls through
+///   to the platform `ВыборкаИзРезультатаЗапроса` table for legacy
+///   behaviour),
+/// - the projection doesn't carry `field_name` (caller falls through to
+///   the platform table so `НомерСтроки` / `СледующаяСтрока` /
+///   `Уровень` still resolve).
+///
+/// Case-insensitive bilingual match: BSL field-access is case-folded
+/// the same way platform method lookup is. Same posture as
+/// [`lookup_field_on_metadata_ref`].
+fn lookup_field_in_query_projection(
+    db: &dyn TypeKernelDb,
+    receiver: TypeId,
+    field_name: &Name,
+) -> Option<FieldInfo> {
+    let projection = match db.lookup_type(receiver) {
+        TypeKind::QueryResultSelection(facet) => facet.projection.clone()?,
+        // Phase H Slice 3 — projected `ValueTableRow` mirrors the
+        // `QueryResultSelection` projection lookup so `Для Каждого
+        // Стр Из <ТЗ> → Стр.<column>` resolves through the SDBL
+        // projection slice.
+        TypeKind::ValueTableRow(facet) => facet.projection.clone()?,
+        _ => return None,
+    };
+    let needle = field_name.as_str().to_lowercase();
+    projection.fields.iter().find(|f| f.name.as_str().to_lowercase() == needle).map(|f| {
         FieldInfo {
-            name: field_name.clone(),
+            name: Name::new(f.name.as_str()),
             name_en: None,
-            ty: res.return_ty,
+            ty: f.ty,
             value_ty: None,
-            is_readonly: res.is_readonly,
-            origin: FieldOrigin::PlatformProperty,
+            // SDBL projection fields are not writeable through the
+            // selection cursor — `Выборка.X = ...` is a runtime error.
+            is_readonly: true,
+            // Projection fields surface as user-defined names (the
+            // SELECT alias or column ref the user wrote). `UserAttribute`
+            // origin gives them the right icon and sort band in
+            // completion. A dedicated `SdblProjectionField` variant
+            // can replace this once the IDE differentiates them.
+            origin: crate::field_enum::FieldOrigin::UserAttribute,
         }
+    })
+}
+
+/// Resolve a field on every other receiver via the platform-property
+/// adapter.
+///
+/// `lookup_platform_property` itself decides whether the shape is
+/// supported — primitives and managers return `None` — so the wrapper
+/// is safe to call for any non-MetadataRef, non-Union receiver.
+///
+/// **Important:** takes the ORIGINAL `receiver_ty`, not the
+/// projected/coerced `effective_ty`. FormData projection and
+/// `ThisObject` coercion are MetadataRef-specific transforms and must
+/// not leak into the platform-property channel (e.g. a `FormControl`
+/// receiver must keep its `FormControl` identity through this fallback,
+/// not get projected away).
+fn lookup_field_via_platform_property(
+    db: &dyn TypeKernelDb,
+    receiver: TypeId,
+    field_name: &Name,
+) -> Option<FieldInfo> {
+    let res = crate::platform_property_lookup::lookup_platform_property(db, receiver, field_name)?;
+    Some(FieldInfo {
+        name: field_name.clone(),
+        name_en: None,
+        ty: res.return_ty,
+        value_ty: None,
+        is_readonly: res.is_readonly,
+        origin: crate::field_enum::FieldOrigin::PlatformProperty,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bsl_types::builders::Builders;
+    use bsl_types::facet::ProjectionSource;
+    use bsl_types::kind::TypeKind;
+    use bsl_types::testing::{InMemoryDb, RootConfigCtx};
+    use std::rc::Rc;
+
+    #[derive(Clone)]
+    struct FieldInfoForTest {
+        ty: ActualType,
+        is_readonly: bool,
+    }
+
+    #[derive(Clone)]
+    struct ActualType {
+        db: Rc<InMemoryDb>,
+        id: TypeId,
+    }
+
+    impl std::fmt::Debug for ActualType {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            self.db.lookup_type(self.id).fmt(f)
+        }
+    }
+
+    #[derive(Clone)]
+    struct TypeFixture {
+        label: String,
+        intern: Rc<dyn Fn(&InMemoryDb) -> TypeId>,
+    }
+
+    impl TypeFixture {
+        fn new(label: impl Into<String>, intern: impl Fn(&InMemoryDb) -> TypeId + 'static) -> Self {
+            Self { label: label.into(), intern: Rc::new(intern) }
+        }
+
+        fn intern(&self, db: &InMemoryDb) -> TypeId {
+            (self.intern)(db)
+        }
+    }
+
+    impl std::fmt::Debug for TypeFixture {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(&self.label)
+        }
+    }
+
+    impl PartialEq<TypeFixture> for ActualType {
+        fn eq(&self, other: &TypeFixture) -> bool {
+            self.id == other.intern(&self.db)
+        }
+    }
+
+    impl PartialEq for ActualType {
+        fn eq(&self, other: &Self) -> bool {
+            self.db.lookup_type(self.id) == other.db.lookup_type(other.id)
+        }
+    }
+
+    fn lookup_field(
+        configs: &[VisibleConfig],
+        receiver_ty: &TypeFixture,
+        field_name: &Name,
+    ) -> Option<FieldInfoForTest> {
+        let db = Rc::new(InMemoryDb::new());
+        let receiver = receiver_ty.intern(&db);
+        super::lookup_field(db.as_ref(), configs, receiver, field_name).map(|info| {
+            FieldInfoForTest {
+                ty: ActualType { db: Rc::clone(&db), id: info.ty },
+                is_readonly: info.is_readonly,
+            }
+        })
+    }
     use bsl_metadata::tabular_section::{TabularSection, TabularSectionAttribute};
     use bsl_metadata::{Attribute, AttributeType, Configuration, MdoType, MetadataObject};
     use hir_def::ty::MetadataKind;
     use std::sync::Arc;
     use uuid::Uuid;
+
+    fn metadata_ref(kind: MetadataKind, name: &str) -> TypeFixture {
+        let name = Name::new(name);
+        TypeFixture::new(format!("MetadataRef({kind:?}, {name})"), move |db| {
+            db.metadata_ref(kind, name.to_string(), &RootConfigCtx)
+        })
+    }
+
+    fn platform_object(name: &str) -> TypeFixture {
+        let name = Name::new(name);
+        TypeFixture::new(format!("PlatformObject({name})"), move |db| {
+            db.platform_object(name.to_string())
+        })
+    }
+
+    fn union(parts: Vec<TypeFixture>) -> TypeFixture {
+        TypeFixture::new("Union", move |db| {
+            db.union(parts.iter().map(|part| part.intern(db)).collect())
+        })
+    }
+
+    fn number() -> TypeFixture {
+        TypeFixture::new("Number", |db| db.number(None, None))
+    }
+
+    fn string() -> TypeFixture {
+        TypeFixture::new("String", |db| db.string(None, false))
+    }
+
+    fn boolean() -> TypeFixture {
+        TypeFixture::new("Boolean", |db| db.boolean())
+    }
+
+    fn date() -> TypeFixture {
+        TypeFixture::new("Date", |db| db.date(bsl_types::facet::DateComponent::DateTime))
+    }
+
+    fn structure() -> TypeFixture {
+        TypeFixture::new("Structure", |db| db.structure(None))
+    }
+
+    fn array() -> TypeFixture {
+        TypeFixture::new("Array", |db| db.array(None))
+    }
+
+    fn unknown() -> TypeFixture {
+        TypeFixture::new("Unknown", |db| db.unknown())
+    }
+
+    fn undefined() -> TypeFixture {
+        TypeFixture::new("Undefined", |db| db.undefined())
+    }
 
     fn wrap(config: Configuration) -> Vec<VisibleConfig> {
         vec![VisibleConfig { name: None, configuration: Arc::new(config) }]
@@ -274,25 +537,19 @@ mod tests {
 
         let ep_info = lookup_field(
             &configs,
-            &Ty::MetadataRef {
-                kind: MetadataKind::ExchangePlanRef,
-                name: Name::new("Контрагенты"),
-            },
+            &metadata_ref(MetadataKind::ExchangePlanRef, "Контрагенты"),
             &Name::new("Признак"),
         )
         .expect("ExchangePlanRef.Признак resolves");
-        assert_eq!(ep_info.ty, Ty::Boolean);
+        assert_eq!(ep_info.ty, boolean());
 
         let coa_info = lookup_field(
             &configs,
-            &Ty::MetadataRef {
-                kind: MetadataKind::ChartOfAccountsRef,
-                name: Name::new("Хозрасчетный"),
-            },
+            &metadata_ref(MetadataKind::ChartOfAccountsRef, "Хозрасчетный"),
             &Name::new("Порядок"),
         )
         .expect("ChartOfAccountsRef.Порядок resolves");
-        assert_eq!(coa_info.ty, Ty::Number);
+        assert_eq!(coa_info.ty, number());
     }
 
     #[test]
@@ -304,13 +561,10 @@ mod tests {
         ));
         let configs = wrap(config);
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::CatalogRef,
-            name: Name::new("Номенклатура"),
-        };
+        let receiver = metadata_ref(MetadataKind::CatalogRef, "Номенклатура");
         let info = lookup_field(&configs, &receiver, &Name::new("Цена"))
             .expect("Цена resolves on Номенклатура");
-        assert_eq!(info.ty, Ty::Number);
+        assert_eq!(info.ty, number());
     }
 
     #[test]
@@ -322,17 +576,14 @@ mod tests {
         ));
         let configs = wrap(config);
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::CatalogRef,
-            name: Name::new("Номенклатура"),
-        };
+        let receiver = metadata_ref(MetadataKind::CatalogRef, "Номенклатура");
         let info = lookup_field(&configs, &receiver, &Name::new("Код"))
             .expect("standard Code attribute resolves");
-        assert_eq!(info.ty, Ty::String);
+        assert_eq!(info.ty, string());
 
         let info_en = lookup_field(&configs, &receiver, &Name::new("Code"))
             .expect("Code (en) resolves through bilingual match");
-        assert_eq!(info_en.ty, Ty::String);
+        assert_eq!(info_en.ty, string());
     }
 
     #[test]
@@ -350,16 +601,12 @@ mod tests {
         config.add_metadata_object(doc);
         let configs = wrap(config);
 
-        let receiver =
-            Ty::MetadataRef { kind: MetadataKind::DocumentRef, name: Name::new("ПКО") };
+        let receiver = metadata_ref(MetadataKind::DocumentRef, "ПКО");
         let info = lookup_field(&configs, &receiver, &Name::new("Товары"))
             .expect("tabular section name resolves to TabularSection Ty");
         assert_eq!(
             info.ty,
-            Ty::MetadataRef {
-                kind: MetadataKind::TabularSection { parent: MdoType::Document },
-                name: Name::new("ПКО.Товары"),
-            }
+            metadata_ref(MetadataKind::TabularSection { parent: MdoType::Document }, "ПКО.Товары")
         );
     }
 
@@ -378,13 +625,13 @@ mod tests {
         config.add_metadata_object(doc);
         let configs = wrap(config);
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::TabularSectionRow { parent: MdoType::Document },
-            name: Name::new("ПКО.Товары"),
-        };
+        let receiver = metadata_ref(
+            MetadataKind::TabularSectionRow { parent: MdoType::Document },
+            "ПКО.Товары",
+        );
         let info = lookup_field(&configs, &receiver, &Name::new("Количество"))
             .expect("row attribute Количество resolves to Number");
-        assert_eq!(info.ty, Ty::Number);
+        assert_eq!(info.ty, number());
     }
 
     #[test]
@@ -409,22 +656,18 @@ mod tests {
         config.add_metadata_object(doc);
         let configs = wrap(config);
 
-        let cat_row = Ty::MetadataRef {
-            kind: MetadataKind::TabularSectionRow { parent: MdoType::Catalog },
-            name: Name::new("X.Товары"),
-        };
-        let doc_row = Ty::MetadataRef {
-            kind: MetadataKind::TabularSectionRow { parent: MdoType::Document },
-            name: Name::new("X.Товары"),
-        };
+        let cat_row =
+            metadata_ref(MetadataKind::TabularSectionRow { parent: MdoType::Catalog }, "X.Товары");
+        let doc_row =
+            metadata_ref(MetadataKind::TabularSectionRow { parent: MdoType::Document }, "X.Товары");
         assert_eq!(
             lookup_field(&configs, &cat_row, &Name::new("Количество")).unwrap().ty,
-            Ty::String,
+            string(),
             "Catalog row must resolve via its own tabular section",
         );
         assert_eq!(
             lookup_field(&configs, &doc_row, &Name::new("Количество")).unwrap().ty,
-            Ty::Number,
+            number(),
             "Document row must resolve via its own tabular section — not Catalog's",
         );
     }
@@ -438,13 +681,13 @@ mod tests {
         config.add_metadata_object(cat);
         let configs = wrap(config);
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::TabularSectionRow { parent: MdoType::Catalog },
-            name: Name::new("Номенклатура.Услуги"),
-        };
+        let receiver = metadata_ref(
+            MetadataKind::TabularSectionRow { parent: MdoType::Catalog },
+            "Номенклатура.Услуги",
+        );
         let info = lookup_field(&configs, &receiver, &Name::new("НомерСтроки"))
             .expect("НомерСтроки resolves through platform property fall-through");
-        assert_eq!(info.ty, Ty::Number);
+        assert_eq!(info.ty, number());
     }
 
     #[test]
@@ -461,15 +704,15 @@ mod tests {
         config.add_metadata_object(cat);
         let configs = wrap(config);
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::TabularSectionRow { parent: MdoType::Catalog },
-            name: Name::new("Номенклатура.Услуги"),
-        };
+        let receiver = metadata_ref(
+            MetadataKind::TabularSectionRow { parent: MdoType::Catalog },
+            "Номенклатура.Услуги",
+        );
         let info = lookup_field(&configs, &receiver, &Name::new("НомерСтроки"))
             .expect("custom attribute named НомерСтроки must still resolve");
         assert_eq!(
             info.ty,
-            Ty::String,
+            string(),
             "custom XML attribute must win over the platform standard row property",
         );
     }
@@ -477,14 +720,9 @@ mod tests {
     #[test]
     fn field_lookup_unknown_receiver_returns_none() {
         let configs = wrap(Configuration::new("Test"));
-        for ty in [
-            Ty::Unknown,
-            Ty::Number,
-            Ty::String,
-            Ty::Array,
-            Ty::Undefined,
-            Ty::Union(vec![Ty::Number, Ty::String].into()),
-        ] {
+        for ty in
+            [unknown(), number(), string(), array(), undefined(), union(vec![number(), string()])]
+        {
             assert!(
                 lookup_field(&configs, &ty, &Name::new("Любой")).is_none(),
                 "no field lookup on {ty:?}"
@@ -498,20 +736,14 @@ mod tests {
         config.add_metadata_object(catalog("Номенклатура", vec![]));
         let configs = wrap(config);
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::CatalogRef,
-            name: Name::new("Номенклатура"),
-        };
+        let receiver = metadata_ref(MetadataKind::CatalogRef, "Номенклатура");
         assert!(lookup_field(&configs, &receiver, &Name::new("НесуществующееПоле")).is_none());
     }
 
     #[test]
     fn field_lookup_register_missing_in_config_returns_none() {
         let configs = wrap(Configuration::new("Test"));
-        let r = Ty::MetadataRef {
-            kind: MetadataKind::AccumulationRegisterRef,
-            name: Name::new("ТоварыНаСкладах"),
-        };
+        let r = metadata_ref(MetadataKind::AccumulationRegisterRef, "ТоварыНаСкладах");
         assert!(lookup_field(&configs, &r, &Name::new("Количество")).is_none());
     }
 
@@ -576,17 +808,12 @@ mod tests {
         ));
         let configs = wrap(config);
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::InformationRegisterRef,
-            name: Name::new("РегистрСведений1"),
-        };
+        let receiver = metadata_ref(MetadataKind::InformationRegisterRef, "РегистрСведений1");
         let info = lookup_field(&configs, &receiver, &Name::new("Справочник1"))
             .expect("dimension resolves against Configuration.registers");
         assert_eq!(
             info.ty,
-            Ty::MetadataRef {
-                kind: MetadataKind::CatalogRef, name: Name::new("Справочник1")
-            },
+            metadata_ref(MetadataKind::CatalogRef, "Справочник1"),
             "typed dimension must lower through TyLoweringContext to a concrete MetadataRef",
         );
     }
@@ -603,13 +830,10 @@ mod tests {
         ));
         let configs = wrap(config);
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::AccumulationRegisterRecordSet,
-            name: Name::new("ТоварыНаСкладах"),
-        };
+        let receiver = metadata_ref(MetadataKind::AccumulationRegisterRecordSet, "ТоварыНаСкладах");
         let info = lookup_field(&configs, &receiver, &Name::new("Количество"))
             .expect("resource resolves against Configuration.registers");
-        assert_eq!(info.ty, Ty::Number);
+        assert_eq!(info.ty, number());
     }
 
     #[test]
@@ -624,13 +848,11 @@ mod tests {
         ));
         let configs = wrap(config);
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::InformationRegisterRecordManager,
-            name: Name::new("РегистрСведений1"),
-        };
+        let receiver =
+            metadata_ref(MetadataKind::InformationRegisterRecordManager, "РегистрСведений1");
         let info = lookup_field(&configs, &receiver, &Name::new("Комментарий"))
             .expect("attribute resolves against Configuration.registers");
-        assert_eq!(info.ty, Ty::String);
+        assert_eq!(info.ty, string());
     }
 
     #[test]
@@ -645,18 +867,15 @@ mod tests {
         ));
         let configs = wrap(config);
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::InformationRegisterRef,
-            name: Name::new("РегистрСведений1"),
-        };
+        let receiver = metadata_ref(MetadataKind::InformationRegisterRef, "РегистрСведений1");
         let info = lookup_field(&configs, &receiver, &Name::new("Справочник1"))
             .expect("untyped dimension still resolves with symbolic fallback");
         assert_eq!(
             info.ty,
-            Ty::MetadataRef {
-                kind: MetadataKind::RegisterDimension { parent: MdoType::InformationRegister },
-                name: Name::new("РегистрСведений1.Справочник1"),
-            },
+            metadata_ref(
+                MetadataKind::RegisterDimension { parent: MdoType::InformationRegister },
+                "РегистрСведений1.Справочник1"
+            ),
             "fallback must carry parent flavour + `Register.Part` name for provenance",
         );
     }
@@ -701,10 +920,10 @@ mod tests {
             (MetadataKind::CalculationRegisterRef, "РегРасч"),
         ];
         for (kind, name) in cases {
-            let receiver = Ty::MetadataRef { kind, name: Name::new(name) };
+            let receiver = metadata_ref(kind, name);
             let info = lookup_field(&configs, &receiver, &Name::new("R"))
                 .unwrap_or_else(|| panic!("resource R must resolve on {kind:?}/{name}"));
-            assert_eq!(info.ty, Ty::Number, "{kind:?}/{name}.R must lower to Ty::Number");
+            assert_eq!(info.ty, number(), "{kind:?}/{name}.R must lower to Ty::Number");
         }
     }
 
@@ -716,10 +935,7 @@ mod tests {
             MetadataKind::RegisterResource { parent: MdoType::AccumulationRegister },
             MetadataKind::RegisterAttribute { parent: MdoType::CalculationRegister },
         ] {
-            let receiver = Ty::MetadataRef {
-                kind,
-                name: Name::new("РегистрСведений1.Справочник1"),
-            };
+            let receiver = metadata_ref(kind, "РегистрСведений1.Справочник1");
             assert!(
                 lookup_field(&configs, &receiver, &Name::new("ЛюбоеПоле")).is_none(),
                 "leaf part kind {kind:?} must not expose a field surface",
@@ -739,8 +955,7 @@ mod tests {
         ));
         let configs = wrap(config);
 
-        let wrong_flavour_receiver =
-            Ty::MetadataRef { kind: MetadataKind::AccumulationRegisterRef, name: Name::new("X") };
+        let wrong_flavour_receiver = metadata_ref(MetadataKind::AccumulationRegisterRef, "X");
         assert!(
             lookup_field(&configs, &wrong_flavour_receiver, &Name::new("R")).is_none(),
             "AccumulationRegisterRef must not resolve against an InformationRegister even with the same name",
@@ -766,18 +981,15 @@ mod tests {
         ));
         let configs = wrap(config);
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::InformationRegisterRecordSet,
-            name: Name::new("Курсы"),
-        };
+        let receiver = metadata_ref(MetadataKind::InformationRegisterRecordSet, "Курсы");
         let info = lookup_field(&configs, &receiver, &Name::new("Отбор"))
             .expect("synthetic .Отбор must resolve on InformationRegisterRecordSet");
         assert_eq!(
             info.ty,
-            Ty::MetadataRef {
-                kind: MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
-                name: Name::new("Курсы"),
-            },
+            metadata_ref(
+                MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
+                "Курсы"
+            ),
         );
 
         // English alias must also work (бilingual contract).
@@ -805,15 +1017,15 @@ mod tests {
         ));
         let configs = wrap(config);
 
-        let filter_receiver = Ty::MetadataRef {
-            kind: MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
-            name: Name::new("Курсы"),
-        };
+        let filter_receiver = metadata_ref(
+            MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
+            "Курсы",
+        );
         let dim_info = lookup_field(&configs, &filter_receiver, &Name::new("Валюта"))
             .expect("dimension Валюта resolves through the synthetic Filter receiver");
         assert_eq!(
             dim_info.ty,
-            Ty::PlatformObject(Name::new("ЭлементОтбора")),
+            platform_object("ЭлементОтбора"),
             "Filter members must lower to platform `ЭлементОтбора` so FilterItem methods apply",
         );
 
@@ -841,29 +1053,26 @@ mod tests {
         ));
         let configs = wrap(config);
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::InformationRegisterRecordSet,
-            name: Name::new("РегСвед"),
-        };
+        let receiver = metadata_ref(MetadataKind::InformationRegisterRecordSet, "РегСвед");
         let info = lookup_field(&configs, &receiver, &Name::new("Отбор"))
             .expect("synthetic .Отбор must win over a same-named dimension");
         assert_eq!(
             info.ty,
-            Ty::MetadataRef {
-                kind: MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
-                name: Name::new("РегСвед"),
-            },
+            metadata_ref(
+                MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
+                "РегСвед"
+            ),
             "synthetic Filter wins over a register dimension named `Отбор`",
         );
 
         // Dimension stays reachable through the Filter receiver.
-        let filter_receiver = Ty::MetadataRef {
-            kind: MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
-            name: Name::new("РегСвед"),
-        };
+        let filter_receiver = metadata_ref(
+            MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
+            "РегСвед",
+        );
         let dim_via_filter = lookup_field(&configs, &filter_receiver, &Name::new("Отбор"))
             .expect("dimension stays reachable as <recordSet>.Отбор.Отбор");
-        assert_eq!(dim_via_filter.ty, Ty::PlatformObject(Name::new("ЭлементОтбора")));
+        assert_eq!(dim_via_filter.ty, platform_object("ЭлементОтбора"));
     }
 
     #[test]
@@ -878,10 +1087,10 @@ mod tests {
         ));
         let configs = wrap(config);
 
-        let filter_receiver = Ty::MetadataRef {
-            kind: MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
-            name: Name::new("РегСвед"),
-        };
+        let filter_receiver = metadata_ref(
+            MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
+            "РегСвед",
+        );
         assert!(
             lookup_field(&configs, &filter_receiver, &Name::new("НетТакогоИзмерения")).is_none(),
             "unknown dimension on Filter receiver must return None",
@@ -907,10 +1116,7 @@ mod tests {
         ));
         let configs = wrap(config);
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::InformationRegisterRecordSet,
-            name: Name::new("Курсы"),
-        };
+        let receiver = metadata_ref(MetadataKind::InformationRegisterRecordSet, "Курсы");
         for prop in ["Записывать", "ДополнительныеСвойства", "ЗаписьИсторииДанных"]
         {
             assert!(
@@ -951,10 +1157,7 @@ mod tests {
         ));
         let configs = wrap(config);
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::AccountingRegisterRecordSet,
-            name: Name::new("Хозрасчетный"),
-        };
+        let receiver = metadata_ref(MetadataKind::AccountingRegisterRecordSet, "Хозрасчетный");
         assert!(
             lookup_field(&configs, &receiver, &Name::new("БлокироватьДляИзменения")).is_some(),
             "AccountingRegisterRecordSet must expose БлокироватьДляИзменения from HBK",
@@ -996,15 +1199,12 @@ mod tests {
             (MetadataKind::CalculationRegisterRecordSet, "РегРасч", MdoType::CalculationRegister),
         ];
         for (kind, name, parent) in cases {
-            let receiver = Ty::MetadataRef { kind, name: Name::new(name) };
+            let receiver = metadata_ref(kind, name);
             let info = lookup_field(&configs, &receiver, &Name::new("Отбор"))
                 .unwrap_or_else(|| panic!("{kind:?}/{name}: synthetic .Отбор must resolve"));
             assert_eq!(
                 info.ty,
-                Ty::MetadataRef {
-                    kind: MetadataKind::RegisterFilter { parent },
-                    name: Name::new(name),
-                },
+                metadata_ref(MetadataKind::RegisterFilter { parent }, name),
                 "{kind:?}/{name}: RegisterFilter parent must match register flavour",
             );
         }
@@ -1027,13 +1227,10 @@ mod tests {
             VisibleConfig { name: Some("Ext".into()), configuration: Arc::new(ext) },
         ];
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::CatalogRef,
-            name: Name::new("Номенклатура"),
-        };
+        let receiver = metadata_ref(MetadataKind::CatalogRef, "Номенклатура");
         let info = lookup_field(&configs, &receiver, &Name::new("Цена"))
             .expect("Цена resolves via extension override");
-        assert_eq!(info.ty, Ty::String, "extension type wins over main config");
+        assert_eq!(info.ty, string(), "extension type wins over main config");
     }
 
     #[test]
@@ -1059,13 +1256,10 @@ mod tests {
             VisibleConfig { name: Some("Ext".into()), configuration: Arc::new(ext) },
         ];
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::InformationRegisterRef,
-            name: Name::new("РегистрСведений1"),
-        };
+        let receiver = metadata_ref(MetadataKind::InformationRegisterRef, "РегистрСведений1");
         let info = lookup_field(&configs, &receiver, &Name::new("R"))
             .expect("R resolves via extension override");
-        assert_eq!(info.ty, Ty::String, "extension register type wins over main config");
+        assert_eq!(info.ty, string(), "extension register type wins over main config");
     }
 
     #[test]
@@ -1098,14 +1292,17 @@ mod tests {
         config.add_metadata_object(doc);
         let configs = wrap(config);
 
-        let row = Ty::MetadataRef {
-            kind: MetadataKind::TabularSectionRow { parent: MdoType::Document },
-            name: Name::new("ПКО.Товары"),
-        };
-        let receiver = Ty::Union(vec![row, Ty::Undefined].into());
+        let row = metadata_ref(
+            MetadataKind::TabularSectionRow { parent: MdoType::Document },
+            "ПКО.Товары",
+        );
+        let receiver = union(vec![row, undefined()]);
         let info = lookup_field(&configs, &receiver, &Name::new("Номенклатура"))
             .expect("union arm column must resolve");
-        assert!(matches!(info.ty, Ty::MetadataRef { .. }), "Номенклатура is a Ref");
+        assert!(
+            matches!(info.ty.db.lookup_type(info.ty.id), TypeKind::MetadataRef(_)),
+            "Номенклатура is a Ref"
+        );
     }
 
     #[test]
@@ -1141,16 +1338,54 @@ mod tests {
         ));
         let configs = wrap(config);
 
-        let a = Ty::MetadataRef { kind: MetadataKind::CatalogRef, name: Name::new("A") };
-        let b = Ty::MetadataRef { kind: MetadataKind::CatalogRef, name: Name::new("B") };
-        let receiver = Ty::Union(vec![a, b].into());
+        let a = metadata_ref(MetadataKind::CatalogRef, "A");
+        let b = metadata_ref(MetadataKind::CatalogRef, "B");
+        let receiver = union(vec![a, b]);
 
         let common = lookup_field(&configs, &receiver, &Name::new("Код"))
             .expect("Код is in both arms — intersection succeeds");
-        assert_eq!(common.ty, Ty::String, "merged type collapses identical String arms");
+        assert_eq!(common.ty, string(), "merged type collapses identical String arms");
 
         let only_a = lookup_field(&configs, &receiver, &Name::new("OnlyInA"));
         assert!(only_a.is_none(), "field absent in B must not resolve under union");
+    }
+
+    #[test]
+    fn lookup_field_on_union_intersection_readonly_merges_via_or() {
+        // OR-merge semantic of `is_readonly` in union intersection
+        // (`lookup_field_in_union_intersection` cohesion rule).
+        //
+        // Construction:
+        //   - arm A = `CatalogObject.A` without a user
+        //     `ДополнительныеСвойства` → HBK platform-property cascade
+        //     surfaces the field as `is_readonly = true`.
+        //   - arm B = `CatalogObject.B` WITH a user attribute named
+        //     `ДополнительныеСвойства` (not a recognised standard, so
+        //     `classify_attr` returns `None` → `UserAttribute, false`).
+        //     `push_unique` blocks the HBK fall-through behind the
+        //     user version, leaving `is_readonly = false`.
+        //
+        // Union merge MUST be `true` (writeable iff EVERY arm writeable —
+        // a single read-only arm makes the union read-only). If the
+        // merge ever flips to AND, this assertion fires.
+        let mut config = Configuration::new("Test");
+        config.add_metadata_object(catalog("A", vec![]));
+        config.add_metadata_object(catalog(
+            "B",
+            vec![attr("ДополнительныеСвойства", None, AttributeType::Boolean)],
+        ));
+        let configs = wrap(config);
+
+        let a = metadata_ref(MetadataKind::CatalogObject, "A");
+        let b = metadata_ref(MetadataKind::CatalogObject, "B");
+        let receiver = union(vec![a, b]);
+
+        let info = lookup_field(&configs, &receiver, &Name::new("ДополнительныеСвойства"))
+            .expect("ДополнительныеСвойства is in both arms — intersection succeeds");
+        assert!(
+            info.is_readonly,
+            "OR-merge: arm A is read-only (HBK), so union read-only regardless of arm B"
+        );
     }
 
     // -------------------------------------------------------------
@@ -1171,12 +1406,11 @@ mod tests {
         config.add_metadata_object(document("ПКО", vec![]));
         let configs = wrap(config);
 
-        let receiver =
-            Ty::MetadataRef { kind: MetadataKind::DocumentObject, name: Name::new("ПКО") };
+        let receiver = metadata_ref(MetadataKind::DocumentObject, "ПКО");
 
         let dop = lookup_field(&configs, &receiver, &Name::new("ДополнительныеСвойства"))
             .expect("ДополнительныеСвойства must surface on DocumentObject via HBK");
-        assert_eq!(dop.ty, Ty::Structure, "HBK declares Структура");
+        assert_eq!(dop.ty, structure(), "HBK declares Структура");
         assert!(dop.is_readonly, "DocumentObject.ДополнительныеСвойства is read-only per HBK");
 
         for prop in [
@@ -1219,26 +1453,21 @@ mod tests {
         config.add_metadata_object(catalog("Номенклатура", vec![]));
         let configs = wrap(config);
 
-        let doc = Ty::MetadataRef { kind: MetadataKind::DocumentObject, name: Name::new("ПКО") };
+        let doc = metadata_ref(MetadataKind::DocumentObject, "ПКО");
         let this_obj = lookup_field(&configs, &doc, &Name::new("ЭтотОбъект"))
             .expect("ЭтотОбъект resolves on DocumentObject");
         assert_eq!(
             this_obj.ty,
-            Ty::MetadataRef { kind: MetadataKind::DocumentObject, name: Name::new("ПКО") },
+            metadata_ref(MetadataKind::DocumentObject, "ПКО"),
             "ЭтотОбъект must be a typed MetadataRef (self), not a generic PlatformObject",
         );
 
-        let cat = Ty::MetadataRef {
-            kind: MetadataKind::CatalogObject,
-            name: Name::new("Номенклатура"),
-        };
+        let cat = metadata_ref(MetadataKind::CatalogObject, "Номенклатура");
         let cat_this_obj = lookup_field(&configs, &cat, &Name::new("ЭтотОбъект"))
             .expect("ЭтотОбъект resolves on CatalogObject");
         assert_eq!(
             cat_this_obj.ty,
-            Ty::MetadataRef {
-                kind: MetadataKind::CatalogObject, name: Name::new("Номенклатура")
-            },
+            metadata_ref(MetadataKind::CatalogObject, "Номенклатура"),
             "CatalogObject.ЭтотОбъект must specialize to typed self",
         );
 
@@ -1250,7 +1479,7 @@ mod tests {
             .expect("Ссылка resolves on DocumentObject via cascade");
         assert_eq!(
             r#ref.ty,
-            Ty::MetadataRef { kind: MetadataKind::DocumentRef, name: Name::new("ПКО") },
+            metadata_ref(MetadataKind::DocumentRef, "ПКО"),
             "Ссылка must specialize to typed DocumentRef self",
         );
     }
@@ -1273,32 +1502,21 @@ mod tests {
         config.add_metadata_object(mdo_of(MdoType::DataProcessor, "Обработка1", vec![]));
         let configs = wrap(config);
 
-        let report = Ty::MetadataRef {
-            kind: MetadataKind::ReportObject,
-            name: Name::new("ОстаткиТоваров"),
-        };
+        let report = metadata_ref(MetadataKind::ReportObject, "ОстаткиТоваров");
         let report_this = lookup_field(&configs, &report, &Name::new("ЭтотОбъект"))
             .expect("ЭтотОбъект resolves on ReportObject");
         assert_eq!(
             report_this.ty,
-            Ty::MetadataRef {
-                kind: MetadataKind::ReportObject, name: Name::new("ОстаткиТоваров")
-            },
+            metadata_ref(MetadataKind::ReportObject, "ОстаткиТоваров"),
             "ReportObject.ЭтотОбъект must specialize through ё↔е folding",
         );
 
-        let dp = Ty::MetadataRef {
-            kind: MetadataKind::DataProcessorObject,
-            name: Name::new("Обработка1"),
-        };
+        let dp = metadata_ref(MetadataKind::DataProcessorObject, "Обработка1");
         let dp_this = lookup_field(&configs, &dp, &Name::new("ЭтотОбъект"))
             .expect("ЭтотОбъект resolves on DataProcessorObject");
         assert_eq!(
             dp_this.ty,
-            Ty::MetadataRef {
-                kind: MetadataKind::DataProcessorObject,
-                name: Name::new("Обработка1"),
-            },
+            metadata_ref(MetadataKind::DataProcessorObject, "Обработка1"),
             "DataProcessorObject.ЭтотОбъект must specialize to typed self",
         );
     }
@@ -1309,14 +1527,11 @@ mod tests {
         config.add_metadata_object(catalog("Номенклатура", vec![]));
         let configs = wrap(config);
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::CatalogObject,
-            name: Name::new("Номенклатура"),
-        };
+        let receiver = metadata_ref(MetadataKind::CatalogObject, "Номенклатура");
 
         let dop = lookup_field(&configs, &receiver, &Name::new("ДополнительныеСвойства"))
             .expect("ДополнительныеСвойства must surface on CatalogObject via HBK");
-        assert_eq!(dop.ty, Ty::Structure);
+        assert_eq!(dop.ty, structure());
         assert!(dop.is_readonly);
 
         assert!(lookup_field(&configs, &receiver, &Name::new("ВерсияДанных")).is_some());
@@ -1363,25 +1578,24 @@ mod tests {
         config.add_metadata_object(document_with_standard_attrs("ПКО"));
         let configs = wrap(config);
 
-        let receiver =
-            Ty::MetadataRef { kind: MetadataKind::DocumentObject, name: Name::new("ПКО") };
+        let receiver = metadata_ref(MetadataKind::DocumentObject, "ПКО");
 
-        let date = lookup_field(&configs, &receiver, &Name::new("Дата"))
+        let date_info = lookup_field(&configs, &receiver, &Name::new("Дата"))
             .expect("standard Дата resolves on DocumentObject");
-        assert_eq!(date.ty, Ty::Date, "spec-typed Дата must win over HBK cascade");
-        assert!(!date.is_readonly, "Дата on DocumentObject is writable per spec");
+        assert_eq!(date_info.ty, date(), "spec-typed Дата must win over HBK cascade");
+        assert!(!date_info.is_readonly, "Дата on DocumentObject is writable per spec");
 
         let r#ref = lookup_field(&configs, &receiver, &Name::new("Ссылка"))
             .expect("standard Ссылка resolves on DocumentObject");
         assert_eq!(
             r#ref.ty,
-            Ty::MetadataRef { kind: MetadataKind::DocumentRef, name: Name::new("ПКО") },
+            metadata_ref(MetadataKind::DocumentRef, "ПКО"),
             "Ссылка must remain a typed self-ref, not a stringly-typed HBK entry",
         );
 
         let posted = lookup_field(&configs, &receiver, &Name::new("Проведен"))
             .expect("standard Проведен resolves on DocumentObject");
-        assert_eq!(posted.ty, Ty::Boolean, "spec-typed Проведен must keep its Boolean type");
+        assert_eq!(posted.ty, boolean(), "spec-typed Проведен must keep its Boolean type");
     }
 
     #[test]
@@ -1402,8 +1616,7 @@ mod tests {
         config.add_metadata_object(document_with_standard_attrs("ПКО"));
         let configs = wrap(config);
 
-        let receiver =
-            Ty::MetadataRef { kind: MetadataKind::DocumentRef, name: Name::new("ПКО") };
+        let receiver = metadata_ref(MetadataKind::DocumentRef, "ПКО");
 
         // 1) Object-only HBK properties must NOT appear on Ref.
         assert!(
@@ -1460,16 +1673,13 @@ mod tests {
         config.add_metadata_object(catalog("Номенклатура", vec![]));
         let configs = wrap(config);
 
-        let doc = Ty::MetadataRef { kind: MetadataKind::DocumentObject, name: Name::new("ПКО") };
+        let doc = metadata_ref(MetadataKind::DocumentObject, "ПКО");
         assert!(
             lookup_field(&configs, &doc, &Name::new("Номер")).is_none(),
             "Номер must NOT leak from HBK when the document has no NumberLength",
         );
 
-        let cat = Ty::MetadataRef {
-            kind: MetadataKind::CatalogObject,
-            name: Name::new("Номенклатура"),
-        };
+        let cat = metadata_ref(MetadataKind::CatalogObject, "Номенклатура");
         assert!(
             lookup_field(&configs, &cat, &Name::new("Код")).is_none(),
             "Код must NOT leak from HBK when the catalog has no CodeLength",
@@ -1523,22 +1733,121 @@ mod tests {
         });
         let configs = wrap(config);
 
-        let filter = Ty::MetadataRef {
-            kind: MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
-            name: Name::new("РегСвед"),
-        };
+        let filter = metadata_ref(
+            MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
+            "РегСвед",
+        );
         assert!(
             lookup_field(&configs, &filter, &Name::new("ДополнительныеСвойства")).is_none(),
             "RegisterFilter must not pull DocumentObject/CatalogObject cascade",
         );
 
-        let row = Ty::MetadataRef {
-            kind: MetadataKind::TabularSectionRow { parent: MdoType::Catalog },
-            name: Name::new("Товары.Цены"),
-        };
+        let row = metadata_ref(
+            MetadataKind::TabularSectionRow { parent: MdoType::Catalog },
+            "Товары.Цены",
+        );
         assert!(
             lookup_field(&configs, &row, &Name::new("ДополнительныеСвойства")).is_none(),
             "TabularSectionRow must not pull MDO cascade",
         );
+    }
+
+    // ============================================================
+    // SDBL projection-branch lookup (Phase 1.3 Slice 2)
+    // ============================================================
+
+    fn projection_with_two_fields(
+        db: &dyn TypeKernelDb,
+    ) -> std::sync::Arc<bsl_types::kind::Projection> {
+        use bsl_types::kind::{ProjectionField, ProjectionFieldSource, ProjectionOrigin};
+        // Manually-constructed projection mirroring what the bridge
+        // produces for `SELECT Код AS КодТов, Наименование FROM …`.
+        std::sync::Arc::new(bsl_types::kind::Projection::new(
+            std::sync::Arc::from([
+                ProjectionField::new(
+                    "КодТов".to_string(),
+                    db.string(None, false),
+                    ProjectionFieldSource::Column,
+                ),
+                ProjectionField::new(
+                    "Наименование".to_string(),
+                    db.string(None, false),
+                    ProjectionFieldSource::Column,
+                ),
+            ]),
+            ProjectionOrigin::SdblQuery,
+            None,
+        ))
+    }
+
+    #[test]
+    fn sdbl_projection_field_resolves_via_projection_table() {
+        let db = InMemoryDb::new();
+        let receiver = db.query_result_selection(
+            Some(projection_with_two_fields(&db)),
+            ProjectionSource::Unknown,
+        );
+        let info = super::lookup_field(&db, &[], receiver, &Name::new("КодТов"))
+            .expect("projection field must resolve");
+        assert_eq!(info.ty, db.string(None, false));
+        assert!(info.is_readonly, "SDBL projection fields are read-only");
+    }
+
+    #[test]
+    fn sdbl_projection_field_lookup_is_case_insensitive() {
+        // BSL field access is case-folded; the projection lookup
+        // matches the same way platform field/method lookup does.
+        let db = InMemoryDb::new();
+        let receiver = db.query_result_selection(
+            Some(projection_with_two_fields(&db)),
+            ProjectionSource::Unknown,
+        );
+        assert!(super::lookup_field(&db, &[], receiver, &Name::new("кодтов")).is_some());
+        assert!(super::lookup_field(&db, &[], receiver, &Name::new("НАИМЕНОВАНИЕ")).is_some());
+    }
+
+    #[test]
+    fn sdbl_projection_falls_through_to_platform_on_miss() {
+        // Field not in the projection — must fall through to the
+        // platform `ВыборкаИзРезультатаЗапроса` table so platform
+        // properties like `НомерСтроки` still resolve.
+        // (The exact platform property must exist in `platform_data`;
+        // we don't pin the lookup result here — only that the
+        // projection-branch returned `None` so the orchestrator
+        // continued to the platform fallback.)
+        let db = InMemoryDb::new();
+        let receiver_id = db.query_result_selection(
+            Some(projection_with_two_fields(&db)),
+            ProjectionSource::Unknown,
+        );
+        assert!(
+            lookup_field_in_query_projection(&db, receiver_id, &Name::new("НесуществующееПоле"))
+                .is_none(),
+            "projection lookup must miss on unknown field — orchestrator continues to platform fallback",
+        );
+    }
+
+    #[test]
+    fn sdbl_projection_lookup_no_op_for_none_projection() {
+        // `QueryResultSelection{None}` carries no projection (dynamic
+        // query text or pre-Phase-1.3b lift). The projection branch
+        // must return `None` immediately so the orchestrator falls
+        // through to platform property lookup — preserving the
+        // legacy `Ty::PlatformObject` behaviour for tests that pin
+        // the chain without any SDBL trace.
+        let db = InMemoryDb::new();
+        let receiver_id = db.query_result_selection(None, ProjectionSource::Unknown);
+        assert!(lookup_field_in_query_projection(&db, receiver_id, &Name::new("Имя")).is_none());
+    }
+
+    #[test]
+    fn sdbl_projection_lookup_no_op_for_non_selection_receiver() {
+        // A different receiver shape that happens to carry a
+        // projection (e.g. `Ty::Query{Some(p)}` after Phase 1.3b)
+        // must NOT be served by this branch — the projection
+        // surface only exists on the *selection* cursor.
+        let db = InMemoryDb::new();
+        let receiver_id = db.query(Arc::from([Some(projection_with_two_fields(&db))]));
+        assert!(lookup_field_in_query_projection(&db, receiver_id, &Name::new("КодТов")).is_none());
     }
 }

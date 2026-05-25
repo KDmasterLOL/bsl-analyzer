@@ -38,11 +38,15 @@
 
 use bsl_metadata::MdoType;
 use bsl_platform::{find_prefixed_method, PlatformMethod};
-use hir_def::ty::{FunctionSignature, MetadataKind, Ty};
+use bsl_types::builders::Builders;
+use bsl_types::intern::TypeKernelDb;
+use bsl_types::kind::TypeId;
+use bsl_types::testing::RootConfigCtx;
+use hir_def::ty::{FunctionSignature, MetadataKind};
 use hir_def::Name;
 
-use crate::lower::type_string::{lower_param_type_string, lower_platform_type_name};
-use crate::method_lookup::lower_overloads;
+use crate::lower::type_string::{lower_param_type_string_typeid, lower_platform_type_name_typeid};
+use crate::method_lookup::lower_overloads_typeid;
 
 /// Outcome of a successful platform-method lookup.
 ///
@@ -54,12 +58,12 @@ use crate::method_lookup::lower_overloads;
 /// return type for the call's `Ty`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlatformMethodResolution {
-    /// Signature lowered to `Ty`s (parameter types + return type).
+    /// Signature lowered to type-kernel ids (parameter types + return type).
     pub signature: FunctionSignature,
     /// Convenience clone of `signature.ret` — matches the shape of
     /// `MethodResolution.return_type` so inference call-sites can
-    /// read without dereferencing the `Box`.
-    pub return_ty: Ty,
+    /// read without dereferencing the signature.
+    pub return_ty: TypeId,
     /// Per-overload parameter lists for multi-overload composite methods
     /// (`InformationRegisterManager.Get`,
     /// `AccountingRegisterRecordSet.Move`,
@@ -70,7 +74,7 @@ pub struct PlatformMethodResolution {
     /// multi-overload methods as strictly typed against the first
     /// signature only and false-fired on legitimate alternative call
     /// shapes.
-    pub overloads: Vec<Vec<Ty>>,
+    pub overloads: Vec<Vec<TypeId>>,
 }
 
 /// Resolve `<manager-collective>.<mdo_name>.<method>()` through platform data.
@@ -81,13 +85,14 @@ pub struct PlatformMethodResolution {
 /// - no indexed method under that prefix matches `method_name`
 ///   bilingually.
 pub fn resolve_platform_manager_method(
+    db: &dyn TypeKernelDb,
     mdo_type: MdoType,
     mdo_name: &Name,
     method_name: &Name,
 ) -> Option<PlatformMethodResolution> {
     let prefix = mdo_type.manager_type_prefix()?;
     let method = find_prefixed_method(prefix, method_name.as_str())?;
-    Some(build_resolution(&method, mdo_type, mdo_name))
+    Some(build_resolution(db, &method, mdo_type, mdo_name))
 }
 
 /// Resolve `<metadata-ref>.<method>()` through platform data.
@@ -99,13 +104,14 @@ pub fn resolve_platform_manager_method(
 /// platform surface (register dimensions, tabular sections) return
 /// `None`.
 pub fn resolve_platform_metadata_ref_method(
+    db: &dyn TypeKernelDb,
     kind: MetadataKind,
     mdo_name: &Name,
     method_name: &Name,
 ) -> Option<PlatformMethodResolution> {
     let (prefix, parent_mdo) = metadata_kind_to_prefix_and_mdo(kind)?;
     let method = find_prefixed_method(prefix, method_name.as_str())?;
-    Some(build_resolution(&method, parent_mdo, mdo_name))
+    Some(build_resolution(db, &method, parent_mdo, mdo_name))
 }
 
 /// Build a `PlatformMethodResolution` from a resolved platform method in
@@ -116,14 +122,20 @@ pub fn resolve_platform_metadata_ref_method(
 /// [`map_generic_metadata_return_type`] for the manager-relative
 /// generics (`"СправочникОбъект"` → `Ty::MetadataRef { CatalogObject, mdo_name }`).
 pub(crate) fn build_resolution(
+    db: &dyn TypeKernelDb,
     method: &PlatformMethod,
     mdo_type: MdoType,
     mdo_name: &Name,
 ) -> PlatformMethodResolution {
-    let params: Vec<Ty> = method
+    let params: Vec<TypeId> = method
         .parameters
         .iter()
-        .map(|p| p.param_type.as_ref().map(|t| lower_param_type_string(t)).unwrap_or(Ty::Unknown))
+        .map(|p| {
+            p.param_type
+                .as_ref()
+                .map(|t| lower_param_type_string_typeid(db, t))
+                .unwrap_or(db.unknown())
+        })
         .collect();
     let defaults: Vec<bool> = method.parameters.iter().map(|p| p.is_optional).collect();
 
@@ -131,13 +143,29 @@ pub(crate) fn build_resolution(
         .return_type
         .as_ref()
         .map(|raw| {
-            map_generic_metadata_return_type(raw, mdo_type, mdo_name)
-                .unwrap_or_else(|| lower_platform_type_name(raw))
+            map_generic_metadata_return_type_typeid(db, raw, mdo_type, mdo_name)
+                .unwrap_or_else(|| lower_platform_type_name_typeid(db, raw))
         })
-        .unwrap_or(Ty::Undefined);
+        .unwrap_or(db.undefined());
 
-    let signature = FunctionSignature::new_with_defaults(params, defaults, return_ty.clone());
-    PlatformMethodResolution { signature, return_ty, overloads: lower_overloads(method) }
+    let signature = FunctionSignature {
+        max_args: Some(params.len() as u32),
+        params: params.into_boxed_slice(),
+        defaults: defaults.into_boxed_slice(),
+        ret: return_ty,
+    };
+    PlatformMethodResolution { signature, return_ty, overloads: lower_overloads_typeid(db, method) }
+}
+
+/// Kernel-native counterpart of [`map_generic_metadata_return_type`].
+pub(crate) fn map_generic_metadata_return_type_typeid(
+    db: &dyn TypeKernelDb,
+    raw: &str,
+    mdo_type: MdoType,
+    mdo_name: &Name,
+) -> Option<TypeId> {
+    let kind = map_generic_metadata_return_type(raw, mdo_type)?;
+    Some(db.metadata_ref(kind, mdo_name.as_str().to_string(), &RootConfigCtx))
 }
 
 /// Map a `MetadataKind` to `(prefix, parent_mdo)` for platform lookup.
@@ -224,8 +252,7 @@ pub(crate) fn metadata_kind_to_prefix_and_mdo(
 pub(crate) fn map_generic_metadata_return_type(
     raw: &str,
     mdo_type: MdoType,
-    mdo_name: &Name,
-) -> Option<Ty> {
+) -> Option<MetadataKind> {
     let kind = match (raw, mdo_type) {
         ("СправочникОбъект" | "CatalogObject", MdoType::Catalog) => {
             MetadataKind::CatalogObject
@@ -313,18 +340,41 @@ pub(crate) fn map_generic_metadata_return_type(
         }
         _ => return None,
     };
-    Some(Ty::MetadataRef { kind, name: mdo_name.clone() })
+    Some(kind)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bsl_types::builders::Builders;
+    use bsl_types::kind::TypeKind;
+    use bsl_types::testing::InMemoryDb;
+
+    /// §4.C drift-detector: kernel-native accessors mirror return_ty / overloads.
+    #[test]
+    fn platform_manager_typeid_round_trips_via_ty() {
+        let db = InMemoryDb::new();
+        let res = PlatformMethodResolution {
+            signature: FunctionSignature {
+                params: Box::new([]),
+                defaults: Box::new([]),
+                ret: db.number(None, None),
+                max_args: Some(0),
+            },
+            return_ty: db.number(None, None),
+            overloads: vec![vec![db.string(None, false)]],
+        };
+        assert_eq!(res.return_ty, db.number(None, None));
+        assert_eq!(res.overloads, vec![vec![db.string(None, false)]]);
+    }
 
     #[test]
     fn manager_create_item_on_catalog_returns_catalog_object() {
         // `Справочники.<Name>.СоздатьЭлемент()` must bind the generic
         // `СправочникОбъект` return to `MetadataRef { CatalogObject, Name }`.
+        let db = InMemoryDb::new();
         let res = resolve_platform_manager_method(
+            &db,
             MdoType::Catalog,
             &Name::new("Номенклатура"),
             &Name::new("СоздатьЭлемент"),
@@ -333,9 +383,11 @@ mod tests {
 
         assert_eq!(
             res.return_ty,
-            Ty::MetadataRef {
-                kind: MetadataKind::CatalogObject, name: Name::new("Номенклатура")
-            }
+            db.metadata_ref(
+                MetadataKind::CatalogObject,
+                "Номенклатура".to_string(),
+                &RootConfigCtx
+            )
         );
     }
 
@@ -344,7 +396,9 @@ mod tests {
         // `НайтиПоКоду` returns the generic `СправочникСсылка` — must
         // rebind to `MetadataRef { CatalogRef, Name }`, not a bare
         // `PlatformObject("СправочникСсылка")`.
+        let db = InMemoryDb::new();
         let res = resolve_platform_manager_method(
+            &db,
             MdoType::Catalog,
             &Name::new("Валюты"),
             &Name::new("НайтиПоКоду"),
@@ -353,7 +407,7 @@ mod tests {
 
         assert_eq!(
             res.return_ty,
-            Ty::MetadataRef { kind: MetadataKind::CatalogRef, name: Name::new("Валюты") }
+            db.metadata_ref(MetadataKind::CatalogRef, "Валюты".to_string(), &RootConfigCtx)
         );
     }
 
@@ -367,7 +421,9 @@ mod tests {
         // Pin that comma-joined param_type lowers to a `Ty::Union` so
         // `is_assignable(String, Number|String)` passes via the
         // union-right rule.
+        let db = InMemoryDb::new();
         let res = resolve_platform_manager_method(
+            &db,
             MdoType::Catalog,
             &Name::new("Валюты"),
             &Name::new("НайтиПоКоду"),
@@ -376,7 +432,7 @@ mod tests {
 
         assert_eq!(
             res.signature.params.first(),
-            Some(&Ty::union(vec![Ty::Number, Ty::String])),
+            Some(&db.union(vec![db.number(None, None), db.string(None, false)])),
             "first param of FindByCode must be a Union, not a single PlatformObject; got {:?}",
             res.signature.params.first(),
         );
@@ -385,7 +441,9 @@ mod tests {
     #[test]
     fn manager_unknown_method_returns_none() {
         // Not a platform method — lookup must fail, diagnostic stays.
+        let db = InMemoryDb::new();
         assert!(resolve_platform_manager_method(
+            &db,
             MdoType::Catalog,
             &Name::new("Валюты"),
             &Name::new("НетТакогоМетода"),
@@ -396,19 +454,26 @@ mod tests {
     #[test]
     fn manager_english_method_name_resolves() {
         // Bilingual gate — the English canonical name must hit too.
+        let db = InMemoryDb::new();
         let res = resolve_platform_manager_method(
+            &db,
             MdoType::Catalog,
             &Name::new("Номенклатура"),
             &Name::new("CreateItem"),
         )
         .expect("English 'CreateItem' must also resolve to CatalogManager.CreateItem");
-        assert!(matches!(res.return_ty, Ty::MetadataRef { kind: MetadataKind::CatalogObject, .. }));
+        match db.lookup_type(res.return_ty) {
+            TypeKind::MetadataRef(facet) => assert_eq!(facet.kind, MetadataKind::CatalogObject),
+            other => panic!("expected MetadataRef{{CatalogObject}}, got {other:?}"),
+        }
     }
 
     #[test]
     fn manager_mdo_without_prefix_returns_none() {
         // CommonModule / Cube / DimensionTable have no `manager_type_prefix`.
+        let db = InMemoryDb::new();
         assert!(resolve_platform_manager_method(
+            &db,
             MdoType::CommonModule,
             &Name::new("AnyName"),
             &Name::new("СоздатьЭлемент"),
@@ -420,13 +485,15 @@ mod tests {
     fn metadata_ref_catalog_object_resolves_write_as_procedure() {
         // `CatalogObject.Записать()` is a procedure (return=None) —
         // lookup must succeed with `Ty::Undefined` return.
+        let db = InMemoryDb::new();
         let res = resolve_platform_metadata_ref_method(
+            &db,
             MetadataKind::CatalogObject,
             &Name::new("Номенклатура"),
             &Name::new("Записать"),
         )
         .expect("platform data indexes Write under CatalogObject");
-        assert_eq!(res.return_ty, Ty::Undefined);
+        assert_eq!(res.return_ty, db.undefined());
     }
 
     #[test]
@@ -437,14 +504,16 @@ mod tests {
         // declared under the
         // `InformationRegisterRecordManager.<Имя>` composite typename
         // (`Записать`, `Прочитать`, …) now resolve.
+        let db = InMemoryDb::new();
         let res = resolve_platform_metadata_ref_method(
+            &db,
             MetadataKind::InformationRegisterRecordManager,
             &Name::new("Курсы"),
             &Name::new("Записать"),
         )
         .expect("platform data indexes Write under InformationRegisterRecordManager");
         // `Записать` is a procedure → `Ty::Undefined` return.
-        assert_eq!(res.return_ty, Ty::Undefined);
+        assert_eq!(res.return_ty, db.undefined());
     }
 
     #[test]
@@ -456,7 +525,9 @@ mod tests {
         // `Ty::PlatformObject("РегистрСведенийНаборЗаписей")` and the
         // composite-prefixed methods (`Записать`, `Загрузить`, …)
         // become unreachable.
+        let db = InMemoryDb::new();
         let res = resolve_platform_manager_method(
+            &db,
             MdoType::InformationRegister,
             &Name::new("Курсы"),
             &Name::new("СоздатьНаборЗаписей"),
@@ -464,16 +535,19 @@ mod tests {
         .expect("platform data indexes CreateRecordSet under InformationRegisterManager");
         assert_eq!(
             res.return_ty,
-            Ty::MetadataRef {
-                kind: MetadataKind::InformationRegisterRecordSet,
-                name: Name::new("Курсы"),
-            }
+            db.metadata_ref(
+                MetadataKind::InformationRegisterRecordSet,
+                "Курсы".to_string(),
+                &RootConfigCtx,
+            )
         );
     }
 
     #[test]
     fn manager_create_record_set_on_accumulation_register_returns_record_set() {
+        let db = InMemoryDb::new();
         let res = resolve_platform_manager_method(
+            &db,
             MdoType::AccumulationRegister,
             &Name::new("ПродажиОбороты"),
             &Name::new("СоздатьНаборЗаписей"),
@@ -481,16 +555,19 @@ mod tests {
         .expect("platform data indexes CreateRecordSet under AccumulationRegisterManager");
         assert_eq!(
             res.return_ty,
-            Ty::MetadataRef {
-                kind: MetadataKind::AccumulationRegisterRecordSet,
-                name: Name::new("ПродажиОбороты"),
-            }
+            db.metadata_ref(
+                MetadataKind::AccumulationRegisterRecordSet,
+                "ПродажиОбороты".to_string(),
+                &RootConfigCtx,
+            )
         );
     }
 
     #[test]
     fn manager_create_record_set_on_accounting_register_returns_record_set() {
+        let db = InMemoryDb::new();
         let res = resolve_platform_manager_method(
+            &db,
             MdoType::AccountingRegister,
             &Name::new("Хозрасчетный"),
             &Name::new("СоздатьНаборЗаписей"),
@@ -498,16 +575,19 @@ mod tests {
         .expect("platform data indexes CreateRecordSet under AccountingRegisterManager");
         assert_eq!(
             res.return_ty,
-            Ty::MetadataRef {
-                kind: MetadataKind::AccountingRegisterRecordSet,
-                name: Name::new("Хозрасчетный"),
-            }
+            db.metadata_ref(
+                MetadataKind::AccountingRegisterRecordSet,
+                "Хозрасчетный".to_string(),
+                &RootConfigCtx,
+            )
         );
     }
 
     #[test]
     fn manager_create_record_set_on_calculation_register_returns_record_set() {
+        let db = InMemoryDb::new();
         let res = resolve_platform_manager_method(
+            &db,
             MdoType::CalculationRegister,
             &Name::new("Начисления"),
             &Name::new("СоздатьНаборЗаписей"),
@@ -515,10 +595,11 @@ mod tests {
         .expect("platform data indexes CreateRecordSet under CalculationRegisterManager");
         assert_eq!(
             res.return_ty,
-            Ty::MetadataRef {
-                kind: MetadataKind::CalculationRegisterRecordSet,
-                name: Name::new("Начисления"),
-            }
+            db.metadata_ref(
+                MetadataKind::CalculationRegisterRecordSet,
+                "Начисления".to_string(),
+                &RootConfigCtx,
+            )
         );
     }
 
@@ -527,13 +608,15 @@ mod tests {
         // After the new variant is wired through `platform_prefix`,
         // platform-indexed methods on `InformationRegisterRecordSet.<X>`
         // (e.g. `Загрузить`) must resolve via the metadata-ref path.
+        let db = InMemoryDb::new();
         let res = resolve_platform_metadata_ref_method(
+            &db,
             MetadataKind::InformationRegisterRecordSet,
             &Name::new("Курсы"),
             &Name::new("Загрузить"),
         )
         .expect("platform data indexes Load under InformationRegisterRecordSet");
         // `Загрузить` is a procedure → `Ty::Undefined` return.
-        assert_eq!(res.return_ty, Ty::Undefined);
+        assert_eq!(res.return_ty, db.undefined());
     }
 }

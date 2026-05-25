@@ -15,11 +15,12 @@ use vfs::FileId;
 
 use crate::features::FeaturesInput;
 use crate::queries::{
-    all_sdbl_in_file_query, line_index_query, liveness_analysis_query, method_cfg_query,
-    module_metadata_query, reaching_definitions_query, sdbl_hir_in_file_query,
+    line_index_query, liveness_analysis_query, method_cfg_query, module_metadata_query,
+    reaching_definitions_query,
 };
-use crate::types::SdblHirEntries;
-use crate::{metadata, queries, vfs_helpers, RootDatabase};
+use crate::type_kernel::{TypeKernelHandle, TypeKernelInner, TypeKernelInput};
+use crate::{metadata, queries, vfs_helpers, RootDatabase, SdblHirEntries};
+use hir::{all_sdbl_in_file_query, sdbl_hir_for_file_query};
 
 /// Default implementation of RootDatabase with Salsa integration.
 ///
@@ -51,6 +52,12 @@ pub struct RootDatabaseImpl {
     /// query reads from this input, Salsa's standard revision tracking
     /// kicks in for that query.
     features_input: parking_lot::RwLock<Option<FeaturesInput>>,
+
+    /// Monotonic production type-kernel storage shared by database clones.
+    type_kernel: Arc<TypeKernelInner>,
+
+    /// Salsa input whose value is the shared type-kernel handle.
+    type_kernel_input: parking_lot::RwLock<Option<TypeKernelInput>>,
 }
 
 impl Default for RootDatabaseImpl {
@@ -68,6 +75,8 @@ impl Clone for RootDatabaseImpl {
             // so cloning the handle is safe.
             workspace_configs_input: parking_lot::RwLock::new(*self.workspace_configs_input.read()),
             features_input: parking_lot::RwLock::new(*self.features_input.read()),
+            type_kernel: Arc::clone(&self.type_kernel),
+            type_kernel_input: parking_lot::RwLock::new(*self.type_kernel_input.read()),
         }
     }
 }
@@ -80,11 +89,14 @@ impl RootDatabaseImpl {
     /// a Salsa input and register a proper invalidation dependency — even
     /// before the LSP layer has published any configuration paths.
     pub fn new() -> Self {
+        let type_kernel = Arc::new(TypeKernelInner::new());
         let db = Self {
             storage: salsa::Storage::default(),
             files: Files::new(),
             workspace_configs_input: parking_lot::RwLock::new(None),
             features_input: parking_lot::RwLock::new(None),
+            type_kernel: Arc::clone(&type_kernel),
+            type_kernel_input: parking_lot::RwLock::new(None),
         };
         let input = metadata::WorkspaceConfigsInput::new(&db, Vec::new(), 0);
         *db.workspace_configs_input.write() = Some(input);
@@ -95,7 +107,13 @@ impl RootDatabaseImpl {
         let defaults = project_model::FeaturesConfig::default();
         let features = FeaturesInput::new(&db, defaults.type_narrowing);
         *db.features_input.write() = Some(features);
+        let type_kernel_input = TypeKernelInput::new(&db, TypeKernelHandle::new(type_kernel));
+        *db.type_kernel_input.write() = Some(type_kernel_input);
         db
+    }
+
+    pub(crate) fn type_kernel_inner(&self) -> &Arc<TypeKernelInner> {
+        &self.type_kernel
     }
 
     /// Handle of the singleton workspace-configs Salsa input.
@@ -399,6 +417,53 @@ impl hir::ConfigsDatabase for RootDatabaseImpl {
             .map(|(name, configuration)| hir::VisibleConfig { name, configuration })
             .collect()
     }
+
+    fn merged_visible_configuration(
+        &self,
+        file_id: FileId,
+    ) -> Option<Arc<bsl_metadata::Configuration>> {
+        // Restored from the historic `visible_configuration_for_file`
+        // helper in `queries.rs`: pick the main config and the
+        // longest-path-prefix extension whose root contains `file_id`,
+        // then merge via `Configuration::merged_with_extension`. Lives
+        // here (not in hir-def) because the path-prefix probe is
+        // filesystem-bound — keeping it in the adapter preserves
+        // hir-def's no-VFS invariant.
+        let file_path = vfs_helpers::get_file_path(self, file_id)?;
+        let paths = RootDatabaseImpl::all_config_paths(self);
+
+        let load_at = |path: &std::path::Path| -> Arc<bsl_metadata::Configuration> {
+            let path_input = metadata::intern_configuration_path(
+                self,
+                &path.to_string_lossy(),
+                self.metadata_version(),
+            );
+            metadata::load_configuration(self, path_input)
+        };
+
+        if paths.is_empty() {
+            let config_root = vfs_helpers::find_configuration_root(self, &file_path)?;
+            return Some(load_at(&config_root));
+        }
+
+        let main_path = paths.iter().find_map(|(name, path)| name.is_none().then_some(path));
+        let extension_path = paths
+            .iter()
+            .filter(|(name, path)| name.is_some() && file_path.starts_with(path))
+            .max_by_key(|(_, path)| path.as_os_str().len())
+            .map(|(_, path)| path);
+
+        match (main_path, extension_path) {
+            (Some(main_path), Some(extension_path)) => {
+                let main = load_at(main_path);
+                let extension = load_at(extension_path);
+                Some(Arc::new(main.merged_with_extension(&extension)))
+            }
+            (Some(main_path), None) => Some(load_at(main_path)),
+            (None, Some(extension_path)) => Some(load_at(extension_path)),
+            (None, None) => None,
+        }
+    }
 }
 
 #[salsa::db]
@@ -413,7 +478,7 @@ impl hir::HirDatabase for RootDatabaseImpl {
         file_id: FileId,
         owner: hir::DefWithBodyId,
         expr: hir::ExprId,
-    ) -> hir::Ty {
+    ) -> hir::TypeId {
         hir::type_of_expr_query(self, file_id, owner, expr)
     }
 
@@ -450,6 +515,14 @@ impl hir::HirDatabase for RootDatabaseImpl {
     fn infer_module_code(&self, file_id: FileId) -> Arc<hir::ModuleCodeInferenceResult> {
         let file_id_input = FileIdInput::new(self, file_id);
         hir::infer_module_code_query(self, file_id_input)
+    }
+
+    fn module_reaching_definitions(
+        &self,
+        file_id: FileId,
+    ) -> Arc<hir::dataflow::reaching_defs::ModuleReachingDefs> {
+        let file_id_input = FileIdInput::new(self, file_id);
+        queries::module_reaching_definitions_query(self, file_id_input)
     }
 }
 
@@ -502,7 +575,7 @@ impl RootDatabase for RootDatabaseImpl {
 
     fn sdbl_hir_in_file(&self, file_id: FileId) -> SdblHirEntries {
         let file_id_input = base_db::FileIdInput::new(self, file_id);
-        sdbl_hir_in_file_query(self, file_id_input)
+        sdbl_hir_for_file_query(self, file_id_input)
     }
 
     fn module_cfgs(&self, file_id_input: FileIdInput) -> Arc<hir::cfg::ModuleCfgs> {

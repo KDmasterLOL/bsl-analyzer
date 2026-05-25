@@ -7,8 +7,12 @@ pub mod name_classify;
 mod semantic_symbol;
 pub mod type_facade;
 
+pub use bsl_types::intern::TypeKernelDb;
+pub use bsl_types::kind::{TypeId, TypeKind};
 pub use definition::{Definition, ReferenceScope};
-pub use hir_ty::coerce_this_object_to_metadata_ref;
+pub use hir_ty::method_lookup::platform_type_key_id;
+pub use hir_ty::resolve_platform_global_property_type;
+pub use hir_ty::this_object::coerce_to_metadata_ref_id;
 pub use hir_ty::TyLoweringContext;
 pub use hir_ty::{is_form_items_collection_ty, FORM_ITEMS_TYPE_EN, FORM_ITEMS_TYPE_RU};
 pub use hir_ty::{PlatformMethodHandle, PlatformMethodOrigin};
@@ -16,9 +20,10 @@ pub use name_classify::{classify_token, NameClass};
 pub use semantic_symbol::{
     SemanticSymbol, SemanticSymbolKey, SemanticSymbolKind, SymbolDeclaration,
 };
-pub use type_facade::{module_implicit_fields, Field, HirFieldOrigin, Type};
+pub use type_facade::{kernel_type_label, module_implicit_fields, Field, HirFieldOrigin, Type};
 
 // Re-export core types
+pub use hir_def::{all_sdbl_in_file_query, sdbl_hir_for_file_query, SdblHirEntries, SdblInFile};
 pub use hir_def::{
     BindingId, DefWithBodyId, ExprId, IdConversion, ModuleMetadata, Name, PathResolution, StmtId,
 };
@@ -141,7 +146,8 @@ pub use hir_def::{
 };
 
 // Re-export hir-ty types and queries
-pub use hir_def::{ConfigsDatabase, VisibleConfig};
+pub use bsl_config::VisibleConfig;
+pub use hir_def::ConfigsDatabase;
 pub use hir_ty::arg_diagnostics::arg_diagnostics_query;
 pub use hir_ty::db::HirDatabase;
 pub use hir_ty::form_self::{is_form_self_property_name, FORM_TYPE_NAME};
@@ -157,14 +163,15 @@ pub use hir_ty::proc_signature;
 // tests (`ide/tests/`) and the upcoming method-graph queries (O.8+)
 // can construct a body-scoped inference context via the `hir` frontend
 // layer without going through `infer_query`.
+pub use bsl_types::facet::{FormBindingFacet, FormBindingTargetFacet, MdoRefFacet};
 pub use hir_ty::{
     form_control_platform_type_chain, form_control_platform_type_name, form_element_kind_label,
-    form_element_kind_sort_band, BodyInferenceResult, CallArgBinding, FormDataBinding,
-    FormDataTarget, FormElementKind, InferOwnerResult, InferenceContext, InferenceDiagnostic,
-    InferenceResult, MetadataKind, ModuleCodeInferenceResult, ParamsShape, Ty,
-    UnresolvedMethodKind,
+    form_element_kind_sort_band, BodyInferenceResult, CallArgBinding, FormElementKind,
+    InferOwnerResult, InferenceContext, InferenceDiagnostic, InferenceResult, MetadataKind,
+    ModuleCodeInferenceResult, ParamsShape, UnresolvedMethodKind,
 };
 
+pub use bsl_types::builders::Builders;
 use syntax::{ast::AstNode, TextRange};
 use vfs::FileId;
 
@@ -706,7 +713,7 @@ impl<'db, DB: ConfigsDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
 /// callers that need [`HirDatabase`] pay the trait-bound cost; the main
 /// IDE flows (definition, name resolution) don't.
 impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
-    /// Resolve a syntax node to its inferred [`Ty`].
+    /// Resolve a syntax node to its inferred `TypeId`.
     ///
     /// Uses the `BodySourceMap` of each body in the file to locate the
     /// containing `Body`; once found, looks up the inferred type in
@@ -715,10 +722,10 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
     /// during merge, so this function would always have seen `None`.
     ///
     /// **Narrowing overlay (M4 Task 6.6).** If the matched expression is
-    /// an [`Expr::Path`], the inferred base [`Ty`] is merged with the
+    /// an [`Expr::Path`], the inferred base `TypeId` is merged with the
     /// narrowing overlay produced by [`HirDatabase::narrow`]: the
     /// block-IN state of the CFG vertex covering the expression supplies
-    /// the narrowed [`Ty`] for that variable. Per ADR-01 Q4, this
+    /// the narrowed `TypeId` for that variable. Per ADR-01 Q4, this
     /// structurally returns:
     /// - the **pre-narrow** type on a guard's own receiver (the receiver
     ///   lives in a Conditional vertex whose IN carries the base overlay
@@ -727,9 +734,9 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
     ///   expressions live in successor BasicBlocks whose IN has the
     ///   narrowing applied).
     ///
-    /// Returns [`Ty::Unknown`] when the node isn't an expression (no
-    /// `ExprId` binding) or when inference produced no entry for it.
-    pub fn type_of_expr(&self, file_id: FileId, node: &syntax::SyntaxNode) -> Ty {
+    /// Returns the kernel `Unknown` id when the node isn't an expression
+    /// (no `ExprId` binding) or when inference produced no entry for it.
+    pub fn type_of_expr(&self, file_id: FileId, node: &syntax::SyntaxNode) -> TypeId {
         let module_id = ModuleId::new(file_id);
         let module_bodies = self.db.module_bodies(module_id);
         let range = node.text_range();
@@ -745,8 +752,11 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
             if let Some(expr_id) = result.source_map.expr_at_range(range) {
                 let owner = DefWithBodyId::ModuleCode;
                 let routed = infer_owner(self.db, file_id, owner);
-                let base = routed.type_of_expr(expr_id).cloned().unwrap_or(Ty::Unknown);
-                return narrow_or_base(self.db, file_id, owner, &result.body, expr_id, base);
+                // Phase 3 §4.G.5b: the `Semantics` boundary is kernel-native.
+                // Read the raw interned base id and let `narrow_or_base`
+                // overlay the narrowed arm-set — all in `TypeId` space.
+                let base_id = routed.type_id_of_expr(expr_id).unwrap_or_else(|| self.db.unknown());
+                return narrow_or_base(self.db, file_id, owner, &result.body, expr_id, base_id);
             }
         }
 
@@ -758,15 +768,15 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
             if let Some(expr_id) = source_map.expr_at_range(range) {
                 let owner = DefWithBodyId::Method(local_id);
                 let routed = infer_owner(self.db, file_id, owner);
-                let base = routed.type_of_expr(expr_id).cloned().unwrap_or(Ty::Unknown);
-                return narrow_or_base(self.db, file_id, owner, body, expr_id, base);
+                let base_id = routed.type_id_of_expr(expr_id).unwrap_or_else(|| self.db.unknown());
+                return narrow_or_base(self.db, file_id, owner, body, expr_id, base_id);
             }
         }
 
-        Ty::Unknown
+        self.db.unknown()
     }
 
-    /// Resolve a syntax range to the inferred [`Ty`] of the binding declared
+    /// Resolve a syntax range to the inferred `TypeId` of the binding declared
     /// at that range.
     ///
     /// Used by hover/goto on **declaration-site** identifiers where no
@@ -788,7 +798,7 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
     /// of `file_id`, or when inference produced no entry for the
     /// binding (e.g. a bare `Перем X` with no subsequent assignment, or
     /// a parameter — those aren't pinned by the declaration-site arms).
-    pub fn type_of_binding_at(&self, file_id: FileId, range: TextRange) -> Option<Ty> {
+    pub fn type_of_binding_at(&self, file_id: FileId, range: TextRange) -> Option<TypeId> {
         let module_id = ModuleId::new(file_id);
         let module_bodies = self.db.module_bodies(module_id);
 
@@ -797,14 +807,15 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
         if let Some(result) = module_bodies.module_code_result() {
             if let Some(binding_id) = result.source_map.binding_at_range(range) {
                 let routed = infer_owner(self.db, file_id, DefWithBodyId::ModuleCode);
-                return routed.type_of_binding(binding_id).cloned();
+                // Phase 3 §4.G.5b: kernel-native boundary — return the raw id.
+                return routed.type_id_of_binding(binding_id);
             }
         }
 
         for (local_id, _body, source_map) in module_bodies.method_bodies() {
             if let Some(binding_id) = source_map.binding_at_range(range) {
                 let routed = infer_owner(self.db, file_id, DefWithBodyId::Method(local_id));
-                return routed.type_of_binding(binding_id).cloned();
+                return routed.type_id_of_binding(binding_id);
             }
         }
 
@@ -812,7 +823,7 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
     }
 
     /// Resolve `recv.method(...)` to a [`Definition::BuiltinMethodHandle`]
-    /// when the receiver's inferred [`Ty`] yields a platform-method match
+    /// when the receiver's inferred `TypeId` yields a platform-method match
     /// through [`hir_ty::resolve_method`].
     ///
     /// This is the **type-aware** counterpart to
@@ -858,13 +869,13 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
         }
 
         let receiver_node = field_name_receiver(token)?;
-        let receiver_ty = self.type_of_expr(file_id, &receiver_node);
-        if matches!(receiver_ty, Ty::Unknown) {
+        let receiver_id = self.type_of_expr(file_id, &receiver_node);
+        if matches!(self.db.lookup_type(receiver_id), TypeKind::Unknown) {
             return None;
         }
 
         let method_name = Name::new(token.text());
-        let resolution = hir_ty::resolve_method(self.db, &receiver_ty, &method_name)?;
+        let resolution = hir_ty::resolve_method(self.db, receiver_id, &method_name)?;
 
         Some(Definition::BuiltinMethodHandle { handle: resolution.handle, method_name })
     }

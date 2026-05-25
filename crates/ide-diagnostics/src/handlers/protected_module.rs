@@ -49,7 +49,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // first by `visible_configurations()`, so duplicates between main and
     // CFE (rare under 1C extension semantics) report main first.
     for vc in &visible {
-        for common_module in vc.configuration.common_modules() {
+        for common_module in vc.config.configuration.common_modules() {
             if common_module.is_protected() {
                 let mdo_ref = format!("ОбщийМодуль.{}", common_module.name());
                 diagnostics.push(Diagnostic {

@@ -1,26 +1,25 @@
 //! TypeRef → Ty lowering.
 //!
 //! [`TyLoweringContext`] is the single entry point that turns the syntactic
-//! [`TypeRef`] layer into the semantic [`Ty`]. Every source of BSL type
+//! [`TypeRef`] layer into the semantic `TypeId`. Every source of BSL type
 //! information — `Новый X`, `Тип("…")`, JSDoc parameter hints, XML metadata
 //! attributes, `ОписаниеТипов("…")` literals — goes through the same
 //! pipeline, so a future change (e.g. adding `Ty::Union` in M3) only needs a
 //! single edit here instead of fanning out into per-source lowering code.
 //!
-//! M2 keeps the context stateless: there is no resolver or database yet, and
-//! `lower_bare_name` therefore cannot tell a user-defined type from a
-//! platform object — it falls back to `Ty::PlatformObject(name)`, mirroring
-//! the legacy `Ty::from_type_name` behaviour. Task 7 wires the context to
+//! M2 keeps the context stateless apart from the optional resolver. Bare-name
+//! lowering therefore cannot tell a user-defined type from a platform object,
+//! so it falls back to a platform object type id. Task 7 wires the context to
 //! `Resolver` + `ConfigsDatabase` so three-segment paths and cross-module
 //! lookups can go through the same adapter.
 //!
 //! # Invariants
 //!
-//! 1. `lower_bare_name("Документы")` → `Ty::ManagerCollection(Document)` —
+//! 1. `lower_bare_name_id("Документы")` → `ManagerCollection(Document)` —
 //!    the plural-form check runs before the PlatformObject fallback so
 //!    manager globals never degenerate into `PlatformObject`.
-//! 2. `lower_qualified(<RefPrefix>.<Name>)` consults the builtin
-//!    prefix-to-kind table; unknown prefixes land on `Ty::Unknown` rather
+//! 2. `lower_qualified_id(<RefPrefix>.<Name>)` consults the builtin
+//!    prefix-to-kind table; unknown prefixes land on `Unknown` rather
 //!    than fabricating a platform object — the resolver (M2 Task 7) will
 //!    handle user-facing diagnostics.
 //! 3. Everything is inside `hir-ty`, so `hir-def` never sees a `Ty` built
@@ -33,12 +32,15 @@ pub mod type_string;
 use std::collections::HashSet;
 
 use bsl_metadata::{resolve_defined_type_terminal, MdoType, MetadataResolver};
+use bsl_types::builders::Builders;
+use bsl_types::intern::TypeKernelDb;
+use bsl_types::kind::{MetadataKind, TypeId};
+use bsl_types::testing::RootConfigCtx;
 use hir_def::path::QualifiedName;
-use hir_def::ty::{MetadataKind, Ty};
 use hir_def::type_ref::TypeRef;
 use hir_def::Name;
 
-/// Adapter that lowers a syntactic [`TypeRef`] into a semantic [`Ty`].
+/// Adapter that lowers a syntactic [`TypeRef`] into a semantic `TypeId`.
 ///
 /// Carries an optional [`MetadataResolver`] so qualified names of the form
 /// `ОпределяемыйТип.X` can be expanded to their underlying type at lowering
@@ -74,174 +76,118 @@ impl<'a> TyLoweringContext<'a> {
         Self { resolver: Some(resolver) }
     }
 
-    /// Lower a [`TypeRef`] into a [`Ty`].
-    ///
-    /// Dispatches over the `TypeRef` variants:
-    /// - `Builtin(b)` → the fixed primitive from [`builtin_names::builtin_to_ty`].
-    /// - `Array(Some(elem))` → `Ty::TypedArray(Box::new(<elem>))` (Phase 0):
-    ///   carries the element through to iteration / field lookup.
-    /// - `Array(None)` → `Ty::Array` (no element witness, e.g. `Новый Массив`).
-    /// - `Map(_)` → `Ty::Map` (element types still dropped — `Ty::Map` is
-    ///   not yet parameterised; a future `Ty::TypedMap(K, V)` mirrors
-    ///   `TypedArray`).
-    /// - `Name(qname)` → [`Self::lower_qualified`] for 2+ segments, else
-    ///   [`Self::lower_bare_name`].
-    /// - `Union(parts)` → [`Ty::union`] after recursive lowering of each
-    ///   component. The smart constructor flattens nested unions (including
-    ///   those emerging from XML `Composite of Composite`), deduplicates,
-    ///   and collapses singletons.
-    /// - `AnyRef` / `Unknown` → `Ty::Unknown` (deliberately: we have no
-    ///   `Ty::AnyRef` variant yet, and narrowing it to a concrete kind would
-    ///   lie to callers).
-    pub fn lower_type_ref(&self, type_ref: &TypeRef) -> Ty {
+    // ── §4.A kernel-native recursion ─────────────────────────────
+    //
+    // Native recursion minting `TypeId` directly through the kernel
+    // [`Builders`]. `db` is the interning sink, passed per-call; the
+    // context itself stays a db-free resolver holder.
+
+    /// Lower a [`TypeRef`] into a kernel [`TypeId`].
+    pub fn lower_type_ref_id(&self, db: &dyn TypeKernelDb, type_ref: &TypeRef) -> TypeId {
         let mut visited = HashSet::new();
-        self.lower_type_ref_inner(type_ref, &mut visited)
+        self.lower_type_ref_id_inner(db, type_ref, &mut visited)
     }
 
-    fn lower_type_ref_inner(&self, type_ref: &TypeRef, visited: &mut HashSet<String>) -> Ty {
+    fn lower_type_ref_id_inner(
+        &self,
+        db: &dyn TypeKernelDb,
+        type_ref: &TypeRef,
+        visited: &mut HashSet<String>,
+    ) -> TypeId {
         match type_ref {
-            TypeRef::Builtin(b) => builtin_names::builtin_to_ty(*b),
-            // `Array(Some(elem))` carries an element type — typically a
-            // JSDoc `Массив из X` or a refined form-control payload —
-            // and lowers to `Ty::TypedArray(Box::new(<elem ty>))`. The
-            // unparameterised `Array(None)` (e.g. `Новый Массив`,
-            // bare-name `Массив`) stays `Ty::Array`. Keeping the two
-            // variants distinct lets `iteration_lookup` and field/method
-            // lookup refine through `TypedArray` while the legacy table
-            // still serves callers without a known element.
+            TypeRef::Builtin(b) => builtin_names::builtin_to_typeid(db, *b),
             TypeRef::Array(Some(elem)) => {
-                Ty::TypedArray(Box::new(self.lower_type_ref_inner(elem, visited)))
+                db.array(Some(self.lower_type_ref_id_inner(db, elem, visited)))
             }
-            TypeRef::Array(None) => Ty::Array,
-            TypeRef::Map(_) => Ty::Map,
+            TypeRef::Array(None) => db.array(None),
+            TypeRef::Map(_) => db.map(None, None),
             TypeRef::Name(qname) => match qname.len() {
-                0 => Ty::Unknown,
-                1 => self.lower_bare_name(qname.first()),
-                _ => self.lower_qualified_inner(qname, visited),
+                0 => db.unknown(),
+                1 => self.lower_bare_name_id(db, qname.first()),
+                _ => self.lower_qualified_id_inner(db, qname, visited),
             },
             TypeRef::Union(parts) => {
-                let lowered: Vec<Ty> =
-                    parts.iter().map(|t| self.lower_type_ref_inner(t, visited)).collect();
-                Ty::union(lowered)
+                let lowered: Vec<TypeId> =
+                    parts.iter().map(|t| self.lower_type_ref_id_inner(db, t, visited)).collect();
+                db.union(lowered)
             }
-            TypeRef::AnyRef | TypeRef::Unknown => Ty::Unknown,
+            TypeRef::AnyRef | TypeRef::Unknown => db.unknown(),
         }
     }
 
-    /// Lower a single-segment bare name (`Массив`, `Документы`, `Запрос`).
-    ///
-    /// Consolidated cascade:
-    /// 1. Primitive or collection builtin (via [`TypeRef::from_bare_name`]).
-    /// 2. MDO plural (`Документы` → `Ty::ManagerCollection(Document)`).
-    /// 3. Metadata-reference prefix without an object name (`СправочникСсылка`
-    ///    standalone) → `Ty::Unknown`. Prevents producing bogus
-    ///    `Ty::PlatformObject("CatalogRef")` from stray XML `cfg:*Ref`
-    ///    tokens that arrive without a concrete object name.
-    /// 4. Fallback `Ty::PlatformObject(name)` — matches the legacy
-    ///    `Expr::New` fallback in `infer::infer_new_expr` for `Новый Запрос`
-    ///    and other unverified platform objects.
-    ///
-    /// The cascade never returns `Ty::Unknown` for a syntactically valid
-    /// bare name, apart from the explicit RefPrefix guard above — the real
-    /// "unknown type" diagnostic is the resolver's job in Task 7.
-    pub fn lower_bare_name(&self, name: &Name) -> Ty {
+    /// Lower a single-segment bare name into a kernel [`TypeId`].
+    pub fn lower_bare_name_id(&self, db: &dyn TypeKernelDb, name: &Name) -> TypeId {
         let raw = name.as_str();
 
         if let Some(tref) = TypeRef::from_bare_name(raw) {
-            return self.lower_type_ref(&tref);
+            return self.lower_type_ref_id(db, &tref);
         }
 
+        // MDO plural (`Документы` → manager collection). Gated on
+        // `manager_type_prefix` exactly like `Ty::manager_collection`.
         if let Some(mdo) = MdoType::from_plural(raw) {
-            if let Some(ty) = Ty::manager_collection(mdo) {
-                return ty;
+            if mdo.manager_type_prefix().is_some() {
+                return db.manager_collection(mdo);
             }
         }
 
-        // Guard against stray metadata-reference prefixes — a bare
-        // `СправочникСсылка` is not a platform object and must not degrade
-        // into one. The resolver (Task 7) will eventually turn this into a
-        // diagnostic; for now Unknown is the honest answer.
+        // Bare metadata-reference prefix without an object name stays
+        // `Unknown` — mirrors the `Ty::Unknown` guard.
         if metadata_kind_from_prefix(raw).is_some() {
-            return Ty::Unknown;
+            return db.unknown();
         }
 
-        Ty::PlatformObject(name.clone())
+        db.platform_object(raw.to_string())
     }
 
-    /// Lower a multi-segment qualified name.
-    ///
-    /// Two patterns are decoded:
-    /// - 2-segment metadata reference (`СправочникСсылка.Товары`,
-    ///   `DocumentObject.ПКО`).
-    /// - 2-segment `ОпределяемыйТип.X` (or `DefinedType.X`) — when a
-    ///   resolver is attached, the underlying [`bsl_metadata::AttributeType`]
-    ///   is fetched via the resolver and lowered through this same context,
-    ///   so a `DefinedType` whose underlying is `xs:decimal` becomes
-    ///   `Ty::Number`. Without a resolver — or when the chain is unresolved
-    ///   or cyclic — the result is `Ty::Unknown`.
-    ///
-    /// Three-segment paths (`Документы.ПКО.СоздатьДокумент`) are delegated
-    /// to the resolver in Task 7 — this method returns `Ty::Unknown` for
-    /// anything beyond the 2-segment case so callers cannot silently observe
-    /// a wrong tail.
-    pub fn lower_qualified(&self, qname: &QualifiedName) -> Ty {
+    /// Lower a multi-segment qualified name into a kernel [`TypeId`].
+    pub fn lower_qualified_id(&self, db: &dyn TypeKernelDb, qname: &QualifiedName) -> TypeId {
         let mut visited = HashSet::new();
-        self.lower_qualified_inner(qname, &mut visited)
+        self.lower_qualified_id_inner(db, qname, &mut visited)
     }
 
-    fn lower_qualified_inner(&self, qname: &QualifiedName, visited: &mut HashSet<String>) -> Ty {
+    fn lower_qualified_id_inner(
+        &self,
+        db: &dyn TypeKernelDb,
+        qname: &QualifiedName,
+        visited: &mut HashSet<String>,
+    ) -> TypeId {
         if qname.len() != 2 {
-            return Ty::Unknown;
+            return db.unknown();
         }
 
         let prefix = qname.first().as_str();
 
-        // `ОпределяемыйТип.X` / `DefinedType.X` — resolve through the
-        // attached resolver, then lower the underlying `AttributeType`
-        // recursively. Two distinct cycle layers operate here:
-        //
-        // 1. **Lowering-level guard (`visited`)** — tracks DefinedTypes that
-        //    are currently in the process of being lowered up the call stack,
-        //    snapshot/restore-style. Without it, a self-referential
-        //    `A → Composite{A, …}` would recurse forever between the
-        //    `Composite` arm lowering and re-entry into `lower_qualified`.
-        //    The set must be popped when the arm exits so sibling arms of
-        //    the same `Composite` start from the same shared ancestry but do
-        //    not see *each other's* chain.
-        // 2. **Chain guard (inside `resolve_defined_type_terminal`)** — a
-        //    fresh, *local* set per call protects against `A → B → A`
-        //    chains. Keeping this set local is essential: two sibling arms
-        //    `DefT.A` and `DefT.B` that happen to chain through the same
-        //    intermediate `X → terminal` must each be free to walk through
-        //    `X`, otherwise the second arm collapses to `Ty::Unknown`.
         if is_defined_type_prefix(prefix) {
             let Some(resolver) = self.resolver else {
-                return Ty::Unknown;
+                return db.unknown();
             };
             let name = qname.last().as_str();
             let key = name.to_lowercase();
 
             if !visited.insert(key.clone()) {
-                // Already inside a lowering of this DefinedType higher up
-                // the stack — break the recursion.
-                return Ty::Unknown;
+                return db.unknown();
             }
 
             let mut chain_visited = HashSet::new();
             let result = resolve_defined_type_terminal(resolver, name, &mut chain_visited)
                 .map(|underlying| {
                     let tref = TypeRef::from_attribute_type(underlying);
-                    self.lower_type_ref_inner(&tref, visited)
+                    self.lower_type_ref_id_inner(db, &tref, visited)
                 })
-                .unwrap_or(Ty::Unknown);
+                .unwrap_or_else(|| db.unknown());
 
             visited.remove(&key);
             return result;
         }
 
+        // Every MetadataKind prefix mints a plain `MetadataRef` via
+        // `db.metadata_ref(.., &RootConfigCtx)`. Never `metadata_object` /
+        // `register_*` here; those are richer kinds than qualified-name
+        // lowering should produce.
         match metadata_kind_from_prefix(prefix) {
-            Some(kind) => Ty::MetadataRef { kind, name: qname.last().clone() },
-            None => Ty::Unknown,
+            Some(kind) => db.metadata_ref(kind, qname.last().as_str().to_string(), &RootConfigCtx),
+            None => db.unknown(),
         }
     }
 }
@@ -259,7 +205,7 @@ fn is_defined_type_prefix(prefix: &str) -> bool {
 }
 
 /// Prefix → [`MetadataKind`] table for the reference/object forms currently
-/// modelled by [`Ty::MetadataRef`]. Both Russian and English variants are
+/// modelled by `TypeKind::MetadataRef`. Both Russian and English variants are
 /// accepted to keep the resolver case-insensitive and bilingual end-to-end.
 ///
 /// # Coverage
@@ -354,24 +300,49 @@ fn metadata_kind_from_prefix(prefix: &str) -> Option<MetadataKind> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bsl_types::kind::TypeKind;
+    use bsl_types::testing::InMemoryDb;
     use hir_def::type_ref::BuiltinTypeRef;
 
     fn ctx() -> TyLoweringContext<'static> {
         TyLoweringContext::new()
     }
 
+    fn assert_metadata_ref(
+        db: &InMemoryDb,
+        id: TypeId,
+        expected_kind: MetadataKind,
+        expected_name: &str,
+    ) {
+        match db.lookup_type(id) {
+            TypeKind::MetadataRef(facet) => {
+                assert_eq!(facet.kind, expected_kind);
+                assert_eq!(facet.name.as_str(), expected_name);
+            }
+            other => {
+                panic!("expected MetadataRef({expected_kind:?}, {expected_name}), got {other:?}")
+            }
+        }
+    }
+
     #[test]
     fn ty_lowering_builtin_primitive() {
-        // `BuiltinTypeRef` → concrete `Ty` primitive.
-        assert_eq!(ctx().lower_type_ref(&TypeRef::Builtin(BuiltinTypeRef::Number)), Ty::Number);
-        assert_eq!(ctx().lower_type_ref(&TypeRef::Builtin(BuiltinTypeRef::String)), Ty::String);
+        let db = InMemoryDb::new();
         assert_eq!(
-            ctx().lower_type_ref(&TypeRef::Builtin(BuiltinTypeRef::Undefined)),
-            Ty::Undefined
+            ctx().lower_type_ref_id(&db, &TypeRef::Builtin(BuiltinTypeRef::Number)),
+            db.number(None, None)
         );
         assert_eq!(
-            ctx().lower_type_ref(&TypeRef::Builtin(BuiltinTypeRef::ValueTable)),
-            Ty::ValueTable
+            ctx().lower_type_ref_id(&db, &TypeRef::Builtin(BuiltinTypeRef::String)),
+            db.string(None, false)
+        );
+        assert_eq!(
+            ctx().lower_type_ref_id(&db, &TypeRef::Builtin(BuiltinTypeRef::Undefined)),
+            db.undefined()
+        );
+        assert_eq!(
+            ctx().lower_type_ref_id(&db, &TypeRef::Builtin(BuiltinTypeRef::ValueTable)),
+            db.value_table(None, bsl_types::facet::TableSource::Unknown)
         );
     }
 
@@ -382,9 +353,13 @@ mod tests {
         // the element through to iteration / field lookup. The
         // unparameterised `TypeRef::Array(None)` keeps the legacy
         // `Ty::Array` lowering — see `ty_lowering_array_none_stays_unparameterised`.
+        let db = InMemoryDb::new();
         let array_with_elem =
             TypeRef::Array(Some(Box::new(TypeRef::Builtin(BuiltinTypeRef::Number))));
-        assert_eq!(ctx().lower_type_ref(&array_with_elem), Ty::TypedArray(Box::new(Ty::Number)));
+        assert_eq!(
+            ctx().lower_type_ref_id(&db, &array_with_elem),
+            db.array(Some(db.number(None, None)))
+        );
     }
 
     #[test]
@@ -393,9 +368,13 @@ mod tests {
         // produces `TypeRef::Array(Some(Builtin(String)))`, and lowering
         // it must surface `Ty::TypedArray(String)` so downstream
         // iteration / method lookup see the element type.
+        let db = InMemoryDb::new();
         let doc = "// Возвращаемое значение:\n//   Массив из Строка - результат\n";
         let hints = hir_def::ty::doc_types::parse_method_doc_types(doc).unwrap();
-        assert_eq!(ctx().lower_type_ref(&hints.ret), Ty::TypedArray(Box::new(Ty::String)));
+        assert_eq!(
+            ctx().lower_type_ref_id(&db, &hints.ret),
+            db.array(Some(db.string(None, false)))
+        );
     }
 
     #[test]
@@ -403,7 +382,8 @@ mod tests {
         // `TypeRef::Array(None)` (e.g. `Новый Массив`, bare-name `Массив`)
         // has no recoverable element type — stays `Ty::Array` so platform
         // method lookup still resolves through the unparameterised page.
-        assert_eq!(ctx().lower_type_ref(&TypeRef::Array(None)), Ty::Array);
+        let db = InMemoryDb::new();
+        assert_eq!(ctx().lower_type_ref_id(&db, &TypeRef::Array(None)), db.array(None));
     }
 
     #[test]
@@ -415,28 +395,31 @@ mod tests {
             Box::new(TypeRef::Builtin(BuiltinTypeRef::String)),
             Box::new(TypeRef::Builtin(BuiltinTypeRef::Number)),
         )));
-        assert_eq!(ctx().lower_type_ref(&map_with_kv), Ty::Map);
+        let db = InMemoryDb::new();
+        assert_eq!(ctx().lower_type_ref_id(&db, &map_with_kv), db.map(None, None));
     }
 
     #[test]
     fn ty_lowering_bare_builtin_bilingual() {
         // Cascade step 1: `from_bare_name` catches builtins in both languages.
-        assert_eq!(ctx().lower_bare_name(&Name::new("Число")), Ty::Number);
-        assert_eq!(ctx().lower_bare_name(&Name::new("NUMBER")), Ty::Number);
-        assert_eq!(ctx().lower_bare_name(&Name::new("Массив")), Ty::Array);
-        assert_eq!(ctx().lower_bare_name(&Name::new("Соответствие")), Ty::Map);
+        let db = InMemoryDb::new();
+        assert_eq!(ctx().lower_bare_name_id(&db, &Name::new("Число")), db.number(None, None));
+        assert_eq!(ctx().lower_bare_name_id(&db, &Name::new("NUMBER")), db.number(None, None));
+        assert_eq!(ctx().lower_bare_name_id(&db, &Name::new("Массив")), db.array(None));
+        assert_eq!(ctx().lower_bare_name_id(&db, &Name::new("Соответствие")), db.map(None, None));
     }
 
     #[test]
     fn ty_lowering_manager_collection_plural() {
         // Cascade step 2: MDO plural → ManagerCollection.
+        let db = InMemoryDb::new();
         assert_eq!(
-            ctx().lower_bare_name(&Name::new("Документы")),
-            Ty::ManagerCollection(MdoType::Document)
+            ctx().lower_bare_name_id(&db, &Name::new("Документы")),
+            db.manager_collection(MdoType::Document)
         );
         assert_eq!(
-            ctx().lower_bare_name(&Name::new("Справочники")),
-            Ty::ManagerCollection(MdoType::Catalog)
+            ctx().lower_bare_name_id(&db, &Name::new("Справочники")),
+            db.manager_collection(MdoType::Catalog)
         );
     }
 
@@ -446,12 +429,19 @@ mod tests {
         // the legacy `infer::Expr::New` fallback that lets `Новый Запрос`
         // type the expression as a platform object even without verifying
         // against `bsl_platform`.
+        let db = InMemoryDb::new();
         let request = Name::new("Запрос");
-        assert_eq!(ctx().lower_bare_name(&request), Ty::PlatformObject(request));
+        assert_eq!(
+            ctx().lower_bare_name_id(&db, &request),
+            db.platform_object("Запрос".to_string())
+        );
 
         // Case is preserved verbatim — the caller owns display casing.
         let mixed = Name::new("HTTPЗапрос");
-        assert_eq!(ctx().lower_bare_name(&mixed), Ty::PlatformObject(mixed));
+        assert_eq!(
+            ctx().lower_bare_name_id(&db, &mixed),
+            db.platform_object("HTTPЗапрос".to_string())
+        );
     }
 
     #[test]
@@ -461,9 +451,10 @@ mod tests {
         // must never become `Ty::PlatformObject("CatalogRef")`. Both
         // languages covered because `metadata_kind_from_prefix` is
         // case-insensitive bilingual.
-        assert_eq!(ctx().lower_bare_name(&Name::new("СправочникСсылка")), Ty::Unknown);
-        assert_eq!(ctx().lower_bare_name(&Name::new("CatalogRef")), Ty::Unknown);
-        assert_eq!(ctx().lower_bare_name(&Name::new("documentobject")), Ty::Unknown);
+        let db = InMemoryDb::new();
+        assert_eq!(ctx().lower_bare_name_id(&db, &Name::new("СправочникСсылка")), db.unknown());
+        assert_eq!(ctx().lower_bare_name_id(&db, &Name::new("CatalogRef")), db.unknown());
+        assert_eq!(ctx().lower_bare_name_id(&db, &Name::new("documentobject")), db.unknown());
     }
 
     #[test]
@@ -477,10 +468,11 @@ mod tests {
         for prefix in
             ["ChartOfCharacteristicTypesRef", "ChartOfCalculationTypesRef", "ConstantValueManager"]
         {
+            let db = InMemoryDb::new();
             let qname = QualifiedName::from_segments([Name::new(prefix), Name::new("Х")]);
             assert_eq!(
-                ctx().lower_qualified(&qname),
-                Ty::Unknown,
+                ctx().lower_qualified_id(&db, &qname),
+                db.unknown(),
                 "expected Unknown for `{prefix}.Х`"
             );
         }
@@ -501,12 +493,10 @@ mod tests {
             ("ChartOfAccountsObject", MetadataKind::ChartOfAccountsObject),
             ("ПланСчетовОбъект", MetadataKind::ChartOfAccountsObject),
         ] {
+            let db = InMemoryDb::new();
             let qname = QualifiedName::from_segments([Name::new(prefix), Name::new("Х")]);
-            assert_eq!(
-                ctx().lower_qualified(&qname),
-                Ty::MetadataRef { kind: expected, name: Name::new("Х") },
-                "expected MetadataRef({expected:?}) for `{prefix}.Х`"
-            );
+            let id = ctx().lower_qualified_id(&db, &qname);
+            assert_metadata_ref(&db, id, expected, "Х");
         }
     }
 
@@ -523,12 +513,10 @@ mod tests {
             ("BusinessProcessRef", MetadataKind::BusinessProcessRef),
             ("БизнесПроцессСсылка", MetadataKind::BusinessProcessRef),
         ] {
+            let db = InMemoryDb::new();
             let qname = QualifiedName::from_segments([Name::new(prefix), Name::new("Х")]);
-            assert_eq!(
-                ctx().lower_qualified(&qname),
-                Ty::MetadataRef { kind: expected, name: Name::new("Х") },
-                "expected MetadataRef({expected:?}) for `{prefix}.Х`"
-            );
+            let id = ctx().lower_qualified_id(&db, &qname);
+            assert_metadata_ref(&db, id, expected, "Х");
         }
     }
 
@@ -548,39 +536,36 @@ mod tests {
             ("CalculationRegisterRef", MetadataKind::CalculationRegisterRef),
             ("РегистрРасчетаКлючЗаписи", MetadataKind::CalculationRegisterRef),
         ] {
+            let db = InMemoryDb::new();
             let qname = QualifiedName::from_segments([Name::new(prefix), Name::new("Х")]);
-            assert_eq!(
-                ctx().lower_qualified(&qname),
-                Ty::MetadataRef { kind: expected, name: Name::new("Х") },
-                "expected MetadataRef({expected:?}) for `{prefix}.Х`"
-            );
+            let id = ctx().lower_qualified_id(&db, &qname);
+            assert_metadata_ref(&db, id, expected, "Х");
         }
     }
 
     #[test]
     fn ty_lowering_qualified_metadata_ref_english() {
+        let db = InMemoryDb::new();
         let qname = QualifiedName::from_segments([Name::new("CatalogRef"), Name::new("Товары")]);
-        assert_eq!(
-            ctx().lower_qualified(&qname),
-            Ty::MetadataRef { kind: MetadataKind::CatalogRef, name: Name::new("Товары") }
-        );
+        let id = ctx().lower_qualified_id(&db, &qname);
+        assert_metadata_ref(&db, id, MetadataKind::CatalogRef, "Товары");
     }
 
     #[test]
     fn ty_lowering_qualified_metadata_ref_russian() {
+        let db = InMemoryDb::new();
         let qname = QualifiedName::from_segments([Name::new("ДокументСсылка"), Name::new("ПКО")]);
-        assert_eq!(
-            ctx().lower_qualified(&qname),
-            Ty::MetadataRef { kind: MetadataKind::DocumentRef, name: Name::new("ПКО") }
-        );
+        let id = ctx().lower_qualified_id(&db, &qname);
+        assert_metadata_ref(&db, id, MetadataKind::DocumentRef, "ПКО");
     }
 
     #[test]
     fn ty_lowering_qualified_unknown_prefix_is_unknown() {
         // Not a MetadataKind prefix; resolver will produce the user-facing
         // diagnostic in Task 7.
+        let db = InMemoryDb::new();
         let qname = QualifiedName::from_segments([Name::new("ОбщийМодуль"), Name::new("Х")]);
-        assert_eq!(ctx().lower_qualified(&qname), Ty::Unknown);
+        assert_eq!(ctx().lower_qualified_id(&db, &qname), db.unknown());
     }
 
     #[test]
@@ -593,12 +578,13 @@ mod tests {
             Name::new("ПКО"),
             Name::new("СоздатьДокумент"),
         ]);
-        assert_eq!(ctx().lower_qualified(&three), Ty::Unknown);
+        let db = InMemoryDb::new();
+        assert_eq!(ctx().lower_qualified_id(&db, &three), db.unknown());
     }
 
     #[test]
     fn ty_lowering_union_flows_through_ty_union_constructor() {
-        // Each member lowers through the same `lower_type_ref`, then the
+        // Each member lowers through the same `lower_type_ref_id`, then the
         // smart constructor normalises the result. Sibling primitives stay
         // distinct; `Ty::union` imposes a stable order so two syntactically
         // different composites with the same member set compare equal.
@@ -606,10 +592,11 @@ mod tests {
             TypeRef::Builtin(BuiltinTypeRef::Number),
             TypeRef::Builtin(BuiltinTypeRef::String),
         ]);
-        let ty = ctx().lower_type_ref(&tr);
-        match ty {
-            Ty::Union(ref parts) => assert_eq!(parts.len(), 2),
-            _ => panic!("expected Ty::Union, got {ty:?}"),
+        let db = InMemoryDb::new();
+        let ty = ctx().lower_type_ref_id(&db, &tr);
+        match db.lookup_type(ty) {
+            TypeKind::Union(parts) => assert_eq!(parts.len(), 2),
+            other => panic!("expected TypeKind::Union, got {other:?}"),
         }
 
         // Flipping the order reaches the same semantic `Ty`.
@@ -617,7 +604,7 @@ mod tests {
             TypeRef::Builtin(BuiltinTypeRef::String),
             TypeRef::Builtin(BuiltinTypeRef::Number),
         ]);
-        assert_eq!(ctx().lower_type_ref(&flipped), ty);
+        assert_eq!(ctx().lower_type_ref_id(&db, &flipped), ty);
     }
 
     #[test]
@@ -626,7 +613,8 @@ mod tests {
         // unwraps to `lowered_x` — callers never have to pattern-match on a
         // one-element union.
         let tr = TypeRef::Union(vec![TypeRef::Builtin(BuiltinTypeRef::Number)]);
-        assert_eq!(ctx().lower_type_ref(&tr), Ty::Number);
+        let db = InMemoryDb::new();
+        assert_eq!(ctx().lower_type_ref_id(&db, &tr), db.number(None, None));
     }
 
     #[test]
@@ -634,30 +622,28 @@ mod tests {
         // Empty union has no type information — `Ty::union([])` returns
         // `Ty::Unknown`, keeping the "stated but empty" case distinguishable
         // from a truly absent type.
-        assert_eq!(ctx().lower_type_ref(&TypeRef::Union(vec![])), Ty::Unknown);
+        let db = InMemoryDb::new();
+        assert_eq!(ctx().lower_type_ref_id(&db, &TypeRef::Union(vec![])), db.unknown());
     }
 
     #[test]
     fn ty_lowering_type_ref_routes_through_name_branches() {
         // `TypeRef::Name([single])` → bare-name cascade.
+        let db = InMemoryDb::new();
         let single = TypeRef::Name(QualifiedName::from_segments([Name::new("Массив")]));
-        assert_eq!(ctx().lower_type_ref(&single), Ty::Array);
+        assert_eq!(ctx().lower_type_ref_id(&db, &single), db.array(None));
 
         // `TypeRef::Name([prefix, name])` → qualified cascade.
         let qualified = TypeRef::Name(QualifiedName::from_segments([
             Name::new("СправочникСсылка"),
             Name::new("Номенклатура"),
         ]));
-        assert_eq!(
-            ctx().lower_type_ref(&qualified),
-            Ty::MetadataRef {
-                kind: MetadataKind::CatalogRef, name: Name::new("Номенклатура")
-            }
-        );
+        let id = ctx().lower_type_ref_id(&db, &qualified);
+        assert_metadata_ref(&db, id, MetadataKind::CatalogRef, "Номенклатура");
 
         // AnyRef / Unknown remain Unknown until Ty::AnyRef lands.
-        assert_eq!(ctx().lower_type_ref(&TypeRef::AnyRef), Ty::Unknown);
-        assert_eq!(ctx().lower_type_ref(&TypeRef::Unknown), Ty::Unknown);
+        assert_eq!(ctx().lower_type_ref_id(&db, &TypeRef::AnyRef), db.unknown());
+        assert_eq!(ctx().lower_type_ref_id(&db, &TypeRef::Unknown), db.unknown());
     }
 
     // -----------------------------------------------------------------------
@@ -702,7 +688,8 @@ mod tests {
             Name::new("ОпределяемыйТип"),
             Name::new("ДенежнаяСумма"),
         ]);
-        assert_eq!(ctx().lower_qualified(&qname), Ty::Unknown);
+        let db = InMemoryDb::new();
+        assert_eq!(ctx().lower_qualified_id(&db, &qname), db.unknown());
     }
 
     #[test]
@@ -722,7 +709,8 @@ mod tests {
             Name::new("ОпределяемыйТип"),
             Name::new("ДенежнаяСумма"),
         ]);
-        assert_eq!(lowering.lower_qualified(&qname), Ty::Number);
+        let db = InMemoryDb::new();
+        assert_eq!(lowering.lower_qualified_id(&db, &qname), db.number(None, None));
     }
 
     #[test]
@@ -736,7 +724,8 @@ mod tests {
 
         let lowering = TyLoweringContext::with_resolver(&resolver);
         let qname = QualifiedName::from_segments([Name::new("ОпределяемыйТип"), Name::new("A")]);
-        assert_eq!(lowering.lower_qualified(&qname), Ty::String);
+        let db = InMemoryDb::new();
+        assert_eq!(lowering.lower_qualified_id(&db, &qname), db.string(None, false));
     }
 
     #[test]
@@ -751,7 +740,8 @@ mod tests {
 
         let lowering = TyLoweringContext::with_resolver(&resolver);
         let qname = QualifiedName::from_segments([Name::new("ОпределяемыйТип"), Name::new("A")]);
-        assert_eq!(lowering.lower_qualified(&qname), Ty::Unknown);
+        let db = InMemoryDb::new();
+        assert_eq!(lowering.lower_qualified_id(&db, &qname), db.unknown());
     }
 
     #[test]
@@ -775,12 +765,13 @@ mod tests {
             Name::new("ОпределяемыйТип"),
             Name::new("ЛюбоеЧислоИлиСтрока"),
         ]);
-        match lowering.lower_qualified(&qname) {
-            Ty::Union(arms) => {
-                assert!(arms.contains(&Ty::Number), "union must contain Number");
-                assert!(arms.contains(&Ty::String), "union must contain String");
+        let db = InMemoryDb::new();
+        match db.lookup_type(lowering.lower_qualified_id(&db, &qname)) {
+            TypeKind::Union(arms) => {
+                assert!(arms.contains(&db.number(None, None)), "union must contain Number");
+                assert!(arms.contains(&db.string(None, false)), "union must contain String");
             }
-            other => panic!("expected Ty::Union, got {other:?}"),
+            other => panic!("expected TypeKind::Union, got {other:?}"),
         }
     }
 
@@ -809,7 +800,8 @@ mod tests {
         // Both arms collapse to `Ty::Number`; `Ty::union` then dedupes the
         // singleton — the assertion fails if either arm degrades to
         // `Ty::Unknown` (the bug case).
-        assert_eq!(lowering.lower_type_ref(&tref), Ty::Number);
+        let db = InMemoryDb::new();
+        assert_eq!(lowering.lower_type_ref_id(&db, &tref), db.number(None, None));
     }
 
     #[test]
@@ -828,16 +820,12 @@ mod tests {
         )]);
         let lowering = TyLoweringContext::with_resolver(&resolver);
         let qname = QualifiedName::from_segments([Name::new("ОпределяемыйТип"), Name::new("A")]);
-        // Self-reference inside the composite collapses to `Ty::Unknown`,
-        // the other arm to `Ty::Number` — the smart constructor builds a
-        // union of the two.
-        match lowering.lower_qualified(&qname) {
-            Ty::Union(arms) => {
-                assert!(arms.contains(&Ty::Number));
-                assert!(arms.contains(&Ty::Unknown));
-            }
-            other => panic!("expected Ty::Union, got {other:?}"),
-        }
+        // Self-reference inside the composite collapses to Unknown, the
+        // other arm to Number. The kernel union canonicalizer drops the
+        // unknown arm, preserving the concrete witness while still proving
+        // that recursion terminates.
+        let db = InMemoryDb::new();
+        assert_eq!(lowering.lower_qualified_id(&db, &qname), db.number(None, None));
     }
 
     #[test]
@@ -851,9 +839,10 @@ mod tests {
         for prefix in ["ОпределяемыйТип", "определяемыйтип", "ОПРЕДЕЛЯЕМЫЙТИП"]
         {
             let qname = QualifiedName::from_segments([Name::new(prefix), Name::new("X")]);
+            let db = InMemoryDb::new();
             assert_eq!(
-                lowering.lower_qualified(&qname),
-                Ty::Boolean,
+                lowering.lower_qualified_id(&db, &qname),
+                db.boolean(),
                 "case-insensitive lookup failed for `{prefix}`"
             );
         }
@@ -867,6 +856,125 @@ mod tests {
         let resolver = MockResolver::with(&[("X", AttributeType::Boolean)]);
         let lowering = TyLoweringContext::with_resolver(&resolver);
         let qname = QualifiedName::from_segments([Name::new("DefinedType"), Name::new("X")]);
-        assert_eq!(lowering.lower_qualified(&qname), Ty::Boolean);
+        let db = InMemoryDb::new();
+        assert_eq!(lowering.lower_qualified_id(&db, &qname), db.boolean());
+    }
+
+    #[test]
+    fn lower_type_ref_id_covers_resolver_free_branches() {
+        let db = InMemoryDb::new();
+        let lowering = ctx();
+
+        let name = |s: &str| TypeRef::Name(QualifiedName::from_segments([Name::new(s)]));
+        let qual = |a: &str, b: &str| {
+            TypeRef::Name(QualifiedName::from_segments([Name::new(a), Name::new(b)]))
+        };
+
+        let cases = vec![
+            (TypeRef::Builtin(BuiltinTypeRef::Number), db.number(None, None)),
+            (
+                TypeRef::Builtin(BuiltinTypeRef::ValueTable),
+                db.value_table(None, bsl_types::facet::TableSource::Unknown),
+            ),
+            (
+                TypeRef::Array(Some(Box::new(TypeRef::Builtin(BuiltinTypeRef::String)))),
+                db.array(Some(db.string(None, false))),
+            ),
+            (TypeRef::Array(None), db.array(None)),
+            (
+                TypeRef::Map(Some((
+                    Box::new(TypeRef::Builtin(BuiltinTypeRef::String)),
+                    Box::new(TypeRef::Builtin(BuiltinTypeRef::Number)),
+                ))),
+                db.map(None, None),
+            ),
+            (TypeRef::AnyRef, db.unknown()),
+            (TypeRef::Unknown, db.unknown()),
+            // bare names: builtin, MDO plural, RefPrefix-without-name guard,
+            // platform-object fallback.
+            (name("Число"), db.number(None, None)),
+            (name("Документы"), db.manager_collection(MdoType::Document)),
+            (name("СправочникСсылка"), db.unknown()),
+            (name("Запрос"), db.platform_object("Запрос".to_string())),
+            // qualified: MetadataRef prefix, non-metadata prefix, DefinedType
+            // (no resolver → Unknown), 3-segment overflow.
+            (
+                qual("СправочникСсылка", "Товары"),
+                db.metadata_ref(MetadataKind::CatalogRef, "Товары".to_string(), &RootConfigCtx),
+            ),
+            (qual("ОбщийМодуль", "Х"), db.unknown()),
+            (qual("ОпределяемыйТип", "ДенежнаяСумма"), db.unknown()),
+            (
+                TypeRef::Name(QualifiedName::from_segments([
+                    Name::new("Документы"),
+                    Name::new("ПКО"),
+                    Name::new("Создать"),
+                ])),
+                db.unknown(),
+            ),
+            // unions: concrete arms, arm with Unknown, all-Unknown, dup arms.
+            (
+                TypeRef::Union(vec![
+                    TypeRef::Builtin(BuiltinTypeRef::Number),
+                    TypeRef::Builtin(BuiltinTypeRef::String),
+                ]),
+                db.union(vec![db.number(None, None), db.string(None, false)]),
+            ),
+            (
+                TypeRef::Union(vec![TypeRef::Builtin(BuiltinTypeRef::Number), TypeRef::Unknown]),
+                db.union(vec![db.number(None, None), db.unknown()]),
+            ),
+            (TypeRef::Union(vec![TypeRef::Unknown, TypeRef::AnyRef]), db.unknown()),
+            (
+                TypeRef::Union(vec![
+                    TypeRef::Builtin(BuiltinTypeRef::Boolean),
+                    TypeRef::Builtin(BuiltinTypeRef::Boolean),
+                ]),
+                db.boolean(),
+            ),
+        ];
+
+        for (tr, expected) in &cases {
+            assert_eq!(lowering.lower_type_ref_id(&db, tr), *expected, "lowering drift for {tr:?}");
+        }
+    }
+
+    #[test]
+    fn lower_qualified_id_resolves_defined_types() {
+        let db = InMemoryDb::new();
+        let resolver = MockResolver::with(&[
+            ("ДенежнаяСумма", AttributeType::Number { precision: 15, scale: 2 }),
+            ("A", AttributeType::DefinedType { name: "B".to_string() }),
+            ("B", AttributeType::String { length: Some(64) }),
+            (
+                "ЛюбоеЧислоИлиСтрока",
+                AttributeType::Composite {
+                    types: vec![
+                        AttributeType::Number { precision: 10, scale: 0 },
+                        AttributeType::String { length: None },
+                    ],
+                },
+            ),
+        ]);
+        let lowering = TyLoweringContext::with_resolver(&resolver);
+
+        let number_qname = QualifiedName::from_segments([
+            Name::new("ОпределяемыйТип"),
+            Name::new("ДенежнаяСумма"),
+        ]);
+        assert_eq!(lowering.lower_qualified_id(&db, &number_qname), db.number(None, None));
+
+        let chained_qname =
+            QualifiedName::from_segments([Name::new("ОпределяемыйТип"), Name::new("A")]);
+        assert_eq!(lowering.lower_qualified_id(&db, &chained_qname), db.string(None, false));
+
+        let union_qname = QualifiedName::from_segments([
+            Name::new("ОпределяемыйТип"),
+            Name::new("ЛюбоеЧислоИлиСтрока"),
+        ]);
+        assert_eq!(
+            lowering.lower_qualified_id(&db, &union_qname),
+            db.union(vec![db.number(None, None), db.string(None, false)])
+        );
     }
 }

@@ -2,7 +2,8 @@
 //!
 //! Unified IDE entry point for asking semantic questions about a type:
 //! "what methods are callable on this?", "what's the type of this
-//! field?", "is this a reference type?". Wraps [`hir_ty::Ty`] and
+//! field?", "is this a reference type?". Wraps the type kernel
+//! (`TypeId` / `TypeKind`) and
 //! plumbs through the M3 adapters — [`hir_ty::lookup_method`],
 //! [`hir_ty::lookup_field`] — plus [`PlatformData`] / [`Configuration`]
 //! enumeration for the list-shaped queries.
@@ -24,13 +25,19 @@
 
 use bsl_metadata::MdoType;
 use bsl_platform::{PlatformData, PlatformMethod};
+use bsl_types::builders::Builders;
+use bsl_types::display::{display_name as kernel_display, Locale as KernelLocale, PlainDisplayCtx};
+use bsl_types::intern::TypeKernelDb;
+use bsl_types::kind::{Projection, TypeId, TypeKind};
 use hir_def::configs::ConfigsDatabase;
-use hir_def::ty::{MetadataKind, Ty};
+use hir_def::ty::MetadataKind;
 use hir_def::Name;
-use hir_ty::lower::type_string::{lower_param_type_string, lower_return_type_string};
+use hir_ty::lower::type_string::{lower_param_type_string_typeid, lower_return_type_string_typeid};
+use hir_ty::method_lookup::platform_type_key_id;
 use hir_ty::{
     enumerate_fields, is_assignable, is_ref_ty, lookup_field, lookup_method, FieldInfo, FieldOrigin,
 };
+use std::sync::Arc;
 use vfs::FileId;
 
 /// Lightweight DTO for a method exposed by a [`Type`].
@@ -41,7 +48,7 @@ pub struct Method {
     /// English method name.
     pub english_name: Name,
     /// `None` for procedures.
-    pub return_ty: Option<Ty>,
+    pub return_ty: Option<TypeId>,
     /// Method parameters in declaration order.
     pub params: Vec<MethodParam>,
 }
@@ -50,7 +57,7 @@ pub struct Method {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MethodParam {
     pub name: Name,
-    pub ty: Option<Ty>,
+    pub ty: Option<TypeId>,
     pub optional: bool,
 }
 
@@ -99,9 +106,9 @@ pub struct Field {
     /// metadata does not declare a separate English alias.
     pub english_name: Name,
     /// Field type after lowering through [`TyLoweringContext`].
-    pub ty: Ty,
+    pub ty: TypeId,
     /// Domain value type wrapped by a synthetic/platform accessor.
-    pub value_ty: Option<Ty>,
+    pub value_ty: Option<TypeId>,
     /// Whether this field is read-only.
     pub is_readonly: bool,
     /// Where this field originated from.
@@ -110,7 +117,7 @@ pub struct Field {
 
 /// Semantic type handle with IDE-facing queries.
 ///
-/// Pairs a [`Ty`] with the database + file context so enumerators that
+/// Pairs a `TypeId` with the database + file context so enumerators that
 /// need visible configurations (MDO attribute list) and the platform
 /// index (method list) don't require extra parameters at every call
 /// site.
@@ -118,46 +125,43 @@ pub struct Field {
 pub struct Type<'db, DB> {
     db: &'db DB,
     file_id: FileId,
-    ty: Ty,
+    id: TypeId,
 }
 
-impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
-    /// Wrap a raw [`Ty`] in the facade.
-    ///
-    /// `file_id` anchors the lookup in a specific file's visible
-    /// configurations — swapping it changes which extensions' MDOs the
-    /// facade sees (matches the Salsa invalidation graph).
-    pub fn new(db: &'db DB, file_id: FileId, ty: Ty) -> Self {
-        Self { db, file_id, ty }
+impl<'db, DB: ConfigsDatabase + TypeKernelDb> Type<'db, DB> {
+    /// Wrap an interned [`TypeId`] in the facade (kernel-native entry).
+    pub fn from_id(db: &'db DB, file_id: FileId, id: TypeId) -> Self {
+        Self { db, file_id, id }
     }
 
-    /// Underlying [`Ty`] — escape hatch for callers that need the raw
-    /// variant (e.g. union narrowing in M4).
-    pub fn ty(&self) -> &Ty {
-        &self.ty
+    /// The interned type id backing this facade.
+    pub fn id(&self) -> TypeId {
+        self.id
+    }
+
+    /// Borrow the kernel [`TypeKind`] backing this facade.
+    pub fn kind(&self) -> &TypeKind {
+        self.db.lookup_type(self.id)
     }
 
     /// Short human-readable name in the given locale, e.g.
     /// `"Number"` / `"Число"`, `"Number | String"` / `"Число | Строка"` for
-    /// a union. Delegates to [`Ty::display_name`] and owns a fresh `String`
-    /// so callers can format freely.
+    /// a union. Phase 3 §4.G.5d: rendered through the type kernel
+    /// ([`bsl_types::display`]) — the single source of display truth.
     pub fn display_name(&self, locale: base_db::Locale) -> String {
-        self.ty.display_name(locale).to_string()
+        kernel_type_label(self.db, self.id, locale, false)
     }
 
-    /// Stable English machine-name; equivalent to
-    /// `display_name(Locale::En)`. Use in tests, logs, and any other
-    /// context where the canonical English label is intentional rather
-    /// than locale-dependent.
+    /// English type label; equivalent to `display_name(Locale::En)`. Use in
+    /// tests, logs, and any other context where the English rendering is
+    /// intentional rather than locale-dependent.
+    ///
+    /// Phase 3 §4.G.5d: rendered through the type kernel
+    /// ([`bsl_types::display`]); manager-shaped types may differ from the
+    /// legacy `Ty::canonical_name` platform machine-names until the Phase 4
+    /// manager-display polish lands.
     pub fn canonical_name(&self) -> String {
-        self.ty.canonical_name().to_string()
-    }
-
-    /// `Display`-able wrapper that knows the locale. Equivalent to
-    /// `Ty::display`, exposed on the facade for IDE-layer convenience —
-    /// emitters write `format!("{}", ty.display(locale))`.
-    pub fn display(&self, locale: base_db::Locale) -> hir_def::ty::TyDisplay<'_> {
-        self.ty.display(locale)
+        kernel_type_label(self.db, self.id, base_db::Locale::En, false)
     }
 
     /// `true` for types that carry an MDO reference — `CatalogRef`,
@@ -167,7 +171,7 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
     /// or `TabularSection`/`TabularSectionRow`; those are manager-side
     /// or container-side abstractions, not first-class references.
     pub fn is_ref_type(&self) -> bool {
-        is_ref_ty(&self.ty)
+        is_ref_ty(self.db, self.id)
     }
 
     /// Structural assignability: is `self` usable where `other` is expected?
@@ -192,18 +196,21 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
     /// ## Narrowing
     ///
     /// The method takes a plain [`Type`] — not a syntax node — so it
-    /// compares whatever [`Ty`] the caller already narrowed. Callers
+    /// compares whatever `TypeId` the caller already narrowed. Callers
     /// that want the narrowed type at a specific expression should
     /// build the [`Type`] from [`Semantics::type_of_expr`], which
     /// already overlays the [`NarrowState`] produced by
     /// [`HirDatabase::narrow`] (Task 6.6). Calling `is_assignable_to`
-    /// on the base (pre-narrow) [`Ty`] is legal but less precise.
+    /// on the base (pre-narrow) `TypeId` is legal but less precise.
     ///
     /// [`Semantics::type_of_expr`]: crate::Semantics::type_of_expr
     /// [`NarrowState`]: hir_ty::narrow::NarrowState
     /// [`HirDatabase::narrow`]: hir_ty::HirDatabase::narrow
     pub fn is_assignable_to(&self, other: &Self) -> bool {
-        is_assignable(&self.ty, &other.ty)
+        // `TypeId` is db-local, so `self` and `other` must share the same
+        // kernel db — every caller builds both facades from one
+        // `Semantics`/db, so their ids are directly comparable.
+        is_assignable(self.db, self.id, other.id)
     }
 
     /// The corresponding manager type — e.g. `CatalogRef.Товары` →
@@ -216,64 +223,76 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
     /// (primitives, collections, unions, platform objects, tabular
     /// sections / rows, register record-set / record-manager receivers).
     pub fn manager(&self) -> Option<Self> {
-        let (mdo_type, name) = match &self.ty {
-            Ty::MetadataRef { kind, name } => {
-                let mdo = match kind {
-                    MetadataKind::CatalogRef | MetadataKind::CatalogObject => MdoType::Catalog,
-                    MetadataKind::DocumentRef | MetadataKind::DocumentObject => MdoType::Document,
-                    MetadataKind::EnumRef => MdoType::Enum,
-                    // *Object companions of MDOs reach the same Manager
-                    // (`Обработки.X`, `Отчёты.X`, `БизнесПроцессы.X`,
-                    // `Задачи.X`) — the form-attribute projection lands
-                    // on `MetadataRef{*Object}` and the user may then
-                    // navigate `Объект.Manager`-style paths through the
-                    // facade. Mapping to MDO here is symmetric with the
-                    // *Ref / *Object union arms for Catalog / Document.
-                    MetadataKind::TaskRef | MetadataKind::TaskObject => MdoType::Task,
-                    MetadataKind::BusinessProcessRef | MetadataKind::BusinessProcessObject => {
-                        MdoType::BusinessProcess
-                    }
-                    MetadataKind::DataProcessorObject => MdoType::DataProcessor,
-                    MetadataKind::ReportObject => MdoType::Report,
-                    MetadataKind::ExchangePlanRef | MetadataKind::ExchangePlanObject => {
-                        MdoType::ExchangePlan
-                    }
-                    MetadataKind::ChartOfAccountsRef | MetadataKind::ChartOfAccountsObject => {
-                        MdoType::ChartOfAccounts
-                    }
-                    MetadataKind::InformationRegisterRef => MdoType::InformationRegister,
-                    MetadataKind::AccumulationRegisterRef => MdoType::AccumulationRegister,
-                    MetadataKind::AccountingRegisterRef => MdoType::AccountingRegister,
-                    MetadataKind::CalculationRegisterRef => MdoType::CalculationRegister,
-                    // No-manager kinds: enumerated explicitly (no wildcard)
-                    // so a new `MetadataKind` variant becomes a compile
-                    // error here instead of silently returning None.
-                    // Tabular sections, register parts, and the Filter
-                    // synthetic don't have a Manager surface; record-set
-                    // and record-manager kinds reach managers through
-                    // their parent register, not the kind directly.
-                    MetadataKind::InformationRegisterRecordManager
-                    | MetadataKind::InformationRegisterRecordSet
-                    | MetadataKind::InformationRegisterRecord
-                    | MetadataKind::AccumulationRegisterRecordSet
-                    | MetadataKind::AccumulationRegisterRecord
-                    | MetadataKind::AccountingRegisterRecordSet
-                    | MetadataKind::AccountingRegisterRecord
-                    | MetadataKind::CalculationRegisterRecordSet
-                    | MetadataKind::CalculationRegisterRecord
-                    | MetadataKind::RegisterDimension { .. }
-                    | MetadataKind::RegisterResource { .. }
-                    | MetadataKind::RegisterAttribute { .. }
-                    | MetadataKind::RegisterFilter { .. }
-                    | MetadataKind::TabularSection { .. }
-                    | MetadataKind::TabularSectionRow { .. } => return None,
-                };
-                (mdo, name.clone())
+        // Extract owned facet data before the `object_manager_with_config`
+        // builder call — the `&TypeKind` borrow from `kind()` cannot be
+        // held across a `db` method that re-borrows the kernel.
+        //
+        // Both `MetadataRef` and `MetadataObject` carry the same
+        // `kind/name/config_id` and must route here: the legacy `Ty` path
+        // collapsed `MetadataObject` into `Ty::MetadataRef` before the
+        // manager arms, so a native `MetadataObject` receiver reached them.
+        let (kind, name, config_id) = match self.kind() {
+            TypeKind::MetadataRef(facet) => {
+                (facet.kind, facet.name.clone(), facet.config_id.clone())
+            }
+            TypeKind::MetadataObject(facet) => {
+                (facet.kind, facet.name.clone(), facet.config_id.clone())
             }
             _ => return None,
         };
+        let mdo_type = match kind {
+            MetadataKind::CatalogRef | MetadataKind::CatalogObject => MdoType::Catalog,
+            MetadataKind::DocumentRef | MetadataKind::DocumentObject => MdoType::Document,
+            MetadataKind::EnumRef => MdoType::Enum,
+            // *Object companions of MDOs reach the same Manager
+            // (`Обработки.X`, `Отчёты.X`, `БизнесПроцессы.X`,
+            // `Задачи.X`) — the form-attribute projection lands
+            // on `MetadataRef{*Object}` and the user may then
+            // navigate `Объект.Manager`-style paths through the
+            // facade. Mapping to MDO here is symmetric with the
+            // *Ref / *Object union arms for Catalog / Document.
+            MetadataKind::TaskRef | MetadataKind::TaskObject => MdoType::Task,
+            MetadataKind::BusinessProcessRef | MetadataKind::BusinessProcessObject => {
+                MdoType::BusinessProcess
+            }
+            MetadataKind::DataProcessorObject => MdoType::DataProcessor,
+            MetadataKind::ReportObject => MdoType::Report,
+            MetadataKind::ExchangePlanRef | MetadataKind::ExchangePlanObject => {
+                MdoType::ExchangePlan
+            }
+            MetadataKind::ChartOfAccountsRef | MetadataKind::ChartOfAccountsObject => {
+                MdoType::ChartOfAccounts
+            }
+            MetadataKind::InformationRegisterRef => MdoType::InformationRegister,
+            MetadataKind::AccumulationRegisterRef => MdoType::AccumulationRegister,
+            MetadataKind::AccountingRegisterRef => MdoType::AccountingRegister,
+            MetadataKind::CalculationRegisterRef => MdoType::CalculationRegister,
+            // No-manager kinds: enumerated explicitly (no wildcard)
+            // so a new `MetadataKind` variant becomes a compile
+            // error here instead of silently returning None.
+            // Tabular sections, register parts, and the Filter
+            // synthetic don't have a Manager surface; record-set
+            // and record-manager kinds reach managers through
+            // their parent register, not the kind directly.
+            MetadataKind::InformationRegisterRecordManager
+            | MetadataKind::InformationRegisterRecordSet
+            | MetadataKind::InformationRegisterRecord
+            | MetadataKind::AccumulationRegisterRecordSet
+            | MetadataKind::AccumulationRegisterRecord
+            | MetadataKind::AccountingRegisterRecordSet
+            | MetadataKind::AccountingRegisterRecord
+            | MetadataKind::CalculationRegisterRecordSet
+            | MetadataKind::CalculationRegisterRecord
+            | MetadataKind::RegisterDimension { .. }
+            | MetadataKind::RegisterResource { .. }
+            | MetadataKind::RegisterAttribute { .. }
+            | MetadataKind::RegisterFilter { .. }
+            | MetadataKind::TabularSection { .. }
+            | MetadataKind::TabularSectionRow { .. } => return None,
+        };
 
-        Some(Self::new(self.db, self.file_id, Ty::ObjectManager { kind: mdo_type, name }))
+        let id = self.db.object_manager_with_config(mdo_type, name, config_id);
+        Some(Self::from_id(self.db, self.file_id, id))
     }
 
     /// Resolve a method call `x.method_name(...)` to its return type.
@@ -282,9 +301,13 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
     /// `PlatformData::instance` (used by the adapter) controls caching
     /// at the platform-data layer.
     pub fn method_return_type(&self, method_name: &Name) -> Self {
-        let ty =
-            lookup_method(&self.ty, method_name).map(|info| info.return_ty).unwrap_or(Ty::Unknown);
-        Self::new(self.db, self.file_id, ty)
+        // Phase 3 §4.F: facade + `lookup_method` are both kernel-native,
+        // so the receiver id and the returned id flow through without a
+        // bridge.
+        let id = lookup_method(self.db, self.id, method_name)
+            .map(|info| info.return_ty)
+            .unwrap_or_else(|| self.db.unknown());
+        Self::from_id(self.db, self.file_id, id)
     }
 
     /// Resolve a field access `x.field_name` to its type.
@@ -293,10 +316,13 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
     /// hover / completion on attributes correctly invalidate when the
     /// MDO's XML changes.
     pub fn field_type(&self, field_name: &Name) -> Self {
+        // `lookup_field` takes and returns kernel ids, so the receiver and
+        // the resolved `FieldInfo.ty` flow through without bridging.
         let configs = self.db.configurations(self.file_id);
-        let ty =
-            lookup_field(&configs, &self.ty, field_name).map(|info| info.ty).unwrap_or(Ty::Unknown);
-        Self::new(self.db, self.file_id, ty)
+        let id = lookup_field(self.db, &configs, self.id, field_name)
+            .map(|info| info.ty)
+            .unwrap_or_else(|| self.db.unknown());
+        Self::from_id(self.db, self.file_id, id)
     }
 
     /// Enumerate methods callable on the receiver.
@@ -316,7 +342,7 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
         // extension members (`<UsualGroup>.Скрыть`, …) appear next to
         // shared base methods. Single-entry chains reduce to one
         // platform-data lookup, identical to the pre-chain shape.
-        if let Ty::FormControl { kind, .. } = &self.ty {
+        if let TypeKind::FormControl { kind, .. } = self.kind() {
             let chain = hir_def::ty::form_control_platform_type_chain(*kind);
             let mut methods: Vec<Method> = Vec::new();
             let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -324,7 +350,7 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
             // matches `lookup_method` precedence.
             for type_name in chain.iter().rev() {
                 for m in PlatformData::instance().get_type_methods(type_name) {
-                    let dto = method_dto_from_platform(m);
+                    let dto = method_dto_from_platform(self.db, m);
                     if seen.insert(dto.name.as_str().to_lowercase()) {
                         methods.push(dto);
                     }
@@ -333,13 +359,13 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
             return methods;
         }
 
-        let Some(type_key) = platform_type_key(&self.ty) else {
+        let Some(type_key) = platform_type_key_id(self.db, self.id) else {
             return Vec::new();
         };
         PlatformData::instance()
-            .get_type_methods(type_key)
+            .get_type_methods(&type_key)
             .into_iter()
-            .map(method_dto_from_platform)
+            .map(|m| method_dto_from_platform(self.db, m))
             .collect()
     }
 
@@ -355,7 +381,7 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
     /// so callers do not need to prepare the receiver.
     pub fn fields(&self) -> Vec<Field> {
         let configs = self.db.configurations(self.file_id);
-        enumerate_fields(&configs, &self.ty)
+        enumerate_fields(self.db, &configs, self.id)
             .into_iter()
             .map(|info| Field {
                 name: info.name.clone(),
@@ -367,48 +393,95 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
             })
             .collect()
     }
+
+    /// Whether this type is a `Ty::QueryResultSelection` carrying a
+    /// resolved SDBL projection (a non-`None` payload).
+    ///
+    /// IDE consumers use this as a cheap discriminator before pulling
+    /// the field list — e.g. hover routes through the projection
+    /// pretty-printer instead of the generic platform docs only when
+    /// this returns `true`.
+    pub fn is_query_projection(&self) -> bool {
+        self.projection().is_some()
+    }
+
+    /// The SDBL projection carried by a `QueryResultSelection` /
+    /// `ValueTable` / `ValueTableRow` receiver, if any. Cloned (cheap `Arc`)
+    /// so the `kind()` borrow is released for downstream `db` calls.
+    fn projection(&self) -> Option<Arc<Projection>> {
+        match self.kind() {
+            TypeKind::QueryResultSelection(facet) => facet.projection.clone(),
+            TypeKind::ValueTable(facet) | TypeKind::ValueTableRow(facet) => {
+                facet.projection.clone()
+            }
+            _ => None,
+        }
+    }
+
+    /// Per-column `(name, type)` pairs from the SDBL projection.
+    ///
+    /// `Some(vec)` when [`Type::is_query_projection`] returns `true`;
+    /// `None` otherwise. Phase 3 §4.G.5c: each column type is the interned
+    /// kernel [`TypeId`] (the SDBL projection stores the interned handles
+    /// directly). Callers that need the IDE facade `Type` for a column can
+    /// wrap the id via [`Type::from_id`] with the same `db` / `file_id`.
+    pub fn projection_fields(&self) -> Option<Vec<(Name, TypeId)>> {
+        let p = self.projection()?;
+        Some(p.fields.iter().map(|f| (Name::new(f.name.as_str()), f.ty)).collect())
+    }
+
+    /// Per-column SDBL display labels (`"Число(15,2)"`, `"Строка(50)"`)
+    /// indexed in lock-step with [`Type::projection_fields`].
+    ///
+    /// `None` when the receiver isn't a projection-typed selection OR
+    /// when the projection's `raw_sdbl_types` shadow was not captured
+    /// (some bridge entry points skip it). Hover uses these to render
+    /// SDBL precision/scale that the bridged `Ty` drops. Each entry is the
+    /// pre-rendered SDBL type label (`"Число(15,2)"`, `"Строка(50)"`).
+    pub fn projection_field_displays(&self) -> Option<Vec<String>> {
+        let p = self.projection()?;
+        p.raw_sdbl_types.as_ref().map(|shadows| shadows.iter().map(|s| s.display.clone()).collect())
+    }
 }
 
-impl From<FieldInfo> for Field {
-    fn from(info: FieldInfo) -> Self {
-        Self {
-            name: info.name.clone(),
-            english_name: info.name_en.unwrap_or_else(|| info.name.clone()),
-            ty: info.ty,
-            value_ty: info.value_ty,
-            is_readonly: info.is_readonly,
-            origin: HirFieldOrigin::from(info.origin),
-        }
+/// Kernel-display label for `id` (Phase 3 §4.G.5d).
+///
+/// Renders through the type kernel's locale-aware
+/// [`bsl_types::display::display_name`] — the single source of display
+/// truth. `precision = true` → hover-style (precision / scale / length and
+/// projection column shapes shown); `false` → completion-style bare name.
+/// IDE features call this at the display boundary instead of the legacy
+/// `Ty::display` / `Ty::display_name`.
+pub fn kernel_type_label(
+    db: &dyn TypeKernelDb,
+    id: TypeId,
+    locale: base_db::Locale,
+    precision: bool,
+) -> String {
+    let kernel_locale = match locale {
+        base_db::Locale::Ru => KernelLocale::Ru,
+        base_db::Locale::En => KernelLocale::En,
+    };
+    let ctx = PlainDisplayCtx { locale: kernel_locale, precision_visible: precision };
+    kernel_display(db.lookup_type(id), &ctx, db)
+}
+
+/// Project a kernel [`FieldInfo`] into the hir [`Field`] DTO.
+/// §4.G.5c: the DTO is kernel-native (`TypeId`), so `ty` / `value_ty`
+/// pass through without bridging.
+fn field_from_info(info: FieldInfo) -> Field {
+    Field {
+        name: info.name.clone(),
+        english_name: info.name_en.unwrap_or_else(|| info.name.clone()),
+        ty: info.ty,
+        value_ty: info.value_ty,
+        is_readonly: info.is_readonly,
+        origin: HirFieldOrigin::from(info.origin),
     }
 }
 
 pub fn module_implicit_fields<DB: hir_ty::db::HirDatabase>(db: &DB, file_id: FileId) -> Vec<Field> {
-    hir_ty::module_implicit_fields(db, file_id).into_iter().map(Field::from).collect()
-}
-
-/// Pick the `PlatformData` key for a receiver, matching
-/// `method_lookup::platform_type_key`. Returning the same keys here
-/// keeps `.methods()` and `.method_return_type()` consistent.
-fn platform_type_key(ty: &Ty) -> Option<&str> {
-    match ty {
-        // `TypedArray` shares the platform method/property surface with
-        // `Array` (`.Добавить`, `.Количество`, …) — the element type
-        // refines field/iteration only.
-        Ty::Array | Ty::TypedArray(_) => Some("Array"),
-        Ty::Structure => Some("Structure"),
-        Ty::Map => Some("Map"),
-        Ty::ValueTable => Some("ValueTable"),
-        Ty::ValueList => Some("ValueList"),
-        Ty::Type => Some("Type"),
-        Ty::PlatformObject(name) => Some(name.as_str()),
-        // FormData / FormControl wrap per-kind platform tables — same
-        // routing as `method_lookup::platform_type_key`. Without these
-        // arms, `.methods()` would return empty on a `Ty::FormData`
-        // receiver that `lookup_method` already serves correctly.
-        Ty::FormData { kind, .. } => Some(kind.platform_type_name()),
-        Ty::FormControl { kind, .. } => hir_def::ty::form_control_platform_type_name(*kind),
-        _ => None,
-    }
+    hir_ty::module_implicit_fields(db, file_id).into_iter().map(field_from_info).collect()
 }
 
 /// Convert a `PlatformMethod` into the facade's `Method` DTO.
@@ -417,20 +490,22 @@ fn platform_type_key(ty: &Ty) -> Option<&str> {
 /// [`hir_ty::lower::type_string`] pipeline so the DTO stays consistent
 /// with what `lookup_method` produces (param-asymmetric gradual typing,
 /// `;`-separator-aware unions, `Произвольный` collapse).
-fn method_dto_from_platform(method: &PlatformMethod) -> Method {
+fn method_dto_from_platform(db: &dyn TypeKernelDb, method: &PlatformMethod) -> Method {
     let params = method
         .parameters
         .iter()
         .map(|param| MethodParam {
             name: Name::new(param.name.as_str()),
-            ty: param.param_type.as_ref().map(|ty| lower_param_type_string(ty)),
+            // Phase 3 §4.A.4: the DTO is kernel-native and so is the lowering —
+            // mint the param type directly through the native type-string path.
+            ty: param.param_type.as_ref().map(|ty| lower_param_type_string_typeid(db, ty)),
             optional: param.is_optional,
         })
         .collect();
     Method {
         name: Name::new(method.name.as_str()),
         english_name: fallback_name(method.english_name.as_str(), method.name.as_str()),
-        return_ty: method.return_type.as_ref().map(|ret| lower_return_type_string(ret)),
+        return_ty: method.return_type.as_ref().map(|ret| lower_return_type_string_typeid(db, ret)),
         params,
     }
 }
@@ -446,6 +521,11 @@ fn fallback_name(name: &str, fallback: &str) -> Name {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bsl_config::ConfigId;
+    use bsl_types::facet::{
+        ArgArity, FunctionFacet, FunctionOrigin, MdoRefFacet, ParamPassing, ParamSpec,
+    };
+    use bsl_types::testing::RootConfigCtx;
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
     use ide_db::RootDatabaseImpl;
     use std::fs;
@@ -583,10 +663,10 @@ mod tests {
         // facade must agree with `Ty::display_name(Ru)`.
         use base_db::Locale;
         let (db, file_id) = empty_db();
-        let t = Type::new(&db, file_id, Ty::Number);
-        assert_eq!(t.display_name(Locale::En), Ty::Number.display_name(Locale::En));
-        assert_eq!(t.display_name(Locale::Ru), Ty::Number.display_name(Locale::Ru));
-        assert_eq!(t.canonical_name(), Ty::Number.canonical_name());
+        let t = t(&db, file_id, db.number(None, None));
+        assert_eq!(t.display_name(Locale::En), "Number");
+        assert_eq!(t.display_name(Locale::Ru), "Число");
+        assert_eq!(t.canonical_name(), "Number");
     }
 
     #[test]
@@ -595,31 +675,24 @@ mod tests {
         // must report as a ref type; non-ref MetadataKinds
         // (`CatalogObject`, `TabularSection`) must not.
         let (db, file_id) = empty_db();
-        let catalog = Type::new(
-            &db,
-            file_id,
-            Ty::MetadataRef { kind: MetadataKind::CatalogRef, name: Name::new("X") },
-        );
+        let catalog = t(&db, file_id, metadata_ref(&db, MetadataKind::CatalogRef, "X"));
         assert!(catalog.is_ref_type());
 
-        let catalog_obj = Type::new(
-            &db,
-            file_id,
-            Ty::MetadataRef { kind: MetadataKind::CatalogObject, name: Name::new("X") },
-        );
+        let catalog_obj = t(&db, file_id, metadata_ref(&db, MetadataKind::CatalogObject, "X"));
         assert!(!catalog_obj.is_ref_type(), "CatalogObject is not a ref type (it is an object)");
 
-        let row = Type::new(
+        let row = t(
             &db,
             file_id,
-            Ty::MetadataRef {
-                kind: MetadataKind::TabularSectionRow { parent: MdoType::Document },
-                name: Name::new("X.Section"),
-            },
+            metadata_ref(
+                &db,
+                MetadataKind::TabularSectionRow { parent: MdoType::Document },
+                "X.Section",
+            ),
         );
         assert!(!row.is_ref_type());
 
-        assert!(!Type::new(&db, file_id, Ty::Number).is_ref_type());
+        assert!(!t(&db, file_id, db.number(None, None)).is_ref_type());
     }
 
     #[test]
@@ -627,18 +700,12 @@ mod tests {
         // CatalogRef.X → ObjectManager(Catalog, "X"). Proves the
         // kind-to-MdoType translation and the name carry-over.
         let (db, file_id) = empty_db();
-        let cat = Type::new(
-            &db,
-            file_id,
-            Ty::MetadataRef {
-                kind: MetadataKind::CatalogRef, name: Name::new("Номенклатура")
-            },
-        );
+        let cat = t(&db, file_id, metadata_ref(&db, MetadataKind::CatalogRef, "Номенклатура"));
         let manager = cat.manager().expect("CatalogRef has a manager form");
-        match manager.ty() {
-            Ty::ObjectManager { kind, name } => {
-                assert_eq!(*kind, MdoType::Catalog);
-                assert_eq!(name.as_str(), "Номенклатура");
+        match db.lookup_type(manager.id()) {
+            TypeKind::ObjectManager(facet) => {
+                assert_eq!(facet.mdo, MdoType::Catalog);
+                assert_eq!(facet.name.as_str(), "Номенклатура");
             }
             other => panic!("expected ObjectManager, got {other:?}"),
         }
@@ -650,23 +717,44 @@ mod tests {
         // register managers, so keep one real non-ref and one
         // collection receiver to pin the fall-through branch.
         let (db, file_id) = empty_db();
-        assert!(Type::new(&db, file_id, Ty::Number).manager().is_none());
-        assert!(Type::new(&db, file_id, Ty::Array).manager().is_none());
+        assert!(t(&db, file_id, db.number(None, None)).manager().is_none());
+        assert!(t(&db, file_id, db.array(None)).manager().is_none());
     }
 
     #[test]
     fn manager_from_register_ref_types() {
         let (db, file_id) = empty_db();
-        let reg = Type::new(
-            &db,
-            file_id,
-            Ty::MetadataRef { kind: MetadataKind::AccumulationRegisterRef, name: Name::new("X") },
-        );
+        let reg = t(&db, file_id, metadata_ref(&db, MetadataKind::AccumulationRegisterRef, "X"));
         let manager = reg.manager().expect("register ref has a manager form");
-        match manager.ty() {
-            Ty::ObjectManager { kind, name } => {
-                assert_eq!(*kind, MdoType::AccumulationRegister);
-                assert_eq!(name.as_str(), "X");
+        match db.lookup_type(manager.id()) {
+            TypeKind::ObjectManager(facet) => {
+                assert_eq!(facet.mdo, MdoType::AccumulationRegister);
+                assert_eq!(facet.name.as_str(), "X");
+            }
+            other => panic!("expected ObjectManager, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn manager_from_metadata_object_receiver() {
+        // A native kernel `MetadataObject` receiver (not reachable through
+        // the `Ty` bridge, which collapses it to `MetadataRef`) must still
+        // resolve its manager. Regression pin for the §4.E.5a `.kind()`
+        // flip, which originally matched only `MetadataRef`.
+        use bsl_types::testing::RootConfigCtx;
+        let (db, file_id) = empty_db();
+        let id = db.metadata_object(
+            MetadataKind::CatalogObject,
+            "Номенклатура".to_string(),
+            &RootConfigCtx,
+        );
+        let manager = Type::from_id(&db, file_id, id)
+            .manager()
+            .expect("MetadataObject receiver has a manager form");
+        match db.lookup_type(manager.id()) {
+            TypeKind::ObjectManager(facet) => {
+                assert_eq!(facet.mdo, MdoType::Catalog);
+                assert_eq!(facet.name.as_str(), "Номенклатура");
             }
             other => panic!("expected ObjectManager, got {other:?}"),
         }
@@ -678,11 +766,11 @@ mod tests {
         // lives in PlatformData under type_name "Array". Smoke-tests
         // the full pipeline `lookup_method → return_ty → Self::new`.
         let (db, file_id) = empty_db();
-        let arr = Type::new(&db, file_id, Ty::Array);
+        let arr = t(&db, file_id, db.array(None));
         let ret = arr.method_return_type(&Name::new("Добавить"));
         // `Добавить` is a procedure — `lookup_method` returns
         // `Ty::Undefined`.
-        assert_eq!(ret.ty(), &Ty::Undefined);
+        assert_eq!(ret.id(), db.undefined());
     }
 
     #[test]
@@ -690,9 +778,9 @@ mod tests {
         // Missing method → Unknown (no fabrication of a non-existent
         // return type).
         let (db, file_id) = empty_db();
-        let arr = Type::new(&db, file_id, Ty::Array);
+        let arr = t(&db, file_id, db.array(None));
         let ret = arr.method_return_type(&Name::new("НеСуществует"));
-        assert_eq!(ret.ty(), &Ty::Unknown);
+        assert_eq!(ret.id(), db.unknown());
     }
 
     #[test]
@@ -701,12 +789,12 @@ mod tests {
         // Wrapped with `.iter().any(...)` so the test doesn't need to
         // know the exact count — platform data may grow.
         let (db, file_id) = empty_db();
-        let arr = Type::new(&db, file_id, Ty::Array);
+        let arr = t(&db, file_id, db.array(None));
         let methods = arr.methods();
-        assert!(!methods.is_empty(), "Ty::Array must expose at least one platform method");
+        assert!(!methods.is_empty(), "Array must expose at least one platform method");
         assert!(
             methods.iter().any(|m| m.name.as_str() == "Добавить"),
-            "Ty::Array methods must include Добавить — got {:?}",
+            "Array methods must include Добавить — got {:?}",
             methods.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
         );
     }
@@ -716,13 +804,9 @@ mod tests {
         // Ref / register / tabular types return an empty method list at
         // M3 — manager methods are the M4 adapter's job.
         let (db, file_id) = empty_db();
-        let cat = Type::new(
-            &db,
-            file_id,
-            Ty::MetadataRef { kind: MetadataKind::CatalogRef, name: Name::new("X") },
-        );
+        let cat = t(&db, file_id, metadata_ref(&db, MetadataKind::CatalogRef, "X"));
         assert!(cat.methods().is_empty());
-        assert!(Type::new(&db, file_id, Ty::Number).methods().is_empty());
+        assert!(t(&db, file_id, db.number(None, None)).methods().is_empty());
     }
 
     #[test]
@@ -732,24 +816,14 @@ mod tests {
         // so `fields()` returns an empty list rather than panicking.
         // Pins the deferred-gap contract.
         let (db, file_id) = empty_db();
-        let cat = Type::new(
-            &db,
-            file_id,
-            Ty::MetadataRef { kind: MetadataKind::CatalogRef, name: Name::new("X") },
-        );
+        let cat = t(&db, file_id, metadata_ref(&db, MetadataKind::CatalogRef, "X"));
         assert!(cat.fields().is_empty());
     }
 
     #[test]
     fn fields_include_custom_attributes_from_configuration() {
         let (db, file_id) = db_with_configuration(designer_fixture_path());
-        let cat = Type::new(
-            &db,
-            file_id,
-            Ty::MetadataRef {
-                kind: MetadataKind::CatalogRef, name: Name::new("Справочник1")
-            },
-        );
+        let cat = t(&db, file_id, metadata_ref(&db, MetadataKind::CatalogRef, "Справочник1"));
 
         let fields = cat.fields();
         let attr = fields
@@ -757,19 +831,35 @@ mod tests {
             .find(|field| field.name == Name::new("Реквизит2"))
             .expect("custom attribute must be present");
         assert_eq!(attr.english_name, Name::new("Реквизит2"));
-        assert_eq!(attr.ty, Ty::Number);
+        assert_eq!(attr.ty, db.number(None, None));
+    }
+
+    #[test]
+    fn fields_on_metadata_object_receiver_surface_attributes() {
+        // Regression pin (§4.E.5c-completion): a native kernel
+        // `MetadataObject` receiver must enumerate the same MDO fields as
+        // its `MetadataRef` companion. Completion routes such receivers
+        // through `HirType::from_id(...).fields()`; before the
+        // `enumerate_fields_inner` MetadataObject arm they came back empty.
+        use bsl_types::testing::RootConfigCtx;
+        let (db, file_id) = db_with_configuration(designer_fixture_path());
+        let id = db.metadata_object(
+            MetadataKind::CatalogObject,
+            "Справочник1".to_string(),
+            &RootConfigCtx,
+        );
+        let fields = Type::from_id(&db, file_id, id).fields();
+        assert!(
+            fields.iter().any(|f| f.name == Name::new("Реквизит2")),
+            "MetadataObject receiver must surface MDO custom attributes; got {:?}",
+            fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+        );
     }
 
     #[test]
     fn fields_include_tabular_sections_from_configuration() {
         let (db, file_id) = db_with_configuration(designer_fixture_path());
-        let cat = Type::new(
-            &db,
-            file_id,
-            Ty::MetadataRef {
-                kind: MetadataKind::CatalogRef, name: Name::new("Справочник1")
-            },
-        );
+        let cat = t(&db, file_id, metadata_ref(&db, MetadataKind::CatalogRef, "Справочник1"));
 
         let fields = cat.fields();
         let section = fields
@@ -779,10 +869,11 @@ mod tests {
         assert_eq!(section.english_name, Name::new("ТабличнаяЧасть1"));
         assert_eq!(
             section.ty,
-            Ty::MetadataRef {
-                kind: MetadataKind::TabularSection { parent: MdoType::Catalog },
-                name: Name::new("Справочник1.ТабличнаяЧасть1"),
-            }
+            metadata_ref(
+                &db,
+                MetadataKind::TabularSection { parent: MdoType::Catalog },
+                "Справочник1.ТабличнаяЧасть1",
+            )
         );
     }
 
@@ -796,13 +887,10 @@ mod tests {
         // how `FieldLookup::lookup_on_register` resolves the same part
         // but through the completion-surface API instead.
         let (db, file_id) = db_with_configuration(designer_fixture_path());
-        let reg = Type::new(
+        let reg = t(
             &db,
             file_id,
-            Ty::MetadataRef {
-                kind: MetadataKind::InformationRegisterRef,
-                name: Name::new("РегистрСведений1"),
-            },
+            metadata_ref(&db, MetadataKind::InformationRegisterRef, "РегистрСведений1"),
         );
 
         let fields = reg.fields();
@@ -812,9 +900,7 @@ mod tests {
             .expect("register dimension must appear in .fields()");
         assert_eq!(
             dim.ty,
-            Ty::MetadataRef {
-                kind: MetadataKind::CatalogRef, name: Name::new("Справочник1")
-            },
+            metadata_ref(&db, MetadataKind::CatalogRef, "Справочник1"),
             "typed dimension must lower through TyLoweringContext, not fall back to symbolic",
         );
     }
@@ -831,7 +917,7 @@ mod tests {
             .find(|field| field.name == Name::new("АдресСайта"))
             .expect("object module must expose owner MDO attributes as bare identifiers");
 
-        assert_eq!(attr.ty, Ty::String);
+        assert_eq!(attr.ty, db.string(None, false));
     }
 
     #[test]
@@ -896,8 +982,30 @@ mod tests {
 
     // --- is_assignable_to (Task 7) --------------------------------
 
-    fn t(db: &RootDatabaseImpl, file_id: FileId, ty: Ty) -> Type<'_, RootDatabaseImpl> {
-        Type::new(db, file_id, ty)
+    fn t(db: &RootDatabaseImpl, file_id: FileId, id: TypeId) -> Type<'_, RootDatabaseImpl> {
+        Type::from_id(db, file_id, id)
+    }
+
+    fn metadata_ref(db: &RootDatabaseImpl, kind: MetadataKind, name: &str) -> TypeId {
+        db.metadata_ref(kind, name.to_string(), &RootConfigCtx)
+    }
+
+    fn fixed_function(db: &RootDatabaseImpl, params: Vec<TypeId>, returns: TypeId) -> TypeId {
+        let params: Arc<[ParamSpec]> = params
+            .into_iter()
+            .enumerate()
+            .map(|(idx, ty)| ParamSpec::new(format!("p{idx}"), ty, ParamPassing::ByRef, false))
+            .collect();
+        let arity = u16::try_from(params.len()).expect("test function arity fits u16");
+        let defaults = vec![None; params.len()].into();
+        db.function(FunctionFacet::new(
+            params,
+            defaults,
+            arity,
+            ArgArity::Fixed(arity),
+            returns,
+            FunctionOrigin::Unknown,
+        ))
     }
 
     #[test]
@@ -905,10 +1013,22 @@ mod tests {
         // `A ≤ A` — the most basic rule. Pins that reflexivity works
         // for primitives where `Ty` implements `PartialEq` trivially.
         let (db, file_id) = empty_db();
-        assert!(t(&db, file_id, Ty::Number).is_assignable_to(&t(&db, file_id, Ty::Number)));
-        assert!(t(&db, file_id, Ty::String).is_assignable_to(&t(&db, file_id, Ty::String)));
-        assert!(t(&db, file_id, Ty::Boolean).is_assignable_to(&t(&db, file_id, Ty::Boolean)));
-        assert!(!t(&db, file_id, Ty::Number).is_assignable_to(&t(&db, file_id, Ty::String)));
+        assert!(t(&db, file_id, db.number(None, None)).is_assignable_to(&t(
+            &db,
+            file_id,
+            db.number(None, None)
+        )));
+        assert!(t(&db, file_id, db.string(None, false)).is_assignable_to(&t(
+            &db,
+            file_id,
+            db.string(None, false)
+        )));
+        assert!(t(&db, file_id, db.boolean()).is_assignable_to(&t(&db, file_id, db.boolean())));
+        assert!(!t(&db, file_id, db.number(None, None)).is_assignable_to(&t(
+            &db,
+            file_id,
+            db.string(None, false)
+        )));
     }
 
     #[test]
@@ -917,9 +1037,9 @@ mod tests {
         // the Name-equality path of the structural comparison. A ref
         // to a different catalog must *not* be assignable.
         let (db, file_id) = empty_db();
-        let cat_x = Ty::MetadataRef { kind: MetadataKind::CatalogRef, name: Name::new("X") };
-        let cat_y = Ty::MetadataRef { kind: MetadataKind::CatalogRef, name: Name::new("Y") };
-        assert!(t(&db, file_id, cat_x.clone()).is_assignable_to(&t(&db, file_id, cat_x.clone())));
+        let cat_x = metadata_ref(&db, MetadataKind::CatalogRef, "X");
+        let cat_y = metadata_ref(&db, MetadataKind::CatalogRef, "Y");
+        assert!(t(&db, file_id, cat_x).is_assignable_to(&t(&db, file_id, cat_x)));
         assert!(!t(&db, file_id, cat_x).is_assignable_to(&t(&db, file_id, cat_y)));
     }
 
@@ -929,9 +1049,17 @@ mod tests {
         // extension — prevents false `TypeMismatch`es on inferences
         // that bailed out to `Unknown`).
         let (db, file_id) = empty_db();
-        assert!(t(&db, file_id, Ty::Number).is_assignable_to(&t(&db, file_id, Ty::Unknown)));
-        assert!(t(&db, file_id, Ty::Unknown).is_assignable_to(&t(&db, file_id, Ty::Number)));
-        assert!(t(&db, file_id, Ty::Unknown).is_assignable_to(&t(&db, file_id, Ty::Unknown)));
+        assert!(t(&db, file_id, db.number(None, None)).is_assignable_to(&t(
+            &db,
+            file_id,
+            db.unknown()
+        )));
+        assert!(t(&db, file_id, db.unknown()).is_assignable_to(&t(
+            &db,
+            file_id,
+            db.number(None, None)
+        )));
+        assert!(t(&db, file_id, db.unknown()).is_assignable_to(&t(&db, file_id, db.unknown())));
     }
 
     #[test]
@@ -940,7 +1068,7 @@ mod tests {
         // hold for `CatalogObject` (object, not ref) or for non-MDO
         // primitives.
         let (db, file_id) = empty_db();
-        let null = t(&db, file_id, Ty::Null);
+        let null = t(&db, file_id, db.null());
         for kind in [
             MetadataKind::CatalogRef,
             MetadataKind::DocumentRef,
@@ -954,17 +1082,13 @@ mod tests {
             MetadataKind::AccountingRegisterRef,
             MetadataKind::CalculationRegisterRef,
         ] {
-            let target = t(&db, file_id, Ty::MetadataRef { kind, name: Name::new("X") });
+            let target = t(&db, file_id, metadata_ref(&db, kind, "X"));
             assert!(null.is_assignable_to(&target), "Null should be assignable to {kind:?}");
         }
         // Objects are not refs — must reject.
-        let cat_obj = t(
-            &db,
-            file_id,
-            Ty::MetadataRef { kind: MetadataKind::CatalogObject, name: Name::new("X") },
-        );
+        let cat_obj = t(&db, file_id, metadata_ref(&db, MetadataKind::CatalogObject, "X"));
         assert!(!null.is_assignable_to(&cat_obj));
-        assert!(!null.is_assignable_to(&t(&db, file_id, Ty::Number)));
+        assert!(!null.is_assignable_to(&t(&db, file_id, db.number(None, None))));
     }
 
     #[test]
@@ -972,18 +1096,22 @@ mod tests {
         // `A ≤ Union(…, A, …)` — the union-right rule. Element lives
         // in the union → assignable; element does not → rejected.
         let (db, file_id) = empty_db();
-        let number_or_string = Ty::union(vec![Ty::Number, Ty::String]);
-        assert!(t(&db, file_id, Ty::Number).is_assignable_to(&t(
+        let number_or_string = db.union(vec![db.number(None, None), db.string(None, false)]);
+        assert!(t(&db, file_id, db.number(None, None)).is_assignable_to(&t(
             &db,
             file_id,
-            number_or_string.clone()
+            number_or_string
         )));
-        assert!(t(&db, file_id, Ty::String).is_assignable_to(&t(
+        assert!(t(&db, file_id, db.string(None, false)).is_assignable_to(&t(
             &db,
             file_id,
-            number_or_string.clone()
+            number_or_string
         )));
-        assert!(!t(&db, file_id, Ty::Boolean).is_assignable_to(&t(&db, file_id, number_or_string)));
+        assert!(!t(&db, file_id, db.boolean()).is_assignable_to(&t(
+            &db,
+            file_id,
+            number_or_string
+        )));
     }
 
     #[test]
@@ -993,17 +1121,17 @@ mod tests {
         // `Union(Number, Number)` collapses to `Number` (smart
         // constructor), so test with two genuinely distinct types.
         let (db, file_id) = empty_db();
-        let ns = Ty::union(vec![Ty::Number, Ty::String]);
+        let ns = db.union(vec![db.number(None, None), db.string(None, false)]);
         // Neither `Number` nor `String` alone covers the whole union.
-        assert!(!t(&db, file_id, ns.clone()).is_assignable_to(&t(&db, file_id, Ty::Number)));
-        assert!(!t(&db, file_id, ns.clone()).is_assignable_to(&t(&db, file_id, Ty::String)));
+        assert!(!t(&db, file_id, ns).is_assignable_to(&t(&db, file_id, db.number(None, None))));
+        assert!(!t(&db, file_id, ns).is_assignable_to(&t(&db, file_id, db.string(None, false))));
 
         // `Union(A, B) ≤ Union(A, B)` (reflexivity after `Ty::union`
         // normalisation) — and `Union(Number, String) ≤
         // Union(Number, String, Boolean)` via every component matching
         // some component of the target.
-        let nsb = Ty::union(vec![Ty::Number, Ty::String, Ty::Boolean]);
-        assert!(t(&db, file_id, ns.clone()).is_assignable_to(&t(&db, file_id, ns.clone())));
+        let nsb = db.union(vec![db.number(None, None), db.string(None, false), db.boolean()]);
+        assert!(t(&db, file_id, ns).is_assignable_to(&t(&db, file_id, ns)));
         assert!(t(&db, file_id, ns).is_assignable_to(&t(&db, file_id, nsb)));
     }
 
@@ -1016,24 +1144,19 @@ mod tests {
         // etc.), so an arbitrary `CatalogObject.X` must not satisfy a
         // `ЭтотОбъект` slot.
         let (db, file_id) = empty_db();
-        let this_cat = Ty::ThisObject { owner: (MdoType::Catalog, Name::new("Товары")) };
-        let cat_object =
-            Ty::MetadataRef { kind: MetadataKind::CatalogObject, name: Name::new("Товары") };
-        assert!(t(&db, file_id, this_cat.clone()).is_assignable_to(&t(
-            &db,
-            file_id,
-            cat_object.clone()
-        )));
+        let this_cat = db.mk_this_object(
+            ConfigId::Root,
+            MdoRefFacet::new(MdoType::Catalog, "Товары".to_string()),
+        );
+        let cat_object = metadata_ref(&db, MetadataKind::CatalogObject, "Товары");
+        assert!(t(&db, file_id, this_cat).is_assignable_to(&t(&db, file_id, cat_object)));
         assert!(
-            !t(&db, file_id, cat_object).is_assignable_to(&t(&db, file_id, this_cat.clone())),
+            !t(&db, file_id, cat_object).is_assignable_to(&t(&db, file_id, this_cat)),
             "reverse *Object → ThisObject direction must be rejected — preserves provenance"
         );
 
         // Mismatched owner must still fail even in the accepted direction.
-        let cat_other = Ty::MetadataRef {
-            kind: MetadataKind::CatalogObject,
-            name: Name::new("Номенклатура"),
-        };
+        let cat_other = metadata_ref(&db, MetadataKind::CatalogObject, "Номенклатура");
         assert!(!t(&db, file_id, this_cat).is_assignable_to(&t(&db, file_id, cat_other)));
     }
 
@@ -1043,18 +1166,13 @@ mod tests {
         // `CatalogRef.Товары ≤ Union(CatalogRef.Товары, DocumentRef.Заказ)`
         // must hold; a third ref absent from the union must fail.
         let (db, file_id) = empty_db();
-        let cat_t =
-            Ty::MetadataRef { kind: MetadataKind::CatalogRef, name: Name::new("Товары") };
-        let doc_z =
-            Ty::MetadataRef { kind: MetadataKind::DocumentRef, name: Name::new("Заказ") };
-        let cat_o = Ty::MetadataRef {
-            kind: MetadataKind::CatalogRef,
-            name: Name::new("Номенклатура"),
-        };
-        let target = Ty::union(vec![cat_t.clone(), doc_z.clone()]);
+        let cat_t = metadata_ref(&db, MetadataKind::CatalogRef, "Товары");
+        let doc_z = metadata_ref(&db, MetadataKind::DocumentRef, "Заказ");
+        let cat_o = metadata_ref(&db, MetadataKind::CatalogRef, "Номенклатура");
+        let target = db.union(vec![cat_t, doc_z]);
 
-        assert!(t(&db, file_id, cat_t).is_assignable_to(&t(&db, file_id, target.clone())));
-        assert!(t(&db, file_id, doc_z).is_assignable_to(&t(&db, file_id, target.clone())));
+        assert!(t(&db, file_id, cat_t).is_assignable_to(&t(&db, file_id, target)));
+        assert!(t(&db, file_id, doc_z).is_assignable_to(&t(&db, file_id, target)));
         assert!(
             !t(&db, file_id, cat_o).is_assignable_to(&t(&db, file_id, target)),
             "concrete ref not present in union must be rejected"
@@ -1066,14 +1184,14 @@ mod tests {
         // Composition: `Null` + union-right. `Null ≤ CatalogRef.X` and
         // union-right accepts the `Null`-compatible member.
         let (db, file_id) = empty_db();
-        let cat_x = Ty::MetadataRef { kind: MetadataKind::CatalogRef, name: Name::new("X") };
-        let doc_y = Ty::MetadataRef { kind: MetadataKind::DocumentRef, name: Name::new("Y") };
-        let target = Ty::union(vec![cat_x, doc_y]);
-        assert!(t(&db, file_id, Ty::Null).is_assignable_to(&t(&db, file_id, target)));
+        let cat_x = metadata_ref(&db, MetadataKind::CatalogRef, "X");
+        let doc_y = metadata_ref(&db, MetadataKind::DocumentRef, "Y");
+        let target = db.union(vec![cat_x, doc_y]);
+        assert!(t(&db, file_id, db.null()).is_assignable_to(&t(&db, file_id, target)));
 
         // Null into a union with no ref members must fail.
-        let ns = Ty::union(vec![Ty::Number, Ty::String]);
-        assert!(!t(&db, file_id, Ty::Null).is_assignable_to(&t(&db, file_id, ns)));
+        let ns = db.union(vec![db.number(None, None), db.string(None, false)]);
+        assert!(!t(&db, file_id, db.null()).is_assignable_to(&t(&db, file_id, ns)));
     }
 
     #[test]
@@ -1082,14 +1200,14 @@ mod tests {
         // every component must fit individually. `Null ≤ ref` passes,
         // reflexivity passes → true.
         let (db, file_id) = empty_db();
-        let cat_x = Ty::MetadataRef { kind: MetadataKind::CatalogRef, name: Name::new("X") };
-        let nullable_cat = Ty::union(vec![Ty::Null, cat_x.clone()]);
-        assert!(t(&db, file_id, nullable_cat).is_assignable_to(&t(&db, file_id, cat_x.clone())));
+        let cat_x = metadata_ref(&db, MetadataKind::CatalogRef, "X");
+        let nullable_cat = db.union(vec![db.null(), cat_x]);
+        assert!(t(&db, file_id, nullable_cat).is_assignable_to(&t(&db, file_id, cat_x)));
 
         // And the key negative composition case Codex flagged:
         // `Union(Null, String) ≤ CatalogRef.X` — `Null ≤ ref` true,
         // `String ≤ CatalogRef.X` false → whole union rejected.
-        let null_or_string = Ty::union(vec![Ty::Null, Ty::String]);
+        let null_or_string = db.union(vec![db.null(), db.string(None, false)]);
         assert!(
             !t(&db, file_id, null_or_string).is_assignable_to(&t(&db, file_id, cat_x)),
             "union-left must reject when any component fails"
@@ -1097,23 +1215,44 @@ mod tests {
     }
 
     #[test]
-    fn is_assignable_unknown_inside_union_is_permissive() {
-        // Documents the **gradual-typing** composition: `Ty::union`
-        // preserves `Unknown` members (`hir-def/src/ty.rs` smart
-        // constructor does not absorb `Unknown`), so any union that
-        // acquired an `Unknown` through failed inference will pass all
-        // assignment checks. Intentional at M4 Task 7 — revisit when
-        // `TypeMismatch` gets a live emitter (see FIXME in
-        // `is_assignable`).
+    fn is_assignable_unknown_inside_union_collapses_to_concrete_arm() {
+        // Phase 3 §4.E: the kernel's `canonicalise_union` ABSORBS
+        // `Unknown` once a concrete arm remains (`bsl-types`
+        // `intern.rs` step 4, plan §1.D rule 4). This DIVERGES from the
+        // legacy `hir-def` `Ty::union` smart constructor, which
+        // preserved `Unknown` members. Since assignability now runs on
+        // interned `TypeId`s, a union built with an `Unknown` arm no
+        // longer carries that arm — it collapses to the concrete
+        // member(s).
+        //
+        // Net behavioural shift (intentional, single-source-of-truth):
+        // the old "an Unknown arm makes the whole union permissive"
+        // gradual quirk is GONE. It was explicitly flagged as a
+        // revisit-point at M4 Task 7; the kernel resolves it in favour
+        // of the concrete arm.
         let (db, file_id) = empty_db();
-        let unknown_or_string = Ty::union(vec![Ty::Unknown, Ty::String]);
-        // Union-left: `Unknown ≤ String` (gradual bottom) + `String ≤
-        // String` (reflex) → true.
-        assert!(t(&db, file_id, unknown_or_string).is_assignable_to(&t(&db, file_id, Ty::String)));
-        // Union-right: `String ≤ Unknown` (gradual top) short-circuits
-        // inside the `any`.
-        let number_or_unknown = Ty::union(vec![Ty::Number, Ty::Unknown]);
-        assert!(t(&db, file_id, Ty::String).is_assignable_to(&t(&db, file_id, number_or_unknown)));
+
+        // `Union(Unknown, String)` canonicalises to `String`, so
+        // `String ≤ String` (reflexivity) → still true.
+        let unknown_or_string = db.union(vec![db.unknown(), db.string(None, false)]);
+        assert_eq!(unknown_or_string, db.string(None, false));
+        assert!(t(&db, file_id, unknown_or_string).is_assignable_to(&t(
+            &db,
+            file_id,
+            db.string(None, false)
+        )));
+
+        // `Union(Number, Unknown)` canonicalises to `Number`, so the
+        // target is just `Number`. `String ≤ Number` → FALSE. Under the
+        // legacy union-preserves-Unknown rule this returned true via the
+        // gradual `String ≤ Unknown` arm; the kernel drops that arm.
+        let number_or_unknown = db.union(vec![db.number(None, None), db.unknown()]);
+        assert_eq!(number_or_unknown, db.number(None, None));
+        assert!(
+            !t(&db, file_id, db.string(None, false))
+                .is_assignable_to(&t(&db, file_id, number_or_unknown)),
+            "kernel absorbs Unknown: Number|Unknown collapses to Number, so String is not assignable"
+        );
     }
 
     #[test]
@@ -1128,41 +1267,15 @@ mod tests {
         // stays narrow so the facade catches any accidental
         // short-circuit before the branch runs.
         let (db, file_id) = empty_db();
-        let f_num_to_str = Ty::Function {
-            params: vec![Ty::Number].into(),
-            defaults: Box::new([false]),
-            max_args: Some(1),
-            ret: Box::new(Ty::String),
-        };
-        let f_num_to_str_2 = Ty::Function {
-            params: vec![Ty::Number].into(),
-            defaults: Box::new([false]),
-            max_args: Some(1),
-            ret: Box::new(Ty::String),
-        };
-        let f_str_to_str = Ty::Function {
-            params: vec![Ty::String].into(),
-            defaults: Box::new([false]),
-            max_args: Some(1),
-            ret: Box::new(Ty::String),
-        };
-        let f_num_to_num = Ty::Function {
-            params: vec![Ty::Number].into(),
-            defaults: Box::new([false]),
-            max_args: Some(1),
-            ret: Box::new(Ty::Number),
-        };
+        let f_num_to_str = fixed_function(&db, vec![db.number(None, None)], db.string(None, false));
+        let f_num_to_str_2 =
+            fixed_function(&db, vec![db.number(None, None)], db.string(None, false));
+        let f_str_to_str =
+            fixed_function(&db, vec![db.string(None, false)], db.string(None, false));
+        let f_num_to_num = fixed_function(&db, vec![db.number(None, None)], db.number(None, None));
 
-        assert!(t(&db, file_id, f_num_to_str.clone()).is_assignable_to(&t(
-            &db,
-            file_id,
-            f_num_to_str_2
-        )));
-        assert!(!t(&db, file_id, f_num_to_str.clone()).is_assignable_to(&t(
-            &db,
-            file_id,
-            f_str_to_str
-        )));
+        assert!(t(&db, file_id, f_num_to_str).is_assignable_to(&t(&db, file_id, f_num_to_str_2)));
+        assert!(!t(&db, file_id, f_num_to_str).is_assignable_to(&t(&db, file_id, f_str_to_str)));
         assert!(!t(&db, file_id, f_num_to_str).is_assignable_to(&t(&db, file_id, f_num_to_num)));
     }
 
@@ -1176,19 +1289,10 @@ mod tests {
         // narrowing, both in a single function signature. Detailed
         // axis-by-axis assertions live in `hir_ty::subtype::tests`.
         let (db, file_id) = empty_db();
-        let from = Ty::Function {
-            params: vec![Ty::union(vec![Ty::Number, Ty::String])].into(),
-            defaults: Box::new([false]),
-            max_args: Some(1),
-            ret: Box::new(Ty::Number),
-        };
-        let to = Ty::Function {
-            params: vec![Ty::Number].into(),
-            defaults: Box::new([false]),
-            max_args: Some(1),
-            ret: Box::new(Ty::union(vec![Ty::Number, Ty::String])),
-        };
-        assert!(t(&db, file_id, from.clone()).is_assignable_to(&t(&db, file_id, to.clone())));
+        let number_or_string = db.union(vec![db.number(None, None), db.string(None, false)]);
+        let from = fixed_function(&db, vec![number_or_string], db.number(None, None));
+        let to = fixed_function(&db, vec![db.number(None, None)], number_or_string);
+        assert!(t(&db, file_id, from).is_assignable_to(&t(&db, file_id, to)));
         assert!(!t(&db, file_id, to).is_assignable_to(&t(&db, file_id, from)));
     }
 
@@ -1196,18 +1300,12 @@ mod tests {
     fn fields_deduplicate_duplicate_names_preferring_attributes() {
         let fixture = TempFixture::duplicated_field();
         let (db, file_id) = db_with_configuration(fixture.path());
-        let cat = Type::new(
-            &db,
-            file_id,
-            Ty::MetadataRef {
-                kind: MetadataKind::CatalogRef, name: Name::new("Справочник1")
-            },
-        );
+        let cat = t(&db, file_id, metadata_ref(&db, MetadataKind::CatalogRef, "Справочник1"));
 
         let fields = cat.fields();
         let matches: Vec<_> =
             fields.iter().filter(|field| field.name == Name::new("Реквизит2")).collect();
         assert_eq!(matches.len(), 1, "duplicate Russian names must be deduplicated");
-        assert_eq!(matches[0].ty, Ty::Number, "attribute must win over tabular section");
+        assert_eq!(matches[0].ty, db.number(None, None), "attribute must win over tabular section");
     }
 }

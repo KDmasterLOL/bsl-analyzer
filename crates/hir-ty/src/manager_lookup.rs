@@ -39,10 +39,15 @@
 //! [`predefined_ref_kind_for`] is the single edit needed when they
 //! land.
 
+use bsl_config::VisibleConfig;
 use bsl_metadata::{MdoType, MetadataObject};
-use hir_def::configs::VisibleConfig;
-use hir_def::ty::{MetadataKind, Ty};
+use bsl_types::builders::Builders;
+use bsl_types::intern::TypeKernelDb;
+use bsl_types::kind::{ConfigId, MetadataKind, TypeId, TypeKind};
+use bsl_types::testing::RootConfigCtx;
 use hir_def::Name;
+
+use crate::this_object::FixedConfigCtx;
 
 /// Result of a successful manager-member lookup.
 ///
@@ -52,8 +57,9 @@ use hir_def::Name;
 /// return signature.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagerMemberInfo {
-    /// Type of the member after promotion / predefined-item lookup.
-    pub ty: Ty,
+    /// Type of the member after promotion / predefined-item lookup
+    /// (kernel handle, §4.G.2).
+    pub ty: TypeId,
 }
 
 /// Single adapter entry for `Expr::Field` on a manager-global receiver.
@@ -63,14 +69,42 @@ pub struct ManagerMemberInfo {
 /// the caller can keep its existing fall-through (`field_lookup`
 /// already covered `Ty::MetadataRef`; everything else stays `Unknown`).
 pub fn lookup_manager_field(
+    db: &dyn TypeKernelDb,
     configs: &[VisibleConfig],
-    base_ty: &Ty,
+    receiver: TypeId,
     member: &Name,
 ) -> Option<ManagerMemberInfo> {
-    match base_ty {
-        Ty::ManagerCollection(kind) => promote_collection_member(configs, *kind, member),
-        Ty::ObjectManager { kind, name } => lookup_predefined(configs, *kind, name, member),
-        _ => None,
+    lookup_manager_field_inner(db, configs, receiver, member)
+}
+
+fn lookup_manager_field_inner(
+    db: &dyn TypeKernelDb,
+    configs: &[VisibleConfig],
+    receiver: TypeId,
+    member: &Name,
+) -> Option<ManagerMemberInfo> {
+    // Extract owned receiver data before any config walk / builder
+    // callback re-borrows `db`.
+    enum Shape {
+        Collection(MdoType),
+        Manager { mdo: MdoType, name: String, config_id: ConfigId },
+        Other,
+    }
+    let shape = match db.lookup_type(receiver) {
+        TypeKind::ManagerCollection(kind) => Shape::Collection(*kind),
+        TypeKind::ObjectManager(facet) => Shape::Manager {
+            mdo: facet.mdo,
+            name: facet.name.clone(),
+            config_id: facet.config_id.clone(),
+        },
+        _ => Shape::Other,
+    };
+    match shape {
+        Shape::Collection(kind) => promote_collection_member(db, configs, kind, member),
+        Shape::Manager { mdo, name, config_id } => {
+            lookup_predefined(db, configs, mdo, &name, member, &config_id)
+        }
+        Shape::Other => None,
     }
 }
 
@@ -83,6 +117,7 @@ pub fn lookup_manager_field(
 /// and the `registers` vec (InformationRegister/…), so
 /// `РегистрыСведений.РегистрСведений1` promotes too.
 fn promote_collection_member(
+    db: &dyn TypeKernelDb,
     configs: &[VisibleConfig],
     kind: MdoType,
     mdo_name: &Name,
@@ -93,7 +128,15 @@ fn promote_collection_member(
             || cfg.configuration.find_register_by_type_and_name(kind, needle).is_some()
     });
 
-    exists.then(|| ManagerMemberInfo { ty: Ty::ObjectManager { kind, name: mdo_name.clone() } })
+    exists.then(|| {
+        // `ManagerCollection` carries no `config_id`, so the promoted
+        // `ObjectManager` resolves under `Root` — faithful to the prior
+        // `Ty` bridge default. Config-lossy for CFE managers; revisited
+        // if `ManagerCollection` ever gains a config carrier.
+        ManagerMemberInfo {
+            ty: db.object_manager(kind, mdo_name.as_str().to_string(), &RootConfigCtx),
+        }
+    })
 }
 
 /// Resolve a predefined-item / enum-value member on an
@@ -106,13 +149,15 @@ fn promote_collection_member(
 /// a predefined item is a value of the owner's ref kind, so the name
 /// shouldn't switch to the member.
 pub(crate) fn lookup_predefined(
+    db: &dyn TypeKernelDb,
     configs: &[VisibleConfig],
     kind: MdoType,
-    owner_name: &Name,
+    owner_name: &str,
     member_name: &Name,
+    config_id: &ConfigId,
 ) -> Option<ManagerMemberInfo> {
     let ref_kind = predefined_ref_kind_for(kind)?;
-    let mdo = find_mdo(configs, kind, owner_name.as_str())?;
+    let mdo = find_mdo(configs, kind, owner_name)?;
     let hit = match kind {
         MdoType::Enum => mdo.find_enum_value(member_name.as_str()).is_some(),
         MdoType::Catalog | MdoType::ChartOfAccounts => {
@@ -121,8 +166,12 @@ pub(crate) fn lookup_predefined(
         _ => false,
     };
 
-    hit.then(|| ManagerMemberInfo {
-        ty: Ty::MetadataRef { kind: ref_kind, name: owner_name.clone() },
+    hit.then(|| {
+        // The receiver `ObjectManager` facet carried a `config_id`; thread
+        // it onto the resolved ref so a CFE-scoped manager keeps its
+        // extension config (the old `Ty` path defaulted to `Root`).
+        let cfg = FixedConfigCtx(config_id.clone());
+        ManagerMemberInfo { ty: db.metadata_ref(ref_kind, owner_name.to_string(), &cfg) }
     })
 }
 
@@ -155,9 +204,19 @@ fn find_mdo<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bsl_config::VisibleConfig;
     use bsl_metadata::metadata_object::{EnumValue, PredefinedItem};
     use bsl_metadata::Configuration;
-    use hir_def::configs::VisibleConfig;
+    use bsl_types::testing::InMemoryDb;
+
+    fn lookup_manager_field(
+        db: &InMemoryDb,
+        configs: &[VisibleConfig],
+        base_ty: TypeId,
+        member: &Name,
+    ) -> Option<ManagerMemberInfo> {
+        super::lookup_manager_field(db, configs, base_ty, member)
+    }
     use std::sync::Arc;
 
     fn wrap(config: Configuration) -> Vec<VisibleConfig> {
@@ -209,16 +268,18 @@ mod tests {
         let mut config = Configuration::new("Test");
         config.add_metadata_object(catalog("Валюты", vec![]));
         let configs = wrap(config);
+        let db = InMemoryDb::new();
 
         let info = lookup_manager_field(
+            &db,
             &configs,
-            &Ty::ManagerCollection(MdoType::Catalog),
+            db.manager_collection(MdoType::Catalog),
             &Name::new("Валюты"),
         )
         .expect("ManagerCollection(Catalog).Валюты must promote when MDO exists");
         assert_eq!(
             info.ty,
-            Ty::ObjectManager { kind: MdoType::Catalog, name: Name::new("Валюты") }
+            db.object_manager(MdoType::Catalog, "Валюты".to_string(), &RootConfigCtx)
         );
     }
 
@@ -229,9 +290,11 @@ mod tests {
         // emit an UnresolvedName-style diagnostic). Promoting a
         // non-existent name would let typos silently type-check.
         let configs = wrap(Configuration::new("Test"));
+        let db = InMemoryDb::new();
         assert!(lookup_manager_field(
+            &db,
             &configs,
-            &Ty::ManagerCollection(MdoType::Catalog),
+            db.manager_collection(MdoType::Catalog),
             &Name::new("НеСуществует"),
         )
         .is_none());
@@ -251,19 +314,22 @@ mod tests {
                 .build(),
         );
         let configs = wrap(config);
+        let db = InMemoryDb::new();
 
         let info = lookup_manager_field(
+            &db,
             &configs,
-            &Ty::ManagerCollection(MdoType::InformationRegister),
+            db.manager_collection(MdoType::InformationRegister),
             &Name::new("РегистрСведений1"),
         )
         .expect("register promotion must consult Configuration.registers");
         assert_eq!(
             info.ty,
-            Ty::ObjectManager {
-                kind: MdoType::InformationRegister,
-                name: Name::new("РегистрСведений1"),
-            }
+            db.object_manager(
+                MdoType::InformationRegister,
+                "РегистрСведений1".to_string(),
+                &RootConfigCtx,
+            )
         );
     }
 
@@ -275,16 +341,18 @@ mod tests {
         let mut config = Configuration::new("Test");
         config.add_metadata_object(enum_mdo("Состояния", vec!["Активен", "Закрыт"]));
         let configs = wrap(config);
+        let db = InMemoryDb::new();
 
         let info = lookup_manager_field(
+            &db,
             &configs,
-            &Ty::ObjectManager { kind: MdoType::Enum, name: Name::new("Состояния") },
+            db.object_manager(MdoType::Enum, "Состояния".to_string(), &RootConfigCtx),
             &Name::new("Активен"),
         )
         .expect("enum value must resolve on ObjectManager<Enum, Состояния>");
         assert_eq!(
             info.ty,
-            Ty::MetadataRef { kind: MetadataKind::EnumRef, name: Name::new("Состояния") }
+            db.metadata_ref(MetadataKind::EnumRef, "Состояния".to_string(), &RootConfigCtx)
         );
     }
 
@@ -295,16 +363,18 @@ mod tests {
         let mut config = Configuration::new("Test");
         config.add_metadata_object(catalog("Валюты", vec!["Доллар", "Евро"]));
         let configs = wrap(config);
+        let db = InMemoryDb::new();
 
         let info = lookup_manager_field(
+            &db,
             &configs,
-            &Ty::ObjectManager { kind: MdoType::Catalog, name: Name::new("Валюты") },
+            db.object_manager(MdoType::Catalog, "Валюты".to_string(), &RootConfigCtx),
             &Name::new("Доллар"),
         )
         .expect("predefined item must resolve on ObjectManager<Catalog, Валюты>");
         assert_eq!(
             info.ty,
-            Ty::MetadataRef { kind: MetadataKind::CatalogRef, name: Name::new("Валюты") }
+            db.metadata_ref(MetadataKind::CatalogRef, "Валюты".to_string(), &RootConfigCtx)
         );
     }
 
@@ -315,21 +385,22 @@ mod tests {
         let mut config = Configuration::new("Test");
         config.add_metadata_object(chart_of_accounts("Хозрасчетный", vec!["Касса"]));
         let configs = wrap(config);
+        let db = InMemoryDb::new();
 
         let info = lookup_manager_field(
+            &db,
             &configs,
-            &Ty::ObjectManager {
-                kind: MdoType::ChartOfAccounts, name: Name::new("Хозрасчетный")
-            },
+            db.object_manager(MdoType::ChartOfAccounts, "Хозрасчетный".to_string(), &RootConfigCtx),
             &Name::new("Касса"),
         )
         .expect("chart-of-accounts predefined item must resolve");
         assert_eq!(
             info.ty,
-            Ty::MetadataRef {
-                kind: MetadataKind::ChartOfAccountsRef,
-                name: Name::new("Хозрасчетный"),
-            }
+            db.metadata_ref(
+                MetadataKind::ChartOfAccountsRef,
+                "Хозрасчетный".to_string(),
+                &RootConfigCtx,
+            )
         );
     }
 
@@ -342,10 +413,12 @@ mod tests {
         let mut config = Configuration::new("Test");
         config.add_metadata_object(catalog("Валюты", vec!["Доллар"]));
         let configs = wrap(config);
+        let db = InMemoryDb::new();
 
         assert!(lookup_manager_field(
+            &db,
             &configs,
-            &Ty::ObjectManager { kind: MdoType::Catalog, name: Name::new("Валюты") },
+            db.object_manager(MdoType::Catalog, "Валюты".to_string(), &RootConfigCtx),
             &Name::new("Несуществующий"),
         )
         .is_none());
@@ -365,10 +438,12 @@ mod tests {
         // without ever reaching for attributes / tabular sections.
         config.add_metadata_object(doc);
         let configs = wrap(config);
+        let db = InMemoryDb::new();
 
         assert!(lookup_manager_field(
+            &db,
             &configs,
-            &Ty::ObjectManager { kind: MdoType::Document, name: Name::new("ПКО") },
+            db.object_manager(MdoType::Document, "ПКО".to_string(), &RootConfigCtx),
             &Name::new("Любой"),
         )
         .is_none());
@@ -380,17 +455,19 @@ mod tests {
         // member info — `field_lookup` is the path for `MetadataRef`,
         // and everything else is a miss.
         let configs = wrap(Configuration::new("Test"));
+        let db = InMemoryDb::new();
         for ty in [
-            Ty::Unknown,
-            Ty::Number,
-            Ty::String,
-            Ty::Array,
-            Ty::MetadataRef { kind: MetadataKind::CatalogRef, name: Name::new("X") },
-            Ty::Union(vec![Ty::Number, Ty::String].into()),
+            db.unknown(),
+            db.number(None, None),
+            db.string(None, false),
+            db.array(None),
+            db.metadata_ref(MetadataKind::CatalogRef, "X".to_string(), &RootConfigCtx),
+            db.union(vec![db.number(None, None), db.string(None, false)]),
         ] {
             assert!(
-                lookup_manager_field(&configs, &ty, &Name::new("Любой")).is_none(),
-                "no manager lookup on {ty:?}",
+                lookup_manager_field(&db, &configs, ty, &Name::new("Любой")).is_none(),
+                "no manager lookup on {:?}",
+                db.lookup_type(ty),
             );
         }
     }
@@ -410,27 +487,30 @@ mod tests {
             VisibleConfig { name: None, configuration: Arc::new(main) },
             VisibleConfig { name: Some("Ext".into()), configuration: Arc::new(ext) },
         ];
+        let db = InMemoryDb::new();
 
         // Promotion doesn't distinguish main from ext here — both have
         // `Валюты`; the test pins that *some* config hit produces the
         // promotion. Predefined-item lookup on top:
         let info = lookup_manager_field(
+            &db,
             &configs,
-            &Ty::ObjectManager { kind: MdoType::Catalog, name: Name::new("Валюты") },
+            db.object_manager(MdoType::Catalog, "Валюты".to_string(), &RootConfigCtx),
             &Name::new("Евро"),
         )
         .expect("extension-declared predefined item must resolve");
         assert_eq!(
             info.ty,
-            Ty::MetadataRef { kind: MetadataKind::CatalogRef, name: Name::new("Валюты") }
+            db.metadata_ref(MetadataKind::CatalogRef, "Валюты".to_string(), &RootConfigCtx)
         );
 
         // `Доллар` (declared only in main) must NOT resolve — the ext
         // shadows the main MDO entirely, matching the reverse-iteration
         // rule.
         assert!(lookup_manager_field(
+            &db,
             &configs,
-            &Ty::ObjectManager { kind: MdoType::Catalog, name: Name::new("Валюты") },
+            db.object_manager(MdoType::Catalog, "Валюты".to_string(), &RootConfigCtx),
             &Name::new("Доллар"),
         )
         .is_none());

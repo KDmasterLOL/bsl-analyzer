@@ -1,4 +1,4 @@
-//! Managed-form attribute → [`Ty`] resolution.
+//! Managed-form attribute → kernel type resolution.
 //!
 //! `Form.xml` declares attributes (`<Attributes><Attribute name="…">`) with
 //! a typed surface — primitive, ref, MainAttribute object, ValueTable with
@@ -7,23 +7,23 @@
 //! exposes them via form-data wrappers.
 //!
 //! [`resolve_form_attribute`] is the bridge: cheap form gate first
-//! (`Resolver::resolve_this_form`), then a metadata read, then a small
+//! (`this_object::is_managed_form_module`), then a metadata read, then a small
 //! lowering decision per attribute kind:
 //!
 //! - **MainAttribute typed as `cfg:CatalogObject.X` / `cfg:DocumentObject.Y` /
 //!   `cfg:ExchangePlanObject.Z` / `cfg:ChartOfAccountsObject.W`** lowers to
-//!   [`Ty::FormData { kind: Structure, underlying: Some((mdo, name)) }`].
+//!   `TypeKind::FormData { kind: Structure, underlying: Some(...) }`.
 //!   Field lookup peels `underlying` to enumerate MDO attributes
 //!   (`Объект.Дата` reaches the document's `Дата`), method lookup goes
 //!   through `ДанныеФормыСтруктура` so object methods like `Записать` stay
 //!   blocked.
 //! - **`<Columns>`-bearing attribute** (`v8:ValueTable`) lowers to
-//!   [`Ty::FormData { kind: Collection, underlying: None }`]; methods come
+//!   `TypeKind::FormData { kind: Collection, underlying: None }`; methods come
 //!   from `ДанныеФормыКоллекция`. Row schema (per-column types) is out of
 //!   scope for the first iteration — completion / hover for `Строка.Колонка`
 //!   inside table iteration is a follow-up.
 //! - **Anything else** (primitive, simple ref, DefinedType, AnyObjectRef,
-//!   composite) goes through the standard [`attribute_type_to_ty`] adapter,
+//!   composite) goes through the standard `attribute_type_to_typeid` adapter,
 //!   which already understands DefinedType chain unwrapping and composite
 //!   union construction.
 //!
@@ -31,70 +31,59 @@
 //! ordinary forms and non-form modules return `None` so the caller can fall
 //! through the normal cascade in `infer_path_name`.
 
+use bsl_config::VisibleConfig;
 use bsl_metadata::{AttributeType, FormAttribute};
-use hir_def::configs::VisibleConfig;
+use bsl_types::builders::Builders;
+use bsl_types::facet::{FormDataFacet, MdoRefFacet};
+use bsl_types::intern::TypeKernelDb;
+use bsl_types::kind::{MetadataKind, TypeId};
 use hir_def::resolver::Resolver;
-use hir_def::ty::{FormDataKind, MetadataKind, Ty};
 use hir_def::Name;
 
 use crate::db::HirDatabase;
-use crate::field_enum::attribute_type_to_ty;
+use crate::field_enum::attribute_type_to_typeid;
 
-/// Pure adapter from a [`FormAttribute`] declaration to a [`Ty`].
-///
-/// Split out from [`resolve_form_attribute`] so the lowering rules
-/// (MainAttribute → `FormData::Structure`, columns → `FormData::Collection`,
-/// otherwise generic [`attribute_type_to_ty`]) can be unit-tested without
-/// spinning up a Salsa database. The full resolver path layers the
-/// managed-form gate and the metadata read on top of this function.
-pub fn lower_form_attribute_to_ty(attr: &FormAttribute, configs: &[VisibleConfig]) -> Ty {
+/// Pure adapter from a [`FormAttribute`] declaration directly to a kernel
+/// [`TypeId`].
+pub fn lower_form_attribute_to_typeid(
+    db: &dyn TypeKernelDb,
+    attr: &FormAttribute,
+    configs: &[VisibleConfig],
+) -> TypeId {
     let has_columns = !attr.columns.is_empty();
 
     if attr.is_main {
-        // MainAttribute typed as `cfg:CatalogObject.X` etc. projects to
-        // a structure wrapper. If the same attribute *also* carries a
-        // `<Columns>` schema (the document/catalog declares tabular
-        // sections accessible through the form), pick the platform's
-        // composite wrapper `ДанныеФормыСтруктураСКоллекцией` so method
-        // lookup picks up the structure-and-collection method table.
-        // Field projection still uses the underlying MDO.
         let kind = if has_columns {
-            FormDataKind::StructureWithCollection
+            FormDataFacet::StructureWithCollection
         } else {
-            FormDataKind::Structure
+            FormDataFacet::Structure
         };
 
         if let AttributeType::Ref { mdo_type, name: mdo_name } = &attr.attr_type {
             if MetadataKind::object_kind_for(*mdo_type).is_some() {
-                return Ty::FormData {
+                return db.mk_form_data(
                     kind,
-                    underlying: Some((*mdo_type, Name::new(mdo_name.as_str()))),
-                };
+                    Some(MdoRefFacet::new(*mdo_type, mdo_name.as_str().to_string())),
+                );
             }
         }
         if matches!(&attr.attr_type, AttributeType::AnyObjectRef { .. }) {
-            // Bare `cfg:CatalogObject` (no name) — methods still live on
-            // `ДанныеФормыСтруктура` (or the composite if columns exist),
-            // but field projection has nothing to anchor to.
-            return Ty::FormData { kind, underlying: None };
+            return db.mk_form_data(kind, None);
         }
-        // Exotic MainAttribute (primitive / DefinedType / composite) —
-        // unusual but not invalid; fall through to the generic adapter
-        // unless columns force the collection wrapper below.
     }
 
     if has_columns {
-        return Ty::FormData { kind: FormDataKind::Collection, underlying: None };
+        return db.mk_form_data(FormDataFacet::Collection, None);
     }
 
-    attribute_type_to_ty(&attr.attr_type, configs)
+    attribute_type_to_typeid(db, &attr.attr_type, configs)
 }
 
 /// Resolve a bare identifier as a managed-form attribute.
 ///
 /// Returns `Some(Ty)` only when **all** are true:
 /// 1. the resolver's enclosing module is a managed form
-///    ([`Resolver::resolve_this_form`] gate);
+///    ([`this_object::is_managed_form_module`] gate);
 /// 2. the form metadata declares an attribute with this name
 ///    (case-insensitive — BSL identifiers are case-insensitive);
 /// 3. the attribute lowers to a known shape.
@@ -106,11 +95,11 @@ pub(crate) fn resolve_form_attribute(
     db: &dyn HirDatabase,
     resolver: &Resolver,
     name: &Name,
-) -> Option<Ty> {
-    // Cheap gate FIRST so non-form modules pay nothing — `resolve_this_form`
-    // checks the FormType and the form payload's presence, both of which
-    // are already cached on `module_metadata`.
-    if !resolver.resolve_this_form(db) {
+) -> Option<TypeId> {
+    // Cheap gate FIRST so non-form modules pay nothing —
+    // `is_managed_form_module` checks the FormType and the form payload's
+    // presence, both of which are already cached on `module_metadata`.
+    if !crate::this_object::is_managed_form_module(db, resolver) {
         return None;
     }
 
@@ -119,18 +108,19 @@ pub(crate) fn resolve_form_attribute(
     let form = metadata.form.as_ref()?;
     let attr = form.find_attribute(name.as_str())?;
 
-    // `attribute_type_to_ty` reads `configs` only for `DefinedType` chain
-    // unwrapping; pre-computing the slice here avoids paying that cost on
-    // the common Structure/Collection short-circuits but keeps the call
-    // shape pure for testing (see [`lower_form_attribute_to_ty`]).
+    // `attribute_type_to_typeid` reads `configs` only for `DefinedType`
+    // chain unwrapping; pre-computing the slice here avoids paying that
+    // cost on the common Structure/Collection short-circuits.
     let configs = db.configurations(module_id.file_id);
-    Some(lower_form_attribute_to_ty(attr, &configs))
+    Some(lower_form_attribute_to_typeid(db, attr, &configs))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use bsl_metadata::{FormAttributeColumn, MdoType};
+    use bsl_types::kind::TypeKind;
+    use bsl_types::testing::InMemoryDb;
 
     fn plain(name: &str, attr_type: AttributeType) -> FormAttribute {
         FormAttribute::new(name, attr_type)
@@ -140,16 +130,57 @@ mod tests {
         FormAttribute { name: name.to_string(), attr_type, is_main: true, columns: vec![] }
     }
 
+    fn assert_metadata_ref(
+        db: &InMemoryDb,
+        id: TypeId,
+        expected_kind: MetadataKind,
+        expected_name: &str,
+    ) {
+        match db.lookup_type(id) {
+            TypeKind::MetadataRef(facet) => {
+                assert_eq!(facet.kind, expected_kind);
+                assert_eq!(facet.name.as_str(), expected_name);
+            }
+            other => {
+                panic!("expected MetadataRef({expected_kind:?}, {expected_name}), got {other:?}")
+            }
+        }
+    }
+
+    fn assert_form_data(
+        db: &InMemoryDb,
+        id: TypeId,
+        expected_kind: FormDataFacet,
+        expected_underlying: Option<(MdoType, &str)>,
+    ) {
+        match db.lookup_type(id) {
+            TypeKind::FormData { kind, underlying } => {
+                assert_eq!(*kind, expected_kind);
+                match (underlying, expected_underlying) {
+                    (Some(actual), Some((mdo_type, name))) => {
+                        assert_eq!(actual.mdo_type, mdo_type);
+                        assert_eq!(actual.name.as_str(), name);
+                    }
+                    (None, None) => {}
+                    _ => panic!("unexpected FormData underlying: {underlying:?}"),
+                }
+            }
+            other => panic!("expected FormData({expected_kind:?}), got {other:?}"),
+        }
+    }
+
     #[test]
     fn primitive_attribute_lowers_through_generic_adapter() {
+        let db = InMemoryDb::new();
         let attr = plain("Замечание", AttributeType::String { length: Some(100) });
-        assert_eq!(lower_form_attribute_to_ty(&attr, &[]), Ty::String);
+        assert_eq!(lower_form_attribute_to_typeid(&db, &attr, &[]), db.string(None, false));
     }
 
     #[test]
     fn boolean_attribute_lowers_to_boolean() {
+        let db = InMemoryDb::new();
         let attr = plain("Флаг", AttributeType::Boolean);
-        assert_eq!(lower_form_attribute_to_ty(&attr, &[]), Ty::Boolean);
+        assert_eq!(lower_form_attribute_to_typeid(&db, &attr, &[]), db.boolean());
     }
 
     #[test]
@@ -160,13 +191,9 @@ mod tests {
                 mdo_type: MdoType::Catalog, name: "Контрагенты".to_string()
             },
         );
-        match lower_form_attribute_to_ty(&attr, &[]) {
-            Ty::MetadataRef { kind, name } => {
-                assert_eq!(kind, MetadataKind::CatalogRef);
-                assert_eq!(name.as_str(), "Контрагенты");
-            }
-            other => panic!("expected MetadataRef{{CatalogRef,Контрагенты}}, got {:?}", other),
-        }
+        let db = InMemoryDb::new();
+        let id = lower_form_attribute_to_typeid(&db, &attr, &[]);
+        assert_metadata_ref(&db, id, MetadataKind::CatalogRef, "Контрагенты");
     }
 
     #[test]
@@ -179,15 +206,9 @@ mod tests {
             "Объект",
             AttributeType::Ref { mdo_type: MdoType::Document, name: "Заказ".to_string() },
         );
-        match lower_form_attribute_to_ty(&attr, &[]) {
-            Ty::FormData { kind: FormDataKind::Structure, underlying: Some((mdo, name)) } => {
-                assert_eq!(mdo, MdoType::Document);
-                assert_eq!(name.as_str(), "Заказ");
-            }
-            other => {
-                panic!("expected FormData{{Structure,Some((Document,Заказ))}}, got {:?}", other)
-            }
-        }
+        let db = InMemoryDb::new();
+        let id = lower_form_attribute_to_typeid(&db, &attr, &[]);
+        assert_form_data(&db, id, FormDataFacet::Structure, Some((MdoType::Document, "Заказ")));
     }
 
     #[test]
@@ -202,15 +223,14 @@ mod tests {
                 name: "БУС_ПомощникИмпортаТоваровБитрикс".to_string(),
             },
         );
-        match lower_form_attribute_to_ty(&attr, &[]) {
-            Ty::FormData { kind: FormDataKind::Structure, underlying: Some((mdo, name)) } => {
-                assert_eq!(mdo, MdoType::DataProcessor);
-                assert_eq!(name.as_str(), "БУС_ПомощникИмпортаТоваровБитрикс");
-            }
-            other => {
-                panic!("expected FormData{{Structure,Some((DataProcessor,..))}}, got {:?}", other)
-            }
-        }
+        let db = InMemoryDb::new();
+        let id = lower_form_attribute_to_typeid(&db, &attr, &[]);
+        assert_form_data(
+            &db,
+            id,
+            FormDataFacet::Structure,
+            Some((MdoType::DataProcessor, "БУС_ПомощникИмпортаТоваровБитрикс")),
+        );
     }
 
     #[test]
@@ -219,15 +239,9 @@ mod tests {
             "Объект",
             AttributeType::Ref { mdo_type: MdoType::Report, name: "Анализ".to_string() },
         );
-        match lower_form_attribute_to_ty(&attr, &[]) {
-            Ty::FormData { kind: FormDataKind::Structure, underlying: Some((mdo, name)) } => {
-                assert_eq!(mdo, MdoType::Report);
-                assert_eq!(name.as_str(), "Анализ");
-            }
-            other => {
-                panic!("expected FormData{{Structure,Some((Report,Анализ))}}, got {:?}", other)
-            }
-        }
+        let db = InMemoryDb::new();
+        let id = lower_form_attribute_to_typeid(&db, &attr, &[]);
+        assert_form_data(&db, id, FormDataFacet::Structure, Some((MdoType::Report, "Анализ")));
     }
 
     #[test]
@@ -239,15 +253,14 @@ mod tests {
                 name: "Согласование".to_string(),
             },
         );
-        match lower_form_attribute_to_ty(&attr, &[]) {
-            Ty::FormData { kind: FormDataKind::Structure, underlying: Some((mdo, name)) } => {
-                assert_eq!(mdo, MdoType::BusinessProcess);
-                assert_eq!(name.as_str(), "Согласование");
-            }
-            other => {
-                panic!("expected FormData{{Structure,Some((BusinessProcess,..))}}, got {:?}", other)
-            }
-        }
+        let db = InMemoryDb::new();
+        let id = lower_form_attribute_to_typeid(&db, &attr, &[]);
+        assert_form_data(
+            &db,
+            id,
+            FormDataFacet::Structure,
+            Some((MdoType::BusinessProcess, "Согласование")),
+        );
     }
 
     #[test]
@@ -258,13 +271,14 @@ mod tests {
                 mdo_type: MdoType::Task, name: "ЗадачаИсполнителя".to_string()
             },
         );
-        match lower_form_attribute_to_ty(&attr, &[]) {
-            Ty::FormData { kind: FormDataKind::Structure, underlying: Some((mdo, name)) } => {
-                assert_eq!(mdo, MdoType::Task);
-                assert_eq!(name.as_str(), "ЗадачаИсполнителя");
-            }
-            other => panic!("expected FormData{{Structure,Some((Task,..))}}, got {:?}", other),
-        }
+        let db = InMemoryDb::new();
+        let id = lower_form_attribute_to_typeid(&db, &attr, &[]);
+        assert_form_data(
+            &db,
+            id,
+            FormDataFacet::Structure,
+            Some((MdoType::Task, "ЗадачаИсполнителя")),
+        );
     }
 
     #[test]
@@ -277,24 +291,17 @@ mod tests {
             "Регистр",
             AttributeType::Ref { mdo_type: MdoType::InformationRegister, name: "X".to_string() },
         );
-        match lower_form_attribute_to_ty(&attr, &[]) {
-            Ty::MetadataRef { kind, .. } => {
-                // Generic adapter produced a plain MetadataRef for the
-                // register — not a FormData wrapper. The cascade stays
-                // honest about an unusual configuration.
-                assert!(matches!(kind, MetadataKind::InformationRegisterRef));
-            }
-            other => panic!("expected fall-through to MetadataRef, got {:?}", other),
-        }
+        let db = InMemoryDb::new();
+        let id = lower_form_attribute_to_typeid(&db, &attr, &[]);
+        assert_metadata_ref(&db, id, MetadataKind::InformationRegisterRef, "X");
     }
 
     #[test]
     fn main_attribute_with_bare_object_kind_yields_form_data_without_underlying() {
         let attr = main_attr("Объект", AttributeType::AnyObjectRef { mdo_type: MdoType::Catalog });
-        match lower_form_attribute_to_ty(&attr, &[]) {
-            Ty::FormData { kind: FormDataKind::Structure, underlying: None } => {}
-            other => panic!("expected FormData{{Structure,None}}, got {:?}", other),
-        }
+        let db = InMemoryDb::new();
+        let id = lower_form_attribute_to_typeid(&db, &attr, &[]);
+        assert_form_data(&db, id, FormDataFacet::Structure, None);
     }
 
     #[test]
@@ -308,10 +315,9 @@ mod tests {
                 attr_type: AttributeType::Boolean,
             }],
         };
-        match lower_form_attribute_to_ty(&attr, &[]) {
-            Ty::FormData { kind: FormDataKind::Collection, underlying: None } => {}
-            other => panic!("expected FormData{{Collection,None}}, got {:?}", other),
-        }
+        let db = InMemoryDb::new();
+        let id = lower_form_attribute_to_typeid(&db, &attr, &[]);
+        assert_form_data(&db, id, FormDataFacet::Collection, None);
     }
 
     #[test]
@@ -328,16 +334,16 @@ mod tests {
                 attr_type: AttributeType::Boolean,
             }],
         };
-        match lower_form_attribute_to_ty(&attr, &[]) {
-            Ty::FormData { kind: FormDataKind::Collection, .. } => {}
-            other => panic!("columns must win for Collection wrapper, got {:?}", other),
-        }
+        let db = InMemoryDb::new();
+        let id = lower_form_attribute_to_typeid(&db, &attr, &[]);
+        assert_form_data(&db, id, FormDataFacet::Collection, None);
     }
 
     #[test]
     fn unknown_attribute_lowers_to_unknown() {
+        let db = InMemoryDb::new();
         let attr = plain("БезТипа", AttributeType::Unknown);
-        assert_eq!(lower_form_attribute_to_ty(&attr, &[]), Ty::Unknown);
+        assert_eq!(lower_form_attribute_to_typeid(&db, &attr, &[]), db.unknown());
     }
 
     #[test]
@@ -358,16 +364,14 @@ mod tests {
                 attr_type: AttributeType::Unknown,
             }],
         };
-        match lower_form_attribute_to_ty(&attr, &[]) {
-            Ty::FormData {
-                kind: FormDataKind::StructureWithCollection,
-                underlying: Some((mdo, name)),
-            } => {
-                assert_eq!(mdo, MdoType::Document);
-                assert_eq!(name.as_str(), "Заказ");
-            }
-            other => panic!("expected StructureWithCollection with underlying, got {:?}", other),
-        }
+        let db = InMemoryDb::new();
+        let id = lower_form_attribute_to_typeid(&db, &attr, &[]);
+        assert_form_data(
+            &db,
+            id,
+            FormDataFacet::StructureWithCollection,
+            Some((MdoType::Document, "Заказ")),
+        );
     }
 
     /// Critical invariant from Codex review Q1: a managed-form main
@@ -385,32 +389,33 @@ mod tests {
     ///   (`platform_type_key` adapter at `method_lookup.rs:307`).
     #[test]
     fn form_data_structure_blocks_object_methods() {
-        use crate::method_lookup::platform_type_key;
+        use crate::method_lookup::platform_type_key_id;
 
-        let main_obj = Ty::FormData {
-            kind: FormDataKind::Structure,
-            underlying: Some((MdoType::Document, Name::new("Заказ"))),
-        };
-        // `platform_type_key` is the entry point method-lookup uses to pick
-        // the platform method table for a non-MDO receiver. For form data
-        // it returns the wrapper name — NOT the underlying MDO key — so
-        // `lookup_method` will look up methods on
-        // `ДанныеФормыСтруктура`, where `Записать` is absent.
-        assert_eq!(platform_type_key(&main_obj), Some("ДанныеФормыСтруктура"));
+        let db = InMemoryDb::new();
+        // `platform_type_key_id` is the entry point method-lookup uses to
+        // pick the platform method table for a non-MDO receiver. For form
+        // data it returns the wrapper name — NOT the underlying MDO key —
+        // so `lookup_method` looks up methods on `ДанныеФормыСтруктура`,
+        // where `Записать` is absent.
+        let main_obj = db.mk_form_data(
+            FormDataFacet::Structure,
+            Some(MdoRefFacet::new(MdoType::Document, "Заказ".to_string())),
+        );
+        assert_eq!(platform_type_key_id(&db, main_obj).as_deref(), Some("ДанныеФормыСтруктура"));
 
         // The composite-wrapper variant is symmetrically routed.
-        let main_obj_with_columns = Ty::FormData {
-            kind: FormDataKind::StructureWithCollection,
-            underlying: Some((MdoType::Document, Name::new("Заказ"))),
-        };
+        let main_obj_with_columns = db.mk_form_data(
+            FormDataFacet::StructureWithCollection,
+            Some(MdoRefFacet::new(MdoType::Document, "Заказ".to_string())),
+        );
         assert_eq!(
-            platform_type_key(&main_obj_with_columns),
+            platform_type_key_id(&db, main_obj_with_columns).as_deref(),
             Some("ДанныеФормыСтруктураСКоллекцией")
         );
 
         // And Collection lands on the form-data collection wrapper.
-        let table = Ty::FormData { kind: FormDataKind::Collection, underlying: None };
-        assert_eq!(platform_type_key(&table), Some("ДанныеФормыКоллекция"));
+        let table = db.mk_form_data(FormDataFacet::Collection, None);
+        assert_eq!(platform_type_key_id(&db, table).as_deref(), Some("ДанныеФормыКоллекция"));
 
         // Same invariant for the four new MDO families: DataProcessor /
         // Report / BusinessProcess / Task — methods route through the
@@ -423,12 +428,12 @@ mod tests {
             (MdoType::BusinessProcess, "Согласование"),
             (MdoType::Task, "ЗадачаИсполнителя"),
         ] {
-            let receiver = Ty::FormData {
-                kind: FormDataKind::Structure,
-                underlying: Some((mdo, Name::new(name))),
-            };
+            let receiver = db.mk_form_data(
+                FormDataFacet::Structure,
+                Some(MdoRefFacet::new(mdo, name.to_string())),
+            );
             assert_eq!(
-                platform_type_key(&receiver),
+                platform_type_key_id(&db, receiver).as_deref(),
                 Some("ДанныеФормыСтруктура"),
                 "FormData wrapper for {:?} must NOT route through {:?}'s HBK surface",
                 mdo,
@@ -445,11 +450,12 @@ mod tests {
     #[test]
     fn form_data_structure_projects_for_fields() {
         use crate::field_lookup;
+        let db = InMemoryDb::new();
 
-        let receiver = Ty::FormData {
-            kind: FormDataKind::Structure,
-            underlying: Some((MdoType::Document, Name::new("Заказ"))),
-        };
+        let receiver = db.mk_form_data(
+            FormDataFacet::Structure,
+            Some(MdoRefFacet::new(MdoType::Document, "Заказ".to_string())),
+        );
         // `lookup_field` returns `None` here (no real configs in this
         // test), but the *projection* must produce a `MetadataRef` BEFORE
         // hitting the empty enumerator — otherwise the platform-property
@@ -461,11 +467,11 @@ mod tests {
         // (The actual MDO field walk is exercised by the existing
         // `MetadataRef` integration tests — duplicating that wiring here
         // would test the enumerator, not our projection.)
-        let _ = field_lookup::lookup_field(&[], &receiver, &Name::new("Дата"));
+        let _ = field_lookup::lookup_field(&db, &[], receiver, &Name::new("Дата"));
         // The negative path on a Collection: no underlying, projection
         // returns None, falls through to platform property lookup on
         // `ДанныеФормыКоллекция`, which has no `Дата` field. Returns None.
-        let table = Ty::FormData { kind: FormDataKind::Collection, underlying: None };
-        assert!(field_lookup::lookup_field(&[], &table, &Name::new("Дата")).is_none());
+        let table = db.mk_form_data(FormDataFacet::Collection, None);
+        assert!(field_lookup::lookup_field(&db, &[], table, &Name::new("Дата")).is_none());
     }
 }

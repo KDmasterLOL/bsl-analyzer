@@ -4,13 +4,15 @@
 //! names. Managed form modules expose form attributes the same way.
 
 use bsl_metadata::{MdoType, ModuleType};
-use hir_def::ty::{MetadataKind, Ty};
+use bsl_types::builders::Builders;
+use bsl_types::kind::MetadataKind;
+use bsl_types::testing::RootConfigCtx;
 use hir_def::{ModuleId, Name};
 use vfs::FileId;
 
 use crate::db::HirDatabase;
-use crate::field_enum::{enumerate_fields, FieldInfo, FieldOrigin};
-use crate::form_attr::lower_form_attribute_to_ty;
+use crate::field_enum::{enumerate_fields_inner, FieldInfo, FieldOrigin};
+use crate::form_attr::lower_form_attribute_to_typeid;
 
 /// Symbols visible as bare-ident in the current module.
 pub fn module_implicit_fields(db: &dyn HirDatabase, file_id: FileId) -> Vec<FieldInfo> {
@@ -24,8 +26,12 @@ pub fn module_implicit_fields(db: &dyn HirDatabase, file_id: FileId) -> Vec<Fiel
             let Some(kind) = MetadataKind::object_kind_for(mdo.mdo_type) else {
                 return Vec::new();
             };
-            let receiver = Ty::MetadataRef { kind, name: Name::new(&mdo.name) };
-            enumerate_fields(&configs, &receiver)
+            // The module's own MDO carries no `config_id` here, so the
+            // receiver resolves under `Root` — behavior-preserving (the
+            // prior `Ty` bridge also defaulted to Root) with known
+            // config-identity loss for CFE modules.
+            let receiver = db.metadata_ref(kind, mdo.name.clone(), &RootConfigCtx);
+            enumerate_fields_inner(db, &configs, receiver)
         }
         ModuleType::RecordSetModule => {
             let Some((mdo_type, name)) = module_owner_mdo(&metadata) else {
@@ -34,8 +40,8 @@ pub fn module_implicit_fields(db: &dyn HirDatabase, file_id: FileId) -> Vec<Fiel
             let Some(kind) = MetadataKind::record_set_kind_for(mdo_type) else {
                 return Vec::new();
             };
-            let receiver = Ty::MetadataRef { kind, name };
-            enumerate_fields(&configs, &receiver)
+            let receiver = db.metadata_ref(kind, name.as_str().to_string(), &RootConfigCtx);
+            enumerate_fields_inner(db, &configs, receiver)
         }
         ModuleType::ManagerModule => Vec::new(),
         ModuleType::FormModule => {
@@ -47,7 +53,7 @@ pub fn module_implicit_fields(db: &dyn HirDatabase, file_id: FileId) -> Vec<Fiel
                 .map(|attr| FieldInfo {
                     name: Name::new(&attr.name),
                     name_en: None,
-                    ty: lower_form_attribute_to_ty(attr, &configs),
+                    ty: lower_form_attribute_to_typeid(db, attr, &configs),
                     value_ty: None,
                     is_readonly: false,
                     origin: if attr.is_main {

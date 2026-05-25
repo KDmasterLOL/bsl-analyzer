@@ -48,6 +48,10 @@ impl<'a> DiagnosticsContext<'a> {
         self.config.locale
     }
 
+    pub fn kernel_type_display(&self, id: hir::TypeId, locale: base_db::Locale) -> String {
+        self.provider.kernel_type_display(id, locale)
+    }
+
     /// Load **main** configuration metadata.
     ///
     /// Returns the main configuration only — extension (CFE) configurations
@@ -67,7 +71,7 @@ impl<'a> DiagnosticsContext<'a> {
     ///
     /// The main configuration is sourced from
     /// [`Self::visible_configurations`] — the **first entry whose
-    /// `VisibleConfig.name` is `None`**. This matches the invariant set up
+    /// `config.name` is `None`**. This matches the invariant set up
     /// in `bsl-analyzer/src/workspace.rs::set_workspace_root`, which always
     /// pushes the main config as `(None, path)` ahead of any extensions.
     /// We do not blindly trust the provider's own configured path: that
@@ -86,8 +90,8 @@ impl<'a> DiagnosticsContext<'a> {
     pub fn main_configuration(&self) -> Option<Arc<bsl_metadata::Configuration>> {
         self.visible_configurations()
             .into_iter()
-            .find(|vc| vc.name.is_none())
-            .map(|vc| vc.configuration)
+            .find(|vc| vc.config.name.is_none())
+            .map(|vc| vc.config.configuration)
     }
 
     /// Get all visible configurations for the current file: main + extensions.
@@ -98,7 +102,7 @@ impl<'a> DiagnosticsContext<'a> {
     /// cross-configuration references (e.g. a file in an extension calling a
     /// CommonModule defined in the main configuration) should iterate the
     /// returned list rather than relying on [`Self::main_configuration`].
-    pub fn visible_configurations(&self) -> Vec<ide_db::provider::VisibleConfig> {
+    pub fn visible_configurations(&self) -> Vec<ide_db::provider::VisibleConfigWithRoot> {
         self.provider.visible_configurations(self.file_id)
     }
 
@@ -127,7 +131,7 @@ impl<'a> DiagnosticsContext<'a> {
 
         let mut out = Vec::new();
         for visible in self.visible_configurations() {
-            let Some(common_module) = visible.configuration.find_common_module(name) else {
+            let Some(common_module) = visible.config.configuration.find_common_module(name) else {
                 continue;
             };
             let Some(uri) = common_module.uri() else { continue };
@@ -147,7 +151,7 @@ impl<'a> DiagnosticsContext<'a> {
             } else {
                 tracing::debug!(
                     module = %name,
-                    ext = ?visible.name,
+                    ext = ?visible.config.name,
                     root = %visible.root.display(),
                     "CommonModule file not found in VFS",
                 );
@@ -170,9 +174,9 @@ impl<'a> DiagnosticsContext<'a> {
     pub fn find_common_module_anywhere(
         &self,
         name: &str,
-    ) -> Option<(ide_db::provider::VisibleConfig, bsl_metadata::CommonModule)> {
+    ) -> Option<(ide_db::provider::VisibleConfigWithRoot, bsl_metadata::CommonModule)> {
         for visible in self.visible_configurations() {
-            if let Some(common_module) = visible.configuration.find_common_module(name) {
+            if let Some(common_module) = visible.config.configuration.find_common_module(name) {
                 let module = common_module.clone();
                 return Some((visible, module));
             }
@@ -187,7 +191,7 @@ impl<'a> DiagnosticsContext<'a> {
     pub fn is_common_module_anywhere(&self, name: &str) -> bool {
         self.visible_configurations()
             .iter()
-            .any(|visible| visible.configuration.find_common_module(name).is_some())
+            .any(|visible| visible.config.configuration.find_common_module(name).is_some())
     }
 
     /// Classify the assignment target `Name = …` for the current file.

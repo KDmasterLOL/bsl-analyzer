@@ -20,7 +20,9 @@
 
 use std::sync::Arc;
 
-use crate::configs::{ConfigsDatabase, VisibleConfig};
+use bsl_config::VisibleConfig;
+
+use crate::configs::ConfigsDatabase;
 use crate::scope::{ExprScopes, ScopeId};
 use crate::{DefDatabase, MethodId, ModuleId, Name, PathResolution, QualifiedName, VariableId};
 
@@ -202,153 +204,6 @@ impl Resolver {
         Some(variable.id)
     }
 
-    /// Resolve the `ЭтотОбъект` / `ThisObject` receiver to the enclosing
-    /// MDO's `(kind, name)`.
-    ///
-    /// Reads [`DefDatabase::module_metadata`] for the current module and
-    /// returns `Some((mdo_type, name))` only when **both** conditions
-    /// hold:
-    ///
-    /// 1. The module is an `ObjectModule` — the single module type
-    ///    where `ЭтотОбъект` semantically means "the current MDO as a
-    ///    `*Object` reference" (record-set / form / manager / common /
-    ///    command modules have their own `ЭтотОбъект` semantics, out
-    ///    of scope for Task 5).
-    /// 2. The MDO flavour has a matching `*Object` companion in
-    ///    [`crate::ty::MetadataKind`] (checked via
-    ///    [`crate::ty::MetadataKind::object_kind_for`]). Without a
-    ///    coercion target the downstream `FieldLookup` /
-    ///    `MethodLookup` adapters have nothing to resolve against,
-    ///    so a `Ty::ThisObject` constructed here would dangle.
-    ///    Covered kinds today: `Catalog`, `Document`, `ExchangePlan`,
-    ///    `ChartOfAccounts`, `Task`, `BusinessProcess`, `DataProcessor`,
-    ///    `Report`. `ChartOfCharacteristicTypes`, registers, and enums
-    ///    still sit in this gap — their ObjectModule `ЭтотОбъект`
-    ///    stays `Ty::Unknown` until dedicated `*Object` variants land.
-    ///
-    /// # Why in `Resolver`
-    ///
-    /// The identifier is intercepted ahead of the usual lookup cascade
-    /// (builtins / locals / module) because BSL treats `ЭтотОбъект`
-    /// like a platform global — not shadowable, resolved through module
-    /// metadata rather than scope chain. Keeping the helper on
-    /// `Resolver` groups it with the other `resolve_*` entry points so
-    /// hir-ty / ide callers have a single lookup surface.
-    pub fn resolve_this_object(
-        &self,
-        db: &dyn DefDatabase,
-    ) -> Option<(bsl_metadata::MdoType, Name)> {
-        let module_id = self.module_id()?;
-        let metadata = db.module_metadata(module_id);
-        let mdo = metadata.mdo.as_ref()?;
-
-        if metadata.module_type != bsl_metadata::ModuleType::ObjectModule {
-            return None;
-        }
-
-        // Only MDO flavours with an `*Object` companion in
-        // `MetadataKind` are allowed to surface `Ty::ThisObject`.
-        // See `resolve_this_object` doc block for rationale.
-        crate::ty::MetadataKind::object_kind_for(mdo.mdo_type)?;
-
-        Some((mdo.mdo_type, Name::new(&mdo.name)))
-    }
-
-    /// Resolve `ЭтотОбъект` / `ThisObject` inside a `ManagerModule.bsl`.
-    ///
-    /// Sibling of [`Self::resolve_this_object`] for the manager axis.
-    /// Returns `Some((MdoType, Name))` only when the resolver's enclosing
-    /// module is a `ModuleType::ManagerModule` whose MDO has a manager
-    /// surface — gated on
-    /// [`bsl_metadata::MdoType::manager_type_prefix`] returning `Some(_)`,
-    /// the same table that `Ty::ManagerCollection` factory uses, so a
-    /// flavour without a manager (constants, common modules, forms,
-    /// HTTP-services, web-services, event subscriptions, scheduled jobs
-    /// …) returns `None` rather than dangle a `Ty::ThisManager` no
-    /// adapter can dispatch.
-    ///
-    /// In a manager module `ЭтотОбъект` denotes the manager itself
-    /// (`Справочники.Номенклатура` for a Catalog manager — same surface
-    /// the user reaches via the `Справочники.<Имя>` qualified path).
-    /// Inference produces [`crate::ty::Ty::ThisManager`]; field / method
-    /// lookup adapters then coerce it to [`crate::ty::Ty::ObjectManager`]
-    /// via `hir-ty::this_object::coerce_to_metadata_ref`. Both halves of
-    /// the pipeline share this gate so a new `MdoType` flavour with a
-    /// manager grows `ЭтотОбъект` support automatically.
-    pub fn resolve_this_manager(
-        &self,
-        db: &dyn DefDatabase,
-    ) -> Option<(bsl_metadata::MdoType, Name)> {
-        let module_id = self.module_id()?;
-        let metadata = db.module_metadata(module_id);
-
-        if metadata.module_type != bsl_metadata::ModuleType::ManagerModule {
-            return None;
-        }
-
-        // Two storage slots per `build_module_metadata`
-        // (`crates/ide-db/src/metadata.rs::build_module_metadata`):
-        //
-        // - `metadata.mdo` for non-register flavours (Catalog,
-        //   Document, ChartOfAccounts, …) — populated from
-        //   `Configuration::find_metadata_object`.
-        // - `metadata.register` for the four register flavours
-        //   (Information / Accumulation / Accounting / Calculation) —
-        //   populated from `Configuration::find_register_by_type_and_name`,
-        //   `metadata.mdo` stays `None`.
-        //
-        // Both carry the `(MdoType, name)` pair this gate needs. The
-        // earlier "read `metadata.mdo` only" shape would silently
-        // refuse every register's `ManagerModule.bsl` even though
-        // `manager_type_prefix` is `Some(...)` for all four flavours
-        // (covered end-to-end by
-        // `crates/ide/tests/infer_this_manager.rs::infer_this_manager_resolves_in_information_register_module`).
-        let (mdo_type, name) = match (metadata.mdo.as_ref(), metadata.register.as_ref()) {
-            (Some(mdo), _) => (mdo.mdo_type, Name::new(&mdo.name)),
-            (None, Some(reg)) => (reg.mdo_type(), Name::new(reg.name())),
-            (None, None) => return None,
-        };
-
-        // Only MDO flavours with a manager surface are allowed to surface
-        // `Ty::ThisManager`. The `Ty::ObjectManager` factory uses the same
-        // gate, so a manager that exists at the inference layer always
-        // has a corresponding dispatch target downstream.
-        mdo_type.manager_type_prefix()?;
-
-        Some((mdo_type, name))
-    }
-
-    /// Resolve `ЭтотОбъект` / `ThisObject` inside `<Register>/Ext/RecordSetModule.bsl`.
-    ///
-    /// Returns `Some((MdoType, Name))` only when the enclosing module is
-    /// `ModuleType::RecordSetModule` whose MDO is one of the four register
-    /// flavours — gated through `MetadataKind::record_set_kind_for` so the
-    /// downstream `*RecordSet` companion always exists.
-    ///
-    /// Two storage slots, same as [`Self::resolve_this_manager`]: register
-    /// flavours populate `metadata.register`, not `metadata.mdo`.
-    pub fn resolve_this_record_set(
-        &self,
-        db: &dyn DefDatabase,
-    ) -> Option<(bsl_metadata::MdoType, Name)> {
-        let module_id = self.module_id()?;
-        let metadata = db.module_metadata(module_id);
-
-        if metadata.module_type != bsl_metadata::ModuleType::RecordSetModule {
-            return None;
-        }
-
-        let (mdo_type, name) = match (metadata.mdo.as_ref(), metadata.register.as_ref()) {
-            (Some(mdo), _) => (mdo.mdo_type, Name::new(&mdo.name)),
-            (None, Some(reg)) => (reg.mdo_type(), Name::new(reg.name())),
-            (None, None) => return None,
-        };
-
-        crate::ty::MetadataKind::record_set_kind_for(mdo_type)?;
-
-        Some((mdo_type, name))
-    }
-
     /// Visibility-aware probe for "is `module_name` a user CommonModule?".
     ///
     /// Mirrors the two-stage gate inside [`Self::resolve_qualified_method`]:
@@ -379,32 +234,6 @@ impl Resolver {
 
         let source_root_id = db.file_source_root_input(file_id).source_root_id(db);
         db.module_index(source_root_id).resolve_common_module(module_name).is_some()
-    }
-
-    /// Returns `true` when the resolver's enclosing module is a managed form.
-    ///
-    /// Sibling to [`Self::resolve_this_object`]: same input shape and
-    /// parallel module-metadata gate, but answers a different question.
-    /// `resolve_this_object` returns the `(MdoType, Name)` pair that lets
-    /// `infer_path_name` build a `Ty::ThisObject` for an object module's
-    /// `ЭтотОбъект`. Forms have no `MdoType` companion (they live outside
-    /// the catalog/document/exchange-plan/chart-of-accounts axis), so the
-    /// form path returns just a flag — the caller maps it to the platform
-    /// type `ФормаКлиентскогоПриложения` directly.
-    ///
-    /// Gate is strict: only `ModuleType::FormModule` *and* an attached
-    /// managed `Form` payload qualifies. Ordinary forms and form modules
-    /// without a loaded `Form.xml` return `false` (conservative — we'd
-    /// rather miss type info than mistype an ordinary form as managed).
-    pub fn resolve_this_form(&self, db: &dyn DefDatabase) -> bool {
-        let Some(module_id) = self.module_id() else { return false };
-        let metadata = db.module_metadata(module_id);
-
-        if metadata.module_type != bsl_metadata::ModuleType::FormModule {
-            return false;
-        }
-
-        metadata.form.as_ref().is_some_and(|f| f.is_managed())
     }
 
     /// Resolve a bare name as an assignment-statement target.
@@ -877,9 +706,9 @@ impl Resolver {
     }
 
     /// 2-shape variant of [`Self::resolve_three_level_method`]:
-    /// `М = Справочники.X; М.МойМетод()` where `М` carries
-    /// [`crate::ty::Ty::ObjectManager { kind, name }`][ObjectManager] —
-    /// the manager-collection plural has already been consumed by type
+    /// `М = Справочники.X; М.МойМетод()` where `М` carries an
+    /// object-manager type (`TypeKind::ObjectManager`) — the
+    /// manager-collection plural has already been consumed by type
     /// inference, so this entry skips the `MdoType::from_plural` step.
     ///
     /// Otherwise identical to [`Self::resolve_three_level_method`]:
@@ -899,8 +728,6 @@ impl Resolver {
     /// the platform `lookup_method` only when the workspace
     /// authoritatively does *not* know the receiver, and the platform
     /// surface is the legitimate next consult.
-    ///
-    /// [ObjectManager]: crate::ty::Ty::ObjectManager
     pub fn resolve_aliased_manager_method(
         &self,
         db: &dyn ConfigsDatabase,

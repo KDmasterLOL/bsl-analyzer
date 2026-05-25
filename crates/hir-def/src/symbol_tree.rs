@@ -73,12 +73,6 @@ pub struct MethodSymbol {
     /// Annotations (&НаКлиенте, etc.).
     pub annotations: Vec<Annotation>,
 
-    /// Return type (for functions).
-    ///
-    /// For Iteration 8, this is always Unknown (full type inference in Iteration 12+).
-    /// Procedures have return_type = Ty::Undefined.
-    pub return_type: crate::Ty,
-
     /// Source location for navigation.
     pub source_range: TextRange,
 
@@ -95,7 +89,7 @@ pub struct MethodSymbol {
     /// the comment did not state a return type; callers treat this as
     /// `Ty::Unknown` rather than "no return". Consumed by
     /// `hir_ty::method_resolution::materialise_signature` via
-    /// [`hir_ty::TyLoweringContext::lower_type_ref`].
+    /// `hir_ty::TyLoweringContext::lower_type_ref_id`.
     pub return_type_ref: Option<TypeRef>,
 }
 
@@ -162,18 +156,13 @@ pub struct ParamSymbol {
     /// Has default value?
     pub has_default: bool,
 
-    /// Parameter type.
-    ///
-    /// For Iteration 8, this is always Unknown (full type inference in Iteration 12+).
-    pub ty: crate::Ty,
-
     /// JSDoc-derived syntactic type hint for this parameter.
     ///
     /// Matched against [`MethodTypeHints::params`] by case-insensitive name
     /// during `SymbolTreeBuilder` construction. `None` when the doc comment
     /// had no matching `Param - Type` line; callers treat this as
     /// `Ty::Unknown` after
-    /// [`hir_ty::TyLoweringContext::lower_type_ref`].
+    /// `hir_ty::TyLoweringContext::lower_type_ref_id`.
     pub type_ref: Option<TypeRef>,
 }
 
@@ -244,7 +233,6 @@ impl SymbolTree {
                         is_export: proc.is_export,
                         params: proc.params.iter().map(ParamSymbol::from).collect(),
                         annotations: proc.annotations.to_vec(),
-                        return_type: crate::Ty::Undefined,
                         source_range: proc.source_range,
                         docs: None,
                         return_type_ref: None,
@@ -263,7 +251,6 @@ impl SymbolTree {
                         is_export: func.is_export,
                         params: func.params.iter().map(ParamSymbol::from).collect(),
                         annotations: func.annotations.to_vec(),
-                        return_type: crate::Ty::Unknown,
                         source_range: func.source_range,
                         docs: None,
                         return_type_ref: None,
@@ -419,7 +406,6 @@ impl<'a> SymbolTreeBuilder<'a> {
             is_export: proc.is_export,
             params: Self::params_with_hints(&proc.params, hints.as_ref()),
             annotations: proc.annotations.to_vec(),
-            return_type: crate::Ty::Undefined, // Procedures don't return values
             source_range: proc.source_range,
             return_type_ref: hints.as_ref().map(|h| h.ret.clone()),
             docs,
@@ -442,7 +428,6 @@ impl<'a> SymbolTreeBuilder<'a> {
             is_export: func.is_export,
             params: Self::params_with_hints(&func.params, hints.as_ref()),
             annotations: func.annotations.to_vec(),
-            return_type: crate::Ty::Unknown, // TODO: Full type inference in Iteration 12+
             source_range: func.source_range,
             return_type_ref: hints.as_ref().map(|h| h.ret.clone()),
             docs,
@@ -553,7 +538,6 @@ impl From<&Param> for ParamSymbol {
             name: param.name.clone(),
             is_val: param.is_val,
             has_default: param.has_default,
-            ty: crate::Ty::Unknown, // TODO: Full type inference in Iteration 12+
             type_ref: None,
         }
     }

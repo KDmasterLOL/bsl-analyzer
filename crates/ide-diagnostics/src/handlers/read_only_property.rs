@@ -3,7 +3,7 @@
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir::{Name, Ty};
+use hir::{Name, TypeId};
 use ide_db::TextRange;
 
 // Warning-level: the user may be intentionally trying to call a setter
@@ -28,17 +28,15 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 
 /// Creates diagnostic from `InferenceDiagnostic::ReadOnlyPropertyAssignment`.
 pub fn from_hir(
-    receiver_ty: &Ty,
+    receiver_ty: TypeId,
     field_name: &Name,
     range: TextRange,
     ctx: &DiagnosticsContext,
 ) -> Option<Diagnostic> {
-    // `display(locale)` expands `Ty::Union` to `A | B` so the message
-    // names the actual member types instead of the coarse `Составной` label.
     let message = format!(
         "Свойство '{}' типа '{}' доступно только для чтения",
         field_name.as_str(),
-        receiver_ty.display(ctx.locale())
+        ctx.kernel_type_display(receiver_ty, ctx.locale())
     );
     crate::simple_hir_diagnostic(DiagnosticCode::ReadOnlyPropertyAssignment, message, range, ctx)
 }

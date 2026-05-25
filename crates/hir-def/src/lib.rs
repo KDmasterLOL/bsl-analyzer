@@ -43,6 +43,7 @@ pub mod queries;
 pub mod region_tree;
 pub mod resolver;
 pub mod scope;
+pub mod sdbl_cache;
 pub mod symbol_tree;
 pub mod ty;
 pub mod type_ref;
@@ -66,7 +67,7 @@ pub use cfg_types::{BindingId, ExprId, IdConversion, StmtId};
 
 // ModuleBodies, ModuleMetadata, ExecutionContext are defined in this file, not in modules
 pub use conditional_tree::{ConditionalData, ConditionalIdx, ConditionalKind, ConditionalTree};
-pub use configs::{ConfigsDatabase, VisibleConfig};
+pub use configs::ConfigsDatabase;
 pub use item_tree::ItemTree;
 pub use module_index::ModuleIndex;
 pub use name::Name;
@@ -76,8 +77,9 @@ pub use name_usage_index::{
 };
 pub use path::{PathResolution, QualifiedName};
 pub use region_tree::{RegionData, RegionIdx, RegionTree};
+pub use sdbl_cache::{all_sdbl_in_file_query, sdbl_hir_for_file_query, SdblHirEntries, SdblInFile};
 pub use symbol_tree::{MethodSymbol, ParamSymbol, SymbolTree, VariableSymbol};
-pub use ty::{FunctionSignature, Ty};
+pub use ty::FunctionSignature;
 pub use type_ref::{BuiltinTypeRef, TypeRef};
 pub use workspace::{is_bsl_source, CommonModuleInfo, WorkspaceSymbols};
 pub use workspace_index::{SymbolInfo, SymbolKind, WorkspaceIndex};

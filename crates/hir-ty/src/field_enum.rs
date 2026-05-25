@@ -8,22 +8,28 @@
 //! # Helper migration
 //!
 //! The low-level helpers (`mdo_type_for_kind`, `register_parent_for_kind`,
-//! `find_mdo`, `attribute_type_to_ty`, `register_part_ty`,
+//! `find_mdo`, `attribute_type_to_typeid`, `register_part_typeid`,
 //! `split_parent_section`) were previously duplicated between
 //! `field_lookup.rs` and `type_facade.rs`. They now live here as
 //! `pub(crate)` so both modules use the single canonical copy.
 
+use bsl_config::VisibleConfig;
 use bsl_metadata::{AttributeType, MdoType, MetadataObject, RegisterPeriodicity};
 use bsl_platform::{
     standard_attributes_for, MdoTemplateKind, ObjectView, PlatformData, StandardKind,
 };
-use hir_def::configs::VisibleConfig;
-use hir_def::ty::{MetadataKind, Ty};
+use bsl_types::builders::Builders;
+use bsl_types::facet::DateComponent;
+use bsl_types::intern::TypeKernelDb;
+use bsl_types::kind::{ConfigId, TypeId, TypeKind};
+use bsl_types::testing::RootConfigCtx;
+use hir_def::ty::MetadataKind;
 use hir_def::type_ref::TypeRef;
 use hir_def::Name;
 
 use crate::lower::metadata_resolver::ConfigsResolver;
 use crate::lower::TyLoweringContext;
+use crate::this_object::FixedConfigCtx;
 
 /// Where a field came from.
 ///
@@ -51,13 +57,11 @@ pub struct FieldInfo {
     pub name: Name,
     /// English alias from metadata, if present.
     pub name_en: Option<Name>,
-    /// Lowered type of the field.
-    pub ty: Ty,
-    /// тип доменного значения, обёрнутого synthetic/platform wrapper'ом;
-    /// `ty` остаётся фактическим типом доступа. Сейчас заполняется только
-    /// для RegisterFilter-ключей. Когда появится второй wrapper-kind,
-    /// рефакторить в FieldWrapperInfo { kind, value_ty }.
-    pub value_ty: Option<Ty>,
+    /// Lowered type of the field (kernel handle).
+    pub ty: TypeId,
+    /// Domain value type wrapped by a synthetic/platform wrapper; `ty`
+    /// stays the actual access type. Currently only RegisterFilter keys.
+    pub value_ty: Option<TypeId>,
     /// `true` when the field is read-only (platform property or intrinsically
     /// read-only standard attribute like `Ссылка`, `НомерСтроки`).
     pub is_readonly: bool,
@@ -65,79 +69,171 @@ pub struct FieldInfo {
     pub origin: FieldOrigin,
 }
 
-/// Enumerate every field exposed by `receiver_ty` against the visible
+/// Enumerate every field exposed by `receiver` against the visible
 /// configurations.
 ///
 /// Configuration iteration: `configs.iter().rev()` — extensions override
 /// main on `(MdoType, name)` collisions.
 ///
-/// `Ty::ThisObject` is coerced to its matching `*Object` `MetadataRef` at
+/// `ThisObject` is coerced to its matching `*Object` `MetadataRef` at
 /// the start, so callers do not need to handle it separately.
 ///
-/// `Ty::Union` is descended into: each non-`Undefined`/`Null` arm is
+/// `Union` is descended into: each non-`Undefined`/`Null` arm is
 /// enumerated and the results are merged with a name-based dedup. This
 /// matches receiver shapes produced by upstream inference such as
 /// `НайтиСтроки(...)` returning `Union(TabularSectionRow, Undefined)`,
 /// so completion / lookup on the union keeps working.
 ///
 /// Returns an empty `Vec` for receivers that have no field surface
-/// (`Ty::Unknown`, primitives, `Ty::PlatformObject`, managers, plain
+/// (`Unknown`, primitives, `PlatformObject`, managers, plain
 /// `TabularSection` collection receivers).
-pub fn enumerate_fields(configs: &[VisibleConfig], receiver_ty: &Ty) -> Vec<FieldInfo> {
-    // Symmetric with `lookup_field`: `Ty::FormData{Structure | StructureWithCollection,
+pub fn enumerate_fields(
+    db: &dyn TypeKernelDb,
+    configs: &[VisibleConfig],
+    receiver: TypeId,
+) -> Vec<FieldInfo> {
+    enumerate_fields_inner(db, configs, receiver)
+}
+
+pub(crate) fn enumerate_fields_inner(
+    db: &dyn TypeKernelDb,
+    configs: &[VisibleConfig],
+    receiver: TypeId,
+) -> Vec<FieldInfo> {
+    // Symmetric with `lookup_field`: `FormData{Structure | StructureWithCollection,
     // underlying: Some((mdo, name))}` projects to `MetadataRef{*Object, name}`
     // so the MDO's attributes/tabular sections are enumerable for hover and
     // completion on `Объект.|`. Without this projection `Type::fields()`
     // would return empty for FormData receivers, and IDE would only see the
     // bare `ДанныеФормыСтруктура` platform properties.
-    let projected_form_data = crate::field_lookup::project_form_data_for_fields(receiver_ty);
-    let receiver_ty = projected_form_data.as_ref().unwrap_or(receiver_ty);
+    let projected_form_data = crate::field_lookup::project_form_data_for_fields_id(db, receiver);
+    let receiver = projected_form_data.unwrap_or(receiver);
 
-    let coerced = crate::this_object::coerce_to_metadata_ref(receiver_ty);
-    let ty = coerced.as_ref().unwrap_or(receiver_ty);
+    let ty = crate::this_object::coerce_to_metadata_ref_id(db, receiver).unwrap_or(receiver);
 
-    // `Ty::ThisManager` coerces to `Ty::ObjectManager`, which has no
-    // enumerable attribute table here (managers only expose predefined
-    // items via the `ManagerCollection` indexing path, not via field
-    // lookup). The match below short-circuits non-MetadataRef receivers
-    // to an empty Vec — same shape `Документы.ПКО` enumeration returned
-    // pre-Step-J. Predefined-item enumeration is a separate enhancement.
+    // `ThisManager` coerces to `ObjectManager`, which has no enumerable
+    // attribute table here (managers only expose predefined items via the
+    // `ManagerCollection` indexing path, not via field lookup). The match
+    // below short-circuits non-MetadataRef receivers to an empty Vec —
+    // same shape `Документы.ПКО` enumeration returned pre-Step-J.
 
-    if let Ty::Union(arms) = ty {
-        let mut out: Vec<FieldInfo> = Vec::new();
-        let mut seen: std::collections::HashSet<Name> = std::collections::HashSet::new();
-        for arm in arms.iter().filter(|t| !matches!(t, Ty::Undefined | Ty::Null)) {
-            for info in enumerate_fields(configs, arm) {
-                push_unique(&mut out, &mut seen, info);
-            }
-        }
-        return out;
+    if let Some(infos) = enumerate_projection_fields(db, ty) {
+        return infos;
     }
 
-    let Ty::MetadataRef { kind, name } = ty else {
-        return Vec::new();
+    // Extract owned receiver data before any recursion / builder callback
+    // (the `&TypeKind` borrow from `lookup_type` cannot be held across
+    // a recursive `enumerate_fields_inner` or a `db.metadata_ref`).
+    enum Shape {
+        Union(Vec<TypeId>),
+        MetadataRef { kind: MetadataKind, name: Name, config_id: ConfigId },
+        Other,
+    }
+    let shape = match db.lookup_type(ty) {
+        TypeKind::Union(arms) => Shape::Union(arms.to_vec()),
+        // `MetadataObject` enumerates the same attribute / tabular-section
+        // surface as its `MetadataRef` companion (an object exposes the
+        // MDO's fields). The legacy `Ty` bridge collapsed `MetadataObject`
+        // into `Ty::MetadataRef` before reaching here, so handling both
+        // arms identically preserves that behavior.
+        TypeKind::MetadataRef(facet) => Shape::MetadataRef {
+            kind: facet.kind,
+            name: Name::new(facet.name.as_str()),
+            config_id: facet.config_id.clone(),
+        },
+        TypeKind::MetadataObject(facet) => Shape::MetadataRef {
+            kind: facet.kind,
+            name: Name::new(facet.name.as_str()),
+            config_id: facet.config_id.clone(),
+        },
+        _ => Shape::Other,
     };
 
-    if let Some(mdo_type) = mdo_type_for_kind(*kind) {
-        return enumerate_mdo_fields(configs, *kind, mdo_type, name);
+    match shape {
+        Shape::Union(arms) => {
+            let mut out: Vec<FieldInfo> = Vec::new();
+            let mut seen: std::collections::HashSet<Name> = std::collections::HashSet::new();
+            for arm in arms {
+                if matches!(db.lookup_type(arm), TypeKind::Undefined | TypeKind::Null) {
+                    continue;
+                }
+                for info in enumerate_fields_inner(db, configs, arm) {
+                    push_unique(&mut out, &mut seen, info);
+                }
+            }
+            out
+        }
+        Shape::MetadataRef { kind, name, config_id } => {
+            if let Some(mdo_type) = mdo_type_for_kind(kind) {
+                return enumerate_mdo_fields(db, configs, kind, mdo_type, &name, &config_id);
+            }
+            if let Some(parent) = register_parent_for_kind(kind) {
+                return enumerate_register_fields(db, configs, kind, parent, &name, &config_id);
+            }
+            if let MetadataKind::RegisterFilter { parent } = kind {
+                return enumerate_filter_fields(db, configs, parent, &name);
+            }
+            if let MetadataKind::TabularSectionRow { parent } = kind {
+                let Some((parent_name, section_name)) = split_parent_section(name.as_str()) else {
+                    return Vec::new();
+                };
+                return enumerate_tabular_row_fields(
+                    db,
+                    configs,
+                    parent,
+                    parent_name,
+                    section_name,
+                );
+            }
+            Vec::new()
+        }
+        Shape::Other => Vec::new(),
     }
+}
 
-    if let Some(parent) = register_parent_for_kind(*kind) {
-        return enumerate_register_fields(configs, *kind, parent, name);
-    }
-
-    if let MetadataKind::RegisterFilter { parent } = kind {
-        return enumerate_filter_fields(configs, *parent, name);
-    }
-
-    if let MetadataKind::TabularSectionRow { parent } = kind {
-        let Some((parent_name, section_name)) = split_parent_section(name.as_str()) else {
-            return Vec::new();
-        };
-        return enumerate_tabular_row_fields(configs, *parent, parent_name, section_name);
-    }
-
-    Vec::new()
+/// Surface the SDBL projection columns of a
+/// `Ty::QueryResultSelection { projection: Some(p) }` receiver as
+/// IDE-visible fields.
+///
+/// Returns:
+/// - `Some(fields)` — projection-typed receiver; the slice is the
+///   per-column [`FieldInfo`]s in declaration order, marked read-only
+///   (the cursor's columns are not assignable) with `UserAttribute`
+///   origin so completion sorts them alongside other user-defined
+///   columns.
+/// - `Some(empty Vec)` — projection-typed receiver but the projection
+///   carries no columns (`SELECT *` against an unresolved table, parse
+///   error, …). Caller treats this as "no fields" — same as the
+///   `Ty::Unknown` fallthrough below.
+/// - `None` — receiver is anything else; caller falls through to the
+///   existing union / MetadataRef / register dispatch.
+///
+/// Mirrors [`field_lookup::lookup_field_in_query_projection`] which
+/// resolves a single named column on the same shape — the projection
+/// arm is the IDE-completion sibling of the inference-time field
+/// lookup.
+fn enumerate_projection_fields(db: &dyn TypeKernelDb, ty: TypeId) -> Option<Vec<FieldInfo>> {
+    let projection = match db.lookup_type(ty) {
+        TypeKind::QueryResultSelection(facet) => facet.projection.clone()?,
+        // Phase H Slice 3 — projected `ValueTableRow` surfaces its columns
+        // through the same completion / hover pipe as `QueryResultSelection`,
+        // keeping the SDBL projection visible after the `.Выгрузить()` chain.
+        TypeKind::ValueTableRow(facet) => facet.projection.clone()?,
+        _ => return None,
+    };
+    let fields = projection
+        .fields
+        .iter()
+        .map(|f| FieldInfo {
+            name: Name::new(f.name.as_str()),
+            name_en: None,
+            ty: f.ty,
+            value_ty: None,
+            is_readonly: true,
+            origin: FieldOrigin::UserAttribute,
+        })
+        .collect();
+    Some(fields)
 }
 
 /// Whether `kind` represents a register **record-set** receiver — the only
@@ -192,13 +288,16 @@ fn is_record_kind(kind: MetadataKind) -> bool {
 /// / standard attribute always wins on a name collision (`push_unique`
 /// keeps the first push). This preserves the priority `mdo.attributes`
 /// → tabular sections → HBK platform properties.
+#[allow(clippy::too_many_arguments)]
 fn push_platform_prefix_properties(
+    db: &dyn TypeKernelDb,
     kind: MetadataKind,
     mdo_type: MdoType,
     mdo_name: &Name,
+    config_id: &ConfigId,
     out: &mut Vec<FieldInfo>,
     seen: &mut std::collections::HashSet<Name>,
-    mut ty_override: impl FnMut(&str) -> Option<Ty>,
+    mut ty_override: impl FnMut(&str) -> Option<TypeId>,
 ) {
     let Some(prefix) = kind.platform_prefix() else {
         return;
@@ -215,17 +314,18 @@ fn push_platform_prefix_properties(
             // honour that absence, not paper over it from HBK.
             continue;
         }
-        let res = crate::platform_property_lookup::to_resolution(prop);
+        let res = crate::platform_property_lookup::to_resolution(db, prop);
         // HBK declares self-typed properties (`ЭтотОбъект` →
         // `ДокументОбъект`, `Ссылка` → `ДокументСсылка`, …) with the
         // base platform-type name, not the composite `<Prefix>.<MDO>`
         // shape. `to_resolution` therefore yields a generic
-        // `Ty::PlatformObject(base)`, which kills chain typing:
+        // `PlatformObject(base)`, which kills chain typing:
         // `Док.ЭтотОбъект.Записать()` would not see `Записать` because
         // the receiver type lost its MDO anchor. Specialize the
-        // self-base name back to a concrete `MetadataRef` pinned to
-        // this receiver's `mdo_name` so the chain stays typed.
-        let specialized = specialize_self_ref_ty(mdo_type, mdo_name, &res.return_ty);
+        // self-base name back to a concrete `MetadataRef` pinned to this
+        // receiver's `mdo_name` (and its `config_id`) so the chain stays
+        // typed.
+        let specialized = specialize_self_ref_ty(db, mdo_type, mdo_name, config_id, res.return_ty);
         let ty = ty_override(prop.name.as_str()).or(specialized).unwrap_or(res.return_ty);
         let info = FieldInfo {
             name: Name::new(prop.name.as_str()),
@@ -266,17 +366,27 @@ fn push_platform_prefix_properties(
 /// a Catalog points at the *owner* catalog, not self — those are
 /// configurator-conditional and handled by the spec's `HasOwners`
 /// path, not by this cascade).
-fn specialize_self_ref_ty(mdo_type: MdoType, mdo_name: &Name, ty: &Ty) -> Option<Ty> {
-    let Ty::PlatformObject(base) = ty else {
+fn specialize_self_ref_ty(
+    db: &dyn TypeKernelDb,
+    mdo_type: MdoType,
+    mdo_name: &Name,
+    config_id: &ConfigId,
+    ty: TypeId,
+) -> Option<TypeId> {
+    let TypeKind::PlatformObject(facet) = db.lookup_type(ty) else {
         return None;
     };
-    let base = base.as_str();
+    let base = facet.name.as_str().to_string();
     let candidates = [MetadataKind::object_kind_for(mdo_type), ref_kind_for_mdo(mdo_type)];
     for candidate in candidates.into_iter().flatten() {
         let ru = candidate.display_label(base_db::Locale::Ru);
         let en = candidate.display_label(base_db::Locale::En);
-        if eq_yo_insensitive(base, ru) || base == en {
-            return Some(Ty::MetadataRef { kind: candidate, name: mdo_name.clone() });
+        if eq_yo_insensitive(&base, ru) || base == en {
+            // Preserve the receiver's `config_id` so a CFE-scoped self-ref
+            // keeps its extension config (the old `Ty` path defaulted to
+            // `Root`). Mirrors §4.E.4a's `coerce_to_metadata_ref_id`.
+            let cfg = FixedConfigCtx(config_id.clone());
+            return Some(db.metadata_ref(candidate, mdo_name.as_str().to_string(), &cfg));
         }
     }
     None
@@ -366,10 +476,12 @@ fn name_in_spec(spec_names: &std::collections::HashSet<String>, ru: &str, en: &s
 // ---------------------------------------------------------------------------
 
 fn enumerate_mdo_fields(
+    db: &dyn TypeKernelDb,
     configs: &[VisibleConfig],
     kind: MetadataKind,
     mdo_type: MdoType,
     mdo_name: &Name,
+    config_id: &ConfigId,
 ) -> Vec<FieldInfo> {
     for cfg in configs.iter().rev() {
         let Some(mdo) = cfg.configuration.find_metadata_object(mdo_type, mdo_name.as_str()) else {
@@ -392,7 +504,7 @@ fn enumerate_mdo_fields(
             let info = FieldInfo {
                 name: Name::new(&attr.name),
                 name_en: attr.name_en.as_deref().filter(|s| !s.is_empty()).map(Name::new),
-                ty: attribute_type_to_ty(&attr.attr_type, configs),
+                ty: attribute_type_to_typeid(db, &attr.attr_type, configs),
                 value_ty: None,
                 is_readonly,
                 origin,
@@ -401,14 +513,15 @@ fn enumerate_mdo_fields(
         }
 
         for ts in &mdo.tabular_sections {
-            let qualified = Name::new(&format!("{}.{}", mdo_name.as_str(), ts.name()));
+            let qualified = format!("{}.{}", mdo_name.as_str(), ts.name());
             let info = FieldInfo {
                 name: Name::new(ts.name()),
                 name_en: ts.name_en().filter(|s| !s.is_empty()).map(Name::new),
-                ty: Ty::MetadataRef {
-                    kind: MetadataKind::TabularSection { parent: mdo_type },
-                    name: qualified,
-                },
+                ty: db.metadata_ref(
+                    MetadataKind::TabularSection { parent: mdo_type },
+                    qualified,
+                    &RootConfigCtx,
+                ),
                 value_ty: None,
                 is_readonly: false,
                 origin: FieldOrigin::TabularSection,
@@ -431,7 +544,16 @@ fn enumerate_mdo_fields(
         // (`ЭтотОбъект` → `ДокументОбъект`, `Ссылка` → `ДокументСсылка`,
         // …) can be re-typed to a concrete `MetadataRef` anchored on
         // this receiver, restoring chain typing.
-        push_platform_prefix_properties(kind, mdo_type, mdo_name, &mut out, &mut seen, |_| None);
+        push_platform_prefix_properties(
+            db,
+            kind,
+            mdo_type,
+            mdo_name,
+            config_id,
+            &mut out,
+            &mut seen,
+            |_| None,
+        );
 
         return out;
     }
@@ -439,10 +561,12 @@ fn enumerate_mdo_fields(
 }
 
 fn enumerate_register_fields(
+    db: &dyn TypeKernelDb,
     configs: &[VisibleConfig],
     kind: MetadataKind,
     parent: MdoType,
     register_name: &Name,
+    config_id: &ConfigId,
 ) -> Vec<FieldInfo> {
     for cfg in configs.iter().rev() {
         let Some(register) =
@@ -471,10 +595,11 @@ fn enumerate_register_fields(
             let info = FieldInfo {
                 name: Name::new("Отбор"),
                 name_en: Some(Name::new("Filter")),
-                ty: Ty::MetadataRef {
-                    kind: MetadataKind::RegisterFilter { parent },
-                    name: register_name.clone(),
-                },
+                ty: db.metadata_ref(
+                    MetadataKind::RegisterFilter { parent },
+                    register_name.as_str().to_string(),
+                    &RootConfigCtx,
+                ),
                 value_ty: None,
                 is_readonly: true,
                 origin: FieldOrigin::PlatformProperty,
@@ -487,7 +612,8 @@ fn enumerate_register_fields(
                 name: Name::new(dim.name()),
                 // Dimension has no `name_en` in bsl-metadata.
                 name_en: None,
-                ty: register_part_ty(
+                ty: register_part_typeid(
+                    db,
                     dim.attr_type(),
                     MetadataKind::RegisterDimension { parent },
                     register_name,
@@ -505,7 +631,8 @@ fn enumerate_register_fields(
             let info = FieldInfo {
                 name: Name::new(res.name()),
                 name_en: res.name_en().filter(|s| !s.is_empty()).map(Name::new),
-                ty: register_part_ty(
+                ty: register_part_typeid(
+                    db,
                     res.attr_type(),
                     MetadataKind::RegisterResource { parent },
                     register_name,
@@ -520,18 +647,23 @@ fn enumerate_register_fields(
         }
 
         for attr in register.attributes() {
-            let mut ty = register_part_ty(
-                attr.attr_type(),
-                MetadataKind::RegisterAttribute { parent },
-                register_name,
-                attr.name(),
-                configs,
-            );
-            if is_record_kind(kind) && is_recorder_name(attr.name()) {
-                if let Some(recorders_ty) = recorder_union_ty(configs, parent, register_name) {
-                    ty = recorders_ty;
-                }
-            }
+            // For record-kind recorders, prefer the concrete document-ref
+            // union; fall back to the declared part type only when no
+            // recorder is registered. Computed lazily so the part type is
+            // not interned when the recorder override wins.
+            let recorder_override = (is_record_kind(kind) && is_recorder_name(attr.name()))
+                .then(|| recorder_union_typeid(db, configs, parent, register_name))
+                .flatten();
+            let ty = recorder_override.unwrap_or_else(|| {
+                register_part_typeid(
+                    db,
+                    attr.attr_type(),
+                    MetadataKind::RegisterAttribute { parent },
+                    register_name,
+                    attr.name(),
+                    configs,
+                )
+            });
             let info = FieldInfo {
                 name: Name::new(attr.name()),
                 name_en: attr.name_en().filter(|s| !s.is_empty()).map(Name::new),
@@ -552,14 +684,16 @@ fn enumerate_register_fields(
         // `Filter`. Recorder override widens the platform-declared base
         // ref into a union of concrete document refs for record kinds.
         push_platform_prefix_properties(
+            db,
             kind,
             parent,
             register_name,
+            config_id,
             &mut out,
             &mut seen,
             |prop_name| {
                 if is_record_kind(kind) && is_recorder_name(prop_name) {
-                    recorder_union_ty(configs, parent, register_name)
+                    recorder_union_typeid(db, configs, parent, register_name)
                 } else {
                     None
                 }
@@ -578,27 +712,29 @@ fn is_recorder_name(name: &str) -> bool {
     !name.is_ascii() && name.to_lowercase() == "регистратор"
 }
 
-fn recorder_union_ty(
+fn recorder_union_typeid(
+    db: &dyn TypeKernelDb,
     configs: &[VisibleConfig],
     parent: MdoType,
     register_name: &Name,
-) -> Option<Ty> {
+) -> Option<TypeId> {
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut docs: Vec<Ty> = Vec::new();
+    let mut docs: Vec<TypeId> = Vec::new();
     for cfg in configs {
         for name in cfg.configuration.recorders_for_register(parent, register_name.as_str()) {
             if seen.insert(name.to_lowercase()) {
-                docs.push(Ty::MetadataRef {
-                    kind: MetadataKind::DocumentRef,
-                    name: Name::new(name),
-                });
+                docs.push(db.metadata_ref(
+                    MetadataKind::DocumentRef,
+                    name.to_string(),
+                    &RootConfigCtx,
+                ));
             }
         }
     }
     if docs.is_empty() {
         None
     } else {
-        Some(Ty::union(docs))
+        Some(db.union(docs))
     }
 }
 
@@ -619,6 +755,7 @@ fn recorder_union_ty(
 /// against any visible configuration; same fallthrough policy as
 /// [`enumerate_register_fields`].
 fn enumerate_filter_fields(
+    db: &dyn TypeKernelDb,
     configs: &[VisibleConfig],
     parent: MdoType,
     register_name: &Name,
@@ -636,15 +773,15 @@ fn enumerate_filter_fields(
             std::collections::HashSet::with_capacity(out.capacity() * 2);
 
         for dim in register.dimensions() {
+            let value_ty = dim
+                .attr_type()
+                .map(|attr_type| attribute_type_to_typeid(db, attr_type, configs))
+                .unwrap_or_else(|| db.unknown());
             let info = FieldInfo {
                 name: Name::new(dim.name()),
                 name_en: None,
-                ty: Ty::PlatformObject(Name::new("ЭлементОтбора")),
-                value_ty: Some(
-                    dim.attr_type()
-                        .map(|attr_type| attribute_type_to_ty(attr_type, configs))
-                        .unwrap_or(Ty::Unknown),
-                ),
+                ty: db.platform_object("ЭлементОтбора".to_string()),
+                value_ty: Some(value_ty),
                 is_readonly: false,
                 origin: FieldOrigin::RegisterDimension,
             };
@@ -652,11 +789,13 @@ fn enumerate_filter_fields(
         }
 
         for key in standard_keys {
+            let value_ty =
+                standard_filter_key_value_typeid(db, configs, parent, register_name, key);
             let info = FieldInfo {
                 name: Name::new(key),
                 name_en: None,
-                ty: Ty::PlatformObject(Name::new("ЭлементОтбора")),
-                value_ty: Some(standard_filter_key_value_ty(configs, parent, register_name, key)),
+                ty: db.platform_object("ЭлементОтбора".to_string()),
+                value_ty: Some(value_ty),
                 is_readonly: false,
                 origin: FieldOrigin::PlatformProperty,
             };
@@ -668,22 +807,22 @@ fn enumerate_filter_fields(
     Vec::new()
 }
 
-fn standard_filter_key_value_ty(
+fn standard_filter_key_value_typeid(
+    db: &dyn TypeKernelDb,
     configs: &[VisibleConfig],
     parent: MdoType,
     register_name: &Name,
     key: &str,
-) -> Ty {
+) -> TypeId {
     match key {
-        "Регистратор" => {
-            recorder_union_ty(configs, parent, register_name).unwrap_or(Ty::Unknown)
-        }
-        "Период" | "ПериодРегистрации" => Ty::Date,
-        "Активность" => Ty::Boolean,
-        "НомерСтроки" => Ty::Number,
+        "Регистратор" => recorder_union_typeid(db, configs, parent, register_name)
+            .unwrap_or_else(|| db.unknown()),
+        "Период" | "ПериодРегистрации" => db.date(DateComponent::DateTime),
+        "Активность" => db.boolean(),
+        "НомерСтроки" => db.number(None, None),
         // CalcReg-specific, separate slice
-        "ВидРасчета" => Ty::Unknown,
-        _ => Ty::Unknown,
+        "ВидРасчета" => db.unknown(),
+        _ => db.unknown(),
     }
 }
 
@@ -723,6 +862,7 @@ fn standard_filter_keys(
 }
 
 fn enumerate_tabular_row_fields(
+    db: &dyn TypeKernelDb,
     configs: &[VisibleConfig],
     parent: MdoType,
     parent_name: &str,
@@ -742,7 +882,7 @@ fn enumerate_tabular_row_fields(
         .map(|attr| FieldInfo {
             name: Name::new(attr.name()),
             name_en: attr.name_en().filter(|s| !s.is_empty()).map(Name::new),
-            ty: attribute_type_to_ty(attr.attr_type(), configs),
+            ty: attribute_type_to_typeid(db, attr.attr_type(), configs),
             value_ty: None,
             is_readonly: false,
             origin: FieldOrigin::TabularSectionRowColumn,
@@ -761,6 +901,7 @@ fn enumerate_tabular_row_fields(
     });
     if !already_defined {
         if let Some(prop) = crate::platform_property_lookup::lookup_platform_property_by_type(
+            db,
             "Line of a tabular section",
             &nr_name,
         ) {
@@ -886,36 +1027,37 @@ pub(crate) fn find_mdo<'a>(
     configs.iter().rev().find_map(|cfg| cfg.configuration.find_metadata_object(mdo_type, name))
 }
 
-/// Lower an [`AttributeType`] to a [`Ty`] through [`TyLoweringContext`].
-///
-/// `configs` is forwarded so `ОпределяемыйТип`-typed attributes can be
-/// expanded to their underlying `Ty` (e.g. `СуммаДокумента` typed as
-/// `cfg:DefinedType.ДенежнаяСуммаЛюбогоЗнака` lowers to `Ty::Number`).
-/// Without the visible configurations the resolver could not look up
-/// the DefinedType chain — every field-enumeration call site already has
-/// `&[VisibleConfig]` in scope, so the dependency is thread-through, not new.
-pub(crate) fn attribute_type_to_ty(attr_type: &AttributeType, configs: &[VisibleConfig]) -> Ty {
+/// Kernel-native attribute-type lowering — mints a [`TypeId`] directly via
+/// the §4.A `lower_type_ref_id` producer (no `Ty` round-trip).
+pub(crate) fn attribute_type_to_typeid(
+    db: &dyn TypeKernelDb,
+    attr_type: &AttributeType,
+    configs: &[VisibleConfig],
+) -> TypeId {
     let type_ref = TypeRef::from_attribute_type(attr_type);
     let resolver = ConfigsResolver(configs);
-    TyLoweringContext::with_resolver(&resolver).lower_type_ref(&type_ref)
+    TyLoweringContext::with_resolver(&resolver).lower_type_ref_id(db, &type_ref)
 }
 
 /// Lower a register-part type, falling back to a symbolic
 /// `MetadataKind::Register{Dimension,Resource,Attribute}` when `attr_type`
-/// is absent.
-pub(crate) fn register_part_ty(
+/// is absent. Kernel-native; the fallback mints the symbolic ref with a
+/// Root config axis to match the legacy `Ty::MetadataRef` → intern path.
+pub(crate) fn register_part_typeid(
+    db: &dyn TypeKernelDb,
     attr_type: Option<&AttributeType>,
     fallback_kind: MetadataKind,
     register_name: &Name,
     part_name: &str,
     configs: &[VisibleConfig],
-) -> Ty {
+) -> TypeId {
     match attr_type {
-        Some(at) => attribute_type_to_ty(at, configs),
-        None => Ty::MetadataRef {
-            kind: fallback_kind,
-            name: Name::new(&format!("{}.{}", register_name.as_str(), part_name)),
-        },
+        Some(at) => attribute_type_to_typeid(db, at, configs),
+        None => db.metadata_ref(
+            fallback_kind,
+            format!("{}.{}", register_name.as_str(), part_name),
+            &RootConfigCtx,
+        ),
     }
 }
 
@@ -987,10 +1129,156 @@ fn push_unique(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bsl_types::facet::MdoRefFacet;
+    use std::rc::Rc;
+
+    #[derive(Clone)]
+    struct FieldInfoForTest {
+        name: Name,
+        ty: ActualType,
+        value_ty: Option<ActualType>,
+        is_readonly: bool,
+        origin: FieldOrigin,
+    }
+
+    #[derive(Clone)]
+    struct ActualType {
+        db: Rc<InMemoryDb>,
+        id: TypeId,
+    }
+
+    impl std::fmt::Debug for ActualType {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            self.db.lookup_type(self.id).fmt(f)
+        }
+    }
+
+    #[derive(Clone)]
+    struct TypeFixture {
+        label: String,
+        intern: Rc<dyn Fn(&InMemoryDb) -> TypeId>,
+    }
+
+    impl TypeFixture {
+        fn new(label: impl Into<String>, intern: impl Fn(&InMemoryDb) -> TypeId + 'static) -> Self {
+            Self { label: label.into(), intern: Rc::new(intern) }
+        }
+
+        fn intern(&self, db: &InMemoryDb) -> TypeId {
+            (self.intern)(db)
+        }
+    }
+
+    impl std::fmt::Debug for TypeFixture {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(&self.label)
+        }
+    }
+
+    impl PartialEq<TypeFixture> for ActualType {
+        fn eq(&self, other: &TypeFixture) -> bool {
+            self.id == other.intern(&self.db)
+        }
+    }
+
+    impl PartialEq for ActualType {
+        fn eq(&self, other: &Self) -> bool {
+            self.db.lookup_type(self.id) == other.db.lookup_type(other.id)
+        }
+    }
+
+    fn enumerate_fields(
+        configs: &[VisibleConfig],
+        receiver_ty: &TypeFixture,
+    ) -> Vec<FieldInfoForTest> {
+        let db = Rc::new(InMemoryDb::new());
+        let receiver = receiver_ty.intern(&db);
+        super::enumerate_fields(db.as_ref(), configs, receiver)
+            .into_iter()
+            .map(|info| FieldInfoForTest {
+                name: info.name,
+                ty: ActualType { db: Rc::clone(&db), id: info.ty },
+                value_ty: info.value_ty.map(|id| ActualType { db: Rc::clone(&db), id }),
+                is_readonly: info.is_readonly,
+                origin: info.origin,
+            })
+            .collect()
+    }
     use bsl_metadata::tabular_section::{TabularSection, TabularSectionAttribute};
     use bsl_metadata::{Attribute, Configuration};
+    use bsl_types::testing::InMemoryDb;
     use std::sync::Arc;
     use uuid::Uuid;
+
+    fn metadata_ref(kind: MetadataKind, name: &str) -> TypeFixture {
+        let name = Name::new(name);
+        TypeFixture::new(format!("MetadataRef({kind:?}, {name})"), move |db| {
+            db.metadata_ref(kind, name.to_string(), &RootConfigCtx)
+        })
+    }
+
+    fn this_object(mdo_type: MdoType, name: &str) -> TypeFixture {
+        let name = Name::new(name);
+        TypeFixture::new(format!("ThisObject({mdo_type:?}, {name})"), move |db| {
+            db.mk_this_object(ConfigId::Root, MdoRefFacet::new(mdo_type, name.to_string()))
+        })
+    }
+
+    fn union(parts: Vec<TypeFixture>) -> TypeFixture {
+        TypeFixture::new("Union", move |db| {
+            db.union(parts.iter().map(|part| part.intern(db)).collect())
+        })
+    }
+
+    fn number() -> TypeFixture {
+        TypeFixture::new("Number", |db| db.number(None, None))
+    }
+
+    fn string() -> TypeFixture {
+        TypeFixture::new("String", |db| db.string(None, false))
+    }
+
+    fn boolean() -> TypeFixture {
+        TypeFixture::new("Boolean", |db| db.boolean())
+    }
+
+    fn date() -> TypeFixture {
+        TypeFixture::new("Date", |db| db.date(DateComponent::DateTime))
+    }
+
+    fn array() -> TypeFixture {
+        TypeFixture::new("Array", |db| db.array(None))
+    }
+
+    fn unknown() -> TypeFixture {
+        TypeFixture::new("Unknown", |db| db.unknown())
+    }
+
+    fn undefined() -> TypeFixture {
+        TypeFixture::new("Undefined", |db| db.undefined())
+    }
+
+    fn assert_value_ty(field: &FieldInfoForTest, expected: TypeFixture) {
+        let actual = field.value_ty.as_ref().expect("expected value_ty");
+        assert_eq!(actual, &expected);
+    }
+
+    #[test]
+    fn attribute_typeid_lowers_defined_type_to_underlying_kernel_type() {
+        let db = InMemoryDb::new();
+        let mut config = Configuration::new("main");
+        config.add_defined_type(
+            bsl_metadata::DefinedType::builder()
+                .uuid(Uuid::new_v4())
+                .name("ДенежнаяСумма")
+                .underlying_type(AttributeType::Number { precision: 15, scale: 2 })
+                .build(),
+        );
+        let configs = wrap(config);
+        let attr_type =
+            AttributeType::DefinedType { name: "ДенежнаяСумма".to_string() };
+        assert_eq!(attribute_type_to_typeid(&db, &attr_type, &configs), db.number(None, None));
+    }
 
     fn wrap(config: Configuration) -> Vec<VisibleConfig> {
         vec![VisibleConfig { name: None, configuration: Arc::new(config) }]
@@ -1057,7 +1345,7 @@ mod tests {
     #[test]
     fn enumerate_unknown_receiver_returns_empty_vec() {
         let configs = wrap(Configuration::new("Test"));
-        for ty in [Ty::Unknown, Ty::Number, Ty::String, Ty::Array, Ty::Undefined] {
+        for ty in [unknown(), number(), string(), array(), undefined()] {
             assert!(enumerate_fields(&configs, &ty).is_empty(), "no fields on {ty:?}");
         }
     }
@@ -1073,8 +1361,7 @@ mod tests {
         ));
         let configs = wrap(config);
 
-        let this_obj =
-            Ty::ThisObject { owner: (MdoType::Catalog, Name::new("Номенклатура")) };
+        let this_obj = this_object(MdoType::Catalog, "Номенклатура");
         let fields = enumerate_fields(&configs, &this_obj);
         assert!(!fields.is_empty(), "ThisObject must coerce and enumerate fields");
         assert!(fields.iter().any(|f| f.name.as_str() == "Цена"), "Цена must appear");
@@ -1096,10 +1383,7 @@ mod tests {
         ));
         let configs = wrap(config);
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::CatalogRef,
-            name: Name::new("Номенклатура"),
-        };
+        let receiver = metadata_ref(MetadataKind::CatalogRef, "Номенклатура");
         let fields = enumerate_fields(&configs, &receiver);
         assert!(!fields.is_empty());
 
@@ -1146,10 +1430,7 @@ mod tests {
         config.add_metadata_object(cat);
         let configs = wrap(config);
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::CatalogRef,
-            name: Name::new("Справочник1"),
-        };
+        let receiver = metadata_ref(MetadataKind::CatalogRef, "Справочник1");
         let fields = enumerate_fields(&configs, &receiver);
 
         let by_name = |n: &str| fields.iter().find(|f| f.name.as_str() == n).cloned();
@@ -1180,8 +1461,7 @@ mod tests {
         config.add_metadata_object(doc);
         let configs = wrap(config);
 
-        let receiver =
-            Ty::MetadataRef { kind: MetadataKind::DocumentRef, name: Name::new("ПКО") };
+        let receiver = metadata_ref(MetadataKind::DocumentRef, "ПКО");
         let fields = enumerate_fields(&configs, &receiver);
 
         let date_field =
@@ -1199,10 +1479,7 @@ mod tests {
         assert_eq!(ts_field.origin, FieldOrigin::TabularSection);
         assert_eq!(
             ts_field.ty,
-            Ty::MetadataRef {
-                kind: MetadataKind::TabularSection { parent: MdoType::Document },
-                name: Name::new("ПКО.Товары"),
-            }
+            metadata_ref(MetadataKind::TabularSection { parent: MdoType::Document }, "ПКО.Товары")
         );
     }
 
@@ -1222,10 +1499,10 @@ mod tests {
         config.add_metadata_object(cat);
         let configs = wrap(config);
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::TabularSectionRow { parent: MdoType::Catalog },
-            name: Name::new("Номенклатура.Услуги"),
-        };
+        let receiver = metadata_ref(
+            MetadataKind::TabularSectionRow { parent: MdoType::Catalog },
+            "Номенклатура.Услуги",
+        );
         let fields = enumerate_fields(&configs, &receiver);
 
         let qty = fields
@@ -1233,7 +1510,7 @@ mod tests {
             .find(|f| f.name.as_str() == "Количество")
             .expect("Количество must appear");
         assert_eq!(qty.origin, FieldOrigin::TabularSectionRowColumn);
-        assert_eq!(qty.ty, Ty::Number);
+        assert_eq!(qty.ty, number());
 
         let nr = fields
             .iter()
@@ -1241,7 +1518,7 @@ mod tests {
             .expect("НомерСтроки must appear via platform fall-through");
         assert_eq!(nr.origin, FieldOrigin::PlatformProperty);
         assert!(nr.is_readonly);
-        assert_eq!(nr.ty, Ty::Number);
+        assert_eq!(nr.ty, number());
     }
 
     #[test]
@@ -1261,10 +1538,7 @@ mod tests {
         ));
         let configs = wrap(config);
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::InformationRegisterRef,
-            name: Name::new("РегистрСведений1"),
-        };
+        let receiver = metadata_ref(MetadataKind::InformationRegisterRef, "РегистрСведений1");
         let fields = enumerate_fields(&configs, &receiver);
 
         let dim = fields
@@ -1276,14 +1550,14 @@ mod tests {
         let res =
             fields.iter().find(|f| f.name.as_str() == "Количество").expect("resource must appear");
         assert_eq!(res.origin, FieldOrigin::RegisterResource);
-        assert_eq!(res.ty, Ty::Number);
+        assert_eq!(res.ty, number());
 
         let att = fields
             .iter()
             .find(|f| f.name.as_str() == "Комментарий")
             .expect("attribute must appear");
         assert_eq!(att.origin, FieldOrigin::RegisterAttribute);
-        assert_eq!(att.ty, Ty::String);
+        assert_eq!(att.ty, string());
     }
 
     #[test]
@@ -1307,10 +1581,7 @@ mod tests {
         ));
         let configs = wrap(config);
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::InformationRegisterRecord,
-            name: Name::new("РегистрСведений1"),
-        };
+        let receiver = metadata_ref(MetadataKind::InformationRegisterRecord, "РегистрСведений1");
         let fields = enumerate_fields(&configs, &receiver);
         let recorder = fields
             .iter()
@@ -1319,13 +1590,9 @@ mod tests {
 
         assert_eq!(
             recorder.ty,
-            Ty::union(vec![
-                Ty::MetadataRef {
-                    kind: MetadataKind::DocumentRef, name: Name::new("Документ1")
-                },
-                Ty::MetadataRef {
-                    kind: MetadataKind::DocumentRef, name: Name::new("Документ2")
-                },
+            union(vec![
+                metadata_ref(MetadataKind::DocumentRef, "Документ1"),
+                metadata_ref(MetadataKind::DocumentRef, "Документ2"),
             ]),
         );
     }
@@ -1349,22 +1616,14 @@ mod tests {
         ));
         let configs = wrap(config);
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::InformationRegisterRecord,
-            name: Name::new("РегистрСведений1"),
-        };
+        let receiver = metadata_ref(MetadataKind::InformationRegisterRecord, "РегистрСведений1");
         let fields = enumerate_fields(&configs, &receiver);
         let recorder = fields
             .iter()
             .find(|f| f.name.as_str() == "регистратор")
             .expect("регистратор must appear on register record");
 
-        assert_eq!(
-            recorder.ty,
-            Ty::MetadataRef {
-                kind: MetadataKind::DocumentRef, name: Name::new("Документ1")
-            },
-        );
+        assert_eq!(recorder.ty, metadata_ref(MetadataKind::DocumentRef, "Документ1"),);
     }
 
     #[test]
@@ -1398,23 +1657,22 @@ mod tests {
             VisibleConfig { name: Some("Extension".to_string()), configuration: Arc::new(ext) },
         ];
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::InformationRegisterRecord,
-            name: Name::new("РегистрСведений1"),
-        };
+        let receiver = metadata_ref(MetadataKind::InformationRegisterRecord, "РегистрСведений1");
         let fields = enumerate_fields(&configs, &receiver);
         let recorder = fields
             .iter()
             .find(|f| f.name.as_str() == "Регистратор")
             .expect("Регистратор must appear on register record");
 
-        let Ty::Union(parts) = &recorder.ty else {
-            panic!("expected Ty::Union for cross-config recorders, got {:?}", recorder.ty);
+        let TypeKind::Union(parts) = recorder.ty.db.lookup_type(recorder.ty.id) else {
+            panic!("expected TypeKind::Union for cross-config recorders, got {:?}", recorder.ty);
         };
         let names: std::collections::HashSet<&str> = parts
             .iter()
-            .filter_map(|t| match t {
-                Ty::MetadataRef { kind: MetadataKind::DocumentRef, name } => Some(name.as_str()),
+            .filter_map(|id| match recorder.ty.db.lookup_type(*id) {
+                TypeKind::MetadataRef(facet) if facet.kind == MetadataKind::DocumentRef => {
+                    Some(facet.name.as_str())
+                }
                 _ => None,
             })
             .collect();
@@ -1435,10 +1693,10 @@ mod tests {
         ));
         let configs = wrap(config);
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::RegisterFilter { parent: MdoType::AccumulationRegister },
-            name: Name::new("РегистрНакопления1"),
-        };
+        let receiver = metadata_ref(
+            MetadataKind::RegisterFilter { parent: MdoType::AccumulationRegister },
+            "РегистрНакопления1",
+        );
         let fields = enumerate_fields(&configs, &receiver);
 
         for key in ["Период", "Регистратор", "НомерСтроки", "Активность"]
@@ -1478,25 +1736,20 @@ mod tests {
         config.add_register(register);
         let configs = wrap(config);
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
-            name: Name::new("Курсы"),
-        };
+        let receiver = metadata_ref(
+            MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
+            "Курсы",
+        );
         let fields = enumerate_fields(&configs, &receiver);
 
         let period = fields.iter().find(|f| f.name.as_str() == "Период").expect("Период");
-        assert_eq!(period.value_ty, Some(Ty::Date));
+        assert_value_ty(period, date());
         let active = fields.iter().find(|f| f.name.as_str() == "Активность").expect("Активность");
-        assert_eq!(active.value_ty, Some(Ty::Boolean));
+        assert_value_ty(active, boolean());
         let currency = fields.iter().find(|f| f.name.as_str() == "Валюта").expect("Валюта");
-        assert_eq!(
-            currency.value_ty,
-            Some(Ty::MetadataRef {
-                kind: MetadataKind::CatalogRef, name: Name::new("Валюты")
-            }),
-        );
+        assert_value_ty(currency, metadata_ref(MetadataKind::CatalogRef, "Валюты"));
         let price = fields.iter().find(|f| f.name.as_str() == "Цена").expect("Цена");
-        assert_eq!(price.value_ty, Some(Ty::Number));
+        assert_value_ty(price, number());
     }
 
     #[test]
@@ -1514,21 +1767,15 @@ mod tests {
         ));
         let configs = wrap(config);
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::RegisterFilter { parent: MdoType::AccumulationRegister },
-            name: Name::new("Остатки"),
-        };
+        let receiver = metadata_ref(
+            MetadataKind::RegisterFilter { parent: MdoType::AccumulationRegister },
+            "Остатки",
+        );
         let fields = enumerate_fields(&configs, &receiver);
 
         let recorder =
             fields.iter().find(|f| f.name.as_str() == "Регистратор").expect("Регистратор");
-        assert_eq!(
-            recorder.value_ty,
-            Some(Ty::MetadataRef {
-                kind: MetadataKind::DocumentRef,
-                name: Name::new("Поступление"),
-            }),
-        );
+        assert_value_ty(recorder, metadata_ref(MetadataKind::DocumentRef, "Поступление"));
     }
 
     #[test]
@@ -1546,15 +1793,15 @@ mod tests {
         config.add_register(register);
         let configs = wrap(config);
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
-            name: Name::new("Срез"),
-        };
+        let receiver = metadata_ref(
+            MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
+            "Срез",
+        );
         let fields = enumerate_fields(&configs, &receiver);
         let period = fields.iter().find(|f| f.name.as_str() == "Период").expect("Период");
 
         assert_eq!(period.origin, FieldOrigin::RegisterDimension);
-        assert_eq!(period.value_ty, Some(Ty::Number));
+        assert_value_ty(period, number());
     }
 
     #[test]
@@ -1569,10 +1816,10 @@ mod tests {
         ));
         let configs = wrap(config);
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::RegisterFilter { parent: MdoType::CalculationRegister },
-            name: Name::new("РегистрРасчета1"),
-        };
+        let receiver = metadata_ref(
+            MetadataKind::RegisterFilter { parent: MdoType::CalculationRegister },
+            "РегистрРасчета1",
+        );
         let fields = enumerate_fields(&configs, &receiver);
         let names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
 
@@ -1600,10 +1847,10 @@ mod tests {
         config.add_register(register);
         let configs = wrap(config);
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
-            name: Name::new("ПозицияРегистратора"),
-        };
+        let receiver = metadata_ref(
+            MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
+            "ПозицияРегистратора",
+        );
         let fields = enumerate_fields(&configs, &receiver);
         let names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
 
@@ -1624,10 +1871,10 @@ mod tests {
         };
         let configs = wrap(config);
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
-            name: Name::new("ПериодическийРегистр"),
-        };
+        let receiver = metadata_ref(
+            MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
+            "ПериодическийРегистр",
+        );
         let fields = enumerate_fields(&configs, &receiver);
 
         assert!(fields.iter().any(|f| f.name.as_str() == "Период"));
@@ -1655,11 +1902,11 @@ mod tests {
         config.add_metadata_object(doc);
         let configs = wrap(config);
 
-        let row = Ty::MetadataRef {
-            kind: MetadataKind::TabularSectionRow { parent: MdoType::Document },
-            name: Name::new("ПКО.Товары"),
-        };
-        let receiver = Ty::Union(vec![row, Ty::Undefined].into());
+        let row = metadata_ref(
+            MetadataKind::TabularSectionRow { parent: MdoType::Document },
+            "ПКО.Товары",
+        );
+        let receiver = union(vec![row, undefined()]);
         let fields = enumerate_fields(&configs, &receiver);
         assert!(
             fields.iter().any(|f| f.name.as_str() == "Номенклатура"),
@@ -1699,14 +1946,13 @@ mod tests {
         });
         let configs = wrap(config);
 
-        let receiver =
-            Ty::MetadataRef { kind: MetadataKind::DocumentRef, name: Name::new("ПКО") };
+        let receiver = metadata_ref(MetadataKind::DocumentRef, "ПКО");
         let fields = enumerate_fields(&configs, &receiver);
         let sum =
             fields.iter().find(|f| f.name.as_str() == "СуммаДокумента").expect("СуммаДокумента");
         assert_eq!(
             sum.ty,
-            Ty::Number,
+            number(),
             "DefinedType-typed attribute must resolve to its underlying `Ty::Number`"
         );
     }
@@ -1730,13 +1976,10 @@ mod tests {
             VisibleConfig { name: Some("Ext".into()), configuration: Arc::new(ext) },
         ];
 
-        let receiver = Ty::MetadataRef {
-            kind: MetadataKind::CatalogRef,
-            name: Name::new("Номенклатура"),
-        };
+        let receiver = metadata_ref(MetadataKind::CatalogRef, "Номенклатура");
         let fields = enumerate_fields(&configs, &receiver);
         let цена = fields.iter().find(|f| f.name.as_str() == "Цена").expect("Цена must appear");
-        assert_eq!(цена.ty, Ty::String, "extension type must win over main config");
+        assert_eq!(цена.ty, string(), "extension type must win over main config");
     }
 
     /// HBK 8.3.27 documents the platform method `МоментВремени()`

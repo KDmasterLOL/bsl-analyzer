@@ -16,7 +16,7 @@ use vfs::FileId;
 
 use crate::{
     metadata::{intern_configuration_path, load_configuration, ConfigurationPathInput},
-    provider::{AnalysisProvider, VisibleConfig},
+    provider::{AnalysisProvider, VisibleConfigWithRoot},
     RootDatabase,
 };
 
@@ -60,16 +60,18 @@ impl AnalysisProvider for SalsaProvider<'_> {
         Some(load_configuration(self.db, path_input))
     }
 
-    fn visible_configurations(&self, _file_id: FileId) -> Vec<VisibleConfig> {
+    fn visible_configurations(&self, _file_id: FileId) -> Vec<VisibleConfigWithRoot> {
         let paths = self.db.all_config_paths();
         if paths.is_empty() {
             return match self.configuration_path_input {
                 Some(path_input) => {
                     let root = std::path::PathBuf::from(path_input.path(self.db));
-                    vec![VisibleConfig {
-                        name: None,
+                    vec![VisibleConfigWithRoot {
+                        config: bsl_config::VisibleConfig {
+                            name: None,
+                            configuration: load_configuration(self.db, path_input),
+                        },
                         root,
-                        configuration: load_configuration(self.db, path_input),
                     }]
                 }
                 None => Vec::new(),
@@ -83,7 +85,10 @@ impl AnalysisProvider for SalsaProvider<'_> {
                 let path_input =
                     intern_configuration_path(self.db, &path.to_string_lossy(), version);
                 let configuration = load_configuration(self.db, path_input);
-                VisibleConfig { name, root: path, configuration }
+                VisibleConfigWithRoot {
+                    config: bsl_config::VisibleConfig { name, configuration },
+                    root: path,
+                }
             })
             .collect()
     }
@@ -105,6 +110,10 @@ impl AnalysisProvider for SalsaProvider<'_> {
         let module_id = ModuleId::new(file_id);
         let resolver = Resolver::for_module(module_id);
         resolver.resolve_assignment_target(self.db, &Name::new(name))
+    }
+
+    fn kernel_type_display(&self, id: bsl_types::kind::TypeId, locale: base_db::Locale) -> String {
+        hir::kernel_type_label(self.db, id, locale, false)
     }
 
     fn parse(&self, file_id: FileId) -> Parse<SyntaxNode> {
@@ -179,7 +188,7 @@ impl AnalysisProvider for SalsaProvider<'_> {
         file_id: FileId,
     ) -> Arc<hir::dataflow::reaching_defs::ModuleReachingDefs> {
         let input = FileIdInput::new(self.db, file_id);
-        self.db.module_reaching_definitions(input)
+        <dyn RootDatabase as RootDatabase>::module_reaching_definitions(self.db, input)
     }
 
     fn region_tree(&self, file_id: FileId) -> Arc<hir::RegionTree> {
