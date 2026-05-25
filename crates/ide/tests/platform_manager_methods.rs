@@ -23,8 +23,8 @@
 
 use bsl_metadata::MdoType;
 use hir::{
-    DefDatabase, HirDatabase, InferenceDiagnostic, MetadataKind, ModuleId, Name, Ty,
-    UnresolvedMethodKind,
+    DefDatabase, HirDatabase, InferenceDiagnostic, MetadataKind, ModuleId, TypeId, TypeKernelDb,
+    TypeKind, UnresolvedMethodKind,
 };
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
@@ -61,9 +61,32 @@ fn setup(fixture_text: &str) -> (RootDatabaseImpl, FileId) {
     (db, test_file)
 }
 
-fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<Ty> {
-    let id = db.infer(file_id).var_types.get(var_lower).copied()?;
-    Some(hir::ty_bridge::typeid_to_ty(db, id))
+fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<TypeId> {
+    db.infer(file_id).var_types.get(var_lower).copied()
+}
+
+fn assert_metadata_ref(db: &RootDatabaseImpl, actual: TypeId, kind: MetadataKind, name: &str) {
+    assert!(
+        matches!(
+            db.lookup_type(actual),
+            TypeKind::MetadataRef(facet)
+                if facet.kind == kind && facet.name.as_str() == name
+        ),
+        "expected MetadataRef({kind:?}, {name}), got {:?}",
+        db.lookup_type(actual)
+    );
+}
+
+fn assert_object_manager(db: &RootDatabaseImpl, actual: TypeId, mdo: MdoType, name: &str) {
+    assert!(
+        matches!(
+            db.lookup_type(actual),
+            TypeKind::ObjectManager(facet)
+                if facet.mdo == mdo && facet.name.as_str() == name
+        ),
+        "expected ObjectManager({mdo:?}, {name}), got {:?}",
+        db.lookup_type(actual)
+    );
 }
 
 fn unresolved_kinds(db: &RootDatabaseImpl, file_id: FileId) -> Vec<UnresolvedMethodKind> {
@@ -164,13 +187,8 @@ fn catalog_create_item_returns_catalog_object_metadata_ref() {
 "#;
     let (db, file_id) = setup(fixture);
 
-    assert_eq!(
-        var_ty(&db, file_id, "спр"),
-        Some(Ty::MetadataRef {
-            kind: MetadataKind::CatalogObject, name: Name::new("Справочник1")
-        }),
-        "Спр must carry CatalogObject.Справочник1, not Unknown",
-    );
+    let spr = var_ty(&db, file_id, "спр").expect("спр must be inferred");
+    assert_metadata_ref(&db, spr, MetadataKind::CatalogObject, "Справочник1");
 
     // Sanity — no UnresolvedMethodCall on `СоздатьЭлемент`. Before the
     // platform fallback this emitted a false positive.
@@ -200,20 +218,10 @@ fn aliased_manager_create_item_resolves_through_lookup_method() {
 "#;
     let (db, file_id) = setup(fixture);
 
-    assert_eq!(
-        var_ty(&db, file_id, "м"),
-        Some(Ty::ObjectManager {
-            kind: MdoType::Catalog, name: Name::new("Справочник1")
-        }),
-        "Sanity — alias carries ObjectManager",
-    );
-    assert_eq!(
-        var_ty(&db, file_id, "спр"),
-        Some(Ty::MetadataRef {
-            kind: MetadataKind::CatalogObject, name: Name::new("Справочник1")
-        }),
-        "Aliased manager path must resolve СоздатьЭлемент through platform fallback",
-    );
+    let manager = var_ty(&db, file_id, "м").expect("м must be inferred");
+    assert_object_manager(&db, manager, MdoType::Catalog, "Справочник1");
+    let spr = var_ty(&db, file_id, "спр").expect("спр must be inferred");
+    assert_metadata_ref(&db, spr, MetadataKind::CatalogObject, "Справочник1");
 }
 
 #[test]
@@ -229,12 +237,8 @@ fn catalog_find_by_code_returns_catalog_ref() {
 "#;
     let (db, file_id) = setup(fixture);
 
-    assert_eq!(
-        var_ty(&db, file_id, "ссылка"),
-        Some(Ty::MetadataRef {
-            kind: MetadataKind::CatalogRef, name: Name::new("Справочник1")
-        }),
-    );
+    let link = var_ty(&db, file_id, "ссылка").expect("ссылка must be inferred");
+    assert_metadata_ref(&db, link, MetadataKind::CatalogRef, "Справочник1");
 }
 
 #[test]
@@ -260,10 +264,9 @@ fn catalog_find_by_code_string_arg_does_not_fire_type_mismatch() {
         .arg_diagnostics(file_id)
         .iter()
         .filter_map(|(_, d)| match d {
-            InferenceDiagnostic::TypeMismatch { expected, actual, .. } => Some((
-                hir::ty_bridge::typeid_to_ty(&db, *expected),
-                hir::ty_bridge::typeid_to_ty(&db, *actual),
-            )),
+            InferenceDiagnostic::TypeMismatch { expected, actual, .. } => {
+                Some((*expected, *actual))
+            }
             _ => None,
         })
         .collect();
@@ -419,14 +422,8 @@ fn catalog_object_chained_unknown_method_still_emits_diagnostic() {
     // 3-segment form today. On `Expr::MethodCall` path the inference
     // returns `Ty::Unknown` silently. So we only check the round-trip
     // type stays sensible; the diagnostic shape is not a contract here.
-    assert_eq!(
-        var_ty(&db, file_id, "спр"),
-        Some(Ty::MetadataRef {
-            kind: MetadataKind::CatalogObject,
-            name: Name::new("Справочник1"),
-        }),
-        "Спр must still be MetadataRef — chained-call failure on it must not poison the prior assignment",
-    );
+    let spr = var_ty(&db, file_id, "спр").expect("спр must be inferred");
+    assert_metadata_ref(&db, spr, MetadataKind::CatalogObject, "Справочник1");
 }
 
 fn unresolved_field_names(db: &RootDatabaseImpl, file_id: FileId) -> Vec<String> {

@@ -25,8 +25,8 @@
 //! can exercise without changing the caching strategy elsewhere in the crate.
 
 use hir::{
-    narrow_query, narrowed_type_at, ty_bridge, DefDatabase, DefWithBodyId, ExprId, IdConversion,
-    ModuleId, Name, Semantics, Ty, Type,
+    narrow_query, narrowed_type_at, Builders, DefDatabase, DefWithBodyId, ExprId, IdConversion,
+    ModuleId, Name, Semantics, Type,
 };
 use ide_db::base_db::{RootQueryDb, SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
@@ -160,9 +160,8 @@ fn narrowed_type_at_then_body_returns_narrowed_ty() {
 
     let result = narrow_query(&db, file_id, owner).expect("narrow_query must converge");
     assert_eq!(
-        narrowed_type_at(&db, &result, expr_id.to_idx(), &Name::new("Х"))
-            .map(|id| ty_bridge::typeid_to_ty(&db, id)),
-        Some(Ty::String),
+        narrowed_type_at(&db, &result, expr_id.to_idx(), &Name::new("Х")),
+        Some(db.string(None, false)),
         "then-body `Х` must observe the narrowed Ty::String (True-edge overlay)"
     );
 
@@ -170,8 +169,8 @@ fn narrowed_type_at_then_body_returns_narrowed_ty() {
     // overlay entry over the inferred base type when it is non-Unknown.
     let sema = Semantics::new(&db);
     assert_eq!(
-        ty_bridge::typeid_to_ty(&db, sema.type_of_expr(file_id, &then_rhs)),
-        Ty::String,
+        sema.type_of_expr(file_id, &then_rhs),
+        db.string(None, false),
         "Semantics::type_of_expr merges the narrowed overlay onto the base"
     );
 }
@@ -213,17 +212,16 @@ fn narrowed_type_at_guard_receiver_returns_pre_narrow_reaching_ty() {
 
     let result = narrow_query(&db, file_id, owner).expect("narrow_query must converge");
     assert_eq!(
-        narrowed_type_at(&db, &result, expr_id.to_idx(), &Name::new("Х"))
-            .map(|id| ty_bridge::typeid_to_ty(&db, id)),
-        Some(Ty::Number),
+        narrowed_type_at(&db, &result, expr_id.to_idx(), &Name::new("Х")),
+        Some(db.number(None, None)),
         "guard-receiver `Х` observes the pre-narrow reaching type (Number from `Х = 42`), \
          not the narrowed one (String)"
     );
 
     let sema = Semantics::new(&db);
     assert_eq!(
-        ty_bridge::typeid_to_ty(&db, sema.type_of_expr(file_id, &receiver)),
-        Ty::Number,
+        sema.type_of_expr(file_id, &receiver),
+        db.number(None, None),
         "hover on guard receiver returns the pre-narrow Number"
     );
 }
@@ -268,8 +266,7 @@ fn narrowed_type_at_after_one_sided_if_on_parameter_drops() {
 
     let result = narrow_query(&db, file_id, owner).expect("narrow_query must converge");
     assert_eq!(
-        narrowed_type_at(&db, &result, expr_id.to_idx(), &Name::new("Х"))
-            .map(|id| ty_bridge::typeid_to_ty(&db, id)),
+        narrowed_type_at(&db, &result, expr_id.to_idx(), &Name::new("Х")),
         None,
         "post-КонецЕсли `Х` must drop the one-sided narrowing (entry only in True branch)"
     );
@@ -357,16 +354,15 @@ fn narrow_is_case_insensitive_across_guard_and_hover() {
     // the lowercase-receiver guard. If case-folding regresses this
     // returns `None` and `Semantics::type_of_expr` falls back to base.
     assert_eq!(
-        narrowed_type_at(&db, &result, expr_id.to_idx(), &Name::new("Х"))
-            .map(|id| ty_bridge::typeid_to_ty(&db, id)),
-        Some(Ty::String),
+        narrowed_type_at(&db, &result, expr_id.to_idx(), &Name::new("Х")),
+        Some(db.string(None, false)),
         "mixed-case guard receiver (`х`) must narrow the uppercase reference (`Х`)"
     );
 
     let sema = Semantics::new(&db);
     assert_eq!(
-        ty_bridge::typeid_to_ty(&db, sema.type_of_expr(file_id, &then_rhs)),
-        Ty::String,
+        sema.type_of_expr(file_id, &then_rhs),
+        db.string(None, false),
         "hover under Semantics::type_of_expr must see the case-folded narrowing"
     );
 }
@@ -408,9 +404,8 @@ fn narrow_query_handles_module_code_body() {
     let result = narrow_query(&db, file_id, DefWithBodyId::ModuleCode)
         .expect("narrow_query must converge for ModuleCode");
     assert_eq!(
-        narrowed_type_at(&db, &result, expr_id.to_idx(), &Name::new("Х"))
-            .map(|id| ty_bridge::typeid_to_ty(&db, id)),
-        Some(Ty::String),
+        narrowed_type_at(&db, &result, expr_id.to_idx(), &Name::new("Х")),
+        Some(db.string(None, false)),
         "module-code narrowing must reach the then-body Х"
     );
 
@@ -419,8 +414,8 @@ fn narrow_query_handles_module_code_body() {
     // the hover for top-level code must also return the narrowed type.
     let sema = Semantics::new(&db);
     assert_eq!(
-        ty_bridge::typeid_to_ty(&db, sema.type_of_expr(file_id, &then_rhs)),
-        Ty::String,
+        sema.type_of_expr(file_id, &then_rhs),
+        db.string(None, false),
         "Semantics::type_of_expr on module-level then-body must merge the ModuleCode narrowing"
     );
 }
@@ -470,9 +465,8 @@ fn narrowed_type_at_else_body_inherits_reaching_when_complement_degrades() {
 
     let result = narrow_query(&db, file_id, owner).expect("narrow_query must converge");
     assert_eq!(
-        narrowed_type_at(&db, &result, expr_id.to_idx(), &Name::new("Х"))
-            .map(|id| ty_bridge::typeid_to_ty(&db, id)),
-        Some(Ty::Number),
+        narrowed_type_at(&db, &result, expr_id.to_idx(), &Name::new("Х")),
+        Some(db.number(None, None)),
         "else-body Х inherits the Conditional-IN reaching type when the complement is Unknown"
     );
 
@@ -481,8 +475,8 @@ fn narrowed_type_at_else_body_inherits_reaching_when_complement_degrades() {
     // missing from the suite.
     let sema = Semantics::new(&db);
     assert_eq!(
-        ty_bridge::typeid_to_ty(&db, sema.type_of_expr(file_id, &else_rhs)),
-        Ty::Number,
+        sema.type_of_expr(file_id, &else_rhs),
+        db.number(None, None),
         "Semantics::type_of_expr on else-body must merge the else-IN overlay (Number)"
     );
 }
@@ -548,8 +542,8 @@ fn type_narrowing_enabled_by_default() {
 
     let sema = Semantics::new(&db);
     assert_eq!(
-        ty_bridge::typeid_to_ty(&db, sema.type_of_expr(file_id, &then_rhs)),
-        Ty::String,
+        sema.type_of_expr(file_id, &then_rhs),
+        db.string(None, false),
         "with default flags the narrowing overlay is applied — then-body `Х` sees `Ty::String`"
     );
 }
@@ -586,8 +580,8 @@ fn type_narrowing_disabled_skips_overlay() {
 
     let sema = Semantics::new(&db);
     assert_eq!(
-        ty_bridge::typeid_to_ty(&db, sema.type_of_expr(file_id, &then_rhs)),
-        Ty::Number,
+        sema.type_of_expr(file_id, &then_rhs),
+        db.number(None, None),
         "with narrowing disabled, the then-body `Х` falls back to the base `Ty::Number`"
     );
 
@@ -597,8 +591,8 @@ fn type_narrowing_disabled_skips_overlay() {
     db.set_type_narrowing_enabled(true);
     let sema = Semantics::new(&db);
     assert_eq!(
-        ty_bridge::typeid_to_ty(&db, sema.type_of_expr(file_id, &then_rhs)),
-        Ty::String,
+        sema.type_of_expr(file_id, &then_rhs),
+        db.string(None, false),
         "re-enabling the flag restores the narrowed `Ty::String` without DB rebuild"
     );
 }
@@ -639,16 +633,16 @@ fn is_assignable_to_sees_narrowed_ty_from_semantics() {
     let then_rhs = nth_ident_expr_at_distinct_position(&root, "Х", 1);
 
     let sema = Semantics::new(&db);
-    let narrowed_ty = ty_bridge::typeid_to_ty(&db, sema.type_of_expr(file_id, &then_rhs));
+    let narrowed_ty = sema.type_of_expr(file_id, &then_rhs);
     assert_eq!(
         narrowed_ty,
-        Ty::String,
+        db.string(None, false),
         "precondition: narrowing overlay must reach the then-body `Х` before we start the assignability probe",
     );
 
     let narrowed = Type::from_id(&db, file_id, sema.type_of_expr(file_id, &then_rhs));
-    let expect_string = Type::from_id(&db, file_id, ty_bridge::ty_to_typeid(&db, &Ty::String));
-    let expect_number = Type::from_id(&db, file_id, ty_bridge::ty_to_typeid(&db, &Ty::Number));
+    let expect_string = Type::from_id(&db, file_id, db.string(None, false));
+    let expect_number = Type::from_id(&db, file_id, db.number(None, None));
 
     assert!(
         narrowed.is_assignable_to(&expect_string),

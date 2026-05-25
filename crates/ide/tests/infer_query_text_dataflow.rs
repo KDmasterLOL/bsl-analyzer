@@ -16,7 +16,7 @@
 //! `.Выполнить()` / `.Выбрать()` but downstream field access on the
 //! selection stays at `Ty::Unknown`.
 
-use hir::{DefDatabase, HirDatabase, ModuleId, Ty};
+use hir::{Builders, DefDatabase, HirDatabase, ModuleId, TypeId, TypeKernelDb, TypeKind};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
 use test_fixture::Fixture;
@@ -44,17 +44,16 @@ fn setup(fixture_text: &str) -> (RootDatabaseImpl, FileId) {
     (db, test_file)
 }
 
-fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<Ty> {
-    let id = db.infer(file_id).var_types.get(var_lower).copied()?;
-    Some(hir::ty_bridge::typeid_to_ty(db, id))
+fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<TypeId> {
+    db.infer(file_id).var_types.get(var_lower).copied()
 }
 
 /// `Ty::Query { projections }` with every slot empty or `None` — the
 /// shape produced when refinement fails or never ran. Mirrors the
 /// helper in `infer_new_expr.rs` so the two suites stay aligned.
-fn query_no_projection(ty: &Ty) -> bool {
-    match ty {
-        Ty::Query { projections } => projections.iter().all(Option::is_none),
+fn query_no_projection(db: &RootDatabaseImpl, ty: TypeId) -> bool {
+    match db.lookup_type(ty) {
+        TypeKind::Query { projections } => projections.iter().all(Option::is_none),
         _ => false,
     }
 }
@@ -77,7 +76,7 @@ fn straight_line_text_assign_refines_projection_through_execute_select() {
     let (db, file_id) = setup(fixture);
     assert_eq!(
         var_ty(&db, file_id, "х"),
-        Some(Ty::String),
+        Some(db.string(None, false)),
         "single literal write to Зап.Текст must let .Выбрать().Имя resolve to Ty::String",
     );
 }
@@ -106,7 +105,7 @@ fn text_append_idiom_collapses_refinement_to_none() {
     // contract "do not propagate the first literal's projection".
     let ty = var_ty(&db, file_id, "х");
     assert!(
-        ty.as_ref().is_none_or(|t| !matches!(t, Ty::String)),
+        ty.is_none_or(|t| t != db.string(None, false)),
         "append idiom must not propagate the first literal's projection — got {ty:?}",
     );
 }
@@ -138,7 +137,7 @@ fn divergent_branch_literals_collapse_refinement_to_none() {
     // literal over the other.
     let ty = var_ty(&db, file_id, "х");
     assert!(
-        ty.as_ref().is_none_or(|t| !matches!(t, Ty::String)),
+        ty.is_none_or(|t| t != db.string(None, false)),
         "divergent-branch literals must not pick one — got {ty:?}",
     );
 }
@@ -162,7 +161,7 @@ fn unrelated_field_writes_do_not_block_refinement() {
     let (db, file_id) = setup(fixture);
     assert_eq!(
         var_ty(&db, file_id, "х"),
-        Some(Ty::String),
+        Some(db.string(None, false)),
         "intervening .Параметры call must not block .Текст refinement",
     );
 }
@@ -184,8 +183,8 @@ fn no_text_assignment_keeps_receiver_unrefined() {
     // The selection itself stays a QueryResultSelection — Phase D
     // never downgrades it; it just leaves the projection at None.
     let ty = var_ty(&db, file_id, "выборка").expect("выборка must be inferred");
-    let projections = match &ty {
-        Ty::QueryResultSelection { projection } => projection.clone(),
+    let projections = match db.lookup_type(ty) {
+        TypeKind::QueryResultSelection(facet) => facet.projection.clone(),
         other => panic!("expected Ty::QueryResultSelection, got {other:?}"),
     };
     assert!(
@@ -257,7 +256,7 @@ fn unbound_receiver_keeps_chain_unrefined() {
     // the contract.
     let ty = var_ty(&db, file_id, "х");
     assert!(
-        ty.as_ref().is_none_or(|t| !matches!(t, Ty::String)),
+        ty.is_none_or(|t| t != db.string(None, false)),
         "unbound `Зап` receiver must not produce a Ty::String chain — got {ty:?}",
     );
     let _ = query_no_projection;

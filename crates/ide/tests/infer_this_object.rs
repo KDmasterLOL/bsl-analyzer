@@ -28,7 +28,9 @@
 //! out of scope for Task 5.
 
 use bsl_metadata::MdoType;
-use hir::{HirDatabase, InferenceDiagnostic, MetadataKind, Name, Ty};
+use hir::{
+    Builders, HirDatabase, InferenceDiagnostic, MetadataKind, TypeId, TypeKernelDb, TypeKind,
+};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
 use std::path::PathBuf;
@@ -78,9 +80,20 @@ fn setup(text: &str) -> (RootDatabaseImpl, FileId) {
     setup_at(catalog_object_module_path(), text)
 }
 
-fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<Ty> {
-    let id = db.infer(file_id).var_types.get(var_lower).copied()?;
-    Some(hir::ty_bridge::typeid_to_ty(db, id))
+fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<TypeId> {
+    db.infer(file_id).var_types.get(var_lower).copied()
+}
+
+fn assert_this_object(db: &RootDatabaseImpl, actual: TypeId, mdo_type: MdoType, name: &str) {
+    assert!(
+        matches!(
+            db.lookup_type(actual),
+            TypeKind::ThisObject { owner, .. }
+                if owner.mdo_type == mdo_type && owner.name.as_str() == name
+        ),
+        "expected ThisObject({mdo_type:?}, {name}), got {:?}",
+        db.lookup_type(actual)
+    );
 }
 
 #[test]
@@ -97,10 +110,8 @@ fn infer_this_object_resolves_to_catalog_owner() {
 КонецФункции
 "#;
     let (db, file_id) = setup(text);
-    assert_eq!(
-        var_ty(&db, file_id, "э"),
-        Some(Ty::ThisObject { owner: (MdoType::Catalog, Name::new("Справочник1")) }),
-    );
+    let actual = var_ty(&db, file_id, "э").expect("э must be inferred");
+    assert_this_object(&db, actual, MdoType::Catalog, "Справочник1");
 }
 
 #[test]
@@ -116,10 +127,8 @@ fn infer_this_object_english_spelling() {
 КонецФункции
 "#;
     let (db, file_id) = setup(text);
-    assert_eq!(
-        var_ty(&db, file_id, "t"),
-        Some(Ty::ThisObject { owner: (MdoType::Catalog, Name::new("Справочник1")) }),
-    );
+    let actual = var_ty(&db, file_id, "t").expect("t must be inferred");
+    assert_this_object(&db, actual, MdoType::Catalog, "Справочник1");
 }
 
 #[test]
@@ -139,7 +148,7 @@ fn infer_this_object_field_access_resolves_via_coercion() {
     let (db, file_id) = setup(text);
     assert_eq!(
         var_ty(&db, file_id, "ч"),
-        Some(Ty::Number),
+        Some(db.number(None, None)),
         "ЭтотОбъект.Реквизит2 must coerce to CatalogObject and resolve to Number",
     );
 }
@@ -168,7 +177,7 @@ fn infer_this_object_unknown_field_stays_unknown() {
         .iter()
         .filter_map(|(_, d)| match d {
             InferenceDiagnostic::UnresolvedField { receiver_ty, field_name, .. } => {
-                Some((hir::ty_bridge::typeid_to_ty(&db, *receiver_ty), field_name.clone()))
+                Some((*receiver_ty, field_name.clone()))
             }
             _ => None,
         })
@@ -179,11 +188,7 @@ fn infer_this_object_unknown_field_stays_unknown() {
         "exactly one UnresolvedField must fire on ЭтотОбъект miss, got {unresolved:?}"
     );
     let (receiver_ty, field_name) = &unresolved[0];
-    assert_eq!(
-        receiver_ty,
-        &Ty::ThisObject { owner: (MdoType::Catalog, Name::new("Справочник1")) },
-        "receiver_ty must preserve ThisObject provenance for the diagnostic"
-    );
+    assert_this_object(&db, *receiver_ty, MdoType::Catalog, "Справочник1");
     assert_eq!(field_name.as_str(), "НесуществующийРеквизит");
 }
 
@@ -210,11 +215,10 @@ fn infer_this_object_in_common_module_stays_unknown() {
     // common-module `ЭтотОбъект` would violate Task 5's scope
     // (coercion only covers `*Object` MDO kinds).
     let infer = db.infer(file_id);
-    // Phase 3 §4.D: var_types stores TypeId; bridge before pattern-match.
     let has_this_object = infer
         .var_types
         .values()
-        .any(|tid| matches!(hir::ty_bridge::typeid_to_ty(&db, *tid), Ty::ThisObject { .. }));
+        .any(|tid| matches!(db.lookup_type(*tid), TypeKind::ThisObject { .. }));
     assert!(!has_this_object, "common module must not produce Ty::ThisObject");
 }
 
@@ -236,11 +240,16 @@ fn infer_this_object_coercion_pins_object_kind() {
 КонецФункции
 "#;
     let (db, file_id) = setup(text);
-    assert_eq!(
-        var_ty(&db, file_id, "с"),
-        Some(Ty::MetadataRef {
-            kind: MetadataKind::CatalogRef, name: Name::new("Справочник1")
-        }),
+    let ty = var_ty(&db, file_id, "с").expect("с must be inferred");
+    assert!(
+        matches!(
+            db.lookup_type(ty),
+            TypeKind::MetadataRef(facet)
+                if facet.kind == MetadataKind::CatalogRef
+                    && facet.name.as_str() == "Справочник1"
+        ),
+        "expected CatalogRef.Справочник1, got {:?}",
+        db.lookup_type(ty)
     );
 }
 
@@ -262,14 +271,11 @@ fn infer_this_object_resolves_in_task_object_module() {
 КонецФункции
 "#;
     let (db, file_id) = setup_at(task_object_module_path(), text);
-    assert_eq!(
-        var_ty(&db, file_id, "э"),
-        Some(Ty::ThisObject { owner: (MdoType::Task, Name::new("ТестоваяЗадача")) }),
-        "ЭтотОбъект in TaskObject must resolve to Ty::ThisObject(Task)",
-    );
+    let actual = var_ty(&db, file_id, "э").expect("э must be inferred");
+    assert_this_object(&db, actual, MdoType::Task, "ТестоваяЗадача");
     assert_eq!(
         var_ty(&db, file_id, "к"),
-        Some(Ty::String),
+        Some(db.string(None, false)),
         "ЭтотОбъект.Комментарий in TaskObject must coerce to MetadataRef and resolve to String",
     );
 }

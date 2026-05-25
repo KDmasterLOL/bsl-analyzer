@@ -13,7 +13,7 @@
 //! assignment `Х = Новый <Type>();` and then read `var_types["х"]`, which is
 //! merged into the file-level result.
 
-use hir::{ty_bridge::typeid_to_ty, DefDatabase, HirDatabase, ModuleId, Ty};
+use hir::{Builders, DefDatabase, HirDatabase, ModuleId, TypeId, TypeKernelDb, TypeKind};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
 use test_fixture::Fixture;
@@ -42,9 +42,8 @@ fn setup(fixture_text: &str) -> (RootDatabaseImpl, FileId) {
     (db, test_file)
 }
 
-fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<Ty> {
-    let id = db.infer(file_id).var_types.get(var_lower).copied()?;
-    Some(hir::ty_bridge::typeid_to_ty(db, id))
+fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<TypeId> {
+    db.infer(file_id).var_types.get(var_lower).copied()
 }
 
 /// `Ty::Query` carries every sub-query's projection slice; "no
@@ -53,9 +52,9 @@ fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<Ty>
 /// projection). Both signal the same downstream behaviour — chain
 /// rewrite falls through to legacy platform-property dispatch — so
 /// tests that pin "no projection" accept either shape.
-fn query_no_projection(ty: &Ty) -> bool {
-    match ty {
-        Ty::Query { projections } => projections.iter().all(Option::is_none),
+fn query_no_projection(db: &RootDatabaseImpl, ty: TypeId) -> bool {
+    match db.lookup_type(ty) {
+        TypeKind::Query { projections } => projections.iter().all(Option::is_none),
         _ => false,
     }
 }
@@ -74,7 +73,7 @@ fn new_array_gives_array_ty() {
     let (db, file_id) = setup(fixture);
     assert_eq!(
         var_ty(&db, file_id, "х"),
-        Some(Ty::Array),
+        Some(db.array(None)),
         "`Новый Массив` must type the RHS as Ty::Array"
     );
 }
@@ -97,7 +96,7 @@ fn new_query_with_no_args_types_as_query_with_no_projection() {
     let (db, file_id) = setup(fixture);
     let ty = var_ty(&db, file_id, "х").expect("х must be inferred");
     assert!(
-        query_no_projection(&ty),
+        query_no_projection(&db, ty),
         "`Новый Запрос()` without literal text must produce Ty::Query with no projection, got {ty:?}",
     );
 }
@@ -119,7 +118,7 @@ fn new_query_with_dynamic_text_types_as_query_with_no_projection() {
     let (db, file_id) = setup(fixture);
     let ty = var_ty(&db, file_id, "х").expect("х must be inferred");
     assert!(
-        query_no_projection(&ty),
+        query_no_projection(&db, ty),
         "`Новый Запрос(<variable>)` must produce Ty::Query with no projection, got {ty:?}",
     );
 }
@@ -138,8 +137,8 @@ fn new_query_with_literal_text_types_as_query_with_projection() {
 "#;
     let (db, file_id) = setup(fixture);
     let ty = var_ty(&db, file_id, "х").expect("х must be inferred");
-    let projections = match &ty {
-        Ty::Query { projections } => projections.clone(),
+    let projections = match db.lookup_type(ty) {
+        TypeKind::Query { projections } => projections.clone(),
         other => panic!("expected Ty::Query, got {other:?}"),
     };
     assert_eq!(
@@ -154,7 +153,7 @@ fn new_query_with_literal_text_types_as_query_with_projection() {
         "single-column SELECT must yield one projection field, got {projection:?}",
     );
     assert_eq!(projection.fields[0].name.as_str(), "А");
-    assert_eq!(typeid_to_ty(&db, projection.fields[0].ty), Ty::Number);
+    assert_eq!(projection.fields[0].ty, db.number(None, None));
 }
 
 #[test]
@@ -174,7 +173,7 @@ fn new_query_chain_propagates_projection_through_execute_select() {
     let (db, file_id) = setup(fixture);
     assert_eq!(
         var_ty(&db, file_id, "х"),
-        Some(Ty::String),
+        Some(db.string(None, false)),
         "`Новый Запрос(\"...Имя\").Выполнить().Выбрать().Имя` must resolve to Ty::String",
     );
 }
@@ -195,7 +194,7 @@ fn new_query_with_parse_error_literal_falls_back_to_no_projection() {
     let (db, file_id) = setup(fixture);
     let ty = var_ty(&db, file_id, "х").expect("х must be inferred");
     assert!(
-        query_no_projection(&ty),
+        query_no_projection(&db, ty),
         "parse-error SDBL literal must collapse to Ty::Query with no projection, not PlatformObject — got {ty:?}",
     );
 }
@@ -215,14 +214,14 @@ fn execute_batch_literal_zero_index_yields_first_subquery_projection() {
 "#;
     let (db, file_id) = setup(fixture);
     let ty = var_ty(&db, file_id, "х").expect("х must be inferred");
-    let projection = match &ty {
-        Ty::QueryResult { projection } => projection.as_ref(),
+    let projection = match db.lookup_type(ty) {
+        TypeKind::QueryResult(facet) => facet.projection.as_ref(),
         other => panic!("expected Ty::QueryResult, got {other:?}"),
     };
     let projection = projection.expect("batch[0] must carry the first sub-query's projection");
     assert_eq!(projection.fields.len(), 1);
     assert_eq!(projection.fields[0].name.as_str(), "ПерваяКолонка");
-    assert_eq!(typeid_to_ty(&db, projection.fields[0].ty), Ty::Number);
+    assert_eq!(projection.fields[0].ty, db.number(None, None));
 }
 
 #[test]
@@ -237,13 +236,13 @@ fn execute_batch_literal_one_index_yields_second_subquery_projection() {
 "#;
     let (db, file_id) = setup(fixture);
     let ty = var_ty(&db, file_id, "х").expect("х must be inferred");
-    let projection = match &ty {
-        Ty::QueryResult { projection } => projection.as_ref(),
+    let projection = match db.lookup_type(ty) {
+        TypeKind::QueryResult(facet) => facet.projection.as_ref(),
         other => panic!("expected Ty::QueryResult, got {other:?}"),
     };
     let projection = projection.expect("batch[1] must carry the second sub-query's projection");
     assert_eq!(projection.fields[0].name.as_str(), "ВтораяКолонка");
-    assert_eq!(typeid_to_ty(&db, projection.fields[0].ty), Ty::String);
+    assert_eq!(projection.fields[0].ty, db.string(None, false));
 }
 
 #[test]
@@ -259,10 +258,11 @@ fn execute_batch_out_of_range_index_yields_no_projection() {
 КонецФункции
 "#;
     let (db, file_id) = setup(fixture);
-    assert_eq!(
-        var_ty(&db, file_id, "х"),
-        Some(Ty::QueryResult { projection: None }),
-        "out-of-range batch index must yield Ty::QueryResult{{None}}",
+    let ty = var_ty(&db, file_id, "х").expect("х must be inferred");
+    assert!(
+        matches!(db.lookup_type(ty), TypeKind::QueryResult(facet) if facet.projection.is_none()),
+        "out-of-range batch index must yield Ty::QueryResult{{None}}, got {:?}",
+        db.lookup_type(ty)
     );
 }
 
@@ -278,10 +278,11 @@ fn execute_batch_dynamic_index_yields_no_projection() {
 КонецФункции
 "#;
     let (db, file_id) = setup(fixture);
-    assert_eq!(
-        var_ty(&db, file_id, "х"),
-        Some(Ty::QueryResult { projection: None }),
-        "non-literal batch index must yield Ty::QueryResult{{None}}",
+    let ty = var_ty(&db, file_id, "х").expect("х must be inferred");
+    assert!(
+        matches!(db.lookup_type(ty), TypeKind::QueryResult(facet) if facet.projection.is_none()),
+        "non-literal batch index must yield Ty::QueryResult{{None}}, got {:?}",
+        db.lookup_type(ty)
     );
 }
 
@@ -303,7 +304,7 @@ fn execute_batch_chain_propagates_through_select() {
     let (db, file_id) = setup(fixture);
     assert_eq!(
         var_ty(&db, file_id, "х"),
-        Some(Ty::String),
+        Some(db.string(None, false)),
         "batch[1].Выбрать().Имя must resolve to Ty::String",
     );
 }
@@ -322,7 +323,7 @@ fn new_structure_gives_structure_ty() {
     let (db, file_id) = setup(fixture);
     assert_eq!(
         var_ty(&db, file_id, "х"),
-        Some(Ty::Structure),
+        Some(db.structure(None)),
         "`Новый Структура` must type the RHS as Ty::Structure"
     );
 }

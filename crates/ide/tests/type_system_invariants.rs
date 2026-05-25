@@ -40,7 +40,9 @@
 //!    file does not duplicate them; listing the coverage keeps the
 //!    invariant discoverable.
 
-use hir::{DefDatabase, HirDatabase, MetadataKind, ModuleId, Name, Ty};
+use hir::{
+    Builders, DefDatabase, HirDatabase, MetadataKind, ModuleId, Name, TypeKernelDb, TypeKind,
+};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
 use test_fixture::Fixture;
@@ -87,18 +89,16 @@ fn single_resolver_cascade_across_builtins_locals_and_managers() {
 "#;
     let (db, file_id) = setup(fixture);
     let infer = db.infer(file_id);
-    // Phase 3 §4.D: var_types stores TypeId; bridge for assert_eq!.
-    let var_ty =
-        |n: &str| infer.var_types.get(n).copied().map(|tid| hir::ty_bridge::typeid_to_ty(&db, tid));
+    let var_ty = |n: &str| infer.var_types.get(n).copied();
 
     assert_eq!(
         var_ty("м"),
-        Some(Ty::Array),
+        Some(db.array(None)),
         "`Новый Массив()` must still lower through TyLoweringContext"
     );
     assert_eq!(
         var_ty("к"),
-        Some(Ty::ManagerCollection(bsl_metadata::MdoType::Document)),
+        Some(db.manager_collection(bsl_metadata::MdoType::Document)),
         "`Документы` must still resolve to Ty::ManagerCollection via MdoType::from_plural"
     );
 }
@@ -134,19 +134,22 @@ fn jsdoc_and_three_level_share_signature_materialisation() {
 "#;
     let (db, file_id) = setup(fixture);
     let infer = db.infer(file_id);
-    // Phase 3 §4.D: var_types stores TypeId; bridge for assert_eq!.
-    let var_ty =
-        |n: &str| infer.var_types.get(n).copied().map(|tid| hir::ty_bridge::typeid_to_ty(&db, tid));
+    let var_ty = |n: &str| infer.var_types.get(n).copied();
 
     assert_eq!(
         var_ty("а"),
-        Some(Ty::String),
+        Some(db.string(None, false)),
         "2-segment call must materialise signature from JSDoc"
     );
-    assert_eq!(
-        var_ty("б"),
-        Some(Ty::MetadataRef { kind: MetadataKind::DocumentRef, name: Name::new("ПКО") }),
-        "3-segment call must materialise signature through the same path"
+    let doc_ref = var_ty("б").expect("3-segment call must produce a var_type entry");
+    assert!(
+        matches!(
+            db.lookup_type(doc_ref),
+            TypeKind::MetadataRef(facet)
+                if facet.kind == MetadataKind::DocumentRef && facet.name.as_str() == "ПКО"
+        ),
+        "3-segment call must materialise signature through the same path, got {:?}",
+        db.lookup_type(doc_ref)
     );
 }
 
@@ -171,30 +174,27 @@ fn single_method_lookup_path_agrees_across_infer_and_facade() {
     let infer = db.infer(file_id);
 
     // Path A: whole-program inference.
-    // Phase 3 §4.D: var_types stores TypeId; bridge to Ty.
     let infer_ty = infer
         .var_types
         .get("б")
         .copied()
-        .map(|tid| hir::ty_bridge::typeid_to_ty(&db, tid))
         .expect("Массив.Количество() must produce a var_type entry");
 
     // Path B: hir::Type facade (the API IDE completion uses after M3).
-    let array_id = hir::ty_bridge::ty_to_typeid(&db, &Ty::Array);
+    let array_id = db.array(None);
     let facade_ret = hir::Type::from_id(&db, file_id, array_id)
         .method_return_type(&Name::new("Количество"))
         .id();
-    let facade_ty = hir::ty_bridge::typeid_to_ty(&db, facade_ret);
 
     assert_eq!(
-        infer_ty, facade_ty,
+        infer_ty, facade_ret,
         "Expr::MethodCall inference and hir::Type::method_return_type must \
          return the same Ty for `Массив.Количество()` — both must route \
          through `method_lookup::lookup_method`"
     );
     assert_eq!(
         infer_ty,
-        Ty::Number,
+        db.number(None, None),
         "`Массив.Количество()` must resolve to Ty::Number — a change here \
          means the platform-data index drifted, not a facade regression",
     );
@@ -232,34 +232,25 @@ fn single_field_lookup_path_agrees_across_infer_and_facade() {
     )]);
 
     let infer = db.infer(file_id);
-    // Phase 3 §4.D: var_types stores TypeId; bridge to Ty.
-    let infer_ty = infer
-        .var_types
-        .get("р")
-        .copied()
-        .map(|tid| hir::ty_bridge::typeid_to_ty(&db, tid))
-        .expect("С.Реквизит2 must produce a var_type entry");
+    let infer_ty =
+        infer.var_types.get("р").copied().expect("С.Реквизит2 must produce a var_type entry");
 
     // The facade routes through `field_lookup::lookup_field` with the
     // same `configurations(file_id)` the inference used.
-    let receiver_ty = Ty::MetadataRef {
-        kind: MetadataKind::CatalogRef,
-        name: Name::new("Справочник1"),
-    };
-    let receiver_id = hir::ty_bridge::ty_to_typeid(&db, &receiver_ty);
+    let receiver_id =
+        infer.var_types.get("с").copied().expect("С must carry the CatalogRef receiver type");
     let facade_field_id =
         hir::Type::from_id(&db, file_id, receiver_id).field_type(&Name::new("Реквизит2")).id();
-    let facade_ty = hir::ty_bridge::typeid_to_ty(&db, facade_field_id);
 
     assert_eq!(
-        infer_ty, facade_ty,
+        infer_ty, facade_field_id,
         "Expr::Field inference and hir::Type::field_type must return the \
          same Ty for `Справочник1.Реквизит2` — both must route through \
          `field_lookup::lookup_field`"
     );
     assert_eq!(
         infer_ty,
-        Ty::Number,
+        db.number(None, None),
         "`Справочник1.Реквизит2` must resolve to Ty::Number per the \
          designer fixture XML — drift here indicates the XML changed",
     );

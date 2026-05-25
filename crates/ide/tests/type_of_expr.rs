@@ -15,7 +15,7 @@
 //!
 //! These are the load-bearing acceptance tests from the M3 plan Task 9.
 
-use hir::{DefDatabase, DefWithBodyId, HirDatabase, ModuleId, Semantics, Ty};
+use hir::{Builders, DefDatabase, DefWithBodyId, HirDatabase, ModuleId, Semantics};
 use ide_db::base_db::{RootQueryDb, SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
 use syntax::ast::{self, AstNode};
@@ -146,8 +146,8 @@ fn type_of_call_expr_matches_infer() {
         root.descendants().filter_map(ast::Literal::cast).next().expect("fixture has a literal");
 
     assert_eq!(
-        hir::ty_bridge::typeid_to_ty(&db, sema.type_of_expr(file_id, literal.syntax())),
-        Ty::Number,
+        sema.type_of_expr(file_id, literal.syntax()),
+        db.number(None, None),
         "Semantics::type_of_expr must return Ty::Number for literal `42`"
     );
 
@@ -161,10 +161,8 @@ fn type_of_call_expr_matches_infer() {
         })
         .expect("BodySourceMap must locate the literal ExprId");
     assert_eq!(
-        infer
-            .type_id_of_expr_in(owner_match, expr_match)
-            .map(|id| hir::ty_bridge::typeid_to_ty(&db, id)),
-        Some(Ty::Number),
+        infer.type_id_of_expr_in(owner_match, expr_match),
+        Some(db.number(None, None)),
         "direct expr_types_by_body lookup must agree with Semantics::type_of_expr"
     );
 }
@@ -188,8 +186,8 @@ fn type_of_module_level_expr_resolves() {
         root.descendants().filter_map(ast::Literal::cast).next().expect("fixture has a literal");
 
     assert_eq!(
-        hir::ty_bridge::typeid_to_ty(&db, sema.type_of_expr(file_id, literal.syntax())),
-        Ty::Number,
+        sema.type_of_expr(file_id, literal.syntax()),
+        db.number(None, None),
         "Semantics::type_of_expr must resolve the module-level `42` literal"
     );
 
@@ -205,10 +203,8 @@ fn type_of_module_level_expr_resolves() {
         .expect("module-level BodySourceMap must locate the literal");
     let infer = db.infer(file_id);
     assert_eq!(
-        infer
-            .type_id_of_expr_in(DefWithBodyId::ModuleCode, expr_id)
-            .map(|id| hir::ty_bridge::typeid_to_ty(&db, id)),
-        Some(Ty::Number),
+        infer.type_id_of_expr_in(DefWithBodyId::ModuleCode, expr_id),
+        Some(db.number(None, None)),
         "direct ModuleCode lookup must agree with Semantics::type_of_expr"
     );
 }
@@ -241,8 +237,8 @@ fn type_of_field_expr_matches_infer() {
     let field = first_field_expr(&root, "Реквизит2").expect("fixture has С.Реквизит2");
 
     assert_eq!(
-        hir::ty_bridge::typeid_to_ty(&db, sema.type_of_expr(file_id, field.syntax())),
-        Ty::Number,
+        sema.type_of_expr(file_id, field.syntax()),
+        db.number(None, None),
         "Semantics::type_of_expr on a field access must agree with inference (Ty::Number)"
     );
 
@@ -262,8 +258,8 @@ fn type_of_field_expr_matches_infer() {
         .expect("BodySourceMap must locate the field-expr ExprId");
     let infer = db.infer(file_id);
     assert_eq!(
-        infer.type_id_of_expr_in(owner, expr_id).map(|id| hir::ty_bridge::typeid_to_ty(&db, id)),
-        Some(Ty::Number),
+        infer.type_id_of_expr_in(owner, expr_id),
+        Some(db.number(None, None)),
         "direct expr_types_by_body lookup must agree with Semantics::type_of_expr"
     );
 }
@@ -281,7 +277,7 @@ fn type_of_expr_unknown_for_non_expression_node() {
     let sema = Semantics::new(&db);
     let parse = db.parse(file_id);
     let root = parse.syntax_node();
-    assert_eq!(hir::ty_bridge::typeid_to_ty(&db, sema.type_of_expr(file_id, &root)), Ty::Unknown);
+    assert_eq!(sema.type_of_expr(file_id, &root), db.unknown());
 }
 
 #[test]
@@ -310,8 +306,8 @@ fn type_of_expr_covers_call_site() {
     let root = parse.syntax_node();
     let call = first_call_expr(&root, "Сумма").expect("fixture has a Сумма() call");
     assert_eq!(
-        hir::ty_bridge::typeid_to_ty(&db, sema.type_of_expr(file_id, call.syntax())),
-        Ty::Number,
+        sema.type_of_expr(file_id, call.syntax()),
+        db.number(None, None),
         "type_of_expr on a CallExpr must reflect the JSDoc-lowered return type"
     );
 }

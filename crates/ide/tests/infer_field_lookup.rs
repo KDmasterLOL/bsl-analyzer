@@ -31,7 +31,9 @@
 //! (same absolute path inside the workspace-style layout), so the JSDoc
 //! return hint is the one the Resolver reads.
 
-use hir::{HirDatabase, InferenceDiagnostic, Name, Ty};
+use hir::{
+    Builders, HirDatabase, InferenceDiagnostic, MetadataKind, Name, TypeId, TypeKernelDb, TypeKind,
+};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
 use std::path::PathBuf;
@@ -71,9 +73,8 @@ fn setup(fixture_text: &str) -> (RootDatabaseImpl, FileId) {
     (db, test_file)
 }
 
-fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<Ty> {
-    let id = db.infer(file_id).var_types.get(var_lower).copied()?;
-    Some(hir::ty_bridge::typeid_to_ty(db, id))
+fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<TypeId> {
+    db.infer(file_id).var_types.get(var_lower).copied()
 }
 
 #[test]
@@ -102,7 +103,7 @@ fn infer_field_catalog_custom_attribute_typed() {
     let (db, file_id) = setup(fixture);
     assert_eq!(
         var_ty(&db, file_id, "р"),
-        Some(Ty::Number),
+        Some(db.number(None, None)),
         "Expr::Field must resolve Реквизит2 on Ty::MetadataRef → Ty::Number"
     );
 }
@@ -131,7 +132,7 @@ fn infer_field_catalog_standard_attribute_typed() {
     let (db, file_id) = setup(fixture);
     assert_eq!(
         var_ty(&db, file_id, "к"),
-        Some(Ty::String),
+        Some(db.string(None, false)),
         "Standard attribute Код must resolve to Ty::String (CodeLength=9)"
     );
 }
@@ -158,7 +159,7 @@ fn infer_field_catalog_boolean_attribute_typed() {
 КонецФункции
 "#;
     let (db, file_id) = setup(fixture);
-    assert_eq!(var_ty(&db, file_id, "б"), Some(Ty::Boolean));
+    assert_eq!(var_ty(&db, file_id, "б"), Some(db.boolean()));
 }
 
 #[test]
@@ -219,7 +220,7 @@ fn infer_field_unresolved_on_known_receiver_emits_diagnostic() {
         .iter()
         .filter_map(|(_, d)| match d {
             InferenceDiagnostic::UnresolvedField { receiver_ty, field_name, .. } => {
-                Some((hir::ty_bridge::typeid_to_ty(&db, *receiver_ty), field_name.clone()))
+                Some((*receiver_ty, field_name.clone()))
             }
             _ => None,
         })
@@ -232,8 +233,9 @@ fn infer_field_unresolved_on_known_receiver_emits_diagnostic() {
     let (ty, name) = &unresolved[0];
     assert_eq!(name, &Name::new("НесуществующееПоле"));
     assert!(
-        matches!(ty, Ty::MetadataRef { kind, .. } if *kind == hir::MetadataKind::CatalogRef),
-        "receiver_ty must carry the CatalogRef kind, got {ty:?}"
+        matches!(db.lookup_type(*ty), TypeKind::MetadataRef(facet) if facet.kind == MetadataKind::CatalogRef),
+        "receiver_ty must carry the CatalogRef kind, got {:?}",
+        db.lookup_type(*ty)
     );
 }
 
@@ -406,14 +408,14 @@ fn infer_field_tabular_section_promotes_to_tabular_section_ty() {
 "#;
     let (db, file_id) = setup(fixture);
     let ty = var_ty(&db, file_id, "т").expect("Tabular-section access should set a var type");
-    match ty {
-        Ty::MetadataRef { kind, name } => {
+    match db.lookup_type(ty) {
+        TypeKind::MetadataRef(facet) => {
             assert_eq!(
-                kind,
-                hir::MetadataKind::TabularSection { parent: bsl_metadata::MdoType::Catalog },
+                facet.kind,
+                MetadataKind::TabularSection { parent: bsl_metadata::MdoType::Catalog },
                 "promoted kind must be TabularSection {{ parent: Catalog }}"
             );
-            assert_eq!(name, Name::new("Справочник1.ТабличнаяЧасть1"));
+            assert_eq!(facet.name.as_str(), "Справочник1.ТабличнаяЧасть1");
         }
         other => panic!("expected Ty::MetadataRef(TabularSection), got {other:?}"),
     }
