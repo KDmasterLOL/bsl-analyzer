@@ -85,8 +85,8 @@ pub struct InferenceResult {
     /// Populated by tracking `Stmt::Assign { target: Path(name), value }` during inference.
     /// Used by completion to resolve receiver types for method lookup.
     ///
-    /// Phase 3 §4.D: stores `TypeId` (interned via the type kernel) instead
-    /// of `Ty`. Bridge to `Ty` via [`crate::ty_bridge::typeid_to_ty`].
+    /// Phase 3 §4.D: stores `TypeId` (interned via the type kernel); inspect
+    /// a stored id with `db.lookup_type`.
     ///
     /// File-global merge across all bodies (last-write-wins on lowercase
     /// name). Useful for name-based completion which has no body context.
@@ -280,8 +280,8 @@ pub enum InferenceDiagnostic {
     /// Emitted from `Expr::Field` when [`crate::field_lookup::lookup_field`]
     /// returns `None` **and** the receiver carries enough type information
     /// for the gap to be user-actionable — i.e. the receiver is not
-    /// [`Ty::Unknown`] (no type info to disagree with) and not a
-    /// [`Ty::Union`] (field lookup on unions defers to M4 narrowing, so a
+    /// `TypeKind::Unknown` (no type info to disagree with) and not a
+    /// `TypeKind::Union` (field lookup on unions defers to M4 narrowing, so a
     /// `None` there is "can't decide yet", not "field does not exist").
     ///
     /// `receiver_ty` captures the type as seen at the access site so the
@@ -519,8 +519,8 @@ pub struct BodyInferenceResult {
     pub owner: DefWithBodyId,
     /// Variable types discovered during inference (lowercase name → `TypeId`).
     ///
-    /// Phase 3 §4.D: storage migrated from `Ty` to `TypeId`. Bridge via
-    /// [`crate::ty_bridge::typeid_to_ty`].
+    /// Phase 3 §4.D: storage migrated from `Ty` to `TypeId`; inspect a
+    /// stored id with `db.lookup_type`.
     pub var_types: FxHashMap<String, TypeId>,
     /// Implicit locals introduced by simple assignments in this body.
     pub implicit_locals: FxHashMap<String, ImplicitLocalInfo>,
@@ -694,9 +694,8 @@ impl InferOwnerResult {
     /// overlay across all expressions in the body) use this in
     /// preference to repeated [`Self::type_id_of_expr`] calls.
     ///
-    /// Phase 3 §4.D: map values migrated from `Ty` to `TypeId`. Callers
-    /// needing `Ty` views must bridge per-entry via
-    /// [`crate::ty_bridge::typeid_to_ty`].
+    /// Phase 3 §4.D: map values migrated from `Ty` to `TypeId`; inspect an
+    /// entry with `db.lookup_type`.
     pub fn expr_types(&self) -> &FxHashMap<ExprId, TypeId> {
         match self {
             InferOwnerResult::Method(r) => &r.expr_types,
@@ -1628,7 +1627,7 @@ impl<'db> InferenceContext<'db> {
         ty
     }
 
-    /// Resolve a bare `Expr::Path` identifier to a [`Ty`].
+    /// Resolve a bare `Expr::Path` identifier to a `TypeId`.
     ///
     /// Lookup order mirrors BSL visibility:
     ///

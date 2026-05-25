@@ -1,7 +1,7 @@
 //! TypeRef → Ty lowering.
 //!
 //! [`TyLoweringContext`] is the single entry point that turns the syntactic
-//! [`TypeRef`] layer into the semantic [`Ty`]. Every source of BSL type
+//! [`TypeRef`] layer into the semantic `TypeId`. Every source of BSL type
 //! information — `Новый X`, `Тип("…")`, JSDoc parameter hints, XML metadata
 //! attributes, `ОписаниеТипов("…")` literals — goes through the same
 //! pipeline, so a future change (e.g. adding `Ty::Union` in M3) only needs a
@@ -40,7 +40,7 @@ use hir_def::path::QualifiedName;
 use hir_def::type_ref::TypeRef;
 use hir_def::Name;
 
-/// Adapter that lowers a syntactic [`TypeRef`] into a semantic [`Ty`].
+/// Adapter that lowers a syntactic [`TypeRef`] into a semantic `TypeId`.
 ///
 /// Carries an optional [`MetadataResolver`] so qualified names of the form
 /// `ОпределяемыйТип.X` can be expanded to their underlying type at lowering
@@ -205,7 +205,7 @@ fn is_defined_type_prefix(prefix: &str) -> bool {
 }
 
 /// Prefix → [`MetadataKind`] table for the reference/object forms currently
-/// modelled by [`Ty::MetadataRef`]. Both Russian and English variants are
+/// modelled by `TypeKind::MetadataRef`. Both Russian and English variants are
 /// accepted to keep the resolver case-insensitive and bilingual end-to-end.
 ///
 /// # Coverage

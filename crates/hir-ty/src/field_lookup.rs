@@ -32,7 +32,7 @@ use hir_def::Name;
 
 use crate::field_enum::enumerate_fields_inner;
 
-/// Project a [`Ty::FormData`] receiver to the underlying MDO for **field**
+/// Project a `TypeKind::FormData` receiver to the underlying MDO for **field**
 /// resolution.
 ///
 /// Fields on a managed-form attribute that wraps an `*Object` MDO behave
@@ -198,7 +198,7 @@ fn lookup_field_inner(
     lookup_field_via_platform_property(db, receiver, field_name)
 }
 
-/// Resolve a field on a [`Ty::Union`] receiver via **intersection** over
+/// Resolve a field on a `TypeKind::Union` receiver via **intersection** over
 /// live arms.
 ///
 /// Contract — distinct from [`crate::method_lookup::union_lookup`] which
@@ -254,7 +254,7 @@ fn lookup_field_in_union_intersection(
     })
 }
 
-/// Resolve a field on a [`Ty::MetadataRef`] receiver via bilingual
+/// Resolve a field on a `TypeKind::MetadataRef` receiver via bilingual
 /// case-insensitive match over [`crate::field_enum::enumerate_fields`].
 ///
 /// The enumerator is the source of truth for "what fields does an MDO

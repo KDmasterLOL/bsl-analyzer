@@ -13,7 +13,6 @@ pub use definition::{Definition, ReferenceScope};
 pub use hir_ty::method_lookup::platform_type_key_id;
 pub use hir_ty::resolve_platform_global_property_type;
 pub use hir_ty::this_object::coerce_to_metadata_ref_id;
-pub use hir_ty::ty_bridge;
 pub use hir_ty::TyLoweringContext;
 pub use hir_ty::{is_form_items_collection_ty, FORM_ITEMS_TYPE_EN, FORM_ITEMS_TYPE_RU};
 pub use hir_ty::{PlatformMethodHandle, PlatformMethodOrigin};
@@ -169,7 +168,7 @@ pub use hir_ty::{
     form_control_platform_type_chain, form_control_platform_type_name, form_element_kind_label,
     form_element_kind_sort_band, BodyInferenceResult, CallArgBinding, FormElementKind,
     InferOwnerResult, InferenceContext, InferenceDiagnostic, InferenceResult, MetadataKind,
-    ModuleCodeInferenceResult, ParamsShape, Ty, UnresolvedMethodKind,
+    ModuleCodeInferenceResult, ParamsShape, UnresolvedMethodKind,
 };
 
 pub use bsl_types::builders::Builders;
@@ -714,7 +713,7 @@ impl<'db, DB: ConfigsDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
 /// callers that need [`HirDatabase`] pay the trait-bound cost; the main
 /// IDE flows (definition, name resolution) don't.
 impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
-    /// Resolve a syntax node to its inferred [`Ty`].
+    /// Resolve a syntax node to its inferred `TypeId`.
     ///
     /// Uses the `BodySourceMap` of each body in the file to locate the
     /// containing `Body`; once found, looks up the inferred type in
@@ -723,10 +722,10 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
     /// during merge, so this function would always have seen `None`.
     ///
     /// **Narrowing overlay (M4 Task 6.6).** If the matched expression is
-    /// an [`Expr::Path`], the inferred base [`Ty`] is merged with the
+    /// an [`Expr::Path`], the inferred base `TypeId` is merged with the
     /// narrowing overlay produced by [`HirDatabase::narrow`]: the
     /// block-IN state of the CFG vertex covering the expression supplies
-    /// the narrowed [`Ty`] for that variable. Per ADR-01 Q4, this
+    /// the narrowed `TypeId` for that variable. Per ADR-01 Q4, this
     /// structurally returns:
     /// - the **pre-narrow** type on a guard's own receiver (the receiver
     ///   lives in a Conditional vertex whose IN carries the base overlay
@@ -777,7 +776,7 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
         self.db.unknown()
     }
 
-    /// Resolve a syntax range to the inferred [`Ty`] of the binding declared
+    /// Resolve a syntax range to the inferred `TypeId` of the binding declared
     /// at that range.
     ///
     /// Used by hover/goto on **declaration-site** identifiers where no
@@ -824,7 +823,7 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
     }
 
     /// Resolve `recv.method(...)` to a [`Definition::BuiltinMethodHandle`]
-    /// when the receiver's inferred [`Ty`] yields a platform-method match
+    /// when the receiver's inferred `TypeId` yields a platform-method match
     /// through [`hir_ty::resolve_method`].
     ///
     /// This is the **type-aware** counterpart to

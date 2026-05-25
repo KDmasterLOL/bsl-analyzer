@@ -1,4 +1,4 @@
-//! `Элементы.<имя>` → [`Ty::FormControl`] resolution.
+//! `Элементы.<имя>` → `TypeKind::FormControl` resolution.
 //!
 //! Inside a managed-form module (`Forms/<X>/Ext/Form/Module.bsl`),
 //! `Элементы` is the platform-typed collection of UI controls
@@ -6,7 +6,7 @@
 //! (`Элементы.Переприемка`, `Элементы.Кнопка1`) lands here: we resolve
 //! the name against `Form.xml`'s `<ChildItems>` (captured during XML
 //! parsing as [`bsl_metadata::FormElement`]) and lower the matching
-//! element to a [`Ty::FormControl { kind, binding }`].
+//! element to a `TypeKind::FormControl`.
 //!
 //! `kind` comes from the XML tag taxonomy (Phase 2 wired this through
 //! `bsl_metadata::FormElement::kind`). `binding` carries the resolved
@@ -122,7 +122,7 @@ pub(crate) fn lookup_form_item_field(
     })
 }
 
-/// Lower a single [`FormElement`] to a [`Ty::FormControl`].
+/// Lower a single [`FormElement`] to a `TypeKind::FormControl`.
 ///
 /// Pulls `kind` from the XML-tag taxonomy and resolves the optional
 /// `<DataPath>` binding via [`resolve_data_path`]. A `~`-prefixed path
@@ -189,7 +189,7 @@ fn row_typeid_of_tabular_section_target(
 /// [`crate::platform_property_lookup::lookup_platform_property`], which
 /// resolves un-refined `ТаблицаФормы` properties (`.Видимость`,
 /// `.Заголовок`, `.УсловноеОформление`, …) through the platform table
-/// indirected by [`Ty::platform_type_name`].
+/// indirected by the control's platform-type-name mapping.
 ///
 /// `is_readonly` matches `platform_data.json` for these three
 /// properties — the slot itself is read-only.

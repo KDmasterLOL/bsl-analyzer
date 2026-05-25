@@ -2,7 +2,8 @@
 //!
 //! Unified IDE entry point for asking semantic questions about a type:
 //! "what methods are callable on this?", "what's the type of this
-//! field?", "is this a reference type?". Wraps [`hir_ty::Ty`] and
+//! field?", "is this a reference type?". Wraps the type kernel
+//! (`TypeId` / `TypeKind`) and
 //! plumbs through the M3 adapters — [`hir_ty::lookup_method`],
 //! [`hir_ty::lookup_field`] — plus [`PlatformData`] / [`Configuration`]
 //! enumeration for the list-shaped queries.
@@ -116,7 +117,7 @@ pub struct Field {
 
 /// Semantic type handle with IDE-facing queries.
 ///
-/// Pairs a [`Ty`] with the database + file context so enumerators that
+/// Pairs a `TypeId` with the database + file context so enumerators that
 /// need visible configurations (MDO attribute list) and the platform
 /// index (method list) don't require extra parameters at every call
 /// site.
@@ -195,12 +196,12 @@ impl<'db, DB: ConfigsDatabase + TypeKernelDb> Type<'db, DB> {
     /// ## Narrowing
     ///
     /// The method takes a plain [`Type`] — not a syntax node — so it
-    /// compares whatever [`Ty`] the caller already narrowed. Callers
+    /// compares whatever `TypeId` the caller already narrowed. Callers
     /// that want the narrowed type at a specific expression should
     /// build the [`Type`] from [`Semantics::type_of_expr`], which
     /// already overlays the [`NarrowState`] produced by
     /// [`HirDatabase::narrow`] (Task 6.6). Calling `is_assignable_to`
-    /// on the base (pre-narrow) [`Ty`] is legal but less precise.
+    /// on the base (pre-narrow) `TypeId` is legal but less precise.
     ///
     /// [`Semantics::type_of_expr`]: crate::Semantics::type_of_expr
     /// [`NarrowState`]: hir_ty::narrow::NarrowState

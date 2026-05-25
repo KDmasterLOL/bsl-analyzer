@@ -60,7 +60,6 @@ pub mod sdbl_bridge;
 pub mod subtype;
 pub mod this_object;
 pub mod this_object_attr;
-pub mod ty_bridge;
 
 // Re-export main types for convenience
 pub use bsl_config::VisibleConfig;
@@ -70,7 +69,6 @@ pub use form_items::{is_form_items_collection_ty, FORM_ITEMS_TYPE_EN, FORM_ITEMS
 pub use hir_def::ty::{
     form_control_platform_type_chain, form_control_platform_type_name, form_element_kind_label,
     form_element_kind_sort_band, FormDataKind, FormElementKind, FunctionSignature, MetadataKind,
-    Ty,
 };
 pub use hir_def::type_ref::{BuiltinTypeRef, TypeRef};
 pub use hir_def::ConfigsDatabase;

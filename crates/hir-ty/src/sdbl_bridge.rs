@@ -6,8 +6,8 @@
 //! (Phase 1.3 inference hooks) consume
 //! `query_to_projection` / `package_to_projections` to attach
 //! [`Projection`] payloads to the new
-//! [`Ty::Query`] / [`Ty::QueryResult`] / [`Ty::QueryResultSelection`] /
-//! [`Ty::QueryBatchResult`] variants seeded in Phase 0.
+//! `TypeKind::Query` / `TypeKind::QueryResult` / `TypeKind::QueryResultSelection` /
+//! `TypeKind::QueryBatchResult` variants seeded in Phase 0.
 //!
 //! ## Mapping table
 //!
@@ -182,8 +182,8 @@ fn ref_kind_for(mdo: MdoType) -> Option<MetadataKind> {
 /// the originating `ResolvedTable::fields()` and bridging each named
 /// field's `SdblType` into a `TypeId`. Returns `Some(projection)` when at
 /// least one bridge-able field remains, `None` otherwise — callers
-/// attach a `None` projection to the receiver's [`Ty::QueryResult`] /
-/// [`Ty::QueryResultSelection`] in that case.
+/// attach a `None` projection to the receiver's `TypeKind::QueryResult` /
+/// `TypeKind::QueryResultSelection` in that case.
 ///
 /// Field-name priority for named fields follows
 /// [`sdbl_hir::FieldHir::alias_or_name`]: alias > column name > raw
@@ -352,7 +352,7 @@ fn expand_asterisk(
 /// Result length equals the package's query count (`pkg.queries().len()`).
 /// Indices align with `pkg.queries()` — `result[i]` is the projection of
 /// the `i`-th sub-query in the batch. Phase 3 attaches the result to
-/// [`Ty::QueryBatchResult { per_query: ... }`].
+/// `TypeKind::QueryBatchResult`.
 pub fn package_to_projections(
     db: &dyn TypeKernelDb,
     pkg: &sdbl_hir::SdblPackage,

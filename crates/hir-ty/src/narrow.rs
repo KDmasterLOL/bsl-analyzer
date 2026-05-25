@@ -1136,7 +1136,7 @@ pub fn narrowed_type_at<DB: TypeKernelDb + ?Sized>(
     Some(db.union(arms.to_vec()))
 }
 
-/// Merge the narrowing overlay with the base [`Ty`] for an expression
+/// Merge the narrowing overlay with the base `TypeId` for an expression
 /// lookup (originally lived in `hir::Semantics`).
 ///
 /// Hover/completion through `Semantics::type_of_expr` and the argument-

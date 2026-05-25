@@ -1,4 +1,4 @@
-//! Single source of truth for lowering raw HBK type-strings to [`Ty`].
+//! Single source of truth for lowering raw HBK type-strings to `TypeId`.
 //!
 //! The platform JSON encodes parameter, return, and property types as
 //! free-form strings: `"Число"`, `"Булево, Неопределено"`,

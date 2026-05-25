@@ -375,7 +375,7 @@ fn hover_platform_method_on_token<DB: RootDatabase>(
     hover_for_platform_method(db, &handle, token.text_range())
 }
 
-/// Resolve the inferred [`Ty`] of a single identifier token.
+/// Resolve the inferred `TypeId` of a single identifier token.
 ///
 /// Walks upward only through same-range wrappers (an IdentExpr / EXPR shell
 /// whose `text_range()` equals the token's), stopping as soon as an
@@ -705,7 +705,7 @@ fn hover_for_platform_type<DB: RootDatabase>(
 ///
 /// Shared between [`hover_for_platform_type`] (whose caller already owns the
 /// hover range) and [`ty_info_markup`], which appends this block to
-/// bindings whose inferred [`Ty`] resolves to a platform object.
+/// bindings whose inferred `TypeId` resolves to a platform object.
 fn platform_type_markup<DB: RootDatabase>(db: &DB, type_name: &str) -> Option<String> {
     let input = TypeNameInput::new(db, type_name.to_string());
     let platform_type = platform_type_query(db, input)?;
@@ -739,7 +739,7 @@ fn platform_type_markup<DB: RootDatabase>(db: &DB, type_name: &str) -> Option<St
     Some(markup)
 }
 
-/// Format an inferred [`Ty`] as hover markdown.
+/// Format an inferred `TypeId` as hover markdown.
 ///
 /// - `Ty::Unknown` → `None` (hover stays silent rather than printing a
 ///   useless "Unknown" label).
@@ -756,7 +756,7 @@ fn platform_type_markup<DB: RootDatabase>(db: &DB, type_name: &str) -> Option<St
 ///   projection payload is not yet rendered inline — Phase 1.5+ will
 ///   surface field names from `Projection.fields` when present.
 /// - Anything else → single locale-aware `**Тип:** <label>` line via
-///   [`Ty::display`]. Renders unions, MDO refs, manager refs, and
+///   the kernel display (`bsl_types::display`). Renders unions, MDO refs, manager refs, and
 ///   form-data wrappers richly (`СправочникСсылка.Товары` /
 ///   `CatalogRef.Товары`, `Справочник.Товары` / `Catalog.Товары`,
 ///   `ДанныеФормыСтруктура (ДокументОбъект.ПКО)`).
@@ -796,7 +796,7 @@ fn ty_info_markup<DB: RootDatabase>(db: &DB, id: TypeId, locale: Locale) -> Opti
     Some(format!("**Тип:** {}\n\n", kernel_type_label(db, id, locale, false)))
 }
 
-/// Render the SDBL projection of a [`Ty::QueryResultSelection`] as a
+/// Render the SDBL projection of a `TypeKind::QueryResultSelection` as a
 /// trailing `**Поля:** ...` markup block, or `None` when the receiver
 /// is not projection-typed.
 ///

@@ -364,9 +364,9 @@ fn try_refine_receiver(
 /// Shape of the platform return arm the chain rewrite is looking for.
 ///
 /// `Запрос.Выполнить()` and `РезультатЗапроса.Выбрать()` return a
-/// named [`Ty::PlatformObject`] in the platform data; the rewrite
+/// named `TypeKind::PlatformObject` in the platform data; the rewrite
 /// matches on the bilingual name pair. `Запрос.ВыполнитьПакет()`
-/// returns `Массив` which lowers to the structural [`Ty::Array`]
+/// returns `Массив` which lowers to the structural `TypeKind::Array`
 /// variant, not `PlatformObject("Массив")` — so the matcher needs
 /// both shapes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -613,7 +613,7 @@ fn lookup_scalar_receiver(
     Some(info)
 }
 
-/// Resolve a method on a [`Ty::ObjectManager`] receiver.
+/// Resolve a method on a `TypeKind::ObjectManager` receiver.
 ///
 /// Platform-data indexes managers with composite `type_name`
 /// (`"CatalogManager.<Имя>"`) and placeholder per-method `name`, so the
@@ -644,7 +644,7 @@ fn lookup_on_object_manager(
     })
 }
 
-/// Resolve a method on a [`Ty::MetadataRef`] receiver.
+/// Resolve a method on a `TypeKind::MetadataRef` receiver.
 ///
 /// Three layered dispatch paths in priority order:
 ///
@@ -701,7 +701,7 @@ fn lookup_on_metadata_ref(
     None
 }
 
-/// Resolve a method on a [`Ty::FormControl`] receiver.
+/// Resolve a method on a `TypeKind::FormControl` receiver.
 ///
 /// Walks the platform-type chain `[base, extension?]` in reverse:
 /// kind-specific extension methods (e.g. `<UsualGroup>.Скрыть()` from
@@ -721,7 +721,7 @@ fn lookup_on_form_control(
     })
 }
 
-/// Dispatch method lookup across a [`Ty::Union`] receiver.
+/// Dispatch method lookup across a `TypeKind::Union` receiver.
 ///
 /// `Ty::Union` receivers are the common "happy path + Неопределено"
 /// shape from platform return types (e.g. `Запрос.Выполнить()` →
@@ -1045,8 +1045,9 @@ fn rewrite_row_generic(
     }
 }
 
-/// Promote a bare [`Ty::Array`] return to [`Ty::TypedArray`] of the
-/// matching tabular-section row when the method is one of the
+/// Promote a bare element-less `TypeKind::Array` return to a typed
+/// `TypeKind::Array` (element id set) of the matching tabular-section row
+/// when the method is one of the
 /// row-array-returning kind on a tabular section receiver.
 ///
 /// Companion to [`rewrite_row_generic`]: that one rewrites the scalar

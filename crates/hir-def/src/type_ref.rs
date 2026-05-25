@@ -8,10 +8,10 @@
 //! - XML metadata: `<Type>cfg:CatalogRef.Товары</Type>`
 //! - `ОписаниеТипов("…")` literals
 //!
-//! To turn a `TypeRef` into a semantic [`crate::Ty`] the caller must run
-//! `hir_ty::TyLoweringContext::lower_type_ref` — that adapter consults the
-//! resolver and the workspace configuration to pick between `Ty::MetadataRef`,
-//! `Ty::PlatformObject`, `Ty::ManagerCollection`, and so on.
+//! To turn a `TypeRef` into a semantic `TypeId` the caller must run
+//! `hir_ty::TyLoweringContext::lower_type_ref_id` — that adapter consults the
+//! resolver and the workspace configuration to pick between the
+//! metadata-reference, platform-object, manager-collection, … kernel kinds.
 //!
 //! # Not to be confused with `symbol_info::domain::TypeRef`
 //!
@@ -60,10 +60,10 @@ pub enum TypeRef {
     /// Union of types — from XML `AttributeType::Composite` and JSDoc
     /// `"Число, Строка"` (M3 Task 4 parser).
     ///
-    /// `TyLoweringContext::lower_type_ref` feeds each component through the
-    /// same lowering pipeline and then hands the results to [`crate::Ty::union`],
-    /// which imposes the flatten/dedup/sort invariant. The caller must not
-    /// pre-normalise — the smart constructor owns the shape.
+    /// `TyLoweringContext::lower_type_ref_id` feeds each component through the
+    /// same lowering pipeline and then hands the results to the kernel union
+    /// builder (`db.union`), which imposes the flatten/dedup/sort invariant.
+    /// The caller must not pre-normalise — the smart constructor owns the shape.
     ///
     /// An empty `Vec` is legal: downstream it collapses to `Ty::Unknown`,
     /// matching the old "something stated but empty" behaviour.
@@ -137,8 +137,8 @@ impl TypeRef {
     ///
     /// `Unknown` maps to [`TypeRef::Unknown`]; `Composite` builds a
     /// [`TypeRef::Union`] whose members are each recursively lowered by the
-    /// same bridge, so a composite of composites flattens at the `Ty` layer
-    /// when [`crate::Ty::union`] runs.
+    /// same pipeline, so a composite of composites flattens at the kernel
+    /// layer when the union builder (`db.union`) runs.
     pub fn from_attribute_type(attr: &AttributeType) -> Self {
         match attr {
             AttributeType::String { .. } => TypeRef::Builtin(BuiltinTypeRef::String),

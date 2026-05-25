@@ -7,11 +7,9 @@
 //! any reverse reference would cycle.
 //!
 //! Phase 3 §4.E: the algorithm matches on [`TypeKind`] directly via
-//! `db.lookup_type(id)` rather than on legacy [`hir_def::ty::Ty`].
-//! Callers that still hold raw `Ty` bridge through
-//! [`crate::ty_bridge::ty_to_typeid`] at the call site; the public
-//! entry points take `TypeId`. Structural equality collapses to
-//! `TypeId` equality because interning canonicalises every value.
+//! `db.lookup_type(id)`. The public entry points take `TypeId`.
+//! Structural equality collapses to `TypeId` equality because interning
+//! canonicalises every value.
 
 use bsl_types::intern::TypeKernelDb;
 use bsl_types::kind::{MetadataKind, TypeId, TypeKind};

@@ -89,7 +89,7 @@ pub struct MethodSymbol {
     /// the comment did not state a return type; callers treat this as
     /// `Ty::Unknown` rather than "no return". Consumed by
     /// `hir_ty::method_resolution::materialise_signature` via
-    /// [`hir_ty::TyLoweringContext::lower_type_ref`].
+    /// `hir_ty::TyLoweringContext::lower_type_ref_id`.
     pub return_type_ref: Option<TypeRef>,
 }
 
@@ -162,7 +162,7 @@ pub struct ParamSymbol {
     /// during `SymbolTreeBuilder` construction. `None` when the doc comment
     /// had no matching `Param - Type` line; callers treat this as
     /// `Ty::Unknown` after
-    /// [`hir_ty::TyLoweringContext::lower_type_ref`].
+    /// `hir_ty::TyLoweringContext::lower_type_ref_id`.
     pub type_ref: Option<TypeRef>,
 }
 

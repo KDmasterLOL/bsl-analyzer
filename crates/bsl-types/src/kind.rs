@@ -522,38 +522,6 @@ pub struct ProjectionField {
     pub source: ProjectionFieldSource,
 }
 
-// Deterministic raw-id ordering only (NOT semantic), required while
-// `hir_def::ty::Ty`'s query/table variants embed `Arc<Projection>` and
-// derive `Ord`. Removable once `Ty` is deleted (§4.E.6h) — the kernel
-// orders types by interned `TypeId`, never structurally. Mirrors the
-// transitional form-facet `Ord` in `facet.rs`.
-impl Ord for ProjectionField {
-    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-        self.name
-            .cmp(&other.name)
-            .then_with(|| self.ty.raw().cmp(&other.ty.raw()))
-            .then_with(|| self.source.cmp(&other.source))
-    }
-}
-impl PartialOrd for ProjectionField {
-    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-impl Ord for Projection {
-    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-        self.fields
-            .cmp(&other.fields)
-            .then_with(|| self.origin.cmp(&other.origin))
-            .then_with(|| self.raw_sdbl_types.cmp(&other.raw_sdbl_types))
-    }
-}
-impl PartialOrd for Projection {
-    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
 /// Where a projection came from. Provenance — not part of equality
 /// (canonicalisation strips it before hashing).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

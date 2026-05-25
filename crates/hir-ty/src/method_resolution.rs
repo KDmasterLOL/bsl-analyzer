@@ -344,7 +344,7 @@ fn record_set_kind_to_mdo(kind: hir_def::ty::MetadataKind) -> Option<bsl_metadat
 /// Resolve a 2-shape RecordSetModule method call like
 /// `НЗ = РегистрыСведений.X.СоздатьМенеджерЗаписи(); НЗ.МойМетод()`
 /// where `НЗ` carries
-/// [`Ty::MetadataRef { InformationRegisterRecordManager, .. }`][MetadataRef].
+/// `TypeKind::MetadataRef`.
 ///
 /// Mirrors [`resolve_object_module_call`] but routes the workspace
 /// lookup to [`Resolver::resolve_record_set_module_method`]. The
@@ -354,7 +354,6 @@ fn record_set_kind_to_mdo(kind: hir_def::ty::MetadataKind) -> Option<bsl_metadat
 /// `Err(MethodNotFound)` immediately and the call site's
 /// platform-fallback path takes over.
 ///
-/// [MetadataRef]: hir_def::ty::Ty::MetadataRef
 pub fn resolve_record_set_module_call(
     db: &dyn HirDatabase,
     kind: hir_def::ty::MetadataKind,
@@ -384,7 +383,7 @@ pub fn resolve_record_set_module_call(
 
 /// Resolve a 2-shape ObjectModule method call like
 /// `Об = Справочники.X.СоздатьЭлемент(); Об.МойМетод()` where `Об`
-/// carries [`Ty::MetadataRef { *Object, .. }`][MetadataRef].
+/// carries `TypeKind::MetadataRef`.
 ///
 /// Mirrors [`resolve_aliased_manager_call`] but routes the workspace
 /// lookup to [`Resolver::resolve_object_module_method`]. The strict
@@ -404,7 +403,6 @@ pub fn resolve_record_set_module_call(
 ///   - No `<MDO>/Ext/ObjectModule.bsl` for `(MdoType, name)`.
 ///   - Object module exists but does not contain `method_name`.
 ///
-/// [MetadataRef]: hir_def::ty::Ty::MetadataRef
 pub fn resolve_object_module_call(
     db: &dyn HirDatabase,
     kind: hir_def::ty::MetadataKind,
@@ -434,7 +432,7 @@ pub fn resolve_object_module_call(
 
 /// Resolve a 2-shape aliased manager method call like
 /// `М = Справочники.X; М.МойМетод()` where `М` carries
-/// [`Ty::ObjectManager`].
+/// `TypeKind::ObjectManager`.
 ///
 /// Mirrors [`resolve_three_level_call`]: delegates the workspace
 /// lookup (with the CFE visibility gate and Salsa invalidation) to

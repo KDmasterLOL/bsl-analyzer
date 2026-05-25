@@ -273,7 +273,7 @@ impl SdblType {
 impl SdblType {
     /// Locale-aware human-readable rendering of this query-language type.
     ///
-    /// Mirrors [`hir_def::ty::Ty::display_name`] for the BSL side: lets a
+    /// Mirrors the BSL-side type display: lets a
     /// future SDBL-diagnostic frame substitute Russian or English type
     /// names per `[output] display_language` without re-parsing the
     /// `Display`-formatted output. Today's [`std::fmt::Display`] impl on

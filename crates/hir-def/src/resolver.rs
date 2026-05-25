@@ -706,9 +706,9 @@ impl Resolver {
     }
 
     /// 2-shape variant of [`Self::resolve_three_level_method`]:
-    /// `М = Справочники.X; М.МойМетод()` where `М` carries
-    /// [`crate::ty::Ty::ObjectManager { kind, name }`][ObjectManager] —
-    /// the manager-collection plural has already been consumed by type
+    /// `М = Справочники.X; М.МойМетод()` where `М` carries an
+    /// object-manager type (`TypeKind::ObjectManager`) — the
+    /// manager-collection plural has already been consumed by type
     /// inference, so this entry skips the `MdoType::from_plural` step.
     ///
     /// Otherwise identical to [`Self::resolve_three_level_method`]:
@@ -728,8 +728,6 @@ impl Resolver {
     /// the platform `lookup_method` only when the workspace
     /// authoritatively does *not* know the receiver, and the platform
     /// surface is the legitimate next consult.
-    ///
-    /// [ObjectManager]: crate::ty::Ty::ObjectManager
     pub fn resolve_aliased_manager_method(
         &self,
         db: &dyn ConfigsDatabase,
