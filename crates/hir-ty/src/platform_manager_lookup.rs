@@ -346,18 +346,9 @@ pub(crate) fn map_generic_metadata_return_type(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ty_bridge::typeid_to_ty;
     use bsl_types::builders::Builders;
+    use bsl_types::kind::TypeKind;
     use bsl_types::testing::InMemoryDb;
-    use hir_def::ty::Ty;
-
-    fn ret_ty(db: &InMemoryDb, res: &PlatformMethodResolution) -> Ty {
-        typeid_to_ty(db, res.return_ty)
-    }
-
-    fn params_ty(db: &InMemoryDb, res: &PlatformMethodResolution) -> Vec<Ty> {
-        res.signature.params.iter().map(|id| typeid_to_ty(db, *id)).collect()
-    }
 
     /// §4.C drift-detector: kernel-native accessors mirror return_ty / overloads.
     #[test]
@@ -373,13 +364,8 @@ mod tests {
             return_ty: db.number(None, None),
             overloads: vec![vec![db.string(None, false)]],
         };
-        assert_eq!(typeid_to_ty(&db, res.return_ty), Ty::Number);
-        let overloads_via_ty: Vec<Vec<Ty>> = res
-            .overloads
-            .iter()
-            .map(|row| row.iter().map(|id| typeid_to_ty(&db, *id)).collect())
-            .collect();
-        assert_eq!(overloads_via_ty, vec![vec![Ty::String]]);
+        assert_eq!(res.return_ty, db.number(None, None));
+        assert_eq!(res.overloads, vec![vec![db.string(None, false)]]);
     }
 
     #[test]
@@ -396,10 +382,12 @@ mod tests {
         .expect("platform data indexes CreateItem under CatalogManager");
 
         assert_eq!(
-            ret_ty(&db, &res),
-            Ty::MetadataRef {
-                kind: MetadataKind::CatalogObject, name: Name::new("Номенклатура")
-            }
+            res.return_ty,
+            db.metadata_ref(
+                MetadataKind::CatalogObject,
+                "Номенклатура".to_string(),
+                &RootConfigCtx
+            )
         );
     }
 
@@ -418,8 +406,8 @@ mod tests {
         .expect("platform data indexes FindByCode under CatalogManager");
 
         assert_eq!(
-            ret_ty(&db, &res),
-            Ty::MetadataRef { kind: MetadataKind::CatalogRef, name: Name::new("Валюты") }
+            res.return_ty,
+            db.metadata_ref(MetadataKind::CatalogRef, "Валюты".to_string(), &RootConfigCtx)
         );
     }
 
@@ -443,10 +431,10 @@ mod tests {
         .expect("platform data indexes FindByCode under CatalogManager");
 
         assert_eq!(
-            params_ty(&db, &res).first(),
-            Some(&Ty::union(vec![Ty::Number, Ty::String])),
+            res.signature.params.first(),
+            Some(&db.union(vec![db.number(None, None), db.string(None, false)])),
             "first param of FindByCode must be a Union, not a single PlatformObject; got {:?}",
-            params_ty(&db, &res).first(),
+            res.signature.params.first(),
         );
     }
 
@@ -474,10 +462,10 @@ mod tests {
             &Name::new("CreateItem"),
         )
         .expect("English 'CreateItem' must also resolve to CatalogManager.CreateItem");
-        assert!(matches!(
-            ret_ty(&db, &res),
-            Ty::MetadataRef { kind: MetadataKind::CatalogObject, .. }
-        ));
+        match db.lookup_type(res.return_ty) {
+            TypeKind::MetadataRef(facet) => assert_eq!(facet.kind, MetadataKind::CatalogObject),
+            other => panic!("expected MetadataRef{{CatalogObject}}, got {other:?}"),
+        }
     }
 
     #[test]
@@ -505,7 +493,7 @@ mod tests {
             &Name::new("Записать"),
         )
         .expect("platform data indexes Write under CatalogObject");
-        assert_eq!(ret_ty(&db, &res), Ty::Undefined);
+        assert_eq!(res.return_ty, db.undefined());
     }
 
     #[test]
@@ -525,7 +513,7 @@ mod tests {
         )
         .expect("platform data indexes Write under InformationRegisterRecordManager");
         // `Записать` is a procedure → `Ty::Undefined` return.
-        assert_eq!(ret_ty(&db, &res), Ty::Undefined);
+        assert_eq!(res.return_ty, db.undefined());
     }
 
     #[test]
@@ -546,11 +534,12 @@ mod tests {
         )
         .expect("platform data indexes CreateRecordSet under InformationRegisterManager");
         assert_eq!(
-            ret_ty(&db, &res),
-            Ty::MetadataRef {
-                kind: MetadataKind::InformationRegisterRecordSet,
-                name: Name::new("Курсы"),
-            }
+            res.return_ty,
+            db.metadata_ref(
+                MetadataKind::InformationRegisterRecordSet,
+                "Курсы".to_string(),
+                &RootConfigCtx,
+            )
         );
     }
 
@@ -565,11 +554,12 @@ mod tests {
         )
         .expect("platform data indexes CreateRecordSet under AccumulationRegisterManager");
         assert_eq!(
-            ret_ty(&db, &res),
-            Ty::MetadataRef {
-                kind: MetadataKind::AccumulationRegisterRecordSet,
-                name: Name::new("ПродажиОбороты"),
-            }
+            res.return_ty,
+            db.metadata_ref(
+                MetadataKind::AccumulationRegisterRecordSet,
+                "ПродажиОбороты".to_string(),
+                &RootConfigCtx,
+            )
         );
     }
 
@@ -584,11 +574,12 @@ mod tests {
         )
         .expect("platform data indexes CreateRecordSet under AccountingRegisterManager");
         assert_eq!(
-            ret_ty(&db, &res),
-            Ty::MetadataRef {
-                kind: MetadataKind::AccountingRegisterRecordSet,
-                name: Name::new("Хозрасчетный"),
-            }
+            res.return_ty,
+            db.metadata_ref(
+                MetadataKind::AccountingRegisterRecordSet,
+                "Хозрасчетный".to_string(),
+                &RootConfigCtx,
+            )
         );
     }
 
@@ -603,11 +594,12 @@ mod tests {
         )
         .expect("platform data indexes CreateRecordSet under CalculationRegisterManager");
         assert_eq!(
-            ret_ty(&db, &res),
-            Ty::MetadataRef {
-                kind: MetadataKind::CalculationRegisterRecordSet,
-                name: Name::new("Начисления"),
-            }
+            res.return_ty,
+            db.metadata_ref(
+                MetadataKind::CalculationRegisterRecordSet,
+                "Начисления".to_string(),
+                &RootConfigCtx,
+            )
         );
     }
 
@@ -625,6 +617,6 @@ mod tests {
         )
         .expect("platform data indexes Load under InformationRegisterRecordSet");
         // `Загрузить` is a procedure → `Ty::Undefined` return.
-        assert_eq!(ret_ty(&db, &res), Ty::Undefined);
+        assert_eq!(res.return_ty, db.undefined());
     }
 }

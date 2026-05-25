@@ -338,40 +338,24 @@ fn resolve_data_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bsl_types::facet::TableSource;
     use bsl_types::testing::InMemoryDb;
 
-    use crate::ty_bridge::ty_to_typeid;
-
-    /// Test shim: the kernel-native `lower_form_element` now returns a
-    /// `TypeId`; bridge back to `Ty` so the shape-asserting tests below
-    /// read in the source type language.
-    fn lower_form_element(form: &Form, element: &FormElement, configs: &[VisibleConfig]) -> Ty {
-        let db = InMemoryDb::new();
-        let id = super::lower_form_element(&db, form, element, configs);
-        crate::ty_bridge::typeid_to_ty(&db, id)
+    fn lower_form_element(
+        db: &InMemoryDb,
+        form: &Form,
+        element: &FormElement,
+        configs: &[VisibleConfig],
+    ) -> TypeId {
+        super::lower_form_element(db, form, element, configs)
     }
 
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    struct FieldInfoForTest {
-        name: Name,
-        name_en: Option<Name>,
-        ty: Ty,
-        value_ty: Option<Ty>,
-        is_readonly: bool,
-        origin: FieldOrigin,
-    }
-
-    fn refine_form_control_property(receiver_ty: &Ty, field: &Name) -> Option<FieldInfoForTest> {
-        let db = InMemoryDb::new();
-        let receiver = ty_to_typeid(&db, receiver_ty);
-        super::refine_form_control_property(&db, receiver, field).map(|info| FieldInfoForTest {
-            name: info.name,
-            name_en: info.name_en,
-            ty: crate::ty_bridge::typeid_to_ty(&db, info.ty),
-            value_ty: info.value_ty.map(|ty| crate::ty_bridge::typeid_to_ty(&db, ty)),
-            is_readonly: info.is_readonly,
-            origin: info.origin,
-        })
+    fn refine_form_control_property(
+        db: &InMemoryDb,
+        receiver: TypeId,
+        field: &Name,
+    ) -> Option<FieldInfo> {
+        super::refine_form_control_property(db, receiver, field)
     }
 
     use bsl_metadata::tabular_section::{TabularSection, TabularSectionAttribute};
@@ -379,7 +363,6 @@ mod tests {
         AttributeType, Configuration, Form, FormAttribute, FormElement, FormElementKind, FormType,
         MdoType, MetadataObject,
     };
-    use hir_def::ty::{FormDataKind, Ty};
     use uuid::Uuid;
 
     fn empty_form(name: &str) -> Form {
@@ -418,10 +401,11 @@ mod tests {
     fn lower_form_element_button_with_no_data_path_has_no_binding() {
         let form = empty_form("Ф");
         let element = FormElement::with_kind("Кнопка1", 1, None, FormElementKind::Button, None);
-        let ty = lower_form_element(&form, &element, &[]);
-        match ty {
-            Ty::FormControl { kind, binding } => {
-                assert_eq!(kind, FormElementKind::Button);
+        let db = InMemoryDb::new();
+        let ty = lower_form_element(&db, &form, &element, &[]);
+        match db.lookup_type(ty) {
+            TypeKind::FormControl { kind, binding } => {
+                assert_eq!(*kind, FormElementKind::Button);
                 assert!(binding.is_none(), "no DataPath ⇒ binding=None");
             }
             other => panic!("expected FormControl, got {other:?}"),
@@ -441,9 +425,10 @@ mod tests {
             FormElementKind::Table,
             None,
         );
-        let ty = lower_form_element(&form, &element, &[]);
-        match ty {
-            Ty::FormControl { kind: FormElementKind::Table, binding } => {
+        let db = InMemoryDb::new();
+        let ty = lower_form_element(&db, &form, &element, &[]);
+        match db.lookup_type(ty) {
+            TypeKind::FormControl { kind: FormElementKind::Table, binding } => {
                 assert!(binding.is_none(), "~-prefixed DataPath ⇒ binding=None");
             }
             other => panic!("expected FormControl{{Table,None}}, got {other:?}"),
@@ -462,9 +447,10 @@ mod tests {
             FormElementKind::Field,
             None,
         );
-        let ty = lower_form_element(&form, &element, &[]);
-        match ty {
-            Ty::FormControl { binding, .. } => assert!(binding.is_none()),
+        let db = InMemoryDb::new();
+        let ty = lower_form_element(&db, &form, &element, &[]);
+        match db.lookup_type(ty) {
+            TypeKind::FormControl { binding, .. } => assert!(binding.is_none()),
             other => panic!("expected FormControl, got {other:?}"),
         }
     }
@@ -492,7 +478,7 @@ mod tests {
                 assert_eq!(b.path[0].as_str(), "Замечание");
                 match &b.target {
                     FormBindingTargetFacet::Attribute { ty } => {
-                        assert_eq!(crate::ty_bridge::typeid_to_ty(&db, *ty), Ty::String)
+                        assert_eq!(*ty, db.string(None, false))
                     }
                     other => panic!("expected Attribute{{String}}, got {other:?}"),
                 }
@@ -572,8 +558,9 @@ mod tests {
             FormElementKind::Other,
         ] {
             let element = FormElement::with_kind("X", 1, None, k, None);
-            match lower_form_element(&form, &element, &[]) {
-                Ty::FormControl { kind, binding: None } => assert_eq!(kind, k),
+            let db = InMemoryDb::new();
+            match db.lookup_type(lower_form_element(&db, &form, &element, &[])) {
+                TypeKind::FormControl { kind, binding: None } => assert_eq!(*kind, k),
                 other => panic!("expected FormControl{{kind={k:?},None}}, got {other:?}"),
             }
         }
@@ -621,19 +608,26 @@ mod tests {
         // Headline Phase 5 case: refined `.ВыделенныеСтроки` overrides
         // the platform's bare `Массив` with `TypedArray(row_ty)` so
         // iteration / `.Количество()` / indexing all carry the row Ty.
-        let receiver = Ty::FormControl {
-            kind: FormElementKind::Table,
-            binding: Some(binding_to(MdoType::Document, "ПКО", "Переприемка")),
-        };
-        let info = refine_form_control_property(&receiver, &Name::new("ВыделенныеСтроки"))
+        let db = InMemoryDb::new();
+        let receiver = db.mk_form_control(
+            FormElementKind::Table,
+            Some(binding_to(MdoType::Document, "ПКО", "Переприемка")),
+        );
+        let info = refine_form_control_property(&db, receiver, &Name::new("ВыделенныеСтроки"))
             .expect("refined property");
-        match info.ty {
-            Ty::TypedArray(elem) => match *elem {
-                Ty::MetadataRef {
-                    kind: MetadataKind::TabularSectionRow { parent: MdoType::Document },
-                    name,
-                } => assert_eq!(name.as_str(), "ПКО.Переприемка"),
-                other => panic!("expected row Ty inside TypedArray, got {other:?}"),
+        match db.lookup_type(info.ty) {
+            TypeKind::Array(facet) => match facet.element {
+                Some(elem) => match db.lookup_type(elem) {
+                    TypeKind::MetadataRef(facet) => {
+                        assert_eq!(
+                            facet.kind,
+                            MetadataKind::TabularSectionRow { parent: MdoType::Document }
+                        );
+                        assert_eq!(facet.name.as_str(), "ПКО.Переприемка");
+                    }
+                    other => panic!("expected row MetadataRef inside TypedArray, got {other:?}"),
+                },
+                None => panic!("expected typed Array(row), got untyped Array"),
             },
             other => panic!("expected TypedArray(row), got {other:?}"),
         }
@@ -644,17 +638,21 @@ mod tests {
 
     #[test]
     fn refine_current_row_returns_row_ty() {
-        let receiver = Ty::FormControl {
-            kind: FormElementKind::Table,
-            binding: Some(binding_to(MdoType::Catalog, "Номенклатура", "ЕдиницыИзмерения")),
-        };
-        let info = refine_form_control_property(&receiver, &Name::new("ТекущаяСтрока"))
+        let db = InMemoryDb::new();
+        let receiver = db.mk_form_control(
+            FormElementKind::Table,
+            Some(binding_to(MdoType::Catalog, "Номенклатура", "ЕдиницыИзмерения")),
+        );
+        let info = refine_form_control_property(&db, receiver, &Name::new("ТекущаяСтрока"))
             .expect("refined ТекущаяСтрока");
-        match info.ty {
-            Ty::MetadataRef {
-                kind: MetadataKind::TabularSectionRow { parent: MdoType::Catalog },
-                name,
-            } => assert_eq!(name.as_str(), "Номенклатура.ЕдиницыИзмерения"),
+        match db.lookup_type(info.ty) {
+            TypeKind::MetadataRef(facet) => {
+                assert_eq!(
+                    facet.kind,
+                    MetadataKind::TabularSectionRow { parent: MdoType::Catalog }
+                );
+                assert_eq!(facet.name.as_str(), "Номенклатура.ЕдиницыИзмерения");
+            }
             other => panic!("expected row Ty, got {other:?}"),
         }
         assert_eq!(info.name_en.as_ref().unwrap().as_str(), "CurrentRow");
@@ -662,28 +660,31 @@ mod tests {
 
     #[test]
     fn refine_current_data_returns_row_ty() {
-        let receiver = Ty::FormControl {
-            kind: FormElementKind::Table,
-            binding: Some(binding_to(MdoType::Document, "ПКО", "Переприемка")),
-        };
-        let info = refine_form_control_property(&receiver, &Name::new("ТекущиеДанные"))
+        let db = InMemoryDb::new();
+        let receiver = db.mk_form_control(
+            FormElementKind::Table,
+            Some(binding_to(MdoType::Document, "ПКО", "Переприемка")),
+        );
+        let info = refine_form_control_property(&db, receiver, &Name::new("ТекущиеДанные"))
             .expect("refined ТекущиеДанные");
         assert!(matches!(
-            info.ty,
-            Ty::MetadataRef { kind: MetadataKind::TabularSectionRow { .. }, .. }
+            db.lookup_type(info.ty),
+            TypeKind::MetadataRef(facet)
+                if matches!(facet.kind, MetadataKind::TabularSectionRow { .. })
         ));
         assert_eq!(info.name_en.as_ref().unwrap().as_str(), "CurrentData");
     }
 
     #[test]
     fn refine_recognises_english_aliases() {
-        let receiver = Ty::FormControl {
-            kind: FormElementKind::Table,
-            binding: Some(binding_to(MdoType::Document, "ПКО", "Переприемка")),
-        };
+        let db = InMemoryDb::new();
+        let receiver = db.mk_form_control(
+            FormElementKind::Table,
+            Some(binding_to(MdoType::Document, "ПКО", "Переприемка")),
+        );
         for english in ["SelectedRows", "CurrentRow", "CurrentData"] {
             assert!(
-                refine_form_control_property(&receiver, &Name::new(english)).is_some(),
+                refine_form_control_property(&db, receiver, &Name::new(english)).is_some(),
                 "{english} must resolve via English alias"
             );
         }
@@ -693,14 +694,15 @@ mod tests {
     fn refine_is_case_insensitive_cyrillic() {
         // Regression: the field name comparator must fold Cyrillic
         // case (mirrors the Phase 4 receiver fix).
-        let receiver = Ty::FormControl {
-            kind: FormElementKind::Table,
-            binding: Some(binding_to(MdoType::Document, "ПКО", "Переприемка")),
-        };
+        let db = InMemoryDb::new();
+        let receiver = db.mk_form_control(
+            FormElementKind::Table,
+            Some(binding_to(MdoType::Document, "ПКО", "Переприемка")),
+        );
         for spelling in ["ВЫДЕЛЕННЫЕСТРОКИ", "выделенныестроки", "вЫдЕлЕнНыЕсТрОкИ"]
         {
             assert!(
-                refine_form_control_property(&receiver, &Name::new(spelling)).is_some(),
+                refine_form_control_property(&db, receiver, &Name::new(spelling)).is_some(),
                 "spelling {spelling:?} must resolve"
             );
         }
@@ -712,13 +714,14 @@ mod tests {
         // through to the platform-property adapter (handled by
         // `field_lookup::lookup_field`'s catch-all). Refinement must
         // not steal them.
-        let receiver = Ty::FormControl {
-            kind: FormElementKind::Table,
-            binding: Some(binding_to(MdoType::Document, "ПКО", "Переприемка")),
-        };
-        assert!(refine_form_control_property(&receiver, &Name::new("Видимость")).is_none());
-        assert!(refine_form_control_property(&receiver, &Name::new("Заголовок")).is_none());
-        assert!(refine_form_control_property(&receiver, &Name::new("ШтрихКод")).is_none());
+        let db = InMemoryDb::new();
+        let receiver = db.mk_form_control(
+            FormElementKind::Table,
+            Some(binding_to(MdoType::Document, "ПКО", "Переприемка")),
+        );
+        assert!(refine_form_control_property(&db, receiver, &Name::new("Видимость")).is_none());
+        assert!(refine_form_control_property(&db, receiver, &Name::new("Заголовок")).is_none());
+        assert!(refine_form_control_property(&db, receiver, &Name::new("ШтрихКод")).is_none());
     }
 
     #[test]
@@ -738,12 +741,12 @@ mod tests {
             FormElementKind::Addition,
             FormElementKind::Other,
         ] {
-            let receiver = Ty::FormControl {
-                kind,
-                binding: Some(binding_to(MdoType::Document, "ПКО", "Переприемка")),
-            };
+            let db = InMemoryDb::new();
+            let receiver =
+                db.mk_form_control(kind, Some(binding_to(MdoType::Document, "ПКО", "Переприемка")));
             assert!(
-                refine_form_control_property(&receiver, &Name::new("ВыделенныеСтроки")).is_none(),
+                refine_form_control_property(&db, receiver, &Name::new("ВыделенныеСтроки"))
+                    .is_none(),
                 "kind {kind:?} must not refine .ВыделенныеСтроки"
             );
         }
@@ -753,8 +756,11 @@ mod tests {
     fn refine_returns_none_when_binding_absent() {
         // No DataPath ⇒ no row schema ⇒ refinement degrades to platform
         // fallback (which keeps the bare `Массив`).
-        let receiver = Ty::FormControl { kind: FormElementKind::Table, binding: None };
-        assert!(refine_form_control_property(&receiver, &Name::new("ВыделенныеСтроки")).is_none());
+        let db = InMemoryDb::new();
+        let receiver = db.mk_form_control(FormElementKind::Table, None);
+        assert!(
+            refine_form_control_property(&db, receiver, &Name::new("ВыделенныеСтроки")).is_none()
+        );
     }
 
     /// Regression for the Codex Phase 5 review finding: `is_readonly`
@@ -766,29 +772,30 @@ mod tests {
     /// is writable.
     #[test]
     fn refine_is_readonly_matches_platform_per_property() {
-        let receiver = Ty::FormControl {
-            kind: FormElementKind::Table,
-            binding: Some(binding_to(MdoType::Document, "ПКО", "Переприемка")),
-        };
+        let db = InMemoryDb::new();
+        let receiver = db.mk_form_control(
+            FormElementKind::Table,
+            Some(binding_to(MdoType::Document, "ПКО", "Переприемка")),
+        );
         let selected =
-            refine_form_control_property(&receiver, &Name::new("ВыделенныеСтроки")).unwrap();
+            refine_form_control_property(&db, receiver, &Name::new("ВыделенныеСтроки")).unwrap();
         assert!(selected.is_readonly, "ВыделенныеСтроки is platform-readonly");
         let selected_en =
-            refine_form_control_property(&receiver, &Name::new("SelectedRows")).unwrap();
+            refine_form_control_property(&db, receiver, &Name::new("SelectedRows")).unwrap();
         assert!(selected_en.is_readonly);
 
         let current_data =
-            refine_form_control_property(&receiver, &Name::new("ТекущиеДанные")).unwrap();
+            refine_form_control_property(&db, receiver, &Name::new("ТекущиеДанные")).unwrap();
         assert!(current_data.is_readonly, "ТекущиеДанные is platform-readonly");
         let current_data_en =
-            refine_form_control_property(&receiver, &Name::new("CurrentData")).unwrap();
+            refine_form_control_property(&db, receiver, &Name::new("CurrentData")).unwrap();
         assert!(current_data_en.is_readonly);
 
         let current_row =
-            refine_form_control_property(&receiver, &Name::new("ТекущаяСтрока")).unwrap();
+            refine_form_control_property(&db, receiver, &Name::new("ТекущаяСтрока")).unwrap();
         assert!(!current_row.is_readonly, "ТекущаяСтрока is writable per platform_data");
         let current_row_en =
-            refine_form_control_property(&receiver, &Name::new("CurrentRow")).unwrap();
+            refine_form_control_property(&db, receiver, &Name::new("CurrentRow")).unwrap();
         assert!(!current_row_en.is_readonly);
     }
 
@@ -800,7 +807,7 @@ mod tests {
         // refinement must NOT fire on Attribute targets — the row Ty
         // would be wrong.
         let db = InMemoryDb::new();
-        let attr_ty = ty_to_typeid(&db, &Ty::ValueTable { projection: None });
+        let attr_ty = db.value_table(None, TableSource::Unknown);
         let attr_binding = FormBindingFacet::new(
             Arc::from(["ТабличнаяЧасть".to_string()]),
             FormBindingTargetFacet::Attribute { ty: attr_ty },
@@ -843,13 +850,13 @@ mod tests {
                 assert_eq!(b.path.len(), 1);
                 match &b.target {
                     FormBindingTargetFacet::Attribute { ty: inner } => {
-                        match crate::ty_bridge::typeid_to_ty(&db, *inner) {
-                            Ty::FormData {
-                                kind: FormDataKind::Structure,
-                                underlying: Some((mdo, name)),
+                        match db.lookup_type(*inner) {
+                            TypeKind::FormData {
+                                kind: FormDataFacet::Structure,
+                                underlying: Some(mdo_ref),
                             } => {
-                                assert_eq!(mdo, MdoType::Document);
-                                assert_eq!(name.as_str(), "ПКО");
+                                assert_eq!(mdo_ref.mdo_type, MdoType::Document);
+                                assert_eq!(mdo_ref.name.as_str(), "ПКО");
                             }
                             other => panic!("expected FormData{{Structure}}, got {other:?}"),
                         }

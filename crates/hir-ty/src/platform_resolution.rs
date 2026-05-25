@@ -372,9 +372,7 @@ fn lookup_prefixed(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ty_bridge::{ty_to_typeid, typeid_to_ty};
-    use bsl_types::testing::InMemoryDb;
-    use hir_def::ty::Ty;
+    use bsl_types::testing::{InMemoryDb, RootConfigCtx};
 
     // Minimal Salsa database for unit tests in this crate. Mirrors
     // `bsl_platform::db::tests::TestDatabase` and avoids pulling
@@ -391,16 +389,12 @@ mod tests {
         TestDatabase::default()
     }
 
-    // The receiver `Ty` is interned into `kdb` (same kernel db the
-    // resolver looks up against), so the returned `TypeId`s decode back
-    // through `kdb` in assertions.
     fn resolve_for_test(
         db: &TestDatabase,
         kdb: &InMemoryDb,
-        receiver_ty: &Ty,
+        receiver: TypeId,
         method_name: &Name,
     ) -> Option<ResolvedPlatformMethod> {
-        let receiver = ty_to_typeid(kdb, receiver_ty);
         resolve_method_inner(db, kdb, receiver, method_name)
     }
 
@@ -408,11 +402,12 @@ mod tests {
     fn metadata_ref_record_set_resolves_with_prefixed_handle() {
         let db = db();
         let kdb = InMemoryDb::new();
-        let ty = Ty::MetadataRef {
-            kind: MetadataKind::InformationRegisterRecordSet,
-            name: Name::new("Курсы"),
-        };
-        let res = resolve_for_test(&db, &kdb, &ty, &Name::new("Прочитать"));
+        let receiver = kdb.metadata_ref(
+            MetadataKind::InformationRegisterRecordSet,
+            "Курсы".to_string(),
+            &RootConfigCtx,
+        );
+        let res = resolve_for_test(&db, &kdb, receiver, &Name::new("Прочитать"));
         let Some(res) = res else {
             // Skip when running without platform data (CI without HBK).
             println!("Skipping: no platform data available");
@@ -430,7 +425,7 @@ mod tests {
             }
         }
         // `Прочитать()` is a procedure → return is `Undefined`.
-        assert_eq!(typeid_to_ty(&kdb, res.return_ty), Ty::Undefined);
+        assert_eq!(res.return_ty, kdb.undefined());
     }
 
     #[test]
@@ -439,11 +434,12 @@ mod tests {
         // composite prefix; resolve_method must reach the scalar fallback.
         let db = db();
         let kdb = InMemoryDb::new();
-        let ty = Ty::MetadataRef {
-            kind: MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
-            name: Name::new("Курсы"),
-        };
-        let res = resolve_for_test(&db, &kdb, &ty, &Name::new("Сбросить"));
+        let receiver = kdb.metadata_ref(
+            MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
+            "Курсы".to_string(),
+            &RootConfigCtx,
+        );
+        let res = resolve_for_test(&db, &kdb, receiver, &Name::new("Сбросить"));
         let Some(res) = res else {
             println!("Skipping: no platform data available");
             return;
@@ -487,11 +483,12 @@ mod tests {
     fn unknown_method_returns_none_not_panic() {
         let db = db();
         let kdb = InMemoryDb::new();
-        let ty = Ty::MetadataRef {
-            kind: MetadataKind::InformationRegisterRecordSet,
-            name: Name::new("Курсы"),
-        };
-        let res = resolve_for_test(&db, &kdb, &ty, &Name::new("НесуществующийМетод"));
+        let receiver = kdb.metadata_ref(
+            MetadataKind::InformationRegisterRecordSet,
+            "Курсы".to_string(),
+            &RootConfigCtx,
+        );
+        let res = resolve_for_test(&db, &kdb, receiver, &Name::new("НесуществующийМетод"));
         assert!(res.is_none());
     }
 
@@ -501,12 +498,13 @@ mod tests {
         // must find the same method as the Russian (`Прочитать`).
         let db = db();
         let kdb = InMemoryDb::new();
-        let ty = Ty::MetadataRef {
-            kind: MetadataKind::InformationRegisterRecordSet,
-            name: Name::new("Курсы"),
-        };
-        let ru = resolve_for_test(&db, &kdb, &ty, &Name::new("Прочитать"));
-        let en = resolve_for_test(&db, &kdb, &ty, &Name::new("Read"));
+        let receiver = kdb.metadata_ref(
+            MetadataKind::InformationRegisterRecordSet,
+            "Курсы".to_string(),
+            &RootConfigCtx,
+        );
+        let ru = resolve_for_test(&db, &kdb, receiver, &Name::new("Прочитать"));
+        let en = resolve_for_test(&db, &kdb, receiver, &Name::new("Read"));
         match (ru, en) {
             (Some(r), Some(e)) => assert_eq!(r.handle.method_id, e.handle.method_id),
             (None, None) => println!("Skipping: no platform data available"),
@@ -528,9 +526,9 @@ mod tests {
         // surfaces here.
         let db = db();
         let kdb = InMemoryDb::new();
-        let ty =
-            Ty::ObjectManager { kind: MdoType::InformationRegister, name: Name::new("Курсы") };
-        let res = resolve_for_test(&db, &kdb, &ty, &Name::new("Получить"));
+        let receiver =
+            kdb.object_manager(MdoType::InformationRegister, "Курсы".to_string(), &RootConfigCtx);
+        let res = resolve_for_test(&db, &kdb, receiver, &Name::new("Получить"));
         let Some(res) = res else {
             println!("Skipping: no platform data available");
             return;
@@ -554,10 +552,9 @@ mod tests {
         // arm.
         let db = db();
         let kdb = InMemoryDb::new();
-        let ty = Ty::ObjectManager {
-            kind: MdoType::Catalog, name: Name::new("Номенклатура")
-        };
-        let res = resolve_for_test(&db, &kdb, &ty, &Name::new("СоздатьЭлемент"));
+        let receiver =
+            kdb.object_manager(MdoType::Catalog, "Номенклатура".to_string(), &RootConfigCtx);
+        let res = resolve_for_test(&db, &kdb, receiver, &Name::new("СоздатьЭлемент"));
         let Some(res) = res else {
             println!("Skipping: no platform data available");
             return;
@@ -576,10 +573,12 @@ mod tests {
         // generic-return rebinding (build_resolution) must produce a
         // concrete `Ty::MetadataRef { CatalogObject, "Номенклатура" }`.
         assert_eq!(
-            typeid_to_ty(&kdb, res.return_ty),
-            Ty::MetadataRef {
-                kind: MetadataKind::CatalogObject, name: Name::new("Номенклатура")
-            }
+            res.return_ty,
+            kdb.metadata_ref(
+                MetadataKind::CatalogObject,
+                "Номенклатура".to_string(),
+                &RootConfigCtx,
+            )
         );
     }
 
@@ -594,10 +593,10 @@ mod tests {
         // `Ty::Union([QueryResult, Undefined])`.
         let db = db();
         let kdb = InMemoryDb::new();
-        let happy = Ty::PlatformObject(Name::new("РезультатЗапроса"));
-        let union = Ty::union(vec![happy.clone(), Ty::Undefined]);
-        let direct = resolve_for_test(&db, &kdb, &happy, &Name::new("Выгрузить"));
-        let through_union = resolve_for_test(&db, &kdb, &union, &Name::new("Выгрузить"));
+        let happy = kdb.platform_object("РезультатЗапроса".to_string());
+        let union = kdb.union(vec![happy, kdb.undefined()]);
+        let direct = resolve_for_test(&db, &kdb, happy, &Name::new("Выгрузить"));
+        let through_union = resolve_for_test(&db, &kdb, union, &Name::new("Выгрузить"));
         match (direct, through_union) {
             (Some(direct_res), Some(union_res)) => {
                 // First-branch handle: same id and origin.
@@ -621,17 +620,17 @@ mod tests {
         // stripping (no instance methods on Undefined / Null).
         let db = db();
         let kdb = InMemoryDb::new();
-        let dead = Ty::union(vec![Ty::Undefined, Ty::Null]);
-        let res = resolve_for_test(&db, &kdb, &dead, &Name::new("ЛюбоеИмя"));
+        let dead = kdb.union(vec![kdb.undefined(), kdb.null()]);
+        let res = resolve_for_test(&db, &kdb, dead, &Name::new("ЛюбоеИмя"));
         assert!(res.is_none());
     }
 
     #[test]
     fn into_method_info_drops_handle() {
         let db = InMemoryDb::new();
-        let return_ty = ty_to_typeid(&db, &Ty::Number);
-        let params = vec![ty_to_typeid(&db, &Ty::String)];
-        let overloads = vec![vec![ty_to_typeid(&db, &Ty::Boolean)]];
+        let return_ty = db.number(None, None);
+        let params = vec![db.string(None, false)];
+        let overloads = vec![vec![db.boolean()]];
         let res = ResolvedPlatformMethod {
             handle: PlatformMethodHandle {
                 method_id: 1,

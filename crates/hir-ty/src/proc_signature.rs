@@ -189,18 +189,9 @@ fn lower_return_from_docs(db: &dyn TypeKernelDb, docs: &MethodDocs) -> Option<Ty
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ty_bridge::typeid_to_ty;
     use bsl_types::testing::InMemoryDb;
     use hir_def::docs::TypeDoc;
-    use hir_def::ty::Ty;
     use hir_def::{Body, ExprId, IdConversion, Stmt};
-
-    /// Bridge interned param ids back to `Ty` for readable assertions. The
-    /// minting is byte-exact with the legacy `Ty` path (§4.A.2 drift tests),
-    /// so the round-trip is lossless for these primitive/union cases.
-    fn as_ty(db: &InMemoryDb, ids: &[TypeId]) -> Vec<Ty> {
-        ids.iter().map(|id| typeid_to_ty(db, *id)).collect()
-    }
 
     fn typedoc(name: &str) -> TypeDoc {
         TypeDoc::simple(name.to_string(), None)
@@ -242,7 +233,7 @@ mod tests {
         let db = InMemoryDb::new();
         let d = docs(vec![param_doc("А", vec![typedoc("Число")])], Vec::new());
         let params = lower_params(&db, &[decl_param("А"), decl_param("Б")], Some(&d));
-        assert_eq!(as_ty(&db, &params), vec![Ty::Number, Ty::Unknown]);
+        assert_eq!(params, vec![db.number(None, None), db.unknown()]);
     }
 
     #[test]
@@ -253,7 +244,7 @@ mod tests {
             Vec::new(),
         );
         let params = lower_params(&db, &[decl_param("А"), decl_param("Б")], Some(&d));
-        assert_eq!(as_ty(&db, &params), vec![Ty::Number, Ty::String]);
+        assert_eq!(params, vec![db.number(None, None), db.string(None, false)]);
     }
 
     #[test]
@@ -262,14 +253,14 @@ mod tests {
         let db = InMemoryDb::new();
         let d = docs(vec![param_doc("ПАРАМЕТР", vec![typedoc("Число")])], Vec::new());
         let params = lower_params(&db, &[decl_param("параметр")], Some(&d));
-        assert_eq!(as_ty(&db, &params), vec![Ty::Number]);
+        assert_eq!(params, vec![db.number(None, None)]);
     }
 
     #[test]
     fn no_docs_at_all_keeps_every_slot_unknown() {
         let db = InMemoryDb::new();
         let params = lower_params(&db, &[decl_param("А"), decl_param("Б")], None);
-        assert_eq!(as_ty(&db, &params), vec![Ty::Unknown, Ty::Unknown]);
+        assert_eq!(params, vec![db.unknown(), db.unknown()]);
     }
 
     #[test]
@@ -278,7 +269,7 @@ mod tests {
         let db = InMemoryDb::new();
         let d = docs(vec![param_doc("X", vec![typedoc("СтрокаТабличнойЧасти")])], Vec::new());
         let params = lower_params(&db, &[decl_param("X")], Some(&d));
-        assert_eq!(as_ty(&db, &params), vec![Ty::Unknown]);
+        assert_eq!(params, vec![db.unknown()]);
     }
 
     #[test]
@@ -286,15 +277,15 @@ mod tests {
         let db = InMemoryDb::new();
         let d = docs(vec![param_doc("X", vec![typedoc("Число"), typedoc("Строка")])], Vec::new());
         let params = lower_params(&db, &[decl_param("X")], Some(&d));
-        assert_eq!(as_ty(&db, &params), vec![Ty::union(vec![Ty::Number, Ty::String])]);
+        assert_eq!(params, vec![db.union(vec![db.number(None, None), db.string(None, false)])]);
     }
 
     #[test]
     fn return_section_lowers_through_return_pipeline() {
         let db = InMemoryDb::new();
         let d = docs(Vec::new(), vec![typedoc("Булево"), typedoc("Неопределено")]);
-        let ret = lower_return_from_docs(&db, &d).map(|id| typeid_to_ty(&db, id));
-        assert_eq!(ret, Some(Ty::union(vec![Ty::Boolean, Ty::Undefined])));
+        let ret = lower_return_from_docs(&db, &d);
+        assert_eq!(ret, Some(db.union(vec![db.boolean(), db.undefined()])));
     }
 
     #[test]
@@ -305,8 +296,8 @@ mod tests {
         // body inference.
         let db = InMemoryDb::new();
         let d = docs(Vec::new(), vec![typedoc("Произвольный"), typedoc("Неопределено")]);
-        let ret = lower_return_from_docs(&db, &d).map(|id| typeid_to_ty(&db, id));
-        assert_eq!(ret, Some(Ty::Unknown));
+        let ret = lower_return_from_docs(&db, &d);
+        assert_eq!(ret, Some(db.unknown()));
     }
 
     #[test]

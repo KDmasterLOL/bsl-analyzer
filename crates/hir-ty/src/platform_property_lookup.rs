@@ -168,35 +168,34 @@ fn map_property_type_list(db: &dyn TypeKernelDb, types: &[smol_str::SmolStr]) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ty_bridge::{ty_to_typeid, typeid_to_ty};
-    use bsl_types::testing::InMemoryDb;
-    use hir_def::ty::Ty;
+    use bsl_metadata::MdoType;
+    use bsl_types::facet::DateComponent;
+    use bsl_types::kind::MetadataKind;
+    use bsl_types::testing::{InMemoryDb, RootConfigCtx};
 
-    /// Test shim: build a readable `Ty` receiver, intern it, run the
-    /// kernel-native lookup, and bridge the result back to `Ty` so the
-    /// assertions below read in the source type language.
     struct ResolvedForTest {
-        return_ty: Ty,
+        return_ty: TypeId,
         is_readonly: bool,
     }
 
-    fn lookup_platform_property(receiver: &Ty, prop_name: &Name) -> Option<ResolvedForTest> {
-        let db = InMemoryDb::new();
-        let receiver_id = ty_to_typeid(&db, receiver);
-        super::lookup_platform_property(&db, receiver_id, prop_name).map(|res| ResolvedForTest {
-            return_ty: typeid_to_ty(&db, res.return_ty),
-            is_readonly: res.is_readonly,
-        })
+    fn lookup_platform_property(
+        db: &InMemoryDb,
+        receiver: TypeId,
+        prop_name: &Name,
+    ) -> Option<ResolvedForTest> {
+        super::lookup_platform_property(db, receiver, prop_name)
+            .map(|res| ResolvedForTest { return_ty: res.return_ty, is_readonly: res.is_readonly })
     }
 
     #[test]
     fn query_text_resolves_to_string_writable() {
         // `Запрос.Текст` is the canonical scalar read-write property —
         // platform property_types = ["Строка"], is_readonly = false.
-        let receiver = Ty::PlatformObject(Name::new("Запрос"));
-        let res = lookup_platform_property(&receiver, &Name::new("Текст"))
+        let db = InMemoryDb::new();
+        let receiver = db.platform_object("Запрос".to_string());
+        let res = lookup_platform_property(&db, receiver, &Name::new("Текст"))
             .expect("Query.Текст must resolve through platform property data");
-        assert_eq!(res.return_ty, Ty::String);
+        assert_eq!(res.return_ty, db.string(None, false));
         assert!(!res.is_readonly);
     }
 
@@ -205,10 +204,11 @@ mod tests {
         // The headline user scenario — `Запрос.Параметры` must come back as
         // `Ty::Structure` so the chained `.Вставить` lookup in method_lookup
         // can find `Структура.Вставить`. Platform flag: read-only.
-        let receiver = Ty::PlatformObject(Name::new("Запрос"));
-        let res = lookup_platform_property(&receiver, &Name::new("Параметры"))
+        let db = InMemoryDb::new();
+        let receiver = db.platform_object("Запрос".to_string());
+        let res = lookup_platform_property(&db, receiver, &Name::new("Параметры"))
             .expect("Query.Параметры must resolve");
-        assert_eq!(res.return_ty, Ty::Structure);
+        assert_eq!(res.return_ty, db.structure(None));
         assert!(res.is_readonly);
     }
 
@@ -218,14 +218,15 @@ mod tests {
         // `МенеджерВременныхТаблиц, Неопределено`; the mapper must produce
         // `Ty::Union(...)` with both members rather than a stringly-typed
         // `PlatformObject("…, Неопределено")`.
-        let receiver = Ty::PlatformObject(Name::new("Запрос"));
-        let res = lookup_platform_property(&receiver, &Name::new("МенеджерВременныхТаблиц"))
+        let db = InMemoryDb::new();
+        let receiver = db.platform_object("Запрос".to_string());
+        let res = lookup_platform_property(&db, receiver, &Name::new("МенеджерВременныхТаблиц"))
             .expect("Query.МенеджерВременныхТаблиц must resolve");
-        match res.return_ty {
-            Ty::Union(members) => {
+        match db.lookup_type(res.return_ty) {
+            TypeKind::Union(members) => {
                 assert_eq!(members.len(), 2);
             }
-            other => panic!("Expected Ty::Union for TempTablesManager, got {other:?}"),
+            other => panic!("Expected TypeKind::Union for TempTablesManager, got {other:?}"),
         }
         assert!(!res.is_readonly);
     }
@@ -234,17 +235,21 @@ mod tests {
     fn bilingual_english_property_name_resolves() {
         // Bilingual keying — `Query.Parameters` (English on both sides) must
         // hit the same property row as `Запрос.Параметры`.
-        let receiver = Ty::PlatformObject(Name::new("Query"));
-        let res = lookup_platform_property(&receiver, &Name::new("Parameters"))
+        let db = InMemoryDb::new();
+        let receiver = db.platform_object("Query".to_string());
+        let res = lookup_platform_property(&db, receiver, &Name::new("Parameters"))
             .expect("Query.Parameters must resolve via bilingual index");
-        assert_eq!(res.return_ty, Ty::Structure);
+        assert_eq!(res.return_ty, db.structure(None));
         assert!(res.is_readonly);
     }
 
     #[test]
     fn unknown_property_returns_none() {
-        let receiver = Ty::PlatformObject(Name::new("Запрос"));
-        assert!(lookup_platform_property(&receiver, &Name::new("ЗаведомоНесуществующее")).is_none());
+        let db = InMemoryDb::new();
+        let receiver = db.platform_object("Запрос".to_string());
+        assert!(
+            lookup_platform_property(&db, receiver, &Name::new("ЗаведомоНесуществующее")).is_none()
+        );
     }
 
     #[test]
@@ -253,17 +258,16 @@ mod tests {
         // adapters. The dispatcher in `field_lookup` routes them there
         // before ever calling us, but as defense-in-depth the adapter
         // itself must also say "not my receiver".
-        let mdo = Ty::MetadataRef {
-            kind: hir_def::ty::MetadataKind::CatalogObject,
-            name: Name::new("Номенклатура"),
-        };
-        assert!(lookup_platform_property(&mdo, &Name::new("Код")).is_none());
+        let db = InMemoryDb::new();
+        let mdo = db.metadata_ref(
+            MetadataKind::CatalogObject,
+            "Номенклатура".to_string(),
+            &RootConfigCtx,
+        );
+        assert!(lookup_platform_property(&db, mdo, &Name::new("Код")).is_none());
 
-        let mgr = Ty::ObjectManager {
-            kind: bsl_metadata::MdoType::Catalog,
-            name: Name::new("Валюты"),
-        };
-        assert!(lookup_platform_property(&mgr, &Name::new("Любой")).is_none());
+        let mgr = db.object_manager(MdoType::Catalog, "Валюты".to_string(), &RootConfigCtx);
+        assert!(lookup_platform_property(&db, mgr, &Name::new("Любой")).is_none());
     }
 
     #[test]
@@ -271,10 +275,18 @@ mod tests {
         // Primitives have no declared instance properties — `platform_type_key`
         // returns None for them, so we propagate None without ever touching
         // the platform index.
-        assert!(lookup_platform_property(&Ty::Number, &Name::new("Любая")).is_none());
-        assert!(lookup_platform_property(&Ty::String, &Name::new("Любая")).is_none());
-        assert!(lookup_platform_property(&Ty::Boolean, &Name::new("Любая")).is_none());
-        assert!(lookup_platform_property(&Ty::Date, &Name::new("Любая")).is_none());
+        let db = InMemoryDb::new();
+        assert!(lookup_platform_property(&db, db.number(None, None), &Name::new("Любая")).is_none());
+        assert!(
+            lookup_platform_property(&db, db.string(None, false), &Name::new("Любая")).is_none()
+        );
+        assert!(lookup_platform_property(&db, db.boolean(), &Name::new("Любая")).is_none());
+        assert!(lookup_platform_property(
+            &db,
+            db.date(DateComponent::DateTime),
+            &Name::new("Любая")
+        )
+        .is_none());
     }
 
     // ---------- Phase 12: form-control chain walk ----------
@@ -285,9 +297,10 @@ mod tests {
         // `Расширение группы формы для страниц` (5 props), NOT in the
         // shared `ГруппаФормы` base. Without the chain walk this would
         // miss — chain.iter().rev() hits the extension first and wins.
-        use hir_def::ty::FormElementKind;
-        let receiver = Ty::FormControl { kind: FormElementKind::Pages, binding: None };
-        let res = lookup_platform_property(&receiver, &Name::new("ТекущаяСтраница"))
+        use bsl_metadata::FormElementKind;
+        let db = InMemoryDb::new();
+        let receiver = db.mk_form_control(FormElementKind::Pages, None);
+        let res = lookup_platform_property(&db, receiver, &Name::new("ТекущаяСтраница"))
             .expect("<Pages>.ТекущаяСтраница must resolve through extension chain");
         // ТекущаяСтраница on Pages is writable (per platform_data.json).
         assert!(!res.is_readonly);
@@ -298,11 +311,12 @@ mod tests {
         // `Видимость` lives on the base `ГруппаФормы` — chain walk's
         // extension hit misses, fall through to base wins. Confirms the
         // chain doesn't *only* surface extension members.
-        use hir_def::ty::FormElementKind;
-        let receiver = Ty::FormControl { kind: FormElementKind::Pages, binding: None };
-        let res = lookup_platform_property(&receiver, &Name::new("Видимость"))
+        use bsl_metadata::FormElementKind;
+        let db = InMemoryDb::new();
+        let receiver = db.mk_form_control(FormElementKind::Pages, None);
+        let res = lookup_platform_property(&db, receiver, &Name::new("Видимость"))
             .expect("<Pages>.Видимость must fall through to ГруппаФормы base");
-        assert_eq!(res.return_ty, Ty::Boolean);
+        assert_eq!(res.return_ty, db.boolean());
     }
 
     #[test]
@@ -311,10 +325,11 @@ mod tests {
         // `<UsualGroup>` receiver must NOT resolve it — its chain only
         // includes "Расширение группы формы для обычной группы" which
         // doesn't carry the property.
-        use hir_def::ty::FormElementKind;
-        let receiver = Ty::FormControl { kind: FormElementKind::UsualGroup, binding: None };
+        use bsl_metadata::FormElementKind;
+        let db = InMemoryDb::new();
+        let receiver = db.mk_form_control(FormElementKind::UsualGroup, None);
         assert!(
-            lookup_platform_property(&receiver, &Name::new("ТекущаяСтраница")).is_none(),
+            lookup_platform_property(&db, receiver, &Name::new("ТекущаяСтраница")).is_none(),
             "UsualGroup chain must not borrow Pages-extension properties"
         );
     }
@@ -325,19 +340,21 @@ mod tests {
         // were NOT split (Field/Decoration/Button/Addition) must keep
         // their pre-chain behaviour. `<InputField>.Видимость` resolves
         // through the base `ПолеФормы` table — single-entry chain.
-        use hir_def::ty::FormElementKind;
-        let receiver = Ty::FormControl { kind: FormElementKind::Field, binding: None };
-        let res = lookup_platform_property(&receiver, &Name::new("Видимость"))
+        use bsl_metadata::FormElementKind;
+        let db = InMemoryDb::new();
+        let receiver = db.mk_form_control(FormElementKind::Field, None);
+        let res = lookup_platform_property(&db, receiver, &Name::new("Видимость"))
             .expect("<InputField>.Видимость must resolve via base ПолеФормы");
-        assert_eq!(res.return_ty, Ty::Boolean);
+        assert_eq!(res.return_ty, db.boolean());
     }
 
     #[test]
     fn form_control_other_returns_none_with_empty_chain() {
         // `Other` chain is &[] — the rev-walk loop runs zero iterations
         // and we return None safely (no panic on empty chain).
-        use hir_def::ty::FormElementKind;
-        let receiver = Ty::FormControl { kind: FormElementKind::Other, binding: None };
-        assert!(lookup_platform_property(&receiver, &Name::new("Видимость")).is_none());
+        use bsl_metadata::FormElementKind;
+        let db = InMemoryDb::new();
+        let receiver = db.mk_form_control(FormElementKind::Other, None);
+        assert!(lookup_platform_property(&db, receiver, &Name::new("Видимость")).is_none());
     }
 }
