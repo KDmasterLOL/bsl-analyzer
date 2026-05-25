@@ -190,7 +190,7 @@ pub enum FormBindingTargetFacet {
 // `hir_def::ty::Ty::FormControl` embeds `FormBindingFacet` and derives
 // `Ord`. Removable once `Ty` is deleted (§4.E.6h) — the kernel orders
 // types by interned `TypeId`, never structurally. Mirrors the
-// transitional `impl Ord for SdblProjection` in `hir-def`.
+// transitional `impl Ord for Projection` in `kind.rs`.
 impl Ord for MdoRefFacet {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.mdo_type.cmp(&other.mdo_type).then_with(|| self.name.cmp(&other.name))
@@ -320,7 +320,7 @@ impl ProjectionFacet {
 /// Phase 3 §4.D: introduced to preserve hover-rendered precision through
 /// the `Ty ↔ TypeId` bridge round-trip. Decoupled from `sdbl-hir` so the
 /// kernel stays independent of SDBL HIR shape.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub struct SdblTypeShadowFacet {
     /// Pre-rendered SDBL type label (locale-stable).

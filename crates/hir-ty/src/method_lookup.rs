@@ -57,13 +57,12 @@ use bsl_types::kind::{Projection, TypeId, TypeKind};
 use bsl_types::testing::RootConfigCtx;
 use hir_def::body::Body;
 use hir_def::hir::Expr;
-use hir_def::ty::{MetadataKind, SdblProjection, Ty};
+use hir_def::ty::MetadataKind;
 use hir_def::{DefWithBodyId, ExprId, Name};
 use vfs::FileId;
 
 use crate::db::HirDatabase;
 use crate::lower::type_string::{lower_param_type_string_typeid, lower_return_type_string_typeid};
-use crate::ty_bridge::ty_to_typeid;
 
 /// Result of a successful method lookup — kernel-native surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -359,27 +358,7 @@ fn try_refine_receiver(
         receiver_name,
         ctx.body,
     )?;
-    Some(
-        db.query(
-            projections
-                .iter()
-                .map(|p| p.as_ref().map(|p| sdbl_projection_to_projection_via_bridge(db, p)))
-                .collect(),
-        ),
-    )
-}
-
-fn sdbl_projection_to_projection_via_bridge(
-    db: &dyn TypeKernelDb,
-    projection: &Arc<SdblProjection>,
-) -> Arc<Projection> {
-    let bridged = ty_to_typeid(db, &Ty::QueryResult { projection: Some(projection.clone()) });
-    match db.lookup_type(bridged) {
-        TypeKind::QueryResult(facet) => {
-            facet.projection.clone().expect("bridged QueryResult must carry a projection")
-        }
-        _ => unreachable!("Ty::QueryResult must bridge to TypeKind::QueryResult"),
-    }
+    Some(db.query(projections.iter().cloned().collect()))
 }
 
 /// Shape of the platform return arm the chain rewrite is looking for.
@@ -1124,11 +1103,12 @@ fn is_tabular_row_type_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ty_bridge::typeid_to_ty;
+    use crate::ty_bridge::{ty_to_typeid, typeid_to_ty};
     use bsl_metadata::MdoType;
     use bsl_platform::MethodParam;
+    use bsl_types::kind::{ProjectionField, ProjectionFieldSource, ProjectionOrigin};
     use bsl_types::testing::InMemoryDb;
-    use hir_def::ty::MetadataKind;
+    use hir_def::ty::{MetadataKind, Ty};
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct TyMethodInfo {
@@ -1151,31 +1131,27 @@ mod tests {
         })
     }
 
-    fn query_ty(projections: Vec<Option<Arc<SdblProjection>>>) -> Ty {
+    fn query_ty(projections: Vec<Option<Arc<Projection>>>) -> Ty {
         Ty::Query { projections: Arc::from(projections) }
     }
 
-    fn projection(db: &dyn TypeKernelDb) -> Arc<SdblProjection> {
-        Arc::new(SdblProjection {
-            fields: Arc::new([
-                (Name::new("Номер"), ty_to_typeid(db, &Ty::Number)),
-                (Name::new("Имя"), ty_to_typeid(db, &Ty::String)),
+    fn projection(db: &dyn TypeKernelDb) -> Arc<Projection> {
+        Arc::new(Projection::new(
+            Arc::from([
+                ProjectionField::new(
+                    "Номер".to_string(),
+                    ty_to_typeid(db, &Ty::Number),
+                    ProjectionFieldSource::Column,
+                ),
+                ProjectionField::new(
+                    "Имя".to_string(),
+                    ty_to_typeid(db, &Ty::String),
+                    ProjectionFieldSource::Column,
+                ),
             ]),
-            raw_sdbl_types: None,
-        })
-    }
-
-    fn kernel_projection_from_query_result(
-        db: &dyn TypeKernelDb,
-        projection: &Arc<SdblProjection>,
-    ) -> Arc<Projection> {
-        let id = ty_to_typeid(db, &Ty::QueryResult { projection: Some(projection.clone()) });
-        match db.lookup_type(id) {
-            TypeKind::QueryResult(facet) => {
-                facet.projection.clone().expect("bridged QueryResult must carry projection")
-            }
-            other => panic!("expected kernel QueryResult, got {other:?}"),
-        }
+            ProjectionOrigin::SdblQuery,
+            None,
+        ))
     }
 
     fn projection_result_id(
@@ -1187,7 +1163,7 @@ mod tests {
 
     fn projection_result_expected_id(
         db: &dyn TypeKernelDb,
-        projection: Option<Option<Arc<SdblProjection>>>,
+        projection: Option<Option<Arc<Projection>>>,
     ) -> Option<TypeId> {
         projection.map(|projection| ty_to_typeid(db, &Ty::QueryResult { projection }))
     }
@@ -1202,7 +1178,7 @@ mod tests {
 
     fn projection_selection_expected_id(
         db: &dyn TypeKernelDb,
-        projection: Option<Option<Arc<SdblProjection>>>,
+        projection: Option<Option<Arc<Projection>>>,
     ) -> Option<TypeId> {
         projection.map(|projection| ty_to_typeid(db, &Ty::QueryResultSelection { projection }))
     }
@@ -1517,7 +1493,7 @@ mod tests {
     fn kernel_native_attach_projection_to_value_table_twin_matches_ty_helper() {
         let db = InMemoryDb::new();
         let projection = projection(&db);
-        let kernel_projection = kernel_projection_from_query_result(&db, &projection);
+        let kernel_projection = projection.clone();
         let cases = vec![
             Ty::ValueTable { projection: None },
             Ty::union(vec![

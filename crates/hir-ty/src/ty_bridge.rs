@@ -7,13 +7,13 @@ use bsl_metadata::MdoType;
 use bsl_types::builders::Builders;
 use bsl_types::facet::{
     ArgArity, ArrayFacet, DateComponent, DefaultValue, FormDataFacet, FunctionFacet,
-    FunctionOrigin, MapFacet, MdoRefFacet, ParamPassing, ParamSpec, ProjectionFacet,
-    ProjectionFieldSource, ProjectionSource, StructureFacet, TableFacet, TableSource,
+    FunctionOrigin, MapFacet, MdoRefFacet, ParamPassing, ParamSpec, ProjectionSource,
+    StructureFacet, TableSource,
 };
 use bsl_types::intern::TypeKernelDb;
-use bsl_types::kind::{LiteralValue, MetadataKind, Projection, ProjectionOrigin, TypeId, TypeKind};
+use bsl_types::kind::{LiteralValue, MetadataKind, TypeId, TypeKind};
 use bsl_types::testing::RootConfigCtx;
-use hir_def::ty::{FormDataKind, SdblProjection, Ty};
+use hir_def::ty::{FormDataKind, Ty};
 use hir_def::Name;
 
 pub fn ty_to_typeid(db: &dyn TypeKernelDb, ty: &Ty) -> TypeId {
@@ -30,14 +30,10 @@ pub fn ty_to_typeid(db: &dyn TypeKernelDb, ty: &Ty) -> TypeId {
         Ty::Structure => db.structure(None),
         Ty::Map => db.map(None, None),
         Ty::Type => db.type_descriptor(),
-        Ty::ValueTable { projection } => db.value_table(
-            projection.as_ref().map(|p| sdbl_projection_to_projection(db, p)),
-            TableSource::Unknown,
-        ),
-        Ty::ValueTableRow { projection } => db.value_table_row(
-            projection.as_ref().map(|p| sdbl_projection_to_projection(db, p)),
-            TableSource::Unknown,
-        ),
+        Ty::ValueTable { projection } => db.value_table(projection.clone(), TableSource::Unknown),
+        Ty::ValueTableRow { projection } => {
+            db.value_table_row(projection.clone(), TableSource::Unknown)
+        }
         Ty::ValueList => db.value_list(None),
         Ty::MetadataRef { kind, name } => {
             debug_loss("T→K", "MetadataRef", "defaulting config_id to Root");
@@ -70,26 +66,16 @@ pub fn ty_to_typeid(db: &dyn TypeKernelDb, ty: &Ty) -> TypeId {
         }
         Ty::PlatformObject(name) => db.platform_object(ty_name_to_kernel(name, "PlatformObject")),
         Ty::Union(types) => db.union(types.iter().map(|ty| ty_to_typeid(db, ty)).collect()),
-        Ty::Query { projections } => db.query(
-            projections
-                .iter()
-                .map(|p| p.as_ref().map(|p| sdbl_projection_to_projection(db, p)))
-                .collect(),
-        ),
-        Ty::QueryResult { projection } => db.query_result(
-            projection.as_ref().map(|p| sdbl_projection_to_projection(db, p)),
-            ProjectionSource::Unknown,
-        ),
-        Ty::QueryResultSelection { projection } => db.query_result_selection(
-            projection.as_ref().map(|p| sdbl_projection_to_projection(db, p)),
-            ProjectionSource::Unknown,
-        ),
-        Ty::QueryBatchResult { per_query } => db.query_batch_result(
-            per_query
-                .iter()
-                .map(|p| p.as_ref().map(|p| sdbl_projection_to_projection(db, p)))
-                .collect(),
-        ),
+        Ty::Query { projections } => db.query(projections.iter().cloned().collect()),
+        Ty::QueryResult { projection } => {
+            db.query_result(projection.clone(), ProjectionSource::Unknown)
+        }
+        Ty::QueryResultSelection { projection } => {
+            db.query_result_selection(projection.clone(), ProjectionSource::Unknown)
+        }
+        Ty::QueryBatchResult { per_query } => {
+            db.query_batch_result(per_query.iter().cloned().collect())
+        }
         Ty::AnyMetadataRef { mdo_type } => db.any_metadata_ref(*mdo_type),
     }
 }
@@ -161,12 +147,10 @@ pub fn typeid_to_ty(db: &dyn TypeKernelDb, id: TypeId) -> Ty {
             }
             Ty::ValueList
         }
-        TypeKind::ValueTable(facet) => {
-            Ty::ValueTable { projection: table_facet_to_sdbl_projection(db, "ValueTable", facet) }
+        TypeKind::ValueTable(facet) => Ty::ValueTable { projection: facet.projection.clone() },
+        TypeKind::ValueTableRow(facet) => {
+            Ty::ValueTableRow { projection: facet.projection.clone() }
         }
-        TypeKind::ValueTableRow(facet) => Ty::ValueTableRow {
-            projection: table_facet_to_sdbl_projection(db, "ValueTableRow", facet),
-        },
         TypeKind::MetadataRef(facet) => {
             debug_loss("K→T", "MetadataRef", "dropping config_id");
             // loss-ok: Ty::MetadataRef has no config axis per §3.6.
@@ -253,24 +237,16 @@ pub fn typeid_to_ty(db: &dyn TypeKernelDb, id: TypeId) -> Ty {
             Ty::ObjectManager { kind: facet.mdo, name: kernel_name_to_ty(&facet.name) }
         }
         TypeKind::Function(facet) => function_from_facet(db, facet),
-        TypeKind::QueryResult(facet) => Ty::QueryResult {
-            projection: projection_facet_to_sdbl_projection(db, "QueryResult", facet),
-        },
-        TypeKind::QueryResultSelection(facet) => Ty::QueryResultSelection {
-            projection: projection_facet_to_sdbl_projection(db, "QueryResultSelection", facet),
-        },
-        TypeKind::QueryBatchResult { per_query } => Ty::QueryBatchResult {
-            per_query: per_query
-                .iter()
-                .map(|p| p.as_ref().map(|p| projection_to_sdbl_projection(db, p)))
-                .collect(),
-        },
-        TypeKind::Query { projections } => Ty::Query {
-            projections: projections
-                .iter()
-                .map(|p| p.as_ref().map(|p| projection_to_sdbl_projection(db, p)))
-                .collect(),
-        },
+        TypeKind::QueryResult(facet) => Ty::QueryResult { projection: facet.projection.clone() },
+        TypeKind::QueryResultSelection(facet) => {
+            Ty::QueryResultSelection { projection: facet.projection.clone() }
+        }
+        TypeKind::QueryBatchResult { per_query } => {
+            Ty::QueryBatchResult { per_query: per_query.iter().cloned().collect() }
+        }
+        TypeKind::Query { projections } => {
+            Ty::Query { projections: projections.iter().cloned().collect() }
+        }
         future => {
             debug_loss("K→T", "TypeKind", "unhandled future non_exhaustive TypeKind variant");
             // loss-ok: external match on #[non_exhaustive] TypeKind must remain forward-compatible.
@@ -278,88 +254,6 @@ pub fn typeid_to_ty(db: &dyn TypeKernelDb, id: TypeId) -> Ty {
             Ty::Unknown
         }
     }
-}
-
-fn sdbl_projection_to_projection(
-    _db: &dyn TypeKernelDb,
-    projection: &Arc<SdblProjection>,
-) -> Arc<Projection> {
-    // Phase 3 §4.D: preserve `raw_sdbl_types` through the bridge so
-    // hover keeps rendering precision-bearing labels (`Число(15,2)`,
-    // `Строка(50)`). Length invariant: when both `fields` and
-    // `raw_sdbl_types` are present they index parallel.
-    let fields: Arc<[bsl_types::kind::ProjectionField]> = projection
-        .fields
-        .iter()
-        .map(|(name, ty)| {
-            bsl_types::kind::ProjectionField::new(
-                ty_name_to_kernel(name, "Projection"),
-                *ty,
-                ProjectionFieldSource::Unknown,
-            )
-        })
-        .collect();
-    let raw_sdbl_types = projection.raw_sdbl_types.as_ref().map(|shadows| {
-        shadows
-            .iter()
-            .map(|s| bsl_types::facet::SdblTypeShadowFacet::new(s.display.clone()))
-            .collect::<Arc<[_]>>()
-    });
-    Arc::new(Projection::new(fields, ProjectionOrigin::SdblQuery, raw_sdbl_types))
-}
-
-fn projection_to_sdbl_projection(
-    _db: &dyn TypeKernelDb,
-    projection: &Arc<Projection>,
-) -> Arc<SdblProjection> {
-    if projection.origin != ProjectionOrigin::Unknown {
-        debug_loss("K→T", "Projection", "dropping projection origin");
-        // loss-ok: SdblProjection carries no kernel ProjectionOrigin field.
-    }
-    let fields = projection
-        .fields
-        .iter()
-        .map(|field| {
-            if field.source != ProjectionFieldSource::Unknown {
-                debug_loss("K→T", "Projection", "dropping projection field source");
-                // loss-ok: SdblProjection carries field name and TypeId only.
-            }
-            (kernel_name_to_ty(&field.name), field.ty)
-        })
-        .collect();
-    // Phase 3 §4.D: copy kernel-side shadows back into the legacy
-    // `SdblTypeShadow` shape so hover renders precision-aware labels.
-    let raw_sdbl_types = projection.raw_sdbl_types.as_ref().map(|shadows| {
-        shadows
-            .iter()
-            .map(|s| hir_def::ty::SdblTypeShadow { display: s.display.clone() })
-            .collect::<Arc<[_]>>()
-    });
-    Arc::new(SdblProjection { fields, raw_sdbl_types })
-}
-
-fn table_facet_to_sdbl_projection(
-    db: &dyn TypeKernelDb,
-    variant: &'static str,
-    facet: &TableFacet,
-) -> Option<Arc<SdblProjection>> {
-    if facet.source != TableSource::Unknown {
-        debug_loss("K→T", variant, "dropping table source facet");
-        // loss-ok: Ty table variants carry projection only per §3.6.
-    }
-    facet.projection.as_ref().map(|p| projection_to_sdbl_projection(db, p))
-}
-
-fn projection_facet_to_sdbl_projection(
-    db: &dyn TypeKernelDb,
-    variant: &'static str,
-    facet: &ProjectionFacet,
-) -> Option<Arc<SdblProjection>> {
-    if facet.source != ProjectionSource::Unknown {
-        debug_loss("K→T", variant, "dropping projection source facet");
-        // loss-ok: Ty query result variants carry projection only per §3.6.
-    }
-    facet.projection.as_ref().map(|p| projection_to_sdbl_projection(db, p))
 }
 
 fn function_to_facet(
@@ -596,6 +490,7 @@ mod tests {
     use bsl_types::facet::{
         FormBindingFacet, FormBindingTargetFacet, NumberFacet, ProjectionSource, StringFacet,
     };
+    use bsl_types::kind::{Projection, ProjectionField, ProjectionFieldSource, ProjectionOrigin};
     use bsl_types::testing::InMemoryDb;
 
     fn db() -> InMemoryDb {
@@ -619,14 +514,28 @@ mod tests {
         Name::new(s)
     }
 
-    fn projection(db: &dyn TypeKernelDb) -> Arc<SdblProjection> {
-        Arc::new(SdblProjection {
-            fields: Arc::new([
-                (name("A"), ty_to_typeid(db, &Ty::Number)),
-                (name("B"), ty_to_typeid(db, &Ty::String)),
+    // Provenance (`source` / `origin`) is stripped by `intern_type`
+    // canonicalisation, so a `ty_to_typeid → typeid_to_ty` round-trip
+    // returns it as `Unknown`. Build the helper with the post-intern
+    // canonical provenance so the strict-`==` round-trip tests below stay
+    // an identity (they assert the *fields* survive, not the hints).
+    fn projection(db: &dyn TypeKernelDb) -> Arc<Projection> {
+        Arc::new(Projection::new(
+            Arc::from([
+                ProjectionField::new(
+                    "A".to_string(),
+                    ty_to_typeid(db, &Ty::Number),
+                    ProjectionFieldSource::Unknown,
+                ),
+                ProjectionField::new(
+                    "B".to_string(),
+                    ty_to_typeid(db, &Ty::String),
+                    ProjectionFieldSource::Unknown,
+                ),
             ]),
-            raw_sdbl_types: None,
-        })
+            ProjectionOrigin::Unknown,
+            None,
+        ))
     }
 
     fn binding_attr(db: &dyn TypeKernelDb) -> FormBindingFacet {
@@ -811,7 +720,10 @@ mod tests {
     }
 
     #[test]
-    fn k_projection_field_source_drops_but_fields_survive() {
+    fn k_projection_fields_survive_query_result_round_trip() {
+        // K→T now passes the kernel `Projection` through verbatim (no
+        // SdblProjection mirror). Pin that the projected field name + ty
+        // survive the `Ty::QueryResult` round-trip.
         let db = db();
         let ty = ty_to_typeid(&db, &Ty::Boolean);
         let projection = db.projection_from_fields(
@@ -820,15 +732,14 @@ mod tests {
             ProjectionOrigin::SdblQuery,
         );
         let id = db.query_result(Some(projection), ProjectionSource::Sdbl);
-        assert_eq!(
-            typeid_to_ty(&db, id),
-            Ty::QueryResult {
-                projection: Some(Arc::new(SdblProjection {
-                    fields: Arc::new([(name("Flag"), ty)]),
-                    raw_sdbl_types: None,
-                })),
+        match typeid_to_ty(&db, id) {
+            Ty::QueryResult { projection: Some(p) } => {
+                assert_eq!(p.fields.len(), 1);
+                assert_eq!(p.fields[0].name, "Flag");
+                assert_eq!(p.fields[0].ty, ty);
             }
-        );
+            other => panic!("expected QueryResult with projection, got {other:?}"),
+        }
     }
 
     #[test]

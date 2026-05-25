@@ -1754,16 +1754,26 @@ mod tests {
 
     fn projection_with_two_fields(
         db: &dyn TypeKernelDb,
-    ) -> std::sync::Arc<hir_def::ty::SdblProjection> {
+    ) -> std::sync::Arc<bsl_types::kind::Projection> {
+        use bsl_types::kind::{ProjectionField, ProjectionFieldSource, ProjectionOrigin};
         // Manually-constructed projection mirroring what the bridge
         // produces for `SELECT Код AS КодТов, Наименование FROM …`.
-        std::sync::Arc::new(hir_def::ty::SdblProjection {
-            fields: std::sync::Arc::from([
-                (Name::new("КодТов"), ty_to_typeid(db, &Ty::String)),
-                (Name::new("Наименование"), ty_to_typeid(db, &Ty::String)),
+        std::sync::Arc::new(bsl_types::kind::Projection::new(
+            std::sync::Arc::from([
+                ProjectionField::new(
+                    "КодТов".to_string(),
+                    ty_to_typeid(db, &Ty::String),
+                    ProjectionFieldSource::Column,
+                ),
+                ProjectionField::new(
+                    "Наименование".to_string(),
+                    ty_to_typeid(db, &Ty::String),
+                    ProjectionFieldSource::Column,
+                ),
             ]),
-            raw_sdbl_types: None,
-        })
+            ProjectionOrigin::SdblQuery,
+            None,
+        ))
     }
 
     #[test]

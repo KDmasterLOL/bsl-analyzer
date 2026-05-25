@@ -2979,7 +2979,7 @@ fn asterisk_qualifier_lowers_aliased_star() {
 // precise `SdblType` (primitive with optional precision/length, or MDO
 // reference) and stores it on the resulting `ExprHir::FunctionCall.ty`,
 // which the SELECT lowerer copies to `FieldHir.ty`. The bridge then
-// renders `SdblTypeShadow.display` via `SdblType::Display`.
+// renders `SdblTypeShadowFacet.display` via `SdblType::Display`.
 
 fn cast_field_ty(sdbl: &str) -> crate::types::SdblType {
     let hir = lower_query(sdbl);

@@ -5,7 +5,7 @@
 //! kernel `TypeId`s through the caller's `TypeKernelDb`. Callers
 //! (Phase 1.3 inference hooks) consume
 //! `query_to_projection` / `package_to_projections` to attach
-//! [`SdblProjection`] payloads to the new
+//! [`Projection`] payloads to the new
 //! [`Ty::Query`] / [`Ty::QueryResult`] / [`Ty::QueryResultSelection`] /
 //! [`Ty::QueryBatchResult`] variants seeded in Phase 0.
 //!
@@ -80,11 +80,13 @@ use std::sync::Arc;
 
 use bsl_metadata::MdoType;
 use bsl_types::builders::Builders;
-use bsl_types::facet::{DateComponent, TableSource};
+use bsl_types::facet::{DateComponent, SdblTypeShadowFacet, TableSource};
 use bsl_types::intern::TypeKernelDb;
-use bsl_types::kind::TypeId;
+use bsl_types::kind::{
+    Projection, ProjectionField, ProjectionFieldSource, ProjectionOrigin, TypeId,
+};
 use bsl_types::testing::RootConfigCtx;
-use hir_def::ty::{MetadataKind, SdblProjection, SdblTypeShadow, Ty};
+use hir_def::ty::{MetadataKind, Ty};
 use hir_def::Name;
 
 /// Kernel-native counterpart of [`sdbl_type_to_ty`].
@@ -92,7 +94,7 @@ use hir_def::Name;
 /// Mints the `TypeId` directly through the kernel [`Builders`], mirroring
 /// [`sdbl_type_to_ty`] arm-for-arm. The mapping is **lossy-structural** —
 /// SDBL precision/scale/length facets drop (they live on the
-/// [`SdblTypeShadow`] display shadow), so each arm is byte-identical to
+/// [`SdblTypeShadowFacet`] display shadow), so each arm is byte-identical to
 /// `ty_to_typeid(db, &sdbl_type_to_ty(t))` (asserted by the drift test).
 #[allow(dead_code, reason = "Phase 3 §4.C producer — projection callers migrate in 4.C.2")]
 pub fn sdbl_type_to_typeid(db: &dyn TypeKernelDb, t: &sdbl_hir::SdblType) -> TypeId {
@@ -135,7 +137,7 @@ pub fn sdbl_type_to_ty(t: &sdbl_hir::SdblType) -> Ty {
         S::Boolean => Ty::Boolean,
         // Length / precision / scale are display-only enrichments —
         // they drop out of `Ty` (which is structural) and live on
-        // [`SdblTypeShadow.display`] for hover.
+        // [`SdblTypeShadowFacet.display`] for hover.
         S::String { .. } => Ty::String,
         S::Number { .. } => Ty::Number,
         S::Date | S::DateTime => Ty::Date,
@@ -254,13 +256,13 @@ fn ref_kind_for(mdo: MdoType) -> Option<MetadataKind> {
 pub fn query_to_projection(
     db: &dyn TypeKernelDb,
     q: &sdbl_hir::SdblQuery,
-) -> Option<Arc<SdblProjection>> {
+) -> Option<Arc<Projection>> {
     // Capacity is a best-effort hint — asterisk expansion can grow the
     // result well beyond `select.fields.len()`. Allocating up to the
     // base length avoids over-reservation on the common no-asterisk path.
     let initial_cap = q.hir.select.fields.len();
-    let mut named_fields: Vec<(Name, TypeId)> = Vec::with_capacity(initial_cap);
-    let mut shadows: Vec<SdblTypeShadow> = Vec::with_capacity(initial_cap);
+    let mut named_fields: Vec<ProjectionField> = Vec::with_capacity(initial_cap);
+    let mut shadows: Vec<SdblTypeShadowFacet> = Vec::with_capacity(initial_cap);
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // Seeds `seen` with every dedup key tied to this insertion so
@@ -269,9 +271,9 @@ pub fn query_to_projection(
     let push_unique = |name: Name,
                        alt_keys: &[&str],
                        ty: TypeId,
-                       shadow: SdblTypeShadow,
-                       named_fields: &mut Vec<(Name, TypeId)>,
-                       shadows: &mut Vec<SdblTypeShadow>,
+                       shadow: SdblTypeShadowFacet,
+                       named_fields: &mut Vec<ProjectionField>,
+                       shadows: &mut Vec<SdblTypeShadowFacet>,
                        seen: &mut std::collections::HashSet<String>|
      -> bool {
         let primary_key = name.as_str().to_lowercase();
@@ -282,7 +284,15 @@ pub fn query_to_projection(
             for k in alt_keys {
                 seen.insert(k.to_lowercase());
             }
-            named_fields.push((name, ty));
+            // Uniform `Column` source — `query_to_projection` does not
+            // (yet) discriminate Cast/Aggregate fields. Provenance is
+            // deterministic, so projection equality across reaching defs
+            // (query_text_dataflow) stays stable.
+            named_fields.push(ProjectionField::new(
+                name.as_str().to_string(),
+                ty,
+                ProjectionFieldSource::Column,
+            ));
             shadows.push(shadow);
             true
         } else {
@@ -315,7 +325,7 @@ pub fn query_to_projection(
             continue;
         };
         let bridged = sdbl_type_to_typeid(db, &field.ty);
-        let shadow = SdblTypeShadow { display: field.ty.to_string() };
+        let shadow = SdblTypeShadowFacet::new(field.ty.to_string());
         push_unique(
             Name::new(name.as_str()),
             &[],
@@ -338,13 +348,14 @@ pub fn query_to_projection(
     debug_assert_eq!(
         named_fields.len(),
         shadows.len(),
-        "SdblProjection invariant: raw_sdbl_types.len() must equal fields.len()",
+        "Projection invariant: raw_sdbl_types.len() must equal fields.len()",
     );
 
-    Some(Arc::new(SdblProjection {
-        fields: named_fields.into(),
-        raw_sdbl_types: Some(shadows.into()),
-    }))
+    Some(Arc::new(Projection::new(
+        named_fields.into(),
+        ProjectionOrigin::SdblQuery,
+        Some(shadows.into()),
+    )))
 }
 
 /// Expand an asterisk field against the tables in scope.
@@ -370,7 +381,7 @@ fn expand_asterisk(
     db: &dyn TypeKernelDb,
     qualifier: Option<&str>,
     hir: &sdbl_hir::SdblHir,
-) -> Vec<(Name, Option<String>, TypeId, SdblTypeShadow)> {
+) -> Vec<(Name, Option<String>, TypeId, SdblTypeShadowFacet)> {
     let qualifier_lower = qualifier.map(|q| q.to_lowercase());
     let mut out = Vec::new();
     for table in hir.all_tables() {
@@ -389,7 +400,7 @@ fn expand_asterisk(
                 Name::new(&field_def.name),
                 field_def.name_en.clone(),
                 sdbl_type_to_typeid(db, &field_def.ty),
-                SdblTypeShadow { display: field_def.ty.to_string() },
+                SdblTypeShadowFacet::new(field_def.ty.to_string()),
             ));
         }
     }
@@ -405,7 +416,7 @@ fn expand_asterisk(
 pub fn package_to_projections(
     db: &dyn TypeKernelDb,
     pkg: &sdbl_hir::SdblPackage,
-) -> Vec<Option<Arc<SdblProjection>>> {
+) -> Vec<Option<Arc<Projection>>> {
     pkg.queries().iter().map(|q| query_to_projection(db, q)).collect()
 }
 
@@ -421,7 +432,7 @@ mod tests {
 
     /// §4.C drift-detector: native minting must produce the *same interned
     /// id* as bridging the legacy `Ty` path. Guards §4.C.2 (the
-    /// `SdblProjection.fields` flip) — and ultimately the `Ty`-path deletion
+    /// `Projection.fields` flip) — and ultimately the `Ty`-path deletion
     /// — against any divergence. Covers precision/scale + string length
     /// (must drop), unknown/error, composite-with-unknown, and the ref
     /// fallback (MDO family without a `*Ref` companion).
@@ -727,8 +738,8 @@ mod tests {
         SdblQuery { hir, range: MODULE_RANGE }
     }
 
-    fn projection_field_names(p: &SdblProjection) -> Vec<String> {
-        p.fields.iter().map(|(n, _)| n.as_str().to_string()).collect()
+    fn projection_field_names(p: &Projection) -> Vec<String> {
+        p.fields.iter().map(|f| f.name.clone()).collect()
     }
 
     #[test]
@@ -751,9 +762,9 @@ mod tests {
         assert_eq!(projection_field_names(&p), vec!["Ссылка", "Наименование", "Цена"]);
         // Type bridging applies per-field. Asterisk fields lift directly
         // from the FieldDef's `SdblType` — no aliasing layer.
-        assert_eq!(p.fields[1].1, sdbl_type_to_typeid(&db, &SdblType::String { length: None }));
+        assert_eq!(p.fields[1].ty, sdbl_type_to_typeid(&db, &SdblType::String { length: None }));
         assert_eq!(
-            p.fields[2].1,
+            p.fields[2].ty,
             sdbl_type_to_typeid(&db, &SdblType::Number { precision: Some(15), scale: Some(2) },),
         );
     }
@@ -831,9 +842,9 @@ mod tests {
         let p =
             query_to_projection(&db, &q).expect("bare asterisk must project at least one field");
         assert_eq!(p.fields.len(), 1);
-        assert_eq!(p.fields[0].0.as_str(), "Ссылка");
+        assert_eq!(p.fields[0].name.as_str(), "Ссылка");
         assert_eq!(
-            p.fields[0].1,
+            p.fields[0].ty,
             sdbl_type_to_typeid(&db, &SdblType::reference(MdoType::Catalog, "A")),
         );
     }
@@ -1019,7 +1030,7 @@ mod tests {
         // a CAST/ВЫРАЗИТЬ-typed `SdblType::Number { Some(15), Some(2) }`
         // (the shape the lowerer now produces for
         // `ВЫРАЗИТЬ(0 КАК Число(15, 2))`) must flow precision/scale into
-        // `SdblTypeShadow.display` via `field.ty.to_string()`. The
+        // `SdblTypeShadowFacet.display` via `field.ty.to_string()`. The
         // structural `Ty` collapses to `Ty::Number` — display lives only
         // in the shadow lane.
         let cast_field = FieldHir {
@@ -1037,9 +1048,9 @@ mod tests {
         let q = mk_query(vec![cast_field], Vec::new());
         let p = query_to_projection(&db, &q).expect("CAST field must project");
         assert_eq!(p.fields.len(), 1);
-        assert_eq!(p.fields[0].0.as_str(), "Цена");
+        assert_eq!(p.fields[0].name.as_str(), "Цена");
         assert_eq!(
-            p.fields[0].1,
+            p.fields[0].ty,
             sdbl_type_to_typeid(&db, &SdblType::Number { precision: Some(15), scale: Some(2) },),
         );
         let shadows = p.raw_sdbl_types.as_ref().expect("Phase E shadows always populated");

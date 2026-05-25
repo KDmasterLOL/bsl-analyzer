@@ -290,7 +290,7 @@ fn hover_on_projection_selection_lists_field_names() {
 fn hover_on_projection_selection_renders_cast_precision_and_scale() {
     // Phase G end-to-end: `ВЫРАЗИТЬ(0 КАК Число(15, 2))` lowers to
     // `SdblType::Number { Some(15), Some(2) }` inside the SDBL HIR; the
-    // bridge surfaces it as `SdblTypeShadow { display: "Число(15, 2)" }`;
+    // bridge surfaces it as `SdblTypeShadowFacet { display: "Число(15, 2)" }`;
     // hover concatenates the column into the `**Поля:**` block with the
     // precision-bearing display verbatim. Before Phase G the CAST fell
     // through to `SdblType::Unknown` so the projection field was either

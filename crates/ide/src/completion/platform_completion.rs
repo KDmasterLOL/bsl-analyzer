@@ -862,7 +862,7 @@ pub(super) fn render_platform_property(
 /// so the user sees both the SELECT aliases AND the platform
 /// `НомерСтроки` / `СледующаяСтрока` / `Уровень` on the same popup.
 ///
-/// Each item uses `SdblTypeShadow.display` (`"Число(15,2)"`,
+/// Each item uses `SdblTypeShadowFacet.display` (`"Число(15,2)"`,
 /// `"Строка(50)"`) when the bridge captured it; otherwise the column
 /// type is rendered through kernel display (§4.G.5d) in the caller's
 /// locale. `sort_text` is `"0_<name>"` so projection columns surface

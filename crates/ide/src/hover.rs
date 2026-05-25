@@ -759,7 +759,7 @@ fn platform_type_markup<DB: RootDatabase>(db: &DB, type_name: &str) -> Option<St
 ///   the same `Запрос` / `РезультатЗапроса` / `ВыборкаИзРезультатаЗапроса`
 ///   / `Массив` keys their `Ty::PlatformObject` counterparts use. The
 ///   projection payload is not yet rendered inline — Phase 1.5+ will
-///   surface field names from `SdblProjection.fields` when present.
+///   surface field names from `Projection.fields` when present.
 /// - Anything else → single locale-aware `**Тип:** <label>` line via
 ///   [`Ty::display`]. Renders unions, MDO refs, manager refs, and
 ///   form-data wrappers richly (`СправочникСсылка.Товары` /
@@ -789,7 +789,7 @@ fn ty_info_markup<DB: RootDatabase>(db: &DB, ty: &Ty, locale: Locale) -> Option<
         // Phase E enrichment — if this is a `Ty::QueryResultSelection`
         // with a resolved SDBL projection, append the per-column
         // shape so the user sees the schema directly on hover. Uses
-        // `SdblTypeShadow.display` when present (`Строка(50)` /
+        // `SdblTypeShadowFacet.display` when present (`Строка(50)` /
         // `Число(15,2)`) and falls back to kernel display when the
         // bridge didn't capture the shadow.
         if let Some(fields_block) = projection_fields_markup(db, ty, locale) {
@@ -831,16 +831,16 @@ fn projection_fields_markup<DB: RootDatabase>(db: &DB, ty: &Ty, locale: Locale) 
     // preceding line in the rendered markup.
     let mut out = String::from("\n\n**Поля:** ");
     let shadows = projection.raw_sdbl_types.as_deref();
-    for (i, (name, field_ty)) in projection.fields.iter().enumerate() {
+    for (i, field) in projection.fields.iter().enumerate() {
         if i > 0 {
             out.push_str(", ");
         }
-        out.push_str(name.as_str());
+        out.push_str(field.name.as_str());
         out.push_str(": ");
         let label = shadows
             .and_then(|s| s.get(i))
             .map(|shadow| shadow.display.clone())
-            .unwrap_or_else(|| hir::kernel_type_label(db, *field_ty, locale, false));
+            .unwrap_or_else(|| hir::kernel_type_label(db, field.ty, locale, false));
         out.push_str(&label);
     }
     out.push_str("\n\n");

@@ -30,17 +30,13 @@ use base_db::FileIdInput;
 use bsl_types::builders::Builders;
 use bsl_types::facet::{ArgArity, DateComponent, FormDataFacet, MdoRefFacet, ProjectionSource};
 use bsl_types::intern::TypeKernelDb;
-use bsl_types::kind::{
-    ConfigId, Projection, ProjectionField, ProjectionFieldSource, ProjectionOrigin, TypeId,
-    TypeKind,
-};
+use bsl_types::kind::{ConfigId, Projection, TypeId, TypeKind};
 use bsl_types::testing::RootConfigCtx;
 use cfg_types::{BindingId, IdConversion};
 use hir_def::body::Body;
 use hir_def::hir::{BinaryOp, Expr, ExprIdx, Literal, Stmt, StmtIdx, UnaryOp};
 use hir_def::resolver::Resolver;
 use hir_def::ty::FunctionSignature;
-use hir_def::ty::SdblProjection;
 use hir_def::ty::Ty;
 use hir_def::{sdbl_hir_for_file_query, DefWithBodyId, ExprId, MethodIdInput, Name, SdblExprId};
 use rustc_hash::FxHashMap;
@@ -1313,10 +1309,7 @@ impl<'db> InferenceContext<'db> {
     /// every `ExprId` in `body.sdbl_exprs` is a string literal today,
     /// but the explicit check prevents a future lowerer change from
     /// quietly producing projections for non-literal expressions.
-    fn try_synthesise_query_projections(
-        &self,
-        args: &[ExprIdx],
-    ) -> Arc<[Option<Arc<SdblProjection>>]> {
+    fn try_synthesise_query_projections(&self, args: &[ExprIdx]) -> Arc<[Option<Arc<Projection>>]> {
         let Some(arg_idx) = args.first().copied() else {
             return Arc::from([]);
         };
@@ -1659,12 +1652,7 @@ impl<'db> InferenceContext<'db> {
                 });
                 if is_query_ctor {
                     let projections = self.try_synthesise_query_projections(args);
-                    self.db.query(
-                        projections
-                            .iter()
-                            .map(|p| p.as_ref().map(|p| sdbl_projection_to_projection(self.db, p)))
-                            .collect(),
-                    )
+                    self.db.query(projections.iter().cloned().collect())
                 } else {
                     // Lower the constructor name through the shared TypeRef →
                     // Ty adapter. The cascade (builtin → MDO plural → platform
@@ -1827,12 +1815,7 @@ impl<'db> InferenceContext<'db> {
                     name,
                     &self.body,
                 ) {
-                    let refined = self.db.query(
-                        projections
-                            .iter()
-                            .map(|p| p.as_ref().map(|p| sdbl_projection_to_projection(self.db, p)))
-                            .collect(),
-                    );
+                    let refined = self.db.query(projections.iter().cloned().collect());
                     trace!("Phase F refined {} to {:?}", name, refined);
                     return refined;
                 }
@@ -3544,26 +3527,6 @@ fn const_eval_literal_index(expr: &Expr) -> Option<usize> {
         return None;
     }
     Some(f as usize)
-}
-
-fn sdbl_projection_to_projection(
-    _db: &dyn TypeKernelDb,
-    projection: &Arc<SdblProjection>,
-) -> Arc<Projection> {
-    let fields: Arc<[ProjectionField]> = projection
-        .fields
-        .iter()
-        .map(|(name, ty)| {
-            ProjectionField::new(name.as_str().to_string(), *ty, ProjectionFieldSource::Unknown)
-        })
-        .collect();
-    let raw_sdbl_types = projection.raw_sdbl_types.as_ref().map(|shadows| {
-        shadows
-            .iter()
-            .map(|s| bsl_types::facet::SdblTypeShadowFacet::new(s.display.clone()))
-            .collect::<Arc<[_]>>()
-    });
-    Arc::new(Projection::new(fields, ProjectionOrigin::SdblQuery, raw_sdbl_types))
 }
 
 fn receiver_display_name(db: &dyn TypeKernelDb, receiver_ty: TypeId) -> Option<hir_def::Name> {

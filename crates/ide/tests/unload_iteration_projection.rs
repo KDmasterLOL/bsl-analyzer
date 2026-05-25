@@ -68,7 +68,7 @@ fn for_each_over_projected_value_table_yields_projected_row() {
         panic!("Стр must be Ty::ValueTableRow {{ projection: Some(..) }}, got {row_ty:?}");
     };
     assert_eq!(
-        p.fields.iter().map(|(n, _)| n.as_str().to_string()).collect::<Vec<_>>(),
+        p.fields.iter().map(|f| f.name.clone()).collect::<Vec<_>>(),
         vec!["Имя".to_string()],
     );
 }

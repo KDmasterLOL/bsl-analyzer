@@ -14,7 +14,7 @@
 //! idiom by tracing `<var>.Текст` definitions reaching the dispatch
 //! site, validating that every reaching write is a static SDBL string
 //! literal, and reusing the [`crate::sdbl_bridge`] lowering pipeline to
-//! turn that literal back into an [`SdblProjection`].
+//! turn that literal back into an [`Projection`].
 //!
 //! ## Hook surface
 //!
@@ -46,10 +46,10 @@
 use std::sync::Arc;
 
 use base_db::FileIdInput;
+use bsl_types::kind::Projection;
 use dataflow::reaching_defs::DefSite;
 use hir_def::body::Body;
 use hir_def::hir::{Expr, Literal, Stmt};
-use hir_def::ty::SdblProjection;
 use hir_def::{
     sdbl_hir_for_file_query, DefWithBodyId, ExprId, IdConversion, Name, SdblExprId, StmtId,
 };
@@ -58,7 +58,7 @@ use vfs::FileId;
 use crate::db::HirDatabase;
 use crate::sdbl_bridge::package_to_projections;
 
-/// Try to recover the per-sub-query [`SdblProjection`] vector for a
+/// Try to recover the per-sub-query [`Projection`] vector for a
 /// `<name>` use site by walking reaching `<name>.Текст = "..."` writes.
 ///
 /// Returns `Some(projections)` only when **every** reaching definition
@@ -91,7 +91,7 @@ pub(crate) fn refine_query_at_use_site(
     use_expr_id: ExprId,
     name: &Name,
     body: &Body,
-) -> Option<Arc<[Option<Arc<SdblProjection>>]>> {
+) -> Option<Arc<[Option<Arc<Projection>>]>> {
     // Reaching-defs analysis runs per-method (see
     // `module_reaching_definitions_query` in `ide-db`); module-level
     // code lives in a separate `DefWithBodyId::ModuleCode` body that
@@ -139,7 +139,7 @@ pub(crate) fn refine_query_at_use_site(
     // must match it byte-for-byte (divergent literals across branches
     // ship as None — a future phase may upgrade to per-branch
     // projection union).
-    let mut candidate: Option<Arc<[Option<Arc<SdblProjection>>]>> = None;
+    let mut candidate: Option<Arc<[Option<Arc<Projection>>]>> = None;
     for def in defs {
         let DefSite::Assignment(stmt_raw) = def.def_site else {
             return None;
@@ -149,11 +149,38 @@ pub(crate) fn refine_query_at_use_site(
             projections_from_text_assignment(db, file_id, owner, body, assign_stmt_id)?;
         match &candidate {
             None => candidate = Some(projections),
-            Some(prev) if **prev == *projections => (),
+            Some(prev) if projections_eq_ignoring_provenance(prev, &projections) => (),
             Some(_) => return None,
         }
     }
     candidate
+}
+
+/// Structural equality of two per-sub-query projection vectors that
+/// **ignores provenance** (`ProjectionOrigin` / `ProjectionFieldSource`).
+///
+/// Branch convergence must hinge on the observable shape — field order,
+/// names, interned `TypeId`s, and the SDBL display shadow — never on
+/// provenance hints. The kernel strips provenance at intern time, so two
+/// reaching writes that produce the same projected columns must converge
+/// even if a future bridge tags fields with finer `Column`/`Cast`/… sources.
+fn projections_eq_ignoring_provenance(
+    a: &[Option<Arc<Projection>>],
+    b: &[Option<Arc<Projection>>],
+) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(x, y)| match (x, y) {
+            (None, None) => true,
+            (Some(x), Some(y)) => {
+                x.fields.len() == y.fields.len()
+                    && x.raw_sdbl_types == y.raw_sdbl_types
+                    && x.fields
+                        .iter()
+                        .zip(y.fields.iter())
+                        .all(|(fx, fy)| fx.name == fy.name && fx.ty == fy.ty)
+            }
+            _ => false,
+        })
 }
 
 /// Resolve a single `<var>.Текст = "<literal>"` assignment to its
@@ -176,7 +203,7 @@ fn projections_from_text_assignment(
     owner: DefWithBodyId,
     body: &Body,
     assign_stmt_id: StmtId,
-) -> Option<Arc<[Option<Arc<SdblProjection>>]>> {
+) -> Option<Arc<[Option<Arc<Projection>>]>> {
     let Stmt::Assign { value, .. } = body.stmt(assign_stmt_id) else {
         return None;
     };

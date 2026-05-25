@@ -10,7 +10,7 @@ use std::sync::Arc;
 pub use bsl_metadata::FormElementKind;
 use bsl_metadata::MdoType;
 use bsl_types::facet::FormBindingFacet;
-use bsl_types::kind::TypeId;
+use bsl_types::kind::Projection;
 use syntax::ast::{self, AstNode};
 use syntax::SyntaxKind;
 
@@ -82,14 +82,14 @@ pub enum Ty {
 
     /// ValueTable (ТаблицаЗначений).
     ///
-    /// `projection` carries an [`SdblProjection`] when the table value was
+    /// `projection` carries a [`Projection`] when the table value was
     /// derived from a refined query result via `.Выгрузить()` (Phase H).
     /// `None` means either non-SDBL origin (`Новый ТаблицаЗначений`, form
     /// attribute) or an SDBL chain that the bridge couldn't refine
     /// (dynamic text, unrecognised `КАК` alias, etc.). Platform method
     /// dispatch always ignores `projection`; only `field_lookup` /
     /// `iteration_lookup` / `field_enum` consult it.
-    ValueTable { projection: Option<Arc<SdblProjection>> },
+    ValueTable { projection: Option<Arc<Projection>> },
 
     /// Row of a projected [`Ty::ValueTable`] (Phase H).
     ///
@@ -100,7 +100,7 @@ pub enum Ty {
     /// matching the runtime shape. `projection: None` mirrors the
     /// existing platform `СтрокаТаблицыЗначений` row (no projection
     /// enrichment).
-    ValueTableRow { projection: Option<Arc<SdblProjection>> },
+    ValueTableRow { projection: Option<Arc<Projection>> },
 
     /// ValueList (СписокЗначений).
     ValueList,
@@ -320,13 +320,13 @@ pub enum Ty {
     /// `projections.first().cloned().flatten()`; the batch case
     /// (`.ВыполнитьПакет()`) feeds the whole slice through to
     /// [`Ty::QueryBatchResult::per_query`] verbatim.
-    Query { projections: Arc<[Option<Arc<SdblProjection>>]> },
+    Query { projections: Arc<[Option<Arc<Projection>>]> },
 
     /// Return of `.Выполнить()` on a Query whose projection we know.
     ///
     /// `projection = None` mirrors `Ty::PlatformObject("РезультатЗапроса")`
     /// behaviour. Phase 0 never constructs `Some(_)`.
-    QueryResult { projection: Option<Arc<SdblProjection>> },
+    QueryResult { projection: Option<Arc<Projection>> },
 
     /// Return of `.Выбрать()` on a query result — the iteration cursor.
     ///
@@ -334,7 +334,7 @@ pub enum Ty {
     /// `Ty::PlatformObject("ВыборкаИзРезультатаЗапроса")`. Phase 0 never
     /// constructs `Some(_)`. Field lookup gains a projection-driven branch
     /// in Phase 1.
-    QueryResultSelection { projection: Option<Arc<SdblProjection>> },
+    QueryResultSelection { projection: Option<Arc<Projection>> },
 
     /// Return of `.ВыполнитьПакет()` — array of per-query results.
     ///
@@ -342,7 +342,7 @@ pub enum Ty {
     /// batch, or `None` when unresolved. Phase 0 never constructs a
     /// non-empty per_query — variant exists so Phase 3 can attach the
     /// projection at `.ВыполнитьПакет()[i]` indexing.
-    QueryBatchResult { per_query: Arc<[Option<Arc<SdblProjection>>]> },
+    QueryBatchResult { per_query: Arc<[Option<Arc<Projection>>]> },
 
     /// Coarse "some MDO of this kind, name unknown" reference.
     ///
@@ -358,69 +358,6 @@ pub enum Ty {
     /// `Ty::ManagerCollection(mdo_type)` until Phase 1 wires the
     /// instance-shape semantics.
     AnyMetadataRef { mdo_type: MdoType },
-}
-
-/// SDBL projection — per-field type information bridged from `sdbl-hir`.
-///
-/// Lives in `hir-def` (not `sdbl-hir`) because [`Ty`] embeds it: keeping
-/// `hir-def` independent of SDBL HIR internals while still surfacing
-/// projection data through the type system. The bridge (`hir-ty` Phase 1)
-/// fills it; `sdbl-hir` does not import `hir-def`.
-///
-/// `fields` is the **bridged** view: each entry's [`TypeId`] is an interned
-/// BSL type handle, not a raw `SdblType`. This is the single source of truth
-/// for field-lookup, completion, and inference on projection-typed receivers.
-///
-/// `raw_sdbl_types` is the optional **shadow** carrying display-relevant
-/// SDBL attributes (precision/scale, length) that `Ty` deliberately drops.
-/// `None` when the projection was constructed without the originating
-/// package (e.g. a manual cache-bypass path).
-///
-/// Holds interned `TypeId`s rather than raw `sdbl_hir::SdblType`; ordering is
-/// implemented manually below because `TypeId` intentionally has no semantic
-/// [`Ord`].
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct SdblProjection {
-    /// Per-field interned `TypeId`s under the same-db invariant.
-    pub fields: Arc<[(crate::Name, TypeId)]>,
-    /// Optional shadow with pre-rendered SDBL-specific display attributes,
-    /// indexed parallel to `fields`. `None` when the bridge wasn't given
-    /// the originating package; `Some(slice)` invariant: `slice.len() ==
-    /// fields.len()`.
-    pub raw_sdbl_types: Option<Arc<[SdblTypeShadow]>>,
-}
-
-// Deterministic raw-id ordering only (NOT semantic); required while `Ty`
-// embeds `Arc<SdblProjection>` and derives `Ord`, until §4.E deletes `Ty`.
-impl Ord for SdblProjection {
-    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-        self.fields
-            .iter()
-            .map(|(n, t)| (n, t.raw()))
-            .cmp(other.fields.iter().map(|(n, t)| (n, t.raw())))
-            .then_with(|| self.raw_sdbl_types.cmp(&other.raw_sdbl_types))
-    }
-}
-
-impl PartialOrd for SdblProjection {
-    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-/// Display-only shadow for an SDBL field type.
-///
-/// Carries the rendered SDBL type label (`"Число(15,2)"`, `"Строка(50)"`)
-/// so hover can show precision/scale/length that the bridged [`Ty`]
-/// drops. Decoupled from `sdbl_hir::SdblType` to keep `hir-def`
-/// independent of SDBL HIR shape.
-///
-/// `display` is rendered eagerly at bridge time — no formatting in the
-/// hover hot path.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SdblTypeShadow {
-    /// Pre-rendered SDBL type label.
-    pub display: String,
 }
 
 /// Managed-form data wrapper flavour.

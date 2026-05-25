@@ -435,15 +435,11 @@ impl<'db, DB: ConfigsDatabase + TypeKernelDb> Type<'db, DB> {
     /// `None` when the receiver isn't a projection-typed selection OR
     /// when the projection's `raw_sdbl_types` shadow was not captured
     /// (some bridge entry points skip it). Hover uses these to render
-    /// SDBL precision/scale that the bridged `Ty` drops.
-    pub fn projection_field_displays(&self) -> Option<Vec<hir_def::ty::SdblTypeShadow>> {
+    /// SDBL precision/scale that the bridged `Ty` drops. Each entry is the
+    /// pre-rendered SDBL type label (`"Число(15,2)"`, `"Строка(50)"`).
+    pub fn projection_field_displays(&self) -> Option<Vec<String>> {
         let p = self.projection()?;
-        p.raw_sdbl_types.as_ref().map(|shadows| {
-            shadows
-                .iter()
-                .map(|s| hir_def::ty::SdblTypeShadow { display: s.display.clone() })
-                .collect()
-        })
+        p.raw_sdbl_types.as_ref().map(|shadows| shadows.iter().map(|s| s.display.clone()).collect())
     }
 }
 

@@ -180,7 +180,7 @@ fn dynamic_arg_keeps_union() {
 
 #[test]
 fn projection_carries_into_narrowed_value_table() {
-    // Slice 1b — Phase B synthesises an `SdblProjection` at the
+    // Slice 1b — Phase B synthesises a `Projection` at the
     // constructor; chain rewrite carries it through to the kept
     // `Ty::ValueTable` arm after the union narrows.
     let fixture = r#"//- /test.bsl
@@ -195,7 +195,7 @@ fn projection_carries_into_narrowed_value_table() {
     match ty {
         Ty::ValueTable { projection: Some(p) } => {
             assert_eq!(
-                p.fields.iter().map(|(n, _)| n.as_str().to_string()).collect::<Vec<_>>(),
+                p.fields.iter().map(|f| f.name.clone()).collect::<Vec<_>>(),
                 vec!["Имя".to_string()],
                 "projection must carry the single SELECT alias",
             );
@@ -221,7 +221,7 @@ fn projection_carries_through_direct_iteration_arg() {
     let Ty::ValueTable { projection: Some(p) } = ty else {
         panic!("expected Ty::ValueTable {{ projection: Some(..) }}, got {ty:?}");
     };
-    let names: Vec<_> = p.fields.iter().map(|(n, _)| n.as_str().to_string()).collect();
+    let names: Vec<_> = p.fields.iter().map(|f| f.name.clone()).collect();
     assert_eq!(names, vec!["Поле1".to_string(), "Поле2".to_string()]);
 }
 
