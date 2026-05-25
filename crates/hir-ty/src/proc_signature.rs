@@ -211,13 +211,7 @@ mod tests {
     }
 
     fn decl_param(name: &str) -> ParamSymbol {
-        ParamSymbol {
-            name: Name::new(name),
-            is_val: false,
-            has_default: false,
-            ty: hir_def::ty::Ty::Unknown,
-            type_ref: None,
-        }
+        ParamSymbol { name: Name::new(name), is_val: false, has_default: false, type_ref: None }
     }
 
     fn docs(parameters: Vec<ParameterDoc>, returned_value: Vec<TypeDoc>) -> MethodDocs {

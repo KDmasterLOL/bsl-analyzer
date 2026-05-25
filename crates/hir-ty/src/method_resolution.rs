@@ -490,10 +490,9 @@ pub fn resolve_aliased_manager_call(
 /// `resolve_three_level_call` (3-segment): both resolve a method by name
 /// and then need to hand the caller typed parameters / return type. The
 /// cascade walks the JSDoc-derived `TypeRef` first (when present), then
-/// falls back to `Ty::Unknown` for parameters and to the
-/// `MethodSymbol::return_type` default for the return type — `Ty::Undefined`
-/// for procedures and `Ty::Unknown` for functions without a
-/// `// Возвращаемое значение:` block.
+/// falls back to `Unknown` for parameters and, for the return type, to a
+/// kernel sentinel derived from `is_function` — `Undefined` for procedures
+/// and `Unknown` for functions without a `// Возвращаемое значение:` block.
 ///
 /// Lowering runs through [`TyLoweringContext`] so the JSDoc `TypeRef`
 /// lookups share a single path with `Expr::New` and XML metadata: adding
@@ -508,10 +507,8 @@ fn materialise_signature(db: &dyn TypeKernelDb, method_symbol: &MethodSymbol) ->
         .collect();
     let defaults: Box<[bool]> = method_symbol.params.iter().map(|p| p.has_default).collect();
 
-    // No docstring return type → kernel sentinel matching the symbol-tree
-    // default: functions get `Unknown` (inference may refine), procedures
-    // `Undefined`. Equivalent to the old `return_type` Ty field (set to
-    // exactly these per `is_function` in `hir_def::symbol_tree`).
+    // No docstring return type → kernel sentinel keyed on `is_function`:
+    // functions get `Unknown` (inference may refine), procedures `Undefined`.
     let ret = method_symbol
         .return_type_ref
         .as_ref()
