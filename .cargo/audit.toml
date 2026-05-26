@@ -1,0 +1,11 @@
+[advisories]
+ignore = [
+    # RUSTSEC-2020-0138 targets the abandoned crates.io `lexer` crate. Our match
+    # is a name collision with the workspace crate `crates/lexer`, which has no
+    # relation to that advisory. Safe to ignore.
+    "RUSTSEC-2020-0138",
+    # number_prefix / paste are unmaintained but pulled transitively (indicatif,
+    # tikv-jemalloc-ctl) with no fixed upgrade available; no known vulnerability.
+    "RUSTSEC-2025-0119",
+    "RUSTSEC-2024-0436",
+]
