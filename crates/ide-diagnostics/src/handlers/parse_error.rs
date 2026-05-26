@@ -422,6 +422,19 @@ HHH"#;
     }
 
     #[test]
+    fn test_no_parse_error_for_enum_value_named_new() {
+        // Enum values may be named `Новый` (a keyword), so accessing one as a
+        // property must NOT report "Ожидалось имя свойства после '.'".
+        // Real corpus example: `Перечисления.ГрадацииКачества.Новый`.
+        let code = r#"
+Процедура Тест()
+    Качество = Перечисления.ГрадацииКачества.Новый;
+КонецПроцедуры
+"#;
+        assert_no_parse_errors_for(code, "Enum value named Новый should not trigger parse error");
+    }
+
+    #[test]
     fn test_no_parse_error_for_multiline_nstr_argument() {
         let code = r#"Процедура Тест()
     ТекстПодсказки = НСтр("ru = 'Доплата может производиться картой,

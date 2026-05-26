@@ -53,6 +53,9 @@ const PROPERTY_NAME_TOKENS: TokenSet = TokenSet::new(&[
     TokenKind::KwFalse,
     TokenKind::KwUndefined,
     TokenKind::KwNull,
+    // Enum values may be named `Новый`/`New` (e.g. `Перечисления.ГрадацииКачества.Новый`),
+    // so the keyword is a valid property name after `.`.
+    TokenKind::KwNew,
 ]);
 
 /// Parses an expression.
