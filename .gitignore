@@ -41,6 +41,7 @@ coverage/
 # Local planning / env
 .env
 .codex
+AGENTS.md
 plans/
 
 # 1C platform auto-generated
