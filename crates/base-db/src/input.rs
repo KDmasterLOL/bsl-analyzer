@@ -1,62 +1,44 @@
-//! Input types for the database - SourceRoot and related structures.
-//!
-//! A SourceRoot represents a logical grouping of files, typically corresponding
-//! to a directory on the filesystem (like a project or a library).
+//! Salsa input types for the base database.
 
 use vfs::file_set::FileSet;
 use vfs::FileId;
 
 /// Unique identifier for a source root.
-///
-/// Source roots partition the set of all files into logical groups.
-/// Each file belongs to exactly one source root.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SourceRootId(pub u32);
 
-/// A source root is a directory on the filesystem that contains related files.
-///
-/// Source roots are typically used to distinguish between:
-/// - Local code (your project)
-/// - Library code (external dependencies)
-///
-/// This distinction is important for setting appropriate Salsa durability levels.
+/// A logical group of files that share the same Salsa durability.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SourceRoot {
-    /// Whether this is a library (external dependencies vs local code).
-    ///
-    /// Library code is assumed to change rarely (HIGH durability in Salsa),
-    /// while local code changes frequently (LOW durability).
+    /// Whether files in this root should be treated as rarely changing.
     pub is_library: bool,
 
-    /// The set of files in this source root.
+    /// Files that belong to this source root.
     file_set: FileSet,
 }
 
 impl SourceRoot {
-    /// Create a new source root for local (project) code.
+    /// Create a source root for local project code.
     pub fn new_local(file_set: FileSet) -> Self {
         SourceRoot { is_library: false, file_set }
     }
 
-    /// Create a new source root for library (external) code.
+    /// Create a source root for library code.
     pub fn new_library(file_set: FileSet) -> Self {
         SourceRoot { is_library: true, file_set }
     }
 
-    /// Get the file set for this source root.
+    /// Return the files in this source root.
     pub fn file_set(&self) -> &FileSet {
         &self.file_set
     }
 
-    /// Iterate over all file IDs in this source root.
+    /// Iterate over file IDs in this source root.
     pub fn iter(&self) -> impl Iterator<Item = FileId> + '_ {
         self.file_set.iter()
     }
 
-    /// Get Salsa durability level for this source root.
-    ///
-    /// Libraries (is_library = true) use HIGH durability - rarely change.
-    /// User code (is_library = false) uses LOW durability - changes frequently.
+    /// Return the durability used for inputs from this source root.
     pub fn durability(&self) -> salsa::Durability {
         if self.is_library {
             salsa::Durability::HIGH
@@ -66,150 +48,61 @@ impl SourceRoot {
     }
 }
 
-/// Salsa input for file text content.
-///
-/// This represents mutable base input that can be changed via setters.
-/// When file text changes, Salsa automatically invalidates dependent queries.
+/// Salsa input for file text.
 #[salsa::input(debug)]
 pub struct FileTextInput {
-    /// The file text content (stored as String, Salsa handles efficiently)
+    /// File contents.
     pub text: String,
 }
 
 /// Salsa input for source root data.
-///
-/// This represents the logical grouping of files into source roots.
-/// Note: We store the SourceRoot directly, Salsa will intern it.
 #[salsa::input(debug)]
 pub struct SourceRootInput {
-    /// The source root data
+    /// Source root data.
     pub root: SourceRoot,
 }
 
 /// Salsa input for file-to-source-root mapping.
-///
-/// This tracks which source root each file belongs to.
 #[salsa::input(debug)]
 pub struct FileSourceRootInput {
-    /// The source root ID this file belongs to
+    /// Source root that owns this file.
     pub source_root_id: SourceRootId,
 }
 
-/// Salsa interned FileId for HIR queries.
-///
-/// This wrapper makes FileId compatible with Salsa tracked functions.
-/// Salsa 0.25 requires parameters to tracked functions to be Salsa types,
-/// so we wrap the raw FileId in a Salsa interned struct.
-///
-/// ## Usage
-///
-/// ```ignore
-/// // In HIR queries:
-/// #[salsa::tracked(lru = 512)]
-/// pub fn item_tree_query(
-///     db: &dyn salsa::Database,
-///     file_id_input: FileIdInput,
-/// ) -> Arc<ItemTree> {
-///     let file_id = file_id_input.file_id(db);
-///     // ... use file_id
-/// }
-/// ```
+/// Interned `FileId` wrapper for tracked Salsa queries.
 #[salsa::interned(debug)]
 pub struct FileIdInput {
-    /// The raw FileId value
+    /// Raw VFS file identifier.
     pub file_id: vfs::FileId,
 }
 
 /// Hashable diagnostics configuration for Salsa caching.
 ///
-/// Uses String codes instead of DiagnosticCode enum to avoid circular dependencies
-/// between base-db and ide-diagnostics. Conversion to DiagnosticCode happens at
-/// the query call site.
-///
-/// ## Design rationale
-///
-/// HashMap can't be used in Salsa because:
-/// 1. Iteration order is non-deterministic (violates Salsa's same-input→same-output guarantee)
-/// 2. serde_json::Value doesn't implement Hash
-///
-/// Instead, we use sorted Vec which is:
-/// - Deterministic (same data → same hash)
-/// - Hashable (all fields implement Hash)
-/// - Efficient for ~10 items (typical diagnostic config size)
-///
-/// ## Usage
-///
-/// ```ignore
-/// let config = DiagnosticsConfigInput {
-///     disabled: vec!["LineLength".to_string(), "MissingReturn".to_string()],
-///     parameters: vec![
-///         ("LineLength".to_string(), r#"{"maxLength":140}"#.to_string()),
-///     ],
-///     ordinary_app_support: false,
-///     dataflow_max_iterations: 10000,
-///     locale: Locale::Ru,
-/// };
-/// let config_id = DiagnosticsConfigId::new(db, config);
-/// ```
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+/// Diagnostic codes stay as strings to keep `base-db` independent from
+/// `ide-diagnostics`. Sorted vectors keep the input deterministic and hashable.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DiagnosticsConfigInput {
-    /// Disabled diagnostic codes (sorted alphabetically).
-    ///
-    /// Example: `["LineLength", "MissingReturn"]`
+    /// Disabled diagnostic codes.
     pub disabled: Vec<String>,
 
-    /// Enabled diagnostic codes (sorted alphabetically).
-    /// Used to enable diagnostics that are disabled by default.
-    ///
-    /// Example: `["TernaryOperatorUsage", "BadWords"]`
+    /// Diagnostics enabled despite being disabled by default.
     pub enabled: Vec<String>,
 
-    /// Per-diagnostic parameters as (code, json_string) pairs, sorted by code.
-    ///
-    /// JSON string is used instead of serde_json::Value because Value doesn't implement Hash.
-    /// The JSON is parsed at the call site when needed.
-    ///
-    /// Example: `[("LineLength", r#"{"maxLength":140}"#)]`
+    /// Per-diagnostic parameters as `(code, json_string)` pairs.
     pub parameters: Vec<(String, String)>,
 
-    /// Support for ordinary application mode.
-    ///
-    /// When true, enables checks specific to ordinary (non-managed) applications.
+    /// Whether ordinary application checks are enabled.
     pub ordinary_app_support: bool,
 
-    /// Max iterations for dataflow analysis.
-    ///
-    /// Used by flow-sensitive diagnostics to limit computation.
-    /// Default: 10000 (sync with dataflow::DEFAULT_MAX_ITERATIONS).
+    /// Iteration limit for flow-sensitive diagnostics.
     pub dataflow_max_iterations: usize,
 
-    /// User-facing output locale (for diagnostic message rendering).
-    ///
-    /// Determines which language is used for primitive type names and other
-    /// localized labels in diagnostic messages. Resolved at the LSP layer
-    /// from `[output] display_language` (TOML) or `InitializeParams.locale`
-    /// (LSP), with `Locale::default()` (= Ru) as a fallback.
+    /// Locale for rendered diagnostic messages.
     pub locale: crate::Locale,
 }
 
 impl DiagnosticsConfigInput {
-    /// Create a new DiagnosticsConfigInput with default values.
-    pub fn new() -> Self {
-        Self {
-            disabled: Vec::new(),
-            enabled: Vec::new(),
-            parameters: Vec::new(),
-            ordinary_app_support: false,
-            dataflow_max_iterations: 10000,
-            locale: crate::Locale::default(),
-        }
-    }
-
-    /// Build from raw config data, normalizing for deterministic hashing.
-    ///
-    /// - Sorts disabled/enabled lists alphabetically
-    /// - Sorts parameters by code
-    /// - Removes duplicates
+    /// Build from raw config data and normalize it for deterministic hashing.
     pub fn from_raw(
         disabled: impl IntoIterator<Item = String>,
         enabled: impl IntoIterator<Item = String>,
@@ -240,17 +133,12 @@ impl DiagnosticsConfigInput {
         }
     }
 
-    /// Check if a diagnostic code is disabled.
-    ///
-    /// Uses binary search for O(log n) lookup.
+    /// Return whether a diagnostic code is disabled.
     pub fn is_disabled(&self, code: &str) -> bool {
         self.disabled.binary_search_by(|c| c.as_str().cmp(code)).is_ok()
     }
 
-    /// Get parameter JSON for a diagnostic code.
-    ///
-    /// Uses binary search for O(log n) lookup.
-    /// Returns None if no parameters are set for this code.
+    /// Return parameter JSON for a diagnostic code.
     pub fn get_parameters(&self, code: &str) -> Option<&str> {
         self.parameters
             .binary_search_by(|(c, _)| c.as_str().cmp(code))
@@ -259,32 +147,10 @@ impl DiagnosticsConfigInput {
     }
 }
 
-/// Salsa interned diagnostics config for caching.
-///
-/// This wrapper makes DiagnosticsConfigInput compatible with Salsa tracked functions.
-/// Salsa interns the config, so identical configs share the same ID.
-///
-/// ## Usage
-///
-/// ```ignore
-/// // Create config ID
-/// let config = DiagnosticsConfigInput::new();
-/// let config_id = DiagnosticsConfigId::new(db, config);
-///
-/// // Use in tracked function
-/// #[salsa::tracked(lru = 256)]
-/// pub fn file_diagnostics(
-///     db: &dyn RootDatabase,
-///     file_id_input: FileIdInput,
-///     config_id: DiagnosticsConfigId,
-/// ) -> Arc<Vec<Diagnostic>> {
-///     let config = config_id.config(db);
-///     // ... use config
-/// }
-/// ```
+/// Interned diagnostics config for tracked Salsa queries.
 #[salsa::interned(debug)]
 pub struct DiagnosticsConfigId {
-    /// The diagnostics configuration.
+    /// Diagnostics configuration.
     pub config: DiagnosticsConfigInput,
 }
 

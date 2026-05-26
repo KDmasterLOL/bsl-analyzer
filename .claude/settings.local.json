@@ -3,7 +3,10 @@
     "allow": [
       "Bash(find:*)",
       "Bash(ls:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Skill(codex:rescue)",
+      "Skill(codex:rescue:*)",
+      "Bash(cargo check *)"
     ]
   }
 }
