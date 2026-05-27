@@ -405,6 +405,87 @@ fn type_mismatch_still_fires_on_string_to_number() {
 }
 
 #[test]
+fn type_mismatch_silent_on_any_ref_param() {
+    // Real-code repro of a user-reported false positive:
+    //   «Несоответствие типов: ожидалось 'Строка | ЛюбаяСсылка',
+    //    получено 'СправочникСсылка.Справочник1'»
+    //
+    // `ЛюбаяСсылка` (AnyRef) is BSL's "any reference" supertype: every
+    // concrete `*Ссылка.X` is a subtype of it, so passing a catalog ref
+    // into a `Строка | ЛюбаяСсылка` slot is correct code and must NOT
+    // fire `TypeMismatch`.
+    //
+    // Before the kernel `AnyRef` work, the type word `ЛюбаяСсылка` from a
+    // doc comment (not XML `cfg:AnyRef`) fell through `lower_bare_name_id`
+    // to `db.platform_object("ЛюбаяСсылка")` — an opaque leaf nothing is
+    // assignable to — so the expected `Union(String, PlatformObject(…))`
+    // matched neither leg. Now `ЛюбаяСсылка → TypeKind::AnyRef` and the
+    // `is_ref_kind(from) ≤ AnyRef` subtype rule accepts the catalog ref.
+    let fixture = r#"
+//- /CommonModules/ПервыйОбщийМодуль/Ext/Module.bsl
+// Параметры:
+//   Значение - Строка, ЛюбаяСсылка - строка или любая ссылка
+Процедура Записать(Значение) Экспорт
+КонецПроцедуры
+
+// Возвращаемое значение:
+//   СправочникСсылка.Справочник1 - ссылка на элемент
+Функция ПолучитьСсылку() Экспорт
+    Возврат Неопределено;
+КонецФункции
+
+//- /test.bsl
+Процедура Тест()
+    Ссылка = ПервыйОбщийМодуль.ПолучитьСсылку();
+    ПервыйОбщийМодуль.Записать(Ссылка);
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    let rendered: Vec<(String, String)> = mismatches(&db, file_id)
+        .into_iter()
+        .map(|(expected, actual)| {
+            (
+                hir::Type::from_id(&db, file_id, expected)
+                    .display_name(ide_db::base_db::Locale::Ru),
+                hir::Type::from_id(&db, file_id, actual).display_name(ide_db::base_db::Locale::Ru),
+            )
+        })
+        .collect();
+    assert!(
+        rendered.is_empty(),
+        "concrete `СправочникСсылка.X` is a subtype of `ЛюбаяСсылка` — passing it \
+         into a `Строка | ЛюбаяСсылка` param must not fire TypeMismatch; got {rendered:?}"
+    );
+}
+
+#[test]
+fn type_mismatch_still_fires_on_number_to_any_ref_param() {
+    // Regression guard for the one-way `ref ≤ AnyRef` rule: `AnyRef` is
+    // NOT gradual like `Unknown`. A `Число` flowing into a bare
+    // `ЛюбаяСсылка` param is a real bug (a number is not a reference) and
+    // must still fire — otherwise `AnyRef` would have silently become a
+    // second `Unknown` and the precision win would be lost.
+    let fixture = r#"
+//- /CommonModules/ПервыйОбщийМодуль/Ext/Module.bsl
+// Параметры:
+//   Значение - ЛюбаяСсылка - любая ссылка
+Процедура Записать(Значение) Экспорт
+КонецПроцедуры
+
+//- /test.bsl
+Процедура Тест()
+    ПервыйОбщийМодуль.Записать(42);
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    assert_eq!(
+        mismatches(&db, file_id),
+        vec![(db.any_ref(), db.number(None, None))],
+        "Число into a `ЛюбаяСсылка` param must still fire — AnyRef is a ref supertype, not gradual"
+    );
+}
+
+#[test]
 fn bare_identifier_matching_global_function_is_not_function_typed() {
     // Regression: a parameter (or any bare identifier) whose name
     // collides with a platform global function — here

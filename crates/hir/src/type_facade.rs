@@ -164,8 +164,10 @@ impl<'db, DB: ConfigsDatabase + TypeKernelDb> Type<'db, DB> {
         kernel_type_label(self.db, self.id, base_db::Locale::En, false)
     }
 
-    /// `true` for types that carry an MDO reference — `CatalogRef`,
-    /// `DocumentRef`, register refs, etc.
+    /// `true` for types that denote a reference value — concrete
+    /// `CatalogRef` / `DocumentRef` / register refs, the flavoured
+    /// `AnyMetadataRef{mdo_type}` (`ЛюбаяСсылка<Catalog>`), and the
+    /// flavour-less `AnyRef` (`ЛюбаяСсылка`).
     ///
     /// Does **not** return `true` for `ObjectManager`, `ManagerCollection`,
     /// or `TabularSection`/`TabularSectionRow`; those are manager-side

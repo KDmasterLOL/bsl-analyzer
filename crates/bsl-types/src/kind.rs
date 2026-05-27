@@ -298,6 +298,30 @@ impl MetadataKind {
         }
     }
 
+    /// The MDO flavour of a `*Ref` reference kind, or `None` for non-ref
+    /// kinds (objects, record sets, tabular sections, …).
+    ///
+    /// Single source of truth for "which `AnyMetadataRef{mdo_type}` does
+    /// this concrete reference belong to" — used by the subtype rule
+    /// `MetadataRef{kind} ≤ AnyMetadataRef{k}` and as the backing set for
+    /// the `is_ref_kind` predicate.
+    pub fn ref_mdo_type(self) -> Option<MdoType> {
+        match self {
+            Self::CatalogRef => Some(MdoType::Catalog),
+            Self::DocumentRef => Some(MdoType::Document),
+            Self::EnumRef => Some(MdoType::Enum),
+            Self::TaskRef => Some(MdoType::Task),
+            Self::BusinessProcessRef => Some(MdoType::BusinessProcess),
+            Self::ExchangePlanRef => Some(MdoType::ExchangePlan),
+            Self::ChartOfAccountsRef => Some(MdoType::ChartOfAccounts),
+            Self::InformationRegisterRef => Some(MdoType::InformationRegister),
+            Self::AccumulationRegisterRef => Some(MdoType::AccumulationRegister),
+            Self::AccountingRegisterRef => Some(MdoType::AccountingRegister),
+            Self::CalculationRegisterRef => Some(MdoType::CalculationRegister),
+            _ => None,
+        }
+    }
+
     /// English prefix under which this kind's platform methods and properties
     /// are indexed in `bsl-platform` (`CatalogObject`, `CatalogRef`, …).
     ///
@@ -628,6 +652,16 @@ pub enum TypeKind {
     AnyMetadataRef {
         mdo_type: MdoType,
     },
+    /// `ЛюбаяСсылка` — a reference of *any* MDO flavour. The supertype
+    /// of every concrete `MetadataRef(*Ref)` and every
+    /// [`Self::AnyMetadataRef`].
+    ///
+    /// Distinct from [`Self::Unknown`] (analysis-incomplete) and
+    /// [`Self::Any`] (`Произвольный`, the universal type): `AnyRef`
+    /// positively asserts "this value *is* a reference", which the
+    /// `Null ≤ ref` rule and the ref subtype rules depend on. Carries no
+    /// `mdo_type` precisely because the flavour is unknown.
+    AnyRef,
     /// Concrete metadata object: `СправочникОбъект.X`, etc.
     MetadataObject(MetaObjFacet),
     /// Tabular section of an MDO. `parent` pins the owner MDO;

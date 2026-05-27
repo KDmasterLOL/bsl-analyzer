@@ -18,7 +18,7 @@
 //! | `Number { precision, scale }` | `Ty::Number` (dims preserved in shadow)   |
 //! | `Date` / `DateTime`           | `Ty::Date`                                |
 //! | `Ref(MdoRef)`                 | `Ty::MetadataRef { *Ref, name }`          |
-//! | `AnyRef`                      | `Ty::Unknown`                             |
+//! | `AnyRef`                      | `Ty::AnyRef`                              |
 //! | `AnyObjectRef { mdo_type }`   | `Ty::AnyMetadataRef { mdo_type }`         |
 //! | `Uuid`                        | `Ty::PlatformObject("УникальныйИдентификатор")` |
 //! | `ValueStorage`                | `Ty::PlatformObject("ХранилищеЗначения")` |
@@ -104,7 +104,11 @@ pub fn sdbl_type_to_typeid(db: &dyn TypeKernelDb, t: &sdbl_hir::SdblType) -> Typ
         S::Number { .. } => db.number(None, None),
         S::Date | S::DateTime => db.date(DateComponent::DateTime),
         S::Ref(mdo) => mdo_ref_to_typeid(db, mdo),
-        S::AnyRef => db.unknown(),
+        // Query `ЛюбаяСсылка` → the kernel `AnyRef` supertype, matching the
+        // doc/XML lowering path. Mapping to `Unknown` here would reopen a
+        // down-flow hole (`Unknown` is bidirectionally assignable), letting
+        // a query-typed any-ref slip into a concrete-ref slot unchecked.
+        S::AnyRef => db.any_ref(),
         S::AnyObjectRef { mdo_type } => db.any_metadata_ref(*mdo_type),
         S::Uuid => db.platform_object("УникальныйИдентификатор".to_string()),
         S::ValueStorage => db.platform_object("ХранилищеЗначения".to_string()),
@@ -389,7 +393,7 @@ mod tests {
             (SdblType::ValueTable, db.value_table(None, TableSource::Unknown)),
             (SdblType::Uuid, db.platform_object("УникальныйИдентификатор".to_string())),
             (SdblType::ValueStorage, db.platform_object("ХранилищеЗначения".to_string())),
-            (SdblType::AnyRef, db.unknown()),
+            (SdblType::AnyRef, db.any_ref()),
             (SdblType::Unknown, db.unknown()),
             (SdblType::Error, db.unknown()),
             (
@@ -465,7 +469,7 @@ mod tests {
             sdbl_type_to_typeid(&db, &SdblType::ValueTable),
             db.value_table(None, TableSource::Unknown)
         );
-        assert_eq!(sdbl_type_to_typeid(&db, &SdblType::AnyRef), db.unknown());
+        assert_eq!(sdbl_type_to_typeid(&db, &SdblType::AnyRef), db.any_ref());
         assert_eq!(sdbl_type_to_typeid(&db, &SdblType::Unknown), db.unknown());
         assert_eq!(sdbl_type_to_typeid(&db, &SdblType::Error), db.unknown());
     }

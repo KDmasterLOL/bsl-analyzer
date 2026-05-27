@@ -111,7 +111,13 @@ impl<'a> TyLoweringContext<'a> {
                     parts.iter().map(|t| self.lower_type_ref_id_inner(db, t, visited)).collect();
                 db.union(lowered)
             }
-            TypeRef::AnyRef | TypeRef::Unknown => db.unknown(),
+            // `ЛюбаяСсылка` — a reference of any flavour. Distinct from
+            // `Unknown`: it positively asserts ref-ness so the subtype
+            // rules accept any concrete `*Ссылка` into an `AnyRef` slot.
+            TypeRef::AnyRef => db.any_ref(),
+            // `<Flavour>Ссылка` without a name → kind-scoped any-ref.
+            TypeRef::AnyRefOf(mdo) => db.any_metadata_ref(*mdo),
+            TypeRef::Unknown => db.unknown(),
         }
     }
 
@@ -641,8 +647,9 @@ mod tests {
         let id = ctx().lower_type_ref_id(&db, &qualified);
         assert_metadata_ref(&db, id, MetadataKind::CatalogRef, "Номенклатура");
 
-        // AnyRef / Unknown remain Unknown until Ty::AnyRef lands.
-        assert_eq!(ctx().lower_type_ref_id(&db, &TypeRef::AnyRef), db.unknown());
+        // `ЛюбаяСсылка` lowers to the kernel `AnyRef` supertype; only the
+        // flavour-less `Unknown` marker stays `Unknown`.
+        assert_eq!(ctx().lower_type_ref_id(&db, &TypeRef::AnyRef), db.any_ref());
         assert_eq!(ctx().lower_type_ref_id(&db, &TypeRef::Unknown), db.unknown());
     }
 
@@ -888,7 +895,8 @@ mod tests {
                 ))),
                 db.map(None, None),
             ),
-            (TypeRef::AnyRef, db.unknown()),
+            (TypeRef::AnyRef, db.any_ref()),
+            (TypeRef::AnyRefOf(MdoType::Catalog), db.any_metadata_ref(MdoType::Catalog)),
             (TypeRef::Unknown, db.unknown()),
             // bare names: builtin, MDO plural, RefPrefix-without-name guard,
             // platform-object fallback.
@@ -924,7 +932,10 @@ mod tests {
                 TypeRef::Union(vec![TypeRef::Builtin(BuiltinTypeRef::Number), TypeRef::Unknown]),
                 db.union(vec![db.number(None, None), db.unknown()]),
             ),
-            (TypeRef::Union(vec![TypeRef::Unknown, TypeRef::AnyRef]), db.unknown()),
+            (
+                TypeRef::Union(vec![TypeRef::Unknown, TypeRef::AnyRef]),
+                db.union(vec![db.unknown(), db.any_ref()]),
+            ),
             (
                 TypeRef::Union(vec![
                     TypeRef::Builtin(BuiltinTypeRef::Boolean),

@@ -54,8 +54,15 @@ pub enum TypeRef {
     /// `Соответствие` with optional `(Ключ, Значение)` types.
     Map(Option<(Box<TypeRef>, Box<TypeRef>)>),
 
-    /// `ЛюбаяСсылка` — matches XML `cfg:AnyRef` without a concrete name.
+    /// `ЛюбаяСсылка` — matches XML `cfg:AnyRef`, a bare `ЛюбаяСсылка` /
+    /// `AnyRef` doc-comment type, without a concrete name or flavour.
     AnyRef,
+
+    /// `<Flavour>Ссылка` without a concrete name — XML `cfg:AnyObjectRef`
+    /// (e.g. "any catalog reference"). Carries the MDO flavour so
+    /// lowering can mint a kind-scoped `AnyMetadataRef{mdo_type}` instead
+    /// of collapsing to the flavour-less [`Self::AnyRef`].
+    AnyRefOf(MdoType),
 
     /// Union of types — from XML `AttributeType::Composite` and JSDoc
     /// `"Число, Строка"` (M3 Task 4 parser).
@@ -123,6 +130,11 @@ impl TypeRef {
         match name.to_lowercase().as_str() {
             "массив" | "array" => Some(TypeRef::Array(None)),
             "соответствие" | "map" => Some(TypeRef::Map(None)),
+            // `ЛюбаяСсылка` / `AnyRef` as a bare type word (doc comments,
+            // `ОписаниеТипов` literals). The XML path reaches `AnyRef` via
+            // `from_attribute_type`; this is the source-text counterpart so
+            // the word does not fall through to an opaque `PlatformObject`.
+            "любаяссылка" | "anyref" => Some(TypeRef::AnyRef),
             other => BuiltinTypeRef::from_name(other).map(TypeRef::Builtin),
         }
     }
@@ -153,15 +165,13 @@ impl TypeRef {
                 None => TypeRef::Unknown,
             },
             AttributeType::AnyRef => TypeRef::AnyRef,
-            // `AnyObjectRef { mdo_type }` means "any ref of this kind" without
-            // a concrete object name — semantically narrower than `AnyRef`
-            // but M2 has no `Ty::AnyOf(kind)` variant yet, so we collapse it
-            // into `TypeRef::AnyRef`. This deliberately avoids emitting a
-            // 1-segment `TypeRef::Name([prefix])`, which downstream lowering
-            // would misread as a bare platform object and turn into
-            // `Ty::PlatformObject("CatalogRef")`. Promote to a dedicated
-            // kind-scoped variant when `Ty` gains union / any-of support.
-            AttributeType::AnyObjectRef { .. } => TypeRef::AnyRef,
+            // `AnyObjectRef { mdo_type }` means "any ref of this flavour"
+            // without a concrete object name — semantically narrower than
+            // `AnyRef`. Carry the flavour through [`TypeRef::AnyRefOf`] so
+            // lowering mints `AnyMetadataRef{mdo_type}` (the kernel kind-
+            // scoped any-ref). Must NOT emit a 1-segment `TypeRef::Name`,
+            // which lowering would misread as a bare platform object.
+            AttributeType::AnyObjectRef { mdo_type } => TypeRef::AnyRefOf(*mdo_type),
             AttributeType::Uuid => {
                 TypeRef::Name(QualifiedName::from_segments([Name::new("УникальныйИдентификатор")]))
             }
@@ -313,17 +323,16 @@ mod tests {
     fn typeref_from_attribute_any_ref_and_any_object_ref() {
         assert_eq!(TypeRef::from_attribute_type(&AttributeType::AnyRef), TypeRef::AnyRef);
 
-        // `AnyObjectRef` loses the `mdo_type` discriminator in M2 because
-        // there is no `Ty::AnyOf(kind)` — we map to `TypeRef::AnyRef` to
-        // avoid producing a bogus 1-segment `TypeRef::Name(["DocumentRef"])`
-        // that the lowering fallback would turn into
-        // `Ty::PlatformObject("DocumentRef")`. When Ty grows union support,
-        // flip this test to expect the kind-scoped variant.
+        // `AnyObjectRef` keeps its `mdo_type` flavour via the kind-scoped
+        // `TypeRef::AnyRefOf`, which lowers to `AnyMetadataRef{mdo_type}`.
+        // It must NOT collapse to the flavour-less `TypeRef::AnyRef`, nor
+        // emit a 1-segment `TypeRef::Name(["DocumentRef"])` that lowering
+        // would misread as `PlatformObject("DocumentRef")`.
         assert_eq!(
             TypeRef::from_attribute_type(&AttributeType::AnyObjectRef {
                 mdo_type: MdoType::Document,
             }),
-            TypeRef::AnyRef
+            TypeRef::AnyRefOf(MdoType::Document)
         );
     }
 

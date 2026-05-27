@@ -195,6 +195,13 @@ pub trait Builders: TypeKernelDb {
         self.intern_type(TypeKind::AnyMetadataRef { mdo_type })
     }
 
+    /// `AnyRef` — `ЛюбаяСсылка`, a reference of any MDO flavour. The
+    /// supertype of every concrete reference; coarser than both
+    /// [`Builders::metadata_ref`] and [`Builders::any_metadata_ref`].
+    fn any_ref(&self) -> TypeId {
+        self.intern_type(TypeKind::AnyRef)
+    }
+
     /// `ManagerCollection(MdoType)` — `Справочники`, `Документы`, ….
     fn manager_collection(&self, mdo_type: bsl_metadata::MdoType) -> TypeId {
         self.intern_type(TypeKind::ManagerCollection(mdo_type))

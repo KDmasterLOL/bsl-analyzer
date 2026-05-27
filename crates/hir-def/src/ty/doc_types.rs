@@ -754,18 +754,27 @@ mod tests {
     }
 
     #[test]
-    fn parse_type_name_array_of_t_keeps_unresolved_tail() {
-        // `Массив из ЛюбаяСсылка` has a tail that's not a builtin —
-        // it falls through to `TypeRef::Name` at lowering time. The
-        // important thing here is that the wrapper survives intact and
-        // the tail is *not* lowercased (would damage `Name` Eq/Hash and
-        // hover rendering).
+    fn parse_type_name_array_of_any_ref() {
+        // `Массив из ЛюбаяСсылка` — the element `ЛюбаяСсылка` is the
+        // recognised AnyRef supertype (`from_bare_name`), so the wrapper
+        // carries `TypeRef::AnyRef`, not an opaque `TypeRef::Name`. This
+        // is what lets `Массив из ЛюбаяСсылка` accept arrays of any
+        // concrete reference downstream.
         let parsed = parse_type_name("Массив из ЛюбаяСсылка");
+        assert_eq!(parsed, TypeRef::Array(Some(Box::new(TypeRef::AnyRef))));
+    }
+
+    #[test]
+    fn parse_type_name_array_of_t_keeps_unresolved_tail() {
+        // A genuinely unresolved tail (a user-defined name, not a builtin
+        // or AnyRef) survives intact as `TypeRef::Name` and is *not*
+        // lowercased (would damage `Name` Eq/Hash and hover rendering).
+        let parsed = parse_type_name("Массив из ПроизвольныйТип");
         match parsed {
             TypeRef::Array(Some(inner)) => match *inner {
                 TypeRef::Name(qname) => {
                     assert_eq!(qname.len(), 1);
-                    assert_eq!(qname.first().as_str(), "ЛюбаяСсылка");
+                    assert_eq!(qname.first().as_str(), "ПроизвольныйТип");
                 }
                 other => panic!("expected inner TypeRef::Name, got {other:?}"),
             },

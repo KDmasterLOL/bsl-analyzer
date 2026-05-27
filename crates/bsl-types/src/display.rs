@@ -152,6 +152,10 @@ fn render(kind: &TypeKind, ctx: &dyn DisplayCtx, db: &dyn TypeKernelDb, buf: &mu
         TypeKind::AnyMetadataRef { mdo_type } => {
             buf.push_str(manager_collection_label(*mdo_type, ctx.locale()));
         }
+        TypeKind::AnyRef => buf.push_str(match ctx.locale() {
+            Locale::Ru => "ЛюбаяСсылка",
+            Locale::En => "AnyRef",
+        }),
         TypeKind::ManagerCollection(mdo_type) => {
             buf.push_str(manager_collection_label(*mdo_type, ctx.locale()));
         }
@@ -610,6 +614,16 @@ mod tests {
         );
         expect!["ТабличнаяЧасть.Номенклатура.Товары"].assert_eq(&show(&db, ts, &ru()));
         expect!["TabularSection.Номенклатура.Товары"].assert_eq(&show(&db, ts, &en()));
+    }
+
+    #[test]
+    fn any_ref_renders_localized_label() {
+        // `AnyRef` is the `ЛюбаяСсылка` supertype — rendered with the bare
+        // localized word, not the manager-collection label used by the
+        // flavoured `AnyMetadataRef`.
+        let db = InMemoryDb::new();
+        expect!["ЛюбаяСсылка"].assert_eq(&show(&db, db.any_ref(), &ru()));
+        expect!["AnyRef"].assert_eq(&show(&db, db.any_ref(), &en()));
     }
 
     #[test]
