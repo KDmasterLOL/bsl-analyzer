@@ -1,19 +1,12 @@
 //! Output locale for user-facing strings.
 //!
 //! BSL is bilingual (Russian / English) at the language level. The analyzer
-//! emits diagnostics, hover labels, and completion details on the user-facing
-//! side; for primitive type names and generic labels we want to render them in
-//! the user's locale ("Число" rather than "Number" when the IDE is Russian).
+//! uses `Locale` when rendering user-facing type names and generic labels in
+//! diagnostics, hover, and completion output.
 //!
-//! `Locale` is a small value-type that flows from [Driver layer](LSP /
-//! TOML config) down to the presentation adapters (diagnostics emitters,
-//! hover/completion renderers). The domain layer (`Ty`, `hir-ty`) treats it
-//! as opaque — it only consults the variant when producing display strings.
-//!
-//! Default is [`Locale::Ru`] because BSL is a Russian-first language: the
-//! BSL community writes code in Russian by overwhelming default, and a Russian
-//! 1C project loaded in an IDE without any locale signal should display
-//! Russian type names.
+//! The default is [`Locale::Ru`] because BSL projects and platform APIs are
+//! Russian-first. Project config and LSP locale signals may override it before
+//! values reach presentation code.
 
 /// User-facing output locale.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
@@ -26,7 +19,6 @@ pub enum Locale {
 }
 
 /// Returned when a config string could not be mapped to a known locale.
-/// The caller is expected to log a warning and fall back to a default.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnknownLocale(pub String);
 
@@ -39,17 +31,17 @@ impl std::fmt::Display for UnknownLocale {
 impl std::error::Error for UnknownLocale {}
 
 impl Locale {
-    /// Parse a locale label from project config (`bsl-analyzer.toml`'s
-    /// `[output] display_language` field).
+    /// Parse `[output] display_language` from project config.
     ///
     /// Accepts both bare codes (`"ru"`, `"en"`) and a few common aliases.
     /// Unknown values return an [`UnknownLocale`] so the caller can warn
     /// and pick an explicit fallback (typically [`Locale::default()`]).
     pub fn from_config_str(s: &str) -> Result<Self, UnknownLocale> {
-        match s.trim().to_ascii_lowercase().as_str() {
+        let trimmed = s.trim();
+        match trimmed.to_ascii_lowercase().as_str() {
             "ru" | "russian" | "ru-ru" | "ru_ru" => Ok(Locale::Ru),
             "en" | "english" | "en-us" | "en_us" | "en-gb" | "en_gb" => Ok(Locale::En),
-            _ => Err(UnknownLocale(s.to_string())),
+            _ => Err(UnknownLocale(trimmed.to_string())),
         }
     }
 }
@@ -81,5 +73,11 @@ mod tests {
         assert_eq!(err.0, "fr");
         assert!(Locale::from_config_str("").is_err());
         assert!(Locale::from_config_str("xx-YY").is_err());
+    }
+
+    #[test]
+    fn from_config_str_trims_unknown_value() {
+        let err = Locale::from_config_str(" fr ").unwrap_err();
+        assert_eq!(err.0, "fr");
     }
 }
