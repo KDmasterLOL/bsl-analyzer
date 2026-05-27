@@ -29,22 +29,16 @@ pub use queries::{method_regions_query, parse_query, resolve_vfs_path_query};
 /// It uses Salsa for automatic dependency tracking and cache invalidation.
 #[salsa::db]
 pub trait SourceDatabase: salsa::Database {
-    /// Get the Salsa input for file text.
     fn file_text_input(&self, file_id: FileId) -> FileTextInput;
 
-    /// Get the Salsa input for source root.
     fn source_root_input(&self, source_root_id: SourceRootId) -> SourceRootInput;
 
-    /// Get the Salsa input for file source root mapping.
     fn file_source_root_input(&self, file_id: FileId) -> FileSourceRootInput;
 
-    /// Set file text.
     fn set_file_text(&mut self, file_id: FileId, text: &str);
 
-    /// Set file source root mapping.
     fn set_file_source_root(&mut self, file_id: FileId, source_root_id: SourceRootId);
 
-    /// Set source root.
     fn set_source_root(&mut self, source_root_id: SourceRootId, source_root: SourceRoot);
 
     /// Resolve a VfsPath to FileId within a SourceRoot.
@@ -173,13 +167,10 @@ pub struct Files {
 }
 
 impl Files {
-    /// Create a new empty Files collection.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Get the Salsa input for file text.
-    ///
     /// # Panics
     ///
     /// Panics if the file has not been set.
@@ -190,8 +181,6 @@ impl Files {
         })
     }
 
-    /// Try to get the Salsa input for file text.
-    ///
     /// Returns None if the file has not been loaded yet.
     pub fn try_file_text(&self, file_id: FileId) -> Option<FileTextInput> {
         self.file_texts.get(&file_id).map(|entry| *entry.value())
@@ -289,7 +278,9 @@ impl Files {
         }
     }
 
-    /// Get the Salsa input for source root.
+    /// # Panics
+    ///
+    /// Panics if the source root has not been set.
     pub fn source_root(&self, source_root_id: SourceRootId) -> SourceRootInput {
         self.source_roots.get(&source_root_id).map(|entry| *entry.value()).unwrap_or_else(|| {
             tracing::error!(?source_root_id, "source root not set — this is a programming error");
@@ -297,7 +288,6 @@ impl Files {
         })
     }
 
-    /// Set the source root.
     pub fn set_source_root(
         &self,
         db: &mut dyn SourceDatabase,
@@ -322,7 +312,9 @@ impl Files {
         }
     }
 
-    /// Get the Salsa input for file source root mapping.
+    /// # Panics
+    ///
+    /// Panics if the file source root mapping has not been set.
     pub fn file_source_root(&self, file_id: FileId) -> FileSourceRootInput {
         self.file_source_roots.get(&file_id).map(|entry| *entry.value()).unwrap_or_else(|| {
             tracing::error!(?file_id, "file source root not set — this is a programming error");
@@ -330,7 +322,6 @@ impl Files {
         })
     }
 
-    /// Set the file source root mapping.
     pub fn set_file_source_root(
         &self,
         db: &mut dyn SourceDatabase,
