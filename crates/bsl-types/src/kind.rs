@@ -284,6 +284,31 @@ impl MetadataKind {
         }
     }
 
+    /// The `*Ref` reference variant for an MDO flavour — inverse of
+    /// [`Self::ref_mdo_type`]. `None` for flavours with no reference form
+    /// in [`MetadataKind`] (DataProcessor, Report, registers' inner kinds,
+    /// CommonModule, …).
+    ///
+    /// Used to give a flavour-scoped [`TypeKind::AnyMetadataRef`] the same
+    /// platform method / completion / display surface a concrete
+    /// `MetadataRef(*Ref)` of that flavour would have, minus the name.
+    pub fn ref_kind_for(mdo_type: MdoType) -> Option<Self> {
+        match mdo_type {
+            MdoType::Catalog => Some(MetadataKind::CatalogRef),
+            MdoType::Document => Some(MetadataKind::DocumentRef),
+            MdoType::Enum => Some(MetadataKind::EnumRef),
+            MdoType::Task => Some(MetadataKind::TaskRef),
+            MdoType::BusinessProcess => Some(MetadataKind::BusinessProcessRef),
+            MdoType::ExchangePlan => Some(MetadataKind::ExchangePlanRef),
+            MdoType::ChartOfAccounts => Some(MetadataKind::ChartOfAccountsRef),
+            MdoType::InformationRegister => Some(MetadataKind::InformationRegisterRef),
+            MdoType::AccumulationRegister => Some(MetadataKind::AccumulationRegisterRef),
+            MdoType::AccountingRegister => Some(MetadataKind::AccountingRegisterRef),
+            MdoType::CalculationRegister => Some(MetadataKind::CalculationRegisterRef),
+            _ => None,
+        }
+    }
+
     /// Sibling of [`Self::object_kind_for`] for register record-set modules.
     ///
     /// Returns the `*RecordSet` companion kind for the four register

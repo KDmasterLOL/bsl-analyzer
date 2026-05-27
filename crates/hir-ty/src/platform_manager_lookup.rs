@@ -157,6 +157,64 @@ pub(crate) fn build_resolution(
     PlatformMethodResolution { signature, return_ty, overloads: lower_overloads_typeid(db, method) }
 }
 
+/// Resolve a method on a flavour-scoped any-reference
+/// ([`TypeKind::AnyMetadataRef`]) — `ЛюбаяСсылка<Catalog>`.
+///
+/// Same platform surface as a concrete `MetadataRef(*Ref)` of that
+/// flavour, minus the concrete name: methods are found under the flavour
+/// prefix (`CatalogRef.*.<method>`), but name-bound generic returns
+/// cannot be made concrete. A same-flavour ref return therefore widens
+/// back to `AnyMetadataRef { mdo_type }`; an object return (no name to
+/// bind) degrades to `Unknown`.
+///
+/// `None` when the flavour has no `*Ref` kind, no composite platform
+/// prefix, or the method is not found under that prefix.
+pub fn resolve_platform_any_metadata_ref_method(
+    db: &dyn TypeKernelDb,
+    mdo_type: MdoType,
+    method_name: &Name,
+) -> Option<PlatformMethodResolution> {
+    let ref_kind = MetadataKind::ref_kind_for(mdo_type)?;
+    let (prefix, parent_mdo) = metadata_kind_to_prefix_and_mdo(ref_kind)?;
+    let method = find_prefixed_method(prefix, method_name.as_str())?;
+
+    let params: Vec<TypeId> = method
+        .parameters
+        .iter()
+        .map(|p| {
+            p.param_type
+                .as_ref()
+                .map(|t| lower_param_type_string_typeid(db, t))
+                .unwrap_or(db.unknown())
+        })
+        .collect();
+    let defaults: Vec<bool> = method.parameters.iter().map(|p| p.is_optional).collect();
+
+    let return_ty = method
+        .return_type
+        .as_ref()
+        .map(|raw| match map_generic_metadata_return_type(raw, parent_mdo) {
+            // Same-flavour ref return: re-widen to the any-ref (no name).
+            Some(kind) if kind.ref_mdo_type().is_some() => db.any_metadata_ref(parent_mdo),
+            // Object / other generic return: no name to bind → Unknown.
+            Some(_) => db.unknown(),
+            None => lower_platform_type_name_typeid(db, raw),
+        })
+        .unwrap_or(db.undefined());
+
+    let signature = FunctionSignature {
+        max_args: Some(params.len() as u32),
+        params: params.into_boxed_slice(),
+        defaults: defaults.into_boxed_slice(),
+        ret: return_ty,
+    };
+    Some(PlatformMethodResolution {
+        signature,
+        return_ty,
+        overloads: lower_overloads_typeid(db, &method),
+    })
+}
+
 /// Kernel-native counterpart of [`map_generic_metadata_return_type`].
 pub(crate) fn map_generic_metadata_return_type_typeid(
     db: &dyn TypeKernelDb,
@@ -494,6 +552,60 @@ mod tests {
         )
         .expect("platform data indexes Write under CatalogObject");
         assert_eq!(res.return_ty, db.undefined());
+    }
+
+    #[test]
+    fn any_metadata_ref_resolves_common_method_without_name() {
+        // A flavour-scoped any-ref (`ЛюбаяСсылка<Catalog>`) reaches the same
+        // `CatalogRef.*` platform surface as a named catalog ref — no
+        // concrete name required for the method itself.
+        let db = InMemoryDb::new();
+        let res = resolve_platform_any_metadata_ref_method(
+            &db,
+            MdoType::Catalog,
+            &Name::new("Метаданные"),
+        );
+        assert!(res.is_some(), "Metadata() must resolve on AnyMetadataRef{{Catalog}}");
+    }
+
+    #[test]
+    fn any_metadata_ref_object_return_degrades_to_unknown() {
+        // `ПолучитьОбъект()` returns `СправочникОбъект` — a name-bound
+        // object kind. With no concrete name to bind, the nameless resolver
+        // must degrade it to `Unknown` rather than inventing a name.
+        let db = InMemoryDb::new();
+        let res = resolve_platform_any_metadata_ref_method(
+            &db,
+            MdoType::Catalog,
+            &Name::new("ПолучитьОбъект"),
+        )
+        .expect("GetObject must resolve on AnyMetadataRef{Catalog}");
+        assert_eq!(res.return_ty, db.unknown(), "object return has no name to bind → Unknown");
+    }
+
+    #[test]
+    fn any_metadata_ref_unknown_method_is_none() {
+        let db = InMemoryDb::new();
+        assert!(resolve_platform_any_metadata_ref_method(
+            &db,
+            MdoType::Catalog,
+            &Name::new("НесуществующийМетод"),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn any_metadata_ref_register_flavour_has_no_ref_surface() {
+        // Register `*Ref` kinds carry no composite platform prefix, so a
+        // register-flavour any-ref resolves nothing — matching concrete
+        // register-ref behaviour.
+        let db = InMemoryDb::new();
+        assert!(resolve_platform_any_metadata_ref_method(
+            &db,
+            MdoType::InformationRegister,
+            &Name::new("Метаданные"),
+        )
+        .is_none());
     }
 
     #[test]
