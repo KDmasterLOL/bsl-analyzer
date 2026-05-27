@@ -94,30 +94,30 @@ pub struct InstallRequest {
 }
 
 #[derive(Debug, Clone)]
-pub struct ServerSpec {
-    pub name: String,
-    pub command: String,
-    pub args: Vec<String>,
-    pub env: BTreeMap<String, String>,
+pub(super) struct ServerSpec {
+    pub(super) name: String,
+    pub(super) command: String,
+    pub(super) args: Vec<String>,
+    pub(super) env: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
-pub struct InstallAction {
-    pub target: InstallTarget,
-    pub scope: InstallScope,
-    pub spec: ServerSpec,
-    pub project_dir: PathBuf,
-    pub force: bool,
-    pub dry_run: bool,
+pub(super) struct InstallAction {
+    pub(super) target: InstallTarget,
+    pub(super) scope: InstallScope,
+    pub(super) spec: ServerSpec,
+    pub(super) project_dir: PathBuf,
+    pub(super) force: bool,
+    pub(super) dry_run: bool,
 }
 
 #[derive(Debug, Clone)]
-pub struct InstallPlan {
-    pub actions: Vec<InstallAction>,
+pub(super) struct InstallPlan {
+    pub(super) actions: Vec<InstallAction>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ApplyDecision {
+pub(super) enum ApplyDecision {
     Install,
     Update,
 }
@@ -144,14 +144,14 @@ pub struct InstallResult {
 }
 
 impl ApplyDecision {
-    pub fn status(self) -> InstallStatus {
+    pub(super) fn status(self) -> InstallStatus {
         match self {
             Self::Install => InstallStatus::Installed,
             Self::Update => InstallStatus::Updated,
         }
     }
 
-    pub fn action_label(self) -> &'static str {
+    pub(super) fn action_label(self) -> &'static str {
         match self {
             Self::Install => "install",
             Self::Update => "update",
@@ -159,7 +159,7 @@ impl ApplyDecision {
     }
 }
 
-pub fn resolve_apply_decision(
+pub(super) fn resolve_apply_decision(
     exists: bool,
     force: bool,
     target: InstallTarget,
@@ -179,7 +179,7 @@ pub fn resolve_apply_decision(
     }
 }
 
-pub fn normalize_source_dir_for_scope(
+pub(super) fn normalize_source_dir_for_scope(
     scope: InstallScope,
     project_dir: &Path,
     source_dir: &Path,

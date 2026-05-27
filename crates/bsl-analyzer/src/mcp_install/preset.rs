@@ -2,7 +2,7 @@ use crate::mcp_install::model::{
     normalize_source_dir_for_scope, InstallPreset, InstallRequest, ServerSpec,
 };
 
-pub fn build_server_spec(request: &InstallRequest) -> ServerSpec {
+pub(super) fn build_server_spec(request: &InstallRequest) -> ServerSpec {
     match request.preset {
         InstallPreset::Workspace => build_workspace_spec(request),
         InstallPreset::Reference => build_reference_spec(request),
