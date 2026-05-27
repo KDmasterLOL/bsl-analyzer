@@ -833,6 +833,34 @@ fn test_partial_dot_preserves_next_function_declaration() {
 }
 
 #[test]
+fn test_partial_dot_preserves_orphaned_function_declaration() {
+    // `Функция` is a valid property name, but a line-leading `Функция Имя(`
+    // header is an orphaned declaration (the enclosing item lost its
+    // terminator) and must NOT be swallowed as a field name. The guard keys
+    // on the declaration shape, not the line break, so the partial dot still
+    // reports the property error and leaves `Callee` reachable.
+    let input = "Функция Caller()\n    X.\nФункция Callee()\n    Возврат 0;\nКонецФункции\n";
+    let result = parse(input);
+
+    let errs = result.errors();
+    assert!(
+        errs.iter().any(|e| e.message().contains("свойства")),
+        "expected `ожидалось имя свойства` error on partial dot; got: {:?}",
+        errs.iter().map(|e| e.message().to_string()).collect::<Vec<_>>(),
+    );
+    assert!(
+        result.syntax_node().descendants().any(|n| {
+            n.kind().to_string() == "FUNCTION_DEF"
+                && n.descendants_with_tokens().any(|el| {
+                    el.into_token()
+                        .is_some_and(|t| t.kind().to_string() == "IDENT" && t.text() == "Callee")
+                })
+        }),
+        "orphaned `Функция Callee()` declaration must not be swallowed as a property name"
+    );
+}
+
+#[test]
 fn test_large_file_performance() {
     // Large real-world BSL module for performance testing
     let input = include_str!("fixtures/Module.bsl");

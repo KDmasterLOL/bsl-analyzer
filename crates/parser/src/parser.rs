@@ -248,6 +248,37 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Like [`skip_trivia`](Self::skip_trivia), but reports whether a line break
+    /// was among the skipped tokens. Used by post-`.` recovery to tell a
+    /// line-leading token apart from one on the same line as the dot.
+    pub fn skip_trivia_crossing_newline(&mut self) -> bool {
+        let mut crossed_newline = false;
+        while let Some(kind) = self.current() {
+            match kind {
+                TokenKind::Newline => {
+                    crossed_newline = true;
+                    self.bump();
+                }
+                TokenKind::Whitespace | TokenKind::Comment | TokenKind::Bom => self.bump(),
+                _ => break,
+            }
+        }
+        crossed_newline
+    }
+
+    /// Returns true if the parser is positioned at the header of a function or
+    /// procedure declaration (`Функция Имя` / `Процедура Имя`). Non-consuming.
+    ///
+    /// `Функция`/`Процедура` are valid property names (`Перечисления.X.Функция`),
+    /// so they belong to the post-`.` allowlist — but a declaration header can
+    /// never be an expression member. After a line break, this shape means the
+    /// enclosing item lost its terminator and the declaration must be left for
+    /// the module rule to recover, not swallowed as a field name.
+    pub fn at_declaration_start(&self) -> bool {
+        matches!(self.current(), Some(TokenKind::KwFunction | TokenKind::KwProcedure))
+            && self.nth_non_trivia(0) == Some(TokenKind::Ident)
+    }
+
     /// Checks whether the parser appears stuck in the recent token window.
     /// The guard panics only when the position barely moves; large-but-progressing
     /// inputs (e.g. a multi-megabyte file fed by mistake) merely reset the counter.
