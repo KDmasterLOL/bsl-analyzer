@@ -68,7 +68,8 @@ Detailed reference: `docs/architecture/ARCHITECTURE.md`, `docs/contributing/DEVE
    let _span = tracing::info_span!("parse_file", len = input.len()).entered();
    ```
 
-4. **Self-documenting code**. Comments explain WHY, not WHAT. Doc-comments (`///`) for public API. No commented-out code, no obvious-restate-of-code comments.
+4. **Self-documenting code**. Comments explain WHY, not WHAT. Doc-comments (`///`) for public API. No commented-out code, no obvious-restate-of-code comments — if the code already makes its intent clear, write no comment.
+   - **No process references in comments.** Never cite a plan, phase, milestone, task, PR, review, or reviewer in code/test comments (e.g. `§4.E.6e follow-up`, `Phase C`, `PR2:`, `Codex round-1 area 8`, `M4 Task 7`). They rot and mean nothing to a future reader. State the WHY directly; process/history belongs in commit messages and the tracker, not the source.
 
 5. **Tests are mandatory** for new functionality. Use `expect-test` snapshots for parser/AST output. Fixtures live in the repo (`include_str!("fixtures/...")`) — no absolute paths, no per-machine references. **New diagnostic** = handler module + `DiagnosticMetadata` registration + test fixture + `crates/ide-diagnostics/docs/{en,ru}/<Code>.md`; full route in `CONTRIBUTING.md`.
 
