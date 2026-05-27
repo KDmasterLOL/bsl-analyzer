@@ -1,6 +1,4 @@
 //! Request and notification dispatching.
-//!
-//! This module provides the dispatcher pattern for LSP requests and notifications.
 
 use std::fmt;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -15,17 +13,9 @@ use crate::global_state::{GlobalState, Task};
 
 /// Dispatcher for LSP requests.
 ///
-/// Provides a chain-based API for handling different request types:
-/// - `on_sync_mut`: Handlers that need mutable access to GlobalState (main thread).
-///   Use for writes (shutdown, reload).
-/// - `on_sync`: Read-only handlers that run on the main thread. Reserved for
-///   requests the client expects to be synchronous (formatting).
-/// - `on_latency`: Read-only handlers dispatched to the task pool. The handler
-///   receives an immutable `LatencyRequestContext` (frozen `MemDocs` / VFS
-///   paths + owned Salsa snapshot), so it cannot race with `didChange`. The
-///   main loop stays free to handle `$/cancelRequest` and further edits.
+/// Supports main-thread handlers for state mutations and background handlers
+/// for read-only requests that can tolerate latency.
 ///
-/// # Example
 /// ```ignore
 /// RequestDispatcher { req: Some(req), global_state: &mut state }
 ///     .on_sync_mut::<Shutdown>(|state, ()| { state.shutdown_requested = true; Ok(()) })
@@ -39,9 +29,7 @@ pub struct RequestDispatcher<'a> {
 }
 
 impl RequestDispatcher<'_> {
-    /// Handles a request with mutable access to GlobalState.
-    ///
-    /// Use this for requests that need to modify server state (e.g., shutdown, reload).
+    /// Handles a request that mutates server state.
     pub fn on_sync_mut<R>(
         &mut self,
         f: fn(&mut GlobalState, R::Params) -> Result<R::Result>,
@@ -65,9 +53,7 @@ impl RequestDispatcher<'_> {
         self
     }
 
-    /// Handles a request with immutable snapshot access.
-    ///
-    /// Use this for read-only queries that don't modify server state.
+    /// Handles a request against a main-thread snapshot.
     pub fn on_sync<R>(
         &mut self,
         f: fn(crate::global_state::GlobalStateSnapshot, R::Params) -> Result<R::Result>,
@@ -92,18 +78,12 @@ impl RequestDispatcher<'_> {
         self
     }
 
-    /// Handles a read-only request on the background task pool.
+    /// Handles a read-only request on the task pool.
     ///
-    /// Builds an immutable `LatencyRequestContext` on the main thread
-    /// (freezes `MemDocs` and VFS paths, clones the Salsa DB), tracks a
-    /// `salsa::CancellationToken` in `GlobalState.request_tokens`, and
-    /// spawns the handler on the task pool. The response is delivered to
-    /// the main loop via `Task::RequestResult`; cancellation unwinds the
-    /// worker cooperatively and produces a `RequestCanceled` response.
-    ///
-    /// Guarantees exactly one `Task::RequestResult` per dispatch, even if
-    /// the handler panics — panics are caught and reported as
-    /// `InternalError` with the payload logged.
+    /// `LatencyRequestContext` freezes mutable editor state and owns its Salsa
+    /// snapshot, so handlers cannot race with later edits. Every dispatch sends
+    /// exactly one `Task::RequestResult`; cancellation and panics are converted
+    /// to LSP error responses.
     pub fn on_latency<R>(
         &mut self,
         f: fn(LatencyRequestContext, R::Params) -> Result<R::Result>,
@@ -120,16 +100,10 @@ impl RequestDispatcher<'_> {
 
         tracing::debug!("Handling {} on task pool (id: {})", R::METHOD, req.id);
 
-        // Clone the Salsa DB for this request — the clone is owned and Send,
-        // so it can travel to a worker thread. The cancellation token is tied
-        // to this specific snapshot.
         let db = self.global_state.analysis_host.raw_database().clone();
         let token = db.cancellation_token();
         let analysis = ide::Analysis::from_database(db);
 
-        // Overwrite policy: if the client recycled a request id (unusual but
-        // not forbidden by LSP), cancel the superseded worker so its token
-        // doesn't leak.
         if let Some(prev) = self.global_state.request_tokens.insert(req.id.clone(), token) {
             tracing::warn!(request_id = ?req.id, "duplicate LSP request id; cancelling previous");
             prev.cancel();
@@ -155,9 +129,6 @@ impl RequestDispatcher<'_> {
         self
     }
 
-    /// Finishes the dispatch chain.
-    ///
-    /// If the request wasn't handled, sends a "method not found" error.
     pub fn finish(&mut self) {
         if let Some(req) = self.req.take() {
             tracing::error!("Unhandled request: {}", req.method);
@@ -170,10 +141,6 @@ impl RequestDispatcher<'_> {
         }
     }
 
-    /// Tries to parse the request as type R.
-    ///
-    /// If successful, consumes self.req and returns the request and parsed params.
-    /// If the method doesn't match, leaves self.req unchanged and returns None.
     fn parse_request<R>(&mut self) -> Option<(Request, R::Params)>
     where
         R: lsp_types::request::Request,
@@ -207,9 +174,6 @@ impl RequestDispatcher<'_> {
 
 /// Dispatcher for LSP notifications.
 ///
-/// Provides a chain-based API for handling different notification types.
-///
-/// # Example
 /// ```ignore
 /// NotificationDispatcher { not: Some(not), global_state: &mut state }
 ///     .on_sync_mut::<DidOpenTextDocument>(handlers::handle_did_open)
@@ -222,7 +186,6 @@ pub struct NotificationDispatcher<'a> {
 }
 
 impl NotificationDispatcher<'_> {
-    /// Handles a notification with mutable access to GlobalState.
     pub fn on_sync_mut<N>(
         &mut self,
         f: fn(&mut GlobalState, N::Params) -> Result<()>,
@@ -257,9 +220,6 @@ impl NotificationDispatcher<'_> {
         Ok(self)
     }
 
-    /// Finishes the dispatch chain.
-    ///
-    /// If the notification wasn't handled, logs a warning.
     pub fn finish(&mut self) {
         if let Some(not) = &self.not {
             if !not.method.starts_with("$/") {
@@ -269,7 +229,6 @@ impl NotificationDispatcher<'_> {
     }
 }
 
-/// Converts a Result into an LSP Response.
 fn result_to_response<R>(id: lsp_server::RequestId, result: Result<R::Result>) -> Response
 where
     R: lsp_types::request::Request,
@@ -291,15 +250,7 @@ where
 }
 
 /// Runs a read-only LSP handler on the task pool, producing exactly one
-/// `Response` regardless of handler outcome (success, error, Salsa
-/// cancellation, or panic).
-///
-/// Two layers of protection:
-/// 1. `salsa::Cancelled::catch` unwinds cooperative cancellation into a
-///    `RequestCanceled` response.
-/// 2. `std::panic::catch_unwind` turns any residual panic (including those
-///    outside Salsa's purview) into an `InternalError` response with the
-///    payload and a backtrace logged via `tracing::error!`.
+/// `Response` for success, handler errors, Salsa cancellation, or panic.
 fn run_latency_handler<R>(
     id: RequestId,
     ctx: LatencyRequestContext,
@@ -438,11 +389,6 @@ mod tests {
         assert_eq!(response.id, lsp_server::RequestId::from(7));
         let err = response.error.expect("panic must produce error");
         assert_eq!(err.code, ErrorCode::InternalError as i32);
-        // Token cleanup is the main loop's responsibility (see
-        // `server::handle_task::RequestResult`); the worker itself never
-        // touches `request_tokens`. We just sanity-check the entry still
-        // exists at this point so a cancel sent before main-loop pickup
-        // can still unwind the worker.
         assert!(state.request_tokens.contains_key(&lsp_server::RequestId::from(7)));
     }
 
@@ -451,8 +397,6 @@ mod tests {
         let (sender, _receiver) = unbounded();
         let mut state = GlobalState::new(sender);
 
-        // Dispatch two requests with the same id. The second one must cancel
-        // the first's token before storing its own.
         let id = lsp_server::RequestId::from(99);
 
         let req1 = Request::new(

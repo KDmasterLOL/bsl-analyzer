@@ -1,7 +1,4 @@
 //! Handlers for LSP requests.
-//!
-//! This module implements handlers for LSP requests like
-//! textDocument/definition, textDocument/references, etc.
 
 use anyhow::Result;
 use ide::{
@@ -25,12 +22,10 @@ use vfs::FileId;
 use crate::frozen_context::LatencyRequestContext;
 use crate::global_state::GlobalStateSnapshot;
 
-/// Handles textDocument/definition request.
+/// Handles textDocument/definition.
 ///
-/// Goes to the definition of the symbol at the cursor position. Runs on the
-/// task pool via `on_latency` — it reads exclusively from the immutable
-/// `LatencyRequestContext`, so concurrent `didChange` edits cannot alias
-/// the Salsa snapshot used for resolution.
+/// Reads from `LatencyRequestContext`, so concurrent `didChange` edits cannot
+/// alias the Salsa snapshot used for resolution.
 pub fn handle_goto_definition(
     ctx: LatencyRequestContext,
     params: GotoDefinitionParams,
@@ -100,9 +95,7 @@ pub fn handle_goto_definition(
     }
 }
 
-/// Handles textDocument/references request.
-///
-/// Finds all references to the symbol at the cursor position.
+/// Handles textDocument/references.
 pub fn handle_find_references(
     ctx: LatencyRequestContext,
     params: ReferenceParams,
@@ -145,9 +138,7 @@ pub fn handle_find_references(
     }
 }
 
-/// Handles textDocument/documentHighlight request.
-///
-/// Returns same-document highlights for the symbol at the cursor position.
+/// Handles textDocument/documentHighlight.
 pub fn handle_document_highlight(
     ctx: LatencyRequestContext,
     params: DocumentHighlightParams,
@@ -201,9 +192,7 @@ pub fn handle_document_highlight(
     }
 }
 
-/// Handles textDocument/foldingRange request.
-///
-/// Returns all foldable ranges in the document.
+/// Handles textDocument/foldingRange.
 pub fn handle_folding_range(
     ctx: LatencyRequestContext,
     params: FoldingRangeParams,
@@ -246,9 +235,7 @@ pub fn handle_folding_range(
     }
 }
 
-/// Handles textDocument/hover request.
-///
-/// Returns hover information for the symbol at the cursor position.
+/// Handles textDocument/hover.
 pub fn handle_hover(ctx: LatencyRequestContext, params: HoverParams) -> Result<Option<Hover>> {
     let _p = tracing::info_span!(
         "handle_hover",
@@ -290,9 +277,7 @@ pub fn handle_hover(ctx: LatencyRequestContext, params: HoverParams) -> Result<O
     }
 }
 
-/// Handles textDocument/completion request.
-///
-/// Returns code completion suggestions at the cursor position.
+/// Handles textDocument/completion.
 pub fn handle_completion(
     ctx: LatencyRequestContext,
     params: CompletionParams,
@@ -303,8 +288,8 @@ pub fn handle_completion(
     )
     .entered();
 
-    tracing::info!(
-        "COMPLETION REQUEST RECEIVED at line={} char={}",
+    tracing::debug!(
+        "completion request at line={} char={}",
         params.text_document_position.position.line,
         params.text_document_position.position.character
     );
@@ -321,34 +306,32 @@ pub fn handle_completion(
     let text = doc.text();
     let line_index = doc.line_index();
 
-    // Log the actual line content for debugging
     let line_num = position.line as usize;
     let lines: Vec<&str> = text.lines().collect();
     if line_num < lines.len() {
         let line_text = lines[line_num];
-        tracing::info!(
+        tracing::debug!(
             "Line {} content (first 100 chars): {:?}",
             line_num,
             &line_text.chars().take(100).collect::<String>()
         );
-        tracing::info!(
+        tracing::debug!(
             "Position.character={} (UTF-16 code units from line start)",
             position.character
         );
     }
 
-    // Convert position to offset (handle race condition with didChange)
     let offset =
         match crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding) {
             Ok(o) => o,
             Err(_) => {
-                tracing::warn!(
+                tracing::debug!(
                     "Position out of bounds, likely race with didChange - returning empty"
                 );
                 return Ok(None);
             }
         };
-    tracing::info!("Converted position to offset: {:?}", offset);
+    tracing::debug!("Converted position to offset: {:?}", offset);
 
     let items = ctx.analysis.completions(
         file_id,
@@ -356,23 +339,23 @@ pub fn handle_completion(
         ctx.workspace_root.clone(),
         ctx.diagnostics_config.locale,
     );
-    tracing::info!("IDE API returned {} completion items", items.len());
+    tracing::debug!("IDE API returned {} completion items", items.len());
 
-    // Convert results
     if items.is_empty() {
-        tracing::info!("No completion items, returning None");
+        tracing::debug!("No completion items, returning None");
         return Ok(None);
     }
 
     let lsp_items: Vec<CompletionItem> = items.into_iter().map(convert_completion_item).collect();
-    tracing::info!("Converted to {} LSP items, returning CompletionResponse", lsp_items.len());
+    tracing::debug!("Converted to {} LSP items, returning CompletionResponse", lsp_items.len());
 
     Ok(Some(CompletionResponse::Array(lsp_items)))
 }
 
-/// Handles textDocument/semanticTokens/full request.
+/// Handles textDocument/semanticTokens/full.
 ///
-/// Returns semantic highlighting for the entire document.
+/// Returns empty tokens while VFS is loading; the client re-requests after
+/// `workspace/semanticTokens/refresh`.
 pub fn handle_semantic_tokens_full(
     ctx: LatencyRequestContext,
     params: SemanticTokensParams,
@@ -384,8 +367,6 @@ pub fn handle_semantic_tokens_full(
     )
     .entered();
 
-    // Don't block on metadata loading if VFS isn't done yet.
-    // Client will re-request when ready.
     if !ctx.vfs_done {
         tracing::debug!("VFS not ready, returning empty semantic tokens");
         return Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
@@ -408,7 +389,7 @@ pub fn handle_semantic_tokens_full(
     let highlight_start = std::time::Instant::now();
     let highlight_result = ctx.analysis.highlight(file_id);
     let highlight_elapsed = highlight_start.elapsed();
-    tracing::warn!(
+    tracing::debug!(
         file_id = file_id.0,
         highlight_count = highlight_result.highlights.len(),
         resolved_external_files = highlight_result.resolved_external_files.len(),
@@ -423,7 +404,7 @@ pub fn handle_semantic_tokens_full(
         ctx.position_encoding,
     );
     let total_elapsed = start.elapsed();
-    tracing::warn!(
+    tracing::debug!(
         file_id = file_id.0,
         token_count = tokens.len(),
         total_ms = total_elapsed.as_millis() as u64,
@@ -441,7 +422,7 @@ pub fn handle_semantic_tokens_full(
     Ok(Some(SemanticTokensResult::Tokens(SemanticTokens { result_id: None, data: tokens })))
 }
 
-/// Handles textDocument/documentSymbol request.
+/// Handles textDocument/documentSymbol.
 pub fn handle_document_symbol(
     ctx: LatencyRequestContext,
     params: DocumentSymbolParams,
@@ -477,9 +458,7 @@ pub fn handle_document_symbol(
     Ok(Some(DocumentSymbolResponse::Nested(lsp_symbols)))
 }
 
-/// Handles textDocument/signatureHelp request.
-///
-/// Returns signature help (parameter hints) at the cursor position.
+/// Handles textDocument/signatureHelp.
 pub fn handle_signature_help(
     ctx: LatencyRequestContext,
     params: SignatureHelpParams,
@@ -506,7 +485,7 @@ pub fn handle_signature_help(
         match crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding) {
             Ok(o) => o,
             Err(_) => {
-                tracing::warn!(
+                tracing::debug!(
                     "Position out of bounds, likely race with didChange - returning empty"
                 );
                 return Ok(None);
@@ -518,7 +497,6 @@ pub fn handle_signature_help(
     Ok(sig_help.map(to_lsp_signature_help))
 }
 
-/// Convert IDE SignatureHelp to LSP SignatureHelp.
 fn to_lsp_signature_help(sh: ide::SignatureHelp) -> lsp_types::SignatureHelp {
     let parameters: Vec<_> = sh
         .parameters
@@ -551,9 +529,7 @@ fn to_lsp_signature_help(sh: ide::SignatureHelp) -> lsp_types::SignatureHelp {
     }
 }
 
-/// Handles textDocument/codeAction request.
-///
-/// Returns quick-fix code actions for diagnostics in the requested range.
+/// Handles textDocument/codeAction.
 pub fn handle_code_action(
     ctx: LatencyRequestContext,
     params: CodeActionParams,
@@ -736,7 +712,6 @@ fn folding_range_lines(line_index: &LineIndex, range: ide::TextRange) -> Option<
     (end_line > start_line).then_some((start_line, end_line))
 }
 
-/// Convert IDE CompletionItem to LSP CompletionItem.
 fn convert_completion_item(item: ide::CompletionItem) -> CompletionItem {
     let has_snippet = item.insert_text.contains('$');
     CompletionItem {
@@ -759,7 +734,6 @@ fn convert_completion_item(item: ide::CompletionItem) -> CompletionItem {
     }
 }
 
-/// Convert IDE CompletionItemKind to LSP CompletionItemKind.
 fn convert_completion_kind(kind: ide::CompletionItemKind) -> CompletionItemKind {
     match kind {
         ide::CompletionItemKind::MdoType => CompletionItemKind::CLASS,
@@ -775,9 +749,7 @@ fn convert_completion_kind(kind: ide::CompletionItemKind) -> CompletionItemKind 
     }
 }
 
-/// Handles textDocument/formatting request.
-///
-/// Formats the entire document.
+/// Handles textDocument/formatting.
 pub fn handle_formatting(
     snap: GlobalStateSnapshot,
     params: lsp_types::DocumentFormattingParams,
@@ -790,10 +762,8 @@ pub fn handle_formatting(
 
     let uri = params.text_document.uri;
 
-    // Get FileId
     let file_id = crate::lsp::file_id_snapshot(&snap, &uri)?;
 
-    // Get text for line index
     let text = snap
         .mem_docs
         .get(&uri)
@@ -801,14 +771,11 @@ pub fn handle_formatting(
 
     let line_index = LineIndex::new(&text);
 
-    // Get formatting config from LSP options
     let config = formatting_config_from_options(&params.options);
 
-    // Call IDE API
     let result = snap.analysis.format_file(file_id, &config);
     tracing::debug!("format_file: {} edits", result.edits.len());
 
-    // Convert edits
     if result.edits.is_empty() {
         return Ok(None);
     }
@@ -856,9 +823,7 @@ fn truncate_edit_preview(s: &str) -> String {
     }
 }
 
-/// Handles textDocument/rangeFormatting request.
-///
-/// Formats a selected range in the document.
+/// Handles textDocument/rangeFormatting.
 pub fn handle_range_formatting(
     snap: GlobalStateSnapshot,
     params: lsp_types::DocumentRangeFormattingParams,
@@ -873,12 +838,10 @@ pub fn handle_range_formatting(
 
     let uri = params.text_document.uri;
 
-    // Get FileId
     let start = std::time::Instant::now();
     let file_id = crate::lsp::file_id_snapshot(&snap, &uri)?;
     tracing::debug!("file_id_snapshot: {:?}", start.elapsed());
 
-    // Get text for line index
     let start = std::time::Instant::now();
     let text = snap
         .mem_docs
@@ -890,7 +853,6 @@ pub fn handle_range_formatting(
     let line_index = LineIndex::new(&text);
     tracing::debug!("LineIndex::new: {:?}", start.elapsed());
 
-    // Convert LSP range to TextRange
     let start = std::time::Instant::now();
     let range = crate::lsp::text_range_with_encoding(
         &line_index,
@@ -900,15 +862,12 @@ pub fn handle_range_formatting(
     )?;
     tracing::debug!("text_range conversion: {:?}, range: {:?}", start.elapsed(), range);
 
-    // Get formatting config
     let config = formatting_config_from_options(&params.options);
 
-    // Call IDE API
     let start = std::time::Instant::now();
     let result = snap.analysis.format_range(file_id, range, &config);
     tracing::debug!("format_range: {:?}, edits: {}", start.elapsed(), result.edits.len());
 
-    // Convert edits
     if result.edits.is_empty() {
         tracing::debug!("total time (no edits): {:?}", total_start.elapsed());
         return Ok(None);
@@ -931,7 +890,7 @@ pub fn handle_range_formatting(
         .collect();
     tracing::debug!("convert edits: {:?}", start.elapsed());
 
-    tracing::info!("range_formatting total: {:?}", total_start.elapsed());
+    tracing::debug!("range_formatting total: {:?}", total_start.elapsed());
 
     if lsp_edits.is_empty() {
         Ok(None)
@@ -940,9 +899,7 @@ pub fn handle_range_formatting(
     }
 }
 
-/// Handles textDocument/onTypeFormatting request.
-///
-/// Formats when a trigger character is typed (e.g., `;`, `\n`).
+/// Handles textDocument/onTypeFormatting.
 pub fn handle_on_type_formatting(
     snap: GlobalStateSnapshot,
     params: lsp_types::DocumentOnTypeFormattingParams,
@@ -956,10 +913,8 @@ pub fn handle_on_type_formatting(
     let uri = params.text_document_position.text_document.uri;
     let position = params.text_document_position.position;
 
-    // Get FileId
     let file_id = crate::lsp::file_id_snapshot(&snap, &uri)?;
 
-    // Get text for line index
     let text = snap
         .mem_docs
         .get(&uri)
@@ -967,17 +922,13 @@ pub fn handle_on_type_formatting(
 
     let line_index = LineIndex::new(&text);
 
-    // Convert position to offset
     let offset =
         crate::lsp::offset_with_encoding(&line_index, &text, position, snap.position_encoding)?;
 
-    // Get the typed character
     let char_typed = params.ch.chars().next().unwrap_or('\0');
 
-    // Get formatting config
     let config = formatting_config_from_options(&params.options);
 
-    // Call IDE API
     let edits = snap.analysis.on_type_formatting(file_id, offset.into(), char_typed, &config);
 
     match edits {
@@ -1005,7 +956,6 @@ pub fn handle_on_type_formatting(
     }
 }
 
-/// Creates a FormattingConfig from LSP FormattingOptions.
 fn formatting_config_from_options(options: &lsp_types::FormattingOptions) -> ide::FormattingConfig {
     ide::FormattingConfig {
         use_tabs: !options.insert_spaces,
@@ -1016,32 +966,6 @@ fn formatting_config_from_options(options: &lsp_types::FormattingOptions) -> ide
         space_around_binary_ops: true,
         trim_trailing_whitespace: options.trim_trailing_whitespace.unwrap_or(true),
         insert_final_newline: options.insert_final_newline.unwrap_or(true),
-    }
-}
-
-/// Converts project-model formatting config (from `.bsl-analyzer.json`) into the IDE
-/// formatting config used by the formatter.
-///
-/// `project_model::FormattingConfig` carries only the two fields that are serialised
-/// from the config file (`indent_size`, `use_tabs`); all remaining fields fall back to
-/// their `ide::FormattingConfig` defaults so that the two types stay in sync
-/// automatically.
-///
-/// A `From` impl is not possible here due to the orphan rule (both types are defined in
-/// external crates relative to `bsl-analyzer`), so this free function serves the same
-/// purpose.
-///
-/// Called when the server applies workspace formatting config from the project model
-/// (as opposed to per-request LSP `FormattingOptions` handled by
-/// [`formatting_config_from_options`]).
-#[allow(dead_code)] // conversion infrastructure: will be called when project-model config is plumbed into LSP handlers
-fn formatting_config_from_project_model(
-    cfg: &project_model::FormattingConfig,
-) -> ide::FormattingConfig {
-    ide::FormattingConfig {
-        use_tabs: cfg.use_tabs,
-        indent_size: cfg.indent_size,
-        ..ide::FormattingConfig::default()
     }
 }
 
@@ -1081,7 +1005,6 @@ mod tests {
 
         let uri = lsp_types::Url::parse("file:///test.bsl").unwrap();
 
-        // Insert document
         state.mem_docs.insert(uri.clone(), "Процедура Тест() КонецПроцедуры".to_string(), 1);
 
         let ctx = latency_ctx(&state);
@@ -1095,9 +1018,7 @@ mod tests {
             partial_result_params: Default::default(),
         };
 
-        // Should handle gracefully even if file is not in VFS
         let result = handle_goto_definition(ctx, params);
-        // File not in VFS is expected to fail in tests
         assert!(result.is_err() || result.unwrap().is_none());
     }
 
@@ -1111,11 +1032,9 @@ mod tests {
         let uri = lsp_types::Url::parse("file:///frozen.bsl").unwrap();
         state.mem_docs.insert(uri.clone(), "original".to_string(), 1);
 
-        // Freeze ctx BEFORE mutation. This is what on_latency does on the
-        // main thread right before spawning the worker.
+        // Mirrors `on_latency`: freeze the worker context before later main-thread edits.
         let ctx = latency_ctx(&state);
 
-        // Main thread mutates MemDocs while the "worker" still holds ctx.
         state.mem_docs.update(
             &uri,
             vec![lsp_types::TextDocumentContentChangeEvent {
@@ -1125,12 +1044,10 @@ mod tests {
             }],
         );
 
-        // Worker reads ctx — must see "original", not "rewritten".
         let doc = ctx.mem_docs.get(&uri).expect("document must be in frozen view");
         assert_eq!(doc.text(), "original");
         assert_eq!(doc.version(), 1);
 
-        // Main thread's live view reflects the mutation.
         assert_eq!(state.mem_docs.get(&uri).as_deref(), Some("rewritten"));
     }
 
@@ -1154,9 +1071,7 @@ mod tests {
             context: lsp_types::ReferenceContext { include_declaration: true },
         };
 
-        // Should handle gracefully even if file is not in VFS
         let result = handle_find_references(ctx, params);
-        // File not in VFS is expected to fail in tests
         assert!(result.is_err() || result.unwrap().is_none());
     }
 
@@ -1317,20 +1232,23 @@ mod tests {
 
     #[test]
     fn completion_returns_none_on_out_of_bounds_position() {
-        // Guard path: if the client sends a position beyond the document
-        // (typical race with didChange), the handler must fall through to
-        // Ok(None), not bubble the bounds error up to the client as an
-        // InternalError.
         let mut state = create_test_state();
-        let uri = lsp_types::Url::parse("file:///short.bsl").unwrap();
-        state.mem_docs.insert(uri.clone(), "short".to_string(), 1);
+        state.init_empty_source_root();
 
-        // File is in MemDocs but not in VFS, so file_id_for_url fails first.
-        // That's fine — the handler still exercises the ?-propagation, and a
-        // proper VFS-backed fixture can't be built without metadata scaffolding
-        // this test deliberately avoids. The guard we actually care about is
-        // `crate::lsp::offset(...)` Err → Ok(None), which only matters once
-        // file_id/doc resolve; covered by the `?` error path here.
+        let uri = lsp_types::Url::parse("file:///short.bsl").unwrap();
+        let source = "short";
+
+        state.mem_docs.insert(uri.clone(), source.to_string(), 1);
+        state.vfs_file_for_url(&uri).unwrap();
+        {
+            let mut vfs = state.vfs.write();
+            vfs.set_file_contents(
+                VfsPath::new(uri.to_file_path().unwrap()),
+                Some(Arc::from(source)),
+            );
+        }
+        state.process_changes(false);
+
         let ctx = latency_ctx(&state);
         let params = CompletionParams {
             text_document_position: TextDocumentPositionParams {
@@ -1343,7 +1261,6 @@ mod tests {
         };
 
         let result = handle_completion(ctx, params);
-        // Either Ok(None) (guard taken) or Err (earlier resolve failed).
-        assert!(result.is_err() || result.unwrap().is_none());
+        assert!(result.unwrap().is_none());
     }
 }

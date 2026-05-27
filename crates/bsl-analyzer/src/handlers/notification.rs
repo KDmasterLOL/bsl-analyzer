@@ -1,7 +1,4 @@
 //! Handlers for LSP notifications.
-//!
-//! This module implements handlers for LSP notifications like
-//! textDocument/didOpen, didChange, didClose, and didSave.
 
 use std::{sync::Arc, time::Instant};
 
@@ -14,7 +11,7 @@ use lsp_types::{
     DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
     DidSaveTextDocumentParams, PublishDiagnosticsParams, Url,
 };
-use salsa::Database; // brings cancellation_token() into scope
+use salsa::Database as _;
 
 use crate::global_state::{GlobalState, Task};
 
@@ -30,11 +27,8 @@ fn is_handled_uri(uri: &Url) -> bool {
 
 /// Schedules diagnostics computation in a background thread.
 ///
-/// Before spawning, any previous in-flight worker for this URI is cancelled via its
-/// Salsa `CancellationToken`, letting it unwind cooperatively at the next query
-/// boundary (no write to the global revision required). A concurrent `set_file_text()`
-/// still triggers `Cancelled::PendingWrite`; both flavors are caught by `Cancelled::catch`,
-/// while bug panics propagate out and are logged by the task pool.
+/// Previous in-flight diagnostics for the URI are cancelled via their Salsa
+/// token before a fresh worker is queued.
 pub fn schedule_diagnostics(state: &mut GlobalState, uri: &Url) {
     if let Some(prev) = state.diagnostics_tokens.remove(uri) {
         prev.cancel();
@@ -103,12 +97,6 @@ pub fn schedule_diagnostics(state: &mut GlobalState, uri: &Url) {
 }
 
 /// Handles textDocument/didOpen notification.
-///
-/// When a document is opened in the editor:
-/// 1. Store the full text in MemDocs
-/// 2. Update VFS with file content
-/// 3. Sync changes to Salsa database via process_changes()
-/// 4. Preload dependencies in background for fast GoToDefinition
 pub fn handle_did_open(state: &mut GlobalState, params: DidOpenTextDocumentParams) -> Result<()> {
     let _p = tracing::info_span!("handle_did_open", uri = %params.text_document.uri).entered();
     if !is_handled_uri(&params.text_document.uri) {
@@ -124,13 +112,10 @@ pub fn handle_did_open(state: &mut GlobalState, params: DidOpenTextDocumentParam
 
     tracing::debug!("Document opened: {} (version {})", uri, version);
 
-    // Store in MemDocs for incremental updates
     state.mem_docs.insert(uri.clone(), text.clone(), version);
 
-    // Get or create FileId
     let file_id = state.vfs_file_for_url(&uri)?;
 
-    // Update VFS with file content
     {
         let vfs_path = vfs::VfsPath::new(
             uri.to_file_path().map_err(|()| anyhow::anyhow!("Not a file URI: {}", uri))?,
@@ -139,22 +124,17 @@ pub fn handle_did_open(state: &mut GlobalState, params: DidOpenTextDocumentParam
         vfs.set_file_contents(vfs_path, Some(Arc::from(text.as_str())));
     }
 
-    // Process VFS changes and sync to Salsa database. During cold-start
-    // (`!vfs_done`) loader batches stream straight into `Vfs::changes`,
-    // so a pre-finish drain here will pick them up too — that is fine
-    // (set_file_text is idempotent and the bulk-finish drain just becomes
-    // a no-op for already-synced files), but suppress the metadata-cache
-    // version bump while `warm_metadata_cache` has not yet populated it.
+    // During cold-start, loader batches also flow through `Vfs::changes`.
+    // Draining here is idempotent with the bulk finish drain, but metadata
+    // cache versioning must wait until `warm_metadata_cache` has populated it.
     let process_start = Instant::now();
     state.process_changes(!vfs_done);
     let process_changes_ms = process_start.elapsed().as_millis() as u64;
 
-    // Preload dependencies in background for fast GoToDefinition
     let preload_start = Instant::now();
     preload_dependencies(state, file_id);
     let preload_dispatch_ms = preload_start.elapsed().as_millis() as u64;
 
-    // Schedule diagnostics in background (didOpen runs immediately, no batching benefit)
     schedule_diagnostics(state, &uri);
 
     tracing::info!(
@@ -169,16 +149,9 @@ pub fn handle_did_open(state: &mut GlobalState, params: DidOpenTextDocumentParam
     Ok(())
 }
 
-/// Preloads dependencies of a file in background.
+/// Preloads dependencies of a file in the background.
 ///
-/// This warms up caches for modules that the opened file depends on:
-/// - symbol_tree (for fast GoToDefinition)
-/// - module_bodies (for hover info)
-/// - diagnostics (for fast diagnostics on dependency navigation)
-///
-/// Any previous preload for the same head `file_id` is cancelled cooperatively
-/// via its Salsa `CancellationToken`, so repeated `didOpen` does not pile up
-/// stale warming tasks. Cancellation is also triggered from `handle_did_close`.
+/// Repeated `didOpen` cancels stale warming tasks for the same head file.
 fn preload_dependencies(state: &mut GlobalState, file_id: vfs::FileId) {
     let discover_start = Instant::now();
     let analysis = state.analysis_host.analysis();
@@ -237,11 +210,6 @@ fn preload_dependencies(state: &mut GlobalState, file_id: vfs::FileId) {
 }
 
 /// Handles textDocument/didChange notification.
-///
-/// When a document is modified:
-/// 1. Apply incremental changes to MemDocs
-/// 2. Update VFS with new content
-/// 3. Sync changes to Salsa database via process_changes() (triggers incremental recomputation)
 pub fn handle_did_change(
     state: &mut GlobalState,
     params: DidChangeTextDocumentParams,
@@ -269,13 +237,11 @@ pub fn handle_did_change(
         return Ok(());
     }
 
-    // Get updated text
     let text = state
         .mem_docs
         .get(&uri)
         .ok_or_else(|| anyhow::anyhow!("Document not in MemDocs: {}", uri))?;
 
-    // Update VFS
     {
         let vfs_path = vfs::VfsPath::new(
             uri.to_file_path().map_err(|()| anyhow::anyhow!("Not a file URI: {}", uri))?,
@@ -284,25 +250,17 @@ pub fn handle_did_change(
         vfs.set_file_contents(vfs_path, Some(Arc::from(text.as_str())));
     }
 
-    // Process VFS changes and sync to Salsa database (triggers incremental recomputation).
-    // During cold-start the loader streams batches into `Vfs::changes` too; a pre-finish
-    // drain here is idempotent with the bulk drain at LoadingProgress::Finished, but we
-    // suppress the metadata-cache bump until `warm_metadata_cache` has populated it.
+    // Keep the same cold-start drain semantics as `didOpen`.
     state.process_changes(!state.vfs_done);
 
     tracing::debug!("Document updated successfully: {}", uri);
 
-    // Mark file as pending diagnostics (scheduled after event loop drains all messages)
     state.pending_diagnostics_uri = Some(uri);
 
     Ok(())
 }
 
 /// Handles textDocument/didClose notification.
-///
-/// When a document is closed:
-/// 1. Remove from MemDocs
-/// 2. Optionally keep in VFS (for goto definition across files)
 pub fn handle_did_close(state: &mut GlobalState, params: DidCloseTextDocumentParams) -> Result<()> {
     let _p = tracing::info_span!("handle_did_close", uri = %params.text_document.uri).entered();
 
@@ -324,26 +282,19 @@ pub fn handle_did_close(state: &mut GlobalState, params: DidCloseTextDocumentPar
         }
     }
 
-    // Remove from MemDocs
     state.mem_docs.remove(&uri);
 
-    // Clear diagnostics
     let params = PublishDiagnosticsParams { uri: uri.clone(), diagnostics: vec![], version: None };
 
     let notification = Notification::new("textDocument/publishDiagnostics".to_string(), params);
 
     state.sender.send(notification.into())?;
 
-    // Note: We keep the file in VFS for cross-file operations
-    // It will be garbage collected later if needed
-
     tracing::debug!("Document closed successfully: {}", uri);
 
     Ok(())
 }
 
-/// Handles textDocument/didSave notification.
-///
 /// If the saved file is a config file (.bsl-analyzer.json or .bsl-language-server.json),
 /// reloads the project config and recalculates diagnostics for all open documents.
 pub fn handle_did_save(state: &mut GlobalState, params: DidSaveTextDocumentParams) -> Result<()> {
@@ -377,8 +328,8 @@ pub fn handle_did_save(state: &mut GlobalState, params: DidSaveTextDocumentParam
 /// cooperatively at the next Salsa query boundary, producing a
 /// `RequestCanceled` response via the normal `Task::RequestResult` path.
 ///
-/// Missing ids are a normal race (worker beat the cancel to the finish line);
-/// just log at debug level.
+/// Missing ids are a normal race: the worker may beat cancellation to the
+/// finish line.
 pub fn handle_cancel(state: &mut GlobalState, params: lsp_types::CancelParams) -> Result<()> {
     let id = match params.id {
         lsp_types::NumberOrString::Number(n) => lsp_server::RequestId::from(n),
@@ -407,7 +358,6 @@ mod tests {
         let (sender, receiver) = unbounded();
         let mut state = GlobalState::new(sender);
 
-        // Initialize SourceRoot for tests (normally done by VFS loader)
         use base_db::{SourceDatabase, SourceRoot, SourceRootId};
         let db = state.analysis_host.raw_database_mut();
         let source_root_id = SourceRootId(0);
@@ -434,7 +384,6 @@ mod tests {
         let result = handle_did_open(&mut state, params.clone());
         assert!(result.is_ok());
 
-        // Check MemDocs
         assert!(state.mem_docs.contains(&params.text_document.uri));
         assert_eq!(state.mem_docs.get(&params.text_document.uri), Some(params.text_document.text));
 
@@ -449,7 +398,6 @@ mod tests {
     fn test_did_change() {
         let (mut state, _receiver) = create_test_state();
 
-        // First open the document
         let uri = lsp_types::Url::parse("file:///test.bsl").unwrap();
         handle_did_open(
             &mut state,
@@ -464,7 +412,6 @@ mod tests {
         )
         .unwrap();
 
-        // Now change it
         let params = DidChangeTextDocumentParams {
             text_document: VersionedTextDocumentIdentifier { uri: uri.clone(), version: 2 },
             content_changes: vec![TextDocumentContentChangeEvent {
@@ -477,7 +424,6 @@ mod tests {
         let result = handle_did_change(&mut state, params);
         assert!(result.is_ok());
 
-        // Check MemDocs has updated text
         assert_eq!(state.mem_docs.get(&uri), Some("new text".to_string()));
     }
 
@@ -540,7 +486,6 @@ mod tests {
     fn handle_cancel_is_noop_for_unknown_id() {
         let (mut state, _receiver) = create_test_state();
 
-        // No token registered for id 999.
         let params = lsp_types::CancelParams { id: lsp_types::NumberOrString::Number(999) };
         let result = handle_cancel(&mut state, params);
         assert!(result.is_ok());
@@ -570,7 +515,6 @@ mod tests {
 
         let uri = lsp_types::Url::parse("file:///test.bsl").unwrap();
 
-        // Open document
         handle_did_open(
             &mut state,
             DidOpenTextDocumentParams {
@@ -586,7 +530,6 @@ mod tests {
 
         assert!(state.mem_docs.contains(&uri));
 
-        // Close document
         handle_did_close(
             &mut state,
             DidCloseTextDocumentParams {
@@ -595,7 +538,6 @@ mod tests {
         )
         .unwrap();
 
-        // Should be removed from MemDocs
         assert!(!state.mem_docs.contains(&uri));
     }
 }
