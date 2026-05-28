@@ -68,7 +68,8 @@ Detailed reference: `docs/architecture/ARCHITECTURE.md`, `docs/contributing/DEVE
    let _span = tracing::info_span!("parse_file", len = input.len()).entered();
    ```
 
-4. **Self-documenting code**. Comments explain WHY, not WHAT. Doc-comments (`///`) for public API. No commented-out code, no obvious-restate-of-code comments.
+4. **Self-documenting code**. Comments explain WHY, not WHAT. Doc-comments (`///`) for public API. No commented-out code, no obvious-restate-of-code comments — if the code already makes its intent clear, write no comment.
+   - **No process references in comments.** Never cite a plan, phase, milestone, task, PR, review, or reviewer in code/test comments (e.g. `§4.E.6e follow-up`, `Phase C`, `PR2:`, `Codex round-1 area 8`, `M4 Task 7`). They rot and mean nothing to a future reader. State the WHY directly; process/history belongs in commit messages and the tracker, not the source.
 
 5. **Tests are mandatory** for new functionality. Use `expect-test` snapshots for parser/AST output. Fixtures live in the repo (`include_str!("fixtures/...")`) — no absolute paths, no per-machine references. **New diagnostic** = handler module + `DiagnosticMetadata` registration + test fixture + `crates/ide-diagnostics/docs/{en,ru}/<Code>.md`; full route in `CONTRIBUTING.md`.
 
@@ -79,22 +80,22 @@ Detailed reference: `docs/architecture/ARCHITECTURE.md`, `docs/contributing/DEVE
 
 ## BSL language
 
-- **Bilingual** identifiers, case-insensitive: `Процедура` ≡ `Procedure`.
-- **Preprocessor**: `#Если`, `#Область`, `#Использовать`.
-- **Annotations**: `&НаКлиенте`, `&НаСервере`, `&До`, `&После`, `&Вместо`.
+- **Bilingual** identifiers and keywords are case-insensitive: `Процедура` ≡ `Procedure`.
+- **Preprocessor** directives include localized and English forms, for example `#Если`, `#Область`, `#Использовать`.
+- **Annotations** include localized and English forms, for example `&НаКлиенте`, `&НаСервере`, `&До`, `&После`, `&Вместо`.
 
-## Общие правила
+## General Rules
 
-- Менять код только с согласия пользователя.
-- Запрашивать установку пакетов — не искать альтернативы самостоятельно.
-- **Слойная архитектура (Martin clean)**. Каждое решение живёт в одном слое из диаграммы выше — никакого дублирования логики между слоями.
-  Где что лежит:
-  - синтаксис → `lexer` / `parser` / `syntax`;
-  - семантика, резолюция имён, инференс типов → `hir-ty` / `hir-def`;
-  - эмиссия диагностик и форматирование сообщений → `ide-diagnostics`;
-  - IDE-фичи (hover / completion / refs / actions) → `ide` / `ide-assists`.
-  Перед написанием кода ответь себе: "в каком слое это решение и почему?". Если ответ "в нескольких" — это запах: либо логика принадлежит одному из них, либо нужен helper в общем нижнем слое.
-- **Lowering работает без `db`**. `hir-def/body/lower` принимает **только синтаксические** решения. Любое решение, которое требует типа receiver'а, резолвера или конфигурации, живёт в `hir-ty` (см. cascade gate в `infer.rs::dispatch_bare_ident_field_call` как образец). Адаптеры (`ide-diagnostics`, `ide-completion`, …) — тонкие проекции, без собственной бизнес-логики.
-- Удалять неиспользуемый код, не оставлять заглушки.
-- Не использовать regex для парсинга / семантики BSL — есть AST / HIR / SDBL API. Regex допустим только для инфраструктурных утилит (поиск по тексту, форматтеры вывода).
-- Push только на `origin` (не на `github` mirror).
+- Change code only with user consent.
+- Ask before installing packages; do not silently look for alternatives.
+- **Layered architecture (Martin clean).** Every solution belongs to one layer from the diagram above; do not duplicate logic across layers.
+  Layer ownership:
+  - syntax -> `lexer` / `parser` / `syntax`;
+  - semantics, name resolution, type inference -> `hir-ty` / `hir-def`;
+  - diagnostic emission and message formatting -> `ide-diagnostics`;
+  - IDE features (hover / completion / refs / actions) -> `ide` / `ide-assists`.
+  Before writing code, answer: "Which layer does this solution belong to, and why?" If the answer is "several", that is a design smell: either the logic belongs to one layer, or a helper is needed in a common lower layer.
+- **Lowering works without `db`.** `hir-def/body/lower` makes only syntactic decisions. Any decision that requires the receiver type, resolver, or configuration belongs in `hir-ty` (see the cascade gate in `infer.rs::dispatch_bare_ident_field_call` as the model). Adapters (`ide-diagnostics`, `ide-completion`, ...) are thin projections without their own business logic.
+- Remove unused code and do not leave stubs.
+- Do not use regex for BSL parsing or semantics: use AST / HIR / SDBL APIs. Regex is allowed only for infrastructure utilities such as text search and output formatters.
+- Push only to `origin`, not to the `github` mirror.

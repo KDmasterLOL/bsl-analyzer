@@ -1,6 +1,4 @@
-//! LSP WorkDoneProgress utilities.
-//!
-//! This module provides types and helpers for reporting progress to LSP clients.
+//! LSP WorkDoneProgress helpers.
 
 /// Progress state for WorkDoneProgress notifications.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,7 +12,7 @@ pub enum Progress {
 }
 
 impl Progress {
-    /// Computes progress fraction (0.0 to 1.0) from done/total counts.
+    /// Returns `done / total`, treating an empty total as one item.
     pub fn fraction(done: usize, total: usize) -> f64 {
         assert!(done <= total);
         done as f64 / total.max(1) as f64

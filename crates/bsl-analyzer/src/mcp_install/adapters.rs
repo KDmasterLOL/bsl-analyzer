@@ -10,15 +10,15 @@ use toml_edit::{value, Array, DocumentMut, Item, Table};
 use crate::mcp_install::{
     error::InstallError,
     model::{
-        resolve_apply_decision, InstallAction, InstallEntryResult, InstallPlan, InstallResult,
-        InstallScope, InstallStatus, InstallTarget, ServerSpec,
+        resolve_apply_decision, ApplyDecision, InstallAction, InstallEntryResult, InstallPlan,
+        InstallResult, InstallScope, InstallStatus, InstallTarget, ServerSpec,
     },
     ports::{CommandOutput, CommandRunner, FileStore},
 };
 
 const LEGACY_SERVER_NAME: &str = "bsl-analyzer";
 
-pub struct RealCommandRunner;
+pub(super) struct RealCommandRunner;
 
 impl CommandRunner for RealCommandRunner {
     fn run(
@@ -47,7 +47,7 @@ impl CommandRunner for RealCommandRunner {
     }
 }
 
-pub struct RealFileStore;
+pub(super) struct RealFileStore;
 
 impl FileStore for RealFileStore {
     fn read_to_string(&self, path: &Path) -> io::Result<String> {
@@ -67,7 +67,7 @@ impl FileStore for RealFileStore {
     }
 }
 
-pub fn apply_install_plan(
+pub(super) fn apply_install_plan(
     plan: &InstallPlan,
     runner: &dyn CommandRunner,
     files: &dyn FileStore,
@@ -144,7 +144,7 @@ fn install_codex_user(
         });
     }
 
-    if matches!(decision, crate::mcp_install::ApplyDecision::Update) {
+    if matches!(decision, ApplyDecision::Update) {
         if let Some(existing_name) = existing_name.as_deref() {
             if existing_name != action.spec.name {
                 run_checked(
@@ -164,7 +164,7 @@ fn install_codex_user(
         scope: action.scope,
         status: decision.status(),
         location: location.display().to_string(),
-        detail: if matches!(decision, crate::mcp_install::ApplyDecision::Update) {
+        detail: if matches!(decision, ApplyDecision::Update) {
             "updated via codex CLI".to_owned()
         } else {
             "installed via codex CLI".to_owned()
@@ -251,7 +251,7 @@ fn install_codex_project(
         scope: action.scope,
         status: decision.status(),
         location: path.display().to_string(),
-        detail: if matches!(decision, crate::mcp_install::ApplyDecision::Update) {
+        detail: if matches!(decision, ApplyDecision::Update) {
             "updated project-scoped codex MCP config".to_owned()
         } else {
             "created project-scoped codex MCP config".to_owned()
@@ -302,7 +302,7 @@ fn install_gemini(
         });
     }
 
-    if matches!(decision, crate::mcp_install::ApplyDecision::Update) {
+    if matches!(decision, ApplyDecision::Update) {
         if let Some(existing_name) = existing_name.as_deref() {
             if existing_name != action.spec.name {
                 run_checked(
@@ -322,7 +322,7 @@ fn install_gemini(
         scope: action.scope,
         status: decision.status(),
         location: location.display().to_string(),
-        detail: if matches!(decision, crate::mcp_install::ApplyDecision::Update) {
+        detail: if matches!(decision, ApplyDecision::Update) {
             "updated via gemini CLI".to_owned()
         } else {
             "installed via gemini CLI".to_owned()
@@ -372,7 +372,7 @@ fn install_claude(
         });
     }
 
-    if matches!(decision, crate::mcp_install::ApplyDecision::Update) {
+    if matches!(decision, ApplyDecision::Update) {
         let remove_name = existing_name.as_deref().unwrap_or(&action.spec.name);
         let remove_args = build_claude_remove_args(remove_name, action.scope);
         run_checked(runner, "claude", &remove_args, &action.project_dir)?;
@@ -385,7 +385,7 @@ fn install_claude(
         scope: action.scope,
         status: decision.status(),
         location,
-        detail: if matches!(decision, crate::mcp_install::ApplyDecision::Update) {
+        detail: if matches!(decision, ApplyDecision::Update) {
             "updated via claude CLI".to_owned()
         } else {
             "installed via claude CLI".to_owned()
@@ -484,7 +484,7 @@ fn install_cursor(
         scope: action.scope,
         status: decision.status(),
         location: path.display().to_string(),
-        detail: if matches!(decision, crate::mcp_install::ApplyDecision::Update) {
+        detail: if matches!(decision, ApplyDecision::Update) {
             "updated cursor MCP config".to_owned()
         } else {
             "created cursor MCP config".to_owned()
@@ -848,7 +848,7 @@ fn render_dry_run_command(
     let mut lines = vec![
         format!("planned action: {action}"),
         format!("target config: {location}"),
-        format!("command: {}", shell_preview(program, args)),
+        format!("command: {}", shell_preview(program, &redacted_args(args))),
     ];
     if let Some(warning) = secret_warning(spec) {
         lines.push(warning);
@@ -862,12 +862,34 @@ fn render_dry_run_config(
     config: String,
     spec: &ServerSpec,
 ) -> String {
+    let config = redact_config_preview(config, spec);
     let mut lines =
         vec![format!("planned action: {action}"), format!("target config: {location}"), config];
     if let Some(warning) = secret_warning(spec) {
         lines.push(warning);
     }
     lines.join("\n")
+}
+
+fn redacted_args(args: &[String]) -> Vec<String> {
+    let mut redacted = args.to_vec();
+    for index in secret_arg_value_indices(args) {
+        redacted[index] = "<redacted>".to_owned();
+    }
+    redacted
+}
+
+fn redact_config_preview(mut config: String, spec: &ServerSpec) -> String {
+    for index in secret_arg_value_indices(&spec.args) {
+        config = config.replace(&spec.args[index], "<redacted>");
+    }
+    config
+}
+
+fn secret_arg_value_indices(args: &[String]) -> impl Iterator<Item = usize> + '_ {
+    args.windows(2)
+        .enumerate()
+        .filter_map(|(index, pair)| (pair[0] == "--onec-password").then_some(index + 1))
 }
 
 fn secret_warning(spec: &ServerSpec) -> Option<String> {
@@ -980,6 +1002,22 @@ mod tests {
         }
     }
 
+    fn spec_with_password() -> ServerSpec {
+        ServerSpec {
+            name: "bsl-analyzer".to_owned(),
+            command: "bsl-analyzer".to_owned(),
+            args: vec![
+                "mcp".to_owned(),
+                "serve".to_owned(),
+                "--profile".to_owned(),
+                "workspace".to_owned(),
+                "--onec-password".to_owned(),
+                "super-secret".to_owned(),
+            ],
+            env: BTreeMap::new(),
+        }
+    }
+
     fn action(target: InstallTarget, scope: InstallScope) -> InstallAction {
         InstallAction {
             target,
@@ -1004,6 +1042,42 @@ mod tests {
             force: true,
             dry_run: false,
         }
+    }
+
+    #[test]
+    fn dry_run_command_preview_redacts_onec_password() {
+        let runner = FakeRunner::new(vec![CommandOutput {
+            status: 1,
+            stdout: String::new(),
+            stderr: "No MCP server found with name bsl-analyzer".to_owned(),
+        }]);
+        let files = MemoryFiles::default();
+        let mut install_action =
+            action_with_spec(InstallTarget::Claude, InstallScope::Project, spec_with_password());
+        install_action.dry_run = true;
+
+        let result = apply_action(&install_action, &runner, &files).expect("dry-run succeeds");
+
+        assert_eq!(result.status, InstallStatus::DryRun);
+        assert!(!result.detail.contains("super-secret"));
+        assert!(result.detail.contains("<redacted>"));
+        assert!(result.detail.contains("--onec-password will be stored"));
+    }
+
+    #[test]
+    fn dry_run_config_preview_redacts_onec_password() {
+        let runner = FakeRunner::new(Vec::new());
+        let files = MemoryFiles::default();
+        let mut install_action =
+            action_with_spec(InstallTarget::Cursor, InstallScope::Project, spec_with_password());
+        install_action.dry_run = true;
+
+        let result = apply_action(&install_action, &runner, &files).expect("dry-run succeeds");
+
+        assert_eq!(result.status, InstallStatus::DryRun);
+        assert!(!result.detail.contains("super-secret"));
+        assert!(result.detail.contains("<redacted>"));
+        assert!(result.detail.contains("--onec-password will be stored"));
     }
 
     #[test]

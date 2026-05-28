@@ -1,7 +1,4 @@
 //! File change application for incrementally updating the database.
-//!
-//! FileChange represents a batch of file changes (from VFS) that need to be
-//! applied to the database.
 
 use std::sync::Arc;
 
@@ -9,43 +6,32 @@ use vfs::FileId;
 
 use crate::{SourceRoot, SourceRootId};
 
-/// A batch of file changes to apply to the database.
-///
-/// Changes are accumulated from the VFS and then applied atomically
-/// with appropriate durability levels for incremental computation.
+/// A batch of VFS changes to apply to the database.
 #[derive(Default, Debug)]
 pub struct FileChange {
-    /// Source roots to set/update
+    /// Source roots that replace the current database roots.
     pub roots: Option<Vec<SourceRoot>>,
-    /// Files that changed (FileId, new content or None for deletion)
+    /// Changed file contents. `None` marks a deleted file.
     pub files_changed: Vec<(FileId, Option<Arc<str>>)>,
 }
 
 impl FileChange {
-    /// Create a new empty FileChange.
+    /// Create an empty change batch.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Set the source roots for this change.
+    /// Replace the source roots when the batch is applied.
     pub fn set_roots(&mut self, roots: Vec<SourceRoot>) {
         self.roots = Some(roots);
     }
 
-    /// Add a file change (create, modify, or delete).
-    ///
-    /// - `new_text = Some(text)` for create/modify
-    /// - `new_text = None` for delete
+    /// Add a file creation, modification, or deletion.
     pub fn change_file(&mut self, file_id: FileId, new_text: Option<Arc<str>>) {
         self.files_changed.push((file_id, new_text));
     }
 
-    /// Apply all changes to the database.
-    ///
-    /// This method:
-    /// 1. Sets source roots (if provided)
-    /// 2. Maps files to their source roots
-    /// 3. Updates file contents
+    /// Apply this batch to the database.
     pub fn apply(self, db: &mut dyn crate::RootQueryDb) {
         let _span = tracing::info_span!(
             "FileChange::apply",
@@ -54,7 +40,6 @@ impl FileChange {
         )
         .entered();
 
-        // Apply source root changes
         let mut library_files = 0;
         let mut user_files = 0;
         if let Some(roots) = self.roots {
@@ -68,12 +53,10 @@ impl FileChange {
                     user_files += file_count;
                 }
 
-                // Map each file in this root to the root ID
                 for file_id in root.iter() {
                     db.set_file_source_root(file_id, root_id);
                 }
 
-                // Store the source root
                 db.set_source_root(root_id, root);
             }
             tracing::debug!(
@@ -83,9 +66,7 @@ impl FileChange {
             );
         }
 
-        // Apply file content changes
         for (file_id, text) in self.files_changed {
-            // Update file text (empty string for deleted files)
             let text = text.unwrap_or_else(|| Arc::from(""));
             db.set_file_text(file_id, &text);
         }

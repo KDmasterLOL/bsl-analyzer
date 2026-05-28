@@ -215,6 +215,27 @@ mod tests {
     };
     use crate::{DiagnosticCode, DiagnosticsConfig};
     use expect_test::expect;
+
+    #[test]
+    fn test_call_inside_dot_function_condition_is_counted() {
+        // A `.Функция` property access in the `Если` condition must not break
+        // the block: the enclosed call has to stay reachable in the call
+        // graph, otherwise the callee is falsely reported as unused.
+        let code = r#"
+Процедура ВывестиКолонкуФункция()
+КонецПроцедуры
+
+Процедура Главная(ПараметрыПечати)
+    Если ПараметрыПечати.Функция Тогда
+        ВывестиКолонкуФункция();
+    КонецЕсли;
+КонецПроцедуры
+
+Главная(Неопределено);
+"#;
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UnusedLocalMethod, expect![[r#""#]]);
+    }
+
     #[test]
     fn test_detects_unused_local_methods() {
         let code = r#"

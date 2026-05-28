@@ -2,10 +2,6 @@
 //!
 //! This crate provides the foundation for incremental computation using Salsa.
 //! It defines the core database traits and types for managing source files and parsing.
-//!
-//! Note: This is an initial implementation with simplified caching.
-//! Full Salsa 0.25.2 integration (with tracked functions and proper ingredient registration)
-//! will be completed in a later iteration.
 
 use std::hash::BuildHasherDefault;
 use std::sync::Arc;
@@ -33,24 +29,16 @@ pub use queries::{method_regions_query, parse_query, resolve_vfs_path_query};
 /// It uses Salsa for automatic dependency tracking and cache invalidation.
 #[salsa::db]
 pub trait SourceDatabase: salsa::Database {
-    /// Get the Salsa input for file text.
     fn file_text_input(&self, file_id: FileId) -> FileTextInput;
 
-    /// Get the Salsa input for source root.
     fn source_root_input(&self, source_root_id: SourceRootId) -> SourceRootInput;
 
-    /// Get the Salsa input for file source root mapping.
     fn file_source_root_input(&self, file_id: FileId) -> FileSourceRootInput;
 
-    // Convenience setters (implemented by databases with Files helper)
-
-    /// Set file text (requires Files helper in implementation).
     fn set_file_text(&mut self, file_id: FileId, text: &str);
 
-    /// Set file source root mapping (requires Files helper in implementation).
     fn set_file_source_root(&mut self, file_id: FileId, source_root_id: SourceRootId);
 
-    /// Set source root (requires Files helper in implementation).
     fn set_source_root(&mut self, source_root_id: SourceRootId, source_root: SourceRoot);
 
     /// Resolve a VfsPath to FileId within a SourceRoot.
@@ -78,9 +66,7 @@ pub trait SourceDatabase: salsa::Database {
 /// ## Region Analysis
 /// - [`method_regions`](Self::method_regions) - Methods in API regions (LRU: 256)
 ///
-/// Module-level regions are exposed via `hir::RegionTree::module_level_regions`
-/// (see `crates/hir-def/src/region_tree.rs`); the previous flat
-/// `module_level_regions_query` was removed in Track 2 Phase C §3 Slice 2.
+/// Module-level regions are exposed via `hir::RegionTree::module_level_regions`.
 ///
 /// # Implementation Pattern
 ///
@@ -150,7 +136,7 @@ pub trait RootQueryDb: SourceDatabase {
 /// Helper structure for managing file state with concurrent access.
 ///
 /// Uses DashMap for lock-free concurrent access to Salsa input structs.
-/// Note: Files is a DashMap-based helper kept outside Salsa.
+/// `Files` stores Salsa input handles outside Salsa itself.
 ///
 /// # Locking invariant (ABBA deadlock prevention)
 ///
@@ -178,17 +164,13 @@ pub struct Files {
     file_texts: Arc<DashMap<FileId, FileTextInput, BuildHasherDefault<FxHasher>>>,
     source_roots: Arc<DashMap<SourceRootId, SourceRootInput, BuildHasherDefault<FxHasher>>>,
     file_source_roots: Arc<DashMap<FileId, FileSourceRootInput, BuildHasherDefault<FxHasher>>>,
-    // parse_cache removed - Salsa handles caching via parse_query tracked function
 }
 
 impl Files {
-    /// Create a new empty Files collection.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Get the Salsa input for file text.
-    ///
     /// # Panics
     ///
     /// Panics if the file has not been set.
@@ -199,8 +181,6 @@ impl Files {
         })
     }
 
-    /// Try to get the Salsa input for file text.
-    ///
     /// Returns None if the file has not been loaded yet.
     pub fn try_file_text(&self, file_id: FileId) -> Option<FileTextInput> {
         self.file_texts.get(&file_id).map(|entry| *entry.value())
@@ -298,7 +278,9 @@ impl Files {
         }
     }
 
-    /// Get the Salsa input for source root.
+    /// # Panics
+    ///
+    /// Panics if the source root has not been set.
     pub fn source_root(&self, source_root_id: SourceRootId) -> SourceRootInput {
         self.source_roots.get(&source_root_id).map(|entry| *entry.value()).unwrap_or_else(|| {
             tracing::error!(?source_root_id, "source root not set — this is a programming error");
@@ -306,7 +288,6 @@ impl Files {
         })
     }
 
-    /// Set the source root.
     pub fn set_source_root(
         &self,
         db: &mut dyn SourceDatabase,
@@ -331,7 +312,9 @@ impl Files {
         }
     }
 
-    /// Get the Salsa input for file source root mapping.
+    /// # Panics
+    ///
+    /// Panics if the file source root mapping has not been set.
     pub fn file_source_root(&self, file_id: FileId) -> FileSourceRootInput {
         self.file_source_roots.get(&file_id).map(|entry| *entry.value()).unwrap_or_else(|| {
             tracing::error!(?file_id, "file source root not set — this is a programming error");
@@ -339,7 +322,6 @@ impl Files {
         })
     }
 
-    /// Set the file source root mapping.
     pub fn set_file_source_root(
         &self,
         db: &mut dyn SourceDatabase,
@@ -363,8 +345,6 @@ impl Files {
             }
         }
     }
-
-    // parse() method removed - replaced by parse_query tracked function below
 }
 
 #[cfg(test)]
@@ -373,7 +353,6 @@ mod tests {
     use vfs::file_set::FileSet;
     use vfs::VfsPath;
 
-    // Test database implementation with full Salsa integration
     #[salsa::db]
     #[derive(Clone, Default)]
     struct TestDatabase {
@@ -440,11 +419,6 @@ mod tests {
         }
     }
 
-    // Test query to verify FileIdInput (Salsa interned FileId) works with Salsa tracked functions.
-    // This is critical for Phase 1 of the Salsa HIR integration plan.
-    //
-    // Note: FileId directly is NOT compatible with Salsa 0.25 (requires SalsaStructInDb trait).
-    // We use FileIdInput wrapper (Salsa interned) as fallback solution.
     #[salsa::tracked(lru = 10)]
     fn test_fileid_query<'db>(
         db: &'db dyn salsa::Database,
@@ -457,25 +431,20 @@ mod tests {
     fn test_fileid_salsa_compatible() {
         let db = TestDatabase::default();
 
-        // Test basic usage
         let file_id = FileId(42);
         let file_id_input = FileIdInput::new(&db, file_id);
 
-        // If this compiles and runs, FileIdInput works with Salsa
         let result = test_fileid_query(&db, file_id_input);
         assert_eq!(result, 42);
 
-        // Test caching - should return the same value
         let result2 = test_fileid_query(&db, file_id_input);
         assert_eq!(result2, 42);
 
-        // Test different FileId - should compute different value
         let file_id2 = FileId(100);
         let file_id_input2 = FileIdInput::new(&db, file_id2);
         let result3 = test_fileid_query(&db, file_id_input2);
         assert_eq!(result3, 100);
 
-        // Test interning - same FileId should return same FileIdInput
         let file_id_input3 = FileIdInput::new(&db, file_id);
         assert_eq!(file_id_input, file_id_input3);
     }
@@ -485,17 +454,14 @@ mod tests {
         let mut db = TestDatabase::default();
         let file_id = FileId(0);
 
-        // Set up source root
         let mut file_set = FileSet::new();
         file_set.insert(file_id, VfsPath::new("/test.bsl"));
         let source_root = SourceRoot::new_local(file_set);
         db.set_source_root(SourceRootId(0), source_root);
         db.set_file_source_root(file_id, SourceRootId(0));
 
-        // Set file text
         db.set_file_text(file_id, "Процедура Тест() КонецПроцедуры");
 
-        // Parse the file
         let result = db.parse(file_id);
         assert!(!result.has_errors());
     }
@@ -505,25 +471,20 @@ mod tests {
         let mut db = TestDatabase::default();
         let file_id = FileId(0);
 
-        // Set up source root
         let mut file_set = FileSet::new();
         file_set.insert(file_id, VfsPath::new("/test.bsl"));
         let source_root = SourceRoot::new_local(file_set);
         db.set_source_root(SourceRootId(0), source_root);
         db.set_file_source_root(file_id, SourceRootId(0));
 
-        // Set initial content
         db.set_file_text(file_id, "Процедура Тест() КонецПроцедуры");
         let parse1 = db.parse(file_id);
         assert!(!parse1.has_errors());
 
-        // Set same content - should return cached result
-        // Note: While wrapper structs may differ, the underlying Rowan GreenNode is shared
         let parse2 = db.parse(file_id);
         assert!(!parse2.has_errors());
         assert_eq!(parse1.syntax_node().text(), parse2.syntax_node().text());
 
-        // Change content - should reparse
         db.set_file_text(file_id, "Процедура Тест2() КонецПроцедуры");
         let parse3 = db.parse(file_id);
         assert!(!parse3.has_errors());
@@ -538,7 +499,6 @@ mod tests {
         let mut change = FileChange::new();
         change.change_file(file_id, Some(Arc::from("Процедура Тест() КонецПроцедуры")));
 
-        // Set up source root
         let mut file_set = FileSet::new();
         file_set.insert(file_id, VfsPath::new("/test.bsl"));
         let source_root = SourceRoot::new_local(file_set);
@@ -546,10 +506,7 @@ mod tests {
 
         change.apply(&mut db);
 
-        // Should be able to parse now
         let result = db.parse(file_id);
         assert!(!result.has_errors());
     }
-
-    // SDBL tests migrated to ide-db (all_sdbl_in_file API)
 }

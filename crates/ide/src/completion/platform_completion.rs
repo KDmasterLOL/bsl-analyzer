@@ -414,6 +414,13 @@ fn collect_platform_items<DB: RootDatabase>(
         TypeKind::MetadataObject(f) => Shape::MetaKind(f.kind),
         TypeKind::FormData { .. } => Shape::FormData,
         TypeKind::ObjectManager(f) => Shape::Manager(f.mdo),
+        // A flavour-scoped any-ref completes like its concrete `*Ref` kind
+        // (`CatalogRef.*` methods), driven off the flavour prefix — no name
+        // needed for the method surface.
+        TypeKind::AnyMetadataRef { mdo_type } => match hir::MetadataKind::ref_kind_for(*mdo_type) {
+            Some(kind) => Shape::MetaKind(kind),
+            None => Shape::Other,
+        },
         _ => Shape::Other,
     };
 
@@ -1133,6 +1140,33 @@ mod tests {
         assert!(
             detail.contains("ВРег") && detail.contains("Строка"),
             "Detail should contain method name and parameter type, got: {detail}"
+        );
+    }
+
+    #[test]
+    fn any_metadata_ref_completes_flavour_ref_surface() {
+        use bsl_platform::PlatformDataInner;
+        use ide_db::base_db::Locale;
+        use ide_db::RootDatabaseImpl;
+
+        if PlatformDataInner::instance().all_methods().is_empty() {
+            return;
+        }
+        let db = RootDatabaseImpl::new();
+
+        // A flavour-scoped any-ref offers its concrete `*Ref` method surface
+        // (`CatalogRef.*`) even without a concrete MDO name.
+        let any_catalog = db.any_metadata_ref(bsl_metadata::MdoType::Catalog);
+        assert!(
+            !collect_platform_items(&db, any_catalog, Locale::Ru).is_empty(),
+            "AnyMetadataRef<Catalog> must offer the CatalogRef method surface"
+        );
+
+        // Register flavours have no composite ref prefix → no surface.
+        let any_register = db.any_metadata_ref(bsl_metadata::MdoType::InformationRegister);
+        assert!(
+            collect_platform_items(&db, any_register, Locale::Ru).is_empty(),
+            "register-flavour any-ref has no ref method surface"
         );
     }
 

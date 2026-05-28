@@ -91,6 +91,26 @@ pub fn is_assignable(db: &dyn TypeKernelDb, from: TypeId, to: TypeId) -> bool {
         return true;
     }
 
+    // Reference subtyping toward the coarser any-ref kinds. ONE-WAY: a
+    // concrete / flavoured ref flows UP to the broader type, never the
+    // reverse (`AnyRef ≤ CatalogRef` would need narrowing — keeping it
+    // false preserves real `CatalogRef` vs `DocumentRef` diagnostics).
+    //
+    //   `ref ≤ AnyRef`  — any reference is "some reference". `is_ref_kind`
+    //                     covers concrete `MetadataRef(*Ref)` AND a flavoured
+    //                     `AnyMetadataRef{k}`, so both flow up to `AnyRef`.
+    //   `MetadataRef{kind∈k} ≤ AnyMetadataRef{k}` — concrete ≤ its flavour.
+    if matches!(to_kind, TypeKind::AnyRef) && is_ref_kind(from_kind) {
+        return true;
+    }
+    if let TypeKind::AnyMetadataRef { mdo_type } = to_kind {
+        if let TypeKind::MetadataRef(facet) = from_kind {
+            if facet.kind.ref_mdo_type() == Some(*mdo_type) {
+                return true;
+            }
+        }
+    }
+
     // TabularSectionRow ↔ `PlatformObject("Строка табличной части")`
     // bridge (bidirectional). Both denote the same BSL value: the row
     // receiver carries a `(parent, "Parent.Section")` payload so
@@ -153,26 +173,19 @@ pub fn is_assignable(db: &dyn TypeKernelDb, from: TypeId, to: TypeId) -> bool {
     false
 }
 
-/// Whether `kind` is one of the MDO reference variants — the set for
-/// which [`is_assignable`] accepts `Null ≤ ref-type`.
+/// Whether `kind` denotes a reference value — the set for which
+/// [`is_assignable`] accepts `Null ≤ ref-type` and `ref ≤ AnyRef`.
+///
+/// Covers concrete `MetadataRef(*Ref)` (via the
+/// [`MetadataKind::ref_mdo_type`] source of truth) plus the two coarser
+/// any-ref kinds: a flavoured [`TypeKind::AnyMetadataRef`] and the
+/// flavour-less [`TypeKind::AnyRef`] are both references.
 fn is_ref_kind(kind: &TypeKind) -> bool {
-    matches!(
-        kind,
-        TypeKind::MetadataRef(facet) if matches!(
-            facet.kind,
-            MetadataKind::CatalogRef
-                | MetadataKind::DocumentRef
-                | MetadataKind::EnumRef
-                | MetadataKind::TaskRef
-                | MetadataKind::BusinessProcessRef
-                | MetadataKind::ExchangePlanRef
-                | MetadataKind::ChartOfAccountsRef
-                | MetadataKind::InformationRegisterRef
-                | MetadataKind::AccumulationRegisterRef
-                | MetadataKind::AccountingRegisterRef
-                | MetadataKind::CalculationRegisterRef,
-        )
-    )
+    match kind {
+        TypeKind::MetadataRef(facet) => facet.kind.ref_mdo_type().is_some(),
+        TypeKind::AnyMetadataRef { .. } | TypeKind::AnyRef => true,
+        _ => false,
+    }
 }
 
 /// Whether `ty` is one of the MDO reference variants. Kept public so
@@ -516,6 +529,89 @@ mod tests {
         let number = db.number(None, None);
         assert!(is_assignable(&db, number, any), "A ≤ Any (universal top)");
         assert!(is_assignable(&db, any, number), "Any ≤ A (universal, gradual)");
+    }
+
+    #[test]
+    fn concrete_ref_assignable_to_any_ref() {
+        // `СправочникСсылка.X ≤ ЛюбаяСсылка` — the core fix. Every
+        // concrete reference flows into the AnyRef supertype.
+        let db = InMemoryDb::new();
+        let cat = metadata_ref_id(&db, MetadataKind::CatalogRef, "Контрагенты");
+        let doc = metadata_ref_id(&db, MetadataKind::DocumentRef, "ПКО");
+        assert!(is_assignable(&db, cat, db.any_ref()));
+        assert!(is_assignable(&db, doc, db.any_ref()));
+    }
+
+    #[test]
+    fn any_metadata_ref_assignable_to_any_ref() {
+        // A flavoured `AnyMetadataRef{Catalog}` is still a reference, so
+        // it flows up to the flavour-less AnyRef.
+        let db = InMemoryDb::new();
+        assert!(is_assignable(
+            &db,
+            db.any_metadata_ref(bsl_metadata::MdoType::Catalog),
+            db.any_ref()
+        ));
+    }
+
+    #[test]
+    fn any_ref_not_assignable_to_concrete_ref() {
+        // ONE-WAY: `ЛюбаяСсылка` is "some reference", not "the expected
+        // reference". Flowing it into a concrete-ref slot must fail —
+        // narrowing/cast is the only way down.
+        let db = InMemoryDb::new();
+        let cat = metadata_ref_id(&db, MetadataKind::CatalogRef, "Контрагенты");
+        assert!(!is_assignable(&db, db.any_ref(), cat));
+        assert!(!is_assignable(
+            &db,
+            db.any_ref(),
+            db.any_metadata_ref(bsl_metadata::MdoType::Catalog)
+        ));
+    }
+
+    #[test]
+    fn concrete_ref_assignable_to_matching_flavour() {
+        // `MetadataRef{CatalogRef} ≤ AnyMetadataRef{Catalog}`, but a
+        // mismatched flavour (`DocumentRef ≤ AnyMetadataRef{Catalog}`)
+        // stays false — the flavour discriminator is meaningful.
+        let db = InMemoryDb::new();
+        let cat = metadata_ref_id(&db, MetadataKind::CatalogRef, "Контрагенты");
+        let doc = metadata_ref_id(&db, MetadataKind::DocumentRef, "ПКО");
+        let any_catalog = db.any_metadata_ref(bsl_metadata::MdoType::Catalog);
+        assert!(is_assignable(&db, cat, any_catalog), "CatalogRef ≤ AnyMetadataRef{{Catalog}}");
+        assert!(
+            !is_assignable(&db, doc, any_catalog),
+            "DocumentRef ≰ AnyMetadataRef{{Catalog}} — wrong flavour"
+        );
+    }
+
+    #[test]
+    fn any_metadata_ref_not_assignable_to_concrete_ref() {
+        // ONE-WAY also at the flavour level: a flavoured
+        // `AnyMetadataRef{Catalog}` does NOT narrow down to a concrete
+        // `CatalogRef.X` — only the reverse (`concrete ≤ flavour`) holds.
+        let db = InMemoryDb::new();
+        let cat = metadata_ref_id(&db, MetadataKind::CatalogRef, "Контрагенты");
+        let any_catalog = db.any_metadata_ref(bsl_metadata::MdoType::Catalog);
+        assert!(!is_assignable(&db, any_catalog, cat));
+    }
+
+    #[test]
+    fn null_assignable_to_any_ref() {
+        // `Null ≤ AnyRef` — clearing an any-ref slot is the same idiom as
+        // clearing a concrete ref.
+        let db = InMemoryDb::new();
+        assert!(is_assignable(&db, db.null(), db.any_ref()));
+        assert!(is_assignable(&db, db.null(), db.any_metadata_ref(bsl_metadata::MdoType::Catalog)));
+    }
+
+    #[test]
+    fn number_not_assignable_to_any_ref() {
+        // AnyRef is a ref supertype, NOT gradual: a non-ref value must
+        // not slip into an AnyRef slot.
+        let db = InMemoryDb::new();
+        assert!(!is_assignable(&db, db.number(None, None), db.any_ref()));
+        assert!(!is_assignable(&db, db.string(None, false), db.any_ref()));
     }
 
     #[test]

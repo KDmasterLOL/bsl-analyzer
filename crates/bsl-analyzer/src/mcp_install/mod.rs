@@ -7,8 +7,8 @@ mod usecase;
 
 pub use error::InstallError;
 pub use model::{
-    default_server_name, ApplyDecision, InstallPreset, InstallRequest, InstallResult, InstallScope,
-    InstallStatus, InstallTarget, InstallTargetSelector,
+    default_server_name, InstallPreset, InstallRequest, InstallResult, InstallScope, InstallStatus,
+    InstallTarget, InstallTargetSelector,
 };
 
 use crate::mcp_install::adapters::{RealCommandRunner, RealFileStore};

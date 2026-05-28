@@ -1,7 +1,7 @@
 //! Type parsing functions for XML metadata
 
 use crate::error::Result;
-use crate::metadata_object::{AttributeType, MdoType};
+use crate::metadata_object::{AttributeType, MdoType, PlatformValueType};
 
 /// Mapping from reference type prefix to MdoType
 static REF_TYPE_MAP: &[(&str, MdoType)] = &[
@@ -253,11 +253,43 @@ fn parse_single_type(type_str: &str, qualifiers: &TypeQualifiers) -> Result<Attr
         "v8:UUID" => Ok(AttributeType::Uuid),
         "v8:ValueStorage" => Ok(AttributeType::ValueStorage),
 
-        _ => {
-            tracing::warn!(type_str = %type_str, "unknown type");
-            Ok(AttributeType::Unknown)
-        }
+        // Platform value types — fixed `v8:` XDTO vocabulary. Classify the
+        // token; the kernel mapping is the HIR bridge's job. `v8:FillChecking`
+        // is intentionally absent: it names a metadata enum-value domain, not
+        // a form-attribute value type.
+        _ => match parse_platform_value_type(type_str) {
+            Some(pvt) => Ok(AttributeType::Platform(pvt)),
+            None => {
+                tracing::warn!(type_str = %type_str, "unknown type");
+                Ok(AttributeType::Unknown)
+            }
+        },
     }
+}
+
+/// Classify a `v8:` platform value-type token.
+///
+/// Pure token → [`PlatformValueType`] classification over the fixed XDTO
+/// vocabulary — no kernel/HIR knowledge. `v8:UUID` / `v8:ValueStorage` are
+/// handled by their own dedicated [`AttributeType`] variants and never reach
+/// here. `v8:FillChecking` is deliberately omitted (enum-value domain, not a
+/// value type).
+fn parse_platform_value_type(type_str: &str) -> Option<PlatformValueType> {
+    let pvt = match type_str {
+        "v8:ValueListType" => PlatformValueType::ValueList,
+        "v8:ValueTable" => PlatformValueType::ValueTable,
+        "v8:ValueTree" => PlatformValueType::ValueTree,
+        "v8:StandardPeriod" => PlatformValueType::StandardPeriod,
+        "v8:StandardBeginningDate" => PlatformValueType::StandardBeginningDate,
+        "v8:TypeDescription" => PlatformValueType::TypeDescription,
+        "v8:FixedStructure" => PlatformValueType::FixedStructure,
+        "v8:FixedArray" => PlatformValueType::FixedArray,
+        "v8:FixedMap" => PlatformValueType::FixedMap,
+        "v8:Type" => PlatformValueType::Type,
+        "v8:Null" => PlatformValueType::Null,
+        _ => return None,
+    };
+    Some(pvt)
 }
 
 /// Parse reference type string like "cfg:CatalogRef.Валюты"
@@ -289,4 +321,67 @@ fn parse_reference_type(type_str: &str) -> Result<AttributeType> {
         "unsupported reference type"
     );
     Ok(AttributeType::Unknown)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn qualifiers() -> TypeQualifiers {
+        TypeQualifiers {
+            string_length: None,
+            number_digits: None,
+            number_fraction_digits: None,
+            date_fractions: None,
+        }
+    }
+
+    #[test]
+    fn classifies_every_platform_value_token() {
+        for (token, expected) in [
+            ("v8:ValueListType", PlatformValueType::ValueList),
+            ("v8:ValueTable", PlatformValueType::ValueTable),
+            ("v8:ValueTree", PlatformValueType::ValueTree),
+            ("v8:StandardPeriod", PlatformValueType::StandardPeriod),
+            ("v8:StandardBeginningDate", PlatformValueType::StandardBeginningDate),
+            ("v8:TypeDescription", PlatformValueType::TypeDescription),
+            ("v8:FixedStructure", PlatformValueType::FixedStructure),
+            ("v8:FixedArray", PlatformValueType::FixedArray),
+            ("v8:FixedMap", PlatformValueType::FixedMap),
+            ("v8:Type", PlatformValueType::Type),
+            ("v8:Null", PlatformValueType::Null),
+        ] {
+            assert_eq!(parse_platform_value_type(token), Some(expected), "token {token}");
+            assert_eq!(
+                parse_single_type(token, &qualifiers()).unwrap(),
+                AttributeType::Platform(expected),
+                "single-type {token}",
+            );
+        }
+    }
+
+    #[test]
+    fn uuid_and_value_storage_keep_dedicated_variants() {
+        // These two `v8:` tokens have their own `AttributeType` variants and
+        // must NOT be reclassified as `Platform(_)`.
+        assert_eq!(parse_platform_value_type("v8:UUID"), None);
+        assert_eq!(parse_platform_value_type("v8:ValueStorage"), None);
+        assert_eq!(parse_single_type("v8:UUID", &qualifiers()).unwrap(), AttributeType::Uuid);
+        assert_eq!(
+            parse_single_type("v8:ValueStorage", &qualifiers()).unwrap(),
+            AttributeType::ValueStorage
+        );
+    }
+
+    #[test]
+    fn fill_checking_and_unrelated_tokens_stay_unknown() {
+        // `v8:FillChecking` names a metadata enum-value domain, not a value
+        // type — it must stay Unknown rather than be mapped to a platform type.
+        assert_eq!(parse_platform_value_type("v8:FillChecking"), None);
+        assert_eq!(parse_platform_value_type("v8:Nonsense"), None);
+        assert_eq!(
+            parse_single_type("v8:FillChecking", &qualifiers()).unwrap(),
+            AttributeType::Unknown
+        );
+    }
 }

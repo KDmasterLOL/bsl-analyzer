@@ -4,7 +4,7 @@ use crate::mcp_install::model::{
 };
 use crate::mcp_install::preset;
 
-pub fn build_install_plan(mut request: InstallRequest) -> Result<InstallPlan, InstallError> {
+pub(super) fn build_install_plan(mut request: InstallRequest) -> Result<InstallPlan, InstallError> {
     if request.name.trim().is_empty() {
         return Err(InstallError::EmptyName);
     }

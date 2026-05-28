@@ -422,6 +422,51 @@ HHH"#;
     }
 
     #[test]
+    fn test_no_parse_error_for_enum_value_named_new() {
+        // Enum values may be named `Новый` (a keyword), so accessing one as a
+        // property must NOT report "Ожидалось имя свойства после '.'".
+        // Real corpus example: `Перечисления.ГрадацииКачества.Новый`.
+        let code = r#"
+Процедура Тест()
+    Качество = Перечисления.ГрадацииКачества.Новый;
+КонецПроцедуры
+"#;
+        assert_no_parse_errors_for(code, "Enum value named Новый should not trigger parse error");
+    }
+
+    #[test]
+    fn test_no_parse_error_for_property_named_function() {
+        // `Функция` is a valid property / enum-value name after `.`
+        // (e.g. `Перечисления.X.Функция`, `ПараметрыПечати.Функция`), even
+        // though it is also the function-declaration keyword.
+        let code = r#"
+Процедура Тест()
+    Если ПараметрыПечати.Функция Тогда
+    КонецЕсли;
+    Качество = Перечисления.ГрадацииКачества.Функция;
+КонецПроцедуры
+"#;
+        assert_no_parse_errors_for(code, "Property named Функция should not trigger parse error");
+    }
+
+    #[test]
+    fn test_no_parse_error_for_multiline_chained_function_property() {
+        // A line break after `.` is valid for ordinary property chains, so a
+        // `Функция` property on the next line must still parse cleanly — the
+        // declaration-shape guard only fires for a `Функция Имя(` header.
+        let code = r#"
+Процедура Тест()
+    Значение = ПараметрыПечати.
+        Функция;
+КонецПроцедуры
+"#;
+        assert_no_parse_errors_for(
+            code,
+            "Multiline-chained Функция property should not trigger parse error",
+        );
+    }
+
+    #[test]
     fn test_no_parse_error_for_multiline_nstr_argument() {
         let code = r#"Процедура Тест()
     ТекстПодсказки = НСтр("ru = 'Доплата может производиться картой,

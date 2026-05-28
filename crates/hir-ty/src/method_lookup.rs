@@ -142,6 +142,9 @@ fn lookup_method_inner(
         TypeKind::MetadataObject(facet) => {
             lookup_on_metadata_ref(db, facet.kind, &Name::new(&facet.name), method_name)
         }
+        TypeKind::AnyMetadataRef { mdo_type } => {
+            lookup_on_any_metadata_ref(db, *mdo_type, method_name)
+        }
         TypeKind::FormControl { kind, .. } => lookup_on_form_control(db, *kind, method_name),
         _ => lookup_scalar_receiver(db, eff_id, method_name),
     }?;
@@ -699,6 +702,31 @@ fn lookup_on_metadata_ref(
         }
     }
     None
+}
+
+/// Resolve a method on a flavour-scoped any-reference
+/// (`TypeKind::AnyMetadataRef { mdo_type }` — `ЛюбаяСсылка<Catalog>`).
+///
+/// Reuses the concrete-ref platform surface via the flavour prefix
+/// (`CatalogRef.*`); the resolver widens same-flavour ref returns back to
+/// `AnyMetadataRef` and degrades object returns to `Unknown` since there
+/// is no concrete name to bind. Flavours without a `*Ref` platform
+/// surface (registers, etc.) return `None`.
+fn lookup_on_any_metadata_ref(
+    db: &dyn TypeKernelDb,
+    mdo_type: MdoType,
+    method_name: &Name,
+) -> Option<MethodInfo> {
+    let res = crate::platform_manager_lookup::resolve_platform_any_metadata_ref_method(
+        db,
+        mdo_type,
+        method_name,
+    )?;
+    Some(MethodInfo {
+        return_ty: res.return_ty,
+        params: res.signature.params.to_vec(),
+        overloads: res.overloads,
+    })
 }
 
 /// Resolve a method on a `TypeKind::FormControl` receiver.

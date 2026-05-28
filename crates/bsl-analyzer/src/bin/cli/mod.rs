@@ -1,0 +1,12 @@
+pub mod analyze;
+pub mod check_config;
+pub mod dap;
+pub mod deps;
+pub mod extension;
+pub mod format;
+pub mod logging;
+pub mod lsp;
+pub mod mcp;
+pub mod rules;
+pub mod search_baseline;
+pub mod smoke;

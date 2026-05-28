@@ -16,7 +16,7 @@ use crate::facet::{
     StringFacet, StructureFacet, TableFacet,
 };
 use crate::intern::TypeKernelDb;
-use crate::kind::{Projection, TypeId, TypeKind};
+use crate::kind::{MetadataKind, Projection, TypeId, TypeKind};
 use bsl_metadata::MdoType;
 
 /// Manager-collection label for an MDO family — `СправочникМенеджер` /
@@ -150,8 +150,20 @@ fn render(kind: &TypeKind, ctx: &dyn DisplayCtx, db: &dyn TypeKernelDb, buf: &mu
         TypeKind::MetadataRef(facet) => render_meta_ref(facet, ctx, buf),
         TypeKind::MetadataObject(facet) => render_meta_obj(facet, ctx, buf),
         TypeKind::AnyMetadataRef { mdo_type } => {
-            buf.push_str(manager_collection_label(*mdo_type, ctx.locale()));
+            // A flavour-scoped any-ref reads like the bare reference kind
+            // (`СправочникСсылка`), NOT the manager collection
+            // (`Справочники`) — it denotes "some reference of this
+            // flavour", a value, not the manager. Fall back to the
+            // collection label only for flavours with no `*Ref` kind.
+            match MetadataKind::ref_kind_for(*mdo_type) {
+                Some(kind) => buf.push_str(kind.display_label(ctx.locale())),
+                None => buf.push_str(manager_collection_label(*mdo_type, ctx.locale())),
+            }
         }
+        TypeKind::AnyRef => buf.push_str(match ctx.locale() {
+            Locale::Ru => "ЛюбаяСсылка",
+            Locale::En => "AnyRef",
+        }),
         TypeKind::ManagerCollection(mdo_type) => {
             buf.push_str(manager_collection_label(*mdo_type, ctx.locale()));
         }
@@ -162,48 +174,52 @@ fn render(kind: &TypeKind, ctx: &dyn DisplayCtx, db: &dyn TypeKernelDb, buf: &mu
             };
             write!(buf, "{}.{}", kind_label, facet.name).unwrap();
         }
-        TypeKind::TabularSection { name, .. } => {
+        // Parent-qualified so the owning MDO disambiguates same-named
+        // sections (`Catalog X.Товары` vs `Document X.Товары`).
+        TypeKind::TabularSection { parent, name } => {
             buf.push_str(match ctx.locale() {
                 Locale::Ru => "ТабличнаяЧасть<",
                 Locale::En => "TabularSection<",
             });
-            buf.push_str(name);
+            write!(buf, "{}.{}", parent.name, name).unwrap();
             buf.push('>');
         }
-        TypeKind::TabularSectionRow { name, .. } => {
+        TypeKind::TabularSectionRow { parent, name } => {
             buf.push_str(match ctx.locale() {
                 Locale::Ru => "СтрокаТабличнойЧасти<",
                 Locale::En => "TabularSectionRow<",
             });
-            buf.push_str(name);
+            write!(buf, "{}.{}", parent.name, name).unwrap();
             buf.push('>');
         }
-        TypeKind::RegisterDimension { name, .. } => {
+        TypeKind::RegisterDimension { parent, name } => {
             let label = match ctx.locale() {
                 Locale::Ru => "Измерение",
                 Locale::En => "Dimension",
             };
-            write!(buf, "{}<{}>", label, name).unwrap();
+            write!(buf, "{}<{}.{}>", label, parent.name, name).unwrap();
         }
-        TypeKind::RegisterResource { name, .. } => {
+        TypeKind::RegisterResource { parent, name } => {
             let label = match ctx.locale() {
                 Locale::Ru => "Ресурс",
                 Locale::En => "Resource",
             };
-            write!(buf, "{}<{}>", label, name).unwrap();
+            write!(buf, "{}<{}.{}>", label, parent.name, name).unwrap();
         }
-        TypeKind::RegisterAttribute { name, .. } => {
+        TypeKind::RegisterAttribute { parent, name } => {
             let label = match ctx.locale() {
                 Locale::Ru => "Реквизит",
                 Locale::En => "Attribute",
             };
-            write!(buf, "{}<{}>", label, name).unwrap();
+            write!(buf, "{}<{}.{}>", label, parent.name, name).unwrap();
         }
         TypeKind::RegisterFilter { .. } => buf.push_str(match ctx.locale() {
             Locale::Ru => "Отбор",
             Locale::En => "Filter",
         }),
-        TypeKind::Attribute { name, .. } => buf.push_str(name),
+        TypeKind::Attribute { parent, name } => {
+            write!(buf, "{}.{}", parent.name, name).unwrap();
+        }
         TypeKind::FormData { kind, underlying } => {
             // Concrete platform wrapper (`ДанныеФормыСтруктура` /
             // `…Коллекция` / `…СтруктураСКоллекцией`) — locale-independent
@@ -613,6 +629,42 @@ mod tests {
     }
 
     #[test]
+    fn any_ref_renders_localized_label() {
+        // `AnyRef` is the `ЛюбаяСсылка` supertype — rendered with the bare
+        // localized word, not the manager-collection label used by the
+        // flavoured `AnyMetadataRef`.
+        let db = InMemoryDb::new();
+        expect!["ЛюбаяСсылка"].assert_eq(&show(&db, db.any_ref(), &ru()));
+        expect!["AnyRef"].assert_eq(&show(&db, db.any_ref(), &en()));
+    }
+
+    #[test]
+    fn any_metadata_ref_renders_ref_kind_label() {
+        // A flavoured any-ref reads like the bare reference kind
+        // (`СправочникСсылка`), NOT the manager collection (`Справочники`)
+        // — it is a reference value, not the manager.
+        let db = InMemoryDb::new();
+        let any_catalog = db.any_metadata_ref(MdoType::Catalog);
+        expect!["СправочникСсылка"].assert_eq(&show(&db, any_catalog, &ru()));
+        expect!["CatalogRef"].assert_eq(&show(&db, any_catalog, &en()));
+    }
+
+    #[test]
+    fn tabular_section_label_is_parent_qualified() {
+        // The owning MDO is part of the label so `Catalog "X".Товары` and
+        // `Document "X".Товары` don't collide.
+        use crate::kind::MetadataKind;
+        let db = InMemoryDb::new();
+        let cfg = RootConfigCtx;
+        let parent = db.meta_ref_facet(MetadataKind::CatalogRef, "Номенклатура".to_string(), &cfg);
+        let ts = db.tabular_section(parent.clone(), "Товары".to_string());
+        let row = db.tabular_section_row(parent, "Товары".to_string());
+        expect!["ТабличнаяЧасть<Номенклатура.Товары>"].assert_eq(&show(&db, ts, &ru()));
+        expect!["TabularSection<Номенклатура.Товары>"].assert_eq(&show(&db, ts, &en()));
+        expect!["СтрокаТабличнойЧасти<Номенклатура.Товары>"].assert_eq(&show(&db, row, &ru()));
+    }
+
+    #[test]
     fn array_of_element() {
         let db = InMemoryDb::new();
         let n = db.number(None, None);
@@ -627,8 +679,8 @@ mod tests {
 
     #[test]
     fn register_inner_variants_use_ctx_locale() {
-        // Regression for Codex 1.F round-1 area 8: previously these
-        // variants hard-coded Russian labels even in En contexts.
+        // Labels honour the context locale and are parent-qualified
+        // (`<Регистр>.<Имя>`) so the owning register is visible.
         use crate::kind::MetadataKind;
         let db = InMemoryDb::new();
         let cfg = RootConfigCtx;
@@ -639,12 +691,12 @@ mod tests {
         let att = db.register_attribute(parent.clone(), "Комментарий".to_string());
         let filt = db.register_filter(parent);
 
-        expect!["Измерение<Период>"].assert_eq(&show(&db, dim, &ru()));
-        expect!["Dimension<Период>"].assert_eq(&show(&db, dim, &en()));
-        expect!["Ресурс<Сумма>"].assert_eq(&show(&db, res, &ru()));
-        expect!["Resource<Сумма>"].assert_eq(&show(&db, res, &en()));
-        expect!["Реквизит<Комментарий>"].assert_eq(&show(&db, att, &ru()));
-        expect!["Attribute<Комментарий>"].assert_eq(&show(&db, att, &en()));
+        expect!["Измерение<Цены.Период>"].assert_eq(&show(&db, dim, &ru()));
+        expect!["Dimension<Цены.Период>"].assert_eq(&show(&db, dim, &en()));
+        expect!["Ресурс<Цены.Сумма>"].assert_eq(&show(&db, res, &ru()));
+        expect!["Resource<Цены.Сумма>"].assert_eq(&show(&db, res, &en()));
+        expect!["Реквизит<Цены.Комментарий>"].assert_eq(&show(&db, att, &ru()));
+        expect!["Attribute<Цены.Комментарий>"].assert_eq(&show(&db, att, &en()));
         expect!["Отбор"].assert_eq(&show(&db, filt, &ru()));
         expect!["Filter"].assert_eq(&show(&db, filt, &en()));
     }

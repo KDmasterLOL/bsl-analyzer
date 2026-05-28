@@ -189,6 +189,9 @@ impl SdblType {
                     Self::Composite { types: sdbl_types }
                 }
             }
+            // Platform value types (СписокЗначений, ДеревоЗначений, …) are not
+            // query-source field types — the query layer has no use for them.
+            AttributeType::Platform(_) => Self::Unknown,
             AttributeType::Unknown => Self::Unknown,
         }
     }

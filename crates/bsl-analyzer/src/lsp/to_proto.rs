@@ -1,7 +1,4 @@
-//! Convert internal types to LSP protocol types.
-//!
-//! This module provides conversions from our internal representation
-//! (Diagnostic, TextRange, etc.) to LSP types (lsp_types).
+//! Conversion from internal types to LSP protocol types.
 
 use ide::{Diagnostic as IdeDiagnostic, HlMod, HlRange, HlTag, Severity};
 use ide::{DiagnosticTag as IdeTag, TextRange};
@@ -14,13 +11,7 @@ use lsp_types::{
 
 use crate::lsp::PositionEncoding;
 
-/// Converts a TextRange to an LSP Range.
-///
-/// Uses UTF-16 code units for positions as required by LSP protocol.
-/// This is critical for non-ASCII text (e.g., Cyrillic) where byte positions differ from UTF-16 positions.
-///
-/// # Errors
-/// Returns an error if the range is out of bounds.
+/// Converts a byte range to a UTF-16 LSP range.
 pub fn range(line_index: &LineIndex, text: &str, range: TextRange) -> Option<Range> {
     range_with_encoding(line_index, text, range, PositionEncoding::Utf16)
 }
@@ -42,26 +33,20 @@ pub fn range_with_encoding(
     Some(Range { start, end })
 }
 
-/// Converts a TextSize to an LSP Position.
-///
-/// **IMPORTANT**: LSP requires character positions in UTF-16 code units, not bytes!
-/// This function is a helper - you must use `position_utf16()` which takes text parameter.
+/// Converts a byte offset to a position whose character is a byte column.
 pub fn position(line_index: &LineIndex, offset: TextSize) -> Option<Position> {
     let line_col = line_index.try_line_col(offset)?;
     Some(Position { line: line_col.line, character: line_col.col })
 }
 
-/// Converts a TextSize to an LSP Position with UTF-16 character offset.
-///
-/// **USE THIS** instead of `position()` for all LSP protocol conversions.
-/// LSP requires positions in UTF-16 code units, not bytes.
+/// Converts a byte offset to a UTF-16 LSP position.
 pub fn position_utf16(line_index: &LineIndex, text: &str, offset: TextSize) -> Option<Position> {
     let line_col = line_index.try_line_col(offset)?;
     let utf16_col = line_index.utf16_col(text, line_col.line, line_col.col);
     Some(Position { line: line_col.line, character: utf16_col })
 }
 
-/// Converts our Severity to LSP DiagnosticSeverity.
+/// Maps diagnostic severity to the LSP enum.
 pub fn severity(severity: Severity) -> DiagnosticSeverity {
     match severity {
         Severity::Blocker => DiagnosticSeverity::ERROR,
@@ -74,7 +59,7 @@ pub fn severity(severity: Severity) -> DiagnosticSeverity {
     }
 }
 
-/// Converts our DiagnosticTag to LSP DiagnosticTag.
+/// Maps diagnostic tags to the LSP enum.
 pub fn diagnostic_tags(tags: &[IdeTag]) -> Option<Vec<DiagnosticTag>> {
     if tags.is_empty() {
         return None;
@@ -90,10 +75,7 @@ pub fn diagnostic_tags(tags: &[IdeTag]) -> Option<Vec<DiagnosticTag>> {
     )
 }
 
-/// Converts an IDE Diagnostic to an LSP Diagnostic.
-///
-/// # Errors
-/// Returns None if the diagnostic range cannot be converted.
+/// Converts an IDE diagnostic to a UTF-16 LSP diagnostic.
 pub fn diagnostic(line_index: &LineIndex, text: &str, diag: &IdeDiagnostic) -> Option<Diagnostic> {
     diagnostic_with_encoding(line_index, text, diag, PositionEncoding::Utf16)
 }
@@ -122,7 +104,6 @@ pub fn diagnostic_with_encoding(
     })
 }
 
-/// Converts multiple diagnostics to LSP format.
 pub fn diagnostics(line_index: &LineIndex, text: &str, diags: &[IdeDiagnostic]) -> Vec<Diagnostic> {
     diagnostics_with_encoding(line_index, text, diags, PositionEncoding::Utf16)
 }
@@ -136,10 +117,7 @@ pub fn diagnostics_with_encoding(
     diags.iter().filter_map(|d| diagnostic_with_encoding(line_index, text, d, encoding)).collect()
 }
 
-/// Converts a FileId + TextRange to an LSP Location.
-///
-/// # Errors
-/// Returns None if the range cannot be converted or URL cannot be created.
+/// Converts a URL and byte range to a UTF-16 LSP location.
 pub fn location(
     line_index: &LineIndex,
     text: &str,
@@ -160,7 +138,6 @@ pub fn location_with_encoding(
     Some(Location { uri: url.clone(), range: lsp_range })
 }
 
-/// Converts related information for diagnostics.
 pub fn related_information(
     line_index: &LineIndex,
     text: &str,
@@ -172,7 +149,7 @@ pub fn related_information(
     Some(DiagnosticRelatedInformation { location: loc, message })
 }
 
-/// Converts a diagnostic Fix to an LSP CodeAction.
+/// Converts a diagnostic fix to a UTF-16 LSP code action.
 pub fn code_action(
     line_index: &LineIndex,
     text: &str,
@@ -217,7 +194,7 @@ pub fn code_action_with_encoding(
     })
 }
 
-/// Returns the semantic tokens legend (token types and modifiers).
+/// Returns the semantic token types and modifiers advertised to clients.
 pub fn semantic_tokens_legend() -> SemanticTokensLegend {
     let token_types = vec![
         SemanticTokenType::KEYWORD,
@@ -249,7 +226,6 @@ pub fn semantic_tokens_legend() -> SemanticTokensLegend {
     SemanticTokensLegend { token_types, token_modifiers }
 }
 
-/// Converts HlTag to token type index.
 fn token_type_index(tag: HlTag) -> u32 {
     match tag {
         HlTag::Keyword | HlTag::BooleanLiteral => 0,
@@ -271,7 +247,6 @@ fn token_type_index(tag: HlTag) -> u32 {
     }
 }
 
-/// Converts HlMod to token modifiers bitset.
 fn token_modifiers_bitset(mods: HlMod) -> u32 {
     let mut bitset = 0u32;
     if mods.contains(HlMod::EXPORT) {
@@ -292,22 +267,10 @@ fn token_modifiers_bitset(mods: HlMod) -> u32 {
     bitset
 }
 
-/// Converts highlighted ranges to LSP semantic tokens (delta encoding).
+/// Encodes sorted, non-overlapping highlights as UTF-16 LSP semantic tokens.
 ///
-/// Semantic tokens are encoded as a flat array of integers:
-/// [deltaLine, deltaStart, length, tokenType, tokenModifiers, ...]
-///
-/// **IMPORTANT**: The length field must be in UTF-16 code units, not bytes!
-/// This is critical for non-ASCII text like Cyrillic where 1 char = 2 bytes but 1 UTF-16 code unit.
-///
-/// Contract: `ide::highlight()` returns highlights sorted by `range.start()`
-/// and pairwise non-overlapping. This adapter is a dumb encoder: it does not
-/// make priority decisions about which highlight wins. As a transitional
-/// safety-net it skips any incoming highlight that violates the sort/non-overlap
-/// invariant and logs at WARN, rather than emitting an LSP-invalid token list
-/// (the delta encoder would underflow on a backwards-sorted token). The skip
-/// path is to be tightened to a `debug_assert!` once the IDE-layer contract has
-/// soaked in production.
+/// Invalid input ranges are skipped to avoid emitting an invalid delta stream;
+/// such ranges indicate an `ide::highlight()` contract violation.
 pub fn semantic_tokens(
     line_index: &LineIndex,
     text: &str,
@@ -325,9 +288,7 @@ pub fn semantic_tokens_with_encoding(
     let mut tokens = Vec::with_capacity(highlights.len());
     let mut prev_line = 0;
     let mut prev_start = 0;
-    // Tracks the largest range-end we have already emitted. Any incoming
-    // highlight whose start sits below this value violates either the
-    // sortedness contract or the non-overlap contract (or both).
+    // Delta encoding cannot represent overlapping or backwards-sorted ranges.
     let mut prev_max_end: Option<TextSize> = None;
 
     for hl in highlights {
@@ -338,7 +299,7 @@ pub fn semantic_tokens_with_encoding(
                     range = ?hl.range,
                     tag = ?hl.tag,
                     prev_max_end = ?prev_end,
-                    "ide::highlight() returned an out-of-order or overlapping HlRange — skipping (contract violation)"
+                    "ide::highlight() returned an out-of-order or overlapping HlRange; skipping",
                 );
                 continue;
             }
@@ -400,7 +361,6 @@ mod tests {
         let text = "hello\nworld";
         let line_index = LineIndex::new(text);
 
-        // Range covering "world"
         let text_range = TextRange::new(6.into(), 11.into());
         let lsp_range = range(&line_index, text, text_range).unwrap();
 
@@ -440,8 +400,6 @@ mod tests {
         assert_eq!(lsp_diag.tags, Some(vec![DiagnosticTag::UNNECESSARY]));
     }
 
-    /// Encoder behavior: tokens on different lines round-trip correctly via
-    /// delta encoding. Pure encoder test, no dedup involved.
     #[test]
     fn test_semantic_tokens_encodes_disjoint_tokens() {
         let text = "abc\ndef\n";
@@ -520,9 +478,6 @@ mod tests {
         );
     }
 
-    /// End-to-end check: `ide::highlight()` on the Zed-regression example must
-    /// itself return overlap-free highlights (use-case-layer contract), and
-    /// the encoded LSP tokens must inherit that property.
     #[test]
     fn test_semantic_tokens_end_to_end_no_overlap_on_procedure_name() {
         use ide::highlight;
@@ -542,7 +497,7 @@ mod tests {
 
         let result = highlight(&db, file_id);
 
-        // 1. Use-case-layer contract: highlight() output is sorted and pairwise non-overlapping.
+        // `ide::highlight()` must return sorted, non-overlapping ranges.
         for window in result.highlights.windows(2) {
             assert!(
                 window[0].range.start() <= window[1].range.start(),
@@ -558,7 +513,6 @@ mod tests {
             );
         }
 
-        // 2. Adapter passes the contract through to LSP wire format.
         let line_index = LineIndex::new(code);
         let tokens = semantic_tokens(&line_index, code, &result.highlights);
 
@@ -584,7 +538,7 @@ mod tests {
             );
         }
 
-        // 3. Procedure name 'Тест' occupies UTF-16 columns 10..14 on line 0; exactly one token.
+        // Regression check: procedure name `Тест` occupies UTF-16 columns 10..14.
         let proc_name_tokens: Vec<_> = absolute
             .iter()
             .filter(|(line, start, end)| *line == 0 && *start == 10 && *end == 14)
@@ -598,25 +552,12 @@ mod tests {
 
     #[test]
     fn test_range_utf16_cyrillic() {
-        // Test case from MissingReturnedValueDescription bug report.
-        // Code: "// Описание\nФункция ЗапросВERP(СервисПублика) Экспорт"
-        // Diagnostic should highlight "ЗапросВERP" which is at bytes 35..52.
-        //
-        // IMPORTANT: LSP positions must use UTF-16 code units, not bytes!
-        // "// Описание\nФункция " = 11 Cyrillic chars + 10 ASCII = 21 chars total
-        // In UTF-16: 11*1 + 10*1 = 21 code units
-        // "ЗапросВERP" = 7 Cyrillic + 3 ASCII = 10 chars = 10 UTF-16 code units
-        //
-        // Expected LSP position: line 1, characters 8..18 (UTF-16 code units)
-        // (8 = "Функция " in UTF-16, 18 = 8 + 10)
         let text = "// Описание\nФункция ЗапросВERP(СервисПублика) Экспорт";
         let line_index = LineIndex::new(text);
 
-        // Byte range for "ЗапросВERP" (35..52 in UTF-8)
         let text_range = TextRange::new(35.into(), 52.into());
         let lsp_range = range(&line_index, text, text_range).unwrap();
 
-        // Verify UTF-16 positions
         assert_eq!(lsp_range.start.line, 1, "Start line should be 1");
         assert_eq!(lsp_range.start.character, 8, "Start character should be 8 (UTF-16 code units)");
         assert_eq!(lsp_range.end.line, 1, "End line should be 1");

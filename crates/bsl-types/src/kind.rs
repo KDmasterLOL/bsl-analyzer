@@ -284,6 +284,31 @@ impl MetadataKind {
         }
     }
 
+    /// The `*Ref` reference variant for an MDO flavour — inverse of
+    /// [`Self::ref_mdo_type`]. `None` for flavours with no reference form
+    /// in [`MetadataKind`] (DataProcessor, Report, registers' inner kinds,
+    /// CommonModule, …).
+    ///
+    /// Used to give a flavour-scoped [`TypeKind::AnyMetadataRef`] the same
+    /// platform method / completion / display surface a concrete
+    /// `MetadataRef(*Ref)` of that flavour would have, minus the name.
+    pub fn ref_kind_for(mdo_type: MdoType) -> Option<Self> {
+        match mdo_type {
+            MdoType::Catalog => Some(MetadataKind::CatalogRef),
+            MdoType::Document => Some(MetadataKind::DocumentRef),
+            MdoType::Enum => Some(MetadataKind::EnumRef),
+            MdoType::Task => Some(MetadataKind::TaskRef),
+            MdoType::BusinessProcess => Some(MetadataKind::BusinessProcessRef),
+            MdoType::ExchangePlan => Some(MetadataKind::ExchangePlanRef),
+            MdoType::ChartOfAccounts => Some(MetadataKind::ChartOfAccountsRef),
+            MdoType::InformationRegister => Some(MetadataKind::InformationRegisterRef),
+            MdoType::AccumulationRegister => Some(MetadataKind::AccumulationRegisterRef),
+            MdoType::AccountingRegister => Some(MetadataKind::AccountingRegisterRef),
+            MdoType::CalculationRegister => Some(MetadataKind::CalculationRegisterRef),
+            _ => None,
+        }
+    }
+
     /// Sibling of [`Self::object_kind_for`] for register record-set modules.
     ///
     /// Returns the `*RecordSet` companion kind for the four register
@@ -294,6 +319,30 @@ impl MetadataKind {
             MdoType::AccumulationRegister => Some(MetadataKind::AccumulationRegisterRecordSet),
             MdoType::AccountingRegister => Some(MetadataKind::AccountingRegisterRecordSet),
             MdoType::CalculationRegister => Some(MetadataKind::CalculationRegisterRecordSet),
+            _ => None,
+        }
+    }
+
+    /// The MDO flavour of a `*Ref` reference kind, or `None` for non-ref
+    /// kinds (objects, record sets, tabular sections, …).
+    ///
+    /// Single source of truth for "which `AnyMetadataRef{mdo_type}` does
+    /// this concrete reference belong to" — used by the subtype rule
+    /// `MetadataRef{kind} ≤ AnyMetadataRef{k}` and as the backing set for
+    /// the `is_ref_kind` predicate.
+    pub fn ref_mdo_type(self) -> Option<MdoType> {
+        match self {
+            Self::CatalogRef => Some(MdoType::Catalog),
+            Self::DocumentRef => Some(MdoType::Document),
+            Self::EnumRef => Some(MdoType::Enum),
+            Self::TaskRef => Some(MdoType::Task),
+            Self::BusinessProcessRef => Some(MdoType::BusinessProcess),
+            Self::ExchangePlanRef => Some(MdoType::ExchangePlan),
+            Self::ChartOfAccountsRef => Some(MdoType::ChartOfAccounts),
+            Self::InformationRegisterRef => Some(MdoType::InformationRegister),
+            Self::AccumulationRegisterRef => Some(MdoType::AccumulationRegister),
+            Self::AccountingRegisterRef => Some(MdoType::AccountingRegister),
+            Self::CalculationRegisterRef => Some(MdoType::CalculationRegister),
             _ => None,
         }
     }
@@ -628,6 +677,16 @@ pub enum TypeKind {
     AnyMetadataRef {
         mdo_type: MdoType,
     },
+    /// `ЛюбаяСсылка` — a reference of *any* MDO flavour. The supertype
+    /// of every concrete `MetadataRef(*Ref)` and every
+    /// [`Self::AnyMetadataRef`].
+    ///
+    /// Distinct from [`Self::Unknown`] (analysis-incomplete) and
+    /// [`Self::Any`] (`Произвольный`, the universal type): `AnyRef`
+    /// positively asserts "this value *is* a reference", which the
+    /// `Null ≤ ref` rule and the ref subtype rules depend on. Carries no
+    /// `mdo_type` precisely because the flavour is unknown.
+    AnyRef,
     /// Concrete metadata object: `СправочникОбъект.X`, etc.
     MetadataObject(MetaObjFacet),
     /// Tabular section of an MDO. `parent` pins the owner MDO;

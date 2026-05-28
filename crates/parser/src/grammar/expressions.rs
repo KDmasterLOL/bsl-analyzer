@@ -24,6 +24,8 @@ use crate::token_set::TokenSet;
 /// Counts at audit time:
 /// * `Процедура` (`KwProcedure`) — 20 occurrences (user-code callback
 ///   structs like `Обработчик.Процедура`).
+/// * `Функция` (`KwFunction`) — enum values / fields named `Функция`
+///   (e.g. `Перечисления.X.Функция`, `ПараметрыПечати.Функция`).
 /// * `Выполнить` (`KwExecute`) — 12 occurrences (`Query.Execute`,
 ///   `DataCompositionTemplateComposer.Execute`, ...).
 /// * `Перейти` (`KwGoto`) — 6 occurrences (`HTMLDocumentField.Navigate`).
@@ -41,9 +43,15 @@ use crate::token_set::TokenSet;
 ///
 /// Extending this set requires corpus evidence — do NOT re-broaden to
 /// "any keyword" or add by symmetry alone.
+///
+/// `KwFunction`/`KwProcedure` double as declaration-header keywords, so the
+/// post-`.` call site additionally rejects a line-leading `Функция Имя(` /
+/// `Процедура Имя(` shape via [`Parser::at_declaration_start`] — otherwise a
+/// declaration orphaned by a missing terminator would be swallowed as a field.
 const PROPERTY_NAME_TOKENS: TokenSet = TokenSet::new(&[
     TokenKind::Ident,
     TokenKind::KwProcedure,
+    TokenKind::KwFunction,
     TokenKind::KwExecute,
     TokenKind::KwGoto,
     TokenKind::KwBreak,
@@ -53,6 +61,9 @@ const PROPERTY_NAME_TOKENS: TokenSet = TokenSet::new(&[
     TokenKind::KwFalse,
     TokenKind::KwUndefined,
     TokenKind::KwNull,
+    // Enum values may be named `Новый`/`New` (e.g. `Перечисления.ГрадацииКачества.Новый`),
+    // so the keyword is a valid property name after `.`.
+    TokenKind::KwNew,
 ]);
 
 /// Parses an expression.
@@ -233,8 +244,12 @@ fn postfix_expr_with_call_info(p: &mut Parser) -> bool {
                 // next function declaration from the symbol tree.
                 let m = lhs.precede(p);
                 p.bump();
-                p.skip_trivia();
-                if p.at_ts(PROPERTY_NAME_TOKENS) {
+                let crossed_newline = p.skip_trivia_crossing_newline();
+                // A line-leading `Функция Имя(` / `Процедура Имя(` is an
+                // orphaned declaration (missing terminator above), not a
+                // property name — leave it for the module rule to recover.
+                let is_orphaned_declaration = crossed_newline && p.at_declaration_start();
+                if p.at_ts(PROPERTY_NAME_TOKENS) && !is_orphaned_declaration {
                     p.bump();
                     lhs = m.complete(p, NodeKind::FieldExpr);
                     is_valid_statement = false;

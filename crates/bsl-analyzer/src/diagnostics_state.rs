@@ -35,9 +35,14 @@ impl GlobalState {
         self.diagnostics_config =
             self.project.as_ref().map(|p| Self::config_from_project(p, locale)).unwrap_or_else(
                 || {
-                    let mut input = DiagnosticsConfigInput::new();
-                    input.locale = locale;
-                    input
+                    DiagnosticsConfigInput::from_raw(
+                        Vec::<String>::new(),
+                        Vec::<String>::new(),
+                        Vec::<(String, String)>::new(),
+                        false,
+                        hir::dataflow::DEFAULT_MAX_ITERATIONS,
+                        locale,
+                    )
                 },
             );
 

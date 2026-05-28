@@ -184,6 +184,30 @@ mod tests {
     }
 
     #[test]
+    fn value_list_attribute_lowers_to_kernel_value_list() {
+        // `v8:ValueListType` form attribute (e.g. `СценарииВыгрузки`) must
+        // lower to the kernel `ValueList`, not `Unknown` — otherwise a method
+        // call like `.Добавить()` falls into the module cascade and falsely
+        // reports an unresolved module.
+        use bsl_metadata::PlatformValueType;
+        let db = InMemoryDb::new();
+        let attr = plain("СценарииВыгрузки", AttributeType::Platform(PlatformValueType::ValueList));
+        assert_eq!(lower_form_attribute_to_typeid(&db, &attr, &[]), db.value_list(None));
+    }
+
+    #[test]
+    fn platform_object_fallback_attribute_lowers_to_platform_object() {
+        // A platform value type without a dedicated kernel kind (ДеревоЗначений)
+        // lowers to a named PlatformObject — resolvable, and crucially not
+        // `Unknown`.
+        use bsl_metadata::PlatformValueType;
+        let db = InMemoryDb::new();
+        let attr = plain("Дерево", AttributeType::Platform(PlatformValueType::ValueTree));
+        let id = lower_form_attribute_to_typeid(&db, &attr, &[]);
+        assert_eq!(id, db.platform_object("ДеревоЗначений".to_string()));
+    }
+
+    #[test]
     fn ref_attribute_lowers_to_metadata_ref() {
         let attr = plain(
             "Контрагент",

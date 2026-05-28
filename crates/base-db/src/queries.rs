@@ -1,7 +1,6 @@
 //! Salsa tracked queries for base-db.
 //!
-//! This module contains all Salsa queries for parsing BSL files and extracting regions.
-//! These queries form the foundation of the incremental computation system.
+//! These queries sit below HIR and expose parsed source-level facts.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -12,15 +11,7 @@ use vfs::{FileId, VfsPath};
 
 use crate::input::{FileTextInput, SourceRootInput};
 
-/// Salsa tracked query for parsing.
-///
-/// This query automatically depends on the FileTextInput and is cached with LRU (512 entries).
-/// When file text changes, Salsa automatically invalidates this query.
-///
-/// Uses a thread-local shared cache for token deduplication across files.
-/// Common tokens like keywords ("Процедура", "Функция"), punctuation ("(", ")", ";"),
-/// and whitespace are shared between all parses on the same thread, significantly
-/// reducing memory usage when parsing many files.
+/// Parse file text using the parser's shared token cache.
 #[salsa::tracked(lru = 512)]
 pub fn parse_query(db: &dyn salsa::Database, input: FileTextInput) -> Parse<SyntaxNode> {
     let _span = tracing::info_span!("parse").entered();
@@ -29,23 +20,9 @@ pub fn parse_query(db: &dyn salsa::Database, input: FileTextInput) -> Parse<Synt
     parser::parse_with_shared_cache(&text)
 }
 
-/// Map from method source ranges to parent API region names.
+/// Map method source ranges to their root API region name.
 ///
-/// This query identifies all methods (procedures/functions) that are inside
-/// API regions (ПрограммныйИнтерфейс, Public, СлужебныйПрограммныйИнтерфейс, Internal)
-/// and returns a mapping from their TextRange to the root region name.
-///
-/// # Performance
-/// - LRU cache: 256 files (region analysis is inexpensive)
-/// - Depends on: parse_query (automatic invalidation via Salsa)
-/// - Recomputed only when file content changes
-/// - Shared by region-based diagnostics (no redundant tree walking)
-///
-/// # Root Region Lookup
-/// For nested regions, always returns the TOP-LEVEL (root) region name,
-/// not the immediate parent.
-///
-/// Example:
+/// Nested regions report the top-level region, not the immediate parent:
 /// ```bsl
 /// #Region Public
 ///     #Region Internal
@@ -72,9 +49,6 @@ pub fn method_regions_query(
     Arc::new(map)
 }
 
-/// Recursively collect methods in API regions.
-///
-/// Tracks region stack to identify root (first) region for nested structures.
 fn collect_methods_in_regions(
     node: &SyntaxNode,
     region_stack: &mut Vec<String>,
@@ -107,42 +81,19 @@ fn collect_methods_in_regions(
                 }
             }
             _ => {
-                if child.kind() != SyntaxKind::PRE_REGION_DIR {
-                    collect_methods_in_regions(&child, region_stack, map);
-                }
+                collect_methods_in_regions(&child, region_stack, map);
             }
         }
     }
 }
 
-/// Check if a region name is an API region.
-///
-/// API regions (case-insensitive):
-/// - ПрограммныйИнтерфейс / Public
-/// - СлужебныйПрограммныйИнтерфейс / Internal
 fn is_api_region(name: &str) -> bool {
     const API_REGIONS: &[&str] =
         &["программныйинтерфейс", "public", "служебныйпрограммныйинтерфейс", "internal"];
     API_REGIONS.contains(&name.to_lowercase().as_str())
 }
 
-/// Resolve a VfsPath to FileId within a SourceRoot.
-///
-/// Searches the FileSet of a SourceRoot for a given VfsPath.
-/// Used by diagnostics to resolve metadata URIs to FileIds.
-///
-/// # Performance
-/// - O(1) FileSet lookup (HashMap)
-/// - Cached by Salsa (LRU 256)
-/// - Expected: < 1ms after first call
-///
-/// # Parameters
-/// - `source_root_input`: The SourceRoot to search in
-/// - `vfs_path_str`: String representation of VfsPath (PathBuf is not Hash)
-///
-/// # Returns
-/// - `Some(FileId)` if path exists in FileSet
-/// - `None` if path not found
+/// Resolve a path string to `FileId` within a source root.
 #[salsa::tracked(lru = 256)]
 pub fn resolve_vfs_path_query(
     db: &dyn salsa::Database,

@@ -121,7 +121,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                     let insert_pos = token.text_range().start() + TextSize::from(slash_count);
                     diagnostics.push(Diagnostic {
                         code,
-                        message: "Comment should have space after //".to_string(),
+                        message: "Комментарий должен иметь пробел после //".to_string(),
                         severity: ctx.severity(code),
                         range: token.text_range(),
                         tags: ctx.tags(code),
@@ -191,34 +191,34 @@ mod tests {
             DiagnosticCode::SpaceAtStartComment,
             expect![[r#"
                 SpaceAtStartComment @ 7:1..7:21
-                  message: Comment should have space after //
+                  message: Комментарий должен иметь пробел после //
                   severity: Hint
                 SpaceAtStartComment @ 9:13..9:27
-                  message: Comment should have space after //
+                  message: Комментарий должен иметь пробел после //
                   severity: Hint
                 SpaceAtStartComment @ 10:17..10:33
-                  message: Comment should have space after //
+                  message: Комментарий должен иметь пробел после //
                   severity: Hint
                 SpaceAtStartComment @ 21:1..21:57
-                  message: Comment should have space after //
+                  message: Комментарий должен иметь пробел после //
                   severity: Hint
                 SpaceAtStartComment @ 23:1..23:57
-                  message: Comment should have space after //
+                  message: Комментарий должен иметь пробел после //
                   severity: Hint
                 SpaceAtStartComment @ 31:1..31:13
-                  message: Comment should have space after //
+                  message: Комментарий должен иметь пробел после //
                   severity: Hint
                 SpaceAtStartComment @ 32:1..32:36
-                  message: Comment should have space after //
+                  message: Комментарий должен иметь пробел после //
                   severity: Hint
                 SpaceAtStartComment @ 33:1..33:17
-                  message: Comment should have space after //
+                  message: Комментарий должен иметь пробел после //
                   severity: Hint
                 SpaceAtStartComment @ 35:1..35:21
-                  message: Comment should have space after //
+                  message: Комментарий должен иметь пробел после //
                   severity: Hint
                 SpaceAtStartComment @ 36:1..36:20
-                  message: Comment should have space after //
+                  message: Комментарий должен иметь пробел после //
                   severity: Hint"#]],
         );
     }
@@ -259,13 +259,13 @@ mod tests {
             DiagnosticCode::SpaceAtStartComment,
             expect![[r#"
                 SpaceAtStartComment @ 2:1..2:21
-                  message: Comment should have space after //
+                  message: Комментарий должен иметь пробел после //
                   severity: Hint
                 SpaceAtStartComment @ 3:13..3:27
-                  message: Comment should have space after //
+                  message: Комментарий должен иметь пробел после //
                   severity: Hint
                 SpaceAtStartComment @ 4:17..4:33
-                  message: Comment should have space after //
+                  message: Комментарий должен иметь пробел после //
                   severity: Hint"#]],
         );
     }
@@ -315,10 +315,10 @@ mod tests {
             DiagnosticCode::SpaceAtStartComment,
             expect![[r#"
                 SpaceAtStartComment @ 2:1..2:8
-                  message: Comment should have space after //
+                  message: Комментарий должен иметь пробел после //
                   severity: Hint
                 SpaceAtStartComment @ 3:1..3:13
-                  message: Comment should have space after //
+                  message: Комментарий должен иметь пробел после //
                   severity: Hint"#]],
         );
     }
