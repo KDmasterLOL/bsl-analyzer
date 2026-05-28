@@ -127,7 +127,9 @@ pub use http_service::{
     HTTPServiceURLTemplate, HTTPServiceURLTemplateBuilder,
 };
 pub use loader::load_from_directory;
-pub use metadata_object::{Attribute, AttributeType, MdoType, MetadataObject, Name};
+pub use metadata_object::{
+    Attribute, AttributeType, MdoType, MetadataObject, Name, PlatformValueType,
+};
 pub use metadata_resolver::{resolve_defined_type_terminal, MetadataResolver};
 pub use register::{
     AccumulationRegisterType, Register, RegisterAttribute, RegisterBuilder, RegisterPeriodicity,

@@ -194,6 +194,56 @@ fn chained_form_attribute_misspelled_method_emits_method_not_found() {
 }
 
 #[test]
+fn value_list_form_attribute_method_call_silent() {
+    // User-reported: `СценарииВыгрузки.Добавить()` on a `v8:ValueListType`
+    // form attribute falsely fired `UnresolvedMethodCall { ReceiverNotResolved }`
+    // ("Не удалось разрешить модуль …"). The attribute type used to lower to
+    // `Unknown`, which routed the call into the bare-ident module cascade.
+    // Now `v8:ValueListType` lowers to the kernel `ValueList`, so `.Добавить()`
+    // resolves through the platform method tables.
+    if !has_platform_data() {
+        eprintln!("Skipping: no platform data available");
+        return;
+    }
+
+    let bsl = "Процедура Тест()\n    \
+        НоваяСтр = СписокЗначенийРеквизит.Добавить();\n\
+        КонецПроцедуры\n";
+    let (db, file_id) = setup_form_module(data_processor_module_path(), bsl);
+
+    let kinds = unresolved_kinds(&db, file_id);
+    assert!(
+        kinds.is_empty(),
+        "ValueList form-attribute method call must not produce UnresolvedMethodCall, got: {:?}",
+        kinds
+    );
+}
+
+#[test]
+fn value_list_form_attribute_types_to_kernel_value_list() {
+    // Positive cross-check for the silent sibling: the form attribute must
+    // type to the kernel `ValueList` (not `Unknown`). A miss on platform
+    // value-collection receivers is deliberately silent — so MethodNotFound
+    // can't distinguish "resolved" from "fell through on Unknown"; the
+    // inferred receiver type can.
+    if !has_platform_data() {
+        eprintln!("Skipping: no platform data available");
+        return;
+    }
+
+    let bsl = "Процедура Тест()\n    \
+        Список = СписокЗначенийРеквизит;\n\
+        КонецПроцедуры\n";
+    let (db, file_id) = setup_form_module(data_processor_module_path(), bsl);
+
+    assert_eq!(
+        var_ty(&db, file_id, "список"),
+        Some(db.value_list(None)),
+        "v8:ValueListType form attribute must infer to the kernel ValueList",
+    );
+}
+
+#[test]
 fn findrows_chain_no_unresolved_method_call() {
     // Cross-check with the typed-array rebind iteration (commit
     // c9cab461). `НайтиСтроки` returns `TypedArray<TabularSectionRow>`

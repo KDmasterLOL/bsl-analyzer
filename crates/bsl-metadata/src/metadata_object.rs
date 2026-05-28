@@ -732,8 +732,76 @@ pub enum AttributeType {
         /// List of allowed types (union type)
         types: Vec<AttributeType>,
     },
+    /// Platform value type declared by a `v8:` XDTO token
+    /// (`v8:ValueListType`, `v8:ValueTree`, `v8:StandardPeriod`, …).
+    ///
+    /// Carries only the parsed token classification — the metadata layer
+    /// stays ignorant of the kernel/HIR mapping. `hir_def::type_ref` turns
+    /// each variant into the right `TypeRef` (kernel builtin or a platform
+    /// object name).
+    Platform(PlatformValueType),
     /// Unknown or unsupported type
     Unknown,
+}
+
+/// Platform value types expressible as a form-attribute type via a `v8:`
+/// XDTO serialization token.
+///
+/// This is a fixed, 1C-defined vocabulary (the configuration serialization
+/// format), not free-form text. New platform versions may add tokens but
+/// existing ones never change meaning — an explicit token table is the
+/// legitimate representation, mirroring the existing `cfg:` reference maps.
+///
+/// The bridge to a semantic kernel type lives in `hir_def::type_ref`
+/// (`TypeRef::from_attribute_type`); `bsl-metadata` only classifies the token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PlatformValueType {
+    /// `v8:ValueListType` — СписокЗначений.
+    ValueList,
+    /// `v8:ValueTable` — ТаблицаЗначений (column-less; a form attribute with
+    /// `<Columns>` is modelled as a FormData collection upstream instead).
+    ValueTable,
+    /// `v8:ValueTree` — ДеревоЗначений.
+    ValueTree,
+    /// `v8:StandardPeriod` — СтандартныйПериод.
+    StandardPeriod,
+    /// `v8:StandardBeginningDate` — СтандартнаяДатаНачала.
+    StandardBeginningDate,
+    /// `v8:TypeDescription` — ОписаниеТипов.
+    TypeDescription,
+    /// `v8:FixedStructure` — ФиксированнаяСтруктура.
+    FixedStructure,
+    /// `v8:FixedArray` — ФиксированныйМассив.
+    FixedArray,
+    /// `v8:FixedMap` — ФиксированноеСоответствие.
+    FixedMap,
+    /// `v8:Type` — Тип (the type-reflection object).
+    Type,
+    /// `v8:Null` — Null.
+    Null,
+}
+
+impl PlatformValueType {
+    /// Canonical 1C (Russian) name of the platform type.
+    ///
+    /// Presentation only — used by [`AttributeType`]'s `Display` and reused by
+    /// the HIR bridge as the `PlatformObject` name for variants without a
+    /// dedicated kernel kind.
+    pub fn russian_name(self) -> &'static str {
+        match self {
+            Self::ValueList => "СписокЗначений",
+            Self::ValueTable => "ТаблицаЗначений",
+            Self::ValueTree => "ДеревоЗначений",
+            Self::StandardPeriod => "СтандартныйПериод",
+            Self::StandardBeginningDate => "СтандартнаяДатаНачала",
+            Self::TypeDescription => "ОписаниеТипов",
+            Self::FixedStructure => "ФиксированнаяСтруктура",
+            Self::FixedArray => "ФиксированныйМассив",
+            Self::FixedMap => "ФиксированноеСоответствие",
+            Self::Type => "Тип",
+            Self::Null => "Null",
+        }
+    }
 }
 
 impl MetadataObject {
@@ -957,6 +1025,7 @@ impl std::fmt::Display for AttributeType {
                     write!(f, "Составной тип:")
                 }
             }
+            Self::Platform(pvt) => write!(f, "{}", pvt.russian_name()),
             Self::Unknown => write!(f, "Неизвестно"),
         }
     }

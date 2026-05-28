@@ -24,7 +24,7 @@
 //! use symbol_info::domain::TypeRef as SymTypeRef;  // presentation
 //! ```
 
-use bsl_metadata::{AttributeType, MdoType};
+use bsl_metadata::{AttributeType, MdoType, PlatformValueType};
 
 use crate::{path::QualifiedName, Name};
 
@@ -186,7 +186,38 @@ impl TypeRef {
                 let members: Vec<TypeRef> = types.iter().map(Self::from_attribute_type).collect();
                 TypeRef::Union(members)
             }
+            AttributeType::Platform(pvt) => platform_value_type_to_ref(*pvt),
             AttributeType::Unknown => TypeRef::Unknown,
+        }
+    }
+}
+
+/// Bridge a [`PlatformValueType`] into a syntactic [`TypeRef`].
+///
+/// Variants with a dedicated kernel kind go straight to the matching
+/// [`BuiltinTypeRef`] (precise intent, no reliance on spelling tables); the
+/// rest become a single-segment [`TypeRef::Name`] carrying the canonical 1C
+/// name, which lowering resolves to `PlatformObject(<name>)` (whose methods /
+/// properties come from the platform tables).
+///
+/// `TypeDescription` is deliberately NOT mapped to the kernel `TypeDescriptor`
+/// kind — that kind models the `Тип` reflection object (it renders as "Тип"),
+/// whereas `ОписаниеТипов` is a distinct platform object with its own surface
+/// (`СодержитТип`, `ПривестиЗначение`, …). Only `v8:Type` maps to `Тип`.
+fn platform_value_type_to_ref(pvt: PlatformValueType) -> TypeRef {
+    match pvt {
+        PlatformValueType::ValueList => TypeRef::Builtin(BuiltinTypeRef::ValueList),
+        PlatformValueType::ValueTable => TypeRef::Builtin(BuiltinTypeRef::ValueTable),
+        PlatformValueType::Type => TypeRef::Builtin(BuiltinTypeRef::Type),
+        PlatformValueType::Null => TypeRef::Builtin(BuiltinTypeRef::Null),
+        PlatformValueType::ValueTree
+        | PlatformValueType::StandardPeriod
+        | PlatformValueType::StandardBeginningDate
+        | PlatformValueType::TypeDescription
+        | PlatformValueType::FixedStructure
+        | PlatformValueType::FixedArray
+        | PlatformValueType::FixedMap => {
+            TypeRef::Name(QualifiedName::from_segments([Name::new(pvt.russian_name())]))
         }
     }
 }
@@ -399,6 +430,50 @@ mod tests {
     #[test]
     fn typeref_from_attribute_unknown_passthrough() {
         assert_eq!(TypeRef::from_attribute_type(&AttributeType::Unknown), TypeRef::Unknown);
+    }
+
+    #[test]
+    fn typeref_from_attribute_platform_kernel_backed_variants() {
+        // Variants with a dedicated kernel kind map to the matching builtin
+        // for precise intent (no reliance on `from_bare_name` spelling).
+        for (pvt, expected) in [
+            (PlatformValueType::ValueList, BuiltinTypeRef::ValueList),
+            (PlatformValueType::ValueTable, BuiltinTypeRef::ValueTable),
+            (PlatformValueType::Type, BuiltinTypeRef::Type),
+            (PlatformValueType::Null, BuiltinTypeRef::Null),
+        ] {
+            assert_eq!(
+                TypeRef::from_attribute_type(&AttributeType::Platform(pvt)),
+                TypeRef::Builtin(expected),
+                "{pvt:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn typeref_from_attribute_platform_object_fallback_variants() {
+        // Variants without a kernel kind become a single-segment Name carrying
+        // the canonical 1C name, which lowering turns into PlatformObject.
+        for (pvt, name) in [
+            (PlatformValueType::ValueTree, "ДеревоЗначений"),
+            (PlatformValueType::StandardPeriod, "СтандартныйПериод"),
+            (PlatformValueType::StandardBeginningDate, "СтандартнаяДатаНачала"),
+            (PlatformValueType::FixedStructure, "ФиксированнаяСтруктура"),
+            (PlatformValueType::FixedArray, "ФиксированныйМассив"),
+            (PlatformValueType::FixedMap, "ФиксированноеСоответствие"),
+            // ОписаниеТипов is a distinct object from `Тип`, so it must NOT
+            // collapse to the kernel TypeDescriptor (`Тип`) — it stays a named
+            // platform object with its own method surface.
+            (PlatformValueType::TypeDescription, "ОписаниеТипов"),
+        ] {
+            match TypeRef::from_attribute_type(&AttributeType::Platform(pvt)) {
+                TypeRef::Name(qname) => {
+                    assert_eq!(qname.len(), 1, "{pvt:?}");
+                    assert_eq!(qname.first().as_str(), name, "{pvt:?}");
+                }
+                other => panic!("expected single-segment Name for {pvt:?}, got {other:?}"),
+            }
+        }
     }
 
     #[test]
