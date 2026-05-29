@@ -1,68 +1,3 @@
-//! Type-narrowing guard recognition — pure syntactic layer.
-//!
-//! Recognizes the ADR-01 MUST-grammar guard shapes inside an `Expr`
-//! tree and returns a [`Guard`] describing the effect the guard has on
-//! the true / false successor of a conditional. Consumed by
-//! [`NarrowingAnalysis`](crate::narrow) (Task 6.2) through the
-//! branch-aware [`dataflow::Transfer::transfer_edge`] hook added in
-//! Task 6.0.
-//!
-//! # Scope (ADR-01 MUST-grammar)
-//!
-//! - `ТипЗнч(X) = Тип("Строка")` — narrows `X` to the string-named
-//!   platform type on the true branch; on the false branch, `Union \
-//!   Ty` via [`ty_difference`] (Task 6.3).
-//! - `X = Неопределено` / `X <> Неопределено` — flips between
-//!   `Ty::Undefined` and its `Union \ Undefined` complement.
-//! - `ЗначениеЗаполнено(X)` — true-branch narrows the variable's union
-//!   by removing the type-level "unfilled" witnesses `Ty::Undefined`
-//!   and `Ty::Null` (Track 1 Step K). The false branch is a no-op
-//!   because it admits value-level "empty" shapes (`""`, `0`,
-//!   empty `Date`) that `Ty` cannot represent. See
-//!   [`NarrowingTransfer::apply_guard`] for the contract.
-//! - Symmetric orientations — `Тип("…") = ТипЗнч(X)`,
-//!   `Неопределено <> X` — are accepted verbatim (BSL's `=` is not
-//!   orientation-sensitive and authors routinely flip the sides).
-//!
-//! # Deferred (ADR-01 Q1 — not this task)
-//!
-//! - `ИЛИ`-composition (`ТипЗнч(X) = Тип("Строка") ИЛИ ТипЗнч(X) = Тип("Число")`).
-//! - Negation (`Не ТипЗнч(X) = Тип("…")` or `Не ЗначениеЗаполнено(X)`).
-//! - Nested guards (`Если A И B Тогда`).
-//! - `X Есть Справочник`.
-//! - Narrowing on non-`Path(Name)` receivers (fields, indexes, qualified paths).
-//!
-//! Anything outside the MUST-grammar returns [`None`] — the caller is
-//! expected to propagate state unchanged across the branch, which is
-//! exactly the default [`dataflow::Transfer::transfer_edge`] behaviour.
-//!
-//! # Purity
-//!
-//! Guard *recognition* (the `recognize_guard` half of this module) does
-//! not touch the Salsa database, [`InferenceContext`], or
-//! [`TyLoweringContext`]: guards are recognized purely from `Expr` /
-//! `Literal` shape plus case-insensitive name matches on builtin
-//! function names. The narrowing *analysis* half resolves the guard's
-//! `Тип("…")` string literal to a concrete kernel [`TypeId`] through
-//! `bare_name_to_typeid`, so it needs a [`TypeKernelDb`] but never the
-//! full inference context.
-//!
-//! # Arm-set storage (Phase 3 §4.G.3)
-//!
-//! The narrowing overlay stores each variable's narrowed type as its
-//! **canonical union arm-set** ([`Box<[TypeId]>`]), not a single
-//! `TypeId`. The dataflow [`Lattice::join`] has no database, so it
-//! cannot intern a kernel union; representing the value as its set of
-//! arms lets `join` be a db-free sorted-dedup set-merge. The union is
-//! interned only at the read boundary ([`narrowed_type_at`]). Kernel
-//! sentinels (`Unknown`, `Never`, `Any`) never enter an arm-set — the
-//! [`arm_set_from_type_id`] gate filters `Unknown`/`Never` and collapses
-//! `Any` to the empty set — which keeps the arm-set domain closed under
-//! plain set-merge so `join` stays canonical without a db.
-//!
-//! [`InferenceContext`]: crate::InferenceContext
-//! [`TyLoweringContext`]: crate::TyLoweringContext
-
 use cfg::CfgEdgeType;
 use dataflow::{Lattice, Transfer};
 use hir_def::body::Body;
@@ -86,58 +21,22 @@ use crate::db::HirDatabase;
 type ExprIdx = Idx<Expr>;
 type StmtIdx = Idx<Stmt>;
 
-/// One recognized guard shape and the variable it constrains.
-///
-/// Each variant describes the guard's effect implicitly via its name;
-/// the mapping `Guard → (Ty_true, Ty_false)` lives in the narrowing
-/// analysis (Task 6.2) because it needs the pre-guard union to compute
-/// the false-branch complement (Task 6.3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Guard {
-    /// `ТипЗнч(X) = Тип("SomeType")` (or reversed orientation).
-    ///
-    /// On the true branch, `X` narrows to the type named by
-    /// `type_name`; on the false branch, to `Union \ Ty` if `X` was a
-    /// union, else `Unknown`.
-    ///
-    /// `type_name` is kept as the raw string literal — the caller maps
-    /// it through [`hir_def::ty::ty_from_bare_name`].
     TypeCheck { var: Name, type_name: String },
 
-    /// `X = Неопределено` (or `Неопределено = X`).
-    ///
-    /// True branch: `X` is `Ty::Undefined`.
-    /// False branch: `X` is `Union \ Undefined` (or `Unknown`).
     IsUndefined { var: Name },
 
-    /// `X <> Неопределено` (or `Неопределено <> X`).
-    ///
-    /// Mirror of [`Guard::IsUndefined`] — branches swap.
     IsNotUndefined { var: Name },
 
-    /// `ЗначениеЗаполнено(X)`.
-    ///
-    /// True-branch narrows by removing `Ty::Undefined` and `Ty::Null`
-    /// from the variable's `Ty::Union` base — the type-level half of
-    /// `ЗначениеЗаполнено`. False-branch is a no-op because it also
-    /// admits value-level "empty" shapes (`""`, `0`, empty `Date`)
-    /// that `Ty` cannot witness. See
-    /// [`NarrowingTransfer::apply_guard`] for the precise contract.
     ValueFilled { var: Name },
 }
 
-/// Recognize an ADR-01 MUST-grammar guard at `expr`. Returns [`None`]
-/// for any shape outside the grammar.
-///
-/// This is a pure syntactic match on `body.expr_idx(expr)` — no
-/// inference context, no database. Case-insensitive comparisons use
-/// [`Name::eq_ignore_case`] so Russian (`ТипЗнч`) and English
-/// (`TypeOf`) spellings are treated uniformly.
 pub fn recognize_guard(expr: ExprIdx, body: &Body) -> Option<Guard> {
     match body.expr_idx(expr) {
         Expr::BinaryOp { lhs, rhs, op } => match op {
-            BinaryOp::Eq => recognize_eq_guard(*lhs, *rhs, body, /*negated=*/ false),
-            BinaryOp::Neq => recognize_eq_guard(*lhs, *rhs, body, /*negated=*/ true),
+            BinaryOp::Eq => recognize_eq_guard(*lhs, *rhs, body, false),
+            BinaryOp::Neq => recognize_eq_guard(*lhs, *rhs, body, true),
             _ => None,
         },
         Expr::Call { callee, args } => {
@@ -155,17 +54,7 @@ pub fn recognize_guard(expr: ExprIdx, body: &Body) -> Option<Guard> {
     }
 }
 
-/// Handle `=` / `<>` guards. When `negated` is true, true- and
-/// false-branch semantics flip, which we express by swapping the
-/// variant produced for `X = Неопределено` vs `X <> Неопределено`.
-///
-/// The `ТипЗнч(X) = Тип("…")` shape is *not* sensitive to `<>` in
-/// ADR-01's MUST set — `Не ТипЗнч(X) = Тип("…")` is an explicit
-/// non-goal, so `<>` on a type check falls through to [`None`] rather
-/// than producing a "negated-type-check" variant we'd have to carry
-/// through the analysis.
 fn recognize_eq_guard(lhs: ExprIdx, rhs: ExprIdx, body: &Body, negated: bool) -> Option<Guard> {
-    // Try each orientation: the BSL author can write either side first.
     if let Some(g) =
         try_type_check(lhs, rhs, body, negated).or_else(|| try_type_check(rhs, lhs, body, negated))
     {
@@ -185,9 +74,6 @@ fn recognize_eq_guard(lhs: ExprIdx, rhs: ExprIdx, body: &Body, negated: bool) ->
     None
 }
 
-/// Try to match `ТипЗнч(var) = Тип("…")` with `lhs = ТипЗнч(var)` and
-/// `rhs = Тип("…")`. Returns `None` if either side's shape is wrong,
-/// or if the comparison is `<>` (which is an explicit non-goal).
 fn try_type_check(lhs: ExprIdx, rhs: ExprIdx, body: &Body, negated: bool) -> Option<Guard> {
     if negated {
         return None;
@@ -197,7 +83,6 @@ fn try_type_check(lhs: ExprIdx, rhs: ExprIdx, body: &Body, negated: bool) -> Opt
     Some(Guard::TypeCheck { var, type_name })
 }
 
-/// Return `Some(var)` if `(lhs, rhs)` is `(Path(var), Literal(Undefined))`.
 fn try_undefined_compare(lhs: ExprIdx, rhs: ExprIdx, body: &Body) -> Option<Name> {
     let var = path_name(lhs, body)?;
     match body.expr_idx(rhs) {
@@ -206,9 +91,6 @@ fn try_undefined_compare(lhs: ExprIdx, rhs: ExprIdx, body: &Body) -> Option<Name
     }
 }
 
-/// Extract the variable from `ТипЗнч(var)` / `TypeOf(var)` — accepts
-/// exactly one `Path(Name)` argument. Anything else (non-`Path` arg,
-/// zero or multiple args, wrong callee name) returns [`None`].
 fn type_of_arg(expr: ExprIdx, body: &Body) -> Option<Name> {
     let (callee_name, args) = call_parts(expr, body)?;
     if !callee_name.eq_ignore_case(&Name::new("ТипЗнч"))
@@ -219,9 +101,6 @@ fn type_of_arg(expr: ExprIdx, body: &Body) -> Option<Name> {
     single_path_arg(args, body)
 }
 
-/// Extract the string literal from `Тип("…")` / `Type("…")`. Returns
-/// [`None`] if the callee is wrong, argument count is not 1, or the
-/// argument is not a string literal.
 fn type_literal_arg(expr: ExprIdx, body: &Body) -> Option<String> {
     let (callee_name, args) = call_parts(expr, body)?;
     if !callee_name.eq_ignore_case(&Name::new("Тип"))
@@ -238,7 +117,6 @@ fn type_literal_arg(expr: ExprIdx, body: &Body) -> Option<String> {
     }
 }
 
-/// Return `(callee_name, args)` for a `Call { callee: Path(name), .. }`.
 fn call_parts(expr: ExprIdx, body: &Body) -> Option<(Name, &[ExprIdx])> {
     match body.expr_idx(expr) {
         Expr::Call { callee, args } => {
@@ -249,9 +127,6 @@ fn call_parts(expr: ExprIdx, body: &Body) -> Option<(Name, &[ExprIdx])> {
     }
 }
 
-/// If `expr` is `Path(name)`, return `name`. Covers the variable-reference
-/// case for guard receivers; `QualifiedPath`, `Field`, etc. are out of
-/// scope for ADR-01's MUST-grammar.
 fn path_name(expr: ExprIdx, body: &Body) -> Option<Name> {
     match body.expr_idx(expr) {
         Expr::Path(name) => Some(name.clone()),
@@ -259,8 +134,6 @@ fn path_name(expr: ExprIdx, body: &Body) -> Option<Name> {
     }
 }
 
-/// Require a single `Path(name)` argument. Anything else (zero args,
-/// multiple args, non-path arg) returns [`None`].
 fn single_path_arg(args: &[ExprIdx], body: &Body) -> Option<Name> {
     if args.len() != 1 {
         return None;
@@ -268,44 +141,6 @@ fn single_path_arg(args: &[ExprIdx], body: &Body) -> Option<Name> {
     path_name(args[0], body)
 }
 
-// ===========================================================================
-// Narrowing analysis (M4 Task 6.2)
-// ===========================================================================
-//
-// The lattice is `Name → Ty` (a narrowing *overlay* over each body's base
-// `var_types`) plus a "pending guard" slot. Task 6.0's branch-aware
-// `transfer_edge` hook consumes the slot to refine state per outgoing
-// `TrueBranch` / `FalseBranch` edge. Task 6.3 added the `Union \ Ty`
-// smart-constructor so false branches refine over union bases. Task 6.4
-// records the rhs's inferred type on a reassignment, replacing the
-// earlier kill-only behaviour for every rhs shape we can type without
-// leaving this module. The plumbing remains load-bearing: future
-// refinements swap implementations of `apply_guard`, `infer_rhs_type`,
-// or the `Assign` branch without touching the lattice or solver wiring.
-
-/// Lattice value for narrowing: an overlay of narrowed types keyed by
-/// name, plus a transient "pending guard" slot.
-///
-/// # Overlay contract
-///
-/// - An **absent** `Name` means "no narrowing applies at this program
-///   point — consult the base type from [`InferenceContext::var_types`]".
-/// - A **present** `Name → Ty` mapping is *authoritative*: the caller
-///   must show `Ty` instead of the base union.
-/// - `Ty::Unknown` is **never** a valid mapped value. The
-///   [`NarrowingTransfer::apply_guard`] insertion gate filters it out
-///   (via [`insert_if_informative`]), because a stored `Ty::Unknown`
-///   would be indistinguishable from "fall through to base" but would
-///   still clobber any prior, more-informative narrowing on merge.
-///   Callers may therefore assume every value read from the overlay
-///   carries strictly more information than the base type.
-///
-/// `pending_guard` flows from a `Conditional` vertex to its `TrueBranch`
-/// / `FalseBranch` successors. The solver guarantees it is cleared on
-/// every edge by [`NarrowingTransfer::transfer_edge`], so it never
-/// leaks into a merge point where it could be mis-applied.
-///
-/// [`InferenceContext::var_types`]: crate::InferenceContext
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct NarrowState {
     narrowed: FxHashMap<Name, Box<[TypeId]>>,
@@ -313,71 +148,24 @@ pub struct NarrowState {
 }
 
 impl NarrowState {
-    /// Create an empty narrowing state (bottom of the lattice).
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Look up the narrowed arm-set for `name`. Returns `None` when the
-    /// overlay does not constrain `name` at this program point —
-    /// callers fall back to the base `var_types` lookup. A returned
-    /// `Some(arms)` is a non-empty, canonical (sorted, deduped,
-    /// sentinel-free) union arm-set per the overlay contract.
-    ///
-    /// Case-folds `name` before the lookup so `Х` and `х` hit the same
-    /// entry — BSL is case-insensitive and all narrowing writes fold
-    /// through [`fold_name`] at insert time.
     pub fn get(&self, name: &Name) -> Option<&[TypeId]> {
         self.narrowed.get(&fold_name(name)).map(|arms| &arms[..])
     }
 
-    /// Number of narrowed bindings. Exists for tests and introspection.
     pub fn len(&self) -> usize {
         self.narrowed.len()
     }
 
-    /// Whether the overlay carries any narrowing.
     pub fn is_empty(&self) -> bool {
         self.narrowed.is_empty()
     }
 }
 
 impl Lattice for NarrowState {
-    /// Point-wise join of `narrowed`, taking **only** keys present on
-    /// *both* sides (intersection), each combined by **merging the two
-    /// arm-sets** (sorted-dedup union of `TypeId`s).
-    ///
-    /// **Why intersection, not union, of keys.** An absent entry means
-    /// "no narrowing — consult the base type". If `Х` is narrowed on
-    /// one incoming path but not on the other, the merged program
-    /// point cannot commit to the narrowing: on the other path `Х`
-    /// could be the full base type. Keeping the one-sided entry would
-    /// be unsound — e.g. `Если <unrecognized_cond> Тогда Х = 42
-    /// КонецЕсли` would falsely report `Х: Number` after the merge
-    /// even though the fall-through path never touched `Х`. Dropping
-    /// the entry degrades back to the base type, which is sound.
-    ///
-    /// **Keys on both sides — db-free set-merge.** Each value is a
-    /// canonical union arm-set (sorted by raw `TypeId`, deduped,
-    /// sentinel-free per [`arm_set_from_type_id`]). Merging two such
-    /// sets by sorted-dedup union yields another canonical arm-set
-    /// without an interner — which is the whole reason the overlay
-    /// stores arm-sets rather than a single `TypeId` (the
-    /// [`Lattice::join`] contract has no database). Soundness of
-    /// dedup-by-id: the kernel is single-source-of-truth, so
-    /// structurally-equal types share one `TypeId`. Because sentinels
-    /// never enter an arm-set, the domain is closed under set-merge —
-    /// no `Any`-dominance / `Never`-dropping re-canonicalisation is
-    /// needed here.
-    ///
-    /// **Pending guards do not survive a join.** A guard is only
-    /// meaningful on the single edge that carries it; if it reached a
-    /// merge point it would get applied to paths that did not go
-    /// through the guard, which is unsound. The solver's
-    /// [`Transfer::transfer_edge`] implementation clears the slot on
-    /// every edge (see [`NarrowingTransfer::transfer_edge`]), and
-    /// joining further forces the slot to `None` as a belt-and-braces
-    /// second line of defence.
     fn join(&self, other: &Self) -> Self {
         let mut narrowed = FxHashMap::default();
         for (k, arms_self) in &self.narrowed {
@@ -389,52 +177,6 @@ impl Lattice for NarrowState {
     }
 }
 
-/// Forward-direction dataflow transfer for narrowing.
-///
-/// - [`Transfer::transfer_stmt`] — on an `Assign { target: Path(x), ..
-///   value }` statement, infers `value`'s type via
-///   [`NarrowingTransfer::infer_rhs_type`] and records it as the new
-///   narrowing for `x` (ADR-01 Q3 locality). If inference cannot
-///   produce anything more precise than `Ty::Unknown`, the entry is
-///   dropped instead, since the assignment definitively overwrites
-///   any prior narrowing of `x` and leaving the stale entry would
-///   break the overlay contract.
-///
-/// - [`Transfer::transfer_expr`] — called by the solver on each
-///   `Conditional` vertex's condition (see
-///   `DataflowSolver::transfer_block`). Runs [`recognize_guard`] and
-///   stashes the result in `pending_guard`.
-///
-/// - [`Transfer::transfer_edge`] — consumes `pending_guard` on every
-///   outgoing edge. On `TrueBranch` / `FalseBranch` of a `Conditional`
-///   vertex, applies the guard via [`NarrowingTransfer::apply_guard`].
-///   Every other edge kind falls through to identity. The slot is
-///   unconditionally cleared regardless of the edge kind to keep the
-///   transient guard from leaking past the branch it belongs to.
-///
-/// **`base_types`** — per-body map from `Name` to its pre-narrow type
-/// (populated by the lowering layer from the body's inferred
-/// `var_types`), stored as a single interned [`TypeId`] per name. These
-/// are read-only seeds (never joined) so they do not need arm-set
-/// representation. Needed by [`NarrowingTransfer::apply_guard`] to
-/// compute the false-branch complement of a type check via
-/// [`ty_difference`]. When a name is absent or maps to a non-union
-/// type, the complement falls back to the empty arm-set (sound — the
-/// consumer then reads the base).
-///
-/// **`db`** — the kernel database used to inspect [`TypeKind`]s and to
-/// resolve guard type names through [`bare_name_to_typeid`]. The `'db`
-/// borrow is sound because the only constructors of this transfer
-/// ([`narrow_body`] / [`narrow_query`]) build the solver locally and
-/// call [`dataflow::DataflowSolver::solve`] before returning, so the
-/// transfer never outlives the borrow.
-///
-/// **Visibility:** `pub(crate)` — external consumers reach the
-/// narrowing overlay through the (forthcoming Task 6.6) Salsa query,
-/// which returns a `NarrowState` keyed by program point. There is no
-/// reason for a downstream crate to construct its own solver, and
-/// keeping the transfer crate-local lets future refinements (Task 6.4)
-/// evolve its surface freely.
 pub(crate) struct NarrowingTransfer<'db> {
     db: &'db dyn TypeKernelDb,
     base_types: FxHashMap<Name, TypeId>,
@@ -445,49 +187,11 @@ impl<'db> NarrowingTransfer<'db> {
         Self { db, base_types }
     }
 
-    /// Apply a recognized guard to the overlay on the given branch.
-    ///
-    /// True-branch narrowing is always precise:
-    /// - `Guard::TypeCheck { var, type_name }` → [`bare_name_to_typeid`].
-    /// - `Guard::IsUndefined { var }` → `Undefined`.
-    /// - `Guard::IsNotUndefined { var }` → `base \ Undefined`.
-    ///
-    /// False-branch narrowing uses [`ty_difference`] over `base_types`
-    /// to subtract the matched type from the pre-narrow union.
-    ///
-    /// **Overlay invariant.** An empty arm-set is never stored in
-    /// `state.narrowed` — it would be indistinguishable, at every
-    /// consumer site (hover, `Semantics::type_of_expr`, Task 6.6's
-    /// Salsa query), from "I know nothing more than the base type,"
-    /// which is exactly what a *missing* entry already means. Instead,
-    /// a computed empty arm-set is treated as **no new information**:
-    /// we leave the overlay alone so any prior (still-valid) narrowing
-    /// survives the branch. That preserves information in the common
-    /// nested-guard case where an outer guard narrowed the variable
-    /// precisely and an inner guard lacks base-type context to refine
-    /// further.
-    ///
-    /// `Guard::ValueFilled` (`ЗначениеЗаполнено(X)`) narrows the **true**
-    /// branch by removing `Undefined` and `Null` from the variable's
-    /// base — a precise type-level refinement, distinct from the
-    /// value-level claims (`= ""`, `= 0`, etc.) that `ЗначениеЗаполнено`
-    /// also makes at runtime. The **false** branch is left untouched:
-    /// claiming "definitely Undefined or Null" on the false branch would
-    /// discard `String`/`Number` arms that could legitimately be empty /
-    /// zero, contradicting the guard's runtime semantics.
     fn apply_guard(&self, state: &mut NarrowState, guard: &Guard, on_true: bool) {
         match guard {
             Guard::TypeCheck { var, type_name } => {
                 let matched = bare_name_to_typeid(self.db, type_name);
                 let arms = if on_true {
-                    // True branch: take the matched type, but refine it
-                    // with the base when the base is strictly more
-                    // precise. The only such pair is an element-less
-                    // `Array` matched against a base `Array(element)`:
-                    // `bare_name_to_typeid("Массив")` cannot reconstruct
-                    // an element witness from the surface name, so a
-                    // direct write would clobber the element. Promoting
-                    // the base preserves it through the guard.
                     self.refine_matched_with_base(matched, var)
                 } else {
                     self.complement_of(var, matched)
@@ -516,46 +220,14 @@ impl<'db> NarrowingTransfer<'db> {
                         return;
                     };
                     let residual = ty_difference_unfilled_witnesses(self.db, base);
-                    // Skip the write when the residual equals the full
-                    // base arm-set — the guard didn't actually narrow
-                    // anything (no `Undefined` / `Null` to remove).
-                    // Storing the unchanged base would clobber a prior
-                    // precise overlay entry on the same variable; the
-                    // overlay contract says "no entry means no
-                    // narrowing", so leaving it alone preserves earlier
-                    // precision.
                     if *residual != *arm_set_from_type_id(self.db, base) {
                         insert_if_informative(state, var, residual);
                     }
                 }
-                // False branch: `ЗначениеЗаполнено(X) = false` admits
-                // `Undefined`, `Null`, **and** value-level "empty"
-                // shapes (`""`, `0`, empty `Date`, …). Type-level
-                // narrowing can't represent those, and dropping
-                // non-witness arms from the base would unsoundly
-                // claim more than the guard establishes — leave the
-                // overlay alone.
             }
         }
     }
 
-    /// Refine the matched guard type with the variable's recorded base
-    /// when the base is strictly more precise.
-    ///
-    /// [`bare_name_to_typeid`] resolves surface names like `"Массив"` /
-    /// `"Array"` to an element-less `Array` — it has no element witness
-    /// to reconstruct. If the base for `var` is an element-bearing
-    /// `Array`, the guard `Если ТипЗнч(М) = Тип("Массив") Тогда …`
-    /// should narrow to that form (so iteration / field access inside
-    /// the branch still see the element type), not downgrade.
-    ///
-    /// **Soundness rule.** When the base is a union that mixes array
-    /// arms (and possibly non-array arms), the true branch must keep
-    /// **all** array-shaped arms. Dropping a bare-array arm would claim
-    /// more precision than the guard actually established — the runtime
-    /// value could still be the un-witnessed array, and pretending it
-    /// is an element-bearing array would let iteration emit a fictitious
-    /// element type.
     fn refine_matched_with_base(&self, matched: TypeId, var: &Name) -> Box<[TypeId]> {
         if !is_array_kind(self.db, matched) {
             return arm_set_from_type_id(self.db, matched);
@@ -564,10 +236,7 @@ impl<'db> NarrowingTransfer<'db> {
             return arm_set_from_type_id(self.db, matched);
         };
         match self.db.lookup_type(base) {
-            // Base is itself an array (element-less or element-bearing)
-            // — keep it: at least as precise as the matched type.
             TypeKind::Array(_) => arm_set_from_type_id(self.db, base),
-            // Base is a union — keep ALL array-shaped arms.
             TypeKind::Union(members) => {
                 let array_arms: Vec<TypeId> =
                     members.iter().copied().filter(|id| is_array_kind(self.db, *id)).collect();
@@ -581,20 +250,6 @@ impl<'db> NarrowingTransfer<'db> {
         }
     }
 
-    /// Compute `base_types[var] \ matched` via [`ty_difference`].
-    /// Returns the empty arm-set when the variable has no recorded base
-    /// type (consumer then reads the base).
-    ///
-    /// Folds `var` so mixed-case sources (`Х` / `х`) hit the same seed
-    /// entry — the overlay already round-trips through [`fold_name`] on
-    /// every write, so the base map must honour the same invariant.
-    ///
-    /// When `matched` is an array, the difference is computed with the
-    /// array subtype relation: every array-kind arm (element-less or
-    /// element-bearing) is removed from the false branch, since they all
-    /// satisfy the guard's "is an array" claim. A structural
-    /// id-difference would otherwise leave an element-bearing array arm
-    /// on the false branch, contradicting the guard's "is NOT an array".
     fn complement_of(&self, var: &Name, matched: TypeId) -> Box<[TypeId]> {
         let Some(&base) = self.base_types.get(&fold_name(var)) else {
             return Box::new([]);
@@ -605,26 +260,6 @@ impl<'db> NarrowingTransfer<'db> {
         ty_difference(self.db, base, matched)
     }
 
-    /// Minimal, pure inference for the rhs of a `Stmt::Assign` — enough
-    /// for Task 6.4's reassignment-locality invariant.
-    ///
-    /// Returns a precise arm-set for shapes where it is knowable without
-    /// leaving this module:
-    /// - `Expr::Literal` — canonical per-variant lowering (matches
-    ///   [`infer_literal`](crate::InferenceContext::infer_literal)
-    ///   verbatim so hover, Task 6.6, and this transfer never diverge).
-    /// - `Expr::Path(name)` — overlay wins over `base_types`. That is,
-    ///   if the rhs is a variable currently narrowed in this program
-    ///   point, the assignee inherits the *narrowed* arm-set, not the
-    ///   base. This is what makes `Если Т(Y) = Тип("Строка") Тогда Х =
-    ///   Y` see `Х: String` in the then-branch.
-    ///
-    /// Anything else — calls, binary ops, new, field access, ternary —
-    /// returns the empty arm-set. The caller (`transfer_stmt`) then DROPs
-    /// the overlay entry for the assignee rather than storing an empty
-    /// set (overlay contract: empty never stored). This matches Task
-    /// 6.2's kill-on-reassignment behaviour for the shapes we still
-    /// cannot handle here, so the upgrade is strictly-more-informative.
     fn infer_rhs_type(&self, value: ExprIdx, state: &NarrowState, body: &Body) -> Box<[TypeId]> {
         match body.expr_idx(value) {
             Expr::Literal(lit) => {
@@ -659,11 +294,6 @@ impl Transfer<NarrowState> for NarrowingTransfer<'_> {
         let stmt_idx: StmtIdx = Idx::from_raw(stmt_id);
         if let Stmt::Assign { target, value } = body.stmt_idx(stmt_idx) {
             if let Expr::Path(name) = body.expr_idx(*target) {
-                // Task 6.4: an assignment definitively overwrites the
-                // target — any prior narrowing is stale. Try to infer
-                // the rhs's arm-set and record it; if inference is out
-                // of scope (empty arm-set), drop the entry so the
-                // overlay cannot keep showing the outdated narrowing.
                 let new_arms = self.infer_rhs_type(*value, &new_state, body);
                 let folded = fold_name(name);
                 if new_arms.is_empty() {
@@ -694,34 +324,12 @@ impl Transfer<NarrowState> for NarrowingTransfer<'_> {
     }
 }
 
-/// Insert `arms` into the overlay for `var` iff it carries new
-/// information, i.e. the arm-set is non-empty. An empty arm-set reads
-/// back as the base type (the read-time union of `[]` is `Unknown`),
-/// which is exactly what a *missing* entry already encodes, so storing
-/// it would only clobber a prior, more-informative narrowing. See the
-/// [`NarrowingTransfer::apply_guard`] docs for the overlay invariant.
-/// Extracted as a free fn so every guard arm routes through the same
-/// gate — future refinements (Task 6.4) plug in here.
 fn insert_if_informative(state: &mut NarrowState, var: &Name, arms: Box<[TypeId]>) {
     if !arms.is_empty() {
         state.narrowed.insert(fold_name(var), arms);
     }
 }
 
-/// Flatten a [`TypeId`] into its **canonical** union arm-set: deduped,
-/// sorted by raw `TypeId`, and **sentinel-free**.
-///
-/// This is the single construction gate for every arm-set that enters
-/// the overlay. A union id expands to its member arms; any other id is
-/// a one-element set. The kernel sentinels are excluded so the arm-set
-/// domain is closed under the db-free set-merge in [`NarrowState`]'s
-/// [`Lattice::join`]:
-/// - `Unknown` / `Never` are filtered out (they carry no narrowing).
-/// - `Any` collapses to the empty set (`Произвольный` admits every
-///   value, so it carries no narrowing either).
-///
-/// An empty result means "store nothing" — the overlay's "absent =
-/// consult base" contract.
 fn arm_set_from_type_id(db: &dyn TypeKernelDb, id: TypeId) -> Box<[TypeId]> {
     let arms: Vec<TypeId> = match db.lookup_type(id) {
         TypeKind::Union(members) => members.iter().copied().collect(),
@@ -731,10 +339,6 @@ fn arm_set_from_type_id(db: &dyn TypeKernelDb, id: TypeId) -> Box<[TypeId]> {
     normalize_arms(db, arms)
 }
 
-/// Canonicalise a vector of arms: drop kernel sentinels
-/// (`Unknown` / `Never` / `Any`), sort by raw `TypeId`, and dedup. The
-/// result is the canonical arm-set representation shared by every
-/// overlay value and by [`NarrowState`]'s [`Lattice::join`].
 fn normalize_arms(db: &dyn TypeKernelDb, arms: Vec<TypeId>) -> Box<[TypeId]> {
     let mut arms: Vec<TypeId> = arms
         .into_iter()
@@ -747,11 +351,6 @@ fn normalize_arms(db: &dyn TypeKernelDb, arms: Vec<TypeId>) -> Box<[TypeId]> {
     arms.into_boxed_slice()
 }
 
-/// Merge two canonical arm-sets into another canonical arm-set without
-/// a database — a sorted-dedup set union. Both inputs are already
-/// sentinel-free and sorted-by-raw (per [`arm_set_from_type_id`]), so a
-/// plain merge stays canonical: this is what lets [`Lattice::join`] run
-/// db-free.
 fn merge_arm_sets(a: &[TypeId], b: &[TypeId]) -> Box<[TypeId]> {
     let mut merged: Vec<TypeId> = Vec::with_capacity(a.len() + b.len());
     merged.extend_from_slice(a);
@@ -761,45 +360,14 @@ fn merge_arm_sets(a: &[TypeId], b: &[TypeId]) -> Box<[TypeId]> {
     merged.into_boxed_slice()
 }
 
-/// Whether `id` is an array-kind type (element-less or element-bearing).
-/// The kernel represents both as `TypeKind::Array(_)`, so the legacy
-/// `Array` ↔ `TypedArray` distinction collapses to a single check.
 fn is_array_kind(db: &dyn TypeKernelDb, id: TypeId) -> bool {
     matches!(db.lookup_type(id), TypeKind::Array(_))
 }
 
-/// Case-fold a [`Name`] for use as a narrowing-overlay key.
-///
-/// BSL is case-insensitive (per ADR-01 and `name.eq_ignore_case`), but
-/// [`Name`]'s derived `Hash` / `Eq` are case-sensitive — a `SmolStr` wrapper.
-/// Without normalisation, `Если ТипЗнч(х) = Тип("Строка") Тогда А = Х` would
-/// write the narrowed overlay under `Name("х")` and then miss on the hover
-/// lookup under `Name("Х")`, violating ADR-01 Q4. This helper canonicalises
-/// the spelling to lowercase before both inserting into and reading from any
-/// narrowing-related `FxHashMap<Name, _>` — including `NarrowState::narrowed`,
-/// `NarrowingTransfer::base_types`, and the per-body seed built by
-/// [`build_base_types_for_body`]. All internal iterators already see
-/// pre-folded keys (they never call `fold_name` themselves), so the
-/// invariant holds structurally once every write site and every explicit
-/// lookup folds.
 fn fold_name(n: &Name) -> Name {
     Name::new(&n.as_str().to_lowercase())
 }
 
-/// Set-difference on arm-sets: `base \ matched`. Returns a canonical
-/// arm-set (possibly empty).
-///
-/// Used to compute the false-branch narrowing of a type check. Rules:
-///
-/// - `base` is `Union(members)` → drop every arm equal to `matched`
-///   (by `TypeId`; the kernel is single-source-of-truth, so equal types
-///   share one id) and normalise the remainder.
-/// - `base` is any other kind → return the empty arm-set. We cannot
-///   refine a non-union base: either it already equals `matched` (the
-///   complement is empty — caller is on a dead branch) or it is a single
-///   type disjoint from `matched` (so the complement is `base`, but
-///   falling back to "no narrowing" is sound and keeps parity with the
-///   legacy non-union behaviour).
 fn ty_difference(db: &dyn TypeKernelDb, base: TypeId, matched: TypeId) -> Box<[TypeId]> {
     match db.lookup_type(base) {
         TypeKind::Union(members) => {
@@ -811,17 +379,6 @@ fn ty_difference(db: &dyn TypeKernelDb, base: TypeId, matched: TypeId) -> Box<[T
     }
 }
 
-/// `base \ {Undefined, Null}` — the type-level half of
-/// `ЗначениеЗаполнено(X)` true-branch narrowing.
-///
-/// [`is_unfilled_witness`] is intentionally narrow: only `Undefined`
-/// and `Null` qualify. Value-level "unfilled" shapes (empty `String`,
-/// zero `Number`, empty `Date`) are NOT removed — there is no value
-/// witness for them, and pretending otherwise would surface `String` /
-/// `Number` arms as "definitely non-empty" when the runtime can still
-/// observe an empty string / zero. Non-union bases yield the empty
-/// arm-set (overlay no-op), matching [`ty_difference`] /
-/// [`ty_difference_array_aware`].
 fn ty_difference_unfilled_witnesses(db: &dyn TypeKernelDb, base: TypeId) -> Box<[TypeId]> {
     match db.lookup_type(base) {
         TypeKind::Union(members) => {
@@ -833,28 +390,10 @@ fn ty_difference_unfilled_witnesses(db: &dyn TypeKernelDb, base: TypeId) -> Box<
     }
 }
 
-/// `Undefined` and `Null` are the only type-level shapes
-/// `ЗначениеЗаполнено` can rule out from a static union. Anything else —
-/// primitives that may be empty at runtime, structural types, metadata
-/// refs — stays in the residual.
 fn is_unfilled_witness(db: &dyn TypeKernelDb, id: TypeId) -> bool {
     matches!(db.lookup_type(id), TypeKind::Undefined | TypeKind::Null)
 }
 
-/// `base \ Array` with the array subtype relation honoured: every
-/// array-kind arm is removed.
-///
-/// The kernel represents element-less and element-bearing arrays alike
-/// as `TypeKind::Array(_)`; the false branch of `Если ТипЗнч(М) =
-/// Тип("Массив")` must exclude **all** of them — otherwise a
-/// `Union(Array(String), Number)` base would survive the false branch
-/// surfacing the array arm to consumers that asked for "definitely not
-/// an array" and silently contradicting the guard.
-///
-/// Non-union bases (array or otherwise) yield the empty arm-set: a
-/// non-union array base means the false branch is dead (no remainder),
-/// and any other non-union base degrades to "no narrowing", matching
-/// the structural fallback.
 fn ty_difference_array_aware(db: &dyn TypeKernelDb, base: TypeId) -> Box<[TypeId]> {
     match db.lookup_type(base) {
         TypeKind::Union(members) => {
@@ -866,25 +405,6 @@ fn ty_difference_array_aware(db: &dyn TypeKernelDb, base: TypeId) -> Box<[TypeId
     }
 }
 
-/// Run the forward narrowing analysis on a body and return the
-/// per-block fixed point.
-///
-/// This is the single non-test entry point that wires the CFG builder,
-/// the `NarrowingTransfer`, and the `DataflowSolver` together. Task 6.6
-/// will wrap it in a Salsa query keyed by `(file_id, owner)`; until
-/// then it stays the facade so the forthcoming query can swap the
-/// implementation without touching call sites.
-///
-/// `base_types` is the body's pre-narrow `Name → TypeId` snapshot. It is
-/// consumed by [`NarrowingTransfer::apply_guard`] to compute precise
-/// `Union \ matched` complements on false branches of type checks
-/// (see [`ty_difference`]). An empty map is sound: every false-branch
-/// complement degrades to the empty arm-set and callers fall back to
-/// the base type lookup.
-///
-/// Returns `None` if the solver fails to converge within the default
-/// iteration cap — an impossible outcome for lowered HIR bodies, kept
-/// in the signature solely to match `DataflowSolver::solve`.
 pub fn narrow_body(
     db: &dyn TypeKernelDb,
     body: Body,
@@ -898,25 +418,6 @@ pub fn narrow_body(
     solver.solve()
 }
 
-/// Salsa-facing wrapper around [`narrow_body`].
-///
-/// Resolves `owner` through [`hir_def::ModuleBodies`] to the `Body` that
-/// lives in `file_id`, seeds `base_types` from the body's own
-/// [`Expr::Path`] inferred types (see [`build_base_types_for_body`]),
-/// and returns the solver result wrapped in `Arc` so consumers share a
-/// single allocation.
-///
-/// Follows the same "plain function, no `#[salsa::tracked]` attribute"
-/// pattern as [`crate::infer::infer_query`] / [`crate::infer::type_of_expr_query`].
-/// The database implementation (`RootDatabaseImpl` in `ide-db`) delegates
-/// [`HirDatabase::narrow`] straight to this function; the tracked layer
-/// underneath (`module_bodies`, `infer`) supplies incremental invalidation.
-///
-/// Returns `None` when:
-/// - `owner` does not resolve to a body that lives in this file
-///   (stale call site after refactor, or mismatched `DefWithBodyId`);
-/// - [`narrow_body`] fails to converge within the default iteration cap
-///   (impossible for lowered HIR, kept for signature compatibility).
 pub fn narrow_query(
     db: &dyn HirDatabase,
     file_id: FileId,
@@ -925,11 +426,6 @@ pub fn narrow_query(
     let _span = tracing::info_span!("narrow_query", ?file_id, ?owner).entered();
     let total_start = Instant::now();
 
-    // Per-stage Δ instrumentation. Slow `arg_diagnostics_query` summary
-    // already showed `narrow_ms` dominates; this breakdown attributes
-    // those ~60 ms / owner across the steps inside narrow_query so
-    // optimization targeting (cached CFG, in-place join, etc.) gets a
-    // ranked list rather than a single black-box Δ.
     let resolve_start = Instant::now();
     let module_id = ModuleId { file_id };
     let module_bodies = db.module_bodies(module_id);
@@ -942,11 +438,6 @@ pub fn narrow_query(
     };
     let resolve_ns = resolve_start.elapsed().as_nanos();
 
-    // Phase O.17: route through the per-owner Salsa cell instead of
-    // `infer_query`. Warm hits become a single `Arc::clone` on the
-    // `infer_method` / `infer_module_code` cell; cold cross-file hits
-    // invalidate only the touched method rather than every body in
-    // the file.
     let infer_start = Instant::now();
     let infer_routed = crate::infer::infer_owner(db, file_id, owner);
     let per_body_types = Some(infer_routed.expr_types());
@@ -956,11 +447,6 @@ pub fn narrow_query(
     let base_types = build_base_types_for_body(body, per_body_types);
     let base_types_ns = base_types_start.elapsed().as_nanos();
 
-    // Inline CFG build + solve so the `narrow_body` test helper signature
-    // stays untouched while we get isolated timers for the two heaviest
-    // chunks. The `body.clone()` is forced by `DataflowSolver::new`
-    // taking `Body` by value — kept measurable so it can be revisited
-    // separately if the clone shows up as a hot allocation.
     let body_clone_start = Instant::now();
     let body_owned = body.clone();
     let body_clone_ns = body_clone_start.elapsed().as_nanos();
@@ -994,38 +480,18 @@ pub fn narrow_query(
     Some(Arc::new(solved?))
 }
 
-/// Per-stage time budget for one [`narrow_query`] call.
-///
-/// Together they cover total wall time of the call. Microsecond-keyed
-/// fields surface in the slow-path log when the call exceeds
-/// [`log_narrow_query_stages`]'s threshold so optimization work has a
-/// concrete target ranking instead of one opaque per-owner Δ.
 struct NarrowQueryStages {
-    /// Wall time of the entire `narrow_query` call.
     total_ns: u128,
-    /// `db.module_bodies(module_id)` lookup + `Body` resolution by owner.
     resolve_ns: u128,
-    /// `db.infer(file_id)` Salsa hit (Arc clone in steady state) +
-    /// per-body type-map fetch.
     infer_ns: u128,
-    /// `build_base_types_for_body` — linear scan over `Expr::Path` nodes.
     base_types_ns: u128,
-    /// `body.clone()` forced by the `DataflowSolver::new` by-value contract.
     body_clone_ns: u128,
-    /// `CfgBuilder::build_graph_from_hir` — currently rebuilt every call
-    /// (no Salsa cache hit), the prime suspect for narrow_ms dominance.
     cfg_build_ns: u128,
-    /// `DataflowSolver::solve` — fixed-point iterations over `NarrowState`.
     solve_ns: u128,
 }
 
-/// Emit a per-call stage breakdown when narrow_query takes longer than
-/// the slow-path threshold. Filters out the median-fast calls so the
-/// log stays a usable signal: the hot file `ОбщегоНазначения` produces
-/// 240 owners; with a 20 ms gate only those above the median surface,
-/// keeping the scan compact while preserving every interesting tail.
 fn log_narrow_query_stages(owner: DefWithBodyId, stages: &NarrowQueryStages) {
-    const SLOW_NS: u128 = 20_000_000; // 20 ms
+    const SLOW_NS: u128 = 20_000_000;
     if stages.total_ns < SLOW_NS {
         return;
     }
@@ -1043,31 +509,6 @@ fn log_narrow_query_stages(owner: DefWithBodyId, stages: &NarrowQueryStages) {
     );
 }
 
-/// Build a per-body `Name → TypeId` base map by scanning [`Expr::Path`]
-/// nodes and reading their inferred types from the body's per-expr map.
-///
-/// Why per-body, not from [`InferenceResult::var_types`]: the file-
-/// global `var_types` map keys variables by `String::to_lowercase()`,
-/// whereas [`NarrowingTransfer::base_types`] uses `Name` — whose
-/// `Hash` / `Eq` are **case-sensitive** — to look up entries keyed on
-/// the original-case names that appear inside `Expr::Path`. Routing
-/// through the body's own `expr_types` preserves source case and
-/// scopes collisions to a single procedure.
-///
-/// **Policy:** first-writer wins. Arena iteration order matches source
-/// order, so we pick the type associated with the first occurrence of
-/// each name — usually its declared / initial-assignment type, which is
-/// the value that best plays the role of a "pre-narrow base" for the
-/// [`ty_difference`]-driven false-branch complement.
-///
-/// **Soundness.** A stale base never over-narrows. If the seed is
-/// narrower than the true reaching type (e.g., first assign was
-/// `Х = 42` but `Х` was later rewritten to `"abc"`), [`ty_difference`]
-/// on the false branch sees a non-Union base → degrades to the empty
-/// arm-set → [`insert_if_informative`] skips → overlay stays unchanged.
-/// The worst case is losing else-branch precision, never a wrong
-/// overlay entry. Task 6.7 can upgrade the seed to the merged reaching
-/// type without violating this invariant.
 fn build_base_types_for_body(
     body: &Body,
     per_body_types: Option<&FxHashMap<hir_def::ExprId, TypeId>>,
@@ -1079,11 +520,6 @@ fn build_base_types_for_body(
     for (expr_id, expr) in body.exprs_iter() {
         if let Expr::Path(name) = expr {
             if let Some(tid) = per_body.get(&expr_id).copied() {
-                // Fold the key so a mixed-case source (`Х` and `х` both
-                // referring to the same BSL variable) lands on the same
-                // entry — the overlay round-trips through `fold_name`
-                // at every write, so the seed must honour the same
-                // invariant.
                 base_types.entry(fold_name(name)).or_insert(tid);
             }
         }
@@ -1091,34 +527,6 @@ fn build_base_types_for_body(
     base_types
 }
 
-/// Return the narrowed type of `name` observed at the program point
-/// occupied by `expr_idx`, or `None` when no overlay applies.
-///
-/// **Pre-narrow on guard receivers (ADR-01 Q4).** The receiver of a
-/// guard expression — e.g., the `Х` inside `ТипЗнч(Х) = Тип("Строка")` —
-/// lives in the Conditional vertex's `condition` sub-tree. Narrowing
-/// is applied on the vertex's *outgoing* True / False edges (Task 6.2
-/// wires the pending-guard through [`dataflow::Transfer::transfer_edge`]),
-/// so the Conditional's IN state still carries the base (pre-narrow)
-/// overlay. Expressions inside the then / else bodies live in
-/// successor BasicBlocks whose IN state carries the narrowed overlay.
-///
-/// This function implements the lookup by finding the CFG vertex whose
-/// evaluation covers `expr_idx` and returning `block_in[vertex].get(name)`.
-/// Task 6.6 will wrap the call site in a Salsa query and merge the
-/// result into [`Semantics::type_of_expr`]; until then, this is the
-/// raw reader that exercises the pre-narrow invariant end-to-end.
-///
-/// Returns `None` when `expr_idx` isn't reachable from any CFG vertex
-/// — e.g., a parameter's default value expression (those live outside
-/// the method body proper) — or when no overlay arm-set applies.
-///
-/// The overlay stores a canonical union arm-set per variable; this
-/// reader interns it back into a single [`TypeId`] at the read boundary
-/// via [`Builders::union`] (which collapses a one-element set to that
-/// element and re-canonicalises). The stored arm-set is never empty per
-/// the overlay contract, so the interned result is always a concrete,
-/// non-sentinel type.
 pub fn narrowed_type_at<DB: TypeKernelDb + ?Sized>(
     db: &DB,
     result: &dataflow::DataflowResult<NarrowState>,
@@ -1136,29 +544,6 @@ pub fn narrowed_type_at<DB: TypeKernelDb + ?Sized>(
     Some(db.union(arms.to_vec()))
 }
 
-/// Merge the narrowing overlay with the base `TypeId` for an expression
-/// lookup (originally lived in `hir::Semantics`).
-///
-/// Hover/completion through `Semantics::type_of_expr` and the argument-
-/// validation query both need the same overlay, so the function lives in
-/// `hir-ty` where the validation query can also reach it without a
-/// `hir → hir-ty → hir` cycle.
-///
-/// Only applies when the expression is an [`Expr::Path`] — narrowing
-/// targets named variables. For all other shapes we pass the base type
-/// through unchanged.
-///
-/// Fallback rules (in order):
-/// 1. `db.type_narrowing_enabled() == false` (Task 6.7 feature flag;
-///    workspace opt-out) → `base`.
-/// 2. Non-`Path` expr → `base`.
-/// 3. `db.narrow(...)` returns `None` (body not in this file, provider
-///    opted out) → `base`.
-/// 4. Overlay has no (non-empty) arm-set for this `Name` at this
-///    program point (variable untouched by any guard that dominates the
-///    expression) → `base`.
-/// 5. Otherwise → the narrowed [`TypeId`] (the read-time intern of the
-///    overlay arm-set).
 pub fn narrow_or_base<DB: HirDatabase + ?Sized>(
     db: &DB,
     file_id: FileId,
@@ -1179,20 +564,6 @@ pub fn narrow_or_base<DB: HirDatabase + ?Sized>(
     narrowed_type_at(db, &result, expr_id.to_idx(), name).unwrap_or(base)
 }
 
-/// Find the CFG vertex whose evaluation covers `expr_idx`.
-///
-/// Mirrors the virtualization rule in [`cfg::CfgBuilder`]:
-/// `If` / `PreprocIf` / `While` / `For` / `ForEach` / `Try` statements
-/// never appear in a `BasicBlock::statements()` — their condition /
-/// from / to / collection sub-expressions are instead pinned at the
-/// specialised vertex that represents the statement itself. All other
-/// ("linear") statements flow into the BasicBlock arena.
-///
-/// The walk is O(body_size) per call — a single hover-type lookup
-/// visits every expression in the body at most once. Fine for this
-/// use case; Task 6.6's Salsa cache will memoise the full
-/// `narrow_query` result, so repeated hovers on the same body pay
-/// this traversal only once per revision.
 fn containing_vertex(
     body: &Body,
     cfg: &cfg::ControlFlowGraph,
@@ -1225,14 +596,6 @@ fn containing_vertex(
     None
 }
 
-/// Recursively check whether `stmt` contains `target` in any of its
-/// expression children.
-///
-/// Only covers the "linear" statement shapes that can appear in a
-/// BasicBlock (`Expr` / `Assign` / `Return` / `Raise` / `Execute` /
-/// `AddHandler` / `RemoveHandler`). Virtualized statements (`If` /
-/// `While` / `For` / `ForEach` / `Try` / `PreprocIf`) are handled by
-/// their specialised vertices in [`containing_vertex`].
 fn stmt_covers_expr(body: &Body, stmt_idx: StmtIdx, target: ExprIdx) -> bool {
     match body.stmt_idx(stmt_idx) {
         Stmt::Expr(e) => expr_covers_expr(body, *e, target),
@@ -1258,9 +621,6 @@ fn stmt_covers_expr(body: &Body, stmt_idx: StmtIdx, target: ExprIdx) -> bool {
     }
 }
 
-/// Recursively check whether `target` is anywhere in the sub-tree
-/// rooted at `root`. Stops at `Literal`, `Path`, and `QualifiedPath`
-/// leaves — the only expression shapes with no nested [`ExprIdx`].
 fn expr_covers_expr(body: &Body, root: ExprIdx, target: ExprIdx) -> bool {
     if root == target {
         return true;
@@ -1300,30 +660,19 @@ mod tests {
     use bsl_types::testing::InMemoryDb;
     use hir_def::hir::UnaryOp;
 
-    /// Fresh sandbox kernel db for a single test. All `TypeId`s within a
-    /// test must come from the same db instance (ids are db-local).
     fn kdb() -> InMemoryDb {
         InMemoryDb::new()
     }
 
-    /// Build the canonical arm-set for a list of `Ty`s — the expected
-    /// shape of an overlay entry.
     fn arm_set(db: &dyn TypeKernelDb, ids: Vec<TypeId>) -> Box<[TypeId]> {
         normalize_arms(db, ids)
     }
 
-    /// Read an overlay entry back as a legacy `Ty` (interning the
-    /// arm-set, then bridging) so assertions can keep their readable
-    /// `Ty::X` expectations.
     fn overlay_type_id(db: &dyn TypeKernelDb, s: &NarrowState, name: &str) -> Option<TypeId> {
         let arms = s.get(&Name::new(name))?;
         Some(db.union(arms.to_vec()))
     }
 
-    /// Intern an arm-set and bridge it back to a legacy `Ty` for the
-    /// `ty_difference*` unit tests. An empty arm-set (the "no
-    /// narrowing" residual) maps to `Ty::Unknown`, matching the legacy
-    /// non-union fallback those tests assert on.
     fn type_id_of_arms(db: &dyn TypeKernelDb, arms: &[TypeId]) -> TypeId {
         if arms.is_empty() {
             return db.unknown();
@@ -1331,10 +680,6 @@ mod tests {
         db.union(arms.to_vec())
     }
 
-    /// Tiny builder that hand-rolls a `Body` with just enough expressions
-    /// to exercise guard recognition. We never need statements or
-    /// bindings for these tests — `recognize_guard` is pure on the
-    /// expression arena.
     struct ExprBuilder {
         body: Body,
     }
@@ -1372,9 +717,6 @@ mod tests {
             self.body.stmts_mut().alloc(Stmt::Assign { target, value })
         }
 
-        /// Build an `If` stmt with a given condition, a single-statement
-        /// then-branch, and no elsif / else — the minimum CFG-producing
-        /// shape for narrowing e2e tests.
         fn if_then(&mut self, condition: ExprIdx, then_stmt: StmtIdx) -> StmtIdx {
             let if_stmt = hir_def::hir::IfStmt {
                 condition,
@@ -1385,9 +727,6 @@ mod tests {
             self.body.stmts_mut().alloc(Stmt::If(Box::new(if_stmt)))
         }
 
-        /// Build an `If` stmt with a single-statement then-branch and a
-        /// single-statement else-branch — the shape Task 6.3 e2e tests
-        /// need to assert on the false-branch IN state.
         fn if_then_else(
             &mut self,
             condition: ExprIdx,
@@ -1403,10 +742,6 @@ mod tests {
             self.body.stmts_mut().alloc(Stmt::If(Box::new(if_stmt)))
         }
 
-        /// Build an `If` stmt with one `ИначеЕсли`-branch and no else
-        /// — the minimum shape that produces a second CFG Conditional
-        /// vertex, used by Task 6.5 to exercise receiver resolution
-        /// on elsif conditions.
         fn if_then_elsif(
             &mut self,
             condition: ExprIdx,
@@ -1423,8 +758,6 @@ mod tests {
             self.body.stmts_mut().alloc(Stmt::If(Box::new(if_stmt)))
         }
 
-        /// Build a `Пока … Цикл … КонецЦикла` stmt with a single-
-        /// statement body, exercising CFG's `WhileLoop` vertex.
         fn while_stmt(&mut self, condition: ExprIdx, body_stmt: StmtIdx) -> StmtIdx {
             self.body.stmts_mut().alloc(Stmt::While { condition, body: Box::from([body_stmt]) })
         }
@@ -1436,7 +769,6 @@ mod tests {
 
     #[test]
     fn recognizes_type_check_direct() {
-        // `ТипЗнч(Х) = Тип("Строка")` — canonical orientation.
         let mut b = ExprBuilder::new();
         let x = b.path("Х");
         let typznc_callee = b.path("ТипЗнч");
@@ -1454,7 +786,6 @@ mod tests {
 
     #[test]
     fn recognizes_type_check_reversed() {
-        // `Тип("Строка") = ТипЗнч(Х)` — flipped sides, same meaning.
         let mut b = ExprBuilder::new();
         let tip_callee = b.path("Тип");
         let s = b.string_lit("Массив");
@@ -1474,8 +805,6 @@ mod tests {
 
     #[test]
     fn recognizes_type_check_english_spelling() {
-        // `TypeOf(X) = Type("String")` — English forms accepted verbatim
-        // (BSL is bilingual and case-insensitive on builtin names).
         let mut b = ExprBuilder::new();
         let x = b.path("X");
         let typeof_callee = b.path("TypeOf");
@@ -1493,8 +822,6 @@ mod tests {
 
     #[test]
     fn recognizes_type_check_case_insensitive() {
-        // Mixed case — `тИпЗнЧ` must still match, because identifier
-        // comparison in BSL is fully case-insensitive.
         let mut b = ExprBuilder::new();
         let x = b.path("а");
         let typznc_callee = b.path("тИпЗнЧ");
@@ -1509,7 +836,6 @@ mod tests {
 
     #[test]
     fn recognizes_is_undefined() {
-        // `Х = Неопределено`
         let mut b = ExprBuilder::new();
         let lhs = b.path("Х");
         let rhs = b.undefined();
@@ -1523,7 +849,6 @@ mod tests {
 
     #[test]
     fn recognizes_is_undefined_reversed() {
-        // `Неопределено = Х` — same guard, flipped sides.
         let mut b = ExprBuilder::new();
         let lhs = b.undefined();
         let rhs = b.path("Х");
@@ -1537,7 +862,6 @@ mod tests {
 
     #[test]
     fn recognizes_is_not_undefined() {
-        // `Х <> Неопределено`
         let mut b = ExprBuilder::new();
         let lhs = b.path("Х");
         let rhs = b.undefined();
@@ -1551,7 +875,6 @@ mod tests {
 
     #[test]
     fn recognizes_is_not_undefined_reversed() {
-        // `Неопределено <> Х`
         let mut b = ExprBuilder::new();
         let lhs = b.undefined();
         let rhs = b.path("Х");
@@ -1565,7 +888,6 @@ mod tests {
 
     #[test]
     fn recognizes_value_filled() {
-        // `ЗначениеЗаполнено(Х)`
         let mut b = ExprBuilder::new();
         let x = b.path("Х");
         let callee = b.path("ЗначениеЗаполнено");
@@ -1579,7 +901,6 @@ mod tests {
 
     #[test]
     fn recognizes_value_filled_english() {
-        // `ValueIsFilled(X)` — documented English spelling.
         let mut b = ExprBuilder::new();
         let x = b.path("X");
         let callee = b.path("ValueIsFilled");
@@ -1593,8 +914,6 @@ mod tests {
 
     #[test]
     fn does_not_recognize_random_binary_op() {
-        // `Х + 1` — arithmetic, not a guard. Must return `None` so the
-        // solver leaves state unchanged.
         let mut b = ExprBuilder::new();
         let lhs = b.path("Х");
         let rhs = b.alloc(Expr::Literal(Literal::Number(1.0.try_into().unwrap())));
@@ -1605,10 +924,6 @@ mod tests {
 
     #[test]
     fn does_not_recognize_negated_type_check() {
-        // `ТипЗнч(Х) <> Тип("Строка")` is an explicit non-goal of
-        // ADR-01 (see module doc). Falling through to `None` is the
-        // contract — `Не` / `<>` on a type check does *not* synthesize
-        // an inverted TypeCheck guard.
         let mut b = ExprBuilder::new();
         let x = b.path("Х");
         let typznc_callee = b.path("ТипЗнч");
@@ -1623,7 +938,6 @@ mod tests {
 
     #[test]
     fn does_not_recognize_unary_not() {
-        // `Не ЗначениеЗаполнено(Х)` — negation is deferred (ADR-01 Q1).
         let mut b = ExprBuilder::new();
         let x = b.path("Х");
         let callee = b.path("ЗначениеЗаполнено");
@@ -1635,9 +949,6 @@ mod tests {
 
     #[test]
     fn does_not_recognize_or_composition() {
-        // `ТипЗнч(Х) = Тип("Строка") ИЛИ ТипЗнч(Х) = Тип("Число")` —
-        // explicitly deferred. The top-level expression is BinaryOp::Or
-        // so `recognize_guard` falls through to `None`.
         let mut b = ExprBuilder::new();
 
         let build_tc = |b: &mut ExprBuilder, type_lit: &str| {
@@ -1659,8 +970,6 @@ mod tests {
 
     #[test]
     fn does_not_recognize_type_check_with_non_string_arg() {
-        // `ТипЗнч(Х) = Тип(СомеПеременная)` — the `Тип(…)` argument
-        // must be a string literal. A dynamic argument is out of scope.
         let mut b = ExprBuilder::new();
         let x = b.path("Х");
         let tz = b.path("ТипЗнч");
@@ -1675,7 +984,6 @@ mod tests {
 
     #[test]
     fn does_not_recognize_multi_arg_type_of() {
-        // `ТипЗнч(Х, Y) = Тип("Строка")` — excess args.
         let mut b = ExprBuilder::new();
         let x = b.path("Х");
         let y = b.path("Y");
@@ -1691,7 +999,6 @@ mod tests {
 
     #[test]
     fn does_not_recognize_value_filled_with_no_args() {
-        // `ЗначениеЗаполнено()` — wrong arity.
         let mut b = ExprBuilder::new();
         let callee = b.path("ЗначениеЗаполнено");
         let call = b.call(callee, vec![]);
@@ -1701,8 +1008,6 @@ mod tests {
 
     #[test]
     fn does_not_recognize_value_filled_with_literal_arg() {
-        // `ЗначениеЗаполнено("hi")` — only simple variable receivers
-        // narrow, literals do not (ADR-01 scope).
         let mut b = ExprBuilder::new();
         let lit = b.string_lit("hi");
         let callee = b.path("ЗначениеЗаполнено");
@@ -1713,8 +1018,6 @@ mod tests {
 
     #[test]
     fn does_not_recognize_field_receiver() {
-        // `Объект.Поле = Неопределено` — narrowing on field receivers
-        // is deferred (would need alias analysis). Must return `None`.
         let mut b = ExprBuilder::new();
         let obj = b.path("Объект");
         let field = b.alloc(Expr::Field { base: obj, field: Name::new("Поле") });
@@ -1726,7 +1029,6 @@ mod tests {
 
     #[test]
     fn does_not_recognize_missing_literal() {
-        // `Х = 1` — `1` is not `Неопределено`, so no IsUndefined guard.
         let mut b = ExprBuilder::new();
         let lhs = b.path("Х");
         let rhs = b.alloc(Expr::Literal(Literal::Number(1.0.try_into().unwrap())));
@@ -1737,11 +1039,6 @@ mod tests {
 
     #[test]
     fn does_not_recognize_path_eq_path() {
-        // `Х = Y` — both sides are identifiers. Equality between two
-        // variables is not a narrowing guard under ADR-01 (no known
-        // type info to transfer). Pin the `None` so a future sloppy
-        // refactor of `try_undefined_compare` can't accidentally
-        // promote `Path == Path` into an IsUndefined-shaped guard.
         let mut b = ExprBuilder::new();
         let lhs = b.path("Х");
         let rhs = b.path("Y");
@@ -1752,10 +1049,6 @@ mod tests {
 
     #[test]
     fn does_not_recognize_type_check_on_type_check() {
-        // `ТипЗнч(Х) = ТипЗнч(Y)` — both sides look like `ТипЗнч(…)`;
-        // neither side is a `Тип("…")` string literal. Must return
-        // `None` — cross-variable type-equality is not an ADR-01
-        // guard and narrowing both variables is out of scope.
         let mut b = ExprBuilder::new();
         let x = b.path("Х");
         let tz1 = b.path("ТипЗнч");
@@ -1770,14 +1063,6 @@ mod tests {
 
     #[test]
     fn does_not_recognize_ternary() {
-        // `?(Х = Неопределено, А, Б)` — `recognize_guard` is called
-        // on the `Ternary` node itself. It MUST NOT peek through and
-        // return the guard hidden in `condition`: the solver asks
-        // "what does THIS expression narrow?", not "what does its
-        // condition narrow?". The latter is Task 6.2's job (the CFG
-        // builder emits a `Conditional` vertex whose `condition`
-        // expr-id is what `recognize_guard` gets called on — never
-        // the Ternary).
         let mut b = ExprBuilder::new();
         let x = b.path("Х");
         let und = b.undefined();
@@ -1791,12 +1076,6 @@ mod tests {
 
     #[test]
     fn does_not_recognize_value_filled_on_field() {
-        // `ЗначениеЗаполнено(Объект.Поле)` — the receiver is a
-        // `Field`, not a `Path`. Field narrowing is deferred (it
-        // needs alias analysis that ADR-01 leaves out of scope).
-        // `single_path_arg` rejects via `path_name`, but pin the
-        // reject path with a dedicated test so it can't silently
-        // regress.
         let mut b = ExprBuilder::new();
         let obj = b.path("Объект");
         let field = b.alloc(Expr::Field { base: obj, field: Name::new("Поле") });
@@ -1806,18 +1085,9 @@ mod tests {
         assert_eq!(recognize_guard(call, &b.body), None);
     }
 
-    // =====================================================================
-    // Analysis tests (Task 6.2)
-    // =====================================================================
-
     fn state_with(db: &dyn TypeKernelDb, entries: &[(&str, TypeId)]) -> NarrowState {
         let mut s = NarrowState::new();
         for (n, id) in entries {
-            // Fold the key to match the production invariant: every
-            // overlay write in `NarrowingTransfer` routes through
-            // `fold_name`, so the test helper must not short-circuit
-            // that — otherwise case-insensitivity regressions would
-            // hide behind raw `Name::new(...)` keys.
             let arms = arm_set(db, vec![*id]);
             if !arms.is_empty() {
                 s.narrowed.insert(fold_name(&Name::new(n)), arms);
@@ -1828,8 +1098,6 @@ mod tests {
 
     #[test]
     fn lattice_join_empty_with_empty_is_empty() {
-        // Bottom ⊔ Bottom = Bottom. A sanity baseline so later tests
-        // can assume the join is monotone from ⊥.
         let a = NarrowState::new();
         let b = NarrowState::new();
         assert!(a.join(&b).is_empty());
@@ -1837,31 +1105,18 @@ mod tests {
 
     #[test]
     fn lattice_join_drops_one_sided_entry() {
-        // {X → String} ⊔ {} = {} — dropped. An absent entry on the
-        // other side means the other path made no commitment narrower
-        // than the base type, so keeping `X → String` would misreport
-        // a branch-local fact as merge-global. This is the soundness
-        // fix that makes Task 6.4's reassignment-locality work:
-        // `Если <cond> Тогда Х = 42 КонецЕсли` must not leak `Х →
-        // Number` past КонецЕсли. Dropping the entry degrades to the
-        // base type, which is sound.
         let db = kdb();
         let a = state_with(&db, &[("Х", db.string(None, false))]);
         let b = NarrowState::new();
         let joined = a.join(&b);
         assert_eq!(joined.get(&Name::new("Х")), None);
 
-        // Commutativity sanity: swapping arguments must not change the
-        // outcome (join is defined as a lattice operation).
         let joined_rev = b.join(&a);
         assert_eq!(joined_rev.get(&Name::new("Х")), None);
     }
 
     #[test]
     fn lattice_join_equal_entries_stay_equal() {
-        // {X → String} ⊔ {X → String} = {X → String}. Crucial for
-        // fixed-point convergence — if join introduced spurious
-        // Union(String, String) it would never stabilise.
         let db = kdb();
         let a = state_with(&db, &[("Х", db.string(None, false))]);
         let b = state_with(&db, &[("Х", db.string(None, false))]);
@@ -1871,9 +1126,6 @@ mod tests {
 
     #[test]
     fn lattice_join_different_entries_go_to_union() {
-        // {X → String} ⊔ {X → Number} = {X → Union(Number, String)}.
-        // `Ty::union` canonicalises, so the order inside the union
-        // should be deterministic across runs — pin it explicitly.
         let db = kdb();
         let a = state_with(&db, &[("Х", db.string(None, false))]);
         let b = state_with(&db, &[("Х", db.number(None, None))]);
@@ -1884,10 +1136,6 @@ mod tests {
 
     #[test]
     fn lattice_join_clears_pending_guard() {
-        // A guard is only meaningful on the single edge that carries
-        // it. Joining forces the slot back to `None` so any stray
-        // guard that somehow reached a merge point cannot cause the
-        // downstream transfer_edge to apply it to the wrong branch.
         let mut a = NarrowState::new();
         a.pending_guard = Some(Guard::IsUndefined { var: Name::new("Х") });
         let b = NarrowState::new();
@@ -1895,25 +1143,16 @@ mod tests {
         assert!(b.join(&a).pending_guard.is_none());
     }
 
-    /// Build a `NarrowingTransfer` with no base-type knowledge — forces
-    /// every false-branch complement to degrade to the empty arm-set.
     fn transfer_no_bases(db: &dyn TypeKernelDb) -> NarrowingTransfer<'_> {
         NarrowingTransfer::new(db, FxHashMap::default())
     }
 
-    /// Build a `NarrowingTransfer` with the given `Name → Ty` entries
-    /// (interned to `TypeId`) as the pre-narrow snapshot feeding
-    /// false-branch `ty_difference`.
     fn transfer_with_bases<'a>(
         db: &'a dyn TypeKernelDb,
         entries: &[(&str, TypeId)],
     ) -> NarrowingTransfer<'a> {
         let mut bases = FxHashMap::default();
         for (name, id) in entries {
-            // Match the production seed: `build_base_types_for_body`
-            // folds every key before inserting, so tests that read via
-            // `complement_of` (which also folds) need the same spelling
-            // on the way in.
             bases.insert(fold_name(&Name::new(name)), *id);
         }
         NarrowingTransfer::new(db, bases)
@@ -1921,9 +1160,6 @@ mod tests {
 
     #[test]
     fn apply_guard_type_check_true_maps_to_named_ty() {
-        // `ТипЗнч(Х) = Тип("Строка")` on the true branch maps Х to
-        // Ty::String (lowered via `ty_from_bare_name`). This is the
-        // path users will actually observe in hover.
         let db = kdb();
         let tr = transfer_no_bases(&db);
         let mut s = NarrowState::new();
@@ -1937,12 +1173,6 @@ mod tests {
 
     #[test]
     fn apply_guard_type_check_true_promotes_array_to_typed_array_base() {
-        // Phase 0 regression guard: `Если ТипЗнч(М) = Тип("Массив")`
-        // must NOT downgrade a `TypedArray(String)` base to bare
-        // `Ty::Array`. The matched type from `ty_from_bare_name`
-        // ("Массив") is `Ty::Array` (no element witness), so without
-        // the refinement the overlay would clobber the element type
-        // and iteration inside the branch would lose `String`.
         let db = kdb();
         let tr = transfer_with_bases(&db, &[("М", db.array(Some(db.string(None, false))))]);
         let mut s = NarrowState::new();
@@ -1956,12 +1186,6 @@ mod tests {
 
     #[test]
     fn apply_guard_type_check_true_promotes_array_through_union_base() {
-        // Base `Union(TypedArray(Number), Undefined)` ∩ guard `Массив`
-        // should narrow to `TypedArray(Number)` — the typed-array arm
-        // of the union, not bare `Array`. Otherwise the JSDoc-typed
-        // `Параметры.Список` (lowered to TypedArray ∪ Undefined) would
-        // lose element info on every `Если ТипЗнч(…) = Тип("Массив")`
-        // probe.
         let db = kdb();
         let typed = db.array(Some(db.number(None, None)));
         let tr = transfer_with_bases(&db, &[("М", db.union(vec![typed, db.undefined()]))]);
@@ -1976,12 +1200,6 @@ mod tests {
 
     #[test]
     fn apply_guard_type_check_true_preserves_both_array_and_typed_array_arms() {
-        // Soundness: `Union(TypedArray(String), Array, Number)` ∩
-        // `Array` must keep BOTH array-shaped arms. Dropping the
-        // bare `Array` arm would claim "definitely a typed array of
-        // strings" when the runtime value could still be the
-        // un-witnessed array, leading iteration to emit a
-        // fictitious element type.
         let db = kdb();
         let typed = db.array(Some(db.string(None, false)));
         let tr = transfer_with_bases(
@@ -2000,12 +1218,6 @@ mod tests {
 
     #[test]
     fn apply_guard_type_check_false_removes_typed_array_arm() {
-        // Soundness for the FALSE branch: `Union(TypedArray(String),
-        // Number) \ Array` must remove `TypedArray(String)` because
-        // a typed array IS an array (Phase 0 subtype rule). The
-        // structural `ty_difference` would have left it intact —
-        // surfacing "definitely a typed array of strings" to
-        // consumers who asked for "definitely not an array."
         let db = kdb();
         let typed = db.array(Some(db.string(None, false)));
         let tr = transfer_with_bases(&db, &[("М", db.union(vec![typed, db.number(None, None)]))]);
@@ -2020,10 +1232,6 @@ mod tests {
 
     #[test]
     fn apply_guard_type_check_false_drops_typed_array_only_base_to_dead() {
-        // Non-union TypedArray base, false branch: dead. Overlay
-        // no-op (Ty::Unknown contract). Pre-Phase-0 the structural
-        // `ty_difference` already returned Unknown for non-union
-        // bases — preserve the existing dead-branch behaviour.
         let db = kdb();
         let typed = db.array(Some(db.string(None, false)));
         let tr = transfer_with_bases(&db, &[("М", typed)]);
@@ -2038,10 +1246,6 @@ mod tests {
 
     #[test]
     fn apply_guard_type_check_true_keeps_array_when_base_has_no_typed_array() {
-        // Negative: when no TypedArray sits in the base, the guard
-        // type wins as before. Pins that the refinement is scoped
-        // exclusively to Array ↔ TypedArray and does not perturb
-        // other narrowing paths.
         let db = kdb();
         let tr = transfer_with_bases(
             &db,
@@ -2058,10 +1262,6 @@ mod tests {
 
     #[test]
     fn apply_guard_type_check_false_without_base_is_overlay_noop() {
-        // No pre-narrow type known for Х — the false-branch complement
-        // degrades to Ty::Unknown. By the overlay contract, a computed
-        // Ty::Unknown must NOT appear in the map (indistinguishable
-        // from "no narrowing" and could clobber prior precise info).
         let db = kdb();
         let tr = transfer_no_bases(&db);
         let mut s = NarrowState::new();
@@ -2075,9 +1275,6 @@ mod tests {
 
     #[test]
     fn apply_guard_type_check_false_narrows_binary_union_to_singleton() {
-        // Core Task 6.3 invariant: `Union(Number, String) \ String
-        // = Number`. The smart-constructor must collapse the residual
-        // single-element union down to the non-union singleton.
         let db = kdb();
         let tr = transfer_with_bases(
             &db,
@@ -2094,9 +1291,6 @@ mod tests {
 
     #[test]
     fn apply_guard_type_check_false_narrows_ternary_union_to_union() {
-        // `Union(Number, String, Date) \ String = Union(Number, Date)`
-        // — multi-member residue stays a union, canonicalised by
-        // `Ty::union` (deterministic sort + dedup).
         let db = kdb();
         let tr = transfer_with_bases(
             &db,
@@ -2121,11 +1315,6 @@ mod tests {
 
     #[test]
     fn apply_guard_type_check_false_on_exhausted_union_is_overlay_noop() {
-        // Degenerate input: `base == matched` is a dead false-branch.
-        // `ty_difference(String, String)` returns `Ty::Unknown` because
-        // the non-union `String` base falls into the generic fallback.
-        // By the overlay contract, Ty::Unknown is a no-op — overlay
-        // stays absent and readers fall back to the base type.
         let db = kdb();
         let tr = transfer_with_bases(&db, &[("Х", db.string(None, false))]);
         let mut s = NarrowState::new();
@@ -2139,13 +1328,6 @@ mod tests {
 
     #[test]
     fn apply_guard_imprecise_refinement_preserves_prior_narrowing() {
-        // Outer guard narrowed Х to String precisely; inner guard
-        // fires on the false branch of an unrelated `ТипЗнч` test
-        // with NO base_types context → computes Ty::Unknown → by the
-        // overlay contract, MUST NOT clobber the still-valid outer
-        // narrowing. This is the load-bearing invariant that gates
-        // the "insert only if informative" change: without it, nested
-        // guards would routinely destroy outer precision.
         let db = kdb();
         let tr = transfer_no_bases(&db);
         let mut s = state_with(&db, &[("Х", db.string(None, false))]);
@@ -2172,8 +1354,6 @@ mod tests {
 
     #[test]
     fn apply_guard_is_undefined_false_narrows_union_minus_undefined() {
-        // `Х = Неопределено` on the false branch knows Х ≠ Undefined.
-        // Over `Union(String, Undefined)` that leaves just `String`.
         let db = kdb();
         let tr = transfer_with_bases(
             &db,
@@ -2186,9 +1366,6 @@ mod tests {
 
     #[test]
     fn apply_guard_is_not_undefined_false_maps_to_undefined() {
-        // Mirror case — `Х <> Неопределено` false-branch knows Х IS
-        // Undefined. This IS precise (no union needed), so it must
-        // not fall back to Unknown.
         let db = kdb();
         let tr = transfer_no_bases(&db);
         let mut s = NarrowState::new();
@@ -2198,9 +1375,6 @@ mod tests {
 
     #[test]
     fn apply_guard_is_not_undefined_true_narrows_union_minus_undefined() {
-        // `Х <> Неопределено` on the true branch is the main "null-
-        // check narrows to the non-null union member" shape. Must
-        // strip Undefined from the pre-narrow union.
         let db = kdb();
         let tr = transfer_with_bases(
             &db,
@@ -2213,9 +1387,6 @@ mod tests {
 
     #[test]
     fn apply_guard_value_filled_true_strips_undefined_and_null() {
-        // `ЗначениеЗаполнено(Х)` true-branch removes both Undefined and
-        // Null from the base union. `String` and other arms survive —
-        // value-level "empty" shapes (`""`) are not type-level.
         let db = kdb();
         let tr = transfer_with_bases(
             &db,
@@ -2228,8 +1399,6 @@ mod tests {
 
     #[test]
     fn apply_guard_value_filled_true_strips_only_null() {
-        // Base without `Undefined` — `Null` alone is also an unfilled
-        // witness and must be removed.
         let db = kdb();
         let tr =
             transfer_with_bases(&db, &[("Х", db.union(vec![db.number(None, None), db.null()]))]);
@@ -2240,10 +1409,6 @@ mod tests {
 
     #[test]
     fn apply_guard_value_filled_false_leaves_overlay_untouched() {
-        // False branch admits `Undefined`, `Null`, AND value-level
-        // empty shapes (`""`, `0`, …). Type-level narrowing can't
-        // represent the latter, so dropping non-witness arms from the
-        // base would be unsound. Overlay stays empty.
         let db = kdb();
         let tr = transfer_with_bases(
             &db,
@@ -2256,11 +1421,6 @@ mod tests {
 
     #[test]
     fn apply_guard_value_filled_true_no_witness_in_base_is_noop() {
-        // Base has no Undefined / Null members → nothing to remove.
-        // The arm short-circuits when the residual equals the base
-        // (Codex pair-mode MEDIUM): writing the unchanged base would
-        // clobber any prior precise narrowing on the same variable.
-        // No overlay entry is the canonical "no claim" shape.
         let db = kdb();
         let base = db.union(vec![db.number(None, None), db.string(None, false)]);
         let tr = transfer_with_bases(&db, &[("Х", base)]);
@@ -2271,11 +1431,6 @@ mod tests {
 
     #[test]
     fn apply_guard_value_filled_true_preserves_prior_overlay_when_no_witness() {
-        // Headline of the MEDIUM fix: a prior precise narrowing must
-        // survive a `ЗначениеЗаполнено` true branch when the base has
-        // no `Undefined` / `Null` to strip. Without the equality
-        // short-circuit the unchanged base would clobber the prior
-        // String into the broader Union, widening the overlay.
         let db = kdb();
         let base = db.union(vec![db.number(None, None), db.string(None, false)]);
         let tr = transfer_with_bases(&db, &[("Х", base)]);
@@ -2284,8 +1439,6 @@ mod tests {
         tr.apply_guard(&mut s, &Guard::ValueFilled { var: Name::new("Х") }, true);
         assert_eq!(overlay_type_id(&db, &s, "Х"), Some(db.string(None, false)));
     }
-
-    // --- ty_difference pure unit tests --------------------------------------
 
     #[test]
     fn ty_difference_union_minus_member_collapses_to_singleton() {
@@ -2297,7 +1450,6 @@ mod tests {
 
     #[test]
     fn ty_difference_union_minus_missing_member_returns_whole_union() {
-        // `Union(A, B) \ C` when C ∉ {A, B} is the whole union.
         let db = kdb();
         let base = db.union(vec![db.number(None, None), db.string(None, false)]);
         let arms = ty_difference(&db, base, db.date(DateComponent::DateTime));
@@ -2319,10 +1471,6 @@ mod tests {
 
     #[test]
     fn ty_difference_non_union_base_returns_unknown() {
-        // We cannot refine a non-union base: either it equals `matched`
-        // (exhausted) or it is disjoint (unchanged), and we choose the
-        // sound conservative answer (empty arm-set → `Ty::Unknown`) so
-        // callers read the base type via fall-through.
         let db = kdb();
         let s = db.string(None, false);
         let n = db.number(None, None);
@@ -2342,8 +1490,6 @@ mod tests {
 
     #[test]
     fn ty_difference_unfilled_witnesses_keeps_other_arms_untouched() {
-        // String and Number stay in the residual; only `Undefined`
-        // and `Null` are dropped.
         let db = kdb();
         let base = db.union(vec![
             db.number(None, None),
@@ -2357,9 +1503,6 @@ mod tests {
 
     #[test]
     fn ty_difference_unfilled_witnesses_non_union_collapses_to_unknown() {
-        // Same conservative answer as `ty_difference` for non-union
-        // bases — the caller's `apply_guard` short-circuit reads the
-        // base type via fall-through.
         let db = kdb();
         let s = db.string(None, false);
         let u = db.undefined();
@@ -2372,7 +1515,6 @@ mod tests {
         let db = kdb();
         assert!(is_unfilled_witness(&db, db.undefined()));
         assert!(is_unfilled_witness(&db, db.null()));
-        // Value-level "empty" shapes are NOT type-level witnesses.
         assert!(!is_unfilled_witness(&db, db.string(None, false)));
         assert!(!is_unfilled_witness(&db, db.number(None, None)));
         assert!(!is_unfilled_witness(&db, db.date(DateComponent::DateTime)));
@@ -2380,10 +1522,6 @@ mod tests {
 
     #[test]
     fn ty_difference_chain_to_exhaustion_stays_sound() {
-        // Chained subtraction: strip members one at a time. After the
-        // first step the 2-member union collapses to a singleton, so
-        // the second subtraction hits the non-union fallback and
-        // returns the empty arm-set (sound — caller reads the base).
         let db = kdb();
         let base = db.union(vec![db.number(None, None), db.string(None, false)]);
         let step1 = ty_difference(&db, base, db.number(None, None));
@@ -2395,9 +1533,6 @@ mod tests {
 
     #[test]
     fn transfer_expr_stashes_recognized_guard() {
-        // The solver drives transfer_expr on the Conditional vertex's
-        // condition. Pin that the guard lands in `pending_guard` so
-        // transfer_edge can consume it downstream.
         let mut b = ExprBuilder::new();
         let x = b.path("Х");
         let und = b.undefined();
@@ -2411,9 +1546,6 @@ mod tests {
 
     #[test]
     fn transfer_expr_non_guard_condition_clears_pending() {
-        // A condition that isn't an ADR-01 guard (e.g. `Х > 0`) must
-        // NOT leave a stale pending guard in place. Otherwise an
-        // earlier guard could leak across an unrelated Conditional.
         let mut b = ExprBuilder::new();
         let x = b.path("Х");
         let one = b.alloc(Expr::Literal(Literal::Number(1.0.try_into().unwrap())));
@@ -2441,7 +1573,6 @@ mod tests {
 
     #[test]
     fn transfer_edge_false_branch_applies_pending_guard() {
-        // False branch of `Х <> Неопределено` narrows Х to Undefined.
         let db = kdb();
         let tr = transfer_no_bases(&db);
         let mut state = NarrowState::new();
@@ -2453,10 +1584,6 @@ mod tests {
 
     #[test]
     fn transfer_edge_direct_clears_pending_without_applying() {
-        // Defensive: a guard that somehow landed in a `Direct` edge
-        // must not be applied (Direct edges are sequential fall-
-        // through, not conditional branches). Clearing without
-        // applying is the correct behaviour — the state is identity.
         let db = kdb();
         let tr = transfer_no_bases(&db);
         let mut state = state_with(&db, &[("Х", db.string(None, false))]);
@@ -2472,11 +1599,6 @@ mod tests {
 
     #[test]
     fn transfer_stmt_assign_from_untyped_rhs_drops_narrowed_entry() {
-        // `Х = Y` where Y has no known type (no overlay entry, no
-        // base_types entry): `infer_rhs_type` yields Ty::Unknown, so
-        // the assignment drops the prior narrowing of Х rather than
-        // keeping stale information. Overlay contract: no Unknown
-        // stored, no stale narrowing left behind.
         let mut b = ExprBuilder::new();
         let x_tgt = b.path("Х");
         let y_val = b.path("Y");
@@ -2491,10 +1613,6 @@ mod tests {
 
     #[test]
     fn transfer_stmt_assign_to_non_path_preserves_narrowed() {
-        // `Объект.Поле = 1` — the target is a Field, not a Path(Name).
-        // Such assignments must NOT kill any narrowed variable (they
-        // touch a field, not a binding — ADR-01 leaves field-level
-        // tracking out of scope).
         let mut b = ExprBuilder::new();
         let obj = b.path("Объект");
         let target = b.alloc(Expr::Field { base: obj, field: Name::new("Поле") });
@@ -2508,8 +1626,6 @@ mod tests {
         assert_eq!(overlay_type_id(&db, &state_out, "Х"), Some(db.string(None, false)));
     }
 
-    // --- Task 6.4: reassignment-locality (rhs inference) --------------------
-
     #[test]
     fn transfer_stmt_assign_number_literal_records_number() {
         let mut b = ExprBuilder::new();
@@ -2519,9 +1635,6 @@ mod tests {
 
         let db = kdb();
         let tr = transfer_no_bases(&db);
-        // Outer narrowing (Х: String) must be OVERWRITTEN by the
-        // reassignment, not joined with it — assignment is
-        // destructive.
         let state_in = state_with(&db, &[("Х", db.string(None, false))]);
         let state_out = tr.transfer_stmt(assign.into_raw(), &state_in, &b.body);
         assert_eq!(overlay_type_id(&db, &state_out, "Х"), Some(db.number(None, None)));
@@ -2542,10 +1655,6 @@ mod tests {
 
     #[test]
     fn transfer_stmt_assign_undefined_literal_records_undefined() {
-        // `Х = Неопределено` — the reassignment-to-Undefined case is
-        // the shape users write most often and narrowing must catch it
-        // (otherwise an immediately-following `Если Х <> Неопределено`
-        // guard cannot see the correct pre-narrow type).
         let mut b = ExprBuilder::new();
         let x_tgt = b.path("Х");
         let und = b.undefined();
@@ -2595,9 +1704,6 @@ mod tests {
 
     #[test]
     fn transfer_stmt_assign_from_base_typed_rhs_records_base_type() {
-        // `Х = Y` with `Y: Ty::Number` known in base_types but no
-        // overlay entry for Y: the rhs type comes from base_types and
-        // Х inherits it.
         let mut b = ExprBuilder::new();
         let x_tgt = b.path("Х");
         let y_val = b.path("Y");
@@ -2611,10 +1717,6 @@ mod tests {
 
     #[test]
     fn transfer_stmt_assign_from_narrowed_rhs_prefers_overlay_over_base() {
-        // `Х = Y` where Y: base Union(Number, String) but Y is
-        // *narrowed* to String in the current overlay (e.g. inside an
-        // `Если ТипЗнч(Y) = Тип("Строка")` branch): the assignment
-        // must propagate the narrowed String, not the base Union.
         let mut b = ExprBuilder::new();
         let x_tgt = b.path("Х");
         let y_val = b.path("Y");
@@ -2632,10 +1734,6 @@ mod tests {
 
     #[test]
     fn transfer_stmt_assign_from_complex_rhs_drops_entry() {
-        // `Х = Y + 1` — `Expr::BinaryOp` is out of Task 6.4's
-        // inference scope → infer_rhs_type returns Ty::Unknown → the
-        // overlay drops any prior narrowing of Х (cannot keep stale
-        // info across a destructive assignment).
         let mut b = ExprBuilder::new();
         let x_tgt = b.path("Х");
         let y = b.path("Y");
@@ -2652,7 +1750,6 @@ mod tests {
 
     #[test]
     fn transfer_stmt_assign_literal_does_not_touch_unrelated_entries() {
-        // Reassignment of Х must not perturb the narrowing of Y.
         let mut b = ExprBuilder::new();
         let x_tgt = b.path("Х");
         let num = b.alloc(Expr::Literal(Literal::Number(7.0.try_into().unwrap())));
@@ -2668,26 +1765,8 @@ mod tests {
 
     #[test]
     fn e2e_if_type_check_narrows_then_block() {
-        // Hand-build
-        //
-        //   Если ТипЗнч(Х) = Тип("Строка") Тогда
-        //       Х = Х  // no-op — keeps the then-block non-empty
-        //   КонецЕсли
-        //
-        // then run the full pipeline: CfgBuilder → DataflowSolver.
-        // The then-block's IN state must carry `Х → Ty::String`,
-        // because transfer_edge applied the TypeCheck guard on the
-        // TrueBranch edge from the Conditional vertex.
-        //
-        // This is the integration proof that Task 6.0's transfer_edge
-        // hook, Task 6.1's recognize_guard, and Task 6.2's NarrowState
-        // / NarrowingTransfer all wire together end-to-end on a real
-        // CFG. If the assertion fails, either the pending-guard flow
-        // is broken, or the CFG is not emitting TrueBranch edges in
-        // the shape we expect.
         let mut b = ExprBuilder::new();
 
-        // Condition: `ТипЗнч(Х) = Тип("Строка")`
         let x_arg = b.path("Х");
         let typznc = b.path("ТипЗнч");
         let lhs = b.call(typznc, vec![x_arg]);
@@ -2696,11 +1775,6 @@ mod tests {
         let rhs = b.call(tip, vec![s]);
         let condition = b.bin(lhs, rhs, BinaryOp::Eq);
 
-        // Then-branch body: trivial self-assignment `Х = Х` to keep
-        // the block non-empty without triggering the reassignment
-        // kill (the kill fires on `Assign { target: Path(x), .. }`,
-        // which means the then-block's narrowing is already pinned
-        // BEFORE the assign runs — the IN state is what we assert).
         let x_tgt = b.path("Х");
         let x_val = b.path("Х");
         let assign = b.assign(x_tgt, x_val);
@@ -2708,19 +1782,12 @@ mod tests {
         let if_stmt = b.if_then(condition, assign);
         b.set_top_level(vec![if_stmt]);
 
-        // Go through the crate-level entry point so the test
-        // exercises the same wiring that Task 6.6's Salsa query will
-        // eventually wrap. No base-types needed — the true-branch
-        // narrowing of a TypeCheck is always precise without them.
         let db = kdb();
         let body = b.body.clone();
         let result =
             narrow_body(&db, body, FxHashMap::default()).expect("narrowing analysis must converge");
         let cfg = result.cfg();
 
-        // Find the then-block: the successor of the Conditional
-        // vertex along a TrueBranch edge whose target's IN state
-        // contains the narrowing.
         use cfg::CfgVertex;
         let cond_idx = cfg
             .vertices()
@@ -2746,23 +1813,8 @@ mod tests {
 
     #[test]
     fn e2e_if_type_check_else_branch_narrows_union_complement() {
-        // Hand-build
-        //
-        //   Если ТипЗнч(Х) = Тип("Строка") Тогда
-        //       Х = Х
-        //   Иначе
-        //       Х = Х
-        //   КонецЕсли
-        //
-        // with a pre-narrow base type `Х: Union(Number, String)` fed
-        // into the solver. The false-branch (Иначе) block's IN state
-        // must carry `Х → Number` — the Task 6.3 invariant that
-        // `Union(Number, String) \ String = Number` is observed
-        // end-to-end through the CFG and solver, not just inside
-        // `apply_guard`.
         let mut b = ExprBuilder::new();
 
-        // Condition: `ТипЗнч(Х) = Тип("Строка")`
         let x_arg = b.path("Х");
         let typznc = b.path("ТипЗнч");
         let lhs = b.call(typznc, vec![x_arg]);
@@ -2771,14 +1823,10 @@ mod tests {
         let rhs = b.call(tip, vec![s]);
         let condition = b.bin(lhs, rhs, BinaryOp::Eq);
 
-        // Then-branch: `Х = Х`. Needed so the CFG emits a distinct
-        // then-block (an empty branch would collapse into the merge).
         let x_tgt_then = b.path("Х");
         let x_val_then = b.path("Х");
         let assign_then = b.assign(x_tgt_then, x_val_then);
 
-        // Else-branch: `Х = Х` — same reason. IN state of this block
-        // is what we assert on.
         let x_tgt_else = b.path("Х");
         let x_val_else = b.path("Х");
         let assign_else = b.assign(x_tgt_else, x_val_else);
@@ -2821,20 +1869,6 @@ mod tests {
 
     #[test]
     fn e2e_reassignment_in_then_block_records_new_type_in_out_state() {
-        // Task 6.4 e2e:
-        //
-        //   Если ТипЗнч(Х) = Тип("Строка") Тогда
-        //       Х = 42        // reassign to Number
-        //   КонецЕсли
-        //
-        // Then-block's IN state has Х → String (from the guard).
-        // After `transfer_stmt` fires on the assign, the OUT state
-        // must have Х → Number — the guard's narrowing is overwritten
-        // by the reassignment (destructive semantics). Without Task
-        // 6.4's rhs-type inference, OUT would have Х absent from the
-        // overlay ("kill" semantics), which loses the Number
-        // information that downstream narrowing should be able to
-        // exploit.
         let mut b = ExprBuilder::new();
 
         let x_arg = b.path("Х");
@@ -2892,21 +1926,6 @@ mod tests {
 
     #[test]
     fn e2e_one_sided_reassignment_does_not_leak_past_merge() {
-        // Soundness regression for the Task 6.4 join fix:
-        //
-        //   Если ТипЗнч(Х) = Тип("Строка") Тогда
-        //       Х = 42
-        //   КонецЕсли
-        //
-        // In the then-block: Х → Number (reassignment). The else
-        // path (implicit fall-through) does not touch Х — after the
-        // merge, no single value can be committed for Х, so the
-        // overlay MUST drop the entry. If `join` propagated the
-        // one-sided `Х → Number`, readers past КонецЕсли would
-        // falsely believe Х is always Number.
-        //
-        // We assert via the Exit vertex's IN state, which is where
-        // the post-merge join lands.
         let mut b = ExprBuilder::new();
 
         let x_arg = b.path("Х");
@@ -2946,17 +1965,7 @@ mod tests {
         );
     }
 
-    // ── Task 6.5: narrowed_type_at reader (pre-narrow on guard receivers,
-    // narrowed on then/else-body expressions).
-    //
-    // Builds a canonical if-else shape once and captures the ExprIdx
-    // values we want to probe — the receiver `Х` inside `ТипЗнч(Х)`,
-    // the `Х` inside the then-body's `Х = Х`, and same in the
-    // else-body. The tests below reuse this helper to pin down
-    // Task 6.5's lookup rule on each position.
     struct NarrowProbe {
-        // Owns the db so the `TypeId`s inside `result` stay resolvable
-        // for the lifetime of the probe (ids are db-local).
         db: InMemoryDb,
         result: dataflow::DataflowResult<NarrowState>,
         then_body_path: ExprIdx,
@@ -2978,16 +1987,10 @@ mod tests {
         let rhs = b.call(tip, vec![s]);
         let condition = b.bin(lhs, rhs, BinaryOp::Eq);
 
-        // Then-body: `Х = Х`. `then_body_path` is the rhs `Х` —
-        // reading it sees the narrowed overlay from the TrueBranch
-        // edge applied to the then-block's IN state.
         let then_lhs = b.path("Х");
         let then_body_path = b.path("Х");
         let then_assign = b.assign(then_lhs, then_body_path);
 
-        // Else-body: `Х = Х`. `else_body_path` is the rhs `Х` —
-        // reading it sees the FalseBranch complement applied to the
-        // else-block's IN state.
         let else_lhs = b.path("Х");
         let else_body_path = b.path("Х");
         let else_assign = b.assign(else_lhs, else_body_path);
@@ -3027,29 +2030,6 @@ mod tests {
 
     #[test]
     fn narrowed_type_at_guard_receiver_returns_pre_narrow() {
-        // ADR-01 Q4 (stronger shape, per pair-review MUST-FIX):
-        //
-        //     Х = 42                                          // entry BB
-        //     Если ТипЗнч(Х) = Тип("Строка") Тогда            // Conditional
-        //         Х = Х                                       // then-block
-        //     КонецЕсли
-        //
-        // The preceding assignment seeds the overlay with
-        // `Х → Number` BEFORE the Если, so `block_in` of the
-        // Conditional vertex is a non-empty overlay. A hover on the
-        // receiver `Х` inside `ТипЗнч(Х)` must return
-        // `Some(Ty::Number)` — the pre-narrow value from the prior
-        // assignment.
-        //
-        // The weaker "empty-overlay → None" shape (the original
-        // Task 6.5 test) could pass even if `containing_vertex`
-        // failed to locate the receiver (returning `None`
-        // short-circuits `narrowed_type_at` to `None` too). This
-        // version distinguishes three possible regressions:
-        //   - `Some(Ty::Number)` — correct (pre-narrow).
-        //   - `Some(Ty::String)` — dispatched to then-block's IN
-        //     state (post-narrow bug).
-        //   - `None` — dispatched nowhere (walk missed the vertex).
         let mut b = ExprBuilder::new();
 
         let pre_target = b.path("Х");
@@ -3082,9 +2062,6 @@ mod tests {
             "receiver must see pre-narrow overlay (Х → Number from prior assign), NOT the post-narrow String from the guard"
         );
 
-        // Control: the then-body rhs still sees the TrueBranch
-        // narrowing. Pinning this in the same test guards against a
-        // future regression that disables narrowing wholesale.
         assert_eq!(
             narrowed_type_at(&db, &result, then_rhs, &Name::new("Х")),
             Some(db.string(None, false)),
@@ -3094,11 +2071,6 @@ mod tests {
 
     #[test]
     fn narrowed_type_at_then_body_sees_narrowed() {
-        // A read of `Х` inside the then-body sees the narrowed overlay
-        // applied by the TrueBranch edge. This is the primary
-        // user-facing win of narrowing: hover on `Х` inside `Если
-        // ТипЗнч(Х) = Тип("Строка") Тогда … КонецЕсли` reports
-        // `Строка`, not the original union / unknown.
         let probe = build_probe_if_then_else(|_| FxHashMap::default());
         let expected = probe.db.string(None, false);
         assert_eq!(
@@ -3110,10 +2082,6 @@ mod tests {
 
     #[test]
     fn narrowed_type_at_else_body_sees_complement() {
-        // Binary union base seeded (`Union(Number, String)`). On the
-        // FalseBranch of `ТипЗнч(Х) = Тип("Строка")`, Task 6.3's
-        // `ty_difference` collapses the union to the remaining
-        // member, so the else-block's IN state pins Х → Number.
         let probe = build_probe_if_then_else(|db| {
             let mut bases = FxHashMap::default();
             bases.insert(
@@ -3132,10 +2100,6 @@ mod tests {
 
     #[test]
     fn narrowed_type_at_untouched_var_returns_none() {
-        // Looking up a name the analysis never narrows must return
-        // `None` at every position — even in positions where *other*
-        // names are narrowed. Protects against accidentally leaking
-        // one variable's overlay to another.
         let probe = build_probe_if_then_else(|_| FxHashMap::default());
         assert_eq!(
             narrowed_type_at(&probe.db, &probe.result, probe.then_body_path, &Name::new("Y")),
@@ -3146,17 +2110,6 @@ mod tests {
 
     #[test]
     fn narrowed_type_at_after_konec_esli_drops_one_sided_narrowing() {
-        // Task 6.4 intersection-join: one-sided narrowings (only the
-        // then-block narrows Х, the else is absent) must NOT survive
-        // the post-КонецЕсли merge. We don't have a convenient
-        // post-merge expression in the `if_then_only` probe (the only
-        // expr after the If is the method's implicit Exit vertex, and
-        // no expressions live there), so we assert directly on the
-        // Exit vertex's IN state: `narrowed_type_at` is just a
-        // syntactic re-projection of `block_in`, and this test closes
-        // the loop with the Exit-vertex assertion the existing
-        // `e2e_one_sided_reassignment_does_not_leak_past_merge`
-        // exercises through the same channel.
         use cfg::CfgVertex;
 
         let probe = build_probe_if_then_only();
@@ -3176,10 +2129,6 @@ mod tests {
 
     #[test]
     fn narrowed_type_at_missing_expr_returns_none() {
-        // Safety: when `expr_idx` isn't reachable from any CFG vertex
-        // (here, a stray expression we allocate but never wire into
-        // any statement or vertex), `narrowed_type_at` must return
-        // `None` rather than panicking or picking a random vertex.
         let probe = build_probe_if_then_else(|_| FxHashMap::default());
         let stray_expr = Idx::<Expr>::from_raw(RawIdx::from(u32::MAX - 1));
         assert_eq!(
@@ -3191,21 +2140,6 @@ mod tests {
 
     #[test]
     fn narrowed_type_at_elsif_condition_receiver_sees_pre_narrow() {
-        // Per pair-review NIT: exercise the secondary Conditional
-        // vertex that `ИначеЕсли` produces.
-        //
-        //     Если ТипЗнч(Х) = Тип("Строка") Тогда
-        //         Х = Х
-        //     ИначеЕсли ТипЗнч(Х) = Тип("Дата") Тогда     // ← receiver
-        //         Х = Х
-        //     КонецЕсли
-        //
-        // With base_types seeded as `Х: Union(Number, String)`, the
-        // FalseBranch from the first Conditional applies
-        // `Union(Number, String) \ String = Number`. The ИначеЕсли
-        // Conditional's IN state therefore carries `Х → Number`,
-        // which is the pre-narrow type the receiver must see (as
-        // distinct from the elsif's own narrowing target, `Дата`).
         let mut b = ExprBuilder::new();
 
         let x1 = b.path("Х");
@@ -3250,8 +2184,6 @@ mod tests {
             "elsif-condition receiver must see the FalseBranch-complement from the first Conditional (Number), not its own elsif narrowing target (Дата)"
         );
 
-        // Control: inside the elsif's then-body, the overlay is
-        // narrowed to the elsif's target type (Дата).
         assert_eq!(
             narrowed_type_at(&db, &result, elsif_rhs, &Name::new("Х")),
             Some(db.date(DateComponent::DateTime)),
@@ -3261,22 +2193,6 @@ mod tests {
 
     #[test]
     fn narrowed_type_at_while_condition_receiver_sees_pre_narrow() {
-        // Per pair-review NIT: exercise the `WhileLoop` vertex.
-        //
-        //     Х = 42
-        //     Пока ТипЗнч(Х) = Тип("Строка") Цикл   // ← receiver
-        //         Х = Х
-        //     КонецЦикла
-        //
-        // `WhileLoop` vertex has two in-edges: the direct edge from
-        // the entry block (carrying `Х → Number` from the prior
-        // assignment) and the `LoopIteration` back-edge from the
-        // body (carrying `Х → String`, because the TrueBranch edge
-        // applied the guard on the first iteration). The join is
-        // `Ty::union([Number, String])`, which is the pre-narrow
-        // overlay the receiver must observe — *not* the String the
-        // body sees inside each iteration, and not the Number from
-        // the initial entry alone.
         let mut b = ExprBuilder::new();
 
         let pre_target = b.path("Х");
@@ -3309,8 +2225,6 @@ mod tests {
             "while-condition receiver must see the merged pre-narrow overlay Union(Number, String), not either side in isolation"
         );
 
-        // Control: inside the loop body, the guard's narrowing to
-        // Строка is visible through the TrueBranch edge.
         assert_eq!(
             narrowed_type_at(&db, &result, body_rhs, &Name::new("Х")),
             Some(db.string(None, false)),

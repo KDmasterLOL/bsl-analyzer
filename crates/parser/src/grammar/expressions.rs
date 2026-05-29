@@ -1,53 +1,9 @@
-//! Expression parsing.
-
 use lexer::TokenKind;
 
 use crate::event::NodeKind;
 use crate::parser::{CompletedMarker, Parser};
 use crate::token_set::TokenSet;
 
-/// Tokens accepted as the property/method name after `.` in a field- or
-/// call-expression.
-///
-/// Mirrors rust-analyzer's `PATH_NAME_REF_KINDS` pattern: a strict
-/// position-specific allowlist instead of "everything except some
-/// keywords". Block terminators (`КонецФункции`, `КонецЕсли`, ...) and
-/// statement starters (`Функция`, `Возврат`, ...) are NOT accepted —
-/// consuming them as a property name destroys parser recovery: the
-/// enclosing block fails to close and downstream declarations vanish
-/// from the symbol tree (see
-/// `crates/ide/tests/completion_value_collections.rs::completion_after_dot_on_local_from_same_module_fn_value_table_callee_below`
-/// for the canonical regression).
-///
-/// Curated keyword whitelist comes from a `platform_data.json` audit:
-/// only keywords that are documented members of platform types.
-/// Counts at audit time:
-/// * `Процедура` (`KwProcedure`) — 20 occurrences (user-code callback
-///   structs like `Обработчик.Процедура`).
-/// * `Функция` (`KwFunction`) — enum values / fields named `Функция`
-///   (e.g. `Перечисления.X.Функция`, `ПараметрыПечати.Функция`).
-/// * `Выполнить` (`KwExecute`) — 12 occurrences (`Query.Execute`,
-///   `DataCompositionTemplateComposer.Execute`, ...).
-/// * `Перейти` (`KwGoto`) — 6 occurrences (`HTMLDocumentField.Navigate`).
-/// * `Прервать` (`KwBreak`) — 1 occurrence (`DialogReturnCode` enum).
-/// * `Продолжить` (`KwContinue`) — 1 occurrence
-///   (`OnScreenKeyboardReturnKeyText` enum).
-/// * `To` (`KwTo`) — 1 occurrence (XDTO `Result.To` field; the
-///   English `To` keyword name was used as a struct/object field).
-/// * `Истина`/`Ложь`/`Неопределено`/`NULL` (`KwTrue`/`KwFalse`/
-///   `KwUndefined`/`KwNull`) — value-position literals, never
-///   statement-starters or block-terminators. User code can legitimately
-///   name a struct property after one (`Структура.Истина`); accepting
-///   them here cannot regress block recovery because the lexer never
-///   emits them at a structural boundary.
-///
-/// Extending this set requires corpus evidence — do NOT re-broaden to
-/// "any keyword" or add by symmetry alone.
-///
-/// `KwFunction`/`KwProcedure` double as declaration-header keywords, so the
-/// post-`.` call site additionally rejects a line-leading `Функция Имя(` /
-/// `Процедура Имя(` shape via [`Parser::at_declaration_start`] — otherwise a
-/// declaration orphaned by a missing terminator would be swallowed as a field.
 const PROPERTY_NAME_TOKENS: TokenSet = TokenSet::new(&[
     TokenKind::Ident,
     TokenKind::KwProcedure,
@@ -61,19 +17,13 @@ const PROPERTY_NAME_TOKENS: TokenSet = TokenSet::new(&[
     TokenKind::KwFalse,
     TokenKind::KwUndefined,
     TokenKind::KwNull,
-    // Enum values may be named `Новый`/`New` (e.g. `Перечисления.ГрадацииКачества.Новый`),
-    // so the keyword is a valid property name after `.`.
     TokenKind::KwNew,
 ]);
 
-/// Parses an expression.
 pub fn expression(p: &mut Parser) {
     or_expr(p);
 }
 
-/// Parses a postfix expression for use in assignment left-hand side.
-/// This allows parsing "Var", "Obj.Field", "Arr[Index]" without consuming `=` as comparison.
-/// Returns true if the expression ends with a call (has parentheses).
 pub fn postfix_expression_for_assignment(p: &mut Parser) -> bool {
     postfix_expr_with_call_info(p)
 }
@@ -133,8 +83,6 @@ fn comparison_expr(p: &mut Parser) {
 
     while matches!(
         p.current(),
-        // Include Eq for comparisons (needed for diagnostics like IdenticalExpressions)
-        // Context determines if it's assignment or comparison
         Some(
             TokenKind::Eq
                 | TokenKind::Neq
@@ -215,9 +163,6 @@ fn postfix_expr(p: &mut Parser) {
     postfix_expr_with_call_info(p);
 }
 
-/// Parses a postfix expression and returns whether it's a valid statement.
-/// Valid statements: calls `Foo()` and index access `Arr[i]` (may have side effects).
-/// Invalid: bare identifiers `Foo` or field access `Foo.Bar` without call/index.
 fn postfix_expr_with_call_info(p: &mut Parser) -> bool {
     let Some(mut lhs) = primary_expr(p) else {
         return false;
@@ -230,42 +175,21 @@ fn postfix_expr_with_call_info(p: &mut Parser) -> bool {
         p.skip_trivia();
         match p.current() {
             Some(TokenKind::Dot) => {
-                // Wrap the base in a FieldExpr.
-                //
-                // Recovery contract: after `.` we accept ONLY tokens in
-                // `PROPERTY_NAME_TOKENS` (currently `Ident`). On miss we
-                // emit the error and complete the partial FieldExpr
-                // WITHOUT consuming the lookahead. This preserves block
-                // terminators (`КонецФункции`, `КонецЕсли`, ...) and
-                // statement starters (`Функция`, `Возврат`, ...) for the
-                // enclosing block/statement to consume — without this,
-                // mid-typing `obj.<EOL>КонецФункции` would let the parser
-                // swallow the terminator as a property name and erase the
-                // next function declaration from the symbol tree.
                 let m = lhs.precede(p);
                 p.bump();
                 let crossed_newline = p.skip_trivia_crossing_newline();
-                // A line-leading `Функция Имя(` / `Процедура Имя(` is an
-                // orphaned declaration (missing terminator above), not a
-                // property name — leave it for the module rule to recover.
                 let is_orphaned_declaration = crossed_newline && p.at_declaration_start();
                 if p.at_ts(PROPERTY_NAME_TOKENS) && !is_orphaned_declaration {
                     p.bump();
                     lhs = m.complete(p, NodeKind::FieldExpr);
                     is_valid_statement = false;
                 } else {
-                    // `error_custom_no_bump` instead of `error_custom`:
-                    // the latter consumes the lookahead token into an
-                    // `ERROR` child, which would re-introduce the original
-                    // bug (block terminator swallowed inside FIELD_EXPR).
                     p.error_custom_no_bump("ожидалось имя свойства после '.'");
                     m.complete(p, NodeKind::FieldExpr);
                     break;
                 }
             }
             Some(TokenKind::LBracket) => {
-                // Wrap the base in an IndexExpr
-                // Index access is valid as statement (may trigger getter with side effects)
                 let m = lhs.precede(p);
                 p.bump();
                 p.skip_trivia();
@@ -276,7 +200,6 @@ fn postfix_expr_with_call_info(p: &mut Parser) -> bool {
                 is_valid_statement = true;
             }
             Some(TokenKind::LParen) => {
-                // Wrap the base in a CallExpr
                 let m = lhs.precede(p);
                 arg_list(p);
                 lhs = m.complete(p, NodeKind::CallExpr);
@@ -298,7 +221,6 @@ fn primary_expr(p: &mut Parser) -> Option<CompletedMarker> {
         }
         Some(TokenKind::String) | Some(TokenKind::StringStart) => Some(string_literal(p)),
         Some(TokenKind::StringPart) | Some(TokenKind::StringTail) => {
-            // These should only appear after StringStart
             p.error_custom("неожиданный фрагмент строки");
             None
         }
@@ -330,7 +252,6 @@ fn primary_expr(p: &mut Parser) -> Option<CompletedMarker> {
         Some(TokenKind::KwNew) => Some(new_expr(p)),
         Some(TokenKind::Question) => Some(ternary_expr(p)),
         _ => {
-            // Error recovery: consume unexpected token and create error node
             p.error_unexpected();
             None
         }
@@ -400,7 +321,7 @@ fn string_continuation_tail(p: &mut Parser) {
 
 fn await_expr(p: &mut Parser) -> CompletedMarker {
     let m = p.start();
-    p.bump(); // Await
+    p.bump();
     p.skip_trivia();
     expression(p);
     m.complete(p, NodeKind::AwaitExpr)
@@ -408,7 +329,7 @@ fn await_expr(p: &mut Parser) -> CompletedMarker {
 
 fn new_expr(p: &mut Parser) -> CompletedMarker {
     let m = p.start();
-    p.bump(); // Новый
+    p.bump();
     p.skip_trivia();
 
     if p.at(TokenKind::Ident) {
@@ -425,19 +346,19 @@ fn new_expr(p: &mut Parser) -> CompletedMarker {
 
 fn ternary_expr(p: &mut Parser) -> CompletedMarker {
     let m = p.start();
-    p.bump(); // ?
+    p.bump();
     p.skip_trivia();
     p.expect(TokenKind::LParen);
     p.skip_trivia();
-    expression(p); // condition
+    expression(p);
     p.skip_trivia();
     p.expect(TokenKind::Comma);
     p.skip_trivia();
-    expression(p); // then
+    expression(p);
     p.skip_trivia();
     p.expect(TokenKind::Comma);
     p.skip_trivia();
-    expression(p); // else
+    expression(p);
     p.skip_trivia();
     p.expect(TokenKind::RParen);
     m.complete(p, NodeKind::TernaryExpr)
@@ -445,12 +366,11 @@ fn ternary_expr(p: &mut Parser) -> CompletedMarker {
 
 fn arg_list(p: &mut Parser) {
     let m = p.start();
-    p.bump(); // (
+    p.bump();
 
     p.skip_trivia();
 
     if !p.at(TokenKind::RParen) {
-        // First argument (might be empty)
         if !p.at(TokenKind::Comma) && !p.at(TokenKind::RParen) {
             expression(p);
         }

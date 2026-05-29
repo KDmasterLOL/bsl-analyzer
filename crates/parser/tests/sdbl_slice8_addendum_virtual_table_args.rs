@@ -1,26 +1,3 @@
-//! SDBL Slice 8-addendum acceptance tests — virtual-table arguments
-//! (`virtual_table_args` + `recover_to_delimiter_vt`).
-//!
-//! Provenance — these tests were authored against:
-//! - v8.3.27 Developer's Reference Глава 8 «Работа с запросами»,
-//!   primary source for SDBL grammar at
-//!   <https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453>;
-//!   specifically Глава 8.2 «Виртуальные таблицы» and Глава 8.3
-//!   «Виртуальные и обычные поля» canonical example
-//!   `РегистрНакопления.УчетНоменклатуры.ОстаткиИОбороты(, , Авто, , )`.
-//! - pubqlang chapters 9, 104, 116, 152, 156 (VT-args primary
-//!   structural sources) and peripheral chapter 9
-//!   (`СрезПоследних` prose intro).
-//! - the C0a-extended `docs/legal/sdbl-select-mini-spec.md`
-//!   §Virtual table argument behavior — Grammar EBNF, AST-shape
-//!   contract, IDE-recovery allowances #1–#6, Tier classification.
-//! - `docs/legal/sdbl-clean-room-slice8-addendum.md` for the
-//!   per-function provenance and child-attachment invariants.
-//!
-//! Per the user's citation policy, this file's comments and test
-//! docstrings cite only the public ITS URL above and pubqlang
-//! chapter identifiers; no local mirror paths.
-
 use parser::parse_sdbl;
 use syntax::{NodeOrToken, SyntaxKind};
 
@@ -62,18 +39,6 @@ fn count_direct_token_kind(node: &syntax::SyntaxNode, kind: SyntaxKind) -> usize
         .count()
 }
 
-// ============================================================
-// §Empty `()` no-args (2 tests).
-//
-// Mini-spec §IDE-recovery allowance #4 — empty paren pair emits
-// LParen + RParen as flat children of SdblTableRef with no
-// SdblMissingArg between them.
-// ============================================================
-
-/// Empty `()` no-args, RU form. Mirrors the canonical no-args
-/// pubqlang chapter 152 line 23 listing
-/// `РегистрНакопления.ТоварыНаСкладах.Остатки() КАК
-/// ТоварыНаСкладахОстатки`.
 #[test]
 fn test_slice8adn_empty_paren_pair_ru() {
     let parse = assert_clean("ВЫБРАТЬ * ИЗ Регистр.Остатки() КАК Т");
@@ -87,8 +52,6 @@ fn test_slice8adn_empty_paren_pair_ru() {
     assert_eq!(count_direct_token_kind(&table_ref, SyntaxKind::R_PAREN), 1);
 }
 
-/// Empty `()` no-args, EN form (bilingual coverage — Slice 2
-/// keyword pairs `SELECT`/`FROM`/`AS`).
 #[test]
 fn test_slice8adn_empty_paren_pair_en() {
     let parse = assert_clean("SELECT * FROM Reg.Balance() AS T");
@@ -102,16 +65,6 @@ fn test_slice8adn_empty_paren_pair_en() {
     assert_eq!(count_direct_token_kind(&table_ref, SyntaxKind::R_PAREN), 1);
 }
 
-// ============================================================
-// §Empty-trailing-arg (2 tests).
-//
-// Mini-spec §IDE-recovery allowance #2 — empty-trailing-arg
-// after the last comma produces SdblMissingArg before RParen.
-// ============================================================
-
-/// Single trailing comma `(&Период,)`. The parsed `&Период`
-/// expression precedes one Comma + one SdblMissingArg before
-/// RParen.
 #[test]
 fn test_slice8adn_single_trailing_comma_ru() {
     let parse = assert_clean("ВЫБРАТЬ * ИЗ Регистр.Остатки(&Период,) КАК Т");
@@ -124,9 +77,6 @@ fn test_slice8adn_single_trailing_comma_ru() {
     assert_eq!(count_direct_token_kind(&table_ref, SyntaxKind::COMMA), 1);
 }
 
-/// Double trailing comma `(&Начало, &Конец, , )` — common 1C
-/// idiom for VT-args methods with 4 positional slots where the
-/// last two default to "all".
 #[test]
 fn test_slice8adn_double_trailing_comma_ru() {
     let parse = assert_clean("ВЫБРАТЬ * ИЗ Регистр.Обороты(&Начало, &Конец, , ) КАК Т");
@@ -139,25 +89,6 @@ fn test_slice8adn_double_trailing_comma_ru() {
     assert_eq!(count_direct_token_kind(&table_ref, SyntaxKind::COMMA), 3);
 }
 
-// ============================================================
-// §Empty-leading + middle args (3 tests).
-//
-// Mini-spec §IDE-recovery allowances #1 (empty-leading) + #3
-// (consecutive-empty). The canonical v8327doc Глава 8.3 example
-// `РегистрНакопления.УчетНоменклатуры.ОстаткиИОбороты(, , Авто, , )`
-// is the primary attestation.
-// ============================================================
-
-/// Canonical v8327doc Глава 8.3 5-arg shape — pin the exact
-/// direct-child layout: LParen, SdblMissingArg, Comma,
-/// SdblMissingArg, Comma, expression-NodeKind (for `Авто`), Comma,
-/// SdblMissingArg, Comma, SdblMissingArg, RParen. Plus aggregate
-/// counts: 4× SdblMissingArg + 4× Comma + 1 expression-NodeKind +
-/// LParen + RParen = 11 direct children.
-///
-/// Source: v8327doc Глава 8.3 «Виртуальные и обычные поля»
-/// canonical listing at
-/// <https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453>.
 #[test]
 fn test_slice8adn_canonical_v8327doc_ru() {
     let parse = assert_clean(
@@ -176,12 +107,6 @@ fn test_slice8adn_canonical_v8327doc_ru() {
     );
     assert_eq!(count_direct_token_kind(&table_ref, SyntaxKind::L_PAREN), 1);
     assert_eq!(count_direct_token_kind(&table_ref, SyntaxKind::R_PAREN), 1);
-    // Walk the direct children (token-or-node) and assert the
-    // interleaved sequence. The `Авто` slot is normalised to
-    // "Expr" because `expression(p)` wraps even a single Ident
-    // in one of the 9 expression NodeKinds per Slice 10a / 10b
-    // (typically SdblLogicalOrExpr at the top of the chain);
-    // the test pins SHAPE, not the specific wrapper variant.
     let normalised: Vec<&'static str> = table_ref
         .children_with_tokens()
         .filter_map(|el| match el {
@@ -228,8 +153,6 @@ fn test_slice8adn_canonical_v8327doc_ru() {
     );
 }
 
-/// Consecutive empty args `(,,)` — pure stress shape with no
-/// non-empty content. Mini-spec §IDE-recovery allowance #3.
 #[test]
 fn test_slice8adn_consecutive_empty_args() {
     let parse = assert_clean("ВЫБРАТЬ * ИЗ Регистр.Остатки(,,) КАК Т");
@@ -243,11 +166,6 @@ fn test_slice8adn_consecutive_empty_args() {
     assert_eq!(count_direct_token_kind(&table_ref, SyntaxKind::COMMA), 2);
 }
 
-/// Leading-empty followed by named-condition arg
-/// `( , Поле = &Парам)`. Mirrors pubqlang chapter 152 line 35
-/// `РегистрНакопления.ТоварыНаСкладах.Остатки( , Номенклатура =
-/// &Номенклатура)`. Pins §IDE-recovery allowance #1 alongside a
-/// non-trivial expression in the second slot.
 #[test]
 fn test_slice8adn_leading_empty_then_named() {
     let parse = assert_clean("ВЫБРАТЬ * ИЗ Регистр.Обороты(, Поле = &Парам) КАК Т");
@@ -260,20 +178,6 @@ fn test_slice8adn_leading_empty_then_named() {
     assert_eq!(count_direct_token_kind(&table_ref, SyntaxKind::COMMA), 1);
 }
 
-// ============================================================
-// §Paren-balanced subquery / function arg (2 tests).
-//
-// Mini-spec §IDE-recovery allowance #5 (negative path) — clean
-// nested forms (subquery, function call) are fully consumed by
-// `expression(p)` / `predicate_expr` (Slice 10b), NOT by
-// `recover_to_delimiter_vt`.
-// ============================================================
-
-/// Paren-balanced subquery as VT param. Mirrors the structural
-/// form documented at pubqlang chapter 156 lines 50–56
-/// (`Остатки( , ... В (ВЫБРАТЬ ...))`). The IN-subquery's `)` is
-/// matched inside the predicate handler; zero ERROR direct
-/// children of SdblTableRef.
 #[test]
 fn test_slice8adn_paren_balanced_subquery_arg_ru() {
     let parse =
@@ -296,12 +200,6 @@ fn test_slice8adn_paren_balanced_subquery_arg_ru() {
     );
 }
 
-/// Nested function call as VT arg `Остатки(СУММА(A))`. Mirrors
-/// the pubqlang chapter 104 line 23 form
-/// `Обороты(&НачалоПериода, КОНЕЦПЕРИОДА(&КонецПериода, ДЕНЬ),
-/// , ...)`. Clean nested call's `)` is consumed inside the
-/// function-call argument-list handler; zero ERROR direct
-/// children.
 #[test]
 fn test_slice8adn_nested_function_call_arg() {
     let parse = assert_clean("ВЫБРАТЬ * ИЗ Регистр.Остатки(СУММА(A)) КАК Т");
@@ -320,17 +218,6 @@ fn test_slice8adn_nested_function_call_arg() {
     );
 }
 
-// ============================================================
-// §Recovery — paren-balanced (2 tests).
-//
-// Mini-spec §IDE-recovery allowance #5 (positive path) +
-// §Preserved behaviour #3 (always-emit Error).
-// ============================================================
-
-/// Mid-arg recovery — the spurious `Q` between `СУММА(A)` and
-/// the comma is consumed inside an `Error` sub-node by
-/// `recover_to_delimiter_vt` without breaking the subsequent
-/// `, B` arg.
 #[test]
 fn test_slice8adn_mid_arg_recovery() {
     let parse = parse_sdbl("ВЫБРАТЬ * ИЗ Регистр.Остатки(СУММА(A) Q, B) КАК Т");
@@ -351,70 +238,20 @@ fn test_slice8adn_mid_arg_recovery() {
     );
 }
 
-/// Audit gate — `recover_to_delimiter_vt` always emits an
-/// `Error` marker after the recovery loop, regardless of how
-/// many tokens were consumed. Pin §Preserved behaviour #3 so a
-/// future "skip empty Error" promotion candidate cannot be
-/// taken without updating this test.
 #[test]
 fn test_slice8adn_recover_always_emits_error() {
-    // The mid-arg recovery test above already proves the
-    // "non-empty Error" path. This test exercises the
-    // "Error may be empty if recovery exits immediately" branch
-    // by feeding a malformed form where the spurious token IS
-    // the clause keyword `ИЗ` — the recovery loop terminates on
-    // the first iteration via the clause-keyword check, so the
-    // Error marker is opened and closed without consuming any
-    // tokens.
-    //
-    // We accept whatever shape the parser emits (the exact
-    // arrangement of leading recovery vs. fallback markers
-    // depends on the empty-arg-after-comma fallback). What we
-    // pin is: there must be at least one ERROR descendant
-    // anywhere in the tree (since the helper unconditionally
-    // emits) AND the parser does not panic / loop forever.
     let parse = parse_sdbl("ВЫБРАТЬ * ИЗ Регистр.Остатки(A B C ИЗ Т");
-    let _ = parse.syntax_node(); // force materialisation
-                                 // The parser must complete (no infinite loop). No
-                                 // assertion on tree shape: the test's safety property is
-                                 // termination + no panic.
+    let _ = parse.syntax_node();
 }
 
-/// Slice 8-addendum §Behaviour change — clause-keyword
-/// termination at ANY paren depth. Pin the new behaviour
-/// where an unterminated nested `(...)` inside VT-args does
-/// NOT gobble up a clause keyword that belongs to the outer
-/// query.
-///
-/// Input simulates a user who forgot to close a nested paren
-/// inside a VT arg and kept typing the WHERE clause. Old
-/// behaviour: `ГДЕ` was consumed inside the recovery `Error`
-/// sub-node at paren_depth=1. New behaviour: recovery stops
-/// on `ГДЕ` at any depth, leaving the keyword for the
-/// enclosing query to recover from. The downstream WHERE-
-/// clause attachment depends on broader missing-RParen
-/// recovery quality (Slice 12 territory), so this test pins
-/// only the core §Behaviour change contract: `ГДЕ` MUST NOT
-/// appear inside any `Error` descendant of `SdblTableRef`.
 #[test]
 fn test_slice8adn_recovery_stops_on_clause_keyword_at_any_depth() {
-    // The bare `(` after `СУММА(A)` is what triggers
-    // recover_to_delimiter_vt at paren_depth that increments to 1
-    // before the loop encounters `ГДЕ`. Without the fix, the
-    // depth-0-only clause-keyword guard would let `ГДЕ S = 1` be
-    // consumed inside the Error sub-node.
     let parse = parse_sdbl("ВЫБРАТЬ * ИЗ Регистр.Остатки(СУММА(A) ( ГДЕ S = 1");
     let root = parse.syntax_node();
     let table_ref = root
         .descendants()
         .find(|n| n.kind() == SyntaxKind::SDBL_TABLE_REF)
         .expect("Tree must contain SdblTableRef");
-    // After the §Behaviour change fix, NO Error sub-node anywhere
-    // in the tree contains the `ГДЕ` clause keyword: neither the
-    // recovery helper's Error (which stops at any depth on
-    // `is_clause_keyword`) nor the post-helper missing-RParen
-    // Error (which now emits an empty marker rather than bumping
-    // the keyword).
     for err in parse.syntax_node().descendants().filter(|n| n.kind() == SyntaxKind::ERROR) {
         let text = err.text().to_string();
         assert!(
@@ -426,22 +263,9 @@ fn test_slice8adn_recovery_stops_on_clause_keyword_at_any_depth() {
             text,
         );
     }
-    let _ = table_ref; // silence unused-binding lint after the assertion shape change
+    let _ = table_ref;
 }
 
-// ============================================================
-// §Cross-slice integration (4 tests).
-//
-// Pin slice boundaries so a regression in adjacent slices
-// (Slice 8 dispatch, Slice 9 JOIN, Slice 10b predicates, Slice
-// 11 clauses) propagates a focused failure rather than a
-// confusing tree-shape assertion failure here.
-// ============================================================
-
-/// Cross-slice: Slice 8 `table_ref` dispatch boundary. The call
-/// site at `select.rs:table_ref` is the sole path into
-/// `virtual_table_args`; this test confirms the dispatch still
-/// works when the MDO chain ends in an Ident followed by `(`.
 #[test]
 fn test_slice8adn_x_slice8_table_ref_dispatch() {
     let parse = assert_clean("ВЫБРАТЬ * ИЗ Справочник.Товары.СрезПоследних() КАК С");
@@ -455,8 +279,6 @@ fn test_slice8adn_x_slice8_table_ref_dispatch() {
     assert_eq!(count_direct_token_kind(&table_refs[0], SyntaxKind::R_PAREN), 1);
 }
 
-/// Cross-slice: Slice 9 JOIN boundary. VT call as the right-
-/// hand source of an INNER JOIN.
 #[test]
 fn test_slice8adn_x_slice9_join_with_vt() {
     let parse = assert_clean(
@@ -475,10 +297,6 @@ fn test_slice8adn_x_slice9_join_with_vt() {
     assert!(table_refs_in_join >= 1, "JOIN clause must contain the VT-call SdblTableRef",);
 }
 
-/// Cross-slice: Slice 10b predicate-expression boundary. An
-/// IN-subquery inside a VT arg is a Slice 10b predicate
-/// production — a regression in `predicate_expr` would surface
-/// as ERROR sub-nodes inside the VT-args layout.
 #[test]
 fn test_slice8adn_x_slice10b_subquery_in_vt_arg() {
     let parse = assert_clean(
@@ -495,11 +313,6 @@ fn test_slice8adn_x_slice10b_subquery_in_vt_arg() {
     assert!(subqueries >= 1, "Expected at least one SdblSubquery descendant for the IN-subquery",);
 }
 
-/// Cross-slice: Slice 11 clauses-after-FROM boundary. After the
-/// VT-args closing `)`, parsing exits `virtual_table_args`
-/// cleanly; the trailing `ГДЕ` / `СГРУППИРОВАТЬ ПО` /
-/// `УПОРЯДОЧИТЬ ПО` clauses attach OUTSIDE SdblTableRef as
-/// peers of the Slice 8 `data_source`.
 #[test]
 fn test_slice8adn_x_slice11_vt_with_clauses_after_from() {
     let parse = assert_clean(
@@ -543,19 +356,6 @@ fn test_slice8adn_x_slice11_vt_with_clauses_after_from() {
     );
 }
 
-// ============================================================
-// §Outer LParen guard (1 test).
-//
-// Mini-spec §AST-shape invariant #1 — the outer `if !p.at(LParen)
-// { return; }` guard makes the call site in `table_ref`
-// unconditional. When the MDO chain ends without a `(`, the
-// function is a no-op.
-// ============================================================
-
-/// Outer LParen guard — `Регистр.Остатки` (no parens) must parse
-/// as a plain MDO chain inside SdblTableRef without entering the
-/// VT-args body and without emitting any LParen / RParen / Comma /
-/// SdblMissingArg as direct children of SdblTableRef.
 #[test]
 fn test_slice8adn_outer_lparen_guard_no_op() {
     let parse = assert_clean("ВЫБРАТЬ * ИЗ Регистр.Остатки КАК Т");
@@ -570,23 +370,8 @@ fn test_slice8adn_outer_lparen_guard_no_op() {
     );
 }
 
-// ----------------------------------------------------------------------------
-// §Slice 12 codex Round-5 stop-hook fix —
-// `recover_to_delimiter_vt` does NOT stop at nested SELECT/UNION at
-// paren_depth > 0, so the outer query's trailing clauses (e.g.
-// `КАК Т ГДЕ Т.A = 1`) survive an unterminated nested ВЫБРАТЬ inside
-// the VT-args list.
-// ----------------------------------------------------------------------------
-
 #[test]
 fn test_slice8adn_recovery_does_not_stop_on_nested_select_at_depth() {
-    // Trigger: a literal first VT-arg, then an unterminated `(` and
-    // a nested ВЫБРАТЬ X. Pre-fix (Slice 12 over-broad promotion),
-    // depth-1 ВЫБРАТЬ stopped recovery prematurely and the outer
-    // alias / WHERE clause was lost. Post-fix, recovery walks past
-    // ВЫБРАТЬ X to the outer `)`, leaves the outer alias scan to
-    // `source_alias`, and `query_body_clauses` parses the trailing
-    // ГДЕ.
     let input = "ВЫБРАТЬ * ИЗ Регистр.Остатки(1 ( ВЫБРАТЬ X )) КАК Т ГДЕ Т.A = 1";
     let parse = parse_sdbl(input);
     let root = parse.syntax_node();
@@ -602,20 +387,10 @@ fn test_slice8adn_recovery_does_not_stop_on_nested_select_at_depth() {
 
 #[test]
 fn test_slice8adn_recovery_inner_from_does_not_misattribute() {
-    // Codex Round-5b: when the nested subquery inside VT-args
-    // contains a hard intra-clause keyword (e.g. `ИЗ Y`), the
-    // VT-args recovery must absorb that inner ИЗ as part of the
-    // nested query body rather than stop at it. Otherwise the
-    // outer ИЗ would still parse correctly (it's already inside the
-    // FROM clause) but the alias scan / WHERE attachment can break
-    // because the function call returns at the wrong position.
     let input = "ВЫБРАТЬ * ИЗ Регистр.Остатки(1 ( ВЫБРАТЬ X ИЗ Y )) КАК Т ГДЕ Т.A = 1";
     let parse = parse_sdbl(input);
     let root = parse.syntax_node();
 
-    // The trailing alias `КАК Т` and `ГДЕ Т.A = 1` must both still
-    // be present; if the inner ИЗ misattributed, both would be
-    // dropped or routed into ERROR.
     let where_clauses =
         root.descendants().filter(|n| n.kind() == SyntaxKind::SDBL_WHERE_CLAUSE).count();
     assert!(

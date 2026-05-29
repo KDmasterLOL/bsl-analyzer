@@ -1,8 +1,3 @@
-//! String interning for bsl-analyzer.
-//!
-//! This crate provides efficient string interning to reduce memory usage
-//! and speed up string comparisons.
-
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -14,7 +9,6 @@ type Interner = DashMap<Arc<str>, (), FxBuildHasher>;
 
 static INTERNER: Lazy<Interner> = Lazy::new(|| DashMap::with_hasher(FxBuildHasher));
 
-/// An interned string.
 #[derive(Clone, Eq)]
 pub struct Symbol(Arc<str>);
 

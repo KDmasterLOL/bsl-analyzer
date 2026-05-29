@@ -1,9 +1,3 @@
-//! End-to-end regressions for `ЭтотОбъект` in an information register
-//! `RecordSetModule.bsl`.
-//!
-//! These tests use the shared Designer fixture and inject only module text into
-//! the salsa database. The fixture directory itself is never written.
-
 use hir::{Builders, HirDatabase, MetadataKind, TypeId, TypeKernelDb, TypeKind};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
@@ -223,13 +217,6 @@ fn record_dimension_resolves() {
 
 #[test]
 fn record_standard_period_resolves() {
-    // `Период` is `PresenceCondition::IsPeriodic`-gated in
-    // `bsl_platform::standard_mdo_attributes`. The HBK cascade in
-    // `push_platform_prefix_properties` correctly defers to that gate
-    // (the spec is the sole arbiter of which standard attributes are
-    // visible on the configured register). So the test must use a
-    // *periodic* register — the designer-fixture `РегистрСведений1` is
-    // `Nonperiodical` and would not expose `Период`.
     let config_path = temp_designer_config_with_register_recorders();
     let text = r#"
 Процедура Тест()

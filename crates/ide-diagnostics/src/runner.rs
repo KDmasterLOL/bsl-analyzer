@@ -1,52 +1,6 @@
-//! Diagnostic runner helpers.
-//!
-//! This module provides helper functions for running diagnostics.
-//! Diagnostics are organized by data source for clarity and proper caching.
-//!
-//! ## Architecture
-//!
-//! | Category | Collector | Data Source | Caching |
-//! |----------|-----------|-------------|---------|
-//! | **HIR Body emit** | `hir_dispatch::collect_hir_diagnostics` | Lowering | Salsa |
-//! | **ItemTree** | `collect_item_tree_diagnostics` | ItemTree + Metadata | Salsa |
-//! | **ModuleBodies** | `collect_module_bodies_diagnostics` | HIR bodies | Salsa |
-//! | **Configuration** | `collect_configuration_diagnostics` | Configuration XML | Salsa |
-//! | **Single-pass AST** | `collect_syntax_single_pass` | One traversal | None |
-//! | **Line/Text** | `collect_line_diagnostics` | Raw text | None |
-//! | **SDBL** | `collect_sdbl_hir_diagnostics` | SDBL HIR | Salsa |
-//! | **Dataflow** | `collect_dataflow_diagnostics` | CFG + liveness | Salsa |
-//! | **Metadata HIR** | `metadata_dispatch::collect_metadata_diagnostics` | ModuleMetadata | Salsa |
-//!
-//! ## Caching Strategy
-//!
-//! 1. **Salsa-cached (optimal):** HIR Body emit, ItemTree, ModuleBodies, Configuration, SDBL, Dataflow, Metadata
-//! 2. **Not cached (keep minimal):** AST traversal, Single-pass AST, Line/Text
-//!
-//! Migration goal: Maximize Salsa-cached diagnostics (~85%), minimize AST traversal (~15%)
-//!
-//! ## Single-Pass Architecture
-//!
-//! The single-pass collector (`collect_syntax_single_pass`) traverses the AST once and calls
-//! all migrated handlers via `check_node()` or `check_token()` API. This provides:
-//! - **Performance:** O(n) instead of O(n × handlers)
-//! - **Cache locality:** Better CPU cache utilization
-//! - **Reduced latency:** Faster diagnostics, less UI flicker
-//!
-//! ### Migrated handlers (9 total):
-//! - **Node-based:** useless_ternary_operator, double_negatives, unknown_preprocessor_symbol,
-//!   bad_words, typo, nested_ternary_operator
-//! - **Token-based:** yo_letter_usage, magic_date
-//!
-//! Handlers not yet migrated remain in `collect_syntax_diagnostics` (legacy).
-
 use crate::single_pass::collect_syntax_single_pass;
 use crate::{handlers, Diagnostic, DiagnosticCode, DiagnosticsContext};
 
-// ============================================================================
-// Diagnostic code sets for early exit optimization
-// ============================================================================
-
-/// Diagnostics in collect_line_diagnostics
 const LINE_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::ParseError,
     DiagnosticCode::ConsecutiveEmptyLines,
@@ -60,7 +14,6 @@ const LINE_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::SpaceAtStartComment,
 ];
 
-/// Diagnostics in collect_syntax_single_pass
 pub(crate) const SINGLE_PASS_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::UselessTernaryOperator,
     DiagnosticCode::DoubleNegatives,
@@ -73,7 +26,6 @@ pub(crate) const SINGLE_PASS_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::UsingHardcodePath,
 ];
 
-/// Diagnostics in collect_syntax_diagnostics (excluding single-pass)
 const SYNTAX_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::CodeBlockBeforeSub,
     DiagnosticCode::CodeOutOfRegion,
@@ -87,7 +39,6 @@ const SYNTAX_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::NonStandardRegion,
 ];
 
-/// Diagnostics in collect_item_tree_diagnostics
 const ITEM_TREE_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::OrderOfParams,
     DiagnosticCode::ReservedParameterNames,
@@ -109,7 +60,6 @@ const ITEM_TREE_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::SetPermissionsForNewObjects,
 ];
 
-/// Diagnostics in collect_module_bodies_diagnostics
 const MODULE_BODIES_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::InternetAccess,
     DiagnosticCode::IsInRoleMethod,
@@ -130,14 +80,12 @@ const MODULE_BODIES_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::UsingHardcodeNetworkAddress,
 ];
 
-/// Diagnostics in collect_configuration_diagnostics
 const CONFIGURATION_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::ProtectedModule,
     DiagnosticCode::MissingEventSubscriptionHandler,
     DiagnosticCode::ScheduledJobHandler,
 ];
 
-/// Diagnostics in collect_sdbl_hir_diagnostics
 const SDBL_HIR_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::QueryParseError,
     DiagnosticCode::AssignAliasFieldsInQuery,
@@ -158,17 +106,14 @@ const SDBL_HIR_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::VirtualTableCallWithoutParameters,
 ];
 
-/// Diagnostics in collect_dataflow_diagnostics
 const DATAFLOW_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::UnreachableCode,
     DiagnosticCode::UnusedLocalVariable,
     DiagnosticCode::UnusedParameters,
     DiagnosticCode::MissingTemporaryFileDeletion,
     DiagnosticCode::MissingTempStorageDeletion,
-    // Track 2 §1.6 Group C: lattice-driven (security_state).
     DiagnosticCode::SetPrivilegedMode,
     DiagnosticCode::DisableSafeMode,
-    // Track 2 Phase B §6.4: HirMethodMetrics-driven.
     DiagnosticCode::CognitiveComplexity,
     DiagnosticCode::CyclomaticComplexity,
     DiagnosticCode::NestedStatements,
@@ -178,7 +123,6 @@ const DATAFLOW_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::NumberOfOptionalParams,
 ];
 
-/// Helper to run a diagnostic and log if it's slow (>80ms).
 pub fn run_diagnostic<F>(
     name: &'static str,
     ctx: &DiagnosticsContext,
@@ -205,13 +149,7 @@ where
     result
 }
 
-/// Collect line-based diagnostics.
-///
-/// These diagnostics work on lines/text level, not AST nodes.
-/// Examples: line_length, consecutive_empty_lines, parse_error, etc.
-///
 pub fn collect_line_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    // Early exit: skip if none of our diagnostics are enabled
     if !ctx.config.any_enabled(LINE_DIAGNOSTICS) {
         return Vec::new();
     }
@@ -229,20 +167,10 @@ pub fn collect_line_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics.extend(handlers::missing_space::check(ctx));
     diagnostics.extend(handlers::space_at_start_comment::check(ctx));
 
-    // Node-based handlers moved to collect_syntax_single_pass():
-    // - bad_words, typo, nested_ternary_operator
-
     diagnostics
 }
 
-/// Collect Tier 1 syntax diagnostics.
-///
-/// Contains:
-/// - Single-pass AST traversal (optimized)
-/// - Pure AST diagnostics (parse + descendants)
 pub fn collect_syntax_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    // Early exit: skip if none of our diagnostics are enabled
-    // Check both single-pass and syntax-specific diagnostics
     if !ctx.config.any_enabled(SINGLE_PASS_DIAGNOSTICS)
         && !ctx.config.any_enabled(SYNTAX_DIAGNOSTICS)
     {
@@ -251,10 +179,8 @@ pub fn collect_syntax_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     let mut diagnostics = Vec::new();
 
-    // Single-pass handlers (optimized - one traversal for all)
     diagnostics.extend(collect_syntax_single_pass(ctx));
 
-    // Pure AST handlers (parse + descendants)
     diagnostics.extend(run_diagnostic(
         "CodeBlockBeforeSub",
         ctx,
@@ -297,31 +223,13 @@ pub fn collect_syntax_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics
 }
 
-// ============================================================================
-// ItemTree-based diagnostics (method signatures, cached by Salsa)
-// ============================================================================
-
-/// Collect diagnostics based on ItemTree (method signatures).
-///
-/// These diagnostics use Salsa-cached data:
-/// - `ctx.item_tree()` - method signatures, parameters, annotations
-/// - `ctx.module_metadata()` - module type (FormModule, CommonModule, etc.)
-/// - `ctx.region_tree()` - code regions (ПрограммныйИнтерфейс, etc.)
-/// - `ctx.method_docs()` - method documentation comments
-/// - `ctx.module_data()` - module-level data
-///
-/// All data sources are cached by Salsa, making these diagnostics efficient.
 pub fn collect_item_tree_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    // Early exit: skip if none of our diagnostics are enabled
     if !ctx.config.any_enabled(ITEM_TREE_DIAGNOSTICS) {
         return Vec::new();
     }
 
     let mut diagnostics = Vec::new();
 
-    // === Pure ItemTree checks ===
-
-    // Parameter checks
     diagnostics.extend(run_diagnostic("OrderOfParams", ctx, handlers::order_of_params::check));
     diagnostics.extend(run_diagnostic(
         "ReservedParameterNames",
@@ -329,28 +237,20 @@ pub fn collect_item_tree_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic
         handlers::reserved_parameter_names::check,
     ));
 
-    // Compiler directives
     diagnostics.extend(run_diagnostic(
         "SeveralCompilerDirectives",
         ctx,
         handlers::several_compiler_directives::check,
     ));
 
-    // === ItemTree + RegionTree checks ===
-
-    // Region/export checks
     diagnostics.extend(run_diagnostic(
         "NonExportMethodsInApiRegion",
         ctx,
         handlers::non_export_methods_in_api_region::check,
     ));
 
-    // Cached module checks (RegionTree + ItemTree + ModuleMetadata)
     diagnostics.extend(run_diagnostic("CachedPublic", ctx, handlers::cached_public::check));
 
-    // === ItemTree + ModuleMetadata checks ===
-
-    // Compilation directive checks (require ModuleMetadata for module type)
     diagnostics.extend(run_diagnostic(
         "CompilationDirectiveLost",
         ctx,
@@ -377,9 +277,6 @@ pub fn collect_item_tree_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic
         handlers::ordinary_app_support::check,
     ));
 
-    // === ItemTree + MethodDocs checks ===
-
-    // Documentation checks (require MethodDocs)
     diagnostics.extend(run_diagnostic(
         "MissingReturnedValueDescription",
         ctx,
@@ -400,8 +297,6 @@ pub fn collect_item_tree_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic
         ctx,
         handlers::missing_variables_description::check,
     ));
-
-    // === ItemTree + CommonModule metadata checks ===
 
     diagnostics.extend(run_diagnostic(
         "ExecuteExternalCodeInCommonModule",
@@ -427,34 +322,22 @@ pub fn collect_item_tree_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic
     diagnostics
 }
 
-// ============================================================================
-// ModuleBodies-based diagnostics (HIR bodies, cached by Salsa)
-// ============================================================================
-
-/// Collect diagnostics based on ModuleBodies (HIR method bodies).
-///
-/// These diagnostics use `ctx.module_bodies()` which is cached by Salsa.
-/// They analyze HIR expressions and statements, not raw AST.
 pub fn collect_module_bodies_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    // Early exit: skip if none of our diagnostics are enabled
     if !ctx.config.any_enabled(MODULE_BODIES_DIAGNOSTICS) {
         return Vec::new();
     }
 
     let mut diagnostics = Vec::new();
 
-    // Security checks
     diagnostics.extend(run_diagnostic("InternetAccess", ctx, handlers::internet_access::check));
     diagnostics.extend(run_diagnostic("IsInRoleMethod", ctx, handlers::is_in_role_method::check));
 
-    // Transaction checks
     diagnostics.extend(run_diagnostic(
         "PairingBrokenTransaction",
         ctx,
         handlers::pairing_broken_transaction::check,
     ));
 
-    // Resource management
     diagnostics.extend(run_diagnostic(
         "TimeoutsInExternalResources",
         ctx,
@@ -466,7 +349,6 @@ pub fn collect_module_bodies_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagno
         handlers::using_hardcode_secret_information::check,
     ));
 
-    // Module-level checks
     diagnostics.extend(run_diagnostic(
         "DataExchangeLoading",
         ctx,
@@ -488,7 +370,6 @@ pub fn collect_module_bodies_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagno
         handlers::server_calls_in_form_events::check,
     ));
 
-    // Expression analysis
     diagnostics.extend(run_diagnostic(
         "IdenticalExpressions",
         ctx,
@@ -505,7 +386,6 @@ pub fn collect_module_bodies_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagno
         handlers::incorrect_use_of_str_template::check,
     ));
 
-    // Constructor checks
     diagnostics.extend(run_diagnostic(
         "NumberOfValuesInStructureConstructor",
         ctx,
@@ -522,14 +402,12 @@ pub fn collect_module_bodies_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagno
         handlers::nested_function_in_parameters::check,
     ));
 
-    // Try-catch checks (uses module_bodies)
     diagnostics.extend(run_diagnostic(
         "MissingCodeTryCatchEx",
         ctx,
         handlers::missing_code_try_catch_ex::check,
     ));
 
-    // Hardcoded values (uses module_bodies for string literal iteration)
     diagnostics.extend(run_diagnostic(
         "UsingHardcodeNetworkAddress",
         ctx,
@@ -539,29 +417,15 @@ pub fn collect_module_bodies_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagno
     diagnostics
 }
 
-// ============================================================================
-// Configuration-based diagnostics (require Configuration XML, SessionModule only)
-// ============================================================================
-
-/// Collect diagnostics that require Configuration XML metadata.
-///
-/// These diagnostics use `ctx.main_configuration()` (and CFE-aware
-/// helpers like `find_common_module_anywhere` / `is_common_module_anywhere`)
-/// to resolve metadata. They only run for SessionModule files.
-///
-/// Data source: Configuration XML (ScheduledJobs, EventSubscriptions, CommonModules)
 pub fn collect_configuration_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    // Early exit: skip if none of our diagnostics are enabled
     if !ctx.config.any_enabled(CONFIGURATION_DIAGNOSTICS) {
         return Vec::new();
     }
 
     let mut diagnostics = Vec::new();
 
-    // Protected module check (Configuration + CommonModules)
     diagnostics.extend(run_diagnostic("ProtectedModule", ctx, handlers::protected_module::check));
 
-    // Handler validation (Configuration + ScheduledJobs/EventSubscriptions)
     diagnostics.extend(run_diagnostic(
         "MissingEventSubscriptionHandler",
         ctx,
@@ -576,36 +440,20 @@ pub fn collect_configuration_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagno
     diagnostics
 }
 
-/// Collect SDBL HIR-based diagnostics.
-///
-/// Diagnostics for BSL's SQL-like query language that use SDBL HIR lowering.
-/// Diagnostics are collected during SDBL AST→HIR transformation.
-///
-/// Uses single-pass architecture: shared data (SDBL HIR, file text, line index)
-/// is computed once, then all diagnostics are dispatched in a single iteration.
-/// This eliminates 16× redundant line index builds and iterations that caused
-/// the straggler bottleneck on large files (~26s → ~2s for a 7.8MB file).
 pub fn collect_sdbl_hir_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    // Early exit: skip if none of our diagnostics are enabled
     if !ctx.config.any_enabled(SDBL_HIR_DIAGNOSTICS) {
         return Vec::new();
     }
 
     let mut diagnostics = Vec::new();
 
-    // QueryParseError is AST-only (no SDBL HIR needed), runs separately
     diagnostics.extend(run_diagnostic("QueryParseError", ctx, handlers::query_parse_error::check));
 
-    // All remaining 16 handlers share the same data — single-pass dispatch
     diagnostics.extend(collect_sdbl_hir_single_pass(ctx));
 
     diagnostics
 }
 
-/// Dispatch table: maps each SDBL diagnostic code to its handler's dispatch function.
-///
-/// Each handler encapsulates its own matching logic (Strategy pattern / OCP).
-/// To add a new SDBL diagnostic, add one line here + a `dispatch` fn in the handler.
 const SDBL_DISPATCH: &[(DiagnosticCode, crate::sdbl_utils::SdblDispatchFn)] = &[
     (DiagnosticCode::AssignAliasFieldsInQuery, handlers::assign_alias_fields_in_query::dispatch),
     (
@@ -637,18 +485,9 @@ const SDBL_DISPATCH: &[(DiagnosticCode, crate::sdbl_utils::SdblDispatchFn)] = &[
     ),
 ];
 
-/// Single-pass SDBL HIR diagnostic collector.
-///
-/// Pre-computes shared data (SDBL HIR, file text, line index) once, then dispatches
-/// each diagnostic to all enabled handlers via the `SDBL_DISPATCH` table.
-///
-/// Previously each of the 16 handlers independently rebuilt the line index and
-/// iterated all diagnostics (16× redundant work). This single-pass approach
-/// eliminated the straggler bottleneck (~26s → ~2s for a 7.8MB file).
 fn collect_sdbl_hir_single_pass(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     use crate::sdbl_utils::{build_line_index_shared, SdblPositionMapper};
 
-    // Filter dispatch table to only enabled handlers
     let enabled: Vec<_> =
         SDBL_DISPATCH.iter().filter(|(code, _)| !ctx.is_disabled_with_metadata(*code)).collect();
 
@@ -656,7 +495,6 @@ fn collect_sdbl_hir_single_pass(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    // Pre-compute shared data ONCE
     let sdbl_hirs = ctx.sdbl_hir_in_file();
     let bsl_source = ctx.file_text();
     let sdbl_queries = ctx.all_sdbl_in_file();
@@ -664,7 +502,6 @@ fn collect_sdbl_hir_single_pass(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     let mut diagnostics = Vec::new();
 
-    // SINGLE PASS: one iteration over all queries × diagnostics
     for ((_, sdbl_package), (_, query_info)) in sdbl_hirs.iter().zip(sdbl_queries.iter()) {
         let mapper = SdblPositionMapper::from_query_info(query_info, &bsl_source, &line_starts);
 
@@ -678,11 +515,7 @@ fn collect_sdbl_hir_single_pass(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics
 }
 
-/// Collect dataflow-based diagnostics.
-///
-/// Diagnostics that use CFG + dataflow analysis (liveness, reaching definitions).
 pub fn collect_dataflow_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    // Early exit: skip if none of our diagnostics are enabled
     if !ctx.config.any_enabled(DATAFLOW_DIAGNOSTICS) {
         return Vec::new();
     }
@@ -706,16 +539,12 @@ pub fn collect_dataflow_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
         ctx,
         handlers::missing_temp_storage_deletion::check,
     ));
-    // Track 2 §1.6 Group C — lattice-driven security-mode handlers
-    // (read `module_security_state` through `open_events`).
     diagnostics.extend(run_diagnostic(
         "SetPrivilegedMode",
         ctx,
         handlers::set_privileged_mode::check,
     ));
     diagnostics.extend(run_diagnostic("DisableSafeMode", ctx, handlers::disable_safe_mode::check));
-    // Track 2 Phase B §6.4 — handler-side reads cached
-    // `module_hir_metrics_query` / `module_cyclomatic_query`.
     diagnostics.extend(run_diagnostic(
         "CognitiveComplexity",
         ctx,
@@ -743,18 +572,11 @@ pub fn collect_dataflow_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
     diagnostics
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::DiagnosticCode;
 
-    /// Every DiagnosticCode must be registered in exactly one collector array.
-    ///
-    /// This catches forgotten registrations when adding new diagnostics.
     #[test]
     fn test_all_diagnostic_codes_in_exactly_one_collector() {
         use std::collections::HashMap;
@@ -774,7 +596,6 @@ mod tests {
             ("INFERENCE_DIAGNOSTICS", crate::hir_inference_dispatch::INFERENCE_DIAGNOSTICS),
         ];
 
-        // Build map: code → list of arrays it appears in
         let mut code_to_arrays: HashMap<DiagnosticCode, Vec<&str>> = HashMap::new();
         for (name, codes) in all_arrays {
             for code in *codes {
@@ -782,28 +603,12 @@ mod tests {
             }
         }
 
-        // Codes intentionally in multiple collectors (non-overlapping detection paths:
-        // HIR handles literals, dataflow handles variables).
-        //
-        // RedundantAccessToObject and MissedRequiredParameter are dual-registered
-        // because their detection is split across two channels with non-overlapping
-        // responsibilities:
-        //   - HIR_DIAGNOSTICS  — three-level (`Документы.ПКО.Method`) and
-        //                        ЭтотОбъект/local-call shapes, classified at body
-        //                        lowering time via the positive `MdoType::from_plural`
-        //                        gate.
-        //   - INFERENCE_DIAGNOSTICS — two-level CommonModule shape, classified at
-        //                        inference time via `Resolver::user_common_module_exists`
-        //                        (clean-architecture lift — lowering can no longer
-        //                        decide "this is a CommonModule call" without the
-        //                        receiver type, see `dispatch_bare_ident_field_call`).
         let known_dual_registration: &[DiagnosticCode] = &[
             DiagnosticCode::IncorrectUseOfStrTemplate,
             DiagnosticCode::RedundantAccessToObject,
             DiagnosticCode::MissedRequiredParameter,
         ];
 
-        // Check for unexpected duplicates
         let mut duplicates = Vec::new();
         for (code, arrays) in &code_to_arrays {
             if arrays.len() > 1 && !known_dual_registration.contains(code) {
@@ -816,7 +621,6 @@ mod tests {
             duplicates.join("\n")
         );
 
-        // Check for missing codes
         let mut missing = Vec::new();
         for code in DiagnosticCode::iter() {
             if !code_to_arrays.contains_key(&code) {

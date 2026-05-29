@@ -1,44 +1,33 @@
-//! Salsa input types for the base database.
-
 use vfs::file_set::FileSet;
 use vfs::FileId;
 
-/// Unique identifier for a source root.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SourceRootId(pub u32);
 
-/// A logical group of files that share the same Salsa durability.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SourceRoot {
-    /// Whether files in this root should be treated as rarely changing.
     pub is_library: bool,
 
-    /// Files that belong to this source root.
     file_set: FileSet,
 }
 
 impl SourceRoot {
-    /// Create a source root for local project code.
     pub fn new_local(file_set: FileSet) -> Self {
         SourceRoot { is_library: false, file_set }
     }
 
-    /// Create a source root for library code.
     pub fn new_library(file_set: FileSet) -> Self {
         SourceRoot { is_library: true, file_set }
     }
 
-    /// Return the files in this source root.
     pub fn file_set(&self) -> &FileSet {
         &self.file_set
     }
 
-    /// Iterate over file IDs in this source root.
     pub fn iter(&self) -> impl Iterator<Item = FileId> + '_ {
         self.file_set.iter()
     }
 
-    /// Return the durability used for inputs from this source root.
     pub fn durability(&self) -> salsa::Durability {
         if self.is_library {
             salsa::Durability::HIGH
@@ -48,61 +37,42 @@ impl SourceRoot {
     }
 }
 
-/// Salsa input for file text.
 #[salsa::input(debug)]
 pub struct FileTextInput {
-    /// File contents.
     pub text: String,
 }
 
-/// Salsa input for source root data.
 #[salsa::input(debug)]
 pub struct SourceRootInput {
-    /// Source root data.
     pub root: SourceRoot,
 }
 
-/// Salsa input for file-to-source-root mapping.
 #[salsa::input(debug)]
 pub struct FileSourceRootInput {
-    /// Source root that owns this file.
     pub source_root_id: SourceRootId,
 }
 
-/// Interned `FileId` wrapper for tracked Salsa queries.
 #[salsa::interned(debug)]
 pub struct FileIdInput {
-    /// Raw VFS file identifier.
     pub file_id: vfs::FileId,
 }
 
-/// Hashable diagnostics configuration for Salsa caching.
-///
-/// Diagnostic codes stay as strings to keep `base-db` independent from
-/// `ide-diagnostics`. Sorted vectors keep the input deterministic and hashable.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DiagnosticsConfigInput {
-    /// Disabled diagnostic codes.
     pub disabled: Vec<String>,
 
-    /// Diagnostics enabled despite being disabled by default.
     pub enabled: Vec<String>,
 
-    /// Per-diagnostic parameters as `(code, json_string)` pairs.
     pub parameters: Vec<(String, String)>,
 
-    /// Whether ordinary application checks are enabled.
     pub ordinary_app_support: bool,
 
-    /// Iteration limit for flow-sensitive diagnostics.
     pub dataflow_max_iterations: usize,
 
-    /// Locale for rendered diagnostic messages.
     pub locale: crate::Locale,
 }
 
 impl DiagnosticsConfigInput {
-    /// Build from raw config data and normalize it for deterministic hashing.
     pub fn from_raw(
         disabled: impl IntoIterator<Item = String>,
         enabled: impl IntoIterator<Item = String>,
@@ -133,12 +103,10 @@ impl DiagnosticsConfigInput {
         }
     }
 
-    /// Return whether a diagnostic code is disabled.
     pub fn is_disabled(&self, code: &str) -> bool {
         self.disabled.binary_search_by(|c| c.as_str().cmp(code)).is_ok()
     }
 
-    /// Return parameter JSON for a diagnostic code.
     pub fn get_parameters(&self, code: &str) -> Option<&str> {
         self.parameters
             .binary_search_by(|(c, _)| c.as_str().cmp(code))
@@ -147,10 +115,8 @@ impl DiagnosticsConfigInput {
     }
 }
 
-/// Interned diagnostics config for tracked Salsa queries.
 #[salsa::interned(debug)]
 pub struct DiagnosticsConfigId {
-    /// Diagnostics configuration.
     pub config: DiagnosticsConfigInput,
 }
 

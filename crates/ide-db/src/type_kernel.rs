@@ -1,5 +1,3 @@
-//! Production type-kernel storage for `RootDatabaseImpl`.
-
 use std::fmt;
 use std::sync::Arc;
 
@@ -11,7 +9,6 @@ use rustc_hash::FxHashMap;
 
 use crate::database::RootDatabaseImpl;
 
-/// Production append-only type table plus reverse intern map.
 pub struct TypeKernelInner {
     table: FrozenVec<Box<TypeKind>>,
     intern: RwLock<FxHashMap<TypeKind, u64>>,
@@ -28,7 +25,6 @@ struct Sentinels {
     boolean: u64,
 }
 
-/// Salsa-visible handle for the monotonic production type kernel.
 #[derive(Clone)]
 pub(crate) struct TypeKernelHandle(Arc<TypeKernelInner>);
 
@@ -65,7 +61,6 @@ impl Default for TypeKernelInner {
 }
 
 impl TypeKernelInner {
-    /// Build a fresh kernel with the same six sentinels as the Phase 1 sandbox.
     pub fn new() -> Self {
         let table = FrozenVec::new();
         let mut intern = FxHashMap::default();

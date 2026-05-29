@@ -1,51 +1,3 @@
-//! CreateQueryInCycle diagnostic.
-//!
-//! Detects when Query/QueryBuilder/ReportBuilder objects have their Execute() method
-//! called inside loops, which is a critical performance anti-pattern.
-//!
-//! ## Why?
-//! Calling Execute() on a Query inside a loop causes:
-//! - Severe performance degradation (N database round-trips instead of 1)
-//! - Increased database load
-//! - Potential timeout errors on large datasets
-//! - Inefficient use of database connections
-//!
-//! ## Bad practice
-//! ```bsl
-//! Для Каждого ИД Из МассивИД Цикл
-//!     Запрос = Новый Запрос;
-//!     Запрос.Текст = "SELECT ...";
-//!     Запрос.УстановитьПараметр("ID", ИД);
-//!     Результат = Запрос.Выполнить(); // Error: Execute in loop!
-//! КонецЦикла;
-//! ```
-//!
-//! ## Better practice
-//! ```bsl
-//! Запрос = Новый Запрос;
-//! Запрос.Текст = "SELECT ... WHERE Field IN (&Values)";
-//! Запрос.УстановитьПараметр("Values", МассивЗначений);
-//! Результат = Запрос.Выполнить();
-//! ```
-//!
-//! Better still: use temporary tables, batch queries, or list parameters
-//! depending on the data shape.
-//!
-//! ## Configuration
-//! - **Enabled by default:** Yes
-//! - **Severity:** Error (CRITICAL)
-//! - **Tags:** PERFORMANCE
-//! - **Minutes to fix:** 20
-//!
-//! ## Implementation
-//! Migrated to HIR-based approach for consistency with other diagnostics.
-//! Diagnostics are collected during HIR lowering when Query.Execute() is called inside loops.
-//!
-//! See:
-//! - `crates/hir-def/src/body/lower/mod.rs` - LoweringCtx with loop_depth and query_vars tracking
-//! - `crates/hir-def/src/body/lower/stmt.rs` - Loop handling and query variable tracking
-//! - `crates/hir-def/src/body/lower/expr.rs` - Execute() call detection
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -65,9 +17,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic.
-///
-/// Called from lib.rs dispatch when `BodyDiagnostic::CreateQueryInCycle` is encountered.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     crate::simple_hir_diagnostic(
         DiagnosticCode::CreateQueryInCycle,

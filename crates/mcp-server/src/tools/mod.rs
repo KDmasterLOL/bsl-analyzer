@@ -1,5 +1,3 @@
-//! MCP tool implementations.
-
 pub mod debug;
 pub mod execution;
 pub mod its_help;

@@ -1,5 +1,3 @@
-//! Reports unknown symbols in `#Если` / `#If` preprocessor conditions.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::utils::preprocessor_symbols;
@@ -21,7 +19,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     clean_code_attribute: CleanCodeAttribute::Intentional,
 };
 
-/// Single-pass node handler for UnknownPreprocessorSymbol.
 #[inline]
 pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &DiagnosticsContext) {
     let code = DiagnosticCode::UnknownPreprocessorSymbol;
@@ -47,7 +44,6 @@ pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &Diagnostic
     }
 }
 
-/// Legacy entry point that delegates to single-pass node processing.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let root = ctx.parse().syntax_node();
     let mut diagnostics = Vec::new();

@@ -1,5 +1,3 @@
-//! Statement parsing.
-
 use lexer::TokenKind;
 use parser_error::{ParseError, RecoveryKind};
 
@@ -8,7 +6,6 @@ use crate::parser::Parser;
 
 use super::expressions;
 
-/// Parses a list of statements until the given terminator.
 pub fn stmt_list(p: &mut Parser, terminator: TokenKind) {
     let m = p.start();
 
@@ -26,7 +23,6 @@ pub fn stmt_list(p: &mut Parser, terminator: TokenKind) {
     m.complete(p, NodeKind::StmtList);
 }
 
-/// Parses a single statement.
 pub fn statement(p: &mut Parser) {
     p.skip_trivia();
 
@@ -67,11 +63,9 @@ pub fn statement(p: &mut Parser) {
         Some(TokenKind::PreDelete) => super::preprocessor_delete(p),
         Some(TokenKind::PreInsert) => super::preprocessor_insert(p),
         Some(TokenKind::Ident) => {
-            // Could be assignment or call
             assignment_or_call(p);
         }
         _ => {
-            // Try to parse as expression statement
             if p.current().is_some() {
                 let m = p.start();
                 expressions::expression(p);
@@ -85,14 +79,10 @@ pub fn statement(p: &mut Parser) {
 
 fn return_stmt(p: &mut Parser) {
     let m = p.start();
-    p.bump(); // Возврат
+    p.bump();
 
     p.skip_trivia();
 
-    // Optional return value
-    // BSL allows omitting semicolon before block-ending keywords:
-    //   Если Истина Тогда Возврат КонецЕсли;
-    //   Если А Тогда Возврат ИначеЕсли Б Тогда ...
     if !p.at(TokenKind::Semicolon)
         && !p.at(TokenKind::KwEndFunction)
         && !p.at(TokenKind::KwEndProcedure)
@@ -114,7 +104,7 @@ fn return_stmt(p: &mut Parser) {
 
 fn if_stmt(p: &mut Parser) {
     let m = p.start();
-    p.bump(); // Если
+    p.bump();
 
     p.skip_trivia();
     expressions::expression(p);
@@ -125,7 +115,6 @@ fn if_stmt(p: &mut Parser) {
     p.skip_trivia();
     stmt_list_inner(p, &[TokenKind::KwElsIf, TokenKind::KwElse, TokenKind::KwEndIf]);
 
-    // ElsIf clauses
     while p.at(TokenKind::KwElsIf) {
         p.check_iteration_limit();
         let em = p.start();
@@ -139,7 +128,6 @@ fn if_stmt(p: &mut Parser) {
         em.complete(p, NodeKind::ElseIfClause);
     }
 
-    // Else clause
     if p.at(TokenKind::KwElse) {
         let em = p.start();
         p.bump();
@@ -159,7 +147,7 @@ fn if_stmt(p: &mut Parser) {
 
 fn while_stmt(p: &mut Parser) {
     let m = p.start();
-    p.bump(); // Пока
+    p.bump();
 
     p.skip_trivia();
     expressions::expression(p);
@@ -181,12 +169,11 @@ fn while_stmt(p: &mut Parser) {
 
 fn for_stmt(p: &mut Parser) {
     let m = p.start();
-    p.bump(); // Для
+    p.bump();
 
     p.skip_trivia();
 
     if p.at(TokenKind::KwEach) {
-        // For Each
         p.bump();
         p.skip_trivia();
 
@@ -214,7 +201,6 @@ fn for_stmt(p: &mut Parser) {
 
         m.complete(p, NodeKind::ForEachStmt);
     } else {
-        // Regular For
         if p.at(TokenKind::Ident) {
             p.bump();
         }
@@ -249,7 +235,7 @@ fn for_stmt(p: &mut Parser) {
 
 fn try_stmt(p: &mut Parser) {
     let m = p.start();
-    p.bump(); // Попытка
+    p.bump();
 
     p.skip_trivia();
     stmt_list(p, TokenKind::KwExcept);
@@ -273,20 +259,13 @@ fn try_stmt(p: &mut Parser) {
 
 fn raise_stmt(p: &mut Parser) {
     let m = p.start();
-    p.bump(); // ВызватьИсключение
+    p.bump();
 
     p.skip_trivia();
 
-    // ВызватьИсключение supports two forms:
-    // 1. Old style (deprecated): ВызватьИсключение "string";
-    // 2. New style: ВызватьИсключение(arg1, arg2, ...);
-    //
-    // The keyword acts as a function call, so we need to check if next token is '('.
     if p.at(TokenKind::LParen) {
-        // Parse as function call with argument list
         parse_raise_call_args(p);
     } else if !at_bare_raise_boundary(p) {
-        // Old style: parse single expression (usually a string literal)
         expressions::expression(p);
     }
 
@@ -316,37 +295,25 @@ fn at_bare_raise_boundary(p: &Parser) -> bool {
     )
 }
 
-/// Parse argument list for ВызватьИсключение(...).
-///
-/// This handles the function-call style syntax:
-/// ВызватьИсключение(message, category, , , errorInfo)
-///
-/// Arguments can be omitted (empty between commas).
 fn parse_raise_call_args(p: &mut Parser) {
     assert!(p.at(TokenKind::LParen));
-    p.bump(); // (
+    p.bump();
 
     p.skip_trivia();
 
-    // Parse arguments until we hit ')'
     while !p.at(TokenKind::RParen) && !p.at_end() {
         p.skip_trivia();
 
-        // Check if this is an omitted argument (empty between commas or after comma)
         if p.at(TokenKind::Comma) {
-            // Empty argument - skip
         } else if !p.at(TokenKind::RParen) {
-            // Parse argument expression
             expressions::expression(p);
         }
 
         p.skip_trivia();
 
-        // Consume comma if present
         if p.at(TokenKind::Comma) {
             p.bump();
         } else if !p.at(TokenKind::RParen) {
-            // Expected comma or ')'
             break;
         }
     }
@@ -356,7 +323,7 @@ fn parse_raise_call_args(p: &mut Parser) {
 
 fn goto_stmt(p: &mut Parser) {
     let m = p.start();
-    p.bump(); // Перейти
+    p.bump();
 
     p.skip_trivia();
 
@@ -376,19 +343,18 @@ fn goto_stmt(p: &mut Parser) {
 
 fn label_stmt(p: &mut Parser) {
     let m = p.start();
-    p.bump(); // ~
-    p.expect(TokenKind::Ident); // label name
-    p.expect(TokenKind::Colon); // :
+    p.bump();
+    p.expect(TokenKind::Ident);
+    p.expect(TokenKind::Colon);
     m.complete(p, NodeKind::LabelStmt);
 }
 
 fn execute_stmt(p: &mut Parser) {
     let m = p.start();
-    p.bump(); // Выполнить/Execute
+    p.bump();
 
     p.skip_trivia();
 
-    // Expression or call
     expressions::expression(p);
 
     p.skip_trivia();
@@ -399,11 +365,10 @@ fn execute_stmt(p: &mut Parser) {
 
 fn add_handler_stmt(p: &mut Parser) {
     let m = p.start();
-    p.bump(); // ДобавитьОбработчик/AddHandler
+    p.bump();
 
     p.skip_trivia();
 
-    // Event expression
     expressions::expression(p);
 
     p.skip_trivia();
@@ -411,7 +376,6 @@ fn add_handler_stmt(p: &mut Parser) {
 
     p.skip_trivia();
 
-    // Handler expression
     expressions::expression(p);
 
     p.skip_trivia();
@@ -422,11 +386,10 @@ fn add_handler_stmt(p: &mut Parser) {
 
 fn remove_handler_stmt(p: &mut Parser) {
     let m = p.start();
-    p.bump(); // УдалитьОбработчик/RemoveHandler
+    p.bump();
 
     p.skip_trivia();
 
-    // Event expression
     expressions::expression(p);
 
     p.skip_trivia();
@@ -434,7 +397,6 @@ fn remove_handler_stmt(p: &mut Parser) {
 
     p.skip_trivia();
 
-    // Handler expression
     expressions::expression(p);
 
     p.skip_trivia();
@@ -446,27 +408,20 @@ fn remove_handler_stmt(p: &mut Parser) {
 fn assignment_or_call(p: &mut Parser) {
     let m = p.start();
 
-    // Parse left-hand side as postfix expression (identifier, field access, indexing, call)
-    // This prevents `=` from being consumed as comparison operator
-    // Returns true if expression is valid as statement (call or index access)
     let is_valid_stmt = expressions::postfix_expression_for_assignment(p);
 
     p.skip_trivia();
 
     if p.eat(TokenKind::Eq) {
-        // This is an assignment: LHS = RHS
         p.skip_trivia();
         expressions::expression(p);
         p.skip_trivia();
         m.complete(p, NodeKind::AssignStmt);
         p.eat(TokenKind::Semicolon);
     } else if is_valid_stmt {
-        // Valid statement: Foo(), Obj.Method(), or Arr[i]
         m.complete(p, NodeKind::CallStmt);
         p.eat(TokenKind::Semicolon);
     } else {
-        // Bare identifier or field access without call/index - syntax error
-        // e.g., "HHH" instead of "HHH()" or "HHH = value"
         p.emit_error_at_marker(
             m,
             ParseError::Custom {

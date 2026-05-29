@@ -1,35 +1,3 @@
-//! BadWords diagnostic
-//!
-//! Detects usage of configured bad/forbidden words in code.
-//!
-//! ## Why?
-//! Using inappropriate or forbidden words leads to:
-//! - Unprofessional codebase
-//! - Potential conflicts with coding standards
-//! - Communication issues in team
-//! - Compliance violations
-//!
-//! ## Bad practice
-//! ```bsl
-//! Процедура ОбработатьДанные()
-//!     // With badWords pattern = "todo|fixme|hack"
-//!     TODO: Доделать функцию  // Bad!
-//!     Результат = HACK;  // Bad!
-//! КонецПроцедуры
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! Процедура ОбработатьДанные()
-//!     // No forbidden words
-//!     Результат = ВыполнитьОперацию();
-//! КонецПроцедуры
-//! ```
-//!
-//! ## Configuration
-//! - `badWords`: Regular expression pattern for forbidden words (default: "")
-//! - `findInComments`: Check comments as well (default: true)
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -51,7 +19,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Configuration for BadWords diagnostic
 #[derive(Debug, Clone)]
 struct Config {
     bad_words_pattern: String,
@@ -68,17 +35,7 @@ impl Config {
     }
 }
 
-/// Check a single syntax node for bad words (node-based API).
-///
-/// This is called from collect_syntax_single_pass() for each node in single AST pass.
 pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &DiagnosticsContext) {
-    // Run exactly once per file. Three correctness properties:
-    //   1. Single pass → no duplicate emissions across ancestor nodes.
-    //   2. Whole-file regex scan → cross-token patterns keep working
-    //      (e.g. `not\s+recommended`, `client[_\s]*facing`).
-    //   3. Comment ranges collected from the syntax tree → inline `// ...`
-    //      tails are skipped when findInComments=false, not just full
-    //      comment lines.
     if node.kind() != SyntaxKind::SOURCE_FILE {
         return;
     }
@@ -116,11 +73,6 @@ pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &Diagnostic
         let match_end = root_start + mat.end() as u32;
         let match_range = TextRange::new(match_start.into(), match_end.into());
 
-        // Strict overlap: drop the match only when its range and the comment
-        // range share at least one byte. Pure boundary contact (e.g. `code//cmt`
-        // where the match ends exactly where the comment starts) leaves the
-        // code-side match emitted, which `intersect` alone would suppress
-        // because it returns Some(empty) on touching ranges.
         if comment_ranges
             .iter()
             .any(|c| c.start() < match_range.end() && match_range.start() < c.end())
@@ -139,44 +91,35 @@ pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &Diagnostic
     }
 }
 
-/// Main entry point for BadWords diagnostic
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::BadWords;
 
-    // Check if disabled
     if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
-    // Load configuration
     let config = Config::from_context(ctx);
 
-    // If pattern is empty, diagnostic is disabled
     if config.bad_words_pattern.is_empty() {
         return Vec::new();
     }
 
-    // Build case-insensitive regex
     let re = match RegexBuilder::new(&config.bad_words_pattern).case_insensitive(true).build() {
         Ok(regex) => regex,
-        Err(_) => return Vec::new(), // Invalid pattern, skip
+        Err(_) => return Vec::new(),
     };
 
-    // Get file text directly (not from parsed tree, to preserve exact positions)
     let file_text = ctx.file_text();
 
     let mut diagnostics = Vec::new();
     let mut byte_offset = 0;
 
-    // Iterate through lines
     for line in file_text.lines() {
-        // Skip comments if findInComments is false
         if !config.find_in_comments && line.trim_start().starts_with("//") {
-            byte_offset += line.len() + 1; // +1 for newline
+            byte_offset += line.len() + 1;
             continue;
         }
 
-        // Find all matches in the line
         for mat in re.find_iter(line) {
             let start = (byte_offset + mat.start()) as u32;
             let end = (byte_offset + mat.end()) as u32;
@@ -191,7 +134,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             });
         }
 
-        byte_offset += line.len() + 1; // +1 for newline
+        byte_offset += line.len() + 1;
     }
 
     diagnostics
@@ -236,15 +179,9 @@ fn integration_bad_words_no_duplicates_per_occurrence() {
 #[cfg(test)]
 #[test]
 fn integration_bad_words_keeps_match_touching_comment_at_boundary() {
-    // A match whose end touches the start of an inline comment (zero bytes
-    // overlap) is pure code and must STAY flagged. `TextRange::intersect`
-    // returns Some(empty) for touching ranges, so the predicate needs to
-    // require strict overlap rather than relying on `intersect(..).is_some()`.
     use crate::test_utils::{check_ast_diagnostic_with_config, format_diags};
     use crate::DiagnosticsConfig;
 
-    // No space between identifier and `//`: the comment token starts exactly
-    // where the identifier ends.
     let code = r#"Процедура Тест()
     forbiddenIdent//tail
 КонецПроцедуры"#;
@@ -276,11 +213,6 @@ fn integration_bad_words_keeps_match_touching_comment_at_boundary() {
 #[cfg(test)]
 #[test]
 fn integration_bad_words_skips_match_straddling_comment_boundary() {
-    // A regex match can begin in code and extend INTO an inline `// ...`
-    // comment (or vice versa). `contains_range`-style filtering would
-    // miss this because the match is not fully inside the comment.
-    // `intersect`-based exclusion drops any match that overlaps a comment
-    // range at all when findInComments=false.
     use crate::test_utils::{check_ast_diagnostic_with_config, format_diags};
     use crate::DiagnosticsConfig;
 
@@ -314,10 +246,6 @@ fn integration_bad_words_skips_match_straddling_comment_boundary() {
 #[cfg(test)]
 #[test]
 fn integration_bad_words_skips_inline_comment_tail() {
-    // findInComments=false must skip BOTH comment-only lines AND inline
-    // `// ...` tails. Line-based comment detection (the previous
-    // delegate path) caught only the former; this regression test pins
-    // the syntax-tree-aware comment range exclusion.
     use crate::test_utils::{check_ast_diagnostic_with_config, format_diags};
     use crate::DiagnosticsConfig;
 
@@ -351,9 +279,6 @@ fn integration_bad_words_skips_inline_comment_tail() {
 #[cfg(test)]
 #[test]
 fn integration_bad_words_matches_pattern_across_tokens() {
-    // Regex patterns may match across token boundaries (e.g. whitespace,
-    // punctuation). The handler must scan whole-line text — not per-token —
-    // so cross-token patterns keep working.
     use crate::test_utils::{check_ast_diagnostic_with_config, format_diags};
     use crate::DiagnosticsConfig;
 
@@ -544,15 +469,6 @@ mod tests {
         check_bad_words_snapshot(code, config, expect![[r#""#]]);
     }
 
-    /// Fresh local fixture with comment scanning enabled.
-    ///
-    /// Pattern "legacy|draft", findInComments=true:
-    /// - Line 0, cols 3-9: legacy (in comment)
-    /// - Line 0, cols 10-15: draft (in comment)
-    /// - Line 4, cols 4-10: Legacy (query identifier)
-    /// - Line 6, cols 12-17: Draft (metadata name)
-    /// - Line 6, cols 26-31: Draft (alias)
-    /// - Line 8, cols 0-5: Draft (variable name)
     #[test]
     fn test_bad_words_with_comments() {
         let code = "// legacy draft markers in comment\n\nQuery = New Query;\nQuery.Text = \"SELECT FIRST 1\n|   LegacyTable.Ref AS Ref\n|FROM\n|   Catalog.DraftItems AS DraftItems\";\n\nDraftResult = Query.Execute().Unload()[0].Ref;\n";
@@ -591,10 +507,6 @@ mod tests {
         );
     }
 
-    /// Fresh local fixture with comment scanning disabled.
-    ///
-    /// Pattern "legacy|draft", findInComments=false:
-    /// Skips line 0 (comment line), finds 4 remaining matches.
     #[test]
     fn test_bad_words_without_comments() {
         let code = "// legacy draft markers in comment\n\nQuery = New Query;\nQuery.Text = \"SELECT FIRST 1\n|   LegacyTable.Ref AS Ref\n|FROM\n|   Catalog.DraftItems AS DraftItems\";\n\nDraftResult = Query.Execute().Unload()[0].Ref;\n";

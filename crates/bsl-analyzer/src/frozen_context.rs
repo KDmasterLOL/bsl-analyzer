@@ -1,10 +1,3 @@
-//! Immutable request context for background LSP handlers.
-//!
-//! Async read-handlers run on a task-pool thread, while the main loop
-//! continues to apply `didChange` edits and mutate VFS. This module provides
-//! frozen views of `MemDocs` and VFS paths so a worker's source view stays
-//! consistent with the Salsa snapshot captured at dispatch time.
-
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -20,11 +13,6 @@ use crate::global_state::Task;
 use crate::lsp::PositionEncoding;
 use crate::mem_docs::FrozenMemDocs;
 
-/// Frozen bidirectional mapping of FileId <-> PathBuf captured at dispatch time.
-///
-/// Built via `FrozenFilePaths::freeze(&Vfs)` on the main thread. Cheap to
-/// clone (two `Arc`s). Matches the lookups handlers need via the synchronous
-/// `GlobalStateSnapshot::file_id_for_url` / `url_for_file_id` pair.
 #[derive(Debug, Clone, Default)]
 pub struct FrozenFilePaths {
     forward: Arc<FxHashMap<PathBuf, FileId>>,
@@ -32,10 +20,6 @@ pub struct FrozenFilePaths {
 }
 
 impl FrozenFilePaths {
-    /// Build a frozen snapshot of all live VFS paths.
-    ///
-    /// Iterates every allocated FileId and filters to ones still present.
-    /// Cost is O(num_file_ids); typical workspace is tens of thousands.
     pub fn freeze(vfs: &Vfs) -> Self {
         let n = vfs.num_file_ids();
         let mut forward: FxHashMap<PathBuf, FileId> = FxHashMap::default();
@@ -54,10 +38,6 @@ impl FrozenFilePaths {
 
     pub fn file_id_for_url(&self, url: &Url) -> anyhow::Result<FileId> {
         let path = url.to_file_path().map_err(|_| anyhow::anyhow!("Invalid file URL: {}", url))?;
-        // Reject non-BSL files at the URL boundary. `process_changes` skips
-        // `set_file_text` for them, so any downstream `db.parse(file_id)`
-        // would panic. Returning `Err` here turns the LSP request into a
-        // clean error response instead of a server crash.
         if !project_model::is_bsl_source_path(&path) {
             return Err(anyhow::anyhow!("File is not BSL, request unsupported: {}", url));
         }
@@ -85,25 +65,15 @@ impl FrozenFilePaths {
     }
 }
 
-/// Immutable input to a background read-request handler.
-///
-/// Created on the main thread via `RequestDispatcher::on_latency`, shipped
-/// by value into a task-pool worker. Any state reachable through this
-/// context is either owned or `Arc`-shared read-only — no worker ever
-/// touches `&mut GlobalState` or live VFS/MemDocs locks.
 pub struct LatencyRequestContext {
-    /// Owned Salsa snapshot. Send because `Analysis` owns `RootDatabaseImpl`.
     pub analysis: Analysis,
     pub workspace_root: Option<PathBuf>,
     pub project: Option<Project>,
     pub diagnostics_config: DiagnosticsConfigInput,
     pub position_encoding: PositionEncoding,
     pub vfs_done: bool,
-    /// Lets handlers queue follow-up work (e.g., external file preload).
     pub task_sender: Sender<Task>,
-    /// Frozen in-memory documents at dispatch time.
     pub mem_docs: FrozenMemDocs,
-    /// Frozen VFS path mapping at dispatch time.
     pub file_paths: FrozenFilePaths,
 }
 

@@ -1,9 +1,3 @@
-//! XML parser for Form metadata.
-//!
-//! Parses Form.xml files including:
-//! - Form type (Managed/Ordinary)
-//! - ChildItems with DataPath bindings
-
 use crate::enums::FormType;
 use crate::error::{MetadataError, Result};
 use crate::form::{
@@ -14,28 +8,6 @@ use crate::metadata_object::AttributeType;
 use super::helpers::parse_uuid;
 use super::type_parser::parse_type_xml;
 
-/// Parse form XML to extract FormType and elements.
-///
-/// Parses form metadata needed for diagnostics:
-/// - Name
-/// - FormType (Managed/Ordinary)
-/// - UUID
-/// - ChildItems with DataPath bindings
-///
-/// # Example XML
-/// ```xml
-/// <Form uuid="...">
-///     <Properties>
-///         <Name>ФормаЭлемента</Name>
-///     </Properties>
-///     <FormType>Managed</FormType>
-///     <ChildItems>
-///         <InputField name="Код" id="1">
-///             <DataPath>Объект.Code</DataPath>
-///         </InputField>
-///     </ChildItems>
-/// </Form>
-/// ```
 pub fn parse_form_xml(xml: &str) -> Result<Form> {
     let _span = tracing::debug_span!("parse_form_xml").entered();
 
@@ -44,7 +16,6 @@ pub fn parse_form_xml(xml: &str) -> Result<Form> {
 
     let root = doc.root_element();
 
-    // Support both <Form ...> root and <FormRoot><Form ...></FormRoot> wrapper
     let form_node = if root.tag_name().name() == "Form" {
         root
     } else {
@@ -134,12 +105,6 @@ pub fn parse_form_xml(xml: &str) -> Result<Form> {
     Ok(form)
 }
 
-/// Parse one `<Attribute>` node into [`FormAttribute`].
-///
-/// Skips nameless attributes. A missing or unparseable `<Type>` collapses to
-/// [`AttributeType::Unknown`] — the attribute is still surfaced (its name is
-/// needed by `UnusedLocalVariable` and completion), but type inference will
-/// see it as untyped.
 fn parse_form_attribute(node: roxmltree::Node<'_, '_>) -> Option<FormAttribute> {
     let name = node.attribute("name").filter(|s| !s.is_empty())?.to_string();
 
@@ -169,7 +134,6 @@ fn parse_form_attribute(node: roxmltree::Node<'_, '_>) -> Option<FormAttribute> 
     Some(FormAttribute { name, attr_type, is_main, columns })
 }
 
-/// Parse one `<Column>` node inside `<Columns>`.
 fn parse_form_attribute_column(node: roxmltree::Node<'_, '_>) -> Option<FormAttributeColumn> {
     let name = node.attribute("name").filter(|s| !s.is_empty())?.to_string();
     let attr_type = node
@@ -180,7 +144,6 @@ fn parse_form_attribute_column(node: roxmltree::Node<'_, '_>) -> Option<FormAttr
     Some(FormAttributeColumn { name, attr_type })
 }
 
-/// Recursively collect `<Event>` handlers from an element and all its descendants.
 fn collect_all_events(node: roxmltree::Node<'_, '_>) -> Vec<FormEventHandler> {
     let mut handlers = Vec::new();
     collect_events_recursive(node, &mut handlers);
@@ -204,29 +167,9 @@ fn collect_events_recursive(node: roxmltree::Node<'_, '_>, handlers: &mut Vec<Fo
     }
 }
 
-/// Map an XML tag name from `<ChildItems>` to the coarse [`FormElementKind`]
-/// taxonomy. Unknown tags fall through to [`FormElementKind::Other`] —
-/// the element is still surfaced (its name participates in `Элементы.<имя>`
-/// lookup), but `Ty::FormControl` mapping in later phases collapses to
-/// `Unknown` rather than mis-classifying as a known control.
-///
-/// The mapping mirrors the «Элементы коллекции» section of the BSL
-/// platform documentation. The table is the canonical contract; new
-/// tags must be classified explicitly here rather than inheriting silent
-/// platform-control semantics.
-///
-/// Tags observed in this repo's fixtures and known to the platform
-/// «Элементы коллекции» section are listed below. Anything else falls to
-/// `Other` deliberately — adding a tag without fixture or doc evidence
-/// risks mis-classifying as a control that does not exist.
 fn tag_to_kind(tag: &str) -> FormElementKind {
     match tag {
         "Table" => FormElementKind::Table,
-        // Each group sub-tag has its own platform extension type (Phase 9
-        // of v3.1 — see `form_control_platform_type_chain` in hir-def).
-        // Mapping every sub-tag to a single `Group` would collapse 5
-        // distinct property/method tables into one, missing
-        // `<Pages>.ТекущаяСтраница`, `<UsualGroup>.Скрыть`, etc.
         "UsualGroup" => FormElementKind::UsualGroup,
         "Pages" => FormElementKind::Pages,
         "Page" => FormElementKind::Page,
@@ -257,13 +200,6 @@ fn tag_to_kind(tag: &str) -> FormElementKind {
     }
 }
 
-/// Recursively collect `FormElement`s from a `<ChildItems>` node.
-///
-/// Any element with both `name` and `id` attributes is collected.
-/// Elements with a `<ChildItems>` child are recursed into. The XML tag
-/// name is decoded into [`FormElementKind`] and the immediate parent's
-/// id is threaded through the recursion so that `Form::children_of`
-/// can answer column/control hierarchy queries without re-parsing XML.
 fn collect_child_items(
     child_items: roxmltree::Node<'_, '_>,
     elements: &mut Vec<FormElement>,
@@ -295,24 +231,9 @@ fn collect_child_items(
     }
 }
 
-/// Parse form XML from file path.
-///
-/// Given a BSL module path like:
-/// `Catalogs/Справочник1/Forms/ФормаЭлемента/Ext/Form/Module.bsl`
-/// `CommonForms/ОбщаяФорма/Ext/Form/Module.bsl`
-///
-/// Reads two XML files:
-/// 1. `Catalogs/Справочник1/Forms/ФормаЭлемента.xml` or
-///    `CommonForms/ОбщаяФорма.xml` - MetaDataObject with FormType, UUID, Name
-/// 2. `Catalogs/Справочник1/Forms/ФормаЭлемента/Ext/Form.xml` - Form definition with Events, Commands
-///
-/// Combines information from both files.
 pub fn parse_form_from_bsl_path(bsl_path: &std::path::Path) -> Result<Form> {
-    // Path: .../Forms/<FormName>/Ext/Form/Module.bsl
-
     let mut forms_dir = bsl_path.to_path_buf();
 
-    // Go up: Module.bsl -> Form -> Ext -> FormName -> Forms
     for _ in 0..4 {
         if !forms_dir.pop() {
             return Err(crate::error::MetadataError::InvalidFormat(format!(
@@ -322,11 +243,10 @@ pub fn parse_form_from_bsl_path(bsl_path: &std::path::Path) -> Result<Form> {
         }
     }
 
-    // Get form name
     let form_name = bsl_path
-        .parent() // Module.bsl -> Form
-        .and_then(|p| p.parent()) // Form -> Ext
-        .and_then(|p| p.parent()) // Ext -> FormName
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
         .and_then(|p| p.file_name())
         .and_then(|n| n.to_str())
         .ok_or_else(|| {
@@ -336,22 +256,18 @@ pub fn parse_form_from_bsl_path(bsl_path: &std::path::Path) -> Result<Form> {
             ))
         })?;
 
-    // Path to Ext/Form.xml (contains Events, Commands, ChildItems)
-    let ext_form_xml_path = bsl_path
-        .parent() // Module.bsl -> Form
-        .and_then(|p| p.parent()) // Form -> Ext
-        .map(|p| p.join("Form.xml"))
-        .ok_or_else(|| {
-            crate::error::MetadataError::InvalidFormat(format!(
-                "Cannot build Ext/Form.xml path from: {}",
-                bsl_path.display()
-            ))
-        })?;
+    let ext_form_xml_path =
+        bsl_path.parent().and_then(|p| p.parent()).map(|p| p.join("Form.xml")).ok_or_else(
+            || {
+                crate::error::MetadataError::InvalidFormat(format!(
+                    "Cannot build Ext/Form.xml path from: {}",
+                    bsl_path.display()
+                ))
+            },
+        )?;
 
-    // Path to Forms/<FormName>.xml (MetaDataObject with FormType)
     let metadata_xml_path = forms_dir.join(format!("{}.xml", form_name));
 
-    // Read Ext/Form.xml (primary source for Events, Commands, ChildItems)
     let ext_form_xml = std::fs::read_to_string(&ext_form_xml_path).map_err(|e| {
         crate::error::MetadataError::InvalidFormat(format!(
             "Cannot read form XML at {}: {}",
@@ -360,13 +276,10 @@ pub fn parse_form_from_bsl_path(bsl_path: &std::path::Path) -> Result<Form> {
         ))
     })?;
 
-    // Parse Ext/Form.xml
     let mut form = parse_form_xml(&ext_form_xml)?;
 
-    // Try to read MetaDataObject for FormType (optional, may not exist)
     if let Ok(metadata_xml) = std::fs::read_to_string(&metadata_xml_path) {
         if let Ok(metadata) = parse_form_metadata_xml(&metadata_xml) {
-            // Update form with metadata info
             form.name = metadata.name;
             form.form_type = metadata.form_type;
             form.uuid = metadata.uuid;
@@ -376,26 +289,12 @@ pub fn parse_form_from_bsl_path(bsl_path: &std::path::Path) -> Result<Form> {
     Ok(form)
 }
 
-/// Minimal form metadata from MetaDataObject XML.
 struct FormMetadataInfo {
     name: String,
     form_type: FormType,
     uuid: uuid::Uuid,
 }
 
-/// Parse form MetaDataObject XML for FormType information.
-///
-/// MetaDataObject structure:
-/// ```xml
-/// <MetaDataObject>
-///     <Form uuid="...">
-///         <Properties>
-///             <Name>ФормаЭлемента</Name>
-///             <FormType>Managed</FormType>
-///         </Properties>
-///     </Form>
-/// </MetaDataObject>
-/// ```
 fn parse_form_metadata_xml(xml: &str) -> Result<FormMetadataInfo> {
     let doc = roxmltree::Document::parse(xml)
         .map_err(|e| MetadataError::InvalidFormat(format!("Invalid form metadata XML: {}", e)))?;
@@ -488,7 +387,6 @@ mod tests {
 
     #[test]
     fn test_parse_form_default_type() {
-        // When FormType is not specified, defaults to Managed
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
 <FormRoot xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
     <Form uuid="12345678-1234-1234-1234-123456789012">
@@ -544,7 +442,7 @@ mod tests {
 </Form>"#;
 
         let form = parse_form_xml(xml).unwrap();
-        assert_eq!(form.elements().len(), 2); // Group + InputField
+        assert_eq!(form.elements().len(), 2);
 
         let wrong: Vec<_> = form.elements_with_wrong_data_path().collect();
         assert_eq!(wrong.len(), 1);
@@ -571,20 +469,17 @@ mod tests {
 
         let form = parse_form_xml(xml).unwrap();
 
-        // Check event handlers
         let event_handler_names = form.event_handler_names();
         assert_eq!(event_handler_names.len(), 2);
         assert!(event_handler_names.contains(&"ПриСозданииНаСервере"));
         assert!(event_handler_names.contains(&"ПриОткрытии"));
 
-        // Check command handlers
         assert_eq!(form.command_handlers().len(), 2);
         assert!(form.command_handlers().contains(&"Ок".to_string()));
         assert!(form.command_handlers().contains(&"Отмена".to_string()));
 
-        // Check is_handler method
         assert!(form.is_handler("ПриСозданииНаСервере"));
-        assert!(form.is_handler("присозданиинасервере")); // case-insensitive
+        assert!(form.is_handler("присозданиинасервере"));
         assert!(form.is_handler("Ок"));
         assert!(!form.is_handler("НеСуществующийОбработчик"));
     }
@@ -617,7 +512,6 @@ mod tests {
 
         let form = parse_form_xml(xml).unwrap();
 
-        // All event handlers (form-level + element-level) should be collected
         assert_eq!(form.event_handler_names().len(), 4);
         assert!(form.is_handler("ПриСозданииНаСервере"));
         assert!(form.is_handler("СписокПриАктивизацииСтроки"));
@@ -667,14 +561,12 @@ mod tests {
 
         let form = parse_form_xml(xml).unwrap();
 
-        // Check attributes parsed
         assert_eq!(form.attributes().len(), 3);
         let names: Vec<&str> = form.attribute_names().collect();
         assert!(names.contains(&"Замечание"));
         assert!(names.contains(&"ТекущееОписание"));
         assert!(names.contains(&"ИсправленноеОписание"));
 
-        // No <Type> in any of these — all collapse to Unknown.
         for attr in form.attributes() {
             assert_eq!(
                 attr.attr_type,
@@ -686,7 +578,6 @@ mod tests {
             assert!(attr.columns.is_empty());
         }
 
-        // Check elements still parsed
         assert_eq!(form.elements().len(), 2);
     }
 
@@ -697,14 +588,12 @@ mod tests {
         );
         let form = parse_form_xml(xml).unwrap();
 
-        // Form has 3 InputFields: Код, Наименование, НесуществующийРеквизит
         assert_eq!(form.elements().len(), 3);
 
         let wrong: Vec<_> = form.elements_with_wrong_data_path().collect();
         assert_eq!(wrong.len(), 1);
         assert_eq!(wrong[0].name, "НесуществующийРеквизит");
 
-        // Form has one event handler
         assert_eq!(form.event_handler_names().len(), 1);
         assert!(form.is_handler("ПриСозданииНаСервере"));
     }
@@ -719,9 +608,6 @@ mod tests {
 
         let form = result.unwrap();
 
-        // Interleaved UsualGroup/InputField elements must all be collected
-        // Structure: UsualGroup(Поле1) → InputField(Родитель) → UsualGroup(Флаг1) →
-        //            InputField(Наименование) → UsualGroup(Дата)
         assert_eq!(
             form.elements().len(),
             8,
@@ -729,7 +615,6 @@ mod tests {
             form.elements().iter().map(|e| &e.name).collect::<Vec<_>>()
         );
 
-        // Verify form attributes parsed from <Attributes> section
         assert_eq!(form.attributes().len(), 4);
         let attr_names: Vec<String> = form.attribute_names().map(|n| n.to_lowercase()).collect();
         assert!(attr_names.contains(&"объект".to_string()));
@@ -744,8 +629,6 @@ mod tests {
 
     #[test]
     fn test_parse_form_attributes_with_types() {
-        // Covers: simple ref, primitive with qualifier, MainAttribute,
-        // composite, DefinedType, ValueTable + Columns, missing <Type>.
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
 <Form xmlns="http://v8.1c.ru/8.3/xcf/logform" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.20">
     <Attributes>
@@ -800,9 +683,6 @@ mod tests {
         let main = form.main_attribute().expect("Объект is MainAttribute");
         assert_eq!(main.name, "Объект");
         assert!(main.is_main);
-        // `cfg:DocumentObject.Заказ` carries a name → `parse_reference_type`
-        // path → `Ref{Document, "Заказ"}`. Bare `cfg:DocumentObject` (no
-        // name) is the AnyObjectRef path, exercised separately.
         match &main.attr_type {
             crate::metadata_object::AttributeType::Ref { mdo_type, name } => {
                 assert_eq!(*mdo_type, crate::metadata_object::MdoType::Document);
@@ -879,8 +759,6 @@ mod tests {
 
     #[test]
     fn test_parse_form_attribute_malformed_type() {
-        // Unknown <v8:Type> text and a stray <Type> with no children must
-        // not panic — collapse to Unknown and keep the attribute surfaced.
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
 <Form xmlns="http://v8.1c.ru/8.3/xcf/logform" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.20">
     <Attributes>
@@ -906,12 +784,10 @@ mod tests {
 
     #[test]
     fn test_parse_form_from_bsl_path() {
-        // Get path to fixtures relative to this source file
         let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let bsl_path = manifest_dir
             .join("fixtures/designer/Catalogs/Справочник1/Forms/ФормаЭлемента/Ext/Form/Module.bsl");
 
-        // Create a dummy Module.bsl if it doesn't exist (needed for path resolution)
         let module_dir = bsl_path.parent().unwrap();
         std::fs::create_dir_all(module_dir).ok();
         if !bsl_path.exists() {
@@ -920,11 +796,9 @@ mod tests {
 
         let form = parse_form_from_bsl_path(&bsl_path).unwrap();
 
-        // Should have data from both MetaDataObject and Ext/Form.xml
         assert_eq!(form.name(), "ФормаЭлемента");
         assert_eq!(form.form_type(), FormType::Managed);
 
-        // Event handlers from Ext/Form.xml
         assert_eq!(form.event_handler_names().len(), 1);
         assert!(form.is_handler("ПриСозданииНаСервере"));
     }
@@ -943,18 +817,10 @@ mod tests {
         assert!(form.is_handler("КомандаОК"));
     }
 
-    /// Pure function-level table for [`tag_to_kind`]. One row per tag the
-    /// platform docs name in «Элементы коллекции» plus a fallback for an
-    /// unknown tag — guards against silent regressions if a future edit
-    /// moves a tag between buckets.
     #[test]
     fn test_tag_to_kind_table() {
         let cases = [
             ("Table", FormElementKind::Table),
-            // Each group sub-tag now maps to its own kind — Phase 9 of
-            // v3.1 split the catch-all `Group` so the chain mechanism in
-            // `field_lookup`/`method_lookup` can reach extension members
-            // (`<Pages>.ТекущаяСтраница`, `<UsualGroup>.Скрыть`, etc.).
             ("UsualGroup", FormElementKind::UsualGroup),
             ("Pages", FormElementKind::Pages),
             ("Page", FormElementKind::Page),
@@ -993,8 +859,6 @@ mod tests {
         }
     }
 
-    /// `<UsualGroup>` containing `<InputField>` — kind decoded from the
-    /// XML tag and `parent_id` of the inner field points at the group.
     #[test]
     fn test_collect_child_items_kind_and_parent_id() {
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -1031,15 +895,10 @@ mod tests {
         assert_eq!(decoration.kind, FormElementKind::Decoration);
         assert_eq!(decoration.parent_id, None);
 
-        // `children_of` recovers the hierarchy without re-parsing XML.
         let group_children: Vec<_> = form.children_of(1).map(|e| e.name.as_str()).collect();
         assert_eq!(group_children, vec!["ПолеВГруппе", "КнопкаВГруппе"]);
     }
 
-    /// Multi-level nesting: `<UsualGroup>` → `<UsualGroup>` → `<Table>`
-    /// → `<InputField>`. Each step must record `parent_id = enclosing.id`
-    /// so that `Form::children_of` can walk back up the chain. Pins the
-    /// recursive descent against accidental flattening.
     #[test]
     fn test_collect_child_items_multilevel_parent_chain() {
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -1081,23 +940,12 @@ mod tests {
         assert_eq!(column.kind, FormElementKind::Field);
         assert_eq!(column.parent_id, Some(table.id));
 
-        // children_of returns immediate (single-level) descendants only.
         assert_eq!(form.children_of(outer.id).count(), 1);
         assert_eq!(form.children_of(inner.id).count(), 1);
         assert_eq!(form.children_of(table.id).count(), 1);
         assert_eq!(form.children_of(column.id).count(), 0);
     }
 
-    /// End-to-end on a real fixture: `<Table>` with column fields nested
-    /// inside its `<ChildItems>`. The parent_id chain is what Phase 5
-    /// will walk for column lookup.
-    ///
-    /// Note: per platform layout, decoration elements like `<ContextMenu>`,
-    /// `<AutoCommandBar>`, `<ExtendedTooltip>` sit *directly* under
-    /// `<Table>` (siblings of `<ChildItems>`, not inside it). They are
-    /// intentionally not surfaced as `FormElement`s — only items inside
-    /// `<ChildItems>` are collected. Adding them would require a
-    /// separate parser pass and is out of scope for Phase 2.
     #[test]
     fn test_parse_real_form_with_table_kind_propagation() {
         let xml = include_str!(
@@ -1111,7 +959,6 @@ mod tests {
         assert_eq!(table.kind, FormElementKind::Table);
         assert_eq!(table.parent_id, None, "table is top-level under form's <ChildItems>");
 
-        // Columns inside Table's <ChildItems> must point back to the table.
         let table_children: Vec<_> = form.children_of(table.id).collect();
         assert!(
             !table_children.is_empty(),
@@ -1122,13 +969,11 @@ mod tests {
             table_children.iter().all(|c| c.parent_id == Some(table.id)),
             "every child of Table must carry parent_id=Some(table.id)"
         );
-        // At least one column field is expected (LabelField / InputField).
         assert!(
             table_children.iter().any(|c| c.kind == FormElementKind::Field),
             "table must have at least one Field column inside its <ChildItems>"
         );
 
-        // Confirm fixture contains top-level Field controls outside the table.
         assert!(
             form.elements()
                 .iter()

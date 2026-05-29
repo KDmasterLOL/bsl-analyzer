@@ -1,34 +1,10 @@
-//! Use case: Complete VALUE() function elements (enum values, predefined items, EmptyRef).
-
 use crate::completion::sdbl::domain::{MetadataProvider, SdblCompletionItem};
 use crate::completion::CompletionItemKind;
 use bsl_metadata::MdoType;
 
-/// Use case for completing elements inside VALUE() function.
-///
-/// Handles third level of VALUE completion:
-/// - Enum values for Enum type
-/// - Predefined items for Catalog, Document, etc.
-/// - ПустаяСсылка/EmptyRef for all reference types
 pub struct CompleteValueElementsUseCase;
 
 impl CompleteValueElementsUseCase {
-    /// Execute the use case: get VALUE element completions.
-    ///
-    /// Returns:
-    /// - EnumValue names for Enum type
-    /// - PredefinedItem names for Catalog/Document types
-    /// - ПустаяСсылка (RU) or EmptyRef (EN) based on context language
-    ///
-    /// # Arguments
-    /// - `metadata`: Metadata provider for accessing configuration
-    /// - `mdo_type`: Type of metadata object
-    /// - `object_name`: Name of the specific object (e.g., "Статусы")
-    /// - `prefix`: Filter prefix (case-insensitive)
-    /// - `is_russian`: True if Russian keywords used in context
-    ///
-    /// # Returns
-    /// List of element completion items
     pub fn execute(
         metadata: &dyn MetadataProvider,
         mdo_type: MdoType,
@@ -38,10 +14,8 @@ impl CompleteValueElementsUseCase {
     ) -> Vec<SdblCompletionItem> {
         let mut items = Vec::new();
 
-        // Suggest ПустаяСсылка (RU) or EmptyRef (EN) based on context language
         items.extend(Self::empty_ref_items(prefix, is_russian));
 
-        // Get configuration
         let Some(config) = metadata.get_configuration() else {
             tracing::debug!(
                 ?mdo_type,
@@ -51,7 +25,6 @@ impl CompleteValueElementsUseCase {
             return items;
         };
 
-        // Find the metadata object
         let Some(mdo) = Self::find_metadata_object(&config, mdo_type, object_name) else {
             tracing::debug!(
                 ?mdo_type,
@@ -61,7 +34,6 @@ impl CompleteValueElementsUseCase {
             return items;
         };
 
-        // Add type-specific elements
         match mdo_type {
             MdoType::Enum => {
                 items.extend(Self::enum_value_items(&mdo, prefix));
@@ -69,9 +41,7 @@ impl CompleteValueElementsUseCase {
             MdoType::Catalog | MdoType::Document | MdoType::ChartOfCharacteristicTypes => {
                 items.extend(Self::predefined_items(&mdo, prefix));
             }
-            _ => {
-                // Other types: only EmptyRef
-            }
+            _ => {}
         }
 
         tracing::debug!(
@@ -85,15 +55,11 @@ impl CompleteValueElementsUseCase {
         items
     }
 
-    /// Generate ПустаяСсылка (RU) or EmptyRef (EN) completion item.
-    ///
-    /// Returns only one variant based on context language.
     fn empty_ref_items(prefix: &str, is_russian: bool) -> Vec<SdblCompletionItem> {
         let prefix_lower = prefix.to_lowercase();
         let mut items = Vec::new();
 
         if is_russian {
-            // ПустаяСсылка (Russian)
             if prefix.is_empty() || "пустаяссылка".starts_with(&prefix_lower) {
                 items.push(
                     SdblCompletionItem::new("ПустаяСсылка", CompletionItemKind::Constant)
@@ -101,7 +67,6 @@ impl CompleteValueElementsUseCase {
                 );
             }
         } else {
-            // EmptyRef (English)
             if prefix.is_empty() || "emptyref".starts_with(&prefix_lower) {
                 items.push(
                     SdblCompletionItem::new("EmptyRef", CompletionItemKind::Constant)
@@ -113,7 +78,6 @@ impl CompleteValueElementsUseCase {
         items
     }
 
-    /// Generate enum value completion items.
     fn enum_value_items(
         mdo: &bsl_metadata::MetadataObject,
         prefix: &str,
@@ -137,7 +101,6 @@ impl CompleteValueElementsUseCase {
             .collect()
     }
 
-    /// Generate predefined item completion items.
     fn predefined_items(
         mdo: &bsl_metadata::MetadataObject,
         prefix: &str,
@@ -162,7 +125,6 @@ impl CompleteValueElementsUseCase {
             .collect()
     }
 
-    /// Find metadata object by type and name.
     fn find_metadata_object(
         config: &bsl_metadata::Configuration,
         mdo_type: MdoType,
@@ -195,7 +157,6 @@ mod tests {
 
     #[test]
     fn test_execute_enum_values() {
-        // Create mock configuration with enum
         let mut config = Configuration::new("Test");
         let mut enum_obj = MetadataObject::new(MdoType::Enum, "Статусы");
         enum_obj.enum_values = vec![
@@ -214,18 +175,14 @@ mod tests {
 
         let provider = MockMetadataProvider { config: Some(config) };
 
-        // Test: get all enum values + ПустаяСсылка (Russian context)
         let items =
             CompleteValueElementsUseCase::execute(&provider, MdoType::Enum, "Статусы", "", true);
 
-        // Should have: 2 enum values + 1 EmptyRef (Russian only)
         assert!(items.len() >= 3);
 
-        // Check that enum values are present
         assert!(items.iter().any(|i| i.label == "Активный"));
         assert!(items.iter().any(|i| i.label == "Неактивный"));
 
-        // Check that only Russian EmptyRef is present
         assert!(items.iter().any(|i| i.label == "ПустаяСсылка"));
         assert!(!items.iter().any(|i| i.label == "EmptyRef"));
     }
@@ -246,7 +203,6 @@ mod tests {
 
         let provider = MockMetadataProvider { config: Some(config) };
 
-        // Test: prefix "Акт" should match "Активный" (Russian context)
         let items =
             CompleteValueElementsUseCase::execute(&provider, MdoType::Enum, "Статусы", "Акт", true);
 
@@ -258,7 +214,6 @@ mod tests {
     fn test_execute_no_configuration() {
         let provider = MockMetadataProvider { config: None };
 
-        // Russian context - should only have ПустаяСсылка
         let items =
             CompleteValueElementsUseCase::execute(&provider, MdoType::Enum, "Статусы", "", true);
 
@@ -266,7 +221,6 @@ mod tests {
         assert!(items.iter().any(|i| i.label == "ПустаяСсылка"));
         assert!(!items.iter().any(|i| i.label == "EmptyRef"));
 
-        // English context - should only have EmptyRef
         let items =
             CompleteValueElementsUseCase::execute(&provider, MdoType::Enum, "Статусы", "", false);
 
@@ -277,22 +231,18 @@ mod tests {
 
     #[test]
     fn test_empty_ref_prefix_filtering() {
-        // Russian context with prefix
         let items = CompleteValueElementsUseCase::empty_ref_items("Пуст", true);
         assert!(items.iter().any(|i| i.label == "ПустаяСсылка"));
         assert!(!items.iter().any(|i| i.label == "EmptyRef"));
 
-        // English context with prefix
         let items = CompleteValueElementsUseCase::empty_ref_items("Empty", false);
         assert!(!items.iter().any(|i| i.label == "ПустаяСсылка"));
         assert!(items.iter().any(|i| i.label == "EmptyRef"));
 
-        // Russian context without prefix
         let items = CompleteValueElementsUseCase::empty_ref_items("", true);
         assert_eq!(items.len(), 1);
         assert!(items.iter().any(|i| i.label == "ПустаяСсылка"));
 
-        // English context without prefix
         let items = CompleteValueElementsUseCase::empty_ref_items("", false);
         assert_eq!(items.len(), 1);
         assert!(items.iter().any(|i| i.label == "EmptyRef"));

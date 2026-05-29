@@ -1,9 +1,3 @@
-//! Generic MDO XML parser — handles Catalog, Document, BusinessProcess,
-//! Task, ExchangePlan, ChartOfCharacteristicTypes, ChartOfAccounts,
-//! DataProcessor, and Report. All wrappers delegate to
-//! [`parse_metadata_object_xml`] which is the single-source-of-truth for
-//! `MetaDataObject/<flavour>/Properties + ChildObjects` lowering.
-
 use crate::enums::CodeSeries;
 use crate::error::{MetadataError, Result};
 use crate::metadata_object::{Attribute, MdoType, MetadataObject};
@@ -20,82 +14,51 @@ use super::standard_attributes::{
 };
 use super::type_parser::parse_type_xml;
 
-/// Parse Catalog XML from Designer format
-///
-/// # Arguments
-///
-/// * `xml` - XML content as string
-///
-/// # Returns
-///
-/// Parsed `MetadataObject` structure with attributes
-///
-/// # Example
-///
-/// ```no_run
-/// # use bsl_metadata::xml_parser::parse_catalog_xml;
-/// let xml = std::fs::read_to_string("Catalogs/Валюты.xml")?;
-/// let catalog = parse_catalog_xml(&xml)?;
-/// # Ok::<(), bsl_metadata::MetadataError>(())
-/// ```
 pub fn parse_catalog_xml(xml: &str) -> Result<MetadataObject> {
     let _span = tracing::debug_span!("parse_catalog_xml").entered();
     parse_metadata_object_xml(xml, MdoType::Catalog)
 }
 
-/// Parse Document XML from Designer format
 pub fn parse_document_xml(xml: &str) -> Result<MetadataObject> {
     let _span = tracing::debug_span!("parse_document_xml").entered();
     parse_metadata_object_xml(xml, MdoType::Document)
 }
 
-/// Parse BusinessProcess XML from Designer format
 pub fn parse_business_process_xml(xml: &str) -> Result<MetadataObject> {
     let _span = tracing::debug_span!("parse_business_process_xml").entered();
     parse_metadata_object_xml(xml, MdoType::BusinessProcess)
 }
 
-/// Parse ChartOfCharacteristicTypes XML from Designer format
 pub fn parse_chart_of_characteristic_types_xml(xml: &str) -> Result<MetadataObject> {
     let _span = tracing::debug_span!("parse_chart_of_characteristic_types_xml").entered();
     parse_metadata_object_xml(xml, MdoType::ChartOfCharacteristicTypes)
 }
 
-/// Parse Task XML from Designer format
 pub fn parse_task_xml(xml: &str) -> Result<MetadataObject> {
     let _span = tracing::debug_span!("parse_task_xml").entered();
     parse_metadata_object_xml(xml, MdoType::Task)
 }
 
-/// Parse ExchangePlan XML from Designer format
 pub fn parse_exchange_plan_xml(xml: &str) -> Result<MetadataObject> {
     let _span = tracing::debug_span!("parse_exchange_plan_xml").entered();
     parse_metadata_object_xml(xml, MdoType::ExchangePlan)
 }
 
-/// Parse ChartOfAccounts XML from Designer format
 pub fn parse_chart_of_accounts_xml(xml: &str) -> Result<MetadataObject> {
     let _span = tracing::debug_span!("parse_chart_of_accounts_xml").entered();
     parse_metadata_object_xml(xml, MdoType::ChartOfAccounts)
 }
 
-/// Parse DataProcessor XML from Designer format. DataProcessors carry no
-/// standard attributes — only user-declared `<Attribute>` and
-/// `<TabularSection>` children, which the generic helper already handles.
 pub fn parse_data_processor_xml(xml: &str) -> Result<MetadataObject> {
     let _span = tracing::debug_span!("parse_data_processor_xml").entered();
     parse_metadata_object_xml(xml, MdoType::DataProcessor)
 }
 
-/// Parse Report XML from Designer format. Symmetric to DataProcessor —
-/// no standard attributes, only user-declared `<Attribute>` and
-/// `<TabularSection>` children.
 pub fn parse_report_xml(xml: &str) -> Result<MetadataObject> {
     let _span = tracing::debug_span!("parse_report_xml").entered();
     parse_metadata_object_xml(xml, MdoType::Report)
 }
 
-/// Internal helper to parse metadata object XML using roxmltree
 fn parse_metadata_object_xml(xml: &str, mdo_type: MdoType) -> Result<MetadataObject> {
     let doc = parse_xml(xml)?;
 
@@ -110,7 +73,6 @@ fn parse_metadata_object_xml(xml: &str, mdo_type: MdoType) -> Result<MetadataObj
     let mut attributes = Vec::new();
     let mut tabular_sections = Vec::new();
 
-    // Add standard attributes FIRST based on object type
     match mdo_type {
         MdoType::Catalog => {
             add_catalog_standard_attributes(&mut attributes, &properties, mdo_type);
@@ -147,7 +109,6 @@ fn parse_metadata_object_xml(xml: &str, mdo_type: MdoType) -> Result<MetadataObj
         _ => {}
     }
 
-    // Parse child objects if present
     if let Some(child_objects) = find_child(mdo_node, "ChildObjects") {
         for child in child_objects.children().filter(|n| n.is_element()) {
             match child.tag_name().name() {
@@ -164,8 +125,6 @@ fn parse_metadata_object_xml(xml: &str, mdo_type: MdoType) -> Result<MetadataObj
 
     let mut mdo = MetadataObject::new(mdo_type, properties.name.clone());
     if let Some(uuid_str) = mdo_node.attribute("uuid") {
-        // Lenient: malformed UUIDs (placeholders, corrupted XML) degrade to
-        // `None` rather than abort the whole workspace load.
         match parse_uuid(uuid_str, "MDO root") {
             Ok(uuid) => mdo.set_uuid(uuid),
             Err(err) => tracing::warn!(
@@ -187,7 +146,6 @@ fn parse_metadata_object_xml(xml: &str, mdo_type: MdoType) -> Result<MetadataObj
         mdo.add_tabular_section(ts);
     }
 
-    // Set CheckUnique and CodeSeries for relevant object types
     mdo.set_check_unique(properties.check_unique);
     if let Some(code_series_str) = &properties.code_series {
         mdo.set_code_series(parse_code_series(code_series_str));
@@ -206,7 +164,6 @@ fn parse_metadata_object_xml(xml: &str, mdo_type: MdoType) -> Result<MetadataObj
     Ok(mdo)
 }
 
-/// Parse Document `<RegisterRecords>` entries into register type/name pairs.
 fn parse_register_records(props_node: roxmltree::Node<'_, '_>) -> Vec<(MdoType, String)> {
     let Some(records_node) = find_child(props_node, "RegisterRecords") else {
         return Vec::new();
@@ -233,7 +190,6 @@ fn parse_register_records(props_node: roxmltree::Node<'_, '_>) -> Vec<(MdoType, 
         .collect()
 }
 
-/// Parse CodeSeries string from XML into enum
 fn parse_code_series(s: &str) -> CodeSeries {
     match s {
         "WholeCatalog" | "WholeCharacteristicKind" | "WholeChartOfAccounts" => {
@@ -245,7 +201,6 @@ fn parse_code_series(s: &str) -> CodeSeries {
     }
 }
 
-/// Parse single attribute from an `<Attribute>` (or `<Resource>` / `<Dimension>`) node
 fn parse_attribute_node(node: roxmltree::Node<'_, '_>) -> Result<Attribute> {
     let props = find_child(node, "Properties")
         .ok_or_else(|| MetadataError::InvalidFormat("Attribute missing Properties".to_string()))?;
@@ -259,7 +214,6 @@ fn parse_attribute_node(node: roxmltree::Node<'_, '_>) -> Result<Attribute> {
     Ok(Attribute { name, name_en: None, attr_type })
 }
 
-/// Parse TabularSection node
 fn parse_tabular_section_node(node: roxmltree::Node<'_, '_>) -> Result<TabularSection> {
     let uuid_str = node.attribute("uuid").unwrap_or("");
     let uuid = parse_uuid(uuid_str, "tabular section")?;
@@ -271,16 +225,13 @@ fn parse_tabular_section_node(node: roxmltree::Node<'_, '_>) -> Result<TabularSe
     let name = child_text(props, "Name").unwrap_or("").to_string();
     let mut tabular_section = TabularSection::new(uuid, name);
 
-    // Set synonym if present — handle both text content and empty element
     if let Some(synonym_node) = find_child(props, "Synonym") {
         tabular_section.set_synonym(synonym_node.text().map(|s| s.to_string()));
     }
 
-    // Set use mode if present
     let use_mode = child_text(props, "Use").map(|s| s.to_string());
     tabular_section.set_use_mode(use_mode);
 
-    // Parse attributes of the tabular section
     let Some(child_objects) = find_child(node, "ChildObjects") else {
         return Ok(tabular_section);
     };
@@ -369,10 +320,6 @@ mod tests {
 
     #[test]
     fn malformed_uuid_attribute_degrades_to_none() {
-        // Real XML always has well-formed UUIDs (verified across an ERP-scale
-        // configuration). Lenient policy: malformed → None + tracing::warn,
-        // so a corrupted file cannot abort workspace load. Also lets existing
-        // fixtures use `uuid="..."` placeholder strings.
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
 <MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20">
     <Catalog uuid="not-a-uuid">

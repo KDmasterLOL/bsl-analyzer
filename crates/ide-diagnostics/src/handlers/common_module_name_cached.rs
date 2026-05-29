@@ -1,8 +1,3 @@
-//! CommonModuleNameCached diagnostic
-//!
-//! Cached CommonModules must contain "Cached" or "ПовтИсп" in their name.
-//!
-
 use crate::define_common_module_name_check;
 use crate::metadata::*;
 

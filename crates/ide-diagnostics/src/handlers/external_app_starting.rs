@@ -1,43 +1,3 @@
-//! ExternalAppStarting diagnostic.
-//!
-//! Detects calls to methods that start external applications or execute system commands.
-//!
-//! ## Why?
-//! Starting external applications creates security vulnerabilities:
-//! - Arbitrary command execution
-//! - Bypasses 1C:Enterprise security model
-//! - May violate security policies
-//! - Creates attack vectors for code injection
-//!
-//! Methods that trigger this diagnostic:
-//! - КомандаСистемы / System
-//! - ЗапуститьСистему / RunSystem
-//! - ЗапуститьПриложение / RunApp
-//! - НачатьЗапускПриложения / BeginRunningApplication
-//! - ЗапуститьПриложениеАсинх / RunAppAsync
-//! - ЗапуститьПрограмму
-//! - ОткрытьПроводник
-//! - ОткрытьФайл
-//!
-//! ## Bad practice
-//! ```bsl
-//! Процедура ВыполнитьКоманду()
-//!     КомандаСистемы("del /f /q *.*");
-//!     ЗапуститьПриложение("calc.exe");
-//!     ФайловаяСистемаКлиент.ЗапуститьПрограмму("cmd.exe");
-//! КонецПроцедуры
-//! ```
-//!
-//! ## Configuration
-//! - **Enabled by default:** Yes
-//! - **Severity:** Warning (MAJOR)
-//! - **Type:** SECURITY_HOTSPOT
-//! - **Tags:** SUSPICIOUS
-//! - **Minutes to fix:** 5
-//!
-//! ## Implementation
-//! **This is a HIR-based diagnostic** - detects external app calls during HIR lowering.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -57,9 +17,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic.
-///
-/// Called from lib.rs dispatch when ExternalAppStarting diagnostic is emitted during lowering.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     crate::simple_hir_diagnostic(
         DiagnosticCode::ExternalAppStarting,
@@ -76,7 +33,6 @@ mod tests {
     use expect_test::expect;
     #[test]
     fn test_global_methods_detected() {
-        // КомандаСистемы, ЗапуститьПриложение, НачатьЗапускПриложения
         let code = r#"
 Процедура Метод()
     СтрокаКоманды = "";
@@ -111,7 +67,6 @@ mod tests {
 
     #[test]
     fn test_run_program_methods_detected() {
-        // ФайловаяСистемаКлиент.ЗапуститьПрограмму and ФайловаяСистема.ЗапуститьПрограмму
         let code = r#"
 Процедура Метод()
     СтрокаКоманды = "";
@@ -144,7 +99,6 @@ mod tests {
 
     #[test]
     fn test_open_explorer_and_file_detected() {
-        // ОткрытьПроводник and ОткрытьФайл
         let code = r#"
 Процедура Метод()
     СтрокаКоманды = "";
@@ -173,7 +127,6 @@ mod tests {
 
     #[test]
     fn test_run_app_async_detected() {
-        // ЗапуститьПриложениеАсинх
         let code = r#"
 &НаКлиенте
 Асинх Процедура Подключить()
@@ -196,7 +149,6 @@ mod tests {
 
     #[test]
     fn test_zapustit_sistemu_variants_detected() {
-        // ЗапуститьСистему with various argument counts
         let code = r#"
 &НаКлиенте
 Процедура ПроверкаЗапуститьСистему()

@@ -1,7 +1,3 @@
-//! PublicMethodsDescription diagnostic.
-//!
-//! Reports exported methods without a documentation comment.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};

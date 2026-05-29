@@ -1,5 +1,3 @@
-//! Reports comments that do not have a space after `//`.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
@@ -20,13 +18,8 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-// Default comment annotations
 const DEFAULT_COMMENTS_ANNOTATION: &str = "//@,//(c),//©";
 
-/// Check if comment matches the "good comment" pattern.
-///
-/// Strict mode: exactly 2 slashes + space/tab + text, or 2+ slashes as separator.
-/// Non-strict mode: 2+ slashes + space/tab + text, or 2+ slashes as separator.
 fn matches_good_comment_pattern(text: &str, use_strict: bool) -> bool {
     let slash_count = text.bytes().take_while(|&b| b == b'/').count();
     if slash_count < 2 {
@@ -34,18 +27,14 @@ fn matches_good_comment_pattern(text: &str, use_strict: bool) -> bool {
     }
     let rest = &text[slash_count..];
 
-    // Both modes: 2+ slashes followed by only spaces/tabs (separator lines like /////)
     if rest.bytes().all(|b| b == b' ' || b == b'\t') {
         return true;
     }
 
-    // Text after slashes: must start with space/tab
     if !rest.starts_with(' ') && !rest.starts_with('\t') {
         return false;
     }
 
-    // Strict: exactly 2 slashes for text comments
-    // Non-strict: 2+ slashes for text comments
     if use_strict {
         slash_count == 2
     } else {
@@ -53,44 +42,32 @@ fn matches_good_comment_pattern(text: &str, use_strict: bool) -> bool {
     }
 }
 
-/// Parse comma-separated annotation patterns
 fn parse_comments_annotation(config: &str) -> Vec<String> {
     config.split(',').map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()).collect()
 }
 
-/// Check if comment starts with annotation pattern
 fn is_annotation(text: &str, annotations: &[String]) -> bool {
     let text_lower = text.to_lowercase();
     annotations.iter().any(|ann| text_lower.starts_with(ann))
 }
 
-/// Check if comment is good according to pattern and configuration
 fn is_good_comment(comment_text: &str, use_strict: bool, annotations: &[String]) -> bool {
-    // Empty comment (just // with nothing after, followed by newline or end of line)
-    // This is considered good (no diagnostic)
     let trimmed = comment_text.trim_end();
     if trimmed == "//" {
         return true;
     }
 
-    // Check if comment matches good pattern (space/tab after slashes, or separator line)
     if matches_good_comment_pattern(comment_text, use_strict) {
         return true;
     }
 
-    // Check if matches annotation patterns
     if is_annotation(comment_text, annotations) {
         return true;
     }
 
-    // TODO: Implement CodeRecognizer to skip commented code (0.9 threshold)
-
     false
 }
 
-/// Main entry point for SpaceAtStartComment diagnostic.
-///
-/// Uses tokens from parser to correctly identify comments (avoiding false positives on // in strings).
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let _span = tracing::debug_span!("SpaceAtStartComment::check").entered();
 
@@ -100,22 +77,18 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    // Get configuration (using defaults for now, TODO: support configuration)
-    let use_strict = true; // Default: USE_STRICT_VALIDATION = true
+    let use_strict = true;
     let comments_annotation = parse_comments_annotation(DEFAULT_COMMENTS_ANNOTATION);
 
     let parse = ctx.parse();
     let root = parse.syntax_node();
     let mut diagnostics = Vec::new();
 
-    // Traverse all tokens in the file looking for COMMENT tokens
-    // This correctly handles strings vs comments (lexer already distinguished them)
     for element in root.descendants_with_tokens() {
         if let NodeOrToken::Token(token) = element {
             if token.kind() == SyntaxKind::COMMENT {
                 let text = token.text();
 
-                // Check if comment is bad
                 if !is_good_comment(text, use_strict, &comments_annotation) {
                     let slash_count = text.chars().take_while(|c| *c == '/').count() as u32;
                     let insert_pos = token.text_range().start() + TextSize::from(slash_count);
@@ -186,6 +159,7 @@ mod tests {
 
 /// Текст без ошибки
 ////Текст с ошибкой"#;
+
         check_diagnostics_snapshot_for(
             code,
             DiagnosticCode::SpaceAtStartComment,
@@ -272,7 +246,6 @@ mod tests {
 
     #[test]
     fn test_empty_comment_lines() {
-        // Test case from user: empty comment lines should not trigger diagnostic
         let code = r#"
 // Возвращает параметры запроса для ключа действия см. ПОЗКДействия()
 //  Если требуются дополнительные параметры, то необходимо добавить ваше действие в ПОЗКДействияСПараметрами()
@@ -293,7 +266,6 @@ mod tests {
 
     #[test]
     fn test_empty_comment_variants() {
-        // Test different variants of empty comments
         let code = r#"
 //
 //
@@ -305,7 +277,6 @@ mod tests {
 
     #[test]
     fn test_comment_with_text_no_space() {
-        // Ensure comments with text but no space still trigger diagnostic
         let code = r#"
 //Плохо
 //Тоже плохо
@@ -325,7 +296,6 @@ mod tests {
 
     #[test]
     fn test_comment_in_string_false_positive() {
-        // Test that we don't trigger on // inside strings
         let code = r#"
 Процедура Тест()
     URL = "http://example.com"; // Нормальный комментарий
@@ -338,7 +308,6 @@ mod tests {
 
     #[test]
     fn test_url_in_string() {
-        // Simple test with URL
         let code = r#"
 URL = "http://example.com";
 "#;

@@ -1,29 +1,3 @@
-//! Reports calls that disable or weaken safe mode.
-//!
-//! # Track 2 §1.6 Group C
-//!
-//! Detection moved out of HIR lowering into this handler's [`check`]
-//! function, consuming the §1.2 saturating-counter lattice + §1.3 const-
-//! propagation overlay through
-//! [`hir::dataflow::security_state::open_events`]. The lattice
-//! understands both call shapes via the curated security registry:
-//! `УстановитьБезопасныйРежим(Ложь)` and
-//! `УстановитьОтключениеБезопасногоРежима(Истина)` both push the
-//! unsafe-frame counter; their opposite-polarity arguments pop it. The
-//! handler emits one diagnostic per yielded `OpenEvent` whose category
-//! is [`Category::SafeMode`].
-//!
-//! Const-prop precision: `Значение = Ложь;
-//! УстановитьБезопасныйРежим(Значение)` is folded to `KnownFalse` and
-//! emits (lattice categorises it as opening the unsafe frame, just like
-//! the literal-`Ложь` form).
-//!
-//! # Coverage
-//!
-//! Both per-method bodies AND module-level top-level code are scanned —
-//! see [`hir::dataflow::security_state::open_events`] for the lattice
-//! event surface. Parity with the legacy HIR-side detector is preserved.
-
 use std::sync::Arc;
 
 use crate::define_metadata;
@@ -45,8 +19,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Track 2 §1.6 Group C — lattice-driven detection. Replaces the old
-/// `from_hir(method_name, range, ctx)` adapter.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::DisableSafeMode;
     if ctx.is_disabled_with_metadata(code) {
@@ -70,7 +42,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             emit_for_result(&result, &lower_result.source_map, code, ctx, &mut diagnostics);
         }
     }
-    // Codex round-1 NIT: emit in source order.
     diagnostics.sort_by_key(|d| (d.range.start(), d.range.end()));
     diagnostics
 }
@@ -249,12 +220,6 @@ mod tests {
         );
     }
 
-    /// Track 2 §1.6 Group C — Codex round-3 stop-hook regression
-    /// guard: security calls inside compound-statement condition
-    /// expressions (`If <cond> Then`, `While <cond>`) live in
-    /// dedicated CFG vertices, not BasicBlocks. `open_events` walks
-    /// those vertices too — without this, the diagnostic would
-    /// silently regress vs. the legacy HIR detector.
     #[test]
     fn test_call_in_if_condition_emits() {
         let code = r#"
@@ -274,10 +239,6 @@ mod tests {
         );
     }
 
-    /// Track 2 §1.6 Group C — Codex round-2 stop-hook regression
-    /// guard: nested security calls (e.g. as a function argument)
-    /// must still surface, matching legacy `lower_call_expr` behaviour
-    /// which fired on every CALL_EXPR regardless of nesting depth.
     #[test]
     fn test_nested_call_in_argument_emits() {
         let code = r#"
@@ -297,9 +258,6 @@ mod tests {
 
     #[test]
     fn test_all_four_patterns_in_procedure() {
-        // Covers all 4 triggering patterns from the original fixture:
-        // SetSafeMode(False), SetSafeMode(variable), SetSafeModeDisabled(True), SetSafeModeDisabled(variable)
-        // SetSafeMode(True) and SetSafeModeDisabled(False) do NOT trigger.
         let code = r#"&НаСервере
 Процедура Метод()
     УстановитьБезопасныйРежим(Ложь);

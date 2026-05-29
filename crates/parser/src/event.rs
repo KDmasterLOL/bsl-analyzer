@@ -1,33 +1,19 @@
-//! Parser events.
-//!
-//! The parser produces events that are later processed to build the syntax tree.
-
 use parser_error::ParseError;
 
-/// Parsing events.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
-    /// Start a new node.
     Start { kind: NodeKind, forward_parent: Option<usize> },
-    /// Finish the current node.
     Finish,
-    /// Add a token to the current node.
     Token { kind: lexer::TokenKind },
-    /// Placeholder for nodes that will be replaced.
     Placeholder,
-    /// Parser error without explicit marker span (`Event::Error(...)`).
     Error(ParseError),
-    /// Parser error with explicit token marker span (`Event::ErrorWithSpan`).
     ErrorWithSpan { start_token: usize, err: ParseError },
 }
 
-/// Node kinds for the syntax tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NodeKind {
-    // Root
     SourceFile,
 
-    // Items
     ProcedureDef,
     FunctionDef,
     VarDef,
@@ -38,7 +24,6 @@ pub enum NodeKind {
     AnnotationParam,
     CompilerDirective,
 
-    // Statements
     StmtList,
     AssignStmt,
     CallStmt,
@@ -61,7 +46,6 @@ pub enum NodeKind {
     RemoveHandlerStmt,
     EmptyStmt,
 
-    // Expressions
     Expr,
     BinaryExpr,
     UnaryExpr,
@@ -76,7 +60,6 @@ pub enum NodeKind {
     Ident,
     ArgList,
 
-    // Preprocessor
     PreIfDir,
     PreElsIfClause,
     PreElseClause,
@@ -89,8 +72,6 @@ pub enum NodeKind {
     PreSymbol,
     PreBoolOp,
 
-    // SDBL (Query Language)
-    // Phase 1: Basic SELECT parsing
     SdblQueryPackage,
     SdblSelectQuery,
     SdblSubquery,
@@ -147,7 +128,6 @@ pub enum NodeKind {
     SdblMissingArg,
     SdblError,
 
-    // Other
     Error,
     Comment,
 }

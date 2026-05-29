@@ -1,10 +1,3 @@
-//! SQLite-backed persistent storage for search index.
-//!
-//! Stores file hashes, code chunks, embedding vectors, and platform
-//! documentation. Supports multiple collections (e.g. "code", "platform")
-//! within a single database. Survives process restarts and supports
-//! incremental updates.
-
 use crate::chunker::Chunk;
 use crate::document::Document;
 use crate::error::SearchError;
@@ -12,13 +5,11 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-/// Persistent store for search index data.
 pub struct Store {
     conn: Connection,
 }
 
 impl Store {
-    /// Open or create a search index database at the given path.
     pub fn open(path: &Path) -> Result<Self, SearchError> {
         let conn = Connection::open(path)?;
         let store = Self { conn };
@@ -26,7 +17,6 @@ impl Store {
         Ok(store)
     }
 
-    /// Create an in-memory store (for testing).
     #[cfg(test)]
     pub fn in_memory() -> Result<Self, SearchError> {
         let conn = Connection::open_in_memory()?;
@@ -74,15 +64,10 @@ impl Store {
             ",
         )?;
 
-        // Migration: add collection column to existing databases.
         let _ = self
             .conn
             .execute("ALTER TABLE files ADD COLUMN collection TEXT NOT NULL DEFAULT 'code'", []);
 
-        // Overlay-only tables: baseline metadata, overlay tombstones, and
-        // overlay-specific file/chunk storage. These are created alongside the
-        // existing schema but are only populated when a Postgres baseline is
-        // configured.
         self.conn.execute_batch(
             "
             -- Baseline manifest metadata for workspace code.
@@ -172,7 +157,6 @@ impl Store {
         Ok(())
     }
 
-    /// Get the stored hash for a file path, if any.
     pub fn file_hash(&self, path: &str) -> Result<Option<Vec<u8>>, SearchError> {
         let hash = self
             .conn
@@ -183,8 +167,6 @@ impl Store {
         Ok(hash)
     }
 
-    /// Insert or update a file record.
-    /// Returns the file id.
     pub fn upsert_file(
         &self,
         path: &str,
@@ -205,9 +187,7 @@ impl Store {
         Ok(self.conn.last_insert_rowid())
     }
 
-    /// Remove a file and all its chunks (CASCADE) and FTS entries.
     pub fn remove_file(&self, path: &str) -> Result<(), SearchError> {
-        // Clean FTS entries before CASCADE deletes chunks.
         self.conn.execute(
             "DELETE FROM chunks_fts WHERE rowid IN (
                  SELECT c.id FROM chunks c
@@ -220,13 +200,11 @@ impl Store {
         Ok(())
     }
 
-    /// Delete all chunks belonging to a file.
     pub fn delete_chunks_for_file(&self, file_id: i64) -> Result<(), SearchError> {
         self.conn.execute("DELETE FROM chunks WHERE file_id = ?1", params![file_id])?;
         Ok(())
     }
 
-    /// Insert a chunk for a file. Returns the chunk id.
     pub fn insert_chunk(
         &self,
         file_id: i64,
@@ -262,8 +240,6 @@ impl Store {
         Ok(self.conn.last_insert_rowid())
     }
 
-    /// Reindex a file: delete old chunks, insert new ones.
-    /// Runs in a single transaction for atomicity.
     pub fn reindex_file(
         &mut self,
         path: &str,
@@ -274,7 +250,6 @@ impl Store {
         self.reindex_file_in_collection(path, hash, "code", chunks, embeddings)
     }
 
-    /// Reindex a file within a specific collection.
     pub fn reindex_file_in_collection(
         &mut self,
         path: &str,
@@ -285,7 +260,6 @@ impl Store {
     ) -> Result<i64, SearchError> {
         let tx = self.conn.transaction()?;
 
-        // Upsert file.
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -300,16 +274,13 @@ impl Store {
         let file_id: i64 =
             tx.query_row("SELECT id FROM files WHERE path = ?1", params![path], |row| row.get(0))?;
 
-        // Delete old FTS entries for this file's chunks.
         tx.execute(
             "DELETE FROM chunks_fts WHERE rowid IN (SELECT id FROM chunks WHERE file_id = ?1)",
             params![file_id],
         )?;
 
-        // Delete old chunks.
         tx.execute("DELETE FROM chunks WHERE file_id = ?1", params![file_id])?;
 
-        // Insert new chunks and sync FTS index.
         {
             let mut stmt = tx.prepare(
                 "INSERT INTO chunks (file_id, kind, symbol_name, is_export, annotations,
@@ -355,10 +326,6 @@ impl Store {
         Ok(file_id)
     }
 
-    /// Reindex documents in a collection (e.g. platform reference).
-    ///
-    /// Documents are stored as chunks under a virtual file path.
-    /// Uses the same FTS and embedding infrastructure as code chunks.
     pub fn reindex_documents(
         &mut self,
         collection: &str,
@@ -385,14 +352,12 @@ impl Store {
                 row.get(0)
             })?;
 
-        // Delete old FTS entries.
         tx.execute(
             "DELETE FROM chunks_fts WHERE rowid IN (SELECT id FROM chunks WHERE file_id = ?1)",
             params![file_id],
         )?;
         tx.execute("DELETE FROM chunks WHERE file_id = ?1", params![file_id])?;
 
-        // Insert documents as chunks.
         {
             let mut stmt = tx.prepare(
                 "INSERT INTO chunks (file_id, kind, symbol_name, is_export, annotations,
@@ -481,8 +446,6 @@ impl Store {
         Ok(file_id)
     }
 
-    /// Load all embeddings with their chunk ids for building the HNSW index.
-    /// Returns (chunk_id, embedding) pairs.
     pub fn load_all_embeddings(&self, dim: usize) -> Result<Vec<(i64, Vec<f32>)>, SearchError> {
         let mut stmt =
             self.conn.prepare("SELECT id, embedding FROM chunks WHERE embedding IS NOT NULL")?;
@@ -507,7 +470,6 @@ impl Store {
         Ok(result)
     }
 
-    /// Get chunk metadata by id (for returning search results).
     pub fn chunk_by_id(&self, chunk_id: i64) -> Result<Option<ChunkInfo>, SearchError> {
         let info = self
             .conn
@@ -536,7 +498,6 @@ impl Store {
         Ok(info)
     }
 
-    /// Get all indexed file paths with their hashes.
     pub fn all_files(&self) -> Result<Vec<(String, Vec<u8>)>, SearchError> {
         let mut stmt = self.conn.prepare("SELECT path, hash FROM files")?;
         let rows =
@@ -549,7 +510,6 @@ impl Store {
         Ok(result)
     }
 
-    /// Get all indexed file paths with their hashes for a single collection.
     pub fn all_files_in_collection(
         &self,
         collection: &str,
@@ -566,7 +526,6 @@ impl Store {
         Ok(result)
     }
 
-    /// Remove all persisted rows for one collection from the primary code/docs tables.
     pub fn clear_collection(&self, collection: &str) -> Result<(), SearchError> {
         self.conn.execute(
             "DELETE FROM chunks_fts WHERE rowid IN (
@@ -580,14 +539,12 @@ impl Store {
         Ok(())
     }
 
-    /// Total number of chunks in the store.
     pub fn chunk_count(&self) -> Result<usize, SearchError> {
         let count: i64 =
             self.conn.query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))?;
         Ok(count as usize)
     }
 
-    /// Load indexed documents, optionally filtered by collection.
     pub fn load_indexed_documents(
         &self,
         collection: Option<&str>,
@@ -641,19 +598,12 @@ impl Store {
         Ok(rows)
     }
 
-    /// Full-text search across chunk symbol names and text.
-    ///
-    /// If `collection` is `Some`, only searches within that collection.
-    /// Returns chunk ids with FTS5 rank scores, ordered by relevance.
     pub fn text_search(
         &self,
         query: &str,
         limit: usize,
         collection: Option<&str>,
     ) -> Result<Vec<TextSearchResult>, SearchError> {
-        // Wrap query in double quotes for FTS5 to treat it as a literal phrase.
-        // This prevents FTS5 syntax errors on dots, parentheses, and other special chars
-        // (e.g. "БонусныеБаллы.Остатки" or "СообщитьПользователю()").
         let escaped = format!("\"{}\"", query.replace('"', "\"\""));
         let results = if let Some(coll) = collection {
             let mut stmt = self.conn.prepare(
@@ -685,10 +635,6 @@ impl Store {
         Ok(results)
     }
 
-    /// Rebuild the FTS5 index from existing chunk data.
-    ///
-    /// Clears and repopulates the standalone FTS5 table from chunks.
-    /// Useful after schema migration or if the index gets out of sync.
     pub fn rebuild_fts(&self) -> Result<(), SearchError> {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute("DELETE FROM chunks_fts", [])?;
@@ -701,20 +647,17 @@ impl Store {
         Ok(())
     }
 
-    /// Check if the FTS index is populated.
     pub fn fts_count(&self) -> Result<usize, SearchError> {
         let count: i64 =
             self.conn.query_row("SELECT COUNT(*) FROM chunks_fts", [], |row| row.get(0))?;
         Ok(count as usize)
     }
 
-    /// Total number of indexed files.
     pub fn file_count(&self) -> Result<usize, SearchError> {
         let count: i64 = self.conn.query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))?;
         Ok(count as usize)
     }
 
-    /// Count chunks with embeddings in a specific collection.
     pub fn embedding_count_by_collection(&self, collection: &str) -> Result<usize, SearchError> {
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM chunks c
@@ -726,7 +669,6 @@ impl Store {
         Ok(count as usize)
     }
 
-    /// Clear file hashes for a collection so they get re-indexed.
     pub fn clear_file_hashes(&self, collection: &str) -> Result<usize, SearchError> {
         let count = self.conn.execute(
             "UPDATE files SET hash = zeroblob(0) WHERE collection = ?1",
@@ -735,10 +677,6 @@ impl Store {
         Ok(count)
     }
 
-    /// Clear file hashes only for files that have no embeddings in their chunks.
-    ///
-    /// This allows `index_directory` to re-process only files that lack
-    /// embeddings, without touching files already fully indexed.
     pub fn clear_file_hashes_without_embeddings(
         &self,
         collection: &str,
@@ -754,12 +692,6 @@ impl Store {
         Ok(count)
     }
 
-    // -----------------------------------------------------------------------
-    // Baseline manifest metadata persistence
-    // -----------------------------------------------------------------------
-
-    /// Persist the selected baseline manifest metadata for workspace code.
-    /// This is the only baseline state stored locally — no code documents.
     pub fn upsert_baseline_manifest(
         &self,
         snapshot_id: &str,
@@ -821,7 +753,6 @@ impl Store {
         Ok(())
     }
 
-    /// Returns the stored baseline manifest metadata, if any.
     pub fn load_baseline_manifest(&self) -> Result<Option<BaselineManifestRecord>, SearchError> {
         let record = self
             .conn
@@ -871,18 +802,12 @@ impl Store {
         Ok(Some(fingerprints))
     }
 
-    /// Clear the stored baseline manifest metadata.
     pub fn clear_baseline_manifest(&self) -> Result<(), SearchError> {
         self.conn.execute("DELETE FROM baseline_manifest_files", [])?;
         self.conn.execute("DELETE FROM baseline_manifest WHERE id = 1", [])?;
         Ok(())
     }
 
-    // -----------------------------------------------------------------------
-    // Overlay tombstones
-    // -----------------------------------------------------------------------
-
-    /// Record a tombstone for a deleted baseline file.
     pub fn insert_overlay_tombstone(
         &self,
         path: &str,
@@ -901,13 +826,11 @@ impl Store {
         Ok(())
     }
 
-    /// Remove a tombstone (e.g. when a previously deleted file is restored).
     pub fn remove_overlay_tombstone(&self, path: &str) -> Result<(), SearchError> {
         self.conn.execute("DELETE FROM overlay_tombstones WHERE path = ?1", params![path])?;
         Ok(())
     }
 
-    /// Returns all tombstone paths for a collection.
     pub fn overlay_tombstone_paths(
         &self,
         collection: &str,
@@ -922,19 +845,12 @@ impl Store {
         Ok(paths)
     }
 
-    /// Clear all tombstones for a collection.
     pub fn clear_overlay_tombstones(&self, collection: &str) -> Result<(), SearchError> {
         self.conn
             .execute("DELETE FROM overlay_tombstones WHERE collection = ?1", params![collection])?;
         Ok(())
     }
 
-    // -----------------------------------------------------------------------
-    // Overlay files and chunks
-    // -----------------------------------------------------------------------
-
-    /// Upsert an overlay file with its chunks and FTS entries atomically.
-    /// Returns the overlay file id.
     pub fn upsert_overlay_file_with_chunks(
         &mut self,
         path: &str,
@@ -961,14 +877,12 @@ impl Store {
                 row.get(0)
             })?;
 
-        // Delete old FTS entries and chunks for this overlay file.
         tx.execute(
             "DELETE FROM overlay_chunks_fts WHERE rowid IN (SELECT id FROM overlay_chunks WHERE file_id = ?1)",
             params![file_id],
         )?;
         tx.execute("DELETE FROM overlay_chunks WHERE file_id = ?1", params![file_id])?;
 
-        // Insert new chunks and sync FTS.
         {
             let mut stmt = tx.prepare(
                 "INSERT INTO overlay_chunks (file_id, kind, symbol_name, is_export, annotations,
@@ -1015,7 +929,6 @@ impl Store {
         Ok(file_id)
     }
 
-    /// Remove an overlay file and all its chunks (CASCADE + FTS).
     pub fn remove_overlay_file(&self, path: &str) -> Result<(), SearchError> {
         self.conn.execute(
             "DELETE FROM overlay_chunks_fts WHERE rowid IN (
@@ -1029,7 +942,6 @@ impl Store {
         Ok(())
     }
 
-    /// Overlay FTS search: returns chunk ids with rank scores.
     pub fn overlay_text_search(
         &self,
         query: &str,
@@ -1067,7 +979,6 @@ impl Store {
         Ok(results)
     }
 
-    /// Load overlay chunks by chunk ids (for returning search results).
     pub fn overlay_chunks_by_ids(&self, chunk_ids: &[i64]) -> Result<Vec<ChunkInfo>, SearchError> {
         if chunk_ids.is_empty() {
             return Ok(Vec::new());
@@ -1100,7 +1011,6 @@ impl Store {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    /// Load all overlay embeddings for building the HNSW index.
     pub fn load_overlay_embeddings(&self, dim: usize) -> Result<Vec<(i64, Vec<f32>)>, SearchError> {
         let mut stmt = self
             .conn
@@ -1124,7 +1034,6 @@ impl Store {
         Ok(result)
     }
 
-    /// Count of overlay files in a collection.
     pub fn overlay_file_count(&self, collection: &str) -> Result<usize, SearchError> {
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM overlay_files WHERE collection = ?1",
@@ -1134,7 +1043,6 @@ impl Store {
         Ok(count as usize)
     }
 
-    /// Count of overlay chunks in a collection.
     pub fn overlay_chunk_count(&self, collection: &str) -> Result<usize, SearchError> {
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM overlay_chunks c
@@ -1146,7 +1054,6 @@ impl Store {
         Ok(count as usize)
     }
 
-    /// Count of overlay tombstones in a collection.
     pub fn overlay_tombstone_count(&self, collection: &str) -> Result<usize, SearchError> {
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM overlay_tombstones WHERE collection = ?1",
@@ -1156,10 +1063,6 @@ impl Store {
         Ok(count as usize)
     }
 
-    // -- Overlay fingerprint cache ------------------------------------------
-
-    /// Load persisted overlay fingerprint cache for the given manifest snapshot.
-    /// Returns `None` if the cache belongs to a different snapshot (stale).
     pub fn load_overlay_fingerprint_cache(
         &self,
         manifest_snapshot_id: &str,
@@ -1186,14 +1089,12 @@ impl Store {
             map.insert(path, entry);
         }
         if map.is_empty() {
-            // Check if there are rows for a different snapshot → stale cache.
             let any_rows: bool = self.conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM overlay_fingerprint_cache LIMIT 1)",
                 [],
                 |row| row.get(0),
             )?;
             if any_rows {
-                // Stale cache — different manifest snapshot. Clear it.
                 self.clear_overlay_fingerprint_cache()?;
             }
             return Ok(None);
@@ -1201,13 +1102,11 @@ impl Store {
         Ok(Some(map))
     }
 
-    /// Persist overlay fingerprint cache entries in a single transaction.
     pub fn save_overlay_fingerprint_cache(
         &self,
         manifest_snapshot_id: &str,
         entries: &HashMap<String, PersistedFingerprint>,
     ) -> Result<(), SearchError> {
-        // Clear old entries and insert new ones atomically.
         self.conn.execute("DELETE FROM overlay_fingerprint_cache", [])?;
         let mut stmt = self.conn.prepare(
             "INSERT INTO overlay_fingerprint_cache
@@ -1227,16 +1126,11 @@ impl Store {
         Ok(())
     }
 
-    /// Clear the overlay fingerprint cache.
     pub fn clear_overlay_fingerprint_cache(&self) -> Result<(), SearchError> {
         self.conn.execute("DELETE FROM overlay_fingerprint_cache", [])?;
         Ok(())
     }
 
-    // -- Overlay embedding cache ----------------------------------------------
-
-    /// Load persisted overlay embeddings for the given model and dimension.
-    /// Returns an empty map if no matching embeddings exist.
     pub fn load_overlay_embedding_cache(
         &self,
         model_id: &str,
@@ -1256,7 +1150,6 @@ impl Store {
         let mut map = HashMap::new();
         for row in rows {
             let (hash, blob) = row?;
-            // Decode f32 values from little-endian byte blob.
             if blob.len() % 4 == 0 {
                 let embedding: Vec<f32> = blob
                     .chunks_exact(4)
@@ -1268,7 +1161,6 @@ impl Store {
         Ok(map)
     }
 
-    /// Persist overlay embeddings. Merges with existing entries.
     pub fn save_overlay_embedding_cache(
         &self,
         model_id: &str,
@@ -1288,13 +1180,11 @@ impl Store {
         Ok(())
     }
 
-    /// Clear the overlay embedding cache.
     pub fn clear_overlay_embedding_cache(&self) -> Result<(), SearchError> {
         self.conn.execute("DELETE FROM overlay_embedding_cache", [])?;
         Ok(())
     }
 
-    /// Clear all overlay state (files, chunks, tombstones) for a collection.
     pub fn clear_overlay_state(&self, collection: &str) -> Result<(), SearchError> {
         self.conn.execute(
             "DELETE FROM overlay_chunks_fts WHERE rowid IN (
@@ -1317,16 +1207,12 @@ impl Store {
     }
 }
 
-/// Full-text search result with chunk id and relevance rank.
 #[derive(Debug, Clone)]
 pub struct TextSearchResult {
-    /// Chunk id (matches the SQLite chunks.id).
     pub chunk_id: i64,
-    /// FTS5 rank score (lower is more relevant).
     pub rank: f64,
 }
 
-/// Chunk metadata returned from search results.
 #[derive(Debug, Clone)]
 pub struct ChunkInfo {
     pub file_path: String,
@@ -1340,7 +1226,6 @@ pub struct ChunkInfo {
     pub is_export: bool,
 }
 
-/// Baseline manifest metadata persisted locally.
 #[derive(Debug, Clone)]
 pub struct BaselineManifestRecord {
     pub snapshot_id: String,
@@ -1349,7 +1234,6 @@ pub struct BaselineManifestRecord {
     pub fetched_at: String,
 }
 
-/// Cached file fingerprint from a previous overlay scan.
 #[derive(Debug, Clone)]
 pub struct PersistedFingerprint {
     pub file_size: u64,
@@ -1450,10 +1334,8 @@ mod tests {
             .reindex_file("path/to/module.bsl", hash.as_bytes(), &[sample_chunk("Метод")], None)
             .unwrap();
 
-        // No embeddings stored, so nothing loaded.
         assert_eq!(store.chunk_count().unwrap(), 1);
 
-        // Get chunk id via a direct query.
         let chunk_id: i64 =
             store.conn.query_row("SELECT id FROM chunks LIMIT 1", [], |r| r.get(0)).unwrap();
 
@@ -1530,7 +1412,6 @@ mod tests {
 
         store.reindex_file("test.bsl", hash2.as_bytes(), &[sample_chunk("Новая")], None).unwrap();
 
-        // Old name gone, new name found.
         assert_eq!(store.text_search("Старая", 10, None).unwrap().len(), 0);
         assert_eq!(store.text_search("Новая", 10, None).unwrap().len(), 1);
     }
@@ -1575,10 +1456,6 @@ mod tests {
         assert_eq!(platform_docs.len(), 1);
         assert_eq!(platform_docs[0].collection, "platform");
     }
-
-    // -----------------------------------------------------------------------
-    // Overlay-only store tests
-    // -----------------------------------------------------------------------
 
     #[test]
     fn baseline_manifest_roundtrip() {
@@ -1664,11 +1541,9 @@ mod tests {
         assert_eq!(store.overlay_file_count("code").unwrap(), 1);
         assert_eq!(store.overlay_chunk_count("code").unwrap(), 1);
 
-        // FTS search should find the overlay chunk.
         let results = store.overlay_text_search("OverlayProc", 10, Some("code")).unwrap();
         assert_eq!(results.len(), 1);
 
-        // Remove the overlay file.
         store.remove_overlay_file("src/Overlay.bsl").unwrap();
         assert_eq!(store.overlay_file_count("code").unwrap(), 0);
         assert_eq!(store.overlay_chunk_count("code").unwrap(), 0);

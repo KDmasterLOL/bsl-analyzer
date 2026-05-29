@@ -2,11 +2,6 @@ use crate::engine::SearchHit;
 use crate::lexical::lexical_hits_for_documents;
 use crate::resolver::ResolvedView;
 
-/// In-memory lexical search over a resolved search view.
-///
-/// This is used when the visible code corpus is composed from a baseline
-/// snapshot plus a local overlay, and no storage-native FTS index exists for
-/// that resolved state.
 pub fn lexical_hits(
     view: &ResolvedView,
     query: &str,

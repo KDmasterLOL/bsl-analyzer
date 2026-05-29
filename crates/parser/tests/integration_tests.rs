@@ -1,5 +1,3 @@
-//! Integration tests for BSL parser.
-
 use parser::parse;
 use std::time::Instant;
 use syntax::SyntaxKind;
@@ -16,7 +14,6 @@ fn assert_clean_parse(input: &str, message: &str) {
 
 #[test]
 fn test_raise_old_style_string() {
-    // Old style (deprecated): ВызватьИсключение "string";
     let input = r#"Процедура Тест()
     ВызватьИсключение "Текст исключения";
 КонецПроцедуры"#;
@@ -26,7 +23,6 @@ fn test_raise_old_style_string() {
 
 #[test]
 fn test_raise_call_one_arg() {
-    // New style with one argument: ВызватьИсключение(expr);
     let input = r#"Процедура Тест()
     ВызватьИсключение("Текст ошибки");
 КонецПроцедуры"#;
@@ -36,7 +32,6 @@ fn test_raise_call_one_arg() {
 
 #[test]
 fn test_raise_call_multiple_args_with_omitted() {
-    // New style with multiple arguments, some omitted: ВызватьИсключение(arg1, arg2, , , arg5);
     let input = r#"Процедура Тест()
     ВызватьИсключение("Текст ошибки", КатегорияОшибки.ОшибкаСети, , ,
                         ФоновоеЗадание.ИнформацияОбОшибке);
@@ -50,7 +45,6 @@ fn test_raise_call_multiple_args_with_omitted() {
 
 #[test]
 fn test_raise_call_two_args() {
-    // Common case: ВызватьИсключение(message, category);
     let input = r#"Процедура Тест()
     ВызватьИсключение("Текст ошибки", КатегорияОшибки.ОшибкаХранимыхДанных);
 КонецПроцедуры"#;
@@ -60,7 +54,6 @@ fn test_raise_call_two_args() {
 
 #[test]
 fn test_raise_empty() {
-    // ВызватьИсключение; (re-raises current exception)
     let input = r#"Процедура Тест()
     Попытка
         // code
@@ -549,7 +542,6 @@ fn test_built_in_functions() {
 
 #[test]
 fn test_real_bsl_code_sample() {
-    // Real BSL code from 1C:Enterprise
     let input = r#"#Область ПрограммныйИнтерфейс
 
 Функция ЗначениеНастройкиПланаОбмена(ИмяПланаОбмена, ИмяПараметра, ИдентификаторНастройки = "", ВерсияКорреспондента = "") Экспорт
@@ -580,7 +572,6 @@ fn test_real_bsl_code_sample() {
 
 #[test]
 fn test_region_minimal() {
-    // Minimal test - just region with function
     let input = r#"#Область Test
 Функция Тест()
 КонецФункции
@@ -592,7 +583,6 @@ fn test_region_minimal() {
 
 #[test]
 fn test_preprocessor_not_without_parens() {
-    // Test the fix for НЕ without parentheses - this was causing infinite loop
     let input = r#"#Если НЕ Клиент Тогда
     Процедура Тест() КонецПроцедуры
 #КонецЕсли"#;
@@ -603,7 +593,6 @@ fn test_preprocessor_not_without_parens() {
 
 #[test]
 fn test_small_file_performance() {
-    // Test with small code to verify parser is fast on simple cases
     let input = r#"Функция Тест() Экспорт
     Результат = 10 + 20;
     Возврат Результат;
@@ -625,7 +614,6 @@ fn test_small_file_performance() {
     println!("Total time: {:?}", elapsed);
     println!("Average per parse: {} μs", avg_micros);
 
-    // Should be fast - under 100 microseconds per parse for such simple code
     assert!(avg_micros < 1000, "Parser too slow even for simple code: {} μs", avg_micros);
 }
 
@@ -660,12 +648,6 @@ fn benchmark_parser_performance() {
     println!("File: fixtures/Module.bsl");
     println!("Size: {} bytes ({:.2} MB)", file_size_bytes, file_size_mb);
 
-    // Warmup - skip to save time
-    // for _ in 0..3 {
-    //     let _ = parse(&input);
-    // }
-
-    // Single parse to measure performance
     println!("\nParsing file (this may take time)...");
     let start = Instant::now();
 
@@ -677,7 +659,6 @@ fn benchmark_parser_performance() {
 
     println!("\nResults:");
     println!("Parse time: {:.2?}", elapsed);
-    // Tree built successfully
     println!("Throughput: {:.2} MB/s", throughput);
 
     println!("\n=== Criterion Check ===");
@@ -686,7 +667,6 @@ fn benchmark_parser_performance() {
     } else {
         println!("⚠️  NOTICE: Throughput {:.2} MB/s < 50 MB/s target", throughput);
         println!("Parser works but needs optimization");
-        // Don't panic - at least it works now!
     }
 }
 #[test]
@@ -740,14 +720,12 @@ fn debug_tokens_around_68041() {
 
 #[test]
 fn test_keyword_as_method_name() {
-    // Keywords like Перейти (Goto) can be used as method names after dot
     let input = r#"Процедура Тест()
     Поток.Перейти(0, ПозицияВПотоке.Начало);
 КонецПроцедуры"#;
     let result = parse(input);
     assert!(!result.has_errors(), "Keyword 'Перейти' should be valid as method name after dot");
 
-    // Check ERROR nodes in tree
     let error_nodes: Vec<_> = result
         .syntax_node()
         .descendants()
@@ -759,26 +737,6 @@ fn test_keyword_as_method_name() {
         error_nodes.iter().map(|n| n.text().to_string()).collect::<Vec<_>>()
     );
 }
-
-// ----------------------------------------------------------------------------
-// Post-DOT recovery regression: a partial field-access (`obj.<EOL>`) at the
-// tail of a function body must NOT swallow the enclosing block terminator
-// or the next item declaration.
-//
-// Pre-fix (commit before the `PROPERTY_NAME_TOKENS` allowlist landed) the
-// parser's `is_ident_or_keyword()` helper admitted ANY keyword as a property
-// name. Typing `Х.` and pausing for completion (cursor on next line, before
-// the next non-whitespace token, which is the function's `КонецФункции`)
-// caused the parser to consume that terminator as the field-name slot,
-// chain-reacting through the rest of the file: the enclosing function never
-// closed, the next `Функция X()` declaration became stray ERROR tokens, and
-// downstream completion / find-references / cascade typing collapsed because
-// the second function vanished from the symbol tree.
-//
-// The two tests below pin both the new error semantics ("ожидалось имя
-// свойства после '.'" without consuming the lookahead) and the structural
-// outcome (two FUNCTION_DEF nodes, terminator stays as block-end).
-// ----------------------------------------------------------------------------
 
 #[test]
 fn test_partial_dot_preserves_enclosing_end_function() {
@@ -807,10 +765,6 @@ fn test_partial_dot_preserves_enclosing_end_function() {
 
 #[test]
 fn test_partial_dot_preserves_next_function_declaration() {
-    // Symbol-tree consumers (completion, find-references, cascade typing)
-    // require the next declaration to survive parse recovery. We check the
-    // syntactic shape here; semantic recovery is pinned at the IDE layer in
-    // `crates/ide/tests/completion_value_collections.rs`.
     let input = "Функция Caller()\n    X.\nКонецФункции\n\nФункция Callee()\n    Возврат 0;\nКонецФункции\n";
     let result = parse(input);
     let names: Vec<String> = result
@@ -834,11 +788,6 @@ fn test_partial_dot_preserves_next_function_declaration() {
 
 #[test]
 fn test_partial_dot_preserves_orphaned_function_declaration() {
-    // `Функция` is a valid property name, but a line-leading `Функция Имя(`
-    // header is an orphaned declaration (the enclosing item lost its
-    // terminator) and must NOT be swallowed as a field name. The guard keys
-    // on the declaration shape, not the line break, so the partial dot still
-    // reports the property error and leaves `Callee` reachable.
     let input = "Функция Caller()\n    X.\nФункция Callee()\n    Возврат 0;\nКонецФункции\n";
     let result = parse(input);
 
@@ -862,7 +811,6 @@ fn test_partial_dot_preserves_orphaned_function_declaration() {
 
 #[test]
 fn test_large_file_performance() {
-    // Large real-world BSL module for performance testing
     let input = include_str!("fixtures/Module.bsl");
 
     println!("\nLarge file performance:");
@@ -873,27 +821,11 @@ fn test_large_file_performance() {
     let elapsed = start.elapsed();
 
     println!("Parse time: {:?}", elapsed);
-    // Tree built successfully
     println!("Performance: {:.2} MB/s", (input.len() as f64 / 1_048_576.0) / elapsed.as_secs_f64());
 
     assert!(!result.has_errors());
 }
 
-// ----------------------------------------------------------------------------
-// Iteration-guard regression tests
-//
-// Reproduces a hang where the parser's iteration guard (see
-// `Parser::check_iteration_limit`) panicked on any sufficiently large input —
-// including non-BSL files fed in by mistake — even when the position was
-// monotonically advancing. The guard must distinguish between a genuinely
-// stuck loop (few unique positions in the recent window) and a large-but-
-// progressing input, and only panic on the former.
-// ----------------------------------------------------------------------------
-
-/// XML payload with ~100k records (~5 MB). Historical behavior: panicked at
-/// token index ≈1.5M with `SLOW (making progress)` status. Now the guard must
-/// let such input run to completion (errors are expected — BSL grammar does
-/// not accept XML — but the parser must return without unwinding).
 #[test]
 fn parser_does_not_panic_on_large_xml_like_input() {
     let mut input = String::with_capacity(5_000_000);
@@ -916,8 +848,6 @@ fn parser_does_not_panic_on_large_xml_like_input() {
     );
 }
 
-/// Large, fully valid BSL input must parse in O(n) without panic and with zero
-/// errors. Catches future regressions where the guard is tuned too aggressively.
 #[test]
 fn parser_handles_million_token_valid_bsl() {
     let mut input = String::with_capacity(2_000_000);
@@ -937,9 +867,6 @@ fn parser_handles_million_token_valid_bsl() {
     );
 }
 
-/// The guard must still abort when the parser is genuinely stuck (no position
-/// progress across the 100-position history window). Drives the guard
-/// directly so the test remains valid even if grammar internals change.
 #[test]
 fn parser_guard_panics_on_stuck_loop() {
     use lexer::tokenize;
@@ -947,12 +874,8 @@ fn parser_guard_panics_on_stuck_loop() {
 
     let tokens = tokenize("Процедура Т() КонецПроцедуры");
     let mut p = Parser::new(&tokens);
-    let hit_guard = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        // Never advance `pos`; call the guard until the iteration budget trips.
-        // In release builds this runs ~1M iterations (well under 1 s).
-        loop {
-            p.check_iteration_limit();
-        }
+    let hit_guard = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| loop {
+        p.check_iteration_limit();
     }));
     let panic_msg = match hit_guard {
         Ok(()) => panic!("stuck parser guard did not panic"),

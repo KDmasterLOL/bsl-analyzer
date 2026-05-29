@@ -4,81 +4,61 @@ use clap::{Args, Subcommand, ValueEnum};
 
 #[derive(Subcommand)]
 pub enum McpCommand {
-    /// Start MCP server (Model Context Protocol for AI agents)
     Serve(McpServeArgs),
 
-    /// Install MCP config into supported AI tools
     Install(McpInstallArgs),
 }
 
 #[derive(Args, Clone)]
 pub struct McpServeArgs {
-    /// Runtime profile
     #[arg(long = "profile", value_enum)]
     runtime_profile: McpProfileCli,
 
-    /// Source directory containing 1C configuration (with Configuration.xml)
     #[arg(short = 's', long = "source-dir", required_if_eq("runtime_profile", "workspace"))]
     source_dir: Option<PathBuf>,
 
-    /// URL of 1C HTTP service for live database queries (e.g., http://localhost/base/hs/bsl-analyzer)
     #[arg(long)]
     onec_url: Option<String>,
 
-    /// 1C username for HTTP service authentication
     #[arg(long, default_value = "")]
     onec_user: String,
 
-    /// 1C password for HTTP service authentication.
-    /// Supports base64 encoding: prefix with "base64:" (e.g. "base64:cGFzc3dvcmQ=")
     #[arg(long, default_value = "")]
     onec_password: String,
 }
 
 #[derive(Args)]
 pub struct McpInstallArgs {
-    /// Target application: codex, gemini, claude, cursor or all
     #[arg(long, value_enum)]
     target: InstallTargetCli,
 
-    /// Configuration scope
     #[arg(long, value_enum)]
     scope: Option<InstallScopeCli>,
 
-    /// Installation preset or recommended bundle
     #[arg(long, value_enum, default_value_t = InstallPresetCli::Workspace)]
     preset: InstallPresetCli,
 
-    /// MCP server name inside target config
     #[arg(long)]
     name: Option<String>,
 
-    /// Source directory containing 1C configuration (with Configuration.xml)
     #[arg(short = 's', long = "source-dir")]
     source_dir: Option<PathBuf>,
 
-    /// URL of 1C HTTP service for live database queries (e.g., http://localhost/base/hs/bsl-analyzer)
     #[arg(long)]
     onec_url: Option<String>,
 
-    /// 1C username for HTTP service authentication
     #[arg(long, default_value = "")]
     onec_user: String,
 
-    /// 1C password for HTTP service authentication.
-    /// Supports base64 encoding: prefix with "base64:" (e.g. "base64:cGFzc3dvcmQ=")
     #[arg(long, default_value = "")]
     onec_password: String,
 
-    /// Extra environment variable for the spawned MCP server (repeatable KEY=value)
     #[arg(long = "env", value_parser = parse_env_pair)]
     env: Vec<(String, String)>,
 
-    /// Replace an existing MCP entry with the same name
     #[arg(long)]
     force: bool,
 
-    /// Print the generated command or config instead of writing it
     #[arg(long)]
     dry_run: bool,
 }
@@ -291,9 +271,6 @@ fn run_mcp_server(
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     let serve_result = rt.block_on(mcp_server::serve_stdio(server));
 
-    // Keep one clone alive until after the Tokio runtime is dropped so sync
-    // PostgreSQL baseline clients/pools are destroyed outside the active
-    // runtime context and avoid nested-runtime panics during MCP stdio shutdown.
     drop(rt);
     shutdown_guard.shutdown();
     drop(shutdown_guard);
@@ -365,8 +342,6 @@ fn status_label(status: bsl_analyzer::mcp_install::InstallStatus) -> &'static st
     }
 }
 
-/// Decode password: if prefixed with `base64:`, decode the suffix; otherwise
-/// return as-is. Not encryption — just obfuscation for `.mcp.json`.
 fn decode_password(password: &str) -> String {
     if let Some(encoded) = password.strip_prefix("base64:") {
         if let Some(decoded) = base64_decode(encoded) {

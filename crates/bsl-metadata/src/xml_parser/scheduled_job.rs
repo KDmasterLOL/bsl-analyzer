@@ -1,28 +1,8 @@
-//! ScheduledJob XML parser
-
 use crate::error::{MetadataError, Result};
 use crate::scheduled_job::ScheduledJob;
 
 use super::helpers::{child_bool, child_text, find_child, find_mdo_element, parse_uuid, parse_xml};
 
-/// Parse ScheduledJob XML from Designer format
-///
-/// # Arguments
-///
-/// * `xml` - XML content as string
-///
-/// # Returns
-///
-/// Parsed `ScheduledJob` structure
-///
-/// # Example
-///
-/// ```no_run
-/// # use bsl_metadata::xml_parser::parse_scheduled_job_xml;
-/// let xml = std::fs::read_to_string("ScheduledJobs/MyJob.xml")?;
-/// let job = parse_scheduled_job_xml(&xml)?;
-/// # Ok::<(), bsl_metadata::MetadataError>(())
-/// ```
 pub fn parse_scheduled_job_xml(xml: &str) -> Result<ScheduledJob> {
     let _span = tracing::debug_span!("parse_scheduled_job_xml").entered();
 

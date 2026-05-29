@@ -1,35 +1,3 @@
-//! FullOuterJoinQuery diagnostic.
-//!
-//! Detects usage of FULL OUTER JOIN in SDBL queries.
-//!
-//! ## Why?
-//! FULL OUTER JOIN operations have severe performance implications in 1C:Enterprise.
-//! The query optimizer struggles with full outer joins, leading to slow execution
-//! and high memory consumption.
-//!
-//! ## Bad practice
-//! ```bsl
-//! Query = "SELECT T1.Field1, T2.Field2
-//!          FROM Table1 AS T1
-//!          FULL OUTER JOIN Table2 AS T2
-//!          ON T1.ID = T2.ID";
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! // Use UNION of LEFT JOINs instead:
-//! Query = "SELECT T1.Field1, T2.Field2
-//!          FROM Table1 AS T1
-//!          LEFT JOIN Table2 AS T2 ON T1.ID = T2.ID
-//!          UNION ALL
-//!          SELECT NULL AS Field1, T2.Field2
-//!          FROM Table2 AS T2
-//!          LEFT JOIN Table1 AS T1 ON T2.ID = T1.ID
-//!          WHERE T1.ID IS NULL";
-//! ```
-//!
-//! ## Implementation
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -48,7 +16,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Single-pass dispatch for FullOuterJoinQuery.
 pub(crate) fn dispatch(
     ctx: &DiagnosticsContext,
     diag: &sdbl_hir::SdblDiagnostic,
@@ -61,7 +28,6 @@ pub(crate) fn dispatch(
     }
 }
 
-/// Runs the FullOuterJoinQuery diagnostic (standalone, used in tests).
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     crate::sdbl_utils::collect_sdbl_via_dispatch(ctx, DiagnosticCode::FullOuterJoinQuery, dispatch)
 }
@@ -74,8 +40,6 @@ mod tests {
 
     #[test]
     fn test_fixture_full_outer_join_detected_left_join_not() {
-        // Fixture Тест1: has ПОЛНОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ -> 1 diagnostic
-        // Fixture Тест2: has only LEFT JOINs -> 0 diagnostics
         let code_test1 = r#"Процедура Тест1()
     Запрос = Новый Запрос;
     Запрос.Текст = "ВЫБРАТЬ

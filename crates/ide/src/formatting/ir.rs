@@ -1,71 +1,24 @@
-//! Token-level IR for the BSL formatter (Phase 2 architecture).
-//!
-//! Builds a flat stream of opaque [`Atom`]s separated by [`Gap`]s from a
-//! Rowan CST. The pipeline is:
-//!
-//! ```text
-//!   Ir::build(root)                                  — CST traversal → IR
-//!   apply_policy(ir, cfg, initial_indent)            — per-gap GapDecision
-//!   render_with_line_ending(ir, decisions, cfg, le)  — final String
-//! ```
-//!
-//! Invariants enforced by the builder:
-//!
-//!   * `gaps.len() == atoms.len() + 1` — boundary gaps frame the stream so
-//!     the leading BOM-only prefix and the trailing newline are first-class.
-//!   * Multi-line / concatenated string literals (Rowan `LITERAL` nodes
-//!     containing `STRING_*` tokens) coalesce into a **single** [`Atom`];
-//!     their internal whitespace is preserved by construction *unless* the
-//!     preceding gap got a [`GapDecision::NewlineWithIndent`] decision, in
-//!     which case `render_full` re-indents `|`-continuation lines to match
-//!     the new opening-quote column (#std444 п. 3.1). Compensating edits
-//!     for those rewrites flow through the same `edits` list as gap edits.
-//!   * Comments are emitted as standalone atoms — their same-line-ness is
-//!     a property of the surrounding gap, not the atom itself. Comment
-//!     bodies may also be rewritten (`//foo` → `// foo`, #std456 п. 7.3);
-//!     those rewrites are tracked via [`Ir::atom_edits`] at build time.
-//!   * Only the policy layer reads [`SyntaxKind`] to make spacing
-//!     decisions; the builder is policy-free apart from the two
-//!     standard-driven content normalizations noted above.
-
 use syntax::{NodeOrToken, SyntaxKind, SyntaxNode, TextRange, TextSize, WalkEvent};
 
 use super::FormattingConfig;
 
-/// An opaque slice of source. The formatter emits `text` byte-for-byte.
 #[derive(Debug, Clone)]
 pub struct Atom {
     pub kind: SyntaxKind,
     pub text: String,
 }
 
-/// The whitespace between two atoms (or framing the stream at the edges).
-/// Comments are NOT gaps — they are their own atoms. `range` is the source
-/// span the gap occupies; per-gap edits replace `source[range]` with the
-/// rendered text when policy reshapes the gap.
 #[derive(Debug, Clone)]
 pub struct Gap {
     pub range: TextRange,
     pub text: String,
 }
 
-/// Decision the policy layer makes for each gap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GapDecision {
-    /// Emit `gap.text` byte-for-byte. The conservative-formatter default.
     Preserve,
-    /// Emit no whitespace at all.
     None,
-    /// Emit a single ASCII space.
     OneSpace,
-    /// Emit `newlines` `\n`-separators. Intermediate `\n`-separators get
-    /// `body_level` indent (the level where blank lines visually sit);
-    /// the final `\n`-separator gets `final_level` indent (the depth of
-    /// the next atom, adjusted for block-boundary keywords). When
-    /// `body_level == final_level` the gap is plain re-indent; differing
-    /// values arise around block-end / middle keywords (e.g. blank line
-    /// before `КонецПроцедуры` sits at body depth, `КонецПроцедуры`
-    /// itself sits at the outer depth).
     NewlineWithIndent { newlines: u32, body_level: u32, final_level: u32 },
 }
 
@@ -73,29 +26,18 @@ pub enum GapDecision {
 pub struct Ir {
     pub atoms: Vec<Atom>,
     pub gaps: Vec<Gap>,
-    /// One CST node per atom: the token's parent for token atoms, the
-    /// LITERAL node itself for coalesced atoms. Used by `apply_policy` to
-    /// query ancestry (statement boundaries, block depth) without
-    /// embedding policy-relevant fields in `Atom` itself.
     pub atom_nodes: Vec<SyntaxNode>,
-    /// Edits that replace bytes *inside* an atom's source range (currently
-    /// only used to normalize `//foo` → `// foo` per #std456 п. 7.3).
-    /// Merged with gap edits by `render_full` so edit-path parity holds.
     pub atom_edits: Vec<GapEdit>,
 }
 
 impl Ir {
-    /// Builds the IR from a Rowan CST root. See module-level invariants.
     pub fn build(root: &SyntaxNode) -> Self {
         let mut atoms: Vec<Atom> = Vec::new();
         let mut gaps: Vec<Gap> = Vec::new();
         let mut atom_nodes: Vec<SyntaxNode> = Vec::new();
         let mut atom_edits: Vec<GapEdit> = Vec::new();
 
-        // Pending whitespace accumulator between two atoms.
         let mut pending_text = String::new();
-        // End of the previous atom (or start of file for the first gap).
-        // The next gap's source range is `prev_atom_end..next_atom_start`.
         let mut prev_atom_end = TextSize::from(0);
         let mut coalesce_until: Option<SyntaxNode> = None;
 
@@ -138,24 +80,11 @@ impl Ir {
                         pending_text.push_str(token.text());
                     } else {
                         flush_gap(&mut gaps, &mut pending_text, tok_range.start(), prev_atom_end);
-                        // The lexer's `//[^\n]*` regex greedily eats `\r`
-                        // before `\r\n`, so COMMENT tokens in CRLF files
-                        // carry a trailing `\r`. Strip it from the atom
-                        // (the `\r` is line-ending whitespace, not comment
-                        // content) but re-inject it into the *next* gap so
-                        // the line ending survives byte-for-byte.
                         let (text, stripped_suffix) = if kind == SyntaxKind::COMMENT {
                             let raw = token.text();
                             let trimmed = raw.trim_end_matches('\r');
                             let normalized = normalize_comment_spacing(trimmed);
                             let suffix = &raw[trimmed.len()..];
-                            // #std456 п. 7.3: a space must separate `//`
-                            // from the comment body. If we inserted one,
-                            // emit a compensating atom-level edit so the
-                            // edit-path stays in lock-step with the render
-                            // output. The edit covers the comment's source
-                            // bytes minus the trailing `\r` (which lives
-                            // in the next gap, see CRLF note below).
                             if normalized != trimmed {
                                 let effective_end = tok_range.end() - TextSize::of(suffix);
                                 atom_edits.push(GapEdit {
@@ -171,13 +100,7 @@ impl Ir {
                         if !stripped_suffix.is_empty() {
                             pending_text.push_str(stripped_suffix);
                         }
-                        // Roll `prev_atom_end` back past the stripped `\r`
-                        // bytes so the next gap's source range covers them.
-                        // Otherwise a per-gap edit would re-insert `\r`
-                        // while leaving the original byte in place, doubling
-                        // the carriage return.
                         prev_atom_end = tok_range.end() - TextSize::of(stripped_suffix);
-                        // Every non-root token has a parent in a valid CST.
                         atom_nodes
                             .push(token.parent().expect("token without parent in syntax tree"));
                     }
@@ -186,7 +109,6 @@ impl Ir {
             }
         }
 
-        // Trailing boundary gap: from the last atom's end to the root end.
         let stream_end = root.text_range().end();
         flush_gap(&mut gaps, &mut pending_text, stream_end, prev_atom_end);
 
@@ -203,21 +125,6 @@ impl Ir {
     }
 }
 
-/// Rewrites the leading whitespace of every `|`-continuation line inside a
-/// multi-line string literal to `target_indent`. The opening line (before
-/// the first `\n`) and any line whose first non-whitespace char is not `|`
-/// are left untouched.
-///
-/// Per #std444 п. 3.1, the `|` markers align with the opening `"` — i.e.
-/// at the same indent the formatter placed the literal on (the
-/// `final_level` of the preceding `NewlineWithIndent` gap decision).
-///
-/// Whitespace-only lines (no `|` marker) inside the literal are also
-/// preserved verbatim — `trim_trailing_whitespace` operates on gaps, not
-/// on atom internals, so any source-authored blank inside a query body
-/// keeps the bytes the user typed. This is intentional: a blank line in
-/// SDBL is rare and almost always meaningful (visual separator), and
-/// touching it would mean overstepping the literal-content invariant.
 fn reindent_literal_continuation_lines(text: &str, target_indent: &str) -> String {
     let mut out = String::with_capacity(text.len() + 16);
     let mut iter = text.split('\n');
@@ -240,12 +147,6 @@ fn reindent_literal_continuation_lines(text: &str, target_indent: &str) -> Strin
     out
 }
 
-/// Normalizes leading whitespace inside a `//` comment per #std456 п. 7.3
-/// (`v8std/docs/std/456.md` — между `//` и началом комментария должен
-/// быть пробел): inserts exactly one space if the body starts with a
-/// non-whitespace character. Comments that already have ANY whitespace
-/// after `//` (one space, many spaces, a tab) are left untouched — the
-/// user's spacing intent is respected.
 fn normalize_comment_spacing(raw: &str) -> String {
     let Some(rest) = raw.strip_prefix("//") else { return raw.to_string() };
     if rest.is_empty() || rest.starts_with(|c: char| c.is_whitespace()) {
@@ -257,9 +158,6 @@ fn normalize_comment_spacing(raw: &str) -> String {
     s
 }
 
-/// A `LITERAL` node whose children include any string-flavored token. Such
-/// literals carry whitespace-significant content (multi-line `|`-strings,
-/// string concatenation chains) and must be emitted as a single atom.
 fn is_coalescing_literal(node: &SyntaxNode) -> bool {
     if node.kind() != SyntaxKind::LITERAL {
         return false;
@@ -279,8 +177,6 @@ fn is_coalescing_literal(node: &SyntaxNode) -> bool {
     })
 }
 
-/// Minimal placeholder policy: preserve every gap. Renders the source text
-/// unchanged. Kept as the round-trip identity baseline used by IR tests.
 #[cfg(test)]
 fn apply_policy_preserve_all(
     ir: &Ir,
@@ -290,9 +186,6 @@ fn apply_policy_preserve_all(
     vec![GapDecision::Preserve; ir.gaps.len()]
 }
 
-/// Per-gap policy. Within-line spacing mirrors `whitespace.rs`; newline
-/// gaps split into statement boundaries (re-indented via CST depth) and
-/// expression continuations (preserved byte-for-byte).
 pub fn apply_policy(ir: &Ir, cfg: &FormattingConfig, _initial_indent: u32) -> Vec<GapDecision> {
     let mut decisions = Vec::with_capacity(ir.gaps.len());
     let mut prev_was_unary = false;
@@ -307,10 +200,6 @@ pub fn apply_policy(ir: &Ir, cfg: &FormattingConfig, _initial_indent: u32) -> Ve
         } else {
             decide_inline_gap(prev_kind, next_kind, prev_was_unary, cfg)
         };
-        // A newline gap whose LCA is a statement-boundary container starts
-        // a new statement. The next atom is then at "start of statement"
-        // for the `+`/`-` unary heuristic, even though its raw predecessor
-        // (`;`, `Тогда`, `Иначе`, …) isn't in the unary list.
         let crossed_stmt_boundary = matches!(decision, GapDecision::NewlineWithIndent { .. });
         decisions.push(decision);
 
@@ -325,55 +214,15 @@ pub fn apply_policy(ir: &Ir, cfg: &FormattingConfig, _initial_indent: u32) -> Ve
     decisions
 }
 
-/// Decides spacing for a gap that contains at least one newline. The two
-/// outcomes are:
-///   * `NewlineWithIndent { newlines, level }` — statement boundary, recompute
-///     indent from CST depth. `newlines` mirrors the source so user blank
-///     lines round-trip.
-///   * `Preserve` — expression continuation (both atoms inside the same
-///     statement), don't reformat user-authored indent.
 fn decide_newline_gap(ir: &Ir, gap_index: usize, gap_text: &str) -> GapDecision {
-    // Boundary gap (leading or trailing): no surrounding statement context.
     if gap_index == 0 || gap_index == ir.gaps.len() - 1 {
         return GapDecision::Preserve;
     }
     let prev_node = &ir.atom_nodes[gap_index - 1];
     let next_node = &ir.atom_nodes[gap_index];
 
-    // A newline is a statement boundary iff the lowest common ancestor of
-    // the two atoms is a node that *contains* multiple statements / clauses
-    // / block sides (STMT_LIST, SOURCE_FILE, IF_STMT, TRY_STMT, …). If the
-    // LCA is a sub-expression node, we are inside one statement and the
-    // newline is a user-authored continuation.
     let lca = lowest_common_ancestor(prev_node, next_node);
     if !is_statement_boundary_container(lca.kind()) {
-        // Vendor canon (1C Стандарт #std444 «Перенос выражений»):
-        //   п. 3.1 — длинная строковая константа после `=` на отдельной
-        //   строке стоит на «стандартном отступе» (body + 1);
-        //   п. 3.3 — то же после `+` в конце предыдущей строки.
-        // Источник: https://its.1c.ru/db/v8std#content:444
-        //
-        //     ТекстЗапроса =
-        //         "ВЫБРАТЬ
-        //         |   ...";
-        //
-        //     ТекстЗапроса = ТекстЗапроса +
-        //         "ВЫБРАТЬ
-        //         |   ...";
-        //
-        // Без этого исключения общая continuation-политика просто копирует
-        // авторскую whitespace (часто один пробел), и литерал «съезжает»
-        // влево от тела функции. Содержимое литерала между внешними `"`
-        // всё равно эмитится атомом LITERAL байт-в-байт; форматтер чинит
-        // только зазор перед открывающей кавычкой.
-        //
-        // Предикат держим узким:
-        //   * `prev_kind in (EQ, PLUS)` — RHS присваивания/сравнения и
-        //     конкатенация с `+` в конце строки;
-        //   * `next_kind == LITERAL` с `\n` внутри — коалесцированная
-        //     многострочка (см. `is_coalescing_literal`);
-        //   * `L_PAREN` / `COMMA` (отступ аргументов) и обычный `+`-перенос
-        //     перед однострочным литералом проходят мимо → Preserve.
         let prev_kind = ir.atoms[gap_index - 1].kind;
         let next_atom = &ir.atoms[gap_index];
         let prev_anchors_multiline_literal = matches!(prev_kind, SyntaxKind::EQ | SyntaxKind::PLUS);
@@ -393,10 +242,6 @@ fn decide_newline_gap(ir: &Ir, gap_index: usize, gap_text: &str) -> GapDecision 
     }
 
     let next_kind = ir.atoms[gap_index].kind;
-    // Body indent (blank lines between statements) sits at the LCA's
-    // depth — the depth where the blank lines visually live. Final indent
-    // is the next atom's own depth, dropped by one for block-boundary
-    // keywords (`КонецПроцедуры`, `Иначе`, …).
     let body_level = block_depth(&lca);
     let next_depth = block_depth(next_node);
     let final_level = if is_block_boundary_keyword(next_kind) {
@@ -427,16 +272,10 @@ fn decide_inline_gap(
         return GapDecision::None;
     }
 
-    // UTF-8 BOM is file-leading metadata, never separated from the first
-    // content token. Without this the `next == COMMENT` rule below would
-    // synthesize a space between `\u{FEFF}` and `//...`.
     if prev == SyntaxKind::BOM {
         return GapDecision::None;
     }
 
-    // Trailing inline comment (`КонецФункции\t\t// note` → `КонецФункции // note`):
-    // collapse any horizontal whitespace before a same-line comment to one
-    // space. Comments on their own line are reached via the newline path.
     if next == SyntaxKind::COMMENT {
         return GapDecision::OneSpace;
     }
@@ -464,8 +303,6 @@ fn decide_inline_gap(
         return GapDecision::OneSpace;
     }
 
-    // Fallback: respect the source. Inserting a space here would be policy
-    // overreach for an unhandled token pair.
     GapDecision::Preserve
 }
 
@@ -473,18 +310,6 @@ fn count_newlines(s: &str) -> u32 {
     s.bytes().filter(|&b| b == b'\n').count() as u32
 }
 
-/// CST node kinds that contribute to block-indentation depth. CLAUSE
-/// nodes (ELSIF/ELSE/EXCEPT) are intentionally excluded — their boundary
-/// keywords get a `-1` adjustment via `is_block_boundary_keyword` instead,
-/// which matches the line-based engine's behavior of placing
-/// `Иначе`/`Исключение` at the outer indent level.
-///
-/// Preprocessor directives (`#Область` / `#Если`) are intentionally NOT
-/// block-defining: 1C Configurator convention puts procedures at column
-/// zero even when wrapped in `#Область`, and conditional compilation
-/// keeps the conditional code at its host depth. Treating them as block-
-/// defining would over-indent every procedure inside `#Область` (and
-/// stack with nested regions, producing 2-3 spurious tabs).
 fn is_block_defining(kind: SyntaxKind) -> bool {
     matches!(
         kind,
@@ -498,9 +323,6 @@ fn is_block_defining(kind: SyntaxKind) -> bool {
     )
 }
 
-/// Block-boundary keywords: the start/middle/end markers of block-defining
-/// constructs. They sit lexically inside their block-defining ancestor but
-/// visually align with the outer level — hence the `-1` adjustment.
 fn is_block_boundary_keyword(kind: SyntaxKind) -> bool {
     matches!(
         kind,
@@ -527,13 +349,6 @@ fn is_block_boundary_keyword(kind: SyntaxKind) -> bool {
     )
 }
 
-/// A CST node kind that *contains* multiple sibling statements, clauses, or
-/// block sides. When the lowest common ancestor of two atoms has one of
-/// these kinds, the gap between them crosses a statement boundary — so a
-/// newline there is "the line break between statements" and the next atom
-/// should be re-indented from CST depth. Anything below (BIN_EXPR, ARG_LIST,
-/// CALL_EXPR, …) means the atoms are inside a single statement and the
-/// newline is an expression continuation that must be preserved.
 fn is_statement_boundary_container(kind: SyntaxKind) -> bool {
     matches!(
         kind,
@@ -571,29 +386,17 @@ fn block_depth(node: &SyntaxNode) -> u32 {
         .count() as u32
 }
 
-/// Render the IR to a string with LF (`"\n"`) line endings. Production
-/// callers use [`render_full`] directly to honour the source file's line
-/// ending and collect per-gap edits; this is a test-only convenience.
 #[cfg(test)]
 fn render(ir: &Ir, decisions: &[GapDecision], cfg: &FormattingConfig) -> String {
     render_full(ir, decisions, cfg, "\n", false).0
 }
 
-/// A per-gap text edit produced by [`render_full`]. `range` covers the
-/// source bytes the gap occupies; replacing those bytes with `new_text`
-/// is equivalent to running the formatter on the gap in isolation.
 #[derive(Debug, Clone)]
 pub struct GapEdit {
     pub range: TextRange,
     pub new_text: String,
 }
 
-/// Render the IR using `line_ending` (typically `"\n"` or `"\r\n"`).
-/// Returns the full output text plus per-gap edits whose `range` ↦
-/// `new_text` collectively reproduce the same transformation. Gaps whose
-/// rendered text matches the source emit no edit. `insert_final_newline`
-/// appends one line ending to the trailing gap if the output doesn't
-/// already end with one.
 pub fn render_full(
     ir: &Ir,
     decisions: &[GapDecision],
@@ -614,10 +417,6 @@ pub fn render_full(
     let mut out = String::new();
     let mut edits = Vec::new();
 
-    // Index loop: the body reads three parallel collections (`gaps`,
-    // `decisions`, `atoms`) plus structural predicates (`is_last_gap`,
-    // `has_*_atom_same_line`) that key off the index. An iterator chain
-    // would obscure the parallelism without removing it.
     #[allow(clippy::needless_range_loop)]
     for i in 0..n_gaps {
         let has_prev_atom_same_line = i > 0;
@@ -625,18 +424,10 @@ pub fn render_full(
         let is_last_gap = i == n_gaps - 1;
 
         let mut rendered = emit_gap_text(&ir.gaps[i], &decisions[i], cfg, line_ending);
-        // Preserve-gap byte stream may carry trailing whitespace from the
-        // source; trim it per line. Synthesized decisions never emit
-        // trailing whitespace, so the trim is a no-op for them. The
-        // global trim flag also gates this so round-trip identity passes
-        // (which use `apply_policy_preserve_all`) can keep raw bytes.
         if cfg.trim_trailing_whitespace && matches!(decisions[i], GapDecision::Preserve) {
             rendered =
                 trim_preserve_gap(&rendered, has_prev_atom_same_line, has_next_atom_same_line);
         }
-        // `insert_final_newline` lives on the trailing gap: if the source
-        // doesn't end with a line ending and the policy didn't add one,
-        // append one here so the edit reflects the same byte stream.
         if is_last_gap
             && insert_final_newline
             && (!out.is_empty() || !rendered.is_empty() || n_atoms > 0)
@@ -652,15 +443,6 @@ pub fn render_full(
         out.push_str(&rendered);
 
         if i < n_atoms {
-            // #std444 пп. 3.1, 3.3: when the gap that precedes a multi-line
-            // string literal was re-indented (the `=` / `+` exception in
-            // `decide_newline_gap`), the `|` continuation lines inside the
-            // literal must align with the opening `"`. Source content is
-            // byte-preserved by the coalesced LITERAL atom, so we rewrite
-            // its text here at render time and emit a compensating atom
-            // edit. Untouched if the preceding gap was Preserve (literal
-            // on same line as `=`) — that case is already pinned by
-            // `regression_multiline_string_literal_preserved`.
             let atom = &ir.atoms[i];
             let needs_reindent = atom.kind == SyntaxKind::LITERAL
                 && atom.text.contains('\n')
@@ -684,12 +466,6 @@ pub fn render_full(
         }
     }
 
-    // Atom-level edits (currently only comment-spacing normalization) are
-    // already reflected in `out` via the modified `atom.text`. Surface
-    // them in the edit list too so consumers applying `edits` to the
-    // source reproduce the same output. Order edits by source start so
-    // `apply_edits`-style consumers can iterate left-to-right; gap and
-    // atom edits never overlap by construction.
     edits.extend(ir.atom_edits.iter().cloned());
     edits.sort_by_key(|e| e.range.start());
 
@@ -724,20 +500,12 @@ fn emit_gap_text(
     }
 }
 
-/// Trim trailing horizontal whitespace per "line" in a Preserve gap. A
-/// segment of the gap that immediately follows an atom on the same line
-/// (the first segment when there is a previous atom) has its trailing
-/// `' '`/`'\t'` stripped. Other segments are pure whitespace inside the
-/// gap and are kept verbatim (the blank-but-indented rule).
 fn trim_preserve_gap(
     gap_text: &str,
     has_prev_atom_same_line: bool,
     has_next_atom_same_line: bool,
 ) -> String {
     if !gap_text.contains('\n') {
-        // Single-segment gap: trim only if it is trailing whitespace
-        // after the last atom of the file (or this line, equivalently —
-        // there's a previous atom and no following atom on the same line).
         if has_prev_atom_same_line && !has_next_atom_same_line {
             return gap_text.trim_end_matches([' ', '\t']).to_string();
         }
@@ -771,9 +539,6 @@ mod tests {
 
     fn round_trip(src: &str) -> String {
         let ir = build(src);
-        // Disable trim so the identity-policy passes through trailing
-        // whitespace byte-for-byte. The full formatter (which has a
-        // real policy) enables trim via the same flag.
         let cfg = FormattingConfig { trim_trailing_whitespace: false, ..Default::default() };
         let decisions = apply_policy_preserve_all(&ir, &cfg, 0);
         render(&ir, &decisions, &cfg)
@@ -792,18 +557,12 @@ mod tests {
 
     #[test]
     fn round_trip_preserves_bom() {
-        // Uses canonical `// comment` so the identity round-trip is not
-        // disturbed by the comment-spacing normalization that runs in
-        // `Ir::build` (see `normalize_comment_spacing`). Non-canonical
-        // input is, by design, no longer a round-trip case — it is
-        // expected to be modified.
         let src = "\u{FEFF}// comment\nПерем А Экспорт;\n";
         assert_eq!(round_trip(src), src);
     }
 
     #[test]
     fn round_trip_preserves_multiline_string() {
-        // The `\n` inside the string literal must survive byte-for-byte.
         let src = "А = \"ВЫБРАТЬ\n|\tX.A\n|ИЗ\n|\tT КАК X\";\n";
         assert_eq!(round_trip(src), src);
     }
@@ -825,7 +584,6 @@ mod tests {
         let ir = build("А = \"a\n|b\n|c\";");
         let string_atoms: Vec<_> =
             ir.atoms.iter().filter(|a| a.kind == SyntaxKind::LITERAL).collect();
-        // Exactly one LITERAL atom for the entire multi-line string.
         assert_eq!(string_atoms.len(), 1, "expected one coalesced LITERAL atom");
         assert!(string_atoms[0].text.contains('\n'));
     }
@@ -879,8 +637,6 @@ mod tests {
         let src = "А";
         let ir = build(src);
         assert_eq!(ir.atoms.len(), 1);
-        // Leading boundary gap (0..0, ""), atom "А", trailing boundary
-        // gap (1..1, "") — both zero-width on either side.
         assert_eq!(ir.gaps.len(), 2);
         assert_eq!(ir.gaps[0].text, "");
         assert_eq!(ir.gaps[1].text, "");
@@ -889,15 +645,12 @@ mod tests {
 
     #[test]
     fn build_survives_parse_errors() {
-        // Open paren never closed — parser emits errors but tokens are
-        // still attached to the syntax tree; the IR must round-trip them.
         let src = "А = (\n";
         let ir = build(src);
         assert!(!ir.atoms.is_empty());
         assert_eq!(round_trip(src), src);
     }
 
-    /// Renders `src` through `apply_policy` (not the preserve-all baseline).
     fn format_via_policy(src: &str) -> String {
         let ir = build(src);
         let cfg = FormattingConfig::default();
@@ -907,13 +660,11 @@ mod tests {
 
     #[test]
     fn policy_assignment_spaces() {
-        // Tight `А=1;` expands to `А = 1;`.
         assert_eq!(format_via_policy("А=1;"), "А = 1;");
     }
 
     #[test]
     fn policy_method_call_no_space_before_paren() {
-        // The KW_EXECUTE-before-paren rule fires through the new pipeline.
         assert_eq!(format_via_policy("Х.Выполнить ()"), "Х.Выполнить()");
     }
 
@@ -924,7 +675,6 @@ mod tests {
 
     #[test]
     fn policy_comma_after_comma_keeps_space() {
-        // Skipped default arguments stay visually separated.
         assert_eq!(format_via_policy("Ф(а,,,, в)"), "Ф(а, , , , в)");
     }
 
@@ -946,8 +696,6 @@ mod tests {
 
     #[test]
     fn policy_preserves_newlines_unchanged() {
-        // Step B.1 leaves newline-containing gaps alone. The output is the
-        // input verbatim because no within-line normalization is triggered.
         let src = "Процедура Т()\nКонецПроцедуры\n";
         assert_eq!(format_via_policy(src), src);
     }
@@ -958,12 +706,8 @@ mod tests {
         assert_eq!(format_via_policy(src), src);
     }
 
-    // ----- Step B.2: CST-driven indent for newline gaps -----
-
     #[test]
     fn policy_reindents_procedure_body() {
-        // The line-based engine indents `А = 1;` to one tab inside the
-        // procedure body; the IR pipeline should produce the same shape.
         let src = "Процедура Тест()\nА = 1;\nКонецПроцедуры";
         let expected = "Процедура Тест()\n\tА = 1;\nКонецПроцедуры";
         assert_eq!(format_via_policy(src), expected);
@@ -978,8 +722,6 @@ mod tests {
 
     #[test]
     fn policy_else_at_outer_level() {
-        // `Иначе` sits inside ELSE_CLAUSE inside IF_STMT but is displayed
-        // at the outer level via the boundary-keyword adjustment.
         let src = "Если А Тогда\nБ = 1;\nИначе\nВ = 2;\nКонецЕсли;";
         let expected = "Если А Тогда\n\tБ = 1;\nИначе\n\tВ = 2;\nКонецЕсли;";
         assert_eq!(format_via_policy(src), expected);
@@ -994,21 +736,12 @@ mod tests {
 
     #[test]
     fn policy_preserves_plus_continuation() {
-        // Both atoms surrounding the newline are in the same assignment
-        // statement → expression continuation → user indent kept.
         let src = "а = \"foo\"\n\t\t+ \": \" + б;";
         assert_eq!(format_via_policy(src), src);
     }
 
-    // ----- Cross-newline unary/binary `+`/`-` classification -----
-
     #[test]
     fn policy_unary_plus_after_return_across_newline() {
-        // `Возврат\n+ А;` parses as one return statement (`+ А` is the
-        // return expression). The newline gap is expression-continuation,
-        // so the user's indent on the `+` line is preserved (zero here),
-        // and the unary classification (KW_RETURN is in the unary list)
-        // collapses `+ А` to `+А`.
         let src = "Процедура Т()\nВозврат\n+ А;\nКонецПроцедуры";
         let expected = "Процедура Т()\n\tВозврат\n+А;\nКонецПроцедуры";
         assert_eq!(format_via_policy(src), expected);
@@ -1016,8 +749,6 @@ mod tests {
 
     #[test]
     fn policy_unary_plus_after_semicolon_across_newline() {
-        // `+ А;` is its own statement; `+` after `;` should classify as
-        // unary (start of new expression).
         let src = "Процедура Т()\nБ = 1;\n+ А;\nКонецПроцедуры";
         let expected = "Процедура Т()\n\tБ = 1;\n\t+А;\nКонецПроцедуры";
         assert_eq!(format_via_policy(src), expected);
@@ -1025,7 +756,6 @@ mod tests {
 
     #[test]
     fn policy_unary_plus_after_then_across_newline() {
-        // `Тогда\n+ Б;` — `+` opens body, unary on Б.
         let src = "Если А Тогда\n+ Б;\nКонецЕсли;";
         let expected = "Если А Тогда\n\t+Б;\nКонецЕсли;";
         assert_eq!(format_via_policy(src), expected);
@@ -1033,9 +763,6 @@ mod tests {
 
     #[test]
     fn policy_binary_plus_continuation_across_newline() {
-        // Inside a single assignment statement, `+` is binary continuation.
-        // The newline is expression-continuation (preserved), and the in-
-        // line spacing around `+` is binary (one space each side).
         let src = "а = 1\n\t\t+ б;";
         assert_eq!(format_via_policy(src), src);
     }
@@ -1043,8 +770,6 @@ mod tests {
     #[test]
     fn policy_preserves_blank_lines() {
         let src = "Процедура Тест()\n\nА = 1;\n\nКонецПроцедуры";
-        // Each blank line in the source produces a blank indented line in
-        // the output.
         let expected = "Процедура Тест()\n\t\n\tА = 1;\n\t\nКонецПроцедуры";
         assert_eq!(format_via_policy(src), expected);
     }

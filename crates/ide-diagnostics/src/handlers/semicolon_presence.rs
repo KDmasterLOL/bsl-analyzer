@@ -1,5 +1,3 @@
-//! Reports statements that omit a trailing semicolon.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
@@ -19,7 +17,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates a diagnostic from HIR semicolon-lowering data.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     let code = DiagnosticCode::SemicolonPresence;
 
@@ -107,8 +104,6 @@ mod tests {
 
     #[test]
     fn test_return_without_semicolon_before_endif() {
-        // BSL allows omitting semicolon before КонецЕсли, but it's bad practice
-        // SemicolonPresence should warn about missing semicolon
         let code = r#"Процедура Тест()
     Если Истина Тогда
         Возврат

@@ -1,18 +1,11 @@
-//! Debug tools — wrap `bsl_debug::session::DebugSession` for MCP tool handlers.
-//!
-//! All functions take `&Arc<Mutex<Option<DebugSession>>>` and are called from
-//! `tokio::task::spawn_blocking` in the tool handlers (DebugSession uses blocking I/O).
-
 use bsl_debug::session::{DebugConfig, DebugSession};
 use rmcp::model::{CallToolResult, Content};
 use rmcp::ErrorData as McpError;
 use std::fmt::Write;
 use std::sync::{Arc, Mutex};
 
-/// Default auto-attach target types: Client, Server, HTTPService.
 const DEFAULT_AUTO_ATTACH: &[&str] = &["Client", "Server", "HTTPService"];
 
-/// Parameters for `debug_attach` (avoids clippy::too_many_arguments).
 pub struct AttachParams<'a> {
     pub host: &'a str,
     pub port: u16,
@@ -38,7 +31,6 @@ pub fn debug_attach(
     let AttachParams { host, port, infobase, config_root, workspace_root, extensions, auto_attach } =
         params;
 
-    // Resolve config_root: explicit param > workspace_root > "."
     let root = if let Some(cr) = config_root {
         std::path::PathBuf::from(cr)
     } else if let Some(wr) = workspace_root {
@@ -47,11 +39,9 @@ pub fn debug_attach(
         std::path::PathBuf::from(".")
     };
 
-    // Convert extensions from [name, path] pairs
     let ext_pairs: Vec<(String, std::path::PathBuf)> =
         extensions.iter().map(|e| (e[0].clone(), std::path::PathBuf::from(&e[1]))).collect();
 
-    // Use provided auto_attach or defaults (including HTTPService)
     let attach_types: Vec<String> = if auto_attach.is_empty() {
         DEFAULT_AUTO_ATTACH.iter().map(|s| s.to_string()).collect()
     } else {
@@ -238,7 +228,6 @@ pub fn debug_stack_trace(
     let session =
         guard.as_mut().ok_or_else(|| McpError::invalid_params("No active debug session", None))?;
 
-    // Try live call stack first, fall back to cached last_stop stack
     let call_stack_result = session.call_stack();
     let frames = match call_stack_result {
         Ok(ref f) if !f.is_empty() => f.clone(),
@@ -251,7 +240,6 @@ pub fn debug_stack_trace(
             let has_last_stop = session.last_stop().is_some();
             let last_stop_stack_len = session.last_stop().map(|s| s.stack.len()).unwrap_or(0);
 
-            // Fall back to stack from last stop event
             if let Some(stop) = session.last_stop() {
                 if !stop.stack.is_empty() {
                     stop.stack.clone()

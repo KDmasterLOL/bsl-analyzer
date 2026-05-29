@@ -3,7 +3,6 @@ use quick_xml::Reader;
 
 use super::xml::local_name_owned as local_name;
 
-/// Result of attachDebugUI.
 #[derive(Debug)]
 pub enum AttachResult {
     Ok,
@@ -42,7 +41,6 @@ impl AttachResult {
     }
 }
 
-/// A debug target returned by getDbgTargets.
 #[derive(Debug, Clone)]
 pub struct DebugTarget {
     pub id: String,
@@ -51,7 +49,6 @@ pub struct DebugTarget {
     pub user_name: String,
 }
 
-/// Parse getDbgTargets response.
 pub fn parse_targets(data: &[u8]) -> Vec<DebugTarget> {
     let mut reader = Reader::from_reader(data);
     reader.config_mut().trim_text(true);
@@ -113,7 +110,6 @@ pub fn parse_targets(data: &[u8]) -> Vec<DebugTarget> {
     targets
 }
 
-/// A stack frame from getCallStack response.
 #[derive(Debug, Clone)]
 pub struct StackFrame {
     pub line_no: u32,
@@ -123,7 +119,6 @@ pub struct StackFrame {
     pub module_property_id: String,
 }
 
-/// Parse getCallStack response.
 pub fn parse_call_stack(data: &[u8]) -> Vec<StackFrame> {
     let mut reader = Reader::from_reader(data);
     reader.config_mut().trim_text(true);
@@ -197,12 +192,10 @@ pub fn parse_call_stack(data: &[u8]) -> Vec<StackFrame> {
         }
     }
 
-    // 1C returns stack bottom-first, reverse to get top-first
     frames.reverse();
     frames
 }
 
-/// A variable value from eval responses.
 #[derive(Debug, Clone)]
 pub struct VarValue {
     pub name: String,
@@ -212,7 +205,6 @@ pub struct VarValue {
     pub error: Option<String>,
 }
 
-/// Parse evalLocalVariables or evalExpr response.
 pub fn parse_eval_result(data: &[u8]) -> Vec<VarValue> {
     let mut reader = Reader::from_reader(data);
     reader.config_mut().trim_text(true);
@@ -281,7 +273,6 @@ pub fn parse_eval_result(data: &[u8]) -> Vec<VarValue> {
         }
     }
 
-    // Also try to parse single result (evalExpr)
     if vars.is_empty() {
         if let Some(pres) = read_element_text(data, "pres") {
             let type_name = read_element_text(data, "typeName").unwrap_or_default();
@@ -322,14 +313,11 @@ fn read_element_text(data: &[u8], target: &str) -> Option<String> {
 fn decode_base64_utf8(s: &str) -> Option<String> {
     use std::io::Read;
     let bytes = base64_decode(s.as_bytes())?;
-    // 1C uses UTF-8 or UTF-16LE for base64-encoded strings
     if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
-        // UTF-16LE BOM
         let u16s: Vec<u16> =
             bytes[2..].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
         Some(String::from_utf16_lossy(&u16s))
     } else {
-        // Try as raw bytes first, then lossy UTF-8
         let mut s = String::new();
         (&bytes[..]).read_to_string(&mut s).ok()?;
         Some(s)
@@ -337,7 +325,6 @@ fn decode_base64_utf8(s: &str) -> Option<String> {
 }
 
 fn base64_decode(input: &[u8]) -> Option<Vec<u8>> {
-    // Simple base64 decoder (no external dep needed)
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
     fn val(c: u8) -> Option<u8> {

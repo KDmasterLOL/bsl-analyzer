@@ -1,19 +1,12 @@
-//! Renders a [`SymbolSignature`] as Markdown suitable for an LSP hover.
-
 use crate::domain::{Lang, MethodKind, SignatureSource, SymbolSignature, TypeRef};
 use crate::presenters::signature_help::render_signature_help;
 
-/// Render a hover markdown body for the given signature.
-///
-/// `lang` is reserved for future bilingual headers; only Russian is currently
-/// emitted (matches existing UX).
 pub fn render_hover_markdown(sig: &SymbolSignature, _lang: Lang) -> String {
     let mut out = String::new();
 
     out.push_str(&header_line(sig));
     out.push_str("\n\n");
 
-    // Type owner (e.g. "**Тип:** Строка") for platform methods that have one.
     if let Some(qualifier) = sig.qualifier.as_deref() {
         let trimmed = qualifier.trim_end_matches('.');
         if !trimmed.is_empty()
@@ -23,7 +16,6 @@ pub fn render_hover_markdown(sig: &SymbolSignature, _lang: Lang) -> String {
         }
     }
 
-    // Inline signature in a fenced bsl code block.
     let inline = render_signature_help(sig, 0).signature;
     out.push_str("**Синтаксис:**\n```bsl\n");
     out.push_str(&inline);

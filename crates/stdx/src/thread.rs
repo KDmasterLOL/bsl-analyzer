@@ -1,19 +1,3 @@
-//! A utility module for working with threads that automatically joins threads upon drop
-//! and abstracts over operating system quality of service (`QoS`) APIs
-//! through the concept of a “thread intent”.
-//!
-//! The intent of a thread is frozen at thread creation time,
-//! i.e. there is no API to change the intent of a thread once it has been spawned.
-//!
-//! As a system, old manual scheduling APIs are replaced entirely by `QoS`.
-//! To maintain this invariant, we panic when it is clear that
-//! old scheduling APIs have been used.
-//!
-//! Moreover, we also want to ensure that every thread has an intent set explicitly
-//! to force a decision about its importance to the system.
-//! Thus, [`ThreadIntent`] has no default value
-//! and every entry point to creating a thread requires a [`ThreadIntent`] upfront.
-
 use std::fmt;
 
 mod intent;
@@ -22,9 +6,6 @@ mod pool;
 pub use intent::ThreadIntent;
 pub use pool::Pool;
 
-/// # Panics
-///
-/// Panics if failed to spawn the thread.
 pub fn spawn<F, T>(intent: ThreadIntent, name: String, f: F) -> JoinHandle<T>
 where
     F: (FnOnce() -> T) + Send + 'static,
@@ -50,8 +31,6 @@ impl Builder {
         Self { inner: self.inner.stack_size(size), ..self }
     }
 
-    /// Whether dropping should detach the thread
-    /// instead of joining it.
     #[must_use]
     pub fn allow_leak(self, allow_leak: bool) -> Self {
         Self { allow_leak, ..self }
@@ -72,16 +51,11 @@ impl Builder {
 }
 
 pub struct JoinHandle<T = ()> {
-    // `inner` is an `Option` so that we can
-    // take ownership of the contained `JoinHandle`.
     inner: Option<jod_thread::JoinHandle<T>>,
     allow_leak: bool,
 }
 
 impl<T> JoinHandle<T> {
-    /// # Panics
-    ///
-    /// Panics if there is no thread to join.
     #[must_use]
     pub fn join(mut self) -> T {
         self.inner.take().unwrap().join()

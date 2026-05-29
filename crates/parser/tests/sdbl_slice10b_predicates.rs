@@ -1,55 +1,3 @@
-//! SDBL Slice 10b clean-room acceptance tests — predicates,
-//! comparison, function calls, CAST, CASE.
-//!
-//! This file is the spec-driven acceptance suite for the Slice 10b
-//! clean-room rewrite under the `CLEAN-ROOM Slice 10b` banner in
-//! `crates/parser/src/grammar/sdbl/expressions.rs`. It exercises the
-//! 8 functions `comparison_expr`, `predicate_expr`,
-//! `column_or_function`, `inline_table_fields`, `is_cast_function`,
-//! `parse_cast_type`, `case_expr`, `when_clause` and the 13 NodeKinds
-//! they emit (`SdblComparisonExpr`, `SdblInExpr`,
-//! `SdblInHierarchyExpr`, `SdblIsNullExpr`, `SdblBetweenExpr`,
-//! `SdblLikeExpr`, `SdblRefsExpr`, `SdblColumnRef`,
-//! `SdblFunctionCall`, `SdblType`, `SdblInlineTableFields`,
-//! `SdblCaseExpr`, `SdblWhenClause`).
-//!
-//! Tests authored from:
-//!   - `docs/legal/sdbl-expressions-mini-spec.md` (the C0a-extended
-//!     clean-room reference, sections §Predicates, §Comparison,
-//!     §Column references and function calls, §CAST type
-//!     specification, §CASE expressions);
-//!   - 1C ITS pubqlang documentation, accessed via the local dump
-//!     at `/home/itrous/src/tools_migration/its/dump/`:
-//!     - chapter 21 (`/db/pubqlang/content/21/hdoc`) — DISTINCT /
-//!       РАЗЛИЧНЫЕ aggregate prefix canonical example
-//!       `КОЛИЧЕСТВО(РАЗЛИЧНЫЕ ЗаказТовара.Клиент)`;
-//!     - chapter 22 (`/db/pubqlang/content/22/hdoc`) — WHERE
-//!       conditions, BETWEEN canonical
-//!       `Дата МЕЖДУ ДАТАВРЕМЯ(...) И ДАТАВРЕМЯ(...)`;
-//!     - chapter 23 (`/db/pubqlang/content/23/hdoc`) — LIKE /
-//!       ПОДОБНО pattern primitive (`Наименование ПОДОБНО "%Иван%"`);
-//!     - chapter 27 (`/db/pubqlang/content/27/hdoc`) — IS NULL /
-//!       ЕСТЬ NULL canonical
-//!       `КОГДА (Товары.Производитель) ЕСТЬ NULL ТОГДА "NULL"`;
-//!     - chapter 32 (`/db/pubqlang/content/32/hdoc`) — IN HIERARCHY
-//!       / В ИЕРАРХИИ canonical
-//!       `Товары.Ссылка В ИЕРАРХИИ (&ГруппаТоваров)` (NOT chapter 28
-//!       — codex Round-1 finding 1);
-//!     - chapter 40 (`/db/pubqlang/content/40/hdoc`) — CASE / ВЫБОР,
-//!       CAST / ВЫРАЗИТЬ, REFS / ССЫЛКА canonical examples.
-//!
-//! The oracle is the mini-spec §Predicates / §Comparison / §Column
-//! references and function calls / §CAST type specification / §CASE
-//! expressions and the §AST-shape contracts they specify, NOT any
-//! pre-rewrite parser implementation. Each per-test comment cites
-//! the relevant mini-spec section / ITS chapter so the post-Slice-
-//! 10b-C2 parser is validated against the mini-spec contract.
-//!
-//! `../bsl-parser/*` was not consulted during authoring of this file
-//! per the Slice 10b attestation
-//! (`docs/legal/sdbl-clean-room-slice10b.md`) §Non-consultation
-//! statement.
-
 use parser::parse_sdbl;
 use syntax::SyntaxKind;
 
@@ -81,13 +29,6 @@ fn first_selected_field_direct_child_kinds(input: &str) -> Vec<SyntaxKind> {
     let field = first_of_kind(&root, SyntaxKind::SDBL_SELECTED_FIELD);
     field.children().map(|n| n.kind()).collect()
 }
-
-// ============================================================================
-// 1. Comparison operators (mini-spec §Comparison)
-// ============================================================================
-//
-// Six binary comparison operators sharing a single SdblComparisonExpr
-// wrapper. Single-shot tail per mini-spec §Comparison.
 
 #[test]
 fn test_slice10b_comparison_eq() {
@@ -128,20 +69,12 @@ fn test_slice10b_comparison_ge() {
     assert!(count_kind(&root, SyntaxKind::SDBL_COMPARISON_EXPR) >= 1);
 }
 
-// ============================================================================
-// 2. IN predicate (mini-spec §SdblInExpr; ITS pubqlang/22 by analogy)
-// ============================================================================
-
-// IN with two-element value list — recoverable parse of the
-// canonical inline-list form.
 #[test]
 fn test_slice10b_in_value_list_two_elements() {
     let root = parse_no_errors("ВЫБРАТЬ * ИЗ Т ГДЕ Поле В (1, 2)");
     assert!(count_kind(&root, SyntaxKind::SDBL_IN_EXPR) >= 1);
 }
 
-// Empty IN list `IN ()` — local IDE-recovery allowance per
-// mini-spec §IDE-recovery allowances #10.
 #[test]
 fn test_slice10b_in_empty_list_recoverable() {
     let parse = parse_sdbl("ВЫБРАТЬ * ИЗ Т ГДЕ Поле В ()");
@@ -153,7 +86,6 @@ fn test_slice10b_in_empty_list_recoverable() {
     );
 }
 
-// NOT IN with subquery — KwNot before KwIn, SdblSubquery inside parens.
 #[test]
 fn test_slice10b_not_in_with_subquery() {
     let root = parse_no_errors("ВЫБРАТЬ * ИЗ Т ГДЕ Поле НЕ В (ВЫБРАТЬ Х ИЗ С)");
@@ -167,13 +99,6 @@ fn test_slice10b_not_in_with_subquery() {
     );
 }
 
-// ============================================================================
-// 3. IN HIERARCHY predicate (mini-spec §SdblInHierarchyExpr;
-//    ITS pubqlang/32 canonical example)
-// ============================================================================
-
-// pubqlang/32 (chapter_032.html, листинг 1.51):
-// «Товары.Ссылка В ИЕРАРХИИ (&ГруппаТоваров)»
 #[test]
 fn test_slice10b_in_hierarchy_canonical_russian() {
     let root = parse_no_errors("ВЫБРАТЬ * ИЗ Т ГДЕ Товары.Ссылка В ИЕРАРХИИ (&Корень)");
@@ -183,34 +108,24 @@ fn test_slice10b_in_hierarchy_canonical_russian() {
     );
 }
 
-// EN variant `IN HIERARCHY (...)` — bilingual.
 #[test]
 fn test_slice10b_in_hierarchy_english() {
     let root = parse_no_errors("ВЫБРАТЬ * ИЗ Т ГДЕ Field IN HIERARCHY (&Root)");
     assert!(count_kind(&root, SyntaxKind::SDBL_IN_HIERARCHY_EXPR) >= 1);
 }
 
-// ============================================================================
-// 4. IS NULL predicate (mini-spec §SdblIsNullExpr;
-//    ITS pubqlang/27 canonical example)
-// ============================================================================
-
-// pubqlang/27 (chapter_027.html):
-// «КОГДА (Товары.Производитель) ЕСТЬ NULL ТОГДА "NULL"»
 #[test]
 fn test_slice10b_is_null_russian_canonical() {
     let root = parse_no_errors("ВЫБРАТЬ * ИЗ Т ГДЕ Поле ЕСТЬ NULL");
     assert!(count_kind(&root, SyntaxKind::SDBL_IS_NULL_EXPR) >= 1);
 }
 
-// IS NULL EN variant.
 #[test]
 fn test_slice10b_is_null_english() {
     let root = parse_no_errors("ВЫБРАТЬ * ИЗ Т ГДЕ Поле IS NULL");
     assert!(count_kind(&root, SyntaxKind::SDBL_IS_NULL_EXPR) >= 1);
 }
 
-// IS NOT NULL — KwNot direct child of SdblIsNullExpr between IS and NULL.
 #[test]
 fn test_slice10b_is_not_null_english() {
     let root = parse_no_errors("ВЫБРАТЬ * ИЗ Т ГДЕ Поле IS NOT NULL");
@@ -221,13 +136,6 @@ fn test_slice10b_is_not_null_english() {
     );
 }
 
-// ============================================================================
-// 5. BETWEEN predicate (mini-spec §SdblBetweenExpr;
-//    ITS pubqlang/22 канonical example)
-// ============================================================================
-
-// pubqlang/22 (chapter_022.html, листинг 1.33):
-// «Дата МЕЖДУ ДАТАВРЕМЯ(2012, 10, 01) И ДАТАВРЕМЯ(2012, 10, 31)»
 #[test]
 fn test_slice10b_between_canonical_russian_dates() {
     let root = parse_no_errors(
@@ -236,15 +144,12 @@ fn test_slice10b_between_canonical_russian_dates() {
     assert!(count_kind(&root, SyntaxKind::SDBL_BETWEEN_EXPR) >= 1);
 }
 
-// BETWEEN with simple integer bounds.
 #[test]
 fn test_slice10b_between_integer_bounds() {
     let root = parse_no_errors("ВЫБРАТЬ * ИЗ Т ГДЕ Поле МЕЖДУ 1 И 5");
     assert!(count_kind(&root, SyntaxKind::SDBL_BETWEEN_EXPR) >= 1);
 }
 
-// BETWEEN missing-AND recovery — local IDE-recovery allowance per
-// mini-spec §IDE-recovery allowances #12.
 #[test]
 fn test_slice10b_between_missing_and_recovery() {
     let parse = parse_sdbl("ВЫБРАТЬ * ИЗ Т ГДЕ Поле МЕЖДУ 1");
@@ -256,22 +161,12 @@ fn test_slice10b_between_missing_and_recovery() {
     );
 }
 
-// ============================================================================
-// 6. LIKE predicate (mini-spec §SdblLikeExpr;
-//    ITS pubqlang/23 canonical example)
-// ============================================================================
-
-// pubqlang/23 (chapter_023.html, листинг 1.34):
-// «Наименование ПОДОБНО "%Иван%"»
 #[test]
 fn test_slice10b_like_canonical_russian() {
     let root = parse_no_errors("ВЫБРАТЬ * ИЗ Т ГДЕ Наименование ПОДОБНО \"%Иван%\"");
     assert!(count_kind(&root, SyntaxKind::SDBL_LIKE_EXPR) >= 1);
 }
 
-// LIKE with ESCAPE clause — local IDE-recovery allowance per
-// mini-spec §IDE-recovery allowances #13 (ESCAPE / СПЕЦСИМВОЛ is
-// NOT documented in dumped ITS chapters).
 #[test]
 fn test_slice10b_like_with_escape_local_allowance() {
     let parse = parse_sdbl("ВЫБРАТЬ * ИЗ Т ГДЕ Поле ПОДОБНО \"abc%\" СПЕЦСИМВОЛ \"!\"");
@@ -283,23 +178,12 @@ fn test_slice10b_like_with_escape_local_allowance() {
     );
 }
 
-// ============================================================================
-// 7. REFS predicate (mini-spec §SdblRefsExpr;
-//    ITS pubqlang/40 canonical example)
-// ============================================================================
-
-// pubqlang/40 (chapter_040.html):
-// «(ОстаткиТоваров.Регистратор ССЫЛКА Документ.ПриходнаяНакладная)»
 #[test]
 fn test_slice10b_refs_canonical_russian() {
     let root = parse_no_errors("ВЫБРАТЬ * ИЗ Т ГДЕ Регистратор ССЫЛКА Документ.ПриходнаяНакладная");
     assert!(count_kind(&root, SyntaxKind::SDBL_REFS_EXPR) >= 1);
 }
 
-// Deep MDO chain — REFS is greedy (mini-spec §SdblRefsExpr).
-// English segment names avoid collision with Russian keywords
-// (e.g. `В` lexes as `KwIn` rather than `Ident`, so a chain like
-// `А.Б.В` would terminate after the second segment).
 #[test]
 fn test_slice10b_refs_deep_mdo_chain() {
     let root = parse_no_errors("SELECT * FROM T WHERE Field REFS Catalog.Products.Item");
@@ -310,12 +194,6 @@ fn test_slice10b_refs_deep_mdo_chain() {
     assert!(text.contains("Item"));
 }
 
-// ============================================================================
-// 8. CAST primitive types (mini-spec §CAST type specification;
-//    ITS pubqlang/40 canonical example)
-// ============================================================================
-
-// pubqlang/40 (chapter_040.html): «ВЫРАЗИТЬ(... КАК ЧИСЛО(8,2))».
 #[test]
 fn test_slice10b_cast_number_two_args() {
     let root = parse_no_errors("ВЫБРАТЬ ВЫРАЗИТЬ(Поле КАК ЧИСЛО(8, 2)) ИЗ Т");
@@ -323,27 +201,18 @@ fn test_slice10b_cast_number_two_args() {
     assert!(count_kind(&root, SyntaxKind::SDBL_FUNCTION_CALL) >= 1);
 }
 
-// CAST with primitive STRING(length).
 #[test]
 fn test_slice10b_cast_string_with_length() {
     let root = parse_no_errors("ВЫБРАТЬ ВЫРАЗИТЬ(Поле КАК СТРОКА(200)) ИЗ Т");
     assert!(count_kind(&root, SyntaxKind::SDBL_TYPE) >= 1);
 }
 
-// CAST with primitive DATE (no parameters).
 #[test]
 fn test_slice10b_cast_date_no_params() {
     let root = parse_no_errors("ВЫБРАТЬ ВЫРАЗИТЬ(Поле КАК ДАТА) ИЗ Т");
     assert!(count_kind(&root, SyntaxKind::SDBL_TYPE) >= 1);
 }
 
-// ============================================================================
-// 9. CAST MDO type and member access (mini-spec §CAST type
-//    specification; ITS pubqlang/40 canonical example)
-// ============================================================================
-
-// pubqlang/40 (chapter_040.html):
-// «ВЫРАЗИТЬ (ОстаткиТоваров.Регистратор КАК Документ.ПриходнаяНакладная).Поставщик»
 #[test]
 fn test_slice10b_cast_mdo_with_member_access_canonical() {
     let root = parse_no_errors(
@@ -359,21 +228,12 @@ fn test_slice10b_cast_mdo_with_member_access_canonical() {
     assert!(count_kind(&root, SyntaxKind::SDBL_TYPE) >= 1);
 }
 
-// CAST with simple MDO type (no member access).
 #[test]
 fn test_slice10b_cast_mdo_simple() {
     let root = parse_no_errors("ВЫБРАТЬ ВЫРАЗИТЬ(Поле КАК Справочник.Товары) ИЗ Т");
     assert!(count_kind(&root, SyntaxKind::SDBL_TYPE) >= 1);
 }
 
-// ============================================================================
-// 10. CASE expressions (mini-spec §CASE expressions;
-//     ITS pubqlang/40 canonical example)
-// ============================================================================
-
-// pubqlang/40 (chapter_040.html):
-// «ВЫБОР КОГДА Товары.ЭтоГруппа = ИСТИНА ТОГДА "Это группа"
-//        ИНАЧЕ "Это элемент" КОНЕЦ КАК ПризнакГруппы»
 #[test]
 fn test_slice10b_case_searched_canonical_russian() {
     let root = parse_no_errors(
@@ -389,8 +249,6 @@ fn test_slice10b_case_searched_canonical_russian() {
     );
 }
 
-// Simple CASE — operand expression as first child node BEFORE
-// any SdblWhenClause (HIR contract at case_expr.rs:40-45).
 #[test]
 fn test_slice10b_case_simple_form_operand_first() {
     let root = parse_no_errors("ВЫБРАТЬ ВЫБОР Поле КОГДА 1 ТОГДА \"А\" ИНАЧЕ \"Б\" КОНЕЦ ИЗ Т");
@@ -404,7 +262,6 @@ fn test_slice10b_case_simple_form_operand_first() {
     );
 }
 
-// CASE with multiple WHEN clauses.
 #[test]
 fn test_slice10b_case_multiple_when_clauses() {
     let root =
@@ -415,20 +272,12 @@ fn test_slice10b_case_multiple_when_clauses() {
     );
 }
 
-// ============================================================================
-// 11. column_or_function dispatch (mini-spec §Column references and
-//     function calls)
-// ============================================================================
-
-// COUNT(*) — function call with bare `*` argument. Mini-spec §Atoms
-// + §SdblFunctionCall.
 #[test]
 fn test_slice10b_count_asterisk() {
     let root = parse_no_errors("ВЫБРАТЬ КОЛИЧЕСТВО(*) ИЗ Т");
     assert!(count_kind(&root, SyntaxKind::SDBL_FUNCTION_CALL) >= 1);
 }
 
-// Dot-chain column reference — `Т.Х.Y` flat token chain.
 #[test]
 fn test_slice10b_dot_chain_column_ref() {
     let root = parse_no_errors("ВЫБРАТЬ Т.Х.Y ИЗ Т");
@@ -437,13 +286,6 @@ fn test_slice10b_dot_chain_column_ref() {
     assert!(text.contains("Т") && text.contains("Х") && text.contains("Y"));
 }
 
-// Inline tabular field syntax — Т.ТабЧасть.(Поле1, Поле2).
-// Mini-spec §Inline tabular field syntax.
-//
-// SdblInlineTableFields wraps the result of `selected_fields()`
-// (Slice 7), which emits an SdblFieldList containing
-// SdblSelectedField children — so SdblSelectedField appears as a
-// descendant (not a direct child) of SdblInlineTableFields.
 #[test]
 fn test_slice10b_inline_tabular_fields() {
     let root = parse_no_errors("ВЫБРАТЬ Т.ТабЧасть.(Поле1, Поле2) ИЗ Т");
@@ -457,9 +299,6 @@ fn test_slice10b_inline_tabular_fields() {
     );
 }
 
-// DISTINCT / РАЗЛИЧНЫЕ aggregate prefix —
-// pubqlang/21 (chapter_021.html, листинг 1.29):
-// «КОЛИЧЕСТВО(РАЗЛИЧНЫЕ ЗаказТовара.Клиент)»
 #[test]
 fn test_slice10b_distinct_aggregate_prefix_canonical() {
     let root = parse_no_errors("ВЫБРАТЬ КОЛИЧЕСТВО(РАЗЛИЧНЫЕ ЗаказТовара.Клиент) ИЗ Т");
@@ -471,15 +310,6 @@ fn test_slice10b_distinct_aggregate_prefix_canonical() {
     );
 }
 
-// ============================================================================
-// 12. Function-call clause-keyword recovery (codex Round-1 finding 2
-//     → C2 FIX). Mini-spec §SdblFunctionCall + §IDE-recovery
-//     allowances #15. MANDATORY per Slice 10b plan v7 §C3.
-// ============================================================================
-
-// EN regression gate for the C2 fix. Pre-C2 parser hijacked FROM as
-// an Ident-shaped argument; post-C2 parser leaves FROM for the
-// outer SELECT body.
 #[test]
 fn test_slice10b_func_call_clause_keyword_recovery_en() {
     let input = "SELECT func(x, FROM T)";
@@ -503,7 +333,6 @@ fn test_slice10b_func_call_clause_keyword_recovery_en() {
     );
 }
 
-// RU regression gate for the C2 fix.
 #[test]
 fn test_slice10b_func_call_clause_keyword_recovery_ru() {
     let input = "ВЫБРАТЬ функ(х, ИЗ Т)";
@@ -526,23 +355,6 @@ fn test_slice10b_func_call_clause_keyword_recovery_ru() {
         func_text
     );
 }
-
-// ============================================================================
-// 13. SELECT-field predicate descendant guards (codex Round-1
-//     finding 3 → 3-of-13 consumer correction; Round-3 expansion to
-//     5 named tests). MANDATORY per Slice 10b plan v7 §C3.
-//
-// Producer-side invariant: `expression(p)` always wraps in
-// `logical_or_expr` (Slice 10a) so consumer-side
-// `SdblSelectedField::expression()` (which directly matches only 3
-// of the 13 Slice-10b kinds) reaches predicate / CASE descendants
-// via `SdblLogicalOrExpr` traversal.
-//
-// Each guard test asserts:
-//  1. SdblSelectedField direct child IS SdblLogicalOrExpr;
-//  2. SdblSelectedField direct child IS NOT a bare predicate /
-//     CASE / comparison node.
-// ============================================================================
 
 #[test]
 fn test_slice10b_select_field_comparison_descendant_guard() {
@@ -588,21 +400,6 @@ fn test_slice10b_select_field_case_descendant_guard() {
     assert!(!kinds.contains(&SyntaxKind::SDBL_CASE_EXPR));
 }
 
-// ============================================================================
-// 14. Preserved behaviour #2 — leading NOT capture and orphan-NOT
-//     boundary (mini-spec §IDE-recovery allowances #14;
-//     attestation §Preserved pre-refactor behaviours #2)
-//
-// `predicate_expr` consumes a leading `KwNot` BEFORE probing for
-// IN/IS/BETWEEN/LIKE/REFS/comparison. The consumed NOT becomes a
-// direct token child of the eventual predicate wrapper when a
-// branch matches; if no branch matches, the marker is abandoned
-// and the consumed NOT remains as a stray token in the syntax
-// tree (the orphan-NOT boundary).
-// ============================================================================
-
-// NOT BETWEEN — KwNot direct child appears between operand and
-// МЕЖДУ keyword inside SdblBetweenExpr.
 #[test]
 fn test_slice10b_not_between_captures_kwnot() {
     let root = parse_no_errors("ВЫБРАТЬ * ИЗ Т ГДЕ Поле НЕ МЕЖДУ 1 И 5");
@@ -616,8 +413,6 @@ fn test_slice10b_not_between_captures_kwnot() {
     assert!(between_text.contains("МЕЖДУ"));
 }
 
-// NOT LIKE — KwNot direct child appears between operand and
-// ПОДОБНО keyword inside SdblLikeExpr.
 #[test]
 fn test_slice10b_not_like_captures_kwnot() {
     let root = parse_no_errors("ВЫБРАТЬ * ИЗ Т ГДЕ Поле НЕ ПОДОБНО \"X%\"");
@@ -631,17 +426,6 @@ fn test_slice10b_not_like_captures_kwnot() {
     assert!(like_text.contains("ПОДОБНО"));
 }
 
-// Orphan-NOT no-branch boundary — input `1 НЕ 2` consumes `1` as
-// additive operand, consumes `НЕ` as the leading NOT prefix, then
-// finds neither a predicate keyword nor a comparison operator at
-// `2`. The marker is abandoned and `НЕ` remains as a stray token
-// in the syntax tree. Mini-spec §IDE-recovery allowances #14.
-//
-// The contract pinned here: NO predicate / comparison wrapper is
-// emitted for this input, so a future rewrite that "fixes" the
-// orphan-NOT boundary by emitting a partial wrapper would break
-// this test and trigger an explicit decision in the next slice
-// instead of silently changing the AST shape.
 #[test]
 fn test_slice10b_orphan_not_no_predicate_wrapper() {
     let parse = parse_sdbl("ВЫБРАТЬ * ИЗ Т ГДЕ 1 НЕ 2");
@@ -667,8 +451,6 @@ fn test_slice10b_orphan_not_no_predicate_wrapper() {
         root
     );
 
-    // The НЕ token must still appear in the tree as a stray
-    // (consumed but not wrapped).
     let has_ne_token = root
         .descendants_with_tokens()
         .filter_map(|c| c.into_token())

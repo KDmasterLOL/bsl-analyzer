@@ -1,5 +1,3 @@
-//! LSP protocol type conversions.
-
 pub mod from_proto;
 pub mod position_encoding;
 pub mod progress;

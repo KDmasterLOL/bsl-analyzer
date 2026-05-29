@@ -1,5 +1,3 @@
-//! Forbids export methods in managed forms unless they are explicitly `&НаКлиенте`.
-
 use bsl_metadata::{FormType, ModuleType};
 use hir::AnnotationKind;
 use ide_db::TextRange;
@@ -22,7 +20,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Check for server-side export methods in managed forms.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::ServerSideExportFormMethod;
 
@@ -32,12 +29,10 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     let metadata = ctx.module_metadata();
 
-    // Only FormModule
     if metadata.module_type != ModuleType::FormModule {
         return Vec::new();
     }
 
-    // Only managed forms
     match &metadata.form {
         Some(form) if form.form_type == FormType::Managed => {}
         _ => return Vec::new(),
@@ -46,14 +41,12 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let item_tree = ctx.item_tree();
     let mut diagnostics = Vec::new();
 
-    // Check procedures
     for (_, proc) in item_tree.procedures() {
         if proc.is_export && !has_client_annotation(&proc.annotations) {
             diagnostics.push(make_diagnostic(proc.name_range, code, ctx));
         }
     }
 
-    // Check functions
     for (_, func) in item_tree.functions() {
         if func.is_export && !has_client_annotation(&func.annotations) {
             diagnostics.push(make_diagnostic(func.name_range, code, ctx));
@@ -63,12 +56,10 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics
 }
 
-/// Check if method has `&НаКлиенте` annotation.
 fn has_client_annotation(annotations: &[hir::Annotation]) -> bool {
     annotations.iter().any(|a| a.kind == AnnotationKind::AtClient)
 }
 
-/// Create diagnostic for export method without client annotation.
 fn make_diagnostic(range: TextRange, code: DiagnosticCode, ctx: &DiagnosticsContext) -> Diagnostic {
     Diagnostic {
         code,

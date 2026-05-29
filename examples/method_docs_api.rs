@@ -1,17 +1,7 @@
-//! Example demonstrating HIR-based method documentation API.
-//!
-//! This example shows how to:
-//! 1. Parse a BSL file
-//! 2. Get method documentation via HIR
-//! 3. Access structured documentation fields
-//!
-//! Run with: `cargo run --example method_docs_api`
-
 use ide_db::{base_db::SourceDatabase, RootDatabaseImpl};
 use test_fixture::Fixture;
 
 fn main() {
-    // Example BSL code with full documentation
     let fixture_text = r#"
 //- /test.bsl
 // Вычисляет сумму двух чисел.
@@ -59,24 +49,20 @@ fn main() {
     println!("║          HIR Method Documentation API Demo                    ║");
     println!("╚════════════════════════════════════════════════════════════════╝\n");
 
-    // Parse fixture
     let fixture = Fixture::parse(fixture_text);
     let file_id = fixture.first_file().expect("fixture should have a file");
 
-    // Create database
     let mut db = RootDatabaseImpl::new();
     for (fid, file) in &fixture.files {
         db.set_file_text(*fid, &file.content);
     }
 
-    // Get module
     let module_id = hir_def::ModuleId::new(file_id);
     let module_data = db.module_data(module_id);
 
     println!("📄 File: test.bsl\n");
     println!("Found {} functions\n", module_data.functions.len());
 
-    // Iterate through all functions
     for (idx, method_id) in module_data.functions.iter().enumerate() {
         let method = hir::Method::new(&db, *method_id);
         let name = method.name();
@@ -85,21 +71,17 @@ fn main() {
         println!("│ Function #{}: {}", idx + 1, name);
         println!("└─────────────────────────────────────────────────────────────┘");
 
-        // Get documentation
         if let Some(docs) = method.docs() {
-            // Purpose
             if let Some(purpose) = &docs.purpose {
                 println!("\n📝 Purpose:");
                 println!("   {}", purpose);
             }
 
-            // Hyperlink
             if let Some(link) = &docs.link {
                 println!("\n🔗 Hyperlink:");
                 println!("   {}", link);
             }
 
-            // Parameters
             if !docs.parameters.is_empty() {
                 println!("\n📋 Parameters:");
                 for param in &docs.parameters {
@@ -117,7 +99,6 @@ fn main() {
                 }
             }
 
-            // Return value
             if !docs.returned_value.is_empty() {
                 println!("\n↩️  Return Value:");
                 for type_doc in &docs.returned_value {
@@ -128,7 +109,6 @@ fn main() {
                     }
                     println!();
 
-                    // Structured fields
                     if !type_doc.parameters.is_empty() {
                         println!("     Fields:");
                         for field in &type_doc.parameters {
@@ -149,7 +129,6 @@ fn main() {
                 }
             }
 
-            // Examples
             if !docs.examples.is_empty() {
                 println!("\n💡 Examples:");
                 for example in &docs.examples {
@@ -157,7 +136,6 @@ fn main() {
                 }
             }
 
-            // Status indicators
             println!();
             if docs.is_hyperlink() {
                 println!("   🔗 This is a hyperlink reference");

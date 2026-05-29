@@ -1,13 +1,7 @@
-//! Diagnostic codes.
-
 use strum::{Display, EnumIter, EnumString, IntoStaticStr};
 
-/// Diagnostic code.
-///
-/// Uses strum for automatic as_str/from_str generation and iteration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumString, Display, IntoStaticStr, EnumIter)]
 pub enum DiagnosticCode {
-    // Tier 1: Simple (syntax-only)
     ParseError,
     CanonicalSpellingKeywords,
     ConsecutiveEmptyLines,
@@ -53,7 +47,6 @@ pub enum DiagnosticCode {
     NestedFunctionInParameters,
     Typo,
 
-    // Tier 2: Medium (requires symbol table)
     AllFunctionPathMustHaveReturn,
     FunctionShouldHaveReturn,
     ProcedureReturnsValue,
@@ -141,7 +134,6 @@ pub enum DiagnosticCode {
     UsingThisForm,
     WrongUseFunctionProceedWithCall,
 
-    // Tier 3: Metadata (requires 1C configuration metadata)
     WrongHttpServiceHandler,
     WrongWebServiceHandler,
     WrongDataPathForFormElements,
@@ -177,16 +169,12 @@ pub enum DiagnosticCode {
     TransferringParametersBetweenClientAndServer,
     UnsafeFindByCode,
 
-    // Type-inference diagnostics (BSL-TY-*)
-    // Emitted by `hir-ty::infer` during type inference, wired into
-    // ide-diagnostics via the `hir_inference_dispatch` collector.
     UnresolvedMethodCall,
     MismatchedArgCount,
     TypeMismatch,
     UnresolvedField,
     ReadOnlyPropertyAssignment,
 
-    // SDBL Diagnostics
     AssignAliasFieldsInQuery,
     FieldsFromJoinsWithoutIsNull,
     FullOuterJoinQuery,
@@ -207,7 +195,6 @@ pub enum DiagnosticCode {
 }
 
 impl DiagnosticCode {
-    /// Returns the string representation (for LSP and SonarQube).
     pub fn as_str(&self) -> &'static str {
         (*self).into()
     }

@@ -1,6 +1,3 @@
-//! Thin wrappers around [`camino::Utf8PathBuf`], distinguishing
-//! between absolute and relative paths.
-
 use std::{
     borrow::Borrow,
     ffi::OsStr,
@@ -10,7 +7,6 @@ use std::{
 
 pub use camino::{Utf8Component, Utf8Components, Utf8Path, Utf8PathBuf, Utf8Prefix};
 
-/// A [`Utf8PathBuf`] that is guaranteed to be absolute.
 #[derive(Debug, Clone, Ord, PartialOrd, Eq, Hash)]
 pub struct AbsPathBuf(Utf8PathBuf);
 
@@ -87,21 +83,11 @@ impl<P: AsRef<Path> + ?Sized> PartialEq<P> for AbsPathBuf {
 }
 
 impl AbsPathBuf {
-    /// Wrap the given absolute path in `AbsPathBuf`
-    ///
-    /// # Panics
-    ///
-    /// Panics if `path` is not absolute.
     pub fn assert(path: Utf8PathBuf) -> AbsPathBuf {
         AbsPathBuf::try_from(path)
             .unwrap_or_else(|path| panic!("expected absolute path, got {path}"))
     }
 
-    /// Wrap the given absolute path in `AbsPathBuf`
-    ///
-    /// # Panics
-    ///
-    /// Panics if `path` is not absolute.
     pub fn assert_utf8(path: PathBuf) -> AbsPathBuf {
         AbsPathBuf::assert(
             Utf8PathBuf::from_path_buf(path)
@@ -109,35 +95,14 @@ impl AbsPathBuf {
         )
     }
 
-    /// Coerces to an `AbsPath` slice.
-    ///
-    /// Equivalent of [`Utf8PathBuf::as_path`] for `AbsPathBuf`.
     pub fn as_path(&self) -> &AbsPath {
         AbsPath::assert(self.0.as_path())
     }
 
-    /// Equivalent of [`Utf8PathBuf::pop`] for `AbsPathBuf`.
-    ///
-    /// Note that this won't remove the root component, so `self` will still be
-    /// absolute.
     pub fn pop(&mut self) -> bool {
         self.0.pop()
     }
 
-    /// Equivalent of [`PathBuf::push`] for `AbsPathBuf`.
-    ///
-    /// Extends `self` with `path`.
-    ///
-    /// If `path` is absolute, it replaces the current path.
-    ///
-    /// On Windows:
-    ///
-    /// * if `path` has a root but no prefix (e.g., `\windows`), it
-    ///   replaces everything except for the prefix (if any) of `self`.
-    /// * if `path` has a prefix but no root, it replaces `self`.
-    /// * if `self` has a verbatim prefix (e.g. `\\?\C:\windows`)
-    ///   and `path` is not empty, the new path is normalized: all references
-    ///   to `.` and `..` are removed.
     pub fn push<P: AsRef<Utf8Path>>(&mut self, suffix: P) {
         self.0.push(suffix)
     }
@@ -153,7 +118,6 @@ impl fmt::Display for AbsPathBuf {
     }
 }
 
-/// Wrapper around an absolute [`Utf8Path`].
 #[derive(Debug, Ord, PartialOrd, Eq, Hash)]
 #[repr(transparent)]
 pub struct AbsPath(Utf8Path);
@@ -201,48 +165,27 @@ impl<'a> TryFrom<&'a Utf8Path> for &'a AbsPath {
 }
 
 impl AbsPath {
-    /// Wrap the given absolute path in `AbsPath`
-    ///
-    /// # Panics
-    ///
-    /// Panics if `path` is not absolute.
     pub fn assert(path: &Utf8Path) -> &AbsPath {
         assert!(path.is_absolute(), "{path} is not absolute");
         unsafe { &*(path as *const Utf8Path as *const AbsPath) }
     }
 
-    /// Equivalent of [`Utf8Path::parent`] for `AbsPath`.
     pub fn parent(&self) -> Option<&AbsPath> {
         self.0.parent().map(AbsPath::assert)
     }
 
-    /// Equivalent of [`Utf8Path::join`] for `AbsPath` with an additional normalize step afterwards.
     pub fn absolutize(&self, path: impl AsRef<Utf8Path>) -> AbsPathBuf {
         self.join(path).normalize()
     }
 
-    /// Equivalent of [`Utf8Path::join`] for `AbsPath`.
     pub fn join(&self, path: impl AsRef<Utf8Path>) -> AbsPathBuf {
         Utf8Path::join(self.as_ref(), path).try_into().unwrap()
     }
 
-    /// Normalize the given path:
-    /// - Removes repeated separators: `/a//b` becomes `/a/b`
-    /// - Removes occurrences of `.` and resolves `..`.
-    /// - Removes trailing slashes: `/a/b/` becomes `/a/b`.
-    ///
-    /// # Example
-    /// ```ignore
-    /// # use paths::AbsPathBuf;
-    /// let abs_path_buf = AbsPathBuf::assert("/a/../../b/.//c//".into());
-    /// let normalized = abs_path_buf.normalize();
-    /// assert_eq!(normalized, AbsPathBuf::assert("/b/c".into()));
-    /// ```
     pub fn normalize(&self) -> AbsPathBuf {
         AbsPathBuf(normalize_path(&self.0))
     }
 
-    /// Equivalent of [`Utf8Path::to_path_buf`] for `AbsPath`.
     pub fn to_path_buf(&self) -> AbsPathBuf {
         AbsPathBuf::try_from(self.0.to_path_buf()).unwrap()
     }
@@ -253,9 +196,6 @@ impl AbsPath {
         )
     }
 
-    /// Equivalent of [`Utf8Path::strip_prefix`] for `AbsPath`.
-    ///
-    /// Returns a relative path.
     pub fn strip_prefix(&self, base: &AbsPath) -> Option<&RelPath> {
         self.0.strip_prefix(base).ok().map(RelPath::new_unchecked)
     }
@@ -269,16 +209,6 @@ impl AbsPath {
     pub fn name_and_extension(&self) -> Option<(&str, Option<&str>)> {
         Some((self.file_stem()?, self.extension()))
     }
-
-    // region:delegate-methods
-
-    // Note that we deliberately don't implement `Deref<Target = Utf8Path>` here.
-    //
-    // The problem with `Utf8Path` is that it directly exposes convenience IO-ing
-    // methods. For example, `Utf8Path::exists` delegates to `fs::metadata`.
-    //
-    // For `AbsPath`, we want to make sure that this is a POD type, and that all
-    // IO goes via `fs`. That way, it becomes easier to mock IO when we need it.
 
     pub fn file_name(&self) -> Option<&str> {
         self.0.file_name()
@@ -307,7 +237,6 @@ impl AbsPath {
     pub fn components(&self) -> Utf8Components<'_> {
         self.0.components()
     }
-    // endregion:delegate-methods
 }
 
 impl fmt::Display for AbsPath {
@@ -316,7 +245,6 @@ impl fmt::Display for AbsPath {
     }
 }
 
-/// Wrapper around a relative [`Utf8PathBuf`].
 #[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub struct RelPathBuf(Utf8PathBuf);
 
@@ -363,15 +291,11 @@ impl TryFrom<&str> for RelPathBuf {
 }
 
 impl RelPathBuf {
-    /// Coerces to a `RelPath` slice.
-    ///
-    /// Equivalent of [`Utf8PathBuf::as_path`] for `RelPathBuf`.
     pub fn as_path(&self) -> &RelPath {
         RelPath::new_unchecked(self.0.as_path())
     }
 }
 
-/// Wrapper around a relative [`Utf8Path`].
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq, Hash)]
 #[repr(transparent)]
 pub struct RelPath(Utf8Path);
@@ -389,12 +313,10 @@ impl AsRef<Path> for RelPath {
 }
 
 impl RelPath {
-    /// Creates a new `RelPath` from `path`, without checking if it is relative.
     pub fn new_unchecked(path: &Utf8Path) -> &RelPath {
         unsafe { &*(path as *const Utf8Path as *const RelPath) }
     }
 
-    /// Equivalent of [`Utf8Path::to_path_buf`] for `RelPath`.
     pub fn to_path_buf(&self) -> RelPathBuf {
         RelPathBuf::try_from(self.0.to_path_buf()).unwrap()
     }
@@ -408,7 +330,6 @@ impl RelPath {
     }
 }
 
-/// Taken from <https://github.com/rust-lang/cargo/blob/79c769c3d7b4c2cf6a93781575b7f592ef974255/src/cargo/util/paths.rs#L60-L85>
 fn normalize_path(path: &Utf8Path) -> Utf8PathBuf {
     let mut components = path.components().peekable();
     let mut ret = if let Some(c @ Utf8Component::Prefix(..)) = components.peek().copied() {

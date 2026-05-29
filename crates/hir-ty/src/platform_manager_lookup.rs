@@ -1,41 +1,3 @@
-//! Platform-method lookup for managers and metadata refs.
-//!
-//! Bridges two receiver shapes into the platform-data catalogue:
-//!
-//! - `Ty::ObjectManager { kind, name }` → methods indexed under
-//!   `"CatalogManager.<Имя>"` / `"DocumentManager.<Имя>"` …. The user
-//!   surface is `Справочники.Номенклатура.СоздатьЭлемент()` (3-segment
-//!   call) or `М.СоздатьЭлемент()` after `М = Справочники.Номенклатура`
-//!   (aliased manager — method-lookup path).
-//! - `Ty::MetadataRef { kind, name }` for object/ref flavours →
-//!   methods indexed under `"CatalogObject.<Имя>"` / `"CatalogRef.<Имя>"`
-//!   …. The user surface is `Спр.Записать()` after
-//!   `Спр = Справочники.Номенклатура.СоздатьЭлемент()`.
-//!
-//! Platform-data stores these method groups with composite `type_name`
-//! (the `"ManagerType.<Имя справочника>"` shape) and placeholder
-//! `name = "<Имя"`; the real Russian method name lives in
-//! `docs.syntax`, and the English name lives in `english_name` after
-//! the last `.`. This mirrors the matching logic first introduced in
-//! `symbol-info::adapters::platform_manager::build`.
-//!
-//! ## Return-type rewriting
-//!
-//! `PlatformMethod::return_type` is a generic string (`"СправочникОбъект"`,
-//! `"СправочникСсылка"`, …) that intentionally drops the concrete MDO
-//! name. Inference has to re-bind it to the current `(mdo_type, mdo_name)`
-//! context so chained calls like `Спр.Записать()` keep resolving. The
-//! rewrite table lives in [`map_generic_metadata_return_type`]; anything
-//! it doesn't recognise falls through to [`crate::method_lookup::lower_platform_type_name`]
-//! (primitives, `ValueTable`, opaque `Ty::PlatformObject`).
-//!
-//! ## Workspace > platform priority
-//!
-//! The 3-segment-call caller consults `Resolver::resolve_three_level_method`
-//! first (workspace `ManagerModule.bsl` with exported method) and only
-//! falls back here on `MethodNotFound`. A user-defined override therefore
-//! always wins; platform fills the gap when no workspace method exists.
-
 use bsl_metadata::MdoType;
 use bsl_platform::{find_prefixed_method, PlatformMethod};
 use bsl_types::builders::Builders;
@@ -48,42 +10,13 @@ use hir_def::Name;
 use crate::lower::type_string::{lower_param_type_string_typeid, lower_platform_type_name_typeid};
 use crate::method_lookup::lower_overloads_typeid;
 
-/// Outcome of a successful platform-method lookup.
-///
-/// Deliberately does not carry `method_id` / `is_export` — platform
-/// methods live outside the workspace symbol tree and are always
-/// callable. This is the stripped mirror of
-/// [`crate::method_resolution::MethodResolution`] with only the fields
-/// inference actually uses (signature for arg-count / arg-type checks,
-/// return type for the call's `Ty`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlatformMethodResolution {
-    /// Signature lowered to type-kernel ids (parameter types + return type).
     pub signature: FunctionSignature,
-    /// Convenience clone of `signature.ret` — matches the shape of
-    /// `MethodResolution.return_type` so inference call-sites can
-    /// read without dereferencing the signature.
     pub return_ty: TypeId,
-    /// Per-overload parameter lists for multi-overload composite methods
-    /// (`InformationRegisterManager.Get`,
-    /// `AccountingRegisterRecordSet.Move`,
-    /// `BusinessProcessManager.FindByNumber` …). Empty for
-    /// single-signature methods — `signature.params` already covers
-    /// them. Argument-type checks accept the call when ANY overload
-    /// accepts it; without this, `arg_diagnostics_query` saw composite
-    /// multi-overload methods as strictly typed against the first
-    /// signature only and false-fired on legitimate alternative call
-    /// shapes.
     pub overloads: Vec<Vec<TypeId>>,
 }
 
-/// Resolve `<manager-collective>.<mdo_name>.<method>()` through platform data.
-///
-/// Returns `None` when:
-/// - `mdo_type` has no `manager_type_prefix` (e.g. `Cube`,
-///   `DimensionTable`, `CommonModule`);
-/// - no indexed method under that prefix matches `method_name`
-///   bilingually.
 pub fn resolve_platform_manager_method(
     db: &dyn TypeKernelDb,
     mdo_type: MdoType,
@@ -95,14 +28,6 @@ pub fn resolve_platform_manager_method(
     Some(build_resolution(db, &method, mdo_type, mdo_name))
 }
 
-/// Resolve `<metadata-ref>.<method>()` through platform data.
-///
-/// Covers `Ty::MetadataRef { kind, name }` for the object/ref flavours
-/// (`CatalogObject`, `CatalogRef`, `DocumentObject`, …). The prefix and
-/// the parent `MdoType` (used for context-aware return rewriting) both
-/// come from [`metadata_kind_to_prefix_and_mdo`]; kinds without a
-/// platform surface (register dimensions, tabular sections) return
-/// `None`.
 pub fn resolve_platform_metadata_ref_method(
     db: &dyn TypeKernelDb,
     kind: MetadataKind,
@@ -114,13 +39,6 @@ pub fn resolve_platform_metadata_ref_method(
     Some(build_resolution(db, &method, parent_mdo, mdo_name))
 }
 
-/// Build a `PlatformMethodResolution` from a resolved platform method in
-/// the context of `(mdo_type, mdo_name)`.
-///
-/// Parameter types and the return type lower through
-/// [`lower_platform_type_name`] for the scalar cases and
-/// [`map_generic_metadata_return_type`] for the manager-relative
-/// generics (`"СправочникОбъект"` → `Ty::MetadataRef { CatalogObject, mdo_name }`).
 pub(crate) fn build_resolution(
     db: &dyn TypeKernelDb,
     method: &PlatformMethod,
@@ -157,18 +75,6 @@ pub(crate) fn build_resolution(
     PlatformMethodResolution { signature, return_ty, overloads: lower_overloads_typeid(db, method) }
 }
 
-/// Resolve a method on a flavour-scoped any-reference
-/// ([`TypeKind::AnyMetadataRef`]) — `ЛюбаяСсылка<Catalog>`.
-///
-/// Same platform surface as a concrete `MetadataRef(*Ref)` of that
-/// flavour, minus the concrete name: methods are found under the flavour
-/// prefix (`CatalogRef.*.<method>`), but name-bound generic returns
-/// cannot be made concrete. A same-flavour ref return therefore widens
-/// back to `AnyMetadataRef { mdo_type }`; an object return (no name to
-/// bind) degrades to `Unknown`.
-///
-/// `None` when the flavour has no `*Ref` kind, no composite platform
-/// prefix, or the method is not found under that prefix.
 pub fn resolve_platform_any_metadata_ref_method(
     db: &dyn TypeKernelDb,
     mdo_type: MdoType,
@@ -194,9 +100,7 @@ pub fn resolve_platform_any_metadata_ref_method(
         .return_type
         .as_ref()
         .map(|raw| match map_generic_metadata_return_type(raw, parent_mdo) {
-            // Same-flavour ref return: re-widen to the any-ref (no name).
             Some(kind) if kind.ref_mdo_type().is_some() => db.any_metadata_ref(parent_mdo),
-            // Object / other generic return: no name to bind → Unknown.
             Some(_) => db.unknown(),
             None => lower_platform_type_name_typeid(db, raw),
         })
@@ -215,7 +119,6 @@ pub fn resolve_platform_any_metadata_ref_method(
     })
 }
 
-/// Kernel-native counterpart of [`map_generic_metadata_return_type`].
 pub(crate) fn map_generic_metadata_return_type_typeid(
     db: &dyn TypeKernelDb,
     raw: &str,
@@ -226,20 +129,6 @@ pub(crate) fn map_generic_metadata_return_type_typeid(
     Some(db.metadata_ref(kind, mdo_name.as_str().to_string(), &RootConfigCtx))
 }
 
-/// Map a `MetadataKind` to `(prefix, parent_mdo)` for platform lookup.
-///
-/// - `prefix` is the English composite-type prefix used in
-///   `PlatformMethod::type_name` (`"CatalogObject"`, `"CatalogRef"`, …).
-/// - `parent_mdo` is the owning MDO flavour — threaded into
-///   [`map_generic_metadata_return_type`] so a method on
-///   `MetadataRef { CatalogObject, "Валюты" }` returning generic
-///   `"СправочникСсылка"` re-binds to
-///   `MetadataRef { CatalogRef, "Валюты" }`.
-///
-/// `None` for kinds without a platform surface (register dimensions,
-/// resources, attributes, tabular sections, the synthetic
-/// `RegisterFilter`, and the bare `*Ref` register reference forms whose
-/// methods are not indexed under a composite prefix).
 pub(crate) fn metadata_kind_to_prefix_and_mdo(
     kind: MetadataKind,
 ) -> Option<(&'static str, MdoType)> {
@@ -258,10 +147,6 @@ pub(crate) fn metadata_kind_to_prefix_and_mdo(
         MetadataKind::ChartOfAccountsRef | MetadataKind::ChartOfAccountsObject => {
             MdoType::ChartOfAccounts
         }
-        // Register-record kinds — manager / record-set / record platform
-        // surfaces. The per-record variants (`*Record`) are the element
-        // types yielded by `Для каждого … Из …` over a record-set; their
-        // platform methods are indexed under `<Flavour>Record.<Имя>`.
         MetadataKind::InformationRegisterRecordManager
         | MetadataKind::InformationRegisterRecordSet
         | MetadataKind::InformationRegisterRecord => MdoType::InformationRegister,
@@ -274,12 +159,6 @@ pub(crate) fn metadata_kind_to_prefix_and_mdo(
         MetadataKind::CalculationRegisterRecordSet | MetadataKind::CalculationRegisterRecord => {
             MdoType::CalculationRegister
         }
-        // No-platform-prefix kinds: `platform_prefix` already returned
-        // `None` for these via `?` above, so these arms are unreachable
-        // in practice. Listed explicitly (no wildcard) so a new
-        // `MetadataKind` variant surfaces as a compiler error here and
-        // forces an authorial decision rather than silently bypassing
-        // the manager-prefix dispatch.
         MetadataKind::InformationRegisterRef
         | MetadataKind::AccumulationRegisterRef
         | MetadataKind::AccountingRegisterRef
@@ -294,19 +173,6 @@ pub(crate) fn metadata_kind_to_prefix_and_mdo(
     Some((prefix, parent_mdo))
 }
 
-/// Rewrite a generic platform return-type string to a concrete
-/// `Ty::MetadataRef` bound to `(mdo_type, mdo_name)`.
-///
-/// Returns `None` when `raw` is not a recognised manager-relative
-/// generic; the caller then falls through to
-/// [`lower_platform_type_name`] (primitives, value-types,
-/// `Ty::PlatformObject`).
-///
-/// The table mirrors [`MetadataKind::object_kind_for`] plus the
-/// corresponding `*Ref` variants — both directions are kept in sync by
-/// the `(raw, mdo_type) → MetadataKind` pair: producing an
-/// `ExchangePlanObject` for an `MdoType::Document` context would be
-/// a bug, so the match is keyed on both.
 pub(crate) fn map_generic_metadata_return_type(
     raw: &str,
     mdo_type: MdoType,
@@ -353,11 +219,6 @@ pub(crate) fn map_generic_metadata_return_type(
         ("ОтчётОбъект" | "ОтчетОбъект" | "ReportObject", MdoType::Report) => {
             MetadataKind::ReportObject
         }
-        // Register-record return forms: manager methods like
-        // `РегистрыСведений.X.СоздатьМенеджерЗаписи()` and
-        // `РегистрыНакопления.X.СоздатьНаборЗаписей()` produce a
-        // register-record receiver that platform method lookup and the
-        // workspace `RecordSetModule.bsl` resolver can act on.
         (
             "РегистрСведенийМенеджерЗаписи" | "InformationRegisterRecordManager",
             MdoType::InformationRegister,
@@ -378,11 +239,6 @@ pub(crate) fn map_generic_metadata_return_type(
             "РегистрРасчетаНаборЗаписей" | "CalculationRegisterRecordSet",
             MdoType::CalculationRegister,
         ) => MetadataKind::CalculationRegisterRecordSet,
-        // Per-record element forms: yielded by `Для каждого … Из …`
-        // over a register record-set. `iteration_lookup` calls into
-        // this same table, threading the `(record_kind, mdo_name)`
-        // pair so iteration over a register-set produces the matching
-        // `Ty::MetadataRef { *Record, mdo_name }` element.
         ("РегистрСведенийЗапись" | "InformationRegisterRecord", MdoType::InformationRegister) => {
             MetadataKind::InformationRegisterRecord
         }
@@ -408,7 +264,6 @@ mod tests {
     use bsl_types::kind::TypeKind;
     use bsl_types::testing::InMemoryDb;
 
-    /// §4.C drift-detector: kernel-native accessors mirror return_ty / overloads.
     #[test]
     fn platform_manager_typeid_round_trips_via_ty() {
         let db = InMemoryDb::new();
@@ -428,8 +283,6 @@ mod tests {
 
     #[test]
     fn manager_create_item_on_catalog_returns_catalog_object() {
-        // `Справочники.<Name>.СоздатьЭлемент()` must bind the generic
-        // `СправочникОбъект` return to `MetadataRef { CatalogObject, Name }`.
         let db = InMemoryDb::new();
         let res = resolve_platform_manager_method(
             &db,
@@ -451,9 +304,6 @@ mod tests {
 
     #[test]
     fn manager_find_by_code_on_catalog_returns_catalog_ref() {
-        // `НайтиПоКоду` returns the generic `СправочникСсылка` — must
-        // rebind to `MetadataRef { CatalogRef, Name }`, not a bare
-        // `PlatformObject("СправочникСсылка")`.
         let db = InMemoryDb::new();
         let res = resolve_platform_manager_method(
             &db,
@@ -471,14 +321,6 @@ mod tests {
 
     #[test]
     fn manager_find_by_code_param_lowers_to_union() {
-        // `НайтиПоКоду`'s first param is `param_type = "Число, Строка"` in
-        // platform_data. The bug: `build_resolution` used to lower this
-        // through `lower_platform_type_name` directly, which doesn't
-        // split on `,` — the whole string became `Ty::PlatformObject(
-        // "Число, Строка")` and `String → that` failed structural equality.
-        // Pin that comma-joined param_type lowers to a `Ty::Union` so
-        // `is_assignable(String, Number|String)` passes via the
-        // union-right rule.
         let db = InMemoryDb::new();
         let res = resolve_platform_manager_method(
             &db,
@@ -498,7 +340,6 @@ mod tests {
 
     #[test]
     fn manager_unknown_method_returns_none() {
-        // Not a platform method — lookup must fail, diagnostic stays.
         let db = InMemoryDb::new();
         assert!(resolve_platform_manager_method(
             &db,
@@ -511,7 +352,6 @@ mod tests {
 
     #[test]
     fn manager_english_method_name_resolves() {
-        // Bilingual gate — the English canonical name must hit too.
         let db = InMemoryDb::new();
         let res = resolve_platform_manager_method(
             &db,
@@ -528,7 +368,6 @@ mod tests {
 
     #[test]
     fn manager_mdo_without_prefix_returns_none() {
-        // CommonModule / Cube / DimensionTable have no `manager_type_prefix`.
         let db = InMemoryDb::new();
         assert!(resolve_platform_manager_method(
             &db,
@@ -541,8 +380,6 @@ mod tests {
 
     #[test]
     fn metadata_ref_catalog_object_resolves_write_as_procedure() {
-        // `CatalogObject.Записать()` is a procedure (return=None) —
-        // lookup must succeed with `Ty::Undefined` return.
         let db = InMemoryDb::new();
         let res = resolve_platform_metadata_ref_method(
             &db,
@@ -556,9 +393,6 @@ mod tests {
 
     #[test]
     fn any_metadata_ref_resolves_common_method_without_name() {
-        // A flavour-scoped any-ref (`ЛюбаяСсылка<Catalog>`) reaches the same
-        // `CatalogRef.*` platform surface as a named catalog ref — no
-        // concrete name required for the method itself.
         let db = InMemoryDb::new();
         let res = resolve_platform_any_metadata_ref_method(
             &db,
@@ -570,9 +404,6 @@ mod tests {
 
     #[test]
     fn any_metadata_ref_object_return_degrades_to_unknown() {
-        // `ПолучитьОбъект()` returns `СправочникОбъект` — a name-bound
-        // object kind. With no concrete name to bind, the nameless resolver
-        // must degrade it to `Unknown` rather than inventing a name.
         let db = InMemoryDb::new();
         let res = resolve_platform_any_metadata_ref_method(
             &db,
@@ -596,9 +427,6 @@ mod tests {
 
     #[test]
     fn any_metadata_ref_register_flavour_has_no_ref_surface() {
-        // Register `*Ref` kinds carry no composite platform prefix, so a
-        // register-flavour any-ref resolves nothing — matching concrete
-        // register-ref behaviour.
         let db = InMemoryDb::new();
         assert!(resolve_platform_any_metadata_ref_method(
             &db,
@@ -610,12 +438,6 @@ mod tests {
 
     #[test]
     fn metadata_ref_register_record_manager_resolves_write() {
-        // Phase C: Register-record kinds were de-authoritized in
-        // Phase 0 (returning `None`) because their platform surface
-        // wasn't wired. Phase C wires `platform_prefix()` so methods
-        // declared under the
-        // `InformationRegisterRecordManager.<Имя>` composite typename
-        // (`Записать`, `Прочитать`, …) now resolve.
         let db = InMemoryDb::new();
         let res = resolve_platform_metadata_ref_method(
             &db,
@@ -624,19 +446,11 @@ mod tests {
             &Name::new("Записать"),
         )
         .expect("platform data indexes Write under InformationRegisterRecordManager");
-        // `Записать` is a procedure → `Ty::Undefined` return.
         assert_eq!(res.return_ty, db.undefined());
     }
 
     #[test]
     fn manager_create_record_set_on_information_register_returns_record_set() {
-        // `РегистрыСведений.<X>.СоздатьНаборЗаписей()` must rebind the
-        // generic `РегистрСведенийНаборЗаписей` return to a concrete
-        // `MetadataRef { InformationRegisterRecordSet, X }`. Without
-        // this rebinding the receiver type degrades to
-        // `Ty::PlatformObject("РегистрСведенийНаборЗаписей")` and the
-        // composite-prefixed methods (`Записать`, `Загрузить`, …)
-        // become unreachable.
         let db = InMemoryDb::new();
         let res = resolve_platform_manager_method(
             &db,
@@ -717,9 +531,6 @@ mod tests {
 
     #[test]
     fn metadata_ref_information_register_record_set_resolves_load() {
-        // After the new variant is wired through `platform_prefix`,
-        // platform-indexed methods on `InformationRegisterRecordSet.<X>`
-        // (e.g. `Загрузить`) must resolve via the metadata-ref path.
         let db = InMemoryDb::new();
         let res = resolve_platform_metadata_ref_method(
             &db,
@@ -728,7 +539,6 @@ mod tests {
             &Name::new("Загрузить"),
         )
         .expect("platform data indexes Load under InformationRegisterRecordSet");
-        // `Загрузить` is a procedure → `Ty::Undefined` return.
         assert_eq!(res.return_ty, db.undefined());
     }
 }

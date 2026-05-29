@@ -1,30 +1,21 @@
-//! Query tools: validation and execution.
-
 use crate::state::SharedState;
 use rmcp::model::{CallToolResult, Content};
 use rmcp::ErrorData as McpError;
 use std::collections::HashMap;
 use std::fmt::Write;
 
-/// Validates SDBL query syntax.
-///
-/// If 1C HTTP client is configured (--onec-url), validates via СхемаЗапроса on the 1C platform.
-/// Otherwise falls back to local parser ERROR node detection.
 pub async fn validate_query(state: &SharedState, query: &str) -> Result<CallToolResult, McpError> {
     if query.trim().is_empty() {
         return Err(McpError::invalid_params("Пустой запрос", None));
     }
 
-    // If 1C client available, validate via platform (most accurate)
     if let Some(client) = state.onec_client() {
         return validate_query_remote(client, query).await;
     }
 
-    // Fallback: local parser ERROR node detection
     validate_query_local(query)
 }
 
-/// Validate query via 1C platform using СхемаЗапроса.
 async fn validate_query_remote(
     client: &onec_client::Client,
     query: &str,
@@ -46,7 +37,6 @@ async fn validate_query_remote(
     }
 }
 
-/// Validate query locally using parser ERROR nodes (offline fallback).
 fn validate_query_local(query: &str) -> Result<CallToolResult, McpError> {
     let parse = parser::parse_sdbl(query);
     let root = parse.syntax_node();
@@ -81,7 +71,6 @@ fn validate_query_local(query: &str) -> Result<CallToolResult, McpError> {
 const DEFAULT_QUERY_LIMIT: u32 = 100;
 const MAX_QUERY_LIMIT: u32 = 1000;
 
-/// Executes a SELECT query against a live 1C database.
 pub async fn execute_query(
     state: &SharedState,
     query: &str,
@@ -99,7 +88,6 @@ pub async fn execute_query(
         return Err(McpError::invalid_params("Пустой запрос", None));
     }
 
-    // Only SELECT/ВЫБРАТЬ allowed
     let prefix = query.trim();
     let upper_start: String = prefix.chars().take(30).collect::<String>().to_uppercase();
     if !upper_start.starts_with("ВЫБРАТЬ") && !upper_start.starts_with("SELECT") {
@@ -137,21 +125,18 @@ fn format_query_result(result: &onec_client::QueryResult) -> String {
     }
     out.push_str(")\n\n");
 
-    // Header
     let _ = write!(out, "|");
     for col in &result.columns {
         let _ = write!(out, " {col} |");
     }
     out.push('\n');
 
-    // Separator
     let _ = write!(out, "|");
     for _ in &result.columns {
         let _ = write!(out, "-----|");
     }
     out.push('\n');
 
-    // Rows
     for row in &result.rows {
         let _ = write!(out, "|");
         for val in row {
@@ -175,8 +160,6 @@ mod tests {
     fn extract_text(result: &CallToolResult) -> &str {
         result.content[0].raw.as_text().expect("expected text content").text.as_str()
     }
-
-    // Tests use local validation (no 1C client in test state)
 
     #[test]
     fn test_validate_query_valid() {

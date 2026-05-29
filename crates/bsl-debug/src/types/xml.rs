@@ -9,7 +9,6 @@ const NS_CALC: &str = "http://v8.1c.ru/8.3/debugger/debugCalculations";
 const NS_AUTO: &str = "http://v8.1c.ru/8.3/debugger/debugAutoAttach";
 const NS_RTE: &str = "http://v8.1c.ru/8.3/debugger/debugRTEFilter";
 
-/// Builds an XML request body.
 pub struct XmlRequestBuilder {
     pub(crate) writer: Writer<Cursor<Vec<u8>>>,
 }
@@ -52,7 +51,6 @@ impl XmlRequestBuilder {
         self
     }
 
-    /// Opens an element with xmlns attribute (switches default namespace for this element and children).
     pub fn start_ns(&mut self, name: &str, ns: &str) -> &mut Self {
         let mut el = BytesStart::new(name);
         el.push_attribute(("xmlns", ns));
@@ -60,8 +58,6 @@ impl XmlRequestBuilder {
         self
     }
 
-    /// Opens an element in parent namespace but declares a prefix for children.
-    /// Children written after this should use the prefixed variants.
     pub fn start_with_child_ns(&mut self, name: &str, prefix: &str, ns: &str) -> &mut Self {
         let mut el = BytesStart::new(name);
         el.push_attribute((format!("xmlns:{prefix}").as_str(), ns));
@@ -69,26 +65,22 @@ impl XmlRequestBuilder {
         self
     }
 
-    /// Writes a prefixed text element: <prefix:name>value</prefix:name>
     pub fn prefixed_text(&mut self, prefix: &str, name: &str, value: &str) -> &mut Self {
         let qname = format!("{prefix}:{name}");
         write_text_element(&mut self.writer, &qname, value);
         self
     }
 
-    /// Writes a prefixed bool element.
     pub fn prefixed_bool(&mut self, prefix: &str, name: &str, value: bool) -> &mut Self {
         self.prefixed_text(prefix, name, if value { "true" } else { "false" })
     }
 
-    /// Opens a prefixed element: <prefix:name>
     pub fn start_prefixed(&mut self, prefix: &str, name: &str) -> &mut Self {
         let qname = format!("{prefix}:{name}");
         self.writer.write_event(Event::Start(BytesStart::new(&qname))).unwrap();
         self
     }
 
-    /// Closes a prefixed element: </prefix:name>
     pub fn end_prefixed(&mut self, prefix: &str, name: &str) -> &mut Self {
         let qname = format!("{prefix}:{name}");
         self.writer.write_event(Event::End(BytesEnd::new(&qname))).unwrap();
@@ -149,7 +141,6 @@ fn write_text_element_ns(writer: &mut Writer<Cursor<Vec<u8>>>, name: &str, value
     writer.write_event(Event::End(BytesEnd::new(name))).unwrap();
 }
 
-/// Lightweight XML response parser.
 pub struct XmlResponseReader<'a> {
     reader: Reader<&'a [u8]>,
 }
@@ -161,7 +152,6 @@ impl<'a> XmlResponseReader<'a> {
         Self { reader }
     }
 
-    /// Reads all text content of elements with the given local name.
     pub fn read_text(&mut self, target: &str) -> Option<String> {
         let target_bytes = target.as_bytes();
         loop {
@@ -195,13 +185,9 @@ pub fn local_name(name: &[u8]) -> &[u8] {
     }
 }
 
-/// Extracts local name from a quick-xml QName, returning owned bytes.
-/// Use this when the QName is a temporary that would be dropped.
 pub fn local_name_owned(name: &[u8]) -> Vec<u8> {
     local_name(name).to_vec()
 }
-
-// --- Request builders for each debug command ---
 
 pub fn build_attach_request(debugger_id: &str, infobase: &str) -> Vec<u8> {
     let mut b = XmlRequestBuilder::new("RDBGAttachDebugUIRequest", debugger_id, infobase);
@@ -261,24 +247,19 @@ pub fn build_set_breakpoints_request(
 ) -> Vec<u8> {
     let mut b = XmlRequestBuilder::new("RDBGSetBreakpointsRequest", debugger_id, infobase);
 
-    // Group by module
     let mut modules: std::collections::HashMap<(&str, &str, &str), Vec<&BreakpointDef>> =
         std::collections::HashMap::new();
     for bp in breakpoints {
         modules.entry((&bp.extension, &bp.object_id, &bp.property_id)).or_default().push(bp);
     }
 
-    // bpWorkspace in request ns; moduleBPInfo in debugBreakpoints ns;
-    // module id fields in debugBaseData ns
     b.start("bpWorkspace");
     for ((ext, obj_id, prop_id), bps) in &modules {
-        // moduleBPInfo in breakpoints ns, with base prefix for module id fields
         let mut el = BytesStart::new("moduleBPInfo");
         el.push_attribute(("xmlns", NS_BP));
         el.push_attribute(("xmlns:base", NS_BASE));
         b.writer.write_event(Event::Start(el)).unwrap();
 
-        // id wrapper in breakpoints ns, children in base ns
         b.start("id");
         let mod_type = if ext.is_empty() { "ConfigModule" } else { "ExtensionModule" };
         b.prefixed_text("base", "type", mod_type);
@@ -314,7 +295,6 @@ pub fn build_set_break_on_rte_request(
 ) -> Vec<u8> {
     let mut b =
         XmlRequestBuilder::new("RDBGSetRunTimeErrorProcessingRequest", debugger_id, infobase);
-    // state wrapper is in request ns, children in debugRTEFilter ns via prefix
     b.start_with_child_ns("state", "rte", NS_RTE);
     b.prefixed_bool("rte", "stopOnErrors", stop);
     if let Some(text) = filter {
@@ -456,7 +436,6 @@ pub fn build_eval_expand_request(
     b.build()
 }
 
-/// Breakpoint definition for request building.
 pub struct BreakpointDef {
     pub extension: String,
     pub object_id: String,
@@ -477,7 +456,6 @@ mod tests {
             &["Client", "Server", "HTTPService"],
         );
         let s = String::from_utf8(xml).unwrap();
-        // 1C debug server expects xmlns on each targetType element (XDTO format)
         assert!(
             s.contains("<autoAttachSettings>"),
             "autoAttachSettings must NOT have xmlns (1C XDTO). Got: {s}"

@@ -6,8 +6,6 @@ license.workspace = true
 rust-version.workspace = true
 
 [features]
-# Enable jemalloc for memory profiling on all platforms.
-# Requires tikv-jemalloc-ctl dependency when enabled.
 jemalloc = ["dep:tikv-jemalloc-ctl"]
 
 [dependencies]

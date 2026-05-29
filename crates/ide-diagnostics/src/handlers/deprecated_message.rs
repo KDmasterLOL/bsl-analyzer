@@ -1,41 +1,3 @@
-//! DeprecatedMessage diagnostic.
-//!
-//! Detects usage of deprecated global `Сообщить()` / `Message()` methods.
-//!
-//! ## Why?
-//! The global `Сообщить()` / `Message()` method is deprecated:
-//! - Low level API without structured logging
-//! - No severity levels or categorization
-//! - Output goes to user messages which may be inappropriate
-//! - Better alternatives exist for different scenarios
-//!
-//! ## Bad practice
-//! ```bsl
-//! Процедура Тест()
-//!     Сообщить("Операция выполнена"); // ❌ Global Сообщить() is deprecated
-//! КонецПроцедуры
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! Процедура Тест()
-//!     // ✅ For user notifications - use ОбщегоНазначения.СообщитьПользователю()
-//!     ОбщегоНазначения.СообщитьПользователю("Операция выполнена");
-//!
-//!     // ✅ For logging - use ЗаписьЖурналаРегистрации()
-//!     ЗаписьЖурналаРегистрации("ИмяСобытия", УровеньЖурналаРегистрации.Информация);
-//! КонецПроцедуры
-//! ```
-//!
-//! ## Configuration
-//! - **Enabled by default:** Yes
-//! - **Severity:** Information (MINOR)
-//! - **Tags:** STANDARD, DEPRECATED
-//! - **Minutes to fix:** 2
-//!
-//! ## Implementation
-//! **This is a HIR-based diagnostic** - collected during AST→HIR lowering.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -55,11 +17,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic.
-///
-/// Called from lib.rs dispatch when `BodyDiagnostic::DeprecatedMessage` is encountered.
 pub fn from_hir(name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    // Check if the diagnostic is disabled
     let code = DiagnosticCode::DeprecatedMessage;
 
     if ctx.is_disabled_with_metadata(code) {
@@ -112,7 +70,7 @@ mod tests {
               message: Используйте "ОбщегоНазначения.СообщитьПользователю" вместо устаревшего "Сообщить"
               severity: Information"#]].assert_eq(&format_diags(code, &deprecated_diags));
         assert_eq!(deprecated_diags[0].severity, Severity::Information);
-        assert!(deprecated_diags[0].message.contains("СообщитьПользователю")); // snapshot-skip: message-substring assertion intentionally retained.
+        assert!(deprecated_diags[0].message.contains("СообщитьПользователю"));
     }
 
     #[test]
@@ -133,7 +91,7 @@ EndProcedure
               message: Use "CommonUse.MessageToUser" instead of deprecated "Message"
               severity: Information"#]]
         .assert_eq(&format_diags(code, &deprecated_diags));
-        assert!(deprecated_diags[0].message.contains("MessageToUser")); // snapshot-skip: message-substring assertion intentionally retained.
+        assert!(deprecated_diags[0].message.contains("MessageToUser"));
     }
 
     #[test]
@@ -149,7 +107,6 @@ EndProcedure
             .filter(|d| d.code == DiagnosticCode::DeprecatedMessage)
             .collect();
 
-        // Should not trigger for method calls
         expect![[r#""#]].assert_eq(&format_diags(code, &deprecated_diags));
     }
 
@@ -186,7 +143,6 @@ EndProcedure
 
     #[test]
     fn test_inside_if_block() {
-        // MessaGe() inside an If block triggers, Модуль.Сообщить() does not
         let code = r#"
 Процедура А()
     Если Истина Тогда
@@ -205,12 +161,11 @@ EndProcedure
               message: Use "CommonUse.MessageToUser" instead of deprecated "Message"
               severity: Information"#]]
         .assert_eq(&format_diags(code, &diags));
-        assert!(diags[0].message.contains("MessageToUser")); // snapshot-skip: message-substring assertion intentionally retained.
+        assert!(diags[0].message.contains("MessageToUser"));
     }
 
     #[test]
     fn test_module_level_call() {
-        // Сообщить() at module level triggers, Модуль.Сообщить() does not
         let code = r#"
 Сообщить("А");
 Модуль.Сообщить();
@@ -225,6 +180,6 @@ EndProcedure
             DeprecatedMessage @ 2:1..2:9
               message: Используйте "ОбщегоНазначения.СообщитьПользователю" вместо устаревшего "Сообщить"
               severity: Information"#]].assert_eq(&format_diags(code, &diags));
-        assert!(diags[0].message.contains("СообщитьПользователю")); // snapshot-skip: message-substring assertion intentionally retained.
+        assert!(diags[0].message.contains("СообщитьПользователю"));
     }
 }

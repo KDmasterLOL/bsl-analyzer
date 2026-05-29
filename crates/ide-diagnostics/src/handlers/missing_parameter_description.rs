@@ -1,5 +1,3 @@
-//! Reports missing, extra, duplicated, or misordered parameter descriptions.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -31,10 +29,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
     let module_data = ctx.module_data();
 
-    // Strict mode rejects "Параметр - Тип" docs that omit the trailing
-    // "— описание" prose. Default `true` keeps existing fixtures (and
-    // BSL-style "Тип alone" parameters) compatible; opt-in via config to
-    // mirror MissingReturnedValueDescription's `allowShortDescriptionReturnValues`.
     let allow_short = ctx.config.get_bool(code, "allowShortDescriptionParameters").unwrap_or(true);
 
     for method_id in &module_data.procedures {
@@ -167,10 +161,6 @@ fn check_parameter_descriptions(
                     let message =
                         format!("Необходимо добавить пояснение к параметру \"{}\"", param_name);
                     diagnostics.push(create_diagnostic(param.name_range, &message, code, ctx));
-                    // Intentionally NOT setting `has_missing_description`:
-                    // content-quality issues are orthogonal to structural
-                    // (missing/extra/order) issues and should not suppress
-                    // the order-correctness check below.
                 }
             }
             matched_docs.push(lower_name);
@@ -217,10 +207,6 @@ fn check_parameter_descriptions(
     }
 }
 
-/// True iff the parameter doc carries any prose description (a `- описание`
-/// tail on at least one type, or a structured `Структура:` block with sub-fields).
-/// "Type alone" docs (`Параметр - Строка`) and bare-name docs (`Параметр`)
-/// return false — these are what strict mode wants to flag.
 fn param_doc_has_description(doc: &hir::ParameterDoc) -> bool {
     if doc.types.is_empty() {
         return false;
@@ -273,11 +259,6 @@ mod tests {
 
     #[test]
     fn test_java_fixture_compatibility() {
-        // Was 12 before PR #3: a non-export purpose-only comment (line 7,
-        // `// Описание есть, но нет параметров`) used to trigger
-        // "Необходимо добавить описание всех параметров метода". Non-export
-        // methods no longer require a Параметры section unless one is
-        // already present.
         check_diagnostics_snapshot_for(
             FIXTURE,
             DiagnosticCode::MissingParameterDescription,
@@ -479,9 +460,6 @@ mod tests {
 
     #[test]
     fn test_strict_mode_flags_type_only_param_doc() {
-        // `Параметр1 - Строка` matches the signature but has no description
-        // tail. Default mode accepts this (BSL idiom). Strict mode
-        // (`allowShortDescription=false`) should emit.
         let code = r#"// Описание
 // Параметры:
 //   Параметр1 - Строка
@@ -504,7 +482,6 @@ mod tests {
 
     #[test]
     fn test_strict_mode_passes_param_with_description() {
-        // Param with full prose (`- описание`) is acceptable even in strict mode.
         let code = r#"// Описание
 // Параметры:
 //   Параметр1 - Строка - первое слагаемое
@@ -523,8 +500,6 @@ mod tests {
 
     #[test]
     fn test_strict_mode_passes_structured_param_doc() {
-        // Structured Структура: docs carry semantic content via sub-fields.
-        // Strict mode treats this as adequate.
         let code = r#"// Описание
 // Параметры:
 //   Параметр1 - Структура:
@@ -545,9 +520,6 @@ mod tests {
 
     #[test]
     fn test_strict_mode_content_does_not_suppress_order_check() {
-        // Codex pair-mode regression guard: a content-quality emission
-        // (param doc lacking prose description) must not mask the
-        // structural order-mismatch emission for the same method.
         let code = r#"// Описание
 // Параметры:
 //   Параметр2 - Строка - second
@@ -574,8 +546,6 @@ mod tests {
 
     #[test]
     fn test_default_mode_accepts_type_only_param_doc() {
-        // Regression guard: default mode (`allowShortDescription=true`)
-        // must keep accepting `Параметр - Тип` shorthand.
         let code = r#"// Описание
 // Параметры:
 //   Параметр1 - Строка

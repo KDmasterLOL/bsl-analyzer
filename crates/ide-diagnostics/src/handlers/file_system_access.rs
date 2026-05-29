@@ -1,68 +1,3 @@
-//! FileSystemAccess diagnostic.
-//!
-//! Detects file system access operations for security review.
-//!
-//! ## Why?
-//! File system access creates security vulnerabilities:
-//! - Potential for unauthorized file operations
-//! - May leak confidential information
-//! - Creates attack vectors for data exfiltration
-//! - Destructive operations (delete, move, modify)
-//!
-//! This diagnostic is a **security audit tool** - disabled by default.
-//! Enable it for code review, especially when auditing third-party or contractor code.
-//!
-//! ## What is detected
-//!
-//! ### Constructor patterns (NEW_EXPRESSION):
-//! - File/Файл - file operations
-//! - xBase - database file access
-//! - HTMLWriter/ЗаписьHTML, HTMLReader/ЧтениеHTML - HTML file operations
-//! - FastInfosetWriter/Reader - Fast Infoset file operations
-//! - XSLTransform - XSLT file processing
-//! - ZipFileWriter/Reader - archive operations
-//! - TextWriter/Reader - text file operations
-//! - TextExtraction - text extraction from files
-//! - BinaryData - binary file operations
-//! - FileStream - file stream operations
-//! - FileStreamsManager - file stream management
-//! - DataWriter/Reader - data file operations
-//!
-//! ### Global method patterns (GLOBAL_METHODS):
-//! - File operations: ЗначениеВФайл, КопироватьФайл, ПереместитьФайл, etc.
-//! - Directory operations: СоздатьКаталог, КаталогВременныхФайлов, etc.
-//! - Extension operations: УстановитьРасширениеРаботыСФайлами, etc.
-//! - Async operations: КопироватьФайлАсинх, СоздатьКаталогАсинх, etc.
-//!
-//! ## Bad practice
-//! ```bsl
-//! Процедура ВыгрузитьДанные()
-//!     // File system access without authorization check
-//!     ЗаписьТекста = Новый ЗаписьТекста("C:\Temp\PersonalData.txt");
-//!     ЗаписьТекста.Записать(ЛичныеДанные);
-//!
-//!     КопироватьФайл("C:\Temp\Order.htm", "C:\My Documents\Order.htm");
-//!     УдалитьФайлы("C:\temp\Works");
-//! КонецПроцедуры
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! // Review and verify file system access is authorized
-//! // Use 1C:Enterprise storage mechanisms instead (ValueStorage, temp storage)
-//! // Implement proper access control and validation
-//! ```
-//!
-//! ## Configuration
-//! - **Enabled by default:** No (security audit tool)
-//! - **Severity:** Warning (MAJOR VULNERABILITY)
-//! - **Type:** VULNERABILITY
-//! - **Tags:** SUSPICIOUS
-//! - **Minutes to fix:** 3
-//!
-//! ## Implementation
-//! **This is a HIR-based diagnostic** - detects file system access during HIR lowering.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -82,9 +17,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic.
-///
-/// Called from lib.rs dispatch when FileSystemAccess diagnostic is emitted during lowering.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     crate::simple_hir_diagnostic(
         DiagnosticCode::FileSystemAccess,
@@ -103,7 +35,6 @@ mod tests {
 
     #[test]
     fn test_all_constructor_types_in_procedure() {
-        // All 14 NEW_EXPR types from the fixture (Метод1) trigger diagnostics
         let code = r#"Процедура Метод1()
     Значение = Новый File(ИмяФайла);
     Значение = Новый xBase("C:\temp.dbf");
@@ -198,7 +129,6 @@ mod tests {
 
     #[test]
     fn test_all_global_methods() {
-        // All global method calls from the fixture (Метод4) trigger diagnostics
         let code = r#"Процедура Метод4()
     ЗначениеВФайл("C:\Temp\PersonalData.txt", ЛичныеДанные);
     КопироватьФайл("C:\Temp\Order.htm", "C:\My Documents\Order.htm");
@@ -210,7 +140,6 @@ mod tests {
     СоздатьКаталог("C:\Temp");
     УдалитьФайлы("C:\temp\Works");
 КонецПроцедуры"#;
-        // 7 global methods (Массив and its method are not file system)
         check_diagnostics_snapshot_for(
             code,
             DiagnosticCode::FileSystemAccess,
@@ -241,7 +170,6 @@ mod tests {
 
     #[test]
     fn test_annotation_does_not_suppress() {
-        // Fixture Метод2 and Метод3: annotations don't suppress FileSystemAccess
         let code = r#"&НаСервере
 Процедура Метод2()
     Значение = Новый xBase("C:\temp.dbf");

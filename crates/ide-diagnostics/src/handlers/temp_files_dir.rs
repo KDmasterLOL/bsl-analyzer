@@ -70,8 +70,8 @@ mod tests {
               message: Не рекомендуемый вызов функции КаталогВременныхФайлов()
               severity: Warning"#]],
         );
-        assert_eq!(diags[0].severity, Severity::Warning); // snapshot-skip: severity assertion intentionally retained.
-        assert!(diags[0].message.contains("КаталогВременныхФайлов")); // snapshot-skip: message-substring assertion intentionally retained.
+        assert_eq!(diags[0].severity, Severity::Warning);
+        assert!(diags[0].message.contains("КаталогВременныхФайлов"));
     }
 
     #[test]
@@ -93,7 +93,7 @@ EndProcedure
               message: Not recommended TempFilesDir() call
               severity: Warning"#]],
         );
-        assert!(diags[0].message.contains("TempFilesDir")); // snapshot-skip: message-substring assertion intentionally retained.
+        assert!(diags[0].message.contains("TempFilesDir"));
     }
 
     #[test]

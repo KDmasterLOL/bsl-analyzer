@@ -1,31 +1,3 @@
-//! InvalidCharacterInFile diagnostic
-//!
-//! Detects invalid Unicode characters in BSL files that cause unpredictable behavior.
-//!
-//!
-//! ## Why?
-//!
-//! Invalid Unicode characters can cause serious problems in 1C:Enterprise:
-//! - Soft hyphens (U+00AD) can break identifiers unexpectedly
-//! - Wrong dashes (en-dash, em-dash, etc.) cause compilation errors
-//! - Non-breaking spaces (U+00A0) create hard-to-debug issues
-//! - 1C:Enterprise expects standard ASCII minus (U+002D) and space (U+0020)
-//!
-//! These characters often appear when copying code from word processors or websites.
-//!
-//! ## Detected Characters
-//!
-//! ### Illegal Dashes (6 types):
-//! - U+00AD (173) - Soft hyphen (­)
-//! - U+2012 (8210) - Figure dash (‒)
-//! - U+2013 (8211) - En dash (–)
-//! - U+2014 (8212) - Em dash (—)
-//! - U+2015 (8213) - Horizontal bar (―)
-//! - U+2212 (8722) - Minus sign (−)
-//!
-//! ### Illegal Space:
-//! - U+00A0 (160) - Non-breaking space
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -46,16 +18,10 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-const ILLEGAL_DASHES: &[char] = &[
-    '\u{00AD}', // 173 - Soft hyphen
-    '\u{2012}', // 8210 - Figure dash
-    '\u{2013}', // 8211 - En dash
-    '\u{2014}', // 8212 - Em dash
-    '\u{2015}', // 8213 - Horizontal bar
-    '\u{2212}', // 8722 - Minus sign
-];
+const ILLEGAL_DASHES: &[char] =
+    &['\u{00AD}', '\u{2012}', '\u{2013}', '\u{2014}', '\u{2015}', '\u{2212}'];
 
-const ILLEGAL_SPACE: char = '\u{00A0}'; // 160 - Non-breaking space
+const ILLEGAL_SPACE: char = '\u{00A0}';
 
 enum InvalidCharType {
     IllegalDash,
@@ -85,8 +51,6 @@ fn create_diagnostic(
     }
 }
 
-/// Main entry point for InvalidCharacterInFile diagnostic (file-level text-based).
-/// This diagnostic scans STRING, COMMENT, WHITESPACE, and ERROR tokens for illegal characters.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::InvalidCharacterInFile;
 
@@ -98,7 +62,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let root = parse.syntax_node();
     let mut diagnostics = Vec::new();
 
-    // Scan STRING, COMMENT, and ERROR tokens for illegal characters
     for element in root.descendants_with_tokens() {
         if let Some(token) = element.as_token() {
             let should_check = matches!(
@@ -115,12 +78,10 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             if should_check {
                 let text = token.text();
 
-                // Check if token contains illegal characters
                 let has_illegal_space = text.chars().any(|ch| ch == ILLEGAL_SPACE);
                 let has_illegal_dash = text.chars().any(|ch| ILLEGAL_DASHES.contains(&ch));
 
                 if has_illegal_space || has_illegal_dash {
-                    // Prefer space message if both types exist
                     let char_type = if has_illegal_space {
                         InvalidCharType::IllegalSpace
                     } else {
@@ -143,38 +104,36 @@ mod tests {
     use expect_test::expect;
     #[test]
     fn test_comprehensive() {
-        // Inline fixture with illegal Unicode characters preserved exactly.
-        // Uses explicit Unicode escapes to keep source readable while preserving byte-exact content.
         let code = concat!(
             "// минусы с ошибками\n",
-            "СреднееТире = \"\u{2013}\";\n",  // line 1: en dash –
-            "ЦифровоеТире = \"\u{2012}\";\n", // line 2: figure dash ‒
-            "ДлинноеТире = \"\u{2014}\";\n",  // line 3: em dash —
-            "ГоризонтальнаяЛиния = \"\u{2015}\";\n", // line 4: horizontal bar ―
-            "НеправильныйМинус = \"\u{2212}\";\n", // line 5: minus sign −
-            "// Мягкий перенос в комментарии \u{00AD}\n", // line 6: soft hyphen in comment
+            "СреднееТире = \"\u{2013}\";\n",
+            "ЦифровоеТире = \"\u{2012}\";\n",
+            "ДлинноеТире = \"\u{2014}\";\n",
+            "ГоризонтальнаяЛиния = \"\u{2015}\";\n",
+            "НеправильныйМинус = \"\u{2212}\";\n",
+            "// Мягкий перенос в комментарии \u{00AD}\n",
             "\n",
             "// минус без ошибки\n",
             "ПравильныйДефисМинус = \"-\";\n",
             "\n",
             "// ошибочные неразрывные пробелы\n",
-            "// В этом комментарии только\u{00A0}НПП\n", // line 12: NBSP in comment (32 chars)
+            "// В этом комментарии только\u{00A0}НПП\n",
             "\n",
-            "Строка = \"А\" + \"\u{00A0}\" + \"И\";\n", // line 14: NBSP in string
+            "Строка = \"А\" + \"\u{00A0}\" + \"И\";\n",
             "\n",
             "//в строке ниже неразрывный пробел\n",
-            "\u{00A0}\n", // line 17: standalone NBSP
+            "\u{00A0}\n",
             "// минусы с ошибками\n",
             "//СреднееТире = \"\n",
-            "\u{2013};\n", // line 20: standalone –
+            "\u{2013};\n",
             "//ЦифровоеТире = \"\n",
-            "\u{2012};\n", // line 22: standalone ‒
+            "\u{2012};\n",
             "//ДлинноеТире = \"\n",
-            "\u{2014};\n", // line 24: standalone —
+            "\u{2014};\n",
             "//ГоризонтальнаяЛиния = \"\n",
-            "\u{2015};\n", // line 26: standalone ―
+            "\u{2015};\n",
             "//НеправильныйМинус = \"\n",
-            "\u{2212};\n", // line 28: standalone −
+            "\u{2212};\n",
             "//конец файла\n",
         );
         check_diagnostics_snapshot_for(
@@ -243,7 +202,6 @@ mod tests {
 
     #[test]
     fn test_nbsp_in_comment() {
-        // Non-breaking space in comment (U+00A0 explicitly)
         let code = "// Тест\u{00A0}неразрывный\u{00A0}пробел";
         check_diagnostics_snapshot_for(
             code,
@@ -257,7 +215,6 @@ mod tests {
 
     #[test]
     fn test_no_false_positives() {
-        // Regular hyphen-minus and space should not trigger
         let code = r#"
 Процедура Тест()
     А = "тест-тест";
@@ -274,7 +231,6 @@ mod tests {
 
     #[test]
     fn test_all_illegal_dashes() {
-        // Test all 6 types of illegal dashes (using explicit Unicode escapes)
         let code = "А = \"\u{AD}\";\nБ = \"\u{2012}\";\nВ = \"\u{2013}\";\nГ = \"\u{2014}\";\nД = \"\u{2015}\";\nЕ = \"\u{2212}\";";
         check_diagnostics_snapshot_for(
             code,
@@ -303,7 +259,6 @@ mod tests {
 
     #[test]
     fn test_mixed_invalid_chars() {
-        // Mix of dashes and spaces (using explicit Unicode escapes)
         let code = "А = \"\u{2013}\";\nБ = \"\u{00A0}\";";
         check_diagnostics_snapshot_for(
             code,

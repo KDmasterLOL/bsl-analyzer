@@ -1,9 +1,6 @@
-//! Diagnostic types and structs.
-
 use crate::DiagnosticCode;
 use ide_db::TextRange;
 
-/// A diagnostic produced by the analyzer (internal representation).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
     pub code: DiagnosticCode,
@@ -14,73 +11,32 @@ pub struct Diagnostic {
     pub fixes: Vec<Fix>,
 }
 
-/// Diagnostic output DTO for external consumption (reports, CLI, etc.).
-///
-/// This is the public-facing format with line/column positions instead of byte offsets.
-/// Used by:
-/// - Streaming mode results
-/// - Reporter system (JSON, SARIF, console)
-/// - CLI output
-///
-/// ## Architecture
-/// This follows the DTO (Data Transfer Object) pattern:
-/// - Internal representation: `Diagnostic` with `TextRange` (byte offsets)
-/// - External representation: `DiagnosticOutput` with line/column positions
-///
-/// Conversion happens in the domain layer via `Diagnostic::to_output()`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DiagnosticOutput {
-    /// Diagnostic code (e.g., "LineLength", "BadWords").
     pub code: String,
 
-    /// Human-readable message.
     pub message: String,
 
-    /// Severity level (e.g., "Warning", "Error").
     pub severity: String,
 
-    /// Start line (0-based, LSP compatible).
     pub start_line: usize,
 
-    /// Start column (0-based, LSP compatible).
     pub start_column: usize,
 
-    /// End line (0-based, LSP compatible).
     pub end_line: usize,
 
-    /// End column (0-based, LSP compatible).
     pub end_column: usize,
 
-    /// Diagnostic tags (e.g., "Unnecessary", "Deprecated").
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
 }
 
 impl Diagnostic {
-    /// Convert to output DTO with line/column positions.
-    ///
-    /// This method performs the conversion from internal representation (TextRange)
-    /// to external output format (line/column). Requires file text to build LineIndex.
-    ///
-    /// **Important**: Column positions are converted from byte offsets to character positions.
-    /// This is necessary because external tools (SonarQube, editors) expect character positions,
-    /// while internal TextRange uses byte offsets. For Cyrillic text, 1 char = 2 bytes in UTF-8.
     pub fn to_output(&self, file_text: &str) -> DiagnosticOutput {
-        // Convenience wrapper: callers that only ever emit one diagnostic per
-        // file still get the old behaviour. Hot paths (streaming diagnostics
-        // for a 25k-file workspace, CLI `analyze`) **must** go through
-        // [`Self::to_output_with_index`] with a pre-built
-        // [`line_index::LineIndex`] — profiling showed this function
-        // dominating at ~43% self time when rebuilt per diagnostic.
         let line_index = line_index::LineIndex::new(file_text);
         self.to_output_with_index(file_text, &line_index)
     }
 
-    /// Convert to output DTO using a pre-built [`line_index::LineIndex`].
-    ///
-    /// Use this on any hot path that emits multiple diagnostics per file —
-    /// the shared index drops `to_output` from ~43% self time to
-    /// ~negligible on a 25k-file ERP workspace.
     pub fn to_output_with_index(
         &self,
         file_text: &str,
@@ -109,8 +65,6 @@ impl Diagnostic {
         let start = line_index.line_col(self.range.start());
         let end = line_index.line_col(self.range.end());
 
-        // Convert byte columns to character columns for external tools.
-        // Internal TextRange uses byte offsets, but SonarQube/editors expect character positions.
         let start_char_col = line_index.byte_col_to_char_col(file_text, start.line, start.col);
         let end_char_col = line_index.byte_col_to_char_col(file_text, end.line, end.col);
 
@@ -127,20 +81,18 @@ impl Diagnostic {
     }
 }
 
-/// Diagnostic severity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
-    Blocker,     // Highest severity
-    Critical,    // Critical issues
-    Major,       // Significant issues
-    Error,       // General errors
-    Warning,     // Minor issues
-    Information, // Informational
-    Hint,        // Lowest severity
+    Blocker,
+    Critical,
+    Major,
+    Error,
+    Warning,
+    Information,
+    Hint,
 }
 
 impl Severity {
-    /// Returns string representation for output.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Blocker => "Blocker",
@@ -154,7 +106,6 @@ impl Severity {
     }
 }
 
-/// Diagnostic tag for special handling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticTag {
     Unnecessary,
@@ -162,7 +113,6 @@ pub enum DiagnosticTag {
 }
 
 impl DiagnosticTag {
-    /// Returns string representation for output.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Unnecessary => "Unnecessary",
@@ -171,14 +121,12 @@ impl DiagnosticTag {
     }
 }
 
-/// A quick fix for a diagnostic.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fix {
     pub label: String,
     pub edits: Vec<TextEdit>,
 }
 
-/// A text edit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextEdit {
     pub range: TextRange,

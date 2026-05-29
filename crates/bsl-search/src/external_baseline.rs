@@ -130,11 +130,6 @@ pub enum SemanticPublishProgress {
     },
 }
 
-/// Infrastructure adapter for centralized baseline storage.
-///
-/// This adapter is a backend selector. The first supported production backend is
-/// PostgreSQL. Runtime code should depend on this selector or directly on the
-/// storage ports, not on a concrete PostgreSQL client.
 #[derive(Debug, Clone)]
 pub enum ExternalBaselineAdapter {
     Postgres(postgres::PostgresBaselineAdapter),
@@ -249,18 +244,12 @@ impl ExternalBaselineAdapter {
         }
     }
 
-    /// Checks if the external baseline storage is fully initialized and
-    /// the schema version is compatible with the current analyzer.
-    ///
-    /// Returns typed errors for unverified/mismatched storage instead
-    /// of letting downstream operations fail with raw database errors.
     pub fn check_storage_readiness(&self) -> Result<(), SearchError> {
         match self {
             Self::Postgres(adapter) => adapter.check_storage_readiness(),
         }
     }
 
-    /// Returns the schema version stored in the database, if any.
     pub fn get_schema_version(&self) -> Result<Option<i32>, SearchError> {
         match self {
             Self::Postgres(adapter) => adapter.get_schema_version(),

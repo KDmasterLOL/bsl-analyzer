@@ -1,7 +1,3 @@
-//! Sink for converting parser events into Rowan syntax tree.
-//!
-//! This module builds a SyntaxTreeBuilder from the events produced by the parser.
-
 use parser_error::{ParseError, RecoveryKind};
 use syntax::{SyntaxTreeBuilder, TextRange, TextSize};
 
@@ -10,13 +6,6 @@ use crate::{
     syntax_kind::{node_kind_to_syntax, token_kind_to_syntax},
 };
 
-/// Builds a Rowan syntax tree from parser events and tokens.
-///
-/// This processes the event stream and constructs a lossless syntax tree
-/// with all trivia (whitespace, comments) preserved.
-///
-/// The lifetime parameter `'cache` allows using a shared `NodeCache` for
-/// token deduplication across multiple parses.
 pub struct Sink<'t, 'cache> {
     builder: SyntaxTreeBuilder<'cache>,
     tokens: &'t [lexer::Token],
@@ -25,14 +14,12 @@ pub struct Sink<'t, 'cache> {
 }
 
 impl<'t> Sink<'t, 'static> {
-    /// Create a new sink with the given tokens and its own internal cache.
     pub fn new(tokens: &'t [lexer::Token]) -> Self {
         Self { builder: SyntaxTreeBuilder::new(), tokens, token_pos: 0, errors: Vec::new() }
     }
 }
 
 impl<'t, 'cache> Sink<'t, 'cache> {
-    /// Create a new sink with the given tokens and a shared cache.
     pub fn with_cache(tokens: &'t [lexer::Token], cache: &'cache mut syntax::NodeCache) -> Self {
         Self {
             builder: SyntaxTreeBuilder::with_cache(cache),
@@ -42,13 +29,10 @@ impl<'t, 'cache> Sink<'t, 'cache> {
         }
     }
 
-    /// Process all events and finish building the tree.
     pub fn finish(mut self, events: Vec<Event>) -> SyntaxTreeBuilder<'cache> {
-        // Process events with forward_parent resolution
         let mut forward_parents = Vec::new();
         let mut skip = vec![false; events.len()];
 
-        // First pass: mark events that are forward parents as already processed
         for i in 0..events.len() {
             if let Event::Start { forward_parent: Some(fwd), .. } = &events[i] {
                 let mut idx = i + fwd;
@@ -63,16 +47,13 @@ impl<'t, 'cache> Sink<'t, 'cache> {
             }
         }
 
-        // Second pass: process events
         for i in 0..events.len() {
             match &events[i] {
                 Event::Start { kind, forward_parent } => {
-                    // Skip if this event was already processed as a forward_parent
                     if skip[i] {
                         continue;
                     }
 
-                    // Collect all forward parents
                     forward_parents.clear();
                     forward_parents.push(*kind);
 
@@ -88,7 +69,6 @@ impl<'t, 'cache> Sink<'t, 'cache> {
                         }
                     }
 
-                    // Start nodes in reverse order (outermost first)
                     for kind in forward_parents.iter().rev() {
                         self.builder.start_node(node_kind_to_syntax(*kind));
                     }
@@ -102,9 +82,7 @@ impl<'t, 'cache> Sink<'t, 'cache> {
                     self.token(*kind);
                 }
 
-                Event::Placeholder => {
-                    // Placeholders should have been replaced during event processing
-                }
+                Event::Placeholder => {}
 
                 Event::Error(err) => {
                     let range = self.compute_error_range(err, None);
@@ -118,7 +96,6 @@ impl<'t, 'cache> Sink<'t, 'cache> {
             }
         }
 
-        // Add any remaining errors.
         for (range, err) in self.errors.drain(..) {
             self.builder.error(range, err);
         }
@@ -126,12 +103,7 @@ impl<'t, 'cache> Sink<'t, 'cache> {
         self.builder
     }
 
-    /// Process a single token.
-    ///
-    /// Note: Trivia (whitespace, comments) are already in the event stream from the parser
-    /// calling bump() on them, so we don't need to consume trivia here.
     fn token(&mut self, kind: lexer::TokenKind) {
-        // Add the token
         if let Some(token) = self.tokens.get(self.token_pos) {
             let syntax_kind = token_kind_to_syntax(kind);
             self.builder.token(syntax_kind, &token.text);
@@ -340,7 +312,6 @@ mod tests {
 
     #[test]
     fn test_sink_with_bom() {
-        // UTF-8 BOM at start of file
         let source = "\u{FEFF}Процедура Тест() КонецПроцедуры";
         let tokens = lexer::tokenize(source);
 
@@ -360,12 +331,10 @@ mod tests {
         eprintln!("=== Syntax tree ===");
         eprintln!("{:#?}", parse.syntax_node());
 
-        // Should parse without errors (BOM is trivia)
         assert!(!parse.has_errors(), "File with BOM should parse without errors");
         let root = parse.syntax_node();
         assert_eq!(root.kind(), syntax::SyntaxKind::SOURCE_FILE);
 
-        // Check that there are no ERROR nodes
         let error_nodes: Vec<_> =
             root.descendants().filter(|n| n.kind() == syntax::SyntaxKind::ERROR).collect();
         assert!(error_nodes.is_empty(), "Should have no ERROR nodes, found: {:?}", error_nodes);
@@ -373,7 +342,6 @@ mod tests {
 
     #[test]
     fn test_sink_with_bom_and_region() {
-        // UTF-8 BOM + CRLF + #Область (like real 1C files)
         let source =
             "\u{FEFF}\r\n#Область Test\r\nПроцедура Тест()\r\nКонецПроцедуры\r\n#КонецОбласти";
         let tokens = lexer::tokenize(source);
@@ -394,12 +362,10 @@ mod tests {
         eprintln!("=== Syntax tree ===");
         eprintln!("{:#?}", parse.syntax_node());
 
-        // Should parse without errors (BOM is trivia)
         assert!(!parse.has_errors(), "File with BOM+CRLF+Region should parse without errors");
         let root = parse.syntax_node();
         assert_eq!(root.kind(), syntax::SyntaxKind::SOURCE_FILE);
 
-        // Check that there are no ERROR nodes
         let error_nodes: Vec<_> =
             root.descendants().filter(|n| n.kind() == syntax::SyntaxKind::ERROR).collect();
         assert!(error_nodes.is_empty(), "Should have no ERROR nodes, found: {:?}", error_nodes);

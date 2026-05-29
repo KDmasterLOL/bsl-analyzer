@@ -1,7 +1,3 @@
-//! JoinWithSubQuery diagnostic.
-//!
-//! Detects SDBL joins that use a subquery as one of the joined sources.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -20,7 +16,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Single-pass dispatch for JoinWithSubQuery.
 pub(crate) fn dispatch(
     ctx: &DiagnosticsContext,
     diag: &sdbl_hir::SdblDiagnostic,
@@ -33,7 +28,6 @@ pub(crate) fn dispatch(
     }
 }
 
-/// Runs the JoinWithSubQuery diagnostic (standalone, used in tests).
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     crate::sdbl_utils::collect_sdbl_via_dispatch(ctx, DiagnosticCode::JoinWithSubQuery, dispatch)
 }
@@ -260,19 +254,6 @@ mod tests {
         );
     }
 
-    // -------------------------------------------------------------------------
-    // Track 2 §4 Slice 3 — aggregation exemption
-    //
-    // A subquery that aggregates (GROUP BY or aggregate function in SELECT
-    // list) is doing something the underlying table cannot, so the
-    // «no joins on subqueries» rule does not apply. Tests below exercise
-    // both emit sites (`join_clause.rs` for joined-side subquery,
-    // `from_clause.rs` for FROM-side subquery with subsequent joins) and
-    // guard the narrow scope: only function-call positions are aggregation
-    // signals, so columns or aliases named after an aggregate function must
-    // still trigger the diagnostic.
-    // -------------------------------------------------------------------------
-
     #[test]
     fn test_join_with_sum_subquery_exempted() {
         let code = r#"
@@ -314,8 +295,6 @@ mod tests {
 
     #[test]
     fn test_join_with_nested_isnull_around_sum_exempted() {
-        // Per Codex finding 5: aggregate wrapped inside another function call
-        // must still be detected as aggregation (descendants walk).
         let code = r#"
 Процедура Тест()
     Запрос = "ВЫБРАТЬ T1.Ссылка ИЗ Документ.Заказ КАК T1
@@ -330,8 +309,6 @@ mod tests {
 
     #[test]
     fn test_from_aggregating_subquery_with_join_exempted() {
-        // Covers the second emit site at `from_clause.rs:38-44` — FROM is a
-        // subquery and that subquery has subsequent JOINs.
         let code = r#"
 Процедура Тест()
     Запрос = "ВЫБРАТЬ Агрегат.Регистратор
@@ -347,10 +324,6 @@ mod tests {
 
     #[test]
     fn test_join_with_subquery_column_named_summa_still_emits() {
-        // Per Codex finding 3: a column named `Сумма` is NOT in function-call
-        // position and must NOT suppress the diagnostic. This guards against
-        // a regression where a flat IDENT scan would falsely exempt non-aggregating
-        // subqueries that happen to mention an aggregate-keyword identifier.
         let code = r#"
 Процедура Тест()
     Запрос = "ВЫБРАТЬ * ИЗ Т1 ЛЕВОЕ СОЕДИНЕНИЕ (ВЫБРАТЬ Сумма ИЗ Т2) КАК С ПО Т1.ID = С.ID";
@@ -368,7 +341,6 @@ mod tests {
 
     #[test]
     fn test_join_with_subquery_alias_named_sum_still_emits() {
-        // Same guard against alias false-positive in English.
         let code = r#"
 Процедура Тест()
     Запрос = "SELECT * FROM T1 LEFT JOIN (SELECT Field1 AS Sum FROM T2) AS S ON T1.ID = S.ID";

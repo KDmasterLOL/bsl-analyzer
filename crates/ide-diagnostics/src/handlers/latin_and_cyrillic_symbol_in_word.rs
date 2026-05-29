@@ -1,7 +1,3 @@
-//! LatinAndCyrillicSymbolInWord diagnostic
-//!
-//! Detects identifiers that mix Latin and Cyrillic characters in the same word.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -29,7 +25,6 @@ const DEFAULT_EXCLUDE_WORDS: &str = "ЧтениеXML, ЧтениеJSON, Запи
 
 const DEFAULT_ALLOW_TRAILING_PARTS: bool = true;
 
-/// Configuration for the diagnostic
 #[derive(Debug, Clone)]
 struct Config {
     exclude_words: Vec<String>,
@@ -60,73 +55,54 @@ impl Config {
     }
 }
 
-/// Information about an identifier found in the code
 #[derive(Debug, Clone)]
 struct IdentifierInfo {
     text: String,
     range: TextRange,
 }
 
-/// Check if character is Cyrillic (Russian alphabet)
 #[inline]
 fn is_cyrillic(c: char) -> bool {
     matches!(c, 'а'..='я' | 'А'..='Я' | 'ё' | 'Ё')
 }
 
-/// Check if character is Latin
 #[inline]
 fn is_latin(c: char) -> bool {
     c.is_ascii_alphabetic()
 }
 
-/// Check if character is uppercase Cyrillic
 #[inline]
 fn is_cyrillic_upper(c: char) -> bool {
     matches!(c, 'А'..='Я' | 'Ё')
 }
 
-/// Check if character is uppercase Latin
 #[inline]
 fn is_latin_upper(c: char) -> bool {
     c.is_ascii_uppercase()
 }
 
-/// Quick byte-level check to detect pure scripts without char iteration.
-/// Returns Some(false) if definitely not mixed (pure Cyrillic or pure Latin).
-/// Returns None if we need a full char-level check.
-///
-/// Optimized for BSL where most identifiers are pure Cyrillic.
 #[inline]
 fn quick_mixed_check(text: &str) -> Option<bool> {
     let bytes = text.as_bytes();
 
-    // Fast path 1: Pure Cyrillic (most common in BSL)
-    // Cyrillic letters are multi-byte UTF-8 (bytes >= 0x80)
-    // If no ASCII letters present, can't be mixed
     let has_ascii_letter = bytes.iter().any(|&b| b.is_ascii_alphabetic());
     if !has_ascii_letter {
-        return Some(false); // Pure Cyrillic (or no letters at all)
+        return Some(false);
     }
 
-    // Fast path 2: Pure Latin
-    // If no high bytes (>= 0x80), no multi-byte chars, so no Cyrillic
     let has_high_byte = bytes.iter().any(|&b| b >= 0x80);
     if !has_high_byte {
-        return Some(false); // Pure ASCII/Latin
+        return Some(false);
     }
 
-    // Has both ASCII letters and high bytes - need full check
     None
 }
 
-/// Checks if text contains both Latin and Cyrillic characters
 fn has_mixed_scripts(text: &str) -> bool {
-    // Try quick byte-level check first
     if let Some(result) = quick_mixed_check(text) {
         return result;
     }
 
-    // Full char-level check for ambiguous cases
     let mut has_cyrillic = false;
     let mut has_latin = false;
 
@@ -144,15 +120,11 @@ fn has_mixed_scripts(text: &str) -> bool {
     false
 }
 
-/// Check if identifier is in exclusion list (case-insensitive)
 fn is_excluded(text: &str, exclude_words: &[String]) -> bool {
     let text_lower = text.to_lowercase();
     exclude_words.contains(&text_lower)
 }
 
-/// Check if identifier matches trailing pattern (one language at start, another at end).
-/// Pattern: starts with >=2 chars of one script (uppercase start), ends with >=2 chars of another.
-/// Examples: HTTPСоединение, ВИмениEnglish
 fn matches_trailing_pattern(text: &str) -> bool {
     if text.len() < 4 {
         return false;
@@ -165,9 +137,7 @@ fn matches_trailing_pattern(text: &str) -> bool {
 
     let first = chars[0];
 
-    // Pattern 1: Latin start -> Cyrillic end (e.g., HTTPСоединение)
     if is_latin_upper(first) {
-        // Find where Latin ends and Cyrillic begins
         let mut latin_end = 0;
         for (i, &c) in chars.iter().enumerate() {
             if is_latin(c) || c.is_ascii_digit() || c == '_' {
@@ -177,29 +147,23 @@ fn matches_trailing_pattern(text: &str) -> bool {
             }
         }
 
-        // Need at least 2 Latin chars at start
         if latin_end < 2 {
             return false;
         }
 
-        // Check remaining is Cyrillic (at least 2 chars)
         let remaining = &chars[latin_end..];
         if remaining.len() < 2 {
             return false;
         }
 
-        // First char of Cyrillic part must be uppercase
         if !is_cyrillic_upper(remaining[0]) {
             return false;
         }
 
-        // All remaining must be Cyrillic or digits/underscore
         return remaining.iter().all(|&c| is_cyrillic(c) || c.is_ascii_digit() || c == '_');
     }
 
-    // Pattern 2: Cyrillic start -> Latin end (e.g., ВИмениEnglish)
     if is_cyrillic_upper(first) {
-        // Find where Cyrillic ends and Latin begins
         let mut cyrillic_end = 0;
         for (i, &c) in chars.iter().enumerate() {
             if is_cyrillic(c) || c.is_ascii_digit() || c == '_' {
@@ -209,45 +173,37 @@ fn matches_trailing_pattern(text: &str) -> bool {
             }
         }
 
-        // Need at least 2 Cyrillic chars at start
         if cyrillic_end < 2 {
             return false;
         }
 
-        // Check remaining is Latin (at least 2 chars)
         let remaining = &chars[cyrillic_end..];
         if remaining.len() < 2 {
             return false;
         }
 
-        // First char of Latin part must be uppercase
         if !is_latin_upper(remaining[0]) {
             return false;
         }
 
-        // All remaining must be Latin or digits/underscore
         return remaining.iter().all(|&c| is_latin(c) || c.is_ascii_digit() || c == '_');
     }
 
     false
 }
 
-/// Determines if identifier should be reported based on configuration
 fn should_report(id: &IdentifierInfo, config: &Config) -> bool {
     if !config.allow_trailing_parts {
-        return true; // Strict mode: report all mixed scripts
+        return true;
     }
 
-    // Check trailing pattern exception
     !matches_trailing_pattern(&id.text)
 }
 
-/// Extracts region name from PRE_REGION_DIR node
 fn extract_region_name(node: &syntax::SyntaxNode) -> Option<IdentifierInfo> {
     let text = node.text().to_string();
     let first_line = text.lines().next()?;
 
-    // Try all variants (case-insensitive prefix matching)
     let (name, prefix_len) = if let Some(n) = first_line.strip_prefix("#Область") {
         (n, "#Область".len())
     } else if let Some(n) = first_line.strip_prefix("#область") {
@@ -265,7 +221,6 @@ fn extract_region_name(node: &syntax::SyntaxNode) -> Option<IdentifierInfo> {
         return None;
     }
 
-    // Extract only the identifier (before any comment '//')
     let identifier = if let Some(comment_pos) = trimmed.find("//") {
         trimmed[..comment_pos].trim()
     } else {
@@ -276,7 +231,6 @@ fn extract_region_name(node: &syntax::SyntaxNode) -> Option<IdentifierInfo> {
         return None;
     }
 
-    // Calculate exact range for the identifier
     let name_start = prefix_len + (name.len() - trimmed.len());
     let byte_start: u32 = node.text_range().start().into();
     let byte_start = byte_start + name_start as u32;
@@ -287,7 +241,6 @@ fn extract_region_name(node: &syntax::SyntaxNode) -> Option<IdentifierInfo> {
     })
 }
 
-/// Extracts label from GOTO_STMT node (IDENT after TILDE)
 fn extract_goto_label(node: &syntax::SyntaxNode) -> Option<IdentifierInfo> {
     let mut found_tilde = false;
 
@@ -307,7 +260,6 @@ fn extract_goto_label(node: &syntax::SyntaxNode) -> Option<IdentifierInfo> {
     None
 }
 
-/// Extracts lvalue from ASSIGN_STMT node (first IDENT token)
 fn extract_assign_lvalue(node: &syntax::SyntaxNode) -> Option<IdentifierInfo> {
     for element in node.descendants_with_tokens() {
         if let Some(token) = element.as_token() {
@@ -322,14 +274,11 @@ fn extract_assign_lvalue(node: &syntax::SyntaxNode) -> Option<IdentifierInfo> {
 
     None
 }
-/// Check if token text is a candidate for mixed scripts (quick pre-filter).
-/// Only allocates String if this returns true.
 #[inline]
 fn is_mixed_candidate(text: &str) -> bool {
     text.len() >= 2 && has_mixed_scripts(text)
 }
 
-/// Process a single IDENT token: check if mixed and add to results
 #[inline]
 fn process_ident_token(
     token: &syntax::SyntaxToken,
@@ -342,7 +291,6 @@ fn process_ident_token(
     if !is_mixed_candidate(text) {
         return;
     }
-    // Only allocate String after passing quick check
     let text_owned = text.to_string();
     if is_excluded(&text_owned, &config.exclude_words) {
         return;
@@ -363,7 +311,6 @@ fn process_ident_token(
     }
 }
 
-/// Collects and filters identifiers in a single pass (avoids intermediate allocations)
 fn collect_and_check(
     ctx: &DiagnosticsContext,
     config: &Config,
@@ -375,7 +322,6 @@ fn collect_and_check(
 
     for node in root.descendants() {
         match node.kind() {
-            // 1. Function names
             SyntaxKind::FUNCTION_DEF | SyntaxKind::PROCEDURE_DEF => {
                 for element in node.children_with_tokens() {
                     if let Some(token) = element.as_token() {
@@ -387,7 +333,6 @@ fn collect_and_check(
                 }
             }
 
-            // 3. Variable declarations
             SyntaxKind::VAR_DEF => {
                 for element in node.descendants_with_tokens() {
                     if let Some(token) = element.as_token() {
@@ -398,7 +343,6 @@ fn collect_and_check(
                 }
             }
 
-            // 4. Parameters
             SyntaxKind::PARAM => {
                 for element in node.children_with_tokens() {
                     if let Some(token) = element.as_token() {
@@ -410,7 +354,6 @@ fn collect_and_check(
                 }
             }
 
-            // 5. Annotations (both name and params)
             SyntaxKind::ANNOTATION | SyntaxKind::COMPILER_DIRECTIVE => {
                 for element in node.children_with_tokens() {
                     if let Some(token) = element.as_token() {
@@ -446,7 +389,6 @@ fn collect_and_check(
                         }
                     }
                 }
-                // Annotation parameters
                 for child in node.descendants() {
                     if child.kind() == SyntaxKind::ANNOTATION_PARAM {
                         for element in child.children_with_tokens() {
@@ -461,7 +403,6 @@ fn collect_and_check(
                 }
             }
 
-            // 6. Region names
             SyntaxKind::PRE_REGION_DIR => {
                 if let Some(id) = extract_region_name(&node) {
                     if id.text.len() >= 2
@@ -484,7 +425,6 @@ fn collect_and_check(
                 }
             }
 
-            // 7. Goto labels
             SyntaxKind::GOTO_STMT => {
                 if let Some(id) = extract_goto_label(&node) {
                     if id.text.len() >= 2
@@ -507,7 +447,6 @@ fn collect_and_check(
                 }
             }
 
-            // 8. Assignment left-hand side
             SyntaxKind::ASSIGN_STMT => {
                 if let Some(id) = extract_assign_lvalue(&node) {
                     if id.text.len() >= 2
@@ -546,7 +485,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     let config = Config::from_context(ctx);
 
-    // Single-pass collection and filtering to minimize allocations
     collect_and_check(ctx, &config, code)
 }
 
@@ -557,9 +495,6 @@ mod tests {
     use expect_test::expect;
     #[test]
     fn test_comprehensive() {
-        // Inline fixture: covers all 8 identifier categories with known mixed-script identifiers.
-        // Line numbers (0-based) must match position assertions below.
-        // Uses concat! to preserve exact per-line indentation without Rust's \n\ stripping.
         let code = concat!(
             "Перем Namе;                 // <- ошибка\n",
             "\n",

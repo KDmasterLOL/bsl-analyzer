@@ -1,30 +1,3 @@
-//! Flags enabling `УстановитьПривилегированныйРежим` as a security hotspot.
-//!
-//! # Track 2 §1.6 Group C
-//!
-//! Detection moved out of HIR lowering into this handler's [`check`]
-//! function, consuming the §1.2 saturating-counter lattice + §1.3 const-
-//! propagation overlay through
-//! [`hir::dataflow::security_state::open_events`]. Const-prop precision:
-//! `Значение = Истина; УстановитьПривилегированныйРежим(Значение)` is
-//! folded as `KnownTrue` and emitted; `Значение = Ложь;
-//! УстановитьПривилегированныйРежим(Значение)` is folded as
-//! `KnownFalse` and **suppressed** (the legacy "any non-literal-False ⇒
-//! emit" coarsening over-approximated and is replaced by the lattice
-//! decision). Cases that don't fold (`Перем =
-//! НепрозрачнаяФункция(); Установить(Перем)`) still surface — the
-//! lattice yields `Unknown`, and `open_events` treats `Unknown` as
-//! "potentially opens" to preserve the legacy alarm.
-//!
-//! # Coverage
-//!
-//! Both per-method bodies AND module-level top-level code are scanned.
-//! `module_security_state` carries a separate
-//! [`hir::dataflow::DataflowResult`] for the module's top-level body
-//! when one exists, so file-scope
-//! `УстановитьПривилегированныйРежим(...)` calls outside any procedure
-//! are surfaced — matching the legacy HIR-side detector's parity.
-
 use std::sync::Arc;
 
 use crate::define_metadata;
@@ -46,9 +19,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Track 2 §1.6 Group C — lattice-driven detection. Replaces the old
-/// `from_hir(range, ctx)` adapter that consumed
-/// `BodyDiagnostic::SetPrivilegedModeCall` from HIR lowering.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::SetPrivilegedMode;
     if ctx.is_disabled_with_metadata(code) {
@@ -72,9 +42,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             emit_for_result(&result, &lower_result.source_map, code, ctx, &mut diagnostics);
         }
     }
-    // Codex round-1 NIT: emit in source order so handler tests that
-    // read `diags[idx]` see deterministic output regardless of CFG
-    // vertex iteration order.
     diagnostics.sort_by_key(|d| (d.range.start(), d.range.end()));
     diagnostics
 }
@@ -131,10 +98,6 @@ mod tests {
         );
     }
 
-    /// Track 2 §1.6 Group C — Codex round-1 MAJOR regression guard:
-    /// module-level (top-level) calls outside any procedure must be
-    /// surfaced. A regression here would silently lose coverage for
-    /// file-scope `SetPrivilegedMode`.
     #[test]
     fn test_module_level_call_emits() {
         let code = r#"УстановитьПривилегированныйРежим(Истина);

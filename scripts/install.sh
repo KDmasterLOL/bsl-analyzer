@@ -1,24 +1,11 @@
 #!/usr/bin/env bash
-# Install script for bsl-analyzer LSP server
-#
-# Usage:
-#   curl -fsSL <url>/install.sh | bash
-#   curl -fsSL <url>/install.sh | bash -s -- --version 0.1.38
-#   curl -fsSL <url>/install.sh | bash -s -- --install-dir /usr/local/bin
-#
-# Environment variables:
-#   BSL_INSTALL_DIR - installation directory (default: ~/.local/bin on Linux, /usr/local/bin on macOS)
-#   BSL_VERSION     - version to install (default: latest)
 
 set -euo pipefail
 
-# --- Source configuration (replaced by github-sync for GitHub builds) ---
-# INSTALL_SOURCE:gitlab
 INSTALL_SOURCE="gitlab"
 GITLAB_RELEASE_URL="https://dev.runsystems.ru/releases"
 GITLAB_PRODUCT="bsl-analyzer"
 GITHUB_REPO="itrous/bsl-analyzer"
-# --- End source configuration ---
 
 VERSION="${BSL_VERSION:-}"
 INSTALL_DIR="${BSL_INSTALL_DIR:-}"
@@ -214,7 +201,6 @@ main() {
     info "Source: ${INSTALL_SOURCE}"
     info "Install dir: ${INSTALL_DIR}"
 
-    # Fetch latest version if not specified
     if [ -z "$VERSION" ]; then
         info "Fetching latest version..."
         case "$INSTALL_SOURCE" in
@@ -230,7 +216,6 @@ main() {
 
     info "Version: ${VERSION}"
 
-    # Check if already installed
     local existing="${INSTALL_DIR}/${BINARY_NAME}"
     if [ -f "$existing" ]; then
         local current
@@ -243,7 +228,6 @@ main() {
         info "Upgrading from ${current} to ${VERSION}"
     fi
 
-    # Build download URL
     local file_name="bsl-analyzer-app-${PLATFORM}"
     local url
     case "$INSTALL_SOURCE" in
@@ -251,7 +235,6 @@ main() {
         gitlab) url=$(download_url_gitlab "$VERSION" "$file_name") ;;
     esac
 
-    # Download
     TMP_DIR=$(mktemp -d)
     trap 'rm -rf "$TMP_DIR"' EXIT
 
@@ -263,7 +246,6 @@ main() {
         exit 1
     fi
 
-    # Verify checksum (if checksums available)
     local checksums_file="${TMP_DIR}/checksums.txt"
     local checksums_url
     case "$INSTALL_SOURCE" in
@@ -285,7 +267,6 @@ main() {
         fi
     fi
 
-    # Install
     chmod +x "$tmp_file"
 
     mkdir -p "$INSTALL_DIR"
@@ -301,7 +282,6 @@ main() {
 
     check_path
 
-    # Verify installation
     if check_command "$BINARY_NAME"; then
         local installed_version
         installed_version=$("$BINARY_NAME" --version 2>/dev/null || echo "")

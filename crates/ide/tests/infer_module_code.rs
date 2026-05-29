@@ -1,21 +1,3 @@
-//! Behavioural tests for `infer_module_code_query` (Phase O.14).
-//!
-//! O.14 ships the per-file module-code Salsa primitive that O.16's
-//! `infer_query` wrapper will consume to skip re-walking the
-//! module-code body. Narrow callers (completion in module scope,
-//! `narrow_query` with `ModuleCode` owner) reach the same data via
-//! [`InferOwnerResult::ModuleCode`] in later slices.
-//!
-//! These tests pin three properties of the query in isolation, before
-//! O.17 wires narrow callers through `db.infer_module_code`:
-//!
-//! - empty-body contract — a file with no module-code body returns a
-//!   default result (empty maps, owner = `ModuleCode`);
-//! - populated module-level state — a `Перем` declaration with an
-//!   explicit literal assignment shows up in `var_types`;
-//! - Salsa cache hit identity — two consecutive calls inside the same
-//!   revision share the same `Arc`.
-
 use std::sync::Arc;
 
 use hir::{infer_module_code_query, Builders, DefWithBodyId, HirDatabase};
@@ -45,9 +27,6 @@ fn setup(fixture_text: &str) -> (RootDatabaseImpl, FileId) {
     (db, test_file)
 }
 
-/// File with no module-code body (only a method declaration) — the
-/// query returns a defaulted result. Critical for callers that need a
-/// uniform "always returns Arc" contract.
 #[test]
 fn no_module_code_body_returns_default() {
     let (db, fid) = setup(
@@ -66,12 +45,6 @@ fn no_module_code_body_returns_default() {
     assert!(result.diagnostics.is_empty());
 }
 
-/// Module-level implicit local — bare `Х = "hello"` (no `Перем`)
-/// — surfaces in `var_types`. Mirrors the slice of `infer_query`'s
-/// file-wide aggregate that comes from the module-code body. NB:
-/// module-level `Перем X;` declarations intentionally stay
-/// `Ty::Unknown` per current semantics (see PLAN-v3 §4.4), so this
-/// test uses an implicit-local assignment instead.
 #[test]
 fn module_level_implicit_local_assignment_populates_var_types() {
     let (db, fid) = setup(
@@ -86,10 +59,6 @@ fn module_level_implicit_local_assignment_populates_var_types() {
     assert_eq!(result.var_types.get("х").copied(), Some(db.string(None, false)),);
 }
 
-/// Two consecutive calls inside the same Salsa revision return the
-/// SAME `Arc`. Confirms the `#[salsa::tracked]` cache wiring landed —
-/// without it, every IDE interaction would pay for a full
-/// module-code body walk.
 #[test]
 fn salsa_cache_hit_shares_arc() {
     let (db, fid) = setup(
@@ -105,10 +74,6 @@ fn salsa_cache_hit_shares_arc() {
     assert!(Arc::ptr_eq(&r1, &r2), "second call within the same revision must hit the Salsa cache");
 }
 
-/// Smoke: the query body must call `module_bodies` (cycle-free) and
-/// not panic on a bilingual mixed-case identifier. Asserts the
-/// implicit-locals map contains the lowercase key — the same shape
-/// completion will read after O.17.
 #[test]
 fn bilingual_implicit_local_shows_in_implicit_locals() {
     let (db, fid) = setup(
@@ -126,10 +91,6 @@ fn bilingual_implicit_local_shows_in_implicit_locals() {
     );
 }
 
-/// `db.infer_module_code(file_id)` (the trait delegator wired in
-/// `RootDatabaseImpl`) must return the same `Arc` as the direct
-/// `infer_module_code_query(db, FileIdInput::new(db, file_id))` call.
-/// Pins the trait-method wiring against a future divergence.
 #[test]
 fn trait_method_delegates_to_query() {
     let (db, fid) = setup(

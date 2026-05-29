@@ -1,28 +1,8 @@
-//! EventSubscription XML parser
-
 use crate::error::{MetadataError, Result};
 use crate::event_subscription::EventSubscription;
 
 use super::helpers::{child_text, find_child, find_mdo_element, parse_uuid, parse_xml};
 
-/// Parse EventSubscription XML from Designer format
-///
-/// # Arguments
-///
-/// * `xml` - XML content as string
-///
-/// # Returns
-///
-/// Parsed `EventSubscription` structure
-///
-/// # Example
-///
-/// ```no_run
-/// # use bsl_metadata::xml_parser::parse_event_subscription_xml;
-/// let xml = std::fs::read_to_string("EventSubscriptions/MySubscription.xml")?;
-/// let subscription = parse_event_subscription_xml(&xml)?;
-/// # Ok::<(), bsl_metadata::MetadataError>(())
-/// ```
 pub fn parse_event_subscription_xml(xml: &str) -> Result<EventSubscription> {
     let _span = tracing::debug_span!("parse_event_subscription_xml").entered();
 
@@ -43,7 +23,6 @@ pub fn parse_event_subscription_xml(xml: &str) -> Result<EventSubscription> {
     let event = child_text(props, "Event").unwrap_or("").to_string();
     let handler = child_text(props, "Handler").unwrap_or("").to_string();
 
-    // Source may contain <Type> and/or <TypeSet> children — collect and join with ";"
     let source = find_child(props, "Source")
         .map(|source_node| {
             let mut all_types: Vec<&str> = Vec::new();

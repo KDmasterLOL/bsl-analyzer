@@ -1,18 +1,3 @@
-//! Behavioural tests for the Phase O.11 cascade-typing wiring.
-//!
-//! O.11 wires `method_return_type_query` (O.10) into two production
-//! sites:
-//! - `materialise_signature_enriched` — when `sig.return_ty == Unknown`,
-//!   the qualified-call resolution adapters consult the cascade query.
-//! - `infer_call`'s `Ty::Unknown` arm — when a bare same-module
-//!   `Expr::Path(name)` callee whose `infer_path_name` returned
-//!   `Ty::Unknown` resolves to a user-defined method via the local
-//!   `symbol_tree`, the cascade query feeds the inferred return type.
-//!
-//! These tests exercise the bare-fn cascade end-to-end through
-//! `db.infer(file_id)` so the wiring is observable via standard
-//! `InferenceResult.var_types` / `expr_types_by_body`.
-
 use hir::{Builders, DefDatabase, DefWithBodyId, HirDatabase, ModuleId, Name};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
@@ -46,9 +31,6 @@ fn var_ty(db: &RootDatabaseImpl, fid: FileId, name: &str) -> hir::TypeId {
     result.var_types.get(&key).copied().unwrap_or_else(|| db.unknown())
 }
 
-/// Bare same-module fn-call cascade: `Х = ЛокФн();` where `ЛокФн`
-/// returns a string literal must produce `var_types[Х] == Ty::String`
-/// via the O.11 `Ty::Unknown` arm in `infer_call`.
 #[test]
 fn bare_fn_cascade_string() {
     let (db, fid) = setup(
@@ -66,10 +48,6 @@ fn bare_fn_cascade_string() {
     assert_eq!(var_ty(&db, fid, "Х"), db.string(None, false));
 }
 
-/// Two-step cascade: `f` returns `g()`, `g` returns `"x"`. After O.11
-/// the `var_types[Х]` for `Х = f();` must be `Ty::String`. This
-/// exercises the cycle handlers' "no cycle" path — both queries
-/// resolve linearly to concrete Tys.
 #[test]
 fn bare_fn_cascade_two_step_chain() {
     let (db, fid) = setup(
@@ -91,11 +69,6 @@ fn bare_fn_cascade_two_step_chain() {
     assert_eq!(var_ty(&db, fid, "Х"), db.string(None, false));
 }
 
-/// Body-binding shadow: a parameter named the same as a module method
-/// must NOT resolve through `symbol_tree.find_method` to the module
-/// method. The cascade-arm body-binding guard ensures
-/// `var_types[Х]` stays `Ty::Unknown` (parameter `Foo` has no
-/// inferred call-result), not the module method's return type.
 #[test]
 fn bare_fn_cascade_respects_param_shadow() {
     let (db, fid) = setup(
@@ -110,20 +83,9 @@ fn bare_fn_cascade_respects_param_shadow() {
 КонецПроцедуры
 "#,
     );
-    // The parameter `Foo` shadows the module method — its type is
-    // Unknown (no annotation), so calling it yields Unknown rather
-    // than cascading through to the module method.
     assert_eq!(var_ty(&db, fid, "Х"), db.unknown());
 }
 
-/// Cycle scaffolding now reachable: `f` returns `f()`. The cascade
-/// arm calls `method_return_type_query(f)` which recursively requests
-/// `method_return_type_query(f)` — Salsa's cycle handlers fire,
-/// `cycle_initial` seeds `Ty::Unknown`, and the body produces no
-/// non-recursive concrete type, so the result converges to
-/// `Ty::Unknown`. This is the same final value the O.10 self-recursion
-/// test sees, but now via the actual cycle iteration rather than a
-/// no-cascade short-circuit.
 #[test]
 fn self_recursion_under_cascade_yields_unknown() {
     let (db, fid) = setup(
@@ -141,18 +103,6 @@ fn self_recursion_under_cascade_yields_unknown() {
     assert_eq!(var_ty(&db, fid, "Х"), db.unknown());
 }
 
-/// The cascade also fires through `Stmt::Return`: a function `Wrap`
-/// that returns a same-module call to `Inner` must propagate
-/// `Inner`'s body-inferred return type up to `Wrap`'s body.
-///
-/// The assertion is scoped to `Wrap`'s
-/// `DefWithBodyId::Method(local_id)` (Codex O.12 C1) — otherwise a
-/// global "any body has any `Ty::String`" probe would be satisfied
-/// by the literal `"from-inner"` inside `Inner`'s OWN body and the
-/// test would not actually verify the cascade. We assert
-/// `expr_types_by_body[Wrap]` contains a `Ty::String` entry — that
-/// can only come from the call expression `Inner()`, since `Wrap`'s
-/// own body has no string literals.
 #[test]
 fn return_statement_propagates_cascade() {
     let (db, fid) = setup(
@@ -180,15 +130,9 @@ fn return_statement_propagates_cascade() {
     let inner_exprs =
         result.expr_types_by_body.get(&inner_owner).expect("Inner's body must have inferred exprs");
 
-    // Sanity: `Wrap` and `Inner` are distinct keys in `expr_types_by_body`.
     assert_ne!(wrap_owner, inner_owner, "Wrap and Inner must lower to distinct DefWithBodyId");
-    // Phase 3 §4.D: per-body `expr_types` now stores `TypeId`; bridge
-    // through the kernel to keep the structural `matches!` assertion.
     let has_string = |tid: &hir::TypeId| *tid == db.string(None, false);
-    // Inner contains the literal — confirms `expr_types_by_body[Inner]` sees a String.
     assert!(inner_exprs.values().any(has_string));
-    // The actual cascade assertion: `Wrap`'s OWN body sees the
-    // call-to-`Inner` expression typed `Ty::String` via O.11.
     assert!(
         wrap_exprs.values().any(has_string),
         "Wrap's body must contain a Ty::String entry for `Inner()` via the O.11 cascade \

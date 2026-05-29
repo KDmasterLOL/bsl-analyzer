@@ -3,7 +3,6 @@ name = "html-parser"
 version = "0.1.0"
 edition = "2021"
 
-# Not part of workspace - standalone tool
 [workspace]
 
 [[bin]]

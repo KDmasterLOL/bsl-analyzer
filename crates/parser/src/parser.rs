@@ -1,25 +1,18 @@
-//! The parser state machine.
-
 use lexer::{Token, TokenKind};
 use parser_error::{ParseError, RecoveryKind};
 use smallvec::smallvec;
 
 use crate::event::{Event, NodeKind};
 
-/// Maximum number of iterations to prevent infinite loops
 const MAX_ITERATIONS: usize = 1_000_000;
 
-/// How many recent positions to track for debugging infinite loops
 const POSITION_HISTORY_SIZE: usize = 100;
 
-/// Parser for BSL language.
 pub struct Parser<'a> {
     tokens: &'a [Token],
     pos: usize,
     events: Vec<Event>,
-    /// Iteration counter to detect infinite loops
     iteration_count: usize,
-    /// Recent positions to detect stuck loops
     recent_positions: Vec<usize>,
 }
 
@@ -38,26 +31,22 @@ impl<'a> Parser<'a> {
         self.events
     }
 
-    /// Returns the current token kind.
     pub fn current(&self) -> Option<TokenKind> {
         self.nth(0)
     }
 
-    /// Returns the current token text for debugging.
     #[allow(dead_code)]
     pub(crate) fn current_text(&self) -> Option<&str> {
         self.tokens.get(self.pos).map(|t| t.text.as_str())
     }
 
-    /// Returns the nth token kind (0-indexed).
     pub fn nth(&self, n: usize) -> Option<TokenKind> {
         self.tokens.get(self.pos + n).map(|t| t.kind)
     }
 
-    /// Returns the nth non-trivia token kind (0-indexed), skipping whitespace/comments/newlines.
     pub fn nth_non_trivia(&self, n: usize) -> Option<TokenKind> {
         let mut count = 0;
-        let mut offset = 1; // start from next token
+        let mut offset = 1;
         while let Some(t) = self.tokens.get(self.pos + offset) {
             match t.kind {
                 TokenKind::Whitespace
@@ -78,24 +67,14 @@ impl<'a> Parser<'a> {
         None
     }
 
-    /// Checks if the current token matches the given kind.
     pub fn at(&self, kind: TokenKind) -> bool {
         self.current() == Some(kind)
     }
 
-    /// Checks if the current token is in the given set.
-    ///
-    /// Mirrors rust-analyzer's `Parser::at_ts` — the canonical way to test
-    /// position-specific allowlists (e.g. tokens accepted as a property
-    /// name after `.`). Returns false at EOF.
     pub fn at_ts(&self, set: crate::token_set::TokenSet) -> bool {
         self.current().is_some_and(|k| set.contains(k))
     }
 
-    /// Checks if the current token matches the given kind and text (case-insensitive).
-    ///
-    /// This is useful for SDBL keywords that are mapped to TokenKind::Ident.
-    /// Uses Unicode-aware case comparison to support Russian keywords.
     pub fn at_keyword(&self, text: &str) -> bool {
         if let Some(token) = self.tokens.get(self.pos) {
             token.kind == TokenKind::Ident && token.text.to_lowercase() == text.to_lowercase()
@@ -104,12 +83,10 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Checks if at the end of input.
     pub fn at_end(&self) -> bool {
         self.pos >= self.tokens.len()
     }
 
-    /// Consumes the current token if it matches the given kind.
     pub fn eat(&mut self, kind: TokenKind) -> bool {
         if self.at(kind) {
             self.bump();
@@ -119,7 +96,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Consumes the current token.
     pub fn bump(&mut self) {
         if let Some(kind) = self.current() {
             self.events.push(Event::Token { kind });
@@ -127,7 +103,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Expects the current token to be of the given kind.
     pub fn expect(&mut self, kind: TokenKind) -> bool {
         if self.eat(kind) {
             return true;
@@ -147,9 +122,6 @@ impl<'a> Parser<'a> {
         false
     }
 
-    /// Consumes the current token if it matches the keyword text (case-insensitive).
-    ///
-    /// This is useful for SDBL keywords that are mapped to TokenKind::Ident.
     pub fn eat_keyword(&mut self, text: &str) -> bool {
         if self.at_keyword(text) {
             self.bump();
@@ -159,7 +131,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Starts a new node.
     pub fn start(&mut self) -> Marker {
         let pos = self.events.len();
         let start_token_pos = self.pos;
@@ -167,7 +138,6 @@ impl<'a> Parser<'a> {
         Marker { pos, start_token_pos }
     }
 
-    /// Adds an error node.
     pub fn error(&mut self) {
         let found = self.current();
         let recovery =
@@ -199,14 +169,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Emits a custom error at the current position WITHOUT consuming the
-    /// lookahead token.
-    ///
-    /// Use this when the diagnostic itself is enough and the outer grammar
-    /// should keep the current token for its own recovery (e.g. block
-    /// terminators that must close the enclosing function). `error_custom`
-    /// always bumps the next token into an `ERROR` child — that is correct
-    /// for "expected `X`, got garbage" cases but wrong here.
     pub fn error_custom_no_bump(&mut self, msg: &'static str) {
         let err = ParseError::Custom { message: msg, recovery: RecoveryKind::MissingToken };
         self.emit_missing(err);
@@ -235,7 +197,6 @@ impl<'a> Parser<'a> {
         m.complete(self, NodeKind::Error);
     }
 
-    /// Skips whitespace, comments, and BOM.
     pub fn skip_trivia(&mut self) {
         while let Some(kind) = self.current() {
             match kind {
@@ -248,9 +209,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Like [`skip_trivia`](Self::skip_trivia), but reports whether a line break
-    /// was among the skipped tokens. Used by post-`.` recovery to tell a
-    /// line-leading token apart from one on the same line as the dot.
     pub fn skip_trivia_crossing_newline(&mut self) -> bool {
         let mut crossed_newline = false;
         while let Some(kind) = self.current() {
@@ -266,26 +224,14 @@ impl<'a> Parser<'a> {
         crossed_newline
     }
 
-    /// Returns true if the parser is positioned at the header of a function or
-    /// procedure declaration (`Функция Имя` / `Процедура Имя`). Non-consuming.
-    ///
-    /// `Функция`/`Процедура` are valid property names (`Перечисления.X.Функция`),
-    /// so they belong to the post-`.` allowlist — but a declaration header can
-    /// never be an expression member. After a line break, this shape means the
-    /// enclosing item lost its terminator and the declaration must be left for
-    /// the module rule to recover, not swallowed as a field name.
     pub fn at_declaration_start(&self) -> bool {
         matches!(self.current(), Some(TokenKind::KwFunction | TokenKind::KwProcedure))
             && self.nth_non_trivia(0) == Some(TokenKind::Ident)
     }
 
-    /// Checks whether the parser appears stuck in the recent token window.
-    /// The guard panics only when the position barely moves; large-but-progressing
-    /// inputs (e.g. a multi-megabyte file fed by mistake) merely reset the counter.
     pub fn check_iteration_limit(&mut self) {
         self.iteration_count += 1;
 
-        // Track recent positions
         if self.recent_positions.len() >= POSITION_HISTORY_SIZE {
             self.recent_positions.remove(0);
         }
@@ -296,11 +242,9 @@ impl<'a> Parser<'a> {
         }
 
         let unique_positions: std::collections::HashSet<_> = self.recent_positions.iter().collect();
-        let stuck = unique_positions.len() < 5; // Less than 5 unique positions = real loop
+        let stuck = unique_positions.len() < 5;
 
         if !stuck {
-            // Large input that makes genuine progress: reset the counter and keep parsing.
-            // `recent_positions` keeps sliding so a later stall is still caught.
             tracing::debug!(
                 position = self.pos,
                 unique_in_window = unique_positions.len(),
@@ -329,8 +273,7 @@ impl<'a> Parser<'a> {
     }
 }
 
-/// A marker for a started node.
-pub struct Marker /* RecoverySpan carrier */ {
+pub struct Marker {
     pos: usize,
     start_token_pos: usize,
 }
@@ -340,7 +283,6 @@ impl Marker {
         Self { pos, start_token_pos }
     }
 
-    /// Completes the node with the given kind.
     pub fn complete(self, p: &mut Parser, kind: NodeKind) -> CompletedMarker {
         let event = &mut p.events[self.pos];
         *event = Event::Start { kind, forward_parent: None };
@@ -348,7 +290,6 @@ impl Marker {
         CompletedMarker::at_event_pos(self.pos, self.start_token_pos)
     }
 
-    /// Abandons this marker.
     pub fn abandon(self, p: &mut Parser) {
         if self.pos == p.events.len() - 1 {
             if let Some(Event::Placeholder) = p.events.last() {
@@ -358,7 +299,6 @@ impl Marker {
     }
 }
 
-/// A completed marker that can be used for precede.
 pub struct CompletedMarker {
     pos: usize,
     start_token_pos: usize,
@@ -369,7 +309,6 @@ impl CompletedMarker {
         Self { pos, start_token_pos }
     }
 
-    /// Wraps the completed node in a new parent.
     pub fn precede(self, p: &mut Parser) -> Marker {
         let new_pos = p.events.len();
         p.events.push(Event::Placeholder);

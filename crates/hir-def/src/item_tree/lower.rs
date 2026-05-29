@@ -1,9 +1,3 @@
-//! Lowering from AST to ItemTree.
-//!
-//! This module converts high-level AST nodes into the compact ItemTree representation.
-//! The lowering process extracts only the signatures of procedures/functions/variables,
-//! not their bodies, making ItemTree an "invalidation barrier" for incremental computation.
-
 use crate::{
     item_tree::{
         Annotation, AnnotationKind, Function, ItemTree, ModItem, Param, Procedure, Variable,
@@ -19,15 +13,11 @@ use syntax::{
 use tracing::{debug, trace};
 use vfs::FileId;
 
-/// Context for lowering AST → ItemTree.
 pub(super) struct Ctx {
     tree: ItemTree,
 }
 
 impl Ctx {
-    /// Lower a file's AST into an ItemTree.
-    ///
-    /// This is the main entry point for ItemTree construction.
     pub fn lower_file(db: &dyn RootQueryDb, file_id: FileId) -> Arc<ItemTree> {
         let _span = tracing::info_span!("lower_file", ?file_id).entered();
 
@@ -54,10 +44,7 @@ impl Ctx {
         Arc::new(ctx.tree)
     }
 
-    /// Lower all top-level items in a file.
     fn lower_module_items(&mut self, file: &ast::SourceFile) {
-        // Walk through all descendants to find items inside preprocessor regions
-        // BSL allows procedures/functions inside #Область...#КонецОбласти regions
         for node in file.syntax().descendants() {
             match node.kind() {
                 SyntaxKind::PROCEDURE_DEF => {
@@ -71,19 +58,15 @@ impl Ctx {
                     }
                 }
                 SyntaxKind::VAR_DEF if !is_inside_method(&node) => {
-                    // Only collect module-level variables, not local variables inside procedures
                     if let Some(var) = ast::VarDef::cast(node.clone()) {
                         self.lower_variable(&var);
                     }
                 }
-                _ => {
-                    // Ignore other nodes (comments, whitespace, preprocessor, etc.)
-                }
+                _ => {}
             }
         }
     }
 
-    /// Lower a procedure definition.
     fn lower_procedure(&mut self, proc: &ast::ProcedureDef) {
         let name_token = proc.name_or_keyword();
         let name = name_token.as_ref().map(|t| Name::new(t.text())).unwrap_or_else(Name::missing);
@@ -113,7 +96,6 @@ impl Ctx {
         self.tree.top_level.push(ModItem::Procedure(idx));
     }
 
-    /// Lower a function definition.
     fn lower_function(&mut self, func: &ast::FunctionDef) {
         let name_token = func.name_or_keyword();
         let name = name_token.as_ref().map(|t| Name::new(t.text())).unwrap_or_else(Name::missing);
@@ -143,7 +125,6 @@ impl Ctx {
         self.tree.top_level.push(ModItem::Function(idx));
     }
 
-    /// Lower a variable definition.
     fn lower_variable(&mut self, var: &ast::VarDef) {
         let name_token = var.name();
         let name = name_token.as_ref().map(|t| Name::new(t.text())).unwrap_or_else(Name::missing);
@@ -169,7 +150,6 @@ impl Ctx {
         self.tree.top_level.push(ModItem::Variable(idx));
     }
 
-    /// Lower a parameter list.
     fn lower_params(&mut self, param_list: Option<ast::ParamList>) -> Box<[Param]> {
         use syntax::ast::AstNode;
 
@@ -196,7 +176,6 @@ impl Ctx {
             .collect()
     }
 
-    /// Lower annotations.
     fn lower_annotations(
         &mut self,
         annotations: impl Iterator<Item = ast::Annotation>,
@@ -247,15 +226,11 @@ impl Ctx {
     }
 }
 
-/// Check if a node is inside a procedure or function definition.
 fn is_inside_method(node: &SyntaxNode) -> bool {
     node.ancestors()
         .any(|n| n.kind() == SyntaxKind::PROCEDURE_DEF || n.kind() == SyntaxKind::FUNCTION_DEF)
 }
 
-/// Calculate the text range covering all parameters (without parentheses).
-///
-/// Returns None if there are no parameters.
 fn calculate_params_content_range(param_list: &ast::ParamList) -> Option<text_size::TextRange> {
     use syntax::ast::AstNode;
 
@@ -268,9 +243,6 @@ fn calculate_params_content_range(param_list: &ast::ParamList) -> Option<text_si
     Some(text_size::TextRange::new(first.start(), last.end()))
 }
 
-/// Lower module items into an ItemTree (pure function, no Salsa).
-///
-/// This is used by streaming mode to build ItemTree without database access.
 pub fn lower_module_items_into(file: &ast::SourceFile, tree: &mut ItemTree) {
     let mut ctx = Ctx { tree: std::mem::take(tree) };
     ctx.lower_module_items(file);
@@ -283,7 +255,6 @@ mod tests {
     use base_db::{Files, RootQueryDb, SourceDatabase};
     use vfs::{FileId, FileSet, VfsPath};
 
-    // Test database that implements RootQueryDb
     #[salsa::db]
     #[derive(Default, Clone)]
     struct TestDb {
@@ -361,14 +332,12 @@ mod tests {
         let mut db = TestDb::default();
         let file_id = FileId(0);
 
-        // Set up source root
         let mut file_set = FileSet::new();
         file_set.insert(file_id, VfsPath::new("/test.bsl"));
         let source_root = base_db::SourceRoot::new_local(file_set);
         db.set_source_root(base_db::SourceRootId(0), source_root);
         db.set_file_source_root(file_id, base_db::SourceRootId(0));
 
-        // Set file text
         db.set_file_text(file_id, input);
 
         Ctx::lower_file(&db, file_id)
@@ -413,12 +382,10 @@ mod tests {
         assert!(func.is_export);
         assert_eq!(func.params.len(), 2);
 
-        // First parameter: Знач Первое
         assert_eq!(func.params[0].name.as_str(), "Первое");
         assert!(func.params[0].is_val);
         assert!(!func.params[0].has_default);
 
-        // Second parameter: Второе = 0
         assert_eq!(func.params[1].name.as_str(), "Второе");
         assert!(!func.params[1].is_val);
         assert!(func.params[1].has_default);
@@ -457,13 +424,10 @@ mod tests {
 
         assert_eq!(tree.top_level_items().len(), 3);
 
-        // First: variable
         assert!(matches!(tree.top_level_items()[0], ModItem::Variable(_)));
 
-        // Second: procedure
         assert!(matches!(tree.top_level_items()[1], ModItem::Procedure(_)));
 
-        // Third: function
         assert!(matches!(tree.top_level_items()[2], ModItem::Function(_)));
     }
 
@@ -523,22 +487,18 @@ mod tests {
 
         assert_eq!(proc.params.len(), 4);
 
-        // Знач Первый
         assert_eq!(proc.params[0].name.as_str(), "Первый");
         assert!(proc.params[0].is_val);
         assert!(!proc.params[0].has_default);
 
-        // Второй
         assert_eq!(proc.params[1].name.as_str(), "Второй");
         assert!(!proc.params[1].is_val);
         assert!(!proc.params[1].has_default);
 
-        // Знач Третий = 10
         assert_eq!(proc.params[2].name.as_str(), "Третий");
         assert!(proc.params[2].is_val);
         assert!(proc.params[2].has_default);
 
-        // Четвертый = "текст"
         assert_eq!(proc.params[3].name.as_str(), "Четвертый");
         assert!(!proc.params[3].is_val);
         assert!(proc.params[3].has_default);
@@ -561,7 +521,6 @@ EndFunction
 
         assert_eq!(tree.top_level_items().len(), 3);
 
-        // Variable
         let var = tree.variable(match tree.top_level_items()[0] {
             ModItem::Variable(idx) => idx,
             _ => panic!("expected variable"),
@@ -569,7 +528,6 @@ EndFunction
         assert_eq!(var.name.as_str(), "GlobalCounter");
         assert!(var.is_export);
 
-        // Procedure
         let proc = tree.procedure(match tree.top_level_items()[1] {
             ModItem::Procedure(idx) => idx,
             _ => panic!("expected procedure"),
@@ -577,7 +535,6 @@ EndFunction
         assert_eq!(proc.name.as_str(), "Initialize");
         assert!(proc.is_export);
 
-        // Function
         let func = tree.function(match tree.top_level_items()[2] {
             ModItem::Function(idx) => idx,
             _ => panic!("expected function"),
@@ -621,7 +578,6 @@ EndFunction
 
         assert_eq!(tree.top_level_items().len(), 2);
 
-        // Check AtClient
         let proc = tree.procedure(match tree.top_level_items()[0] {
             ModItem::Procedure(idx) => idx,
             _ => panic!("expected procedure"),
@@ -629,7 +585,6 @@ EndFunction
         assert_eq!(proc.annotations.len(), 1);
         assert!(matches!(proc.annotations[0].kind, AnnotationKind::AtClient));
 
-        // Check AtServer
         let func = tree.function(match tree.top_level_items()[1] {
             ModItem::Function(idx) => idx,
             _ => panic!("expected function"),

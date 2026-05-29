@@ -1,18 +1,9 @@
-//! Build script for bsl-platform.
-//!
-//! Priority for platform data:
-//! 1. data/platform_data.json (committed to repo) - preferred, no external dependencies
-//! 2. Extract from 1C:Enterprise installation - requires 1C and 7z
-//! 3. Empty structures - fallback when nothing available
-
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Finds paths to 1C help files without extracting them.
 fn find_1c_help_file_paths() -> Option<(PathBuf, PathBuf)> {
-    // Check environment variable first
     if let Ok(path) = env::var("BSL_PLATFORM_PATH") {
         let base_path = PathBuf::from(path);
         let shcntx_path = base_path.join("shcntx_ru.hbk");
@@ -23,11 +14,9 @@ fn find_1c_help_file_paths() -> Option<(PathBuf, PathBuf)> {
         }
     }
 
-    // Try to find 1C installation
     find_1c_help_files()
 }
 
-/// Gets a timestamp string for the .hbk files (modification times).
 fn get_files_timestamp(shcntx_path: &Path, shlang_path: &Path) -> String {
     let shcntx_time = fs::metadata(shcntx_path)
         .and_then(|m| m.modified())
@@ -49,11 +38,9 @@ fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let generated_path = out_dir.join("generated.rs");
 
-    // Store timestamp in crate root (stable location across builds)
     let crate_root = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let timestamp_path = crate_root.join(".platform_cache_timestamp");
 
-    // Priority 1: Check for committed platform data in repo
     let committed_data_path = crate_root.join("data/platform_data.json");
     println!("cargo:rerun-if-changed=data/platform_data.json");
 
@@ -63,56 +50,43 @@ fn main() {
         return;
     }
 
-    // Priority 2: Extract from 1C installation
     let platform_found = find_1c_help_file_paths().is_some();
 
     if let Some(hbk_files) = find_1c_help_file_paths() {
         let (shcntx_path, shlang_path) = hbk_files;
 
-        // Tell Cargo to rerun if .hbk files change
         println!("cargo:rerun-if-changed={}", shcntx_path.display());
         println!("cargo:rerun-if-changed={}", shlang_path.display());
 
-        // Check if generated.rs exists and .hbk files haven't changed
         if generated_path.exists() && timestamp_path.exists() {
             if let Ok(stored_timestamp) = fs::read_to_string(&timestamp_path) {
                 let current_timestamp = get_files_timestamp(&shcntx_path, &shlang_path);
                 if stored_timestamp == current_timestamp {
-                    // No changes detected, skip regeneration (silent - this is the normal case)
                     println!("cargo:rustc-cfg=feature=\"platform_docs\"");
                     return;
                 }
             }
         }
 
-        // Extract and generate
         if let Some(json_path) = extract_both_help_files(&shcntx_path, &shlang_path) {
-            // Success - no warning needed, this is the expected path
             println!("cargo:rustc-cfg=feature=\"platform_docs\"");
             generate_code_from_json(&json_path, &generated_path, true);
 
-            // Save timestamp for future builds
             let timestamp = get_files_timestamp(&shcntx_path, &shlang_path);
             let _ = fs::write(&timestamp_path, timestamp);
             return;
         }
-        // If extraction failed, fall through to fallback (warnings already printed by extract_both_help_files)
     }
 
-    // Priority 3: Fallback - no platform found or extraction failed
     if !platform_found {
         println!("cargo:warning=1C platform not found and data/platform_data.json missing");
         println!("cargo:warning=See docs/contributing/DEVELOPMENT_RULES.md for instructions");
     }
 
-    // Generate empty structures as last resort
     generate_empty_structures(&generated_path);
 }
 
-/// Searches for 1C help files in standard installation locations.
-/// Returns (shcntx_ru.hbk, shlang_ru.hbk) paths without printing anything.
 fn find_1c_help_files() -> Option<(PathBuf, PathBuf)> {
-    // Linux: /opt/1cv8/x86_64/*/
     #[cfg(target_os = "linux")]
     {
         if let Ok(entries) = fs::read_dir("/opt/1cv8/x86_64") {
@@ -127,14 +101,12 @@ fn find_1c_help_files() -> Option<(PathBuf, PathBuf)> {
         }
     }
 
-    // macOS: /opt/1cv8/*/
     #[cfg(target_os = "macos")]
     {
         if let Ok(entries) = fs::read_dir("/opt/1cv8") {
             for entry in entries.flatten() {
                 let path = entry.path();
 
-                // Skip common, conf, etc. - only process version directories
                 if !path.is_dir() {
                     continue;
                 }
@@ -154,7 +126,6 @@ fn find_1c_help_files() -> Option<(PathBuf, PathBuf)> {
         }
     }
 
-    // Windows: C:\Program Files\1cv8\*\
     #[cfg(target_os = "windows")]
     {
         let program_files =
@@ -176,20 +147,14 @@ fn find_1c_help_files() -> Option<(PathBuf, PathBuf)> {
     None
 }
 
-/// Extracts a single .hbk file using 7z.
 fn extract_hbk_file(hbk_path: &Path, name: &str) -> Option<PathBuf> {
-    // Create temp directory for extraction
     let temp_dir = env::temp_dir().join(format!("bsl-platform-{}", name));
-    let _ = fs::remove_dir_all(&temp_dir); // Clean up previous extraction
+    let _ = fs::remove_dir_all(&temp_dir);
     fs::create_dir_all(&temp_dir).ok()?;
 
-    // Extract with 7z: 7z x -y -o<output_dir> <input_file>
-    // Note: Some .hbk files have minor errors but still extract most files
     let output_arg = format!("-o{}", temp_dir.display());
     let _output = Command::new("7z").args(["x", "-y", &output_arg]).arg(hbk_path).output().ok()?;
 
-    // Don't check exit code - 7z returns error for corrupted archives even if most files extracted
-    // Instead, check if any files were actually extracted
     if let Ok(entries) = fs::read_dir(&temp_dir) {
         let file_count = entries.count();
         if file_count > 0 {
@@ -201,28 +166,22 @@ fn extract_hbk_file(hbk_path: &Path, name: &str) -> Option<PathBuf> {
     None
 }
 
-/// Extracts both help files and combines data.
 fn extract_both_help_files(shcntx_path: &Path, shlang_path: &Path) -> Option<PathBuf> {
-    // Extract shlang_ru.hbk (keywords) - small file, extract first
     let shlang_dir = extract_hbk_file(shlang_path, "shlang")?;
 
-    // Extract shcntx_ru.hbk (platform types/methods) - large file
     let shcntx_dir = extract_hbk_file(shcntx_path, "shcntx")?;
 
-    // Check if HTML parser tool exists
     let parser_binary = PathBuf::from("tools/html-parser/target/release/html-parser");
     if !parser_binary.exists() {
         println!("cargo:warning=HTML parser not built, skipping documentation extraction");
         println!(
             "cargo:warning=Run: cargo build --release --manifest-path tools/html-parser/Cargo.toml"
         );
-        // Clean up temp directories
         let _ = fs::remove_dir_all(&shlang_dir);
         let _ = fs::remove_dir_all(&shcntx_dir);
         return None;
     }
 
-    // Parse HTML files to JSON
     let json_output = PathBuf::from(env::var("OUT_DIR").unwrap()).join("platform_data.json");
     let output = Command::new(&parser_binary)
         .arg(&shlang_dir)
@@ -231,7 +190,6 @@ fn extract_both_help_files(shcntx_path: &Path, shlang_path: &Path) -> Option<Pat
         .output()
         .ok()?;
 
-    // Clean up temporary extraction directories
     let _ = fs::remove_dir_all(&shlang_dir);
     let _ = fs::remove_dir_all(&shcntx_dir);
 
@@ -246,7 +204,6 @@ fn extract_both_help_files(shcntx_path: &Path, shlang_path: &Path) -> Option<Pat
     Some(json_output)
 }
 
-/// Generates Rust code from JSON data.
 fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: bool) {
     let json_content = fs::read_to_string(json_path).expect("Failed to read JSON file");
 
@@ -258,7 +215,6 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
     code.push_str("// DO NOT EDIT MANUALLY\n\n");
     code.push_str("use super::types::*;\n\n");
 
-    // Generate context availability constants
     let mut context_counter = 0;
     let mut type_context_names = Vec::new();
 
@@ -305,7 +261,6 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
         }
     }
 
-    // Generate method parameter arrays and context availability constants
     let mut param_counter = 0;
     let mut method_param_names = Vec::new();
     let mut method_context_names = Vec::new();
@@ -315,7 +270,6 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
     let mut method_variants_names: Vec<Option<String>> = Vec::new();
     if let Some(methods) = data.get("methods").and_then(|v| v.as_array()) {
         for method in methods {
-            // Generate parameters array
             if let Some(params) = method.get("parameters").and_then(|v| v.as_array()) {
                 if !params.is_empty() {
                     let param_name = format!("METHOD_PARAMS_{}", param_counter);
@@ -358,9 +312,6 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
                 method_param_names.push(None);
             }
 
-            // Per-variant parameter arrays for multi-overload methods
-            // (e.g. `ЧтениеXML.ПолучитьАтрибут`, `ТаблицаЗначений.Скопировать`).
-            // Mirrors the global-function variants codegen below.
             if let Some(variants) =
                 method.get("variants").and_then(|v| v.as_array()).filter(|v| !v.is_empty())
             {
@@ -435,7 +386,6 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
                 method_variants_names.push(None);
             }
 
-            // Generate context availability
             if let Some(context) = method.get("context").and_then(|v| v.as_object()) {
                 let context_name = format!("METHOD_CONTEXT_{}", context_counter);
                 context_counter += 1;
@@ -477,12 +427,9 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
         }
     }
 
-    // Generate global function parameter arrays, per-variant arrays, and
-    // context availability constants
     let mut global_function_variants_names: Vec<Option<String>> = Vec::new();
     if let Some(global_functions) = data.get("global_functions").and_then(|v| v.as_array()) {
         for function in global_functions {
-            // Generate parameters array
             if let Some(params) = function.get("parameters").and_then(|v| v.as_array()) {
                 if !params.is_empty() {
                     let param_name = format!("GLOBAL_FUNC_PARAMS_{}", param_counter);
@@ -525,20 +472,12 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
                 global_function_param_names.push(None);
             }
 
-            // Per-variant parameter arrays for multi-overload functions
-            // (e.g. `ПодключитьВнешнююКомпоненту`, `Дата`, `ОткрытьФорму`).
-            // Each variant becomes its own `RawMethodParam` slice plus a
-            // `RawGlobalFunctionVariant` wrapper that carries the
-            // human-readable variant name. The whole list of variants is
-            // emitted as one `&[RawGlobalFunctionVariant]` slice.
             if let Some(variants) =
                 function.get("variants").and_then(|v| v.as_array()).filter(|v| !v.is_empty())
             {
                 let variants_array_name =
                     format!("GLOBAL_FUNC_VARIANTS_{}", global_function_variants_names.len());
 
-                // First emit the parameter arrays for each variant so
-                // they can be referenced from within the variants slice.
                 let mut per_variant_param_names: Vec<Option<String>> = Vec::new();
                 for variant in variants {
                     if let Some(vparams) = variant
@@ -607,7 +546,6 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
                 global_function_variants_names.push(None);
             }
 
-            // Generate context availability
             if let Some(context) = function.get("context").and_then(|v| v.as_object()) {
                 let context_name = format!("GLOBAL_FUNC_CONTEXT_{}", context_counter);
                 context_counter += 1;
@@ -649,12 +587,6 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
         }
     }
 
-    // Generate platform types array.
-    //
-    // Per-type `iter_element_types` is flattened into `TYPE_ITER_ELEMENTS_{N}`
-    // const slices (mirrors `PROP_TYPES_{N}` for `RawPlatformProperty`) so
-    // `RawPlatformType::iter_element_types` stays a `&'static [&'static str]`
-    // and no SmolStr allocation happens at const-init time.
     if let Some(types) = data.get("types").and_then(|v| v.as_array()) {
         let mut type_iter_elem_names: Vec<Option<String>> = Vec::with_capacity(types.len());
         let mut type_iter_elem_counter = 0usize;
@@ -690,21 +622,18 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
             code.push_str(&format!("        name: {:?},\n", name));
             code.push_str(&format!("        english_name: {:?},\n", english_name));
 
-            // min_version
             if let Some(min_version) = ty.get("min_version").and_then(|v| v.as_str()) {
                 code.push_str(&format!("        min_version: Some({:?}),\n", min_version));
             } else {
                 code.push_str("        min_version: None,\n");
             }
 
-            // context
             if let Some(context_name) = &type_context_names[idx] {
                 code.push_str(&format!("        context: Some({}),\n", context_name));
             } else {
                 code.push_str("        context: None,\n");
             }
 
-            // iter_element_types — empty for non-iterable types
             if let Some(arr) = &type_iter_elem_names[idx] {
                 code.push_str(&format!("        iter_element_types: {},\n", arr));
             } else {
@@ -718,7 +647,6 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
         code.push_str("pub const PLATFORM_TYPES: &[RawPlatformType] = &[];\n\n");
     }
 
-    // Generate platform methods array
     if let Some(methods) = data.get("methods").and_then(|v| v.as_array()) {
         code.push_str("pub const PLATFORM_METHODS: &[RawPlatformMethod] = &[\n");
         for (idx, method) in methods.iter().enumerate() {
@@ -733,35 +661,30 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
             code.push_str(&format!("        name: {:?},\n", name));
             code.push_str(&format!("        english_name: {:?},\n", english_name));
 
-            // return_type
             if let Some(return_type) = method.get("return_type").and_then(|v| v.as_str()) {
                 code.push_str(&format!("        return_type: Some({:?}),\n", return_type));
             } else {
                 code.push_str("        return_type: None,\n");
             }
 
-            // parameters
             if let Some(param_name) = &method_param_names[idx] {
                 code.push_str(&format!("        parameters: {},\n", param_name));
             } else {
                 code.push_str("        parameters: &[],\n");
             }
 
-            // variants — populated only for multi-overload methods
             if let Some(variants_name) = &method_variants_names[idx] {
                 code.push_str(&format!("        variants: {},\n", variants_name));
             } else {
                 code.push_str("        variants: &[],\n");
             }
 
-            // min_version
             if let Some(min_version) = method.get("min_version").and_then(|v| v.as_str()) {
                 code.push_str(&format!("        min_version: Some({:?}),\n", min_version));
             } else {
                 code.push_str("        min_version: None,\n");
             }
 
-            // context
             if let Some(context_name) = &method_context_names[idx] {
                 code.push_str(&format!("        context: Some({}),\n", context_name));
             } else {
@@ -775,7 +698,6 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
         code.push_str("pub const PLATFORM_METHODS: &[RawPlatformMethod] = &[];\n\n");
     }
 
-    // Generate platform global functions array
     if let Some(global_functions) = data.get("global_functions").and_then(|v| v.as_array()) {
         code.push_str("pub const PLATFORM_GLOBAL_FUNCTIONS: &[RawGlobalFunction] = &[\n");
         for (idx, function) in global_functions.iter().enumerate() {
@@ -788,35 +710,30 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
             code.push_str(&format!("        name: {:?},\n", name));
             code.push_str(&format!("        english_name: {:?},\n", english_name));
 
-            // return_type
             if let Some(return_type) = function.get("return_type").and_then(|v| v.as_str()) {
                 code.push_str(&format!("        return_type: Some({:?}),\n", return_type));
             } else {
                 code.push_str("        return_type: None,\n");
             }
 
-            // parameters
             if let Some(param_name) = &global_function_param_names[idx] {
                 code.push_str(&format!("        parameters: {},\n", param_name));
             } else {
                 code.push_str("        parameters: &[],\n");
             }
 
-            // variants — populated only for multi-overload functions
             if let Some(variants_name) = &global_function_variants_names[idx] {
                 code.push_str(&format!("        variants: {},\n", variants_name));
             } else {
                 code.push_str("        variants: &[],\n");
             }
 
-            // min_version
             if let Some(min_version) = function.get("min_version").and_then(|v| v.as_str()) {
                 code.push_str(&format!("        min_version: Some({:?}),\n", min_version));
             } else {
                 code.push_str("        min_version: None,\n");
             }
 
-            // context
             if let Some(context_name) = &global_function_context_names[idx] {
                 code.push_str(&format!("        context: Some({}),\n", context_name));
             } else {
@@ -830,9 +747,7 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
         code.push_str("pub const PLATFORM_GLOBAL_FUNCTIONS: &[RawGlobalFunction] = &[];\n");
     }
 
-    // Generate method documentation arrays
     if let Some(methods) = data.get("methods").and_then(|v| v.as_array()) {
-        // First pass: generate nested arrays for params and examples
         let mut param_docs_names = Vec::new();
         let mut examples_names = Vec::new();
         let mut param_docs_counter = 0;
@@ -840,7 +755,6 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
 
         for method in methods {
             if let Some(docs) = method.get("documentation").and_then(|v| v.as_object()) {
-                // Generate param docs array
                 if let Some(params) = docs.get("param_descriptions").and_then(|v| v.as_array()) {
                     if !params.is_empty() {
                         let param_array_name = format!("METHOD_PARAM_DOCS_{}", param_docs_counter);
@@ -875,7 +789,6 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
                     param_docs_names.push(None);
                 }
 
-                // Generate examples array
                 if let Some(examples) = docs.get("examples").and_then(|v| v.as_array()) {
                     if !examples.is_empty() {
                         let examples_array_name = format!("METHOD_EXAMPLES_{}", examples_counter);
@@ -913,7 +826,6 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
             }
         }
 
-        // Second pass: generate METHOD_DOCS array
         code.push_str("pub const METHOD_DOCS: &[RawMethodDocs] = &[\n");
         let mut docs_idx = 0;
         for method in methods {
@@ -928,28 +840,24 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
                 code.push_str(&format!("        syntax: {:?},\n", syntax));
                 code.push_str(&format!("        description: {:?},\n", description));
 
-                // params
                 if let Some(param_name) = &param_docs_names[docs_idx] {
                     code.push_str(&format!("        params: {},\n", param_name));
                 } else {
                     code.push_str("        params: &[],\n");
                 }
 
-                // examples
                 if let Some(examples_name) = &examples_names[docs_idx] {
                     code.push_str(&format!("        examples: {},\n", examples_name));
                 } else {
                     code.push_str("        examples: &[],\n");
                 }
 
-                // notes
                 if let Some(notes_text) = notes {
                     code.push_str(&format!("        notes: Some({:?}),\n", notes_text));
                 } else {
                     code.push_str("        notes: None,\n");
                 }
 
-                // see_also
                 if let Some(see_also) = docs.get("see_also").and_then(|v| v.as_array()) {
                     if see_also.is_empty() {
                         code.push_str("        see_also: &[],\n");
@@ -977,9 +885,7 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
         code.push_str("pub const METHOD_DOCS: &[RawMethodDocs] = &[];\n\n");
     }
 
-    // Generate global function documentation arrays
     if let Some(global_functions) = data.get("global_functions").and_then(|v| v.as_array()) {
-        // First pass: generate nested arrays for params and examples
         let mut gf_param_docs_names = Vec::new();
         let mut gf_examples_names = Vec::new();
         let mut gf_param_docs_counter = 0;
@@ -987,7 +893,6 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
 
         for function in global_functions {
             if let Some(docs) = function.get("documentation").and_then(|v| v.as_object()) {
-                // Generate param docs array
                 if let Some(params) = docs.get("param_descriptions").and_then(|v| v.as_array()) {
                     if !params.is_empty() {
                         let param_array_name = format!("GF_PARAMS_{}", gf_param_docs_counter);
@@ -1022,7 +927,6 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
                     gf_param_docs_names.push(None);
                 }
 
-                // Generate examples array
                 if let Some(examples) = docs.get("examples").and_then(|v| v.as_array()) {
                     if !examples.is_empty() {
                         let examples_array_name = format!("GF_EXAMPLES_{}", gf_examples_counter);
@@ -1060,7 +964,6 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
             }
         }
 
-        // Second pass: generate GLOBAL_FUNCTION_DOCS array
         code.push_str("pub const GLOBAL_FUNCTION_DOCS: &[RawMethodDocs] = &[\n");
         let mut docs_idx = 0;
         for function in global_functions {
@@ -1075,28 +978,24 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
                 code.push_str(&format!("        syntax: {:?},\n", syntax));
                 code.push_str(&format!("        description: {:?},\n", description));
 
-                // params
                 if let Some(param_name) = &gf_param_docs_names[docs_idx] {
                     code.push_str(&format!("        params: {},\n", param_name));
                 } else {
                     code.push_str("        params: &[],\n");
                 }
 
-                // examples
                 if let Some(examples_name) = &gf_examples_names[docs_idx] {
                     code.push_str(&format!("        examples: {},\n", examples_name));
                 } else {
                     code.push_str("        examples: &[],\n");
                 }
 
-                // notes
                 if let Some(notes_text) = notes {
                     code.push_str(&format!("        notes: Some({:?}),\n", notes_text));
                 } else {
                     code.push_str("        notes: None,\n");
                 }
 
-                // see_also
                 if let Some(see_also) = docs.get("see_also").and_then(|v| v.as_array()) {
                     if see_also.is_empty() {
                         code.push_str("        see_also: &[],\n");
@@ -1124,15 +1023,7 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
         code.push_str("pub const GLOBAL_FUNCTION_DOCS: &[RawMethodDocs] = &[];\n\n");
     }
 
-    // ---- Platform constructors --------------------------------------------
-    // Constructor param arrays, context blocks, the PLATFORM_CONSTRUCTORS
-    // table, and CONSTRUCTOR_DOCS. Missing `constructors` key in the JSON is
-    // treated as "no constructors" — the fallback emits empty const arrays so
-    // the crate still compiles while the JSON is being regenerated.
     if let Some(constructors) = data.get("constructors").and_then(|v| v.as_array()) {
-        // Pass 1: per-constructor supporting arrays (params, context,
-        // param-docs, examples). Kept as locally-scoped `CTOR_*_{N}` consts —
-        // same shape as the method/global-function section above.
         let mut ctor_param_names: Vec<Option<String>> = Vec::with_capacity(constructors.len());
         let mut ctor_context_names: Vec<Option<String>> = Vec::with_capacity(constructors.len());
         let mut ctor_param_docs_names: Vec<Option<String>> = Vec::with_capacity(constructors.len());
@@ -1144,7 +1035,6 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
         let mut ctor_examples_counter = 0usize;
 
         for ctor in constructors {
-            // parameters
             if let Some(params) = ctor.get("parameters").and_then(|v| v.as_array()) {
                 if !params.is_empty() {
                     let arr = format!("CTOR_PARAMS_{}", ctor_param_counter);
@@ -1180,7 +1070,6 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
                 ctor_param_names.push(None);
             }
 
-            // context
             if let Some(ctx) = ctor.get("context").and_then(|v| v.as_object()) {
                 let name = format!("CTOR_CONTEXT_{}", ctor_context_counter);
                 ctor_context_counter += 1;
@@ -1208,7 +1097,6 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
                 ctor_context_names.push(None);
             }
 
-            // documentation.param_descriptions + documentation.examples
             if let Some(docs) = ctor.get("documentation").and_then(|v| v.as_object()) {
                 if let Some(params) = docs.get("param_descriptions").and_then(|v| v.as_array()) {
                     if !params.is_empty() {
@@ -1270,7 +1158,6 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
             }
         }
 
-        // Pass 2: PLATFORM_CONSTRUCTORS table.
         code.push_str("pub const PLATFORM_CONSTRUCTORS: &[RawPlatformConstructor] = &[\n");
         for (idx, ctor) in constructors.iter().enumerate() {
             let id = ctor.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -1304,8 +1191,6 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
         }
         code.push_str("];\n\n");
 
-        // Pass 3: CONSTRUCTOR_DOCS table — one entry per constructor with
-        // documentation; skipped when the HBK page had no doc block.
         code.push_str("pub const CONSTRUCTOR_DOCS: &[RawConstructorDocs] = &[\n");
         for (idx, ctor) in constructors.iter().enumerate() {
             let Some(docs) = ctor.get("documentation").and_then(|v| v.as_object()) else {
@@ -1359,19 +1244,7 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
         code.push_str("pub const CONSTRUCTOR_DOCS: &[RawConstructorDocs] = &[];\n\n");
     }
 
-    // ---- Platform properties ---------------------------------------------
-    // Properties carry a `Vec<SmolStr>` of declared value types plus an
-    // `is_readonly` flag. Missing `properties` key in the JSON is treated
-    // as "no properties" — the fallback emits empty const arrays so the
-    // crate still compiles while the JSON is being regenerated or when
-    // `platform_data.json` pre-dates the property extractor.
     if let Some(properties) = data.get("properties").and_then(|v| v.as_array()) {
-        // Pass 1: per-property supporting arrays — `PROP_TYPES_{N}` for the
-        // value-type list, `PROP_CONTEXT_{N}` for availability, and
-        // `PROP_SEE_ALSO_{N}` for docs' see_also. The property-types list
-        // is flattened into a plain `&[&'static str]` const so
-        // `RawPlatformProperty::property_types` stays a `'static` slice
-        // (SmolStr conversion happens at runtime in `From<&Raw…>`).
         let mut prop_types_names: Vec<Option<String>> = Vec::with_capacity(properties.len());
         let mut prop_context_names: Vec<Option<String>> = Vec::with_capacity(properties.len());
 
@@ -1379,7 +1252,6 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
         let mut prop_context_counter = 0usize;
 
         for prop in properties {
-            // property_types
             if let Some(types) = prop.get("property_types").and_then(|v| v.as_array()) {
                 if !types.is_empty() {
                     let arr = format!("PROP_TYPES_{}", prop_types_counter);
@@ -1400,7 +1272,6 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
                 prop_types_names.push(None);
             }
 
-            // context
             if let Some(ctx) = prop.get("context").and_then(|v| v.as_object()) {
                 let name = format!("PROP_CONTEXT_{}", prop_context_counter);
                 prop_context_counter += 1;
@@ -1429,7 +1300,6 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
             }
         }
 
-        // Pass 2: PLATFORM_PROPERTIES table.
         code.push_str("pub const PLATFORM_PROPERTIES: &[RawPlatformProperty] = &[\n");
         for (idx, prop) in properties.iter().enumerate() {
             let id = prop.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -1463,10 +1333,6 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
         }
         code.push_str("];\n\n");
 
-        // Pass 3: PROPERTY_DOCS table — one entry per property with a
-        // documentation block (pages with only a `Тип:` segment and no
-        // narrative / notes / see-also are skipped on the parser side, so
-        // the missing-documentation case simply means no entry here).
         code.push_str("pub const PROPERTY_DOCS: &[RawPropertyDocs] = &[\n");
         for prop in properties.iter() {
             let Some(docs) = prop.get("documentation").and_then(|v| v.as_object()) else {
@@ -1511,7 +1377,6 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
     fs::write(output_path, code).expect("Failed to write generated.rs");
 }
 
-/// Generates empty structures when no data is available.
 fn generate_empty_structures(output_path: &Path) {
     let code = r#"// Auto-generated by build.rs
 // NO PLATFORM DATA AVAILABLE

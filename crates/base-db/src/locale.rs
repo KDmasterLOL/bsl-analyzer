@@ -1,24 +1,10 @@
-//! Output locale for user-facing strings.
-//!
-//! BSL is bilingual (Russian / English) at the language level. The analyzer
-//! uses `Locale` when rendering user-facing type names and generic labels in
-//! diagnostics, hover, and completion output.
-//!
-//! The default is [`Locale::Ru`] because BSL projects and platform APIs are
-//! Russian-first. Project config and LSP locale signals may override it before
-//! values reach presentation code.
-
-/// User-facing output locale.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 pub enum Locale {
-    /// Russian — `Число`, `Строка`, `Тип`.
     #[default]
     Ru,
-    /// English — `Number`, `String`, `Type`.
     En,
 }
 
-/// Returned when a config string could not be mapped to a known locale.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnknownLocale(pub String);
 
@@ -31,11 +17,6 @@ impl std::fmt::Display for UnknownLocale {
 impl std::error::Error for UnknownLocale {}
 
 impl Locale {
-    /// Parse `[output] display_language` from project config.
-    ///
-    /// Accepts both bare codes (`"ru"`, `"en"`) and a few common aliases.
-    /// Unknown values return an [`UnknownLocale`] so the caller can warn
-    /// and pick an explicit fallback (typically [`Locale::default()`]).
     pub fn from_config_str(s: &str) -> Result<Self, UnknownLocale> {
         let trimmed = s.trim();
         match trimmed.to_ascii_lowercase().as_str() {

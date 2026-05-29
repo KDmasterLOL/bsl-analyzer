@@ -1,36 +1,3 @@
-//! # HIR Type Inference
-//!
-//! This crate implements type inference for BSL (1C:Enterprise) language.
-//! It uses a separate hir-ty crate for type system and inference.
-//!
-//! ## Architecture
-//!
-//! - **Type Representation**: `Ty` enum (re-exported from hir-def)
-//! - **Inference**: `InferenceContext` performs type inference on HIR
-//! - **Salsa Integration**: All type queries are cached via Salsa
-//! - **Diagnostics**: Type-related diagnostics collected during inference
-//!
-//! ## Main Entry Points
-//!
-//! - `infer_query()` - Main Salsa query for type inference
-//! - `type_of_expr_query()` - Get type of specific expression
-//!
-//! ## Example
-//!
-//! ```rust,ignore
-//! use hir_ty::db::HirDatabase;
-//! use hir_def::DefWithBodyId;
-//!
-//! // Get inference result for a file
-//! let inference = db.infer(file_id);
-//!
-//! // Get type of a specific expression. `ExprId` is only unique inside
-//! // a single `Body`, so callers must identify the body with
-//! // `DefWithBodyId::Method(local_id)` or `DefWithBodyId::ModuleCode`.
-//! let owner = DefWithBodyId::Method(local_id);
-//! let type_id = db.type_of_expr(file_id, owner, expr_id);
-//! ```
-
 pub mod arg_diagnostics;
 pub mod builtin;
 pub mod db;
@@ -61,7 +28,6 @@ pub mod subtype;
 pub mod this_object;
 pub mod this_object_attr;
 
-// Re-export main types for convenience
 pub use bsl_config::VisibleConfig;
 pub use field_enum::{enumerate_fields, FieldInfo, FieldOrigin};
 pub use field_lookup::lookup_field;

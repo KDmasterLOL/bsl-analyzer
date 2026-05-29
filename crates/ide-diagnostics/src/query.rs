@@ -1,24 +1,9 @@
-//! Salsa-cached diagnostics query.
-
 use crate::{diagnostics, Diagnostic, DiagnosticsConfig, DiagnosticsContext};
 use base_db::{DiagnosticsConfigId, FileIdInput};
 use ide_db::RootDatabase;
 use ide_db::SalsaProvider;
 use std::sync::Arc;
 
-/// Salsa-cached diagnostics query.
-///
-/// Computes diagnostics for a file with the given configuration.
-/// Results are cached by Salsa and automatically invalidated when:
-/// - File content changes (via FileIdInput dependency)
-/// - Config changes (via DiagnosticsConfigId)
-///
-/// ## Performance
-/// - **LRU cache:** 256 files
-/// - **First call:** ~700ms (full computation)
-/// - **Cached call:** < 1ms (cache hit)
-/// - **After file change:** ~700ms (recomputes for that file only)
-/// - **After config change:** ~700ms × N files (all invalidated)
 #[salsa::tracked(lru = 256)]
 pub fn file_diagnostics_query<'db>(
     db: &'db dyn RootDatabase,

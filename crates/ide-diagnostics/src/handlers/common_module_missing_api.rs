@@ -1,8 +1,3 @@
-//! CommonModuleMissingAPI diagnostic
-//!
-//! CommonModule / ManagerModule should contain export methods AND API regions.
-//!
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};

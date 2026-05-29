@@ -1,54 +1,3 @@
-//! FieldsFromJoinsWithoutIsNull diagnostic.
-//!
-//! Checks that fields from LEFT/RIGHT/FULL JOINs are protected with NULL checks.
-//!
-//! ## Why?
-//! When using LEFT, RIGHT, or FULL JOINs in SDBL queries, fields from the joined table
-//! can be NULL even if rows exist. Accessing these fields without NULL protection can cause:
-//! - Unexpected query results
-//! - Runtime errors in 1C:Enterprise
-//! - Incorrect business logic execution
-//!
-//! ## Bad practice
-//! ```bsl
-//! Query = "SELECT Employee.Ref FROM Document.Order AS Orders
-//!         |LEFT JOIN Catalog.Employees AS Employee
-//!         |  ON Orders.Employee = Employee.Ref";
-//!         // Error: Employee.Ref can be NULL, needs ISNULL() or IS NULL check
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! // Option 1: Use ISNULL function
-//! Query = "SELECT ISNULL(Employee.Ref, NULL) FROM Document.Order AS Orders
-//!         |LEFT JOIN Catalog.Employees AS Employee
-//!         |  ON Orders.Employee = Employee.Ref";
-//!
-//! // Option 2: Use IS NULL operator
-//! Query = "SELECT Employee.Ref FROM Document.Order AS Orders
-//!         |LEFT JOIN Catalog.Employees AS Employee
-//!         |  ON Orders.Employee = Employee.Ref
-//!         |WHERE Employee.Ref IS NOT NULL";
-//!
-//! // Option 3: Use INNER JOIN instead (if semantically correct)
-//! Query = "SELECT Employee.Ref FROM Document.Order AS Orders
-//!         |INNER JOIN Catalog.Employees AS Employee
-//!         |  ON Orders.Employee = Employee.Ref";
-//! ```
-//!
-//! ## Rules
-//! - Checks LEFT JOIN, RIGHT JOIN, FULL JOIN (INNER JOIN is safe)
-//! - Fields must be protected with:
-//!   - `ISNULL(field, defaultValue)` function
-//!   - `field IS NULL` or `field IS NOT NULL` operator
-//!   - `NOT (field IS NULL)` negation pattern
-//!   - Global WHERE clause with `IS NOT NULL` exempts all field usage
-//! - Bilingual support: ЛЕВОЕ/LEFT, ПРАВОЕ/RIGHT, ПОЛНОЕ/FULL
-//! - Checks three contexts: SELECT, WHERE, JOIN ON conditions
-//!
-//! ## Implementation
-//!
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -68,7 +17,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Single-pass dispatch for FieldsFromJoinsWithoutIsNull.
 pub(crate) fn dispatch(
     ctx: &DiagnosticsContext,
     diag: &sdbl_hir::SdblDiagnostic,
@@ -107,7 +55,6 @@ pub(crate) fn dispatch(
     }
 }
 
-/// Runs the FieldsFromJoinsWithoutIsNull diagnostic (standalone, used in tests).
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     crate::sdbl_utils::collect_sdbl_via_dispatch(
         ctx,
@@ -124,7 +71,6 @@ mod tests {
 
     #[test]
     fn test_left_join_unprotected_field() {
-        // Test1: single LEFT JOIN, unprotected field in SELECT
         let code = r#"Процедура Тест()
     Запрос = Новый Запрос;
     Запрос.Текст =
@@ -146,7 +92,6 @@ mod tests {
 
     #[test]
     fn test_left_join_with_isnull_protected() {
-        // Test3: ISNULL-protected field should NOT trigger, bare field SHOULD
         let code = r#"Процедура Тест()
     Запрос = Новый Запрос;
     Запрос.Текст =
@@ -169,7 +114,6 @@ mod tests {
 
     #[test]
     fn test_left_join_where_clause_unprotected() {
-        // Test4: unprotected field in WHERE clause triggers
         let code = r#"Процедура Тест()
     Запрос = Новый Запрос;
     Запрос.Текст =
@@ -193,7 +137,6 @@ mod tests {
 
     #[test]
     fn test_right_join_unprotected_field() {
-        // Test5: RIGHT JOIN, unprotected field in SELECT
         let code = r#"Процедура Тест()
     Запрос = Новый Запрос;
     Запрос.Текст =
@@ -216,7 +159,6 @@ mod tests {
 
     #[test]
     fn test_inner_join_no_diagnostic() {
-        // Test6: INNER JOIN - never triggers
         let code = r#"Процедура Тест()
     Запрос = Новый Запрос;
     Запрос.Текст =
@@ -235,7 +177,6 @@ mod tests {
 
     #[test]
     fn test_full_join_multiple_unprotected_fields() {
-        // Test8: FULL JOIN, 3 unprotected fields -> 3 diagnostics
         let code = r#"Процедура Тест()
     Запрос = Новый Запрос;
     Запрос.Текст =
@@ -267,7 +208,6 @@ mod tests {
 
     #[test]
     fn test_left_join_is_not_null_in_where_exempts() {
-        // Test9/Test10: IS NOT NULL in WHERE exempts all field usage
         let code = r#"Процедура Тест()
     Запрос = Новый Запрос;
     Запрос.Текст =
@@ -287,7 +227,6 @@ mod tests {
 
     #[test]
     fn test_is_null_in_where_does_not_exempt_select() {
-        // Test13: IS NULL in WHERE does not exempt SELECT fields
         let code = r#"Процедура Тест()
     Запрос = Новый Запрос;
     Запрос.Текст =
@@ -310,9 +249,6 @@ mod tests {
 
     #[test]
     fn test_no_diagnostic_for_fields_in_join_conditions() {
-        // Fields from a LEFT JOIN used in other JOINs' ON conditions should NOT trigger.
-        // Using a joined table's field in another JOIN's ON condition is standard practice -
-        // NULL in ON simply means "no match", which is expected LEFT JOIN behavior.
         let code = r#"Процедура Тест()
     Запрос = Новый Запрос;
     Запрос.Текст = "ВЫБРАТЬ РАЗЛИЧНЫЕ
@@ -344,9 +280,6 @@ mod tests {
 
     #[test]
     fn test_no_diagnostic_for_inner_joined_table_with_nested_left_join() {
-        // When INNER JOIN has a nested LEFT JOIN, fields from the INNER-joined table
-        // should NOT trigger - they are guaranteed non-NULL by the INNER JOIN.
-        // Only fields from the LEFT-joined table are potentially NULL.
         let code = r#"Процедура Тест()
     Запрос = Новый Запрос;
     Запрос.Текст = "ВЫБРАТЬ
@@ -369,7 +302,6 @@ mod tests {
 
     #[test]
     fn test_diagnostic_highlights_field_not_join() {
-        // Verify diagnostic highlights the unprotected field, not the JOIN clause
         let code = r#"Процедура Тест()
     Запрос = Новый Запрос("ВЫБРАТЬ
         |    ЗадачиИсполнителей.Исполнитель,

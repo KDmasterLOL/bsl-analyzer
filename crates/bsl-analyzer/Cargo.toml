@@ -35,52 +35,41 @@ bsl-debug.workspace = true
 onec-client.workspace = true
 bsl-search.workspace = true
 
-# LSP
 lsp-types.workspace = true
 lsp-server.workspace = true
 
-# CLI
 clap.workspace = true
 
-# Async
 tokio.workspace = true
 crossbeam-channel.workspace = true
 
-# Parallelism
 rayon.workspace = true
 indicatif.workspace = true
 parking_lot.workspace = true
 
-# Serialization
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
 toml_edit = "0.25"
 
-# Logging
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-tree.workspace = true
 rustc-hash.workspace = true
 
-# Error handling
 anyhow.workspace = true
 thiserror.workspace = true
 
-# Utilities
 walkdir.workspace = true
 tempfile.workspace = true
 zip = { version = "8", default-features = false, features = ["deflate"] }
 
-# Allocator (Unix only — reduces memory fragmentation in multithreaded workloads)
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 tikv-jemallocator.workspace = true
 
 [build-dependencies]
 zip = { version = "8", default-features = false, features = ["deflate"] }
 walkdir = "2.4"
-# Pulled on every host because build.rs gates usage at runtime via
-# `CARGO_CFG_TARGET_OS` to support cross-compilation under `cargo xwin`.
 winresource = "0.1"
 
 [dev-dependencies]

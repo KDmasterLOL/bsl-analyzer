@@ -1,5 +1,3 @@
-//! Reports metadata child objects whose names match their parent object.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -25,27 +23,13 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     clean_code_attribute: CleanCodeAttribute::Consistent,
 };
 
-/// Supported module types for this diagnostic.
-const SUPPORTED_MODULE_TYPES: &[bsl_metadata::ModuleType] = &[
-    bsl_metadata::ModuleType::ManagerModule,
-    bsl_metadata::ModuleType::ObjectModule,
-    // Note: SessionModule is not yet supported in our infrastructure
-];
+const SUPPORTED_MODULE_TYPES: &[bsl_metadata::ModuleType] =
+    &[bsl_metadata::ModuleType::ManagerModule, bsl_metadata::ModuleType::ObjectModule];
 
-/// Check if module type is supported.
 fn is_supported_module_type(module_type: bsl_metadata::ModuleType) -> bool {
     SUPPORTED_MODULE_TYPES.contains(&module_type)
 }
 
-/// Collect diagnostics from module metadata.
-///
-/// Checks for child objects that have the same name as their parent:
-/// 1. Attributes of object → name should not match object name
-/// 2. Tabular sections → name should not match object name
-/// 3. Attributes of tabular sections → name should not match tabular section name
-/// 4. Register dimensions → name should not match register name
-/// 5. Register resources → name should not match register name
-/// 6. Register attributes → name should not match register name
 pub fn from_metadata(metadata: &ModuleMetadata, ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::SameMetadataObjectAndChildNames;
 
@@ -59,12 +43,10 @@ pub fn from_metadata(metadata: &ModuleMetadata, ctx: &DiagnosticsContext) -> Vec
 
     let mut diagnostics = Vec::new();
 
-    // Check MetadataObject (Catalog, Document, etc.)
     if let Some(ref mdo) = metadata.mdo {
         collect_mdo_diagnostics(&mdo.name, mdo.as_ref(), code, ctx, &mut diagnostics);
     }
 
-    // Check Register
     if let Some(ref register) = metadata.register {
         collect_register_diagnostics(
             register.name(),
@@ -78,7 +60,6 @@ pub fn from_metadata(metadata: &ModuleMetadata, ctx: &DiagnosticsContext) -> Vec
     diagnostics
 }
 
-/// Collect diagnostics for a MetadataObject.
 fn collect_mdo_diagnostics(
     parent_name: &str,
     mdo: &bsl_metadata::MetadataObject,
@@ -88,24 +69,20 @@ fn collect_mdo_diagnostics(
 ) {
     let parent_name_lower = parent_name.to_lowercase();
 
-    // Check attributes
     for attr in &mdo.attributes {
         if attr.name.to_lowercase() == parent_name_lower {
             diagnostics.push(create_diagnostic(&attr.name, parent_name, code, ctx));
         }
     }
 
-    // Check tabular sections
     for ts in &mdo.tabular_sections {
         let ts_name = ts.name();
         let ts_name_lower = ts_name.to_lowercase();
 
-        // Tabular section name should not match parent name
         if ts_name_lower == parent_name_lower {
             diagnostics.push(create_diagnostic(ts_name, parent_name, code, ctx));
         }
 
-        // Tabular section attributes should not match tabular section name
         for ts_attr in ts.attributes() {
             if ts_attr.name().to_lowercase() == ts_name_lower {
                 diagnostics.push(create_diagnostic(ts_attr.name(), ts_name, code, ctx));
@@ -114,7 +91,6 @@ fn collect_mdo_diagnostics(
     }
 }
 
-/// Collect diagnostics for a Register.
 fn collect_register_diagnostics(
     parent_name: &str,
     register: &bsl_metadata::Register,
@@ -124,21 +100,18 @@ fn collect_register_diagnostics(
 ) {
     let parent_name_lower = parent_name.to_lowercase();
 
-    // Check dimensions
     for dim in register.dimensions() {
         if dim.name().to_lowercase() == parent_name_lower {
             diagnostics.push(create_diagnostic(dim.name(), parent_name, code, ctx));
         }
     }
 
-    // Check resources
     for resource in register.resources() {
         if resource.name().to_lowercase() == parent_name_lower {
             diagnostics.push(create_diagnostic(resource.name(), parent_name, code, ctx));
         }
     }
 
-    // Check attributes
     for attr in register.attributes() {
         if attr.name().to_lowercase() == parent_name_lower {
             diagnostics.push(create_diagnostic(attr.name(), parent_name, code, ctx));
@@ -146,7 +119,6 @@ fn collect_register_diagnostics(
     }
 }
 
-/// Create a diagnostic for a name conflict.
 fn create_diagnostic(
     child_name: &str,
     parent_name: &str,

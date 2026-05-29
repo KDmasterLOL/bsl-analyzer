@@ -1,10 +1,3 @@
-//! Per-module call graph facts extracted from HIR.
-//!
-//! This module defines the types and extraction logic for building
-//! a per-module call summary from HIR bodies and ItemTree metadata.
-//! No cross-module resolution or BFS traversal happens here —
-//! those belong in `ide-diagnostics`.
-
 use rustc_hash::FxHashMap;
 use syntax::TextRange;
 
@@ -16,8 +9,6 @@ use crate::{
     ModuleBodies,
 };
 
-/// Per-module call facts extracted from HIR.
-/// No cross-module resolution, no BFS — pure per-module data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleCallSummary {
     pub methods: Vec<MethodSummary>,
@@ -35,7 +26,6 @@ pub struct MethodSummary {
     pub is_export: bool,
 }
 
-/// Dispatch classification computed from `AnnotationKind`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MethodDispatch {
     pub can_run_on_client: bool,
@@ -76,7 +66,6 @@ impl MethodDispatch {
     }
 }
 
-/// Synchronous call edge within a module.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallEdge {
     pub caller: CallerId,
@@ -106,7 +95,6 @@ pub enum CallerId {
     ModuleCode,
 }
 
-/// NotifyDescription registration (async, not a call edge).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotifyReg {
     pub caller: CallerId,
@@ -115,7 +103,6 @@ pub struct NotifyReg {
     pub range: TextRange,
 }
 
-/// Idle handler registration (async, not a call edge).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IdleReg {
     pub caller: CallerId,
@@ -124,31 +111,17 @@ pub struct IdleReg {
     pub range: TextRange,
 }
 
-/// Form event entry mapping event type to handler method.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FormEventEntry {
     pub event_type: String,
     pub handler_name: Name,
 }
 
-// ============================================================================
-// Extraction
-// ============================================================================
-
-/// Extract per-module call summary from HIR.
-///
-/// Iterates all method bodies and module-level code to collect:
-/// - Method summaries with dispatch classification
-/// - Synchronous call edges (DirectLocal, DirectQualifiedModule)
-/// - NotifyDescription registrations
-/// - Idle handler registrations
-/// - Form event entries
 pub fn extract_call_summary(
     item_tree: &ItemTree,
     module_bodies: &ModuleBodies,
     form_event_handlers: &[bsl_metadata::FormEventHandler],
 ) -> ModuleCallSummary {
-    // 1. Build method summaries from ItemTree
     let mut methods = Vec::new();
     let mut local_method_ids: FxHashMap<String, u32> = FxHashMap::default();
 
@@ -183,9 +156,6 @@ pub fn extract_call_summary(
         }
     }
 
-    // 2. Extract edges from all method bodies
-    //    Collect local_ids and sort for deterministic order
-    //    (ModuleBodies iterates FxHashMap which is non-deterministic)
     let mut call_edges = Vec::new();
     let mut notify_regs = Vec::new();
     let mut idle_handler_regs = Vec::new();
@@ -209,7 +179,6 @@ pub fn extract_call_summary(
         );
     }
 
-    // 3. Extract edges from module-level code
     if let Some(module_code) = module_bodies.module_code_result() {
         extract_from_body(
             &module_code.body,
@@ -222,7 +191,6 @@ pub fn extract_call_summary(
         );
     }
 
-    // 4. Build form entries
     let form_entries = form_event_handlers
         .iter()
         .map(|h| FormEventEntry {
@@ -272,7 +240,6 @@ fn extract_from_body(
                             call_edges.push(edge);
                         }
                     }
-                    // Field { base: Path(module), field: method } — streaming mode
                     Expr::Field { base: field_base, field } => {
                         if let Some(edge) = field_callee_to_edge(
                             body,
@@ -289,8 +256,6 @@ fn extract_from_body(
                 }
             }
             Expr::New { type_name, args } => {
-                // Static: Новый ОписаниеОповещения("Callback", ЭтотОбъект)
-                // Dynamic: Новый("ОписаниеОповещения", "Callback", ЭтотОбъект)
                 let offsets = match type_name {
                     Some(tn) if is_notify_description(tn) => Some((0, 1)),
                     None if !args.is_empty() => {
@@ -321,28 +286,23 @@ fn extract_from_body(
     }
 }
 
-/// Check if a name (lowercased) matches `ПодключитьОбработчикОжидания` / `AttachIdleHandler`.
 fn is_attach_idle_handler(name_lower: &str) -> bool {
     name_lower == "подключитьобработчикожидания" || name_lower == "attachidlehandler"
 }
 
-/// Check if a type name matches `ОписаниеОповещения` / `NotifyDescription`.
 fn is_notify_description(name: &Name) -> bool {
     is_notify_description_str(name.as_str())
 }
 
-/// Check if a string matches `ОписаниеОповещения` / `NotifyDescription` (case-insensitive).
 fn is_notify_description_str(name: &str) -> bool {
     let lower = name.to_lowercase();
     lower == "описаниеоповещения" || lower == "notifydescription"
 }
 
-/// Check if a name (lowercased) matches `ЭтотОбъект` / `ThisObject`.
 fn is_this_object(name_lower: &str) -> bool {
     name_lower == "этотобъект" || name_lower == "thisobject"
 }
 
-/// Extract an IdleReg from `ПодключитьОбработчикОжидания("Handler", Interval, OneShot)`.
 fn extract_idle_reg(
     body: &Body,
     caller: CallerId,
@@ -363,10 +323,6 @@ fn extract_idle_reg(
     Some(IdleReg { caller, handler_name: Name::new(&handler_name), one_shot, range })
 }
 
-/// Extract a NotifyReg with explicit arg offsets.
-///
-/// Static form: `Новый ОписаниеОповещения("Callback", ЭтотОбъект)` → method_idx=0, target_idx=1
-/// Dynamic form: `Новый("ОписаниеОповещения", "Callback", ЭтотОбъект)` → method_idx=1, target_idx=2
 fn extract_notify_reg_at(
     body: &Body,
     caller: CallerId,
@@ -384,7 +340,6 @@ fn extract_notify_reg_at(
     Some(NotifyReg { caller, callback_name: Name::new(&callback_name), target_module, range })
 }
 
-/// Build a CallEdge from QualifiedPath segments.
 fn qualified_path_to_edge(
     caller: CallerId,
     segments: &[Name],
@@ -416,12 +371,6 @@ fn qualified_path_to_edge(
     }
 }
 
-/// Build a CallEdge from `Call { callee: Field { base, field } }` pattern.
-///
-/// Handles two cases:
-/// - `Field { base: Path(ЭтотОбъект), field: method }` → direct local call
-/// - `Field { base: Path(module), field: method }` → 2-segment qualified call
-/// - `Field { base: Field { base: Path(mdo_type), field: mdo_name }, field: method }` → 3-segment manager access
 fn field_callee_to_edge(
     body: &Body,
     caller: CallerId,
@@ -479,7 +428,6 @@ fn field_callee_to_edge(
     }
 }
 
-/// Extract string content from a string literal expression.
 fn extract_string_literal(body: &Body, idx: ExprIdx) -> Option<String> {
     match body.expr_idx(idx) {
         Expr::Literal(Literal::String(s)) => Some(s.clone()),
@@ -525,7 +473,6 @@ mod tests {
         assert!(!d.is_server_only());
         assert!(d.no_context);
 
-        // Extension methods default to client
         let d = MethodDispatch::from_annotation(Some(&AnnotationKind::Before));
         assert!(d.can_run_on_client);
         assert!(!d.can_run_on_server);
@@ -598,10 +545,6 @@ mod tests {
         assert_eq!(summary.form_entries[1].event_type, "OnActivateRow");
     }
 
-    // ====================================================================
-    // Integration tests: parse BSL → extract_call_summary
-    // ====================================================================
-
     fn parse_and_extract(code: &str) -> ModuleCallSummary {
         parse_and_extract_with_handlers(code, &[])
     }
@@ -641,16 +584,13 @@ mod tests {
         assert!(summary.methods[0].dispatch.can_run_on_client);
         assert!(summary.methods[2].dispatch.is_server_only());
 
-        // Two DirectLocal edges: handler→client, client→server
         let local_edges: Vec<_> =
             summary.call_edges.iter().filter(|e| e.kind == EdgeKind::DirectLocal).collect();
         assert_eq!(local_edges.len(), 2);
 
-        // handler (local_id=0) → client (local_id=1)
         assert_eq!(local_edges[0].caller, CallerId::Method(0));
         assert!(matches!(&local_edges[0].target, CallTarget::Local { callee_local_id: 1 }));
 
-        // client (local_id=1) → server (local_id=2)
         assert_eq!(local_edges[1].caller, CallerId::Method(1));
         assert!(matches!(&local_edges[1].target, CallTarget::Local { callee_local_id: 2 }));
     }
@@ -779,8 +719,6 @@ EndProcedure
 
     #[test]
     fn test_qualified_call_to_nonexistent_method_still_produces_edge() {
-        // Qualified calls to methods that may not exist in the target module
-        // still produce edges — resolution happens lazily during BFS (Phase 3).
         let code = r#"
 Процедура Тест()
     НесуществующийМодуль.НесуществующийМетод();
@@ -878,13 +816,11 @@ EndProcedure
 "#;
         let summary = parse_and_extract(code);
 
-        // Idle handler goes to idle_handler_regs, NOT to call_edges
         assert_eq!(summary.idle_handler_regs.len(), 1);
         assert_eq!(summary.idle_handler_regs[0].handler_name, Name::new("Обновить"));
         assert!(summary.idle_handler_regs[0].one_shot);
         assert_eq!(summary.idle_handler_regs[0].caller, CallerId::Method(0));
 
-        // No DirectLocal edge for ПодключитьОбработчикОжидания
         let local_edges: Vec<_> =
             summary.call_edges.iter().filter(|e| e.kind == EdgeKind::DirectLocal).collect();
         assert!(local_edges.is_empty(), "Idle handler registration should not produce a call edge");
@@ -922,7 +858,6 @@ EndProcedure
         assert!(summary.methods[2].dispatch.can_run_on_server);
         assert!(summary.methods[2].dispatch.no_context);
 
-        // No annotation → defaults to client
         assert!(summary.methods[3].dispatch.can_run_on_client);
         assert!(!summary.methods[3].dispatch.can_run_on_server);
     }

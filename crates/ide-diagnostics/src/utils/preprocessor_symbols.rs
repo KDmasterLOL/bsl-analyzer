@@ -1,9 +1,3 @@
-//! Known preprocessor symbols for BSL conditional compilation.
-//!
-//! These symbols are used in `#Если` / `#If` directives to control conditional compilation.
-//! Unknown symbols should trigger the UnknownPreprocessorSymbol diagnostic.
-//!
-
 const KNOWN_SYMBOLS: &[&str] = &[
     "КЛИЕНТ",
     "CLIENT",

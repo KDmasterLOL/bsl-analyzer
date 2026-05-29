@@ -1,26 +1,11 @@
 #!/usr/bin/env bash
-# Синхронизация с GitHub — чистое зеркало без истории коммитов
-#
-# Использование:
-#   ./scripts/github-sync.sh              # синк текущей версии из Cargo.toml
-#   ./scripts/github-sync.sh v0.1.33      # синк с указанным тегом
-#   ./scripts/github-sync.sh --dry-run    # только показать что будет сделано
-#   ./scripts/github-sync.sh --no-summary # пропустить генерацию release notes через codex
-#
-# Требования:
-#   - SSH ключ с доступом к GitHub (локально)
-#   - Или переменная GITHUB_SSH_KEY (в CI)
-#   - `gh` — для публикации release notes
-#   - `codex` — для генерации краткого summary (опционально, --no-summary отключает)
 
 set -euo pipefail
 
-# --- Конфигурация ---
 GITHUB_REPO="git@github.com:itrous/bsl-analyzer.git"
 GITHUB_REPO_SLUG="itrous/bsl-analyzer"
 GITHUB_BRANCH="develop"
 
-# Файлы и директории, исключаемые из GitHub-зеркала
 EXCLUDE_PATTERNS=(
     ".gitlab-ci.yml"
     ".cargo/config.toml"
@@ -32,14 +17,12 @@ EXCLUDE_PATTERNS=(
     "crates/bsl-launcher/release-source.github.json"
 )
 
-# --- Цвета ---
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-# --- Переменные ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 WORK_DIR=""
@@ -50,7 +33,6 @@ NOTES_FILE=""
 SKIP_SUMMARY=false
 LAST_GH_TAG=""
 
-# --- Функции ---
 
 log_info()  { echo -e "${BLUE}[INFO]${NC} $*"; }
 log_ok()    { echo -e "${GREEN}[OK]${NC} $*"; }
@@ -85,8 +67,6 @@ setup_ssh_for_ci() {
     export GIT_SSH_COMMAND="ssh -i $SSH_KEY_FILE -o StrictHostKeyChecking=no"
 }
 
-# Последний опубликованный тег релиза на GitHub (пусто — если релизов ещё нет).
-# Fail-fast при ошибках auth/сети, чтобы не перепутать "нет релизов" с "gh упал".
 fetch_last_github_tag() {
     if ! command -v gh >/dev/null 2>&1; then
         log_warn "gh CLI не найден — пропускаем определение последнего тега"
@@ -115,9 +95,6 @@ fetch_last_github_tag() {
     fi
 }
 
-# Генерирует краткий summary на русском через codex exec.
-# Вход: $1 — тег релиза, $2 — базовый тег (пусто — значит от начала истории).
-# Пишет итог в $NOTES_FILE. При ошибке/пропуске — оставляет $NOTES_FILE пустым.
 generate_release_notes() {
     local new_tag="$1"
     local base_tag="$2"
@@ -154,7 +131,6 @@ generate_release_notes() {
         return
     fi
 
-    # Защита от prompt-инъекции через commit subject: убираем совпадения с разделителем <commits>.
     commits=$(printf '%s\n' "$commits" | sed -e 's|</commits>|[/commits]|g; s|<commits>|[commits]|g')
 
     log_info "Генерация release notes через codex ($(echo "$commits" | wc -l) коммитов)..."
@@ -180,7 +156,6 @@ EOP
 
     local codex_log codex_rc
     codex_log=$(mktemp)
-    # 5 минут потолка — release flow не должен залипать на codex.
     codex_rc=0
     printf '%s' "$prompt" | timeout 300 codex exec \
             --sandbox read-only \
@@ -203,7 +178,6 @@ EOP
     fi
     rm -f "$codex_log"
 
-    # codex иногда заворачивает ответ в ```markdown … ```; вычистим обёртку.
     sed -i '1{/^```/d}; ${/^```$/d}' "$NOTES_FILE"
 
     if [[ ! -s "$NOTES_FILE" ]]; then
@@ -214,7 +188,6 @@ EOP
     log_ok "Release notes сгенерированы ($(wc -l < "$NOTES_FILE") строк)"
 }
 
-# Формирует полный текст release notes (summary + Full Changelog ссылка).
 compose_release_body() {
     local new_tag="$1"
     local base_tag="$2"
@@ -222,8 +195,6 @@ compose_release_body() {
 
     if [[ -s "$NOTES_FILE" ]]; then
         cat "$NOTES_FILE" > "$out"
-        # Гарантируем перевод строки в конце, чтобы blank-line-разделитель ниже работал.
-        # `$(tail -c 1 ...)` вернёт пустую строку, если последний байт — \n (trimming в подстановке).
         [[ -z "$(tail -c 1 "$out")" ]] || printf '\n' >> "$out"
     else
         : > "$out"
@@ -238,9 +209,6 @@ compose_release_body() {
     fi
 }
 
-# Сохраняет release notes в постоянный файл (target/ в gitignore) и печатает
-# готовую команду для ручной публикации. Файл переживает EXIT-trap скрипта,
-# в отличие от $RELEASE_BODY_FILE (mktemp).
 persist_notes_for_manual_publish() {
     local tag="$1"
     local body_file="$2"
@@ -252,13 +220,6 @@ persist_notes_for_manual_publish() {
     log_warn "Опубликовать вручную: gh release edit $tag --repo $GITHUB_REPO_SLUG --notes-file '$persisted'"
 }
 
-# Публикует release notes на GitHub.
-#
-# Стратегия: единственный writer — этот скрипт. Релиз создаёт release.yml
-# (softprops/action-gh-release@v2 с generate_release_notes=true), после чего
-# мы дожидаемся его появления и перезаписываем body через `gh release edit`.
-# `action-gh-release@v2` генерит notes только при создании и не трогает body
-# на update, так что финальная версия — всегда наша.
 publish_release_notes() {
     local tag="$1"
     local body_file="$2"
@@ -275,7 +236,7 @@ publish_release_notes() {
 
     log_info "Ожидаем появления релиза $tag на GitHub (CI собирает артефакты)..."
     local attempt=0
-    local max_attempts=60   # ~30 минут при sleep 30
+    local max_attempts=60
     while (( attempt < max_attempts )); do
         if gh release view "$tag" --repo "$GITHUB_REPO_SLUG" >/dev/null 2>&1; then
             log_info "Релиз $tag найден, обновляем описание..."
@@ -300,7 +261,6 @@ build_rsync_excludes() {
     for pattern in "${EXCLUDE_PATTERNS[@]}"; do
         excludes+=(--exclude "$pattern")
     done
-    # Всегда исключаем .git и временные файлы
     excludes+=(--exclude ".git")
     excludes+=(--exclude ".git/")
     excludes+=(--exclude "target/")
@@ -313,17 +273,14 @@ sync_files() {
 
     log_info "Синхронизация файлов..."
 
-    # Удаляем всё в целевой директории (кроме .git) чтобы отслеживать удалённые файлы
     find "$dst" -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} +
 
-    # Копируем файлы с исключениями
     local excludes
     excludes=$(build_rsync_excludes)
     # shellcheck disable=SC2086
     rsync -a $excludes "$src/" "$dst/"
 }
 
-# --- Парсинг аргументов ---
 
 for arg in "$@"; do
     case "$arg" in
@@ -343,7 +300,6 @@ for arg in "$@"; do
     esac
 done
 
-# --- Основная логика ---
 
 VERSION=$(get_version)
 if [[ -n "$TAG" ]]; then
@@ -382,21 +338,16 @@ if $DRY_RUN; then
     exit 0
 fi
 
-# Настройка SSH для CI
 setup_ssh_for_ci
 
-# Создаём рабочую директорию
 WORK_DIR=$(mktemp -d)
 log_info "Рабочая директория: $WORK_DIR"
 
-# Клонируем GitHub-репо (или создаём orphan если пустой)
 log_info "Клонирование GitHub-репозитория..."
 if git ls-remote "$GITHUB_REPO" HEAD &>/dev/null 2>&1; then
-    # Проверяем есть ли коммиты
     REMOTE_HEAD=$(git ls-remote "$GITHUB_REPO" HEAD 2>/dev/null | awk '{print $1}')
     if [[ -n "$REMOTE_HEAD" ]]; then
         git clone --depth 1 --branch "$GITHUB_BRANCH" "$GITHUB_REPO" "$WORK_DIR/github" 2>/dev/null || {
-            # Ветка main не существует — создаём orphan
             log_info "Ветка $GITHUB_BRANCH не найдена, создаём новую..."
             mkdir -p "$WORK_DIR/github"
             cd "$WORK_DIR/github"
@@ -405,7 +356,6 @@ if git ls-remote "$GITHUB_REPO" HEAD &>/dev/null 2>&1; then
             git remote add origin "$GITHUB_REPO"
         }
     else
-        # Пустой репозиторий
         log_info "Пустой репозиторий, создаём начальный коммит..."
         mkdir -p "$WORK_DIR/github"
         cd "$WORK_DIR/github"
@@ -420,19 +370,15 @@ fi
 
 cd "$WORK_DIR/github"
 
-# Синхронизируем файлы
 sync_files "$PROJECT_ROOT" "$WORK_DIR/github"
 
-# Подмена конфига для GitHub-сборки
 cp "$PROJECT_ROOT/crates/bsl-launcher/release-source.github.json" \
    "$WORK_DIR/github/crates/bsl-launcher/release-source.json"
 
-# Подмена источника в install.sh для GitHub
 sed -i.bak 's/^INSTALL_SOURCE="gitlab"/INSTALL_SOURCE="github"/' \
     "$WORK_DIR/github/scripts/install.sh"
 rm -f "$WORK_DIR/github/scripts/install.sh.bak"
 
-# Подмена URL установки в README для GitHub
 sed -i.bak '/<!-- INSTALL_URL:gitlab -->/,/<!-- \/INSTALL_URL -->/c\
 <!-- INSTALL_URL:github -->\
 ```bash\
@@ -447,18 +393,15 @@ curl -fsSL https://raw.githubusercontent.com/'"$GITHUB_REPO_SLUG"'/develop/scrip
 <!-- /INSTALL_URL -->' "$WORK_DIR/github/README.md"
 rm -f "$WORK_DIR/github/README.md.bak"
 
-# Проверяем есть ли изменения
 git add -A
 if git diff --cached --quiet 2>/dev/null; then
     log_ok "Нет изменений для синхронизации"
     exit 0
 fi
 
-# Показываем статистику
 log_info "Изменения:"
 git diff --cached --stat | tail -1
 
-# Создаём коммит
 COMMIT_MSG_FILE=$(mktemp)
 {
     printf 'Release %s\n' "$COMMIT_TAG"
@@ -471,11 +414,9 @@ git commit -F "$COMMIT_MSG_FILE" \
     --author="BSL Analyzer <itrous@gmail.com>"
 rm -f "$COMMIT_MSG_FILE"
 
-# Пушим коммит
 log_info "Отправка в GitHub..."
 git push -u origin "$GITHUB_BRANCH"
 
-# Создаём тег (если ещё не существует)
 if git ls-remote --tags origin "$COMMIT_TAG" | grep -q "$COMMIT_TAG"; then
     log_warn "Тег $COMMIT_TAG уже существует, пропускаем создание"
 else
@@ -484,8 +425,6 @@ else
     log_ok "Тег $COMMIT_TAG создан"
 fi
 
-# Публикуем release notes на GitHub. Работает и при rerun по уже существующему тегу —
-# release body будет перезаписан актуальным summary.
 publish_release_notes "$COMMIT_TAG" "$RELEASE_BODY_FILE"
 
 log_ok "Синхронизация завершена!"

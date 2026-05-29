@@ -1,13 +1,3 @@
-//! Baseline regression tests for completion.
-//!
-//! These lock down current completion behaviour ahead of the M1 resolver
-//! rework (`Scope::Builtins`, unified `Resolver` name lookup, CFE extension
-//! iteration via `visible_configurations`). Completion output is broad and
-//! order-sensitive, so these tests assert on presence + kind of specific
-//! items instead of full-markup snapshots.
-//!
-//! The `$0` marker denotes the cursor position.
-
 use ide::{Analysis, CompletionItem, CompletionItemKind};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
@@ -70,8 +60,6 @@ fn items_matching<'a>(items: &'a [CompletionItem], label: &str) -> Vec<&'a Compl
     items.iter().filter(|i| i.label == label).collect()
 }
 
-// ---------- cross-module method completion ----------
-
 #[test]
 fn completion_after_dot_on_common_module_lists_exported_methods() {
     let items = complete(
@@ -119,15 +107,8 @@ fn completion_after_dot_on_common_module_lists_exported_methods() {
     }
 }
 
-// ---------- top-level BSL keyword completion ----------
-
 #[test]
 fn completion_in_procedure_body_without_qualifier_is_empty_today() {
-    // Current baseline: typing a bare identifier in a procedure body without
-    // a qualifier (no DOT) yields an empty completion list. The M1 rework
-    // introduces `Scope::Builtins` and unified `Resolver` lookup, which is
-    // expected to populate this path. When that lands, this test should
-    // flip to asserting non-empty output.
     let items = complete(
         r#"//- /test.bsl
 Процедура Тест()
@@ -143,16 +124,8 @@ fn completion_in_procedure_body_without_qualifier_is_empty_today() {
     );
 }
 
-// ---------- platform type methods ----------
-
 #[test]
 fn completion_after_dot_on_new_array_type() {
-    // `Новый Массив` gives the expression type `Массив`. Completion after
-    // the dot exercises the full pipeline: parser wraps the bare `А.` in
-    // an ERROR node (not a valid statement), HIR lowering's recovery
-    // path (see `hir-def::body::lower::stmt::try_lower_recovered_expr_stmt`)
-    // salvages the FIELD_EXPR so `Semantics::type_of_expr` can return
-    // `Ty::Array`, and platform completion surfaces the methods.
     let items = complete(
         r#"//- /test.bsl
 Процедура Тест()
@@ -183,9 +156,6 @@ fn completion_after_dot_on_new_array_type() {
 
 #[test]
 fn completion_after_dot_on_array_variable_with_prefix() {
-    // `Сп.Доб|` — cursor on IDENT whose previous non-trivia token is DOT.
-    // `platform_completions` must walk back to the anchor DOT, use the
-    // receiver's type, and filter methods by the partial-typed IDENT.
     let items = complete(
         r#"//- /test.bsl
 Процедура Тест()
@@ -207,8 +177,6 @@ fn completion_after_dot_on_array_variable_with_prefix() {
 
 #[test]
 fn completion_after_dot_on_array_variable_typed_prefix_full_ident() {
-    // `Сп.В|` — user has typed just the first letter. Recovery kicks in;
-    // prefix filter narrows by `В`.
     let items = complete(
         r#"//- /test.bsl
 Процедура Тест()
@@ -234,10 +202,6 @@ fn completion_after_dot_on_array_variable_typed_prefix_full_ident() {
 
 #[test]
 fn completion_after_chained_dot_on_array_variable() {
-    // Chain with a valid call in between: the first `Сп.Добавить(1)` is
-    // a normal CALL_STMT, the trailing `Сп.` goes through recovery.
-    // Completion must still surface methods for the second `Сп.` — the
-    // recovery marker is per-expression, not per-body.
     let items = complete(
         r#"//- /test.bsl
 Процедура Тест()
@@ -261,8 +225,6 @@ fn completion_after_chained_dot_on_array_variable() {
 
 #[test]
 fn completion_after_dot_on_number_variable_does_not_offer_array_methods() {
-    // Negative: `Сп = 42` makes `Сп` a Number. A trailing `Сп.` must not
-    // surface Массив methods — recovery doesn't hallucinate types.
     let items = complete(
         r#"//- /test.bsl
 Процедура Тест()
@@ -272,8 +234,6 @@ fn completion_after_dot_on_number_variable_does_not_offer_array_methods() {
 "#,
     );
 
-    // We don't assert emptiness (Number has a handful of methods in
-    // platform data); we assert the Array-specific ones aren't there.
     let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
     assert!(
         !has_label(&items, "Добавить"),
@@ -282,13 +242,6 @@ fn completion_after_dot_on_number_variable_does_not_offer_array_methods() {
     );
 }
 
-// ---------- keyword-as-method-name (Layer B regression guards) ----------
-
-/// Pin completion when the cursor sits on a fully-typed keyword
-/// token after the dot. Pre-migration `resolve_dot_anchor` accepted
-/// only `IDENT` after `.`, so a `KW_EXECUTE` cursor
-/// (`Запрос.Выполнить$0`) bypassed the anchor and completion silently
-/// fell through to other providers.
 #[test]
 fn completion_with_cursor_on_keyword_method_name_after_dot() {
     let items = complete(
@@ -312,8 +265,6 @@ fn completion_with_cursor_on_keyword_method_name_after_dot() {
     );
 }
 
-// ---------- no-crash canary for unresolved receiver ----------
-
 #[test]
 fn completion_after_dot_on_unresolved_receiver_is_safe() {
     let items = complete(
@@ -324,8 +275,6 @@ fn completion_after_dot_on_unresolved_receiver_is_safe() {
 "#,
     );
 
-    // The pipeline must complete without panicking. Returning an empty list
-    // is acceptable behaviour for an unresolved receiver.
     for item in &items {
         assert!(
             !item.label.is_empty(),

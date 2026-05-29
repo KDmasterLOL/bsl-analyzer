@@ -1,5 +1,3 @@
-//! Reports usage of the `Goto` / `Перейти` statement.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};

@@ -1,24 +1,3 @@
-//! End-to-end regression tests for `MismatchedArgCount` on platform
-//! constructor calls (`Новый <Type>(args)`).
-//!
-//! Pins the PR3 contract: `Expr::New` arity-checks against
-//! [`bsl_platform::PlatformDataInner::get_constructors`] using the
-//! same `descriptor_from_params` adapter and multi-overload "accept-if-
-//! any" loop that PR1/PR2 already used for global functions. Variadic
-//! tails are honoured through three sources, all transparent to the
-//! caller:
-//!
-//! - **Syntax-line detector (PR2):** HBK `Синтаксис:` containing the
-//!   `<X1>,...,<XN>` shape — `Array.По количеству элементов`,
-//!   `COMSafeArray` ×2.
-//! - **Docs-only overlay (PR3 Step 2):** HBK `Описание:` declares
-//!   variadic but `Синтаксис:` is fixed — `Structure`, `FixedStructure`,
-//!   `DynamicListRowKey` (each on the «По ключам и значениям» / «На
-//!   основе путей и значений полей» variant).
-//! - **Name idiom (PR3 Step 1):** rubric param NAME contains
-//!   `<word>N,...,<word>N` with a letter suffix — `FormattedString.На
-//!   основании строк`.
-
 use hir::{HirDatabase, InferenceDiagnostic};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
@@ -63,9 +42,6 @@ fn arg_count_diags(db: &RootDatabaseImpl, file_id: FileId) -> Vec<(usize, usize,
 
 #[test]
 fn array_variadic_accepts_many_args() {
-    // `Array.По количеству элементов` is is_variadic=true (PR2,
-    // syntax-line detector). Multi-arg `Новый Массив(...)` must NOT
-    // fire — variadic upper bound is None.
     let fixture = r#"
 //- /test.bsl
 Процедура Тест()
@@ -82,9 +58,6 @@ fn array_variadic_accepts_many_args() {
 
 #[test]
 fn array_one_arg_accepts() {
-    // 1-arg form selects `Array.На основании фиксированного массива`
-    // (single optional `Массив` param, max=1). Locks that the variadic
-    // overload doesn't shadow the fixed one.
     let fixture = r#"
 //- /test.bsl
 Процедура Тест(ИсхМассив)
@@ -101,8 +74,6 @@ fn array_one_arg_accepts() {
 
 #[test]
 fn array_no_parens_accepts() {
-    // `Новый Массив` (no parens) lowers to args=[]. Both Array
-    // overloads are all-optional → required_count=0 for each → accept.
     let fixture = r#"
 //- /test.bsl
 Процедура Тест()
@@ -119,10 +90,6 @@ fn array_no_parens_accepts() {
 
 #[test]
 fn structure_keys_and_values_accepts_variadic() {
-    // `Structure.По ключам и значениям` declares fixed [Ключи, Значения]
-    // in HBK syntax, but the description allows additional values matching
-    // keys. PR3 Step 2 overlay lifts is_variadic=true on the trailing
-    // `Значения` param so this verbatim user-style call accepts.
     let fixture = r#"
 //- /test.bsl
 Процедура Тест()
@@ -139,8 +106,6 @@ fn structure_keys_and_values_accepts_variadic() {
 
 #[test]
 fn structure_no_parens_accepts() {
-    // `Новый Структура` matches the `На основании фиксированной
-    // структуры` overload (single optional param) at arity 0.
     let fixture = r#"
 //- /test.bsl
 Процедура Тест()
@@ -157,8 +122,6 @@ fn structure_no_parens_accepts() {
 
 #[test]
 fn fixed_structure_keys_and_values_accepts_variadic() {
-    // `FixedStructure.По ключам и значениям`: PR3 overlay marks `Значения`
-    // as variadic. With keys + multiple values, the call accepts.
     let fixture = r#"
 //- /test.bsl
 Процедура Тест()
@@ -175,9 +138,6 @@ fn fixed_structure_keys_and_values_accepts_variadic() {
 
 #[test]
 fn dynamic_list_row_key_accepts_variadic() {
-    // `DynamicListRowKey.На основе путей и значений полей`: PR3
-    // overlay marks the trailing `Значения` as variadic. Description
-    // says additional values follow paths in declaration order.
     let fixture = r#"
 //- /test.bsl
 Процедура Тест()
@@ -194,10 +154,6 @@ fn dynamic_list_row_key_accepts_variadic() {
 
 #[test]
 fn formatted_string_strings_accepts_variadic() {
-    // `FormattedString.На основании строк` encodes its variadic shape
-    // INSIDE one rubric name (`Содержимое1,...,СодержимоеN`). PR3
-    // Step 1 (`name_implies_unbounded_variadic`) lifts max_args=None
-    // for that overload.
     let fixture = r#"
 //- /test.bsl
 Процедура Тест()
@@ -214,10 +170,6 @@ fn formatted_string_strings_accepts_variadic() {
 
 #[test]
 fn fixed_array_required_floor_fires() {
-    // `FixedArray` has a single ctor `На основании обычного массива`
-    // with one REQUIRED `Массив` param and NO zero-arity overload.
-    // `Новый ФиксированныйМассив()` violates the required floor →
-    // exactly one MismatchedArgCount(required=1, total=1, found=0).
     let fixture = r#"
 //- /test.bsl
 Процедура Тест()
@@ -233,9 +185,6 @@ fn fixed_array_required_floor_fires() {
 
 #[test]
 fn query_upper_bound_fires() {
-    // `Query` has a single ctor with one OPTIONAL `ТекстЗапроса` param
-    // (max=1, no variadic). `Новый Запрос("a", "b", "c")` exceeds the
-    // upper bound → exactly one MismatchedArgCount.
     let fixture = r#"
 //- /test.bsl
 Процедура Тест()
@@ -251,11 +200,6 @@ fn query_upper_bound_fires() {
 
 #[test]
 fn unresolved_type_does_not_fire_arity() {
-    // No `PlatformConstructor` registered for unknown types. The arity
-    // check must SKIP (return early on empty `get_constructors`),
-    // avoiding double-firing on top of any upstream "unresolved type"
-    // diagnostic. Pin: zero MismatchedArgCount for an unknown type
-    // even with arbitrary args.
     let fixture = r#"
 //- /test.bsl
 Процедура Тест()
@@ -272,10 +216,6 @@ fn unresolved_type_does_not_fire_arity() {
 
 #[test]
 fn user_repro_structure_filter() {
-    // The kind of call the user actually writes — a filter Structure
-    // built from one keys-string and a matching number of values.
-    // This is the constructor analogue of the PR2 `Мин(Макс(...))`
-    // user-repro test in `infer_builtin_arity.rs`.
     let fixture = r#"
 //- /test.bsl
 Процедура ПрименитьОтбор(Дата, Клиент, Сумма)

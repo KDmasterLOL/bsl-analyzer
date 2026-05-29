@@ -1,8 +1,3 @@
-//! Adapters map source-specific representations into the domain [`SymbolSignature`].
-//!
-//! One adapter per data source. Adapters own all source-specific knowledge;
-//! presenters stay generic.
-
 use ide_db::RootDatabase;
 use vfs::FileId;
 
@@ -21,11 +16,6 @@ pub mod platform_method;
 pub use global_function::from_global_function;
 pub use platform_method::from_platform_method;
 
-/// Build a [`SymbolSignature`] for the given callee.
-///
-/// `file_id` is the file containing the call site — needed to resolve
-/// project-local symbols (common modules, manager modules) within the right
-/// source root. Platform/global lookups ignore it.
 pub fn build_signature(
     db: &dyn RootDatabase,
     file_id: FileId,

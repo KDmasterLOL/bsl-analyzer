@@ -1,10 +1,3 @@
-//! Go to Definition implementation.
-//!
-//! This module implements "Go to Definition" functionality, which allows
-//! navigating from a symbol usage to its definition.
-//!
-//! Uses the unified Definition enum for resolution.
-
 use hir::{Definition, SemanticSymbol, SemanticSymbolKind, Semantics};
 use ide_db::RootDatabase;
 use syntax::TextSize;
@@ -12,22 +5,6 @@ use vfs::FileId;
 
 use crate::{NavigationTarget, SymbolKind};
 
-/// Go to the definition of the symbol at the given position.
-///
-/// Returns a navigation target pointing to the symbol's definition,
-/// or None if no symbol is found at the position.
-///
-/// Dispatch is driven by [`hir::classify_token`] — every name-token
-/// resolves through the same classifier the rest of the IDE layer
-/// uses, so keyword-shaped names sitting in field-tail slots
-/// (`Запрос.Выполнить`, where `Выполнить` is `KW_EXECUTE`) reach the
-/// resolver instead of being rejected by an `IDENT`-only gate.
-///
-/// Supports:
-/// - Same-file navigation (methods, variables, parameters)
-/// - Cross-file navigation (qualified names like `Module.Method`)
-/// - Builtin functions / platform methods / MDO types (no source
-///   target — returns `None`)
 pub fn goto_definition<DB: RootDatabase>(
     db: &DB,
     file_id: FileId,
@@ -75,10 +52,6 @@ fn symbol_kind_for_semantic(kind: SemanticSymbolKind) -> SymbolKind {
     }
 }
 
-/// Convert a Definition to a NavigationTarget.
-///
-/// This is the unified conversion function for all definition types.
-/// Returns None for builtins, MDO types, and unresolved symbols.
 fn definition_to_navigation_target<DB: RootDatabase>(
     db: &DB,
     definition: &Definition,
@@ -141,7 +114,6 @@ fn definition_to_navigation_target<DB: RootDatabase>(
             None
         }
         Definition::Parameter { method_id, param_name, .. } => {
-            // Navigate to the parameter in the method signature
             let file_id = method_id.module.file_id;
             let tree = db.item_tree(file_id);
 
@@ -155,17 +127,15 @@ fn definition_to_navigation_target<DB: RootDatabase>(
 
                     return Some(NavigationTarget {
                         file_id,
-                        range, // For now, navigate to the whole method (TODO: narrow to param)
+                        range,
                         name: param_name.as_str().to_string(),
-                        kind: SymbolKind::Variable, // Parameters are variables in BSL
+                        kind: SymbolKind::Variable,
                     });
                 }
             }
             None
         }
         Definition::Local { method_id, var_name } => {
-            // Navigate to the local variable declaration
-            // For now, navigate to the containing method (TODO: find exact declaration)
             let file_id = method_id.module.file_id;
             let tree = db.item_tree(file_id);
 
@@ -187,7 +157,6 @@ fn definition_to_navigation_target<DB: RootDatabase>(
             }
             None
         }
-        // Builtins, MDO types, modules, etc. - no navigation target
         Definition::BuiltinFunction(_)
         | Definition::BuiltinMethodHandle { .. }
         | Definition::MdoCollectionType(_)
@@ -210,14 +179,12 @@ mod tests {
         let mut db = RootDatabaseImpl::default();
         let file_id = FileId(0);
 
-        // Set up source root
         let mut file_set = FileSet::new();
         file_set.insert(file_id, VfsPath::new("/test.bsl"));
         let source_root = SourceRoot::new_local(file_set);
         db.set_source_root(SourceRootId(0), source_root);
         db.set_file_source_root(file_id, SourceRootId(0));
 
-        // Set file text
         db.set_file_text(file_id, source);
 
         (db, file_id)
@@ -236,7 +203,6 @@ mod tests {
 
         let (db, file_id) = create_db_with_file(source);
 
-        // Find position of method call "МояПроцедура" in the body
         let call_offset = source.rfind("МояПроцедура").unwrap();
         let offset = TextSize::from(call_offset as u32);
 
@@ -264,7 +230,6 @@ mod tests {
 
         let (db, file_id) = create_db_with_file(source);
 
-        // Find position of function call
         let call_offset = source.rfind("МояФункция").unwrap();
         let offset = TextSize::from(call_offset as u32);
 
@@ -288,7 +253,6 @@ mod tests {
 
         let (db, file_id) = create_db_with_file(source);
 
-        // Find position of variable usage
         let usage_offset = source.rfind("МодульнаяПеременная").unwrap();
         let offset = TextSize::from(usage_offset as u32);
 
@@ -338,14 +302,12 @@ mod tests {
 
         let (db, file_id) = create_db_with_file(source);
 
-        // Find lowercase call
         let call_offset = source.find("мояпроцедура").unwrap();
         let offset = TextSize::from(call_offset as u32);
 
         let target = goto_definition(&db, file_id, offset);
         assert!(target.is_some());
 
-        // Should resolve to the definition with original case
         let target = target.unwrap();
         assert_eq!(target.name, "МояПроцедура");
     }
@@ -359,12 +321,10 @@ mod tests {
 
         let (db, file_id) = create_db_with_file(source);
 
-        // Position on keyword "Процедура"
         let offset = source.find("Процедура").unwrap();
         let offset = TextSize::from(offset as u32);
 
         let target = goto_definition(&db, file_id, offset);
-        // Keywords are not navigable
         assert!(target.is_none());
     }
 
@@ -377,19 +337,16 @@ mod tests {
 
         let (db, file_id) = create_db_with_file(source);
 
-        // Position on the method name in declaration
         let decl_offset = source.find("МояПроцедура").unwrap();
         let offset = TextSize::from(decl_offset as u32);
 
         let target = goto_definition(&db, file_id, offset);
         assert!(target.is_some());
 
-        // Should navigate to itself
         let target = target.unwrap();
         assert_eq!(target.name, "МояПроцедура");
     }
 
-    /// Helper function to create a database with multiple files
     fn create_multi_file_db(files: &[(&str, &str)]) -> (RootDatabaseImpl, Vec<FileId>) {
         let mut db = RootDatabaseImpl::default();
         let mut file_ids = Vec::new();
@@ -414,14 +371,12 @@ mod tests {
 
     #[test]
     fn test_goto_definition_cross_file() {
-        // File 1: CommonModule with export method
         let common_module = r#"
 Функция ЭкспортнаяФункция() Экспорт
     Возврат 42;
 КонецФункции
         "#;
 
-        // File 2: Form module calling the common module method
         let form_module = r#"
 Процедура Тест()
     Результат = ОбщийМодуль.ЭкспортнаяФункция();
@@ -435,7 +390,6 @@ mod tests {
 
         let (db, file_ids) = create_multi_file_db(files);
 
-        // Find the position of "ЭкспортнаяФункция" in the call (file 2)
         let call_offset = form_module.rfind("ЭкспортнаяФункция").unwrap();
         let offset = TextSize::from(call_offset as u32);
 
@@ -469,7 +423,6 @@ mod tests {
 
         let (db, file_ids) = create_multi_file_db(files);
 
-        // Find lowercase method name in call
         let call_offset = form_module.find("мояфункция").unwrap();
         let offset = TextSize::from(call_offset as u32);
 
@@ -478,7 +431,7 @@ mod tests {
 
         let target = target.unwrap();
         assert_eq!(target.file_id, file_ids[0]);
-        assert_eq!(target.name, "МояФункция"); // Original case preserved
+        assert_eq!(target.name, "МояФункция");
     }
 
     #[test]
@@ -506,7 +459,6 @@ mod tests {
         let offset = TextSize::from(call_offset as u32);
 
         let target = goto_definition(&db, file_ids[1], offset);
-        // Should return None for non-existent method
         assert!(target.is_none(), "Should not resolve non-existent method");
     }
 
@@ -535,13 +487,11 @@ mod tests {
         let offset = TextSize::from(call_offset as u32);
 
         let target = goto_definition(&db, file_ids[1], offset);
-        // Should return None for non-export method
         assert!(target.is_none(), "Should not navigate to non-export method");
     }
 
     #[test]
     fn test_goto_definition_same_file_still_works() {
-        // Ensure backward compatibility - same-file navigation still works
         let source = r#"
 Процедура МояПроцедура()
 КонецПроцедуры
@@ -564,7 +514,6 @@ mod tests {
         assert_eq!(target.name, "МояПроцедура");
     }
 
-    // Helper for multi-file scenarios
     fn create_db_with_two_files(
         caller_source: &str,
         caller_path: &str,
@@ -575,7 +524,6 @@ mod tests {
         let caller_file = FileId(0);
         let manager_file = FileId(1);
 
-        // Set up source root with both files
         let mut file_set = FileSet::new();
         file_set.insert(caller_file, VfsPath::new(caller_path));
         file_set.insert(manager_file, VfsPath::new(manager_path));
@@ -584,7 +532,6 @@ mod tests {
         db.set_file_source_root(caller_file, SourceRootId(0));
         db.set_file_source_root(manager_file, SourceRootId(0));
 
-        // Set file text
         db.set_file_text(caller_file, caller_source);
         db.set_file_text(manager_file, manager_source);
 
@@ -593,7 +540,6 @@ mod tests {
 
     #[test]
     fn test_goto_definition_manager_module_method() {
-        // Setup: two-file scenario
         let caller_source = r#"
 Процедура Тест()
     РегистрыСведений.ТестовыйРегистр.МетодМенеджера();
@@ -613,7 +559,6 @@ mod tests {
             "/test/InformationRegisters/ТестовыйРегистр/Ext/ManagerModule.bsl",
         );
 
-        // Position on "МетодМенеджера" in call
         let offset = TextSize::from(caller_source.rfind("МетодМенеджера").unwrap() as u32);
 
         let result = goto_definition(&db, caller_file, offset);
@@ -627,7 +572,6 @@ mod tests {
 
     #[test]
     fn test_goto_definition_manager_module_method_not_exported() {
-        // Manager method WITHOUT "Экспорт"
         let caller_source = r#"
 Процедура Тест()
     Документы.ТестовыйДокумент.ВнутреннийМетод();
@@ -650,7 +594,6 @@ mod tests {
         let offset = TextSize::from(caller_source.rfind("ВнутреннийМетод").unwrap() as u32);
         let result = goto_definition(&db, caller_file, offset);
 
-        // Should NOT resolve to non-exported method
         assert!(result.is_none(), "Non-exported methods should not resolve");
     }
 
@@ -667,19 +610,9 @@ mod tests {
         let offset = TextSize::from(caller_source.rfind("Метод").unwrap() as u32);
         let result = goto_definition(&db, caller_file, offset);
 
-        // Should return None when metadata object not found
         assert!(result.is_none(), "Should not resolve non-existent metadata object");
     }
 
-    /// Regression guard for Layer B: goto on `Запрос.Выполнить()`
-    /// must NOT panic and must return `None` (the platform method has
-    /// no source to navigate to). Pre-migration the IDENT-only entry
-    /// gate dropped `KW_EXECUTE` before classification — but the
-    /// codepath through `resolve_method_call_to_definition` is the
-    /// same one hover uses, so a goto request still has to resolve
-    /// the field-tail, just to a `BuiltinMethod` definition that
-    /// produces no nav target. This test pins both halves: the
-    /// resolution succeeds, the navigation returns `None`.
     #[test]
     fn test_goto_definition_keyword_method_after_dot_returns_none() {
         let source = r#"
@@ -693,21 +626,9 @@ mod tests {
 
         let offset = TextSize::from(source.rfind("Выполнить").unwrap() as u32);
         let target = goto_definition(&db, file_id, offset);
-        // Platform methods have no navigable source — None is correct.
         assert!(target.is_none(), "platform method navigation must be None, got: {target:?}");
     }
 
-    /// Hard regression for the codex stop-time review: goto on
-    /// `Запрос.Выполнить()` must NOT jump to an unrelated CommonModule
-    /// that happens to share the receiver's name and exports a method
-    /// called `Выполнить`. The receiver is a typed local variable
-    /// (`Новый Запрос` — platform Query type), and the field-tail
-    /// must resolve through the platform-method dispatch, which
-    /// claims the slot exclusively. Pre-fix the goto fell back to
-    /// qualified-name resolution after the platform dispatch
-    /// returned a `BuiltinMethod` (no source), and the workspace
-    /// resolver matched `[Запрос, Выполнить]` against the bogus
-    /// CommonModule.
     #[test]
     fn test_goto_definition_platform_method_does_not_leak_to_workspace_module() {
         let bogus = r#"
@@ -732,9 +653,6 @@ mod tests {
         let offset = TextSize::from(caller.rfind("Выполнить").unwrap() as u32);
         let target = goto_definition(&db, file_ids[1], offset);
 
-        // The bug we're guarding against is `Some(file_ids[0])` —
-        // jumping to the unrelated CommonModule. `None` (platform
-        // method, no source) or any non-bogus target is acceptable.
         if let Some(t) = target {
             assert_ne!(
                 t.file_id, file_ids[0],
@@ -770,7 +688,6 @@ mod tests {
         assert!(result.is_some());
         let nav = result.unwrap();
         assert_eq!(nav.file_id, manager_file);
-        // Should preserve original case from definition
         assert_eq!(nav.name, "МетодМенеджера");
     }
 }

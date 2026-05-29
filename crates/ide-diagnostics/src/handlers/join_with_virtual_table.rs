@@ -1,7 +1,3 @@
-//! JoinWithVirtualTable diagnostic.
-//!
-//! Detects SDBL joins that use a virtual table as one of the joined sources.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -21,7 +17,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Single-pass dispatch for JoinWithVirtualTable.
 pub(crate) fn dispatch(
     ctx: &DiagnosticsContext,
     diag: &sdbl_hir::SdblDiagnostic,
@@ -42,7 +37,6 @@ pub(crate) fn dispatch(
     }
 }
 
-/// Runs the JoinWithVirtualTable diagnostic (standalone, used in tests).
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     crate::sdbl_utils::collect_sdbl_via_dispatch(
         ctx,
@@ -59,7 +53,6 @@ mod tests {
 
     #[test]
     fn test_join_with_virtual_table_single_line() {
-        // Single-line query: LEFT JOIN with СрезПоследних
         let code = r#"Процедура Тест1()
     Запрос = Новый Запрос;
     Запрос.Текст = "Выбрать Т.Ссылка Из Справочник.Справочник1 СПр Левое соединение РегистрСведений.Курсы.СрезПоследних КАК Т По СПр.Поле1 = Т.Валюта";
@@ -77,7 +70,6 @@ mod tests {
 
     #[test]
     fn test_join_with_virtual_table_multiline_left() {
-        // Multiline query: LEFT JOIN with Остатки
         let code = r#"Процедура Тест2()
     Запрос = Новый Запрос;
     Запрос.Текст = "Выбрать Т.Измерение Из Справочник.Справочник1
@@ -98,7 +90,6 @@ mod tests {
 
     #[test]
     fn test_join_with_virtual_table_multiline_right() {
-        // Multiline query: RIGHT JOIN with Остатки
         let code = r#"Процедура Тест3()
     Запрос = Новый Запрос;
     Запрос.Текст = "Выбрать Т.Регистратор Из Справочник.Справочник1
@@ -119,7 +110,6 @@ mod tests {
 
     #[test]
     fn test_join_with_two_virtual_tables() {
-        // Query with two virtual tables in JOINs → 2 diagnostics
         let code = r#"Процедура Тест4()
     Запрос = Новый Запрос;
     Запрос.Текст = "Выбрать Т.Измерение
@@ -143,7 +133,6 @@ mod tests {
 
     #[test]
     fn test_virtual_table_in_from_no_join_no_trigger() {
-        // Virtual table used in FROM without any JOIN → no diagnostic
         let code = r#"Процедура Тест7()
     Запрос = Новый Запрос;
     Запрос.Текст = "Выбрать Т.Ссылка

@@ -1,78 +1,21 @@
-//! SDBL query information extracted from BSL files.
-//!
-//! This module provides the SdblQueryInfo structure which caches parsed SDBL queries
-//! along with their positions in BSL source files. Used by Salsa to avoid re-parsing
-//! SDBL queries when running multiple SDBL diagnostics.
-
 use parser_error::ParseError;
 
 use crate::{Parse, SyntaxKind, SyntaxNode, TextRange};
 
-/// Information about a single SDBL query found in BSL file.
-///
-/// This structure is cached by Salsa to avoid re-parsing SDBL queries
-/// when running multiple SDBL diagnostics.
-///
-/// ## Usage
-///
-/// ```ignore
-/// // In diagnostics:
-/// let sdbl_queries = ctx.db.sdbl_queries(ctx.file_id);
-/// for query_info in sdbl_queries.iter() {
-///     if query_info.is_valid() {
-///         // Use query_info.query_ast to analyze SDBL
-///         // Use query_info.bsl_literal_range for position mapping
-///     }
-/// }
-/// ```
-///
-/// ## Performance
-///
-/// - Eager parsing: SDBL AST is parsed during extraction (not lazy)
-/// - Keyword filtering: Only strings containing SELECT/ВЫБРАТЬ are parsed
-/// - Parse validation: Only successfully parsed queries are cached
-/// - Cached by Salsa with LRU=256
-///
-/// ## Implementation Notes
-///
-/// This struct must be `Clone`, `PartialEq`, and `Eq` to work with Salsa.
-/// It uses `Option<Parse<SyntaxNode>>` for the query AST because:
-/// - Some strings might look like SDBL but fail to parse (rare)
-/// - Parse errors are stored in the Parse structure itself
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SdblQueryInfo {
-    /// Text range of the LITERAL node in BSL source
     pub bsl_literal_range: TextRange,
 
-    /// Extracted SDBL query text (with | prefixes removed, "" unescaped to ")
     pub query_text: String,
 
-    /// Parsed SDBL AST (None if parse failed)
     pub query_ast: Option<Parse<SyntaxNode>>,
 
-    /// Quote escape corrections: (sdbl_byte_offset, chars_added_in_bsl)
-    /// Tracks ""→" replacements for accurate position mapping.
-    /// When mapping SDBL position X to BSL column: bsl_col = sdbl_col + sum(chars for positions < X)
-    /// NOTE: This stores CHARACTER count, not byte count, for correct UTF-8 handling.
     pub quote_corrections: Vec<(usize, usize)>,
 
-    /// SDBL parse errors projected into BSL-literal-relative coordinates.
-    /// Callers add bsl_literal_range.start() to lift these ranges into file
-    /// coordinates. Empty when the query parsed cleanly. Populated at
-    /// construction by hir-def/body/lower/expr.rs.
     pub error_ranges_in_bsl: Vec<(TextRange, ParseError)>,
 }
 
 impl SdblQueryInfo {
-    /// Create a new SDBL query info.
-    ///
-    /// ## Arguments
-    ///
-    /// - `bsl_literal_range`: Position of the LITERAL node in BSL source
-    /// - `query_text`: Extracted SDBL query text (multiline | prefixes already removed, "" unescaped)
-    /// - `query_ast`: Parsed SDBL AST (or None if parsing failed)
-    /// - `quote_corrections`: Quote escape corrections for position mapping
-    /// - `error_ranges_in_bsl`: SDBL parse errors projected into BSL-literal-relative ranges
     pub fn new(
         bsl_literal_range: TextRange,
         query_text: String,
@@ -83,62 +26,37 @@ impl SdblQueryInfo {
         Self { bsl_literal_range, query_text, query_ast, quote_corrections, error_ranges_in_bsl }
     }
 
-    /// Check if SDBL parse was successful and has no errors.
-    ///
-    /// Returns `false` if:
-    /// - Parse failed (query_ast is None)
-    /// - Parse succeeded but has syntax errors
-    ///
-    /// Diagnostics should skip queries where `is_valid() == false`.
     pub fn is_valid(&self) -> bool {
         self.query_ast.as_ref().map(|p| !p.has_errors()).unwrap_or(false)
     }
 
-    /// Get the SDBL root node if parse was successful.
-    ///
-    /// This is a convenience method for diagnostics that need to access the AST.
     pub fn syntax_node(&self) -> Option<SyntaxNode> {
         self.query_ast.as_ref().map(|p| p.syntax_node())
     }
 }
 
-/// Extract SDBL query text with quote escape tracking.
-///
-/// Returns (text, quote_corrections) where quote_corrections tracks `""` → `"` replacements.
-/// Each correction is (sdbl_offset, bytes_added_in_bsl) - when SDBL has position X,
-/// BSL position = X + sum(bytes for corrections before X).
-///
-/// This is the canonical function for SDBL extraction - single source of truth.
-///
-/// Handles both simple strings and multiline strings:
-/// - Simple: `"text"` → one STRING token
-/// - Multiline: `"line1\n|line2"` → STRING_START + NEWLINE + STRING_PART + ... + STRING_TAIL
 pub fn extract_sdbl_with_corrections(node: &SyntaxNode) -> Option<(String, Vec<(usize, usize)>)> {
     let mut result = String::new();
     let mut corrections = Vec::new();
     let mut tokens = node.children_with_tokens().filter_map(|it| it.into_token());
 
-    // Check first token to determine string type
     let first_token = tokens.next()?;
 
     match first_token.kind() {
         SyntaxKind::STRING => {
-            // Simple string: "text"
             let text = first_token.text();
             if text.len() < 2 {
                 return None;
             }
-            // Remove outer quotes and track "" → " replacements
             let inner = &text[1..text.len() - 1];
 
             let mut pos = 0;
             let mut chars = inner.chars().peekable();
             while let Some(ch) = chars.next() {
                 if ch == '"' && chars.peek() == Some(&'"') {
-                    // Found "" escape
-                    chars.next(); // skip second "
+                    chars.next();
                     result.push('"');
-                    corrections.push((pos, 1)); // at SDBL pos, BSL has 1 extra byte
+                    corrections.push((pos, 1));
                     pos += 1;
                 } else {
                     result.push(ch);
@@ -147,13 +65,11 @@ pub fn extract_sdbl_with_corrections(node: &SyntaxNode) -> Option<(String, Vec<(
             }
         }
         SyntaxKind::STRING_START => {
-            // Multiline string
             let text = first_token.text();
             if text.is_empty() {
                 return None;
             }
 
-            // Process first line (after opening quote)
             let first_line = &text[1..];
             let mut pos = 0;
             let mut chars = first_line.chars().peekable();
@@ -169,7 +85,6 @@ pub fn extract_sdbl_with_corrections(node: &SyntaxNode) -> Option<(String, Vec<(
                 }
             }
 
-            // Process remaining tokens
             for token in tokens {
                 match token.kind() {
                     SyntaxKind::NEWLINE => {
@@ -178,7 +93,6 @@ pub fn extract_sdbl_with_corrections(node: &SyntaxNode) -> Option<(String, Vec<(
                     }
                     SyntaxKind::STRING_PART | SyntaxKind::STRING_TAIL => {
                         let text = token.text();
-                        // Remove | prefix (and closing " for TAIL)
                         let content = if let Some(c) = text.strip_prefix('|') {
                             if token.kind() == SyntaxKind::STRING_TAIL {
                                 c.strip_suffix('"').unwrap_or(c)
@@ -216,18 +130,6 @@ pub fn extract_sdbl_with_corrections(node: &SyntaxNode) -> Option<(String, Vec<(
     Some((result, corrections))
 }
 
-/// Project an SDBL-text range back into BSL-literal coordinates. All offsets are byte offsets.
-/// literal_text is the raw BSL literal (including outer quote delimiters, pipe continuation
-/// prefixes, escaped double-quotes). query_range is a TextRange within the extracted SDBL query
-/// text (the string extract_query_text returns). Returns the corresponding TextRange relative to
-/// literal_text start. Caller adds bsl_literal_range.start() to lift into file coordinates.
-///
-/// Invariant: this byte-walker must mirror [`extract_sdbl_with_corrections`] for any input the
-/// lexer would accept as STRING / STRING_START / STRING_PART / STRING_TAIL. The two
-/// implementations operate on different inputs (this one on raw text, the canonical on
-/// SyntaxNode tokens) but must agree on the (bsl_byte ↔ sdbl_byte) correspondence. Integration
-/// parity coverage lives in `parser` / `ide-db` tests where SyntaxNode is available — `syntax`
-/// cannot dev-dep `parser` without a cycle.
 pub fn map_range_query_to_literal(literal_text: &str, query_range: TextRange) -> TextRange {
     let query_start: u32 = query_range.start().into();
     let query_end: u32 = query_range.end().into();
@@ -248,8 +150,6 @@ pub fn map_range_query_to_literal(literal_text: &str, query_range: TextRange) ->
     };
 
     let mut content_start = skip_leading_whitespace(literal_text, first_line.start, first_line.end);
-    // Skip exactly one opening quote — additional `"` bytes belong to an escape sequence
-    // (`""` → `"`) and must be processed by `process_content` to emit the literal `"` into SDBL.
     if content_start < first_line.end && bytes[content_start] == b'"' {
         content_start += 1;
     }
@@ -311,17 +211,6 @@ pub fn map_range_query_to_literal(literal_text: &str, query_range: TextRange) ->
     let mut end =
         if query_start == query_end { start } else { projection.projected_end.unwrap_or(fallback) };
 
-    // Both `projected_start` and `projected_end` are written from monotonically
-    // increasing BSL positions, so under a faithful projection `start <= end`.
-    // The fallback for `end` (`content_end` of the last processed line) is not
-    // monotone with `projected_start` though: when `query_end` exceeds the
-    // materialized SDBL byte count (e.g. caller passed a range derived from a
-    // partially-failed extract), `projected_end` stays `None`, and the
-    // fallback can land before `projected_start` — producing an inverted
-    // range that crashes `TextRange::new`. Clamp to a degenerate range at
-    // `start` so downstream lowering keeps a valid source map; precise
-    // positioning was already lost the moment the projection couldn't satisfy
-    // the requested endpoint.
     if end < start {
         end = start;
     }
@@ -463,8 +352,8 @@ mod tests {
         assert_eq!(info.bsl_literal_range, range);
         assert_eq!(info.query_text, query_text);
         assert!(info.error_ranges_in_bsl.is_empty());
-        assert!(!info.is_valid()); // No AST
-        assert!(info.syntax_node().is_none()); // No AST
+        assert!(!info.is_valid());
+        assert!(info.syntax_node().is_none());
     }
 
     #[test]
@@ -537,8 +426,6 @@ mod tests {
             }
         ));
     }
-
-    // Note: Tests with parsed AST are in base-db tests where parser is available
 }
 
 #[cfg(test)]
@@ -601,12 +488,6 @@ mod tests_range_projection {
         );
     }
 
-    /// Query end byte beyond the materialized SDBL byte count: `projected_end`
-    /// stays `None`, the post-loop fallback (`content_end` of the last
-    /// processed line) can land before `projected_start`, and historically
-    /// produced an inverted range that panicked `TextRange::new`. The fix
-    /// clamps such projections to a degenerate range at `start`; the contract
-    /// here is "no inversion, no panic", not exact positioning.
     #[test]
     fn out_of_bounds_query_end_does_not_invert_projection() {
         let literal = "\"X\n|Y\n|Z\"";

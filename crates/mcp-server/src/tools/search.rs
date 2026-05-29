@@ -1,5 +1,3 @@
-//! Search tools: full-text and semantic search across code and documentation.
-
 use crate::baseline::{ConfiguredBaselineStatus, ExternalBaselineService, ExternalBaselineState};
 use crate::state::{SemanticRuntimeStatus, WorkspaceSearchMode};
 use bsl_search::{
@@ -20,11 +18,6 @@ const DIRECT_SEARCH_MAX_WINDOW_MULTIPLIER: usize = 10;
 const DIRECT_SEARCH_MIN_MAX_WINDOW: usize = 100;
 const DIRECT_SEARCH_MAX_REFILL_ROUNDS: usize = 4;
 
-/// Full-text search across indexed BSL code.
-///
-/// Resolution order when an external baseline is available:
-/// 1. Direct lexical search via the serving table + local overlay merge.
-/// 2. Fallback to loading all documents from the snapshot (old snapshots without serving tables).
 pub fn find_code(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
     workspace_search_mode: WorkspaceSearchMode,
@@ -42,7 +35,6 @@ pub fn find_code(
     let guard = match engine.try_lock() {
         Ok(g) => g,
         Err(_) => {
-            // Engine is locked by overlay warmup — serve from Postgres baseline directly.
             if let Some(source) = external_baseline {
                 match try_direct_lexical_code_no_overlay(&source, query, limit) {
                     DirectResult::Found(hits) => {
@@ -74,46 +66,37 @@ pub fn find_code(
                 DirectResult::Terminal(error) => {
                     return Err(external_baseline_mcp_error(&error));
                 }
-                DirectResult::Unavailable => {
-                    // Fallback: load-all-then-search.
-                    match source.resolve_workspace_view(engine) {
-                        Ok(Some(view)) => {
-                            lexical_hits_for_resolved_view(&view, query, limit, Some("code"))
-                        }
-                        Ok(None) => {
-                            engine.text_search(query, limit, Some("code")).map_err(|e| {
-                                McpError::internal_error(format!("search error: {e}"), None)
-                            })?
-                        }
-                        Err(error) => {
-                            if error.is_terminal() {
-                                return Err(external_baseline_mcp_error(&error));
-                            }
-                            warn!(
-                                "failed to resolve external baseline view for lexical search: {error}"
-                            );
-                            engine.text_search(query, limit, Some("code")).map_err(|e| {
-                                McpError::internal_error(format!("search error: {e}"), None)
-                            })?
-                        }
+                DirectResult::Unavailable => match source.resolve_workspace_view(engine) {
+                    Ok(Some(view)) => {
+                        lexical_hits_for_resolved_view(&view, query, limit, Some("code"))
                     }
+                    Ok(None) => engine.text_search(query, limit, Some("code")).map_err(|e| {
+                        McpError::internal_error(format!("search error: {e}"), None)
+                    })?,
+                    Err(error) => {
+                        if error.is_terminal() {
+                            return Err(external_baseline_mcp_error(&error));
+                        }
+                        warn!(
+                            "failed to resolve external baseline view for lexical search: {error}"
+                        );
+                        engine.text_search(query, limit, Some("code")).map_err(|e| {
+                            McpError::internal_error(format!("search error: {e}"), None)
+                        })?
+                    }
+                },
+            },
+            None => match try_direct_lexical_code_no_overlay(&source, query, limit) {
+                DirectResult::Found(hits) => hits,
+                DirectResult::Terminal(error) => {
+                    return Err(external_baseline_mcp_error(&error));
+                }
+                DirectResult::Unavailable => {
+                    return Ok(CallToolResult::success(vec![Content::text(
+                        "Search index is being built, please try again in a moment.",
+                    )]));
                 }
             },
-            None => {
-                // Engine still building — try direct PG without overlay (no local
-                // changes have been tracked yet).
-                match try_direct_lexical_code_no_overlay(&source, query, limit) {
-                    DirectResult::Found(hits) => hits,
-                    DirectResult::Terminal(error) => {
-                        return Err(external_baseline_mcp_error(&error));
-                    }
-                    DirectResult::Unavailable => {
-                        return Ok(CallToolResult::success(vec![Content::text(
-                            "Search index is being built, please try again in a moment.",
-                        )]));
-                    }
-                }
-            }
         }
     } else {
         let Some(engine) = guard.as_ref() else {
@@ -133,10 +116,6 @@ pub fn find_code(
     Ok(CallToolResult::success(vec![Content::text(format_code_hits(&hits))]))
 }
 
-/// Semantic search across indexed BSL code.
-///
-/// Resolution order when an external baseline is available:
-/// 1. Direct semantic search via the serving table + local overlay merge.
 pub fn search_code(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
     semantic_runtime: &Arc<Mutex<SemanticRuntimeStatus>>,
@@ -159,7 +138,6 @@ pub fn search_code(
     let guard = match engine.try_lock() {
         Ok(g) => g,
         Err(_) => {
-            // Engine is locked by overlay warmup — semantic search requires the engine.
             return Ok(CallToolResult::success(vec![Content::text(
                 "Semantic search overlay is warming up. Use find_code for lexical search while overlay is being prepared.",
             )]));
@@ -190,7 +168,6 @@ pub fn search_code(
         ));
     }
 
-    // Try direct PG baseline + local overlay merge.
     if let Some(source) = external_baseline {
         match try_direct_semantic_code(engine, &source, query, limit) {
             DirectResult::Found(hits) => {
@@ -224,7 +201,6 @@ pub fn search_code(
         ));
     }
 
-    // Fallback: local SQLite semantic index.
     let hits = engine
         .search(query, limit, Some("code"))
         .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?;
@@ -236,23 +212,13 @@ pub fn search_code(
     Ok(CallToolResult::success(vec![Content::text(format_code_hits(&hits))]))
 }
 
-/// Result of a direct baseline search attempt.
 #[derive(Debug)]
 enum DirectResult {
-    /// Baseline query returned results and merge is authoritative (may be empty
-    /// after overlay filtering — that is a valid final answer).
     Found(Vec<SearchHit>),
-    /// Serving table is unavailable or not populated for this snapshot — caller
-    /// should fall back to load-all or local SQLite.
     Unavailable,
-    /// Terminal error (schema / config / storage / credential resolution) that
-    /// must **not** be silently swallowed — caller should surface it to the user.
     Terminal(bsl_search::SearchError),
 }
 
-/// Try direct lexical search against the external baseline serving table
-/// without overlay merge. Used when the local search engine is still building
-/// and no overlay changes have been tracked yet.
 fn try_direct_lexical_code_no_overlay(
     source: &ExternalBaselineService,
     query: &str,
@@ -283,8 +249,6 @@ fn try_direct_lexical_code_no_overlay(
     }
 }
 
-/// Try direct lexical search against the external baseline serving table,
-/// merging with local overlay.
 fn try_direct_lexical_code(
     engine: &SearchEngine,
     source: &ExternalBaselineService,
@@ -316,8 +280,6 @@ fn try_direct_lexical_code(
     })
 }
 
-/// Try direct semantic search against the external baseline serving table,
-/// merging with local overlay.
 fn try_direct_semantic_code(
     engine: &SearchEngine,
     source: &ExternalBaselineService,
@@ -494,12 +456,6 @@ where
     DirectResult::Found(best)
 }
 
-/// Full-text search across platform documentation (types, methods, global functions).
-///
-/// Resolution order when an external baseline is available:
-/// 1. Direct lexical search via the serving table (`serving_lexical`).
-/// 2. Fallback to loading all documents from the snapshot (old snapshots without serving tables).
-/// 3. Fallback to the local SQLite FTS index.
 pub fn find_docs(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
     configured_baseline: Option<&ConfiguredBaselineStatus>,
@@ -517,7 +473,6 @@ pub fn find_docs(
             source.resolve_snapshot(),
             "failed to resolve external reference baseline snapshot for lexical search",
         )? {
-            // Try direct lexical search via the serving table first.
             match source.lexical_search(snapshot.id.0.as_str(), query, Some("platform"), limit) {
                 Ok(hits) if !hits.is_empty() => {
                     return Ok(CallToolResult::success(vec![Content::text(
@@ -525,8 +480,6 @@ pub fn find_docs(
                     )]));
                 }
                 Ok(_) => {
-                    // Query succeeded — authoritative empty. Don't fall back
-                    // to load-all or local SQLite which may hold stale data.
                     return Ok(CallToolResult::success(vec![Content::text("No results found.")]));
                 }
                 Err(error) => {
@@ -541,7 +494,6 @@ pub fn find_docs(
                 }
             }
 
-            // Fallback: load all documents from the snapshot and search in memory.
             if let Some(view) = map_reference_baseline_resolution(
                 configured_baseline,
                 source.resolve_reference_view(),
@@ -558,7 +510,6 @@ pub fn find_docs(
         }
     }
 
-    // Final fallback: local SQLite FTS.
     let Some(engine) = guard.as_ref() else {
         return Ok(CallToolResult::success(vec![Content::text(
             "Search index is being built, please try again in a moment.",
@@ -575,11 +526,6 @@ pub fn find_docs(
     Ok(CallToolResult::success(vec![Content::text(format_doc_hits(&hits))]))
 }
 
-/// Semantic search across platform documentation.
-///
-/// Resolution order when an external baseline is available:
-/// 1. Direct semantic search via the serving table (`serving_semantic` + pgvector).
-/// 2. Fallback to the local SQLite semantic index.
 pub fn search_docs(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
     configured_baseline: Option<&ConfiguredBaselineStatus>,
@@ -605,7 +551,6 @@ pub fn search_docs(
         ));
     }
 
-    // Try direct semantic search against the external baseline serving table.
     if let Some(source) = external_baseline {
         if let Some((_, snapshot)) = map_reference_baseline_resolution(
             configured_baseline,
@@ -642,8 +587,6 @@ pub fn search_docs(
                     )]));
                 }
                 Ok(_) => {
-                    // Query succeeded — authoritative empty. Don't fall back
-                    // to local SQLite which may hold stale embeddings.
                     return Ok(CallToolResult::success(vec![Content::text("No results found.")]));
                 }
                 Err(error) => {
@@ -660,7 +603,6 @@ pub fn search_docs(
         }
     }
 
-    // Fallback: local SQLite semantic index.
     let hits = engine
         .search(query, limit, Some("platform"))
         .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?;
@@ -672,7 +614,6 @@ pub fn search_docs(
     Ok(CallToolResult::success(vec![Content::text(format_doc_hits(&hits))]))
 }
 
-/// Search index status and indexing progress.
 pub fn search_status(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
     progress: &Arc<IndexProgress>,
@@ -1183,7 +1124,6 @@ fn format_code_hits(hits: &[bsl_search::SearchHit]) -> String {
             hit.kind,
         );
 
-        // Show first 5 lines of code.
         for line in hit.text.lines().take(5) {
             let _ = writeln!(out, "  │ {line}");
         }
@@ -1203,7 +1143,6 @@ fn format_doc_hits(hits: &[bsl_search::SearchHit]) -> String {
     for (i, hit) in hits.iter().enumerate() {
         let _ = writeln!(out, "#{} [{:.3}] {} ({})", i + 1, hit.score, hit.symbol_name, hit.kind,);
 
-        // Show first 5 lines of documentation.
         for line in hit.text.lines().take(5) {
             let _ = writeln!(out, "  │ {line}");
         }
@@ -1974,8 +1913,6 @@ mod tests {
 
     #[test]
     fn search_docs_falls_back_to_local_sqlite_when_external_semantic_fails() {
-        // Engine has no semantic, so semantic search returns an error
-        // before touching the external baseline. Verifies standard validation.
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("reference-search.db");
         let engine = SearchEngine::fts_only(&db_path).unwrap();

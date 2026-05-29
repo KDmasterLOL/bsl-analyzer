@@ -1,8 +1,3 @@
-//! VFS helper functions for accessing file paths and configuration roots.
-//!
-//! These functions downcast the database to `RootDatabaseImpl` to access
-//! VFS and file system operations that are not part of the trait interface.
-
 use std::path::{Path, PathBuf};
 
 use vfs::FileId;

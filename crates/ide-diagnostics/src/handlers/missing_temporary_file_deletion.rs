@@ -1,41 +1,3 @@
-//! Reports temp files from `GetTempFileName()` that are not cleaned up locally.
-//!
-//! Migrated to a CFG-anchored forward MAY analysis through the
-//! generic `dataflow::temp_resource` lattice (Track 1 Step Q-β-2).
-//! Pre-Step-Q the diagnostic ran an AST-order body-wide BFS check —
-//! "any deletion call anywhere in the body whose path matches the
-//! configured regex and whose arg references the variable counts as
-//! cleanup". Post-migration the principled MAY analysis flags every
-//! path on which a temp file is opened but never closed before exit,
-//! including conditional cleanups whose else-branch leaves the file
-//! open.
-//!
-//! ## Key resolution
-//!
-//! Resource keys are *lowercased variable names*. A `Get*` call is
-//! recorded in the open-set only when it is the direct RHS of an
-//! `Assign` whose target is a `Path` —
-//! `Файл = ПолучитьИмяВременногоФайла("xml")`. Inline uses
-//! (`Записать(GetTempFileName(...))`,
-//! `Файл = Новый Файл(GetTempFileName(...))`) cannot be tracked by
-//! the lattice — they have no variable to key on — and emit an
-//! immediate diagnostic via the inline pre-pass below.
-//!
-//! ## Multi-event closes
-//!
-//! BSL's `УдалитьФайлы(path, mask)` overload deletes both files in
-//! a single call. The provider's `classify_many` walks each arg
-//! subtree for a reference to a tracked variable and emits one
-//! `Close(var)` event per match — see
-//! `dataflow::temp_resource::ResourceProvider`'s contract.
-//!
-//! ## Legacy parity
-//!
-//! `obj.field = GetTempFileName(...)` (non-`Path` Assign target) is
-//! suppressed — the pre-Step-Q handler emitted nothing for this
-//! shape, and the migration preserves that contract. Promoting it
-//! to a leak diagnostic lands as a follow-up.
-
 use hir::cfg::{CfgBuilder, ControlFlowGraph};
 use hir::dataflow::temp_resource::{analyze_open_resources, ResourceEvent, ResourceProvider};
 use hir::{Body, BodySourceMap, Expr, ExprId, ExprIdx, IdConversion, Stmt};
@@ -60,12 +22,9 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Default deletion methods pattern (case-insensitive, anchored).
 const DEFAULT_SEARCH_DELETE_FILE_METHOD: &str =
     "УдалитьФайлы|DeleteFiles|НачатьУдалениеФайлов|BeginDeletingFiles|ПереместитьФайл|MoveFile";
 
-/// Diagnostic message for inline `GetTempFileName()` uses (no
-/// variable name to interpolate).
 const INLINE_MESSAGE: &str = "Нужно добавить удаление временного файла после использования";
 
 #[derive(Debug, Clone)]
@@ -94,8 +53,6 @@ impl Config {
     }
 }
 
-/// Variable name preserved in both original case (for diagnostic
-/// messages) and lower case (for the lattice's resource key).
 struct AssignedGet {
     original_name: String,
     lower_name: String,
@@ -114,11 +71,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     for (local_id, body) in module_bodies.iter_bodies() {
         let Some(source_map) = module_bodies.source_map(local_id) else { continue };
-        // Build a CFG on demand if Salsa hasn't materialised one for
-        // this body — pre-Step-Q the legacy handler accepted a
-        // missing CFG by falling back to a body-wide BFS, and
-        // silently dropping the body would regress that contract.
-        // The on-demand build mirrors the module-level path below.
         let cfg_arc = module_cfgs.get(local_id);
         let owned_cfg;
         let cfg: &ControlFlowGraph = if let Some(ref arc) = cfg_arc {
@@ -154,10 +106,6 @@ fn check_body(
     code: DiagnosticCode,
     ctx: &DiagnosticsContext,
 ) -> Vec<Diagnostic> {
-    // Pre-pass: bucket every `Get*` call into either a tracked
-    // (lattice-driven) or suppressed (legacy parity, see module-doc)
-    // role. Inline uses are everything else and emit immediately
-    // below.
     let (tracked, suppressed) = collect_assigned_gets(body);
 
     let mut diagnostics = Vec::new();
@@ -198,12 +146,6 @@ fn check_body(
         return diagnostics;
     };
 
-    // For each `(var_lower, leaked_sites)` at exit, emit one
-    // diagnostic per leaked site, with the variable's original-case
-    // name in the message. The lattice's resource key (`var_lower`)
-    // is unused at the emission site — `tracked.get(site)` already
-    // carries the original-case name needed for the message — so
-    // iterate values only.
     for sites in result.open_at_exit().values() {
         for &site in sites {
             let Some(ag) = tracked.get(&site) else { continue };
@@ -225,13 +167,6 @@ fn check_body(
     diagnostics
 }
 
-/// Walk body statements and bucket every `GetTempFileName` call
-/// expression that is the direct RHS of an `Assign`:
-/// - target = `Path(name)` → `tracked`, keyed on `lower(name)`.
-/// - any other target shape → `suppressed` (legacy parity).
-///
-/// Inline Gets are derived implicitly by the caller via
-/// `body.exprs_iter()`.
 fn collect_assigned_gets(body: &Body) -> (FxHashMap<ExprIdx, AssignedGet>, FxHashSet<ExprIdx>) {
     let mut tracked: FxHashMap<ExprIdx, AssignedGet> = FxHashMap::default();
     let mut suppressed: FxHashSet<ExprIdx> = FxHashSet::default();
@@ -260,7 +195,6 @@ fn collect_assigned_gets(body: &Body) -> (FxHashMap<ExprIdx, AssignedGet>, FxHas
     (tracked, suppressed)
 }
 
-/// Provider for the lattice's forward MAY analysis.
 struct TempFileProvider<'a> {
     deletion_methods: &'a Regex,
     tracked: &'a FxHashMap<ExprIdx, AssignedGet>,
@@ -269,9 +203,6 @@ struct TempFileProvider<'a> {
 
 impl<'a> ResourceProvider<String> for TempFileProvider<'a> {
     fn classify(&self, _body: &Body, expr_idx: ExprIdx) -> Option<ResourceEvent<String>> {
-        // Open events: this expr is a tracked `Get*` call. Closes
-        // flow through `classify_many` because a single deletion
-        // call may close several resources at once.
         self.tracked.get(&expr_idx).map(|ag| ResourceEvent::Open(ag.lower_name.clone()))
     }
 
@@ -295,10 +226,6 @@ impl<'a> ResourceProvider<String> for TempFileProvider<'a> {
     }
 }
 
-/// Build the full dotted call-path of a `Call` callee. Mirrors the
-/// pre-Step-Q `extract_call_path` so the deletion regex matches
-/// the same surface (`УдалитьФайлы`, `obj.УдалитьФайл`,
-/// `Mod.Sub.Method`, …) it always did.
 fn extract_call_path(body: &Body, callee: ExprIdx) -> String {
     match body.expr_idx(callee) {
         Expr::Path(name) => name.as_str().to_string(),
@@ -317,26 +244,6 @@ fn extract_call_path(body: &Body, callee: ExprIdx) -> String {
     }
 }
 
-/// Walk `expr` depth-first, inserting (lower-cased) names of every
-/// `Path` whose lowered form is in `known_vars`. The set of
-/// recursed-into expression shapes mirrors the pre-Step-Q
-/// `expr_contains_var` walker exactly:
-///
-/// **Recursed:** `Path`, `Call`, `MethodCall`, `Field`, `Index`,
-/// `BinaryOp`, `UnaryOp`, `New`.
-///
-/// **Not recursed (returns no closed vars):** `Ternary`, `Array`,
-/// `Await`, `QualifiedPath`, `Literal`, `Missing`. Each of these is
-/// a *non-direct wrapper* — its value is conditional, computed, or
-/// disjunctive, so a textual occurrence of a tracked variable
-/// inside one of them does not statically prove the deletion call
-/// closes that variable. Treating
-/// `УдалитьФайлы(?(Условие, Файл1, Файл2))` as closing both
-/// branches would be a false negative under MAY semantics — at
-/// runtime exactly one branch evaluates, leaving the other temp
-/// file leaked. The legacy walker fell into its catch-all
-/// `_ => false` arm for these shapes; the migration preserves
-/// that conservative parity.
 fn collect_referenced_vars(
     body: &Body,
     expr_idx: ExprIdx,
@@ -386,15 +293,12 @@ fn collect_referenced_vars(
     }
 }
 
-/// True iff `expr_idx` is a `Call` whose callee is a `Path` matching
-/// `GetTempFileName` (case-insensitive, bilingual).
 fn is_get_temp_filename_call(body: &Body, expr_idx: ExprIdx) -> bool {
     let Expr::Call { callee, .. } = body.expr_idx(expr_idx) else { return false };
     let Expr::Path(name) = body.expr_idx(*callee) else { return false };
     is_get_temp_filename(name.as_str())
 }
 
-/// Bilingual case-insensitive `GetTempFileName` predicate.
 fn is_get_temp_filename(name: &str) -> bool {
     let lower = name.to_lowercase();
     lower == "получитьимявременногофайла" || lower == "gettempfilename"
@@ -542,10 +446,6 @@ mod tests {
 
     #[test]
     fn test_inline_usage() {
-        // Inline GetTempFileName usage (without assignment) is
-        // always flagged via the inline pre-pass — there is no
-        // variable to track through the lattice.
-
         let code = r#"
             Процедура Тест()
                 Записать(GetTempFileName("txt"));
@@ -727,11 +627,6 @@ mod tests {
 
     #[test]
     fn test_lattice_flags_conditional_cleanup_leak() {
-        // Conditional cleanup: Get on the linear path, Delete only
-        // inside an `Если` — the else-fall-through path leaves the
-        // file open at exit. Pre-Step-Q the body-wide BFS missed
-        // this leak (deletion call existed somewhere in the body);
-        // post-migration the principled MAY analysis flags it.
         let code = r#"
             Процедура Тест(Условие)
                 Файл = ПолучитьИмяВременногоФайла("xml");
@@ -750,11 +645,6 @@ mod tests {
 
     #[test]
     fn test_multi_arg_deletion_closes_each_file() {
-        // BSL `УдалитьФайлы(path, mask)` deletes both files in a
-        // single call. The provider's `classify_many` walks each
-        // arg subtree for a tracked-var reference and emits one
-        // `Close(var)` event per match — both files must close on
-        // every path through this single call.
         let code = r#"
             Процедура Тест()
                 Файл1 = ПолучитьИмяВременногоФайла("xml");
@@ -768,10 +658,6 @@ mod tests {
 
     #[test]
     fn test_get_in_branch_delete_in_separate_branch_leaks() {
-        // Get inside one `Если`, Delete inside a sibling `Если`
-        // whose else-branch leaves the file open. Each `Если` is
-        // a separate branch, so the lattice's MAY join correctly
-        // reports the leak on the path through both else-branches.
         let code = r#"
             Процедура Тест(Условие1, Условие2)
                 Если Условие1 Тогда
@@ -793,12 +679,6 @@ mod tests {
     #[test]
     #[ignore = "Move-method destination semantics: `ПереместитьФайл(src, dst)` leaves dst as a live temp file, but the lattice (matching pre-Step-Q legacy behavior) treats every variable referenced by any matching deletion-method arg as closed. Fix needs per-method arg-role metadata. Tracked as a follow-up beyond Track 1's scope; pinned here so the fix flips this test green."]
     fn test_move_method_destination_leaks() {
-        // BSL `ПереместитьФайл(src, dst)` moves the file from `src`
-        // to `dst`. The source path is freed (correctly closed); the
-        // destination is now occupied and still needs explicit
-        // cleanup. The pre-Step-Q body-wide BFS treated *both*
-        // arguments as closed (any matching method × any var-ref =
-        // delete); the Q-β-2 lattice preserves that legacy parity.
         let code = r#"
             Процедура Тест()
                 Файл1 = ПолучитьИмяВременногоФайла("xml");
@@ -818,13 +698,6 @@ mod tests {
     #[test]
     #[ignore = "Variable-generation tracking: a re-assignment to the same name overwrites the prior Get-site's runtime reachability, but on disk the prior temp file is still alive — leaked. The lattice keys resources on lowercased var name only, so the later delete clears both opening sites. Pre-Step-Q's body-wide BFS had the same blindspot; preserved as legacy parity. Fix requires reaching-definitions on the temp-name binding."]
     fn test_reassigned_variable_first_get_leaks() {
-        // Two `Get*` calls assigned to the same name. At runtime the
-        // first call's filename is overwritten by the second
-        // assignment; the file at the first path is still on disk
-        // when the procedure exits. The lattice treats the second
-        // `УдалитьФайлы(Файл)` as closing both opening sites — both
-        // share the lower_name `файл` resource key — and reports no
-        // leak. Same blindspot as the sibling temp-storage handler.
         let code = r#"
             Процедура Тест()
                 Файл = ПолучитьИмяВременногоФайла("a");
@@ -838,15 +711,6 @@ mod tests {
 
     #[test]
     fn test_ternary_deletion_arg_does_not_close_either_branch() {
-        // Codex stop-time finding: a deletion call whose arg is a
-        // Ternary (`?(cond, A, B)`) cannot statically be resolved
-        // to a single closed resource — at runtime exactly one
-        // branch evaluates, so under MAY semantics neither branch
-        // is guaranteed to close. The pre-Step-Q `expr_contains_var`
-        // walker did not recurse into Ternary at all (it fell into
-        // its catch-all `_ => false` arm), so the body-wide BFS
-        // already conservatively flagged both temps as leaks. This
-        // test pins that legacy parity post-migration.
         let code = r#"
             Процедура Тест(Условие)
                 Файл1 = ПолучитьИмяВременногоФайла("xml");
@@ -867,9 +731,6 @@ mod tests {
 
     #[test]
     fn test_inline_and_assigned_get_in_same_body_emit_separately() {
-        // One inline Get and one tracked-but-unclosed Get in the
-        // same body must each produce their own diagnostic with the
-        // appropriate message shape.
         let code = r#"
             Процедура Тест()
                 Файл = ПолучитьИмяВременногоФайла("xml");

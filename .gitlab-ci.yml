@@ -18,9 +18,6 @@ variables:
       - .cargo/registry/index
       - .cargo/registry/cache
 
-# ============================================
-# Stage: test
-# ============================================
 
 test:
   stage: test
@@ -37,9 +34,6 @@ test:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
     - if: $CI_COMMIT_TAG
 
-# ============================================
-# Stage: build
-# ============================================
 
 .build-base:
   stage: build
@@ -67,7 +61,6 @@ test:
     BINARY_EXT: ".exe"
     CXXFLAGS: "-DMAP_FAILED=((void*)-1)"
 
-# Linux AMD64 (glibc 2.35, compatible with Ubuntu 22.04+)
 build:linux-amd64:
   extends:
     - .build-base
@@ -79,7 +72,6 @@ build:linux-amd64:
     - cp target/${RUST_TARGET}/release/bsl-analyzer-app artifacts/bsl-analyzer-app-${PLATFORM_SUFFIX}
     - ls -la artifacts/
 
-# Windows AMD64 (cross-compilation via cargo-xwin, MSVC ABI)
 build:windows-amd64:
   extends:
     - .build-base
@@ -91,11 +83,7 @@ build:windows-amd64:
     - cp target/${RUST_TARGET}/release/bsl-analyzer-app${BINARY_EXT} artifacts/bsl-analyzer-app-${PLATFORM_SUFFIX}${BINARY_EXT}
     - ls -la artifacts/
 
-# macOS builds require local MacBook - see scripts/build-macos.sh
 
-# ============================================
-# Stage: upload
-# ============================================
 
 upload:
   stage: upload
@@ -126,9 +114,6 @@ upload:
   rules:
     - if: $CI_COMMIT_TAG && $RELEASE_SERVER_URL
 
-# ============================================
-# Stage: publish
-# ============================================
 
 publish:
   stage: publish
@@ -157,7 +142,6 @@ publish:
   rules:
     - if: $CI_COMMIT_TAG && $RELEASE_SERVER_URL
 
-# GitLab Release
 release:
   stage: publish
   image: registry.gitlab.com/gitlab-org/cli:v1.60.0
@@ -176,9 +160,6 @@ release:
   rules:
     - if: $CI_COMMIT_TAG
 
-# ============================================
-# Stage: GitHub mirror
-# ============================================
 
 github-sync:
   stage: publish
@@ -203,9 +184,6 @@ github-sync:
       when: manual
       allow_failure: true
 
-# ============================================
-# Optional: documentation
-# ============================================
 
 doc:
   stage: test

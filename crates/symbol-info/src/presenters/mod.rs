@@ -1,8 +1,3 @@
-//! Presenters render a [`SymbolSignature`](crate::SymbolSignature) into a
-//! consumer-specific view-model.
-//!
-//! No LSP types here; the LSP server crate maps view-models to wire types.
-
 pub mod completion;
 pub mod hover;
 pub mod signature_help;

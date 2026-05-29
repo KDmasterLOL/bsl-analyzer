@@ -1,5 +1,3 @@
-//! Metadata tools: configuration tree, object structure, forms.
-
 use bsl_metadata::metadata_object::MdoType;
 use bsl_metadata::traits::MdObject;
 use bsl_metadata::Configuration;
@@ -8,7 +6,6 @@ use rmcp::ErrorData as McpError;
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
-/// Returns configuration metadata tree — categories and object names.
 pub fn get_metadata_tree(
     config: &Configuration,
     extensions: &[(String, Configuration)],
@@ -18,7 +15,6 @@ pub fn get_metadata_tree(
         format_filtered_tree(config, category)
     } else {
         let mut result = format_summary_tree(config)?;
-        // Append extension summaries
         if !extensions.is_empty() {
             let text = result.content[0].raw.as_text().expect("text").text.clone();
             let mut out = text;
@@ -99,7 +95,6 @@ fn format_filtered_tree(
     let mut out = String::new();
     let mut found = false;
 
-    // Try to match as MdoType (both Russian and English)
     if let Ok(mdo_type) = category.parse::<MdoType>() {
         let objects: Vec<_> =
             config.metadata_objects().iter().filter(|o| o.mdo_type == mdo_type).collect();
@@ -128,7 +123,6 @@ fn format_filtered_tree(
         }
     }
 
-    // Special categories not in MdoType
     if !found {
         match category.to_lowercase().as_str() {
             "общиемодули" | "общиймодуль" | "commonmodule" | "commonmodules" =>
@@ -211,7 +205,6 @@ fn format_common_module_flags(m: &bsl_metadata::CommonModule) -> String {
     }
 }
 
-/// Returns detailed structure of a metadata object.
 pub fn get_object_structure(
     config: &Configuration,
     object_type: &str,
@@ -348,7 +341,6 @@ fn format_register_structure(reg: &bsl_metadata::Register) -> String {
     out
 }
 
-/// Returns general configuration info.
 pub fn get_configuration_info(
     config: &Configuration,
     extensions: &[(String, Configuration)],
@@ -389,10 +381,6 @@ pub fn get_configuration_info(
     Ok(CallToolResult::success(vec![Content::text(out)]))
 }
 
-/// Returns form structure for a metadata object.
-///
-/// Loads forms on-demand from the configuration directory.
-/// Path convention: `{TypeDir}/{ObjectName}/Forms/{FormName}/Ext/Form.xml`
 pub fn get_form_structure(
     workspace_root: Option<&std::path::Path>,
     object_type: &str,
@@ -416,7 +404,6 @@ pub fn get_form_structure(
     }
 
     if let Some(fname) = form_name {
-        // Load specific form
         let form_xml_path = forms_dir.join(fname).join("Ext").join("Form.xml");
         if !form_xml_path.exists() {
             return Err(McpError::invalid_params(
@@ -430,7 +417,6 @@ pub fn get_form_structure(
             .map_err(|e| McpError::internal_error(format!("Ошибка разбора формы: {e}"), None))?;
         Ok(CallToolResult::success(vec![Content::text(format_form(&form))]))
     } else {
-        // List available forms
         let mut form_names = Vec::new();
         if let Ok(entries) = std::fs::read_dir(&forms_dir) {
             for entry in entries.flatten() {

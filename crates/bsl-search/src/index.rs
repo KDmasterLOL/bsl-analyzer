@@ -1,32 +1,20 @@
-//! HNSW vector index for nearest-neighbor search.
-//!
-//! Wraps usearch for in-memory HNSW index. Built from embeddings
-//! stored in SQLite; rebuilt on startup and after significant changes.
-
 use crate::error::SearchError;
 use usearch::ffi::{IndexOptions, MetricKind, ScalarKind};
 
-/// In-memory HNSW vector index.
 pub struct VectorIndex {
     index: usearch::Index,
     dim: usize,
-    /// Number of live vectors (excludes tombstones).
     count: usize,
-    /// Number of removed vectors (tombstones).
     tombstones: usize,
 }
 
-/// A search result with chunk id and distance.
 #[derive(Debug, Clone)]
 pub struct SearchResult {
-    /// Chunk id (matches the SQLite chunks.id).
     pub chunk_id: i64,
-    /// Cosine similarity score (higher is better, 0..1 range).
     pub score: f32,
 }
 
 impl VectorIndex {
-    /// Create an empty index with the given embedding dimension.
     pub fn new(dim: usize) -> Result<Self, SearchError> {
         let options = IndexOptions {
             dimensions: dim,
@@ -43,7 +31,6 @@ impl VectorIndex {
         Ok(Self { index, dim, count: 0, tombstones: 0 })
     }
 
-    /// Build index from a set of (chunk_id, embedding) pairs.
     pub fn build(dim: usize, data: &[(i64, Vec<f32>)]) -> Result<Self, SearchError> {
         let mut idx = Self::new(dim)?;
         if data.is_empty() {
@@ -64,7 +51,6 @@ impl VectorIndex {
         Ok(idx)
     }
 
-    /// Add a single vector to the index.
     pub fn add(&mut self, chunk_id: i64, embedding: &[f32]) -> Result<(), SearchError> {
         if self.count + 1 > self.index.capacity() {
             let new_cap = (self.count + 1).next_power_of_two().max(1024);
@@ -79,10 +65,6 @@ impl VectorIndex {
         Ok(())
     }
 
-    /// Mark a vector as removed (tombstone).
-    ///
-    /// usearch doesn't support true deletion, so we track tombstones
-    /// and rebuild when the ratio exceeds a threshold.
     pub fn remove(&mut self, chunk_id: i64) -> Result<(), SearchError> {
         self.index
             .remove(chunk_id as u64)
@@ -91,9 +73,6 @@ impl VectorIndex {
         Ok(())
     }
 
-    /// Search for nearest neighbors of a query embedding.
-    ///
-    /// Returns up to `limit` results sorted by descending similarity.
     pub fn search(&self, query: &[f32], limit: usize) -> Result<Vec<SearchResult>, SearchError> {
         if self.count == 0 {
             return Ok(Vec::new());
@@ -108,36 +87,26 @@ impl VectorIndex {
             .keys
             .iter()
             .zip(results.distances.iter())
-            .map(|(&key, &distance)| SearchResult {
-                chunk_id: key as i64,
-                // usearch cosine metric returns distance (0 = identical),
-                // convert to similarity score.
-                score: 1.0 - distance,
-            })
+            .map(|(&key, &distance)| SearchResult { chunk_id: key as i64, score: 1.0 - distance })
             .collect())
     }
 
-    /// Number of vectors in the index.
     pub fn len(&self) -> usize {
         self.count
     }
 
-    /// Whether the index is empty.
     pub fn is_empty(&self) -> bool {
         self.count == 0
     }
 
-    /// Whether the index needs rebuilding (too many tombstones).
     pub fn needs_rebuild(&self) -> bool {
         self.count > 0 && self.tombstones * 20 > self.count
     }
 
-    /// Reset tombstone counter (after a rebuild).
     pub fn reset_tombstones(&mut self) {
         self.tombstones = 0;
     }
 
-    /// Embedding dimension.
     pub fn dim(&self) -> usize {
         self.dim
     }
@@ -148,14 +117,12 @@ mod tests {
     use super::*;
 
     fn random_vec(dim: usize, seed: u64) -> Vec<f32> {
-        // Simple deterministic pseudo-random for tests.
         let mut v = Vec::with_capacity(dim);
         let mut x = seed;
         for _ in 0..dim {
             x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             v.push((x as f32) / (u64::MAX as f32));
         }
-        // Normalize.
         let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
         for x in &mut v {
             *x /= norm;
@@ -172,7 +139,6 @@ mod tests {
         let index = VectorIndex::build(dim, &data).unwrap();
         assert_eq!(index.len(), 100);
 
-        // Search for the first vector — it should find itself.
         let results = index.search(&data[0].1, 5).unwrap();
         assert!(!results.is_empty());
         assert_eq!(results[0].chunk_id, 1);
@@ -211,7 +177,6 @@ mod tests {
 
         assert!(!index.needs_rebuild());
 
-        // Remove >5% of vectors.
         index.remove(1).unwrap();
         assert!(index.needs_rebuild());
 

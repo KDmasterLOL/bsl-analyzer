@@ -1,5 +1,3 @@
-//! Reports redundant self-access through `ЭтотОбъект` or the current module name.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -29,14 +27,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     clean_code_attribute: CleanCodeAttribute::Adaptable,
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic.
-///
-/// Called from hir_dispatch when `BodyDiagnostic::RedundantAccessToObject` is encountered.
-///
-/// This function validates the candidate against module metadata:
-/// 1. For ThisObject: module must be ObjectModule/FormModule/RecordSetModule
-/// 2. For TwoLevel (CommonModule): module name must match, ReturnValueReuse == DontUse
-/// 3. For ThreeLevel (ManagerModule): mdo_type and mdo_name must match current module
 pub fn from_hir(
     kind: &RedundantAccessKind,
     range: TextRange,
@@ -52,7 +42,6 @@ pub fn from_hir(
 
     match kind {
         RedundantAccessKind::ThisObject { prefix: _ } => {
-            // Validate for ObjectModule/FormModule/RecordSetModule
             let should_check = match metadata.module_type {
                 ModuleType::ObjectModule => get_check_object_module(ctx),
                 ModuleType::FormModule => get_check_form_module(ctx),
@@ -65,39 +54,32 @@ pub fn from_hir(
             Some(create_diagnostic(range, code, ctx))
         }
         RedundantAccessKind::TwoLevel { module } => {
-            // Validate for CommonModule: module name must match current module
             if metadata.module_type != ModuleType::CommonModule {
                 return None;
             }
             let cm = metadata.common_module.as_ref()?;
 
-            // Skip if ReturnValueReuse is active (caching requires full path)
             if cm.return_values_reuse() != ReturnValueReuse::DontUse {
                 return None;
             }
 
-            // Check if module name matches current common module name
             if !module.eq_ignore_ascii_case(cm.name()) {
                 return None;
             }
             Some(create_diagnostic(range, code, ctx))
         }
         RedundantAccessKind::ThreeLevel { mdo_type, mdo_name } => {
-            // Validate for ManagerModule: mdo_type and mdo_name must match
             if metadata.module_type != ModuleType::ManagerModule {
                 return None;
             }
             let mdo = metadata.mdo.as_ref()?;
 
-            // Check if mdo_type matches manager collection name
             let expected_plural = get_plural_collection_name(mdo.mdo_type)?;
 
-            // Compare mdo_type (case-insensitive, bilingual)
             if !is_matching_mdo_type(mdo_type, expected_plural) {
                 return None;
             }
 
-            // Check if mdo_name matches
             if !mdo_name.eq_ignore_ascii_case(&mdo.name) {
                 return None;
             }
@@ -121,7 +103,6 @@ fn create_diagnostic(
     }
 }
 
-/// Get plural collection name for MdoType (Russian form).
 fn get_plural_collection_name(
     mdo_type: bsl_metadata::MdoType,
 ) -> Option<(&'static str, &'static str)> {
@@ -146,18 +127,15 @@ fn get_plural_collection_name(
         MdoType::Constant => Some(("константы", "constants")),
         MdoType::DataProcessor => Some(("обработки", "dataprocessors")),
         MdoType::Report => Some(("отчеты", "reports")),
-        // These don't have manager modules
         MdoType::Cube | MdoType::DimensionTable | MdoType::CommonModule => None,
     }
 }
 
-/// Check if mdo_type string matches expected plural forms (bilingual, case-insensitive).
 fn is_matching_mdo_type(mdo_type: &str, expected: (&str, &str)) -> bool {
     let lower = mdo_type.to_lowercase();
     lower == expected.0 || lower == expected.1
 }
 
-// Configuration parameter getters (with defaults)
 fn get_check_object_module(ctx: &DiagnosticsContext) -> bool {
     ctx.config
         .get_bool(DiagnosticCode::RedundantAccessToObject, "checkObjectModule")
@@ -181,7 +159,6 @@ mod tests {
     use expect_test::expect;
     #[test]
     fn test_this_object_field_access() {
-        // ThisObject field access - should emit candidate (but no diagnostic without metadata)
         let code = r#"Процедура Тест()
     ЭтотОбъект.Контрагент = Данные.Контрагент;
 КонецПроцедуры"#;
@@ -195,7 +172,6 @@ mod tests {
 
     #[test]
     fn test_this_object_index_access_no_diagnostic() {
-        // INDEX_EXPR access - should NOT emit candidate (handled separately)
         let code = r#"Процедура Тест()
     ЭтотОбъект["ПолеКонтактнойИнформации"] = Данные.Телефон;
 КонецПроцедуры"#;
@@ -209,8 +185,6 @@ mod tests {
 
     #[test]
     fn test_this_object_chained_access_single_diagnostic() {
-        // Chained access ЭтотОбъект.Отбор.Регистратор.Значение should emit only ONE diagnostic,
-        // not one per each FIELD_EXPR level in the chain
         use crate::test_utils::{check_metadata_diagnostic, make_non_common_module_metadata};
 
         let metadata = make_non_common_module_metadata(bsl_metadata::ModuleType::ObjectModule);
@@ -235,7 +209,6 @@ mod tests {
 
     #[test]
     fn test_this_object_english() {
-        // English ThisObject
         let code = r#"Procedure Test()
     ThisObject.Counterparty = Data.Counterparty;
 EndProcedure"#;

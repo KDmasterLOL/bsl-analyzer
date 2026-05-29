@@ -1,5 +1,3 @@
-//! Reports service tags and placeholder comments left in code.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -523,9 +521,8 @@ EndProcedure"#;
             .insert(DiagnosticCode::UsingServiceTag, serde_json::json!({"serviceTags": "todo"}));
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-        assert_eq!(diagnostics.len(), 2, "With only 'todo' tag, should have 2 diagnostics"); // snapshot-skip: custom configuration assertion intentionally retained.
-        crate::test_utils::assert_diagnostic_range(code, &diagnostics[0], 1, 0, 36); // snapshot-skip: custom configuration range assertion intentionally retained.
+        assert_eq!(diagnostics.len(), 2, "With only 'todo' tag, should have 2 diagnostics");
+        crate::test_utils::assert_diagnostic_range(code, &diagnostics[0], 1, 0, 36);
         crate::test_utils::assert_diagnostic_range(code, &diagnostics[1], 21, 4, 29);
-        // snapshot-skip: custom configuration range assertion intentionally retained.
     }
 }

@@ -1,17 +1,3 @@
-//! Byte-identity golden corpus for the SDBL lexer.
-//!
-//! Purpose: regression gate for structural refactors of the SDBL lexer.
-//! Every entry records the exact `(kind, offset, text)` tuple sequence
-//! produced by `tokenize_sdbl` for a query covering a specific slice of
-//! the token surface. The baseline is captured via `expect-test`; any
-//! drift must be either explained and re-approved (run with
-//! `UPDATE_EXPECT=1` after justifying the change) or fixed in the
-//! lexer.
-//!
-//! This file exists to protect the Slice 1 clean-room migration: the
-//! refactor must preserve tokenisation byte-for-byte across the whole
-//! corpus, regardless of which internal module hosts the regexes.
-
 use expect_test::{expect, Expect};
 use lexer::sdbl::tokenize_sdbl;
 
@@ -1462,8 +1448,6 @@ fn collect_headers(src: &str) -> Vec<(usize, &str)> {
     headers
 }
 
-// Anchor a header as `---- NNN ` (three ASCII digits + space) so a body
-// line that happens to start with `---- ` cannot split an entry.
 fn is_header_line(line: &str) -> bool {
     let Some(rest) = line.strip_prefix("---- ") else {
         return false;

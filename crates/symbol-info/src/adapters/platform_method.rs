@@ -1,5 +1,3 @@
-//! Adapter for platform-defined methods on a known type (`Строка.Найти`, …).
-
 use bsl_platform::{platform_method_query, MethodLookupInput, PlatformDataInner, PlatformMethod};
 use ide_db::RootDatabase;
 use smol_str::SmolStr;
@@ -18,12 +16,6 @@ pub(super) fn build(
     Some(from_platform_method(&method, docs.as_ref()))
 }
 
-/// Build a [`SymbolSignature`] from an already-resolved [`PlatformMethod`].
-///
-/// Exposed so completion (which already holds fetched `PlatformMethod`s from
-/// `type_methods_query` / `get_manager_methods`) can render them without an
-/// extra Salsa lookup. The `signature_help` adapter dispatcher uses
-/// [`build`](super::build_signature) instead.
 pub fn from_platform_method(
     method: &PlatformMethod,
     docs: Option<&bsl_platform::MethodDocs>,
@@ -56,11 +48,6 @@ pub fn from_platform_method(
         })
         .unwrap_or_default();
 
-    // `method.type_name` stores the English primary key (`"Array"`,
-    // `"String"`, …). Surfacing that as the qualifier — e.g.
-    // `"Array.Добавить"` — looks broken for BSL's Russian audience.
-    // Translate via the bilingual `PlatformData` index; fall back to
-    // the raw English name only when the type somehow isn't registered.
     let russian_type_name = PlatformDataInner::instance()
         .get_type(&method.type_name)
         .map(|ty| ty.name.clone())

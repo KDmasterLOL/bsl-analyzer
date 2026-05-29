@@ -8,15 +8,11 @@ use tracing::{debug, error, trace};
 use crate::client::DebugClient;
 use crate::types::events::DebugEvent;
 
-/// Polls the debug server for events and sends them over a channel.
 pub struct EventListener {
     stop: Arc<AtomicBool>,
 }
 
 impl EventListener {
-    /// Starts polling in a background thread.
-    ///
-    /// Returns the listener handle and a receiver for events.
     pub fn start(
         client: Arc<DebugClient>,
         poll_interval_ms: u64,
@@ -53,7 +49,6 @@ impl EventListener {
         (Self { stop }, rx)
     }
 
-    /// Stops the polling loop.
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
     }

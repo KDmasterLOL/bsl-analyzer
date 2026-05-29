@@ -1,7 +1,3 @@
-//! ProtectedModule diagnostic.
-//!
-//! Reports password-protected common modules found in configuration metadata.
-
 use bsl_metadata::traits::{MdObject, Module};
 use ide_db::TextRange;
 
@@ -42,12 +38,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let diagnostic_range = get_diagnostic_range(ctx);
     let mut diagnostics = Vec::new();
 
-    // Union protected modules across main + CFE: an extension may add a
-    // password-protected CommonModule, and the SessionModule still needs to
-    // surface that the source is unavailable. Within a single VisibleConfig
-    // we keep the legacy iteration order; configurations are emitted main-
-    // first by `visible_configurations()`, so duplicates between main and
-    // CFE (rare under 1C extension semantics) report main first.
     for vc in &visible {
         for common_module in vc.config.configuration.common_modules() {
             if common_module.is_protected() {
@@ -102,7 +92,6 @@ mod tests {
 
         let mut file_set = FileSet::default();
         let file_id = FileId(0);
-        // Not a SessionModule path
         let vfs_path = VfsPath::new("/test/CommonModules/Module1/Ext/Module.bsl");
         file_set.insert(file_id, vfs_path);
 

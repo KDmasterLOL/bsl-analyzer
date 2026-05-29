@@ -1,17 +1,7 @@
-//! Unit tests for [`hir::classify_token`].
-//!
-//! These pin the *positional* rules — kind alone is not enough. The
-//! headline collision is `Запрос.Выполнить()`: `Выполнить` lexes as
-//! `KW_EXECUTE` but appears in a `FieldName` slot, so consumers must
-//! treat it as a method name, not a keyword.
-
 use hir::{classify_token, NameClass};
 use parser::parse;
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
-/// Find the token whose text matches `text` (case-sensitive) in the
-/// parsed tree. Picks the first match in document order — fixtures
-/// must keep the target token unique.
 fn token_with_text(root: &SyntaxNode, text: &str) -> SyntaxToken {
     root.descendants_with_tokens()
         .filter_map(|el| el.into_token())
@@ -38,8 +28,6 @@ fn ident_in_expression_position_is_free_name() {
 
 #[test]
 fn ident_after_dot_no_parens_is_field_name_not_call() {
-    // `Запрос.Текст` — property access, no parens after the field
-    // tail. `is_call` must be false so hover prefers property lookup.
     let src = r#"Процедура Тест()
     Запрос = Новый Запрос;
     Х = Запрос.Текст;
@@ -58,11 +46,6 @@ fn ident_after_dot_no_parens_is_field_name_not_call() {
 
 #[test]
 fn keyword_after_dot_with_parens_is_field_name_with_is_call_true() {
-    // The headline case from the user's bug report. `Выполнить`
-    // is `KW_EXECUTE`, not `IDENT`, so a naive
-    // `if token.kind() != IDENT { return None }` rejects it. The
-    // classifier must still produce `FieldName` here, with `is_call`
-    // true because `()` follows.
     let src = r#"Процедура Тест()
     Запрос = Новый Запрос;
     Запрос.Текст = "ВЫБРАТЬ 1";
@@ -86,14 +69,6 @@ fn keyword_after_dot_with_parens_is_field_name_with_is_call_true() {
 
 #[test]
 fn keyword_in_statement_position_is_free_name_or_keyword() {
-    // `Выполнить("...код...")` as a statement — same `KW_EXECUTE`
-    // token, but in expression / call-callee position rather than
-    // after a dot. The current parser unwraps it as the call's
-    // callee node directly, so the token is a child of `CALL_EXPR`,
-    // not `FIELD_EXPR`. Either `FreeName` or `Keyword` is acceptable
-    // here (different syntactic shapes), but never `FieldName` —
-    // that would route through receiver-typed lookup with no
-    // receiver.
     let src = r#"Процедура Тест()
     Выполнить("Сообщить()");
 КонецПроцедуры
@@ -122,8 +97,6 @@ fn ident_after_kw_new_is_type_ref() {
 
 #[test]
 fn boolean_keyword_is_literal_not_keyword() {
-    // `Истина` is `KW_TRUE` — `is_keyword()` is true, but
-    // `is_literal()` is also true. Literal wins.
     let src = r#"Процедура Тест()
     Х = Истина;
 КонецПроцедуры
@@ -147,8 +120,6 @@ fn null_keyword_is_literal() {
 
 #[test]
 fn control_flow_keyword_is_keyword() {
-    // `Если` in non-name position. Pure keyword — only hover_keyword
-    // cares.
     let src = r#"Процедура Тест()
     Если Истина Тогда
     КонецЕсли;
@@ -193,11 +164,6 @@ fn whitespace_is_other() {
 
 #[test]
 fn literal_keyword_after_dot_classifies_as_field_name_not_literal() {
-    // Codex review point 1: the parser admits `KW_TRUE`/`KW_FALSE`/
-    // `KW_UNDEFINED`/`KW_NULL` as field-tail tokens via
-    // `is_ident_or_keyword`. A user-defined property called `Истина`
-    // (rare but legal) must reach the field-name resolution path,
-    // not be classified as a boolean literal.
     let src = r#"Процедура Тест()
     Х = obj.Истина;
 КонецПроцедуры
@@ -211,9 +177,6 @@ fn literal_keyword_after_dot_classifies_as_field_name_not_literal() {
 
 #[test]
 fn nested_qualified_keyword_segment_classifies_as_field_name() {
-    // `A.Выполнить.B` — middle keyword segment must classify as
-    // `FieldName` so the qualified-name resolver sees it as a name
-    // segment, not as a keyword stop.
     let src = r#"Процедура Тест()
     Х = A.Выполнить.B;
 КонецПроцедуры

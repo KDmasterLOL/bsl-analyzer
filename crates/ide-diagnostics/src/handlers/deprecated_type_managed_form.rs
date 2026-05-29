@@ -1,42 +1,3 @@
-//! DeprecatedTypeManagedForm diagnostic.
-//!
-//! Detects usage of deprecated `Тип("УправляемаяФорма")` / `Type("ManagedForm")` type.
-//!
-//! ## Why?
-//! Starting from 1C:Enterprise 8.3.14, the type "УправляемаяФорма" (ManagedForm) was renamed
-//! to "ФормаКлиентскогоПриложения" (ClientApplicationForm) for better clarity:
-//! - More descriptive name indicating client application context
-//! - Aligns with platform's terminology updates
-//! - Improves code readability
-//!
-//! ## Bad practice
-//! ```bsl
-//! Процедура ПроверитьФорму()
-//!     Если ТипЗнч(Форма) = Тип("УправляемаяФорма") Тогда  // ❌ Deprecated type
-//!         // ...
-//!     КонецЕсли;
-//! КонецПроцедуры
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! Процедура ПроверитьФорму()
-//!     // ✅ Use modern type name
-//!     Если ТипЗнч(Форма) = Тип("ФормаКлиентскогоПриложения") Тогда
-//!         // ...
-//!     КонецЕсли;
-//! КонецПроцедуры
-//! ```
-//!
-//! ## Configuration
-//! - **Enabled by default:** Yes
-//! - **Severity:** Information (MINOR)
-//! - **Tags:** STANDARD, DEPRECATED
-//! - **Minutes to fix:** 1
-//!
-//! ## Implementation
-//! **This is a HIR-based diagnostic** - collected during AST→HIR lowering.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -56,11 +17,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic.
-///
-/// Called from lib.rs dispatch when `BodyDiagnostic::DeprecatedTypeManagedForm` is encountered.
 pub fn from_hir(type_name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    // Check if the diagnostic is disabled
     let code = DiagnosticCode::DeprecatedTypeManagedForm;
 
     if ctx.is_disabled_with_metadata(code) {
@@ -117,8 +74,8 @@ mod tests {
             DeprecatedTypeManagedForm @ 3:30..3:48
               message: Использование устаревшего типа "УправляемаяФорма". Рекомендуется использовать "ФормаКлиентскогоПриложения"
               severity: Hint"#]].assert_eq(&format_diags(code, &deprecated_diags));
-        assert_eq!(deprecated_diags[0].severity, Severity::Hint); // CodeSmell + Info -> Hint
-        assert!(deprecated_diags[0].message.contains("УправляемаяФорма")); // snapshot-skip: message-substring assertion intentionally retained.
+        assert_eq!(deprecated_diags[0].severity, Severity::Hint);
+        assert!(deprecated_diags[0].message.contains("УправляемаяФорма"));
     }
 
     #[test]
@@ -140,7 +97,7 @@ EndProcedure
             DeprecatedTypeManagedForm @ 3:28..3:41
               message: Usage of deprecated type "ManagedForm". Recommended to use "ClientApplicationForm"
               severity: Hint"#]].assert_eq(&format_diags(code, &deprecated_diags));
-        assert!(deprecated_diags[0].message.contains("ManagedForm")); // snapshot-skip: message-substring assertion intentionally retained.
+        assert!(deprecated_diags[0].message.contains("ManagedForm"));
     }
 
     #[test]
@@ -200,7 +157,6 @@ EndProcedure
 
     #[test]
     fn test_russian_in_if_triggers_string_literal_does_not() {
-        // Тип("УправляемаяФорма") triggers; Сообщить("УправляемаяФорма") does not
         let code = r#"Процедура Тест()
     Если ТипЗнч(Форма) = Тип("УправляемаяФорма") Тогда
         Возврат;
@@ -221,12 +177,11 @@ EndProcedure
             DeprecatedTypeManagedForm @ 2:30..2:48
               message: Использование устаревшего типа "УправляемаяФорма". Рекомендуется использовать "ФормаКлиентскогоПриложения"
               severity: Hint"#]].assert_eq(&format_diags(code, &diags));
-        assert!(diags[0].message.contains("УправляемаяФорма")); // snapshot-skip: message-substring assertion intentionally retained.
+        assert!(diags[0].message.contains("УправляемаяФорма"));
     }
 
     #[test]
     fn test_english_in_if_triggers() {
-        // Type("ManagedForm") in English triggers
         let code = r#"Procedure Test()
     If TypeOf(Form) = Type("ManagedForm") Then
         Return;
@@ -243,6 +198,6 @@ EndProcedure
             DeprecatedTypeManagedForm @ 2:28..2:41
               message: Usage of deprecated type "ManagedForm". Recommended to use "ClientApplicationForm"
               severity: Hint"#]].assert_eq(&format_diags(code, &diags));
-        assert!(diags[0].message.contains("ManagedForm")); // snapshot-skip: message-substring assertion intentionally retained.
+        assert!(diags[0].message.contains("ManagedForm"));
     }
 }

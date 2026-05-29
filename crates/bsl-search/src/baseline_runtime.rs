@@ -4,10 +4,6 @@ use crate::ports::{ResolvedViewService, SnapshotCatalog, SnapshotContentStore};
 use crate::resolver::ResolvedView;
 use crate::SearchOverlay;
 
-/// Application service that resolves a baseline snapshot and applies a local overlay.
-///
-/// This service is storage-agnostic: the baseline may come from SQLite today and
-/// from PostgreSQL later, as long as adapters implement the required ports.
 pub struct BaselineOverlaySearchService<C, S, R> {
     catalog: C,
     content_store: S,
@@ -24,9 +20,6 @@ where
         Self { catalog, content_store, resolver }
     }
 
-    /// Resolve one visible view from a baseline reference and local overlay.
-    ///
-    /// Returns `Ok(None)` when the requested baseline is unknown to the backing catalog.
     pub fn resolve_view(
         &self,
         baseline: BaselineRef,

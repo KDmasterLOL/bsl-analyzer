@@ -1,16 +1,3 @@
-//! Behavioural tests for `method_body_query` (Phase O.8).
-//!
-//! O.8 lands the per-method body lowering Salsa query that the upcoming
-//! method-graph queries (O.10 `method_return_type_query`, O.11 cascade
-//! typing) consume. The query is keyed by `MethodIdInput` and returns
-//! `Arc<Body>`; no residency gate is present (Phase O total-VFS
-//! invariant — commit `6c578f3a` — guarantees BSL fids registered in
-//! the source root have populated text).
-//!
-//! These tests exercise the query through the public `db.method_body`
-//! surface on `RootDatabaseImpl`, so they pin both the query body and
-//! the `DefDatabase` trait wiring in one go.
-
 use hir::{DefDatabase, MethodIdInput, ModuleId, Name};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
@@ -39,9 +26,6 @@ fn setup(fixture_text: &str) -> (RootDatabaseImpl, FileId) {
     (db, test_file)
 }
 
-/// `method_body_query` lowers the single requested method and matches
-/// the same body the file-level `module_bodies_query` produces for that
-/// `local_id`.
 #[test]
 fn method_body_matches_module_bodies_slice() {
     let (db, fid) = setup(
@@ -71,8 +55,6 @@ fn method_body_matches_module_bodies_slice() {
     assert!(body.stmt_count() >= 2, "two assignments must produce at least two stmts");
 }
 
-/// Bilingual lowering: Russian and Latin keywords must both surface
-/// a non-empty body through the query.
 #[test]
 fn method_body_handles_bilingual_decl() {
     for (src, name) in [
@@ -96,7 +78,6 @@ fn method_body_handles_bilingual_decl() {
     }
 }
 
-/// Salsa cache: a second call returns the same `Arc` payload pointer.
 #[test]
 fn method_body_caches_via_salsa() {
     let (db, fid) = setup(

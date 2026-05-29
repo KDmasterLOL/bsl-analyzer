@@ -1,54 +1,3 @@
-//! BeginTransactionBeforeTryCatch diagnostic.
-//!
-//! Checks that `BeginTransaction()`/`НачатьТранзакцию()` calls are immediately followed by `Try-Catch` blocks.
-//!
-//! ## Why?
-//! Starting a transaction without proper error handling is dangerous:
-//! - Uncommitted transactions can lock database
-//! - Data corruption if transaction is not rolled back on error
-//! - Resource leaks
-//! - Must ensure transaction is always finalized (commit or rollback)
-//!
-//! ## Bad practice
-//! ```bsl
-//! Процедура Тест()
-//!     НачатьТранзакцию();
-//!     // If error occurs here, transaction is left open!
-//!     ЗаписатьДанные();
-//!     ЗафиксироватьТранзакцию();
-//! КонецПроцедуры
-//!
-//! Процедура Тест2()
-//!     НачатьТранзакцию();
-//!     Метод(); // ← Code between BeginTransaction and Try
-//!     Попытка
-//!         ЗаписатьДанные();
-//!         ЗафиксироватьТранзакцию();
-//!     Исключение
-//!         ОтменитьТранзакцию();
-//!     КонецПопытки;
-//! КонецПроцедуры
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! Процедура Тест()
-//!     НачатьТранзакцию();
-//!     Попытка
-//!         ЗаписатьДанные();
-//!         ЗафиксироватьТранзакцию();
-//!     Исключение
-//!         ОтменитьТранзакцию();
-//!         ВызватьИсключение;
-//!     КонецПопытки;
-//! КонецПроцедуры
-//! ```
-//!
-//! ## Implementation
-//!
-//! This diagnostic is collected during HIR lowering as a byproduct of statement processing.
-//! The `from_hir` function converts the BodyDiagnostic to a Diagnostic for display.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -69,7 +18,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     clean_code_attribute: CleanCodeAttribute::Intentional,
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic (called from lib.rs dispatch).
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     crate::simple_hir_diagnostic(
         DiagnosticCode::BeginTransactionBeforeTryCatch,
@@ -215,18 +163,6 @@ EndProcedure"#;
         );
     }
 
-    /// Track 2 Phase D §2.3 mini-fix: preprocessor-aware
-    /// recognition of `НачатьТранзакцию(); #Если ... Попытка ... #Иначе
-    /// Попытка ... #КонецЕсли`. The fixture is BSL-safe — every active
-    /// preprocessor branch starts with `Попытка` immediately after the
-    /// shared outer `НачатьТранзакцию()`, so the runtime semantics are
-    /// always `Begin; Try`. The false positive was closed by Track 6.3
-    /// with per-branch preprocessor source-of-truth. The single-branch
-    /// form (`#Если ... Try ... #КонецЕсли` without `#Иначе`) is
-    /// intentionally NOT used here:
-    /// on the inactive branch there would be `Begin; КонецПроцедуры`
-    /// without a `Try`, which is a genuine violation the diagnostic is
-    /// meant to flag.
     #[test]
     fn begin_in_preproc_then_try_outside() {
         let code = r#"Процедура Тест()
@@ -311,9 +247,6 @@ EndProcedure"#;
         );
     }
 
-    /// `#Если` without `#Иначе`: on the inactive branch there's no `Попытка`
-    /// after `НачатьТранзакцию` — a real violation that must stay flagged
-    /// even after Track 6.3 preproc-aware pattern detection landed.
     #[test]
     fn begin_in_preproc_no_else_branch_still_flagged() {
         let code = r#"Процедура Тест()
@@ -339,7 +272,6 @@ EndProcedure"#;
         );
     }
 
-    /// Local integration fixture with several independent violations in one file.
     #[test]
     fn test_multiple_violations_in_one_module() {
         let code = r#"Процедура ПровестиДокумент()

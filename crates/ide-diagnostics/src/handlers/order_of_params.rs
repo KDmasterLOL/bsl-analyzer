@@ -1,7 +1,3 @@
-//! OrderOfParams diagnostic.
-//!
-//! Reports methods where optional parameters appear before required ones.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -54,13 +50,11 @@ fn check_method(
     ctx: &DiagnosticsContext,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    // Find first optional parameter
     let first_optional_idx = params.iter().position(|p| p.has_default);
     let Some(first_optional_idx) = first_optional_idx else {
-        return; // No optional params - nothing to check
+        return;
     };
 
-    // Report each required parameter that comes after an optional one
     for param in params.iter().skip(first_optional_idx + 1) {
         if !param.has_default {
             diagnostics.push(Diagnostic {

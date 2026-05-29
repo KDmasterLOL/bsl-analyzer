@@ -1,5 +1,3 @@
-//! Reports `FindByDescription`, `FindByCode`, and `FindByNumber` calls with literal arguments.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};

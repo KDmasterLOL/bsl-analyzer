@@ -1,7 +1,3 @@
-//! OSUsersMethod diagnostic.
-//!
-//! Reports calls to the global method `ПользователиОС()` / `OSUsers()`.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};

@@ -1,6 +1,3 @@
-//! Like [`std::time::Instant`], but for memory.
-//!
-//! Measures the total size of all currently allocated objects.
 use std::fmt;
 
 use cfg_if::cfg_if;
@@ -34,7 +31,6 @@ impl MemoryUsage {
             } else if #[cfg(all(target_os = "linux", target_env = "gnu"))] {
                 memusage_linux()
             } else if #[cfg(windows)] {
-                // Estimate memory usage from working set size
                 MemoryUsage { allocated: Bytes(0) }
             } else {
                 MemoryUsage { allocated: Bytes(0) }
@@ -45,11 +41,6 @@ impl MemoryUsage {
 
 #[cfg(all(target_os = "linux", target_env = "gnu", not(feature = "jemalloc")))]
 fn memusage_linux() -> MemoryUsage {
-    // Linux/glibc has 2 APIs for allocator introspection that we can use: mallinfo and mallinfo2.
-    // mallinfo uses `int` fields and cannot handle memory usage exceeding 2 GB.
-    // mallinfo2 is very recent, so its presence needs to be detected at runtime.
-    // Both are abysmally slow.
-
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static MALLINFO2: AtomicUsize = AtomicUsize::new(1);
@@ -57,12 +48,10 @@ fn memusage_linux() -> MemoryUsage {
     let mut mallinfo2 = MALLINFO2.load(Ordering::Relaxed);
     if mallinfo2 == 1 {
         mallinfo2 = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"mallinfo2".as_ptr()) } as usize;
-        // NB: races don't matter here, since they'll always store the same value
         MALLINFO2.store(mallinfo2, Ordering::Relaxed);
     }
 
     if mallinfo2 == 0 {
-        // mallinfo2 does not exist, use mallinfo.
         let alloc = unsafe { libc::mallinfo() }.uordblks as isize;
         MemoryUsage { allocated: Bytes(alloc) }
     } else {

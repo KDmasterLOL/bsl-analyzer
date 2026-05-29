@@ -1,5 +1,3 @@
-//! Reports identifiers that contain the Russian letter `ё`.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -23,7 +21,6 @@ fn contains_yo_letter(text: &str) -> bool {
     text.chars().any(|c| c == 'ё' || c == 'Ё')
 }
 
-/// Single-pass token handler for YoLetterUsage diagnostic.
 #[inline]
 pub fn check_token(token: &SyntaxToken, acc: &mut Vec<Diagnostic>, ctx: &DiagnosticsContext) {
     let code = DiagnosticCode::YoLetterUsage;
@@ -50,7 +47,6 @@ pub fn check_token(token: &SyntaxToken, acc: &mut Vec<Diagnostic>, ctx: &Diagnos
     });
 }
 
-/// Legacy check function (delegates to single-pass).
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let parse = ctx.parse();
     let root = parse.syntax_node();

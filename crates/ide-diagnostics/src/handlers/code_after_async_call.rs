@@ -1,71 +1,3 @@
-//! CodeAfterAsyncCall diagnostic.
-//!
-//! Detects code that executes immediately after asynchronous method calls in BSL.
-//!
-//! ## Why?
-//! When using asynchronous methods in 1C:Enterprise client-side code, developers sometimes
-//! make the mistake of writing code immediately after an async call. This code executes
-//! synchronously without waiting for the async operation to complete, leading to logic errors.
-//!
-//! Asynchronous methods return immediately and execute in the background. Any code after the
-//! async call will execute BEFORE the async operation completes. To properly handle async
-//! results, you must use callback functions (`ОписаниеОповещения`/`NotifyDescription`) or
-//! async/await patterns.
-//!
-//! ## Bad practice
-//! ```bsl
-//! &НаКлиенте
-//! Процедура Команда1(Команда)
-//!     ДополнительныеПараметры = Новый Структура("Результат", 10);
-//!     Оповещение = Новый ОписаниеОповещения("ПослеВводаКоличества", ЭтотОбъект);
-//!     ПоказатьВводЧисла(Оповещение, 1, "Введите количество", ДополнительныеПараметры.Результат, 2);
-//!
-//!     Сообщить("Введенное количество равно " + ДополнительныеПараметры.Результат); // ERROR! Always shows 10
-//! КонецПроцедуры
-//! ```
-//!
-//! ## Good practice
-//! Move code that depends on async results into the callback function:
-//! ```bsl
-//! &НаКлиенте
-//! Процедура Команда1(Команда)
-//!     ДополнительныеПараметры = Новый Структура("Результат", 10);
-//!     Оповещение = Новый ОписаниеОповещения("ПослеВводаКоличества", ЭтотОбъект);
-//!     ПоказатьВводЧисла(Оповещение, 1, "Введите количество", ДополнительныеПараметры.Результат, 2);
-//! КонецПроцедуры
-//!
-//! &НаКлиенте
-//! Процедура ПослеВводаКоличества(Число, ДополнительныеПараметры) Экспорт
-//!     Если Число <> Неопределено Тогда
-//!         ДополнительныеПараметры.Результат = Число;
-//!         Сообщить("Введенное количество равно " + ДополнительныеПараметры.Результат); // Correct!
-//!     КонецЕсли;
-//! КонецПроцедуры
-//! ```
-//!
-//! Or use async/await:
-//! ```bsl
-//! &НаКлиенте
-//! Асинх Процедура Команда1(Команда)
-//!     Число = Ждать ПоказатьВводЧислаАсинх(1, "Введите количество", 10, 2);
-//!     Если Число <> Неопределено Тогда
-//!         Сообщить("Введенное количество равно " + Число); // Correct with async/await
-//!     КонецЕсли;
-//! КонецПроцедуры
-//! ```
-//!
-//! ## Configuration
-//! - **Enabled by default:** No (must be enabled via config)
-//! - **Severity:** Warning
-//! - **Tags:** SUSPICIOUS
-//! - **Minutes to fix:** 10
-//!
-//! ## Implementation
-//!
-//! This diagnostic is collected during HIR lowering as a byproduct of
-//! statement processing. The `from_hir` function converts the BodyDiagnostic
-//! to a Diagnostic for display.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -85,7 +17,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic (called from lib.rs dispatch).
 pub fn from_hir(
     method_name: &str,
     range: TextRange,
@@ -150,7 +81,6 @@ mod tests {
             CodeAfterAsyncCall @ 3:5..3:54
               message: После вызова асинхронного метода 'ПоказатьВводЧисла' есть строки кода. Код выполнится немедленно, не дожидаясь завершения асинхронной операции
               severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
-        // Line 2 (0-indexed from start of code including leading newline)
     }
 
     #[test]
@@ -230,7 +160,6 @@ EndProcedure
 
     #[test]
     fn test_code_after_async_at_top_level() {
-        // Команда1: async call followed directly by code — should trigger
         let code = r#"Процедура Команда1(Команда)
     ДополнительныеПараметры = Новый Структура("Результат", 10);
     Оповещение = Новый ОписаниеОповещения("ПослеВводаКоличества1", ЭтотОбъект);
@@ -246,7 +175,6 @@ EndProcedure
 
     #[test]
     fn test_code_after_async_in_if_branch() {
-        // Команда2: async inside if-branch, followed by code in same branch — should trigger
         let code = r#"Процедура Команда2(Команда)
     Если Условие Тогда
         ДополнительныеПараметры = Новый Структура("Результат", 10);
@@ -266,7 +194,6 @@ EndProcedure
 
     #[test]
     fn test_code_after_async_outside_if() {
-        // Команда3: async in if-branch, code AFTER КонецЕсли — should trigger
         let code = r#"Процедура Команда3(Команда)
     Если Условие Тогда
         ДополнительныеПараметры = Новый Структура("Результат", 10);
@@ -286,7 +213,6 @@ EndProcedure
 
     #[test]
     fn test_code_after_async_in_nested_if() {
-        // Команда4: nested if with async, code after outer КонецЕсли — should trigger
         let code = r#"Процедура Команда4(Команда)
     Если Условие Тогда
         ДополнительныеПараметры = Новый Структура("Результат", 10);
@@ -308,7 +234,6 @@ EndProcedure
 
     #[test]
     fn test_code_after_async_in_nested_if_same_block() {
-        // КодПослеКонецЕсли: async in nested if, code after inner КонецЕсли in same outer branch
         let code = r#"Процедура КодПослеКонецЕсли(Команда)
     Если Условие Тогда
         ДополнительныеПараметры = Новый Структура("Результат", 10);
@@ -330,7 +255,6 @@ EndProcedure
 
     #[test]
     fn test_code_after_async_in_while_loop() {
-        // КодПослеЦикла: async in while loop, code after КонецЦикла
         let code = r#"Процедура КодПослеЦикла(Команда)
     Если Условие Тогда
         ДополнительныеПараметры = Новый Структура("Результат", 10);
@@ -344,13 +268,11 @@ EndProcedure
     КонецЕсли;
 КонецПроцедуры"#;
         let diagnostics = check_diagnostic(code);
-        // While loop containing async + code after = 2 diagnostics (loop itself + code after)
         assert!(!diagnostics.is_empty());
     }
 
     #[test]
     fn test_code_after_async_in_for_each_loop() {
-        // КодПослеЦиклаДляКаждого: async in for-each loop, code after КонецЦикла
         let code = r#"Процедура КодПослеЦиклаДляКаждого(Команда)
     Если Условие Тогда
         ДополнительныеПараметры = Новый Структура("Результат", 10);
@@ -369,7 +291,6 @@ EndProcedure
 
     #[test]
     fn test_code_after_async_in_for_to_loop() {
-        // КодПослеЦиклаДляПо: async in for-to loop, code after КонецЦикла
         let code = r#"Процедура КодПослеЦиклаДляПо(Команда)
     Если Условие Тогда
         ДополнительныеПараметры = Новый Структура("Результат", 10);
@@ -388,7 +309,6 @@ EndProcedure
 
     #[test]
     fn test_code_after_async_after_try() {
-        // КодПослеПопытки: async in try, code after КонецПопытки
         let code = r#"Процедура КодПослеПопытки(Команда)
     Если Условие Тогда
         ДополнительныеПараметры = Новый Структура("Результат", 10);
@@ -412,7 +332,6 @@ EndProcedure
 
     #[test]
     fn test_no_diagnostic_only_async_no_following_code() {
-        // БезОшибок1: async + comment only — should NOT trigger
         let code = r#"Процедура БезОшибок1(Команда)
     ПоказатьВводЧисла(Оповещение, 1);
     // комментарий
@@ -423,7 +342,6 @@ EndProcedure
 
     #[test]
     fn test_no_diagnostic_async_in_if_no_following_code() {
-        // БезОшибок2: async only in if-branch, nothing after КонецЕсли — should NOT trigger
         let code = r#"Процедура БезОшибок2(Команда)
     Если Условие Тогда
         ДополнительныеПараметры = Новый Структура("Результат", 10);
@@ -439,7 +357,6 @@ EndProcedure
 
     #[test]
     fn test_no_diagnostic_return_after_async() {
-        // ВозвратПослеАсинхрона: return after async is allowed
         let code = r#"Процедура ВозвратПослеАсинхрона(Команда)
     Если Условие Тогда
         ДополнительныеПараметры = Новый Структура("Результат", 10);
@@ -455,7 +372,6 @@ EndProcedure
 
     #[test]
     fn test_no_diagnostic_break_after_async_in_loop() {
-        // ПрерватьАсинхрона: break after async in loop is allowed
         let code = r#"Процедура ПрерватьАсинхрона(Команда)
     Если Условие Тогда
         Для Каждого Элемент Из Коллекция Цикл
@@ -472,7 +388,6 @@ EndProcedure
 
     #[test]
     fn test_code_after_loop_with_break_after_async() {
-        // ПрерватьПослеАсинхронаИКодПослеЦикла: break after async, but code after loop — triggers
         let code = r#"Процедура ПрерватьПослеАсинхронаИКодПослеЦикла(Команда)
     Если Условие Тогда
         Для Каждого Элемент Из Коллекция Цикл
@@ -493,7 +408,6 @@ EndProcedure
 
     #[test]
     fn test_no_diagnostic_async_in_mutually_exclusive_branches() {
-        // ДваВызоваАсинхронаВоВзаимоисключащихВетках: async in each branch — NOT an error
         let code = r#"Процедура ДваВызоваАсинхронаВоВзаимоисключащихВетках(Команда)
     ДополнительныеПараметры = Новый Структура("Результат", 10);
     Оповещение = Новый ОписаниеОповещения("ПослеВводаКоличества1", ЭтотОбъект);

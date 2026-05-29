@@ -10,7 +10,6 @@ use crate::constants::property_id_for_module;
 use crate::error::DebugError;
 use crate::types::base::ModuleId;
 
-/// Mapping of configuration directory names to Russian type labels.
 const METADATA_TYPES: &[(&str, &str)] = &[
     ("Languages", "Язык"),
     ("Subsystems", "Подсистема"),
@@ -58,11 +57,6 @@ const METADATA_TYPES: &[(&str, &str)] = &[
     ("ExternalDataSources", "ВнешнийИсточникДанных"),
 ];
 
-/// Bidirectional index: file path <-> debug module ID.
-///
-/// Built by scanning a 1C configuration source tree on disk.
-/// Used to translate between human-readable module names / file paths
-/// and the (objectId, propertyId) pairs required by the debug protocol.
 pub struct ModuleIndex {
     by_path: HashMap<PathBuf, ModuleId>,
     by_id: HashMap<ModuleId, PathBuf>,
@@ -70,10 +64,6 @@ pub struct ModuleIndex {
 }
 
 impl ModuleIndex {
-    /// Scans configuration root directory and builds the index.
-    ///
-    /// `config_root` — path to the `Configuration/` directory containing `Configuration.xml`.
-    /// `extensions` — list of (extension_name, extension_root_path) pairs.
     pub fn scan(config_root: &Path, extensions: &[(&str, &Path)]) -> Result<Self, DebugError> {
         let mut index =
             Self { by_path: HashMap::new(), by_id: HashMap::new(), by_name: HashMap::new() };
@@ -94,28 +84,19 @@ impl ModuleIndex {
         Ok(index)
     }
 
-    /// Resolves file path to module ID.
     pub fn module_by_path(&self, path: &Path) -> Option<&ModuleId> {
         self.by_path.get(path)
     }
 
-    /// Resolves module ID to file path.
     pub fn path_by_module(&self, id: &ModuleId) -> Option<&Path> {
         self.by_id.get(id).map(|p| p.as_path())
     }
 
-    /// Resolves human-readable name like "Справочник.Товары.МодульОбъекта"
-    /// or "Catalog.Товары.ObjectModule" to module ID and path.
-    ///
-    /// If exact match fails, tries appending common module kind suffixes:
-    /// "ОбщийМодуль.Foo" → "ОбщийМодуль.Foo.Модуль",
-    /// "Справочник.Foo" → "Справочник.Foo.МодульОбъекта", etc.
     pub fn resolve_name(&self, name: &str) -> Option<&(ModuleId, PathBuf)> {
         if let Some(result) = self.by_name.get(name) {
             return Some(result);
         }
 
-        // Fallback: try appending common module kind suffixes
         const SUFFIXES: &[&str] = &[
             "Модуль",
             "МодульОбъекта",
@@ -134,12 +115,10 @@ impl ModuleIndex {
         None
     }
 
-    /// Returns all indexed modules.
     pub fn all_modules(&self) -> impl Iterator<Item = (&PathBuf, &ModuleId)> {
         self.by_path.iter()
     }
 
-    /// Total number of indexed modules.
     pub fn len(&self) -> usize {
         self.by_path.len()
     }
@@ -148,7 +127,6 @@ impl ModuleIndex {
         self.by_path.is_empty()
     }
 
-    /// Returns all registered human-readable module names.
     pub fn all_names(&self) -> Vec<&str> {
         let mut names: Vec<&str> = self.by_name.keys().map(|s| s.as_str()).collect();
         names.sort();
@@ -156,7 +134,6 @@ impl ModuleIndex {
     }
 
     fn scan_root(&mut self, extension: &str, root: &Path) -> Result<(), DebugError> {
-        // Configuration-level modules (Ext/*.bsl)
         let config_xml = root.join("Configuration.xml");
         if let Some(config_object_id) = read_object_uuid(&config_xml)? {
             let ext_dir = root.join("Ext");
@@ -165,7 +142,6 @@ impl ModuleIndex {
             }
         }
 
-        // Scan all metadata type directories
         for entry in fs::read_dir(root)? {
             let entry = entry?;
             let dir_path = entry.path();
@@ -186,7 +162,6 @@ impl ModuleIndex {
         dir_name: &str,
         dir_path: &Path,
     ) -> Result<(), DebugError> {
-        // Each .xml file in the directory is a metadata object
         for entry in fs::read_dir(dir_path)? {
             let entry = entry?;
             let path = entry.path();
@@ -209,22 +184,18 @@ impl ModuleIndex {
                 continue;
             }
 
-            // Ext/*.bsl — object-level modules
             let ext_dir = object_dir.join("Ext");
             if ext_dir.is_dir() {
                 self.index_bsl_files(extension, &object_id, dir_name, &ext_dir)?;
 
-                // Build human-readable names for object-level modules
                 self.register_names(extension, dir_name, &object_name, &object_id, &ext_dir)?;
             }
 
-            // Forms/{FormName}/Ext/Form/Module.bsl
             let forms_dir = object_dir.join("Forms");
             if forms_dir.is_dir() {
                 self.scan_forms(extension, dir_name, &object_name, &forms_dir)?;
             }
 
-            // Commands/{CmdName}/Ext/CommandModule.bsl
             let commands_dir = object_dir.join("Commands");
             if commands_dir.is_dir() {
                 self.scan_commands(extension, dir_name, &object_name, &path, &commands_dir)?;
@@ -258,7 +229,6 @@ impl ModuleIndex {
                 None => continue,
             };
 
-            // Forms have their own objectId, propertyId is PROPERTY_FORM_MODULE
             let form_dir = forms_dir.join(&form_name);
             let module_file = form_dir.join("Ext").join("Form").join("Module.bsl");
             if module_file.exists() {
@@ -290,7 +260,6 @@ impl ModuleIndex {
         object_xml_path: &Path,
         commands_dir: &Path,
     ) -> Result<(), DebugError> {
-        // Command UUIDs are stored inside the parent object's XML
         let command_uuids = read_command_uuids(object_xml_path)?;
 
         for entry in fs::read_dir(commands_dir)? {
@@ -410,16 +379,6 @@ impl ModuleIndex {
     }
 }
 
-/// Reads the `uuid` attribute from the root metadata element.
-///
-/// Expected XML structure:
-/// ```xml
-/// <MetaDataObject>
-///   <SomeType uuid="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
-///     ...
-///   </SomeType>
-/// </MetaDataObject>
-/// ```
 fn read_object_uuid(xml_path: &Path) -> Result<Option<String>, DebugError> {
     let content = fs::read(xml_path)?;
     let mut reader = Reader::from_reader(content.as_slice());
@@ -430,7 +389,6 @@ fn read_object_uuid(xml_path: &Path) -> Result<Option<String>, DebugError> {
         match reader.read_event() {
             Ok(Event::Start(e)) => {
                 depth += 1;
-                // depth 2 = child of <MetaDataObject>
                 if depth == 2 {
                     for attr in e.attributes().flatten() {
                         if attr.key.as_ref() == b"uuid" {
@@ -450,9 +408,6 @@ fn read_object_uuid(xml_path: &Path) -> Result<Option<String>, DebugError> {
     }
 }
 
-/// Reads command UUIDs from a metadata object XML.
-///
-/// Commands are nested inside `<ChildObjects><Command uuid="..."><Properties><Name>...</Name>`.
 fn read_command_uuids(xml_path: &Path) -> Result<HashMap<String, String>, DebugError> {
     let content = fs::read(xml_path)?;
     let mut reader = Reader::from_reader(content.as_slice());
@@ -515,7 +470,6 @@ fn local_name(name: &[u8]) -> &[u8] {
     }
 }
 
-/// Maps directory name to Russian singular type name for human-readable labels.
 fn ru_type_name(dir_name: &str) -> &'static str {
     METADATA_TYPES.iter().find(|(d, _)| *d == dir_name).map(|(_, ru)| *ru).unwrap_or("")
 }

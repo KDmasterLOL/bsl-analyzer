@@ -1,12 +1,3 @@
-//! Search engine — ties chunker, embedder, store, and index together.
-//!
-//! Provides the high-level API for indexing BSL files and platform
-//! documentation, and searching through them using FTS5 or semantic
-//! similarity. Supports multiple collections within a single database.
-//!
-//! Embedding generation uses a pool of N concurrent HTTP connections
-//! (default 10) to maximize throughput against remote APIs.
-
 use crate::chunker::Chunker;
 use crate::context::{enrich_chunk_text, file_path_to_module_path};
 use crate::document::Document;
@@ -32,32 +23,21 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::{debug, info, warn};
 
-/// Progress tracker for indexing operations.
-///
-/// Thread-safe, can be shared between the indexing thread and status queries.
 #[derive(Debug, Default)]
 pub struct IndexProgress {
-    /// Whether indexing is currently in progress.
     pub active: AtomicBool,
-    /// Total number of files to process.
     pub total_files: AtomicUsize,
-    /// Total number of chunks to embed.
     pub total_chunks: AtomicUsize,
-    /// Total number of batches.
     pub total_batches: AtomicUsize,
-    /// Number of completed batches.
     pub done_batches: AtomicUsize,
-    /// Number of embedded chunks so far.
     pub done_chunks: AtomicUsize,
 }
 
 impl IndexProgress {
-    /// Create a new progress tracker.
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
     }
 
-    /// Reset all counters.
     pub fn reset(&self) {
         self.active.store(false, Ordering::Relaxed);
         self.total_files.store(0, Ordering::Relaxed);
@@ -67,7 +47,6 @@ impl IndexProgress {
         self.done_chunks.store(0, Ordering::Relaxed);
     }
 
-    /// Completion percentage (0-100).
     pub fn percent(&self) -> usize {
         let total = self.total_chunks.load(Ordering::Relaxed);
         if total == 0 {
@@ -77,43 +56,30 @@ impl IndexProgress {
         (done * 100) / total
     }
 
-    /// Whether indexing is active.
     pub fn is_active(&self) -> bool {
         self.active.load(Ordering::Relaxed)
     }
 }
 
-/// Configuration for the search engine.
 #[derive(Default)]
 pub struct SearchConfig {
-    /// Embedding API configuration.
     pub embedder: EmbedderConfig,
-    /// Execution policy for embedding generation.
     pub execution: EmbeddingExecutionPolicy,
 }
 
-/// A search result with chunk metadata and similarity score.
 #[derive(Debug, Clone)]
 pub struct SearchHit {
-    /// Collection this result belongs to ("code", "platform").
     pub collection: String,
-    /// File path (relative to workspace root, or virtual path for docs).
     pub file_path: String,
-    /// Symbol name (procedure/function name, type/method name).
     pub symbol_name: String,
-    /// Chunk kind: "procedure", "function", "header", "type", "method", etc.
     pub kind: String,
-    /// Source code or documentation text.
     pub text: String,
-    /// Line range in the original file (0 for non-file documents).
     pub line_start: u32,
     pub line_end: u32,
-    /// Similarity score (0..1, higher is better).
     pub score: f32,
 }
 
 impl SearchHit {
-    /// Convert from a [`LexicalHit`] (baseline domain type).
     pub fn from_lexical(hit: &crate::domain::LexicalHit) -> Self {
         Self {
             collection: hit.collection.clone(),
@@ -127,7 +93,6 @@ impl SearchHit {
         }
     }
 
-    /// Convert to a [`LexicalHit`] for merge input.
     pub fn to_lexical(&self) -> crate::domain::LexicalHit {
         crate::domain::LexicalHit {
             collection: self.collection.clone(),
@@ -141,7 +106,6 @@ impl SearchHit {
         }
     }
 
-    /// Convert to a [`SemanticHit`] for merge input.
     pub fn to_semantic(&self) -> crate::domain::SemanticHit {
         crate::domain::SemanticHit {
             collection: self.collection.clone(),
@@ -154,7 +118,6 @@ impl SearchHit {
         }
     }
 
-    /// Convert from a [`MergedHit`] (merge result).
     pub fn from_merged(hit: crate::merge::MergedHit) -> Self {
         Self {
             collection: hit.collection,
@@ -169,7 +132,6 @@ impl SearchHit {
     }
 }
 
-/// The search engine: indexes BSL files and documents, performs search.
 pub struct SearchEngine {
     store: Store,
     embedder: Option<Embedder>,
@@ -183,17 +145,12 @@ pub struct SearchEngine {
 }
 
 impl SearchEngine {
-    /// Create a search engine with full capabilities (FTS + semantic).
-    ///
-    /// - `db_path`: path to the SQLite database file
-    /// - `config`: search configuration (embedder + batch size + concurrency)
     pub fn new(db_path: &Path, config: SearchConfig) -> Result<Self, SearchError> {
         let SearchConfig { embedder: embedder_config, execution } = config;
         let store = Store::open(db_path)?;
         let dim = embedder_config.dim.unwrap_or(1024);
         let embedder = Embedder::new(embedder_config);
 
-        // Load existing embeddings from store into HNSW index.
         let data = store.load_all_embeddings(dim)?;
         let index = VectorIndex::build(dim, &data)?;
         info!(vectors = index.len(), dim, "search index loaded");
@@ -213,10 +170,6 @@ impl SearchEngine {
         })
     }
 
-    /// Create a FTS-only search engine (no embedder, no semantic search).
-    ///
-    /// Suitable for environments without GPU or embedding service.
-    /// `find_code` works, `search_code` returns an error.
     pub fn fts_only(db_path: &Path) -> Result<Self, SearchError> {
         let store = Store::open(db_path)?;
         let dim = 1024;
@@ -237,11 +190,6 @@ impl SearchEngine {
         })
     }
 
-    /// Create a semantic-capable engine for overlay-only workspace mode.
-    ///
-    /// Unlike [`Self::new`], this does not preload persisted vectors into the
-    /// in-memory index. Baseline semantic results are expected to come from the
-    /// external source, while local overlay vectors are built on demand.
     pub fn semantic_overlay_only(
         db_path: &Path,
         config: SearchConfig,
@@ -267,7 +215,6 @@ impl SearchEngine {
         })
     }
 
-    /// Auto-populate FTS index from existing chunk data if needed.
     fn ensure_fts(store: &Store) -> Result<(), SearchError> {
         let chunk_count = store.chunk_count()?;
         let fts_count = store.fts_count()?;
@@ -278,20 +225,10 @@ impl SearchEngine {
         Ok(())
     }
 
-    /// Returns a reference to the underlying store for metadata operations.
     pub fn store(&self) -> &Store {
         &self.store
     }
 
-    /// Index all BSL files in a directory with embeddings.
-    ///
-    /// Uses a pool of N concurrent workers for embedding generation.
-    /// Each worker has its own HTTP connection to the embedding API.
-    /// The main thread acts as writer — receives completed files and
-    /// writes them to SQLite immediately (resumable on interruption).
-    ///
-    /// If `progress` is provided, workers update it atomically.
-    /// Returns the number of files indexed (new or updated).
     pub fn index_directory(
         &mut self,
         root: &Path,
@@ -312,7 +249,6 @@ impl SearchEngine {
             )
         })?;
 
-        // First pass: collect files that need reindexing.
         let mut tasks: Vec<FileTask> = Vec::new();
         let mut total_chunks = 0usize;
 
@@ -374,7 +310,6 @@ impl SearchEngine {
             "generating embeddings"
         );
 
-        // Set up worker pool.
         let (task_tx, task_rx) = crossbeam_channel::bounded::<FileTask>(concurrency * 2);
         let (result_tx, result_rx) = crossbeam_channel::bounded::<FileResult>(concurrency * 2);
 
@@ -422,23 +357,17 @@ impl SearchEngine {
             })
             .collect();
 
-        // Drop our copies — workers hold theirs.
         drop(task_rx);
         drop(result_tx);
 
-        // Producer thread sends tasks while main thread reads results.
-        // Both channels are bounded, so producer and workers apply
-        // backpressure to each other — no deadlock.
         let producer = std::thread::spawn(move || {
             for task in tasks {
                 if task_tx.send(task).is_err() {
                     break;
                 }
             }
-            // task_tx dropped here, closing the channel.
         });
 
-        // Main thread = writer: receive completed files and write to DB.
         let mut indexed = 0usize;
         let mut errors = 0usize;
         while let Ok(result) = result_rx.recv() {
@@ -469,7 +398,6 @@ impl SearchEngine {
             p.active.store(false, Ordering::Relaxed);
         }
 
-        // Rebuild HNSW index from all embeddings.
         let data = self.store.load_all_embeddings(self.dim)?;
         self.index = VectorIndex::build(self.dim, &data)?;
 
@@ -486,10 +414,6 @@ impl SearchEngine {
         Ok(indexed)
     }
 
-    /// Index BSL files for FTS only (no embeddings).
-    ///
-    /// Much faster than full indexing — only parses and chunks code.
-    /// Returns the number of files indexed (new or updated).
     pub fn index_directory_fts(&mut self, root: &Path) -> Result<usize, SearchError> {
         let bsl_files: Vec<std::path::PathBuf> = walkdir::WalkDir::new(root)
             .into_iter()
@@ -514,7 +438,6 @@ impl SearchEngine {
             let rel_path =
                 file_path.strip_prefix(root).unwrap_or(file_path).to_string_lossy().to_string();
 
-            // Skip if hash unchanged.
             if let Some(stored_hash) = self.store.file_hash(&rel_path)? {
                 if stored_hash == hash.as_bytes() {
                     continue;
@@ -526,7 +449,6 @@ impl SearchEngine {
                 continue;
             }
 
-            // Store chunks without embeddings.
             self.store.reindex_file(&rel_path, hash.as_bytes(), &chunks, None)?;
             indexed += 1;
         }
@@ -535,15 +457,6 @@ impl SearchEngine {
         Ok(indexed)
     }
 
-    /// Index documents in a named collection (e.g. platform reference).
-    ///
-    /// Documents are stored under a virtual file path. Hash-based
-    /// deduplication prevents re-indexing unchanged data.
-    ///
-    /// If embedder is configured, generates embeddings using a pool of
-    /// concurrent workers for parallel API calls.
-    ///
-    /// Returns the number of documents indexed (0 if hash unchanged).
     pub fn index_documents(
         &mut self,
         collection: &str,
@@ -552,7 +465,6 @@ impl SearchEngine {
         documents: &[Document],
         progress: Option<&Arc<IndexProgress>>,
     ) -> Result<usize, SearchError> {
-        // Skip if hash unchanged.
         if let Some(stored_hash) = self.store.file_hash(virtual_path)? {
             if stored_hash == version_hash {
                 info!(collection, documents = documents.len(), "documents unchanged, skipping");
@@ -578,7 +490,6 @@ impl SearchEngine {
 
             let concurrency = self.concurrency.min(total_batches.max(1));
 
-            // Split texts into owned batches with indices for ordered reassembly.
             let indexed_batches: Vec<(usize, Vec<String>)> =
                 texts.chunks(batch_size).enumerate().map(|(i, b)| (i, b.to_vec())).collect();
 
@@ -613,7 +524,6 @@ impl SearchEngine {
             drop(task_rx);
             drop(result_tx);
 
-            // Producer thread sends batches while main thread reads results.
             let producer = std::thread::spawn(move || {
                 for (idx, batch) in indexed_batches {
                     if task_tx.send((idx, batch)).is_err() {
@@ -622,7 +532,6 @@ impl SearchEngine {
                 }
             });
 
-            // Collect results and reassemble in order.
             let mut results: Vec<(usize, Vec<Vec<f32>>)> = Vec::with_capacity(total_batches);
             while let Ok((idx, result)) = result_rx.recv() {
                 results.push((idx, result?));
@@ -649,11 +558,9 @@ impl SearchEngine {
                 Some(&all_embeddings),
             )?;
 
-            // Rebuild HNSW index.
             let data = self.store.load_all_embeddings(self.dim)?;
             self.index = VectorIndex::build(self.dim, &data)?;
         } else {
-            // FTS-only: store documents without embeddings.
             self.store.reindex_documents(
                 collection,
                 virtual_path,
@@ -668,7 +575,6 @@ impl SearchEngine {
         Ok(count)
     }
 
-    /// Whether semantic search is available (embedder configured).
     pub fn has_semantic(&self) -> bool {
         self.embedder.is_some()
     }
@@ -681,9 +587,6 @@ impl SearchEngine {
         self.embedder.as_ref().map(Embedder::dim)
     }
 
-    /// Generate an embedding vector for a single query string.
-    ///
-    /// Returns an error if the embedder is not configured.
     pub fn embed_query(&self, query: &str) -> Result<Vec<f32>, SearchError> {
         let embedder = self.embedder.as_ref().ok_or_else(|| {
             SearchError::Index(
@@ -694,7 +597,6 @@ impl SearchEngine {
         embedder.embed(query)
     }
 
-    /// Attach a workspace source root for building a local overlay view.
     pub fn set_workspace_root(&mut self, workspace_root: impl Into<std::path::PathBuf>) {
         self.workspace_root = Some(workspace_root.into());
         if let Ok(mut cache) = self.workspace_overlay_cache.lock() {
@@ -702,7 +604,6 @@ impl SearchEngine {
         }
     }
 
-    /// Enable watcher-driven overlay refresh mode.
     pub fn enable_workspace_watcher_mode(&mut self) {
         if let Ok(mut cache) = self.workspace_overlay_cache.lock() {
             cache.enable_watcher_mode();
@@ -716,9 +617,6 @@ impl SearchEngine {
         }
     }
 
-    /// Mark one workspace file as dirty for the overlay cache.
-    ///
-    /// The path can be absolute inside the configured workspace root or already relative.
     pub fn mark_workspace_path_dirty(
         &self,
         path: impl AsRef<std::path::Path>,
@@ -751,10 +649,6 @@ impl SearchEngine {
         Ok(true)
     }
 
-    /// Get current workspace overlay statistics.
-    ///
-    /// Performs a lightweight refresh using file metadata and hashes, but does not
-    /// force semantic embedding generation for status queries.
     pub fn workspace_overlay_stats(&self) -> Result<Option<WorkspaceOverlayStats>, SearchError> {
         let Some(workspace_root) = &self.workspace_root else {
             return Ok(None);
@@ -785,9 +679,6 @@ impl SearchEngine {
         Ok(Some(cache.stats()))
     }
 
-    /// Pre-compute the workspace overlay including semantic embeddings for
-    /// changed files.  Call from a background thread so the cache is warm
-    /// by the time the first search query arrives.
     pub fn prime_workspace_overlay(&self) -> Result<(), SearchError> {
         if self.workspace_root.is_none() {
             return Ok(());
@@ -796,8 +687,6 @@ impl SearchEngine {
         Ok(())
     }
 
-    /// Returns overlay-only lexical search hits and the set of paths hidden
-    /// by the overlay, for use with external baseline merge.
     pub fn workspace_overlay_lexical_hits(
         &self,
         query: &str,
@@ -814,8 +703,6 @@ impl SearchEngine {
         Ok((hits, overlay.hidden_paths.clone()))
     }
 
-    /// Returns overlay-only semantic search hits and the set of paths hidden
-    /// by the overlay, for use with external baseline merge.
     pub fn workspace_overlay_semantic_hits(
         &self,
         query: &str,
@@ -836,12 +723,6 @@ impl SearchEngine {
         Ok((hits, overlay.hidden_paths.clone()))
     }
 
-    /// Materialize the current workspace code view from the persisted local
-    /// baseline plus the live workspace overlay.
-    ///
-    /// This does not replace the current search runtime yet. It provides a
-    /// real runtime integration point for the baseline + overlay architecture
-    /// so diagnostics and future backend switching can reuse the same flow.
     pub fn resolve_workspace_code_view(&self) -> Result<Option<ResolvedView>, SearchError> {
         self.resolve_workspace_code_view_with(
             BaselineRef::for_snapshot(CorpusId::WorkspaceCode, "local-workspace-baseline"),
@@ -850,11 +731,6 @@ impl SearchEngine {
         )
     }
 
-    /// Materialize the current workspace code view against an arbitrary
-    /// baseline source.
-    ///
-    /// This is the bridge between the local live overlay and pluggable
-    /// baseline backends such as SQLite today and PostgreSQL later.
     pub fn resolve_workspace_code_view_with<C, S>(
         &self,
         baseline: BaselineRef,
@@ -878,8 +754,6 @@ impl SearchEngine {
         service.resolve_view(baseline, overlay)
     }
 
-    /// Materialize the current workspace code view from baseline documents plus
-    /// the live workspace overlay.
     pub fn resolve_workspace_code_view_from_documents(
         &self,
         baseline: BaselineRef,
@@ -896,9 +770,6 @@ impl SearchEngine {
         InMemoryResolvedViewResolver.resolve(baseline, baseline_documents, overlay).map(Some)
     }
 
-    /// Semantic search, optionally filtered by collection.
-    ///
-    /// If `collection` is `None`, searches across all collections.
     pub fn search(
         &self,
         query: &str,
@@ -927,7 +798,6 @@ impl SearchEngine {
         })?;
         let query_embedding = embedder.embed(query)?;
 
-        // Request extra results to account for collection filtering.
         let fetch_limit = if collection.is_some() { limit * 3 } else { limit };
         let results = self.index.search(&query_embedding, fetch_limit)?;
 
@@ -984,10 +854,6 @@ impl SearchEngine {
         Ok(Some(combined))
     }
 
-    /// Full-text search, optionally filtered by collection.
-    ///
-    /// Uses SQLite FTS5 for lexical matching — good for exact names,
-    /// variable references, API calls, and string literals.
     pub fn text_search(
         &self,
         query: &str,
@@ -1014,7 +880,6 @@ impl SearchEngine {
         let mut hits = Vec::with_capacity(results.len());
         for result in results {
             if let Some(info) = self.store.chunk_by_id(result.chunk_id)? {
-                // Normalize FTS5 rank (negative, lower = better) to 0..1 score.
                 let score = 1.0 / (1.0 - result.rank as f32);
                 hits.push(SearchHit {
                     collection: info.collection,
@@ -1206,27 +1071,22 @@ impl SearchEngine {
         Ok(indexed)
     }
 
-    /// Number of indexed chunks.
     pub fn chunk_count(&self) -> Result<usize, SearchError> {
         self.store.chunk_count()
     }
 
-    /// Number of indexed files.
     pub fn file_count(&self) -> Result<usize, SearchError> {
         self.store.file_count()
     }
 
-    /// Number of vectors in the HNSW index.
     pub fn vector_count(&self) -> usize {
         self.index.len()
     }
 
-    /// Count embeddings in a specific collection.
     pub fn embedding_count_by_collection(&self, collection: &str) -> Result<usize, SearchError> {
         self.store.embedding_count_by_collection(collection)
     }
 
-    /// Export indexed documents, optionally filtered by collection.
     pub fn load_indexed_documents(
         &self,
         collection: Option<&str>,
@@ -1234,12 +1094,10 @@ impl SearchEngine {
         self.store.load_indexed_documents(collection)
     }
 
-    /// Clear file hashes for a collection (forces re-indexing).
     pub fn clear_file_hashes(&self, collection: &str) -> Result<usize, SearchError> {
         self.store.clear_file_hashes(collection)
     }
 
-    /// Clear file hashes only for files without embeddings.
     pub fn clear_file_hashes_without_embeddings(
         &self,
         collection: &str,
@@ -1247,7 +1105,6 @@ impl SearchEngine {
         self.store.clear_file_hashes_without_embeddings(collection)
     }
 
-    /// Remove a file from the index.
     pub fn remove_file(&mut self, rel_path: &str) -> Result<(), SearchError> {
         self.store.remove_file(rel_path)?;
         let data = self.store.load_all_embeddings(self.dim)?;
@@ -1256,9 +1113,6 @@ impl SearchEngine {
     }
 }
 
-// -- Internal types for worker pool communication --
-
-/// Task sent to an embedding worker (one file).
 struct FileTask {
     rel_path: String,
     hash: Vec<u8>,
@@ -1266,7 +1120,6 @@ struct FileTask {
     texts: Vec<String>,
 }
 
-/// Result from an embedding worker (one file).
 struct FileResult {
     rel_path: String,
     hash: Vec<u8>,

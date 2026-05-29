@@ -1,31 +1,3 @@
-//! Integration tests for the narrowing-aware argument-validation
-//! pipeline (`hir-ty::arg_diagnostics_query`).
-//!
-//! Inference no longer emits `InferenceDiagnostic::TypeMismatch` for
-//! arguments inline; the downstream `arg_diagnostics_query` produces
-//! them after consulting the [`hir::HirDatabase::narrow`] overlay. The
-//! tests below pin:
-//!
-//! 1. **Positive narrowing** — a guard like `If X <> Undefined Then`
-//!    suppresses the false-positive `TypeMismatch` that the legacy
-//!    inference-stage check would have fired on a `Number | Undefined`
-//!    receiver passed where `Number` is expected. This is the user-
-//!    reported reproducer.
-//! 2. **Else-branch negative** — symmetrically, an arg passed in the
-//!    else-branch of the same guard *must* still fire `TypeMismatch`
-//!    (else-state narrows to `Undefined`).
-//! 3. **No-guard regression** — without any guard, the diagnostic
-//!    must continue to fire (regression anchor for the original
-//!    behaviour).
-//! 4. **Arity-mismatch anchor** — `MismatchedArgCount` continues to
-//!    fire from `infer_query` (it was deliberately not moved to
-//!    `arg_diagnostics_query` because it has no narrowing dependency).
-//! 5. **Feature-flag off** — `set_type_narrowing_enabled(false)`
-//!    restores the pre-narrow baseline (diagnostic fires again).
-//! 6. **Salsa invalidation** — flipping the narrowing flag on the
-//!    same database recomputes `arg_diagnostics` instead of returning
-//!    a stale cache.
-
 use hir::{Builders, HirDatabase, InferenceDiagnostic, TypeId};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
@@ -60,7 +32,6 @@ fn setup(fixture_text: &str) -> (RootDatabaseImpl, FileId) {
     (db, test_file)
 }
 
-/// Collect `(expected, actual)` pairs from `arg_diagnostics_query`.
 fn arg_mismatches(db: &RootDatabaseImpl, file_id: FileId) -> Vec<(TypeId, TypeId)> {
     db.arg_diagnostics(file_id)
         .iter()
@@ -73,11 +44,6 @@ fn arg_mismatches(db: &RootDatabaseImpl, file_id: FileId) -> Vec<(TypeId, TypeId
         .collect()
 }
 
-/// CommonModule with a function returning `Число | Неопределено` and a
-/// function expecting just `Число`. Used by the narrowing tests to
-/// mimic the user's `Массив.Найти(...)` + `Массив.Удалить(...)` shape
-/// without depending on platform-data signatures (which would couple
-/// the tests to the platform-data version).
 const NARROW_FIXTURE_MODULE: &str = r#"
 //- /CommonModules/ПервыйОбщийМодуль/Ext/Module.bsl
 // Возвращаемое значение:
@@ -94,15 +60,6 @@ const NARROW_FIXTURE_MODULE: &str = r#"
 
 #[test]
 fn narrowed_arg_inside_guard_does_not_fire_mismatch() {
-    // The user-reported reproducer:
-    //   Index = Module.Find();   // Index: Number | Undefined
-    //   If Index <> Undefined Then
-    //       Module.Delete(Index);   // narrowed: Number → no mismatch
-    //   EndIf
-    //
-    // Inside the true branch the guard refines `Index` from
-    // `Number | Undefined` down to `Number`, which is assignable to
-    // the declared parameter type — no diagnostic must fire.
     let fixture = format!(
         "{NARROW_FIXTURE_MODULE}\n\
 //- /test.bsl\n\
@@ -125,10 +82,6 @@ fn narrowed_arg_inside_guard_does_not_fire_mismatch() {
 
 #[test]
 fn unnarrowed_arg_outside_guard_still_fires_mismatch() {
-    // Regression anchor for the legacy behaviour: outside any guard,
-    // the same `Number | Undefined` arg passed where `Number` is
-    // expected must still produce a `TypeMismatch`. This pins that
-    // we did not accidentally widen acceptance on the no-guard path.
     let fixture = format!(
         "{NARROW_FIXTURE_MODULE}\n\
 //- /test.bsl\n\
@@ -148,8 +101,6 @@ fn unnarrowed_arg_outside_guard_still_fires_mismatch() {
     );
     let (expected, actual) = &mm[0];
     assert_eq!(*expected, db.number(None, None), "expected param type Number");
-    // `actual` is the union — exact union shape is incidental, just
-    // assert it isn't `Number` (i.e. no narrowing happened here).
     assert!(
         *actual != db.number(None, None),
         "actual must be the unnarrowed union, not Number — got {actual:?}"
@@ -158,20 +109,12 @@ fn unnarrowed_arg_outside_guard_still_fires_mismatch() {
 
 #[test]
 fn arg_mismatch_in_else_branch_still_fires() {
-    // Symmetric to the positive narrowing case: in the else-branch of
-    // `Index <> Undefined`, the variable is narrowed to `Undefined`,
-    // which is **not** assignable to `Number`. Diagnostic must fire.
-    //
-    // (`ty_difference` collapsing to `Ty::Unknown` would mask this —
-    // narrowing falls back to base, which is `Number | Undefined`,
-    // still not assignable to `Number`. Either way, mismatch.)
     let fixture = format!(
         "{NARROW_FIXTURE_MODULE}\n\
 //- /test.bsl\n\
 Процедура Тест()\n\
     Индекс = ПервыйОбщийМодуль.Найти();\n\
     Если Индекс <> Неопределено Тогда\n\
-        // Match — narrowed to Number.\n\
     Иначе\n\
         ПервыйОбщийМодуль.Удалить(Индекс);\n\
     КонецЕсли;\n\
@@ -189,11 +132,6 @@ fn arg_mismatch_in_else_branch_still_fires() {
 
 #[test]
 fn arity_mismatch_still_fires_from_infer_query() {
-    // `MismatchedArgCount` was deliberately NOT moved into
-    // `arg_diagnostics_query` (it has no narrowing dependency). This
-    // test pins that decision: passing the wrong number of args
-    // continues to surface the count diagnostic from inside
-    // `infer_query`, independent of the new arg-validation pipeline.
     let fixture = r#"
 //- /CommonModules/ПервыйОбщийМодуль/Ext/Module.bsl
 // Параметры:
@@ -220,11 +158,6 @@ fn arity_mismatch_still_fires_from_infer_query() {
 
 #[test]
 fn feature_flag_off_disables_narrowing_overlay() {
-    // Toggling `type_narrowing_enabled` to `false` puts
-    // `narrow_or_base` into pass-through mode — no overlay, no
-    // narrowing. The same fixture that produces zero mismatches when
-    // narrowing is on must again produce one mismatch when it's off,
-    // matching the pre-narrow baseline.
     let fixture = format!(
         "{NARROW_FIXTURE_MODULE}\n\
 //- /test.bsl\n\
@@ -248,11 +181,6 @@ fn feature_flag_off_disables_narrowing_overlay() {
 
 #[test]
 fn flag_flip_invalidates_arg_diagnostics_cache() {
-    // Same database, same file content — but flipping
-    // `type_narrowing_enabled` between calls must produce different
-    // results. This catches "fresh-DB green, incremental broken"
-    // regressions where Salsa's caching could otherwise mask a
-    // narrowing wiring break.
     let fixture = format!(
         "{NARROW_FIXTURE_MODULE}\n\
 //- /test.bsl\n\
@@ -265,11 +193,9 @@ fn flag_flip_invalidates_arg_diagnostics_cache() {
     );
     let (mut db, file_id) = setup(&fixture);
 
-    // 1) Narrowing on — no diagnostic.
     let on = arg_mismatches(&db, file_id);
     assert!(on.is_empty(), "with narrowing on: expected zero mismatches, got {on:?}");
 
-    // 2) Toggle off — diagnostic must reappear (no stale cache).
     db.set_type_narrowing_enabled(false);
     let off = arg_mismatches(&db, file_id);
     assert_eq!(
@@ -279,7 +205,6 @@ fn flag_flip_invalidates_arg_diagnostics_cache() {
          indicates stale arg_diagnostics cache",
     );
 
-    // 3) Toggle back on — diagnostic must disappear again.
     db.set_type_narrowing_enabled(true);
     let on_again = arg_mismatches(&db, file_id);
     assert!(

@@ -1,30 +1,19 @@
-//! Enums for BSL metadata
-
 use serde::{Deserialize, Serialize};
 
-/// Return value reuse mode for common modules
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum ReturnValueReuse {
-    /// Do not reuse return values (default)
     #[serde(rename = "DontUse")]
     DontUse,
-
-    /// Reuse return values during a single request
     #[serde(rename = "DuringRequest")]
     DuringRequest,
-
-    /// Reuse return values throughout a session
     #[serde(rename = "DuringSession")]
     DuringSession,
-
-    /// Unknown/unrecognized option
     #[serde(other)]
     #[default]
     Unknown,
 }
 
 impl ReturnValueReuse {
-    /// Parse from Russian or English name
     pub fn from_name(name: &str) -> Self {
         let name_lower = name.to_lowercase();
         match name_lower.as_str() {
@@ -36,107 +25,77 @@ impl ReturnValueReuse {
     }
 }
 
-/// Module type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum ModuleType {
-    /// Application module
     #[serde(rename = "ApplicationModule")]
     ApplicationModule,
-    /// Common module
     #[serde(rename = "CommonModule")]
     CommonModule,
-    /// Session module
     #[serde(rename = "SessionModule")]
     SessionModule,
-    /// External connection module
     #[serde(rename = "ExternalConnectionModule")]
     ExternalConnectionModule,
-    /// Managed application module
     #[serde(rename = "ManagedApplicationModule")]
     ManagedApplicationModule,
-    /// Ordinary application module
     #[serde(rename = "OrdinaryApplicationModule")]
     OrdinaryApplicationModule,
-    /// Manager module
     #[serde(rename = "ManagerModule")]
     ManagerModule,
-    /// Object module
     #[serde(rename = "ObjectModule")]
     ObjectModule,
-    /// Record set module
     #[serde(rename = "RecordSetModule")]
     RecordSetModule,
-    /// Value manager module
     #[serde(rename = "ValueManagerModule")]
     ValueManagerModule,
-    /// Form module
     #[serde(rename = "FormModule")]
     FormModule,
-    /// Command module
     #[serde(rename = "CommandModule")]
     CommandModule,
-    /// HTTP service module
     #[serde(rename = "HTTPServiceModule")]
     HTTPServiceModule,
-    /// Web service module (SOAP)
     #[serde(rename = "WEBServiceModule")]
     WebServiceModule,
-    /// Unknown module type
     #[serde(other)]
     #[default]
     Unknown,
 }
 
-/// Object belonging (own or borrowed from configuration)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum ObjectBelonging {
-    /// Own object
     #[serde(rename = "Own")]
     #[default]
     Own,
-    /// Adopted object from another configuration
     #[serde(rename = "Adopted")]
     Adopted,
-    /// Unknown belonging
     #[serde(other)]
     Unknown,
 }
 
-/// Support variant for configuration compatibility
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum SupportVariant {
-    /// Not editable
     #[serde(rename = "NotEditable")]
     NotEditable,
-    /// Editable
     #[serde(rename = "Editable")]
     Editable,
-    /// Not supported
     #[serde(rename = "NotSupported")]
     NotSupported,
-    /// Unknown support variant
     #[serde(other)]
     #[default]
     Unknown,
 }
 
-/// Form type (managed vs ordinary form)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum FormType {
-    /// Managed form (управляемая форма)
     #[serde(rename = "Managed")]
     #[default]
     Managed,
-    /// Ordinary form (обычная форма)
     #[serde(rename = "Ordinary")]
     Ordinary,
-    /// Unknown form type
     #[serde(other)]
     Unknown,
 }
 
 impl FormType {
-    /// Parse from Russian or English name
     pub fn from_name(name: &str) -> Self {
         let name_lower = name.to_lowercase();
         match name_lower.as_str() {
@@ -147,13 +106,8 @@ impl FormType {
     }
 }
 
-/// Code series mode for Catalogs, ChartOfCharacteristicTypes, ChartOfAccounts
-///
-/// Determines how code uniqueness is enforced across the object hierarchy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum CodeSeries {
-    /// Codes are unique across the entire catalog/chart
-    /// (WholeCatalog, WholeCharacteristicKind, WholeChartOfAccounts)
     #[serde(
         rename = "WholeCatalog",
         alias = "WholeCharacteristicKind",
@@ -162,25 +116,17 @@ pub enum CodeSeries {
     #[default]
     WholeCatalog,
 
-    /// Codes are unique within subordination (parent hierarchy)
     #[serde(rename = "WithinSubordination")]
     WithinSubordination,
 
-    /// Codes are unique within owner
     #[serde(rename = "WithinOwnerSubordination", alias = "WithinOwner")]
     WithinOwnerSubordination,
 
-    /// Unknown code series
     #[serde(other)]
     Unknown,
 }
 
 impl CodeSeries {
-    /// Check if code series allows FindByCode to return unique results
-    ///
-    /// Returns `true` only for `WholeCatalog` (and equivalents like
-    /// `WholeCharacteristicKind`, `WholeChartOfAccounts`), which means
-    /// codes are unique across the entire object.
     pub fn is_whole(&self) -> bool {
         matches!(self, Self::WholeCatalog)
     }

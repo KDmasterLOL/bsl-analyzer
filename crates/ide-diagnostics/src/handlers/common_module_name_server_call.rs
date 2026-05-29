@@ -1,8 +1,3 @@
-//! CommonModuleNameServerCall diagnostic
-//!
-//! ServerCall CommonModules must contain "ServerCall" or "ВызовСервера" in their name.
-//!
-
 use crate::define_common_module_name_check;
 use crate::metadata::*;
 

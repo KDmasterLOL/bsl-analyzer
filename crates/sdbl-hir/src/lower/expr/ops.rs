@@ -1,5 +1,3 @@
-//! Binary and unary operator lowering.
-
 use crate::hir::ExprHir;
 use crate::lower::context::LoweringContext;
 use crate::types::SdblType;
@@ -15,7 +13,6 @@ impl LoweringContext {
             "DIAGNOSTIC LOWERING: lower_binary_expr called"
         );
 
-        // Record operator token
         for element in node.descendants_with_tokens() {
             if let Some(token) = element.as_token() {
                 match token.kind() {
@@ -39,13 +36,8 @@ impl LoweringContext {
             }
         }
 
-        // Collect ALL children (for chained operators like A И B И C)
         let children: Vec<_> = node.children().collect();
 
-        // IMPORTANT: If there's only one child (no operator), just return it unwrapped.
-        // This happens when parser creates operator precedence nodes without actual operators.
-        // For example: "Таблица.Поле" may be wrapped in LOGICAL_OR_EXPR → LOGICAL_AND_EXPR →
-        // ADDITIVE_EXPR → MULTIPLICATIVE_EXPR → COLUMN_REF, even though there are no operators.
         if children.len() == 1 {
             tracing::debug!(
                 node_text = %node.text(),
@@ -54,12 +46,10 @@ impl LoweringContext {
             return self.lower_expr(&children[0]);
         }
 
-        // Handle missing children (error case)
         if children.is_empty() {
             return ExprHir::Missing { range: node.text_range() };
         }
 
-        // Determine operator from node text
         let text = node.text().to_string();
         let op = if text.contains(" И ") || text.contains(" AND ") {
             BinaryOp::And
@@ -88,10 +78,9 @@ impl LoweringContext {
         } else if text.contains('%') {
             BinaryOp::Mod
         } else {
-            BinaryOp::Eq // Default
+            BinaryOp::Eq
         };
 
-        // Infer result type
         let ty = if op.is_comparison() || op.is_logical() {
             SdblType::Boolean
         } else if op.is_arithmetic() {
@@ -100,8 +89,6 @@ impl LoweringContext {
             SdblType::Unknown
         };
 
-        // Build left-associative binary tree for chained operators
-        // Example: A И B И C → BinaryOp { lhs: BinaryOp { lhs: A, op: And, rhs: B }, op: And, rhs: C }
         let mut result = self.lower_expr(&children[0]);
 
         for child in &children[1..] {
@@ -118,7 +105,6 @@ impl LoweringContext {
         result
     }
 
-    /// Lower unary expression.
     pub(super) fn lower_unary_expr(&mut self, node: &syntax::SyntaxNode) -> ExprHir {
         use crate::hir::UnaryOp;
 
@@ -130,7 +116,6 @@ impl LoweringContext {
 
         let text = node.text().to_string().to_uppercase();
         let (op, ty) = if text.contains("НЕ") || text.contains("NOT") {
-            // Record NOT token
             for element in node.descendants_with_tokens() {
                 if let Some(token) = element.as_token() {
                     if token.kind() == syntax::SyntaxKind::KW_NOT {

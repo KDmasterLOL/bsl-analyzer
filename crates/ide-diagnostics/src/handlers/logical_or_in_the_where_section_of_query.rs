@@ -1,7 +1,3 @@
-//! LogicalOrInTheWhereSectionOfQuery diagnostic.
-//!
-//! Detects `OR` / `ИЛИ` operators in SDBL `WHERE` clauses.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -20,7 +16,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Single-pass dispatch for LogicalOrInTheWhereSectionOfQuery.
 pub(crate) fn dispatch(
     ctx: &DiagnosticsContext,
     diag: &sdbl_hir::SdblDiagnostic,
@@ -33,7 +28,6 @@ pub(crate) fn dispatch(
     }
 }
 
-/// Runs the LogicalOrInTheWhereSectionOfQuery diagnostic (standalone, used in tests).
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     crate::sdbl_utils::collect_sdbl_via_dispatch(
         ctx,
@@ -50,9 +44,6 @@ mod tests {
 
     #[test]
     fn test_multi_case_where_or() {
-        // Large inline regression fixture for OR-in-WHERE coverage.
-        // 6 OR diagnostics in WHERE clauses across multiple procedures.
-        // Тест7 has no WHERE-clause ORs (OR in CASE/JOIN only) → no diagnostics from it.
         let code = r#"Процедура Тест1()
 
     Запрос = Новый Запрос;

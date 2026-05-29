@@ -1,36 +1,3 @@
-//! Signature lowering for workspace-defined methods.
-//!
-//! Salsa-tracked query that derives a `(params, return_ty)` signature
-//! for a workspace-defined procedure / function from its docstring.
-//! Slot defaults to `Ty::Unknown` (gradual typing) for anything the
-//! docstring does not declare.
-//!
-//! # Cycle status (Phase O.16b — body-walk dropped)
-//!
-//! Phase O.16b removed the docstring-less `Body`-walk fallback that
-//! previously called `db.infer(file_id)` for return-from-body
-//! inference. After O.16a turned `infer_query` into a thin fan-out
-//! wrapper over `db.infer_method` (Lni.5 / O.15), keeping the
-//! body-walk here would close the self-edge
-//! `proc_signature_query → infer_query → infer_method →
-//! proc_signature_query` (`infer_method`'s
-//! `InferenceContext::infer_all` consults proc signatures during
-//! qualified-call resolution).
-//!
-//! Dropping the body-walk to `Ty::Unknown` for docstring-less
-//! functions is observably a no-op: the cascade-typing path
-//! (`materialise_signature_enriched` in `method_resolution.rs`,
-//! shipped Phase O.11) is the production consumer that wanted a
-//! body-derived return type, and it queries
-//! `method_return_type_query` directly — which has its own
-//! cycle-safe handlers (Phase J / O.10). PLAN-v3 §R9 verified zero
-//! production callers depended on `proc_signature_query`'s
-//! body-walked return type before O.16b.
-//!
-//! `collect_return_value_exprs` is retained under `#[cfg(test)]`
-//! because two unit tests still exercise its Stmt::Return walking
-//! shape against hand-rolled bodies.
-
 use std::sync::Arc;
 
 use bsl_types::builders::Builders;
@@ -43,40 +10,12 @@ use hir_def::{MethodIdInput, Name};
 use crate::db::HirDatabase;
 use crate::lower::type_string::{lower_param_type_string_typeid, lower_return_type_string_typeid};
 
-/// Lowered signature of a workspace-defined procedure / function.
-///
-/// Mirrors the `(params, return_ty)` half of [`crate::method_lookup::MethodInfo`]
-/// so the [`crate::proc_signature_lookup`] adapter (added in a follow-up
-/// slice) can hand workspace methods to the same call-arg checking path
-/// that platform methods use today.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcSignature {
-    /// Parameter types (interned ids), in declaration order. Slots that
-    /// the docstring omits stay `db.unknown()` so call-site `is_assignable`
-    /// accepts any actual via gradual typing.
     pub params: Vec<TypeId>,
-    /// Return type (interned id). `db.unknown()` when the docstring omits
-    /// the `Возвращаемое значение:` section. Body-walked
-    /// return-from-`Возврат` inference was dropped in Phase O.16b to break
-    /// the `proc_signature_query → infer_query → infer_method →
-    /// proc_signature_query` self-edge introduced by O.16a; cascade typing
-    /// recovers the same precision via
-    /// [`crate::method_graph::method_return_type_query`] at the call site.
     pub return_ty: TypeId,
 }
 
-/// Salsa-tracked query: lower a workspace method's signature.
-///
-/// Iterates the **declaration-order** parameter list from the method's
-/// `MethodSymbol` and overlays a docstring `ParameterDoc` whose `name`
-/// matches case-insensitively. Slots without a matching doc entry stay
-/// `Ty::Unknown` (gradual). The return type comes from the docstring
-/// `returned_value`; absent → `Ty::Unknown`.
-///
-/// Driving from the declaration rather than the docstring is what
-/// guarantees the resulting `params.len() == method_symbol.params.len()`
-/// — out-of-order or missing doc entries never shift slots, never
-/// truncate or extend the signature.
 #[salsa::tracked(lru = 1024)]
 pub fn proc_signature_query<'db>(
     db: &'db dyn HirDatabase,
@@ -92,37 +31,17 @@ pub fn proc_signature_query<'db>(
     let docs = method_symbol.docs.as_deref();
     let params = lower_params(db, method_symbol.params.as_slice(), docs);
 
-    // Procedures never carry a return type — match the platform-method
-    // path (`return_type: None` → `Undefined`) so consumers can use a
-    // single sentinel for "no return".
     let return_ty = if !method_symbol.is_function {
         db.undefined()
     } else if let Some(docs_return_ty) = docs.and_then(|d| lower_return_from_docs(db, d)) {
-        // Docstring `Возвращаемое значение:` is present — its lowered
-        // type wins, even when it lowers to `Unknown` (the user wrote
-        // `Произвольный` and we honour that gradual claim instead of
-        // second-guessing via body inference).
         docs_return_ty
     } else {
-        // Phase O.16b: docstring-less return drops to `Unknown`.
-        // The previous body-walk path (`db.infer(file_id)` →
-        // `expr_types_by_body[Method(local_id)]` → union over
-        // `Stmt::Return`s) was a self-edge through the O.16a
-        // `infer_query` wrapper. Cascade typing recovers the same
-        // precision at the call site via
-        // [`crate::method_graph::method_return_type_query`].
         db.unknown()
     };
 
     Arc::new(ProcSignature { params, return_ty })
 }
 
-/// Walk a method body for every `Stmt::Return { value: Some(_) }`
-/// and collect the value-bearing expression ids.
-///
-/// Retained under `#[cfg(test)]` after Phase O.16b dropped the
-/// production caller; the local unit tests still exercise the
-/// Stmt::Return walking shape against hand-rolled bodies.
 #[cfg(test)]
 fn collect_return_value_exprs(body: &hir_def::Body) -> Vec<hir_def::ExprId> {
     use hir_def::{ExprId, IdConversion, Stmt};
@@ -148,7 +67,6 @@ fn lower_params(
         .collect()
 }
 
-/// Look up a docstring parameter entry by name, BSL-case-insensitive.
 fn find_param_doc<'a>(docs: &'a MethodDocs, name: &Name) -> Option<&'a ParameterDoc> {
     let needle = name.as_str().to_lowercase();
     docs.parameters.iter().find(|p| p.name.to_lowercase() == needle)
@@ -161,23 +79,10 @@ fn lower_one_param_doc(db: &dyn TypeKernelDb, param: &ParameterDoc) -> TypeId {
     if param.types.len() == 1 {
         return lower_param_type_string_typeid(db, &param.types[0].name);
     }
-    // Multiple `TypeDoc` entries are already a parsed union per the
-    // doc grammar. Re-joining with `, ` and routing through the
-    // unified pipeline keeps the gradual-typing rules
-    // (single-unrecognised → Unknown, multi all-valid → Union) and
-    // the `Произвольный` collapse in one place rather than
-    // re-implementing them here.
     let joined = param.types.iter().map(|t| t.name.as_str()).collect::<Vec<_>>().join(", ");
     lower_param_type_string_typeid(db, &joined)
 }
 
-/// Lower the docstring's `Возвращаемое значение:` section.
-///
-/// Returns `None` when the section is absent — that's the signal the
-/// caller uses to fall through to body-walk inference. Returns
-/// `Some(id)` whenever the section is present, even when it collapses to
-/// `db.unknown()` (e.g., the user wrote `Произвольный`): an explicit
-/// "any" claim is still the user's claim and wins over body inference.
 fn lower_return_from_docs(db: &dyn TypeKernelDb, docs: &MethodDocs) -> Option<TypeId> {
     if docs.returned_value.is_empty() {
         return None;
@@ -227,9 +132,6 @@ mod tests {
 
     #[test]
     fn missing_doc_for_decl_param_stays_unknown() {
-        // Headline contract: declaration drives arity. The doc has nothing
-        // for `Б`, so slot index 1 must be `Ty::Unknown`, not collapse the
-        // signature.
         let db = InMemoryDb::new();
         let d = docs(vec![param_doc("А", vec![typedoc("Число")])], Vec::new());
         let params = lower_params(&db, &[decl_param("А"), decl_param("Б")], Some(&d));
@@ -249,7 +151,6 @@ mod tests {
 
     #[test]
     fn name_match_is_case_insensitive() {
-        // BSL identifiers are case-insensitive; the matcher follows.
         let db = InMemoryDb::new();
         let d = docs(vec![param_doc("ПАРАМЕТР", vec![typedoc("Число")])], Vec::new());
         let params = lower_params(&db, &[decl_param("параметр")], Some(&d));
@@ -265,7 +166,6 @@ mod tests {
 
     #[test]
     fn single_unrecognised_param_stays_unknown_for_gradual_typing() {
-        // Same asymmetry as the platform-method path.
         let db = InMemoryDb::new();
         let d = docs(vec![param_doc("X", vec![typedoc("СтрокаТабличнойЧасти")])], Vec::new());
         let params = lower_params(&db, &[decl_param("X")], Some(&d));
@@ -290,10 +190,6 @@ mod tests {
 
     #[test]
     fn return_arbitrary_returns_some_unknown_not_none() {
-        // Explicit `Произвольный` is the user's gradual claim and
-        // collapses to `Ty::Unknown`, but the section IS present —
-        // wrap in `Some` so the caller knows not to fall through to
-        // body inference.
         let db = InMemoryDb::new();
         let d = docs(Vec::new(), vec![typedoc("Произвольный"), typedoc("Неопределено")]);
         let ret = lower_return_from_docs(&db, &d);
@@ -302,8 +198,6 @@ mod tests {
 
     #[test]
     fn return_section_absent_returns_none() {
-        // No `Возвращаемое значение:` line in the docstring — the
-        // caller falls through to body inference.
         let db = InMemoryDb::new();
         let d = docs(Vec::new(), Vec::new());
         assert_eq!(lower_return_from_docs(&db, &d), None);
@@ -313,8 +207,6 @@ mod tests {
     fn collect_return_value_exprs_picks_value_bearing_returns() {
         use hir_def::{Expr, Literal};
 
-        // Procedure-shape `Возврат;` (no value) is excluded; only
-        // `Возврат <expr>;` contributes to the return-from-body union.
         let mut body = Body::default();
         let lit_true = body.exprs_mut().alloc(Expr::Literal(Literal::Bool(true)));
         let return_value = body.stmts_mut().alloc(Stmt::Return { value: Some(lit_true) });
@@ -327,8 +219,6 @@ mod tests {
 
     #[test]
     fn collect_return_value_exprs_returns_empty_for_procedure_body() {
-        // Procedures with only `Возврат;` (no value) → empty vector,
-        // so the caller falls back to `Ty::Unknown` via `Ty::union(vec![])`.
         let mut body = Body::default();
         let return_void = body.stmts_mut().alloc(Stmt::Return { value: None });
         body.set_body_stmts(vec![return_void].into());

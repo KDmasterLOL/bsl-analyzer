@@ -1,5 +1,3 @@
-//! Reports by-value parameters overwritten before any meaningful use.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -20,10 +18,9 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates a diagnostic from HIR rewrite-parameter data.
 pub fn from_hir(
     param_id: BindingId,
-    _stmt_id: StmtId, // Placeholder from lowering - we'll find real one via range
+    _stmt_id: StmtId,
     stmt_range: TextRange,
     ident_range: TextRange,
     ctx: &DiagnosticsContext,
@@ -34,63 +31,45 @@ pub fn from_hir(
         return None;
     }
 
-    // Get module bodies and find the method containing this diagnostic
     let module_bodies = ctx.module_bodies();
 
-    // Find which method contains this stmt_range
-    let (local_id, body, source_map) =
-        module_bodies.method_bodies().find(|(_local_id, _body, source_map)| {
-            // Check if any statement in this method has matching range
-            source_map.stmt_at_range(stmt_range).is_some()
-        })?;
+    let (local_id, body, source_map) = module_bodies
+        .method_bodies()
+        .find(|(_local_id, _body, source_map)| source_map.stmt_at_range(stmt_range).is_some())?;
 
-    // Get the actual StmtId for this assignment
     let stmt_id = source_map.stmt_at_range(stmt_range)?;
 
-    // Get parameter name for diagnostic message
     let param = body.binding(param_id);
     let param_name = param.name.as_str();
 
-    // Get reaching definitions for this method
     let module_reaching_defs = ctx.module_reaching_defs();
     let reaching_defs_result = module_reaching_defs.get(local_id)?;
 
-    // Get reaching defs BEFORE this assignment statement
     let reaching_defs_set = reaching_defs_result.defs_before_stmt(stmt_id)?;
 
-    // Get parameter name (lowercase for matching)
     let param_name_lower = param_name.to_lowercase();
 
-    // Find all definitions for this parameter variable
     let param_definitions: Vec<_> =
         reaching_defs_set.iter().filter(|def| def.var_name.as_str() == param_name_lower).collect();
 
     if param_definitions.is_empty() {
-        // No definitions reach here - parameter not in scope? Shouldn't happen
         return None;
     }
 
-    // Check if all definitions are just the parameter itself (not modified/used)
-    // If there's only one definition and it's the parameter → not used before overwrite
     if param_definitions.len() == 1 {
         let single_def = param_definitions[0];
         if let hir::dataflow::reaching_defs::DefSite::Parameter(def_binding_id) =
             single_def.def_site
         {
             if def_binding_id == param_id {
-                // Check if parameter is used in RHS of this assignment
-                // If yes, this is not "overwrite without use" (e.g., Param = Param or Param = Func(Param))
                 if parameter_used_in_assignment_rhs(body, stmt_id, param_id) {
-                    return None; // Parameter used in RHS, no diagnostic
+                    return None;
                 }
 
-                // Check if parameter was used in any previous statement
-                // (e.g., field access: Param.Field = value or value = Param.Field)
                 if parameter_used_before_stmt(body, stmt_id, param_id) {
-                    return None; // Parameter used in prior statement, no diagnostic
+                    return None;
                 }
 
-                // Parameter overwritten without prior use!
                 return Some(Diagnostic {
                     code,
                     message: format!("Переприсваивание параметра метода '{}'", param_name),
@@ -103,34 +82,23 @@ pub fn from_hir(
         }
     }
 
-    // If multiple definitions or definition is not the parameter → parameter was used/modified
     None
 }
 
-/// Check if parameter was used in any statement before the target statement.
-///
-/// Returns true if the parameter appears anywhere in statements that textually
-/// precede the target statement (including field accesses, function arguments, etc.)
-///
-/// Self-assigns (Param = Param) are NOT considered meaningful uses.
 fn parameter_used_before_stmt(
     body: &hir::Body,
     target_stmt_id: StmtId,
     param_id: BindingId,
 ) -> bool {
-    // Scan all statements before target (by RawIdx ordering)
     for (stmt_id, _stmt) in body.stmts_iter() {
-        // Stop when we reach the target statement
         if stmt_id == target_stmt_id {
             break;
         }
 
-        // Skip self-assigns (Param = Param) - not considered meaningful uses
         if is_self_assign_to_binding(body, stmt_id, param_id) {
             continue;
         }
 
-        // Check if this statement uses the parameter in a meaningful way
         if stmt_uses_binding(body, stmt_id, param_id) {
             return true;
         }
@@ -139,21 +107,18 @@ fn parameter_used_before_stmt(
     false
 }
 
-/// Check if statement is a self-assign to the binding (Param = Param).
 fn is_self_assign_to_binding(body: &hir::Body, stmt_id: StmtId, binding_id: BindingId) -> bool {
     use hir::{Expr, Stmt};
 
     let stmt = body.stmt(stmt_id);
     match stmt {
         Stmt::Assign { target, value } => {
-            // Check if target is our binding
             if let Expr::Path(target_name) = body.expr(ExprId::from_idx(*target)) {
                 let binding = body.binding(binding_id);
                 if !target_name.as_str().eq_ignore_ascii_case(binding.name.as_str()) {
-                    return false; // Target is not our binding
+                    return false;
                 }
 
-                // Check if value is also our binding (self-assign)
                 if let Expr::Path(value_name) = body.expr(ExprId::from_idx(*value)) {
                     return value_name.as_str().eq_ignore_ascii_case(binding.name.as_str());
                 }
@@ -164,7 +129,6 @@ fn is_self_assign_to_binding(body: &hir::Body, stmt_id: StmtId, binding_id: Bind
     }
 }
 
-/// Check if a statement uses a specific binding anywhere.
 fn stmt_uses_binding(body: &hir::Body, stmt_id: StmtId, binding_id: BindingId) -> bool {
     use hir::Stmt;
 
@@ -179,7 +143,6 @@ fn stmt_uses_binding(body: &hir::Body, stmt_id: StmtId, binding_id: BindingId) -
             if expr_uses_binding(body, ExprId::from_idx(if_stmt.condition), binding_id) {
                 return true;
             }
-            // Check branches
             for &stmt_idx in if_stmt.then_branch.iter() {
                 if stmt_uses_binding(body, StmtId::from_idx(stmt_idx), binding_id) {
                     return true;
@@ -269,14 +232,10 @@ fn stmt_uses_binding(body: &hir::Body, stmt_id: StmtId, binding_id: BindingId) -
             expr_uses_binding(body, ExprId::from_idx(*event), binding_id)
                 || expr_uses_binding(body, ExprId::from_idx(*handler), binding_id)
         }
-        // Other statements don't use expressions
         _ => false,
     }
 }
 
-/// Check if parameter is used in the RHS of an assignment statement.
-///
-/// Returns true if the parameter binding appears anywhere in the value expression.
 fn parameter_used_in_assignment_rhs(
     body: &hir::Body,
     stmt_id: StmtId,
@@ -287,22 +246,18 @@ fn parameter_used_in_assignment_rhs(
     let stmt = body.stmt(stmt_id);
     let value_expr_id = match stmt {
         Stmt::Assign { value, .. } => ExprId::from_idx(*value),
-        _ => return false, // Not an assignment
+        _ => return false,
     };
 
-    // Check if param_id is used anywhere in the value expression tree
     expr_uses_binding(body, value_expr_id, param_id)
 }
 
-/// Recursively check if an expression uses a specific binding.
 fn expr_uses_binding(body: &hir::Body, expr_id: ExprId, binding_id: BindingId) -> bool {
     use hir::Expr;
 
     let expr = body.expr(expr_id);
     match expr {
         Expr::Path(name) => {
-            // Check if this path resolves to our binding
-            // We need to match by name (case-insensitive) since we don't have full name resolution
             let binding = body.binding(binding_id);
             name.as_str().eq_ignore_ascii_case(binding.name.as_str())
         }
@@ -329,9 +284,7 @@ fn expr_uses_binding(body: &hir::Body, expr_id: ExprId, binding_id: BindingId) -
                 || expr_uses_binding(body, ExprId::from_idx(*then_expr), binding_id)
                 || expr_uses_binding(body, ExprId::from_idx(*else_expr), binding_id)
         }
-        // Literals, missing expressions don't use bindings
         Expr::Literal(_) | Expr::Missing => false,
-        // Other expression types (Await, etc.) - conservatively assume no usage for now
         _ => false,
     }
 }

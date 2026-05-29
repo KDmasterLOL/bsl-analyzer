@@ -1,5 +1,3 @@
-//! Adapter for user-defined methods inside common modules.
-
 use hir::{ModItem, ModuleId, Name};
 use ide_db::RootDatabase;
 use smol_str::SmolStr;

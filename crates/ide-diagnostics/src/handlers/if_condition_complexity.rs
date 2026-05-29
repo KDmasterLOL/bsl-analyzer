@@ -1,41 +1,3 @@
-//! IfConditionComplexity diagnostic.
-//!
-//! Detects overly complex if conditions with too many boolean operations.
-//!
-//! ## Why?
-//! Complex if conditions are hard to understand:
-//! - Reduced readability
-//! - Difficult to debug
-//! - Error-prone
-//! - Should be extracted to variables
-//!
-//! ## Bad practice
-//! ```bsl
-//! Если А И Б ИЛИ В И Г Тогда  // Too complex!
-//!     ВыполнитьДействие();
-//! КонецЕсли;
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! УсловиеВыполнено = (А И Б) ИЛИ (В И Г);
-//! Если УсловиеВыполнено Тогда
-//!     ВыполнитьДействие();
-//! КонецЕсли;
-//! ```
-//!
-//! ## Track 2 Phase B §6.4 migration
-//! Pre-migration the legacy `from_hir` adapter consumed
-//! `BodyDiagnostic::IfConditionComplexity`, which was emitted from
-//! `lower::stmt::check_condition_complexity` once per `Если`/`ИначеЕсли`
-//! condition that exceeded a hardcoded default threshold of 3. That
-//! per-condition emit pattern is preserved here: the `compute_hir_metrics`
-//! visitor records a `ConditionMetrics { condition: ExprId, logical_op_count }`
-//! entry for every `If`/`Elsif` condition, and this handler replays the
-//! threshold filter directly against the cached `module_hir_metrics_query`
-//! data — one diagnostic per over-budget condition, attached to the
-//! condition's source range trimmed of trailing whitespace.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -56,15 +18,8 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Default maximum if condition complexity (legacy `DEFAULT_MAX_COMPLEXITY`).
 const DEFAULT_MAX_IF_CONDITION_COMPLEXITY: i64 = 3;
 
-/// Track 2 Phase B §6.4 — handler-side detection consuming the cached
-/// `HirMethodMetrics::if_conditions` via `ctx.module_hir_metrics()`.
-/// Emits one diagnostic per `Если`/`ИначеЕсли` condition whose
-/// complexity (`logical_op_count + 1`) exceeds `maxIfConditionComplexity`
-/// (mirrors the legacy behaviour the retired
-/// `lower::stmt::check_condition_complexity` produced).
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::IfConditionComplexity;
     if ctx.is_disabled_with_metadata(code) {
@@ -82,10 +37,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let module_bodies = ctx.module_bodies();
     let file_text = ctx.file_text();
 
-    // Sort by `local_id` for deterministic outer-method ordering —
-    // matches the §6.4 cohort follow-up. Inner per-condition ordering
-    // already comes from HIR allocation order via
-    // `metrics.if_conditions`.
     let mut local_ids: Vec<u32> = module_bodies.iter_bodies().map(|(id, _)| id).collect();
     local_ids.sort_unstable();
 
@@ -98,9 +49,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         let Some(source_map) = module_bodies.source_map(local_id) else { continue };
         emit_conditions(ctx, code, &metrics, source_map, &file_text, max_complexity, &mut out);
     }
-    // Module-level code: top-level `Если`/`ИначеЕсли` outside any
-    // method body. The legacy lowering-time emit ran for these the same
-    // way it ran for method bodies — preserve that coverage.
     if let Some(metrics) = module_metrics.module_code() {
         if !metrics.if_conditions.is_empty() {
             if let Some(lower_result) = module_bodies.module_code_result() {
@@ -149,9 +97,6 @@ fn emit_conditions(
     }
 }
 
-/// Mirror of the retired `lower::stmt::get_condition_range`: Rowan
-/// records expression node ranges with trailing trivia included; the
-/// user-visible diagnostic range should not.
 fn trim_trailing_whitespace(file_text: &str, range: TextRange) -> TextRange {
     let start: usize = range.start().into();
     let end: usize = range.end().into();
@@ -161,9 +106,6 @@ fn trim_trailing_whitespace(file_text: &str, range: TextRange) -> TextRange {
     let slice = &file_text[start..end];
     let trimmed_len = slice.trim_end().len();
     if trimmed_len == slice.len() || trimmed_len == 0 {
-        // No trailing trivia, or the entire slice is trivia (unreachable
-        // for real expressions but stay defensive — never produce a
-        // zero-length diagnostic range).
         return range;
     }
     let new_end = range.start() + TextSize::from(trimmed_len as u32);
@@ -175,7 +117,6 @@ mod tests {
     use crate::test_utils::*;
     use crate::{DiagnosticCode, DiagnosticsConfig};
     use expect_test::expect;
-    /// Test simple condition (should pass)
     #[test]
     fn test_simple_condition() {
         let code = r#"Процедура Тест()
@@ -191,7 +132,6 @@ mod tests {
         );
     }
 
-    /// Test at threshold (should pass)
     #[test]
     fn test_at_threshold() {
         let code = r#"Процедура Тест()
@@ -207,7 +147,6 @@ mod tests {
         );
     }
 
-    /// Test complex condition (should fail)
     #[test]
     fn test_complex_condition() {
         let code = r#"Процедура Тест()
@@ -226,7 +165,6 @@ mod tests {
         );
     }
 
-    /// Test elsif clause
     #[test]
     fn test_elseif_complex() {
         let code = r#"Процедура Тест()
@@ -247,7 +185,6 @@ mod tests {
         );
     }
 
-    /// Test English keywords
     #[test]
     fn test_english_condition() {
         let code = r#"Procedure Test()
@@ -266,7 +203,6 @@ EndProcedure"#;
         );
     }
 
-    /// Large multiline condition (9 OR ops) - should warn
     #[test]
     fn test_large_multiline_condition() {
         let code = r#"Процедура Тест()
@@ -293,7 +229,6 @@ EndProcedure"#;
         );
     }
 
-    /// Simple outer condition (2 OR ops) should pass; nested condition (3 OR ops) should warn
     #[test]
     fn test_nested_outer_pass_inner_warn() {
         let code = r#"Процедура Тест()
@@ -318,11 +253,6 @@ EndProcedure"#;
         );
     }
 
-    /// Codex round-A regression guard: sub-default `maxIfConditionComplexity`.
-    /// Legacy lowering hard-gated emission at `complexity > 3` before the
-    /// per-config check, so users who set the threshold below 3 silently
-    /// got no diagnostics. The migrated handler applies the config max
-    /// directly, so a stricter threshold now fires as expected.
     #[test]
     fn test_sub_default_threshold_emits() {
         let code = r#"Процедура Тест()
@@ -348,7 +278,6 @@ EndProcedure"#;
               severity: Information"#]].assert_eq(&format_diags(code, &if_diags));
     }
 
-    /// If branch (4 OR) and ElseIf branch (6 OR) both exceed threshold
     #[test]
     fn test_if_and_elseif_both_complex() {
         let code = r#"Процедура Тест()

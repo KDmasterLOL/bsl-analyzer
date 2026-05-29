@@ -12,7 +12,6 @@ pub fn setup_logging(
         None => BoxMakeWriter::new(io::stderr),
     };
 
-    // Suppress noisy Salsa internal logs that fire on every input change.
     let user_filter = env::var("BSL_LOG").ok().unwrap_or_else(|| "warn".to_owned());
     let filter = format!("{},salsa=warn", user_filter);
 

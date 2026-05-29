@@ -1,12 +1,3 @@
-//! [`Pool`] implements a basic custom thread pool
-//! inspired by the [`threadpool` crate](http://docs.rs/threadpool).
-//! When you spawn a task you specify a thread intent
-//! so the pool can schedule it to run on a thread with that intent,
-//! prioritizing work based on latency requirements.
-//!
-//! The thread pool is implemented entirely using
-//! the threading utilities in [`crate::thread`].
-
 use std::{
     marker::PhantomData,
     panic::{self, UnwindSafe},
@@ -22,13 +13,6 @@ use crossbeam_utils::sync::WaitGroup;
 use crate::thread::{Builder, JoinHandle, ThreadIntent};
 
 pub struct Pool {
-    // `_handles` is never read: the field is present
-    // only for its `Drop` impl.
-
-    // The worker threads exit once the channel closes;
-    // make sure to keep `job_sender` above `handles`
-    // so that the channel is actually closed
-    // before we join the worker threads!
     job_sender: Sender<Job>,
     _handles: Box<[JoinHandle]>,
     extant_tasks: Arc<AtomicUsize>,
@@ -40,9 +24,6 @@ struct Job {
 }
 
 impl Pool {
-    /// # Panics
-    ///
-    /// Panics if job panics
     #[must_use]
     pub fn new(threads: usize) -> Self {
         const STACK_SIZE: usize = 8 * 1024 * 1024;
@@ -66,7 +47,6 @@ impl Pool {
                                 job.requested_intent.apply_to_current_thread();
                                 current_intent = job.requested_intent;
                             }
-                            // discard the panic, we should've logged the backtrace already
                             drop(panic::catch_unwind(job.f));
                             extant_tasks.fetch_sub(1, Ordering::SeqCst);
                         }

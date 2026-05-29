@@ -3,7 +3,6 @@ use quick_xml::Reader;
 
 use super::xml::local_name_owned as local_name;
 
-/// A single stack frame from a CallStackFormed event.
 #[derive(Debug, Clone)]
 pub struct EventStackFrame {
     pub object_id: String,
@@ -13,14 +12,15 @@ pub struct EventStackFrame {
     pub presentation: String,
 }
 
-/// Events received from the debug server via polling.
 #[derive(Debug, Clone)]
 pub enum DebugEvent {
-    /// A debug target (client/server) has started.
-    TargetStarted { target_id: String, target_type: String },
-    /// A debug target has quit.
-    TargetQuit { target_id: String },
-    /// Execution stopped (breakpoint or step).
+    TargetStarted {
+        target_id: String,
+        target_type: String,
+    },
+    TargetQuit {
+        target_id: String,
+    },
     CallStackFormed {
         target_id: String,
         stop_by_bp: bool,
@@ -32,9 +32,10 @@ pub enum DebugEvent {
         send_message_only: bool,
         call_stack: Vec<EventStackFrame>,
     },
-    /// An expression evaluation completed.
-    ExprEvaluated { result_id: String, raw_xml: Vec<u8> },
-    /// A runtime exception occurred.
+    ExprEvaluated {
+        result_id: String,
+        raw_xml: Vec<u8>,
+    },
     RuntimeException {
         target_id: String,
         description: String,
@@ -45,7 +46,6 @@ pub enum DebugEvent {
     },
 }
 
-/// Parse ping response into events.
 pub fn parse_ping_events(data: &[u8]) -> Vec<DebugEvent> {
     let mut reader = Reader::from_reader(data);
     reader.config_mut().trim_text(true);
@@ -59,7 +59,6 @@ pub fn parse_ping_events(data: &[u8]) -> Vec<DebugEvent> {
     let mut in_exception = false;
     let mut current_element = Vec::new();
 
-    // CallStackFormed fields
     let mut stop_by_bp = false;
     let mut line_no = 0u32;
     let mut mod_ext = String::new();
@@ -76,10 +75,8 @@ pub fn parse_ping_events(data: &[u8]) -> Vec<DebugEvent> {
     let mut cs_line = 0u32;
     let mut cs_pres = String::new();
 
-    // RTE fields
     let mut exception_descr = String::new();
 
-    // ExprEvaluated fields
     let mut result_id = String::new();
 
     loop {
@@ -118,12 +115,10 @@ pub fn parse_ping_events(data: &[u8]) -> Vec<DebugEvent> {
                     _ => {}
                 }
 
-                // Check xsi:type attribute for typed results
                 if local.as_slice() == b"result" {
                     for attr in e.attributes().flatten() {
                         if attr.key.as_ref().ends_with(b"type") {
                             let val = String::from_utf8_lossy(attr.value.as_ref()).to_string();
-                            // Store type hint for later
                             if val.contains("CallStackFormed") {
                                 cmd_id = "callStackFormed".to_string();
                             } else if val.contains("Started") {
@@ -256,9 +251,8 @@ pub fn parse_ping_events(data: &[u8]) -> Vec<DebugEvent> {
 }
 
 fn base64_decode_utf8(encoded: &str) -> String {
-    // 1C encodes presentation as base64 UTF-8
     let clean: String = encoded.chars().filter(|c| !c.is_whitespace()).collect();
-    let mut buf = vec![0u8; clean.len()]; // more than enough
+    let mut buf = vec![0u8; clean.len()];
     let len = base64_decode_slice(clean.as_bytes(), &mut buf);
     String::from_utf8(buf[..len].to_vec()).unwrap_or_default()
 }

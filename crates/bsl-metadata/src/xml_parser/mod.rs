@@ -1,7 +1,3 @@
-//! XML parser for Designer format metadata
-//!
-//! Parses 1C:Enterprise metadata files in Designer format using roxmltree.
-
 mod catalog;
 mod common_module;
 mod constant;
@@ -19,7 +15,6 @@ mod standard_attributes;
 mod type_parser;
 mod web_service;
 
-// Re-export public API
 pub use catalog::{
     parse_business_process_xml, parse_catalog_xml, parse_chart_of_accounts_xml,
     parse_chart_of_characteristic_types_xml, parse_data_processor_xml, parse_document_xml,
@@ -178,7 +173,6 @@ mod tests {
         assert!(dimension.is_master());
         assert_eq!(dimension.indexing(), "Index");
 
-        // Verify standard attributes for AccumulationRegister
         let attrs = register.attributes();
         let attr_names: Vec<&str> = attrs.iter().map(|a| a.name()).collect();
 
@@ -250,7 +244,6 @@ mod tests {
 
     #[test]
     fn test_parse_all_register_types() {
-        // Test InformationRegister
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
 <MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
     <InformationRegister uuid="77777777-7777-7777-7777-777777777777">
@@ -263,7 +256,6 @@ mod tests {
         assert_eq!(register.name(), "ТестРегистр");
         assert_eq!(register.mdo_type(), MdoType::InformationRegister);
 
-        // Test AccumulationRegister
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
 <MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
     <AccumulationRegister uuid="77777777-7777-7777-7777-777777777777">
@@ -276,7 +268,6 @@ mod tests {
         assert_eq!(register.name(), "ТестРегистр");
         assert_eq!(register.mdo_type(), MdoType::AccumulationRegister);
 
-        // Test AccountingRegister
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
 <MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
     <AccountingRegister uuid="77777777-7777-7777-7777-777777777777">
@@ -289,7 +280,6 @@ mod tests {
         assert_eq!(register.name(), "ТестРегистр");
         assert_eq!(register.mdo_type(), MdoType::AccountingRegister);
 
-        // Test CalculationRegister
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
 <MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
     <CalculationRegister uuid="77777777-7777-7777-7777-777777777777">
@@ -419,22 +409,18 @@ mod tests {
         assert_eq!(catalog.name, "Валюты");
         assert!(catalog.attributes.len() >= 4);
 
-        // Check Boolean attribute
         let attr1 = catalog.find_attribute("ЗагружаетсяИзИнтернета").unwrap();
         assert_eq!(attr1.name, "ЗагружаетсяИзИнтернета");
         assert_eq!(attr1.attr_type, AttributeType::Boolean);
 
-        // Check String attribute with length
         let attr2 = catalog.find_attribute("НаименованиеПолное").unwrap();
         assert_eq!(attr2.name, "НаименованиеПолное");
         assert_eq!(attr2.attr_type, AttributeType::String { length: Some(50) });
 
-        // Check Number attribute
         let attr3 = catalog.find_attribute("Наценка").unwrap();
         assert_eq!(attr3.name, "Наценка");
         assert_eq!(attr3.attr_type, AttributeType::Number { precision: 10, scale: 2 });
 
-        // Check Reference attribute
         let attr4 = catalog.find_attribute("ОсновнаяВалюта").unwrap();
         assert_eq!(attr4.name, "ОсновнаяВалюта");
         assert_eq!(
@@ -1048,11 +1034,9 @@ mod tests {
         assert!(document.find_attribute("Дата").is_some());
         assert!(document.find_attribute("Проведен").is_some());
 
-        // Document should NOT have Catalog-specific attributes
         assert!(document.find_attribute("Код").is_none());
         assert!(document.find_attribute("Наименование").is_none());
 
-        // Check English names
         let number = document.find_attribute("Номер").unwrap();
         assert_eq!(number.name_en, Some("Number".to_string()));
         let date = document.find_attribute("Дата").unwrap();
@@ -1081,7 +1065,6 @@ mod tests {
         assert!(bp.find_attribute("Завершен").is_some());
         assert!(bp.find_attribute("ГлавнаяЗадача").is_some());
 
-        // BusinessProcess should NOT have Document-specific or Catalog-specific
         assert!(bp.find_attribute("Проведен").is_none());
         assert!(bp.find_attribute("Код").is_none());
     }
@@ -1108,7 +1091,6 @@ mod tests {
         assert!(task.find_attribute("БизнесПроцесс").is_some());
         assert!(task.find_attribute("ТочкаМаршрута").is_some());
 
-        // Task should NOT have BP-specific
         assert!(task.find_attribute("Стартован").is_none());
     }
 
@@ -1127,11 +1109,9 @@ mod tests {
 
         let ep = parse_exchange_plan_xml(xml).unwrap();
 
-        // Has Catalog standard attributes
         assert!(ep.find_attribute("Ссылка").is_some());
         assert!(ep.find_attribute("Код").is_some());
         assert!(ep.find_attribute("Наименование").is_some());
-        // Plus ExchangePlan-specific
         assert!(ep.find_attribute("ЭтотУзел").is_some());
     }
 

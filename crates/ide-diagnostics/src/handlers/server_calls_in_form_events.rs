@@ -1,5 +1,3 @@
-//! Detects server-side call chains from selected form events.
-
 use std::collections::VecDeque;
 
 use crate::define_metadata;
@@ -27,7 +25,6 @@ const FORBIDDEN_EVENT_TYPES: &[&str] = &["OnActivateRow", "OnStartChoice"];
 const MAX_DEPTH: usize = 64;
 const MAX_VISITED: usize = 10_000;
 
-/// Result of BFS: call site range, method name, whether path goes through idle handler.
 struct ServerCallFinding {
     range: TextRange,
     method_name: String,
@@ -41,7 +38,6 @@ fn bfs_find_server_calls(
 ) -> Vec<ServerCallFinding> {
     let mut results = Vec::new();
     let mut visited: FxHashSet<(vfs::FileId, u32)> = FxHashSet::default();
-    // Queue: (file_id, local_id, through_idle)
     let mut queue: VecDeque<(vfs::FileId, u32, bool)> = VecDeque::new();
 
     let file_id = ctx.file_id;
@@ -70,7 +66,6 @@ fn bfs_find_server_calls(
 
             let caller = CallerId::Method(current_id);
 
-            // Follow synchronous call edges
             for edge in &summary.call_edges {
                 if edge.caller != caller {
                     continue;
@@ -138,7 +133,6 @@ fn bfs_find_server_calls(
                 }
             }
 
-            // Follow idle handler registrations (findings get lowered severity)
             for idle_reg in &summary.idle_handler_regs {
                 if idle_reg.caller != caller {
                     continue;

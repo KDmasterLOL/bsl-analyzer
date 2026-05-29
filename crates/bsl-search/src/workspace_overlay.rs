@@ -73,12 +73,6 @@ impl WorkspaceOverlayCache {
         self.dirty_paths.insert(rel_path.into());
     }
 
-    /// Refresh the overlay by comparing workspace files against a remote
-    /// baseline manifest. The manifest provides per-file fingerprints that
-    /// are compared against locally computed normalized chunk hashes.
-    ///
-    /// `manifest_fingerprints` maps relative file paths to their published
-    /// file fingerprint (hex-encoded normalized chunk hash).
     pub fn refresh_with_manifest(
         &mut self,
         manifest_fingerprints: &HashMap<String, String>,
@@ -305,10 +299,6 @@ impl WorkspaceOverlayCache {
         Ok(())
     }
 
-    // -----------------------------------------------------------------------
-    // Manifest-based refresh (overlay-only, no SQLite baseline dependency)
-    // -----------------------------------------------------------------------
-
     fn full_refresh_from_manifest(
         &mut self,
         manifest_fingerprints: &HashMap<String, String>,
@@ -317,7 +307,6 @@ impl WorkspaceOverlayCache {
         batch_size: usize,
         store: &Store,
     ) -> Result<(), SearchError> {
-        // Load persisted fingerprint cache from a previous scan.
         let manifest_snapshot_id = store
             .load_baseline_manifest()
             .ok()
@@ -329,7 +318,6 @@ impl WorkspaceOverlayCache {
             .unwrap_or(None)
             .unwrap_or_default();
 
-        // Load persisted embedding cache from a previous scan.
         if self.embedding_cache.is_empty() {
             if let Some(embedder) = embedder {
                 let model_id = embedder.model();
@@ -389,14 +377,10 @@ impl WorkspaceOverlayCache {
                 continue;
             }
 
-            // Fast path: if file metadata (size + mtime) matches the persisted
-            // cache, reuse the stored content_fingerprint without reading the
-            // file.  This skips I/O + parsing + hashing for unchanged files.
             if let Some(cached) = persisted.get(&file.rel_path) {
                 if cached.file_size == file.fingerprint.len
                     && fingerprint_mtime_matches(file.fingerprint.modified, cached)
                 {
-                    // Persist for next restart.
                     updated_persisted.insert(file.rel_path.clone(), cached.clone());
 
                     if baseline_fingerprint
@@ -405,8 +389,6 @@ impl WorkspaceOverlayCache {
                         self.entries.remove(&file.rel_path);
                         continue;
                     }
-                    // File changed from baseline but we still need content for
-                    // building overlay documents — fall through to read.
                 }
             }
 
@@ -417,7 +399,6 @@ impl WorkspaceOverlayCache {
             let file_hash = normalized_file_hash_for_content(&content);
             let local_fp = fingerprint_content(&content, &file.rel_path);
 
-            // Persist this file's fingerprint for next restart.
             if let Some((secs, nanos)) = mtime_to_secs_nanos(file.fingerprint.modified) {
                 updated_persisted.insert(
                     file.rel_path.clone(),
@@ -461,7 +442,6 @@ impl WorkspaceOverlayCache {
         self.hidden_paths = hidden_paths;
         self.dirty_paths.clear();
 
-        // Persist updated fingerprint cache for next restart.
         if !updated_persisted.is_empty() {
             if let Err(error) =
                 store.save_overlay_fingerprint_cache(&manifest_snapshot_id, &updated_persisted)
@@ -470,7 +450,6 @@ impl WorkspaceOverlayCache {
             }
         }
 
-        // Persist embedding cache for next restart.
         if let Some(embedder) = embedder {
             if !self.embedding_cache.is_empty() {
                 if let Err(error) = store.save_overlay_embedding_cache(
@@ -777,9 +756,6 @@ fn normalized_file_hash_for_chunks<'a>(
     hasher.finalize().as_bytes().to_vec()
 }
 
-/// Computes a file fingerprint that matches the Postgres publish-time
-/// `fingerprint_file_documents` algorithm. Returns a hex-encoded blake3 hash.
-/// This is used for comparing local overlay files against the remote manifest.
 pub(crate) fn fingerprint_content(content: &str, rel_path: &str) -> String {
     let documents = Chunker::chunk(content);
     let mut hasher = blake3::Hasher::new();
@@ -807,8 +783,6 @@ pub(crate) fn fingerprint_content(content: &str, rel_path: &str) -> String {
     hasher.finalize().to_hex().to_string()
 }
 
-/// Computes the fingerprint for already-built overlay documents, matching
-/// the Postgres publish-time algorithm.
 pub(crate) fn fingerprint_overlay_documents(
     documents: &[IndexedDocument],
     rel_path: &str,
@@ -1124,7 +1098,6 @@ mod tests {
 
         let store = Store::open(&workspace.join("search.db")).unwrap();
         let mut cache = WorkspaceOverlayCache::default();
-        // Empty manifest means no baseline — all files are new.
         let manifest: HashMap<String, String> = HashMap::new();
         cache.refresh_with_manifest(&manifest, workspace, None, 32, &store).unwrap();
 
@@ -1142,7 +1115,6 @@ mod tests {
         let file = workspace.join("A.bsl");
         fs::write(&file, content).unwrap();
 
-        // Compute the fingerprint that Postgres would store for this file.
         let fp = fingerprint_content(content, "A.bsl");
         let mut manifest = HashMap::new();
         manifest.insert("A.bsl".to_owned(), fp);
@@ -1152,7 +1124,6 @@ mod tests {
         cache.refresh_with_manifest(&manifest, workspace, None, 32, &store).unwrap();
 
         let overlay = cache.snapshot();
-        // File matches manifest — no overlay entry or hidden path needed.
         assert_eq!(overlay.lexical_documents.len(), 0);
         assert!(!overlay.hidden_paths.contains("A.bsl"));
     }
@@ -1164,7 +1135,6 @@ mod tests {
         let file = workspace.join("A.bsl");
         fs::write(&file, "Процедура Старая()\nКонецПроцедуры").unwrap();
 
-        // Manifest has a different fingerprint (simulating baseline version).
         let mut manifest = HashMap::new();
         manifest.insert("A.bsl".to_owned(), "different-fingerprint".to_owned());
 
@@ -1182,7 +1152,6 @@ mod tests {
     fn manifest_refresh_detects_deleted_baseline_file() {
         let dir = tempdir().unwrap();
         let workspace = dir.path();
-        // No files on disk.
 
         let mut manifest = HashMap::new();
         manifest.insert("A.bsl".to_owned(), "some-fp".to_owned());
@@ -1194,7 +1163,6 @@ mod tests {
 
         let overlay = cache.snapshot();
         assert_eq!(overlay.lexical_documents.len(), 0);
-        // Both files are deleted relative to manifest.
         assert_eq!(overlay.hidden_paths.len(), 2);
         assert!(overlay.hidden_paths.contains("A.bsl"));
         assert!(overlay.hidden_paths.contains("B.bsl"));

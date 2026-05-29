@@ -1,11 +1,8 @@
 #!/bin/bash
 
-# Сравнительный бенчмарк: bsl-analyzer vs bsl-language-server
-# Использует /usr/bin/time -v (GNU time) для точных измерений
 
 set -euo pipefail
 
-# --- Настройки ---
 PROJECT_DIR="${1:?Использование: $0 <путь-к-проекту> [конфиг]}"
 PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
 CONFIG="${2:-$PROJECT_DIR/.bsl-benchmark.json}"
@@ -17,7 +14,6 @@ BSL_LS="${BSL_LS:-bsl-language-server}"
 
 RUNS="${RUNS:-1}"
 
-# --- Проверки ---
 if [ ! -d "$PROJECT_DIR/src/cf" ]; then
     echo "ОШИБКА: Директория $PROJECT_DIR/src/cf не найдена"
     exit 1
@@ -28,7 +24,6 @@ if [ ! -f "$CONFIG" ]; then
     exit 1
 fi
 
-# Работаем из директории проекта
 cd "$PROJECT_DIR"
 
 if ! command -v "$BSL_ANALYZER" &>/dev/null; then
@@ -46,7 +41,6 @@ if ! /usr/bin/time --version &>/dev/null 2>&1; then
     exit 1
 fi
 
-# --- Подсчёт файлов ---
 BSL_COUNT=$(find "$PROJECT_DIR/src/cf" -name "*.bsl" | wc -l)
 BSL_SIZE=$(find "$PROJECT_DIR/src/cf" -name "*.bsl" -print0 | xargs -0 cat 2>/dev/null | wc -c)
 BSL_SIZE_MB=$(echo "scale=1; $BSL_SIZE / 1024 / 1024" | bc)
@@ -66,7 +60,6 @@ echo "================================================================"
 
 mkdir -p "$OUTPUT_DIR"
 
-# --- Функция запуска с замерами ---
 run_benchmark() {
     local name="$1"
     shift
@@ -88,16 +81,12 @@ run_benchmark() {
     local vol_ctx=$(grep "Voluntary context switches" "$time_output" | awk '{print $NF}')
     local invol_ctx=$(grep "Involuntary context switches" "$time_output" | awk '{print $NF}')
 
-    # RSS в MB
     local rss_mb=$(echo "scale=1; $max_rss / 1024" | bc)
 
-    # Wall time в секундах (формат может быть h:mm:ss или m:ss.ss)
     local wall_seconds
     if echo "$wall_time" | grep -qE "^[0-9]+:[0-9]+:[0-9]"; then
-        # h:mm:ss
         wall_seconds=$(echo "$wall_time" | awk -F: '{print $1*3600 + $2*60 + $3}')
     elif echo "$wall_time" | grep -qE "^[0-9]+:[0-9]"; then
-        # m:ss.ss
         wall_seconds=$(echo "$wall_time" | awk -F: '{print $1*60 + $2}')
     else
         wall_seconds="$wall_time"
@@ -115,7 +104,6 @@ run_benchmark() {
     echo "    Context switches: $vol_ctx vol / $invol_ctx invol"
     echo "    Exit code:        $exit_code"
 
-    # Сохраняем результаты для итоговой таблицы
     eval "${name//[- ]/_}_wall=$wall_seconds"
     eval "${name//[- ]/_}_user=$user_time"
     eval "${name//[- ]/_}_sys=$sys_time"
@@ -127,7 +115,6 @@ run_benchmark() {
     return $exit_code
 }
 
-# --- Прогон bsl-language-server ---
 echo ""
 echo "================================================================"
 echo "  1/2: bsl-language-server"
@@ -145,7 +132,6 @@ for i in $(seq 1 "$RUNS"); do
         -s="$SOURCE_DIR" || true
 done
 
-# --- Прогон bsl-analyzer ---
 echo ""
 echo "================================================================"
 echo "  2/2: bsl-analyzer"
@@ -165,7 +151,6 @@ for i in $(seq 1 "$RUNS"); do
         -q || true
 done
 
-# --- Итоговая таблица ---
 echo ""
 echo ""
 echo "================================================================"
@@ -173,7 +158,6 @@ echo "  СРАВНЕНИЕ"
 echo "================================================================"
 echo ""
 
-# Вычисляем разницу
 if [ -n "${bsl_ls_wall:-}" ] && [ -n "${bsl_analyzer_wall:-}" ]; then
     speed_ratio=$(echo "scale=2; $bsl_ls_wall / $bsl_analyzer_wall" | bc 2>/dev/null || echo "N/A")
     mem_ratio=$(echo "scale=2; $bsl_ls_rss / $bsl_analyzer_rss" | bc 2>/dev/null || echo "N/A")

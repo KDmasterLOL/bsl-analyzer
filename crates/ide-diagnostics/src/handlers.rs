@@ -1,7 +1,3 @@
-//! Diagnostic handlers.
-//!
-//! Each diagnostic has its own handler module.
-
 pub mod all_function_path_must_have_return;
 pub mod assign_alias_fields_in_query;
 pub mod bad_words;
@@ -191,12 +187,8 @@ pub mod yo_letter_usage;
 use crate::metadata::*;
 use crate::DiagnosticCode;
 
-/// Get metadata for a diagnostic code.
-///
-/// Returns `None` if metadata is not yet defined for this diagnostic.
 pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata> {
     match code {
-        // DISABLED_BY_DEFAULT diagnostics (11 total)
         DiagnosticCode::BadWords => Some(&bad_words::METADATA),
         DiagnosticCode::CodeAfterAsyncCall => Some(&code_after_async_call::METADATA),
         DiagnosticCode::DenyIncompleteValues => Some(&deny_incomplete_values::METADATA),
@@ -214,7 +206,6 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::TernaryOperatorUsage => Some(&ternary_operator_usage::METADATA),
         DiagnosticCode::TooManyReturns => Some(&too_many_returns::METADATA),
 
-        // Tier 1 diagnostics (syntax-only) - 39 total
         DiagnosticCode::ParseError => Some(&parse_error::METADATA),
         DiagnosticCode::CanonicalSpellingKeywords => Some(&canonical_spelling_keywords::METADATA),
         DiagnosticCode::ConsecutiveEmptyLines => Some(&consecutive_empty_lines::METADATA),
@@ -271,7 +262,6 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
             Some(&nested_function_in_parameters::METADATA)
         }
 
-        // Tier 2 diagnostics (semantic analysis) - 52 total
         DiagnosticCode::AllFunctionPathMustHaveReturn => {
             Some(&all_function_path_must_have_return::METADATA)
         }
@@ -354,7 +344,6 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
             Some(&wrong_use_of_rollback_transaction_method::METADATA)
         }
 
-        // Tier 3 + SDBL diagnostics (35 total)
         DiagnosticCode::AssignAliasFieldsInQuery => Some(&assign_alias_fields_in_query::METADATA),
         DiagnosticCode::CachedPublic => Some(&cached_public::METADATA),
         DiagnosticCode::CommandModuleExportMethods => {
@@ -425,7 +414,6 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         }
         DiagnosticCode::UnsafeFindByCode => Some(&unsafe_find_by_code::METADATA),
 
-        // Additional diagnostics
         DiagnosticCode::DataExchangeLoading => Some(&data_exchange_loading::METADATA),
         DiagnosticCode::ExecuteExternalCode => Some(&execute_external_code::METADATA),
         DiagnosticCode::ExecuteExternalCodeInCommonModule => {
@@ -471,7 +459,6 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
             Some(&wrong_use_function_proceed_with_call::METADATA)
         }
 
-        // Type-inference diagnostics (BSL-TY-*)
         DiagnosticCode::UnresolvedMethodCall => Some(&unresolved_method_call::METADATA),
         DiagnosticCode::MismatchedArgCount => Some(&mismatched_arg_count::METADATA),
         DiagnosticCode::TypeMismatch => Some(&type_mismatch::METADATA),

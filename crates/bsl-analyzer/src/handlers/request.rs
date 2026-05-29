@@ -1,5 +1,3 @@
-//! Handlers for LSP requests.
-
 use anyhow::Result;
 use ide::{
     DocumentHighlightKind as IdeDocumentHighlightKind, FoldingRangeKind as IdeFoldingRangeKind,
@@ -22,10 +20,6 @@ use vfs::FileId;
 use crate::frozen_context::LatencyRequestContext;
 use crate::global_state::GlobalStateSnapshot;
 
-/// Handles textDocument/definition.
-///
-/// Reads from `LatencyRequestContext`, so concurrent `didChange` edits cannot
-/// alias the Salsa snapshot used for resolution.
 pub fn handle_goto_definition(
     ctx: LatencyRequestContext,
     params: GotoDefinitionParams,
@@ -95,7 +89,6 @@ pub fn handle_goto_definition(
     }
 }
 
-/// Handles textDocument/references.
 pub fn handle_find_references(
     ctx: LatencyRequestContext,
     params: ReferenceParams,
@@ -138,7 +131,6 @@ pub fn handle_find_references(
     }
 }
 
-/// Handles textDocument/documentHighlight.
 pub fn handle_document_highlight(
     ctx: LatencyRequestContext,
     params: DocumentHighlightParams,
@@ -192,7 +184,6 @@ pub fn handle_document_highlight(
     }
 }
 
-/// Handles textDocument/foldingRange.
 pub fn handle_folding_range(
     ctx: LatencyRequestContext,
     params: FoldingRangeParams,
@@ -235,7 +226,6 @@ pub fn handle_folding_range(
     }
 }
 
-/// Handles textDocument/hover.
 pub fn handle_hover(ctx: LatencyRequestContext, params: HoverParams) -> Result<Option<Hover>> {
     let _p = tracing::info_span!(
         "handle_hover",
@@ -277,7 +267,6 @@ pub fn handle_hover(ctx: LatencyRequestContext, params: HoverParams) -> Result<O
     }
 }
 
-/// Handles textDocument/completion.
 pub fn handle_completion(
     ctx: LatencyRequestContext,
     params: CompletionParams,
@@ -352,10 +341,6 @@ pub fn handle_completion(
     Ok(Some(CompletionResponse::Array(lsp_items)))
 }
 
-/// Handles textDocument/semanticTokens/full.
-///
-/// Returns empty tokens while VFS is loading; the client re-requests after
-/// `workspace/semanticTokens/refresh`.
 pub fn handle_semantic_tokens_full(
     ctx: LatencyRequestContext,
     params: SemanticTokensParams,
@@ -422,7 +407,6 @@ pub fn handle_semantic_tokens_full(
     Ok(Some(SemanticTokensResult::Tokens(SemanticTokens { result_id: None, data: tokens })))
 }
 
-/// Handles textDocument/documentSymbol.
 pub fn handle_document_symbol(
     ctx: LatencyRequestContext,
     params: DocumentSymbolParams,
@@ -458,7 +442,6 @@ pub fn handle_document_symbol(
     Ok(Some(DocumentSymbolResponse::Nested(lsp_symbols)))
 }
 
-/// Handles textDocument/signatureHelp.
 pub fn handle_signature_help(
     ctx: LatencyRequestContext,
     params: SignatureHelpParams,
@@ -529,7 +512,6 @@ fn to_lsp_signature_help(sh: ide::SignatureHelp) -> lsp_types::SignatureHelp {
     }
 }
 
-/// Handles textDocument/codeAction.
 pub fn handle_code_action(
     ctx: LatencyRequestContext,
     params: CodeActionParams,
@@ -749,7 +731,6 @@ fn convert_completion_kind(kind: ide::CompletionItemKind) -> CompletionItemKind 
     }
 }
 
-/// Handles textDocument/formatting.
 pub fn handle_formatting(
     snap: GlobalStateSnapshot,
     params: lsp_types::DocumentFormattingParams,
@@ -802,9 +783,6 @@ pub fn handle_formatting(
     }
 }
 
-/// Renders an edit's `new_text` in a debug-log-friendly form: escapes
-/// whitespace, caps length at 60 chars. Spotting `\\t`/`\\n` in the log is
-/// what makes the format trace actually readable.
 fn truncate_edit_preview(s: &str) -> String {
     let escaped: String = s
         .chars()
@@ -823,7 +801,6 @@ fn truncate_edit_preview(s: &str) -> String {
     }
 }
 
-/// Handles textDocument/rangeFormatting.
 pub fn handle_range_formatting(
     snap: GlobalStateSnapshot,
     params: lsp_types::DocumentRangeFormattingParams,
@@ -899,7 +876,6 @@ pub fn handle_range_formatting(
     }
 }
 
-/// Handles textDocument/onTypeFormatting.
 pub fn handle_on_type_formatting(
     snap: GlobalStateSnapshot,
     params: lsp_types::DocumentOnTypeFormattingParams,
@@ -1024,15 +1000,11 @@ mod tests {
 
     #[test]
     fn goto_definition_context_frozen_against_main_thread_mutation() {
-        // Regression for the async dispatch race: the worker must read the
-        // same text that existed at dispatch time, even if the main thread
-        // applies didChange edits before the handler runs.
         let mut state = create_test_state();
 
         let uri = lsp_types::Url::parse("file:///frozen.bsl").unwrap();
         state.mem_docs.insert(uri.clone(), "original".to_string(), 1);
 
-        // Mirrors `on_latency`: freeze the worker context before later main-thread edits.
         let ctx = latency_ctx(&state);
 
         state.mem_docs.update(
@@ -1208,9 +1180,6 @@ mod tests {
 
     #[test]
     fn semantic_tokens_returns_empty_when_vfs_not_done() {
-        // Guard path: when VFS is still loading, the handler must not panic
-        // on missing file data; it returns an empty token list so the client
-        // retries after `workspace/semanticTokens/refresh`.
         let state = create_test_state();
         assert!(!state.vfs_done, "default GlobalState has vfs_done=false");
 

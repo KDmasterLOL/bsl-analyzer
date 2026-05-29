@@ -1,21 +1,3 @@
-//! End-to-end inference tests for the TabularSection method bridge.
-//!
-//! Covers the full BSL chain
-//! ```bsl
-//!   ОбъектСпр   = Справочники.Справочник1.СоздатьЭлемент();
-//!   НоваяСтрока = ОбъектСпр.ТабличнаяЧасть1.Добавить();
-//!   Кол         = НоваяСтрока.Реквизит2;
-//!   НомСтр      = НоваяСтрока.НомерСтроки;
-//! ```
-//! against the designer fixture at `crates/bsl-metadata/fixtures/designer`,
-//! which already declares `Catalog Справочник1` with
-//! `ТабличнаяЧасть1` (`Реквизит1: String`, `Реквизит2: Number`).
-//!
-//! The receiver `СправочникОбъект.Справочник1` is provided by a
-//! JSDoc-annotated CommonModule function — the same trick as
-//! `infer_field_lookup.rs` — so the test does not depend on the manager
-//! 3-segment call path.
-
 use bsl_metadata::MdoType;
 use hir::{
     Builders, HirDatabase, InferenceDiagnostic, MetadataKind, TypeId, TypeKernelDb, TypeKind,
@@ -87,12 +69,6 @@ const OBJECT_RETURNING_MODULE: &str = r#"
 
 #[test]
 fn infer_full_tabular_section_chain() {
-    // The motivating user scenario, end-to-end. After the bridge:
-    //   - ОбъектСпр    : MetadataRef { CatalogObject, "Справочник1" }
-    //   - Тч           : MetadataRef { TabularSection { Catalog }, "Справочник1.ТабличнаяЧасть1" }
-    //   - НоваяСтрока  : MetadataRef { TabularSectionRow { Catalog }, "Справочник1.ТабличнаяЧасть1" }
-    //   - Кол          : Number  (custom row attribute Реквизит2)
-    //   - НомСтр       : Number  (platform standard row property НомерСтроки)
     let fixture = format!(
         r#"{OBJECT_RETURNING_MODULE}
 //- /test.bsl
@@ -177,9 +153,6 @@ fn infer_tabular_section_unload_returns_value_table() {
 
 #[test]
 fn unresolved_method_call_fires_on_tabular_section_typo() {
-    // After the bridge, `mdo_kind_to_plural` returns Some for
-    // TabularSection — so a typo'd method name surfaces as
-    // `UnresolvedMethodCall` instead of being silently swallowed.
     let fixture = format!(
         r#"{OBJECT_RETURNING_MODULE}
 //- /test.bsl
@@ -218,8 +191,6 @@ fn unresolved_method_call_fires_on_tabular_section_typo() {
 
 #[test]
 fn no_unresolved_method_call_on_valid_tabular_section_method() {
-    // Negative twin of the typo test: the bridge resolves the call,
-    // the diagnostic stays silent.
     let fixture = format!(
         r#"{OBJECT_RETURNING_MODULE}
 //- /test.bsl

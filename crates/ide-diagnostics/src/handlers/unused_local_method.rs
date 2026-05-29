@@ -1,5 +1,3 @@
-//! Reports local procedures and functions that are declared but never used.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -51,13 +49,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     let item_tree = ctx.item_tree();
 
-    // Collect called method names from ModuleCallSummary (DRY: reuse call_graph extraction)
     let module_id = hir::ModuleId::new(ctx.file_id);
     let summary = ctx.call_summary(module_id);
 
     let mut called_methods: FxHashSet<String> = FxHashSet::default();
 
-    // DirectLocal call targets from call_edges
     for edge in &summary.call_edges {
         if let hir::call_graph::CallTarget::Local { callee_local_id } = &edge.target {
             if let Some(method) = summary.methods.iter().find(|m| m.local_id == *callee_local_id) {
@@ -66,8 +62,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         }
     }
 
-    // MethodCall names (obj.Method()) — conservative: prevents false positives
-    // for ЭтотОбъект.Метод() patterns not captured by call_edges
     let module_bodies = ctx.module_bodies();
     for (_, body) in module_bodies.iter_bodies() {
         collect_method_call_names(body, &mut called_methods);
@@ -76,8 +70,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         collect_method_call_names(&module_code.body, &mut called_methods);
     }
 
-    // Add form event and command handlers as "called" methods
-    // These are called by the platform, not by code
     if let Some(ref form) = metadata.form {
         for handler in form.event_handlers() {
             called_methods.insert(handler.handler_name.to_lowercase());
@@ -87,8 +79,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         }
     }
 
-    // Add HTTP service handlers as "called" methods
-    // These are called by the platform, not by code
     if let Some(ref http_service) = metadata.http_service {
         for (_template, method) in http_service.all_methods() {
             if !method.is_handler_empty() {
@@ -132,11 +122,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics
 }
 
-/// Collect method names from `obj.Method()` calls (MethodCall pattern).
-///
-/// DirectLocal calls are already covered by `ModuleCallSummary.call_edges`.
-/// MethodCall names are collected separately as a conservative measure to prevent
-/// false positives for patterns like `ЭтотОбъект.Метод()`.
 fn collect_method_call_names(body: &hir::Body, called_methods: &mut FxHashSet<String>) {
     for (_, expr) in body.exprs_iter() {
         if let hir::Expr::MethodCall { method, .. } = expr {
@@ -218,9 +203,6 @@ mod tests {
 
     #[test]
     fn test_call_inside_dot_function_condition_is_counted() {
-        // A `.Функция` property access in the `Если` condition must not break
-        // the block: the enclosed call has to stay reachable in the call
-        // graph, otherwise the callee is falsely reported as unused.
         let code = r#"
 Процедура ВывестиКолонкуФункция()
 КонецПроцедуры
@@ -424,17 +406,15 @@ mod tests {
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalMethod).collect();
 
         assert_eq!(
-            // snapshot-skip: custom configuration assertion intentionally retained.
             unused_diags.len(),
             3,
             "Expected 3 diagnostics with custom prefixes, got {}",
             unused_diags.len()
         );
 
-        crate::test_utils::assert_diagnostic_range(code, unused_diags[0], 1, 10, 24); // snapshot-skip: custom configuration range assertion intentionally retained.
-        crate::test_utils::assert_diagnostic_range(code, unused_diags[1], 60, 10, 40); // snapshot-skip: custom configuration range assertion intentionally retained.
+        crate::test_utils::assert_diagnostic_range(code, unused_diags[0], 1, 10, 24);
+        crate::test_utils::assert_diagnostic_range(code, unused_diags[1], 60, 10, 40);
         crate::test_utils::assert_diagnostic_range(code, unused_diags[2], 63, 10, 39);
-        // snapshot-skip: custom configuration range assertion intentionally retained.
     }
 
     #[test]
@@ -459,7 +439,7 @@ mod tests {
               message: Неиспользуемый локальный метод "ЛокальнаяПроцедура"
               severity: Warning"#]],
         );
-        assert!(unused_diags[0].message.contains("ЛокальнаяПроцедура")); // snapshot-skip: message-substring assertion intentionally retained.
+        assert!(unused_diags[0].message.contains("ЛокальнаяПроцедура"));
     }
 
     #[test]
@@ -485,7 +465,7 @@ mod tests {
               message: Неиспользуемый локальный метод "Главная"
               severity: Warning"#]],
         );
-        assert!(unused_diags[0].message.contains("Главная")); // snapshot-skip: message-substring assertion intentionally retained.
+        assert!(unused_diags[0].message.contains("Главная"));
     }
 
     #[test]
@@ -613,10 +593,8 @@ mod tests {
         let unused_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalMethod).collect();
 
-        // createPOST — HTTP service handler, should not be flagged
-        // НеИспользуемая — not a handler, should be flagged
-        assert_eq!(unused_diags.len(), 1); // snapshot-skip: metadata-backed diagnostic assertion intentionally retained.
-        assert!(unused_diags[0].message.contains("НеИспользуемая")); // snapshot-skip: metadata-backed message assertion intentionally retained.
+        assert_eq!(unused_diags.len(), 1);
+        assert!(unused_diags[0].message.contains("НеИспользуемая"));
     }
 
     #[test]
@@ -670,18 +648,14 @@ mod tests {
         let unused_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalMethod).collect();
 
-        // СписокПриАктивизацииСтроки — element event handler, should not be flagged
-        // ПриСозданииНаСервере — form event handler, should not be flagged
-        // НеИспользуемая — not a handler, should be flagged
         assert_eq!(
-            // snapshot-skip: metadata-backed diagnostic assertion intentionally retained.
             unused_diags.len(),
             1,
             "Expected 1 diagnostic, got {}. Diagnostics: {:?}",
             unused_diags.len(),
             unused_diags.iter().map(|d| &d.message).collect::<Vec<_>>()
         );
-        assert!(unused_diags[0].message.contains("НеИспользуемая")); // snapshot-skip: metadata-backed message assertion intentionally retained.
+        assert!(unused_diags[0].message.contains("НеИспользуемая"));
     }
 
     #[test]
@@ -707,6 +681,6 @@ mod tests {
               message: Неиспользуемый локальный метод "Главная"
               severity: Warning"#]],
         );
-        assert!(unused_diags[0].message.contains("Главная")); // snapshot-skip: message-substring assertion intentionally retained.
+        assert!(unused_diags[0].message.contains("Главная"));
     }
 }

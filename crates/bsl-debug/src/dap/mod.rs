@@ -1,8 +1,3 @@
-//! DAP (Debug Adapter Protocol) server for bsl-debug.
-//!
-//! Translates DAP protocol messages to [`crate::session::DebugSession`] calls.
-//! Reads from stdin and writes to stdout via the `dap` crate.
-
 use std::collections::HashMap;
 use std::io::{BufReader, BufWriter};
 use std::path::Path;
@@ -24,19 +19,16 @@ use crate::types::base::{CalcPathItem, StepAction, ViewInterface};
 const THREAD_ID: i64 = 1;
 const VAR_REF_BASE: i64 = 1000;
 
-/// Information needed to expand a variable.
 #[derive(Clone)]
 struct ExpandInfo {
     path: Vec<CalcPathItem>,
     stack_level: u32,
 }
 
-/// State shared between the main loop and the event listener thread.
 struct DapState {
     session: Option<DebugSession>,
     var_refs: HashMap<i64, ExpandInfo>,
     next_var_ref: i64,
-    /// Breakpoints keyed by file path.
     breakpoints_by_file: HashMap<String, Vec<u32>>,
 }
 
@@ -66,7 +58,6 @@ impl DapState {
     }
 }
 
-/// Custom attach arguments for 1C debugger.
 #[derive(Deserialize, Debug)]
 struct AttachArgs {
     host: String,
@@ -76,9 +67,6 @@ struct AttachArgs {
     config_root: Option<String>,
 }
 
-/// Run the DAP adapter loop on stdio.
-///
-/// Blocks until the client disconnects or sends a Disconnect request.
 pub fn run_dap_stdio() {
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
@@ -196,7 +184,6 @@ fn handle_request(
         }
 
         Command::Scopes(args) => {
-            // frame_id encodes stack level: frame 0 = stack level 0, etc.
             let variables_reference = VAR_REF_BASE - 1 + args.frame_id;
             let rsp = req.success(ResponseBody::Scopes(responses::ScopesResponse {
                 scopes: vec![Scope {
@@ -382,7 +369,6 @@ fn do_set_breakpoints(
 
     let mut guard = state.lock().unwrap();
 
-    // Remove old breakpoints for this file first.
     let old_lines = guard.breakpoints_by_file.remove(&path).unwrap_or_default();
 
     if let Some(session) = guard.session.as_mut() {
@@ -392,7 +378,6 @@ fn do_set_breakpoints(
             let _ = session.remove_breakpoint_by_path(file_path, *line);
         }
 
-        // Set new breakpoints.
         let mut new_lines = Vec::new();
         for bp in breakpoints {
             let line = bp.line as u32;
@@ -452,9 +437,6 @@ fn do_variables(
 ) -> Result<Vec<Variable>, String> {
     let mut guard = state.lock().unwrap();
 
-    // Check if this is a locals scope reference (VAR_REF_BASE - 1 + frame_id)
-    // Frame 0 → VAR_REF_BASE - 1, Frame 1 → VAR_REF_BASE, etc.
-    // Locals scope references start below VAR_REF_BASE.
     if variables_reference < VAR_REF_BASE {
         let stack_level = (variables_reference - (VAR_REF_BASE - 1)).max(0) as u32;
         let session = guard.session_mut().map_err(|e| e.to_string())?;
@@ -493,7 +475,6 @@ fn do_variables(
         return Ok(result);
     }
 
-    // Expand a structured variable.
     let expand_info = guard.var_refs.get(&variables_reference).cloned();
     let Some(info) = expand_info else {
         return Ok(Vec::new());
@@ -539,7 +520,6 @@ fn do_step(action: StepAction, state: &Arc<Mutex<DapState>>) -> Result<(), Strin
     session.step(action).map_err(|e| e.to_string())
 }
 
-/// Spawns a background thread that polls for debug events and sends DAP events.
 fn spawn_event_listener(
     state: Arc<Mutex<DapState>>,
     output: Arc<Mutex<ServerOutput<std::io::Stdout>>>,
@@ -576,7 +556,6 @@ fn spawn_event_listener(
                     "execution stopped"
                 );
 
-                // Reset variable references on each new stop.
                 state.lock().unwrap().reset_var_refs();
 
                 let (reason, text, description) = match &ev.reason {

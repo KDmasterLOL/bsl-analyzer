@@ -19,7 +19,6 @@ notify.workspace = true
 rayon.workspace = true
 rustc-hash.workspace = true
 
-# Internal crates
 stdx.workspace = true
 vfs.workspace = true
 paths.workspace = true

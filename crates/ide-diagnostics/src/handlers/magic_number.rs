@@ -1,7 +1,3 @@
-//! MagicNumber diagnostic
-//!
-//! Detects hard-coded numeric literals in BSL code.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -23,13 +19,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic.
-///
-/// Called from hir_dispatch when `BodyDiagnostic::MagicNumber` is encountered.
-/// Applies configuration filtering:
-/// - authorizedNumbers: numbers that are always allowed
-/// - allowMagicIndexes: whether to allow numbers in array index access
-/// - excludedConstructors: constructor types where numbers are allowed
 pub fn from_hir(
     value: &str,
     range: TextRange,
@@ -42,13 +31,11 @@ pub fn from_hir(
         return None;
     }
 
-    // Apply authorizedNumbers configuration
     let config = Config::from_context(ctx);
     if is_authorized(value, &config) {
         return None;
     }
 
-    // Apply context-based exclusions
     match context {
         MagicNumberContext::InDefaultParam => return None,
         MagicNumberContext::InStructureInsert => return None,
@@ -61,15 +48,12 @@ pub fn from_hir(
             if config.allow_magic_indexes {
                 return None;
             }
-            // If not allowed, fall through to emit diagnostic
         }
         MagicNumberContext::InConstructor { type_name } => {
             if config.excluded_constructors.contains(type_name) {
                 return None;
             }
-            // If not excluded, fall through to emit diagnostic
         }
-        // These contexts should emit diagnostics:
         MagicNumberContext::InExpression
         | MagicNumberContext::InReturn
         | MagicNumberContext::InMethodCall
@@ -94,7 +78,6 @@ const DEFAULT_ALLOW_MAGIC_INDEXES: bool = true;
 const DEFAULT_EXCLUDED_CONSTRUCTORS: &str =
     "КвалификаторыЧисла,КвалификаторыСтроки,NumberQualifiers,StringQualifiers,Цвет,Color";
 
-/// Configuration for the diagnostic
 #[derive(Debug, Clone)]
 struct Config {
     authorized_numbers: HashSet<String>,
@@ -143,7 +126,6 @@ impl Config {
     }
 }
 
-/// Check if number is in authorized list
 fn is_authorized(number: &str, config: &Config) -> bool {
     config.authorized_numbers.contains(number)
 }
@@ -168,8 +150,6 @@ mod tests {
 
     #[test]
     fn test_comprehensive() {
-        // Large inline regression fixture for magic-number coverage.
-        // Uses 4-space indentation to match original column positions exactly.
         let code = r#"Процедура ПроверкаЧисел()
 
     ПонятнаяПеременная = 6; // Нет ошибки
@@ -312,8 +292,6 @@ mod tests {
 
     #[test]
     fn test_comprehensive_with_allow_magic_indexes_false() {
-        // Same code as test_comprehensive with 4-space indentation.
-        // Lines 49-50 contain array index accesses with magic numbers.
         let code = r#"Процедура ПроверкаЧисел()
 
     ПонятнаяПеременная = 6; // Нет ошибки

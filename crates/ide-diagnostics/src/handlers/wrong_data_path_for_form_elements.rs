@@ -1,5 +1,3 @@
-//! Reports form elements whose XML `DataPath` starts with `~`.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode};
@@ -23,7 +21,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Collect diagnostics from form metadata.
 pub fn from_metadata(
     metadata: &ModuleMetadata,
     ctx: &crate::DiagnosticsContext,
@@ -34,12 +31,10 @@ pub fn from_metadata(
         return Vec::new();
     }
 
-    // Only process FormModule
     if metadata.module_type != bsl_metadata::ModuleType::FormModule {
         return Vec::new();
     }
 
-    // Check if we have form metadata
     let Some(ref form) = metadata.form else {
         return Vec::new();
     };
@@ -54,7 +49,6 @@ pub fn from_metadata(
             form.name()
         );
 
-        // Use range [0, min(9, file_len)) to avoid exceeding file bounds
         let file_len = file_text.len();
         let end_offset = std::cmp::min(9, file_len);
         let range = TextRange::new(0.into(), (end_offset as u32).into());

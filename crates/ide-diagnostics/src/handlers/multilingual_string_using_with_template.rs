@@ -1,5 +1,3 @@
-//! Reports `НСтр` / `NStr` calls with missing languages when they are used as templates.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::utils::nstr::{
@@ -23,7 +21,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Checks multilingual `НСтр` literals used by `СтрШаблон` / `StrTemplate`.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let _span = tracing::debug_span!("MultilingualStringUsingWithTemplate::check").entered();
 
@@ -39,7 +36,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     let mut diagnostics = Vec::new();
 
-    // Find all NStr calls by finding IDENT tokens with НСтр/NStr text
     for token in root.descendants_with_tokens() {
         let tok = match token {
             syntax::NodeOrToken::Token(t) => t,
@@ -50,9 +46,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             continue;
         }
 
-        // AST structure: CALL_EXPR > IDENT(node) > IDENT(token) > ARG_LIST
-        // Or for qualified: CALL_EXPR > FIELD_EXPR > IDENT(node) > IDENT(token)
-        // tok.parent() returns IDENT node, we need to find CALL_EXPR ancestor
         let call_expr = match tok
             .parent()
             .and_then(|p| p.ancestors().find(|n| n.kind() == SyntaxKind::CALL_EXPR))
@@ -61,23 +54,19 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             None => continue,
         };
 
-        // Check if NStr is inside StrTemplate call OR assigned to variable used in StrTemplate
         let in_template = has_template_in_parents(&call_expr);
         let used_in_template = get_assigned_variable_name(&call_expr)
             .map(|var| is_variable_used_in_template(&var, &call_expr))
             .unwrap_or(false);
 
-        // Skip if NOT in template context - this is the opposite of MultilingualStringHasAllDeclaredLanguages
         if !in_template && !used_in_template {
             continue;
         }
 
-        // Find ARG_LIST sibling
         let arg_list = call_expr.children().find(|n| n.kind() == SyntaxKind::ARG_LIST);
         let arg_list = match arg_list {
             Some(al) => al,
             None => {
-                // НСтр() with empty arguments in template context - error
                 diagnostics.push(Diagnostic {
                     code,
                     message: format!(
@@ -93,12 +82,10 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             }
         };
 
-        // Get first argument from ARG_LIST
         let first_arg = arg_list.children().find(|n| n.kind() == SyntaxKind::EXPR);
         let first_arg = match first_arg {
             Some(a) => a,
             None => {
-                // Empty arguments in template context
                 diagnostics.push(Diagnostic {
                     code,
                     message: format!(
@@ -114,23 +101,19 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             }
         };
 
-        // Find the LITERAL node containing the string
         let literal = first_arg.descendants().find(|n| n.kind() == SyntaxKind::LITERAL);
         let literal = match literal {
             Some(l) => l,
             None => continue,
         };
 
-        // Extract the string content
         let string_content = match sdbl_utils::extract_string_content(&literal) {
             Some(s) => s,
             None => continue,
         };
 
-        // Extract language keys from the string
         let found_languages = extract_language_keys(&string_content);
 
-        // Find missing languages
         let missing: Vec<&String> = config
             .declared_languages
             .iter()
@@ -138,7 +121,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             .collect();
 
         if !missing.is_empty() {
-            // Format missing languages for message
             let missing_str = missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
 
             diagnostics.push(Diagnostic {
@@ -168,8 +150,6 @@ mod tests {
     use expect_test::expect;
     #[test]
     fn test_only_ru() {
-        // Default config: declaredLanguages = "ru"
-        // Only NStr in StrTemplate context with missing ru triggers diagnostic
         let code = r#"// Считаем, что в конфигурации два языка ru и en
 Процедура БезОшибок()
 
@@ -221,7 +201,6 @@ mod tests {
 
     #[test]
     fn test_ru_and_en() {
-        // declaredLanguages = "ru,en": NStr in StrTemplate context missing either language triggers
         let code = r#"// Считаем, что в конфигурации два языка ru и en
 Процедура БезОшибок()
 

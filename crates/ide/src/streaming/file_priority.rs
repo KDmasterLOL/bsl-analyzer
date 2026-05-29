@@ -1,39 +1,19 @@
-//! File priority calculation for streaming analysis.
-//!
-//! Determines processing order based on module type and execution context.
-//! Higher priority modules are processed first to minimize waits during
-//! cross-module dependency resolution.
-
 use std::path::Path;
 use std::sync::Arc;
 
 use bsl_metadata::{CommonModule, Configuration};
 
-/// Priority levels for file processing.
-///
-/// Lower values = higher priority (processed first).
 pub mod priority {
-    /// CommonModule with Server context only (highest priority).
     pub const COMMON_MODULE_SERVER: u8 = 0;
-    /// CommonModule with ServerCall capability.
     pub const COMMON_MODULE_SERVER_CALL: u8 = 1;
-    /// CommonModule running on both client and server.
     pub const COMMON_MODULE_CLIENT_SERVER: u8 = 2;
-    /// CommonModule with Client context only.
     pub const COMMON_MODULE_CLIENT: u8 = 3;
-    /// Manager module (Catalogs, Documents, etc.).
     pub const MANAGER_MODULE: u8 = 4;
-    /// Object module (data layer).
     pub const OBJECT_MODULE: u8 = 5;
-    /// Form module (UI layer, lowest priority).
     pub const FORM_MODULE: u8 = 6;
-    /// Other module types.
     pub const OTHER: u8 = 7;
 }
 
-/// Calculate priority for a file based on its path and metadata.
-///
-/// Returns priority level where 0 = highest priority, 7 = lowest.
 pub fn compute_priority(path: &Path, configuration: Option<&Arc<Configuration>>) -> u8 {
     let path_str = path.to_string_lossy();
     let normalized = path_str.replace('\\', "/");
@@ -50,11 +30,6 @@ pub fn compute_priority(path: &Path, configuration: Option<&Arc<Configuration>>)
     module_type_priority(&normalized)
 }
 
-/// Extract CommonModule name from path.
-///
-/// Matches patterns:
-/// - `CommonModules/<Name>/Ext/Module.bsl`
-/// - `ОбщиеМодули/<Name>/Ext/Module.bsl`
 fn extract_common_module_name(path: &str) -> Option<String> {
     let lower = path.to_lowercase();
 
@@ -80,10 +55,6 @@ fn extract_common_module_name(path: &str) -> Option<String> {
     Some(name.to_string())
 }
 
-/// Determine CommonModule priority from its execution context flags.
-///
-/// Server-only modules have highest priority because ServerCall modules
-/// typically depend on them.
 fn common_module_priority(module: &CommonModule) -> u8 {
     let is_server = module.is_server();
     let is_client =
@@ -109,7 +80,6 @@ fn common_module_priority(module: &CommonModule) -> u8 {
     priority::COMMON_MODULE_CLIENT_SERVER
 }
 
-/// Determine priority from module type in path.
 fn module_type_priority(path: &str) -> u8 {
     let lower = path.to_lowercase();
 

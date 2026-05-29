@@ -1,42 +1,3 @@
-//! CommentedCode diagnostic.
-//!
-//! Detects commented-out code that should be removed.
-//!
-//! ## Why?
-//! Commented code clutters the codebase and creates confusion.
-//! Use version control (git) instead of commenting out old code.
-//!
-//! ## Bad practice
-//! ```bsl
-//! Функция Тест()
-//!     А = 1;
-//!     // Б = 2;
-//!     // Если Условие Тогда
-//!     //     Возврат Б;
-//!     // КонецЕсли;
-//!     Возврат А;
-//! КонецФункции
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! Функция Тест()
-//!     А = 1;
-//!     Возврат А;
-//! КонецФункции
-//! ```
-//!
-//! ## Configuration
-//! - **threshold** (default: 0.9) - Code detection threshold (0.0 to 1.0)
-//! - **exclusionPrefixes** (default: "") - Comma-separated list of prefixes to exclude
-//! - **Enabled by default:** Yes
-//! - **Severity:** Minor (INFO in our implementation)
-//! - **Tags:** STANDARD, BADPRACTICE
-//! - **Minutes to fix:** 1
-//!
-//! ## Implementation
-//! Migrated to text-based API using Rowan tokens instead of text processing.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -83,10 +44,6 @@ struct CommentGroup {
     tokens: Vec<SyntaxToken>,
 }
 
-/// Main entry point for CommentedCode diagnostic.
-///
-/// This is a file-level text-based diagnostic called from collect_text_diagnostics().
-/// Pattern: Similar to SpaceAtStartComment - works with comment tokens.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::CommentedCode;
     if ctx.is_disabled_with_metadata(code) {
@@ -99,19 +56,14 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let parse = ctx.parse();
     let root = parse.syntax_node();
 
-    // Get file text for checking gaps between comments
     let file_text = ctx.file_text();
 
-    // Collect all comment tokens
     let comment_tokens = collect_comment_tokens(&root);
 
-    // Group consecutive comments
     let comment_groups = group_consecutive_comments(comment_tokens, &file_text);
 
-    // Check each group
     for group in comment_groups {
         if is_comment_group_code(&group, &config) {
-            // Compute range covering only code-like tokens (trim non-code comments from edges)
             let code_range = code_tokens_range(&group, &config);
             diagnostics.push(Diagnostic {
                 code: DiagnosticCode::CommentedCode,
@@ -127,7 +79,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics
 }
 
-/// Collect all COMMENT tokens from the syntax tree.
 fn collect_comment_tokens(root: &SyntaxNode) -> Vec<SyntaxToken> {
     let mut tokens = Vec::new();
     for element in root.descendants_with_tokens() {
@@ -140,18 +91,11 @@ fn collect_comment_tokens(root: &SyntaxNode) -> Vec<SyntaxToken> {
     tokens
 }
 
-/// Group consecutive comment tokens into comment groups.
-///
-/// Comments are considered consecutive if they are on immediately adjacent lines
-/// with no non-comment lines between them (including blank lines or code lines).
-///
-/// Groups are broken when a non-comment line is encountered.
 fn group_consecutive_comments(tokens: Vec<SyntaxToken>, file_text: &str) -> Vec<CommentGroup> {
     if tokens.is_empty() {
         return Vec::new();
     }
 
-    // Build line index to map offsets to line numbers
     let mut line_starts = vec![0];
     for (idx, ch) in file_text.char_indices() {
         if ch == '\n' {
@@ -159,7 +103,6 @@ fn group_consecutive_comments(tokens: Vec<SyntaxToken>, file_text: &str) -> Vec<
         }
     }
 
-    // Helper to get line number from offset
     let get_line = |offset: usize| -> usize {
         line_starts.binary_search(&offset).unwrap_or_else(|idx| idx.saturating_sub(1))
     };
@@ -172,14 +115,11 @@ fn group_consecutive_comments(tokens: Vec<SyntaxToken>, file_text: &str) -> Vec<
         let curr_offset = u32::from(curr_token.text_range().start()) as usize;
         let curr_line = get_line(curr_offset);
 
-        // Strict consecutive check: comments must be on immediately adjacent lines
-        // Groups break on any non-comment line
         let is_consecutive = curr_line == prev_line + 1;
 
         if is_consecutive {
             current_tokens.push(curr_token.clone());
         } else {
-            // Start new group
             let range = TextRange::new(
                 current_tokens.first().unwrap().text_range().start(),
                 current_tokens.last().unwrap().text_range().end(),
@@ -191,7 +131,6 @@ fn group_consecutive_comments(tokens: Vec<SyntaxToken>, file_text: &str) -> Vec<
         prev_line = curr_line;
     }
 
-    // Don't forget the last group
     if !current_tokens.is_empty() {
         let range = TextRange::new(
             current_tokens.first().unwrap().text_range().start(),
@@ -203,8 +142,6 @@ fn group_consecutive_comments(tokens: Vec<SyntaxToken>, file_text: &str) -> Vec<
     groups
 }
 
-/// Compute the range covering only code-like tokens in a group,
-/// trimming non-code comments from the start and end.
 fn code_tokens_range(group: &CommentGroup, config: &Config) -> Option<TextRange> {
     let first = group.tokens.iter().position(|t| is_code_like(t.text(), config))?;
     let last = group.tokens.iter().rposition(|t| is_code_like(t.text(), config))?;
@@ -606,7 +543,6 @@ mod tests {
 
     #[test]
     fn test_multiline_commented_block() {
-        // Multi-line commented code block at start — should be 1 diagnostic
         let code = r#"//НужноПересчитать = Ложь;
 //Если Документ.Проведен Тогда
 //    НужноПересчитать = Истина;
@@ -621,7 +557,6 @@ mod tests {
 
     #[test]
     fn test_commented_out_procedure() {
-        // Commented-out procedure definition
         let code = r#"//// Процедура ВыполнитьСервис()
 ////
 ////    ПодготовитьДанные();
@@ -637,7 +572,6 @@ mod tests {
 
     #[test]
     fn test_two_consecutive_commented_lines() {
-        // Two consecutive commented code lines — single group, single diagnostic
         let code = r#"//Параметры.Вставить("ДатаНачала", ТекущаяДата());
 //Параметры.Вставить("ДатаОкончания", ТекущаяДата());"#;
         let diagnostics = check_ast_diagnostic(code, check);
@@ -650,7 +584,6 @@ mod tests {
 
     #[test]
     fn test_range_excludes_wrapping_descriptive_comments() {
-        // Descriptive comments wrapping commented-out code should not be included in range
         let code = r#"Процедура Тест()
     // ++ Проверяем одинаковые значения
     //Таблица = Источник;
@@ -668,15 +601,10 @@ mod tests {
               message: Программные модули не должны иметь закомментированных фрагментов кода
               severity: Information"#]]
         .assert_eq(&format_diags(code, &diagnostics));
-
-        // Range should cover only lines 2-7 (code), not line 1 (// ++) or line 8 (// --)
-        // Line 2: "    //Таблица = Источник;" starts at col 4
-        // Line 7: "    //Возврат Истина;" ends at end of that line
     }
 
     #[test]
     fn test_exclusion_prefix() {
-        // Lines with <code> prefix should be excluded when exclusionPrefixes is configured
         let code = r#"Процедура ШаблонМетода(Параметр)
     //<code>Если Истина Тогда
     //<code>Возврат;

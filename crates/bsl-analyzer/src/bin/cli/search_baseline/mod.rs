@@ -13,7 +13,6 @@ mod snapshot_id;
 
 #[derive(Subcommand)]
 pub enum SearchCommand {
-    /// Baseline storage operations for centralized search
     Baseline {
         #[command(subcommand)]
         command: SearchBaselineCommand,
@@ -22,16 +21,13 @@ pub enum SearchCommand {
 
 #[derive(Subcommand)]
 pub enum SearchBaselineCommand {
-    /// Build a local code snapshot and publish it into centralized PostgreSQL storage
     Publish(SearchBaselinePublishArgs),
 
-    /// Inspect centralized PostgreSQL baseline storage
     Inspect {
         #[command(subcommand)]
         command: SearchBaselineInspectCommand,
     },
 
-    /// Run administrative PostgreSQL baseline storage operations
     Admin {
         #[command(subcommand)]
         command: SearchBaselineAdminCommand,
@@ -40,34 +36,25 @@ pub enum SearchBaselineCommand {
 
 #[derive(Subcommand)]
 pub enum SearchBaselineInspectCommand {
-    /// List published snapshots from centralized PostgreSQL storage
     ListSnapshots(SearchBaselineListSnapshotsArgs),
 
-    /// Show one published snapshot from centralized PostgreSQL storage
     ShowSnapshot(SearchBaselineShowSnapshotArgs),
 
-    /// List shared file objects stored in centralized PostgreSQL storage
     ListFileObjects(SearchBaselineListFileObjectsArgs),
 
-    /// Show one shared file object from centralized PostgreSQL storage
     ShowFileObject(SearchBaselineShowFileObjectArgs),
 
-    /// List embedding inventories stored in centralized PostgreSQL storage
     ListEmbeddings(SearchBaselineListEmbeddingsArgs),
 
-    /// Show active embedding coverage for centralized PostgreSQL storage
     ShowEmbeddingCoverage(SearchBaselineShowEmbeddingCoverageArgs),
 
-    /// Analyze snapshot retention policy for centralized PostgreSQL storage
     Retention(SearchBaselineRetentionArgs),
 }
 
 #[derive(Subcommand)]
 pub enum SearchBaselineAdminCommand {
-    /// Initialize or migrate PostgreSQL baseline storage schema
     Migrate(SearchBaselineAdminMigrateArgs),
 
-    /// Garbage-collect unreferenced shared baseline objects in PostgreSQL storage
     Gc(SearchBaselineAdminGcArgs),
 }
 
@@ -79,35 +66,24 @@ pub enum SearchBaselineCorpusCli {
 
 #[derive(Args, Clone)]
 pub struct SearchBaselinePublishArgs {
-    /// Corpus to publish into centralized baseline storage
     #[arg(long, value_enum, default_value_t = SearchBaselineCorpusCli::WorkspaceCode)]
     pub(super) corpus: SearchBaselineCorpusCli,
 
-    /// Project root containing bsl-analyzer.toml
     #[arg(short = 's', long = "source-dir", default_value = ".")]
     pub(super) source_dir: PathBuf,
 
-    /// Immutable snapshot identifier. Optional when --branch/--commit are provided.
     #[arg(long = "snapshot-id")]
     pub(super) snapshot_id: Option<String>,
 
-    /// Optional branch name associated with the snapshot.
-    /// Falls back to CI_COMMIT_BRANCH or CI_COMMIT_REF_NAME.
     #[arg(long)]
     pub(super) branch: Option<String>,
 
-    /// Optional commit SHA associated with the snapshot.
-    /// Falls back to CI_COMMIT_SHA or GITHUB_SHA.
     #[arg(long)]
     pub(super) commit: Option<String>,
 
-    /// Optional parent snapshot identifier for lineage tracking.
-    /// When omitted, the CLI reuses the latest published snapshot in the same
-    /// corpus and branch, or the same corpus when branch is not specified.
     #[arg(long = "parent-snapshot-id")]
     pub(super) parent_snapshot_id: Option<String>,
 
-    /// Allow publishing a workspace branch that is not listed in branch policy.
     #[arg(long = "allow-non-policy-branch")]
     pub(super) allow_non_policy_branch: bool,
 }
@@ -189,7 +165,6 @@ pub struct SearchBaselineAdminGcArgs {
     #[arg(short = 's', long = "source-dir", default_value = ".")]
     pub(super) source_dir: PathBuf,
 
-    /// Apply deletions. Without this flag the command reports a dry-run summary.
     #[arg(long)]
     pub(super) execute: bool,
 }

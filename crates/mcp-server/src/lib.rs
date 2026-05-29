@@ -1,10 +1,3 @@
-//! MCP (Model Context Protocol) server for bsl-analyzer.
-//!
-//! Exposes 1C:Enterprise metadata and platform knowledge as MCP tools
-//! for AI agents. Complements LSP (which handles code analysis) with
-//! capabilities LSP doesn't cover: metadata browsing, platform docs,
-//! ad-hoc query validation.
-
 mod baseline;
 mod state;
 mod tools;
@@ -15,10 +8,6 @@ pub use baseline::{
 pub use state::SharedState;
 use state::WorkspaceSearchMode;
 
-/// Start MCP server on stdio (stdin/stdout).
-///
-/// This is the standard MCP transport — the host IDE spawns the process
-/// and communicates via JSON-RPC over stdin/stdout.
 pub async fn serve_stdio(server: McpServer) -> anyhow::Result<()> {
     use rmcp::ServiceExt;
     let stdio = rmcp::transport::stdio();
@@ -40,143 +29,64 @@ pub enum McpProfile {
     Reference,
 }
 
-// -- Parameter types for consolidated tools --
-
 #[derive(Deserialize, JsonSchema)]
 struct MetadataParams {
-    /// Действие:
-    /// - "info" — общая информация о конфигурации (название, UUID, количество объектов)
-    /// - "tree" — дерево объектов по категориям (с filter — объекты категории, без — сводка)
-    /// - "object" — структура объекта: реквизиты, ТЧ, измерения, ресурсы (требует object_type + object_name)
-    /// - "form" — структура управляемой формы: элементы, команды, обработчики (требует object_type + object_name, form_name — опционально)
     action: String,
-    /// Категория метаданных для фильтрации (action=tree, на русском): Справочники, Документы,
-    /// Перечисления, Обработки, Отчеты, РегистрыСведений, РегистрыНакопления, ОбщиеМодули и др.
     filter: Option<String>,
-    /// Тип объекта на английском (action=object, form): Document, Catalog, InformationRegister,
-    /// AccumulationRegister, Enum, DataProcessor, Report, CommonModule и др.
     object_type: Option<String>,
-    /// Имя объекта метаданных, например РеализацияТоваровУслуг (action=object, form)
     object_name: Option<String>,
-    /// Имя формы (action=form, необязательно — без него возвращается список форм)
     form_name: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
 struct SearchParams {
-    /// Действие:
-    /// - "find_code" — полнотекстовый поиск по коду (точные имена процедур, переменных, вызовов API)
-    /// - "search_code" — семантический поиск по коду на естественном языке (требует EMBEDDING_URL)
-    /// - "find_docs" — полнотекстовый поиск по справке платформы (точные имена типов, методов)
-    /// - "search_docs" — семантический поиск по справке на естественном языке (требует EMBEDDING_URL)
-    /// - "status" — статус поискового индекса (количество файлов, чанков, прогресс)
     action: String,
-    /// Текст запроса.
-    /// Для find_code/find_docs: точные имена и токены ("ОбработкаПроведения", "Массив").
-    /// Для search_code/search_docs: описание на естественном языке ("обработка проведения документа").
-    /// Не требуется для action=status.
     query: Option<String>,
-    /// Максимальное количество результатов (по умолчанию 10, максимум 50)
     limit: Option<usize>,
 }
 
 #[derive(Deserialize, JsonSchema)]
 struct SyntaxHelpParams {
-    /// Имя типа, метода или глобальной функции платформы (русское или английское).
     name: String,
-    /// Имя типа для поиска метода в контексте типа (например type_name="Массив", name="Добавить")
     type_name: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
 struct QueryParams {
-    /// Действие:
-    /// - "validate" — проверить синтаксис запроса без выполнения (через СхемаЗапроса если доступен --onec-url, иначе локально парсером)
-    /// - "execute" — выполнить запрос и получить данные (только ВЫБРАТЬ/SELECT, требует --onec-url)
     action: String,
-    /// Текст запроса на языке запросов 1С (SDBL). Параметры через &ИмяПараметра.
     query: String,
-    /// Максимальное количество строк результата (action=execute, по умолчанию 100, максимум 1000)
     limit: Option<u32>,
-    /// Параметры запроса в виде пар ключ-значение (action=execute). Ключ — имя параметра без амперсанда.
     parameters: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 #[derive(Deserialize, JsonSchema)]
 struct ExecuteParams {
-    /// Действие:
-    /// - "check" — проверить синтаксис BSL-кода без выполнения (компиляция платформой, но не запуск)
-    /// - "run" — выполнить BSL-код (операторы) через Выполнить(). Для возврата данных:
-    ///   Контекст.Вставить("ключ", значение). Содержимое Контекст возвращается в ответе.
-    /// - "eval" — вычислить BSL-выражение через Вычислить() и вернуть результат.
-    ///   Примеры: ТекущаяДата(), 1+1, Справочники.Номенклатура.НайтиПоНаименованию("Товар")
-    ///
-    /// ОГРАНИЧЕНИЯ: нельзя объявлять Функция/Процедура — только операторы, выражения, условия, циклы.
-    /// action=run и action=eval требуют подключения к живой базе (--onec-url).
     action: String,
-    /// BSL-код (action=check, run) или BSL-выражение (action=eval).
     code: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
 struct ItsHelpParams {
-    /// Вопрос на русском языке. Примеры:
-    /// - "Как правильно реализовать обработку проведения документа?"
-    /// - "Стандарт структуры модуля по ИТС"
-    /// - "Когда использовать ПовторноеИспользование НаВремяСеанса?"
-    /// - "Ошибка 'Поле объекта не обнаружено' — причины и решения"
     question: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
 struct DebugParams {
-    /// Действие:
-    /// - "attach" — подключиться к серверу отладки (требует host, infobase; port по умолчанию 1550)
-    /// - "disconnect" — отключиться от сервера отладки
-    /// - "set_breakpoint" — установить точку останова (требует module, line; condition опционально)
-    /// - "remove_breakpoint" — удалить точку останова (требует module, line)
-    /// - "continue" — продолжить выполнение после остановки
-    /// - "step" — пошаговое выполнение (требует direction: "next"/"in"/"out")
-    /// - "wait_stop" — ожидать остановку на breakpoint/исключении (timeout_secs по умолчанию 30)
-    /// - "stack_trace" — получить стек вызовов остановленной программы
-    /// - "locals" — получить локальные переменные (stack_level по умолчанию 0)
-    /// - "eval" — вычислить выражение в контексте остановленной программы (требует expression)
-    ///
-    /// ВАЖНО: если код запущен через execute(action=run) и остановился на breakpoint,
-    /// execute зависнет до вызова debug(action=continue). Запускай код через curl или в фоне.
     action: String,
-    /// Хост сервера отладки 1С (action=attach)
     host: Option<String>,
-    /// Порт сервера отладки (action=attach, по умолчанию 1550)
     port: Option<u16>,
-    /// Имя информационной базы (action=attach)
     infobase: Option<String>,
-    /// Корневой каталог конфигурации для маппинга модулей на файлы (action=attach)
     config_root: Option<String>,
-    /// Расширения: список пар ["имя", "путь_к_каталогу"] для маппинга модулей расширений (action=attach)
     #[serde(default)]
     extensions: Vec<[String; 2]>,
-    /// Типы целей автоподключения (action=attach). По умолчанию: Client, Server, HTTPService.
-    /// Допустимые: Client, ManagedClient, WEBClient, COMConnector, Server, ServerEmulation,
-    /// WEBService, HTTPService, OData, JOB, JobFileMode, MobileClient, MobileServer, MobileManagedClient.
     #[serde(default)]
     auto_attach: Vec<String>,
-    /// Имя модуля (action=set_breakpoint, remove_breakpoint).
-    /// Например "ОбщийМодуль.ОбщегоНазначения" или "Справочник.Номенклатура.МодульОбъекта".
-    /// Сокращённый формат поддерживается — суффикс .Модуль/.МодульОбъекта добавляется автоматически.
     module: Option<String>,
-    /// Номер строки (action=set_breakpoint, remove_breakpoint)
     line: Option<u32>,
-    /// Условие остановки — BSL-выражение (action=set_breakpoint, опционально)
     condition: Option<String>,
-    /// Направление шага (action=step): "next" (через), "in" (внутрь), "out" (наружу)
     direction: Option<String>,
-    /// Таймаут ожидания в секундах (action=wait_stop, по умолчанию 30)
     timeout_secs: Option<u64>,
-    /// Уровень стека, 0 = текущий фрейм (action=locals, eval; по умолчанию 0)
     stack_level: Option<u32>,
-    /// BSL-выражение для вычисления в контексте breakpoint (action=eval).
-    /// Для вычисления без отладчика используй execute(action=eval).
     expression: Option<String>,
 }
 
@@ -184,14 +94,12 @@ fn default_debug_port() -> u16 {
     1550
 }
 
-/// Helper to extract a required field from Option, returning McpError if missing.
 fn require<T>(val: Option<T>, field: &str, action: &str) -> Result<T, McpError> {
     val.ok_or_else(|| {
         McpError::invalid_params(format!("'{field}' is required for action '{action}'"), None)
     })
 }
 
-/// MCP server exposing bsl-analyzer capabilities as tools.
 #[derive(Clone)]
 pub struct McpServer {
     profile: McpProfile,
@@ -213,9 +121,6 @@ impl McpServer {
         self.state.shutdown();
     }
 
-    /// Метаданные конфигурации 1С: общая информация, дерево объектов по категориям,
-    /// структура объекта (реквизиты, ТЧ, измерения, ресурсы), структура формы.
-    /// action: info | tree | object | form
     #[tool(name = "metadata", annotations(read_only_hint = true))]
     async fn metadata(
         &self,
@@ -265,9 +170,6 @@ impl McpServer {
         }
     }
 
-    /// Поиск по коду и справке платформы 1С.
-    /// find_code — полнотекстовый по коду. search_code — семантический по коду.
-    /// action: find_code | search_code | status
     #[tool(name = "search", annotations(read_only_hint = true))]
     async fn workspace_search(
         &self,
@@ -334,8 +236,6 @@ impl McpServer {
         }
     }
 
-    /// Запросы 1С (SDBL): проверка синтаксиса или выполнение SELECT с получением данных.
-    /// action: validate | execute
     #[tool(name = "query", annotations(read_only_hint = true))]
     async fn query(&self, params: Parameters<QueryParams>) -> Result<CallToolResult, McpError> {
         let p = params.0;
@@ -351,9 +251,6 @@ impl McpServer {
         }
     }
 
-    /// Выполнение BSL-кода в реальной базе 1С: проверка синтаксиса, выполнение операторов, вычисление выражений.
-    /// action=run и action=eval требуют подключения (--onec-url).
-    /// action: check | run | eval
     #[tool(name = "execute")]
     async fn execute(&self, params: Parameters<ExecuteParams>) -> Result<CallToolResult, McpError> {
         let p = params.0;
@@ -368,9 +265,6 @@ impl McpServer {
         }
     }
 
-    /// Отладчик 1С: подключение к серверу отладки, точки останова, пошаговое выполнение,
-    /// просмотр стека и переменных, вычисление выражений в контексте breakpoint.
-    /// action: attach | disconnect | set_breakpoint | remove_breakpoint | continue | step | wait_stop | stack_trace | locals | eval
     #[tool(name = "debug")]
     async fn debug(&self, params: Parameters<DebugParams>) -> Result<CallToolResult, McpError> {
         let p = params.0;
@@ -485,9 +379,6 @@ impl McpServer {
 
 #[tool_router(router = reference_tool_router)]
 impl McpServer {
-    /// Поиск по справке платформы 1С.
-    /// find_docs — полнотекстовый, search_docs — семантический.
-    /// action: find_docs | search_docs | status
     #[tool(name = "search", annotations(read_only_hint = true))]
     async fn reference_search(
         &self,
@@ -548,8 +439,6 @@ impl McpServer {
         }
     }
 
-    /// Справка по типам, методам и глобальным функциям платформы 1С.
-    /// Точный поиск по имени. Для полнотекстового/семантического поиска используй search.
     #[tool(name = "syntax_help", annotations(read_only_hint = true))]
     async fn syntax_help(
         &self,
@@ -558,12 +447,6 @@ impl McpServer {
         tools::platform::bsl_syntax_help(&params.0.name, params.0.type_name.as_deref())
     }
 
-    /// Вопрос эксперту по 1С:Предприятие через ИТС (1С:Напарник).
-    /// Используйте для: стандартов разработки ИТС, паттернов БСП,
-    /// методических рекомендаций, типовых решений, диагностики ошибок.
-    /// НЕ используйте для: сигнатур методов платформы (→ syntax_help),
-    /// поиска в коде конфигурации (→ search).
-    /// Требует NAPARNIK_TOKEN. Latency: 5-20 секунд.
     #[tool(name = "its_help", annotations(read_only_hint = true))]
     async fn its_help(
         &self,

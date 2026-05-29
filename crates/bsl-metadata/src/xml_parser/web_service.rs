@@ -1,5 +1,3 @@
-//! WebService XML parser
-
 use crate::error::{MetadataError, Result};
 use crate::web_service::{
     WebService, WebServiceBuilder, WebServiceOperationBuilder, WebServiceParameter,
@@ -7,7 +5,6 @@ use crate::web_service::{
 
 use super::helpers::{child_text, find_child, find_mdo_element, parse_xml};
 
-/// Parse WebService XML from Designer format
 pub fn parse_web_service_xml(xml: &str, name: &str) -> Result<WebService> {
     let _span = tracing::debug_span!("parse_web_service_xml", name).entered();
 

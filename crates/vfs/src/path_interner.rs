@@ -1,61 +1,32 @@
-//! Path interning for efficient FileId ↔ VfsPath bidirectional mapping.
-//!
-//! This module provides the `PathInterner` which uses an `IndexSet` to maintain
-//! a bidirectional mapping between paths and file IDs. This allows for O(1) lookups
-//! in both directions and ensures each path is stored only once.
-
 use indexmap::IndexSet;
 use rustc_hash::FxBuildHasher;
 
 use crate::{FileId, VfsPath};
 
-/// Bidirectional interner for VfsPath ↔ FileId mapping.
-///
-/// Internally uses an `IndexSet` which provides:
-/// - Stable indices that can be used as FileIds
-/// - Fast lookup by path (hash-based)
-/// - Fast lookup by FileId (index-based)
-/// - Each path stored only once (interned)
 #[derive(Default, Debug)]
 pub(crate) struct PathInterner {
     map: IndexSet<VfsPath, FxBuildHasher>,
 }
 
 impl PathInterner {
-    /// Intern a path and return its FileId.
-    ///
-    /// If the path already exists, returns the existing FileId.
-    /// Otherwise, allocates a new FileId and stores the path.
     pub(crate) fn intern(&mut self, path: VfsPath) -> FileId {
         let (idx, _inserted) = self.map.insert_full(path);
         FileId(idx as u32)
     }
 
-    /// Get the FileId for a path if it exists.
-    ///
-    /// Returns `None` if the path has not been interned.
     pub(crate) fn get(&self, path: &VfsPath) -> Option<FileId> {
         self.map.get_index_of(path).map(|idx| FileId(idx as u32))
     }
 
-    /// Look up a path by its FileId.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the FileId is invalid (out of bounds).
     pub(crate) fn lookup(&self, id: FileId) -> &VfsPath {
         &self.map[id.0 as usize]
     }
 
-    // Test-only methods below
-
-    /// Create a new empty path interner (test helper).
     #[cfg(test)]
     pub(crate) fn new() -> Self {
         Self::default()
     }
 
-    /// Returns the number of interned paths (test helper).
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.map.len()
@@ -86,7 +57,7 @@ mod tests {
         let id2 = interner.intern(path.clone());
 
         assert_eq!(id1, id2);
-        assert_eq!(interner.len(), 1); // Only one entry
+        assert_eq!(interner.len(), 1);
     }
 
     #[test]

@@ -1,23 +1,3 @@
-//! Phase H Slice 3 + end-to-end — projected `Ty::ValueTable` iterates
-//! to a projected `Ty::ValueTableRow`, and `Стр.<column>` resolves to
-//! the SDBL-bridged column type.
-//!
-//! This is the ERP idiom the phase plan is motivated by:
-//!
-//! ```bsl
-//! Функция ПолучитьТЗ()
-//!     Зап = Новый Запрос("ВЫБРАТЬ Имя, Цена ИЗ Справочник.Товары");
-//!     Возврат Зап.Выполнить().Выгрузить();
-//! КонецФункции
-//!
-//! Процедура Тест()
-//!     ТЗ = ПолучитьТЗ();
-//!     Для Каждого Стр Из ТЗ Цикл
-//!         Х = Стр.Имя;   // ← must resolve through the projection
-//!     КонецЦикла;
-//! КонецПроцедуры
-//! ```
-
 use hir::{Builders, DefDatabase, HirDatabase, ModuleId, TypeId, TypeKernelDb, TypeKind};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
@@ -78,9 +58,6 @@ fn for_each_over_projected_value_table_yields_projected_row() {
 
 #[test]
 fn projected_row_column_resolves_via_projection() {
-    // `Стр.Имя` where Имя is a string literal alias should resolve
-    // to `Ty::String` via the projection lookup, not via the
-    // platform `СтрокаТаблицыЗначений` table.
     let fixture = r#"//- /test.bsl
 Процедура Тест()
     Зап = Новый Запрос("ВЫБРАТЬ ""abc"" КАК Имя");
@@ -100,10 +77,6 @@ fn projected_row_column_resolves_via_projection() {
 
 #[test]
 fn helper_function_propagates_projection_through_unload_and_iteration() {
-    // ERP-canonical shape: helper builds Запрос + Выгрузить inline,
-    // caller iterates the result. Phase B constructor synthesis +
-    // Phase J method-graph return-type inference + Phase H narrowing
-    // compose to make `Стр.Имя` typed as Ty::String inside the loop.
     let fixture = r#"//- /test.bsl
 Функция ПолучитьТЗ()
     Зап = Новый Запрос("ВЫБРАТЬ ""abc"" КАК Имя");
@@ -127,10 +100,6 @@ fn helper_function_propagates_projection_through_unload_and_iteration() {
 
 #[test]
 fn projection_less_value_table_keeps_platform_row() {
-    // `Новый ТаблицаЗначений` has no projection; iteration must
-    // still produce the platform `СтрокаТаблицыЗначений` row, not
-    // an empty `Ty::ValueTableRow { None }` that would hide the
-    // platform members.
     let fixture = r#"//- /test.bsl
 Процедура Тест()
     ТЗ = Новый ТаблицаЗначений;
@@ -141,14 +110,8 @@ fn projection_less_value_table_keeps_platform_row() {
 "#;
     let (db, file_id) = setup(fixture);
     let row_ty = var_ty(&db, file_id, "стр").expect("Стр must be inferred");
-    // The legacy path returns `Ty::PlatformObject("СтрокаТаблицыЗначений")`
-    // (platform-template iteration). The contract is "platform row,
-    // no projection enrichment".
     match db.lookup_type(row_ty) {
         TypeKind::PlatformObject(facet) if facet.name.as_str() == "СтрокаТаблицыЗначений" => {}
-        // If a future refactor wires projection-None ValueTable to
-        // `Ty::ValueTableRow { None }` directly, that's also acceptable
-        // — the field surface would still match through `platform_type_name`.
         TypeKind::ValueTableRow(facet) if facet.projection.is_none() => {}
         other => panic!(
             "non-projected ТЗ row must be platform СтрокаТаблицыЗначений (or its dedicated variant), got {other:?}",

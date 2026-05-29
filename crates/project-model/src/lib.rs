@@ -1,14 +1,3 @@
-//! Project model for bsl-analyzer.
-//!
-//! This crate handles project structure and configuration.
-//!
-//! The [`Project`] struct is the main entry point. It automatically discovers
-//! the 1C configuration path using multiple strategies:
-//! 1. `source.root` from bsl-analyzer.toml, or `configurationRoot` from .bsl-analyzer.json / .bsl-language-server.json
-//! 2. Search for Configuration.xml (max depth 2)
-//! 3. Common patterns: src/cf, Configuration
-//! 4. Fallback to project root
-
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -20,18 +9,11 @@ pub use file_role::{
     SOURCE_EXTENSIONS,
 };
 
-/// A BSL project.
 #[derive(Debug, Clone)]
 pub struct Project {
-    /// Project root directory (workspace root).
     pub root: PathBuf,
-    /// Loaded configuration from .bsl-analyzer.json or .bsl-language-server.json.
     pub config: ProjectConfig,
-    /// Path to 1C configuration directory (containing Configuration.xml).
-    /// This is computed automatically using multiple discovery strategies.
     source_path: Option<PathBuf>,
-    /// Resolved extension paths: (name, absolute_path).
-    /// Each extension must contain Configuration.xml.
     extension_paths: Vec<(String, PathBuf)>,
 }
 
@@ -44,24 +26,15 @@ impl Project {
         Self { root, config, source_path, extension_paths }
     }
 
-    /// Returns the path to scan for BSL/OS source files.
-    ///
-    /// This is the directory containing 1C configuration (with Configuration.xml)
-    /// or the project root if no configuration was found.
     pub fn source_path(&self) -> &Path {
         self.source_path.as_deref().unwrap_or(&self.root)
     }
 
-    /// Returns the path to 1C configuration directory if found.
-    ///
-    /// Returns `None` if no Configuration.xml was discovered.
     pub fn configuration_path(&self) -> Option<&Path> {
         self.source_path.as_deref()
     }
 
-    /// Discovers the source path using multiple strategies.
     fn discover_source_path(root: &Path, config: &ProjectConfig) -> Option<PathBuf> {
-        // Strategy 1: Use configurationRoot from config file
         if let Some(ref config_root) = config.configuration_root {
             let path = root.join(config_root);
             if path.join("Configuration.xml").exists() {
@@ -76,13 +49,11 @@ impl Project {
             }
         }
 
-        // Strategy 2: Search for Configuration.xml (max depth 2)
         if let Some(path) = search_configuration_xml(root, 2) {
             tracing::info!(?path, "found Configuration.xml by search");
             return Some(path);
         }
 
-        // Strategy 3: Try common patterns
         for pattern in &["src/cf", "Configuration"] {
             let path = root.join(pattern);
             if path.join("Configuration.xml").exists() {
@@ -95,13 +66,10 @@ impl Project {
         None
     }
 
-    /// Returns resolved extension paths as (name, path) pairs.
     pub fn extension_paths(&self) -> &[(String, PathBuf)] {
         &self.extension_paths
     }
 
-    /// Resolves extension paths from config, filtering to those that exist
-    /// and contain Configuration.xml.
     fn resolve_extensions(root: &Path, config: &ProjectConfig) -> Vec<(String, PathBuf)> {
         config
             .extensions
@@ -119,7 +87,6 @@ impl Project {
                     );
                     return None;
                 }
-                // Derive name from last path component
                 let name = path
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
@@ -131,7 +98,6 @@ impl Project {
     }
 }
 
-/// Searches for Configuration.xml recursively up to max_depth.
 fn search_configuration_xml(root: &Path, max_depth: usize) -> Option<PathBuf> {
     search_configuration_xml_recursive(root, max_depth, 0)
 }
@@ -145,19 +111,16 @@ fn search_configuration_xml_recursive(
         return None;
     }
 
-    // Check if Configuration.xml exists in current directory
     if dir.join("Configuration.xml").exists() {
         return Some(dir.to_path_buf());
     }
 
-    // If we haven't reached max depth, search subdirectories
     if current_depth < max_depth {
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 if let Ok(file_type) = entry.file_type() {
                     if file_type.is_dir() {
                         let name = entry.file_name();
-                        // Skip hidden and common non-source directories
                         if !name.to_string_lossy().starts_with('.') {
                             if let Some(path) = search_configuration_xml_recursive(
                                 &entry.path(),
@@ -176,36 +139,9 @@ fn search_configuration_xml_recursive(
     None
 }
 
-/// Project configuration (from .bsl-analyzer.json or .bsl-language-server.json).
-///
-/// ## JSON Format (bsl-language-server compatible)
-///
-/// ```json
-/// {
-///   "configurationRoot": "src/cf",
-///   "diagnostics": {
-///     "ordinaryAppSupport": false,
-///     "dataflowMaxIterations": 10000,
-///     "parameters": {
-///       "EmptyCodeBlock": false,
-///       "LineLength": { "maxLength": 120 }
-///     }
-///   }
-/// }
-/// ```
-///
-/// The `diagnostics` field is stored as raw JSON and parsed by `ide_diagnostics::DiagnosticsConfig`.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectConfig {
-    /// Raw diagnostics configuration.
-    ///
-    /// Stored as raw JSON to avoid coupling project_model to ide_diagnostics.
-    /// Convert to `ide_diagnostics::DiagnosticsConfig` via:
-    /// ```ignore
-    /// let config: DiagnosticsConfig = serde_json::from_value(proj_config.diagnostics.clone())
-    ///     .unwrap_or_default();
-    /// ```
     #[serde(default)]
     pub diagnostics: serde_json::Value,
 
@@ -221,14 +157,6 @@ pub struct ProjectConfig {
     #[serde(default)]
     pub language: Option<String>,
 
-    /// Extension paths relative to project root.
-    ///
-    /// Each path should point to an extension directory containing Configuration.xml.
-    /// Extensions are loaded as separate configurations visible in the shared context.
-    ///
-    /// ```json
-    /// { "extensions": ["src/cfe/BMS_RU_UT", "src/cfe/YAxUnit"] }
-    /// ```
     #[serde(default)]
     pub extensions: Vec<String>,
 
@@ -243,11 +171,6 @@ pub struct ProjectConfig {
 }
 
 impl ProjectConfig {
-    /// Loads configuration with priority: `bsl-analyzer.toml` > `.bsl-analyzer.json` > `.bsl-language-server.json`.
-    ///
-    /// If `bsl-analyzer.toml` exists but fails to parse, JSON files are NOT consulted —
-    /// the parse error is logged and `None` is returned so callers get defaults
-    /// instead of silently falling back to stale JSON.
     pub fn load(root: &Path) -> Option<Self> {
         let toml_path = root.join("bsl-analyzer.toml");
         if toml_path.exists() {
@@ -286,7 +209,6 @@ impl ProjectConfig {
         }
     }
 
-    /// Load configuration from a specific file path.
     pub fn load_from_file(path: &Path) -> Option<Self> {
         if !path.exists() {
             return None;
@@ -346,12 +268,6 @@ impl ProjectConfig {
         self.configuration_root.as_ref().map(|root| project_root.join(root))
     }
 
-    /// Load 1C metadata (Configuration.xml, CommonModules, etc.) from configuration root.
-    ///
-    /// Returns `None` if:
-    /// - No `configurationRoot` specified in config
-    /// - Configuration root directory doesn't exist
-    /// - Failed to parse metadata files
     pub fn load_metadata(&self, workspace_root: &Path) -> Option<bsl_metadata::Configuration> {
         let cfg_path = self.configuration_path(workspace_root)?;
 
@@ -381,7 +297,6 @@ impl ProjectConfig {
     }
 }
 
-/// Code Lens configuration.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodeLensConfig {
@@ -392,7 +307,6 @@ pub struct CodeLensConfig {
     pub show_cyclomatic_complexity: bool,
 }
 
-/// Formatting configuration.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct FormattingConfig {
     #[serde(default = "default_indent_size")]
@@ -406,20 +320,9 @@ fn default_indent_size() -> u32 {
     4
 }
 
-/// Opt-in feature flags for analysis passes.
-///
-/// Consumers read the flags via the Salsa `FeaturesInput` exposed by
-/// `ide-db`, so toggling a flag at runtime invalidates any query that
-/// observes it. Defaults are conservative: every flag is on by default
-/// and opting out is an explicit project decision.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct FeaturesConfig {
-    /// Type narrowing overlay (ADR-01 Option A). Default: `true`.
-    ///
-    /// When `false`, `Semantics::type_of_expr` skips the narrowing
-    /// analysis entirely and returns the base inferred type — useful as
-    /// a rollback switch if narrowing regressions surface in the field.
     #[serde(default = "default_true", alias = "type_narrowing")]
     pub type_narrowing: bool,
 }
@@ -430,47 +333,14 @@ impl Default for FeaturesConfig {
     }
 }
 
-/// User-facing output configuration.
-///
-/// Controls how analyzer-produced strings (diagnostic messages, hover
-/// labels, completion details) are rendered. Currently exposes only the
-/// display language; future settings (e.g. severity-label style) would
-/// land here.
-///
-/// Loaded from the `[output]` section of `bsl-analyzer.toml`:
-/// ```toml
-/// [output]
-/// display_language = "ru"   # or "en"
-/// ```
-///
-/// The string is kept raw at this layer; consumers call
-/// [`Self::resolve_locale`] to turn it into a `base_db::Locale`, which
-/// reports unknown values via `tracing::warn!` and returns `None` so the
-/// caller can fall back to other locale signals (LSP, default).
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OutputConfig {
-    /// Display language for analyzer output. Accepts `"ru"`/`"en"` and
-    /// common aliases (see `base_db::Locale::from_config_str`). `None`
-    /// means "no project preference" — the LSP layer falls back to the
-    /// IDE's locale signal or to the analyzer default.
     #[serde(default, alias = "display_language")]
     pub display_language: Option<String>,
 }
 
 impl OutputConfig {
-    /// Resolve `display_language` into a [`base_db::Locale`].
-    ///
-    /// - `None` → field unset, no project preference.
-    /// - `Some(_)` with a recognised value → the parsed locale.
-    /// - `Some(_)` with an unknown value → logs `warn!` and returns `None`
-    ///   so the caller can fall back (LSP locale, then analyzer default)
-    ///   instead of failing project load on a typo.
-    ///
-    /// Single source of truth for `[output] display_language` parsing,
-    /// shared between the LSP main-loop path
-    /// (`bsl-analyzer::diagnostics_state`) and the CLI / streaming path
-    /// (`ide::streaming::orchestrator`).
     pub fn resolve_locale(&self) -> Option<base_db::Locale> {
         let raw = self.display_language.as_deref()?;
         match base_db::Locale::from_config_str(raw) {
@@ -490,7 +360,6 @@ fn default_true() -> bool {
     true
 }
 
-/// Search subsystem configuration.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchConfig {
@@ -498,7 +367,6 @@ pub struct SearchConfig {
     pub baseline: SearchBaselineConfig,
 }
 
-/// Shared baseline configuration for centralized search backends.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchBaselineConfig {
@@ -910,10 +778,6 @@ fn discover_git_dir(start_dir: &Path) -> Option<PathBuf> {
 
     None
 }
-
-// ---------------------------------------------------------------------------
-// TOML configuration (bsl-analyzer.toml)
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1890,20 +1754,15 @@ LineLength = { maxLineLength = 120 }
         assert_eq!(config.configuration_root.as_deref(), Some("from-json"));
     }
 
-    // --- Config loading tests ---
-
     #[test]
     fn toml_present_but_invalid_blocks_json_fallback() {
         let dir = tempdir().unwrap();
         fs::write(dir.path().join("bsl-analyzer.toml"), "invalid {{{{ toml").unwrap();
         fs::write(dir.path().join(".bsl-analyzer.json"), r#"{"configurationRoot": "from-json"}"#)
             .unwrap();
-        // Broken TOML must NOT fall back to JSON
         let config = ProjectConfig::load(dir.path());
         assert!(config.is_none());
     }
-
-    // --- Credential helper resolver tests ---
 
     #[test]
     fn resolve_postgres_url_fails_when_helper_not_configured() {
@@ -2131,10 +1990,6 @@ LineLength = { maxLineLength = 120 }
         assert!(config.is_configured());
     }
 
-    // -------------------------------------------------------------------
-    // Task 6.7 — `FeaturesConfig` serde round-trips.
-    // -------------------------------------------------------------------
-
     #[test]
     fn features_config_defaults_type_narrowing_to_true() {
         let features = FeaturesConfig::default();
@@ -2155,9 +2010,6 @@ LineLength = { maxLineLength = 120 }
 
     #[test]
     fn project_config_deserializes_features_disabled_json() {
-        // camelCase per `#[serde(rename_all = "camelCase")]` on
-        // `FeaturesConfig`. Matches the on-disk JSON format expected by
-        // the LSP layer.
         let config: ProjectConfig = serde_json::from_str(
             r#"{
                 "features": { "typeNarrowing": false }
@@ -2172,12 +2024,6 @@ LineLength = { maxLineLength = 120 }
 
     #[test]
     fn project_config_load_from_toml_disables_narrowing() {
-        // End-to-end: write a bsl-analyzer.toml with
-        // `[features]` setting `type_narrowing = false`, then run the
-        // same `ProjectConfig::load` path used by `Project::new` at
-        // workspace init. Guards against serde renames, `TomlConfig`
-        // wiring regressions, and accidentally dropping the field in the
-        // `From<TomlConfig>` conversion.
         let dir = tempdir().unwrap();
         let toml_path = dir.path().join("bsl-analyzer.toml");
         fs::write(

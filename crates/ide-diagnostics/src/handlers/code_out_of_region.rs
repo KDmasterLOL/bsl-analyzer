@@ -1,40 +1,3 @@
-//! CodeOutOfRegion diagnostic.
-//!
-//! Detects code elements (variables, procedures, functions, statements)
-//! located outside of region declarations (#Область/#Region).
-//!
-//! ## Why?
-//! Code should be organized in regions:
-//! - Better code structure
-//! - Easier navigation in IDE
-//! - Follows 1C coding standards
-//! - Improves maintainability
-//!
-//! ## Bad practice
-//! ```bsl
-//! Перем МодульПеременная;  // Outside region!
-//!
-//! Процедура Тест()         // Outside region!
-//!     Сообщить("OK");
-//! КонецПроцедуры
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! #Область ПеременныеМодуля
-//! Перем МодульПеременная;
-//! #КонецОбласти
-//!
-//! #Область ПрограммныйИнтерфейс
-//! Процедура Тест() Экспорт
-//!     Сообщить("OK");
-//! КонецПроцедуры
-//! #КонецОбласти
-//! ```
-//!
-//! ## Implementation
-//! Uses RegionTree from HIR for efficient region lookup.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -66,7 +29,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let parse = ctx.parse();
     let root = parse.syntax_node();
 
-    // Get RegionTree from HIR (cached via Salsa)
     let region_tree = ctx.region_tree();
 
     let mut diagnostics = Vec::new();
@@ -74,13 +36,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics
 }
 
-/// Extends range to include trailing semicolon if present.
 fn range_with_semicolon(node: &SyntaxNode) -> ide_db::TextRange {
     use syntax::{SyntaxToken, TextSize};
 
     let base_range = node.text_range();
 
-    // Check if there's a semicolon token immediately after this node
     let has_semicolon = node
         .next_sibling_or_token()
         .and_then(|t| t.into_token())
@@ -88,7 +48,6 @@ fn range_with_semicolon(node: &SyntaxNode) -> ide_db::TextRange {
         .unwrap_or(false);
 
     if has_semicolon {
-        // Extend range by 1 to include semicolon
         ide_db::TextRange::new(base_range.start(), base_range.end() + TextSize::from(1))
     } else {
         base_range
@@ -131,10 +90,7 @@ fn check_node(
                     ("Процедура", range)
                 }
                 SyntaxKind::VAR_DEF => ("Переменная", child.text_range()),
-                _ => {
-                    // For statements, include trailing semicolon
-                    ("Элемент кода", range_with_semicolon(&child))
-                }
+                _ => ("Элемент кода", range_with_semicolon(&child)),
             };
 
             tracing::debug!(

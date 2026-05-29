@@ -1,10 +1,3 @@
-//! Signature help for function/method calls.
-//!
-//! Thin LSP-facing wrapper over the [`symbol_info`] crate's resolve →
-//! build → present pipeline. All formatting and resolution logic lives in
-//! `symbol_info`; this module only provides the public IDE-facing entry
-//! point and converts the view-model into the IDE's `SignatureHelp` shape.
-
 use ide_db::RootDatabase;
 use symbol_info::{
     build_signature, render_signature_help, resolve_callee_at, ParameterInfoView, SignatureHelpView,
@@ -12,26 +5,20 @@ use symbol_info::{
 use syntax::TextSize;
 use vfs::FileId;
 
-/// Result of signature help.
 #[derive(Debug, Clone)]
 pub struct SignatureHelp {
-    /// Full signature, e.g. `"Функция МояФункция(Параметр1, Параметр2): Строка"`.
     pub signature: String,
-    /// Top-level documentation (markdown).
     pub doc: Option<String>,
-    /// Index of the active parameter (0-based).
     pub active_parameter: Option<usize>,
     pub parameters: Vec<ParameterInfo>,
 }
 
-/// Information about a single parameter.
 #[derive(Debug, Clone)]
 pub struct ParameterInfo {
     pub label: String,
     pub documentation: Option<String>,
 }
 
-/// Returns signature help at the specified position.
 pub fn signature_help<DB: RootDatabase>(
     db: &DB,
     file_id: FileId,
@@ -357,9 +344,6 @@ mod tests {
 
     #[test]
     fn test_manager_module_method_signature() {
-        // Bug-fix coverage: signature_help previously skipped user methods on
-        // `Catalogs/<Object>/Ext/ManagerModule.bsl`. The new resolver consults
-        // module_index.resolve_manager and surfaces the user method.
         let mut db = RootDatabaseImpl::new();
 
         let module_file_id = FileId(1);
@@ -414,13 +398,6 @@ mod tests {
 
     #[test]
     fn test_platform_method_variable_shadows_platform_type_name() {
-        // BSL lets a variable share a platform type's name. The inferred
-        // `Ty` comes from the RHS of the assignment, not from the
-        // identifier text — so signature help on `.Добавить(` must
-        // follow the inferred type, not the literal name. Here the
-        // variable is called `Массив` but holds a `ValueList` (has its
-        // own `Добавить` with different parameters), so the signature
-        // must come from `СписокЗначений.Добавить`, not `Массив.Добавить`.
         let code = "Процедура Тест()
     Массив = Новый СписокЗначений;
     Массив.Добавить($0)
@@ -435,9 +412,6 @@ mod tests {
             "signature must include the method name, got: {}",
             sig.signature
         );
-        // СписокЗначений.Добавить has a `Представление` parameter that
-        // Массив.Добавить does not — confirms we resolved on the real
-        // type, not the shadow.
         assert!(
             sig.signature.contains("Представление"),
             "signature must come from СписокЗначений, not Массив (missing `Представление` parameter), got: {}",
@@ -445,13 +419,6 @@ mod tests {
         );
     }
 
-    /// Regression guard for Layer B: signature help on
-    /// `Запрос.Выполнить(` must fire even though `Выполнить` is
-    /// `KW_EXECUTE`. Pre-migration `extract_callee_info` filtered the
-    /// callee path's tokens to `IDENT` only, so the keyword tail was
-    /// dropped. The collected list reduced to `["Запрос"]` and the
-    /// resolver classified the call as a global function with no
-    /// receiver — silently returning `None`.
     #[test]
     fn test_platform_method_signature_on_keyword_method_name() {
         let code = "Процедура Тест()
@@ -468,11 +435,6 @@ mod tests {
             "signature must include the method name, got: {}",
             sig.signature
         );
-        // Hard positive — Query.Execute returns `РезультатЗапроса`
-        // (per `crates/bsl-platform/data/platform_data.json`). Pinning
-        // the return type proves we resolved as the platform-method
-        // overload, not as some other "Выполнить" surface (the global
-        // eval-statement form has no return type).
         assert!(
             sig.signature.contains("РезультатЗапроса"),
             "signature must surface Query.Execute's return type — proves the platform-method overload was selected. got: {}",
@@ -482,15 +444,6 @@ mod tests {
 
     #[test]
     fn test_platform_method_on_instance_variable() {
-        // Before the Ty-based resolver patch, `resolve_callee_at` resolved
-        // the receiver by **text name** only: `МойМассив.Добавить(` asked
-        // `platform_method_query("МойМассив", "Добавить")` — a type with
-        // that name does not exist, so the resolver fell back to a
-        // non-existent CommonModule and signature help returned `None`.
-        // The fix routes the receiver through `Semantics::type_of_expr`
-        // and uses the inferred `Ty::Array` (platform_type_name = "Массив")
-        // to ask for `Массив.Добавить` — the method the user actually
-        // typed.
         let code = "Процедура Тест()
     МойМассив = Новый Массив;
     МойМассив.Добавить($0)
@@ -509,11 +462,6 @@ mod tests {
         assert_eq!(sig.active_parameter, Some(0));
     }
 
-    /// Chained-call regression guard: `Запрос.Выполнить().Выгрузить($0)`
-    /// must resolve `Выгрузить` on the **return type** of the inner call
-    /// (`РезультатЗапроса`), not on the literal receiver text. Pre-Ty-based
-    /// resolver this scenario produced `None` because the receiver chain
-    /// could not be reduced to a type without consulting inferred types.
     #[test]
     fn test_platform_method_signature_on_chained_call_return_type() {
         let code = "Процедура Тест()
@@ -551,17 +499,6 @@ mod tests {
         assert_eq!(sig.active_parameter, Some(0));
     }
 
-    /// Double-chained Union receiver disambiguation. The inner
-    /// `Запрос.Выполнить().Выгрузить()` returns
-    /// `Union(ТаблицаЗначений, ДеревоЗначений)` — **two non-sentinel
-    /// arms**, both of which own a `Скопировать` method with different
-    /// signatures (`ТаблицаЗначений::Скопировать` takes 4 parameters,
-    /// `ДеревоЗначений::Скопировать` takes 0). Pins the "first
-    /// non-sentinel arm wins" convention introduced in the Union
-    /// branch of `resolve_callee_at`: signature help must surface
-    /// exactly one signature, and that signature must be the
-    /// `ТаблицаЗначений` overload because `Ty::union`'s deterministic
-    /// ordering places it before `ДеревоЗначений`.
     #[test]
     fn test_platform_method_signature_on_chained_union_first_arm_wins() {
         let code = "Процедура Тест()
@@ -579,10 +516,6 @@ mod tests {
             "signature must include the method name, got: {}",
             sig.signature
         );
-        // `ТаблицаЗначений::Скопировать` has parameters that
-        // `ДеревоЗначений::Скопировать` does not — `Строки`/`Колонки`
-        // are the distinguishing fingerprint. Asserting on them
-        // proves the first arm (ValueTable) won the dispatch.
         assert!(
             sig.signature.contains("Строки") || sig.signature.contains("Колонки"),
             "signature must come from ТаблицаЗначений::Скопировать (not the zero-param ДеревоЗначений overload), got: {}",
@@ -595,20 +528,14 @@ mod tests {
         );
     }
 
-    // ---- Platform constructor signature help -------------------------------
-
     #[test]
     fn test_constructor_signature_on_array() {
-        // `Новый Массив($0)` — NEW_EXPR, not CALL_EXPR. Pre-ctor support this
-        // was the only site that silently dropped signature help.
         let code = "Процедура Тест()
     Х = Новый Массив($0);
 КонецПроцедуры";
         let (code, offset) = find_cursor(code);
         let (db, file_id) = setup_db(&code);
 
-        // Platform data is always available in this workspace (committed JSON),
-        // so we can assert strongly — Массив has at least one overload.
         let sig =
             signature_help(&db, file_id, offset).expect("constructor signature help must fire");
         assert!(
@@ -626,8 +553,6 @@ mod tests {
 
     #[test]
     fn test_constructor_signature_unknown_type() {
-        // Unknown type → no registered constructor → None. Don't fall through
-        // to any other resolver.
         let code = "Процедура Тест()
     Х = Новый ЗаведомоНесуществующийТип($0);
 КонецПроцедуры";
@@ -638,11 +563,6 @@ mod tests {
 
     #[test]
     fn test_constructor_signature_on_structure() {
-        // `Структура` has a constructor that takes `Ключ, Значения` — cursor
-        // after the first comma must surface `active_parameter == 1` **or**
-        // stay at 0 if the chosen overload only has one parameter. The weaker
-        // assertion (≥ 0) is enough to prove the cursor-tracking logic works
-        // through NEW_EXPR without asserting on platform-data specifics.
         let code = "Процедура Тест()
     С = Новый Структура(\"a\", $0);
 КонецПроцедуры";

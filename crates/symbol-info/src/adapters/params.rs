@@ -1,9 +1,3 @@
-//! Helpers that map source-specific parameter shapes into [`SignatureParam`].
-//!
-//! Two flavours: user-defined (HIR `Param` + parsed `MethodDocs`) and
-//! platform (`MethodParam` + platform `MethodDocs`). Both funnel into the same
-//! domain shape so presenters do not branch on source.
-
 use bsl_platform::{
     ConstructorDocs as PlatformConstructorDocs, MethodDocs as PlatformMethodDocs, MethodParam,
 };
@@ -43,12 +37,6 @@ pub(super) fn build_platform_params(
     build_from_param_docs(items, docs.map(|d| d.params.as_slice()))
 }
 
-/// Maps platform constructor parameters into domain [`SignatureParam`]s.
-///
-/// Same shape as [`build_platform_params`] — the only difference is the doc
-/// container (`ConstructorDocs` vs `MethodDocs`); both expose `.params` as
-/// `Vec<ParamDocs>`, so we delegate to a shared helper rather than
-/// duplicate the body.
 pub(super) fn build_constructor_params(
     items: &[MethodParam],
     docs: Option<&PlatformConstructorDocs>,
@@ -56,7 +44,6 @@ pub(super) fn build_constructor_params(
     build_from_param_docs(items, docs.map(|d| d.params.as_slice()))
 }
 
-/// Shared body of `build_platform_params` and `build_constructor_params`.
 fn build_from_param_docs(
     items: &[MethodParam],
     param_docs: Option<&[bsl_platform::ParamDocs]>,
@@ -66,10 +53,6 @@ fn build_from_param_docs(
         .enumerate()
         .map(|(i, p)| {
             let pdoc = param_docs.and_then(|d| d.get(i));
-            // Platform descriptions typically start with `Тип: T1, T2 . prose`,
-            // duplicating the type label. Lift the richer type list out of the
-            // description and clean the prose so consumers don't render types
-            // twice.
             let (types_from_desc, clean_desc) =
                 pdoc.map(|d| split_platform_param_description(&d.description)).unwrap_or_default();
             let types: Vec<TypeRef> = if !types_from_desc.is_empty() {
@@ -105,10 +88,6 @@ fn build_from_param_docs(
         .collect()
 }
 
-/// Split a platform parameter description like
-/// `"Тип: Строка, ОбъектМетаданных.Форма . Имя формы..."` into a list of
-/// type names and the remaining prose. When the description does not start
-/// with `Тип:`, the type list is empty and the prose is returned unchanged.
 fn split_platform_param_description(s: &str) -> (Vec<String>, String) {
     let trimmed = s.trim_start();
     let Some(after_marker) = trimmed.strip_prefix("Тип:") else {

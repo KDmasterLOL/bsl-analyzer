@@ -1,56 +1,3 @@
-//! DeprecatedMethod diagnostic (HIR-based)
-//!
-//! Detects usage of deprecated methods (8.3.10 and 8.3.17).
-//!
-//! **This is a HIR-based diagnostic** - collected during AST→HIR lowering.
-//!
-//! ## Why?
-//!
-//! Since 1C:Enterprise 8.3.10 and 8.3.17, several global methods were deprecated:
-//!
-//! ### 8.3.10 - Client application methods
-//! Replaced with `КлиентскоеПриложение` / `ClientApplication` object:
-//! - `УстановитьКраткийЗаголовокПриложения` → `КлиентскоеПриложение.УстановитьКраткийЗаголовок`
-//! - `ПолучитьКраткийЗаголовокПриложения` → `КлиентскоеПриложение.ПолучитьКраткийЗаголовок`
-//! - `УстановитьЗаголовокКлиентскогоПриложения` → `КлиентскоеПриложение.УстановитьЗаголовок`
-//! - `ПолучитьЗаголовокКлиентскогоПриложения` → `КлиентскоеПриложение.ПолучитьЗаголовок`
-//! - `ТекущийВариантОсновногоШрифтаКлиентскогоПриложения` → `КлиентскоеПриложение.ТекущийВариантОсновногоШрифта`
-//! - `ТекущийВариантИнтерфейсаКлиентскогоПриложения` → `КлиентскоеПриложение.ТекущийВариантИнтерфейса`
-//!
-//! ### 8.3.17 - Error handling methods
-//! Replaced with `МенеджерОбработкиОшибок` / `ErrorProcessingManager` object:
-//! - `КраткоеПредставлениеОшибки` → `МенеджерОбработкиОшибок.КраткоеПредставлениеОшибки`
-//! - `ПодробноеПредставлениеОшибки` → `МенеджерОбработкиОшибок.ПодробноеПредставлениеОшибки`
-//! - `ПоказатьИнформациюОбОшибке` → `МенеджерОбработкиОшибок.ПоказатьИнформациюОбОшибке`
-//!
-//! ### Common (various versions)
-//! - `ПолучитьФорму` / `GetForm` → Use other methods for form retrieval
-//!
-//! ## Bad practice
-//! ```bsl
-//! Процедура Тест()
-//!     Заголовок = ПолучитьКраткийЗаголовокПриложения(); // ❌ Deprecated
-//! КонецПроцедуры
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! Процедура Тест()
-//!     Заголовок = КлиентскоеПриложение.ПолучитьКраткийЗаголовок(); // ✅
-//! КонецПроцедуры
-//! ```
-//!
-//! ## Configuration
-//! - **Enabled by default:** Yes (both 8310 and 8317)
-//! - **Severity:** Information (INFO)
-//! - **Tags:** DEPRECATED
-//! - **Minutes to fix:** 1-5
-//!
-//! ## Implementation
-//! - Diagnostic is emitted during HIR lowering in `lower_call_expr()`
-//! - This handler converts `BodyDiagnostic::DeprecatedMethod` to `Diagnostic`
-//! - Replaces separate AST-based handlers: `deprecated_methods_8310` and `deprecated_methods_8317`
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -84,14 +31,9 @@ pub const DEPRECATED_METHODS_8317: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic.
-///
-/// Called from lib.rs dispatch when `BodyDiagnostic::DeprecatedMethod` is encountered.
 pub fn from_hir(name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    // Determine which diagnostic code this belongs to
     let (code, replacement) = get_diagnostic_code_and_replacement(name)?;
 
-    // Check if the specific diagnostic is disabled
     if ctx.config.is_disabled(code) {
         return None;
     }
@@ -108,18 +50,13 @@ pub fn from_hir(name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Optio
     })
 }
 
-/// Determine diagnostic code and replacement text for a deprecated method.
-///
-/// Returns (DiagnosticCode, replacement_text) or None if not found.
 fn get_diagnostic_code_and_replacement(name: &str) -> Option<(DiagnosticCode, &'static str)> {
     let lower = name.to_lowercase();
 
-    // Check 8.3.10 methods
     if let Some(replacement) = get_8310_replacement(lower.as_str()) {
         return Some((DiagnosticCode::DeprecatedMethods8310, replacement));
     }
 
-    // Check 8.3.17 methods
     if let Some(replacement) = get_8317_replacement(lower.as_str()) {
         return Some((DiagnosticCode::DeprecatedMethods8317, replacement));
     }
@@ -127,13 +64,11 @@ fn get_diagnostic_code_and_replacement(name: &str) -> Option<(DiagnosticCode, &'
     None
 }
 
-/// Get replacement for 8.3.10 deprecated methods.
 fn get_8310_replacement(method_lower: &str) -> Option<&'static str> {
     let map = get_8310_replacement_map();
     map.get(method_lower).copied()
 }
 
-/// Get replacement for 8.3.17 deprecated methods.
 fn get_8317_replacement(method_lower: &str) -> Option<&'static str> {
     match method_lower {
         "краткоепредставлениеошибки" => {
@@ -154,7 +89,6 @@ fn get_8317_replacement(method_lower: &str) -> Option<&'static str> {
     }
 }
 
-/// Get replacement map for 8.3.10 deprecated methods.
 fn get_8310_replacement_map() -> HashMap<&'static str, &'static str> {
     let mut map = HashMap::new();
 
@@ -196,7 +130,6 @@ fn get_8310_replacement_map() -> HashMap<&'static str, &'static str> {
     map
 }
 
-/// Generate diagnostic message based on method name and replacement.
 fn get_message(method_name: &str, replacement: &str) -> String {
     let lower = method_name.to_lowercase();
     let is_russian = lower.chars().any(|c| c as u32 > 127);
@@ -230,7 +163,7 @@ mod tests {
             DeprecatedMethods8310 @ 3:5..3:54
               message: Метод "УстановитьКраткийЗаголовокПриложения" устарел. Следует использовать "КлиентскоеПриложение.УстановитьКраткийЗаголовок".
               severity: Hint"#]].assert_eq(&format_diags(code, &deprecated_diags));
-        assert!(deprecated_diags[0].message.contains("КлиентскоеПриложение")); // snapshot-skip: message-substring assertion intentionally retained.
+        assert!(deprecated_diags[0].message.contains("КлиентскоеПриложение"));
     }
 
     #[test]
@@ -250,7 +183,7 @@ EndProcedure
             DeprecatedMethods8310 @ 3:15..3:43
               message: Method "GetShortApplicationCaption" is deprecated. You should use "ClientApplication.GetShortCaption".
               severity: Hint"#]].assert_eq(&format_diags(code, &deprecated_diags));
-        assert!(deprecated_diags[0].message.contains("ClientApplication")); // snapshot-skip: message-substring assertion intentionally retained.
+        assert!(deprecated_diags[0].message.contains("ClientApplication"));
     }
 
     #[test]
@@ -271,7 +204,7 @@ EndProcedure
               message: Метод "КраткоеПредставлениеОшибки" устарел. Следует использовать "МенеджерОбработкиОшибок.КраткоеПредставлениеОшибки".
               severity: Hint"#]].assert_eq(&format_diags(code, &deprecated_diags));
         let message = &deprecated_diags[0].message;
-        assert!(message.contains("МенеджерОбработкиОшибок")); // snapshot-skip: message-substring assertion intentionally retained.
+        assert!(message.contains("МенеджерОбработкиОшибок"));
     }
 
     #[test]

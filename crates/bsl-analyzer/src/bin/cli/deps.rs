@@ -8,7 +8,6 @@ use std::{
 
 use clap::ValueEnum;
 
-/// Output format for the `deps` subcommand.
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
 pub enum DepsOutputFormat {
     #[default]
@@ -19,10 +18,7 @@ pub enum DepsOutputFormat {
 struct UnionSummary {
     size: usize,
     bytes: u64,
-    /// Per-root BFS panics encountered while traversing for the union.
     panicked: usize,
-    /// At least one root or transitively reached file was unreadable, so
-    /// the union may be silently truncated.
     hit_unreadable: bool,
 }
 
@@ -31,16 +27,10 @@ struct DepsRow {
     file_id: u32,
     levels: Vec<usize>,
     closure: usize,
-    /// Sum of file sizes (bytes on disk) for every file in the closure,
-    /// including the root. `0` when `--bytes` is off.
     closure_bytes: u64,
-    /// `None` = BFS completed successfully; `Some(reason)` = row excluded
-    /// from aggregate stats (file unreadable at load or BFS panicked).
     error: Option<&'static str>,
 }
 
-/// Best-effort `VmRSS` from `/proc/self/status` in kilobytes. Linux-only;
-/// returns `None` on other platforms or when the proc entry can't be parsed.
 fn read_vmrss_kb() -> Option<u64> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
     for line in status.lines() {
@@ -51,9 +41,6 @@ fn read_vmrss_kb() -> Option<u64> {
     None
 }
 
-/// RFC-4180 field quoting: wrap in `"` and double internal `"` when the
-/// field contains a comma, quote, or newline. Returned `Cow` borrows when
-/// no escaping is needed.
 fn csv_field(s: &str) -> std::borrow::Cow<'_, str> {
     if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
         std::borrow::Cow::Owned(format!("\"{}\"", s.replace('"', "\"\"")))
@@ -93,10 +80,6 @@ pub fn run_deps(
     let start = Instant::now();
     let rss_baseline = if report_mem { read_vmrss_kb() } else { None };
 
-    // Canonicalize the workspace root up-front so `path_to_id` and CLI args
-    // (`--bench`/`--multi-open`) share one canonical key space; otherwise
-    // `--source-dir .` produces relative WalkDir paths that CLI canonicalize
-    // can't match.
     let source_dir = source_dir.canonicalize().unwrap_or(source_dir);
 
     let mut bsl_entries: Vec<(PathBuf, u64)> = Vec::new();
@@ -117,9 +100,6 @@ pub fn run_deps(
         return Err(format!("no .bsl files under {}", source_dir.display()).into());
     }
 
-    // Short-circuit before the eager workspace-into-Salsa load so the
-    // measurement times only the lexer-only index build, not the surrounding
-    // ingest.
     if bench_index {
         return run_deps_bench_index(bsl_entries, index_workers, rss_baseline, start);
     }
@@ -148,9 +128,6 @@ pub fn run_deps(
                 tracing::warn!(path = %path.display(), error = %err, "failed to read file");
                 unreadable.insert(*file_id);
                 read_errors.push((path.clone(), err));
-                // Leave file_text empty so `file_dependencies_query` on this
-                // file returns an empty deps list; we mark roots that hit
-                // this state with an `error` and exclude them from aggregates.
                 db.set_file_text(*file_id, "");
             }
         }
@@ -191,8 +168,6 @@ pub fn run_deps(
     } else if sample == 0 || sample >= total {
         all_file_ids.clone()
     } else {
-        // Integer stride sampling: `i * total / sample` avoids the f64
-        // precision wobble at workspace scales beyond 2^53.
         (0..sample)
             .map(|i| {
                 let idx = (i.saturating_mul(total) / sample).min(total - 1);
@@ -200,8 +175,6 @@ pub fn run_deps(
             })
             .collect()
     };
-    // Dedupe roots (for `--multi-open`) preserving first occurrence so the
-    // union arithmetic later cannot underflow when the user repeats a path.
     let roots: Vec<(FileId, PathBuf)> = {
         let mut seen: HashSet<FileId> = HashSet::new();
         roots.into_iter().filter(|(fid, _)| seen.insert(*fid)).collect()
@@ -246,11 +219,6 @@ pub fn run_deps(
                     let mut visited: HashSet<FileId> = HashSet::new();
                     visited.insert(*root_id);
                     let mut frontier: Vec<FileId> = vec![*root_id];
-                    // Stop-but-record: if BFS reaches a file whose text we
-                    // couldn't read at load time, the closure beyond that
-                    // point is unknown — mark the root row as errored so it
-                    // doesn't pollute aggregates with a falsely-truncated
-                    // closure.
                     let mut hit_unreadable = false;
 
                     for _ in 0..max_depth {
@@ -322,11 +290,6 @@ pub fn run_deps(
     let bfs_elapsed = bfs_start.elapsed();
     let rss_after_bfs = if report_mem { read_vmrss_kb() } else { None };
 
-    // Multi-open: synthesize a union row covering the union of all roots'
-    // closures. Compute each root's closure with its OWN visited set, then
-    // union the sets — a single shared visited set under-counts because a
-    // file first reached at a deeper depth from one root would not be
-    // re-expanded when reached at a shallower depth from another root.
     let union_summary: Option<UnionSummary> = if !multi_open.is_empty() {
         let snapshot = db.clone();
         let root_ids: HashSet<FileId> = roots.iter().map(|(fid, _)| *fid).collect();
@@ -334,10 +297,6 @@ pub fn run_deps(
         let mut union_panicked: usize = 0;
         let mut union_hit_unreadable: bool = false;
         for (root_id, root_path) in &roots {
-            // A root that itself failed to load at workspace ingestion has
-            // an empty `file_text` in Salsa; its closure will be empty and
-            // misleading. Surface that explicitly instead of silently
-            // contributing a 1-file (root-only) singleton to the union.
             if unreadable.contains(root_id) {
                 union_hit_unreadable = true;
                 union.insert(*root_id);
@@ -390,9 +349,6 @@ pub fn run_deps(
         } else {
             0
         };
-        // "Files beyond the roots" = union members that are NOT themselves
-        // roots. Counting `union.len() - roots.len()` underflows when
-        // panicked roots are absent from `union`, so filter explicitly.
         let union_size = union.iter().filter(|f| !root_ids.contains(f)).count();
         Some(UnionSummary {
             size: union_size,
@@ -446,9 +402,6 @@ pub fn run_deps(
         }
     }
 
-    // Aggregate over successful rows only. Failed rows (unreadable file or
-    // panicked BFS) carry closure=0 by construction and would otherwise pull
-    // every percentile and the mean downward.
     let ok_rows: Vec<&DepsRow> = rows.iter().filter(|r| r.error.is_none()).collect();
     let mut closures: Vec<usize> = ok_rows.iter().map(|r| r.closure).collect();
     closures.sort_unstable();
@@ -557,9 +510,6 @@ pub fn run_deps(
     Ok(())
 }
 
-/// Bench mode for `deps --bench <file>`: time the cold cost of bringing a
-/// single file's text into Salsa-driven IDE state
-/// (read → parse → item_tree → module_bodies).
 #[allow(clippy::too_many_arguments)]
 fn run_deps_bench(
     db: &ide::RootDatabaseImpl,
@@ -586,8 +536,6 @@ fn run_deps_bench(
     let read_elapsed = read_start.elapsed();
     let read_bytes = read_result.map(|s| s.len()).unwrap_or(0);
 
-    // Cold from Salsa's POV — the eager workspace load above only set inputs,
-    // it didn't trigger parse/item_tree/module_bodies for this file_id yet.
     let parse_start = Instant::now();
     let _parse = db.parse(file_id);
     let parse_elapsed = parse_start.elapsed();
@@ -607,12 +555,6 @@ fn run_deps_bench(
     eprintln!("=== Bench: {} ===", canonical.display());
     eprintln!("file_id:               {}", file_id.0);
     eprintln!("file size (disk):      {} bytes ({:.1} KB)", size, size as f64 / 1024.0);
-    // These timings are staged, not isolated: each step observes Salsa
-    // memoization populated by earlier phases (item_tree builds on parse,
-    // module_bodies on item_tree, …). The numbers reflect the marginal
-    // wall-clock seen by an LSP request that triggers each phase for the
-    // first time *after* the prior phases ran — which is the realistic
-    // cold-cost of a hover crossing the closure boundary.
     eprintln!("---- staged cold phases (each marginal over prior) ----");
     eprintln!(
         "read_to_string:        {:.1} ms ({} bytes)",
@@ -640,10 +582,6 @@ fn run_deps_bench(
     Ok(())
 }
 
-/// Bench for `deps --bench-index`: lexer-only sweep over every `.bsl`
-/// file in `bsl_entries`, accumulate identifier tokens (lowercased) into
-/// a `HashMap<Name, Vec<FileId>>`, and report wall-clock, unique-name count,
-/// (name,file) pair count, and a rough byte-size estimate.
 fn run_deps_bench_index(
     bsl_entries: Vec<(PathBuf, u64)>,
     index_workers: Option<usize>,
@@ -675,8 +613,6 @@ fn run_deps_bench_index(
 
     let build_start = Instant::now();
 
-    // Parallel phase: per-file lex → unique identifier set. No locking,
-    // no global state — each task is pure, results merged later.
     let per_file: Vec<(u32, HashSet<String>)> = pool.install(|| {
         bsl_entries
             .par_iter()
@@ -696,9 +632,6 @@ fn run_deps_bench_index(
     });
     let lex_elapsed = build_start.elapsed();
 
-    // Serial merge into the final `by_name` map. Could be parallelized
-    // with a sharded reduce, but at 25k files this is sub-second and
-    // keeps the measurement honest about the canonical-merge step.
     let mut by_name: HashMap<String, Vec<u32>> = HashMap::new();
     for (file_id, names) in &per_file {
         for n in names {
@@ -710,9 +643,6 @@ fn run_deps_bench_index(
 
     let unique_names = by_name.len();
     let total_pairs: usize = by_name.values().map(|v| v.len()).sum();
-    // Rough lower bound on `by_name` memory: assume 24 B `String`
-    // overhead per key + key bytes, plus 24 B `Vec` overhead per value
-    // + 4 B per `FileId` entry. HashMap bucket overhead not counted.
     let est_key_bytes: usize = by_name.keys().map(|k| k.len() + 24).sum();
     let est_value_bytes: usize = by_name.values().map(|v| v.len() * 4 + 24).sum();
     let est_total = est_key_bytes + est_value_bytes;

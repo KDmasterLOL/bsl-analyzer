@@ -1,19 +1,9 @@
-//! BSL-aware code chunking.
-//!
-//! Splits BSL source files into meaningful chunks at procedure/function
-//! boundaries using the parser's AST. Code outside procedures (module header:
-//! variable declarations, preprocessor directives) is captured as a separate chunk.
-
 use syntax::ast::{Annotation, AstNode, FunctionDef, ProcedureDef};
 
-/// Kind of a code chunk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChunkKind {
-    /// Module-level code before the first procedure/function.
     ModuleHeader,
-    /// Procedure definition.
     Procedure,
-    /// Function definition.
     Function,
 }
 
@@ -27,37 +17,22 @@ impl ChunkKind {
     }
 }
 
-/// A chunk of BSL source code with metadata.
 #[derive(Debug, Clone)]
 pub struct Chunk {
-    /// Kind of chunk.
     pub kind: ChunkKind,
-    /// Symbol name (procedure/function name, or empty for module header).
     pub name: String,
-    /// Whether the symbol is exported.
     pub is_export: bool,
-    /// Annotations attached to the symbol (e.g. "&НаСервере").
     pub annotations: Vec<String>,
-    /// 0-based line range (start inclusive, end exclusive).
     pub line_start: u32,
     pub line_end: u32,
-    /// Full source text of the chunk.
     pub text: String,
 }
 
-/// Maximum chunk size in bytes. Chunks larger than this are split by lines.
-const MAX_CHUNK_BYTES: usize = 32 * 1024; // 32 KB
+const MAX_CHUNK_BYTES: usize = 32 * 1024;
 
-/// BSL-aware chunker that splits source code into procedure/function chunks.
 pub struct Chunker;
 
 impl Chunker {
-    /// Extract chunks from BSL source code.
-    ///
-    /// The source is parsed into an AST and split at procedure/function
-    /// boundaries. Any code before the first procedure is captured as
-    /// a `ModuleHeader` chunk (if non-trivial).
-    /// Chunks exceeding 32KB are split into smaller parts by lines.
     pub fn chunk(source: &str) -> Vec<Chunk> {
         let parse = parser::parse(source);
         let root = parse.syntax_node();
@@ -65,8 +40,6 @@ impl Chunker {
 
         let mut chunks = Vec::new();
 
-        // Use descendants() to find procedures/functions at any nesting level
-        // (they can be inside #Если, #Область, etc.)
         for node in root.descendants() {
             let (kind, name, is_export, annotations) =
                 if let Some(proc) = ProcedureDef::cast(node.clone()) {
@@ -102,7 +75,6 @@ impl Chunker {
             });
         }
 
-        // If no procedures/functions found, treat entire file as a single chunk.
         if chunks.is_empty() && has_meaningful_content(source) {
             chunks.push(Chunk {
                 kind: ChunkKind::ModuleHeader,
@@ -115,7 +87,6 @@ impl Chunker {
             });
         }
 
-        // Split oversized chunks into smaller parts.
         let mut result = Vec::new();
         for chunk in chunks {
             if chunk.text.len() <= MAX_CHUNK_BYTES {
@@ -129,8 +100,6 @@ impl Chunker {
     }
 }
 
-/// Split a large chunk into parts of at most MAX_CHUNK_BYTES,
-/// breaking at line boundaries.
 fn split_large_chunk(chunk: Chunk) -> Vec<Chunk> {
     let lines: Vec<&str> = chunk.text.lines().collect();
     let mut parts = Vec::new();
@@ -139,7 +108,7 @@ fn split_large_chunk(chunk: Chunk) -> Vec<Chunk> {
     let mut part_line_start = chunk.line_start;
 
     for (i, line) in lines.iter().enumerate() {
-        let line_bytes = line.len() + 1; // +1 for newline
+        let line_bytes = line.len() + 1;
         if current_bytes + line_bytes > MAX_CHUNK_BYTES && !current_lines.is_empty() {
             let part_num = parts.len() + 1;
             parts.push(Chunk {
@@ -203,8 +172,6 @@ fn annotation_text(ann: &Annotation) -> Option<String> {
     ann.kind_token().map(|t| t.text().to_string())
 }
 
-/// Check whether a text fragment contains meaningful BSL code
-/// (not just whitespace, comments, or empty regions).
 fn has_meaningful_content(text: &str) -> bool {
     let tokens = lexer::tokenize(text);
     tokens.iter().any(|t| {
@@ -215,7 +182,6 @@ fn has_meaningful_content(text: &str) -> bool {
     })
 }
 
-/// Simple line index mapping byte offsets to 0-based line numbers.
 struct LineIndex {
     line_starts: Vec<u32>,
 }

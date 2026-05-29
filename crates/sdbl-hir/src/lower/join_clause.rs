@@ -1,5 +1,3 @@
-//! JOIN clause lowering.
-
 use std::collections::HashSet;
 
 use crate::diagnostics::SdblDiagnostic;
@@ -11,10 +9,6 @@ use syntax::ast::AstNode;
 use super::context::LoweringContext;
 
 impl LoweringContext {
-    /// Lower all JOIN clauses (including nested) from query.
-    ///
-    /// Returns a flat list of all JOINs, recursively collecting nested JOINs.
-    /// This ensures all tables from nested JOINs are available in completion scope.
     pub(super) fn lower_joins(&mut self, query: &syntax::ast::SdblQuery) -> Vec<JoinHir> {
         let Some(from_clause) = query.from_clause() else {
             return Vec::new();
@@ -31,7 +25,6 @@ impl LoweringContext {
         all_joins
     }
 
-    /// Recursively lower JOIN clause and collect all nested JOINs.
     fn lower_join_clause_recursive(
         &mut self,
         join: &syntax::ast::SdblJoinClause,
@@ -39,20 +32,16 @@ impl LoweringContext {
     ) {
         let join_hir = self.lower_join_clause(join);
 
-        // First collect nested JOINs (depth-first)
         if let Some(ds) = join.data_source() {
             for nested_join in ds.join_clauses() {
                 self.lower_join_clause_recursive(&nested_join, out);
             }
         }
 
-        // Then add this JOIN
         out.push(join_hir);
     }
 
-    /// Lower a single JOIN clause.
     fn lower_join_clause(&mut self, join: &syntax::ast::SdblJoinClause) -> JoinHir {
-        // Record JOIN keyword
         self.record_keyword_by_text(
             join.syntax(),
             "JOIN",
@@ -60,7 +49,6 @@ impl LoweringContext {
             crate::source_map::TokenCategory::JoinKeyword,
         );
 
-        // Determine join type using the AST method
         let ast_join_type = join.join_type();
         let join_type = match ast_join_type {
             syntax::ast::JoinType::Left => {
@@ -101,18 +89,12 @@ impl LoweringContext {
             }
         };
 
-        // Check for FULL OUTER JOIN
         if matches!(join_type, crate::hir::JoinType::Full) {
             self.diagnostics
                 .push(SdblDiagnostic::FullOuterJoin { range: join.syntax().text_range() });
         }
 
-        // Lower joined table
         let table = if let Some(ds) = join.data_source() {
-            // Check if JOIN's data source is a subquery.
-            // Track 2 §4 Slice 3: aggregating subqueries (GROUP BY or aggregate
-            // function in SELECT) are exempted — they are doing something the
-            // underlying table cannot, so the rule does not apply.
             if let Some(subquery) = ds.subquery() {
                 if !super::from_clause::subquery_has_aggregation(&subquery) {
                     self.diagnostics
@@ -120,14 +102,11 @@ impl LoweringContext {
                 }
             }
 
-            // NOTE: Nested JOINs are now handled by lower_join_clause_recursive()
-            // which calls this function recursively. No need to process them here.
             self.lower_data_source(&ds)
         } else {
             TableRef::missing(join.syntax().text_range())
         };
 
-        // Check for join with virtual table
         if table.is_virtual_table {
             if let Some(vt_type) = table.parts.last().and_then(|p| virtual_table_type(p)) {
                 self.diagnostics.push(SdblDiagnostic::JoinWithVirtualTable {
@@ -138,12 +117,8 @@ impl LoweringContext {
             }
         }
 
-        // Add joined table to scope BEFORE processing ON condition
-        // so that fields from the joined table resolve correctly
         self.scope.add_table(table.clone());
 
-        // Lower ON condition - get the expression child directly from JOIN clause
-        // AST structure: SDBL_JOIN_CLAUSE contains SDBL_DATA_SOURCE + expression (ON condition)
         let condition_node = join.syntax().children().find(|n| {
             matches!(
                 n.kind(),
@@ -157,7 +132,6 @@ impl LoweringContext {
             )
         });
 
-        // Check for OR with multiple fields in JOIN condition
         if let Some(ref expr_node) = condition_node {
             self.check_join_or_with_multiple_fields(expr_node);
         }
@@ -167,13 +141,9 @@ impl LoweringContext {
         JoinHir { join_type, table, condition, range: join.syntax().text_range() }
     }
 
-    /// Check JOIN ON condition for OR with multiple distinct fields.
-    ///
-    /// Only reports if OR involves different fields (same field like "Status = 1 OR Status = 2" is OK).
     fn check_join_or_with_multiple_fields(&mut self, expr_node: &syntax::SyntaxNode) {
         use syntax::SyntaxToken;
 
-        // Find all OR tokens in this expression
         let or_tokens: Vec<SyntaxToken> = expr_node
             .descendants_with_tokens()
             .filter_map(|el| el.into_token())
@@ -181,14 +151,11 @@ impl LoweringContext {
             .collect();
 
         for or_token in or_tokens {
-            // Find containing logical expression
             let containing_expr = self.find_containing_logical_expr_for_join(&or_token);
 
             if let Some(expr) = containing_expr {
-                // Extract field names
                 let field_names = self.extract_field_names_from_expr(&expr);
 
-                // Only report if multiple distinct fields
                 if field_names.len() > 1 {
                     self.diagnostics
                         .push(SdblDiagnostic::LogicalOrInJoin { range: or_token.text_range() });
@@ -197,7 +164,6 @@ impl LoweringContext {
         }
     }
 
-    /// Find the containing logical expression for an OR token in JOIN context.
     fn find_containing_logical_expr_for_join(
         &self,
         or_token: &syntax::SyntaxToken,
@@ -223,10 +189,6 @@ impl LoweringContext {
         }
     }
 
-    /// Extract all unique field names from an expression.
-    ///
-    /// Handles qualified (Table.Field) and unqualified fields.
-    /// Filters SQL keywords.
     fn extract_field_names_from_expr(&self, expr: &syntax::SyntaxNode) -> HashSet<String> {
         use syntax::{SyntaxKind, SyntaxToken};
 
@@ -239,16 +201,6 @@ impl LoweringContext {
         while i < tokens.len() {
             let token = &tokens[i];
 
-            // Qualified name `Name.Name(.Name)*`. Both sides of each
-            // `.` accept any property-name token (`is_name_token`) so
-            // soft-keyword field names retained by `sdbl_token_converter`
-            // (e.g. `Т.В` where `В` is KW_IN) lower as qualified fields.
-            // Greedy chain consumption: a three-part reference like
-            // `Т.В.Поле` collapses to a single qualified field instead
-            // of leaking `Поле` into a second pseudo-field entry. The
-            // text-level `is_sql_keyword` filter still rejects words
-            // like `И`/`ИЛИ`/`НЕ`/`ИСТИНА`/`ЛОЖЬ` that would confuse
-            // join-condition parsing.
             if token.kind().is_name_token()
                 && i + 2 < tokens.len()
                 && tokens[i + 1].kind() == SyntaxKind::DOT
@@ -273,11 +225,6 @@ impl LoweringContext {
                 continue;
             }
 
-            // Unqualified identifier. Strict `IDENT` only — a bare
-            // soft-keyword token like `В` (KW_IN) or `Неопределено`
-            // (KW_UNDEFINED) is an operator or literal, not a field
-            // reference, even though it can appear as a property name
-            // after a `.` (qualified case handled above).
             if token.kind() == SyntaxKind::IDENT {
                 let text = token.text();
                 if !self.is_sql_keyword(text) {
@@ -291,7 +238,6 @@ impl LoweringContext {
         fields
     }
 
-    /// Check if text is a SQL keyword.
     fn is_sql_keyword(&self, text: &str) -> bool {
         matches!(
             text.to_uppercase().as_str(),

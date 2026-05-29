@@ -1,9 +1,3 @@
-//! IsInRoleMethod diagnostic.
-//!
-//! Detects `IsInRole()` / `РольДоступна()` usage in `if` conditions when the
-//! condition is not protected by `PrivilegedMode()` /
-//! `ПривилегированныйРежим()`.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -25,9 +19,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// HIR-based check for IsInRole() usage without PrivilegedMode() protection.
-///
-/// Processes each method and module-level code independently to maintain proper scoping.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::IsInRoleMethod;
 
@@ -38,7 +29,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut all_diagnostics = Vec::new();
     let module_bodies = ctx.module_bodies();
 
-    // Check method bodies
     for (_local_id, body, source_map) in module_bodies.method_bodies() {
         let mut checker = IsInRoleChecker {
             is_in_role_vars: HashSet::new(),
@@ -50,17 +40,13 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             ctx,
         };
 
-        // Two-pass approach within each method:
-        // Pass 1: Process all assignments to build variable tracking
         checker.collect_variables();
 
-        // Pass 2: Check if-statements for diagnostics
         checker.check_statements();
 
         all_diagnostics.extend(checker.diagnostics);
     }
 
-    // Check module-level code
     if let Some(lower_result) = module_bodies.module_code_result() {
         let mut checker = IsInRoleChecker {
             is_in_role_vars: HashSet::new(),
@@ -93,7 +79,6 @@ struct IsInRoleChecker<'a> {
 }
 
 impl<'a> IsInRoleChecker<'a> {
-    /// Pass 1: Collect variables containing IsInRole() or PrivilegedMode() results.
     fn collect_variables(&mut self) {
         for (_stmt_id, stmt) in self.body.stmts_iter() {
             if let Stmt::Assign { target, value } = stmt {
@@ -102,14 +87,11 @@ impl<'a> IsInRoleChecker<'a> {
         }
     }
 
-    /// Pass 2: Check if-statements for unprotected IsInRole() usage.
     fn check_statements(&mut self) {
         for (_stmt_id, stmt) in self.body.stmts_iter() {
             if let Stmt::If(if_stmt) = stmt {
-                // Check main if condition
                 self.check_expression(ExprId::from_idx(if_stmt.condition));
 
-                // Check elsif conditions
                 for (elsif_condition, _elsif_stmts) in if_stmt.elsif_branches.iter() {
                     self.check_expression(ExprId::from_idx(*elsif_condition));
                 }
@@ -117,22 +99,18 @@ impl<'a> IsInRoleChecker<'a> {
         }
     }
 
-    /// Handle assignment statement - track variables containing method call results.
     fn handle_assignment(&mut self, target: ExprId, value: ExprId) {
-        // Get variable name from target
         let var_name = if let Expr::Path(name) = self.body.expr(target) {
             Some(name.as_str().to_lowercase())
         } else {
             None
         };
 
-        // CRITICAL: Remove variable from BOTH sets (reassignment clears tracking)
         if let Some(ref var) = var_name {
             self.is_in_role_vars.remove(var);
             self.privileged_mode_vars.remove(var);
         }
 
-        // Check if RHS is IsInRole() or PrivilegedMode() call
         if let Some(ref var) = var_name {
             if self.is_is_in_role_call(value) {
                 self.is_in_role_vars.insert(var.clone());
@@ -142,28 +120,19 @@ impl<'a> IsInRoleChecker<'a> {
         }
     }
 
-    /// Check expression for unprotected IsInRole() usage.
-    ///
-    /// This recursively scans the expression tree looking for IsInRole() calls or variables,
-    /// but protection check is done at the root level (if-condition).
     fn check_expression(&mut self, root_expr_id: ExprId) {
-        // Protection is checked at root level (if-condition contains PrivilegedMode somewhere)
         let has_protection = self.has_privileged_mode_protection(root_expr_id);
 
-        // Recursively find all IsInRole usages in the expression tree
         self.find_is_in_role_usages(root_expr_id, has_protection);
     }
 
-    /// Recursively find IsInRole() calls and variables in expression tree.
     fn find_is_in_role_usages(&mut self, expr_id: ExprId, has_protection: bool) {
-        // Check for direct IsInRole() calls
         if self.is_is_in_role_call(expr_id) && !has_protection {
             if let Some(range) = self.source_map.expr_range(expr_id) {
                 self.diagnostics.push(create_diagnostic(range, self.code, self.ctx));
             }
         }
 
-        // Check for variable references to IsInRole() results
         if let Expr::Path(name) = self.body.expr(expr_id) {
             let var_name = name.as_str().to_lowercase();
             if self.is_in_role_vars.contains(&var_name) && !has_protection {
@@ -173,7 +142,6 @@ impl<'a> IsInRoleChecker<'a> {
             }
         }
 
-        // Recursively check subexpressions
         match self.body.expr(expr_id) {
             Expr::BinaryOp { lhs, rhs, .. } => {
                 self.find_is_in_role_usages(ExprId::from_idx(*lhs), has_protection);
@@ -191,7 +159,6 @@ impl<'a> IsInRoleChecker<'a> {
         }
     }
 
-    /// Check if expression is a call to IsInRole() / РольДоступна().
     fn is_is_in_role_call(&self, expr_id: ExprId) -> bool {
         if let Expr::Call { callee, .. } = self.body.expr(expr_id) {
             if let Expr::Path(name) = self.body.expr(ExprId::from_idx(*callee)) {
@@ -201,7 +168,6 @@ impl<'a> IsInRoleChecker<'a> {
         false
     }
 
-    /// Check if expression is a call to PrivilegedMode() / ПривилегированныйРежим().
     fn is_privileged_mode_call(&self, expr_id: ExprId) -> bool {
         if let Expr::Call { callee, .. } = self.body.expr(expr_id) {
             if let Expr::Path(name) = self.body.expr(ExprId::from_idx(*callee)) {
@@ -211,20 +177,12 @@ impl<'a> IsInRoleChecker<'a> {
         false
     }
 
-    /// Check if expression has PrivilegedMode() protection.
-    ///
-    /// Protection means the expression contains:
-    /// - Direct call to PrivilegedMode()
-    /// - Variable reference to PrivilegedMode() result
-    /// - OR operator with PrivilegedMode() in either operand
     fn has_privileged_mode_protection(&self, expr_id: ExprId) -> bool {
         self.contains_privileged_mode(expr_id)
     }
 
-    /// Recursively check if expression contains PrivilegedMode() call or variable.
     fn contains_privileged_mode(&self, expr_id: ExprId) -> bool {
         match self.body.expr(expr_id) {
-            // Direct PrivilegedMode() call
             Expr::Call { callee, .. } => {
                 if let Expr::Path(name) = self.body.expr(ExprId::from_idx(*callee)) {
                     if is_privileged_mode_method(name.as_str()) {
@@ -234,22 +192,18 @@ impl<'a> IsInRoleChecker<'a> {
                 false
             }
 
-            // Variable reference to PrivilegedMode() result
             Expr::Path(name) => {
                 let var_name = name.as_str().to_lowercase();
                 self.privileged_mode_vars.contains(&var_name)
             }
 
-            // Binary operations - recursively check both sides
             Expr::BinaryOp { lhs, rhs, .. } => {
                 self.contains_privileged_mode(ExprId::from_idx(*lhs))
                     || self.contains_privileged_mode(ExprId::from_idx(*rhs))
             }
 
-            // Unary operations
             Expr::UnaryOp { expr, .. } => self.contains_privileged_mode(ExprId::from_idx(*expr)),
 
-            // Ternary operations
             Expr::Ternary { condition, then_expr, else_expr } => {
                 self.contains_privileged_mode(ExprId::from_idx(*condition))
                     || self.contains_privileged_mode(ExprId::from_idx(*then_expr))
@@ -261,13 +215,11 @@ impl<'a> IsInRoleChecker<'a> {
     }
 }
 
-/// Check if method name is IsInRole() / РольДоступна().
 fn is_is_in_role_method(name: &str) -> bool {
     let lower = name.to_lowercase();
     matches!(lower.as_str(), "рольдоступна" | "isinrole")
 }
 
-/// Check if method name is PrivilegedMode() / ПривилегированныйРежим().
 fn is_privileged_mode_method(name: &str) -> bool {
     let lower = name.to_lowercase();
     matches!(lower.as_str(), "привилегированныйрежим" | "privilegedmode")

@@ -1,13 +1,3 @@
-//! ConsecutiveEmptyLines diagnostic
-//!
-//! Checks that BSL code does not contain too many consecutive empty lines.
-//!
-//! ## Why?
-//! Too many empty lines reduce code readability and waste vertical space.
-//!
-//! ## Configuration
-//! - `allowedEmptyLinesCount` (Integer, default: 1) - Maximum allowed consecutive empty lines
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -30,7 +20,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 
 const DEFAULT_ALLOWED_EMPTY_LINES: usize = 1;
 
-/// Main entry point for ConsecutiveEmptyLines diagnostic.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let _span = tracing::debug_span!("ConsecutiveEmptyLines::check").entered();
 
@@ -52,13 +41,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    // Get line index (cached, using helper method for streaming mode compatibility)
     let line_index = ctx.line_index();
 
     scan_consecutive_empty_lines(&file_text, &line_index, allowed_empty_lines, code, ctx)
 }
 
-/// Scan for consecutive empty lines using LineIndex.
 fn scan_consecutive_empty_lines(
     text: &str,
     line_index: &LineIndex,
@@ -80,7 +67,6 @@ fn scan_consecutive_empty_lines(
             let line_text = &text[usize::from(range.start())..usize::from(range.end())];
             line_text.trim().is_empty()
         } else {
-            // Last line without range - check remaining text
             let start: usize = line_start.into();
             if start < text.len() {
                 text[start..].trim().is_empty()
@@ -113,7 +99,6 @@ fn scan_consecutive_empty_lines(
         }
     }
 
-    // Handle trailing empty lines
     if consecutive_empty > allowed {
         if let Some(start_line) = empty_start_line {
             diagnostics.push(create_diagnostic(
@@ -133,7 +118,6 @@ fn scan_consecutive_empty_lines(
     diagnostics
 }
 
-/// Create a diagnostic for consecutive empty lines.
 fn create_diagnostic(
     line_index: &LineIndex,
     start_line: u32,
@@ -203,14 +187,11 @@ mod tests {
     fn test_single_newline_file() {
         let text = "\n";
         let diagnostics = check_ast_diagnostic(text, check);
-        // NOTE: Test fixture normalizes text, so single "\n" becomes empty file
-        // This is expected behavior - LineIndex doesn't count trailing empty line
         expect![[r#""#]].assert_eq(&format_diags(text, &diagnostics));
     }
 
     #[test]
     fn test_three_consecutive_empty_lines() {
-        // Three consecutive empty lines should produce 1 diagnostic
         let code = "Процедура А()\n\n\n\nКонецПроцедуры";
         let diagnostics = check_ast_diagnostic(code, check);
         expect![[r#"
@@ -222,7 +203,6 @@ mod tests {
 
     #[test]
     fn test_multiple_groups_of_consecutive_empty_lines() {
-        // Two separate groups of consecutive empty lines
         let code = "А = 1;\n\n\nБ = 2;\n\n\nВ = 3;";
         let diagnostics = check_ast_diagnostic(code, check);
         expect![[r#"

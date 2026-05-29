@@ -1,28 +1,3 @@
-//! Phase 5 regression coverage for the qualified-call clean-architecture
-//! refactor. The user-reported bug — `ТаблицаДокументов.Очистить()` in a
-//! managed form's BSL module producing two false-positive diagnostics
-//! (`MissingCommonModuleMethod` + `UnresolvedMethodCall`) — was the
-//! driver of the entire refactor. This test pins the negative
-//! invariant from the surface inference exposes (no
-//! `UnresolvedMethodCall` for valid form-data method calls), so a
-//! regression in any layer (parser → loader → schema → form_attr →
-//! field_lookup → cascade gate → PlatformObject bridge) surfaces
-//! immediately.
-//!
-//! The fixture re-uses
-//! `crates/bsl-metadata/fixtures/designer/DataProcessors/ТестоваяОбработка/`
-//! which has a `НастройкиЭксель` `TabularSection` on the
-//! `Объект` MainAttribute (added during the previous Объект.<dot>
-//! iteration), so chained calls
-//! (`Объект.НастройкиЭксель.<TabularSectionMethod>(…)`) reach the
-//! same `ДанныеФормыКоллекция` HBK type the user's
-//! `ТаблицаДокументов.Очистить()` resolves to.
-//!
-//! Method-surface invariant (mirrors `completion_form_object.rs`):
-//! methods on the FormData wrapper resolve through
-//! `ДанныеФормыКоллекция` / `ДанныеФормыСтруктура` — they MUST stay
-//! silent in the inference diagnostic surface.
-
 use bsl_platform::PlatformDataInner;
 use hir::{
     Builders, InferenceDiagnostic, MetadataKind, TypeId, TypeKernelDb, TypeKind,
@@ -84,20 +59,6 @@ fn is_metadata_ref(db: &RootDatabaseImpl, ty: TypeId, kind: MetadataKind, name: 
 
 #[test]
 fn chained_form_attribute_method_call_silent() {
-    // The user-reported scenario expressed through the chained shape
-    // available in our DataProcessor fixture: `Объект.НастройкиЭксель`
-    // is a `TabularSection`, so `.Очистить()` resolves through the
-    // FormData wrapper (`ДанныеФормыКоллекция.Очистить`) — exactly
-    // the platform method the user's `ТаблицаДокументов.Очистить()`
-    // resolved to in their real project.
-    //
-    // Pre-Phase-2 the eager `M.Method()` ⇒ CommonModule classification
-    // in body lowering forced `MissingCommonModuleMethod` on this
-    // pattern (lowering had no `db` to see the form attribute) and
-    // inference followed up with `UnresolvedMethodCall`. The cascade
-    // gate now resolves through `infer_path_name`'s steps 4 / 4b, the
-    // resulting `Ty::FormData{Collection,…}` flows through
-    // `lookup_method`, and the platform method resolves cleanly.
     if !has_platform_data() {
         eprintln!("Skipping: no platform data available");
         return;
@@ -116,11 +77,6 @@ fn chained_form_attribute_method_call_silent() {
 
 #[test]
 fn form_data_collection_find_by_id_silent_and_preserves_row_schema() {
-    // `НайтиПоИдентификатору` exists on `ДанныеФормыКоллекция`, not on the
-    // ordinary object-module `ТабличнаяЧасть` surface. In a managed form,
-    // `Объект.<ТЧ>` must therefore keep the form-data collection wrapper
-    // while still remembering the tabular-section row schema for chained
-    // column access.
     if !has_platform_data() {
         eprintln!("Skipping: no platform data available");
         return;
@@ -164,14 +120,6 @@ fn form_data_collection_find_by_id_silent_and_preserves_row_schema() {
 
 #[test]
 fn chained_form_attribute_misspelled_method_emits_method_not_found() {
-    // Cross-validation for `chained_form_attribute_method_call_silent`:
-    // if a regression silenced ALL diagnostics on this receiver shape
-    // (e.g. by widening the cascade-gate's silent arm or losing
-    // `receiver_display_name` for `ДанныеФормыКоллекция`), the
-    // sibling test would still pass on `Ty::Unknown`. This test pins
-    // the positive direction — the receiver IS typed correctly, so
-    // a misspelled method emits exactly one
-    // `UnresolvedMethodCall { MethodNotFound }`.
     if !has_platform_data() {
         eprintln!("Skipping: no platform data available");
         return;
@@ -195,12 +143,6 @@ fn chained_form_attribute_misspelled_method_emits_method_not_found() {
 
 #[test]
 fn value_list_form_attribute_method_call_silent() {
-    // User-reported: `СценарииВыгрузки.Добавить()` on a `v8:ValueListType`
-    // form attribute falsely fired `UnresolvedMethodCall { ReceiverNotResolved }`
-    // ("Не удалось разрешить модуль …"). The attribute type used to lower to
-    // `Unknown`, which routed the call into the bare-ident module cascade.
-    // Now `v8:ValueListType` lowers to the kernel `ValueList`, so `.Добавить()`
-    // resolves through the platform method tables.
     if !has_platform_data() {
         eprintln!("Skipping: no platform data available");
         return;
@@ -221,11 +163,6 @@ fn value_list_form_attribute_method_call_silent() {
 
 #[test]
 fn value_list_form_attribute_types_to_kernel_value_list() {
-    // Positive cross-check for the silent sibling: the form attribute must
-    // type to the kernel `ValueList` (not `Unknown`). A miss on platform
-    // value-collection receivers is deliberately silent — so MethodNotFound
-    // can't distinguish "resolved" from "fell through on Unknown"; the
-    // inferred receiver type can.
     if !has_platform_data() {
         eprintln!("Skipping: no platform data available");
         return;
@@ -245,12 +182,6 @@ fn value_list_form_attribute_types_to_kernel_value_list() {
 
 #[test]
 fn findrows_chain_no_unresolved_method_call() {
-    // Cross-check with the typed-array rebind iteration (commit
-    // c9cab461). `НайтиСтроки` returns `TypedArray<TabularSectionRow>`
-    // so `[0].Значение` chains through to the row's column type.
-    // Both link types must travel through the inference pipeline
-    // without firing UnresolvedMethodCall — a regression at the
-    // PlatformObject bridge or the cascade gate would surface here.
     if !has_platform_data() {
         eprintln!("Skipping: no platform data available");
         return;

@@ -1,5 +1,3 @@
-//! Reports hardcoded absolute file-system paths in string literals.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -94,7 +92,6 @@ fn is_url(content: &str) -> bool {
     after_scheme.is_some_and(|pos| bytes.get(pos).is_some_and(|&b| b != b' '))
 }
 
-/// Single-pass token handler for UsingHardcodePath diagnostic.
 #[inline]
 pub fn check_token(token: &SyntaxToken, acc: &mut Vec<Diagnostic>, ctx: &DiagnosticsContext) {
     let code = DiagnosticCode::UsingHardcodePath;
@@ -141,7 +138,6 @@ pub fn check_token(token: &SyntaxToken, acc: &mut Vec<Diagnostic>, ctx: &Diagnos
     });
 }
 
-/// Legacy check function (delegates to single-pass).
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let parse = ctx.parse();
     let root = parse.syntax_node();
@@ -344,7 +340,6 @@ mod tests {
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
         assert_eq!(diagnostics.len(), 16, "Expected 16 diagnostics with reduced Unix paths");
-        // snapshot-skip: custom configuration assertion intentionally retained.
     }
 
     #[test]

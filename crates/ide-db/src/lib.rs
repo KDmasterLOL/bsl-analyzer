@@ -1,27 +1,7 @@
-//! IDE database for bsl-analyzer.
-//!
-//! This crate provides the database for IDE functionality with full DefDatabase implementation.
-//!
-//! ## Module structure
-//!
-//! - **`root_db`** — `RootDatabase` trait (application-facing port)
-//! - **`database`** — `RootDatabaseImpl` struct + all Salsa trait impls (adapter)
-//! - **`types`** — Shared types (`SymbolKind`, `SdblHirEntries`)
-//! - **`provider`** — `AnalysisProvider` trait (data access port)
-//! - **`salsa_provider`** — `SalsaProvider` (Salsa-backed provider)
-//! - **`queries`** — Salsa tracked query functions
-//! - **`metadata`** — `MetadataDb` trait + configuration loading
-//! - **`streaming`** — Runtime infrastructure for parallel batch analysis
-
-// Re-export commonly used types
 pub use base_db;
 pub use hir::is_bsl_source;
 pub use syntax::TextRange;
 pub use vfs;
-
-// ========================================================================
-// Modules
-// ========================================================================
 
 pub mod database;
 pub mod effects;
@@ -36,42 +16,29 @@ pub mod type_kernel;
 pub mod types;
 pub(crate) mod vfs_helpers;
 
-// ========================================================================
-// Re-exports: public API
-// ========================================================================
-
-// Core types
 pub use hir::SdblHirEntries;
 pub use types::SymbolKind;
 
-// Port: RootDatabase trait
+pub use database::RootDatabaseImpl;
 pub use root_db::RootDatabase;
 
-// Adapter: RootDatabaseImpl
-pub use database::RootDatabaseImpl;
-
-// Provider types
 pub use provider::AnalysisProvider;
 pub use salsa_provider::SalsaProvider;
 
-// Streaming types
 pub use streaming::{
     ClaimResult, FileReader, FileStatus, GlobalContext, ProcessError, SharedState,
     StreamingProvider,
 };
 
-// Salsa query functions
 pub use hir::{all_sdbl_in_file_query, sdbl_hir_for_file_query};
 pub use queries::{
     configuration_path_for_file, line_index_query, liveness_analysis_query, method_cfg_query,
     module_metadata_query, reaching_definitions_query,
 };
 
-// Track 2 §1.4b — security/effect Salsa wrappers
 pub use effects::{
     method_effect_summary_query, module_effect_summaries_query, module_security_state_query,
     ModuleEffectSummaries, ModuleSecurityState,
 };
 
-// Metadata helpers
 pub use metadata::build_module_metadata;

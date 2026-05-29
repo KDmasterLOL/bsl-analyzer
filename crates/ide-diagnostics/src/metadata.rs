@@ -1,54 +1,26 @@
-//! Diagnostic metadata.
-//!
-//! Provides compile-time const metadata definitions with zero-cost abstraction.
-//! Runtime config can override metadata through JSON configuration.
-
 use crate::Severity;
 use serde::{Deserialize, Serialize};
 
-// ============================================================================
-// SonarQube Clean Code Taxonomy
-// ============================================================================
-
-/// SonarQube Clean Code Attribute (4 categories mapped to default attributes).
-///
-/// Used for Generic Issue Import format to categorize issues beyond simple severity.
-/// See: <https://docs.sonarqube.org/latest/project-administration/clean-code/>
-///
-/// Categories are mapped to valid SonarQube attribute values:
-/// - Consistent → CONVENTIONAL
-/// - Intentional → CLEAR
-/// - Adaptable → FOCUSED
-/// - Responsible → TRUSTWORTHY
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CleanCodeAttribute {
-    /// Code follows standards and conventions (formatting, naming)
     #[serde(rename = "CONVENTIONAL")]
     Consistent,
-    /// Code clearly expresses intent (clarity, completeness, logic)
     #[serde(rename = "CLEAR")]
     Intentional,
-    /// Code is easy to change (design, modularity, no duplication)
     #[serde(rename = "FOCUSED")]
     Adaptable,
-    /// Code respects guidelines and users (security, i18n)
     #[serde(rename = "TRUSTWORTHY")]
     Responsible,
 }
 
-/// SonarQube Software Quality dimension.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum SoftwareQuality {
-    /// Code maintainability
     Maintainability,
-    /// Code reliability (bugs)
     Reliability,
-    /// Code security (vulnerabilities)
     Security,
 }
 
-/// Impact severity level for SonarQube.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ImpactSeverity {
@@ -57,7 +29,6 @@ pub enum ImpactSeverity {
     High,
 }
 
-/// Impact on a software quality dimension.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Impact {
     #[serde(rename = "softwareQuality")]
@@ -66,61 +37,44 @@ pub struct Impact {
 }
 
 impl Impact {
-    /// Create a new impact.
     pub const fn new(software_quality: SoftwareQuality, severity: ImpactSeverity) -> Self {
         Self { software_quality, severity }
     }
 }
 
-// ============================================================================
-// Clean Code Attribute Derivation
-// ============================================================================
-
-/// Derive clean code attribute from metadata tag and diagnostic type.
-///
-/// This provides sensible defaults based on existing categorization.
-/// Individual diagnostics can override if needed.
 pub const fn derive_clean_code_attribute(
     tag: MetadataTag,
     dtype: DiagnosticType,
 ) -> CleanCodeAttribute {
     match (tag, dtype) {
-        // Security issues -> Responsible
         (_, DiagnosticType::Vulnerability | DiagnosticType::SecurityHotspot) => {
             CleanCodeAttribute::Responsible
         }
 
-        // Localization -> Responsible
         (MetadataTag::Localize, _) => CleanCodeAttribute::Responsible,
 
-        // Standard/conventions -> Consistent
         (MetadataTag::Standard, _) => CleanCodeAttribute::Consistent,
         (MetadataTag::Deprecated, _) => CleanCodeAttribute::Consistent,
 
-        // Design/architecture -> Adaptable
         (MetadataTag::Design, _) => CleanCodeAttribute::Adaptable,
         (MetadataTag::Performance, _) => CleanCodeAttribute::Adaptable,
         (MetadataTag::Unused, _) => CleanCodeAttribute::Adaptable,
         (MetadataTag::Lockinos, _) => CleanCodeAttribute::Adaptable,
 
-        // Logic/clarity issues -> Intentional
         (MetadataTag::Error, _) => CleanCodeAttribute::Intentional,
         (MetadataTag::Suspicious, _) => CleanCodeAttribute::Intentional,
         (MetadataTag::Unpredictable, _) => CleanCodeAttribute::Intentional,
         (MetadataTag::Brainoverload, _) => CleanCodeAttribute::Intentional,
         (MetadataTag::Clumsy, _) => CleanCodeAttribute::Intentional,
 
-        // Bad practice -> depends on type
         (MetadataTag::Badpractice, DiagnosticType::Error) => CleanCodeAttribute::Intentional,
         (MetadataTag::Badpractice, _) => CleanCodeAttribute::Consistent,
 
-        // SQL issues -> depends on type
         (MetadataTag::Sql, DiagnosticType::Error) => CleanCodeAttribute::Intentional,
         (MetadataTag::Sql, _) => CleanCodeAttribute::Adaptable,
     }
 }
 
-/// Derive primary impact from diagnostic type and severity.
 pub const fn derive_primary_impact(
     dtype: DiagnosticType,
     severity: DiagnosticSeverityLevel,
@@ -144,79 +98,48 @@ pub const fn derive_primary_impact(
     Impact::new(software_quality, impact_severity)
 }
 
-/// Diagnostic type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DiagnosticType {
-    /// Ошибка в коде
     Error,
-    /// Code smell
     CodeSmell,
-    /// Уязвимость безопасности
     Vulnerability,
-    /// Точка для проверки безопасности
     SecurityHotspot,
 }
 
-/// Diagnostic severity level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DiagnosticSeverityLevel {
-    /// Информация
     Info,
-    /// Незначительная проблема
     Minor,
-    /// Значимая проблема
     Major,
-    /// Критическая проблема
     Critical,
-    /// Блокирующая проблема
     Blocker,
 }
 
-/// Diagnostic tag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MetadataTag {
-    /// Нарушение стандартов 1С
     Standard,
-    /// Не работает на другой ОС
     Lockinos,
-    /// Проблема с запросом
     Sql,
-    /// Проблема производительности
     Performance,
-    /// Непонятный код
     Brainoverload,
-    /// Плохая практика
     Badpractice,
-    /// Излишние действия
     Clumsy,
-    /// Ошибка в проектировании
     Design,
-    /// Подозрительный код
     Suspicious,
-    /// Непредсказуемо работающий
     Unpredictable,
-    /// Устаревшая функциональность
     Deprecated,
-    /// Неиспользуемый код
     Unused,
-    /// Ошибочная конструкция
     Error,
-    /// Проблемы локализации
     Localize,
 }
 
-/// Diagnostic scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DiagnosticScope {
-    /// BSL и OneScript
     All,
-    /// Только OneScript
     Os,
-    /// Только BSL
     Bsl,
 }
 
-/// Diagnostic compatibility mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DiagnosticCompatibilityMode {
     Undefined,
@@ -230,16 +153,11 @@ pub enum DiagnosticCompatibilityMode {
     Compatibility8320,
 }
 
-/// Compile-time diagnostic metadata (zero-cost).
-///
-/// Compile-time diagnostic metadata definition.
-/// All fields are const-friendly for compile-time definitions.
 #[derive(Debug, Clone, Copy)]
 pub struct DiagnosticMetadata {
     pub diagnostic_type: DiagnosticType,
     pub severity: DiagnosticSeverityLevel,
     pub scope: DiagnosticScope,
-    /// Пустой массив = все модули
     pub modules: &'static [bsl_metadata::ModuleType],
     pub minutes_to_fix: u32,
     pub activated_by_default: bool,
@@ -247,23 +165,12 @@ pub struct DiagnosticMetadata {
     pub tags: &'static [MetadataTag],
     pub can_locate_on_project: bool,
     pub extra_min_for_complexity: f64,
-    /// "" = auto-calculate from diagnostic_type + severity
     pub lsp_severity_override: &'static str,
-    /// SonarQube Clean Code attribute
     pub clean_code_attribute: CleanCodeAttribute,
-    /// SonarQube impacts on software quality dimensions
     pub impacts: &'static [Impact],
 }
 
 impl DiagnosticMetadata {
-    /// Calculate LSP severity from diagnostic type and severity level.
-    ///
-    /// Mapping logic:
-    /// - CODE_SMELL + INFO → Hint
-    /// - CODE_SMELL + MINOR → Information
-    /// - CODE_SMELL + MAJOR/CRITICAL/BLOCKER → Warning
-    /// - SECURITY_HOTSPOT → Warning
-    /// - ERROR/VULNERABILITY + severity level → map directly
     pub const fn calculate_severity(&self) -> Severity {
         match self.diagnostic_type {
             DiagnosticType::CodeSmell => match self.severity {
@@ -284,12 +191,10 @@ impl DiagnosticMetadata {
     }
 }
 
-/// Default impact for CodeSmell + Major severity
 const DEFAULT_IMPACT: Impact =
     Impact::new(SoftwareQuality::Maintainability, ImpactSeverity::Medium);
 
 impl Default for DiagnosticMetadata {
-    /// Default metadata (enabled by default, no specific tags/modules).
     fn default() -> Self {
         Self {
             diagnostic_type: DiagnosticType::CodeSmell,
@@ -309,15 +214,8 @@ impl Default for DiagnosticMetadata {
     }
 }
 
-/// Helper macro to create DiagnosticMetadata with auto-derived Clean Code attributes.
-///
-/// Automatically derives `clean_code_attribute` from the first tag and diagnostic type,
-/// and `impacts` from the diagnostic type and severity level.
-///
-/// Use the variant with `clean_code_attribute:` to explicitly set the attribute.
 #[macro_export]
 macro_rules! define_metadata {
-    // Variant with explicit clean_code_attribute
     (
         diagnostic_type: $dtype:expr,
         severity: $severity:expr,
@@ -351,7 +249,6 @@ macro_rules! define_metadata {
             impacts: &[IMPACT],
         }
     }};
-    // Variant with auto-derived clean_code_attribute
     (
         diagnostic_type: $dtype:expr,
         severity: $severity:expr,
@@ -365,7 +262,6 @@ macro_rules! define_metadata {
         extra_min_for_complexity: $emfc:expr,
         lsp_severity_override: $lso:expr $(,)?
     ) => {{
-        // Extract first tag for clean code attribute derivation
         const FIRST_TAG: $crate::metadata::MetadataTag =
             if $tags.is_empty() { $crate::metadata::MetadataTag::Badpractice } else { $tags[0] };
         const CCA: $crate::metadata::CleanCodeAttribute =
@@ -421,7 +317,6 @@ mod tests {
 
     #[test]
     fn test_severity_mapping_error() {
-        // Error type maps severity level directly
         let meta_blocker = DiagnosticMetadata {
             diagnostic_type: DiagnosticType::Error,
             severity: DiagnosticSeverityLevel::Blocker,
@@ -453,7 +348,6 @@ mod tests {
 
     #[test]
     fn test_severity_mapping_vulnerability() {
-        // Vulnerability type maps severity level directly
         let meta_blocker = DiagnosticMetadata {
             diagnostic_type: DiagnosticType::Vulnerability,
             severity: DiagnosticSeverityLevel::Blocker,
@@ -485,7 +379,6 @@ mod tests {
 
     #[test]
     fn test_derive_clean_code_attribute() {
-        // Security issues -> Responsible
         assert_eq!(
             derive_clean_code_attribute(MetadataTag::Badpractice, DiagnosticType::Vulnerability),
             CleanCodeAttribute::Responsible
@@ -495,37 +388,31 @@ mod tests {
             CleanCodeAttribute::Responsible
         );
 
-        // Standard -> Consistent
         assert_eq!(
             derive_clean_code_attribute(MetadataTag::Standard, DiagnosticType::CodeSmell),
             CleanCodeAttribute::Consistent
         );
 
-        // Design -> Adaptable
         assert_eq!(
             derive_clean_code_attribute(MetadataTag::Design, DiagnosticType::CodeSmell),
             CleanCodeAttribute::Adaptable
         );
 
-        // Performance -> Adaptable
         assert_eq!(
             derive_clean_code_attribute(MetadataTag::Performance, DiagnosticType::CodeSmell),
             CleanCodeAttribute::Adaptable
         );
 
-        // Localize -> Responsible
         assert_eq!(
             derive_clean_code_attribute(MetadataTag::Localize, DiagnosticType::CodeSmell),
             CleanCodeAttribute::Responsible
         );
 
-        // Unused -> Adaptable
         assert_eq!(
             derive_clean_code_attribute(MetadataTag::Unused, DiagnosticType::CodeSmell),
             CleanCodeAttribute::Adaptable
         );
 
-        // Error -> Intentional
         assert_eq!(
             derive_clean_code_attribute(MetadataTag::Error, DiagnosticType::Error),
             CleanCodeAttribute::Intentional
@@ -538,7 +425,6 @@ mod tests {
 
     #[test]
     fn test_derive_primary_impact() {
-        // Security types -> Security quality
         let impact =
             derive_primary_impact(DiagnosticType::Vulnerability, DiagnosticSeverityLevel::Critical);
         assert_eq!(impact.software_quality, SoftwareQuality::Security);
@@ -549,23 +435,19 @@ mod tests {
         assert_eq!(impact.software_quality, SoftwareQuality::Security);
         assert_eq!(impact.severity, ImpactSeverity::Medium);
 
-        // Error type -> Reliability quality
         let impact = derive_primary_impact(DiagnosticType::Error, DiagnosticSeverityLevel::Major);
         assert_eq!(impact.software_quality, SoftwareQuality::Reliability);
         assert_eq!(impact.severity, ImpactSeverity::Medium);
 
-        // CodeSmell -> Maintainability quality
         let impact =
             derive_primary_impact(DiagnosticType::CodeSmell, DiagnosticSeverityLevel::Minor);
         assert_eq!(impact.software_quality, SoftwareQuality::Maintainability);
         assert_eq!(impact.severity, ImpactSeverity::Low);
 
-        // Blocker severity -> High impact
         let impact =
             derive_primary_impact(DiagnosticType::CodeSmell, DiagnosticSeverityLevel::Blocker);
         assert_eq!(impact.severity, ImpactSeverity::High);
 
-        // Info severity -> Low impact
         let impact =
             derive_primary_impact(DiagnosticType::CodeSmell, DiagnosticSeverityLevel::Info);
         assert_eq!(impact.severity, ImpactSeverity::Low);
@@ -573,7 +455,6 @@ mod tests {
 
     #[test]
     fn test_clean_code_attribute_serialization() {
-        // Categories serialize to valid SonarQube attribute values
         assert_eq!(
             serde_json::to_string(&CleanCodeAttribute::Consistent).unwrap(),
             "\"CONVENTIONAL\""

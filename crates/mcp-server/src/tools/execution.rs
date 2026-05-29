@@ -1,5 +1,3 @@
-//! Code execution tools: syntax check, execute, eval.
-
 use crate::state::SharedState;
 use rmcp::model::{CallToolResult, Content};
 use rmcp::ErrorData as McpError;
@@ -13,7 +11,6 @@ fn require_onec_client(state: &SharedState) -> Result<&onec_client::Client, McpE
     })
 }
 
-/// Checks BSL code syntax without execution.
 pub async fn check_syntax(state: &SharedState, code: &str) -> Result<CallToolResult, McpError> {
     let client = require_onec_client(state)?;
 
@@ -35,7 +32,6 @@ pub async fn check_syntax(state: &SharedState, code: &str) -> Result<CallToolRes
     }
 }
 
-/// Executes BSL code (statements) in a live 1C database.
 pub async fn execute_code(state: &SharedState, code: &str) -> Result<CallToolResult, McpError> {
     let client = require_onec_client(state)?;
 
@@ -77,7 +73,6 @@ pub async fn execute_code(state: &SharedState, code: &str) -> Result<CallToolRes
     Ok(CallToolResult::success(vec![Content::text(out)]))
 }
 
-/// Evaluates a BSL expression and returns the result.
 pub async fn eval_expression(
     state: &SharedState,
     expression: &str,

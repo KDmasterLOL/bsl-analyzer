@@ -129,7 +129,7 @@ impl BaselineRuntime {
         )
     }
 
-    #[allow(clippy::too_many_arguments)] // private, all params are needed for resolution chain
+    #[allow(clippy::too_many_arguments, reason = "private resolution chain uses all inputs")]
     fn for_corpus(
         corpus: CorpusId,
         project_root: Option<&Path>,
@@ -589,10 +589,6 @@ pub(crate) struct ExternalBaselineSource {
     selection: String,
 }
 
-/// Data needed to re-resolve a PostgreSQL credential URL.
-/// Stored inside `RefreshableExternalBaselineSource` so that on a retryable
-/// auth / connectivity failure we can invalidate the current reader and
-/// re-run `resolve_postgres_url` → rebuild the adapter / source once.
 #[derive(Debug)]
 struct RefreshContext {
     postgres: SearchPostgresConfig,
@@ -601,18 +597,6 @@ struct RefreshContext {
     schema_keys: Vec<String>,
 }
 
-/// A wrapper around `ExternalBaselineSource` that can re-resolve
-/// credentials and rebuild the inner source once, on retryable
-/// PostgreSQL auth/connectivity errors.
-///
-/// On retryable failures the flow is:
-/// 1. Invalidate current reader.
-/// 2. Re-run `resolve_postgres_url(..., Reader)`.
-/// 3. Rebuild adapter + source.
-/// 4. Retry the original operation once.
-///
-/// Terminal errors (helper/config/protocol/target/storage/schema) are
-/// surfaced explicitly rather than silently falling back to sqlite.
 #[derive(Debug)]
 pub(crate) struct RefreshableExternalBaselineSource {
     inner: StdRwLock<ExternalBaselineSource>,
@@ -622,7 +606,6 @@ pub(crate) struct RefreshableExternalBaselineSource {
 }
 
 impl RefreshableExternalBaselineSource {
-    /// Build a new refreshable source from an already-resolved connection URL.
     fn new(
         connection_url: String,
         schema: Option<String>,
@@ -645,8 +628,6 @@ impl RefreshableExternalBaselineSource {
         })
     }
 
-    /// Test constructor: builds a refreshable source directly from config and
-    /// baseline, without going through the full credential resolution chain.
     #[cfg(test)]
     pub(crate) fn for_test(
         config: ExternalBaselineConfig,
@@ -658,9 +639,6 @@ impl RefreshableExternalBaselineSource {
             vec![baseline.clone()],
             selection.clone(),
         )?);
-        // Test-only default: refresh attempts are intentionally non-functional here
-        // and surface as `missing_config` unless the caller provides explicit
-        // refresh context via `for_test_with_refresh_context`.
         let context = RefreshContext {
             postgres: SearchPostgresConfig::default(),
             baselines: vec![baseline],
@@ -697,15 +675,10 @@ impl RefreshableExternalBaselineSource {
         })
     }
 
-    /// Execute a fallible operation against the current inner source.
-    /// If the error is retryable, perform exactly one credential refresh
-    /// and retry. Any failure after the refresh is surfaced as terminal so
-    /// callers do not silently fall back to stale local SQLite data.
     fn run_with_refresh<F, T>(&self, operation: F) -> Result<T, RefreshOrTerminalError>
     where
         F: Fn(&ExternalBaselineSource) -> Result<T, bsl_search::SearchError>,
     {
-        // Fast path: try with current reader.
         let first_error = {
             let reader = self.inner.read().expect("baseline source lock poisoned");
             match operation(&reader) {
@@ -719,7 +692,6 @@ impl RefreshableExternalBaselineSource {
             }
         };
 
-        // Refresh path: invalidate, re-resolve, rebuild, retry once.
         let generation_before = self.refresh_generation.load(Ordering::Acquire);
         let _refresh_guard = self.refresh_lock.lock().expect("baseline refresh lock poisoned");
 
@@ -782,7 +754,6 @@ impl RefreshableExternalBaselineSource {
         }
     }
 
-    /// Re-resolve credentials and replace the inner source.
     fn refresh_inner(&self) -> Result<(), RefreshAttemptError> {
         let resolved = resolve_postgres_url(&self.context.postgres, PostgresAccessMode::Reader)
             .map_err(RefreshAttemptError::Resolve)?;
@@ -906,8 +877,6 @@ impl RefreshableExternalBaselineSource {
         reader.corpus().clone()
     }
 
-    /// Returns the snapshot details from the current source.
-    /// Used by `resolve_workspace_support_status` for branch policy validation.
     pub(crate) fn snapshot_details(
         &self,
         snapshot_id: &str,
@@ -926,7 +895,6 @@ impl RefreshableExternalBaselineSource {
         self.delegate(|source| source.resolve_snapshot())
     }
 
-    /// The current selection string (for diagnostics).
     pub(crate) fn _selection(&self) -> String {
         self.context.selection.clone()
     }
@@ -937,20 +905,10 @@ impl RefreshableExternalBaselineSource {
     }
 }
 
-/// Result of a `run_with_refresh` execution.
-///
-/// - `Ok(T)`: operation succeeded (either on first attempt or after refresh).
-/// - `Terminal(SearchError)`: the underlying operation returned a terminal
-///   (non-retryable) error, or the retryable first failure still failed after
-///   a credential refresh attempt.
 enum RefreshOrTerminalError {
     Terminal(bsl_search::SearchError),
 }
 
-/// Why a credential refresh attempt failed.
-/// These errors are always terminal from the caller's perspective:
-/// - `Resolve`: `project_model::ResolvePostgresUrlError` (helper / config / protocol / target).
-/// - `Build`: `SearchError` during adapter construction (typically storage / schema).
 #[derive(Debug)]
 enum RefreshAttemptError {
     Resolve(project_model::ResolvePostgresUrlError),
@@ -1349,7 +1307,6 @@ fn resolve_schema(schema_keys: &[&str], postgres: &SearchPostgresConfig) -> Opti
         .or_else(|| postgres.schema.clone())
 }
 
-/// Re-reads the schema from env / config given stored `Vec<String>` keys.
 fn resolve_schema_vec(schema_keys: &[String], postgres: &SearchPostgresConfig) -> Option<String> {
     resolve_env_value_from_vec(schema_keys)
         .filter(|v| !v.trim().is_empty())
@@ -1557,10 +1514,8 @@ mod tests {
             },
         );
 
-        // Helper returns non-postgres URL, so resolution fails; selection still computed
         assert_eq!(runtime.configured_baseline.backend, "postgres");
         assert_eq!(runtime.configured_baseline.selection, "branch main");
-        // The echo helper returns an echo line back, which fails protocol validation
         assert!(runtime.configured_baseline.issue.is_some());
         assert!(runtime.external_baseline.is_none());
     }
@@ -1612,8 +1567,6 @@ mod tests {
         fs::create_dir_all(&git_dir).unwrap();
         fs::write(git_dir.join("HEAD"), "ref: refs/heads/feature/demo\n").unwrap();
 
-        // Build a postgres config; the helper will fail, but selection logic
-        // runs before the helper, so we can still verify the policy selection path.
         let postgres_config = build_dummy_postgres_config();
 
         let runtime = BaselineRuntime::workspace(
@@ -1653,7 +1606,6 @@ mod tests {
             runtime.configured_baseline.selection,
             "workspace branch feature/demo -> branch develop -> branch vendor"
         );
-        // Helper fails, so external_baseline is None but selection is still correct
         assert!(runtime.external_baseline.is_none());
     }
 
@@ -1682,20 +1634,14 @@ mod tests {
             },
         );
 
-        // Both workspace and reference are postgres-backed; helper will fail
-        // but diagnostics should still capture the backend and selection.
         assert_eq!(diagnostics.workspace.backend, "postgres");
         assert_eq!(diagnostics.workspace.selection, "branch main");
-        // Helper failure recorded as issue
         assert!(diagnostics.workspace.issue.is_some());
         assert_eq!(diagnostics.reference.backend, "postgres");
         assert_eq!(diagnostics.reference.selection, "snapshot reference:0.1.104");
         assert!(diagnostics.reference.issue.is_some());
     }
 
-    /// Helper to construct a valid-but-dummy PostgresConfig for tests.
-    /// The helper program will fail protocol validation, but the config structure
-    /// is complete enough for selection logic.
     fn build_dummy_postgres_config() -> SearchPostgresConfig {
         SearchPostgresConfig {
             host: Some("pg-central.company.com".to_owned()),
@@ -1723,8 +1669,6 @@ mod tests {
         )
         .unwrap();
 
-        // corpus() must return without panicking even if the internal adapter
-        // cannot connect.
         assert!(matches!(source.corpus(), CorpusId::WorkspaceCode));
     }
 

@@ -1,5 +1,3 @@
-//! Reports `Прервать` / `Продолжить` statements outside loop bodies.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};

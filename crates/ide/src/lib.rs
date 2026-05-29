@@ -1,7 +1,3 @@
-//! IDE functionality for bsl-analyzer.
-//!
-//! This crate provides the high-level API for IDE features.
-
 mod completion;
 pub mod config_finder;
 mod document_highlight;
@@ -37,11 +33,6 @@ use std::sync::Arc;
 use syntax::TextSize;
 use vfs::FileId;
 
-/// The main analysis API.
-///
-/// `Analysis` owns a `RootDatabaseImpl` directly (not `Arc<RootDatabaseImpl>`)
-/// so it can be sent to background worker threads. Each `Analysis` represents
-/// an independent Salsa snapshot; clones are produced via `AnalysisHost::analysis()`.
 pub struct Analysis {
     db: RootDatabaseImpl,
 }
@@ -51,17 +42,14 @@ impl Analysis {
         Self { db: RootDatabaseImpl::default() }
     }
 
-    /// Create Analysis with a specific database (for testing).
     pub fn from_database(db: RootDatabaseImpl) -> Self {
         Self { db }
     }
 
-    /// Get a reference to the database (for testing).
     pub fn database(&self) -> &RootDatabaseImpl {
         &self.db
     }
 
-    /// Returns diagnostics for a file.
     pub fn diagnostics(&self, file_id: FileId, config: &DiagnosticsConfig) -> Vec<Diagnostic> {
         let config_path_input = ide_db::configuration_path_for_file(&self.db, file_id);
         let provider = ide_db::SalsaProvider::new(&self.db, config_path_input);
@@ -69,46 +57,25 @@ impl Analysis {
         ide_diagnostics::diagnostics(&ctx)
     }
 
-    /// Goes to the definition of the symbol at the position.
     pub fn goto_definition(&self, file_id: FileId, offset: u32) -> Option<NavigationTarget> {
         let offset = TextSize::from(offset);
         goto_definition::goto_definition(&self.db, file_id, offset)
     }
 
-    /// Finds all references to the symbol at the position.
     pub fn find_references(&self, file_id: FileId, offset: u32) -> Vec<Location> {
         let offset = TextSize::from(offset);
         references::find_references(&self.db, file_id, offset)
     }
 
-    /// Returns same-document highlights for the symbol at the position.
     pub fn document_highlights(&self, file_id: FileId, offset: u32) -> Vec<DocumentHighlight> {
         let offset = TextSize::from(offset);
         document_highlight::document_highlights(&self.db, file_id, offset)
     }
 
-    /// Returns folding ranges for a file.
     pub fn folding_ranges(&self, file_id: FileId) -> Vec<FoldingRange> {
         folding::folding_ranges(&self.db, file_id)
     }
 
-    /// Returns code completions at the position.
-    ///
-    /// Provides context-aware completion suggestions including:
-    /// - SDBL query completion (FROM clause, metadata objects)
-    /// - BSL keyword completion (future)
-    /// - Symbol completion (future)
-    ///
-    /// # Arguments
-    ///
-    /// * `file_id` - File identifier
-    /// * `offset` - Byte offset in the file
-    /// * `workspace_root` - Workspace root for metadata loading
-    /// * `locale` - User-facing locale for renderable details (type names,
-    ///   the `[Только чтение]` / `[Read-only]` marker). Threaded through
-    ///   from the LSP / TOML driver layer; tests typically pass
-    ///   [`Locale::default`] (Russian) which mirrors the historical
-    ///   single-locale behaviour.
     pub fn completions(
         &self,
         file_id: FileId,
@@ -121,52 +88,31 @@ impl Analysis {
         completion::completions(&self.db, position)
     }
 
-    /// Returns hover information at the position.
-    ///
-    /// Provides contextual information for:
-    /// - Platform types (Строка, Число, Массив, etc.)
-    /// - Platform methods with signatures and documentation
-    /// - User-defined symbols (future)
-    ///
-    /// # Arguments
-    ///
-    /// * `file_id` - File identifier
-    /// * `offset` - Byte offset in the file (0-based)
-    /// * `locale` - User-facing locale for renderable type labels. The
-    ///   surrounding hover frame stays Russian (single-locale message
-    ///   templates are out of scope for the bilingual-display refactor),
-    ///   but `Ty` rendering switches per locale.
     pub fn hover(&self, file_id: FileId, offset: u32, locale: Locale) -> Option<HoverResult> {
         let offset = TextSize::from(offset);
         hover::hover(&self.db, file_id, offset, locale)
     }
 
-    /// Returns document symbols (procedures, functions, variables, regions).
     pub fn document_symbols(&self, file_id: FileId) -> Vec<DocumentSymbol> {
         document_symbols::document_symbols(&self.db, file_id)
     }
 
-    /// Returns code actions at the position.
     pub fn code_actions(&self, _file_id: FileId, _range: TextRange) -> Vec<Assist> {
-        // TODO: Implement
         Vec::new()
     }
 
-    /// Get dependencies of a file (resolved ExternalRefs → FileIds).
     pub fn file_dependencies(&self, file_id: FileId) -> Arc<Vec<FileId>> {
         use hir::{DefDatabase, ModuleId};
         let module_id = ModuleId::new(file_id);
         self.db.file_dependencies(module_id)
     }
 
-    /// Get file text content from Salsa database.
     pub fn file_text(&self, file_id: FileId) -> String {
         use ide_db::base_db::SourceDatabase;
         let input = self.db.file_text_input(file_id);
         input.text(&self.db).clone()
     }
 
-    /// Run diagnostics query via Salsa (cached).
     pub fn file_diagnostics_cached(
         &self,
         file_id: FileId,
@@ -178,47 +124,19 @@ impl Analysis {
         ide_diagnostics::file_diagnostics_query(&self.db, file_id_input, config_id)
     }
 
-    /// Create a cache-warming task for background execution.
-    ///
-    /// Returns a task containing a cloned database that can be moved to a
-    /// background thread. The task primes `symbol_tree` and `module_bodies` so
-    /// navigation features (GoToDefinition, hover, semantic tokens) on
-    /// dependent files are responsive once the user actually requests them.
-    /// Full diagnostic computation is **not** included — that remains the job
-    /// of `schedule_diagnostics` in the LSP layer, which only fires after VFS
-    /// finalization and avoids the duplicate-and-throw-away cycle this task
-    /// used to cause while VFS was still loading.
     pub fn warm_caches_task(&self, file_ids: &[FileId]) -> WarmCachesTask {
         WarmCachesTask { db: self.db.clone(), file_ids: file_ids.to_vec() }
     }
 
-    /// Returns semantic highlighting for a file.
-    ///
-    /// Returns `HighlightResult` containing both highlights and resolved external files.
-    /// External files can be preloaded in background for faster goto_definition.
     pub fn highlight(&self, file_id: FileId) -> HighlightResult {
         syntax_highlighting::highlight(&self.db, file_id)
     }
 
-    /// Returns signature help at the position.
-    ///
-    /// Provides parameter hints when the cursor is inside a function call:
-    /// - Global platform functions (НачатьТранзакцию, Формат, etc.)
-    /// - Platform type methods (Строка.Найти, Массив.Добавить, etc.)
-    /// - User-defined procedures and functions
-    ///
-    /// # Arguments
-    ///
-    /// * `file_id` - File identifier
-    /// * `offset` - Byte offset in the file (0-based)
     pub fn signature_help(&self, file_id: FileId, offset: u32) -> Option<SignatureHelp> {
         let offset = TextSize::from(offset);
         signature_help::signature_help(&self.db, file_id, offset)
     }
 
-    /// Formats an entire file.
-    ///
-    /// Returns formatting result with the formatted text and text edits.
     pub fn format_file(&self, file_id: FileId, config: &FormattingConfig) -> FormattingResult {
         use ide_db::base_db::RootQueryDb;
         let parse = self.db.parse(file_id);
@@ -226,9 +144,6 @@ impl Analysis {
         formatting::format_file(&root, config)
     }
 
-    /// Formats a range within a file.
-    ///
-    /// Returns formatting result with the formatted text and text edits for the range.
     pub fn format_range(
         &self,
         file_id: FileId,
@@ -241,9 +156,6 @@ impl Analysis {
         formatting::format_range(&root, range, config)
     }
 
-    /// Handles on-type formatting when a character is typed.
-    ///
-    /// Returns text edits to apply, or None if no formatting needed.
     pub fn on_type_formatting(
         &self,
         file_id: FileId,
@@ -265,27 +177,16 @@ impl Default for Analysis {
     }
 }
 
-/// Background task for warming Salsa caches.
-///
-/// Contains a cloned database that can be sent to a background thread.
-/// Warms `symbol_tree` and `module_bodies` for the given files so navigation
-/// (GoToDefinition, hover, semantic tokens) on dependents is responsive.
 pub struct WarmCachesTask {
     db: RootDatabaseImpl,
     file_ids: Vec<FileId>,
 }
 
 impl WarmCachesTask {
-    /// Returns a cancellation token for this task's Salsa snapshot.
-    ///
-    /// Calling `cancel()` on the returned token makes the next query boundary
-    /// inside `run()` unwind with `salsa::Cancelled::Local`, so callers can
-    /// abort long-running cache warming when the work is no longer needed.
     pub fn cancellation_token(&self) -> salsa::CancellationToken {
         salsa::Database::cancellation_token(&self.db)
     }
 
-    /// Run the cache-warming task. Returns the number of files processed.
     pub fn run(self) -> usize {
         use hir::{DefDatabase, ModuleId};
 
@@ -299,7 +200,6 @@ impl WarmCachesTask {
     }
 }
 
-/// A navigation target (for go to definition).
 #[derive(Debug, Clone)]
 pub struct NavigationTarget {
     pub file_id: FileId,
@@ -308,21 +208,18 @@ pub struct NavigationTarget {
     pub kind: SymbolKind,
 }
 
-/// A location in a file.
 #[derive(Debug, Clone)]
 pub struct Location {
     pub file_id: FileId,
     pub range: TextRange,
 }
 
-/// Hover information.
 #[derive(Debug, Clone)]
 pub struct HoverResult {
     pub markup: String,
     pub range: Option<TextRange>,
 }
 
-/// A document symbol.
 #[derive(Debug, Clone)]
 pub struct DocumentSymbol {
     pub name: String,
@@ -332,8 +229,6 @@ pub struct DocumentSymbol {
     pub children: Vec<DocumentSymbol>,
 }
 
-// Compile-time guard: `Analysis` must be `Send` so it can be moved into
-// background worker threads by `on_latency` dispatch.
 const _: fn() = || {
     fn assert_send<T: Send>() {}
     assert_send::<Analysis>();

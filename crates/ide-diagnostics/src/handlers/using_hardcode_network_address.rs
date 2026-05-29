@@ -1,5 +1,3 @@
-//! Reports hardcoded IPv4 and IPv6 addresses in string literals.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -183,16 +181,11 @@ fn is_letter_before_match(content: &str, match_start: usize) -> bool {
     false
 }
 
-/// Find the STRING token in the AST at the given range (for context checks).
 fn find_string_token(root: &SyntaxNode, range: ide_db::TextRange) -> Option<SyntaxToken> {
     root.token_at_offset(range.start())
         .find(|t| t.kind() == SyntaxKind::STRING && t.text_range() == range)
 }
 
-/// HIR-based entry point for UsingHardcodeNetworkAddress diagnostic.
-///
-/// Uses Salsa-cached module_bodies for string literal discovery.
-/// Falls back to AST only for context exclusion checks (rare path).
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::UsingHardcodeNetworkAddress;
 
@@ -212,7 +205,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics
 }
 
-/// Check a single HIR body for hardcoded network addresses.
 #[allow(clippy::too_many_arguments)]
 fn check_body(
     body: &Body,
@@ -251,7 +243,6 @@ fn check_body(
 
         let Some(range) = source_map.expr_range(expr_id) else { continue };
 
-        // Context exclusion checks via AST (only for matched strings — rare path)
         if let Some(token) = find_string_token(root, range) {
             if skip_statement_context(&token, config)
                 || skip_param_context(&token, config)
@@ -481,7 +472,6 @@ FoundedElement = HTMLDocument.evaluate(".//img[ancestor::div[@aria-hidden=""Fals
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
         assert_eq!(diagnostics.len(), 10, "Expected 10 diagnostics with reduced exclusion");
-        // snapshot-skip: custom configuration assertion intentionally retained.
     }
 
     #[test]
@@ -570,7 +560,6 @@ FoundedElement = HTMLDocument.evaluate(".//img[ancestor::div[@aria-hidden=""Fals
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
         assert_eq!(diagnostics.len(), 13, "Expected 13 diagnostics without 2.* exclusion");
-        // snapshot-skip: custom configuration assertion intentionally retained.
     }
 
     #[test]

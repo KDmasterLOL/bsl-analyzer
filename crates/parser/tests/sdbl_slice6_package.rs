@@ -1,52 +1,8 @@
-//! Clean-room acceptance tests for SDBL Slice 6 — parser root and package
-//! skeleton.
-//!
-//! Sources:
-//! - ITS query-language structure —
-//!   <https://its.1c.ru/db/pubqlang/content/10/hdoc>
-//!   (query package shape: one or more query items separated by `;`,
-//!   trailing `;` allowed; `UNION` / `UNION ALL` skeleton; subquery).
-//! - ITS lexical elements —
-//!   <https://its.1c.ru/db/pubqlang/content/12/hdoc>
-//!   (keyword vocabulary for `DROP` / `УНИЧТОЖИТЬ`, `UNION` /
-//!   `ОБЪЕДИНИТЬ`, `ALL` / `ВСЕ`, `SELECT` / `ВЫБРАТЬ`).
-//! - ITS temporary-table lifecycle —
-//!   <https://its.1c.ru/db/pubqlang/content/51/hdoc/h47>
-//!   (`DROP` terminates the lifetime of a temporary table).
-//!
-//! Per-test docstring shorthand: `ITS pubqlang/N` refers to the
-//! documentation sub-tree rooted at
-//! `https://its.1c.ru/db/pubqlang/content/N/hdoc` for the given `N`.
-//!
-//! These tests were authored against the specifications above, not
-//! against the existing `parse_sdbl` output. They cover the Slice 6
-//! surface — `query_package`, `queries`, `drop_table_query` (in
-//! `grammar/sdbl.rs`) and the clean-room portion of `select_query`,
-//! `subquery`, `union_clause` (in `grammar/sdbl/select.rs`). Several
-//! boundary fixtures necessarily include downstream fragments (`FROM`,
-//! `WHERE`) to exercise the subquery-vs-package boundary contract, but
-//! every assertion targets a Slice 6 node kind (`SdblQueryPackage`,
-//! `SdblSelectQuery`, `SdblDropQuery`, `SdblSubquery`,
-//! `SdblUnionClause`) or a Slice 6 wrapper behaviour. The bodies of
-//! those downstream clauses stay Tier B until their clean-room rewrite
-//! in Slices 7–11.
-//!
-//! One documented pre-refactor behaviour is preserved: `UNION` and
-//! `UNION ALL` share `SdblUnionClause` as a single node kind (the
-//! optional `ALL` modifier is carried as an IDENT token inside the
-//! node). See `docs/legal/sdbl-clean-room-slice6.md` § Preserved
-//! pre-refactor behaviours; the split into a distinct
-//! `SdblUnionAllClause` is deferred to Slice 13.
-
 use parser::parse_sdbl;
 use syntax::{
     ast::{AstNode, SdblQueryPackage, SdblSubquery},
     SyntaxKind,
 };
-
-// ----------------------------------------------------------------------------
-// Helpers
-// ----------------------------------------------------------------------------
 
 fn package(input: &str) -> SdblQueryPackage {
     let parse = parse_sdbl(input);
@@ -71,26 +27,18 @@ fn top_level_select_count(pkg: &SdblQueryPackage) -> usize {
     pkg.queries().count()
 }
 
-// ----------------------------------------------------------------------------
-// Package shape — ITS pubqlang/10 query package
-// ----------------------------------------------------------------------------
-
-/// ITS pubqlang/10 — a single query is a valid package.
 #[test]
 fn test_single_select_is_a_package() {
     let pkg = package("SELECT Name FROM Products");
     assert_eq!(top_level_select_count(&pkg), 1);
 }
 
-/// ITS pubqlang/10 — two queries separated by `;` form a two-item package.
 #[test]
 fn test_two_selects_separated_by_semicolon() {
     let pkg = package("SELECT Name FROM Products; SELECT Code FROM Services");
     assert_eq!(top_level_select_count(&pkg), 2);
 }
 
-/// ITS pubqlang/10 — three queries separated by `;` form a three-item
-/// package. Trivia between items is accepted.
 #[test]
 fn test_three_selects_separated_by_semicolons() {
     let pkg = package(
@@ -101,26 +49,18 @@ fn test_three_selects_separated_by_semicolons() {
     assert_eq!(top_level_select_count(&pkg), 3);
 }
 
-/// ITS pubqlang/10 — a trailing `;` after the last query is allowed
-/// (the `SEMICOLON?` at the end of the package production).
 #[test]
 fn test_trailing_semicolon_is_accepted() {
     let pkg = package("SELECT Name FROM Products;");
     assert_eq!(top_level_select_count(&pkg), 1);
 }
 
-/// ITS pubqlang/10 — two queries with a trailing `;` also form a two-item
-/// package (trailing `;` does not introduce a third item).
 #[test]
 fn test_two_selects_with_trailing_semicolon() {
     let pkg = package("SELECT Name FROM Products; SELECT Code FROM Services;");
     assert_eq!(top_level_select_count(&pkg), 2);
 }
 
-/// Parser tolerance (not formal grammar): empty input is accepted as an
-/// `SdblQueryPackage` node with no query items. See the rustdoc on
-/// `grammar::sdbl::query_package` for the rationale — the IDE must
-/// reason about empty documents without parse aborts.
 #[test]
 fn test_empty_input_yields_empty_package() {
     let pkg = package("");
@@ -128,28 +68,18 @@ fn test_empty_input_yields_empty_package() {
     assert_eq!(count_kind(&pkg, SyntaxKind::SDBL_DROP_QUERY), 0);
 }
 
-/// Parser tolerance (not formal grammar): whitespace-only input is
-/// accepted the same way as empty input.
 #[test]
 fn test_whitespace_only_input_yields_empty_package() {
     let pkg = package("   \n\t  \n");
     assert_eq!(top_level_select_count(&pkg), 0);
 }
 
-/// Parser tolerance (not formal grammar): comment-only input is accepted
-/// the same way as empty input.
 #[test]
 fn test_comment_only_input_yields_empty_package() {
     let pkg = package("// just a comment\n");
     assert_eq!(top_level_select_count(&pkg), 0);
 }
 
-// ----------------------------------------------------------------------------
-// DROP statement — ITS pubqlang/10 + /12 vocabulary, pubqlang/51 h47 lifecycle
-// ----------------------------------------------------------------------------
-
-/// ITS pubqlang/12 — the DROP keyword followed by a single identifier
-/// produces an SdblDropQuery item inside the package.
 #[test]
 fn test_drop_english_keyword() {
     let parse = parse_sdbl("DROP T");
@@ -165,8 +95,6 @@ fn test_drop_english_keyword() {
     );
 }
 
-/// ITS pubqlang/12 — the Russian spelling `УНИЧТОЖИТЬ` is equivalent to
-/// `DROP`. A bilingual invocation with a Cyrillic identifier is accepted.
 #[test]
 fn test_drop_russian_keyword() {
     let pkg = package("УНИЧТОЖИТЬ ВТ");
@@ -174,16 +102,12 @@ fn test_drop_russian_keyword() {
     assert_eq!(top_level_select_count(&pkg), 0);
 }
 
-/// ITS pubqlang/10 — a DROP query may be the last item in a package and
-/// may be followed by a trailing `;`.
 #[test]
 fn test_drop_with_trailing_semicolon() {
     let pkg = package("DROP T;");
     assert_eq!(count_kind(&pkg, SyntaxKind::SDBL_DROP_QUERY), 1);
 }
 
-/// ITS pubqlang/10 — a package may mix SELECT and DROP items, in any
-/// order. Here SELECT ... then DROP.
 #[test]
 fn test_select_then_drop_same_package() {
     let pkg = package("SELECT Name FROM Products; DROP T");
@@ -191,8 +115,6 @@ fn test_select_then_drop_same_package() {
     assert_eq!(count_kind(&pkg, SyntaxKind::SDBL_DROP_QUERY), 1);
 }
 
-/// ITS pubqlang/10 — a package may mix DROP and SELECT items, in any
-/// order. Here DROP then SELECT.
 #[test]
 fn test_drop_then_select_same_package() {
     let pkg = package("DROP T; SELECT Name FROM Products");
@@ -200,12 +122,6 @@ fn test_drop_then_select_same_package() {
     assert_eq!(count_kind(&pkg, SyntaxKind::SDBL_DROP_QUERY), 1);
 }
 
-// ----------------------------------------------------------------------------
-// UNION / UNION ALL — ITS pubqlang/10 subquery := query (union-clause)*
-// ----------------------------------------------------------------------------
-
-/// ITS pubqlang/10 — a bare `UNION` between two queries produces one
-/// `SdblUnionClause` child of the containing subquery.
 #[test]
 fn test_union_english() {
     let pkg = package("SELECT Name FROM Products UNION SELECT Name FROM Services");
@@ -214,9 +130,6 @@ fn test_union_english() {
     assert_eq!(subquery.union_clauses().count(), 1);
 }
 
-/// ITS pubqlang/10 + /12 — `UNION ALL` between two queries is still a
-/// single `SdblUnionClause` (the `ALL` modifier is carried as an IDENT
-/// token inside the node per § Preserved pre-refactor behaviours).
 #[test]
 fn test_union_all_english() {
     let pkg = package("SELECT Name FROM Products UNION ALL SELECT Name FROM Services");
@@ -225,8 +138,6 @@ fn test_union_all_english() {
     assert_eq!(subquery.union_clauses().count(), 1);
 }
 
-/// ITS pubqlang/10 — chained UNION clauses `A UNION B UNION ALL C` yield
-/// two `SdblUnionClause` children on the outer subquery.
 #[test]
 fn test_union_chain_english() {
     let pkg = package("SELECT A FROM T1 UNION SELECT A FROM T2 UNION ALL SELECT A FROM T3");
@@ -234,8 +145,6 @@ fn test_union_chain_english() {
     assert_eq!(subquery.union_clauses().count(), 2);
 }
 
-/// ITS pubqlang/12 — the Russian spellings `ОБЪЕДИНИТЬ` / `ОБЪЕДИНИТЬ
-/// ВСЕ` are equivalent to `UNION` / `UNION ALL`.
 #[test]
 fn test_union_russian() {
     let pkg = package("ВЫБРАТЬ Наименование ИЗ Товары ОБЪЕДИНИТЬ ВЫБРАТЬ Наименование ИЗ Услуги");
@@ -243,7 +152,6 @@ fn test_union_russian() {
     assert_eq!(subquery.union_clauses().count(), 1);
 }
 
-/// ITS pubqlang/12 — `ОБЪЕДИНИТЬ ВСЕ` (Russian `UNION ALL`).
 #[test]
 fn test_union_all_russian() {
     let pkg = package("ВЫБРАТЬ Код ИЗ Товары ОБЪЕДИНИТЬ ВСЕ ВЫБРАТЬ Код ИЗ Услуги");
@@ -251,10 +159,6 @@ fn test_union_all_russian() {
     assert_eq!(subquery.union_clauses().count(), 1);
 }
 
-/// § Preserved pre-refactor behaviour — `UNION` alone and `UNION ALL`
-/// both produce the same `SdblUnionClause` node kind (no
-/// `SdblUnionAllClause` variant). `SdblUnionClause::has_all()`
-/// distinguishes the two post-parse.
 #[test]
 fn test_union_and_union_all_share_one_node_kind() {
     let with_all = package("SELECT A FROM T1 UNION ALL SELECT A FROM T2");
@@ -280,7 +184,6 @@ fn test_union_and_union_all_share_one_node_kind() {
         .expect("union clause without ALL");
     assert!(!other_clause.has_all(), "UNION → has_all() = false");
 
-    // Same SyntaxKind for both shapes.
     assert_eq!(
         one_clause.syntax().kind(),
         other_clause.syntax().kind(),
@@ -289,13 +192,6 @@ fn test_union_and_union_all_share_one_node_kind() {
     assert_eq!(one_clause.syntax().kind(), SyntaxKind::SDBL_UNION_CLAUSE);
 }
 
-// ----------------------------------------------------------------------------
-// Subquery boundary — ITS pubqlang/10 subquery scope vs package scope
-// ----------------------------------------------------------------------------
-
-/// ITS pubqlang/10 — a subquery inside parentheses in `FROM` is closed
-/// by `)`, not by the outer package. One inner `SdblSubquery` sits
-/// inside the outer `SdblSubquery`.
 #[test]
 fn test_subquery_in_from_is_closed_by_paren() {
     let pkg = package("SELECT * FROM (SELECT 1)");
@@ -305,9 +201,6 @@ fn test_subquery_in_from_is_closed_by_paren() {
     assert_eq!(top_level_select_count(&pkg), 1);
 }
 
-/// ITS pubqlang/10 — a UNION inside a parenthesised subquery stays
-/// inside that subquery; it does not surface as a UNION clause on the
-/// outer subquery.
 #[test]
 fn test_union_inside_parenthesised_subquery_stays_inside() {
     let pkg = package("SELECT * FROM (SELECT 1 UNION SELECT 2) AS s");
@@ -322,22 +215,15 @@ fn test_union_inside_parenthesised_subquery_stays_inside() {
     assert_eq!(inner.union_clauses().count(), 1, "inner subquery owns the UNION clause");
 }
 
-/// ITS pubqlang/10 — package boundary (`;`) is a hard terminator for a
-/// subquery's UNION loop; the next statement is a separate package item.
 #[test]
 fn test_package_boundary_after_parenthesised_subquery() {
     let pkg = package("SELECT * FROM (SELECT 1); SELECT 2");
     assert_eq!(top_level_select_count(&pkg), 2);
     let subqueries =
         pkg.syntax().descendants().filter(|n| n.kind() == SyntaxKind::SDBL_SUBQUERY).count();
-    // One outer subquery per top-level SELECT (2) plus one inner parenthesised
-    // subquery = 3 SdblSubquery descendants in total.
     assert_eq!(subqueries, 3);
 }
 
-/// ITS pubqlang/10 — a UNION inside a subquery-in-WHERE does not escape
-/// into the outer subquery. The outer subquery carries its own UNION
-/// clause attached to itself.
 #[test]
 fn test_subquery_in_where_does_not_steal_outer_union() {
     let pkg = package(
@@ -347,7 +233,6 @@ fn test_subquery_in_where_does_not_steal_outer_union() {
     let outer = pkg.queries().next().and_then(|q| q.subquery()).expect("outer subquery");
     assert_eq!(outer.union_clauses().count(), 1);
 
-    // The parenthesised subquery-in-WHERE has no UNION clause of its own.
     let mut subqueries: Vec<_> =
         pkg.syntax().descendants().filter(|n| n.kind() == SyntaxKind::SDBL_SUBQUERY).collect();
     assert_eq!(subqueries.len(), 2);
@@ -356,13 +241,6 @@ fn test_subquery_in_where_does_not_steal_outer_union() {
     assert_eq!(inner.union_clauses().count(), 0, "inner subquery in WHERE has no UNION clause");
 }
 
-// ----------------------------------------------------------------------------
-// Bilingual integration — ITS pubqlang/12 bilingual vocabulary
-// ----------------------------------------------------------------------------
-
-/// ITS pubqlang/10 + /12 — a three-item package mixing Russian SELECT,
-/// Russian UNION ALL, and a DROP statement, terminated by an English
-/// SELECT.
 #[test]
 fn test_bilingual_three_item_package() {
     let pkg = package(
@@ -377,13 +255,6 @@ fn test_bilingual_three_item_package() {
     assert_eq!(first_subquery.union_clauses().count(), 1);
 }
 
-// ----------------------------------------------------------------------------
-// Entry-point wrapper (`select_query`) — NodeKind marker preservation
-// ----------------------------------------------------------------------------
-
-/// ITS pubqlang/10 — each top-level SELECT produces exactly one
-/// `SdblSelectQuery` node; each such node owns exactly one
-/// `SdblSubquery` child.
 #[test]
 fn test_select_query_wraps_exactly_one_subquery() {
     let pkg = package("SELECT Name FROM Products");
@@ -398,14 +269,6 @@ fn test_select_query_wraps_exactly_one_subquery() {
     );
 }
 
-/// ITS pubqlang/10 — parser tolerance: a DROP with a missing identifier
-/// still produces a parse tree with exactly one `SdblDropQuery` node so
-/// the IDE can reason about partially-typed input without losing the
-/// containing package. The identifier-recovery path is marked
-/// local-preserved in `drop_table_query` (see
-/// `sdbl-clean-room-slice6.md` § Preserved pre-refactor behaviours);
-/// the `SdblDropQuery` node carries an `Error` sub-node where the
-/// identifier would have gone.
 #[test]
 fn test_drop_missing_identifier_is_recoverable() {
     let pkg = package_allow_errors("DROP ");

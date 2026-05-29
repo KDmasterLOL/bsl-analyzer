@@ -1,23 +1,3 @@
-//! FormDataToValue diagnostic.
-//!
-//! Detects use of ДанныеФормыВЗначение() / FormDataToValue() method in context methods.
-//!
-//! ## Why?
-//! Using FormDataToValue() in methods with context is bad practice:
-//! - Creates unnecessary form context dependency
-//! - May cause performance issues with large data
-//! - Better to use direct value manipulation or FormAttributeToValue()
-//!
-//! ## Configuration
-//! - **Enabled by default:** Yes
-//! - **Severity:** INFO
-//! - **Type:** CODE_SMELL
-//! - **Tags:** BADPRACTICE
-//! - **Minutes to fix:** 5
-//!
-//! ## Implementation
-//! **This is a HIR-based diagnostic** - detects FormDataToValue calls during HIR lowering.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -37,9 +17,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic.
-///
-/// Called from lib.rs dispatch when FormDataToValue diagnostic is emitted during lowering.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     crate::simple_hir_diagnostic(
         DiagnosticCode::FormDataToValue,
@@ -56,7 +33,6 @@ mod tests {
     use expect_test::expect;
     #[test]
     fn test_qualified_call_in_procedure_no_annotation() {
-        // Тест(): Форма.ДанныеФормыВЗначение - qualified call in unannotated procedure triggers
         let code = r#"Процедура Тест()
     Форма=Док.ПолучитьФорму("ФормаДокумента");
     ДФ = Форма.ДанныеФормыВЗначение(Объект, Тип("ТаблицаЗначений"));
@@ -73,7 +49,6 @@ mod tests {
 
     #[test]
     fn test_global_call_with_server_annotation() {
-        // &НаСервере Тест2(): bare ДанныеФормыВЗначение triggers
         let code = r#"&НаСервере
 Функция Тест2()
     ДФ = ДанныеФормыВЗначение(Объект, Тип("ТаблицаЗначений"));
@@ -90,7 +65,6 @@ mod tests {
 
     #[test]
     fn test_server_no_context_does_not_trigger() {
-        // &НаСервереБезКонтекста: should NOT trigger
         let code = r#"&НаСервереБезКонтекста
 Процедура Тест2()
     ДФ = ДанныеФормыВЗначение(Объект, Тип("ТаблицаЗначений"));
@@ -103,7 +77,6 @@ mod tests {
 
     #[test]
     fn test_client_server_no_context_does_not_trigger() {
-        // &НаКлиентеНаСервереБезКонтекста: should NOT trigger
         let code = r#"&НаКлиентеНаСервереБезКонтекста
 Процедура Тест2()
     ДФ = ДанныеФормыВЗначение(Объект, Тип("ТаблицаЗначений"));
@@ -116,7 +89,6 @@ mod tests {
 
     #[test]
     fn test_english_qualified_call_triggers() {
-        // English: Form.FormDataToValue in plain procedure triggers
         let code = r#"Procedure Test()
     Form = Doc.GetForm("DocumentForm");
     FD = Form.FormDataToValue(Object, Type("ValueTable"));
@@ -133,7 +105,6 @@ EndProcedure"#;
 
     #[test]
     fn test_english_global_call_triggers() {
-        // English: bare FormDataToValue in plain function triggers
         let code = r#"Function Test2()
     FormDataToValue(Object, Type("ValueTable"));
 EndFunction"#;

@@ -1,88 +1,3 @@
-//! CognitiveComplexity diagnostic.
-//!
-//! Detects functions and procedures with high cognitive complexity.
-//!
-//! ## Why?
-//! Cognitive complexity measures how difficult code is to understand for humans.
-//! Unlike cyclomatic complexity, it penalizes nested structures more heavily,
-//! better reflecting the actual mental effort required to comprehend code.
-//!
-//! High cognitive complexity makes code harder to:
-//! - Understand and maintain
-//! - Test thoroughly
-//! - Debug when issues arise
-//! - Modify safely without introducing bugs
-//!
-//! ## Algorithm
-//! Based on SonarSource Cognitive Complexity specification v1.4:
-//!
-//! **Structural increment** (if, for, while, foreach, except, ternary):
-//! - Add: 1 + current_nesting_level
-//! - Then increase nesting for children
-//!
-//! **Hybrid increment** (elsif, else):
-//! - Add: 1 (no nesting penalty on the keyword itself)
-//! - But increase nesting for children
-//!
-//! **Fundamental increment** (goto, AND/OR operators):
-//! - Add: 1 per construct (no nesting, no nesting increase)
-//!
-//! ## Bad practice
-//! Deeply nested code with multiple decision points:
-//! ```bsl
-//! Функция ОбработатьДанные(Данные)
-//!     Если ТипЗнч(Данные) = Тип("Массив") Тогда           // +1
-//!         Для Каждого Элемент Из Данные Цикл             // +2 (1 + nesting)
-//!             Если Элемент.Активен Тогда                 // +3 (1 + nesting)
-//!                 Для Каждого Поле Из Элемент Цикл      // +4 (1 + nesting)
-//!                     Если Поле.Значение <> 0 Тогда     // +5 (1 + nesting)
-//!                         // Обработка
-//!                     КонецЕсли;
-//!                 КонецЦикла;
-//!             КонецЕсли;
-//!         КонецЦикла;
-//!     КонецЕсли;
-//! КонецФункции
-//! // Total complexity: 15 (at threshold)
-//! ```
-//!
-//! ## Good practice
-//! Extract nested logic into separate functions with clear names:
-//! ```bsl
-//! Функция ОбработатьДанные(Данные)
-//!     Если ТипЗнч(Данные) <> Тип("Массив") Тогда
-//!         Возврат;
-//!     КонецЕсли;
-//!
-//!     Для Каждого Элемент Из Данные Цикл
-//!         ОбработатьЭлемент(Элемент);
-//!     КонецЦикла;
-//! КонецФункции
-//!
-//! Функция ОбработатьЭлемент(Элемент)
-//!     Если НЕ Элемент.Активен Тогда
-//!         Возврат;
-//!     КонецЕсли;
-//!
-//!     Для Каждого Поле Из Элемент Цикл
-//!         ОбработатьПоле(Поле);
-//!     КонецЦикла;
-//! КонецФункции
-//! ```
-//!
-//! ## Configuration
-//! - **complexityThreshold** (default: 15) - Maximum allowed cognitive complexity
-//! - **Enabled by default:** Yes
-//! - **Severity:** Warning
-//! - **Tags:** BRAINOVERLOAD
-//! - **Minutes to fix:** 15
-//!
-//! ## Implementation
-//! Uses HIR-based complexity calculation for:
-//! - Better performance (Salsa caching)
-//! - Cleaner code (structured HIR vs raw AST)
-//! - Reusability (same calculation for code lens)
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -106,11 +21,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Track 2 Phase B §6.4 — handler-side detection consuming the cached
-/// [`hir::metrics::HirMethodMetrics::cognitive`] field via
-/// `ctx.module_hir_metrics()`. Replaces the legacy `from_hir` adapter
-/// (BodyDiagnostic-fed) and the per-method HIR walk in
-/// `hir-def/cognitive_complexity.rs`.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::CognitiveComplexity;
     if ctx.is_disabled_with_metadata(code) {
@@ -127,19 +37,12 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let module_id = ModuleId::new(ctx.file_id);
     let recursive_methods = local_recursive_methods(&ctx.call_summary(module_id));
 
-    // Sort by `local_id` for deterministic output ordering — matches
-    // the §6.4 cohort follow-up applied to method_size etc.
     let mut local_ids: Vec<u32> = module_bodies.iter_bodies().map(|(id, _)| id).collect();
     local_ids.sort_unstable();
 
     let mut out = Vec::new();
     for local_id in local_ids {
         let Some(metrics) = module_metrics.get(local_id) else { continue };
-        // SonarSource Cognitive Complexity v1.4 recursion penalty: +1
-        // when the method is self-recursive or part of a local recursive
-        // cycle. Keep this on the cheap call-summary path; pulling the
-        // security EffectSummary batch here triggers cross-module effect
-        // fixpoints for a diagnostic that only needs recursion.
         let recursion_bonus = if recursive_methods.contains(&local_id) { 1 } else { 0 };
         let total = metrics.cognitive + recursion_bonus;
         if total <= threshold {
@@ -355,14 +258,6 @@ mod tests {
         );
     }
 
-    /// Track 2 Phase B §6.5 — recursion penalty regression guard.
-    /// SonarSource Cognitive Complexity v1.4 spec adds `+1` for any
-    /// recursive call (self or mutual). The §6.4 visitor's HIR-walk
-    /// can't see call edges, so the handler sources the penalty from
-    /// the module call summary. This test pins the +1 increment against
-    /// a tight fixture: a self-recursive function with cognitive=1
-    /// (one `Если` increment) plus the recursion bonus = 2, fires when
-    /// `complexityThreshold = 1`.
     #[test]
     fn test_recursion_penalty_self_call() {
         let code = r#"Функция Факториал(N)
@@ -390,11 +285,6 @@ mod tests {
               severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
-    /// Track 2 Phase B §6.4 — pin the cognitive value the §6.1 visitor
-    /// produces against the same fixture the legacy
-    /// `calculate_complexity` test asserted on. The migration path runs
-    /// through `hir::metrics::compute_hir_metrics` instead of the
-    /// retired wrapper; the expected number is unchanged.
     #[test]
     fn test_compute_hir_metrics_cognitive_value() {
         let code = COMPLEX_FUNCTION;

@@ -1,5 +1,3 @@
-//! Register XML parser (InformationRegister, AccumulationRegister, etc.)
-
 use crate::dimension::Dimension;
 use crate::error::{MetadataError, Result};
 use crate::metadata_object::MdoType;
@@ -13,34 +11,27 @@ use super::standard_attributes::{
 };
 use super::type_parser::parse_type_xml;
 
-/// Parse InformationRegister XML from Designer format
 pub fn parse_information_register_xml(xml: &str) -> Result<Register> {
     parse_register_xml(xml, MdoType::InformationRegister)
 }
 
-/// Parse AccumulationRegister XML from Designer format
 pub fn parse_accumulation_register_xml(xml: &str) -> Result<Register> {
     parse_register_xml(xml, MdoType::AccumulationRegister)
 }
 
-/// Parse AccountingRegister XML from Designer format
 pub fn parse_accounting_register_xml(xml: &str) -> Result<Register> {
     parse_register_xml(xml, MdoType::AccountingRegister)
 }
 
-/// Parse CalculationRegister XML from Designer format
 pub fn parse_calculation_register_xml(xml: &str) -> Result<Register> {
     parse_register_xml(xml, MdoType::CalculationRegister)
 }
 
-/// Internal helper to parse register XML with specific type
 fn parse_register_xml(xml: &str, mdo_type: MdoType) -> Result<Register> {
     let _span = tracing::debug_span!("parse_register_xml", ?mdo_type).entered();
 
     let doc = parse_xml(xml)?;
 
-    // find_mdo_element gets the first child of root regardless of tag name —
-    // handles InformationRegister/AccumulationRegister/AccountingRegister/CalculationRegister
     let mdo = find_mdo_element(&doc)
         .ok_or_else(|| MetadataError::InvalidFormat("No register element found".to_string()))?;
 
@@ -57,7 +48,6 @@ fn parse_register_xml(xml: &str, mdo_type: MdoType) -> Result<Register> {
     let enable_totals_slice_last = child_bool(props, "EnableTotalsSliceLast");
     let register_type_str = child_text(props, "RegisterType").map(|s| s.to_string());
 
-    // Add standard attributes first
     let mut attributes = Vec::new();
     match mdo_type {
         MdoType::InformationRegister => {
@@ -70,21 +60,12 @@ fn parse_register_xml(xml: &str, mdo_type: MdoType) -> Result<Register> {
         MdoType::AccumulationRegister => {
             add_accumulation_register_standard_attrs(&mut attributes, &object_name);
         }
-        _ => {
-            // AccountingRegister and CalculationRegister deliberately
-            // have no configuration-side standard-attribute connector
-            // — see `standard_attributes.rs` for the rationale (shadow
-            // risk against richer platform-side composite-prefix
-            // properties). The four common standards still surface
-            // through the platform-properties branch of
-            // `enumerate_register_fields` for `*Record` receivers.
-        }
+        _ => {}
     }
 
     let mut dimensions = Vec::new();
     let mut resources = Vec::new();
 
-    // Parse child objects
     if let Some(child_objects) = find_child(mdo, "ChildObjects") {
         for child in child_objects.children().filter(|n| n.is_element()) {
             match child.tag_name().name() {
@@ -131,7 +112,6 @@ fn parse_register_xml(xml: &str, mdo_type: MdoType) -> Result<Register> {
     Ok(register)
 }
 
-/// Parse a `<Dimension>` node
 fn parse_dimension_node(node: roxmltree::Node<'_, '_>) -> Result<Dimension> {
     let uuid_str = node.attribute("uuid").unwrap_or("");
     let dim_uuid = parse_uuid(uuid_str, "dimension")?;
@@ -164,7 +144,6 @@ fn parse_dimension_node(node: roxmltree::Node<'_, '_>) -> Result<Dimension> {
     Ok(dimension)
 }
 
-/// Parse a `<Resource>` node
 fn parse_resource_node(node: roxmltree::Node<'_, '_>) -> Result<RegisterResource> {
     let uuid_str = node.attribute("uuid").unwrap_or("");
     let resource_uuid = parse_uuid(uuid_str, "resource")?;
@@ -187,7 +166,6 @@ fn parse_resource_node(node: roxmltree::Node<'_, '_>) -> Result<RegisterResource
     Ok(resource)
 }
 
-/// Parse a `<Attribute>` node into a RegisterAttribute
 fn parse_register_attr_node(
     node: roxmltree::Node<'_, '_>,
     attributes: &mut Vec<RegisterAttribute>,
@@ -216,7 +194,6 @@ fn parse_register_attr_node(
     Ok(())
 }
 
-/// Parse periodicity for InformationRegister
 fn parse_periodicity(periodicity: Option<&str>, mdo_type: MdoType) -> Option<RegisterPeriodicity> {
     if mdo_type != MdoType::InformationRegister {
         return None;
@@ -232,7 +209,6 @@ fn parse_periodicity(periodicity: Option<&str>, mdo_type: MdoType) -> Option<Reg
     })
 }
 
-/// Parse register type for AccumulationRegister
 fn parse_register_type(
     register_type: Option<&str>,
     mdo_type: MdoType,

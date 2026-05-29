@@ -1,5 +1,3 @@
-//! Reports `ЗафиксироватьТранзакцию` / `CommitTransaction` calls in invalid positions.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -20,7 +18,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     clean_code_attribute: CleanCodeAttribute::Intentional,
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic (called from lib.rs dispatch).
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     crate::simple_hir_diagnostic(
         DiagnosticCode::CommitTransactionOutsideTryCatch,
@@ -174,7 +171,6 @@ EndProcedure"#;
 
     #[test]
     fn test_multiple_procedures_seven_errors() {
-        // Seven error patterns in a single file (module-level code not supported)
         let code = r#"Процедура Пример1()
     НачатьТранзакцию();
     Попытка
@@ -280,7 +276,6 @@ EndProcedure"#;
 
     #[test]
     fn test_commit_in_loop_after_code() {
-        // CommitTransaction with code after it inside a loop
         let code = r#"Процедура Тест()
     Для каждого Элемент Из Коллекция Цикл
         НачатьТранзакцию();
@@ -307,7 +302,6 @@ EndProcedure"#;
 
     #[test]
     fn test_single_sub_outside_try() {
-        // Single procedure with CommitTransaction outside try-catch
         let code = r#"Процедура Тестовая()
     НачатьТранзакцию();
     А = 1;
@@ -326,10 +320,6 @@ EndProcedure"#;
 
     #[test]
     fn test_nested_if_commit_in_try_snapshot() {
-        // Track 3 Phase C §4.2: documents the current gap. The
-        // direct-statement check does not descend into IF_STMT inside
-        // the try body, so this nested CommitTransaction is not emitted
-        // even though code can continue after the if.
         check_diagnostics_snapshot_for(
             r#"Процедура Тест(Условие)
     НачатьТранзакцию();

@@ -1,8 +1,3 @@
-//! NestedFunctionInParameters diagnostic.
-//!
-//! Reports nested function calls and parameterized constructors used as
-//! arguments of other calls and constructors.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -75,10 +70,8 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     let config = Config::from_context(ctx);
 
-    // Get line index (cached by Salsa)
     let line_index = ctx.line_index();
 
-    // Get parse tree for name token extraction
     let parse = ctx.parse();
     let root = parse.syntax_node();
 
@@ -86,13 +79,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         check_body(body, source_map, diags, &config, &line_index, &root, code, ctx);
     });
 
-    // Sort diagnostics by position (HIR expressions are stored in arena, not source order)
     diagnostics.sort_by_key(|d| (d.range.start(), d.range.end()));
 
     diagnostics
 }
 
-/// Check a single body for nested function calls in parameters.
 #[allow(clippy::too_many_arguments)]
 fn check_body(
     body: &Body,
@@ -104,9 +95,7 @@ fn check_body(
     code: DiagnosticCode,
     ctx: &DiagnosticsContext,
 ) {
-    // Walk all expressions in the body
     for (expr_id, expr) in body.exprs_iter() {
-        // Check all three types of calls: Call, MethodCall, New
         match expr {
             Expr::Call { callee, args } => {
                 check_call_expr(
@@ -158,23 +147,9 @@ fn check_body(
     }
 }
 
-/// Find the name token range in a call/method call/new expression (hybrid AST approach).
-///
-/// Returns the text range of the method/constructor name token.
-///
-/// Optimized: Uses covering_element instead of iterating all descendants.
-/// Time complexity: O(tree_depth) instead of O(n_nodes).
 fn find_name_token_range(expr_range: TextRange, root: &SyntaxNode) -> TextRange {
-    // Strategy: Use covering_element to find the node at expr_range directly,
-    // then walk up to find CALL_EXPR/CALL_STMT/NEW_EXPR
-    //
-    // For chained calls like Obj.Method1().Method2(), we need to find the correct
-    // parent whose range matches expr_range.
-
-    // Get the element covering this expression range
     let covering = root.covering_element(expr_range);
 
-    // Walk up ancestors to find the call/new expression
     let start_node = match covering {
         syntax::NodeOrToken::Node(node) => node,
         syntax::NodeOrToken::Token(token) => match token.parent() {
@@ -183,17 +158,11 @@ fn find_name_token_range(expr_range: TextRange, root: &SyntaxNode) -> TextRange 
         },
     };
 
-    // Walk up until we find a CALL_EXPR/CALL_STMT/NEW_EXPR that matches our range
     for ancestor in start_node.ancestors() {
         let ancestor_range = ancestor.text_range();
 
-        // Skip if this ancestor doesn't match our expression range
-        // (important for chained calls)
         if ancestor_range != expr_range {
-            // If ancestor is larger than our range, we've gone too far
             if ancestor_range.contains_range(expr_range) && ancestor_range != expr_range {
-                // Check if this ancestor contains the right ARG_LIST
-                // by looking for ARG_LIST that ends at expr_range.end()
                 if let Some(arg_list) = ancestor.children().find(|c| {
                     c.kind() == SyntaxKind::ARG_LIST && c.text_range().end() == expr_range.end()
                 }) {
@@ -217,7 +186,6 @@ fn find_name_token_range(expr_range: TextRange, root: &SyntaxNode) -> TextRange 
             continue;
         }
 
-        // Exact match - this is our expression
         match ancestor.kind() {
             SyntaxKind::CALL_EXPR | SyntaxKind::CALL_STMT => {
                 if let Some(name_token) = find_last_ident_before_arg_list(&ancestor) {
@@ -233,7 +201,6 @@ fn find_name_token_range(expr_range: TextRange, root: &SyntaxNode) -> TextRange 
         }
     }
 
-    // Fallback: use first IDENT in expression range
     let start_offset = expr_range.start();
     for token in root.token_at_offset(start_offset) {
         if token.kind() == SyntaxKind::IDENT {
@@ -241,11 +208,9 @@ fn find_name_token_range(expr_range: TextRange, root: &SyntaxNode) -> TextRange 
         }
     }
 
-    // Ultimate fallback
     expr_range
 }
 
-/// Find the last IDENT token before a specific node in a parent.
 fn find_last_ident_before_node(parent: &SyntaxNode, target: &SyntaxNode) -> Option<SyntaxToken> {
     let target_start = target.text_range().start();
 
@@ -264,7 +229,6 @@ fn find_last_ident_before_node(parent: &SyntaxNode, target: &SyntaxNode) -> Opti
                 if node.text_range().start() >= target_start {
                     break;
                 }
-                // Recurse into child nodes to find IDENTs
                 for descendant in node.descendants_with_tokens() {
                     if let syntax::NodeOrToken::Token(token) = descendant {
                         if token.text_range().start() >= target_start {
@@ -281,7 +245,6 @@ fn find_last_ident_before_node(parent: &SyntaxNode, target: &SyntaxNode) -> Opti
     last_ident
 }
 
-/// Find the last IDENT token before ARG_LIST in a call expression.
 fn find_last_ident_before_arg_list(node: &SyntaxNode) -> Option<SyntaxToken> {
     let arg_list = node.children().find(|c| c.kind() == SyntaxKind::ARG_LIST)?;
     let arg_list_start = arg_list.text_range().start();
@@ -300,7 +263,6 @@ fn find_last_ident_before_arg_list(node: &SyntaxNode) -> Option<SyntaxToken> {
     last_ident
 }
 
-/// Find type name IDENT or KW_NEW token in NEW_EXPR.
 fn find_type_name_or_new_keyword(node: &SyntaxNode) -> Option<SyntaxToken> {
     let mut found_new = false;
     let mut new_keyword: Option<SyntaxToken> = None;
@@ -313,16 +275,14 @@ fn find_type_name_or_new_keyword(node: &SyntaxNode) -> Option<SyntaxToken> {
                 continue;
             }
             if found_new && token.kind() == SyntaxKind::IDENT {
-                return Some(token); // Type name found
+                return Some(token);
             }
         }
     }
 
-    // No type name - return KW_NEW
     new_keyword
 }
 
-/// Check a Call expression for nested function calls in parameters.
 #[allow(clippy::too_many_arguments)]
 fn check_call_expr(
     expr_id: ExprId,
@@ -337,42 +297,33 @@ fn check_call_expr(
     code: DiagnosticCode,
     ctx: &DiagnosticsContext,
 ) {
-    // Empty args - skip
     if args.is_empty() {
         return;
     }
 
-    // Get expr range for line check
     let Some(range) = source_map.expr_range(expr_id) else {
         return;
     };
 
-    // ALWAYS skip single-line calls
     let start_line = line_index.line_col(range.start()).line;
     let end_line = line_index.line_col(range.end()).line;
     if start_line == end_line {
         return;
     }
 
-    // Check if any argument contains forbidden nested calls
     if !has_forbidden_nested_call(args, body, config) {
         return;
     }
 
-    // Check multiline param condition
-    // allowOneliner=true: requires at least one param spanning multiple lines
-    // allowOneliner=false: any nested call in multiline call is an error
     if config.allow_oneliner && !has_multiline_param_hir(args, body, source_map, line_index) {
         return;
     }
 
-    // Get method name from callee
     let method_name = match body.expr(callee) {
         Expr::Path(name) => name.as_str(),
-        _ => "метод", // fallback
+        _ => "метод",
     };
 
-    // Get precise range for method name token (hybrid AST approach)
     let name_range = find_name_token_range(range, root);
 
     diagnostics.push(Diagnostic {
@@ -388,7 +339,6 @@ fn check_call_expr(
     });
 }
 
-/// Check a MethodCall expression for nested function calls in parameters.
 #[allow(clippy::too_many_arguments)]
 fn check_method_call_expr(
     expr_id: ExprId,
@@ -403,34 +353,28 @@ fn check_method_call_expr(
     code: DiagnosticCode,
     ctx: &DiagnosticsContext,
 ) {
-    // Empty args - skip
     if args.is_empty() {
         return;
     }
 
-    // Get expr range for line check
     let Some(range) = source_map.expr_range(expr_id) else {
         return;
     };
 
-    // ALWAYS skip single-line calls
     let start_line = line_index.line_col(range.start()).line;
     let end_line = line_index.line_col(range.end()).line;
     if start_line == end_line {
         return;
     }
 
-    // Check if any argument contains forbidden nested calls
     if !has_forbidden_nested_call(args, body, config) {
         return;
     }
 
-    // Check multiline param condition
     if config.allow_oneliner && !has_multiline_param_hir(args, body, source_map, line_index) {
         return;
     }
 
-    // Get precise range for method name token (hybrid AST approach)
     let name_range = find_name_token_range(range, root);
 
     diagnostics.push(Diagnostic {
@@ -446,7 +390,6 @@ fn check_method_call_expr(
     });
 }
 
-/// Check a New expression for nested function calls in parameters.
 #[allow(clippy::too_many_arguments)]
 fn check_new_expr(
     expr_id: ExprId,
@@ -461,36 +404,30 @@ fn check_new_expr(
     code: DiagnosticCode,
     ctx: &DiagnosticsContext,
 ) {
-    // Empty args - skip
     if args.is_empty() {
         return;
     }
 
-    // Get expr range for line check
     let Some(range) = source_map.expr_range(expr_id) else {
         return;
     };
 
-    // ALWAYS skip single-line calls
     let start_line = line_index.line_col(range.start()).line;
     let end_line = line_index.line_col(range.end()).line;
     if start_line == end_line {
         return;
     }
 
-    // Check if any argument contains forbidden nested calls
     if !has_forbidden_nested_call(args, body, config) {
         return;
     }
 
-    // Check multiline param condition
     if config.allow_oneliner && !has_multiline_param_hir(args, body, source_map, line_index) {
         return;
     }
 
     let display_name = type_name.as_ref().map(|n| n.as_str()).unwrap_or("Новый");
 
-    // Get precise range for constructor name token (hybrid AST approach)
     let name_range = find_name_token_range(range, root);
 
     diagnostics.push(Diagnostic {
@@ -506,35 +443,23 @@ fn check_new_expr(
     });
 }
 
-/// Check if any argument has forbidden nested calls (HIR-based).
 fn has_forbidden_nested_call(args: &[ExprIdx], body: &Body, config: &Config) -> bool {
     args.iter().any(|&arg_idx| is_forbidden_call(ExprId::from_idx(arg_idx), body, config))
 }
 
-/// Recursively check if an expression is or contains a forbidden call (HIR-based).
 fn is_forbidden_call(expr_id: ExprId, body: &Body, config: &Config) -> bool {
     match body.expr(expr_id) {
         Expr::Call { callee, .. } => {
-            // Global call - check if it's allowed
             if let Expr::Path(name) = body.expr(ExprId::from_idx(*callee)) {
                 if config.is_allowed_method(name.as_str()) {
-                    // Allowed global method - don't recurse into its arguments
                     return false;
                 }
             }
-            // Forbidden global call OR has nested calls in its arguments
             true
         }
-        Expr::MethodCall { .. } => {
-            // Method call (with DOT) - always forbidden
-            true
-        }
-        Expr::New { args, .. } => {
-            // Constructor with parameters - forbidden
-            !args.is_empty()
-        }
+        Expr::MethodCall { .. } => true,
+        Expr::New { args, .. } => !args.is_empty(),
         Expr::BinaryOp { lhs, rhs, .. } => {
-            // Check both operands
             is_forbidden_call(ExprId::from_idx(*lhs), body, config)
                 || is_forbidden_call(ExprId::from_idx(*rhs), body, config)
         }
@@ -553,7 +478,6 @@ fn is_forbidden_call(expr_id: ExprId, body: &Body, config: &Config) -> bool {
     }
 }
 
-/// Check if any argument spans multiple lines (HIR-based).
 fn has_multiline_param_hir(
     args: &[ExprIdx],
     _body: &Body,
@@ -590,8 +514,6 @@ mod tests {
 
     #[test]
     fn test_no_diagnostic_multiline_but_single_line_params() {
-        // With default allowOneliner=true, nested calls are allowed if each param is on a single line
-        // Even though the whole call spans multiple lines, each parameter is on its own single line
         let code = r#"Сообщить(СуммаСтрокой("77"),
     СуммаСтрокой(СуммаНДС(Перечисление.ВтораяСумма)));"#;
         let diagnostics = check_ast_diagnostic(code, check);
@@ -600,7 +522,6 @@ mod tests {
 
     #[test]
     fn test_diagnostic_multiline_param() {
-        // A parameter that spans multiple lines should trigger the diagnostic
         let code = r#"Метод(
     ВложенныйМетод(
         Параметр
@@ -628,8 +549,6 @@ mod tests {
 
     #[test]
     fn test_diagnostic_with_allow_oneliner_false() {
-        // Single-line calls are ALWAYS skipped
-        // allowOneliner only affects whether multiline params are required
         let code = r#"Сообщить(СуммаСтрокой("7"), СуммаСтрокой(СуммаНДС(Перечисление.Сумма)));"#;
         let mut config = DiagnosticsConfig::default();
         config.parameters.insert(
@@ -650,8 +569,6 @@ mod tests {
 
     #[test]
     fn test_no_diagnostic_new_expr_single_line_params() {
-        // With default allowOneliner=true, this shouldn't trigger because
-        // each parameter is on a single line (even though call spans multiple lines)
         let code = r#"Структура = Новый Структура("Параметр1, Параметр2",
             Новый Структура(), Новый Структура("Параметр3", Новый Массив()));"#;
         let diagnostics = check_ast_diagnostic(code, check);
@@ -660,7 +577,6 @@ mod tests {
 
     #[test]
     fn test_diagnostic_new_expr_with_multiline_param() {
-        // This SHOULD trigger because a param spans multiple lines
         let code = r#"Структура = Новый Структура("Параметр1, Параметр2",
             Новый Структура(
                 "ВложенныйПараметр"

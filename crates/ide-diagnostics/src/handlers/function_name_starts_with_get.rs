@@ -1,32 +1,3 @@
-//! FunctionNameStartsWithGet diagnostic
-//!
-//! Detects functions with names starting with "Получить" (Russian for "Get").
-//!
-//!
-//! ## Why?
-//! Function names starting with "Получить" are considered a code smell in 1C:Enterprise.
-//! According to 1C coding standards, such names should be avoided and replaced with more
-//! descriptive alternatives that don't use the "Получить" prefix.
-//!
-//! **Note:** This diagnostic only checks Russian "Получить" prefix, not English "Get".
-//!
-//! ## Implementation
-//! **This is a HIR-based diagnostic** - detects function names during HIR lowering.
-//!
-//! ## Bad practice
-//! ```bsl
-//! Функция ПолучитьИмяПоКоду()  // Bad!
-//!     Возврат "Имя";
-//! КонецФункции
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! Функция ИмяПоКоду()  // Good!
-//!     Возврат "Имя";
-//! КонецФункции
-//! ```
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -46,9 +17,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic.
-///
-/// Called from lib.rs dispatch when FunctionNameStartsWithGet diagnostic is emitted during lowering.
 pub fn from_hir(name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     let code = DiagnosticCode::FunctionNameStartsWithGet;
 
@@ -113,15 +81,13 @@ EndProcedure
             .filter(|d| d.code == DiagnosticCode::FunctionNameStartsWithGet)
             .collect();
 
-        // Only the first function "ПолучитьИмяПоКоду" should trigger
         expect![[r#"
             FunctionNameStartsWithGet @ 2:9..2:26
               message: Имя функции 'ПолучитьИмяПоКоду' не должно начинаться с 'Получить'
               severity: Hint"#]]
         .assert_eq(&format_diags(code, &func_diags));
 
-        // Line 1 (0-indexed), cols 8-25
-        assert!(func_diags[0].message.contains("ПолучитьИмяПоКоду")); // snapshot-skip: message-substring assertion intentionally retained.
+        assert!(func_diags[0].message.contains("ПолучитьИмяПоКоду"));
     }
 
     #[test]

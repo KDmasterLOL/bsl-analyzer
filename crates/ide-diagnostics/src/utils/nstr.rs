@@ -4,17 +4,14 @@ use syntax::{SyntaxKind, SyntaxNode};
 
 pub const DEFAULT_DECLARED_LANGUAGES: &str = "ru";
 
-/// Check if the given name is an NStr call (case-insensitive).
 pub fn is_nstr_call(name: &str) -> bool {
     name.eq_ignore_ascii_case("НСтр") || name.eq_ignore_ascii_case("NStr")
 }
 
-/// Check if the given name is a StrTemplate call (case-insensitive).
 pub fn is_template_call(name: &str) -> bool {
     name.eq_ignore_ascii_case("СтрШаблон") || name.eq_ignore_ascii_case("StrTemplate")
 }
 
-/// Check if a node has a StrTemplate call in its ancestors.
 pub fn has_template_in_parents(node: &SyntaxNode) -> bool {
     for ancestor in node.ancestors() {
         if ancestor.kind() == SyntaxKind::CALL_EXPR {
@@ -38,7 +35,6 @@ pub fn has_template_in_parents(node: &SyntaxNode) -> bool {
     false
 }
 
-/// Parsed configuration for NStr-related diagnostics.
 #[derive(Debug, Clone)]
 pub struct NstrConfig {
     pub declared_languages: HashSet<String>,
@@ -59,8 +55,6 @@ impl NstrConfig {
     }
 }
 
-/// Extract language keys from NStr string content.
-/// Looks for patterns like: `ru='text'`, `en = "text"`, etc.
 pub fn extract_language_keys(text: &str) -> HashSet<String> {
     let mut keys = HashSet::new();
     let chars: Vec<char> = text.chars().collect();
@@ -68,28 +62,22 @@ pub fn extract_language_keys(text: &str) -> HashSet<String> {
     let mut i = 0;
 
     while i < len {
-        // Look for start of identifier (letter or _)
         if chars[i].is_alphabetic() || chars[i] == '_' {
             let start = i;
-            // Collect entire identifier
             while i < len && (chars[i].is_alphanumeric() || chars[i] == '_') {
                 i += 1;
             }
             let ident: String = chars[start..i].iter().collect();
 
-            // Skip whitespace
             while i < len && chars[i].is_whitespace() {
                 i += 1;
             }
 
-            // Check for =
             if i < len && chars[i] == '=' {
                 i += 1;
-                // Skip whitespace
                 while i < len && chars[i].is_whitespace() {
                     i += 1;
                 }
-                // Check for quote (single or double)
                 if i < len && (chars[i] == '\'' || chars[i] == '"') {
                     keys.insert(ident.to_lowercase());
                 }
@@ -102,7 +90,6 @@ pub fn extract_language_keys(text: &str) -> HashSet<String> {
     keys
 }
 
-/// Get the variable name from an ASSIGN_STMT if this is an assignment.
 pub fn get_assigned_variable_name(nstr_node: &SyntaxNode) -> Option<String> {
     let mut current = nstr_node.parent();
     while let Some(parent) = current {
@@ -136,7 +123,6 @@ pub fn get_assigned_variable_name(nstr_node: &SyntaxNode) -> Option<String> {
     None
 }
 
-/// Check if a variable is used later in a StrTemplate call within the same code block.
 pub fn is_variable_used_in_template(var_name: &str, nstr_node: &SyntaxNode) -> bool {
     let stmt_list = nstr_node.ancestors().find(|n| n.kind() == SyntaxKind::STMT_LIST);
     let stmt_list = match stmt_list {

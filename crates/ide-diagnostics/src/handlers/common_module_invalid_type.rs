@@ -1,8 +1,3 @@
-//! CommonModuleInvalidType diagnostic
-//!
-//! CommonModule must be one of four types: Server, ServerCall, Client, ClientServer.
-//!
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{common_module_helpers, Diagnostic, DiagnosticCode};
@@ -22,10 +17,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Check metadata-based diagnostics using ModuleMetadata.
-///
-/// This is the new metadata-driven version that uses HIR-collected metadata
-/// instead of loading configuration for each file.
 pub fn from_metadata(
     metadata: &ModuleMetadata,
     ctx: &crate::DiagnosticsContext,
@@ -36,7 +27,6 @@ pub fn from_metadata(
         return Vec::new();
     }
 
-    // Only check CommonModules
     if !matches!(metadata.module_type, bsl_metadata::ModuleType::CommonModule) {
         return Vec::new();
     }

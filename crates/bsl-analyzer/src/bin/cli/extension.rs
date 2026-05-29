@@ -4,9 +4,7 @@ use clap::Subcommand;
 
 #[derive(Subcommand)]
 pub enum ExtensionCommands {
-    /// Export extension XML files to a directory for loading into 1C infobase
     Export {
-        /// Output directory (will be created if it doesn't exist)
         #[arg(short, long)]
         output: PathBuf,
     },

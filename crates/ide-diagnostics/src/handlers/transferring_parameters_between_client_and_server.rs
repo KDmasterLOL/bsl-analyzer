@@ -1,5 +1,3 @@
-//! Detects server parameters that are copied back to the client without need.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -39,7 +37,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let summary = ctx.call_summary(hir::ModuleId::new(ctx.file_id));
     let mut diagnostics = Vec::new();
 
-    // Precompute client-only method local_ids (AtClient annotation)
     let client_method_ids: FxHashSet<u32> = symbol_tree
         .methods()
         .filter(|m| m.annotations.iter().any(|ann| ann.kind == CLIENT_ANNOTATION))
@@ -61,7 +58,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             continue;
         }
 
-        // Check once per method: is this server method called from any client method?
         let server_local_id = method.id.local_id;
         let has_client_call = summary.call_edges.iter().any(|edge| {
             edge.kind == EdgeKind::DirectLocal

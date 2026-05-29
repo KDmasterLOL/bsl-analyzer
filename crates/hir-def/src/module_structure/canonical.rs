@@ -1,22 +1,3 @@
-//! Canonical names for the standard 1C module-structure regions.
-//!
-//! BSL standard regions exist in bilingual RU/EN form (e.g. `Public` ≡
-//! `ПрограммныйИнтерфейс`). For diagnostics like `DuplicateRegion` that
-//! group regions by identity, both spellings must collapse onto a single
-//! canonical name.
-//!
-//! The alias table is universal across [`bsl_metadata::ModuleType`] —
-//! verified by recon of the previous in-handler table in
-//! `ide-diagnostics/src/handlers/duplicate_region.rs`.
-
-/// Returns the canonical name for a known standard-region alias.
-///
-/// `name` is matched case-insensitively against the BSL bilingual alias
-/// set. Returns [`None`] for non-standard region names. Callers that
-/// need an owned fall-through to `name` should use
-/// `canonical_alias(name).map(str::to_string).unwrap_or_else(|| name.to_string())`
-/// — `.unwrap_or(name)` does not compile because `name: &str` is not
-/// `&'static str`.
 pub fn canonical_alias(name: &str) -> Option<&'static str> {
     let lower = name.to_lowercase();
     Some(match lower.as_str() {

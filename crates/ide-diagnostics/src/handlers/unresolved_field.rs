@@ -1,13 +1,9 @@
-//! Reports field access that cannot be resolved for a known receiver type.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::{Name, TypeId};
 use ide_db::TextRange;
 
-// Major/Error is appropriate here because the emit side is intentionally
-// conservative: only high-confidence typed receivers produce this diagnostic.
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Major,
@@ -22,7 +18,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates a diagnostic from `InferenceDiagnostic::UnresolvedField`.
 pub fn from_hir(
     receiver_ty: TypeId,
     field_name: &Name,
@@ -44,12 +39,6 @@ mod tests {
 
     #[test]
     fn emits_on_module_level_code_not_only_inside_methods() {
-        // Coverage for the `DefWithBodyId::ModuleCode` branch in
-        // `hir_inference_dispatch` — statements outside any procedure go
-        // through `module_code_result()`'s source map, which is a
-        // different path from method bodies (keyed on `MethodId`).
-        // Without this test the module-code branch is compiled but
-        // never exercised.
         let fixture = r#"
 //- /CommonModules/ОбщийМодуль/Ext/Module.bsl
 // Возвращаемое значение:
@@ -74,9 +63,6 @@ mod tests {
 
     #[test]
     fn emits_on_missing_field_of_known_catalog_ref() {
-        // JSDoc annotates the return as CatalogRef.Справочник1, so the
-        // receiver `С` gets `Ty::MetadataRef { CatalogRef, Справочник1 }`.
-        // `С.НесуществующееПоле` must fire UnresolvedField.
         let fixture = r#"
 //- /CommonModules/ОбщийМодуль/Ext/Module.bsl
 // Возвращаемое значение:

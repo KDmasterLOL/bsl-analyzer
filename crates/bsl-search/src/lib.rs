@@ -1,12 +1,3 @@
-//! Full-text and semantic search over 1C:Enterprise configurations
-//! and platform documentation.
-//!
-//! Provides BSL-aware code chunking, embedding generation via OpenAI-compatible
-//! API, and HNSW-based vector search. Backed by SQLite for persistence.
-//!
-//! Supports multiple collections (e.g. "code", "platform") within a single
-//! database, enabling unified search across code and documentation.
-
 mod baseline_runtime;
 mod chunker;
 mod context;

@@ -1,42 +1,3 @@
-//! CodeBlockBeforeSub diagnostic.
-//!
-//! Detects executable code before procedure/function declarations.
-//!
-//! ## Why?
-//! Code before subroutine declarations violates BSL organizational conventions:
-//! - Makes code structure unclear
-//! - Can lead to initialization order issues
-//! - Harder to navigate and maintain
-//!
-//! Best practice: Variables → Procedures/Functions → Executable Code
-//!
-//! ## Bad practice
-//! ```bsl
-//! Перем МояПеременная;
-//!
-//! Инициализация();
-//! МояПеременная = 10;
-//!
-//! Процедура Инициализация()
-//!     // ...
-//! КонецПроцедуры
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! Перем МояПеременная;
-//!
-//! Процедура Инициализация()
-//!     // ...
-//! КонецПроцедуры
-//!
-//! Инициализация();
-//! МояПеременная = 10;
-//! ```
-//!
-//! ## Implementation
-//! Adapted to use Rowan SyntaxNode traversal.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -56,10 +17,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Main entry point for CodeBlockBeforeSub diagnostic.
-///
-/// Detects executable code blocks before the first procedure/function declaration.
-/// Reports ONE diagnostic covering all code blocks (from first to last).
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::CodeBlockBeforeSub;
 
@@ -88,22 +45,10 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     Vec::new()
 }
 
-/// Check if node is a procedure or function definition.
 fn is_subroutine(node: &SyntaxNode) -> bool {
     matches!(node.kind(), SyntaxKind::PROCEDURE_DEF | SyntaxKind::FUNCTION_DEF)
 }
 
-/// Check if node is an executable code block.
-///
-/// Returns true for:
-/// - Direct executable statements (CALL_STMT, ASSIGN_STMT, IF_STMT, etc.)
-/// - Preprocessor regions containing executable code
-/// - Preprocessor conditionals containing executable code
-///
-/// Returns false for:
-/// - Variable declarations (VAR_DEF)
-/// - Trivia (WHITESPACE, NEWLINE, COMMENT)
-/// - Annotations (COMPILER_DIRECTIVE, ANNOTATION)
 fn is_code_block(node: &SyntaxNode) -> bool {
     match node.kind() {
         SyntaxKind::CALL_STMT
@@ -137,10 +82,6 @@ fn is_code_block(node: &SyntaxNode) -> bool {
     }
 }
 
-/// Check if node or its descendants contain executable code outside of subroutines.
-///
-/// Used for preprocessor regions and conditionals to determine if they should be flagged.
-/// Skips procedure/function bodies — code inside them is not "free" executable code.
 fn contains_executable_code(node: &SyntaxNode) -> bool {
     for child in node.children() {
         if is_subroutine(&child) {
@@ -169,10 +110,6 @@ fn contains_executable_code(node: &SyntaxNode) -> bool {
     false
 }
 
-/// Create diagnostic for code blocks before subroutines.
-///
-/// Combines ranges from first block to last block (inclusive).
-/// For preprocessor regions, adjusts the range to start from the first executable code inside.
 fn create_diagnostic(
     code_blocks: &[SyntaxNode],
     code: DiagnosticCode,
@@ -206,7 +143,6 @@ fn create_diagnostic(
     }
 }
 
-/// Check if node is an executable statement (helper for create_diagnostic).
 fn is_executable_statement(node: &SyntaxNode) -> bool {
     matches!(
         node.kind(),
@@ -231,7 +167,6 @@ mod tests {
     use expect_test::expect;
     #[test]
     fn test_code_inside_region_before_sub() {
-        // Executable code inside a top region before procedures should trigger.
         let code = r#"Перем П;
 
 #Область КодДоМетодов
@@ -333,8 +268,6 @@ mod tests {
 
     #[test]
     fn test_region_with_only_procedures_before_top_level_procedure() {
-        // Region contains only procedures (no free code) before a top-level procedure
-        // Should NOT trigger — code inside procedure bodies is not "free" executable code
         let code = r#"#Область ОбработчикиСобытий
 
 &НаКлиенте

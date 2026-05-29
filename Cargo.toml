@@ -14,7 +14,6 @@ repository = "https://github.com/itrous/bsl-analyzer"
 rust-version = "1.91"
 
 [workspace.dependencies]
-# Internal crates
 bsl-analyzer = { path = "crates/bsl-analyzer" }
 syntax = { path = "crates/syntax" }
 parser = { path = "crates/parser" }
@@ -54,36 +53,28 @@ bsl-search = { path = "crates/bsl-search" }
 naparnik = { path = "crates/naparnik" }
 symbol-info = { path = "crates/symbol-info" }
 
-# Salsa for incremental computation
 salsa = { version = "0.26", features = ["rayon", "macros"] }
 salsa-macros = "0.26"
 
-# LSP protocol
 lsp-types = "0.95"
 lsp-server = "0.7"
 
-# Parsing infrastructure (rowan for syntax trees)
 rowan = "0.16.1"
 logos = "0.14"
 text-size = "1.1.1"
 
-# Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 url = "2.5"
 
-# Async runtime
 tokio = { version = "1.35", features = ["full"] }
 
-# CLI
 clap = { version = "4.4", features = ["derive"] }
 
-# Error handling
 anyhow = "1.0"
 thiserror = "1.0"
 
-# Logging
 tracing = { version = "0.1.42", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3.20", default-features = false, features = [
     "registry",
@@ -94,16 +85,12 @@ tracing-subscriber = { version = "0.3.20", default-features = false, features = 
 ] }
 tracing-tree = "0.4.0"
 
-# Parallelism
 rayon = "1.8"
 
-# Allocator
 tikv-jemallocator = "0.6"
 
-# Progress indicators
 indicatif = "0.17"
 
-# Utilities
 once_cell = "1.19"
 dashmap = "5.5"
 parking_lot = "0.12"
@@ -132,11 +119,9 @@ notify = "6.1"
 camino = "1.1"
 rust-stemmers = "1.2"
 
-# Testing
 expect-test = "1.4"
 tempfile = "3.8"
 
-# Benchmarking
 criterion = { version = "0.5", features = ["html_reports"] }
 
 [profile.release]
@@ -144,14 +129,12 @@ strip = true
 lto = true
 codegen-units = 1
 
-# Profile for development with debug info
 [profile.release-with-debug]
 inherits = "release"
 strip = false
 debug = 1
 
 [profile.dev]
-# Faster compile times
 debug = 0
 
 [profile.dev.package."*"]

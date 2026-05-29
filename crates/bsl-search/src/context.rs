@@ -1,19 +1,5 @@
-//! Context enrichment for code chunks.
-//!
-//! Converts file paths to 1C module paths and builds enriched
-//! text representations for better embedding quality.
-
 use crate::chunker::{Chunk, ChunkKind};
 
-/// Convert a relative file path to a 1C metadata module path.
-///
-/// Examples:
-///   `Documents/Реализация/Ext/ObjectModule.bsl`
-///     → `Документ.Реализация.МодульОбъекта`
-///   `CommonModules/ОбщийМодульСервер/Ext/Module.bsl`
-///     → `ОбщийМодуль.ОбщийМодульСервер`
-///   `Catalogs/Номенклатура/Forms/ФормаЭлемента/Ext/Form/Module.bsl`
-///     → `Справочник.Номенклатура.Форма.ФормаЭлемента`
 pub fn file_path_to_module_path(rel_path: &str) -> String {
     let path = rel_path.replace('\\', "/");
     let parts: Vec<&str> = path.split('/').collect();
@@ -22,25 +8,21 @@ pub fn file_path_to_module_path(rel_path: &str) -> String {
         return rel_path.to_owned();
     }
 
-    // Find the metadata type directory and object name.
     let mut result_parts = Vec::new();
 
     let mut i = 0;
     while i < parts.len() {
         if let Some(ru_type) = metadata_type_ru(parts[i]) {
             result_parts.push(ru_type.to_owned());
-            // Next part is the object name.
             if i + 1 < parts.len() && parts[i + 1] != "Ext" {
                 result_parts.push(parts[i + 1].to_owned());
                 i += 2;
 
-                // Check for Forms subdirectory.
                 if i < parts.len() && parts[i] == "Forms" && i + 1 < parts.len() {
                     result_parts.push("Форма".to_owned());
                     result_parts.push(parts[i + 1].to_owned());
                     i += 2;
                 }
-                // Check for Commands subdirectory.
                 if i < parts.len() && parts[i] == "Commands" && i + 1 < parts.len() {
                     result_parts.push("Команда".to_owned());
                     result_parts.push(parts[i + 1].to_owned());
@@ -51,7 +33,6 @@ pub fn file_path_to_module_path(rel_path: &str) -> String {
         i += 1;
     }
 
-    // Append module type from filename.
     if let Some(&last) = parts.last() {
         if let Some(module_type) = module_type_ru(last) {
             result_parts.push(module_type.to_owned());
@@ -65,19 +46,13 @@ pub fn file_path_to_module_path(rel_path: &str) -> String {
     result_parts.join(".")
 }
 
-/// Build enriched text for embedding.
-///
-/// Prepends metadata context to the chunk text so the embedding model
-/// understands where this code belongs in the configuration.
 pub fn enrich_chunk_text(chunk: &Chunk, module_path: &str) -> String {
     let mut lines = Vec::new();
 
-    // Module path context.
     if !module_path.is_empty() {
         lines.push(format!("// Модуль: {module_path}"));
     }
 
-    // Symbol signature context.
     match chunk.kind {
         ChunkKind::Procedure | ChunkKind::Function => {
             let kind_ru = match chunk.kind {
@@ -109,7 +84,6 @@ pub fn enrich_chunk_text(chunk: &Chunk, module_path: &str) -> String {
     lines.join("\n")
 }
 
-/// Map EDT directory names to Russian metadata type names.
 fn metadata_type_ru(dir_name: &str) -> Option<&'static str> {
     match dir_name {
         "Documents" => Some("Документ"),
@@ -143,7 +117,6 @@ fn metadata_type_ru(dir_name: &str) -> Option<&'static str> {
     }
 }
 
-/// Map BSL module file names to Russian module type names.
 fn module_type_ru(file_name: &str) -> Option<&'static str> {
     match file_name {
         "ObjectModule.bsl" => Some("МодульОбъекта"),

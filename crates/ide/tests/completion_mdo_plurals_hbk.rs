@@ -1,14 +1,3 @@
-//! Phase C — HBK as the source-of-record for MDO plural completion items.
-//!
-//! Pins the post-Phase-C behaviour of band-2 (`complete_mdo_plurals`):
-//! - label / detail / readonly marker / documentation all sourced from HBK;
-//! - the 17 global-context MDO plurals are emitted; `Cube`, `DimensionTable`,
-//!   `CommonModule` are NOT emitted at top level because HBK classifies them
-//!   as nested type descriptors;
-//! - workspace `CommonModule` entries still surface from band 3.
-//!
-//! Cursor marker: `$0`.
-
 use ide::{Analysis, CompletionItem, CompletionItemKind};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
@@ -81,10 +70,6 @@ fn hbk_globals_available() -> bool {
     !bsl_platform::PlatformDataInner::instance().all_global_properties().is_empty()
 }
 
-// =====================================================================
-// 1. Label sourced from HBK, not from the deleted hardcoded table
-// =====================================================================
-
 #[test]
 fn completion_mdo_plural_label_from_hbk() {
     if !hbk_globals_available() {
@@ -109,10 +94,6 @@ fn completion_mdo_plural_label_from_hbk() {
     assert_eq!(docs.label, hbk.name.as_str(), "label must come from HBK prop.name");
 }
 
-// =====================================================================
-// 2. English HBK alias drives bilingual filter
-// =====================================================================
-
 #[test]
 fn completion_mdo_plural_bilingual_english_from_hbk() {
     if !hbk_globals_available() {
@@ -136,10 +117,6 @@ fn completion_mdo_plural_bilingual_english_from_hbk() {
     assert!(filter.contains("Documents"), "filter_text must contain EN name; filter = {filter:?}");
 }
 
-// =====================================================================
-// 3. HBK readonly flag surfaces in detail
-// =====================================================================
-
 #[test]
 fn completion_mdo_plural_readonly_marker_in_detail() {
     if !hbk_globals_available() {
@@ -149,8 +126,6 @@ fn completion_mdo_plural_readonly_marker_in_detail() {
         .get_global_property("Документы")
         .expect("HBK must list Документы");
     if !hbk.is_readonly {
-        // Future-proofing: if HBK ever flips readonly for MDO plurals, this
-        // assertion would mis-fire — skip rather than spuriously fail.
         return;
     }
     let items = complete(
@@ -168,10 +143,6 @@ fn completion_mdo_plural_readonly_marker_in_detail() {
     );
 }
 
-// =====================================================================
-// 4. Documentation panel populated from HBK PropertyDocs (when present)
-// =====================================================================
-
 #[test]
 fn completion_mdo_plural_documentation_from_hbk() {
     if !hbk_globals_available() {
@@ -180,7 +151,7 @@ fn completion_mdo_plural_documentation_from_hbk() {
     let data = bsl_platform::PlatformDataInner::instance();
     let hbk = data.get_global_property("Документы").expect("HBK must list Документы");
     let Some(hbk_docs) = data.get_property_docs(hbk.id) else {
-        return; // HBK has no PropertyDocs for this id — nothing to pin.
+        return;
     };
     if hbk_docs.description.trim().is_empty() {
         return;
@@ -202,10 +173,6 @@ fn completion_mdo_plural_documentation_from_hbk() {
     );
 }
 
-// =====================================================================
-// 5. Kind stays `MdoType` — workspace shape preserved
-// =====================================================================
-
 #[test]
 fn completion_mdo_plural_kind_remains_mdo_type() {
     if !hbk_globals_available() {
@@ -226,10 +193,6 @@ fn completion_mdo_plural_kind_remains_mdo_type() {
     );
 }
 
-// =====================================================================
-// 6. Legacy detail prefix preserved
-// =====================================================================
-
 #[test]
 fn completion_mdo_plural_detail_keeps_legacy_prefix() {
     if !hbk_globals_available() {
@@ -246,10 +209,6 @@ fn completion_mdo_plural_detail_keeps_legacy_prefix() {
     let detail = docs.detail.as_deref().unwrap_or("");
     assert!(detail.starts_with("Коллекция метаданных"), "detail = {detail:?}");
 }
-
-// =====================================================================
-// 7. CommonModule descriptor is NOT emitted at top level; workspace CM still is
-// =====================================================================
 
 #[test]
 fn completion_mdo_plural_common_module_not_emitted_top_level() {
@@ -284,10 +243,6 @@ fn completion_mdo_plural_common_module_not_emitted_top_level() {
     );
 }
 
-// =====================================================================
-// 8. Cube not emitted at top level
-// =====================================================================
-
 #[test]
 fn completion_mdo_plural_cube_not_emitted_top_level() {
     if !hbk_globals_available() {
@@ -307,10 +262,6 @@ fn completion_mdo_plural_cube_not_emitted_top_level() {
         items.iter().map(|i| &i.label).collect::<Vec<_>>()
     );
 }
-
-// =====================================================================
-// 9. DimensionTable not emitted at top level
-// =====================================================================
 
 #[test]
 fn completion_mdo_plural_dimension_table_not_emitted_top_level() {
@@ -332,30 +283,11 @@ fn completion_mdo_plural_dimension_table_not_emitted_top_level() {
     );
 }
 
-// =====================================================================
-// 10. Frozen-baseline regression pin for the full plural set
-// =====================================================================
-//
-// Compares the empty-prefix MDO-plural emission against the committed
-// baseline in `fixtures/expected_mdo_plurals.txt`. Catches accidental
-// removal or rename of any of the 17 currently-known plurals.
-//
-// Does NOT auto-detect a new HBK MDO plural that the `MdoType` enum has
-// not been extended for — both sides of the comparison route through
-// `MdoType::from_plural`, so a new HBK entry the enum doesn't recognise is
-// absent from both. Sync-gap discovery is procedural; see
-// `crates/bsl-platform/data/PROVENANCE.md` and the comment block in the
-// baseline file.
-
 #[test]
 fn mdo_plural_completion_set_matches_frozen_baseline() {
     if !hbk_globals_available() {
         return;
     }
-    // Cursor on a fresh line right after a terminated statement → token is
-    // WHITESPACE / NEWLINE, prev non-trivia is `;` → `is_expression_start_position`
-    // fires and `complete_top_level` runs with an empty prefix, so every
-    // MDO plural is emitted.
     let items = complete(
         r#"//- /test.bsl
 Процедура Тест()
@@ -379,9 +311,6 @@ fn mdo_plural_completion_set_matches_frozen_baseline() {
          crates/bsl-platform/data/PROVENANCE.md.\nemitted: {emitted:?}\nexpected: {expected:?}"
     );
 
-    // Explicit non-emit guards: catch a regression where a future HBK regen
-    // moves any of these into the global-context partition without coordinated
-    // bareword-resolution work in BSL itself.
     assert!(!emitted.contains("Кубы"), "Кубы must not be emitted at top level");
     assert!(!emitted.contains("ТаблицыИзмерения"), "ТаблицыИзмерения must not be emitted");
     assert!(!emitted.contains("ОбщиеМодули"), "ОбщиеМодули must not be emitted");

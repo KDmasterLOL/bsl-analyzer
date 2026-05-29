@@ -1,70 +1,3 @@
-//! CyclomaticComplexity diagnostic.
-//!
-//! Detects functions and procedures with high cyclomatic complexity.
-//!
-//! ## Why?
-//! Cyclomatic complexity (McCabe) measures code complexity by counting decision points.
-//! Unlike cognitive complexity, it treats all decision points equally without nesting penalties.
-//!
-//! High cyclomatic complexity indicates code that is:
-//! - Difficult to test (many execution paths)
-//! - Prone to bugs (complex logic)
-//! - Hard to understand and maintain
-//!
-//! ## Algorithm
-//! Track 2 Phase B §6.5 — SonarQube-style cyclomatic complexity:
-//! `V(G) + boolean_ops + ternary` where `V(G) = E - N + 2*P` is the
-//! textbook McCabe count from the cached CFG, and the boolean / ternary
-//! extras come from the §6.1 HIR visitor (BSL `И` / `ИЛИ` and
-//! `?(...)` evaluate inside basic blocks and don't add CFG edges, so
-//! the textbook formula misses them).
-//!
-//! **Decision points** (+1 each, no nesting penalty):
-//! - if, elsif (NOT else — SonarQube parity)
-//! - for, while, foreach
-//! - ternary operator `?(...)`
-//! - except clause (try-except)
-//! - AND / OR (`И`/`ИЛИ`) operators in expressions
-//!
-//! ## Bad practice
-//! Many decision points regardless of nesting:
-//! ```bsl
-//! Функция СложнаяФункция(Данные)
-//!     Если Условие1 Тогда        // +1
-//!         Возврат 1;
-//!     ИначеЕсли Условие2 Тогда   // +1
-//!         Возврат 2;
-//!     Иначе                       // +1
-//!         Возврат 3;
-//!     КонецЕсли;
-//!     // Many more decision points...
-//! КонецФункции
-//! ```
-//!
-//! ## Good practice
-//! Simplify logic or split into smaller functions:
-//! ```bsl
-//! Функция ОбработатьДанные(Данные)
-//!     Если НЕ ПроверитьДанные(Данные) Тогда
-//!         Возврат;
-//!     КонецЕсли;
-//!     ВыполнитьОбработку(Данные);
-//! КонецФункции
-//! ```
-//!
-//! ## Configuration
-//! - **complexityThreshold** (default: 20) - Maximum allowed cyclomatic complexity
-//! - **Enabled by default:** Yes
-//! - **Severity:** CRITICAL
-//! - **Tags:** BRAINOVERLOAD
-//! - **Minutes to fix:** 25
-//!
-//! ## Implementation
-//! Uses HIR-based complexity calculation for:
-//! - Better performance (Salsa caching)
-//! - Cleaner code (structured HIR vs raw AST)
-//! - Reusability (same calculation for code lens)
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -83,11 +16,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Track 2 Phase B §6.4 — handler-side detection consuming the cached
-/// CFG-based [`hir::cfg::cyclomatic_complexity`] via
-/// `ctx.module_cyclomatic()`. Replaces the legacy `from_hir` adapter
-/// (BodyDiagnostic-fed) and the per-method HIR-walk approximation
-/// in `hir-def/cyclomatic_complexity.rs`.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     use hir::ModItem;
 
@@ -104,9 +32,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let module_bodies = ctx.module_bodies();
     let item_tree = ctx.item_tree();
 
-    // Sort by `local_id` for deterministic output ordering — matches
-    // the §6.4 cohort follow-up applied to method_size etc. (the
-    // underlying `FxHashMap` walk in `iter_bodies()` is non-deterministic).
     let mut local_ids: Vec<u32> = module_bodies.iter_bodies().map(|(id, _)| id).collect();
     local_ids.sort_unstable();
 
@@ -188,18 +113,6 @@ mod tests {
 
     #[test]
     fn test_high_complexity_triggers_diagnostic() {
-        // Track 2 Phase B §6.5: SonarQube-style formula gives
-        // `cyclomatic = 23` for this extended fixture (CFG-based 14 +
-        // 7 boolean-op + 2 ternary). The fixture was enlarged here to
-        // cross the default threshold (20) naturally, removing the
-        // §6.4 "lower threshold to 10" compromise. The textbook
-        // McCabe value the §6.4 commit pinned was 13 against the
-        // smaller fixture; the SonarQube extras add `И`/`ИЛИ` and
-        // ternary as decision points the CFG can't see (they evaluate
-        // inside basic blocks). The legacy HIR-walk approximation
-        // additionally counted each `Else` clause as a separate
-        // decision; SonarQube does not, so the alignment intentionally
-        // drops that contribution.
         let code = r#"Функция РассчитатьМаршрут(Сумма, ТипКлиента, Режим, ЕстьСкидка)
     Результат = 0;
     Если Сумма > 100 Тогда
@@ -341,17 +254,6 @@ mod tests {
 
         let body = module_bodies.body(0).expect("Should have first method body");
 
-        // Track 2 Phase B §6.5 — pin both the textbook CFG value and
-        // the SonarQube extension separately. `V(G) = E - N + 2*P`
-        // counts only structural decisions that produce CFG edges
-        // (If/Elsif, While, For, ForEach, Try/Except). BSL `И` / `ИЛИ`
-        // and ternary `?(...)` evaluate inside basic blocks and don't
-        // add edges, so the SonarQube definition adds them back as
-        // per-occurrence increments. The §6.4 commit asserted the
-        // textbook value (13 for the smaller fixture); after §6.5 the
-        // diagnostic reports `cfg + boolean_ops + ternary`, so this
-        // test now pins all three components against the extended
-        // fixture.
         let cfg =
             hir::cfg::CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), body, None);
         let complexity = hir::cfg::cyclomatic_complexity(&cfg);
@@ -363,8 +265,6 @@ mod tests {
             "boolean ops contribute +7 to SonarQube cyclomatic"
         );
         assert_eq!(metrics.ternary_count, 2, "ternary expressions contribute +2");
-        // The §6.5 SonarQube-aligned cyclomatic the diagnostic reports
-        // is the sum: 14 (CFG) + 7 (boolean) + 2 (ternary) = 23.
         assert_eq!(complexity + metrics.boolean_ops_count + metrics.ternary_count, 23);
     }
 }

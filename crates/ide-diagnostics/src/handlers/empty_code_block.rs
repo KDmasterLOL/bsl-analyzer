@@ -1,27 +1,3 @@
-//! EmptyCodeBlock diagnostic
-//!
-//! Detects empty code blocks in control structures (if/while/for/etc).
-//!
-//!
-//! BSL supports empty code blocks in control structures, but they often indicate
-//! incomplete implementation or unintended code.  This diagnostic helps detect such cases.
-//!
-//! ## Empty blocks detected:
-//! - Empty if/then blocks
-//! - Empty elsif blocks
-//! - Empty else blocks
-//! - Empty while/for/foreach loops
-//!
-//! ## NOT checked (other diagnostics handle these):
-//! - Empty function/procedure bodies (handled by other diagnostic)
-//! - Empty try/except blocks (handled by other diagnostic)
-//!
-//! ## Implementation
-//! **This is a HIR-based diagnostic** - collected during AST→HIR lowering.
-//!
-//! The diagnostic is emitted in `hir-def/body/lower/stmt.rs` during statement lowering
-//! for if/elsif/else/while/for/foreach/try/except blocks.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -41,9 +17,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic.
-///
-/// Called from lib.rs dispatch when `BodyDiagnostic::EmptyCodeBlock` is encountered.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     crate::simple_hir_diagnostic(DiagnosticCode::EmptyCodeBlock, "Пустой блок кода", range, ctx)
 }
@@ -118,7 +91,6 @@ mod tests {
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> =
             diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::EmptyCodeBlock).collect();
-        // Empty if, empty elseif, empty else = 3 diagnostics
         expect![[r#"
             EmptyCodeBlock @ 2:1..2:17
               message: Пустой блок кода
@@ -134,7 +106,6 @@ mod tests {
 
     #[test]
     fn test_no_diagnostic_for_empty_try_except() {
-        // Empty except blocks are NOT reported by EmptyCodeBlock (separate diagnostic)
         let code = r#"Процедура А()
     Попытка
         А = 0;
@@ -150,7 +121,6 @@ mod tests {
 
     #[test]
     fn test_no_diagnostic_for_empty_procedure_body() {
-        // Empty procedure bodies are NOT reported by EmptyCodeBlock (separate diagnostic)
         let code = r#"Функция В()
     // только комментарий
 КонецФункции"#;

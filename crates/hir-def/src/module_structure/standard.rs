@@ -1,15 +1,3 @@
-//! Standard region names allowed per BSL [`bsl_metadata::ModuleType`].
-//!
-//! Each module type (FormModule, ObjectModule, CommonModule, etc.) admits
-//! a specific set of standard region names per the 1C standard. Form
-//! modules also allow the dynamic `ОбработчикиСобытийЭлементовТаблицыФормы<TableName>`
-//! / `FormTableItemsEventHandlers<TableName>` family — modelled as a
-//! prefix pattern.
-//!
-//! Track 2 Phase C §3 Slice 1: moved from
-//! `crates/ide-diagnostics/src/utils/standard_regions.rs` so BSL semantic
-//! policy lives in the HIR layer, not the diagnostics layer.
-
 use bsl_metadata::ModuleType;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,11 +80,6 @@ fn standard_patterns(module_type: ModuleType) -> Vec<RegionPattern> {
     patterns
 }
 
-/// Returns `true` when `name` is a standard region name allowed in
-/// `module_type`. RU and EN spellings are both accepted, comparison is
-/// case-insensitive, and form-table prefix regions
-/// (`ОбработчикиСобытийЭлементовТаблицыФормы<TableName>`) match when the
-/// suffix is a syntactically valid identifier tail.
 pub fn is_standard_region(module_type: ModuleType, name: &str) -> bool {
     let patterns = standard_patterns(module_type);
 

@@ -92,7 +92,6 @@ mod tests {
 
     #[test]
     fn resolve_publish_branch_uses_git_when_cli_and_ci_are_missing() {
-        // CI env vars take priority over git in resolve_publish_branch.
         let saved_branch = env::var("CI_COMMIT_BRANCH").ok();
         let saved_ref = env::var("CI_COMMIT_REF_NAME").ok();
         env::remove_var("CI_COMMIT_BRANCH");

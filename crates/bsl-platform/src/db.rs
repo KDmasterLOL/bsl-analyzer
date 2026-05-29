@@ -1,9 +1,3 @@
-//! Platform data database with efficient indexing.
-//!
-//! This module provides both:
-//! - Salsa tracked queries for IDE integration with caching
-//! - A singleton for standalone usage
-
 use crate::types::{
     ConstructorDocs, GlobalFunction, PlatformConstructor, PlatformMethod, PlatformProperty,
     PlatformType, PropertyDocs,
@@ -15,74 +9,37 @@ use std::sync::Arc;
 
 static PLATFORM_DATA_SINGLETON: OnceCell<PlatformDataInner> = OnceCell::new();
 
-/// Sentinel `type_name` used in `properties` records that originate from
-/// `objects/Global context/properties/` in HBK. Top-level identifiers like
-/// `ОбработкаОшибок`, `Метаданные`, `Справочники` are emitted with this
-/// owner so they can be filtered out into the dedicated global-scope index
-/// without colliding with regular type members.
 pub const GLOBAL_CONTEXT_OWNER: &str = "Global context";
 
-/// Internal platform data implementation.
-///
-/// This struct is not public API. Access it through:
-/// - Salsa tracked queries (`platform_type_query`, `platform_method_query`, `global_function_query`)
-/// - `PlatformDataInner::instance()` for standalone usage
 pub struct PlatformDataInner {
-    /// Converted platform types (from raw const data)
     types: Vec<PlatformType>,
-    /// Types indexed by lowercase name (both Russian and English)
     types_by_name: FxHashMap<SmolStr, usize>,
-    /// Converted platform methods (from raw const data)
     methods: Vec<PlatformMethod>,
-    /// Methods indexed by (type_name, method_name)
     methods_by_name: FxHashMap<(SmolStr, SmolStr), usize>,
-    /// Converted global functions (from raw const data)
     global_functions: Vec<GlobalFunction>,
-    /// Global functions indexed by lowercase name (both Russian and English)
     global_functions_by_name: FxHashMap<SmolStr, usize>,
-    /// Method documentation indexed by method ID
     method_docs_by_id: FxHashMap<u32, usize>,
-    /// Global function documentation indexed by function ID
     global_function_docs_by_id: FxHashMap<u32, usize>,
-    /// Converted platform constructors (from raw const data).
     constructors: Vec<PlatformConstructor>,
-    /// Constructors indexed by lowercase type name (both Russian and English).
-    /// Each key maps to the list of constructor overloads for that type.
     constructors_by_type: FxHashMap<SmolStr, Vec<usize>>,
-    /// Constructor documentation indexed by constructor ID.
     constructor_docs_by_id: FxHashMap<u32, usize>,
-    /// Converted platform properties (from raw const data).
     properties: Vec<PlatformProperty>,
-    /// Properties indexed by (type_name, property_name). Bilingual — same
-    /// indexing shape as `methods_by_name`, so callers can pass either the
-    /// Russian or English type name and either the Russian or English
-    /// property name.
     properties_by_name: FxHashMap<(SmolStr, SmolStr), usize>,
-    /// Property documentation indexed by property ID.
     property_docs_by_id: FxHashMap<u32, usize>,
-    /// Global-scope identifiers from `objects/Global context/properties/`
-    /// (e.g. `ОбработкаОшибок` → `МенеджерОбработкиОшибок`). Indexed by
-    /// lowercased name, both Russian and English. Values are indices into
-    /// `properties` so the declared type and documentation are reached
-    /// through the same record as regular type members.
     global_properties_by_name: FxHashMap<SmolStr, usize>,
 }
 
 impl PlatformDataInner {
-    /// Get the global platform data instance.
     pub fn instance() -> &'static Self {
         PLATFORM_DATA_SINGLETON.get_or_init(Self::new)
     }
 
-    /// Initialize platform data and build indices.
     fn new() -> Self {
-        // Convert raw types to SmolStr-based types
         let types: Vec<PlatformType> =
             crate::generated::PLATFORM_TYPES.iter().map(PlatformType::from).collect();
 
         let mut types_by_name = FxHashMap::default();
 
-        // Index platform types
         for (idx, ty) in types.iter().enumerate() {
             let ru_key: SmolStr = ty.name.to_lowercase().into();
             let en_key: SmolStr = ty.english_name.to_lowercase().into();
@@ -90,13 +47,11 @@ impl PlatformDataInner {
             types_by_name.insert(en_key, idx);
         }
 
-        // Convert raw methods to SmolStr-based methods
         let methods: Vec<PlatformMethod> =
             crate::generated::PLATFORM_METHODS.iter().map(PlatformMethod::from).collect();
 
         let mut methods_by_name = FxHashMap::default();
 
-        // Build English→Russian type name mapping for bilingual method lookup.
         let mut type_en_to_ru: FxHashMap<SmolStr, SmolStr> = FxHashMap::default();
         for ty in &types {
             let en_key: SmolStr = ty.english_name.to_lowercase().into();
@@ -104,66 +59,46 @@ impl PlatformDataInner {
             type_en_to_ru.insert(en_key, ru_key);
         }
 
-        // Index platform methods by (type_name, method_name).
-        // method.type_name is English (e.g. "Array"), so we also index by
-        // the Russian type name (e.g. "Массив") for bilingual lookup.
         for (idx, method) in methods.iter().enumerate() {
             let en_type_key: SmolStr = method.type_name.to_lowercase().into();
             let ru_method_key: SmolStr = method.name.to_lowercase().into();
             let en_method_key: SmolStr = method.english_name.to_lowercase().into();
 
-            // (english_type, russian_method) and (english_type, english_method)
             methods_by_name.insert((en_type_key.clone(), ru_method_key.clone()), idx);
             methods_by_name.insert((en_type_key.clone(), en_method_key.clone()), idx);
 
-            // (russian_type, russian_method) and (russian_type, english_method)
             if let Some(ru_type_key) = type_en_to_ru.get(&en_type_key) {
                 methods_by_name.insert((ru_type_key.clone(), ru_method_key), idx);
                 methods_by_name.insert((ru_type_key.clone(), en_method_key), idx);
             }
         }
 
-        // Convert raw global functions to SmolStr-based functions
         let global_functions: Vec<GlobalFunction> =
             crate::generated::PLATFORM_GLOBAL_FUNCTIONS.iter().map(GlobalFunction::from).collect();
 
         let mut global_functions_by_name = FxHashMap::default();
 
-        // Index global functions by name (both Russian and English)
         for (idx, function) in global_functions.iter().enumerate() {
             let ru_key: SmolStr = function.name.to_lowercase().into();
             let en_key: SmolStr = function.english_name.to_lowercase().into();
 
-            // Index by Russian name
             global_functions_by_name.insert(ru_key, idx);
-            // Index by English name
             global_functions_by_name.insert(en_key, idx);
         }
 
-        // Index method documentation by ID
         let mut method_docs_by_id = FxHashMap::default();
         for (idx, docs) in crate::generated::METHOD_DOCS.iter().enumerate() {
             method_docs_by_id.insert(docs.method_id, idx);
         }
 
-        // Index global function documentation by ID
         let mut global_function_docs_by_id = FxHashMap::default();
         for (idx, docs) in crate::generated::GLOBAL_FUNCTION_DOCS.iter().enumerate() {
             global_function_docs_by_id.insert(docs.method_id, idx);
         }
 
-        // Convert raw constructors and build per-type index. Bilingual keying
-        // mirrors `methods_by_name`: same `type_en_to_ru` mapping, same
-        // lowercase normalization, so callers can look constructors up by
-        // either Russian or English type name without special-casing.
         let mut constructors: Vec<PlatformConstructor> =
             crate::generated::PLATFORM_CONSTRUCTORS.iter().map(PlatformConstructor::from).collect();
 
-        // HBK-data correction: a handful of constructors are variadic per
-        // `Описание:` (free text) but encode a fixed `Синтаксис:` line, so
-        // PR2's `>,...,<`-in-syntax detector misses them. Apply the overlay
-        // before the per-type index is built so every consumer (completion
-        // / hover / inference) sees the corrected `is_variadic` flag.
         apply_docs_only_variadic_overlay(&mut constructors);
 
         let mut constructors_by_type: FxHashMap<SmolStr, Vec<usize>> = FxHashMap::default();
@@ -175,16 +110,11 @@ impl PlatformDataInner {
             }
         }
 
-        // Index constructor documentation by constructor ID.
         let mut constructor_docs_by_id = FxHashMap::default();
         for (idx, docs) in crate::generated::CONSTRUCTOR_DOCS.iter().enumerate() {
             constructor_docs_by_id.insert(docs.constructor_id, idx);
         }
 
-        // Convert raw properties and build the bilingual lookup index. Key
-        // shape mirrors `methods_by_name`: `(lowercase_type, lowercase_prop)`
-        // with four combinations (en/ru × en/ru) per entry so callers can
-        // supply either language.
         let properties: Vec<PlatformProperty> =
             crate::generated::PLATFORM_PROPERTIES.iter().map(PlatformProperty::from).collect();
 
@@ -203,17 +133,11 @@ impl PlatformDataInner {
             }
         }
 
-        // Index property documentation by property ID.
         let mut property_docs_by_id = FxHashMap::default();
         for (idx, docs) in crate::generated::PROPERTY_DOCS.iter().enumerate() {
             property_docs_by_id.insert(docs.property_id, idx);
         }
 
-        // Build the global-scope index from properties whose owner is the
-        // sentinel `Global context` type. Both Russian and English names are
-        // mapped to the same property index so callers can look up either.
-        // Unlike regular properties, we do NOT key by `(owner, name)` — the
-        // global namespace is flat and the owner is implicit.
         let mut global_properties_by_name = FxHashMap::default();
         for (idx, prop) in properties.iter().enumerate() {
             if prop.type_name.as_str() != GLOBAL_CONTEXT_OWNER {
@@ -244,25 +168,16 @@ impl PlatformDataInner {
         }
     }
 
-    /// Get platform type by name (case-insensitive, bilingual).
-    ///
-    /// Accepts either the Russian or English name. Exposed publicly so
-    /// `symbol-info` adapters can translate an English primary key
-    /// (`PlatformMethod::type_name`, `PlatformConstructor::type_name`)
-    /// back to the Russian display name when building a qualifier. Cheap —
-    /// single hash lookup via `types_by_name`.
     pub fn get_type(&self, name: &str) -> Option<&PlatformType> {
         let key: SmolStr = name.to_lowercase().into();
         let idx = *self.types_by_name.get(&key)?;
         self.types.get(idx)
     }
 
-    /// Get all platform types.
     pub fn all_types(&self) -> &[PlatformType] {
         &self.types
     }
 
-    /// Get platform method by type and method name (case-insensitive, bilingual).
     pub fn get_method(&self, type_name: &str, method_name: &str) -> Option<&PlatformMethod> {
         let type_key: SmolStr = type_name.to_lowercase().into();
         let method_key: SmolStr = method_name.to_lowercase().into();
@@ -270,16 +185,11 @@ impl PlatformDataInner {
         self.methods.get(idx)
     }
 
-    /// Get all platform methods.
     pub fn all_methods(&self) -> &[PlatformMethod] {
         &self.methods
     }
 
-    /// Get all methods for a specific type (case-insensitive, bilingual).
-    ///
-    /// Accepts both Russian and English type names (e.g. "Массив" or "Array").
     pub fn get_type_methods(&self, type_name: &str) -> Vec<&PlatformMethod> {
-        // Resolve to the English type name used in method.type_name.
         let type_key: SmolStr = type_name.to_lowercase().into();
         let en_type_key = if let Some(idx) = self.types_by_name.get(&type_key) {
             self.types[*idx].english_name.to_lowercase().into()
@@ -289,41 +199,27 @@ impl PlatformDataInner {
         self.methods.iter().filter(|m| m.type_name.to_lowercase() == en_type_key.as_str()).collect()
     }
 
-    /// Get all methods for a manager type prefix (case-insensitive).
-    ///
-    /// Manager type names in platform data have the form `"CatalogManager.<Catalog name>"`.
-    /// This method matches all methods whose type_name starts with `"{prefix}."`.
-    ///
-    /// Example: `get_manager_methods("CatalogManager")` returns НайтиПоКоду, СоздатьЭлемент, etc.
     pub fn get_manager_methods(&self, manager_prefix: &str) -> Vec<&PlatformMethod> {
         let prefix = format!("{}.", manager_prefix.to_lowercase());
         self.methods.iter().filter(|m| m.type_name.to_lowercase().starts_with(&prefix)).collect()
     }
 
-    /// Get global function by name (case-insensitive, bilingual).
     pub fn get_global_function(&self, name: &str) -> Option<&GlobalFunction> {
         let key: SmolStr = name.to_lowercase().into();
         let idx = *self.global_functions_by_name.get(&key)?;
         self.global_functions.get(idx)
     }
 
-    /// Get all global functions.
     pub fn all_global_functions(&self) -> &[GlobalFunction] {
         &self.global_functions
     }
 
-    /// Get method documentation by method ID.
     pub fn get_method_docs(&self, method_id: u32) -> Option<crate::types::MethodDocs> {
         let idx = *self.method_docs_by_id.get(&method_id)?;
         let raw_docs = crate::generated::METHOD_DOCS.get(idx)?;
         Some(crate::types::MethodDocs::from(raw_docs))
     }
 
-    /// Get constructors for a platform type (case-insensitive, bilingual).
-    ///
-    /// Returns all overloads (`Новый Массив()` vs `Новый Массив(КоличествоЭлементов)`
-    /// vs `Новый Массив(ФиксированныйМассив)`) in source order from the HBK.
-    /// Empty vector when the type has no constructors or the name is unknown.
     pub fn get_constructors(&self, type_name: &str) -> Vec<&PlatformConstructor> {
         let key: SmolStr = type_name.to_lowercase().into();
         match self.constructors_by_type.get(&key) {
@@ -332,30 +228,22 @@ impl PlatformDataInner {
         }
     }
 
-    /// Get all platform constructors.
     pub fn all_constructors(&self) -> &[PlatformConstructor] {
         &self.constructors
     }
 
-    /// Get constructor documentation by constructor ID.
     pub fn get_constructor_docs(&self, constructor_id: u32) -> Option<ConstructorDocs> {
         let idx = *self.constructor_docs_by_id.get(&constructor_id)?;
         let raw = crate::generated::CONSTRUCTOR_DOCS.get(idx)?;
         Some(ConstructorDocs::from(raw))
     }
 
-    /// Get global function documentation by function ID.
     pub fn get_global_function_docs(&self, function_id: u32) -> Option<crate::types::MethodDocs> {
         let idx = *self.global_function_docs_by_id.get(&function_id)?;
         let raw_docs = crate::generated::GLOBAL_FUNCTION_DOCS.get(idx)?;
         Some(crate::types::MethodDocs::from(raw_docs))
     }
 
-    /// Get platform property by type and property name (case-insensitive, bilingual).
-    ///
-    /// Accepts both Russian and English names on either side. Returns `None`
-    /// when the type has no declared properties, when the property name is
-    /// unknown, or when the type name itself is not in the platform catalogue.
     pub fn get_property(&self, type_name: &str, prop_name: &str) -> Option<&PlatformProperty> {
         let type_key: SmolStr = type_name.to_lowercase().into();
         let prop_key: SmolStr = prop_name.to_lowercase().into();
@@ -363,11 +251,6 @@ impl PlatformDataInner {
         self.properties.get(idx)
     }
 
-    /// Get all properties for a specific type (case-insensitive, bilingual).
-    ///
-    /// Mirrors [`Self::get_type_methods`]: walks `properties` and filters by
-    /// the English type key so the caller can pass either the Russian or
-    /// English display name.
     pub fn get_type_properties(&self, type_name: &str) -> Vec<&PlatformProperty> {
         let type_key: SmolStr = type_name.to_lowercase().into();
         let en_type_key = if let Some(idx) = self.types_by_name.get(&type_key) {
@@ -381,43 +264,21 @@ impl PlatformDataInner {
             .collect()
     }
 
-    /// Get all properties indexed under a composite manager-style prefix
-    /// (case-insensitive).
-    ///
-    /// Companion to [`Self::get_manager_methods`]. Composite type pages
-    /// (`InformationRegisterRecordSet.<Information register name>`,
-    /// `CatalogObject.<Catalog name>`, …) carry their property rows with
-    /// the full composite `type_name`; per-MDO callers don't know the
-    /// concrete `<Имя>` placeholder text so they walk by `"{prefix}."`
-    /// the same way method lookup does.
-    ///
-    /// Example: `get_manager_properties("InformationRegisterRecordSet")`
-    /// returns `Отбор`, `Записывать`, `ЗаписьИсторииДанных`, …
     pub fn get_manager_properties(&self, manager_prefix: &str) -> Vec<&PlatformProperty> {
         let prefix = format!("{}.", manager_prefix.to_lowercase());
         self.properties.iter().filter(|p| p.type_name.to_lowercase().starts_with(&prefix)).collect()
     }
 
-    /// Get all platform properties.
     pub fn all_properties(&self) -> &[PlatformProperty] {
         &self.properties
     }
 
-    /// Resolve a top-level identifier to its global-scope property record.
-    ///
-    /// Returns `Some` for built-in platform globals like `ОбработкаОшибок`,
-    /// `Метаданные`, `Справочники`. Bilingual and case-insensitive. Used by
-    /// the IDE-facing context wrapper and by `hir-ty` to type-tag a bare
-    /// `Path` expression that names a platform global.
     pub fn get_global_property(&self, name: &str) -> Option<&PlatformProperty> {
         let key: SmolStr = name.to_lowercase().into();
         let idx = *self.global_properties_by_name.get(&key)?;
         self.properties.get(idx)
     }
 
-    /// Iterate every global-scope property record. Used for top-level
-    /// completion (`Обработ|`) where the candidate set must include all
-    /// global identifiers alongside global functions and user CommonModules.
     pub fn all_global_properties(&self) -> Vec<&PlatformProperty> {
         let mut seen: Vec<usize> = self.global_properties_by_name.values().copied().collect();
         seen.sort_unstable();
@@ -425,25 +286,6 @@ impl PlatformDataInner {
         seen.into_iter().filter_map(|i| self.properties.get(i)).collect()
     }
 
-    /// Resolve `(global_name, member_name)` to a method on the declared type
-    /// of the global identifier. This is the centralised lookup that
-    /// powers `hir-ty::platform_global_lookup::try_resolve_platform_global_member`.
-    /// Used by inference's bare-IDENT cascade gate to type
-    /// `ОбработкаОшибок.КраткоеПредставлениеОшибки(...)`-shaped calls
-    /// (gate 4 `Resolved`) and to surface a precise
-    /// `UnresolvedMethodCall { MethodNotFound }` when the receiver IS
-    /// a known platform global but the member is missing
-    /// (`KnownContainerMissingMember`). Pre-Phase-2 callers
-    /// suppressed the legacy `MissingCommonModuleMethod` diagnostic
-    /// here — that diagnostic is now deprecated; see
-    /// `crates/ide-diagnostics/src/handlers/missing_common_module_method.rs`.
-    ///
-    /// Returns `None` when the global is unknown, when its declared
-    /// `property_types` is empty, or when no method with that name exists on
-    /// the declared type. We pick the FIRST declared type — global properties
-    /// in HBK are scalar (single-element `property_types`), so this is
-    /// unambiguous in practice. Union-typed globals would need a different
-    /// resolution strategy and currently do not occur.
     pub fn resolve_global_member(
         &self,
         global_name: &str,
@@ -454,52 +296,18 @@ impl PlatformDataInner {
         self.get_method(declared_type.as_str(), member_name)
     }
 
-    /// Get property documentation by property id.
     pub fn get_property_docs(&self, property_id: u32) -> Option<PropertyDocs> {
         let idx = *self.property_docs_by_id.get(&property_id)?;
         let raw = crate::generated::PROPERTY_DOCS.get(idx)?;
         Some(PropertyDocs::from(raw))
     }
 
-    /// Returns keyword documentation by name (case-insensitive).
-    ///
-    /// Examples: "ВызватьИсключение", "Для", "Если"
     pub fn get_keyword_docs(&self, keyword: &str) -> Option<crate::types::KeywordDocs> {
         get_keyword_docs_static(keyword)
     }
 }
 
-/// HBK-data correction: lift `is_variadic = true` on the trailing
-/// parameter of constructors that are variadic per `Описание:` (free
-/// text) but encode a fixed `Синтаксис:` line in HBK. Applied during
-/// [`PlatformDataInner::new`] before the per-type index is built so all
-/// consumers (completion / hover / inference) see the corrected flag
-/// uniformly.
-///
-/// **This is a data correction, not a runtime-inference shortcut.** If a
-/// future regen of `platform_data.json` makes the JSON correct (or HBK
-/// starts encoding these properly), the matching entry becomes a
-/// no-op — the overlay only touches param flags it does not already
-/// see set, and missing entries (renamed types/variants) silently skip.
-///
-/// Inventory (audit 2026-04-29 against the 8.3.27.1989 HBK dump):
-/// - `Structure.По ключам и значениям` — `parameters: [Ключи, Значения]`
-///   both optional. Description: «Если в первом параметре заданы ключи
-///   элементов структуры, то в следующих параметрах могут быть указаны
-///   значения этих элементов в том порядке, в котором они расположены
-///   в строке в первом параметре.»
-/// - `FixedStructure.По ключам и значениям` — `[Ключ, Значения]`
-///   `Ключ` required + `Значения` optional. Description mirrors
-///   Structure (additional values are unbounded).
-/// - `DynamicListRowKey.На основе путей и значений полей` —
-///   `[ПутиКлючевыхПолей, Значения]` both required. Description: «в
-///   следующих параметрах — значения этих ключевых полей в том
-///   порядке, в котором они расположены в строке в первом параметре».
 fn apply_docs_only_variadic_overlay(constructors: &mut [PlatformConstructor]) {
-    /// `(type_name, variant_name)` pairs of constructors whose trailing
-    /// parameter must be lifted to `is_variadic = true`. Both fields are
-    /// matched verbatim against the values in `PlatformConstructor`
-    /// (English `type_name`, Russian `variant_name`).
     const OVERLAY: &[(&str, &str)] = &[
         ("Structure", "По ключам и значениям"),
         ("FixedStructure", "По ключам и значениям"),
@@ -517,9 +325,6 @@ fn apply_docs_only_variadic_overlay(constructors: &mut [PlatformConstructor]) {
     }
 }
 
-/// Static keyword documentation (hardcoded for proof-of-concept).
-///
-/// TODO: Generate from shlang_ru.hbk HTML files in build.rs
 fn get_keyword_docs_static(keyword: &str) -> Option<crate::types::KeywordDocs> {
     use crate::types::{KeywordDocs, ParamDocs};
     use smol_str::SmolStr;
@@ -585,60 +390,25 @@ fn get_keyword_docs_static(keyword: &str) -> Option<crate::types::KeywordDocs> {
     }
 }
 
-// Backward compatibility: type alias for non-Salsa usage
 pub type PlatformData = PlatformDataInner;
 
-// ============================================================================
-// Salsa Interned Inputs
-// ============================================================================
-
-/// Interned type name for platform lookups.
-///
-/// This allows Salsa to intern and deduplicate type name strings.
 #[salsa::interned(debug)]
 pub struct TypeNameInput {
     pub name: String,
 }
 
-/// Interned method lookup key (type_name + method_name).
 #[salsa::interned(debug)]
 pub struct MethodLookupInput {
     pub type_name: String,
     pub method_name: String,
 }
 
-/// Interned composite-prefix lookup key (`prefix` + `method_name`).
-///
-/// Used for methods whose `type_name` in platform data has the composite
-/// `"<Prefix>.<MDO>"` shape (`"CatalogManager.<Имя>"`,
-/// `"InformationRegisterRecordSet.<Имя>"`, …) and whose per-method `name`
-/// is the placeholder `"<Имя"`. The scalar `(type_name, method_name)`
-/// index in `MethodLookupInput` cannot serve these — the placeholder is
-/// part of the key, not a parameter — so a dedicated `(prefix, name)`
-/// input feeds [`prefixed_method_query`] which walks the prefixed-method
-/// list and matches against `docs.syntax` / `english_name`.
 #[salsa::interned(debug)]
 pub struct PrefixedMethodLookupInput {
     pub prefix: String,
     pub method_name: String,
 }
 
-// ============================================================================
-// Salsa Queries
-// ============================================================================
-
-/// Lookup platform type by name (case-insensitive, bilingual).
-///
-/// This Salsa query provides cached access to platform types.
-/// The underlying data never changes (loaded once at startup), but Salsa caching
-/// provides efficient repeated lookups.
-///
-/// # Example
-/// ```ignore
-/// let input = TypeNameInput::new(db, "Строка".to_string());
-/// let ty = platform_type_query(db, input);
-/// assert_eq!(ty.unwrap().english_name.as_str(), "String");
-/// ```
 #[salsa::tracked(lru = 256)]
 pub fn platform_type_query<'db>(
     db: &'db dyn salsa::Database,
@@ -649,16 +419,6 @@ pub fn platform_type_query<'db>(
     data.get_type(&name).cloned()
 }
 
-/// Lookup platform method by type and method name (case-insensitive, bilingual).
-///
-/// This Salsa query provides cached access to platform methods.
-///
-/// # Example
-/// ```ignore
-/// let input = MethodLookupInput::new(db, "Строка".to_string(), "ВРег".to_string());
-/// let method = platform_method_query(db, input);
-/// assert_eq!(method.unwrap().english_name.as_str(), "Upper");
-/// ```
 #[salsa::tracked(lru = 256)]
 pub fn platform_method_query<'db>(
     db: &'db dyn salsa::Database,
@@ -670,18 +430,6 @@ pub fn platform_method_query<'db>(
     data.get_method(&type_name, &method_name).cloned()
 }
 
-/// Get all methods for a specific type (case-insensitive, bilingual).
-///
-/// Returns Arc<Vec<>> for efficient sharing across queries.
-///
-/// # Example
-/// ```ignore
-/// let input = TypeNameInput::new(db, "Строка".to_string());
-/// let methods = type_methods_query(db, input);
-/// for method in methods.iter() {
-///     println!("{} / {}", method.name, method.english_name);
-/// }
-/// ```
 #[salsa::tracked(lru = 128)]
 pub fn type_methods_query<'db>(
     db: &'db dyn salsa::Database,
@@ -692,26 +440,6 @@ pub fn type_methods_query<'db>(
     Arc::new(data.get_type_methods(&type_name).into_iter().cloned().collect())
 }
 
-/// Get all manager methods for a manager-type prefix (e.g.
-/// `"CatalogManager"`, `"DocumentManager"`).
-///
-/// Mirrors [`type_methods_query`] for manager-collective receivers:
-/// completion on `Справочники.Валюты.` needs `НайтиПоКоду`,
-/// `СоздатьЭлемент`, etc., which live under
-/// `CatalogManager.<Name>` in the platform index. Wrapping the
-/// [`PlatformDataInner::get_manager_methods`] lookup in a Salsa query
-/// keeps `ide::completion::mdo_completion` off of
-/// `PlatformData::instance()` and matches the facade-boundary
-/// Invariant #3 in M3.
-///
-/// # Example
-/// ```ignore
-/// let input = TypeNameInput::new(db, "CatalogManager".to_string());
-/// let methods = manager_methods_query(db, input);
-/// for method in methods.iter() {
-///     // НайтиПоКоду, СоздатьЭлемент, ...
-/// }
-/// ```
 #[salsa::tracked(lru = 128)]
 pub fn manager_methods_query<'db>(
     db: &'db dyn salsa::Database,
@@ -722,26 +450,6 @@ pub fn manager_methods_query<'db>(
     Arc::new(data.get_manager_methods(&prefix).into_iter().cloned().collect())
 }
 
-/// Resolve a single method on a composite-prefixed receiver.
-///
-/// Platform data stores manager / object / ref / record-set / record-manager
-/// methods with composite `type_name` (`"CatalogManager.<Имя>"`,
-/// `"InformationRegisterRecordSet.<Имя>"`, …) and placeholder per-method
-/// `name = "<Имя"`. Neither the `(type_name, method_name)` scalar index
-/// nor a direct name comparison hits, so the lookup walks
-/// [`PlatformDataInner::get_manager_methods`] for `prefix` and matches
-/// `method_name` against either:
-///
-/// 1. `docs.syntax.split('(').next()` — the Russian method name lives in
-///    HBK-derived docs as `"ИмяМенеджера.Метод(...)"`.
-/// 2. `english_name.rsplit_once('.')` — the English canonical name has
-///    `"ManagerType.Method"` shape.
-///
-/// Both matches are case-insensitive and bilingual.
-///
-/// `lru = 256` mirrors [`platform_method_query`]; platform data is loaded
-/// once at startup (`OnceCell` singleton) so the cache is stable for the
-/// process lifetime.
 #[salsa::tracked(lru = 256)]
 pub fn prefixed_method_query<'db>(
     db: &'db dyn salsa::Database,
@@ -752,12 +460,6 @@ pub fn prefixed_method_query<'db>(
     find_prefixed_method(&prefix, &method_name)
 }
 
-/// Bare composite-prefix lookup (not Salsa-tracked).
-///
-/// The single canonical implementation. [`prefixed_method_query`] caches
-/// repeated calls; non-Salsa contexts (inference fallbacks, unit tests)
-/// call this directly to avoid wiring a database. Both paths return
-/// equivalent results.
 pub fn find_prefixed_method(prefix: &str, method_name: &str) -> Option<PlatformMethod> {
     let method_lower = method_name.to_lowercase();
     let data = PlatformDataInner::instance();
@@ -779,16 +481,6 @@ pub fn find_prefixed_method(prefix: &str, method_name: &str) -> Option<PlatformM
         .cloned()
 }
 
-/// Lookup global function by name (case-insensitive, bilingual).
-///
-/// This Salsa query provides cached access to global platform functions.
-///
-/// # Example
-/// ```ignore
-/// let input = TypeNameInput::new(db, "НачатьТранзакцию".to_string());
-/// let function = global_function_query(db, input);
-/// assert_eq!(function.unwrap().english_name.as_str(), "BeginTransaction");
-/// ```
 #[salsa::tracked(lru = 256)]
 pub fn global_function_query<'db>(
     db: &'db dyn salsa::Database,
@@ -799,19 +491,6 @@ pub fn global_function_query<'db>(
     data.get_global_function(&name).cloned()
 }
 
-/// Lookup platform constructors for a type (case-insensitive, bilingual).
-///
-/// Returns `Arc<Vec<_>>` so callers can share ownership across queries —
-/// mirrors the shape of [`type_methods_query`] / [`manager_methods_query`].
-/// Empty vector for types with no constructors (e.g. `Строка`, `Число`)
-/// or for unknown type names.
-///
-/// # Example
-/// ```ignore
-/// let input = TypeNameInput::new(db, "Массив".to_string());
-/// let ctors = platform_constructors_query(db, input);
-/// assert!(!ctors.is_empty(), "Массив has multiple constructor overloads");
-/// ```
 #[salsa::tracked(lru = 128)]
 pub fn platform_constructors_query<'db>(
     db: &'db dyn salsa::Database,
@@ -822,13 +501,6 @@ pub fn platform_constructors_query<'db>(
     Arc::new(data.get_constructors(&type_name).into_iter().cloned().collect())
 }
 
-/// Lookup a platform property by type + property name (case-insensitive, bilingual).
-///
-/// Thin Salsa wrapper around [`PlatformDataInner::get_property`]. Uses the
-/// existing [`MethodLookupInput`] interned input: property lookup shares the
-/// `(type_name, member_name)` key shape with method lookup, and reusing the
-/// same interned input avoids paying for a second Salsa interner over the
-/// same string pairs.
 #[salsa::tracked(lru = 256)]
 pub fn platform_property_query<'db>(
     db: &'db dyn salsa::Database,
@@ -840,12 +512,6 @@ pub fn platform_property_query<'db>(
     data.get_property(&type_name, &prop_name).cloned()
 }
 
-/// Get all properties for a specific platform type (case-insensitive, bilingual).
-///
-/// Mirrors [`type_methods_query`] — returns `Arc<Vec<_>>` so completion
-/// providers can share ownership across queries, and uses the same
-/// [`TypeNameInput`] interned key so both queries cache against the same
-/// input.
 #[salsa::tracked(lru = 128)]
 pub fn type_properties_query<'db>(
     db: &'db dyn salsa::Database,
@@ -856,11 +522,6 @@ pub fn type_properties_query<'db>(
     Arc::new(data.get_type_properties(&type_name).into_iter().cloned().collect())
 }
 
-/// Lookup a global-scope identifier by name (case-insensitive, bilingual).
-///
-/// Salsa wrapper around [`PlatformDataInner::get_global_property`]. Reuses
-/// [`TypeNameInput`] — the interned string keyspace is the same as for type
-/// lookups, so no second interner is needed.
 #[salsa::tracked(lru = 256)]
 pub fn global_property_query<'db>(
     db: &'db dyn salsa::Database,
@@ -871,10 +532,6 @@ pub fn global_property_query<'db>(
     data.get_global_property(&name).cloned()
 }
 
-/// Resolve `(global_name, member_name)` to a method on the global's declared
-/// type. Salsa wrapper around [`PlatformDataInner::resolve_global_member`].
-/// Reuses [`MethodLookupInput`] for the same `(name, member)` interner used
-/// by regular method/property lookups.
 #[salsa::tracked(lru = 256)]
 pub fn global_member_method_query<'db>(
     db: &'db dyn salsa::Database,
@@ -895,7 +552,6 @@ mod tests {
         let data1 = PlatformDataInner::instance();
         let data2 = PlatformDataInner::instance();
 
-        // Same instance
         assert!(std::ptr::eq(data1, data2));
     }
 
@@ -903,7 +559,6 @@ mod tests {
     fn test_get_type_case_insensitive() {
         let data = PlatformDataInner::instance();
 
-        // When platform is not installed, no types available
         if data.all_types().is_empty() {
             println!("Skipping test: no platform data available");
             return;
@@ -912,7 +567,6 @@ mod tests {
         let ty = data.all_types().first().unwrap();
         let name = ty.name.as_str();
 
-        // Should find by different cases
         assert!(data.get_type(name).is_some());
         assert!(data.get_type(&name.to_lowercase()).is_some());
         assert!(data.get_type(&name.to_uppercase()).is_some());
@@ -927,23 +581,19 @@ mod tests {
             return;
         }
 
-        // Test bilingual method lookup
         let method = data.all_methods().first().unwrap();
         let type_name = method.type_name.as_str();
         let ru_name = method.name.as_str();
         let en_name = method.english_name.as_str();
 
-        // Should find by Russian name
         let found = data.get_method(type_name, ru_name);
         assert!(found.is_some(), "Should find method by Russian name");
         assert_eq!(found.unwrap().id, method.id);
 
-        // Should find by English name
         let found = data.get_method(type_name, en_name);
         assert!(found.is_some(), "Should find method by English name");
         assert_eq!(found.unwrap().id, method.id);
 
-        // Should be case-insensitive
         let found = data.get_method(&type_name.to_uppercase(), &ru_name.to_uppercase());
         assert!(found.is_some(), "Should be case-insensitive");
     }
@@ -957,20 +607,17 @@ mod tests {
             return;
         }
 
-        // Get first type that has methods
         let ty = data.all_types().first().unwrap();
         let methods = data.get_type_methods(&ty.english_name);
 
         if !methods.is_empty() {
             println!("Type {} has {} methods", ty.english_name, methods.len());
-            // All methods should belong to this type
             for method in &methods {
                 assert_eq!(method.type_name.to_lowercase(), ty.english_name.to_lowercase());
             }
         }
     }
 
-    // Salsa query tests - these test the Salsa integration
     #[salsa::db]
     #[derive(Clone, Default)]
     struct TestDatabase {
@@ -983,14 +630,12 @@ mod tests {
     fn test_platform_type_query() {
         let db = TestDatabase::default();
 
-        // Skip if no platform data available
         let data = PlatformDataInner::instance();
         if data.all_types().is_empty() {
             println!("Skipping test: no platform data available");
             return;
         }
 
-        // Case-insensitive lookup using interned inputs
         let input1 = TypeNameInput::new(&db, "Строка".to_string());
         let input2 = TypeNameInput::new(&db, "СТРОКА".to_string());
         let input3 = TypeNameInput::new(&db, "String".to_string());
@@ -999,7 +644,6 @@ mod tests {
         let ty2 = platform_type_query(&db, input2);
         let ty3 = platform_type_query(&db, input3);
 
-        // All lookups should return the same type (or all None)
         assert_eq!(ty1.is_some(), ty2.is_some());
         assert_eq!(ty1.is_some(), ty3.is_some());
 
@@ -1013,7 +657,6 @@ mod tests {
     fn test_platform_method_query() {
         let db = TestDatabase::default();
 
-        // Skip if no platform data available
         let data = PlatformDataInner::instance();
         if data.all_methods().is_empty() {
             println!("Skipping test: no platform methods available");
@@ -1033,7 +676,6 @@ mod tests {
     fn test_type_methods_query() {
         let db = TestDatabase::default();
 
-        // Skip if no platform data available
         let data = PlatformDataInner::instance();
         if data.all_types().is_empty() {
             println!("Skipping test: no platform data available");
@@ -1044,7 +686,6 @@ mod tests {
         let methods = type_methods_query(&db, input);
 
         if !methods.is_empty() {
-            // All methods should belong to String type
             for method in methods.iter() {
                 assert_eq!(method.type_name.to_lowercase(), "строка");
             }
@@ -1062,7 +703,6 @@ mod tests {
 
         println!("Total global functions: {}", data.all_global_functions().len());
 
-        // Test НачатьТранзакцию
         let func = data.get_global_function("НачатьТранзакцию");
         assert!(func.is_some(), "Should find НачатьТранзакцию");
 
@@ -1071,47 +711,15 @@ mod tests {
         assert_eq!(func.english_name.as_str(), "BeginTransaction");
         println!("Found function: {} / {}", func.name, func.english_name);
 
-        // Test with English name
         let func_en = data.get_global_function("BeginTransaction");
         assert!(func_en.is_some(), "Should find by English name");
         assert_eq!(func_en.unwrap().id, func.id);
 
-        // Test case insensitivity
         let func_upper = data.get_global_function("НАЧАТЬТРАНЗАКЦИЮ");
         assert!(func_upper.is_some(), "Should be case-insensitive");
         assert_eq!(func_upper.unwrap().id, func.id);
     }
 
-    /// Pin the exact set of platform entries whose last parameter is
-    /// the unbounded-variadic tail. Sources:
-    ///
-    /// - **PR2** detector — `<X1>,...,<XN>` substring (`>,...,<` after
-    ///   HTML decoding) in the HBK `Синтаксис:` chapter sets the JSON
-    ///   field directly during regen.
-    /// - **PR3** [`apply_docs_only_variadic_overlay`] — corrects three
-    ///   constructors that are variadic per HBK `Описание:` but encode
-    ///   a fixed `Синтаксис:` line; the overlay flips the trailing
-    ///   param's flag at `PlatformDataInner::new` time.
-    ///
-    /// Combined inventory (audit 2026-04-29 against the 8.3.27.1989
-    /// HBK dump):
-    ///
-    /// - **Globals** (3): `Мин`, `Макс`, `ПродолжитьВызов`.
-    /// - **Constructors** (6): `Array.По количеству элементов`,
-    ///   `COMSafeArray.Из массива 1`, `COMSafeArray.По типу элемента 1`
-    ///   (PR2 — from syntax) and `Structure.По ключам и значениям`,
-    ///   `FixedStructure.По ключам и значениям`,
-    ///   `DynamicListRowKey.На основе путей и значений полей`
-    ///   (PR3 — from overlay).
-    ///
-    /// `FormattedString.На основании строк` is intentionally NOT in
-    /// this set: its variadic shape is encoded inside ONE rubric
-    /// `MethodParam.name` (`Содержимое1,...,СодержимоеN`), so the JSON
-    /// flag stays `false` and the adapter (`hir-ty/builtin.rs`) lifts
-    /// `max_args = None` via [`name_implies_unbounded_variadic`].
-    ///
-    /// Any drift — extra entries, missing entries, or the flag landing
-    /// on a non-last parameter — fails this test loudly.
     #[test]
     fn test_is_variadic_marks_expected_unbounded_entries_only() {
         let data = PlatformDataInner::instance();
@@ -1125,9 +733,6 @@ mod tests {
 
         for func in funcs {
             let expected = expected_global_ru.contains(&func.name.as_str());
-            // The flag belongs only to the LAST parameter of the
-            // signature. Walk all params and check both the
-            // expected-on-last and not-on-others invariants.
             let last_idx = func.parameters.len().saturating_sub(1);
             for (idx, param) in func.parameters.iter().enumerate() {
                 if expected && idx == last_idx {
@@ -1145,8 +750,6 @@ mod tests {
                     );
                 }
             }
-            // No multi-variant global currently uses the unbounded
-            // shape — variants must all stay at false.
             for variant in &func.variants {
                 for param in &variant.parameters {
                     assert!(
@@ -1165,10 +768,6 @@ mod tests {
              — a missing global silently passing the per-function loop is a regression"
         );
 
-        // Constructors — pinned by (type_name, variant_name). The first
-        // three come from PR2's syntax-line detector; the last three are
-        // PR3's `apply_docs_only_variadic_overlay` (variadic per HBK
-        // description, fixed per HBK syntax).
         let expected_ctors: &[(&str, &str)] = &[
             ("Array", "По количеству элементов"),
             ("COMSafeArray", "Из массива 1"),
@@ -1215,8 +814,6 @@ mod tests {
             return;
         }
 
-        // Массив has multiple constructor overloads; both Russian and English
-        // lookups must agree on overload count and ids.
         let ru = platform_constructors_query(&db, TypeNameInput::new(&db, "Массив".to_string()));
         let en = platform_constructors_query(&db, TypeNameInput::new(&db, "Array".to_string()));
 
@@ -1246,9 +843,6 @@ mod tests {
             return;
         }
 
-        // `Query.Текст` is the canonical sanity check: writable scalar
-        // returning `Строка`. Verify bilingual lookup on both sides —
-        // (en type, ru prop), (ru type, en prop), (en type, en prop).
         let ru_ru = platform_property_query(
             &db,
             MethodLookupInput::new(&db, "Запрос".to_string(), "Текст".to_string()),
@@ -1284,8 +878,6 @@ mod tests {
             return;
         }
 
-        // `Запрос.Параметры` is the user's headline scenario — read-only
-        // Структура. Flag + scalar type must round-trip through the query.
         let got = platform_property_query(
             &db,
             MethodLookupInput::new(&db, "Запрос".to_string(), "Параметры".to_string()),
@@ -1294,7 +886,6 @@ mod tests {
         assert!(prop.is_readonly, "Параметры is read-only");
         assert_eq!(prop.property_types, vec![smol_str::SmolStr::new("Структура")]);
 
-        // `Запрос.МенеджерВременныхТаблиц` is the union property sanity check.
         let got = platform_property_query(
             &db,
             MethodLookupInput::new(
@@ -1346,13 +937,10 @@ mod tests {
             return;
         }
 
-        // ОбработкаОшибок is the headline case (bsl-analyzer issue): platform
-        // global of type МенеджерОбработкиОшибок introduced in 8.3.17.
         let ru = data.get_global_property("ОбработкаОшибок").expect("ru name must resolve");
         let en = data.get_global_property("ErrorProcessing").expect("en name must resolve");
         assert_eq!(ru.id, en.id);
         assert_eq!(ru.property_types, vec![smol_str::SmolStr::new("МенеджерОбработкиОшибок")]);
-        // Case-insensitivity contract.
         assert!(data.get_global_property("ОБРАБОТКАОШИБОК").is_some());
         assert!(data.get_global_property("errorprocessing").is_some());
     }
@@ -1365,23 +953,18 @@ mod tests {
             return;
         }
 
-        // ОбработкаОшибок.КраткоеПредставлениеОшибки → method on
-        // МенеджерОбработкиОшибок returning Строка.
         let m = data
             .resolve_global_member("ОбработкаОшибок", "КраткоеПредставлениеОшибки")
             .expect("ru.ru must resolve");
         assert_eq!(m.name.as_str(), "КраткоеПредставлениеОшибки");
         assert_eq!(m.english_name.as_str(), "BriefErrorDescription");
 
-        // English on either side must also resolve.
         let m_en = data
             .resolve_global_member("ErrorProcessing", "BriefErrorDescription")
             .expect("en.en must resolve");
         assert_eq!(m_en.id, m.id);
 
-        // Negative: unknown member.
         assert!(data.resolve_global_member("ОбработкаОшибок", "ЗаведомоНеТакогоМетода").is_none());
-        // Negative: unknown global.
         assert!(data.resolve_global_member("ЗаведомоНеТакогоГлобала", "X").is_none());
     }
 
@@ -1418,8 +1001,6 @@ mod tests {
             println!("Skipping test: no constructor data");
             return;
         }
-        // Pick a constructor that actually has a documentation record and
-        // check that get_constructor_docs returns the same id.
         let ctor_with_docs =
             data.all_constructors().iter().find(|c| data.get_constructor_docs(c.id).is_some());
         if let Some(ctor) = ctor_with_docs {
@@ -1430,11 +1011,6 @@ mod tests {
 
     #[test]
     fn find_prefixed_method_resolves_information_register_record_set_read() {
-        // Composite-prefix lookup must hit a method whose
-        // `type_name = "InformationRegisterRecordSet.<Information register name>"`
-        // and whose `name = "<Имя"` placeholder. The Russian display name lives
-        // in `docs.syntax`, so the bare `(type_name, method_name)` index can't
-        // find it — only `find_prefixed_method` (and the Salsa wrapper) can.
         let data = PlatformDataInner::instance();
         if data.get_manager_methods("InformationRegisterRecordSet").is_empty() {
             println!("Skipping test: no platform data available");
@@ -1442,9 +1018,6 @@ mod tests {
         }
         let m = find_prefixed_method("InformationRegisterRecordSet", "Прочитать")
             .expect("Прочитать must resolve under InformationRegisterRecordSet");
-        // Russian name lives in docs.syntax; the placeholder `name` field
-        // is intentionally meaningless ("<Имя"), so we assert via english_name
-        // which carries `<Information register name>.Read`.
         assert!(
             m.english_name.to_lowercase().ends_with(".read"),
             "english_name must end with `.Read`, got `{}`",
@@ -1452,7 +1025,6 @@ mod tests {
         );
         assert_ne!(m.id, 0);
 
-        // Bilingual: lookup by English name resolves the same method id.
         let m_en = find_prefixed_method("InformationRegisterRecordSet", "Read")
             .expect("Read must resolve bilingually");
         assert_eq!(m.id, m_en.id);
@@ -1477,8 +1049,6 @@ mod tests {
             "InformationRegisterRecordSet".to_string(),
             "Прочитать".to_string(),
         );
-        // Salsa interns identical (prefix, method_name) pairs to the same
-        // input handle — pin this so the cache key is stable.
         assert_eq!(input1, input2);
 
         let m1 = prefixed_method_query(&db, input1).expect("must resolve");

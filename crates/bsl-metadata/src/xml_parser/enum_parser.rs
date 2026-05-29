@@ -1,28 +1,8 @@
-//! Enum XML parser
-
 use crate::error::{MetadataError, Result};
 use crate::metadata_object::{EnumValue, MdoType, MetadataObject};
 
 use super::helpers::{child_text, find_child, find_mdo_element, parse_uuid, parse_xml};
 
-/// Parse Enum XML from Designer format
-///
-/// # Arguments
-///
-/// * `xml` - XML content as string
-///
-/// # Returns
-///
-/// Parsed `MetadataObject` structure with enum_values populated
-///
-/// # Example
-///
-/// ```no_run
-/// # use bsl_metadata::xml_parser::parse_enum_xml;
-/// let xml = std::fs::read_to_string("Enums/Статусы.xml")?;
-/// let enum_obj = parse_enum_xml(&xml)?;
-/// # Ok::<(), bsl_metadata::MetadataError>(())
-/// ```
 pub fn parse_enum_xml(xml: &str) -> Result<MetadataObject> {
     let _span = tracing::debug_span!("parse_enum_xml").entered();
 
@@ -49,11 +29,7 @@ pub fn parse_enum_xml(xml: &str) -> Result<MetadataObject> {
             })?;
             let ev_name = child_text(ev_props, "Name").unwrap_or("").to_string();
 
-            enum_values.push(EnumValue {
-                name: ev_name,
-                name_en: None, // MVP: only Russian names
-                uuid,
-            });
+            enum_values.push(EnumValue { name: ev_name, name_en: None, uuid });
         }
     }
 
@@ -122,7 +98,6 @@ mod tests {
         );
         assert_eq!(enum_obj.enum_values.len(), 3);
 
-        // Check enum values
         assert_eq!(enum_obj.enum_values[0].name, "Активный");
         assert_eq!(enum_obj.enum_values[0].uuid, "f32053d4-6092-498a-9107-b042289e65ae");
 
@@ -132,7 +107,6 @@ mod tests {
         assert_eq!(enum_obj.enum_values[2].name, "Завершенный");
         assert_eq!(enum_obj.enum_values[2].uuid, "ff25e312-3fc6-49f2-8382-e5ed6f9746bb");
 
-        // Test find_enum_value method (case-insensitive)
         assert!(enum_obj.find_enum_value("Активный").is_some());
         assert!(enum_obj.find_enum_value("активный").is_some());
         assert!(enum_obj.find_enum_value("АКТИВНЫЙ").is_some());

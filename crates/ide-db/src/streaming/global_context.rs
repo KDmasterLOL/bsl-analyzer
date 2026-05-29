@@ -1,5 +1,3 @@
-//! Global context for streaming analysis.
-
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -10,37 +8,18 @@ use vfs::{file_set::FileSet, FileId};
 
 use super::file_reader::FileReader;
 
-/// Global context shared across all files during streaming analysis.
-///
-/// This structure holds data that needs to be available for cross-module
-/// validation and is kept in memory for the entire analysis session.
 #[derive(Debug, Clone)]
 pub struct GlobalContext {
-    /// 1C Configuration metadata.
     pub configuration: Option<Arc<Configuration>>,
-
-    /// Symbol trees for all modules (prebuilt during initialization).
     pub symbol_trees: FxHashMap<FileId, Arc<SymbolTree>>,
-
-    /// Workspace symbols index for cross-module resolution.
     pub workspace_symbols: Arc<WorkspaceSymbols>,
-
-    /// Module index (name → FileId).
     pub module_index: Arc<ModuleIndex>,
-
-    /// File set for path resolution.
     pub file_set: Arc<FileSet>,
-
-    /// File content provider.
     pub file_reader: FileReader,
-
-    /// Configuration root path for resolving module URIs.
-    /// Metadata URIs like "CommonModules/Foo/Ext/Module.bsl" are relative to this path.
     pub config_root: Option<PathBuf>,
 }
 
 impl GlobalContext {
-    /// Create a new GlobalContext with the given components.
     pub fn new(
         configuration: Option<Arc<Configuration>>,
         symbol_trees: FxHashMap<FileId, Arc<SymbolTree>>,
@@ -60,7 +39,6 @@ impl GlobalContext {
         }
     }
 
-    /// Create an empty GlobalContext (useful for testing).
     pub fn empty() -> Self {
         Self {
             configuration: None,

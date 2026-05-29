@@ -1,45 +1,3 @@
-//! M2/M3 cross-cut regression suite.
-//!
-//! Individual call sites are already covered by `infer_new_expr`,
-//! `infer_three_level`, `infer_plural_managers`, `infer_jsdoc_types`,
-//! `infer_field_lookup`, and `infer_invalidation`. This file pins the
-//! **invariants** those tests rely on — a regression here means the
-//! shared Resolver / TypeRef / TyLoweringContext / MethodLookup /
-//! FieldLookup plumbing slipped, not that one individual feature broke.
-//!
-//! Invariants locked in:
-//!
-//! 1. **Single Resolver cascade** — user bindings shadow manager-plural and
-//!    platform names in value position, while builtin calls (`Name(...)`)
-//!    still resolve through the call-specific builtin path. A regression here
-//!    would mean some callsite re-introduced a parallel lookup that bypasses
-//!    the shared cascade.
-//!
-//! 2. **One lowering pipeline** — `Новый X`, `Тип("…")`-shaped JSDoc, and
-//!    manager-chain calls all share `TyLoweringContext`. The test below
-//!    chains three different syntactic sources and proves each resolves
-//!    through the shared adapter.
-//!
-//! 3. **One method-lookup path (M3)** — `Expr::MethodCall` inference and
-//!    `hir::Type::method_return_type` must both delegate to
-//!    `hir_ty::method_lookup::lookup_method`. The test below proves the
-//!    two paths return identical `Ty` for a platform-method receiver.
-//!
-//! 4. **One field-lookup path (M3)** — `Expr::Field` inference and
-//!    `hir::Type::field_type` must both delegate to
-//!    `hir_ty::field_lookup::lookup_field`. The test below proves the
-//!    two paths agree for a JSDoc-typed MDO receiver + custom attribute.
-//!
-//! 5. **Facade boundary (M3)** — IDE code must not reach into
-//!    `PlatformData::instance()` on the type path. Enforced at CI by
-//!    `scripts/check-invariants.sh`; listed here for discoverability.
-//!
-//! 6. **Salsa invalidation chain** — already covered end-to-end by
-//!    `infer_invalidation::infer_invalidates_when_config_set_changes` and
-//!    `infer_three_level::three_level_invalidates_on_config_change`. This
-//!    file does not duplicate them; listing the coverage keeps the
-//!    invariant discoverable.
-
 use hir::{
     Builders, DefDatabase, HirDatabase, MetadataKind, ModuleId, Name, TypeKernelDb, TypeKind,
 };
@@ -72,14 +30,6 @@ fn setup(fixture_text: &str) -> (RootDatabaseImpl, FileId) {
 
 #[test]
 fn single_resolver_cascade_across_builtins_locals_and_managers() {
-    // Three different name-shaped expressions share the same cascade:
-    //
-    // - `Новый Массив()`  → Ty::Array           (TyLoweringContext builtin table)
-    // - `Документы`       → Ty::ManagerCollection (MdoType plural branch)
-    // - local `Массив`    → shadows builtin name (but NOT `Новый Массив`)
-    //
-    // A regression here would mean one of the three stopped going through
-    // the shared Resolver + TyLoweringContext cascade.
     let fixture = r#"//- /test.bsl
 Функция Тест()
     М = Новый Массив();
@@ -105,11 +55,6 @@ fn single_resolver_cascade_across_builtins_locals_and_managers() {
 
 #[test]
 fn jsdoc_and_three_level_share_signature_materialisation() {
-    // Both `ОбщегоНазначения.Имя()` (2-segment) and
-    // `Документы.ПКО.ПолучитьСсылку()` (3-segment) must flow through the
-    // same `method_resolution::materialise_signature`, which lowers the
-    // stored JSDoc TypeRef via TyLoweringContext. If either path forked
-    // back to `Ty::Unknown`, this test catches it.
     let fixture = r#"
 //- /CommonModules/ОбщегоНазначения/Ext/Module.bsl
 // Возвращаемое значение:
@@ -155,14 +100,6 @@ fn jsdoc_and_three_level_share_signature_materialisation() {
 
 #[test]
 fn single_method_lookup_path_agrees_across_infer_and_facade() {
-    // `Expr::MethodCall` in `infer.rs` and `hir::Type::method_return_type`
-    // both route through `hir_ty::method_lookup::lookup_method`. Before
-    // M3 these paths were separate: inference called
-    // `resolve_method_return_type` and completion re-walked the syntax
-    // tree with its own `PlatformData::instance()` resolver. This test
-    // proves the two consumers now return **identical** `Ty` for a
-    // well-known platform method — a regression would mean one branch
-    // slipped back to a private adapter.
     let fixture = r#"//- /test.bsl
 Функция Тест()
     А = Новый Массив;
@@ -173,14 +110,12 @@ fn single_method_lookup_path_agrees_across_infer_and_facade() {
     let (db, file_id) = setup(fixture);
     let infer = db.infer(file_id);
 
-    // Path A: whole-program inference.
     let infer_ty = infer
         .var_types
         .get("б")
         .copied()
         .expect("Массив.Количество() must produce a var_type entry");
 
-    // Path B: hir::Type facade (the API IDE completion uses after M3).
     let array_id = db.array(None);
     let facade_ret = hir::Type::from_id(&db, file_id, array_id)
         .method_return_type(&Name::new("Количество"))
@@ -202,11 +137,6 @@ fn single_method_lookup_path_agrees_across_infer_and_facade() {
 
 #[test]
 fn single_field_lookup_path_agrees_across_infer_and_facade() {
-    // Same invariant shape as the method-lookup test, but for
-    // `Expr::Field` + `hir::Type::field_type`. Uses the designer
-    // fixture so `FieldLookup` has a real `Configuration` to read;
-    // without it, both paths would return Ty::Unknown and the
-    // assertion would be trivially satisfied.
     let fixture = r#"
 //- /CommonModules/ПервыйОбщийМодуль/Ext/Module.bsl
 // Возвращаемое значение:
@@ -235,8 +165,6 @@ fn single_field_lookup_path_agrees_across_infer_and_facade() {
     let infer_ty =
         infer.var_types.get("р").copied().expect("С.Реквизит2 must produce a var_type entry");
 
-    // The facade routes through `field_lookup::lookup_field` with the
-    // same `configurations(file_id)` the inference used.
     let receiver_id =
         infer.var_types.get("с").copied().expect("С must carry the CatalogRef receiver type");
     let facade_field_id =

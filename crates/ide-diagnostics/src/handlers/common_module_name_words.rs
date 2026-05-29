@@ -1,8 +1,3 @@
-//! CommonModuleNameWords diagnostic
-//!
-//! CommonModule name should not contain generic words like "Procedures", "Functions", "Module", etc.
-//!
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode};

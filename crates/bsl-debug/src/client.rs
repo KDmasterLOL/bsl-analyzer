@@ -6,7 +6,6 @@ use crate::types::events::{self, DebugEvent};
 use crate::types::responses::{self, AttachResult, DebugTarget, StackFrame, VarValue};
 use crate::types::xml;
 
-/// Low-level HTTP client for the 1C debug server.
 pub struct DebugClient {
     client: Client,
     base_url: String,
