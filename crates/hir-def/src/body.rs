@@ -772,6 +772,29 @@ impl ManagerType {
             MdoType::Cube | MdoType::DimensionTable | MdoType::CommonModule => None,
         }
     }
+
+    pub fn to_mdo_type(self) -> bsl_metadata::MdoType {
+        use bsl_metadata::MdoType;
+        match self {
+            Self::Documents => MdoType::Document,
+            Self::Catalogs => MdoType::Catalog,
+            Self::DataProcessors => MdoType::DataProcessor,
+            Self::Reports => MdoType::Report,
+            Self::InformationRegisters => MdoType::InformationRegister,
+            Self::AccumulationRegisters => MdoType::AccumulationRegister,
+            Self::AccountingRegisters => MdoType::AccountingRegister,
+            Self::CalculationRegisters => MdoType::CalculationRegister,
+            Self::ChartsOfCharacteristicTypes => MdoType::ChartOfCharacteristicTypes,
+            Self::ChartsOfAccounts => MdoType::ChartOfAccounts,
+            Self::ChartsOfCalculationTypes => MdoType::ChartOfCalculationTypes,
+            Self::BusinessProcesses => MdoType::BusinessProcess,
+            Self::Tasks => MdoType::Task,
+            Self::Enums => MdoType::Enum,
+            Self::ExchangePlans => MdoType::ExchangePlan,
+            Self::ExternalDataSources => MdoType::ExternalDataSource,
+            Self::Constants => MdoType::Constant,
+        }
+    }
 }
 
 impl BodyDiagnostic {
@@ -872,6 +895,36 @@ mod tests {
     use crate::hir::{Binding, Expr, Literal, Stmt};
     use crate::Name;
     use ordered_float::NotNan;
+
+    #[test]
+    fn manager_type_to_mdo_type_round_trips() {
+        let all = [
+            ManagerType::Documents,
+            ManagerType::Catalogs,
+            ManagerType::DataProcessors,
+            ManagerType::Reports,
+            ManagerType::InformationRegisters,
+            ManagerType::AccumulationRegisters,
+            ManagerType::AccountingRegisters,
+            ManagerType::CalculationRegisters,
+            ManagerType::ChartsOfCharacteristicTypes,
+            ManagerType::ChartsOfAccounts,
+            ManagerType::ChartsOfCalculationTypes,
+            ManagerType::BusinessProcesses,
+            ManagerType::Tasks,
+            ManagerType::Enums,
+            ManagerType::ExchangePlans,
+            ManagerType::ExternalDataSources,
+            ManagerType::Constants,
+        ];
+        for mt in all {
+            assert_eq!(
+                ManagerType::from_mdo_type(mt.to_mdo_type()),
+                Some(mt),
+                "to_mdo_type/from_mdo_type must round-trip for {mt:?}"
+            );
+        }
+    }
 
     #[test]
     fn test_body_creation() {

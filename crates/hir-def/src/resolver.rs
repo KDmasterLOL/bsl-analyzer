@@ -315,14 +315,6 @@ impl Resolver {
         mdo_name: &Name,
         method_name: &Name,
     ) -> Result<QualifiedMethodResolution, QualifiedMethodError> {
-        let _span = tracing::info_span!(
-            "resolve_three_level_method",
-            mdo_type = %mdo_type_plural,
-            mdo_name = %mdo_name,
-            method = %method_name
-        )
-        .entered();
-
         let mdo_type =
             bsl_metadata::MdoType::from_plural(mdo_type_plural.as_str()).ok_or_else(|| {
                 tracing::debug!("Unknown MDO type plural: {}", mdo_type_plural);
@@ -334,8 +326,31 @@ impl Resolver {
             QualifiedMethodError::NotFound
         })?;
 
+        self.resolve_manager_method(db, manager_type, mdo_name, method_name)
+    }
+
+    /// Resolve a user-defined method on the manager module of a metadata object,
+    /// addressed by an already-parsed [`ManagerType`] (e.g.
+    /// `Справочники.Контрагенты.Метод`). Platform manager methods (e.g.
+    /// `СоздатьЭлемент`) are not user methods and resolve to `NotFound`.
+    pub fn resolve_manager_method(
+        &self,
+        db: &dyn ConfigsDatabase,
+        manager_type: crate::body::ManagerType,
+        mdo_name: &Name,
+        method_name: &Name,
+    ) -> Result<QualifiedMethodResolution, QualifiedMethodError> {
+        let mdo_type = manager_type.to_mdo_type();
+        let _span = tracing::info_span!(
+            "resolve_manager_method",
+            ?manager_type,
+            mdo_name = %mdo_name,
+            method = %method_name
+        )
+        .entered();
+
         let current_module_id = self.module_id().ok_or_else(|| {
-            tracing::warn!("resolve_three_level_method called without module scope");
+            tracing::warn!("resolve_manager_method called without module scope");
             QualifiedMethodError::NotFound
         })?;
 
@@ -345,7 +360,7 @@ impl Resolver {
             && !Self::mdo_visible_in_configs(&configurations, mdo_type, mdo_name)
         {
             tracing::debug!(
-                "resolve_three_level_method: {:?} '{}' not declared in any visible configuration",
+                "resolve_manager_method: {:?} '{}' not declared in any visible configuration",
                 mdo_type,
                 mdo_name
             );
@@ -361,13 +376,6 @@ impl Resolver {
                 QualifiedMethodError::NotFound
             })?;
 
-        tracing::debug!(
-            "Manager module '{:?}/{}' resolved to FileId({})",
-            manager_type,
-            mdo_name,
-            target_file_id.index()
-        );
-
         let target_module_id = crate::ModuleId::new(target_file_id);
         let symbol_tree = db.symbol_tree(target_module_id);
 
@@ -380,14 +388,6 @@ impl Resolver {
             );
             QualifiedMethodError::NotFound
         })?;
-
-        tracing::info!(
-            "SUCCESS - found method '{}' in manager module '{:?}/{}' (is_export={})",
-            method_name,
-            manager_type,
-            mdo_name,
-            method_symbol.is_export
-        );
 
         Ok(QualifiedMethodResolution {
             method_id: method_symbol.id,

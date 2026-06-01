@@ -827,3 +827,328 @@ fn test_sdbl_hir_in_file_invalidation() {
 
     assert_eq!(hirs2[0].1.queries()[0].hir.from[0].full_name, "Документ.Продажа");
 }
+
+#[test]
+fn test_resolved_module_summary_targets() {
+    use hir::call_graph::{CallTarget, EdgeProvenance, ResolvedTarget};
+    use hir::ConfigsDatabase;
+
+    let mut db = RootDatabaseImpl::new();
+    let caller = FileId(0);
+    let utils = FileId(1);
+
+    let mut file_set = FileSet::new();
+    file_set.insert(caller, VfsPath::new("/src/CommonModules/Клиент/Ext/Module.bsl"));
+    file_set.insert(utils, VfsPath::new("/src/CommonModules/Утилиты/Ext/Module.bsl"));
+    let source_root = SourceRoot::new_local(file_set);
+    db.set_source_root(SourceRootId(0), source_root);
+    db.set_file_source_root(caller, SourceRootId(0));
+    db.set_file_source_root(utils, SourceRootId(0));
+
+    db.set_file_text(
+        utils,
+        "Функция ПроверитьИНН() Экспорт КонецФункции\n\
+         Процедура Приватная() КонецПроцедуры",
+    );
+    db.set_file_text(
+        caller,
+        "Процедура ЛокальнаяЦель() Экспорт КонецПроцедуры\n\
+         Процедура Главная() Экспорт\n\
+         ЛокальнаяЦель();\n\
+         Утилиты.ПроверитьИНН();\n\
+         Утилиты.Приватная();\n\
+         НетТакогоМодуля.Метод();\n\
+         КонецПроцедуры",
+    );
+
+    let summary = db.resolved_module_summary(ModuleId::new(caller));
+    let caller_module = ModuleId::new(caller);
+    let utils_module = ModuleId::new(utils);
+
+    let resolved: Vec<_> =
+        summary.edges.iter().filter(|e| e.provenance == EdgeProvenance::Resolved).collect();
+    assert_eq!(resolved.len(), 2, "local + exported-qualified call resolve");
+
+    // Local call resolves to a method in the caller's own module.
+    assert!(resolved.iter().any(|e| matches!(
+        &e.target,
+        ResolvedTarget::Method(m) if m.module == caller_module
+    )));
+    // Exported qualified call resolves to a method in the target common module.
+    assert!(resolved.iter().any(|e| matches!(
+        &e.target,
+        ResolvedTarget::Method(m) if m.module == utils_module
+    )));
+
+    // Non-exported qualified target is visible but unreachable across modules,
+    // and the original target payload is preserved (surfaced, not dropped).
+    let blocked: Vec<_> = summary
+        .edges
+        .iter()
+        .filter(|e| e.provenance == EdgeProvenance::VisibilityBlocked)
+        .collect();
+    assert_eq!(blocked.len(), 1);
+    assert!(matches!(
+        &blocked[0].target,
+        ResolvedTarget::Unresolved(CallTarget::QualifiedModule { method_name, .. })
+            if method_name.as_str() == "Приватная"
+    ));
+
+    // Unknown module → honestly surfaced as unresolved with its original name preserved.
+    let unresolved: Vec<_> =
+        summary.edges.iter().filter(|e| e.provenance == EdgeProvenance::Unresolved).collect();
+    assert_eq!(unresolved.len(), 1);
+    assert!(matches!(
+        &unresolved[0].target,
+        ResolvedTarget::Unresolved(CallTarget::QualifiedModule { module_name, .. })
+            if module_name.as_str() == "НетТакогоМодуля"
+    ));
+}
+
+#[test]
+fn test_resolved_module_summary_manager_access() {
+    use hir::call_graph::{EdgeProvenance, ResolvedTarget};
+    use hir::ConfigsDatabase;
+
+    let mut db = RootDatabaseImpl::new();
+    let caller = FileId(0);
+    let mgr = FileId(1);
+
+    let mut file_set = FileSet::new();
+    file_set.insert(caller, VfsPath::new("/src/CommonModules/Клиент/Ext/Module.bsl"));
+    file_set.insert(mgr, VfsPath::new("/src/Catalogs/Контрагенты/Ext/ManagerModule.bsl"));
+    let source_root = SourceRoot::new_local(file_set);
+    db.set_source_root(SourceRootId(0), source_root);
+    db.set_file_source_root(caller, SourceRootId(0));
+    db.set_file_source_root(mgr, SourceRootId(0));
+
+    db.set_file_text(
+        mgr,
+        "Функция НайтиПоИНН() Экспорт КонецФункции\n\
+         Процедура Внутренняя() КонецПроцедуры",
+    );
+    db.set_file_text(
+        caller,
+        "Процедура Главная() Экспорт\n\
+         Справочники.Контрагенты.НайтиПоИНН();\n\
+         Справочники.Контрагенты.Внутренняя();\n\
+         Справочники.Контрагенты.СоздатьЭлемент();\n\
+         КонецПроцедуры",
+    );
+
+    let summary = db.resolved_module_summary(ModuleId::new(caller));
+    let mgr_module = ModuleId::new(mgr);
+
+    // A user-defined, exported manager-module method resolves to its node (Inferred).
+    assert!(
+        summary.edges.iter().any(|e| e.provenance == EdgeProvenance::Inferred
+            && matches!(&e.target, ResolvedTarget::Method(m) if m.module == mgr_module)),
+        "Справочники.Контрагенты.НайтиПоИНН should resolve to the manager-module method"
+    );
+    // A non-exported manager-module method is visible but unreachable across modules.
+    assert_eq!(
+        summary.edges.iter().filter(|e| e.provenance == EdgeProvenance::VisibilityBlocked).count(),
+        1,
+        "Справочники.Контрагенты.Внутренняя is non-export → VisibilityBlocked"
+    );
+    // A platform manager method (СоздатьЭлемент) is not a user node — surfaced as unresolved.
+    assert!(
+        summary.edges.iter().any(|e| e.provenance == EdgeProvenance::Unresolved
+            && matches!(&e.target, ResolvedTarget::Unresolved(_))),
+        "Платформенный СоздатьЭлемент should be surfaced as unresolved"
+    );
+}
+
+#[test]
+fn test_workspace_call_graph_callers_and_callees() {
+    use hir::call_graph::{GraphNode, ResolvedTarget};
+    use hir::ConfigsDatabase;
+
+    let mut db = RootDatabaseImpl::new();
+    let caller = FileId(0);
+    let utils = FileId(1);
+
+    let mut file_set = FileSet::new();
+    file_set.insert(caller, VfsPath::new("/src/CommonModules/Клиент/Ext/Module.bsl"));
+    file_set.insert(utils, VfsPath::new("/src/CommonModules/Утилиты/Ext/Module.bsl"));
+    let source_root = SourceRoot::new_local(file_set);
+    db.set_source_root(SourceRootId(0), source_root);
+    db.set_file_source_root(caller, SourceRootId(0));
+    db.set_file_source_root(utils, SourceRootId(0));
+
+    db.set_file_text(utils, "Функция ПроверитьИНН() Экспорт КонецФункции");
+    db.set_file_text(
+        caller,
+        "Процедура Главная() Экспорт\n\
+         Утилиты.ПроверитьИНН();\n\
+         КонецПроцедуры",
+    );
+
+    let caller_module = ModuleId::new(caller);
+    let utils_module = ModuleId::new(utils);
+
+    // Derive the resolved target MethodId without hardcoding a local_id.
+    let caller_summary = db.resolved_module_summary(caller_module);
+    let target = caller_summary
+        .edges
+        .iter()
+        .find_map(|e| match &e.target {
+            ResolvedTarget::Method(m) if m.module == utils_module => Some(*m),
+            _ => None,
+        })
+        .expect("Утилиты.ПроверитьИНН should resolve");
+
+    let graph = db.workspace_call_graph(SourceRootId(0));
+
+    // Reverse adjacency: callers of the utils method include a method in the caller module.
+    let callers = graph.callers(GraphNode::Method(target));
+    assert!(!callers.is_empty(), "utils method must have a caller");
+    assert!(callers.iter().all(|e| e.to == GraphNode::Method(target)));
+    assert!(callers
+        .iter()
+        .any(|e| matches!(e.from, GraphNode::Method(m) if m.module == caller_module)));
+
+    // Forward adjacency: the caller node lists the utils method as a callee.
+    let caller_node = match callers[0].from {
+        GraphNode::Method(_) => callers[0].from,
+        other => panic!("expected a method caller, got {other:?}"),
+    };
+    let callees = graph.callees(caller_node);
+    assert!(callees.iter().any(|e| e.to == GraphNode::Method(target)));
+}
+
+#[test]
+fn test_workspace_call_graph_module_code_and_multiple_callers() {
+    use hir::call_graph::{GraphNode, ResolvedTarget};
+    use hir::ConfigsDatabase;
+
+    let mut db = RootDatabaseImpl::new();
+    let caller = FileId(0);
+    let utils = FileId(1);
+
+    let mut file_set = FileSet::new();
+    file_set.insert(caller, VfsPath::new("/src/CommonModules/Клиент/Ext/Module.bsl"));
+    file_set.insert(utils, VfsPath::new("/src/CommonModules/Утилиты/Ext/Module.bsl"));
+    let source_root = SourceRoot::new_local(file_set);
+    db.set_source_root(SourceRootId(0), source_root);
+    db.set_file_source_root(caller, SourceRootId(0));
+    db.set_file_source_root(utils, SourceRootId(0));
+
+    db.set_file_text(utils, "Функция Ц() Экспорт КонецФункции");
+    // Two methods plus trailing module-body code all call the same target.
+    db.set_file_text(
+        caller,
+        "Процедура П1() Экспорт\n\
+         Утилиты.Ц();\n\
+         КонецПроцедуры\n\
+         Процедура П2() Экспорт\n\
+         Утилиты.Ц();\n\
+         КонецПроцедуры\n\
+         Утилиты.Ц();",
+    );
+
+    let caller_module = ModuleId::new(caller);
+    let utils_module = ModuleId::new(utils);
+
+    let target = db
+        .resolved_module_summary(caller_module)
+        .edges
+        .iter()
+        .find_map(|e| match &e.target {
+            ResolvedTarget::Method(m) if m.module == utils_module => Some(*m),
+            _ => None,
+        })
+        .expect("Утилиты.Ц should resolve");
+
+    let graph = db.workspace_call_graph(SourceRootId(0));
+    let callers = graph.callers(GraphNode::Method(target));
+
+    assert_eq!(callers.len(), 3, "two methods + module-body code call the target");
+    assert!(
+        callers.iter().any(|e| e.from == GraphNode::ModuleCode(caller_module)),
+        "module-body call is attributed to the ModuleCode node"
+    );
+    let method_callers = callers.iter().filter(|e| matches!(e.from, GraphNode::Method(_))).count();
+    assert_eq!(method_callers, 2, "П1 and П2 are distinct method callers");
+
+    // The callee is client-capable (default), so no edge — including the
+    // ModuleCode caller — is a client→server crossing.
+    assert!(callers.iter().all(|e| !e.crosses_client_to_server));
+}
+
+#[test]
+fn test_workspace_call_graph_client_server_boundary() {
+    use hir::call_graph::{GraphNode, ResolvedTarget};
+    use hir::ConfigsDatabase;
+
+    let mut db = RootDatabaseImpl::new();
+    let caller = FileId(0);
+    let utils = FileId(1);
+
+    let mut file_set = FileSet::new();
+    file_set.insert(caller, VfsPath::new("/src/CommonModules/Клиент/Ext/Module.bsl"));
+    file_set.insert(utils, VfsPath::new("/src/CommonModules/Сервер/Ext/Module.bsl"));
+    let source_root = SourceRoot::new_local(file_set);
+    db.set_source_root(SourceRootId(0), source_root);
+    db.set_file_source_root(caller, SourceRootId(0));
+    db.set_file_source_root(utils, SourceRootId(0));
+
+    db.set_file_text(
+        utils,
+        "&НаСервере\n\
+         Функция СерверныйМетод() Экспорт КонецФункции\n\
+         &НаКлиентеНаСервере\n\
+         Функция Универсальный() Экспорт КонецФункции",
+    );
+    db.set_file_text(
+        caller,
+        "&НаКлиенте\n\
+         Процедура Клиентский() Экспорт\n\
+         Сервер.СерверныйМетод();\n\
+         Сервер.Универсальный();\n\
+         КонецПроцедуры",
+    );
+
+    let utils_module = ModuleId::new(utils);
+    let resolve = |method: &str| {
+        db.resolved_module_summary(ModuleId::new(caller))
+            .edges
+            .iter()
+            .filter_map(|e| match &e.target {
+                ResolvedTarget::Method(m) if m.module == utils_module => Some(*m),
+                _ => None,
+            })
+            .find(|m| {
+                db.symbol_tree(utils_module)
+                    .find_method_by_id(*m)
+                    .is_some_and(|s| s.name.as_str() == method)
+            })
+            .unwrap_or_else(|| panic!("Сервер.{method} should resolve"))
+    };
+    let server_method = resolve("СерверныйМетод");
+    let universal = resolve("Универсальный");
+
+    let graph = db.workspace_call_graph(SourceRootId(0));
+
+    // Node dispatch is attached: the &НаСервере target is server-only.
+    let dispatch = graph
+        .dispatch(GraphNode::Method(server_method))
+        .expect("server method must have known dispatch");
+    assert!(dispatch.is_server_only(), "&НаСервере method is server-only");
+
+    // The client→server-only call is flagged as a boundary crossing.
+    let server_callers = graph.callers(GraphNode::Method(server_method));
+    assert!(!server_callers.is_empty());
+    assert!(
+        server_callers.iter().all(|e| e.crosses_client_to_server),
+        "&НаКлиенте → &НаСервере is a client→server roundtrip"
+    );
+
+    // A &НаКлиентеНаСервере callee is not server-only → NOT a boundary crossing.
+    let universal_callers = graph.callers(GraphNode::Method(universal));
+    assert!(!universal_callers.is_empty());
+    assert!(
+        universal_callers.iter().all(|e| !e.crosses_client_to_server),
+        "&НаКлиентеНаСервере callee is reachable on the client — no roundtrip"
+    );
+}

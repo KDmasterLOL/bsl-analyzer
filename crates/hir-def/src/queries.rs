@@ -75,6 +75,155 @@ pub fn module_call_summary_query<'db>(
     Arc::new(crate::call_graph::extract_call_summary(&item_tree, &module_bodies, form_handlers))
 }
 
+#[salsa::tracked(lru = 256)]
+pub fn resolved_module_summary_query<'db>(
+    db: &'db dyn crate::configs::ConfigsDatabase,
+    file_id_input: FileIdInput<'db>,
+) -> Arc<crate::call_graph::ResolvedModuleSummary> {
+    use crate::call_graph::{CallTarget, EdgeProvenance, ResolvedCallEdge, ResolvedTarget};
+
+    let _span = tracing::info_span!("resolved_module_summary", ?file_id_input).entered();
+    let file_id = file_id_input.file_id(db);
+    let module_id = ModuleId::new(file_id);
+
+    let summary = db.module_call_summary(module_id);
+    let resolver = crate::resolver::Resolver::with_workspace_scope(module_id);
+
+    let mut edges = Vec::with_capacity(summary.call_edges.len());
+    for edge in &summary.call_edges {
+        let (target, provenance) = match &edge.target {
+            CallTarget::Local { callee_local_id } => (
+                ResolvedTarget::Method(crate::MethodId {
+                    module: module_id,
+                    local_id: *callee_local_id,
+                }),
+                EdgeProvenance::Resolved,
+            ),
+            CallTarget::QualifiedModule { module_name, method_name } => {
+                match resolver.resolve_qualified_method(db, module_name, method_name) {
+                    Ok(r) if r.is_export => {
+                        (ResolvedTarget::Method(r.method_id), EdgeProvenance::Resolved)
+                    }
+                    Ok(_) => (
+                        ResolvedTarget::Unresolved(edge.target.clone()),
+                        EdgeProvenance::VisibilityBlocked,
+                    ),
+                    Err(_) => (
+                        ResolvedTarget::Unresolved(edge.target.clone()),
+                        EdgeProvenance::Unresolved,
+                    ),
+                }
+            }
+            CallTarget::ManagerAccess {
+                manager_type,
+                object_name,
+                method_name: Some(method_name),
+            } => match resolver.resolve_manager_method(db, *manager_type, object_name, method_name)
+            {
+                Ok(r) if r.is_export => {
+                    (ResolvedTarget::Method(r.method_id), EdgeProvenance::Inferred)
+                }
+                Ok(_) => (
+                    ResolvedTarget::Unresolved(edge.target.clone()),
+                    EdgeProvenance::VisibilityBlocked,
+                ),
+                Err(_) => {
+                    (ResolvedTarget::Unresolved(edge.target.clone()), EdgeProvenance::Unresolved)
+                }
+            },
+            // ManagerAccess without a method is an object reference, and a
+            // `ЭтотОбъект` call that reached here is a platform object method
+            // (local user methods were already resolved at extraction time) —
+            // neither maps to a user node yet.
+            CallTarget::ManagerAccess { .. }
+            | CallTarget::ThisObjectMethod { .. }
+            | CallTarget::Unresolved => {
+                (ResolvedTarget::Unresolved(edge.target.clone()), EdgeProvenance::Unresolved)
+            }
+        };
+
+        edges.push(ResolvedCallEdge {
+            caller: edge.caller,
+            target,
+            kind: edge.kind,
+            range: edge.range,
+            provenance,
+        });
+    }
+
+    Arc::new(crate::call_graph::ResolvedModuleSummary { module: module_id, edges })
+}
+
+#[salsa::tracked(lru = 16)]
+pub fn workspace_call_graph_query(
+    db: &dyn crate::configs::ConfigsDatabase,
+    source_root_input: base_db::SourceRootInput,
+) -> Arc<crate::call_graph::WorkspaceCallGraph> {
+    use crate::call_graph::{
+        CallerId, GraphNode, MethodDispatch, ResolvedTarget, WorkspaceCallEdge, WorkspaceCallGraph,
+    };
+
+    let source_root = source_root_input.root(db);
+    let file_set = source_root.file_set();
+    let modules: Vec<ModuleId> = source_root
+        .iter()
+        .filter(|&file_id| crate::workspace::is_bsl_source(file_set, file_id))
+        .map(ModuleId::new)
+        .collect();
+    let _span = tracing::info_span!("workspace_call_graph", module_count = modules.len()).entered();
+
+    let mut graph = WorkspaceCallGraph::default();
+
+    // Pass 1: per-method client/server dispatch, needed before edges so the
+    // boundary flag can consult a callee that lives in another module. Common
+    // modules dispatch at the module level (execution context); method-level
+    // `&НаКлиенте`/`&НаСервере` annotations only apply where the module context
+    // is unknown (form/command modules).
+    for &module in &modules {
+        let summary = db.module_call_summary(module);
+        let module_dispatch = db
+            .module_metadata(module)
+            .execution_context
+            .and_then(MethodDispatch::from_execution_context);
+        for method in &summary.methods {
+            graph.set_dispatch(
+                GraphNode::Method(crate::MethodId { module, local_id: method.local_id }),
+                module_dispatch.unwrap_or(method.dispatch),
+            );
+        }
+    }
+
+    // Pass 2: fold resolved edges into forward/reverse adjacency.
+    for &module in &modules {
+        let summary = db.resolved_module_summary(module);
+        for edge in &summary.edges {
+            let to_mid = match &edge.target {
+                ResolvedTarget::Method(method_id) => *method_id,
+                ResolvedTarget::Unresolved(_) => continue,
+            };
+            let from = match edge.caller {
+                CallerId::Method(local_id) => {
+                    GraphNode::Method(crate::MethodId { module, local_id })
+                }
+                CallerId::ModuleCode => GraphNode::ModuleCode(module),
+            };
+            let to = GraphNode::Method(to_mid);
+            let crosses_client_to_server =
+                graph.dispatch(from).is_some_and(|d| d.can_run_on_client)
+                    && graph.dispatch(to).is_some_and(|d| d.is_server_only());
+            graph.insert(WorkspaceCallEdge {
+                from,
+                to,
+                kind: edge.kind,
+                provenance: edge.provenance,
+                crosses_client_to_server,
+            });
+        }
+    }
+
+    Arc::new(graph)
+}
+
 #[salsa::tracked(lru = 512)]
 pub fn file_external_refs_query<'db>(
     db: &'db dyn DefDatabase,

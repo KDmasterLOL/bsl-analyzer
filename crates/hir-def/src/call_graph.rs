@@ -6,7 +6,7 @@ use crate::{
     hir::{Expr, ExprIdx, Literal},
     item_tree::{AnnotationKind, ItemTree, ModItem},
     name::Name,
-    ModuleBodies,
+    MethodId, ModuleBodies, ModuleId,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,6 +64,26 @@ impl MethodDispatch {
     pub fn is_server_only(&self) -> bool {
         self.can_run_on_server && !self.can_run_on_client
     }
+
+    /// Module-level client/server capability from a common module's execution
+    /// context (where dispatch is set per-module, not per-method). `None` for
+    /// `Unknown` — the caller then falls back to per-method annotation dispatch.
+    pub fn from_execution_context(ctx: crate::ExecutionContext) -> Option<Self> {
+        use crate::ExecutionContext;
+        let d = |can_run_on_client, can_run_on_server| Self {
+            can_run_on_client,
+            can_run_on_server,
+            no_context: false,
+        };
+        Some(match ctx {
+            ExecutionContext::Server
+            | ExecutionContext::ServerCall
+            | ExecutionContext::ExternalConnection => d(false, true),
+            ExecutionContext::Client => d(true, false),
+            ExecutionContext::ClientServer => d(true, true),
+            ExecutionContext::Unknown => return None,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,6 +135,110 @@ pub struct IdleReg {
 pub struct FormEventEntry {
     pub event_type: String,
     pub handler_name: Name,
+}
+
+/// A module's call edges with each target resolved to a concrete graph node
+/// where possible. Produced by `resolved_module_summary_query`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedModuleSummary {
+    pub module: ModuleId,
+    pub edges: Vec<ResolvedCallEdge>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedCallEdge {
+    pub caller: CallerId,
+    pub target: ResolvedTarget,
+    pub kind: EdgeKind,
+    pub range: TextRange,
+    pub provenance: EdgeProvenance,
+}
+
+/// Resolution outcome for a call edge's target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedTarget {
+    /// Resolved to a concrete method node.
+    Method(MethodId),
+    /// Not resolved to a concrete node; the original target is preserved so
+    /// the gap is surfaced honestly rather than dropped.
+    Unresolved(CallTarget),
+}
+
+/// How much to trust a resolved edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeProvenance {
+    /// Target points at a concrete node by direct lookup (local call, or an
+    /// exported qualified-module call).
+    Resolved,
+    /// Target resolved to a concrete node via metadata inference (e.g. a
+    /// user-defined method on an object's manager module).
+    Inferred,
+    /// Target method exists but is not exported — visible-but-unreachable across modules.
+    VisibilityBlocked,
+    /// Target could not be resolved to a node: missing, or a platform builtin
+    /// (e.g. a manager method like `СоздатьЭлемент`, or a `ЭтотОбъект` platform method).
+    Unresolved,
+}
+
+/// A globally-addressable node in the workspace call graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GraphNode {
+    Method(MethodId),
+    /// A module's top-level body (the `CallerId::ModuleCode` caller).
+    ModuleCode(ModuleId),
+}
+
+/// A resolved call edge between two workspace graph nodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkspaceCallEdge {
+    pub from: GraphNode,
+    pub to: GraphNode,
+    pub kind: EdgeKind,
+    pub provenance: EdgeProvenance,
+    /// A client-capable caller invoking a server-only callee — a client→server
+    /// roundtrip. Dispatch comes from the module's execution context (common
+    /// modules) or per-method `&НаКлиенте`/`&НаСервере` annotations (form/command
+    /// modules). `false` when either endpoint's dispatch is unknown (e.g. a
+    /// `ModuleCode` caller, or a module with `Unknown` context and no annotation).
+    pub crosses_client_to_server: bool,
+}
+
+/// Whole-config call graph: forward (callees) and reverse (callers) adjacency
+/// over the resolved edges of every module, plus per-method client/server
+/// dispatch. Produced by `workspace_call_graph_query`. Only edges whose target
+/// resolved to a concrete node are indexed; unresolved outgoing calls stay
+/// visible per-module via `ResolvedModuleSummary`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkspaceCallGraph {
+    forward: FxHashMap<GraphNode, Vec<WorkspaceCallEdge>>,
+    reverse: FxHashMap<GraphNode, Vec<WorkspaceCallEdge>>,
+    node_dispatch: FxHashMap<GraphNode, MethodDispatch>,
+}
+
+impl WorkspaceCallGraph {
+    pub fn insert(&mut self, edge: WorkspaceCallEdge) {
+        self.forward.entry(edge.from).or_default().push(edge);
+        self.reverse.entry(edge.to).or_default().push(edge);
+    }
+
+    pub fn set_dispatch(&mut self, node: GraphNode, dispatch: MethodDispatch) {
+        self.node_dispatch.insert(node, dispatch);
+    }
+
+    /// Client/server dispatch of a node, if known (method nodes only).
+    pub fn dispatch(&self, node: GraphNode) -> Option<MethodDispatch> {
+        self.node_dispatch.get(&node).copied()
+    }
+
+    /// Outgoing resolved calls from `node` (callees).
+    pub fn callees(&self, node: GraphNode) -> &[WorkspaceCallEdge] {
+        self.forward.get(&node).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// Incoming resolved calls to `node` (callers).
+    pub fn callers(&self, node: GraphNode) -> &[WorkspaceCallEdge] {
+        self.reverse.get(&node).map(Vec::as_slice).unwrap_or(&[])
+    }
 }
 
 pub fn extract_call_summary(
@@ -438,6 +562,30 @@ fn extract_string_literal(body: &Body, idx: ExprIdx) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dispatch_from_execution_context_maps_each_variant() {
+        use crate::ExecutionContext;
+
+        for ctx in [
+            ExecutionContext::Server,
+            ExecutionContext::ServerCall,
+            ExecutionContext::ExternalConnection,
+        ] {
+            let d = MethodDispatch::from_execution_context(ctx).unwrap();
+            assert!(d.is_server_only(), "{ctx:?} is server-only");
+        }
+
+        let client = MethodDispatch::from_execution_context(ExecutionContext::Client).unwrap();
+        assert!(client.can_run_on_client && !client.can_run_on_server);
+
+        let both = MethodDispatch::from_execution_context(ExecutionContext::ClientServer).unwrap();
+        assert!(both.can_run_on_client && both.can_run_on_server);
+        assert!(!both.is_server_only());
+
+        // Unknown → no module-level dispatch; caller falls back to annotations.
+        assert!(MethodDispatch::from_execution_context(ExecutionContext::Unknown).is_none());
+    }
 
     #[test]
     fn test_dispatch_from_annotation() {

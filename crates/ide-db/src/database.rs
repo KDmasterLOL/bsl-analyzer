@@ -368,6 +368,22 @@ impl hir::ConfigsDatabase for RootDatabaseImpl {
             (None, None) => None,
         }
     }
+
+    fn resolved_module_summary(
+        &self,
+        module_id: ModuleId,
+    ) -> Arc<hir::call_graph::ResolvedModuleSummary> {
+        let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
+        hir::resolved_module_summary_query(self, file_id_input)
+    }
+
+    fn workspace_call_graph(
+        &self,
+        source_root_id: base_db::SourceRootId,
+    ) -> Arc<hir::call_graph::WorkspaceCallGraph> {
+        let source_root_input = self.source_root_input(source_root_id);
+        hir::workspace_call_graph_query(self, source_root_input)
+    }
 }
 
 #[salsa::db]
