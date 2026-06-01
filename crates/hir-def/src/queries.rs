@@ -275,6 +275,51 @@ pub fn workspace_call_graph_query(
         }
     }
 
+    // Pass 3: query_ref edges. A method (or module body) that runs an SDBL query
+    // reading a metadata object links to that object's Mdo node. Built here so it
+    // shares `mdo_canonical` — query- and call-derived Mdo nodes must be the same
+    // node. Deduped per (caller, object): "this method reads Catalog X" once.
+    let mut seen_query_ref: rustc_hash::FxHashSet<(GraphNode, MdoType, String)> =
+        rustc_hash::FxHashSet::default();
+    for &module in &modules {
+        let file_id_input = base_db::FileIdInput::new(db, module.file_id);
+        let sdbl_entries = crate::sdbl_cache::sdbl_hir_for_file_query(db, file_id_input);
+        for (sdbl_expr_id, package) in sdbl_entries.iter() {
+            let from = match sdbl_expr_id.owner {
+                crate::DefWithBodyId::Method(local_id) => {
+                    GraphNode::Method(crate::MethodId { module, local_id })
+                }
+                crate::DefWithBodyId::ModuleCode => GraphNode::ModuleCode(module),
+            };
+            let mut resolved = Vec::new();
+            for query in package.queries() {
+                query.hir.collect_resolved_tables(&mut resolved);
+            }
+            for table in resolved {
+                let (mdo_type, name) = match table {
+                    sdbl_hir::ResolvedTable::Metadata { mdo_type, name, .. }
+                    | sdbl_hir::ResolvedTable::Register { mdo_type, name, .. } => (*mdo_type, name),
+                    sdbl_hir::ResolvedTable::TempTable { .. } => continue,
+                };
+                let name_lower = name.to_lowercase();
+                if !seen_query_ref.insert((from.clone(), mdo_type, name_lower.clone())) {
+                    continue;
+                }
+                let canon = mdo_canonical
+                    .entry((mdo_type, name_lower))
+                    .or_insert_with(|| crate::name::Name::new(name))
+                    .clone();
+                graph.insert(WorkspaceCallEdge {
+                    from: from.clone(),
+                    to: GraphNode::Mdo { mdo_type, object_name: canon },
+                    kind: crate::call_graph::EdgeKind::QueryRef,
+                    provenance: crate::call_graph::EdgeProvenance::Inferred,
+                    crosses_client_to_server: false,
+                });
+            }
+        }
+    }
+
     Arc::new(graph)
 }
 

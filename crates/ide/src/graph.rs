@@ -817,6 +817,7 @@ fn edge_kind_label(kind: EdgeKind) -> &'static str {
         EdgeKind::DirectLocal | EdgeKind::DirectQualifiedModule => "call",
         EdgeKind::ManagerCreates => "manager_creates",
         EdgeKind::ManagerAccess => "manager_access",
+        EdgeKind::QueryRef => "query_ref",
     }
 }
 

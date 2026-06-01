@@ -105,6 +105,9 @@ pub enum EdgeKind {
     /// Any other touch of an object through its manager (a platform find/select
     /// method, or a bare `Справочники.X` reference). Target is an [`GraphNode::Mdo`].
     ManagerAccess,
+    /// The caller runs an SDBL query that reads a metadata object. From a
+    /// `Method`/`ModuleCode` node to the read object's [`GraphNode::Mdo`].
+    QueryRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

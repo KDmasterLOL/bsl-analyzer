@@ -1157,3 +1157,59 @@ fn test_workspace_call_graph_client_server_boundary() {
         "&НаКлиентеНаСервере callee is reachable on the client — no roundtrip"
     );
 }
+
+#[test]
+fn test_workspace_call_graph_query_ref_links_method_to_mdo() {
+    use bsl_metadata::MdoType;
+    use hir::call_graph::{EdgeKind, EdgeProvenance, GraphNode};
+    use hir::ConfigsDatabase;
+
+    // The SDBL table must resolve against a configuration, so declare the catalog.
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("src/cf");
+    std::fs::create_dir_all(root.join("Catalogs")).unwrap();
+    std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+    std::fs::write(
+        root.join("Catalogs/Номенклатура.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Catalog uuid="00000000-0000-0000-0000-000000000001">
+        <Properties>
+            <Name>Номенклатура</Name>
+            <CodeLength>9</CodeLength>
+        </Properties>
+    </Catalog>
+</MetaDataObject>"#,
+    )
+    .unwrap();
+
+    let mut db = RootDatabaseImpl::new();
+    db.set_all_config_paths(vec![(None, root.clone())]);
+
+    let file_id = FileId(0);
+    let file_path = root.join("CommonModules/Отчеты/Ext/Module.bsl");
+    let mut file_set = FileSet::new();
+    file_set.insert(file_id, VfsPath::new(file_path.to_string_lossy().as_ref()));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(file_id, SourceRootId(0));
+    db.set_file_text(
+        file_id,
+        "Процедура Считать() Экспорт\n\
+         Запрос = \"ВЫБРАТЬ Код ИЗ Справочник.Номенклатура\";\n\
+         КонецПроцедуры",
+    );
+
+    let graph = db.workspace_call_graph(SourceRootId(0));
+    let qref = graph
+        .edges()
+        .find(|e| e.kind == EdgeKind::QueryRef)
+        .expect("the query reads Справочник.Номенклатура → one query_ref edge");
+    assert!(matches!(&qref.from, GraphNode::Method(_)), "the reading method is the edge source");
+    assert!(
+        matches!(&qref.to, GraphNode::Mdo { mdo_type, object_name }
+            if *mdo_type == MdoType::Catalog && object_name.as_str() == "Номенклатура"),
+        "the edge targets the read object's Mdo node"
+    );
+    assert_eq!(qref.provenance, EdgeProvenance::Inferred);
+    assert!(!qref.crosses_client_to_server);
+}

@@ -56,6 +56,114 @@ impl SdblHir {
     pub fn all_tables(&self) -> impl Iterator<Item = &TableRef> {
         self.from.iter().chain(self.joins.iter().map(|j| &j.table))
     }
+
+    /// Every metadata-resolved table read anywhere in this query tree: top-level
+    /// FROM/JOIN sources plus tables nested in subqueries, unions, and expression
+    /// subqueries (WHERE/HAVING/SELECT/JOIN-ON/IN/CASE/virtual-table params).
+    /// Unresolved (by-name-only) and temp tables carry no metadata and are absent.
+    pub fn collect_resolved_tables<'a>(&'a self, out: &mut Vec<&'a ResolvedTable>) {
+        for table in self.all_tables() {
+            if let Some(meta) = &table.metadata {
+                out.push(meta);
+            }
+            for param in &table.virtual_table_params {
+                collect_expr_tables(param, out);
+            }
+            for sub in &table.subquery {
+                sub.collect_resolved_tables(out);
+            }
+        }
+        for field in &self.select.fields {
+            collect_expr_tables(&field.expr, out);
+        }
+        for join in &self.joins {
+            if let Some(cond) = &join.condition {
+                collect_expr_tables(cond, out);
+            }
+        }
+        if let Some(where_expr) = &self.where_clause {
+            collect_expr_tables(where_expr, out);
+        }
+        if let Some(group_by) = &self.group_by {
+            for expr in &group_by.exprs {
+                collect_expr_tables(expr, out);
+            }
+        }
+        if let Some(having) = &self.having {
+            collect_expr_tables(having, out);
+        }
+        if let Some(order_by) = &self.order_by {
+            for item in &order_by.items {
+                collect_expr_tables(&item.expr, out);
+            }
+        }
+        for union in &self.unions {
+            union.query.collect_resolved_tables(out);
+        }
+    }
+}
+
+/// Recurse an expression, descending into embedded subqueries to collect their
+/// metadata-resolved tables.
+fn collect_expr_tables<'a>(expr: &'a ExprHir, out: &mut Vec<&'a ResolvedTable>) {
+    match expr {
+        ExprHir::Subquery { query, .. } => query.collect_resolved_tables(out),
+        ExprHir::In { expr: inner, values, .. } => {
+            collect_expr_tables(inner, out);
+            match values {
+                InValues::List(items) => {
+                    for item in items {
+                        collect_expr_tables(item, out);
+                    }
+                }
+                InValues::Subquery(sq) => sq.collect_resolved_tables(out),
+            }
+        }
+        ExprHir::BinaryOp { lhs, rhs, .. } => {
+            collect_expr_tables(lhs, out);
+            collect_expr_tables(rhs, out);
+        }
+        ExprHir::UnaryOp { expr: inner, .. } => collect_expr_tables(inner, out),
+        ExprHir::FunctionCall { args, .. } => {
+            for arg in args {
+                collect_expr_tables(arg, out);
+            }
+        }
+        ExprHir::Case { operand, when_clauses, else_expr, .. } => {
+            if let Some(op) = operand {
+                collect_expr_tables(op, out);
+            }
+            for clause in when_clauses {
+                collect_expr_tables(&clause.condition, out);
+                collect_expr_tables(&clause.result, out);
+            }
+            if let Some(else_e) = else_expr {
+                collect_expr_tables(else_e, out);
+            }
+        }
+        ExprHir::Between { expr: inner, low, high, .. } => {
+            collect_expr_tables(inner, out);
+            collect_expr_tables(low, out);
+            collect_expr_tables(high, out);
+        }
+        ExprHir::Like { expr: inner, pattern, escape, .. } => {
+            collect_expr_tables(inner, out);
+            collect_expr_tables(pattern, out);
+            if let Some(esc) = escape {
+                collect_expr_tables(esc, out);
+            }
+        }
+        ExprHir::IsNull { expr: inner, .. } => collect_expr_tables(inner, out),
+        ExprHir::Tuple { elements, .. } => {
+            for elem in elements {
+                collect_expr_tables(elem, out);
+            }
+        }
+        ExprHir::ColumnRef { .. }
+        | ExprHir::Literal { .. }
+        | ExprHir::Parameter { .. }
+        | ExprHir::Missing { .. } => {}
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
