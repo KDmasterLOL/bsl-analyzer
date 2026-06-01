@@ -1,16 +1,15 @@
-//! Background-loaded semantic call graph for the workspace MCP profile.
+//! Background-built semantic call graph for the workspace MCP profile.
 //!
-//! The whole-config call graph lives in a Salsa database that must be populated
-//! with every `.bsl` file plus the configuration metadata paths (the resolver
-//! consults config visibility). Loading is done off-thread, mirroring the search
-//! engine: tools observe [`GraphStatus`] and degrade gracefully while indexing.
+//! The whole-config call graph is built into an on-disk SQLite store (the
+//! in-memory graph does not fit in RAM on large configs) and served read-only from
+//! there. The build runs off-thread in RAM-bounded batches: tools observe
+//! [`GraphStatus`] and degrade gracefully while it indexes.
 //!
 //! Freshness is **pull-on-request**: each `graph` call cheaply checks whether the
 //! workspace drifted on disk since the snapshot it served and, on drift, kicks an
 //! async reload while still serving the current (stale) snapshot. The agent-facing
-//! freshness token is a monotonic [`GraphState`] *generation* — a wholesale reload
-//! builds a brand-new database whose internal Salsa revision restarts, so a
-//! database-level counter would not be monotonic across reloads.
+//! freshness token is a monotonic *generation*, recorded in the built file's `meta`
+//! so a served response's revision always describes the exact build it serves.
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
@@ -126,11 +125,11 @@ pub(crate) struct Freshness {
     pub reload: &'static str,
 }
 
-/// Handle to the workspace call graph database. Cheap to clone (shared `Arc`s).
+/// Handle to the workspace call graph. Cheap to clone (shared `Arc`s).
 ///
-/// Loading is lazy: building the database walks every `.bsl` file and the first
-/// query forces whole-config lowering, so a server whose user never touches the
-/// graph pays nothing. The load is triggered on the first `graph` tool call.
+/// Loading is lazy: the SQLite graph is built off the workspace on first use, so a
+/// server whose user never touches the graph pays nothing. The build is triggered
+/// on the first `graph` tool call.
 #[derive(Clone)]
 pub(crate) struct GraphState {
     inner: Arc<Mutex<Inner>>,
@@ -188,10 +187,10 @@ impl GraphState {
         }
     }
 
-    /// Snapshot the database for a blocking query, if loaded, capturing the
-    /// generation and fingerprint it reflects. The returned [`GraphSnapshot`] owns
-    /// a cheap Salsa snapshot and can be moved onto a blocking task without holding
-    /// the lock during the query.
+    /// Snapshot the graph for a blocking query, if built. The returned
+    /// [`GraphSnapshot`] owns a read-only SQLite handle and its freshness token,
+    /// and can be moved onto a blocking task without holding the lock during the
+    /// query.
     pub(crate) fn snapshot(&self) -> Option<GraphSnapshot> {
         // Gate on a published build, but take the served revision/fingerprint from
         // the FILE's own meta (below), not from the lock — so even if a reload
