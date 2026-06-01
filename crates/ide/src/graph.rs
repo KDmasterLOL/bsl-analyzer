@@ -432,53 +432,28 @@ impl<'a> GraphCtx<'a> {
     // ---- id resolution ------------------------------------------------------
 
     fn resolve_id(&self, id: &str) -> Result<GraphNode, GraphError> {
-        if let Some(rest) = id.strip_prefix("method/file/") {
-            // Split off the method from the right: a method name cannot contain
-            // ':' but a relative path conceivably could.
-            let (rel, method) = rest.rsplit_once("::").ok_or_else(|| GraphError::BadId {
-                id: id.to_string(),
-                reason: "path method id must contain '::<method>'".to_string(),
-            })?;
-            let file_id = self
-                .resolve_rel_path(rel)
-                .ok_or_else(|| GraphError::NotFound { id: id.to_string() })?;
-            return self.resolve_method_in(file_id, method, id);
-        }
-        if let Some(rel) = id.strip_prefix("module/file/") {
-            let file_id = self
-                .resolve_rel_path(rel)
-                .ok_or_else(|| GraphError::NotFound { id: id.to_string() })?;
-            return Ok(GraphNode::ModuleCode(ModuleId::new(file_id)));
-        }
-        if let Some(rest) = id.strip_prefix("mdo/") {
-            return self.resolve_mdo_id(rest, id);
-        }
-        if let Some(rest) = id.strip_prefix("attribute/") {
-            return self.resolve_attribute_id(rest, id);
-        }
-
-        let parts: Vec<&str> = id.split('/').collect();
-        let (is_method, rest) = match parts.first().copied() {
-            Some("method") => (true, &parts[1..]),
-            Some("module") => (false, &parts[1..]),
-            _ => {
-                return Err(GraphError::BadId {
-                    id: id.to_string(),
-                    reason: "id must start with 'method/' or 'module/'".to_string(),
-                })
+        let not_found = || GraphError::NotFound { id: id.to_string() };
+        match classify_graph_id(id)? {
+            GraphIdKind::MethodFile { rel, name } => {
+                let file_id = self.resolve_rel_path(&rel).ok_or_else(not_found)?;
+                self.resolve_method_in(file_id, &name, id)
             }
-        };
-        let (key, method) = decode_scope(rest, is_method).ok_or_else(|| GraphError::BadId {
-            id: id.to_string(),
-            reason: "malformed scope".to_string(),
-        })?;
-        let file_id = self
-            .index
-            .resolve_module_key(&key)
-            .ok_or_else(|| GraphError::NotFound { id: id.to_string() })?;
-        match method {
-            Some(method) => self.resolve_method_in(file_id, &method, id),
-            None => Ok(GraphNode::ModuleCode(ModuleId::new(file_id))),
+            GraphIdKind::ModuleFile { rel } => {
+                let file_id = self.resolve_rel_path(&rel).ok_or_else(not_found)?;
+                Ok(GraphNode::ModuleCode(ModuleId::new(file_id)))
+            }
+            GraphIdKind::Method { scope, name } => {
+                let file_id = self.index.resolve_module_key(&scope).ok_or_else(not_found)?;
+                self.resolve_method_in(file_id, &name, id)
+            }
+            GraphIdKind::Module { scope } => {
+                let file_id = self.index.resolve_module_key(&scope).ok_or_else(not_found)?;
+                Ok(GraphNode::ModuleCode(ModuleId::new(file_id)))
+            }
+            GraphIdKind::Mdo { mdo_type, object } => self.find_mdo_node(mdo_type, &object, id),
+            GraphIdKind::Attribute { mdo_type, object, attr } => {
+                self.find_attribute_node(mdo_type, &object, &attr, id)
+            }
         }
     }
 
@@ -495,18 +470,15 @@ impl<'a> GraphCtx<'a> {
         Ok(GraphNode::Method(method.id()))
     }
 
-    /// Resolve `<MdoEnglish>/<ObjectName>` to the metadata-object node, if the
-    /// workspace graph references it. The match is case-insensitive on the object
-    /// name (BSL is case-insensitive) and returns the graph's canonical spelling.
-    fn resolve_mdo_id(&self, rest: &str, id: &str) -> Result<GraphNode, GraphError> {
-        let (mdo_eng, object) = rest.split_once('/').ok_or_else(|| GraphError::BadId {
-            id: id.to_string(),
-            reason: "mdo id must be 'mdo/<MdoType>/<Object>'".to_string(),
-        })?;
-        let mdo_type: MdoType = mdo_eng.parse().map_err(|_| GraphError::BadId {
-            id: id.to_string(),
-            reason: format!("unknown metadata type '{mdo_eng}'"),
-        })?;
+    /// The metadata-object node for `(mdo_type, object)`, if the workspace graph
+    /// references it. Case-insensitive on the object name (BSL is case-insensitive);
+    /// returns the graph's canonical spelling.
+    fn find_mdo_node(
+        &self,
+        mdo_type: MdoType,
+        object: &str,
+        id: &str,
+    ) -> Result<GraphNode, GraphError> {
         let object_lower = object.to_lowercase();
         self.graph
             .nodes()
@@ -517,22 +489,15 @@ impl<'a> GraphCtx<'a> {
             .ok_or_else(|| GraphError::NotFound { id: id.to_string() })
     }
 
-    /// Resolve `<MdoEnglish>/<Object>/<Attr>` to the attribute node, if the graph
-    /// references it. Case-insensitive on object and attribute names; returns the
-    /// graph's canonical node.
-    fn resolve_attribute_id(&self, rest: &str, id: &str) -> Result<GraphNode, GraphError> {
-        let mut parts = rest.splitn(3, '/');
-        let bad = || GraphError::BadId {
-            id: id.to_string(),
-            reason: "attribute id must be 'attribute/<MdoType>/<Object>/<Attr>'".to_string(),
-        };
-        let mdo_eng = parts.next().ok_or_else(bad)?;
-        let object = parts.next().ok_or_else(bad)?;
-        let attr = parts.next().ok_or_else(bad)?;
-        let mdo_type: MdoType = mdo_eng.parse().map_err(|_| GraphError::BadId {
-            id: id.to_string(),
-            reason: format!("unknown metadata type '{mdo_eng}'"),
-        })?;
+    /// The attribute node for `(mdo_type, object, attr)`, if the graph references
+    /// it. Case-insensitive on object and attribute names; returns the canonical node.
+    fn find_attribute_node(
+        &self,
+        mdo_type: MdoType,
+        object: &str,
+        attr: &str,
+        id: &str,
+    ) -> Result<GraphNode, GraphError> {
         let object_lower = object.to_lowercase();
         let attr_lower = attr.to_lowercase();
         self.graph
@@ -926,6 +891,77 @@ pub fn method_id_for_path(path: &str, method_name: &str) -> Option<String> {
     Some(format!("method/{}/{method_name}", encode_scope(&key)))
 }
 
+/// The parsed shape of a durable graph id, independent of any database. Drives
+/// both the in-memory [`Analysis::graph_node`] resolver and the SQLite serving
+/// path, so the id grammar — and its [`GraphError::BadId`] rules — live in one
+/// place. Resolving a kind to an actual node needs the graph; that is the caller's
+/// job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GraphIdKind {
+    /// `method/<scope>/<name>` — a method addressed by module scope.
+    Method { scope: ModuleKey, name: String },
+    /// `module/<scope>` — a module body addressed by scope.
+    Module { scope: ModuleKey },
+    /// `method/file/<rel>::<name>` — a method in a non-standard file path.
+    MethodFile { rel: String, name: String },
+    /// `module/file/<rel>` — a module body in a non-standard file path.
+    ModuleFile { rel: String },
+    /// `mdo/<MdoEnglish>/<Object>`.
+    Mdo { mdo_type: MdoType, object: String },
+    /// `attribute/<MdoEnglish>/<Object>/<Attr>`.
+    Attribute { mdo_type: MdoType, object: String, attr: String },
+}
+
+/// Parse a durable graph id into its [`GraphIdKind`] without touching a database,
+/// returning [`GraphError::BadId`] for a malformed id (unknown prefix, missing
+/// `::<method>`, unknown metadata type, malformed scope).
+pub fn classify_graph_id(id: &str) -> Result<GraphIdKind, GraphError> {
+    let bad = |reason: &str| GraphError::BadId { id: id.to_string(), reason: reason.to_string() };
+
+    if let Some(rest) = id.strip_prefix("method/file/") {
+        let (rel, name) = rest
+            .rsplit_once("::")
+            .ok_or_else(|| bad("path method id must contain '::<method>'"))?;
+        return Ok(GraphIdKind::MethodFile { rel: rel.to_string(), name: name.to_string() });
+    }
+    if let Some(rel) = id.strip_prefix("module/file/") {
+        return Ok(GraphIdKind::ModuleFile { rel: rel.to_string() });
+    }
+    if let Some(rest) = id.strip_prefix("mdo/") {
+        let (mdo_eng, object) =
+            rest.split_once('/').ok_or_else(|| bad("mdo id must be 'mdo/<MdoType>/<Object>'"))?;
+        let mdo_type =
+            mdo_eng.parse().map_err(|_| bad(&format!("unknown metadata type '{mdo_eng}'")))?;
+        return Ok(GraphIdKind::Mdo { mdo_type, object: object.to_string() });
+    }
+    if let Some(rest) = id.strip_prefix("attribute/") {
+        let mut parts = rest.splitn(3, '/');
+        let structure = || bad("attribute id must be 'attribute/<MdoType>/<Object>/<Attr>'");
+        let mdo_eng = parts.next().ok_or_else(structure)?;
+        let object = parts.next().ok_or_else(structure)?;
+        let attr = parts.next().ok_or_else(structure)?;
+        let mdo_type =
+            mdo_eng.parse().map_err(|_| bad(&format!("unknown metadata type '{mdo_eng}'")))?;
+        return Ok(GraphIdKind::Attribute {
+            mdo_type,
+            object: object.to_string(),
+            attr: attr.to_string(),
+        });
+    }
+
+    let parts: Vec<&str> = id.split('/').collect();
+    let (is_method, rest) = match parts.first().copied() {
+        Some("method") => (true, &parts[1..]),
+        Some("module") => (false, &parts[1..]),
+        _ => return Err(bad("id must start with 'method/' or 'module/'")),
+    };
+    let (scope, method) = decode_scope(rest, is_method).ok_or_else(|| bad("malformed scope"))?;
+    Ok(match method {
+        Some(name) => GraphIdKind::Method { scope, name },
+        None => GraphIdKind::Module { scope },
+    })
+}
+
 fn decode_scope(rest: &[&str], is_method: bool) -> Option<(ModuleKey, Option<String>)> {
     // For a method id the trailing segment is the method name; module ids end at
     // the scope.
@@ -1085,6 +1121,59 @@ mod tests {
         let a = client_server_workspace();
         let err = a.graph_node(ROOT, None, "Сервер.Считать", GraphDetail::Names).unwrap_err();
         assert!(matches!(err, GraphError::BadId { .. }));
+    }
+
+    #[test]
+    fn classify_graph_id_grammar() {
+        use super::{classify_graph_id, GraphIdKind};
+
+        // Well-formed ids of every kind.
+        assert!(matches!(
+            classify_graph_id("method/common/Сервер/Считать"),
+            Ok(GraphIdKind::Method { name, .. }) if name == "Считать"
+        ));
+        assert!(matches!(
+            classify_graph_id("module/common/Сервер"),
+            Ok(GraphIdKind::Module { .. })
+        ));
+        assert!(matches!(
+            classify_graph_id("method/file/src/a.bsl::M"),
+            Ok(GraphIdKind::MethodFile { rel, name }) if rel == "src/a.bsl" && name == "M"
+        ));
+        assert!(matches!(
+            classify_graph_id("module/file/src/a.bsl"),
+            Ok(GraphIdKind::ModuleFile { rel }) if rel == "src/a.bsl"
+        ));
+        assert!(matches!(
+            classify_graph_id("mdo/Catalog/Контрагенты"),
+            Ok(GraphIdKind::Mdo { object, .. }) if object == "Контрагенты"
+        ));
+        // A localized type spelling parses to the same variant.
+        assert!(matches!(
+            classify_graph_id("mdo/Справочник/Контрагенты"),
+            Ok(GraphIdKind::Mdo { .. })
+        ));
+        assert!(matches!(
+            classify_graph_id("attribute/Catalog/Контрагенты/Наименование"),
+            Ok(GraphIdKind::Attribute { object, attr, .. })
+                if object == "Контрагенты" && attr == "Наименование"
+        ));
+
+        // Malformed ids are BadId.
+        for bad in [
+            "garbage",
+            "Сервер.Считать",
+            "method/file/no-method-separator",
+            "mdo/onlytype",
+            "mdo/NoSuchType/X",
+            "attribute/Catalog/OnlyObject",
+            "method/bogusscope/M",
+        ] {
+            assert!(
+                matches!(classify_graph_id(bad), Err(GraphError::BadId { .. })),
+                "{bad} must be BadId"
+            );
+        }
     }
 
     #[test]

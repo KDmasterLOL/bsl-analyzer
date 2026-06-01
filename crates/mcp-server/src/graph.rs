@@ -507,6 +507,7 @@ fn load_workspace_db(workspace_root: &Path) -> anyhow::Result<(RootDatabaseImpl,
 mod tests {
     use super::*;
     use crate::graph_db::build_graph_database;
+    use crate::graph_query::{graph_db_path, GraphDb};
     use rusqlite::Connection;
     use std::fs;
 
@@ -756,6 +757,159 @@ mod tests {
             sqlite_mdo[0], fold_id,
             "cross-batch Mdo node id must be byte-identical to the in-memory fold's"
         );
+    }
+
+    /// Serving overview/node/neighbors/source from the SQLite store must produce
+    /// JSON byte-identical to the in-memory `ide::Analysis::graph_*` path it
+    /// replaces — same fields, signatures, bodies, edges and budget behaviour.
+    #[test]
+    fn sqlite_serving_matches_in_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let (db, files) = load_workspace_db(root).expect("workspace loads");
+        let analysis = Analysis::from_database(db);
+
+        let out = graph_db_path(root);
+        fs::create_dir_all(out.parent().unwrap()).unwrap();
+        build_graph_database(
+            root,
+            &out,
+            1,
+            &crate::graph_db::GraphMeta {
+                revision: 1,
+                fingerprint: 0,
+                files,
+                built_at: "t".to_string(),
+            },
+        )
+        .expect("graph database builds");
+        let gdb = GraphDb::open(&out).expect("graph database opens and validates");
+
+        let id = "method/common/Сервер/Считать";
+
+        let mem_overview =
+            serde_json::to_value(analysis.graph_overview(GRAPH_SOURCE_ROOT, Some(root), 10))
+                .unwrap();
+        let sql_overview = serde_json::to_value(gdb.overview(10).unwrap()).unwrap();
+        assert_eq!(mem_overview, sql_overview, "overview JSON");
+
+        let mem_node = serde_json::to_value(
+            analysis
+                .graph_node(GRAPH_SOURCE_ROOT, Some(root), id, ide::GraphDetail::Bodies)
+                .unwrap(),
+        )
+        .unwrap();
+        let sql_node =
+            serde_json::to_value(gdb.node(id, ide::GraphDetail::Bodies).unwrap().unwrap()).unwrap();
+        assert_eq!(mem_node, sql_node, "node JSON (bodies detail)");
+
+        let params = ide::NeighborsParams {
+            id,
+            dir: ide::Direction::In,
+            depth: 1,
+            max_nodes: 50,
+            detail: ide::GraphDetail::Signatures,
+            provenance_filter: Vec::new(),
+        };
+        let mem_nb = serde_json::to_value(
+            analysis.graph_neighbors(GRAPH_SOURCE_ROOT, Some(root), &params).unwrap(),
+        )
+        .unwrap();
+        let sql_nb = serde_json::to_value(gdb.neighbors(&params).unwrap().unwrap()).unwrap();
+        assert_eq!(mem_nb, sql_nb, "neighbors JSON");
+
+        let ids = [id.to_string()];
+        let mem_src =
+            serde_json::to_value(analysis.graph_source(GRAPH_SOURCE_ROOT, Some(root), &ids, 4000))
+                .unwrap();
+        let sql_src = serde_json::to_value(gdb.source(&ids, 4000).unwrap()).unwrap();
+        assert_eq!(mem_src, sql_src, "source JSON");
+
+        // A malformed/unknown id reports NotFound, not an infra error.
+        let missing = gdb.node("method/common/Нет/Метод", ide::GraphDetail::Names).unwrap();
+        assert!(missing.is_err(), "unknown id resolves to a GraphError");
+    }
+
+    /// The SQLite reader must keep the in-memory resolver's id semantics: a
+    /// malformed id is `BadId` (not `NotFound`), and a metadata id resolves
+    /// case-insensitively on its type and object name.
+    #[test]
+    fn sqlite_serving_bad_id_and_case_insensitive_mdo() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        write(
+            root,
+            "Catalogs/Номенклатура.xml",
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Catalog uuid="00000000-0000-0000-0000-000000000001">
+        <Properties><Name>Номенклатура</Name><CodeLength>9</CodeLength></Properties>
+    </Catalog>
+</MetaDataObject>"#,
+        );
+        write(
+            root,
+            "CommonModules/Менеджер/Ext/Module.bsl",
+            "Процедура Создать() Экспорт\nСправочники.Номенклатура.СоздатьЭлемент();\nКонецПроцедуры",
+        );
+
+        let files = enumerate_bsl_files(root).len();
+        let out = graph_db_path(root);
+        fs::create_dir_all(out.parent().unwrap()).unwrap();
+        build_graph_database(
+            root,
+            &out,
+            1,
+            &crate::graph_db::GraphMeta {
+                revision: 1,
+                fingerprint: 0,
+                files,
+                built_at: "t".to_string(),
+            },
+        )
+        .expect("graph database builds");
+        let gdb = GraphDb::open(&out).expect("opens");
+
+        let canonical = gdb
+            .overview(50)
+            .unwrap()
+            .top_by_centrality
+            .iter()
+            .find(|n| n.kind == "mdo")
+            .map(|n| n.id.clone())
+            .expect("a catalog Mdo node");
+        assert_eq!(canonical, "mdo/Catalog/Номенклатура");
+
+        // Case-insensitive on the object name and ASCII type segment, and accepting
+        // a localized type spelling (Справочник → Catalog).
+        for variant in
+            ["mdo/Catalog/НОМЕНКЛАТУРА", "mdo/catalog/номенклатура", "mdo/Справочник/Номенклатура"]
+        {
+            let r = gdb
+                .node(variant, ide::GraphDetail::Names)
+                .unwrap()
+                .unwrap_or_else(|e| panic!("{variant} should resolve, got {e:?}"));
+            assert_eq!(r.node.id, canonical, "{variant} resolves to the canonical node");
+        }
+
+        // Malformed ids are BadId, not NotFound.
+        for garbage in ["garbage", "mdo/NoSuchType/X", "method/file/x"] {
+            assert!(
+                matches!(
+                    gdb.node(garbage, ide::GraphDetail::Names).unwrap(),
+                    Err(ide::GraphError::BadId { .. })
+                ),
+                "{garbage} must be BadId"
+            );
+        }
+        // Well-formed but absent → NotFound.
+        assert!(matches!(
+            gdb.node("method/common/Нет/М", ide::GraphDetail::Names).unwrap(),
+            Err(ide::GraphError::NotFound { .. })
+        ));
     }
 
     #[test]

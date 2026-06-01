@@ -17,9 +17,9 @@ pub use document_highlight::{DocumentHighlight, DocumentHighlightKind};
 pub use folding::{FoldingRange, FoldingRangeKind};
 pub use formatting::{FormattingConfig, FormattingResult};
 pub use graph::{
-    build_workspace_graph_rows, method_id_for_path, BatchDbOpener, Direction, EdgeRef,
-    GraphBuildSummary, GraphDetail, GraphError, GraphOverview, GraphRowSink, NeighborsParams,
-    NeighborsResult, NodeRef, NodeResult, SourceItem, SourceResult,
+    build_workspace_graph_rows, classify_graph_id, method_id_for_path, BatchDbOpener, Direction,
+    EdgeRef, GraphBuildSummary, GraphDetail, GraphError, GraphIdKind, GraphOverview, GraphRowSink,
+    NeighborsParams, NeighborsResult, NodeRef, NodeResult, SourceItem, SourceResult,
 };
 pub use hir::graph_index;
 pub use hir::ModuleId;

@@ -1,6 +1,7 @@
 mod baseline;
 mod graph;
 mod graph_db;
+mod graph_query;
 mod state;
 mod tools;
 
@@ -8,6 +9,7 @@ pub use baseline::{
     resolve_project_baseline_diagnostics, BaselineConfigDiagnostics, BaselineResolutionSummary,
 };
 pub use graph_db::build_graph_database;
+pub use graph_query::{graph_db_path, GraphDb};
 pub use state::SharedState;
 use state::WorkspaceSearchMode;
 
