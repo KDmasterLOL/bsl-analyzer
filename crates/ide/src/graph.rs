@@ -18,12 +18,16 @@ use std::sync::Arc;
 
 use bsl_metadata::MdoType;
 use hir::call_graph::{EdgeKind, MethodDispatch};
-use hir::graph_index::{display_scope, encode_scope};
+use hir::graph_index::{
+    display_scope, encode_scope, project_batch_edges, EdgeRow, GraphBuildState, GraphIndex,
+    GraphRowEncoder, NodeRow,
+};
 use hir::{
-    module_key_for_path, ConfigsDatabase, DefDatabase, GraphNode, MethodId, ModuleId, ModuleIndex,
-    ModuleKey, Semantics, WorkspaceCallEdge, WorkspaceCallGraph,
+    is_bsl_source, module_key_for_path, ConfigsDatabase, DefDatabase, GraphNode, MethodId,
+    ModuleId, ModuleIndex, ModuleKey, Semantics, WorkspaceCallEdge, WorkspaceCallGraph,
 };
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Serialize;
 use vfs::FileId;
 
@@ -213,6 +217,110 @@ impl Analysis {
         let ctx = GraphCtx::new(self.database(), source_root_id, workspace_root);
         ctx.source(ids, max_output_tokens)
     }
+}
+
+/// Tallies from a streaming graph build, for logging and metadata.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct GraphBuildSummary {
+    pub modules: usize,
+    /// Node rows handed to the sink (before id de-duplication).
+    pub node_rows: usize,
+    pub edges: usize,
+}
+
+/// A per-batch persistence sink: it receives one batch's freshly-encoded node and
+/// edge rows and is responsible for storing them. The error is boxed so this layer
+/// stays agnostic of the storage backend's error type.
+pub type GraphRowSink<'s> =
+    dyn FnMut(&[NodeRow], &[EdgeRow]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> + 's;
+
+/// Project the whole-workspace call graph into durable node/edge rows in bounded
+/// batches, streaming each batch to `sink` rather than materialising the full
+/// graph in memory. Only the resident [`GraphIndex`] (a compact per-module method
+/// table) plus one batch's rows are live at a time, so peak RAM is bounded by the
+/// batch size — the in-memory whole-config graph does not fit on large configs.
+///
+/// The emitted rows carry the SAME durable ids as the in-memory serving path (a
+/// parity test guards the encoder), and the node set mirrors the in-memory
+/// graph's: every method node (including call-free ones) plus every edge endpoint.
+///
+/// `batch_size` is the number of modules whose edges are projected per batch; a
+/// value of 0 is treated as 1.
+pub fn build_workspace_graph_rows(
+    db: &RootDatabaseImpl,
+    source_root_id: SourceRootId,
+    workspace_root: Option<&Path>,
+    batch_size: usize,
+    sink: &mut GraphRowSink<'_>,
+) -> Result<GraphBuildSummary, Box<dyn std::error::Error + Send + Sync>> {
+    let batch_size = batch_size.max(1);
+    let source_root = db.source_root_input(source_root_id).root(db);
+    let file_set = source_root.file_set();
+    let modules: Vec<ModuleId> =
+        source_root.iter().filter(|&f| is_bsl_source(file_set, f)).map(ModuleId::new).collect();
+
+    let paths: FxHashMap<FileId, String> = source_root
+        .iter()
+        .filter_map(|f| {
+            file_set
+                .path_for_file(&f)
+                .and_then(|p| p.as_path().to_str().map(|s| (f, s.to_string())))
+        })
+        .collect();
+
+    // The index must cover every potential resolution target, so it is built over
+    // all modules up front; only body lowering (in `project_batch_edges`) is batched.
+    let index = GraphIndex::build(db, &modules);
+    let encoder = GraphRowEncoder::new(&index, &paths, workspace_root);
+
+    let mut summary = GraphBuildSummary { modules: modules.len(), ..Default::default() };
+
+    // Phase A — every method node (the fold's dispatch-seeded set), including
+    // isolated methods that no edge references. Flushed in batches of node rows.
+    let mut node_batch: Vec<NodeRow> = Vec::with_capacity(batch_size);
+    for method in index.method_nodes() {
+        node_batch.push(encoder.node_row(&GraphNode::Method(method)));
+        if node_batch.len() >= batch_size {
+            summary.node_rows += node_batch.len();
+            sink(&node_batch, &[])?;
+            node_batch.clear();
+        }
+    }
+    if !node_batch.is_empty() {
+        summary.node_rows += node_batch.len();
+        sink(&node_batch, &[])?;
+        node_batch.clear();
+    }
+
+    // Phase B — edges per module batch, plus the non-method endpoint nodes
+    // (ModuleCode/Mdo/Attribute) that only edges introduce. Method endpoints are
+    // already covered by Phase A, so they are skipped here; a resident id set keeps
+    // a hub object's node from being re-emitted for every edge that targets it.
+    let mut state = GraphBuildState::new();
+    let mut seen_aux: FxHashSet<String> = FxHashSet::default();
+    for batch in modules.chunks(batch_size) {
+        let edges = project_batch_edges(db, batch, &index, &mut state);
+        let edge_rows: Vec<EdgeRow> = edges.iter().map(|e| encoder.edge_row(e)).collect();
+
+        let mut aux_nodes: Vec<NodeRow> = Vec::new();
+        for edge in &edges {
+            for endpoint in [&edge.from, &edge.to] {
+                if matches!(endpoint, GraphNode::Method(_)) {
+                    continue;
+                }
+                let row = encoder.node_row(endpoint);
+                if seen_aux.insert(row.id.clone()) {
+                    aux_nodes.push(row);
+                }
+            }
+        }
+
+        summary.node_rows += aux_nodes.len();
+        summary.edges += edge_rows.len();
+        sink(&aux_nodes, &edge_rows)?;
+    }
+
+    Ok(summary)
 }
 
 struct GraphCtx<'a> {

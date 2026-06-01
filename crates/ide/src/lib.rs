@@ -17,9 +17,11 @@ pub use document_highlight::{DocumentHighlight, DocumentHighlightKind};
 pub use folding::{FoldingRange, FoldingRangeKind};
 pub use formatting::{FormattingConfig, FormattingResult};
 pub use graph::{
-    method_id_for_path, Direction, EdgeRef, GraphDetail, GraphError, GraphOverview,
-    NeighborsParams, NeighborsResult, NodeRef, NodeResult, SourceItem, SourceResult,
+    build_workspace_graph_rows, method_id_for_path, Direction, EdgeRef, GraphBuildSummary,
+    GraphDetail, GraphError, GraphOverview, GraphRowSink, NeighborsParams, NeighborsResult,
+    NodeRef, NodeResult, SourceItem, SourceResult,
 };
+pub use hir::graph_index;
 pub use ide_assists::{Assist, AssistId, SourceChange};
 pub use ide_db::base_db::Locale;
 pub use ide_db::{RootDatabase, RootDatabaseImpl, SymbolKind, TextRange};

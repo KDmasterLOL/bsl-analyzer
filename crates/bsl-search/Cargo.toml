@@ -13,7 +13,7 @@ syntax.workspace = true
 parser.workspace = true
 lexer.workspace = true
 
-rusqlite = { version = "0.39", features = ["bundled"] }
+rusqlite.workspace = true
 postgres = "0.19"
 r2d2_postgres = "0.18"
 

@@ -478,6 +478,8 @@ fn load_workspace_db(workspace_root: &Path) -> anyhow::Result<(RootDatabaseImpl,
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph_db::build_graph_database;
+    use rusqlite::Connection;
     use std::fs;
 
     fn write(root: &Path, rel: &str, text: &str) {
@@ -581,6 +583,75 @@ mod tests {
             )
             .expect("neighbors resolve");
         assert!(callers.nodes.iter().any(|n| n.id == "method/common/Клиент/Главная"));
+    }
+
+    /// The streaming SQLite build must reproduce the in-memory graph: identical
+    /// node-kind tallies, edge counts, durable ids, dispatch and in-degree.
+    #[test]
+    fn sqlite_build_matches_in_memory_graph() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let (db, files) = load_workspace_db(root).expect("workspace loads");
+        let analysis = Analysis::from_database(db.clone());
+        let overview = analysis.graph_overview(GRAPH_SOURCE_ROOT, Some(root), 10);
+
+        let out = root.join(".build/bsl-graph.db");
+        fs::create_dir_all(out.parent().unwrap()).unwrap();
+        let summary = build_graph_database(
+            &db,
+            GRAPH_SOURCE_ROOT,
+            Some(root),
+            &out,
+            1,
+            &crate::graph_db::GraphMeta {
+                revision: 1,
+                fingerprint: 0,
+                files,
+                built_at: "t".to_string(),
+            },
+        )
+        .expect("graph database builds");
+        assert_eq!(summary.edges, overview.edges);
+
+        let conn = Connection::open(&out).unwrap();
+        let count = |sql: &str| -> usize {
+            conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap() as usize
+        };
+
+        assert_eq!(count("SELECT COUNT(*) FROM nodes"), overview.nodes);
+        assert_eq!(count("SELECT COUNT(*) FROM nodes WHERE kind='method'"), overview.methods);
+        assert_eq!(count("SELECT COUNT(*) FROM nodes WHERE kind='module'"), overview.modules);
+        assert_eq!(count("SELECT COUNT(*) FROM nodes WHERE kind='mdo'"), overview.mdos);
+        assert_eq!(count("SELECT COUNT(*) FROM nodes WHERE kind='attribute'"), overview.attributes);
+        assert_eq!(count("SELECT COUNT(*) FROM edges"), overview.edges);
+        assert_eq!(
+            count("SELECT COUNT(*) FROM edges WHERE crosses=1"),
+            overview.client_to_server_edges
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM edges WHERE provenance='resolved'"),
+            *overview.edge_provenance.get("resolved").unwrap_or(&0)
+        );
+
+        let (name, dispatch): (String, String) = conn
+            .query_row(
+                "SELECT name, dispatch FROM nodes WHERE id = ?1",
+                rusqlite::params!["method/common/Сервер/Считать"],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((name.as_str(), dispatch.as_str()), ("Считать", "server"));
+
+        let in_degree: i64 = conn
+            .query_row(
+                "SELECT degree FROM in_degree WHERE id = 'method/common/Сервер/Считать'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(in_degree, 1, "Сервер.Считать is called once");
     }
 
     #[test]

@@ -119,6 +119,14 @@ impl GraphIndex {
         self.methods.get(&method.module)?.all.iter().find(|e| e.local_id == method.local_id)
     }
 
+    /// Every indexed method node. This is exactly the fold's Pass-1 dispatch-seeded
+    /// set (`node_dispatch.keys`), so a streaming build that materialises a node for
+    /// each yields the same isolated (call-free) method nodes the in-memory graph's
+    /// [`nodes`](WorkspaceCallGraph::nodes) exposes, not only edge endpoints.
+    pub fn method_nodes(&self) -> impl Iterator<Item = MethodId> + '_ {
+        self.node_dispatch.keys().copied()
+    }
+
     /// Method lookup mirroring `SymbolTree::find_method` (lowercased, first-wins).
     /// Returns the same `{local_id, is_export}` the Salsa symbol tree would, so the
     /// reconstructed `MethodId` is identical.
