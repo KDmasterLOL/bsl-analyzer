@@ -1,19 +1,19 @@
-//! Agent-facing call-graph tool actions over [`ide::Analysis::graph_*`].
+//! Agent-facing call-graph tool actions over the on-disk [`GraphDb`].
 //!
-//! These run on a blocking task with a Salsa snapshot. Domain errors (not found,
-//! malformed id) are returned in-band as structured JSON so the agent can react,
-//! rather than as transport errors. Each result is wrapped in a freshness
-//! [`envelope`] so the agent knows the revision the answer was computed at and
-//! whether the workspace has drifted on disk since.
+//! These run on a blocking task against a read-only SQLite handle. Domain errors
+//! (not found, malformed id) are returned in-band as structured JSON so the agent
+//! can react, rather than as transport errors; an infrastructure error (e.g. a
+//! failed SQL read) surfaces as an `internal` error object. Each result is wrapped
+//! in a freshness [`envelope`] so the agent knows the revision the answer was
+//! computed at and whether the workspace has drifted on disk since.
 
-use std::path::Path;
-
-use ide::{Analysis, Direction, GraphDetail, NeighborsParams};
+use ide::{Direction, GraphDetail, NeighborsParams};
 use rmcp::model::{CallToolResult, Content};
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use crate::graph::{Freshness, GRAPH_SOURCE_ROOT};
+use crate::graph::Freshness;
+use crate::graph_query::GraphDb;
 use crate::tools::redact::redact_secrets;
 
 pub fn detail_from(s: Option<&str>) -> GraphDetail {
@@ -32,55 +32,54 @@ pub fn direction_from(s: Option<&str>) -> Direction {
     }
 }
 
-pub fn overview(analysis: &Analysis, workspace_root: Option<&Path>, top: usize) -> Value {
-    let overview = analysis.graph_overview(GRAPH_SOURCE_ROOT, workspace_root, top);
-    to_value(&overview)
+/// An infrastructure failure (e.g. a SQL read error) surfaced in-band so the agent
+/// sees a structured error rather than a dropped tool call.
+fn internal(e: anyhow::Error) -> Value {
+    json!({ "error": "internal", "detail": e.to_string() })
 }
 
-pub fn node(
-    analysis: &Analysis,
-    workspace_root: Option<&Path>,
-    id: &str,
-    detail: GraphDetail,
-) -> Value {
-    match analysis.graph_node(GRAPH_SOURCE_ROOT, workspace_root, id, detail) {
-        Ok(mut result) => {
-            redact_opt(&mut result.node.source);
-            to_value(&result)
-        }
-        Err(err) => to_value(&err),
+pub fn overview(graph: &GraphDb, top: usize) -> Value {
+    match graph.overview(top) {
+        Ok(overview) => to_value(&overview),
+        Err(e) => internal(e),
     }
 }
 
-pub fn neighbors(
-    analysis: &Analysis,
-    workspace_root: Option<&Path>,
-    params: &NeighborsParams<'_>,
-) -> Value {
-    match analysis.graph_neighbors(GRAPH_SOURCE_ROOT, workspace_root, params) {
-        Ok(mut result) => {
+pub fn node(graph: &GraphDb, id: &str, detail: GraphDetail) -> Value {
+    match graph.node(id, detail) {
+        Ok(Ok(mut result)) => {
+            redact_opt(&mut result.node.source);
+            to_value(&result)
+        }
+        Ok(Err(err)) => to_value(&err),
+        Err(e) => internal(e),
+    }
+}
+
+pub fn neighbors(graph: &GraphDb, params: &NeighborsParams<'_>) -> Value {
+    match graph.neighbors(params) {
+        Ok(Ok(mut result)) => {
             redact_opt(&mut result.root.source);
             for node in &mut result.nodes {
                 redact_opt(&mut node.source);
             }
             to_value(&result)
         }
-        Err(err) => to_value(&err),
+        Ok(Err(err)) => to_value(&err),
+        Err(e) => internal(e),
     }
 }
 
-pub fn source(
-    analysis: &Analysis,
-    workspace_root: Option<&Path>,
-    ids: &[String],
-    max_output_tokens: usize,
-) -> Value {
-    let mut result =
-        analysis.graph_source(GRAPH_SOURCE_ROOT, workspace_root, ids, max_output_tokens);
-    for item in &mut result.items {
-        redact_opt(&mut item.source);
+pub fn source(graph: &GraphDb, ids: &[String], max_output_tokens: usize) -> Value {
+    match graph.source(ids, max_output_tokens) {
+        Ok(mut result) => {
+            for item in &mut result.items {
+                redact_opt(&mut item.source);
+            }
+            to_value(&result)
+        }
+        Err(e) => internal(e),
     }
-    to_value(&result)
 }
 
 /// Wrap an action result in the freshness envelope. `revision` is the snapshot

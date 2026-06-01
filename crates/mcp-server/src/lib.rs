@@ -442,17 +442,15 @@ impl McpServer {
         let Some(snapshot) = graph.snapshot() else {
             return Ok(CallToolResult::success(vec![Content::text("{\"status\":\"loading\"}")]));
         };
-        let workspace_root = graph.workspace_root().map(std::path::Path::to_path_buf);
 
         tokio::task::spawn_blocking(move || {
-            let workspace_root = workspace_root.as_deref();
-            let analysis = &snapshot.analysis;
+            let gdb = &snapshot.graph;
             let value = match p.action.as_str() {
-                "overview" => tools::graph::overview(analysis, workspace_root, p.top.unwrap_or(20)),
+                "overview" => tools::graph::overview(gdb, p.top.unwrap_or(20)),
                 "node" => {
                     let id = require(p.id, "id", "node")?;
                     let detail = tools::graph::detail_from(p.detail.as_deref());
-                    tools::graph::node(analysis, workspace_root, &id, detail)
+                    tools::graph::node(gdb, &id, detail)
                 }
                 "source" => {
                     if p.ids.is_empty() {
@@ -462,7 +460,7 @@ impl McpServer {
                         ));
                     }
                     let budget = p.max_output_tokens.unwrap_or(4000);
-                    tools::graph::source(analysis, workspace_root, &p.ids, budget)
+                    tools::graph::source(gdb, &p.ids, budget)
                 }
                 action @ ("neighbors" | "callers" | "callees") => {
                     let id = require(p.id, "id", action)?;
@@ -479,7 +477,7 @@ impl McpServer {
                         detail: tools::graph::detail_from(p.detail.as_deref()),
                         provenance_filter: p.provenance.clone(),
                     };
-                    tools::graph::neighbors(analysis, workspace_root, &neighbors)
+                    tools::graph::neighbors(gdb, &neighbors)
                 }
                 other => {
                     return Err(McpError::invalid_params(

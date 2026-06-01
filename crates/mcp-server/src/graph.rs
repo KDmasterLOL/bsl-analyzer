@@ -20,10 +20,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use base_db::{SourceDatabase, SourceRoot, SourceRootId};
-use ide::{Analysis, RootDatabaseImpl};
+use ide::RootDatabaseImpl;
 use rustc_hash::FxHashSet;
 use vfs::{file_set::FileSet, FileId, VfsPath};
 use walkdir::WalkDir;
+
+use crate::graph_query::{graph_db_path, GraphDb};
 
 /// The whole workspace is loaded into a single source root.
 pub(crate) const GRAPH_SOURCE_ROOT: SourceRootId = SourceRootId(0);
@@ -32,6 +34,11 @@ pub(crate) const GRAPH_SOURCE_ROOT: SourceRootId = SourceRootId(0);
 /// file under the config roots, so throttling bounds its cost regardless of how
 /// fast an agent fires `graph` calls.
 const DRIFT_CHECK_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Modules whose edges are projected per batch when building the on-disk graph.
+/// 500 keeps peak RSS comfortably bounded on a 25k-module config (measured ~2.9 GB)
+/// while the resident method index resolves cross-batch calls.
+const GRAPH_BUILD_BATCH: usize = 500;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum GraphStatus {
@@ -70,18 +77,14 @@ impl ReloadState {
     }
 }
 
-/// A coherently published snapshot: the database, the generation it was built at,
-/// the on-disk fingerprint it reflects, and any reload in flight. All four move
-/// together under one lock so a reader never observes a torn mix (e.g. a bumped
-/// generation paired with the old database).
+/// The published build's freshness metadata. The graph itself lives in the SQLite
+/// file at `graph_db_path(workspace_root)` (atomically renamed into place by the
+/// loader), so only the generation/fingerprint/reload move under the lock; a query
+/// opens the file separately. Keeping these together still gives a reader a torn-free
+/// freshness token.
 struct Published {
-    db: RootDatabaseImpl,
     generation: u64,
     fingerprint: u64,
-    /// Set when the load straddled a disk write and the db is an indeterminate
-    /// mix. Forces `stale=true` regardless of fingerprint equality, so an ABA
-    /// rollback to a byte/mtime-identical pre-load state cannot mask it.
-    force_stale: bool,
     reload: ReloadState,
 }
 
@@ -101,12 +104,13 @@ struct ScanCache {
     disk_fp: u64,
 }
 
-/// A served database snapshot plus the freshness token it was built at. Capturing
-/// the generation/fingerprint at snapshot time (not at response time) keeps the
+/// A served graph handle plus the freshness token it was built at. Capturing the
+/// generation/fingerprint at snapshot time (not at response time) keeps the
 /// envelope's `revision`/`stale` consistent with the data actually returned, even
-/// if a reload publishes a newer generation while the query runs.
+/// if a reload publishes a newer generation while the query runs. The handle is an
+/// own read-only connection opened against the on-disk SQLite graph.
 pub(crate) struct GraphSnapshot {
-    pub analysis: Analysis,
+    pub graph: GraphDb,
     generation: u64,
     fingerprint: u64,
     force_stale: bool,
@@ -159,10 +163,6 @@ impl GraphState {
         lock_recover(&self.inner).status.clone()
     }
 
-    pub(crate) fn workspace_root(&self) -> Option<&Path> {
-        self.workspace_root.as_deref()
-    }
-
     /// Trigger the background load if this is the first call. Transitions
     /// `Idle → Loading` and spawns exactly one loader thread; later calls return
     /// immediately. No-op for disabled / already-loading / ready / failed graphs.
@@ -193,14 +193,18 @@ impl GraphState {
     /// a cheap Salsa snapshot and can be moved onto a blocking task without holding
     /// the lock during the query.
     pub(crate) fn snapshot(&self) -> Option<GraphSnapshot> {
-        let inner = lock_recover(&self.inner);
-        let published = inner.published.as_ref()?;
-        Some(GraphSnapshot {
-            analysis: Analysis::from_database(published.db.clone()),
-            generation: published.generation,
-            fingerprint: published.fingerprint,
-            force_stale: published.force_stale,
-        })
+        // Gate on a published build, but take the served revision/fingerprint from
+        // the FILE's own meta (below), not from the lock — so even if a reload
+        // renames a newer file in between this check and the open, the snapshot's
+        // freshness token describes exactly the build it serves, never a torn mix.
+        lock_recover(&self.inner).published.as_ref()?;
+        // A complete file is always present once `Ready` (the loader renames it into
+        // place atomically and publishes only after); a failed open (incomplete or
+        // missing) degrades to the caller's "still loading" path.
+        let path = graph_db_path(self.workspace_root.as_deref()?);
+        let graph = GraphDb::open(&path).ok()?;
+        let (generation, fingerprint, force_stale) = graph.freshness_token().ok()?;
+        Some(GraphSnapshot { graph, generation, fingerprint, force_stale })
     }
 
     /// Report the freshness of `snapshot` relative to disk, and on drift kick an
@@ -274,59 +278,94 @@ impl GraphState {
         let Some(workspace_root) = self.workspace_root.clone() else {
             return;
         };
-        tracing::info!(?workspace_root, is_reload, "graph database load started");
+        // The generation this build will carry. Only one load runs at a time (the
+        // initial load, then at most one reload via the claim guard), so peeking the
+        // current generation without reserving it is race-free; a failed build leaves
+        // it unpublished and the next attempt reuses the same number.
+        let generation =
+            lock_recover(&self.inner).published.as_ref().map(|p| p.generation).unwrap_or(0) + 1;
+
+        tracing::info!(?workspace_root, is_reload, generation, "graph database build started");
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            // Bracket the load with two fingerprint scans. The database reads files
-            // between them, so when `fp_pre == fp_post` the disk did not move during
-            // the load and the db provably reflects exactly that state — publish it
-            // as fresh. When they differ the load straddled a write and the db is an
-            // indeterminate mix; we still publish the (better) new db but mark it
-            // `force_stale` so freshness reports it stale until a clean reload
-            // replaces it — never claiming a coherent state the load could not
-            // capture, even under an ABA rollback to the pre-load fingerprint.
+            // Bracket the build with two fingerprint scans. The build reads files
+            // between them, so when `fp_pre == fp_post` the disk did not move and the
+            // graph provably reflects exactly that state — publish it fresh. When they
+            // differ the build straddled a write and is an indeterminate mix; we still
+            // publish it but mark it `force_stale` so freshness reports it stale until
+            // a clean reload replaces it, even under an ABA rollback to `fp_pre`.
             let fp_pre = workspace_fingerprint(&workspace_root);
-            let (db, files) = load_workspace_db(&workspace_root)?;
+            let out_path = graph_db_path(&workspace_root);
+            // Build into a sibling temp file and rename atomically, so a reader always
+            // sees a complete database — the previous one until the swap, never a
+            // half-written file.
+            let tmp_path = out_path.with_extension("db.building");
+            if let Some(parent) = out_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let built_at = chrono::Utc::now().to_rfc3339();
+            let summary = crate::graph_db::build_graph_database(
+                &workspace_root,
+                &tmp_path,
+                GRAPH_BUILD_BATCH,
+                &crate::graph_db::GraphMeta {
+                    revision: generation,
+                    fingerprint: fp_pre,
+                    files: 0,
+                    built_at,
+                },
+            )?;
             let fp_post = workspace_fingerprint(&workspace_root);
-            anyhow::Ok((db, files, fp_pre, fp_post))
+            let force_stale = fp_pre != fp_post;
+            // Stamp the build-determined freshness into the file's own meta before
+            // it is swapped in, so a served snapshot reads `force_stale` (and the
+            // true file count) from the exact build it serves rather than from a
+            // separately-locked field that a concurrent reload could desync.
+            {
+                let conn = rusqlite::Connection::open(&tmp_path)?;
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('force_stale', ?1)",
+                    rusqlite::params![if force_stale { "1" } else { "0" }],
+                )?;
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('files', ?1)",
+                    rusqlite::params![summary.modules.to_string()],
+                )?;
+            }
+            std::fs::rename(&tmp_path, &out_path)?;
+            anyhow::Ok((summary.modules, fp_pre, force_stale))
         }));
 
         match outcome {
-            Ok(Ok((db, files, fp_pre, fp_post))) => {
-                let force_stale = fp_pre != fp_post;
+            Ok(Ok((files, fp_pre, force_stale))) => {
                 if force_stale {
                     tracing::warn!(
                         is_reload,
-                        "graph load straddled a disk write; marking snapshot stale to force reload"
+                        "graph build straddled a disk write; marking snapshot stale to force reload"
                     );
                 }
                 // Drop the stale scan cache *before* publishing so a concurrent
                 // freshness check re-scans against the new snapshot rather than a
                 // pre-reload cached fingerprint.
                 *lock_recover(&self.scan) = None;
-                let generation = {
+                {
                     let mut inner = lock_recover(&self.inner);
-                    let generation =
-                        inner.published.as_ref().map(|p| p.generation).unwrap_or(0) + 1;
                     inner.published = Some(Published {
-                        db,
                         generation,
                         fingerprint: fp_pre,
-                        force_stale,
                         reload: ReloadState::Idle,
                     });
                     inner.status = GraphStatus::Ready { files };
-                    generation
-                };
-                tracing::info!(files, generation, is_reload, "graph database load complete");
+                }
+                tracing::info!(files, generation, is_reload, "graph database build complete");
             }
             Ok(Err(e)) => {
                 let msg = e.to_string();
-                tracing::warn!("graph database load failed: {msg}");
+                tracing::warn!("graph database build failed: {msg}");
                 self.record_load_failure(is_reload, msg);
             }
             Err(_) => {
-                tracing::error!("graph database load panicked");
-                self.record_load_failure(is_reload, "loader panicked".to_owned());
+                tracing::error!("graph database build panicked");
+                self.record_load_failure(is_reload, "builder panicked".to_owned());
             }
         }
     }
@@ -494,7 +533,10 @@ pub(crate) fn db_for_files(
 }
 
 /// Walk the configuration source and extension directories, load every `.bsl`
-/// file into a fresh database, and register the config metadata paths.
+/// file into a fresh database, and register the config metadata paths. Test-only:
+/// the production graph is built straight into SQLite per batch, never as one
+/// whole-config in-memory database.
+#[cfg(test)]
 fn load_workspace_db(workspace_root: &Path) -> anyhow::Result<(RootDatabaseImpl, usize)> {
     let files = enumerate_bsl_files(workspace_root);
     let config_paths = config_metadata_paths(workspace_root);
@@ -507,7 +549,7 @@ fn load_workspace_db(workspace_root: &Path) -> anyhow::Result<(RootDatabaseImpl,
 mod tests {
     use super::*;
     use crate::graph_db::build_graph_database;
-    use crate::graph_query::{graph_db_path, GraphDb};
+    use ide::Analysis;
     use rusqlite::Connection;
     use std::fs;
 
@@ -571,45 +613,42 @@ mod tests {
         panic!("graph did not become ready");
     }
 
+    /// End-to-end through `GraphState`: a first use builds the SQLite graph off
+    /// the workspace and serves overview/node/neighbors from the opened handle.
     #[test]
     fn loads_workspace_and_serves_graph() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         sample_workspace(root);
 
-        let (db, files) = load_workspace_db(root).expect("workspace loads");
-        assert_eq!(files, 2);
+        let graph = GraphState::for_workspace(root.to_path_buf());
+        graph.ensure_loading();
+        wait_ready(&graph);
+        let snap = graph.snapshot().expect("ready graph snapshots an opened handle");
+        let gdb = &snap.graph;
 
-        let analysis = Analysis::from_database(db);
-        let overview = analysis.graph_overview(GRAPH_SOURCE_ROOT, Some(root), 10);
+        let overview = gdb.overview(10).expect("overview");
         assert_eq!(overview.edges, 1, "Клиент.Главная → Сервер.Считать is one resolved edge");
         assert_eq!(overview.client_to_server_edges, 1);
 
-        let node = analysis
-            .graph_node(
-                GRAPH_SOURCE_ROOT,
-                Some(root),
-                "method/common/Сервер/Считать",
-                ide::GraphDetail::Names,
-            )
-            .expect("durable id resolves after disk load");
+        let node = gdb
+            .node("method/common/Сервер/Считать", ide::GraphDetail::Names)
+            .expect("query")
+            .expect("durable id resolves from the on-disk graph");
         assert_eq!(node.node.name, "Считать");
         assert_eq!(node.node.dispatch, vec!["server"]);
 
         // Callers traversal reaches the client method via the resolved edge.
-        let callers = analysis
-            .graph_neighbors(
-                GRAPH_SOURCE_ROOT,
-                Some(root),
-                &ide::NeighborsParams {
-                    id: "method/common/Сервер/Считать",
-                    dir: ide::Direction::In,
-                    depth: 1,
-                    max_nodes: 50,
-                    detail: ide::GraphDetail::Names,
-                    provenance_filter: Vec::new(),
-                },
-            )
+        let callers = gdb
+            .neighbors(&ide::NeighborsParams {
+                id: "method/common/Сервер/Считать",
+                dir: ide::Direction::In,
+                depth: 1,
+                max_nodes: 50,
+                detail: ide::GraphDetail::Names,
+                provenance_filter: Vec::new(),
+            })
+            .expect("query")
             .expect("neighbors resolve");
         assert!(callers.nodes.iter().any(|n| n.id == "method/common/Клиент/Главная"));
     }

@@ -138,6 +138,24 @@ impl GraphDb {
         Ok(())
     }
 
+    /// The build's freshness token — `(revision, fingerprint, force_stale)` — read
+    /// from the file's own `meta`, so a served response's revision/staleness always
+    /// describe the exact build being served (never a torn mix where a concurrent
+    /// reload renamed a newer file in after the generation was captured elsewhere).
+    /// `force_stale` defaults to false when absent.
+    pub fn freshness_token(&self) -> anyhow::Result<(u64, u64, bool)> {
+        let revision = self
+            .meta("revision")?
+            .and_then(|v| v.parse().ok())
+            .context("graph database meta.revision missing or unparsable")?;
+        let fingerprint = self
+            .meta("fingerprint")?
+            .and_then(|v| v.parse().ok())
+            .context("graph database meta.fingerprint missing or unparsable")?;
+        let force_stale = self.meta("force_stale")?.map(|v| v == "1").unwrap_or(false);
+        Ok((revision, fingerprint, force_stale))
+    }
+
     fn count(&self, sql: &str) -> anyhow::Result<usize> {
         let n: i64 = self.conn.query_row(sql, [], |r| r.get(0)).context("counting graph rows")?;
         Ok(n as usize)
