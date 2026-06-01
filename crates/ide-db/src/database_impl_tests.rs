@@ -1213,3 +1213,129 @@ fn test_workspace_call_graph_query_ref_links_method_to_mdo() {
     assert_eq!(qref.provenance, EdgeProvenance::Inferred);
     assert!(!qref.crosses_client_to_server);
 }
+
+/// Golden equivalence: building the whole-config graph through the resident
+/// `GraphIndex` (the streaming-build path) must produce byte-for-byte the same
+/// `WorkspaceCallGraph` as the monolithic Salsa fold, AND the same per-module
+/// `ResolvedModuleSummary` (which carries the VisibilityBlocked/Unresolved
+/// outcomes the graph itself drops).
+///
+/// No configuration is registered, so the visibility gate is a no-op and
+/// resolution proceeds on the path-based module index alone — exactly like the
+/// existing `test_resolved_module_summary_*` fixtures. This lets the calls
+/// actually reach every resolution arm. Coverage is asserted explicitly (below)
+/// so the equality is not silently vacuous.
+#[test]
+fn workspace_call_graph_via_index_matches_salsa_fold() {
+    use bsl_metadata::MdoType;
+    use hir::call_graph::{EdgeKind, EdgeProvenance, ResolvedTarget};
+    use hir::graph_index::{
+        resolve_module_summary_via_index, workspace_call_graph_via_index, GraphIndex,
+    };
+    use hir::ConfigsDatabase;
+
+    let files: &[(&str, &str)] = &[
+        (
+            "/src/CommonModules/Клиент/Ext/Module.bsl",
+            "&НаКлиенте\n\
+             Процедура Главная() Экспорт\n\
+             ЛокальнаяЦель();\n\
+             Сервер.Считать();\n\
+             Сервер.Приватная();\n\
+             НетМодуля.Метод();\n\
+             ЭтотОбъект.НетМетода();\n\
+             Справочники.Контрагенты.НайтиПоИНН();\n\
+             Справочники.Контрагенты.Внутренняя();\n\
+             Справочники.Контрагенты.НетТакого();\n\
+             Справочники.Номенклатура.СоздатьЭлемент();\n\
+             Справочники.Номенклатура.НайтиПоКоду();\n\
+             КонецПроцедуры\n\
+             &НаКлиенте\n\
+             Процедура ЛокальнаяЦель() Экспорт КонецПроцедуры",
+        ),
+        (
+            "/src/CommonModules/Сервер/Ext/Module.bsl",
+            "&НаСервере\n\
+             Функция Считать() Экспорт КонецФункции\n\
+             &НаСервере\n\
+             Функция Приватная() КонецФункции",
+        ),
+        (
+            "/src/Catalogs/Контрагенты/Ext/ManagerModule.bsl",
+            "Функция НайтиПоИНН() Экспорт КонецФункции\n\
+             Процедура Внутренняя() КонецПроцедуры",
+        ),
+    ];
+
+    let mut db = RootDatabaseImpl::new();
+    let mut file_set = FileSet::new();
+    for (i, (path, _)) in files.iter().enumerate() {
+        file_set.insert(FileId(i as u32), VfsPath::new(*path));
+    }
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    for (i, (_, text)) in files.iter().enumerate() {
+        let fid = FileId(i as u32);
+        db.set_file_source_root(fid, SourceRootId(0));
+        db.set_file_text(fid, text);
+    }
+
+    // Enumerate modules exactly as the fold does (same iteration order → same
+    // edge insertion order, so the two graphs compare equal).
+    let source_root = db.source_root_input(SourceRootId(0)).root(&db);
+    let file_set = source_root.file_set();
+    let modules: Vec<ModuleId> = source_root
+        .iter()
+        .filter(|&f| hir::is_bsl_source(file_set, f))
+        .map(ModuleId::new)
+        .collect();
+
+    let salsa = db.workspace_call_graph(SourceRootId(0));
+    let index = GraphIndex::build(&db, &modules);
+    let via_index = workspace_call_graph_via_index(&db, &modules, &index);
+
+    assert_eq!(via_index, *salsa, "index-backed graph must equal the Salsa fold");
+
+    // Coverage: prove the caller's summary actually hits every resolution arm, so
+    // the equality above is not vacuous. (The index path equals this summary by
+    // the per-module assertion below, so reaching the arm here proves it there.)
+    let caller = db.resolved_module_summary(ModuleId::new(FileId(0)));
+    let has = |pred: &dyn Fn(&hir::ResolvedCallEdge) -> bool| caller.edges.iter().any(pred);
+    assert!(
+        has(&|e| e.provenance == EdgeProvenance::Resolved
+            && matches!(e.target, ResolvedTarget::Method(_))),
+        "local + exported-qualified → Resolved method"
+    );
+    assert!(
+        caller.edges.iter().filter(|e| e.provenance == EdgeProvenance::VisibilityBlocked).count()
+            >= 2,
+        "non-exported qualified (Приватная) and manager (Внутренняя) → VisibilityBlocked"
+    );
+    assert!(
+        has(&|e| e.provenance == EdgeProvenance::Unresolved),
+        "unknown module / ThisObject method → Unresolved"
+    );
+    assert!(
+        has(&|e| e.provenance == EdgeProvenance::Inferred
+            && matches!(e.target, ResolvedTarget::Method(_))),
+        "exported manager-module method (НайтиПоИНН) → Inferred method"
+    );
+    assert!(
+        has(&|e| e.kind == EdgeKind::ManagerCreates
+            && matches!(&e.target, ResolvedTarget::Mdo { mdo_type, .. } if *mdo_type == MdoType::Catalog)),
+        "platform СоздатьЭлемент on a manager-less object → Mdo + ManagerCreates"
+    );
+    assert!(
+        has(&|e| e.kind == EdgeKind::ManagerAccess
+            && matches!(e.target, ResolvedTarget::Mdo { .. })),
+        "platform find / absent manager method → Mdo + ManagerAccess"
+    );
+
+    for &module in &modules {
+        let salsa_summary = db.resolved_module_summary(module);
+        let index_summary = resolve_module_summary_via_index(&db, module, &index);
+        assert_eq!(
+            index_summary, *salsa_summary,
+            "per-module ResolvedModuleSummary must match for {module:?}"
+        );
+    }
+}

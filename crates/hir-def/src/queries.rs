@@ -188,7 +188,7 @@ pub fn resolved_module_summary_query<'db>(
 /// `ManagerCreates` edge; everything else (find/select/…) a `ManagerAccess` edge.
 /// Only platform methods reach here — user manager-module methods resolve to a
 /// `Method` node earlier — so the name prefix is a reliable creation signal.
-fn manager_edge_kind(method_name: &str) -> crate::call_graph::EdgeKind {
+pub(crate) fn manager_edge_kind(method_name: &str) -> crate::call_graph::EdgeKind {
     use crate::call_graph::EdgeKind;
     let lower = method_name.to_lowercase();
     if lower.starts_with("создать") || lower.starts_with("create") {
@@ -202,27 +202,26 @@ fn manager_edge_kind(method_name: &str) -> crate::call_graph::EdgeKind {
 /// case-insensitive, so different spellings of the same object across call sites
 /// and query texts must collapse to a single `Mdo`/`Attribute` node. First-seen
 /// spelling wins; shared between the call-edge and query-ref projections.
-type MdoCanonical = FxHashMap<(MdoType, String), crate::name::Name>;
+pub(crate) type MdoCanonical = FxHashMap<(MdoType, String), crate::name::Name>;
 
-/// Project one module's resolved call/manager edges (its
-/// `resolved_module_summary`) into workspace graph edges. `dispatch` supplies
-/// per-node client/server capability — including callees in other modules — so
-/// the client→server boundary flag can be set without the whole graph being
-/// materialised. `mdo_canonical` is updated as new metadata-object spellings are
-/// seen and is shared with [`project_module_query_edges`].
+/// Project a module's resolved call/manager edges (`summary`) into workspace
+/// graph edges. `dispatch` supplies per-node client/server capability — including
+/// callees in other modules — so the client→server boundary flag can be set
+/// without the whole graph being materialised. `mdo_canonical` is updated as new
+/// metadata-object spellings are seen and is shared with
+/// [`project_module_query_edges`].
 ///
-/// Forcing only `resolved_module_summary(module)` (which lowers exactly this
-/// module's bodies) keeps the projection per-module: a streaming build can
-/// project one module, write its edges, and evict before the next.
-fn project_module_call_edges(
-    db: &dyn crate::configs::ConfigsDatabase,
-    module: ModuleId,
+/// Takes the summary by reference rather than fetching it, so the same projection
+/// serves both the Salsa fold (`db.resolved_module_summary`) and the graph-index
+/// build (a summary resolved against the resident `GraphIndex`).
+pub(crate) fn project_module_call_edges(
+    summary: &crate::call_graph::ResolvedModuleSummary,
     dispatch: &dyn Fn(&GraphNode) -> Option<MethodDispatch>,
     mdo_canonical: &mut MdoCanonical,
 ) -> Vec<WorkspaceCallEdge> {
     use crate::call_graph::{CallerId, ResolvedTarget};
 
-    let summary = db.resolved_module_summary(module);
+    let module = summary.module;
     let mut edges = Vec::with_capacity(summary.edges.len());
     for edge in &summary.edges {
         let to = match &edge.target {
@@ -261,7 +260,7 @@ fn project_module_call_edges(
 /// so query- and call-derived `Mdo` nodes are the same node. The `seen_*` sets
 /// dedup across the whole workspace ("this method reads Catalog X" once), so they
 /// are threaded through every module's projection rather than reset per module.
-fn project_module_query_edges(
+pub(crate) fn project_module_query_edges(
     db: &dyn crate::configs::ConfigsDatabase,
     module: ModuleId,
     mdo_canonical: &mut MdoCanonical,
@@ -381,9 +380,10 @@ pub fn workspace_call_graph_query(
 
     // Pass 2: resolved call/manager edges, projected per module.
     for &module in &modules {
+        let summary = db.resolved_module_summary(module);
         let edges = {
             let dispatch = |node: &GraphNode| graph.dispatch(node);
-            project_module_call_edges(db, module, &dispatch, &mut mdo_canonical)
+            project_module_call_edges(&summary, &dispatch, &mut mdo_canonical)
         };
         for edge in edges {
             graph.insert(edge);

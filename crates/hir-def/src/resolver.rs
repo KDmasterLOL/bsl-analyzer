@@ -216,22 +216,23 @@ impl Resolver {
         ]))
     }
 
-    pub fn resolve_qualified_method(
+    /// Locate the common module `module_name` is declared in (config visibility +
+    /// path index), without looking at any method. Shared by
+    /// [`Self::resolve_qualified_method`] and the graph-index build, so both agree
+    /// on which module a qualified call targets; only the method-lookup step
+    /// (symbol tree vs. the resident graph index) differs.
+    pub(crate) fn locate_common_module(
         &self,
         db: &dyn ConfigsDatabase,
         module_name: &Name,
-        method_name: &Name,
-    ) -> Result<QualifiedMethodResolution, QualifiedMethodError> {
-        let _span =
-            tracing::info_span!("resolve_qualified_method", %module_name, %method_name).entered();
-
+    ) -> Result<ModuleId, QualifiedMethodError> {
         if !self.scopes.iter().any(|s| matches!(s, Scope::WorkspaceScope)) {
-            tracing::warn!("resolve_qualified_method called without workspace scope; refusing");
+            tracing::warn!("locate_common_module called without workspace scope; refusing");
             return Err(QualifiedMethodError::NotFound);
         }
 
         let module_id = self.module_id().ok_or_else(|| {
-            tracing::warn!("resolve_qualified_method called without module scope");
+            tracing::warn!("locate_common_module called without module scope");
             QualifiedMethodError::NotFound
         })?;
 
@@ -241,49 +242,33 @@ impl Resolver {
         if !configurations.is_empty()
             && !Self::module_visible_in_configs(&configurations, module_name)
         {
-            tracing::debug!(
-                "resolve_qualified_method: module '{}' is not declared in any visible \
-                 configuration (main + {} extensions); refusing",
-                module_name,
-                configurations.iter().filter(|c| c.name.is_some()).count()
-            );
             return Err(QualifiedMethodError::NotVisibleInConfigs);
         }
 
         let source_root_id = db.file_source_root_input(file_id).source_root_id(db);
         let module_index = db.module_index(source_root_id);
 
-        let target_file_id = module_index.resolve_common_module(module_name).ok_or_else(|| {
-            tracing::debug!(
-                "resolve_qualified_method: module '{}' NOT found in module_index",
-                module_name
-            );
-            QualifiedMethodError::NotFound
-        })?;
+        let target_file_id = module_index
+            .resolve_common_module(module_name)
+            .ok_or(QualifiedMethodError::NotFound)?;
 
-        tracing::debug!(
-            "resolve_qualified_method: module '{}' resolved to FileId({})",
-            module_name,
-            target_file_id.index()
-        );
+        Ok(crate::ModuleId::new(target_file_id))
+    }
 
-        let target_module_id = crate::ModuleId::new(target_file_id);
+    pub fn resolve_qualified_method(
+        &self,
+        db: &dyn ConfigsDatabase,
+        module_name: &Name,
+        method_name: &Name,
+    ) -> Result<QualifiedMethodResolution, QualifiedMethodError> {
+        let _span =
+            tracing::info_span!("resolve_qualified_method", %module_name, %method_name).entered();
+
+        let target_module_id = self.locate_common_module(db, module_name)?;
         let symbol_tree = db.symbol_tree(target_module_id);
-        let method_symbol = symbol_tree.find_method(method_name).ok_or_else(|| {
-            tracing::debug!(
-                "resolve_qualified_method: module '{}' found but method '{}' NOT found",
-                module_name,
-                method_name
-            );
-            QualifiedMethodError::NotFound
-        })?;
+        let method_symbol =
+            symbol_tree.find_method(method_name).ok_or(QualifiedMethodError::NotFound)?;
 
-        tracing::debug!(
-            "resolve_qualified_method: SUCCESS - '{}.{}' (export = {})",
-            module_name,
-            method_name,
-            method_symbol.is_export
-        );
         Ok(QualifiedMethodResolution {
             method_id: method_symbol.id,
             is_export: method_symbol.is_export,
@@ -333,24 +318,19 @@ impl Resolver {
     /// addressed by an already-parsed [`ManagerType`] (e.g.
     /// `Справочники.Контрагенты.Метод`). Platform manager methods (e.g.
     /// `СоздатьЭлемент`) are not user methods and resolve to `NotFound`.
-    pub fn resolve_manager_method(
+    /// Locate the manager module of `manager_type`/`mdo_name` (config visibility +
+    /// path index), without looking at any method. Shared by
+    /// [`Self::resolve_manager_method`] and the graph-index build.
+    pub(crate) fn locate_manager_module(
         &self,
         db: &dyn ConfigsDatabase,
         manager_type: crate::body::ManagerType,
         mdo_name: &Name,
-        method_name: &Name,
-    ) -> Result<QualifiedMethodResolution, QualifiedMethodError> {
+    ) -> Result<ModuleId, QualifiedMethodError> {
         let mdo_type = manager_type.to_mdo_type();
-        let _span = tracing::info_span!(
-            "resolve_manager_method",
-            ?manager_type,
-            mdo_name = %mdo_name,
-            method = %method_name
-        )
-        .entered();
 
         let current_module_id = self.module_id().ok_or_else(|| {
-            tracing::warn!("resolve_manager_method called without module scope");
+            tracing::warn!("locate_manager_module called without module scope");
             QualifiedMethodError::NotFound
         })?;
 
@@ -359,35 +339,39 @@ impl Resolver {
         if !configurations.is_empty()
             && !Self::mdo_visible_in_configs(&configurations, mdo_type, mdo_name)
         {
-            tracing::debug!(
-                "resolve_manager_method: {:?} '{}' not declared in any visible configuration",
-                mdo_type,
-                mdo_name
-            );
             return Err(QualifiedMethodError::NotVisibleInConfigs);
         }
 
         let source_root_id = db.file_source_root_input(current_file_id).source_root_id(db);
         let module_index = db.module_index(source_root_id);
 
-        let target_file_id =
-            module_index.resolve_manager(manager_type, mdo_name).ok_or_else(|| {
-                tracing::debug!("Manager module not found: {:?} / {}", manager_type, mdo_name);
-                QualifiedMethodError::NotFound
-            })?;
+        let target_file_id = module_index
+            .resolve_manager(manager_type, mdo_name)
+            .ok_or(QualifiedMethodError::NotFound)?;
 
-        let target_module_id = crate::ModuleId::new(target_file_id);
+        Ok(crate::ModuleId::new(target_file_id))
+    }
+
+    pub fn resolve_manager_method(
+        &self,
+        db: &dyn ConfigsDatabase,
+        manager_type: crate::body::ManagerType,
+        mdo_name: &Name,
+        method_name: &Name,
+    ) -> Result<QualifiedMethodResolution, QualifiedMethodError> {
+        let _span = tracing::info_span!(
+            "resolve_manager_method",
+            ?manager_type,
+            mdo_name = %mdo_name,
+            method = %method_name
+        )
+        .entered();
+
+        let target_module_id = self.locate_manager_module(db, manager_type, mdo_name)?;
         let symbol_tree = db.symbol_tree(target_module_id);
 
-        let method_symbol = symbol_tree.find_method(method_name).ok_or_else(|| {
-            tracing::debug!(
-                "Manager module '{:?}/{}' found but method '{}' NOT found",
-                manager_type,
-                mdo_name,
-                method_name
-            );
-            QualifiedMethodError::NotFound
-        })?;
+        let method_symbol =
+            symbol_tree.find_method(method_name).ok_or(QualifiedMethodError::NotFound)?;
 
         Ok(QualifiedMethodResolution {
             method_id: method_symbol.id,

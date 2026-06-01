@@ -58,6 +58,7 @@ pub use hir_def::call_graph::{
 pub use hir_def::docs::{
     is_dotted_type_reference, MethodDocs, ParameterDoc, TypeDoc, VariableDocs,
 };
+pub use hir_def::graph_index;
 pub use hir_def::{resolved_module_summary_query, workspace_call_graph_query};
 
 pub use hir_def::catch_class;

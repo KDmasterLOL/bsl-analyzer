@@ -4,6 +4,7 @@ pub mod catch_class;
 pub mod conditional_tree;
 pub mod configs;
 pub mod docs;
+pub mod graph_index;
 pub mod hir;
 pub mod item_tree;
 pub mod method_body;
