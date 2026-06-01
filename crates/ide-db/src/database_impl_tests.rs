@@ -1339,3 +1339,83 @@ fn workspace_call_graph_via_index_matches_salsa_fold() {
         );
     }
 }
+
+/// The batched build path: a call from a module in one batch to a module in
+/// another must resolve through the resident `GraphIndex`, even though the target
+/// module's text is absent from the batch's database. Asserts the edge SET
+/// collected across per-batch databases equals the Salsa fold's.
+#[test]
+fn project_batch_edges_resolves_across_batches() {
+    use hir::call_graph::WorkspaceCallEdge;
+    use hir::graph_index::{project_batch_edges, GraphBuildState, GraphIndex};
+    use hir::ConfigsDatabase;
+
+    let files: &[(&str, &str)] = &[
+        (
+            "/src/CommonModules/A/Ext/Module.bsl",
+            "Процедура Т() Экспорт\nB.Метод();\nКонецПроцедуры",
+        ),
+        ("/src/CommonModules/B/Ext/Module.bsl", "Функция Метод() Экспорт Возврат 1; КонецФункции"),
+    ];
+    let a = FileId(0);
+    let b = FileId(1);
+    let module_a = ModuleId::new(a);
+    let module_b = ModuleId::new(b);
+
+    let make_db = |texts: &[(FileId, &str)]| -> RootDatabaseImpl {
+        let mut db = RootDatabaseImpl::new();
+        let mut file_set = FileSet::new();
+        for (i, (path, _)) in files.iter().enumerate() {
+            file_set.insert(FileId(i as u32), VfsPath::new(*path));
+        }
+        db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+        for (i, _) in files.iter().enumerate() {
+            db.set_file_source_root(FileId(i as u32), SourceRootId(0));
+        }
+        for &(fid, text) in texts {
+            db.set_file_text(fid, text);
+        }
+        db
+    };
+
+    // The index is built over ALL modules (whole config), here from one db.
+    let full = make_db(&[(a, files[0].1), (b, files[1].1)]);
+    let index = GraphIndex::build(&full, &[module_a, module_b]);
+
+    // Batch 0 sees only A's text; batch 1 only B's. A's call to B.Метод must still
+    // resolve through the index.
+    let db0 = make_db(&[(a, files[0].1)]);
+    let db1 = make_db(&[(b, files[1].1)]);
+    let mut state = GraphBuildState::new();
+    let mut batched: Vec<WorkspaceCallEdge> = Vec::new();
+    batched.extend(project_batch_edges(&db0, &[module_a], &index, &mut state));
+    batched.extend(project_batch_edges(&db1, &[module_b], &index, &mut state));
+
+    let salsa = full.workspace_call_graph(SourceRootId(0));
+    let folded: Vec<WorkspaceCallEdge> = salsa.edges().cloned().collect();
+
+    // The cross-batch call resolved (not dropped to Unresolved).
+    assert!(
+        batched.iter().any(|e| matches!(
+            (&e.from, &e.to),
+            (hir::GraphNode::Method(f), hir::GraphNode::Method(t))
+                if f.module == module_a && t.module == module_b
+        )),
+        "A.Т → B.Метод must resolve through the index across batches"
+    );
+
+    // Same edge MULTISET as the fold (order differs — per-batch vs. global
+    // passes). This fixture has no metadata objects, so node spelling cannot
+    // diverge; a per-edge count comparison guards against duplicates too.
+    let count = |edges: &[WorkspaceCallEdge], target: &WorkspaceCallEdge| {
+        edges.iter().filter(|e| *e == target).count()
+    };
+    assert_eq!(batched.len(), folded.len(), "batched and fold edge counts must match");
+    for edge in folded.iter().chain(batched.iter()) {
+        assert_eq!(
+            count(&batched, edge),
+            count(&folded, edge),
+            "edge multiplicity differs between batched build and fold: {edge:?}"
+        );
+    }
+}

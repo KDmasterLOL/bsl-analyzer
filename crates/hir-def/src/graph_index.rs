@@ -21,8 +21,8 @@ use bsl_metadata::MdoType;
 
 use crate::{
     call_graph::{
-        EdgeKind, EdgeProvenance, GraphMethodEntry, GraphNode, MethodDispatch, ResolvedCallEdge,
-        ResolvedModuleSummary, ResolvedTarget, WorkspaceCallGraph,
+        EdgeKind, EdgeProvenance, GraphNode, MethodDispatch, ResolvedCallEdge,
+        ResolvedModuleSummary, ResolvedTarget, WorkspaceCallEdge, WorkspaceCallGraph,
     },
     configs::ConfigsDatabase,
     name::Name,
@@ -30,15 +30,12 @@ use crate::{
     MethodId, ModuleId,
 };
 
-/// A module's methods as seen from the item tree alone (no body lowering).
+/// A module's method lookup table as seen from the item tree alone (no body
+/// lowering). Only what resolution needs; dispatch lives in
+/// [`GraphIndex::node_dispatch`].
 struct ModuleMethods {
     /// Lowercased name → first declaration, mirroring `SymbolTree::find_method`.
     by_name: FxHashMap<String, MethodRef>,
-    /// All entries in declaration order — for the dispatch table.
-    all: Vec<GraphMethodEntry>,
-    /// Module-level dispatch from the execution context (common modules); `None`
-    /// falls back to each method's annotation dispatch.
-    module_dispatch: Option<MethodDispatch>,
 }
 
 #[derive(Clone, Copy)]
@@ -47,40 +44,66 @@ struct MethodRef {
     is_export: bool,
 }
 
-/// The compact, resident method index over a set of modules.
+/// The compact, resident method index over a set of modules, plus the per-method
+/// client/server dispatch table (the fold's Pass-1 data).
+#[derive(Default)]
 pub struct GraphIndex {
     methods: FxHashMap<ModuleId, ModuleMethods>,
+    /// Per-method dispatch (module execution context wins, else annotation),
+    /// resident so a batched build can flag client→server edges without rebuilding
+    /// the whole graph's dispatch table per batch.
+    node_dispatch: FxHashMap<MethodId, MethodDispatch>,
 }
 
 impl GraphIndex {
-    /// Build the index for `modules` from item trees + module metadata only — no
-    /// body lowering. The heavy `item_tree` is transient; only the compact tables
-    /// are retained, so this stays cheap over a whole configuration.
+    /// An empty index; populate with [`Self::add_module`] (e.g. one batch's modules
+    /// at a time in a fresh database) to build the whole-config index without ever
+    /// holding every module's item tree resident.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Build the index for `modules` in one pass. See [`Self::add_module`]; this is
+    /// the convenience path when every module's text is already in `db`.
     ///
     /// `modules` must cover **every** module that could be a resolution target,
     /// not just the ones whose edges are projected: a qualified/manager call into a
     /// module absent from the index falls into the method-absent arm (→ Unresolved
     /// / Mdo) instead of resolving. A batched build therefore indexes the whole
-    /// configuration here, even though it lowers bodies one batch at a time later.
+    /// configuration, even though it lowers bodies one batch at a time later.
     pub fn build(db: &dyn ConfigsDatabase, modules: &[ModuleId]) -> Self {
-        let mut methods = FxHashMap::default();
+        let mut index = Self::new();
         for &module in modules {
-            let item_tree = db.item_tree(module.file_id);
-            let all = crate::call_graph::extract_graph_methods(&item_tree);
-            // First-wins lowercased map, matching `SymbolTree::find_method`.
-            let mut by_name = FxHashMap::default();
-            for entry in &all {
-                by_name
-                    .entry(entry.name.as_str().to_lowercase())
-                    .or_insert(MethodRef { local_id: entry.local_id, is_export: entry.is_export });
-            }
-            let module_dispatch = db
-                .module_metadata(module)
-                .execution_context
-                .and_then(MethodDispatch::from_execution_context);
-            methods.insert(module, ModuleMethods { by_name, all, module_dispatch });
+            index.add_module(db, module);
         }
-        Self { methods }
+        index
+    }
+
+    /// Add one module's compact method table + dispatch from the item tree and
+    /// module metadata only — no body lowering. The heavy `item_tree` is transient,
+    /// so building the whole index batch-by-batch in fresh databases keeps peak RAM
+    /// bounded.
+    pub fn add_module(&mut self, db: &dyn ConfigsDatabase, module: ModuleId) {
+        let item_tree = db.item_tree(module.file_id);
+        let all = crate::call_graph::extract_graph_methods(&item_tree);
+        let module_dispatch = db
+            .module_metadata(module)
+            .execution_context
+            .and_then(MethodDispatch::from_execution_context);
+
+        // First-wins lowercased map, matching `SymbolTree::find_method`.
+        let mut by_name = FxHashMap::default();
+        for entry in &all {
+            by_name
+                .entry(entry.name.as_str().to_lowercase())
+                .or_insert(MethodRef { local_id: entry.local_id, is_export: entry.is_export });
+            // Pass-1 dispatch rule: module execution context wins, else annotation.
+            self.node_dispatch.insert(
+                MethodId { module, local_id: entry.local_id },
+                module_dispatch.unwrap_or(entry.dispatch),
+            );
+        }
+        self.methods.insert(module, ModuleMethods { by_name });
     }
 
     /// Method lookup mirroring `SymbolTree::find_method` (lowercased, first-wins).
@@ -90,16 +113,19 @@ impl GraphIndex {
         self.methods.get(&target)?.by_name.get(&name.as_str().to_lowercase()).copied()
     }
 
-    /// Populate `graph`'s per-method dispatch table exactly as the fold's Pass 1:
-    /// module execution context wins, else the method's annotation dispatch.
+    /// Resident per-node dispatch — the same value the fold's seeded graph returns
+    /// (`None` for non-method nodes), so the client→server boundary flag matches.
+    pub fn dispatch(&self, node: &GraphNode) -> Option<MethodDispatch> {
+        match node {
+            GraphNode::Method(method_id) => self.node_dispatch.get(method_id).copied(),
+            _ => None,
+        }
+    }
+
+    /// Populate `graph`'s per-method dispatch table (the fold's Pass 1).
     fn seed_dispatch(&self, graph: &mut WorkspaceCallGraph) {
-        for (&module, mm) in &self.methods {
-            for entry in &mm.all {
-                graph.set_dispatch(
-                    GraphNode::Method(MethodId { module, local_id: entry.local_id }),
-                    mm.module_dispatch.unwrap_or(entry.dispatch),
-                );
-            }
+        for (&method_id, &dispatch) in &self.node_dispatch {
+            graph.set_dispatch(GraphNode::Method(method_id), dispatch);
         }
     }
 }
@@ -274,4 +300,64 @@ pub fn workspace_call_graph_via_index(
     }
 
     graph
+}
+
+/// Workspace-wide state threaded across batches: MDO spelling canonicalization and
+/// query-ref dedup. Reuse ONE instance for the whole build — recreating it per
+/// batch would split an object's `Mdo` node across spellings and re-emit duplicate
+/// query_ref edges.
+#[derive(Default)]
+pub struct GraphBuildState {
+    mdo_canonical: crate::queries::MdoCanonical,
+    seen_query_ref: FxHashSet<(GraphNode, MdoType, String)>,
+    seen_query_attr: FxHashSet<(GraphNode, MdoType, String, String)>,
+}
+
+impl GraphBuildState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Project the call/manager and SDBL query_ref edges for one `batch` of modules,
+/// resolving cross-module targets and the client→server boundary flag through the
+/// resident `index`. The batch database therefore needs only its own modules'
+/// texts (plus the configuration metadata) — the foundation of the RAM-bounded
+/// streaming build.
+///
+/// `state` carries the workspace-wide canonicalization/dedup across batches and
+/// MUST be reused. The returned edges are the same set the Salsa fold produces
+/// **modulo `Mdo`/`Attribute` node spelling**: an object referenced only in code
+/// vs. only in a query may get a different first-seen spelling than the fold's
+/// Pass-2-then-Pass-3 order would pick, since this projects call-then-query per
+/// batch. The choice is deterministic and self-consistent within a build (one
+/// node per object, case-insensitive id lookup); it is not byte-identical to the
+/// fold, so this is NOT a drop-in for the order-sensitive
+/// [`workspace_call_graph_via_index`] (which the golden test compares).
+pub fn project_batch_edges(
+    db: &dyn ConfigsDatabase,
+    batch: &[ModuleId],
+    index: &GraphIndex,
+    state: &mut GraphBuildState,
+) -> Vec<WorkspaceCallEdge> {
+    let mut edges = Vec::new();
+    for &module in batch {
+        let summary = resolve_module_summary_via_index(db, module, index);
+        let dispatch = |node: &GraphNode| index.dispatch(node);
+        edges.extend(crate::queries::project_module_call_edges(
+            &summary,
+            &dispatch,
+            &mut state.mdo_canonical,
+        ));
+    }
+    for &module in batch {
+        edges.extend(crate::queries::project_module_query_edges(
+            db,
+            module,
+            &mut state.mdo_canonical,
+            &mut state.seen_query_ref,
+            &mut state.seen_query_attr,
+        ));
+    }
+    edges
 }
