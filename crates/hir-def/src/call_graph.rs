@@ -27,6 +27,23 @@ pub struct MethodSummary {
     pub is_export: bool,
 }
 
+/// Per-method facts derivable from the item tree alone — declaration name,
+/// export flag, annotation dispatch, and the name/source ranges — without
+/// lowering any body. This is the compact, resident "Pass A" data a streaming
+/// graph build needs: enumerating methods and their durable-id/source coordinates
+/// must not force the heavy body HIR that the per-module edge projection does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphMethodEntry {
+    pub local_id: u32,
+    pub name: Name,
+    pub is_export: bool,
+    pub dispatch: MethodDispatch,
+    /// Range of the declaration's name token — the `signature` line anchor.
+    pub name_range: TextRange,
+    /// Range of the whole procedure/function — the `source` slice.
+    pub source_range: TextRange,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MethodDispatch {
     pub can_run_on_client: bool,
@@ -299,43 +316,67 @@ impl WorkspaceCallGraph {
     }
 }
 
+/// Enumerate a module's methods from the item tree, in top-level declaration
+/// order (so the index is each method's `local_id`). Reads declarations only and
+/// never lowers bodies — cheap enough to run over a whole configuration without
+/// the RAM cost of body HIR.
+pub fn extract_graph_methods(item_tree: &ItemTree) -> Vec<GraphMethodEntry> {
+    let mut methods = Vec::new();
+    for (top_level_idx, item) in item_tree.top_level_items().iter().enumerate() {
+        let local_id = top_level_idx as u32;
+        let entry = match item {
+            ModItem::Procedure(idx) => {
+                let proc = item_tree.procedure(*idx);
+                GraphMethodEntry {
+                    local_id,
+                    name: proc.name.clone(),
+                    is_export: proc.is_export,
+                    dispatch: MethodDispatch::from_annotation(
+                        proc.annotations.first().map(|a| &a.kind),
+                    ),
+                    name_range: proc.name_range,
+                    source_range: proc.source_range,
+                }
+            }
+            ModItem::Function(idx) => {
+                let func = item_tree.function(*idx);
+                GraphMethodEntry {
+                    local_id,
+                    name: func.name.clone(),
+                    is_export: func.is_export,
+                    dispatch: MethodDispatch::from_annotation(
+                        func.annotations.first().map(|a| &a.kind),
+                    ),
+                    name_range: func.name_range,
+                    source_range: func.source_range,
+                }
+            }
+            ModItem::Variable(_) => continue,
+        };
+        methods.push(entry);
+    }
+    methods
+}
+
 pub fn extract_call_summary(
     item_tree: &ItemTree,
     module_bodies: &ModuleBodies,
     form_event_handlers: &[bsl_metadata::FormEventHandler],
 ) -> ModuleCallSummary {
-    let mut methods = Vec::new();
+    // Method enumeration is the cheap, body-free part — share it with the graph
+    // build. The `local_method_ids` map (lowercased name → first local id) is what
+    // body extraction uses to bind local calls.
+    let graph_methods = extract_graph_methods(item_tree);
     let mut local_method_ids: FxHashMap<String, u32> = FxHashMap::default();
-
-    for (top_level_idx, item) in item_tree.top_level_items().iter().enumerate() {
-        let local_id = top_level_idx as u32;
-        match item {
-            ModItem::Procedure(idx) => {
-                let proc = item_tree.procedure(*idx);
-                let dispatch =
-                    MethodDispatch::from_annotation(proc.annotations.first().map(|a| &a.kind));
-                local_method_ids.entry(proc.name.as_str().to_lowercase()).or_insert(local_id);
-                methods.push(MethodSummary {
-                    local_id,
-                    name: proc.name.clone(),
-                    dispatch,
-                    is_export: proc.is_export,
-                });
-            }
-            ModItem::Function(idx) => {
-                let func = item_tree.function(*idx);
-                let dispatch =
-                    MethodDispatch::from_annotation(func.annotations.first().map(|a| &a.kind));
-                local_method_ids.entry(func.name.as_str().to_lowercase()).or_insert(local_id);
-                methods.push(MethodSummary {
-                    local_id,
-                    name: func.name.clone(),
-                    dispatch,
-                    is_export: func.is_export,
-                });
-            }
-            ModItem::Variable(_) => {}
-        }
+    let mut methods = Vec::with_capacity(graph_methods.len());
+    for method in &graph_methods {
+        local_method_ids.entry(method.name.as_str().to_lowercase()).or_insert(method.local_id);
+        methods.push(MethodSummary {
+            local_id: method.local_id,
+            name: method.name.clone(),
+            dispatch: method.dispatch,
+            is_export: method.is_export,
+        });
     }
 
     let mut call_edges = Vec::new();
@@ -714,6 +755,65 @@ mod tests {
         assert_eq!(ManagerType::from_name("Справочники"), Some(ManagerType::Catalogs));
         assert_eq!(ManagerType::from_name("catalogs"), Some(ManagerType::Catalogs));
         assert_eq!(ManagerType::from_name("НеизвестныйТип"), None);
+    }
+
+    #[test]
+    fn extract_graph_methods_reports_ranges_dispatch_and_export() {
+        let code = "&НаСервере\n\
+                    Функция Считать() Экспорт\n\
+                    Возврат 1;\n\
+                    КонецФункции\n\
+                    \n\
+                    Процедура Делать()\n\
+                    КонецПроцедуры";
+        let parse = parser::parse(code);
+        let item_tree = ItemTree::from_parse(&parse);
+        let methods = extract_graph_methods(&item_tree);
+        assert_eq!(methods.len(), 2);
+
+        let read = &methods[0];
+        assert_eq!(read.local_id, 0);
+        assert_eq!(read.name.as_str(), "Считать");
+        assert!(read.is_export);
+        assert!(read.dispatch.is_server_only());
+        // The name range pinpoints the identifier; the source range spans the
+        // whole declaration — both index back into the original text.
+        let name_slice =
+            &code[usize::from(read.name_range.start())..usize::from(read.name_range.end())];
+        assert_eq!(name_slice, "Считать");
+        let source_slice =
+            &code[usize::from(read.source_range.start())..usize::from(read.source_range.end())];
+        assert!(source_slice.contains("Функция Считать"));
+        assert!(source_slice.contains("КонецФункции"));
+
+        let act = &methods[1];
+        assert_eq!(act.name.as_str(), "Делать");
+        assert!(!act.is_export);
+        assert!(act.dispatch.can_run_on_client && !act.dispatch.can_run_on_server);
+    }
+
+    #[test]
+    fn extract_graph_methods_matches_call_summary_method_list() {
+        // The two enumerations must agree: `extract_call_summary` reuses
+        // `extract_graph_methods`, so the body-free index is the source of truth
+        // for local ids, names, dispatch, and export.
+        let code = "Процедура Альфа() Экспорт\n\
+                    КонецПроцедуры\n\
+                    Функция Бета()\n\
+                    Возврат 0;\n\
+                    КонецФункции";
+        let parse = parser::parse(code);
+        let item_tree = ItemTree::from_parse(&parse);
+        let entries = extract_graph_methods(&item_tree);
+        let summary = parse_and_extract(code);
+
+        assert_eq!(entries.len(), summary.methods.len());
+        for (entry, summary_method) in entries.iter().zip(&summary.methods) {
+            assert_eq!(entry.local_id, summary_method.local_id);
+            assert_eq!(entry.name, summary_method.name);
+            assert_eq!(entry.is_export, summary_method.is_export);
+            assert_eq!(entry.dispatch, summary_method.dispatch);
+        }
     }
 
     #[test]

@@ -1,12 +1,16 @@
 use std::sync::Arc;
 
 use base_db::FileIdInput;
+use bsl_metadata::MdoType;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use vfs::FileId;
 
 use crate::{
-    body::ExternalRef, module_index::ModuleIndex, DefDatabase, ModuleBodies, ModuleData, ModuleId,
-    WorkspaceSymbols,
+    body::ExternalRef,
+    call_graph::{GraphNode, MethodDispatch, WorkspaceCallEdge},
+    module_index::ModuleIndex,
+    DefDatabase, ModuleBodies, ModuleData, ModuleId, WorkspaceSymbols,
 };
 
 pub use crate::conditional_tree::conditional_tree_query;
@@ -194,16 +198,155 @@ fn manager_edge_kind(method_name: &str) -> crate::call_graph::EdgeKind {
     }
 }
 
+/// Canonical-spelling map for metadata objects. BSL identifiers are
+/// case-insensitive, so different spellings of the same object across call sites
+/// and query texts must collapse to a single `Mdo`/`Attribute` node. First-seen
+/// spelling wins; shared between the call-edge and query-ref projections.
+type MdoCanonical = FxHashMap<(MdoType, String), crate::name::Name>;
+
+/// Project one module's resolved call/manager edges (its
+/// `resolved_module_summary`) into workspace graph edges. `dispatch` supplies
+/// per-node client/server capability — including callees in other modules — so
+/// the client→server boundary flag can be set without the whole graph being
+/// materialised. `mdo_canonical` is updated as new metadata-object spellings are
+/// seen and is shared with [`project_module_query_edges`].
+///
+/// Forcing only `resolved_module_summary(module)` (which lowers exactly this
+/// module's bodies) keeps the projection per-module: a streaming build can
+/// project one module, write its edges, and evict before the next.
+fn project_module_call_edges(
+    db: &dyn crate::configs::ConfigsDatabase,
+    module: ModuleId,
+    dispatch: &dyn Fn(&GraphNode) -> Option<MethodDispatch>,
+    mdo_canonical: &mut MdoCanonical,
+) -> Vec<WorkspaceCallEdge> {
+    use crate::call_graph::{CallerId, ResolvedTarget};
+
+    let summary = db.resolved_module_summary(module);
+    let mut edges = Vec::with_capacity(summary.edges.len());
+    for edge in &summary.edges {
+        let to = match &edge.target {
+            ResolvedTarget::Method(method_id) => GraphNode::Method(*method_id),
+            ResolvedTarget::Mdo { mdo_type, object_name } => {
+                let canon = mdo_canonical
+                    .entry((*mdo_type, object_name.as_str().to_lowercase()))
+                    .or_insert_with(|| object_name.clone())
+                    .clone();
+                GraphNode::Mdo { mdo_type: *mdo_type, object_name: canon }
+            }
+            ResolvedTarget::Unresolved(_) => continue,
+        };
+        let from = match edge.caller {
+            CallerId::Method(local_id) => GraphNode::Method(crate::MethodId { module, local_id }),
+            CallerId::ModuleCode => GraphNode::ModuleCode(module),
+        };
+        // Mdo nodes have no dispatch, so the boundary flag falls out `false`.
+        let crosses_client_to_server = dispatch(&from).is_some_and(|d| d.can_run_on_client)
+            && dispatch(&to).is_some_and(|d| d.is_server_only());
+        edges.push(WorkspaceCallEdge {
+            from,
+            to,
+            kind: edge.kind,
+            provenance: edge.provenance,
+            crosses_client_to_server,
+        });
+    }
+    edges
+}
+
+/// Project one module's SDBL query references into `query_ref` graph edges: a
+/// method (or module body) that runs a query reading a metadata object links to
+/// that object's `Mdo` node (coarse) and to each read attribute's `Attribute`
+/// node (precise). `mdo_canonical` is shared with [`project_module_call_edges`]
+/// so query- and call-derived `Mdo` nodes are the same node. The `seen_*` sets
+/// dedup across the whole workspace ("this method reads Catalog X" once), so they
+/// are threaded through every module's projection rather than reset per module.
+fn project_module_query_edges(
+    db: &dyn crate::configs::ConfigsDatabase,
+    module: ModuleId,
+    mdo_canonical: &mut MdoCanonical,
+    seen_query_ref: &mut FxHashSet<(GraphNode, MdoType, String)>,
+    seen_query_attr: &mut FxHashSet<(GraphNode, MdoType, String, String)>,
+) -> Vec<WorkspaceCallEdge> {
+    use crate::call_graph::{EdgeKind, EdgeProvenance};
+
+    let file_id_input = base_db::FileIdInput::new(db, module.file_id);
+    let sdbl_entries = crate::sdbl_cache::sdbl_hir_for_file_query(db, file_id_input);
+    let mut edges = Vec::new();
+    for (sdbl_expr_id, package) in sdbl_entries.iter() {
+        let from = match sdbl_expr_id.owner {
+            crate::DefWithBodyId::Method(local_id) => {
+                GraphNode::Method(crate::MethodId { module, local_id })
+            }
+            crate::DefWithBodyId::ModuleCode => GraphNode::ModuleCode(module),
+        };
+        let mut resolved = Vec::new();
+        let mut attrs = Vec::new();
+        for query in package.queries() {
+            query.hir.collect_resolved_tables(&mut resolved);
+            query.hir.collect_resolved_attributes(&mut attrs);
+        }
+        // Coarse: the method reads object X (survives even when columns are
+        // unresolved, e.g. `ВЫБРАТЬ *`).
+        for table in resolved {
+            let (mdo_type, name) = match table {
+                sdbl_hir::ResolvedTable::Metadata { mdo_type, name, .. }
+                | sdbl_hir::ResolvedTable::Register { mdo_type, name, .. } => (*mdo_type, name),
+                sdbl_hir::ResolvedTable::TempTable { .. } => continue,
+            };
+            let name_lower = name.to_lowercase();
+            if !seen_query_ref.insert((from.clone(), mdo_type, name_lower.clone())) {
+                continue;
+            }
+            let canon = mdo_canonical
+                .entry((mdo_type, name_lower))
+                .or_insert_with(|| crate::name::Name::new(name))
+                .clone();
+            edges.push(WorkspaceCallEdge {
+                from: from.clone(),
+                to: GraphNode::Mdo { mdo_type, object_name: canon },
+                kind: EdgeKind::QueryRef,
+                provenance: EdgeProvenance::Inferred,
+                crosses_client_to_server: false,
+            });
+        }
+        // Precise: the method reads object X's attribute Y.
+        for (mdo_type, object, attr) in attrs {
+            let object_lower = object.to_lowercase();
+            if !seen_query_attr.insert((
+                from.clone(),
+                mdo_type,
+                object_lower.clone(),
+                attr.to_lowercase(),
+            )) {
+                continue;
+            }
+            let canon = mdo_canonical
+                .entry((mdo_type, object_lower))
+                .or_insert_with(|| crate::name::Name::new(&object))
+                .clone();
+            edges.push(WorkspaceCallEdge {
+                from: from.clone(),
+                to: GraphNode::Attribute {
+                    mdo_type,
+                    object_name: canon,
+                    attr_name: crate::name::Name::new(&attr),
+                },
+                kind: EdgeKind::QueryRef,
+                provenance: EdgeProvenance::Inferred,
+                crosses_client_to_server: false,
+            });
+        }
+    }
+    edges
+}
+
 #[salsa::tracked(lru = 16)]
 pub fn workspace_call_graph_query(
     db: &dyn crate::configs::ConfigsDatabase,
     source_root_input: base_db::SourceRootInput,
 ) -> Arc<crate::call_graph::WorkspaceCallGraph> {
-    use crate::call_graph::{
-        CallerId, GraphNode, MethodDispatch, ResolvedTarget, WorkspaceCallEdge, WorkspaceCallGraph,
-    };
-    use bsl_metadata::MdoType;
-    use rustc_hash::FxHashMap;
+    use crate::call_graph::WorkspaceCallGraph;
 
     let source_root = source_root_input.root(db);
     let file_set = source_root.file_set();
@@ -215,11 +358,7 @@ pub fn workspace_call_graph_query(
     let _span = tracing::info_span!("workspace_call_graph", module_count = modules.len()).entered();
 
     let mut graph = WorkspaceCallGraph::default();
-
-    // One canonical spelling per metadata object: BSL identifiers are
-    // case-insensitive, so different spellings of the same object across call
-    // sites must collapse to a single `Mdo` node.
-    let mut mdo_canonical: FxHashMap<(MdoType, String), crate::name::Name> = FxHashMap::default();
+    let mut mdo_canonical: MdoCanonical = FxHashMap::default();
 
     // Pass 1: per-method client/server dispatch, needed before edges so the
     // boundary flag can consult a callee that lives in another module. Common
@@ -240,116 +379,32 @@ pub fn workspace_call_graph_query(
         }
     }
 
-    // Pass 2: fold resolved edges into forward/reverse adjacency.
+    // Pass 2: resolved call/manager edges, projected per module.
     for &module in &modules {
-        let summary = db.resolved_module_summary(module);
-        for edge in &summary.edges {
-            let to = match &edge.target {
-                ResolvedTarget::Method(method_id) => GraphNode::Method(*method_id),
-                ResolvedTarget::Mdo { mdo_type, object_name } => {
-                    let canon = mdo_canonical
-                        .entry((*mdo_type, object_name.as_str().to_lowercase()))
-                        .or_insert_with(|| object_name.clone())
-                        .clone();
-                    GraphNode::Mdo { mdo_type: *mdo_type, object_name: canon }
-                }
-                ResolvedTarget::Unresolved(_) => continue,
-            };
-            let from = match edge.caller {
-                CallerId::Method(local_id) => {
-                    GraphNode::Method(crate::MethodId { module, local_id })
-                }
-                CallerId::ModuleCode => GraphNode::ModuleCode(module),
-            };
-            // Mdo nodes have no dispatch, so the boundary flag falls out `false`.
-            let crosses_client_to_server =
-                graph.dispatch(&from).is_some_and(|d| d.can_run_on_client)
-                    && graph.dispatch(&to).is_some_and(|d| d.is_server_only());
-            graph.insert(WorkspaceCallEdge {
-                from,
-                to,
-                kind: edge.kind,
-                provenance: edge.provenance,
-                crosses_client_to_server,
-            });
+        let edges = {
+            let dispatch = |node: &GraphNode| graph.dispatch(node);
+            project_module_call_edges(db, module, &dispatch, &mut mdo_canonical)
+        };
+        for edge in edges {
+            graph.insert(edge);
         }
     }
 
-    // Pass 3: query_ref edges. A method (or module body) that runs an SDBL query
-    // reading a metadata object links to that object's Mdo node. Built here so it
-    // shares `mdo_canonical` — query- and call-derived Mdo nodes must be the same
-    // node. Deduped per (caller, object): "this method reads Catalog X" once.
-    let mut seen_query_ref: rustc_hash::FxHashSet<(GraphNode, MdoType, String)> =
-        rustc_hash::FxHashSet::default();
-    let mut seen_query_attr: rustc_hash::FxHashSet<(GraphNode, MdoType, String, String)> =
-        rustc_hash::FxHashSet::default();
+    // Pass 3: SDBL query_ref edges, projected per module. Built after the call
+    // edges so it shares the populated `mdo_canonical`; the `seen_*` sets dedup
+    // across the whole workspace.
+    let mut seen_query_ref: FxHashSet<(GraphNode, MdoType, String)> = FxHashSet::default();
+    let mut seen_query_attr: FxHashSet<(GraphNode, MdoType, String, String)> = FxHashSet::default();
     for &module in &modules {
-        let file_id_input = base_db::FileIdInput::new(db, module.file_id);
-        let sdbl_entries = crate::sdbl_cache::sdbl_hir_for_file_query(db, file_id_input);
-        for (sdbl_expr_id, package) in sdbl_entries.iter() {
-            let from = match sdbl_expr_id.owner {
-                crate::DefWithBodyId::Method(local_id) => {
-                    GraphNode::Method(crate::MethodId { module, local_id })
-                }
-                crate::DefWithBodyId::ModuleCode => GraphNode::ModuleCode(module),
-            };
-            let mut resolved = Vec::new();
-            let mut attrs = Vec::new();
-            for query in package.queries() {
-                query.hir.collect_resolved_tables(&mut resolved);
-                query.hir.collect_resolved_attributes(&mut attrs);
-            }
-            // Coarse: the method reads object X (survives even when columns are
-            // unresolved, e.g. `ВЫБРАТЬ *`).
-            for table in resolved {
-                let (mdo_type, name) = match table {
-                    sdbl_hir::ResolvedTable::Metadata { mdo_type, name, .. }
-                    | sdbl_hir::ResolvedTable::Register { mdo_type, name, .. } => (*mdo_type, name),
-                    sdbl_hir::ResolvedTable::TempTable { .. } => continue,
-                };
-                let name_lower = name.to_lowercase();
-                if !seen_query_ref.insert((from.clone(), mdo_type, name_lower.clone())) {
-                    continue;
-                }
-                let canon = mdo_canonical
-                    .entry((mdo_type, name_lower))
-                    .or_insert_with(|| crate::name::Name::new(name))
-                    .clone();
-                graph.insert(WorkspaceCallEdge {
-                    from: from.clone(),
-                    to: GraphNode::Mdo { mdo_type, object_name: canon },
-                    kind: crate::call_graph::EdgeKind::QueryRef,
-                    provenance: crate::call_graph::EdgeProvenance::Inferred,
-                    crosses_client_to_server: false,
-                });
-            }
-            // Precise: the method reads object X's attribute Y.
-            for (mdo_type, object, attr) in attrs {
-                let object_lower = object.to_lowercase();
-                if !seen_query_attr.insert((
-                    from.clone(),
-                    mdo_type,
-                    object_lower.clone(),
-                    attr.to_lowercase(),
-                )) {
-                    continue;
-                }
-                let canon = mdo_canonical
-                    .entry((mdo_type, object_lower))
-                    .or_insert_with(|| crate::name::Name::new(&object))
-                    .clone();
-                graph.insert(WorkspaceCallEdge {
-                    from: from.clone(),
-                    to: GraphNode::Attribute {
-                        mdo_type,
-                        object_name: canon,
-                        attr_name: crate::name::Name::new(&attr),
-                    },
-                    kind: crate::call_graph::EdgeKind::QueryRef,
-                    provenance: crate::call_graph::EdgeProvenance::Inferred,
-                    crosses_client_to_server: false,
-                });
-            }
+        let edges = project_module_query_edges(
+            db,
+            module,
+            &mut mdo_canonical,
+            &mut seen_query_ref,
+            &mut seen_query_attr,
+        );
+        for edge in edges {
+            graph.insert(edge);
         }
     }
 
