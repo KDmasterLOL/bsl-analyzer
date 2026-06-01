@@ -103,6 +103,204 @@ impl SdblHir {
     }
 }
 
+impl SdblHir {
+    /// Metadata-object attributes read by this query, resolved per query level
+    /// (each subquery is its own scope). Conservative first-hop only: an explicit
+    /// `alias.field`, or an unqualified `field` that matches exactly one table in
+    /// scope (ambiguous matches are skipped). Register dimension/resource/attribute
+    /// columns count. Standard (platform) fields are skipped. Returns
+    /// `(mdo_type, object_name, attr_name)` with declared metadata names.
+    pub fn collect_resolved_attributes(&self, out: &mut Vec<(MdoType, String, String)>) {
+        use std::collections::HashMap;
+
+        // This level's resolved tables: case-insensitive alias → table, and the
+        // full list for unqualified resolution.
+        let mut by_alias: HashMap<String, &ResolvedTable> = HashMap::new();
+        let mut resolved: Vec<&ResolvedTable> = Vec::new();
+        for table in self.all_tables() {
+            if let Some(meta) = &table.metadata {
+                by_alias.insert(table.effective_name().to_lowercase(), meta);
+                resolved.push(meta);
+            }
+        }
+
+        // One walk gathers this level's column refs and the nested subqueries to
+        // recurse into (which resolve against their own scope, not this one).
+        let mut cols: Vec<&[Name]> = Vec::new();
+        let mut subqueries: Vec<&SdblHir> = Vec::new();
+        for field in &self.select.fields {
+            walk_level_expr(&field.expr, &mut cols, &mut subqueries);
+        }
+        for join in &self.joins {
+            if let Some(cond) = &join.condition {
+                walk_level_expr(cond, &mut cols, &mut subqueries);
+            }
+        }
+        if let Some(where_expr) = &self.where_clause {
+            walk_level_expr(where_expr, &mut cols, &mut subqueries);
+        }
+        if let Some(group_by) = &self.group_by {
+            for expr in &group_by.exprs {
+                walk_level_expr(expr, &mut cols, &mut subqueries);
+            }
+        }
+        if let Some(having) = &self.having {
+            walk_level_expr(having, &mut cols, &mut subqueries);
+        }
+        if let Some(order_by) = &self.order_by {
+            for item in &order_by.items {
+                walk_level_expr(&item.expr, &mut cols, &mut subqueries);
+            }
+        }
+
+        for parts in cols {
+            if let Some(attr) = resolve_column_attribute(parts, &by_alias, &resolved) {
+                out.push(attr);
+            }
+        }
+
+        for table in self.all_tables() {
+            for sub in &table.subquery {
+                sub.collect_resolved_attributes(out);
+            }
+        }
+        for sq in subqueries {
+            sq.collect_resolved_attributes(out);
+        }
+        for union in &self.unions {
+            union.query.collect_resolved_attributes(out);
+        }
+    }
+}
+
+/// Search every field bucket of a resolved table (a register keeps dimensions,
+/// resources, and attributes separate from `fields`).
+fn find_attr_field<'a>(table: &'a ResolvedTable, col: &str) -> Option<&'a FieldDef> {
+    let in_bucket = |bucket: &'a [FieldDef]| bucket.iter().find(|f| f.matches_name(col));
+    match table {
+        ResolvedTable::Metadata { fields, .. } | ResolvedTable::TempTable { fields, .. } => {
+            in_bucket(fields)
+        }
+        ResolvedTable::Register { fields, dimensions, resources, attributes, .. } => {
+            in_bucket(fields)
+                .or_else(|| in_bucket(dimensions))
+                .or_else(|| in_bucket(resources))
+                .or_else(|| in_bucket(attributes))
+        }
+    }
+}
+
+/// The (mdo_type, declared object name, declared attribute name) for a resolved
+/// field, or `None` for temp tables (no metadata object) and standard fields.
+fn attribute_of(table: &ResolvedTable, field: &FieldDef) -> Option<(MdoType, String, String)> {
+    if field.is_standard {
+        return None;
+    }
+    let (mdo_type, name) = match table {
+        ResolvedTable::Metadata { mdo_type, name, .. }
+        | ResolvedTable::Register { mdo_type, name, .. } => (*mdo_type, name),
+        ResolvedTable::TempTable { .. } => return None,
+    };
+    Some((mdo_type, name.clone(), field.name.clone()))
+}
+
+/// Resolve a column reference to a metadata attribute, first hop only. Qualified
+/// `alias.field` binds via the alias; unqualified `field` binds only when exactly
+/// one table in scope has it (ambiguity → `None`).
+fn resolve_column_attribute(
+    parts: &[Name],
+    by_alias: &std::collections::HashMap<String, &ResolvedTable>,
+    resolved: &[&ResolvedTable],
+) -> Option<(MdoType, String, String)> {
+    match parts {
+        [] => None,
+        [field] => {
+            let mut hit: Option<(&ResolvedTable, &FieldDef)> = None;
+            for table in resolved {
+                if let Some(f) = find_attr_field(table, field.as_str()) {
+                    if hit.is_some() {
+                        return None; // ambiguous across tables
+                    }
+                    hit = Some((table, f));
+                }
+            }
+            let (table, f) = hit?;
+            attribute_of(table, f)
+        }
+        [alias, field, ..] => {
+            let table = by_alias.get(&alias.as_str().to_lowercase())?;
+            let f = find_attr_field(table, field.as_str())?;
+            attribute_of(table, f)
+        }
+    }
+}
+
+/// Gather this query level's column-ref paths and the nested subqueries to recurse
+/// into. Descends ordinary expressions but stops at subquery boundaries — those
+/// resolve against their own scope.
+fn walk_level_expr<'a>(
+    expr: &'a ExprHir,
+    cols: &mut Vec<&'a [Name]>,
+    subqueries: &mut Vec<&'a SdblHir>,
+) {
+    match expr {
+        ExprHir::ColumnRef { parts, .. } => cols.push(parts.as_slice()),
+        ExprHir::Subquery { query, .. } => subqueries.push(query),
+        ExprHir::In { expr: inner, values, .. } => {
+            walk_level_expr(inner, cols, subqueries);
+            match values {
+                InValues::List(items) => {
+                    for item in items {
+                        walk_level_expr(item, cols, subqueries);
+                    }
+                }
+                InValues::Subquery(sq) => subqueries.push(sq),
+            }
+        }
+        ExprHir::BinaryOp { lhs, rhs, .. } => {
+            walk_level_expr(lhs, cols, subqueries);
+            walk_level_expr(rhs, cols, subqueries);
+        }
+        ExprHir::UnaryOp { expr: inner, .. } => walk_level_expr(inner, cols, subqueries),
+        ExprHir::FunctionCall { args, .. } => {
+            for arg in args {
+                walk_level_expr(arg, cols, subqueries);
+            }
+        }
+        ExprHir::Case { operand, when_clauses, else_expr, .. } => {
+            if let Some(op) = operand {
+                walk_level_expr(op, cols, subqueries);
+            }
+            for clause in when_clauses {
+                walk_level_expr(&clause.condition, cols, subqueries);
+                walk_level_expr(&clause.result, cols, subqueries);
+            }
+            if let Some(else_e) = else_expr {
+                walk_level_expr(else_e, cols, subqueries);
+            }
+        }
+        ExprHir::Between { expr: inner, low, high, .. } => {
+            walk_level_expr(inner, cols, subqueries);
+            walk_level_expr(low, cols, subqueries);
+            walk_level_expr(high, cols, subqueries);
+        }
+        ExprHir::Like { expr: inner, pattern, escape, .. } => {
+            walk_level_expr(inner, cols, subqueries);
+            walk_level_expr(pattern, cols, subqueries);
+            if let Some(esc) = escape {
+                walk_level_expr(esc, cols, subqueries);
+            }
+        }
+        ExprHir::IsNull { expr: inner, .. } => walk_level_expr(inner, cols, subqueries),
+        ExprHir::Tuple { elements, .. } => {
+            for elem in elements {
+                walk_level_expr(elem, cols, subqueries);
+            }
+        }
+        ExprHir::Literal { .. } | ExprHir::Parameter { .. } | ExprHir::Missing { .. } => {}
+    }
+}
+
 /// Recurse an expression, descending into embedded subqueries to collect their
 /// metadata-resolved tables.
 fn collect_expr_tables<'a>(expr: &'a ExprHir, out: &mut Vec<&'a ResolvedTable>) {

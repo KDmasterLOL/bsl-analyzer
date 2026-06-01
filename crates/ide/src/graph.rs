@@ -91,6 +91,7 @@ pub struct GraphOverview {
     pub modules: usize,
     pub methods: usize,
     pub mdos: usize,
+    pub attributes: usize,
     pub nodes: usize,
     pub edges: usize,
     pub top_by_centrality: Vec<NodeRef>,
@@ -254,6 +255,15 @@ impl<'a> GraphCtx<'a> {
             GraphNode::Mdo { mdo_type, object_name } => {
                 (format!("mdo/{}/{}", mdo_type.english_name(), object_name.as_str()), true)
             }
+            GraphNode::Attribute { mdo_type, object_name, attr_name } => (
+                format!(
+                    "attribute/{}/{}/{}",
+                    mdo_type.english_name(),
+                    object_name.as_str(),
+                    attr_name.as_str()
+                ),
+                true,
+            ),
         }
     }
 
@@ -306,6 +316,9 @@ impl<'a> GraphCtx<'a> {
         }
         if let Some(rest) = id.strip_prefix("mdo/") {
             return self.resolve_mdo_id(rest, id);
+        }
+        if let Some(rest) = id.strip_prefix("attribute/") {
+            return self.resolve_attribute_id(rest, id);
         }
 
         let parts: Vec<&str> = id.split('/').collect();
@@ -368,6 +381,35 @@ impl<'a> GraphCtx<'a> {
             .ok_or_else(|| GraphError::NotFound { id: id.to_string() })
     }
 
+    /// Resolve `<MdoEnglish>/<Object>/<Attr>` to the attribute node, if the graph
+    /// references it. Case-insensitive on object and attribute names; returns the
+    /// graph's canonical node.
+    fn resolve_attribute_id(&self, rest: &str, id: &str) -> Result<GraphNode, GraphError> {
+        let mut parts = rest.splitn(3, '/');
+        let bad = || GraphError::BadId {
+            id: id.to_string(),
+            reason: "attribute id must be 'attribute/<MdoType>/<Object>/<Attr>'".to_string(),
+        };
+        let mdo_eng = parts.next().ok_or_else(bad)?;
+        let object = parts.next().ok_or_else(bad)?;
+        let attr = parts.next().ok_or_else(bad)?;
+        let mdo_type: MdoType = mdo_eng.parse().map_err(|_| GraphError::BadId {
+            id: id.to_string(),
+            reason: format!("unknown metadata type '{mdo_eng}'"),
+        })?;
+        let object_lower = object.to_lowercase();
+        let attr_lower = attr.to_lowercase();
+        self.graph
+            .nodes()
+            .find(|n| {
+                matches!(n, GraphNode::Attribute { mdo_type: mt, object_name, attr_name }
+                    if *mt == mdo_type
+                        && object_name.as_str().to_lowercase() == object_lower
+                        && attr_name.as_str().to_lowercase() == attr_lower)
+            })
+            .ok_or_else(|| GraphError::NotFound { id: id.to_string() })
+    }
+
     fn resolve_rel_path(&self, rel: &str) -> Option<FileId> {
         for file_id in self.source_root.iter() {
             let abs = match self.path_for(file_id) {
@@ -395,6 +437,23 @@ impl<'a> GraphCtx<'a> {
             GraphNode::ModuleCode(module) => self.module_node_ref(module, id, addressable),
             GraphNode::Mdo { mdo_type, object_name } => {
                 self.mdo_node_ref(mdo_type, object_name.as_str(), id, addressable)
+            }
+            GraphNode::Attribute { mdo_type, object_name, attr_name } => {
+                let name = attr_name.as_str().to_string();
+                let qualified =
+                    format!("{}.{}.{name}", mdo_type.russian_name(), object_name.as_str());
+                NodeRef {
+                    id,
+                    kind: "attribute",
+                    name,
+                    qualified,
+                    module: None,
+                    signature: None,
+                    source: None,
+                    dispatch: Vec::new(),
+                    is_export: None,
+                    addressable,
+                }
             }
         }
     }
@@ -558,12 +617,12 @@ impl<'a> GraphCtx<'a> {
                     }),
                     truncated: false,
                 },
-                Ok(GraphNode::Mdo { .. }) => SourceItem {
+                Ok(GraphNode::Mdo { .. }) | Ok(GraphNode::Attribute { .. }) => SourceItem {
                     id: id.clone(),
                     source: None,
                     error: Some(GraphError::Unsupported {
                         id: id.clone(),
-                        reason: "a metadata object has no source; request a method".to_string(),
+                        reason: "a metadata node has no source; request a method".to_string(),
                     }),
                     truncated: false,
                 },
@@ -589,6 +648,7 @@ impl<'a> GraphCtx<'a> {
         let mut methods = 0usize;
         let mut modules = 0usize;
         let mut mdos = 0usize;
+        let mut attributes = 0usize;
         let mut node_count = 0usize;
         for node in self.graph.nodes() {
             node_count += 1;
@@ -596,6 +656,7 @@ impl<'a> GraphCtx<'a> {
                 GraphNode::Method(_) => methods += 1,
                 GraphNode::ModuleCode(_) => modules += 1,
                 GraphNode::Mdo { .. } => mdos += 1,
+                GraphNode::Attribute { .. } => attributes += 1,
             }
         }
 
@@ -625,6 +686,7 @@ impl<'a> GraphCtx<'a> {
             modules,
             methods,
             mdos,
+            attributes,
             nodes: node_count,
             edges: self.graph.edge_count(),
             top_by_centrality,

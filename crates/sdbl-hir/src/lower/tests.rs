@@ -2761,3 +2761,43 @@ fn cast_unknown_mdo_qualifier_collapses_to_unknown() {
     use crate::types::SdblType;
     assert_eq!(cast_field_ty("ВЫБРАТЬ ВЫРАЗИТЬ(0 КАК Foo.Bar) КАК X"), SdblType::Unknown);
 }
+
+#[test]
+fn collect_resolved_attributes_first_hop_skips_standard() {
+    use crate::hir::SdblHir;
+    use bsl_metadata::{Attribute, AttributeType, Configuration, MdoType, MetadataObject};
+    use std::sync::Arc;
+
+    let mut config = Configuration::new("Test");
+    let mut catalog = MetadataObject::new(MdoType::Catalog, "Валюты");
+    catalog.add_attribute(Attribute {
+        name: "Курс".to_string(),
+        name_en: Some("Rate".to_string()),
+        attr_type: AttributeType::Number { precision: 15, scale: 4 },
+    });
+    catalog.add_attribute(Attribute {
+        name: "Код".to_string(),
+        name_en: Some("Code".to_string()),
+        attr_type: AttributeType::String { length: Some(10) },
+    });
+    config.add_metadata_object(catalog);
+
+    let ast = parser::parse_sdbl("ВЫБРАТЬ Валюты.Курс, Валюты.Код ИЗ Справочник.Валюты КАК Валюты");
+    let package = lower_sdbl_to_hir(&ast, Some(Arc::new(config)));
+
+    let mut attrs: Vec<(MdoType, String, String)> = Vec::new();
+    for query in package.queries() {
+        SdblHir::collect_resolved_attributes(&query.hir, &mut attrs);
+    }
+
+    // Курс (user attribute, qualified by alias) resolves to its attribute node.
+    assert!(
+        attrs.iter().any(|(t, o, a)| *t == MdoType::Catalog && o == "Валюты" && a == "Курс"),
+        "user attribute Валюты.Курс must resolve: {attrs:?}"
+    );
+    // Код is a standard (platform) attribute → skipped.
+    assert!(
+        !attrs.iter().any(|(_, _, a)| a == "Код"),
+        "standard attribute Код must be skipped: {attrs:?}"
+    );
+}

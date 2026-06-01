@@ -103,7 +103,7 @@ pub fn schema() -> CallToolResult {
     let schema = json!({
         "schema_version": "1",
         "actions": ["overview", "schema", "node", "source", "neighbors", "callers", "callees"],
-        "node_kinds": ["method", "module", "mdo"],
+        "node_kinds": ["method", "module", "mdo", "attribute"],
         "edge_kinds": ["call", "manager_creates", "manager_access", "query_ref"],
         "provenance": ["resolved", "inferred", "visibility_blocked", "unresolved"],
         "dispatch": ["client", "server"],
@@ -120,6 +120,7 @@ pub fn schema() -> CallToolResult {
             "method_record_set": "method/recordset/<MdoEnglish>/<Object>/<Method>",
             "module": "module/common/<Module>",
             "mdo": "mdo/<MdoEnglish>/<ObjectName>",
+            "attribute": "attribute/<MdoEnglish>/<ObjectName>/<AttrName>",
             "path_fallback": "method/file/<relpath>::<Method>"
         }
     });

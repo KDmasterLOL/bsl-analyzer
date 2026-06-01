@@ -209,6 +209,14 @@ pub enum GraphNode {
         mdo_type: MdoType,
         object_name: Name,
     },
+    /// An attribute (or register dimension/resource, tabular-section column, …) of
+    /// a metadata object, read by an SDBL query. `object_name` shares the `Mdo`
+    /// canonicalisation; `attr_name` is the declared metadata field name.
+    Attribute {
+        mdo_type: MdoType,
+        object_name: Name,
+        attr_name: Name,
+    },
 }
 
 /// A resolved call edge between two workspace graph nodes.

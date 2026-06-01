@@ -281,6 +281,8 @@ pub fn workspace_call_graph_query(
     // node. Deduped per (caller, object): "this method reads Catalog X" once.
     let mut seen_query_ref: rustc_hash::FxHashSet<(GraphNode, MdoType, String)> =
         rustc_hash::FxHashSet::default();
+    let mut seen_query_attr: rustc_hash::FxHashSet<(GraphNode, MdoType, String, String)> =
+        rustc_hash::FxHashSet::default();
     for &module in &modules {
         let file_id_input = base_db::FileIdInput::new(db, module.file_id);
         let sdbl_entries = crate::sdbl_cache::sdbl_hir_for_file_query(db, file_id_input);
@@ -292,9 +294,13 @@ pub fn workspace_call_graph_query(
                 crate::DefWithBodyId::ModuleCode => GraphNode::ModuleCode(module),
             };
             let mut resolved = Vec::new();
+            let mut attrs = Vec::new();
             for query in package.queries() {
                 query.hir.collect_resolved_tables(&mut resolved);
+                query.hir.collect_resolved_attributes(&mut attrs);
             }
+            // Coarse: the method reads object X (survives even when columns are
+            // unresolved, e.g. `ВЫБРАТЬ *`).
             for table in resolved {
                 let (mdo_type, name) = match table {
                     sdbl_hir::ResolvedTable::Metadata { mdo_type, name, .. }
@@ -312,6 +318,33 @@ pub fn workspace_call_graph_query(
                 graph.insert(WorkspaceCallEdge {
                     from: from.clone(),
                     to: GraphNode::Mdo { mdo_type, object_name: canon },
+                    kind: crate::call_graph::EdgeKind::QueryRef,
+                    provenance: crate::call_graph::EdgeProvenance::Inferred,
+                    crosses_client_to_server: false,
+                });
+            }
+            // Precise: the method reads object X's attribute Y.
+            for (mdo_type, object, attr) in attrs {
+                let object_lower = object.to_lowercase();
+                if !seen_query_attr.insert((
+                    from.clone(),
+                    mdo_type,
+                    object_lower.clone(),
+                    attr.to_lowercase(),
+                )) {
+                    continue;
+                }
+                let canon = mdo_canonical
+                    .entry((mdo_type, object_lower))
+                    .or_insert_with(|| crate::name::Name::new(&object))
+                    .clone();
+                graph.insert(WorkspaceCallEdge {
+                    from: from.clone(),
+                    to: GraphNode::Attribute {
+                        mdo_type,
+                        object_name: canon,
+                        attr_name: crate::name::Name::new(&attr),
+                    },
                     kind: crate::call_graph::EdgeKind::QueryRef,
                     provenance: crate::call_graph::EdgeProvenance::Inferred,
                     crosses_client_to_server: false,
