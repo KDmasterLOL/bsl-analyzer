@@ -2410,6 +2410,7 @@ dependencies = [
  "project-model",
  "rmcp",
  "rusqlite",
+ "rustc-hash 2.1.2",
  "schemars",
  "sdbl-hir",
  "serde",

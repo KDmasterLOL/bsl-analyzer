@@ -21,6 +21,7 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide::{Analysis, RootDatabaseImpl};
+use rustc_hash::FxHashSet;
 use vfs::{file_set::FileSet, FileId, VfsPath};
 use walkdir::WalkDir;
 
@@ -413,19 +414,27 @@ fn workspace_fingerprint(workspace_root: &Path) -> u64 {
     hasher.finish()
 }
 
-/// Walk the configuration source and extension directories, load every `.bsl`
-/// file into a fresh database, and register the config metadata paths.
-fn load_workspace_db(workspace_root: &Path) -> anyhow::Result<(RootDatabaseImpl, usize)> {
+/// The configuration source + extension metadata paths the resolver needs for
+/// visibility checks, registered on every database (full or per-batch) just like
+/// the LSP workspace loader does.
+pub(crate) fn config_metadata_paths(workspace_root: &Path) -> Vec<(Option<String>, PathBuf)> {
     let project = project_model::Project::new(workspace_root);
-    let source_path = project.source_path().to_path_buf();
-    let extensions = project.extension_paths().to_vec();
+    let mut config_paths: Vec<(Option<String>, PathBuf)> =
+        vec![(None, project.source_path().to_path_buf())];
+    for (name, ext_path) in project.extension_paths() {
+        config_paths.push((Some(name.clone()), ext_path.clone()));
+    }
+    config_paths
+}
 
-    let mut db = RootDatabaseImpl::default();
-    let mut file_set = FileSet::new();
+/// Enumerate every `.bsl` file under the config + extension roots, assigning a
+/// stable [`FileId`] in walk order. No file text is read — this is the cheap
+/// file-id↔path map that lets the graph build load one batch of texts at a time
+/// while keeping ids consistent across batches.
+pub(crate) fn enumerate_bsl_files(workspace_root: &Path) -> Vec<(FileId, PathBuf)> {
     let mut entries: Vec<(FileId, PathBuf)> = Vec::new();
     let mut seen: HashSet<PathBuf> = HashSet::new();
     let mut next_id = 0u32;
-
     for root in scan_roots(workspace_root) {
         for entry in WalkDir::new(&root).follow_links(true) {
             let entry = match entry {
@@ -444,17 +453,34 @@ fn load_workspace_db(workspace_root: &Path) -> anyhow::Result<(RootDatabaseImpl,
             if !seen.insert(path.clone()) {
                 continue;
             }
-            let file_id = FileId(next_id);
+            entries.push((FileId(next_id), path));
             next_id += 1;
-            file_set.insert(file_id, VfsPath::new(path.clone()));
-            entries.push((file_id, path));
         }
     }
+    entries
+}
 
-    let count = entries.len();
+/// Build a database whose source root maps EVERY file's path — so cross-module
+/// resolution through the module index can find any target's [`FileId`] — but
+/// loads text only for the files in `load_text`. Files outside `load_text` are
+/// addressable by path yet never lowered, so a per-batch build pays HIR cost only
+/// for its own batch while still resolving calls into the rest of the config.
+pub(crate) fn db_for_files(
+    all_files: &[(FileId, PathBuf)],
+    load_text: &FxHashSet<FileId>,
+    config_paths: &[(Option<String>, PathBuf)],
+) -> RootDatabaseImpl {
+    let mut db = RootDatabaseImpl::default();
+    let mut file_set = FileSet::new();
+    for (file_id, path) in all_files {
+        file_set.insert(*file_id, VfsPath::new(path.clone()));
+    }
     db.set_source_root(GRAPH_SOURCE_ROOT, SourceRoot::new_local(file_set));
-    for (file_id, path) in &entries {
+    for (file_id, path) in all_files {
         db.set_file_source_root(*file_id, GRAPH_SOURCE_ROOT);
+        if !load_text.contains(file_id) {
+            continue;
+        }
         match std::fs::read_to_string(path) {
             Ok(text) => db.set_file_text(*file_id, &text),
             Err(e) => {
@@ -463,16 +489,18 @@ fn load_workspace_db(workspace_root: &Path) -> anyhow::Result<(RootDatabaseImpl,
             }
         }
     }
+    db.set_all_config_paths(config_paths.to_vec());
+    db
+}
 
-    // The resolver checks configuration visibility, so the config + extension
-    // metadata paths must be registered just like the LSP workspace loader does.
-    let mut config_paths: Vec<(Option<String>, PathBuf)> = vec![(None, source_path)];
-    for (name, ext_path) in extensions {
-        config_paths.push((Some(name), ext_path));
-    }
-    db.set_all_config_paths(config_paths);
-
-    Ok((db, count))
+/// Walk the configuration source and extension directories, load every `.bsl`
+/// file into a fresh database, and register the config metadata paths.
+fn load_workspace_db(workspace_root: &Path) -> anyhow::Result<(RootDatabaseImpl, usize)> {
+    let files = enumerate_bsl_files(workspace_root);
+    let config_paths = config_metadata_paths(workspace_root);
+    let load_text: FxHashSet<FileId> = files.iter().map(|(f, _)| *f).collect();
+    let db = db_for_files(&files, &load_text, &config_paths);
+    Ok((db, files.len()))
 }
 
 #[cfg(test)]
@@ -600,9 +628,7 @@ mod tests {
         let out = root.join(".build/bsl-graph.db");
         fs::create_dir_all(out.parent().unwrap()).unwrap();
         let summary = build_graph_database(
-            &db,
-            GRAPH_SOURCE_ROOT,
-            Some(root),
+            root,
             &out,
             1,
             &crate::graph_db::GraphMeta {
@@ -652,6 +678,84 @@ mod tests {
             )
             .unwrap();
         assert_eq!(in_degree, 1, "Сервер.Считать is called once");
+    }
+
+    /// A metadata object reached by a manager call in one module and by an SDBL
+    /// query in another, across separate batches (`batch_size = 1`), must get the
+    /// SAME durable `Mdo` node id from the streaming build as the in-memory fold.
+    /// The build runs call edges across all batches before query edges, mirroring
+    /// the fold's Pass-2-then-Pass-3 order, so the first-seen (canonical) spelling —
+    /// and thus the id — cannot diverge even when the call and query sites differ in
+    /// case.
+    #[test]
+    fn cross_batch_mdo_node_id_matches_fold() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        write(
+            root,
+            "Catalogs/Номенклатура.xml",
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Catalog uuid="00000000-0000-0000-0000-000000000001">
+        <Properties><Name>Номенклатура</Name><CodeLength>9</CodeLength></Properties>
+    </Catalog>
+</MetaDataObject>"#,
+        );
+        // One module creates via the manager (canonical case), another reads it in a
+        // query (upper case). Their batch order is fixed by walk order; the build's
+        // global call-before-query order decides the canonical spelling regardless.
+        write(
+            root,
+            "CommonModules/Менеджер/Ext/Module.bsl",
+            "Процедура Создать() Экспорт\nСправочники.Номенклатура.СоздатьЭлемент();\nКонецПроцедуры",
+        );
+        write(
+            root,
+            "CommonModules/Отчет/Ext/Module.bsl",
+            "Процедура Читать() Экспорт\n\
+             Запрос = \"ВЫБРАТЬ Код ИЗ Справочник.НОМЕНКЛАТУРА\";\nКонецПроцедуры",
+        );
+
+        let (db, files) = load_workspace_db(root).expect("workspace loads");
+        let analysis = Analysis::from_database(db);
+        let fold = analysis.graph_overview(GRAPH_SOURCE_ROOT, Some(root), 50);
+        let fold_mdo: Vec<&str> = fold
+            .top_by_centrality
+            .iter()
+            .filter(|n| n.kind == "mdo")
+            .map(|n| n.id.as_str())
+            .collect();
+        assert_eq!(fold_mdo.len(), 1, "exactly one catalog Mdo node in the fold: {fold_mdo:?}");
+        let fold_id = fold_mdo[0];
+
+        let out = root.join(".build/bsl-graph.db");
+        fs::create_dir_all(out.parent().unwrap()).unwrap();
+        build_graph_database(
+            root,
+            &out,
+            1,
+            &crate::graph_db::GraphMeta {
+                revision: 1,
+                fingerprint: 0,
+                files,
+                built_at: "t".to_string(),
+            },
+        )
+        .expect("graph database builds");
+
+        let conn = Connection::open(&out).unwrap();
+        let sqlite_mdo: Vec<String> = {
+            let mut stmt = conn.prepare("SELECT id FROM nodes WHERE kind='mdo'").unwrap();
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0)).unwrap();
+            rows.map(|r| r.unwrap()).collect()
+        };
+        assert_eq!(sqlite_mdo.len(), 1, "exactly one catalog Mdo node in SQLite: {sqlite_mdo:?}");
+        assert_eq!(
+            sqlite_mdo[0], fold_id,
+            "cross-batch Mdo node id must be byte-identical to the in-memory fold's"
+        );
     }
 
     #[test]

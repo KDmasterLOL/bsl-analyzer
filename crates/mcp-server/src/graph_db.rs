@@ -17,10 +17,13 @@
 use std::path::Path;
 
 use anyhow::Context;
-use base_db::SourceRootId;
 use ide::graph_index::{EdgeRow, NodeRow};
-use ide::{GraphBuildSummary, RootDatabaseImpl};
+use ide::{GraphBuildSummary, ModuleId, RootDatabaseImpl};
 use rusqlite::{params, Connection};
+use rustc_hash::{FxHashMap, FxHashSet};
+use vfs::FileId;
+
+use crate::graph::{config_metadata_paths, db_for_files, enumerate_bsl_files};
 
 /// Bumped whenever the table layout changes so a stale on-disk cache from an
 /// older binary is rejected (via the `meta` row) and rebuilt.
@@ -209,27 +212,41 @@ impl GraphDbWriter {
     }
 }
 
-/// Build the whole-workspace call graph from `db` straight into a fresh SQLite
-/// file at `out_path`, in RAM-bounded batches. The in-memory graph does not fit on
-/// large configurations, so this is the path that makes a whole-config graph
-/// available at all: the driver streams one batch of rows at a time and this
-/// writer persists them, so peak memory is bounded by the batch size plus the
-/// resident method index — never the full node/edge set.
+/// Build the whole-workspace call graph straight into a fresh SQLite file at
+/// `out_path`, in RAM-bounded batches. The in-memory graph does not fit on large
+/// configurations (a 25k-module ERP blows past 8 GB in a single database), so this
+/// is the path that makes a whole-config graph available at all.
+///
+/// Files are enumerated once for a stable id↔path map, then each batch's texts are
+/// loaded into a throwaway database (dropped before the next), with cross-batch
+/// call targets resolved through the resident compact method index — never another
+/// batch's database. Peak memory is therefore bounded by the batch size plus that
+/// index, not by the whole config.
 ///
 /// Returns the build tally; node/edge counts in the database are recorded in its
 /// `meta` table by [`GraphDbWriter::finalize`].
 pub fn build_graph_database(
-    db: &RootDatabaseImpl,
-    source_root_id: SourceRootId,
-    workspace_root: Option<&Path>,
+    workspace_root: &Path,
     out_path: &Path,
     batch_size: usize,
     meta: &GraphMeta,
 ) -> anyhow::Result<GraphBuildSummary> {
+    let files = enumerate_bsl_files(workspace_root);
+    let config_paths = config_metadata_paths(workspace_root);
+    let modules: Vec<ModuleId> = files.iter().map(|(f, _)| ModuleId::new(*f)).collect();
+    let paths: FxHashMap<FileId, String> =
+        files.iter().map(|(f, p)| (*f, p.to_string_lossy().replace('\\', "/"))).collect();
+
     let mut writer = GraphDbWriter::create(out_path)?;
 
-    // Scope the sink so its mutable borrow of `writer` ends before `finalize`.
+    // Scope the closures so their borrows end before `finalize`. `open_batch`
+    // loads only the batch's texts (shared reads of the id↔path map + config);
+    // `sink` persists the freshly-encoded rows (the sole `&mut writer` borrow).
     let summary = {
+        let mut open_batch = |batch: &[ModuleId]| -> RootDatabaseImpl {
+            let load_text: FxHashSet<FileId> = batch.iter().map(|m| m.file_id).collect();
+            db_for_files(&files, &load_text, &config_paths)
+        };
         let mut sink = |nodes: &[NodeRow],
                         edges: &[EdgeRow]|
          -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -237,8 +254,15 @@ pub fn build_graph_database(
             writer.write_edges(edges)?;
             Ok(())
         };
-        ide::build_workspace_graph_rows(db, source_root_id, workspace_root, batch_size, &mut sink)
-            .map_err(|e| anyhow::anyhow!("{e}"))?
+        ide::build_workspace_graph_rows(
+            &modules,
+            &paths,
+            Some(workspace_root),
+            batch_size,
+            &mut open_batch,
+            &mut sink,
+        )
+        .map_err(|e| anyhow::anyhow!("{e}"))?
     };
 
     writer.finalize(meta)?;

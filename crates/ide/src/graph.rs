@@ -19,12 +19,12 @@ use std::sync::Arc;
 use bsl_metadata::MdoType;
 use hir::call_graph::{EdgeKind, MethodDispatch};
 use hir::graph_index::{
-    display_scope, encode_scope, project_batch_edges, EdgeRow, GraphBuildState, GraphIndex,
-    GraphRowEncoder, NodeRow,
+    display_scope, encode_scope, project_batch_call_edges, project_batch_query_edges, EdgeRow,
+    GraphBuildState, GraphIndex, GraphRowEncoder, NodeRow,
 };
 use hir::{
-    is_bsl_source, module_key_for_path, ConfigsDatabase, DefDatabase, GraphNode, MethodId,
-    ModuleId, ModuleIndex, ModuleKey, Semantics, WorkspaceCallEdge, WorkspaceCallGraph,
+    module_key_for_path, ConfigsDatabase, DefDatabase, GraphNode, MethodId, ModuleId, ModuleIndex,
+    ModuleKey, Semantics, WorkspaceCallEdge, WorkspaceCallGraph,
 };
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -234,49 +234,58 @@ pub struct GraphBuildSummary {
 pub type GraphRowSink<'s> =
     dyn FnMut(&[NodeRow], &[EdgeRow]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> + 's;
 
+/// Opens a fresh database holding only the given batch of modules' texts (with
+/// their original [`FileId`]s) plus the configuration metadata. Each call's
+/// database is dropped before the next, so no more than one batch's Salsa state is
+/// resident at a time — the property that keeps the build's peak RAM bounded.
+///
+/// A whole-config single database does NOT bound RAM: resolving every module in
+/// one database accumulates each module's lowering until it exhausts memory (a
+/// 25k-module ERP blows past 8 GB). Cross-batch call targets are instead resolved
+/// through the resident [`GraphIndex`], never another batch's database, so a batch
+/// database needs only its own texts.
+pub type BatchDbOpener<'s> = dyn FnMut(&[ModuleId]) -> RootDatabaseImpl + 's;
+
 /// Project the whole-workspace call graph into durable node/edge rows in bounded
 /// batches, streaming each batch to `sink` rather than materialising the full
-/// graph in memory. Only the resident [`GraphIndex`] (a compact per-module method
-/// table) plus one batch's rows are live at a time, so peak RAM is bounded by the
-/// batch size — the in-memory whole-config graph does not fit on large configs.
+/// graph in memory. The compact [`GraphIndex`] (a per-module method table) is
+/// resident throughout; everything else lives one batch at a time — both the
+/// index build and the edge projection load each batch's database via `open_batch`
+/// and drop it before the next, so peak RAM is bounded by the batch size.
 ///
 /// The emitted rows carry the SAME durable ids as the in-memory serving path (a
 /// parity test guards the encoder), and the node set mirrors the in-memory
 /// graph's: every method node (including call-free ones) plus every edge endpoint.
 ///
-/// `batch_size` is the number of modules whose edges are projected per batch; a
-/// value of 0 is treated as 1.
+/// `modules` is every module in the workspace, in a stable order; `paths` maps
+/// every file id to its path for id encoding. `batch_size` modules are loaded and
+/// projected per batch; a value of 0 is treated as 1.
 pub fn build_workspace_graph_rows(
-    db: &RootDatabaseImpl,
-    source_root_id: SourceRootId,
+    modules: &[ModuleId],
+    paths: &FxHashMap<FileId, String>,
     workspace_root: Option<&Path>,
     batch_size: usize,
+    open_batch: &mut BatchDbOpener<'_>,
     sink: &mut GraphRowSink<'_>,
 ) -> Result<GraphBuildSummary, Box<dyn std::error::Error + Send + Sync>> {
     let batch_size = batch_size.max(1);
-    let source_root = db.source_root_input(source_root_id).root(db);
-    let file_set = source_root.file_set();
-    let modules: Vec<ModuleId> =
-        source_root.iter().filter(|&f| is_bsl_source(file_set, f)).map(ModuleId::new).collect();
 
-    let paths: FxHashMap<FileId, String> = source_root
-        .iter()
-        .filter_map(|f| {
-            file_set
-                .path_for_file(&f)
-                .and_then(|p| p.as_path().to_str().map(|s| (f, s.to_string())))
-        })
-        .collect();
+    // Build the index batch-by-batch: it must cover every resolution target, but
+    // only one batch's item trees are resident while it is assembled.
+    let mut index = GraphIndex::new();
+    for batch in modules.chunks(batch_size) {
+        let db = open_batch(batch);
+        for &module in batch {
+            index.add_module(&db, module);
+        }
+    }
 
-    // The index must cover every potential resolution target, so it is built over
-    // all modules up front; only body lowering (in `project_batch_edges`) is batched.
-    let index = GraphIndex::build(db, &modules);
-    let encoder = GraphRowEncoder::new(&index, &paths, workspace_root);
-
+    let encoder = GraphRowEncoder::new(&index, paths, workspace_root);
     let mut summary = GraphBuildSummary { modules: modules.len(), ..Default::default() };
 
     // Phase A — every method node (the fold's dispatch-seeded set), including
-    // isolated methods that no edge references. Flushed in batches of node rows.
+    // isolated methods that no edge references. No database needed: the index and
+    // path map carry every fact. Flushed in batches of node rows.
     let mut node_batch: Vec<NodeRow> = Vec::with_capacity(batch_size);
     for method in index.method_nodes() {
         node_batch.push(encoder.node_row(&GraphNode::Method(method)));
@@ -292,18 +301,26 @@ pub fn build_workspace_graph_rows(
         node_batch.clear();
     }
 
-    // Phase B — edges per module batch, plus the non-method endpoint nodes
-    // (ModuleCode/Mdo/Attribute) that only edges introduce. Method endpoints are
-    // already covered by Phase A, so they are skipped here; a resident id set keeps
-    // a hub object's node from being re-emitted for every edge that targets it.
+    // Phase B — edges plus the non-method endpoint nodes (ModuleCode/Mdo/Attribute)
+    // that only edges introduce. Method endpoints are already covered by Phase A and
+    // skipped here; a resident id set keeps a hub object's node from being re-emitted
+    // for every edge that targets it.
+    //
+    // The two edge kinds run as two global passes — call/manager edges across all
+    // batches, THEN query edges across all batches — sharing one `GraphBuildState`.
+    // This mirrors the fold's Pass-2-then-Pass-3 order, so an object's first-seen
+    // (canonical) Mdo/Attribute node spelling, and thus its durable id, is identical
+    // to the in-memory graph's. A per-batch call-then-query order would diverge.
     let mut state = GraphBuildState::new();
     let mut seen_aux: FxHashSet<String> = FxHashSet::default();
-    for batch in modules.chunks(batch_size) {
-        let edges = project_batch_edges(db, batch, &index, &mut state);
+    let emit = |edges: &[WorkspaceCallEdge],
+                summary: &mut GraphBuildSummary,
+                seen_aux: &mut FxHashSet<String>,
+                sink: &mut GraphRowSink<'_>|
+     -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let edge_rows: Vec<EdgeRow> = edges.iter().map(|e| encoder.edge_row(e)).collect();
-
         let mut aux_nodes: Vec<NodeRow> = Vec::new();
-        for edge in &edges {
+        for edge in edges {
             for endpoint in [&edge.from, &edge.to] {
                 if matches!(endpoint, GraphNode::Method(_)) {
                     continue;
@@ -314,10 +331,20 @@ pub fn build_workspace_graph_rows(
                 }
             }
         }
-
         summary.node_rows += aux_nodes.len();
         summary.edges += edge_rows.len();
-        sink(&aux_nodes, &edge_rows)?;
+        sink(&aux_nodes, &edge_rows)
+    };
+
+    for batch in modules.chunks(batch_size) {
+        let db = open_batch(batch);
+        let edges = project_batch_call_edges(&db, batch, &index, &mut state);
+        emit(&edges, &mut summary, &mut seen_aux, sink)?;
+    }
+    for batch in modules.chunks(batch_size) {
+        let db = open_batch(batch);
+        let edges = project_batch_query_edges(&db, batch, &mut state);
+        emit(&edges, &mut summary, &mut seen_aux, sink)?;
     }
 
     Ok(summary)

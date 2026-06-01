@@ -347,15 +347,32 @@ impl GraphBuildState {
 /// streaming build.
 ///
 /// `state` carries the workspace-wide canonicalization/dedup across batches and
-/// MUST be reused. The returned edges are the same set the Salsa fold produces
-/// **modulo `Mdo`/`Attribute` node spelling**: an object referenced only in code
-/// vs. only in a query may get a different first-seen spelling than the fold's
-/// Pass-2-then-Pass-3 order would pick, since this projects call-then-query per
-/// batch. The choice is deterministic and self-consistent within a build (one
-/// node per object, case-insensitive id lookup); it is not byte-identical to the
-/// fold, so this is NOT a drop-in for the order-sensitive
-/// [`workspace_call_graph_via_index`] (which the golden test compares).
+/// MUST be reused.
+///
+/// This projects a batch's call/manager edges **and** its query edges together. To
+/// reproduce the fold's `Mdo`/`Attribute` node spelling byte-for-byte, a streaming
+/// build must instead run [`project_batch_call_edges`] across ALL batches before
+/// [`project_batch_query_edges`] across all batches (the fold's Pass-2-then-Pass-3
+/// order): an object referenced only in code vs. only in a query would otherwise
+/// get a different first-seen spelling. This combined helper is for callers that
+/// process one batch in isolation and accept that per-batch ordering.
 pub fn project_batch_edges(
+    db: &dyn ConfigsDatabase,
+    batch: &[ModuleId],
+    index: &GraphIndex,
+    state: &mut GraphBuildState,
+) -> Vec<WorkspaceCallEdge> {
+    let mut edges = project_batch_call_edges(db, batch, index, state);
+    edges.extend(project_batch_query_edges(db, batch, state));
+    edges
+}
+
+/// A batch's resolved call/manager edges, resolving cross-module targets through
+/// the resident `index` (so the batch database needs only its own texts). Run this
+/// across every batch before [`project_batch_query_edges`] to match the fold's
+/// global Pass-2-then-Pass-3 canonicalization order. `state.mdo_canonical` is
+/// shared and updated as new metadata-object spellings are first seen.
+pub fn project_batch_call_edges(
     db: &dyn ConfigsDatabase,
     batch: &[ModuleId],
     index: &GraphIndex,
@@ -371,6 +388,19 @@ pub fn project_batch_edges(
             &mut state.mdo_canonical,
         ));
     }
+    edges
+}
+
+/// A batch's SDBL `query_ref` edges. Run across every batch only after
+/// [`project_batch_call_edges`] has run across all of them, sharing the same
+/// `state`, so query-only metadata objects inherit the spelling the fold's Pass 3
+/// would give them (call sites win first, exactly as in the fold).
+pub fn project_batch_query_edges(
+    db: &dyn ConfigsDatabase,
+    batch: &[ModuleId],
+    state: &mut GraphBuildState,
+) -> Vec<WorkspaceCallEdge> {
+    let mut edges = Vec::new();
     for &module in batch {
         edges.extend(crate::queries::project_module_query_edges(
             db,

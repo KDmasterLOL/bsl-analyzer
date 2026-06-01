@@ -36,6 +36,7 @@ anyhow.workspace = true
 chrono.workspace = true
 dirs = "6"
 rusqlite.workspace = true
+rustc-hash = "2.1"
 
 [dev-dependencies]
 expect-test.workspace = true
