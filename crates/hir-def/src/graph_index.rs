@@ -15,27 +15,34 @@
 //! method lookup for a [`GraphIndex`] read. A golden-equivalence test
 //! (`ide-db`) asserts the result is identical to the Salsa fold.
 
+use std::path::Path;
+
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use bsl_metadata::MdoType;
+use vfs::FileId;
 
 use crate::{
     call_graph::{
-        EdgeKind, EdgeProvenance, GraphNode, MethodDispatch, ResolvedCallEdge,
+        EdgeKind, EdgeProvenance, GraphMethodEntry, GraphNode, MethodDispatch, ResolvedCallEdge,
         ResolvedModuleSummary, ResolvedTarget, WorkspaceCallEdge, WorkspaceCallGraph,
     },
     configs::ConfigsDatabase,
+    module_index::{module_key_for_path, ModuleKey},
     name::Name,
     resolver::Resolver,
     MethodId, ModuleId,
 };
 
-/// A module's method lookup table as seen from the item tree alone (no body
-/// lowering). Only what resolution needs; dispatch lives in
+/// A module's methods as seen from the item tree alone (no body lowering).
+/// `by_name` serves resolution; `all` carries the declaration facts (name, export,
+/// ranges) that node materialisation needs. Dispatch lives in
 /// [`GraphIndex::node_dispatch`].
 struct ModuleMethods {
     /// Lowercased name → first declaration, mirroring `SymbolTree::find_method`.
     by_name: FxHashMap<String, MethodRef>,
+    /// Every method in declaration order (the index is the `local_id`).
+    all: Vec<GraphMethodEntry>,
 }
 
 #[derive(Clone, Copy)]
@@ -103,7 +110,13 @@ impl GraphIndex {
                 module_dispatch.unwrap_or(entry.dispatch),
             );
         }
-        self.methods.insert(module, ModuleMethods { by_name });
+        self.methods.insert(module, ModuleMethods { by_name, all });
+    }
+
+    /// The declaration facts (name, export, dispatch, ranges) for a method, for
+    /// node materialisation. `None` if the module/method is not indexed.
+    pub fn method_entry(&self, method: MethodId) -> Option<&GraphMethodEntry> {
+        self.methods.get(&method.module)?.all.iter().find(|e| e.local_id == method.local_id)
     }
 
     /// Method lookup mirroring `SymbolTree::find_method` (lowercased, first-wins).
@@ -360,4 +373,280 @@ pub fn project_batch_edges(
         ));
     }
     edges
+}
+
+// ---- build-time durable-id encoding + row projection -----------------------
+
+/// Encode a module key to the durable id scope segment. Shared with `ide::graph`'s
+/// serving path so build-time ids and serve-time ids agree.
+pub fn encode_scope(key: &ModuleKey) -> String {
+    match key {
+        ModuleKey::Common { name } => format!("common/{name}"),
+        ModuleKey::Manager { mdo_type, name } => {
+            format!("manager/{}/{name}", mdo_type.english_name())
+        }
+        ModuleKey::Object { mdo_type, name } => {
+            format!("object/{}/{name}", mdo_type.english_name())
+        }
+        ModuleKey::RecordSet { mdo_type, name } => {
+            format!("recordset/{}/{name}", mdo_type.english_name())
+        }
+    }
+}
+
+/// The human-facing qualified scope for a module key (e.g. `ОбщийМодуль.X`).
+pub fn display_scope(key: &ModuleKey) -> String {
+    match key {
+        ModuleKey::Common { name } => format!("ОбщийМодуль.{name}"),
+        ModuleKey::Manager { mdo_type, name } => {
+            format!("{}.{name}.МодульМенеджера", mdo_type.russian_name())
+        }
+        ModuleKey::Object { mdo_type, name } => {
+            format!("{}.{name}.МодульОбъекта", mdo_type.russian_name())
+        }
+        ModuleKey::RecordSet { mdo_type, name } => {
+            format!("{}.{name}.МодульНабораЗаписей", mdo_type.russian_name())
+        }
+    }
+}
+
+fn basename(path: &str) -> Option<&str> {
+    path.rsplit('/').next()
+}
+
+fn dispatch_labels(d: MethodDispatch) -> Vec<&'static str> {
+    let mut labels = Vec::new();
+    if d.can_run_on_client {
+        labels.push("client");
+    }
+    if d.can_run_on_server {
+        labels.push("server");
+    }
+    labels
+}
+
+fn edge_kind_label(kind: EdgeKind) -> &'static str {
+    match kind {
+        EdgeKind::DirectLocal | EdgeKind::DirectQualifiedModule => "call",
+        EdgeKind::ManagerCreates => "manager_creates",
+        EdgeKind::ManagerAccess => "manager_access",
+        EdgeKind::QueryRef => "query_ref",
+    }
+}
+
+fn provenance_label(p: EdgeProvenance) -> &'static str {
+    match p {
+        EdgeProvenance::Resolved => "resolved",
+        EdgeProvenance::Inferred => "inferred",
+        EdgeProvenance::VisibilityBlocked => "visibility_blocked",
+        EdgeProvenance::Unresolved => "unresolved",
+    }
+}
+
+/// A graph node projected for storage and serving. Source text is read on demand
+/// from `file` + the ranges, never stored inline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeRow {
+    pub id: String,
+    pub kind: &'static str,
+    pub name: String,
+    pub qualified: String,
+    pub module: Option<String>,
+    /// Workspace path for source-on-demand (method/module nodes only).
+    pub file: Option<String>,
+    /// Byte offset of the declaration name token, to reconstruct the signature line.
+    pub name_offset: Option<u32>,
+    /// Method source byte range (method nodes only).
+    pub src_start: Option<u32>,
+    pub src_end: Option<u32>,
+    pub dispatch: Vec<&'static str>,
+    pub is_export: Option<bool>,
+    /// Whether the id round-trips back to a node on its own.
+    pub addressable: bool,
+}
+
+/// A resolved edge projected for storage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EdgeRow {
+    pub from_id: String,
+    pub to_id: String,
+    pub kind: &'static str,
+    pub provenance: &'static str,
+    pub crosses: bool,
+}
+
+/// Encodes graph nodes/edges to durable rows at build time — method names/ranges
+/// from the resident [`GraphIndex`], paths from the file set, no database. Produces
+/// the SAME durable id strings as `ide::graph` (a parity test in `ide-db` guards
+/// this), so ids an agent holds survive the in-memory → SQLite switch.
+pub struct GraphRowEncoder<'a> {
+    index: &'a GraphIndex,
+    paths: &'a FxHashMap<FileId, String>,
+    workspace_root: Option<&'a Path>,
+}
+
+impl<'a> GraphRowEncoder<'a> {
+    pub fn new(
+        index: &'a GraphIndex,
+        paths: &'a FxHashMap<FileId, String>,
+        workspace_root: Option<&'a Path>,
+    ) -> Self {
+        Self { index, paths, workspace_root }
+    }
+
+    fn path_for(&self, file: FileId) -> Option<String> {
+        self.paths.get(&file).map(|p| p.replace('\\', "/"))
+    }
+
+    fn rel_path(&self, abs: &str) -> Option<String> {
+        let root = self.workspace_root?;
+        let root_str = root.to_str()?.replace('\\', "/");
+        let stripped = abs.strip_prefix(&root_str)?;
+        Some(stripped.trim_start_matches('/').to_string())
+    }
+
+    fn method_name(&self, method: MethodId) -> String {
+        self.index.method_entry(method).map(|e| e.name.as_str().to_string()).unwrap_or_default()
+    }
+
+    fn module_display(&self, module: ModuleId) -> Option<String> {
+        let path = self.path_for(module.file_id)?;
+        match module_key_for_path(&path) {
+            Some(key) => Some(display_scope(&key)),
+            None => self.rel_path(&path).or_else(|| basename(&path).map(str::to_string)),
+        }
+    }
+
+    /// The durable id and whether it round-trips on its own.
+    pub fn encode(&self, node: &GraphNode) -> (String, bool) {
+        match node {
+            GraphNode::Method(method) => {
+                let name = self.method_name(*method);
+                let path = self.path_for(method.module.file_id);
+                if let Some(key) = path.as_deref().and_then(module_key_for_path) {
+                    (format!("method/{}/{name}", encode_scope(&key)), true)
+                } else if let Some(rel) = path.as_deref().and_then(|p| self.rel_path(p)) {
+                    (format!("method/file/{rel}::{name}"), true)
+                } else {
+                    let base = path.as_deref().and_then(basename).unwrap_or("?");
+                    (format!("method/file/{base}::{name}"), false)
+                }
+            }
+            GraphNode::ModuleCode(module) => {
+                let path = self.path_for(module.file_id);
+                if let Some(key) = path.as_deref().and_then(module_key_for_path) {
+                    (format!("module/{}", encode_scope(&key)), true)
+                } else if let Some(rel) = path.as_deref().and_then(|p| self.rel_path(p)) {
+                    (format!("module/file/{rel}"), true)
+                } else {
+                    let base = path.as_deref().and_then(basename).unwrap_or("?");
+                    (format!("module/file/{base}"), false)
+                }
+            }
+            GraphNode::Mdo { mdo_type, object_name } => {
+                (format!("mdo/{}/{}", mdo_type.english_name(), object_name.as_str()), true)
+            }
+            GraphNode::Attribute { mdo_type, object_name, attr_name } => (
+                format!(
+                    "attribute/{}/{}/{}",
+                    mdo_type.english_name(),
+                    object_name.as_str(),
+                    attr_name.as_str()
+                ),
+                true,
+            ),
+        }
+    }
+
+    /// Project a node to its storage row.
+    pub fn node_row(&self, node: &GraphNode) -> NodeRow {
+        let (id, addressable) = self.encode(node);
+        match node {
+            GraphNode::Method(method) => {
+                let entry = self.index.method_entry(*method);
+                let name = entry.map(|e| e.name.as_str().to_string()).unwrap_or_default();
+                let module = self.module_display(method.module);
+                let qualified = match &module {
+                    Some(scope) => format!("{scope}.{name}"),
+                    None => name.clone(),
+                };
+                NodeRow {
+                    id,
+                    kind: "method",
+                    name,
+                    qualified,
+                    module,
+                    file: self.path_for(method.module.file_id),
+                    name_offset: entry.map(|e| e.name_range.start().into()),
+                    src_start: entry.map(|e| e.source_range.start().into()),
+                    src_end: entry.map(|e| e.source_range.end().into()),
+                    dispatch: self.index.dispatch(node).map(dispatch_labels).unwrap_or_default(),
+                    is_export: entry.map(|e| e.is_export),
+                    addressable,
+                }
+            }
+            GraphNode::ModuleCode(module) => {
+                let display = self.module_display(*module);
+                let name = display.clone().unwrap_or_else(|| "<модуль>".to_string());
+                NodeRow {
+                    id,
+                    kind: "module",
+                    name: name.clone(),
+                    qualified: name,
+                    module: display,
+                    file: self.path_for(module.file_id),
+                    name_offset: None,
+                    src_start: None,
+                    src_end: None,
+                    dispatch: self.index.dispatch(node).map(dispatch_labels).unwrap_or_default(),
+                    is_export: None,
+                    addressable,
+                }
+            }
+            GraphNode::Mdo { mdo_type, object_name } => NodeRow {
+                id,
+                kind: "mdo",
+                name: object_name.as_str().to_string(),
+                qualified: format!("{}.{}", mdo_type.russian_name(), object_name.as_str()),
+                module: None,
+                file: None,
+                name_offset: None,
+                src_start: None,
+                src_end: None,
+                dispatch: Vec::new(),
+                is_export: None,
+                addressable,
+            },
+            GraphNode::Attribute { mdo_type, object_name, attr_name } => NodeRow {
+                id,
+                kind: "attribute",
+                name: attr_name.as_str().to_string(),
+                qualified: format!(
+                    "{}.{}.{}",
+                    mdo_type.russian_name(),
+                    object_name.as_str(),
+                    attr_name.as_str()
+                ),
+                module: None,
+                file: None,
+                name_offset: None,
+                src_start: None,
+                src_end: None,
+                dispatch: Vec::new(),
+                is_export: None,
+                addressable,
+            },
+        }
+    }
+
+    /// Project a resolved edge to its storage row.
+    pub fn edge_row(&self, edge: &WorkspaceCallEdge) -> EdgeRow {
+        EdgeRow {
+            from_id: self.encode(&edge.from).0,
+            to_id: self.encode(&edge.to).0,
+            kind: edge_kind_label(edge.kind),
+            provenance: provenance_label(edge.provenance),
+            crosses: edge.crosses_client_to_server,
+        }
+    }
 }

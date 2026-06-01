@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use bsl_metadata::MdoType;
 use hir::call_graph::{EdgeKind, MethodDispatch};
+use hir::graph_index::{display_scope, encode_scope};
 use hir::{
     module_key_for_path, ConfigsDatabase, DefDatabase, GraphNode, MethodId, ModuleId, ModuleIndex,
     ModuleKey, Semantics, WorkspaceCallEdge, WorkspaceCallGraph,
@@ -790,21 +791,6 @@ pub fn method_id_for_path(path: &str, method_name: &str) -> Option<String> {
     Some(format!("method/{}/{method_name}", encode_scope(&key)))
 }
 
-fn encode_scope(key: &ModuleKey) -> String {
-    match key {
-        ModuleKey::Common { name } => format!("common/{name}"),
-        ModuleKey::Manager { mdo_type, name } => {
-            format!("manager/{}/{name}", mdo_type.english_name())
-        }
-        ModuleKey::Object { mdo_type, name } => {
-            format!("object/{}/{name}", mdo_type.english_name())
-        }
-        ModuleKey::RecordSet { mdo_type, name } => {
-            format!("recordset/{}/{name}", mdo_type.english_name())
-        }
-    }
-}
-
 fn decode_scope(rest: &[&str], is_method: bool) -> Option<(ModuleKey, Option<String>)> {
     // For a method id the trailing segment is the method name; module ids end at
     // the scope.
@@ -834,21 +820,6 @@ fn decode_scope(rest: &[&str], is_method: bool) -> Option<(ModuleKey, Option<Str
 fn parse_mdo(s: &str) -> Option<MdoType> {
     // Bilingual `MdoType: FromStr` accepts the English folder names we encode.
     s.parse().ok()
-}
-
-fn display_scope(key: &ModuleKey) -> String {
-    match key {
-        ModuleKey::Common { name } => format!("ОбщийМодуль.{name}"),
-        ModuleKey::Manager { mdo_type, name } => {
-            format!("{}.{name}.МодульМенеджера", mdo_type.russian_name())
-        }
-        ModuleKey::Object { mdo_type, name } => {
-            format!("{}.{name}.МодульОбъекта", mdo_type.russian_name())
-        }
-        ModuleKey::RecordSet { mdo_type, name } => {
-            format!("{}.{name}.МодульНабораЗаписей", mdo_type.russian_name())
-        }
-    }
 }
 
 fn dispatch_labels(d: MethodDispatch) -> Vec<&'static str> {
@@ -1142,5 +1113,136 @@ mod tests {
         // The only incoming edge is `resolved`, so the inferred-only filter drops it.
         assert!(res.edges.is_empty());
         assert!(res.nodes.is_empty());
+    }
+
+    /// The build-time `GraphRowEncoder` (used by the SQLite graph build) must
+    /// produce byte-identical durable ids and matching node/edge fields to this
+    /// module's serve-time encoder, so ids an agent holds survive the in-memory →
+    /// SQLite switch.
+    #[test]
+    fn build_time_encoder_matches_serve_time_ids() {
+        use hir::graph_index::{GraphIndex, GraphRowEncoder};
+        use hir::ConfigsDatabase;
+
+        let a = workspace(&[
+            (
+                "/src/CommonModules/Вызов/Ext/Module.bsl",
+                "Утил.Делать();\n\
+                 Процедура СоздатьКонтрагента() Экспорт\n\
+                 Справочники.Контрагенты.СоздатьЭлемент();\n\
+                 КонецПроцедуры",
+            ),
+            ("/src/CommonModules/Утил/Ext/Module.bsl", "Процедура Делать() Экспорт КонецПроцедуры"),
+        ]);
+        let db = a.database();
+        let graph = db.workspace_call_graph(ROOT);
+
+        let source_root = db.source_root_input(ROOT).root(db);
+        let file_set = source_root.file_set();
+        let modules: Vec<hir::ModuleId> = source_root
+            .iter()
+            .filter(|&f| hir::is_bsl_source(file_set, f))
+            .map(hir::ModuleId::new)
+            .collect();
+        let index = GraphIndex::build(db, &modules);
+
+        let mut paths: std::collections::HashMap<FileId, String> = std::collections::HashMap::new();
+        for f in source_root.iter() {
+            if let Some(p) = file_set.path_for_file(&f) {
+                if let Some(s) = p.as_path().to_str() {
+                    paths.insert(f, s.to_string());
+                }
+            }
+        }
+        let paths: rustc_hash::FxHashMap<FileId, String> = paths.into_iter().collect();
+        let encoder = GraphRowEncoder::new(&index, &paths, None);
+
+        let ctx = GraphCtx::new(db, ROOT, None);
+
+        let mut nodes = 0;
+        let mut kinds = std::collections::HashSet::new();
+        for node in graph.nodes() {
+            let (build_id, build_addr) = encoder.encode(&node);
+            let (serve_id, serve_addr) = ctx.encode_node(&node);
+            assert_eq!(build_id, serve_id, "durable id mismatch for {node:?}");
+            assert_eq!(build_addr, serve_addr, "addressable mismatch for {node:?}");
+
+            let row = encoder.node_row(&node);
+            let serve = ctx.node_ref(node.clone(), GraphDetail::Names);
+            assert_eq!(row.kind, serve.kind, "kind for {node:?}");
+            assert_eq!(row.name, serve.name, "name for {node:?}");
+            assert_eq!(row.qualified, serve.qualified, "qualified for {node:?}");
+            assert_eq!(row.module, serve.module, "module for {node:?}");
+            assert_eq!(row.dispatch, serve.dispatch, "dispatch for {node:?}");
+            assert_eq!(row.is_export, serve.is_export, "is_export for {node:?}");
+            assert_eq!(row.addressable, serve.addressable, "addressable for {node:?}");
+            kinds.insert(row.kind);
+            nodes += 1;
+        }
+        assert!(nodes >= 4, "fixture should yield several nodes, got {nodes}");
+        assert!(kinds.contains("method") && kinds.contains("module") && kinds.contains("mdo"));
+
+        for edge in graph.edges() {
+            let row = encoder.edge_row(edge);
+            let serve = ctx.edge_ref(edge);
+            assert_eq!(row.from_id, serve.from);
+            assert_eq!(row.to_id, serve.to);
+            assert_eq!(row.kind, serve.kind);
+            assert_eq!(row.provenance, serve.provenance);
+            assert_eq!(row.crosses, serve.crosses_client_to_server);
+        }
+    }
+
+    /// Parity for the path-fallback id forms: a file outside the recognised module
+    /// layout (`module_key_for_path` → None) encodes to `method/file/<rel>::name`
+    /// with a workspace root, or `method/file/<basename>::name` (addressable=false)
+    /// without one. Build-time and serve-time encoders must agree in both.
+    #[test]
+    fn build_time_encoder_matches_serve_time_path_fallback() {
+        use hir::graph_index::{GraphIndex, GraphRowEncoder};
+        use hir::ConfigsDatabase;
+        use std::path::Path;
+
+        let a = workspace(&[(
+            "/ws/proj/scripts/loose.bsl",
+            "Процедура Свободный() Экспорт КонецПроцедуры",
+        )]);
+        let db = a.database();
+        let graph = db.workspace_call_graph(ROOT);
+        let source_root = db.source_root_input(ROOT).root(db);
+        let file_set = source_root.file_set();
+        let modules: Vec<hir::ModuleId> = source_root
+            .iter()
+            .filter(|&f| hir::is_bsl_source(file_set, f))
+            .map(hir::ModuleId::new)
+            .collect();
+        let index = GraphIndex::build(db, &modules);
+        let paths: rustc_hash::FxHashMap<FileId, String> = source_root
+            .iter()
+            .filter_map(|f| {
+                file_set
+                    .path_for_file(&f)
+                    .and_then(|p| p.as_path().to_str().map(|s| (f, s.to_string())))
+            })
+            .collect();
+
+        // With a workspace root → rel_path form (addressable); without → basename
+        // fallback (not addressable). Both must match the serve-time encoder.
+        for workspace_root in [Some(Path::new("/ws/proj")), None] {
+            let encoder = GraphRowEncoder::new(&index, &paths, workspace_root);
+            let ctx = GraphCtx::new(db, ROOT, workspace_root);
+            let mut seen = 0;
+            for node in graph.nodes() {
+                let (build_id, build_addr) = encoder.encode(&node);
+                let (serve_id, serve_addr) = ctx.encode_node(&node);
+                assert_eq!(build_id, serve_id, "id mismatch (ws={workspace_root:?}) for {node:?}");
+                assert_eq!(
+                    build_addr, serve_addr,
+                    "addressable mismatch (ws={workspace_root:?}) for {node:?}"
+                );
+                seen += 1;
+            }
+            assert!(seen >= 1, "the loose-path method must surface as a node");
+        }
     }
 }
