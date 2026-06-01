@@ -1,4 +1,5 @@
 mod baseline;
+mod graph;
 mod state;
 mod tools;
 
@@ -16,9 +17,10 @@ pub async fn serve_stdio(server: McpServer) -> anyhow::Result<()> {
     Ok(())
 }
 
+use crate::graph::GraphStatus;
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, ServerCapabilities, ServerInfo};
+use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -63,6 +65,27 @@ struct QueryParams {
 struct ExecuteParams {
     action: String,
     code: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct GraphParams {
+    /// overview | schema | node | neighbors | callers | callees
+    action: String,
+    /// Durable node id (required for node/neighbors/callers/callees).
+    id: Option<String>,
+    /// names | signatures | bodies (default: signatures).
+    detail: Option<String>,
+    /// in | out | both — only for `neighbors` (default: in).
+    dir: Option<String>,
+    /// Traversal depth for neighbors (default: 1).
+    depth: Option<usize>,
+    /// Server-side cap on returned neighbour nodes (default: 50).
+    max_nodes: Option<usize>,
+    /// Keep only edges with these provenances (resolved/inferred/visibility_blocked/unresolved).
+    #[serde(default)]
+    provenance: Vec<String>,
+    /// How many top-centrality methods to include in `overview` (default: 20).
+    top: Option<usize>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -375,6 +398,83 @@ impl McpServer {
             )),
         }
     }
+
+    #[tool(name = "graph", annotations(read_only_hint = true))]
+    async fn graph(&self, params: Parameters<GraphParams>) -> Result<CallToolResult, McpError> {
+        let p = params.0;
+        let graph = self.state.graph().clone();
+
+        // `schema` is static and needs no loaded graph.
+        if p.action == "schema" {
+            return Ok(tools::graph::schema());
+        }
+
+        // Lazily trigger the background load on first use.
+        graph.ensure_loading();
+
+        match graph.status() {
+            GraphStatus::Disabled => {
+                return Err(McpError::invalid_params(
+                    "graph is only available in the workspace profile",
+                    None,
+                ))
+            }
+            GraphStatus::Idle | GraphStatus::Loading => {
+                return Ok(CallToolResult::success(vec![Content::text(
+                    "{\"status\":\"loading\",\"detail\":\"call graph is still indexing; retry shortly\"}",
+                )]))
+            }
+            GraphStatus::Failed(msg) => {
+                return Err(McpError::internal_error(format!("graph load failed: {msg}"), None))
+            }
+            GraphStatus::Ready { .. } => {}
+        }
+
+        let Some(analysis) = graph.snapshot() else {
+            return Ok(CallToolResult::success(vec![Content::text("{\"status\":\"loading\"}")]));
+        };
+        let workspace_root = graph.workspace_root().map(std::path::Path::to_path_buf);
+
+        tokio::task::spawn_blocking(move || {
+            let workspace_root = workspace_root.as_deref();
+            match p.action.as_str() {
+                "overview" => {
+                    Ok(tools::graph::overview(&analysis, workspace_root, p.top.unwrap_or(20)))
+                }
+                "node" => {
+                    let id = require(p.id, "id", "node")?;
+                    let detail = tools::graph::detail_from(p.detail.as_deref());
+                    Ok(tools::graph::node(&analysis, workspace_root, &id, detail))
+                }
+                action @ ("neighbors" | "callers" | "callees") => {
+                    let id = require(p.id, "id", action)?;
+                    let dir = match action {
+                        "callers" => ide::Direction::In,
+                        "callees" => ide::Direction::Out,
+                        _ => tools::graph::direction_from(p.dir.as_deref()),
+                    };
+                    let neighbors = ide::NeighborsParams {
+                        id: &id,
+                        dir,
+                        depth: p.depth.unwrap_or(1),
+                        max_nodes: p.max_nodes.unwrap_or(50),
+                        detail: tools::graph::detail_from(p.detail.as_deref()),
+                        provenance_filter: p.provenance.clone(),
+                    };
+                    Ok(tools::graph::neighbors(&analysis, workspace_root, &neighbors))
+                }
+                other => Err(McpError::invalid_params(
+                    format!(
+                        "Unknown action '{other}'. Expected: overview, schema, node, neighbors, \
+                         callers, callees"
+                    ),
+                    None,
+                )),
+            }
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+    }
 }
 
 #[tool_router(router = reference_tool_router)]
@@ -463,8 +563,11 @@ impl ServerHandler for McpServer {
         info.instructions = Some(match self.profile {
             McpProfile::Workspace => {
                 "BSL Analyzer workspace MCP server. Provides project metadata browsing, \
-                 code search, SDBL query validation, code execution and debugging. \
-                 Tools: metadata, search, query, execute, debug."
+                 code search, a whole-config semantic call graph, SDBL query validation, \
+                 code execution and debugging. Prefer the `graph` tool over text search when \
+                 you need call relationships: start with action 'overview' on an unfamiliar \
+                 project, then 'node'/'callers'/'callees'/'neighbors' using the durable ids it \
+                 returns. Tools: metadata, search, graph, query, execute, debug."
                     .into()
             }
             McpProfile::Reference => {

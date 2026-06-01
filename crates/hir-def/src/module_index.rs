@@ -110,6 +110,73 @@ impl ModuleIndex {
     pub fn common_module_names(&self) -> impl Iterator<Item = &str> {
         self.common_modules.keys().map(|s| s.as_str())
     }
+
+    /// Resolve a path-derived [`ModuleKey`] back to its `FileId`, mirroring the
+    /// per-kind `resolve_*` routes used during dependency resolution.
+    pub fn resolve_module_key(&self, key: &ModuleKey) -> Option<FileId> {
+        let name = Name::new(key.name());
+        match key {
+            ModuleKey::Common { .. } => self.resolve_common_module(&name),
+            ModuleKey::Manager { mdo_type, .. } => {
+                self.resolve_manager(ManagerType::from_mdo_type(*mdo_type)?, &name)
+            }
+            ModuleKey::Object { mdo_type, .. } => self.resolve_object_module(*mdo_type, &name),
+            ModuleKey::RecordSet { mdo_type, .. } => {
+                self.resolve_record_set_module(*mdo_type, &name)
+            }
+        }
+    }
+}
+
+/// A durable, path-derived identity for an indexed BSL module. The role plus the
+/// metadata-object type and object name fully determine which module file the
+/// name belongs to, so it round-trips: [`module_key_for_path`] derives it from a
+/// path and [`ModuleIndex::resolve_module_key`] resolves it back to a `FileId`
+/// in the current revision. Common modules carry no metadata-object type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModuleKey {
+    Common { name: String },
+    Manager { mdo_type: MdoType, name: String },
+    Object { mdo_type: MdoType, name: String },
+    RecordSet { mdo_type: MdoType, name: String },
+}
+
+impl ModuleKey {
+    pub fn name(&self) -> &str {
+        match self {
+            ModuleKey::Common { name }
+            | ModuleKey::Manager { name, .. }
+            | ModuleKey::Object { name, .. }
+            | ModuleKey::RecordSet { name, .. } => name,
+        }
+    }
+
+    /// The metadata-object type, or `None` for common modules.
+    pub fn mdo_type(&self) -> Option<MdoType> {
+        match self {
+            ModuleKey::Common { .. } => None,
+            ModuleKey::Manager { mdo_type, .. }
+            | ModuleKey::Object { mdo_type, .. }
+            | ModuleKey::RecordSet { mdo_type, .. } => Some(*mdo_type),
+        }
+    }
+}
+
+/// Derive a [`ModuleKey`] from a module file path. Returns `None` for files that
+/// are not indexable user modules (forms, commands, non-module files).
+pub fn module_key_for_path(path: &str) -> Option<ModuleKey> {
+    let normalized = path.replace('\\', "/");
+    let (module_type, name, file_kind) = parse_module_path(&normalized)?;
+    Some(match file_kind {
+        ModuleFileKind::Common => ModuleKey::Common { name },
+        ModuleFileKind::Manager => {
+            ModuleKey::Manager { mdo_type: module_type.to_mdo_type()?, name }
+        }
+        ModuleFileKind::Object => ModuleKey::Object { mdo_type: module_type.to_mdo_type()?, name },
+        ModuleFileKind::RecordSet => {
+            ModuleKey::RecordSet { mdo_type: module_type.to_mdo_type()?, name }
+        }
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

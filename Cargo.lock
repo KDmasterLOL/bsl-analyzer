@@ -2394,6 +2394,7 @@ name = "mcp-server"
 version = "0.2.3"
 dependencies = [
  "anyhow",
+ "base-db",
  "bsl-debug",
  "bsl-metadata",
  "bsl-platform",
@@ -2401,6 +2402,7 @@ dependencies = [
  "chrono",
  "dirs",
  "expect-test",
+ "ide",
  "naparnik",
  "notify",
  "onec-client",
@@ -2415,6 +2417,8 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "vfs",
+ "walkdir",
 ]
 
 [[package]]

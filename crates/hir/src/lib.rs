@@ -41,7 +41,10 @@ pub use hir_def::is_bsl_source;
 pub use hir_def::module_structure;
 pub use hir_def::region_tree::{RegionIdx, RegionTree};
 pub use hir_def::symbol_tree::MethodSymbol;
-pub use hir_def::{ConditionalTree, ItemTree, ModuleIndex, SymbolTree, WorkspaceSymbols};
+pub use hir_def::{
+    module_key_for_path, ConditionalTree, ItemTree, ModuleIndex, ModuleKey, SymbolTree,
+    WorkspaceSymbols,
+};
 
 pub use hir_def::resolver::{AssignmentResolution, Resolver};
 pub use hir_def::scope::{ExprScopes, ScopeDef};

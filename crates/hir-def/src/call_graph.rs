@@ -239,6 +239,33 @@ impl WorkspaceCallGraph {
     pub fn callers(&self, node: GraphNode) -> &[WorkspaceCallEdge] {
         self.reverse.get(&node).map(Vec::as_slice).unwrap_or(&[])
     }
+
+    /// Every node that participates in the graph: it has an outgoing edge, an
+    /// incoming edge, or a known dispatch. Order is unspecified.
+    pub fn nodes(&self) -> impl Iterator<Item = GraphNode> + '_ {
+        let mut seen = FxHashMap::default();
+        self.forward
+            .keys()
+            .chain(self.reverse.keys())
+            .chain(self.node_dispatch.keys())
+            .copied()
+            .filter(move |&node| seen.insert(node, ()).is_none())
+    }
+
+    /// Every resolved edge in the graph (each edge appears once). Order is unspecified.
+    pub fn edges(&self) -> impl Iterator<Item = &WorkspaceCallEdge> + '_ {
+        self.forward.values().flat_map(|edges| edges.iter())
+    }
+
+    /// Number of resolved edges.
+    pub fn edge_count(&self) -> usize {
+        self.forward.values().map(Vec::len).sum()
+    }
+
+    /// Caller-in centrality: how many resolved calls target `node`.
+    pub fn in_degree(&self, node: GraphNode) -> usize {
+        self.reverse.get(&node).map_or(0, Vec::len)
+    }
 }
 
 pub fn extract_call_summary(

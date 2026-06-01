@@ -1,4 +1,5 @@
 use crate::baseline::{BaselineRuntime, ConfiguredBaselineStatus, ExternalBaselineService};
+use crate::graph::GraphState;
 use bsl_metadata::Configuration;
 use bsl_platform::PlatformDataInner;
 use bsl_search::{BaselineHashMode, CorpusId, Document, IndexProgress, SearchEngine};
@@ -27,6 +28,7 @@ pub struct SharedState {
     workspace_search_mode: WorkspaceSearchMode,
     external_baseline: Option<Arc<ExternalBaselineService>>,
     configured_baseline: Option<ConfiguredBaselineStatus>,
+    graph: GraphState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,6 +115,8 @@ impl SharedState {
             }
         }
 
+        let graph = GraphState::for_workspace(source_dir.clone());
+
         Self {
             configuration: Arc::new(RwLock::new(configuration)),
             extensions: Arc::new(RwLock::new(extensions)),
@@ -125,6 +129,7 @@ impl SharedState {
             workspace_search_mode,
             external_baseline: baseline_runtime.external_baseline,
             configured_baseline: Some(baseline_runtime.configured_baseline),
+            graph,
         }
     }
 
@@ -265,6 +270,7 @@ impl SharedState {
             workspace_search_mode: WorkspaceSearchMode::SqliteLocal,
             external_baseline: baseline_runtime.external_baseline,
             configured_baseline: Some(baseline_runtime.configured_baseline),
+            graph: GraphState::disabled(),
         }
     }
 
@@ -281,7 +287,12 @@ impl SharedState {
             workspace_search_mode: WorkspaceSearchMode::SqliteLocal,
             external_baseline: None,
             configured_baseline: None,
+            graph: GraphState::disabled(),
         }
+    }
+
+    pub(crate) fn graph(&self) -> &GraphState {
+        &self.graph
     }
 
     pub fn set_onec_client(&mut self, client: OnecClient) {

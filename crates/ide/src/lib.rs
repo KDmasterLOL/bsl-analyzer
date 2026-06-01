@@ -5,6 +5,7 @@ mod document_symbols;
 mod folding;
 pub mod formatting;
 mod goto_definition;
+pub mod graph;
 mod hover;
 mod references;
 mod signature_help;
@@ -15,6 +16,10 @@ pub use completion::{CompletionItem, CompletionItemKind};
 pub use document_highlight::{DocumentHighlight, DocumentHighlightKind};
 pub use folding::{FoldingRange, FoldingRangeKind};
 pub use formatting::{FormattingConfig, FormattingResult};
+pub use graph::{
+    Direction, EdgeRef, GraphDetail, GraphError, GraphOverview, NeighborsParams, NeighborsResult,
+    NodeRef, NodeResult,
+};
 pub use ide_assists::{Assist, AssistId, SourceChange};
 pub use ide_db::base_db::Locale;
 pub use ide_db::{RootDatabase, RootDatabaseImpl, SymbolKind, TextRange};
