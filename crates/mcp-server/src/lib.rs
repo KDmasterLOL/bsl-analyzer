@@ -435,21 +435,20 @@ impl McpServer {
             GraphStatus::Ready { .. } => {}
         }
 
-        let Some(analysis) = graph.snapshot() else {
+        let Some(snapshot) = graph.snapshot() else {
             return Ok(CallToolResult::success(vec![Content::text("{\"status\":\"loading\"}")]));
         };
         let workspace_root = graph.workspace_root().map(std::path::Path::to_path_buf);
 
         tokio::task::spawn_blocking(move || {
             let workspace_root = workspace_root.as_deref();
-            match p.action.as_str() {
-                "overview" => {
-                    Ok(tools::graph::overview(&analysis, workspace_root, p.top.unwrap_or(20)))
-                }
+            let analysis = &snapshot.analysis;
+            let value = match p.action.as_str() {
+                "overview" => tools::graph::overview(analysis, workspace_root, p.top.unwrap_or(20)),
                 "node" => {
                     let id = require(p.id, "id", "node")?;
                     let detail = tools::graph::detail_from(p.detail.as_deref());
-                    Ok(tools::graph::node(&analysis, workspace_root, &id, detail))
+                    tools::graph::node(analysis, workspace_root, &id, detail)
                 }
                 "source" => {
                     if p.ids.is_empty() {
@@ -459,7 +458,7 @@ impl McpServer {
                         ));
                     }
                     let budget = p.max_output_tokens.unwrap_or(4000);
-                    Ok(tools::graph::source(&analysis, workspace_root, &p.ids, budget))
+                    tools::graph::source(analysis, workspace_root, &p.ids, budget)
                 }
                 action @ ("neighbors" | "callers" | "callees") => {
                     let id = require(p.id, "id", action)?;
@@ -476,16 +475,23 @@ impl McpServer {
                         detail: tools::graph::detail_from(p.detail.as_deref()),
                         provenance_filter: p.provenance.clone(),
                     };
-                    Ok(tools::graph::neighbors(&analysis, workspace_root, &neighbors))
+                    tools::graph::neighbors(analysis, workspace_root, &neighbors)
                 }
-                other => Err(McpError::invalid_params(
-                    format!(
-                        "Unknown action '{other}'. Expected: overview, schema, node, source, \
-                         neighbors, callers, callees"
-                    ),
-                    None,
-                )),
-            }
+                other => {
+                    return Err(McpError::invalid_params(
+                        format!(
+                            "Unknown action '{other}'. Expected: overview, schema, node, source, \
+                             neighbors, callers, callees"
+                        ),
+                        None,
+                    ))
+                }
+            };
+            // Stamp freshness relative to the snapshot that served this answer: the
+            // scan may detect drift and kick a background reload, but `revision`
+            // and `stale` describe the data actually returned above.
+            let freshness = graph.freshness(&snapshot);
+            Ok(tools::graph::envelope(freshness, value))
         })
         .await
         .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
