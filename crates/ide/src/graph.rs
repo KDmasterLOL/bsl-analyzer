@@ -90,6 +90,7 @@ pub struct EdgeRef {
 pub struct GraphOverview {
     pub modules: usize,
     pub methods: usize,
+    pub mdos: usize,
     pub nodes: usize,
     pub edges: usize,
     pub top_by_centrality: Vec<NodeRef>,
@@ -246,10 +247,13 @@ impl<'a> GraphCtx<'a> {
 
     // ---- id encoding --------------------------------------------------------
 
-    fn encode_node(&self, node: GraphNode) -> (String, bool) {
+    fn encode_node(&self, node: &GraphNode) -> (String, bool) {
         match node {
-            GraphNode::Method(method) => self.encode_method(method),
-            GraphNode::ModuleCode(module) => self.encode_module(module),
+            GraphNode::Method(method) => self.encode_method(*method),
+            GraphNode::ModuleCode(module) => self.encode_module(*module),
+            GraphNode::Mdo { mdo_type, object_name } => {
+                (format!("mdo/{}/{}", mdo_type.english_name(), object_name.as_str()), true)
+            }
         }
     }
 
@@ -300,6 +304,9 @@ impl<'a> GraphCtx<'a> {
                 .ok_or_else(|| GraphError::NotFound { id: id.to_string() })?;
             return Ok(GraphNode::ModuleCode(ModuleId::new(file_id)));
         }
+        if let Some(rest) = id.strip_prefix("mdo/") {
+            return self.resolve_mdo_id(rest, id);
+        }
 
         let parts: Vec<&str> = id.split('/').collect();
         let (is_method, rest) = match parts.first().copied() {
@@ -339,6 +346,28 @@ impl<'a> GraphCtx<'a> {
         Ok(GraphNode::Method(method.id()))
     }
 
+    /// Resolve `<MdoEnglish>/<ObjectName>` to the metadata-object node, if the
+    /// workspace graph references it. The match is case-insensitive on the object
+    /// name (BSL is case-insensitive) and returns the graph's canonical spelling.
+    fn resolve_mdo_id(&self, rest: &str, id: &str) -> Result<GraphNode, GraphError> {
+        let (mdo_eng, object) = rest.split_once('/').ok_or_else(|| GraphError::BadId {
+            id: id.to_string(),
+            reason: "mdo id must be 'mdo/<MdoType>/<Object>'".to_string(),
+        })?;
+        let mdo_type: MdoType = mdo_eng.parse().map_err(|_| GraphError::BadId {
+            id: id.to_string(),
+            reason: format!("unknown metadata type '{mdo_eng}'"),
+        })?;
+        let object_lower = object.to_lowercase();
+        self.graph
+            .nodes()
+            .find(|n| {
+                matches!(n, GraphNode::Mdo { mdo_type: mt, object_name }
+                    if *mt == mdo_type && object_name.as_str().to_lowercase() == object_lower)
+            })
+            .ok_or_else(|| GraphError::NotFound { id: id.to_string() })
+    }
+
     fn resolve_rel_path(&self, rel: &str) -> Option<FileId> {
         for file_id in self.source_root.iter() {
             let abs = match self.path_for(file_id) {
@@ -360,10 +389,36 @@ impl<'a> GraphCtx<'a> {
     }
 
     fn node_ref(&self, node: GraphNode, detail: GraphDetail) -> NodeRef {
-        let (id, addressable) = self.encode_node(node);
+        let (id, addressable) = self.encode_node(&node);
         match node {
             GraphNode::Method(method) => self.method_node_ref(method, id, addressable, detail),
             GraphNode::ModuleCode(module) => self.module_node_ref(module, id, addressable),
+            GraphNode::Mdo { mdo_type, object_name } => {
+                self.mdo_node_ref(mdo_type, object_name.as_str(), id, addressable)
+            }
+        }
+    }
+
+    fn mdo_node_ref(
+        &self,
+        mdo_type: MdoType,
+        object_name: &str,
+        id: String,
+        addressable: bool,
+    ) -> NodeRef {
+        let name = object_name.to_string();
+        let qualified = format!("{}.{name}", mdo_type.russian_name());
+        NodeRef {
+            id,
+            kind: "mdo",
+            name,
+            qualified,
+            module: None,
+            signature: None,
+            source: None,
+            dispatch: Vec::new(),
+            is_export: None,
+            addressable,
         }
     }
 
@@ -381,8 +436,11 @@ impl<'a> GraphCtx<'a> {
             Some(scope) => format!("{scope}.{name}"),
             None => name.clone(),
         };
-        let dispatch =
-            self.graph.dispatch(GraphNode::Method(method)).map(dispatch_labels).unwrap_or_default();
+        let dispatch = self
+            .graph
+            .dispatch(&GraphNode::Method(method))
+            .map(dispatch_labels)
+            .unwrap_or_default();
 
         let mut node = NodeRef {
             id,
@@ -422,7 +480,7 @@ impl<'a> GraphCtx<'a> {
             source: None,
             dispatch: self
                 .graph
-                .dispatch(GraphNode::ModuleCode(module))
+                .dispatch(&GraphNode::ModuleCode(module))
                 .map(dispatch_labels)
                 .unwrap_or_default(),
             is_export: None,
@@ -500,6 +558,15 @@ impl<'a> GraphCtx<'a> {
                     }),
                     truncated: false,
                 },
+                Ok(GraphNode::Mdo { .. }) => SourceItem {
+                    id: id.clone(),
+                    source: None,
+                    error: Some(GraphError::Unsupported {
+                        id: id.clone(),
+                        reason: "a metadata object has no source; request a method".to_string(),
+                    }),
+                    truncated: false,
+                },
             };
             items.push(item);
         }
@@ -521,12 +588,14 @@ impl<'a> GraphCtx<'a> {
     fn overview(&self, top_n: usize) -> GraphOverview {
         let mut methods = 0usize;
         let mut modules = 0usize;
+        let mut mdos = 0usize;
         let mut node_count = 0usize;
         for node in self.graph.nodes() {
             node_count += 1;
             match node {
                 GraphNode::Method(_) => methods += 1,
                 GraphNode::ModuleCode(_) => modules += 1,
+                GraphNode::Mdo { .. } => mdos += 1,
             }
         }
 
@@ -542,7 +611,7 @@ impl<'a> GraphCtx<'a> {
         let mut ranked: Vec<(usize, GraphNode)> = self
             .graph
             .nodes()
-            .map(|n| (self.graph.in_degree(n), n))
+            .map(|n| (self.graph.in_degree(&n), n))
             .filter(|(d, _)| *d > 0)
             .collect();
         ranked.sort_by_key(|&(degree, _)| std::cmp::Reverse(degree));
@@ -555,6 +624,7 @@ impl<'a> GraphCtx<'a> {
         GraphOverview {
             modules,
             methods,
+            mdos,
             nodes: node_count,
             edges: self.graph.edge_count(),
             top_by_centrality,
@@ -567,24 +637,24 @@ impl<'a> GraphCtx<'a> {
         let root = self.resolve_id(params.id)?;
         let depth = params.depth.max(1);
 
-        let mut visited: Vec<GraphNode> = vec![root];
+        let mut visited: Vec<GraphNode> = vec![root.clone()];
         let mut seen: std::collections::HashSet<GraphNode> = std::collections::HashSet::new();
-        seen.insert(root);
+        seen.insert(root.clone());
         let mut out_edges: Vec<&WorkspaceCallEdge> = Vec::new();
-        let mut frontier = vec![root];
+        let mut frontier = vec![root.clone()];
 
         for _ in 0..depth {
             let mut next: Vec<GraphNode> = Vec::new();
-            for &node in &frontier {
+            for node in &frontier {
                 for edge in self.directed_edges(node, params.dir) {
                     if !self.provenance_allowed(edge, &params.provenance_filter) {
                         continue;
                     }
                     out_edges.push(edge);
-                    let other = if edge.from == node { edge.to } else { edge.from };
-                    if seen.insert(other) {
-                        next.push(other);
-                        visited.push(other);
+                    let other = if &edge.from == node { &edge.to } else { &edge.from };
+                    if seen.insert(other.clone()) {
+                        next.push(other.clone());
+                        visited.push(other.clone());
                     }
                 }
             }
@@ -595,35 +665,35 @@ impl<'a> GraphCtx<'a> {
         }
 
         // Centrality-ranked tail-drop of discovered (non-root) nodes.
-        let mut discovered: Vec<GraphNode> =
-            visited.iter().copied().filter(|&n| n != root).collect();
-        discovered.sort_by_key(|&n| std::cmp::Reverse(self.graph.in_degree(n)));
+        let mut discovered: Vec<GraphNode> = visited.into_iter().filter(|n| *n != root).collect();
+        discovered.sort_by_key(|n| std::cmp::Reverse(self.graph.in_degree(n)));
         let mut dropped: Vec<String> = Vec::new();
         if discovered.len() > params.max_nodes {
             for node in discovered.split_off(params.max_nodes) {
-                dropped.push(self.encode_node(node).0);
+                dropped.push(self.encode_node(&node).0);
             }
         }
-        let kept: std::collections::HashSet<GraphNode> = discovered.iter().copied().collect();
+        let kept: std::collections::HashSet<GraphNode> = discovered.iter().cloned().collect();
 
-        let nodes = discovered.iter().map(|&n| self.node_ref(n, params.detail)).collect();
+        let nodes = discovered.iter().map(|n| self.node_ref(n.clone(), params.detail)).collect();
         // A `Direction::Both` sweep visits an edge from each endpoint, so a
-        // self-call surfaces twice; dedup the projected edges.
-        let mut seen_edges: std::collections::HashSet<(GraphNode, GraphNode)> =
+        // self-call surfaces twice; dedup by `(from, to, kind)` so the two
+        // manager edge kinds between the same pair are not collapsed.
+        let mut seen_edges: std::collections::HashSet<(GraphNode, GraphNode, EdgeKind)> =
             std::collections::HashSet::new();
         let edges = out_edges
             .iter()
             .filter(|e| {
                 (e.from == root || kept.contains(&e.from)) && (e.to == root || kept.contains(&e.to))
             })
-            .filter(|e| seen_edges.insert((e.from, e.to)))
+            .filter(|e| seen_edges.insert((e.from.clone(), e.to.clone(), e.kind)))
             .map(|e| self.edge_ref(e))
             .collect();
 
         Ok(NeighborsResult { root: self.node_ref(root, params.detail), nodes, edges, dropped })
     }
 
-    fn directed_edges(&self, node: GraphNode, dir: Direction) -> Vec<&WorkspaceCallEdge> {
+    fn directed_edges(&self, node: &GraphNode, dir: Direction) -> Vec<&WorkspaceCallEdge> {
         match dir {
             Direction::Out => self.graph.callees(node).iter().collect(),
             Direction::In => self.graph.callers(node).iter().collect(),
@@ -639,8 +709,8 @@ impl<'a> GraphCtx<'a> {
 
     fn edge_ref(&self, edge: &WorkspaceCallEdge) -> EdgeRef {
         EdgeRef {
-            from: self.encode_node(edge.from).0,
-            to: self.encode_node(edge.to).0,
+            from: self.encode_node(&edge.from).0,
+            to: self.encode_node(&edge.to).0,
             kind: edge_kind_label(edge.kind),
             provenance: provenance_label(edge),
             crosses_client_to_server: edge.crosses_client_to_server,
@@ -745,6 +815,8 @@ fn edge_kind_label(kind: EdgeKind) -> &'static str {
     // local-vs-qualified distinction is an internal resolution detail.
     match kind {
         EdgeKind::DirectLocal | EdgeKind::DirectQualifiedModule => "call",
+        EdgeKind::ManagerCreates => "manager_creates",
+        EdgeKind::ManagerAccess => "manager_access",
     }
 }
 
@@ -917,6 +989,48 @@ mod tests {
         let res = a.graph_neighbors(ROOT, None, &params).unwrap();
         assert!(res.nodes.iter().any(|n| n.id == "method/common/Вызыватель/Делать"));
         assert!(res.edges.iter().any(|e| e.provenance == "inferred"));
+    }
+
+    #[test]
+    fn platform_manager_calls_link_to_mdo_node() {
+        // No manager module for Контрагенты, so СоздатьЭлемент/НайтиПоКоду are
+        // platform methods that touch the metadata object rather than a user node.
+        let a = workspace(&[(
+            "/src/CommonModules/Вызыватель/Ext/Module.bsl",
+            "Процедура Делать() Экспорт\n\
+             Справочники.Контрагенты.СоздатьЭлемент();\n\
+             Справочники.Контрагенты.НайтиПоКоду();\n\
+             КонецПроцедуры",
+        )]);
+
+        let id = "mdo/Catalog/Контрагенты";
+        let node = a.graph_node(ROOT, None, id, GraphDetail::Names).expect("mdo node resolves");
+        assert_eq!(node.node.id, id);
+        assert_eq!(node.node.kind, "mdo");
+        assert_eq!(node.node.name, "Контрагенты");
+        assert_eq!(node.node.qualified, "Справочник.Контрагенты");
+        assert!(node.node.addressable);
+
+        let ov = a.graph_overview(ROOT, None, 10);
+        assert_eq!(ov.mdos, 1, "one metadata object node");
+
+        // The Mdo node's callers carry both edge kinds (create + access), deduped
+        // by kind rather than collapsed to one.
+        let params = NeighborsParams {
+            id,
+            dir: Direction::In,
+            depth: 1,
+            max_nodes: 50,
+            detail: GraphDetail::Names,
+            provenance_filter: Vec::new(),
+        };
+        let res = a.graph_neighbors(ROOT, None, &params).unwrap();
+        assert!(res.nodes.iter().any(|n| n.id == "method/common/Вызыватель/Делать"));
+        assert!(res
+            .edges
+            .iter()
+            .any(|e| e.kind == "manager_creates" && e.provenance == "inferred"));
+        assert!(res.edges.iter().any(|e| e.kind == "manager_access"));
     }
 
     #[test]

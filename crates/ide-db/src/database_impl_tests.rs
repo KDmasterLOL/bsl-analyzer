@@ -951,11 +951,16 @@ fn test_resolved_module_summary_manager_access() {
         1,
         "Справочники.Контрагенты.Внутренняя is non-export → VisibilityBlocked"
     );
-    // A platform manager method (СоздатьЭлемент) is not a user node — surfaced as unresolved.
+    // A platform creation method (СоздатьЭлемент) is not a user node — it touches
+    // the metadata object, so it resolves to an Mdo target via a ManagerCreates edge.
+    use bsl_metadata::MdoType;
+    use hir::call_graph::EdgeKind;
     assert!(
-        summary.edges.iter().any(|e| e.provenance == EdgeProvenance::Unresolved
-            && matches!(&e.target, ResolvedTarget::Unresolved(_))),
-        "Платформенный СоздатьЭлемент should be surfaced as unresolved"
+        summary.edges.iter().any(|e| e.provenance == EdgeProvenance::Inferred
+            && e.kind == EdgeKind::ManagerCreates
+            && matches!(&e.target, ResolvedTarget::Mdo { mdo_type, object_name }
+                if *mdo_type == MdoType::Catalog && object_name.as_str() == "Контрагенты")),
+        "Платформенный СоздатьЭлемент should resolve to an Mdo node via manager_creates"
     );
 }
 
@@ -1001,7 +1006,7 @@ fn test_workspace_call_graph_callers_and_callees() {
     let graph = db.workspace_call_graph(SourceRootId(0));
 
     // Reverse adjacency: callers of the utils method include a method in the caller module.
-    let callers = graph.callers(GraphNode::Method(target));
+    let callers = graph.callers(&GraphNode::Method(target));
     assert!(!callers.is_empty(), "utils method must have a caller");
     assert!(callers.iter().all(|e| e.to == GraphNode::Method(target)));
     assert!(callers
@@ -1009,11 +1014,11 @@ fn test_workspace_call_graph_callers_and_callees() {
         .any(|e| matches!(e.from, GraphNode::Method(m) if m.module == caller_module)));
 
     // Forward adjacency: the caller node lists the utils method as a callee.
-    let caller_node = match callers[0].from {
-        GraphNode::Method(_) => callers[0].from,
+    let caller_node = match &callers[0].from {
+        GraphNode::Method(_) => callers[0].from.clone(),
         other => panic!("expected a method caller, got {other:?}"),
     };
-    let callees = graph.callees(caller_node);
+    let callees = graph.callees(&caller_node);
     assert!(callees.iter().any(|e| e.to == GraphNode::Method(target)));
 }
 
@@ -1061,7 +1066,7 @@ fn test_workspace_call_graph_module_code_and_multiple_callers() {
         .expect("Утилиты.Ц should resolve");
 
     let graph = db.workspace_call_graph(SourceRootId(0));
-    let callers = graph.callers(GraphNode::Method(target));
+    let callers = graph.callers(&GraphNode::Method(target));
 
     assert_eq!(callers.len(), 3, "two methods + module-body code call the target");
     assert!(
@@ -1132,12 +1137,12 @@ fn test_workspace_call_graph_client_server_boundary() {
 
     // Node dispatch is attached: the &НаСервере target is server-only.
     let dispatch = graph
-        .dispatch(GraphNode::Method(server_method))
+        .dispatch(&GraphNode::Method(server_method))
         .expect("server method must have known dispatch");
     assert!(dispatch.is_server_only(), "&НаСервере method is server-only");
 
     // The client→server-only call is flagged as a boundary crossing.
-    let server_callers = graph.callers(GraphNode::Method(server_method));
+    let server_callers = graph.callers(&GraphNode::Method(server_method));
     assert!(!server_callers.is_empty());
     assert!(
         server_callers.iter().all(|e| e.crosses_client_to_server),
@@ -1145,7 +1150,7 @@ fn test_workspace_call_graph_client_server_boundary() {
     );
 
     // A &НаКлиентеНаСервере callee is not server-only → NOT a boundary crossing.
-    let universal_callers = graph.callers(GraphNode::Method(universal));
+    let universal_callers = graph.callers(&GraphNode::Method(universal));
     assert!(!universal_callers.is_empty());
     assert!(
         universal_callers.iter().all(|e| !e.crosses_client_to_server),

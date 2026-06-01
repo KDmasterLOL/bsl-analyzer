@@ -1,3 +1,4 @@
+use bsl_metadata::MdoType;
 use rustc_hash::FxHashMap;
 use syntax::TextRange;
 
@@ -98,6 +99,12 @@ pub struct CallEdge {
 pub enum EdgeKind {
     DirectLocal,
     DirectQualifiedModule,
+    /// `Справочники.X.СоздатьЭлемент()` — a manager method that creates an object
+    /// of its metadata type. Target is an [`GraphNode::Mdo`].
+    ManagerCreates,
+    /// Any other touch of an object through its manager (a platform find/select
+    /// method, or a bare `Справочники.X` reference). Target is an [`GraphNode::Mdo`].
+    ManagerAccess,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -159,6 +166,9 @@ pub struct ResolvedCallEdge {
 pub enum ResolvedTarget {
     /// Resolved to a concrete method node.
     Method(MethodId),
+    /// Resolved to a metadata-object node (a manager access that is not a user
+    /// manager-module method — a creation/find platform method or bare reference).
+    Mdo { mdo_type: MdoType, object_name: Name },
     /// Not resolved to a concrete node; the original target is preserved so
     /// the gap is surfaced honestly rather than dropped.
     Unresolved(CallTarget),
@@ -181,15 +191,25 @@ pub enum EdgeProvenance {
 }
 
 /// A globally-addressable node in the workspace call graph.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// Not `Copy`: an `Mdo` node carries a `Name`. Clones are cheap (`SmolStr` is
+/// inline for short names) and the graph stores nodes by reference internally.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum GraphNode {
     Method(MethodId),
     /// A module's top-level body (the `CallerId::ModuleCode` caller).
     ModuleCode(ModuleId),
+    /// A metadata object (catalog, document, register, …) reached through its
+    /// manager. The identity is the metadata type plus the object name as it
+    /// appears in code, canonicalised to a single spelling per object at fold time.
+    Mdo {
+        mdo_type: MdoType,
+        object_name: Name,
+    },
 }
 
 /// A resolved call edge between two workspace graph nodes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceCallEdge {
     pub from: GraphNode,
     pub to: GraphNode,
@@ -217,8 +237,8 @@ pub struct WorkspaceCallGraph {
 
 impl WorkspaceCallGraph {
     pub fn insert(&mut self, edge: WorkspaceCallEdge) {
-        self.forward.entry(edge.from).or_default().push(edge);
-        self.reverse.entry(edge.to).or_default().push(edge);
+        self.forward.entry(edge.from.clone()).or_default().push(edge.clone());
+        self.reverse.entry(edge.to.clone()).or_default().push(edge);
     }
 
     pub fn set_dispatch(&mut self, node: GraphNode, dispatch: MethodDispatch) {
@@ -226,18 +246,18 @@ impl WorkspaceCallGraph {
     }
 
     /// Client/server dispatch of a node, if known (method nodes only).
-    pub fn dispatch(&self, node: GraphNode) -> Option<MethodDispatch> {
-        self.node_dispatch.get(&node).copied()
+    pub fn dispatch(&self, node: &GraphNode) -> Option<MethodDispatch> {
+        self.node_dispatch.get(node).copied()
     }
 
     /// Outgoing resolved calls from `node` (callees).
-    pub fn callees(&self, node: GraphNode) -> &[WorkspaceCallEdge] {
-        self.forward.get(&node).map(Vec::as_slice).unwrap_or(&[])
+    pub fn callees(&self, node: &GraphNode) -> &[WorkspaceCallEdge] {
+        self.forward.get(node).map(Vec::as_slice).unwrap_or(&[])
     }
 
     /// Incoming resolved calls to `node` (callers).
-    pub fn callers(&self, node: GraphNode) -> &[WorkspaceCallEdge] {
-        self.reverse.get(&node).map(Vec::as_slice).unwrap_or(&[])
+    pub fn callers(&self, node: &GraphNode) -> &[WorkspaceCallEdge] {
+        self.reverse.get(node).map(Vec::as_slice).unwrap_or(&[])
     }
 
     /// Every node that participates in the graph: it has an outgoing edge, an
@@ -248,8 +268,8 @@ impl WorkspaceCallGraph {
             .keys()
             .chain(self.reverse.keys())
             .chain(self.node_dispatch.keys())
-            .copied()
-            .filter(move |&node| seen.insert(node, ()).is_none())
+            .filter(move |node| seen.insert((*node).clone(), ()).is_none())
+            .cloned()
     }
 
     /// Every resolved edge in the graph (each edge appears once). Order is unspecified.
@@ -263,8 +283,8 @@ impl WorkspaceCallGraph {
     }
 
     /// Caller-in centrality: how many resolved calls target `node`.
-    pub fn in_degree(&self, node: GraphNode) -> usize {
-        self.reverse.get(&node).map_or(0, Vec::len)
+    pub fn in_degree(&self, node: &GraphNode) -> usize {
+        self.reverse.get(node).map_or(0, Vec::len)
     }
 }
 

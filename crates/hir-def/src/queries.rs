@@ -80,7 +80,9 @@ pub fn resolved_module_summary_query<'db>(
     db: &'db dyn crate::configs::ConfigsDatabase,
     file_id_input: FileIdInput<'db>,
 ) -> Arc<crate::call_graph::ResolvedModuleSummary> {
-    use crate::call_graph::{CallTarget, EdgeProvenance, ResolvedCallEdge, ResolvedTarget};
+    use crate::call_graph::{
+        CallTarget, EdgeKind, EdgeProvenance, ResolvedCallEdge, ResolvedTarget,
+    };
 
     let _span = tracing::info_span!("resolved_module_summary", ?file_id_input).entered();
     let file_id = file_id_input.file_id(db);
@@ -91,26 +93,33 @@ pub fn resolved_module_summary_query<'db>(
 
     let mut edges = Vec::with_capacity(summary.call_edges.len());
     for edge in &summary.call_edges {
-        let (target, provenance) = match &edge.target {
+        // Each branch yields the resolved target, its provenance, and the edge
+        // kind. The kind defaults to the extraction-time kind, but manager
+        // accesses that land on a metadata object override it with
+        // `ManagerCreates`/`ManagerAccess` (create-vs-touch is a semantic call).
+        let (target, provenance, kind) = match &edge.target {
             CallTarget::Local { callee_local_id } => (
                 ResolvedTarget::Method(crate::MethodId {
                     module: module_id,
                     local_id: *callee_local_id,
                 }),
                 EdgeProvenance::Resolved,
+                edge.kind,
             ),
             CallTarget::QualifiedModule { module_name, method_name } => {
                 match resolver.resolve_qualified_method(db, module_name, method_name) {
                     Ok(r) if r.is_export => {
-                        (ResolvedTarget::Method(r.method_id), EdgeProvenance::Resolved)
+                        (ResolvedTarget::Method(r.method_id), EdgeProvenance::Resolved, edge.kind)
                     }
                     Ok(_) => (
                         ResolvedTarget::Unresolved(edge.target.clone()),
                         EdgeProvenance::VisibilityBlocked,
+                        edge.kind,
                     ),
                     Err(_) => (
                         ResolvedTarget::Unresolved(edge.target.clone()),
                         EdgeProvenance::Unresolved,
+                        edge.kind,
                     ),
                 }
             }
@@ -120,38 +129,69 @@ pub fn resolved_module_summary_query<'db>(
                 method_name: Some(method_name),
             } => match resolver.resolve_manager_method(db, *manager_type, object_name, method_name)
             {
+                // A user manager-module method: keep the edge about the method.
                 Ok(r) if r.is_export => {
-                    (ResolvedTarget::Method(r.method_id), EdgeProvenance::Inferred)
+                    (ResolvedTarget::Method(r.method_id), EdgeProvenance::Inferred, edge.kind)
                 }
                 Ok(_) => (
                     ResolvedTarget::Unresolved(edge.target.clone()),
                     EdgeProvenance::VisibilityBlocked,
+                    edge.kind,
                 ),
-                Err(_) => {
-                    (ResolvedTarget::Unresolved(edge.target.clone()), EdgeProvenance::Unresolved)
-                }
+                // A platform manager method (create/find/…): the edge is about
+                // the metadata object it touches, not a user node.
+                Err(_) => (
+                    ResolvedTarget::Mdo {
+                        mdo_type: manager_type.to_mdo_type(),
+                        object_name: object_name.clone(),
+                    },
+                    EdgeProvenance::Inferred,
+                    manager_edge_kind(method_name.as_str()),
+                ),
             },
-            // ManagerAccess without a method is an object reference, and a
-            // `ЭтотОбъект` call that reached here is a platform object method
-            // (local user methods were already resolved at extraction time) —
-            // neither maps to a user node yet.
-            CallTarget::ManagerAccess { .. }
-            | CallTarget::ThisObjectMethod { .. }
-            | CallTarget::Unresolved => {
-                (ResolvedTarget::Unresolved(edge.target.clone()), EdgeProvenance::Unresolved)
-            }
+            // A bare `Справочники.X` reference (no method) touches the object.
+            CallTarget::ManagerAccess { manager_type, object_name, method_name: None } => (
+                ResolvedTarget::Mdo {
+                    mdo_type: manager_type.to_mdo_type(),
+                    object_name: object_name.clone(),
+                },
+                EdgeProvenance::Inferred,
+                EdgeKind::ManagerAccess,
+            ),
+            // A `ЭтотОбъект` call that reached here is a platform object method
+            // (local user methods were already resolved at extraction time).
+            CallTarget::ThisObjectMethod { .. } | CallTarget::Unresolved => (
+                ResolvedTarget::Unresolved(edge.target.clone()),
+                EdgeProvenance::Unresolved,
+                edge.kind,
+            ),
         };
 
         edges.push(ResolvedCallEdge {
             caller: edge.caller,
             target,
-            kind: edge.kind,
+            kind,
             range: edge.range,
             provenance,
         });
     }
 
     Arc::new(crate::call_graph::ResolvedModuleSummary { module: module_id, edges })
+}
+
+/// Classify a platform manager method into a metadata-object edge kind. Creation
+/// methods (`СоздатьЭлемент`/`СоздатьГруппу`/… or English `Create…`) produce a
+/// `ManagerCreates` edge; everything else (find/select/…) a `ManagerAccess` edge.
+/// Only platform methods reach here — user manager-module methods resolve to a
+/// `Method` node earlier — so the name prefix is a reliable creation signal.
+fn manager_edge_kind(method_name: &str) -> crate::call_graph::EdgeKind {
+    use crate::call_graph::EdgeKind;
+    let lower = method_name.to_lowercase();
+    if lower.starts_with("создать") || lower.starts_with("create") {
+        EdgeKind::ManagerCreates
+    } else {
+        EdgeKind::ManagerAccess
+    }
 }
 
 #[salsa::tracked(lru = 16)]
@@ -162,6 +202,8 @@ pub fn workspace_call_graph_query(
     use crate::call_graph::{
         CallerId, GraphNode, MethodDispatch, ResolvedTarget, WorkspaceCallEdge, WorkspaceCallGraph,
     };
+    use bsl_metadata::MdoType;
+    use rustc_hash::FxHashMap;
 
     let source_root = source_root_input.root(db);
     let file_set = source_root.file_set();
@@ -173,6 +215,11 @@ pub fn workspace_call_graph_query(
     let _span = tracing::info_span!("workspace_call_graph", module_count = modules.len()).entered();
 
     let mut graph = WorkspaceCallGraph::default();
+
+    // One canonical spelling per metadata object: BSL identifiers are
+    // case-insensitive, so different spellings of the same object across call
+    // sites must collapse to a single `Mdo` node.
+    let mut mdo_canonical: FxHashMap<(MdoType, String), crate::name::Name> = FxHashMap::default();
 
     // Pass 1: per-method client/server dispatch, needed before edges so the
     // boundary flag can consult a callee that lives in another module. Common
@@ -197,8 +244,15 @@ pub fn workspace_call_graph_query(
     for &module in &modules {
         let summary = db.resolved_module_summary(module);
         for edge in &summary.edges {
-            let to_mid = match &edge.target {
-                ResolvedTarget::Method(method_id) => *method_id,
+            let to = match &edge.target {
+                ResolvedTarget::Method(method_id) => GraphNode::Method(*method_id),
+                ResolvedTarget::Mdo { mdo_type, object_name } => {
+                    let canon = mdo_canonical
+                        .entry((*mdo_type, object_name.as_str().to_lowercase()))
+                        .or_insert_with(|| object_name.clone())
+                        .clone();
+                    GraphNode::Mdo { mdo_type: *mdo_type, object_name: canon }
+                }
                 ResolvedTarget::Unresolved(_) => continue,
             };
             let from = match edge.caller {
@@ -207,10 +261,10 @@ pub fn workspace_call_graph_query(
                 }
                 CallerId::ModuleCode => GraphNode::ModuleCode(module),
             };
-            let to = GraphNode::Method(to_mid);
+            // Mdo nodes have no dispatch, so the boundary flag falls out `false`.
             let crosses_client_to_server =
-                graph.dispatch(from).is_some_and(|d| d.can_run_on_client)
-                    && graph.dispatch(to).is_some_and(|d| d.is_server_only());
+                graph.dispatch(&from).is_some_and(|d| d.can_run_on_client)
+                    && graph.dispatch(&to).is_some_and(|d| d.is_server_only());
             graph.insert(WorkspaceCallEdge {
                 from,
                 to,
