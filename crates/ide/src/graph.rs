@@ -114,6 +114,28 @@ pub struct NeighborsResult {
     pub dropped: Vec<String>,
 }
 
+/// Source for one requested node.
+#[derive(Debug, Clone, Serialize)]
+pub struct SourceItem {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<GraphError>,
+    /// The source was cut short to stay within the output budget.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+}
+
+/// Budgeted source for a set of nodes.
+#[derive(Debug, Clone, Serialize)]
+pub struct SourceResult {
+    pub items: Vec<SourceItem>,
+    /// The token budget was reached; later items carry no source.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub budget_exhausted: bool,
+}
+
 /// Why a graph request could not be served.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(tag = "error", rename_all = "snake_case")]
@@ -173,6 +195,20 @@ impl Analysis {
     ) -> Result<NeighborsResult, GraphError> {
         let ctx = GraphCtx::new(self.database(), source_root_id, workspace_root);
         ctx.neighbors(params)
+    }
+
+    /// Fetch method source for a set of durable ids, stopping once the rough
+    /// output budget (`max_output_tokens`, ~4 chars/token) is reached. Returns
+    /// raw source — the MCP adapter is responsible for any redaction.
+    pub fn graph_source(
+        &self,
+        source_root_id: SourceRootId,
+        workspace_root: Option<&Path>,
+        ids: &[String],
+        max_output_tokens: usize,
+    ) -> SourceResult {
+        let ctx = GraphCtx::new(self.database(), source_root_id, workspace_root);
+        ctx.source(ids, max_output_tokens)
     }
 }
 
@@ -409,6 +445,68 @@ impl<'a> GraphCtx<'a> {
         text.get(start..end).map(str::to_string)
     }
 
+    fn method_source(&self, method: MethodId) -> Option<String> {
+        let range = hir::Method::new(self.db, method).source_range()?;
+        self.slice(method.module.file_id, range)
+    }
+
+    fn source(&self, ids: &[String], max_output_tokens: usize) -> SourceResult {
+        let budget_chars = max_output_tokens.saturating_mul(4).max(1);
+        let mut used = 0usize;
+        let mut budget_exhausted = false;
+        let mut items = Vec::with_capacity(ids.len());
+
+        for id in ids {
+            let item = match self.resolve_id(id) {
+                Err(err) => {
+                    SourceItem { id: id.clone(), source: None, error: Some(err), truncated: false }
+                }
+                Ok(GraphNode::Method(method)) => match self.method_source(method) {
+                    Some(src) => {
+                        if used >= budget_chars {
+                            budget_exhausted = true;
+                            SourceItem {
+                                id: id.clone(),
+                                source: None,
+                                error: None,
+                                truncated: true,
+                            }
+                        } else {
+                            let remaining = budget_chars - used;
+                            let (text, truncated) = clamp_source(src, remaining);
+                            used += text.len();
+                            budget_exhausted |= truncated;
+                            SourceItem {
+                                id: id.clone(),
+                                source: Some(text),
+                                error: None,
+                                truncated,
+                            }
+                        }
+                    }
+                    None => SourceItem {
+                        id: id.clone(),
+                        source: None,
+                        error: Some(GraphError::NotFound { id: id.clone() }),
+                        truncated: false,
+                    },
+                },
+                Ok(GraphNode::ModuleCode(_)) => SourceItem {
+                    id: id.clone(),
+                    source: None,
+                    error: Some(GraphError::Unsupported {
+                        id: id.clone(),
+                        reason: "module-body source is not served; request a method".to_string(),
+                    }),
+                    truncated: false,
+                },
+            };
+            items.push(item);
+        }
+
+        SourceResult { items, budget_exhausted }
+    }
+
     /// The trimmed source line containing `offset`.
     fn line_at(&self, file_id: FileId, offset: syntax::TextSize) -> Option<String> {
         let text = self.db.file_text_input(file_id).text(self.db).clone();
@@ -550,6 +648,16 @@ impl<'a> GraphCtx<'a> {
     }
 }
 
+/// Derive the durable method id for `method_name` in the module at `path`,
+/// without a database. Returns `None` when `path` is not an indexable user
+/// module (forms, commands, non-module files). Best-effort: the id is not
+/// verified to resolve, but it round-trips through [`Analysis::graph_node`] when
+/// the method exists. Used to bridge code-search hits into the graph.
+pub fn method_id_for_path(path: &str, method_name: &str) -> Option<String> {
+    let key = module_key_for_path(path)?;
+    Some(format!("method/{}/{method_name}", encode_scope(&key)))
+}
+
 fn encode_scope(key: &ModuleKey) -> String {
     match key {
         ModuleKey::Common { name } => format!("common/{name}"),
@@ -642,6 +750,19 @@ fn edge_kind_label(kind: EdgeKind) -> &'static str {
 
 fn basename(path: &str) -> Option<&str> {
     path.rsplit('/').next()
+}
+
+/// Truncate `src` to at most `max_chars` bytes on a char boundary, returning the
+/// (possibly shortened) text and whether it was cut.
+fn clamp_source(src: String, max_chars: usize) -> (String, bool) {
+    if src.len() <= max_chars {
+        return (src, false);
+    }
+    let mut end = max_chars;
+    while end > 0 && !src.is_char_boundary(end) {
+        end -= 1;
+    }
+    (src[..end].to_string(), true)
 }
 
 #[cfg(test)]
@@ -796,6 +917,37 @@ mod tests {
         let res = a.graph_neighbors(ROOT, None, &params).unwrap();
         assert!(res.nodes.iter().any(|n| n.id == "method/common/Вызыватель/Делать"));
         assert!(res.edges.iter().any(|e| e.provenance == "inferred"));
+    }
+
+    #[test]
+    fn source_returns_method_body_and_reports_bad_ids() {
+        let a = client_server_workspace();
+        let ids = vec![
+            "method/common/Сервер/Считать".to_string(),
+            "method/common/Сервер/НетТакого".to_string(),
+        ];
+        let result = a.graph_source(ROOT, None, &ids, 4000);
+        assert_eq!(result.items.len(), 2);
+        assert!(result.items[0].source.as_deref().unwrap().contains("Функция Считать"));
+        assert!(result.items[0].error.is_none());
+        assert!(result.items[1].source.is_none());
+        assert!(matches!(result.items[1].error, Some(GraphError::NotFound { .. })));
+    }
+
+    #[test]
+    fn source_honors_token_budget() {
+        let a = client_server_workspace();
+        let ids = vec![
+            "method/common/Сервер/Считать".to_string(),
+            "method/common/Клиент/Главная".to_string(),
+        ];
+        // 1 token ≈ 4 chars: the bodies far exceed it, so output is capped.
+        let result = a.graph_source(ROOT, None, &ids, 1);
+        assert!(result.budget_exhausted);
+        let emitted: usize =
+            result.items.iter().filter_map(|i| i.source.as_ref()).map(String::len).sum();
+        assert!(emitted <= 4, "emitted {emitted} bytes must stay within the 4-byte budget");
+        assert!(result.items.iter().all(|i| i.truncated || i.source.is_none()));
     }
 
     #[test]

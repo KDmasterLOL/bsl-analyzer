@@ -69,10 +69,15 @@ struct ExecuteParams {
 
 #[derive(Deserialize, JsonSchema)]
 struct GraphParams {
-    /// overview | schema | node | neighbors | callers | callees
+    /// overview | schema | node | source | neighbors | callers | callees
     action: String,
     /// Durable node id (required for node/neighbors/callers/callees).
     id: Option<String>,
+    /// Durable node ids (required for `source`).
+    #[serde(default)]
+    ids: Vec<String>,
+    /// Output budget for `source`, in tokens (~4 chars each; default 4000).
+    max_output_tokens: Option<usize>,
     /// names | signatures | bodies (default: signatures).
     detail: Option<String>,
     /// in | out | both — only for `neighbors` (default: in).
@@ -446,6 +451,16 @@ impl McpServer {
                     let detail = tools::graph::detail_from(p.detail.as_deref());
                     Ok(tools::graph::node(&analysis, workspace_root, &id, detail))
                 }
+                "source" => {
+                    if p.ids.is_empty() {
+                        return Err(McpError::invalid_params(
+                            "'ids' is required (non-empty) for action 'source'",
+                            None,
+                        ));
+                    }
+                    let budget = p.max_output_tokens.unwrap_or(4000);
+                    Ok(tools::graph::source(&analysis, workspace_root, &p.ids, budget))
+                }
                 action @ ("neighbors" | "callers" | "callees") => {
                     let id = require(p.id, "id", action)?;
                     let dir = match action {
@@ -465,8 +480,8 @@ impl McpServer {
                 }
                 other => Err(McpError::invalid_params(
                     format!(
-                        "Unknown action '{other}'. Expected: overview, schema, node, neighbors, \
-                         callers, callees"
+                        "Unknown action '{other}'. Expected: overview, schema, node, source, \
+                         neighbors, callers, callees"
                     ),
                     None,
                 )),

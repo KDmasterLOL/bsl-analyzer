@@ -1107,6 +1107,22 @@ fn ensure_reference_baseline_runtime_ready(
     Ok(())
 }
 
+/// Durable graph id for a code-search hit, when it names a method in an
+/// indexable module. Returns `None` for headers, non-method symbols, and
+/// non-module files (forms, platform docs).
+fn graph_id_for_hit(hit: &SearchHit) -> Option<String> {
+    if hit.symbol_name.is_empty() {
+        return None;
+    }
+    let kind = hit.kind.to_lowercase();
+    let is_method =
+        ["proc", "func", "процед", "функц", "метод"].iter().any(|marker| kind.contains(marker));
+    if !is_method {
+        return None;
+    }
+    ide::method_id_for_path(&hit.file_path, &hit.symbol_name)
+}
+
 fn format_code_hits(hits: &[bsl_search::SearchHit]) -> String {
     let mut out = String::new();
 
@@ -1123,11 +1139,19 @@ fn format_code_hits(hits: &[bsl_search::SearchHit]) -> String {
             name,
             hit.kind,
         );
+        // Bridge into the call graph: surface the durable node id so the agent
+        // can pivot to `graph` callers/callees/source.
+        if let Some(id) = graph_id_for_hit(hit) {
+            let _ = writeln!(out, "  graph_id: {id}");
+        }
 
-        for line in hit.text.lines().take(5) {
+        // Redact secrets before emitting the source snippet (same safety net as
+        // the `graph` tool's source output).
+        let snippet = crate::tools::redact::redact_secrets(&hit.text);
+        for line in snippet.lines().take(5) {
             let _ = writeln!(out, "  │ {line}");
         }
-        let total_lines = hit.text.lines().count();
+        let total_lines = snippet.lines().count();
         if total_lines > 5 {
             let _ = writeln!(out, "  │ ... ({} more lines)", total_lines - 5);
         }
@@ -1306,6 +1330,50 @@ mod tests {
             line_end: 10,
             score,
         }
+    }
+
+    fn code_hit(file_path: &str, symbol: &str, kind: &str) -> bsl_search::SearchHit {
+        bsl_search::SearchHit {
+            collection: "code".to_owned(),
+            file_path: file_path.to_owned(),
+            symbol_name: symbol.to_owned(),
+            kind: kind.to_owned(),
+            text: String::new(),
+            line_start: 0,
+            line_end: 1,
+            score: 1.0,
+        }
+    }
+
+    #[test]
+    fn graph_id_bridges_method_hits_in_modules() {
+        // A method in a common module gets a durable graph id.
+        assert_eq!(
+            super::graph_id_for_hit(&code_hit(
+                "/src/CommonModules/Утилиты/Ext/Module.bsl",
+                "ПроверитьИНН",
+                "procedure",
+            )),
+            Some("method/common/Утилиты/ПроверитьИНН".to_owned()),
+        );
+        // A non-method symbol gets no id.
+        assert_eq!(
+            super::graph_id_for_hit(&code_hit(
+                "/src/CommonModules/Утилиты/Ext/Module.bsl",
+                "МодульнаяПерем",
+                "variable",
+            )),
+            None,
+        );
+        // A method in a non-indexable module (form) gets no id.
+        assert_eq!(
+            super::graph_id_for_hit(&code_hit(
+                "/src/Catalogs/Контрагенты/Forms/Форма/Ext/Form/Module.bsl",
+                "ПриОткрытии",
+                "procedure",
+            )),
+            None,
+        );
     }
 
     #[test]

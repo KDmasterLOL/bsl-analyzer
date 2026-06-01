@@ -5,4 +5,5 @@ pub mod its_help;
 pub mod metadata;
 pub mod platform;
 pub mod query;
+pub mod redact;
 pub mod search;

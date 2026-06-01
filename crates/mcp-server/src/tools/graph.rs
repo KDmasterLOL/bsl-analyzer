@@ -12,6 +12,7 @@ use serde::Serialize;
 use serde_json::json;
 
 use crate::graph::GRAPH_SOURCE_ROOT;
+use crate::tools::redact::redact_secrets;
 
 pub fn detail_from(s: Option<&str>) -> GraphDetail {
     match s {
@@ -41,7 +42,10 @@ pub fn node(
     detail: GraphDetail,
 ) -> CallToolResult {
     match analysis.graph_node(GRAPH_SOURCE_ROOT, workspace_root, id, detail) {
-        Ok(result) => json_result(&result),
+        Ok(mut result) => {
+            redact_opt(&mut result.node.source);
+            json_result(&result)
+        }
         Err(err) => json_result(&err),
     }
 }
@@ -52,15 +56,36 @@ pub fn neighbors(
     params: &NeighborsParams<'_>,
 ) -> CallToolResult {
     match analysis.graph_neighbors(GRAPH_SOURCE_ROOT, workspace_root, params) {
-        Ok(result) => json_result(&result),
+        Ok(mut result) => {
+            redact_opt(&mut result.root.source);
+            for node in &mut result.nodes {
+                redact_opt(&mut node.source);
+            }
+            json_result(&result)
+        }
         Err(err) => json_result(&err),
     }
+}
+
+pub fn source(
+    analysis: &Analysis,
+    workspace_root: Option<&Path>,
+    ids: &[String],
+    max_output_tokens: usize,
+) -> CallToolResult {
+    let mut result =
+        analysis.graph_source(GRAPH_SOURCE_ROOT, workspace_root, ids, max_output_tokens);
+    for item in &mut result.items {
+        redact_opt(&mut item.source);
+    }
+    json_result(&result)
 }
 
 /// Static graph schema for cold-start discovery.
 pub fn schema() -> CallToolResult {
     let schema = json!({
         "schema_version": "1",
+        "actions": ["overview", "schema", "node", "source", "neighbors", "callers", "callees"],
         "node_kinds": ["method", "module"],
         "edge_kinds": ["call"],
         "provenance": ["resolved", "inferred", "visibility_blocked", "unresolved"],
@@ -81,4 +106,10 @@ fn json_result<T: Serialize>(value: &T) -> CallToolResult {
     let text = serde_json::to_string_pretty(value)
         .unwrap_or_else(|e| format!("{{\"error\":\"serialize\",\"detail\":\"{e}\"}}"));
     CallToolResult::success(vec![Content::text(text)])
+}
+
+fn redact_opt(source: &mut Option<String>) {
+    if let Some(text) = source {
+        *text = redact_secrets(text);
+    }
 }
