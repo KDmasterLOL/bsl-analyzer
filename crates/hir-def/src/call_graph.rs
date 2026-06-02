@@ -128,6 +128,11 @@ pub enum EdgeKind {
     /// The caller runs an SDBL query that reads a metadata object. From a
     /// `Method`/`ModuleCode` node to the read object's [`GraphNode::Mdo`].
     QueryRef,
+    /// Structural metadata containment: a metadata object owns a form
+    /// ([`GraphNode::Mdo`] → [`GraphNode::Form`]), or a form owns an item
+    /// ([`GraphNode::Form`] → [`GraphNode::FormItem`]). Derived from form metadata,
+    /// not from code.
+    Contains,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -236,6 +241,21 @@ pub enum GraphNode {
         mdo_type: MdoType,
         object_name: Name,
         attr_name: Name,
+    },
+    /// A managed/ordinary form. Owned by a metadata object (`owner = Some((type,
+    /// object))`) or a common form (`owner = None`). `form_name` is the form's
+    /// directory name in the source tree (edit-stable, single-spelling). The owner
+    /// object name shares the `Mdo` canonicalisation.
+    Form {
+        owner: Option<(MdoType, Name)>,
+        form_name: Name,
+    },
+    /// An item (control/group/field) on a form, identified by its declared element
+    /// name. `owner`/`form_name` mirror the containing [`GraphNode::Form`].
+    FormItem {
+        owner: Option<(MdoType, Name)>,
+        form_name: Name,
+        item_name: Name,
     },
 }
 

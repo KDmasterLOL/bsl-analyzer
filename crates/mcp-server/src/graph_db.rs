@@ -700,8 +700,15 @@ pub fn update_graph_database_bodies(
         // it solely as an edge endpoint. Deleting it (rather than INSERT OR IGNORE)
         // is what lets a module that lost its last module-level edge shed the node.
         for nfile in &changed_files {
+            // Only the module's body-derived outgoing edges (from its method/module-code
+            // nodes) are reprojected, so only those are deleted. `contains` edges have
+            // `mdo`/`form` from-endpoints — never method/module — and the form pass is
+            // full-build-only, so the kind filter keeps reprojection from dropping form
+            // structure it cannot re-emit. (A no-op when no form nodes exist: all current
+            // edge sources are method/module nodes.)
             tx.execute(
-                "DELETE FROM edges WHERE from_id IN (SELECT id FROM nodes WHERE file = ?1)",
+                "DELETE FROM edges WHERE from_id IN \
+                 (SELECT id FROM nodes WHERE file = ?1 AND kind IN ('method', 'module'))",
                 params![nfile],
             )?;
             tx.execute(
@@ -738,10 +745,15 @@ pub fn update_graph_database_bodies(
 
         // GC aux nodes that lost their last reference. Restricted to pure-sink kinds:
         // module-code nodes are `from_id`-only sources, so a `to_id`-absence sweep
-        // would wrongly delete a live caller.
+        // would wrongly delete a live caller. An `mdo` may also be a `from_id` — the
+        // parent of a `contains` edge to a form — so it must survive on either role:
+        // a full rebuild keeps such an object (materialised as the contains-from
+        // endpoint) even with no inbound call/query edge. (The `from_id` clause is a
+        // no-op when no form nodes exist: `mdo`/`attribute` are never edge sources then.)
         tx.execute(
             "DELETE FROM nodes WHERE kind IN ('mdo', 'attribute') \
-             AND id NOT IN (SELECT to_id FROM edges)",
+             AND id NOT IN (SELECT to_id FROM edges) \
+             AND id NOT IN (SELECT from_id FROM edges)",
             [],
         )?;
 

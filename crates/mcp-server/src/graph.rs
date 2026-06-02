@@ -1690,6 +1690,25 @@ mod tests {
         );
     }
 
+    /// Write a managed form for catalog `obj`: the `Ext/Form.xml` (two named input
+    /// fields) plus the form module `Ext/Form/Module.bsl`. `module_metadata.form` is
+    /// loaded from the XML by path, so the form pass sees the two elements.
+    fn write_catalog_form(root: &Path, obj: &str, form: &str, module_body: &str) {
+        let base = format!("Catalogs/{obj}/Forms/{form}/Ext");
+        write(
+            root,
+            &format!("{base}/Form.xml"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.10">
+    <ChildItems>
+        <InputField name="ПолеКод" id="1"><DataPath>Объект.Код</DataPath></InputField>
+        <InputField name="ПолеНаименование" id="2"><DataPath>Объект.Наименование</DataPath></InputField>
+    </ChildItems>
+</Form>"#,
+        );
+        write(root, &format!("{base}/Form/Module.bsl"), module_body);
+    }
+
     /// Dump the data tables in a stable order so two databases can be compared for
     /// logical (byte-identical) equality independent of physical row order. Returns
     /// `(nodes, edges, in_degree, unresolved_calls)`.
@@ -1803,6 +1822,139 @@ mod tests {
         };
         assert_eq!(meta_count(&db_inc, "nodes"), meta_count(&db_full, "nodes"), "meta node count");
         assert_eq!(meta_count(&db_inc, "edges"), meta_count(&db_full, "edges"), "meta edge count");
+    }
+
+    /// The full build's form pass emits `form`/`form_item` nodes and `contains`
+    /// edges (`mdo → form`, `form → form_item`) into SQLite, and the SQL serving path
+    /// counts and resolves them (case-insensitively, localized type accepted).
+    #[test]
+    fn sqlite_build_includes_form_nodes_and_contains_edges() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        write_catalog(root, "Номенклатура", 1);
+        write_catalog_form(
+            root,
+            "Номенклатура",
+            "ФормаЭлемента",
+            "&НаКлиенте\nПроцедура ПриОткрытии(Отказ)\nКонецПроцедуры",
+        );
+
+        let (_, files) = load_workspace_db(root).expect("workspace loads");
+        let out = graph_db_path(root);
+        fs::create_dir_all(out.parent().unwrap()).unwrap();
+        build_graph_database(
+            root,
+            &out,
+            1,
+            &crate::graph_db::GraphMeta {
+                revision: 1,
+                fingerprint: 0,
+                files,
+                built_at: "t".to_string(),
+            },
+        )
+        .expect("graph database builds");
+
+        let conn = Connection::open(&out).unwrap();
+        let count = |sql: &str| -> usize {
+            conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap() as usize
+        };
+        assert_eq!(count("SELECT COUNT(*) FROM nodes WHERE kind='form'"), 1);
+        assert_eq!(count("SELECT COUNT(*) FROM nodes WHERE kind='form_item'"), 2);
+        // mdo → form containment.
+        assert_eq!(
+            count(
+                "SELECT COUNT(*) FROM edges WHERE kind='contains' \
+                 AND from_id='mdo/Catalog/Номенклатура' \
+                 AND to_id='form/Catalog/Номенклатура/ФормаЭлемента'"
+            ),
+            1,
+            "mdo → form contains edge"
+        );
+        // form → form_item containment (one per declared element).
+        assert_eq!(
+            count(
+                "SELECT COUNT(*) FROM edges WHERE kind='contains' \
+                 AND from_id='form/Catalog/Номенклатура/ФормаЭлемента'"
+            ),
+            2,
+            "form → form_item contains edges"
+        );
+
+        let gdb = GraphDb::open(&out).expect("graph database opens");
+        let overview = gdb.overview(10).unwrap();
+        assert_eq!(overview.forms, 1);
+        assert_eq!(overview.form_items, 2);
+
+        // Form node resolves with a localized type segment and mixed casing.
+        let node = gdb
+            .node("form/Справочник/номенклатура/ФОРМАЭЛЕМЕНТА", ide::GraphDetail::Names)
+            .unwrap()
+            .expect("form node resolves case-insensitively");
+        assert_eq!(node.node.id, "form/Catalog/Номенклатура/ФормаЭлемента");
+        assert_eq!(node.node.kind, "form");
+    }
+
+    /// A body-only edit to a form module's `.bsl` must leave the form's structural
+    /// nodes/edges byte-identical to a full rebuild: form structure comes from form
+    /// XML, not the body, and the incremental reprojection never re-derives it.
+    #[test]
+    fn incremental_body_edit_preserves_form_nodes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        write_catalog(root, "Номенклатура", 1);
+        write_catalog_form(
+            root,
+            "Номенклатура",
+            "ФормаЭлемента",
+            "&НаКлиенте\nПроцедура ПриОткрытии(Отказ)\nСообщить(\"a\");\nКонецПроцедуры",
+        );
+
+        let meta = || crate::graph_db::GraphMeta {
+            revision: 1,
+            fingerprint: 0,
+            files: 0,
+            built_at: "t".to_string(),
+        };
+        let db_pre = root.join(".build/pre.db");
+        fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
+        build_graph_database(root, &db_pre, 1, &meta()).expect("pre build");
+
+        // Body-only edit of the form module: same handler signature, different body.
+        let module_rel = "Catalogs/Номенклатура/Forms/ФормаЭлемента/Ext/Form/Module.bsl";
+        write(
+            root,
+            module_rel,
+            "&НаКлиенте\nПроцедура ПриОткрытии(Отказ)\nСообщить(\"b\");\nКонецПроцедуры",
+        );
+        let changed = vec![root.join(module_rel).canonicalize().unwrap()];
+
+        let db_inc = root.join(".build/inc.db");
+        update_graph_database_bodies(root, &db_pre, &db_inc, &changed, 1, &meta())
+            .expect("incremental update");
+
+        let db_full = root.join(".build/full.db");
+        build_graph_database(root, &db_full, 1, &meta()).expect("full rebuild");
+
+        let (inc_nodes, inc_edges, inc_indeg, inc_unres) = dump_data(&db_inc);
+        let (full_nodes, full_edges, full_indeg, full_unres) = dump_data(&db_full);
+        assert_eq!(inc_nodes, full_nodes, "nodes (incl. form/form_item) must match a full rebuild");
+        assert_eq!(inc_edges, full_edges, "edges (incl. contains) must match a full rebuild");
+        assert_eq!(inc_indeg, full_indeg, "in-degree must match a full rebuild");
+        assert_eq!(inc_unres, full_unres, "unresolved_calls must match a full rebuild");
+
+        // The form structure survived the body edit in the incremental path.
+        assert!(
+            inc_nodes.iter().any(|n| n.contains("form/Catalog/Номенклатура/ФормаЭлемента")),
+            "form node preserved: {inc_nodes:?}"
+        );
+        assert_eq!(
+            inc_edges.iter().filter(|e| e.contains("contains")).count(),
+            3,
+            "1 mdo→form + 2 form→form_item contains edges preserved: {inc_edges:?}"
+        );
     }
 
     /// A changed module referencing an existing object with a different casing must

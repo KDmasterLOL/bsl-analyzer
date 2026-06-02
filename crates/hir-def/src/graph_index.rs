@@ -637,6 +637,92 @@ pub fn project_batch_query_edges<DB: ConfigsDatabase + Clone + Send>(
     edges
 }
 
+/// One form module's structural facts, gathered read-only for the form pass: its
+/// path-derived key (owner + name) and the declared element names (deduped
+/// case-insensitively, declaration order preserved).
+struct CollectedForm {
+    key: crate::module_index::FormKey,
+    items: Vec<crate::name::Name>,
+}
+
+/// A batch's `contains` edges derived from form metadata: `mdo → form` (object forms
+/// only) and `form → form_item` for each declared element. Run across every batch
+/// only AFTER the call/query passes, sharing the same `state`, so a form's owner
+/// object inherits the canonical spelling the call/query passes assigned (code sites
+/// win first; a divergent form-directory casing is recorded as a casing variant just
+/// like any other).
+///
+/// Emitted as edges only — the `Form`/`FormItem`/`Mdo` nodes fall out as edge
+/// endpoints in the build driver, exactly as `Mdo`/`Attribute` nodes do. A common
+/// form (no owner) with no elements therefore produces no edges and is not
+/// represented; such a form carries no structural information.
+///
+/// This pass is run ONLY by the full build. The incremental reprojection leaves form
+/// nodes/edges untouched (form structure comes from form XML, so any form-structure
+/// change is a metadata drift that already forces a full rebuild).
+pub fn project_batch_form_edges<DB: ConfigsDatabase + Clone + Send>(
+    pool: &rayon::ThreadPool,
+    db: &DB,
+    batch: &[ModuleId],
+    paths: &FxHashMap<FileId, String>,
+    state: &mut GraphBuildState,
+) -> Vec<WorkspaceCallEdge> {
+    let collected: Vec<Option<CollectedForm>> =
+        parallel_per_module(pool, db, batch, |db, module| {
+            let path = paths.get(&module.file_id)?;
+            let key = crate::module_index::parse_form_module_path(path)?;
+            let metadata = db.module_metadata(module);
+            let form = metadata.form.as_ref()?;
+            let mut items = Vec::new();
+            let mut seen = FxHashSet::default();
+            for element in &form.elements {
+                let name = crate::name::Name::new(&element.name);
+                if seen.insert(name.as_str().to_lowercase()) {
+                    items.push(name);
+                }
+            }
+            Some(CollectedForm { key, items })
+        });
+
+    let mut edges = Vec::new();
+    for form in collected.iter().flatten() {
+        let form_name = crate::name::Name::new(&form.key.form_name);
+        // Canonicalise the owner object so the form's `mdo` parent unifies with the
+        // call/query-derived `Mdo` node for the same object.
+        let owner = form.key.owner.as_ref().map(|(mdo_type, object)| {
+            (*mdo_type, state.mdo_canonical.canonical(*mdo_type, object))
+        });
+        let form_node = GraphNode::Form { owner: owner.clone(), form_name: form_name.clone() };
+        if let Some((mdo_type, object_name)) = &owner {
+            edges.push(contains_edge(
+                GraphNode::Mdo { mdo_type: *mdo_type, object_name: object_name.clone() },
+                form_node.clone(),
+            ));
+        }
+        for item in &form.items {
+            edges.push(contains_edge(
+                form_node.clone(),
+                GraphNode::FormItem {
+                    owner: owner.clone(),
+                    form_name: form_name.clone(),
+                    item_name: item.clone(),
+                },
+            ));
+        }
+    }
+    edges
+}
+
+fn contains_edge(from: GraphNode, to: GraphNode) -> WorkspaceCallEdge {
+    WorkspaceCallEdge {
+        from,
+        to,
+        kind: EdgeKind::Contains,
+        provenance: EdgeProvenance::Resolved,
+        crosses_client_to_server: false,
+    }
+}
+
 // ---- build-time durable-id encoding + row projection -----------------------
 
 /// Encode a module key to the durable id scope segment. Shared with `ide::graph`'s
@@ -693,6 +779,30 @@ fn edge_kind_label(kind: EdgeKind) -> &'static str {
         EdgeKind::ManagerCreates => "manager_creates",
         EdgeKind::ManagerAccess => "manager_access",
         EdgeKind::QueryRef => "query_ref",
+        EdgeKind::Contains => "contains",
+    }
+}
+
+/// The durable id scope segment for a form's owner: `<EnglishType>/<Object>` for an
+/// object-owned form, or `common` for a common form. Shared with `ide::graph`'s
+/// serving path so build-time ids and serve-time ids agree.
+pub fn form_scope(owner: &Option<(MdoType, crate::name::Name)>) -> String {
+    match owner {
+        Some((mdo_type, object_name)) => {
+            format!("{}/{}", mdo_type.english_name(), object_name.as_str())
+        }
+        None => "common".to_string(),
+    }
+}
+
+/// The human-facing qualified-name prefix for a form's owner. Shared with
+/// `ide::graph`'s serving path so build-time and serve-time `qualified` agree.
+pub fn form_qualified_prefix(owner: &Option<(MdoType, crate::name::Name)>) -> String {
+    match owner {
+        Some((mdo_type, object_name)) => {
+            format!("{}.{}", mdo_type.russian_name(), object_name.as_str())
+        }
+        None => "ОбщаяФорма".to_string(),
     }
 }
 
@@ -820,6 +930,18 @@ impl<'a> GraphRowEncoder<'a> {
                 ),
                 true,
             ),
+            GraphNode::Form { owner, form_name } => {
+                (format!("form/{}/{}", form_scope(owner), form_name.as_str()), true)
+            }
+            GraphNode::FormItem { owner, form_name, item_name } => (
+                format!(
+                    "form_item/{}/{}/{}",
+                    form_scope(owner),
+                    form_name.as_str(),
+                    item_name.as_str()
+                ),
+                true,
+            ),
         }
     }
 
@@ -894,6 +1016,41 @@ impl<'a> GraphRowEncoder<'a> {
                     mdo_type.russian_name(),
                     object_name.as_str(),
                     attr_name.as_str()
+                ),
+                module: None,
+                file: None,
+                name_offset: None,
+                sig_end: None,
+                src_start: None,
+                src_end: None,
+                dispatch: Vec::new(),
+                is_export: None,
+                addressable,
+            },
+            GraphNode::Form { owner, form_name } => NodeRow {
+                id,
+                kind: "form",
+                name: form_name.as_str().to_string(),
+                qualified: format!("{}.Форма.{}", form_qualified_prefix(owner), form_name.as_str()),
+                module: None,
+                file: None,
+                name_offset: None,
+                sig_end: None,
+                src_start: None,
+                src_end: None,
+                dispatch: Vec::new(),
+                is_export: None,
+                addressable,
+            },
+            GraphNode::FormItem { owner, form_name, item_name } => NodeRow {
+                id,
+                kind: "form_item",
+                name: item_name.as_str().to_string(),
+                qualified: format!(
+                    "{}.Форма.{}.{}",
+                    form_qualified_prefix(owner),
+                    form_name.as_str(),
+                    item_name.as_str()
                 ),
                 module: None,
                 file: None,

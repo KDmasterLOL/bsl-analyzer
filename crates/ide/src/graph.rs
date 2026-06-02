@@ -19,8 +19,9 @@ use std::sync::Arc;
 use bsl_metadata::MdoType;
 use hir::call_graph::{EdgeKind, MethodDispatch};
 use hir::graph_index::{
-    display_scope, encode_scope, project_batch_call_edges, project_batch_query_edges, EdgeRow,
-    GraphBuildState, GraphIndex, GraphRowEncoder, NodeRow,
+    display_scope, encode_scope, form_qualified_prefix, form_scope, project_batch_call_edges,
+    project_batch_form_edges, project_batch_query_edges, EdgeRow, GraphBuildState, GraphIndex,
+    GraphRowEncoder, NodeRow,
 };
 use hir::{
     module_key_for_path, ConfigsDatabase, DefDatabase, GraphNode, MethodId, ModuleId, ModuleIndex,
@@ -97,6 +98,8 @@ pub struct GraphOverview {
     pub methods: usize,
     pub mdos: usize,
     pub attributes: usize,
+    pub forms: usize,
+    pub form_items: usize,
     pub nodes: usize,
     pub edges: usize,
     pub top_by_centrality: Vec<NodeRef>,
@@ -400,6 +403,20 @@ pub fn build_workspace_graph_rows(
     }
     summary.unresolved_calls = unresolved_calls;
 
+    // Phase C — `contains` edges from form metadata: `mdo → form` (object forms) and
+    // `form → form_item` per element. Runs after the call/query passes (sharing the
+    // same `state`) so a form's owner object inherits the canonical spelling those
+    // passes assigned; a divergent form-directory casing is recorded as a variant for
+    // the gate, exactly like any other. The Form/FormItem/Mdo endpoint nodes are
+    // materialised by `emit`. Full-build only — the incremental reprojection never
+    // runs it (form structure lives in form XML, so any form-structure change is a
+    // metadata drift that already forces a full rebuild).
+    for batch in modules.chunks(batch_size) {
+        let db = open_batch(batch);
+        let edges = project_batch_form_edges(&pool, &db, batch, paths, &mut state);
+        emit(&edges, &mut summary, &mut seen_aux, sink)?;
+    }
+
     // After both passes the canonicalization state knows every object's spelling(s);
     // record the inconsistently-cased ones for the incremental fast-path gate. Sorted
     // so the persisted set is deterministic across builds (the raw `FxHashSet` order
@@ -591,6 +608,18 @@ impl<'a> GraphCtx<'a> {
                 ),
                 true,
             ),
+            GraphNode::Form { owner, form_name } => {
+                (format!("form/{}/{}", form_scope(owner), form_name.as_str()), true)
+            }
+            GraphNode::FormItem { owner, form_name, item_name } => (
+                format!(
+                    "form_item/{}/{}/{}",
+                    form_scope(owner),
+                    form_name.as_str(),
+                    item_name.as_str()
+                ),
+                true,
+            ),
         }
     }
 
@@ -644,6 +673,10 @@ impl<'a> GraphCtx<'a> {
             GraphIdKind::Mdo { mdo_type, object } => self.find_mdo_node(mdo_type, &object, id),
             GraphIdKind::Attribute { mdo_type, object, attr } => {
                 self.find_attribute_node(mdo_type, &object, &attr, id)
+            }
+            GraphIdKind::Form { owner, form_name } => self.find_form_node(&owner, &form_name, id),
+            GraphIdKind::FormItem { owner, form_name, item_name } => {
+                self.find_form_item_node(&owner, &form_name, &item_name, id)
             }
         }
     }
@@ -702,6 +735,51 @@ impl<'a> GraphCtx<'a> {
             .ok_or_else(|| GraphError::NotFound { id: id.to_string() })
     }
 
+    /// The form node for `(owner, form_name)`, if the graph references it.
+    /// Case-insensitive on the owner object and form name; returns the canonical node.
+    fn find_form_node(
+        &self,
+        owner: &Option<(MdoType, String)>,
+        form_name: &str,
+        id: &str,
+    ) -> Result<GraphNode, GraphError> {
+        let form_lower = form_name.to_lowercase();
+        self.graph
+            .nodes()
+            .find(|n| match n {
+                GraphNode::Form { owner: o, form_name: fname } => {
+                    form_owner_matches(o.as_ref().map(|(t, n)| (*t, n.as_str())), owner)
+                        && fname.as_str().to_lowercase() == form_lower
+                }
+                _ => false,
+            })
+            .ok_or_else(|| GraphError::NotFound { id: id.to_string() })
+    }
+
+    /// The form-item node for `(owner, form_name, item_name)`, if the graph
+    /// references it. Case-insensitive on all name components.
+    fn find_form_item_node(
+        &self,
+        owner: &Option<(MdoType, String)>,
+        form_name: &str,
+        item_name: &str,
+        id: &str,
+    ) -> Result<GraphNode, GraphError> {
+        let form_lower = form_name.to_lowercase();
+        let item_lower = item_name.to_lowercase();
+        self.graph
+            .nodes()
+            .find(|n| match n {
+                GraphNode::FormItem { owner: o, form_name: fname, item_name: iname } => {
+                    form_owner_matches(o.as_ref().map(|(t, n)| (*t, n.as_str())), owner)
+                        && fname.as_str().to_lowercase() == form_lower
+                        && iname.as_str().to_lowercase() == item_lower
+                }
+                _ => false,
+            })
+            .ok_or_else(|| GraphError::NotFound { id: id.to_string() })
+    }
+
     fn resolve_rel_path(&self, rel: &str) -> Option<FileId> {
         for file_id in self.source_root.iter() {
             let abs = match self.path_for(file_id) {
@@ -747,6 +825,39 @@ impl<'a> GraphCtx<'a> {
                     addressable,
                 }
             }
+            GraphNode::Form { owner, form_name } => NodeRef {
+                qualified: format!(
+                    "{}.Форма.{}",
+                    form_qualified_prefix(&owner),
+                    form_name.as_str()
+                ),
+                name: form_name.as_str().to_string(),
+                kind: "form",
+                id,
+                module: None,
+                signature: None,
+                source: None,
+                dispatch: Vec::new(),
+                is_export: None,
+                addressable,
+            },
+            GraphNode::FormItem { owner, form_name, item_name } => NodeRef {
+                qualified: format!(
+                    "{}.Форма.{}.{}",
+                    form_qualified_prefix(&owner),
+                    form_name.as_str(),
+                    item_name.as_str()
+                ),
+                name: item_name.as_str().to_string(),
+                kind: "form_item",
+                id,
+                module: None,
+                signature: None,
+                source: None,
+                dispatch: Vec::new(),
+                is_export: None,
+                addressable,
+            },
         }
     }
 
@@ -913,7 +1024,10 @@ impl<'a> GraphCtx<'a> {
                     }),
                     truncated: false,
                 },
-                Ok(GraphNode::Mdo { .. }) | Ok(GraphNode::Attribute { .. }) => SourceItem {
+                Ok(GraphNode::Mdo { .. })
+                | Ok(GraphNode::Attribute { .. })
+                | Ok(GraphNode::Form { .. })
+                | Ok(GraphNode::FormItem { .. }) => SourceItem {
                     id: id.clone(),
                     source: None,
                     error: Some(GraphError::Unsupported {
@@ -955,6 +1069,8 @@ impl<'a> GraphCtx<'a> {
         let mut modules = 0usize;
         let mut mdos = 0usize;
         let mut attributes = 0usize;
+        let mut forms = 0usize;
+        let mut form_items = 0usize;
         let mut node_count = 0usize;
         for node in self.graph.nodes() {
             node_count += 1;
@@ -963,6 +1079,8 @@ impl<'a> GraphCtx<'a> {
                 GraphNode::ModuleCode(_) => modules += 1,
                 GraphNode::Mdo { .. } => mdos += 1,
                 GraphNode::Attribute { .. } => attributes += 1,
+                GraphNode::Form { .. } => forms += 1,
+                GraphNode::FormItem { .. } => form_items += 1,
             }
         }
 
@@ -993,6 +1111,8 @@ impl<'a> GraphCtx<'a> {
             methods,
             mdos,
             attributes,
+            forms,
+            form_items,
             nodes: node_count,
             edges: self.graph.edge_count(),
             top_by_centrality,
@@ -1126,6 +1246,29 @@ pub enum GraphIdKind {
     Mdo { mdo_type: MdoType, object: String },
     /// `attribute/<MdoEnglish>/<Object>/<Attr>`.
     Attribute { mdo_type: MdoType, object: String, attr: String },
+    /// `form/<MdoEnglish>/<Object>/<Form>` or `form/common/<Form>`.
+    Form { owner: Option<(MdoType, String)>, form_name: String },
+    /// `form_item/<MdoEnglish>/<Object>/<Form>/<Item>` or
+    /// `form_item/common/<Form>/<Item>`.
+    FormItem { owner: Option<(MdoType, String)>, form_name: String, item_name: String },
+}
+
+/// A form's owner: `None` for a common form, `Some((type, object))` for an
+/// object-owned form.
+type FormOwner = Option<(MdoType, String)>;
+
+/// Split a form id's segments (after the `form/`/`form_item/` prefix) into the owner
+/// — `None` for a `common/…` form, `Some((type, object))` otherwise — and the
+/// trailing segments (form name, then item name for a form item).
+fn split_form_owner<'a>(parts: &'a [&'a str]) -> Option<(FormOwner, &'a [&'a str])> {
+    match parts.first().copied()? {
+        "common" => Some((None, &parts[1..])),
+        eng => {
+            let mdo_type = eng.parse().ok()?;
+            let object = (*parts.get(1)?).to_string();
+            Some((Some((mdo_type, object)), &parts[2..]))
+        }
+    }
 }
 
 /// Parse a durable graph id into its [`GraphIdKind`] without touching a database,
@@ -1163,6 +1306,29 @@ pub fn classify_graph_id(id: &str) -> Result<GraphIdKind, GraphError> {
             object: object.to_string(),
             attr: attr.to_string(),
         });
+    }
+    // `form_item/` must be tested before `form/` (the latter is a prefix of the former).
+    if let Some(rest) = id.strip_prefix("form_item/") {
+        let parts: Vec<&str> = rest.split('/').collect();
+        let structure = || {
+            bad("form item id must be 'form_item/<scope>/<Form>/<Item>' (scope = <MdoType>/<Object> or 'common')")
+        };
+        let (owner, tail) = split_form_owner(&parts).ok_or_else(structure)?;
+        let [form_name, item_name] = tail else { return Err(structure()) };
+        return Ok(GraphIdKind::FormItem {
+            owner,
+            form_name: form_name.to_string(),
+            item_name: item_name.to_string(),
+        });
+    }
+    if let Some(rest) = id.strip_prefix("form/") {
+        let parts: Vec<&str> = rest.split('/').collect();
+        let structure = || {
+            bad("form id must be 'form/<scope>/<Form>' (scope = <MdoType>/<Object> or 'common')")
+        };
+        let (owner, tail) = split_form_owner(&parts).ok_or_else(structure)?;
+        let [form_name] = tail else { return Err(structure()) };
+        return Ok(GraphIdKind::Form { owner, form_name: form_name.to_string() });
     }
 
     let parts: Vec<&str> = id.split('/').collect();
@@ -1238,6 +1404,17 @@ fn edge_kind_label(kind: EdgeKind) -> &'static str {
         EdgeKind::ManagerCreates => "manager_creates",
         EdgeKind::ManagerAccess => "manager_access",
         EdgeKind::QueryRef => "query_ref",
+        EdgeKind::Contains => "contains",
+    }
+}
+
+/// Whether a stored form node's owner (`node`) equals a parsed-id owner (`query`),
+/// comparing the object name case-insensitively. `None` (common form) matches `None`.
+fn form_owner_matches(node: Option<(MdoType, &str)>, query: &Option<(MdoType, String)>) -> bool {
+    match (node, query) {
+        (None, None) => true,
+        (Some((nt, nn)), Some((qt, qn))) => nt == *qt && nn.to_lowercase() == qn.to_lowercase(),
+        _ => false,
     }
 }
 
@@ -1396,6 +1573,26 @@ mod tests {
             Ok(GraphIdKind::Attribute { object, attr, .. })
                 if object == "Контрагенты" && attr == "Наименование"
         ));
+        // Forms: object-owned and common, plus their items.
+        assert!(matches!(
+            classify_graph_id("form/Catalog/Контрагенты/ФормаЭлемента"),
+            Ok(GraphIdKind::Form { owner: Some((_, object)), form_name })
+                if object == "Контрагенты" && form_name == "ФормаЭлемента"
+        ));
+        assert!(matches!(
+            classify_graph_id("form/common/НастройкиПрограммы"),
+            Ok(GraphIdKind::Form { owner: None, form_name }) if form_name == "НастройкиПрограммы"
+        ));
+        assert!(matches!(
+            classify_graph_id("form_item/Catalog/Контрагенты/ФормаЭлемента/ПолеКод"),
+            Ok(GraphIdKind::FormItem { owner: Some(_), form_name, item_name })
+                if form_name == "ФормаЭлемента" && item_name == "ПолеКод"
+        ));
+        assert!(matches!(
+            classify_graph_id("form_item/common/Ф/Кнопка"),
+            Ok(GraphIdKind::FormItem { owner: None, form_name, item_name })
+                if form_name == "Ф" && item_name == "Кнопка"
+        ));
 
         // Malformed ids are BadId.
         for bad in [
@@ -1406,6 +1603,9 @@ mod tests {
             "mdo/NoSuchType/X",
             "attribute/Catalog/OnlyObject",
             "method/bogusscope/M",
+            "form/Catalog/OnlyObjectNoForm",
+            "form/NoSuchType/X/Ф",
+            "form_item/common/OnlyForm",
         ] {
             assert!(
                 matches!(classify_graph_id(bad), Err(GraphError::BadId { .. })),
@@ -1728,5 +1928,86 @@ mod tests {
             }
             assert!(seen >= 1, "the loose-path method must surface as a node");
         }
+    }
+
+    /// Forms never enter the in-memory `workspace_call_graph` (they are emitted only
+    /// by the SQLite build pass), so the loops above never see a `Form`/`FormItem`
+    /// node. This pins the build-time vs serve-time encoder parity for those kinds —
+    /// and the `contains` edge label — on synthetic nodes, guarding the shared
+    /// `form_scope`/`form_qualified_prefix` helpers against drift.
+    #[test]
+    fn form_node_ids_match_between_encoders() {
+        use hir::call_graph::{EdgeProvenance, WorkspaceCallEdge};
+        use hir::graph_index::{GraphIndex, GraphRowEncoder};
+        use hir::Name;
+
+        let a = workspace(&[(
+            "/src/CommonModules/М/Ext/Module.bsl",
+            "Процедура П() Экспорт КонецПроцедуры",
+        )]);
+        let db = a.database();
+        let source_root = db.source_root_input(ROOT).root(db);
+        let file_set = source_root.file_set();
+        let modules: Vec<hir::ModuleId> = source_root
+            .iter()
+            .filter(|&f| hir::is_bsl_source(file_set, f))
+            .map(hir::ModuleId::new)
+            .collect();
+        let index = GraphIndex::build(db, &modules);
+        let paths: rustc_hash::FxHashMap<FileId, String> = FxHashMap::default();
+        let encoder = GraphRowEncoder::new(&index, &paths, None);
+        let ctx = GraphCtx::new(db, ROOT, None);
+
+        let owner = Some((MdoType::Catalog, Name::new("Контрагенты")));
+        let object_form = GraphNode::Form {
+            owner: owner.clone(),
+            form_name: Name::new("ФормаЭлемента"),
+        };
+        let common_form =
+            GraphNode::Form { owner: None, form_name: Name::new("ОбщаяФорма1") };
+        let object_item = GraphNode::FormItem {
+            owner: owner.clone(),
+            form_name: Name::new("ФормаЭлемента"),
+            item_name: Name::new("ПолеКод"),
+        };
+        let common_item = GraphNode::FormItem {
+            owner: None,
+            form_name: Name::new("ОбщаяФорма1"),
+            item_name: Name::new("Кнопка"),
+        };
+
+        for node in [&object_form, &common_form, &object_item, &common_item] {
+            assert_eq!(encoder.encode(node), ctx.encode_node(node), "encode mismatch for {node:?}");
+            let row = encoder.node_row(node);
+            let serve = ctx.node_ref(node.clone(), GraphDetail::Names);
+            assert_eq!(row.kind, serve.kind, "kind for {node:?}");
+            assert_eq!(row.name, serve.name, "name for {node:?}");
+            assert_eq!(row.qualified, serve.qualified, "qualified for {node:?}");
+            assert_eq!(row.addressable, serve.addressable, "addressable for {node:?}");
+        }
+
+        // The exact durable id strings (object + common scopes).
+        assert_eq!(encoder.encode(&object_form).0, "form/Catalog/Контрагенты/ФормаЭлемента");
+        assert_eq!(encoder.encode(&common_form).0, "form/common/ОбщаяФорма1");
+        assert_eq!(
+            encoder.encode(&object_item).0,
+            "form_item/Catalog/Контрагенты/ФормаЭлемента/ПолеКод"
+        );
+        assert_eq!(encoder.encode(&common_item).0, "form_item/common/ОбщаяФорма1/Кнопка");
+
+        let edge = WorkspaceCallEdge {
+            from: object_form.clone(),
+            to: object_item.clone(),
+            kind: EdgeKind::Contains,
+            provenance: EdgeProvenance::Resolved,
+            crosses_client_to_server: false,
+        };
+        let row = encoder.edge_row(&edge);
+        let serve = ctx.edge_ref(&edge);
+        assert_eq!(row.kind, "contains");
+        assert_eq!(row.kind, serve.kind);
+        assert_eq!(row.from_id, serve.from);
+        assert_eq!(row.to_id, serve.to);
+        assert_eq!(row.provenance, "resolved");
     }
 }

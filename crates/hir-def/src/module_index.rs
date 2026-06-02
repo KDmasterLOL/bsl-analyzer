@@ -257,6 +257,81 @@ enum ModuleFileKind {
     RecordSet,
 }
 
+fn module_path_type_from_segment(segment: &str) -> Option<ModulePathType> {
+    match segment.to_lowercase().as_str() {
+        "commonmodules" | "общиемодули" => Some(ModulePathType::CommonModule),
+        "documents" | "документы" => Some(ModulePathType::Document),
+        "catalogs" | "справочники" => Some(ModulePathType::Catalog),
+        "dataprocessors" | "обработки" => Some(ModulePathType::DataProcessor),
+        "reports" | "отчёты" | "отчеты" => Some(ModulePathType::Report),
+        "informationregisters" | "регистрысведений" => {
+            Some(ModulePathType::InformationRegister)
+        }
+        "accumulationregisters" | "регистрынакопления" => {
+            Some(ModulePathType::AccumulationRegister)
+        }
+        "accountingregisters" | "регистрыбухгалтерии" => {
+            Some(ModulePathType::AccountingRegister)
+        }
+        "calculationregisters" | "регистрырасчёта" | "регистрырасчета" => {
+            Some(ModulePathType::CalculationRegister)
+        }
+        "chartsofcharacteristictypes" | "планывидовхарактеристик" => {
+            Some(ModulePathType::ChartOfCharacteristicTypes)
+        }
+        "chartsofaccounts" | "планысчетов" => Some(ModulePathType::ChartOfAccounts),
+        "chartsofcalculationtypes" | "планывидоврасчёта" | "планывидоврасчета" => {
+            Some(ModulePathType::ChartOfCalculationTypes)
+        }
+        "businessprocesses" | "бизнеспроцессы" => {
+            Some(ModulePathType::BusinessProcess)
+        }
+        "tasks" | "задачи" => Some(ModulePathType::Task),
+        "enums" | "перечисления" => Some(ModulePathType::Enum),
+        "exchangeplans" | "планыобмена" => Some(ModulePathType::ExchangePlan),
+        "externaldatasources" | "внешниеисточникиданных" => {
+            Some(ModulePathType::ExternalDataSource)
+        }
+        "constants" | "константы" => Some(ModulePathType::Constant),
+        _ => None,
+    }
+}
+
+/// A durable, path-derived identity for a form module. A managed form module lives
+/// at `…/Ext/Form/Module.bsl`; the owner is the metadata object whose `Forms/`
+/// directory contains it, or `None` for a common form (`CommonForms/…`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FormKey {
+    pub owner: Option<(MdoType, String)>,
+    pub form_name: String,
+}
+
+/// Parse a form module path into its owner + form name, or `None` if the path is
+/// not a managed form module. Mirrors the authoritative detection in
+/// `ide-db/src/metadata.rs` (managed-form suffix `…/Ext/Form/Module.bsl`),
+/// including its exact-case service-folder matching: a path this parser accepts but
+/// `metadata.rs` would not loads no `module_metadata.form`, so matching its casing
+/// keeps the form pass from claiming a form whose metadata never loads.
+pub fn parse_form_module_path(path: &str) -> Option<FormKey> {
+    let normalized = path.replace('\\', "/");
+    let parts: Vec<&str> = normalized.split('/').collect();
+    let n = parts.len();
+    if n < 5 || parts[n - 1] != "Module.bsl" || parts[n - 2] != "Form" || parts[n - 3] != "Ext" {
+        return None;
+    }
+    let form_name = parts[n - 4].to_string();
+    let container = parts[n - 5];
+    if container == "CommonForms" || container == "ОбщиеФормы" {
+        return Some(FormKey { owner: None, form_name });
+    }
+    if container == "Forms" && n >= 7 {
+        let object = parts[n - 6].to_string();
+        let mdo_type = module_path_type_from_segment(parts[n - 7])?.to_mdo_type()?;
+        return Some(FormKey { owner: Some((mdo_type, object)), form_name });
+    }
+    None
+}
+
 fn parse_module_path(path: &str) -> Option<(ModulePathType, String, ModuleFileKind)> {
     let parts: Vec<&str> = path.split('/').collect();
 
@@ -267,43 +342,7 @@ fn parse_module_path(path: &str) -> Option<(ModulePathType, String, ModuleFileKi
     let path_lower = path.to_lowercase();
 
     for (i, part) in parts.iter().enumerate().rev() {
-        let module_type = match part.to_lowercase().as_str() {
-            "commonmodules" | "общиемодули" => Some(ModulePathType::CommonModule),
-            "documents" | "документы" => Some(ModulePathType::Document),
-            "catalogs" | "справочники" => Some(ModulePathType::Catalog),
-            "dataprocessors" | "обработки" => Some(ModulePathType::DataProcessor),
-            "reports" | "отчёты" | "отчеты" => Some(ModulePathType::Report),
-            "informationregisters" | "регистрысведений" => {
-                Some(ModulePathType::InformationRegister)
-            }
-            "accumulationregisters" | "регистрынакопления" => {
-                Some(ModulePathType::AccumulationRegister)
-            }
-            "accountingregisters" | "регистрыбухгалтерии" => {
-                Some(ModulePathType::AccountingRegister)
-            }
-            "calculationregisters" | "регистрырасчёта" | "регистрырасчета" => {
-                Some(ModulePathType::CalculationRegister)
-            }
-            "chartsofcharacteristictypes" | "планывидовхарактеристик" => {
-                Some(ModulePathType::ChartOfCharacteristicTypes)
-            }
-            "chartsofaccounts" | "планысчетов" => Some(ModulePathType::ChartOfAccounts),
-            "chartsofcalculationtypes" | "планывидоврасчёта" | "планывидоврасчета" => {
-                Some(ModulePathType::ChartOfCalculationTypes)
-            }
-            "businessprocesses" | "бизнеспроцессы" => {
-                Some(ModulePathType::BusinessProcess)
-            }
-            "tasks" | "задачи" => Some(ModulePathType::Task),
-            "enums" | "перечисления" => Some(ModulePathType::Enum),
-            "exchangeplans" | "планыобмена" => Some(ModulePathType::ExchangePlan),
-            "externaldatasources" | "внешниеисточникиданных" => {
-                Some(ModulePathType::ExternalDataSource)
-            }
-            "constants" | "константы" => Some(ModulePathType::Constant),
-            _ => None,
-        };
+        let module_type = module_path_type_from_segment(part);
 
         if let Some(mod_type) = module_type {
             if i + 1 < parts.len() {
@@ -518,6 +557,58 @@ mod tests {
         assert_eq!(index.manager_count(), 0);
         assert_eq!(index.common_module_count(), 0);
         assert_eq!(index.record_set_module_count(), 0);
+    }
+
+    #[test]
+    fn parse_form_module_path_object_form() {
+        let path = "Catalogs/Контрагенты/Forms/ФормаЭлемента/Ext/Form/Module.bsl";
+        assert_eq!(
+            parse_form_module_path(path),
+            Some(FormKey {
+                owner: Some((MdoType::Catalog, "Контрагенты".to_string())),
+                form_name: "ФормаЭлемента".to_string(),
+            }),
+        );
+    }
+
+    #[test]
+    fn parse_form_module_path_common_form() {
+        let path = "CommonForms/НастройкиПрограммы/Ext/Form/Module.bsl";
+        assert_eq!(
+            parse_form_module_path(path),
+            Some(FormKey {
+                owner: None, form_name: "НастройкиПрограммы".to_string()
+            }),
+        );
+        let localized = "ОбщиеФормы/НастройкиПрограммы/Ext/Form/Module.bsl";
+        assert_eq!(
+            parse_form_module_path(localized),
+            Some(FormKey {
+                owner: None, form_name: "НастройкиПрограммы".to_string()
+            }),
+        );
+    }
+
+    #[test]
+    fn parse_form_module_path_with_absolute_prefix() {
+        let path = "/Users/x/project/Documents/Заказ/Forms/ФормаДокумента/Ext/Form/Module.bsl";
+        assert_eq!(
+            parse_form_module_path(path),
+            Some(FormKey {
+                owner: Some((MdoType::Document, "Заказ".to_string())),
+                form_name: "ФормаДокумента".to_string(),
+            }),
+        );
+    }
+
+    #[test]
+    fn parse_form_module_path_rejects_non_form_modules() {
+        // Manager/object/common modules are not forms.
+        assert_eq!(parse_form_module_path("Catalogs/Х/Ext/ManagerModule.bsl"), None);
+        assert_eq!(parse_form_module_path("CommonModules/Х/Ext/Module.bsl"), None);
+        // The legacy ordinary-form `FormModule.bsl` shape (no `Ext/Form/Module.bsl`)
+        // does not load form metadata, so it is not a graph form module either.
+        assert_eq!(parse_form_module_path("Documents/Х/Forms/Ф/Ext/FormModule.bsl"), None,);
     }
 
     #[test]
