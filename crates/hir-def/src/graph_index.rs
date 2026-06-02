@@ -480,6 +480,40 @@ pub struct GraphBuildState {
     mdo_canonical: crate::queries::MdoCanonical,
     seen_query_ref: FxHashSet<(GraphNode, MdoType, String)>,
     seen_query_attr: FxHashSet<(GraphNode, MdoType, String, String)>,
+    /// Form data-binding intents gathered by the form pass, resolved against
+    /// `catalog_index` and emitted as `DataBinding` edges in the final binding pass.
+    form_bindings: Vec<FormBinding>,
+    /// The metadata catalog indexed for binding resolution: per object, its canonical
+    /// spelling and its declared (non-standard) fields / tabular-section columns with
+    /// their metadata casing. Populated by the catalog pass as it emits nodes, so a
+    /// binding's resolved to-id byte-matches the node the catalog emitted.
+    catalog_index: CatalogIndex,
+}
+
+/// A form data-binding intent: a form node bound to a metadata object's structure.
+/// `field_path` is empty for an object-level binding (`form_attribute → mdo`), `[field]`
+/// for an object attribute, `[section, column]` for a tabular-section column.
+struct FormBinding {
+    from: GraphNode,
+    target_mdo: MdoType,
+    target_obj: String,
+    field_path: Vec<String>,
+}
+
+type CatalogIndex = FxHashMap<(MdoType, String), CatalogEntry>;
+
+/// One object's structure as the catalog emitted it: the canonical object spelling and
+/// its fields / tabular sections keyed by lowercased name, each mapped to the
+/// metadata-cased name used in the emitted node id.
+struct CatalogEntry {
+    object_name: crate::name::Name,
+    attrs: FxHashMap<String, crate::name::Name>,
+    sections: FxHashMap<String, CatalogSection>,
+}
+
+struct CatalogSection {
+    section_name: crate::name::Name,
+    cols: FxHashMap<String, crate::name::Name>,
 }
 
 impl GraphBuildState {
@@ -648,12 +682,32 @@ struct CollectedForm {
     /// Declared form-attribute names (the form's data model), deduped
     /// case-insensitively in declaration order.
     attributes: Vec<crate::name::Name>,
+    /// Data-binding intents: a Ref-typed form attribute (object-level) or a data-bound
+    /// UI element (field-level). Resolved against the catalog in the binding pass.
+    bindings: Vec<CollectedBinding>,
 }
 
 struct CollectedItem {
     name: crate::name::Name,
     id: u32,
     parent_id: Option<u32>,
+}
+
+/// The form-side endpoint of a data binding, before the canonical owner/form is known.
+enum BindingFrom {
+    /// A Ref-typed form attribute (object-level binding to its backing object).
+    Attr(crate::name::Name),
+    /// A data-bound UI element (field-level binding via its data path).
+    Item(crate::name::Name),
+}
+
+struct CollectedBinding {
+    from: BindingFrom,
+    mdo: MdoType,
+    obj: String,
+    /// Empty for an object-level binding; the data-path segments after the form
+    /// attribute for a field-level one.
+    field_path: Vec<String>,
 }
 
 /// A batch's `contains` edges derived from form metadata: `mdo → form` (object forms
@@ -697,13 +751,52 @@ pub fn project_batch_form_edges<DB: ConfigsDatabase + Clone + Send>(
                 .collect();
             let mut attributes = Vec::new();
             let mut seen_attr = FxHashSet::default();
+            let mut bindings = Vec::new();
+            // `Ref`-typed form attributes back an object; index the survivor of each
+            // name so a data path's first segment can resolve to its object, and emit
+            // an object-level binding for it.
+            let mut attr_backing: FxHashMap<String, (MdoType, String)> = FxHashMap::default();
             for attr in &form.attributes {
                 let name = crate::name::Name::new(&attr.name);
-                if seen_attr.insert(name.as_str().to_lowercase()) {
-                    attributes.push(name);
+                let lower = name.as_str().to_lowercase();
+                if seen_attr.insert(lower.clone()) {
+                    attributes.push(name.clone());
+                    if let bsl_metadata::AttributeType::Ref { mdo_type, name: obj } =
+                        &attr.attr_type
+                    {
+                        attr_backing.insert(lower, (*mdo_type, obj.clone()));
+                        bindings.push(CollectedBinding {
+                            from: BindingFrom::Attr(name),
+                            mdo: *mdo_type,
+                            obj: obj.clone(),
+                            field_path: Vec::new(),
+                        });
+                    }
                 }
             }
-            Some(CollectedForm { key, items, attributes })
+            // A UI element whose data path is `<реквизит>.<поле>[.<колонка>]` binds to
+            // that field of the form attribute's backing object. A leading `~` marks a
+            // broken path; bare `<реквизит>` has no field.
+            for element in &form.elements {
+                let Some(dp) = element.data_path.as_deref() else { continue };
+                if dp.starts_with('~') {
+                    continue;
+                }
+                let mut segs = dp.split('.');
+                let Some(seg0) = segs.next() else { continue };
+                let Some((mdo, obj)) = attr_backing.get(&seg0.to_lowercase()) else { continue };
+                let field_path: Vec<String> = segs.map(str::to_string).collect();
+                if field_path.is_empty() {
+                    continue;
+                }
+                bindings.push(CollectedBinding {
+                    from: BindingFrom::Item(crate::name::Name::new(&element.name)),
+                    mdo: *mdo,
+                    obj: obj.clone(),
+                    field_path,
+                });
+            }
+            Some(CollectedForm { key, items, attributes, bindings })
         });
 
     let mut edges = Vec::new();
@@ -735,8 +828,14 @@ pub fn project_batch_form_edges<DB: ConfigsDatabase + Clone + Send>(
         let id_to_name: FxHashMap<u32, &crate::name::Name> =
             form.items.iter().map(|item| (item.id, &item.name)).collect();
         let mut survivor_id: FxHashMap<String, u32> = FxHashMap::default();
+        // The surviving `form_item` node for a name is the first element declaring it;
+        // its spelling is the one the node carries. A field-level binding must point at
+        // that survivor spelling, not a later same-name element's own casing.
+        let mut survivor_name: FxHashMap<String, &crate::name::Name> = FxHashMap::default();
         for item in &form.items {
-            survivor_id.entry(item.name.as_str().to_lowercase()).or_insert(item.id);
+            let lower = item.name.as_str().to_lowercase();
+            survivor_id.entry(lower.clone()).or_insert(item.id);
+            survivor_name.entry(lower).or_insert(&item.name);
         }
         let mut seen_item = FxHashSet::default();
         for item in &form.items {
@@ -764,6 +863,28 @@ pub fn project_batch_form_edges<DB: ConfigsDatabase + Clone + Send>(
                     attr_name: attr.clone(),
                 },
             ));
+        }
+        // Stash data-binding intents with the from-node fully built; the binding pass
+        // resolves their targets once the catalog index is complete.
+        for binding in &form.bindings {
+            let from = match &binding.from {
+                BindingFrom::Attr(name) => GraphNode::FormAttribute {
+                    owner: owner.clone(),
+                    form_name: form_name.clone(),
+                    attr_name: name.clone(),
+                },
+                BindingFrom::Item(name) => {
+                    let survivor =
+                        survivor_name.get(&name.as_str().to_lowercase()).copied().unwrap_or(name);
+                    form_item(survivor.clone())
+                }
+            };
+            state.form_bindings.push(FormBinding {
+                from,
+                target_mdo: binding.mdo,
+                target_obj: binding.obj.clone(),
+                field_path: binding.field_path.clone(),
+            });
         }
     }
     edges
@@ -870,6 +991,29 @@ pub fn project_workspace_catalog_edges<DB: ConfigsDatabase>(
         let object_name = state.mdo_canonical.canonical(obj.mdo_type, &obj.name);
         let key = object_name.as_str().to_lowercase();
         let mdo = GraphNode::Mdo { mdo_type: obj.mdo_type, object_name: object_name.clone() };
+        // Index this object for form data-binding resolution. First-wins on each
+        // lowercased name mirrors the dedup below, so the indexed (metadata-cased) name
+        // is the one the emitted node carries.
+        let entry = state.catalog_index.entry((obj.mdo_type, key.clone())).or_insert_with(|| {
+            CatalogEntry {
+                object_name: object_name.clone(),
+                attrs: FxHashMap::default(),
+                sections: FxHashMap::default(),
+            }
+        });
+        for attr in &obj.attrs {
+            entry.attrs.entry(attr.to_lowercase()).or_insert_with(|| crate::name::Name::new(attr));
+        }
+        for (section, cols) in &obj.sections {
+            let sec =
+                entry.sections.entry(section.to_lowercase()).or_insert_with(|| CatalogSection {
+                    section_name: crate::name::Name::new(section),
+                    cols: FxHashMap::default(),
+                });
+            for col in cols {
+                sec.cols.entry(col.to_lowercase()).or_insert_with(|| crate::name::Name::new(col));
+            }
+        }
         for attr in &obj.attrs {
             if seen_attr.insert((obj.mdo_type, key.clone(), attr.to_lowercase())) {
                 edges.push(contains_edge(
@@ -923,6 +1067,71 @@ fn contains_edge(from: GraphNode, to: GraphNode) -> WorkspaceCallEdge {
         provenance: EdgeProvenance::Resolved,
         crosses_client_to_server: false,
     }
+}
+
+fn data_binding_edge(from: GraphNode, to: GraphNode) -> WorkspaceCallEdge {
+    WorkspaceCallEdge {
+        from,
+        to,
+        kind: EdgeKind::DataBinding,
+        provenance: EdgeProvenance::Resolved,
+        crosses_client_to_server: false,
+    }
+}
+
+/// Resolve the form data-bindings gathered by the form pass against the catalog index
+/// built by the catalog pass, emitting `DataBinding` edges. Pure (no database): run on
+/// the driver thread AFTER the catalog pass so `state.catalog_index` is complete.
+///
+/// Each binding's target object is looked up in the catalog — only objects that the
+/// catalog actually emitted (and, for a field/column binding, only declared non-standard
+/// fields) produce an edge, so a `DataBinding` edge can never dangle. The catalog also
+/// supplies the canonical object spelling and the metadata-cased field/section/column
+/// names, so the to-id byte-matches the node the catalog pass emitted. Full-build only,
+/// like the form and catalog passes it depends on.
+pub fn project_form_binding_edges(state: &GraphBuildState) -> Vec<WorkspaceCallEdge> {
+    let mut edges = Vec::new();
+    let mut seen: FxHashSet<(GraphNode, GraphNode)> = FxHashSet::default();
+    for binding in &state.form_bindings {
+        let Some(entry) =
+            state.catalog_index.get(&(binding.target_mdo, binding.target_obj.to_lowercase()))
+        else {
+            continue;
+        };
+        let to = match binding.field_path.as_slice() {
+            // Ref-typed form attribute → the whole backing object.
+            [] => GraphNode::Mdo {
+                mdo_type: binding.target_mdo,
+                object_name: entry.object_name.clone(),
+            },
+            // `Объект.<поле>` → an object attribute.
+            [field] => {
+                let Some(attr) = entry.attrs.get(&field.to_lowercase()) else { continue };
+                GraphNode::Attribute {
+                    mdo_type: binding.target_mdo,
+                    object_name: entry.object_name.clone(),
+                    attr_name: attr.clone(),
+                }
+            }
+            // `Объект.<ТЧ>.<колонка>` → a tabular-section column.
+            [section, column] => {
+                let Some(sec) = entry.sections.get(&section.to_lowercase()) else { continue };
+                let Some(col) = sec.cols.get(&column.to_lowercase()) else { continue };
+                GraphNode::TabularSectionAttribute {
+                    mdo_type: binding.target_mdo,
+                    object_name: entry.object_name.clone(),
+                    section_name: sec.section_name.clone(),
+                    attr_name: col.clone(),
+                }
+            }
+            // Deeper ref-chains are not resolved.
+            _ => continue,
+        };
+        if seen.insert((binding.from.clone(), to.clone())) {
+            edges.push(data_binding_edge(binding.from.clone(), to));
+        }
+    }
+    edges
 }
 
 // ---- build-time durable-id encoding + row projection -----------------------
@@ -982,6 +1191,7 @@ fn edge_kind_label(kind: EdgeKind) -> &'static str {
         EdgeKind::ManagerAccess => "manager_access",
         EdgeKind::QueryRef => "query_ref",
         EdgeKind::Contains => "contains",
+        EdgeKind::DataBinding => "data_binding",
     }
 }
 

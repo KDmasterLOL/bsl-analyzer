@@ -133,6 +133,13 @@ pub enum EdgeKind {
     /// ([`GraphNode::Form`] → [`GraphNode::FormItem`]). Derived from form metadata,
     /// not from code.
     Contains,
+    /// A form's data model binds to the metadata structure it mirrors. A UI element
+    /// ([`GraphNode::FormItem`]) whose data path is `Объект.<поле>` →
+    /// [`GraphNode::Attribute`]/[`GraphNode::TabularSectionAttribute`] of the backing
+    /// object's field ("which object fields are shown on the form"); a Ref-typed form
+    /// attribute ([`GraphNode::FormAttribute`]) → the [`GraphNode::Mdo`] it is typed
+    /// as. Derived from form metadata, not from code.
+    DataBinding,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

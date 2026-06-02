@@ -131,10 +131,10 @@ fn structured(body: Value) -> CallToolResult {
 /// independent of the on-disk SQLite cache layout in [`crate::graph_db`]).
 fn schema_json() -> Value {
     json!({
-        "schema_version": "5",
+        "schema_version": "6",
         "actions": ["overview", "schema", "node", "source", "neighbors", "callers", "callees"],
         "node_kinds": ["method", "module", "mdo", "attribute", "tabular_section", "form", "form_item", "form_attribute"],
-        "edge_kinds": ["call", "manager_creates", "manager_access", "query_ref", "contains"],
+        "edge_kinds": ["call", "manager_creates", "manager_access", "query_ref", "contains", "data_binding"],
         "provenance": ["resolved", "inferred", "visibility_blocked", "unresolved"],
         "dispatch": ["client", "server"],
         "neighbors_result": {
@@ -186,9 +186,9 @@ mod tests {
         let schema = schema_json();
         // The contract version must be bumped in lockstep with response-shape
         // changes; `total` since this revision, `form`/`form_item` + `contains` since
-        // version 3, `form_attribute` since version 4, and `tabular_section` since
-        // version 5.
-        assert_eq!(schema["schema_version"], "5");
+        // version 3, `form_attribute` since version 4, `tabular_section` since version
+        // 5, and the `data_binding` edge since version 6.
+        assert_eq!(schema["schema_version"], "6");
         assert!(
             schema["neighbors_result"]["total"].is_string(),
             "neighbours result must document the `total` field"
@@ -198,7 +198,9 @@ mod tests {
         assert!(node_kinds.iter().any(|k| k == "form_item"));
         assert!(node_kinds.iter().any(|k| k == "form_attribute"));
         assert!(node_kinds.iter().any(|k| k == "tabular_section"));
-        assert!(schema["edge_kinds"].as_array().unwrap().iter().any(|k| k == "contains"));
+        let edge_kinds = schema["edge_kinds"].as_array().unwrap();
+        assert!(edge_kinds.iter().any(|k| k == "contains"));
+        assert!(edge_kinds.iter().any(|k| k == "data_binding"));
     }
 
     /// The text content block must parse back to exactly the `structuredContent`
@@ -227,7 +229,7 @@ mod tests {
     #[test]
     fn schema_and_loading_populate_structured_content() {
         assert_structured_mirrors_text(&schema());
-        assert_eq!(schema().structured_content.unwrap()["schema_version"], "5");
+        assert_eq!(schema().structured_content.unwrap()["schema_version"], "6");
 
         assert_structured_mirrors_text(&loading(Some("indexing")));
         let body = loading(Some("indexing")).structured_content.unwrap();

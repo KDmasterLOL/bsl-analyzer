@@ -91,6 +91,7 @@ fn edge_kind(kind: &str) -> &'static str {
         "manager_access" => "manager_access",
         "query_ref" => "query_ref",
         "contains" => "contains",
+        "data_binding" => "data_binding",
         _ => "call",
     }
 }

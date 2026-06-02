@@ -20,8 +20,9 @@ use bsl_metadata::MdoType;
 use hir::call_graph::{EdgeKind, MethodDispatch};
 use hir::graph_index::{
     display_scope, encode_scope, form_qualified_prefix, form_scope, project_batch_call_edges,
-    project_batch_form_edges, project_batch_query_edges, project_workspace_catalog_edges, EdgeRow,
-    GraphBuildState, GraphIndex, GraphRowEncoder, NodeRow,
+    project_batch_form_edges, project_batch_query_edges, project_form_binding_edges,
+    project_workspace_catalog_edges, EdgeRow, GraphBuildState, GraphIndex, GraphRowEncoder,
+    NodeRow,
 };
 use hir::{
     module_key_for_path, ConfigsDatabase, DefDatabase, GraphNode, MethodId, ModuleId, ModuleIndex,
@@ -432,6 +433,15 @@ pub fn build_workspace_graph_rows(
         let edges = project_workspace_catalog_edges(&db, first[0].file_id, &mut state);
         emit(&edges, &mut summary, &mut seen_aux, sink)?;
     }
+
+    // Phase E — `data_binding` edges linking the form data model gathered in Phase C to
+    // the catalog structure built in Phase D: a UI element's `data_path` field →
+    // `attribute`/`ts_attr` node, and a Ref-typed form attribute → `mdo` node. Pure (no
+    // database), driver thread, after the catalog so every target node exists (the
+    // binding pass gates on the catalog index, so no edge dangles). Full-build only,
+    // like the form/catalog passes it joins.
+    let binding_edges = project_form_binding_edges(&state);
+    emit(&binding_edges, &mut summary, &mut seen_aux, sink)?;
 
     // After both passes the canonicalization state knows every object's spelling(s);
     // record the inconsistently-cased ones for the incremental fast-path gate. Sorted
@@ -1655,6 +1665,7 @@ fn edge_kind_label(kind: EdgeKind) -> &'static str {
         EdgeKind::ManagerAccess => "manager_access",
         EdgeKind::QueryRef => "query_ref",
         EdgeKind::Contains => "contains",
+        EdgeKind::DataBinding => "data_binding",
     }
 }
 

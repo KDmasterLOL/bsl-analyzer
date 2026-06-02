@@ -1767,6 +1767,43 @@ mod tests {
         write(root, &format!("{base}/Form/Module.bsl"), module_body);
     }
 
+    /// A form for object `obj` whose main attribute `Объект` is typed
+    /// `CatalogObject.{obj}` (a `Ref`), with UI fields bound to: a real object
+    /// attribute (`Объект.ИНН`), a tabular-section column (`Объект.Товары.Цена`), a
+    /// platform standard attribute (`Объект.Код` — must NOT link, excluded from the
+    /// catalog), and a broken path (`~Объект.Нет` — must be skipped). Exercises the
+    /// `data_binding` cross-links. Pair with `write_catalog_with_attributes(obj)`.
+    fn write_catalog_form_databinding(root: &Path, obj: &str, form: &str, module_body: &str) {
+        let base = format!("Catalogs/{obj}/Forms/{form}/Ext");
+        write(
+            root,
+            &format!("{base}/Form.xml"),
+            &format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.10">
+    <ChildItems>
+        <InputField name="ПолеИНН" id="1"><DataPath>Объект.ИНН</DataPath></InputField>
+        <InputField name="ПолеЦена" id="2"><DataPath>Объект.Товары.Цена</DataPath></InputField>
+        <InputField name="ПолеКод" id="3"><DataPath>Объект.Код</DataPath></InputField>
+        <InputField name="ПолеБитый" id="4"><DataPath>~Объект.Нет</DataPath></InputField>
+        <InputField name="ПолеГлубокий" id="5"><DataPath>Объект.Товары.Цена.Лишнее</DataPath></InputField>
+        <InputField name="ПолеПрочее" id="6"><DataPath>Прочее.Что</DataPath></InputField>
+    </ChildItems>
+    <Attributes>
+        <Attribute name="Объект">
+            <Type><v8:Type>cfg:CatalogObject.{obj}</v8:Type></Type>
+            <MainAttribute>true</MainAttribute>
+        </Attribute>
+        <Attribute name="Прочее">
+            <Type><v8:Type>xs:string</v8:Type></Type>
+        </Attribute>
+    </Attributes>
+</Form>"#
+            ),
+        );
+        write(root, &format!("{base}/Form/Module.bsl"), module_body);
+    }
+
     /// Dump the data tables in a stable order so two databases can be compared for
     /// logical (byte-identical) equality independent of physical row order. Returns
     /// `(nodes, edges, in_degree, unresolved_calls)`.
@@ -2311,6 +2348,193 @@ mod tests {
         // The catalog structure is present and survived the body edit.
         assert!(inc_nodes.iter().any(|n| n.contains("tabular_section/Catalog/Контрагенты/Товары")));
         assert!(inc_edges.iter().any(|e| e.contains("ts_attr/Catalog/Контрагенты/Товары/Цена")));
+    }
+
+    /// The form's data model links to the object structure it mirrors: a UI field's
+    /// data path → the object attribute / tabular-section column it shows, and a
+    /// Ref-typed form attribute → its backing object. A standard attribute and a broken
+    /// path produce no edge (no dangling).
+    #[test]
+    fn sqlite_build_links_form_data_to_object_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        write_catalog_with_attributes(root, "Контрагенты", 1);
+        write_catalog_form_databinding(
+            root,
+            "Контрагенты",
+            "ФормаЭлемента",
+            "&НаКлиенте\nПроцедура ПриОткрытии(Отказ)\nКонецПроцедуры",
+        );
+
+        let (_, files) = load_workspace_db(root).expect("workspace loads");
+        let out = graph_db_path(root);
+        fs::create_dir_all(out.parent().unwrap()).unwrap();
+        build_graph_database(
+            root,
+            &out,
+            1,
+            &crate::graph_db::GraphMeta {
+                revision: 1,
+                fingerprint: 0,
+                files,
+                built_at: "t".to_string(),
+            },
+        )
+        .expect("graph database builds");
+
+        let conn = Connection::open(&out).unwrap();
+        let count = |sql: &str| -> usize {
+            conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap() as usize
+        };
+        let bind = |from: &str, to: &str| -> usize {
+            count(&format!(
+                "SELECT COUNT(*) FROM edges WHERE kind='data_binding' \
+                 AND from_id='{from}' AND to_id='{to}'"
+            ))
+        };
+        let item = |name: &str| format!("form_item/Catalog/Контрагенты/ФормаЭлемента/{name}");
+
+        // UI field → object attribute, and → tabular-section column.
+        assert_eq!(
+            bind(&item("ПолеИНН"), "attribute/Catalog/Контрагенты/ИНН"),
+            1,
+            "field ПолеИНН shows Контрагенты.ИНН"
+        );
+        assert_eq!(
+            bind(&item("ПолеЦена"), "ts_attr/Catalog/Контрагенты/Товары/Цена"),
+            1,
+            "field ПолеЦена shows the Товары.Цена column"
+        );
+        // Ref-typed form attribute → its backing object.
+        assert_eq!(
+            bind("form_attr/Catalog/Контрагенты/ФормаЭлемента/Объект", "mdo/Catalog/Контрагенты"),
+            1,
+            "form attribute Объект is backed by Контрагенты"
+        );
+
+        // A platform standard attribute is not in the catalog → no edge; a `~` path is
+        // skipped. Neither dangles.
+        assert_eq!(
+            count(
+                "SELECT COUNT(*) FROM edges WHERE kind='data_binding' \
+                   AND to_id LIKE '%/Контрагенты/Код'"
+            ),
+            0,
+            "standard attribute Код is not linked"
+        );
+        assert_eq!(
+            count(&format!(
+                "SELECT COUNT(*) FROM edges e WHERE e.kind='data_binding' \
+             AND e.from_id='{}'",
+                item("ПолеБитый")
+            )),
+            0,
+            "broken ~ path produces no binding"
+        );
+        // A path through a non-Ref form attribute (`Прочее.Что`) and one deeper than a
+        // tabular-section column (`Объект.Товары.Цена.Лишнее`) both resolve to nothing.
+        assert_eq!(
+            count(&format!(
+                "SELECT COUNT(*) FROM edges WHERE kind='data_binding' \
+                 AND from_id='{}'",
+                item("ПолеПрочее")
+            )),
+            0,
+            "data path through a non-Ref attribute is not linked"
+        );
+        assert_eq!(
+            count(&format!(
+                "SELECT COUNT(*) FROM edges WHERE kind='data_binding' \
+                 AND from_id='{}'",
+                item("ПолеГлубокий")
+            )),
+            0,
+            "data path deeper than a tabular-section column is not linked"
+        );
+        // Exactly three data_binding edges total (ИНН, Цена, Объект).
+        assert_eq!(count("SELECT COUNT(*) FROM edges WHERE kind='data_binding'"), 3);
+        // Every data_binding endpoint resolves to a real node (no dangling).
+        assert_eq!(
+            count(
+                "SELECT COUNT(*) FROM edges e WHERE e.kind='data_binding' \
+                 AND (e.from_id NOT IN (SELECT id FROM nodes) \
+                   OR e.to_id NOT IN (SELECT id FROM nodes))"
+            ),
+            0,
+            "no dangling data_binding endpoints"
+        );
+
+        // Served via SQLite: the edge carries the `data_binding` kind, and an inbound
+        // query answers "which forms show this object field".
+        let gdb = GraphDb::open(&out).expect("graph database opens");
+        let neighbors = gdb
+            .neighbors(&ide::NeighborsParams {
+                id: "attribute/Catalog/Контрагенты/ИНН",
+                dir: ide::Direction::In,
+                depth: 1,
+                max_nodes: 50,
+                detail: ide::GraphDetail::Names,
+                provenance_filter: Vec::new(),
+            })
+            .unwrap()
+            .expect("attribute node resolves");
+        assert!(
+            neighbors.edges.iter().any(|e| e.kind == "data_binding"),
+            "the field's inbound edges include a data_binding from the form item: {:?}",
+            neighbors.edges.iter().map(|e| e.kind).collect::<Vec<_>>()
+        );
+    }
+
+    /// A body-only edit to a form module's `.bsl` leaves the `data_binding` cross-links
+    /// byte-identical to a full rebuild — build-only, never re-derived incrementally.
+    #[test]
+    fn incremental_body_edit_preserves_data_binding_edges() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        write_catalog_with_attributes(root, "Контрагенты", 1);
+        write_catalog_form_databinding(
+            root,
+            "Контрагенты",
+            "ФормаЭлемента",
+            "&НаКлиенте\nПроцедура ПриОткрытии(Отказ)\nСообщить(\"a\");\nКонецПроцедуры",
+        );
+
+        let meta = || crate::graph_db::GraphMeta {
+            revision: 1,
+            fingerprint: 0,
+            files: 0,
+            built_at: "t".to_string(),
+        };
+        let db_pre = root.join(".build/pre.db");
+        fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
+        build_graph_database(root, &db_pre, 1, &meta()).expect("pre build");
+
+        let module_rel = "Catalogs/Контрагенты/Forms/ФормаЭлемента/Ext/Form/Module.bsl";
+        write(
+            root,
+            module_rel,
+            "&НаКлиенте\nПроцедура ПриОткрытии(Отказ)\nСообщить(\"b\");\nКонецПроцедуры",
+        );
+        let changed = vec![root.join(module_rel).canonicalize().unwrap()];
+
+        let db_inc = root.join(".build/inc.db");
+        update_graph_database_bodies(root, &db_pre, &db_inc, &changed, 1, &meta())
+            .expect("incremental update");
+
+        let db_full = root.join(".build/full.db");
+        build_graph_database(root, &db_full, 1, &meta()).expect("full rebuild");
+
+        let (inc_nodes, inc_edges, ..) = dump_data(&db_inc);
+        let (full_nodes, full_edges, ..) = dump_data(&db_full);
+        assert_eq!(inc_nodes, full_nodes, "nodes must match a full rebuild");
+        assert_eq!(inc_edges, full_edges, "data_binding edges must match a full rebuild");
+        assert_eq!(
+            inc_edges.iter().filter(|e| e.contains("data_binding")).count(),
+            3,
+            "three data_binding edges preserved: {inc_edges:?}"
+        );
     }
 
     /// A changed module referencing an existing object with a different casing must
