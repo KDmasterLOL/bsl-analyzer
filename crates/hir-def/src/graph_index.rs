@@ -460,21 +460,21 @@ where
 {
     use rayon::prelude::*;
 
-    // Warm every configuration-loading query the parallel jobs can reach, for every
-    // module in the batch, on THIS thread before the parallel region. A config root's
-    // `load_from_directory` (`bsl_metadata`) fans out over its own `rayon::scope`; if
-    // it ran inside a parallel job, a free worker could steal a sibling job — which
-    // carries a different `db` clone — into that scope and attach a second database to
-    // a thread mid-query, which Salsa forbids. Forcing the loads here memoises them
-    // (clones share the `Zalsa`), so the jobs below only read cached configs and never
-    // open a nested scope. A single module does not suffice: a batch may mix modules
-    // from different roots (a base config plus extensions), each a distinct, separately
-    // loaded key. These are the only internally parallel queries the build reaches
-    // (it runs no type inference); once warmed, the parallel region nests no scope.
-    for &module in batch {
-        let _ = db.module_metadata(module);
-        let _ = db.configurations(module.file_id);
-        let _ = db.merged_visible_configuration(module.file_id);
+    // Warm the configuration loader ONCE on THIS thread before the parallel region.
+    // `bsl_metadata::load_from_directory` (reached through the lru-cached
+    // `load_configuration` query) fans out over its own `rayon::scope`; if it ran
+    // inside a parallel job, a free worker could steal a sibling job — carrying a
+    // different `db` clone — into that scope and attach a second database to a thread
+    // mid-query, which Salsa forbids. `configurations` loads EVERY config root (it
+    // iterates all config paths through the shared loader), so this single call
+    // memoises the loader for all roots — base config plus extensions. The clones
+    // share the `Zalsa`, so the per-module jobs below find the loader cached and
+    // never open a nested scope; their own per-file metadata/visibility work runs in
+    // the pool. It is the only internally parallel query the build reaches (no type
+    // inference), so this one warm-up closes the window.
+    if let Some(&first) = batch.first() {
+        let _ = db.configurations(first.file_id);
+        let _ = db.module_metadata(first);
     }
 
     let seed = db.clone();

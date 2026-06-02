@@ -37,7 +37,14 @@ pub struct WorkspaceConfigsInput {
     pub version: u32,
 }
 
-#[salsa::tracked(lru = 16)]
+// Keyed by config root (base config + each extension), so the cache holds one entry
+// per root, not per file/module — its size tracks the number of configurations, which
+// is small. The cap must exceed the realistic number of extension roots: the graph
+// build pre-warms every root before its parallel region (a per-root reload there would
+// re-enter the metadata loader's `rayon::scope` inside a worker thread), so an eviction
+// under the cap would let that load run in parallel and break the build's concurrency
+// invariant. 1024 is far above any real extension count while still bounded.
+#[salsa::tracked(lru = 1024)]
 pub fn load_configuration<'db>(
     db: &'db dyn salsa::Database,
     path_input: ConfigurationPathInput<'db>,
