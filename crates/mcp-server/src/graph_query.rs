@@ -159,6 +159,12 @@ impl GraphDb {
         Ok((revision, fingerprint, force_stale))
     }
 
+    /// The indexed `.bsl` file count recorded at build time, for status display.
+    /// Defaults to 0 when absent (an older build without the row).
+    pub fn files(&self) -> anyhow::Result<usize> {
+        Ok(self.meta("files")?.and_then(|v| v.parse().ok()).unwrap_or(0))
+    }
+
     fn count(&self, sql: &str) -> anyhow::Result<usize> {
         let n: i64 = self.conn.query_row(sql, [], |r| r.get(0)).context("counting graph rows")?;
         Ok(n as usize)

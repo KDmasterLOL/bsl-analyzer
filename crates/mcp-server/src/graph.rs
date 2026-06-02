@@ -284,6 +284,14 @@ impl GraphState {
         let generation =
             lock_recover(&self.inner).published.as_ref().map(|p| p.generation).unwrap_or(0) + 1;
 
+        // On the initial load, reuse a cached build from a previous process run if it
+        // still matches the workspace — turning a multi-minute rebuild into a stat
+        // walk plus an open. A reload is skipped here: it only fires once drift has
+        // been detected, so the on-disk file is known stale and must be rebuilt.
+        if !is_reload && self.try_publish_cached(&workspace_root) {
+            return;
+        }
+
         tracing::info!(?workspace_root, is_reload, generation, "graph database build started");
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             // Bracket the build with two fingerprint scans. The build reads files
@@ -367,6 +375,36 @@ impl GraphState {
                 self.record_load_failure(is_reload, "builder panicked".to_owned());
             }
         }
+    }
+
+    /// Publish an existing on-disk build instead of rebuilding, when it is still a
+    /// valid, current, non-straddled match for the workspace. Returns `true` (and
+    /// transitions to `Ready`) when the cache was reused; `false` to fall through to
+    /// a full build. The fingerprint scan it runs is the same one the build would do.
+    fn try_publish_cached(&self, workspace_root: &Path) -> bool {
+        let path = graph_db_path(workspace_root);
+        let Ok(graph) = GraphDb::open(&path) else {
+            return false; // missing, truncated, or stale-schema → rebuild
+        };
+        let Ok((revision, fingerprint, force_stale)) = graph.freshness_token() else {
+            return false;
+        };
+        let fp_now = workspace_fingerprint(workspace_root);
+        // Reuse only an exact, clean match: a fingerprint mismatch means the
+        // workspace moved since the build, and `force_stale` means the build
+        // straddled a write and was never a coherent snapshot.
+        if force_stale || fingerprint != fp_now {
+            return false;
+        }
+        let files = graph.files().unwrap_or(0);
+
+        *lock_recover(&self.scan) = None;
+        let mut inner = lock_recover(&self.inner);
+        inner.published =
+            Some(Published { generation: revision, fingerprint, reload: ReloadState::Idle });
+        inner.status = GraphStatus::Ready { files };
+        tracing::info!(files, revision, "reused cached graph database (workspace unchanged)");
+        true
     }
 
     /// A failed initial load surfaces as `Failed`; a failed reload keeps the
@@ -650,6 +688,94 @@ mod tests {
             .expect("query")
             .expect("neighbors resolve");
         assert!(callers.nodes.iter().any(|n| n.id == "method/common/Клиент/Главная"));
+    }
+
+    /// Seed a graph database at the workspace's cache path as a prior process run
+    /// would, with a distinctive `revision`/`built_at` so a test can tell a reused
+    /// cache from a fresh rebuild.
+    fn seed_cache(root: &Path, fingerprint: u64) {
+        let out = graph_db_path(root);
+        fs::create_dir_all(out.parent().unwrap()).unwrap();
+        build_graph_database(
+            root,
+            &out,
+            GRAPH_BUILD_BATCH,
+            &crate::graph_db::GraphMeta {
+                revision: 7,
+                fingerprint,
+                files: 0,
+                built_at: "cached-build-sentinel".to_string(),
+            },
+        )
+        .expect("seed cache builds");
+    }
+
+    fn meta_string(path: &Path, key: &str) -> String {
+        Connection::open(path)
+            .unwrap()
+            .query_row("SELECT value FROM meta WHERE key=?1", [key], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// A cached build that still matches the workspace is republished as-is — no
+    /// rebuild — so its `revision` and `built_at` survive the load.
+    #[test]
+    fn reuses_a_matching_cached_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        seed_cache(root, workspace_fingerprint(root));
+
+        let graph = GraphState::for_workspace(root.to_path_buf());
+        graph.ensure_loading();
+        wait_ready(&graph);
+
+        // Reused: the served revision is the cache's (7); a rebuild would reset it to 1.
+        let snap = graph.snapshot().expect("ready graph snapshots");
+        assert_eq!(snap.generation, 7, "served the cached revision, not a fresh build");
+        // The file was not rewritten — its build timestamp is untouched.
+        assert_eq!(meta_string(&graph_db_path(root), "built_at"), "cached-build-sentinel");
+    }
+
+    /// A cached build whose fingerprint no longer matches the workspace (it moved
+    /// since the build) is discarded and rebuilt from scratch.
+    #[test]
+    fn rebuilds_when_cached_fingerprint_differs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        seed_cache(root, workspace_fingerprint(root).wrapping_add(1));
+
+        let graph = GraphState::for_workspace(root.to_path_buf());
+        graph.ensure_loading();
+        wait_ready(&graph);
+
+        let snap = graph.snapshot().expect("ready graph snapshots");
+        assert_eq!(snap.generation, 1, "stale cache discarded and rebuilt at generation 1");
+        assert_ne!(meta_string(&graph_db_path(root), "built_at"), "cached-build-sentinel");
+    }
+
+    /// A cached build flagged `force_stale` (it straddled a disk write and was never
+    /// a coherent snapshot) is never reused even if its fingerprint matches.
+    #[test]
+    fn rebuilds_when_cached_build_is_force_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        let fp = workspace_fingerprint(root);
+        seed_cache(root, fp);
+        Connection::open(graph_db_path(root))
+            .unwrap()
+            .execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('force_stale', '1')", [])
+            .unwrap();
+
+        let graph = GraphState::for_workspace(root.to_path_buf());
+        graph.ensure_loading();
+        wait_ready(&graph);
+
+        let snap = graph.snapshot().expect("ready graph snapshots");
+        assert_eq!(snap.generation, 1, "force_stale cache rebuilt at generation 1");
+        assert_ne!(meta_string(&graph_db_path(root), "built_at"), "cached-build-sentinel");
     }
 
     /// The streaming SQLite build must reproduce the in-memory graph: identical
