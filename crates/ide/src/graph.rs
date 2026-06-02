@@ -282,14 +282,20 @@ pub fn build_workspace_graph_rows(
 ) -> Result<GraphBuildSummary, Box<dyn std::error::Error + Send + Sync>> {
     let batch_size = batch_size.max(1);
 
+    // A dedicated thread pool for this build's intra-batch parallelism. Each build
+    // gets its own pool so concurrent builds never share a worker thread: Salsa
+    // attaches at most one database per thread, and the databases here are distinct
+    // (per-build, and cloned per job), so a shared pool could attach two databases to
+    // one thread and panic. Keeping the pool per build also confines any salsa query
+    // that parallelises internally (e.g. metadata loading) to this build's threads.
+    let pool = rayon::ThreadPoolBuilder::new().build()?;
+
     // Build the index batch-by-batch: it must cover every resolution target, but
     // only one batch's item trees are resident while it is assembled.
     let mut index = GraphIndex::new();
     for batch in modules.chunks(batch_size) {
         let db = open_batch(batch);
-        for &module in batch {
-            index.add_module(&db, module);
-        }
+        index.add_batch(&pool, &db, batch);
     }
 
     let encoder = GraphRowEncoder::new(&index, paths, workspace_root);
@@ -350,12 +356,12 @@ pub fn build_workspace_graph_rows(
 
     for batch in modules.chunks(batch_size) {
         let db = open_batch(batch);
-        let edges = project_batch_call_edges(&db, batch, &index, &mut state);
+        let edges = project_batch_call_edges(&pool, &db, batch, &index, &mut state);
         emit(&edges, &mut summary, &mut seen_aux, sink)?;
     }
     for batch in modules.chunks(batch_size) {
         let db = open_batch(batch);
-        let edges = project_batch_query_edges(&db, batch, &mut state);
+        let edges = project_batch_query_edges(&pool, &db, batch, &mut state);
         emit(&edges, &mut summary, &mut seen_aux, sink)?;
     }
 

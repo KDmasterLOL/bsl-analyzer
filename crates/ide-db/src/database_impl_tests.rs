@@ -1386,10 +1386,11 @@ fn project_batch_edges_resolves_across_batches() {
     // resolve through the index.
     let db0 = make_db(&[(a, files[0].1)]);
     let db1 = make_db(&[(b, files[1].1)]);
+    let pool = rayon::ThreadPoolBuilder::new().build().unwrap();
     let mut state = GraphBuildState::new();
     let mut batched: Vec<WorkspaceCallEdge> = Vec::new();
-    batched.extend(project_batch_edges(&db0, &[module_a], &index, &mut state));
-    batched.extend(project_batch_edges(&db1, &[module_b], &index, &mut state));
+    batched.extend(project_batch_edges(&pool, &db0, &[module_a], &index, &mut state));
+    batched.extend(project_batch_edges(&pool, &db1, &[module_b], &index, &mut state));
 
     let salsa = full.workspace_call_graph(SourceRootId(0));
     let folded: Vec<WorkspaceCallEdge> = salsa.edges().cloned().collect();

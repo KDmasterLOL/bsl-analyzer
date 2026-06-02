@@ -91,13 +91,53 @@ impl GraphIndex {
     /// so building the whole index batch-by-batch in fresh databases keeps peak RAM
     /// bounded.
     pub fn add_module(&mut self, db: &dyn ConfigsDatabase, module: ModuleId) {
+        let (all, module_dispatch) = Self::extract_module_data(db, module);
+        self.insert_module_data(module, all, module_dispatch);
+    }
+
+    /// Add a whole batch's modules, lowering each module's item tree + metadata in
+    /// parallel on `pool` (the per-module cost of [`Self::add_module`], repeated
+    /// across the config), then folding the results into the index sequentially. The
+    /// index is a set of per-module maps, so insertion order does not affect it —
+    /// only the read-only extraction is parallelised.
+    pub fn add_batch<DB: ConfigsDatabase + Clone + Send>(
+        &mut self,
+        pool: &rayon::ThreadPool,
+        db: &DB,
+        batch: &[ModuleId],
+    ) {
+        let extracted = parallel_per_module(pool, db, batch, |db, module| {
+            (module, Self::extract_module_data(db, module))
+        });
+        for (module, (all, module_dispatch)) in extracted {
+            self.insert_module_data(module, all, module_dispatch);
+        }
+    }
+
+    /// The read-only half of [`Self::add_module`]: force a module's item tree and
+    /// metadata and extract its method entries + module-level dispatch. Touches no
+    /// shared index state, so it is safe to run for many modules concurrently.
+    fn extract_module_data(
+        db: &dyn ConfigsDatabase,
+        module: ModuleId,
+    ) -> (Vec<GraphMethodEntry>, Option<MethodDispatch>) {
         let item_tree = db.item_tree(module.file_id);
         let all = crate::call_graph::extract_graph_methods(&item_tree);
         let module_dispatch = db
             .module_metadata(module)
             .execution_context
             .and_then(MethodDispatch::from_execution_context);
+        (all, module_dispatch)
+    }
 
+    /// The mutating half of [`Self::add_module`]: fold one module's extracted methods
+    /// + dispatch into the resident index. Order-independent across modules.
+    fn insert_module_data(
+        &mut self,
+        module: ModuleId,
+        all: Vec<GraphMethodEntry>,
+        module_dispatch: Option<MethodDispatch>,
+    ) {
         // First-wins lowercased map, matching `SymbolTree::find_method`.
         let mut by_name = FxHashMap::default();
         for entry in &all {
@@ -357,13 +397,14 @@ impl GraphBuildState {
 /// get a different first-seen spelling. This combined helper is for callers that
 /// process one batch in isolation and accept that per-batch ordering.
 pub fn project_batch_edges<DB: ConfigsDatabase + Clone + Send>(
+    pool: &rayon::ThreadPool,
     db: &DB,
     batch: &[ModuleId],
     index: &GraphIndex,
     state: &mut GraphBuildState,
 ) -> Vec<WorkspaceCallEdge> {
-    let mut edges = project_batch_call_edges(db, batch, index, state);
-    edges.extend(project_batch_query_edges(db, batch, state));
+    let mut edges = project_batch_call_edges(pool, db, batch, index, state);
+    edges.extend(project_batch_query_edges(pool, db, batch, state));
     edges
 }
 
@@ -373,23 +414,19 @@ pub fn project_batch_edges<DB: ConfigsDatabase + Clone + Send>(
 /// global Pass-2-then-Pass-3 canonicalization order. `state.mdo_canonical` is
 /// shared and updated as new metadata-object spellings are first seen.
 pub fn project_batch_call_edges<DB: ConfigsDatabase + Clone + Send>(
+    pool: &rayon::ThreadPool,
     db: &DB,
     batch: &[ModuleId],
     index: &GraphIndex,
     state: &mut GraphBuildState,
 ) -> Vec<WorkspaceCallEdge> {
-    use rayon::prelude::*;
-
     // Resolve every module's summary in parallel, then project edges sequentially in
     // `batch` order so the shared `mdo_canonical` sees objects first-seen in the
     // exact order the fold does — parallelising only the read-only resolution keeps
-    // the canonicalization deterministic. The database is `Send` but not `Sync`
-    // (a per-handle query stack), so each rayon job works on its own cheap clone
-    // (`map_with`); the clones share the underlying memo storage.
-    let summaries: Vec<_> = batch
-        .par_iter()
-        .map_with(db.clone(), |db, &module| resolve_module_summary_via_index(db, module, index))
-        .collect();
+    // the canonicalization deterministic.
+    let summaries: Vec<_> = parallel_per_module(pool, db, batch, |db, module| {
+        resolve_module_summary_via_index(db, module, index)
+    });
 
     let mut edges = Vec::new();
     let dispatch = |node: &GraphNode| index.dispatch(node);
@@ -403,24 +440,63 @@ pub fn project_batch_call_edges<DB: ConfigsDatabase + Clone + Send>(
     edges
 }
 
+/// Run `f` for every module in `batch` in parallel on `pool`, returning the results
+/// in `batch` order. The database is `Send` but not `Sync` (a per-handle query
+/// stack), so each rayon job works on its own cheap `db` clone — the clones share
+/// the underlying memo storage. The work runs on the caller-supplied `pool`, never
+/// the global one, so concurrent builds (each with its own pool and database) never
+/// share a worker thread — Salsa attaches at most one database to any thread, and a
+/// salsa query that itself parallelises (e.g. metadata loading) stays on this pool.
+fn parallel_per_module<DB, R, F>(
+    pool: &rayon::ThreadPool,
+    db: &DB,
+    batch: &[ModuleId],
+    f: F,
+) -> Vec<R>
+where
+    DB: ConfigsDatabase + Clone + Send,
+    R: Send,
+    F: Fn(&DB, ModuleId) -> R + Sync + Send,
+{
+    use rayon::prelude::*;
+
+    // Warm every configuration-loading query the parallel jobs can reach, for every
+    // module in the batch, on THIS thread before the parallel region. A config root's
+    // `load_from_directory` (`bsl_metadata`) fans out over its own `rayon::scope`; if
+    // it ran inside a parallel job, a free worker could steal a sibling job — which
+    // carries a different `db` clone — into that scope and attach a second database to
+    // a thread mid-query, which Salsa forbids. Forcing the loads here memoises them
+    // (clones share the `Zalsa`), so the jobs below only read cached configs and never
+    // open a nested scope. A single module does not suffice: a batch may mix modules
+    // from different roots (a base config plus extensions), each a distinct, separately
+    // loaded key. These are the only internally parallel queries the build reaches
+    // (it runs no type inference); once warmed, the parallel region nests no scope.
+    for &module in batch {
+        let _ = db.module_metadata(module);
+        let _ = db.configurations(module.file_id);
+        let _ = db.merged_visible_configuration(module.file_id);
+    }
+
+    let seed = db.clone();
+    pool.install(move || batch.par_iter().map_with(seed, |db, &module| f(&*db, module)).collect())
+}
+
 /// A batch's SDBL `query_ref` edges. Run across every batch only after
 /// [`project_batch_call_edges`] has run across all of them, sharing the same
 /// `state`, so query-only metadata objects inherit the spelling the fold's Pass 3
 /// would give them (call sites win first, exactly as in the fold).
 pub fn project_batch_query_edges<DB: ConfigsDatabase + Clone + Send>(
+    pool: &rayon::ThreadPool,
     db: &DB,
     batch: &[ModuleId],
     state: &mut GraphBuildState,
 ) -> Vec<WorkspaceCallEdge> {
-    use rayon::prelude::*;
-
-    // Collect each module's query reads from its SDBL HIR in parallel (read-only,
-    // one cheap db clone per rayon job), then project edges sequentially in `batch`
-    // order so the shared canonicalization/dedup matches the fold byte-for-byte.
-    let collected: Vec<_> = batch
-        .par_iter()
-        .map_with(db.clone(), |db, &module| crate::queries::collect_module_query_refs(db, module))
-        .collect();
+    // Collect each module's query reads from its SDBL HIR in parallel (read-only),
+    // then project edges sequentially in `batch` order so the shared
+    // canonicalization/dedup matches the fold byte-for-byte.
+    let collected: Vec<_> = parallel_per_module(pool, db, batch, |db, module| {
+        crate::queries::collect_module_query_refs(db, module)
+    });
 
     let mut edges = Vec::new();
     for refs in &collected {
