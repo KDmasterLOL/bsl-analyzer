@@ -73,8 +73,8 @@ pub fn file_name_usage_query<'db>(
 }
 
 #[salsa::tracked(lru = 4)]
-pub fn source_root_name_usage_query<'db>(
-    db: &'db dyn DefDatabase,
+pub fn source_root_name_usage_query(
+    db: &dyn DefDatabase,
     source_root_input: SourceRootInput,
 ) -> Arc<SourceRootNameUsage> {
     let source_root = source_root_input.root(db);
