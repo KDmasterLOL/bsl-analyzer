@@ -232,12 +232,16 @@ impl Analysis {
 }
 
 /// Tallies from a streaming graph build, for logging and metadata.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 pub struct GraphBuildSummary {
     pub modules: usize,
     /// Node rows handed to the sink (before id de-duplication).
     pub node_rows: usize,
     pub edges: usize,
+    /// Per-module signature hash (see [`GraphIndex::module_sig_hash`]), captured from
+    /// the resident index so a build can persist it for incremental drift checks. One
+    /// entry per indexed module.
+    pub module_sig_hashes: FxHashMap<ModuleId, u64>,
 }
 
 /// A per-batch persistence sink: it receives one batch's freshly-encoded node and
@@ -298,8 +302,15 @@ pub fn build_workspace_graph_rows(
         index.add_batch(&pool, &db, batch);
     }
 
+    // Capture each module's body-free signature hash from the resident index, for
+    // persisting alongside the per-file fingerprint so an incremental rebuild can tell
+    // a body-only edit (sig unchanged) from a resolution-affecting one.
+    let module_sig_hashes: FxHashMap<ModuleId, u64> =
+        modules.iter().filter_map(|&m| index.module_sig_hash(m).map(|h| (m, h))).collect();
+
     let encoder = GraphRowEncoder::new(&index, paths, workspace_root);
-    let mut summary = GraphBuildSummary { modules: modules.len(), ..Default::default() };
+    let mut summary =
+        GraphBuildSummary { modules: modules.len(), module_sig_hashes, ..Default::default() };
 
     // Phase A — every method node (the fold's dispatch-seeded set), including
     // isolated methods that no edge references. No database needed: the index and

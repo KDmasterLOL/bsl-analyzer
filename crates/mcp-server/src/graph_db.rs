@@ -325,14 +325,25 @@ pub fn build_graph_database(
 
     // Persist a per-file fingerprint for every graph-relevant file (`.bsl` + `.xml`),
     // covering the same universe the workspace fingerprint folds, so a later reload
-    // can classify drift granularly. `sig_hash` is left NULL until the body-only fast
-    // path computes it.
+    // can classify drift granularly. For `.bsl` modules also persist the body-free
+    // signature hash from the build, so a body-only edit (sig unchanged) is
+    // distinguishable from a resolution-affecting one. `.xml` rows keep NULL sig.
+    //
+    // `file_paths` holds each module's canonical path verbatim; `scan_file_stats`
+    // stringifies the same canonical path, so keying by that string lines the two up.
+    let sig_by_path: FxHashMap<String, u64> = summary
+        .module_sig_hashes
+        .iter()
+        .filter_map(|(m, &h)| {
+            file_paths.get(&m.file_id).map(|p| (p.to_string_lossy().into_owned(), h))
+        })
+        .collect();
     let file_rows: Vec<FileFingerprint> = crate::graph::scan_file_stats(workspace_root)
         .iter()
         .map(|s| FileFingerprint {
-            path: s.path.clone(),
             fingerprint: s.fingerprint(),
-            sig_hash: None,
+            sig_hash: sig_by_path.get(&s.path).copied(),
+            path: s.path.clone(),
         })
         .collect();
     writer.write_files(&file_rows)?;

@@ -1427,10 +1427,73 @@ mod tests {
             (&diff.added, &diff.removed, &diff.modified)
         );
 
-        let null_sigs: i64 = conn
-            .query_row("SELECT COUNT(*) FROM files WHERE sig_hash IS NOT NULL", [], |r| r.get(0))
+        // Every `.bsl` module carries a signature hash; `.xml` descriptors stay NULL.
+        let bsl_sigs: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM files WHERE path LIKE '%.bsl' AND sig_hash IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
-        assert_eq!(null_sigs, 0, "sig_hash stays NULL in this phase");
+        let xml_sigs: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM files WHERE path LIKE '%.xml' AND sig_hash IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(bsl_sigs, 2, "both module bodies get a signature hash");
+        assert_eq!(xml_sigs, 0, ".xml descriptors have no signature hash");
+    }
+
+    /// The persisted signature hash is stable across a body-only edit (same method
+    /// names/exports/dispatch) but changes when a signature does — the exact property
+    /// the body-only fast path relies on.
+    #[test]
+    fn sig_hash_stable_across_body_edit_changes_on_signature_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        let out = graph_db_path(root);
+        fs::create_dir_all(out.parent().unwrap()).unwrap();
+
+        let meta = || crate::graph_db::GraphMeta {
+            revision: 1,
+            fingerprint: 0,
+            files: 0,
+            built_at: "t".to_string(),
+        };
+        let server_sig = |out: &Path| -> i64 {
+            Connection::open(out)
+                .unwrap()
+                .query_row(
+                    "SELECT sig_hash FROM files WHERE path LIKE '%Сервер/Ext/Module.bsl'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+
+        build_graph_database(root, &out, 1, &meta()).expect("builds");
+        let base = server_sig(&out);
+
+        // Body-only edit: same signature `Функция Считать() Экспорт`, new body.
+        write(
+            root,
+            "CommonModules/Сервер/Ext/Module.bsl",
+            "&НаСервере\nФункция Считать() Экспорт\nА = 1; Возврат А;\nКонецФункции",
+        );
+        build_graph_database(root, &out, 1, &meta()).expect("rebuilds");
+        assert_eq!(server_sig(&out), base, "a body-only edit leaves the signature hash unchanged");
+
+        // Signature edit: rename the function. The hash must move.
+        write(
+            root,
+            "CommonModules/Сервер/Ext/Module.bsl",
+            "&НаСервере\nФункция Считать2() Экспорт КонецФункции",
+        );
+        build_graph_database(root, &out, 1, &meta()).expect("rebuilds");
+        assert_ne!(server_sig(&out), base, "renaming a method changes the signature hash");
     }
 
     /// `classify_changes` sorts each modified/added/removed file into the right

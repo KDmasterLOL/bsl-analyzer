@@ -159,6 +159,46 @@ impl GraphIndex {
         self.methods.get(&method.module)?.all.iter().find(|e| e.local_id == method.local_id)
     }
 
+    /// A body-free signature hash of one module's methods: the ordered
+    /// (original-spelling name, `is_export`, effective dispatch) of every method in
+    /// declaration order. This is exactly the cross-module resolution + identity
+    /// surface — `find_method` resolves on the name, callers' edges/boundary flags
+    /// depend on `is_export` + effective dispatch, and the durable method id embeds
+    /// the original name spelling. So if this hash is unchanged across an edit, no
+    /// caller's resolved edge or stored node row can change and only this module's own
+    /// rows need reprojecting. Deliberately excludes source ranges (they shift on any
+    /// text edit) and bodies (a body edit not touching a signature keeps it stable).
+    /// `None` if the module is not indexed.
+    ///
+    /// The hasher (std `DefaultHasher`) is stable within a build but not guaranteed
+    /// across toolchain versions. That is safe by construction: a changed algorithm
+    /// only makes the stored hashes mismatch on the next reload, which falls back to a
+    /// full rebuild and re-persists fresh hashes — the same self-healing contract the
+    /// workspace fingerprint already relies on for cache reuse.
+    pub fn module_sig_hash(&self, module: ModuleId) -> Option<u64> {
+        use std::hash::{Hash, Hasher};
+
+        let methods = self.methods.get(&module)?;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for entry in &methods.all {
+            entry.name.as_str().hash(&mut hasher);
+            entry.is_export.hash(&mut hasher);
+            // The effective dispatch (module execution context wins, else annotation)
+            // is what the stored node row and the client→server edge flag carry, so it
+            // is the dispatch the parity surface sees — not the raw annotation.
+            match self.node_dispatch.get(&MethodId { module, local_id: entry.local_id }) {
+                Some(d) => {
+                    true.hash(&mut hasher);
+                    d.can_run_on_client.hash(&mut hasher);
+                    d.can_run_on_server.hash(&mut hasher);
+                    d.no_context.hash(&mut hasher);
+                }
+                None => false.hash(&mut hasher),
+            }
+        }
+        Some(hasher.finish())
+    }
+
     /// Every indexed method node. This is exactly the fold's Pass-1 dispatch-seeded
     /// set (`node_dispatch.keys`), so a streaming build that materialises a node for
     /// each yields the same isolated (call-free) method nodes the in-memory graph's
