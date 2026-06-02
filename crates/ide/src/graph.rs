@@ -100,6 +100,7 @@ pub struct GraphOverview {
     pub attributes: usize,
     pub forms: usize,
     pub form_items: usize,
+    pub form_attributes: usize,
     pub nodes: usize,
     pub edges: usize,
     pub top_by_centrality: Vec<NodeRef>,
@@ -620,6 +621,15 @@ impl<'a> GraphCtx<'a> {
                 ),
                 true,
             ),
+            GraphNode::FormAttribute { owner, form_name, attr_name } => (
+                format!(
+                    "form_attr/{}/{}/{}",
+                    form_scope(owner),
+                    form_name.as_str(),
+                    attr_name.as_str()
+                ),
+                true,
+            ),
         }
     }
 
@@ -677,6 +687,9 @@ impl<'a> GraphCtx<'a> {
             GraphIdKind::Form { owner, form_name } => self.find_form_node(&owner, &form_name, id),
             GraphIdKind::FormItem { owner, form_name, item_name } => {
                 self.find_form_item_node(&owner, &form_name, &item_name, id)
+            }
+            GraphIdKind::FormAttribute { owner, form_name, attr_name } => {
+                self.find_form_attribute_node(&owner, &form_name, &attr_name, id)
             }
         }
     }
@@ -780,6 +793,30 @@ impl<'a> GraphCtx<'a> {
             .ok_or_else(|| GraphError::NotFound { id: id.to_string() })
     }
 
+    /// The form-attribute node for `(owner, form_name, attr_name)`, if the graph
+    /// references it. Case-insensitive on all name components.
+    fn find_form_attribute_node(
+        &self,
+        owner: &Option<(MdoType, String)>,
+        form_name: &str,
+        attr_name: &str,
+        id: &str,
+    ) -> Result<GraphNode, GraphError> {
+        let form_lower = form_name.to_lowercase();
+        let attr_lower = attr_name.to_lowercase();
+        self.graph
+            .nodes()
+            .find(|n| match n {
+                GraphNode::FormAttribute { owner: o, form_name: fname, attr_name: aname } => {
+                    form_owner_matches(o.as_ref().map(|(t, n)| (*t, n.as_str())), owner)
+                        && fname.as_str().to_lowercase() == form_lower
+                        && aname.as_str().to_lowercase() == attr_lower
+                }
+                _ => false,
+            })
+            .ok_or_else(|| GraphError::NotFound { id: id.to_string() })
+    }
+
     fn resolve_rel_path(&self, rel: &str) -> Option<FileId> {
         for file_id in self.source_root.iter() {
             let abs = match self.path_for(file_id) {
@@ -850,6 +887,23 @@ impl<'a> GraphCtx<'a> {
                 ),
                 name: item_name.as_str().to_string(),
                 kind: "form_item",
+                id,
+                module: None,
+                signature: None,
+                source: None,
+                dispatch: Vec::new(),
+                is_export: None,
+                addressable,
+            },
+            GraphNode::FormAttribute { owner, form_name, attr_name } => NodeRef {
+                qualified: format!(
+                    "{}.Форма.{}.Реквизит.{}",
+                    form_qualified_prefix(&owner),
+                    form_name.as_str(),
+                    attr_name.as_str()
+                ),
+                name: attr_name.as_str().to_string(),
+                kind: "form_attribute",
                 id,
                 module: None,
                 signature: None,
@@ -1027,7 +1081,8 @@ impl<'a> GraphCtx<'a> {
                 Ok(GraphNode::Mdo { .. })
                 | Ok(GraphNode::Attribute { .. })
                 | Ok(GraphNode::Form { .. })
-                | Ok(GraphNode::FormItem { .. }) => SourceItem {
+                | Ok(GraphNode::FormItem { .. })
+                | Ok(GraphNode::FormAttribute { .. }) => SourceItem {
                     id: id.clone(),
                     source: None,
                     error: Some(GraphError::Unsupported {
@@ -1071,6 +1126,7 @@ impl<'a> GraphCtx<'a> {
         let mut attributes = 0usize;
         let mut forms = 0usize;
         let mut form_items = 0usize;
+        let mut form_attributes = 0usize;
         let mut node_count = 0usize;
         for node in self.graph.nodes() {
             node_count += 1;
@@ -1081,6 +1137,7 @@ impl<'a> GraphCtx<'a> {
                 GraphNode::Attribute { .. } => attributes += 1,
                 GraphNode::Form { .. } => forms += 1,
                 GraphNode::FormItem { .. } => form_items += 1,
+                GraphNode::FormAttribute { .. } => form_attributes += 1,
             }
         }
 
@@ -1113,6 +1170,7 @@ impl<'a> GraphCtx<'a> {
             attributes,
             forms,
             form_items,
+            form_attributes,
             nodes: node_count,
             edges: self.graph.edge_count(),
             top_by_centrality,
@@ -1251,6 +1309,9 @@ pub enum GraphIdKind {
     /// `form_item/<MdoEnglish>/<Object>/<Form>/<Item>` or
     /// `form_item/common/<Form>/<Item>`.
     FormItem { owner: Option<(MdoType, String)>, form_name: String, item_name: String },
+    /// `form_attr/<MdoEnglish>/<Object>/<Form>/<Attr>` or
+    /// `form_attr/common/<Form>/<Attr>`.
+    FormAttribute { owner: Option<(MdoType, String)>, form_name: String, attr_name: String },
 }
 
 /// A form's owner: `None` for a common form, `Some((type, object))` for an
@@ -1305,6 +1366,19 @@ pub fn classify_graph_id(id: &str) -> Result<GraphIdKind, GraphError> {
             mdo_type,
             object: object.to_string(),
             attr: attr.to_string(),
+        });
+    }
+    if let Some(rest) = id.strip_prefix("form_attr/") {
+        let parts: Vec<&str> = rest.split('/').collect();
+        let structure = || {
+            bad("form attribute id must be 'form_attr/<scope>/<Form>/<Attr>' (scope = <MdoType>/<Object> or 'common')")
+        };
+        let (owner, tail) = split_form_owner(&parts).ok_or_else(structure)?;
+        let [form_name, attr_name] = tail else { return Err(structure()) };
+        return Ok(GraphIdKind::FormAttribute {
+            owner,
+            form_name: form_name.to_string(),
+            attr_name: attr_name.to_string(),
         });
     }
     // `form_item/` must be tested before `form/` (the latter is a prefix of the former).
@@ -1593,6 +1667,17 @@ mod tests {
             Ok(GraphIdKind::FormItem { owner: None, form_name, item_name })
                 if form_name == "Ф" && item_name == "Кнопка"
         ));
+        // Form attributes: object-owned and common.
+        assert!(matches!(
+            classify_graph_id("form_attr/Catalog/Контрагенты/ФормаЭлемента/Объект"),
+            Ok(GraphIdKind::FormAttribute { owner: Some(_), form_name, attr_name })
+                if form_name == "ФормаЭлемента" && attr_name == "Объект"
+        ));
+        assert!(matches!(
+            classify_graph_id("form_attr/common/Ф/Список"),
+            Ok(GraphIdKind::FormAttribute { owner: None, form_name, attr_name })
+                if form_name == "Ф" && attr_name == "Список"
+        ));
 
         // Malformed ids are BadId.
         for bad in [
@@ -1606,6 +1691,8 @@ mod tests {
             "form/Catalog/OnlyObjectNoForm",
             "form/NoSuchType/X/Ф",
             "form_item/common/OnlyForm",
+            "form_attr/common/OnlyForm",
+            "form_attr/NoSuchType/X/Ф/А",
         ] {
             assert!(
                 matches!(classify_graph_id(bad), Err(GraphError::BadId { .. })),
@@ -1975,8 +2062,20 @@ mod tests {
             form_name: Name::new("ОбщаяФорма1"),
             item_name: Name::new("Кнопка"),
         };
+        let object_attr = GraphNode::FormAttribute {
+            owner: owner.clone(),
+            form_name: Name::new("ФормаЭлемента"),
+            attr_name: Name::new("Объект"),
+        };
+        let common_attr = GraphNode::FormAttribute {
+            owner: None,
+            form_name: Name::new("ОбщаяФорма1"),
+            attr_name: Name::new("Список"),
+        };
 
-        for node in [&object_form, &common_form, &object_item, &common_item] {
+        for node in
+            [&object_form, &common_form, &object_item, &common_item, &object_attr, &common_attr]
+        {
             assert_eq!(encoder.encode(node), ctx.encode_node(node), "encode mismatch for {node:?}");
             let row = encoder.node_row(node);
             let serve = ctx.node_ref(node.clone(), GraphDetail::Names);
@@ -1994,6 +2093,11 @@ mod tests {
             "form_item/Catalog/Контрагенты/ФормаЭлемента/ПолеКод"
         );
         assert_eq!(encoder.encode(&common_item).0, "form_item/common/ОбщаяФорма1/Кнопка");
+        assert_eq!(
+            encoder.encode(&object_attr).0,
+            "form_attr/Catalog/Контрагенты/ФормаЭлемента/Объект"
+        );
+        assert_eq!(encoder.encode(&common_attr).0, "form_attr/common/ОбщаяФорма1/Список");
 
         let edge = WorkspaceCallEdge {
             from: object_form.clone(),

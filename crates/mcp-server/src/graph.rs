@@ -1709,6 +1709,33 @@ mod tests {
         write(root, &format!("{base}/Form/Module.bsl"), module_body);
     }
 
+    /// A form with a nested group (`Группа` → `ПолеВложенное`), a root field, and two
+    /// form attributes — exercises the `form_item → form_item` hierarchy and the
+    /// `form → form_attribute` edges.
+    fn write_catalog_form_rich(root: &Path, obj: &str, form: &str, module_body: &str) {
+        let base = format!("Catalogs/{obj}/Forms/{form}/Ext");
+        write(
+            root,
+            &format!("{base}/Form.xml"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.10">
+    <ChildItems>
+        <InputField name="ПолеКод" id="1"><DataPath>Объект.Код</DataPath></InputField>
+        <UsualGroup name="Группа" id="10">
+            <ChildItems>
+                <InputField name="ПолеВложенное" id="11"><DataPath>Объект.Наименование</DataPath></InputField>
+            </ChildItems>
+        </UsualGroup>
+    </ChildItems>
+    <Attributes>
+        <Attribute name="Объект"/>
+        <Attribute name="СписокЗначений"/>
+    </Attributes>
+</Form>"#,
+        );
+        write(root, &format!("{base}/Form/Module.bsl"), module_body);
+    }
+
     /// Dump the data tables in a stable order so two databases can be compared for
     /// logical (byte-identical) equality independent of physical row order. Returns
     /// `(nodes, edges, in_degree, unresolved_calls)`.
@@ -1954,6 +1981,167 @@ mod tests {
             inc_edges.iter().filter(|e| e.contains("contains")).count(),
             3,
             "1 mdo→form + 2 form→form_item contains edges preserved: {inc_edges:?}"
+        );
+    }
+
+    /// Form-item group hierarchy (`FormElement.parent_id`) and `Form.attributes`
+    /// become graph structure: a nested element hangs off its parent group, root
+    /// elements off the form, and each form attribute off the form.
+    #[test]
+    fn sqlite_build_models_form_hierarchy_and_attributes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        write_catalog(root, "Номенклатура", 1);
+        write_catalog_form_rich(
+            root,
+            "Номенклатура",
+            "ФормаЭлемента",
+            "&НаКлиенте\nПроцедура ПриОткрытии(Отказ)\nКонецПроцедуры",
+        );
+
+        let (_, files) = load_workspace_db(root).expect("workspace loads");
+        let out = graph_db_path(root);
+        fs::create_dir_all(out.parent().unwrap()).unwrap();
+        build_graph_database(
+            root,
+            &out,
+            1,
+            &crate::graph_db::GraphMeta {
+                revision: 1,
+                fingerprint: 0,
+                files,
+                built_at: "t".to_string(),
+            },
+        )
+        .expect("graph database builds");
+
+        let conn = Connection::open(&out).unwrap();
+        let count = |sql: &str| -> usize {
+            conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap() as usize
+        };
+        let edge = |from: &str, to: &str| -> usize {
+            count(&format!(
+                "SELECT COUNT(*) FROM edges WHERE kind='contains' \
+                 AND from_id='{from}' AND to_id='{to}'"
+            ))
+        };
+        let form = "form/Catalog/Номенклатура/ФормаЭлемента";
+        let item = |name: &str| format!("form_item/Catalog/Номенклатура/ФормаЭлемента/{name}");
+
+        // 3 UI elements, 2 form attributes.
+        assert_eq!(count("SELECT COUNT(*) FROM nodes WHERE kind='form_item'"), 3);
+        assert_eq!(count("SELECT COUNT(*) FROM nodes WHERE kind='form_attribute'"), 2);
+
+        // Roots hang off the form; the nested field hangs off its group, NOT the form.
+        assert_eq!(edge(form, &item("ПолеКод")), 1, "root field → form");
+        assert_eq!(edge(form, &item("Группа")), 1, "group → form");
+        assert_eq!(edge(form, &item("ПолеВложенное")), 0, "nested field is NOT a form root");
+        assert_eq!(
+            edge(&item("Группа"), &item("ПолеВложенное")),
+            1,
+            "nested field → its parent group"
+        );
+
+        // Each form attribute hangs off the form.
+        assert_eq!(
+            edge(form, "form_attr/Catalog/Номенклатура/ФормаЭлемента/Объект"),
+            1,
+            "form → form_attribute Объект"
+        );
+        assert_eq!(
+            edge(form, "form_attr/Catalog/Номенклатура/ФормаЭлемента/СписокЗначений"),
+            1,
+            "form → form_attribute СписокЗначений"
+        );
+
+        let gdb = GraphDb::open(&out).expect("graph database opens");
+        assert_eq!(gdb.overview(10).unwrap().form_attributes, 2);
+        // A form attribute resolves with a localized type segment and mixed casing.
+        let node = gdb
+            .node("form_attr/Справочник/номенклатура/ФормаЭлемента/объект", ide::GraphDetail::Names)
+            .unwrap()
+            .expect("form attribute resolves case-insensitively");
+        assert_eq!(node.node.id, "form_attr/Catalog/Номенклатура/ФормаЭлемента/Объект");
+        assert_eq!(node.node.kind, "form_attribute");
+
+        // Served edges out of the form carry the `contains` kind (not mislabelled
+        // `call`), and reach both UI items and form attributes.
+        let neighbors = gdb
+            .neighbors(&ide::NeighborsParams {
+                id: form,
+                dir: ide::Direction::Out,
+                depth: 1,
+                max_nodes: 50,
+                detail: ide::GraphDetail::Names,
+                provenance_filter: Vec::new(),
+            })
+            .unwrap()
+            .expect("form node resolves");
+        assert!(
+            !neighbors.edges.is_empty() && neighbors.edges.iter().all(|e| e.kind == "contains"),
+            "all edges out of a form are `contains`: {:?}",
+            neighbors.edges.iter().map(|e| e.kind).collect::<Vec<_>>()
+        );
+    }
+
+    /// A body-only edit to a form module's `.bsl` must leave the form hierarchy and
+    /// attribute nodes/edges byte-identical to a full rebuild (build-only structure,
+    /// never re-derived by the incremental reprojection).
+    #[test]
+    fn incremental_body_edit_preserves_form_hierarchy_and_attributes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        write_catalog(root, "Номенклатура", 1);
+        write_catalog_form_rich(
+            root,
+            "Номенклатура",
+            "ФормаЭлемента",
+            "&НаКлиенте\nПроцедура ПриОткрытии(Отказ)\nСообщить(\"a\");\nКонецПроцедуры",
+        );
+
+        let meta = || crate::graph_db::GraphMeta {
+            revision: 1,
+            fingerprint: 0,
+            files: 0,
+            built_at: "t".to_string(),
+        };
+        let db_pre = root.join(".build/pre.db");
+        fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
+        build_graph_database(root, &db_pre, 1, &meta()).expect("pre build");
+
+        let module_rel = "Catalogs/Номенклатура/Forms/ФормаЭлемента/Ext/Form/Module.bsl";
+        write(
+            root,
+            module_rel,
+            "&НаКлиенте\nПроцедура ПриОткрытии(Отказ)\nСообщить(\"b\");\nКонецПроцедуры",
+        );
+        let changed = vec![root.join(module_rel).canonicalize().unwrap()];
+
+        let db_inc = root.join(".build/inc.db");
+        update_graph_database_bodies(root, &db_pre, &db_inc, &changed, 1, &meta())
+            .expect("incremental update");
+
+        let db_full = root.join(".build/full.db");
+        build_graph_database(root, &db_full, 1, &meta()).expect("full rebuild");
+
+        let (inc_nodes, inc_edges, ..) = dump_data(&db_inc);
+        let (full_nodes, full_edges, ..) = dump_data(&db_full);
+        assert_eq!(inc_nodes, full_nodes, "nodes (incl. form_attribute) must match a full rebuild");
+        assert_eq!(
+            inc_edges, full_edges,
+            "edges (incl. form_item hierarchy + form_attribute) must match a full rebuild"
+        );
+        // The group-hierarchy edge and the form-attribute edges survived the body edit.
+        assert!(inc_edges
+            .iter()
+            .any(|e| e.contains("/ФормаЭлемента/Группа")
+                && e.contains("/ФормаЭлемента/ПолеВложенное")));
+        assert_eq!(
+            inc_edges.iter().filter(|e| e.contains("form_attr/")).count(),
+            2,
+            "two form_attribute edges preserved: {inc_edges:?}"
         );
     }
 

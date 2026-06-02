@@ -257,6 +257,14 @@ pub enum GraphNode {
         form_name: Name,
         item_name: Name,
     },
+    /// A form attribute — an entry in the form's data model (distinct from the UI
+    /// [`GraphNode::FormItem`] controls). `owner`/`form_name` mirror the containing
+    /// [`GraphNode::Form`]; `attr_name` is the declared form-attribute name.
+    FormAttribute {
+        owner: Option<(MdoType, Name)>,
+        form_name: Name,
+        attr_name: Name,
+    },
 }
 
 /// A resolved call edge between two workspace graph nodes.

@@ -642,7 +642,18 @@ pub fn project_batch_query_edges<DB: ConfigsDatabase + Clone + Send>(
 /// case-insensitively, declaration order preserved).
 struct CollectedForm {
     key: crate::module_index::FormKey,
-    items: Vec<crate::name::Name>,
+    /// One per UI element, in declaration order: its name, its own element id, and
+    /// its parent's element id (`None` for a root element).
+    items: Vec<CollectedItem>,
+    /// Declared form-attribute names (the form's data model), deduped
+    /// case-insensitively in declaration order.
+    attributes: Vec<crate::name::Name>,
+}
+
+struct CollectedItem {
+    name: crate::name::Name,
+    id: u32,
+    parent_id: Option<u32>,
 }
 
 /// A batch's `contains` edges derived from form metadata: `mdo → form` (object forms
@@ -673,15 +684,26 @@ pub fn project_batch_form_edges<DB: ConfigsDatabase + Clone + Send>(
             let key = crate::module_index::parse_form_module_path(path)?;
             let metadata = db.module_metadata(module);
             let form = metadata.form.as_ref()?;
-            let mut items = Vec::new();
-            let mut seen = FxHashSet::default();
-            for element in &form.elements {
-                let name = crate::name::Name::new(&element.name);
-                if seen.insert(name.as_str().to_lowercase()) {
-                    items.push(name);
+            // Keep every element (no dedup here) so the parent-id map below can
+            // resolve any `parent_id`, even one pointing at a same-named sibling.
+            let items = form
+                .elements
+                .iter()
+                .map(|element| CollectedItem {
+                    name: crate::name::Name::new(&element.name),
+                    id: element.id,
+                    parent_id: element.parent_id,
+                })
+                .collect();
+            let mut attributes = Vec::new();
+            let mut seen_attr = FxHashSet::default();
+            for attr in &form.attributes {
+                let name = crate::name::Name::new(&attr.name);
+                if seen_attr.insert(name.as_str().to_lowercase()) {
+                    attributes.push(name);
                 }
             }
-            Some(CollectedForm { key, items })
+            Some(CollectedForm { key, items, attributes })
         });
 
     let mut edges = Vec::new();
@@ -699,13 +721,47 @@ pub fn project_batch_form_edges<DB: ConfigsDatabase + Clone + Send>(
                 form_node.clone(),
             ));
         }
+        let form_item = |item_name: crate::name::Name| GraphNode::FormItem {
+            owner: owner.clone(),
+            form_name: form_name.clone(),
+            item_name,
+        };
+        // `form_item` nodes are keyed by name, so the surviving node for a name is
+        // the first element declaring it. Map id → name over every element, and
+        // record which id is that survivor per lowercased name. A `parent_id` is
+        // only honoured when it points at the surviving element for its name — if the
+        // real parent was a same-named element that collapsed into another node, its
+        // name now denotes a different element, so the child hangs off the form root.
+        let id_to_name: FxHashMap<u32, &crate::name::Name> =
+            form.items.iter().map(|item| (item.id, &item.name)).collect();
+        let mut survivor_id: FxHashMap<String, u32> = FxHashMap::default();
         for item in &form.items {
+            survivor_id.entry(item.name.as_str().to_lowercase()).or_insert(item.id);
+        }
+        let mut seen_item = FxHashSet::default();
+        for item in &form.items {
+            if !seen_item.insert(item.name.as_str().to_lowercase()) {
+                continue;
+            }
+            let parent = item.parent_id.and_then(|pid| Some((pid, *id_to_name.get(&pid)?))).filter(
+                |(pid, parent_name)| {
+                    !parent_name.as_str().eq_ignore_ascii_case(item.name.as_str())
+                        && survivor_id.get(&parent_name.as_str().to_lowercase()) == Some(pid)
+                },
+            );
+            let parent_node = match parent {
+                Some((_, parent_name)) => form_item(parent_name.clone()),
+                None => form_node.clone(),
+            };
+            edges.push(contains_edge(parent_node, form_item(item.name.clone())));
+        }
+        for attr in &form.attributes {
             edges.push(contains_edge(
                 form_node.clone(),
-                GraphNode::FormItem {
+                GraphNode::FormAttribute {
                     owner: owner.clone(),
                     form_name: form_name.clone(),
-                    item_name: item.clone(),
+                    attr_name: attr.clone(),
                 },
             ));
         }
@@ -942,6 +998,15 @@ impl<'a> GraphRowEncoder<'a> {
                 ),
                 true,
             ),
+            GraphNode::FormAttribute { owner, form_name, attr_name } => (
+                format!(
+                    "form_attr/{}/{}/{}",
+                    form_scope(owner),
+                    form_name.as_str(),
+                    attr_name.as_str()
+                ),
+                true,
+            ),
         }
     }
 
@@ -1051,6 +1116,26 @@ impl<'a> GraphRowEncoder<'a> {
                     form_qualified_prefix(owner),
                     form_name.as_str(),
                     item_name.as_str()
+                ),
+                module: None,
+                file: None,
+                name_offset: None,
+                sig_end: None,
+                src_start: None,
+                src_end: None,
+                dispatch: Vec::new(),
+                is_export: None,
+                addressable,
+            },
+            GraphNode::FormAttribute { owner, form_name, attr_name } => NodeRow {
+                id,
+                kind: "form_attribute",
+                name: attr_name.as_str().to_string(),
+                qualified: format!(
+                    "{}.Форма.{}.Реквизит.{}",
+                    form_qualified_prefix(owner),
+                    form_name.as_str(),
+                    attr_name.as_str()
                 ),
                 module: None,
                 file: None,

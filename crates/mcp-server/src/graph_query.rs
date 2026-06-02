@@ -66,6 +66,7 @@ fn node_kind(kind: &str) -> &'static str {
         "attribute" => "attribute",
         "form" => "form",
         "form_item" => "form_item",
+        "form_attribute" => "form_attribute",
         _ => "method",
     }
 }
@@ -88,6 +89,7 @@ fn edge_kind(kind: &str) -> &'static str {
         "manager_creates" => "manager_creates",
         "manager_access" => "manager_access",
         "query_ref" => "query_ref",
+        "contains" => "contains",
         _ => "call",
     }
 }
@@ -244,6 +246,21 @@ impl GraphDb {
                     format!("form_item/common/{form_name}/{item_name}").to_lowercase(),
                 ),
             },
+            GraphIdKind::FormAttribute { owner, form_name, attr_name } => match owner {
+                Some((mdo_type, object)) => {
+                    let eng = mdo_type.english_name();
+                    (
+                        "form_attribute",
+                        format!("form_attr/{eng}/"),
+                        format!("form_attr/{eng}/{object}/{form_name}/{attr_name}").to_lowercase(),
+                    )
+                }
+                None => (
+                    "form_attribute",
+                    "form_attr/common/".to_string(),
+                    format!("form_attr/common/{form_name}/{attr_name}").to_lowercase(),
+                ),
+            },
             _ => return Ok(Err(GraphError::NotFound { id: id.to_string() })),
         };
         let mut stmt = self
@@ -326,6 +343,8 @@ impl GraphDb {
         let attributes = self.count("SELECT COUNT(*) FROM nodes WHERE kind='attribute'")?;
         let forms = self.count("SELECT COUNT(*) FROM nodes WHERE kind='form'")?;
         let form_items = self.count("SELECT COUNT(*) FROM nodes WHERE kind='form_item'")?;
+        let form_attributes =
+            self.count("SELECT COUNT(*) FROM nodes WHERE kind='form_attribute'")?;
         let edges = self.count("SELECT COUNT(*) FROM edges")?;
         let client_to_server_edges = self.count("SELECT COUNT(*) FROM edges WHERE crosses=1")?;
 
@@ -362,6 +381,7 @@ impl GraphDb {
             attributes,
             forms,
             form_items,
+            form_attributes,
             nodes,
             edges,
             top_by_centrality,
