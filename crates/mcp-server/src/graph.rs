@@ -409,32 +409,71 @@ impl GraphState {
         {
             return false;
         }
-        let changed_paths: Vec<PathBuf> = diff.modified.iter().map(PathBuf::from).collect();
+        let modified_paths: Vec<PathBuf> = diff.modified.iter().map(PathBuf::from).collect();
 
-        // Each changed module's stored signature must still match a fresh recompute,
-        // else its resolution surface may have moved → not body-only.
-        let fresh =
-            match crate::graph_db::recompute_module_sig_hashes(workspace_root, &changed_paths) {
-                Ok(f) => f,
+        // Recompute each modified module's profile and partition into body-only
+        // (signature unchanged) and signature-changed.
+        let profiles =
+            match crate::graph_db::recompute_module_profiles(workspace_root, &modified_paths) {
+                Ok(p) => p,
                 Err(e) => {
-                    tracing::warn!("incremental reload: signature recompute failed: {e}");
+                    tracing::warn!("incremental reload: profile recompute failed: {e}");
                     return false;
                 }
             };
         let stored_sig = read_stored_sig_hashes(&db_path);
-        let eligible = changed_paths.iter().all(|p| {
-            let key = p.to_string_lossy();
-            matches!(
-                (stored_sig.get(key.as_ref()), fresh.get(key.as_ref())),
-                (Some(Some(stored)), Some(new)) if stored == new
-            )
-        });
-        if !eligible {
-            tracing::info!(
-                modified = changed_paths.len(),
-                "incremental reload: signature changed; full rebuild"
-            );
-            return false;
+        let mut sig_changed: Vec<(String, &crate::graph_db::ModuleProfile)> = Vec::new();
+        for p in &modified_paths {
+            let key = p.to_string_lossy().into_owned();
+            let Some(profile) = profiles.get(&key) else {
+                return false; // could not profile the module → full rebuild
+            };
+            match stored_sig.get(&key) {
+                Some(Some(stored)) if *stored == profile.sig_hash => {} // body-only
+                Some(Some(_)) => sig_changed.push((key, profile)),      // signature changed
+                _ => return false, // no stored signature (pre-signature build) → full rebuild
+            }
+        }
+
+        // A signature change is handled by the caller-delta path: reproject the changed
+        // module PLUS its resolved callers, when caller-delta-safe (no new resolvable
+        // name). Otherwise fall back to a full rebuild.
+        let mut changed_paths = modified_paths.clone();
+        if !sig_changed.is_empty() {
+            let refs: Vec<(&str, &crate::graph_db::ModuleProfile)> =
+                sig_changed.iter().map(|(f, p)| (f.as_str(), *p)).collect();
+            match crate::graph_db::caller_delta_plan(&db_path, &refs) {
+                Ok(Some(callers)) => {
+                    for c in callers {
+                        if !changed_paths.contains(&c) {
+                            changed_paths.push(c);
+                        }
+                    }
+                }
+                Ok(None) => {
+                    tracing::info!(
+                        "incremental reload: signature change not caller-delta-safe; full rebuild"
+                    );
+                    return false;
+                }
+                Err(e) => {
+                    tracing::warn!("incremental reload: caller-delta plan failed: {e}");
+                    return false;
+                }
+            }
+            // If the caller fan-out approaches the whole config, a full rebuild (no
+            // 2.6 GB copy) is cheaper than reprojecting most modules. Compare against
+            // the `.bsl` module count only — `changed_paths` are modules, while
+            // `stored_fp` also counts `.xml`, which would skew the threshold.
+            let module_total = stored_fp.keys().filter(|p| p.ends_with(".bsl")).count();
+            if changed_paths.len() * 2 > module_total {
+                tracing::info!(
+                    changed = changed_paths.len(),
+                    modules = module_total,
+                    "incremental reload: caller-delta too broad; full rebuild"
+                );
+                return false;
+            }
         }
 
         // Bracket the patch with fingerprint scans, mirroring the full build's
@@ -1987,6 +2026,110 @@ mod tests {
         );
     }
 
+    /// Caller-delta path: removing an exported method from B must update B's resolved
+    /// callers (their edge to the removed method vanishes) byte-identically to a full
+    /// rebuild. The reprojection set is the one `caller_delta_plan` derives.
+    #[test]
+    fn caller_delta_update_matches_full_rebuild_on_method_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        write_common_module(root, "Ядро", true, "&НаСервере\nПроцедура М() Экспорт КонецПроцедуры\nПроцедура Н() Экспорт КонецПроцедуры");
+        write_common_module(
+            root,
+            "Алиса",
+            true,
+            "&НаСервере\nПроцедура ШагА() Экспорт\nЯдро.М();\nКонецПроцедуры",
+        );
+        write_common_module(
+            root,
+            "Вера",
+            true,
+            "&НаСервере\nПроцедура ШагВ() Экспорт\nЯдро.Н();\nКонецПроцедуры",
+        );
+
+        let meta = || crate::graph_db::GraphMeta {
+            revision: 1,
+            fingerprint: 0,
+            files: 0,
+            built_at: "t".to_string(),
+        };
+        let db_pre = root.join(".build/pre.db");
+        fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
+        build_graph_database(root, &db_pre, 1, &meta()).expect("pre build");
+
+        // Remove Ядро.М (keep Н) — a signature change that only shrinks the resolvable
+        // surface, so it is caller-delta-safe.
+        write(
+            root,
+            "CommonModules/Ядро/Ext/Module.bsl",
+            "&НаСервере\nПроцедура Н() Экспорт КонецПроцедуры",
+        );
+        let core_path = root.join("CommonModules/Ядро/Ext/Module.bsl").canonicalize().unwrap();
+        let core_key = core_path.to_string_lossy().into_owned();
+
+        let profiles =
+            crate::graph_db::recompute_module_profiles(root, std::slice::from_ref(&core_path))
+                .unwrap();
+        let profile = profiles.get(&core_key).expect("profiled Ядро");
+        let callers = crate::graph_db::caller_delta_plan(&db_pre, &[(core_key.as_str(), profile)])
+            .unwrap()
+            .expect("method removal is caller-delta-safe");
+        // Both Алиса (called the removed М) and Вера (called Н) are resolved callers.
+        assert_eq!(callers.len(), 2, "both callers discovered: {callers:?}");
+
+        let mut changed = vec![core_path];
+        changed.extend(callers);
+        let db_inc = root.join(".build/inc.db");
+        crate::graph_db::update_graph_database_bodies(root, &db_pre, &db_inc, &changed, 1, &meta())
+            .expect("caller-delta update");
+
+        let db_full = root.join(".build/full.db");
+        build_graph_database(root, &db_full, 1, &meta()).expect("full rebuild");
+        let (inc_nodes, inc_edges, inc_indeg) = dump_data(&db_inc);
+        let (full_nodes, full_edges, full_indeg) = dump_data(&db_full);
+        assert_eq!(inc_nodes, full_nodes, "nodes match a full rebuild");
+        assert_eq!(inc_edges, full_edges, "edges match a full rebuild");
+        assert_eq!(inc_indeg, full_indeg, "in-degree matches a full rebuild");
+        assert!(
+            !inc_nodes.iter().any(|n| n.contains("method/common/Ядро/М")),
+            "removed method node gone: {inc_nodes:?}"
+        );
+    }
+
+    /// `caller_delta_plan` refuses (→ full rebuild) when a signature change ADDS a
+    /// resolvable name: a previously-unresolved caller could newly resolve, and such
+    /// callers are not in `edges_to(B)`.
+    #[test]
+    fn caller_delta_plan_refuses_method_addition() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        write_common_module(root, "Ядро", true, "&НаСервере\nПроцедура М() Экспорт КонецПроцедуры");
+
+        let meta = || crate::graph_db::GraphMeta {
+            revision: 1,
+            fingerprint: 0,
+            files: 0,
+            built_at: "t".to_string(),
+        };
+        let db_pre = root.join(".build/pre.db");
+        fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
+        build_graph_database(root, &db_pre, 1, &meta()).expect("pre build");
+
+        // Add a new exported method.
+        write(root, "CommonModules/Ядро/Ext/Module.bsl", "&НаСервере\nПроцедура М() Экспорт КонецПроцедуры\nПроцедура Новый() Экспорт КонецПроцедуры");
+        let core_path = root.join("CommonModules/Ядро/Ext/Module.bsl").canonicalize().unwrap();
+        let core_key = core_path.to_string_lossy().into_owned();
+        let profiles =
+            crate::graph_db::recompute_module_profiles(root, std::slice::from_ref(&core_path))
+                .unwrap();
+        let profile = profiles.get(&core_key).unwrap();
+        let plan =
+            crate::graph_db::caller_delta_plan(&db_pre, &[(core_key.as_str(), profile)]).unwrap();
+        assert!(plan.is_none(), "adding a resolvable name must refuse the caller-delta path");
+    }
+
     /// `classify_changes` sorts each modified/added/removed file into the right
     /// bucket, and `.xml` drift is flagged for the (forced) full-rebuild path.
     #[test]
@@ -2043,6 +2186,63 @@ mod tests {
             modified: vec!["/cfg/SomeModule/Ext/Module.bsl".to_string()],
         };
         assert!(!body_only.touches_metadata(), "a body-only change does not touch metadata");
+    }
+
+    /// End-to-end: a signature change (method removal) drifts the workspace, and the
+    /// reload takes the caller-delta path — bumping the generation and serving a graph
+    /// where the removed method (and its caller's edge) is gone.
+    #[test]
+    fn drift_with_signature_change_reloads_via_caller_delta() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        write_common_module(root, "Ядро", true, "&НаСервере\nФункция Цель() Экспорт КонецФункции\nФункция Прочее() Экспорт КонецФункции");
+        write_common_module(
+            root,
+            "Вызов",
+            true,
+            "&НаСервере\nПроцедура Звать() Экспорт\nЯдро.Цель();\nКонецПроцедуры",
+        );
+
+        let mut graph = GraphState::for_workspace(root.to_path_buf());
+        graph.drift_interval = Duration::ZERO;
+        graph.ensure_loading();
+        wait_ready(&graph);
+
+        let snap1 = graph.snapshot().expect("ready");
+        assert!(snap1
+            .graph
+            .node("method/common/Ядро/Цель", ide::GraphDetail::Names)
+            .unwrap()
+            .is_ok());
+
+        // Remove Ядро.Цель — a caller-delta-safe signature change.
+        write(
+            root,
+            "CommonModules/Ядро/Ext/Module.bsl",
+            "&НаСервере\nФункция Прочее() Экспорт КонецФункции",
+        );
+        let drifted = graph.freshness(&snap1);
+        assert!(drifted.stale, "removal drifts the workspace");
+
+        // The caller-delta reload publishes generation 2 with the method gone.
+        let mut settled = None;
+        for _ in 0..200 {
+            let snap = graph.snapshot().expect("snapshot");
+            if snap.generation == 2 {
+                settled = Some(snap);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let snap2 = settled.expect("reload published generation 2");
+        assert!(
+            snap2.graph.node("method/common/Ядро/Цель", ide::GraphDetail::Names).unwrap().is_err(),
+            "removed method no longer resolves after caller-delta reload"
+        );
+        // The caller's edge into the removed method is gone (Вызов has no out-edges now).
+        let overview = snap2.graph.overview(10).expect("overview");
+        assert_eq!(overview.edges, 0, "the caller's edge to the removed method vanished");
     }
 
     #[test]

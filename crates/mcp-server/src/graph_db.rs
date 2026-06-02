@@ -565,11 +565,14 @@ fn insert_node_row(tx: &rusqlite::Transaction<'_>, row: &NodeRow, id: &str) -> a
     Ok(())
 }
 
-/// Apply a body-only incremental update: reproject ONLY the modules at
-/// `changed_paths` and patch a COPY of `src_path` written to `out_path`, leaving
-/// every unchanged module's rows in place. The caller must have proven the body-only
-/// preconditions (each changed module's `sig_hash` unchanged, no file add/remove, no
-/// `.xml` drift); the result is byte-identical to a full rebuild of the edited tree.
+/// Apply an incremental update: reproject ONLY the modules at `changed_paths` and
+/// patch a COPY of `src_path` written to `out_path`, leaving every unchanged module's
+/// rows in place. `changed_paths` is the FULL reprojection set the caller proved
+/// sufficient — either the edited body-only modules (signature unchanged), or, for a
+/// signature change, the changed modules PLUS their resolved callers (the
+/// caller-delta set). The result is byte-identical to a full rebuild of the edited
+/// tree. This function does not re-validate eligibility — the caller
+/// (`try_incremental_reload`) owns the sig/caller-delta-safety gates.
 ///
 /// Concurrency: the patch lands on a copy and the caller atomically renames it into
 /// place — the same model the full build uses, so a live reader keeps its open
@@ -784,14 +787,26 @@ pub fn update_graph_database_bodies(
     })
 }
 
-/// Recompute the body-free signature hash for each module at `changed_paths`, for an
-/// eligibility check against the persisted `files.sig_hash`. Builds a tiny resident
-/// index over only those modules — `module_sig_hash` reads a module's own methods +
-/// dispatch with no cross-module data, so this stays cheap. Keyed by canonical path.
-pub fn recompute_module_sig_hashes(
+/// A changed module's recomputed body-free profile: its signature hash plus the
+/// resolvable-name surface a caller-delta eligibility check needs — the lowercased
+/// names of its exported methods, and whether any two methods fold to the same name
+/// (a collision makes "exported name" ≠ "resolvable name", since resolution is
+/// first-wins).
+pub struct ModuleProfile {
+    pub sig_hash: u64,
+    pub exported_lower: std::collections::BTreeSet<String>,
+    pub has_collision: bool,
+}
+
+/// Recompute each module at `changed_paths`'s profile, for the incremental
+/// eligibility checks (sig drift, and the caller-delta resolvable-name surface).
+/// Builds a tiny resident index over only those modules — these reads are a module's
+/// own item-tree + dispatch, no cross-module data — so it stays cheap. Keyed by
+/// canonical path.
+pub fn recompute_module_profiles(
     workspace_root: &Path,
     changed_paths: &[PathBuf],
-) -> anyhow::Result<FxHashMap<String, u64>> {
+) -> anyhow::Result<FxHashMap<String, ModuleProfile>> {
     use ide::graph_index::GraphIndex;
 
     let files = enumerate_bsl_files(workspace_root);
@@ -814,11 +829,95 @@ pub fn recompute_module_sig_hashes(
 
     let mut out = FxHashMap::default();
     for (module, path) in &changed {
-        if let Some(h) = index.module_sig_hash(*module) {
-            out.insert(path.to_string_lossy().into_owned(), h);
-        }
+        let Some(sig_hash) = index.module_sig_hash(*module) else {
+            continue;
+        };
+        let methods = index.module_methods(*module).unwrap_or_default();
+        let lowers: Vec<String> = methods.iter().map(|(n, _)| n.to_lowercase()).collect();
+        let has_collision =
+            lowers.iter().collect::<std::collections::HashSet<_>>().len() != lowers.len();
+        let exported_lower: std::collections::BTreeSet<String> =
+            methods.iter().filter(|(_, exp)| *exp).map(|(n, _)| n.to_lowercase()).collect();
+        out.insert(
+            path.to_string_lossy().into_owned(),
+            ModuleProfile { sig_hash, exported_lower, has_collision },
+        );
     }
     Ok(out)
+}
+
+/// Plan the caller-delta for a set of signature-changed modules (the body-only fast
+/// path is not eligible because their signature moved). Returns:
+/// - `Ok(Some(caller_files))` — every changed module is *caller-delta-safe* (its
+///   resolvable-name surface only shrank/mutated, no new resolvable name and no
+///   first-wins name collision), so reprojecting it PLUS the returned resolved
+///   callers reproduces a full rebuild. `caller_files` excludes the changed modules
+///   themselves.
+/// - `Ok(None)` — not eligible (a new resolvable name, a name collision, or a missing
+///   stored profile); the caller must do a full rebuild.
+///
+/// `sig_changed` pairs each changed module's normalised `nodes.file` key with its
+/// freshly-recomputed [`ModuleProfile`].
+pub fn caller_delta_plan(
+    db_path: &Path,
+    sig_changed: &[(&str, &ModuleProfile)],
+) -> anyhow::Result<Option<Vec<PathBuf>>> {
+    let conn = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+
+    for (file, profile) in sig_changed {
+        if profile.has_collision {
+            return Ok(None); // first-wins shadowing — exported set ≠ resolvable set
+        }
+        // OLD resolvable surface from the stored method nodes.
+        let mut stmt =
+            conn.prepare("SELECT name, is_export FROM nodes WHERE file = ?1 AND kind = 'method'")?;
+        let rows = stmt.query_map([file], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?.unwrap_or(0) != 0))
+        })?;
+        let mut old_lowers: Vec<String> = Vec::new();
+        let mut old_exported: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+        for row in rows {
+            let (name, exported) = row?;
+            let lower = name.to_lowercase();
+            if exported {
+                old_exported.insert(lower.clone());
+            }
+            old_lowers.push(lower);
+        }
+        let old_collision =
+            old_lowers.iter().collect::<std::collections::HashSet<_>>().len() != old_lowers.len();
+        if old_collision {
+            return Ok(None);
+        }
+        // A previously-unresolved caller would newly resolve iff a resolvable name is
+        // added → not caller-delta-safe (that is IB-3b's job).
+        if !profile.exported_lower.iter().all(|n| old_exported.contains(n)) {
+            return Ok(None);
+        }
+    }
+
+    // Resolved callers: modules with a stored edge into a changed module's method node.
+    let changed_files: std::collections::BTreeSet<&str> =
+        sig_changed.iter().map(|(f, _)| *f).collect();
+    let placeholders = changed_files.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!(
+        "SELECT DISTINCT n2.file FROM edges e \
+         JOIN nodes n1 ON e.to_id = n1.id \
+         JOIN nodes n2 ON e.from_id = n2.id \
+         WHERE n1.file IN ({placeholders}) AND n1.kind = 'method' AND n2.file IS NOT NULL"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(changed_files.iter()), |r| r.get::<_, String>(0))?;
+    let mut callers = Vec::new();
+    for row in rows {
+        let file = row?;
+        if !changed_files.contains(file.as_str()) {
+            callers.push(PathBuf::from(file));
+        }
+    }
+    Ok(Some(callers))
 }
 
 #[cfg(test)]

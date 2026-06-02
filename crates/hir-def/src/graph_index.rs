@@ -199,6 +199,20 @@ impl GraphIndex {
         Some(hasher.finish())
     }
 
+    /// A module's methods as `(original-spelling name, is_export)` in declaration
+    /// order, for the incremental caller-delta eligibility check (comparing the
+    /// resolvable name surface across an edit). `None` if the module is not indexed.
+    pub fn module_methods(&self, module: ModuleId) -> Option<Vec<(String, bool)>> {
+        Some(
+            self.methods
+                .get(&module)?
+                .all
+                .iter()
+                .map(|e| (e.name.as_str().to_string(), e.is_export))
+                .collect(),
+        )
+    }
+
     /// Every indexed method node. This is exactly the fold's Pass-1 dispatch-seeded
     /// set (`node_dispatch.keys`), so a streaming build that materialises a node for
     /// each yields the same isolated (call-free) method nodes the in-memory graph's
