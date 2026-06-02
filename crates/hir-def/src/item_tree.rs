@@ -4,7 +4,7 @@ use crate::Name;
 use base_db::RootQueryDb;
 use la_arena::{Arena, Idx};
 use std::sync::Arc;
-use text_size::TextRange;
+use text_size::{TextRange, TextSize};
 use vfs::FileId;
 
 pub fn lower_file(db: &dyn RootQueryDb, file_id: FileId) -> Arc<ItemTree> {
@@ -92,6 +92,10 @@ pub struct Procedure {
     pub source_range: TextRange,
     pub name_range: TextRange,
     pub param_list_range: Option<TextRange>,
+    /// End of the declaration header — the closing `)` of the parameter list, or
+    /// the export keyword when present. Anchors the full (possibly multi-line)
+    /// signature slice, distinct from `name_range` which is the name token alone.
+    pub sig_end: TextSize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,6 +107,10 @@ pub struct Function {
     pub source_range: TextRange,
     pub name_range: TextRange,
     pub param_list_range: Option<TextRange>,
+    /// End of the declaration header — the closing `)` of the parameter list, or
+    /// the export keyword when present. Anchors the full (possibly multi-line)
+    /// signature slice, distinct from `name_range` which is the name token alone.
+    pub sig_end: TextSize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,6 +179,7 @@ mod tests {
             source_range: TextRange::new(0.into(), 10.into()),
             name_range: TextRange::new(0.into(), 10.into()),
             param_list_range: None,
+            sig_end: 10.into(),
         };
 
         assert_eq!(proc.name.as_str(), "ТестоваяПроцедура");
@@ -201,6 +210,7 @@ mod tests {
             source_range: TextRange::new(0.into(), 10.into()),
             name_range: TextRange::new(0.into(), 10.into()),
             param_list_range: Some(TextRange::new(0.into(), 10.into())),
+            sig_end: 10.into(),
         };
 
         assert_eq!(func.params.len(), 2);
@@ -236,6 +246,7 @@ mod tests {
             source_range: TextRange::new(0.into(), 10.into()),
             name_range: TextRange::new(0.into(), 10.into()),
             param_list_range: None,
+            sig_end: 10.into(),
         });
 
         tree.top_level.push(ModItem::Procedure(proc_idx));

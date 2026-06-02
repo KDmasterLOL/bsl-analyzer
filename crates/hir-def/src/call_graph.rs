@@ -1,6 +1,6 @@
 use bsl_metadata::MdoType;
 use rustc_hash::FxHashMap;
-use syntax::TextRange;
+use syntax::{TextRange, TextSize};
 
 use crate::{
     body::{Body, BodySourceMap, ManagerType},
@@ -38,8 +38,11 @@ pub struct GraphMethodEntry {
     pub name: Name,
     pub is_export: bool,
     pub dispatch: MethodDispatch,
-    /// Range of the declaration's name token — the `signature` line anchor.
+    /// Range of the declaration's name token — anchors the start of the signature.
     pub name_range: TextRange,
+    /// End of the declaration header (closing `)` or export keyword) — anchors the
+    /// end of the full, possibly multi-line, signature slice.
+    pub sig_end: TextSize,
     /// Range of the whole procedure/function — the `source` slice.
     pub source_range: TextRange,
 }
@@ -335,6 +338,7 @@ pub fn extract_graph_methods(item_tree: &ItemTree) -> Vec<GraphMethodEntry> {
                         proc.annotations.first().map(|a| &a.kind),
                     ),
                     name_range: proc.name_range,
+                    sig_end: proc.sig_end,
                     source_range: proc.source_range,
                 }
             }
@@ -348,6 +352,7 @@ pub fn extract_graph_methods(item_tree: &ItemTree) -> Vec<GraphMethodEntry> {
                         func.annotations.first().map(|a| &a.kind),
                     ),
                     name_range: func.name_range,
+                    sig_end: func.sig_end,
                     source_range: func.source_range,
                 }
             }

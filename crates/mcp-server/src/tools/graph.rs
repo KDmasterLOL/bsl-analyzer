@@ -97,15 +97,30 @@ pub fn envelope(freshness: Freshness, result: Value) -> CallToolResult {
     CallToolResult::success(vec![Content::text(text)])
 }
 
-/// Static graph schema for cold-start discovery.
+/// Static graph schema for cold-start discovery. Wraps [`schema_json`] in a tool
+/// result; the JSON is split out so a test can pin the advertised contract.
 pub fn schema() -> CallToolResult {
-    let schema = json!({
-        "schema_version": "1",
+    let text = serde_json::to_string_pretty(&schema_json())
+        .unwrap_or_else(|e| format!("{{\"error\":\"serialize\",\"detail\":\"{e}\"}}"));
+    CallToolResult::success(vec![Content::text(text)])
+}
+
+/// The agent-facing graph contract: action names, node/edge vocabularies, the
+/// neighbours-result and envelope shapes, and the durable id grammar. `schema_version`
+/// is the contract version — bump it whenever this response shape changes (it is
+/// independent of the on-disk SQLite cache layout in [`crate::graph_db`]).
+fn schema_json() -> Value {
+    json!({
+        "schema_version": "2",
         "actions": ["overview", "schema", "node", "source", "neighbors", "callers", "callees"],
         "node_kinds": ["method", "module", "mdo", "attribute"],
         "edge_kinds": ["call", "manager_creates", "manager_access", "query_ref"],
         "provenance": ["resolved", "inferred", "visibility_blocked", "unresolved"],
         "dispatch": ["client", "server"],
+        "neighbors_result": {
+            "total": "usize — distinct neighbours discovered, before the max_nodes cap",
+            "dropped": "string[] — bounded sample of dropped ids; full count is total - nodes.len()"
+        },
         "envelope": {
             "revision": "u64 — snapshot generation the answer was computed at",
             "stale": "bool — workspace drifted on disk since this snapshot",
@@ -122,10 +137,7 @@ pub fn schema() -> CallToolResult {
             "attribute": "attribute/<MdoEnglish>/<ObjectName>/<AttrName>",
             "path_fallback": "method/file/<relpath>::<Method>"
         }
-    });
-    let text = serde_json::to_string_pretty(&schema)
-        .unwrap_or_else(|e| format!("{{\"error\":\"serialize\",\"detail\":\"{e}\"}}"));
-    CallToolResult::success(vec![Content::text(text)])
+    })
 }
 
 fn to_value<T: Serialize>(value: &T) -> Value {
@@ -136,5 +148,22 @@ fn to_value<T: Serialize>(value: &T) -> Value {
 fn redact_opt(source: &mut Option<String>) {
     if let Some(text) = source {
         *text = redact_secrets(text);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn schema_advertises_the_current_contract_shape() {
+        let schema = schema_json();
+        // The contract version must be bumped in lockstep with response-shape
+        // changes; `total` is part of that shape since this revision.
+        assert_eq!(schema["schema_version"], "2");
+        assert!(
+            schema["neighbors_result"]["total"].is_string(),
+            "neighbours result must document the `total` field"
+        );
     }
 }

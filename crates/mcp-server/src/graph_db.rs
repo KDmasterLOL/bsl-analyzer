@@ -27,7 +27,7 @@ use crate::graph::{config_metadata_paths, db_for_files, enumerate_bsl_files};
 
 /// Bumped whenever the table layout changes so a stale on-disk cache from an
 /// older binary is rejected (via the `meta` row) and rebuilt.
-pub(crate) const SCHEMA_VERSION: u32 = 1;
+pub(crate) const SCHEMA_VERSION: u32 = 2;
 
 /// Build-level metadata recorded in the `meta` table, used on reopen to decide
 /// whether a cached database still matches the current sources and binary. Node
@@ -80,6 +80,7 @@ impl GraphDbWriter {
                 module      TEXT,
                 file        TEXT,
                 name_offset INTEGER,
+                sig_end     INTEGER,
                 src_start   INTEGER,
                 src_end     INTEGER,
                 dispatch    TEXT,
@@ -120,9 +121,9 @@ impl GraphDbWriter {
         {
             let mut stmt = tx.prepare_cached(
                 "INSERT OR IGNORE INTO nodes \
-                 (id, kind, name, qualified, module, file, name_offset, src_start, src_end, \
-                  dispatch, is_export, addressable) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                 (id, kind, name, qualified, module, file, name_offset, sig_end, src_start, \
+                  src_end, dispatch, is_export, addressable) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             )?;
             for row in rows {
                 let dispatch =
@@ -135,6 +136,7 @@ impl GraphDbWriter {
                     row.module,
                     row.file,
                     row.name_offset,
+                    row.sig_end,
                     row.src_start,
                     row.src_end,
                     dispatch,
@@ -282,6 +284,7 @@ mod tests {
             module: Some("ОбщийМодуль.X".to_string()),
             file: Some("CommonModules/X/Ext/Module.bsl".to_string()),
             name_offset: Some(10),
+            sig_end: Some(20),
             src_start: Some(0),
             src_end: Some(40),
             dispatch: vec!["server"],

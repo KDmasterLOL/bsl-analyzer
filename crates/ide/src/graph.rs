@@ -116,10 +116,22 @@ pub struct NeighborsResult {
     pub root: NodeRef,
     pub nodes: Vec<NodeRef>,
     pub edges: Vec<EdgeRef>,
-    /// Nodes dropped by the `max_nodes` early-exit, lowest-centrality first.
+    /// Total distinct neighbours discovered (excluding the root), before the
+    /// `max_nodes` cap. Lets an agent see the true fan-out even when only the
+    /// top-centrality slice is returned in `nodes`.
+    pub total: usize,
+    /// A bounded sample of the ids dropped by the `max_nodes` cap, taken from the
+    /// ranked tail so the highest-centrality dropped nodes (those just past the cut)
+    /// come first. Capped at [`MAX_DROPPED_SAMPLE`]; the full dropped count is
+    /// `total - nodes.len()`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub dropped: Vec<String>,
 }
+
+/// Upper bound on the `dropped` id sample returned in [`NeighborsResult`]; a hot
+/// node can have tens of thousands of low-centrality callers and emitting them all
+/// would bloat the response without helping the agent (the count lives in `total`).
+pub const MAX_DROPPED_SAMPLE: usize = 50;
 
 /// Source for one requested node.
 #[derive(Debug, Clone, Serialize)]
@@ -616,10 +628,14 @@ impl<'a> GraphCtx<'a> {
         };
 
         if matches!(detail, GraphDetail::Signatures | GraphDetail::Bodies) {
-            // The signature is the declaration line (skipping any `&НаСервере`-style
-            // annotation lines that the method's source range includes).
-            node.signature =
-                m.name_range().and_then(|r| self.line_at(method.module.file_id, r.start()));
+            // The full declaration header, from the keyword line through the closing
+            // `)` / export keyword, with wrapped parameter lines collapsed to one.
+            node.signature = match (m.name_range(), m.sig_end()) {
+                (Some(name), Some(sig_end)) => {
+                    self.signature_at(method.module.file_id, name.start(), sig_end)
+                }
+                _ => None,
+            };
             if detail == GraphDetail::Bodies {
                 node.source = m.source_range().and_then(|r| self.slice(method.module.file_id, r));
             }
@@ -734,13 +750,23 @@ impl<'a> GraphCtx<'a> {
         SourceResult { items, budget_exhausted }
     }
 
-    /// The trimmed source line containing `offset`.
-    fn line_at(&self, file_id: FileId, offset: syntax::TextSize) -> Option<String> {
+    /// The full signature slice: from the keyword line containing `name_offset`
+    /// through the header end `sig_end`, with internal whitespace (including the
+    /// newlines of a wrapped parameter list) collapsed to single spaces.
+    fn signature_at(
+        &self,
+        file_id: FileId,
+        name_offset: syntax::TextSize,
+        sig_end: syntax::TextSize,
+    ) -> Option<String> {
         let text = self.db.file_text_input(file_id).text(self.db).clone();
-        let off = (u32::from(offset) as usize).min(text.len());
-        let start = text[..off].rfind('\n').map_or(0, |i| i + 1);
-        let end = text[off..].find('\n').map_or(text.len(), |i| off + i);
-        Some(text[start..end].trim().to_string())
+        let name = (u32::from(name_offset) as usize).min(text.len());
+        let end = (u32::from(sig_end) as usize).min(text.len());
+        if name > end || !text.is_char_boundary(name) || !text.is_char_boundary(end) {
+            return None;
+        }
+        let start = text[..name].rfind('\n').map_or(0, |i| i + 1);
+        Some(text.get(start..end)?.split_whitespace().collect::<Vec<_>>().join(" "))
     }
 
     // ---- queries ------------------------------------------------------------
@@ -827,13 +853,18 @@ impl<'a> GraphCtx<'a> {
             frontier = next;
         }
 
-        // Centrality-ranked tail-drop of discovered (non-root) nodes.
+        // Centrality-ranked tail-drop of discovered (non-root) nodes. Tie-break by
+        // durable id so a cut through equal-centrality nodes keeps/drops the same
+        // set as the SQLite serve path (`graph_query::neighbors`).
         let mut discovered: Vec<GraphNode> = visited.into_iter().filter(|n| *n != root).collect();
-        discovered.sort_by_key(|n| std::cmp::Reverse(self.graph.in_degree(n)));
+        let total = discovered.len();
+        discovered.sort_by_cached_key(|n| {
+            (std::cmp::Reverse(self.graph.in_degree(n)), self.encode_node(n).0)
+        });
         let mut dropped: Vec<String> = Vec::new();
         if discovered.len() > params.max_nodes {
-            for node in discovered.split_off(params.max_nodes) {
-                dropped.push(self.encode_node(&node).0);
+            for node in discovered.split_off(params.max_nodes).iter().take(MAX_DROPPED_SAMPLE) {
+                dropped.push(self.encode_node(node).0);
             }
         }
         let kept: std::collections::HashSet<GraphNode> = discovered.iter().cloned().collect();
@@ -853,7 +884,13 @@ impl<'a> GraphCtx<'a> {
             .map(|e| self.edge_ref(e))
             .collect();
 
-        Ok(NeighborsResult { root: self.node_ref(root, params.detail), nodes, edges, dropped })
+        Ok(NeighborsResult {
+            root: self.node_ref(root, params.detail),
+            nodes,
+            edges,
+            total,
+            dropped,
+        })
     }
 
     fn directed_edges(&self, node: &GraphNode, dir: Direction) -> Vec<&WorkspaceCallEdge> {
@@ -1098,8 +1135,30 @@ mod tests {
         assert_eq!(node.qualified, "ОбщийМодуль.Сервер.Считать");
         assert_eq!(node.is_export, Some(true));
         assert_eq!(node.dispatch, vec!["server"]);
-        assert!(node.signature.as_deref().unwrap().contains("Считать"));
+        // Full header through the export keyword, not just the name.
+        assert_eq!(node.signature.as_deref(), Some("Функция Считать() Экспорт"));
         assert!(node.addressable);
+    }
+
+    #[test]
+    fn signature_collapses_a_wrapped_parameter_list() {
+        let a = workspace(&[(
+            "/src/CommonModules/Утилиты/Ext/Module.bsl",
+            "Функция Сложить(Знач Первое,\n\
+             \tВторое,\n\
+             \tТретье = 0) Экспорт\n\
+             Возврат Первое;\n\
+             КонецФункции",
+        )]);
+        let node = a
+            .graph_node(ROOT, None, "method/common/Утилиты/Сложить", GraphDetail::Signatures)
+            .expect("method resolves")
+            .node;
+        // The wrapped parameter lines collapse to one, ending at the export keyword.
+        assert_eq!(
+            node.signature.as_deref(),
+            Some("Функция Сложить(Знач Первое, Второе, Третье = 0) Экспорт")
+        );
     }
 
     #[test]
@@ -1190,6 +1249,10 @@ mod tests {
         let res = a.graph_neighbors(ROOT, None, &params).expect("neighbors resolve");
         assert_eq!(res.root.id, "method/common/Сервер/Считать");
         assert!(res.nodes.iter().any(|n| n.id == "method/common/Клиент/Главная"));
+        // One caller discovered, none dropped under a generous cap.
+        assert_eq!(res.total, 1);
+        assert_eq!(res.total, res.nodes.len());
+        assert!(res.dropped.is_empty());
         let edge = res
             .edges
             .iter()
@@ -1199,6 +1262,24 @@ mod tests {
         assert_eq!(edge.kind, "call");
         assert_eq!(edge.provenance, "resolved");
         assert!(edge.crosses_client_to_server);
+    }
+
+    #[test]
+    fn neighbors_total_counts_beyond_the_max_nodes_cap() {
+        let a = client_server_workspace();
+        let params = NeighborsParams {
+            id: "method/common/Сервер/Считать",
+            dir: Direction::In,
+            depth: 1,
+            max_nodes: 0,
+            detail: GraphDetail::Names,
+            provenance_filter: Vec::new(),
+        };
+        let res = a.graph_neighbors(ROOT, None, &params).expect("neighbors resolve");
+        // The cap drops the sole caller, but `total` still reflects the real fan-out.
+        assert_eq!(res.total, 1);
+        assert!(res.nodes.is_empty());
+        assert_eq!(res.dropped, vec!["method/common/Клиент/Главная".to_string()]);
     }
 
     #[test]

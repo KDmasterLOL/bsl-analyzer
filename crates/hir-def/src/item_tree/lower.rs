@@ -80,6 +80,7 @@ impl Ctx {
         let param_list_range = proc.param_list().and_then(|pl| calculate_params_content_range(&pl));
         let annotations = self.lower_annotations(proc.annotations());
         let source_range = proc.syntax().text_range();
+        let sig_end = header_end(proc.export_keyword(), proc.param_list(), name_range);
 
         trace!(name = %name, is_export, "lowering procedure");
 
@@ -91,6 +92,7 @@ impl Ctx {
             source_range,
             name_range,
             param_list_range,
+            sig_end,
         });
 
         self.tree.top_level.push(ModItem::Procedure(idx));
@@ -109,6 +111,7 @@ impl Ctx {
         let param_list_range = func.param_list().and_then(|pl| calculate_params_content_range(&pl));
         let annotations = self.lower_annotations(func.annotations());
         let source_range = func.syntax().text_range();
+        let sig_end = header_end(func.export_keyword(), func.param_list(), name_range);
 
         trace!(name = %name, is_export, "lowering function");
 
@@ -120,6 +123,7 @@ impl Ctx {
             source_range,
             name_range,
             param_list_range,
+            sig_end,
         });
 
         self.tree.top_level.push(ModItem::Function(idx));
@@ -229,6 +233,23 @@ impl Ctx {
 fn is_inside_method(node: &SyntaxNode) -> bool {
     node.ancestors()
         .any(|n| n.kind() == SyntaxKind::PROCEDURE_DEF || n.kind() == SyntaxKind::FUNCTION_DEF)
+}
+
+/// End of the declaration header: after the export keyword when present, else
+/// after the parameter list's closing `)`, else the name token. Anchors the full
+/// signature slice and is bilingual by construction — it returns the offset of the
+/// actual `Экспорт`/`Export` token, never a synthesised spelling.
+fn header_end(
+    export_keyword: Option<syntax::SyntaxToken>,
+    param_list: Option<ast::ParamList>,
+    name_range: text_size::TextRange,
+) -> text_size::TextSize {
+    use syntax::ast::AstNode;
+
+    export_keyword
+        .map(|t| t.text_range().end())
+        .or_else(|| param_list.map(|pl| pl.syntax().text_range().end()))
+        .unwrap_or_else(|| name_range.end())
 }
 
 fn calculate_params_content_range(param_list: &ast::ParamList) -> Option<text_size::TextRange> {

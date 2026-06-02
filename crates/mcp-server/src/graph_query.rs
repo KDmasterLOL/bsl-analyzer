@@ -14,6 +14,7 @@ use anyhow::Context;
 use ide::{
     classify_graph_id, Direction, EdgeRef, GraphDetail, GraphError, GraphIdKind, GraphOverview,
     NeighborsParams, NeighborsResult, NodeRef, NodeResult, SourceItem, SourceResult,
+    MAX_DROPPED_SAMPLE,
 };
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 
@@ -28,6 +29,7 @@ struct StoredNode {
     module: Option<String>,
     file: Option<String>,
     name_offset: Option<u32>,
+    sig_end: Option<u32>,
     src_start: Option<u32>,
     src_end: Option<u32>,
     dispatch: Option<String>,
@@ -36,7 +38,7 @@ struct StoredNode {
 }
 
 const NODE_COLUMNS: &str =
-    "id, kind, name, qualified, module, file, name_offset, src_start, src_end, dispatch, is_export, addressable";
+    "id, kind, name, qualified, module, file, name_offset, sig_end, src_start, src_end, dispatch, is_export, addressable";
 
 fn row_to_stored(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredNode> {
     Ok(StoredNode {
@@ -47,11 +49,12 @@ fn row_to_stored(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredNode> {
         module: row.get(4)?,
         file: row.get(5)?,
         name_offset: row.get::<_, Option<i64>>(6)?.map(|v| v as u32),
-        src_start: row.get::<_, Option<i64>>(7)?.map(|v| v as u32),
-        src_end: row.get::<_, Option<i64>>(8)?.map(|v| v as u32),
-        dispatch: row.get(9)?,
-        is_export: row.get::<_, Option<i64>>(10)?.map(|v| v != 0),
-        addressable: row.get::<_, i64>(11)? != 0,
+        sig_end: row.get::<_, Option<i64>>(7)?.map(|v| v as u32),
+        src_start: row.get::<_, Option<i64>>(8)?.map(|v| v as u32),
+        src_end: row.get::<_, Option<i64>>(9)?.map(|v| v as u32),
+        dispatch: row.get(10)?,
+        is_export: row.get::<_, Option<i64>>(11)?.map(|v| v != 0),
+        addressable: row.get::<_, i64>(12)? != 0,
     })
 }
 
@@ -227,16 +230,20 @@ impl GraphDb {
         Ok(d.unwrap_or(0) as usize)
     }
 
-    /// The trimmed source line containing byte `offset` in `file`.
-    fn line_at(&self, file: &str, offset: u32) -> Option<String> {
+    /// The full declaration signature, from the keyword line containing `name_offset`
+    /// through the header end `sig_end` (the closing `)` or export keyword). Internal
+    /// runs of whitespace — including the newlines of a wrapped parameter list — are
+    /// collapsed to single spaces so a multi-line declaration reads as one line.
+    fn signature_at(&self, file: &str, name_offset: u32, sig_end: u32) -> Option<String> {
         let text = std::fs::read_to_string(file).ok()?;
-        let off = (offset as usize).min(text.len());
-        if !text.is_char_boundary(off) {
+        let name = (name_offset as usize).min(text.len());
+        let end = (sig_end as usize).min(text.len());
+        if name > end || !text.is_char_boundary(name) || !text.is_char_boundary(end) {
             return None;
         }
-        let start = text[..off].rfind('\n').map_or(0, |i| i + 1);
-        let end = text[off..].find('\n').map_or(text.len(), |i| off + i);
-        text.get(start..end).map(|l| l.trim().to_string())
+        let start = text[..name].rfind('\n').map_or(0, |i| i + 1);
+        let slice = text.get(start..end)?;
+        Some(slice.split_whitespace().collect::<Vec<_>>().join(" "))
     }
 
     fn slice(&self, file: &str, start: u32, end: u32) -> Option<String> {
@@ -259,8 +266,8 @@ impl GraphDb {
             addressable: n.addressable,
         };
         if n.kind == "method" && matches!(detail, GraphDetail::Signatures | GraphDetail::Bodies) {
-            if let (Some(file), Some(off)) = (&n.file, n.name_offset) {
-                node.signature = self.line_at(file, off);
+            if let (Some(file), Some(off), Some(end)) = (&n.file, n.name_offset, n.sig_end) {
+                node.signature = self.signature_at(file, off, end);
             }
             if detail == GraphDetail::Bodies {
                 if let (Some(file), Some(s), Some(e)) = (&n.file, n.src_start, n.src_end) {
@@ -376,7 +383,7 @@ impl GraphDb {
     }
 
     /// Traverse callers/callees from a node up to `depth`, bounded by `max_nodes`
-    /// (lowest-centrality discovered nodes are dropped first).
+    /// (the lowest-centrality discovered nodes are the ones dropped past the cap).
     pub fn neighbors(
         &self,
         params: &NeighborsParams<'_>,
@@ -418,9 +425,10 @@ impl GraphDb {
             ranked.push((self.in_degree(&id)?, id));
         }
         ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        let total = ranked.len();
         let mut dropped = Vec::new();
         if ranked.len() > params.max_nodes {
-            for (_, id) in ranked.split_off(params.max_nodes) {
+            for (_, id) in ranked.split_off(params.max_nodes).into_iter().take(MAX_DROPPED_SAMPLE) {
                 dropped.push(id);
             }
         }
@@ -453,7 +461,13 @@ impl GraphDb {
             })
             .collect();
 
-        Ok(Ok(NeighborsResult { root: self.node_ref(&root, params.detail), nodes, edges, dropped }))
+        Ok(Ok(NeighborsResult {
+            root: self.node_ref(&root, params.detail),
+            nodes,
+            edges,
+            total,
+            dropped,
+        }))
     }
 
     /// Fetch method source for a set of ids, stopping once the rough output budget

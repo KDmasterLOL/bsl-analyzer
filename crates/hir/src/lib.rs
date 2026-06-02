@@ -156,7 +156,7 @@ pub use hir_ty::{
 };
 
 pub use bsl_types::builders::Builders;
-use syntax::{ast::AstNode, TextRange};
+use syntax::{ast::AstNode, TextRange, TextSize};
 use vfs::FileId;
 
 #[derive(Debug, Clone, Copy)]
@@ -202,6 +202,7 @@ pub(crate) struct MethodInfo {
     pub(crate) is_function: bool,
     pub(crate) source_range: TextRange,
     pub(crate) name_range: TextRange,
+    pub(crate) sig_end: TextSize,
 }
 
 pub(crate) fn get_method_info(id: &MethodId, db: &dyn DefDatabase) -> Option<MethodInfo> {
@@ -216,6 +217,7 @@ pub(crate) fn get_method_info(id: &MethodId, db: &dyn DefDatabase) -> Option<Met
                 is_function: false,
                 source_range: proc.source_range,
                 name_range: proc.name_range,
+                sig_end: proc.sig_end,
             })
         }
         hir_def::item_tree::ModItem::Function(func_idx) => {
@@ -226,6 +228,7 @@ pub(crate) fn get_method_info(id: &MethodId, db: &dyn DefDatabase) -> Option<Met
                 is_function: true,
                 source_range: func.source_range,
                 name_range: func.name_range,
+                sig_end: func.sig_end,
             })
         }
         _ => None,
@@ -263,6 +266,12 @@ impl<'db, DB: DefDatabase> Method<'db, DB> {
 
     pub fn name_range(&self) -> Option<TextRange> {
         self.method_info().map(|i| i.name_range)
+    }
+
+    /// End of the declaration header (closing `)` or export keyword) — the end of
+    /// the full, possibly multi-line, signature that starts at [`name_range`](Self::name_range).
+    pub fn sig_end(&self) -> Option<TextSize> {
+        self.method_info().map(|i| i.sig_end)
     }
 
     pub fn docs(&self) -> Option<std::sync::Arc<hir_def::docs::MethodDocs>> {

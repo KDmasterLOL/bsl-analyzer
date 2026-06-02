@@ -492,8 +492,11 @@ pub struct NodeRow {
     pub module: Option<String>,
     /// Workspace path for source-on-demand (method/module nodes only).
     pub file: Option<String>,
-    /// Byte offset of the declaration name token, to reconstruct the signature line.
+    /// Byte offset of the declaration name token — the start of the signature.
     pub name_offset: Option<u32>,
+    /// Byte offset of the declaration header end (closing `)` or export keyword) —
+    /// the end of the full, possibly multi-line, signature slice (method nodes only).
+    pub sig_end: Option<u32>,
     /// Method source byte range (method nodes only).
     pub src_start: Option<u32>,
     pub src_end: Option<u32>,
@@ -616,6 +619,7 @@ impl<'a> GraphRowEncoder<'a> {
                     module,
                     file: self.path_for(method.module.file_id),
                     name_offset: entry.map(|e| e.name_range.start().into()),
+                    sig_end: entry.map(|e| e.sig_end.into()),
                     src_start: entry.map(|e| e.source_range.start().into()),
                     src_end: entry.map(|e| e.source_range.end().into()),
                     dispatch: self.index.dispatch(node).map(dispatch_labels).unwrap_or_default(),
@@ -634,6 +638,7 @@ impl<'a> GraphRowEncoder<'a> {
                     module: display,
                     file: self.path_for(module.file_id),
                     name_offset: None,
+                    sig_end: None,
                     src_start: None,
                     src_end: None,
                     dispatch: self.index.dispatch(node).map(dispatch_labels).unwrap_or_default(),
@@ -649,6 +654,7 @@ impl<'a> GraphRowEncoder<'a> {
                 module: None,
                 file: None,
                 name_offset: None,
+                sig_end: None,
                 src_start: None,
                 src_end: None,
                 dispatch: Vec::new(),
@@ -668,6 +674,7 @@ impl<'a> GraphRowEncoder<'a> {
                 module: None,
                 file: None,
                 name_offset: None,
+                sig_end: None,
                 src_start: None,
                 src_end: None,
                 dispatch: Vec::new(),

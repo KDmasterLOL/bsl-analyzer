@@ -870,6 +870,67 @@ mod tests {
         assert!(missing.is_err(), "unknown id resolves to a GraphError");
     }
 
+    /// When `max_nodes` cuts through a set of equal-centrality neighbours, the
+    /// in-memory and SQLite paths must keep/drop the *same* nodes — both rank by
+    /// `(in_degree desc, durable id asc)`. Guards the tie-break parity.
+    #[test]
+    fn neighbors_tie_break_matches_across_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        write_common_module(root, "Ядро", true, "&НаСервере\nФункция Цель() Экспорт КонецФункции");
+        // Three callers, each with in-degree 0 — a three-way centrality tie.
+        write_common_module(
+            root,
+            "Вызовы",
+            true,
+            "&НаСервере\n\
+             Процедура А() Экспорт Ядро.Цель(); КонецПроцедуры\n\
+             Процедура Б() Экспорт Ядро.Цель(); КонецПроцедуры\n\
+             Процедура В() Экспорт Ядро.Цель(); КонецПроцедуры",
+        );
+
+        let (db, files) = load_workspace_db(root).expect("workspace loads");
+        let analysis = Analysis::from_database(db);
+
+        let out = graph_db_path(root);
+        fs::create_dir_all(out.parent().unwrap()).unwrap();
+        build_graph_database(
+            root,
+            &out,
+            1,
+            &crate::graph_db::GraphMeta {
+                revision: 1,
+                fingerprint: 0,
+                files,
+                built_at: "t".to_string(),
+            },
+        )
+        .expect("graph database builds");
+        let gdb = GraphDb::open(&out).expect("graph database opens");
+
+        let params = ide::NeighborsParams {
+            id: "method/common/Ядро/Цель",
+            dir: ide::Direction::In,
+            depth: 1,
+            max_nodes: 1,
+            detail: ide::GraphDetail::Names,
+            provenance_filter: Vec::new(),
+        };
+        let mem = analysis.graph_neighbors(GRAPH_SOURCE_ROOT, Some(root), &params).unwrap();
+        let sql = gdb.neighbors(&params).unwrap().unwrap();
+
+        assert_eq!(mem.total, 3, "all three tied callers counted");
+        assert_eq!(mem.nodes.len(), 1);
+        assert_eq!(mem.dropped.len(), 2);
+        // The cut resolves identically on both paths, not just by count.
+        assert_eq!(
+            serde_json::to_value(&mem).unwrap(),
+            serde_json::to_value(&sql).unwrap(),
+            "tie-break keeps/drops the same nodes on both paths"
+        );
+    }
+
     /// The SQLite reader must keep the in-memory resolver's id semantics: a
     /// malformed id is `BadId` (not `NotFound`), and a metadata id resolves
     /// case-insensitively on its type and object name.
