@@ -1,12 +1,18 @@
+use std::sync::Arc;
+
 use indexmap::IndexMap;
 use rustc_hash::{FxBuildHasher, FxHashMap};
 
 use crate::{FileId, VfsPath};
 
+/// A bidirectional file-id ↔ path map. The two indices are held behind `Arc` so a
+/// clone is O(1): the same map can be shared across many Salsa databases (e.g. one
+/// per graph-build batch) without re-cloning every path. Mutation copies on write
+/// via [`Arc::make_mut`], so building a fresh set stays cheap while clones stay shared.
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct FileSet {
-    files: FxHashMap<VfsPath, FileId>,
-    paths: IndexMap<FileId, VfsPath, FxBuildHasher>,
+    files: Arc<FxHashMap<VfsPath, FileId>>,
+    paths: Arc<IndexMap<FileId, VfsPath, FxBuildHasher>>,
 }
 
 impl FileSet {
@@ -23,8 +29,8 @@ impl FileSet {
     }
 
     pub fn insert(&mut self, file_id: FileId, path: VfsPath) {
-        self.files.insert(path.clone(), file_id);
-        self.paths.insert(file_id, path);
+        Arc::make_mut(&mut self.files).insert(path.clone(), file_id);
+        Arc::make_mut(&mut self.paths).insert(file_id, path);
     }
 
     pub fn file_for_path(&self, path: &VfsPath) -> Option<&FileId> {
@@ -40,8 +46,8 @@ impl FileSet {
     }
 
     pub fn remove(&mut self, file_id: FileId) -> Option<VfsPath> {
-        let path = self.paths.shift_remove(&file_id)?;
-        self.files.remove(&path);
+        let path = Arc::make_mut(&mut self.paths).shift_remove(&file_id)?;
+        Arc::make_mut(&mut self.files).remove(&path);
         Some(path)
     }
 }

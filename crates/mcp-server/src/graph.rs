@@ -20,7 +20,6 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide::RootDatabaseImpl;
-use rustc_hash::FxHashSet;
 use vfs::{file_set::FileSet, FileId, VfsPath};
 use walkdir::WalkDir;
 
@@ -536,14 +535,31 @@ pub(crate) fn enumerate_bsl_files(workspace_root: &Path) -> Vec<(FileId, PathBuf
     entries
 }
 
-/// Build a database whose source root maps EVERY file's path — so cross-module
-/// resolution through the module index can find any target's [`FileId`] — but
-/// loads text only for the files in `load_text`. Files outside `load_text` are
-/// addressable by path yet never lowered, so a per-batch build pays HIR cost only
-/// for its own batch while still resolving calls into the rest of the config.
+/// The whole-workspace source root: a file-id ↔ path map covering EVERY file, so
+/// cross-module resolution through the module index can find any target's
+/// [`FileId`]. Built once per build and shared (cheaply cloned — the map is
+/// `Arc`-backed) into every per-batch database.
+pub(crate) fn build_source_root(all_files: &[(FileId, PathBuf)]) -> SourceRoot {
+    let mut file_set = FileSet::new();
+    for (file_id, path) in all_files {
+        file_set.insert(*file_id, VfsPath::new(path.clone()));
+    }
+    SourceRoot::new_local(file_set)
+}
+
+/// Build a batch database that shares the whole-workspace `source_root` (so any
+/// target is addressable by path through the module index) but loads text only for
+/// `batch_files` — the only modules this database lowers.
+///
+/// `file_source_root` is set ONLY for `batch_files`: the per-file source-root input
+/// is read solely for the file being lowered (resolver / infer / `get_file_path`),
+/// and the build never lowers a non-batch file. Cross-batch call targets resolve
+/// through the path-keyed module index built from the shared source root, which
+/// never consults `file_source_root`. Setting it for all files would re-pay a
+/// whole-config-sized loop on every batch database for no resolution benefit.
 pub(crate) fn db_for_files(
-    all_files: &[(FileId, PathBuf)],
-    load_text: &FxHashSet<FileId>,
+    source_root: &SourceRoot,
+    batch_files: &[(FileId, PathBuf)],
     config_paths: &[(Option<String>, PathBuf)],
     config_cache: Option<&Arc<ide::GraphConfigCache>>,
 ) -> RootDatabaseImpl {
@@ -551,16 +567,9 @@ pub(crate) fn db_for_files(
     if let Some(cache) = config_cache {
         db.set_graph_config_cache(Arc::clone(cache));
     }
-    let mut file_set = FileSet::new();
-    for (file_id, path) in all_files {
-        file_set.insert(*file_id, VfsPath::new(path.clone()));
-    }
-    db.set_source_root(GRAPH_SOURCE_ROOT, SourceRoot::new_local(file_set));
-    for (file_id, path) in all_files {
+    db.set_source_root(GRAPH_SOURCE_ROOT, source_root.clone());
+    for (file_id, path) in batch_files {
         db.set_file_source_root(*file_id, GRAPH_SOURCE_ROOT);
-        if !load_text.contains(file_id) {
-            continue;
-        }
         match std::fs::read_to_string(path) {
             Ok(text) => db.set_file_text(*file_id, &text),
             Err(e) => {
@@ -581,8 +590,8 @@ pub(crate) fn db_for_files(
 fn load_workspace_db(workspace_root: &Path) -> anyhow::Result<(RootDatabaseImpl, usize)> {
     let files = enumerate_bsl_files(workspace_root);
     let config_paths = config_metadata_paths(workspace_root);
-    let load_text: FxHashSet<FileId> = files.iter().map(|(f, _)| *f).collect();
-    let db = db_for_files(&files, &load_text, &config_paths, None);
+    let source_root = build_source_root(&files);
+    let db = db_for_files(&source_root, &files, &config_paths, None);
     Ok((db, files.len()))
 }
 

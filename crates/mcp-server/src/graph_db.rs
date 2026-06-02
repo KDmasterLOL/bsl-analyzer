@@ -14,13 +14,13 @@
 //! [`hir::graph_index`], byte-identical to the ids the in-memory serving path
 //! emits, so ids an agent holds survive the in-memory → SQLite switch.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use ide::graph_index::{EdgeRow, NodeRow};
 use ide::{GraphBuildSummary, ModuleId, RootDatabaseImpl};
 use rusqlite::{params, Connection};
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use vfs::FileId;
 
 use crate::graph::{config_metadata_paths, db_for_files, enumerate_bsl_files};
@@ -238,6 +238,13 @@ pub fn build_graph_database(
     let modules: Vec<ModuleId> = files.iter().map(|(f, _)| ModuleId::new(*f)).collect();
     let paths: FxHashMap<FileId, String> =
         files.iter().map(|(f, p)| (*f, p.to_string_lossy().replace('\\', "/"))).collect();
+    let file_paths: FxHashMap<FileId, PathBuf> =
+        files.iter().map(|(f, p)| (*f, p.clone())).collect();
+
+    // The whole-workspace source root, built once and shared (cheap `Arc` clone)
+    // into every per-batch database, so the 25k-path file set is assembled a single
+    // time for the build rather than re-cloned per batch.
+    let source_root = crate::graph::build_source_root(&files);
 
     let mut writer = GraphDbWriter::create(out_path)?;
 
@@ -248,12 +255,13 @@ pub fn build_graph_database(
     let config_cache = std::sync::Arc::new(ide::GraphConfigCache::default());
 
     // Scope the closures so their borrows end before `finalize`. `open_batch`
-    // loads only the batch's texts (shared reads of the id↔path map + config);
+    // loads only the batch's texts (sharing the resident source root + config);
     // `sink` persists the freshly-encoded rows (the sole `&mut writer` borrow).
     let summary = {
         let mut open_batch = |batch: &[ModuleId]| -> RootDatabaseImpl {
-            let load_text: FxHashSet<FileId> = batch.iter().map(|m| m.file_id).collect();
-            db_for_files(&files, &load_text, &config_paths, Some(&config_cache))
+            let batch_files: Vec<(FileId, PathBuf)> =
+                batch.iter().map(|m| (m.file_id, file_paths[&m.file_id].clone())).collect();
+            db_for_files(&source_root, &batch_files, &config_paths, Some(&config_cache))
         };
         let mut sink = |nodes: &[NodeRow],
                         edges: &[EdgeRow]|
