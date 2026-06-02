@@ -1,9 +1,8 @@
 use crate::diagnostics::SdblDiagnostic;
 use crate::hir::{FieldDef, Name, ResolvedTable, TableRef};
-use crate::scope::is_standard_attribute_name;
 use crate::standard_fields::{is_virtual_table_name, virtual_table_type};
 use crate::SdblType;
-use bsl_metadata::MdoType;
+use bsl_metadata::{is_standard_attribute_name, MdoType};
 use syntax::ast::AstNode;
 use text_size::TextRange;
 

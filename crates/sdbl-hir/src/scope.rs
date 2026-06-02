@@ -385,7 +385,7 @@ impl Scope {
         let mut fields = Vec::new();
 
         for attr in &mdo_object.attributes {
-            let is_standard = is_standard_attribute_name(&attr.name);
+            let is_standard = bsl_metadata::is_standard_attribute_name(&attr.name);
             fields.push(FieldDef::new_with_names(
                 attr.name.clone(),
                 attr.name_en.clone(),
@@ -511,62 +511,6 @@ impl Scope {
     ) -> Vec<FieldDef> {
         self.resolve_defined_type_fields(name, underlying_type).unwrap_or_default()
     }
-}
-
-pub(crate) fn is_standard_attribute_name(name: &str) -> bool {
-    matches!(
-        name.to_lowercase().as_str(),
-        "ссылка"
-            | "ref"
-            | "пометкаудаления"
-            | "deletionmark"
-            | "код"
-            | "code"
-            | "наименование"
-            | "description"
-            | "этогруппа"
-            | "isfolder"
-            | "родитель"
-            | "parent"
-            | "владелец"
-            | "owner"
-            | "предопределенный"
-            | "predefined"
-            | "имяпредопределенныхданных"
-            | "predefineddataname"
-            | "номер"
-            | "number"
-            | "дата"
-            | "date"
-            | "проведен"
-            | "posted"
-            | "стартован"
-            | "started"
-            | "завершен"
-            | "completed"
-            | "главнаязадача"
-            | "headtask"
-            | "выполнена"
-            | "executed"
-            | "бизнеспроцесс"
-            | "taskbusinessprocess"
-            | "точкамаршрута"
-            | "routepoint"
-            | "этотузел"
-            | "thisnode"
-            | "типзначения"
-            | "valuetype"
-            | "порядок"
-            | "order"
-            | "активность"
-            | "active"
-            | "номерстроки"
-            | "linenumber"
-            | "регистратор"
-            | "recorder"
-            | "период"
-            | "period"
-    )
 }
 
 #[derive(Debug, Clone)]
