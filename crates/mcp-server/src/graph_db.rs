@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use ide::graph_index::{EdgeRow, NodeRow};
 use ide::{GraphBuildSummary, ModuleId, RootDatabaseImpl};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use rustc_hash::FxHashMap;
 use vfs::FileId;
 
@@ -214,6 +214,20 @@ impl GraphDbWriter {
         Ok(())
     }
 
+    /// Persist the set of inconsistently-cased objects into a single `meta` row
+    /// (`casing_variants`, newline-joined). The incremental fast path reads it to
+    /// refuse a body-only update that touches such an object. Empty for the common,
+    /// consistently-cased configuration.
+    pub(crate) fn write_casing_variants(&mut self, keys: &[String]) -> anyhow::Result<()> {
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('casing_variants', ?1)",
+                params![keys.join("\n")],
+            )
+            .context("writing casing variants")?;
+        Ok(())
+    }
+
     /// Build secondary indexes, materialise the in-degree table from the bulk
     /// edges, and record build metadata (including derived node/edge counts).
     /// Consumes the writer — no further rows may be appended.
@@ -347,9 +361,464 @@ pub fn build_graph_database(
         })
         .collect();
     writer.write_files(&file_rows)?;
+    writer.write_casing_variants(&summary.casing_variant_objects)?;
 
     writer.finalize(meta)?;
     Ok(summary)
+}
+
+/// Canonicalise a freshly-projected aux (`mdo`/`attribute`) node/edge id against the
+/// object spellings already in the store. The durable id embeds the source-written
+/// object casing, but a full rebuild fixes it to the global first-seen owner; an
+/// incremental reprojection of a subset only knows the subset's casing, so for an
+/// object an unchanged module already owns we must reuse the stored spelling.
+///
+/// `existing_mdo` maps each stored `mdo/<Type>/<obj>` id, lowercased (Unicode-aware,
+/// since SQLite's `lower()` folds ASCII only and object names are Cyrillic), to its
+/// actual spelling. A `method`/`module` id, or an object the store does not yet know
+/// (genuinely new — owned by the changed set in both paths), is returned unchanged.
+fn canonicalize_aux_id(
+    existing_mdo: &std::collections::HashMap<String, String>,
+    id: &str,
+) -> String {
+    if id.starts_with("mdo/") {
+        return existing_mdo.get(&id.to_lowercase()).cloned().unwrap_or_else(|| id.to_string());
+    }
+    if let Some(rest) = id.strip_prefix("attribute/") {
+        // rest = <Type>/<object>/<attr>; only the object segment needs canonicalising
+        // (Type is the stable english name, attr is the metadata-stable field name).
+        let mut seg = rest.splitn(3, '/');
+        if let (Some(etype), Some(_obj), Some(attr)) = (seg.next(), seg.next(), seg.next()) {
+            let mdo_key = format!("mdo/{etype}/{_obj}").to_lowercase();
+            if let Some(canon_mdo) = existing_mdo.get(&mdo_key) {
+                if let Some(canon_obj) =
+                    canon_mdo.strip_prefix("mdo/").and_then(|r| r.split_once('/')).map(|(_, o)| o)
+                {
+                    return format!("attribute/{etype}/{canon_obj}/{attr}");
+                }
+            }
+        }
+    }
+    id.to_string()
+}
+
+/// Split an aux durable id into its `(EnglishType, object)` segments. `None` for a
+/// `method`/`module` id. Object/type segments never contain `/` (BSL identifiers and
+/// english type names exclude it), so the split is unambiguous.
+fn aux_object(id: &str) -> Option<(&str, &str)> {
+    if let Some(rest) = id.strip_prefix("mdo/") {
+        return rest.split_once('/');
+    }
+    if let Some(rest) = id.strip_prefix("attribute/") {
+        let mut seg = rest.splitn(3, '/');
+        if let (Some(etype), Some(obj), Some(_attr)) = (seg.next(), seg.next(), seg.next()) {
+            return Some((etype, obj));
+        }
+    }
+    None
+}
+
+/// Refuse the body-only fast path for the two aux-spelling cases its DB-pinned
+/// canonicalisation cannot reproduce byte-identically — both require cross-module
+/// casing inconsistency, so a normal (consistent-casing) edit is unaffected:
+///
+/// - **(A) casing change of a referenced object** — a changed module references an
+///   existing object with a different exact spelling. If that module is the object's
+///   first-seen owner, a full rebuild would adopt the new spelling, but the fast path
+///   pins to the stored one.
+/// - **(B) ownership shift on drop** — a changed module drops its last reference to an
+///   object that survives via another module; a full rebuild would re-derive the
+///   canonical spelling from the surviving (possibly different-cased) owner.
+///
+/// In both cases we fall back to a full rebuild, which is always correct.
+fn incremental_safety_check(
+    conn: &Connection,
+    changed_files: &[String],
+    rows: &ide::ReprojectedRows,
+) -> anyhow::Result<()> {
+    use std::collections::{HashMap, HashSet};
+
+    // (C) Objects the full build saw with inconsistent casing across modules. Their
+    // cross-module first-seen ordering is not reconstructable from the canonicalised
+    // store, so the fast path must not touch them. Recorded as lowercased
+    // `englishtype/object` keys in the `casing_variants` meta row.
+    let variant_keys: HashSet<String> = conn
+        .query_row("SELECT value FROM meta WHERE key = 'casing_variants'", [], |r| {
+            r.get::<_, String>(0)
+        })
+        .optional()?
+        .into_iter()
+        .flat_map(|v| v.lines().map(str::to_string).collect::<Vec<_>>())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let touches_variant = |id: &str| -> bool {
+        aux_object(id).is_some_and(|(etype, obj)| {
+            variant_keys.contains(&format!("{}/{}", etype.to_lowercase(), obj.to_lowercase()))
+        })
+    };
+
+    // (A) Stored object spelling per (type, object), case-folded.
+    let mut stored_obj: HashMap<(String, String), String> = HashMap::new();
+    {
+        let mut stmt = conn.prepare("SELECT id FROM nodes WHERE kind IN ('mdo', 'attribute')")?;
+        let ids = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        for id in ids.flatten() {
+            if let Some((etype, obj)) = aux_object(&id) {
+                stored_obj
+                    .entry((etype.to_lowercase(), obj.to_lowercase()))
+                    .or_insert_with(|| obj.to_string());
+            }
+        }
+    }
+    let reprojected_aux = rows
+        .nodes
+        .iter()
+        .filter(|n| n.kind == "mdo" || n.kind == "attribute")
+        .map(|n| n.id.as_str())
+        .chain(rows.edges.iter().map(|e| e.to_id.as_str()));
+    for id in reprojected_aux {
+        if touches_variant(id) {
+            anyhow::bail!("incremental update: touches casing-variant object {id}; full rebuild");
+        }
+        if let Some((etype, obj)) = aux_object(id) {
+            if let Some(stored) = stored_obj.get(&(etype.to_lowercase(), obj.to_lowercase())) {
+                if stored != obj {
+                    anyhow::bail!(
+                        "incremental update: aux object casing drift ({obj} vs stored {stored}); full rebuild"
+                    );
+                }
+            }
+        }
+    }
+
+    // (B) Aux objects the changed modules referenced before the edit.
+    let placeholders = changed_files.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let old_sql = format!(
+        "SELECT DISTINCT e.to_id FROM edges e JOIN nodes n ON e.from_id = n.id \
+         WHERE n.file IN ({placeholders}) \
+         AND (e.to_id LIKE 'mdo/%' OR e.to_id LIKE 'attribute/%')"
+    );
+    let old_aux: HashSet<String> = {
+        let mut stmt = conn.prepare(&old_sql)?;
+        let it = stmt.query_map(rusqlite::params_from_iter(changed_files.iter()), |r| {
+            r.get::<_, String>(0)
+        })?;
+        it.filter_map(|r| r.ok()).collect()
+    };
+    for id in &old_aux {
+        if touches_variant(id) {
+            anyhow::bail!(
+                "incremental update: drops/keeps a casing-variant object {id}; full rebuild"
+            );
+        }
+    }
+    let new_aux: HashSet<&str> = rows
+        .edges
+        .iter()
+        .map(|e| e.to_id.as_str())
+        .filter(|t| t.starts_with("mdo/") || t.starts_with("attribute/"))
+        .collect();
+    let survivors_sql = format!(
+        "SELECT COUNT(*) FROM edges e JOIN nodes n ON e.from_id = n.id \
+         WHERE e.to_id = ?1 AND n.file NOT IN ({placeholders})"
+    );
+    for dropped in old_aux.iter().filter(|x| !new_aux.contains(x.as_str())) {
+        let mut params: Vec<&dyn rusqlite::ToSql> = vec![dropped];
+        for f in changed_files {
+            params.push(f);
+        }
+        let survivors: i64 = conn.query_row(&survivors_sql, params.as_slice(), |r| r.get(0))?;
+        if survivors > 0 {
+            anyhow::bail!(
+                "incremental update: dropped aux ref {dropped} still referenced by an unchanged module; full rebuild"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Insert one node row, overriding only its `id` (for aux-id canonicalisation).
+/// `INSERT OR IGNORE` keeps the first-seen spelling, exactly like the bulk writer.
+fn insert_node_row(tx: &rusqlite::Transaction<'_>, row: &NodeRow, id: &str) -> anyhow::Result<()> {
+    let dispatch = if row.dispatch.is_empty() { None } else { Some(row.dispatch.join(",")) };
+    tx.prepare_cached(
+        "INSERT OR IGNORE INTO nodes \
+         (id, kind, name, qualified, module, file, name_offset, sig_end, src_start, \
+          src_end, dispatch, is_export, addressable) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+    )?
+    .execute(params![
+        id,
+        row.kind,
+        row.name,
+        row.qualified,
+        row.module,
+        row.file,
+        row.name_offset,
+        row.sig_end,
+        row.src_start,
+        row.src_end,
+        dispatch,
+        row.is_export.map(|b| b as i64),
+        row.addressable as i64,
+    ])?;
+    Ok(())
+}
+
+/// Apply a body-only incremental update: reproject ONLY the modules at
+/// `changed_paths` and patch a COPY of `src_path` written to `out_path`, leaving
+/// every unchanged module's rows in place. The caller must have proven the body-only
+/// preconditions (each changed module's `sig_hash` unchanged, no file add/remove, no
+/// `.xml` drift); the result is byte-identical to a full rebuild of the edited tree.
+///
+/// Concurrency: the patch lands on a copy and the caller atomically renames it into
+/// place — the same model the full build uses, so a live reader keeps its open
+/// snapshot until it reopens and no in-place mutation races a query.
+pub fn update_graph_database_bodies(
+    workspace_root: &Path,
+    src_path: &Path,
+    out_path: &Path,
+    changed_paths: &[PathBuf],
+    batch_size: usize,
+    meta: &GraphMeta,
+) -> anyhow::Result<GraphBuildSummary> {
+    let files = enumerate_bsl_files(workspace_root);
+    let config_paths = config_metadata_paths(workspace_root);
+    let all_modules: Vec<ModuleId> = files.iter().map(|(f, _)| ModuleId::new(*f)).collect();
+    let paths: FxHashMap<FileId, String> =
+        files.iter().map(|(f, p)| (*f, p.to_string_lossy().replace('\\', "/"))).collect();
+    let file_paths: FxHashMap<FileId, PathBuf> =
+        files.iter().map(|(f, p)| (*f, p.clone())).collect();
+
+    // Map changed canonical paths → ModuleIds, preserving file-id order so a new aux
+    // object's first-seen spelling matches a full build's.
+    let changed_set: std::collections::HashSet<&Path> =
+        changed_paths.iter().map(|p| p.as_path()).collect();
+    let changed_modules: Vec<ModuleId> = files
+        .iter()
+        .filter(|(_, p)| changed_set.contains(p.as_path()))
+        .map(|(f, _)| ModuleId::new(*f))
+        .collect();
+    if changed_modules.len() != changed_paths.len() {
+        anyhow::bail!(
+            "incremental update: {} changed paths, {} matched modules (a path is not an indexed .bsl module)",
+            changed_paths.len(),
+            changed_modules.len()
+        );
+    }
+
+    let source_root = crate::graph::build_source_root(&files);
+    let config_cache = std::sync::Arc::new(ide::GraphConfigCache::default());
+    let mut open_batch = |batch: &[ModuleId]| -> RootDatabaseImpl {
+        let batch_files: Vec<(FileId, PathBuf)> =
+            batch.iter().map(|m| (m.file_id, file_paths[&m.file_id].clone())).collect();
+        db_for_files(&source_root, &batch_files, &config_paths, Some(&config_cache))
+    };
+
+    let rows = ide::reproject_changed_modules(
+        &all_modules,
+        &changed_modules,
+        &paths,
+        Some(workspace_root),
+        batch_size,
+        &mut open_batch,
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // Normalised `nodes.file` keys for the changed modules — used both to gate the
+    // fast path and to scope the per-module deletes below.
+    let changed_files: Vec<String> =
+        changed_modules.iter().map(|m| paths[&m.file_id].clone()).collect();
+
+    // Bail to a full rebuild for the aux-casing cases the DB-pinned canonicalisation
+    // cannot reproduce (a no-op for normal, consistent-casing edits).
+    {
+        let src = Connection::open_with_flags(src_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .with_context(|| format!("opening graph db {} read-only", src_path.display()))?;
+        incremental_safety_check(&src, &changed_files, &rows)?;
+    }
+
+    // Patch a copy, never the published file (a reader keeps its snapshot until the
+    // caller renames `out_path` into place).
+    std::fs::copy(src_path, out_path).with_context(|| {
+        format!("copying graph db {} → {}", src_path.display(), out_path.display())
+    })?;
+
+    let stat_fp: FxHashMap<String, u64> = crate::graph::scan_file_stats(workspace_root)
+        .iter()
+        .map(|s| (s.path.clone(), s.fingerprint()))
+        .collect();
+
+    let mut conn = Connection::open(out_path)?;
+    {
+        let tx = conn.transaction().context("begin incremental patch")?;
+
+        // The first-seen object spellings the store already owns (Unicode-lowercased
+        // key → actual id), loaded before inserting so new objects keep their casing.
+        let existing_mdo: std::collections::HashMap<String, String> = {
+            let mut stmt = tx.prepare("SELECT id FROM nodes WHERE kind = 'mdo'")?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            rows.filter_map(|r| r.ok()).map(|id| (id.to_lowercase(), id)).collect()
+        };
+
+        // Drop each changed module's outgoing edges, method nodes, AND module-code
+        // node. The module-code node is re-emitted by the reprojection only if the
+        // module still has a module-level edge — matching a full rebuild, which emits
+        // it solely as an edge endpoint. Deleting it (rather than INSERT OR IGNORE)
+        // is what lets a module that lost its last module-level edge shed the node.
+        for nfile in &changed_files {
+            tx.execute(
+                "DELETE FROM edges WHERE from_id IN (SELECT id FROM nodes WHERE file = ?1)",
+                params![nfile],
+            )?;
+            tx.execute(
+                "DELETE FROM nodes WHERE file = ?1 AND kind IN ('method', 'module')",
+                params![nfile],
+            )?;
+        }
+
+        // Re-insert the reprojected nodes, canonicalising aux ids against the store.
+        for row in &rows.nodes {
+            match row.kind {
+                "mdo" | "attribute" => {
+                    let id = canonicalize_aux_id(&existing_mdo, &row.id);
+                    insert_node_row(&tx, row, &id)?;
+                }
+                _ => insert_node_row(&tx, row, &row.id)?,
+            }
+        }
+        // Re-insert the edges, canonicalising aux `to_id`s the same way.
+        for edge in &rows.edges {
+            let to_id = canonicalize_aux_id(&existing_mdo, &edge.to_id);
+            tx.prepare_cached(
+                "INSERT INTO edges (from_id, to_id, kind, provenance, crosses) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?
+            .execute(params![
+                edge.from_id,
+                to_id,
+                edge.kind,
+                edge.provenance,
+                edge.crosses as i64
+            ])?;
+        }
+
+        // GC aux nodes that lost their last reference. Restricted to pure-sink kinds:
+        // module-code nodes are `from_id`-only sources, so a `to_id`-absence sweep
+        // would wrongly delete a live caller.
+        tx.execute(
+            "DELETE FROM nodes WHERE kind IN ('mdo', 'attribute') \
+             AND id NOT IN (SELECT to_id FROM edges)",
+            [],
+        )?;
+
+        // Recompute the whole in-degree table — a delta that forgot the deleted edges'
+        // old targets would leave stale degrees.
+        tx.execute("DELETE FROM in_degree", [])?;
+        tx.execute(
+            "INSERT INTO in_degree (id, degree) SELECT to_id, COUNT(*) FROM edges GROUP BY to_id",
+            [],
+        )?;
+
+        // Merge any casing variants the reprojection observed AMONG the changed
+        // modules into the persisted set, so a future reload still refuses the fast
+        // path for a newly-inconsistent object a multi-file edit introduced.
+        if !rows.casing_variant_objects.is_empty() {
+            let existing: String = tx
+                .query_row("SELECT value FROM meta WHERE key = 'casing_variants'", [], |r| r.get(0))
+                .optional()?
+                .unwrap_or_default();
+            let mut set: std::collections::BTreeSet<String> =
+                existing.lines().filter(|l| !l.is_empty()).map(str::to_string).collect();
+            set.extend(rows.casing_variant_objects.iter().cloned());
+            tx.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('casing_variants', ?1)",
+                params![set.into_iter().collect::<Vec<_>>().join("\n")],
+            )?;
+        }
+
+        // Refresh the changed modules' persisted fingerprint + signature hash.
+        for module in &changed_modules {
+            let canonical = file_paths[&module.file_id].to_string_lossy().into_owned();
+            let fp = stat_fp.get(&canonical).copied().unwrap_or(0);
+            let sig = rows.sig_hashes.get(module).copied();
+            tx.execute(
+                "INSERT OR REPLACE INTO files (path, fingerprint, sig_hash) VALUES (?1, ?2, ?3)",
+                params![canonical, fp as i64, sig.map(|h| h as i64)],
+            )?;
+        }
+
+        // Refresh build metadata + derived counts; a clean incremental snapshot is
+        // never force-stale.
+        let node_count: i64 = tx.query_row("SELECT COUNT(*) FROM nodes", [], |r| r.get(0))?;
+        let edge_count: i64 = tx.query_row("SELECT COUNT(*) FROM edges", [], |r| r.get(0))?;
+        let meta_rows: [(&str, String); 7] = [
+            ("revision", meta.revision.to_string()),
+            ("fingerprint", meta.fingerprint.to_string()),
+            ("files", all_modules.len().to_string()),
+            ("built_at", meta.built_at.clone()),
+            ("nodes", node_count.to_string()),
+            ("edges", edge_count.to_string()),
+            ("force_stale", "0".to_string()),
+        ];
+        for (key, value) in &meta_rows {
+            tx.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+                params![key, value],
+            )?;
+        }
+
+        tx.commit().context("commit incremental patch")?;
+    }
+
+    let node_rows = rows.nodes.len();
+    let edges: i64 = conn.query_row("SELECT COUNT(*) FROM edges", [], |r| r.get(0))?;
+    Ok(GraphBuildSummary {
+        modules: all_modules.len(),
+        node_rows,
+        edges: edges as usize,
+        module_sig_hashes: rows.sig_hashes,
+        // Variants observed among the changed modules (merged into the persisted set
+        // above); pre-existing variants for untouched objects remain in the copied db.
+        casing_variant_objects: rows.casing_variant_objects,
+    })
+}
+
+/// Recompute the body-free signature hash for each module at `changed_paths`, for an
+/// eligibility check against the persisted `files.sig_hash`. Builds a tiny resident
+/// index over only those modules — `module_sig_hash` reads a module's own methods +
+/// dispatch with no cross-module data, so this stays cheap. Keyed by canonical path.
+pub fn recompute_module_sig_hashes(
+    workspace_root: &Path,
+    changed_paths: &[PathBuf],
+) -> anyhow::Result<FxHashMap<String, u64>> {
+    use ide::graph_index::GraphIndex;
+
+    let files = enumerate_bsl_files(workspace_root);
+    let config_paths = config_metadata_paths(workspace_root);
+    let source_root = crate::graph::build_source_root(&files);
+
+    let changed_set: std::collections::HashSet<&Path> =
+        changed_paths.iter().map(|p| p.as_path()).collect();
+    let changed: Vec<(ModuleId, PathBuf)> = files
+        .iter()
+        .filter(|(_, p)| changed_set.contains(p.as_path()))
+        .map(|(f, p)| (ModuleId::new(*f), p.clone()))
+        .collect();
+
+    let batch_files: Vec<(FileId, PathBuf)> =
+        changed.iter().map(|(m, p)| (m.file_id, p.clone())).collect();
+    let db = db_for_files(&source_root, &batch_files, &config_paths, None);
+    let modules: Vec<ModuleId> = changed.iter().map(|(m, _)| *m).collect();
+    let index = GraphIndex::build(&db, &modules);
+
+    let mut out = FxHashMap::default();
+    for (module, path) in &changed {
+        if let Some(h) = index.module_sig_hash(*module) {
+            out.insert(path.to_string_lossy().into_owned(), h);
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

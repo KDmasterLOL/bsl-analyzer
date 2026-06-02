@@ -291,20 +291,12 @@ impl GraphState {
             return;
         }
 
-        // On reload the previous build is still on disk; classify which files drifted
-        // against its stored per-file fingerprints. Observational for now (the full
-        // rebuild below still runs) — the body-only fast path will branch on this.
-        if is_reload {
-            let stored = read_stored_fingerprints(&graph_db_path(&workspace_root));
-            let diff = classify_changes(&stored, &scan_file_stats(&workspace_root));
-            tracing::info!(
-                added = diff.added.len(),
-                removed = diff.removed.len(),
-                modified = diff.modified.len(),
-                xml = diff.touches_metadata(),
-                empty = diff.is_empty(),
-                "graph reload: classified workspace drift"
-            );
+        // On reload, try the body-only fast path first: if only `.bsl` bodies changed
+        // (signatures intact, nothing added/removed, no `.xml` drift) reproject just
+        // those modules instead of the whole config. On any ineligibility or failure
+        // it returns false and we fall through to a full rebuild.
+        if is_reload && self.try_incremental_reload(&workspace_root, generation) {
+            return;
         }
 
         tracing::info!(?workspace_root, is_reload, generation, "graph database build started");
@@ -388,6 +380,126 @@ impl GraphState {
             Err(_) => {
                 tracing::error!("graph database build panicked");
                 self.record_load_failure(is_reload, "builder panicked".to_owned());
+            }
+        }
+    }
+
+    /// The body-only fast path for a reload. Eligible only when every drifted file is
+    /// a `.bsl` whose signature hash still matches its persisted value, with nothing
+    /// added/removed and no `.xml` drift — then no caller's resolution can have moved,
+    /// so reprojecting just those modules yields a database byte-identical to a full
+    /// rebuild. Patches a copy of the published file and atomically renames it in,
+    /// then publishes `generation`. Returns `true` on success; `false` (the common
+    /// case for a structural change) leaves nothing published and falls back to a full
+    /// rebuild.
+    fn try_incremental_reload(&self, workspace_root: &Path, generation: u64) -> bool {
+        let db_path = graph_db_path(workspace_root);
+        let stored_fp = read_stored_fingerprints(&db_path);
+        if stored_fp.is_empty() {
+            return false; // no per-file record (older build) → full rebuild
+        }
+        let diff = classify_changes(&stored_fp, &scan_file_stats(workspace_root));
+
+        // Body-only shape: at least one `.bsl` modified, nothing added/removed, no
+        // metadata drift (an `.xml` change can flip visibility for any module).
+        if diff.is_empty()
+            || !diff.added.is_empty()
+            || !diff.removed.is_empty()
+            || diff.touches_metadata()
+        {
+            return false;
+        }
+        let changed_paths: Vec<PathBuf> = diff.modified.iter().map(PathBuf::from).collect();
+
+        // Each changed module's stored signature must still match a fresh recompute,
+        // else its resolution surface may have moved → not body-only.
+        let fresh =
+            match crate::graph_db::recompute_module_sig_hashes(workspace_root, &changed_paths) {
+                Ok(f) => f,
+                Err(e) => {
+                    tracing::warn!("incremental reload: signature recompute failed: {e}");
+                    return false;
+                }
+            };
+        let stored_sig = read_stored_sig_hashes(&db_path);
+        let eligible = changed_paths.iter().all(|p| {
+            let key = p.to_string_lossy();
+            matches!(
+                (stored_sig.get(key.as_ref()), fresh.get(key.as_ref())),
+                (Some(Some(stored)), Some(new)) if stored == new
+            )
+        });
+        if !eligible {
+            tracing::info!(
+                modified = changed_paths.len(),
+                "incremental reload: signature changed; full rebuild"
+            );
+            return false;
+        }
+
+        // Bracket the patch with fingerprint scans, mirroring the full build's
+        // straddle detection: a write landing mid-patch marks the snapshot stale.
+        let fp_pre = workspace_fingerprint(workspace_root);
+        let tmp_path = db_path.with_extension("db.building");
+        let built_at = chrono::Utc::now().to_rfc3339();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let summary = crate::graph_db::update_graph_database_bodies(
+                workspace_root,
+                &db_path,
+                &tmp_path,
+                &changed_paths,
+                GRAPH_BUILD_BATCH,
+                &crate::graph_db::GraphMeta {
+                    revision: generation,
+                    fingerprint: fp_pre,
+                    files: 0,
+                    built_at,
+                },
+            )?;
+            let fp_post = workspace_fingerprint(workspace_root);
+            let force_stale = fp_pre != fp_post;
+            {
+                let conn = rusqlite::Connection::open(&tmp_path)?;
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('force_stale', ?1)",
+                    rusqlite::params![if force_stale { "1" } else { "0" }],
+                )?;
+            }
+            std::fs::rename(&tmp_path, &db_path)?;
+            anyhow::Ok((summary.modules, fp_pre, force_stale))
+        }));
+
+        match outcome {
+            Ok(Ok((files, fp, force_stale))) => {
+                if force_stale {
+                    tracing::warn!(
+                        "incremental reload straddled a disk write; marking snapshot stale"
+                    );
+                }
+                *lock_recover(&self.scan) = None;
+                {
+                    let mut inner = lock_recover(&self.inner);
+                    inner.published =
+                        Some(Published { generation, fingerprint: fp, reload: ReloadState::Idle });
+                    inner.status = GraphStatus::Ready { files };
+                }
+                tracing::info!(
+                    files,
+                    generation,
+                    modified = changed_paths.len(),
+                    "graph incremental reload complete"
+                );
+                true
+            }
+            Ok(Err(e)) => {
+                tracing::warn!("incremental reload failed, falling back to full rebuild: {e}");
+                let _ = std::fs::remove_file(&tmp_path);
+                false
+            }
+            Err(_) => {
+                tracing::error!("incremental reload panicked, falling back to full rebuild");
+                let _ = std::fs::remove_file(&tmp_path);
+                false
             }
         }
     }
@@ -609,6 +721,34 @@ pub(crate) fn read_stored_fingerprints(db_path: &Path) -> std::collections::Hash
     map
 }
 
+/// Read the stored per-file signature hashes (`None` for `.xml`, and for `.bsl` built
+/// before signature persistence). Read-only open; an open/query failure yields an
+/// empty map → the body-only fast path treats every module as ineligible (full
+/// rebuild). Separate from [`read_stored_fingerprints`] so the eligibility check can
+/// distinguish "no stored signature" (NULL) from "signature present but differs".
+pub(crate) fn read_stored_sig_hashes(
+    db_path: &Path,
+) -> std::collections::HashMap<String, Option<u64>> {
+    let mut map = std::collections::HashMap::new();
+    let Ok(conn) =
+        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+    else {
+        return map;
+    };
+    let Ok(mut stmt) = conn.prepare("SELECT path, sig_hash FROM files") else {
+        return map;
+    };
+    let Ok(rows) = stmt.query_map([], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?.map(|v| v as u64)))
+    }) else {
+        return map;
+    };
+    for row in rows.flatten() {
+        map.insert(row.0, row.1);
+    }
+    map
+}
+
 /// The configuration source + extension metadata paths the resolver needs for
 /// visibility checks, registered on every database (full or per-batch) just like
 /// the LSP workspace loader does.
@@ -718,7 +858,7 @@ fn load_workspace_db(workspace_root: &Path) -> anyhow::Result<(RootDatabaseImpl,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph_db::build_graph_database;
+    use crate::graph_db::{build_graph_database, update_graph_database_bodies};
     use ide::Analysis;
     use rusqlite::Connection;
     use std::fs;
@@ -1494,6 +1634,357 @@ mod tests {
         );
         build_graph_database(root, &out, 1, &meta()).expect("rebuilds");
         assert_ne!(server_sig(&out), base, "renaming a method changes the signature hash");
+    }
+
+    fn write_catalog(root: &Path, name: &str, id: u8) {
+        write(
+            root,
+            &format!("Catalogs/{name}.xml"),
+            &format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Catalog uuid="00000000-0000-0000-0000-0000000000{id:02}">
+        <Properties><Name>{name}</Name><CodeLength>9</CodeLength></Properties>
+    </Catalog>
+</MetaDataObject>"#
+            ),
+        );
+    }
+
+    /// Dump the data tables in a stable order so two databases can be compared for
+    /// logical (byte-identical) equality independent of physical row order.
+    fn dump_data(path: &Path) -> (Vec<String>, Vec<String>, Vec<String>) {
+        let conn = Connection::open(path).unwrap();
+        let collect = |sql: &str, cols: usize| -> Vec<String> {
+            let mut stmt = conn.prepare(sql).unwrap();
+            let rows = stmt
+                .query_map([], |r| {
+                    let mut parts = Vec::with_capacity(cols);
+                    for i in 0..cols {
+                        parts
+                            .push(r.get::<_, rusqlite::types::Value>(i).map(|v| format!("{v:?}"))?);
+                    }
+                    Ok(parts.join("|"))
+                })
+                .unwrap();
+            rows.map(|r| r.unwrap()).collect()
+        };
+        let nodes = collect(
+            "SELECT id, kind, name, qualified, module, file, name_offset, sig_end, src_start, \
+             src_end, dispatch, is_export, addressable FROM nodes ORDER BY id",
+            13,
+        );
+        let edges = collect(
+            "SELECT from_id, to_id, kind, provenance, crosses FROM edges \
+             ORDER BY from_id, to_id, kind, provenance, crosses",
+            5,
+        );
+        let in_degree = collect("SELECT id, degree FROM in_degree ORDER BY id", 2);
+        (nodes, edges, in_degree)
+    }
+
+    /// The body-only fast path must produce a database byte-identical to a full
+    /// rebuild of the edited tree: same nodes (incl. aux GC of an orphaned object),
+    /// edges, in-degree, and meta counts. The edit changes a module's edge set (drops
+    /// a manager-create that orphans one catalog, adds a query to another already
+    /// referenced elsewhere) without touching any signature.
+    #[test]
+    fn incremental_update_matches_full_rebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        write_catalog(root, "Номенклатура", 1);
+        write_catalog(root, "Контрагенты", 2);
+        write_common_module(
+            root,
+            "Альфа",
+            true,
+            "&НаСервере\nПроцедура ШагА() Экспорт\nБета.ШагБ();\n\
+             Запрос = \"ВЫБРАТЬ Код ИЗ Справочник.Номенклатура\";\nКонецПроцедуры",
+        );
+        write_common_module(
+            root,
+            "Бета",
+            true,
+            "&НаСервере\nПроцедура ШагБ() Экспорт\nСправочники.Контрагенты.СоздатьЭлемент();\nКонецПроцедуры",
+        );
+
+        let meta = || crate::graph_db::GraphMeta {
+            revision: 1,
+            fingerprint: 0,
+            files: 0,
+            built_at: "t".to_string(),
+        };
+        let db_pre = root.join(".build/pre.db");
+        fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
+        build_graph_database(root, &db_pre, 1, &meta()).expect("pre build");
+
+        // Body-only edit of Бета: same signature `Процедура ШагБ() Экспорт`. Drops the
+        // Контрагенты manager-create (orphaning that catalog's Mdo node) and adds a
+        // query to Номенклатура (already referenced by Альфа → existing spelling).
+        write(
+            root,
+            "CommonModules/Бета/Ext/Module.bsl",
+            "&НаСервере\nПроцедура ШагБ() Экспорт\n\
+             Запрос = \"ВЫБРАТЬ Наименование ИЗ Справочник.Номенклатура\";\nКонецПроцедуры",
+        );
+        let changed = vec![root.join("CommonModules/Бета/Ext/Module.bsl").canonicalize().unwrap()];
+
+        let db_inc = root.join(".build/inc.db");
+        update_graph_database_bodies(root, &db_pre, &db_inc, &changed, 1, &meta())
+            .expect("incremental update");
+
+        let db_full = root.join(".build/full.db");
+        build_graph_database(root, &db_full, 1, &meta()).expect("full rebuild of edited tree");
+
+        let (inc_nodes, inc_edges, inc_indeg) = dump_data(&db_inc);
+        let (full_nodes, full_edges, full_indeg) = dump_data(&db_full);
+        assert_eq!(inc_nodes, full_nodes, "nodes (incl. orphan-GC) must match a full rebuild");
+        assert_eq!(inc_edges, full_edges, "edges must match a full rebuild");
+        assert_eq!(inc_indeg, full_indeg, "in-degree must match a full rebuild");
+
+        // The orphaned Контрагенты Mdo node is gone in both.
+        assert!(
+            !inc_nodes.iter().any(|n| n.contains("mdo/Catalog/Контрагенты")),
+            "orphaned Контрагенты Mdo node GC'd: {inc_nodes:?}"
+        );
+
+        let meta_count = |path: &Path, key: &str| -> String {
+            Connection::open(path)
+                .unwrap()
+                .query_row("SELECT value FROM meta WHERE key=?1", [key], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(meta_count(&db_inc, "nodes"), meta_count(&db_full, "nodes"), "meta node count");
+        assert_eq!(meta_count(&db_inc, "edges"), meta_count(&db_full, "edges"), "meta edge count");
+    }
+
+    /// A changed module referencing an existing object with a different casing must
+    /// bail to a full rebuild (it may be the object's first-seen owner, whose new
+    /// spelling a full rebuild would adopt but the DB-pinned fast path cannot).
+    #[test]
+    fn incremental_update_bails_on_aux_casing_drift() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        write_catalog(root, "Номенклатура", 1);
+        write_common_module(
+            root,
+            "Альфа",
+            true,
+            "&НаСервере\nПроцедура ШагА() Экспорт\n\
+             Запрос = \"ВЫБРАТЬ Код ИЗ Справочник.Номенклатура\";\nКонецПроцедуры",
+        );
+        write_common_module(
+            root,
+            "Бета",
+            true,
+            "&НаСервере\nПроцедура ШагБ() Экспорт\nКонецПроцедуры",
+        );
+
+        let meta = || crate::graph_db::GraphMeta {
+            revision: 1,
+            fingerprint: 0,
+            files: 0,
+            built_at: "t".to_string(),
+        };
+        let db_pre = root.join(".build/pre.db");
+        fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
+        build_graph_database(root, &db_pre, 1, &meta()).expect("pre build");
+
+        // Бета references the SAME catalog with a different spelling.
+        write(
+            root,
+            "CommonModules/Бета/Ext/Module.bsl",
+            "&НаСервере\nПроцедура ШагБ() Экспорт\n\
+             Запрос = \"ВЫБРАТЬ Код ИЗ Справочник.НОМЕНКЛАТУРА\";\nКонецПроцедуры",
+        );
+        let changed = vec![root.join("CommonModules/Бета/Ext/Module.bsl").canonicalize().unwrap()];
+        let db_inc = root.join(".build/inc.db");
+        let result = update_graph_database_bodies(root, &db_pre, &db_inc, &changed, 1, &meta());
+        assert!(result.is_err(), "casing drift must bail to full rebuild, got {result:?}");
+    }
+
+    /// A changed module dropping its last reference to an object that survives via an
+    /// unchanged module must bail (the surviving module could re-own the object with a
+    /// different canonical spelling on a full rebuild).
+    #[test]
+    fn incremental_update_bails_on_dropped_shared_aux() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        write_catalog(root, "Номенклатура", 1);
+        let body = "&НаСервере\nПроцедура {m}() Экспорт\n\
+                    Запрос = \"ВЫБРАТЬ Код ИЗ Справочник.Номенклатура\";\nКонецПроцедуры";
+        write_common_module(root, "Альфа", true, &body.replace("{m}", "ШагА"));
+        write_common_module(root, "Бета", true, &body.replace("{m}", "ШагБ"));
+
+        let meta = || crate::graph_db::GraphMeta {
+            revision: 1,
+            fingerprint: 0,
+            files: 0,
+            built_at: "t".to_string(),
+        };
+        let db_pre = root.join(".build/pre.db");
+        fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
+        build_graph_database(root, &db_pre, 1, &meta()).expect("pre build");
+
+        // Бета drops its query; Альфа still references Номенклатура (it survives).
+        write(
+            root,
+            "CommonModules/Бета/Ext/Module.bsl",
+            "&НаСервере\nПроцедура ШагБ() Экспорт\nКонецПроцедуры",
+        );
+        let changed = vec![root.join("CommonModules/Бета/Ext/Module.bsl").canonicalize().unwrap()];
+        let db_inc = root.join(".build/inc.db");
+        let result = update_graph_database_bodies(root, &db_pre, &db_inc, &changed, 1, &meta());
+        assert!(result.is_err(), "dropping a shared aux ref must bail, got {result:?}");
+    }
+
+    /// When two modules reference one object with inconsistent casing, the full build
+    /// records it as a casing variant, and a body-only edit of a module touching that
+    /// object bails to a full rebuild — even though the edit itself keeps the casing
+    /// consistent (the fast path cannot reconstruct cross-module first-seen ordering).
+    #[test]
+    fn incremental_update_bails_on_recorded_casing_variant() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        write_catalog(root, "Номенклатура", 1);
+        // Альфа (earlier file-id) and Гамма spell the same catalog differently.
+        write_common_module(
+            root,
+            "Альфа",
+            true,
+            "&НаСервере\nПроцедура ШагА() Экспорт\n\
+             Запрос = \"ВЫБРАТЬ Код ИЗ Справочник.Номенклатура\";\nКонецПроцедуры",
+        );
+        write_common_module(
+            root,
+            "Гамма",
+            true,
+            "&НаСервере\nПроцедура ШагГ() Экспорт\n\
+             Запрос = \"ВЫБРАТЬ Код ИЗ Справочник.НОМЕНКЛАТУРА\";\nКонецПроцедуры",
+        );
+
+        let meta = || crate::graph_db::GraphMeta {
+            revision: 1,
+            fingerprint: 0,
+            files: 0,
+            built_at: "t".to_string(),
+        };
+        let db_pre = root.join(".build/pre.db");
+        fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
+        build_graph_database(root, &db_pre, 1, &meta()).expect("pre build");
+
+        // The build recorded the inconsistent casing.
+        let variants: String = Connection::open(&db_pre)
+            .unwrap()
+            .query_row("SELECT value FROM meta WHERE key='casing_variants'", [], |r| r.get(0))
+            .unwrap();
+        assert!(
+            variants.lines().any(|k| k == "catalog/номенклатура"),
+            "build records the casing variant: {variants:?}"
+        );
+
+        // Body-only edit of Альфа keeping its consistent casing — still bails, because
+        // Альфа touches the variant object.
+        write(
+            root,
+            "CommonModules/Альфа/Ext/Module.bsl",
+            "&НаСервере\nПроцедура ШагА() Экспорт\n\
+             Запрос = \"ВЫБРАТЬ Наименование ИЗ Справочник.Номенклатура\";\nКонецПроцедуры",
+        );
+        let changed = vec![root.join("CommonModules/Альфа/Ext/Module.bsl").canonicalize().unwrap()];
+        let db_inc = root.join(".build/inc.db");
+        let result = update_graph_database_bodies(root, &db_pre, &db_inc, &changed, 1, &meta());
+        assert!(result.is_err(), "touching a recorded casing variant must bail, got {result:?}");
+    }
+
+    /// A multi-file body-only edit that introduces a NEW inconsistently-cased object
+    /// (one not referenced before) succeeds on the fast path AND records the variant,
+    /// so a later single-module reload refuses the fast path for it.
+    #[test]
+    fn incremental_update_records_newly_introduced_casing_variant() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        write_catalog(root, "Товары", 1);
+        // Neither module references Товары yet.
+        write_common_module(
+            root,
+            "Альфа",
+            true,
+            "&НаСервере\nПроцедура ШагА() Экспорт\nКонецПроцедуры",
+        );
+        write_common_module(
+            root,
+            "Бета",
+            true,
+            "&НаСервере\nПроцедура ШагБ() Экспорт\nКонецПроцедуры",
+        );
+
+        let meta = || crate::graph_db::GraphMeta {
+            revision: 1,
+            fingerprint: 0,
+            files: 0,
+            built_at: "t".to_string(),
+        };
+        let db_pre = root.join(".build/pre.db");
+        fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
+        build_graph_database(root, &db_pre, 1, &meta()).expect("pre build");
+
+        // Both modules now reference Товары with inconsistent casing.
+        write(
+            root,
+            "CommonModules/Альфа/Ext/Module.bsl",
+            "&НаСервере\nПроцедура ШагА() Экспорт\n\
+             Запрос = \"ВЫБРАТЬ Код ИЗ Справочник.Товары\";\nКонецПроцедуры",
+        );
+        write(
+            root,
+            "CommonModules/Бета/Ext/Module.bsl",
+            "&НаСервере\nПроцедура ШагБ() Экспорт\n\
+             Запрос = \"ВЫБРАТЬ Код ИЗ Справочник.ТОВАРЫ\";\nКонецПроцедуры",
+        );
+        let changed = vec![
+            root.join("CommonModules/Альфа/Ext/Module.bsl").canonicalize().unwrap(),
+            root.join("CommonModules/Бета/Ext/Module.bsl").canonicalize().unwrap(),
+        ];
+        let db_inc = root.join(".build/inc.db");
+        update_graph_database_bodies(root, &db_pre, &db_inc, &changed, 1, &meta())
+            .expect("multi-file body-only update succeeds (current result is still correct)");
+
+        // The newly-introduced inconsistency is now persisted, so a later reload bails.
+        let variants: String = Connection::open(&db_inc)
+            .unwrap()
+            .query_row("SELECT value FROM meta WHERE key='casing_variants'", [], |r| r.get(0))
+            .unwrap();
+        assert!(
+            variants.lines().any(|k| k == "catalog/товары"),
+            "incremental update records the introduced casing variant: {variants:?}"
+        );
+
+        // And the incremental DB is still byte-identical to a full rebuild of this tree.
+        let db_full = root.join(".build/full.db");
+        build_graph_database(root, &db_full, 1, &meta()).expect("full rebuild");
+        let (inc_nodes, inc_edges, _) = dump_data(&db_inc);
+        let (full_nodes, full_edges, _) = dump_data(&db_full);
+        assert_eq!(inc_nodes, full_nodes, "nodes match a full rebuild");
+        assert_eq!(inc_edges, full_edges, "edges match a full rebuild");
+
+        // The persisted variant set is byte-identical too (both sides sort).
+        let variants_meta = |path: &Path| -> String {
+            Connection::open(path)
+                .unwrap()
+                .query_row("SELECT value FROM meta WHERE key='casing_variants'", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(
+            variants_meta(&db_inc),
+            variants_meta(&db_full),
+            "casing_variants meta row matches a full rebuild byte-for-byte"
+        );
     }
 
     /// `classify_changes` sorts each modified/added/removed file into the right

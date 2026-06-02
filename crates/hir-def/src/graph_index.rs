@@ -418,6 +418,17 @@ impl GraphBuildState {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Objects seen with more than one casing during the build, as
+    /// `(EnglishType, lowercased object)`. An incremental rebuild refuses the
+    /// body-only fast path for these — their cross-module first-seen ordering is not
+    /// reconstructable from the canonicalised store alone.
+    pub fn casing_variant_keys(&self) -> Vec<(&'static str, String)> {
+        self.mdo_canonical
+            .casing_variants()
+            .map(|(ty, obj)| (ty.english_name(), obj.clone()))
+            .collect()
+    }
 }
 
 /// Project the call/manager and SDBL query_ref edges for one `batch` of modules,

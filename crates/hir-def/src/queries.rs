@@ -202,7 +202,45 @@ pub(crate) fn manager_edge_kind(method_name: &str) -> crate::call_graph::EdgeKin
 /// case-insensitive, so different spellings of the same object across call sites
 /// and query texts must collapse to a single `Mdo`/`Attribute` node. First-seen
 /// spelling wins; shared between the call-edge and query-ref projections.
-pub(crate) type MdoCanonical = FxHashMap<(MdoType, String), crate::name::Name>;
+/// First-seen canonical object spelling per `(type, lowercased object)`, plus the
+/// objects seen with more than one casing. The canonical spelling (first-seen in the
+/// build's deterministic order) becomes part of the durable node id; a casing variant
+/// (a later, case-insensitively-equal but exact-different spelling) is recorded so an
+/// incremental rebuild can refuse the body-only fast path for that object — the fast
+/// path cannot reproduce the cross-module first-seen ordering for inconsistently-cased
+/// objects.
+#[derive(Default)]
+pub(crate) struct MdoCanonical {
+    map: FxHashMap<(MdoType, String), crate::name::Name>,
+    variants: FxHashSet<(MdoType, String)>,
+}
+
+impl MdoCanonical {
+    /// The canonical spelling for `spelling`'s object: the first one seen wins; a
+    /// later differently-cased spelling of the same object is recorded as a variant
+    /// and the first-seen spelling is returned (matching the build's first-wins rule).
+    pub(crate) fn canonical(&mut self, mdo_type: MdoType, spelling: &str) -> crate::name::Name {
+        let key = (mdo_type, spelling.to_lowercase());
+        match self.map.get(&key) {
+            Some(existing) => {
+                if existing.as_str() != spelling {
+                    self.variants.insert(key);
+                }
+                existing.clone()
+            }
+            None => {
+                let name = crate::name::Name::new(spelling);
+                self.map.insert(key, name.clone());
+                name
+            }
+        }
+    }
+
+    /// Objects (`type`, lowercased object) seen with more than one casing.
+    pub(crate) fn casing_variants(&self) -> impl Iterator<Item = &(MdoType, String)> + '_ {
+        self.variants.iter()
+    }
+}
 
 /// Project a module's resolved call/manager edges (`summary`) into workspace
 /// graph edges. `dispatch` supplies per-node client/server capability — including
@@ -227,10 +265,7 @@ pub(crate) fn project_module_call_edges(
         let to = match &edge.target {
             ResolvedTarget::Method(method_id) => GraphNode::Method(*method_id),
             ResolvedTarget::Mdo { mdo_type, object_name } => {
-                let canon = mdo_canonical
-                    .entry((*mdo_type, object_name.as_str().to_lowercase()))
-                    .or_insert_with(|| object_name.clone())
-                    .clone();
+                let canon = mdo_canonical.canonical(*mdo_type, object_name.as_str());
                 GraphNode::Mdo { mdo_type: *mdo_type, object_name: canon }
             }
             ResolvedTarget::Unresolved(_) => continue,
@@ -344,13 +379,10 @@ pub(crate) fn project_collected_query_edges(
         let from = &site.from;
         for (mdo_type, name) in &site.tables {
             let name_lower = name.to_lowercase();
-            if !seen_query_ref.insert((from.clone(), *mdo_type, name_lower.clone())) {
+            if !seen_query_ref.insert((from.clone(), *mdo_type, name_lower)) {
                 continue;
             }
-            let canon = mdo_canonical
-                .entry((*mdo_type, name_lower))
-                .or_insert_with(|| crate::name::Name::new(name))
-                .clone();
+            let canon = mdo_canonical.canonical(*mdo_type, name);
             edges.push(WorkspaceCallEdge {
                 from: from.clone(),
                 to: GraphNode::Mdo { mdo_type: *mdo_type, object_name: canon },
@@ -360,19 +392,15 @@ pub(crate) fn project_collected_query_edges(
             });
         }
         for (mdo_type, object, attr) in &site.attrs {
-            let object_lower = object.to_lowercase();
             if !seen_query_attr.insert((
                 from.clone(),
                 *mdo_type,
-                object_lower.clone(),
+                object.to_lowercase(),
                 attr.to_lowercase(),
             )) {
                 continue;
             }
-            let canon = mdo_canonical
-                .entry((*mdo_type, object_lower))
-                .or_insert_with(|| crate::name::Name::new(object))
-                .clone();
+            let canon = mdo_canonical.canonical(*mdo_type, object);
             edges.push(WorkspaceCallEdge {
                 from: from.clone(),
                 to: GraphNode::Attribute {
@@ -406,7 +434,7 @@ pub fn workspace_call_graph_query(
     let _span = tracing::info_span!("workspace_call_graph", module_count = modules.len()).entered();
 
     let mut graph = WorkspaceCallGraph::default();
-    let mut mdo_canonical: MdoCanonical = FxHashMap::default();
+    let mut mdo_canonical = MdoCanonical::default();
 
     // Pass 1: per-method client/server dispatch, needed before edges so the
     // boundary flag can consult a callee that lives in another module. Common

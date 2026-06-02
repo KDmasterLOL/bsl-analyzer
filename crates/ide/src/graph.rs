@@ -242,6 +242,12 @@ pub struct GraphBuildSummary {
     /// the resident index so a build can persist it for incremental drift checks. One
     /// entry per indexed module.
     pub module_sig_hashes: FxHashMap<ModuleId, u64>,
+    /// Objects seen with inconsistent casing across modules, as lowercased
+    /// `englishtype/object` keys. Persisted so an incremental rebuild refuses the
+    /// body-only fast path for them (their cross-module first-seen ordering is not
+    /// reconstructable from the canonicalised store). Empty for the common,
+    /// consistently-cased configuration.
+    pub casing_variant_objects: Vec<String>,
 }
 
 /// A per-batch persistence sink: it receives one batch's freshly-encoded node and
@@ -376,7 +382,121 @@ pub fn build_workspace_graph_rows(
         emit(&edges, &mut summary, &mut seen_aux, sink)?;
     }
 
+    // After both passes the canonicalization state knows every object's spelling(s);
+    // record the inconsistently-cased ones for the incremental fast-path gate. Sorted
+    // so the persisted set is deterministic across builds (the raw `FxHashSet` order
+    // is not), keeping it byte-stable between full and incremental rebuilds.
+    let mut variants: Vec<String> = state
+        .casing_variant_keys()
+        .into_iter()
+        .map(|(ty, obj)| format!("{}/{}", ty.to_lowercase(), obj))
+        .collect();
+    variants.sort();
+    variants.dedup();
+    summary.casing_variant_objects = variants;
+
     Ok(summary)
+}
+
+/// Rows for a body-only incremental update: only the `changed` modules' method nodes
+/// and outgoing edges (plus the aux endpoint nodes those edges introduce), resolved
+/// through a full resident [`GraphIndex`] over `all_modules` so cross-module targets
+/// land identically to a full build. Aux node/edge ids carry the changed modules'
+/// own object spelling; canonicalising them against the existing store (which alone
+/// knows the persisted first-seen casing) is the caller's job.
+pub struct ReprojectedRows {
+    /// The changed modules' method nodes (kind `method`) plus the aux endpoint nodes
+    /// (kind `module`/`mdo`/`attribute`) their edges reference. Distinguish by `kind`.
+    pub nodes: Vec<NodeRow>,
+    /// The changed modules' outgoing edges (every `from_id` is a changed module's node).
+    pub edges: Vec<EdgeRow>,
+    /// Signature hash per changed module, for refreshing the persisted `files` rows.
+    pub sig_hashes: FxHashMap<ModuleId, u64>,
+    /// Casing variants observed AMONG the changed modules (lowercased
+    /// `englishtype/object`). A multi-file edit can introduce a newly inconsistent
+    /// object; merging these into the persisted set keeps a future reload from taking
+    /// the fast path for it. (Changed-vs-unchanged inconsistency is caught separately
+    /// by the stored-spelling drift gate.)
+    pub casing_variant_objects: Vec<String>,
+}
+
+/// Reproject ONLY `changed` modules for a body-only incremental update. Builds the
+/// full resident index over `all_modules` (resolution must see every target), then
+/// emits Phase-A method nodes and Phase-B edges + aux endpoints for the changed
+/// modules only — every unchanged module's rows are left for the caller to keep in
+/// place. The caller must have proven the body-only preconditions (each changed
+/// module's `sig_hash` unchanged, no file add/remove, no `.xml` drift).
+///
+/// `changed` MUST be a subset of `all_modules` in the same (file-id) order, so a
+/// brand-new aux object introduced by an edit gets the same first-seen spelling a
+/// full build would give it.
+pub fn reproject_changed_modules(
+    all_modules: &[ModuleId],
+    changed: &[ModuleId],
+    paths: &FxHashMap<FileId, String>,
+    workspace_root: Option<&Path>,
+    batch_size: usize,
+    open_batch: &mut BatchDbOpener<'_>,
+) -> Result<ReprojectedRows, Box<dyn std::error::Error + Send + Sync>> {
+    let batch_size = batch_size.max(1);
+    let pool = rayon::ThreadPoolBuilder::new().build()?;
+
+    // Full index over every module: a changed module's qualified/manager call into an
+    // unchanged module must still resolve, so the index cannot be limited to `changed`.
+    let mut index = GraphIndex::new();
+    for batch in all_modules.chunks(batch_size) {
+        let db = open_batch(batch);
+        index.add_batch(&pool, &db, batch);
+    }
+
+    let encoder = GraphRowEncoder::new(&index, paths, workspace_root);
+    let changed_set: FxHashSet<ModuleId> = changed.iter().copied().collect();
+
+    // Phase A — method nodes for the changed modules only.
+    let mut nodes: Vec<NodeRow> = index
+        .method_nodes()
+        .filter(|m| changed_set.contains(&m.module))
+        .map(|m| encoder.node_row(&GraphNode::Method(m)))
+        .collect();
+
+    // Phase B — project the changed modules' edges (call pass then query pass, the
+    // fold's order) over one database holding just their texts, with a fresh state.
+    // The resulting aux spellings are first-seen WITHIN the changed set, which the
+    // caller overrides against the store for objects an unchanged module already owns;
+    // a genuinely new object is owned by the changed set in both paths.
+    let db = open_batch(changed);
+    let mut state = GraphBuildState::new();
+    let mut projected = project_batch_call_edges(&pool, &db, changed, &index, &mut state);
+    projected.extend(project_batch_query_edges(&pool, &db, changed, &mut state));
+
+    let mut seen_aux: FxHashSet<String> = FxHashSet::default();
+    let mut edges: Vec<EdgeRow> = Vec::with_capacity(projected.len());
+    for edge in &projected {
+        for endpoint in [&edge.from, &edge.to] {
+            // Method endpoints are covered by Phase A (changed) or already in the store
+            // (unchanged target) — never re-emitted here.
+            if matches!(endpoint, GraphNode::Method(_)) {
+                continue;
+            }
+            let row = encoder.node_row(endpoint);
+            if seen_aux.insert(row.id.clone()) {
+                nodes.push(row);
+            }
+        }
+        edges.push(encoder.edge_row(edge));
+    }
+
+    let sig_hashes: FxHashMap<ModuleId, u64> =
+        changed.iter().filter_map(|&m| index.module_sig_hash(m).map(|h| (m, h))).collect();
+    let mut casing_variant_objects: Vec<String> = state
+        .casing_variant_keys()
+        .into_iter()
+        .map(|(ty, obj)| format!("{}/{}", ty.to_lowercase(), obj))
+        .collect();
+    casing_variant_objects.sort();
+    casing_variant_objects.dedup();
+
+    Ok(ReprojectedRows { nodes, edges, sig_hashes, casing_variant_objects })
 }
 
 struct GraphCtx<'a> {
