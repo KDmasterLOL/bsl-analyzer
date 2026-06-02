@@ -291,6 +291,22 @@ impl GraphState {
             return;
         }
 
+        // On reload the previous build is still on disk; classify which files drifted
+        // against its stored per-file fingerprints. Observational for now (the full
+        // rebuild below still runs) — the body-only fast path will branch on this.
+        if is_reload {
+            let stored = read_stored_fingerprints(&graph_db_path(&workspace_root));
+            let diff = classify_changes(&stored, &scan_file_stats(&workspace_root));
+            tracing::info!(
+                added = diff.added.len(),
+                removed = diff.removed.len(),
+                modified = diff.modified.len(),
+                xml = diff.touches_metadata(),
+                empty = diff.is_empty(),
+                "graph reload: classified workspace drift"
+            );
+        }
+
         tracing::info!(?workspace_root, is_reload, generation, "graph database build started");
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             // Bracket the build with two fingerprint scans. The build reads files
@@ -437,16 +453,35 @@ fn scan_roots(workspace_root: &Path) -> Vec<PathBuf> {
     roots
 }
 
-/// A cheap, order-independent fingerprint of the graph-relevant files on disk.
-///
-/// Covers both `.bsl` sources and `.xml` metadata descriptors: graph resolution
+/// One graph-relevant file's stat-only identity: canonical `/`-normalised path,
+/// mtime in nanos, and length. Produced once per scan and shared by the
+/// whole-workspace fingerprint (which folds them) and the per-file `files` table
+/// (which persists them for granular drift classification).
+pub(crate) struct FileStat {
+    pub(crate) path: String,
+    mtime: u128,
+    len: u64,
+}
+
+impl FileStat {
+    /// The per-file fingerprint stored in (and compared against) the `files` table.
+    /// Must stay deterministic across runs so a reload's recomputed value matches the
+    /// stored one for an unchanged file.
+    pub(crate) fn fingerprint(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        (self.mtime, self.len).hash(&mut hasher);
+        hasher.finish()
+    }
+}
+
+/// Stat every graph-relevant file (`.bsl` sources + `.xml` metadata descriptors)
+/// under the scan roots, once. Covers both extensions because graph resolution
 /// depends on configuration visibility registered from the metadata, not only on
-/// module text, so a `.bsl`-only fingerprint would miss metadata-only drift. Uses
-/// `(canonical path, mtime, len)` — stat only, no file reads — and mirrors the
-/// loader's scan roots and symlink/canonicalization policy so it compares the same
-/// file universe (otherwise it would report phantom drift).
-fn workspace_fingerprint(workspace_root: &Path) -> u64 {
-    let mut entries: Vec<(String, u128, u64)> = Vec::new();
+/// module text. Uses `(canonical path, mtime, len)` — stat only, no file reads —
+/// and mirrors the loader's scan roots and symlink/canonicalization policy so it
+/// compares the same file universe (otherwise it would report phantom drift).
+pub(crate) fn scan_file_stats(workspace_root: &Path) -> Vec<FileStat> {
+    let mut stats: Vec<FileStat> = Vec::new();
     let mut seen: HashSet<PathBuf> = HashSet::new();
 
     for root in scan_roots(workspace_root) {
@@ -479,14 +514,99 @@ fn workspace_fingerprint(workspace_root: &Path) -> u64 {
                     (mtime, m.len())
                 })
                 .unwrap_or((0, 0));
-            entries.push((path.to_string_lossy().into_owned(), mtime, len));
+            stats.push(FileStat { path: path.to_string_lossy().into_owned(), mtime, len });
         }
     }
 
+    stats
+}
+
+/// A cheap, order-independent fingerprint of the graph-relevant files on disk.
+/// Folds every file's `(path, mtime, len)` into one `u64`; B4 cache reuse compares
+/// it for an exact whole-workspace match.
+fn workspace_fingerprint(workspace_root: &Path) -> u64 {
+    let mut entries: Vec<(String, u128, u64)> =
+        scan_file_stats(workspace_root).into_iter().map(|s| (s.path, s.mtime, s.len)).collect();
     entries.sort();
     let mut hasher = DefaultHasher::new();
     entries.hash(&mut hasher);
     hasher.finish()
+}
+
+/// Granular drift between a built graph's stored per-file fingerprints and the
+/// current on-disk state. The body-only fast path acts on this; today it is computed
+/// for observability while the full rebuild still runs.
+pub(crate) struct WorkspaceDiff {
+    pub(crate) added: Vec<String>,
+    pub(crate) removed: Vec<String>,
+    pub(crate) modified: Vec<String>,
+}
+
+impl WorkspaceDiff {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.added.is_empty() && self.removed.is_empty() && self.modified.is_empty()
+    }
+
+    /// Whether any changed file is `.xml` metadata. Metadata drift can change
+    /// configuration visibility for *any* module, so it forces a full rebuild — no
+    /// fast path is sound for it.
+    pub(crate) fn touches_metadata(&self) -> bool {
+        self.added.iter().chain(&self.removed).chain(&self.modified).any(|p| p.ends_with(".xml"))
+    }
+}
+
+/// Classify per-file drift between the stored fingerprint map (read from a built
+/// graph's `files` table) and the current on-disk stats. A path present only on disk
+/// is `added`, present only in the store is `removed`, present in both with a
+/// different fingerprint is `modified`.
+pub(crate) fn classify_changes(
+    stored: &std::collections::HashMap<String, u64>,
+    current: &[FileStat],
+) -> WorkspaceDiff {
+    let mut added = Vec::new();
+    let mut modified = Vec::new();
+    let mut seen: HashSet<&str> = HashSet::with_capacity(current.len());
+
+    for stat in current {
+        seen.insert(stat.path.as_str());
+        match stored.get(&stat.path) {
+            None => added.push(stat.path.clone()),
+            Some(&fp) if fp != stat.fingerprint() => modified.push(stat.path.clone()),
+            Some(_) => {}
+        }
+    }
+    let mut removed: Vec<String> =
+        stored.keys().filter(|p| !seen.contains(p.as_str())).cloned().collect();
+
+    added.sort();
+    modified.sort();
+    removed.sort();
+    WorkspaceDiff { added, removed, modified }
+}
+
+/// Read the stored per-file fingerprints from a built graph's `files` table. Any
+/// open/query failure (missing file, older schema without the table) yields an empty
+/// map, which classifies every current file as `added` → conservative full rebuild.
+pub(crate) fn read_stored_fingerprints(db_path: &Path) -> std::collections::HashMap<String, u64> {
+    let mut map = std::collections::HashMap::new();
+    // Read-only open: never create the file as a side effect. A missing/older DB
+    // errors here and yields an empty map → every current file classified `added`.
+    let Ok(conn) =
+        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+    else {
+        return map;
+    };
+    let Ok(mut stmt) = conn.prepare("SELECT path, fingerprint FROM files") else {
+        return map;
+    };
+    let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64)))
+    else {
+        return map;
+    };
+    for row in rows.flatten() {
+        map.insert(row.0, row.1);
+    }
+    map
 }
 
 /// The configuration source + extension metadata paths the resolver needs for
@@ -1261,6 +1381,114 @@ mod tests {
         write(root, "CommonModules/Сервер.xml", "<MetaDataObject/>");
         let after_xml = workspace_fingerprint(root);
         assert_ne!(after_bsl, after_xml, "a .xml metadata edit must change the fingerprint");
+    }
+
+    /// A build persists a per-file fingerprint for every `.bsl` AND `.xml` file, so
+    /// a later reload can classify drift granularly. `sig_hash` is NULL for now.
+    #[test]
+    fn build_persists_per_file_fingerprints_for_bsl_and_xml() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let out = graph_db_path(root);
+        fs::create_dir_all(out.parent().unwrap()).unwrap();
+        build_graph_database(
+            root,
+            &out,
+            1,
+            &crate::graph_db::GraphMeta {
+                revision: 1,
+                fingerprint: 0,
+                files: 0,
+                built_at: "t".to_string(),
+            },
+        )
+        .expect("graph database builds");
+
+        let conn = Connection::open(&out).unwrap();
+        let bsl: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files WHERE path LIKE '%.bsl'", [], |r| r.get(0))
+            .unwrap();
+        let xml: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files WHERE path LIKE '%.xml'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(bsl, 2, "both common-module bodies are fingerprinted");
+        assert_eq!(xml, 2, "both common-module descriptors are fingerprinted");
+
+        // The stored fingerprints match a fresh stat-scan: an unchanged workspace
+        // classifies as an empty diff.
+        let stored = read_stored_fingerprints(&out);
+        assert_eq!(stored.len(), 4);
+        let diff = classify_changes(&stored, &scan_file_stats(root));
+        assert!(
+            diff.is_empty(),
+            "unchanged workspace ⇒ empty diff: {:?}",
+            (&diff.added, &diff.removed, &diff.modified)
+        );
+
+        let null_sigs: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files WHERE sig_hash IS NOT NULL", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(null_sigs, 0, "sig_hash stays NULL in this phase");
+    }
+
+    /// `classify_changes` sorts each modified/added/removed file into the right
+    /// bucket, and `.xml` drift is flagged for the (forced) full-rebuild path.
+    #[test]
+    fn classify_changes_buckets_add_remove_modify_and_flags_xml() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let out = graph_db_path(root);
+        fs::create_dir_all(out.parent().unwrap()).unwrap();
+        build_graph_database(
+            root,
+            &out,
+            1,
+            &crate::graph_db::GraphMeta {
+                revision: 1,
+                fingerprint: 0,
+                files: 0,
+                built_at: "t".to_string(),
+            },
+        )
+        .expect("graph database builds");
+        let stored = read_stored_fingerprints(&out);
+
+        // Modify one body, add a new module, remove an existing one.
+        write(
+            root,
+            "CommonModules/Сервер/Ext/Module.bsl",
+            "&НаСервере\nФункция Считать() Экспорт Возврат 1; КонецФункции",
+        );
+        write_common_module(
+            root,
+            "Новый",
+            true,
+            "&НаСервере\nПроцедура П() Экспорт КонецПроцедуры",
+        );
+        fs::remove_file(root.join("CommonModules/Клиент/Ext/Module.bsl")).unwrap();
+
+        let diff = classify_changes(&stored, &scan_file_stats(root));
+        assert!(!diff.is_empty());
+
+        let ends = |v: &[String], suffix: &str| v.iter().filter(|p| p.ends_with(suffix)).count();
+        assert_eq!(ends(&diff.modified, "Сервер/Ext/Module.bsl"), 1, "edited body is modified");
+        assert_eq!(ends(&diff.added, "Новый/Ext/Module.bsl"), 1, "new body is added");
+        // The new module also drops a new `.xml` descriptor → metadata drift.
+        assert_eq!(ends(&diff.added, "Новый.xml"), 1, "new descriptor is added");
+        assert_eq!(ends(&diff.removed, "Клиент/Ext/Module.bsl"), 1, "deleted body is removed");
+        assert!(diff.touches_metadata(), "an added .xml descriptor forces the full-rebuild path");
+
+        // A modified-only `.bsl` (no add/remove, no `.xml`) does NOT flag metadata.
+        let body_only = WorkspaceDiff {
+            added: vec![],
+            removed: vec![],
+            modified: vec!["/cfg/SomeModule/Ext/Module.bsl".to_string()],
+        };
+        assert!(!body_only.touches_metadata(), "a body-only change does not touch metadata");
     }
 
     #[test]

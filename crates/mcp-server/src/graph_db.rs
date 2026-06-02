@@ -27,7 +27,21 @@ use crate::graph::{config_metadata_paths, db_for_files, enumerate_bsl_files};
 
 /// Bumped whenever the table layout changes so a stale on-disk cache from an
 /// older binary is rejected (via the `meta` row) and rebuilt.
-pub(crate) const SCHEMA_VERSION: u32 = 2;
+pub(crate) const SCHEMA_VERSION: u32 = 3;
+
+/// One file's persisted identity in the `files` table: its stat-only fingerprint
+/// and (for `.bsl`) its resolution-signature hash. Persisting these per path lets a
+/// reload classify drift granularly (which files changed) instead of only knowing
+/// the whole-workspace fingerprint moved.
+pub(crate) struct FileFingerprint {
+    /// Canonical, `/`-normalised path — the same string `workspace_fingerprint` folds.
+    pub path: String,
+    /// `hash(mtime, len)` for this file.
+    pub fingerprint: u64,
+    /// Resolution-signature hash, `None` for `.xml` (filled in by the body-only fast
+    /// path; currently always `None`).
+    pub sig_hash: Option<u64>,
+}
 
 /// Build-level metadata recorded in the `meta` table, used on reopen to decide
 /// whether a cached database still matches the current sources and binary. Node
@@ -105,6 +119,12 @@ impl GraphDbWriter {
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+
+            CREATE TABLE files (
+                path        TEXT PRIMARY KEY,
+                fingerprint INTEGER NOT NULL,
+                sig_hash    INTEGER
+            ) WITHOUT ROWID;
             ",
         )
         .context("initialising graph schema")?;
@@ -169,6 +189,28 @@ impl GraphDbWriter {
             }
         }
         tx.commit().context("commit edge batch")?;
+        Ok(())
+    }
+
+    /// Persist the per-file fingerprints into the `files` table. Used on reload to
+    /// classify which files drifted instead of only knowing the workspace-wide
+    /// fingerprint moved. `INSERT OR REPLACE` so a re-run at the same path is
+    /// idempotent.
+    pub(crate) fn write_files(&mut self, rows: &[FileFingerprint]) -> anyhow::Result<()> {
+        let tx = self.conn.transaction().context("begin files batch")?;
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT OR REPLACE INTO files (path, fingerprint, sig_hash) VALUES (?1, ?2, ?3)",
+            )?;
+            for row in rows {
+                stmt.execute(params![
+                    row.path,
+                    row.fingerprint as i64,
+                    row.sig_hash.map(|h| h as i64),
+                ])?;
+            }
+        }
+        tx.commit().context("commit files batch")?;
         Ok(())
     }
 
@@ -280,6 +322,20 @@ pub fn build_graph_database(
         )
         .map_err(|e| anyhow::anyhow!("{e}"))?
     };
+
+    // Persist a per-file fingerprint for every graph-relevant file (`.bsl` + `.xml`),
+    // covering the same universe the workspace fingerprint folds, so a later reload
+    // can classify drift granularly. `sig_hash` is left NULL until the body-only fast
+    // path computes it.
+    let file_rows: Vec<FileFingerprint> = crate::graph::scan_file_stats(workspace_root)
+        .iter()
+        .map(|s| FileFingerprint {
+            path: s.path.clone(),
+            fingerprint: s.fingerprint(),
+            sig_hash: None,
+        })
+        .collect();
+    writer.write_files(&file_rows)?;
 
     writer.finalize(meta)?;
     Ok(summary)
@@ -396,6 +452,37 @@ mod tests {
             )
             .unwrap();
         assert_eq!(qualified, "first", "INSERT OR IGNORE keeps the first-seen spelling");
+    }
+
+    #[test]
+    fn write_files_round_trips_fingerprints_and_null_sig_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bsl-graph.db");
+
+        let mut w = GraphDbWriter::create(&path).unwrap();
+        w.write_files(&[
+            FileFingerprint { path: "/cfg/A.bsl".to_string(), fingerprint: 111, sig_hash: None },
+            FileFingerprint { path: "/cfg/A.xml".to_string(), fingerprint: 222, sig_hash: None },
+        ])
+        .unwrap();
+        w.finalize(&GraphMeta { revision: 1, fingerprint: 0, files: 0, built_at: "t".to_string() })
+            .unwrap();
+
+        let conn = open(&path);
+        let (fp, sig): (i64, Option<i64>) = conn
+            .query_row(
+                "SELECT fingerprint, sig_hash FROM files WHERE path = '/cfg/A.bsl'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(fp as u64, 111);
+        assert_eq!(sig, None, "sig_hash is NULL until the body-only fast path fills it");
+
+        let xml_fp: i64 = conn
+            .query_row("SELECT fingerprint FROM files WHERE path = '/cfg/A.xml'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(xml_fp as u64, 222);
     }
 
     #[test]
