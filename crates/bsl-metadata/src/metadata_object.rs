@@ -404,6 +404,38 @@ pub enum StandardAttributeKind {
 }
 
 impl StandardAttributeKind {
+    /// Every standard-attribute kind. The single enumeration the name helpers below
+    /// derive from, so they cannot drift from the variant set (a missing entry fails
+    /// `standard_attribute_names_cover_every_kind`). Variant payloads are placeholders
+    /// — only the discriminant matters for naming.
+    pub const ALL: &'static [StandardAttributeKind] = &[
+        Self::Code { length: 0 },
+        Self::Description { length: 0 },
+        Self::Ref,
+        Self::DeletionMark,
+        Self::IsFolder,
+        Self::Owner,
+        Self::Parent,
+        Self::Predefined,
+        Self::PredefinedDataName,
+        Self::Number { length: 0 },
+        Self::Date,
+        Self::Posted,
+        Self::Started,
+        Self::Completed,
+        Self::HeadTask,
+        Self::Executed,
+        Self::TaskBusinessProcess,
+        Self::RoutePoint,
+        Self::ThisNode,
+        Self::ValueType,
+        Self::Order,
+        Self::Active,
+        Self::LineNumber,
+        Self::Recorder,
+        Self::Period,
+    ];
+
     pub fn attribute_type(&self, mdo_type: MdoType, object_name: &str) -> AttributeType {
         match self {
             Self::Code { length } => AttributeType::String { length: Some(*length) },
@@ -493,6 +525,24 @@ impl StandardAttributeKind {
             Self::Period => "Period",
         }
     }
+}
+
+/// Whether `name` is the name (Russian or English) of a platform standard attribute —
+/// one of the fields `add_*_standard_attributes` synthesises onto every object during
+/// configuration load. Derived from [`StandardAttributeKind::ALL`], so it is the single
+/// source of truth: a consumer that wants only user-declared attributes (the call-graph
+/// catalog pass, the SDBL scope builder) filters against this. Case-insensitive.
+///
+/// Name-based by necessity — the synthesised attributes are merged into the same
+/// `attributes` list as user ones with no surviving marker — so a user attribute that
+/// happens to be named exactly like a standard one is treated as standard.
+pub fn is_standard_attribute_name(name: &str) -> bool {
+    // Unicode-aware fold: `eq_ignore_ascii_case` does not fold Cyrillic (С ≠ с), so the
+    // Russian names need full lowercasing.
+    let name = name.to_lowercase();
+    StandardAttributeKind::ALL.iter().any(|kind| {
+        kind.russian_name().to_lowercase() == name || kind.english_name().to_lowercase() == name
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -747,6 +797,26 @@ impl std::fmt::Display for AttributeType {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_standard_attribute_name_matches_every_kind() {
+        // Both name forms of every kind must be recognised, and a clearly
+        // non-standard name must not be.
+        for kind in StandardAttributeKind::ALL {
+            assert!(
+                is_standard_attribute_name(kind.russian_name()),
+                "{} (ru) must be standard",
+                kind.russian_name()
+            );
+            assert!(
+                is_standard_attribute_name(kind.english_name()),
+                "{} (en) must be standard",
+                kind.english_name()
+            );
+        }
+        assert!(is_standard_attribute_name("ссылка"), "case-insensitive");
+        assert!(!is_standard_attribute_name("ИНН"));
+    }
 
     #[test]
     fn test_mdo_type_from_str_russian() {

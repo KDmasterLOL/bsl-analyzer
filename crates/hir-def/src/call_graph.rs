@@ -265,6 +265,22 @@ pub enum GraphNode {
         form_name: Name,
         attr_name: Name,
     },
+    /// A tabular section (табличная часть) of a metadata object. `object_name` shares
+    /// the [`GraphNode::Mdo`] canonicalisation; `section_name` is the declared name.
+    TabularSection {
+        mdo_type: MdoType,
+        object_name: Name,
+        section_name: Name,
+    },
+    /// A column of a tabular section, reached through its [`GraphNode::TabularSection`]
+    /// (the `<object>.<section>.<column>` hierarchy). Distinct identity from a
+    /// top-level [`GraphNode::Attribute`] of the same object.
+    TabularSectionAttribute {
+        mdo_type: MdoType,
+        object_name: Name,
+        section_name: Name,
+        attr_name: Name,
+    },
 }
 
 /// A resolved call edge between two workspace graph nodes.

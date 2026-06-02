@@ -20,8 +20,8 @@ use bsl_metadata::MdoType;
 use hir::call_graph::{EdgeKind, MethodDispatch};
 use hir::graph_index::{
     display_scope, encode_scope, form_qualified_prefix, form_scope, project_batch_call_edges,
-    project_batch_form_edges, project_batch_query_edges, EdgeRow, GraphBuildState, GraphIndex,
-    GraphRowEncoder, NodeRow,
+    project_batch_form_edges, project_batch_query_edges, project_workspace_catalog_edges, EdgeRow,
+    GraphBuildState, GraphIndex, GraphRowEncoder, NodeRow,
 };
 use hir::{
     module_key_for_path, ConfigsDatabase, DefDatabase, GraphNode, MethodId, ModuleId, ModuleIndex,
@@ -98,6 +98,7 @@ pub struct GraphOverview {
     pub methods: usize,
     pub mdos: usize,
     pub attributes: usize,
+    pub tabular_sections: usize,
     pub forms: usize,
     pub form_items: usize,
     pub form_attributes: usize,
@@ -418,6 +419,20 @@ pub fn build_workspace_graph_rows(
         emit(&edges, &mut summary, &mut seen_aux, sink)?;
     }
 
+    // Phase D — `contains` edges from the metadata catalog: `mdo → attribute`,
+    // `mdo → tabular_section`, `tabular_section → attribute`, for EVERY object in
+    // every visible configuration (not just code-referenced ones). Runs once, last,
+    // sharing `state` so a code-referenced object keeps its code spelling and a
+    // metadata-only object is first-seen here. Sequential on the driver thread (Salsa
+    // attaches one database per thread; the config loader fans out over its own
+    // scope), reusing one batch database for its config access. Full-build only — the
+    // catalog is stable under body edits, so the incremental path never re-derives it.
+    if let Some(first) = modules.chunks(batch_size).next() {
+        let db = open_batch(first);
+        let edges = project_workspace_catalog_edges(&db, first[0].file_id, &mut state);
+        emit(&edges, &mut summary, &mut seen_aux, sink)?;
+    }
+
     // After both passes the canonicalization state knows every object's spelling(s);
     // record the inconsistently-cased ones for the incremental fast-path gate. Sorted
     // so the persisted set is deterministic across builds (the raw `FxHashSet` order
@@ -630,6 +645,30 @@ impl<'a> GraphCtx<'a> {
                 ),
                 true,
             ),
+            GraphNode::TabularSection { mdo_type, object_name, section_name } => (
+                format!(
+                    "tabular_section/{}/{}/{}",
+                    mdo_type.english_name(),
+                    object_name.as_str(),
+                    section_name.as_str()
+                ),
+                true,
+            ),
+            GraphNode::TabularSectionAttribute {
+                mdo_type,
+                object_name,
+                section_name,
+                attr_name,
+            } => (
+                format!(
+                    "ts_attr/{}/{}/{}/{}",
+                    mdo_type.english_name(),
+                    object_name.as_str(),
+                    section_name.as_str(),
+                    attr_name.as_str()
+                ),
+                true,
+            ),
         }
     }
 
@@ -690,6 +729,12 @@ impl<'a> GraphCtx<'a> {
             }
             GraphIdKind::FormAttribute { owner, form_name, attr_name } => {
                 self.find_form_attribute_node(&owner, &form_name, &attr_name, id)
+            }
+            GraphIdKind::TabularSection { mdo_type, object, section } => {
+                self.find_tabular_section_node(mdo_type, &object, &section, id)
+            }
+            GraphIdKind::TabularSectionAttribute { mdo_type, object, section, attr } => {
+                self.find_tabular_section_attribute_node(mdo_type, &object, &section, &attr, id)
             }
         }
     }
@@ -817,6 +862,53 @@ impl<'a> GraphCtx<'a> {
             .ok_or_else(|| GraphError::NotFound { id: id.to_string() })
     }
 
+    /// The tabular-section node for `(mdo_type, object, section)`, if the graph
+    /// references it. Case-insensitive on object and section names.
+    fn find_tabular_section_node(
+        &self,
+        mdo_type: MdoType,
+        object: &str,
+        section: &str,
+        id: &str,
+    ) -> Result<GraphNode, GraphError> {
+        let object_lower = object.to_lowercase();
+        let section_lower = section.to_lowercase();
+        self.graph
+            .nodes()
+            .find(|n| {
+                matches!(n, GraphNode::TabularSection { mdo_type: mt, object_name, section_name }
+                    if *mt == mdo_type
+                        && object_name.as_str().to_lowercase() == object_lower
+                        && section_name.as_str().to_lowercase() == section_lower)
+            })
+            .ok_or_else(|| GraphError::NotFound { id: id.to_string() })
+    }
+
+    /// The tabular-section column node for `(mdo_type, object, section, attr)`.
+    /// Case-insensitive on all name components.
+    fn find_tabular_section_attribute_node(
+        &self,
+        mdo_type: MdoType,
+        object: &str,
+        section: &str,
+        attr: &str,
+        id: &str,
+    ) -> Result<GraphNode, GraphError> {
+        let object_lower = object.to_lowercase();
+        let section_lower = section.to_lowercase();
+        let attr_lower = attr.to_lowercase();
+        self.graph
+            .nodes()
+            .find(|n| {
+                matches!(n, GraphNode::TabularSectionAttribute { mdo_type: mt, object_name, section_name, attr_name }
+                    if *mt == mdo_type
+                        && object_name.as_str().to_lowercase() == object_lower
+                        && section_name.as_str().to_lowercase() == section_lower
+                        && attr_name.as_str().to_lowercase() == attr_lower)
+            })
+            .ok_or_else(|| GraphError::NotFound { id: id.to_string() })
+    }
+
     fn resolve_rel_path(&self, rel: &str) -> Option<FileId> {
         for file_id in self.source_root.iter() {
             let abs = match self.path_for(file_id) {
@@ -904,6 +996,46 @@ impl<'a> GraphCtx<'a> {
                 ),
                 name: attr_name.as_str().to_string(),
                 kind: "form_attribute",
+                id,
+                module: None,
+                signature: None,
+                source: None,
+                dispatch: Vec::new(),
+                is_export: None,
+                addressable,
+            },
+            GraphNode::TabularSection { mdo_type, object_name, section_name } => NodeRef {
+                qualified: format!(
+                    "{}.{}.ТабличнаяЧасть.{}",
+                    mdo_type.russian_name(),
+                    object_name.as_str(),
+                    section_name.as_str()
+                ),
+                name: section_name.as_str().to_string(),
+                kind: "tabular_section",
+                id,
+                module: None,
+                signature: None,
+                source: None,
+                dispatch: Vec::new(),
+                is_export: None,
+                addressable,
+            },
+            GraphNode::TabularSectionAttribute {
+                mdo_type,
+                object_name,
+                section_name,
+                attr_name,
+            } => NodeRef {
+                qualified: format!(
+                    "{}.{}.{}.{}",
+                    mdo_type.russian_name(),
+                    object_name.as_str(),
+                    section_name.as_str(),
+                    attr_name.as_str()
+                ),
+                name: attr_name.as_str().to_string(),
+                kind: "attribute",
                 id,
                 module: None,
                 signature: None,
@@ -1082,7 +1214,9 @@ impl<'a> GraphCtx<'a> {
                 | Ok(GraphNode::Attribute { .. })
                 | Ok(GraphNode::Form { .. })
                 | Ok(GraphNode::FormItem { .. })
-                | Ok(GraphNode::FormAttribute { .. }) => SourceItem {
+                | Ok(GraphNode::FormAttribute { .. })
+                | Ok(GraphNode::TabularSection { .. })
+                | Ok(GraphNode::TabularSectionAttribute { .. }) => SourceItem {
                     id: id.clone(),
                     source: None,
                     error: Some(GraphError::Unsupported {
@@ -1124,6 +1258,7 @@ impl<'a> GraphCtx<'a> {
         let mut modules = 0usize;
         let mut mdos = 0usize;
         let mut attributes = 0usize;
+        let mut tabular_sections = 0usize;
         let mut forms = 0usize;
         let mut form_items = 0usize;
         let mut form_attributes = 0usize;
@@ -1135,6 +1270,8 @@ impl<'a> GraphCtx<'a> {
                 GraphNode::ModuleCode(_) => modules += 1,
                 GraphNode::Mdo { .. } => mdos += 1,
                 GraphNode::Attribute { .. } => attributes += 1,
+                GraphNode::TabularSectionAttribute { .. } => attributes += 1,
+                GraphNode::TabularSection { .. } => tabular_sections += 1,
                 GraphNode::Form { .. } => forms += 1,
                 GraphNode::FormItem { .. } => form_items += 1,
                 GraphNode::FormAttribute { .. } => form_attributes += 1,
@@ -1168,6 +1305,7 @@ impl<'a> GraphCtx<'a> {
             methods,
             mdos,
             attributes,
+            tabular_sections,
             forms,
             form_items,
             form_attributes,
@@ -1312,6 +1450,10 @@ pub enum GraphIdKind {
     /// `form_attr/<MdoEnglish>/<Object>/<Form>/<Attr>` or
     /// `form_attr/common/<Form>/<Attr>`.
     FormAttribute { owner: Option<(MdoType, String)>, form_name: String, attr_name: String },
+    /// `tabular_section/<MdoEnglish>/<Object>/<Section>`.
+    TabularSection { mdo_type: MdoType, object: String, section: String },
+    /// `ts_attr/<MdoEnglish>/<Object>/<Section>/<Attr>`.
+    TabularSectionAttribute { mdo_type: MdoType, object: String, section: String, attr: String },
 }
 
 /// A form's owner: `None` for a common form, `Some((type, object))` for an
@@ -1366,6 +1508,40 @@ pub fn classify_graph_id(id: &str) -> Result<GraphIdKind, GraphError> {
             mdo_type,
             object: object.to_string(),
             attr: attr.to_string(),
+        });
+    }
+    // `ts_attr/` before `tabular_section/`: distinct prefixes, but keep the more
+    // specific column id alongside its section id for readability.
+    if let Some(rest) = id.strip_prefix("ts_attr/") {
+        let mut parts = rest.splitn(4, '/');
+        let structure =
+            || bad("ts attribute id must be 'ts_attr/<MdoType>/<Object>/<Section>/<Attr>'");
+        let mdo_eng = parts.next().ok_or_else(structure)?;
+        let object = parts.next().ok_or_else(structure)?;
+        let section = parts.next().ok_or_else(structure)?;
+        let attr = parts.next().ok_or_else(structure)?;
+        let mdo_type =
+            mdo_eng.parse().map_err(|_| bad(&format!("unknown metadata type '{mdo_eng}'")))?;
+        return Ok(GraphIdKind::TabularSectionAttribute {
+            mdo_type,
+            object: object.to_string(),
+            section: section.to_string(),
+            attr: attr.to_string(),
+        });
+    }
+    if let Some(rest) = id.strip_prefix("tabular_section/") {
+        let mut parts = rest.splitn(3, '/');
+        let structure =
+            || bad("tabular section id must be 'tabular_section/<MdoType>/<Object>/<Section>'");
+        let mdo_eng = parts.next().ok_or_else(structure)?;
+        let object = parts.next().ok_or_else(structure)?;
+        let section = parts.next().ok_or_else(structure)?;
+        let mdo_type =
+            mdo_eng.parse().map_err(|_| bad(&format!("unknown metadata type '{mdo_eng}'")))?;
+        return Ok(GraphIdKind::TabularSection {
+            mdo_type,
+            object: object.to_string(),
+            section: section.to_string(),
         });
     }
     if let Some(rest) = id.strip_prefix("form_attr/") {
@@ -1678,6 +1854,17 @@ mod tests {
             Ok(GraphIdKind::FormAttribute { owner: None, form_name, attr_name })
                 if form_name == "Ф" && attr_name == "Список"
         ));
+        // Tabular sections and their columns.
+        assert!(matches!(
+            classify_graph_id("tabular_section/Catalog/Контрагенты/Товары"),
+            Ok(GraphIdKind::TabularSection { object, section, .. })
+                if object == "Контрагенты" && section == "Товары"
+        ));
+        assert!(matches!(
+            classify_graph_id("ts_attr/Catalog/Контрагенты/Товары/Цена"),
+            Ok(GraphIdKind::TabularSectionAttribute { object, section, attr, .. })
+                if object == "Контрагенты" && section == "Товары" && attr == "Цена"
+        ));
 
         // Malformed ids are BadId.
         for bad in [
@@ -1693,6 +1880,10 @@ mod tests {
             "form_item/common/OnlyForm",
             "form_attr/common/OnlyForm",
             "form_attr/NoSuchType/X/Ф/А",
+            "tabular_section/Catalog/OnlyObject",
+            "tabular_section/NoSuchType/X/TС",
+            "ts_attr/Catalog/Obj/OnlySection",
+            "ts_attr/NoSuchType/X/TС/К",
         ] {
             assert!(
                 matches!(classify_graph_id(bad), Err(GraphError::BadId { .. })),
@@ -2072,10 +2263,28 @@ mod tests {
             form_name: Name::new("ОбщаяФорма1"),
             attr_name: Name::new("Список"),
         };
+        let section = GraphNode::TabularSection {
+            mdo_type: MdoType::Catalog,
+            object_name: Name::new("Контрагенты"),
+            section_name: Name::new("Товары"),
+        };
+        let section_attr = GraphNode::TabularSectionAttribute {
+            mdo_type: MdoType::Catalog,
+            object_name: Name::new("Контрагенты"),
+            section_name: Name::new("Товары"),
+            attr_name: Name::new("Цена"),
+        };
 
-        for node in
-            [&object_form, &common_form, &object_item, &common_item, &object_attr, &common_attr]
-        {
+        for node in [
+            &object_form,
+            &common_form,
+            &object_item,
+            &common_item,
+            &object_attr,
+            &common_attr,
+            &section,
+            &section_attr,
+        ] {
             assert_eq!(encoder.encode(node), ctx.encode_node(node), "encode mismatch for {node:?}");
             let row = encoder.node_row(node);
             let serve = ctx.node_ref(node.clone(), GraphDetail::Names);
@@ -2098,6 +2307,8 @@ mod tests {
             "form_attr/Catalog/Контрагенты/ФормаЭлемента/Объект"
         );
         assert_eq!(encoder.encode(&common_attr).0, "form_attr/common/ОбщаяФорма1/Список");
+        assert_eq!(encoder.encode(&section).0, "tabular_section/Catalog/Контрагенты/Товары");
+        assert_eq!(encoder.encode(&section_attr).0, "ts_attr/Catalog/Контрагенты/Товары/Цена");
 
         let edge = WorkspaceCallEdge {
             from: object_form.clone(),

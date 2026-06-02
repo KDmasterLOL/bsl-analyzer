@@ -131,9 +131,9 @@ fn structured(body: Value) -> CallToolResult {
 /// independent of the on-disk SQLite cache layout in [`crate::graph_db`]).
 fn schema_json() -> Value {
     json!({
-        "schema_version": "4",
+        "schema_version": "5",
         "actions": ["overview", "schema", "node", "source", "neighbors", "callers", "callees"],
-        "node_kinds": ["method", "module", "mdo", "attribute", "form", "form_item", "form_attribute"],
+        "node_kinds": ["method", "module", "mdo", "attribute", "tabular_section", "form", "form_item", "form_attribute"],
         "edge_kinds": ["call", "manager_creates", "manager_access", "query_ref", "contains"],
         "provenance": ["resolved", "inferred", "visibility_blocked", "unresolved"],
         "dispatch": ["client", "server"],
@@ -156,6 +156,8 @@ fn schema_json() -> Value {
             "module": "module/common/<Module>",
             "mdo": "mdo/<MdoEnglish>/<ObjectName>",
             "attribute": "attribute/<MdoEnglish>/<ObjectName>/<AttrName>",
+            "tabular_section": "tabular_section/<MdoEnglish>/<ObjectName>/<Section>",
+            "tabular_section_attribute": "ts_attr/<MdoEnglish>/<ObjectName>/<Section>/<AttrName> (node kind: attribute)",
             "form": "form/<MdoEnglish>/<Object>/<Form> or form/common/<Form>",
             "form_item": "form_item/<MdoEnglish>/<Object>/<Form>/<Item> or form_item/common/<Form>/<Item>",
             "form_attribute": "form_attr/<MdoEnglish>/<Object>/<Form>/<Attr> or form_attr/common/<Form>/<Attr>",
@@ -183,10 +185,10 @@ mod tests {
     fn schema_advertises_the_current_contract_shape() {
         let schema = schema_json();
         // The contract version must be bumped in lockstep with response-shape
-        // changes; `total` is part of that shape since this revision, `form`/
-        // `form_item` node kinds + the `contains` edge kind since version 3, and the
-        // `form_attribute` node kind since version 4.
-        assert_eq!(schema["schema_version"], "4");
+        // changes; `total` since this revision, `form`/`form_item` + `contains` since
+        // version 3, `form_attribute` since version 4, and `tabular_section` since
+        // version 5.
+        assert_eq!(schema["schema_version"], "5");
         assert!(
             schema["neighbors_result"]["total"].is_string(),
             "neighbours result must document the `total` field"
@@ -195,6 +197,7 @@ mod tests {
         assert!(node_kinds.iter().any(|k| k == "form"));
         assert!(node_kinds.iter().any(|k| k == "form_item"));
         assert!(node_kinds.iter().any(|k| k == "form_attribute"));
+        assert!(node_kinds.iter().any(|k| k == "tabular_section"));
         assert!(schema["edge_kinds"].as_array().unwrap().iter().any(|k| k == "contains"));
     }
 
@@ -224,7 +227,7 @@ mod tests {
     #[test]
     fn schema_and_loading_populate_structured_content() {
         assert_structured_mirrors_text(&schema());
-        assert_eq!(schema().structured_content.unwrap()["schema_version"], "4");
+        assert_eq!(schema().structured_content.unwrap()["schema_version"], "5");
 
         assert_structured_mirrors_text(&loading(Some("indexing")));
         let body = loading(Some("indexing")).structured_content.unwrap();

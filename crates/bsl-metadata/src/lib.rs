@@ -38,7 +38,8 @@ pub use http_service::{
 };
 pub use loader::load_from_directory;
 pub use metadata_object::{
-    Attribute, AttributeType, MdoType, MetadataObject, Name, PlatformValueType,
+    is_standard_attribute_name, Attribute, AttributeType, MdoType, MetadataObject, Name,
+    PlatformValueType,
 };
 pub use metadata_resolver::{resolve_defined_type_terminal, MetadataResolver};
 pub use register::{

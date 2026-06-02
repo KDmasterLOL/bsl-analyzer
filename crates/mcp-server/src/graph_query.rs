@@ -67,6 +67,7 @@ fn node_kind(kind: &str) -> &'static str {
         "form" => "form",
         "form_item" => "form_item",
         "form_attribute" => "form_attribute",
+        "tabular_section" => "tabular_section",
         _ => "method",
     }
 }
@@ -261,6 +262,23 @@ impl GraphDb {
                     format!("form_attr/common/{form_name}/{attr_name}").to_lowercase(),
                 ),
             },
+            GraphIdKind::TabularSection { mdo_type, object, section } => {
+                let eng = mdo_type.english_name();
+                (
+                    "tabular_section",
+                    format!("tabular_section/{eng}/"),
+                    format!("tabular_section/{eng}/{object}/{section}").to_lowercase(),
+                )
+            }
+            GraphIdKind::TabularSectionAttribute { mdo_type, object, section, attr } => {
+                let eng = mdo_type.english_name();
+                // Stored as an `attribute`-kind node with a `ts_attr/` id.
+                (
+                    "attribute",
+                    format!("ts_attr/{eng}/"),
+                    format!("ts_attr/{eng}/{object}/{section}/{attr}").to_lowercase(),
+                )
+            }
             _ => return Ok(Err(GraphError::NotFound { id: id.to_string() })),
         };
         let mut stmt = self
@@ -341,6 +359,8 @@ impl GraphDb {
         let modules = self.count("SELECT COUNT(*) FROM nodes WHERE kind='module'")?;
         let mdos = self.count("SELECT COUNT(*) FROM nodes WHERE kind='mdo'")?;
         let attributes = self.count("SELECT COUNT(*) FROM nodes WHERE kind='attribute'")?;
+        let tabular_sections =
+            self.count("SELECT COUNT(*) FROM nodes WHERE kind='tabular_section'")?;
         let forms = self.count("SELECT COUNT(*) FROM nodes WHERE kind='form'")?;
         let form_items = self.count("SELECT COUNT(*) FROM nodes WHERE kind='form_item'")?;
         let form_attributes =
@@ -379,6 +399,7 @@ impl GraphDb {
             methods,
             mdos,
             attributes,
+            tabular_sections,
             forms,
             form_items,
             form_attributes,

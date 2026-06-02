@@ -769,6 +769,152 @@ pub fn project_batch_form_edges<DB: ConfigsDatabase + Clone + Send>(
     edges
 }
 
+/// One metadata object's declared structure, gathered for the catalog pass.
+struct CatalogObject {
+    mdo_type: MdoType,
+    name: String,
+    /// Top-level attribute names (object attributes, or register
+    /// dimensions/resources/attributes), declaration order.
+    attrs: Vec<String>,
+    /// Tabular sections, each with its column names. Empty for registers.
+    sections: Vec<(String, Vec<String>)>,
+}
+
+/// The whole metadata catalog as `contains` edges: `mdo → attribute` (object
+/// attributes + register dimensions/resources/attributes), `mdo → tabular_section`,
+/// and `tabular_section → attribute` (the section column). Driven by the metadata
+/// catalog — **every** object in every visible configuration, whether or not code
+/// references it — so the structural node set is stable under body edits and an
+/// incremental update (which never runs this pass) stays byte-identical to a full
+/// rebuild. Any metadata/`.xml` change already forces a full rebuild.
+///
+/// Run ONCE on the driver thread after the call/query/form passes, sharing `state`
+/// so an object's `mdo` node inherits the canonical spelling code sites assigned (a
+/// metadata-only object is first-seen here). Objects are visited in a deterministic
+/// `(english type, lowercased name)` order so first-seen canonicalisation and the
+/// emitted edge set never depend on configuration load order. The union across base +
+/// extension configurations is by node identity: a duplicated object/attribute/column
+/// dedups, so an extension that adds attributes to a base object contributes only its
+/// new ones.
+pub fn project_workspace_catalog_edges<DB: ConfigsDatabase>(
+    db: &DB,
+    representative: FileId,
+    state: &mut GraphBuildState,
+) -> Vec<WorkspaceCallEdge> {
+    // Platform standard attributes (Ссылка/Код/Наименование/…) are synthesised onto
+    // every object and carry no configuration-specific structure; exclude them so the
+    // catalog covers exactly the user-declared attributes (the same standard-field
+    // exclusion the query-ref pass applies). `is_standard_attribute_name` is derived
+    // from `StandardAttributeKind`, the enum the synthesiser builds them from.
+    let is_standard = bsl_metadata::is_standard_attribute_name;
+
+    let mut objects: Vec<CatalogObject> = Vec::new();
+    for visible in db.configurations(representative) {
+        let config = &visible.configuration;
+        for mdo in config.metadata_objects() {
+            objects.push(CatalogObject {
+                mdo_type: mdo.mdo_type,
+                name: mdo.name.clone(),
+                attrs: mdo
+                    .attributes
+                    .iter()
+                    .map(|a| a.name.clone())
+                    .filter(|n| !is_standard(n))
+                    .collect(),
+                sections: mdo
+                    .tabular_sections
+                    .iter()
+                    .map(|ts| {
+                        (
+                            ts.name().to_string(),
+                            ts.attributes().iter().map(|c| c.name().to_string()).collect(),
+                        )
+                    })
+                    .collect(),
+            });
+        }
+        for reg in config.registers() {
+            let mut attrs = Vec::new();
+            // Dimensions and resources are always user-declared; only the register's
+            // `attributes` bucket can hold synthesised standard fields (Период, …).
+            attrs.extend(reg.dimensions().iter().map(|d| d.name().to_string()));
+            attrs.extend(reg.resources().iter().map(|r| r.name().to_string()));
+            attrs.extend(
+                reg.attributes().iter().map(|a| a.name().to_string()).filter(|n| !is_standard(n)),
+            );
+            objects.push(CatalogObject {
+                mdo_type: reg.mdo_type(),
+                name: reg.name().to_string(),
+                attrs,
+                sections: Vec::new(),
+            });
+        }
+    }
+    // Deterministic visitation regardless of configuration load order. The original
+    // spelling is the final tiebreaker so that two objects sharing a lowercased name
+    // across configs (e.g. base + extension with different casing) always yield the
+    // same first-seen canonical spelling, independent of base-vs-extension load order.
+    objects.sort_by(|a, b| {
+        a.mdo_type
+            .english_name()
+            .cmp(b.mdo_type.english_name())
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+
+    let mut edges = Vec::new();
+    let mut seen_attr: FxHashSet<(MdoType, String, String)> = FxHashSet::default();
+    let mut seen_ts: FxHashSet<(MdoType, String, String)> = FxHashSet::default();
+    let mut seen_ts_attr: FxHashSet<(MdoType, String, String, String)> = FxHashSet::default();
+    for obj in &objects {
+        let object_name = state.mdo_canonical.canonical(obj.mdo_type, &obj.name);
+        let key = object_name.as_str().to_lowercase();
+        let mdo = GraphNode::Mdo { mdo_type: obj.mdo_type, object_name: object_name.clone() };
+        for attr in &obj.attrs {
+            if seen_attr.insert((obj.mdo_type, key.clone(), attr.to_lowercase())) {
+                edges.push(contains_edge(
+                    mdo.clone(),
+                    GraphNode::Attribute {
+                        mdo_type: obj.mdo_type,
+                        object_name: object_name.clone(),
+                        attr_name: crate::name::Name::new(attr),
+                    },
+                ));
+            }
+        }
+        for (section, cols) in &obj.sections {
+            let section_lower = section.to_lowercase();
+            let ts = GraphNode::TabularSection {
+                mdo_type: obj.mdo_type,
+                object_name: object_name.clone(),
+                section_name: crate::name::Name::new(section),
+            };
+            if seen_ts.insert((obj.mdo_type, key.clone(), section_lower.clone())) {
+                edges.push(contains_edge(mdo.clone(), ts.clone()));
+            }
+            for col in cols {
+                if seen_ts_attr.insert((
+                    obj.mdo_type,
+                    key.clone(),
+                    section_lower.clone(),
+                    col.to_lowercase(),
+                )) {
+                    edges.push(contains_edge(
+                        ts.clone(),
+                        GraphNode::TabularSectionAttribute {
+                            mdo_type: obj.mdo_type,
+                            object_name: object_name.clone(),
+                            section_name: crate::name::Name::new(section),
+                            attr_name: crate::name::Name::new(col),
+                        },
+                    ));
+                }
+            }
+        }
+    }
+    edges
+}
+
 fn contains_edge(from: GraphNode, to: GraphNode) -> WorkspaceCallEdge {
     WorkspaceCallEdge {
         from,
@@ -1007,6 +1153,30 @@ impl<'a> GraphRowEncoder<'a> {
                 ),
                 true,
             ),
+            GraphNode::TabularSection { mdo_type, object_name, section_name } => (
+                format!(
+                    "tabular_section/{}/{}/{}",
+                    mdo_type.english_name(),
+                    object_name.as_str(),
+                    section_name.as_str()
+                ),
+                true,
+            ),
+            GraphNode::TabularSectionAttribute {
+                mdo_type,
+                object_name,
+                section_name,
+                attr_name,
+            } => (
+                format!(
+                    "ts_attr/{}/{}/{}/{}",
+                    mdo_type.english_name(),
+                    object_name.as_str(),
+                    section_name.as_str(),
+                    attr_name.as_str()
+                ),
+                true,
+            ),
         }
     }
 
@@ -1135,6 +1305,52 @@ impl<'a> GraphRowEncoder<'a> {
                     "{}.Форма.{}.Реквизит.{}",
                     form_qualified_prefix(owner),
                     form_name.as_str(),
+                    attr_name.as_str()
+                ),
+                module: None,
+                file: None,
+                name_offset: None,
+                sig_end: None,
+                src_start: None,
+                src_end: None,
+                dispatch: Vec::new(),
+                is_export: None,
+                addressable,
+            },
+            GraphNode::TabularSection { mdo_type, object_name, section_name } => NodeRow {
+                id,
+                kind: "tabular_section",
+                name: section_name.as_str().to_string(),
+                qualified: format!(
+                    "{}.{}.ТабличнаяЧасть.{}",
+                    mdo_type.russian_name(),
+                    object_name.as_str(),
+                    section_name.as_str()
+                ),
+                module: None,
+                file: None,
+                name_offset: None,
+                sig_end: None,
+                src_start: None,
+                src_end: None,
+                dispatch: Vec::new(),
+                is_export: None,
+                addressable,
+            },
+            GraphNode::TabularSectionAttribute {
+                mdo_type,
+                object_name,
+                section_name,
+                attr_name,
+            } => NodeRow {
+                id,
+                kind: "attribute",
+                name: attr_name.as_str().to_string(),
+                qualified: format!(
+                    "{}.{}.{}.{}",
+                    mdo_type.russian_name(),
+                    object_name.as_str(),
+                    section_name.as_str(),
                     attr_name.as_str()
                 ),
                 module: None,

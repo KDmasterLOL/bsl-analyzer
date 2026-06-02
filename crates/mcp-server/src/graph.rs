@@ -1690,6 +1690,37 @@ mod tests {
         );
     }
 
+    /// A catalog with one top-level attribute (`ИНН`) and a tabular section (`Товары`)
+    /// carrying one column (`Цена`) — exercises the metadata-catalog pass:
+    /// `mdo -> attribute`, `mdo -> tabular_section`, `tabular_section -> attribute`.
+    fn write_catalog_with_attributes(root: &Path, name: &str, id: u8) {
+        write(
+            root,
+            &format!("Catalogs/{name}.xml"),
+            &format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Catalog uuid="00000000-0000-0000-0000-0000000000{id:02}">
+        <Properties><Name>{name}</Name><CodeLength>9</CodeLength></Properties>
+        <ChildObjects>
+            <Attribute uuid="00000000-0000-0000-0000-0000000010{id:02}">
+                <Properties><Name>ИНН</Name><Type><Type>xs:string</Type></Type></Properties>
+            </Attribute>
+            <TabularSection uuid="00000000-0000-0000-0000-0000000020{id:02}">
+                <Properties><Name>Товары</Name></Properties>
+                <ChildObjects>
+                    <Attribute uuid="00000000-0000-0000-0000-0000000030{id:02}">
+                        <Properties><Name>Цена</Name><Type><Type>xs:string</Type></Type></Properties>
+                    </Attribute>
+                </ChildObjects>
+            </TabularSection>
+        </ChildObjects>
+    </Catalog>
+</MetaDataObject>"#
+            ),
+        );
+    }
+
     /// Write a managed form for catalog `obj`: the `Ext/Form.xml` (two named input
     /// fields) plus the form module `Ext/Form/Module.bsl`. `module_metadata.form` is
     /// loaded from the XML by path, so the form pass sees the two elements.
@@ -2143,6 +2174,143 @@ mod tests {
             2,
             "two form_attribute edges preserved: {inc_edges:?}"
         );
+    }
+
+    /// The metadata-catalog pass materialises every object's declared structure as
+    /// `contains` edges, INDEPENDENT of whether code references the object. A catalog
+    /// touched by no code still gets its attribute / tabular-section / column nodes.
+    #[test]
+    fn sqlite_build_includes_mdo_attribute_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        // Контрагенты has attributes + a tabular section but is referenced by NO code.
+        write_catalog_with_attributes(root, "Контрагенты", 1);
+        // A module exists only so the build has a batch to iterate (and to prove the
+        // catalog object needs no code reference to appear).
+        write_common_module(root, "Альфа", true, "Процедура П() Экспорт КонецПроцедуры");
+
+        let (_, files) = load_workspace_db(root).expect("workspace loads");
+        let out = graph_db_path(root);
+        fs::create_dir_all(out.parent().unwrap()).unwrap();
+        build_graph_database(
+            root,
+            &out,
+            1,
+            &crate::graph_db::GraphMeta {
+                revision: 1,
+                fingerprint: 0,
+                files,
+                built_at: "t".to_string(),
+            },
+        )
+        .expect("graph database builds");
+
+        let conn = Connection::open(&out).unwrap();
+        let count = |sql: &str| -> usize {
+            conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap() as usize
+        };
+        let edge = |from: &str, to: &str| -> usize {
+            count(&format!(
+                "SELECT COUNT(*) FROM edges WHERE kind='contains' \
+                 AND from_id='{from}' AND to_id='{to}'"
+            ))
+        };
+        let mdo = "mdo/Catalog/Контрагенты";
+        // The object node exists though no code references it.
+        assert_eq!(count(&format!("SELECT COUNT(*) FROM nodes WHERE id='{mdo}'")), 1);
+        // mdo -> top-level attribute.
+        assert_eq!(
+            edge(mdo, "attribute/Catalog/Контрагенты/ИНН"),
+            1,
+            "mdo -> attribute (top-level)"
+        );
+        // mdo -> tabular_section -> column.
+        assert_eq!(
+            edge(mdo, "tabular_section/Catalog/Контрагенты/Товары"),
+            1,
+            "mdo -> tabular_section"
+        );
+        assert_eq!(
+            edge(
+                "tabular_section/Catalog/Контрагенты/Товары",
+                "ts_attr/Catalog/Контрагенты/Товары/Цена"
+            ),
+            1,
+            "tabular_section -> column"
+        );
+        assert_eq!(count("SELECT COUNT(*) FROM nodes WHERE kind='tabular_section'"), 1);
+
+        let gdb = GraphDb::open(&out).expect("graph database opens");
+        let overview = gdb.overview(10).unwrap();
+        assert_eq!(overview.tabular_sections, 1);
+        // ИНН + Цена both stored as `attribute`-kind nodes.
+        assert_eq!(overview.attributes, 2);
+
+        // The tabular-section column resolves with a localized type + mixed casing.
+        let node = gdb
+            .node("ts_attr/Справочник/контрагенты/товары/цена", ide::GraphDetail::Names)
+            .unwrap()
+            .expect("ts column resolves case-insensitively");
+        assert_eq!(node.node.id, "ts_attr/Catalog/Контрагенты/Товары/Цена");
+        assert_eq!(node.node.kind, "attribute");
+        // And the tabular-section node itself.
+        let ts = gdb
+            .node("tabular_section/Справочник/Контрагенты/Товары", ide::GraphDetail::Names)
+            .unwrap()
+            .expect("tabular section resolves");
+        assert_eq!(ts.node.kind, "tabular_section");
+    }
+
+    /// A body-only edit leaves the whole metadata catalog (attributes, tabular
+    /// sections, columns) byte-identical to a full rebuild — it is build-only, never
+    /// re-derived incrementally, and the catalog is stable under body edits.
+    #[test]
+    fn incremental_body_edit_preserves_mdo_attribute_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        write_catalog_with_attributes(root, "Контрагенты", 1);
+        write_common_module(
+            root,
+            "Альфа",
+            true,
+            "&НаСервере\nПроцедура П() Экспорт\nСообщить(\"a\");\nКонецПроцедуры",
+        );
+
+        let meta = || crate::graph_db::GraphMeta {
+            revision: 1,
+            fingerprint: 0,
+            files: 0,
+            built_at: "t".to_string(),
+        };
+        let db_pre = root.join(".build/pre.db");
+        fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
+        build_graph_database(root, &db_pre, 1, &meta()).expect("pre build");
+
+        let module_rel = "CommonModules/Альфа/Ext/Module.bsl";
+        write(
+            root,
+            module_rel,
+            "&НаСервере\nПроцедура П() Экспорт\nСообщить(\"b\");\nКонецПроцедуры",
+        );
+        let changed = vec![root.join(module_rel).canonicalize().unwrap()];
+
+        let db_inc = root.join(".build/inc.db");
+        update_graph_database_bodies(root, &db_pre, &db_inc, &changed, 1, &meta())
+            .expect("incremental update");
+
+        let db_full = root.join(".build/full.db");
+        build_graph_database(root, &db_full, 1, &meta()).expect("full rebuild");
+
+        let (inc_nodes, inc_edges, inc_indeg, ..) = dump_data(&db_inc);
+        let (full_nodes, full_edges, full_indeg, ..) = dump_data(&db_full);
+        assert_eq!(inc_nodes, full_nodes, "catalog nodes must match a full rebuild");
+        assert_eq!(inc_edges, full_edges, "catalog contains edges must match a full rebuild");
+        assert_eq!(inc_indeg, full_indeg, "in-degree must match a full rebuild");
+        // The catalog structure is present and survived the body edit.
+        assert!(inc_nodes.iter().any(|n| n.contains("tabular_section/Catalog/Контрагенты/Товары")));
+        assert!(inc_edges.iter().any(|e| e.contains("ts_attr/Catalog/Контрагенты/Товары/Цена")));
     }
 
     /// A changed module referencing an existing object with a different casing must
