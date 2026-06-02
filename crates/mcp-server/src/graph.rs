@@ -1691,8 +1691,9 @@ mod tests {
     }
 
     /// Dump the data tables in a stable order so two databases can be compared for
-    /// logical (byte-identical) equality independent of physical row order.
-    fn dump_data(path: &Path) -> (Vec<String>, Vec<String>, Vec<String>) {
+    /// logical (byte-identical) equality independent of physical row order. Returns
+    /// `(nodes, edges, in_degree, unresolved_calls)`.
+    fn dump_data(path: &Path) -> (Vec<String>, Vec<String>, Vec<String>, Vec<String>) {
         let conn = Connection::open(path).unwrap();
         let collect = |sql: &str, cols: usize| -> Vec<String> {
             let mut stmt = conn.prepare(sql).unwrap();
@@ -1719,7 +1720,12 @@ mod tests {
             5,
         );
         let in_degree = collect("SELECT id, degree FROM in_degree ORDER BY id", 2);
-        (nodes, edges, in_degree)
+        let unresolved = collect(
+            "SELECT target_scope, method_lower, caller_file FROM unresolved_calls \
+             ORDER BY target_scope, method_lower, caller_file",
+            3,
+        );
+        (nodes, edges, in_degree, unresolved)
     }
 
     /// The body-only fast path must produce a database byte-identical to a full
@@ -1776,11 +1782,12 @@ mod tests {
         let db_full = root.join(".build/full.db");
         build_graph_database(root, &db_full, 1, &meta()).expect("full rebuild of edited tree");
 
-        let (inc_nodes, inc_edges, inc_indeg) = dump_data(&db_inc);
-        let (full_nodes, full_edges, full_indeg) = dump_data(&db_full);
+        let (inc_nodes, inc_edges, inc_indeg, inc_unres) = dump_data(&db_inc);
+        let (full_nodes, full_edges, full_indeg, full_unres) = dump_data(&db_full);
         assert_eq!(inc_nodes, full_nodes, "nodes (incl. orphan-GC) must match a full rebuild");
         assert_eq!(inc_edges, full_edges, "edges must match a full rebuild");
         assert_eq!(inc_indeg, full_indeg, "in-degree must match a full rebuild");
+        assert_eq!(inc_unres, full_unres, "unresolved_calls must match a full rebuild");
 
         // The orphaned Контрагенты Mdo node is gone in both.
         assert!(
@@ -2007,10 +2014,11 @@ mod tests {
         // And the incremental DB is still byte-identical to a full rebuild of this tree.
         let db_full = root.join(".build/full.db");
         build_graph_database(root, &db_full, 1, &meta()).expect("full rebuild");
-        let (inc_nodes, inc_edges, _) = dump_data(&db_inc);
-        let (full_nodes, full_edges, _) = dump_data(&db_full);
+        let (inc_nodes, inc_edges, _, inc_unres) = dump_data(&db_inc);
+        let (full_nodes, full_edges, _, full_unres) = dump_data(&db_full);
         assert_eq!(inc_nodes, full_nodes, "nodes match a full rebuild");
         assert_eq!(inc_edges, full_edges, "edges match a full rebuild");
+        assert_eq!(inc_unres, full_unres, "unresolved_calls match a full rebuild");
 
         // The persisted variant set is byte-identical too (both sides sort).
         let variants_meta = |path: &Path| -> String {
@@ -2086,26 +2094,34 @@ mod tests {
 
         let db_full = root.join(".build/full.db");
         build_graph_database(root, &db_full, 1, &meta()).expect("full rebuild");
-        let (inc_nodes, inc_edges, inc_indeg) = dump_data(&db_inc);
-        let (full_nodes, full_edges, full_indeg) = dump_data(&db_full);
+        let (inc_nodes, inc_edges, inc_indeg, inc_unres) = dump_data(&db_inc);
+        let (full_nodes, full_edges, full_indeg, full_unres) = dump_data(&db_full);
         assert_eq!(inc_nodes, full_nodes, "nodes match a full rebuild");
         assert_eq!(inc_edges, full_edges, "edges match a full rebuild");
         assert_eq!(inc_indeg, full_indeg, "in-degree matches a full rebuild");
+        assert_eq!(inc_unres, full_unres, "unresolved_calls match a full rebuild");
         assert!(
             !inc_nodes.iter().any(|n| n.contains("method/common/Ядро/М")),
             "removed method node gone: {inc_nodes:?}"
         );
     }
 
-    /// `caller_delta_plan` refuses (→ full rebuild) when a signature change ADDS a
-    /// resolvable name: a previously-unresolved caller could newly resolve, and such
-    /// callers are not in `edges_to(B)`.
+    /// IB-3b: ADDING an exported method must reproject the callers whose previously-
+    /// unresolved `Ядро.Новый()` now resolves — found via the `unresolved_calls`
+    /// reverse index, not `edges_to`. Byte-identical to a full rebuild.
     #[test]
-    fn caller_delta_plan_refuses_method_addition() {
+    fn caller_delta_update_matches_full_rebuild_on_method_addition() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
         write_common_module(root, "Ядро", true, "&НаСервере\nПроцедура М() Экспорт КонецПроцедуры");
+        // Алиса calls Ядро.Новый, which does not exist yet → unresolved (no stored edge).
+        write_common_module(
+            root,
+            "Алиса",
+            true,
+            "&НаСервере\nПроцедура ШагА() Экспорт\nЯдро.Новый();\nКонецПроцедуры",
+        );
 
         let meta = || crate::graph_db::GraphMeta {
             revision: 1,
@@ -2117,7 +2133,18 @@ mod tests {
         fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
         build_graph_database(root, &db_pre, 1, &meta()).expect("pre build");
 
-        // Add a new exported method.
+        // The build recorded Алиса's unresolved call to Ядро.Новый, and stored no edge.
+        let (_, pre_edges, _, pre_unres) = dump_data(&db_pre);
+        assert!(
+            pre_unres.iter().any(|u| u.contains("common/Ядро") && u.contains("новый")),
+            "unresolved call recorded: {pre_unres:?}"
+        );
+        assert!(
+            !pre_edges.iter().any(|e| e.contains("method/common/Ядро/Новый")),
+            "no edge to the not-yet-existing method"
+        );
+
+        // Add Ядро.Новый exported.
         write(root, "CommonModules/Ядро/Ext/Module.bsl", "&НаСервере\nПроцедура М() Экспорт КонецПроцедуры\nПроцедура Новый() Экспорт КонецПроцедуры");
         let core_path = root.join("CommonModules/Ядро/Ext/Module.bsl").canonicalize().unwrap();
         let core_key = core_path.to_string_lossy().into_owned();
@@ -2125,9 +2152,82 @@ mod tests {
             crate::graph_db::recompute_module_profiles(root, std::slice::from_ref(&core_path))
                 .unwrap();
         let profile = profiles.get(&core_key).unwrap();
-        let plan =
-            crate::graph_db::caller_delta_plan(&db_pre, &[(core_key.as_str(), profile)]).unwrap();
-        assert!(plan.is_none(), "adding a resolvable name must refuse the caller-delta path");
+        let callers = crate::graph_db::caller_delta_plan(&db_pre, &[(core_key.as_str(), profile)])
+            .unwrap()
+            .expect("addition is eligible via the unresolved index");
+        // Алиса is found through the reverse index (it has no stored edge into Ядро).
+        assert_eq!(callers.len(), 1, "the unresolved caller is discovered: {callers:?}");
+
+        let mut changed = vec![core_path];
+        changed.extend(callers);
+        let db_inc = root.join(".build/inc.db");
+        crate::graph_db::update_graph_database_bodies(root, &db_pre, &db_inc, &changed, 1, &meta())
+            .expect("caller-delta update");
+
+        let db_full = root.join(".build/full.db");
+        build_graph_database(root, &db_full, 1, &meta()).expect("full rebuild");
+        let (inc_nodes, inc_edges, inc_indeg, inc_unres) = dump_data(&db_inc);
+        let (full_nodes, full_edges, full_indeg, full_unres) = dump_data(&db_full);
+        assert_eq!(inc_nodes, full_nodes, "nodes match a full rebuild");
+        assert_eq!(inc_edges, full_edges, "edges match a full rebuild");
+        assert_eq!(inc_indeg, full_indeg, "in-degree matches a full rebuild");
+        assert_eq!(inc_unres, full_unres, "unresolved_calls match a full rebuild");
+        assert!(
+            inc_edges.iter().any(|e| e.contains("method/common/Ядро/Новый")),
+            "the newly-resolving caller's edge appears: {inc_edges:?}"
+        );
+        assert!(
+            !inc_unres.iter().any(|u| u.contains("common/Ядро") && u.contains("новый")),
+            "the resolved call is no longer in the unresolved index: {inc_unres:?}"
+        );
+    }
+
+    /// A body-only edit that ADDS an unresolved call must refresh the reverse index
+    /// (so a later addition of that method finds this caller), byte-identically to a
+    /// full rebuild.
+    #[test]
+    fn incremental_body_edit_refreshes_unresolved_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        write_common_module(root, "Ядро", true, "&НаСервере\nПроцедура М() Экспорт КонецПроцедуры");
+        write_common_module(
+            root,
+            "Алиса",
+            true,
+            "&НаСервере\nПроцедура ШагА() Экспорт КонецПроцедуры",
+        );
+
+        let meta = || crate::graph_db::GraphMeta {
+            revision: 1,
+            fingerprint: 0,
+            files: 0,
+            built_at: "t".to_string(),
+        };
+        let db_pre = root.join(".build/pre.db");
+        fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
+        build_graph_database(root, &db_pre, 1, &meta()).expect("pre build");
+
+        // Body-only edit (ШагА signature unchanged): add a call to the missing Ядро.Завтра.
+        write(
+            root,
+            "CommonModules/Алиса/Ext/Module.bsl",
+            "&НаСервере\nПроцедура ШагА() Экспорт\nЯдро.Завтра();\nКонецПроцедуры",
+        );
+        let changed = vec![root.join("CommonModules/Алиса/Ext/Module.bsl").canonicalize().unwrap()];
+        let db_inc = root.join(".build/inc.db");
+        crate::graph_db::update_graph_database_bodies(root, &db_pre, &db_inc, &changed, 1, &meta())
+            .expect("body-only update");
+
+        let db_full = root.join(".build/full.db");
+        build_graph_database(root, &db_full, 1, &meta()).expect("full rebuild");
+        let (_, _, _, inc_unres) = dump_data(&db_inc);
+        let (_, _, _, full_unres) = dump_data(&db_full);
+        assert!(
+            inc_unres.iter().any(|u| u.contains("common/Ядро") && u.contains("завтра")),
+            "the newly-added unresolved call is indexed: {inc_unres:?}"
+        );
+        assert_eq!(inc_unres, full_unres, "unresolved_calls match a full rebuild");
     }
 
     /// `classify_changes` sorts each modified/added/removed file into the right

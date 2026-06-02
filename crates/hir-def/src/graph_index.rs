@@ -417,6 +417,60 @@ pub fn workspace_call_graph_via_index(
     graph
 }
 
+/// A qualified/manager call whose target MODULE resolved but whose METHOD did not
+/// resolve to an exported method — the call sites a reverse index must remember so an
+/// incremental rebuild can find the callers that would newly resolve if the target
+/// gains (or exports) that method. Re-walks the Salsa-cached `module_call_summary`
+/// (a memo hit in the build's batch db — no re-lowering) and re-runs only the cheap
+/// locate+find resolution prefix, deliberately NOT touching the edge projection so
+/// edge output stays byte-identical. The `Err` (module-not-found) cases are omitted:
+/// a target module appearing requires a file/`.xml` add, which forces a full rebuild.
+///
+/// Returns `(target module, lowercased method name)`; the caller is `module`.
+pub fn extract_unresolved_refs(
+    db: &dyn ConfigsDatabase,
+    module: ModuleId,
+    index: &GraphIndex,
+) -> Vec<(ModuleId, String)> {
+    use crate::call_graph::CallTarget;
+
+    let summary = db.module_call_summary(module);
+    let resolver = Resolver::with_workspace_scope(module);
+    let mut out = Vec::new();
+    let unresolved = |m: Option<MethodRef>| !matches!(m, Some(r) if r.is_export);
+    for edge in &summary.call_edges {
+        match &edge.target {
+            CallTarget::QualifiedModule { module_name, method_name } => {
+                if let Ok(target) = resolver.locate_common_module(db, module_name) {
+                    if unresolved(index.find_method(target, method_name)) {
+                        out.push((target, method_name.as_str().to_lowercase()));
+                    }
+                }
+            }
+            CallTarget::ManagerAccess {
+                manager_type,
+                object_name,
+                method_name: Some(method_name),
+            } => {
+                if let Ok(target) = resolver.locate_manager_module(db, *manager_type, object_name) {
+                    if unresolved(index.find_method(target, method_name)) {
+                        out.push((target, method_name.as_str().to_lowercase()));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// A batch's call/manager edge projection plus the module-located-but-unresolved call
+/// refs gathered in the same pass (caller, target module, lowercased method).
+pub struct BatchCallProjection {
+    pub edges: Vec<WorkspaceCallEdge>,
+    pub unresolved: Vec<(ModuleId, ModuleId, String)>,
+}
+
 /// Workspace-wide state threaded across batches: MDO spelling canonicalization and
 /// query-ref dedup. Reuse ONE instance for the whole build — recreating it per
 /// batch would split an object's `Mdo` node across spellings and re-emit duplicate
@@ -468,7 +522,7 @@ pub fn project_batch_edges<DB: ConfigsDatabase + Clone + Send>(
     index: &GraphIndex,
     state: &mut GraphBuildState,
 ) -> Vec<WorkspaceCallEdge> {
-    let mut edges = project_batch_call_edges(pool, db, batch, index, state);
+    let mut edges = project_batch_call_edges(pool, db, batch, index, state).edges;
     edges.extend(project_batch_query_edges(pool, db, batch, state));
     edges
 }
@@ -484,25 +538,33 @@ pub fn project_batch_call_edges<DB: ConfigsDatabase + Clone + Send>(
     batch: &[ModuleId],
     index: &GraphIndex,
     state: &mut GraphBuildState,
-) -> Vec<WorkspaceCallEdge> {
+) -> BatchCallProjection {
     // Resolve every module's summary in parallel, then project edges sequentially in
     // `batch` order so the shared `mdo_canonical` sees objects first-seen in the
     // exact order the fold does — parallelising only the read-only resolution keeps
-    // the canonicalization deterministic.
-    let summaries: Vec<_> = parallel_per_module(pool, db, batch, |db, module| {
-        resolve_module_summary_via_index(db, module, index)
+    // the canonicalization deterministic. The unresolved-call refs are gathered in the
+    // same parallel pass (a `module_call_summary` memo hit), so the index upkeep adds
+    // no extra body lowering; edge projection is unchanged → edge output is identical.
+    let results: Vec<_> = parallel_per_module(pool, db, batch, |db, module| {
+        let summary = resolve_module_summary_via_index(db, module, index);
+        let unresolved = extract_unresolved_refs(db, module, index);
+        (summary, unresolved)
     });
 
     let mut edges = Vec::new();
+    let mut unresolved = Vec::new();
     let dispatch = |node: &GraphNode| index.dispatch(node);
-    for summary in &summaries {
+    for (summary, unres) in &results {
         edges.extend(crate::queries::project_module_call_edges(
             summary,
             &dispatch,
             &mut state.mdo_canonical,
         ));
+        for (target, method_lower) in unres {
+            unresolved.push((summary.module, *target, method_lower.clone()));
+        }
     }
-    edges
+    BatchCallProjection { edges, unresolved }
 }
 
 /// Run `f` for every module in `batch` in parallel on `pool`, returning the results

@@ -248,6 +248,11 @@ pub struct GraphBuildSummary {
     /// reconstructable from the canonicalised store). Empty for the common,
     /// consistently-cased configuration.
     pub casing_variant_objects: Vec<String>,
+    /// Module-located-but-unresolved qualified/manager call sites, as
+    /// `(target durable scope, lowercased method, caller file)`. Persisted as the
+    /// reverse index that lets an incremental rebuild find callers that would newly
+    /// resolve when a target module gains (or exports) a method.
+    pub unresolved_calls: Vec<(String, String, String)>,
 }
 
 /// A per-batch persistence sink: it receives one batch's freshly-encoded node and
@@ -371,16 +376,29 @@ pub fn build_workspace_graph_rows(
         sink(&aux_nodes, &edge_rows)
     };
 
+    // `paths`-derived scope/file for an unresolved-call ref's target/caller modules.
+    let scope_of = |m: ModuleId| -> Option<String> {
+        paths.get(&m.file_id).and_then(|p| module_key_for_path(p)).map(|k| encode_scope(&k))
+    };
+    let file_of = |m: ModuleId| -> Option<String> { paths.get(&m.file_id).cloned() };
+
+    let mut unresolved_calls: Vec<(String, String, String)> = Vec::new();
     for batch in modules.chunks(batch_size) {
         let db = open_batch(batch);
-        let edges = project_batch_call_edges(&pool, &db, batch, &index, &mut state);
-        emit(&edges, &mut summary, &mut seen_aux, sink)?;
+        let proj = project_batch_call_edges(&pool, &db, batch, &index, &mut state);
+        emit(&proj.edges, &mut summary, &mut seen_aux, sink)?;
+        for (caller, target, method_lower) in proj.unresolved {
+            if let (Some(scope), Some(file)) = (scope_of(target), file_of(caller)) {
+                unresolved_calls.push((scope, method_lower, file));
+            }
+        }
     }
     for batch in modules.chunks(batch_size) {
         let db = open_batch(batch);
         let edges = project_batch_query_edges(&pool, &db, batch, &mut state);
         emit(&edges, &mut summary, &mut seen_aux, sink)?;
     }
+    summary.unresolved_calls = unresolved_calls;
 
     // After both passes the canonicalization state knows every object's spelling(s);
     // record the inconsistently-cased ones for the incremental fast-path gate. Sorted
@@ -396,6 +414,13 @@ pub fn build_workspace_graph_rows(
     summary.casing_variant_objects = variants;
 
     Ok(summary)
+}
+
+/// The durable scope segment for a module path (e.g. `common/Б`, `manager/Catalog/X`),
+/// or `None` for a path the metadata index does not key by name. Lets the incremental
+/// reverse-index lookup key by the same scope the build recorded.
+pub fn scope_for_path(path: &str) -> Option<String> {
+    module_key_for_path(path).map(|k| encode_scope(&k))
 }
 
 /// Rows for a body-only incremental update: only the `changed` modules' method nodes
@@ -418,6 +443,10 @@ pub struct ReprojectedRows {
     /// the fast path for it. (Changed-vs-unchanged inconsistency is caught separately
     /// by the stored-spelling drift gate.)
     pub casing_variant_objects: Vec<String>,
+    /// The reprojected modules' unresolved qualified/manager call sites
+    /// `(target scope, lowercased method, caller file)`. The patch replaces these
+    /// modules' rows in the persisted reverse index, keeping it accurate.
+    pub unresolved_calls: Vec<(String, String, String)>,
 }
 
 /// Reproject ONLY `changed` modules for a body-only incremental update. Builds the
@@ -466,7 +495,8 @@ pub fn reproject_changed_modules(
     // a genuinely new object is owned by the changed set in both paths.
     let db = open_batch(changed);
     let mut state = GraphBuildState::new();
-    let mut projected = project_batch_call_edges(&pool, &db, changed, &index, &mut state);
+    let call_proj = project_batch_call_edges(&pool, &db, changed, &index, &mut state);
+    let mut projected = call_proj.edges;
     projected.extend(project_batch_query_edges(&pool, &db, changed, &mut state));
 
     let mut seen_aux: FxHashSet<String> = FxHashSet::default();
@@ -496,7 +526,19 @@ pub fn reproject_changed_modules(
     casing_variant_objects.sort();
     casing_variant_objects.dedup();
 
-    Ok(ReprojectedRows { nodes, edges, sig_hashes, casing_variant_objects })
+    // The reprojected modules' unresolved-call refs, for refreshing the reverse index.
+    let scope_of = |m: ModuleId| -> Option<String> {
+        paths.get(&m.file_id).and_then(|p| module_key_for_path(p)).map(|k| encode_scope(&k))
+    };
+    let unresolved_calls: Vec<(String, String, String)> = call_proj
+        .unresolved
+        .into_iter()
+        .filter_map(|(caller, target, method_lower)| {
+            Some((scope_of(target)?, method_lower, paths.get(&caller.file_id)?.clone()))
+        })
+        .collect();
+
+    Ok(ReprojectedRows { nodes, edges, sig_hashes, casing_variant_objects, unresolved_calls })
 }
 
 struct GraphCtx<'a> {

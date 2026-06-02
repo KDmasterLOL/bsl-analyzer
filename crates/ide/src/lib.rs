@@ -18,9 +18,9 @@ pub use folding::{FoldingRange, FoldingRangeKind};
 pub use formatting::{FormattingConfig, FormattingResult};
 pub use graph::{
     build_workspace_graph_rows, classify_graph_id, method_id_for_path, reproject_changed_modules,
-    BatchDbOpener, Direction, EdgeRef, GraphBuildSummary, GraphDetail, GraphError, GraphIdKind,
-    GraphOverview, GraphRowSink, NeighborsParams, NeighborsResult, NodeRef, NodeResult,
-    ReprojectedRows, SourceItem, SourceResult, MAX_DROPPED_SAMPLE,
+    scope_for_path, BatchDbOpener, Direction, EdgeRef, GraphBuildSummary, GraphDetail, GraphError,
+    GraphIdKind, GraphOverview, GraphRowSink, NeighborsParams, NeighborsResult, NodeRef,
+    NodeResult, ReprojectedRows, SourceItem, SourceResult, MAX_DROPPED_SAMPLE,
 };
 pub use hir::graph_index;
 pub use hir::ModuleId;

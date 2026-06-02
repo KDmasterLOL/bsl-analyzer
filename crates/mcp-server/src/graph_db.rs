@@ -27,7 +27,7 @@ use crate::graph::{config_metadata_paths, db_for_files, enumerate_bsl_files};
 
 /// Bumped whenever the table layout changes so a stale on-disk cache from an
 /// older binary is rejected (via the `meta` row) and rebuilt.
-pub(crate) const SCHEMA_VERSION: u32 = 3;
+pub(crate) const SCHEMA_VERSION: u32 = 4;
 
 /// One file's persisted identity in the `files` table: its stat-only fingerprint
 /// and (for `.bsl`) its resolution-signature hash. Persisting these per path lets a
@@ -124,6 +124,13 @@ impl GraphDbWriter {
                 path        TEXT PRIMARY KEY,
                 fingerprint INTEGER NOT NULL,
                 sig_hash    INTEGER
+            ) WITHOUT ROWID;
+
+            CREATE TABLE unresolved_calls (
+                target_scope TEXT NOT NULL,
+                method_lower TEXT NOT NULL,
+                caller_file  TEXT NOT NULL,
+                PRIMARY KEY (target_scope, method_lower, caller_file)
             ) WITHOUT ROWID;
             ",
         )
@@ -225,6 +232,28 @@ impl GraphDbWriter {
                 params![keys.join("\n")],
             )
             .context("writing casing variants")?;
+        Ok(())
+    }
+
+    /// Persist the module-located-but-unresolved qualified/manager call sites into the
+    /// `unresolved_calls` reverse index. The PK dedups repeated call sites, so the
+    /// content is order-independent. Used by the incremental fast path to find callers
+    /// that would newly resolve when a target module gains/exports a method.
+    pub(crate) fn write_unresolved_calls(
+        &mut self,
+        rows: &[(String, String, String)],
+    ) -> anyhow::Result<()> {
+        let tx = self.conn.transaction().context("begin unresolved_calls batch")?;
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT OR IGNORE INTO unresolved_calls (target_scope, method_lower, caller_file) \
+                 VALUES (?1, ?2, ?3)",
+            )?;
+            for (target_scope, method_lower, caller_file) in rows {
+                stmt.execute(params![target_scope, method_lower, caller_file])?;
+            }
+        }
+        tx.commit().context("commit unresolved_calls batch")?;
         Ok(())
     }
 
@@ -362,6 +391,7 @@ pub fn build_graph_database(
         .collect();
     writer.write_files(&file_rows)?;
     writer.write_casing_variants(&summary.casing_variant_objects)?;
+    writer.write_unresolved_calls(&summary.unresolved_calls)?;
 
     writer.finalize(meta)?;
     Ok(summary)
@@ -751,6 +781,21 @@ pub fn update_graph_database_bodies(
             )?;
         }
 
+        // Refresh the reverse index of unresolved calls for the reprojected modules:
+        // drop their old rows, insert their fresh ones. Unchanged modules' rows stay.
+        for nfile in &changed_files {
+            tx.execute("DELETE FROM unresolved_calls WHERE caller_file = ?1", params![nfile])?;
+        }
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT OR IGNORE INTO unresolved_calls (target_scope, method_lower, caller_file) \
+                 VALUES (?1, ?2, ?3)",
+            )?;
+            for (target_scope, method_lower, caller_file) in &rows.unresolved_calls {
+                stmt.execute(params![target_scope, method_lower, caller_file])?;
+            }
+        }
+
         // Refresh build metadata + derived counts; a clean incremental snapshot is
         // never force-stale.
         let node_count: i64 = tx.query_row("SELECT COUNT(*) FROM nodes", [], |r| r.get(0))?;
@@ -784,6 +829,8 @@ pub fn update_graph_database_bodies(
         // Variants observed among the changed modules (merged into the persisted set
         // above); pre-existing variants for untouched objects remain in the copied db.
         casing_variant_objects: rows.casing_variant_objects,
+        // The reprojected modules' unresolved refs were refreshed in the patch above.
+        unresolved_calls: rows.unresolved_calls,
     })
 }
 
@@ -848,13 +895,15 @@ pub fn recompute_module_profiles(
 
 /// Plan the caller-delta for a set of signature-changed modules (the body-only fast
 /// path is not eligible because their signature moved). Returns:
-/// - `Ok(Some(caller_files))` — every changed module is *caller-delta-safe* (its
-///   resolvable-name surface only shrank/mutated, no new resolvable name and no
-///   first-wins name collision), so reprojecting it PLUS the returned resolved
-///   callers reproduces a full rebuild. `caller_files` excludes the changed modules
-///   themselves.
-/// - `Ok(None)` — not eligible (a new resolvable name, a name collision, or a missing
-///   stored profile); the caller must do a full rebuild.
+/// - `Ok(Some(caller_files))` — reprojecting the changed modules PLUS the returned
+///   callers reproduces a full rebuild. Callers are the union of: modules with a
+///   stored edge INTO a changed module (covers removal/unexport/dispatch/case-rename),
+///   and modules whose previously-unresolved `B.<name>()` would newly resolve when B
+///   gains a resolvable `name` (looked up in the `unresolved_calls` reverse index).
+///   Excludes the changed modules themselves.
+/// - `Ok(None)` — not eligible: a first-wins name collision (invalid-BSL shadowing,
+///   old or new), or an added resolvable name on a module whose scope is not
+///   name-keyed (so its callers cannot be found). The caller must do a full rebuild.
 ///
 /// `sig_changed` pairs each changed module's normalised `nodes.file` key with its
 /// freshly-recomputed [`ModuleProfile`].
@@ -864,6 +913,7 @@ pub fn caller_delta_plan(
 ) -> anyhow::Result<Option<Vec<PathBuf>>> {
     let conn = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
 
+    let mut index_callers: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for (file, profile) in sig_changed {
         if profile.has_collision {
             return Ok(None); // first-wins shadowing — exported set ≠ resolvable set
@@ -890,10 +940,24 @@ pub fn caller_delta_plan(
         if old_collision {
             return Ok(None);
         }
-        // A previously-unresolved caller would newly resolve iff a resolvable name is
-        // added → not caller-delta-safe (that is IB-3b's job).
-        if !profile.exported_lower.iter().all(|n| old_exported.contains(n)) {
-            return Ok(None);
+        // Newly-resolvable names: callers that called them were previously unresolved
+        // (dropped from `edges`), so find them through the reverse index by scope+name.
+        let added: Vec<&String> =
+            profile.exported_lower.iter().filter(|n| !old_exported.contains(*n)).collect();
+        if !added.is_empty() {
+            let Some(scope) = ide::scope_for_path(file) else {
+                return Ok(None); // not name-keyed → its callers aren't indexable
+            };
+            let mut stmt = conn.prepare(
+                "SELECT caller_file FROM unresolved_calls \
+                 WHERE target_scope = ?1 AND method_lower = ?2",
+            )?;
+            for name in added {
+                let rows = stmt.query_map(params![scope, name], |r| r.get::<_, String>(0))?;
+                for row in rows {
+                    index_callers.insert(row?);
+                }
+            }
         }
     }
 
@@ -910,14 +974,17 @@ pub fn caller_delta_plan(
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
         .query_map(rusqlite::params_from_iter(changed_files.iter()), |r| r.get::<_, String>(0))?;
-    let mut callers = Vec::new();
+    let mut callers: std::collections::BTreeSet<String> = index_callers;
     for row in rows {
-        let file = row?;
-        if !changed_files.contains(file.as_str()) {
-            callers.push(PathBuf::from(file));
-        }
+        callers.insert(row?);
     }
-    Ok(Some(callers))
+    Ok(Some(
+        callers
+            .into_iter()
+            .filter(|f| !changed_files.contains(f.as_str()))
+            .map(PathBuf::from)
+            .collect(),
+    ))
 }
 
 #[cfg(test)]
