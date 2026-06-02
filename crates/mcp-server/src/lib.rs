@@ -24,7 +24,7 @@ pub async fn serve_stdio(server: McpServer) -> anyhow::Result<()> {
 use crate::graph::GraphStatus;
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
+use rmcp::model::{CallToolResult, ServerCapabilities, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -429,9 +429,9 @@ impl McpServer {
                 ))
             }
             GraphStatus::Idle | GraphStatus::Loading => {
-                return Ok(CallToolResult::success(vec![Content::text(
-                    "{\"status\":\"loading\",\"detail\":\"call graph is still indexing; retry shortly\"}",
-                )]))
+                return Ok(tools::graph::loading(Some(
+                    "call graph is still indexing; retry shortly",
+                )))
             }
             GraphStatus::Failed(msg) => {
                 return Err(McpError::internal_error(format!("graph load failed: {msg}"), None))
@@ -440,7 +440,7 @@ impl McpServer {
         }
 
         let Some(snapshot) = graph.snapshot() else {
-            return Ok(CallToolResult::success(vec![Content::text("{\"status\":\"loading\"}")]));
+            return Ok(tools::graph::loading(None));
         };
 
         tokio::task::spawn_blocking(move || {

@@ -86,23 +86,43 @@ pub fn source(graph: &GraphDb, ids: &[String], max_output_tokens: usize) -> Valu
 /// generation the answer was computed at; `stale` flags on-disk drift since then;
 /// `reload` is the background-reindex state (`none` / `running` / `failed`).
 pub fn envelope(freshness: Freshness, result: Value) -> CallToolResult {
-    let body = json!({
+    structured(json!({
         "revision": freshness.revision,
         "stale": freshness.stale,
         "reload": freshness.reload,
         "result": result,
-    });
-    let text = serde_json::to_string_pretty(&body)
-        .unwrap_or_else(|e| format!("{{\"error\":\"serialize\",\"detail\":\"{e}\"}}"));
-    CallToolResult::success(vec![Content::text(text)])
+    }))
 }
 
 /// Static graph schema for cold-start discovery. Wraps [`schema_json`] in a tool
 /// result; the JSON is split out so a test can pin the advertised contract.
 pub fn schema() -> CallToolResult {
-    let text = serde_json::to_string_pretty(&schema_json())
+    structured(schema_json())
+}
+
+/// A transient "still indexing" result, emitted while the background load runs.
+/// Not an error — the agent should retry shortly.
+pub fn loading(detail: Option<&str>) -> CallToolResult {
+    let mut body = json!({ "status": "loading" });
+    if let Some(detail) = detail {
+        body["detail"] = json!(detail);
+    }
+    structured(body)
+}
+
+/// Emit `body` as the MCP `structuredContent` field with a pretty-printed JSON
+/// mirror in the text `content` block. Structured-aware clients (code-mode) get a
+/// typed object to filter in-sandbox; plain clients still read the JSON text. The
+/// payload is byte-identical between the two surfaces, so the agent-facing contract
+/// (`schema_version`) is unchanged by carrying it in the native field as well.
+fn structured(body: Value) -> CallToolResult {
+    let text = serde_json::to_string_pretty(&body)
         .unwrap_or_else(|e| format!("{{\"error\":\"serialize\",\"detail\":\"{e}\"}}"));
-    CallToolResult::success(vec![Content::text(text)])
+    // `CallToolResult::structured` mirrors the value compactly; overwrite the text
+    // block with the pretty form so plain-text clients keep the readable layout.
+    let mut result = CallToolResult::structured(body);
+    result.content = vec![Content::text(text)];
+    result
 }
 
 /// The agent-facing graph contract: action names, node/edge vocabularies, the
@@ -125,7 +145,8 @@ fn schema_json() -> Value {
             "revision": "u64 — snapshot generation the answer was computed at",
             "stale": "bool — workspace drifted on disk since this snapshot",
             "reload": "none | running | failed — background re-index state",
-            "result": "the action's payload (or an {error} object)"
+            "result": "the action's payload (or an {error} object)",
+            "delivery": "carried both as MCP structuredContent and a mirrored JSON text block; identical payload"
         },
         "id_format": {
             "method_common": "method/common/<Module>/<Method>",
@@ -172,5 +193,41 @@ mod tests {
         assert!(node_kinds.iter().any(|k| k == "form"));
         assert!(node_kinds.iter().any(|k| k == "form_item"));
         assert!(schema["edge_kinds"].as_array().unwrap().iter().any(|k| k == "contains"));
+    }
+
+    /// The text content block must parse back to exactly the `structuredContent`
+    /// field, so structured-aware and plain clients see byte-identical JSON.
+    fn assert_structured_mirrors_text(result: &CallToolResult) {
+        let structured =
+            result.structured_content.as_ref().expect("structuredContent must be populated");
+        let text = result.content[0].raw.as_text().expect("text mirror").text.as_str();
+        let parsed: Value = serde_json::from_str(text).expect("text mirror must be valid JSON");
+        assert_eq!(&parsed, structured, "text mirror must match structuredContent");
+    }
+
+    #[test]
+    fn envelope_populates_structured_content() {
+        let freshness = Freshness { revision: 7, stale: true, reload: "running" };
+        let result = envelope(freshness, json!({ "kind": "method", "name": "Считать" }));
+        assert_structured_mirrors_text(&result);
+        let body = result.structured_content.as_ref().unwrap();
+        assert_eq!(body["revision"], 7);
+        assert_eq!(body["stale"], true);
+        assert_eq!(body["reload"], "running");
+        assert_eq!(body["result"]["name"], "Считать");
+        assert_eq!(result.is_error, Some(false));
+    }
+
+    #[test]
+    fn schema_and_loading_populate_structured_content() {
+        assert_structured_mirrors_text(&schema());
+        assert_eq!(schema().structured_content.unwrap()["schema_version"], "3");
+
+        assert_structured_mirrors_text(&loading(Some("indexing")));
+        let body = loading(Some("indexing")).structured_content.unwrap();
+        assert_eq!(body["status"], "loading");
+        assert_eq!(body["detail"], "indexing");
+
+        assert_eq!(loading(None).structured_content.unwrap().get("detail"), None);
     }
 }
