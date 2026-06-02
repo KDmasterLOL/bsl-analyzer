@@ -267,11 +267,37 @@ pub(crate) fn project_module_query_edges(
     seen_query_ref: &mut FxHashSet<(GraphNode, MdoType, String)>,
     seen_query_attr: &mut FxHashSet<(GraphNode, MdoType, String, String)>,
 ) -> Vec<WorkspaceCallEdge> {
-    use crate::call_graph::{EdgeKind, EdgeProvenance};
+    let refs = collect_module_query_refs(db, module);
+    project_collected_query_edges(&refs, mdo_canonical, seen_query_ref, seen_query_attr)
+}
 
+/// One query-reading site's metadata reads, lifted out of the SDBL HIR without
+/// touching any cross-module canonicalization or dedup state. This is the
+/// parallel-safe half of query-edge projection: it only reads the database, so a
+/// streaming build can collect it for many modules concurrently, then feed the
+/// results to [`project_collected_query_edges`] sequentially to assign canonical
+/// `Mdo`/`Attribute` spellings in a deterministic order.
+pub(crate) struct ModuleQueryRefs {
+    sites: Vec<QueryRefSite>,
+}
+
+struct QueryRefSite {
+    from: GraphNode,
+    /// Coarse reads: object X is read (survives unresolved columns, e.g. `ВЫБРАТЬ *`).
+    tables: Vec<(MdoType, String)>,
+    /// Precise reads: object X's attribute Y is read.
+    attrs: Vec<(MdoType, String, String)>,
+}
+
+/// Collect a module's query reads from its SDBL HIR. Database reads only — no
+/// shared graph-build state — so it is safe to run for many modules in parallel.
+pub(crate) fn collect_module_query_refs(
+    db: &dyn crate::configs::ConfigsDatabase,
+    module: ModuleId,
+) -> ModuleQueryRefs {
     let file_id_input = base_db::FileIdInput::new(db, module.file_id);
     let sdbl_entries = crate::sdbl_cache::sdbl_hir_for_file_query(db, file_id_input);
-    let mut edges = Vec::new();
+    let mut sites = Vec::new();
     for (sdbl_expr_id, package) in sdbl_entries.iter() {
         let from = match sdbl_expr_id.owner {
             crate::DefWithBodyId::Method(local_id) => {
@@ -285,51 +311,74 @@ pub(crate) fn project_module_query_edges(
             query.hir.collect_resolved_tables(&mut resolved);
             query.hir.collect_resolved_attributes(&mut attrs);
         }
-        // Coarse: the method reads object X (survives even when columns are
-        // unresolved, e.g. `ВЫБРАТЬ *`).
-        for table in resolved {
-            let (mdo_type, name) = match table {
+        let tables = resolved
+            .into_iter()
+            .filter_map(|table| match table {
                 sdbl_hir::ResolvedTable::Metadata { mdo_type, name, .. }
-                | sdbl_hir::ResolvedTable::Register { mdo_type, name, .. } => (*mdo_type, name),
-                sdbl_hir::ResolvedTable::TempTable { .. } => continue,
-            };
+                | sdbl_hir::ResolvedTable::Register { mdo_type, name, .. } => {
+                    Some((*mdo_type, name.clone()))
+                }
+                sdbl_hir::ResolvedTable::TempTable { .. } => None,
+            })
+            .collect();
+        sites.push(QueryRefSite { from, tables, attrs });
+    }
+    ModuleQueryRefs { sites }
+}
+
+/// Project collected query reads ([`collect_module_query_refs`]) into `query_ref`
+/// graph edges, assigning canonical `Mdo`/`Attribute` spellings and deduping across
+/// the workspace. This is the order-sensitive, sequential half: `mdo_canonical` and
+/// the `seen_*` sets are shared across modules and the first-seen spelling wins, so
+/// it must run in a deterministic module order to match the fold byte-for-byte.
+pub(crate) fn project_collected_query_edges(
+    refs: &ModuleQueryRefs,
+    mdo_canonical: &mut MdoCanonical,
+    seen_query_ref: &mut FxHashSet<(GraphNode, MdoType, String)>,
+    seen_query_attr: &mut FxHashSet<(GraphNode, MdoType, String, String)>,
+) -> Vec<WorkspaceCallEdge> {
+    use crate::call_graph::{EdgeKind, EdgeProvenance};
+
+    let mut edges = Vec::new();
+    for site in &refs.sites {
+        let from = &site.from;
+        for (mdo_type, name) in &site.tables {
             let name_lower = name.to_lowercase();
-            if !seen_query_ref.insert((from.clone(), mdo_type, name_lower.clone())) {
+            if !seen_query_ref.insert((from.clone(), *mdo_type, name_lower.clone())) {
                 continue;
             }
             let canon = mdo_canonical
-                .entry((mdo_type, name_lower))
+                .entry((*mdo_type, name_lower))
                 .or_insert_with(|| crate::name::Name::new(name))
                 .clone();
             edges.push(WorkspaceCallEdge {
                 from: from.clone(),
-                to: GraphNode::Mdo { mdo_type, object_name: canon },
+                to: GraphNode::Mdo { mdo_type: *mdo_type, object_name: canon },
                 kind: EdgeKind::QueryRef,
                 provenance: EdgeProvenance::Inferred,
                 crosses_client_to_server: false,
             });
         }
-        // Precise: the method reads object X's attribute Y.
-        for (mdo_type, object, attr) in attrs {
+        for (mdo_type, object, attr) in &site.attrs {
             let object_lower = object.to_lowercase();
             if !seen_query_attr.insert((
                 from.clone(),
-                mdo_type,
+                *mdo_type,
                 object_lower.clone(),
                 attr.to_lowercase(),
             )) {
                 continue;
             }
             let canon = mdo_canonical
-                .entry((mdo_type, object_lower))
-                .or_insert_with(|| crate::name::Name::new(&object))
+                .entry((*mdo_type, object_lower))
+                .or_insert_with(|| crate::name::Name::new(object))
                 .clone();
             edges.push(WorkspaceCallEdge {
                 from: from.clone(),
                 to: GraphNode::Attribute {
-                    mdo_type,
+                    mdo_type: *mdo_type,
                     object_name: canon,
-                    attr_name: crate::name::Name::new(&attr),
+                    attr_name: crate::name::Name::new(attr),
                 },
                 kind: EdgeKind::QueryRef,
                 provenance: EdgeProvenance::Inferred,

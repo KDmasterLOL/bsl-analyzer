@@ -12,6 +12,7 @@ syntax.workspace = true
 vfs.workspace = true
 intern.workspace = true
 salsa.workspace = true
+rayon.workspace = true
 rustc-hash.workspace = true
 la-arena.workspace = true
 ordered-float.workspace = true

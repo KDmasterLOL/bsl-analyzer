@@ -1576,6 +1576,7 @@ dependencies = [
  "parser",
  "parser-error",
  "project-model",
+ "rayon",
  "rustc-hash 2.1.2",
  "salsa",
  "sdbl-hir",

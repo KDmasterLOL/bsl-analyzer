@@ -356,8 +356,8 @@ impl GraphBuildState {
 /// order): an object referenced only in code vs. only in a query would otherwise
 /// get a different first-seen spelling. This combined helper is for callers that
 /// process one batch in isolation and accept that per-batch ordering.
-pub fn project_batch_edges(
-    db: &dyn ConfigsDatabase,
+pub fn project_batch_edges<DB: ConfigsDatabase + Clone + Send>(
+    db: &DB,
     batch: &[ModuleId],
     index: &GraphIndex,
     state: &mut GraphBuildState,
@@ -372,18 +372,30 @@ pub fn project_batch_edges(
 /// across every batch before [`project_batch_query_edges`] to match the fold's
 /// global Pass-2-then-Pass-3 canonicalization order. `state.mdo_canonical` is
 /// shared and updated as new metadata-object spellings are first seen.
-pub fn project_batch_call_edges(
-    db: &dyn ConfigsDatabase,
+pub fn project_batch_call_edges<DB: ConfigsDatabase + Clone + Send>(
+    db: &DB,
     batch: &[ModuleId],
     index: &GraphIndex,
     state: &mut GraphBuildState,
 ) -> Vec<WorkspaceCallEdge> {
+    use rayon::prelude::*;
+
+    // Resolve every module's summary in parallel, then project edges sequentially in
+    // `batch` order so the shared `mdo_canonical` sees objects first-seen in the
+    // exact order the fold does — parallelising only the read-only resolution keeps
+    // the canonicalization deterministic. The database is `Send` but not `Sync`
+    // (a per-handle query stack), so each rayon job works on its own cheap clone
+    // (`map_with`); the clones share the underlying memo storage.
+    let summaries: Vec<_> = batch
+        .par_iter()
+        .map_with(db.clone(), |db, &module| resolve_module_summary_via_index(db, module, index))
+        .collect();
+
     let mut edges = Vec::new();
-    for &module in batch {
-        let summary = resolve_module_summary_via_index(db, module, index);
-        let dispatch = |node: &GraphNode| index.dispatch(node);
+    let dispatch = |node: &GraphNode| index.dispatch(node);
+    for summary in &summaries {
         edges.extend(crate::queries::project_module_call_edges(
-            &summary,
+            summary,
             &dispatch,
             &mut state.mdo_canonical,
         ));
@@ -395,16 +407,25 @@ pub fn project_batch_call_edges(
 /// [`project_batch_call_edges`] has run across all of them, sharing the same
 /// `state`, so query-only metadata objects inherit the spelling the fold's Pass 3
 /// would give them (call sites win first, exactly as in the fold).
-pub fn project_batch_query_edges(
-    db: &dyn ConfigsDatabase,
+pub fn project_batch_query_edges<DB: ConfigsDatabase + Clone + Send>(
+    db: &DB,
     batch: &[ModuleId],
     state: &mut GraphBuildState,
 ) -> Vec<WorkspaceCallEdge> {
+    use rayon::prelude::*;
+
+    // Collect each module's query reads from its SDBL HIR in parallel (read-only,
+    // one cheap db clone per rayon job), then project edges sequentially in `batch`
+    // order so the shared canonicalization/dedup matches the fold byte-for-byte.
+    let collected: Vec<_> = batch
+        .par_iter()
+        .map_with(db.clone(), |db, &module| crate::queries::collect_module_query_refs(db, module))
+        .collect();
+
     let mut edges = Vec::new();
-    for &module in batch {
-        edges.extend(crate::queries::project_module_query_edges(
-            db,
-            module,
+    for refs in &collected {
+        edges.extend(crate::queries::project_collected_query_edges(
+            refs,
             &mut state.mdo_canonical,
             &mut state.seen_query_ref,
             &mut state.seen_query_attr,

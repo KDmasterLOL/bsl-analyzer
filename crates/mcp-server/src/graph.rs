@@ -996,6 +996,95 @@ mod tests {
         assert!(missing.is_err(), "unknown id resolves to a GraphError");
     }
 
+    /// The build parallelises per-module resolution within a batch. A batch holding
+    /// several modules that call each other and touch the same metadata object must
+    /// still produce the fold's graph exactly — same edges, and the shared `Mdo`
+    /// node spelled by whichever module the deterministic (file-order) projection
+    /// sees first. Built with a batch large enough to hold every module at once, so
+    /// the concurrent `map_with` path is exercised, not the one-module-per-batch case.
+    #[test]
+    fn parallel_multi_module_batch_matches_in_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        write(
+            root,
+            "Catalogs/Номенклатура.xml",
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Catalog uuid="00000000-0000-0000-0000-000000000001">
+        <Properties><Name>Номенклатура</Name><CodeLength>9</CodeLength></Properties>
+    </Catalog>
+</MetaDataObject>"#,
+        );
+        // Both modules touch the catalog through both edge passes — a manager call
+        // (Pass 2) and a query (Pass 3) — so the parallel collection of call summaries
+        // AND of SDBL query refs is exercised across multiple modules in one batch.
+        write_common_module(
+            root,
+            "Альфа",
+            true,
+            "&НаСервере\nПроцедура ШагА() Экспорт\nБета.ШагБ();\nСправочники.Номенклатура.СоздатьЭлемент();\nЗапрос = \"ВЫБРАТЬ Код ИЗ Справочник.Номенклатура\";\nКонецПроцедуры",
+        );
+        write_common_module(
+            root,
+            "Бета",
+            true,
+            "&НаСервере\nПроцедура ШагБ() Экспорт\nЗапрос = \"ВЫБРАТЬ Наименование ИЗ Справочник.Номенклатура\";\nКонецПроцедуры",
+        );
+
+        let (db, files) = load_workspace_db(root).expect("workspace loads");
+        let analysis = Analysis::from_database(db);
+
+        let out = graph_db_path(root);
+        fs::create_dir_all(out.parent().unwrap()).unwrap();
+        // A batch_size far above the module count puts every module in one batch.
+        build_graph_database(
+            root,
+            &out,
+            100,
+            &crate::graph_db::GraphMeta {
+                revision: 1,
+                fingerprint: 0,
+                files,
+                built_at: "t".to_string(),
+            },
+        )
+        .expect("graph database builds");
+        let gdb = GraphDb::open(&out).expect("graph database opens");
+
+        // Overview parity covers node/edge tallies, provenance, and the
+        // centrality ranking (whose nodes carry the canonical Mdo spelling).
+        let mem_overview =
+            serde_json::to_value(analysis.graph_overview(GRAPH_SOURCE_ROOT, Some(root), 10))
+                .unwrap();
+        let sql_overview = serde_json::to_value(gdb.overview(10).unwrap()).unwrap();
+        assert_eq!(mem_overview, sql_overview, "overview JSON from a multi-module batch");
+        // Guard the coverage: the query pass really produced edges across the batch,
+        // so the parallel SDBL collection path is genuinely exercised, not vacuous.
+        assert!(
+            sql_overview["edge_provenance"]["inferred"].as_u64().unwrap_or(0) >= 2,
+            "both modules' queries yield inferred query_ref edges: {sql_overview}"
+        );
+
+        // The single catalog Mdo node is reached identically from both modules.
+        let mdo_id = "mdo/Catalog/Номенклатура";
+        let params = ide::NeighborsParams {
+            id: mdo_id,
+            dir: ide::Direction::In,
+            depth: 1,
+            max_nodes: 50,
+            detail: ide::GraphDetail::Names,
+            provenance_filter: Vec::new(),
+        };
+        let mem_nb = serde_json::to_value(
+            analysis.graph_neighbors(GRAPH_SOURCE_ROOT, Some(root), &params).unwrap(),
+        )
+        .unwrap();
+        let sql_nb = serde_json::to_value(gdb.neighbors(&params).unwrap().unwrap()).unwrap();
+        assert_eq!(mem_nb, sql_nb, "Mdo neighbours from a multi-module batch");
+    }
+
     /// When `max_nodes` cuts through a set of equal-centrality neighbours, the
     /// in-memory and SQLite paths must keep/drop the *same* nodes — both rank by
     /// `(in_degree desc, durable id asc)`. Guards the tie-break parity.
