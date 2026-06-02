@@ -35,12 +35,11 @@ pub fn module_metadata_query<'db>(
         }
     };
 
-    let config_root = crate::vfs_helpers::find_configuration_root(db, &file_path);
-    let configuration = config_root.map(|root| {
-        let path_input =
-            intern_configuration_path(db, &root.to_string_lossy(), db.metadata_version());
-        load_configuration(db, path_input)
-    });
+    // Resolve via `get_configuration` (an object-safe `RootDatabase` method) rather
+    // than the free `load_configuration` query, so the build-scoped config cache is
+    // consulted and the configuration is not reloaded per batch database. The LSP
+    // database has no cache attached and falls through to the salsa query.
+    let configuration = db.get_configuration(file_id);
 
     Arc::new(crate::metadata::build_module_metadata(&file_path, configuration.as_deref()))
 }

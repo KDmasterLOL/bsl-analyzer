@@ -9,6 +9,7 @@ use hir::{
 use vfs::FileId;
 
 use crate::features::FeaturesInput;
+use crate::metadata::MetadataDb;
 use crate::queries::{
     line_index_query, liveness_analysis_query, method_cfg_query, module_metadata_query,
     reaching_definitions_query,
@@ -30,7 +31,26 @@ pub struct RootDatabaseImpl {
     type_kernel: Arc<TypeKernelInner>,
 
     type_kernel_input: parking_lot::RwLock<Option<TypeKernelInput>>,
+
+    /// Optional process-side cache of loaded configurations, keyed by the interned
+    /// config-root path string (stable and consistent across this build's batch
+    /// databases — not necessarily filesystem-canonical, which does not matter since
+    /// every batch interns the same root the same way). Set only by the batched
+    /// graph build, which opens a fresh
+    /// database per batch: without it each batch would reload the whole
+    /// configuration via [`metadata::load_configuration`] (re-running
+    /// `bsl_metadata::load_from_directory` over every metadata file). A single
+    /// `Arc` is shared across all of one build's batch databases (and their per-job
+    /// clones), so the load happens once. `None` for the long-lived LSP database,
+    /// which already memoises `load_configuration` per revision — there the field is
+    /// absent and loading is unchanged.
+    graph_config_cache: Option<Arc<GraphConfigCache>>,
 }
+
+/// Build-scoped cache of loaded configurations by interned config-root path string.
+/// A fresh instance per build keeps it a content snapshot — a later build (new
+/// instance) never sees a stale entry — so no version key is needed.
+pub type GraphConfigCache = dashmap::DashMap<PathBuf, Arc<bsl_metadata::Configuration>>;
 
 impl Default for RootDatabaseImpl {
     fn default() -> Self {
@@ -47,6 +67,9 @@ impl Clone for RootDatabaseImpl {
             features_input: parking_lot::RwLock::new(*self.features_input.read()),
             type_kernel: Arc::clone(&self.type_kernel),
             type_kernel_input: parking_lot::RwLock::new(*self.type_kernel_input.read()),
+            // Share the same cache across clones so a per-job db clone sees configs
+            // loaded by its siblings.
+            graph_config_cache: self.graph_config_cache.clone(),
         }
     }
 }
@@ -61,6 +84,7 @@ impl RootDatabaseImpl {
             features_input: parking_lot::RwLock::new(None),
             type_kernel: Arc::clone(&type_kernel),
             type_kernel_input: parking_lot::RwLock::new(None),
+            graph_config_cache: None,
         };
         let input = metadata::WorkspaceConfigsInput::new(&db, Vec::new(), 0);
         *db.workspace_configs_input.write() = Some(input);
@@ -74,6 +98,12 @@ impl RootDatabaseImpl {
 
     pub(crate) fn type_kernel_inner(&self) -> &Arc<TypeKernelInner> {
         &self.type_kernel
+    }
+
+    /// Attach a build-scoped configuration cache shared across this build's batch
+    /// databases. See [`GraphConfigCache`] and the `graph_config_cache` field.
+    pub fn set_graph_config_cache(&mut self, cache: Arc<GraphConfigCache>) {
+        self.graph_config_cache = Some(cache);
     }
 
     fn workspace_configs(&self) -> metadata::WorkspaceConfigsInput {
@@ -342,7 +372,7 @@ impl hir::ConfigsDatabase for RootDatabaseImpl {
                 &path.to_string_lossy(),
                 self.metadata_version(),
             );
-            metadata::load_configuration(self, path_input)
+            self.load_configuration(path_input)
         };
 
         if paths.is_empty() {
@@ -456,7 +486,7 @@ impl RootDatabase for RootDatabaseImpl {
             &config_root.to_string_lossy(),
             self.metadata_version(),
         );
-        Some(metadata::load_configuration(self, path_input))
+        Some(self.load_configuration(path_input))
     }
 
     fn get_all_configurations(
@@ -475,7 +505,7 @@ impl RootDatabase for RootDatabaseImpl {
             .map(|(name, path)| {
                 let path_input =
                     metadata::intern_configuration_path(self, &path.to_string_lossy(), version);
-                let config = metadata::load_configuration(self, path_input);
+                let config = self.load_configuration(path_input);
                 (name, config)
             })
             .collect()
@@ -571,7 +601,32 @@ impl RootDatabase for RootDatabaseImpl {
 }
 
 #[salsa::db]
-impl metadata::MetadataDb for RootDatabaseImpl {}
+impl metadata::MetadataDb for RootDatabaseImpl {
+    /// Override the default loader to consult the build-scoped cache when one is
+    /// attached, so the whole-config metadata load runs once per config root per
+    /// build instead of once per fresh batch database. This is the single chokepoint
+    /// every config read funnels through (the resolver's `find_*`, `module_metadata`,
+    /// `configurations`/`merged_visible_configuration`), so caching here covers them
+    /// all. With no cache attached (the LSP database) it is the plain salsa query.
+    fn load_configuration<'db>(
+        &'db self,
+        path_input: metadata::ConfigurationPathInput<'db>,
+    ) -> Arc<bsl_metadata::Configuration> {
+        let Some(cache) = &self.graph_config_cache else {
+            return metadata::load_configuration(self, path_input);
+        };
+        let key = PathBuf::from(path_input.path(self));
+        if let Some(config) = cache.get(&key) {
+            return Arc::clone(&config);
+        }
+        // Miss: load (the build warms each root sequentially before its parallel
+        // region, so concurrent first-loads of the same root do not occur; a rare
+        // duplicate load would only repeat pure work, never corrupt the result).
+        let config = metadata::load_configuration(self, path_input);
+        cache.insert(key, Arc::clone(&config));
+        config
+    }
+}
 
 #[cfg(test)]
 #[path = "database_impl_tests.rs"]

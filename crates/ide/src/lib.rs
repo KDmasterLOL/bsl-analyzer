@@ -26,7 +26,7 @@ pub use hir::graph_index;
 pub use hir::ModuleId;
 pub use ide_assists::{Assist, AssistId, SourceChange};
 pub use ide_db::base_db::Locale;
-pub use ide_db::{RootDatabase, RootDatabaseImpl, SymbolKind, TextRange};
+pub use ide_db::{GraphConfigCache, RootDatabase, RootDatabaseImpl, SymbolKind, TextRange};
 pub use ide_diagnostics::{
     all_diagnostic_codes, diagnostics as compute_diagnostics, docs, file_diagnostics_query,
     get_metadata, CleanCodeAttribute, Diagnostic, DiagnosticCode, DiagnosticOutput,

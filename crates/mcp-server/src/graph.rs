@@ -545,8 +545,12 @@ pub(crate) fn db_for_files(
     all_files: &[(FileId, PathBuf)],
     load_text: &FxHashSet<FileId>,
     config_paths: &[(Option<String>, PathBuf)],
+    config_cache: Option<&Arc<ide::GraphConfigCache>>,
 ) -> RootDatabaseImpl {
     let mut db = RootDatabaseImpl::default();
+    if let Some(cache) = config_cache {
+        db.set_graph_config_cache(Arc::clone(cache));
+    }
     let mut file_set = FileSet::new();
     for (file_id, path) in all_files {
         file_set.insert(*file_id, VfsPath::new(path.clone()));
@@ -578,7 +582,7 @@ fn load_workspace_db(workspace_root: &Path) -> anyhow::Result<(RootDatabaseImpl,
     let files = enumerate_bsl_files(workspace_root);
     let config_paths = config_metadata_paths(workspace_root);
     let load_text: FxHashSet<FileId> = files.iter().map(|(f, _)| *f).collect();
-    let db = db_for_files(&files, &load_text, &config_paths);
+    let db = db_for_files(&files, &load_text, &config_paths, None);
     Ok((db, files.len()))
 }
 

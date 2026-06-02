@@ -241,13 +241,19 @@ pub fn build_graph_database(
 
     let mut writer = GraphDbWriter::create(out_path)?;
 
+    // One configuration cache shared across every batch database (and their per-job
+    // clones), so the whole-config metadata load runs once for this build instead of
+    // once per fresh batch database. A fresh cache per build keeps it a content
+    // snapshot — see `ide_db`'s `GraphConfigCache`.
+    let config_cache = std::sync::Arc::new(ide::GraphConfigCache::default());
+
     // Scope the closures so their borrows end before `finalize`. `open_batch`
     // loads only the batch's texts (shared reads of the id↔path map + config);
     // `sink` persists the freshly-encoded rows (the sole `&mut writer` borrow).
     let summary = {
         let mut open_batch = |batch: &[ModuleId]| -> RootDatabaseImpl {
             let load_text: FxHashSet<FileId> = batch.iter().map(|m| m.file_id).collect();
-            db_for_files(&files, &load_text, &config_paths)
+            db_for_files(&files, &load_text, &config_paths, Some(&config_cache))
         };
         let mut sink = |nodes: &[NodeRow],
                         edges: &[EdgeRow]|
