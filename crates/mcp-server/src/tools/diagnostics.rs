@@ -23,7 +23,7 @@ use ide::{
 use rmcp::model::CallToolResult;
 use serde_json::{json, Value};
 
-use crate::diagnostics_state::{DiagnosticsResident, Freshness, SweepOptions};
+use crate::diagnostics_state::{DiagnosticsResident, Freshness, StatusReport, SweepOptions};
 use crate::tools::response::structured;
 
 /// Server-side cap on returned findings, honouring Anthropic's tool-response budget.
@@ -92,11 +92,43 @@ pub fn schema() -> CallToolResult {
 }
 
 /// A transient "still building the resident database" result, emitted while the
-/// background load runs. Not an error — the agent should retry shortly.
-pub fn loading() -> CallToolResult {
-    structured(
-        json!({ "status": "loading", "detail": "diagnostics database is building; retry shortly" }),
-    )
+/// background load runs. Not an error — the agent should retry shortly. Carries the
+/// lifecycle snapshot (`state`/`generation`/`elapsed_ms`) so the agent can tell a
+/// progressing build from a stuck or failed one instead of polling a flat `loading`.
+pub fn loading(report: &StatusReport) -> CallToolResult {
+    let mut body = json!({
+        "status": "loading",
+        "detail": "diagnostics database is building; retry shortly",
+        "state": report.state,
+        "generation": report.generation,
+    });
+    if let Some(ms) = report.elapsed_ms {
+        body["elapsed_ms"] = json!(ms);
+    }
+    if let Some(err) = &report.error {
+        body["error"] = json!(err);
+    }
+    structured(body)
+}
+
+/// The `status` action: the resident lifecycle snapshot, always available (no resident
+/// db required), so an agent can poll readiness/progress without a flat `loading`.
+pub fn status(report: &StatusReport) -> CallToolResult {
+    let mut body = json!({
+        "state": report.state,
+        "generation": report.generation,
+        "reload": report.reload,
+    });
+    if let Some(files) = report.files {
+        body["files"] = json!(files);
+    }
+    if let Some(ms) = report.elapsed_ms {
+        body["elapsed_ms"] = json!(ms);
+    }
+    if let Some(err) = &report.error {
+        body["error"] = json!(err);
+    }
+    structured(body)
 }
 
 /// Wrap a `file` result in the freshness envelope, matching the `graph` tool.
@@ -320,9 +352,17 @@ impl Counts {
 
 fn schema_json() -> Value {
     json!({
-        "schema_version": "4",
-        "actions": ["catalog", "schema", "file", "workspace"],
+        "schema_version": "5",
+        "actions": ["catalog", "schema", "status", "file", "workspace"],
         "severities": ["error", "warning", "info", "hint"],
+        "status_result": {
+            "state": "disabled | idle | loading | ready | failed — resident lifecycle",
+            "generation": "u64 — bumped on each build/reload (independent of the graph tool's revision)",
+            "files": "usize — resident .bsl count (present when ready)",
+            "reload": "none | running | failed — background reload state",
+            "elapsed_ms": "u64 — ms since the current build started (present while loading)",
+            "error": "string — failure message (present when failed)"
+        },
         "catalog_entry": {
             "code": "string — stable diagnostic code (e.g. CyclomaticComplexity)",
             "title": "string — localized name",
@@ -413,11 +453,13 @@ mod tests {
         let result = schema();
         assert_structured_mirrors_text(&result);
         let body = body_of(&result);
-        assert_eq!(body["schema_version"], "4");
+        assert_eq!(body["schema_version"], "5");
         let actions = body["actions"].as_array().unwrap();
         assert!(actions.iter().any(|a| a == "catalog"));
+        assert!(actions.iter().any(|a| a == "status"));
         assert!(actions.iter().any(|a| a == "file"));
         assert!(actions.iter().any(|a| a == "workspace"));
+        assert!(body["status_result"]["state"].is_string(), "status action advertised");
         assert!(body["finding"]["graph_id"].is_string(), "graph bridge advertised");
         assert!(body["workspace_result"]["aggregates"].is_string(), "workspace advertised");
         let sev = body["severities"].as_array().unwrap();

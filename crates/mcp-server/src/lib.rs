@@ -549,10 +549,19 @@ impl McpServer {
                 };
                 Ok(tools::diagnostics::catalog(locale, &p.codes))
             }
+            // `status` reports the resident lifecycle (and kicks the lazy build) so an
+            // agent can start it and poll progress instead of a flat `loading`.
+            "status" => {
+                let diag = self.state.diagnostics();
+                diag.ensure_loading();
+                Ok(tools::diagnostics::status(&diag.status_report()))
+            }
             "file" => self.diagnostics_file(p).await,
             "workspace" => self.diagnostics_workspace(p).await,
             other => Err(McpError::invalid_params(
-                format!("Unknown action '{other}'. Expected: catalog, schema, file, workspace"),
+                format!(
+                    "Unknown action '{other}'. Expected: catalog, schema, status, file, workspace"
+                ),
                 None,
             )),
         }
@@ -583,7 +592,7 @@ impl McpServer {
                 ))
             }
             DiagnosticsStatus::Idle | DiagnosticsStatus::Loading => {
-                return Ok(tools::diagnostics::loading())
+                return Ok(tools::diagnostics::loading(&diag.status_report()))
             }
             DiagnosticsStatus::Ready { .. } => {}
         }
@@ -616,7 +625,7 @@ impl McpServer {
                 ResidentOutcome::Ready(result, freshness) => {
                     Ok(tools::diagnostics::envelope(freshness, result))
                 }
-                ResidentOutcome::Loading => Ok(tools::diagnostics::loading()),
+                ResidentOutcome::Loading => Ok(tools::diagnostics::loading(&diag.status_report())),
                 ResidentOutcome::Disabled => Err(McpError::invalid_params(
                     "diagnostics 'file' is only available in the workspace profile",
                     None,
@@ -659,7 +668,7 @@ impl McpServer {
                 ))
             }
             DiagnosticsStatus::Idle | DiagnosticsStatus::Loading => {
-                return Ok(tools::diagnostics::loading())
+                return Ok(tools::diagnostics::loading(&diag.status_report()))
             }
             DiagnosticsStatus::Ready { .. } => {}
         }
@@ -683,7 +692,7 @@ impl McpServer {
                 ResidentOutcome::Ready(result, freshness) => {
                     Ok(tools::diagnostics::envelope(freshness, result))
                 }
-                ResidentOutcome::Loading => Ok(tools::diagnostics::loading()),
+                ResidentOutcome::Loading => Ok(tools::diagnostics::loading(&diag.status_report())),
                 ResidentOutcome::Disabled => Err(McpError::invalid_params(
                     "diagnostics 'workspace' is only available in the workspace profile",
                     None,

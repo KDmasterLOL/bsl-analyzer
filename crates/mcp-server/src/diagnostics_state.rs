@@ -110,9 +110,18 @@ pub(crate) struct DiagnosticsResident {
 
 impl DiagnosticsResident {
     /// Resolve a request path to the resident FileId, canonicalising it the same way
-    /// the loader did. `None` when the path is not a resident workspace `.bsl`.
+    /// the loader did. A relative path is resolved against the workspace root (not the
+    /// process CWD), so `diagnostics file` works regardless of where the server was
+    /// started. `None` when the path is not a resident workspace `.bsl`.
     pub(crate) fn file_id_for(&self, path: &Path) -> Option<FileId> {
-        self.by_path.get(&canonical_key(path)).copied()
+        let resolved;
+        let abs: &Path = if path.is_absolute() {
+            path
+        } else {
+            resolved = self.workspace_root.join(path);
+            &resolved
+        };
+        self.by_path.get(&canonical_key(abs)).copied()
     }
 
     /// The workspace root the resident was built against (the graph's `source_dir`),
@@ -241,6 +250,9 @@ struct Inner {
     config_fp: u64,
     generation: u64,
     reload: ReloadState,
+    /// When the current `Loading` build started, for the `status`/`loading` envelope's
+    /// `elapsed_ms`. Set on `Idle → Loading`, cleared when the resident becomes `Ready`.
+    loading_since: Option<Instant>,
 }
 
 /// Throttled cache of the last on-disk drift scan, guarded across the walk so
@@ -269,6 +281,23 @@ pub(crate) struct Freshness {
     pub revision: u64,
     pub stale: bool,
     pub reload: &'static str,
+}
+
+/// A snapshot of the resident lifecycle for the `status` action and the enriched
+/// `loading` envelope — so an agent can tell "building, N ms in" from "stuck/failed"
+/// instead of polling a flat `loading`.
+pub(crate) struct StatusReport {
+    /// `disabled | idle | loading | ready | failed`.
+    pub state: &'static str,
+    pub generation: u64,
+    /// Resident `.bsl` count once `ready`.
+    pub files: Option<usize>,
+    /// Background reload state: `none | running | failed`.
+    pub reload: &'static str,
+    /// The failure message when `state == failed` (build panicked or errored).
+    pub error: Option<String>,
+    /// Milliseconds since the current `loading` build started (`None` unless loading).
+    pub elapsed_ms: Option<u64>,
 }
 
 /// Handle to the workspace diagnostics database. Cheap to clone (shared `Arc`s).
@@ -305,6 +334,7 @@ impl DiagnosticsState {
                 config_fp: 0,
                 generation: 0,
                 reload: ReloadState::Idle,
+                loading_since: None,
             })),
             scan: Arc::new(Mutex::new(None)),
             last_access: Arc::new(Mutex::new(Instant::now())),
@@ -318,6 +348,30 @@ impl DiagnosticsState {
 
     pub(crate) fn status(&self) -> DiagnosticsStatus {
         lock_recover(&self.inner).status.clone()
+    }
+
+    /// A lifecycle snapshot for the `status` action and the enriched `loading` envelope.
+    pub(crate) fn status_report(&self) -> StatusReport {
+        let inner = lock_recover(&self.inner);
+        let (state, files) = match &inner.status {
+            DiagnosticsStatus::Disabled => ("disabled", None),
+            DiagnosticsStatus::Idle => ("idle", None),
+            DiagnosticsStatus::Loading => ("loading", None),
+            DiagnosticsStatus::Ready { files } => ("ready", Some(*files)),
+            DiagnosticsStatus::Failed(_) => ("failed", None),
+        };
+        let error = match &inner.status {
+            DiagnosticsStatus::Failed(msg) => Some(msg.clone()),
+            _ => None,
+        };
+        StatusReport {
+            state,
+            generation: inner.generation,
+            files,
+            reload: inner.reload.label(),
+            error,
+            elapsed_ms: inner.loading_since.map(|t| t.elapsed().as_millis() as u64),
+        }
     }
 
     /// Stop the idle sweeper (called on server shutdown).
@@ -338,6 +392,7 @@ impl DiagnosticsState {
                 return;
             }
             inner.status = DiagnosticsStatus::Loading;
+            inner.loading_since = Some(Instant::now());
         }
         // Spawn the single idle sweeper on first use (it outlives evict→rebuild cycles).
         if !self.sweeper_started.swap(true, Ordering::SeqCst) {
@@ -348,8 +403,9 @@ impl DiagnosticsState {
             .name("bsl-diag-init".to_owned())
             .spawn(move || state.run_load());
         if let Err(e) = spawned {
-            lock_recover(&self.inner).status =
-                DiagnosticsStatus::Failed(format!("could not spawn loader: {e}"));
+            let mut inner = lock_recover(&self.inner);
+            inner.loading_since = None;
+            inner.status = DiagnosticsStatus::Failed(format!("could not spawn loader: {e}"));
         }
     }
 
@@ -530,7 +586,7 @@ impl DiagnosticsState {
             return;
         };
         tracing::info!(?root, "diagnostics resident db build started");
-        match Self::build_resident(&root) {
+        match Self::catch_build(|| Self::build_resident(&root)) {
             Ok((resident, stats, config_fp)) => {
                 let files = resident.file_count();
                 {
@@ -540,15 +596,17 @@ impl DiagnosticsState {
                     inner.config_fp = config_fp;
                     inner.generation += 1;
                     inner.reload = ReloadState::Idle;
+                    inner.loading_since = None;
                     inner.status = DiagnosticsStatus::Ready { files };
                 }
                 *lock_recover(&self.scan) = None;
                 tracing::info!(files, "diagnostics resident db ready");
             }
-            Err(e) => {
-                let msg = e.to_string();
+            Err(msg) => {
                 tracing::warn!("diagnostics resident db build failed: {msg}");
-                lock_recover(&self.inner).status = DiagnosticsStatus::Failed(msg);
+                let mut inner = lock_recover(&self.inner);
+                inner.loading_since = None;
+                inner.status = DiagnosticsStatus::Failed(msg);
             }
         }
     }
@@ -560,7 +618,7 @@ impl DiagnosticsState {
         let Some(root) = self.workspace_root.clone() else {
             return;
         };
-        match Self::build_resident(&root) {
+        match Self::catch_build(|| Self::build_resident(&root)) {
             Ok((resident, stats, config_fp)) => {
                 let files = resident.file_count();
                 let mut inner = lock_recover(&self.inner);
@@ -574,11 +632,30 @@ impl DiagnosticsState {
                 *lock_recover(&self.scan) = None;
                 tracing::info!(files, "diagnostics resident db reloaded");
             }
-            Err(e) => {
-                let msg = e.to_string();
+            Err(msg) => {
                 tracing::warn!("diagnostics resident db reload failed: {msg}");
                 let mut inner = lock_recover(&self.inner);
                 inner.reload = ReloadState::Failed(msg);
+            }
+        }
+    }
+
+    /// Run a resident-build closure with panic isolation. A panic in the build thread must
+    /// NOT leave the status pinned at `Loading` forever (the agent would see "still
+    /// building" with no recovery, and the idle sweeper only evicts from `Ready`). Folding
+    /// both an `Err` and a panic into `Err(String)` lets the caller publish `Failed`, which
+    /// is visible and retryable. Generic over the closure so the fold itself is testable.
+    fn catch_build<T>(build: impl FnOnce() -> anyhow::Result<T>) -> Result<T, String> {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(build)) {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(e)) => Err(e.to_string()),
+            Err(panic) => {
+                let detail = panic
+                    .downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| panic.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "unknown panic".to_owned());
+                Err(format!("diagnostics build panicked: {detail}"))
             }
         }
     }
@@ -986,5 +1063,99 @@ mod tests {
         state.ensure_loading();
         wait_ready(&state);
         assert!(matches!(state.status(), DiagnosticsStatus::Ready { .. }));
+    }
+
+    /// A `diagnostics file` request may pass a workspace-relative path; it must resolve
+    /// against the workspace root, not the process CWD.
+    #[test]
+    fn file_id_resolves_relative_path_against_workspace_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let state = DiagnosticsState::for_workspace(root.to_path_buf());
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let rel = Path::new("CommonModules/Сервер/Ext/Module.bsl");
+        let abs = module_path(root, "Сервер");
+        let found = state.read(|resident, _gen| {
+            (resident.file_id_for(rel).is_some(), resident.file_id_for(&abs).is_some())
+        });
+        match found {
+            ResidentOutcome::Ready((rel_ok, abs_ok), _) => {
+                assert!(rel_ok, "relative path resolves against the workspace root");
+                assert!(abs_ok, "absolute path still resolves");
+            }
+            _ => panic!("expected Ready"),
+        }
+    }
+
+    /// `status_report` reflects the lifecycle: `idle` before load, `ready` with the file
+    /// count and a bumped generation after, and `reload = none` when not reloading.
+    #[test]
+    fn status_report_tracks_lifecycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let state = DiagnosticsState::for_workspace(root.to_path_buf());
+        let before = state.status_report();
+        assert_eq!(before.state, "idle");
+        assert_eq!(before.generation, 0);
+        assert_eq!(before.files, None);
+
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let after = state.status_report();
+        assert_eq!(after.state, "ready");
+        assert!(after.generation >= 1, "generation bumped on build");
+        assert_eq!(after.files, Some(1), "one resident .bsl");
+        assert_eq!(after.reload, "none");
+        assert!(after.error.is_none());
+        // elapsed_ms is cleared once ready.
+        assert!(after.elapsed_ms.is_none());
+    }
+
+    /// The production `catch_build` fold: an `Ok` build passes through, an `Err` becomes a
+    /// message, and a PANIC is folded into `Err` (so the caller publishes `Failed` instead
+    /// of leaving a dead thread with the status pinned at `Loading`).
+    #[test]
+    fn catch_build_folds_ok_err_and_panic() {
+        let ok: Result<i32, String> = DiagnosticsState::catch_build(|| Ok(42));
+        assert_eq!(ok, Ok(42));
+
+        let err = DiagnosticsState::catch_build(|| -> anyhow::Result<i32> {
+            anyhow::bail!("plain build error")
+        });
+        assert_eq!(err, Err("plain build error".to_owned()));
+
+        let panicked = DiagnosticsState::catch_build(|| -> anyhow::Result<i32> {
+            panic!("synthetic build panic")
+        });
+        let msg = panicked.unwrap_err();
+        assert!(msg.contains("panicked") && msg.contains("synthetic build panic"), "{msg}");
+    }
+
+    /// End-to-end: a loader that publishes via `catch_build`'s `Err` path lands in
+    /// `Failed` with `loading_since` cleared (no stale `elapsed_ms`), never stuck `Loading`.
+    #[test]
+    fn failed_build_clears_loading_since_and_is_visible() {
+        let err = DiagnosticsState::catch_build(|| -> anyhow::Result<()> { panic!("boom") });
+        // Simulate run_load's Err arm publishing the failure.
+        let state = DiagnosticsState::for_workspace(std::env::temp_dir());
+        {
+            let mut inner = lock_recover(&state.inner);
+            inner.loading_since = Some(Instant::now());
+            inner.status = DiagnosticsStatus::Loading;
+            // The exact publication run_load performs on Err.
+            inner.loading_since = None;
+            inner.status = DiagnosticsStatus::Failed(err.unwrap_err());
+        }
+        let report = state.status_report();
+        assert_eq!(report.state, "failed");
+        assert!(report.error.as_deref().unwrap().contains("boom"));
+        assert!(report.elapsed_ms.is_none(), "loading_since cleared on failure");
     }
 }
