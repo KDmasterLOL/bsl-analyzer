@@ -9,14 +9,36 @@ pub(super) fn build_server_spec(request: &InstallRequest, binary: &str) -> Serve
     }
 }
 
-/// The command an AI client should run to launch this MCP server. Prefers the absolute
-/// path of the currently-running executable (`current_exe`), so the generated config
-/// works even when the client starts the server in a reduced `PATH` that lacks the
-/// install directory. Falls back to the bare name if the path cannot be resolved.
+/// Set by the `bsl-launcher` binary to its own absolute path before it spawns the app.
+/// When present, the MCP config must record the launcher (not the app) so the client
+/// keeps going through the launcher's auto-update path. Kept in sync by contract with
+/// `crates/bsl-launcher/src/main.rs`.
+const LAUNCHER_BIN_ENV: &str = "BSL_ANALYZER_LAUNCHER_BIN";
+
+/// The command an AI client should run to launch this MCP server, as an absolute path so
+/// the generated config survives a reduced `PATH`. When invoked through the launcher,
+/// prefers the launcher's own path (via `LAUNCHER_BIN_ENV`) so the client keeps going
+/// through the auto-updating launcher rather than pinning a cached app binary. Otherwise
+/// uses the running executable (`current_exe`), falling back to the bare name.
 pub(super) fn resolve_self_binary() -> String {
-    std::env::current_exe()
-        .ok()
-        .map(|path| path.to_string_lossy().into_owned())
+    // Trust the launcher env only if it still points at an existing path, so a stale
+    // value left over from a previous install can't poison the recorded command. The
+    // absolute-path guard lives in `resolve_binary` (pure, hence testable).
+    let launcher_bin =
+        std::env::var(LAUNCHER_BIN_ENV).ok().filter(|s| std::path::Path::new(s).exists());
+    let current_exe = std::env::current_exe().ok().map(|path| path.to_string_lossy().into_owned());
+    resolve_binary(launcher_bin, current_exe)
+}
+
+/// Pure core of [`resolve_self_binary`]: the launcher path wins over the running
+/// executable, but only when it is a non-empty **absolute** path — a relative or empty
+/// value (e.g. an externally mis-set env var) is ignored so the recorded command never
+/// becomes relative. Falls through to the running executable, then a bare name. Split
+/// out so the precedence is testable without mutating process-global environment.
+fn resolve_binary(launcher_bin: Option<String>, current_exe: Option<String>) -> String {
+    launcher_bin
+        .filter(|s| !s.is_empty() && std::path::Path::new(s).is_absolute())
+        .or(current_exe)
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "bsl-analyzer".to_owned())
 }
@@ -154,5 +176,45 @@ mod tests {
         let bin = super::resolve_self_binary();
         assert!(!bin.is_empty());
         assert!(std::path::Path::new(&bin).is_absolute(), "expected an absolute path, got {bin}");
+    }
+
+    /// When started via the launcher (`BSL_ANALYZER_LAUNCHER_BIN` set), the launcher path
+    /// wins over the running app binary, so the generated config keeps going through the
+    /// auto-updating launcher.
+    #[test]
+    fn resolve_binary_prefers_launcher_over_app() {
+        let bin = super::resolve_binary(
+            Some("/home/u/.local/bin/bsl-analyzer".to_owned()),
+            Some("/home/u/.bsl-analyzer/bin/bsl-analyzer-app".to_owned()),
+        );
+        assert_eq!(bin, "/home/u/.local/bin/bsl-analyzer");
+    }
+
+    /// Without the launcher env (or with it empty), it falls back to the running app
+    /// binary — preserving the absolute-path-for-reduced-PATH behaviour for a bare app.
+    #[test]
+    fn resolve_binary_falls_back_to_current_exe() {
+        let app = "/opt/bsl/bsl-analyzer-app".to_owned();
+        assert_eq!(super::resolve_binary(None, Some(app.clone())), app);
+        assert_eq!(super::resolve_binary(Some(String::new()), Some(app.clone())), app);
+    }
+
+    /// Last resort when neither source resolves: the bare name (relies on PATH).
+    #[test]
+    fn resolve_binary_falls_back_to_bare_name() {
+        assert_eq!(super::resolve_binary(None, None), "bsl-analyzer");
+        assert_eq!(super::resolve_binary(Some(String::new()), Some(String::new())), "bsl-analyzer");
+    }
+
+    /// A relative launcher value (e.g. an externally mis-set env var) is rejected so the
+    /// recorded command never becomes relative; it falls through to the running exe.
+    #[test]
+    fn resolve_binary_ignores_relative_launcher_value() {
+        let app = "/opt/bsl/bsl-analyzer-app".to_owned();
+        assert_eq!(
+            super::resolve_binary(Some("bin/bsl-analyzer".to_owned()), Some(app.clone())),
+            app
+        );
+        assert_eq!(super::resolve_binary(Some("bsl-analyzer".to_owned()), Some(app.clone())), app);
     }
 }
