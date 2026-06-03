@@ -11,13 +11,38 @@
 //! `schema` action advertises the contract. Both are computed from compile-time
 //! metadata, so no resident analysis database is required.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::path::Path;
 use std::str::FromStr;
 
-use ide::{catalog_entry, diagnostic_catalog, DiagnosticCode, Locale};
+use ide::{
+    catalog_entry, diagnostic_catalog, DiagnosticCode, DiagnosticsConfig, Locale, SeverityBucket,
+};
 use rmcp::model::CallToolResult;
 use serde_json::{json, Value};
 
+use crate::diagnostics_state::{DiagnosticsResident, Freshness};
 use crate::tools::response::structured;
+
+/// Server-side cap on returned findings, honouring Anthropic's tool-response budget.
+/// `counts` still reports the full severity histogram, so a capped response is honest.
+pub(crate) const DEFAULT_MAX_FINDINGS: usize = 200;
+
+/// Filters applied to a file's diagnostics before they become findings.
+pub(crate) struct FileFilters {
+    /// Inclusive severity floor (findings below it are dropped from `findings`, but
+    /// still counted in `counts`).
+    pub min_severity: SeverityBucket,
+    /// Keep only these codes (empty = all).
+    pub codes: Vec<String>,
+    /// Keep only findings intersecting this inclusive 0-based line range (None = all).
+    pub range: Option<(usize, usize)>,
+    /// Cap on `findings` length.
+    pub max_findings: usize,
+    /// Detailed mode adds `internal_severity` (7-grade) and the fix label per finding.
+    pub detailed: bool,
+}
 
 /// The static catalog of diagnostic codes in `locale`, optionally narrowed to
 /// `codes`. Unparseable / unknown requested codes are reported back in
@@ -55,10 +80,162 @@ pub fn schema() -> CallToolResult {
     structured(schema_json())
 }
 
+/// A transient "still building the resident database" result, emitted while the
+/// background load runs. Not an error — the agent should retry shortly.
+pub fn loading() -> CallToolResult {
+    structured(
+        json!({ "status": "loading", "detail": "diagnostics database is building; retry shortly" }),
+    )
+}
+
+/// Wrap a `file` result in the freshness envelope, matching the `graph` tool.
+pub fn envelope(freshness: Freshness, result: Value) -> CallToolResult {
+    structured(json!({
+        "revision": freshness.revision,
+        "stale": freshness.stale,
+        "reload": freshness.reload,
+        "result": result,
+    }))
+}
+
+/// Parse a `min_severity` floor, defaulting to `warning` (drops info/hint noise by
+/// default). An unrecognised label is an error so the agent learns the vocabulary.
+pub(crate) fn parse_min_severity(s: Option<&str>) -> Result<SeverityBucket, String> {
+    match s {
+        None => Ok(SeverityBucket::Warning),
+        Some(label) => SeverityBucket::parse(label).ok_or_else(|| {
+            format!("unknown min_severity '{label}'; expected error|warning|info|hint")
+        }),
+    }
+}
+
+/// Compute the `file` action's result body from the resident database: resolve the
+/// path to its FileId, run diagnostics, then filter (codes / range / floor), bucket
+/// severity, and shape findings + the full `counts` histogram + a content-hash
+/// `result_id`. Runs inside the resident read lock, on the calling thread.
+pub(crate) fn file_findings(
+    resident: &DiagnosticsResident,
+    path: &Path,
+    filters: &FileFilters,
+    generation: u64,
+) -> Value {
+    let Some(file_id) = resident.file_id_for(path) else {
+        return json!({
+            "error": "not_in_workspace",
+            "detail": "path is not a resident workspace .bsl file",
+            "path": path.to_string_lossy(),
+        });
+    };
+    let analysis = resident.analysis();
+    let file_text = analysis.file_text(file_id);
+    let diagnostics = analysis.diagnostics(file_id, &DiagnosticsConfig::default());
+
+    let mut counts = Counts::default();
+    let mut findings: Vec<Value> = Vec::new();
+    let mut truncated = false;
+
+    for diag in &diagnostics {
+        let out = diag.to_output(&file_text);
+        if !filters.codes.is_empty() && !filters.codes.iter().any(|c| c == &out.code) {
+            continue;
+        }
+        if let Some((start, end)) = filters.range {
+            // Keep a finding whose line span intersects the requested range.
+            if out.end_line < start || out.start_line > end {
+                continue;
+            }
+        }
+        let bucket = SeverityBucket::from(diag.severity);
+        // `counts` is the full histogram of what passed codes/range, before the floor.
+        counts.add(bucket);
+        if bucket < filters.min_severity {
+            continue;
+        }
+        if findings.len() >= filters.max_findings {
+            truncated = true;
+            continue;
+        }
+        findings.push(finding_value(diag, &out, bucket, filters.detailed));
+    }
+
+    json!({
+        "result_id": result_id(path, generation, &file_text),
+        "kind": "full",
+        "counts": counts.to_value(),
+        "truncated": truncated,
+        "findings": findings,
+    })
+}
+
+fn finding_value(
+    diag: &ide::Diagnostic,
+    out: &ide::DiagnosticOutput,
+    bucket: SeverityBucket,
+    detailed: bool,
+) -> Value {
+    let mut v = json!({
+        "code": out.code,
+        "severity": bucket.as_str(),
+        "message": out.message,
+        "range": {
+            "start_line": out.start_line,
+            "start_column": out.start_column,
+            "end_line": out.end_line,
+            "end_column": out.end_column,
+        },
+        "has_fix": !diag.fixes.is_empty(),
+    });
+    if !out.tags.is_empty() {
+        v["tags"] = json!(out.tags);
+    }
+    if detailed {
+        v["internal_severity"] = json!(diag.severity.as_str());
+        if let Some(fix) = diag.fixes.first() {
+            v["fix"] = json!({ "label": fix.label });
+        }
+    }
+    v
+}
+
+/// The pull-model freshness handle: `<path>@<generation>@<content-hash>`. The content
+/// hash MUST be present so a body edit inside the drift-scan throttle window cannot be
+/// masked by an unchanged generation (a stale `unchanged` would otherwise be possible
+/// once `previous_result_id` lands).
+fn result_id(path: &Path, generation: u64, text: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
+    format!("{}@{}@{:016x}", path.to_string_lossy(), generation, hasher.finish())
+}
+
+/// The four-bucket severity histogram, always emitted so the agent knows what a
+/// floor or a cap hid.
+#[derive(Default)]
+struct Counts {
+    error: usize,
+    warning: usize,
+    info: usize,
+    hint: usize,
+}
+
+impl Counts {
+    fn add(&mut self, bucket: SeverityBucket) {
+        match bucket {
+            SeverityBucket::Error => self.error += 1,
+            SeverityBucket::Warning => self.warning += 1,
+            SeverityBucket::Info => self.info += 1,
+            SeverityBucket::Hint => self.hint += 1,
+        }
+    }
+
+    fn to_value(&self) -> Value {
+        json!({ "error": self.error, "warning": self.warning, "info": self.info, "hint": self.hint })
+    }
+}
+
 fn schema_json() -> Value {
     json!({
-        "schema_version": "1",
-        "actions": ["catalog", "schema"],
+        "schema_version": "2",
+        "actions": ["catalog", "schema", "file"],
         "severities": ["error", "warning", "info", "hint"],
         "catalog_entry": {
             "code": "string — stable diagnostic code (e.g. CyclomaticComplexity)",
@@ -72,6 +249,38 @@ fn schema_json() -> Value {
         "catalog_params": {
             "codes": "string[] — narrow the catalog to these codes (optional)",
             "locale": "ru | en (default ru) — title language"
+        },
+        "file_params": {
+            "path": "string — absolute or workspace-relative .bsl path (required)",
+            "min_severity": "error | warning | info | hint (default warning) — inclusive floor",
+            "codes": "string[] — keep only these codes (optional)",
+            "range_start": "usize — 0-based first line to include (optional)",
+            "range_end": "usize — 0-based last line to include (optional)",
+            "detail": "concise | detailed (default concise) — detailed adds internal_severity + fix",
+            "max_findings": "usize — cap on findings (default 200)"
+        },
+        "finding": {
+            "code": "string",
+            "severity": "error | warning | info | hint (4-bucket)",
+            "message": "string",
+            "range": "{ start_line, start_column, end_line, end_column } — 0-based",
+            "tags": "string[] — omitted when empty",
+            "has_fix": "bool — whether an automatic fix is attached",
+            "internal_severity": "7-grade name (detailed only)",
+            "fix": "{ label } (detailed only, when present)"
+        },
+        "file_result": {
+            "result_id": "<path>@<generation>@<content-hash> — pull-model freshness handle",
+            "kind": "full — (unchanged reserved for a future previous_result_id round-trip)",
+            "counts": "{ error, warning, info, hint } — full histogram before the floor/cap",
+            "truncated": "bool — the findings cap was hit; counts still complete",
+            "findings": "finding[]"
+        },
+        "envelope": {
+            "revision": "u64 — resident-db generation the answer was computed at",
+            "stale": "bool — workspace drifted on disk since this generation",
+            "reload": "none | running | failed — background reload state",
+            "result": "the action payload (or an {error} object)"
         }
     })
 }
@@ -105,13 +314,26 @@ mod tests {
         let result = schema();
         assert_structured_mirrors_text(&result);
         let body = body_of(&result);
-        assert_eq!(body["schema_version"], "1");
+        assert_eq!(body["schema_version"], "2");
         let actions = body["actions"].as_array().unwrap();
         assert!(actions.iter().any(|a| a == "catalog"));
+        assert!(actions.iter().any(|a| a == "file"));
         let sev = body["severities"].as_array().unwrap();
         assert_eq!(sev.len(), 4);
         assert!(sev.iter().any(|s| s == "error"));
         assert!(sev.iter().any(|s| s == "hint"));
+        // The file contract is advertised for cold-start discovery.
+        assert!(body["file_params"]["path"].is_string());
+        assert!(body["file_result"]["result_id"].is_string());
+        assert!(body["envelope"]["revision"].is_string());
+    }
+
+    #[test]
+    fn min_severity_defaults_to_warning_and_rejects_unknown() {
+        assert_eq!(parse_min_severity(None).unwrap(), SeverityBucket::Warning);
+        assert_eq!(parse_min_severity(Some("error")).unwrap(), SeverityBucket::Error);
+        assert_eq!(parse_min_severity(Some("hint")).unwrap(), SeverityBucket::Hint);
+        assert!(parse_min_severity(Some("blocker")).is_err());
     }
 
     #[test]
@@ -150,5 +372,138 @@ mod tests {
         let unknown = body["unknown_codes"].as_array().unwrap();
         assert_eq!(unknown.len(), 1);
         assert_eq!(unknown[0], "NoSuchCode");
+    }
+
+    mod file_action {
+        use super::*;
+        use crate::diagnostics_state::{DiagnosticsState, DiagnosticsStatus, ResidentOutcome};
+        use std::fs;
+        use std::path::{Path, PathBuf};
+        use std::time::Duration;
+
+        fn write(root: &Path, rel: &str, text: &str) {
+            let path = root.join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        }
+
+        fn sample_workspace(root: &Path) {
+            let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core">
+	<CommonModule uuid="00000000-0000-0000-0000-000000000006">
+		<Properties>
+			<Name>Сервер</Name>
+			<Global>false</Global>
+			<ClientManagedApplication>false</ClientManagedApplication>
+			<Server>true</Server>
+			<ExternalConnection>false</ExternalConnection>
+			<ClientOrdinaryApplication>false</ClientOrdinaryApplication>
+			<ServerCall>false</ServerCall>
+			<Privileged>false</Privileged>
+			<ReturnValuesReuse>DontUse</ReturnValuesReuse>
+		</Properties>
+	</CommonModule>
+</MetaDataObject>"#;
+            write(root, "CommonModules/Сервер.xml", xml);
+            write(
+                root,
+                "CommonModules/Сервер/Ext/Module.bsl",
+                "&НаСервере\nФункция Считать() Экспорт Возврат 1; КонецФункции\n",
+            );
+        }
+
+        fn ready_state(root: &Path) -> DiagnosticsState {
+            let state = DiagnosticsState::for_workspace(root.to_path_buf());
+            state.ensure_loading();
+            for _ in 0..300 {
+                match state.status() {
+                    DiagnosticsStatus::Ready { .. } => return state,
+                    DiagnosticsStatus::Failed(m) => panic!("load failed: {m}"),
+                    _ => std::thread::sleep(Duration::from_millis(10)),
+                }
+            }
+            panic!("db did not become ready");
+        }
+
+        fn run(state: &DiagnosticsState, path: &Path, filters: &FileFilters) -> Value {
+            // `read` supplies the generation under the lock, so the closure must not
+            // re-lock `&self`.
+            match state
+                .read(|resident, generation| file_findings(resident, path, filters, generation))
+            {
+                ResidentOutcome::Ready(v) => v,
+                _ => panic!("expected Ready outcome"),
+            }
+        }
+
+        fn default_filters() -> FileFilters {
+            FileFilters {
+                min_severity: SeverityBucket::Hint, // keep everything for shape assertions
+                codes: Vec::new(),
+                range: None,
+                max_findings: DEFAULT_MAX_FINDINGS,
+                detailed: false,
+            }
+        }
+
+        #[test]
+        fn file_findings_shapes_the_result() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            sample_workspace(root);
+            let state = ready_state(root);
+            let path = root.join("CommonModules/Сервер/Ext/Module.bsl");
+
+            let body = run(&state, &path, &default_filters());
+
+            assert_eq!(body["kind"], "full");
+            assert!(body["truncated"].is_boolean());
+            for sev in ["error", "warning", "info", "hint"] {
+                assert!(body["counts"][sev].is_u64(), "counts.{sev} present");
+            }
+            assert!(body["findings"].is_array());
+            // result_id = <path>@<generation>@<content-hash>.
+            let id = body["result_id"].as_str().unwrap();
+            let parts: Vec<&str> = id.rsplitn(3, '@').collect();
+            assert_eq!(parts.len(), 3, "result_id has path@gen@hash shape: {id}");
+            assert_eq!(parts[0].len(), 16, "content hash is 16 hex chars");
+        }
+
+        #[test]
+        fn unknown_path_is_an_in_band_error() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            sample_workspace(root);
+            let state = ready_state(root);
+
+            let body = run(&state, &PathBuf::from("/nope/Missing.bsl"), &default_filters());
+            assert_eq!(body["error"], "not_in_workspace");
+        }
+
+        #[test]
+        fn codes_filter_narrows_findings() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            sample_workspace(root);
+            let state = ready_state(root);
+            let path = root.join("CommonModules/Сервер/Ext/Module.bsl");
+
+            // A code that cannot match drops every finding while counts stay structural.
+            let filters =
+                FileFilters { codes: vec!["NoSuchCodeFilter".to_string()], ..default_filters() };
+            let body = run(&state, &path, &filters);
+            assert_eq!(body["findings"].as_array().unwrap().len(), 0);
+        }
+    }
+
+    #[test]
+    fn result_id_folds_the_content_hash() {
+        let path = std::path::Path::new("/ws/Mod.bsl");
+        let a = result_id(path, 3, "Процедура А() КонецПроцедуры");
+        let a_again = result_id(path, 3, "Процедура А() КонецПроцедуры");
+        let b = result_id(path, 3, "Процедура Б() КонецПроцедуры");
+        assert_eq!(a, a_again, "same path+gen+content → same id");
+        assert_ne!(a, b, "different content → different id even at the same generation");
+        assert!(a.starts_with("/ws/Mod.bsl@3@"), "id is <path>@<gen>@<hash>: {a}");
     }
 }

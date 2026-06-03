@@ -1,4 +1,5 @@
 mod baseline;
+mod diagnostics_state;
 mod graph;
 mod graph_db;
 mod graph_query;
@@ -99,13 +100,25 @@ struct GraphParams {
 
 #[derive(Deserialize, JsonSchema)]
 struct DiagnosticsParams {
-    /// catalog | schema
+    /// catalog | schema | file
     action: String,
-    /// Narrow the catalog to these diagnostic codes (optional).
+    /// `file`: absolute or workspace-relative `.bsl` path.
+    path: Option<String>,
+    /// `catalog`: narrow to these codes. `file`: keep only these codes.
     #[serde(default)]
     codes: Vec<String>,
-    /// ru | en (default ru) — catalog title language.
+    /// `catalog`: ru | en (default ru) — title language.
     locale: Option<String>,
+    /// `file`: inclusive severity floor error|warning|info|hint (default warning).
+    min_severity: Option<String>,
+    /// `file`: 0-based first line to include (optional).
+    range_start: Option<usize>,
+    /// `file`: 0-based last line to include (optional).
+    range_end: Option<usize>,
+    /// `file`: concise | detailed (default concise).
+    detail: Option<String>,
+    /// `file`: cap on returned findings (default 200).
+    max_findings: Option<usize>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -528,11 +541,87 @@ impl McpServer {
                 };
                 Ok(tools::diagnostics::catalog(locale, &p.codes))
             }
+            "file" => self.diagnostics_file(p).await,
             other => Err(McpError::invalid_params(
-                format!("Unknown action '{other}'. Expected: catalog, schema"),
+                format!("Unknown action '{other}'. Expected: catalog, schema, file"),
                 None,
             )),
         }
+    }
+
+    /// The `diagnostics file` action: build/serve per-file findings from the resident
+    /// analysis database, behind the lazy-load lifecycle and freshness envelope.
+    async fn diagnostics_file(&self, p: DiagnosticsParams) -> Result<CallToolResult, McpError> {
+        use crate::diagnostics_state::DiagnosticsStatus;
+        use tools::diagnostics::{parse_min_severity, FileFilters};
+
+        let diag = self.state.diagnostics().clone();
+        let path = require(p.path, "path", "file")?;
+        let path = std::path::PathBuf::from(path);
+
+        diag.ensure_loading();
+        match diag.status() {
+            DiagnosticsStatus::Disabled => {
+                return Err(McpError::invalid_params(
+                    "diagnostics 'file' is only available in the workspace profile",
+                    None,
+                ))
+            }
+            DiagnosticsStatus::Failed(msg) => {
+                return Err(McpError::internal_error(
+                    format!("diagnostics database load failed: {msg}"),
+                    None,
+                ))
+            }
+            DiagnosticsStatus::Idle | DiagnosticsStatus::Loading => {
+                return Ok(tools::diagnostics::loading())
+            }
+            DiagnosticsStatus::Ready { .. } => {}
+        }
+
+        let min_severity = parse_min_severity(p.min_severity.as_deref())
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        let range = match (p.range_start, p.range_end) {
+            (Some(s), Some(e)) => Some((s, e)),
+            (Some(s), None) => Some((s, usize::MAX)),
+            (None, Some(e)) => Some((0, e)),
+            (None, None) => None,
+        };
+        let filters = FileFilters {
+            min_severity,
+            codes: p.codes,
+            range,
+            max_findings: p.max_findings.unwrap_or(tools::diagnostics::DEFAULT_MAX_FINDINGS),
+            detailed: p.detail.as_deref() == Some("detailed"),
+        };
+
+        tokio::task::spawn_blocking(move || {
+            // `generation` is supplied by `read` under the lock, so `result_id` and the
+            // envelope `revision` describe the exact resident state that was queried.
+            let outcome = diag.read(|resident, generation| {
+                let result =
+                    tools::diagnostics::file_findings(resident, &path, &filters, generation);
+                (result, generation)
+            });
+            use crate::diagnostics_state::ResidentOutcome;
+            match outcome {
+                ResidentOutcome::Ready((result, generation)) => {
+                    let mut freshness = diag.freshness();
+                    freshness.revision = generation;
+                    Ok(tools::diagnostics::envelope(freshness, result))
+                }
+                ResidentOutcome::Loading => Ok(tools::diagnostics::loading()),
+                ResidentOutcome::Disabled => Err(McpError::invalid_params(
+                    "diagnostics 'file' is only available in the workspace profile",
+                    None,
+                )),
+                ResidentOutcome::Failed(msg) => {
+                    Err(McpError::internal_error(format!("diagnostics database: {msg}"), None))
+                }
+            }
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
     }
 }
 

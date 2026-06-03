@@ -608,6 +608,7 @@ fn scan_roots(workspace_root: &Path) -> Vec<PathBuf> {
 /// mtime in nanos, and length. Produced once per scan and shared by the
 /// whole-workspace fingerprint (which folds them) and the per-file `files` table
 /// (which persists them for granular drift classification).
+#[derive(Clone)]
 pub(crate) struct FileStat {
     pub(crate) path: String,
     mtime: u128,

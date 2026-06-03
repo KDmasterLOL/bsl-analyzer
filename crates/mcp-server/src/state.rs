@@ -1,4 +1,5 @@
 use crate::baseline::{BaselineRuntime, ConfiguredBaselineStatus, ExternalBaselineService};
+use crate::diagnostics_state::DiagnosticsState;
 use crate::graph::GraphState;
 use bsl_metadata::Configuration;
 use bsl_platform::PlatformDataInner;
@@ -29,6 +30,7 @@ pub struct SharedState {
     external_baseline: Option<Arc<ExternalBaselineService>>,
     configured_baseline: Option<ConfiguredBaselineStatus>,
     graph: GraphState,
+    diagnostics: DiagnosticsState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,6 +118,7 @@ impl SharedState {
         }
 
         let graph = GraphState::for_workspace(source_dir.clone());
+        let diagnostics = DiagnosticsState::for_workspace(source_dir.clone());
 
         Self {
             configuration: Arc::new(RwLock::new(configuration)),
@@ -130,6 +133,7 @@ impl SharedState {
             external_baseline: baseline_runtime.external_baseline,
             configured_baseline: Some(baseline_runtime.configured_baseline),
             graph,
+            diagnostics,
         }
     }
 
@@ -271,6 +275,7 @@ impl SharedState {
             external_baseline: baseline_runtime.external_baseline,
             configured_baseline: Some(baseline_runtime.configured_baseline),
             graph: GraphState::disabled(),
+            diagnostics: DiagnosticsState::disabled(),
         }
     }
 
@@ -288,11 +293,16 @@ impl SharedState {
             external_baseline: None,
             configured_baseline: None,
             graph: GraphState::disabled(),
+            diagnostics: DiagnosticsState::disabled(),
         }
     }
 
     pub(crate) fn graph(&self) -> &GraphState {
         &self.graph
+    }
+
+    pub(crate) fn diagnostics(&self) -> &DiagnosticsState {
+        &self.diagnostics
     }
 
     pub fn set_onec_client(&mut self, client: OnecClient) {
@@ -380,6 +390,7 @@ impl SharedState {
         if let Some(ref service) = self.external_baseline {
             service.shutdown();
         }
+        self.diagnostics.shutdown();
     }
 
     fn embedding_config() -> Option<bsl_search::SearchConfig> {
