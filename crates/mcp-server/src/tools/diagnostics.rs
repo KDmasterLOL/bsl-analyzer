@@ -17,7 +17,8 @@ use std::path::Path;
 use std::str::FromStr;
 
 use ide::{
-    catalog_entry, diagnostic_catalog, DiagnosticCode, DiagnosticsConfig, Locale, SeverityBucket,
+    catalog_entry, diagnostic_catalog, DiagnosticCode, DiagnosticsConfig, DocumentSymbol, Locale,
+    SeverityBucket, SymbolKind, TextRange,
 };
 use rmcp::model::CallToolResult;
 use serde_json::{json, Value};
@@ -129,6 +130,9 @@ pub(crate) fn file_findings(
     let analysis = resident.analysis();
     let file_text = analysis.file_text(file_id);
     let diagnostics = analysis.diagnostics(file_id, &DiagnosticsConfig::default());
+    // Method spans for the graph bridge: each finding inside a method carries the
+    // method's durable graph id so the agent can pivot to `graph callers`.
+    let methods = method_ranges(&analysis.document_symbols(file_id));
 
     let mut counts = Counts::default();
     let mut findings: Vec<Value> = Vec::new();
@@ -155,7 +159,8 @@ pub(crate) fn file_findings(
             truncated = true;
             continue;
         }
-        findings.push(finding_value(diag, &out, bucket, filters.detailed));
+        let graph_id = graph_id_for(diag.range, &methods, path);
+        findings.push(finding_value(diag, &out, bucket, graph_id, filters.detailed));
     }
 
     json!({
@@ -171,6 +176,7 @@ fn finding_value(
     diag: &ide::Diagnostic,
     out: &ide::DiagnosticOutput,
     bucket: SeverityBucket,
+    graph_id: Option<String>,
     detailed: bool,
 ) -> Value {
     let mut v = json!({
@@ -188,6 +194,9 @@ fn finding_value(
     if !out.tags.is_empty() {
         v["tags"] = json!(out.tags);
     }
+    if let Some(graph_id) = graph_id {
+        v["graph_id"] = json!(graph_id);
+    }
     if detailed {
         v["internal_severity"] = json!(diag.severity.as_str());
         if let Some(fix) = diag.fixes.first() {
@@ -195,6 +204,34 @@ fn finding_value(
         }
     }
     v
+}
+
+/// Flatten document symbols into `(method_name, source_range)` for every procedure
+/// and function, descending through `#Область` regions (whose method children are
+/// nested). Module-level vars and the regions themselves are skipped.
+fn method_ranges(symbols: &[DocumentSymbol]) -> Vec<(String, TextRange)> {
+    let mut out = Vec::new();
+    collect_methods(symbols, &mut out);
+    out
+}
+
+fn collect_methods(symbols: &[DocumentSymbol], out: &mut Vec<(String, TextRange)>) {
+    for s in symbols {
+        if matches!(s.kind, SymbolKind::Procedure | SymbolKind::Function) {
+            out.push((s.name.clone(), s.range));
+        }
+        if !s.children.is_empty() {
+            collect_methods(&s.children, out);
+        }
+    }
+}
+
+/// The durable graph id of the method whose span contains `range`, if any. `None`
+/// when the finding is not inside a method (module body) or the file is not an
+/// indexable user module (forms, commands) — `graph_id` is best-effort decoration.
+fn graph_id_for(range: TextRange, methods: &[(String, TextRange)], path: &Path) -> Option<String> {
+    let name = methods.iter().find(|(_, r)| r.contains_range(range)).map(|(n, _)| n.as_str())?;
+    ide::method_id_for_path(&path.to_string_lossy(), name)
 }
 
 /// The pull-model freshness handle: `<path>@<generation>@<content-hash>`. The content
@@ -234,7 +271,7 @@ impl Counts {
 
 fn schema_json() -> Value {
     json!({
-        "schema_version": "2",
+        "schema_version": "3",
         "actions": ["catalog", "schema", "file"],
         "severities": ["error", "warning", "info", "hint"],
         "catalog_entry": {
@@ -266,6 +303,7 @@ fn schema_json() -> Value {
             "range": "{ start_line, start_column, end_line, end_column } — 0-based",
             "tags": "string[] — omitted when empty",
             "has_fix": "bool — whether an automatic fix is attached",
+            "graph_id": "durable id of the containing method — pass to `graph callers`/`node` (omitted when not in a method or not an indexable module)",
             "internal_severity": "7-grade name (detailed only)",
             "fix": "{ label } (detailed only, when present)"
         },
@@ -314,10 +352,11 @@ mod tests {
         let result = schema();
         assert_structured_mirrors_text(&result);
         let body = body_of(&result);
-        assert_eq!(body["schema_version"], "2");
+        assert_eq!(body["schema_version"], "3");
         let actions = body["actions"].as_array().unwrap();
         assert!(actions.iter().any(|a| a == "catalog"));
         assert!(actions.iter().any(|a| a == "file"));
+        assert!(body["finding"]["graph_id"].is_string(), "graph bridge advertised");
         let sev = body["severities"].as_array().unwrap();
         assert_eq!(sev.len(), 4);
         assert!(sev.iter().any(|s| s == "error"));
@@ -494,6 +533,54 @@ mod tests {
             let body = run(&state, &path, &filters);
             assert_eq!(body["findings"].as_array().unwrap().len(), 0);
         }
+    }
+
+    #[test]
+    fn graph_id_maps_a_finding_to_its_containing_method() {
+        let method = DocumentSymbol {
+            name: "Считать".to_string(),
+            kind: SymbolKind::Function,
+            range: TextRange::new(10u32.into(), 50u32.into()),
+            selection_range: TextRange::new(10u32.into(), 20u32.into()),
+            children: Vec::new(),
+        };
+        let methods = method_ranges(std::slice::from_ref(&method));
+        let module = std::path::Path::new("/ws/CommonModules/Сервер/Ext/Module.bsl");
+
+        // A finding inside the method span resolves to the method's durable graph id.
+        let inside = TextRange::new(30u32.into(), 35u32.into());
+        assert_eq!(
+            graph_id_for(inside, &methods, module).as_deref(),
+            Some("method/common/Сервер/Считать")
+        );
+        // A module-body finding (outside any method) carries no graph id.
+        let outside = TextRange::new(0u32.into(), 5u32.into());
+        assert_eq!(graph_id_for(outside, &methods, module), None);
+        // A non-indexable file (a form) has no method graph id even inside a method.
+        let form = std::path::Path::new("/ws/CommonForms/Форма/Ext/Form/Module.bsl");
+        assert_eq!(graph_id_for(inside, &methods, form), None);
+    }
+
+    #[test]
+    fn method_ranges_descends_into_regions() {
+        // A function nested inside an `#Область` region (a non-method symbol with
+        // children) is still collected.
+        let region = DocumentSymbol {
+            name: "Служебные".to_string(),
+            kind: SymbolKind::Region,
+            range: TextRange::new(0u32.into(), 100u32.into()),
+            selection_range: TextRange::new(0u32.into(), 10u32.into()),
+            children: vec![DocumentSymbol {
+                name: "Внутренняя".to_string(),
+                kind: SymbolKind::Procedure,
+                range: TextRange::new(20u32.into(), 80u32.into()),
+                selection_range: TextRange::new(20u32.into(), 30u32.into()),
+                children: Vec::new(),
+            }],
+        };
+        let methods = method_ranges(std::slice::from_ref(&region));
+        assert_eq!(methods.len(), 1, "the region itself is not a method, its child is");
+        assert_eq!(methods[0].0, "Внутренняя");
     }
 
     #[test]
