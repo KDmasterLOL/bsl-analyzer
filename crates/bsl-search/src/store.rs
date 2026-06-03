@@ -16,13 +16,106 @@ pub struct Store {
 /// (file-hash gating would otherwise keep stale-format embeddings indefinitely).
 const EMBED_TEXT_VERSION: i64 = 1;
 
+/// The structural version of the SQLite schema, recorded in the `meta` table — the
+/// search-index counterpart to the call graph's `graph_db::SCHEMA_VERSION`. Bump this
+/// whenever a table's shape changes in a way the additive `ALTER TABLE` migrations in
+/// [`Store::init_schema`] cannot reconcile; on mismatch the derived cache is wiped and
+/// rebuilt. Distinct from [`EMBED_TEXT_VERSION`], which only forces a soft re-embed and
+/// leaves the schema intact. A pre-versioning database (no `meta` row) is treated as
+/// already current — the additive migrations keep it compatible — so upgrading does not
+/// trigger a needless full re-index.
+const SCHEMA_VERSION: i64 = 1;
+
 impl Store {
     pub fn open(path: &Path) -> Result<Self, SearchError> {
         let conn = Connection::open(path)?;
         let store = Self { conn };
-        store.init_schema()?;
+        store.apply_pragmas()?;
+        store.migrate_structural_schema()?;
         store.migrate_embed_text_version()?;
         Ok(store)
+    }
+
+    /// Connection-level pragmas. Set outside any transaction — `journal_mode` is a no-op
+    /// inside one — so the WAL mode that makes [`Self::migrate_structural_schema`]
+    /// crash-atomic is actually in force before that transaction runs.
+    fn apply_pragmas(&self) -> Result<(), SearchError> {
+        self.conn.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA synchronous = NORMAL;
+             PRAGMA foreign_keys = ON;",
+        )?;
+        Ok(())
+    }
+
+    /// Reconcile the structural schema in a single transaction: wipe a stale cache,
+    /// (re)create the current tables, and stamp the version atomically. Under WAL a
+    /// crash mid-reconcile rolls back to the prior consistent state, so the next open
+    /// never sees a half-wiped database it would mistake for a pre-versioning one (whose
+    /// data must be kept). Distinct from [`Self::migrate_embed_text_version`], a soft
+    /// re-embed that leaves the schema intact.
+    fn migrate_structural_schema(&self) -> Result<(), SearchError> {
+        let tx = self.conn.unchecked_transaction()?;
+        if let Some(stored) = Self::stored_schema_version(&tx)? {
+            if stored != SCHEMA_VERSION {
+                tracing::info!(
+                    from = stored,
+                    to = SCHEMA_VERSION,
+                    "search index schema changed; wiping derived cache to rebuild"
+                );
+                Self::wipe_all_tables(&tx)?;
+            }
+        }
+        Self::create_schema(&tx)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?1)",
+            params![SCHEMA_VERSION.to_string()],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The structural schema version recorded in `meta`, or `None` for a fresh or
+    /// pre-versioning database (no `meta` table, or no `schema_version` row).
+    fn stored_schema_version(conn: &Connection) -> Result<Option<i64>, SearchError> {
+        let has_meta = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'",
+                [],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !has_meta {
+            return Ok(None);
+        }
+        let version = conn
+            .query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .optional()?
+            .and_then(|v| v.parse().ok());
+        Ok(version)
+    }
+
+    /// Drop every table so [`Self::create_schema`] can recreate the current structure.
+    /// FTS5 virtual tables are dropped first so their shadow tables vanish before the
+    /// generic enumeration runs (dropping a shadow table directly is an error).
+    fn wipe_all_tables(conn: &Connection) -> Result<(), SearchError> {
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS chunks_fts; DROP TABLE IF EXISTS overlay_chunks_fts;",
+        )?;
+        let names: Vec<String> = {
+            let mut stmt = conn.prepare(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+            )?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            rows.collect::<Result<_, _>>()?
+        };
+        for name in names {
+            conn.execute(&format!("DROP TABLE IF EXISTS \"{name}\""), [])?;
+        }
+        Ok(())
     }
 
     /// Force a full re-embed when the embedding-text format has changed since this
@@ -49,16 +142,18 @@ impl Store {
     pub fn in_memory() -> Result<Self, SearchError> {
         let conn = Connection::open_in_memory()?;
         let store = Self { conn };
-        store.init_schema()?;
+        store.apply_pragmas()?;
+        store.migrate_structural_schema()?;
         Ok(store)
     }
 
-    fn init_schema(&self) -> Result<(), SearchError> {
-        self.conn.execute_batch(
+    fn create_schema(conn: &Connection) -> Result<(), SearchError> {
+        conn.execute_batch(
             "
-            PRAGMA journal_mode = WAL;
-            PRAGMA synchronous = NORMAL;
-            PRAGMA foreign_keys = ON;
+            CREATE TABLE IF NOT EXISTS meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
 
             CREATE TABLE IF NOT EXISTS files (
                 id         INTEGER PRIMARY KEY,
@@ -93,14 +188,13 @@ impl Store {
             ",
         )?;
 
-        let _ = self
-            .conn
+        let _ = conn
             .execute("ALTER TABLE files ADD COLUMN collection TEXT NOT NULL DEFAULT 'code'", []);
         // Idempotent column add for databases created before graph-enriched embeddings;
         // the error when it already exists is intentionally ignored.
-        let _ = self.conn.execute("ALTER TABLE chunks ADD COLUMN graph_context TEXT", []);
+        let _ = conn.execute("ALTER TABLE chunks ADD COLUMN graph_context TEXT", []);
 
-        self.conn.execute_batch(
+        conn.execute_batch(
             "
             -- Baseline manifest metadata for workspace code.
             -- Stores the selected snapshot identity and manifest snapshot.
@@ -1696,5 +1790,57 @@ mod tests {
         // A second open at the same version is a no-op (does not re-clear).
         let store = Store::open(&path).unwrap();
         assert!(store.file_hash("A.bsl").unwrap().unwrap().is_empty());
+    }
+
+    #[test]
+    fn open_stamps_current_schema_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        let store = Store::open(&path).unwrap();
+        let stored = Store::stored_schema_version(&store.conn).unwrap();
+        assert_eq!(stored, Some(SCHEMA_VERSION));
+    }
+
+    #[test]
+    fn schema_version_bump_wipes_derived_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        {
+            let mut store = Store::open(&path).unwrap();
+            store.reindex_file("A.bsl", b"realhash", &[sample_chunk("Делать")], None).unwrap();
+            assert_eq!(store.file_count().unwrap(), 1);
+            assert_eq!(store.chunk_count().unwrap(), 1);
+            // Simulate a database written under an older structural schema.
+            store
+                .conn
+                .execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?1)",
+                    params![(SCHEMA_VERSION - 1).to_string()],
+                )
+                .unwrap();
+        }
+        // Reopening with a structural-version mismatch wipes the cache and rebuilds the
+        // current schema; the rows are gone and the version is stamped current.
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.file_count().unwrap(), 0);
+        assert_eq!(store.chunk_count().unwrap(), 0);
+        assert_eq!(Store::stored_schema_version(&store.conn).unwrap(), Some(SCHEMA_VERSION));
+    }
+
+    #[test]
+    fn pre_versioning_database_is_kept_and_stamped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        {
+            let mut store = Store::open(&path).unwrap();
+            store.reindex_file("A.bsl", b"realhash", &[sample_chunk("Делать")], None).unwrap();
+            // Simulate a database created before schema versioning existed.
+            store.conn.execute("DELETE FROM meta WHERE key = 'schema_version'", []).unwrap();
+        }
+        // A missing version row is treated as already-current: the data survives and the
+        // version is stamped, so existing workspaces are not force-reindexed on upgrade.
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.file_count().unwrap(), 1);
+        assert_eq!(Store::stored_schema_version(&store.conn).unwrap(), Some(SCHEMA_VERSION));
     }
 }

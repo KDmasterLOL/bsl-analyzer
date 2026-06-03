@@ -8,7 +8,7 @@
 //! Source text is read on demand from the file + byte ranges stored per node, so
 //! method bodies stay out of the database.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::Context;
 use ide::{
@@ -723,9 +723,4 @@ fn clamp_source(src: String, max_chars: usize) -> (String, bool) {
         end -= 1;
     }
     (src[..end].to_string(), true)
-}
-
-/// The default graph database path under a workspace's `.build` directory.
-pub fn graph_db_path(workspace_root: &Path) -> PathBuf {
-    workspace_root.join(".build").join("bsl-graph.db")
 }

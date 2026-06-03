@@ -23,7 +23,8 @@ use ide::RootDatabaseImpl;
 use vfs::{file_set::FileSet, FileId, VfsPath};
 use walkdir::WalkDir;
 
-use crate::graph_query::{graph_db_path, GraphDb};
+use crate::cache::graph_db_path;
+use crate::graph_query::GraphDb;
 
 /// The whole workspace is loaded into a single source root.
 pub(crate) const GRAPH_SOURCE_ROOT: SourceRootId = SourceRootId(0);

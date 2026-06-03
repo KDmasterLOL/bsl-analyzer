@@ -537,9 +537,8 @@ impl SharedState {
         watcher_ready: &Arc<AtomicBool>,
         external_baseline: Option<Arc<ExternalBaselineService>>,
     ) -> Option<WorkspaceSearchInit> {
-        let build_dir = workspace_root.join(".build");
-        std::fs::create_dir_all(&build_dir).ok();
-        let db_path = build_dir.join("bsl-search.db");
+        crate::cache::ensure_workspace_cache_dir(workspace_root).ok();
+        let db_path = crate::cache::search_db_path(workspace_root);
 
         let project = project_model::Project::new(workspace_root);
         let source_path = project.source_path().to_path_buf();
@@ -647,7 +646,7 @@ impl SharedState {
         // built lazily on first `graph` tool use) the embeddings are simply graph-free
         // this run and pick up context on a later reindex once the graph exists.
         if engine.has_semantic() {
-            let graph_path = crate::graph_query::graph_db_path(workspace_root);
+            let graph_path = crate::cache::graph_db_path(workspace_root);
             match crate::graph_query::GraphDb::open(&graph_path) {
                 Ok(graph_db) => {
                     engine.set_graph_context_provider(Arc::new(
@@ -1074,9 +1073,9 @@ mod tests {
             "Процедура ЛокальнаяПроцедура()\nКонецПроцедуры",
         )
         .unwrap();
-        fs::create_dir_all(workspace.join(".build")).unwrap();
+        crate::cache::ensure_workspace_cache_dir(workspace).unwrap();
 
-        let db_path = workspace.join(".build").join("bsl-search.db");
+        let db_path = crate::cache::search_db_path(workspace);
         let mut stale_engine = SearchEngine::fts_only(&db_path).unwrap();
         stale_engine
             .sync_indexed_documents_in_collection(
@@ -1135,8 +1134,8 @@ mod tests {
 
         let dir = tempdir().unwrap();
         let workspace = dir.path();
-        fs::create_dir_all(workspace.join(".build")).unwrap();
-        let db_path = workspace.join(".build").join("bsl-search.db");
+        crate::cache::ensure_workspace_cache_dir(workspace).unwrap();
+        let db_path = crate::cache::search_db_path(workspace);
         let mut stale_engine = SearchEngine::fts_only(&db_path).unwrap();
         stale_engine
             .sync_indexed_documents_in_collection(
