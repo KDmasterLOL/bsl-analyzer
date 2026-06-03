@@ -83,6 +83,7 @@ mod tests {
             line_end: 2,
             text: text.to_owned(),
             content_hash: content_hash.to_owned(),
+            graph_context: None,
         }
     }
 

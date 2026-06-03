@@ -1,5 +1,4 @@
 use crate::chunker::Chunker;
-use crate::context::{enrich_chunk_text, file_path_to_module_path};
 use crate::document::Document;
 use crate::embedder::{Embedder, EmbedderConfig};
 use crate::error::SearchError;
@@ -142,6 +141,11 @@ pub struct SearchEngine {
     workspace_root: Option<std::path::PathBuf>,
     workspace_overlay_cache: Mutex<WorkspaceOverlayCache>,
     workspace_baseline_hash_mode: BaselineHashMode,
+    /// Optional graph-context provider (dependency-inverted via
+    /// [`crate::ports::GraphContextProvider`]). When set, code chunks are enriched
+    /// with their outbound graph context before embedding. `None` keeps embeddings
+    /// graph-free.
+    graph_context_provider: Option<Arc<dyn crate::ports::GraphContextProvider>>,
 }
 
 impl SearchEngine {
@@ -167,6 +171,7 @@ impl SearchEngine {
             workspace_root: None,
             workspace_overlay_cache: Mutex::new(WorkspaceOverlayCache::default()),
             workspace_baseline_hash_mode: BaselineHashMode::RawFileBytes,
+            graph_context_provider: None,
         })
     }
 
@@ -187,6 +192,7 @@ impl SearchEngine {
             workspace_root: None,
             workspace_overlay_cache: Mutex::new(WorkspaceOverlayCache::default()),
             workspace_baseline_hash_mode: BaselineHashMode::RawFileBytes,
+            graph_context_provider: None,
         })
     }
 
@@ -212,6 +218,7 @@ impl SearchEngine {
             workspace_root: None,
             workspace_overlay_cache: Mutex::new(WorkspaceOverlayCache::default()),
             workspace_baseline_hash_mode: BaselineHashMode::RawFileBytes,
+            graph_context_provider: None,
         })
     }
 
@@ -227,6 +234,16 @@ impl SearchEngine {
 
     pub fn store(&self) -> &Store {
         &self.store
+    }
+
+    /// Inject the graph-context provider (dependency-inverted). Once set, code chunks
+    /// indexed afterwards are enriched with their outbound graph context before
+    /// embedding. Idempotent; pass-through to the indexing paths.
+    pub fn set_graph_context_provider(
+        &mut self,
+        provider: Arc<dyn crate::ports::GraphContextProvider>,
+    ) {
+        self.graph_context_provider = Some(provider);
     }
 
     pub fn index_directory(
@@ -276,9 +293,14 @@ impl SearchEngine {
                 continue;
             }
 
-            let module_path = file_path_to_module_path(&rel_path);
-            let texts: Vec<String> =
-                chunks.iter().map(|c| enrich_chunk_text(c, &module_path)).collect();
+            let provider = self.graph_context_provider.as_deref();
+            let texts: Vec<String> = chunks
+                .iter()
+                .map(|c| {
+                    let doc = crate::document::indexed_document_for_chunk(&rel_path, c, provider);
+                    crate::document::semantic_text_for_indexed_document(&doc)
+                })
+                .collect();
 
             total_chunks += chunks.len();
             tasks.push(FileTask { rel_path, hash: hash.as_bytes().to_vec(), chunks, texts });
@@ -1281,6 +1303,7 @@ mod tests {
                     line_end: 2,
                     text: "базовая".to_owned(),
                     content_hash: "base-changed".to_owned(),
+                    graph_context: None,
                 },
                 IndexedDocument {
                     collection: "code".to_owned(),
@@ -1291,6 +1314,7 @@ mod tests {
                     line_end: 2,
                     text: "stable".to_owned(),
                     content_hash: "base-stable".to_owned(),
+                    graph_context: None,
                 },
             ],
         );

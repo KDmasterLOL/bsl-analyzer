@@ -129,6 +129,7 @@ mod tests {
             line_end: fixture.line_end,
             text: fixture.text.to_owned(),
             content_hash: fixture.content_hash.to_owned(),
+            graph_context: None,
         }
     }
 

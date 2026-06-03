@@ -1058,6 +1058,7 @@ mod tests {
                     line_end: 1,
                     text: "Процедура ПризрачнаяПроцедура()\nКонецПроцедуры".to_owned(),
                     content_hash: "ghost".to_owned(),
+                    graph_context: None,
                 }],
                 None,
             )
@@ -1117,6 +1118,7 @@ mod tests {
                     line_end: 1,
                     text: "Процедура ПризрачнаяПроцедура()\nКонецПроцедуры".to_owned(),
                     content_hash: "ghost".to_owned(),
+                    graph_context: None,
                 }],
                 None,
             )

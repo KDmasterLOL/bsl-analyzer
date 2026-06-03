@@ -1,5 +1,4 @@
 use crate::chunker::Chunker;
-use crate::context::{enrich_chunk_text, file_path_to_module_path};
 use crate::domain::{BaselineRef, CorpusId, DocumentPath, IndexedDocument, SearchOverlay};
 use crate::embedder::Embedder;
 use crate::error::SearchError;
@@ -808,28 +807,15 @@ pub(crate) fn fingerprint_overlay_documents(
 
 fn build_overlay_documents(rel_path: &str, content: &str) -> (Vec<IndexedDocument>, Vec<String>) {
     let chunks = Chunker::chunk(content);
-    let module_path = file_path_to_module_path(rel_path);
     let mut lexical_documents = Vec::with_capacity(chunks.len());
     let mut embedding_inputs = Vec::with_capacity(chunks.len());
 
-    for chunk in chunks {
-        let kind = match chunk.kind {
-            crate::chunker::ChunkKind::ModuleHeader => "header",
-            crate::chunker::ChunkKind::Procedure => "procedure",
-            crate::chunker::ChunkKind::Function => "function",
-        };
-        let content_hash = blake3::hash(chunk.text.as_bytes()).to_hex().to_string();
-        let document = IndexedDocument {
-            collection: "code".to_owned(),
-            path: rel_path.to_owned(),
-            symbol_name: chunk.name.clone(),
-            kind: kind.to_owned(),
-            line_start: chunk.line_start,
-            line_end: chunk.line_end,
-            text: chunk.text.clone(),
-            content_hash,
-        };
-        embedding_inputs.push(enrich_chunk_text(&chunk, &module_path));
+    // Graph enrichment for the overlay (uncommitted-edit) path is wired in a later
+    // step; pass `None` so overlay documents share the same construction + embed-text
+    // builder as the local index, just without graph context for now.
+    for chunk in &chunks {
+        let document = crate::document::indexed_document_for_chunk(rel_path, chunk, None);
+        embedding_inputs.push(crate::document::semantic_text_for_indexed_document(&document));
         lexical_documents.push(document);
     }
 

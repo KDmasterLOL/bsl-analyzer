@@ -465,6 +465,7 @@ mod tests {
             line_end: 2,
             text: text.to_owned(),
             content_hash: format!("hash:{path}:{text}"),
+            graph_context: None,
         }
     }
 }

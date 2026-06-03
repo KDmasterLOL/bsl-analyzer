@@ -21,7 +21,7 @@ mod workspace_overlay;
 
 pub use baseline_runtime::BaselineOverlaySearchService;
 pub use chunker::{Chunk, ChunkKind, Chunker};
-pub use context::{enrich_chunk_text, file_path_to_module_path};
+pub use context::file_path_to_module_path;
 pub use document::{
     semantic_key_for_indexed_document, semantic_text_for_indexed_document, Document,
 };
@@ -50,9 +50,9 @@ pub use merge::{
 };
 pub use ports::{
     BaselineLexicalSearch, BaselineManifestFile, BaselineSemanticSearch, EmbeddingGenerator,
-    EmbeddingStore, LexicalSearchIndex, OverlayBuilder, ResolvedViewService, SnapshotCatalog,
-    SnapshotContentStore, SnapshotPublisher, VectorSearchIndex, WorkspaceBaselineManifest,
-    WorkspaceBaselineManifestStore,
+    EmbeddingStore, GraphContextProvider, LexicalSearchIndex, OverlayBuilder, ResolvedViewService,
+    SnapshotCatalog, SnapshotContentStore, SnapshotPublisher, VectorSearchIndex,
+    WorkspaceBaselineManifest, WorkspaceBaselineManifestStore,
 };
 pub use publish::{
     BaselinePublishReport, BaselinePublisher, EmbeddingExecutionPolicy, EmbeddingProgress,

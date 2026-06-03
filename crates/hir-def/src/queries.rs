@@ -417,6 +417,124 @@ pub(crate) fn project_collected_query_edges(
     edges
 }
 
+/// A metadata object a method touches through a manager (creation / find /
+/// bare reference), as resolved by the call graph. `creates` marks a
+/// `СоздатьЭлемент`-style call apart from plain access.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagerRef {
+    pub mdo_type: MdoType,
+    pub object_name: String,
+    pub creates: bool,
+}
+
+/// A method's OUTBOUND graph facts — everything derivable from the method's own
+/// module summaries, with no whole-config fold. This is the per-method projection
+/// the call graph would emit for one node: what it calls, what it touches through a
+/// manager, and what metadata it reads via SDBL queries. Because every fact comes
+/// from `resolved_module_summary` + the module's query refs, the result invalidates
+/// exactly when those do (the method's own body and its callees' export tables),
+/// not when the rest of the workspace changes — the property that makes it safe to
+/// fold into an embedding cache key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MethodOutboundFacts {
+    /// Client/server dispatch, by the same rule the fold seeds (module execution
+    /// context wins, else the method's own annotation).
+    pub dispatch: MethodDispatch,
+    /// Resolved user-method calls.
+    pub callees: Vec<crate::MethodId>,
+    /// Metadata objects touched through a manager.
+    pub manager_refs: Vec<ManagerRef>,
+    /// Metadata objects read by an SDBL query (coarse — survives `ВЫБРАТЬ *`).
+    pub query_reads: Vec<(MdoType, String)>,
+    /// Metadata attributes read by an SDBL query (precise).
+    pub query_attr_reads: Vec<(MdoType, String, String)>,
+}
+
+/// Project one method's outbound graph facts for embedding enrichment. Pure per
+/// the method's module summaries; performs no whole-config fold and no inbound
+/// (caller) lookup. See [`MethodOutboundFacts`].
+pub fn method_outbound_facts(
+    db: &dyn crate::configs::ConfigsDatabase,
+    method: crate::MethodId,
+) -> MethodOutboundFacts {
+    use crate::call_graph::{CallerId, EdgeKind, ResolvedTarget};
+
+    let module = method.module;
+    let local_id = method.local_id;
+
+    // Dispatch — the fold's Pass-1 rule: module execution context wins, else the
+    // method's own annotation (`graph_index::extract_module_data`/`insert_module_data`).
+    let item_tree = db.item_tree(module.file_id);
+    let entries = crate::call_graph::extract_graph_methods(&item_tree);
+    let module_dispatch = db
+        .module_metadata(module)
+        .execution_context
+        .and_then(MethodDispatch::from_execution_context);
+    let dispatch = entries
+        .iter()
+        .find(|e| e.local_id == local_id)
+        .map(|e| module_dispatch.unwrap_or(e.dispatch))
+        .or(module_dispatch)
+        .unwrap_or(MethodDispatch {
+            can_run_on_client: true,
+            can_run_on_server: true,
+            no_context: false,
+        });
+
+    // Calls + manager refs — from the resolved module summary, filtered to this method.
+    let file_id_input = FileIdInput::new(db, module.file_id);
+    let summary = resolved_module_summary_query(db, file_id_input);
+    let mut callees = Vec::new();
+    let mut manager_refs = Vec::new();
+    for edge in &summary.edges {
+        if edge.caller != CallerId::Method(local_id) {
+            continue;
+        }
+        match &edge.target {
+            ResolvedTarget::Method(callee) => callees.push(*callee),
+            ResolvedTarget::Mdo { mdo_type, object_name } => manager_refs.push(ManagerRef {
+                mdo_type: *mdo_type,
+                object_name: object_name.as_str().to_string(),
+                creates: edge.kind == EdgeKind::ManagerCreates,
+            }),
+            ResolvedTarget::Unresolved(_) => {}
+        }
+    }
+
+    // SDBL reads — from the per-module query refs, the site owned by this method.
+    let refs = collect_module_query_refs(db, module);
+    let mut query_reads = Vec::new();
+    let mut query_attr_reads = Vec::new();
+    let owner = GraphNode::Method(method);
+    for site in refs.sites.iter().filter(|s| s.from == owner) {
+        for (ty, name) in &site.tables {
+            query_reads.push((*ty, name.clone()));
+        }
+        for (ty, object, attr) in &site.attrs {
+            query_attr_reads.push((*ty, object.clone(), attr.clone()));
+        }
+    }
+
+    // Deterministic order + dedup — the embedding cache key must be run-stable.
+    callees.sort_by_key(|m| (m.module.file_id, m.local_id));
+    callees.dedup();
+    manager_refs.sort_by(|a, b| {
+        (a.mdo_type.english_name(), &a.object_name, a.creates).cmp(&(
+            b.mdo_type.english_name(),
+            &b.object_name,
+            b.creates,
+        ))
+    });
+    manager_refs.dedup();
+    query_reads.sort_by(|a, b| (a.0.english_name(), &a.1).cmp(&(b.0.english_name(), &b.1)));
+    query_reads.dedup();
+    query_attr_reads
+        .sort_by(|a, b| (a.0.english_name(), &a.1, &a.2).cmp(&(b.0.english_name(), &b.1, &b.2)));
+    query_attr_reads.dedup();
+
+    MethodOutboundFacts { dispatch, callees, manager_refs, query_reads, query_attr_reads }
+}
+
 #[salsa::tracked(lru = 16)]
 pub fn workspace_call_graph_query(
     db: &dyn crate::configs::ConfigsDatabase,

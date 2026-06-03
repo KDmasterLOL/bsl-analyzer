@@ -153,11 +153,26 @@ pub struct IndexedDocument {
     pub line_end: u32,
     pub text: String,
     pub content_hash: String,
+    /// Optional pre-rendered graph context (signature, dispatch, calls, metadata
+    /// reads) prepended to the embedding text. Opaque to this crate — produced
+    /// upstream by a layer that has the call graph, so `bsl-search` stays graph
+    /// agnostic. `None` for documents indexed without graph enrichment (the docs
+    /// collection, plain re-index). Folding it into the embedded text (and thus the
+    /// content hash that keys re-embedding) is the whole point of GE.
+    pub graph_context: Option<String>,
 }
 
 impl IndexedDocument {
     pub fn document_path(&self) -> DocumentPath {
         DocumentPath::new(self.collection.clone(), self.path.clone())
+    }
+
+    /// Attach pre-rendered graph context. A blank/whitespace-only string is treated
+    /// as absent so it never perturbs the embedding text or its hash.
+    pub fn with_graph_context(mut self, context: impl Into<String>) -> Self {
+        let context = context.into();
+        self.graph_context = (!context.trim().is_empty()).then_some(context);
+        self
     }
 }
 

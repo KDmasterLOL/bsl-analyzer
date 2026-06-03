@@ -1308,6 +1308,75 @@ mod tests {
         assert!(missing.is_err(), "unknown id resolves to a GraphError");
     }
 
+    /// `GraphDb::graph_context` renders a method's outbound facts (dispatch, signature,
+    /// calls, metadata reads) from the stored graph — the production source for
+    /// embedding enrichment. Reuses `ide::GraphContext::render`, so it is byte-identical
+    /// to the in-memory renderer for the same facts.
+    #[test]
+    fn graph_context_renders_method_outbound_facts_from_sqlite() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // A client method that calls a server method and reads a catalog via a manager.
+        write_common_module(
+            root,
+            "Вызыватель",
+            false,
+            "Процедура Делать() Экспорт\n\
+             Сервер.Считать();\n\
+             Справочники.Контрагенты.НайтиПоКоду();\n\
+             КонецПроцедуры",
+        );
+        write_common_module(root, "Сервер", true, "Функция Считать() Экспорт КонецФункции");
+
+        let (_db, files) = load_workspace_db(root).expect("workspace loads");
+        let out = graph_db_path(root);
+        fs::create_dir_all(out.parent().unwrap()).unwrap();
+        build_graph_database(
+            root,
+            &out,
+            1,
+            &crate::graph_db::GraphMeta {
+                revision: 1,
+                fingerprint: 0,
+                files,
+                built_at: "t".to_string(),
+            },
+        )
+        .expect("graph database builds");
+        let gdb = GraphDb::open(&out).expect("graph database opens");
+
+        // The calling method carries its signature, its call, and its metadata read.
+        let ctx = gdb
+            .graph_context("method/common/Вызыватель/Делать")
+            .unwrap()
+            .expect("method has graph context");
+        assert!(ctx.starts_with("Dispatch: "), "{ctx}");
+        assert!(ctx.contains("\nSignature: Процедура Делать() Экспорт\n"), "{ctx}");
+        assert!(ctx.contains("\nCalls: Считать\n"), "{ctx}");
+        assert!(ctx.contains("\nReads: Справочник.Контрагенты\n"), "{ctx}");
+
+        // A leaf method keeps its signature/dispatch but lists no calls or reads.
+        let leaf =
+            gdb.graph_context("method/common/Сервер/Считать").unwrap().expect("leaf context");
+        assert!(leaf.contains("Signature: Функция Считать() Экспорт"), "{leaf}");
+        assert!(!leaf.contains("Calls:"), "{leaf}");
+        assert!(!leaf.contains("Reads:"), "{leaf}");
+
+        // Non-method ids have no graph context.
+        assert_eq!(gdb.graph_context("mdo/Catalog/Контрагенты").unwrap(), None);
+
+        // The graph-DB-backed provider resolves a chunk (path, symbol) to the same text.
+        let provider = crate::graph_query::GraphDbContextProvider::new(gdb);
+        let via_provider = bsl_search::GraphContextProvider::graph_context(
+            &provider,
+            "CommonModules/Вызыватель/Ext/Module.bsl",
+            "Делать",
+            "procedure",
+        )
+        .expect("provider resolves the method");
+        assert!(via_provider.contains("\nCalls: Считать\n"), "{via_provider}");
+    }
+
     /// The build parallelises per-module resolution within a batch. A batch holding
     /// several modules that call each other and touch the same metadata object must
     /// still produce the fold's graph exactly — same edges, and the shared `Mdo`

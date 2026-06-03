@@ -1,5 +1,3 @@
-use crate::chunker::{Chunk, ChunkKind};
-
 pub fn file_path_to_module_path(rel_path: &str) -> String {
     let path = rel_path.replace('\\', "/");
     let parts: Vec<&str> = path.split('/').collect();
@@ -44,44 +42,6 @@ pub fn file_path_to_module_path(rel_path: &str) -> String {
     }
 
     result_parts.join(".")
-}
-
-pub fn enrich_chunk_text(chunk: &Chunk, module_path: &str) -> String {
-    let mut lines = Vec::new();
-
-    if !module_path.is_empty() {
-        lines.push(format!("// Модуль: {module_path}"));
-    }
-
-    match chunk.kind {
-        ChunkKind::Procedure | ChunkKind::Function => {
-            let kind_ru = match chunk.kind {
-                ChunkKind::Procedure => "Процедура",
-                ChunkKind::Function => "Функция",
-                _ => unreachable!(),
-            };
-
-            let mut sig_parts = Vec::new();
-            if chunk.is_export {
-                sig_parts.push("экспорт");
-            }
-            for ann in &chunk.annotations {
-                sig_parts.push(ann);
-            }
-
-            if sig_parts.is_empty() {
-                lines.push(format!("// {kind_ru} {}", chunk.name));
-            } else {
-                lines.push(format!("// {kind_ru} {} ({})", chunk.name, sig_parts.join(", ")));
-            }
-        }
-        ChunkKind::ModuleHeader => {
-            lines.push("// Заголовок модуля".to_owned());
-        }
-    }
-
-    lines.push(chunk.text.clone());
-    lines.join("\n")
 }
 
 fn metadata_type_ru(dir_name: &str) -> Option<&'static str> {
@@ -191,40 +151,5 @@ mod tests {
             file_path_to_module_path("Documents\\Реализация\\Ext\\ObjectModule.bsl"),
             "Документ.Реализация.МодульОбъекта"
         );
-    }
-
-    #[test]
-    fn enrich_procedure() {
-        let chunk = Chunk {
-            kind: ChunkKind::Procedure,
-            name: "ОбработкаПроведения".to_owned(),
-            is_export: true,
-            annotations: vec!["&НаСервере".to_owned()],
-            line_start: 0,
-            line_end: 5,
-            text: "Процедура ОбработкаПроведения(Отказ)\nКонецПроцедуры".to_owned(),
-        };
-
-        let enriched = enrich_chunk_text(&chunk, "Документ.Реализация.МодульОбъекта");
-        assert!(enriched.contains("// Модуль: Документ.Реализация.МодульОбъекта"));
-        assert!(enriched.contains("// Процедура ОбработкаПроведения (экспорт, &НаСервере)"));
-        assert!(enriched.contains("Процедура ОбработкаПроведения(Отказ)"));
-    }
-
-    #[test]
-    fn enrich_header() {
-        let chunk = Chunk {
-            kind: ChunkKind::ModuleHeader,
-            name: String::new(),
-            is_export: false,
-            annotations: Vec::new(),
-            line_start: 0,
-            line_end: 2,
-            text: "Перем А;".to_owned(),
-        };
-
-        let enriched = enrich_chunk_text(&chunk, "ОбщийМодуль.Сервер");
-        assert!(enriched.contains("// Модуль: ОбщийМодуль.Сервер"));
-        assert!(enriched.contains("// Заголовок модуля"));
     }
 }

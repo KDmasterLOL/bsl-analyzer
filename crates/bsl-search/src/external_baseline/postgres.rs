@@ -1236,6 +1236,7 @@ impl SnapshotContentStore for PostgresBaselineAdapter {
                         line_end: item.line_end,
                         text: item.text.clone(),
                         content_hash: item.content_hash.clone(),
+                        graph_context: None,
                     });
                 }
             }
@@ -3131,6 +3132,7 @@ mod tests {
             line_end: line_start + 1,
             text: text.to_owned(),
             content_hash: content_hash.to_owned(),
+            graph_context: None,
         }
     }
 

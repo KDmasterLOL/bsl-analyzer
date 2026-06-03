@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use ide::{
-    classify_graph_id, Direction, EdgeRef, GraphDetail, GraphError, GraphIdKind, GraphOverview,
-    NeighborsParams, NeighborsResult, NodeRef, NodeResult, SourceItem, SourceResult,
+    classify_graph_id, Direction, EdgeRef, GraphContext, GraphDetail, GraphError, GraphIdKind,
+    GraphOverview, NeighborsParams, NeighborsResult, NodeRef, NodeResult, SourceItem, SourceResult,
     MAX_DROPPED_SAMPLE,
 };
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
@@ -554,6 +554,55 @@ impl GraphDb {
         }))
     }
 
+    /// Render a method's outbound graph context (dispatch, signature, calls, metadata
+    /// reads) from the stored graph — the SQLite-backed twin of
+    /// [`ide::Analysis::graph_context_for_method`]. Returns byte-identical text to the
+    /// in-memory renderer (guarded by a parity test), so a chunk enriched from either
+    /// source keys the same embedding. `None` for a non-method id or one absent from
+    /// the graph.
+    pub fn graph_context(&self, id: &str) -> anyhow::Result<Option<String>> {
+        let node = match self.fetch_node(id)? {
+            Some(n) if n.kind == "method" => n,
+            _ => return Ok(None),
+        };
+        let nref = self.node_ref(&node, GraphDetail::Signatures);
+
+        // Mirror the in-memory renderer's facts exactly by EDGE kind, not just target
+        // kind: calls come only from `call` edges, reads only from a method's
+        // metadata-touch edges (`manager_*` / `query_ref`). A method never has
+        // `contains`/`data_binding` outbound edges (those originate at mdo/form nodes),
+        // but gating on the kind keeps this equivalent even if that changes.
+        let is_read_edge =
+            |kind: &str| matches!(kind, "manager_creates" | "manager_access" | "query_ref");
+        let mut calls = Vec::new();
+        let mut reads = Vec::new();
+        for edge in self.directed_edges(id, Direction::Out, &[])? {
+            match classify_graph_id(&edge.to) {
+                Ok(GraphIdKind::Method { name, .. }) | Ok(GraphIdKind::MethodFile { name, .. })
+                    if edge.kind == "call" =>
+                {
+                    calls.push(name);
+                }
+                Ok(GraphIdKind::Mdo { mdo_type, object }) if is_read_edge(&edge.kind) => {
+                    reads.push(format!("{}.{}", mdo_type.russian_name(), object));
+                }
+                Ok(GraphIdKind::Attribute { mdo_type, object, attr })
+                    if is_read_edge(&edge.kind) =>
+                {
+                    reads.push(format!("{}.{}.{}", mdo_type.russian_name(), object, attr));
+                }
+                _ => {}
+            }
+        }
+        calls.sort();
+        calls.dedup();
+        reads.sort();
+        reads.dedup();
+
+        let ctx = GraphContext { dispatch: nref.dispatch, signature: nref.signature, calls, reads };
+        Ok(Some(ctx.render()))
+    }
+
     /// Fetch method source for a set of ids, stopping once the rough output budget
     /// (`max_output_tokens`, ~4 chars/token) is reached.
     pub fn source(&self, ids: &[String], max_output_tokens: usize) -> anyhow::Result<SourceResult> {
@@ -625,6 +674,34 @@ impl GraphDb {
         }
 
         Ok(SourceResult { items, budget_exhausted })
+    }
+}
+
+/// A [`bsl_search::GraphContextProvider`] backed by the on-disk graph
+/// ([`GraphDb`]). This is the production source for bulk index enrichment: reading a
+/// method's outbound facts from the prebuilt `.build/bsl-graph.db` is RAM-bounded and
+/// shares the graph's freshness, unlike rendering from a whole-workspace `Analysis`.
+///
+/// `GraphDb` holds a non-`Sync` rusqlite connection; the [`Mutex`] makes the provider
+/// `Sync` for the trait. Calls are sequential at the chunk-text stage, so contention
+/// is nil.
+pub struct GraphDbContextProvider {
+    db: std::sync::Mutex<GraphDb>,
+}
+
+impl GraphDbContextProvider {
+    pub fn new(db: GraphDb) -> Self {
+        Self { db: std::sync::Mutex::new(db) }
+    }
+}
+
+impl bsl_search::GraphContextProvider for GraphDbContextProvider {
+    fn graph_context(&self, rel_path: &str, symbol_name: &str, _kind: &str) -> Option<String> {
+        // Methods in metadata-keyed modules resolve to a durable id; form/command
+        // modules (path-fallback ids) are not enriched here.
+        let id = ide::method_id_for_path(rel_path, symbol_name)?;
+        let db = self.db.lock().ok()?;
+        db.graph_context(&id).ok().flatten()
     }
 }
 

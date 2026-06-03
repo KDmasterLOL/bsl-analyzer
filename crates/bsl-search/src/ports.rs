@@ -16,6 +16,21 @@ pub trait EmbeddingGenerator {
     fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, SearchError>;
 }
 
+/// Inverts the dependency from the search index (this crate) up to the call-graph
+/// layer. Clean architecture: `bsl-search` is a lower layer and must not depend on
+/// `ide`/`hir`. An implementor that owns the call graph renders a code chunk's
+/// OUTBOUND graph context (dispatch, signature, calls, metadata reads); the index
+/// folds the returned string into the chunk's embedding text so vectors capture what
+/// a method *does*, not just its source. The returned string is opaque to this crate.
+///
+/// `None` when the chunk is not a resolvable method (module header, unresolved name)
+/// or no provider is configured — in which case embedding text is unchanged.
+pub trait GraphContextProvider: Send + Sync {
+    /// `rel_path` is the chunk's workspace-relative file path, `symbol_name` the
+    /// method name, `kind` the chunk kind label (`procedure` / `function` / `header`).
+    fn graph_context(&self, rel_path: &str, symbol_name: &str, kind: &str) -> Option<String>;
+}
+
 pub trait EmbeddingStore {
     fn load_embeddings(
         &self,

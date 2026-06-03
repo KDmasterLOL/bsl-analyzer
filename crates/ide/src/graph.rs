@@ -185,7 +185,130 @@ pub struct NeighborsParams<'a> {
     pub provenance_filter: Vec<String>,
 }
 
+/// A method's outbound graph context, rendered for embedding enrichment. A semantic
+/// indexer prepends [`GraphContext::render`] to the method body before embedding, so
+/// the vector carries what the method *does* (dispatch, signature, calls, metadata
+/// reads), not just its source text. See `.omc/plans/graph-enriched-embeddings.md`.
+///
+/// Every field derives from the method's own module summaries (no whole-config fold,
+/// no inbound/caller facts), so the rendered text — and thus the embedding cache key
+/// computed from it — is stable unless the method's own body or its callees' export
+/// tables change.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct GraphContext {
+    /// Client/server dispatch labels (`client` / `server`).
+    pub dispatch: Vec<&'static str>,
+    /// The declaration header (collapsed to one line), when available.
+    pub signature: Option<String>,
+    /// Names of the user methods this method calls (sorted, deduped by name).
+    pub calls: Vec<String>,
+    /// Metadata this method touches or reads, as `Тип.Объект[.Реквизит]` (Russian
+    /// spelling, the dominant form in real BSL), sorted and deduped.
+    pub reads: Vec<String>,
+}
+
+/// Cap on each rendered list, so a method with a huge call/read set cannot bloat the
+/// embed text. The overflow count is appended so truncation is visible and stable.
+const GRAPH_CONTEXT_LIST_CAP: usize = 32;
+
+impl GraphContext {
+    /// The text block prepended to the method body before embedding. Deterministic:
+    /// fixed line order, sorted lists, fixed RU/EN dispatch order.
+    pub fn render(&self) -> String {
+        let mut out = String::new();
+        if !self.dispatch.is_empty() {
+            let labels: Vec<&str> = self
+                .dispatch
+                .iter()
+                .map(|d| match *d {
+                    "server" => "server | сервер",
+                    "client" => "client | клиент",
+                    other => other,
+                })
+                .collect();
+            out.push_str("Dispatch: ");
+            out.push_str(&labels.join(", "));
+            out.push('\n');
+        }
+        if let Some(sig) = &self.signature {
+            out.push_str("Signature: ");
+            out.push_str(sig);
+            out.push('\n');
+        }
+        render_capped_list(&mut out, "Calls", &self.calls);
+        render_capped_list(&mut out, "Reads", &self.reads);
+        out
+    }
+
+    /// True when there is nothing to embed beyond the body — used by the producer to
+    /// skip attaching an empty block.
+    pub fn is_empty(&self) -> bool {
+        self.dispatch.is_empty()
+            && self.signature.is_none()
+            && self.calls.is_empty()
+            && self.reads.is_empty()
+    }
+}
+
+fn render_capped_list(out: &mut String, label: &str, items: &[String]) {
+    if items.is_empty() {
+        return;
+    }
+    let shown = items.len().min(GRAPH_CONTEXT_LIST_CAP);
+    out.push_str(label);
+    out.push_str(": ");
+    out.push_str(&items[..shown].join(", "));
+    if items.len() > shown {
+        out.push_str(&format!(" (+{})", items.len() - shown));
+    }
+    out.push('\n');
+}
+
 impl Analysis {
+    /// Per-method outbound graph context for embedding enrichment, rendered live from
+    /// the per-module Salsa summaries — NO whole-config fold (so this is cheap enough
+    /// to call per method at index time, and stays fresh without a graph rebuild).
+    ///
+    /// `None` only when `method_name` does not resolve to a method in `file_id`; a
+    /// resolved leaf method (no calls/reads) still returns its signature + dispatch.
+    pub fn graph_context_for_method(
+        &self,
+        file_id: FileId,
+        method_name: &str,
+    ) -> Option<GraphContext> {
+        let db = self.database();
+        let method = Semantics::new(db).find_method(file_id, method_name)?;
+        let facts = hir::method_outbound_facts(db, method.id());
+
+        let signature = match (method.name_range(), method.sig_end()) {
+            (Some(name), Some(sig_end)) => signature_line(db, file_id, name.start(), sig_end),
+            _ => None,
+        };
+
+        let mut calls: Vec<String> = facts
+            .callees
+            .iter()
+            .map(|c| hir::Method::new(db, *c).name().as_str().to_string())
+            .collect();
+        calls.sort();
+        calls.dedup();
+
+        let mut reads: Vec<String> = Vec::new();
+        for m in &facts.manager_refs {
+            reads.push(format!("{}.{}", m.mdo_type.russian_name(), m.object_name));
+        }
+        for (ty, obj) in &facts.query_reads {
+            reads.push(format!("{}.{}", ty.russian_name(), obj));
+        }
+        for (ty, obj, attr) in &facts.query_attr_reads {
+            reads.push(format!("{}.{}.{}", ty.russian_name(), obj, attr));
+        }
+        reads.sort();
+        reads.dedup();
+
+        Some(GraphContext { dispatch: dispatch_labels(facts.dispatch), signature, calls, reads })
+    }
+
     /// Cold-start overview: module/method/edge counts, the most-called methods,
     /// and the provenance/dispatch profile.
     pub fn graph_overview(
@@ -1251,14 +1374,7 @@ impl<'a> GraphCtx<'a> {
         name_offset: syntax::TextSize,
         sig_end: syntax::TextSize,
     ) -> Option<String> {
-        let text = self.db.file_text_input(file_id).text(self.db).clone();
-        let name = (u32::from(name_offset) as usize).min(text.len());
-        let end = (u32::from(sig_end) as usize).min(text.len());
-        if name > end || !text.is_char_boundary(name) || !text.is_char_boundary(end) {
-            return None;
-        }
-        let start = text[..name].rfind('\n').map_or(0, |i| i + 1);
-        Some(text.get(start..end)?.split_whitespace().collect::<Vec<_>>().join(" "))
+        signature_line(self.db, file_id, name_offset, sig_end)
     }
 
     // ---- queries ------------------------------------------------------------
@@ -1633,6 +1749,25 @@ fn decode_scope(rest: &[&str], is_method: bool) -> Option<(ModuleKey, Option<Str
 fn parse_mdo(s: &str) -> Option<MdoType> {
     // Bilingual `MdoType: FromStr` accepts the English folder names we encode.
     s.parse().ok()
+}
+
+/// The full declaration header — from the keyword line through the closing `)` /
+/// export keyword — with wrapped parameter lines collapsed to one. Char-boundary
+/// safe; `None` if the offsets fall outside the (current) file text.
+fn signature_line(
+    db: &RootDatabaseImpl,
+    file_id: FileId,
+    name_offset: syntax::TextSize,
+    sig_end: syntax::TextSize,
+) -> Option<String> {
+    let text = db.file_text_input(file_id).text(db).clone();
+    let name = (u32::from(name_offset) as usize).min(text.len());
+    let end = (u32::from(sig_end) as usize).min(text.len());
+    if name > end || !text.is_char_boundary(name) || !text.is_char_boundary(end) {
+        return None;
+    }
+    let start = text[..name].rfind('\n').map_or(0, |i| i + 1);
+    Some(text.get(start..end)?.split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
 fn dispatch_labels(d: MethodDispatch) -> Vec<&'static str> {
@@ -2038,6 +2173,62 @@ mod tests {
             .iter()
             .any(|e| e.kind == "manager_creates" && e.provenance == "inferred"));
         assert!(res.edges.iter().any(|e| e.kind == "manager_access"));
+    }
+
+    #[test]
+    fn graph_context_renders_calls_signature_dispatch() {
+        let a = client_server_workspace();
+        // Клиент.Главная is &НаКлиенте and calls the server-only Сервер.Считать.
+        let ctx = a.graph_context_for_method(FileId(0), "Главная").expect("method resolves");
+        assert_eq!(ctx.dispatch, vec!["client"]);
+        assert_eq!(ctx.signature.as_deref(), Some("Процедура Главная() Экспорт"));
+        assert_eq!(ctx.calls, vec!["Считать".to_string()]);
+        assert!(ctx.reads.is_empty());
+
+        let rendered = ctx.render();
+        assert!(rendered.contains("Dispatch: client | клиент"), "{rendered}");
+        assert!(rendered.contains("Signature: Процедура Главная() Экспорт"), "{rendered}");
+        assert!(rendered.contains("Calls: Считать"), "{rendered}");
+    }
+
+    #[test]
+    fn graph_context_leaf_keeps_signature_and_dispatch() {
+        let a = client_server_workspace();
+        // Сервер.Считать calls nothing — a leaf — but is still worth embedding by its
+        // intrinsic signature + dispatch (not collapsed to an empty context).
+        let ctx = a.graph_context_for_method(FileId(1), "Считать").expect("method resolves");
+        assert_eq!(ctx.dispatch, vec!["server"]);
+        assert_eq!(ctx.signature.as_deref(), Some("Функция Считать() Экспорт"));
+        assert!(ctx.calls.is_empty());
+        assert!(ctx.reads.is_empty());
+        assert!(!ctx.is_empty());
+    }
+
+    #[test]
+    fn graph_context_is_none_for_unresolved_method() {
+        let a = client_server_workspace();
+        assert!(a.graph_context_for_method(FileId(1), "НетТакого").is_none());
+    }
+
+    #[test]
+    fn graph_context_reads_dedup_manager_touched_metadata() {
+        // Two manager touches of the same object (create + access) collapse to one
+        // `Reads` entry, in Russian spelling.
+        let a = workspace(&[(
+            "/src/CommonModules/Вызыватель/Ext/Module.bsl",
+            "Процедура Делать() Экспорт\n\
+             Справочники.Контрагенты.СоздатьЭлемент();\n\
+             Справочники.Контрагенты.НайтиПоКоду();\n\
+             КонецПроцедуры",
+        )]);
+        let ctx = a.graph_context_for_method(FileId(0), "Делать").expect("method resolves");
+        assert_eq!(
+            ctx.reads.iter().filter(|r| *r == "Справочник.Контрагенты").count(),
+            1,
+            "create + access collapse to one read entry: {:?}",
+            ctx.reads
+        );
+        assert!(ctx.render().contains("Reads: Справочник.Контрагенты"));
     }
 
     #[test]

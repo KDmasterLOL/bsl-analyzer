@@ -575,6 +575,7 @@ impl Store {
                     line_end: row.get::<_, i64>(5)? as u32,
                     content_hash: blake3::hash(text.as_bytes()).to_hex().to_string(),
                     text,
+                    graph_context: None,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?
@@ -590,6 +591,7 @@ impl Store {
                     line_end: row.get::<_, i64>(5)? as u32,
                     content_hash: blake3::hash(text.as_bytes()).to_hex().to_string(),
                     text,
+                    graph_context: None,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?

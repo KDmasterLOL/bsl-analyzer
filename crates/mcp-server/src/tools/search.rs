@@ -1742,6 +1742,7 @@ mod tests {
                     line_end: 2,
                     text: "body".to_owned(),
                     content_hash: "a".to_owned(),
+                    graph_context: None,
                 },
                 IndexedDocument {
                     collection: "code".to_owned(),
@@ -1752,6 +1753,7 @@ mod tests {
                     line_end: 2,
                     text: "внутри НайтиПроцедуру".to_owned(),
                     content_hash: "b".to_owned(),
+                    graph_context: None,
                 },
             ],
         );

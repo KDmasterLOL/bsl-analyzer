@@ -116,6 +116,7 @@ mod tests {
                 line_end: 2,
                 text: "новый текст".to_owned(),
                 content_hash: "changed".to_owned(),
+                graph_context: None,
             }],
         );
 
