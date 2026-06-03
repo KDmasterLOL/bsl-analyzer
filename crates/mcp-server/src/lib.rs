@@ -119,6 +119,8 @@ struct DiagnosticsParams {
     detail: Option<String>,
     /// `file`: cap on returned findings (default 200).
     max_findings: Option<usize>,
+    /// `workspace`: cap on files swept (default 1000).
+    max_files: Option<usize>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -542,8 +544,9 @@ impl McpServer {
                 Ok(tools::diagnostics::catalog(locale, &p.codes))
             }
             "file" => self.diagnostics_file(p).await,
+            "workspace" => self.diagnostics_workspace(p).await,
             other => Err(McpError::invalid_params(
-                format!("Unknown action '{other}'. Expected: catalog, schema, file"),
+                format!("Unknown action '{other}'. Expected: catalog, schema, file, workspace"),
                 None,
             )),
         }
@@ -613,6 +616,75 @@ impl McpServer {
                 ResidentOutcome::Loading => Ok(tools::diagnostics::loading()),
                 ResidentOutcome::Disabled => Err(McpError::invalid_params(
                     "diagnostics 'file' is only available in the workspace profile",
+                    None,
+                )),
+                ResidentOutcome::Failed(msg) => {
+                    Err(McpError::internal_error(format!("diagnostics database: {msg}"), None))
+                }
+            }
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+    }
+
+    /// The `diagnostics workspace` action: an opt-in, bounded whole-config sweep that
+    /// returns per-code aggregates only (no per-finding detail). The rayon sweep runs
+    /// under the resident lock (so no reload mutates the db mid-sweep), which serialises
+    /// other diagnostics calls for its duration — acceptable for a capped, opt-in pass.
+    async fn diagnostics_workspace(
+        &self,
+        p: DiagnosticsParams,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::diagnostics_state::{DiagnosticsStatus, ResidentOutcome, SweepOptions};
+        use tools::diagnostics::{
+            parse_min_severity, DEFAULT_MAX_SWEEP_FILES, MAX_SWEEP_FILES_CEILING,
+        };
+
+        let diag = self.state.diagnostics().clone();
+        diag.ensure_loading();
+        match diag.status() {
+            DiagnosticsStatus::Disabled => {
+                return Err(McpError::invalid_params(
+                    "diagnostics 'workspace' is only available in the workspace profile",
+                    None,
+                ))
+            }
+            DiagnosticsStatus::Failed(msg) => {
+                return Err(McpError::internal_error(
+                    format!("diagnostics database load failed: {msg}"),
+                    None,
+                ))
+            }
+            DiagnosticsStatus::Idle | DiagnosticsStatus::Loading => {
+                return Ok(tools::diagnostics::loading())
+            }
+            DiagnosticsStatus::Ready { .. } => {}
+        }
+
+        let min_severity = parse_min_severity(p.min_severity.as_deref())
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        let opts = SweepOptions {
+            min_severity,
+            codes: p.codes,
+            // Clamp to the ceiling: the sweep holds the resident lock throughout, so an
+            // unbounded request would stall every other diagnostics call. A larger
+            // config surfaces as `truncated` with the true `files_total`.
+            max_files: p.max_files.unwrap_or(DEFAULT_MAX_SWEEP_FILES).min(MAX_SWEEP_FILES_CEILING),
+        };
+
+        tokio::task::spawn_blocking(move || {
+            let outcome = diag.read(|resident, generation| {
+                (tools::diagnostics::workspace_findings(resident, &opts, generation), generation)
+            });
+            match outcome {
+                ResidentOutcome::Ready((result, generation)) => {
+                    let mut freshness = diag.freshness();
+                    freshness.revision = generation;
+                    Ok(tools::diagnostics::envelope(freshness, result))
+                }
+                ResidentOutcome::Loading => Ok(tools::diagnostics::loading()),
+                ResidentOutcome::Disabled => Err(McpError::invalid_params(
+                    "diagnostics 'workspace' is only available in the workspace profile",
                     None,
                 )),
                 ResidentOutcome::Failed(msg) => {

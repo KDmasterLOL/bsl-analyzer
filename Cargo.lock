@@ -2413,6 +2413,7 @@ dependencies = [
  "onec-client",
  "parser",
  "project-model",
+ "rayon",
  "rmcp",
  "rusqlite",
  "rustc-hash 2.1.2",

@@ -23,12 +23,22 @@ use ide::{
 use rmcp::model::CallToolResult;
 use serde_json::{json, Value};
 
-use crate::diagnostics_state::{DiagnosticsResident, Freshness};
+use crate::diagnostics_state::{DiagnosticsResident, Freshness, SweepOptions};
 use crate::tools::response::structured;
 
 /// Server-side cap on returned findings, honouring Anthropic's tool-response budget.
 /// `counts` still reports the full severity histogram, so a capped response is honest.
 pub(crate) const DEFAULT_MAX_FINDINGS: usize = 200;
+
+/// Default cap on files swept by the opt-in `workspace` action. Bounds the cost of a
+/// whole-config pass; the agent can raise it up to [`MAX_SWEEP_FILES_CEILING`].
+pub(crate) const DEFAULT_MAX_SWEEP_FILES: usize = 1000;
+
+/// Hard ceiling on `max_files`: the sweep holds the resident lock for its whole
+/// duration (blocking other diagnostics calls), so an agent cannot request an
+/// unbounded whole-config pass that stalls the server for minutes. A larger config is
+/// reported as `truncated` with the true `files_total`.
+pub(crate) const MAX_SWEEP_FILES_CEILING: usize = 5000;
 
 /// Filters applied to a file's diagnostics before they become findings.
 pub(crate) struct FileFilters {
@@ -172,6 +182,36 @@ pub(crate) fn file_findings(
     })
 }
 
+/// The `workspace` action's result body: whole-config diagnostics aggregated per code
+/// (`{code, severity, count, files_affected}`), never per-finding — an opt-in, bounded
+/// overview. `result_id` is generation-keyed (no per-file content hash applies).
+pub(crate) fn workspace_findings(
+    resident: &DiagnosticsResident,
+    opts: &SweepOptions,
+    generation: u64,
+) -> Value {
+    let sweep = resident.workspace_aggregates(&DiagnosticsConfig::default(), opts);
+    let aggregates: Vec<Value> = sweep
+        .aggregates
+        .iter()
+        .map(|a| {
+            json!({
+                "code": a.code,
+                "severity": a.severity.as_str(),
+                "count": a.count,
+                "files_affected": a.files_affected,
+            })
+        })
+        .collect();
+    json!({
+        "result_id": format!("workspace@{generation}"),
+        "files_swept": sweep.files_swept,
+        "files_total": sweep.files_total,
+        "truncated": sweep.truncated,
+        "aggregates": aggregates,
+    })
+}
+
 fn finding_value(
     diag: &ide::Diagnostic,
     out: &ide::DiagnosticOutput,
@@ -271,8 +311,8 @@ impl Counts {
 
 fn schema_json() -> Value {
     json!({
-        "schema_version": "3",
-        "actions": ["catalog", "schema", "file"],
+        "schema_version": "4",
+        "actions": ["catalog", "schema", "file", "workspace"],
         "severities": ["error", "warning", "info", "hint"],
         "catalog_entry": {
             "code": "string — stable diagnostic code (e.g. CyclomaticComplexity)",
@@ -314,6 +354,18 @@ fn schema_json() -> Value {
             "truncated": "bool — the findings cap was hit; counts still complete",
             "findings": "finding[]"
         },
+        "workspace_params": {
+            "min_severity": "error | warning | info | hint (default warning) — inclusive floor",
+            "codes": "string[] — keep only these codes (optional)",
+            "max_files": "usize — cap on files swept (default 1000, hard ceiling 5000); a larger config surfaces as truncated with the true files_total"
+        },
+        "workspace_result": {
+            "result_id": "workspace@<generation>",
+            "files_swept": "usize — files actually analyzed",
+            "files_total": "usize — resident files (files_swept < files_total ⇒ capped)",
+            "truncated": "bool — the file cap was hit",
+            "aggregates": "{ code, severity, count, files_affected }[] — per-code, most-severe-then-most-frequent first; NO per-finding detail"
+        },
         "envelope": {
             "revision": "u64 — resident-db generation the answer was computed at",
             "stale": "bool — workspace drifted on disk since this generation",
@@ -352,11 +404,13 @@ mod tests {
         let result = schema();
         assert_structured_mirrors_text(&result);
         let body = body_of(&result);
-        assert_eq!(body["schema_version"], "3");
+        assert_eq!(body["schema_version"], "4");
         let actions = body["actions"].as_array().unwrap();
         assert!(actions.iter().any(|a| a == "catalog"));
         assert!(actions.iter().any(|a| a == "file"));
+        assert!(actions.iter().any(|a| a == "workspace"));
         assert!(body["finding"]["graph_id"].is_string(), "graph bridge advertised");
+        assert!(body["workspace_result"]["aggregates"].is_string(), "workspace advertised");
         let sev = body["severities"].as_array().unwrap();
         assert_eq!(sev.len(), 4);
         assert!(sev.iter().any(|s| s == "error"));
@@ -415,7 +469,9 @@ mod tests {
 
     mod file_action {
         use super::*;
-        use crate::diagnostics_state::{DiagnosticsState, DiagnosticsStatus, ResidentOutcome};
+        use crate::diagnostics_state::{
+            DiagnosticsState, DiagnosticsStatus, ResidentOutcome, SweepOptions,
+        };
         use std::fs;
         use std::path::{Path, PathBuf};
         use std::time::Duration;
@@ -426,12 +482,13 @@ mod tests {
             fs::write(path, text).unwrap();
         }
 
-        fn sample_workspace(root: &Path) {
-            let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+        fn write_common_module(root: &Path, name: &str, body: &str) {
+            let xml = format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
 <MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core">
-	<CommonModule uuid="00000000-0000-0000-0000-000000000006">
+	<CommonModule uuid="00000000-0000-0000-0000-0000000000{id:02}">
 		<Properties>
-			<Name>Сервер</Name>
+			<Name>{name}</Name>
 			<Global>false</Global>
 			<ClientManagedApplication>false</ClientManagedApplication>
 			<Server>true</Server>
@@ -442,11 +499,17 @@ mod tests {
 			<ReturnValuesReuse>DontUse</ReturnValuesReuse>
 		</Properties>
 	</CommonModule>
-</MetaDataObject>"#;
-            write(root, "CommonModules/Сервер.xml", xml);
-            write(
+</MetaDataObject>"#,
+                id = name.len(),
+            );
+            write(root, &format!("CommonModules/{name}.xml"), &xml);
+            write(root, &format!("CommonModules/{name}/Ext/Module.bsl"), body);
+        }
+
+        fn sample_workspace(root: &Path) {
+            write_common_module(
                 root,
-                "CommonModules/Сервер/Ext/Module.bsl",
+                "Сервер",
                 "&НаСервере\nФункция Считать() Экспорт Возврат 1; КонецФункции\n",
             );
         }
@@ -532,6 +595,46 @@ mod tests {
                 FileFilters { codes: vec!["NoSuchCodeFilter".to_string()], ..default_filters() };
             let body = run(&state, &path, &filters);
             assert_eq!(body["findings"].as_array().unwrap().len(), 0);
+        }
+
+        fn run_workspace(state: &DiagnosticsState, opts: &SweepOptions) -> Value {
+            match state.read(|resident, gen| (workspace_findings(resident, opts, gen), gen)) {
+                ResidentOutcome::Ready((v, _)) => v,
+                _ => panic!("expected Ready outcome"),
+            }
+        }
+
+        fn sweep_opts(max_files: usize) -> SweepOptions {
+            SweepOptions { min_severity: SeverityBucket::Hint, codes: Vec::new(), max_files }
+        }
+
+        #[test]
+        fn workspace_sweep_shapes_the_result() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            sample_workspace(root);
+            let state = ready_state(root);
+
+            let body = run_workspace(&state, &sweep_opts(DEFAULT_MAX_SWEEP_FILES));
+            assert_eq!(body["files_total"], 1);
+            assert_eq!(body["files_swept"], 1);
+            assert_eq!(body["truncated"], false);
+            assert!(body["aggregates"].is_array(), "per-code aggregates, no per-finding detail");
+            assert!(body["result_id"].as_str().unwrap().starts_with("workspace@"));
+        }
+
+        #[test]
+        fn workspace_sweep_honors_the_file_cap() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            write_common_module(root, "Сервер", "Функция Ф() Экспорт Возврат 1; КонецФункции\n");
+            write_common_module(root, "Клиент", "Процедура П() Экспорт КонецПроцедуры\n");
+            let state = ready_state(root);
+
+            let body = run_workspace(&state, &sweep_opts(1));
+            assert_eq!(body["files_total"], 2);
+            assert_eq!(body["files_swept"], 1, "capped at one file");
+            assert_eq!(body["truncated"], true);
         }
     }
 

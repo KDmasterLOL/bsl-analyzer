@@ -116,6 +116,97 @@ impl DiagnosticsResident {
     pub(crate) fn file_count(&self) -> usize {
         self.by_path.len()
     }
+
+    /// Workspace-wide diagnostics aggregated per code (the `workspace` action). Runs
+    /// rayon over per-worker db clones (shared Salsa storage, the CLI `analyze`
+    /// discipline). The caller MUST hold the state lock for the whole sweep so no
+    /// reload mutates the master db mid-flight — that would cancel the cloned queries.
+    /// Bounded by `opts.max_files` over a stable FileId order, so a cap is deterministic.
+    pub(crate) fn workspace_aggregates(
+        &self,
+        config: &ide::DiagnosticsConfig,
+        opts: &SweepOptions,
+    ) -> WorkspaceSweep {
+        use rayon::prelude::*;
+        use std::collections::HashSet;
+
+        let mut files: Vec<FileId> = self.by_path.values().copied().collect();
+        files.sort_by_key(|f| f.0);
+        let files_total = files.len();
+        let truncated = files_total > opts.max_files;
+        let swept = &files[..opts.max_files.min(files_total)];
+
+        // Per file: the (code, bucket) of each diagnostic. Each rayon worker owns a db
+        // clone; queries run in parallel on the shared, unmutated Salsa storage.
+        let per_file: Vec<Vec<(String, ide::SeverityBucket)>> = swept
+            .par_iter()
+            .map_with(self.db.clone(), |db, &file_id| {
+                let analysis = Analysis::from_database(db.clone());
+                analysis
+                    .diagnostics(file_id, config)
+                    .iter()
+                    .map(|d| (d.code.as_str().to_string(), ide::SeverityBucket::from(d.severity)))
+                    .collect()
+            })
+            .collect();
+
+        // Fold: code -> (bucket, total count, files-affected). All occurrences of a code
+        // share a bucket under one config, so first-seen is representative.
+        let mut map: HashMap<String, (ide::SeverityBucket, usize, usize)> = HashMap::new();
+        for file_diags in &per_file {
+            let mut seen_here: HashSet<&str> = HashSet::new();
+            for (code, bucket) in file_diags {
+                let entry = map.entry(code.clone()).or_insert((*bucket, 0, 0));
+                entry.1 += 1;
+                if seen_here.insert(code.as_str()) {
+                    entry.2 += 1;
+                }
+            }
+        }
+
+        let mut aggregates: Vec<CodeAggregate> = map
+            .into_iter()
+            .filter(|(_, (bucket, _, _))| *bucket >= opts.min_severity)
+            .filter(|(code, _)| opts.codes.is_empty() || opts.codes.iter().any(|c| c == code))
+            .map(|(code, (severity, count, files_affected))| CodeAggregate {
+                code,
+                severity,
+                count,
+                files_affected,
+            })
+            .collect();
+        // Most-severe first, then most-frequent, then code for a stable order.
+        aggregates.sort_by(|a, b| {
+            b.severity.cmp(&a.severity).then(b.count.cmp(&a.count)).then(a.code.cmp(&b.code))
+        });
+
+        WorkspaceSweep { aggregates, files_swept: swept.len(), files_total, truncated }
+    }
+}
+
+/// Filters for a workspace sweep.
+pub(crate) struct SweepOptions {
+    pub min_severity: ide::SeverityBucket,
+    /// Keep only these codes (empty = all).
+    pub codes: Vec<String>,
+    /// Cap on files swept (bounds the cost of an opt-in whole-config pass).
+    pub max_files: usize,
+}
+
+/// One code's workspace-wide tally.
+pub(crate) struct CodeAggregate {
+    pub code: String,
+    pub severity: ide::SeverityBucket,
+    pub count: usize,
+    pub files_affected: usize,
+}
+
+/// The result of a workspace sweep: per-code aggregates plus coverage bookkeeping.
+pub(crate) struct WorkspaceSweep {
+    pub aggregates: Vec<CodeAggregate>,
+    pub files_swept: usize,
+    pub files_total: usize,
+    pub truncated: bool,
 }
 
 /// Everything mutable about the resident db, guarded by one `Mutex`. The lock is held
