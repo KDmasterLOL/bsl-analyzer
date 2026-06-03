@@ -914,7 +914,7 @@ mod tests {
         InstallError,
     };
 
-    use super::{apply_action, upsert_codex_project_server};
+    use super::{apply_action, build_codex_add_args, upsert_codex_project_server};
 
     struct FakeRunner {
         outputs: RefCell<Vec<CommandOutput>>,
@@ -1094,6 +1094,32 @@ args = ["serve"]
 
         assert!(rendered.contains("[mcp_servers.other]"));
         assert!(rendered.contains("[mcp_servers.bsl-analyzer]"));
+    }
+
+    /// An absolute binary path with spaces / non-ASCII (what `current_exe` may yield)
+    /// survives both Codex sinks intact: the `.codex/config.toml` string round-trips, and
+    /// `codex mcp add -- <command>` keeps it as a single argv element (no shell-split).
+    #[test]
+    fn codex_preserves_command_path_with_spaces_and_unicode() {
+        let mut s = spec();
+        s.command = "/home/пользователь/My Apps/bsl-analyzer".to_owned();
+
+        let doc = upsert_codex_project_server(String::new().parse().expect("valid toml"), &s);
+        let reparsed: toml_edit::DocumentMut =
+            doc.to_string().parse().expect("rendered toml re-parses");
+        assert_eq!(
+            reparsed["mcp_servers"]["bsl-analyzer"]["command"].as_str(),
+            Some("/home/пользователь/My Apps/bsl-analyzer"),
+            "TOML sink preserves the path verbatim"
+        );
+
+        let args = build_codex_add_args(&s);
+        let sep = args.iter().position(|a| a == "--").expect("-- separator present");
+        assert_eq!(
+            args[sep + 1],
+            "/home/пользователь/My Apps/bsl-analyzer",
+            "CLI argv keeps the path as one element"
+        );
     }
 
     #[test]

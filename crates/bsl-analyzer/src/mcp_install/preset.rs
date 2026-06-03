@@ -2,14 +2,26 @@ use crate::mcp_install::model::{
     normalize_source_dir_for_scope, InstallPreset, InstallRequest, ServerSpec,
 };
 
-pub(super) fn build_server_spec(request: &InstallRequest) -> ServerSpec {
+pub(super) fn build_server_spec(request: &InstallRequest, binary: &str) -> ServerSpec {
     match request.preset {
-        InstallPreset::Workspace => build_workspace_spec(request),
-        InstallPreset::Reference => build_reference_spec(request),
+        InstallPreset::Workspace => build_workspace_spec(request, binary),
+        InstallPreset::Reference => build_reference_spec(request, binary),
     }
 }
 
-fn build_workspace_spec(request: &InstallRequest) -> ServerSpec {
+/// The command an AI client should run to launch this MCP server. Prefers the absolute
+/// path of the currently-running executable (`current_exe`), so the generated config
+/// works even when the client starts the server in a reduced `PATH` that lacks the
+/// install directory. Falls back to the bare name if the path cannot be resolved.
+pub(super) fn resolve_self_binary() -> String {
+    std::env::current_exe()
+        .ok()
+        .map(|path| path.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "bsl-analyzer".to_owned())
+}
+
+fn build_workspace_spec(request: &InstallRequest, binary: &str) -> ServerSpec {
     let mut args = vec![
         "mcp".to_owned(),
         "serve".to_owned(),
@@ -36,16 +48,16 @@ fn build_workspace_spec(request: &InstallRequest) -> ServerSpec {
 
     ServerSpec {
         name: request.name.clone(),
-        command: "bsl-analyzer".to_owned(),
+        command: binary.to_owned(),
         args,
         env: request.env.clone(),
     }
 }
 
-fn build_reference_spec(request: &InstallRequest) -> ServerSpec {
+fn build_reference_spec(request: &InstallRequest, binary: &str) -> ServerSpec {
     ServerSpec {
         name: request.name.clone(),
-        command: "bsl-analyzer".to_owned(),
+        command: binary.to_owned(),
         args: vec![
             "mcp".to_owned(),
             "serve".to_owned(),
@@ -85,7 +97,7 @@ mod tests {
 
     #[test]
     fn workspace_preset_builds_expected_stdio_command() {
-        let spec = build_server_spec(&request());
+        let spec = build_server_spec(&request(), "bsl-analyzer");
 
         assert_eq!(spec.name, "bsl-analyzer");
         assert_eq!(spec.command, "bsl-analyzer");
@@ -114,11 +126,33 @@ mod tests {
         let mut req = request();
         req.preset = InstallPreset::Reference;
 
-        let spec = build_server_spec(&req);
+        let spec = build_server_spec(&req, "bsl-analyzer");
 
         assert_eq!(spec.name, "bsl-analyzer");
         assert_eq!(spec.command, "bsl-analyzer");
         assert_eq!(spec.args, vec!["mcp", "serve", "--profile", "reference"]);
         assert_eq!(spec.env.get("NAPARNIK_TOKEN"), Some(&"test".to_owned()));
+    }
+
+    /// The resolved binary path is written verbatim as the launch command, so a config
+    /// generated with an absolute path keeps it (immune to the client's reduced PATH).
+    #[test]
+    fn server_spec_uses_provided_binary_path() {
+        let spec = build_server_spec(&request(), "/usr/local/bin/bsl-analyzer");
+        assert_eq!(spec.command, "/usr/local/bin/bsl-analyzer");
+
+        let mut req = request();
+        req.preset = InstallPreset::Reference;
+        let spec = build_server_spec(&req, "/opt/bsl/bsl-analyzer");
+        assert_eq!(spec.command, "/opt/bsl/bsl-analyzer");
+    }
+
+    /// `resolve_self_binary` yields an absolute path (the running executable), which is
+    /// what makes the generated client config robust to a reduced PATH.
+    #[test]
+    fn resolve_self_binary_is_absolute() {
+        let bin = super::resolve_self_binary();
+        assert!(!bin.is_empty());
+        assert!(std::path::Path::new(&bin).is_absolute(), "expected an absolute path, got {bin}");
     }
 }

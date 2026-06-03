@@ -9,6 +9,11 @@ use std::{
 
 use tempfile::TempDir;
 
+/// `mcp install` writes the absolute path of the running executable as the launch
+/// command. In these tests the harness runs the `bsl-analyzer-app` test binary, so its
+/// `current_exe()` is exactly `CARGO_BIN_EXE_bsl-analyzer-app`.
+const SELF_BIN: &str = env!("CARGO_BIN_EXE_bsl-analyzer-app");
+
 #[derive(Debug)]
 struct Invocation {
     program: String,
@@ -107,7 +112,7 @@ fn codex_user_reference_force_uses_cli_and_passes_env() {
     assert_eq!(invocations[1].args[0..4], ["mcp", "add", "bsl-analyzer-reference", "--env"]);
     assert!(invocations[1].args.contains(&"NAPARNIK_TOKEN=test".to_owned()));
     assert!(invocations[1].args.contains(&"--".to_owned()));
-    assert!(invocations[1].args.contains(&"bsl-analyzer".to_owned()));
+    assert!(invocations[1].args.contains(&SELF_BIN.to_owned()));
     assert_eq!(
         invocations[1].args,
         vec![
@@ -117,7 +122,7 @@ fn codex_user_reference_force_uses_cli_and_passes_env() {
             "--env",
             "NAPARNIK_TOKEN=test",
             "--",
-            "bsl-analyzer",
+            SELF_BIN,
             "mcp",
             "serve",
             "--profile",
@@ -163,7 +168,7 @@ fn codex_user_reference_force_migrates_legacy_name() {
             "add",
             "bsl-analyzer-reference",
             "--",
-            "bsl-analyzer",
+            SELF_BIN,
             "mcp",
             "serve",
             "--profile",
@@ -408,7 +413,7 @@ fn codex_recommended_installs_reference_and_workspace() {
             "--env",
             "NAPARNIK_TOKEN=test",
             "--",
-            "bsl-analyzer",
+            SELF_BIN,
             "mcp",
             "serve",
             "--profile",
@@ -458,7 +463,7 @@ fn codex_recommended_uses_name_prefix_for_both_servers() {
             "add",
             "custom-bsl-reference",
             "--",
-            "bsl-analyzer",
+            SELF_BIN,
             "mcp",
             "serve",
             "--profile",
