@@ -55,6 +55,14 @@ fn main() -> Result<()> {
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
 
+    // Tell the app it was started via this launcher, passing the launcher's own PATH
+    // entry. `mcp install` records this instead of the cached app binary, so generated
+    // MCP configs keep going through the launcher's auto-update path. Contract mirrored
+    // in `crates/bsl-analyzer/src/mcp_install/preset.rs`.
+    if let Ok(launcher_bin) = std::env::current_exe() {
+        cmd.env("BSL_ANALYZER_LAUNCHER_BIN", launcher_bin);
+    }
+
     parent_death::configure_parent_death(&mut cmd);
 
     let mut child = cmd

@@ -140,14 +140,11 @@ bsl-analyzer mcp install --target all --preset recommended --source-dir .
 `recommended` ставит `reference` глобально (user) и `workspace` для текущего проекта
 (project). Клиенты, scope'ы, флаги `--dry-run`/`--force` — в [`README.md`](README.md).
 
-### ⚠️ Ловушка: `mcp install` может записать путь app вместо лаунчера
+### Проверка: в `command` должен стоять путь лаунчера
 
-`mcp install` записывает в `command` путь **запущенного бинарника**. Если вы запустили
-его через лаунчер, лаунчер пере-исполняет app, и в конфиг попадёт путь app
-(`~/.bsl-analyzer/bin/bsl-analyzer-app`), а не лаунчера. Тогда **авто-обновление
-обходится** — MCP-клиент будет вечно держать ту версию app, что была на момент установки.
-
-**Обязательно проверьте записанный путь:**
+Запущенный через лаунчер, `mcp install` сам записывает в `command` путь **лаунчера**
+(а не кэшированного app-бинарника) — так MCP-клиент продолжает ходить через
+авто-обновляемый лаунчер. Убедитесь в этом:
 
 ```bash
 codex mcp list
@@ -159,19 +156,12 @@ codex mcp list
 /home/<user>/.local/bin/bsl-analyzer
 ```
 
-Если там `~/.bsl-analyzer/bin/bsl-analyzer-app` — **замените на путь лаунчера** вручную.
-Для Codex (project scope) в `.codex/config.toml`:
-
-```toml
-[mcp_servers.bsl-analyzer]
-command = "/home/<user>/.local/bin/bsl-analyzer"
-```
-
-(Аналогично проверьте/поправьте конфиг своего клиента: Claude, Gemini, Cursor.)
+Если там `~/.bsl-analyzer/bin/bsl-analyzer-app` — значит `mcp install` был запущен не
+через лаунчер (например, прямым вызовом app-бинарника). Перезапустите установку именно
+через лаунчер (`bsl-analyzer mcp install …` из PATH).
 
 > **PATH-независимость.** Путь в `command` — абсолютный, поэтому сервер стартует даже
-> когда AI-клиент запускает его без `~/.local/bin` в `PATH`. Важно лишь, чтобы это был
-> путь **лаунчера**, а не app.
+> когда AI-клиент запускает его без `~/.local/bin` в `PATH`.
 
 ---
 
