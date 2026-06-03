@@ -98,6 +98,17 @@ struct GraphParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct DiagnosticsParams {
+    /// catalog | schema
+    action: String,
+    /// Narrow the catalog to these diagnostic codes (optional).
+    #[serde(default)]
+    codes: Vec<String>,
+    /// ru | en (default ru) — catalog title language.
+    locale: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct ItsHelpParams {
     question: String,
 }
@@ -498,6 +509,31 @@ impl McpServer {
         .await
         .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
     }
+
+    #[tool(name = "diagnostics", annotations(read_only_hint = true))]
+    async fn diagnostics(
+        &self,
+        params: Parameters<DiagnosticsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let p = params.0;
+        match p.action.as_str() {
+            // `catalog` and `schema` are static (compile-time metadata), so they need
+            // no resident analysis database and answer in either profile.
+            "schema" => Ok(tools::diagnostics::schema()),
+            "catalog" => {
+                let locale = match p.locale.as_deref() {
+                    Some(s) => ide::Locale::from_config_str(s)
+                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?,
+                    None => ide::Locale::default(),
+                };
+                Ok(tools::diagnostics::catalog(locale, &p.codes))
+            }
+            other => Err(McpError::invalid_params(
+                format!("Unknown action '{other}'. Expected: catalog, schema"),
+                None,
+            )),
+        }
+    }
 }
 
 #[tool_router(router = reference_tool_router)]
@@ -586,11 +622,14 @@ impl ServerHandler for McpServer {
         info.instructions = Some(match self.profile {
             McpProfile::Workspace => {
                 "BSL Analyzer workspace MCP server. Provides project metadata browsing, \
-                 code search, a whole-config semantic call graph, SDBL query validation, \
-                 code execution and debugging. Prefer the `graph` tool over text search when \
-                 you need call relationships: start with action 'overview' on an unfamiliar \
-                 project, then 'node'/'callers'/'callees'/'neighbors' using the durable ids it \
-                 returns. Tools: metadata, search, graph, query, execute, debug."
+                 code search, a whole-config semantic call graph, semantic diagnostics, \
+                 SDBL query validation, code execution and debugging. Prefer the `graph` tool \
+                 over text search when you need call relationships: start with action 'overview' \
+                 on an unfamiliar project, then 'node'/'callers'/'callees'/'neighbors' using the \
+                 durable ids it returns. The `diagnostics` tool surfaces analyzer findings grep \
+                 cannot (unreachable code, type mismatch, unresolved call); start with action \
+                 'catalog' to discover the available codes. \
+                 Tools: metadata, search, graph, diagnostics, query, execute, debug."
                     .into()
             }
             McpProfile::Reference => {

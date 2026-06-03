@@ -1,4 +1,5 @@
 pub mod debug;
+pub mod diagnostics;
 pub mod execution;
 pub mod graph;
 pub mod its_help;
@@ -6,4 +7,5 @@ pub mod metadata;
 pub mod platform;
 pub mod query;
 pub mod redact;
+pub mod response;
 pub mod search;

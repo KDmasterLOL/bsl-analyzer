@@ -1,5 +1,6 @@
 mod completion;
 pub mod config_finder;
+pub mod diagnostics_catalog;
 mod document_highlight;
 mod document_symbols;
 mod folding;
@@ -13,6 +14,7 @@ pub mod streaming;
 mod syntax_highlighting;
 
 pub use completion::{CompletionItem, CompletionItemKind};
+pub use diagnostics_catalog::{catalog_entry, diagnostic_catalog, CatalogEntry, SeverityBucket};
 pub use document_highlight::{DocumentHighlight, DocumentHighlightKind};
 pub use folding::{FoldingRange, FoldingRangeKind};
 pub use formatting::{FormattingConfig, FormattingResult};
