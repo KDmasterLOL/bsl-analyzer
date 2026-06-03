@@ -1,50 +1,4 @@
 #!/usr/bin/env bash
-# M3/M4 Invariants — CI gate for type-system facade boundaries.
-#
-# ## Invariant #3 — `PlatformData::instance()` gate
-#
-# IDE code must not reach into `bsl_platform::PlatformData::instance()`
-# directly on the type path. All such access goes through:
-#
-#   - `hir::Semantics::type_of_expr` / `hir::Type` (semantic facade), or
-#   - Salsa-tracked queries in `bsl-platform::db` (`type_methods_query`,
-#     `manager_methods_query`, `platform_method_query`, …).
-#
-# The only allowed exceptions are keyword-docs lookups — keywords
-# aren't part of the type system and predate M3. Each keyword-docs
-# callsite carries a comment of the form
-# `allow: keyword docs (M3 exception)` on the SAME line as the
-# `PlatformData::instance()` call (plain rg -B scan would miss it,
-# so we inspect each violation's text for the marker).
-#
-# ## Invariant (M4 Task 4) — `AttributeType → Ty` gate
-#
-# Semantic consumers must lower `bsl_metadata::AttributeType` through
-# `TypeRef::from_attribute_type` + `TyLoweringContext::lower_type_ref`,
-# not by pattern-matching `AttributeType` variants and producing `Ty`
-# values inline. The anti-pattern this guards against is co-occurrence
-# of `AttributeType::` and `Ty::` in a single semantic-layer file.
-#
-# Allowed (whitelist):
-#   - `crates/bsl-metadata/**` — source of truth for `AttributeType`.
-#   - `crates/hir-def/src/type_ref.rs` — the `TypeRef::from_attribute_type` bridge.
-#   - `crates/sdbl-hir/src/types.rs` — SDBL's parallel type system bridge.
-#   - `crates/sdbl-hir/src/lower/from_clause.rs` — SDBL `DefinedType` special-case.
-#
-# In-file test modules (`#[cfg(test)] mod tests { … }`) are stripped
-# before the co-occurrence check — `AttributeType::X` constructors in
-# test fixtures are a normal idiom and must not force whole production
-# files onto the whitelist. Test-fixture files that live *outside* a
-# production module (e.g. `crates/*/tests/`) are exempt by
-# construction: they only contain `AttributeType::`, never `Ty::`.
-#
-# The script runs both gates, aggregates violations, and exits non-zero
-# when either invariant is breached.
-#
-# Run locally:
-#   scripts/check-invariants.sh
-#
-# Hook into CI by invoking this script from the pipeline's build step.
 
 set -euo pipefail
 
@@ -53,9 +7,6 @@ cd "$ROOT"
 
 ALLOW_MARKER='allow: keyword docs'
 
-# grep/rg alternatives: ripgrep is present in the dev environment and
-# used by the rest of the tooling. Fall back to `git grep` for CI
-# environments that skip rg.
 if command -v rg >/dev/null 2>&1; then
     HAVE_RG=1
 else
@@ -64,9 +15,6 @@ fi
 
 overall_status=0
 
-# ----------------------------------------------------------------------
-# Gate 1 — PlatformData::instance() in crates/ide/
-# ----------------------------------------------------------------------
 
 if [[ $HAVE_RG -eq 1 ]]; then
     pd_matches="$(rg --no-heading --line-number \
@@ -88,18 +36,12 @@ else
         lineno="${rest%%:*}"
         text="${rest#*:}"
 
-        # Skip matches where the hit is inside a comment (`// …` or `/// …`).
-        # These are doc/prose mentions like "don't touch PlatformData::instance()"
-        # explaining the rule, not actual calls.
         trimmed="${text#"${text%%[![:space:]]*}"}"
         if [[ "$trimmed" == "//"* ]] || [[ "$trimmed" == "*"* ]]; then
             continue
         fi
         pd_real_calls=$(( pd_real_calls + 1 ))
 
-        # Portable 8-line window: (lineno - 5) .. (lineno + 2). The allow
-        # marker can sit several lines above the call when the explanation
-        # spans a block comment.
         start=$(( lineno - 5 ))
         end=$(( lineno + 2 ))
         [[ $start -lt 1 ]] && start=1
@@ -123,13 +65,7 @@ else
     fi
 fi
 
-# ----------------------------------------------------------------------
-# Gate 2 — AttributeType → Ty co-occurrence
-# ----------------------------------------------------------------------
 
-# Files allowed to carry both tokens simultaneously (blessed adapters
-# and the bridge). Any file outside this list that contains both
-# `AttributeType::` and `Ty::` is flagged.
 AT_WHITELIST=(
     'crates/bsl-metadata/'
     'crates/hir-def/src/type_ref.rs'
@@ -147,7 +83,6 @@ is_whitelisted() {
     return 1
 }
 
-# Find files under crates/ that contain `AttributeType::`.
 if [[ $HAVE_RG -eq 1 ]]; then
     at_files="$(rg --no-heading --files-with-matches \
         --glob 'crates/**/*.rs' \
@@ -166,22 +101,6 @@ if [[ -n "$at_files" ]]; then
         if is_whitelisted "$file"; then
             continue
         fi
-        # Co-occurrence trigger on production, non-comment lines only:
-        #
-        #  1. Cut everything from the first top-level `#[cfg(test)]`
-        #     attribute to EOF — idiomatic in this codebase for the
-        #     end-of-file `mod tests { … }` block. Attribute-driven
-        #     test fixtures legitimately mention `AttributeType::X`
-        #     constructors and must not force the production half of
-        #     the same file onto the whitelist. A file with an
-        #     intermixed `#[cfg(test)] fn helper() …` before real
-        #     production code would see that tail stripped too; no
-        #     file in `crates/` uses that layout today (all files
-        #     place `#[cfg(test)]` immediately before the trailing
-        #     `mod tests`).
-        #  2. Strip line comments (`//` and `///`) and block-comment
-        #     `*` continuations, covering prose that names `Ty::` or
-        #     `AttributeType::` without actually constructing them.
         stripped="$(awk '/^#\[cfg\(test\)\]/ { exit } { print }' "$file" \
             | sed -E 's|//.*$||' \
             | grep -vE '^[[:space:]]*(\*|$)')"

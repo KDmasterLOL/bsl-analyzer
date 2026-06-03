@@ -1,5 +1,3 @@
-//! Reports usage of the deprecated `ЭтаФорма` / `ThisForm` property.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -53,7 +51,7 @@ mod tests {
               message: Вместо устаревшего свойства "ЭтаФорма" следует использовать "ЭтотОбъект"
               severity: Information"#]],
         );
-        assert_eq!(this_form_diags[0].severity, Severity::Information); // snapshot-skip: severity assertion intentionally retained.
+        assert_eq!(this_form_diags[0].severity, Severity::Information);
     }
 
     #[test]

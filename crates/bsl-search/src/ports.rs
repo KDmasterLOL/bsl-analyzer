@@ -8,7 +8,6 @@ use crate::resolver::ResolvedView;
 use std::collections::HashMap;
 use std::path::Path;
 
-/// Generates embeddings using an external embedding backend.
 pub trait EmbeddingGenerator {
     fn model_id(&self) -> &str;
 
@@ -17,7 +16,21 @@ pub trait EmbeddingGenerator {
     fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, SearchError>;
 }
 
-/// Stores and loads shared embeddings independent of snapshot publication.
+/// Inverts the dependency from the search index (this crate) up to the call-graph
+/// layer. Clean architecture: `bsl-search` is a lower layer and must not depend on
+/// `ide`/`hir`. An implementor that owns the call graph renders a code chunk's
+/// OUTBOUND graph context (dispatch, signature, calls, metadata reads); the index
+/// folds the returned string into the chunk's embedding text so vectors capture what
+/// a method *does*, not just its source. The returned string is opaque to this crate.
+///
+/// `None` when the chunk is not a resolvable method (module header, unresolved name)
+/// or no provider is configured — in which case embedding text is unchanged.
+pub trait GraphContextProvider: Send + Sync {
+    /// `rel_path` is the chunk's workspace-relative file path, `symbol_name` the
+    /// method name, `kind` the chunk kind label (`procedure` / `function` / `header`).
+    fn graph_context(&self, rel_path: &str, symbol_name: &str, kind: &str) -> Option<String>;
+}
+
 pub trait EmbeddingStore {
     fn load_embeddings(
         &self,
@@ -34,12 +47,10 @@ pub trait EmbeddingStore {
     ) -> Result<BaselineEmbeddingStats, SearchError>;
 }
 
-/// Resolves baseline metadata into a concrete snapshot.
 pub trait SnapshotCatalog {
     fn resolve_baseline(&self, baseline: &BaselineRef) -> Result<Option<Snapshot>, SearchError>;
 }
 
-/// Loads searchable documents for a given snapshot.
 pub trait SnapshotContentStore {
     fn load_snapshot_documents(
         &self,
@@ -47,7 +58,6 @@ pub trait SnapshotContentStore {
     ) -> Result<Vec<IndexedDocument>, SearchError>;
 }
 
-/// Provides direct lexical hits from a published baseline snapshot.
 pub trait BaselineLexicalSearch {
     fn lexical_search_baseline(
         &self,
@@ -58,7 +68,6 @@ pub trait BaselineLexicalSearch {
     ) -> Result<Vec<LexicalHit>, SearchError>;
 }
 
-/// Provides direct semantic hits from a published baseline snapshot via pgvector.
 pub trait BaselineSemanticSearch {
     fn semantic_search_baseline(
         &self,
@@ -71,7 +80,6 @@ pub trait BaselineSemanticSearch {
     ) -> Result<Vec<SemanticHit>, SearchError>;
 }
 
-/// Publishes immutable baseline snapshots into a backing store.
 pub trait SnapshotPublisher {
     fn publish_snapshot(
         &self,
@@ -81,7 +89,6 @@ pub trait SnapshotPublisher {
     ) -> Result<SnapshotPublishStats, SearchError>;
 }
 
-/// Builds a local overlay relative to the selected baseline.
 pub trait OverlayBuilder {
     fn build_overlay(
         &self,
@@ -90,7 +97,6 @@ pub trait OverlayBuilder {
     ) -> Result<SearchOverlay, SearchError>;
 }
 
-/// Provides lexical candidates over a resolved set of visible documents.
 pub trait LexicalSearchIndex {
     fn lexical_candidates(
         &self,
@@ -100,7 +106,6 @@ pub trait LexicalSearchIndex {
     ) -> Result<Vec<IndexedDocument>, SearchError>;
 }
 
-/// Provides vector candidates over a resolved set of visible documents.
 pub trait VectorSearchIndex {
     fn semantic_candidates(
         &self,
@@ -110,7 +115,6 @@ pub trait VectorSearchIndex {
     ) -> Result<Vec<IndexedDocument>, SearchError>;
 }
 
-/// Combines baseline and overlay into one visible view.
 pub trait ResolvedViewService {
     fn resolve_view(
         &self,
@@ -120,8 +124,6 @@ pub trait ResolvedViewService {
     ) -> Result<ResolvedView, SearchError>;
 }
 
-/// A single row in the workspace baseline manifest: one visible file in the
-/// selected PostgreSQL snapshot.
 #[derive(Debug, Clone)]
 pub struct BaselineManifestFile {
     pub collection: String,
@@ -131,8 +133,6 @@ pub struct BaselineManifestFile {
     pub file_object_id: String,
 }
 
-/// The workspace baseline manifest returned by Postgres: selected snapshot
-/// metadata plus the list of visible files.
 #[derive(Debug, Clone)]
 pub struct WorkspaceBaselineManifest {
     pub snapshot_id: String,
@@ -140,8 +140,6 @@ pub struct WorkspaceBaselineManifest {
     pub files: Vec<BaselineManifestFile>,
 }
 
-/// Returns the selected snapshot metadata and visible-file manifest for
-/// workspace code from a PostgreSQL baseline.
 pub trait WorkspaceBaselineManifestStore {
     fn load_baseline_manifest(
         &self,

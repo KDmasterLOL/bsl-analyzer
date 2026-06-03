@@ -24,8 +24,6 @@ impl<S> SpanTree<S>
 where
     S: Subscriber + for<'span> LookupSpan<'span>,
 {
-    // Returns `impl Layer<S>` instead of Self to enable tracing layer composition.
-    // This is a common pattern in tracing ecosystem for building reusable layers.
     #[allow(clippy::new_ret_no_self)]
     pub fn new(spec: &str) -> impl Layer<S> {
         let (write_filter, allowed_names) = WriteFilter::from_spec(spec);
@@ -146,7 +144,6 @@ impl Node {
                 let _ = write!(out, " ({} calls)", self.count);
             }
 
-            // Use tracing so output goes to BSL_LOG_FILE when set (important for LSP mode)
             tracing::warn!(target: "bsl_profile", "{out}");
 
             for child in &self.children {

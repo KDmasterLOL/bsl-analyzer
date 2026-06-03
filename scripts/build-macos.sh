@@ -1,24 +1,4 @@
 #!/bin/bash
-# macOS build script for bsl-analyzer
-# Run on MacBook to build and publish macOS binaries
-#
-# Собирает два артефакта для каждой архитектуры:
-#   - bsl-analyzer-darwin-{amd64,arm64}      - launcher
-#   - bsl-analyzer-app-darwin-{amd64,arm64} - LSP сервер
-#
-# Usage:
-#   ./scripts/build-macos.sh              # Build latest tag
-#   ./scripts/build-macos.sh v0.1.0       # Build specific tag
-#   ./scripts/build-macos.sh --watch      # Watch for new tags
-#
-# Required environment variables:
-#   GITLAB_TOKEN        - GitLab Personal Access Token (api scope)
-#   GITLAB_PROJECT_ID   - GitLab project ID
-#
-# Optional:
-#   GITLAB_URL          - GitLab URL (default: https://gitlab.com)
-#   RELEASE_SERVER_URL  - Custom release server URL
-#   RELEASE_UPLOAD_TOKEN - Auth token for custom release server
 
 set -euo pipefail
 
@@ -179,13 +159,11 @@ upload_binaries() {
     local launcher_path="target/$target/release/bsl-analyzer"
     local app_path="target/$target/release/bsl-analyzer-app"
 
-    # Upload launcher
     local url
     url=$(upload_to_gitlab_registry "$version" "$launcher_name" "$launcher_path")
     add_release_link "$tag" "$launcher_name" "$url"
     upload_to_custom_server "$version" "$launcher_name" "$launcher_path"
 
-    # Upload app
     url=$(upload_to_gitlab_registry "$version" "$app_name" "$app_path")
     add_release_link "$tag" "$app_name" "$url"
     upload_to_custom_server "$version" "$app_name" "$app_path"
@@ -207,7 +185,6 @@ build_and_upload() {
     upload_binaries "$version" "$tag" "x86_64-apple-darwin" "darwin-amd64"
     upload_binaries "$version" "$tag" "aarch64-apple-darwin" "darwin-arm64"
 
-    # Publish to custom server if configured
     if [[ -n "${RELEASE_SERVER_URL:-}" ]] && [[ -n "${RELEASE_UPLOAD_TOKEN:-}" ]]; then
         log "Publishing version to custom release server..."
         curl -sf -X POST "${RELEASE_SERVER_URL}/publish/bsl-analyzer/${version}" \

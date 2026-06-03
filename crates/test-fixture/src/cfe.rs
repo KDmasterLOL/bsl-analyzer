@@ -1,12 +1,5 @@
-//! CFE extension fixture builder.
-//!
-//! The fixture writes the real extension tree used by 1C exports:
-//! `Configuration.xml` at the base root and each extension under
-//! `Extensions/<ExtName>`.
-
 use std::path::{Path, PathBuf};
 
-/// Builder for a base configuration plus visible CFE extensions.
 #[derive(Debug)]
 pub struct CfeFixtureBuilder {
     base_config_xml: String,
@@ -26,14 +19,12 @@ struct CfeModuleSpec {
     source: String,
 }
 
-/// Built CFE fixture. Owns the temporary directory and removes it on drop.
 #[derive(Debug)]
 pub struct CfeFixture {
     root: PathBuf,
     extensions: Vec<CfeExtension>,
 }
 
-/// Built extension fixture metadata.
 #[derive(Debug)]
 pub struct CfeExtension {
     name: String,
@@ -42,7 +33,6 @@ pub struct CfeExtension {
     modules: Vec<CfeModule>,
 }
 
-/// Built extension module fixture metadata.
 #[derive(Debug)]
 pub struct CfeModule {
     name: String,
@@ -51,12 +41,10 @@ pub struct CfeModule {
 }
 
 impl CfeFixtureBuilder {
-    /// Create a fixture builder with the base `Configuration.xml`.
     pub fn new(base_config_xml: &str) -> Self {
         Self { base_config_xml: base_config_xml.to_string(), extensions: Vec::new() }
     }
 
-    /// Add or replace an extension configuration.
     pub fn add_extension(&mut self, name: &str, config_xml: &str) -> &mut Self {
         if let Some(existing) = self.extensions.iter_mut().find(|ext| ext.name == name) {
             existing.config_xml = config_xml.to_string();
@@ -71,7 +59,6 @@ impl CfeFixtureBuilder {
         self
     }
 
-    /// Add a CommonModule body under `Extensions/<ExtName>/CommonModules/<ModName>/Module.bsl`.
     pub fn add_extension_module(
         &mut self,
         ext_name: &str,
@@ -99,7 +86,6 @@ impl CfeFixtureBuilder {
         self
     }
 
-    /// Build the fixture on disk.
     pub fn build(self) -> CfeFixture {
         let root = next_cfe_fixture_root();
         let _ = std::fs::remove_dir_all(&root);

@@ -1,6 +1,6 @@
-//! Shared state for MCP server tools.
-
 use crate::baseline::{BaselineRuntime, ConfiguredBaselineStatus, ExternalBaselineService};
+use crate::diagnostics_state::DiagnosticsState;
+use crate::graph::GraphState;
 use bsl_metadata::Configuration;
 use bsl_platform::PlatformDataInner;
 use bsl_search::{BaselineHashMode, CorpusId, Document, IndexProgress, SearchEngine};
@@ -16,18 +16,9 @@ use std::{
 };
 use tokio::sync::RwLock;
 
-/// State shared between all MCP tool handlers.
-///
-/// Contains the 1C configuration metadata, workspace info,
-/// and optional HTTP client to a live 1C database.
-/// Thread-safe: can be cloned and shared across async tasks.
-///
-/// In LSP+MCP mode, Configuration is updated when LSP reloads it.
-/// In standalone mode, Configuration is loaded once at startup.
 #[derive(Clone)]
 pub struct SharedState {
     configuration: Arc<RwLock<Option<Configuration>>>,
-    /// Extension configurations: (name, Configuration).
     extensions: Arc<RwLock<Vec<(String, Configuration)>>>,
     workspace_root: Option<PathBuf>,
     onec_client: Option<OnecClient>,
@@ -38,6 +29,8 @@ pub struct SharedState {
     workspace_search_mode: WorkspaceSearchMode,
     external_baseline: Option<Arc<ExternalBaselineService>>,
     configured_baseline: Option<ConfiguredBaselineStatus>,
+    graph: GraphState,
+    diagnostics: DiagnosticsState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,7 +42,7 @@ pub(crate) enum WorkspaceSearchMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SemanticRuntimeStatus {
     Disabled,
-    #[allow(dead_code)] // used in status display; set when overlay background sync is implemented
+    #[allow(dead_code, reason = "status display uses this once overlay sync is implemented")]
     OverlaySyncing,
     Ready,
     Failed(String),
@@ -61,13 +54,7 @@ struct WorkspaceSearchInit {
 }
 
 impl SharedState {
-    /// Create state for workspace MCP mode (loads configuration from directory).
-    ///
-    /// Returns immediately. Metadata loading is synchronous (~1-2s).
-    /// Search engine initialization (FTS indexing) runs in a background thread.
     pub fn workspace(source_dir: PathBuf) -> Self {
-        // Use Project to discover configuration path (configurationRoot,
-        // recursive Configuration.xml search, common patterns).
         let project = project_model::Project::new(&source_dir);
         let config_path = project.source_path();
         let configuration = bsl_metadata::load_from_directory(config_path)
@@ -92,8 +79,6 @@ impl SharedState {
             WorkspaceSearchMode::SqliteLocal
         };
 
-        // Spawn background thread so standalone() returns immediately.
-        // MCP tools check engine readiness and return a friendly message while init is in progress.
         Self::spawn_workspace_search_init(
             Arc::clone(&search_engine),
             Arc::clone(&index_progress),
@@ -115,7 +100,6 @@ impl SharedState {
                 .ok();
         }
 
-        // Load extension configurations
         let mut extensions = Vec::new();
         for (name, ext_path) in project.extension_paths() {
             match bsl_metadata::load_from_directory(ext_path) {
@@ -133,6 +117,9 @@ impl SharedState {
             }
         }
 
+        let graph = GraphState::for_workspace(source_dir.clone());
+        let diagnostics = DiagnosticsState::for_workspace(source_dir.clone());
+
         Self {
             configuration: Arc::new(RwLock::new(configuration)),
             extensions: Arc::new(RwLock::new(extensions)),
@@ -145,6 +132,8 @@ impl SharedState {
             workspace_search_mode,
             external_baseline: baseline_runtime.external_baseline,
             configured_baseline: Some(baseline_runtime.configured_baseline),
+            graph,
+            diagnostics,
         }
     }
 
@@ -191,13 +180,6 @@ impl SharedState {
 
                 tracing::info!("search engine initialization complete");
 
-                // Spawn a background thread to pre-compute overlay embeddings
-                // for locally changed files.  The engine Mutex is held for the
-                // duration of the warmup so search queries that need the
-                // overlay will block, but this is preferred to blocking on the
-                // first user query.  Lexical baseline search via Postgres
-                // (find_code without overlay) remains available because it
-                // does not need the local engine.
                 if needs_overlay_warmup {
                     Self::set_semantic_runtime_status(
                         &semantic_runtime,
@@ -240,9 +222,6 @@ impl SharedState {
             .ok();
     }
 
-    /// Create state for global reference MCP mode.
-    ///
-    /// Loads no project metadata and builds a user-level docs-only search index in the background.
     pub fn reference(project_root: Option<PathBuf>) -> Self {
         let search_engine: Arc<Mutex<Option<SearchEngine>>> = Arc::new(Mutex::new(None));
         let index_progress = IndexProgress::new();
@@ -295,12 +274,11 @@ impl SharedState {
             workspace_search_mode: WorkspaceSearchMode::SqliteLocal,
             external_baseline: baseline_runtime.external_baseline,
             configured_baseline: Some(baseline_runtime.configured_baseline),
+            graph: GraphState::disabled(),
+            diagnostics: DiagnosticsState::disabled(),
         }
     }
 
-    /// Create state for LSP+MCP shared mode.
-    ///
-    /// Configuration will be set later via `update_configuration`.
     pub fn shared() -> Self {
         Self {
             configuration: Arc::new(RwLock::new(None)),
@@ -314,41 +292,43 @@ impl SharedState {
             workspace_search_mode: WorkspaceSearchMode::SqliteLocal,
             external_baseline: None,
             configured_baseline: None,
+            graph: GraphState::disabled(),
+            diagnostics: DiagnosticsState::disabled(),
         }
     }
 
-    /// Set the 1C HTTP client for live database access.
+    pub(crate) fn graph(&self) -> &GraphState {
+        &self.graph
+    }
+
+    pub(crate) fn diagnostics(&self) -> &DiagnosticsState {
+        &self.diagnostics
+    }
+
     pub fn set_onec_client(&mut self, client: OnecClient) {
         self.onec_client = Some(client);
     }
 
-    /// Get the 1C HTTP client.
     pub fn onec_client(&self) -> Option<&OnecClient> {
         self.onec_client.as_ref()
     }
 
-    /// Update configuration (called from LSP main thread when config reloads).
     pub async fn update_configuration(&self, config: Configuration) {
         *self.configuration.write().await = Some(config);
     }
 
-    /// Update configuration from a sync context (LSP main thread).
-    /// Panics if called from an async context.
     pub fn update_configuration_blocking(&self, config: Configuration) {
         *self.configuration.blocking_write() = Some(config);
     }
 
-    /// Set workspace root.
     pub fn set_workspace_root(&mut self, root: PathBuf) {
         self.workspace_root = Some(root);
     }
 
-    /// Get a clone of the current configuration.
     pub async fn configuration(&self) -> Option<Configuration> {
         self.configuration.read().await.clone()
     }
 
-    /// Access configuration with a closure (avoids clone for read-only access).
     pub async fn with_configuration<F, R>(&self, f: F) -> Option<R>
     where
         F: FnOnce(&Configuration) -> R,
@@ -357,18 +337,15 @@ impl SharedState {
         guard.as_ref().map(f)
     }
 
-    /// Get configuration as Arc for SDBL HIR lowering (sync, blocking).
     pub fn configuration_arc(&self) -> Option<std::sync::Arc<Configuration>> {
         let guard = self.configuration.blocking_read();
         guard.as_ref().map(|c| std::sync::Arc::new(c.clone()))
     }
 
-    /// Get extension configurations.
     pub async fn extensions(&self) -> Vec<(String, Configuration)> {
         self.extensions.read().await.clone()
     }
 
-    /// Access extensions with a closure (avoids clone).
     pub async fn with_extensions<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&[(String, Configuration)]) -> R,
@@ -377,54 +354,45 @@ impl SharedState {
         f(&guard)
     }
 
-    /// Workspace root directory.
     pub fn workspace_root(&self) -> Option<&PathBuf> {
         self.workspace_root.as_ref()
     }
 
-    /// Access the debug session mutex.
     pub fn debug_session(&self) -> &Arc<Mutex<Option<bsl_debug::session::DebugSession>>> {
         &self.debug_session
     }
 
-    /// Access the search engine mutex.
     pub fn search_engine(&self) -> &Arc<Mutex<Option<SearchEngine>>> {
         &self.search_engine
     }
 
-    /// Access the indexing progress tracker.
     pub fn index_progress(&self) -> &Arc<IndexProgress> {
         &self.index_progress
     }
 
-    /// Access the semantic runtime status.
     pub(crate) fn semantic_runtime(&self) -> Arc<Mutex<SemanticRuntimeStatus>> {
         Arc::clone(&self.semantic_runtime)
     }
 
-    /// Access the workspace search operating mode.
     pub(crate) fn workspace_search_mode(&self) -> WorkspaceSearchMode {
         self.workspace_search_mode.clone()
     }
 
-    /// Access configured external baseline service.
     pub(crate) fn external_baseline(&self) -> Option<Arc<ExternalBaselineService>> {
         self.external_baseline.clone()
     }
 
-    /// Access configured baseline runtime diagnostics.
     pub(crate) fn configured_baseline(&self) -> Option<ConfiguredBaselineStatus> {
         self.configured_baseline.clone()
     }
 
-    /// Shutdown the external baseline service (called after Tokio runtime is dropped).
     pub fn shutdown(&self) {
         if let Some(ref service) = self.external_baseline {
             service.shutdown();
         }
+        self.diagnostics.shutdown();
     }
 
-    /// Read embedding configuration from environment variables.
     fn embedding_config() -> Option<bsl_search::SearchConfig> {
         let base_url = std::env::var("EMBEDDING_URL").ok()?;
         let model = std::env::var("EMBEDDING_MODEL")
@@ -496,7 +464,6 @@ impl SharedState {
         }
     }
 
-    /// Open search engine from DB, creating it if needed.
     fn open_search_engine(db_path: &Path) -> Option<SearchEngine> {
         if let Some(config) = Self::embedding_config() {
             return Self::open_semantic_search_engine(db_path, config);
@@ -564,20 +531,14 @@ impl SharedState {
         }
     }
 
-    /// Initialize search engine from workspace root.
-    ///
-    /// If a DB exists, opens it. Otherwise builds index from source files.
-    /// If EMBEDDING_URL is set, enables semantic search too.
-    /// If DB has FTS data but no embeddings, rebuilds for semantic upgrade.
     fn init_workspace_search_engine(
         workspace_root: &std::path::Path,
         progress: &Arc<IndexProgress>,
         watcher_ready: &Arc<AtomicBool>,
         external_baseline: Option<Arc<ExternalBaselineService>>,
     ) -> Option<WorkspaceSearchInit> {
-        let build_dir = workspace_root.join(".build");
-        std::fs::create_dir_all(&build_dir).ok();
-        let db_path = build_dir.join("bsl-search.db");
+        crate::cache::ensure_workspace_cache_dir(workspace_root).ok();
+        let db_path = crate::cache::search_db_path(workspace_root);
 
         let project = project_model::Project::new(workspace_root);
         let source_path = project.source_path().to_path_buf();
@@ -586,9 +547,6 @@ impl SharedState {
             .as_ref()
             .filter(|baseline| matches!(baseline.corpus(), CorpusId::WorkspaceCode))
         {
-            // Overlay-only path: load baseline manifest from Postgres,
-            // persist metadata locally, clear stale local baseline rows, and prepare the overlay engine.
-            // Baseline search remains remote; SQLite stores only overlay state and metadata.
             let mut engine = Self::open_workspace_overlay_search_engine(&db_path)?;
             Self::configure_workspace_engine(
                 &mut engine,
@@ -611,9 +569,6 @@ impl SharedState {
                 return None;
             }
 
-            // Attempt to load and persist baseline manifest metadata.
-            // In Postgres mode baseline availability is mandatory; initialization
-            // fails closed when snapshot resolution or manifest loading fails.
             let manifest = match external_baseline.resolve_snapshot() {
                 Ok(Some((_baseline_ref, snapshot))) => {
                     match external_baseline.load_baseline_manifest(&snapshot.id.0) {
@@ -685,6 +640,27 @@ impl SharedState {
             watcher_ready,
             BaselineHashMode::RawFileBytes,
         );
+
+        // Enrich semantic embeddings with each method's call-graph context when the
+        // graph database is already built. Best-effort: if it is absent (the graph is
+        // built lazily on first `graph` tool use) the embeddings are simply graph-free
+        // this run and pick up context on a later reindex once the graph exists.
+        if engine.has_semantic() {
+            let graph_path = crate::cache::graph_db_path(workspace_root);
+            match crate::graph_query::GraphDb::open(&graph_path) {
+                Ok(graph_db) => {
+                    engine.set_graph_context_provider(Arc::new(
+                        crate::graph_query::GraphDbContextProvider::new(graph_db),
+                    ));
+                    tracing::info!("graph-enriched embeddings enabled");
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        "graph database unavailable; embeddings without graph context: {e}"
+                    );
+                }
+            }
+        }
 
         if engine.has_semantic() {
             match engine.index_directory(&source_path, Some(progress)) {
@@ -840,11 +816,6 @@ impl SharedState {
         }
     }
 
-    /// Index platform reference documentation into the search engine.
-    ///
-    /// Converts all platform types, methods, and global functions into
-    /// searchable documents. Uses a version hash to skip re-indexing
-    /// if data hasn't changed.
     fn index_platform_docs(engine: &mut SearchEngine, progress: &Arc<IndexProgress>) {
         let platform = PlatformDataInner::instance();
         if platform.all_types().is_empty() {
@@ -854,7 +825,6 @@ impl SharedState {
 
         let mut documents = Vec::new();
 
-        // Index platform types.
         for ty in platform.all_types() {
             let methods = platform.get_type_methods(&ty.name);
             let method_list: String = methods
@@ -871,7 +841,6 @@ impl SharedState {
             });
         }
 
-        // Index platform methods with documentation.
         for method in platform.all_methods() {
             let mut body = format!(
                 "Тип: {}\nМетод: {} / {}\n",
@@ -880,7 +849,6 @@ impl SharedState {
             if let Some(ref ret) = method.return_type {
                 body.push_str(&format!("Возвращает: {ret}\n"));
             }
-            // Add documentation if available.
             if let Some(docs) = platform.get_method_docs(method.id) {
                 if !docs.syntax.is_empty() {
                     body.push_str(&format!("Синтаксис: {}\n", docs.syntax));
@@ -905,7 +873,6 @@ impl SharedState {
             });
         }
 
-        // Index global functions.
         for func in platform.all_global_functions() {
             let mut body = format!("Глобальная функция: {} / {}\n", func.name, func.english_name,);
             if let Some(ref ret) = func.return_type {
@@ -929,7 +896,6 @@ impl SharedState {
             });
         }
 
-        // Use package version as hash — platform data changes only with new releases.
         let version_bytes = env!("CARGO_PKG_VERSION").as_bytes();
 
         tracing::info!(
@@ -960,7 +926,6 @@ impl SharedState {
         }
     }
 
-    /// Initialize search engine for LSP+MCP mode (called when workspace root is set).
     pub fn init_search(&self) {
         if let Some(root) = self.workspace_root.clone() {
             let watcher_ready = Arc::new(AtomicBool::new(false));
@@ -1108,9 +1073,9 @@ mod tests {
             "Процедура ЛокальнаяПроцедура()\nКонецПроцедуры",
         )
         .unwrap();
-        fs::create_dir_all(workspace.join(".build")).unwrap();
+        crate::cache::ensure_workspace_cache_dir(workspace).unwrap();
 
-        let db_path = workspace.join(".build").join("bsl-search.db");
+        let db_path = crate::cache::search_db_path(workspace);
         let mut stale_engine = SearchEngine::fts_only(&db_path).unwrap();
         stale_engine
             .sync_indexed_documents_in_collection(
@@ -1124,6 +1089,7 @@ mod tests {
                     line_end: 1,
                     text: "Процедура ПризрачнаяПроцедура()\nКонецПроцедуры".to_owned(),
                     content_hash: "ghost".to_owned(),
+                    graph_context: None,
                 }],
                 None,
             )
@@ -1168,8 +1134,8 @@ mod tests {
 
         let dir = tempdir().unwrap();
         let workspace = dir.path();
-        fs::create_dir_all(workspace.join(".build")).unwrap();
-        let db_path = workspace.join(".build").join("bsl-search.db");
+        crate::cache::ensure_workspace_cache_dir(workspace).unwrap();
+        let db_path = crate::cache::search_db_path(workspace);
         let mut stale_engine = SearchEngine::fts_only(&db_path).unwrap();
         stale_engine
             .sync_indexed_documents_in_collection(
@@ -1183,6 +1149,7 @@ mod tests {
                     line_end: 1,
                     text: "Процедура ПризрачнаяПроцедура()\nКонецПроцедуры".to_owned(),
                     content_hash: "ghost".to_owned(),
+                    graph_context: None,
                 }],
                 None,
             )

@@ -1,5 +1,3 @@
-//! Reports hardcoded secret values such as passwords in code.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -614,7 +612,6 @@ Password = "";
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
         assert_eq!(diagnostics.len(), 1, "Should only match 'Password' with custom config");
-        // snapshot-skip: custom configuration assertion intentionally retained.
     }
 
     #[test]

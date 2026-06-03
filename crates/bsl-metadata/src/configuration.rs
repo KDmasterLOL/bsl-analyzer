@@ -1,5 +1,3 @@
-//! Configuration metadata root object
-
 use crate::common_module::CommonModule;
 use crate::defined_type::DefinedType;
 use crate::error::Result;
@@ -16,105 +14,80 @@ use std::collections::HashMap;
 use std::path::Path;
 use uuid::Uuid;
 
-/// Configuration - root metadata object
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Configuration {
-    /// Configuration UUID
     #[serde(rename = "uuid", default = "Uuid::new_v4")]
     uuid: Uuid,
 
-    /// Configuration name
     #[serde(rename = "name")]
     name: String,
 
-    /// Common modules list
     #[serde(rename = "commonModules", default)]
     common_modules: Vec<CommonModule>,
 
-    /// Metadata objects (Catalogs, Documents, etc.)
     #[serde(rename = "metadataObjects", default)]
     metadata_objects: Vec<MetadataObject>,
 
-    /// Registers (Information, Accumulation, Accounting, Calculation)
     #[serde(rename = "registers", default)]
     registers: Vec<Register>,
 
-    /// Event subscriptions
     #[serde(rename = "eventSubscriptions", default)]
     event_subscriptions: Vec<EventSubscription>,
 
-    /// Defined types (ОпределяемыеТипы)
     #[serde(rename = "definedTypes", default)]
     defined_types: Vec<DefinedType>,
 
-    /// Scheduled jobs (РегламентныеЗадания)
     #[serde(rename = "scheduledJobs", default)]
     scheduled_jobs: Vec<ScheduledJob>,
 
-    /// Roles (Роли)
     #[serde(rename = "roles", default)]
     roles: Vec<Role>,
 
-    /// HTTP services (HTTP-сервисы)
     #[serde(rename = "httpServices", default)]
     http_services: Vec<HTTPService>,
 
-    /// Web services (Web-сервисы / SOAP)
     #[serde(rename = "webServices", default)]
     web_services: Vec<WebService>,
 
-    /// Cache: URI -> Module index mapping (not serialized)
     #[serde(skip)]
     uri_to_module: HashMap<String, usize>,
 
-    /// Cache: Name -> Common Module index mapping (not serialized)
     #[serde(skip)]
     name_to_common_module: HashMap<String, usize>,
 
-    /// Cache: Name -> Register index mapping (not serialized)
     #[serde(skip)]
     name_to_register: HashMap<String, usize>,
 
-    /// Cache: Name -> EventSubscription index mapping (not serialized)
     #[serde(skip)]
     name_to_event_subscription: HashMap<String, usize>,
 
-    /// Cache: Name -> DefinedType index mapping (not serialized)
     #[serde(skip)]
     name_to_defined_type: HashMap<String, usize>,
 
-    /// Cache: Name -> ScheduledJob index mapping (not serialized)
     #[serde(skip)]
     name_to_scheduled_job: HashMap<String, usize>,
 
-    /// Cache: Name -> Role index mapping (not serialized)
     #[serde(skip)]
     name_to_role: HashMap<String, usize>,
 
-    /// Cache: Name -> HTTPService index mapping (not serialized)
     #[serde(skip)]
     name_to_http_service: HashMap<String, usize>,
 
-    /// Cache: Name -> WebService index mapping (not serialized)
     #[serde(skip)]
     name_to_web_service: HashMap<String, usize>,
 
-    /// Cache: (Register type, register name) -> recording Document names (not serialized)
     #[serde(skip)]
     recorders_by_register: HashMap<(MdoType, Name), Vec<Name>>,
 
-    /// Use managed forms in ordinary application
     #[serde(rename = "useManagedFormInOrdinaryApplication", default)]
     use_managed_form_in_ordinary_application: bool,
 
-    /// Use ordinary forms in managed application
     #[serde(rename = "useOrdinaryFormInManagedApplication", default)]
     use_ordinary_form_in_managed_application: bool,
 }
 
 impl PartialEq for Configuration {
     fn eq(&self, other: &Self) -> bool {
-        // Compare all fields EXCEPT the HashMap caches (which are derived from data)
         self.uuid == other.uuid
             && self.name == other.name
             && self.common_modules == other.common_modules
@@ -134,7 +107,6 @@ impl PartialEq for Configuration {
 }
 
 impl Configuration {
-    /// Create empty configuration
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             uuid: Uuid::new_v4(),
@@ -163,22 +135,17 @@ impl Configuration {
         }
     }
 
-    /// Load configuration from XML file
-    ///
-    /// Supports both EDT and Designer formats
     pub fn from_xml_file(path: impl AsRef<Path>) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
         Self::from_xml_str(&content)
     }
 
-    /// Parse configuration from XML string
     pub fn from_xml_str(xml: &str) -> Result<Self> {
         let doc = roxmltree::Document::parse(xml).map_err(|e| {
             crate::error::MetadataError::InvalidFormat(format!("XML parse error: {}", e))
         })?;
 
         let root = doc.root_element();
-        // First child element of root is the Configuration element
         let config_node = root.children().find(|n| n.is_element()).ok_or_else(|| {
             crate::error::MetadataError::InvalidFormat("No Configuration element".to_string())
         })?;
@@ -225,10 +192,8 @@ impl Configuration {
         Ok(config)
     }
 
-    /// Build internal caches for fast lookups after bulk-loading objects
     #[allow(dead_code)]
     fn build_caches(&mut self) {
-        // Build URI -> Module mapping
         self.uri_to_module.clear();
         self.name_to_common_module.clear();
         self.name_to_register.clear();
@@ -280,28 +245,23 @@ impl Configuration {
         }
     }
 
-    /// Get configuration name
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// Get configuration UUID
     pub fn uuid(&self) -> &Uuid {
         &self.uuid
     }
 
-    /// Get all common modules
     pub fn common_modules(&self) -> &[CommonModule] {
         &self.common_modules
     }
 
-    /// Find common module by name (case-insensitive)
     pub fn find_common_module(&self, name: &str) -> Option<&CommonModule> {
         let name_lower = name.to_lowercase();
         self.name_to_common_module.get(&name_lower).and_then(|&idx| self.common_modules.get(idx))
     }
 
-    /// Find module by URI
     pub fn find_module_by_uri(&self, uri: &str) -> Option<&dyn Module> {
         self.uri_to_module
             .get(uri)
@@ -309,17 +269,13 @@ impl Configuration {
             .map(|cm| cm as &dyn Module)
     }
 
-    /// Find any metadata object by URI
     pub fn find_child_by_uri(&self, uri: &str) -> Option<&dyn MdObject> {
-        // For now, only common modules are supported
-        // TODO: Add other MDO types (Documents, Catalogs, etc.)
         self.uri_to_module
             .get(uri)
             .and_then(|&idx| self.common_modules.get(idx))
             .map(|cm| cm as &dyn MdObject)
     }
 
-    /// Add common module
     pub fn add_common_module(&mut self, module: CommonModule) {
         let idx = self.common_modules.len();
 
@@ -331,45 +287,31 @@ impl Configuration {
         self.common_modules.push(module);
     }
 
-    /// Check if managed forms are used in ordinary application
     pub fn use_managed_form_in_ordinary_application(&self) -> bool {
         self.use_managed_form_in_ordinary_application
     }
 
-    /// Check if ordinary forms are used in managed application
     pub fn use_ordinary_form_in_managed_application(&self) -> bool {
         self.use_ordinary_form_in_managed_application
     }
 
-    /// Set use managed forms in ordinary application flag
     pub fn set_use_managed_form_in_ordinary_application(&mut self, value: bool) {
         self.use_managed_form_in_ordinary_application = value;
     }
 
-    /// Set use ordinary forms in managed application flag
     pub fn set_use_ordinary_form_in_managed_application(&mut self, value: bool) {
         self.use_ordinary_form_in_managed_application = value;
     }
 
-    /// Get all metadata objects
     pub fn metadata_objects(&self) -> &[MetadataObject] {
         &self.metadata_objects
     }
 
-    /// Add metadata object
     pub fn add_metadata_object(&mut self, object: MetadataObject) {
         index_document_recorders(&mut self.recorders_by_register, &object);
         self.metadata_objects.push(object);
     }
 
-    /// Merge an extension configuration over this configuration.
-    ///
-    /// Designer extension dumps often contain only the changed part of an
-    /// adopted object. The base object still owns platform-derived properties
-    /// such as `Hierarchical`, while the extension object contributes extra
-    /// attributes/tabular sections. Query analysis needs the effective object
-    /// shape, so duplicate objects are merged instead of letting the partial
-    /// extension object shadow the base one.
     pub fn merge_extension_overlay(&mut self, extension: &Configuration) {
         for ext_obj in &extension.metadata_objects {
             if let Some(base_obj) = self.metadata_objects.iter_mut().find(|obj| {
@@ -396,42 +338,32 @@ impl Configuration {
         self.build_caches();
     }
 
-    /// Return a new configuration with `extension` merged over `self`.
     pub fn merged_with_extension(&self, extension: &Configuration) -> Self {
         let mut merged = self.clone();
         merged.merge_extension_overlay(extension);
         merged
     }
 
-    /// Find metadata object by type and name (case-insensitive)
-    ///
-    /// Returns true if object exists
     pub fn has_metadata_object(&self, mdo_type: MdoType, name: &str) -> bool {
         let name_lower = name.to_lowercase();
 
-        // Check if this is a register type - registers are stored separately
         let result = match mdo_type {
             MdoType::InformationRegister
             | MdoType::AccumulationRegister
             | MdoType::AccountingRegister
-            | MdoType::CalculationRegister => {
-                // Search in registers
-                self.registers.iter().any(|reg| {
-                    reg.mdo_type() == mdo_type && reg.name().to_lowercase() == name_lower
-                })
-            }
-            _ => {
-                // Search in metadata_objects
-                self.metadata_objects
-                    .iter()
-                    .any(|obj| obj.mdo_type == mdo_type && obj.name.to_lowercase() == name_lower)
-            }
+            | MdoType::CalculationRegister => self
+                .registers
+                .iter()
+                .any(|reg| reg.mdo_type() == mdo_type && reg.name().to_lowercase() == name_lower),
+            _ => self
+                .metadata_objects
+                .iter()
+                .any(|obj| obj.mdo_type == mdo_type && obj.name.to_lowercase() == name_lower),
         };
 
         result
     }
 
-    /// Find metadata object by type and name
     pub fn find_metadata_object(&self, mdo_type: MdoType, name: &str) -> Option<&MetadataObject> {
         let name_lower = name.to_lowercase();
         self.metadata_objects
@@ -439,30 +371,20 @@ impl Configuration {
             .find(|obj| obj.mdo_type == mdo_type && obj.name.to_lowercase() == name_lower)
     }
 
-    /// Find a constant's declared value type, if any.
-    ///
-    /// Returns [`None`] both when the constant is not declared in this
-    /// configuration **and** when it is declared without a parsed
-    /// `<Type>` element. Callers that need to distinguish "missing
-    /// constant" from "untyped constant" should use
-    /// [`Self::find_metadata_object`] directly.
     pub fn find_constant_type(&self, name: &str) -> Option<&AttributeType> {
         self.find_metadata_object(MdoType::Constant, name)
             .and_then(|mdo| mdo.constant_type.as_ref())
     }
 
-    /// Get all registers
     pub fn registers(&self) -> &[Register] {
         &self.registers
     }
 
-    /// Find register by name (case-insensitive)
     pub fn find_register(&self, name: &str) -> Option<&Register> {
         let name_lower = name.to_lowercase();
         self.name_to_register.get(&name_lower).and_then(|&idx| self.registers.get(idx))
     }
 
-    /// Find register by type and name (case-insensitive)
     pub fn find_register_by_type_and_name(
         &self,
         mdo_type: MdoType,
@@ -474,25 +396,21 @@ impl Configuration {
             .and_then(|&idx| self.registers.get(idx).filter(|r| r.mdo_type() == mdo_type))
     }
 
-    /// Return document names that can record into the given register.
     pub fn recorders_for_register(&self, parent: MdoType, name: &str) -> &[Name] {
         let key = (parent, name.to_lowercase());
         self.recorders_by_register.get(&key).map(Vec::as_slice).unwrap_or(&[])
     }
 
-    /// Add register
     pub fn add_register(&mut self, register: Register) {
         let idx = self.registers.len();
         self.name_to_register.insert(register.name().to_lowercase(), idx);
         self.registers.push(register);
     }
 
-    /// Get all event subscriptions
     pub fn event_subscriptions(&self) -> &[EventSubscription] {
         &self.event_subscriptions
     }
 
-    /// Find event subscription by name (case-insensitive)
     pub fn find_event_subscription(&self, name: &str) -> Option<&EventSubscription> {
         let name_lower = name.to_lowercase();
         self.name_to_event_subscription
@@ -500,100 +418,81 @@ impl Configuration {
             .and_then(|&idx| self.event_subscriptions.get(idx))
     }
 
-    /// Add event subscription
     pub(crate) fn add_event_subscription(&mut self, subscription: EventSubscription) {
         let idx = self.event_subscriptions.len();
         self.name_to_event_subscription.insert(subscription.name().to_lowercase(), idx);
         self.event_subscriptions.push(subscription);
     }
 
-    /// Get all defined types
     pub fn defined_types(&self) -> &[DefinedType] {
         &self.defined_types
     }
 
-    /// Find defined type by name (case-insensitive)
     pub fn find_defined_type(&self, name: &str) -> Option<&DefinedType> {
         let name_lower = name.to_lowercase();
         self.name_to_defined_type.get(&name_lower).and_then(|&idx| self.defined_types.get(idx))
     }
 
-    /// Add defined type.
-    ///
-    /// Public for symmetry with `add_metadata_object` / `add_register` —
-    /// downstream crates' tests construct `Configuration` directly.
     pub fn add_defined_type(&mut self, defined_type: DefinedType) {
         let idx = self.defined_types.len();
         self.name_to_defined_type.insert(defined_type.name().to_lowercase(), idx);
         self.defined_types.push(defined_type);
     }
 
-    /// Get all scheduled jobs
     pub fn scheduled_jobs(&self) -> &[ScheduledJob] {
         &self.scheduled_jobs
     }
 
-    /// Find scheduled job by name (case-insensitive)
     pub fn find_scheduled_job(&self, name: &str) -> Option<&ScheduledJob> {
         let name_lower = name.to_lowercase();
         self.name_to_scheduled_job.get(&name_lower).and_then(|&idx| self.scheduled_jobs.get(idx))
     }
 
-    /// Add scheduled job
     pub(crate) fn add_scheduled_job(&mut self, job: ScheduledJob) {
         let idx = self.scheduled_jobs.len();
         self.name_to_scheduled_job.insert(job.name().to_lowercase(), idx);
         self.scheduled_jobs.push(job);
     }
 
-    /// Get all roles
     pub fn roles(&self) -> &[Role] {
         &self.roles
     }
 
-    /// Find role by name (case-insensitive)
     pub fn find_role(&self, name: &str) -> Option<&Role> {
         let name_lower = name.to_lowercase();
         self.name_to_role.get(&name_lower).and_then(|&idx| self.roles.get(idx))
     }
 
-    /// Add role
     pub(crate) fn add_role(&mut self, role: Role) {
         let idx = self.roles.len();
         self.name_to_role.insert(role.name().to_lowercase(), idx);
         self.roles.push(role);
     }
 
-    /// Get all HTTP services
     pub fn http_services(&self) -> &[HTTPService] {
         &self.http_services
     }
 
-    /// Find HTTP service by name (case-insensitive)
     pub fn find_http_service(&self, name: &str) -> Option<&HTTPService> {
         let name_lower = name.to_lowercase();
         self.name_to_http_service.get(&name_lower).and_then(|&idx| self.http_services.get(idx))
     }
 
-    /// Add HTTP service
     pub(crate) fn add_http_service(&mut self, http_service: HTTPService) {
         let idx = self.http_services.len();
         self.name_to_http_service.insert(http_service.name().to_lowercase(), idx);
         self.http_services.push(http_service);
     }
 
-    /// Get all web services (SOAP)
     pub fn web_services(&self) -> &[WebService] {
         &self.web_services
     }
 
-    /// Find web service by name (case-insensitive)
     pub fn find_web_service(&self, name: &str) -> Option<&WebService> {
         let name_lower = name.to_lowercase();
         self.name_to_web_service.get(&name_lower).and_then(|&idx| self.web_services.get(idx))
     }
 
-    /// Add web service
     pub(crate) fn add_web_service(&mut self, web_service: WebService) {
         let idx = self.web_services.len();
         self.name_to_web_service.insert(web_service.name().to_lowercase(), idx);
@@ -689,16 +588,13 @@ mod tests {
 
         assert_eq!(config.common_modules().len(), 1);
 
-        // Find by name
         let found = config.find_common_module("TestModule");
         assert!(found.is_some());
         assert_eq!(found.unwrap().name(), "TestModule");
 
-        // Find by name case-insensitive
         let found_ci = config.find_common_module("testmodule");
         assert!(found_ci.is_some());
 
-        // Find by URI
         let found_uri = config.find_module_by_uri("CommonModules/TestModule/Ext/Module.bsl");
         assert!(found_uri.is_some());
         assert_eq!(found_uri.unwrap().name(), "TestModule");
@@ -782,21 +678,17 @@ mod tests {
 
         assert_eq!(config.registers().len(), 1);
 
-        // Find by name
         let found = config.find_register("РегистрСведений1");
         assert!(found.is_some());
         assert_eq!(found.unwrap().name(), "РегистрСведений1");
 
-        // Find by name case-insensitive
         let found_ci = config.find_register("регистрсведений1");
         assert!(found_ci.is_some());
 
-        // Find by type and name
         let found_typed =
             config.find_register_by_type_and_name(MdoType::InformationRegister, "РегистрСведений1");
         assert!(found_typed.is_some());
 
-        // Wrong type
         let not_found = config
             .find_register_by_type_and_name(MdoType::AccumulationRegister, "РегистрСведений1");
         assert!(not_found.is_none());

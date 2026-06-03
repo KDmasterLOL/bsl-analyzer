@@ -1,5 +1,3 @@
-//! Reports missing or invalid HTTP service method handlers.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode};

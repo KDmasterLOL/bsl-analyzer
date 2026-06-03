@@ -1,5 +1,3 @@
-//! Reports missing or unresolved Web service operation handlers.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode};

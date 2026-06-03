@@ -1,38 +1,3 @@
-//! `Элементы.<имя>` → `TypeKind::FormControl` resolution.
-//!
-//! Inside a managed-form module (`Forms/<X>/Ext/Form/Module.bsl`),
-//! `Элементы` is the platform-typed collection of UI controls
-//! (`ВсеЭлементыФормы` / `FormAllItems`). The next field-access step
-//! (`Элементы.Переприемка`, `Элементы.Кнопка1`) lands here: we resolve
-//! the name against `Form.xml`'s `<ChildItems>` (captured during XML
-//! parsing as [`bsl_metadata::FormElement`]) and lower the matching
-//! element to a `TypeKind::FormControl`.
-//!
-//! `kind` comes from the XML tag taxonomy (Phase 2 wired this through
-//! `bsl_metadata::FormElement::kind`). `binding` carries the resolved
-//! `<DataPath>` provenance for row-aware refinement in Phase 5
-//! (`.ВыделенныеСтроки → TypedArray(row)`); a missing or unresolvable
-//! data path leaves `binding: None` and the control type still routes
-//! method/property dispatch through its per-kind platform table.
-//!
-//! # Cheap-first lookup
-//!
-//! [`lookup_form_item_field`] checks the receiver shape **before**
-//! asking `db.module_metadata(...)` — a non-`ВсеЭлементыФормы`
-//! receiver returns immediately with no Salsa cost. The managed-form
-//! gate (`this_object::is_managed_form_module`) is the second gate; both stay
-//! shallow so the inference hot path pays nothing on unrelated
-//! field-access expressions.
-//!
-//! # Out of scope
-//!
-//! - Refined property lookup on `Ty::FormControl{Table, Some(_)}` for
-//!   `.ВыделенныеСтроки` / `.ТекущаяСтрока`. Phase 5 layers this on
-//!   top via `field_lookup`.
-//! - Method dispatch — handled by `method_lookup::platform_type_key`
-//!   which already routes `Ty::FormControl` through the per-kind
-//!   platform table.
-
 use std::sync::Arc;
 
 use bsl_config::VisibleConfig;
@@ -53,48 +18,16 @@ use crate::field_enum::{FieldInfo, FieldOrigin};
 use crate::field_lookup;
 use crate::form_attr::lower_form_attribute_to_typeid;
 
-/// Russian platform type name for the form-elements collection.
 pub const FORM_ITEMS_TYPE_RU: &str = "ВсеЭлементыФормы";
-/// English platform type name for the form-elements collection.
 pub const FORM_ITEMS_TYPE_EN: &str = "FormAllItems";
 
-/// `true` if `ty` is the form-elements collection (`Элементы` / `Items`
-/// receiver). The receiver gate used by [`lookup_form_item_field`] delegates
-/// here so completion offers the same suggestion list that the field-access
-/// pipeline resolves against — single source of truth, no IDE-side
-/// duplicate of the bilingual case-folding rule.
 pub fn is_form_items_collection_ty(db: &dyn HirDatabase, ty: TypeId) -> bool {
     let TypeKind::PlatformObject(facet) = db.lookup_type(ty) else { return false };
-    // BSL identifiers are case-insensitive AND the platform names are
-    // Cyrillic — ASCII case folding does NOT cover Cyrillic, so
-    // `Name::eq_ignore_case` lowercases both sides via the same
-    // Unicode-aware path the rest of the resolver uses.
     let name = Name::new(facet.name.as_str());
     name.eq_ignore_case(&Name::new(FORM_ITEMS_TYPE_RU))
         || name.eq_ignore_case(&Name::new(FORM_ITEMS_TYPE_EN))
 }
 
-/// Resolve `Элементы.<field>` against the form's XML element table.
-///
-/// Returns `Some(FieldInfo)` only when **all** are true:
-/// 1. `receiver` is the form-elements collection
-///    (`PlatformObject("ВсеЭлементыФормы" | "FormAllItems")`, case-insensitive,
-///    bilingual — gated by [`is_form_items_collection_ty`]);
-/// 2. the resolver's enclosing module is a managed form
-///    ([`this_object::is_managed_form_module`] gate — strict, ordinary forms and
-///    forms without a loaded `Form.xml` payload return `false`);
-/// 3. the form metadata declares an element with this name
-///    (case-insensitive — BSL identifiers are case-insensitive).
-///
-/// Otherwise returns `None` so the caller can fall through to
-/// `lookup_field` (which may still find a platform property on the
-/// `ВсеЭлементыФормы` type, e.g. `.Количество()` if such ever lands in
-/// platform data).
-///
-/// `is_readonly` is set to `true`: `Элементы.X` returns the control
-/// reference itself; the **slot** in the `Элементы` collection is not
-/// assignable (BSL has no syntax to overwrite a control reference at
-/// that name).
 pub(crate) fn lookup_form_item_field(
     db: &dyn HirDatabase,
     resolver: &Resolver,
@@ -122,20 +55,6 @@ pub(crate) fn lookup_form_item_field(
     })
 }
 
-/// Lower a single [`FormElement`] to a `TypeKind::FormControl`.
-///
-/// Pulls `kind` from the XML-tag taxonomy and resolves the optional
-/// `<DataPath>` binding via [`resolve_data_path`]. A `~`-prefixed path
-/// (the platform's marker for a deleted form attribute) and any path
-/// whose first segment does not match a form attribute both collapse
-/// to `binding: None` — the wider `Ty::FormControl` is still useful
-/// (method dispatch and the kind-specific property table both work).
-///
-/// Pure on `(form, element, configs)` — split out from
-/// [`lookup_form_item_field`] so the lowering rules can be unit-tested
-/// without spinning up a Salsa database. Mirrors the
-/// [`lower_form_attribute_to_ty`] / [`crate::form_attr::resolve_form_attribute`]
-/// pair.
 pub(crate) fn lower_form_element(
     db: &dyn TypeKernelDb,
     form: &Form,
@@ -150,11 +69,6 @@ pub(crate) fn lower_form_element(
     db.mk_form_control(element.kind, binding)
 }
 
-/// Build the row Ty for a tabular-section binding — the same shape
-/// `field_enum::enumerate_fields` produces for tabular-section
-/// iteration. `MetadataKind::TabularSectionRow { parent: mdo }` carries
-/// the column schema; the qualified name `"Owner.Section"` lets the
-/// enumerator find the section inside the right MDO.
 fn row_typeid_of_tabular_section_target(
     db: &dyn TypeKernelDb,
     target: &FormBindingTargetFacet,
@@ -173,32 +87,11 @@ fn row_typeid_of_tabular_section_target(
     }
 }
 
-/// Refined property lookup on `Ty::FormControl{Table, Some(b)}` for
-/// the row-aware properties — `.ВыделенныеСтроки` / `.ТекущаяСтрока` /
-/// `.ТекущиеДанные` and their English aliases.
-///
-/// Returns `Some(FieldInfo)` only when **all** are true:
-/// - receiver is `Ty::FormControl{kind: Table, binding: Some(b)}`,
-/// - `b.target` is `TabularSection{mdo_type, owner, section}` (Phase 5
-///   row refinement is scoped to MDO tabular sections — see Phase 4
-///   docs on the `<Columns>` follow-up),
-/// - `field` matches one of the refined property names
-///   (case-insensitive, bilingual via `Name::eq_ignore_case`).
-///
-/// Otherwise returns `None` so the caller falls through to
-/// [`crate::platform_property_lookup::lookup_platform_property`], which
-/// resolves un-refined `ТаблицаФормы` properties (`.Видимость`,
-/// `.Заголовок`, `.УсловноеОформление`, …) through the platform table
-/// indirected by the control's platform-type-name mapping.
-///
-/// `is_readonly` matches `platform_data.json` for these three
-/// properties — the slot itself is read-only.
 pub(crate) fn refine_form_control_property(
     db: &dyn TypeKernelDb,
     receiver: TypeId,
     field: &Name,
 ) -> Option<FieldInfo> {
-    // Extract the binding target (owned) before any builder callback.
     let target = match db.lookup_type(receiver) {
         TypeKind::FormControl { kind: FormElementFacet::Table, binding: Some(binding) } => {
             binding.target.clone()
@@ -207,9 +100,6 @@ pub(crate) fn refine_form_control_property(
     };
     let row = row_typeid_of_tabular_section_target(db, &target)?;
 
-    // Bilingual canonical names — recreated as `Name` so
-    // `eq_ignore_case` runs the same Unicode-aware fold the rest of
-    // the resolver uses.
     let selected_rows_ru = Name::new("ВыделенныеСтроки");
     let selected_rows_en = Name::new("SelectedRows");
     let current_row_ru = Name::new("ТекущаяСтрока");
@@ -217,18 +107,8 @@ pub(crate) fn refine_form_control_property(
     let current_data_ru = Name::new("ТекущиеДанные");
     let current_data_en = Name::new("CurrentData");
 
-    // Per-property `is_readonly` mirrors `bsl-platform/data/platform_data.json`:
-    // - `ВыделенныеСтроки` / `SelectedRows` → readonly (the slot itself
-    //   is platform-managed; user can mutate the array contents but
-    //   not reassign the slot).
-    // - `ТекущиеДанные` / `CurrentData` → readonly.
-    // - `ТекущаяСтрока` / `CurrentRow` → **writable** (assigning a row
-    //   activates it; matches `is_readonly: false` in platform_data).
     let (canonical_ru, canonical_en, ty, is_readonly) =
         if field.eq_ignore_case(&selected_rows_ru) || field.eq_ignore_case(&selected_rows_en) {
-            // `.ВыделенныеСтроки` — refined from platform's bare `Массив`
-            // to a typed array over `row` so iteration / indexing yields
-            // the section row type rather than `Произвольный → Unknown`.
             (selected_rows_ru, selected_rows_en, db.array(Some(row)), true)
         } else if field.eq_ignore_case(&current_row_ru) || field.eq_ignore_case(&current_row_en) {
             (current_row_ru, current_row_en, row, false)
@@ -248,32 +128,6 @@ pub(crate) fn refine_form_control_property(
     })
 }
 
-/// Walk `<DataPath>` segment-by-segment to recover the binding's
-/// provenance: the chain itself ([`FormBindingFacet::path`]) and the
-/// resolved target type at the chain's tail
-/// ([`FormBindingTargetFacet::TabularSection`] /
-/// [`FormBindingTargetFacet::Attribute`]).
-///
-/// Resolution flow:
-/// 1. Split `data_path` on `.`. `split_first` guarantees the chain is
-///    **always** at least one segment (we return `None` otherwise).
-/// 2. The first segment must match a form attribute by name
-///    (`Form::find_attribute`, case-insensitive). Forms typically
-///    contain `Объект` (the main attribute) plus user-declared
-///    attributes; both are eligible — the first segment is **not**
-///    restricted to the main attribute.
-/// 3. Subsequent segments traverse `field_lookup::lookup_field` from
-///    the previous segment's resolved `TypeId`. This reuses the same
-///    machinery that powers `Объект.Дата` resolution inside the form
-///    module — no second resolution pass.
-/// 4. Decide the target shape from the tail `TypeKind`: a tabular-section
-///    `MetadataRef` carries `(parent: MdoType, name: "Owner.Section")`,
-///    which we split into a structured `TabularSection` facet;
-///    everything else collapses to a scalar `Attribute { ty }`.
-///
-/// Returns `None` for unresolvable paths (unknown first segment,
-/// mid-path lookup miss, empty path) so the caller surfaces
-/// `binding: None` rather than a half-baked binding.
 fn resolve_data_path(
     db: &dyn TypeKernelDb,
     data_path: &str,
@@ -293,19 +147,6 @@ fn resolve_data_path(
     }
 
     let target = match db.lookup_type(current_id) {
-        // MDO tabular-section reference: both the object-module surface
-        // (`MetadataRef{TabularSection}`) and the managed-form surface
-        // (`FormData{Collection}`) store the qualified name as
-        // `"Owner.Section"`. Split it back into structured form so Phase 5
-        // doesn't have to re-parse.
-        //
-        // Scope note: `<Columns>`-backed form attributes (e.g. an
-        // attribute typed as `v8:ValueTable` with a `<Columns>`
-        // schema) lower to `FormData{Collection, None}` rather than
-        // `MetadataRef{TabularSection,_}`. Those land in the
-        // `Attribute` arm below and are NOT promoted to
-        // `TabularSection` — Phase 5 row-aware refinement only covers
-        // MDO tabular sections.
         TypeKind::MetadataRef(facet) => match &facet.kind {
             MetadataKind::TabularSection { parent } => {
                 let (owner, section) = facet.name.as_str().rsplit_once('.')?;
@@ -323,11 +164,6 @@ fn resolve_data_path(
                 section: section.to_string(),
             }
         }
-        // Path resolved but the tail is not a tabular-section ref.
-        // Surface the resolved type as the bound type rather than
-        // dropping the provenance entirely — hover still shows the
-        // path (debugging aid), and refined lookup gracefully
-        // degrades to the kind-specific platform table.
         _ => FormBindingTargetFacet::Attribute { ty: current_id },
     };
 
@@ -414,9 +250,6 @@ mod tests {
 
     #[test]
     fn lower_form_element_with_wrong_data_path_has_no_binding() {
-        // `~`-prefix marks a deleted form attribute (the platform's own
-        // convention). The control surface is still useful, but the
-        // binding cannot be resolved.
         let form = empty_form("Ф");
         let element = FormElement::with_kind(
             "СломаннаяТаблица",
@@ -437,8 +270,6 @@ mod tests {
 
     #[test]
     fn lower_form_element_unknown_first_segment_yields_no_binding() {
-        // DataPath references an attribute the form does not declare —
-        // collapses to None rather than producing a half-baked binding.
         let form = empty_form("Ф");
         let element = FormElement::with_kind(
             "ЗабытоеПоле",
@@ -457,9 +288,6 @@ mod tests {
 
     #[test]
     fn lower_form_element_with_scalar_attribute_yields_attribute_target() {
-        // DataPath `Замечание` resolves to a string-typed scalar form
-        // attribute. Phase 4 must record `Attribute{ ty: String }`
-        // (no MetadataRef shape involved).
         let mut form = empty_form("Ф");
         form.attributes
             .push(FormAttribute::new("Замечание", AttributeType::String { length: Some(100) }));
@@ -489,11 +317,6 @@ mod tests {
 
     #[test]
     fn lower_form_element_with_tabular_section_path_yields_tabular_section_target() {
-        // The headline scenario for Phase 4: `Объект.Переприемка` on a
-        // managed-form module whose main attribute is a Document with
-        // a tabular section. The binding records (Document, ПКО,
-        // Переприемка) so Phase 5 can refine `.ВыделенныеСтроки` to
-        // `TypedArray(row)` without re-walking the path.
         let mut form = empty_form("ФормаПКО");
         form.attributes.push(FormAttribute {
             name: "Объект".to_string(),
@@ -542,9 +365,6 @@ mod tests {
 
     #[test]
     fn lower_form_element_carries_kind_for_other_buckets() {
-        // A handful of non-Field/Table kinds — pin the kind passes
-        // through the lowering so future refactors don't accidentally
-        // drop the taxonomy.
         let form = empty_form("Ф");
         for k in [
             FormElementKind::Group,
@@ -566,12 +386,6 @@ mod tests {
         }
     }
 
-    /// Regression for the Codex Phase 4 review finding: receiver
-    /// comparison must fold Cyrillic case, not just ASCII. Pin the
-    /// behaviour by walking through `Name::eq_ignore_case` directly —
-    /// `lookup_form_item_field` is still gated on a Salsa db so we
-    /// can't drive it end-to-end in a pure unit test, but the receiver
-    /// comparator is the same `Name` API.
     #[test]
     fn cyrillic_case_insensitive_receiver_match() {
         let canonical = Name::new(FORM_ITEMS_TYPE_RU);
@@ -581,17 +395,12 @@ mod tests {
         assert!(mixed.eq_ignore_case(&canonical));
         assert!(lower.eq_ignore_case(&canonical));
         assert!(upper.eq_ignore_case(&canonical));
-        // Sanity: ASCII-only `eq_ignore_ascii_case` would NOT have
-        // recognised these — keeps the regression honest.
         assert!(!"вСеЭлементыФормы".eq_ignore_ascii_case(FORM_ITEMS_TYPE_RU));
 
-        // English alias also folds.
         let canonical_en = Name::new(FORM_ITEMS_TYPE_EN);
         let mixed_en = Name::new("formALLitems");
         assert!(mixed_en.eq_ignore_case(&canonical_en));
     }
-
-    // ---- Phase 5: refine_form_control_property ----
 
     fn binding_to(mdo: MdoType, owner: &str, section: &str) -> FormBindingFacet {
         FormBindingFacet::new(
@@ -605,9 +414,6 @@ mod tests {
 
     #[test]
     fn refine_selected_rows_returns_typed_array_of_row() {
-        // Headline Phase 5 case: refined `.ВыделенныеСтроки` overrides
-        // the platform's bare `Массив` with `TypedArray(row_ty)` so
-        // iteration / `.Количество()` / indexing all carry the row Ty.
         let db = InMemoryDb::new();
         let receiver = db.mk_form_control(
             FormElementKind::Table,
@@ -692,8 +498,6 @@ mod tests {
 
     #[test]
     fn refine_is_case_insensitive_cyrillic() {
-        // Regression: the field name comparator must fold Cyrillic
-        // case (mirrors the Phase 4 receiver fix).
         let db = InMemoryDb::new();
         let receiver = db.mk_form_control(
             FormElementKind::Table,
@@ -710,10 +514,6 @@ mod tests {
 
     #[test]
     fn refine_returns_none_for_non_refined_field() {
-        // `.Видимость` / `.Заголовок` are NOT refined — they fall
-        // through to the platform-property adapter (handled by
-        // `field_lookup::lookup_field`'s catch-all). Refinement must
-        // not steal them.
         let db = InMemoryDb::new();
         let receiver = db.mk_form_control(
             FormElementKind::Table,
@@ -726,8 +526,6 @@ mod tests {
 
     #[test]
     fn refine_returns_none_when_kind_is_not_table() {
-        // `.ВыделенныеСтроки` only makes sense on a Table control —
-        // never on Field / Button / Group. Refinement must not fire.
         for kind in [
             FormElementKind::Field,
             FormElementKind::Button,
@@ -754,8 +552,6 @@ mod tests {
 
     #[test]
     fn refine_returns_none_when_binding_absent() {
-        // No DataPath ⇒ no row schema ⇒ refinement degrades to platform
-        // fallback (which keeps the bare `Массив`).
         let db = InMemoryDb::new();
         let receiver = db.mk_form_control(FormElementKind::Table, None);
         assert!(
@@ -763,13 +559,6 @@ mod tests {
         );
     }
 
-    /// Regression for the Codex Phase 5 review finding: `is_readonly`
-    /// must be per-property, mirroring `platform_data.json`. Earlier
-    /// version applied a blanket `true` and would have flagged
-    /// legitimate `Элементы.Таблица.ТекущаяСтрока = НайденнаяСтрока`
-    /// as a read-only-property assignment. Pin the platform-aligned
-    /// shape: SelectedRows and CurrentData stay read-only, CurrentRow
-    /// is writable.
     #[test]
     fn refine_is_readonly_matches_platform_per_property() {
         let db = InMemoryDb::new();
@@ -801,11 +590,6 @@ mod tests {
 
     #[test]
     fn refine_returns_none_when_target_is_attribute() {
-        // `<Columns>`-backed form attributes lower to
-        // `Attribute{FormData(Collection)}` (see Phase 4 scope note).
-        // Until a dedicated `FormDataTarget::Columns` variant lands,
-        // refinement must NOT fire on Attribute targets — the row Ty
-        // would be wrong.
         let db = InMemoryDb::new();
         let attr_ty = db.value_table(None, TableSource::Unknown);
         let attr_binding = FormBindingFacet::new(
@@ -819,14 +603,6 @@ mod tests {
 
     #[test]
     fn lower_form_element_main_attribute_object_path_segment_resolves() {
-        // Cross-check the bridge into `lower_form_attribute_to_ty`:
-        // `Объект` typed as `cfg:DocumentObject.ПКО` lowers to
-        // `Ty::FormData{Structure, Some((Document, "ПКО"))}`. Phase 4
-        // needs that to project correctly when DataPath continues past
-        // the main attribute. We exercise the simplest case here —
-        // bare main attribute, no further segments — to pin
-        // `target = Attribute{Ty::FormData{...}}` so Phase 5 has a
-        // stable shape to refine on.
         let mut form = empty_form("Ф");
         form.attributes.push(FormAttribute {
             name: "Объект".to_string(),

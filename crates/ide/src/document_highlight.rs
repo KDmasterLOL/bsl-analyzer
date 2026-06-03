@@ -1,5 +1,3 @@
-//! Document highlights implementation.
-
 use hir::Semantics;
 use ide_db::RootDatabase;
 use syntax::ast_utils::field_tail_name_token;
@@ -8,14 +6,12 @@ use vfs::FileId;
 
 use crate::references;
 
-/// A same-document symbol highlight.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DocumentHighlight {
     pub range: TextRange,
     pub kind: DocumentHighlightKind,
 }
 
-/// Access kind for a document highlight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DocumentHighlightKind {
     Text,
@@ -23,12 +19,6 @@ pub enum DocumentHighlightKind {
     Write,
 }
 
-/// Returns same-document highlights for the symbol at the given position.
-///
-/// LSP `textDocument/documentHighlight` is defined as same-document only, so this
-/// function never crosses file boundaries — no workspace fan-out, no `find_references`
-/// orchestration. The per-file traversal lives in
-/// [`crate::references::find_references_in_file`] and is shared with `find_references`.
 pub fn document_highlights<DB: RootDatabase>(
     db: &DB,
     file_id: FileId,
@@ -323,9 +313,6 @@ mod tests {
 
     #[test]
     fn document_highlights_do_not_cross_file_boundaries() {
-        // Same-named export procedure in both files. Cursor on the definition in A.
-        // documentHighlight is same-document by LSP spec — must not return ranges
-        // that belong to file B's source text.
         let source_a = r#"
 Процедура ОбщийМетод() Экспорт
     ОбщийМетод();
@@ -364,8 +351,6 @@ mod tests {
 
     #[test]
     fn document_highlights_on_call_site_stay_file_local() {
-        // Cursor on a call site (not the definition). Same name exists in a neighbour
-        // module — must not surface in highlights for the current document.
         let source_a = r#"
 Процедура Вызов() Экспорт
     Помощник();

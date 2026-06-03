@@ -1,26 +1,3 @@
-//! End-to-end coverage for platform-manager method fallback.
-//!
-//! Pins the "Спр = Справочники.X.СоздатьЭлемент(); Спр.Записать()" flow
-//! through three adapters that previously returned `Ty::Unknown` for the
-//! stock platform catalogue:
-//!
-//! 1. `infer_three_level_call` (`Справочники.X.СоздатьЭлемент()`) —
-//!    falls back to `resolve_platform_manager_method` when the workspace
-//!    `ManagerModule.bsl` does not define the method.
-//! 2. `method_lookup::lookup_method` on `Ty::ObjectManager` — same
-//!    fallback for aliased managers (`М = Справочники.X; М.СоздатьЭлемент()`),
-//!    which never enter the 3-segment call path.
-//! 3. `method_lookup::lookup_method` on `Ty::MetadataRef { CatalogObject, .. }`
-//!    — chained `Спр.Записать()` resolves to the platform `CatalogObject`
-//!    method table.
-//!
-//! Fixtures use the shared designer workspace (catalog `Справочник1`,
-//! document `Документ1`). The catalog's `ManagerModule.bsl` declares one
-//! exported method (`ТестЭкспортная`) — test #5 below uses that one name
-//! to prove workspace > platform priority (platform has no
-//! `ТестЭкспортная`, but if the resolver muddles priority this test
-//! would either double-emit or silently pick platform).
-
 use bsl_metadata::MdoType;
 use hir::{
     DefDatabase, HirDatabase, InferenceDiagnostic, MetadataKind, ModuleId, TypeId, TypeKernelDb,
@@ -100,21 +77,6 @@ fn unresolved_kinds(db: &RootDatabaseImpl, file_id: FileId) -> Vec<UnresolvedMet
         .collect()
 }
 
-/// Variant of [`setup`] for tests that need the inference target to
-/// be a file *other than* `test.bsl` — typically an inline
-/// `ObjectModule.bsl` whose own body contains `ЭтотОбъект` calls.
-///
-/// `this_object::resolve_this_object_owner` reads `db.module_metadata(...)`,
-/// which is keyed off the file's path: the file path must walk up to a
-/// configuration root (designer fixture) for `ModuleType::ObjectModule`
-/// + `ModuleMetadata.mdo` to be populated.
-///
-/// This helper rewrites each inline fixture path
-/// (`//- /Catalogs/Справочник1/Ext/ObjectModule.bsl`) to its absolute
-/// counterpart under the designer fixture root, so the path-based
-/// metadata detection mirrors a real workspace. File *content* is the
-/// inline test text — the on-disk file is overlaid via
-/// `set_file_text`.
 fn setup_with_target_path(
     fixture_text: &str,
     target_path_suffix: &str,
@@ -142,9 +104,6 @@ fn setup_with_target_path(
         db.set_file_text(*file_id, &file.content);
     }
     db.set_all_config_paths(vec![(None, designer)]);
-    // Normalize separators so the suffix match works on Windows too —
-    // `VfsPath` keeps native separators on disk (`\\` on Windows), but
-    // tests author the suffix with forward slashes (`/`).
     let needle = target_path_suffix.replace('\\', "/");
     let target = mapped
         .iter()
@@ -170,15 +129,6 @@ fn unresolved_method_names(db: &RootDatabaseImpl, file_id: FileId) -> Vec<String
 
 #[test]
 fn catalog_create_item_returns_catalog_object_metadata_ref() {
-    // Primary user scenario:
-    //   Спр = Справочники.Справочник1.СоздатьЭлемент();
-    //   Спр.   ← completion should see CatalogObject methods
-    //
-    // The 3-segment call must resolve through the platform fallback
-    // (`ManagerModule.bsl` has no `СоздатьЭлемент`) and rebind the
-    // generic `СправочникОбъект` return to
-    // `Ty::MetadataRef { CatalogObject, "Справочник1" }`. Without the
-    // rebinding `Спр` stays `Ty::Unknown` → completion empty.
     let fixture = r#"
 //- /test.bsl
 Процедура Тест()
@@ -190,8 +140,6 @@ fn catalog_create_item_returns_catalog_object_metadata_ref() {
     let spr = var_ty(&db, file_id, "спр").expect("спр must be inferred");
     assert_metadata_ref(&db, spr, MetadataKind::CatalogObject, "Справочник1");
 
-    // Sanity — no UnresolvedMethodCall on `СоздатьЭлемент`. Before the
-    // platform fallback this emitted a false positive.
     assert!(
         !unresolved_method_names(&db, file_id)
             .iter()
@@ -203,12 +151,6 @@ fn catalog_create_item_returns_catalog_object_metadata_ref() {
 
 #[test]
 fn aliased_manager_create_item_resolves_through_lookup_method() {
-    // Codex-critical: the bypass that the initial design missed.
-    //   М = Справочники.Справочник1;
-    //   Спр = М.СоздатьЭлемент();
-    // The second call is `Expr::MethodCall { receiver: М, method: ... }`,
-    // **not** a 3-segment call — so the fallback must also live in
-    // `method_lookup::lookup_method` keyed on `Ty::ObjectManager`.
     let fixture = r#"
 //- /test.bsl
 Процедура Тест()
@@ -226,9 +168,6 @@ fn aliased_manager_create_item_resolves_through_lookup_method() {
 
 #[test]
 fn catalog_find_by_code_returns_catalog_ref() {
-    // `НайтиПоКоду` returns the generic `СправочникСсылка` — must
-    // rebind to `MetadataRef { CatalogRef, <mdo_name> }`, not a bare
-    // `PlatformObject("СправочникСсылка")`.
     let fixture = r#"
 //- /test.bsl
 Процедура Тест()
@@ -243,15 +182,6 @@ fn catalog_find_by_code_returns_catalog_ref() {
 
 #[test]
 fn catalog_find_by_code_string_arg_does_not_fire_type_mismatch() {
-    // Regression: `НайтиПоКоду` declares `Код: Число, Строка` in
-    // platform_data — the manager-method lowering path used to lift the
-    // raw "Число, Строка" string into a single `Ty::PlatformObject`,
-    // which made `String → expected` fail structural equality and
-    // false-fired `TypeMismatch` for `НайтиПоКоду("796")`. The fix
-    // routes manager params through `lower_param_type`, the same
-    // comma-aware splitter used by tabular-section / fluent paths, so
-    // the param lowers to `Ty::Union([Number, String])` and the union-
-    // right rule accepts a `String` literal.
     let fixture = r#"
 //- /test.bsl
 Процедура Тест()
@@ -278,9 +208,6 @@ fn catalog_find_by_code_string_arg_does_not_fire_type_mismatch() {
 
 #[test]
 fn unknown_manager_method_still_emits_unresolved_diagnostic() {
-    // Regression guard: an actually-missing method must still surface
-    // `UnresolvedMethodCall`. Without this, the fallback would silence
-    // every typo the user makes on a manager receiver.
     let fixture = r#"
 //- /test.bsl
 Процедура Тест()
@@ -298,9 +225,6 @@ fn unknown_manager_method_still_emits_unresolved_diagnostic() {
     );
 }
 
-/// Inline-module setup that mirrors `infer_three_level.rs::setup`: no
-/// external designer fixture, the ManagerModule.bsl lives in the
-/// fixture text itself. Used by the priority-ordering test below.
 fn setup_inline(fixture_text: &str) -> (RootDatabaseImpl, FileId) {
     let fixture = Fixture::parse(fixture_text);
     let mut db = RootDatabaseImpl::new();
@@ -325,13 +249,6 @@ fn setup_inline(fixture_text: &str) -> (RootDatabaseImpl, FileId) {
 
 #[test]
 fn workspace_manager_method_wins_over_platform() {
-    // `ТестЭкспортная` is declared in the inline manager module — no
-    // platform entry. Resolver must pick the workspace method on the
-    // first pass; the platform fallback never runs for this call.
-    //
-    // This also guards the priority ordering: had platform been tried
-    // first, a future platform `ТестЭкспортная` would silently shadow
-    // the user's implementation.
     let fixture = r#"
 //- /Catalogs/Справочник1/Ext/ManagerModule.bsl
 Процедура ТестЭкспортная() Экспорт
@@ -352,11 +269,6 @@ fn workspace_manager_method_wins_over_platform() {
 
 #[test]
 fn catalog_object_chained_write_resolves_through_metadata_ref_lookup() {
-    // Round-trip: after the SaveItem scenario produces a
-    // `MetadataRef { CatalogObject, ... }`, subsequent calls on that
-    // receiver (`.Записать()`) must resolve through the same adapter.
-    // Without the `MetadataRef` branch in `method_lookup` this
-    // would emit `UnresolvedMethodCall` on `Записать`.
     let fixture = r#"
 //- /test.bsl
 Процедура Тест()
@@ -375,13 +287,6 @@ fn catalog_object_chained_write_resolves_through_metadata_ref_lookup() {
 
 #[test]
 fn completion_after_create_item_offers_catalog_object_methods() {
-    // End-to-end: the primary user-visible scenario. After
-    // `Спр = Справочники.X.СоздатьЭлемент()` the dot-completion on
-    // `Спр.` must include platform CatalogObject methods like
-    // `Записать` / `Удалить`. Without the routing through
-    // `platform_completion::complete_prefix_methods_for_receiver` the
-    // receiver Ty maps to bare "MetadataRef" and the scalar
-    // `complete_platform_methods` returns nothing.
     let source = "\
 Процедура Тест()
     Спр = Справочники.Справочник1.СоздатьЭлемент();
@@ -407,8 +312,6 @@ fn completion_after_create_item_offers_catalog_object_methods() {
 
 #[test]
 fn catalog_object_chained_unknown_method_still_emits_diagnostic() {
-    // Symmetry with test #4 on the `MetadataRef` receiver: bogus method
-    // names on a CatalogObject must still diagnose.
     let fixture = r#"
 //- /test.bsl
 Процедура Тест()
@@ -418,10 +321,6 @@ fn catalog_object_chained_unknown_method_still_emits_diagnostic() {
 "#;
     let (db, file_id) = setup(fixture);
 
-    // `МетодКоторогоНет` — note: diagnostic is emitted only for the
-    // 3-segment form today. On `Expr::MethodCall` path the inference
-    // returns `Ty::Unknown` silently. So we only check the round-trip
-    // type stays sensible; the diagnostic shape is not a contract here.
     let spr = var_ty(&db, file_id, "спр").expect("спр must be inferred");
     assert_metadata_ref(&db, spr, MetadataKind::CatalogObject, "Справочник1");
 }
@@ -441,11 +340,6 @@ fn unresolved_field_names(db: &RootDatabaseImpl, file_id: FileId) -> Vec<String>
 
 #[test]
 fn document_object_chained_write_resolves_through_metadata_ref_lookup() {
-    // User-reported: `Док = Документы.X.СоздатьДокумент(); Док.Записать();`
-    // must resolve via `MetadataRef { DocumentObject, .. }` lookup. Pre-fix
-    // the inner callee `Expr::Field { Док, Записать }` was re-walked by
-    // `infer_all`'s second pass and emitted a spurious `UnresolvedField`
-    // (the field arm doesn't know callees are method references).
     let fixture = r#"
 //- /test.bsl
 Процедура Тест()
@@ -469,10 +363,6 @@ fn document_object_chained_write_resolves_through_metadata_ref_lookup() {
 
 #[test]
 fn document_object_chained_unknown_method_emits_unresolved_method_call() {
-    // Sibling of the catalog-object unknown-method test: a bogus method
-    // name on a `MetadataRef { DocumentObject, .. }` receiver must surface
-    // as `UnresolvedMethodCall(MethodNotFound)` — NOT silently swallowed
-    // and NOT mis-labeled as `UnresolvedField`.
     let fixture = r#"
 //- /test.bsl
 Процедура Тест()
@@ -511,19 +401,6 @@ fn document_object_chained_unknown_method_emits_unresolved_method_call() {
 
 #[test]
 fn aliased_manager_workspace_method_resolves() {
-    // Phase A primary scenario:
-    //   М = Справочники.Справочник1; М.ТестЭкспортная()
-    // The 2-shape callee lowers to
-    // `Expr::Call { callee: Expr::Field {..} }` with `Ty::ObjectManager`
-    // receiver — `lookup_method`'s manager table is platform-only, so
-    // without `resolve_aliased_manager_call` the call would surface a
-    // false-positive `MethodNotFound`.
-    //
-    // The fixture inlines `ManagerModule.bsl` because the designer
-    // fixture path supplies *configuration* data only (so
-    // `Ty::ObjectManager` is produced); BSL source files from disk are
-    // not loaded into the SourceRoot — `module_index.resolve_manager`
-    // finds only the inline path.
     let fixture = r#"
 //- /Catalogs/Справочник1/Ext/ManagerModule.bsl
 Процедура ТестЭкспортная() Экспорт
@@ -552,11 +429,6 @@ fn aliased_manager_workspace_method_resolves() {
 
 #[test]
 fn aliased_manager_non_exported_method_emits_method_not_export() {
-    // `ТестНеЭкспортная` exists in the inline `ManagerModule.bsl` but
-    // lacks the `Экспорт` keyword. Workspace resolver finds the
-    // method; the call site must surface `MethodNotExport` (the user
-    // forgot the keyword), distinct from `MethodNotFound` (typo'd or
-    // missing method).
     let fixture = r#"
 //- /Catalogs/Справочник1/Ext/ManagerModule.bsl
 Процедура ТестНеЭкспортная()
@@ -591,13 +463,6 @@ fn aliased_manager_non_exported_method_emits_method_not_export() {
 
 #[test]
 fn aliased_manager_typo_emits_method_not_found() {
-    // Inverse of the prior `aliased_object_manager_unknown_method_stays_silent`:
-    // with the Phase A workspace resolver wired in, `ObjectManager` is
-    // now authoritative. `М = Справочники.Справочник1; М.УсерМетод()`
-    // misses both the workspace `ManagerModule.bsl` AND the platform
-    // manager catalogue — the call surface for that `(MdoType, name)`
-    // pair has been exhaustively consulted, so a miss conclusively
-    // means "method does not exist".
     let fixture = r#"
 //- /test.bsl
 Процедура Тест()
@@ -633,13 +498,6 @@ fn aliased_manager_typo_emits_method_not_found() {
 
 #[test]
 fn aliased_register_manager_workspace_method_resolves() {
-    // Register-flavour parallel to
-    // `aliased_manager_workspace_method_resolves`. Locks the Phase A.1
-    // visibility-gate extension: without `mdo_visible_in_configs`
-    // probing `Configuration::find_register_by_type_and_name`, the
-    // register MDO would be falsely invisible (it lives in
-    // `Configuration::registers`, not `metadata_objects`) and the
-    // resolver would short-circuit to `NotVisibleInConfigs`.
     let fixture = r#"
 //- /InformationRegisters/РегистрСведений1/Ext/ManagerModule.bsl
 Процедура НеУстаревшаяПроцедура() Экспорт
@@ -668,18 +526,6 @@ fn aliased_register_manager_workspace_method_resolves() {
 
 #[test]
 fn register_recordset_typo_emits_method_not_found() {
-    // Phase C: register-record `MetadataRef` receivers
-    // (`InformationRegisterRecordManager`,
-    // `AccumulationRegisterRecordSet`) now go through the workspace
-    // `RecordSetModule.bsl` resolver before the platform layer. Both
-    // miss `НесуществующийМетод` (no inline RecordSetModule.bsl, no
-    // platform table) → authoritative `MethodNotFound`.
-    //
-    // `СоздатьМенеджерЗаписи` rebinds its return type to
-    // `Ty::MetadataRef { InformationRegisterRecordManager, .. }` via
-    // the Phase C extension to `map_generic_metadata_return_type`,
-    // so the chained call enters the same workspace+platform path as
-    // catalog `Об`/`Спр` receivers.
     let fixture = r#"
 //- /test.bsl
 Процедура Тест()
@@ -719,18 +565,6 @@ fn register_recordset_typo_emits_method_not_found() {
 
 #[test]
 fn record_manager_platform_method_resolves() {
-    // Phase C interaction: now that
-    // `map_generic_metadata_return_type` rebinds
-    // `СоздатьМенеджерЗаписи` to
-    // `Ty::MetadataRef { InformationRegisterRecordManager, .. }`,
-    // platform methods declared in the
-    // `InformationRegisterRecordManager.<Имя>` composite typename
-    // (`Записать`, `Прочитать`, `Удалить`, …) MUST stay resolvable —
-    // restoring `mdo_kind_to_plural` in Phase C without also wiring
-    // `platform_prefix()` for register-record kinds would
-    // false-positive every legitimate platform call. Pinned
-    // explicitly because the platform-side wiring is what makes
-    // Phase C's authoritative diagnostic safe.
     let fixture = r#"
 //- /test.bsl
 Процедура Тест()
@@ -749,11 +583,6 @@ fn record_manager_platform_method_resolves() {
 
 #[test]
 fn record_set_platform_method_resolves_on_information_register() {
-    // After wiring `MetadataKind::InformationRegisterRecordSet`,
-    // `СоздатьНаборЗаписей()` rebinds to a typed record-set receiver
-    // and platform methods declared under
-    // `InformationRegisterRecordSet.<Имя>` (`Записать`, `Загрузить`,
-    // `Очистить`, …) MUST resolve through the metadata-ref path.
     let fixture = r#"
 //- /test.bsl
 Процедура Тест()
@@ -781,14 +610,6 @@ fn record_set_platform_method_resolves_on_information_register() {
 
 #[test]
 fn record_set_filter_dimension_set_method_resolves() {
-    // Repro of the original user defect: the full chain
-    // `НаборЗаписей.Отбор.<Изм>.Установить(...)` must fully resolve.
-    // Step-by-step:
-    //   1. `СоздатьНаборЗаписей()` → `MetadataRef{InformationRegisterRecordSet}`
-    //   2. `.Отбор` → synthetic `MetadataRef{RegisterFilter{InformationRegister}}`
-    //   3. `.Справочник1` (the fixture's only dimension) →
-    //      `Ty::PlatformObject("ЭлементОтбора")`
-    //   4. `.Установить(...)` → platform `FilterItem.Установить` method
     let fixture = r#"
 //- /test.bsl
 Процедура Тест(Знач Значение)
@@ -816,10 +637,6 @@ fn record_set_filter_dimension_set_method_resolves() {
 
 #[test]
 fn record_set_filter_method_resolves_through_scalar_key() {
-    // Filter's own scalar methods (`Сбросить`, `Получить`, `Найти`,
-    // …) must be reachable on a `RegisterFilter` receiver via the
-    // `metadata_ref_scalar_key` side channel. Their HBK rows live
-    // under `type_name = "Filter"`, not a composite prefix.
     let fixture = r#"
 //- /test.bsl
 Процедура Тест()
@@ -837,11 +654,6 @@ fn record_set_filter_method_resolves_through_scalar_key() {
 
 #[test]
 fn aliased_record_set_workspace_method_unresolved_keeps_strict_diagnostic() {
-    // `RecordSetModule.bsl` for InformationRegister is now in scope
-    // (after the new `record_set_kind_to_mdo` arm). The fixture's
-    // RecordSetModule.bsl has no exported `НесуществующийМетод`; the
-    // chain below must surface an authoritative `MethodNotFound`,
-    // not silently fall through to "type unknown".
     let fixture = r#"
 //- /test.bsl
 Процедура Тест()
@@ -873,14 +685,6 @@ fn aliased_record_set_workspace_method_unresolved_keeps_strict_diagnostic() {
 
 #[test]
 fn metadata_ref_object_module_workspace_method_resolves() {
-    // Phase B primary scenario:
-    //   Об = Справочники.Справочник1.СоздатьЭлемент();
-    //   Об.МойОбъектныйМетод()
-    // `СоздатьЭлемент` returns `Ty::MetadataRef { CatalogObject, .. }`
-    // (platform fallback). The chained call's receiver enters the
-    // workspace `ObjectModule.bsl` resolver before `lookup_method`
-    // (which is platform-only); without the Phase B wiring this would
-    // emit a false-positive `MethodNotFound`.
     let fixture = r#"
 //- /Catalogs/Справочник1/Ext/ObjectModule.bsl
 Процедура МойОбъектныйМетод() Экспорт
@@ -909,11 +713,6 @@ fn metadata_ref_object_module_workspace_method_resolves() {
 
 #[test]
 fn metadata_ref_object_module_non_exported_emits_method_not_export() {
-    // `НеЭкспортный` is declared in the inline `ObjectModule.bsl` but
-    // lacks `Экспорт`. BSL semantics: `Об.НеЭкспортный()` is external
-    // access through an object reference, which only sees `Экспорт`
-    // methods. So the workspace resolver finds the method but the
-    // call site must surface `MethodNotExport`.
     let fixture = r#"
 //- /Catalogs/Справочник1/Ext/ObjectModule.bsl
 Процедура НеЭкспортный()
@@ -948,12 +747,6 @@ fn metadata_ref_object_module_non_exported_emits_method_not_export() {
 
 #[test]
 fn metadata_ref_workspace_then_platform_fallback() {
-    // Workspace resolver misses (the inline `ObjectModule.bsl` does
-    // not define `Записать`) but `Записать` is a platform method on
-    // `CatalogObject`. The platform fallback must run after the
-    // workspace miss — this pins the precedence so a future
-    // workspace-only treatment doesn't break stock platform
-    // resolution.
     let fixture = r#"
 //- /Catalogs/Справочник1/Ext/ObjectModule.bsl
 Процедура НикакЗаписатьНеНазывается() Экспорт
@@ -975,10 +768,6 @@ fn metadata_ref_workspace_then_platform_fallback() {
 
 #[test]
 fn metadata_ref_total_miss_emits_method_not_found() {
-    // Both workspace `ObjectModule.bsl` AND platform
-    // `CatalogObject` table miss `НетТакогоМетода`. With Phase B the
-    // workspace+platform pair is fully consulted, so the diagnostic
-    // is now authoritative.
     let fixture = r#"
 //- /Catalogs/Справочник1/Ext/ObjectModule.bsl
 Процедура ЕстьВсего() Экспорт
@@ -1013,16 +802,6 @@ fn metadata_ref_total_miss_emits_method_not_found() {
 
 #[test]
 fn catalog_ref_does_not_consult_object_module() {
-    // `Сс` carries `Ty::MetadataRef { CatalogRef, .. }`. The strict
-    // `*Object` filter inside `resolve_object_module_call` must
-    // reject `*Ref` kinds — a reference value's surface is
-    // attributes / predefined items, NOT exported `ObjectModule.bsl`
-    // methods. The inline ObjectModule.bsl defines `НеЭкспортный`,
-    // but a `*Ref` receiver must not see it (workspace skipped) AND
-    // must not surface a workspace-flavour `MethodNotExport` — the
-    // diagnostic, if any, comes from the platform `CatalogRef` table
-    // (which doesn't have `НеЭкспортный` either, so authoritative
-    // miss).
     let fixture = r#"
 //- /Catalogs/Справочник1/Ext/ObjectModule.bsl
 Процедура НеЭкспортный()
@@ -1058,14 +837,6 @@ fn catalog_ref_does_not_consult_object_module() {
 
 #[test]
 fn this_object_non_exported_method_emits_method_not_export() {
-    // BSL semantics pinned by the user: `ЭтотОбъект.НеЭкспортный()`
-    // inside the same `ObjectModule.bsl` is **not** legal — even
-    // though the method lives in the same file, going through the
-    // `ЭтотОбъект` reference is an external-style access that
-    // requires `Экспорт`. `Ty::ThisObject` is coerced to
-    // `Ty::MetadataRef { CatalogObject, .. }` at the workspace
-    // branch entry, finds the method without `Экспорт`, and surfaces
-    // `MethodNotExport`.
     let fixture = r#"
 //- /Catalogs/Справочник1/Ext/ObjectModule.bsl
 Процедура НеЭкспортный()
@@ -1098,12 +869,6 @@ fn this_object_non_exported_method_emits_method_not_export() {
 
 #[test]
 fn this_object_direct_non_exported_call_resolves() {
-    // Sanity check / counter-example for the previous test. A
-    // *direct* `НеЭкспортный()` call without `ЭтотОбъект.` prefix is
-    // a local-scope call (`Expr::Path`, not `Expr::Field`), so it is
-    // legal even on a non-exported method in the same module. The
-    // workspace ObjectModule branch must NOT misfire here — local
-    // calls don't go through the `Expr::Field` callee path.
     let fixture = r#"
 //- /Catalogs/Справочник1/Ext/ObjectModule.bsl
 Процедура НеЭкспортный()

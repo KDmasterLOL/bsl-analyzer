@@ -7,12 +7,9 @@ use std::collections::BTreeMap;
 use std::thread;
 use tracing::info;
 
-/// Progress events emitted during embedding generation.
 #[derive(Debug, Clone)]
 pub enum EmbeddingProgress {
-    /// Emitted once before computation starts.
     Plan { total_unique: usize, cached: usize, to_compute: usize },
-    /// Emitted periodically during batch processing.
     Batch { processed: usize, total: usize, batches_done: usize, total_batches: usize },
 }
 
@@ -468,6 +465,7 @@ mod tests {
             line_end: 2,
             text: text.to_owned(),
             content_hash: format!("hash:{path}:{text}"),
+            graph_context: None,
         }
     }
 }

@@ -15,22 +15,19 @@ use crate::types::events::DebugEvent;
 use crate::types::responses::{self, VarValue};
 use crate::types::xml::BreakpointDef;
 
-/// High-level debug session — the main API for AI agents and CLI.
 pub struct DebugSession {
     client: Arc<DebugClient>,
     _listener: EventListener,
     events: mpsc::UnboundedReceiver<DebugEvent>,
     index: ModuleIndex,
-    attached_targets: HashMap<String, String>, // id -> type
+    attached_targets: HashMap<String, String>,
     breakpoints: Vec<BreakpointDef>,
     stopped_target: Option<String>,
     last_stop: Option<StopEvent>,
     watches: Vec<String>,
-    /// Buffered async eval results keyed by expressionResultID.
     pending_eval_results: HashMap<String, Vec<u8>>,
 }
 
-/// Configuration for connecting to the debug server.
 pub struct DebugConfig {
     pub host: String,
     pub port: u16,
@@ -40,7 +37,6 @@ pub struct DebugConfig {
     pub auto_attach: Vec<String>,
 }
 
-/// Reason execution stopped.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct StopEvent {
     pub reason: StopReason,
@@ -65,7 +61,6 @@ pub struct FrameInfo {
     pub presentation: String,
 }
 
-/// A variable with its value.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Variable {
     pub name: String,
@@ -74,14 +69,12 @@ pub struct Variable {
     pub expandable: bool,
 }
 
-/// Result of expression evaluation.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct EvalResult {
     pub value: String,
     pub type_name: String,
 }
 
-/// An active debug target.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TargetInfo {
     pub id: String,
@@ -89,7 +82,6 @@ pub struct TargetInfo {
     pub user_name: String,
 }
 
-/// Result of a single watch expression evaluation.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct WatchResult {
     pub expression: String,
@@ -97,7 +89,6 @@ pub struct WatchResult {
     pub error: Option<String>,
 }
 
-/// A line of source code with metadata.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SourceLine {
     pub line: u32,
@@ -105,7 +96,6 @@ pub struct SourceLine {
     pub is_current: bool,
 }
 
-/// Everything the agent sees when execution stops — the "debugger screen".
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct StopSnapshot {
     pub reason: StopReason,
@@ -119,22 +109,18 @@ pub struct StopSnapshot {
 }
 
 impl DebugSession {
-    /// Connects to the debug server and prepares the session.
     pub fn connect(config: DebugConfig) -> Result<Self, ClientError> {
         let debugger_id = Uuid::new_v4().to_string();
 
-        // Build module index
         let ext_refs: Vec<(&str, &Path)> =
             config.extensions.iter().map(|(n, p)| (n.as_str(), p.as_path())).collect();
         let index =
             ModuleIndex::scan(&config.config_root, &ext_refs).map_err(ClientError::Debug)?;
         info!(modules = index.len(), "module index built");
 
-        // Create client
         let client =
             Arc::new(DebugClient::new(&config.host, config.port, &debugger_id, &config.infobase));
 
-        // Attach to debug server
         let result = client.attach()?;
         match &result {
             crate::types::responses::AttachResult::Ok => {
@@ -150,16 +136,13 @@ impl DebugSession {
             }
         }
 
-        // Init settings
         client.init_settings()?;
 
-        // Set auto-attach
         if !config.auto_attach.is_empty() {
             let types: Vec<&str> = config.auto_attach.iter().map(|s| s.as_str()).collect();
             client.set_auto_attach(&types)?;
         }
 
-        // Start event listener
         let (listener, events) = EventListener::start(client.clone(), 50);
 
         Ok(Self {
@@ -176,7 +159,6 @@ impl DebugSession {
         })
     }
 
-    /// Disconnects from the debug server.
     pub fn disconnect(self) -> Result<(), ClientError> {
         self._listener.stop();
         self.client.detach()?;
@@ -184,9 +166,6 @@ impl DebugSession {
         Ok(())
     }
 
-    /// Sets a breakpoint by human-readable module name and line number.
-    ///
-    /// Name format: "ОбщийМодуль.МойМодуль.Модуль" or "Справочник.Товары.МодульОбъекта"
     pub fn set_breakpoint(
         &mut self,
         module_name: &str,
@@ -210,7 +189,6 @@ impl DebugSession {
         Ok(())
     }
 
-    /// Sets a breakpoint by file path and line number.
     pub fn set_breakpoint_by_path(
         &mut self,
         path: &Path,
@@ -233,7 +211,6 @@ impl DebugSession {
         Ok(())
     }
 
-    /// Removes a specific breakpoint by module name and line.
     pub fn remove_breakpoint(&mut self, module_name: &str, line: u32) -> Result<bool, ClientError> {
         let (module_id, _path) = match self.index.resolve_name(module_name) {
             Some(v) => v,
@@ -254,7 +231,6 @@ impl DebugSession {
         }
     }
 
-    /// Removes a specific breakpoint by file path and line.
     pub fn remove_breakpoint_by_path(
         &mut self,
         path: &Path,
@@ -279,34 +255,28 @@ impl DebugSession {
         }
     }
 
-    /// Removes all breakpoints.
     pub fn clear_breakpoints(&mut self) -> Result<(), ClientError> {
         self.breakpoints.clear();
         self.client.set_breakpoints(&self.breakpoints)?;
         Ok(())
     }
 
-    /// Enables break on runtime errors, optionally filtering by error text.
     pub fn break_on_error(&self, filter: Option<&str>) -> Result<(), ClientError> {
         self.client.set_break_on_error(true, filter)
     }
 
-    /// Disables break on runtime errors.
     pub fn ignore_errors(&self) -> Result<(), ClientError> {
         self.client.set_break_on_error(false, None)
     }
 
-    /// Number of modules in the index.
     pub fn module_count(&self) -> usize {
         self.index.len()
     }
 
-    /// All registered human-readable module names.
     pub fn module_names(&self) -> Vec<&str> {
         self.index.all_names()
     }
 
-    /// Lists all available debug targets.
     pub fn targets(&self) -> Result<Vec<TargetInfo>, ClientError> {
         let targets = self.client.get_targets()?;
         Ok(targets
@@ -315,24 +285,18 @@ impl DebugSession {
             .collect())
     }
 
-    /// Returns the currently stopped target ID, if any.
     pub fn stopped_target(&self) -> Option<&str> {
         self.stopped_target.as_deref()
     }
 
-    /// Returns the last stop event, if any.
     pub fn last_stop(&self) -> Option<&StopEvent> {
         self.last_stop.as_ref()
     }
 
-    /// Waits for execution to stop (breakpoint, step, or exception).
-    ///
-    /// Blocks until a stop event is received or timeout expires.
     pub fn wait_for_stop(&mut self, timeout: Duration) -> Result<Option<StopEvent>, ClientError> {
         let deadline = std::time::Instant::now() + timeout;
 
         loop {
-            // Process pending events
             match self.events.try_recv() {
                 Ok(event) => {
                     if let Some(stop) = self.handle_event(event)? {
@@ -353,7 +317,6 @@ impl DebugSession {
         }
     }
 
-    /// Steps execution (next line).
     pub fn step(&self, action: StepAction) -> Result<(), ClientError> {
         let target_id = self.require_stopped_target()?;
 
@@ -367,13 +330,10 @@ impl DebugSession {
         self.client.step(target_id, action_str)
     }
 
-    /// Continues execution.
     pub fn continue_execution(&self) -> Result<(), ClientError> {
         self.step(StepAction::Continue)
     }
 
-    /// Gets the call stack of the currently stopped target.
-    /// Returns the target ID of the stopped target, falling back to the last stop event.
     fn require_stopped_target(&self) -> Result<&str, ClientError> {
         if let Some(ref id) = self.stopped_target {
             return Ok(id);
@@ -413,14 +373,12 @@ impl DebugSession {
             .collect())
     }
 
-    /// Gets local variables at the given stack level.
     pub fn locals(&mut self, stack_level: u32) -> Result<Vec<Variable>, ClientError> {
         let target_id = self.require_stopped_target()?.to_string();
 
         let result_id = Uuid::new_v4().to_string();
         let vars = self.client.eval_local_vars(&target_id, stack_level as i64, &result_id)?;
 
-        // evalLocalVariables results typically arrive async via ExprEvaluated event
         let vars = if vars.is_empty() {
             self.wait_for_eval_result(&result_id, Duration::from_secs(5))
         } else {
@@ -438,10 +396,6 @@ impl DebugSession {
             .collect())
     }
 
-    /// Waits for an async eval result to arrive via the ExprEvaluated event.
-    ///
-    /// The 1C debug server returns evalExpr results asynchronously — the HTTP response
-    /// is typically empty, and the actual result arrives via the ping event loop.
     fn wait_for_eval_result(&mut self, result_id: &str, timeout: Duration) -> Vec<VarValue> {
         let deadline = std::time::Instant::now() + timeout;
 
@@ -468,17 +422,12 @@ impl DebugSession {
         }
     }
 
-    /// Evaluates a 1C expression at the given stack level.
-    ///
-    /// The result may arrive synchronously in the HTTP response or asynchronously
-    /// via the ExprEvaluated event from the ping loop.
     pub fn eval(&mut self, expression: &str, stack_level: u32) -> Result<EvalResult, ClientError> {
         let target_id = self.require_stopped_target()?.to_string();
 
         let result_id = Uuid::new_v4().to_string();
         let vars = self.client.eval_expr(&target_id, expression, stack_level as i64, &result_id)?;
 
-        // evalExpr results typically arrive async via ExprEvaluated event
         let vars = if vars.is_empty() {
             self.wait_for_eval_result(&result_id, Duration::from_secs(5))
         } else {
@@ -496,10 +445,6 @@ impl DebugSession {
         Ok(EvalResult { value: first.presentation, type_name: first.type_name })
     }
 
-    /// Expands a variable to show its children (properties or collection elements).
-    ///
-    /// For objects/structures, use `ViewInterface::Context`.
-    /// For arrays/collections, use `ViewInterface::Collection`.
     pub fn expand(
         &mut self,
         path: &[CalcPathItem],
@@ -512,7 +457,6 @@ impl DebugSession {
         let vars =
             self.client.eval_expand(&target_id, path, view, stack_level as i64, &result_id)?;
 
-        // expand results may also arrive async
         let vars = if vars.is_empty() {
             self.wait_for_eval_result(&result_id, Duration::from_secs(5))
         } else {
@@ -530,29 +474,24 @@ impl DebugSession {
             .collect())
     }
 
-    /// Adds an expression to the watch list.
     pub fn add_watch(&mut self, expression: &str) {
         if !self.watches.contains(&expression.to_string()) {
             self.watches.push(expression.to_string());
         }
     }
 
-    /// Removes an expression from the watch list.
     pub fn remove_watch(&mut self, expression: &str) {
         self.watches.retain(|w| w != expression);
     }
 
-    /// Returns the current watch list.
     pub fn watch_list(&self) -> &[String] {
         &self.watches
     }
 
-    /// Returns the number of active breakpoints.
     pub fn breakpoint_count(&self) -> usize {
         self.breakpoints.len()
     }
 
-    /// Evaluates all watch expressions at the given stack level.
     pub fn eval_watches(&mut self, stack_level: u32) -> Vec<WatchResult> {
         let expressions: Vec<String> = self.watches.clone();
         expressions
@@ -570,9 +509,6 @@ impl DebugSession {
             .collect()
     }
 
-    /// Reads source code around the given file path and line.
-    ///
-    /// Returns ±`context` lines around the target line.
     pub fn source_context(
         &self,
         file_path: &str,
@@ -604,9 +540,6 @@ impl DebugSession {
             .collect())
     }
 
-    /// Builds a complete snapshot of the current stop state from a StopEvent.
-    ///
-    /// This is the primary API for AI agents — one call to get everything.
     pub fn snapshot_from_stop(
         &mut self,
         stop: &StopEvent,
@@ -633,7 +566,6 @@ impl DebugSession {
         })
     }
 
-    /// Returns the module index for external use.
     pub fn module_index(&self) -> &ModuleIndex {
         &self.index
     }
@@ -666,7 +598,6 @@ impl DebugSession {
                 ..
             } => {
                 if send_message_only {
-                    // Logpoint — continue execution
                     self.client.step(&target_id, "Continue")?;
                     return Ok(None);
                 }
@@ -686,7 +617,6 @@ impl DebugSession {
 
                 let reason = if stop_by_bp { StopReason::Breakpoint } else { StopReason::Step };
 
-                // Build call stack from event data
                 let stack: Vec<FrameInfo> = call_stack
                     .into_iter()
                     .map(|f| {
@@ -709,7 +639,6 @@ impl DebugSession {
                     })
                     .collect();
 
-                // Use deepest stack frame for stop location if top-level is empty
                 let (stop_module, stop_line) = if line_no > 0 && !module_path.is_empty() {
                     (module_path, line_no)
                 } else if let Some(last) = stack.last() {

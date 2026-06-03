@@ -1,16 +1,6 @@
-//! Convert SDBL tokens to parser-compatible Token format.
-//!
-//! The lexer produces `SdblToken` with `SdblTokenKind`, but the parser
-//! expects `Token` with `TokenKind`. This module provides the conversion.
-
 use lexer::sdbl::{SdblToken, SdblTokenKind};
 use lexer::{Token, TokenKind};
 
-/// Convert SDBL token to parser Token.
-///
-/// Maps SDBL-specific token kinds to appropriate BSL TokenKind variants.
-/// Where SDBL has unique tokens (e.g., SDBL keywords), we map them to
-/// generic Ident tokens and rely on contextual parsing.
 pub fn convert_sdbl_token(sdbl_token: &SdblToken) -> Token {
     Token {
         kind: convert_sdbl_token_kind(sdbl_token.kind),
@@ -19,23 +9,15 @@ pub fn convert_sdbl_token(sdbl_token: &SdblToken) -> Token {
     }
 }
 
-/// Convert all SDBL tokens to parser tokens.
 pub fn convert_sdbl_tokens(sdbl_tokens: &[SdblToken]) -> Vec<Token> {
     sdbl_tokens.iter().map(convert_sdbl_token).collect()
 }
 
-/// Map SdblTokenKind to TokenKind.
-///
-/// Many SDBL tokens map directly to BSL equivalents.
-/// SDBL-specific keywords are mapped to Ident since we don't have
-/// dedicated BSL TokenKind variants for them.
 fn convert_sdbl_token_kind(kind: SdblTokenKind) -> TokenKind {
     use SdblTokenKind as S;
     use TokenKind as T;
 
     match kind {
-        // SDBL clause keywords - mapped to Ident for at_sdbl_keyword() matching
-        // at_sdbl_keyword() checks for Ident + case-insensitive text match
         S::KwSelect => T::Ident,
         S::KwFrom => T::Ident,
         S::KwWhere => T::Ident,
@@ -45,32 +27,29 @@ fn convert_sdbl_token_kind(kind: SdblTokenKind) -> TokenKind {
         S::KwDistinct => T::Ident,
         S::KwTop => T::Ident,
 
-        // Logical operators - use BSL keyword tokens for type-safe parsing
-        // These are used in expressions and should be checked with p.at(TokenKind::KwAnd)
         S::OpAnd => T::KwAnd,
         S::OpOr => T::KwOr,
         S::OpNot => T::KwNot,
 
-        // Predicates - use BSL keyword tokens
         S::KwIn => T::KwIn,
         S::KwIs => T::Ident,
-        S::LitNull => T::Ident, // Was T::KwNull - FIXED (treated as keyword in SDBL)
+        S::LitNull => T::Ident,
         S::KwBetween => T::Ident,
         S::KwLike => T::Ident,
         S::KwEscape => T::Ident,
         S::KwCase => T::Ident,
         S::KwWhen => T::Ident,
-        S::KwThen => T::Ident, // Was T::KwThen - FIXED
-        S::KwElse => T::Ident, // Was T::KwElse - FIXED
+        S::KwThen => T::Ident,
+        S::KwElse => T::Ident,
         S::KwEnd => T::Ident,
         S::KwInto => T::Ident,
         S::KwGroup => T::Ident,
-        S::KwOnOrBy => T::Ident, // BY/ON/ПО merged token
+        S::KwOnOrBy => T::Ident,
         S::KwHaving => T::Ident,
         S::KwOrder => T::Ident,
         S::KwAsc => T::Ident,
         S::KwDesc => T::Ident,
-        S::KwFor => T::Ident, // Was T::KwFor - FIXED
+        S::KwFor => T::Ident,
         S::KwUpdate => T::Ident,
         S::KwIndex => T::Ident,
         S::KwJoin => T::Ident,
@@ -90,10 +69,8 @@ fn convert_sdbl_token_kind(kind: SdblTokenKind) -> TokenKind {
         S::KwHierarchy => T::Ident,
         S::KwDrop => T::Ident,
 
-        // Aggregate functions
         S::FnSum | S::FnCount | S::FnAvg | S::FnMin | S::FnMax => T::Ident,
 
-        // Date/time functions (only map ones that exist)
         S::FnYear
         | S::FnQuarter
         | S::FnMonth
@@ -110,21 +87,16 @@ fn convert_sdbl_token_kind(kind: SdblTokenKind) -> TokenKind {
         | S::FnDateDiff
         | S::FnDateTime => T::Ident,
 
-        // String functions
         S::FnSubstring => T::Ident,
 
-        // Type conversion/casting
         S::FnPresentation | S::FnValueType | S::FnDate => T::Ident,
 
-        // Other functions
         S::FnIsNull | S::FnRefPresentation | S::FnEmptyRef | S::FnEmptyTable | S::FnUUID => {
             T::Ident
         }
 
-        // Type literals
         S::TypeBoolean | S::TypeNumber | S::TypeString | S::TypeDate => T::Ident,
 
-        // Metadata objects
         S::MdoCatalog
         | S::MdoDocument
         | S::MdoEnum
@@ -141,7 +113,6 @@ fn convert_sdbl_token_kind(kind: SdblTokenKind) -> TokenKind {
         | S::MdoConstant
         | S::MdoSequence => T::Ident,
 
-        // Math/string functions
         S::FnStringLength
         | S::FnStrFind
         | S::FnUpper
@@ -156,7 +127,6 @@ fn convert_sdbl_token_kind(kind: SdblTokenKind) -> TokenKind {
         | S::FnPow
         | S::FnSqrt => T::Ident,
 
-        // Virtual table suffixes
         S::VtSliceFirst
         | S::VtSliceLast
         | S::VtBalance
@@ -164,10 +134,8 @@ fn convert_sdbl_token_kind(kind: SdblTokenKind) -> TokenKind {
         | S::VtBalanceAndTurnovers
         | S::VtDrCrTurnovers => T::Ident,
 
-        // Period types
         S::PeriodTenDays | S::PeriodHalfYear => T::Ident,
 
-        // Operators
         S::Eq => T::Eq,
         S::Neq => T::Neq,
         S::Lt => T::Lt,
@@ -180,17 +148,15 @@ fn convert_sdbl_token_kind(kind: SdblTokenKind) -> TokenKind {
         S::Slash => T::Slash,
         S::Percent => T::Percent,
 
-        // Punctuation
         S::LParen => T::LParen,
         S::RParen => T::RParen,
         S::Dot => T::Dot,
         S::Comma => T::Comma,
         S::Semicolon => T::Semicolon,
         S::Ampersand => T::Ampersand,
-        S::Hash => T::Hash, // For temporary tables (#TempTable)
-        S::Bar => T::Bar,   // For multiline query strings
+        S::Hash => T::Hash,
+        S::Bar => T::Bar,
 
-        // Literals
         S::LitTrue => T::KwTrue,
         S::LitFalse => T::KwFalse,
         S::LitUndefined => T::KwUndefined,
@@ -199,13 +165,10 @@ fn convert_sdbl_token_kind(kind: SdblTokenKind) -> TokenKind {
         S::String => T::String,
         S::Date => T::Date,
 
-        // Identifiers
         S::Ident => T::Ident,
 
-        // Parameters (&Parameter)
-        S::Parameter => T::Ampersand, // Will be converted to parameter syntax later
+        S::Parameter => T::Ampersand,
 
-        // Trivia (all treated as trivia and skipped by parser)
         S::Newline => T::Newline,
         S::Comment => T::Comment,
         S::Whitespace => T::Whitespace,

@@ -1,5 +1,3 @@
-//! Reports usage of synchronous calls that should be replaced with asynchronous alternatives.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -280,7 +278,6 @@ mod tests {
 
     #[test]
     fn test_sync_connect_crypto_ext() {
-        // Two diagnostics: ПодключитьРасширениеРаботыСКриптографией + Предупреждение inside
         let code = r#"Процедура ТестПодключитьРасширениеРаботыСКриптографией()
 
     Если НЕ ПодключитьРасширениеРаботыСКриптографией() Тогда
@@ -305,7 +302,6 @@ mod tests {
 
     #[test]
     fn test_sync_connect_file_ext() {
-        // Two diagnostics: ПодключитьРасширениеРаботыСФайлами + Предупреждение inside
         let code = r#"Процедура ТестПодключитьРасширениеРаботыСФайлами()
 
     Если НЕ ПодключитьРасширениеРаботыСФайлами() Тогда

@@ -3,7 +3,6 @@ use crate::error::SearchError;
 use crate::ports::ResolvedViewService;
 use std::collections::HashMap;
 
-/// Visible search state after local overlay changes are applied to a baseline.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedView {
     baseline: BaselineRef,
@@ -31,7 +30,6 @@ impl ResolvedView {
     }
 }
 
-/// In-memory implementation of baseline + overlay resolution.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct InMemoryResolvedViewResolver;
 
@@ -131,6 +129,7 @@ mod tests {
             line_end: fixture.line_end,
             text: fixture.text.to_owned(),
             content_hash: fixture.content_hash.to_owned(),
+            graph_context: None,
         }
     }
 

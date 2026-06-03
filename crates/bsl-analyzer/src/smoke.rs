@@ -1,20 +1,3 @@
-//! Smoke harness for measuring cold-start + critical-path performance.
-//!
-//! - [`Scenario`] — Boot / FirstPaint / Hover / Deps. Parsed from CLI.
-//! - [`Budgets`] — pass/fail thresholds (vfs_done_ms, rss_mb, first-paint
-//!   per-stage, hover cold/warm, deps cold). Configurable via JSON file.
-//! - [`SmokeReport`] — top-level result; aggregates per-scenario results
-//!   plus a flat [`BudgetViolation`] list. JSON-serializable for CI.
-//! - [`read_rss_bytes`] — best-effort per-OS process RSS reader.
-//! - [`run`] — entry point; takes scenario list + workspace + budgets and
-//!   returns the populated report.
-//!
-//! Scenario landings (Phase O):
-//!
-//! - O.4: Boot — cold-start `vfs_done_ms` + RSS + `degraded_files_count`.
-//! - O.5: FirstPaint — per-stage didOpen → tokens → symbols → folding → diag.
-//! - O.6: Hover + Deps.
-
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -28,22 +11,16 @@ use vfs::loader::{self, LoadingProgress};
 
 use crate::global_state::GlobalState;
 
-/// Smoke scenarios.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Scenario {
-    /// Cold-start: load workspace, measure `vfs_done_ms`, RSS, degraded files.
     Boot,
-    /// didOpen → semantic_tokens → document_symbols → folding_ranges → diagnostics.
     FirstPaint,
-    /// Hover on auto-picked targets; cold + warm pairs.
     Hover,
-    /// `file_dependencies` BFS percentiles per root.
     Deps,
 }
 
 impl Scenario {
-    /// Parse a single scenario name from the CLI surface. Case-insensitive.
     pub fn parse(s: &str) -> Result<Self, String> {
         match s.trim().to_ascii_lowercase().as_str() {
             "boot" => Ok(Scenario::Boot),
@@ -70,24 +47,14 @@ impl Scenario {
     }
 }
 
-/// Pass/fail thresholds. Defaults are calibrated for niagara_ut + ERP per
-/// PLAN-v5 §7; override via `--budgets path/to/budgets.json` if you need
-/// scenario-specific tuning for a different workspace.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Budgets {
-    /// Boot: max wall-clock from server start to `vfs_done`.
     pub boot_vfs_done_ms: u64,
-    /// Boot: max RSS bytes after `vfs_done` (default 1 GiB).
     pub boot_rss_bytes: u64,
-    /// Boot: max acceptable count of unreadable/degraded BSL files.
     pub boot_degraded_files_max: usize,
-    /// FirstPaint: total time from didOpen to last paint stage.
     pub first_paint_total_ms: u64,
-    /// Hover: cold target turnaround.
     pub hover_cold_ms: u64,
-    /// Hover: warm target turnaround.
     pub hover_warm_ms: u64,
-    /// Deps: p95 cold `file_dependencies` BFS time.
     pub deps_cold_p95_ms: u64,
 }
 
@@ -106,8 +73,6 @@ impl Default for Budgets {
 }
 
 impl Budgets {
-    /// Load budgets from a JSON file; falls back to [`Default`] on
-    /// I/O or parse failure (logged via `eprintln!`).
     pub fn load_or_default(path: Option<&Path>) -> Self {
         let Some(path) = path else { return Self::default() };
         match std::fs::read_to_string(path).and_then(|s| {
@@ -123,7 +88,6 @@ impl Budgets {
     }
 }
 
-/// One failed threshold in the report.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BudgetViolation {
     pub scenario: String,
@@ -132,7 +96,6 @@ pub struct BudgetViolation {
     pub budget: u64,
 }
 
-/// Top-level smoke report. JSON-serialized to stdout when `--json` is set.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct SmokeReport {
     pub scenarios_run: Vec<String>,
@@ -144,7 +107,6 @@ pub struct SmokeReport {
 }
 
 impl SmokeReport {
-    /// Convenience: true iff no scenario raised a budget violation.
     pub fn passed(&self) -> bool {
         self.violations.is_empty()
     }
@@ -191,9 +153,6 @@ pub struct DepsResult {
     pub cold_ms_p95: u64,
 }
 
-/// Best-effort per-OS process RSS reader. Returns bytes on Linux via
-/// `/proc/self/status`; `None` elsewhere (Boot scenario tolerates this and
-/// records `None` in the report).
 pub fn read_rss_bytes() -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
@@ -212,7 +171,6 @@ pub fn read_rss_bytes() -> Option<u64> {
     }
 }
 
-/// CLI args bundled together so [`run`] doesn't grow a long signature.
 #[derive(Debug, Clone)]
 pub struct SmokeArgs {
     pub source_dir: PathBuf,
@@ -221,9 +179,6 @@ pub struct SmokeArgs {
     pub json: bool,
 }
 
-/// Entry point for `bsl-analyzer-app smoke`. Dispatches each requested
-/// scenario, populates the matching slot on [`SmokeReport`] and pushes any
-/// budget violations into the flat list.
 pub fn run(args: SmokeArgs) -> SmokeReport {
     let scenarios_run: Vec<String> =
         args.scenarios.iter().map(|s| s.as_str().to_string()).collect();
@@ -351,43 +306,14 @@ fn emit_text_report(report: &SmokeReport) {
     }
 }
 
-/// Primed harness state shared by smoke scenarios that need a fully-booted
-/// `GlobalState`. Created by [`bootstrap_smoke`]; held by reference (Boot)
-/// or by ownership (FirstPaint/Hover/Deps) so each scenario can take the
-/// boot measurement plus optionally drive Salsa queries on top.
 struct SmokeBootstrap {
     state: GlobalState,
-    /// Joined when [`SmokeBootstrap`] drops via the sender disconnect. Held
-    /// here purely to keep the thread alive for the harness lifetime.
     _drain_handle: std::thread::JoinHandle<()>,
     boot: BootResult,
 }
 
-/// Bootstrap mirrors `server::main_loop` cold-start without LSP transport,
-/// background indexer, or name-index priming.
-///
-/// Sequence (matches `server::handle_loader_msg::Finished`):
-///
-///   1. `GlobalState::new(dummy_sender)` + `init_empty_source_root`
-///   2. `set_workspace_root(args.source_dir)` — kicks off vfs-notify loader
-///   3. drain `loader_receiver`, streaming `Loaded`/`Changed` batches into
-///      VFS via [`stream_loader_batch`] (the smoke twin of
-///      `server::handle_vfs_msg` with `sync_to_salsa=false`)
-///   4. on `LoadingProgress::Finished`:
-///      - `process_changes(true)` (suppress metadata bump for the bulk sweep)
-///      - `init_source_root`
-///      - `warm_metadata_cache`
-///      - sync `degraded_files_count = skipped_bsl.len()`
-///      - defensive `assert_total_vfs_invariant` scan (log-only)
-///
-/// Records `vfs_done_ms`, post-finalize RSS, and `degraded_files_count` on
-/// the returned [`SmokeBootstrap::boot`] field.
 fn bootstrap_smoke(args: &SmokeArgs) -> Result<SmokeBootstrap, String> {
     let (sender, receiver) = crossbeam_channel::unbounded::<lsp_server::Message>();
-    // Drain the LSP sender in a background thread so progress notifications
-    // emitted by `report_progress` during bootstrap do not pile up
-    // unboundedly. The thread exits when the sender is dropped along with
-    // the returned `state`.
     let drain_handle = std::thread::spawn(move || while receiver.recv().is_ok() {});
 
     let mut state = GlobalState::new(sender);
@@ -396,10 +322,6 @@ fn bootstrap_smoke(args: &SmokeArgs) -> Result<SmokeBootstrap, String> {
     let start = Instant::now();
     state.set_workspace_root(args.source_dir.clone());
 
-    // Hard deadline: 4× the budget + 60 s buffer. Prevents the smoke run
-    // from hanging indefinitely if the loader stalls on a pathological
-    // workspace; the budget gate (checked after success) still fails the
-    // run when the actual elapsed time exceeds `boot_vfs_done_ms`.
     let safety = args.budgets.boot_vfs_done_ms.saturating_mul(4).saturating_add(60_000);
     let deadline = start + Duration::from_millis(safety);
 
@@ -441,9 +363,7 @@ fn bootstrap_smoke(args: &SmokeArgs) -> Result<SmokeBootstrap, String> {
                 state.vfs_done = true;
                 finished = true;
             }
-            loader::Message::Progress { .. } => {
-                // Started / Scanning / Progress(_) — ignore in smoke; no UI.
-            }
+            loader::Message::Progress { .. } => {}
             loader::Message::Loaded { files } | loader::Message::Changed { files } => {
                 stream_loader_batch(&mut state, files);
             }
@@ -467,15 +387,10 @@ fn bootstrap_smoke(args: &SmokeArgs) -> Result<SmokeBootstrap, String> {
     })
 }
 
-/// Boot scenario — wraps [`bootstrap_smoke`] and discards the primed state.
 fn run_boot(args: &SmokeArgs) -> Result<BootResult, String> {
     Ok(bootstrap_smoke(args)?.boot)
 }
 
-/// Smoke twin of `server::handle_vfs_msg` for `sync_to_salsa = false`: convert
-/// `Vec<u8>` → `Arc<str>` (stripping UTF-8 BOM), record skipped BSL paths in
-/// `skipped_bsl` (B1 hook from O.2), drain into VFS in mini-batches so a
-/// large `Loaded` chunk does not monopolise the write lock.
 fn stream_loader_batch(state: &mut GlobalState, files: Vec<(paths::AbsPathBuf, Option<Vec<u8>>)>) {
     const VFS_WRITE_MINI_BATCH: usize = 16;
 
@@ -519,20 +434,6 @@ fn stream_loader_batch(state: &mut GlobalState, files: Vec<(paths::AbsPathBuf, O
     }
 }
 
-/// FirstPaint scenario — measure the first-paint stages a real LSP client
-/// requests right after `didOpen`: semantic_tokens (`Analysis::highlight`),
-/// document_symbols, folding_ranges, diagnostics. Each stage is recorded as
-/// a cold/warm pair: the cold call walks the Salsa dependency graph from
-/// the just-booted database; the warm call reuses the cache.
-///
-/// File selection is deterministic — the lexicographically-first resident
-/// BSL file in `SourceRoot(0)` (see [`pick_sample_bsl_file`]). On a real
-/// workspace this is normally a CommonModule body which exercises the same
-/// hot paths a developer first lands on.
-///
-/// Returns `Err` when the workspace contains no resident BSL files (e.g.
-/// path supplied but no `.bsl` underneath); the caller logs and inserts a
-/// `BudgetViolation` of metric `"run_error"` exactly like Boot.
 fn run_first_paint(args: &SmokeArgs) -> Result<FirstPaintResult, String> {
     let mut ctx = bootstrap_smoke(args)?;
     let file_id = pick_sample_bsl_file(&ctx.state)
@@ -545,10 +446,6 @@ fn run_first_paint(args: &SmokeArgs) -> Result<FirstPaintResult, String> {
 
     let mut phases = Vec::with_capacity(5);
 
-    // Phase 1 — didOpen: register the file in `mem_docs`. Models the
-    // synchronous client-side handoff in `handle_did_open`; subsequent LSP
-    // requests read text and line index from `mem_docs`. Warm pass exercises
-    // the lookup path used by every later request.
     {
         let cold_start = Instant::now();
         ctx.state.mem_docs.insert(url.clone(), text.clone(), 1);
@@ -559,9 +456,6 @@ fn run_first_paint(args: &SmokeArgs) -> Result<FirstPaintResult, String> {
         phases.push(FirstPaintPhase { name: "didOpen".to_string(), cold_ms, warm_ms });
     }
 
-    // Phases 2–5 — analysis stages on fresh Salsa snapshots. `Analysis` is
-    // a snapshot wrapper so cold = first call after Boot (Salsa builds the
-    // memo graph), warm = re-call on a sibling snapshot (cache hits).
     let stages: &[(&str, AnalysisStageFn)] = &[
         ("semantic_tokens", semantic_tokens_stage),
         ("document_symbols", document_symbols_stage),
@@ -578,10 +472,6 @@ fn run_first_paint(args: &SmokeArgs) -> Result<FirstPaintResult, String> {
     Ok(FirstPaintResult { phases, total_ms })
 }
 
-/// Function-pointer signature for the FirstPaint analysis-stage runners.
-/// Same shape as the LSP request handlers' inner closure: takes a Salsa
-/// snapshot, a `FileId` and the `DiagnosticsConfig` (only used by the
-/// diagnostics stage; ignored by the others).
 type AnalysisStageFn = fn(&ide::Analysis, vfs::FileId, &ide::DiagnosticsConfig);
 
 fn semantic_tokens_stage(a: &ide::Analysis, fid: vfs::FileId, _cfg: &ide::DiagnosticsConfig) {
@@ -621,9 +511,6 @@ fn time_analysis_call(
     (cold_ms, warm_ms)
 }
 
-/// Pick the lexicographically-first resident BSL file in `SourceRoot(0)`.
-/// Deterministic across runs so cold/warm baselines line up. Returns `None`
-/// if the workspace has no `.bsl` files with populated `FileTextInput`.
 fn pick_sample_bsl_file(state: &GlobalState) -> Option<vfs::FileId> {
     let db = state.analysis_host.raw_database();
     let source_root_input = db.source_root_input(base_db::SourceRootId(0));
@@ -652,11 +539,6 @@ fn url_for_file_id(state: &GlobalState, file_id: vfs::FileId) -> Option<lsp_type
     lsp_types::Url::from_file_path(vfs_path.as_path()).ok()
 }
 
-/// Hover scenario — pick up to [`HOVER_MAX_TARGETS`] identifier offsets in
-/// the sample BSL file (via syntactic walk over IDENT tokens), then time
-/// `Analysis::hover` cold + warm at each offset. Hover on whitespace would
-/// short-circuit, so we restrict to IDENT tokens to keep the timings
-/// representative of real user hover hits.
 const HOVER_MAX_TARGETS: usize = 5;
 
 fn run_hover(args: &SmokeArgs) -> Result<HoverResult, String> {
@@ -722,11 +604,6 @@ fn time_hover_call(state: &GlobalState, fid: vfs::FileId, offset: u32) -> (u64, 
     (cold_ms, warm_ms)
 }
 
-/// Byte-offset → (line, character) computed by counting newlines in the
-/// prefix. UTF-8 multi-byte chars map to byte positions, which matches how
-/// LSP reports offsets when negotiated to UTF-8. Not LSP-position-encoding-
-/// aware (no UTF-16 conversion) — the smoke report is descriptive, not
-/// consumed by an LSP client.
 fn offset_to_line_col(text: &str, offset: u32) -> (u32, u32) {
     let off = (offset as usize).min(text.len());
     let prefix = &text[..off];
@@ -736,10 +613,6 @@ fn offset_to_line_col(text: &str, offset: u32) -> (u32, u32) {
     (line, character)
 }
 
-/// Deps scenario — sample up to [`DEPS_MAX_ROOTS`] BSL files in
-/// `SourceRoot(0)` (lexicographic order so cold/warm baselines line up),
-/// time `Analysis::file_dependencies` per file (cold only — Salsa caches
-/// after first call), then report p50 / p95 of the cold timings.
 const DEPS_MAX_ROOTS: usize = 50;
 
 fn run_deps(args: &SmokeArgs) -> Result<DepsResult, String> {
@@ -788,8 +661,6 @@ fn enumerate_bsl_roots(state: &GlobalState, cap: usize) -> Vec<vfs::FileId> {
     paths.into_iter().take(cap).map(|(_, f)| f).collect()
 }
 
-/// Linear-interpolation-free percentile on a sorted slice: returns the
-/// value at index `floor(len * p / 100)`, clamped to the last element.
 fn percentile(sorted: &[u64], p: usize) -> u64 {
     if sorted.is_empty() {
         return 0;
@@ -843,8 +714,6 @@ fn check_first_paint_budgets(
 }
 
 fn check_hover_budgets(hv: &HoverResult, budgets: &Budgets, out: &mut Vec<BudgetViolation>) {
-    // Worst-case rather than mean: a single slow hover is the user-visible
-    // perception, so flag if any target breaches the cold/warm threshold.
     let max_cold = hv.targets.iter().map(|t| t.cold_ms).max().unwrap_or(0);
     let max_warm = hv.targets.iter().map(|t| t.warm_ms).max().unwrap_or(0);
     if max_cold > budgets.hover_cold_ms {
@@ -975,7 +844,6 @@ mod tests {
 
     #[test]
     fn check_boot_budgets_tolerates_missing_rss() {
-        // RSS reading is best-effort; absence must not raise a violation.
         let boot =
             BootResult { vfs_done_ms: 10, rss_bytes_post_boot: None, degraded_files_count: 0 };
         let mut out = Vec::new();
@@ -983,10 +851,6 @@ mod tests {
         assert!(out.is_empty());
     }
 
-    /// End-to-end boot smoke on a synthetic empty workspace. Validates that
-    /// `run_boot` completes without panicking when the loader has nothing to
-    /// load and that the report shape is consistent (`degraded_files_count =
-    /// 0`, no violations against the generous default budgets).
     #[test]
     fn run_boot_on_empty_tmpdir_succeeds() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -998,9 +862,6 @@ mod tests {
         };
         let boot = run_boot(&args).expect("boot on empty tmpdir should succeed");
         assert_eq!(boot.degraded_files_count, 0);
-        // No assertion on `vfs_done_ms` itself — even an empty dir takes a few
-        // ms because of the loader's scan + finalize pipeline. Just confirm
-        // it is within the (very generous) default budget.
         assert!(boot.vfs_done_ms < Budgets::default().boot_vfs_done_ms);
     }
 
@@ -1032,9 +893,6 @@ mod tests {
         assert!(out.is_empty());
     }
 
-    /// End-to-end FirstPaint on a tmpdir with one BSL file. Validates that
-    /// `run_first_paint` boots and walks all five phases, and that `total_ms`
-    /// is the sum of cold timings.
     #[test]
     fn run_first_paint_on_synthetic_workspace_succeeds() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -1079,7 +937,6 @@ mod tests {
         assert_eq!(offset_to_line_col(text, 4), (1, 0));
         assert_eq!(offset_to_line_col(text, 5), (1, 1));
         assert_eq!(offset_to_line_col(text, 7), (2, 0));
-        // Out-of-range offset clamps to text length.
         assert_eq!(offset_to_line_col(text, 999), (2, 3));
     }
 
@@ -1089,8 +946,8 @@ mod tests {
         assert_eq!(percentile(&[42], 50), 42);
         assert_eq!(percentile(&[42], 95), 42);
         let sorted = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-        assert_eq!(percentile(&sorted, 50), 6); // idx = 10 * 50 / 100 = 5 → sorted[5] = 6
-        assert_eq!(percentile(&sorted, 95), 10); // idx = 9 (clamped) → sorted[9] = 10
+        assert_eq!(percentile(&sorted, 50), 6);
+        assert_eq!(percentile(&sorted, 95), 10);
         assert_eq!(percentile(&sorted, 0), 1);
     }
 
@@ -1165,7 +1022,6 @@ mod tests {
         };
         let dp = run_deps(&args).expect("deps on synthetic workspace should succeed");
         assert!(dp.roots_sampled >= 1);
-        // p50 ≤ p95 invariant.
         assert!(dp.cold_ms_p50 <= dp.cold_ms_p95);
     }
 }

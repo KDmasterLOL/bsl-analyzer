@@ -1,7 +1,3 @@
-//! MissedRequiredParameter diagnostic.
-//!
-//! Detects method calls where required parameters are omitted.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -23,30 +19,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic.
-///
-/// Called from lib.rs dispatch when `BodyDiagnostic::MissedRequiredParameter` is encountered.
-///
-/// This function validates a method call against its definition:
-/// 1. Resolves the method using SymbolTree (local, CommonModule, or ManagerModule)
-/// 2. Checks which required parameters are missing
-/// 3. Returns diagnostic if any required parameters are not provided
-///
-/// ## Parameters
-/// - `callee`: Method name being called
-/// - `module`: Optional module name for two-level calls (Module.Method)
-/// - `mdo_type`: Optional MDO type keyword for three-level calls (Документы, Справочники)
-/// - `mdo_name`: Optional MDO name for three-level calls (ПКО, Товары)
-/// - `args`: Boolean array indicating which arguments have values
-/// - `range`: Source range for the diagnostic
-/// - `ctx`: Diagnostics context with database access
-///
-/// ## Call patterns
-/// - Local: `Method()` → module=None, mdo_type=None
-/// - Two-level: `CommonModule.Method()` → module=Some, mdo_type=None
-/// - Three-level: `Документы.ПКО.Method()` → module=None, mdo_type=Some, mdo_name=Some
-/// - ThisObject: `ЭтотОбъект.Method()` → module=None (emitted as a local call in
-///   `lower_call_expr` so it resolves against the current module's SymbolTree)
 pub fn from_hir(
     callee: &str,
     module: Option<&str>,
@@ -62,9 +34,7 @@ pub fn from_hir(
         return None;
     }
 
-    // Resolve and check missing parameters based on call type
     let missing = if let (Some(mdo_type_kw), Some(mdo_obj_name)) = (mdo_type, mdo_name) {
-        // Three-level call: Документы.ПКО.Method()
         tracing::debug!(
             mdo_type = mdo_type_kw,
             mdo_name = mdo_obj_name,
@@ -73,10 +43,8 @@ pub fn from_hir(
         );
         check_manager_module_call(ctx, mdo_type_kw, mdo_obj_name, callee, args)?
     } else if let Some(module_name) = module {
-        // Two-level call: Module.Method() or ЭтотОбъект.Method()
         check_qualified_call(ctx, module_name, callee, args)?
     } else {
-        // Local call: Method()
         check_local_call(ctx, callee, args)?
     };
 
@@ -84,7 +52,6 @@ pub fn from_hir(
         return None;
     }
 
-    // Create diagnostic message
     let param_list =
         missing.iter().map(|name| format!("'{}'", name)).collect::<Vec<_>>().join(", ");
     let message = format!("Укажите обязательный параметр {}", param_list);
@@ -99,9 +66,6 @@ pub fn from_hir(
     })
 }
 
-/// Check local method call for missing required parameters.
-///
-/// Returns Some(missing_params) if method is found, None if method doesn't exist.
 fn check_local_call(
     ctx: &DiagnosticsContext,
     method_name: &str,
@@ -114,9 +78,6 @@ fn check_local_call(
     Some(check_missing_params(method, args))
 }
 
-/// Check qualified method call (Module.Method) for missing required parameters.
-///
-/// Returns Some(missing_params) if method is found and exported, None otherwise.
 fn check_qualified_call(
     ctx: &DiagnosticsContext,
     module_name: &str,
@@ -134,11 +95,6 @@ fn check_qualified_call(
         return None;
     }
 
-    // Files are ordered main-first, then extensions: the first exported match
-    // becomes the authoritative signature for this diagnostic. Under 1C
-    // extension semantics method names should not collide across
-    // configurations, so either definition is correct; when they do collide,
-    // main-first ordering makes resolution deterministic.
     for module_file_id in module_files {
         let module_id = ModuleId::new(module_file_id);
         let symbol_tree = ctx.symbol_tree_for(module_id);
@@ -157,11 +113,6 @@ fn check_qualified_call(
     None
 }
 
-/// Check three-level method call (MdoType.MdoName.Method) for missing required parameters.
-///
-/// Handles calls like `Документы.ПКО.Method()` or `Catalogs.Товары.Method()`.
-///
-/// Returns Some(missing_params) if method is found and exported, None otherwise.
 fn check_manager_module_call(
     ctx: &DiagnosticsContext,
     mdo_type_keyword: &str,
@@ -173,7 +124,6 @@ fn check_manager_module_call(
         tracing::debug_span!("check_manager_module_call", mdo_type_keyword, mdo_name, method_name)
             .entered();
 
-    // Parse MDO type from plural form (Документы → Document, Справочники → Catalog)
     let mdo_type = match bsl_metadata::MdoType::from_plural(mdo_type_keyword) {
         Some(t) => t,
         None => {
@@ -194,18 +144,14 @@ fn check_manager_module_call(
         "Checking manager module method call"
     );
 
-    // Find Manager Module file across all visible configurations
     let manager_file_id = find_manager_module_file(ctx, mdo_type, mdo_name)?;
 
-    // Build SymbolTree for Manager Module
     let module_id = ModuleId::new(manager_file_id);
     let manager_symbol_tree = ctx.symbol_tree_for(module_id);
 
-    // Look up method in Manager Module
     let method_name_obj = Name::new(method_name);
     let method = manager_symbol_tree.find_method(&method_name_obj)?;
 
-    // Only check exported methods for qualified calls
     if !method.is_export {
         tracing::debug!(
             mdo_type = ?mdo_type,
@@ -219,29 +165,11 @@ fn check_manager_module_call(
     Some(check_missing_params(method, args))
 }
 
-/// Find the FileId for a CommonModule by resolving its URI through VFS.
-///
-/// Find the FileId for a Manager Module by resolving its path through VFS.
-///
-/// ## Implementation
-///
-/// 1. Verify metadata object exists in configuration
-/// 2. Build Manager Module path: `{english_plural}/{mdo_name}/Ext/ManagerModule.bsl`
-/// 3. Resolve FileId via ctx.file_set (bypasses Salsa for performance)
-///
-/// ## Example Paths
-/// - Document "ПКО" → `Documents/ПКО/Ext/ManagerModule.bsl`
-/// - Catalog "Справочник1" → `Catalogs/Справочник1/Ext/ManagerModule.bsl`
-/// - InformationRegister "Регистр1" → `InformationRegisters/Регистр1/Ext/ManagerModule.bsl`
-///
-/// ## Performance
-/// - O(1) HashMap lookup in FileSet
 fn find_manager_module_file(
     ctx: &DiagnosticsContext,
     mdo_type: bsl_metadata::MdoType,
     mdo_name: &str,
 ) -> Option<FileId> {
-    // Build Manager Module path using English plural form
     let english_plural = match mdo_type {
         bsl_metadata::MdoType::Document => "Documents",
         bsl_metadata::MdoType::Catalog => "Catalogs",
@@ -265,12 +193,6 @@ fn find_manager_module_file(
 
     let manager_module_path = format!("{}/{}/Ext/ManagerModule.bsl", english_plural, mdo_name);
 
-    // Iterate visible configurations (main + extensions): the metadata
-    // object may live in any of them, and the ManagerModule.bsl is resolved
-    // relative to its defining configuration's root. Unlike CommonModules,
-    // manager modules are not merged across configurations — the metadata
-    // object lives in exactly one configuration — so the first hit wins
-    // unambiguously.
     for visible in ctx.visible_configurations() {
         if !visible.config.configuration.has_metadata_object(mdo_type, mdo_name) {
             continue;
@@ -296,38 +218,14 @@ fn find_manager_module_file(
     None
 }
 
-/// Check which required parameters are missing from a method call.
-///
-/// Returns a vector of parameter names that are required but not provided.
-///
-/// ## Rules
-/// - Parameters with `has_default == true` are optional (skip)
-/// - Parameters with `has_default == false` are required (check)
-/// - A parameter is missing if:
-///   - Index >= provided_args.len() (not enough arguments), OR
-///   - provided_args[i] == false (empty argument like `, ,`)
-///
-/// ## Example
-/// ```bsl
-/// Функция Test(A, B = 1, C)
-///     // A and C are required (no default)
-///     // B is optional (has default)
-/// КонецФункции
-///
-/// Test(5)      // Missing C → returns ["C"]
-/// Test(, 2, 3) // Missing A → returns ["A"]
-/// Test()       // Missing A, C → returns ["A", "C"]
-/// ```
 fn check_missing_params(method: &MethodSymbol, provided_args: &[bool]) -> Vec<String> {
     let mut missing = Vec::new();
 
     for (i, param) in method.params.iter().enumerate() {
-        // Skip optional parameters (have default value)
         if param.has_default {
             continue;
         }
 
-        // Check if parameter is missing or empty
         let is_missing = i >= provided_args.len() || !provided_args[i];
 
         if is_missing {
@@ -401,8 +299,6 @@ mod tests {
 
     #[test]
     fn test_comprehensive() {
-        // Inline version of MissedRequiredParameterDiagnostic.bsl.
-        // Uses 4-space indentation to match original column positions.
         let code = r#"Процедура Рассчет()
 
     Результат = Сложение(, 2); // Range(2, 16, 2, 29)

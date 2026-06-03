@@ -1,16 +1,8 @@
-//! Field formatter for SDBL completion items.
-
 use sdbl_hir::SdblType;
 
-/// Formatter for field completion items.
-///
-/// Formats field types for display in completion detail and documentation.
 pub struct FieldFormatter;
 
 impl FieldFormatter {
-    /// Format field type for completion detail and documentation.
-    ///
-    /// Returns (detail, documentation) tuple.
     pub fn format_field_type(
         ty: &SdblType,
         table_name: &str,
@@ -20,7 +12,6 @@ impl FieldFormatter {
 
         match ty {
             SdblType::Composite { types } => {
-                // Composite type - show brief label in detail, multiline list in documentation
                 let detail = format!("Составной тип:{}", standard_marker);
                 let types_list = types.iter().map(|t| t.to_string()).collect::<Vec<_>>().join("\n");
                 let doc = format!("{}\n\nТаблица: {}", types_list, table_name);
@@ -28,16 +19,13 @@ impl FieldFormatter {
             }
 
             SdblType::DefinedType { name, underlying_type: Some(underlying) } => {
-                // Check if underlying type is Composite
                 if let SdblType::Composite { types } = underlying.as_ref() {
-                    // DefinedType with composite underlying - show multiline list
                     let detail = format!("ОпределяемыйТип.{}:{}", name, standard_marker);
                     let types_list =
                         types.iter().map(|t| t.to_string()).collect::<Vec<_>>().join("\n");
                     let doc = format!("{}\n\nТаблица: {}", types_list, table_name);
                     (detail, doc)
                 } else {
-                    // DefinedType with non-composite underlying
                     let detail = format!("{}{}", ty, standard_marker);
                     let doc = format!("Таблица: {}", table_name);
                     (detail, doc)
@@ -45,7 +33,6 @@ impl FieldFormatter {
             }
 
             _ => {
-                // Single type - show type in detail
                 let detail = format!("{}{}", ty, standard_marker);
                 let doc = format!("Таблица: {}", table_name);
                 (detail, doc)

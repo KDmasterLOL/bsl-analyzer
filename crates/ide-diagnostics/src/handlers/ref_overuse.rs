@@ -1,5 +1,3 @@
-//! Reports redundant `.Ссылка` access on already-reference query fields.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -18,7 +16,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Single-pass dispatch for RefOveruse.
 pub(crate) fn dispatch(
     ctx: &DiagnosticsContext,
     diag: &sdbl_hir::SdblDiagnostic,
@@ -39,7 +36,6 @@ pub(crate) fn dispatch(
     }
 }
 
-/// Runs the RefOveruse diagnostic (standalone, used in tests).
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     crate::sdbl_utils::collect_sdbl_via_dispatch(ctx, DiagnosticCode::RefOveruse, dispatch)
 }
@@ -52,9 +48,6 @@ mod tests {
 
     #[test]
     fn test_ref_overuse_field_ref_in_middle() {
-        // T.Ссылка.Field - accessing field through .Ссылка
-        // Without metadata, type cannot be resolved → no diagnostic emitted
-        // TODO: Add tests with metadata context to verify RefOveruse detection
         let code = r#"
 Процедура Тест()
     Запрос = Новый Запрос;
@@ -69,9 +62,6 @@ mod tests {
 
     #[test]
     fn test_ref_overuse_field_ref_at_end() {
-        // T.Field.Ссылка - accessing .Ссылка on a field
-        // Without metadata, type cannot be resolved → no diagnostic emitted
-        // TODO: Add tests with metadata context to verify RefOveruse detection
         let code = r#"
 Процедура Тест()
     Запрос = Новый Запрос;
@@ -86,9 +76,6 @@ mod tests {
 
     #[test]
     fn test_ref_overuse_double_ref() {
-        // T.Ссылка.Ссылка - double reference
-        // Without metadata, type cannot be resolved → no diagnostic emitted
-        // TODO: Add tests with metadata context to verify RefOveruse detection
         let code = r#"
 Процедура Тест()
     Запрос = Новый Запрос;
@@ -103,7 +90,6 @@ mod tests {
 
     #[test]
     fn test_no_false_positive_simple_ref() {
-        // T.Ссылка - simple reference field access (NOT an error)
         let code = r#"
 Процедура Тест()
     Запрос = Новый Запрос;
@@ -118,7 +104,6 @@ mod tests {
 
     #[test]
     fn test_no_false_positive_tabular_section() {
-        // Tabular section's .Ссылка is a back-reference to parent (NOT an error)
         let code = r#"
 Процедура Тест()
     Запрос = Новый Запрос;
@@ -133,9 +118,6 @@ mod tests {
 
     #[test]
     fn test_ref_overuse_mdo_type_prefix() {
-        // Документ.Документ1.Файл.Ссылка - with MDO type prefix
-        // Without metadata, type cannot be resolved → no diagnostic emitted
-        // TODO: Add tests with metadata context to verify RefOveruse detection
         let code = r#"
 Процедура Тест()
     Запрос = Новый Запрос;
@@ -147,9 +129,6 @@ mod tests {
 
     #[test]
     fn test_ref_overuse_in_where_clause() {
-        // Error in WHERE clause
-        // Without metadata, type cannot be resolved → no diagnostic emitted
-        // TODO: Add tests with metadata context to verify RefOveruse detection
         let code = r#"
 Процедура Тест()
     Запрос = Новый Запрос;
@@ -166,13 +145,6 @@ mod tests {
 
     #[test]
     fn test_ref_overuse_nested_in_case() {
-        // Patterns inside CASE expression (from tabular section)
-        //
-        // Source: Справочник.Пользователи.ДополнительныеРеквизиты (tabular section)
-        // Alias: Пользователи
-        //
-        // Without metadata, type cannot be resolved → no diagnostic emitted
-        // TODO: Add tests with metadata context to verify RefOveruse detection
         let code = r#"
 Процедура Тест()
     Запрос = Новый Запрос;
@@ -191,9 +163,6 @@ mod tests {
 
     #[test]
     fn test_tabular_section_ref_to_owner_field() {
-        // БизнесПроцесс.Согласование.Исполнители - табличная часть
-        // Исполнители.Ссылка.НомерИтерации - обращение к реквизиту ВЛАДЕЛЬЦА через .Ссылка
-        // Это НЕ ошибка, т.к. связь с владельцем встроена в структуру ТЧ и не вызывает JOIN.
         let code = r#"
 Процедура Тест()
     Запрос = Новый Запрос;
@@ -209,8 +178,6 @@ mod tests {
 
     #[test]
     fn test_tabular_section_ref_to_owner_nested_field_is_error() {
-        // Но если после .Ссылка.Поле идёт ещё одно разыменование, это уже ошибка
-        // Пример: ТЧ.Ссылка.Организация.ИНН - обращение к полю ОРГАНИЗАЦИИ через ссылку
         let code = r#"
 Процедура Тест()
     Запрос = Новый Запрос;

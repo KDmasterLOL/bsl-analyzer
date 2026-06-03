@@ -1,24 +1,3 @@
-//! PrivilegedModuleMethodCall diagnostic.
-//!
-//! Reports calls to exported methods of privileged common modules.
-//!
-//! # Guard-predicate suppression (Track 2 §1.6 Group D)
-//!
-//! Calls that are dominated by a recognised guard predicate
-//! (`РольДоступна`, `РольДоступнаПользователю` — see
-//! [`hir::dataflow::guard_predicates::default_registry`]) are
-//! suppressed. `БезопасныйРежим` and `ПривилегированныйРежим` are
-//! intentionally absent from the default registry (the former
-//! conflicts with `UnsafeSafeModeMethodCall`, the latter is
-//! tautological in privileged modules — see the `default_registry`
-//! doc-comment). The detector is `must-be-guarded`: every path
-//! from method entry to the call site must cross a guard's true
-//! branch. False negatives (a guarded call still flagged) are the
-//! conservative direction — security alerts win over noise — but
-//! the common pattern `Если РольДоступна("Администратор") Тогда
-//! ПривилегированныйМодуль.Метод(); КонецЕсли;` is correctly
-//! suppressed.
-
 use bsl_metadata::traits::MdObject;
 
 use crate::define_metadata;
@@ -59,9 +38,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         .get_bool(DiagnosticCode::PrivilegedModuleMethodCall, "validateNestedCalls")
         .unwrap_or(DEFAULT_VALIDATE_NESTED_CALLS);
 
-    // Union privileged CommonModule names across main + CFE so a
-    // privileged module declared by an extension is still flagged from
-    // call sites in other (or the same) configuration.
     let privileged_modules: FxHashSet<String> = ctx
         .visible_configurations()
         .iter()
@@ -87,12 +63,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     let summary = ctx.call_summary(hir::ModuleId::new(ctx.file_id));
 
-    // Single registry per check(); allocation cost amortised across
-    // every flagged call below.
     let guard_registry = default_registry();
-    // Lazy fetches: we only consult the body / cfg batches when we
-    // actually have a candidate flag to suppress. For modules with
-    // no privileged calls, neither structure is touched.
     let mut module_bodies: Option<Arc<hir::ModuleBodies>> = None;
     let mut module_cfgs: Option<Arc<hir::cfg::ModuleCfgs>> = None;
 
@@ -120,10 +91,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
             let resolution = ctx.resolve_qualified_path(module_name, method_name);
             if matches!(resolution, PathResolution::Method(_)) {
-                // Track 2 §1.6 Group D: guard-predicate suppression.
-                // Calls dominated by `РольДоступна(...) Тогда`-style
-                // checks are an authorised pattern — emitting a
-                // diagnostic for them is noise.
                 if is_call_guarded(ctx, edge, &guard_registry, &mut module_bodies, &mut module_cfgs)
                 {
                     continue;
@@ -147,23 +114,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics
 }
 
-/// Track 2 §1.6 Group D — query the §1.5 backward must-be-guarded
-/// detector for the call edge in question.
-///
-/// Returns `true` only when every path from the caller method's CFG
-/// entry to the basic block containing this call passes through a
-/// recognised guard predicate's TRUE branch (see
-/// [`hir::dataflow::guard_predicates::is_stmt_guarded`]).
-///
-/// Module-code edges (`CallerId::ModuleCode`) are not analysed today —
-/// the §1.5 detector takes a method's CFG, and module-level code
-/// has its own separate graph. Returns `false` for those, preserving
-/// the legacy behaviour (no suppression at module scope).
-///
-/// Returns `false` on any internal failure (no CFG, no body, range
-/// not found in any statement). Conservative direction: when in
-/// doubt, surface the diagnostic. False negatives here would silently
-/// suppress real warnings.
 fn is_call_guarded(
     ctx: &DiagnosticsContext,
     edge: &CallEdge,
@@ -199,22 +149,6 @@ fn is_call_guarded(
     is_stmt_guarded(cfg, body, stmt_id, registry)
 }
 
-/// Find the [`hir::StmtId`] whose source range contains `target`,
-/// preferring the smallest-range candidate.
-///
-/// HIR `Stmt::If` / loops / `Stmt::Try` carry nested statement lists
-/// that share the same arena (Codex §1.6 Group D MINOR fix), so a
-/// call buried inside an If's then-branch is contained both by the
-/// inner branch's leaf statement AND by the outer If's full source
-/// range. Picking the smallest containing range zeroes in on the
-/// leaf statement, which is the one the CFG models as a
-/// `BasicBlockVertex` (compound statements like `If` are
-/// `Conditional` vertices that don't list statements). Without this
-/// preference, [`is_stmt_guarded`] would key off the outer compound
-/// statement and `find_block_containing` inside it would fail to
-/// find a basic block — surfacing the diagnostic conservatively
-/// (the "first containing" version), but missing legitimate
-/// suppressions that the smallest-range version catches.
 fn find_stmt_containing(
     body: &hir::Body,
     source_map: &hir::BodySourceMap,
@@ -274,11 +208,6 @@ mod tests {
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
-    /// Track 2 §1.7-A — e2e: direct unguarded call to a privileged
-    /// CommonModule method emits the diagnostic. Validates the full
-    /// pipeline: Configuration → visible_configurations →
-    /// is_privileged filter → call_summary edge → resolve_qualified_path
-    /// → emit.
     const PRIVILEGED_MODULE_BODY: &str = r#"
 Процедура Метод() Экспорт
 КонецПроцедуры
@@ -303,11 +232,6 @@ mod tests {
         .assert_eq(&format_diags(code, &diagnostics));
     }
 
-    /// Track 2 §1.7-A — e2e: a privileged-module call dominated by a
-    /// `РольДоступна("Чтение")` guard is suppressed by the §1.6 Group D
-    /// guard-predicate detector. The full pipeline is exercised end-to-
-    /// end here (Configuration → visible_configurations → call_summary →
-    /// guard_predicates::is_stmt_guarded → suppression).
     #[test]
     fn test_role_guarded_call_suppressed() {
         let code = r#"

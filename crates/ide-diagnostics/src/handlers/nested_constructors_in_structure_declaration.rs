@@ -1,7 +1,3 @@
-//! NestedConstructorsInStructureDeclaration diagnostic.
-//!
-//! Reports nested constructors with parameters inside structure declarations.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -32,13 +28,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         check_body(body, source_map, code, ctx, diags);
     });
 
-    // Sort diagnostics by position (HIR expressions are stored in arena, not source order)
     diagnostics.sort_by_key(|d| (d.range.start(), d.range.end()));
 
     diagnostics
 }
 
-/// Check a single body for nested constructors in structure declarations.
 fn check_body(
     body: &Body,
     source_map: &BodySourceMap,
@@ -46,24 +40,19 @@ fn check_body(
     ctx: &DiagnosticsContext,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    // Walk all expressions in the body
     for (expr_id, expr) in body.exprs_iter() {
-        // Only check New expressions
         let Expr::New { type_name, args } = expr else {
             continue;
         };
 
-        // Check if this is Structure or FixedStructure constructor
         if !is_structure_or_fixed_structure(type_name) {
             continue;
         }
 
-        // Must have more than 1 argument to potentially have nested constructors
         if args.len() <= 1 {
             continue;
         }
 
-        // Check if any argument is a New expression with non-empty parameters
         let has_nested_constructor_with_params = args.iter().any(|&arg_id| {
             matches!(
                 body.expr(ExprId::from_idx(arg_id)),
@@ -75,7 +64,6 @@ fn check_body(
             continue;
         }
 
-        // Get range from source map
         let Some(range) = source_map.expr_range(expr_id) else {
             continue;
         };
@@ -92,7 +80,6 @@ fn check_body(
     }
 }
 
-/// Check if type name is Structure or FixedStructure (case-insensitive, bilingual).
 fn is_structure_or_fixed_structure(type_name: &Option<Name>) -> bool {
     let Some(name) = type_name else {
         return false;
@@ -195,7 +182,6 @@ Result = New Structure("field1, field2, field3", New Array(), New Array(), New A
 
     #[test]
     fn test_comprehensive() {
-        // Full fixture: RU + EN variants, nested constructors with/without params
         let code = r#"
     // RU
 

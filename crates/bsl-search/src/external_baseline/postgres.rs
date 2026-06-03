@@ -18,7 +18,6 @@ use r2d2_postgres::{r2d2::Pool, PostgresConnectionManager};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-/// Name of the table that stores schema version metadata.
 const SCHEMA_METADATA_TABLE: &str = "_schema_metadata_";
 const REQUIRED_STORAGE_TABLES: &[&str] = &[
     SCHEMA_METADATA_TABLE,
@@ -43,78 +42,6 @@ const SERVING_LEXICAL_BATCH_SIZE: usize = 2_000;
 const SERVING_SEMANTIC_BATCH_SIZE: usize = 256;
 const SEMANTIC_PUBLICATION_COMPLETE_PREFIX: &str = "semantic_publication_complete:";
 
-/// PostgreSQL adapter for centralized baseline storage.
-///
-/// Expected schema:
-/// - `<schema>.snapshots`
-///   `id TEXT PRIMARY KEY`
-///   `corpus TEXT NOT NULL`
-///   `fingerprint TEXT NULL`
-///   `parent_snapshot_id TEXT NULL`
-///   `branch TEXT NULL`
-///   `commit_sha TEXT NULL`
-///   `created_at TIMESTAMPTZ NOT NULL`
-/// - `<schema>.snapshot_files`
-///   `snapshot_id TEXT NOT NULL`
-///   `collection TEXT NOT NULL`
-///   `path TEXT NOT NULL`
-///   `file_fingerprint TEXT NOT NULL`
-///   `document_count INTEGER NOT NULL`
-///   `file_object_id TEXT NULL`
-/// - `<schema>.file_objects`
-///   `id TEXT PRIMARY KEY`
-///   `collection TEXT NOT NULL`
-///   `file_fingerprint TEXT NOT NULL`
-///   `document_count INTEGER NOT NULL`
-/// - `<schema>.file_object_items`
-///   `file_object_id TEXT NOT NULL`
-///   `ordinal INTEGER NOT NULL`
-///   `symbol_name TEXT NOT NULL`
-///   `kind TEXT NOT NULL`
-///   `line_start INTEGER NOT NULL`
-///   `line_end INTEGER NOT NULL`
-///   `content_hash TEXT NOT NULL`
-/// - `<schema>.snapshot_items`
-///   legacy fallback for snapshots published before file-object materialization
-/// - `<schema>.content_objects`
-///   `content_hash TEXT PRIMARY KEY`
-///   `text TEXT NOT NULL`
-/// - `<schema>.semantic_embeddings`
-///   `embedding_key TEXT NOT NULL`
-///   `model_id TEXT NOT NULL`
-///   `dimension INTEGER NOT NULL`
-///   `embedding BYTEA NOT NULL`
-/// - `<schema>.snapshot_heads`
-///   `corpus TEXT NOT NULL`
-///   `branch TEXT NOT NULL`
-///   `snapshot_id TEXT NOT NULL`
-///   `updated_at TIMESTAMPTZ NOT NULL`
-///   PK: (corpus, branch)
-/// - `<schema>.serving_lexical`
-///   `snapshot_id TEXT NOT NULL`
-///   `collection TEXT NOT NULL`
-///   `path TEXT NOT NULL`
-///   `ordinal INTEGER NOT NULL`
-///   `symbol_name TEXT NOT NULL`
-///   `kind TEXT NOT NULL`
-///   `line_start INTEGER NOT NULL`
-///   `line_end INTEGER NOT NULL`
-///   `text TEXT NOT NULL`
-///   `tsv TSVECTOR NOT NULL`
-///   PK: (snapshot_id, collection, path, ordinal)
-/// - `<schema>.serving_semantic`
-///   `snapshot_id TEXT NOT NULL`
-///   `collection TEXT NOT NULL`
-///   `path TEXT NOT NULL`
-///   `ordinal INTEGER NOT NULL`
-///   `symbol_name TEXT NOT NULL`
-///   `kind TEXT NOT NULL`
-///   `line_start INTEGER NOT NULL`
-///   `line_end INTEGER NOT NULL`
-///   `model_id TEXT NOT NULL`
-///   `dimension INTEGER NOT NULL`
-///   `embedding vector NOT NULL`
-///   PK: (snapshot_id, model_id, collection, path, ordinal)
 #[derive(Debug, Clone)]
 pub struct PostgresBaselineAdapter {
     config: ExternalBaselineConfig,
@@ -213,12 +140,6 @@ impl PostgresBaselineAdapter {
         Ok(client.query_opt(&sql, &params)?.is_some())
     }
 
-    /// Checks whether the storage is ready for steady-state operations.
-    ///
-    /// Probes for the schema metadata table and the core baseline tables.
-    /// If metadata exists, validates the schema version.
-    /// Returns a typed error instead of letting downstream queries fail
-    /// with raw missing-table errors.
     pub fn check_storage_readiness(&self) -> Result<(), SearchError> {
         let mut client = self.connect()?;
         for table_name in REQUIRED_STORAGE_TABLES {
@@ -251,16 +172,12 @@ impl PostgresBaselineAdapter {
                 });
             }
         } else {
-            // Metadata table present but version row missing means storage
-            // was partially initialized (pre-versioning or interrupted migrate).
             return Err(SearchError::StorageNotInitialized { schema: self.schema.clone() });
         }
 
         Ok(())
     }
 
-    /// Reads the stored schema version, if any.
-    /// Only queries the metadata table; does not validate version compatibility.
     pub fn get_schema_version(&self) -> Result<Option<i32>, SearchError> {
         let mut client = self.connect()?;
         let row = client.query_opt(
@@ -373,11 +290,19 @@ impl PostgresBaselineAdapter {
                     line_start INTEGER NOT NULL,
                     line_end INTEGER NOT NULL,
                     content_hash TEXT NOT NULL REFERENCES {}(content_hash) ON DELETE RESTRICT,
+                    graph_context TEXT,
                     PRIMARY KEY (file_object_id, ordinal)
                 )",
                 self.table("file_object_items"),
                 self.table("file_objects"),
                 self.table("content_objects")
+            ),
+            // Idempotent column add for central databases created before
+            // graph-enriched embeddings; pre-existing rows keep NULL (no context,
+            // matching their pre-enrichment embeddings).
+            format!(
+                "ALTER TABLE {} ADD COLUMN IF NOT EXISTS graph_context TEXT",
+                self.table("file_object_items")
             ),
             format!(
                 "CREATE TABLE IF NOT EXISTS {} (
@@ -473,9 +398,6 @@ impl PostgresBaselineAdapter {
                 self.schema,
                 self.table("serving_lexical")
             ),
-            // pgvector-dependent DDL is handled separately in
-            // pgvector_schema_statements() — migrate_storage() runs it
-            // best-effort so non-superuser environments degrade gracefully.
             format!(
                 "CREATE INDEX IF NOT EXISTS idx_{}_file_objects_fingerprint
                  ON {} (collection, file_fingerprint)",
@@ -497,10 +419,6 @@ impl PostgresBaselineAdapter {
         ]
     }
 
-    /// DDL statements that require the pgvector extension.
-    /// Executed best-effort in `migrate_storage()` — if vector is unavailable,
-    /// semantic serving degrades gracefully (queries return errors that trigger
-    /// fallback to local SQLite).
     fn pgvector_schema_statements(&self) -> Vec<String> {
         vec![
             "CREATE EXTENSION IF NOT EXISTS vector".to_owned(),
@@ -956,11 +874,6 @@ impl PostgresBaselineAdapter {
         Ok(report)
     }
 
-    /// Populates the `serving_semantic` table for a published snapshot.
-    ///
-    /// Computes embedding keys for visible documents, loads matching embeddings
-    /// from `semantic_embeddings`, and inserts them into the serving table.
-    /// Call after both snapshot and embeddings are published.
     pub fn populate_serving_semantic(
         &self,
         snapshot_id: &str,
@@ -1257,8 +1170,6 @@ impl SnapshotCatalog for PostgresBaselineAdapter {
                 self.table("snapshot_heads"),
                 self.table("snapshots"),
             );
-            // Try snapshot_heads first; fall back to timestamp-based if the table
-            // does not exist yet (pre-Phase-1 schema) or the head is not populated.
             let row = client.query_opt(&head_query, &[&corpus, branch]).ok().flatten();
             if row.is_some() {
                 row
@@ -1299,7 +1210,8 @@ impl SnapshotContentStore for PostgresBaselineAdapter {
                     foi.line_start,
                     foi.line_end,
                     co.text,
-                    foi.content_hash
+                    foi.content_hash,
+                    foi.graph_context
              FROM {} foi
              JOIN {} co ON co.content_hash = foi.content_hash
              WHERE foi.file_object_id = ANY($1)
@@ -1317,6 +1229,7 @@ impl SnapshotContentStore for PostgresBaselineAdapter {
                 line_end: row.get::<_, i32>("line_end") as u32,
                 text: row.get("text"),
                 content_hash: row.get("content_hash"),
+                graph_context: row.get("graph_context"),
             });
         }
 
@@ -1333,6 +1246,7 @@ impl SnapshotContentStore for PostgresBaselineAdapter {
                         line_end: item.line_end,
                         text: item.text.clone(),
                         content_hash: item.content_hash.clone(),
+                        graph_context: item.graph_context.clone(),
                     });
                 }
             }
@@ -1528,7 +1442,6 @@ impl WorkspaceBaselineManifestStore for PostgresBaselineAdapter {
         self.check_storage_readiness()?;
         let mut client = self.connect()?;
 
-        // Read snapshot metadata.
         let meta_query = format!(
             "SELECT id, fingerprint FROM {} WHERE id = $1 LIMIT 1",
             self.table("snapshots")
@@ -1541,7 +1454,6 @@ impl WorkspaceBaselineManifestStore for PostgresBaselineAdapter {
         };
         let snapshot_fingerprint: Option<String> = meta_row.get("fingerprint");
 
-        // Load visible-file manifest rows.
         let visible_files = materialize_visible_snapshot_files(&mut *client, self, snapshot_id)?;
 
         let files = visible_files
@@ -1570,10 +1482,6 @@ impl PostgresBaselineAdapter {
         for statement in self.ensure_schema_statements() {
             client.batch_execute(&statement)?;
         }
-        // pgvector-dependent DDL: best-effort. If the extension or table
-        // creation fails (non-superuser, vector not preinstalled), semantic
-        // serving degrades gracefully — queries will error and callers fall
-        // back to local SQLite.
         for statement in self.pgvector_schema_statements() {
             if let Err(e) = client.batch_execute(&statement) {
                 tracing::warn!("pgvector DDL skipped (semantic serving will be unavailable): {e}");
@@ -1581,9 +1489,6 @@ impl PostgresBaselineAdapter {
             }
         }
 
-        // Write schema version metadata.  Use a transaction so the version
-        // row lands atomically (CREATE TABLE IF NOT EXISTS is safe to run
-        // outside a transaction on PG).
         let mut tx = client.transaction()?;
         self.write_schema_version(&mut tx)?;
         tx.commit()?;
@@ -1814,6 +1719,7 @@ struct FileObjectItem {
     line_end: u32,
     text: String,
     content_hash: String,
+    graph_context: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1831,6 +1737,7 @@ struct FileObjectItemRow {
     line_start: i32,
     line_end: i32,
     content_hash: String,
+    graph_context: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -2411,6 +2318,7 @@ fn try_insert_file_object(
             line_start: document.line_start as i32,
             line_end: document.line_end as i32,
             content_hash: document.content_hash.clone(),
+            graph_context: document.graph_context.clone(),
         });
     }
 
@@ -2485,18 +2393,19 @@ fn insert_file_object_items(
     for batch in rows.chunks(FILE_OBJECT_ITEM_BATCH_SIZE) {
         let mut values = Vec::with_capacity(batch.len());
         let mut params: Vec<&(dyn postgres::types::ToSql + Sync)> =
-            Vec::with_capacity(batch.len() * 7);
+            Vec::with_capacity(batch.len() * 8);
         for (index, row) in batch.iter().enumerate() {
-            let base = index * 7;
+            let base = index * 8;
             values.push(format!(
-                "(${}, ${}, ${}, ${}, ${}, ${}, ${})",
+                "(${}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
                 base + 1,
                 base + 2,
                 base + 3,
                 base + 4,
                 base + 5,
                 base + 6,
-                base + 7
+                base + 7,
+                base + 8
             ));
             params.push(&row.file_object_id);
             params.push(&row.ordinal);
@@ -2505,10 +2414,12 @@ fn insert_file_object_items(
             params.push(&row.line_start);
             params.push(&row.line_end);
             params.push(&row.content_hash);
+            params.push(&row.graph_context);
         }
         let query = format!(
             "INSERT INTO {} (
-                file_object_id, ordinal, symbol_name, kind, line_start, line_end, content_hash
+                file_object_id, ordinal, symbol_name, kind, line_start, line_end, content_hash,
+                graph_context
              ) VALUES {}",
             adapter.table("file_object_items"),
             values.join(", ")
@@ -3237,6 +3148,7 @@ mod tests {
             line_end: line_start + 1,
             text: text.to_owned(),
             content_hash: content_hash.to_owned(),
+            graph_context: None,
         }
     }
 

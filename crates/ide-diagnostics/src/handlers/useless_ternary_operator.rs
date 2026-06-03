@@ -17,10 +17,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Checks a single syntax node for ternary expressions reducible to a simpler form.
-/// Check a single syntax node for useless ternary operators (node-based API).
-///
-/// This is called from `collect_syntax_single_pass()` for each node in single AST pass.
 pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &DiagnosticsContext) {
     let code = DiagnosticCode::UselessTernaryOperator;
 
@@ -35,7 +31,6 @@ pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &Diagnostic
     }
 }
 
-/// Main entry point for syntax-based useless-ternary detection.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::UselessTernaryOperator;
 
@@ -178,7 +173,6 @@ mod tests {
 
     #[test]
     fn test_single_boolean_branch_is_not_useless() {
-        // null-guard: ?(obj = Неопределено, Ложь, obj.Свойство)
         let code = r#"А = ?(СтрокаПредмета.Предмет = Неопределено, Ложь, СтрокаПредмета.Предмет.ПометкаУдаления);"#;
         check_diagnostics_snapshot_for(
             code,

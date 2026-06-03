@@ -1,64 +1,9 @@
-//! IdenticalExpressions diagnostic
-//!
-//! Detects identical expressions on both sides of binary operators.
-//!
-//! ## Why?
-//! Identical expressions in comparisons or operations often indicate a bug.
-//! For example:
-//! - `x == x` is always true
-//! - `a - a` is always 0
-//! - `a > a` is always false
-//!
-//! ## Exceptions
-//! - **Addition and multiplication:** `x + x` and `x * x` are considered normal
-//! - **Popular divisors:** `60 / 60` or `1024 / 1024` can be ignored (configurable)
-//! - **Transitive comparisons:** `1 = A` is equivalent to `A = 1` for OR/AND chains
-//!
-//! ## Bad practice
-//! ```bsl
-//! Если x == x Тогда  // Always true - likely a bug
-//!     // ...
-//! КонецЕсли;
-//!
-//! Результат = a - a;  // Always 0 - suspicious
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! Если x == y Тогда  // Compare different variables
-//!     // ...
-//! КонецЕсли;
-//!
-//! Результат = a - b;
-//! ```
-//!
-//! ## Implementation
-//!
-//! **Hybrid approach: HIR + AST fallback**
-//!
-//! ### HIR-based checking (main logic):
-//! 1. Semantic expression equality (not text-based) - handles whitespace/parentheses correctly
-//! 2. Type-safe operator matching via BinaryOp enum
-//! 3. Module-level coverage via ModuleBodies.module_code
-//! 4. Accurate statement context detection via Body.stmts (not heuristic!)
-//! 5. Recursive logical chain collection via ExprId
-//! 6. Transitive comparison normalization (`A=1` ≡ `1=A` in OR/AND chains)
-//!
-//! ### AST fallback (preprocessor split expressions):
-//! - Required for edge case: expressions split by `#Область` or `#Если`
-//! - Example: `Результат = Истина\n#Область\n ИЛИ Истина;\n#КонецОбласти`
-//! - Cannot be migrated to HIR because:
-//!   - HIR loses preprocessor directive boundaries
-//!   - ERROR nodes (`KW_OR` without operands) become `Expr::Missing`
-//!   - No way to distinguish intentional split from separate statements
-//! - See `check_preprocessor_split_expressions()` for detailed explanation
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::{BinaryOp, Body, BodySourceMap, Expr, ExprId, IdConversion, Literal, UnaryOp};
 use std::collections::HashSet;
-use syntax::{SyntaxKind, SyntaxNode}; // Keep for preprocessor fallback
+use syntax::{SyntaxKind, SyntaxNode};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,
@@ -81,14 +26,10 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    // HIR-based checking - covers methods and module-level code
     let mut diagnostics = crate::utils::for_each_body(ctx, |body, source_map, diags| {
         check_body(body, source_map, diags, code, ctx);
     });
 
-    // AST fallback for preprocessor split expressions (Phase 5 evaluation)
-    // These might not be properly captured by HIR lowering
-    // E.g., "Результат = Истина\n#Область\n ИЛИ Истина;\n#КонецОбласти"
     let parse = ctx.parse();
     let root = parse.syntax_node();
     check_preprocessor_split_expressions(&root, &mut diagnostics, code, ctx);
@@ -96,24 +37,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics
 }
 
-// ============================================================================
-// Phase 1: Core HIR utility functions
-// ============================================================================
-
-/// Compare two HIR expressions semantically for identity.
-///
-/// Unlike text-based comparison, this handles:
-/// - Whitespace normalization automatically
-/// - Parentheses correctly (via HIR structure)
-/// - Type-safe operator comparison
-///
-/// Returns true if expressions are semantically identical.
 fn are_exprs_semantically_equal(lhs_id: ExprId, rhs_id: ExprId, body: &Body) -> bool {
     let lhs = body.expr(lhs_id);
     let rhs = body.expr(rhs_id);
 
     match (lhs, rhs) {
-        // Binary operations: check op and both operands
         (
             Expr::BinaryOp { lhs: l_lhs, rhs: l_rhs, op: l_op },
             Expr::BinaryOp { lhs: r_lhs, rhs: r_rhs, op: r_op },
@@ -131,7 +59,6 @@ fn are_exprs_semantically_equal(lhs_id: ExprId, rhs_id: ExprId, body: &Body) -> 
                 )
         }
 
-        // Unary operations: check op and operand
         (Expr::UnaryOp { expr: l_expr, op: l_op }, Expr::UnaryOp { expr: r_expr, op: r_op }) => {
             l_op == r_op
                 && are_exprs_semantically_equal(
@@ -141,13 +68,10 @@ fn are_exprs_semantically_equal(lhs_id: ExprId, rhs_id: ExprId, body: &Body) -> 
                 )
         }
 
-        // Literals: compare values
         (Expr::Literal(l_lit), Expr::Literal(r_lit)) => l_lit == r_lit,
 
-        // Paths (variables, function names): compare names
         (Expr::Path(l_name), Expr::Path(r_name)) => l_name == r_name,
 
-        // Field access: check base and field name
         (
             Expr::Field { base: l_base, field: l_field },
             Expr::Field { base: r_base, field: r_field },
@@ -160,7 +84,6 @@ fn are_exprs_semantically_equal(lhs_id: ExprId, rhs_id: ExprId, body: &Body) -> 
                 )
         }
 
-        // Index access: check base and index expressions
         (
             Expr::Index { base: l_base, index: l_index },
             Expr::Index { base: r_base, index: r_index },
@@ -173,7 +96,6 @@ fn are_exprs_semantically_equal(lhs_id: ExprId, rhs_id: ExprId, body: &Body) -> 
                 )
         }
 
-        // Function calls: check callee and all arguments
         (
             Expr::Call { callee: l_callee, args: l_args },
             Expr::Call { callee: r_callee, args: r_args },
@@ -197,7 +119,6 @@ fn are_exprs_semantically_equal(lhs_id: ExprId, rhs_id: ExprId, body: &Body) -> 
             })
         }
 
-        // Ternary expressions: check condition, then_expr, else_expr
         (
             Expr::Ternary { condition: l_cond, then_expr: l_then, else_expr: l_else },
             Expr::Ternary { condition: r_cond, then_expr: r_then, else_expr: r_else },
@@ -215,7 +136,6 @@ fn are_exprs_semantically_equal(lhs_id: ExprId, rhs_id: ExprId, body: &Body) -> 
                 )
         }
 
-        // New keyword with type and args
         (
             Expr::New { type_name: l_type, args: l_args },
             Expr::New { type_name: r_type, args: r_args },
@@ -232,17 +152,10 @@ fn are_exprs_semantically_equal(lhs_id: ExprId, rhs_id: ExprId, body: &Body) -> 
             })
         }
 
-        // Different expression kinds are never equal
         _ => false,
     }
 }
 
-/// Serialize HIR expression to normalized string for transitive comparison.
-///
-/// Used for detecting transitive duplicates in logical chains:
-/// `A = 1` vs `1 = A` should be recognized as equivalent in OR/AND chains.
-///
-/// Returns normalized string representation (e.g., "a=1" for both `A = 1` and `1 = A`).
 fn expr_to_string(expr_id: ExprId, body: &Body) -> String {
     let expr = body.expr(expr_id);
     match expr {
@@ -347,16 +260,7 @@ fn expr_to_string(expr_id: ExprId, body: &Body) -> String {
     }
 }
 
-/// Check if expression is at statement level (not nested in another expression).
-///
-/// Uses Body.stmts arena to accurately detect statement context.
-/// This is more reliable than AST heuristics for distinguishing:
-/// - `Перем1 = Перем1;` (assignment statement - skip)
-/// - `Если X = X Тогда` (comparison in condition - report)
-///
-/// Returns true if expression appears as direct child of a statement.
 fn is_statement_expr(expr_id: ExprId, body: &Body, _source_map: &BodySourceMap) -> bool {
-    // Check if any statement contains this expression as its direct child
     for stmt_id in body.body_stmts() {
         let stmt = body.stmt(stmt_id);
         match stmt {
@@ -372,13 +276,6 @@ fn is_statement_expr(expr_id: ExprId, body: &Body, _source_map: &BodySourceMap) 
     false
 }
 
-// ============================================================================
-// Phase 2: HIR-based diagnostic checking
-// ============================================================================
-
-/// Check a single body (method or module-level code) for identical expressions.
-///
-/// This is the HIR-based version that replaces AST traversal.
 fn check_body(
     body: &Body,
     source_map: &BodySourceMap,
@@ -386,7 +283,6 @@ fn check_body(
     code: DiagnosticCode,
     ctx: &DiagnosticsContext,
 ) {
-    // Walk all expressions in the body
     for (expr_id, expr) in body.exprs_iter() {
         if let Expr::BinaryOp { lhs, rhs, op } = expr {
             check_binary_expr_hir(
@@ -404,10 +300,7 @@ fn check_body(
     }
 }
 
-/// Check a binary expression for identical operands (HIR-based).
-///
-/// Replaces the AST-based check_binary_expr function.
-#[allow(clippy::too_many_arguments)] // All parameters are needed for HIR-based checking
+#[allow(clippy::too_many_arguments, reason = "HIR binary-expression check needs all inputs")]
 fn check_binary_expr_hir(
     expr_id: ExprId,
     lhs: ExprId,
@@ -419,40 +312,30 @@ fn check_binary_expr_hir(
     code: DiagnosticCode,
     ctx: &DiagnosticsContext,
 ) {
-    // Skip assignment statements (e.g., "Перем1 = Перем1;")
-    // Assignment statements should not be flagged - only comparisons in conditions
     if op == BinaryOp::Eq && is_statement_expr(expr_id, body, source_map) {
         return;
     }
 
-    // Ignore addition and multiplication - considered normal for identical operands
     if matches!(op, BinaryOp::Add | BinaryOp::Mul) {
         return;
     }
 
-    // For AND/OR operators, check the entire logical chain for duplicates
     if matches!(op, BinaryOp::And | BinaryOp::Or) {
-        // Only check at top level of chain to avoid duplicate reports
-        // Top level = this binary op is not nested inside another same-type binary op
         if !is_nested_in_logical_chain(expr_id, op, body) {
             check_logical_chain_hir(expr_id, op, body, source_map, diagnostics, code, ctx);
         }
         return;
     }
 
-    // Check if operands are semantically equal
     if are_exprs_semantically_equal(lhs, rhs, body) {
-        // Check popular division exception
         if op == BinaryOp::Div && is_popular_division_hir(lhs, body, ctx) {
             return;
         }
 
-        // Get range from source map
         let Some(range) = source_map.expr_range(expr_id) else {
             return;
         };
 
-        // Get operator text for message
         let op_text = match op {
             BinaryOp::Eq => "=",
             BinaryOp::Neq => "<>",
@@ -466,7 +349,6 @@ fn check_binary_expr_hir(
             _ => "?",
         };
 
-        // Get expression text for message
         let lhs_text = expr_to_string(lhs, body);
 
         diagnostics.push(Diagnostic {
@@ -483,7 +365,6 @@ fn check_binary_expr_hir(
     }
 }
 
-/// Check if this is a popular division case (60/60, 1024/1024) - HIR version.
 fn is_popular_division_hir(expr_id: ExprId, body: &Body, ctx: &DiagnosticsContext) -> bool {
     let popular_divisors = ctx
         .config
@@ -491,13 +372,12 @@ fn is_popular_division_hir(expr_id: ExprId, body: &Body, ctx: &DiagnosticsContex
         .unwrap_or_else(|| "60, 1024".to_string());
 
     if popular_divisors.trim().is_empty() {
-        return false; // Disabled
+        return false;
     }
 
     let divisors: HashSet<String> =
         popular_divisors.split(',').map(|s| s.trim().to_string()).collect();
 
-    // Check if expression is a literal number matching popular divisors
     let expr = body.expr(expr_id);
     if let Expr::Literal(Literal::Number(n)) = expr {
         let text = n.to_string();
@@ -509,18 +389,9 @@ fn is_popular_division_hir(expr_id: ExprId, body: &Body, ctx: &DiagnosticsContex
     false
 }
 
-// ============================================================================
-// Phase 3: Logical chain handling (AND/OR)
-// ============================================================================
-
-/// Check if expression is nested inside another logical chain of the same operator.
-///
-/// Used to detect top-level of chain and avoid duplicate reports.
 fn is_nested_in_logical_chain(expr_id: ExprId, op: BinaryOp, body: &Body) -> bool {
-    // Walk all expressions looking for parent binary ops
     for (_parent_id, parent_expr) in body.exprs_iter() {
         if let Expr::BinaryOp { lhs, rhs, op: parent_op } = parent_expr {
-            // Check if current expr is operand of same-type binary op
             if parent_op == &op
                 && (ExprId::from_idx(*lhs) == expr_id || ExprId::from_idx(*rhs) == expr_id)
             {
@@ -531,10 +402,6 @@ fn is_nested_in_logical_chain(expr_id: ExprId, op: BinaryOp, body: &Body) -> boo
     false
 }
 
-/// Check logical chain (AND/OR) for duplicate operands with transitive comparison.
-///
-/// Example: `A = 1 ИЛИ B = 2 ИЛИ A = 1` - duplicate detected
-/// Transitive: `1 = A ИЛИ A = 1` - also duplicate (normalized to same form)
 fn check_logical_chain_hir(
     root_expr_id: ExprId,
     chain_op: BinaryOp,
@@ -547,7 +414,6 @@ fn check_logical_chain_hir(
     let mut operands = Vec::new();
     collect_logical_chain_hir(root_expr_id, chain_op, body, &mut operands);
 
-    // Check for duplicates using normalized comparison
     let mut seen = HashSet::new();
     let mut duplicate = None;
 
@@ -563,7 +429,6 @@ fn check_logical_chain_hir(
     }
 
     if let Some(dup_text) = duplicate {
-        // Get range for the root expression
         if let Some(range) = source_map.expr_range(root_expr_id) {
             let op_text = match chain_op {
                 BinaryOp::And => "И",
@@ -586,10 +451,6 @@ fn check_logical_chain_hir(
     }
 }
 
-/// Recursively collect all operands from logical chain (AND/OR).
-///
-/// For `A ИЛИ B ИЛИ C`, collects [A, B, C].
-/// For `(A И B) ИЛИ (C И D)`, collects [(A И B), (C И D)] if chain_op is OR.
 fn collect_logical_chain_hir(
     expr_id: ExprId,
     chain_op: BinaryOp,
@@ -598,7 +459,6 @@ fn collect_logical_chain_hir(
 ) {
     let expr = body.expr(expr_id);
 
-    // If this is a binary op of the same type, recurse into operands
     if let Expr::BinaryOp { lhs, rhs, op } = expr {
         if op == &chain_op {
             collect_logical_chain_hir(ExprId::from_idx(*lhs), chain_op, body, operands);
@@ -607,27 +467,15 @@ fn collect_logical_chain_hir(
         }
     }
 
-    // Otherwise, this is a leaf operand - add it
     operands.push(expr_id);
 }
 
-/// Normalize operand for transitive comparison.
-///
-/// For commutative comparison operators (=, <>), sort operands alphabetically.
-/// This makes "1=A" equivalent to "A=1" for duplicate detection.
-///
-/// Examples:
-/// - "а=1" → "1=а" (sorted)
-/// - "х<>5" → "5<>х" (sorted)
-/// - "а+b" → "а+b" (not a comparison, unchanged)
 fn normalize_operand_hir(text: &str) -> String {
-    // Try to parse as comparison and normalize
     for op in &["<>", "="] {
         if let Some(pos) = text.find(op) {
             let left = &text[..pos];
             let right = &text[pos + op.len()..];
 
-            // Sort operands alphabetically for commutative operators
             let mut parts = [left, right];
             parts.sort();
 
@@ -635,11 +483,9 @@ fn normalize_operand_hir(text: &str) -> String {
         }
     }
 
-    // Not a comparison or different operator - return as is
     text.to_string()
 }
 
-/// Normalize text: remove whitespace and parentheses
 fn normalize_text(text: &str) -> String {
     text.chars()
         .filter(|c| !c.is_whitespace())
@@ -648,45 +494,6 @@ fn normalize_text(text: &str) -> String {
         .to_string()
 }
 
-/// Check for expressions split by preprocessor directives (AST fallback required).
-///
-/// **Example:**
-/// ```bsl
-/// Результат = Истина
-/// #Область НоваяОбласть
-///  ИЛИ Истина;
-/// #КонецОбласти
-/// ```
-///
-/// **Why AST fallback is required (cannot be migrated to HIR):**
-///
-/// 1. **HIR loses preprocessor directive boundaries**
-///    - `process_preproc_region()` processes content recursively
-///    - After lowering, HIR sees only separate statements without context
-///
-/// 2. **HIR sees this as:**
-///    ```text
-///    Stmt[0]: Assign { Результат = Bool(true) }  // complete assignment
-///    Stmt[1]: Expr(Missing)                       // ERROR(ИЛИ) → Missing expr
-///    Stmt[2]: Expr(Bool(true))                    // separate literal
-///    ```
-///    No way to tell that statements [1] and [2] were inside a directive.
-///
-/// 3. **ERROR nodes lose information**
-///    - `ERROR(KW_OR)` in AST → `Expr::Missing` in HIR
-///    - No information that this was an attempt to continue expression
-///
-/// 4. **AST preserves:**
-///    - Directive boundaries (PRE_REGION_DIR, PRE_IF_DIR)
-///    - Sibling relationships (prev/next sibling)
-///    - ERROR nodes with token information (KW_OR, KW_AND)
-///    - Semicolon presence between nodes
-///
-/// **Detection approach:**
-/// - Find ASSIGN_STMT followed by preprocessor directive
-/// - Extract RHS from assignment
-/// - Collect operands from directive content (including ERROR nodes)
-/// - Check for duplicates between assignment RHS and directive operands
 fn check_preprocessor_split_expressions(
     root: &SyntaxNode,
     diagnostics: &mut Vec<Diagnostic>,
@@ -694,27 +501,19 @@ fn check_preprocessor_split_expressions(
     ctx: &DiagnosticsContext,
 ) {
     for node in root.descendants() {
-        // Look for ASSIGN_STMT followed by preprocessor directive
         if node.kind() != SyntaxKind::ASSIGN_STMT {
             continue;
         }
 
-        // Get the next sibling (might be preprocessor directive)
         let Some(next_sibling) = node.next_sibling() else {
             continue;
         };
 
-        // Check if next sibling is preprocessor directive
         if !matches!(next_sibling.kind(), SyntaxKind::PRE_REGION_DIR | SyntaxKind::PRE_IF_DIR) {
             continue;
         }
 
-        // Check if preprocessor block contains split logical expression (ERROR with KW_OR/KW_AND)
-        // This distinguishes between:
-        // 1. Split expression: "Результат = Истина #Область ИЛИ Истина #КонецОбласти" - ERROR(KW_OR)
-        // 2. Normal code: "X = Var; #Если... Y = Var; #КонецЕсли" - no split expression
         if !has_split_logical_operator(&next_sibling) {
-            // Also check CALL_STMT siblings after preprocessor
             let mut found_split = false;
             let mut current_sibling = next_sibling.next_sibling();
             while let Some(sibling) = current_sibling {
@@ -733,17 +532,13 @@ fn check_preprocessor_split_expressions(
             }
         }
 
-        // Extract RHS value from assignment
         let Some(assign_rhs) = extract_assign_rhs(&node) else {
             continue;
         };
 
-        // Extract operands from preprocessor block
         let mut all_operands = vec![normalize_text(&assign_rhs)];
         all_operands.extend(extract_preprocessor_operands(&next_sibling));
 
-        // Also collect operands from subsequent CALL_STMT siblings after preprocessor
-        // E.g., "#КонецЕсли\n ИЛИ Истина;" creates CALL_STMT siblings
         let mut current_sibling = next_sibling.next_sibling();
         while let Some(sibling) = current_sibling {
             if sibling.kind() == SyntaxKind::CALL_STMT {
@@ -754,16 +549,13 @@ fn check_preprocessor_split_expressions(
             }
         }
 
-        // Check if we have any operands beyond the assignment RHS
         if all_operands.len() < 2 {
             continue;
         }
 
-        // Check for duplicates
         let mut seen = HashSet::new();
         for operand in &all_operands {
             if !seen.insert(operand.clone()) {
-                // Found duplicate!
                 diagnostics.push(Diagnostic {
                     code,
                     message: format!(
@@ -781,11 +573,9 @@ fn check_preprocessor_split_expressions(
     }
 }
 
-/// Check if node contains ERROR with KW_OR or KW_AND, indicating a split logical expression.
 fn has_split_logical_operator(node: &SyntaxNode) -> bool {
     for descendant in node.descendants() {
         if descendant.kind() == SyntaxKind::ERROR {
-            // Check if ERROR contains logical operator tokens
             for token in descendant.children_with_tokens() {
                 if let Some(token) = token.as_token() {
                     if matches!(token.kind(), SyntaxKind::KW_OR | SyntaxKind::KW_AND) {
@@ -798,9 +588,7 @@ fn has_split_logical_operator(node: &SyntaxNode) -> bool {
     false
 }
 
-/// Extract right-hand side value from ASSIGN_STMT
 fn extract_assign_rhs(assign_stmt: &SyntaxNode) -> Option<String> {
-    // ASSIGN_STMT structure: IDENT, EXPR (RHS)
     for child in assign_stmt.children() {
         if child.kind() == SyntaxKind::EXPR {
             return Some(child.text().to_string());
@@ -809,33 +597,11 @@ fn extract_assign_rhs(assign_stmt: &SyntaxNode) -> Option<String> {
     None
 }
 
-/// Extract operands from preprocessor directive block.
-///
-/// **Returns:** All literals and identifiers found in the directive content.
-///
-/// **Example AST structure:**
-/// ```text
-/// PRE_REGION_DIR:
-///   CALL_STMT:
-///     ERROR(KW_OR)           ← ИЛИ without operands
-///   CALL_STMT:
-///     LITERAL: Истина        ← the actual operand
-/// ```
-///
-/// **Extraction strategy:**
-/// 1. Collect complete expressions from CALL_STMT (excluding ERROR nodes)
-/// 2. Also collect individual LITERAL/IDENT nodes
-/// 3. Normalize text (remove whitespace, parentheses)
-/// 4. Deduplicate while preserving order
-///
-/// Also finds complex expressions beyond simple literals and identifiers.
 fn extract_preprocessor_operands(prep_dir: &SyntaxNode) -> Vec<String> {
     let mut operands = Vec::new();
 
     fn collect_all_operands(node: &SyntaxNode, operands: &mut Vec<String>) {
-        // Collect complete expressions from CALL_STMT nodes
         if node.kind() == SyntaxKind::CALL_STMT {
-            // Get the full expression text (excluding ERROR nodes)
             let expr_text: String = node
                 .descendants()
                 .filter(|n| n.kind() != SyntaxKind::ERROR)
@@ -849,7 +615,6 @@ fn extract_preprocessor_operands(prep_dir: &SyntaxNode) -> Vec<String> {
             }
         }
 
-        // Also collect individual literals/identifiers
         if matches!(node.kind(), SyntaxKind::LITERAL | SyntaxKind::IDENT) {
             operands.push(normalize_text(&node.text().to_string()));
         }
@@ -861,7 +626,6 @@ fn extract_preprocessor_operands(prep_dir: &SyntaxNode) -> Vec<String> {
 
     collect_all_operands(prep_dir, &mut operands);
 
-    // Deduplicate while preserving order
     let mut seen = HashSet::new();
     operands.into_iter().filter(|op| seen.insert(op.clone())).collect()
 }
@@ -948,7 +712,6 @@ mod tests {
         );
     }
 
-    /// Assignment to self is not flagged (statement-level Eq is skipped).
     #[test]
     fn test_fixture_self_assignment_skipped() {
         let code = r#"Функция Проверка()
@@ -960,7 +723,6 @@ mod tests {
         assert_eq!(diagnostics.len(), 0, "Self-assignment should not be flagged");
     }
 
-    /// Identical operands in <> comparison should trigger.
     #[test]
     fn test_fixture_identical_neq_triggers() {
         let code = r#"Функция Проверка()
@@ -975,7 +737,6 @@ mod tests {
         assert!(diagnostics[0].message.contains("<>"));
     }
 
-    /// Identical return expression with > should trigger.
     #[test]
     fn test_fixture_identical_gt_in_return_triggers() {
         let code = r#"Функция Проверка()
@@ -986,7 +747,6 @@ mod tests {
         assert_eq!(diagnostics.len(), 1, "Identical > should trigger");
     }
 
-    /// Division with identical operands triggers; multiplication does not.
     #[test]
     fn test_fixture_division_triggers_multiplication_skipped() {
         let code = r#"Процедура Проверка()
@@ -999,7 +759,6 @@ mod tests {
         assert!(diagnostics[0].message.contains("/"));
     }
 
-    /// Identical complex expression on both sides of = in condition triggers.
     #[test]
     fn test_fixture_identical_complex_expr_eq_triggers() {
         let code = r#"Функция Проверка()
@@ -1013,7 +772,6 @@ mod tests {
         assert_eq!(diagnostics.len(), 1, "Identical complex expressions should trigger");
     }
 
-    /// Identical operands in <> in return expression triggers.
     #[test]
     fn test_fixture_identical_neq_in_return_triggers() {
         let code = r#"Функция Проверка()
@@ -1024,7 +782,6 @@ mod tests {
         assert_eq!(diagnostics.len(), 1, "Identical <> in return should trigger");
     }
 
-    /// Duplicate operand in OR chain triggers.
     #[test]
     fn test_fixture_duplicate_in_or_chain_triggers() {
         let code = r#"Функция Проверка()
@@ -1038,7 +795,6 @@ mod tests {
         assert_eq!(diagnostics.len(), 1, "Duplicate in OR chain should trigger");
     }
 
-    /// Identical < in return expression triggers.
     #[test]
     fn test_fixture_identical_lt_in_return_triggers() {
         let code = r#"Функция Проверка()
@@ -1049,7 +805,6 @@ mod tests {
         assert_eq!(diagnostics.len(), 1, "Identical < should trigger");
     }
 
-    /// Duplicate operand in AND chain triggers.
     #[test]
     fn test_fixture_duplicate_in_and_chain_triggers() {
         let code = r#"Функция Проверка()
@@ -1063,7 +818,6 @@ mod tests {
         assert_eq!(diagnostics.len(), 1, "Duplicate in AND chain should trigger");
     }
 
-    /// Duplicate in И chain inside Возврат triggers.
     #[test]
     fn test_fixture_duplicate_and_in_return_triggers() {
         let code = r#"Функция Проверка()
@@ -1074,7 +828,6 @@ mod tests {
         assert_eq!(diagnostics.len(), 1, "Duplicate И in return chain should trigger");
     }
 
-    /// Subtraction of identical operands triggers; multiplication does not.
     #[test]
     fn test_fixture_subtraction_triggers_multiplication_skipped() {
         let code = r#"Процедура Проверка()
@@ -1087,7 +840,6 @@ mod tests {
         assert!(diagnostics[0].message.contains("-"));
     }
 
-    /// Complex И/ИЛИ chain with no duplicates — not flagged.
     #[test]
     fn test_fixture_mixed_and_or_no_duplicates() {
         let code = r#"Функция Проверка()
@@ -1098,7 +850,6 @@ mod tests {
         assert_eq!(diagnostics.len(), 0, "No duplicates in mixed И/ИЛИ chain");
     }
 
-    /// Module-level: duplicate AND sub-expression in OR chain triggers.
     #[test]
     fn test_fixture_module_level_complex_and_in_or() {
         let code = r#"
@@ -1109,7 +860,6 @@ mod tests {
         assert_eq!(diagnostics.len(), 1, "Duplicate AND in OR chain at module level");
     }
 
-    /// Module-level: duplicate А = 1 in OR chain triggers.
     #[test]
     fn test_fixture_module_level_or_duplicate() {
         let code = r#"
@@ -1121,7 +871,6 @@ mod tests {
         assert_eq!(diagnostics.len(), 1, "Duplicate А = 1 in module-level OR");
     }
 
-    /// Module-level: transitive А = 1 vs 1 = А triggers.
     #[test]
     fn test_fixture_module_level_transitive_or() {
         let code = r#"
@@ -1132,7 +881,6 @@ mod tests {
         assert_eq!(diagnostics.len(), 1, "Transitive 1=А vs А=1 in OR chain");
     }
 
-    /// Duplicate in chained assignment А = 12 ИЛИ А = 13 ИЛИ А = 12.
     #[test]
     fn test_fixture_chained_assignment_duplicate() {
         let code = r#"
@@ -1142,7 +890,6 @@ mod tests {
         assert_eq!(diagnostics.len(), 1, "Duplicate А = 12 in chained OR");
     }
 
-    /// Preprocessor region split: Истина ИЛИ Истина across #Область triggers.
     #[test]
     fn test_fixture_preprocessor_region_duplicate() {
         let code = r#"
@@ -1155,7 +902,6 @@ mod tests {
         assert_eq!(diagnostics.len(), 1, "Duplicate across #Область should trigger");
     }
 
-    /// Preprocessor #Если split: Истина ИЛИ ... ИЛИ Истина triggers.
     #[test]
     fn test_fixture_preprocessor_if_duplicate() {
         let code = r#"
@@ -1171,7 +917,6 @@ mod tests {
         assert_eq!(diagnostics.len(), 1, "Истина repeated across #Если should trigger");
     }
 
-    /// Preprocessor split with no duplicates — not flagged.
     #[test]
     fn test_fixture_preprocessor_no_duplicate() {
         let code = r#"

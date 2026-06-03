@@ -1,5 +1,3 @@
-//! SARIF reporter for analysis results.
-
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -9,7 +7,6 @@ use super::{AnalysisResults, Reporter};
 
 const SARIF_SCHEMA: &str = "https://json.schemastore.org/sarif-2.1.0.json";
 
-/// SARIF 2.1.0 reporter that writes results to bsl-analyzer.sarif.
 pub struct SarifReporter;
 
 impl Reporter for SarifReporter {

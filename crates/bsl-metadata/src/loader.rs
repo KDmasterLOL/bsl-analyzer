@@ -1,35 +1,3 @@
-//! Metadata loader for Designer format
-//!
-//! Loads 1C:Enterprise metadata from Designer format directory structure.
-//!
-//! ## Designer Format Structure
-//!
-//! **CRITICAL:** XML files are NEXT TO object folders, code files are inside Ext/ subdirectories:
-//!
-//! ```text
-//! Configuration.xml                      # Root configuration
-//! ConfigDumpInfo.xml                     # Dump information
-//!
-//! CommonModules/
-//! ├── <Name>.xml                         # XML NEXT TO folder!
-//! └── <Name>/                            # Object folder
-//!     └── Ext/
-//!         └── Module.bsl                 # Code inside Ext/
-//!
-//! Catalogs/
-//! ├── <Name>.xml                         # XML NEXT TO folder!
-//! └── <Name>/                            # Object folder
-//!     └── Ext/
-//!         ├── ManagerModule.bsl          # Code inside Ext/
-//!         └── ObjectModule.bsl
-//!
-//! InformationRegisters/
-//! ├── <Name>.xml                         # XML NEXT TO folder!
-//! └── <Name>/                            # Object folder
-//!     └── Ext/
-//!         └── ManagerModule.bsl          # Code inside Ext/
-//! ```
-
 use crate::configuration::Configuration;
 use crate::error::Result;
 use crate::metadata_object::{MdoType, MetadataObject};
@@ -39,24 +7,6 @@ use std::fs;
 use std::path::Path;
 use std::sync::Mutex;
 
-/// Load configuration from Designer format directory
-///
-/// # Arguments
-///
-/// * `path` - Path to configuration root directory
-///
-/// # Returns
-///
-/// Loaded `Configuration` with all metadata objects
-///
-/// # Example
-///
-/// ```no_run
-/// # use bsl_metadata::load_from_directory;
-/// let config = load_from_directory("/path/to/configuration")?;
-/// println!("Loaded {} common modules", config.common_modules().len());
-/// # Ok::<(), bsl_metadata::MetadataError>(())
-/// ```
 pub fn load_from_directory(path: impl AsRef<Path>) -> Result<Configuration> {
     let path = path.as_ref();
     let _span = tracing::info_span!("load_from_directory", ?path).entered();
@@ -80,7 +30,6 @@ pub fn load_from_directory(path: impl AsRef<Path>) -> Result<Configuration> {
     Ok(config)
 }
 
-/// All metadata loaded from disk, before assembling into Configuration.
 struct LoadedMetadata {
     common_modules: Vec<crate::common_module::CommonModule>,
     catalogs: Vec<MetadataObject>,
@@ -108,7 +57,6 @@ struct LoadedMetadata {
     reports: Vec<MetadataObject>,
 }
 
-/// Load all metadata types in parallel using rayon::scope.
 fn load_all_metadata_parallel(path: &Path) -> LoadedMetadata {
     let start = std::time::Instant::now();
     let common_modules = Mutex::new(Vec::new());
@@ -257,7 +205,6 @@ fn load_all_metadata_parallel(path: &Path) -> LoadedMetadata {
     result
 }
 
-/// Build Configuration from loaded metadata.
 fn build_configuration(loaded: LoadedMetadata) -> Configuration {
     let mut config = Configuration::new("Configuration");
 
@@ -337,11 +284,6 @@ fn build_configuration(loaded: LoadedMetadata) -> Configuration {
     config
 }
 
-// ============================================================================
-// Parallel loading functions
-// ============================================================================
-
-/// Load CommonModules in parallel, returning a Vec instead of mutating config.
 fn load_common_modules_parallel(dir: &Path) -> Vec<crate::common_module::CommonModule> {
     if !dir.exists() {
         return Vec::new();
@@ -412,58 +354,42 @@ fn load_common_modules_parallel(dir: &Path) -> Vec<crate::common_module::CommonM
         .collect()
 }
 
-/// Load Catalogs in parallel.
 fn load_catalogs_parallel(dir: &Path) -> Vec<MetadataObject> {
     load_metadata_objects_parallel(dir, xml_parser::parse_catalog_xml)
 }
 
-/// Load Documents in parallel.
 fn load_documents_parallel(dir: &Path) -> Vec<MetadataObject> {
     load_metadata_objects_parallel(dir, xml_parser::parse_document_xml)
 }
 
-/// Load BusinessProcesses in parallel.
 fn load_business_processes_parallel(dir: &Path) -> Vec<MetadataObject> {
     load_metadata_objects_parallel(dir, xml_parser::parse_business_process_xml)
 }
 
-/// Load Tasks in parallel.
 fn load_tasks_parallel(dir: &Path) -> Vec<MetadataObject> {
     load_metadata_objects_parallel(dir, xml_parser::parse_task_xml)
 }
 
-/// Load ExchangePlans in parallel.
 fn load_exchange_plans_parallel(dir: &Path) -> Vec<MetadataObject> {
     load_metadata_objects_parallel(dir, xml_parser::parse_exchange_plan_xml)
 }
 
-/// Load ChartsOfCharacteristicTypes in parallel.
 fn load_charts_of_characteristic_types_parallel(dir: &Path) -> Vec<MetadataObject> {
     load_metadata_objects_parallel(dir, xml_parser::parse_chart_of_characteristic_types_xml)
 }
 
-/// Load ChartsOfAccounts in parallel.
 fn load_charts_of_accounts_parallel(dir: &Path) -> Vec<MetadataObject> {
     load_metadata_objects_parallel(dir, xml_parser::parse_chart_of_accounts_xml)
 }
 
-/// Load DataProcessors in parallel.
 fn load_data_processors_parallel(dir: &Path) -> Vec<MetadataObject> {
     load_metadata_objects_parallel(dir, xml_parser::parse_data_processor_xml)
 }
 
-/// Load Reports in parallel.
 fn load_reports_parallel(dir: &Path) -> Vec<MetadataObject> {
     load_metadata_objects_parallel(dir, xml_parser::parse_report_xml)
 }
 
-/// Generic parallel loader for metadata objects.
-///
-/// Loads metadata from XML files. Supports two cases:
-/// 1. Directory + XML file (e.g., `Catalogs/Номенклатура/` + `Catalogs/Номенклатура.xml`)
-/// 2. XML file only (e.g., `Catalogs/ПоставляемыеДополнительныеОтчетыИОбработки.xml` without directory)
-///
-/// Some metadata objects (catalogs, documents without forms/modules) may only have XML files.
 fn load_metadata_objects_parallel<F>(dir: &Path, parser: F) -> Vec<MetadataObject>
 where
     F: Fn(&str) -> Result<MetadataObject> + Sync,
@@ -477,7 +403,6 @@ where
         Err(_) => return Vec::new(),
     };
 
-    // Collect names of directories (to avoid duplicates when processing XML files)
     let dir_names: std::collections::HashSet<String> = entries
         .iter()
         .filter_map(|entry| {
@@ -496,7 +421,6 @@ where
             let path = entry.path();
 
             if path.is_dir() {
-                // Case 1: Directory exists, look for corresponding XML file
                 let name = path.file_name()?.to_str()?;
                 let xml_path = dir.join(format!("{}.xml", name));
 
@@ -507,7 +431,6 @@ where
                 let xml = fs::read_to_string(&xml_path).ok()?;
                 let mut mdo = parser(&xml).ok()?;
 
-                // Load predefined items from Ext/Predefined.xml if exists
                 let predefined_path = path.join("Ext").join("Predefined.xml");
                 if predefined_path.exists() {
                     if let Ok(predefined_xml) = fs::read_to_string(&predefined_path) {
@@ -522,10 +445,8 @@ where
 
                 Some(mdo)
             } else if path.extension().and_then(|e| e.to_str()) == Some("xml") {
-                // Case 2: XML file without directory
                 let file_stem = path.file_stem()?.to_str()?;
 
-                // Skip if there's already a directory with this name (already processed above)
                 if dir_names.contains(file_stem) {
                     return None;
                 }
@@ -539,7 +460,6 @@ where
         .collect()
 }
 
-/// Load Enums in parallel.
 fn load_enums_parallel(dir: &Path) -> Vec<MetadataObject> {
     if !dir.exists() {
         return Vec::new();
@@ -564,7 +484,6 @@ fn load_enums_parallel(dir: &Path) -> Vec<MetadataObject> {
         .collect()
 }
 
-/// Load Constants in parallel.
 fn load_constants_parallel(dir: &Path) -> Vec<MetadataObject> {
     if !dir.exists() {
         return Vec::new();
@@ -589,7 +508,6 @@ fn load_constants_parallel(dir: &Path) -> Vec<MetadataObject> {
         .collect()
 }
 
-/// Load registers in parallel (generic for all register types).
 fn load_registers_parallel<F>(dir: &Path, parser: F) -> Vec<crate::register::Register>
 where
     F: Fn(&str) -> Result<crate::register::Register> + Sync,
@@ -633,7 +551,6 @@ fn load_calculation_registers_parallel(dir: &Path) -> Vec<crate::register::Regis
     load_registers_parallel(dir, xml_parser::parse_calculation_register_xml)
 }
 
-/// Load EventSubscriptions in parallel.
 fn load_event_subscriptions_parallel(
     dir: &Path,
 ) -> Vec<crate::event_subscription::EventSubscription> {
@@ -660,7 +577,6 @@ fn load_event_subscriptions_parallel(
         .collect()
 }
 
-/// Load ScheduledJobs in parallel.
 fn load_scheduled_jobs_parallel(dir: &Path) -> Vec<crate::scheduled_job::ScheduledJob> {
     if !dir.exists() {
         return Vec::new();
@@ -685,7 +601,6 @@ fn load_scheduled_jobs_parallel(dir: &Path) -> Vec<crate::scheduled_job::Schedul
         .collect()
 }
 
-/// Load Roles in parallel.
 fn load_roles_parallel(dir: &Path) -> Vec<crate::role::Role> {
     if !dir.exists() {
         return Vec::new();
@@ -708,7 +623,6 @@ fn load_roles_parallel(dir: &Path) -> Vec<crate::role::Role> {
             let xml = fs::read_to_string(&path).ok()?;
             let mut role = xml_parser::parse_role_xml(&xml).ok()?;
 
-            // Try to load Rights.xml
             let rights_path = dir.join(name).join("Ext").join("Rights.xml");
             if rights_path.exists() {
                 if let Ok(rights_xml) = fs::read_to_string(&rights_path) {
@@ -727,7 +641,6 @@ fn load_roles_parallel(dir: &Path) -> Vec<crate::role::Role> {
         .collect()
 }
 
-/// Load DefinedTypes in parallel.
 fn load_defined_types_parallel(dir: &Path) -> Vec<crate::defined_type::DefinedType> {
     if !dir.exists() {
         return Vec::new();
@@ -752,7 +665,6 @@ fn load_defined_types_parallel(dir: &Path) -> Vec<crate::defined_type::DefinedTy
         .collect()
 }
 
-/// Load HTTPServices in parallel.
 fn load_http_services_parallel(dir: &Path) -> Vec<crate::http_service::HTTPService> {
     if !dir.exists() {
         return Vec::new();
@@ -784,7 +696,6 @@ fn load_http_services_parallel(dir: &Path) -> Vec<crate::http_service::HTTPServi
         .collect()
 }
 
-/// Load WebServices in parallel.
 fn load_web_services_parallel(dir: &Path) -> Vec<crate::web_service::WebService> {
     if !dir.exists() {
         return Vec::new();
@@ -816,7 +727,6 @@ fn load_web_services_parallel(dir: &Path) -> Vec<crate::web_service::WebService>
         .collect()
 }
 
-/// Load simple metadata objects in parallel.
 fn load_simple_metadata_objects_parallel(dir: &Path, mdo_type: MdoType) -> Vec<MetadataObject> {
     if !dir.exists() {
         return Vec::new();
@@ -857,11 +767,9 @@ mod tests {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/designer");
         let config = load_from_directory(path).unwrap();
 
-        // Should load common modules (3 with .bsl + 1 protected with .bin)
         assert!(!config.common_modules().is_empty(), "No common modules loaded");
         assert_eq!(config.common_modules().len(), 4, "Expected 4 common modules");
 
-        // Check specific modules exist
         let global_server = config.find_common_module("ГлобальныйСерверныйМодуль");
         assert!(global_server.is_some(), "ГлобальныйСерверныйМодуль not found");
         let module = global_server.unwrap();
@@ -870,10 +778,8 @@ mod tests {
         assert!(module.uri().is_some(), "Should have URI");
         assert_eq!(module.uri().unwrap(), "CommonModules/ГлобальныйСерверныйМодуль/Ext/Module.bsl");
 
-        // Check registers loaded
         assert!(!config.registers().is_empty(), "No registers loaded");
 
-        // Check InformationRegisters loaded as full Register objects
         let register = config.find_register("РегистрСведений1");
         if let Some(reg) = register {
             assert!(reg.is_information_register(), "Should be InformationRegister");
@@ -885,16 +791,13 @@ mod tests {
             );
         }
 
-        // Check Catalogs and Documents loaded as metadata objects
         assert!(!config.metadata_objects().is_empty(), "No metadata objects loaded");
 
-        // Check that Catalog has attributes loaded
         let catalog = config.metadata_objects().iter().find(|obj| {
             obj.mdo_type == crate::metadata_object::MdoType::Catalog && obj.name == "Справочник1"
         });
 
         if let Some(cat) = catalog {
-            // Should have 3 custom attributes + standard attributes
             assert!(
                 cat.attributes.len() >= 3,
                 "Expected at least 3 custom attributes in Справочник1"
@@ -953,7 +856,6 @@ mod tests {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/designer");
         let config = load_from_directory(path).unwrap();
 
-        // Check protected module is loaded
         let protected_module = config.find_common_module("ЗащищенныйМодуль");
         assert!(protected_module.is_some(), "ЗащищенныйМодуль not found");
 
@@ -964,9 +866,8 @@ mod tests {
         assert!(module.is_server_call(), "Should have server call");
     }
 
-    /// Test loading enum values from doc3 project
     #[test]
-    #[ignore] // Only run when doc3 project is available
+    #[ignore]
     fn test_load_enum_values_from_doc3() {
         let doc3_path = concat!(env!("HOME"), "/src/doc3/src/cf");
 
@@ -977,7 +878,6 @@ mod tests {
 
         let config = load_from_directory(doc3_path).expect("Failed to load doc3 configuration");
 
-        // Find Enums
         let enums: Vec<_> = config
             .metadata_objects()
             .iter()
@@ -987,13 +887,11 @@ mod tests {
         println!("Total Enums loaded: {}", enums.len());
         assert!(!enums.is_empty(), "No enums loaded");
 
-        // Print first 10 enums
         println!("\nFirst 10 Enums:");
         for (i, enum_obj) in enums.iter().take(10).enumerate() {
             println!("  {}: {} (values: {})", i + 1, enum_obj.name, enum_obj.enum_values.len());
         }
 
-        // Check for specific enum
         let target_name = "СпособыУстановкиКурсаВалюты";
         let target_enum_specific = enums.iter().find(|e| e.name == target_name);
 
@@ -1011,28 +909,23 @@ mod tests {
             }
         }
 
-        // Find specific enum - use first one with values
         let target_enum = enums.iter().find(|e| !e.enum_values.is_empty());
 
         if let Some(enum_obj) = target_enum {
             println!("✅ Found enum: {}", enum_obj.name);
             println!("  EnumValues count: {}", enum_obj.enum_values.len());
 
-            // Check that enum values are loaded
             assert!(!enum_obj.enum_values.is_empty(), "EnumValues should not be empty");
 
-            // Print first 5 enum values
             println!("  First 5 EnumValues:");
             for (i, ev) in enum_obj.enum_values.iter().take(5).enumerate() {
                 println!("    {}: {} (uuid: {})", i + 1, ev.name, ev.uuid);
             }
 
-            // Test find_enum_value method
             if let Some(first_value) = enum_obj.enum_values.first() {
                 let found = enum_obj.find_enum_value(&first_value.name);
                 assert!(found.is_some(), "find_enum_value should work");
 
-                // Test case-insensitive search
                 let found_lower = enum_obj.find_enum_value(&first_value.name.to_lowercase());
                 assert!(found_lower.is_some(), "find_enum_value should be case-insensitive");
             }
@@ -1050,7 +943,6 @@ mod tests {
         }
         let config = load_from_directory(path).unwrap();
 
-        // КартыЛояльности: check Партнер, Статус
         let kl = config
             .metadata_objects()
             .iter()
@@ -1066,7 +958,6 @@ mod tests {
             println!("КартыЛояльности not found in metadata");
         }
 
-        // СостояниеАдресовЭлектроннойПочты: check dims/resources
         let reg =
             config.registers().iter().find(|r| r.name() == "СостояниеАдресовЭлектроннойПочты");
         if let Some(reg) = reg {
@@ -1089,7 +980,6 @@ mod tests {
             println!("Register not found");
         }
 
-        // Партнеры.КонтактнаяИнформация: check АдресЭП, Вид
         let p = config
             .metadata_objects()
             .iter()
@@ -1108,9 +998,8 @@ mod tests {
         }
     }
 
-    /// Test loading from doc3 project (only run when doc3 is available)
     #[test]
-    #[ignore] // Only run when doc3 project is available
+    #[ignore]
     fn test_load_from_doc3_project() {
         let doc3_path = concat!(env!("HOME"), "/src/doc3/src/cf");
 
@@ -1123,19 +1012,16 @@ mod tests {
 
         println!("Total registers loaded: {}", config.registers().len());
 
-        // Find InformationRegisters
         let info_registers: Vec<_> =
             config.registers().iter().filter(|r| r.is_information_register()).collect();
 
         println!("InformationRegisters count: {}", info_registers.len());
 
-        // List first 20 registers to see what's loaded
         println!("\nFirst 20 InformationRegisters:");
         for (i, reg) in info_registers.iter().take(20).enumerate() {
             println!("  {}: {}", i + 1, reg.name());
         }
 
-        // Search for registers containing "Значения" or "Действий" or "Писем"
         println!("\nRegisters containing 'Значения':");
         for reg in info_registers.iter() {
             if reg.name().contains("Значения") {
@@ -1157,7 +1043,6 @@ mod tests {
             }
         }
 
-        // Look for the specific register user asked about
         let target_register = config.find_register("ЗначенияДействийПриОбработкеПисем");
 
         if let Some(register) = target_register {
@@ -1185,12 +1070,8 @@ mod tests {
         }
     }
 
-    /// Test to verify that catalogs without directories (XML-only) are loaded correctly.
-    ///
-    /// Some metadata objects like catalogs without forms/modules exist only as XML files.
-    /// The loader must handle this case.
     #[test]
-    #[ignore] // Only run when doc3 project is available
+    #[ignore]
     fn test_catalog_xml_only_without_directory() {
         let doc3_path = concat!(env!("HOME"), "/src/doc3/src/cf");
 
@@ -1201,10 +1082,8 @@ mod tests {
 
         let config = load_from_directory(doc3_path).expect("Failed to load doc3 configuration");
 
-        // This catalog exists only as XML file without a subdirectory
         let catalog_name = "ПоставляемыеДополнительныеОтчетыИОбработки";
 
-        // Verify XML exists but directory doesn't
         let xml_path = format!("{}/Catalogs/{}.xml", doc3_path, catalog_name);
         let dir_path = format!("{}/Catalogs/{}", doc3_path, catalog_name);
         assert!(std::path::Path::new(&xml_path).exists(), "XML file should exist");
@@ -1213,7 +1092,6 @@ mod tests {
             "Directory should NOT exist (this is the test case)"
         );
 
-        // Catalog should be loaded from XML file only
         let exists =
             config.has_metadata_object(crate::metadata_object::MdoType::Catalog, catalog_name);
         assert!(exists, "Catalog '{}' should be loaded from XML-only file", catalog_name);

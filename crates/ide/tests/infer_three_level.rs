@@ -1,15 +1,3 @@
-//! Behavioural tests for three-segment manager-chain calls
-//! (`Документы.ПКО.СоздатьДокумент()`) after Task 7 routes them through
-//! [`hir_ty::method_resolution::resolve_three_level_call`].
-//!
-//! Fixtures put the exported manager-module method behind the canonical
-//! Designer-format path (`Documents/<Name>/Ext/ManagerModule.bsl`); the
-//! inference run then observes the diagnostic surface at the call-site in
-//! `/test.bsl`. Because `infer` goes through `Resolver::resolve_three_level_method`
-//! — which reads `db.configurations(...)` through Salsa — toggling the
-//! workspace config set with `set_all_config_paths` re-runs inference. The
-//! last test locks that invalidation path in.
-
 use hir::{DefDatabase, HirDatabase, InferenceDiagnostic, ModuleId, UnresolvedMethodKind};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
@@ -76,9 +64,6 @@ const MANAGER_FIXTURE: &str = r#"
 
 #[test]
 fn three_level_call_resolves_against_manager_module() {
-    // Manager method exists with arity 2, call passes 2 args → clean
-    // inference, no diagnostics. Positive proof that
-    // `resolve_three_level_call` hit the manager module's symbol_tree.
     let (db, file_id) = setup(MANAGER_FIXTURE);
     assert!(
         unresolved_kinds(&db, file_id).is_empty(),
@@ -94,9 +79,6 @@ fn three_level_call_resolves_against_manager_module() {
 
 #[test]
 fn three_level_arity_mismatch_emits_diagnostic() {
-    // Same manager method, but call now passes zero args — arity check must
-    // fire, and since the method did resolve no UnresolvedMethodCall is
-    // emitted.
     let fixture = r#"
 //- /Documents/ПКО/Ext/ManagerModule.bsl
 Функция ПолучитьСсылку(Код, Имя) Экспорт
@@ -122,10 +104,6 @@ fn three_level_arity_mismatch_emits_diagnostic() {
 
 #[test]
 fn three_level_missing_mdo_emits_unresolved() {
-    // The manager module does not exist; resolution collapses to
-    // MethodNotFound. Inference must not silently type the call as Unknown
-    // — the diagnostic is the observable signal that Task 7 routed the
-    // call through the resolver.
     let fixture = r#"
 //- /test.bsl
 Процедура Тест()
@@ -147,8 +125,6 @@ fn three_level_missing_mdo_emits_unresolved() {
 
 #[test]
 fn three_level_non_exported_method_emits_method_not_export() {
-    // Same fixture, method now missing Экспорт — resolver returns the
-    // MethodId with is_export=false, inference surfaces MethodNotExport.
     let fixture = r#"
 //- /Documents/ПКО/Ext/ManagerModule.bsl
 Функция ПолучитьСсылку(Код, Имя)
@@ -174,15 +150,8 @@ fn three_level_non_exported_method_emits_method_not_export() {
 
 #[test]
 fn three_level_invalidates_on_config_change() {
-    // Locks the Salsa dependency chain for 3-level calls: registering a
-    // bogus configuration forces the visibility gate in
-    // `resolve_three_level_method` to refuse the MDO (no declaration in
-    // any visible config), so the diagnostic surface flips. Resetting the
-    // config list restores the baseline — proving invalidation fires in
-    // both directions.
     let (mut db, file_id) = setup(MANAGER_FIXTURE);
 
-    // Baseline: no config → path-based lookup succeeds, clean inference.
     assert!(unresolved_kinds(&db, file_id).is_empty(), "baseline must be clean");
 
     db.set_all_config_paths(vec![(None, std::path::PathBuf::from("/does-not-exist"))]);

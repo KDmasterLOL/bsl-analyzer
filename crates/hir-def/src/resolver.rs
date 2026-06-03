@@ -1,23 +1,3 @@
-//! Name resolution for BSL.
-//!
-//! The Resolver provides a unified API for resolving names at different levels:
-//! - Builtins: platform global functions (never shadowed by user code)
-//! - Module-level: procedures, functions, module variables
-//! - Expression-level: parameters, local variables
-//!
-//! ## Resolution Order
-//!
-//! BSL platform globals take precedence over local variables — declaring
-//! `Перем Сообщить` does not shadow the platform `Сообщить()` call. The
-//! Resolver reflects this by checking `Scope::Builtins` **first**,
-//! regardless of its position in the scope stack. For the remaining
-//! scopes the usual lexical order applies:
-//!
-//! 1. `Scope::Builtins` (platform globals) — highest priority
-//! 2. `Scope::ExprScope` (parameters, local variables) — innermost user scope
-//! 3. `Scope::ModuleScope` (methods, module variables)
-//! 4. `Scope::WorkspaceScope` (exported methods from other modules) — outermost
-
 use std::sync::Arc;
 
 use bsl_config::VisibleConfig;
@@ -26,10 +6,6 @@ use crate::configs::ConfigsDatabase;
 use crate::scope::{ExprScopes, ScopeId};
 use crate::{DefDatabase, MethodId, ModuleId, Name, PathResolution, QualifiedName, VariableId};
 
-/// Resolver for name resolution.
-///
-/// The resolver maintains a stack of scopes (module scope + expression scopes)
-/// and resolves names by walking up the scope chain.
 pub struct Resolver {
     #[doc(hidden)]
     pub scopes: Vec<Scope>,
@@ -37,62 +13,34 @@ pub struct Resolver {
 
 #[doc(hidden)]
 pub enum Scope {
-    /// Module-level scope (procedures, functions, module variables).
     ModuleScope(ModuleId),
 
-    /// Expression scope (parameters, local variables).
     ExprScope { scopes: Arc<ExprScopes>, scope_id: ScopeId },
 
-    /// Workspace-wide scope for cross-module resolution (exported symbols).
-    ///
-    /// Note: Full cross-module resolution requires ModuleGraph (Iteration 9.5).
-    /// For now, this provides the infrastructure.
     WorkspaceScope,
 
-    /// Platform built-in scope (global functions from `bsl-platform`).
-    ///
-    /// Consulted before any user scope because BSL platform globals are not
-    /// shadowed by local or module-level names (e.g. a local `Сообщить`
-    /// variable does not hide the platform `Сообщить()` function).
     Builtins,
 }
 
 impl Resolver {
-    /// Create a resolver for a module.
     pub fn for_module(module_id: ModuleId) -> Self {
         Resolver { scopes: vec![Scope::ModuleScope(module_id)] }
     }
 
-    /// Create a resolver with workspace scope.
-    ///
-    /// This allows resolving exported methods from other modules.
-    /// Note: Full cross-module resolution requires ModuleGraph (Iteration 9.5).
     pub fn with_workspace_scope(module_id: ModuleId) -> Self {
         Resolver { scopes: vec![Scope::WorkspaceScope, Scope::ModuleScope(module_id)] }
     }
 
-    /// Create a resolver with builtins, workspace and module scopes.
-    ///
-    /// Preferred constructor for callers that perform unqualified name
-    /// resolution (hover, completion, type inference), because it makes
-    /// platform globals visible ahead of user scopes.
     pub fn with_builtins_and_workspace(module_id: ModuleId) -> Self {
         Resolver {
             scopes: vec![Scope::Builtins, Scope::WorkspaceScope, Scope::ModuleScope(module_id)],
         }
     }
 
-    /// Returns `true` if this resolver includes the builtins scope.
     fn has_builtins(&self) -> bool {
         self.scopes.iter().any(|s| matches!(s, Scope::Builtins))
     }
 
-    /// Resolve a name against the platform builtin table.
-    ///
-    /// Returns `Some(name)` when the identifier matches a platform global
-    /// function (e.g. `Сообщить`, `НачатьТранзакцию`). The check is
-    /// case-insensitive and goes through the static `bsl-platform` index,
-    /// matching the behaviour of existing hover/completion call sites.
     fn resolve_builtin(&self, name: &Name) -> Option<Name> {
         if !self.has_builtins() {
             return None;
@@ -106,37 +54,11 @@ impl Resolver {
         }
     }
 
-    /// Is `module_name` declared as a CommonModule in any visible configuration?
-    ///
-    /// Configs are iterated in reverse — extensions (appended to the list
-    /// after main) are consulted first. The `any(...)` short-circuit means
-    /// the reverse order does not change the *bool* result, but it encodes
-    /// the intended union-wins-extension priority for future expansions.
-    ///
-    /// **Known gap:** This helper only answers yes/no. The actual `FileId`
-    /// returned by [`resolve_cross_module`] still comes from the path-based
-    /// `module_index`, which is last-write-wins on same-named collisions
-    /// between main and extensions. Per-config `FileId` tagging is tracked
-    /// separately and is out of scope for Task 1.6.
-    ///
-    /// [`resolve_cross_module`]: Resolver::resolve_cross_module
     fn module_visible_in_configs(configs: &[VisibleConfig], module_name: &Name) -> bool {
         let needle = module_name.as_str();
         configs.iter().rev().any(|cfg| cfg.configuration.find_common_module(needle).is_some())
     }
 
-    /// Is `mdo_name` a metadata object of `mdo_type` in any visible
-    /// configuration? Same reverse-iteration rule as
-    /// [`Self::module_visible_in_configs`].
-    ///
-    /// Probes both [`bsl_metadata::Configuration::find_metadata_object`]
-    /// (objects: `Catalog`, `Document`, `Enum`, `Task`, …) and
-    /// [`bsl_metadata::Configuration::find_register_by_type_and_name`]
-    /// (registers: `InformationRegister`, `AccumulationRegister`, …).
-    /// Without the register branch the gate would falsely reject any
-    /// register MDO that lives in `registers` rather than
-    /// `metadata_objects`, blocking workspace `ManagerModule.bsl`
-    /// resolution for register kinds (Phase A).
     fn mdo_visible_in_configs(
         configs: &[VisibleConfig],
         mdo_type: bsl_metadata::MdoType,
@@ -149,15 +71,11 @@ impl Resolver {
         })
     }
 
-    /// Add an expression scope to the resolver.
-    ///
-    /// This is used when resolving names inside a procedure/function body.
     pub fn push_expr_scope(mut self, scopes: Arc<ExprScopes>, scope_id: ScopeId) -> Self {
         self.scopes.push(Scope::ExprScope { scopes, scope_id });
         self
     }
 
-    /// Get the module ID if this is a module-level resolver.
     pub fn module_id(&self) -> Option<ModuleId> {
         for scope in &self.scopes {
             if let Scope::ModuleScope(module_id) = scope {
@@ -167,9 +85,6 @@ impl Resolver {
         None
     }
 
-    /// Resolve a local name (parameter or local variable).
-    ///
-    /// Returns None if the name is not found in any expression scope.
     pub fn resolve_local(&self, name: &Name) -> Option<ResolvedLocal> {
         for scope in self.scopes.iter().rev() {
             if let Scope::ExprScope { scopes, scope_id } = scope {
@@ -182,10 +97,6 @@ impl Resolver {
         None
     }
 
-    /// Resolve a method (procedure or function) in module scope.
-    ///
-    /// Searches the current module's SymbolTree for a method with the given name.
-    /// Returns the MethodId if found.
     pub fn resolve_module_method(&self, db: &dyn DefDatabase, name: &Name) -> Option<MethodId> {
         let module_id = self.module_id()?;
         let symbol_tree = db.symbol_tree(module_id);
@@ -193,10 +104,6 @@ impl Resolver {
         Some(method.id)
     }
 
-    /// Resolve a module-level variable.
-    ///
-    /// Searches the current module's SymbolTree for a variable with the given name.
-    /// Returns the VariableId if found.
     pub fn resolve_module_variable(&self, db: &dyn DefDatabase, name: &Name) -> Option<VariableId> {
         let module_id = self.module_id()?;
         let symbol_tree = db.symbol_tree(module_id);
@@ -204,20 +111,6 @@ impl Resolver {
         Some(variable.id)
     }
 
-    /// Visibility-aware probe for "is `module_name` a user CommonModule?".
-    ///
-    /// Mirrors the two-stage gate inside [`Self::resolve_qualified_method`]:
-    /// (1) the module name must be declared in at least one registered
-    /// configuration, and (2) the module-index must resolve it to a file.
-    /// A raw `module_index().resolve_common_module(...)` probe is **not**
-    /// equivalent — extensions or main configurations can hide a module
-    /// that's still present in the workspace index, and form-self callers
-    /// must respect the same visibility semantics or they'd silently
-    /// shadow a real CommonModule that the user can't actually call.
-    ///
-    /// Returns `false` when the resolver has no module scope or no
-    /// workspace scope (the same refusal `resolve_qualified_method` issues
-    /// — cross-module questions need both).
     pub fn user_common_module_exists(&self, db: &dyn ConfigsDatabase, module_name: &Name) -> bool {
         if !self.scopes.iter().any(|s| matches!(s, Scope::WorkspaceScope)) {
             return false;
@@ -236,37 +129,6 @@ impl Resolver {
         db.module_index(source_root_id).resolve_common_module(module_name).is_some()
     }
 
-    /// Resolve a bare name as an assignment-statement target.
-    ///
-    /// Narrower than [`Self::resolve_name`] in two ways:
-    ///
-    /// - **Builtins are not classified here.** A platform global like
-    ///   `Сообщить` returns [`AssignmentResolution::Unknown`] rather
-    ///   than a `Builtin` arm. Diagnostics consuming this API
-    ///   (`CommonModuleAssign`, future `ThisObjectAssign` /
-    ///   `ReadOnlyPropertyAssignment`) only care whether the LHS is a
-    ///   visible CommonModule, a module variable, or a local; the
-    ///   runtime semantics of "may a user assign over a platform
-    ///   global?" is out of scope and intentionally not encoded.
-    /// - **Methods are not classified either.** A two-segment
-    ///   `CommonModule.Method = ...` is field-on-receiver syntax that
-    ///   BSL rejects via separate paths, and a bare-name `Method = ...`
-    ///   is implicit-local declaration in BSL — handled by lowering,
-    ///   not by an assignment-target diagnostic. The bare-name resolver
-    ///   therefore drops methods from the resolution cone.
-    ///
-    /// Resolution order (first match wins):
-    /// 1. `Local` — local `Перем` introduced inside the body.
-    /// 2. `Param` — procedure / function parameter.
-    /// 3. `ModuleVariable` — module-level `Перем`.
-    /// 4. `CommonModule` — name resolves to a CommonModule visible
-    ///    across the main configuration + every registered extension.
-    /// 5. `Unknown` — anything else.
-    ///
-    /// `Local` and `Param` are surfaced separately so consumers that
-    /// care about the exact provenance (rename refactor, hover) can
-    /// keep that information; consumers that only need "is this name
-    /// shadowed?" can collapse both into a single arm.
     pub fn resolve_assignment_target(
         &self,
         db: &dyn ConfigsDatabase,
@@ -290,166 +152,109 @@ impl Resolver {
         AssignmentResolution::Unknown
     }
 
-    /// Resolve a name at any level (builtin, local, module, workspace).
-    ///
-    /// Resolution order (first match wins):
-    /// 1. Builtins (platform globals — highest priority, not shadowed)
-    /// 2. Local scope (parameters, local variables)
-    /// 3. Module scope (methods, module variables)
-    /// 4. Workspace scope (cross-module, not yet implemented here)
     pub fn resolve_name(&self, db: &dyn DefDatabase, name: &Name) -> Option<Resolution> {
-        // Builtins take precedence over everything (BSL semantics: platform
-        // globals are not shadowed by local/module names).
         if let Some(builtin_name) = self.resolve_builtin(name) {
             return Some(Resolution::Builtin(builtin_name));
         }
 
-        // Try local scope
         if let Some(local) = self.resolve_local(name) {
             return Some(Resolution::Local(local));
         }
 
-        // Try module method
         if let Some(method_id) = self.resolve_module_method(db, name) {
             return Some(Resolution::Method(method_id));
         }
 
-        // Try module variable
         if let Some(variable_id) = self.resolve_module_variable(db, name) {
             return Some(Resolution::Variable(variable_id));
         }
 
-        // TODO: Workspace scope (Iteration 9.5 with ModuleGraph)
-
         None
     }
 
-    /// Resolve a qualified path (e.g., Module.Method or Documents.PKO.Create).
-    ///
-    /// Performs segment-by-segment resolution.
-    ///
-    /// # Resolution Strategy
-    ///
-    /// - **1 segment:** Try local resolution (parameter/variable/method)
-    /// - **2 segments:** Module.Method → cross-module resolution
-    /// - **3 segments:** Documents.PKO.Create → manager module resolution
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// // Single: local name resolution
-    /// let path = QualifiedName::from_segments([Name::new("Переменная")]);
-    /// let resolution = resolver.resolve_path(db, &path);
-    ///
-    /// // Two: cross-module resolution
-    /// let path = QualifiedName::from_segments([Name::new("ОбщийМодуль"), Name::new("Метод")]);
-    /// let resolution = resolver.resolve_path(db, &path);
-    ///
-    /// // Three: manager module resolution
-    /// let path = QualifiedName::from_segments([
-    ///     Name::new("Документы"),
-    ///     Name::new("ПКО"),
-    ///     Name::new("Создать")
-    /// ]);
-    /// let resolution = resolver.resolve_path(db, &path);
-    /// match resolution {
-    ///     PathResolution::Method(id) => println!("Found method: {:?}", id),
-    ///     PathResolution::Unresolved(_) => println!("Not found"),
-    ///     _ => {}
-    /// }
-    /// ```
     pub fn resolve_path(&self, db: &dyn ConfigsDatabase, path: &QualifiedName) -> PathResolution {
         let segments = path.segments();
 
         match segments.len() {
-            0 => {
-                // Empty path - invalid
-                PathResolution::Unresolved(path.clone())
-            }
+            0 => PathResolution::Unresolved(path.clone()),
 
             1 => {
-                // Single segment - try unified resolution (builtin > local > module)
                 if let Some(resolution) = self.resolve_name(db, &segments[0]) {
                     return match resolution {
                         Resolution::Builtin(name) => PathResolution::Builtin(name),
                         Resolution::Method(id) => PathResolution::Method(id),
                         Resolution::Variable(id) => PathResolution::Variable(id),
-                        Resolution::Local(_) => {
-                            // Local variables cannot be resolved as paths
-                            PathResolution::Unresolved(path.clone())
-                        }
+                        Resolution::Local(_) => PathResolution::Unresolved(path.clone()),
                     };
                 }
                 PathResolution::Unresolved(path.clone())
             }
 
-            2 => {
-                // Two segments: Module.Method
-                self.resolve_two_level(db, &segments[0], &segments[1])
-            }
+            2 => self.resolve_two_level(db, &segments[0], &segments[1]),
 
-            3 => {
-                // Three segments: Documents.PKO.Create
-                self.resolve_three_level(db, &segments[0], &segments[1], &segments[2])
-            }
+            3 => self.resolve_three_level(db, &segments[0], &segments[1], &segments[2]),
 
-            _ => {
-                // More than 3 segments - not supported in BSL
-                PathResolution::Unresolved(path.clone())
-            }
+            _ => PathResolution::Unresolved(path.clone()),
         }
     }
 
-    /// Resolve two-level path: Module.Method
-    ///
-    /// Checks if this resolver has WorkspaceScope, and if so, attempts
-    /// cross-module resolution.
     fn resolve_two_level(
         &self,
         db: &dyn ConfigsDatabase,
         module_name: &Name,
         method_name: &Name,
     ) -> PathResolution {
-        // Check if workspace scope is available
         for scope in &self.scopes {
             if let Scope::WorkspaceScope = scope {
                 return self.resolve_cross_module(db, module_name, method_name);
             }
         }
 
-        // No workspace scope - cannot resolve cross-module
         PathResolution::Unresolved(QualifiedName::from_segments([
             module_name.clone(),
             method_name.clone(),
         ]))
     }
 
-    /// Method-oriented cross-module resolution: `CommonModule.Method`.
-    ///
-    /// Shared implementation for both the Definition-layer (`resolve_path`,
-    /// which collapses the outcome into [`PathResolution`]) and the
-    /// type-inference layer (which needs the `is_export` flag and the
-    /// failure reason to emit precise diagnostics).
-    ///
-    /// # Algorithm
-    ///
-    /// 1. Require workspace scope — without it this resolver is module-local.
-    /// 2. Consult `db.configurations(file_id)`; if any are registered the
-    ///    module name must be declared in at least one (CFE union).
-    /// 3. Resolve the module file via the path-based `module_index`.
-    /// 4. Look up the method in `symbol_tree` and return both id and export
-    ///    flag — non-exported methods are still returned so callers can
-    ///    distinguish "not found" from "found but not exported".
-    ///
-    /// Tests and early workspaces have no configurations registered yet; in
-    /// that case (empty `configurations()`) the resolver falls back to pure
-    /// `module_index` lookup, preserving prior behaviour.
-    ///
-    /// # Performance
-    ///
-    /// - **Metadata check:** O(K·logM) where K = #configs, M = #modules per config
-    /// - **File lookup:** O(1) via `module_index`
-    /// - **Method lookup:** O(1) via `symbol_tree`
+    /// Locate the common module `module_name` is declared in (config visibility +
+    /// path index), without looking at any method. Shared by
+    /// [`Self::resolve_qualified_method`] and the graph-index build, so both agree
+    /// on which module a qualified call targets; only the method-lookup step
+    /// (symbol tree vs. the resident graph index) differs.
+    pub(crate) fn locate_common_module(
+        &self,
+        db: &dyn ConfigsDatabase,
+        module_name: &Name,
+    ) -> Result<ModuleId, QualifiedMethodError> {
+        if !self.scopes.iter().any(|s| matches!(s, Scope::WorkspaceScope)) {
+            tracing::warn!("locate_common_module called without workspace scope; refusing");
+            return Err(QualifiedMethodError::NotFound);
+        }
+
+        let module_id = self.module_id().ok_or_else(|| {
+            tracing::warn!("locate_common_module called without module scope");
+            QualifiedMethodError::NotFound
+        })?;
+
+        let file_id = module_id.file_id;
+
+        let configurations = db.configurations(file_id);
+        if !configurations.is_empty()
+            && !Self::module_visible_in_configs(&configurations, module_name)
+        {
+            return Err(QualifiedMethodError::NotVisibleInConfigs);
+        }
+
+        let source_root_id = db.file_source_root_input(file_id).source_root_id(db);
+        let module_index = db.module_index(source_root_id);
+
+        let target_file_id = module_index
+            .resolve_common_module(module_name)
+            .ok_or(QualifiedMethodError::NotFound)?;
+
+        Ok(crate::ModuleId::new(target_file_id))
+    }
+
     pub fn resolve_qualified_method(
         &self,
         db: &dyn ConfigsDatabase,
@@ -459,98 +264,17 @@ impl Resolver {
         let _span =
             tracing::info_span!("resolve_qualified_method", %module_name, %method_name).entered();
 
-        // Cross-module resolution requires workspace scope.
-        if !self.scopes.iter().any(|s| matches!(s, Scope::WorkspaceScope)) {
-            tracing::warn!("resolve_qualified_method called without workspace scope; refusing");
-            return Err(QualifiedMethodError::NotFound);
-        }
-
-        let module_id = self.module_id().ok_or_else(|| {
-            tracing::warn!("resolve_qualified_method called without module scope");
-            QualifiedMethodError::NotFound
-        })?;
-
-        let file_id = module_id.file_id;
-
-        // Visibility gate: any registered configuration must declare
-        // `module_name`. Extensions iterate first (reverse registration order)
-        // so a module declared in both main and an extension resolves to the
-        // extension's declaration — the union-wins-extension rule.
-        let configurations = db.configurations(file_id);
-        if !configurations.is_empty()
-            && !Self::module_visible_in_configs(&configurations, module_name)
-        {
-            tracing::debug!(
-                "resolve_qualified_method: module '{}' is not declared in any visible \
-                 configuration (main + {} extensions); refusing",
-                module_name,
-                configurations.iter().filter(|c| c.name.is_some()).count()
-            );
-            return Err(QualifiedMethodError::NotVisibleInConfigs);
-        }
-
-        // Path-based module lookup (O(1) — no BSL parsing).
-        let source_root_id = db.file_source_root_input(file_id).source_root_id(db);
-        let module_index = db.module_index(source_root_id);
-
-        let target_file_id = module_index.resolve_common_module(module_name).ok_or_else(|| {
-            tracing::debug!(
-                "resolve_qualified_method: module '{}' NOT found in module_index",
-                module_name
-            );
-            QualifiedMethodError::NotFound
-        })?;
-
-        tracing::debug!(
-            "resolve_qualified_method: module '{}' resolved to FileId({})",
-            module_name,
-            target_file_id.index()
-        );
-
-        // Method lookup in the resolved module.
-        let target_module_id = crate::ModuleId::new(target_file_id);
+        let target_module_id = self.locate_common_module(db, module_name)?;
         let symbol_tree = db.symbol_tree(target_module_id);
-        let method_symbol = symbol_tree.find_method(method_name).ok_or_else(|| {
-            tracing::debug!(
-                "resolve_qualified_method: module '{}' found but method '{}' NOT found",
-                module_name,
-                method_name
-            );
-            QualifiedMethodError::NotFound
-        })?;
+        let method_symbol =
+            symbol_tree.find_method(method_name).ok_or(QualifiedMethodError::NotFound)?;
 
-        tracing::debug!(
-            "resolve_qualified_method: SUCCESS - '{}.{}' (export = {})",
-            module_name,
-            method_name,
-            method_symbol.is_export
-        );
         Ok(QualifiedMethodResolution {
             method_id: method_symbol.id,
             is_export: method_symbol.is_export,
         })
     }
 
-    /// Adapter from the method-oriented resolver to [`PathResolution`].
-    ///
-    /// # Navigation vs inference divergence
-    ///
-    /// `PathResolution` is consumed by goto / hover / completion, which
-    /// must not surface callees that are unreachable from the caller's
-    /// module — so non-exported methods collapse to `Unresolved`. Type
-    /// inference calls [`Self::resolve_qualified_method`] directly because
-    /// it *does* need to distinguish "not exported" from "not found" to
-    /// emit the richer `MethodNotExport` diagnostic. This asymmetry is
-    /// intentional and covered by:
-    ///
-    /// - `non_exported_method_reports_method_not_export`
-    ///   (`crates/ide/tests/resolve_qualified_call.rs`) — inference path.
-    /// - Definition-layer goto returns `None` via the
-    ///   `PathResolution::Unresolved` arm in `hir::Semantics`.
-    ///
-    /// If a future consumer of `resolve_path` needs to distinguish the
-    /// two, extend `PathResolution` with a `NotExported(MethodId)` variant
-    /// rather than duplicating resolution logic.
     fn resolve_cross_module(
         &self,
         db: &dyn ConfigsDatabase,
@@ -569,43 +293,6 @@ impl Resolver {
         }
     }
 
-    /// Resolve a three-level qualified method call
-    /// (`Документы.ПКО.СоздатьДокумент`) to a [`QualifiedMethodResolution`].
-    ///
-    /// Public counterpart of [`Self::resolve_qualified_method`] for the
-    /// 3-segment manager chain. Returns both the `MethodId` and the
-    /// `is_export` flag so the type-inference layer can emit a precise
-    /// `MethodNotExport` diagnostic without running a second lookup.
-    ///
-    /// # Algorithm
-    ///
-    /// 1. `MdoType::from_plural(mdo_type_plural)` — unknown plural collapses
-    ///    to [`QualifiedMethodError::NotFound`].
-    /// 2. `ManagerType::from_mdo_type` — kinds without a manager module
-    ///    (`Cube`, `DimensionTable`, `CommonModule`) return `NotFound`.
-    /// 3. Require module scope (caller needs to be inside a module).
-    /// 4. Consult `db.configurations(file_id)` — when at least one
-    ///    configuration is registered, the MDO must be declared (main + CFE
-    ///    union). Empty config lists skip the gate so fixture-only tests
-    ///    keep resolving through path-based lookup.
-    /// 5. Resolve the manager-module `FileId` via `module_index`.
-    /// 6. Look up the method in the target `symbol_tree` by name.
-    ///
-    /// Non-exported methods are still returned (`is_export: false`) so
-    /// callers can surface a dedicated `MethodNotExport` diagnostic.
-    ///
-    /// # Salsa invalidation
-    ///
-    /// Reads `db.configurations(...)` (CFE gate) and `db.symbol_tree(...)`
-    /// through Salsa — every consumer's `infer` / `resolve_path` transitively
-    /// depends on both, so changes to the workspace config set or the target
-    /// symbol tree invalidate correctly.
-    ///
-    /// # Performance
-    ///
-    /// - Module lookup: O(1) via `module_index`.
-    /// - Method lookup: O(1) via `symbol_tree`.
-    /// - Total: ~1-5ms first call, <10μs cached.
     pub fn resolve_three_level_method(
         &self,
         db: &dyn ConfigsDatabase,
@@ -613,91 +300,78 @@ impl Resolver {
         mdo_name: &Name,
         method_name: &Name,
     ) -> Result<QualifiedMethodResolution, QualifiedMethodError> {
-        let _span = tracing::info_span!(
-            "resolve_three_level_method",
-            mdo_type = %mdo_type_plural,
-            mdo_name = %mdo_name,
-            method = %method_name
-        )
-        .entered();
-
-        // Step 1: Parse plural form → MdoType
         let mdo_type =
             bsl_metadata::MdoType::from_plural(mdo_type_plural.as_str()).ok_or_else(|| {
                 tracing::debug!("Unknown MDO type plural: {}", mdo_type_plural);
                 QualifiedMethodError::NotFound
             })?;
 
-        // Step 2: Convert MdoType → ManagerType
         let manager_type = crate::body::ManagerType::from_mdo_type(mdo_type).ok_or_else(|| {
-            // Types without manager modules (Cube, DimensionTable, CommonModule).
             tracing::debug!("MdoType {:?} does not have manager module", mdo_type);
             QualifiedMethodError::NotFound
         })?;
 
-        // Step 3: Get current module to determine source root
+        self.resolve_manager_method(db, manager_type, mdo_name, method_name)
+    }
+
+    /// Resolve a user-defined method on the manager module of a metadata object,
+    /// addressed by an already-parsed [`ManagerType`] (e.g.
+    /// `Справочники.Контрагенты.Метод`). Platform manager methods (e.g.
+    /// `СоздатьЭлемент`) are not user methods and resolve to `NotFound`.
+    /// Locate the manager module of `manager_type`/`mdo_name` (config visibility +
+    /// path index), without looking at any method. Shared by
+    /// [`Self::resolve_manager_method`] and the graph-index build.
+    pub(crate) fn locate_manager_module(
+        &self,
+        db: &dyn ConfigsDatabase,
+        manager_type: crate::body::ManagerType,
+        mdo_name: &Name,
+    ) -> Result<ModuleId, QualifiedMethodError> {
+        let mdo_type = manager_type.to_mdo_type();
+
         let current_module_id = self.module_id().ok_or_else(|| {
-            tracing::warn!("resolve_three_level_method called without module scope");
+            tracing::warn!("locate_manager_module called without module scope");
             QualifiedMethodError::NotFound
         })?;
 
-        // Step 4: Verify the metadata object is declared in at least one
-        // visible configuration (main + CFE extensions, extension wins).
-        // When no configuration is registered (tests), skip the check so
-        // fixture-only workspaces keep resolving path-based manager modules.
         let current_file_id = current_module_id.file_id;
         let configurations = db.configurations(current_file_id);
         if !configurations.is_empty()
             && !Self::mdo_visible_in_configs(&configurations, mdo_type, mdo_name)
         {
-            tracing::debug!(
-                "resolve_three_level_method: {:?} '{}' not declared in any visible configuration",
-                mdo_type,
-                mdo_name
-            );
             return Err(QualifiedMethodError::NotVisibleInConfigs);
         }
 
-        // Step 5: Resolve manager module via ModuleIndex
         let source_root_id = db.file_source_root_input(current_file_id).source_root_id(db);
         let module_index = db.module_index(source_root_id);
 
-        let target_file_id =
-            module_index.resolve_manager(manager_type, mdo_name).ok_or_else(|| {
-                tracing::debug!("Manager module not found: {:?} / {}", manager_type, mdo_name);
-                QualifiedMethodError::NotFound
-            })?;
+        let target_file_id = module_index
+            .resolve_manager(manager_type, mdo_name)
+            .ok_or(QualifiedMethodError::NotFound)?;
 
-        tracing::debug!(
-            "Manager module '{:?}/{}' resolved to FileId({})",
-            manager_type,
-            mdo_name,
-            target_file_id.index()
-        );
+        Ok(crate::ModuleId::new(target_file_id))
+    }
 
-        // Step 6: Load symbol_tree for manager module
-        let target_module_id = crate::ModuleId::new(target_file_id);
+    pub fn resolve_manager_method(
+        &self,
+        db: &dyn ConfigsDatabase,
+        manager_type: crate::body::ManagerType,
+        mdo_name: &Name,
+        method_name: &Name,
+    ) -> Result<QualifiedMethodResolution, QualifiedMethodError> {
+        let _span = tracing::info_span!(
+            "resolve_manager_method",
+            ?manager_type,
+            mdo_name = %mdo_name,
+            method = %method_name
+        )
+        .entered();
+
+        let target_module_id = self.locate_manager_module(db, manager_type, mdo_name)?;
         let symbol_tree = db.symbol_tree(target_module_id);
 
-        // Step 7: Look up method by name. Returned even when non-exported —
-        // the `is_export` flag lets the caller pick the right diagnostic.
-        let method_symbol = symbol_tree.find_method(method_name).ok_or_else(|| {
-            tracing::debug!(
-                "Manager module '{:?}/{}' found but method '{}' NOT found",
-                manager_type,
-                mdo_name,
-                method_name
-            );
-            QualifiedMethodError::NotFound
-        })?;
-
-        tracing::info!(
-            "SUCCESS - found method '{}' in manager module '{:?}/{}' (is_export={})",
-            method_name,
-            manager_type,
-            mdo_name,
-            method_symbol.is_export
-        );
+        let method_symbol =
+            symbol_tree.find_method(method_name).ok_or(QualifiedMethodError::NotFound)?;
 
         Ok(QualifiedMethodResolution {
             method_id: method_symbol.id,
@@ -705,29 +379,6 @@ impl Resolver {
         })
     }
 
-    /// 2-shape variant of [`Self::resolve_three_level_method`]:
-    /// `М = Справочники.X; М.МойМетод()` where `М` carries an
-    /// object-manager type (`TypeKind::ObjectManager`) — the
-    /// manager-collection plural has already been consumed by type
-    /// inference, so this entry skips the `MdoType::from_plural` step.
-    ///
-    /// Otherwise identical to [`Self::resolve_three_level_method`]:
-    ///
-    /// 1. `MdoType` → `ManagerType` (gates out `Cube`,
-    ///    `DimensionTable`, `CommonModule`).
-    /// 2. Visibility gate via [`Self::mdo_visible_in_configs`] (objects
-    ///    *and* registers).
-    /// 3. `module_index.resolve_manager(...)` for the manager-module
-    ///    `FileId`.
-    /// 4. `symbol_tree.find_method(...)` returns the method even when
-    ///    not exported, so the caller can pick `MethodNotExport` vs
-    ///    `MethodNotFound`.
-    ///
-    /// `Err(NotVisibleInConfigs)` and `Err(NotFound)` are kept distinct
-    /// for the same reason as the 3-segment path: callers fall back to
-    /// the platform `lookup_method` only when the workspace
-    /// authoritatively does *not* know the receiver, and the platform
-    /// surface is the legitimate next consult.
     pub fn resolve_aliased_manager_method(
         &self,
         db: &dyn ConfigsDatabase,
@@ -802,23 +453,6 @@ impl Resolver {
         })
     }
 
-    /// Phase B counterpart to
-    /// [`Self::resolve_aliased_manager_method`]: resolves
-    /// `<Ty::MetadataRef { *Object, name }>.method()` against
-    /// `<MDO>/Ext/ObjectModule.bsl`.
-    ///
-    /// Same shape as the Phase A entry — visibility gate, then
-    /// [`crate::module_index::ModuleIndex::resolve_object_module`] for
-    /// the file id, then `symbol_tree.find_method`. Returns
-    /// non-exported methods so the call site can pick
-    /// `MethodNotExport` vs `MethodNotFound`.
-    ///
-    /// The caller is responsible for filtering `MetadataKind` to the
-    /// `*Object` family (`CatalogObject`, `DocumentObject`,
-    /// `ExchangePlanObject`, `ChartOfAccountsObject`); this entry
-    /// trusts that gate and only consults [`MdoType`]. `*Ref` and
-    /// register receivers must NOT reach this entry — their HIR types
-    /// have no ObjectModule call surface today.
     pub fn resolve_object_module_method(
         &self,
         db: &dyn ConfigsDatabase,
@@ -888,22 +522,6 @@ impl Resolver {
         })
     }
 
-    /// Phase C counterpart to
-    /// [`Self::resolve_object_module_method`]: resolves
-    /// `<Ty::MetadataRef { *RecordManager | *RecordSet, name }>.method()`
-    /// against `<RegisterFolder>/<Name>/Ext/RecordSetModule.bsl`.
-    ///
-    /// Same shape as the Phase B entry — visibility gate, then
-    /// [`crate::module_index::ModuleIndex::resolve_record_set_module`]
-    /// for the file id, then `symbol_tree.find_method`. Returns
-    /// non-exported methods so the call site can pick
-    /// `MethodNotExport` vs `MethodNotFound`.
-    ///
-    /// The caller is responsible for filtering `MetadataKind` to the
-    /// register-record family
-    /// (`InformationRegisterRecordManager`,
-    /// `AccumulationRegisterRecordSet`); this entry trusts that gate
-    /// and only consults [`MdoType`].
     pub fn resolve_record_set_module_method(
         &self,
         db: &dyn ConfigsDatabase,
@@ -973,11 +591,6 @@ impl Resolver {
         })
     }
 
-    /// Legacy [`PathResolution`] adapter over [`Self::resolve_three_level_method`].
-    ///
-    /// Used by [`Self::resolve_path`] (Definition layer). Non-exported
-    /// methods collapse to `Unresolved` here — the Ty-layer gets the full
-    /// outcome via [`Self::resolve_three_level_method`] instead.
     fn resolve_three_level(
         &self,
         db: &dyn ConfigsDatabase,
@@ -999,83 +612,40 @@ impl Resolver {
     }
 }
 
-/// Result of resolving a local name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolvedLocal {
     pub def: crate::scope::ScopeDef,
 }
 
-/// Result of name resolution at any level.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Resolution {
-    /// Platform builtin (global function). Never shadowed by user code.
     Builtin(Name),
 
-    /// Local name (parameter or local variable).
     Local(ResolvedLocal),
 
-    /// Module-level method (procedure or function).
     Method(MethodId),
 
-    /// Module-level variable.
     Variable(VariableId),
 }
 
-/// Result of [`Resolver::resolve_assignment_target`].
-///
-/// Captures the binding an identifier resolves to **when used on the
-/// left-hand side of an assignment**, restricted to the kinds that
-/// assignment-target diagnostics in this codebase actually classify
-/// — local / param / module variable / visible CommonModule.
-/// Builtins and methods deliberately fall through to [`Self::Unknown`];
-/// see [`Resolver::resolve_assignment_target`] for the rationale.
-///
-/// Priority — first match wins:
-/// `Local` > `Param` > `ModuleVariable` > `CommonModule` > `Unknown`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssignmentResolution {
-    /// Local `Перем` declared inside the current body — shadows any
-    /// module / configuration binding.
     Local,
-    /// Procedure / function parameter — same shadowing priority as
-    /// [`Self::Local`], surfaced separately so consumers can render the
-    /// right hover / rename UI.
     Param,
-    /// Module-level `Перем` declared at the module scope.
     ModuleVariable(VariableId),
-    /// CommonModule visible across main + every registered extension.
-    /// Carries the matched name (consumers usually have it already, but
-    /// the field keeps the API symmetric with the other variants).
     CommonModule(Name),
-    /// Identifier does not resolve to any shadowable assignment target.
     Unknown,
 }
 
-/// Successful outcome of [`Resolver::resolve_qualified_method`].
-///
-/// The resolver returns this for both exported and non-exported methods —
-/// export visibility is a diagnostic concern (the caller may surface it),
-/// not a resolution concern (the method exists and is reachable through
-/// name resolution).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QualifiedMethodResolution {
     pub method_id: MethodId,
-    /// Whether the resolved method is marked `Экспорт`.
     pub is_export: bool,
 }
 
-/// Reason [`Resolver::resolve_qualified_method`] could not resolve a call.
-///
-/// Distinct from (and intentionally narrower than) the diagnostic-kind
-/// enums owned by the consumer layers (`hir-ty::UnresolvedMethodKind`,
-/// code-actions): hir-def owns name-resolution reasons only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QualifiedMethodError {
-    /// Module name is not declared in any visible configuration (CFE union
-    /// of main + registered extensions).
     NotVisibleInConfigs,
-    /// Module not indexed, method absent in the resolved module, resolver
-    /// lacks workspace scope, or no module scope was attached.
     NotFound,
 }
 
@@ -1108,15 +678,12 @@ mod tests {
         let resolver =
             Resolver::for_module(module_id).push_expr_scope(Arc::new(scopes), root_scope);
 
-        // Resolve parameter
         let resolved = resolver.resolve_local(&Name::new("Параметр"));
         assert_eq!(resolved.map(|r| r.def), Some(ScopeDef::Parameter));
 
-        // Resolve local variable
         let resolved = resolver.resolve_local(&Name::new("Переменная"));
         assert_eq!(resolved.map(|r| r.def), Some(ScopeDef::LocalVariable));
 
-        // Not found
         let resolved = resolver.resolve_local(&Name::new("НеСуществует"));
         assert_eq!(resolved, None);
     }
@@ -1133,7 +700,6 @@ mod tests {
         let resolver =
             Resolver::for_module(module_id).push_expr_scope(Arc::new(scopes), root_scope);
 
-        // Different case
         let resolved = resolver.resolve_local(&Name::new("мойпараметр"));
         assert_eq!(resolved.map(|r| r.def), Some(ScopeDef::Parameter));
 
@@ -1147,12 +713,7 @@ mod tests {
         let module_id = ModuleId::new(file_id);
         let _resolver = Resolver::for_module(module_id);
 
-        // Single segment path should attempt local resolution
         let _path = QualifiedName::from_segments([Name::new("Переменная")]);
-
-        // Note: Without a real database, resolution will return Unresolved
-        // This test verifies the method signature and basic logic
-        // Full integration tests are in ide-db crate
     }
 
     #[test]
@@ -1161,11 +722,7 @@ mod tests {
         let module_id = ModuleId::new(file_id);
         let _resolver = Resolver::with_workspace_scope(module_id);
 
-        // Two segment path: Module.Method
         let _path = QualifiedName::from_segments([Name::new("ОбщийМодуль"), Name::new("Метод")]);
-
-        // Without database, this returns Unresolved
-        // Full test in ide-db with real database
     }
 
     #[test]
@@ -1174,22 +731,15 @@ mod tests {
         let module_id = ModuleId::new(file_id);
         let _resolver = Resolver::with_workspace_scope(module_id);
 
-        // Three segment path: Documents.PKO.Create
         let _path = QualifiedName::from_segments([
             Name::new("Документы"),
             Name::new("ПКО"),
             Name::new("Создать"),
         ]);
-
-        // Manager module resolution - placeholder for now
-        // Will be implemented with metadata integration
     }
 
     #[test]
     fn test_builtins_scope_guard_is_opt_in() {
-        // Without Scope::Builtins the resolver must not call into the
-        // platform singleton, so builtin resolution returns None even when
-        // the name matches a known platform global.
         let file_id = FileId(0);
         let module_id = ModuleId::new(file_id);
 
@@ -1203,8 +753,6 @@ mod tests {
         assert!(with_all.has_builtins());
     }
 
-    // Build an in-memory `VisibleConfig` with the given common-module names.
-    // No file I/O — only the metadata a `Resolver` needs to check visibility.
     fn make_visible_config(ext_name: Option<&str>, module_names: &[&str]) -> VisibleConfig {
         let mut configuration = bsl_metadata::Configuration::new("test");
         for name in module_names {
@@ -1223,29 +771,20 @@ mod tests {
         let ext = make_visible_config(Some("BMS_RU_UT"), &["ТестовыйМодуль"]);
         let configs = vec![main, ext];
 
-        // Declared only in main
         assert!(Resolver::module_visible_in_configs(&configs, &Name::new("ОбщегоНазначения")));
-        // Declared only in extension
         assert!(Resolver::module_visible_in_configs(&configs, &Name::new("ТестовыйМодуль")));
-        // Case-insensitive — mirrors `find_common_module` contract
         assert!(Resolver::module_visible_in_configs(&configs, &Name::new("общегоназначения")));
-        // Unknown anywhere
         assert!(!Resolver::module_visible_in_configs(&configs, &Name::new("НетТакогоМодуля")));
     }
 
     #[test]
     fn test_module_visible_empty_configs_returns_false() {
-        // With no registered configs the helper must not falsely accept names;
-        // the resolver's fallback to `module_index` gates that distinction.
         let empty: Vec<VisibleConfig> = Vec::new();
         assert!(!Resolver::module_visible_in_configs(&empty, &Name::new("Anything")));
     }
 
     #[test]
     fn test_builtins_scope_resolves_platform_global() {
-        // `Сообщить` ships with the bundled platform data. If the loader
-        // silently produced an empty index, this test must fail — otherwise
-        // a regression in platform-data initialisation would go unnoticed.
         let file_id = FileId(0);
         let module_id = ModuleId::new(file_id);
 
@@ -1264,9 +803,6 @@ mod tests {
             "case-insensitive platform global lookup must succeed"
         );
 
-        // Nonsense names never resolve as builtins.
         assert!(resolver.resolve_builtin(&Name::new("НетТакогоBuiltin")).is_none());
     }
-
-    // Integration tests with RootDatabaseImpl are in ide-db crate
 }

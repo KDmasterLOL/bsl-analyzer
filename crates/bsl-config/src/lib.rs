@@ -1,62 +1,20 @@
-//! Layer 0.5 of the bsl-analyzer architecture: visible configurations
-//! and `ConfigId` identity.
-//!
-//! This crate sits between `bsl-metadata` (Layer 0 — raw configuration
-//! schema) and `bsl-types` (Layer 1 — type kernel). It owns the
-//! semantic notion of "which configurations are visible from a BSL
-//! file" and the opaque `ConfigId` handle that type-bearing references
-//! (e.g. `MetaRefFacet`, `MetaObjFacet`) carry.
-//!
-//! The Salsa-tracked `ConfigsDatabase` trait stays in `hir-def`, where
-//! it can extend `DefDatabase`. This crate provides only the plain
-//! value types — no direct Salsa, LSP, or I/O dependencies. Note
-//! that `bsl-metadata` (the only direct dep) transitively pulls in
-//! `bsl-platform → salsa` and `stdx → ignore`; these are inherited
-//! from Layer 0, not introduced here.
-
 #![deny(rust_2018_idioms)]
 
 use std::sync::Arc;
 
 use bsl_metadata::{Configuration, Name};
 
-/// A configuration visible from a given file: main or extension.
-///
-/// Carries only the metadata — never a filesystem URI — because name
-/// resolution and type inference only consume the declarative
-/// `Configuration` description. Path-aware callers in `ide-db` wrap
-/// this in `VisibleConfigWithRoot` (see §1.5 of the Phase 2 plan).
 #[derive(Clone, Debug)]
 pub struct VisibleConfig {
-    /// Extension name; `None` for the main configuration.
     pub name: Option<String>,
-    /// Loaded configuration metadata.
     pub configuration: Arc<Configuration>,
 }
 
-/// Opaque identity of a configuration inside the type kernel.
-///
-/// `MetaRefFacet` / `MetaObjFacet` use this handle to disambiguate
-/// type-equal MDO names that come from different visible configurations
-/// (main vs CFE extension). Identity is by value, not by interning —
-/// equality compares variant tags and inner data directly.
-///
-/// Documented limitation: two distinct configurations that both fail
-/// to resolve the **same** name collide at the kernel layer (both
-/// produce `ConfigId::Unknown(name)`). Diagnostics differentiate by
-/// source location, not by kernel identity.
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 #[non_exhaustive]
 pub enum ConfigId {
-    /// Single-config workspaces or sandbox tests.
     Root,
-    /// Multi-config workspace; index into the interned configuration
-    /// table maintained by callers that materialise a stable u32 id
-    /// per `VisibleConfig`.
     Resolved(u32),
-    /// MDO name couldn't be resolved against any known configuration.
-    /// Carries the name itself so different unresolved names produce
-    /// different `ConfigId` values.
     Unknown(Name),
 }
 

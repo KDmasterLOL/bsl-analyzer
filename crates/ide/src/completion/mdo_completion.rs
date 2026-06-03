@@ -1,9 +1,3 @@
-//! MDO (Metadata Object) completion.
-//!
-//! Provides completion for metadata collection access:
-//! - `Справочники.` / `Catalogs.` → MDO objects from project metadata
-//! - `Справочники.Валюты.` / `Catalogs.Currencies.` → manager methods from platform data
-
 use bsl_metadata::MdoType;
 use bsl_platform::{manager_methods_query, TypeNameInput};
 use hir::{ManagerType, Name};
@@ -12,14 +6,6 @@ use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
 use super::{CompletionItem, CompletionItemKind, CompletionPosition};
 
-/// Attempts to provide MDO completions.
-///
-/// Returns Some(items) if this is an MDO completion context (after DOT on a manager collection),
-/// otherwise returns None to allow other completion providers to handle it.
-///
-/// Handles two cursor positions:
-/// - Right after DOT: `Справочники.|` → token is DOT
-/// - Inside IDENT after DOT: `Справочники.Допол|нительные` → token is IDENT
 pub(super) fn mdo_completions<DB: RootDatabase>(
     db: &DB,
     position: CompletionPosition,
@@ -31,28 +17,23 @@ pub(super) fn mdo_completions<DB: RootDatabase>(
 
     let token = root.token_at_offset(position.offset).left_biased()?;
 
-    // Detect MDO context from either DOT or IDENT-after-DOT
     let context = detect_mdo_context(&token)?;
     tracing::debug!(?context, "MDO completion context detected");
 
     match context {
-        // `Справочники.` or `Справочники.Доп|` → complete MDO objects
         MdoContext::CollectionDot { mdo_type } => {
             let items = complete_mdo_objects(db, position.file_id, mdo_type);
             if !items.is_empty() {
                 return Some(items);
             }
         }
-        // `Справочники.Валюты.` or `Справочники.Валюты.Найти|` → complete manager methods + predefined items
         MdoContext::ObjectDot { mdo_type, object_name } => {
             let mut items = Vec::new();
 
-            // Platform manager methods (НайтиПоКоду, СоздатьЭлемент, ...)
             if let Some(prefix) = mdo_type.manager_type_prefix() {
                 items.extend(complete_manager_methods(db, prefix));
             }
 
-            // Exported methods from ManagerModule.bsl
             items.extend(complete_manager_module_methods(
                 db,
                 position.file_id,
@@ -60,7 +41,6 @@ pub(super) fn mdo_completions<DB: RootDatabase>(
                 &object_name,
             ));
 
-            // Predefined items (EmailПартнера, Россия, ...)
             items.extend(complete_predefined_items(db, position.file_id, mdo_type, &object_name));
 
             if !items.is_empty() {
@@ -72,29 +52,17 @@ pub(super) fn mdo_completions<DB: RootDatabase>(
     None
 }
 
-/// MDO completion context.
 #[derive(Debug)]
 enum MdoContext {
-    /// Cursor after `Справочники.` — complete with MDO object names
     CollectionDot { mdo_type: MdoType },
-    /// Cursor after `Справочники.Валюты.` — complete with manager methods + predefined items
     ObjectDot { mdo_type: MdoType, object_name: String },
 }
 
-/// Detect MDO completion context from the token at cursor position.
-///
-/// Walks the syntax tree to find if we're in a `ManagerCollection.` or
-/// `ManagerCollection.Object.` context.
 fn detect_mdo_context(token: &SyntaxToken) -> Option<MdoContext> {
     if token.kind() == SyntaxKind::DOT {
-        // Cursor right after DOT: `Справочники.|` or `Справочники.Валюты.|`
         return detect_from_dot(token);
     }
 
-    // Cursor inside a name-token after DOT: `Справочники.Доп|` or
-    // `Справочники.Валюты.Найти|`. Uses `is_name_token` so cursor
-    // positions inside soft-keyword names (e.g. `Справочники.Из|`,
-    // where `Из` lexes as KW_IN) still trigger MDO completion.
     if token.kind().is_name_token() {
         return detect_from_ident_after_dot(token);
     }
@@ -102,18 +70,15 @@ fn detect_mdo_context(token: &SyntaxToken) -> Option<MdoContext> {
     None
 }
 
-/// Detect context when cursor is right after a DOT token.
 fn detect_from_dot(dot_token: &SyntaxToken) -> Option<MdoContext> {
     let receiver = find_receiver_before_dot(dot_token)?;
 
-    // Case: `Справочники.` — receiver is simple IDENT
     if let Some(ident_text) = get_single_ident(&receiver) {
         if let Some(mdo_type) = MdoType::from_plural(&ident_text) {
             return Some(MdoContext::CollectionDot { mdo_type });
         }
     }
 
-    // Case: `Справочники.Валюты.` — receiver is FIELD_EXPR
     if receiver.kind() == SyntaxKind::FIELD_EXPR {
         if let Some((base_text, object_name)) = get_field_expr_parts(&receiver) {
             if let Some(mdo_type) = MdoType::from_plural(&base_text) {
@@ -125,12 +90,7 @@ fn detect_from_dot(dot_token: &SyntaxToken) -> Option<MdoContext> {
     None
 }
 
-/// Detect context when cursor is inside an IDENT that follows a DOT.
-///
-/// The IDENT is inside a FIELD_EXPR: `base . ident|`
-/// We walk up to find the MDO context from the parent FIELD_EXPR structure.
 fn detect_from_ident_after_dot(ident_token: &SyntaxToken) -> Option<MdoContext> {
-    // Verify there's a DOT before this IDENT
     let has_dot_before = ident_token
         .siblings_with_tokens(syntax::Direction::Prev)
         .skip(1)
@@ -141,23 +101,19 @@ fn detect_from_ident_after_dot(ident_token: &SyntaxToken) -> Option<MdoContext> 
         return None;
     }
 
-    // Parent should be FIELD_EXPR: `base.ident`
     let field_expr = ident_token.parent()?;
     if field_expr.kind() != SyntaxKind::FIELD_EXPR {
         return None;
     }
 
-    // Get the base (first child node of the FIELD_EXPR)
     let base = field_expr.children().next()?;
 
-    // Case: `Справочники.Доп|` — base is simple IDENT
     if let Some(base_text) = get_single_ident(&base) {
         if let Some(mdo_type) = MdoType::from_plural(&base_text) {
             return Some(MdoContext::CollectionDot { mdo_type });
         }
     }
 
-    // Case: `Справочники.Валюты.Найти|` — base is FIELD_EXPR
     if base.kind() == SyntaxKind::FIELD_EXPR {
         if let Some((base_text, object_name)) = get_field_expr_parts(&base) {
             if let Some(mdo_type) = MdoType::from_plural(&base_text) {
@@ -169,7 +125,6 @@ fn detect_from_ident_after_dot(ident_token: &SyntaxToken) -> Option<MdoContext> 
     None
 }
 
-/// Find the receiver node before the DOT token.
 fn find_receiver_before_dot(dot_token: &SyntaxToken) -> Option<SyntaxNode> {
     let parent = dot_token.parent()?;
 
@@ -193,9 +148,6 @@ fn find_receiver_before_dot(dot_token: &SyntaxToken) -> Option<SyntaxNode> {
     None
 }
 
-/// Extract identifier text from a simple IDENT node.
-///
-/// Returns None if node is not a simple identifier (e.g., rejects FIELD_EXPR).
 fn get_single_ident(node: &SyntaxNode) -> Option<String> {
     if node.kind() != SyntaxKind::IDENT {
         return None;
@@ -208,14 +160,10 @@ fn get_single_ident(node: &SyntaxNode) -> Option<String> {
     }
 }
 
-/// Extract base and field from a FIELD_EXPR node (base.field).
 fn get_field_expr_parts(node: &SyntaxNode) -> Option<(String, String)> {
     let base = node.children().next()?;
     let base_text = get_single_ident(&base)?;
 
-    // Last name-token of the field expression. Uses `is_name_token` so
-    // soft-keyword field names like `Справочники.Из` extract correctly
-    // instead of returning `None`.
     let field_token = node
         .children_with_tokens()
         .filter_map(|it| it.into_token())
@@ -225,9 +173,6 @@ fn get_field_expr_parts(node: &SyntaxNode) -> Option<(String, String)> {
     Some((base_text, field_token.text().to_string()))
 }
 
-/// Complete MDO objects from project metadata.
-///
-/// Example: `Справочники.` → [Валюты, Контрагенты, Номенклатура, ...]
 fn complete_mdo_objects<DB: RootDatabase>(
     db: &DB,
     file_id: vfs::FileId,
@@ -239,7 +184,6 @@ fn complete_mdo_objects<DB: RootDatabase>(
     for (source_name, config) in &configs {
         let type_label = mdo_type.russian_name();
 
-        // Regular metadata objects
         for obj in config.metadata_objects() {
             if obj.mdo_type == mdo_type {
                 items.push(CompletionItem {
@@ -255,7 +199,6 @@ fn complete_mdo_objects<DB: RootDatabase>(
             }
         }
 
-        // Registers are stored separately
         for reg in config.registers() {
             if reg.mdo_type() == mdo_type {
                 items.push(CompletionItem {
@@ -276,18 +219,10 @@ fn complete_mdo_objects<DB: RootDatabase>(
     items
 }
 
-/// Complete manager methods from platform data.
-///
-/// Example: `Справочники.Валюты.` → [НайтиПоКоду, НайтиПоНаименованию, СоздатьЭлемент, ...]
 fn complete_manager_methods<DB: RootDatabase>(
     db: &DB,
     manager_prefix: &str,
 ) -> Vec<CompletionItem> {
-    // Was: `PlatformData::instance().get_manager_methods(prefix)`. The
-    // M3 Task 12 migration routes the same call through the Salsa-
-    // tracked `manager_methods_query` so the facade boundary
-    // (Invariant #3) isn't crossed in IDE code — caching and
-    // invalidation live in bsl-platform.
     let input = TypeNameInput::new(db, manager_prefix.to_string());
     let methods = manager_methods_query(db, input);
 
@@ -296,10 +231,6 @@ fn complete_manager_methods<DB: RootDatabase>(
     methods.iter().map(super::platform_completion::render_manager_method).collect()
 }
 
-/// Complete exported methods from ManagerModule.bsl, rendered through the
-/// unified `symbol_info` pipeline.
-///
-/// Example: `Справочники.Партнеры.` → [МояЭкспортнаяФункция, ...]
 fn complete_manager_module_methods<DB: RootDatabase>(
     db: &DB,
     file_id: vfs::FileId,
@@ -355,9 +286,6 @@ fn complete_manager_module_methods<DB: RootDatabase>(
     items
 }
 
-/// Complete predefined items from project metadata.
-///
-/// Example: `Справочники.ВидыКонтактнойИнформации.` → [EmailПартнера, АдресПартнера, ...]
 fn complete_predefined_items<DB: RootDatabase>(
     db: &DB,
     file_id: vfs::FileId,
@@ -383,7 +311,7 @@ fn complete_predefined_items<DB: RootDatabase>(
                     kind: CompletionItemKind::Constant,
                     insert_text: pi.name.clone(),
                     documentation: None,
-                    sort_text: Some(format!("1_{}", pi.name)), // Sort after methods (default "0_")
+                    sort_text: Some(format!("1_{}", pi.name)),
                     filter_text: None,
                     source: None,
                 })

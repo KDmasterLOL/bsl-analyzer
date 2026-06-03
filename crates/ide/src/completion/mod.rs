@@ -1,10 +1,3 @@
-//! Code completion for BSL and SDBL.
-//!
-//! This module provides completion suggestions for:
-//! - SDBL queries (FROM clause, metadata objects)
-//! - Platform methods (after DOT operator)
-//! - BSL code (variables, functions, etc.) - TODO
-
 mod bsl_completion;
 mod mdo_completion;
 mod new_expr_completion;
@@ -17,49 +10,34 @@ use std::path::PathBuf;
 use syntax::TextSize;
 use vfs::FileId;
 
-/// Position in file for completion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletionPosition {
     pub file_id: FileId,
     pub offset: TextSize,
     pub workspace_root: Option<PathBuf>,
-    /// User-facing locale for renderable completion details (type names,
-    /// the `[Только чтение]` / `[Read-only]` marker). Threaded down from
-    /// [`crate::Analysis::completions`].
     pub locale: Locale,
 }
 
-/// A single completion item.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletionItem {
-    /// Label shown to user (e.g., "Валюты")
     pub label: String,
 
-    /// Detail shown after label (e.g., "Справочник")
     pub detail: Option<String>,
 
-    /// Kind of completion (Class, Module, Field, etc.)
     pub kind: CompletionItemKind,
 
-    /// Text to insert (usually same as label)
     pub insert_text: String,
 
-    /// Documentation (optional)
     pub documentation: Option<String>,
 
-    /// Sort text (for ordering in completion list)
     pub sort_text: Option<String>,
 
-    /// Filter text (for filtering when user types)
     pub filter_text: Option<String>,
 
-    /// Source of this completion item (extension name).
-    /// `None` for items from main configuration, `Some(name)` for extensions.
     pub source: Option<String>,
 }
 
 impl CompletionItem {
-    /// Create a simple completion item with defaults for optional fields.
     pub fn simple(label: String, kind: CompletionItemKind, insert_text: String) -> Self {
         Self {
             label,
@@ -74,84 +52,48 @@ impl CompletionItem {
     }
 }
 
-/// Kind of completion item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompletionItemKind {
-    /// Metadata object type (Справочник, Документ)
     MdoType,
-    /// Metadata object instance (Валюты, Контрагенты)
     MdoObject,
-    /// Field (MDO attribute / standard attribute).
     Field,
-    /// Property of a platform type (e.g. `Запрос.Параметры`, `Запрос.Текст`).
-    ///
-    /// Distinct from [`Self::Field`] so the editor can pick a different
-    /// icon and rank properties alongside methods when completing after a
-    /// dot on a platform-value receiver.
     Property,
-    /// Function
     Function,
-    /// Method (platform or user-defined)
     Method,
-    /// Keyword
     Keyword,
-    /// Constant (ПустаяСсылка, predefined items)
     Constant,
-    /// Enumeration member (enum value)
     EnumMember,
-    /// Platform type constructor (`Новый X(...)`).
     Constructor,
 }
 
-/// Main completion entry point.
-///
-/// Returns completion suggestions at the given position.
-///
-/// # Arguments
-///
-/// * `db` - Root database with file contents and metadata
-/// * `position` - File and offset where completion is requested
-///
-/// # Returns
-///
-/// List of completion items appropriate for the position.
 pub fn completions<DB: RootDatabase>(db: &DB, position: CompletionPosition) -> Vec<CompletionItem> {
     let _p = tracing::info_span!("completions", ?position).entered();
 
-    // Try SDBL completion first (new Clean Architecture implementation)
     if let Some(items) = sdbl::sdbl_completions(db, position.clone()) {
         tracing::debug!(items = items.len(), "returning SDBL completions");
         return items;
     }
 
-    // Try `Новый <type>` completion. Must run before MDO/platform/BSL: in this
-    // context BSL accepts only platform type names; offering locals, keywords,
-    // global functions, or MDO plurals would be misleading. Returning `Some`
-    // short-circuits the dispatcher unconditionally (even for an empty Vec).
     if let Some(items) = new_expr_completion::new_expr_completions(db, position.clone()) {
         tracing::debug!(items = items.len(), "returning constructor completions after `Новый`");
         return items;
     }
 
-    // Try MDO completion (metadata collection managers)
     if let Some(items) = mdo_completion::mdo_completions(db, position.clone()) {
         tracing::debug!(items = items.len(), "returning MDO completions");
         return items;
     }
 
-    // Try platform method completion
     if let Some(items) = platform_completion::platform_completions(db, position.clone()) {
         tracing::debug!(items = items.len(), "returning platform method completions");
         return items;
     }
 
-    // Try BSL completion (global functions, keywords, etc.)
     if let Some(items) = bsl_completion::bsl_completions(db, position.clone()) {
         tracing::debug!(items = items.len(), "returning BSL completions");
         return items;
     }
 
-    // TODO: BSL user-defined symbols (variables, local functions, etc.)
     tracing::trace!("no completions available");
 
     Vec::new()

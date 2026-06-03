@@ -22,5 +22,4 @@ pub mod smoke;
 pub mod task_pool;
 pub mod workspace;
 
-// Re-export main server function
 pub use server::main_loop;

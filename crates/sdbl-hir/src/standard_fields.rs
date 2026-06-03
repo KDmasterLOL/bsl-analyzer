@@ -1,8 +1,5 @@
-//! Virtual table detection utilities for SDBL queries.
-
 use std::fmt;
 
-/// Virtual table types and their Russian/English names.
 pub const VIRTUAL_TABLES: &[(&str, &str)] = &[
     ("срезпоследних", "slicelast"),
     ("срезпервых", "slicefirst"),
@@ -15,7 +12,6 @@ pub const VIRTUAL_TABLES: &[(&str, &str)] = &[
     ("изменения", "changes"),
 ];
 
-/// Virtual table type enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VirtualTableType {
     SliceLast,
@@ -30,7 +26,6 @@ pub enum VirtualTableType {
 }
 
 impl VirtualTableType {
-    /// Russian lowercase name (for diagnostics).
     pub fn as_str(self) -> &'static str {
         match self {
             Self::SliceLast => "срезпоследних",
@@ -45,7 +40,6 @@ impl VirtualTableType {
         }
     }
 
-    /// Whether this VT type has a periodicity parameter (3rd param, index 2).
     pub fn has_periodicity(self) -> bool {
         matches!(self, Self::Turnovers | Self::BalanceAndTurnovers)
     }
@@ -57,13 +51,11 @@ impl fmt::Display for VirtualTableType {
     }
 }
 
-/// Check if table name part is a virtual table.
 pub fn is_virtual_table_name(name: &str) -> bool {
     let name_lower = name.to_lowercase();
     VIRTUAL_TABLES.iter().any(|(ru, en)| *ru == name_lower || *en == name_lower)
 }
 
-/// Get virtual table type from name.
 pub fn virtual_table_type(name: &str) -> Option<VirtualTableType> {
     let name_lower = name.to_lowercase();
     match name_lower.as_str() {
@@ -86,7 +78,6 @@ pub fn virtual_table_type(name: &str) -> Option<VirtualTableType> {
     }
 }
 
-/// Periodicity enum values for virtual table parameters.
 pub const PERIODICITY_VALUES: &[(&str, &str)] = &[
     ("авто", "auto"),
     ("год", "year"),
@@ -100,7 +91,6 @@ pub const PERIODICITY_VALUES: &[(&str, &str)] = &[
     ("запись", "record"),
 ];
 
-/// Check if a name is a known periodicity enum value.
 pub fn is_periodicity_value(name: &str) -> bool {
     let name_lower = name.to_lowercase();
     PERIODICITY_VALUES.iter().any(|(ru, en)| *ru == name_lower || *en == name_lower)

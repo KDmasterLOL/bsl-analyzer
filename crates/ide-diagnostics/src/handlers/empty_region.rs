@@ -1,44 +1,3 @@
-//! EmptyRegion diagnostic.
-//!
-//! Detects empty code regions that contain only comments, whitespace, or nested empty regions.
-//!
-//! ## Why?
-//! Empty regions serve no purpose and clutter the code. They should either contain
-//! meaningful code or be removed entirely.
-//!
-//! ## Bad practice
-//! ```bsl
-//! #Область ПустаяОбласть
-//! // Только комментарий
-//! #КонецОбласти
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! #Область ПолезнаяОбласть
-//! Перем Счетчик;
-//! #КонецОбласти
-//! ```
-//!
-//! ## Configuration
-//! - **Enabled by default:** Yes
-//! - **Severity:** Information (INFO)
-//! - **Tags:** STANDARD
-//! - **Minutes to fix:** 1
-//!
-//! ## Nested Regions
-//! Handles nested empty regions correctly:
-//! - Reports both inner and outer if both empty
-//! - Reports only inner if outer has code
-//!
-//! ## Implementation
-//! Track 2 Phase C §3.4 — handler reads the cached
-//! `RegionTree::is_region_empty` bit (computed at AST→`RegionTree`
-//! lowering time). The legacy `BodyDiagnostic::EmptyRegion` emit in
-//! `body/lower/preproc.rs` was retired in this slice; the
-//! single-source classification lives next to the rest of the region
-//! data on `RegionData`.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -57,10 +16,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Track 2 Phase C §3.4 — handler-side detection consuming the
-/// cached `RegionTree::is_region_empty` bit via `ctx.region_tree()`.
-/// Replaces the legacy `from_hir` adapter (BodyDiagnostic-fed) and
-/// the AST walks in `body/lower/preproc::is_empty_region`.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::EmptyRegion;
     if ctx.is_disabled_with_metadata(code) {
@@ -82,8 +37,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             fixes: vec![],
         });
     }
-    // Sort by source position for deterministic output (the
-    // `Arena::iter` order isn't position-sorted by construction).
     out.sort_by_key(|d| d.range.start());
     out
 }
@@ -93,11 +46,6 @@ mod tests {
     use crate::test_utils::{check_diagnostics_snapshot_for, check_hir_diagnostic, format_diags};
     use crate::DiagnosticCode;
     use expect_test::expect;
-    /// Codex round-A regression guard for the §3.4 migration: the
-    /// retired `lower_region_stmts` emit ran inside method lowering
-    /// for method-local regions. Without recursing into method
-    /// bodies in `RegionTreeBuilder::collect_regions`, the migrated
-    /// handler would silently miss them.
     #[test]
     fn test_method_local_empty_region_is_detected() {
         let code = r#"Процедура Тест()
@@ -113,7 +61,6 @@ mod tests {
               message: Область 'ВнутриМетода' пуста
               severity: Hint"#]]
         .assert_eq(&format_diags(code, &diags));
-        // snapshot-skip: message-substring assertion intentionally retained.
         assert!(diags[0].message.contains("ВнутриМетода"));
     }
 
@@ -130,13 +77,11 @@ mod tests {
               message: Область 'Тест' пуста
               severity: Hint"#]]
         .assert_eq(&format_diags(code, &diags));
-        // snapshot-skip: message-substring assertion intentionally retained.
         assert!(diags[0].message.contains("Тест"));
     }
 
     #[test]
     fn test_outer_region_with_only_inner_empty_region() {
-        // Both outer and inner are reported when outer contains only an empty inner region
         let code = r#"#Область ВнешняяОбласть
 // комментарий
 #Область ВнутренняяОбласть
@@ -154,9 +99,7 @@ mod tests {
               message: Область 'ВнутренняяОбласть' пуста
               severity: Hint"#]]
         .assert_eq(&format_diags(code, &diags));
-        // snapshot-skip: message-substring assertion intentionally retained.
         assert!(diags.iter().any(|d| d.message.contains("ВнешняяОбласть")));
-        // snapshot-skip: message-substring assertion intentionally retained.
         assert!(diags.iter().any(|d| d.message.contains("ВнутренняяОбласть")));
     }
 
@@ -219,7 +162,6 @@ mod tests {
               message: Область 'Внутренняя' пуста
               severity: Hint"#]]
         .assert_eq(&format_diags(code, &empty_region_diags));
-        // snapshot-skip: message-substring assertion intentionally retained.
         assert!(empty_region_diags[0].message.contains("Внутренняя"));
     }
 

@@ -1,50 +1,9 @@
-//! TokenSet for efficient token matching in parser.
-//!
-//! Uses bitwise operations for O(1) membership checks.
-//!
-//! # Example
-//!
-//! ```
-//! use lexer::TokenKind;
-//! use parser::token_set::TokenSet;
-//!
-//! const RECOVERY_SET: TokenSet = TokenSet::new(&[
-//!     TokenKind::Comma,
-//!     TokenKind::RParen,
-//!     TokenKind::Semicolon,
-//! ]);
-//!
-//! assert!(RECOVERY_SET.contains(TokenKind::Comma));
-//! assert!(!RECOVERY_SET.contains(TokenKind::Plus));
-//! ```
-
 use lexer::TokenKind;
 
-/// A set of token kinds for efficient membership testing.
-///
-/// Uses up to 128 bits (u128) to represent a set of tokens.
-/// Each bit corresponds to a token kind's discriminant value.
-///
-/// Created at compile-time via const fn for zero runtime overhead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TokenSet(u128);
 
 impl TokenSet {
-    /// Creates a new TokenSet from a slice of TokenKinds.
-    ///
-    /// This is a const fn, allowing creation of constant token sets at compile time.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use lexer::TokenKind;
-    /// use parser::token_set::TokenSet;
-    ///
-    /// const PUNCTUATION: TokenSet = TokenSet::new(&[
-    ///     TokenKind::Comma,
-    ///     TokenKind::Semicolon,
-    /// ]);
-    /// ```
     pub const fn new(kinds: &[TokenKind]) -> Self {
         let mut bits: u128 = 0;
         let mut i = 0;
@@ -52,35 +11,27 @@ impl TokenSet {
             let kind = kinds[i];
             let bit_index = kind as u8;
 
-            // Safety: TokenKind discriminants must be < 128
-            // This is enforced by the enum definition (we have ~100 variants max)
             bits |= 1 << bit_index;
             i += 1;
         }
         TokenSet(bits)
     }
 
-    /// Creates an empty TokenSet.
     pub const fn empty() -> Self {
         TokenSet(0)
     }
 
-    /// Checks if the set contains the given token kind.
-    ///
-    /// Time complexity: O(1)
     #[inline]
     pub const fn contains(&self, kind: TokenKind) -> bool {
         let bit_index = kind as u8;
         (self.0 & (1 << bit_index)) != 0
     }
 
-    /// Creates a union of two token sets.
     #[inline]
     pub const fn union(self, other: TokenSet) -> TokenSet {
         TokenSet(self.0 | other.0)
     }
 
-    /// Checks if the set is empty.
     #[inline]
     pub const fn is_empty(&self) -> bool {
         self.0 == 0
@@ -134,7 +85,6 @@ mod tests {
 
     #[test]
     fn test_const_creation() {
-        // Verify that TokenSet can be created as a const
         const RECOVERY_SET: TokenSet =
             TokenSet::new(&[TokenKind::Comma, TokenKind::RParen, TokenKind::Semicolon]);
 
@@ -145,7 +95,6 @@ mod tests {
 
     #[test]
     fn test_duplicate_tokens() {
-        // Duplicates should be handled gracefully (idempotent)
         let set = TokenSet::new(&[TokenKind::Comma, TokenKind::Comma, TokenKind::Plus]);
 
         assert!(set.contains(TokenKind::Comma));

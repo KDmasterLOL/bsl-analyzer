@@ -1,15 +1,3 @@
-//! TypeMismatch diagnostic.
-//!
-//! Emitted from `hir-ty::infer` when an expression's inferred type doesn't
-//! match what the surrounding context expects.
-//!
-//! **No live emitter today.** The M3 inference code has the emission site
-//! stubbed out; the emitter lands in M4 Task 7 (`is_assignable_to`). This
-//! handler is wired into the dispatch now so that (a) the exhaustive
-//! `match` in `hir_inference_dispatch` stays exhaustive as the enum grows,
-//! and (b) Task 7 only has to flip the emission guard — no second plumbing
-//! pass through `code.rs` / `handlers.rs` / `lib.rs`.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -30,7 +18,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates diagnostic from `InferenceDiagnostic::TypeMismatch`.
 pub fn from_hir(
     expected: TypeId,
     actual: TypeId,

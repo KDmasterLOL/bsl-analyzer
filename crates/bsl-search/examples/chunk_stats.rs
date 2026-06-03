@@ -1,6 +1,3 @@
-//! Show chunk size statistics for a configuration directory.
-//! Usage: cargo run -p bsl-search --example chunk_stats -- <config_dir>
-
 use bsl_search::Chunker;
 
 fn main() {
@@ -46,7 +43,6 @@ fn main() {
         println!("  {:>8} bytes  ({:>7.1} KB)  {} :: {}", size, *size as f64 / 1024.0, path, name);
     }
 
-    // Size buckets
     let buckets = [1024, 4096, 16384, 65536, 262144, 1048576];
     println!("\nSize distribution:");
     let mut prev = 0;

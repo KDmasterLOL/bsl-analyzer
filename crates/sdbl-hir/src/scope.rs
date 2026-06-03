@@ -1,7 +1,3 @@
-//! Name resolution scope for SDBL queries.
-//!
-//! Tracks available tables and their fields for column resolution.
-
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
@@ -9,16 +5,10 @@ use rustc_hash::FxHashMap;
 use crate::hir::{FieldDef, Name, TableRef};
 use crate::types::SdblType;
 
-/// Scope for name resolution in SDBL queries.
-///
-/// Maintains a stack of scopes for handling subqueries.
 #[derive(Debug)]
 pub struct Scope {
-    /// Stack of scope frames (innermost last).
     frames: Vec<ScopeFrame>,
 
-    /// Metadata provider for resolving references.
-    /// Wrapped in Arc for cheap cloning.
     metadata: Option<Arc<bsl_metadata::Configuration>>,
 }
 
@@ -28,55 +18,39 @@ impl Default for Scope {
     }
 }
 
-/// Single scope frame.
 #[derive(Debug, Default)]
 struct ScopeFrame {
-    /// Tables in this scope, keyed by effective name (alias or full name).
     tables: FxHashMap<String, TableRef>,
 
-    /// Temporary tables created with INTO clause.
-    /// Keyed by lowercase table name.
     temp_tables: FxHashMap<String, TempTableDef>,
 }
 
-/// Temporary table definition.
 #[derive(Debug, Clone)]
 pub struct TempTableDef {
-    /// Table name.
     pub name: String,
 
-    /// Fields from SELECT clause that created this table.
     pub fields: Vec<FieldDef>,
 }
 
 impl Scope {
-    /// Create a new empty scope without metadata.
-    ///
-    /// For backwards compatibility. Prefer `new_with_metadata()` for full functionality.
     pub fn new() -> Self {
         Self { frames: vec![ScopeFrame::default()], metadata: None }
     }
 
-    /// Create a new empty scope with metadata provider.
-    ///
-    /// Metadata is used for resolving nested field references through reference types.
     pub fn new_with_metadata(metadata: Option<Arc<bsl_metadata::Configuration>>) -> Self {
         Self { frames: vec![ScopeFrame::default()], metadata }
     }
 
-    /// Push a new scope frame (for subqueries).
     pub fn push_frame(&mut self) {
         self.frames.push(ScopeFrame::default());
     }
 
-    /// Pop the innermost scope frame.
     pub fn pop_frame(&mut self) {
         if self.frames.len() > 1 {
             self.frames.pop();
         }
     }
 
-    /// Add a table to the current scope.
     pub fn add_table(&mut self, table: TableRef) {
         if let Some(frame) = self.frames.last_mut() {
             let key = table.effective_name().to_lowercase();
@@ -84,10 +58,6 @@ impl Scope {
         }
     }
 
-    /// Add a temporary table to the current scope.
-    ///
-    /// Temporary tables are created with INTO clause and available
-    /// in subsequent queries (e.g., UNION parts).
     pub fn add_temp_table(&mut self, name: String, fields: Vec<FieldDef>) {
         if let Some(frame) = self.frames.last_mut() {
             let key = name.to_lowercase();
@@ -96,7 +66,6 @@ impl Scope {
         }
     }
 
-    /// Remove a temporary table by name from the nearest scope frame that contains it.
     pub fn remove_temp_table(&mut self, name: &str) {
         let name_lower = name.to_lowercase();
         for frame in self.frames.iter_mut().rev() {
@@ -107,9 +76,6 @@ impl Scope {
         }
     }
 
-    /// Find temporary table by name (case-insensitive).
-    ///
-    /// Searches from innermost to outermost scope.
     pub fn find_temp_table(&self, name: &str) -> Option<&TempTableDef> {
         let name_lower = name.to_lowercase();
         for frame in self.frames.iter().rev() {
@@ -121,9 +87,6 @@ impl Scope {
         None
     }
 
-    /// Find table by name (case-insensitive).
-    ///
-    /// Searches from innermost to outermost scope.
     pub fn find_table(&self, name: &str) -> Option<&TableRef> {
         let name_lower = name.to_lowercase();
         for frame in self.frames.iter().rev() {
@@ -134,40 +97,28 @@ impl Scope {
         None
     }
 
-    /// Get all tables in current scope (not including parent scopes).
     pub fn current_tables(&self) -> impl Iterator<Item = &TableRef> {
         self.frames.last().into_iter().flat_map(|f| f.tables.values())
     }
 
-    /// Get all tables in scope (including parent scopes).
     pub fn all_tables(&self) -> impl Iterator<Item = &TableRef> {
         self.frames.iter().flat_map(|f| f.tables.values())
     }
 
-    /// Resolve column type from scope.
-    ///
-    /// If `table_alias` is provided, looks up in that specific table.
-    /// Otherwise, searches all tables in scope.
-    ///
-    /// Returns `SdblType::Unknown` if not found.
     pub fn resolve_column_type(&self, table_alias: Option<&str>, column_name: &str) -> SdblType {
         if let Some(alias) = table_alias {
-            // Qualified column reference: Table.Column
             if let Some(table) = self.find_table(alias) {
                 return self.find_column_type_in_table(table, column_name);
             }
             return SdblType::Unknown;
         }
 
-        // Unqualified column reference: Column
-        // Search all tables in scope
         let mut found_type: Option<SdblType> = None;
 
         for table in self.all_tables() {
             let ty = self.find_column_type_in_table(table, column_name);
             if !ty.is_unknown_or_error() {
                 if found_type.is_some() {
-                    // Ambiguous - column found in multiple tables
                     return SdblType::Error;
                 }
                 found_type = Some(ty);
@@ -177,7 +128,6 @@ impl Scope {
         found_type.unwrap_or(SdblType::Unknown)
     }
 
-    /// Find column in a specific table.
     fn find_column_type_in_table(&self, table: &TableRef, column_name: &str) -> SdblType {
         if let Some(ref resolved) = table.metadata {
             if let Some(field) = resolved.find_field(column_name) {
@@ -187,7 +137,6 @@ impl Scope {
         SdblType::Unknown
     }
 
-    /// Find all tables that contain a given column (for error messages).
     pub fn find_tables_with_column(&self, column_name: &str) -> Vec<String> {
         let mut result = Vec::new();
         let column_lower = column_name.to_lowercase();
@@ -203,7 +152,6 @@ impl Scope {
         result
     }
 
-    /// Get field definition for a column.
     pub fn find_field_def(
         &self,
         table_alias: Option<&str>,
@@ -218,7 +166,6 @@ impl Scope {
             return None;
         }
 
-        // Search all tables
         for table in self.all_tables() {
             if let Some(ref resolved) = table.metadata {
                 if let Some(field) = resolved.find_field(column_name) {
@@ -230,12 +177,10 @@ impl Scope {
         None
     }
 
-    /// Check if a name is a known table alias in scope.
     pub fn is_table_alias(&self, name: &str) -> bool {
         self.find_table(name).is_some()
     }
 
-    /// Get completion candidates for columns (for LSP).
     pub fn column_completions(&self, table_alias: Option<&str>) -> Vec<ColumnCompletion> {
         let mut result = Vec::new();
 
@@ -246,7 +191,6 @@ impl Scope {
         };
 
         for table in tables {
-            // Use full_name (not effective_name which returns alias) for metadata lookup
             let table_name = &table.full_name;
 
             tracing::info!(
@@ -258,7 +202,6 @@ impl Scope {
             );
 
             if let Some(ref resolved) = table.metadata {
-                // Log field details
                 tracing::info!(
                     full_name = %table_name,
                     total_fields = resolved.fields().len(),
@@ -285,45 +228,8 @@ impl Scope {
         result
     }
 
-    // ========================================
-    // Nested field type resolution
-    // ========================================
-
-    /// Resolve type through chain of field references.
-    ///
-    /// Recursively resolves each field in the chain, following reference types.
-    ///
-    /// # Arguments
-    ///
-    /// * `table_alias` - Starting table alias
-    /// * `field_chain` - Chain of field names to traverse (e.g., ["Владелец", "Родитель"])
-    ///
-    /// # Returns
-    ///
-    /// Final `SdblType` after traversing the chain, or `SdblType::Unknown` if any step fails.
-    ///
-    /// # Algorithm
-    ///
-    /// 1. Start with table from alias
-    /// 2. For each field in chain:
-    ///    a. Resolve field type in current context
-    ///    b. If type is Ref, Composite, or DefinedType:
-    ///       - Extract metadata reference(s)
-    ///       - Update current context to referenced table
-    ///         c. If type is primitive, stop (cannot traverse further)
-    /// 3. Return final type
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// // Т.Владелец.Родитель
-    /// // Step 1: Т (Справочник.Номенклатура)
-    /// // Step 2: Владелец → Справочник.Контрагенты (Ref)
-    /// // Step 3: Родитель → Справочник.Контрагенты (Ref)
-    /// // Step 4: Ready to complete fields of Контрагенты
-    /// ```
     pub fn resolve_nested_field_type(&self, table_alias: &str, field_chain: &[String]) -> SdblType {
-        const MAX_DEPTH: usize = 10; // Protection from cycles
+        const MAX_DEPTH: usize = 10;
 
         if field_chain.len() > MAX_DEPTH {
             tracing::warn!(
@@ -333,7 +239,6 @@ impl Scope {
             return SdblType::Error;
         }
 
-        // Find starting table
         let Some(table) = self.find_table(table_alias) else {
             tracing::warn!(alias = %table_alias, "table not found in scope");
             return SdblType::Unknown;
@@ -355,7 +260,6 @@ impl Scope {
             "starting field resolution"
         );
 
-        // Traverse field chain
         for (i, field_name) in field_chain.iter().enumerate() {
             tracing::info!(
                 step = i + 1,
@@ -364,7 +268,6 @@ impl Scope {
                 "resolving nested field"
             );
 
-            // Find field in current context
             let Some(field) = current_fields.iter().find(|f| f.matches_name(field_name)) else {
                 tracing::warn!(
                     field = %field_name,
@@ -382,10 +285,8 @@ impl Scope {
 
             current_type = field.ty.clone();
 
-            // Resolve next level based on type
             match &current_type {
                 SdblType::Ref(mdo_ref) => {
-                    // Follow reference to metadata object
                     tracing::info!(
                         mdo_ref = ?mdo_ref,
                         "following reference"
@@ -408,18 +309,14 @@ impl Scope {
                         }
                     }
                 }
-                SdblType::Composite { types } => {
-                    // Merge fields from all types
-                    match self.resolve_composite_fields(types) {
-                        Some(fields) => current_fields = fields,
-                        None => {
-                            tracing::debug!("failed to resolve composite fields");
-                            return SdblType::Unknown;
-                        }
+                SdblType::Composite { types } => match self.resolve_composite_fields(types) {
+                    Some(fields) => current_fields = fields,
+                    None => {
+                        tracing::debug!("failed to resolve composite fields");
+                        return SdblType::Unknown;
                     }
-                }
+                },
                 SdblType::DefinedType { name, underlying_type } => {
-                    // Unwrap DefinedType
                     match self.resolve_defined_type_fields(name, underlying_type) {
                         Some(fields) => current_fields = fields,
                         None => {
@@ -432,7 +329,6 @@ impl Scope {
                     }
                 }
                 SdblType::TabularSectionRef { parent_mdo_type, parent_mdo_name, ts_name } => {
-                    // Follow tabular section reference to its attributes
                     tracing::info!(
                         parent = %parent_mdo_name,
                         ts_name = %ts_name,
@@ -461,7 +357,6 @@ impl Scope {
                     }
                 }
                 SdblType::AnyRef | SdblType::AnyObjectRef { .. } => {
-                    // Cannot traverse AnyRef - unknown concrete type
                     tracing::debug!(
                         ty = ?current_type,
                         "reached AnyRef/AnyObjectRef, cannot traverse further"
@@ -469,7 +364,6 @@ impl Scope {
                     return SdblType::Unknown;
                 }
                 _ => {
-                    // Primitive type - cannot traverse further
                     tracing::debug!(
                         field = %field_name,
                         ty = ?current_type,
@@ -483,9 +377,6 @@ impl Scope {
         current_type
     }
 
-    /// Resolve fields for a reference type.
-    ///
-    /// Loads metadata for the referenced object and returns its fields.
     fn resolve_ref_fields(&self, mdo_ref: &crate::types::MdoRef) -> Option<Vec<FieldDef>> {
         let config = self.metadata.as_ref()?;
 
@@ -493,9 +384,8 @@ impl Scope {
 
         let mut fields = Vec::new();
 
-        // Add attributes from metadata (includes standard ones like Ссылка, ПометкаУдаления, etc.)
         for attr in &mdo_object.attributes {
-            let is_standard = is_standard_attribute_name(&attr.name);
+            let is_standard = bsl_metadata::is_standard_attribute_name(&attr.name);
             fields.push(FieldDef::new_with_names(
                 attr.name.clone(),
                 attr.name_en.clone(),
@@ -504,7 +394,6 @@ impl Scope {
             ));
         }
 
-        // Add tabular sections as fields with TabularSectionRef type
         for ts in &mdo_object.tabular_sections {
             fields.push(FieldDef::new_with_names(
                 ts.name().to_string(),
@@ -514,17 +403,13 @@ impl Scope {
                     parent_mdo_name: mdo_ref.name.clone(),
                     ts_name: ts.name().to_string(),
                 },
-                false, // is_standard
+                false,
             ));
         }
 
         Some(fields)
     }
 
-    /// Resolve fields from a tabular section.
-    ///
-    /// Returns attributes of the tabular section as fields.
-    /// This is the single source of truth for tabular section field resolution.
     fn resolve_tabular_section_fields(
         &self,
         parent_mdo_type: bsl_metadata::MdoType,
@@ -535,38 +420,30 @@ impl Scope {
 
         let mdo_object = config.find_metadata_object(parent_mdo_type, parent_mdo_name)?;
 
-        // Find tabular section by name (case-insensitive)
         let ts = mdo_object.find_tabular_section(ts_name)?;
 
         let mut fields = Vec::new();
 
-        // Add standard Ссылка field (reference to parent object)
         fields.push(FieldDef::standard(
             "Ссылка",
             "Ref",
             SdblType::reference(parent_mdo_type, parent_mdo_name),
         ));
 
-        // Add standard НомерСтроки field
         fields.push(FieldDef::standard("НомерСтроки", "LineNumber", SdblType::number()));
 
-        // Add tabular section attributes as fields
-        // Single source of truth: use attr_type directly from metadata
         for attr in ts.attributes() {
             fields.push(FieldDef::new_with_names(
                 attr.name().to_string(),
                 attr.name_en().map(|s| s.to_string()),
                 SdblType::from_attribute_type(attr.attr_type()),
-                false, // not standard
+                false,
             ));
         }
 
         Some(fields)
     }
 
-    /// Merge fields from composite type.
-    ///
-    /// Returns union of all fields from all types, deduplicating by name.
     fn resolve_composite_fields(&self, types: &[SdblType]) -> Option<Vec<FieldDef>> {
         let mut all_fields = Vec::new();
         let mut seen_names = std::collections::HashSet::new();
@@ -591,9 +468,7 @@ impl Scope {
                         }
                     }
                 }
-                _ => {
-                    // Ignore non-reference types in composite
-                }
+                _ => {}
             }
         }
 
@@ -604,17 +479,6 @@ impl Scope {
         }
     }
 
-    /// Resolve fields for a DefinedType.
-    ///
-    /// Unwraps DefinedType to its underlying type and returns fields.
-    /// `LoweringContext::resolve_attribute_type` preserves intermediate
-    /// DefinedType wrappers along a chain (`A → B → Ref` lowers to
-    /// `DefinedType { name: A, underlying: DefinedType { name: B,
-    /// underlying: Ref(...) } }`), so the unwrap recurses on chained
-    /// `DefinedType` underlying values. The `Box<SdblType>` chain is
-    /// finite by construction (`resolve_attribute_type` cycle-guards the
-    /// chain at lowering time), so plain recursion does not need its own
-    /// visited tracking.
     fn resolve_defined_type_fields(
         &self,
         _name: &str,
@@ -632,17 +496,14 @@ impl Scope {
         }
     }
 
-    /// Public API: Get fields for reference type.
     pub fn get_fields_for_ref(&self, mdo_ref: &crate::types::MdoRef) -> Vec<FieldDef> {
         self.resolve_ref_fields(mdo_ref).unwrap_or_default()
     }
 
-    /// Public API: Get merged fields for composite type.
     pub fn get_fields_for_composite(&self, types: &[SdblType]) -> Vec<FieldDef> {
         self.resolve_composite_fields(types).unwrap_or_default()
     }
 
-    /// Public API: Get fields for DefinedType.
     pub fn get_fields_for_defined_type(
         &self,
         name: &str,
@@ -652,73 +513,11 @@ impl Scope {
     }
 }
 
-/// Returns `true` if `name` matches a known standard attribute name (case-insensitive, bilingual).
-pub(crate) fn is_standard_attribute_name(name: &str) -> bool {
-    matches!(
-        name.to_lowercase().as_str(),
-        "ссылка"
-            | "ref"
-            | "пометкаудаления"
-            | "deletionmark"
-            | "код"
-            | "code"
-            | "наименование"
-            | "description"
-            | "этогруппа"
-            | "isfolder"
-            | "родитель"
-            | "parent"
-            | "владелец"
-            | "owner"
-            | "предопределенный"
-            | "predefined"
-            | "имяпредопределенныхданных"
-            | "predefineddataname"
-            | "номер"
-            | "number"
-            | "дата"
-            | "date"
-            | "проведен"
-            | "posted"
-            | "стартован"
-            | "started"
-            | "завершен"
-            | "completed"
-            | "главнаязадача"
-            | "headtask"
-            | "выполнена"
-            | "executed"
-            | "бизнеспроцесс"
-            | "taskbusinessprocess"
-            | "точкамаршрута"
-            | "routepoint"
-            | "этотузел"
-            | "thisnode"
-            | "типзначения"
-            | "valuetype"
-            | "порядок"
-            | "order"
-            | "активность"
-            | "active"
-            | "номерстроки"
-            | "linenumber"
-            | "регистратор"
-            | "recorder"
-            | "период"
-            | "period"
-    )
-}
-
-/// Column completion item.
 #[derive(Debug, Clone)]
 pub struct ColumnCompletion {
-    /// Column name.
     pub column_name: Name,
-    /// Table name (for disambiguation).
     pub table_name: Name,
-    /// Column type.
     pub ty: SdblType,
-    /// Is standard attribute.
     pub is_standard: bool,
 }
 
@@ -764,11 +563,9 @@ mod tests {
 
         scope.add_table(table);
 
-        // Find by alias
         assert!(scope.find_table("в").is_some());
         assert!(scope.find_table("В").is_some());
 
-        // Resolve column
         let ty = scope.resolve_column_type(Some("в"), "Код");
         assert_eq!(ty, SdblType::string());
     }
@@ -781,21 +578,17 @@ mod tests {
             make_table("Outer", None, vec![FieldDef::new("Field1", SdblType::string())]);
         scope.add_table(outer_table);
 
-        // Push subquery scope
         scope.push_frame();
 
         let inner_table =
             make_table("Inner", None, vec![FieldDef::new("Field2", SdblType::number())]);
         scope.add_table(inner_table);
 
-        // Inner scope can see both tables
         assert!(scope.find_table("Inner").is_some());
         assert!(scope.find_table("Outer").is_some());
 
-        // Pop scope
         scope.pop_frame();
 
-        // Only outer table visible
         assert!(scope.find_table("Outer").is_some());
         assert!(scope.find_table("Inner").is_none());
     }
@@ -821,27 +614,15 @@ mod tests {
         scope.add_table(table1);
         scope.add_table(table2);
 
-        // Unique field resolves OK
         let ty = scope.resolve_column_type(None, "UniqueField");
         assert_eq!(ty, SdblType::string());
 
-        // Shared field is ambiguous
         let ty = scope.resolve_column_type(None, "SharedField");
         assert_eq!(ty, SdblType::Error);
     }
 
     #[test]
     fn defined_type_chained_underlying_unwraps_to_ref_fields() {
-        // Codex Q7b regression test.
-        //
-        // Two-step DefinedType chain `A → B → CatalogRef.Валюты`. After
-        // `LoweringContext::resolve_attribute_type` builds the SdblType, the
-        // outer wrapper is `DefinedType { name: "A", underlying: Some(
-        // DefinedType { name: "B", underlying: Some(Ref(Catalog, "Валюты")) }
-        // ) }`. Field access through `Scope::get_fields_for_defined_type`
-        // must follow that nested DefinedType to surface the catalog's
-        // attributes — the original implementation only matched `Ref` and
-        // `Composite` and silently dropped chained DefinedType wrappers.
         use bsl_metadata::{Attribute, AttributeType, Configuration, MetadataObject};
         use std::sync::Arc;
 
@@ -882,7 +663,6 @@ mod tests {
         let mut config = Configuration::new("TestConfig");
         let mut obj = MetadataObject::new(MdoType::Catalog, "Валюты");
 
-        // Add standard attributes that metadata XML parser would include
         obj.add_attribute(Attribute {
             name: "Ссылка".to_string(),
             name_en: Some("Ref".to_string()),
@@ -916,14 +696,12 @@ mod tests {
             crate::types::MdoRef { mdo_type: MdoType::Catalog, name: "Валюты".to_string() };
         let fields = scope.get_fields_for_ref(&mdo_ref);
 
-        // Verify no duplicate field names
         let mut names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
         names.sort_unstable();
         let original_len = names.len();
         names.dedup();
         assert_eq!(names.len(), original_len, "Duplicate fields found in resolve_ref_fields");
 
-        // Verify standard attributes are marked correctly
         let ref_field = fields.iter().find(|f| f.name == "Ссылка");
         assert!(ref_field.is_some(), "Ссылка field should be present");
         assert!(ref_field.unwrap().is_standard, "Ссылка should be marked as standard");
@@ -932,7 +710,6 @@ mod tests {
         assert!(deletion_mark.is_some(), "ПометкаУдаления field should be present");
         assert!(deletion_mark.unwrap().is_standard, "ПометкаУдаления should be marked as standard");
 
-        // Verify custom attribute is not marked as standard
         let rate_field = fields.iter().find(|f| f.name == "Курс");
         assert!(rate_field.is_some(), "Курс field should be present");
         assert!(!rate_field.unwrap().is_standard, "Курс should not be marked as standard");

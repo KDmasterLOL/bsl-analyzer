@@ -1,6 +1,3 @@
-//! Debug: show chunks for a single BSL file.
-//! Usage: cargo run -p bsl-search --example debug_chunks -- <file.bsl>
-
 use bsl_search::Chunker;
 
 fn main() {

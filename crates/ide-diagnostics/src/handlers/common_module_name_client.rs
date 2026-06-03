@@ -1,8 +1,3 @@
-//! CommonModuleNameClient diagnostic
-//!
-//! Client (non-global) CommonModules must contain "Client" or "Клиент" in their name.
-//!
-
 use crate::define_common_module_name_check;
 use crate::metadata::*;
 

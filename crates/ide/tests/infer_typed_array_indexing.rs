@@ -1,17 +1,3 @@
-//! End-to-end regression for indexing a parameterised array.
-//!
-//! `Ty::TypedArray(elem)` carries the element schema, so `arr[i]` must
-//! resolve to `*elem` rather than collapsing to `Ty::Unknown`. The
-//! motivating chain from the form-items work is
-//! `Элементы.Переприемка.ВыделенныеСтроки[0].ШтрихКод`: the
-//! `.ВыделенныеСтроки` refinement returns `TypedArray(row)` (Phase 5),
-//! and the indexing step is what unwraps the row's tabular-section
-//! schema for downstream field access.
-//!
-//! These tests pin the indexing rule independently of the form-control
-//! refinement by using JSDoc `Массив из <T>` to land a `TypedArray(T)`
-//! binding directly — no Form.xml fixture required.
-
 use hir::{Builders, HirDatabase, MetadataKind, TypeId, TypeKernelDb, TypeKind};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
@@ -63,8 +49,6 @@ fn assert_metadata_ref(
 
 #[test]
 fn indexing_typed_array_of_string_returns_string() {
-    // JSDoc lowers `Массив из Строка` to `TypedArray(String)` (Phase 0).
-    // `arr[0]` must unwrap to the element type — `Строка`.
     let (db, file_id) = setup(
         r#"
 //- /CommonModules/ОбщегоНазначения/Ext/Module.bsl
@@ -93,12 +77,6 @@ fn indexing_typed_array_of_string_returns_string() {
 
 #[test]
 fn indexing_typed_array_of_metadata_ref_returns_ref() {
-    // Indexing on a JSDoc-typed catalog-ref array surfaces the element
-    // schema so downstream `.Code` / `.Description` access typechecks.
-    // This is the invariant the form-items chain relies on for
-    // `.ВыделенныеСтроки[i].ШтрихКод` (the row schema is reached via
-    // `MetadataRef { TabularSectionRow, ... }` rather than this
-    // primitive case, but the unwrap step is identical).
     let (db, file_id) = setup(
         r#"
 //- /CommonModules/ОбщегоНазначения/Ext/Module.bsl
@@ -122,11 +100,6 @@ fn indexing_typed_array_of_metadata_ref_returns_ref() {
 
 #[test]
 fn indexing_unparameterised_array_stays_unknown() {
-    // The legacy `Ty::Array` (no element schema) carries no information
-    // for the indexing step to unwrap, so `arr[i]` keeps returning
-    // `Ty::Unknown`. This pins the boundary: only the parameterised
-    // variant gets the new behaviour, so existing call sites that build
-    // a bare `Новый Массив` without JSDoc continue to behave as before.
     let (db, file_id) = setup(
         r#"
 //- /test.bsl
@@ -138,11 +111,6 @@ fn indexing_unparameterised_array_stays_unknown() {
 "#,
     );
 
-    // `Новый Массив` infers to bare `Ty::Array`, so the index step has
-    // no element schema and inference deliberately stays silent.
-    // Asserting `None` (rather than `Some(Ty::Unknown)`) matches the
-    // existing convention in `var_types`: unresolved bindings are
-    // simply absent.
     let actual = var_ty(&db, file_id, "элемент");
     assert!(
         actual.is_none_or(|ty| matches!(db.lookup_type(ty), TypeKind::Unknown)),

@@ -1,20 +1,3 @@
-//! Acceptance tests for the Task 9 ExprId bridge.
-//!
-//! Before Task 9, `InferenceResult` dropped per-body `expr_types` during
-//! merge in `infer_query`, and `type_of_expr_query` always returned
-//! `Ty::Unknown`. Task 9 preserves the maps keyed by [`DefWithBodyId`]
-//! and exposes them through `Semantics::type_of_expr(SyntaxNode)`.
-//!
-//! These tests prove:
-//!
-//! - per-body `expr_types` survive merge
-//!   (`type_of_expr_resolves_across_bodies`);
-//! - `Semantics::type_of_expr` matches what inference produced for call
-//!   and field expressions (`type_of_call_expr_matches_infer`,
-//!   `type_of_field_expr_matches_infer`).
-//!
-//! These are the load-bearing acceptance tests from the M3 plan Task 9.
-
 use hir::{Builders, DefDatabase, DefWithBodyId, HirDatabase, ModuleId, Semantics};
 use ide_db::base_db::{RootQueryDb, SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
@@ -45,9 +28,6 @@ fn setup(fixture_text: &str) -> (RootDatabaseImpl, FileId) {
 
 fn setup_with_designer(fixture_text: &str) -> (RootDatabaseImpl, FileId) {
     let (mut db, file_id) = setup(fixture_text);
-    // Point the metadata bridge at the designer fixture — same trick as
-    // `infer_field_lookup.rs`: the config gate must recognise
-    // `ПервыйОбщийМодуль`, and `FieldLookup` must see real MDOs.
     db.set_all_config_paths(vec![(
         None,
         std::path::PathBuf::from(concat!(
@@ -80,10 +60,6 @@ fn first_field_expr(root: &syntax::SyntaxNode, field_name: &str) -> Option<ast::
 
 #[test]
 fn type_of_expr_resolves_across_bodies() {
-    // Two different method bodies each produce their own expr_types
-    // map. Before Task 9 the merged `InferenceResult` dropped both, so
-    // `type_id_of_expr_in` returned None on either. This test asserts both
-    // maps survived the merge.
     let fixture = r#"
 //- /test.bsl
 Функция Первая()
@@ -99,11 +75,6 @@ fn type_of_expr_resolves_across_bodies() {
     let (db, file_id) = setup(fixture);
     let infer = db.infer(file_id);
 
-    // Two methods survive the merge — `infer_query` runs both and folds
-    // their expr_types into separate `DefWithBodyId::Method(...)`
-    // entries. Module-level code also contributes a
-    // `DefWithBodyId::ModuleCode` entry (possibly empty); we don't care
-    // about its size, only that the per-method entries survive.
     let method_bodies: Vec<_> = infer
         .expr_types_by_body
         .iter()
@@ -124,10 +95,6 @@ fn type_of_expr_resolves_across_bodies() {
 
 #[test]
 fn type_of_call_expr_matches_infer() {
-    // `Semantics::type_of_expr(SyntaxNode)` on a literal must return
-    // the same `Ty::Number` that inference stored. Also cross-checks
-    // the result against a direct `expr_types_by_body` lookup so we
-    // prove the bridge and the underlying map agree.
     let fixture = r#"
 //- /test.bsl
 Функция Тест()
@@ -169,11 +136,6 @@ fn type_of_call_expr_matches_infer() {
 
 #[test]
 fn type_of_module_level_expr_resolves() {
-    // Module-level code uses `DefWithBodyId::ModuleCode` rather than a
-    // `Method(local_id)` key. Without this test the ModuleCode path
-    // through `infer_query` and `Semantics::type_of_expr` would stay
-    // untested — the rest of the suite lives inside `Функция` /
-    // `Процедура` bodies.
     let fixture = r#"
 //- /test.bsl
 Х = 42;
@@ -191,8 +153,6 @@ fn type_of_module_level_expr_resolves() {
         "Semantics::type_of_expr must resolve the module-level `42` literal"
     );
 
-    // Cross-check: module_code_result's BodySourceMap must own this range,
-    // and `expr_types_by_body` must carry the entry under `ModuleCode`.
     let module_id = ModuleId::new(file_id);
     let module_bodies = db.module_bodies(module_id);
     let expr_id = module_bodies
@@ -211,10 +171,6 @@ fn type_of_module_level_expr_resolves() {
 
 #[test]
 fn type_of_field_expr_matches_infer() {
-    // Field access must resolve through the same bridge. Uses a custom
-    // attribute on the designer fixture's `Справочник1` Catalog; the
-    // JSDoc return pins the receiver type so `FieldLookup` can finish
-    // the chain.
     let fixture = r#"
 //- /CommonModules/ПервыйОбщийМодуль/Ext/Module.bsl
 // Возвращаемое значение:
@@ -242,10 +198,6 @@ fn type_of_field_expr_matches_infer() {
         "Semantics::type_of_expr on a field access must agree with inference (Ty::Number)"
     );
 
-    // Cross-check against the underlying `expr_types_by_body` map —
-    // matching the pattern used by the literal-lookup test above, so
-    // a future bug where `Semantics::type_of_expr` short-circuits
-    // without consulting the merged map is caught here too.
     let module_id = ModuleId::new(file_id);
     let module_bodies = db.module_bodies(module_id);
     let (owner, expr_id) = module_bodies
@@ -266,8 +218,6 @@ fn type_of_field_expr_matches_infer() {
 
 #[test]
 fn type_of_expr_unknown_for_non_expression_node() {
-    // Nodes that have no ExprId (e.g. the root SOURCE_FILE) must return
-    // Ty::Unknown without panicking — exercises the "no entry" branch.
     let fixture = r#"
 //- /test.bsl
 Процедура Тест()
@@ -282,10 +232,6 @@ fn type_of_expr_unknown_for_non_expression_node() {
 
 #[test]
 fn type_of_expr_covers_call_site() {
-    // Regression guard: the bridge must handle compound expressions —
-    // a `CallExpr` range spans the whole `Foo.Bar()` string, not just
-    // a token. Earlier drafts that matched token-wide ranges would
-    // miss this case.
     let fixture = r#"
 //- /CommonModules/ПервыйОбщийМодуль/Ext/Module.bsl
 // Возвращаемое значение:

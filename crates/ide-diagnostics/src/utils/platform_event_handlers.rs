@@ -1,11 +1,4 @@
-//! Shared list of platform event handler names.
-//!
-//! These methods have a fixed signature defined by the 1C platform —
-//! their parameters cannot be removed and the methods are called
-//! by the platform, not by user code.
-
 const PLATFORM_EVENT_HANDLERS: &[&str] = &[
-    // Object module handlers
     "передзаписью",
     "beforewrite",
     "призаписи",
@@ -28,7 +21,6 @@ const PLATFORM_EVENT_HANDLERS: &[&str] = &[
     "posting",
     "обработкаудаленияпроведения",
     "undoposting",
-    // Manager module handlers
     "обработкаполученияданныхвыбора",
     "choicedatagetprocessing",
     "обработкаполученияформы",
@@ -37,7 +29,6 @@ const PLATFORM_EVENT_HANDLERS: &[&str] = &[
     "presentationgetprocessing",
     "обработкаполученияполейпредставления",
     "presentationfieldsgetprocessing",
-    // Command module handlers
     "обработкакоманды",
     "commandprocessing",
 ];

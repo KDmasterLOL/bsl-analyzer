@@ -1,5 +1,3 @@
-//! Expression lowering.
-
 mod case_expr;
 mod ops;
 mod predicates;
@@ -28,7 +26,6 @@ impl LoweringContext {
             SyntaxKind::SDBL_MULTI_STRING => self.lower_multi_string(node),
             SyntaxKind::SDBL_FUNCTION_CALL => self.lower_function_call(node),
             SyntaxKind::SDBL_PAREN_EXPR => {
-                // Unwrap parentheses
                 if let Some(inner) = node.children().next() {
                     self.lower_expr(&inner)
                 } else {
@@ -55,15 +52,10 @@ impl LoweringContext {
         }
     }
 
-    /// Lower column reference.
-    ///
-    /// Stores all parts of the path in HIR. Diagnostics like QueryNestedFieldsByDot
-    /// are checked later by analyzing the HIR structure, not during lowering.
     fn lower_column_ref(&mut self, node: &syntax::SyntaxNode) -> ExprHir {
         let text = node.text().to_string();
         let str_parts: Vec<&str> = text.split('.').collect();
 
-        // Convert to Name parts
         let parts: Vec<Name> = str_parts.iter().map(|s| Name::from(s.trim())).collect();
 
         tracing::debug!(
@@ -72,12 +64,6 @@ impl LoweringContext {
             "lower_column_ref called"
         );
 
-        // Extract property-name token ranges from AST for semantic
-        // highlighting. Accepts IDENT plus the SDBL retained-keyword set
-        // (KW_IN / KW_AND / … per `at_property_name` in
-        // `crates/parser/src/grammar/sdbl/expressions.rs`) so that column
-        // names like `Т.В` get the "В" part highlighted as a field,
-        // matching the parser-side property-name rule.
         let ident_ranges: Vec<TextRange> = node
             .children_with_tokens()
             .filter_map(|child| match child {
@@ -88,7 +74,6 @@ impl LoweringContext {
             })
             .collect();
 
-        // Resolve type from scope (using first part as alias, second as column for 2+ parts)
         let (table_alias_str, column_name_str) = if parts.len() >= 2 {
             (Some(parts[0].as_str()), parts[1].as_str())
         } else {
@@ -103,9 +88,6 @@ impl LoweringContext {
             "resolved column type from scope"
         );
 
-        // Check for unknown field
-        // Only emit UnknownField if the field is genuinely absent from the table.
-        // A field with SdblType::Unknown type still exists (e.g., untyped dimension).
         if ty == SdblType::Unknown {
             if let Some(alias) = table_alias_str {
                 if self.scope.find_field_def(Some(alias), column_name_str).is_none() {
@@ -121,7 +103,6 @@ impl LoweringContext {
                 }
             }
         } else if ty == SdblType::Error {
-            // Ambiguous column
             let possible_tables = self.scope.find_tables_with_column(column_name_str);
             self.diagnostics.push(SdblDiagnostic::AmbiguousColumnRef {
                 column_name: column_name_str.to_string(),
@@ -130,11 +111,8 @@ impl LoweringContext {
             });
         }
 
-        // Record ALL identifiers in source_map for semantic highlighting
-        // This handles nested field references like Table.Field1.Field2.Field3
         for (idx, range) in ident_ranges.iter().enumerate() {
             if idx == 0 && parts.len() >= 2 {
-                // First identifier = table alias
                 self.source_map.add_token(
                     crate::source_map::TokenInfo::new(
                         *range,
@@ -144,9 +122,6 @@ impl LoweringContext {
                     crate::source_map::TokenCategory::TableAlias,
                 );
             } else {
-                // All other identifiers = field names (intermediate or final)
-                // A field is "resolved" if it has a known type OR exists in metadata
-                // (type may be Unknown for untyped fields, but the field itself is valid)
                 let field_exists =
                     self.scope.find_field_def(table_alias_str, column_name_str).is_some();
                 let can_validate_field = self.metadata.is_some()
@@ -180,14 +155,11 @@ impl LoweringContext {
         ExprHir::ColumnRef { parts, ty, range: node.text_range() }
     }
 
-    /// Lower literal.
     fn lower_literal(&mut self, node: &syntax::SyntaxNode) -> ExprHir {
         use crate::hir::LiteralValue;
 
         let text = node.text().to_string().trim().to_string();
 
-        // Check for multiline string in SDBL_LITERAL (single String token with \n)
-        // Parser creates SDBL_LITERAL even for strings with newlines inside
         for child in node.children_with_tokens() {
             if let Some(token) = child.as_token() {
                 if token.kind() == syntax::SyntaxKind::STRING && token.text().contains('\n') {
@@ -198,7 +170,6 @@ impl LoweringContext {
             }
         }
 
-        // Determine literal type
         let (value, ty) = if text.starts_with('"') || text.starts_with('\'') {
             (
                 LiteralValue::String(text.trim_matches(|c| c == '"' || c == '\'').to_string()),
@@ -225,13 +196,9 @@ impl LoweringContext {
         ExprHir::Literal { value, ty, range: node.text_range() }
     }
 
-    /// Lower multiline string (SDBL_MULTI_STRING node with multiple String tokens).
-    ///
-    /// Parser creates SDBL_MULTI_STRING when it sees multiple consecutive String tokens.
     fn lower_multi_string(&mut self, node: &syntax::SyntaxNode) -> ExprHir {
         use crate::hir::LiteralValue;
 
-        // Count STRING tokens
         let string_count = node
             .children_with_tokens()
             .filter(|child| {
@@ -239,14 +206,10 @@ impl LoweringContext {
             })
             .count();
 
-        // Flag all SDBL_MULTI_STRING with >2 tokens as potential multiline strings.
-        // False positives (valid strings like "Ж") are filtered in the dispatch layer
-        // by checking the original query_text for actual newlines.
         if string_count > 2 {
             self.diagnostics.push(SdblDiagnostic::MultilineString { range: node.text_range() });
         }
 
-        // Return string literal HIR
         let text = node.text().to_string();
         ExprHir::Literal {
             value: LiteralValue::String(text),
@@ -255,11 +218,9 @@ impl LoweringContext {
         }
     }
 
-    /// Lower function call.
     fn lower_function_call(&mut self, node: &syntax::SyntaxNode) -> ExprHir {
         use crate::hir::FunctionKind;
 
-        // Get function name from first identifier
         let func_name_token = node
             .children_with_tokens()
             .filter_map(|c| c.into_token())
@@ -267,10 +228,8 @@ impl LoweringContext {
 
         let func_name = func_name_token.as_ref().map(|t| t.text().to_string()).unwrap_or_default();
 
-        // Parse function kind
         let function = match func_name.to_uppercase().as_str() {
             "СУММА" | "SUM" => {
-                // Record aggregate function name
                 if let Some(token) = func_name_token.as_ref() {
                     self.record_token(token, crate::source_map::TokenCategory::AggregateFunction);
                 }
@@ -320,7 +279,6 @@ impl LoweringContext {
             | "PRESENTATION"
             | "ЗНАЧЕНИЕ"
             | "VALUE" => {
-                // Record built-in SDBL function token for semantic highlighting
                 if let Some(token) = func_name_token.as_ref() {
                     self.record_token(token, crate::source_map::TokenCategory::BuiltinFunction);
                 }
@@ -341,7 +299,6 @@ impl LoweringContext {
             _ => FunctionKind::Unknown(func_name.clone()),
         };
 
-        // Lower arguments - special handling for VALUE()/ЗНАЧЕНИЕ() function
         let args: Vec<ExprHir> = if matches!(function, FunctionKind::Value) {
             self.lower_value_function_args(node)
         } else {
@@ -368,20 +325,13 @@ impl LoweringContext {
                 .collect()
         };
 
-        // Extract member access chain after closing paren
-        // Token sequence: FUNC ( args ) . Field1 . Field2
-        // We need IDENT tokens that come after RPAREN
         let member_access: Vec<Name> = {
             let tokens: Vec<_> =
                 node.children_with_tokens().filter_map(|c| c.into_token()).collect();
 
-            // Find position of closing paren
             let rparen_pos = tokens.iter().position(|t| t.kind() == syntax::SyntaxKind::R_PAREN);
 
             if let Some(pos) = rparen_pos {
-                // Collect name-tokens after RPAREN (these are member access
-                // fields). Uses `is_name_token` so soft-keyword field names
-                // like `ВЫРАЗИТЬ(...).В` survive lowering.
                 tokens[pos + 1..]
                     .iter()
                     .filter(|t| t.kind().is_name_token())
@@ -392,11 +342,6 @@ impl LoweringContext {
             }
         };
 
-        // Infer return type. CAST consumes the `SDBL_TYPE` child node
-        // for a precise target type; everything else goes through the
-        // generic kind-based inference.
-        // Note: QueryNestedFieldsByDot for CAST with 2+ member_access is checked
-        // in post-lowering phase (check_nested_fields_by_dot)
         let ty = if matches!(function, FunctionKind::Cast) {
             self.resolve_cast_target(node)
         } else {
@@ -406,7 +351,6 @@ impl LoweringContext {
         ExprHir::FunctionCall { function, args, member_access, ty, range: node.text_range() }
     }
 
-    /// Infer function return type.
     fn infer_function_return_type(
         &self,
         function: &crate::hir::FunctionKind,
@@ -415,7 +359,6 @@ impl LoweringContext {
         use crate::hir::FunctionKind;
 
         match function {
-            // Aggregate functions wrap argument type
             FunctionKind::Sum | FunctionKind::Avg => {
                 if let Some(arg) = args.first() {
                     SdblType::Aggregate(Box::new(arg.ty().clone()))
@@ -428,7 +371,6 @@ impl LoweringContext {
             }
             FunctionKind::Count => SdblType::number(),
 
-            // String functions return String
             FunctionKind::Substring
             | FunctionKind::Upper
             | FunctionKind::Lower
@@ -437,7 +379,6 @@ impl LoweringContext {
             | FunctionKind::Concat
             | FunctionKind::Presentation => SdblType::string(),
 
-            // Date part functions return Number
             FunctionKind::Year
             | FunctionKind::Month
             | FunctionKind::Day
@@ -445,56 +386,28 @@ impl LoweringContext {
             | FunctionKind::Minute
             | FunctionKind::Second => SdblType::number(),
 
-            // Date functions return Date/DateTime
             FunctionKind::DateTime | FunctionKind::BeginOfPeriod | FunctionKind::EndOfPeriod => {
                 SdblType::DateTime
             }
             FunctionKind::AddMonth => SdblType::Date,
             FunctionKind::DateDiff => SdblType::number(),
 
-            // ISNULL returns type of first non-null argument
             FunctionKind::Isnull => {
                 args.first().map(|a| a.ty().clone()).unwrap_or(SdblType::Unknown)
             }
 
-            // CAST - need to parse target type (complex)
             FunctionKind::Cast => SdblType::Unknown,
 
-            // Type/ValueType return type descriptors
             FunctionKind::Type | FunctionKind::ValueType => SdblType::Unknown,
 
-            // VALUE returns typed reference (simplified to AnyRef for now)
             FunctionKind::Value => SdblType::AnyRef,
 
-            // Ref returns Boolean
             FunctionKind::Ref => SdblType::Boolean,
 
-            // Unknown function
             FunctionKind::Unknown(_) => SdblType::Unknown,
         }
     }
 
-    /// Resolve the target type of a `ВЫРАЗИТЬ(value КАК <SDBL_TYPE>)` call.
-    ///
-    /// Walks the `SDBL_TYPE` child of `SDBL_FUNCTION_CALL` and produces a
-    /// precise [`SdblType`]:
-    ///
-    /// * Single-identifier primitives with optional numeric params:
-    ///   `Число(P, S)`, `Число(P)`, `Строка(L)`, `Дата`, `Булево` (bilingual,
-    ///   case-insensitive).
-    /// * Two-identifier MDO paths: `Справочник.Товары` →
-    ///   `SdblType::Ref(MdoRef { Catalog, "Товары" })`.
-    /// * Anything else (missing `SDBL_TYPE`, composite/unrecognised paths,
-    ///   length-only DECIMAL out of `u32` range) → `SdblType::Unknown`.
-    ///
-    /// MDO-ref resolution does not consult `self.metadata` here — the goal
-    /// is a syntactic target reading. Validating existence belongs to a
-    /// separate diagnostic pass.
-    ///
-    /// TODO(Phase G follow-up): composite CAST targets
-    /// (`ВЫРАЗИТЬ(X КАК Число | Строка)`) require parser grammar lift —
-    /// `crates/parser/src/grammar/sdbl/expressions.rs:1192` accepts only a
-    /// single IDENT chain today.
     fn resolve_cast_target(&self, node: &syntax::SyntaxNode) -> SdblType {
         let Some(type_node) = node.children().find(|c| c.kind() == syntax::SyntaxKind::SDBL_TYPE)
         else {
@@ -530,9 +443,6 @@ impl LoweringContext {
             return classify_primitive_cast_target(&name_parts[0], &decimals);
         }
 
-        // Multi-segment path: try first segment as MDO type (Справочник,
-        // Документ, …); anything past two segments is out of grammar
-        // scope today.
         if name_parts.len() == 2 {
             if let Ok(mdo_type) = name_parts[0].parse::<bsl_metadata::MdoType>() {
                 return SdblType::reference(mdo_type, &name_parts[1]);
@@ -542,32 +452,21 @@ impl LoweringContext {
         SdblType::Unknown
     }
 
-    /// Lower parameter expression.
     fn lower_parameter(&mut self, node: &syntax::SyntaxNode) -> ExprHir {
         let text = node.text().to_string();
         let name = text.trim_start_matches('&').to_string();
 
         ExprHir::Parameter {
             name: Name::from(name.as_str()),
-            ty: SdblType::Unknown, // Parameters have unknown type without context
+            ty: SdblType::Unknown,
             range: node.text_range(),
         }
     }
 
-    /// Lower VALUE()/ЗНАЧЕНИЕ() function arguments as MDO paths.
-    ///
-    /// VALUE() arguments are MDO paths like:
-    /// - Перечисление.Статусы.Активный (Enum.Statuses.Active)
-    /// - Справочник.Валюты.ПустаяСсылка (Catalog.Currencies.EmptyRef)
-    ///
-    /// These should NOT be resolved as table column references.
     fn lower_value_function_args(&mut self, node: &syntax::SyntaxNode) -> Vec<ExprHir> {
-        // VALUE() argument is wrapped in precedence nodes: LOGICAL_OR → LOGICAL_AND →
-        // ADDITIVE → MULTIPLICATIVE → COLUMN_REF. Find it via descendants.
         let Some(col_ref) =
             node.descendants().find(|n| n.kind() == syntax::SyntaxKind::SDBL_COLUMN_REF)
         else {
-            // No column ref found — fall back to generic expression lowering for incomplete input
             return node
                 .children()
                 .filter(|c| {
@@ -586,9 +485,6 @@ impl LoweringContext {
         let str_parts: Vec<&str> = text.split('.').collect();
         let parts: Vec<Name> = str_parts.iter().map(|s| Name::from(s.trim())).collect();
 
-        // Extract name-token ranges for semantic highlighting. Same
-        // widening as the column-ref highlighter above so soft-keyword
-        // MDO/path parts (e.g. `Справочник.В`) are recorded.
         let ident_ranges: Vec<(TextRange, String)> = col_ref
             .children_with_tokens()
             .filter_map(|child| match child {
@@ -599,12 +495,10 @@ impl LoweringContext {
             })
             .collect();
 
-        // Try to parse first part as MDO type: Перечисление, Справочник, Enum, Catalog, etc.
         let mdo_type_parsed =
             str_parts.first().and_then(|s| s.trim().parse::<bsl_metadata::MdoType>().ok());
 
         if let Some(mdo_type) = mdo_type_parsed {
-            // Part 0: MDO type keyword → MdoType semantic token
             if let Some((range, text)) = ident_ranges.first() {
                 self.source_map.add_token(
                     crate::source_map::TokenInfo::new(*range, syntax::SyntaxKind::IDENT, text),
@@ -612,7 +506,6 @@ impl LoweringContext {
                 );
             }
 
-            // Part 1: Object name → TableName semantic token
             if let Some((range, text)) = ident_ranges.get(1) {
                 self.source_map.add_token(
                     crate::source_map::TokenInfo::new(*range, syntax::SyntaxKind::IDENT, text),
@@ -620,7 +513,6 @@ impl LoweringContext {
                 );
             }
 
-            // Part 2: Value name → validate and assign FieldName or UnresolvedFieldName
             if let Some((range, text)) = ident_ranges.get(2) {
                 let object_name = str_parts.get(1).map(|s| s.trim()).unwrap_or("");
                 let value_name = text.trim();
@@ -637,7 +529,7 @@ impl LoweringContext {
                         .as_ref()
                         .and_then(|config| config.find_metadata_object(mdo_type, object_name))
                         .map(|obj| obj.find_enum_value(value_name).is_some())
-                        .unwrap_or(true) // No metadata = don't flag as error
+                        .unwrap_or(true)
                 } else if matches!(
                     mdo_type,
                     bsl_metadata::MdoType::Catalog
@@ -649,17 +541,15 @@ impl LoweringContext {
                         .as_ref()
                         .and_then(|config| config.find_metadata_object(mdo_type, object_name))
                         .map(|obj| {
-                            // If predefined_items is empty, metadata might not have loaded them yet
-                            // In that case, don't flag as error (graceful degradation)
                             if obj.predefined_items.is_empty() {
                                 true
                             } else {
                                 obj.find_predefined_item(value_name).is_some()
                             }
                         })
-                        .unwrap_or(true) // No metadata = don't flag as error
+                        .unwrap_or(true)
                 } else {
-                    true // Other types: only ПустаяСсылка is valid (already handled above)
+                    true
                 };
 
                 let category = if is_valid {
@@ -674,7 +564,6 @@ impl LoweringContext {
                 );
             }
         } else {
-            // Cannot parse MDO type - fall back to UnresolvedFieldName for all parts
             for (range, text) in &ident_ranges {
                 self.source_map.add_token(
                     crate::source_map::TokenInfo::new(*range, syntax::SyntaxKind::IDENT, text),
@@ -686,12 +575,7 @@ impl LoweringContext {
         vec![ExprHir::ColumnRef { parts, ty: SdblType::AnyRef, range: col_ref.text_range() }]
     }
 
-    /// Lower tuple expression (expr1, expr2, ...).
-    ///
-    /// Used for row-wise comparison in IN predicates:
-    /// `(field1, field2) IN (SELECT col1, col2 FROM ...)`
     fn lower_tuple_expr(&mut self, node: &syntax::SyntaxNode) -> ExprHir {
-        // Get all expression children - filter by expression SyntaxKinds
         let elements: Vec<ExprHir> = node
             .children()
             .filter(|c| {
@@ -719,13 +603,6 @@ impl LoweringContext {
     }
 }
 
-/// Map a single-identifier CAST target (e.g. `Число`, `Строка`, `Дата`,
-/// `Булево`) to its [`SdblType`]. Bilingual, case-insensitive.
-///
-/// `decimals` are the in-parens DECIMAL tokens already harvested from
-/// the `SDBL_TYPE` node; `Число` consumes up to two, `Строка` up to one,
-/// the rest ignore them. Out-of-`u8`-range precision/scale collapses to
-/// `None` for that slot rather than failing the whole cast.
 fn classify_primitive_cast_target(name: &str, decimals: &[u32]) -> SdblType {
     match name.to_uppercase().as_str() {
         "ЧИСЛО" | "NUMBER" => SdblType::Number {

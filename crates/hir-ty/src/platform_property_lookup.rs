@@ -1,53 +1,3 @@
-//! Property lookup on platform value receivers.
-//!
-//! This is the field-lookup analogue of [`crate::platform_manager_lookup`]:
-//! given a receiver typed as a platform value (`Ty::PlatformObject`, a
-//! collection variant, or a primitive), resolve `receiver.field_name`
-//! against the `PlatformProperty` catalogue in `bsl-platform`.
-//!
-//! # Why a separate adapter
-//!
-//! `method_lookup` and `field_lookup` sit in parallel: methods are indexed
-//! by `(type_name, method_name)` in `platform_data.json → methods`, while
-//! properties live in a dedicated `properties` array with an identically
-//! shaped bilingual index. Keeping the adapters symmetrical means the two
-//! dispatchers share nothing but the `platform_type_key` helper from
-//! [`crate::method_lookup`], which turns a scalar `Ty` into the English
-//! canonical name the platform index expects.
-//!
-//! # Coverage
-//!
-//! - **`Ty::PlatformObject(name)`** — the primary case. `Запрос`, `Запись`,
-//!   `РезультатЗапроса`, `ТаблицаЗначений`, and the long tail of types that
-//!   expose instance properties. The `name` is passed straight to the
-//!   bilingual index, so both `Ty::PlatformObject("Запрос")` and a
-//!   `PlatformObject("Query")` resolve to the same property row.
-//! - **Collection variants** (`Ty::Array`, `Ty::Map`, `Ty::Structure`,
-//!   `Ty::ValueTable`, `Ty::ValueList`, `Ty::Type`) — when the HBK describes
-//!   an instance property on them (e.g. `ТаблицаЗначений.Колонки`).
-//! - **Primitives** (`Ty::Number`, `Ty::String`, `Ty::Boolean`, `Ty::Date`)
-//!   — `None`. BSL primitives have no declared properties; returning `None`
-//!   here keeps the "scalar key only" invariant of
-//!   [`crate::method_lookup::platform_type_key_id`] intact.
-//!
-//! `Ty::MetadataRef` is deliberately **not** routed through
-//! [`lookup_platform_property`] — metadata-ref property access goes
-//! through [`crate::field_enum::enumerate_fields`], which composes the
-//! MDO's user/standard attributes, tabular sections, and the HBK
-//! platform-property cascade keyed by [`hir_def::ty::MetadataKind::platform_prefix`].
-//! The dispatcher in `lookup_field` decides who owns a receiver, and
-//! [`lookup_platform_property`] returns `None` for `MetadataRef` /
-//! `ObjectManager` inputs as defense-in-depth (see
-//! `metadata_ref_and_manager_receivers_return_none` test).
-//!
-//! What IS shared with the metadata-ref path is the small
-//! [`to_resolution`] helper: both [`crate::field_enum::enumerate_mdo_fields`]
-//! and [`crate::field_enum::enumerate_register_fields`] call it to convert
-//! a [`PlatformProperty`] into a `(Ty, is_readonly)` pair. That keeps the
-//! type-mapping logic (single-element list collapse, multi-element list
-//! union) in one place without re-exposing the full adapter to receivers
-//! it does not own.
-
 use bsl_platform::{PlatformData, PlatformProperty};
 use bsl_types::builders::Builders;
 use bsl_types::intern::TypeKernelDb;
@@ -57,48 +7,17 @@ use hir_def::Name;
 use crate::lower::type_string::lower_platform_type_name_typeid;
 use crate::method_lookup::platform_type_key_id;
 
-/// Result of a successful platform-property lookup.
-///
-/// Unlike [`crate::field_lookup::FieldInfo`] — which is returned from the
-/// `lookup_field` façade for any kind of field (MDO attribute or platform
-/// property) — this struct stays local to the adapter. Its fields feed the
-/// `FieldInfo` that the façade assembles, keeping the two layers decoupled.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlatformPropertyResolution {
-    /// Resolved value type. Derived from `PlatformProperty::property_types`
-    /// via [`map_property_type_list`]: single-element lists collapse to the
-    /// matching scalar type, multi-element lists become a `Union`. Empty
-    /// lists map to `db.unknown()` (the HBK page omitted the `Тип:`
-    /// marker — free-prose description only).
     pub return_ty: TypeId,
-    /// `true` when `Использование:` reads `"Только чтение"` on the property
-    /// page. Feeds the `ReadOnlyPropertyAssignment` diagnostic.
     pub is_readonly: bool,
 }
 
-/// Resolve `receiver.prop_name` against the platform-property catalogue.
-///
-/// Returns `None` when:
-/// - the receiver is not keyed by [`platform_type_key_id`] (managers,
-///   metadata refs, unions, primitives, `Unknown`);
-/// - the platform type has no property with this name.
-///
-/// Uses the `PlatformData::instance()` singleton the same way
-/// [`crate::method_lookup::lookup_method`] does; `db` is only needed to
-/// read the receiver shape and intern the resolved value type.
 pub fn lookup_platform_property(
     db: &dyn TypeKernelDb,
     receiver: TypeId,
     prop_name: &Name,
 ) -> Option<PlatformPropertyResolution> {
-    // Form-control receivers carry an ordered platform-type chain
-    // `[base, extension?]` (e.g. `Pages → ["ГруппаФормы", "Расширение
-    // группы формы для страниц"]`). The reverse-walk precedence
-    // (extension overrides base, single-entry chains collapse, `Other`
-    // is empty → `None`) is shared with method_lookup and lives in
-    // [`hir_def::ty::form_control_chain_first_hit`]. Extract `kind`
-    // (Copy) so the `&TypeKind` borrow is released before the callback
-    // re-borrows `db`.
     let form_kind = match db.lookup_type(receiver) {
         TypeKind::FormControl { kind, .. } => Some(*kind),
         _ => None,
@@ -112,10 +31,6 @@ pub fn lookup_platform_property(
     lookup_platform_property_by_type(db, &type_key, prop_name)
 }
 
-/// Same as [`lookup_platform_property`] but keyed directly by an English
-/// platform `type_name`. Used by callers whose receiver type does not map
-/// to a `platform_type_key_id` (e.g. `TabularSectionRow` borrowing the
-/// standard row properties from `"Line of a tabular section"`).
 pub(crate) fn lookup_platform_property_by_type(
     db: &dyn TypeKernelDb,
     type_name: &str,
@@ -126,12 +41,6 @@ pub(crate) fn lookup_platform_property_by_type(
     Some(to_resolution(db, prop))
 }
 
-/// Convert a `PlatformProperty` into the semantic [`PlatformPropertyResolution`].
-///
-/// Mirrors `method_lookup::to_method_info` in shape — same path through
-/// `lower_platform_type_name_typeid` for each declared value type, then
-/// `db.union` when the HBK page declared more than one (e.g.
-/// `МенеджерВременныхТаблиц, Неопределено`).
 pub(crate) fn to_resolution(
     db: &dyn TypeKernelDb,
     prop: &PlatformProperty,
@@ -142,17 +51,6 @@ pub(crate) fn to_resolution(
     }
 }
 
-/// Map the parsed list of declared property types to a [`TypeId`].
-///
-/// - **0 entries** — the HBK page didn't carry a `Тип:` marker. Return
-///   `db.unknown()` so downstream inference doesn't claim a type we don't
-///   actually know.
-/// - **1 entry** — direct `lower_platform_type_name_typeid` call (the same
-///   mapper method returns use).
-/// - **2+ entries** — `db.union(...)` of each mapped type. Ensures the
-///   TempTablesManager-style `"…, Неопределено"` declarations become a
-///   `Union({МенеджерВременныхТаблиц, Неопределено})` instead of a single
-///   stringly-typed `PlatformObject("…, Неопределено")`.
 fn map_property_type_list(db: &dyn TypeKernelDb, types: &[smol_str::SmolStr]) -> TypeId {
     match types.len() {
         0 => db.unknown(),
@@ -189,8 +87,6 @@ mod tests {
 
     #[test]
     fn query_text_resolves_to_string_writable() {
-        // `Запрос.Текст` is the canonical scalar read-write property —
-        // platform property_types = ["Строка"], is_readonly = false.
         let db = InMemoryDb::new();
         let receiver = db.platform_object("Запрос".to_string());
         let res = lookup_platform_property(&db, receiver, &Name::new("Текст"))
@@ -201,9 +97,6 @@ mod tests {
 
     #[test]
     fn query_parameters_resolves_to_structure_readonly() {
-        // The headline user scenario — `Запрос.Параметры` must come back as
-        // `Ty::Structure` so the chained `.Вставить` lookup in method_lookup
-        // can find `Структура.Вставить`. Platform flag: read-only.
         let db = InMemoryDb::new();
         let receiver = db.platform_object("Запрос".to_string());
         let res = lookup_platform_property(&db, receiver, &Name::new("Параметры"))
@@ -214,10 +107,6 @@ mod tests {
 
     #[test]
     fn query_temp_tables_manager_resolves_to_union() {
-        // `Запрос.МенеджерВременныхТаблиц` declares a union
-        // `МенеджерВременныхТаблиц, Неопределено`; the mapper must produce
-        // `Ty::Union(...)` with both members rather than a stringly-typed
-        // `PlatformObject("…, Неопределено")`.
         let db = InMemoryDb::new();
         let receiver = db.platform_object("Запрос".to_string());
         let res = lookup_platform_property(&db, receiver, &Name::new("МенеджерВременныхТаблиц"))
@@ -233,8 +122,6 @@ mod tests {
 
     #[test]
     fn bilingual_english_property_name_resolves() {
-        // Bilingual keying — `Query.Parameters` (English on both sides) must
-        // hit the same property row as `Запрос.Параметры`.
         let db = InMemoryDb::new();
         let receiver = db.platform_object("Query".to_string());
         let res = lookup_platform_property(&db, receiver, &Name::new("Parameters"))
@@ -254,10 +141,6 @@ mod tests {
 
     #[test]
     fn metadata_ref_and_manager_receivers_return_none() {
-        // MetadataRef / ObjectManager are owned by the MDO / manager
-        // adapters. The dispatcher in `field_lookup` routes them there
-        // before ever calling us, but as defense-in-depth the adapter
-        // itself must also say "not my receiver".
         let db = InMemoryDb::new();
         let mdo = db.metadata_ref(
             MetadataKind::CatalogObject,
@@ -272,9 +155,6 @@ mod tests {
 
     #[test]
     fn primitive_receivers_return_none() {
-        // Primitives have no declared instance properties — `platform_type_key`
-        // returns None for them, so we propagate None without ever touching
-        // the platform index.
         let db = InMemoryDb::new();
         assert!(lookup_platform_property(&db, db.number(None, None), &Name::new("Любая")).is_none());
         assert!(
@@ -289,28 +169,18 @@ mod tests {
         .is_none());
     }
 
-    // ---------- Phase 12: form-control chain walk ----------
-
     #[test]
     fn form_control_pages_resolves_extension_only_property() {
-        // `<Pages>.ТекущаяСтраница` lives in the extension type
-        // `Расширение группы формы для страниц` (5 props), NOT in the
-        // shared `ГруппаФормы` base. Without the chain walk this would
-        // miss — chain.iter().rev() hits the extension first and wins.
         use bsl_metadata::FormElementKind;
         let db = InMemoryDb::new();
         let receiver = db.mk_form_control(FormElementKind::Pages, None);
         let res = lookup_platform_property(&db, receiver, &Name::new("ТекущаяСтраница"))
             .expect("<Pages>.ТекущаяСтраница must resolve through extension chain");
-        // ТекущаяСтраница on Pages is writable (per platform_data.json).
         assert!(!res.is_readonly);
     }
 
     #[test]
     fn form_control_pages_falls_through_to_base_for_shared_property() {
-        // `Видимость` lives on the base `ГруппаФормы` — chain walk's
-        // extension hit misses, fall through to base wins. Confirms the
-        // chain doesn't *only* surface extension members.
         use bsl_metadata::FormElementKind;
         let db = InMemoryDb::new();
         let receiver = db.mk_form_control(FormElementKind::Pages, None);
@@ -321,10 +191,6 @@ mod tests {
 
     #[test]
     fn form_control_usual_group_does_not_see_pages_extension() {
-        // `ТекущаяСтраница` is exclusive to `<Pages>` extension. A
-        // `<UsualGroup>` receiver must NOT resolve it — its chain only
-        // includes "Расширение группы формы для обычной группы" which
-        // doesn't carry the property.
         use bsl_metadata::FormElementKind;
         let db = InMemoryDb::new();
         let receiver = db.mk_form_control(FormElementKind::UsualGroup, None);
@@ -336,10 +202,6 @@ mod tests {
 
     #[test]
     fn form_control_input_field_still_resolves_base_only() {
-        // Non-regression for scope guard #11 in plan v3.1: kinds that
-        // were NOT split (Field/Decoration/Button/Addition) must keep
-        // their pre-chain behaviour. `<InputField>.Видимость` resolves
-        // through the base `ПолеФормы` table — single-entry chain.
         use bsl_metadata::FormElementKind;
         let db = InMemoryDb::new();
         let receiver = db.mk_form_control(FormElementKind::Field, None);
@@ -350,8 +212,6 @@ mod tests {
 
     #[test]
     fn form_control_other_returns_none_with_empty_chain() {
-        // `Other` chain is &[] — the rev-walk loop runs zero iterations
-        // and we return None safely (no panic on empty chain).
         use bsl_metadata::FormElementKind;
         let db = InMemoryDb::new();
         let receiver = db.mk_form_control(FormElementKind::Other, None);

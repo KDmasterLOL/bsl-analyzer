@@ -1,5 +1,3 @@
-//! 1C:Enterprise debug protocol client.
-
 pub mod client;
 pub mod constants;
 pub mod dap;

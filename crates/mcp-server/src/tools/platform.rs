@@ -1,25 +1,19 @@
-//! Platform reference tool: BSL syntax help.
-
 use bsl_platform::PlatformDataInner;
 use rmcp::model::{CallToolResult, Content};
 use rmcp::ErrorData as McpError;
 use std::fmt::Write;
 
-/// Returns documentation for a platform type, method, or global function.
 pub fn bsl_syntax_help(name: &str, type_name: Option<&str>) -> Result<CallToolResult, McpError> {
     let platform = PlatformDataInner::instance();
 
-    // If type_name is provided, search for a method on that type
     if let Some(tn) = type_name {
         return search_method(platform, tn, name);
     }
 
-    // Try global function first
     if let Some(func) = platform.get_global_function(name) {
         return format_global_function(platform, func);
     }
 
-    // Try as type name — show type info and its methods
     let types = platform.all_types();
     let name_lower = name.to_lowercase();
     if let Some(pt) = types.iter().find(|t| {
@@ -28,7 +22,6 @@ pub fn bsl_syntax_help(name: &str, type_name: Option<&str>) -> Result<CallToolRe
         return format_type_info(platform, pt);
     }
 
-    // Try as method name across all types
     let all_methods = platform.all_methods();
     let matches: Vec<_> = all_methods
         .iter()
@@ -57,7 +50,6 @@ pub fn bsl_syntax_help(name: &str, type_name: Option<&str>) -> Result<CallToolRe
         return Ok(CallToolResult::success(vec![Content::text(out)]));
     }
 
-    // Try as keyword
     if let Some(kw) = platform.get_keyword_docs(name) {
         return format_keyword_docs(&kw);
     }
@@ -242,7 +234,6 @@ mod tests {
             return;
         }
 
-        // Find first available method to test with
         let method = &platform.all_methods()[0];
         let result = bsl_syntax_help(&method.name, Some(&method.type_name)).unwrap();
         let text = extract_text(&result);

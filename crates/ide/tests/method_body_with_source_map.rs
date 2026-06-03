@@ -1,11 +1,3 @@
-//! Behavioural tests for `method_body_with_source_map_query` (Phase O.9).
-//!
-//! Sister of [`method_body_query`] (O.8): returns the lowered `Body`
-//! together with its `BodySourceMap` so IDE features can map offsets
-//! ↔ HIR nodes (hover, narrow infer, diagnostics). Same residency
-//! contract as O.8 (no `file_resident` gate; total-VFS invariant
-//! O.2 guarantees populated text).
-
 use hir::{DefDatabase, MethodIdInput, ModuleId, Name};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
@@ -34,9 +26,6 @@ fn setup(fixture_text: &str) -> (RootDatabaseImpl, FileId) {
     (db, test_file)
 }
 
-/// The pair query yields a body matching the file-level `module_bodies`
-/// slice for the same method, and the accompanying `BodySourceMap`
-/// agrees with the file-level source map on a known expression range.
 #[test]
 fn method_body_with_source_map_matches_module_bodies_slice() {
     let (db, fid) = setup(
@@ -68,11 +57,6 @@ fn method_body_with_source_map_matches_module_bodies_slice() {
     );
     assert!(body.expr_count() > 0, "two assignments must yield expressions");
 
-    // Pick a known expression range via the file-level source map's
-    // forward (id → range) accessor, then confirm the per-method map's
-    // reverse accessor agrees. `whole_body.exprs_iter()` enumerates all
-    // expressions actually produced by lowering — no guesses about
-    // arena indices or byte offsets.
     let probe =
         whole_body.exprs_iter().find_map(|(id, _)| whole_map.expr_range(id).map(|r| (id, r)));
     if let Some((id, range)) = probe {
@@ -84,7 +68,6 @@ fn method_body_with_source_map_matches_module_bodies_slice() {
     }
 }
 
-/// Salsa cache: a second call returns the same `Arc` payload pointer.
 #[test]
 fn method_body_with_source_map_caches_via_salsa() {
     let (db, fid) = setup(

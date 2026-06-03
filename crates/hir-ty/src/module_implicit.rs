@@ -1,8 +1,3 @@
-//! Bare-identifier fields visible through the current module's implicit self.
-//!
-//! Object and record-set modules expose their owner attributes as unqualified
-//! names. Managed form modules expose form attributes the same way.
-
 use bsl_metadata::{MdoType, ModuleType};
 use bsl_types::builders::Builders;
 use bsl_types::kind::MetadataKind;
@@ -14,7 +9,6 @@ use crate::db::HirDatabase;
 use crate::field_enum::{enumerate_fields_inner, FieldInfo, FieldOrigin};
 use crate::form_attr::lower_form_attribute_to_typeid;
 
-/// Symbols visible as bare-ident in the current module.
 pub fn module_implicit_fields(db: &dyn HirDatabase, file_id: FileId) -> Vec<FieldInfo> {
     let module_id = ModuleId::new(file_id);
     let metadata = db.module_metadata(module_id);
@@ -26,10 +20,6 @@ pub fn module_implicit_fields(db: &dyn HirDatabase, file_id: FileId) -> Vec<Fiel
             let Some(kind) = MetadataKind::object_kind_for(mdo.mdo_type) else {
                 return Vec::new();
             };
-            // The module's own MDO carries no `config_id` here, so the
-            // receiver resolves under `Root` — behavior-preserving (the
-            // prior `Ty` bridge also defaulted to Root) with known
-            // config-identity loss for CFE modules.
             let receiver = db.metadata_ref(kind, mdo.name.clone(), &RootConfigCtx);
             enumerate_fields_inner(db, &configs, receiver)
         }

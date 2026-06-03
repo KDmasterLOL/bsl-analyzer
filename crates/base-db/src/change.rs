@@ -1,37 +1,28 @@
-//! File change application for incrementally updating the database.
-
 use std::sync::Arc;
 
 use vfs::FileId;
 
 use crate::{SourceRoot, SourceRootId};
 
-/// A batch of VFS changes to apply to the database.
 #[derive(Default, Debug)]
 pub struct FileChange {
-    /// Source roots that replace the current database roots.
     pub roots: Option<Vec<SourceRoot>>,
-    /// Changed file contents. `None` marks a deleted file.
     pub files_changed: Vec<(FileId, Option<Arc<str>>)>,
 }
 
 impl FileChange {
-    /// Create an empty change batch.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Replace the source roots when the batch is applied.
     pub fn set_roots(&mut self, roots: Vec<SourceRoot>) {
         self.roots = Some(roots);
     }
 
-    /// Add a file creation, modification, or deletion.
     pub fn change_file(&mut self, file_id: FileId, new_text: Option<Arc<str>>) {
         self.files_changed.push((file_id, new_text));
     }
 
-    /// Apply this batch to the database.
     pub fn apply(self, db: &mut dyn crate::RootQueryDb) {
         let _span = tracing::info_span!(
             "FileChange::apply",

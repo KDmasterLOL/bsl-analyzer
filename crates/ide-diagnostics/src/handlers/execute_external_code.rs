@@ -1,47 +1,3 @@
-//! ExecuteExternalCode diagnostic.
-//!
-//! Detects usage of Execute() statements and Eval()/Вычислить() method calls
-//! which can lead to arbitrary code execution vulnerabilities.
-//!
-//! ## Severity
-//! CRITICAL (VULNERABILITY)
-//!
-//! ## Tags
-//! ERROR, STANDARD
-//!
-//! ## Implementation
-//! **This is a HIR-based diagnostic** - collected during AST→HIR lowering.
-//!
-//! Detection points:
-//! - EXECUTE_STMT in `hir-def/body/lower/stmt.rs` (lower_execute_stmt)
-//! - Eval/Вычислить calls in `hir-def/body/lower/expr.rs` (lower_call_expr)
-//!
-//! Context checking: Only allowed in client-only methods (&НаКлиенте annotation ONLY).
-//!
-//! ## Examples
-//!
-//! ```bsl
-//! // ❌ Bad: Execute statement on server
-//! &НаСервере
-//! Процедура ВыполнитьПроизвольныйКод(Строка)
-//!     Выполнить(Строка); // CRITICAL: Arbitrary code execution
-//! КонецПроцедуры
-//!
-//! // ❌ Bad: Eval method call
-//! Функция ВычислитьЗначение(Строка)
-//!     Возврат Вычислить(Строка); // CRITICAL: Arbitrary code execution
-//! КонецФункции
-//!
-//! // ✅ Good: Client-only code (exempted)
-//! &НаКлиенте
-//! Процедура ВыполнитьНаКлиенте(Строка)
-//!     Выполнить(Строка); // OK: Client-side execution is permitted
-//! КонецПроцедуры
-//! ```
-//!
-//! ## References
-//! - 1C Standard: https://its.1c.ru/db/v8std#content:770:hdoc
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -67,9 +23,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic.
-///
-/// Called from lib.rs dispatch when `BodyDiagnostic::ExecuteExternalCode` is encountered.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     crate::simple_hir_diagnostic(
         DiagnosticCode::ExecuteExternalCode,
@@ -252,7 +205,6 @@ mod tests {
 
     #[test]
     fn test_common_module_without_annotations() {
-        // Same code as ExecuteExternalCodeInCommonModule test data
         let code = r#"
 Процедура ВыполнитьПроизвольныйКод(Строка)
     Выполнить(Строка);
@@ -262,7 +214,6 @@ mod tests {
     Возврат Вычислить(Строка);
 КонецФункции
 "#;
-        // ExecuteExternalCode should catch these too (no client-only annotation)
         check_diagnostics_snapshot_for(
             code,
             DiagnosticCode::ExecuteExternalCode,

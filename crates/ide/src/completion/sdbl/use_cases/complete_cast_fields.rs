@@ -1,29 +1,11 @@
-//! Use case: Complete fields for CAST expression types.
-
 use crate::completion::sdbl::domain::{FieldFormatter, MetadataProvider, SdblCompletionItem};
 use crate::completion::CompletionItemKind;
 use bsl_metadata::MdoType;
 use sdbl_hir::{FieldDef, MdoRef, Scope, SdblType};
 
-/// Use case for completing fields after CAST expression.
-///
-/// Handles completion for patterns like "ВЫРАЗИТЬ(X КАК Документ.Продажа)."
-/// where we need to suggest fields of the specified MDO type.
 pub struct CompleteCastFieldsUseCase;
 
 impl CompleteCastFieldsUseCase {
-    /// Execute the use case: get fields for CAST target type.
-    ///
-    /// # Arguments
-    /// - `scope`: Optional SDBL scope (for metadata and field resolution)
-    /// - `metadata_provider`: Fallback metadata provider if scope unavailable
-    /// - `mdo_type`: MDO type from CAST expression
-    /// - `object_name`: Object name from CAST expression
-    /// - `field_chain`: Chain of field names after CAST (may be empty)
-    /// - `prefix`: Filter prefix (case-insensitive)
-    ///
-    /// # Returns
-    /// List of matching fields from the CAST target type
     pub fn execute<M: MetadataProvider>(
         scope: Option<&Scope>,
         _metadata_provider: &M,
@@ -42,27 +24,22 @@ impl CompleteCastFieldsUseCase {
             "CompleteCastFieldsUseCase: resolving CAST target type"
         );
 
-        // Create MdoRef for the CAST target type
         let base_mdo_ref = MdoRef { mdo_type, name: object_name.to_string() };
 
-        // If we have a scope, use it for field resolution (handles metadata + standard fields)
         let Some(scope) = scope else {
             tracing::warn!("no scope available for CAST field completion");
             return Vec::new();
         };
 
-        // Get fields for base type first
         let base_fields = scope.get_fields_for_ref(&base_mdo_ref);
         if base_fields.is_empty() {
             tracing::warn!("no fields found for CAST target type");
             return Vec::new();
         }
 
-        // If there's a field chain, resolve through it
         let (final_type, final_fields) = if field_chain.is_empty() {
             (SdblType::Ref(base_mdo_ref), base_fields)
         } else {
-            // Walk through the chain to resolve final type
             match Self::resolve_field_chain(scope, base_fields, field_chain) {
                 Some((ty, fields)) => (ty, fields),
                 None => {
@@ -74,10 +51,8 @@ impl CompleteCastFieldsUseCase {
 
         tracing::info!(fields_count = final_fields.len(), "got fields from CAST target type");
 
-        // Extract table name for completion detail
         let table_name = Self::extract_table_name(&final_type);
 
-        // Filter by prefix and convert to SdblCompletionItem
         final_fields
             .into_iter()
             .filter(|field| {
@@ -98,9 +73,6 @@ impl CompleteCastFieldsUseCase {
             .collect()
     }
 
-    /// Resolve field chain starting from given fields.
-    ///
-    /// For each field in chain, finds the field type and resolves its fields.
     fn resolve_field_chain(
         scope: &Scope,
         mut current_fields: Vec<FieldDef>,
@@ -109,12 +81,10 @@ impl CompleteCastFieldsUseCase {
         let mut current_type = SdblType::Unknown;
 
         for field_name in field_chain {
-            // Find field in current context
             let field = current_fields.iter().find(|f| f.matches_name(field_name))?;
 
             current_type = field.ty.clone();
 
-            // Resolve next level based on type
             current_fields = match &current_type {
                 SdblType::Ref(mdo_ref) => scope.get_fields_for_ref(mdo_ref),
                 SdblType::Composite { types } => scope.get_fields_for_composite(types),
@@ -122,7 +92,6 @@ impl CompleteCastFieldsUseCase {
                     scope.get_fields_for_defined_type(name, underlying_type)
                 }
                 _ => {
-                    // Primitive type - cannot traverse further
                     return None;
                 }
             };
@@ -135,7 +104,6 @@ impl CompleteCastFieldsUseCase {
         Some((current_type, current_fields))
     }
 
-    /// Extract table name from resolved type for display.
     fn extract_table_name(ty: &SdblType) -> String {
         match ty {
             SdblType::Ref(mdo_ref) => {
@@ -172,7 +140,6 @@ mod tests {
     }
 
     fn make_test_scope_with_document() -> Scope {
-        // Create mock Configuration with a Document type
         let mut config = Configuration::new("TestConfig");
         let document = bsl_metadata::MetadataObject {
             mdo_type: MdoType::Document,
@@ -211,7 +178,6 @@ mod tests {
         let metadata_arc = Arc::new(config);
         let mut scope = Scope::new_with_metadata(Some(metadata_arc));
 
-        // Add a dummy table so the scope has some context
         let table = TableRef {
             parts: vec![SmolStr::from("Справочник"), SmolStr::from("Валюты")],
             full_name: "Справочник.Валюты".to_string(),
@@ -243,7 +209,6 @@ mod tests {
         let scope = make_test_scope_with_document();
         let provider = TestMetadataProvider(None);
 
-        // ВЫРАЗИТЬ(... КАК Документ.НачислениеИСписаниеБонусныхБаллов).
         let items = CompleteCastFieldsUseCase::execute(
             Some(&scope),
             &provider,
@@ -253,10 +218,8 @@ mod tests {
             "",
         );
 
-        // Should have fields from the document
         assert!(!items.is_empty(), "Expected fields from Document type");
 
-        // Check for custom attribute
         assert!(
             items.iter().any(|i| i.label == "ПричинаНачисленияИСписанияБонусныхБаллов"),
             "Expected ПричинаНачисленияИСписанияБонусныхБаллов field"
@@ -268,7 +231,6 @@ mod tests {
         let scope = make_test_scope_with_document();
         let provider = TestMetadataProvider(None);
 
-        // ВЫРАЗИТЬ(... КАК Документ.НачислениеИСписаниеБонусныхБаллов).При
         let items = CompleteCastFieldsUseCase::execute(
             Some(&scope),
             &provider,
@@ -278,7 +240,6 @@ mod tests {
             "При",
         );
 
-        // Should filter to fields starting with "При"
         assert!(
             items.iter().all(|i| i.label.to_lowercase().starts_with("при")),
             "Expected only fields starting with 'При'"
@@ -289,7 +250,6 @@ mod tests {
     fn test_complete_cast_no_scope() {
         let provider = TestMetadataProvider(None);
 
-        // Without scope, should return empty
         let items = CompleteCastFieldsUseCase::execute(
             None,
             &provider,

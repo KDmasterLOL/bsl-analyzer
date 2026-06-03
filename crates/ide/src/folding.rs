@@ -1,24 +1,19 @@
-//! Folding ranges implementation.
-
 use ide_db::RootDatabase;
 use line_index::LineIndex;
 use syntax::{SyntaxKind, SyntaxNode, TextRange, TextSize};
 use vfs::FileId;
 
-/// A foldable text range.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FoldingRange {
     pub range: TextRange,
     pub kind: Option<FoldingRangeKind>,
 }
 
-/// Standardized folding range kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FoldingRangeKind {
     Region,
 }
 
-/// Returns folding ranges for a file.
 pub fn folding_ranges<DB: RootDatabase>(db: &DB, file_id: FileId) -> Vec<FoldingRange> {
     let _span = tracing::info_span!("folding_ranges", ?file_id).entered();
 

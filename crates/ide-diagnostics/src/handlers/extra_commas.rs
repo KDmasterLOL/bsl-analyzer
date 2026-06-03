@@ -1,28 +1,3 @@
-//! ExtraCommas diagnostic
-//!
-//! Detects trailing commas in function/method call argument lists.
-//!
-//! **Test file:** ExtraCommasDiagnostic.bsl
-//!
-//! ## Implementation
-//! **This is a HIR-based diagnostic** - detects trailing commas during HIR lowering.
-//!
-//! ## Why?
-//! Trailing commas in BSL function calls are syntax errors or cause unexpected behavior.
-//! They reduce code readability and can lead to confusion with optional parameters.
-//!
-//! ## Bad practice
-//! ```bsl
-//! Результат = Метод(Парам1, Парам2,);     // Trailing comma
-//! Результат = Метод(Парам1, Парам2,,,);   // Multiple trailing commas
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! Результат = Метод(Парам1, Парам2);
-//! Результат = Метод(Парам1, , Парам2);    // Empty arg is OK
-//! ```
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -42,9 +17,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic.
-///
-/// Called from lib.rs dispatch when ExtraCommas diagnostic is emitted during lowering.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     crate::simple_hir_diagnostic(
         DiagnosticCode::ExtraCommas,
@@ -61,7 +33,6 @@ mod tests {
     use expect_test::expect;
     #[test]
     fn test_trailing_comma_single_arg() {
-        // Метод1(Парам1, , Парам2,) - trailing comma after last arg
         let code = "Результат = Метод1(Парам1, , Парам2,);";
         let diagnostics = check_hir_diagnostic(code);
         let extra_diags: Vec<_> =
@@ -75,7 +46,6 @@ mod tests {
 
     #[test]
     fn test_trailing_commas_multiple() {
-        // Метод2(Парам1, Парам2,,,) - multiple trailing commas
         let code = "Результат = Метод2(Парам1, Парам2,,,);";
         let diagnostics = check_hir_diagnostic(code);
         let extra_diags: Vec<_> =
@@ -89,7 +59,6 @@ mod tests {
 
     #[test]
     fn test_qualified_call_trailing_comma_with_space() {
-        // Модуль.Метод3(Парам1, Парам2, Парам3,, ) - trailing comma then space
         let code = "Результат = Модуль.Метод3(Парам1, Парам2, Парам3,, );";
         let diagnostics = check_hir_diagnostic(code);
         let extra_diags: Vec<_> =
@@ -103,7 +72,6 @@ mod tests {
 
     #[test]
     fn test_qualified_call_many_trailing_commas() {
-        // Модуль.Метод4(Парам1, , Парам2,,,,) - many trailing commas
         let code = "Результат = Модуль.Метод4(Парам1, , Парам2,,,,);";
         let diagnostics = check_hir_diagnostic(code);
         let extra_diags: Vec<_> =
@@ -117,7 +85,6 @@ mod tests {
 
     #[test]
     fn test_trailing_comma_in_if_condition() {
-        // Если Метод5(Парам1, , Парам2,,,,) Тогда
         let code = "Если Метод5(Парам1, , Парам2,,,,) Тогда\nКонецЕсли;";
         let diagnostics = check_hir_diagnostic(code);
         let extra_diags: Vec<_> =
@@ -131,7 +98,6 @@ mod tests {
 
     #[test]
     fn test_qualified_trailing_comma_in_if_condition() {
-        // Если Модуль.Метод6(Парам1, , Парам2,,,,) Тогда
         let code = "Если Модуль.Метод6(Парам1, , Парам2,,,,) Тогда\nКонецЕсли;";
         let diagnostics = check_hir_diagnostic(code);
         let extra_diags: Vec<_> =
@@ -145,7 +111,6 @@ mod tests {
 
     #[test]
     fn test_good_calls_no_diagnostic() {
-        // All valid calls: no trailing commas
         let code = r#"
 Результат = Метод(Парам1, , Парам2);
 Результат = Метод(Парам1, Парам2);
@@ -193,7 +158,6 @@ mod tests {
         let diagnostics = check_hir_diagnostic(code);
         let extra_diags: Vec<_> =
             diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::ExtraCommas).collect();
-        // Сообщается только о первой лишней запятой
         expect![[r#"
             ExtraCommas @ 2:25..2:26
               message: Не используйте запятые для параметры по умолчанию в конце вызова метода

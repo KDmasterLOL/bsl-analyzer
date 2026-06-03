@@ -1,24 +1,3 @@
-//! Completion coverage for platform value-collection types:
-//! `ТаблицаЗначений` (ValueTable), `Структура` (Structure), and
-//! `ДеревоЗначений` (ValueTree).
-//!
-//! Two surfaces are pinned:
-//!
-//! 1. **Direct `Новый T` construction** — assigning the result of
-//!    `Новый ТаблицаЗначений` / `Новый Структура` / `Новый ДеревоЗначений`
-//!    to a local variable, then completing on the variable dot, must
-//!    surface the platform members for the corresponding `Ty::*` (members
-//!    sourced from `platform_data.json` via
-//!    `method_lookup`/`platform_property_lookup`).
-//!
-//! 2. **Cascade typing through same-module function-call**
-//!    (`Х = F(); Х.|`) — Phase J `method_return_type_query` +
-//!    `materialise_signature_enriched` (commit O.11) propagate the
-//!    `Новый ТаблицаЗначений` return type back to the caller so
-//!    completion on `Х.` offers ValueTable members without a docstring.
-//!    This is the C3 follow-up captured in
-//!    `project_phase_o_c3_completion_followup.md`.
-
 use ide::{Analysis, CompletionItem};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
@@ -80,8 +59,6 @@ fn has_label(items: &[CompletionItem], label: &str) -> bool {
 fn labels(items: &[CompletionItem]) -> Vec<&str> {
     items.iter().map(|i| i.label.as_str()).collect()
 }
-
-// ---------- direct `Новый T` construction ----------
 
 #[test]
 fn completion_after_dot_on_new_value_table() {
@@ -148,12 +125,8 @@ fn completion_after_dot_on_new_value_tree() {
     }
 }
 
-// ---------- prefix-filtered completion ----------
-
 #[test]
 fn completion_after_dot_on_new_value_table_with_prefix() {
-    // Прибавляем префикс `Доб` — фильтр должен оставить только
-    // `Добавить` среди методов ValueTable.
     let items = complete(
         r#"//- /test.bsl
 Процедура Тест()
@@ -172,16 +145,8 @@ fn completion_after_dot_on_new_value_table_with_prefix() {
     assert!(has_label(&items, "Добавить"), "`Добавить` must be in the filtered set; got: {ls:?}");
 }
 
-// ---------- C3: cascade typing through same-module function-call ----------
-
 #[test]
 fn completion_after_dot_on_local_from_same_module_fn_returning_value_table() {
-    // Pin for the C3 follow-up: same-module function with no docstring
-    // returns `Новый ТаблицаЗначений`. Phase J cascade typing
-    // (method_return_type_query + materialise_signature_enriched,
-    // commit 224a2559 — Phase O.11) infers the return type from the
-    // body; Phase L narrow-infer routes the caller's local through
-    // InferOwnerResult; completion on `Х.` must offer ValueTable members.
     let items = complete(
         r#"//- /test.bsl
 Функция Получить()
@@ -236,15 +201,8 @@ fn completion_after_dot_on_local_from_same_module_fn_returning_structure() {
     }
 }
 
-// ---------- 2-hop cascade through method-graph ----------
-
 #[test]
 fn completion_two_hop_same_module_cascade_value_table() {
-    // `Outer()` calls `Inner()` which returns `Новый ТаблицаЗначений`.
-    // `method_return_type_query(Outer)` must recursively trigger
-    // `method_return_type_query(Inner)` to infer Outer's return type
-    // as `Ty::ValueTable`. Two method-graph hops; cycle_fn keeps it
-    // safe even though there's no actual cycle here.
     let items = complete(
         r#"//- /test.bsl
 Функция Inner()
@@ -304,15 +262,8 @@ fn completion_two_hop_same_module_cascade_structure() {
     }
 }
 
-// ---------- cross-module qualified call (Phase J via CommonModule) ----------
-
 #[test]
 fn completion_qualified_call_cross_module_value_table() {
-    // `Util.СоздатьТЗ()` — qualified call on a CommonModule receiver.
-    // Resolver finds the CommonModule, picks the exported method,
-    // and `method_return_type_query` infers its return type as
-    // `Ty::ValueTable` from the body. Single Phase J hop across the
-    // CommonModule boundary.
     let items = complete(
         r#"//- /CommonModules/Util/Ext/Module.bsl
 Функция СоздатьТЗ() Экспорт
@@ -342,11 +293,6 @@ fn completion_qualified_call_cross_module_value_table() {
 
 #[test]
 fn completion_two_hop_cross_module_cascade_structure() {
-    // Two Phase J hops across a CommonModule:
-    //   Util.Outer() → Util.Inner() → Новый Структура
-    // method_return_type_query(Outer) needs to recurse into Inner via
-    // the same query — Salsa cycle_fn keeps it safe across the
-    // CommonModule boundary.
     let items = complete(
         r#"//- /CommonModules/Util/Ext/Module.bsl
 Функция Inner() Экспорт
@@ -378,16 +324,8 @@ fn completion_two_hop_cross_module_cascade_structure() {
     }
 }
 
-// ---------- mixed: method-graph hop + property hop ----------
-
 #[test]
 fn completion_method_graph_hop_then_property_hop_value_table_columns() {
-    // Hop 1: `Получить()` → Phase J method_return_type_query → Ty::ValueTable.
-    // Hop 2: `.Колонки` → platform_property_lookup on ValueTable →
-    //         Ty::ValueTableColumnCollection.
-    // Completion at the second dot must surface column-collection
-    // methods (`Добавить`, `Найти`, etc.) — proving cascade typing
-    // chains a Phase J hop with a platform property hop.
     let items = complete(
         r#"//- /test.bsl
 Функция Получить()
@@ -415,15 +353,8 @@ fn completion_method_graph_hop_then_property_hop_value_table_columns() {
     }
 }
 
-// ---------- Массив (Array) cascade with callee-below-caller ordering ----------
-
 #[test]
 fn completion_after_dot_on_local_from_same_module_fn_returning_array_callee_below() {
-    // Воспроизводит реальный сценарий из ERP: caller объявлен ВЫШЕ callee,
-    // callee возвращает `Новый Массив`. Method-graph closure должен видеть
-    // вызываемую функцию независимо от порядка объявления; cascade typing
-    // через `method_return_type_query` обязан вывести `Ty::Array` и
-    // выдать на `Пар.` методы массива (`Добавить`, `Количество`, `Найти`).
     let items = complete(
         r#"//- /test.bsl
 Функция ТестированиеТипов()
@@ -450,13 +381,8 @@ fn completion_after_dot_on_local_from_same_module_fn_returning_array_callee_belo
     }
 }
 
-// ---------- diagnostic: isolate caller-above-callee vs Array-specific ----------
-
 #[test]
 fn completion_after_dot_on_local_from_same_module_fn_value_table_callee_below() {
-    // Тот же ValueTable, что и в зелёном тесте выше, но caller ВЫШЕ callee.
-    // Если падает — виноват порядок объявления (forward-reference в
-    // method-graph closure). Если зелёный — ordering ОК, баг в Массиве.
     let items = complete(
         r#"//- /test.bsl
 Функция Тест()
@@ -482,10 +408,6 @@ fn completion_after_dot_on_local_from_same_module_fn_value_table_callee_below() 
 
 #[test]
 fn completion_after_dot_on_local_from_same_module_fn_array_callee_above() {
-    // Массив с callee ВЫШЕ caller — обратный к failing-case порядок.
-    // Если зелёный — баг в forward-reference. Если красный —
-    // баг конкретно в выводе `Ty::Array` для `Новый Массив`
-    // (cascade через method_return_type_query не достаёт Array).
     let items = complete(
         r#"//- /test.bsl
 Функция СписокПараметров()
@@ -512,22 +434,8 @@ fn completion_after_dot_on_local_from_same_module_fn_array_callee_above() {
     }
 }
 
-// ---------- recursion cascade typing ----------
-//
-// `method_return_type_query` ships `cycle_fn` + `cycle_initial`
-// handlers (lattice bottom = `Ty::Unknown`, monotone-growing union
-// merge). The tests below pin that recursive callees still propagate
-// their concrete return type to the caller's local variable for
-// completion — a common BSL idiom is a tail-call helper that ends
-// with `Возврат Self(...)` after an explicit base-case return.
-
 #[test]
 fn completion_after_dot_on_local_from_self_recursive_value_table() {
-    // Direct self-recursion: the base case returns `Новый
-    // ТаблицаЗначений`; the recursive branch returns `СписокШагов(...)`
-    // itself. `method_return_type_query` must reach the lattice
-    // fixed-point `Ty::ValueTable` through the cycle handlers and the
-    // caller's local `ТЗ` must surface ValueTable members.
     let items = complete(
         r#"//- /test.bsl
 Функция СписокШагов(Глубина)
@@ -559,14 +467,6 @@ fn completion_after_dot_on_local_from_self_recursive_value_table() {
 
 #[test]
 fn completion_after_dot_on_local_from_mutual_recursion_structure() {
-    // Mutual recursion: `Четный` ↔ `Нечетный`. Both functions end
-    // their recursive branch with a call into the other; only one
-    // (`Четный`) has an explicit `Новый Структура` base case.
-    // Phase J `method_return_type_query` must propagate `Ty::Structure`
-    // through both cycles (cycle initial = Unknown; the monotone
-    // union merge promotes Unknown → Structure when the base case is
-    // reached) so completion on the caller's local works regardless
-    // of which arm of the mutual pair the user calls.
     let items = complete(
         r#"//- /test.bsl
 Функция Четный(Х)
@@ -605,12 +505,6 @@ fn completion_after_dot_on_local_from_mutual_recursion_structure() {
 
 #[test]
 fn completion_after_dot_on_local_from_pure_self_recursion_yields_no_items() {
-    // Sanity: a pure self-recursion with NO base-case literal (the
-    // recursive branch is the ONLY return) must cascade to
-    // `Ty::Unknown` — there is no concrete type to lift through the
-    // cycle handlers. Completion correctly shows no platform members
-    // (vs. surfacing wrong-type members from a stale cycle initial).
-    // This pins the cycle handler's lattice contract: ⊥ ⊔ ⊥ = ⊥.
     let items = complete(
         r#"//- /test.bsl
 Функция Бесконечная()
@@ -635,21 +529,11 @@ fn completion_after_dot_on_local_from_pure_self_recursion_yields_no_items() {
     );
 }
 
-// ---------- Structure key tracking (NOT YET IMPLEMENTED) ----------
-
 #[test]
 #[ignore = "Structure key tracking not implemented — Ty::Structure has no payload \
             for known keys; constructor literal `Новый Структура(\"k1, k2\")` and \
             `.Вставить(\"k3\")` mutations are not propagated. Tech-debt pin."]
 fn completion_after_dot_on_structure_returned_from_fn_lists_keys_and_methods() {
-    // Желаемое поведение: при `Стр.|`, где `Стр` приходит из функции,
-    // которая собирает `Новый Структура("Таймаут, Адрес")` плюс
-    // `.Вставить("Шифрование")`, completion должно показать и ключи
-    // (Таймаут / Адрес / Шифрование), и собственные методы Структуры
-    // (Вставить / Свойство / Количество / Удалить / Очистить).
-    //
-    // Сейчас ключи теряются — `Ty::Structure` не несёт информации о
-    // populated keys. Этот pin фиксирует функциональный пробел.
     let items = complete(
         r#"//- /test.bsl
 Функция ПараметрыСоединения()
@@ -681,23 +565,12 @@ fn completion_after_dot_on_structure_returned_from_fn_lists_keys_and_methods() {
     }
 }
 
-// ---------- ValueTable column tracking (NOT YET IMPLEMENTED) ----------
-
 #[test]
 #[ignore = "ValueTable column tracking not implemented — Ty::ValueTable has no \
             payload for declared columns; `Колонки.Добавить(\"Имя\", …)` mutations \
             are not propagated to row receivers in `Для Каждого … Из ТЗ`. \
             Tech-debt pin (same shape as Structure key tracking)."]
 fn completion_after_for_each_row_lists_declared_columns() {
-    // Желаемое поведение: внутри `Для Каждого Стр Из ТЗ Цикл` после
-    // `Колонки.Добавить("Артикул", …)` / `.Добавить("Цена", …)`,
-    // completion на `Стр.|` должен показать имена колонок
-    // (`Артикул`, `Цена`) рядом с собственными методами строки
-    // (`Владелец`, `Получить`, `НомерСтроки`).
-    //
-    // Сейчас имена колонок теряются — `Ty::ValueTable` не несёт
-    // declared-columns; row receiver выходит на платформенный
-    // fallback и видит только generic-методы.
     let items = complete(
         r#"//- /test.bsl
 Функция СоздатьТаблицу()
@@ -723,7 +596,6 @@ fn completion_after_for_each_row_lists_declared_columns() {
             "declared column `{column}` must be offered on row receiver; got: {ls:?}"
         );
     }
-    // Sanity: row's own platform methods/properties still present.
     for member in ["Владелец", "НомерСтроки"] {
         assert!(
             has_label(&items, member),
@@ -737,9 +609,6 @@ fn completion_after_for_each_row_lists_declared_columns() {
             surface declared column names alongside ValueTableColumnCollection \
             methods. Tech-debt pin."]
 fn completion_after_dot_on_columns_lists_declared_column_names() {
-    // Желаемое поведение: `ТЗ.Колонки.|` должен показать и методы
-    // коллекции колонок (`Добавить`, `Найти`, `Количество`), и имена
-    // уже добавленных колонок как индексаторы по имени.
     let items = complete(
         r#"//- /test.bsl
 Процедура Тест()
@@ -766,33 +635,12 @@ fn completion_after_dot_on_columns_lists_declared_column_names() {
     }
 }
 
-// ---------- composite: Structure key → ValueTable → row columns ----------
-
 #[test]
 #[ignore = "Composite payload tracking not implemented — requires Structure \
             key→value-type propagation AND ValueTable column tracking AND \
             cross-receiver iteration. Tech-debt pin (depends on both \
             Structure key and ValueTable column tracking pins)."]
 fn completion_for_each_row_from_chained_structure_key_value_table() {
-    // Желаемое поведение (композиция трёх фич):
-    //
-    // 1. `Новый Структура("Таб", Новый ТаблицаЗначений())` —
-    //    ключ "Таб" связывается со значением типа `Ty::ValueTable`
-    //    (второй позиционный аргумент — выражение).
-    // 2. Cascade typing доводит тип возврата `Тест2()` через
-    //    `materialise_signature_enriched` (Phase O.11).
-    // 3. `Тест2().Таб` разрешается через Structure-key payload →
-    //    `Ty::ValueTable` (с колонками из `.Колонки.Добавить`).
-    // 4. `Для Каждого Стр Из <ValueTable>` даёт row receiver с
-    //    типизированными колонками — на `Стр.|` ожидаем имена
-    //    колонок (плюс платформенные row-fallback методы).
-    //
-    // Колонки определены через
-    // `Колонки.Добавить(Имя: Строка, Тип: ОписаниеТипов, …)` —
-    // см. platform_data.json. Колонка `Артикул : Строка` должна
-    // быть видна по имени; имея payload типа, в идеале и hover
-    // покажет `: Строка`, но этот пин проверяет только наличие
-    // имени в completion.
     let items = complete(
         r#"//- /test.bsl
 Функция Тест2()
@@ -819,13 +667,8 @@ fn completion_for_each_row_from_chained_structure_key_value_table() {
     }
 }
 
-// ---------- chained dot through ValueTable.Колонки ----------
-
 #[test]
 fn completion_after_chained_dot_on_value_table_columns() {
-    // ValueTable.Колонки : ValueTableColumnCollection — chain hop
-    // through `Ty::ValueTable -> property "Колонки" -> Ty::?` must
-    // surface column-collection methods (`Добавить`, `Найти`, etc).
     let items = complete(
         r#"//- /test.bsl
 Процедура Тест()

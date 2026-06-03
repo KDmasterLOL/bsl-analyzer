@@ -1,30 +1,3 @@
-//! SDBL parser tests.
-//!
-//! Tests SDBL query parsing with focus on:
-//! - Basic SELECT queries
-//! - Aliases (with and without AS keyword) - CRITICAL for AssignAliasFieldsInQuery
-//! - UNION queries
-//! - Subqueries in FROM
-//! - Error recovery
-//!
-//! # Provenance and bucket policy
-//!
-//! Tests in this file follow the A/B/C classification defined in
-//! `docs/legal/sdbl-test-corpus-slice0.md`:
-//!
-//! - Bucket A — generic language-acceptance coverage: keep as-is; example
-//!   queries are owned and may be rewritten freely from official 1C docs.
-//! - Bucket B — valuable behavioral coverage whose current query text is
-//!   bulky or historically shaped: keep the behavioral assertion, rewrite
-//!   the query text from the minimal local scenario needed to prove it.
-//! - Bucket C — historical regression archives kept for compatibility: do
-//!   not treat as specification input for clean-room work. Marked inline
-//!   with `// Bucket C:` comments.
-//!
-//! New SDBL tests should be written from 1C query-language documentation
-//! (https://its.1c.ru/db/pubqlang) without consulting third-party grammar
-//! files. See `docs/legal/sdbl-clean-room-slices.md` for the full policy.
-
 use expect_test::{expect, Expect};
 use lexer::TokenKind;
 use parser::parse_sdbl;
@@ -41,14 +14,6 @@ fn check_no_errors(input: &str) {
     assert!(!parse.has_errors(), "Expected no errors, but got: {:#?}", parse.errors());
 }
 
-/// Allows the nested subquery alias recovery surfaced by Track 6.1 structured
-/// errors. After the inner subquery closes, the outer subquery's FROM source
-/// continues parsing past the inner `)`: the source-alias slot sees a clause
-/// keyword (Custom span), the join-clause slot fails on the missing JOIN
-/// keyword (Custom bump), and finally the outer `p.expect(RParen)` reports
-/// the missing close-paren (Expected bump).
-///
-/// XXX: PARSER-BUG-001. See `docs/diagnostics-audit/PARSER_FOLLOWUPS.md`.
 fn is_known_nested_subquery_alias_recovery(error: &syntax::SyntaxError) -> bool {
     match error.structured() {
         ParseError::Unexpected {
@@ -70,46 +35,38 @@ fn is_known_nested_subquery_alias_recovery(error: &syntax::SyntaxError) -> bool 
     }
 }
 
-// Bucket A.
 #[test]
 fn test_select_asterisk() {
     check_no_errors("SELECT * FROM Table");
 }
 
-// Bucket A.
 #[test]
 fn test_select_single_column() {
     check_no_errors("SELECT Name FROM Products");
 }
 
-// Bucket A.
 #[test]
 fn test_select_multiple_columns() {
     check_no_errors("SELECT Name, Code, Description FROM Products");
 }
 
-// Bucket A.
 #[test]
 fn test_select_with_where() {
     check_no_errors("SELECT Name FROM Products WHERE Active = TRUE");
 }
 
-// Bucket A.
 #[test]
 fn test_select_table_asterisk() {
     check_no_errors("SELECT Products.* FROM Products");
 }
 
-// Bucket A.
 #[test]
 fn test_select_qualified_column() {
     check_no_errors("SELECT Products.Name FROM Products");
 }
 
-// Bucket A.
 #[test]
 fn test_alias_with_as_keyword() {
-    // This should have AS keyword in the tree
     check(
         "SELECT Name AS ProductName FROM Products",
         expect![[r#"
@@ -143,98 +100,74 @@ fn test_alias_with_as_keyword() {
     );
 }
 
-// Bucket A.
 #[test]
 fn test_alias_without_as_keyword() {
-    // Implicit alias (no AS keyword) - this is what the diagnostic should catch
     check_no_errors("SELECT Name ProductName FROM Products");
 }
 
-// Bucket A.
 #[test]
 fn test_multiple_aliases_with_as() {
     check_no_errors("SELECT Name AS ProductName, Code AS ProductCode FROM Products");
 }
 
-// Bucket A.
 #[test]
 fn test_multiple_aliases_mixed() {
-    // Some with AS, some without
     check_no_errors("SELECT Name AS ProductName, Code ProductCode FROM Products");
 }
 
-// Bucket A.
 #[test]
 fn test_russian_alias_with_kak() {
-    // Russian КАК keyword
     check_no_errors("ВЫБРАТЬ Имя КАК ИмяПродукта ИЗ Товары");
 }
 
-// Bucket A.
 #[test]
 fn test_alias_case_insensitive() {
-    // AS in various cases
     check_no_errors("SELECT Name as ProductName FROM Products");
     check_no_errors("SELECT Name As ProductName FROM Products");
     check_no_errors("SELECT Name aS ProductName FROM Products");
 }
 
-// Bucket A.
 #[test]
 fn test_asterisk_no_alias() {
-    // Asterisk shouldn't have alias
     check_no_errors("SELECT * FROM Products");
     check_no_errors("SELECT Products.* FROM Products");
 }
 
-// Bucket A.
 #[test]
 fn test_russian_table_asterisk() {
-    // Russian identifier + .* — parallel to English `Products.*`.
-    // Locks that `is_asterisk_start` accepts Russian Ident in the Ident.* form.
     check_no_errors("ВЫБРАТЬ Товары.* ИЗ Товары");
 }
 
-// Bucket A.
 #[test]
 fn test_russian_into_simple() {
-    // Minimal Russian ПОМЕСТИТЬ (INTO) in canonical field-then-INTO-then-FROM order.
-    // Complementary to the complex Bucket-B fixture at test_into_clause_with_union_...;
-    // adds a spec-shaped minimal gate for Slice 7 INTO parsing.
     check_no_errors("ВЫБРАТЬ Поле ПОМЕСТИТЬ ВремТаблица ИЗ Товары");
 }
 
-// Bucket A.
 #[test]
 fn test_union_simple() {
     check_no_errors("SELECT Name FROM Products UNION SELECT Name FROM Services");
 }
 
-// Bucket A.
 #[test]
 fn test_union_all() {
     check_no_errors("SELECT Name FROM Products UNION ALL SELECT Name FROM Services");
 }
 
-// Bucket A.
 #[test]
 fn test_union_multiple() {
     check_no_errors("SELECT A FROM T1 UNION SELECT B FROM T2 UNION SELECT C FROM T3");
 }
 
-// Bucket A.
 #[test]
 fn test_union_with_aliases() {
     check_no_errors("SELECT Name AS N FROM Products UNION SELECT Title AS N FROM Services");
 }
 
-// Bucket A.
 #[test]
 fn test_subquery_in_from() {
     check_no_errors("SELECT * FROM (SELECT Name FROM Products) AS Sub");
 }
 
-// Bucket A.
 #[test]
 fn test_subquery_nested() {
     let input = "SELECT * FROM (SELECT * FROM (SELECT Name FROM Products) AS Inner) AS Outer";
@@ -253,19 +186,16 @@ fn test_subquery_nested() {
     );
 }
 
-// Bucket A.
 #[test]
 fn test_subquery_with_where() {
     check_no_errors("SELECT * FROM (SELECT Name FROM Products WHERE Active = TRUE) AS Sub");
 }
 
-// Bucket A.
 #[test]
 fn test_subquery_in_expression() {
     check_no_errors("SELECT Name FROM Products WHERE Code IN (SELECT Code FROM Active)");
 }
 
-// Bucket A.
 #[test]
 fn test_arithmetic_expressions() {
     check_no_errors("SELECT Price * Quantity AS Total FROM Orders");
@@ -273,7 +203,6 @@ fn test_arithmetic_expressions() {
     check_no_errors("SELECT Amount - Discount AS Final FROM Sales");
 }
 
-// Bucket A.
 #[test]
 fn test_logical_expressions() {
     check_no_errors("SELECT * FROM Products WHERE Active = TRUE AND Price > 100");
@@ -281,7 +210,6 @@ fn test_logical_expressions() {
     check_no_errors("SELECT * FROM Products WHERE NOT Deleted");
 }
 
-// Bucket A.
 #[test]
 fn test_comparison_expressions() {
     check_no_errors("SELECT * FROM Products WHERE Price > 100");
@@ -289,7 +217,6 @@ fn test_comparison_expressions() {
     check_no_errors("SELECT * FROM Products WHERE Code <> 0");
 }
 
-// Bucket A.
 #[test]
 fn test_function_calls() {
     check_no_errors("SELECT COUNT(*) AS Total FROM Products");
@@ -297,58 +224,49 @@ fn test_function_calls() {
     check_no_errors("SELECT YEAR(Date) AS Year FROM Orders");
 }
 
-// Bucket A.
 #[test]
 fn test_mdo_table_reference() {
     check_no_errors("SELECT Name FROM Catalog.Products");
     check_no_errors("SELECT Ref FROM Document.Sales");
 }
 
-// Bucket A.
 #[test]
 fn test_mdo_qualified_column() {
     check_no_errors("SELECT Catalog.Products.Name FROM Catalog.Products");
 }
 
-// Bucket A.
 #[test]
 fn test_numeric_literals() {
     check_no_errors("SELECT * FROM Products WHERE Price = 100");
     check_no_errors("SELECT * FROM Products WHERE Price = 99.99");
 }
 
-// Bucket A.
 #[test]
 fn test_string_literals() {
     check_no_errors(r#"SELECT * FROM Products WHERE Name = "Product""#);
 }
 
-// Bucket A.
 #[test]
 fn test_boolean_literals() {
     check_no_errors("SELECT * FROM Products WHERE Active = TRUE");
     check_no_errors("SELECT * FROM Products WHERE Deleted = FALSE");
 }
 
-// Bucket A.
 #[test]
 fn test_null_literal() {
     check_no_errors("SELECT * FROM Products WHERE Description = NULL");
 }
 
-// Bucket A.
 #[test]
 fn test_parameter() {
     check_no_errors("SELECT * FROM Products WHERE Code = &ProductCode");
 }
 
-// Bucket A.
 #[test]
 fn test_multiple_parameters() {
     check_no_errors("SELECT * FROM Products WHERE Code = &Code AND Active = &IsActive");
 }
 
-// Bucket A.
 #[test]
 fn test_complex_query_with_all_features() {
     check_no_errors(
@@ -365,19 +283,16 @@ fn test_complex_query_with_all_features() {
     );
 }
 
-// Bucket A.
 #[test]
 fn test_multiple_queries_with_semicolon() {
     check_no_errors("SELECT Name FROM Products; SELECT Code FROM Services");
 }
 
-// Bucket A.
 #[test]
 fn test_multiple_queries_trailing_semicolon() {
     check_no_errors("SELECT Name FROM Products; SELECT Code FROM Services;");
 }
 
-// Bucket A: AST API contract.
 #[test]
 fn test_ast_alias_has_as_keyword() {
     use syntax::ast::{AstNode, SdblQueryPackage};
@@ -394,12 +309,10 @@ fn test_ast_alias_has_as_keyword() {
     let field = field_list.fields().next().expect("No field found");
     let alias = field.alias().expect("No alias found");
 
-    // CRITICAL TEST: Check has_as_keyword() method
     assert!(alias.has_as_keyword(), "Alias should have AS keyword: {:?}", alias.syntax());
     assert_eq!(alias.name(), Some("ProductName".to_string()));
 }
 
-// Bucket A: AST API contract.
 #[test]
 fn test_ast_alias_without_as_keyword() {
     use syntax::ast::{AstNode, SdblQueryPackage};
@@ -416,7 +329,6 @@ fn test_ast_alias_without_as_keyword() {
     let field = field_list.fields().next().expect("No field found");
     let alias = field.alias().expect("No alias found");
 
-    // CRITICAL TEST: Implicit alias should NOT have AS keyword
     assert!(
         !alias.has_as_keyword(),
         "Implicit alias should not have AS keyword: {:?}",
@@ -425,7 +337,6 @@ fn test_ast_alias_without_as_keyword() {
     assert_eq!(alias.name(), Some("ProductName".to_string()));
 }
 
-// Bucket A: AST API contract.
 #[test]
 fn test_ast_asterisk_field() {
     use syntax::ast::{AstNode, SdblQueryPackage};
@@ -441,12 +352,10 @@ fn test_ast_asterisk_field() {
     let field_list = main_query.field_list().expect("No field list found");
     let field = field_list.fields().next().expect("No field found");
 
-    // CRITICAL TEST: Check is_asterisk() method
     assert!(field.is_asterisk(), "Field should be asterisk: {:?}", field.syntax());
     assert!(field.alias().is_none(), "Asterisk should not have alias");
 }
 
-// Bucket A: AST API contract.
 #[test]
 fn test_ast_union_queries() {
     use syntax::ast::{AstNode, SdblQueryPackage};
@@ -459,7 +368,6 @@ fn test_ast_union_queries() {
     let query = package.queries().next().expect("No query found");
     let subquery = query.subquery().expect("No subquery found");
 
-    // CRITICAL TEST: Only main query should be checked, not UNION queries
     let main_query = subquery.main_query().expect("No main query found");
     let main_field_list = main_query.field_list().expect("No field list in main query");
     let main_field = main_field_list.fields().next().expect("No field in main query");
@@ -468,12 +376,10 @@ fn test_ast_union_queries() {
         Some("A".to_string())
     );
 
-    // Check that we have union queries
     let union_count = subquery.union_queries().count();
     assert_eq!(union_count, 1, "Should have 1 UNION query");
 }
 
-// Bucket B: banner-separator semicolon pattern with historically shaped query text.
 #[test]
 fn test_debug_semicolon_tokens() {
     let query = r#"ВЫБРАТЬ
@@ -498,10 +404,8 @@ fn test_debug_semicolon_tokens() {
     assert_eq!(count, 2, "Expected 2 queries separated by semicolon");
 }
 
-// Bucket B: banner-separator UNION pattern with historically shaped query text.
 #[test]
 fn test_union_with_semicolon_separator() {
-    // Pattern: SELECT … ОБЪЕДИНИТЬ ВСЕ … ; <comment line> SELECT … ОБЪЕДИНИТЬ ВСЕ …
     let query = r#"ВЫБРАТЬ
 	Валюты.Ссылка
 ИЗ
@@ -538,10 +442,6 @@ fn test_union_with_semicolon_separator() {
     assert_eq!(count, 2, "Expected 2 SELECT queries (each with UNION) separated by semicolon");
 }
 
-// Bucket B: multi-column UNION ALL across a two-statement package boundary
-// with mixed alias forms (bare / AS-style / implicit). Query text authored
-// from ITS pubqlang/10 catalog-reference examples; spec-shaped, no log
-// provenance.
 #[test]
 fn test_double_union_all_queries_with_aliases() {
     let query = r#"ВЫБРАТЬ
@@ -588,9 +488,6 @@ fn test_double_union_all_queries_with_aliases() {
     assert_eq!(count, 2, "Should find 2 SELECT queries separated by semicolon");
 }
 
-// Tests for FULL OUTER JOIN parsing (fix for keyword consumption bug)
-
-// Bucket A.
 #[test]
 fn test_full_outer_join_simple() {
     let input = "SELECT * FROM T1 FULL OUTER JOIN T2 ON T1.A = T2.A";
@@ -598,7 +495,6 @@ fn test_full_outer_join_simple() {
     assert!(!parse.has_errors(), "Should parse without errors");
 }
 
-// Bucket A.
 #[test]
 fn test_multiple_full_outer_joins() {
     let input =
@@ -607,7 +503,6 @@ fn test_multiple_full_outer_joins() {
     assert!(!parse.has_errors(), "Should parse multiple JOINs");
 }
 
-// Bucket A.
 #[test]
 fn test_on_not_consumed_as_alias() {
     let input = "SELECT * FROM T1 JOIN T2 ON T1.ID = T2.ID";
@@ -617,7 +512,6 @@ fn test_on_not_consumed_as_alias() {
     assert!(text.contains("ON"), "ON keyword should be in AST, not consumed as alias");
 }
 
-// Bucket B: multiline RU join with historically shaped schema names (Товары/ПланПродаж).
 #[test]
 fn test_nested_joins_multiline_russian() {
     let input = "ВЫБРАТЬ Товары.Номенклатура
@@ -631,40 +525,28 @@ fn test_nested_joins_multiline_russian() {
     assert!(!parse.has_errors(), "Should parse multiline nested JOINs");
 }
 
-// Tests for multi-argument function calls (bug fix)
-
-// Bucket A.
 #[test]
 fn test_function_with_two_arguments() {
-    // Simplest case: two-argument function without alias
     check_no_errors("SELECT ISNULL(A, 0) FROM T");
 }
 
-// Bucket A.
 #[test]
 fn test_function_with_two_arguments_and_alias() {
-    // With alias
     check_no_errors("SELECT ISNULL(Amount, 0) AS Total FROM Products");
 }
 
-// Bucket A.
 #[test]
 fn test_russian_function_with_arguments() {
-    // Russian version
     check_no_errors("ВЫБРАТЬ ЕСТЬNULL(Сумма, 0) ИЗ Товары");
 }
 
-// Bucket A.
 #[test]
 fn test_multiple_fields_with_function_arguments() {
-    // Multiple fields, one with multi-arg function
     check_no_errors("SELECT Name, ISNULL(Amount, 0) AS Total FROM Products");
 }
 
-// Bucket B: multiline RU query with historically shaped schema (Товары/ПланПродаж/ФактическиеПродажи).
 #[test]
 fn test_multiple_multi_arg_functions() {
-    // Multiple multi-arg functions like the failing diagnostic test
     let input = "ВЫБРАТЬ
     Товары.Номенклатура КАК Номенклатура,
     ЕСТЬNULL(ПланПродаж.Сумма, 0) КАК СуммаПлан,
@@ -674,7 +556,6 @@ fn test_multiple_multi_arg_functions() {
     let parse = parse_sdbl(input);
     assert!(!parse.has_errors(), "Should parse multiple multi-arg functions");
 
-    // Verify FROM clause exists in AST
     use syntax::ast::{AstNode, SdblQueryPackage};
     let root = parse.syntax_node();
     let package = SdblQueryPackage::cast(root).expect("Should have package");
@@ -683,59 +564,48 @@ fn test_multiple_multi_arg_functions() {
     let main_query = subquery.main_query().expect("Should have main query");
     let from_clause = main_query.from_clause().expect("Should have FROM clause");
 
-    // FROM clause should have data sources
     let data_sources_count = from_clause.data_sources().count();
     assert!(data_sources_count > 0, "FROM should have data sources");
 }
 
-// Comprehensive test coverage for multi-argument functions
-
-// Bucket A.
 #[test]
 fn test_single_arg_function() {
     check_no_errors("SELECT SUM(Amount) FROM T");
     check_no_errors("SELECT YEAR(Date) FROM T");
 }
 
-// Bucket A.
 #[test]
 fn test_two_arg_functions() {
     check_no_errors("SELECT ISNULL(A, 0) FROM T");
     check_no_errors("SELECT SUBSTRING(Name, 1, 10) FROM T");
 }
 
-// Bucket A.
 #[test]
 fn test_three_arg_functions() {
     check_no_errors("SELECT SUBSTRING(Text, 1, 5) FROM T");
 }
 
-// Bucket A.
 #[test]
 fn test_multi_arg_with_alias() {
     check_no_errors("SELECT ISNULL(Amount, 0) AS Total FROM T");
 }
 
-// Bucket A.
 #[test]
 fn test_mixed_fields_and_functions() {
     check_no_errors("SELECT Name, ISNULL(Amount, 0), Code FROM T");
 }
 
-// Bucket A.
 #[test]
 fn test_nested_functions() {
     check_no_errors("SELECT ISNULL(SUM(Amount), 0) FROM T");
 }
 
-// Bucket A.
 #[test]
 fn test_russian_multi_arg_functions() {
     check_no_errors("ВЫБРАТЬ ЕСТЬNULL(Сумма, 0) ИЗ Товары");
     check_no_errors("ВЫБРАТЬ ЕСТЬNULL(Сумма, 0) КАК Итого ИЗ Товары");
 }
 
-// Bucket A.
 #[test]
 fn test_join_with_complex_on_condition() {
     let input =
@@ -750,11 +620,6 @@ fn test_join_with_complex_on_condition() {
     assert_eq!(ast_end, input.len(), "AST should cover full input");
 }
 
-// Bucket B: two-statement package where the first query uses ПОМЕСТИТЬ (INTO)
-// + UNION ALL and the second uses INNER JOIN + GROUP BY over the temp table.
-// Exercises package-boundary + UNION ALL bundling + cross-statement temp-table
-// reference. Query text authored from ITS pubqlang/10 temporary-table example
-// shape (ПОМЕСТИТЬ Папки ... ВНУТРЕННЕЕ СОЕДИНЕНИЕ Папки).
 #[test]
 fn test_into_clause_with_union_and_semicolon_separator() {
     let query = r#"ВЫБРАТЬ РАЗРЕШЕННЫЕ
@@ -798,15 +663,8 @@ fn test_into_clause_with_union_and_semicolon_separator() {
     assert_eq!(count, 2, "Expected 2 queries separated by semicolon (first with INTO and UNION ALL, second with JOIN)");
 }
 
-// Bucket C (preserved): exact text extracted from runtime logs with an
-// incomplete inner JOIN ON condition ("Папки. ="). Encodes a specific
-// error-recovery invariant that is not spec-derivable: the package boundary
-// (';' separator) must still yield two SdblSelectQuery children even when
-// the first query has a malformed ON expression. Listed in the Slice 6
-// attestation §Preserved pre-refactor behaviours.
 #[test]
 fn test_exact_extracted_query_from_logs() {
-    // EXACT text extracted from logs (08:16:50) - with incomplete ON condition "Папки. ="
     let query = r#"ВЫБРАТЬ РАЗРЕШЕННЫЕ
 	ГруппыКонтактовПользователей.Ссылка
 ПОМЕСТИТЬ Папки
@@ -838,7 +696,6 @@ fn test_exact_extracted_query_from_logs() {
 
     let parse = parse_sdbl(query);
 
-    // Check for errors
     if parse.has_errors() {
         println!("Parse errors:");
         for error in parse.errors() {
@@ -853,7 +710,6 @@ fn test_exact_extracted_query_from_logs() {
 
     println!("Found {} queries", count);
 
-    // Debug: print all queries
     for (i, query) in package.queries().enumerate() {
         println!("Query {}: {:?}", i, query.syntax().text());
     }
@@ -861,10 +717,8 @@ fn test_exact_extracted_query_from_logs() {
     assert_eq!(count, 2, "Expected 2 queries separated by semicolon, but found {}", count);
 }
 
-// Bucket C: user-extracted highlighting bug query (БизнесПроцессы schema).
 #[test]
 fn test_nested_join_with_parameters_highlighting() {
-    // Test for highlighting issue after &Действие parameter in nested JOIN
     let query = r#"ВЫБРАТЬ РАЗЛИЧНЫЕ
     ЗадачиЭлементовСхемы.ИмяЭлемента,
     ЗадачиЭлементовСхемы.ЗадачаПроцесса
@@ -916,10 +770,8 @@ fn test_nested_join_with_parameters_highlighting() {
     assert!(!parse.has_errors(), "Should parse nested JOINs without errors: {:?}", parse.errors());
 }
 
-// Bucket C: user-extracted completion scenario (incomplete ON condition).
 #[test]
 fn test_incomplete_on_condition_for_completion() {
-    // Test incomplete ON conditions - cursor at "ПроцессыДействий." with incomplete condition
     let query = r#"ВЫБРАТЬ РАЗЛИЧНЫЕ
     ЗадачиЭлементовСхемы.ИмяЭлемента,
     ЗадачиЭлементовСхемы.ЗадачаПроцесса
@@ -952,7 +804,6 @@ fn test_incomplete_on_condition_for_completion() {
     let root = parse.syntax_node();
 
     println!("\n=== Syntax tree (abbreviated) ===");
-    // Print only the structure, not full content
     for child in root.children() {
         println!("{:?} at {:?}", child.kind(), child.text_range());
     }
@@ -963,15 +814,11 @@ fn test_incomplete_on_condition_for_completion() {
     let queries: Vec<_> = package.unwrap().queries().collect();
     println!("\n=== Found {} queries ===", queries.len());
 
-    // We should still get 2 queries
     assert_eq!(queries.len(), 2, "Should parse both queries despite incomplete ON");
 }
 
-// Test for empty parameters in function calls (accumulator register methods)
-// Bucket B: register virtual-table access pattern with historically shaped schema.
 #[test]
 fn test_function_with_empty_parameters() {
-    // Test empty parameters in .Обороты() method call
     let query = r#"ВЫБРАТЬ
     Обороты.СуммаВыручкиОборот
 ИЗ
@@ -993,10 +840,8 @@ fn test_function_with_empty_parameters() {
     assert!(!parse.has_errors(), "Should parse function with empty parameters without errors");
 }
 
-// Bucket C: user's real query (comment: "like in the user's real query").
 #[test]
 fn test_function_with_mixed_empty_and_filled_parameters() {
-    // Test mix of empty and filled parameters like in the user's real query
     let query = r#"ВЫБРАТЬ
     Обороты.СуммаВыручкиОборот,
     Обороты.КоличествоУчетноеОборот
@@ -1018,10 +863,8 @@ fn test_function_with_mixed_empty_and_filled_parameters() {
     );
 }
 
-// Bucket A.
 #[test]
 fn test_multiple_functions_with_empty_parameters() {
-    // Test multiple function calls with empty parameters in same query
     let query = r#"ВЫБРАТЬ
     Обороты1.Сумма,
     Обороты2.Количество
@@ -1033,10 +876,8 @@ fn test_multiple_functions_with_empty_parameters() {
     assert!(!parse.has_errors(), "Should parse multiple functions with empty parameters");
 }
 
-// Bucket C: from user's real query (comment: "Test from user's real query").
 #[test]
 fn test_function_with_in_subquery_parameter() {
-    // Test from user's real query: .Обороты() with IN (subquery) as parameter
     let query = r#"ВЫБРАТЬ
     ВыручкаИСебестоимость.СуммаВыручкиОборот
 ИЗ
@@ -1064,10 +905,8 @@ fn test_function_with_in_subquery_parameter() {
     assert!(!parse.has_errors(), "Should parse function with IN (subquery) as parameter");
 }
 
-// Bucket C: full query from user's original bug report.
 #[test]
 fn test_user_full_query_with_empty_params_and_in_subquery() {
-    // Full query from user's original message with highlighting issue
     let query = r#"ВЫБРАТЬ
     АналитикаПоПартнерам.Партнер КАК Партнер,
     ВыручкаИСебестоимость.СуммаВыручкиОборот КАК Выручка,
@@ -1101,12 +940,8 @@ fn test_user_full_query_with_empty_params_and_in_subquery() {
     );
 }
 
-// Bucket C: fixture-backed regression (see in-body note).
 #[test]
 fn test_complete_user_query_from_fixture() {
-    // Bucket C: historical regression from a user report, preserved as a
-    // fixture (ПОМЕСТИТЬ, ОБЪЕДИНИТЬ, empty params, IN subqueries). Not a
-    // specification input. See docs/legal/sdbl-test-corpus-slice0.md.
     let query = include_str!("fixtures/user_query_with_highlighting_issue.sdbl");
 
     let parse = parse_sdbl(query);
@@ -1126,10 +961,8 @@ fn test_complete_user_query_from_fixture() {
     );
 }
 
-// Bucket A.
 #[test]
 fn test_debug_in_expression_parsing() {
-    // Simplified test to debug IN expression parsing
     let query = "ВЫБРАТЬ X ИЗ Т ГДЕ Поле В (1, 2, 3)";
     let parse = parse_sdbl(query);
     assert!(!parse.has_errors(), "Should parse simple IN with value list");
@@ -1138,7 +971,6 @@ fn test_debug_in_expression_parsing() {
     let parse = parse_sdbl(query);
     assert!(!parse.has_errors(), "Should parse simple IN with subquery");
 
-    // Now test IN inside function parameter
     let query = "ВЫБРАТЬ X ИЗ Рег.Метод(Поле В (ВЫБРАТЬ Y ИЗ Т2))";
     let parse = parse_sdbl(query);
 
@@ -1154,23 +986,11 @@ fn test_debug_in_expression_parsing() {
     assert!(!parse.has_errors(), "Should parse IN inside function parameter");
 }
 
-// ============================================================================
-// Phase 2: Error Recovery Tests
-// ============================================================================
-//
-// Tests for error recovery improvements (Phase 2 of SDBL error recovery plan):
-// 1. IN predicate with empty values
-// 2. REFS identifier chain
-// 3. Function arguments with empty parameters
-
-// Bucket A.
 #[test]
 fn test_error_recovery_in_empty_value() {
-    // IN predicate with empty value: IN (1, , 3)
     let input = "SELECT * FROM T WHERE Field IN (1, , 3)";
     let parse = parse_sdbl(input);
 
-    // Should have ERROR node for empty value
     let tree = format!("{:#?}", parse.syntax_node());
     assert!(
         tree.contains("ERROR"),
@@ -1178,21 +998,17 @@ fn test_error_recovery_in_empty_value() {
         tree
     );
 
-    // But WHERE clause should still be parsed!
     assert!(
         tree.contains("SDBL_WHERE_CLAUSE"),
         "WHERE clause should be parsed despite empty IN value.\nTree: {}",
         tree
     );
 
-    // And the IN expression should be present
     assert!(tree.contains("SDBL_IN_EXPR"), "IN expression should be parsed.\nTree: {}", tree);
 }
 
-// Bucket A.
 #[test]
 fn test_error_recovery_in_leading_empty() {
-    // IN predicate with leading empty value: IN (, 2, 3)
     let input = "SELECT * FROM T WHERE Field IN (, 2, 3)";
     let parse = parse_sdbl(input);
 
@@ -1201,10 +1017,8 @@ fn test_error_recovery_in_leading_empty() {
     assert!(tree.contains("SDBL_WHERE_CLAUSE"), "WHERE clause should be parsed.\nTree: {}", tree);
 }
 
-// Bucket A.
 #[test]
 fn test_error_recovery_in_trailing_empty() {
-    // IN predicate with trailing empty value: IN (1, 2,)
     let input = "SELECT * FROM T WHERE Field IN (1, 2,)";
     let parse = parse_sdbl(input);
 
@@ -1217,16 +1031,13 @@ fn test_error_recovery_in_trailing_empty() {
     assert!(tree.contains("SDBL_WHERE_CLAUSE"), "WHERE clause should be parsed.\nTree: {}", tree);
 }
 
-// Bucket A.
 #[test]
 fn test_error_recovery_function_empty_args() {
-    // Function with empty arguments: func(, , value)
     let input = "SELECT func(, , 123) FROM T";
     let parse = parse_sdbl(input);
 
     let tree = format!("{:#?}", parse.syntax_node());
 
-    // Should have ERROR nodes for empty arguments
     let error_count = tree.matches("ERROR").count();
     assert!(
         error_count >= 2,
@@ -1235,21 +1046,17 @@ fn test_error_recovery_function_empty_args() {
         tree
     );
 
-    // But function call should still be parsed
     assert!(
         tree.contains("SDBL_FUNCTION_CALL"),
         "Function call should be parsed despite empty args.\nTree: {}",
         tree
     );
 
-    // And SELECT should be complete
     assert!(tree.contains("SDBL_FIELD_LIST"), "Field list should be parsed.\nTree: {}", tree);
 }
 
-// Bucket A.
 #[test]
 fn test_error_recovery_function_leading_empty() {
-    // Function with leading empty argument: func(, value)
     let input = "SELECT func(, 456) FROM T";
     let parse = parse_sdbl(input);
 
@@ -1258,10 +1065,8 @@ fn test_error_recovery_function_leading_empty() {
     assert!(tree.contains("SDBL_FUNCTION_CALL"), "Function call should be parsed.\nTree: {}", tree);
 }
 
-// Bucket A.
 #[test]
 fn test_error_recovery_function_trailing_empty() {
-    // Function with trailing empty argument: func(value,)
     let input = "SELECT func(789,) FROM T";
     let parse = parse_sdbl(input);
 
@@ -1270,34 +1075,24 @@ fn test_error_recovery_function_trailing_empty() {
     assert!(tree.contains("SDBL_FUNCTION_CALL"), "Function call should be parsed.\nTree: {}", tree);
 }
 
-// Bucket A.
 #[test]
 fn test_error_recovery_refs_predicate() {
-    // REFS predicate with MDO reference: Field REFS Catalog.Products
     let input = "SELECT * FROM T WHERE Field REFS Catalog.Products";
     let parse = parse_sdbl(input);
 
-    // Should parse without errors (valid REFS syntax)
     assert!(!parse.has_errors(), "REFS with qualified name should parse without errors");
 
     let tree = format!("{:#?}", parse.syntax_node());
     assert!(tree.contains("SDBL_REFS_EXPR"), "REFS expression should be parsed.\nTree: {}", tree);
 }
 
-// Bucket A.
 #[test]
 fn test_error_recovery_comprehensive() {
-    // Comprehensive test: multiple error recovery points in one query
     let input = "ВЫБРАТЬ Поле., Поле2, , Поле3 ИЗ Таблица1 ГДЕ Поле В (1, , 3) И func(, 456) > 0";
 
     let parse = parse_sdbl(input);
     let tree = format!("{:#?}", parse.syntax_node());
 
-    // Should have multiple ERROR nodes:
-    // - Incomplete field (Поле.)
-    // - Empty field (, , Поле3)
-    // - Empty IN value (1, , 3)
-    // - Empty function arg (, 456)
     let error_count = tree.matches("ERROR").count();
     assert!(
         error_count >= 3,
@@ -1306,21 +1101,16 @@ fn test_error_recovery_comprehensive() {
         tree
     );
 
-    // But main clauses should still be parsed!
     assert!(tree.contains("SDBL_FROM_CLAUSE"), "FROM clause should be parsed.\nTree: {}", tree);
     assert!(tree.contains("SDBL_WHERE_CLAUSE"), "WHERE clause should be parsed.\nTree: {}", tree);
     assert!(tree.contains("SDBL_FIELD_LIST"), "Field list should be parsed.\nTree: {}", tree);
 }
 
-// Bucket A.
 #[test]
 fn test_no_infinite_loop_deeply_nested_dots() {
-    // Regression test: ensure parser doesn't loop infinitely on deeply nested dots
-    // This would previously cause infinite loop without check_iteration_limit()
     let input = "SELECT T.a.b.c.d.e.f.g.h.i.j.k.l.m.n.o.p.q.r.s.t.u.v.w.x.y.z FROM T";
     let parse = parse_sdbl(input);
 
-    // Should complete (not hang)
     let tree = format!("{:#?}", parse.syntax_node());
     assert!(
         tree.contains("SDBL_COLUMN_REF"),
@@ -1329,10 +1119,8 @@ fn test_no_infinite_loop_deeply_nested_dots() {
     );
 }
 
-// Bucket A.
 #[test]
 fn test_type_cast_with_recovery() {
-    // Test that CAST (ВЫРАЗИТЬ) is properly parsed
     let query = r#"ВЫБРАТЬ
     Поле1 КАК alias1,
     ВЫРАЗИТЬ(Поле2 КАК СТРОКА(200)) КАК alias2,
@@ -1344,24 +1132,18 @@ fn test_type_cast_with_recovery() {
 
     let tree = format!("{:#?}", parse.syntax_node());
 
-    // CAST is now properly parsed - should have SDBL_TYPE node
     assert!(tree.contains("SDBL_TYPE"), "Expected SDBL_TYPE node for CAST type.\nTree: {}", tree);
 
-    // All clauses should parse
     assert!(tree.contains("SDBL_FROM_CLAUSE"), "FROM clause should be parsed.\nTree: {}", tree);
 
     assert!(tree.contains("SDBL_WHERE_CLAUSE"), "WHERE clause should be parsed.\nTree: {}", tree);
 
-    // Should parse all 3 fields
     let field_count = tree.matches("SDBL_SELECTED_FIELD").count();
     assert!(field_count >= 3, "Should parse all 3 fields. Got: {}.\nTree: {}", field_count, tree);
 }
 
-// Bucket C: real-world query from user (comment: "Real-world query from user").
 #[test]
 fn test_real_query_with_type_cast() {
-    // Real-world query from user
-    // Features: CAST (ВЫРАЗИТЬ) and CASE expression in arithmetic context
     let query = r#"ВЫБРАТЬ
     ДвиженияПоКлиенту.Документ КАК Документ,
     ДвиженияПоКлиенту.order_number КАК order_number,
@@ -1385,22 +1167,16 @@ fn test_real_query_with_type_cast() {
 
     let tree = format!("{:#?}", parse.syntax_node());
 
-    // CAST is now properly parsed - should have SDBL_TYPE node
     assert!(tree.contains("SDBL_TYPE"), "Expected SDBL_TYPE node for CAST type.\nTree: {}", tree);
 
-    // Parser should parse all 10 fields
     let field_count = tree.matches("SDBL_SELECTED_FIELD").count();
     assert!(field_count >= 10, "Should parse all 10 fields. Got: {}.\nTree: {}", field_count, tree);
 
-    // Type cast followed by field - both should be parsed
     assert!(tree.contains("article"), "Field after type cast should be parsed.\nTree: {}", tree);
 }
 
-// Bucket C: simplified slice of same user query (ДвиженияПоКлиенту schema).
 #[test]
 fn test_type_cast_without_case() {
-    // Simplified version without CASE expression
-    // CAST (ВЫРАЗИТЬ) is now fully supported
     let query = r#"ВЫБРАТЬ
     ДвиженияПоКлиенту.Документ КАК Документ,
     ДвиженияПоКлиенту.order_number КАК order_number,
@@ -1418,15 +1194,12 @@ fn test_type_cast_without_case() {
 
     let tree = format!("{:#?}", parse.syntax_node());
 
-    // CAST is now properly parsed - should have SDBL_TYPE node
     assert!(tree.contains("SDBL_TYPE"), "Expected SDBL_TYPE node for CAST type.\nTree: {}", tree);
 
-    // FROM and WHERE should parse
     assert!(tree.contains("SDBL_FROM_CLAUSE"), "FROM clause should be parsed.\nTree: {}", tree);
 
     assert!(tree.contains("SDBL_WHERE_CLAUSE"), "WHERE clause should be parsed.\nTree: {}", tree);
 
-    // Should parse all 9 fields
     let field_count = tree.matches("SDBL_SELECTED_FIELD").count();
     assert!(
         field_count >= 9,
@@ -1436,11 +1209,8 @@ fn test_type_cast_without_case() {
     );
 }
 
-// Bucket A.
 #[test]
 fn test_case_in_arithmetic_with_recovery() {
-    // CASE expression in arithmetic context - NOW SUPPORTED!
-    // Parser should handle CASE correctly and continue parsing
     let query = r#"ВЫБРАТЬ
     Поле1 КАК alias1,
     Поле2 + ВЫБОР КОГДА x ТОГДА 1 ИНАЧЕ 2 КОНЕЦ КАК alias2,
@@ -1452,31 +1222,24 @@ fn test_case_in_arithmetic_with_recovery() {
 
     let tree = format!("{:#?}", parse.syntax_node());
 
-    // CASE expressions are now supported - should parse without errors!
     assert!(!parse.has_errors(), "CASE in arithmetic should parse correctly.\nTree: {}", tree);
 
-    // Verify CASE expression is parsed
     assert!(tree.contains("SDBL_CASE_EXPR"), "Should have CASE expression node.\nTree: {}", tree);
 
-    // Verify other clauses are parsed
     assert!(tree.contains("SDBL_FROM_CLAUSE"), "FROM clause should be parsed.\nTree: {}", tree);
 
     assert!(tree.contains("SDBL_WHERE_CLAUSE"), "WHERE clause should be parsed.\nTree: {}", tree);
 
-    // Should parse all 3 fields
     let field_count = tree.matches("SDBL_SELECTED_FIELD").count();
     assert!(field_count >= 3, "Should parse all 3 fields. Got: {}.\nTree: {}", field_count, tree);
 
-    // All fields should be parsed correctly
     assert!(tree.contains("alias1"), "First field should be parsed.\nTree: {}", tree);
     assert!(tree.contains("alias2"), "Field with CASE should be parsed.\nTree: {}", tree);
     assert!(tree.contains("alias3"), "Field after CASE should be parsed.\nTree: {}", tree);
 }
 
-// Bucket C: full user query (14 fields, comment: "Real user query with CAST and CASE").
 #[test]
 fn test_full_user_query_with_all_features() {
-    // Real user query with CAST and CASE - both now supported
     let query = r#"ВЫБРАТЬ
     ДвиженияПоКлиенту.Документ КАК Документ,
     ДвиженияПоКлиенту.order_number КАК order_number,
@@ -1504,19 +1267,15 @@ fn test_full_user_query_with_all_features() {
 
     let tree = format!("{:#?}", parse.syntax_node());
 
-    // CAST is now properly parsed - should have SDBL_TYPE node
     assert!(tree.contains("SDBL_TYPE"), "Expected SDBL_TYPE node for CAST type.\nTree: {}", tree);
 
-    // FROM and WHERE should parse
     assert!(tree.contains("SDBL_FROM_CLAUSE"), "FROM clause should be parsed.\nTree: {}", tree);
 
     assert!(tree.contains("SDBL_WHERE_CLAUSE"), "WHERE clause should be parsed.\nTree: {}", tree);
 
-    // Should parse all 14 fields
     let field_count = tree.matches("SDBL_SELECTED_FIELD").count();
     assert!(field_count >= 14, "Should parse all 14 fields. Got: {}.\nTree: {}", field_count, tree);
 
-    // All fields should be parsed
     assert!(tree.contains("quantity"), "Quantity field should be parsed.\nTree: {}", tree);
     assert!(tree.contains("price_eur"), "price_eur field should be parsed.\nTree: {}", tree);
     assert!(
@@ -1525,7 +1284,6 @@ fn test_full_user_query_with_all_features() {
         tree
     );
 }
-// Bucket A.
 #[test]
 fn test_simple_plus_case() {
     use parser::parse_sdbl;
@@ -1535,12 +1293,10 @@ fn test_simple_plus_case() {
     eprintln!("\n{:#?}", parse.syntax_node());
 
     let tree = format!("{:#?}", parse.syntax_node());
-    // CASE expressions are now supported - should parse without errors!
     assert!(!parse.has_errors(), "CASE in arithmetic context should parse correctly");
     assert!(tree.contains("SDBL_CASE_EXPR"), "Should have CASE expression node.\nTree: {}", tree);
     assert!(tree.contains("SDBL_FROM_CLAUSE"), "FROM clause should be parsed.\nTree: {}", tree);
 }
-// Bucket A.
 #[test]
 fn test_empty_string_literal() {
     use parser::parse_sdbl;
@@ -1552,7 +1308,6 @@ fn test_empty_string_literal() {
     assert!(!parse.has_errors(), "Should parse empty string");
 }
 
-// Bucket A.
 #[test]
 fn test_case_with_string_concat_in_then() {
     use parser::parse_sdbl;
@@ -1577,7 +1332,6 @@ fn test_case_with_string_concat_in_then() {
     assert!(tree.contains("SDBL_FROM_CLAUSE"), "Should parse FROM clause");
 }
 
-// Bucket A.
 #[test]
 fn test_single_string_literal() {
     use parser::parse_sdbl;
@@ -1591,11 +1345,9 @@ fn test_single_string_literal() {
         eprintln!("\nErrors: {:?}", parse.errors());
     }
 
-    // Should parse without errors
     assert!(!parse.has_errors(), "Single string should parse correctly");
     assert!(tree.contains("SDBL_FROM_CLAUSE"), "FROM clause should parse");
 
-    // String should be either SDBL_LITERAL or SDBL_MULTI_STRING
     assert!(
         tree.contains("SDBL_LITERAL") || tree.contains("SDBL_MULTI_STRING"),
         "Should have string literal node.\nTree: {}",
@@ -1603,7 +1355,6 @@ fn test_single_string_literal() {
     );
 }
 
-// Bucket A.
 #[test]
 fn test_simple_two_queries_with_semicolon() {
     use parser::parse_sdbl;
@@ -1622,24 +1373,20 @@ fn test_simple_two_queries_with_semicolon() {
     eprintln!("Query count: {}", count);
     assert_eq!(count, 2, "Expected 2 queries separated by semicolon");
 }
-// Bucket A.
 #[test]
 fn test_unsupported_features() {
     use parser::parse_sdbl;
 
-    // Test 1: CASE expression - should work now
     let query1 = r#"ВЫБРАТЬ ВЫБОР КОГДА x ТОГДА 1 КОНЕЦ КАК result ИЗ T"#;
     let parse1 = parse_sdbl(query1);
     eprintln!("\n=== CASE expression ===");
     eprintln!("Has errors: {}", parse1.has_errors());
 
-    // Test 2: String concatenation - should work now
     let query2 = r#"ВЫБРАТЬ "a" + "b" КАК result ИЗ T"#;
     let parse2 = parse_sdbl(query2);
     eprintln!("\n=== String concatenation ===");
     eprintln!("Has errors: {}", parse2.has_errors());
 
-    // Test 3: Type cast - NOT supported yet
     let query3 = r#"ВЫБРАТЬ ВЫРАЗИТЬ(field КАК СТРОКА(200)) КАК result ИЗ T"#;
     let parse3 = parse_sdbl(query3);
     eprintln!("\n=== Type cast ВЫРАЗИТЬ ===");
@@ -1647,13 +1394,11 @@ fn test_unsupported_features() {
     let tree3 = format!("{:#?}", parse3.syntax_node());
     eprintln!("Has ERROR: {}", tree3.contains("ERROR"));
 
-    // Test 4: НАЧАЛОПЕРИОДА function
     let query4 = r#"ВЫБРАТЬ НАЧАЛОПЕРИОДА(date, ДЕНЬ) КАК result ИЗ T"#;
     let parse4 = parse_sdbl(query4);
     eprintln!("\n=== НАЧАЛОПЕРИОДА function ===");
     eprintln!("Has errors: {}", parse4.has_errors());
 }
-// Bucket A.
 #[test]
 fn test_like_predicate() {
     use parser::parse_sdbl;
@@ -1668,7 +1413,6 @@ fn test_like_predicate() {
     assert!(tree.contains("SDBL_WHERE_CLAUSE"), "Should parse WHERE clause");
 }
 
-// Bucket A.
 #[test]
 fn test_between_predicate() {
     use parser::parse_sdbl;
@@ -1683,7 +1427,6 @@ fn test_between_predicate() {
     assert!(tree.contains("SDBL_WHERE_CLAUSE"), "Should parse WHERE clause");
 }
 
-// Bucket A.
 #[test]
 fn test_is_null_predicate() {
     use parser::parse_sdbl;
@@ -1697,7 +1440,6 @@ fn test_is_null_predicate() {
     let tree = format!("{:#?}", parse.syntax_node());
     assert!(tree.contains("SDBL_WHERE_CLAUSE"), "Should parse WHERE clause");
 }
-// Bucket A.
 #[test]
 fn test_order_by_clause() {
     use parser::parse_sdbl;
@@ -1711,7 +1453,6 @@ fn test_order_by_clause() {
     eprintln!("Has ORDER BY node: {}", tree.contains("SDBL_ORDER_BY"));
 }
 
-// Bucket A.
 #[test]
 fn test_group_by_clause() {
     use parser::parse_sdbl;
@@ -1725,7 +1466,6 @@ fn test_group_by_clause() {
     eprintln!("Has GROUP BY node: {}", tree.contains("SDBL_GROUP_BY"));
 }
 
-// Bucket A.
 #[test]
 fn test_group_by_debug() {
     use parser::parse_sdbl;
@@ -1739,7 +1479,6 @@ fn test_group_by_debug() {
     eprintln!("\nSearching for: SDBL_GROUP_CLAUSE");
     eprintln!("Found: {}", tree.contains("SDBL_GROUP_CLAUSE"));
 }
-// Bucket A.
 #[test]
 fn test_order_by_debug() {
     use parser::parse_sdbl;
@@ -1753,7 +1492,6 @@ fn test_order_by_debug() {
     eprintln!("\nSearching for: SDBL_ORDER_CLAUSE");
     eprintln!("Found: {}", tree.contains("SDBL_ORDER_CLAUSE"));
 }
-// Bucket A.
 #[test]
 fn debug_complex_query() {
     use parser::parse_sdbl;
@@ -1772,34 +1510,28 @@ fn debug_complex_query() {
     eprintln!("\nHas CASE: {}", tree5.contains("SDBL_CASE_EXPR"));
     eprintln!("Has errors: {}", p5.has_errors());
 }
-// Bucket A.
 #[test]
 fn demo_all_features_fixed() {
     use parser::parse_sdbl;
 
-    // ✅ CASE expressions in arithmetic context
     let q1 = r#"ВЫБРАТЬ name + ВЫБОР КОГДА size <> "" ТОГДА " (" + size + ")" ИНАЧЕ "" КОНЕЦ КАК display_name ИЗ T"#;
     let p1 = parse_sdbl(q1);
     assert!(!p1.has_errors(), "CASE expression should work");
 
-    // ✅ String concatenation
     let q2 = r#"ВЫБРАТЬ "Префикс: " + field + " (суффикс)" КАК result ИЗ T"#;
     let p2 = parse_sdbl(q2);
     assert!(!p2.has_errors(), "String concatenation should work");
 
-    // ✅ GROUP BY with Russian keywords
     let q3 = r#"ВЫБРАТЬ category, СУММА(amount) ИЗ T СГРУППИРОВАТЬ ПО category"#;
     let p3 = parse_sdbl(q3);
     let tree3 = format!("{:#?}", p3.syntax_node());
     assert!(tree3.contains("SDBL_GROUP_CLAUSE"), "GROUP BY should work");
 
-    // ✅ ORDER BY with Russian keywords
     let q4 = r#"ВЫБРАТЬ name, price ИЗ T УПОРЯДОЧИТЬ ПО price УБЫВ, name"#;
     let p4 = parse_sdbl(q4);
     let tree4 = format!("{:#?}", p4.syntax_node());
     assert!(tree4.contains("SDBL_ORDER_CLAUSE"), "ORDER BY should work");
 
-    // ✅ Complex query with everything
     let q5 = r#"ВЫБРАТЬ category, name + ВЫБОР КОГДА discount > 0 ТОГДА " (скидка)" ИНАЧЕ "" КОНЕЦ КАК display_name, СУММА(amount) КАК total ИЗ Products ГДЕ active = ИСТИНА СГРУППИРОВАТЬ ПО category, name, discount УПОРЯДОЧИТЬ ПО category, total УБЫВ"#;
     let p5 = parse_sdbl(q5);
     let tree5 = format!("{:#?}", p5.syntax_node());
@@ -1814,12 +1546,10 @@ fn demo_all_features_fixed() {
     eprintln!("  ✅ GROUP BY (СГРУППИРОВАТЬ ПО)");
     eprintln!("  ✅ ORDER BY (УПОРЯДОЧИТЬ ПО)");
 }
-// Bucket A.
 #[test]
 fn test_view_presentation() {
     use parser::parse_sdbl;
 
-    // Test 1: Simple VIEW reference
     let q1 = r#"ВЫБРАТЬ * ИЗ Справочник.Контрагенты.ПРЕДСТАВЛЕНИЕ"#;
     let p1 = parse_sdbl(q1);
 
@@ -1827,21 +1557,18 @@ fn test_view_presentation() {
     eprintln!("{:#?}", p1.syntax_node());
     eprintln!("Has errors: {}", p1.has_errors());
 
-    // Test 2: VIEW with alias
     let q2 = r#"ВЫБРАТЬ * ИЗ Справочник.Контрагенты.ПРЕДСТАВЛЕНИЕ КАК View1"#;
     let p2 = parse_sdbl(q2);
 
     eprintln!("\n=== Test 2: VIEW with alias ===");
     eprintln!("Has errors: {}", p2.has_errors());
 
-    // Test 3: Multiple VIEWs with JOIN
     let q3 = r#"ВЫБРАТЬ * ИЗ Справочник.Контрагенты.ПРЕДСТАВЛЕНИЕ КАК V1 ЛЕВОЕ СОЕДИНЕНИЕ Документ.ПриходнаяНакладная.ПРЕДСТАВЛЕНИЕ КАК V2 ПО V1.Ссылка = V2.Контрагент"#;
     let p3 = parse_sdbl(q3);
 
     eprintln!("\n=== Test 3: Multiple VIEWs with JOIN ===");
     eprintln!("Has errors: {}", p3.has_errors());
 }
-// Bucket A.
 #[test]
 fn test_view_presentation_detailed() {
     use parser::parse_sdbl;
@@ -1852,12 +1579,10 @@ fn test_view_presentation_detailed() {
     let tree = format!("{:#?}", parse.syntax_node());
     eprintln!("\nFull tree:\n{}", tree);
 
-    // Check if ПРЕДСТАВЛЕНИЕ is recognized as part of table reference
     assert!(!parse.has_errors(), "Should parse VIEW without errors");
     assert!(tree.contains("SDBL_FROM_CLAUSE"), "Should have FROM clause");
     assert!(tree.contains("SDBL_TABLE_REF"), "Should have table reference");
 }
-// Bucket A.
 #[test]
 fn test_virtual_table_debug() {
     use parser::parse_sdbl;
@@ -1875,12 +1600,10 @@ fn test_virtual_table_debug() {
     eprintln!("Has SDBL_TABLE_REF: {}", tree.contains("SDBL_TABLE_REF"));
     eprintln!("Has SDBL_FUNCTION_CALL: {}", tree.contains("SDBL_FUNCTION_CALL"));
 }
-// Bucket A.
 #[test]
 fn test_advanced_sdbl_constructs() {
     use parser::parse_sdbl;
 
-    // Test 1: AUTOORDER
     let q1 = r#"ВЫБРАТЬ Name, Price ИЗ Products АВТОУПОРЯДОЧИВАНИЕ"#;
     let p1 = parse_sdbl(q1);
     eprintln!("\n=== AUTOORDER ===");
@@ -1891,7 +1614,6 @@ fn test_advanced_sdbl_constructs() {
         tree1.contains("AUTOORDER") || tree1.contains("АВТОУПОРЯДОЧИВАНИЕ")
     );
 
-    // Test 2: TOTALS BY
     let q2 = r#"ВЫБРАТЬ Category, СУММА(Price) КАК Total ИЗ Products СГРУППИРОВАТЬ ПО Category ИТОГИ ПО Category"#;
     let p2 = parse_sdbl(q2);
     eprintln!("\n=== TOTALS BY ===");
@@ -1899,19 +1621,16 @@ fn test_advanced_sdbl_constructs() {
     let tree2 = format!("{:#?}", p2.syntax_node());
     eprintln!("Has TOTALS node: {}", tree2.contains("TOTALS") || tree2.contains("ИТОГИ"));
 
-    // Test 3: FOR UPDATE OF
     let q3 = r#"ВЫБРАТЬ Name ИЗ Products ДЛЯ ИЗМЕНЕНИЯ Products"#;
     let p3 = parse_sdbl(q3);
     eprintln!("\n=== FOR UPDATE OF ===");
     eprintln!("Has errors: {}", p3.has_errors());
 
-    // Test 4: INDEX BY
     let q4 = r#"ВЫБРАТЬ Name ИЗ Products ИНДЕКСИРОВАТЬ ПО Name"#;
     let p4 = parse_sdbl(q4);
     eprintln!("\n=== INDEX BY ===");
     eprintln!("Has errors: {}", p4.has_errors());
 
-    // Test 5: ALLOWED / РАЗРЕШЕННЫЕ
     let q5 = r#"ВЫБРАТЬ РАЗРЕШЕННЫЕ Name ИЗ Products"#;
     let p5 = parse_sdbl(q5);
     eprintln!("\n=== ALLOWED ===");
@@ -1919,7 +1638,6 @@ fn test_advanced_sdbl_constructs() {
     let tree5 = format!("{:#?}", p5.syntax_node());
     eprintln!("Has ALLOWED: {}", tree5.contains("РАЗРЕШЕННЫЕ") || tree5.contains("ALLOWED"));
 
-    // Test 6: DISTINCT / РАЗЛИЧНЫЕ
     let q6 = r#"ВЫБРАТЬ РАЗЛИЧНЫЕ Category ИЗ Products"#;
     let p6 = parse_sdbl(q6);
     eprintln!("\n=== DISTINCT ===");
@@ -1927,7 +1645,6 @@ fn test_advanced_sdbl_constructs() {
     let tree6 = format!("{:#?}", p6.syntax_node());
     eprintln!("Has DISTINCT: {}", tree6.contains("РАЗЛИЧНЫЕ") || tree6.contains("DISTINCT"));
 }
-// Bucket A.
 #[test]
 fn test_having_clause() {
     use parser::parse_sdbl;
@@ -1944,12 +1661,10 @@ fn test_having_clause() {
     assert!(tree.contains("SDBL_HAVING_CLAUSE"), "Should have HAVING clause node");
 }
 
-// Bucket A.
 #[test]
 fn test_for_update_clause() {
     use parser::parse_sdbl;
 
-    // Test 1: FOR UPDATE without MDO
     let q1 = r#"ВЫБРАТЬ Name ИЗ Products ДЛЯ ИЗМЕНЕНИЯ"#;
     let p1 = parse_sdbl(q1);
     let tree1 = format!("{:#?}", p1.syntax_node());
@@ -1961,7 +1676,6 @@ fn test_for_update_clause() {
     assert!(!p1.has_errors(), "FOR UPDATE should parse without errors");
     assert!(tree1.contains("SDBL_FOR_UPDATE"), "Should have FOR UPDATE node");
 
-    // Test 2: FOR UPDATE with MDO
     let q2 = r#"ВЫБРАТЬ Name ИЗ Products ДЛЯ ИЗМЕНЕНИЯ Products"#;
     let p2 = parse_sdbl(q2);
 
@@ -1971,7 +1685,6 @@ fn test_for_update_clause() {
     assert!(!p2.has_errors(), "FOR UPDATE with MDO should parse");
 }
 
-// Bucket A.
 #[test]
 fn test_index_by_clause() {
     use parser::parse_sdbl;
@@ -1988,7 +1701,6 @@ fn test_index_by_clause() {
     assert!(tree.contains("SDBL_INDEX_BY"), "Should have INDEX BY node");
 }
 
-// Bucket A.
 #[test]
 fn test_autoorder_clause() {
     use parser::parse_sdbl;
@@ -2005,7 +1717,6 @@ fn test_autoorder_clause() {
     assert!(tree.contains("SDBL_AUTOORDER"), "Should have AUTOORDER node");
 }
 
-// Bucket A.
 #[test]
 fn test_totals_by_clause() {
     use parser::parse_sdbl;
@@ -2022,12 +1733,10 @@ fn test_totals_by_clause() {
     assert!(tree.contains("SDBL_TOTALS_BY"), "Should have TOTALS BY node");
 }
 
-// Bucket A.
 #[test]
 fn test_phase2_combined() {
     use parser::parse_sdbl;
 
-    // Complex query with all Phase 2 features
     let query = r#"
         ВЫБРАТЬ
             category,
@@ -2055,11 +1764,7 @@ fn test_phase2_combined() {
     eprintln!("Has ORDER BY: {}", tree.contains("SDBL_ORDER_CLAUSE"));
     eprintln!("Has AUTOORDER: {}", tree.contains("SDBL_AUTOORDER"));
     eprintln!("Has TOTALS BY: {}", tree.contains("SDBL_TOTALS_BY"));
-
-    // Should parse without errors or with minimal errors
-    // SDBL spec allows flexible ordering of these clauses
 }
-// Bucket A.
 #[test]
 fn test_simple_is_null() {
     use parser::parse_sdbl;
@@ -2072,7 +1777,6 @@ fn test_simple_is_null() {
     eprintln!("Has errors: {}", parse.has_errors());
     eprintln!("\n{}", tree);
 }
-// Bucket B: dotted IS NULL using specific user schema name (ДокЗаказКлиента.Ссылка).
 #[test]
 fn test_dotted_is_null() {
     use parser::parse_sdbl;
@@ -2085,14 +1789,12 @@ fn test_dotted_is_null() {
     eprintln!("Has errors: {}", parse.has_errors());
     eprintln!("\n{}", tree);
 
-    // Check if ЕСТЬ is parsed as part of column ref or as IS NULL
     if tree.contains("SDBL_IS_NULL_EXPR") {
         eprintln!("✓ ЕСТЬ correctly parsed as IS NULL predicate");
     } else {
         eprintln!("✗ ЕСТЬ incorrectly parsed (not IS NULL)");
     }
 }
-// Bucket C: user's CASE/IS NULL repro using lifted schema (ДокЗаказКлиента).
 #[test]
 fn test_case_with_is_null_no_newline() {
     use parser::parse_sdbl;
@@ -2104,7 +1806,6 @@ fn test_case_with_is_null_no_newline() {
     eprintln!("\n=== CASE with IS NULL (no newline) test ===");
     eprintln!("Has errors: {}", parse.has_errors());
 
-    // Count IS NULL expressions
     let is_null_count = tree.matches("SDBL_IS_NULL_EXPR").count();
     eprintln!("IS NULL expressions found: {}", is_null_count);
 
@@ -2113,14 +1814,12 @@ fn test_case_with_is_null_no_newline() {
     } else {
         eprintln!("✗ Missing IS NULL predicates (expected 2, got {})", is_null_count);
         eprintln!("\nTree snippet:");
-        // Print tree but limit output
         let lines: Vec<&str> = tree.lines().collect();
         for line in lines.iter().take(100) {
             eprintln!("{}", line);
         }
     }
 }
-// Bucket C: user-extracted multiline query with CASE/REFS/IS NULL.
 #[test]
 fn test_full_user_query() {
     use parser::parse_sdbl;
@@ -2148,17 +1847,14 @@ fn test_full_user_query() {
     eprintln!("\n=== Full user query test ===");
     eprintln!("Has errors: {}", parse.has_errors());
 
-    // Count IS NULL expressions
     let is_null_count = tree.matches("SDBL_IS_NULL_EXPR").count();
     eprintln!("IS NULL expressions found: {}", is_null_count);
 
-    // Count REFS expressions (ССЫЛКА)
     let refs_count = tree.matches("SDBL_REFS_EXPR").count();
     eprintln!("REFS expressions found: {}", refs_count);
 
     if parse.has_errors() {
         eprintln!("\n✗ Query has errors");
-        // Show first 150 lines of tree
         for line in tree.lines().take(150) {
             eprintln!("{}", line);
         }
@@ -2166,12 +1862,10 @@ fn test_full_user_query() {
         eprintln!("✓ Query parsed successfully");
     }
 }
-// Bucket B: ЕСТЬNULL function vs IS NULL predicate disambiguation using lifted schema name.
 #[test]
 fn test_estnull_function_vs_predicate() {
     use parser::parse_sdbl;
 
-    // Test 1: ЕСТЬNULL function (should be parsed as function call)
     let q1 = r#"ВЫБРАТЬ ЕСТЬNULL(ДокЗаказКлиента.НомерПоДаннымКлиента, "") ИЗ T"#;
     let p1 = parse_sdbl(q1);
     let tree1 = format!("{:#?}", p1.syntax_node());
@@ -2181,7 +1875,6 @@ fn test_estnull_function_vs_predicate() {
     let func_count = tree1.matches("SDBL_FUNCTION_CALL").count();
     eprintln!("Function calls: {}", func_count);
 
-    // Test 2: ЕСТЬ NULL predicate (should be parsed as IS NULL)
     let q2 = r#"ВЫБРАТЬ * ИЗ T ГДЕ ДокЗаказКлиента.Ссылка ЕСТЬ NULL"#;
     let p2 = parse_sdbl(q2);
     let tree2 = format!("{:#?}", p2.syntax_node());
@@ -2205,12 +1898,10 @@ fn test_estnull_function_vs_predicate() {
         }
     }
 }
-// Bucket C: user's exact case (comment: "User's exact case").
 #[test]
 fn test_estnull_no_space_issue() {
     use parser::parse_sdbl;
 
-    // User's exact case: ЕСТЬNULL without space
     let query = r#"ВЫБРАТЬ ЕСТЬNULL(ДокЗаказКлиента.НомерПоДаннымКлиента, "") ИЗ T"#;
     let parse = parse_sdbl(query);
     let tree = format!("{:#?}", parse.syntax_node());
@@ -2218,11 +1909,9 @@ fn test_estnull_no_space_issue() {
     eprintln!("\n=== ЕСТЬNULL token analysis ===");
     eprintln!("Has errors: {}", parse.has_errors());
 
-    // Look for how ЕСТЬNULL is tokenized
     let lines: Vec<&str> = tree.lines().collect();
     for (i, line) in lines.iter().enumerate().take(50) {
         if line.contains("ЕСТЬNULL") || line.contains("ДокЗаказКлиента") {
-            // Print context
             if i > 0 {
                 eprintln!("{}", lines[i - 1]);
             }
@@ -2236,7 +1925,6 @@ fn test_estnull_no_space_issue() {
         }
     }
 
-    // Check if it's parsed as function call
     if tree.contains("SDBL_FUNCTION_CALL") {
         eprintln!("\n✓ ЕСТЬNULL correctly parsed as function call");
     } else {
@@ -2244,20 +1932,15 @@ fn test_estnull_no_space_issue() {
     }
 }
 
-// Bucket A.
 #[test]
 fn test_parameter_as_data_source() {
-    // &Parameter as a table reference in FROM clause (e.g., ValueTable passed as param)
     check_no_errors("ВЫБРАТЬ Поле КАК Поле ИЗ &ТЗ КАК ТЗ");
     check_no_errors("ВЫБРАТЬ Поле ИЗ &ТаблицаЗначений КАК Т");
 }
 
-// Bucket A.
 #[test]
 fn test_parameter_as_data_source_in_batch() {
-    // Batch query with &Parameter data sources and comment separator
     let query = "ВЫБРАТЬ Поле КАК Поле ПОМЕСТИТЬ ВТ ИЗ &ТЗ КАК ТЗ;\n\
-////////////////////////////////////////////////////////////////////////////////\n\
 ВЫБРАТЬ Остатки.Номенклатура КАК Номенклатура ПОМЕСТИТЬ Результат ИЗ &Остатки КАК Остатки";
 
     let parse = parse_sdbl(query);
@@ -2269,7 +1952,6 @@ fn test_parameter_as_data_source_in_batch() {
     assert_eq!(package.queries().count(), 2, "Expected 2 queries");
 }
 
-// Bucket A.
 #[test]
 fn test_sdbl_constructs_for_false_positive() {
     use syntax::SyntaxKind;
@@ -2322,7 +2004,6 @@ fn test_sdbl_constructs_for_false_positive() {
     }
 }
 
-// Bucket A.
 #[test]
 fn test_error_node_analysis() {
     use syntax::SyntaxKind;
@@ -2355,33 +2036,21 @@ fn test_error_node_analysis() {
     }
 }
 
-// Bucket A.
 #[test]
 fn test_drop_table_russian() {
     check_no_errors("УНИЧТОЖИТЬ ВременнаяТаблица");
 }
 
-// Bucket A.
 #[test]
 fn test_drop_table_english() {
     check_no_errors("DROP TempTable");
 }
 
-// Bucket A.
 #[test]
 fn test_batch_with_drop() {
     check_no_errors("ВЫБРАТЬ Поле ИЗ Таблица ПОМЕСТИТЬ ВТ; УНИЧТОЖИТЬ ВТ");
 }
 
-// ============================================================================
-// Slice 6 surface coverage — added by C0 audit to close gaps before the
-// clean-room rewrite of query_package / queries / drop_table_query /
-// select_query / subquery / union_clause in C2.
-// ============================================================================
-
-// Bucket A: three-SELECT package. Locks the queries() + query_package shape
-// for N > 2. (SdblQueryPackage::queries() iterates SdblSelectQuery children
-// only; DROP statements are separate — see the mid-package DROP test below.)
 #[test]
 fn test_package_with_three_statements() {
     use syntax::ast::{AstNode, SdblQueryPackage};
@@ -2394,11 +2063,6 @@ fn test_package_with_three_statements() {
     assert_eq!(package.queries().count(), 3, "Expected 3 SELECT queries in the package");
 }
 
-// Bucket A: subquery in a WHERE predicate followed by UNION in the outer
-// query. Guards the subquery()/union_clause() boundary: the UNION belongs to
-// the outer SdblSubquery, not to the IN-subquery. Asserts UNION-clause count
-// on BOTH subqueries — a count-only package check would pass even if the
-// UNION were wrongly attached to the inner subquery.
 #[test]
 fn test_subquery_in_where_with_outer_union() {
     use syntax::{
@@ -2436,11 +2100,6 @@ fn test_subquery_in_where_with_outer_union() {
     );
 }
 
-// Bucket A: DROP dispatch mid-package after a UNION ALL statement. Three
-// statements: (1) SELECT ОБЪЕДИНИТЬ ВСЕ SELECT, (2) УНИЧТОЖИТЬ ВТ, (3)
-// SELECT. The queries() dispatcher must pick the DROP branch at statement 2
-// without letting the preceding UNION ALL bleed into the package boundary,
-// and statement 3 must appear as a fresh outer SdblSelectQuery.
 #[test]
 fn test_drop_mid_package_after_union() {
     use syntax::{
@@ -2469,20 +2128,6 @@ fn test_drop_mid_package_after_union() {
     assert_eq!(drop_count, 1, "Exactly one DROP statement in the package");
 }
 
-// ============================================================================
-// Slice 8 surface coverage — added by C0 audit to close gaps before the
-// clean-room rewrite of is_data_source_start / from_clause / data_source /
-// table_ref / source_alias in C2. Authored from 1C query-language docs
-// (pubqlang/10 §query-body, /12 identifier + ampersand lexis) and the local
-// mini-spec at docs/legal/sdbl-select-mini-spec.md §FROM clause.
-// ============================================================================
-
-// Bucket A: multi-source FROM with commas and a bare implicit alias on the
-// second source — locks the data_source list shape, the comma separator, and
-// the bare-alias branch of source_alias (no AS / КАК keyword between `Т2`
-// and `А`). Asserts two SdblDataSource nodes AND that the second one carries
-// an SdblAlias whose name is `А` with has_as_keyword() == false, so a
-// regression that drops bare-identifier consumption cannot silently pass.
 #[test]
 fn test_slice8_from_multi_source_with_bare_alias() {
     use syntax::{
@@ -2513,11 +2158,6 @@ fn test_slice8_from_multi_source_with_bare_alias() {
     );
 }
 
-// Bucket A: subquery as a data source with the Russian КАК alias form. The
-// English subquery-in-FROM shape is already exercised by test_subquery_in_from
-// (:202); this gap covers the bilingual alias site of data_source. Asserts
-// the SdblSubquery sits directly under SdblDataSource and that the alias is
-// attached at the data-source level with has_as_keyword() == true.
 #[test]
 fn test_slice8_russian_subquery_source_with_alias() {
     use syntax::{
@@ -2544,12 +2184,6 @@ fn test_slice8_russian_subquery_source_with_alias() {
     assert_eq!(alias.name().as_deref(), Some("С"));
 }
 
-// Bucket A: temporary-table source crossing a package boundary — the first
-// statement creates ВТ via ПОМЕСТИТЬ (INTO), the second statement consumes
-// it as a table_ref. Exercises the identifier-only table_ref path (no MDO
-// prefix, no VT args) and its interaction with the SdblQueryPackage
-// statement loop. Asserts the second query's FROM data source is a single
-// SdblTableRef whose text is `ВремТаблица`.
 #[test]
 fn test_slice8_temp_table_source_across_package_boundary() {
     use syntax::ast::{AstNode, SdblQueryPackage};
@@ -2577,11 +2211,6 @@ fn test_slice8_temp_table_source_across_package_boundary() {
     );
 }
 
-// Bucket A: parameter source without an alias — existing
-// test_parameter_as_data_source (:2205) always pairs &Parameter with КАК;
-// this gap locks the alias?-optional branch of data_source on the parameter
-// path. Asserts SdblParameter sits inside SdblTableRef inside SdblDataSource
-// and that the data source carries NO SdblAlias.
 #[test]
 fn test_slice8_parameter_source_without_alias() {
     use syntax::{
@@ -2613,31 +2242,6 @@ fn test_slice8_parameter_source_without_alias() {
     );
 }
 
-// ============================================================================
-// Slice 10a surface coverage — added by C0b audit to close gaps in the
-// operator-chain + atoms + parens/tuple/subquery surface that the Slice
-// 10a clean-room rewrite must satisfy. Authored from
-// docs/legal/sdbl-expressions-mini-spec.md (the C0a clean-room
-// reference for Slice 10a + 10b) and the local 1C ITS pubqlang dump
-// at /home/itrous/src/tools_migration/its/dump/, specifically chapters
-// 22 (WHERE / logical-operator precedence ladder), 40 (literal forms,
-// arithmetic operators, ВЫБОР / ВЫРАЗИТЬ / ССЫЛКА / МЕЖДУ), and 60
-// (`&Identifier` parameter prefix, ПОДОБНО). The companion overview
-// chapters /10 and /12 (intro paragraph + bilingual-keywords
-// principle) are referenced for surrounding context.
-//
-// **Oracle:** the assertions below derive from the mini-spec §AST-shape
-// invariants and §Operator-binding pin list, NOT from any pre-rewrite
-// parser implementation. Each per-test comment cites the relevant
-// mini-spec section / ITS chapter so the post-rewrite parser is
-// validated against the mini-spec contract rather than against
-// accidental implementation shape.
-// ============================================================================
-
-// Bucket A: nested NOT — tests right-recursive multi-NOT body of
-// `not_expr`. Mini-spec §Operator-binding pin list item 1 + AST-shape
-// invariant for SdblNotExpr (operator token first child, single operand
-// second child). ITS pubqlang/22 §Условие отбора (`И`, `ИЛИ`, `НЕ`).
 #[test]
 fn test_slice10a_nested_not() {
     use syntax::SyntaxKind;
@@ -2660,10 +2264,6 @@ fn test_slice10a_nested_not() {
     );
 }
 
-// Bucket A: NOT-AND binding — `НЕ А И Б` parses as
-// `LogicalAndExpr( NotExpr(А), AND, Б )`, NOT as `NotExpr( А И Б )`.
-// Mini-spec §Operator-binding pin list item 3 (NOT binds tightest under
-// AND because not_expr is the logical_and_expr operand).
 #[test]
 fn test_slice10a_not_and_binding() {
     use syntax::SyntaxKind;
@@ -2690,9 +2290,6 @@ fn test_slice10a_not_and_binding() {
     );
 }
 
-// Bucket A: nested unary minus — `- - А` parses as
-// `UnaryExpr( - , UnaryExpr( - , А ) )` per mini-spec §Operator-binding
-// pin list item 2 (right-recursive multi-unary).
 #[test]
 fn test_slice10a_nested_unary_minus() {
     use syntax::SyntaxKind;
@@ -2715,10 +2312,6 @@ fn test_slice10a_nested_unary_minus() {
     );
 }
 
-// Bucket A: unary minus inside additive right operand — `А + - Б` parses
-// as `AdditiveExpr( А, +, UnaryExpr( -, Б ) )` per mini-spec §Operator-
-// binding pin list item 4. Verifies that unary nests cleanly under the
-// flat-additive wrapper.
 #[test]
 fn test_slice10a_unary_inside_additive_right_operand() {
     use syntax::SyntaxKind;
@@ -2739,9 +2332,6 @@ fn test_slice10a_unary_inside_additive_right_operand() {
     );
 }
 
-// Bucket A: Russian NOT with nested AND inside parens — `НЕ (А И Б)`
-// parses as `NotExpr( НЕ, ParenExpr( LogicalAndExpr( А, И, Б ) ) )`.
-// Mini-spec §Atoms paren dispatch + §Operator-binding pin list item 1.
 #[test]
 fn test_slice10a_russian_not_with_paren_and() {
     use syntax::SyntaxKind;
@@ -2759,19 +2349,6 @@ fn test_slice10a_russian_not_with_paren_and() {
     assert!(and_in_paren.is_some(), "SdblLogicalAndExpr must sit inside the SdblParenExpr",);
 }
 
-// Bucket A: a single user-visible string `"X"` produces 3 internal
-// STRING tokens (opening `"`, content, closing `"`) at the lexer
-// level, and `string_literal_or_multi` collects every consecutive
-// run of STRING tokens into one wrapper. Because count > 1 the
-// wrapper is `SdblMultiString` rather than `SdblLiteral` — even
-// for what the user sees as one literal. The 3-token internal
-// shape is the lexer-level invariant; the input
-// `ВЫБРАТЬ "a" "b" "c" ИЗ Т` produces an SdblMultiString wrapping
-// `"a"` (3 STRING tokens) at the SELECT-field-head position; the
-// trailing `"b" "c"` are recovery noise (whitespace breaks
-// `string_literal_or_multi`'s consecutive-only collector). Mini-
-// spec §Atoms — string literal multi-part IDE recovery + §Lexical
-// assumptions; ITS pubqlang/40 §Литералы string lexical shape.
 #[test]
 fn test_slice10a_multi_string_three_tokens() {
     use syntax::SyntaxKind;
@@ -2794,15 +2371,6 @@ fn test_slice10a_multi_string_three_tokens() {
     );
 }
 
-// Bucket A: precedence with newline trivia between operator and operand.
-// Mini-spec §Trivia handling convention: `p.skip_trivia()` BEFORE the
-// operator probe so operator tokens preceded by whitespace / comments /
-// newlines are recognised. Verifies `1\n+\n2 * 3` parses as
-// `AdditiveExpr( 1, +, MultiplicativeExpr( 2, *, 3 ) )` — strong
-// assertion: SdblAdditiveExpr has a DIRECT PLUS token child (not just
-// some descendant), and the SdblMultiplicativeExpr is a DIRECT child of
-// the additive wrapper with a DIRECT STAR token covering `2 * 3`.
-// Mini-spec §AST-shape invariants #1 (FLAT) and #2 (trivia-before-probe).
 #[test]
 fn test_slice10a_precedence_with_newline_trivia() {
     use syntax::SyntaxKind;
@@ -2812,9 +2380,6 @@ fn test_slice10a_precedence_with_newline_trivia() {
     let root = parse.syntax_node();
     assert_eq!(root.text().to_string(), input, "Root must cover full input");
 
-    // Find the additive wrapper that has a DIRECT PLUS token child. The
-    // parser opens single-child wrappers unconditionally; only the
-    // wrapper whose direct token children include PLUS owns the operator.
     let additive_with_plus = root
         .descendants()
         .filter(|n| n.kind() == SyntaxKind::SDBL_ADDITIVE_EXPR)
@@ -2825,12 +2390,6 @@ fn test_slice10a_precedence_with_newline_trivia() {
         })
         .expect("SdblAdditiveExpr with a DIRECT PLUS token child — mini-spec §AST-shape #1");
 
-    // The right operand of `+` is a SdblMultiplicativeExpr direct child
-    // with a DIRECT STAR token. Note: the LEFT operand `1` is also wrapped
-    // in an SdblMultiplicativeExpr (single-child empty-operator wrapper —
-    // mini-spec §AST-shape invariant #1 + empty-wrapper unwrapping note).
-    // The wrapper that owns the actual `*` operator is the one whose
-    // direct token children include STAR.
     let mul_with_star = additive_with_plus
         .children()
         .filter(|n| n.kind() == SyntaxKind::SDBL_MULTIPLICATIVE_EXPR)
@@ -2848,8 +2407,6 @@ fn test_slice10a_precedence_with_newline_trivia() {
         "SdblMultiplicativeExpr must cover `2 * 3` (got {mul_text:?})",
     );
 
-    // FLAT-shape guard for additive: exactly ONE PLUS direct token child
-    // (mini-spec §AST-shape invariant #1 — flat wrapper for `1 + (2*3)`).
     let plus_count = additive_with_plus
         .children_with_tokens()
         .filter_map(|c| c.into_token())
@@ -2861,14 +2418,6 @@ fn test_slice10a_precedence_with_newline_trivia() {
     );
 }
 
-// Bucket A: flat-associativity guard — `А + Б + Г` parses as a SINGLE
-// SdblAdditiveExpr with 3 expression children + 2 `+` tokens, NOT a
-// nested left-associative tree. Mini-spec §AST-shape invariant #1
-// (FLAT operator wrappers) and §Operator-binding pin list item
-// "flat-wrapper rule".
-//
-// Operand letters intentionally avoid `В` because the SDBL lexer
-// tokenises a single `В` as the `KwIn` (IN-operator) keyword.
 #[test]
 fn test_slice10a_flat_additive_associativity() {
     use syntax::SyntaxKind;
@@ -2896,10 +2445,6 @@ fn test_slice10a_flat_additive_associativity() {
     );
 }
 
-// Bucket A: tuple vs paren distinction at expression level — single
-// expression in parens emits SdblParenExpr; 2+ comma-separated
-// expressions emit SdblTupleExpr. Mini-spec §Atoms paren dispatch +
-// §AST-shape invariant #5.
 #[test]
 fn test_slice10a_paren_single_vs_tuple_two() {
     use syntax::SyntaxKind;
@@ -2938,14 +2483,6 @@ fn test_slice10a_paren_single_vs_tuple_two() {
     assert_eq!(comma_count, 1, "SdblTupleExpr for (1, 2) must have 1 COMMA direct token child");
 }
 
-// Bucket A: newline-separated logical operators — `А\nИ\nБ` parses as a
-// SdblLogicalAndExpr with a DIRECT KW_AND token child and at least two
-// operand subtrees as direct children (mini-spec §AST-shape invariants #1
-// + #2 + §IDE-recovery allowances #8). Note: HIR text-based operator
-// detection at sdbl-hir/src/lower/expr/ops.rs:64-67 looks for " И " (with
-// surrounding spaces) and may fall back to default BinaryOp::Eq when
-// newlines replace spaces; that's a Slice 13 follow-up. This test only
-// locks the parser-side wrapper shape, not HIR's lowering.
 #[test]
 fn test_slice10a_newline_separated_logical_and() {
     use syntax::SyntaxKind;
@@ -2955,9 +2492,6 @@ fn test_slice10a_newline_separated_logical_and() {
     let root = parse.syntax_node();
     assert_eq!(root.text().to_string(), input, "Root must cover full input including newlines");
 
-    // Find the SdblLogicalAndExpr that has a DIRECT KW_AND token child —
-    // single-atom wrappers exist throughout the chain, only the wrapper
-    // owning the operator has KW_AND as a direct child.
     let and_with_kw = root
         .descendants()
         .filter(|n| n.kind() == SyntaxKind::SDBL_LOGICAL_AND_EXPR)
@@ -2970,10 +2504,6 @@ fn test_slice10a_newline_separated_logical_and() {
             "SdblLogicalAndExpr with a DIRECT KW_AND token child even when separated by newlines",
         );
 
-    // The wrapper must contain at least two operand subtrees (one per side
-    // of the AND). Direct children that are nodes — not trivia tokens —
-    // are the operands. Slice 10a's chain wraps every operand, so the
-    // operand-children count is at least 2 (one for А, one for Б).
     let operand_node_count = and_with_kw.children().count();
     assert!(
         operand_node_count >= 2,
@@ -2987,21 +2517,6 @@ fn test_slice10a_newline_separated_logical_and() {
     );
 }
 
-// Bucket A — Slice 10a NULL dispatch regression gate (WHERE side).
-//
-// Pre-Slice-10a-C2, bare `NULL` was routed through `column_or_function`
-// because `sdbl_token_converter.rs:57` maps `LitNull → TokenKind::Ident`
-// and the historical `Some(TokenKind::KwNull)` arm in the parser was
-// unreachable dead code — bare `NULL` was silently consumed as
-// `SdblColumnRef`. Slice 10a C2 added an `at_keyword("NULL")` probe
-// before the generic `Ident → column_or_function` arm so bare `NULL`
-// now emits `SdblLiteral` wrapping the `Ident` token.
-//
-// `check_no_errors` alone (as in the existing `test_null_literal` at
-// line 290) cannot detect the buggy shape because the pre-fix shape
-// was a parse-tree shape bug, not a parse-error bug. This test gates
-// the fix structurally. Mini-spec §Atoms primary dispatch + ITS
-// pubqlang/40 §Литералы.
 #[test]
 fn test_slice10a_bare_null_emits_literal_not_column_ref() {
     use syntax::SyntaxKind;
@@ -3024,9 +2539,6 @@ fn test_slice10a_bare_null_emits_literal_not_column_ref() {
         "Bare NULL must emit SdblLiteral wrapping the Ident token; got parent {null_parent_kind:?}. Pre-Slice-10a-C2 bug placed NULL inside SdblColumnRef.",
     );
 
-    // Defensive cross-angle check: no SdblColumnRef in the tree may
-    // contain the NULL text (catches future refactors that change
-    // the wrapper layout in a different direction).
     let column_refs_with_null = root
         .descendants()
         .filter(|n| n.kind() == SyntaxKind::SDBL_COLUMN_REF)
@@ -3038,14 +2550,6 @@ fn test_slice10a_bare_null_emits_literal_not_column_ref() {
     );
 }
 
-// Bucket A — Slice 10a NULL at SELECT-field-head position.
-//
-// Stronger gate: `SELECT NULL FROM Т` places NULL at the head of an
-// expression position via the SELECT field list (no comparison
-// context). Pre-Slice-10a-C2 this also routed NULL to SdblColumnRef
-// via primary_expr's match arm `Some(TokenKind::Ident) =>
-// column_or_function(p)`. Mini-spec §Atoms primary dispatch + ITS
-// pubqlang/40 §Литералы.
 #[test]
 fn test_slice10a_select_field_null_emits_literal() {
     use syntax::SyntaxKind;
@@ -3067,31 +2571,6 @@ fn test_slice10a_select_field_null_emits_literal() {
     );
 }
 
-// ============================================================================
-// Slice 10b C0b Bucket-A gap additions
-// ============================================================================
-//
-// Pre-rewrite regression gate for the Slice 10b clean-room rewrite of
-// predicates / comparison / column-or-function / CAST / CASE.
-// Authored from `docs/legal/sdbl-expressions-mini-spec.md`
-// (C0a-extended) and ITS pubqlang chapters 22, 23, 27, 32, 40 via the
-// local dump at `/home/itrous/src/tools_migration/its/dump/`. See
-// `docs/legal/sdbl-clean-room-slices.md` §Slice 10b for the slice
-// scope.
-//
-// Tests (a)-(l) and (n.1)-(n.5) MUST pass on the pre-Slice-10b parser:
-// they document existing behaviour that the C2 clean-room rewrite
-// preserves bit-for-bit. Tests (m) EN/RU are `#[ignore]`-ed in C0b —
-// they are the regression gate for the C2 fix to
-// `column_or_function`'s clause-keyword recovery (codex Round-1
-// finding 2). Slice 10b C2 unignores them in the same atomic commit
-// as the fix.
-
-// (a) Empty IN list recovery — `IN ()` accepted as a recoverable
-// parse. Mini-spec §Predicates §SdblInExpr + §IDE-recovery
-// allowances #10. ITS pubqlang/22 documents IN with a non-empty
-// value-list; the empty form is preserved as IDE-recovery for
-// mid-typing.
 #[test]
 fn test_slice10b_empty_in_list_recovery() {
     let input = "ВЫБРАТЬ * ИЗ Т ГДЕ Поле В ()";
@@ -3109,9 +2588,6 @@ fn test_slice10b_empty_in_list_recovery() {
     );
 }
 
-// (b) NOT IN with subquery — `НЕ В (ВЫБРАТЬ ...)` emits SdblInExpr
-// with KwNot before KwIn, and SdblSubquery inside the parens.
-// Mini-spec §Predicates §SdblInExpr.
 #[test]
 fn test_slice10b_not_in_subquery() {
     let input = "ВЫБРАТЬ * ИЗ Т ГДЕ Поле НЕ В (ВЫБРАТЬ Х ИЗ С)";
@@ -3129,9 +2605,6 @@ fn test_slice10b_not_in_subquery() {
     );
 }
 
-// (c) IN HIERARCHY Russian variant — `В ИЕРАРХИИ (...)` emits
-// SdblInHierarchyExpr. Mini-spec §Predicates §SdblInHierarchyExpr +
-// ITS pubqlang/32 canonical example.
 #[test]
 fn test_slice10b_in_hierarchy_russian() {
     let input = "ВЫБРАТЬ * ИЗ Т ГДЕ Поле В ИЕРАРХИИ (&Корень)";
@@ -3144,9 +2617,6 @@ fn test_slice10b_in_hierarchy_russian() {
     );
 }
 
-// (d) IS NOT NULL shape — `ЕСТЬ НЕ NULL` emits SdblIsNullExpr with
-// KwNot between IS and NULL. Mini-spec §Predicates §SdblIsNullExpr
-// + ITS pubqlang/27 canonical example.
 #[test]
 fn test_slice10b_is_not_null_russian() {
     let input = "ВЫБРАТЬ * ИЗ Т ГДЕ Поле ЕСТЬ НЕ NULL";
@@ -3159,9 +2629,6 @@ fn test_slice10b_is_not_null_russian() {
     );
 }
 
-// (e) BETWEEN missing AND recovery — `МЕЖДУ 1` (no AND high-bound)
-// emits SdblBetweenExpr with only the low bound. Mini-spec
-// §Predicates §SdblBetweenExpr + §IDE-recovery allowances #12.
 #[test]
 fn test_slice10b_between_missing_and_recovery() {
     let input = "ВЫБРАТЬ * ИЗ Т ГДЕ Поле МЕЖДУ 1";
@@ -3174,10 +2641,6 @@ fn test_slice10b_between_missing_and_recovery() {
     );
 }
 
-// (f) LIKE pattern ESCAPE char — `ПОДОБНО "..." СПЕЦСИМВОЛ "\"`
-// emits SdblLikeExpr. ESCAPE/СПЕЦСИМВОЛ is a local IDE-recovery
-// allowance (mini-spec §IDE-recovery allowances #13 — not in dumped
-// ITS chapters).
 #[test]
 fn test_slice10b_like_with_escape() {
     let input = "ВЫБРАТЬ * ИЗ Т ГДЕ Поле ПОДОБНО \"abc%\" СПЕЦСИМВОЛ \"!\"";
@@ -3190,10 +2653,6 @@ fn test_slice10b_like_with_escape() {
     );
 }
 
-// (g) REFS MDO chain — `ССЫЛКА Документ.ПриходнаяНакладная` emits
-// SdblRefsExpr with the MDO chain as direct token children.
-// Mini-spec §Predicates §SdblRefsExpr + ITS pubqlang/40 canonical
-// example.
 #[test]
 fn test_slice10b_refs_mdo_chain_russian() {
     let input = "ВЫБРАТЬ * ИЗ Т ГДЕ Регистратор ССЫЛКА Документ.ПриходнаяНакладная";
@@ -3211,11 +2670,6 @@ fn test_slice10b_refs_mdo_chain_russian() {
     );
 }
 
-// (h) CASE simple form — `ВЫБОР Т.Х КОГДА ... КОНЕЦ` emits
-// SdblCaseExpr whose first child node is the operand expression
-// (NOT SdblWhenClause). Mini-spec §CASE expressions
-// §Child-order invariant + HIR consumer
-// `crates/sdbl-hir/src/lower/expr/case_expr.rs:40-45`.
 #[test]
 fn test_slice10b_case_simple_form_operand_first() {
     use syntax::SyntaxKind;
@@ -3238,9 +2692,6 @@ fn test_slice10b_case_simple_form_operand_first() {
     );
 }
 
-// (i) CASE searched form — `ВЫБОР КОГДА ... КОНЕЦ` (no operand)
-// emits SdblCaseExpr whose first child node is SdblWhenClause.
-// Mini-spec §CASE expressions §Child-order invariant.
 #[test]
 fn test_slice10b_case_searched_form_when_first() {
     use syntax::SyntaxKind;
@@ -3263,10 +2714,6 @@ fn test_slice10b_case_searched_form_when_first() {
     );
 }
 
-// (j) CAST primitive parameterised type — `ВЫРАЗИТЬ(Поле КАК
-// СТРОКА(200))` emits SdblFunctionCall containing SdblType with the
-// primitive type Ident plus the (decimal) parameter list. Mini-spec
-// §CAST type specification + ITS pubqlang/40 canonical example.
 #[test]
 fn test_slice10b_cast_primitive_parameterised() {
     let input = "ВЫБРАТЬ ВЫРАЗИТЬ(Поле КАК СТРОКА(200)) ИЗ Т";
@@ -3281,11 +2728,6 @@ fn test_slice10b_cast_primitive_parameterised() {
     assert!(tree.contains("SDBL_TYPE"), "CAST type spec must emit SdblType.\nTree: {}", tree);
 }
 
-// (k) CAST MDO type and member access — `ВЫРАЗИТЬ(Регистратор КАК
-// Документ.ПриходнаяНакладная).Поставщик` emits SdblFunctionCall
-// containing SdblType (MDO chain) AND a post-RParen Dot/Ident chain
-// (member access). Mini-spec §CAST type specification +
-// §SdblFunctionCall member access + ITS pubqlang/40.
 #[test]
 fn test_slice10b_cast_mdo_with_member_access() {
     let input = "ВЫБРАТЬ ВЫРАЗИТЬ(Регистратор КАК Документ.ПриходнаяНакладная).Поставщик ИЗ Т";
@@ -3305,10 +2747,6 @@ fn test_slice10b_cast_mdo_with_member_access() {
     );
 }
 
-// (l) Inline tabular field syntax — `Т.ТабЧасть.(Поле1, Поле2)`
-// emits SdblColumnRef containing SdblInlineTableFields wrapping
-// SdblSelectedField children. Mini-spec §Inline tabular field
-// syntax. The Slice-10b → Slice-7 dispatch boundary.
 #[test]
 fn test_slice10b_inline_tabular_field_syntax() {
     let input = "ВЫБРАТЬ Т.ТабЧасть.(Поле1, Поле2) ИЗ Т";
@@ -3326,18 +2764,6 @@ fn test_slice10b_inline_tabular_field_syntax() {
     );
 }
 
-// (m) Function-call clause-keyword recovery — `func(x, FROM T)`
-// must NOT consume FROM as an Ident-shaped argument; the FROM
-// clause must remain detectable for the outer SELECT. Codex
-// Round-1 finding 2 → Slice 10b C2 FIX. The C2 commit lands a
-// `&& !is_clause_keyword` clause at both arg-start probes in
-// `column_or_function`. Mini-spec §Column references and function
-// calls §SdblFunctionCall + §IDE-recovery allowances #15.
-//
-// `#[ignore]`-ed in C0b: the pre-C2 parser hijacks FROM as an
-// Ident-shaped argument, so this test FAILS on the pre-rewrite
-// parser. Slice 10b C2 unignores it in the same atomic commit as
-// the fix.
 #[test]
 fn test_func_call_clause_keyword_recovery() {
     use syntax::SyntaxKind;
@@ -3345,8 +2771,6 @@ fn test_func_call_clause_keyword_recovery() {
     let parse = parse_sdbl(input);
     let root = parse.syntax_node();
 
-    // Outer SELECT must still recognise FROM T as the FROM clause —
-    // i.e. SDBL_FROM_CLAUSE must appear in the tree.
     let from_clauses =
         root.descendants().filter(|n| n.kind() == SyntaxKind::SDBL_FROM_CLAUSE).count();
     assert!(
@@ -3355,9 +2779,6 @@ fn test_func_call_clause_keyword_recovery() {
         root
     );
 
-    // The function call must NOT contain FROM as a direct
-    // argument-position Ident — the keyword filter at the
-    // arg-start probe should reject FROM.
     let func_call = root
         .descendants()
         .find(|n| n.kind() == SyntaxKind::SDBL_FUNCTION_CALL)
@@ -3370,9 +2791,6 @@ fn test_func_call_clause_keyword_recovery() {
     );
 }
 
-// (m, RU) Russian variant of the function-call clause-keyword
-// recovery regression gate. Same contract as
-// `test_func_call_clause_keyword_recovery` for ИЗ.
 #[test]
 fn test_russian_func_call_clause_keyword_recovery() {
     use syntax::SyntaxKind;
@@ -3400,22 +2818,6 @@ fn test_russian_func_call_clause_keyword_recovery() {
     );
 }
 
-// ----------------------------------------------------------------------------
-// (n.1)-(n.5) SELECT-field predicate descendant guards.
-//
-// Producer-side invariant: `expression(p)` always wraps in
-// `logical_or_expr` (Slice 10a) so consumer-side
-// `SdblSelectedField::expression()` (which directly matches only 3
-// of the 13 Slice-10b kinds — COLUMN_REF, FUNCTION_CALL,
-// COMPARISON_EXPR) reaches the predicate / CASE node via
-// descendant traversal. Codex Round-1 finding 3 + Round-3 expansion.
-//
-// Each guard test asserts:
-//  1. SdblSelectedField direct child is SdblLogicalOrExpr;
-//  2. SdblSelectedField direct child is NOT a bare predicate /
-//     CASE / comparison node.
-// ----------------------------------------------------------------------------
-
 fn first_selected_field_direct_child_kinds(input: &str) -> Vec<syntax::SyntaxKind> {
     use syntax::SyntaxKind;
     let parse = parse_sdbl(input);
@@ -3427,7 +2829,6 @@ fn first_selected_field_direct_child_kinds(input: &str) -> Vec<syntax::SyntaxKin
     field.children().map(|n| n.kind()).collect()
 }
 
-// (n.1) SELECT-field comparison descendant guard.
 #[test]
 fn test_select_field_comparison_descendant_guard() {
     use syntax::SyntaxKind;
@@ -3444,7 +2845,6 @@ fn test_select_field_comparison_descendant_guard() {
     );
 }
 
-// (n.2) SELECT-field IN descendant guard.
 #[test]
 fn test_select_field_in_descendant_guard() {
     use syntax::SyntaxKind;
@@ -3461,7 +2861,6 @@ fn test_select_field_in_descendant_guard() {
     );
 }
 
-// (n.3) SELECT-field BETWEEN descendant guard.
 #[test]
 fn test_select_field_between_descendant_guard() {
     use syntax::SyntaxKind;
@@ -3478,7 +2877,6 @@ fn test_select_field_between_descendant_guard() {
     );
 }
 
-// (n.4) SELECT-field IS NULL descendant guard.
 #[test]
 fn test_select_field_is_null_descendant_guard() {
     use syntax::SyntaxKind;
@@ -3495,7 +2893,6 @@ fn test_select_field_is_null_descendant_guard() {
     );
 }
 
-// (n.5) SELECT-field CASE descendant guard.
 #[test]
 fn test_select_field_case_descendant_guard() {
     use syntax::SyntaxKind;
@@ -3513,30 +2910,6 @@ fn test_select_field_case_descendant_guard() {
     );
 }
 
-// ----------------------------------------------------------------------------
-// Slice 9 (JOIN family) Bucket-A gap tests — parser-side AST-shape guards.
-//
-// Pin parser-side invariants that downstream consumers (sdbl-hir,
-// ide-diagnostics) read. Per `sdbl-clean-room-slice9` plan v9, all 15
-// pass on the pre-rewrite parser. Tier classification per test:
-//   #1-#4  Tier A1 — ITS chapters 44/45/46/47 listings (RU canonical).
-//   #5-#6  Tier A2 OR Tier D candidates — bare ПОЛНОЕ/ЛЕВОЕ without
-//          ВНЕШНЕЕ; final tier set by C2 author after chapter prose
-//          verification.
-//   #7-#8  Tier C — SELECT mini-spec §JOIN clauses + chapter 44
-//          standalone СОЕДИНЕНИЕ.
-//   #9-#10 Tier A1 — chapter 48 chained / nested JOINs.
-//   #11-#13 Parser-side AST-shape guards for the three HIR diagnostics
-//          (JoinWithSubQuery / JoinWithVirtualTable / LogicalOrInJoin).
-//   #14-#15 Audit-gate tests for the two `Parser::error()`-bumps in
-//          `join_clause`. Locked to current behavior so C2 can either
-//          flip them (Option A FIX) or preserve them (Option B).
-// ----------------------------------------------------------------------------
-
-/// Assert a clean parse: both the parser-error list AND the syntax tree
-/// must be free of `ERROR` recovery nodes. `Parser::error()` inserts
-/// `SyntaxKind::ERROR` into the tree without populating `Parse::errors()`,
-/// so checking only `has_errors()` would let recovered parses slip through.
 fn assert_clean_parse(parse: &syntax::Parse<syntax::SyntaxNode>, input: &str) {
     use syntax::SyntaxKind;
     assert!(
@@ -3567,7 +2940,6 @@ fn find_first_join_clause(input: &str) -> syntax::SyntaxNode {
         .expect("Tree must contain SdblJoinClause")
 }
 
-// (1) Tier A1 — chapter 44 ВНУТРЕННЕЕ СОЕДИНЕНИЕ canonical RU listing.
 #[test]
 fn test_slice9_canonical_inner_join_ru() {
     use syntax::ast::{AstNode, JoinType, SdblJoinClause};
@@ -3578,7 +2950,6 @@ fn test_slice9_canonical_inner_join_ru() {
     assert!(join.data_source().is_some(), "JOIN must carry a joined SdblDataSource child");
 }
 
-// (2) Tier A1 — chapter 45 ЛЕВОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ canonical RU listing.
 #[test]
 fn test_slice9_canonical_left_outer_join_ru() {
     use syntax::ast::{AstNode, JoinType, SdblJoinClause};
@@ -3588,7 +2959,6 @@ fn test_slice9_canonical_left_outer_join_ru() {
     assert_eq!(join.join_type(), JoinType::Left);
 }
 
-// (3) Tier A1 — chapter 46 ПРАВОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ canonical RU listing.
 #[test]
 fn test_slice9_canonical_right_outer_join_ru() {
     use syntax::ast::{AstNode, JoinType, SdblJoinClause};
@@ -3598,7 +2968,6 @@ fn test_slice9_canonical_right_outer_join_ru() {
     assert_eq!(join.join_type(), JoinType::Right);
 }
 
-// (4) Tier A1 — chapter 47 ПОЛНОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ canonical RU listing.
 #[test]
 fn test_slice9_canonical_full_outer_join_ru() {
     use syntax::ast::{AstNode, JoinType, SdblJoinClause};
@@ -3608,11 +2977,6 @@ fn test_slice9_canonical_full_outer_join_ru() {
     assert_eq!(join.join_type(), JoinType::Full);
 }
 
-// (5) Bare ПОЛНОЕ — FULL without ВНЕШНЕЕ. Tier classification by C2
-// author (Tier A2 if chapter 47 prose attests OUTER optionality, else
-// Tier D local-allowance guard). Locks current parser behavior:
-// `is_join_keyword` accepts ПОЛНОЕ as a starter and `join_type()`
-// substring-matches it back to JoinType::Full.
 #[test]
 fn test_slice9_bare_full_join_ru() {
     use syntax::ast::{AstNode, JoinType, SdblJoinClause};
@@ -3621,9 +2985,6 @@ fn test_slice9_bare_full_join_ru() {
     assert_eq!(join.join_type(), JoinType::Full);
 }
 
-// (6) Bare ЛЕВОЕ — LEFT without ВНЕШНЕЕ. Tier classification by C2
-// author (Tier A2 if chapter 45 prose-note attests ВНЕШНЕЕ optionality,
-// else Tier D).
 #[test]
 fn test_slice9_bare_left_join_ru() {
     use syntax::ast::{AstNode, JoinType, SdblJoinClause};
@@ -3632,8 +2993,6 @@ fn test_slice9_bare_left_join_ru() {
     assert_eq!(join.join_type(), JoinType::Left);
 }
 
-// (7) Bare JOIN (implicit INNER, EN). Tier C SELECT mini-spec §JOIN
-// clauses (line 318).
 #[test]
 fn test_slice9_bare_join_en() {
     use syntax::ast::{AstNode, JoinType, SdblJoinClause};
@@ -3642,8 +3001,6 @@ fn test_slice9_bare_join_en() {
     assert_eq!(join.join_type(), JoinType::Inner);
 }
 
-// (8) Bare СОЕДИНЕНИЕ (implicit INNER, RU). Tier C / chapter 44
-// standalone (final classification at C2 author time).
 #[test]
 fn test_slice9_bare_join_ru() {
     use syntax::ast::{AstNode, JoinType, SdblJoinClause};
@@ -3652,8 +3009,6 @@ fn test_slice9_bare_join_ru() {
     assert_eq!(join.join_type(), JoinType::Inner);
 }
 
-// (9) Chained JOINs at the same data source — chapter 48 listing.
-// Both JOIN clauses attach as direct children of T1's SdblDataSource.
 #[test]
 fn test_slice9_chained_joins_same_source() {
     use syntax::ast::{AstNode, SdblQueryPackage};
@@ -3673,13 +3028,6 @@ fn test_slice9_chained_joins_same_source() {
     );
 }
 
-// (10) Nested JOIN inside JOIN'ed source — chapter 48 nested example.
-// Asserts the placement invariant: outer LEFT JOIN attaches to T1's
-// SdblDataSource; the inner bare JOIN attaches to the OUTER JOIN's
-// data_source (i.e. T2's SdblDataSource), NOT to T1's. The inner
-// `join_type()` walks up to T2's data source for parent-tokens
-// fallback — that source does NOT carry LEFT, so the default
-// JoinType::Inner fires (Invariant #6).
 #[test]
 fn test_slice9_nested_join_inside_join() {
     use syntax::ast::{AstNode, JoinType, SdblQueryPackage};
@@ -3704,11 +3052,6 @@ fn test_slice9_nested_join_inside_join() {
     );
 }
 
-// (11) FROM-side subquery + JOIN AST-shape guard.
-// Pins Invariant #7: outer SdblDataSource carries BOTH subquery() Some
-// AND join_clauses().next() Some. The JoinWithSubQuery HIR diagnostic
-// (`crates/ide-diagnostics/src/handlers/join_with_sub_query.rs`)
-// reads exactly this shape.
 #[test]
 fn test_slice9_from_subquery_with_join_ast_shape() {
     use syntax::ast::{AstNode, SdblQueryPackage};
@@ -3731,9 +3074,6 @@ fn test_slice9_from_subquery_with_join_ast_shape() {
     );
 }
 
-// (12) FROM-side virtual-table + JOIN AST-shape guard.
-// Pins Invariant #7 for the JoinWithVirtualTable HIR diagnostic
-// (`crates/ide-diagnostics/src/handlers/join_with_virtual_table.rs`).
 #[test]
 fn test_slice9_from_virtual_table_with_join_ast_shape() {
     use syntax::ast::{AstNode, SdblQueryPackage};
@@ -3757,11 +3097,6 @@ fn test_slice9_from_virtual_table_with_join_ast_shape() {
     );
 }
 
-// (13) OR-in-ON parser-side AST-shape guard.
-// Pins the AST shape that LogicalOrInJoin reads
-// (`crates/sdbl-hir/src/lower/join_clause.rs:188`): SdblJoinClause's
-// ON-condition is wrapped in SdblLogicalOrExpr (Slice 10a), which then
-// holds the OR.
 #[test]
 fn test_slice9_or_in_on_ast_shape() {
     use syntax::SyntaxKind;
@@ -3781,15 +3116,6 @@ fn test_slice9_or_in_on_ast_shape() {
     );
 }
 
-// (14) Audit-gate: missing JOIN keyword after LEFT.
-// Locks pre-rewrite behavior — `Parser::error()` at select.rs:984
-// BUMPS the next token (T2) into an ERROR node attached as a direct
-// child of SdblJoinClause, then `m.complete()` runs anyway. The
-// outer parse does NOT raise `has_errors()` (the error lives only as
-// a syntax-tree ERROR node). At C2 the author chooses Option A FIX
-// (mirror Slice 10b column_or_function: zero-width ERROR, do NOT
-// bump T2 — flip this test in the same atomic commit) or Option B
-// PRESERVE (this test stays).
 #[test]
 fn test_slice9_missing_join_keyword_current_behavior() {
     use syntax::SyntaxKind;
@@ -3814,11 +3140,6 @@ fn test_slice9_missing_join_keyword_current_behavior() {
     );
 }
 
-// (15) Audit-gate: missing ON keyword between JOIN'ed source and
-// condition. Same locking pattern as #14 (`Parser::error()` at
-// select.rs:997). Bumps the `=` token into an ERROR node that
-// attaches as a direct child of SdblJoinClause (after the joined
-// SdblDataSource).
 #[test]
 fn test_slice9_missing_on_current_behavior() {
     use syntax::SyntaxKind;
@@ -3843,32 +3164,6 @@ fn test_slice9_missing_on_current_behavior() {
     );
 }
 
-// ============================================================
-// Slice 11 (clauses-after-FROM) C0b Bucket-A gap tests.
-//
-// These 14 tests pin pre-Slice-11-C2 parser behaviour for the
-// post-FROM clause family (WHERE / GROUP BY / HAVING / ORDER BY /
-// AUTOORDER / TOTALS BY / FOR UPDATE / INDEX BY plus the two
-// dispatchers and `is_clause_keyword`). All but test (g) pass on
-// the pre-rewrite parser; test (g) is the regression-gate for the
-// MANDATORY C2 FIX (HIERARCHY consumption per ITS chapter 27 —
-// `chapter_027.html:39, 51` `УПОРЯДОЧИТЬ ПО Наименование
-// ИЕРАРХИЯ`) and lands `#[ignore]`-ed at C0b. C2 unignores it
-// atomically with the `order_by_item` HIERARCHY consumption fix.
-//
-// Coverage maps onto the four §IDE-recovery allowances and the
-// AST-shape invariants enumerated in the Slice 11 plan
-// (serialized-moseying-orbit.md).
-// ============================================================
-
-/// Recursive-walk replica of
-/// `crates/sdbl-hir/src/lower/clauses.rs:170-192`
-/// `collect_or_tokens_excluding_subqueries` — counts KW_OR tokens
-/// reachable from `node` via `children_with_tokens()` recursion,
-/// skipping `SDBL_SUBQUERY` / `SDBL_SUBQUERY_EXPR` /
-/// `SDBL_SELECT_QUERY` descendants. Pins the consumer-side
-/// recursive-walk reachability invariant for the
-/// `LogicalOrInWhere` IDE diagnostic.
 fn count_kw_or_excluding_subqueries(node: &syntax::SyntaxNode) -> usize {
     use syntax::{NodeOrToken, SyntaxKind};
     let mut total = 0usize;
@@ -3893,10 +3188,6 @@ fn count_kw_or_excluding_subqueries(node: &syntax::SyntaxNode) -> usize {
     total
 }
 
-// (a) Slice 11 — WHERE with KW_OR token reachable via recursive
-// walk from SdblWhereClause (LogicalOrInWhere producer-side gate;
-// the token sits as a direct child of the inner SdblLogicalOrExpr
-// wrapper, NOT as a direct token child of SdblWhereClause).
 #[test]
 fn test_slice11_where_kw_or_recursive_walk_reachable() {
     use syntax::SyntaxKind;
@@ -3932,10 +3223,6 @@ fn test_slice11_where_kw_or_recursive_walk_reachable() {
     );
 }
 
-// (b) Slice 11 — WHERE with subquery: outer recursive walk does
-// NOT descend through SDBL_SUBQUERY to count inner KW_OR tokens.
-// The outer walk finds zero, the inner subquery's own SdblWhereClause
-// recursive walk finds exactly one.
 #[test]
 fn test_slice11_where_recursive_walk_skips_subquery() {
     use syntax::SyntaxKind;
@@ -3953,8 +3240,6 @@ fn test_slice11_where_recursive_walk_skips_subquery() {
         where_clauses.len(),
     );
 
-    // Sort by subquery-ancestor depth: the outer WHERE has zero
-    // subquery ancestors, the inner WHERE has at least one.
     let mut sorted = where_clauses.clone();
     sorted.sort_by_key(|w| {
         w.ancestors()
@@ -3987,13 +3272,6 @@ fn test_slice11_where_recursive_walk_skips_subquery() {
     );
 }
 
-/// Strong bare-keyword recovery assertion: a missing-BY clause
-/// must contain ONLY the leading keyword token, no direct child
-/// nodes at all, and no other non-trivia tokens. Used by tests
-/// (c), (d), and (e) to lock the strict bare-keyword recovery
-/// shape — a regression that bumps the trailing `A` as a raw
-/// IDENT token, or wraps it in any other node, would fail this
-/// assertion.
 fn assert_bare_keyword_clause(clause: &syntax::SyntaxNode, expected_keyword: &str) {
     use syntax::{NodeOrToken, SyntaxKind};
     assert_eq!(
@@ -4039,13 +3317,6 @@ fn assert_bare_keyword_clause(clause: &syntax::SyntaxNode, expected_keyword: &st
     );
 }
 
-// (c) Slice 11 — GROUP BY missing-BY recovery (§IDE-recovery
-// allowance #3). The leading СГРУППИРОВАТЬ keyword is consumed
-// via eat_sdbl_keyword BEFORE the BY check; the early-return
-// emits a bare SdblGroupClause containing only the leading
-// keyword (NO direct child nodes, NO non-trivia tokens beyond
-// the keyword — the trailing `A` falls through outside the
-// clause).
 #[test]
 fn test_slice11_group_missing_by_recovery() {
     use syntax::SyntaxKind;
@@ -4060,9 +3331,6 @@ fn test_slice11_group_missing_by_recovery() {
     assert_bare_keyword_clause(&group, "СГРУППИРОВАТЬ");
 }
 
-// (d) Slice 11 — ORDER BY missing-BY recovery (§IDE-recovery
-// allowance #3, parallel shape to GROUP — strict bare-keyword
-// node).
 #[test]
 fn test_slice11_order_missing_by_recovery() {
     use syntax::SyntaxKind;
@@ -4076,8 +3344,6 @@ fn test_slice11_order_missing_by_recovery() {
     assert_bare_keyword_clause(&order, "УПОРЯДОЧИТЬ");
 }
 
-// (e) Slice 11 — INDEX BY missing-BY recovery (§IDE-recovery
-// allowance #3 — strict bare-keyword node).
 #[test]
 fn test_slice11_index_missing_by_recovery() {
     use syntax::SyntaxKind;
@@ -4091,12 +3357,6 @@ fn test_slice11_index_missing_by_recovery() {
     assert_bare_keyword_clause(&index, "ИНДЕКСИРОВАТЬ");
 }
 
-// (f) Slice 11 — TOTALS missing-BY recovery (§IDE-recovery
-// allowance #3, TOTALS variant). Unlike GROUP/ORDER/INDEX, the
-// pre-BY aggregate-expression loop runs FIRST at
-// select.rs:1359-1386, so `ИТОГИ A` (no BY) produces a
-// SdblTotalsBy containing the leading ИТОГИ token PLUS A as a
-// pre-BY expression child.
 #[test]
 fn test_slice11_totals_missing_by_recovery() {
     use syntax::SyntaxKind;
@@ -4119,7 +3379,6 @@ fn test_slice11_totals_missing_by_recovery() {
         "Missing-BY recovery: SdblTotalsBy must NOT contain a BY/ПО token \
          when BY is absent in the input",
     );
-    // Pre-BY aggregate loop consumed `A` before the BY check failed.
     let pre_by_expr_kinds: Vec<_> = totals
         .children()
         .map(|c| c.kind())
@@ -4141,25 +3400,11 @@ fn test_slice11_totals_missing_by_recovery() {
     );
 }
 
-// (g) Slice 11 — ORDER BY with HIERARCHY modifier consumed as an
-// order-by-item modifier (regression gate for the MANDATORY C2
-// FIX promoted per codex Round-1 finding 2; ITS chapter 27
-// attestation `chapter_027.html:39, 51` —
-// `УПОРЯДОЧИТЬ ПО Наименование ИЕРАРХИЯ`).
-//
-// LANDED `#[ignore]`-ED IN C0b. C2 atomically (a) extended
-// `order_by_item` to consume the optional HIERARCHY/ИЕРАРХИЯ
-// modifier after ASC/DESC (per ITS chapter 27 mandatory fix —
-// `chapter_027.html:39, 51`), AND (b) removed the `#[ignore]`.
-// This test is now an ACTIVE regression gate.
 #[test]
 fn test_slice11_order_by_hierarchy_consumed() {
     use syntax::SyntaxKind;
     let input = "ВЫБРАТЬ A ИЗ Т УПОРЯДОЧИТЬ ПО A ИЕРАРХИЯ";
     let parse = parse_sdbl(input);
-    // Once C2 unignores this gate, the canonical ITS-attested
-    // input must parse cleanly with no ERROR descendants and
-    // no parser errors anywhere in the tree.
     assert_clean_parse(&parse, input);
     let root = parse.syntax_node();
     let order = root
@@ -4167,9 +3412,6 @@ fn test_slice11_order_by_hierarchy_consumed() {
         .find(|n| n.kind() == SyntaxKind::SDBL_ORDER_CLAUSE)
         .expect("Tree must contain SdblOrderClause");
 
-    // The ИЕРАРХИЯ token must end up INSIDE SdblOrderClause as a
-    // flat sibling token (no per-item wrapper), NOT left in the
-    // outer token stream after the clause.
     let has_hierarchy_token = order.children_with_tokens().any(|c| {
         c.as_token().is_some_and(|t| {
             let s = t.text().to_uppercase();
@@ -4190,14 +3432,6 @@ fn test_slice11_order_by_hierarchy_consumed() {
     );
 }
 
-// (h) Slice 11 — order_by_item flat children: no per-item
-// wrapper. SdblOrderClause direct children include the
-// expression nodes and ASC/DESC IDENT tokens as flat siblings,
-// NOT wrapped in any SdblOrderByItem-style node (which does not
-// exist as a NodeKind anyway). The HIR consumer at
-// sdbl-hir/src/lower/clauses.rs:114-156 reads ВОЗР/УБЫВ direction
-// tokens as direct children of SdblOrderClause to derive sort
-// direction — both tokens MUST appear as flat siblings.
 #[test]
 fn test_slice11_order_by_flat_children_no_wrapper() {
     use syntax::SyntaxKind;
@@ -4210,7 +3444,6 @@ fn test_slice11_order_by_flat_children_no_wrapper() {
         .find(|n| n.kind() == SyntaxKind::SDBL_ORDER_CLAUSE)
         .expect("Tree must contain SdblOrderClause");
 
-    // Both expression-node children must be DIRECT (not wrapped).
     let direct_expr_kinds: Vec<_> = order
         .children()
         .map(|c| c.kind())
@@ -4231,8 +3464,6 @@ fn test_slice11_order_by_flat_children_no_wrapper() {
         direct_expr_kinds,
     );
 
-    // Both ВОЗР and УБЫВ direction tokens must appear as flat
-    // direct-child IDENT tokens — not buried inside a wrapper.
     let direct_ident_texts: Vec<String> = order
         .children_with_tokens()
         .filter_map(|c| c.as_token().cloned())
@@ -4252,9 +3483,6 @@ fn test_slice11_order_by_flat_children_no_wrapper() {
         direct_ident_texts,
     );
 
-    // No per-item wrapper node may sit between the expressions
-    // and the ORDER BY clause — i.e. no unknown direct-child
-    // node kinds beyond the expression kinds and trivia.
     let unexpected_node_kinds: Vec<_> = order
         .children()
         .map(|c| c.kind())
@@ -4276,9 +3504,6 @@ fn test_slice11_order_by_flat_children_no_wrapper() {
     );
 }
 
-// (i) Slice 11 — HAVING calls expression(p) (NOT
-// logical_expression(p)), but the consumer-side wrapper is still
-// SdblLogicalOrExpr because Slice 10a wraps both entry points.
 #[test]
 fn test_slice11_having_logical_expression_wrapping() {
     use syntax::SyntaxKind;
@@ -4301,9 +3526,6 @@ fn test_slice11_having_logical_expression_wrapping() {
     );
 }
 
-// (j) Slice 11 — FOR UPDATE without UPDATE keyword recovery: the
-// FOR token alone (without UPDATE/ИЗМЕНЕНИЯ) emits SdblForUpdate,
-// the MDO chain follows.
 #[test]
 fn test_slice11_for_without_update_recovery() {
     use syntax::SyntaxKind;
@@ -4328,8 +3550,6 @@ fn test_slice11_for_without_update_recovery() {
     );
 }
 
-// (k) Slice 11 — FOR UPDATE deep MDO chain (greedy until the
-// post-Dot lookahead fails to be an Ident).
 #[test]
 fn test_slice11_for_update_deep_mdo_chain() {
     use syntax::SyntaxKind;
@@ -4342,8 +3562,6 @@ fn test_slice11_for_update_deep_mdo_chain() {
         .find(|n| n.kind() == SyntaxKind::SDBL_FOR_UPDATE)
         .expect("Tree must contain SdblForUpdate");
 
-    // Count Dot tokens at the FLAT direct-child token level —
-    // there should be 3 dots for `Справочник.X.Y.Z`.
     let dot_count = for_update
         .children_with_tokens()
         .filter(|c| c.as_token().is_some_and(|t| t.text() == "."))
@@ -4356,10 +3574,6 @@ fn test_slice11_for_update_deep_mdo_chain() {
     );
 }
 
-// (l) Slice 11 — TOTALS BY OVERALL fallthrough (§IDE-recovery
-// allowance #1 — flat-Ident parser shape; OVERALL/ОБЩИЕ falls
-// through is_expression_start and is consumed as a bare
-// SdblColumnRef expression).
 #[test]
 fn test_slice11_totals_overall_fallthrough_shape() {
     use syntax::SyntaxKind;
@@ -4372,8 +3586,6 @@ fn test_slice11_totals_overall_fallthrough_shape() {
         .find(|n| n.kind() == SyntaxKind::SDBL_TOTALS_BY)
         .expect("Tree must contain SdblTotalsBy");
 
-    // OVERALL/ОБЩИЕ must end up as a direct expression-node child
-    // of SdblTotalsBy (NOT a structured TOTALS-marker NodeKind).
     let has_expr_child = totals.children().any(|c| {
         matches!(
             c.kind(),
@@ -4391,13 +3603,6 @@ fn test_slice11_totals_overall_fallthrough_shape() {
     );
 }
 
-// (m) Slice 11 — tail-clause any-order across a multi-query
-// package: each query's tail clauses must attach within that
-// query's SdblSelectQuery scope, with no leakage across `;`
-// boundaries (§AST-shape invariant #2). Query 1 has TOTALS BY +
-// AUTOORDER (any-order acceptance); query 2 has ORDER BY; query 3
-// has AUTOORDER. The test asserts each tail-clause node's
-// nearest SdblSelectQuery ancestor is the correct query.
 #[test]
 fn test_slice11_tail_any_order_no_cross_query_leak() {
     use syntax::SyntaxKind;
@@ -4408,12 +3613,6 @@ fn test_slice11_tail_any_order_no_cross_query_leak() {
     assert_clean_parse(&parse, input);
     let root = parse.syntax_node();
 
-    // Walk the root's package structure and collect ONLY top-level
-    // SdblSelectQuery nodes — i.e. SdblSelectQuery nodes that are
-    // NOT nested inside another SdblSelectQuery. This catches a
-    // regression where one query's range incorrectly spans across
-    // a semicolon boundary and ends up containing the other queries
-    // as descendants.
     let all_select_queries: Vec<_> =
         root.descendants().filter(|n| n.kind() == SyntaxKind::SDBL_SELECT_QUERY).collect();
     let top_level_queries: Vec<_> = all_select_queries
@@ -4430,8 +3629,6 @@ fn test_slice11_tail_any_order_no_cross_query_leak() {
         top_level_queries.len(),
         all_select_queries.len(),
     );
-    // No SdblSelectQuery may contain another SdblSelectQuery as a
-    // descendant — package segments are disjoint.
     for q in &all_select_queries {
         let nested_count =
             q.descendants().filter(|d| d != q && d.kind() == SyntaxKind::SDBL_SELECT_QUERY).count();
@@ -4446,10 +3643,6 @@ fn test_slice11_tail_any_order_no_cross_query_leak() {
         );
     }
 
-    // Identify each top-level query by its source-text identifier.
-    // ALL three identification predicates require the marker to be
-    // present AND the other two markers to be absent — this catches
-    // any single-query span that crosses a semicolon boundary.
     let q_t1 = top_level_queries
         .iter()
         .find(|q| {
@@ -4478,14 +3671,6 @@ fn test_slice11_tail_any_order_no_cross_query_leak() {
             "Query 3 (T3) top-level SdblSelectQuery must exist and not span across `;` boundaries",
         );
 
-    // Fail-closed owner attribution: collect raw tail-clause nodes
-    // first; for each, assert it has a SdblSelectQuery ancestor
-    // (no root/package-level leak) AND return that ancestor by
-    // identity (text_range), NOT by text substring. A regression
-    // where one query node's range incorrectly spans across a
-    // semicolon would make the wrong owner match by substring but
-    // would be caught here because `text_range()` is unique per
-    // node identity.
     fn owners_or_fail(
         root: &syntax::SyntaxNode,
         kind: SyntaxKind,
@@ -4546,8 +3731,6 @@ fn test_slice11_tail_any_order_no_cross_query_leak() {
         q_t2.text_range(),
     );
 
-    // Exactly two AUTOORDER nodes — query 1 (Т1) and query 3 (T3),
-    // no extras. Match by text_range identity, not text substring.
     let autoorder_owners = owners_or_fail(&root, SyntaxKind::SDBL_AUTOORDER, "SdblAutoorder");
     assert_eq!(
         autoorder_owners.len(),
@@ -4569,17 +3752,6 @@ fn test_slice11_tail_any_order_no_cross_query_leak() {
     );
 }
 
-// (n) Slice 11 — is_clause_keyword preserves the JOIN family
-// delegation (§Child-attachment invariant #10). The
-// `is_clause_keyword` predicate delegates to `is_join_keyword`
-// (LEFT/RIGHT/FULL/INNER/JOIN/ON family) so JOIN starters
-// terminate alias / source / clause-body scans. The observable
-// signal: after the FROM data source `Т1`, the source-alias scan
-// must NOT consume `ВНУТРЕННЕЕ` (an INNER JOIN type keyword)
-// as a source alias — instead, the source completes alias-less
-// and the JOIN clause attaches as a sibling. Without the
-// `is_join_keyword` delegation, alias scan would swallow
-// `ВНУТРЕННЕЕ` as an alias and the JOIN would never form.
 #[test]
 fn test_slice11_is_clause_keyword_join_delegation() {
     use syntax::SyntaxKind;
@@ -4588,10 +3760,6 @@ fn test_slice11_is_clause_keyword_join_delegation() {
     assert_clean_parse(&parse, input);
     let root = parse.syntax_node();
 
-    // (a) The JOIN-family delegation guarantees the JOIN actually
-    // forms: ВНУТРЕННЕЕ СОЕДИНЕНИЕ is recognised as a JOIN keyword
-    // boundary, so the parser builds an SdblJoinClause attached to
-    // the Т1 SdblDataSource as a sibling/child relationship.
     let join_clauses: Vec<_> =
         root.descendants().filter(|n| n.kind() == SyntaxKind::SDBL_JOIN_CLAUSE).collect();
     assert_eq!(
@@ -4603,10 +3771,6 @@ fn test_slice11_is_clause_keyword_join_delegation() {
         join_clauses.len(),
     );
 
-    // (b) The first SdblDataSource (Т1) must NOT carry an alias —
-    // ВНУТРЕННЕЕ must not have been consumed as Т1's alias. Without
-    // is_join_keyword delegation, the parser would consume
-    // ВНУТРЕННЕЕ as an alias for Т1 and the test would fail.
     let first_data_source = root
         .descendants()
         .find(|n| n.kind() == SyntaxKind::SDBL_DATA_SOURCE)
@@ -4620,11 +3784,6 @@ fn test_slice11_is_clause_keyword_join_delegation() {
         first_data_source.children().map(|c| c.kind()).collect::<Vec<_>>(),
     );
 
-    // (c) After the JOIN ON-condition, ГДЕ is recognised as a
-    // clause boundary by is_clause_keyword's direct
-    // at_sdbl_keyword(p, "WHERE", "ГДЕ") branch, so the WHERE
-    // clause attaches at the SdblQuery level above the JOIN, NOT
-    // as a descendant of the JOIN.
     let has_where = root.descendants().any(|n| n.kind() == SyntaxKind::SDBL_WHERE_CLAUSE);
     assert!(has_where, "SdblWhereClause must appear in the tree");
     let where_inside_join = root
@@ -4638,69 +3797,6 @@ fn test_slice11_is_clause_keyword_join_delegation() {
     );
 }
 
-// ============================================================
-// Slice 7-addendum (SELECT prefix qualifiers) C0 Bucket-A gap
-// tests.
-//
-// These 5 tests pin pre-Slice-7-addendum-C2 parser behaviour
-// for the limitations helper family (DISTINCT / TOP / ALLOWED +
-// `is_identifier_token` predicate). All 5 must pass on the
-// pre-rewrite parser (audit-gate semantics — they pin current
-// behaviour before C2 touches it).
-//
-// Provenance per Slice 7-addendum plan §Tier classification
-// (post-Round-3 v8327doc Глава 8 reclassification). Primary
-// source: v8.3.27 Developer's Reference Глава 8 «Работа с
-// запросами» —
-// https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453.
-// `page.html:NNNN` line citations below reference the locally
-// saved snapshot at
-// `its/dump/its_db_v8327doc_bookmark_dev_TI000000453/page.html`
-// for reviewer convenience.
-//   - DISTINCT — Tier A1. Primary source: v8327doc Глава 8
-//                §<Описание запроса> at
-//                page.html:1320
-//                canonical EBNF + :1346-1348 prose. Secondary
-//                corroborating: pubqlang chapter 20.
-//   - TOP      — Tier A1. Primary source: v8327doc Глава 8 at
-//                page.html:1320 (`[ПЕРВЫЕ <Количество>]` slot)
-//                + :1350-1356 prose. Secondary corroborating:
-//                pubqlang chapter 19.
-//   - ALLOWED  — Tier A1. Primary source: v8327doc Глава 8 at
-//                page.html:1320 (`[РАЗРЕШЕННЫЕ]` first
-//                SELECT-prefix slot in canonical EBNF) +
-//                :1331-1344 prose (RLS scope, top-level-only
-//                constraint, propagation into subqueries,
-//                ЧТЕНИЕ-rights interaction). Bilingual
-//                word-list at :1038-1046 РАЗРЕШЕННЫЕ ↔ ALLOWED.
-//                Secondary corroborating: pubqlang
-//                chapter_057.html:50 UI-checkbox prose. Test
-//                name uses `_canonical_ru` per the post-Round-3
-//                Tier A1 elevation; the codex Round-2 finding 1
-//                "no `_canonical_` for ALLOWED" rule is now
-//                satisfied because the canonical source DOES
-//                exist.
-//
-// Coverage maps onto §IDE-recovery allowances Q1/Q2/Q3:
-//   - Q1 (any-order qualifier acceptance) pinned by test (d).
-//   - Q3 (missing-TOP-count recovery) pinned by test (e).
-//   - Q2 (duplicate-qualifier loop tolerance) is documented in
-//     the mini-spec §IDE-recovery allowances but NOT directly
-//     tested in C0 (test (d)'s input does not contain a
-//     duplicate qualifier). A dedicated duplicate-qualifier
-//     acceptance test lands in C3 alongside the
-//     `sdbl_slice7_addendum_limitations.rs` acceptance suite.
-// ============================================================
-
-// (a) Slice 7-addendum — DISTINCT canonical RU form. **Tier A1
-// per v8327doc Глава 8 §<Описание запроса> at
-// `page.html:1320`**
-// (canonical EBNF places РАЗЛИЧНЫЕ in the second SELECT-prefix
-// slot) + `:1346-1348` (duplicate-elimination prose). Pubqlang
-// `chapter_020.html:18, 29` provides the demonstrative
-// `ВЫБРАТЬ РАЗЛИЧНЫЕ` example (secondary). Pins SdblLimitations
-// as a direct child of SdblQuery, containing the РАЗЛИЧНЫЕ
-// Ident token.
 #[test]
 fn test_slice7adn_distinct_canonical_ru() {
     use syntax::SyntaxKind;
@@ -4733,15 +3829,6 @@ fn test_slice7adn_distinct_canonical_ru() {
     );
 }
 
-// (b) Slice 7-addendum — TOP canonical RU form. **Tier A1 per
-// v8327doc Глава 8 §<Описание запроса> at
-// `page.html:1320`**
-// (canonical EBNF `[ПЕРВЫЕ <Количество>]` slot) + `:1350-1356`
-// (limit / ordering / nested-query prose). Pubqlang
-// `chapter_019.html:19, 28` provides the demonstrative
-// `ВЫБРАТЬ ПЕРВЫЕ 3` example (secondary). Pins SdblTopClause as
-// a direct child node of SdblLimitations, containing the
-// ПЕРВЫЕ Ident + Decimal `3` tokens.
 #[test]
 fn test_slice7adn_top_canonical_ru() {
     use syntax::SyntaxKind;
@@ -4785,18 +3872,6 @@ fn test_slice7adn_top_canonical_ru() {
     );
 }
 
-// (c) Slice 7-addendum — ALLOWED canonical RU form. **Tier A1
-// per v8327doc Глава 8 §<Описание запроса> at
-// `page.html:1320`**
-// — the canonical EBNF skeleton
-// `ВЫБРАТЬ [РАЗРЕШЕННЫЕ] [РАЗЛИЧНЫЕ] [ПЕРВЫЕ <Количество>]`
-// places ALLOWED in the canonical first-qualifier slot, with
-// full prose semantics at lines 1331-1344 covering RLS scope
-// (top-level only, propagates into subqueries) and
-// interaction with ЧТЕНИЕ rights. The pubqlang dump's
-// `chapter_057.html:50` UI-checkbox prose is the secondary
-// (textbook-companion) reference; v8327doc Глава 8 is the
-// primary specification.
 #[test]
 fn test_slice7adn_allowed_canonical_ru() {
     use syntax::SyntaxKind;
@@ -4830,13 +3905,6 @@ fn test_slice7adn_allowed_canonical_ru() {
     );
 }
 
-// (d) Slice 7-addendum — combined any-order acceptance pinning
-// IDE-recovery allowance Q1. Per codex Round-2 finding 3, the
-// input must include all three qualifiers (TOP + ALLOWED +
-// DISTINCT). The parser must consume all three under a single
-// SdblLimitations wrapper without enforcing canonical
-// permutation. SDBL canonical-order normalisation is a
-// semantic-layer concern, not a parser concern.
 #[test]
 fn test_slice7adn_combined_any_order() {
     use syntax::SyntaxKind;
@@ -4883,27 +3951,6 @@ fn test_slice7adn_combined_any_order() {
     );
 }
 
-// (e) Slice 7-addendum — TOP missing-decimal recovery pinning
-// IDE-recovery allowance Q3. `top_clause` calls
-// `p.expect(TokenKind::Decimal)` and `Parser::expect` calls
-// `Parser::error` on failure, which BUMPS the next token into
-// an ERROR sub-node. So for input `ВЫБРАТЬ ПЕРВЫЕ A ИЗ Т`:
-//   - SdblTopClause is still emitted (no Decimal child);
-//   - the next Ident `A` is consumed into an ERROR sub-node
-//     attached as a direct child of SdblTopClause;
-//   - the trailing `ИЗ Т` is NOT recognised as a FROM clause:
-//     the SDBL_FROM_CLAUSE node is absent, and `ИЗ` falls
-//     through to `selected_fields` as a bare SdblColumnRef
-//     while `Т` becomes its SdblAlias. This is the **current**
-//     Q3 recovery shape — a known IDE-recovery quality issue
-//     pinned here so any change to the recovery boundary is
-//     visible. Slice 12 owns the recovery-quality fix.
-//
-// The parse-level `Parser::error()` call produces an ERROR
-// NodeKind in the tree, NOT a `Parse::errors()` SyntaxError —
-// `parse.has_errors()` returns false even though there is an
-// ERROR node in the tree. The test asserts on the tree shape,
-// not on `parse.errors()`.
 #[test]
 fn test_slice7adn_top_missing_decimal_recovery() {
     use syntax::SyntaxKind;
@@ -4933,10 +3980,6 @@ fn test_slice7adn_top_missing_decimal_recovery() {
          missing — Q3 preserved-parser-support recovery shape (Parser::expect \
          calls Parser::error which bumps the next token into ERROR sub-node).",
     );
-    // Pre-rewrite parser shape: Parser::error() bumps the next
-    // token (`A`) into an ERROR sub-node attached as a direct
-    // child of SdblTopClause. The ERROR sub-node contains the
-    // bumped Ident token.
     let error_children: Vec<_> =
         top_clauses[0].children().filter(|c| c.kind() == SyntaxKind::ERROR).collect();
     assert_eq!(
@@ -4952,13 +3995,6 @@ fn test_slice7adn_top_missing_decimal_recovery() {
         "ERROR sub-node must contain the bumped `A` Ident. Got text: {:?}",
         error_text,
     );
-    // Q3 IDE-recovery boundary: the trailing `ИЗ Т` is NOT
-    // recognised as a FROM clause in the current parser. `ИЗ`
-    // falls through to `selected_fields` as a bare
-    // SdblColumnRef and `Т` becomes its SdblAlias. This is a
-    // known recovery-quality issue documented in the Slice
-    // 7-addendum plan §IDE-recovery allowance Q3 and deferred
-    // to Slice 12.
     let from_clauses_count =
         root.descendants().filter(|n| n.kind() == SyntaxKind::SDBL_FROM_CLAUSE).count();
     assert_eq!(
@@ -4972,44 +4008,6 @@ fn test_slice7adn_top_missing_decimal_recovery() {
     );
 }
 
-// ============================================================
-// Slice 8-addendum — virtual-table arguments — Bucket-A gap
-// tests (C0b audit-gate). These pin the pre-rewrite parser
-// shape for the 2 functions promoted into the Slice 8-addendum
-// clean-room banner: `virtual_table_args` and
-// `recover_to_delimiter_vt`.
-// All 7 tests must PASS on the pre-rewrite parser; the C2
-// clean-room rewrite must preserve the asserted shapes.
-//
-// Provenance per Slice 8-addendum plan §Tier classification:
-// - A1: v8327doc Глава 8.2/8.3 canonical example
-//   `РегистрНакопления.УчетНоменклатуры.ОстаткиИОбороты(, , Авто, , )`
-//   at https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453;
-//   plus pubqlang chapters 9, 104, 116, 152, 156.
-// - C: mini-spec §Virtual table argument behavior (extended in
-//   C0a) — Grammar EBNF, AST-shape contract, IDE-recovery
-//   allowances #1-#6, Tier classification.
-// - D: empty-arg `SdblMissingArg` AST shape and paren-balanced
-//   recovery via `recover_to_delimiter_vt` (parser-internal
-//   recovery utilities; no ITS source).
-//
-// Coverage maps onto §IDE-recovery allowances #1-#6:
-//   - (a) empty `()` no-args         → allowance #4
-//   - (b) single trailing comma      → allowance #2
-//   - (c) canonical 5-arg shape      → allowances #1 + #3
-//   - (d) IN-subquery as VT param    → allowance #5 (indirect:
-//                                       safety net NOT triggered
-//                                       for clean nested forms)
-//   - (e) mid-arg paren-balanced     → allowance #5 (direct)
-//   - (f) nested function call       → allowance #5 (indirect)
-//   - (g) VT-args + clause keyword   → allowance #6 + outer
-//                                       `expect(RParen)` exit
-// ============================================================
-
-// (a) Slice 8-addendum gap — empty `()` no-args. Mini-spec
-// §IDE-recovery allowance #4: outer `if !p.at(RParen)` skip
-// means an empty paren pair emits LParen + RParen as flat
-// children of SdblTableRef with NO SdblMissingArg.
 #[test]
 fn test_slice8adn_gap_empty_paren_pair() {
     use syntax::SyntaxKind;
@@ -5051,9 +4049,6 @@ fn test_slice8adn_gap_empty_paren_pair() {
     assert_eq!(errors, 0, "Empty `()` must not emit any ERROR direct child. Got: {}", errors);
 }
 
-// (b) Slice 8-addendum gap — single trailing comma `(&Период,)`.
-// Mini-spec §IDE-recovery allowance #2: empty-trailing-arg
-// produces SdblMissingArg after the last comma.
 #[test]
 fn test_slice8adn_gap_single_trailing_comma() {
     use syntax::SyntaxKind;
@@ -5082,12 +4077,6 @@ fn test_slice8adn_gap_single_trailing_comma() {
     assert_eq!(errors, 0, "Clean trailing-comma form must not emit ERROR. Got: {}", errors);
 }
 
-// (c) Slice 8-addendum gap — canonical v8327doc 5-arg shape
-// `(, , Авто, , )` per Глава 8.3 «Виртуальные и обычные поля».
-// Pins allowances #1 (empty-leading) + #3 (consecutive-empty +
-// canonical 5-arg form). Counts only — the strict interleaved
-// child order is locked by the C3 acceptance test
-// `test_slice8adn_canonical_v8327doc_ru`.
 #[test]
 fn test_slice8adn_gap_canonical_v8327doc_5arg() {
     use syntax::SyntaxKind;
@@ -5126,13 +4115,6 @@ fn test_slice8adn_gap_canonical_v8327doc_5arg() {
     );
 }
 
-// (d) Slice 8-addendum gap — paren-balanced subquery as VT
-// param. Mini-spec §IDE-recovery allowance #5 (INDIRECT): the
-// IN-subquery's `)` is consumed inside `expression(p)` →
-// Slice 10b `predicate_expr` → `super::select::subquery(p)`,
-// NOT by `recover_to_delimiter_vt`. The recovery helper is the
-// safety net for malformed input only; clean IN-subquery must
-// not trigger it (zero ERROR direct child of SdblTableRef).
 #[test]
 fn test_slice8adn_gap_paren_balanced_subquery_arg() {
     use syntax::SyntaxKind;
@@ -5155,11 +4137,6 @@ fn test_slice8adn_gap_paren_balanced_subquery_arg() {
     );
 }
 
-// (e) Slice 8-addendum gap — mid-arg paren-balanced recovery.
-// Mini-spec §IDE-recovery allowance #5 (DIRECT): a spurious
-// token `Q` between expression and comma triggers
-// `recover_to_delimiter_vt`; the helper opens an Error marker
-// and consumes the spurious `Q` with paren-depth tracking.
 #[test]
 fn test_slice8adn_gap_mid_arg_recovery() {
     use syntax::SyntaxKind;
@@ -5188,11 +4165,6 @@ fn test_slice8adn_gap_mid_arg_recovery() {
     );
 }
 
-// (f) Slice 8-addendum gap — normal nested function call
-// without recovery. Mini-spec §IDE-recovery allowance #5
-// (NEGATIVE): clean `СУММА(A)` as a VT arg is fully consumed
-// inside `expression(p)`'s function-call argument-list handler;
-// `recover_to_delimiter_vt` is NOT triggered (zero ERROR).
 #[test]
 fn test_slice8adn_gap_nested_function_call_arg() {
     use syntax::SyntaxKind;
@@ -5227,12 +4199,6 @@ fn test_slice8adn_gap_nested_function_call_arg() {
     );
 }
 
-// (g) Slice 8-addendum gap — VT-args followed by clause keyword
-// without alias. Mini-spec §IDE-recovery allowance #6 + outer
-// `expect(RParen)` exit. After the closing `)`, parsing exits
-// `virtual_table_args` cleanly; the subsequent `ГДЕ X = 1`
-// attaches as SdblWhereClause OUTSIDE SdblTableRef (no leak
-// of VT-args state into the WHERE clause).
 #[test]
 fn test_slice8adn_gap_vt_args_then_clause_keyword() {
     use syntax::SyntaxKind;
@@ -5264,24 +4230,6 @@ fn test_slice8adn_gap_vt_args_then_clause_keyword() {
     );
 }
 
-// ----------------------------------------------------------------------------
-// `is_likely_clause_start_after_dot` regression: SDBL keywords lex'd as
-// `Ident` MUST NOT be consumed as a column name after `.`. The denylist
-// is curated in `crates/parser/src/grammar/sdbl/select.rs` with explicit
-// rationale per token; the tests below pin both directions of the
-// denylist contract.
-//
-// POSITIVE — these idents are NOT in the denylist and must continue to
-// parse as legal column names. `Т.Ссылка` is the most common 1С query
-// pattern (every metadata record carries a `Ссылка` field).
-//
-// NEGATIVE — these idents ARE in the denylist; after a trailing `.` the
-// parser must close the column reference without swallowing the keyword.
-// The follow-up structural token (e.g. an alias name after `КАК`) must
-// remain reachable so completion / find-references / cascade typing
-// have a complete tree to work with.
-// ----------------------------------------------------------------------------
-
 #[test]
 fn test_column_dot_ssylka_is_field_name() {
     check_no_errors("SELECT Т.Ссылка FROM Справочник.Номенклатура AS Т");
@@ -5289,17 +4237,11 @@ fn test_column_dot_ssylka_is_field_name() {
 
 #[test]
 fn test_column_dot_summa_is_field_name() {
-    // `Т.Сумма` — domain field named after the aggregate keyword `СУММА`.
-    // Aggregate function names are deliberately NOT in the denylist.
     check_no_errors("SELECT Т.Сумма FROM РегистрНакопления.Продажи AS Т");
 }
 
 #[test]
 fn test_column_dot_v_operator_token_is_field_name() {
-    // `Т.В` — single-letter operator keyword token (`KwIn`) accepted by
-    // `at_property_name`'s soft-keyword set. The denylist must NOT
-    // override this — operator/literal Kw* tokens stay valid as column
-    // names.
     check_no_errors("SELECT Т.В FROM Справочник.Номенклатура AS Т");
 }
 
@@ -5310,11 +4252,6 @@ fn test_column_dot_istina_literal_token_is_field_name() {
 
 #[test]
 fn test_column_dot_kak_does_not_swallow_alias() {
-    // The user-reported symptom: `Алиас. КАК Имя` must not consume `КАК`
-    // as the column name. The `КАК Имя` alias must remain attached to
-    // the column reference. Tree-shape check below verifies the column
-    // ref closes at the dot and the alias node is a sibling, not a
-    // swallowed-into-error.
     let input = "SELECT Т. КАК Алиас FROM Справочник.Номенклатура AS Т";
     let parse = parse_sdbl(input);
 
@@ -5326,7 +4263,6 @@ fn test_column_dot_kak_does_not_swallow_alias() {
         parse.syntax_node()
     );
 
-    // Column ref must close at the dot, not absorb the alias keyword.
     let col_ref = parse
         .syntax_node()
         .descendants()

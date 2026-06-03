@@ -1,80 +1,53 @@
-//! FileSet - bidirectional mapping of FileId ↔ VfsPath for a collection of files.
-//!
-//! A `FileSet` represents a logical grouping of files, typically corresponding to
-//! a source root (like a project directory or library). It maintains bidirectional
-//! mappings for efficient lookup in both directions.
+use std::sync::Arc;
 
 use indexmap::IndexMap;
 use rustc_hash::{FxBuildHasher, FxHashMap};
 
 use crate::{FileId, VfsPath};
 
-/// A set of files with bidirectional FileId ↔ VfsPath mapping.
-///
-/// FileSet is used to group files logically (e.g., all files in a project)
-/// and provides O(1) lookups in both directions.
+/// A bidirectional file-id ↔ path map. The two indices are held behind `Arc` so a
+/// clone is O(1): the same map can be shared across many Salsa databases (e.g. one
+/// per graph-build batch) without re-cloning every path. Mutation copies on write
+/// via [`Arc::make_mut`], so building a fresh set stays cheap while clones stay shared.
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct FileSet {
-    /// Path → FileId mapping for fast lookup by path
-    files: FxHashMap<VfsPath, FileId>,
-    /// FileId → Path mapping for fast lookup by ID, maintains insertion order
-    paths: IndexMap<FileId, VfsPath, FxBuildHasher>,
+    files: Arc<FxHashMap<VfsPath, FileId>>,
+    paths: Arc<IndexMap<FileId, VfsPath, FxBuildHasher>>,
 }
 
 impl FileSet {
-    /// Create a new empty FileSet.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Returns the number of files in this set.
     pub fn len(&self) -> usize {
         self.files.len()
     }
 
-    /// Returns true if this set contains no files.
     pub fn is_empty(&self) -> bool {
         self.files.is_empty()
     }
 
-    /// Insert a file into this set.
-    ///
-    /// If the path or FileId already exists, it will be updated.
     pub fn insert(&mut self, file_id: FileId, path: VfsPath) {
-        self.files.insert(path.clone(), file_id);
-        self.paths.insert(file_id, path);
+        Arc::make_mut(&mut self.files).insert(path.clone(), file_id);
+        Arc::make_mut(&mut self.paths).insert(file_id, path);
     }
 
-    /// Look up the FileId for a given path.
-    ///
-    /// Returns `None` if the path is not in this set.
     pub fn file_for_path(&self, path: &VfsPath) -> Option<&FileId> {
         self.files.get(path)
     }
 
-    /// Look up the VfsPath for a given FileId.
-    ///
-    /// Returns `None` if the FileId is not in this set.
     pub fn path_for_file(&self, file: &FileId) -> Option<&VfsPath> {
         self.paths.get(file)
     }
 
-    /// Iterate over all FileIds in this set.
-    ///
-    /// The iteration order is the insertion order.
     pub fn iter(&self) -> impl Iterator<Item = FileId> + '_ {
         self.paths.keys().copied()
     }
 
-    /// Remove a file from this set.
-    ///
-    /// Returns the path that was associated with the file, or `None` if the
-    /// file was not in the set. Used by `process_changes`'s B2-A eviction
-    /// branch to keep the total-VFS invariant when a BSL file becomes
-    /// unreadable (Delete or content=None).
     pub fn remove(&mut self, file_id: FileId) -> Option<VfsPath> {
-        let path = self.paths.shift_remove(&file_id)?;
-        self.files.remove(&path);
+        let path = Arc::make_mut(&mut self.paths).shift_remove(&file_id)?;
+        Arc::make_mut(&mut self.files).remove(&path);
         Some(path)
     }
 }
@@ -159,17 +132,13 @@ mod tests {
         let id2 = FileId(1);
         let path = VfsPath::from(PathBuf::from("/test.bsl"));
 
-        // Insert with id1
         set.insert(id1, path.clone());
         assert_eq!(set.file_for_path(&path), Some(&id1));
 
-        // Update with id2 for same path
         set.insert(id2, path.clone());
         assert_eq!(set.file_for_path(&path), Some(&id2));
-        // len() returns number of unique paths, which is 1
-        // But we have 2 IDs in the paths map
-        assert_eq!(set.len(), 1); // One unique path
-        assert_eq!(set.iter().count(), 2); // Two IDs
+        assert_eq!(set.len(), 1);
+        assert_eq!(set.iter().count(), 2);
     }
 
     #[test]

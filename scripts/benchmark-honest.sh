@@ -1,9 +1,4 @@
 #!/bin/bash
-# Честное сравнение: bsl-analyzer vs bsl-language-server
-# - 3 прогона каждого инструмента
-# - Отдельные конфиги (JSON для bsl-ls, TOML для bsl-analyzer)
-# - Все прогоны + медиана по метрикам
-# - /usr/bin/time -v для замеров через getrusage()
 
 set -euo pipefail
 
@@ -21,14 +16,12 @@ BSL_ANALYZER="${BSL_ANALYZER:-/home/itrous/src/tools_migration/lsp/bsl-analyzer/
 OUTPUT_DIR="/tmp/bsl-benchmark-console"
 RESULTS_DIR="$OUTPUT_DIR/results"
 
-# --- Проверки ---
 [ -d "$PROJECT_DIR/$SOURCE_DIR" ] || { echo "ОШИБКА: $PROJECT_DIR/$SOURCE_DIR не найдена"; exit 1; }
 [ -f "$BSL_LS_CONFIG" ] || { echo "ОШИБКА: $BSL_LS_CONFIG не найден"; exit 1; }
 [ -f "$BSL_ANALYZER_CONFIG" ] || { echo "ОШИБКА: $BSL_ANALYZER_CONFIG не найден"; exit 1; }
 [ -x "$BSL_LS" ] || { echo "ОШИБКА: $BSL_LS не найден/неисполняем"; exit 1; }
 [ -x "$BSL_ANALYZER" ] || { echo "ОШИБКА: $BSL_ANALYZER не найден/неисполняем"; exit 1; }
 
-# --- Подсчёт файлов ---
 BSL_COUNT=$(find "$PROJECT_DIR/$SOURCE_DIR" -name "*.bsl" | wc -l)
 BSL_SIZE=$(find "$PROJECT_DIR/$SOURCE_DIR" -name "*.bsl" -print0 | xargs -0 cat 2>/dev/null | wc -c)
 BSL_SIZE_MB=$(echo "scale=1; $BSL_SIZE / 1024 / 1024" | bc)
@@ -59,15 +52,12 @@ echo "================================================================"
 mkdir -p "$OUTPUT_DIR" "$RESULTS_DIR"
 cd "$PROJECT_DIR"
 
-# --- Функция одного прогона ---
-# Args: tool_name, run_num, cmd...
 run_one() {
     local tool="$1"
     local run="$2"
     shift 2
     local time_file="$RESULTS_DIR/${tool}_run${run}.time"
 
-    # Очищаем output каждый раз
     rm -rf "$OUTPUT_DIR/${tool}-output"
     mkdir -p "$OUTPUT_DIR/${tool}-output"
 
@@ -80,7 +70,6 @@ run_one() {
     local rss_kb=$(grep "Maximum resident set size" "$time_file" | awk '{print $NF}')
     local cpu=$(grep "Percent of CPU" "$time_file" | awk '{print $NF}')
 
-    # wall → seconds
     local wall_s
     if echo "$wall" | grep -qE "^[0-9]+:[0-9]+:[0-9]"; then
         wall_s=$(echo "$wall" | awk -F: '{print $1*3600 + $2*60 + $3}')
@@ -95,14 +84,12 @@ run_one() {
     printf "    wall=%ss  user=%ss  sys=%ss  RSS=%sMB  CPU=%s\n" \
         "$wall_s" "$user" "$sys" "$rss_mb" "$cpu"
 
-    # CSV для агрегации
     echo "$tool,$run,$wall_s,$user,$sys,$rss_mb,$cpu" >> "$RESULTS_DIR/all.csv"
 }
 
-# --- Медиана из CSV ---
 median() {
     local tool="$1"
-    local col="$2"  # 3=wall 4=user 5=sys 6=rss 7=cpu
+    local col="$2"
     awk -F, -v t="$tool" -v c="$col" '$1==t {print $c}' "$RESULTS_DIR/all.csv" \
         | sort -n \
         | awk '
@@ -115,11 +102,9 @@ median() {
         '
 }
 
-# Очистка старых результатов
 rm -f "$RESULTS_DIR/all.csv"
 touch "$RESULTS_DIR/all.csv"
 
-# --- Прогоны bsl-language-server ---
 echo ""
 echo "----------------------------------------------------------------"
 echo "  bsl-language-server ($BSL_LS_VERSION, JVM $JVM_XMX)"
@@ -134,7 +119,6 @@ for i in $(seq 1 "$RUNS"); do
         -q
 done
 
-# --- Прогоны bsl-analyzer ---
 echo ""
 echo "----------------------------------------------------------------"
 echo "  bsl-analyzer ($BSL_ANALYZER_VERSION)"
@@ -149,7 +133,6 @@ for i in $(seq 1 "$RUNS"); do
         -q
 done
 
-# --- Итоги ---
 echo ""
 echo ""
 echo "================================================================"

@@ -1,13 +1,3 @@
-//! Object-module and record-set-module implicit `ЭтотОбъект` member resolution.
-//!
-//! A bare identifier inside `ObjectModule.bsl` can name a member of the
-//! owning metadata object: `Настройки` is resolved as an implicit
-//! `ЭтотОбъект.Настройки` access. The resolver gate keeps this limited to
-//! ObjectModules whose MDO kind has an `*Object` companion; field lookup
-//! handles user attributes, standard attributes, and tabular sections. The
-//! record-set variant follows the same path for `RecordSetModule.bsl`, using
-//! the owning register's `*RecordSet` receiver.
-
 use bsl_types::builders::Builders;
 use bsl_types::kind::TypeId;
 use bsl_types::testing::RootConfigCtx;
@@ -29,15 +19,6 @@ pub(crate) fn resolve_this_object_member(
     crate::field_lookup::lookup_field(db, &configs, receiver_id, name).map(|info| info.ty)
 }
 
-/// Implicit `ЭтотОбъект.<name>` resolver for RecordSetModule.
-///
-/// Sibling of `resolve_this_object_member` — same shape, only the
-/// kind-mapping helper differs (`record_set_kind_for` instead of
-/// `object_kind_for`). Builds the synthetic `MetadataRef{*RecordSet, name}`
-/// from `this_object::resolve_this_record_set_owner` and hands it to
-/// `field_lookup::lookup_field`, which handles user dimensions/
-/// resources/attributes plus the `*RecordSet` platform-properties
-/// cascade (`ДополнительныеСвойства`, `Отбор`, `ОбменДанными`, …).
 pub(crate) fn resolve_this_record_set_member(
     db: &dyn HirDatabase,
     resolver: &Resolver,

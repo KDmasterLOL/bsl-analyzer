@@ -1,42 +1,3 @@
-//! GetFormMethod diagnostic.
-//!
-//! Detects usage of `ПолучитьФорму()` / `GetForm()` methods.
-//!
-//! ## Why?
-//! Current 1C recommendations prefer opening forms through
-//! `ОткрытьФорму()` / `OpenForm()` instead of obtaining a form object first.
-//! This diagnostic flags direct `ПолучитьФорму()` / `GetForm()` calls as a
-//! conservative project rule built on top of that guidance.
-//!
-//! ## Bad practice
-//! ```bsl
-//! Процедура ОткрытьСправочник()
-//!     Форма = ПолучитьФорму("Справочник.Номенклатура.ФормаСписка");  // Error!
-//!     Форма.Открыть();
-//! КонецПроцедуры
-//!
-//! Процедура ОткрытьДокумент()
-//!     Док = Документы.ЗаявкаНаОперацию.СоздатьДокумент();
-//!     Форма = Док.ПолучитьФорму("ФормаДокумента");  // Error!
-//! КонецПроцедуры
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! Процедура ОткрытьСправочник()
-//!     ОткрытьФорму("Справочник.Номенклатура.ФормаСписка");  // Correct!
-//! КонецПроцедуры
-//! ```
-//!
-//! ## Configuration
-//! - **Enabled by default:** Yes
-//! - **Severity:** Major (ERROR)
-//! - **Tags:** ERROR
-//! - **Minutes to fix:** 15
-//!
-//! ## References
-//! Checks both global and object method calls emitted from local HIR lowering.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -56,9 +17,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic.
-///
-/// Called from lib.rs dispatch when GetFormMethod diagnostic is emitted during lowering.
 pub fn from_hir(
     method_name: &str,
     range: TextRange,
@@ -115,7 +73,7 @@ mod tests {
             GetFormMethod @ 3:22..3:35
               message: Использование метода 'ПолучитьФорму' приводит к ошибкам. Используйте 'ОткрытьФорму()' вместо него
               severity: Major"#]].assert_eq(&format_diags(code, &get_form_diags));
-        assert!(get_form_diags[0].message.contains("ПолучитьФорму")); // snapshot-skip: message-substring assertion intentionally retained.
+        assert!(get_form_diags[0].message.contains("ПолучитьФорму"));
     }
 
     #[test]
@@ -132,7 +90,7 @@ EndProcedure
             GetFormMethod @ 3:12..3:19
               message: Использование метода 'GetForm' приводит к ошибкам. Используйте 'ОткрытьФорму()' вместо него
               severity: Major"#]].assert_eq(&format_diags(code, &get_form_diags));
-        assert!(get_form_diags[0].message.contains("GetForm")); // snapshot-skip: message-substring assertion intentionally retained.
+        assert!(get_form_diags[0].message.contains("GetForm"));
     }
 
     #[test]
@@ -254,7 +212,6 @@ EndProcedure
         let get_form_diags: Vec<_> =
             diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::GetFormMethod).collect();
 
-        // Expected 4 diagnostics
         expect![[r#"
             GetFormMethod @ 3:15..3:28
               message: Использование метода 'ПолучитьФорму' приводит к ошибкам. Используйте 'ОткрытьФорму()' вместо него
@@ -268,7 +225,5 @@ EndProcedure
             GetFormMethod @ 16:12..16:19
               message: Использование метода 'GetForm' приводит к ошибкам. Используйте 'ОткрытьФорму()' вместо него
               severity: Major"#]].assert_eq(&format_diags(code, &get_form_diags));
-
-        // Expected diagnostic ranges (0-based lines):
     }
 }

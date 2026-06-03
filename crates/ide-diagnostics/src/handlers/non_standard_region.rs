@@ -1,8 +1,3 @@
-//! NonStandardRegion diagnostic.
-//!
-//! Reports regions whose names do not match the standard region set for the
-//! current module type.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -65,8 +60,3 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     tracing::debug!(count = diagnostics.len(), "NonStandardRegion diagnostics found");
     diagnostics
 }
-
-// Per-module-type membership behaviour is owned and tested by
-// `hir_def::module_structure::standard`. The handler is a thin
-// projection — additional fixture coverage lives at the workspace
-// integration level.

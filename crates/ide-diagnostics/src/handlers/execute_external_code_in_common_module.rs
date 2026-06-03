@@ -1,19 +1,3 @@
-//! ExecuteExternalCodeInCommonModule diagnostic.
-//!
-//! Detects usage of Execute/Eval in CommonModules that run on server,
-//! external connection, or ordinary client application context.
-//!
-//! ## Severity
-//! CRITICAL (SECURITY_HOTSPOT)
-//!
-//! ## What it checks
-//! Execute and Eval calls in CommonModules with server/externalConnection/clientOrdinary flags.
-//! Unlike ExecuteExternalCode, this diagnostic does NOT check method annotations -
-//! it triggers based on module context only.
-//!
-//! ## Reference
-//! - 1C Standard: https://its.1c.ru/db/v8std#content:770:hdoc
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{common_module_helpers, Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -40,9 +24,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    // CFE-aware "is *this file* a CommonModule with executable scope?":
-    // we don't care which configuration declares it, only that the file is
-    // a CommonModule whose flags match `should_check_module`.
     let module = match common_module_helpers::find_common_module_for_file_anywhere(ctx) {
         Some(m) => m,
         None => return Vec::new(),
@@ -115,12 +96,6 @@ fn is_global_eval_call(node: &syntax::SyntaxNode) -> bool {
         }
     }
 
-    // Track 2 §1.6: registry-driven recognition (`Category::ExecuteExternalCode`,
-    // `EntryKind::GlobalMethod`). The curated registry covers `Eval` /
-    // `Вычислить` and any future bilingual aliases as a single source of
-    // truth, replacing the hardcoded `name == "eval" || name == "вычислить"`
-    // pair. The `EXECUTE_STMT` (`Выполнить`) match in `detect_violations`
-    // stays a SyntaxKind branch — it's not a name-based match.
     bsl_platform::security::registry().lookup_global(first_token.text()).is_some_and(|e| {
         matches!(e.category, bsl_platform::security::Category::ExecuteExternalCode)
     })

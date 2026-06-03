@@ -1,18 +1,14 @@
-//! Database-backed scope provider.
-
 use crate::completion::sdbl::domain::ScopeProvider;
 use ide_db::RootDatabase;
 use sdbl_hir::Scope;
 use syntax::TextSize;
 use vfs::FileId;
 
-/// Scope provider that builds SDBL Scope from RootDatabase.
 pub struct DbScopeProvider<'a> {
     db: &'a dyn RootDatabase,
 }
 
 impl<'a> DbScopeProvider<'a> {
-    /// Create a new provider for given database.
     pub fn new(db: &'a dyn RootDatabase) -> Self {
         Self { db }
     }
@@ -33,7 +29,6 @@ impl ScopeProvider for DbScopeProvider<'_> {
         )
         .entered();
 
-        // 1. Get all SDBL queries from HIR to find ExprId by BSL literal range
         let all_sdbl = self.db.all_sdbl_in_file(file_id);
 
         tracing::info!(
@@ -42,7 +37,6 @@ impl ScopeProvider for DbScopeProvider<'_> {
             "searching for query containing cursor"
         );
 
-        // 2. Find the SdblExprId and QueryInfo by matching BSL literal range
         let (target_sdbl_expr_id, _query_info) =
             all_sdbl.iter().find_map(|(sdbl_expr_id, qinfo)| {
                 let matches = qinfo.bsl_literal_range == bsl_literal_range;
@@ -68,7 +62,6 @@ impl ScopeProvider for DbScopeProvider<'_> {
             "found target query by BSL offset"
         );
 
-        // 3. Get lowered HIR through Salsa query (CACHED!)
         let sdbl_hirs = self.db.sdbl_hir_in_file(file_id);
 
         tracing::info!(
@@ -76,7 +69,6 @@ impl ScopeProvider for DbScopeProvider<'_> {
             "DIAGNOSTIC: retrieved SDBL HIRs from cache"
         );
 
-        // Log all SdblExprIds and their package query counts
         for (sdbl_expr_id, package) in sdbl_hirs.iter() {
             tracing::info!(
                 sdbl_expr_id = ?sdbl_expr_id,
@@ -86,18 +78,15 @@ impl ScopeProvider for DbScopeProvider<'_> {
             );
         }
 
-        // 4. Find the package for the target SdblExprId
         let (_sdbl_expr_id, sdbl_package) =
             sdbl_hirs.iter().find(|(sdbl_expr_id, _)| *sdbl_expr_id == target_sdbl_expr_id)?;
 
-        // 5. Find query containing cursor using SDBL offset (already converted from BSL)
         tracing::info!(
             sdbl_offset = u32::from(sdbl_offset),
             package_queries_count = sdbl_package.queries().len(),
             "DIAGNOSTIC: about to call query_at_offset"
         );
 
-        // Log all query ranges in package
         for (idx, query) in sdbl_package.queries().iter().enumerate() {
             let in_range = query.range.start() <= sdbl_offset && sdbl_offset <= query.range.end();
             tracing::info!(
@@ -120,15 +109,9 @@ impl ScopeProvider for DbScopeProvider<'_> {
             "found target query for completion"
         );
 
-        // 6. Rebuild Scope from HIR with metadata for reference resolution
         let metadata = self.db.get_configuration(file_id);
         let mut scope = Scope::new_with_metadata(metadata);
 
-        // НОВОЕ: Добавить временные таблицы из всех предыдущих queries в батче
-        // Это нужно для completion во втором+ запросе батча, который использует
-        // временную таблицу, созданную в предыдущем запросе.
-
-        // DIAGNOSTIC: Log all queries before processing
         let all_queries = sdbl_package.queries();
         tracing::info!(
             total_queries_in_package = all_queries.len(),
@@ -147,15 +130,12 @@ impl ScopeProvider for DbScopeProvider<'_> {
                 "DIAGNOSTIC: Examining query in batch"
             );
 
-            // Остановиться на текущем query (не включать его INTO clause)
             if prev_query.range == target_query.range {
                 tracing::info!("DIAGNOSTIC: Reached current query, stopping temp table extraction");
                 break;
             }
 
-            // Если предыдущий query создал временную таблицу (INTO clause)
             if let Some(ref temp_name) = prev_query.hir.into_table {
-                // DIAGNOSTIC: Log details of each SELECT field
                 for (field_idx, field) in prev_query.hir.select.fields.iter().enumerate() {
                     tracing::info!(
                         field_idx = field_idx,
@@ -171,7 +151,6 @@ impl ScopeProvider for DbScopeProvider<'_> {
                     );
                 }
 
-                // Извлечь поля из SELECT clause предыдущего query
                 let temp_fields: Vec<sdbl_hir::FieldDef> = prev_query
                     .hir
                     .select
@@ -199,8 +178,6 @@ impl ScopeProvider for DbScopeProvider<'_> {
 
                 scope.add_temp_table(temp_name.to_string(), temp_fields.clone());
 
-                // IMPORTANT: Also add as TableRef for completion to find it
-                // Completion uses find_table() which searches in 'tables', not 'temp_tables'
                 let temp_table_ref = sdbl_hir::TableRef {
                     parts: vec![temp_name.clone()],
                     full_name: temp_name.to_string(),
@@ -218,7 +195,6 @@ impl ScopeProvider for DbScopeProvider<'_> {
             }
         }
 
-        // Добавить таблицы из текущего query (FROM + JOINs)
         let hir = &target_query.hir;
 
         for table in &hir.from {
@@ -236,8 +212,6 @@ impl ScopeProvider for DbScopeProvider<'_> {
 
             scope.add_table(table.clone());
 
-            // If table is a subquery, add its FROM/JOIN tables to scope
-            // Process ALL queries in subquery (main + UNION queries)
             if !table.subquery.is_empty() {
                 tracing::info!(
                     subquery_count = table.subquery.len(),
@@ -275,7 +249,6 @@ impl ScopeProvider for DbScopeProvider<'_> {
             }
         }
 
-        // Add tables from JOINs (now includes nested JOINs thanks to recursive lowering)
         for join in &hir.joins {
             tracing::info!(
                 table_name = %join.table.full_name,

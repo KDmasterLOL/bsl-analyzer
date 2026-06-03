@@ -1,23 +1,3 @@
-//! Behavioural tests for `method_return_type_query` (Phase O.10).
-//!
-//! O.10 ships the per-method cascade-typing primitive with cycle
-//! safety (`cycle_fn` / `cycle_initial`, lru=16384). NO production
-//! callers exist yet — O.11 wires `dispatch_bare_ident_field_call`
-//! gate-3 + `materialise_signature_enriched` to consume the query.
-//!
-//! Phase O drops the J.5b.1 residency gate (PLAN-v5 §3): total-VFS
-//! invariant (commit `6c578f3a`) guarantees populated text for all
-//! BSL fids registered in a `FileSet`, so cold-file Test 5 from the
-//! J reference is not portable and is omitted here.
-//!
-//! Cycle handlers are present as scaffolding. They are NOT exercised
-//! by the self-recursion / mutual-recursion tests below — the
-//! cascade wiring inside `dispatch_bare_ident_field_call` that would
-//! cause `Возврат M()` to recursively invoke
-//! `method_return_type_query` lands in O.11. In the O.10 baseline
-//! these tests still pass (Unknown) because infer does not yet
-//! consult the per-method return-type query.
-
 use hir::{
     method_return_type_query, Builders, DefDatabase, MethodId, MethodIdInput, ModuleId, Name,
     TypeId, TypeKernelDb, TypeKind,
@@ -62,9 +42,6 @@ fn return_ty_for(db: &RootDatabaseImpl, file_id: FileId, name: &str) -> TypeId {
     method_return_type_query(db, input)
 }
 
-// ---------------------------------------------------------------------
-// Test 1 — single literal return → concrete `Ty::String`.
-// ---------------------------------------------------------------------
 #[test]
 fn single_return_yields_inferred_ty() {
     let (db, fid) = setup(
@@ -78,9 +55,6 @@ fn single_return_yields_inferred_ty() {
     assert_eq!(return_ty_for(&db, fid, "F"), db.string(None, false));
 }
 
-// ---------------------------------------------------------------------
-// Test 2 — procedure with no `Возврат` → `Ty::Unknown`.
-// ---------------------------------------------------------------------
 #[test]
 fn no_return_yields_unknown() {
     let (db, fid) = setup(
@@ -94,10 +68,6 @@ fn no_return_yields_unknown() {
     assert_eq!(return_ty_for(&db, fid, "P"), db.unknown());
 }
 
-// ---------------------------------------------------------------------
-// Test 3 — two identical return Tys collapse to a single Ty via the
-// `Ty::union` smart constructor (singleton path).
-// ---------------------------------------------------------------------
 #[test]
 fn multiple_same_return_tys_unify() {
     let (db, fid) = setup(
@@ -115,9 +85,6 @@ fn multiple_same_return_tys_unify() {
     assert_eq!(return_ty_for(&db, fid, "F"), db.string(None, false));
 }
 
-// ---------------------------------------------------------------------
-// Test 4 — mixed return Tys yield `Ty::Union` with exact cardinality.
-// ---------------------------------------------------------------------
 #[test]
 fn mixed_return_tys_yield_union() {
     let (db, fid) = setup(
@@ -142,10 +109,6 @@ fn mixed_return_tys_yield_union() {
     }
 }
 
-// ---------------------------------------------------------------------
-// Test 4b — bare `Возврат;` (no value) contributes no expression →
-// stays `Ty::Unknown`.
-// ---------------------------------------------------------------------
 #[test]
 fn bare_return_yields_unknown() {
     let (db, fid) = setup(
@@ -159,9 +122,6 @@ fn bare_return_yields_unknown() {
     assert_eq!(return_ty_for(&db, fid, "P"), db.unknown());
 }
 
-// ---------------------------------------------------------------------
-// Test 4c — nested `Возврат` inside `Для Каждого ... Цикл`.
-// ---------------------------------------------------------------------
 #[test]
 fn nested_return_in_for_loop() {
     let (db, fid) = setup(
@@ -178,14 +138,6 @@ fn nested_return_in_for_loop() {
     assert_eq!(return_ty_for(&db, fid, "F"), db.string(None, false));
 }
 
-// ---------------------------------------------------------------------
-// Test 5 — self-recursion: `Функция M() Возврат M() КонецФункции`.
-// Without the O.11 cascade wiring, infer does not invoke
-// `method_return_type_query` for the recursive call; the body
-// produces no concrete return-type and the query returns
-// `Ty::Unknown`. Once O.11 lands the cycle handler takes over and
-// converges to the same value.
-// ---------------------------------------------------------------------
 #[test]
 fn self_recursion_yields_unknown() {
     let (db, fid) = setup(
@@ -199,11 +151,6 @@ fn self_recursion_yields_unknown() {
     assert_eq!(return_ty_for(&db, fid, "M"), db.unknown());
 }
 
-// ---------------------------------------------------------------------
-// Test 6 — salsa cache: a second call returns the same `Ty` (Salsa
-// caches the tracked-fn result; structural equality is observable
-// since `Ty: Clone + Eq`).
-// ---------------------------------------------------------------------
 #[test]
 fn return_type_caches_via_salsa() {
     let (db, fid) = setup(

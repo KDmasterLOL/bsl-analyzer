@@ -1,24 +1,3 @@
-//! Symbol tree for fast symbol lookup.
-//!
-//! The SymbolTree provides O(1) case-insensitive lookup of symbols (methods and variables)
-//! in a module. It's built from ItemTree and cached in the database.
-//!
-//! ## Architecture
-//!
-//! ```text
-//! ItemTree → SymbolTree → Resolver → IDE Features
-//!     ↓           ↓
-//! (Iteration 5) (NEW)
-//! ```
-//!
-//! ## Design
-//!
-//! - **Arena storage**: Methods and variables stored in Arena for stable indices
-//! - **HashMap index**: Case-insensitive lookup using lowercase keys
-//! - **BSL-specific**: Handles both Cyrillic and Latin identifiers
-//! - **Documentation**: Method docs are parsed once during SymbolTree construction
-//!
-
 use crate::docs::{compute_variable_docs_with_node, MethodDocs, VariableDocs};
 use crate::item_tree::{Annotation, ItemTree, ModItem, Param};
 use crate::ty::doc_types::{parse_method_doc_types, MethodTypeHints};
@@ -31,80 +10,39 @@ use std::sync::Arc;
 use syntax::{Parse, SyntaxKind, SyntaxNode};
 use text_size::TextRange;
 
-/// Symbol tree for a module.
-///
-/// Provides fast O(1) lookup of methods and variables by name (case-insensitive).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymbolTree {
-    /// Arena of method symbols (procedures + functions).
     methods: Arena<MethodSymbol>,
 
-    /// Arena of variable symbols.
     variables: Arena<VariableSymbol>,
 
-    /// Fast lookup: lowercase name → method indices.
-    ///
-    /// Multiple methods can have the same name (shouldn't happen in valid BSL,
-    /// but we handle it for error recovery).
     methods_by_name: FxHashMap<SmolStr, Vec<Idx<MethodSymbol>>>,
 
-    /// Fast lookup: lowercase name → variable indices.
     variables_by_name: FxHashMap<SmolStr, Vec<Idx<VariableSymbol>>>,
 }
 
-/// A method symbol (procedure or function).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MethodSymbol {
-    /// Method ID for cross-references.
     pub id: MethodId,
 
-    /// Method name (original case preserved).
     pub name: Name,
 
-    /// Is this a function (vs procedure)?
     pub is_function: bool,
 
-    /// Is this exported?
     pub is_export: bool,
 
-    /// Parameters.
     pub params: Vec<ParamSymbol>,
 
-    /// Annotations (&НаКлиенте, etc.).
     pub annotations: Vec<Annotation>,
 
-    /// Source location for navigation.
     pub source_range: TextRange,
 
-    /// Parsed documentation (comments before the method).
-    ///
-    /// Parsed once during SymbolTree construction for efficient access.
-    /// Contains deprecation info, parameter descriptions, return value docs, etc.
     pub docs: Option<Arc<MethodDocs>>,
 
-    /// JSDoc-derived return type hint.
-    ///
-    /// Populated by [`SymbolTreeBuilder`] when
-    /// [`parse_method_doc_types`] finds a return section. `None` means
-    /// the comment did not state a return type; callers treat this as
-    /// `Ty::Unknown` rather than "no return". Consumed by
-    /// `hir_ty::method_resolution::materialise_signature` via
-    /// `hir_ty::TyLoweringContext::lower_type_ref_id`.
     pub return_type_ref: Option<TypeRef>,
 }
 
 impl MethodSymbol {
-    /// Locate this method's syntax node inside the given parse tree.
-    ///
-    /// Used by the per-method body queries (`method_body_query` and
-    /// future `method_body_with_source_map_query`) to feed
-    /// `lower_method_with_externals` without re-walking the whole
-    /// module. Looks for a `PROCEDURE_DEF` / `FUNCTION_DEF` node whose
-    /// text range matches the symbol's `source_range`. Returns `None`
-    /// when the parse no longer contains a matching node — typically
-    /// because the source text moved on after the `SymbolTree` was
-    /// constructed (callers should treat that as "no body available,
-    /// retry later").
     pub fn syntax_node(&self, parse: &Parse<SyntaxNode>) -> Option<SyntaxNode> {
         let expected_kind =
             if self.is_function { SyntaxKind::FUNCTION_DEF } else { SyntaxKind::PROCEDURE_DEF };
@@ -116,67 +54,35 @@ impl MethodSymbol {
     }
 }
 
-/// A module-level variable symbol.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VariableSymbol {
-    /// Variable ID for cross-references.
     pub id: VariableId,
 
-    /// Variable name (original case preserved).
     pub name: Name,
 
-    /// Is exported?
     pub is_export: bool,
 
-    /// Annotations (&НаКлиенте, etc.).
     pub annotations: Vec<Annotation>,
 
-    /// Source location for navigation.
     pub source_range: TextRange,
 
-    /// Source location of the variable name (for diagnostics).
     pub name_range: TextRange,
 
-    /// Parsed documentation for this variable (leading, inter-annotation,
-    /// and trailing comments). Pre-computed during [`SymbolTreeBuilder`]
-    /// construction; mirrors how `MethodSymbol.docs` is populated. `None`
-    /// when the variable carries no description anywhere.
     pub docs: Option<Arc<VariableDocs>>,
 }
 
-/// Parameter symbol.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParamSymbol {
-    /// Parameter name.
     pub name: Name,
 
-    /// Is this a value parameter (`Знач` modifier)?
     pub is_val: bool,
 
-    /// Has default value?
     pub has_default: bool,
 
-    /// JSDoc-derived syntactic type hint for this parameter.
-    ///
-    /// Matched against [`MethodTypeHints::params`] by case-insensitive name
-    /// during `SymbolTreeBuilder` construction. `None` when the doc comment
-    /// had no matching `Param - Type` line; callers treat this as
-    /// `Ty::Unknown` after
-    /// `hir_ty::TyLoweringContext::lower_type_ref_id`.
     pub type_ref: Option<TypeRef>,
 }
 
 impl SymbolTree {
-    /// Build SymbolTree from ItemTree with documentation parsing.
-    ///
-    /// This is the main entry point for constructing a SymbolTree.
-    /// Documentation is parsed once here and cached in MethodSymbol.docs.
-    ///
-    /// # Arguments
-    /// * `item_tree` - The ItemTree containing method signatures
-    /// * `module_id` - Module identifier
-    /// * `parse` - Parsed AST (needed for finding method nodes)
-    /// * `source_text` - Source text (needed for extracting comments)
     pub fn from_item_tree(
         item_tree: &ItemTree,
         module_id: ModuleId,
@@ -207,10 +113,6 @@ impl SymbolTree {
         builder.build()
     }
 
-    /// Build SymbolTree from ItemTree without documentation parsing.
-    ///
-    /// This is a simplified version for tests and fallback cases where
-    /// source text is not available. Methods will have `docs: None`.
     #[cfg(test)]
     pub fn from_item_tree_no_docs(item_tree: &ItemTree, module_id: ModuleId) -> Self {
         let mut methods = Arena::new();
@@ -270,9 +172,6 @@ impl SymbolTree {
                         annotations: var.annotations.to_vec(),
                         source_range: var.source_range,
                         name_range: var.name_range,
-                        // No parse tree available in the no-docs test path,
-                        // so docs are intentionally None — symmetric to how
-                        // `MethodSymbol.docs` is set on this branch.
                         docs: None,
                     };
                     let idx = variables.alloc(symbol);
@@ -287,18 +186,12 @@ impl SymbolTree {
         SymbolTree { methods, variables, methods_by_name, variables_by_name }
     }
 
-    /// Find method by name (case-insensitive).
-    ///
-    /// Returns the first method with the given name, or None if not found.
     pub fn find_method(&self, name: &Name) -> Option<&MethodSymbol> {
         let key = name.as_str().to_lowercase();
         let indices = self.methods_by_name.get(key.as_str())?;
         indices.first().map(|&idx| &self.methods[idx])
     }
 
-    /// Find all methods by name (case-insensitive).
-    ///
-    /// Returns multiple if there are shadowed names (error recovery).
     pub fn find_methods(&self, name: &Name) -> Vec<&MethodSymbol> {
         let key = name.as_str().to_lowercase();
         self.methods_by_name
@@ -307,49 +200,37 @@ impl SymbolTree {
             .unwrap_or_default()
     }
 
-    /// Find variable by name (case-insensitive).
     pub fn find_variable(&self, name: &Name) -> Option<&VariableSymbol> {
         let key = name.as_str().to_lowercase();
         let indices = self.variables_by_name.get(key.as_str())?;
         indices.first().map(|&idx| &self.variables[idx])
     }
 
-    /// Get all methods.
     pub fn methods(&self) -> impl Iterator<Item = &MethodSymbol> {
         self.methods.iter().map(|(_, m)| m)
     }
 
-    /// Get all exported methods.
     pub fn exported_methods(&self) -> impl Iterator<Item = &MethodSymbol> {
         self.methods().filter(|m| m.is_export)
     }
 
-    /// Get all variables.
     pub fn variables(&self) -> impl Iterator<Item = &VariableSymbol> {
         self.variables.iter().map(|(_, v)| v)
     }
 
-    /// Get all exported variables.
     pub fn exported_variables(&self) -> impl Iterator<Item = &VariableSymbol> {
         self.variables().filter(|v| v.is_export)
     }
 
-    /// Find method by MethodId.
-    ///
-    /// Returns the method with the given ID, or None if not found.
     pub fn find_method_by_id(&self, method_id: MethodId) -> Option<&MethodSymbol> {
         self.methods().find(|m| m.id == method_id)
     }
 
-    /// Find variable by VariableId.
-    ///
-    /// Returns the variable with the given ID, or None if not found.
     pub fn find_variable_by_id(&self, variable_id: VariableId) -> Option<&VariableSymbol> {
         self.variables().find(|v| v.id == variable_id)
     }
 }
 
-/// Builder for constructing SymbolTree.
 struct SymbolTreeBuilder<'a> {
     module_id: ModuleId,
     parse: &'a syntax::Parse<syntax::SyntaxNode>,
@@ -359,9 +240,6 @@ struct SymbolTreeBuilder<'a> {
     variables: Arena<VariableSymbol>,
     methods_by_name: FxHashMap<SmolStr, Vec<Idx<MethodSymbol>>>,
     variables_by_name: FxHashMap<SmolStr, Vec<Idx<VariableSymbol>>>,
-    /// Pre-collected `VAR_DEF` nodes keyed by `text_range()` so the
-    /// per-variable docs lookup stays O(1) instead of O(file × variables).
-    /// Codex round-11 MAJOR-3.
     var_def_nodes: FxHashMap<TextRange, syntax::SyntaxNode>,
 }
 
@@ -395,7 +273,6 @@ impl<'a> SymbolTreeBuilder<'a> {
     fn add_procedure(&mut self, local_id: u32, proc: &crate::item_tree::Procedure) {
         let method_id = MethodId { module: self.module_id, local_id };
 
-        // Parse documentation for this method
         let docs = self.parse_method_docs(method_id);
         let hints = docs.as_deref().and_then(|d| parse_method_doc_types(&d.raw));
 
@@ -417,7 +294,6 @@ impl<'a> SymbolTreeBuilder<'a> {
     fn add_function(&mut self, local_id: u32, func: &crate::item_tree::Function) {
         let method_id = MethodId { module: self.module_id, local_id };
 
-        // Parse documentation for this method
         let docs = self.parse_method_docs(method_id);
         let hints = docs.as_deref().and_then(|d| parse_method_doc_types(&d.raw));
 
@@ -436,12 +312,6 @@ impl<'a> SymbolTreeBuilder<'a> {
         self.add_method_symbol(symbol);
     }
 
-    /// Build [`ParamSymbol`]s from `ItemTree` params, attaching a JSDoc
-    /// [`TypeRef`] when the doc comment named the parameter.
-    ///
-    /// Matching is case-insensitive (BSL semantics). Params without a
-    /// matching doc line keep `type_ref = None`; `TyLoweringContext` then
-    /// treats that as `Ty::Unknown` at signature-materialisation time.
     fn params_with_hints(params: &[Param], hints: Option<&MethodTypeHints>) -> Vec<ParamSymbol> {
         params
             .iter()
@@ -459,10 +329,6 @@ impl<'a> SymbolTreeBuilder<'a> {
             .collect()
     }
 
-    /// Parse documentation for a method.
-    ///
-    /// Uses the same logic as `compute_method_docs` from `docs.rs`,
-    /// but inlined here for efficiency during SymbolTree construction.
     fn parse_method_docs(&self, method_id: MethodId) -> Option<Arc<MethodDocs>> {
         crate::docs::compute_method_docs(self.parse, self.item_tree, method_id, self.source_text)
     }
@@ -478,12 +344,6 @@ impl<'a> SymbolTreeBuilder<'a> {
         let key: SmolStr = var.name.as_str().to_lowercase().into();
         let variable_id = VariableId { module: self.module_id, local_id };
 
-        // ItemTree is derived from the same parse tree, so every
-        // `Variable::source_range` must round-trip through the
-        // pre-collected VAR_DEF map. A miss signals ItemTree↔parse
-        // drift; surface it in debug builds and recompute via the
-        // slow scanning path in release so a documented variable
-        // never gets silently flagged as "missing description".
         let var_node = self.var_def_nodes.get(&var.source_range);
         debug_assert!(
             var_node.is_some(),
@@ -512,10 +372,6 @@ impl<'a> SymbolTreeBuilder<'a> {
         };
 
         let idx = self.variables.alloc(symbol);
-        // Dedup only the name index — `find_variable(name)` still resolves
-        // to the first declaration (same semantics as before). Every
-        // VariableSymbol stays accessible by `find_variable_by_id`,
-        // which is what per-variable docs/diagnostic lookups need.
         let entry = self.variables_by_name.entry(key).or_default();
         if entry.is_empty() {
             entry.push(idx);
@@ -543,28 +399,6 @@ impl From<&Param> for ParamSymbol {
     }
 }
 
-/// Salsa tracked query for SymbolTree construction.
-///
-/// SymbolTree is derived from ItemTree - it builds O(1) case-insensitive
-/// lookup tables for methods and variables.
-///
-/// ## Performance
-/// - LRU: 512 files (O(1) lookup, frequently accessed)
-/// - Depends on: item_tree (via FileIdInput)
-/// - Invalidation: Automatic when ItemTree changes
-///
-/// ## Dependency tracking
-/// Salsa automatically tracks that this query depends on `item_tree_query`.
-/// When ItemTree changes, SymbolTree is automatically invalidated.
-///
-/// ## Usage
-/// ```ignore
-/// // In DefDatabase implementation:
-/// fn symbol_tree(&self, module_id: ModuleId) -> Arc<SymbolTree> {
-///     let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
-///     hir_def::symbol_tree_query(self, file_id_input)
-/// }
-/// ```
 #[salsa::tracked(lru = 512)]
 pub fn symbol_tree_query<'db>(
     db: &'db dyn crate::DefDatabase,
@@ -598,7 +432,6 @@ mod tests {
         let file_id = FileId(0);
         let module_id = ModuleId::new(file_id);
 
-        // Add procedure
         let proc_idx = item_tree.procedures.alloc(Procedure {
             name: Name::new("Первая"),
             is_export: false,
@@ -607,10 +440,10 @@ mod tests {
             source_range: make_text_range(0, 10),
             name_range: make_text_range(0, 10),
             param_list_range: None,
+            sig_end: make_text_range(0, 10).end(),
         });
         item_tree.top_level.push(ModItem::Procedure(proc_idx));
 
-        // Add exported function
         let func_idx = item_tree.functions.alloc(Function {
             name: Name::new("Вторая"),
             is_export: true,
@@ -619,10 +452,10 @@ mod tests {
             source_range: make_text_range(20, 30),
             name_range: make_text_range(20, 30),
             param_list_range: None,
+            sig_end: make_text_range(0, 10).end(),
         });
         item_tree.top_level.push(ModItem::Function(func_idx));
 
-        // Add module variable
         let var_idx = item_tree.variables.alloc(Variable {
             name: Name::new("МодульнаяПеременная"),
             is_export: true,
@@ -632,10 +465,8 @@ mod tests {
         });
         item_tree.top_level.push(ModItem::Variable(var_idx));
 
-        // Build SymbolTree
         let symbol_tree = SymbolTree::from_item_tree_no_docs(&item_tree, module_id);
 
-        // Verify methods
         assert_eq!(symbol_tree.methods().count(), 2);
 
         let first = symbol_tree.find_method(&Name::new("Первая")).unwrap();
@@ -648,7 +479,6 @@ mod tests {
         assert!(second.is_function);
         assert!(second.is_export);
 
-        // Verify variables
         assert_eq!(symbol_tree.variables().count(), 1);
 
         let var = symbol_tree.find_variable(&Name::new("МодульнаяПеременная")).unwrap();
@@ -670,18 +500,17 @@ mod tests {
             source_range: make_text_range(0, 10),
             name_range: make_text_range(0, 10),
             param_list_range: None,
+            sig_end: make_text_range(0, 10).end(),
         });
         item_tree.top_level.push(ModItem::Procedure(proc_idx));
 
         let symbol_tree = SymbolTree::from_item_tree_no_docs(&item_tree, module_id);
 
-        // Different cases should all find the same method
         assert!(symbol_tree.find_method(&Name::new("МояПроцедура")).is_some());
         assert!(symbol_tree.find_method(&Name::new("мояпроцедура")).is_some());
         assert!(symbol_tree.find_method(&Name::new("МОЯПРОЦЕДУРА")).is_some());
         assert!(symbol_tree.find_method(&Name::new("МоЯпРоЦеДуРа")).is_some());
 
-        // All should return the same symbol
         let m1 = symbol_tree.find_method(&Name::new("МояПроцедура")).unwrap();
         let m2 = symbol_tree.find_method(&Name::new("мояпроцедура")).unwrap();
         assert_eq!(m1.id, m2.id);
@@ -693,7 +522,6 @@ mod tests {
         let file_id = FileId(0);
         let module_id = ModuleId::new(file_id);
 
-        // Add private procedure
         let proc1_idx = item_tree.procedures.alloc(Procedure {
             name: Name::new("Приватная"),
             is_export: false,
@@ -702,10 +530,10 @@ mod tests {
             source_range: make_text_range(0, 10),
             name_range: make_text_range(0, 10),
             param_list_range: None,
+            sig_end: make_text_range(0, 10).end(),
         });
         item_tree.top_level.push(ModItem::Procedure(proc1_idx));
 
-        // Add exported procedure
         let proc2_idx = item_tree.procedures.alloc(Procedure {
             name: Name::new("Публичная"),
             is_export: true,
@@ -714,15 +542,14 @@ mod tests {
             source_range: make_text_range(20, 30),
             name_range: make_text_range(20, 30),
             param_list_range: None,
+            sig_end: make_text_range(0, 10).end(),
         });
         item_tree.top_level.push(ModItem::Procedure(proc2_idx));
 
         let symbol_tree = SymbolTree::from_item_tree_no_docs(&item_tree, module_id);
 
-        // All methods
         assert_eq!(symbol_tree.methods().count(), 2);
 
-        // Only exported
         let exported: Vec<_> = symbol_tree.exported_methods().collect();
         assert_eq!(exported.len(), 1);
         assert_eq!(exported[0].name.as_str(), "Публичная");
@@ -755,6 +582,7 @@ mod tests {
             source_range: make_text_range(0, 10),
             name_range: make_text_range(0, 10),
             param_list_range: Some(make_text_range(0, 10)),
+            sig_end: make_text_range(0, 10).end(),
         });
         item_tree.top_level.push(ModItem::Procedure(proc_idx));
 
@@ -787,6 +615,7 @@ mod tests {
             source_range: make_text_range(0, 10),
             name_range: make_text_range(0, 10),
             param_list_range: None,
+            sig_end: make_text_range(0, 10).end(),
         });
         item_tree.top_level.push(ModItem::Procedure(proc_idx));
 
@@ -840,7 +669,6 @@ mod tests {
 
         let symbol_tree = SymbolTree::from_item_tree_no_docs(&item_tree, module_id);
 
-        // Different cases
         assert!(symbol_tree.find_variable(&Name::new("МояПеременная")).is_some());
         assert!(symbol_tree.find_variable(&Name::new("мояпеременная")).is_some());
         assert!(symbol_tree.find_variable(&Name::new("МОЯПЕРЕМЕННАЯ")).is_some());
@@ -852,7 +680,6 @@ mod tests {
         let file_id = FileId(0);
         let module_id = ModuleId::new(file_id);
 
-        // Private variable
         let var1_idx = item_tree.variables.alloc(Variable {
             name: Name::new("Приватная"),
             is_export: false,
@@ -862,7 +689,6 @@ mod tests {
         });
         item_tree.top_level.push(ModItem::Variable(var1_idx));
 
-        // Exported variable
         let var2_idx = item_tree.variables.alloc(Variable {
             name: Name::new("Публичная"),
             is_export: true,
@@ -874,10 +700,8 @@ mod tests {
 
         let symbol_tree = SymbolTree::from_item_tree_no_docs(&item_tree, module_id);
 
-        // All variables
         assert_eq!(symbol_tree.variables().count(), 2);
 
-        // Only exported
         let exported: Vec<_> = symbol_tree.exported_variables().collect();
         assert_eq!(exported.len(), 1);
         assert_eq!(exported[0].name.as_str(), "Публичная");
@@ -897,17 +721,16 @@ mod tests {
             source_range: make_text_range(0, 10),
             name_range: make_text_range(0, 10),
             param_list_range: None,
+            sig_end: make_text_range(0, 10).end(),
         });
         item_tree.top_level.push(ModItem::Procedure(proc_idx));
 
         let symbol_tree = SymbolTree::from_item_tree_no_docs(&item_tree, module_id);
 
-        // find_methods returns Vec
         let methods = symbol_tree.find_methods(&Name::new("Метод"));
         assert_eq!(methods.len(), 1);
         assert_eq!(methods[0].name.as_str(), "Метод");
 
-        // Not found returns empty Vec
         let not_found = symbol_tree.find_methods(&Name::new("НеСуществует"));
         assert_eq!(not_found.len(), 0);
     }

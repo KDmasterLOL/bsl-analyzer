@@ -1,30 +1,3 @@
-//! IfElseDuplicatedCodeBlock diagnostic
-//!
-//! Detects identical code blocks in if/elseif/else branches.
-//!
-//! ## Why?
-//! When if/else branches contain identical code, the condition is meaningless
-//! and the code should be simplified.
-//!
-//! ## Bad practice
-//! ```bsl
-//! Если Условие Тогда
-//!     ПоказатьПредупреждение("Ошибка");
-//!     Возврат;
-//! Иначе
-//!     ПоказатьПредупреждение("Ошибка");
-//!     Возврат;
-//! КонецЕсли;
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! // Remove the condition, keep the common code
-//! ПоказатьПредупреждение("Ошибка");
-//! Возврат;
-//! ```
-//!
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -44,9 +17,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic.
-///
-/// Called from lib.rs dispatch when `BodyDiagnostic::IfElseDuplicatedCodeBlock` is encountered.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     crate::simple_hir_diagnostic(
         DiagnosticCode::IfElseDuplicatedCodeBlock,
@@ -144,7 +114,6 @@ mod tests {
         expect![[r#""#]].assert_eq(&format_diags(code, &diags));
     }
 
-    /// Empty blocks across all branches should not trigger duplicate detection
     #[test]
     fn test_empty_blocks_all_branches() {
         let code = r#"Процедура Тест()
@@ -162,7 +131,6 @@ mod tests {
         expect![[r#""#]].assert_eq(&format_diags(code, &diags));
     }
 
-    /// If and Else with identical two-statement blocks should warn
     #[test]
     fn test_if_else_two_statement_duplicate() {
         let code = r#"Процедура Тест()
@@ -187,7 +155,6 @@ mod tests {
         .assert_eq(&format_diags(code, &diags));
     }
 
-    /// If block differs from Else block (different statement count) - should not warn
     #[test]
     fn test_if_else_different_statement_count() {
         let code = r#"Процедура Тест()
@@ -207,7 +174,6 @@ mod tests {
         expect![[r#""#]].assert_eq(&format_diags(code, &diags));
     }
 
-    /// If/ElseIf with identical blocks should warn
     #[test]
     fn test_if_elseif_duplicate_with_else() {
         let code = r#"Процедура Тест()
@@ -234,7 +200,6 @@ mod tests {
         .assert_eq(&format_diags(code, &diags));
     }
 
-    /// Nested if with duplicates inside outer if and else branches (3 diagnostics total)
     #[test]
     fn test_nested_duplicates_in_outer_branches() {
         let code = r#"Процедура Тест()

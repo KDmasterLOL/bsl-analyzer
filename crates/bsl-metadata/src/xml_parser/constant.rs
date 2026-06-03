@@ -1,22 +1,9 @@
-//! Constant XML parser
-
 use crate::error::{MetadataError, Result};
 use crate::metadata_object::{MdoType, MetadataObject};
 
 use super::helpers::{child_text, find_child, find_mdo_element, parse_uuid, parse_xml};
 use super::type_parser::parse_type_xml;
 
-/// Parse Constant XML from Designer format.
-///
-/// Reads the `<Properties>/<Name>` and the optional `<Properties>/<Type>`
-/// block. The type element follows the same canonical shape as register
-/// dimensions and catalog attributes — `<v8:Type>` children plus
-/// `<StringQualifiers>` / `<NumberQualifiers>` / `<DateQualifiers>` —
-/// so it is parsed by the shared [`parse_type_xml`] helper.
-///
-/// Constants whose XML predates type extraction (or whose `<Type>` is
-/// absent) leave `MetadataObject::constant_type = None`; downstream
-/// consumers fall back to gradual typing.
 pub fn parse_constant_xml(xml: &str) -> Result<MetadataObject> {
     let _span = tracing::debug_span!("parse_constant_xml").entered();
 

@@ -1,11 +1,5 @@
-//! Predefined items XML parser (Ext/Predefined.xml)
-
 use crate::metadata_object::PredefinedItem;
 
-/// Parse predefined items from Ext/Predefined.xml content.
-///
-/// Extracts all Item elements (including nested ChildItems) into a flat list.
-/// Only the Name and UUID are extracted — hierarchy is not preserved.
 pub fn parse_predefined_xml(xml: &str) -> Vec<PredefinedItem> {
     let doc = match roxmltree::Document::parse(xml) {
         Ok(doc) => doc,
@@ -24,8 +18,6 @@ pub fn parse_predefined_xml(xml: &str) -> Vec<PredefinedItem> {
     items
 }
 
-/// Recursively collect Item elements from the XML tree.
-/// Handles nested ChildItems for hierarchical catalogs.
 fn collect_items(node: &roxmltree::Node<'_, '_>, items: &mut Vec<PredefinedItem>) {
     for child in node.children() {
         if !child.is_element() || child.tag_name().name() != "Item" {
@@ -42,14 +34,9 @@ fn collect_items(node: &roxmltree::Node<'_, '_>, items: &mut Vec<PredefinedItem>
             .to_string();
 
         if !name.is_empty() {
-            items.push(PredefinedItem {
-                name,
-                name_en: None, // MVP: only Russian names
-                uuid,
-            });
+            items.push(PredefinedItem { name, name_en: None, uuid });
         }
 
-        // Recurse into ChildItems
         if let Some(child_items) =
             child.children().find(|n| n.is_element() && n.tag_name().name() == "ChildItems")
         {
@@ -130,7 +117,6 @@ mod tests {
 
         let items = parse_predefined_xml(xml);
 
-        // Hierarchy is flattened: parent + 2 children + root = 4 items
         assert_eq!(items.len(), 4);
         assert_eq!(items[0].name, "РодительскийЭлемент");
         assert_eq!(items[0].uuid, "11111111-1111-1111-1111-111111111111");

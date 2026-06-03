@@ -1,33 +1,9 @@
-//! Demo: index a 1C configuration and run semantic search queries.
-//!
-//! Prerequisites:
-//!   1. Install ollama: https://ollama.com
-//!   2. Pull the model: `ollama pull qwen3-embedding`
-//!   3. Ollama runs on http://localhost:11434 by default
-//!
-//! Usage:
-//!   cargo run -p bsl-search --example search_demo -- <config_dir> [query]
-//!
-//! Examples:
-//!   # Index and search:
-//!   cargo run -p bsl-search --example search_demo -- ~/src/niagara_ut/src "обработка проведения документа"
-//!
-//!   # Just index (no query):
-//!   cargo run -p bsl-search --example search_demo -- ~/src/niagara_ut/src
-//!
-//! Environment variables:
-//!   EMBEDDING_URL   - embedding API base URL (default: http://localhost:11434)
-//!   EMBEDDING_MODEL - model name (default: qwen3-embedding)
-//!   EMBEDDING_DIM   - embedding dimension (default: 1024)
-//!   BATCH_SIZE      - batch size for embedding (default: 32)
-
 use bsl_search::{EmbedderConfig, SearchConfig, SearchEngine};
 use project_model::Project;
 use std::path::PathBuf;
 use std::time::Instant;
 
 fn main() {
-    // Init tracing.
     tracing_subscriber::fmt().with_max_level(tracing_subscriber::filter::LevelFilter::INFO).init();
 
     let args: Vec<String> = std::env::args().collect();
@@ -48,11 +24,9 @@ fn main() {
         std::process::exit(1);
     }
 
-    // Use project-model to discover the configuration source path.
     let project = Project::new(&project_dir);
     let config_dir = project.source_path().to_path_buf();
 
-    // Configure embedding API.
     let base_url =
         std::env::var("EMBEDDING_URL").unwrap_or_else(|_| "http://localhost:11434".to_owned());
     let model = std::env::var("EMBEDDING_MODEL").unwrap_or_else(|_| "qwen3-embedding".to_owned());
@@ -81,7 +55,6 @@ fn main() {
         },
     };
 
-    // Database stored in .build/ (typically gitignored).
     let build_dir = project_dir.join(".build");
     std::fs::create_dir_all(&build_dir).ok();
     let db_path = build_dir.join("bsl-search.db");
@@ -94,7 +67,6 @@ fn main() {
     println!("Batch size:  {batch_size}");
     println!();
 
-    // Check embedding service.
     let embedder = bsl_search::Embedder::new(EmbedderConfig {
         base_url: config.embedder.base_url.clone(),
         model: config.embedder.model.clone(),
@@ -112,7 +84,6 @@ fn main() {
     }
     println!("Embedding service: OK");
 
-    // Create search engine.
     let mut engine = match SearchEngine::new(&db_path, config) {
         Ok(e) => e,
         Err(e) => {
@@ -129,7 +100,6 @@ fn main() {
     );
     println!();
 
-    // Index.
     println!("Indexing...");
     let start = Instant::now();
     match engine.index_directory(&config_dir, None) {
@@ -149,9 +119,7 @@ fn main() {
     }
     println!();
 
-    // Search.
     if let Some(query) = query {
-        // Prefix "fts:" uses full-text search, otherwise semantic search.
         let (mode, actual_query) = if let Some(q) = query.strip_prefix("fts:") {
             ("FTS", q.trim())
         } else {
@@ -188,7 +156,6 @@ fn main() {
                     );
                     println!("   Lines {}-{}", hit.line_start + 1, hit.line_end);
 
-                    // Show first 3 lines of the chunk.
                     let preview: String = hit
                         .text
                         .lines()

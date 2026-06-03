@@ -1,37 +1,10 @@
-//! Lexer for BSL (1C:Enterprise) language.
-//!
-//! Supports both Russian and English keywords (case-insensitive).
-//!
-//! ## Token Structure
-//!
-//! The lexer recognizes the following token categories:
-//! - Keywords (bilingual: Russian/English)
-//! - Preprocessor directives (#If, #Region, etc.)
-//! - Annotations (&AtClient, &AtServer, etc.)
-//! - Operators (arithmetic, comparison, logical)
-//! - Punctuation
-//! - Literals (numbers, strings, dates, booleans)
-//! - Comments
-//!
-//! ## SDBL Support
-//!
-//! The `sdbl` module provides a separate lexer for SDBL (query language) tokens.
-//! SDBL queries are embedded in BSL string literals.
-//!
 pub mod sdbl;
 
 use logos::Logos;
 use smol_str::SmolStr;
 
-/// Token kinds for BSL language.
-///
-/// Each token represents a lexical element in BSL source code.
-/// Keywords support both Russian and English variants (case-insensitive).
 #[derive(Logos, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TokenKind {
-    // Note: Using regex with (?i) for case-insensitive matching of both ASCII and Cyrillic
-
-    // Procedure/Function keywords
     #[regex(r"(?i)процедура|(?i)procedure")]
     KwProcedure,
 
@@ -50,7 +23,6 @@ pub enum TokenKind {
     #[regex(r"(?i)знач|(?i)val")]
     KwVal,
 
-    // Control flow keywords
     #[regex(r"(?i)если|(?i)if")]
     KwIf,
 
@@ -66,7 +38,6 @@ pub enum TokenKind {
     #[regex(r"(?i)конецесли|(?i)endif")]
     KwEndIf,
 
-    // Loop keywords
     #[regex(r"(?i)для|(?i)for")]
     KwFor,
 
@@ -100,7 +71,6 @@ pub enum TokenKind {
     #[regex(r"(?i)перейти|(?i)goto")]
     KwGoto,
 
-    // Exception handling
     #[regex(r"(?i)попытка|(?i)try")]
     KwTry,
 
@@ -113,7 +83,6 @@ pub enum TokenKind {
     #[regex(r"(?i)вызватьисключение|(?i)raise")]
     KwRaise,
 
-    // Variable and value keywords
     #[regex(r"(?i)перем|(?i)var")]
     KwVar,
 
@@ -123,21 +92,18 @@ pub enum TokenKind {
     #[regex(r"(?i)выполнить|(?i)execute")]
     KwExecute,
 
-    // Event handlers
     #[regex(r"(?i)добавитьобработчик|(?i)addhandler")]
     KwAddHandler,
 
     #[regex(r"(?i)удалитьобработчик|(?i)removehandler")]
     KwRemoveHandler,
 
-    // Async/Await
     #[regex(r"(?i)асинх|(?i)async")]
     KwAsync,
 
     #[regex(r"(?i)ждать|(?i)await")]
     KwAwait,
 
-    // Logical operators
     #[regex(r"(?i)и|(?i)and")]
     KwAnd,
 
@@ -147,14 +113,12 @@ pub enum TokenKind {
     #[regex(r"(?i)не|(?i)not")]
     KwNot,
 
-    // Boolean literals
     #[regex(r"(?i)истина|(?i)true")]
     KwTrue,
 
     #[regex(r"(?i)ложь|(?i)false")]
     KwFalse,
 
-    // Special values
     #[regex(r"(?i)неопределено|(?i)undefined")]
     KwUndefined,
 
@@ -194,10 +158,6 @@ pub enum TokenKind {
     #[regex(r"#(?i)конецудаления|#(?i)enddelete")]
     PreEndDelete,
 
-    // NOTE: Preprocessor platform/OS symbols (Клиент, НаКлиенте, Сервер, Linux, etc.)
-    // are NOT separate tokens. They are recognized as Ident and checked by the parser
-    // in preprocessor expression context. This prevents false matches like "НаКлиенте"
-    // in "Процедура НаКлиенте()" being tokenized as PreAtClient instead of Ident.
     #[regex(r"&(?i)наклиенте|&(?i)atclient")]
     AnnAtClient,
 
@@ -225,7 +185,6 @@ pub enum TokenKind {
     #[regex(r"&(?i)изменениеиконтроль|&(?i)changeandvalidate")]
     AnnChangeAndValidate,
 
-    // Custom annotation (any identifier after &)
     #[regex(r"&[_\p{L}][_\p{L}0-9]*")]
     AnnCustom,
 
@@ -290,85 +249,63 @@ pub enum TokenKind {
     Question,
 
     #[token("~")]
-    Tilde, // For labels: ~LabelName:
+    Tilde,
 
     #[token("|", priority = 1)]
-    Bar, // For multiline strings (lower priority than StringPart/StringTail)
+    Bar,
 
     #[token("#")]
-    Hash, // Generic preprocessor marker
+    Hash,
 
     #[token("&")]
-    Ampersand, // For annotations
+    Ampersand,
 
     #[token("!")]
-    Exclamation, // Used in preprocessor (e.g., #!)
+    Exclamation,
 
-    // Numbers: floats must come before integers to match correctly
     #[regex(r"[0-9]+\.[0-9]*")]
     Float,
 
     #[regex(r"[0-9]+")]
     Decimal,
 
-    // Strings: "..." with "" escaping
     #[regex(r#""([^"\n\r]|"")*""#)]
     String,
 
-    // String start (for multiline strings): "...
-    // Without closing quote before newline
     #[regex(r#""([^"\n\r]|"")*"#)]
     StringStart,
 
-    // String tail: |..."
     #[regex(r#"\|([^"\n\r]|"")*""#, priority = 3)]
     StringTail,
 
-    // String continuation: |...
     #[regex(r#"\|([^"\n\r]|"")*"#, priority = 2)]
     StringPart,
 
-    // Date literals:
-    // 'YYYYMMDD', 'YYYYMMDDHHMMSS', 'YYYY-MM-DD', 'YYYY.MM.DD',
-    // 'YYYY.MM.DD HH:MM.SS', or 'YYYY,MM,DD'
     #[regex(r"'[0-9]{8,14}'")]
     #[regex(r"'[0-9]{4}-[0-9]{2}-[0-9]{2}'")]
     #[regex(r"'[0-9]{4}\.[0-9]{2}\.[0-9]{2}( [0-9]{2}:[0-9]{2}\.[0-9]{2})?'")]
     #[regex(r"'[0-9]{4},[0-9]{2},[0-9]{2}'")]
     Date,
 
-    // Identifier: Unicode letters, digits, underscore
-    // Must start with letter or underscore
-    // Uses \p{L} to support all Unicode letters (Latin, Cyrillic, Greek, etc.)
-    // Lower priority than keywords to ensure keywords are matched first
     #[regex(r"[_\p{L}][_\p{L}0-9]*", priority = 1)]
     Ident,
 
-    // Line comment: // ...
     #[regex(r"//[^\n]*")]
     Comment,
 
-    // Newline
     #[token("\n")]
     Newline,
 
-    // Whitespace (spaces, tabs, carriage returns, NBSP)
-    // Must have LOWEST priority to ensure it doesn't match identifiers or other tokens
-    // NOTE: We must tokenize whitespace explicitly for Rowan's full-fidelity trees
     #[regex(r"[ \t\r\x{00A0}]+", priority = 0)]
     Whitespace,
 
-    // UTF-8 BOM (Byte Order Mark) - treated as trivia
-    // Common in BSL files exported from 1C platform
     #[token("\u{FEFF}")]
     Bom,
 
-    // Error token for unrecognized input
     Error,
 }
 
 impl TokenKind {
-    /// Returns true if this is a BSL keyword token.
     pub fn is_keyword(self) -> bool {
         matches!(
             self,
@@ -416,28 +353,13 @@ impl TokenKind {
     }
 }
 
-/// A token with its kind, text, and position.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Token {
-    /// The kind of token
     pub kind: TokenKind,
-    /// The original text of the token
     pub text: SmolStr,
-    /// The byte offset in the source code
     pub offset: usize,
 }
 
-/// Tokenizes BSL source code into a stream of tokens.
-///
-/// # Example
-///
-/// ```
-/// use lexer::tokenize;
-///
-/// let tokens = tokenize("Процедура Тест() КонецПроцедуры");
-/// // 7 tokens: КwProcedure, Whitespace, Ident, LParen, RParen, Whitespace, KwEndProcedure
-/// assert_eq!(tokens.len(), 7);
-/// ```
 pub fn tokenize(input: &str) -> Vec<Token> {
     let mut lexer = TokenKind::lexer(input);
     let mut tokens = Vec::new();
@@ -505,9 +427,6 @@ mod tests {
     #[test]
     fn test_multiline_string_parts() {
         let tokens = tokenize("\"Line1\n|Line2\"");
-        // "Line1 -> StringStart
-        // \n -> Newline
-        // |Line2" -> StringTail
         assert_eq!(tokens[0].kind, TokenKind::StringStart);
         assert_eq!(tokens[1].kind, TokenKind::Newline);
         assert_eq!(tokens[2].kind, TokenKind::StringTail);
@@ -601,7 +520,7 @@ mod tests {
         let non_whitespace: Vec<_> =
             tokens.iter().filter(|t| t.kind != TokenKind::Whitespace).collect();
         assert_eq!(non_whitespace[0].kind, TokenKind::PreIf);
-        assert_eq!(non_whitespace[1].kind, TokenKind::Ident); // "Клиент" is now Ident, checked by parser
+        assert_eq!(non_whitespace[1].kind, TokenKind::Ident);
         assert_eq!(non_whitespace[2].kind, TokenKind::KwThen);
     }
 
@@ -656,7 +575,6 @@ mod tests {
         let tokens = tokenize("&ИзменениеИКонтроль");
         assert_eq!(tokens[0].kind, TokenKind::AnnChangeAndValidate);
 
-        // With parameters
         let tokens = tokenize("&Вместо(\"Метод\")");
         assert_eq!(tokens[0].kind, TokenKind::AnnAround);
         assert_eq!(tokens[1].kind, TokenKind::LParen);
@@ -773,7 +691,6 @@ mod tests {
 "#;
         let tokens = tokenize(code);
 
-        // Verify we get expected tokens
         assert!(tokens.iter().any(|t| t.kind == TokenKind::KwProcedure));
         assert!(tokens.iter().any(|t| t.kind == TokenKind::KwVal));
         assert!(tokens.iter().any(|t| t.kind == TokenKind::KwIf));
@@ -800,7 +717,6 @@ mod tests {
             );
         }
 
-        // Should have: KwFunction, Whitespace, Ident, LParen, KwVal, Whitespace, Ident, RParen
         assert_eq!(tokens[0].kind, TokenKind::KwFunction);
         assert_eq!(tokens[1].kind, TokenKind::Whitespace);
         assert_eq!(tokens[2].kind, TokenKind::Ident);
@@ -809,7 +725,6 @@ mod tests {
 
     #[test]
     fn test_string_with_paren_sdbl() {
-        // Test that " (" is lexed as ONE String token, not three
         let input = r#"" (" + y"#;
         let tokens = tokenize(input);
 
@@ -818,7 +733,6 @@ mod tests {
             eprintln!("  [{}] {:?}: {:?}", i, tok.kind, tok.text);
         }
 
-        // Should have: String(" ("), Whitespace, Plus, Whitespace, Ident(y)
         assert_eq!(tokens[0].kind, TokenKind::String, "First token should be String");
         assert_eq!(
             tokens[0].text.as_str(),
@@ -829,7 +743,6 @@ mod tests {
 
     #[test]
     fn test_bom() {
-        // UTF-8 BOM at start of file
         let input = "\u{FEFF}Процедура Тест() КонецПроцедуры";
         let tokens = tokenize(input);
 
@@ -838,10 +751,8 @@ mod tests {
             eprintln!("  [{}] {:?}: {:?}", i, tok.kind, tok.text);
         }
 
-        // First token should be BOM
         assert_eq!(tokens[0].kind, TokenKind::Bom, "First token should be BOM");
         assert_eq!(tokens[0].text.as_str(), "\u{FEFF}");
-        // Second token should be keyword
         assert_eq!(tokens[1].kind, TokenKind::KwProcedure);
     }
 }

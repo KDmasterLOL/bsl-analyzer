@@ -13,25 +13,20 @@ fn test_root_database_basic() {
     let mut db = RootDatabaseImpl::new();
     let file_id = FileId(0);
 
-    // Set up source root
     let mut file_set = FileSet::new();
     file_set.insert(file_id, VfsPath::new("/test.bsl"));
     let source_root = SourceRoot::new_local(file_set);
     db.set_source_root(SourceRootId(0), source_root);
     db.set_file_source_root(file_id, SourceRootId(0));
 
-    // Set file text
     db.set_file_text(file_id, "Процедура Тест() КонецПроцедуры");
 
-    // Test parse query
     let parse = db.parse(file_id);
     assert!(!parse.has_errors());
 
-    // Test item_tree query
     let tree = db.item_tree(file_id);
     assert_eq!(tree.top_level_items().len(), 1);
 
-    // Test module_data query
     let module_id = ModuleId::new(file_id);
     let module_data = db.module_data(module_id);
     assert_eq!(module_data.procedures.len(), 1);
@@ -44,19 +39,16 @@ fn test_incremental_item_tree() {
     let mut db = RootDatabaseImpl::new();
     let file_id = FileId(0);
 
-    // Set up source root
     let mut file_set = FileSet::new();
     file_set.insert(file_id, VfsPath::new("/test.bsl"));
     let source_root = SourceRoot::new_local(file_set);
     db.set_source_root(SourceRootId(0), source_root);
     db.set_file_source_root(file_id, SourceRootId(0));
 
-    // Initial content
     db.set_file_text(file_id, "Процедура Тест() КонецПроцедуры");
     let tree1 = db.item_tree(file_id);
     assert_eq!(tree1.top_level_items().len(), 1);
 
-    // Change content - should invalidate cache
     db.set_file_text(
         file_id,
         r#"
@@ -73,14 +65,12 @@ fn test_symbol_tree_query() {
     let mut db = RootDatabaseImpl::new();
     let file_id = FileId(0);
 
-    // Set up source root
     let mut file_set = FileSet::new();
     file_set.insert(file_id, VfsPath::new("/test.bsl"));
     let source_root = SourceRoot::new_local(file_set);
     db.set_source_root(SourceRootId(0), source_root);
     db.set_file_source_root(file_id, SourceRootId(0));
 
-    // Set file text
     db.set_file_text(
         file_id,
         r#"
@@ -94,7 +84,6 @@ fn test_symbol_tree_query() {
         "#,
     );
 
-    // Test symbol_tree query
     let module_id = ModuleId::new(file_id);
     let symbol_tree = db.symbol_tree(module_id);
 
@@ -108,25 +97,21 @@ fn test_symbol_tree_caching() {
     let mut db = RootDatabaseImpl::new();
     let file_id = FileId(0);
 
-    // Set up source root
     let mut file_set = FileSet::new();
     file_set.insert(file_id, VfsPath::new("/test.bsl"));
     let source_root = SourceRoot::new_local(file_set);
     db.set_source_root(SourceRootId(0), source_root);
     db.set_file_source_root(file_id, SourceRootId(0));
 
-    // Set initial content
     db.set_file_text(file_id, "Процедура Тест() КонецПроцедуры");
 
     let module_id = ModuleId::new(file_id);
     let tree1 = db.symbol_tree(module_id);
     assert_eq!(tree1.methods().count(), 1);
 
-    // Second call should return cached result
     let tree2 = db.symbol_tree(module_id);
     assert_eq!(tree2.methods().count(), 1);
 
-    // Verify it's the same Arc (cached)
     assert!(Arc::ptr_eq(&tree1, &tree2));
 }
 
@@ -135,21 +120,18 @@ fn test_symbol_tree_invalidation() {
     let mut db = RootDatabaseImpl::new();
     let file_id = FileId(0);
 
-    // Set up source root
     let mut file_set = FileSet::new();
     file_set.insert(file_id, VfsPath::new("/test.bsl"));
     let source_root = SourceRoot::new_local(file_set);
     db.set_source_root(SourceRootId(0), source_root);
     db.set_file_source_root(file_id, SourceRootId(0));
 
-    // Initial content
     db.set_file_text(file_id, "Процедура Тест1() КонецПроцедуры");
 
     let module_id = ModuleId::new(file_id);
     let tree1 = db.symbol_tree(module_id);
     assert_eq!(tree1.methods().count(), 1);
 
-    // Change content - should invalidate cache
     db.set_file_text(
         file_id,
         r#"
@@ -161,7 +143,6 @@ fn test_symbol_tree_invalidation() {
     let tree2 = db.symbol_tree(module_id);
     assert_eq!(tree2.methods().count(), 2);
 
-    // Should NOT be the same Arc (invalidated)
     assert!(!Arc::ptr_eq(&tree1, &tree2));
 }
 
@@ -170,7 +151,6 @@ fn test_symbol_tree_case_insensitive() {
     let mut db = RootDatabaseImpl::new();
     let file_id = FileId(0);
 
-    // Set up source root
     let mut file_set = FileSet::new();
     file_set.insert(file_id, VfsPath::new("/test.bsl"));
     let source_root = SourceRoot::new_local(file_set);
@@ -182,7 +162,6 @@ fn test_symbol_tree_case_insensitive() {
     let module_id = ModuleId::new(file_id);
     let symbol_tree = db.symbol_tree(module_id);
 
-    // Case-insensitive lookup
     use hir::Name;
     assert!(symbol_tree.find_method(&Name::new("МояПроцедура")).is_some());
     assert!(symbol_tree.find_method(&Name::new("мояпроцедура")).is_some());
@@ -193,7 +172,6 @@ fn test_symbol_tree_case_insensitive() {
 fn test_symbol_tree_multi_file() {
     let mut db = RootDatabaseImpl::new();
 
-    // Set up source root
     let mut file_set = FileSet::new();
     let file1 = FileId(0);
     let file2 = FileId(1);
@@ -204,19 +182,15 @@ fn test_symbol_tree_multi_file() {
     db.set_file_source_root(file1, SourceRootId(0));
     db.set_file_source_root(file2, SourceRootId(0));
 
-    // File 1
     db.set_file_text(file1, "Процедура Метод1() КонецПроцедуры");
 
-    // File 2
     db.set_file_text(file2, "Функция Метод2() Экспорт КонецФункции");
 
-    // Check file 1
     let module1 = ModuleId::new(file1);
     let tree1 = db.symbol_tree(module1);
     assert_eq!(tree1.methods().count(), 1);
     assert_eq!(tree1.exported_methods().count(), 0);
 
-    // Check file 2
     let module2 = ModuleId::new(file2);
     let tree2 = db.symbol_tree(module2);
     assert_eq!(tree2.methods().count(), 1);
@@ -232,14 +206,12 @@ fn test_resolver_resolve_module_method() {
     let file_id = FileId(0);
     let module_id = ModuleId::new(file_id);
 
-    // Set up source root
     let mut file_set = FileSet::new();
     file_set.insert(file_id, VfsPath::new("/test.bsl"));
     let source_root = SourceRoot::new_local(file_set);
     db.set_source_root(SourceRootId(0), source_root);
     db.set_file_source_root(file_id, SourceRootId(0));
 
-    // Use actual BSL code instead of manually constructing ItemTree
     db.set_file_text(
         file_id,
         r#"
@@ -251,20 +223,16 @@ fn test_resolver_resolve_module_method() {
         "#,
     );
 
-    // Create resolver
     let resolver = Resolver::for_module(module_id);
 
-    // Resolve procedure
     let method_id = resolver.resolve_module_method(&db, &Name::new("МояПроцедура"));
     assert!(method_id.is_some());
     assert_eq!(method_id.unwrap().module, module_id);
 
-    // Resolve function
     let method_id = resolver.resolve_module_method(&db, &Name::new("МояФункция"));
     assert!(method_id.is_some());
     assert_eq!(method_id.unwrap().module, module_id);
 
-    // Not found
     let method_id = resolver.resolve_module_method(&db, &Name::new("НеСуществует"));
     assert!(method_id.is_none());
 }
@@ -278,7 +246,6 @@ fn test_resolver_resolve_module_method_case_insensitive() {
     let file_id = FileId(0);
     let module_id = ModuleId::new(file_id);
 
-    // Set up
     let mut file_set = FileSet::new();
     file_set.insert(file_id, VfsPath::new("/test.bsl"));
     let source_root = SourceRoot::new_local(file_set);
@@ -289,7 +256,6 @@ fn test_resolver_resolve_module_method_case_insensitive() {
 
     let resolver = Resolver::for_module(module_id);
 
-    // Different cases should all resolve
     assert!(resolver.resolve_module_method(&db, &Name::new("МояПроцедура")).is_some());
     assert!(resolver.resolve_module_method(&db, &Name::new("мояпроцедура")).is_some());
     assert!(resolver.resolve_module_method(&db, &Name::new("МОЯПРОЦЕДУРА")).is_some());
@@ -304,7 +270,6 @@ fn test_resolver_resolve_module_variable() {
     let file_id = FileId(0);
     let module_id = ModuleId::new(file_id);
 
-    // Set up
     let mut file_set = FileSet::new();
     file_set.insert(file_id, VfsPath::new("/test.bsl"));
     let source_root = SourceRoot::new_local(file_set);
@@ -315,12 +280,10 @@ fn test_resolver_resolve_module_variable() {
 
     let resolver = Resolver::for_module(module_id);
 
-    // Resolve variable
     let var_id = resolver.resolve_module_variable(&db, &Name::new("МодульнаяПеременная"));
     assert!(var_id.is_some());
     assert_eq!(var_id.unwrap().module, module_id);
 
-    // Not found
     let var_id = resolver.resolve_module_variable(&db, &Name::new("НеСуществует"));
     assert!(var_id.is_none());
 }
@@ -335,14 +298,12 @@ fn test_resolver_resolve_name_hierarchy() {
     let file_id = FileId(0);
     let module_id = ModuleId::new(file_id);
 
-    // Set up
     let mut file_set = FileSet::new();
     file_set.insert(file_id, VfsPath::new("/test.bsl"));
     let source_root = SourceRoot::new_local(file_set);
     db.set_source_root(SourceRootId(0), source_root);
     db.set_file_source_root(file_id, SourceRootId(0));
 
-    // Create module with method and variable
     db.set_file_text(
         file_id,
         r#"
@@ -353,7 +314,6 @@ fn test_resolver_resolve_name_hierarchy() {
         "#,
     );
 
-    // Create resolver with expression scope
     let mut expr_scopes = ExprScopes::new();
     expr_scopes.add_parameter(Name::new("Параметр"));
 
@@ -361,19 +321,15 @@ fn test_resolver_resolve_name_hierarchy() {
     let resolver =
         Resolver::for_module(module_id).push_expr_scope(Arc::new(expr_scopes), root_scope);
 
-    // Resolve parameter (local scope)
     let resolved = resolver.resolve_name(&db, &Name::new("Параметр"));
     assert!(matches!(resolved, Some(Resolution::Local(_))));
 
-    // Resolve method (module scope)
     let resolved = resolver.resolve_name(&db, &Name::new("Метод"));
     assert!(matches!(resolved, Some(Resolution::Method(_))));
 
-    // Resolve variable (module scope)
     let resolved = resolver.resolve_name(&db, &Name::new("Переменная"));
     assert!(matches!(resolved, Some(Resolution::Variable(_))));
 
-    // Not found
     let resolved = resolver.resolve_name(&db, &Name::new("НеСуществует"));
     assert!(resolved.is_none());
 }
@@ -388,17 +344,14 @@ fn test_resolver_shadowing_local_over_module() {
     let file_id = FileId(0);
     let module_id = ModuleId::new(file_id);
 
-    // Set up
     let mut file_set = FileSet::new();
     file_set.insert(file_id, VfsPath::new("/test.bsl"));
     let source_root = SourceRoot::new_local(file_set);
     db.set_source_root(SourceRootId(0), source_root);
     db.set_file_source_root(file_id, SourceRootId(0));
 
-    // Create module variable with name "Значение"
     db.set_file_text(file_id, "Перем Значение;");
 
-    // Create local variable with the same name
     let mut expr_scopes = ExprScopes::new();
     expr_scopes.add_local_variable(expr_scopes.root_scope(), Name::new("Значение"));
 
@@ -406,7 +359,6 @@ fn test_resolver_shadowing_local_over_module() {
     let resolver =
         Resolver::for_module(module_id).push_expr_scope(Arc::new(expr_scopes), root_scope);
 
-    // Should resolve to local variable (shadows module variable)
     let resolved = resolver.resolve_name(&db, &Name::new("Значение"));
     assert!(matches!(resolved, Some(Resolution::Local(_))));
 }
@@ -421,21 +373,11 @@ fn test_resolver_with_workspace_scope() {
 
     let resolver = Resolver::with_workspace_scope(module_id);
 
-    // Should have WorkspaceScope and ModuleScope
     assert_eq!(resolver.scopes.len(), 2);
 }
 
 #[test]
 fn test_resolver_cross_module_gated_by_configurations() {
-    // When a configuration is registered but the BSL file for a CommonModule
-    // is NOT declared in that configuration, `resolve_cross_module` must
-    // return `Unresolved` without falling back to path-based lookup.
-    //
-    // We simulate this by registering a non-existent configuration path,
-    // which forces `load_configuration` onto its empty-fallback branch. That
-    // leaves the registered config with zero common_modules — so any module
-    // call the fixture otherwise "sees" via `module_index` must be rejected
-    // by the new metadata visibility gate.
     use hir::{ModuleId, Name, PathResolution, QualifiedName, Resolver};
 
     let mut db = RootDatabaseImpl::new();
@@ -452,8 +394,6 @@ fn test_resolver_cross_module_gated_by_configurations() {
     db.set_file_text(test_file, "Процедура Тест() КонецПроцедуры");
     db.set_file_text(om_file, "Функция ПолучитьЗначение() Экспорт\n    Возврат 1;\nКонецФункции");
 
-    // Sanity: with no config registered, path-based lookup currently finds
-    // ОбщегоНазначения (baseline before the gate kicks in).
     let resolver = Resolver::with_workspace_scope(ModuleId::new(test_file));
     let path = QualifiedName::from_segments([
         Name::new("ОбщегоНазначения"),
@@ -466,9 +406,6 @@ fn test_resolver_cross_module_gated_by_configurations() {
         before
     );
 
-    // Register a non-existent config path — `load_configuration` will
-    // silently produce an empty `Configuration`, so the visibility gate
-    // sees one config with zero common_modules declared.
     db.set_all_config_paths(vec![(None, std::path::PathBuf::from("/does-not-exist"))]);
 
     let after = resolver.resolve_path(&db, &path);
@@ -479,21 +416,17 @@ fn test_resolver_cross_module_gated_by_configurations() {
     );
 }
 
-// ========== SDBL Integration Tests (migrated from base-db) ==========
-
 #[test]
 fn test_all_sdbl_in_file_basic() {
     let mut db = RootDatabaseImpl::new();
     let file_id = FileId(0);
 
-    // Set up source root
     let mut file_set = FileSet::new();
     file_set.insert(file_id, VfsPath::new("/test.bsl"));
     let source_root = SourceRoot::new_local(file_set);
     db.set_source_root(SourceRootId(0), source_root);
     db.set_file_source_root(file_id, SourceRootId(0));
 
-    // Set file with SDBL query
     db.set_file_text(
         file_id,
         r#"Процедура Тест()
@@ -501,12 +434,10 @@ fn test_all_sdbl_in_file_basic() {
 КонецПроцедуры"#,
     );
 
-    // Should extract query
     let queries = db.all_sdbl_in_file(file_id);
     assert_eq!(queries.len(), 1, "Should extract 1 SDBL query");
     assert!(queries[0].1.is_valid(), "SDBL should parse successfully");
 
-    // Change file to have multiple queries
     db.set_file_text(
         file_id,
         r#"Процедура Тест()
@@ -515,7 +446,6 @@ fn test_all_sdbl_in_file_basic() {
 КонецПроцедуры"#,
     );
 
-    // Should extract both queries
     let queries = db.all_sdbl_in_file(file_id);
     assert_eq!(queries.len(), 2, "Should extract 2 SDBL queries");
     assert!(queries.iter().all(|(_, q)| q.is_valid()));
@@ -526,14 +456,12 @@ fn test_all_sdbl_in_file_keyword_filter() {
     let mut db = RootDatabaseImpl::new();
     let file_id = FileId(0);
 
-    // Set up source root
     let mut file_set = FileSet::new();
     file_set.insert(file_id, VfsPath::new("/test.bsl"));
     let source_root = SourceRoot::new_local(file_set);
     db.set_source_root(SourceRootId(0), source_root);
     db.set_file_source_root(file_id, SourceRootId(0));
 
-    // Strings without SELECT/ВЫБРАТЬ keywords should be skipped
     db.set_file_text(
         file_id,
         r#"Процедура Тест()
@@ -543,7 +471,6 @@ fn test_all_sdbl_in_file_keyword_filter() {
     );
 
     let queries = db.all_sdbl_in_file(file_id);
-    // Should only extract strings with SELECT/ВЫБРАТЬ
     assert_eq!(queries.len(), 1, "Should filter by SELECT/ВЫБРАТЬ keyword");
     assert!(queries[0].1.query_text.contains("ВЫБРАТЬ"));
 }
@@ -553,14 +480,12 @@ fn test_all_sdbl_in_file_multiline() {
     let mut db = RootDatabaseImpl::new();
     let file_id = FileId(0);
 
-    // Set up source root
     let mut file_set = FileSet::new();
     file_set.insert(file_id, VfsPath::new("/test.bsl"));
     let source_root = SourceRoot::new_local(file_set);
     db.set_source_root(SourceRootId(0), source_root);
     db.set_file_source_root(file_id, SourceRootId(0));
 
-    // Test multiline SDBL query with | prefix
     db.set_file_text(
         file_id,
         r#"Процедура Тест()
@@ -575,7 +500,6 @@ fn test_all_sdbl_in_file_multiline() {
     assert_eq!(queries.len(), 1, "Should extract multiline SDBL query");
     assert!(queries[0].1.is_valid(), "Multiline query should parse successfully");
 
-    // Verify content contains all parts
     let query_text = &queries[0].1.query_text;
     assert!(query_text.contains("Ссылка"));
     assert!(query_text.contains("Наименование"));
@@ -587,14 +511,12 @@ fn test_all_sdbl_in_file_assignment_patterns() {
     let mut db = RootDatabaseImpl::new();
     let file_id = FileId(0);
 
-    // Set up source root
     let mut file_set = FileSet::new();
     file_set.insert(file_id, VfsPath::new("/test.bsl"));
     let source_root = SourceRoot::new_local(file_set);
     db.set_source_root(SourceRootId(0), source_root);
     db.set_file_source_root(file_id, SourceRootId(0));
 
-    // Test various assignment patterns
     db.set_file_text(
         file_id,
         r#"Процедура Тест()
@@ -611,10 +533,8 @@ fn test_all_sdbl_in_file_assignment_patterns() {
     );
 
     let queries = db.all_sdbl_in_file(file_id);
-    // Should extract all SDBL strings regardless of assignment pattern
     assert_eq!(queries.len(), 3, "Should extract queries from various contexts");
 
-    // Verify all queries are valid
     for (_, query_info) in queries.iter() {
         assert!(query_info.is_valid(), "All queries should parse successfully");
     }
@@ -625,14 +545,12 @@ fn test_all_sdbl_in_file_with_parameters() {
     let mut db = RootDatabaseImpl::new();
     let file_id = FileId(0);
 
-    // Set up source root
     let mut file_set = FileSet::new();
     file_set.insert(file_id, VfsPath::new("/test.bsl"));
     let source_root = SourceRoot::new_local(file_set);
     db.set_source_root(SourceRootId(0), source_root);
     db.set_file_source_root(file_id, SourceRootId(0));
 
-    // Test SDBL query with parameters (&Parameter syntax)
     db.set_file_text(
         file_id,
         r#"Процедура ПолучитьДанные()
@@ -649,13 +567,10 @@ fn test_all_sdbl_in_file_with_parameters() {
 
     let queries = db.all_sdbl_in_file(file_id);
 
-    // Should extract query with parameters
     assert_eq!(queries.len(), 1, "Should extract query with parameters");
 
-    // Verify query is valid (parses successfully)
     assert!(queries[0].1.is_valid(), "Query with parameters should parse successfully");
 
-    // Verify query text contains parameters
     assert!(queries[0].1.query_text.contains("&Значение1"));
     assert!(queries[0].1.query_text.contains("&Значение2"));
     assert!(queries[0].1.query_text.contains("&Значение3"));
@@ -666,23 +581,17 @@ fn test_module_metadata_creation() {
     let mut db = RootDatabaseImpl::new();
     let file_id = FileId(0);
 
-    // Set up source root
     let mut file_set = FileSet::new();
     file_set.insert(file_id, VfsPath::new("/CommonModules/ОбщегоНазначения/Ext/Module.bsl"));
     let source_root = SourceRoot::new_local(file_set);
     db.set_source_root(SourceRootId(0), source_root);
     db.set_file_source_root(file_id, SourceRootId(0));
 
-    // Set file text
     db.set_file_text(file_id, "Процедура Тест() КонецПроцедуры");
 
-    // Test module_metadata query
     let module_id = ModuleId::new(file_id);
     let metadata = db.module_metadata(module_id);
 
-    // Should create metadata successfully
-    // We don't have configuration loaded yet (Phase 2), so metadata will be minimal
-    // But the Arc<ModuleMetadata> structure should be created
     assert_eq!(
         metadata.module_type,
         bsl_metadata::ModuleType::CommonModule,
@@ -695,23 +604,17 @@ fn test_module_bodies_and_metadata_separate() {
     let mut db = RootDatabaseImpl::new();
     let file_id = FileId(0);
 
-    // Set up source root
     let mut file_set = FileSet::new();
     file_set.insert(file_id, VfsPath::new("/test.bsl"));
     let source_root = SourceRoot::new_local(file_set);
     db.set_source_root(SourceRootId(0), source_root);
     db.set_file_source_root(file_id, SourceRootId(0));
 
-    // Set file text
     db.set_file_text(file_id, "Процедура Тест() КонецПроцедуры");
 
-    // Test module_bodies and module_metadata are separate queries
     let module_id = ModuleId::new(file_id);
     let _module_bodies = db.module_bodies(module_id);
     let _module_metadata = db.module_metadata(module_id);
-
-    // Both should work independently (metadata is now accessed separately)
-    // This is the correct pattern for performance - no cloning of ModuleBodies
 }
 
 #[test]
@@ -719,40 +622,31 @@ fn test_module_metadata_cache_invalidation() {
     let mut db = RootDatabaseImpl::new();
     let file_id = FileId(0);
 
-    // Set up source root
     let mut file_set = FileSet::new();
     file_set.insert(file_id, VfsPath::new("/test.bsl"));
     let source_root = SourceRoot::new_local(file_set);
     db.set_source_root(SourceRootId(0), source_root);
     db.set_file_source_root(file_id, SourceRootId(0));
 
-    // Set initial file text and get metadata
     db.set_file_text(file_id, "Процедура Тест() КонецПроцедуры");
     let module_id = ModuleId::new(file_id);
     let _metadata1 = db.module_metadata(module_id);
 
-    // Change file text (should invalidate cache)
     db.set_file_text(file_id, "Процедура Тест2() КонецПроцедуры");
     let _metadata2 = db.module_metadata(module_id);
-
-    // Test passes if we can call metadata again after invalidation
 }
-
-// ========== SDBL HIR Tests ==========
 
 #[test]
 fn test_sdbl_hir_in_file_basic() {
     let mut db = RootDatabaseImpl::new();
     let file_id = FileId(0);
 
-    // Set up source root
     let mut file_set = FileSet::new();
     file_set.insert(file_id, VfsPath::new("/test.bsl"));
     let source_root = SourceRoot::new_local(file_set);
     db.set_source_root(SourceRootId(0), source_root);
     db.set_file_source_root(file_id, SourceRootId(0));
 
-    // Set file with SDBL query
     db.set_file_text(
         file_id,
         r#"Процедура Тест()
@@ -760,11 +654,9 @@ fn test_sdbl_hir_in_file_basic() {
 КонецПроцедуры"#,
     );
 
-    // Should extract and lower query to HIR
     let hirs = db.sdbl_hir_in_file(file_id);
     assert_eq!(hirs.len(), 1, "Should have 1 SDBL HIR");
 
-    // Verify HIR structure
     let (_, sdbl_hir) = &hirs[0];
     assert!(!sdbl_hir.queries()[0].hir.from.is_empty(), "Should have FROM clause");
     assert_eq!(sdbl_hir.queries()[0].hir.from[0].full_name, "Справочник.Товары");
@@ -856,14 +748,12 @@ fn test_sdbl_hir_in_file_multiple_queries() {
     let mut db = RootDatabaseImpl::new();
     let file_id = FileId(0);
 
-    // Set up source root
     let mut file_set = FileSet::new();
     file_set.insert(file_id, VfsPath::new("/test.bsl"));
     let source_root = SourceRoot::new_local(file_set);
     db.set_source_root(SourceRootId(0), source_root);
     db.set_file_source_root(file_id, SourceRootId(0));
 
-    // Set file with multiple SDBL queries
     db.set_file_text(
         file_id,
         r#"Процедура Тест()
@@ -872,14 +762,11 @@ fn test_sdbl_hir_in_file_multiple_queries() {
 КонецПроцедуры"#,
     );
 
-    // Should extract and lower both queries
     let hirs = db.sdbl_hir_in_file(file_id);
     assert_eq!(hirs.len(), 2, "Should have 2 SDBL HIRs");
 
-    // Verify first query
     assert_eq!(hirs[0].1.queries()[0].hir.from[0].full_name, "Справочник.Товары");
 
-    // Verify second query
     assert_eq!(hirs[1].1.queries()[0].hir.from[0].full_name, "Документ.РасходнаяНакладная");
 }
 
@@ -888,14 +775,12 @@ fn test_sdbl_hir_in_file_caching() {
     let mut db = RootDatabaseImpl::new();
     let file_id = FileId(0);
 
-    // Set up source root
     let mut file_set = FileSet::new();
     file_set.insert(file_id, VfsPath::new("/test.bsl"));
     let source_root = SourceRoot::new_local(file_set);
     db.set_source_root(SourceRootId(0), source_root);
     db.set_file_source_root(file_id, SourceRootId(0));
 
-    // Set file with SDBL query
     db.set_file_text(
         file_id,
         r#"Процедура Тест()
@@ -903,13 +788,10 @@ fn test_sdbl_hir_in_file_caching() {
 КонецПроцедуры"#,
     );
 
-    // First call
     let hirs1 = db.sdbl_hir_in_file(file_id);
 
-    // Second call should return cached result
     let hirs2 = db.sdbl_hir_in_file(file_id);
 
-    // Verify same Arc (cached)
     assert!(Arc::ptr_eq(&hirs1, &hirs2), "Should return cached result");
 }
 
@@ -918,14 +800,12 @@ fn test_sdbl_hir_in_file_invalidation() {
     let mut db = RootDatabaseImpl::new();
     let file_id = FileId(0);
 
-    // Set up source root
     let mut file_set = FileSet::new();
     file_set.insert(file_id, VfsPath::new("/test.bsl"));
     let source_root = SourceRoot::new_local(file_set);
     db.set_source_root(SourceRootId(0), source_root);
     db.set_file_source_root(file_id, SourceRootId(0));
 
-    // Initial query
     db.set_file_text(
         file_id,
         r#"Процедура Тест()
@@ -935,7 +815,6 @@ fn test_sdbl_hir_in_file_invalidation() {
     let hirs1 = db.sdbl_hir_in_file(file_id);
     assert_eq!(hirs1[0].1.queries()[0].hir.from[0].full_name, "Справочник.Товары");
 
-    // Change query
     db.set_file_text(
         file_id,
         r#"Процедура Тест()
@@ -944,9 +823,600 @@ fn test_sdbl_hir_in_file_invalidation() {
     );
     let hirs2 = db.sdbl_hir_in_file(file_id);
 
-    // Should NOT be same Arc (invalidated)
     assert!(!Arc::ptr_eq(&hirs1, &hirs2), "Should invalidate cache on file change");
 
-    // Should have new content
     assert_eq!(hirs2[0].1.queries()[0].hir.from[0].full_name, "Документ.Продажа");
+}
+
+#[test]
+fn test_resolved_module_summary_targets() {
+    use hir::call_graph::{CallTarget, EdgeProvenance, ResolvedTarget};
+    use hir::ConfigsDatabase;
+
+    let mut db = RootDatabaseImpl::new();
+    let caller = FileId(0);
+    let utils = FileId(1);
+
+    let mut file_set = FileSet::new();
+    file_set.insert(caller, VfsPath::new("/src/CommonModules/Клиент/Ext/Module.bsl"));
+    file_set.insert(utils, VfsPath::new("/src/CommonModules/Утилиты/Ext/Module.bsl"));
+    let source_root = SourceRoot::new_local(file_set);
+    db.set_source_root(SourceRootId(0), source_root);
+    db.set_file_source_root(caller, SourceRootId(0));
+    db.set_file_source_root(utils, SourceRootId(0));
+
+    db.set_file_text(
+        utils,
+        "Функция ПроверитьИНН() Экспорт КонецФункции\n\
+         Процедура Приватная() КонецПроцедуры",
+    );
+    db.set_file_text(
+        caller,
+        "Процедура ЛокальнаяЦель() Экспорт КонецПроцедуры\n\
+         Процедура Главная() Экспорт\n\
+         ЛокальнаяЦель();\n\
+         Утилиты.ПроверитьИНН();\n\
+         Утилиты.Приватная();\n\
+         НетТакогоМодуля.Метод();\n\
+         КонецПроцедуры",
+    );
+
+    let summary = db.resolved_module_summary(ModuleId::new(caller));
+    let caller_module = ModuleId::new(caller);
+    let utils_module = ModuleId::new(utils);
+
+    let resolved: Vec<_> =
+        summary.edges.iter().filter(|e| e.provenance == EdgeProvenance::Resolved).collect();
+    assert_eq!(resolved.len(), 2, "local + exported-qualified call resolve");
+
+    // Local call resolves to a method in the caller's own module.
+    assert!(resolved.iter().any(|e| matches!(
+        &e.target,
+        ResolvedTarget::Method(m) if m.module == caller_module
+    )));
+    // Exported qualified call resolves to a method in the target common module.
+    assert!(resolved.iter().any(|e| matches!(
+        &e.target,
+        ResolvedTarget::Method(m) if m.module == utils_module
+    )));
+
+    // Non-exported qualified target is visible but unreachable across modules,
+    // and the original target payload is preserved (surfaced, not dropped).
+    let blocked: Vec<_> = summary
+        .edges
+        .iter()
+        .filter(|e| e.provenance == EdgeProvenance::VisibilityBlocked)
+        .collect();
+    assert_eq!(blocked.len(), 1);
+    assert!(matches!(
+        &blocked[0].target,
+        ResolvedTarget::Unresolved(CallTarget::QualifiedModule { method_name, .. })
+            if method_name.as_str() == "Приватная"
+    ));
+
+    // Unknown module → honestly surfaced as unresolved with its original name preserved.
+    let unresolved: Vec<_> =
+        summary.edges.iter().filter(|e| e.provenance == EdgeProvenance::Unresolved).collect();
+    assert_eq!(unresolved.len(), 1);
+    assert!(matches!(
+        &unresolved[0].target,
+        ResolvedTarget::Unresolved(CallTarget::QualifiedModule { module_name, .. })
+            if module_name.as_str() == "НетТакогоМодуля"
+    ));
+}
+
+#[test]
+fn test_resolved_module_summary_manager_access() {
+    use hir::call_graph::{EdgeProvenance, ResolvedTarget};
+    use hir::ConfigsDatabase;
+
+    let mut db = RootDatabaseImpl::new();
+    let caller = FileId(0);
+    let mgr = FileId(1);
+
+    let mut file_set = FileSet::new();
+    file_set.insert(caller, VfsPath::new("/src/CommonModules/Клиент/Ext/Module.bsl"));
+    file_set.insert(mgr, VfsPath::new("/src/Catalogs/Контрагенты/Ext/ManagerModule.bsl"));
+    let source_root = SourceRoot::new_local(file_set);
+    db.set_source_root(SourceRootId(0), source_root);
+    db.set_file_source_root(caller, SourceRootId(0));
+    db.set_file_source_root(mgr, SourceRootId(0));
+
+    db.set_file_text(
+        mgr,
+        "Функция НайтиПоИНН() Экспорт КонецФункции\n\
+         Процедура Внутренняя() КонецПроцедуры",
+    );
+    db.set_file_text(
+        caller,
+        "Процедура Главная() Экспорт\n\
+         Справочники.Контрагенты.НайтиПоИНН();\n\
+         Справочники.Контрагенты.Внутренняя();\n\
+         Справочники.Контрагенты.СоздатьЭлемент();\n\
+         КонецПроцедуры",
+    );
+
+    let summary = db.resolved_module_summary(ModuleId::new(caller));
+    let mgr_module = ModuleId::new(mgr);
+
+    // A user-defined, exported manager-module method resolves to its node (Inferred).
+    assert!(
+        summary.edges.iter().any(|e| e.provenance == EdgeProvenance::Inferred
+            && matches!(&e.target, ResolvedTarget::Method(m) if m.module == mgr_module)),
+        "Справочники.Контрагенты.НайтиПоИНН should resolve to the manager-module method"
+    );
+    // A non-exported manager-module method is visible but unreachable across modules.
+    assert_eq!(
+        summary.edges.iter().filter(|e| e.provenance == EdgeProvenance::VisibilityBlocked).count(),
+        1,
+        "Справочники.Контрагенты.Внутренняя is non-export → VisibilityBlocked"
+    );
+    // A platform creation method (СоздатьЭлемент) is not a user node — it touches
+    // the metadata object, so it resolves to an Mdo target via a ManagerCreates edge.
+    use bsl_metadata::MdoType;
+    use hir::call_graph::EdgeKind;
+    assert!(
+        summary.edges.iter().any(|e| e.provenance == EdgeProvenance::Inferred
+            && e.kind == EdgeKind::ManagerCreates
+            && matches!(&e.target, ResolvedTarget::Mdo { mdo_type, object_name }
+                if *mdo_type == MdoType::Catalog && object_name.as_str() == "Контрагенты")),
+        "Платформенный СоздатьЭлемент should resolve to an Mdo node via manager_creates"
+    );
+}
+
+#[test]
+fn test_workspace_call_graph_callers_and_callees() {
+    use hir::call_graph::{GraphNode, ResolvedTarget};
+    use hir::ConfigsDatabase;
+
+    let mut db = RootDatabaseImpl::new();
+    let caller = FileId(0);
+    let utils = FileId(1);
+
+    let mut file_set = FileSet::new();
+    file_set.insert(caller, VfsPath::new("/src/CommonModules/Клиент/Ext/Module.bsl"));
+    file_set.insert(utils, VfsPath::new("/src/CommonModules/Утилиты/Ext/Module.bsl"));
+    let source_root = SourceRoot::new_local(file_set);
+    db.set_source_root(SourceRootId(0), source_root);
+    db.set_file_source_root(caller, SourceRootId(0));
+    db.set_file_source_root(utils, SourceRootId(0));
+
+    db.set_file_text(utils, "Функция ПроверитьИНН() Экспорт КонецФункции");
+    db.set_file_text(
+        caller,
+        "Процедура Главная() Экспорт\n\
+         Утилиты.ПроверитьИНН();\n\
+         КонецПроцедуры",
+    );
+
+    let caller_module = ModuleId::new(caller);
+    let utils_module = ModuleId::new(utils);
+
+    // Derive the resolved target MethodId without hardcoding a local_id.
+    let caller_summary = db.resolved_module_summary(caller_module);
+    let target = caller_summary
+        .edges
+        .iter()
+        .find_map(|e| match &e.target {
+            ResolvedTarget::Method(m) if m.module == utils_module => Some(*m),
+            _ => None,
+        })
+        .expect("Утилиты.ПроверитьИНН should resolve");
+
+    let graph = db.workspace_call_graph(SourceRootId(0));
+
+    // Reverse adjacency: callers of the utils method include a method in the caller module.
+    let callers = graph.callers(&GraphNode::Method(target));
+    assert!(!callers.is_empty(), "utils method must have a caller");
+    assert!(callers.iter().all(|e| e.to == GraphNode::Method(target)));
+    assert!(callers
+        .iter()
+        .any(|e| matches!(e.from, GraphNode::Method(m) if m.module == caller_module)));
+
+    // Forward adjacency: the caller node lists the utils method as a callee.
+    let caller_node = match &callers[0].from {
+        GraphNode::Method(_) => callers[0].from.clone(),
+        other => panic!("expected a method caller, got {other:?}"),
+    };
+    let callees = graph.callees(&caller_node);
+    assert!(callees.iter().any(|e| e.to == GraphNode::Method(target)));
+}
+
+#[test]
+fn test_workspace_call_graph_module_code_and_multiple_callers() {
+    use hir::call_graph::{GraphNode, ResolvedTarget};
+    use hir::ConfigsDatabase;
+
+    let mut db = RootDatabaseImpl::new();
+    let caller = FileId(0);
+    let utils = FileId(1);
+
+    let mut file_set = FileSet::new();
+    file_set.insert(caller, VfsPath::new("/src/CommonModules/Клиент/Ext/Module.bsl"));
+    file_set.insert(utils, VfsPath::new("/src/CommonModules/Утилиты/Ext/Module.bsl"));
+    let source_root = SourceRoot::new_local(file_set);
+    db.set_source_root(SourceRootId(0), source_root);
+    db.set_file_source_root(caller, SourceRootId(0));
+    db.set_file_source_root(utils, SourceRootId(0));
+
+    db.set_file_text(utils, "Функция Ц() Экспорт КонецФункции");
+    // Two methods plus trailing module-body code all call the same target.
+    db.set_file_text(
+        caller,
+        "Процедура П1() Экспорт\n\
+         Утилиты.Ц();\n\
+         КонецПроцедуры\n\
+         Процедура П2() Экспорт\n\
+         Утилиты.Ц();\n\
+         КонецПроцедуры\n\
+         Утилиты.Ц();",
+    );
+
+    let caller_module = ModuleId::new(caller);
+    let utils_module = ModuleId::new(utils);
+
+    let target = db
+        .resolved_module_summary(caller_module)
+        .edges
+        .iter()
+        .find_map(|e| match &e.target {
+            ResolvedTarget::Method(m) if m.module == utils_module => Some(*m),
+            _ => None,
+        })
+        .expect("Утилиты.Ц should resolve");
+
+    let graph = db.workspace_call_graph(SourceRootId(0));
+    let callers = graph.callers(&GraphNode::Method(target));
+
+    assert_eq!(callers.len(), 3, "two methods + module-body code call the target");
+    assert!(
+        callers.iter().any(|e| e.from == GraphNode::ModuleCode(caller_module)),
+        "module-body call is attributed to the ModuleCode node"
+    );
+    let method_callers = callers.iter().filter(|e| matches!(e.from, GraphNode::Method(_))).count();
+    assert_eq!(method_callers, 2, "П1 and П2 are distinct method callers");
+
+    // The callee is client-capable (default), so no edge — including the
+    // ModuleCode caller — is a client→server crossing.
+    assert!(callers.iter().all(|e| !e.crosses_client_to_server));
+}
+
+#[test]
+fn test_workspace_call_graph_client_server_boundary() {
+    use hir::call_graph::{GraphNode, ResolvedTarget};
+    use hir::ConfigsDatabase;
+
+    let mut db = RootDatabaseImpl::new();
+    let caller = FileId(0);
+    let utils = FileId(1);
+
+    let mut file_set = FileSet::new();
+    file_set.insert(caller, VfsPath::new("/src/CommonModules/Клиент/Ext/Module.bsl"));
+    file_set.insert(utils, VfsPath::new("/src/CommonModules/Сервер/Ext/Module.bsl"));
+    let source_root = SourceRoot::new_local(file_set);
+    db.set_source_root(SourceRootId(0), source_root);
+    db.set_file_source_root(caller, SourceRootId(0));
+    db.set_file_source_root(utils, SourceRootId(0));
+
+    db.set_file_text(
+        utils,
+        "&НаСервере\n\
+         Функция СерверныйМетод() Экспорт КонецФункции\n\
+         &НаКлиентеНаСервере\n\
+         Функция Универсальный() Экспорт КонецФункции",
+    );
+    db.set_file_text(
+        caller,
+        "&НаКлиенте\n\
+         Процедура Клиентский() Экспорт\n\
+         Сервер.СерверныйМетод();\n\
+         Сервер.Универсальный();\n\
+         КонецПроцедуры",
+    );
+
+    let utils_module = ModuleId::new(utils);
+    let resolve = |method: &str| {
+        db.resolved_module_summary(ModuleId::new(caller))
+            .edges
+            .iter()
+            .filter_map(|e| match &e.target {
+                ResolvedTarget::Method(m) if m.module == utils_module => Some(*m),
+                _ => None,
+            })
+            .find(|m| {
+                db.symbol_tree(utils_module)
+                    .find_method_by_id(*m)
+                    .is_some_and(|s| s.name.as_str() == method)
+            })
+            .unwrap_or_else(|| panic!("Сервер.{method} should resolve"))
+    };
+    let server_method = resolve("СерверныйМетод");
+    let universal = resolve("Универсальный");
+
+    let graph = db.workspace_call_graph(SourceRootId(0));
+
+    // Node dispatch is attached: the &НаСервере target is server-only.
+    let dispatch = graph
+        .dispatch(&GraphNode::Method(server_method))
+        .expect("server method must have known dispatch");
+    assert!(dispatch.is_server_only(), "&НаСервере method is server-only");
+
+    // The client→server-only call is flagged as a boundary crossing.
+    let server_callers = graph.callers(&GraphNode::Method(server_method));
+    assert!(!server_callers.is_empty());
+    assert!(
+        server_callers.iter().all(|e| e.crosses_client_to_server),
+        "&НаКлиенте → &НаСервере is a client→server roundtrip"
+    );
+
+    // A &НаКлиентеНаСервере callee is not server-only → NOT a boundary crossing.
+    let universal_callers = graph.callers(&GraphNode::Method(universal));
+    assert!(!universal_callers.is_empty());
+    assert!(
+        universal_callers.iter().all(|e| !e.crosses_client_to_server),
+        "&НаКлиентеНаСервере callee is reachable on the client — no roundtrip"
+    );
+}
+
+#[test]
+fn test_workspace_call_graph_query_ref_links_method_to_mdo() {
+    use bsl_metadata::MdoType;
+    use hir::call_graph::{EdgeKind, EdgeProvenance, GraphNode};
+    use hir::ConfigsDatabase;
+
+    // The SDBL table must resolve against a configuration, so declare the catalog.
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("src/cf");
+    std::fs::create_dir_all(root.join("Catalogs")).unwrap();
+    std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+    std::fs::write(
+        root.join("Catalogs/Номенклатура.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Catalog uuid="00000000-0000-0000-0000-000000000001">
+        <Properties>
+            <Name>Номенклатура</Name>
+            <CodeLength>9</CodeLength>
+        </Properties>
+    </Catalog>
+</MetaDataObject>"#,
+    )
+    .unwrap();
+
+    let mut db = RootDatabaseImpl::new();
+    db.set_all_config_paths(vec![(None, root.clone())]);
+
+    let file_id = FileId(0);
+    let file_path = root.join("CommonModules/Отчеты/Ext/Module.bsl");
+    let mut file_set = FileSet::new();
+    file_set.insert(file_id, VfsPath::new(file_path.to_string_lossy().as_ref()));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(file_id, SourceRootId(0));
+    db.set_file_text(
+        file_id,
+        "Процедура Считать() Экспорт\n\
+         Запрос = \"ВЫБРАТЬ Код ИЗ Справочник.Номенклатура\";\n\
+         КонецПроцедуры",
+    );
+
+    let graph = db.workspace_call_graph(SourceRootId(0));
+    let qref = graph
+        .edges()
+        .find(|e| e.kind == EdgeKind::QueryRef)
+        .expect("the query reads Справочник.Номенклатура → one query_ref edge");
+    assert!(matches!(&qref.from, GraphNode::Method(_)), "the reading method is the edge source");
+    assert!(
+        matches!(&qref.to, GraphNode::Mdo { mdo_type, object_name }
+            if *mdo_type == MdoType::Catalog && object_name.as_str() == "Номенклатура"),
+        "the edge targets the read object's Mdo node"
+    );
+    assert_eq!(qref.provenance, EdgeProvenance::Inferred);
+    assert!(!qref.crosses_client_to_server);
+}
+
+/// Golden equivalence: building the whole-config graph through the resident
+/// `GraphIndex` (the streaming-build path) must produce byte-for-byte the same
+/// `WorkspaceCallGraph` as the monolithic Salsa fold, AND the same per-module
+/// `ResolvedModuleSummary` (which carries the VisibilityBlocked/Unresolved
+/// outcomes the graph itself drops).
+///
+/// No configuration is registered, so the visibility gate is a no-op and
+/// resolution proceeds on the path-based module index alone — exactly like the
+/// existing `test_resolved_module_summary_*` fixtures. This lets the calls
+/// actually reach every resolution arm. Coverage is asserted explicitly (below)
+/// so the equality is not silently vacuous.
+#[test]
+fn workspace_call_graph_via_index_matches_salsa_fold() {
+    use bsl_metadata::MdoType;
+    use hir::call_graph::{EdgeKind, EdgeProvenance, ResolvedTarget};
+    use hir::graph_index::{
+        resolve_module_summary_via_index, workspace_call_graph_via_index, GraphIndex,
+    };
+    use hir::ConfigsDatabase;
+
+    let files: &[(&str, &str)] = &[
+        (
+            "/src/CommonModules/Клиент/Ext/Module.bsl",
+            "&НаКлиенте\n\
+             Процедура Главная() Экспорт\n\
+             ЛокальнаяЦель();\n\
+             Сервер.Считать();\n\
+             Сервер.Приватная();\n\
+             НетМодуля.Метод();\n\
+             ЭтотОбъект.НетМетода();\n\
+             Справочники.Контрагенты.НайтиПоИНН();\n\
+             Справочники.Контрагенты.Внутренняя();\n\
+             Справочники.Контрагенты.НетТакого();\n\
+             Справочники.Номенклатура.СоздатьЭлемент();\n\
+             Справочники.Номенклатура.НайтиПоКоду();\n\
+             КонецПроцедуры\n\
+             &НаКлиенте\n\
+             Процедура ЛокальнаяЦель() Экспорт КонецПроцедуры",
+        ),
+        (
+            "/src/CommonModules/Сервер/Ext/Module.bsl",
+            "&НаСервере\n\
+             Функция Считать() Экспорт КонецФункции\n\
+             &НаСервере\n\
+             Функция Приватная() КонецФункции",
+        ),
+        (
+            "/src/Catalogs/Контрагенты/Ext/ManagerModule.bsl",
+            "Функция НайтиПоИНН() Экспорт КонецФункции\n\
+             Процедура Внутренняя() КонецПроцедуры",
+        ),
+    ];
+
+    let mut db = RootDatabaseImpl::new();
+    let mut file_set = FileSet::new();
+    for (i, (path, _)) in files.iter().enumerate() {
+        file_set.insert(FileId(i as u32), VfsPath::new(*path));
+    }
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    for (i, (_, text)) in files.iter().enumerate() {
+        let fid = FileId(i as u32);
+        db.set_file_source_root(fid, SourceRootId(0));
+        db.set_file_text(fid, text);
+    }
+
+    // Enumerate modules exactly as the fold does (same iteration order → same
+    // edge insertion order, so the two graphs compare equal).
+    let source_root = db.source_root_input(SourceRootId(0)).root(&db);
+    let file_set = source_root.file_set();
+    let modules: Vec<ModuleId> = source_root
+        .iter()
+        .filter(|&f| hir::is_bsl_source(file_set, f))
+        .map(ModuleId::new)
+        .collect();
+
+    let salsa = db.workspace_call_graph(SourceRootId(0));
+    let index = GraphIndex::build(&db, &modules);
+    let via_index = workspace_call_graph_via_index(&db, &modules, &index);
+
+    assert_eq!(via_index, *salsa, "index-backed graph must equal the Salsa fold");
+
+    // Coverage: prove the caller's summary actually hits every resolution arm, so
+    // the equality above is not vacuous. (The index path equals this summary by
+    // the per-module assertion below, so reaching the arm here proves it there.)
+    let caller = db.resolved_module_summary(ModuleId::new(FileId(0)));
+    let has = |pred: &dyn Fn(&hir::ResolvedCallEdge) -> bool| caller.edges.iter().any(pred);
+    assert!(
+        has(&|e| e.provenance == EdgeProvenance::Resolved
+            && matches!(e.target, ResolvedTarget::Method(_))),
+        "local + exported-qualified → Resolved method"
+    );
+    assert!(
+        caller.edges.iter().filter(|e| e.provenance == EdgeProvenance::VisibilityBlocked).count()
+            >= 2,
+        "non-exported qualified (Приватная) and manager (Внутренняя) → VisibilityBlocked"
+    );
+    assert!(
+        has(&|e| e.provenance == EdgeProvenance::Unresolved),
+        "unknown module / ThisObject method → Unresolved"
+    );
+    assert!(
+        has(&|e| e.provenance == EdgeProvenance::Inferred
+            && matches!(e.target, ResolvedTarget::Method(_))),
+        "exported manager-module method (НайтиПоИНН) → Inferred method"
+    );
+    assert!(
+        has(&|e| e.kind == EdgeKind::ManagerCreates
+            && matches!(&e.target, ResolvedTarget::Mdo { mdo_type, .. } if *mdo_type == MdoType::Catalog)),
+        "platform СоздатьЭлемент on a manager-less object → Mdo + ManagerCreates"
+    );
+    assert!(
+        has(&|e| e.kind == EdgeKind::ManagerAccess
+            && matches!(e.target, ResolvedTarget::Mdo { .. })),
+        "platform find / absent manager method → Mdo + ManagerAccess"
+    );
+
+    for &module in &modules {
+        let salsa_summary = db.resolved_module_summary(module);
+        let index_summary = resolve_module_summary_via_index(&db, module, &index);
+        assert_eq!(
+            index_summary, *salsa_summary,
+            "per-module ResolvedModuleSummary must match for {module:?}"
+        );
+    }
+}
+
+/// The batched build path: a call from a module in one batch to a module in
+/// another must resolve through the resident `GraphIndex`, even though the target
+/// module's text is absent from the batch's database. Asserts the edge SET
+/// collected across per-batch databases equals the Salsa fold's.
+#[test]
+fn project_batch_edges_resolves_across_batches() {
+    use hir::call_graph::WorkspaceCallEdge;
+    use hir::graph_index::{project_batch_edges, GraphBuildState, GraphIndex};
+    use hir::ConfigsDatabase;
+
+    let files: &[(&str, &str)] = &[
+        (
+            "/src/CommonModules/A/Ext/Module.bsl",
+            "Процедура Т() Экспорт\nB.Метод();\nКонецПроцедуры",
+        ),
+        ("/src/CommonModules/B/Ext/Module.bsl", "Функция Метод() Экспорт Возврат 1; КонецФункции"),
+    ];
+    let a = FileId(0);
+    let b = FileId(1);
+    let module_a = ModuleId::new(a);
+    let module_b = ModuleId::new(b);
+
+    let make_db = |texts: &[(FileId, &str)]| -> RootDatabaseImpl {
+        let mut db = RootDatabaseImpl::new();
+        let mut file_set = FileSet::new();
+        for (i, (path, _)) in files.iter().enumerate() {
+            file_set.insert(FileId(i as u32), VfsPath::new(*path));
+        }
+        db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+        for (i, _) in files.iter().enumerate() {
+            db.set_file_source_root(FileId(i as u32), SourceRootId(0));
+        }
+        for &(fid, text) in texts {
+            db.set_file_text(fid, text);
+        }
+        db
+    };
+
+    // The index is built over ALL modules (whole config), here from one db.
+    let full = make_db(&[(a, files[0].1), (b, files[1].1)]);
+    let index = GraphIndex::build(&full, &[module_a, module_b]);
+
+    // Batch 0 sees only A's text; batch 1 only B's. A's call to B.Метод must still
+    // resolve through the index.
+    let db0 = make_db(&[(a, files[0].1)]);
+    let db1 = make_db(&[(b, files[1].1)]);
+    let pool = rayon::ThreadPoolBuilder::new().build().unwrap();
+    let mut state = GraphBuildState::new();
+    let mut batched: Vec<WorkspaceCallEdge> = Vec::new();
+    batched.extend(project_batch_edges(&pool, &db0, &[module_a], &index, &mut state));
+    batched.extend(project_batch_edges(&pool, &db1, &[module_b], &index, &mut state));
+
+    let salsa = full.workspace_call_graph(SourceRootId(0));
+    let folded: Vec<WorkspaceCallEdge> = salsa.edges().cloned().collect();
+
+    // The cross-batch call resolved (not dropped to Unresolved).
+    assert!(
+        batched.iter().any(|e| matches!(
+            (&e.from, &e.to),
+            (hir::GraphNode::Method(f), hir::GraphNode::Method(t))
+                if f.module == module_a && t.module == module_b
+        )),
+        "A.Т → B.Метод must resolve through the index across batches"
+    );
+
+    // Same edge MULTISET as the fold (order differs — per-batch vs. global
+    // passes). This fixture has no metadata objects, so node spelling cannot
+    // diverge; a per-edge count comparison guards against duplicates too.
+    let count = |edges: &[WorkspaceCallEdge], target: &WorkspaceCallEdge| {
+        edges.iter().filter(|e| *e == target).count()
+    };
+    assert_eq!(batched.len(), folded.len(), "batched and fold edge counts must match");
+    for edge in folded.iter().chain(batched.iter()) {
+        assert_eq!(
+            count(&batched, edge),
+            count(&folded, edge),
+            "edge multiplicity differs between batched build and fold: {edge:?}"
+        );
+    }
 }

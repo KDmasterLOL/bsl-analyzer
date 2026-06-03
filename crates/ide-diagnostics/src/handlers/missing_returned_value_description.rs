@@ -1,5 +1,3 @@
-//! Reports missing or invalid returned-value documentation.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -20,7 +18,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Run the returned-value documentation diagnostic.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::MissingReturnedValueDescription;
 
@@ -30,17 +27,14 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     let mut diagnostics = Vec::new();
 
-    // Get module data from HIR
     let module_data = ctx.module_data();
 
-    // Check all procedures
     for method_id in &module_data.procedures {
         if let Some(diag) = check_procedure_hir(ctx, *method_id, code) {
             diagnostics.push(diag);
         }
     }
 
-    // Check all functions
     for method_id in &module_data.functions {
         if let Some(diag) = check_function_hir(ctx, *method_id, code) {
             diagnostics.push(diag);
@@ -50,16 +44,13 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics
 }
 
-/// Check a function for missing or invalid return description (HIR-based).
 fn check_function_hir(
     ctx: &DiagnosticsContext,
     method_id: hir::MethodId,
     code: DiagnosticCode,
 ) -> Option<Diagnostic> {
-    // Get item tree via ctx (works in both LSP and streaming mode)
     let tree = ctx.item_tree();
 
-    // Get function info from item tree
     let func_info =
         tree.top_level_items().get(method_id.local_id as usize).and_then(|item| match item {
             ModItem::Function(func_idx) => {
@@ -71,15 +62,10 @@ fn check_function_hir(
 
     let (is_export, name_range) = func_info?;
 
-    // Only check export functions (public API)
     if !is_export {
         return None;
     }
 
-    // When the method has no docs at all we normally defer to
-    // PublicMethodsDescription to avoid double-reporting; if that rule is
-    // disabled, this handler steps in so missing-return docs still get
-    // caught instead of falling through both rules silently.
     let docs = match ctx.method_docs(method_id) {
         Some(docs) => docs,
         None => {
@@ -95,12 +81,10 @@ fn check_function_hir(
         }
     };
 
-    // If it's a hyperlink reference, skip validation
     if docs.is_hyperlink() {
         return None;
     }
 
-    // Check if return value section exists
     if docs.returned_value.is_empty() {
         return Some(create_diagnostic(
             name_range,
@@ -110,7 +94,6 @@ fn check_function_hir(
         ));
     }
 
-    // Get configuration parameter
     let allow_short = ctx
         .config
         .get_bool(
@@ -119,13 +102,11 @@ fn check_function_hir(
         )
         .unwrap_or(true);
 
-    // Strict mode - all types must have descriptions
     if !allow_short {
         let types_without_desc: Vec<&str> = docs
             .returned_value
             .iter()
             .filter_map(|type_doc| {
-                // Type has no description AND no sub-parameters (structured type)
                 if type_doc.description.is_none() && type_doc.parameters.is_empty() {
                     Some(type_doc.name.as_str())
                 } else {
@@ -147,26 +128,21 @@ fn check_function_hir(
     None
 }
 
-/// Check a procedure for invalid return description (HIR-based).
 fn check_procedure_hir(
     ctx: &DiagnosticsContext,
     method_id: hir::MethodId,
     code: DiagnosticCode,
 ) -> Option<Diagnostic> {
-    // Get item tree via ctx (works in both LSP and streaming mode)
     let tree = ctx.item_tree();
 
-    // Get procedure name range from item tree
     let name_range =
         tree.top_level_items().get(method_id.local_id as usize).and_then(|item| match item {
             ModItem::Procedure(proc_idx) => Some(tree.procedure(*proc_idx).name_range),
             _ => None,
         })?;
 
-    // Get documentation via ctx (works in both LSP and streaming mode)
     let docs = ctx.method_docs(method_id)?;
 
-    // Procedures must NOT have return value descriptions
     if !docs.returned_value.is_empty() {
         return Some(create_diagnostic(
             name_range,
@@ -179,9 +155,6 @@ fn check_procedure_hir(
     None
 }
 
-/// Create a diagnostic with the given message.
-///
-/// The diagnostic range is set to the method name (identifier only).
 fn create_diagnostic(
     range: TextRange,
     message: &str,
@@ -219,11 +192,6 @@ mod tests {
 
     #[test]
     fn test_export_function_without_comments() {
-        // The function lives outside any region so PublicMethodsDescription
-        // (default `checkAllRegion=false`) also stays silent — the residual
-        // silent case is the responsibility of PublicMethodsDescription's
-        // own audit-gap fix for export-outside-region, not this rule. When
-        // that lands, this assertion will need to follow.
         let code = "Функция Example() Экспорт\nКонецФункции";
         check_diagnostics_snapshot_for(
             code,
@@ -234,9 +202,6 @@ mod tests {
 
     #[test]
     fn test_export_function_without_comments_pmd_disabled() {
-        // When PublicMethodsDescription is disabled, the missing-return-doc check
-        // must still cover export functions that have no documentation at all —
-        // otherwise the case is silent in both rules.
         let code = "Функция Example() Экспорт\nКонецФункции";
         let mut config = DiagnosticsConfig::default();
         config.disabled.push(DiagnosticCode::PublicMethodsDescription);
@@ -312,7 +277,6 @@ mod tests {
     #[test]
     fn test_function_with_type_no_description_default_mode() {
         let code = "// Описание вроде\n// Возвращаемое значение:\n// Строка\nФункция Example()\nКонецФункции";
-        // Default mode (allowShortDescriptionReturnValues=true): type name alone is OK
         check_diagnostics_snapshot_for(
             code,
             DiagnosticCode::MissingReturnedValueDescription,
@@ -341,7 +305,6 @@ mod tests {
     #[test]
     fn test_function_with_hyperlink_reference() {
         let code = "// См. Пример7()\nФункция Example()\nКонецФункции";
-        // Hyperlink references bypass validation
         check_diagnostics_snapshot_for(
             code,
             DiagnosticCode::MissingReturnedValueDescription,
@@ -415,7 +378,6 @@ mod tests {
 
     #[test]
     fn test_structure_with_nested_fields() {
-        // Real-world example from user: function with structured return type
         let code = r#"// Возвращает структуру с доступными публикациями HTTP-сервисов ERP.
 //
 // Возвращаемое значение:
@@ -433,7 +395,6 @@ mod tests {
     Структура.Вставить("Рецептура", "/hs/recipe/changestatus");
     Возврат Структура;
 КонецФункции"#;
-        // Should have NO diagnostics - return value is properly documented
         check_diagnostics_snapshot_for(
             code,
             DiagnosticCode::MissingReturnedValueDescription,
@@ -443,7 +404,6 @@ mod tests {
 
     #[test]
     fn test_diagnostic_range_for_export_function() {
-        // Test that diagnostic highlights only the function name, not "() Экспорт"
         let code = "// Описание\nФункция ПубликацииERP() Экспорт\nКонецФункции";
         check_diagnostics_snapshot_for(
             code,
@@ -455,15 +415,13 @@ mod tests {
         );
         let diagnostics = check_ast_diagnostic(code, check);
 
-        assert_eq!(diagnostics.len(), 1, "Should have one diagnostic"); // snapshot-skip: verifies highlighted source text, not just coordinates.
+        assert_eq!(diagnostics.len(), 1, "Should have one diagnostic");
 
-        // Extract actual highlighted text
         let range = diagnostics[0].range;
         let start: usize = range.start().into();
         let end: usize = range.end().into();
         let highlighted_text = &code[start..end];
 
-        // Should highlight only the function name
         assert_eq!(
             highlighted_text, "ПубликацииERP",
             "Should highlight only function name, not parameters or modifiers"
@@ -472,11 +430,6 @@ mod tests {
 
     #[test]
     fn test_diagnostic_range_mixed_cyrillic_latin() {
-        // Real example from user: mixed Cyrillic+Latin function name
-        // NOTE: This test verifies diagnostic GENERATES correct byte-based TextRange.
-        // The incorrect column positions reported by user (columns 16-33 instead of 8-18)
-        // are due to LSP server not converting byte positions to UTF-16 code units.
-        // See: crates/bsl-analyzer/src/lsp/to_proto.rs:range() - needs to use position_utf16()
         let code = "// Описание\nФункция ЗапросВERP(СервисПубликации, ПараметрыЗапроса, Сессия = Неопределено) Экспорт\nКонецФункции";
         check_diagnostics_snapshot_for(
             code,
@@ -488,15 +441,13 @@ mod tests {
         );
         let diagnostics = check_ast_diagnostic(code, check);
 
-        assert_eq!(diagnostics.len(), 1, "Should have one diagnostic"); // snapshot-skip: verifies mixed Cyrillic/Latin highlighted source text.
+        assert_eq!(diagnostics.len(), 1, "Should have one diagnostic");
 
-        // Extract actual highlighted text
         let range = diagnostics[0].range;
         let start: usize = range.start().into();
         let end: usize = range.end().into();
         let highlighted_text = &code[start..end];
 
-        // Should highlight only the function name
         assert_eq!(
             highlighted_text, "ЗапросВERP",
             "Should highlight only function name 'ЗапросВERP', got '{}'",
@@ -506,7 +457,6 @@ mod tests {
 
     #[test]
     fn test_non_export_function_no_diagnostic() {
-        // Non-export (private) functions don't require return value documentation
         let code = "// Описание\nФункция НастройкиПодключения(СервисПубликации)\n\tВозврат Новый Структура;\nКонецФункции";
         check_diagnostics_snapshot_for(
             code,
@@ -517,7 +467,6 @@ mod tests {
 
     #[test]
     fn test_export_function_requires_documentation() {
-        // Export functions with an existing comment must have return value documentation.
         let code =
             "// Описание\nФункция НастройкиПодключения(СервисПубликации) Экспорт\n\tВозврат Новый Структура;\nКонецФункции";
         check_diagnostics_snapshot_for(
@@ -532,7 +481,6 @@ mod tests {
 
     #[test]
     fn test_export_function_with_complete_docs_ok() {
-        // Export function with complete documentation should pass
         let code = "// Описание\n// Возвращаемое значение:\n//  Структура - настройки подключения\nФункция НастройкиПодключения(СервисПубликации) Экспорт\n\tВозврат Новый Структура;\nКонецФункции";
         check_diagnostics_snapshot_for(
             code,
@@ -561,22 +509,6 @@ mod tests {
 
     #[test]
     fn test_fields_without_main_type_triggers_diagnostic() {
-        // This is CORRECT behavior - diagnostic should trigger when fields (*)
-        // are listed without specifying the main return type.
-        //
-        // INCORRECT format (should trigger diagnostic):
-        //   Возвращаемое значение:
-        //     * Field1 - Type1 - description
-        //     * Field2 - Type2 - description
-        //
-        // CORRECT format (should NOT trigger):
-        //   Возвращаемое значение:
-        //     Структура:
-        //     * Field1 - Type1 - description
-        //     * Field2 - Type2 - description
-        //
-        // Sub-parameters (fields with *) are added to the last type.
-        // If there's no type, they're ignored and the return value block is considered empty.
         let code = r#"// Пакет ответа результата вызова метода HTTP.
 //
 // Возвращаемое значение:
@@ -602,7 +534,6 @@ mod tests {
 
     #[test]
     fn test_fields_with_main_type_ok() {
-        // CORRECT format - main type declared before fields
         let code = r#"// Пакет ответа результата вызова метода HTTP.
 //
 // Возвращаемое значение:

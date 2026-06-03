@@ -1,5 +1,3 @@
-//! Reports instantiation of `СистемнаяИнформация` / `SystemInfo`.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};

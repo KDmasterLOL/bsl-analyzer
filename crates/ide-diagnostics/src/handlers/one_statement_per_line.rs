@@ -1,7 +1,3 @@
-//! OneStatementPerLine diagnostic.
-//!
-//! Reports multiple statements placed on the same line.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -21,8 +17,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates a diagnostic from HIR when more than one statement is placed on the
-/// same source line.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     crate::simple_hir_diagnostic(
         DiagnosticCode::OneStatementPerLine,
@@ -117,7 +111,6 @@ mod tests {
 
     #[test]
     fn test_preprocessor_exclusion() {
-        // Statements with preprocessor should be excluded
         let code = r#"
 Процедура Тест()
     УспешноПодключено = ПодключитьВнешнююКомпоненту(

@@ -1,6 +1,5 @@
 use std::fmt;
 
-/// Logical search corpus.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum CorpusId {
     WorkspaceCode,
@@ -37,7 +36,6 @@ impl fmt::Display for CorpusId {
     }
 }
 
-/// Immutable snapshot identifier.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SnapshotId(pub String);
 
@@ -47,7 +45,6 @@ impl SnapshotId {
     }
 }
 
-/// Selected baseline for building a resolved search view.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BaselineRef {
     pub corpus: CorpusId,
@@ -62,20 +59,17 @@ impl BaselineRef {
     }
 }
 
-/// Baseline source selection for a resolved search view.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BaselineSourceConfig {
     Local,
     External(ExternalBaselineConfig),
 }
 
-/// Supported backend types for centralized baseline storage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExternalBaselineBackend {
     Postgres,
 }
 
-/// External baseline connection configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalBaselineConfig {
     pub backend: ExternalBaselineBackend,
@@ -98,7 +92,6 @@ impl ExternalBaselineConfig {
     }
 }
 
-/// Immutable baseline snapshot metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
     pub id: SnapshotId,
@@ -123,14 +116,12 @@ impl Snapshot {
     }
 }
 
-/// Operational metadata associated with snapshot publication.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SnapshotPublishMetadata {
     pub branch: Option<String>,
     pub commit: Option<String>,
 }
 
-/// Operational counters produced by one snapshot publication.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SnapshotPublishStats {
     pub reused_files: usize,
@@ -140,7 +131,6 @@ pub struct SnapshotPublishStats {
     pub written_documents: usize,
 }
 
-/// File-like identifier inside a corpus collection.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DocumentPath {
     pub collection: String,
@@ -153,7 +143,6 @@ impl DocumentPath {
     }
 }
 
-/// Searchable document resolved from a chunk or reference entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexedDocument {
     pub collection: String,
@@ -164,15 +153,29 @@ pub struct IndexedDocument {
     pub line_end: u32,
     pub text: String,
     pub content_hash: String,
+    /// Optional pre-rendered graph context (signature, dispatch, calls, metadata
+    /// reads) prepended to the embedding text. Opaque to this crate — produced
+    /// upstream by a layer that has the call graph, so `bsl-search` stays graph
+    /// agnostic. `None` for documents indexed without graph enrichment (the docs
+    /// collection, plain re-index). Folding it into the embedded text (and thus the
+    /// content hash that keys re-embedding) is the whole point of GE.
+    pub graph_context: Option<String>,
 }
 
 impl IndexedDocument {
     pub fn document_path(&self) -> DocumentPath {
         DocumentPath::new(self.collection.clone(), self.path.clone())
     }
+
+    /// Attach pre-rendered graph context. A blank/whitespace-only string is treated
+    /// as absent so it never perturbs the embedding text or its hash.
+    pub fn with_graph_context(mut self, context: impl Into<String>) -> Self {
+        let context = context.into();
+        self.graph_context = (!context.trim().is_empty()).then_some(context);
+        self
+    }
 }
 
-/// Lexical hit returned directly from a baseline serving table.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LexicalHit {
     pub collection: String,
@@ -185,7 +188,6 @@ pub struct LexicalHit {
     pub rank: f32,
 }
 
-/// Semantic hit returned directly from a baseline serving table.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SemanticHit {
     pub collection: String,
@@ -197,7 +199,6 @@ pub struct SemanticHit {
     pub score: f32,
 }
 
-/// Overlay for one logical file/document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileOverlay {
     pub target: DocumentPath,
@@ -210,14 +211,12 @@ impl FileOverlay {
     }
 }
 
-/// Local changes that modify baseline visibility.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OverlayChange {
     ReplaceFile(FileOverlay),
     DeleteFile(DocumentPath),
 }
 
-/// Overlay built relative to a selected baseline.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchOverlay {
     pub baseline: BaselineRef,

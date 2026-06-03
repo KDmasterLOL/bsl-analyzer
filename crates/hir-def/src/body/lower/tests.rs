@@ -1,5 +1,3 @@
-//! Tests for body lowering.
-
 use base_db::{RootQueryDb, SourceDatabase};
 use ide_db::RootDatabaseImpl;
 use syntax::{SyntaxKind, SyntaxNode};
@@ -18,7 +16,6 @@ fn parse_method(code: &str) -> SyntaxNode {
     let parse = db.parse(file_id);
     let root = parse.syntax_node();
 
-    // Find first method
     root.descendants()
         .find(|n| matches!(n.kind(), SyntaxKind::PROCEDURE_DEF | SyntaxKind::FUNCTION_DEF))
         .expect("No method found in test code")
@@ -30,9 +27,6 @@ fn test_lower_empty_procedure() {
     let result = lower_method(&method, false);
 
     assert_eq!(result.body.params.len(), 0);
-    // Empty procedure body should NOT emit EmptyCodeBlock diagnostic
-    // (per test fixture comment: "Ошибка быть не должно, есть другая проверка")
-    // Empty functions/procedures are handled by FunctionShouldHaveReturn or similar
     assert!(!result.diagnostics.iter().any(|d| matches!(d, BodyDiagnostic::EmptyCodeBlock { .. })));
 }
 
@@ -41,7 +35,6 @@ fn test_lower_function_without_return() {
     let method = parse_method("Функция Тест() КонецФункции");
     let result = lower_method(&method, true);
 
-    // Function without return should emit FunctionShouldHaveReturn diagnostic
     assert!(result
         .diagnostics
         .iter()
@@ -57,7 +50,6 @@ fn test_lower_function_with_return() {
     );
     let result = lower_method(&method, true);
 
-    // Function with return should NOT emit FunctionShouldHaveReturn
     assert!(!result
         .diagnostics
         .iter()
@@ -71,25 +63,21 @@ fn test_lower_procedure_with_params() {
 
     assert_eq!(result.body.params.len(), 3);
 
-    // Check first param
     let param1 = result.body.binding(BindingId::from_idx(result.body.params[0]));
     assert_eq!(param1.name.as_str(), "А");
     assert!(!param1.is_val);
     assert!(param1.default_value.is_none(), "param А should not have default value");
 
-    // Check second param (Знач)
     let param2 = result.body.binding(BindingId::from_idx(result.body.params[1]));
     assert_eq!(param2.name.as_str(), "Б");
     assert!(param2.is_val);
     assert!(param2.default_value.is_none(), "param Б should not have default value");
 
-    // Check third param (with default value)
     let param3 = result.body.binding(BindingId::from_idx(result.body.params[2]));
     assert_eq!(param3.name.as_str(), "В");
     assert!(!param3.is_val);
     assert!(param3.default_value.is_some(), "param В should have default value");
 
-    // Check that the default value is a number literal 1
     let default_expr_id = param3.default_value.unwrap();
     let default_expr = result.body.expr_idx(default_expr_id);
     assert!(
@@ -121,7 +109,6 @@ fn test_lower_self_assign() {
     );
     let result = lower_method(&method, false);
 
-    // Self-assignment should emit diagnostic
     assert!(result.diagnostics.iter().any(|d| matches!(d, BodyDiagnostic::SelfAssign { .. })));
 }
 
@@ -153,14 +140,12 @@ fn test_sdbl_collected_in_hir() {
     );
     let result = lower_method(&method, false);
 
-    // Should have collected 1 SDBL query
     assert_eq!(result.body.sdbl_exprs.len(), 1);
 
     let (expr_id, query_info) = &result.body.sdbl_exprs[0];
     assert!(query_info.is_valid());
     assert!(query_info.query_text.contains("SELECT"));
 
-    // Verify ExprId points to a string literal
     match result.body.expr_idx(*expr_id) {
         Expr::Literal(Literal::String(_)) => {}
         _ => panic!("Expected string literal"),
@@ -186,7 +171,6 @@ fn test_sdbl_multiline_query() {
 
     let (_expr_id, query_info) = &result.body.sdbl_exprs[0];
     assert!(query_info.is_valid());
-    // Multiline string should be parsed correctly
     assert!(query_info.query_text.contains("Наименование"));
 }
 
@@ -202,7 +186,6 @@ fn test_short_strings_ignored() {
     );
     let result = lower_method(&method, false);
 
-    // Should not collect short strings (< 15 chars)
     assert_eq!(result.body.sdbl_exprs.len(), 0);
 }
 
@@ -220,7 +203,6 @@ fn test_multiple_queries_in_method() {
     );
     let result = lower_method(&method, false);
 
-    // Should collect both queries
     assert_eq!(result.body.sdbl_exprs.len(), 2);
 
     assert!(result.body.sdbl_exprs[0].1.query_text.contains("SELECT"));
@@ -242,7 +224,6 @@ fn test_if_else_duplicated_code_block() {
     );
     let result = lower_method(&method, false);
 
-    // Should detect duplicated code blocks
     let diags: Vec<_> = result
         .diagnostics
         .iter()
@@ -264,7 +245,6 @@ fn test_if_else_different_blocks() {
     );
     let result = lower_method(&method, false);
 
-    // Should NOT detect duplicated code blocks (different values)
     let diags: Vec<_> = result
         .diagnostics
         .iter()
@@ -286,7 +266,6 @@ fn test_if_elsif_duplicated_code_block() {
     );
     let result = lower_method(&method, false);
 
-    // Should detect duplicated code blocks in if/elsif
     let diags: Vec<_> = result
         .diagnostics
         .iter()
@@ -306,7 +285,6 @@ fn test_if_else_empty_blocks_not_duplicated() {
     );
     let result = lower_method(&method, false);
 
-    // Empty blocks should NOT be reported as duplicates
     let diags: Vec<_> = result
         .diagnostics
         .iter()
@@ -334,17 +312,14 @@ fn test_if_else_duplicated_range_correct() {
         .collect();
     assert_eq!(diags.len(), 1);
 
-    // Diagnostic should point to the FIRST block (then-branch)
     if let BodyDiagnostic::IfElseDuplicatedCodeBlock { range } = diags[0] {
         let text = &code[range.start().into()..range.end().into()];
-        // The range should cover the STMT_LIST content (А = 1;)
         assert!(text.contains("А = 1"), "Range should cover the duplicated statement");
     }
 }
 
 #[test]
 fn test_preprocessor_split_expressions() {
-    // Test from IdenticalExpressionsDiagnostic.bsl fixture
     let mut db = RootDatabaseImpl::new();
     let file_id = FileId::from_raw(0);
     let code = r#"
@@ -393,25 +368,10 @@ fn test_preprocessor_split_expressions() {
     for diag in &result.diagnostics {
         println!("  {:?}", diag);
     }
-
-    // Key questions to answer:
-    // 1. How many statements are lowered?
-    // 2. Are the split expressions represented in HIR?
-    // 3. Are there ERROR nodes in the parse tree?
-
-    // The fixture shows this should work, so we expect:
-    // - 2 statements (both assignments)
-    // - Split expressions should be represented in HIR
-    // We're just inspecting for now - assertions will come after we understand the behavior
 }
-
-// --- ERROR-node recovery lowering -------------------------------------------
 
 #[test]
 fn recovery_lowers_bare_field_access_as_stmt_expr() {
-    // `Сп.В` without `()` is not a valid BSL statement. Parser wraps the
-    // FIELD_EXPR in NodeKind::Error, but we still want an Expr::Field so
-    // completion/hover see the receiver type.
     let method = parse_method(
         "Процедура Тест()
             Сп = Новый Массив;
@@ -420,7 +380,6 @@ fn recovery_lowers_bare_field_access_as_stmt_expr() {
     );
     let result = super::lower_method(&method, false);
 
-    // Last statement must be a Stmt::Expr for the recovered field access.
     assert!(
         result.body.body_stmts.len() >= 2,
         "expected at least assign + recovered stmt, got {}: {:?}",
@@ -453,8 +412,6 @@ fn recovery_lowers_bare_field_access_as_stmt_expr() {
         other => panic!("base should be Expr::Path, got {:?}", other),
     }
 
-    // Both expressions are flagged as recovered so downstream consumers
-    // (hir-ty diagnostics, CFG) can opt out.
     use crate::ExprId;
     assert!(
         result.body.is_recovered(ExprId::from_idx(recovered_expr_id)),
@@ -468,8 +425,6 @@ fn recovery_lowers_bare_field_access_as_stmt_expr() {
 
 #[test]
 fn recovery_does_not_kick_in_for_well_formed_call_stmt() {
-    // Sanity: a normal `Сп.Добавить(1)` is a valid CALL_STMT, so lowering
-    // must not mark it as recovered.
     let method = parse_method(
         "Процедура Тест()
             Сп = Новый Массив;

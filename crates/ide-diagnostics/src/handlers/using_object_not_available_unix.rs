@@ -1,5 +1,3 @@
-//! Reports usage of platform objects that are unavailable in Unix/Linux environments.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -20,9 +18,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     clean_code_attribute: CleanCodeAttribute::Adaptable,
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic.
-///
-/// Called from hir_dispatch when `BodyDiagnostic::UsingObjectNotAvailableUnix` is encountered.
 pub fn from_hir(type_name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     let code = DiagnosticCode::UsingObjectNotAvailableUnix;
 

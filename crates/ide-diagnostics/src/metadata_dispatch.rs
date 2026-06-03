@@ -1,10 +1,5 @@
-//! Metadata-based diagnostics collection.
-//!
-//! This module collects diagnostics that use module_metadata from HIR.
-
 use crate::{handlers, Diagnostic, DiagnosticCode, DiagnosticsContext};
 
-/// Diagnostics that use ModuleMetadata from HIR
 pub(crate) const METADATA_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::CommonModuleInvalidType,
     DiagnosticCode::CommonModuleNameClient,
@@ -25,14 +20,7 @@ pub(crate) const METADATA_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::WrongWebServiceHandler,
 ];
 
-/// Collect metadata-based diagnostics using module_metadata from HIR.
-///
-/// Phase 2 diagnostics that have been migrated to use ModuleMetadata directly
-/// instead of loading Configuration for each file. These are part of module_bodies()
-/// and are cached by Salsa for performance.
-///
 pub fn collect_metadata_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    // Early exit: skip if none of our diagnostics are enabled
     if !ctx.config.any_enabled(METADATA_DIAGNOSTICS) {
         return Vec::new();
     }

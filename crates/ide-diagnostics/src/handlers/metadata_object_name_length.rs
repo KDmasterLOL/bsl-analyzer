@@ -1,8 +1,3 @@
-//! MetadataObjectNameLength diagnostic
-//!
-//! Checks that metadata object names don't exceed maximum allowed length.
-//!
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -24,15 +19,8 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     clean_code_attribute: CleanCodeAttribute::Consistent,
 };
 
-/// Default maximum metadata object name length.
 const DEFAULT_MAX_LENGTH: usize = 80;
 
-/// Collect diagnostics from module metadata.
-///
-/// Checks metadata object name length based on module type:
-/// - CommonModule: check common_module name
-/// - MetadataObject modules: check mdo name and children
-/// - Register modules: check register name
 pub fn from_metadata(metadata: &ModuleMetadata, ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::MetadataObjectNameLength;
 
@@ -47,17 +35,14 @@ pub fn from_metadata(metadata: &ModuleMetadata, ctx: &DiagnosticsContext) -> Vec
 
     let mut diagnostics = Vec::new();
 
-    // Check CommonModule
     if let Some(ref common_module) = metadata.common_module {
         check_common_module(common_module, max_length, code, ctx, &mut diagnostics);
     }
 
-    // Check MetadataObject
     if let Some(ref mdo) = metadata.mdo {
         check_metadata_object(mdo, max_length, code, ctx, &mut diagnostics);
     }
 
-    // Check Register
     if let Some(ref register) = metadata.register {
         check_register(register, max_length, code, ctx, &mut diagnostics);
     }
@@ -65,10 +50,6 @@ pub fn from_metadata(metadata: &ModuleMetadata, ctx: &DiagnosticsContext) -> Vec
     diagnostics
 }
 
-/// Check for SessionModule - needs full configuration access.
-///
-/// SessionModule is special: it checks ALL metadata objects without modules.
-/// This is called from runner.rs with DiagnosticsContext.
 pub fn check_session_module(
     configuration: &bsl_metadata::Configuration,
     ctx: &DiagnosticsContext,
@@ -368,16 +349,13 @@ mod tests {
         use ide_db::RootDatabaseImpl;
         let mut bsl_config = bsl_metadata::Configuration::new("TestConfig");
 
-        // Add object WITH modules - should NOT be checked
         let catalog = bsl_metadata::MetadataObject::new(bsl_metadata::MdoType::Catalog, LONG_NAME);
         bsl_config.add_metadata_object(catalog);
 
-        // Add object WITHOUT modules - SHOULD be checked
         let constant =
             bsl_metadata::MetadataObject::new(bsl_metadata::MdoType::Constant, LONG_NAME);
         bsl_config.add_metadata_object(constant);
 
-        // Create minimal database
         let db = RootDatabaseImpl::new();
         let file_id = vfs::FileId(0);
         let diagnostics_config = default_config();
@@ -387,7 +365,6 @@ mod tests {
 
         let diagnostics = check_session_module(&bsl_config, &ctx);
 
-        // Only the constant should be flagged (Catalog has modules)
         assert_eq!(diagnostics.len(), 1);
     }
 }

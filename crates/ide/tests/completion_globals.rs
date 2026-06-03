@@ -1,9 +1,3 @@
-//! Completion tests for HBK global identifiers (band 2_5 in `complete_top_level`)
-//! and the interaction with band 2 (MDO plurals) and band 3 (workspace
-//! CommonModules).
-//!
-//! The `$0` marker denotes the cursor position.
-
 use ide::{Analysis, CompletionItem, CompletionItemKind};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
@@ -70,10 +64,6 @@ fn hbk_globals_available() -> bool {
     !bsl_platform::PlatformDataInner::instance().all_global_properties().is_empty()
 }
 
-// =====================================================================
-// 1. HBK property appears at top level (band 2_5)
-// =====================================================================
-
 #[test]
 fn completion_hbk_property_appears_at_top_level() {
     if !hbk_globals_available() {
@@ -97,10 +87,6 @@ fn completion_hbk_property_appears_at_top_level() {
     assert!(detail.contains("ОбъектМетаданныхКонфигурация"), "detail = {detail:?}");
 }
 
-// =====================================================================
-// 2. is_readonly marker present in detail
-// =====================================================================
-
 #[test]
 fn completion_hbk_property_readonly_marker_in_detail() {
     if !hbk_globals_available() {
@@ -123,10 +109,6 @@ fn completion_hbk_property_readonly_marker_in_detail() {
     assert!(detail.ends_with("[Только чтение]"), "detail = {detail:?}");
 }
 
-// =====================================================================
-// 3. Bilingual prefix match — typing English finds Russian-labeled property
-// =====================================================================
-
 #[test]
 fn completion_bilingual_prefix_finds_property() {
     if !hbk_globals_available() {
@@ -145,10 +127,6 @@ fn completion_bilingual_prefix_finds_property() {
         items.iter().map(|i| &i.label).collect::<Vec<_>>()
     );
 }
-
-// =====================================================================
-// 4. RU/EN collision emits once — `Документы` once, not also `Documents`
-// =====================================================================
 
 #[test]
 fn completion_russian_english_collision_emits_once() {
@@ -177,10 +155,6 @@ fn completion_russian_english_collision_emits_once() {
     );
 }
 
-// =====================================================================
-// 5. MDO plural not duplicated — only one `Документы` (band 2 wins, band 2_5 skips)
-// =====================================================================
-
 #[test]
 fn completion_mdo_plural_not_duplicated() {
     let items = complete(
@@ -196,10 +170,6 @@ fn completion_mdo_plural_not_duplicated() {
     let detail = docs.detail.as_deref().unwrap_or("");
     assert!(detail.starts_with("Коллекция метаданных"), "detail = {detail:?}");
 }
-
-// =====================================================================
-// 6. Workspace CommonModule shadows HBK global (mirrors infer.rs:1493)
-// =====================================================================
 
 #[test]
 fn completion_workspace_common_module_shadows_hbk_global() {
@@ -228,10 +198,6 @@ fn completion_workspace_common_module_shadows_hbk_global() {
     );
 }
 
-// =====================================================================
-// 7. sort_text bands stable in empty-prefix completion
-// =====================================================================
-
 #[test]
 fn completion_sort_text_bands_stable() {
     let items = complete(
@@ -257,10 +223,6 @@ fn completion_sort_text_bands_stable() {
     }
 }
 
-// =====================================================================
-// 8. Local Перем shadows HBK global (band 0 wins)
-// =====================================================================
-
 #[test]
 fn completion_local_shadows_hbk_global() {
     if !hbk_globals_available() {
@@ -285,10 +247,6 @@ fn completion_local_shadows_hbk_global() {
     );
 }
 
-// =====================================================================
-// 9. Workspace CommonModule appears standalone (no HBK collision)
-// =====================================================================
-
 #[test]
 fn completion_workspace_common_module_appears_standalone() {
     let items = complete(
@@ -312,15 +270,6 @@ fn completion_workspace_common_module_appears_standalone() {
     assert_eq!(item.kind, CompletionItemKind::MdoObject);
 }
 
-// =====================================================================
-// 10. English-named CommonModule does NOT cross-alias-shadow HBK Метаданные
-// =====================================================================
-//
-// Mirrors `Resolver::user_common_module_exists` — it keys on the lookup name
-// as typed by the user (no RU↔EN alias folding). A CM named `Metadata`
-// shadows HBK only when the user types `Metadata`; typing `Метаданные`
-// still resolves to the HBK global, so completion must surface it.
-
 #[test]
 fn completion_english_cm_does_not_cross_alias_shadow_hbk_global() {
     if !hbk_globals_available() {
@@ -338,8 +287,6 @@ fn completion_english_cm_does_not_cross_alias_shadow_hbk_global() {
 КонецПроцедуры
 "#,
     );
-    // CM `Metadata` does not match RU prefix `Мет`, so only the HBK property
-    // should surface — confirming no over-aggressive cross-alias suppression.
     let meta = find_item(&items, "Метаданные").unwrap_or_else(|| {
         panic!(
             "HBK Метаданные must surface for RU prefix `Мет` even with EN-named CM in workspace; \
@@ -349,17 +296,6 @@ fn completion_english_cm_does_not_cross_alias_shadow_hbk_global() {
     });
     assert_eq!(meta.kind, CompletionItemKind::Property);
 }
-
-// =====================================================================
-// 11b. Global function NOT shadowed by same-named workspace CommonModule
-// =====================================================================
-//
-// Per BSL semantics & `Resolver`'s precedence note, builtin platform
-// functions are highest priority and not preempted by user code. A
-// workspace `CommonModule/НачатьТранзакцию/...` only resolves via
-// `НачатьТранзакцию.Method()`; the bareword call still binds to the
-// platform function. Completion must surface the function regardless of
-// a same-named CM.
 
 #[test]
 fn completion_global_function_not_shadowed_by_same_named_cm() {
@@ -392,10 +328,6 @@ fn completion_global_function_not_shadowed_by_same_named_cm() {
             .collect::<Vec<_>>()
     );
 }
-
-// =====================================================================
-// 11. Global function sorts after MDO plural (band 2_ < band 2_5_ < band 3_)
-// =====================================================================
 
 #[test]
 fn completion_global_function_sorts_after_mdo_plural() {

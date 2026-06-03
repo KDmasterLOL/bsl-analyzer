@@ -1,318 +1,151 @@
-//! SDBL semantic diagnostics.
-//!
-//! Diagnostics collected during SDBL HIR lowering.
-
 use text_size::TextRange;
 
 use crate::types::SdblType;
 
-/// Semantic diagnostic collected during SDBL HIR lowering.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SdblDiagnostic {
-    /// Table doesn't exist in metadata.
-    ///
-    /// BSL-LS diagnostic code: 122
     QueryToMissingMetadata {
-        /// Table name that wasn't found.
         table_name: String,
-        /// Source range.
         range: TextRange,
     },
 
-    /// JOIN with virtual table (not recommended).
-    ///
-    /// BSL-LS diagnostic code: 79
     JoinWithVirtualTable {
-        /// Table name.
         table_name: String,
-        /// Virtual table type (e.g., "СрезПоследних").
         virtual_table_type: String,
-        /// Source range.
         range: TextRange,
     },
 
-    /// Virtual table call without required parameters.
-    ///
-    /// BSL-LS diagnostic code: 174
     VirtualTableCallWithoutParameters {
-        /// Table name.
         table_name: String,
-        /// Expected parameters.
         expected_params: Vec<String>,
-        /// Source range.
         range: TextRange,
     },
 
-    /// Unknown field in table.
     UnknownField {
-        /// Table name.
         table_name: String,
-        /// Field name that wasn't found.
         field_name: String,
-        /// Source range.
         range: TextRange,
     },
 
-    /// Ambiguous column reference (multiple tables have same field).
     AmbiguousColumnRef {
-        /// Column name.
         column_name: String,
-        /// Possible tables with this column.
         possible_tables: Vec<String>,
-        /// Source range.
         range: TextRange,
     },
 
-    /// Type mismatch in expression.
     TypeMismatch {
-        /// Expected type.
         expected: SdblType,
-        /// Actual type found.
         actual: SdblType,
-        /// Context description.
         context: String,
-        /// Source range.
         range: TextRange,
     },
 
-    /// Unknown function.
     UnknownFunction {
-        /// Function name.
         function_name: String,
-        /// Source range.
         range: TextRange,
     },
 
-    /// Invalid function argument count.
     InvalidArgumentCount {
-        /// Function name.
         function_name: String,
-        /// Expected count (or range).
         expected: String,
-        /// Actual count.
         actual: usize,
-        /// Source range.
         range: TextRange,
     },
 
-    /// Alias required (AS keyword missing).
-    ///
-    /// Note: This is a syntax-level check that can also be done at HIR level.
     AliasRequired {
-        /// Field or column name.
         name: String,
-        /// Source range.
         range: TextRange,
     },
 
-    /// Duplicate alias in SELECT.
     DuplicateAlias {
-        /// Alias name.
         alias: String,
-        /// Source range of duplicate.
         range: TextRange,
     },
 
-    /// FULL OUTER JOIN detected (performance issue).
-    ///
-    /// BSL-LS diagnostic code: FullOuterJoinQuery
     FullOuterJoin {
-        /// Source range.
         range: TextRange,
     },
 
-    /// JOIN with subquery (severe performance issue).
-    ///
-    /// BSL-LS diagnostic code: JoinWithSubQuery
     JoinWithSubQuery {
-        /// Source range.
         range: TextRange,
     },
 
-    /// Field alias without AS keyword (or no alias).
-    ///
-    /// BSL-LS diagnostic code: AssignAliasFieldsInQuery
     AliasWithoutAsKeyword {
-        /// Field name (for message).
         field_name: Option<String>,
-        /// Raw field name from expression (last identifier, e.g. "ВидНоменклатуры").
         raw_name: Option<String>,
-        /// Source range.
         range: TextRange,
     },
 
-    /// OR operator in WHERE clause (performance issue).
-    ///
-    /// BSL-LS diagnostic code: LogicalOrInTheWhereSectionOfQuery
     LogicalOrInWhere {
-        /// Source range.
         range: TextRange,
     },
 
-    /// OR operator in JOIN condition with multiple fields (performance issue).
-    ///
-    /// BSL-LS diagnostic code: LogicalOrInJoinQuerySection
     LogicalOrInJoin {
-        /// Source range.
         range: TextRange,
     },
 
-    /// Fields from LEFT/RIGHT/FULL JOIN without NULL protection.
-    ///
-    /// BSL-LS diagnostic code: FieldsFromJoinsWithoutIsNull
     FieldsFromJoinWithoutNullCheck {
-        /// JOIN type (for message generation).
         join_type: crate::hir::JoinType,
-        /// Source range of the JOIN clause.
         range: TextRange,
-        /// Unprotected field references (for future LSP RelatedInformation).
         unprotected_fields: Vec<UnprotectedFieldRef>,
     },
 
-    /// Multiline string literal in query (likely incorrect quoting).
-    ///
-    /// BSL-LS diagnostic code: MultilineStringInQuery
-    ///
-    /// In SDBL, empty string is """" (4 quotes), not "" (2 quotes).
-    /// Two quotes create a multiline string which is usually unintended.
     MultilineString {
-        /// Source range.
         range: TextRange,
     },
 
-    /// Nested field dereference by dot (performance issue).
-    ///
-    /// BSL-LS diagnostic code: QueryNestedFieldsByDot
-    ///
-    /// Accessing reference fields through multiple dots causes N+1 query problem.
     QueryNestedFieldsByDot {
-        /// Source range.
         range: TextRange,
-        /// Number of dot-separated parts in the ColumnRef path.
-        ///
-        /// `Some(n)` for ColumnRef contexts — subject to the `minPathDepth`
-        /// handler-side filter (default 3). HIR lowering still enforces the hard
-        /// floor `n >= 2`; one-part identifiers carry no dereference to flag.
-        ///
-        /// `None` for non-path contexts — virtual-table parameter dereference,
-        /// CAST chained `member_access` — these are different rules whose
-        /// thresholds are intrinsic to their syntax and always emit.
         parts_count: Option<u32>,
     },
 
-    /// Redundant use of .Ссылка (Reference) field in SDBL query.
-    ///
-    /// BSL-LS diagnostic code: RefOveruse
-    ///
-    /// Accessing `.Ссылка` on a reference field causes an implicit LEFT JOIN
-    /// with the source table, creating unnecessary database load.
-    ///
-    /// Exceptions:
-    /// - `Table.Ссылка` - direct reference field access (OK)
-    /// - Tabular section's `.Ссылка` - back-reference to parent object (OK)
-    /// - Virtual table slices (СрезПоследних, СрезПервых) - `.Ссылка` refers to dimension (OK)
     RefOveruse {
-        /// Source range.
         range: TextRange,
     },
 
-    /// UNION without ALL keyword (performance issue).
-    ///
-    /// BSL-LS diagnostic code: UnionAll
-    ///
-    /// Using UNION without ALL causes deduplication of identical rows,
-    /// which is unnecessary overhead when duplicate rows cannot exist.
     UnionWithoutAll {
-        /// Source range.
         range: TextRange,
     },
 
-    /// Use of `LIKE` / `ПОДОБНО` operator in a query.
-    ///
-    /// Track 2 §4 Slice 4: a single variant carries both BSL-LS rules
-    /// (`UsingLikeInQuery` always; `IncorrectUseLikeInQuery` when the
-    /// pattern operand is a column reference). The discriminator lives
-    /// in `kind`; consumer handlers filter accordingly.
-    ///
-    /// The pattern (right operand) of `LIKE` / `ПОДОБНО` is expected to be
-    /// a string literal, a query parameter, or a function call. Using a
-    /// column reference yields unpredictable behaviour across DBMS engines
-    /// and is reported as `LikeUsageKind::Incorrect`.
     LikeUsage {
-        /// Source range.
         range: TextRange,
-        /// Pattern-shape classification.
         kind: LikeUsageKind,
     },
 
-    /// Using SELECT TOP/FIRST without ORDER BY clause.
-    ///
-    /// BSL-LS diagnostic code: SelectTopWithoutOrderBy
-    ///
-    /// Without ORDER BY, the result order is unpredictable and may vary between:
-    /// - Different DBMS implementations
-    /// - Different query executions on same DBMS
-    ///
-    /// Special cases:
-    /// - TOP 1 with WHERE clause is allowed (single row guaranteed)
-    /// - TOP in UNION is always an error (ORDER BY applies after UNION, not to parts)
     SelectTopWithoutOrderBy {
-        /// TOP/FIRST value (e.g., 1, 10, etc.)
         top_value: u32,
-        /// Whether this query is part of a UNION (always error in UNION).
         in_union: bool,
-        /// Whether the query has a WHERE clause (TOP 1 + WHERE is allowed).
         has_where: bool,
-        /// Source range of TOP/FIRST keyword.
         range: TextRange,
     },
 }
 
-/// Pattern-shape classification for `LikeUsage`.
-///
-/// Discriminates the two BSL-LS rules that fire on the same `LIKE` /
-/// `ПОДОБНО` site:
-/// - `Allowed` — the pattern is a string literal, query parameter, or
-///   function call. Only the «every LIKE is suspect» rule (`UsingLikeInQuery`)
-///   applies.
-/// - `Incorrect` — the pattern is a column reference (or otherwise
-///   unrecognized as one of the allowed shapes). Both rules apply
-///   (`UsingLikeInQuery` + `IncorrectUseLikeInQuery`); the latter is a
-///   standard violation rather than a code smell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LikeUsageKind {
     Allowed,
     Incorrect,
 }
 
-/// Reference to an unprotected field from JOIN.
-///
-/// Used for detailed error reporting and future LSP RelatedInformation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnprotectedFieldRef {
-    /// Table alias.
     pub table_alias: String,
-    /// Field name (for debugging/messages).
     pub field_name: String,
-    /// Source range in SDBL.
     pub range: TextRange,
 }
 
 impl SdblDiagnostic {
-    /// Get diagnostic code (for BSL-LS compatibility).
     pub fn code(&self) -> Option<u32> {
         match self {
             Self::QueryToMissingMetadata { .. } => Some(122),
             Self::JoinWithVirtualTable { .. } => Some(79),
             Self::VirtualTableCallWithoutParameters { .. } => Some(174),
-            Self::QueryNestedFieldsByDot { .. } => None, // Uses string code
-            Self::RefOveruse { .. } => None,             // Uses string code
-            Self::LikeUsage { .. } => None,              // Uses string code
-            _ => None, // Other diagnostics don't have BSL-LS codes
+            Self::QueryNestedFieldsByDot { .. } => None,
+            Self::RefOveruse { .. } => None,
+            Self::LikeUsage { .. } => None,
+            _ => None,
         }
     }
 
-    /// Get diagnostic message.
     pub fn message(&self) -> String {
         match self {
             Self::QueryToMissingMetadata { table_name, .. } => {
@@ -427,7 +260,6 @@ impl SdblDiagnostic {
         }
     }
 
-    /// Get source range.
     pub fn range(&self) -> TextRange {
         match self {
             Self::QueryToMissingMetadata { range, .. } => *range,
@@ -455,10 +287,8 @@ impl SdblDiagnostic {
         }
     }
 
-    /// Check if this is an error (vs warning).
     pub fn is_error(&self) -> bool {
         match self {
-            // Errors - prevent correct execution
             Self::QueryToMissingMetadata { .. } => true,
             Self::UnknownField { .. } => true,
             Self::AmbiguousColumnRef { .. } => true,
@@ -466,7 +296,6 @@ impl SdblDiagnostic {
             Self::UnknownFunction { .. } => true,
             Self::InvalidArgumentCount { .. } => true,
 
-            // Warnings - code may work but has issues
             Self::JoinWithVirtualTable { .. } => false,
             Self::VirtualTableCallWithoutParameters { .. } => false,
             Self::AliasRequired { .. } => false,
@@ -476,14 +305,14 @@ impl SdblDiagnostic {
             Self::AliasWithoutAsKeyword { .. } => false,
             Self::LogicalOrInWhere { .. } => false,
             Self::LogicalOrInJoin { .. } => false,
-            Self::FieldsFromJoinWithoutNullCheck { .. } => false, // Warning/Critical, not an error
-            Self::MultilineString { .. } => false, // Warning - likely incorrect quoting
-            Self::QueryNestedFieldsByDot { .. } => false, // Warning - performance issue
-            Self::RefOveruse { .. } => false,      // Warning - performance issue
-            Self::UnionWithoutAll { .. } => false, // Warning - performance issue
-            Self::LikeUsage { kind: LikeUsageKind::Allowed, .. } => false, // Warning - unpredictable results
-            Self::LikeUsage { kind: LikeUsageKind::Incorrect, .. } => true, // Error - standard violation
-            Self::SelectTopWithoutOrderBy { .. } => false, // Code smell - unpredictable results
+            Self::FieldsFromJoinWithoutNullCheck { .. } => false,
+            Self::MultilineString { .. } => false,
+            Self::QueryNestedFieldsByDot { .. } => false,
+            Self::RefOveruse { .. } => false,
+            Self::UnionWithoutAll { .. } => false,
+            Self::LikeUsage { kind: LikeUsageKind::Allowed, .. } => false,
+            Self::LikeUsage { kind: LikeUsageKind::Incorrect, .. } => true,
+            Self::SelectTopWithoutOrderBy { .. } => false,
         }
     }
 }

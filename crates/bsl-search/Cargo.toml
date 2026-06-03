@@ -9,39 +9,29 @@ rust-version.workspace = true
 doctest = false
 
 [dependencies]
-# Internal crates
 syntax.workspace = true
 parser.workspace = true
 lexer.workspace = true
 
-# Storage
-rusqlite = { version = "0.39", features = ["bundled"] }
+rusqlite.workspace = true
 postgres = "0.19"
 r2d2_postgres = "0.18"
 
-# Hashing
 blake3 = "1.8"
 
-# HTTP client for embedding API
 ureq = { version = "3.2", features = ["json"] }
 
-# Vector search
 usearch = "2.24"
 
-# Serialization
 serde.workspace = true
 serde_json.workspace = true
 
-# Logging
 tracing.workspace = true
 
-# Error handling
 thiserror.workspace = true
 
-# Parallelism
 crossbeam-channel.workspace = true
 
-# Utilities
 walkdir.workspace = true
 
 [dev-dependencies]

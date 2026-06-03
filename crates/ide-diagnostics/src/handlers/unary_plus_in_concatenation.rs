@@ -1,5 +1,3 @@
-//! Detects accidental unary plus inside string concatenation.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};

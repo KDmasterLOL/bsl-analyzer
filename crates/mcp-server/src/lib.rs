@@ -1,24 +1,21 @@
-//! MCP (Model Context Protocol) server for bsl-analyzer.
-//!
-//! Exposes 1C:Enterprise metadata and platform knowledge as MCP tools
-//! for AI agents. Complements LSP (which handles code analysis) with
-//! capabilities LSP doesn't cover: metadata browsing, platform docs,
-//! ad-hoc query validation.
-
 mod baseline;
+mod cache;
+mod diagnostics_state;
+mod graph;
+mod graph_db;
+mod graph_query;
 mod state;
 mod tools;
 
 pub use baseline::{
     resolve_project_baseline_diagnostics, BaselineConfigDiagnostics, BaselineResolutionSummary,
 };
+pub use cache::graph_db_path;
+pub use graph_db::build_graph_database;
+pub use graph_query::{GraphDb, GraphDbContextProvider};
 pub use state::SharedState;
 use state::WorkspaceSearchMode;
 
-/// Start MCP server on stdio (stdin/stdout).
-///
-/// This is the standard MCP transport — the host IDE spawns the process
-/// and communicates via JSON-RPC over stdin/stdout.
 pub async fn serve_stdio(server: McpServer) -> anyhow::Result<()> {
     use rmcp::ServiceExt;
     let stdio = rmcp::transport::stdio();
@@ -27,6 +24,7 @@ pub async fn serve_stdio(server: McpServer) -> anyhow::Result<()> {
     Ok(())
 }
 
+use crate::graph::GraphStatus;
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ServerCapabilities, ServerInfo};
@@ -40,143 +38,115 @@ pub enum McpProfile {
     Reference,
 }
 
-// -- Parameter types for consolidated tools --
-
 #[derive(Deserialize, JsonSchema)]
 struct MetadataParams {
-    /// Действие:
-    /// - "info" — общая информация о конфигурации (название, UUID, количество объектов)
-    /// - "tree" — дерево объектов по категориям (с filter — объекты категории, без — сводка)
-    /// - "object" — структура объекта: реквизиты, ТЧ, измерения, ресурсы (требует object_type + object_name)
-    /// - "form" — структура управляемой формы: элементы, команды, обработчики (требует object_type + object_name, form_name — опционально)
     action: String,
-    /// Категория метаданных для фильтрации (action=tree, на русском): Справочники, Документы,
-    /// Перечисления, Обработки, Отчеты, РегистрыСведений, РегистрыНакопления, ОбщиеМодули и др.
     filter: Option<String>,
-    /// Тип объекта на английском (action=object, form): Document, Catalog, InformationRegister,
-    /// AccumulationRegister, Enum, DataProcessor, Report, CommonModule и др.
     object_type: Option<String>,
-    /// Имя объекта метаданных, например РеализацияТоваровУслуг (action=object, form)
     object_name: Option<String>,
-    /// Имя формы (action=form, необязательно — без него возвращается список форм)
     form_name: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
 struct SearchParams {
-    /// Действие:
-    /// - "find_code" — полнотекстовый поиск по коду (точные имена процедур, переменных, вызовов API)
-    /// - "search_code" — семантический поиск по коду на естественном языке (требует EMBEDDING_URL)
-    /// - "find_docs" — полнотекстовый поиск по справке платформы (точные имена типов, методов)
-    /// - "search_docs" — семантический поиск по справке на естественном языке (требует EMBEDDING_URL)
-    /// - "status" — статус поискового индекса (количество файлов, чанков, прогресс)
     action: String,
-    /// Текст запроса.
-    /// Для find_code/find_docs: точные имена и токены ("ОбработкаПроведения", "Массив").
-    /// Для search_code/search_docs: описание на естественном языке ("обработка проведения документа").
-    /// Не требуется для action=status.
     query: Option<String>,
-    /// Максимальное количество результатов (по умолчанию 10, максимум 50)
     limit: Option<usize>,
 }
 
 #[derive(Deserialize, JsonSchema)]
 struct SyntaxHelpParams {
-    /// Имя типа, метода или глобальной функции платформы (русское или английское).
     name: String,
-    /// Имя типа для поиска метода в контексте типа (например type_name="Массив", name="Добавить")
     type_name: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
 struct QueryParams {
-    /// Действие:
-    /// - "validate" — проверить синтаксис запроса без выполнения (через СхемаЗапроса если доступен --onec-url, иначе локально парсером)
-    /// - "execute" — выполнить запрос и получить данные (только ВЫБРАТЬ/SELECT, требует --onec-url)
     action: String,
-    /// Текст запроса на языке запросов 1С (SDBL). Параметры через &ИмяПараметра.
     query: String,
-    /// Максимальное количество строк результата (action=execute, по умолчанию 100, максимум 1000)
     limit: Option<u32>,
-    /// Параметры запроса в виде пар ключ-значение (action=execute). Ключ — имя параметра без амперсанда.
     parameters: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 #[derive(Deserialize, JsonSchema)]
 struct ExecuteParams {
-    /// Действие:
-    /// - "check" — проверить синтаксис BSL-кода без выполнения (компиляция платформой, но не запуск)
-    /// - "run" — выполнить BSL-код (операторы) через Выполнить(). Для возврата данных:
-    ///   Контекст.Вставить("ключ", значение). Содержимое Контекст возвращается в ответе.
-    /// - "eval" — вычислить BSL-выражение через Вычислить() и вернуть результат.
-    ///   Примеры: ТекущаяДата(), 1+1, Справочники.Номенклатура.НайтиПоНаименованию("Товар")
-    ///
-    /// ОГРАНИЧЕНИЯ: нельзя объявлять Функция/Процедура — только операторы, выражения, условия, циклы.
-    /// action=run и action=eval требуют подключения к живой базе (--onec-url).
     action: String,
-    /// BSL-код (action=check, run) или BSL-выражение (action=eval).
     code: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct GraphParams {
+    /// overview | schema | node | source | neighbors | callers | callees
+    action: String,
+    /// Durable node id (required for node/neighbors/callers/callees).
+    id: Option<String>,
+    /// Durable node ids (required for `source`).
+    #[serde(default)]
+    ids: Vec<String>,
+    /// Output budget for `source`, in tokens (~4 chars each; default 4000).
+    max_output_tokens: Option<usize>,
+    /// names | signatures | bodies (default: signatures).
+    detail: Option<String>,
+    /// in | out | both — only for `neighbors` (default: in).
+    dir: Option<String>,
+    /// Traversal depth for neighbors (default: 1).
+    depth: Option<usize>,
+    /// Server-side cap on returned neighbour nodes (default: 50).
+    max_nodes: Option<usize>,
+    /// Keep only edges with these provenances (resolved/inferred/visibility_blocked/unresolved).
+    #[serde(default)]
+    provenance: Vec<String>,
+    /// How many top-centrality methods to include in `overview` (default: 20).
+    top: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct DiagnosticsParams {
+    /// catalog | schema | file
+    action: String,
+    /// `file`: absolute or workspace-relative `.bsl` path.
+    path: Option<String>,
+    /// `catalog`: narrow to these codes. `file`: keep only these codes.
+    #[serde(default)]
+    codes: Vec<String>,
+    /// `catalog`: ru | en (default ru) — title language.
+    locale: Option<String>,
+    /// `file`: inclusive severity floor error|warning|info|hint (default warning).
+    min_severity: Option<String>,
+    /// `file`: 0-based first line to include (optional).
+    range_start: Option<usize>,
+    /// `file`: 0-based last line to include (optional).
+    range_end: Option<usize>,
+    /// `file`: concise | detailed (default concise).
+    detail: Option<String>,
+    /// `file`: cap on returned findings (default 200).
+    max_findings: Option<usize>,
+    /// `workspace`: cap on files swept (default 1000).
+    max_files: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct ItsHelpParams {
-    /// Вопрос на русском языке. Примеры:
-    /// - "Как правильно реализовать обработку проведения документа?"
-    /// - "Стандарт структуры модуля по ИТС"
-    /// - "Когда использовать ПовторноеИспользование НаВремяСеанса?"
-    /// - "Ошибка 'Поле объекта не обнаружено' — причины и решения"
     question: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
 struct DebugParams {
-    /// Действие:
-    /// - "attach" — подключиться к серверу отладки (требует host, infobase; port по умолчанию 1550)
-    /// - "disconnect" — отключиться от сервера отладки
-    /// - "set_breakpoint" — установить точку останова (требует module, line; condition опционально)
-    /// - "remove_breakpoint" — удалить точку останова (требует module, line)
-    /// - "continue" — продолжить выполнение после остановки
-    /// - "step" — пошаговое выполнение (требует direction: "next"/"in"/"out")
-    /// - "wait_stop" — ожидать остановку на breakpoint/исключении (timeout_secs по умолчанию 30)
-    /// - "stack_trace" — получить стек вызовов остановленной программы
-    /// - "locals" — получить локальные переменные (stack_level по умолчанию 0)
-    /// - "eval" — вычислить выражение в контексте остановленной программы (требует expression)
-    ///
-    /// ВАЖНО: если код запущен через execute(action=run) и остановился на breakpoint,
-    /// execute зависнет до вызова debug(action=continue). Запускай код через curl или в фоне.
     action: String,
-    /// Хост сервера отладки 1С (action=attach)
     host: Option<String>,
-    /// Порт сервера отладки (action=attach, по умолчанию 1550)
     port: Option<u16>,
-    /// Имя информационной базы (action=attach)
     infobase: Option<String>,
-    /// Корневой каталог конфигурации для маппинга модулей на файлы (action=attach)
     config_root: Option<String>,
-    /// Расширения: список пар ["имя", "путь_к_каталогу"] для маппинга модулей расширений (action=attach)
     #[serde(default)]
     extensions: Vec<[String; 2]>,
-    /// Типы целей автоподключения (action=attach). По умолчанию: Client, Server, HTTPService.
-    /// Допустимые: Client, ManagedClient, WEBClient, COMConnector, Server, ServerEmulation,
-    /// WEBService, HTTPService, OData, JOB, JobFileMode, MobileClient, MobileServer, MobileManagedClient.
     #[serde(default)]
     auto_attach: Vec<String>,
-    /// Имя модуля (action=set_breakpoint, remove_breakpoint).
-    /// Например "ОбщийМодуль.ОбщегоНазначения" или "Справочник.Номенклатура.МодульОбъекта".
-    /// Сокращённый формат поддерживается — суффикс .Модуль/.МодульОбъекта добавляется автоматически.
     module: Option<String>,
-    /// Номер строки (action=set_breakpoint, remove_breakpoint)
     line: Option<u32>,
-    /// Условие остановки — BSL-выражение (action=set_breakpoint, опционально)
     condition: Option<String>,
-    /// Направление шага (action=step): "next" (через), "in" (внутрь), "out" (наружу)
     direction: Option<String>,
-    /// Таймаут ожидания в секундах (action=wait_stop, по умолчанию 30)
     timeout_secs: Option<u64>,
-    /// Уровень стека, 0 = текущий фрейм (action=locals, eval; по умолчанию 0)
     stack_level: Option<u32>,
-    /// BSL-выражение для вычисления в контексте breakpoint (action=eval).
-    /// Для вычисления без отладчика используй execute(action=eval).
     expression: Option<String>,
 }
 
@@ -184,14 +154,12 @@ fn default_debug_port() -> u16 {
     1550
 }
 
-/// Helper to extract a required field from Option, returning McpError if missing.
 fn require<T>(val: Option<T>, field: &str, action: &str) -> Result<T, McpError> {
     val.ok_or_else(|| {
         McpError::invalid_params(format!("'{field}' is required for action '{action}'"), None)
     })
 }
 
-/// MCP server exposing bsl-analyzer capabilities as tools.
 #[derive(Clone)]
 pub struct McpServer {
     profile: McpProfile,
@@ -213,9 +181,6 @@ impl McpServer {
         self.state.shutdown();
     }
 
-    /// Метаданные конфигурации 1С: общая информация, дерево объектов по категориям,
-    /// структура объекта (реквизиты, ТЧ, измерения, ресурсы), структура формы.
-    /// action: info | tree | object | form
     #[tool(name = "metadata", annotations(read_only_hint = true))]
     async fn metadata(
         &self,
@@ -265,9 +230,6 @@ impl McpServer {
         }
     }
 
-    /// Поиск по коду и справке платформы 1С.
-    /// find_code — полнотекстовый по коду. search_code — семантический по коду.
-    /// action: find_code | search_code | status
     #[tool(name = "search", annotations(read_only_hint = true))]
     async fn workspace_search(
         &self,
@@ -334,8 +296,6 @@ impl McpServer {
         }
     }
 
-    /// Запросы 1С (SDBL): проверка синтаксиса или выполнение SELECT с получением данных.
-    /// action: validate | execute
     #[tool(name = "query", annotations(read_only_hint = true))]
     async fn query(&self, params: Parameters<QueryParams>) -> Result<CallToolResult, McpError> {
         let p = params.0;
@@ -351,9 +311,6 @@ impl McpServer {
         }
     }
 
-    /// Выполнение BSL-кода в реальной базе 1С: проверка синтаксиса, выполнение операторов, вычисление выражений.
-    /// action=run и action=eval требуют подключения (--onec-url).
-    /// action: check | run | eval
     #[tool(name = "execute")]
     async fn execute(&self, params: Parameters<ExecuteParams>) -> Result<CallToolResult, McpError> {
         let p = params.0;
@@ -368,9 +325,6 @@ impl McpServer {
         }
     }
 
-    /// Отладчик 1С: подключение к серверу отладки, точки останова, пошаговое выполнение,
-    /// просмотр стека и переменных, вычисление выражений в контексте breakpoint.
-    /// action: attach | disconnect | set_breakpoint | remove_breakpoint | continue | step | wait_stop | stack_trace | locals | eval
     #[tool(name = "debug")]
     async fn debug(&self, params: Parameters<DebugParams>) -> Result<CallToolResult, McpError> {
         let p = params.0;
@@ -481,13 +435,267 @@ impl McpServer {
             )),
         }
     }
+
+    #[tool(name = "graph", annotations(read_only_hint = true))]
+    async fn graph(&self, params: Parameters<GraphParams>) -> Result<CallToolResult, McpError> {
+        let p = params.0;
+        let graph = self.state.graph().clone();
+
+        // `schema` is static and needs no loaded graph.
+        if p.action == "schema" {
+            return Ok(tools::graph::schema());
+        }
+
+        // Lazily trigger the background load on first use.
+        graph.ensure_loading();
+
+        match graph.status() {
+            GraphStatus::Disabled => {
+                return Err(McpError::invalid_params(
+                    "graph is only available in the workspace profile",
+                    None,
+                ))
+            }
+            GraphStatus::Idle | GraphStatus::Loading => {
+                return Ok(tools::graph::loading(Some(
+                    "call graph is still indexing; retry shortly",
+                )))
+            }
+            GraphStatus::Failed(msg) => {
+                return Err(McpError::internal_error(format!("graph load failed: {msg}"), None))
+            }
+            GraphStatus::Ready { .. } => {}
+        }
+
+        let Some(snapshot) = graph.snapshot() else {
+            return Ok(tools::graph::loading(None));
+        };
+
+        tokio::task::spawn_blocking(move || {
+            let gdb = &snapshot.graph;
+            let value = match p.action.as_str() {
+                "overview" => tools::graph::overview(gdb, p.top.unwrap_or(20)),
+                "node" => {
+                    let id = require(p.id, "id", "node")?;
+                    let detail = tools::graph::detail_from(p.detail.as_deref());
+                    tools::graph::node(gdb, &id, detail)
+                }
+                "source" => {
+                    if p.ids.is_empty() {
+                        return Err(McpError::invalid_params(
+                            "'ids' is required (non-empty) for action 'source'",
+                            None,
+                        ));
+                    }
+                    let budget = p.max_output_tokens.unwrap_or(4000);
+                    tools::graph::source(gdb, &p.ids, budget)
+                }
+                action @ ("neighbors" | "callers" | "callees") => {
+                    let id = require(p.id, "id", action)?;
+                    let dir = match action {
+                        "callers" => ide::Direction::In,
+                        "callees" => ide::Direction::Out,
+                        _ => tools::graph::direction_from(p.dir.as_deref()),
+                    };
+                    let neighbors = ide::NeighborsParams {
+                        id: &id,
+                        dir,
+                        depth: p.depth.unwrap_or(1),
+                        max_nodes: p.max_nodes.unwrap_or(50),
+                        detail: tools::graph::detail_from(p.detail.as_deref()),
+                        provenance_filter: p.provenance.clone(),
+                    };
+                    tools::graph::neighbors(gdb, &neighbors)
+                }
+                other => {
+                    return Err(McpError::invalid_params(
+                        format!(
+                            "Unknown action '{other}'. Expected: overview, schema, node, source, \
+                             neighbors, callers, callees"
+                        ),
+                        None,
+                    ))
+                }
+            };
+            // Stamp freshness relative to the snapshot that served this answer: the
+            // scan may detect drift and kick a background reload, but `revision`
+            // and `stale` describe the data actually returned above.
+            let freshness = graph.freshness(&snapshot);
+            Ok(tools::graph::envelope(freshness, value))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+    }
+
+    #[tool(name = "diagnostics", annotations(read_only_hint = true))]
+    async fn diagnostics(
+        &self,
+        params: Parameters<DiagnosticsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let p = params.0;
+        match p.action.as_str() {
+            // `catalog` and `schema` are static (compile-time metadata), so they need
+            // no resident analysis database and answer in either profile.
+            "schema" => Ok(tools::diagnostics::schema()),
+            "catalog" => {
+                let locale = match p.locale.as_deref() {
+                    Some(s) => ide::Locale::from_config_str(s)
+                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?,
+                    None => ide::Locale::default(),
+                };
+                Ok(tools::diagnostics::catalog(locale, &p.codes))
+            }
+            "file" => self.diagnostics_file(p).await,
+            "workspace" => self.diagnostics_workspace(p).await,
+            other => Err(McpError::invalid_params(
+                format!("Unknown action '{other}'. Expected: catalog, schema, file, workspace"),
+                None,
+            )),
+        }
+    }
+
+    /// The `diagnostics file` action: build/serve per-file findings from the resident
+    /// analysis database, behind the lazy-load lifecycle and freshness envelope.
+    async fn diagnostics_file(&self, p: DiagnosticsParams) -> Result<CallToolResult, McpError> {
+        use crate::diagnostics_state::DiagnosticsStatus;
+        use tools::diagnostics::{parse_min_severity, FileFilters};
+
+        let diag = self.state.diagnostics().clone();
+        let path = require(p.path, "path", "file")?;
+        let path = std::path::PathBuf::from(path);
+
+        diag.ensure_loading();
+        match diag.status() {
+            DiagnosticsStatus::Disabled => {
+                return Err(McpError::invalid_params(
+                    "diagnostics 'file' is only available in the workspace profile",
+                    None,
+                ))
+            }
+            DiagnosticsStatus::Failed(msg) => {
+                return Err(McpError::internal_error(
+                    format!("diagnostics database load failed: {msg}"),
+                    None,
+                ))
+            }
+            DiagnosticsStatus::Idle | DiagnosticsStatus::Loading => {
+                return Ok(tools::diagnostics::loading())
+            }
+            DiagnosticsStatus::Ready { .. } => {}
+        }
+
+        let min_severity = parse_min_severity(p.min_severity.as_deref())
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        let range = match (p.range_start, p.range_end) {
+            (Some(s), Some(e)) => Some((s, e)),
+            (Some(s), None) => Some((s, usize::MAX)),
+            (None, Some(e)) => Some((0, e)),
+            (None, None) => None,
+        };
+        let filters = FileFilters {
+            min_severity,
+            codes: p.codes,
+            range,
+            max_findings: p.max_findings.unwrap_or(tools::diagnostics::DEFAULT_MAX_FINDINGS),
+            detailed: p.detail.as_deref() == Some("detailed"),
+        };
+
+        tokio::task::spawn_blocking(move || {
+            // `generation` is supplied by `read` under the lock (so `result_id` describes
+            // the exact resident state queried), and the freshness verdict is computed
+            // under that same lock and returned alongside — the envelope is atomic.
+            let outcome = diag.read(|resident, generation| {
+                tools::diagnostics::file_findings(resident, &path, &filters, generation)
+            });
+            use crate::diagnostics_state::ResidentOutcome;
+            match outcome {
+                ResidentOutcome::Ready(result, freshness) => {
+                    Ok(tools::diagnostics::envelope(freshness, result))
+                }
+                ResidentOutcome::Loading => Ok(tools::diagnostics::loading()),
+                ResidentOutcome::Disabled => Err(McpError::invalid_params(
+                    "diagnostics 'file' is only available in the workspace profile",
+                    None,
+                )),
+                ResidentOutcome::Failed(msg) => {
+                    Err(McpError::internal_error(format!("diagnostics database: {msg}"), None))
+                }
+            }
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+    }
+
+    /// The `diagnostics workspace` action: an opt-in, bounded whole-config sweep that
+    /// returns per-code aggregates only (no per-finding detail). The rayon sweep runs
+    /// under the resident lock (so no reload mutates the db mid-sweep), which serialises
+    /// other diagnostics calls for its duration — acceptable for a capped, opt-in pass.
+    async fn diagnostics_workspace(
+        &self,
+        p: DiagnosticsParams,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::diagnostics_state::{DiagnosticsStatus, ResidentOutcome, SweepOptions};
+        use tools::diagnostics::{
+            parse_min_severity, DEFAULT_MAX_SWEEP_FILES, MAX_SWEEP_FILES_CEILING,
+        };
+
+        let diag = self.state.diagnostics().clone();
+        diag.ensure_loading();
+        match diag.status() {
+            DiagnosticsStatus::Disabled => {
+                return Err(McpError::invalid_params(
+                    "diagnostics 'workspace' is only available in the workspace profile",
+                    None,
+                ))
+            }
+            DiagnosticsStatus::Failed(msg) => {
+                return Err(McpError::internal_error(
+                    format!("diagnostics database load failed: {msg}"),
+                    None,
+                ))
+            }
+            DiagnosticsStatus::Idle | DiagnosticsStatus::Loading => {
+                return Ok(tools::diagnostics::loading())
+            }
+            DiagnosticsStatus::Ready { .. } => {}
+        }
+
+        let min_severity = parse_min_severity(p.min_severity.as_deref())
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        let opts = SweepOptions {
+            min_severity,
+            codes: p.codes,
+            // Clamp to the ceiling: the sweep holds the resident lock throughout, so an
+            // unbounded request would stall every other diagnostics call. A larger
+            // config surfaces as `truncated` with the true `files_total`.
+            max_files: p.max_files.unwrap_or(DEFAULT_MAX_SWEEP_FILES).min(MAX_SWEEP_FILES_CEILING),
+        };
+
+        tokio::task::spawn_blocking(move || {
+            let outcome = diag.read(|resident, generation| {
+                tools::diagnostics::workspace_findings(resident, &opts, generation)
+            });
+            match outcome {
+                ResidentOutcome::Ready(result, freshness) => {
+                    Ok(tools::diagnostics::envelope(freshness, result))
+                }
+                ResidentOutcome::Loading => Ok(tools::diagnostics::loading()),
+                ResidentOutcome::Disabled => Err(McpError::invalid_params(
+                    "diagnostics 'workspace' is only available in the workspace profile",
+                    None,
+                )),
+                ResidentOutcome::Failed(msg) => {
+                    Err(McpError::internal_error(format!("diagnostics database: {msg}"), None))
+                }
+            }
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+    }
 }
 
 #[tool_router(router = reference_tool_router)]
 impl McpServer {
-    /// Поиск по справке платформы 1С.
-    /// find_docs — полнотекстовый, search_docs — семантический.
-    /// action: find_docs | search_docs | status
     #[tool(name = "search", annotations(read_only_hint = true))]
     async fn reference_search(
         &self,
@@ -548,8 +756,6 @@ impl McpServer {
         }
     }
 
-    /// Справка по типам, методам и глобальным функциям платформы 1С.
-    /// Точный поиск по имени. Для полнотекстового/семантического поиска используй search.
     #[tool(name = "syntax_help", annotations(read_only_hint = true))]
     async fn syntax_help(
         &self,
@@ -558,12 +764,6 @@ impl McpServer {
         tools::platform::bsl_syntax_help(&params.0.name, params.0.type_name.as_deref())
     }
 
-    /// Вопрос эксперту по 1С:Предприятие через ИТС (1С:Напарник).
-    /// Используйте для: стандартов разработки ИТС, паттернов БСП,
-    /// методических рекомендаций, типовых решений, диагностики ошибок.
-    /// НЕ используйте для: сигнатур методов платформы (→ syntax_help),
-    /// поиска в коде конфигурации (→ search).
-    /// Требует NAPARNIK_TOKEN. Latency: 5-20 секунд.
     #[tool(name = "its_help", annotations(read_only_hint = true))]
     async fn its_help(
         &self,
@@ -580,8 +780,14 @@ impl ServerHandler for McpServer {
         info.instructions = Some(match self.profile {
             McpProfile::Workspace => {
                 "BSL Analyzer workspace MCP server. Provides project metadata browsing, \
-                 code search, SDBL query validation, code execution and debugging. \
-                 Tools: metadata, search, query, execute, debug."
+                 code search, a whole-config semantic call graph, semantic diagnostics, \
+                 SDBL query validation, code execution and debugging. Prefer the `graph` tool \
+                 over text search when you need call relationships: start with action 'overview' \
+                 on an unfamiliar project, then 'node'/'callers'/'callees'/'neighbors' using the \
+                 durable ids it returns. The `diagnostics` tool surfaces analyzer findings grep \
+                 cannot (unreachable code, type mismatch, unresolved call); start with action \
+                 'catalog' to discover the available codes. \
+                 Tools: metadata, search, graph, diagnostics, query, execute, debug."
                     .into()
             }
             McpProfile::Reference => {

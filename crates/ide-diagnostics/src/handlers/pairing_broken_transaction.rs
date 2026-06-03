@@ -1,8 +1,3 @@
-//! PairingBrokenTransaction diagnostic (CFG-based).
-//!
-//! Reports transaction calls that are not properly paired on all execution
-//! paths.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -26,7 +21,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     clean_code_attribute: CleanCodeAttribute::Intentional,
 };
 
-/// Transaction call type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TransactionType {
     Begin,
@@ -34,7 +28,6 @@ enum TransactionType {
     Rollback,
 }
 
-/// Information about a transaction call found in CFG.
 #[derive(Debug, Clone)]
 struct TransactionCall {
     tx_type: TransactionType,
@@ -42,7 +35,6 @@ struct TransactionCall {
     range: TextRange,
 }
 
-/// Issue found during path analysis.
 #[derive(Debug, Clone)]
 struct TransactionIssue {
     range: TextRange,
@@ -50,7 +42,6 @@ struct TransactionIssue {
     pair_method: &'static str,
 }
 
-/// Collect diagnostics using CFG-based path analysis.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::PairingBrokenTransaction;
 
@@ -58,8 +49,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return vec![];
     }
 
-    // maxTransactionLevel: limits DFS depth to prevent stack overflow on pathological CFGs
-    // (e.g., BeginTransaction in infinite loop). In practice, nesting rarely exceeds 2-3.
     let max_level = ctx
         .config
         .get_int(DiagnosticCode::PairingBrokenTransaction, "maxTransactionLevel")
@@ -80,7 +69,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             None => continue,
         };
 
-        // Check transaction pairing - Begin must be paired with EITHER Commit OR Rollback
         let issues = check_transaction_pairing_cfg(body, source_map, cfg, max_level);
         for issue in issues {
             diagnostics.push(create_diagnostic(issue, code, ctx));
@@ -91,7 +79,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 }
 
 impl TransactionType {
-    /// Returns the pair method name for error messages.
     fn pair_method(&self) -> &'static str {
         match self {
             TransactionType::Begin => "ЗафиксироватьТранзакцию/ОтменитьТранзакцию",
@@ -100,12 +87,9 @@ impl TransactionType {
     }
 }
 
-/// State tracked during DFS path traversal.
 #[derive(Clone)]
 struct PathState {
-    /// Current transaction level (begin increments, commit/rollback decrements)
     level: i32,
-    /// Stack of begin transaction calls (for reporting orphaned begins)
     begin_stack: Vec<TransactionCall>,
 }
 
@@ -115,10 +99,6 @@ impl PathState {
     }
 }
 
-/// Check transaction pairing using CFG-based DFS path analysis.
-///
-/// A transaction is considered properly paired if Begin is matched with EITHER
-/// Commit OR Rollback on every execution path.
 fn check_transaction_pairing_cfg(
     body: &Body,
     source_map: &BodySourceMap,
@@ -130,7 +110,6 @@ fn check_transaction_pairing_cfg(
         None => return vec![],
     };
 
-    // Pre-compute ALL transaction calls per CFG node (Begin, Commit, and Rollback)
     let node_tx_calls = precompute_transaction_calls(body, source_map, cfg);
 
     let dfs_ctx = DfsContext { cfg, node_tx_calls: &node_tx_calls, max_level };
@@ -140,14 +119,12 @@ fn check_transaction_pairing_cfg(
 
     dfs_check_paths(entry, PathState::new(), &mut visited_states, &mut issues, &dfs_ctx);
 
-    // Deduplicate issues by range (same location may be reported from multiple paths)
     let mut seen_ranges: FxHashSet<TextRange> = FxHashSet::default();
     issues.retain(|issue| seen_ranges.insert(issue.range));
 
     issues
 }
 
-/// Pre-compute ALL transaction calls for each CFG node.
 fn precompute_transaction_calls(
     body: &Body,
     source_map: &BodySourceMap,
@@ -174,16 +151,12 @@ fn precompute_transaction_calls(
     result
 }
 
-/// Context for DFS traversal (immutable during traversal).
 struct DfsContext<'a> {
     cfg: &'a ControlFlowGraph,
     node_tx_calls: &'a FxHashMap<NodeIndex, Vec<TransactionCall>>,
     max_level: i32,
 }
 
-/// DFS traversal checking transaction pairing on all paths.
-///
-/// A transaction is considered "closed" if Begin is followed by EITHER Commit OR Rollback.
 fn dfs_check_paths(
     node: NodeIndex,
     mut state: PathState,
@@ -191,19 +164,15 @@ fn dfs_check_paths(
     issues: &mut Vec<TransactionIssue>,
     ctx: &DfsContext,
 ) {
-    // Prevent stack overflow on pathological cases (e.g., BeginTransaction in infinite loop)
     if state.level > ctx.max_level || state.level < -ctx.max_level {
         return;
     }
 
-    // Cycle detection: if we've visited this node with the same level, skip
-    // (prevents infinite loops in cycles while still exploring different levels)
     let levels_at_node = visited_states.entry(node).or_default();
     if !levels_at_node.insert(state.level) {
         return;
     }
 
-    // Process transaction calls in this node
     if let Some(calls) = ctx.node_tx_calls.get(&node) {
         for call in calls {
             match call.tx_type {
@@ -211,17 +180,14 @@ fn dfs_check_paths(
                     state.level += 1;
                     state.begin_stack.push(call.clone());
                 }
-                // Both Commit and Rollback "close" a transaction
                 TransactionType::Commit | TransactionType::Rollback => {
                     state.level -= 1;
                     if state.level < 0 {
-                        // Orphaned commit/rollback - no matching begin on this path
                         issues.push(TransactionIssue {
                             range: call.range,
                             method_name: call.method_name.clone(),
                             pair_method: call.tx_type.pair_method(),
                         });
-                        // Reset level to 0 to continue checking (don't cascade errors)
                         state.level = 0;
                     } else {
                         state.begin_stack.pop();
@@ -231,9 +197,7 @@ fn dfs_check_paths(
         }
     }
 
-    // Check if we reached exit
     if node == ctx.cfg.exit_point() {
-        // Report orphaned begins (level > 0 means unmatched begins)
         for begin_call in &state.begin_stack {
             issues.push(TransactionIssue {
                 range: begin_call.range,
@@ -244,13 +208,7 @@ fn dfs_check_paths(
         return;
     }
 
-    // Continue DFS to successors
     if matches!(ctx.cfg.vertex(node), Some(CfgVertex::TryExcept(_))) {
-        // TryExceptVertex has TrueBranch → try body and FalseBranch → except handler.
-        // The FalseBranch carries transaction level from BEFORE the try body, which causes
-        // false positives when НачатьТранзакцию() is inside the Попытка block.
-        // If the except handler is also reachable via Raise from the try body (with correct
-        // post-Begin level), skip the FalseBranch to avoid false orphaned Rollback reports.
         let mut try_node = None;
         let mut except_node = None;
 
@@ -277,14 +235,6 @@ fn dfs_check_paths(
             }
         }
     } else {
-        // Skip *only* AdjacentCode edges: they represent dead code after
-        // Return/Raise and carry stale transaction levels that cause false
-        // positives. `LoopBreak` / `LoopContinue` are live edges (Track 1
-        // Step C, plan §1.3) and must be walked — `Прервать` propagates the
-        // current transaction state to the loop-exit block (where an
-        // orphan-Begin will surface at procedure exit), and `Продолжить`
-        // returns to the loop header carrying the closed-transaction state
-        // for the next iteration.
         let successors: Vec<_> = ctx
             .cfg
             .outgoing_edges(node)
@@ -297,7 +247,6 @@ fn dfs_check_paths(
     }
 }
 
-/// Check if a statement is a transaction method call.
 fn check_transaction_call(
     body: &Body,
     stmt_id: StmtId,
@@ -314,7 +263,6 @@ fn check_transaction_call(
     check_expr_transaction_call(body, expr_id, source_map)
 }
 
-/// Check if an expression is a transaction method call.
 fn check_expr_transaction_call(
     body: &Body,
     expr_id: ExprId,
@@ -342,7 +290,6 @@ fn check_expr_transaction_call(
     None
 }
 
-/// Determine transaction type from method name (case-insensitive).
 fn get_transaction_type(name: &str) -> Option<TransactionType> {
     let lower = name.to_lowercase();
     match lower.as_str() {
@@ -357,7 +304,6 @@ fn get_transaction_type(name: &str) -> Option<TransactionType> {
     }
 }
 
-/// Create a diagnostic for broken transaction pairing.
 fn create_diagnostic(
     issue: TransactionIssue,
     code: DiagnosticCode,
@@ -413,7 +359,6 @@ mod tests {
         );
     }
 
-    /// Rollback followed by Commit is invalid - Commit is orphaned
     #[test]
     fn test_rollback_then_commit_is_invalid() {
         let code = r#"
@@ -490,7 +435,6 @@ mod tests {
         );
     }
 
-    /// CFG-based test: Begin in one branch, Commit in another (CFG catches both errors)
     #[test]
     fn test_branch_imbalance() {
         let code = r#"
@@ -515,18 +459,6 @@ mod tests {
         );
     }
 
-    // =========================================================================
-    // TRY-EXCEPT TRANSACTION PATTERN TESTS
-    // =========================================================================
-    // These tests cover the canonical 1C transaction patterns with try-except.
-    // A transaction is considered properly paired if Begin is followed by
-    // EITHER Commit OR Rollback on every execution path.
-
-    /// Standard try-except transaction pattern - the canonical 1C pattern:
-    /// - НачатьТранзакцию() before try
-    /// - ЗафиксироватьТранзакцию() inside try (normal path)
-    /// - ОтменитьТранзакцию() inside except (error path)
-    /// - ВызватьИсключение to re-raise after rollback
     #[test]
     fn test_standard_try_except_transaction_pattern() {
         let code = r#"
@@ -557,8 +489,6 @@ mod tests {
         );
     }
 
-    /// Try-except with commit in try and rollback in except - correct pattern
-    /// Simpler version without the raise
     #[test]
     fn test_try_except_commit_rollback_no_raise() {
         let code = r#"
@@ -579,8 +509,6 @@ mod tests {
         );
     }
 
-    /// Try-except with only rollback in except (no commit in try) - INVALID
-    /// Normal path exits without closing transaction
     #[test]
     fn test_try_except_only_rollback_invalid() {
         let code = r#"
@@ -604,8 +532,6 @@ mod tests {
         );
     }
 
-    /// Try-except with only commit in try (no rollback in except) - INVALID
-    /// Exception path exits without closing transaction
     #[test]
     fn test_try_except_only_commit_invalid() {
         let code = r#"
@@ -630,7 +556,6 @@ mod tests {
         );
     }
 
-    /// Nested try-except with transactions - valid pattern
     #[test]
     fn test_nested_try_except_valid() {
         let code = r#"
@@ -655,7 +580,6 @@ mod tests {
         );
     }
 
-    /// Multiple sequential transactions - each properly paired
     #[test]
     fn test_multiple_sequential_transactions_valid() {
         let code = r#"
@@ -686,7 +610,6 @@ mod tests {
         );
     }
 
-    /// Transaction with conditional inside try - valid if all paths close
     #[test]
     fn test_conditional_inside_try_valid() {
         let code = r#"
@@ -711,7 +634,6 @@ mod tests {
         );
     }
 
-    /// Early return in try block before commit - INVALID
     #[test]
     fn test_early_return_before_commit_invalid() {
         let code = r#"
@@ -737,8 +659,6 @@ mod tests {
         );
     }
 
-    /// Raise inside try block should transfer control to except block.
-    /// Transaction is properly closed because except contains Rollback.
     #[test]
     fn test_raise_inside_try_transfers_to_except() {
         let code = r#"
@@ -762,7 +682,6 @@ mod tests {
         );
     }
 
-    /// Raise inside nested try should transfer to innermost except block.
     #[test]
     fn test_raise_inside_nested_try() {
         let code = r#"
@@ -790,7 +709,6 @@ mod tests {
         );
     }
 
-    /// Raise outside try should still go to exit (uncaught exception).
     #[test]
     fn test_raise_outside_try_goes_to_exit() {
         let code = r#"
@@ -812,9 +730,6 @@ mod tests {
         );
     }
 
-    /// Begin inside try with nested try-raise: inner except re-raises to outer except
-    /// where Rollback is called. FalseBranch of outer TryExceptVertex should be skipped
-    /// because except is reachable via Raise with correct transaction level.
     #[test]
     fn test_begin_inside_try_with_nested_raise() {
         let code = r#"
@@ -840,16 +755,6 @@ mod tests {
         );
     }
 
-    /// Pins Track 1 Step P (plan §1.8a, risk #6) — `Прервать` after a
-    /// closed transaction inside a loop must not produce a pairing
-    /// diagnostic. After Step C `walk_break_statement_hir` emits a
-    /// `LoopBreak` *live* edge to the loop-exit block (not the old
-    /// `AdjacentCode` dead edge), and the DFS skip-list still
-    /// excludes only `AdjacentCode`, so the post-break exit block
-    /// inherits `state.level == 0` from the closed transaction.
-    /// Without Step C this case lowered through `AdjacentCode` and
-    /// the after-loop block was never visited, masking real
-    /// orphan-begin bugs.
     #[test]
     fn test_break_after_commit_in_loop_valid() {
         let code = r#"
@@ -869,14 +774,6 @@ mod tests {
         );
     }
 
-    /// Step P companion to `test_break_after_commit_in_loop_valid`:
-    /// `Прервать` while the transaction is still open must surface
-    /// the orphaned `НачатьТранзакцию`. The `LoopBreak` edge carries
-    /// `state.level == 1` to the loop-exit block, which then reaches
-    /// the procedure exit with `begin_stack` non-empty — exactly the
-    /// path the orphan-detector flags. Without Step C this path was
-    /// invisible (dead `AdjacentCode` edge) and the diagnostic
-    /// silently passed.
     #[test]
     fn test_break_with_open_transaction_invalid() {
         let code = r#"
@@ -898,8 +795,6 @@ mod tests {
         );
     }
 
-    /// Multiple Commit+Continue inside loop with try-except.
-    /// Each branch has its own Commit followed by Continue to next iteration.
     #[test]
     fn test_multiple_commit_continue_in_loop() {
         let code = r#"
@@ -1117,9 +1012,6 @@ mod tests {
 
     #[test]
     fn test_interprocedural_begin_commit_are_not_paired_snapshot() {
-        // Track 3 Phase C §4.2: pairing is intentionally method-local
-        // today, so a Begin in one procedure and Commit in another are
-        // reported as two local lifecycle violations.
         check_diagnostics_snapshot_for(
             r#"Процедура Открыть()
     НачатьТранзакцию();

@@ -1,37 +1,3 @@
-//! IfElseDuplicatedCondition diagnostic
-//!
-//! Detects identical conditions in if/elsif chains.
-//!
-//! ## Why?
-//! When if/elsif branches have identical conditions, the second branch will never
-//! be executed. This usually indicates a copy-paste error or logic mistake.
-//!
-//! ## Bad practice
-//! ```bsl
-//! Если п = 1 Тогда
-//!     т = 1;
-//! ИначеЕсли п = 2 Тогда
-//!     т = 2;
-//! ИначеЕсли п = 1 Тогда    // Will never execute!
-//!     т = 3;
-//! КонецЕсли;
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! Если п = 1 Тогда
-//!     т = 1;
-//! ИначеЕсли п = 2 Тогда
-//!     т = 2;
-//! ИначеЕсли п = 3 Тогда    // Fixed condition
-//!     т = 3;
-//! КонецЕсли;
-//! ```
-//!
-//! ## Implementation
-//!
-//! Migrated to HIR-based collection.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -51,9 +17,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic.
-///
-/// Called from lib.rs dispatch when IfElseDuplicatedCondition diagnostic is emitted during lowering.
 pub fn from_hir(
     first_occurrence_index: usize,
     range: TextRange,
@@ -247,9 +210,6 @@ mod tests {
             .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCondition)
             .collect();
 
-        // Should find 2 diagnostics:
-        // 1. Inner if: п = 2 duplicate
-        // 2. Outer if: п = 1 duplicate
         expect![[r#"
             IfElseDuplicatedCondition @ 6:19..6:25
               message: Дублированное условие в конструкции 'Если...Тогда...ИначеЕсли' (уже использовано в позиции 1)
@@ -259,7 +219,6 @@ mod tests {
               severity: Warning"#]].assert_eq(&format_diags(code, &dupl_diags));
     }
 
-    /// Triple duplicate condition group: п = 1 appears three times, two warnings
     #[test]
     fn test_triple_duplicate_condition() {
         let code = r#"
@@ -286,7 +245,6 @@ mod tests {
             .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCondition)
             .collect();
 
-        // п = 1 is duplicated twice (3rd and 5th branch), П = 1 normalized is also п = 1 (4th duplicate)
         expect![[r#"
             IfElseDuplicatedCondition @ 7:15..7:21
               message: Дублированное условие в конструкции 'Если...Тогда...ИначеЕсли' (уже использовано в позиции 2)
@@ -296,7 +254,6 @@ mod tests {
               severity: Warning"#]].assert_eq(&format_diags(code, &dupl_diags));
     }
 
-    /// Nested if with duplicate in both outer and inner chains
     #[test]
     fn test_nested_and_outer_duplicates() {
         let code = r#"
@@ -327,7 +284,6 @@ mod tests {
             .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCondition)
             .collect();
 
-        // Inner: п = 2 duplicated once; outer: п = 1 duplicated once
         expect![[r#"
             IfElseDuplicatedCondition @ 10:19..10:25
               message: Дублированное условие в конструкции 'Если...Тогда...ИначеЕсли' (уже использовано в позиции 2)
@@ -337,7 +293,6 @@ mod tests {
               severity: Warning"#]].assert_eq(&format_diags(code, &dupl_diags));
     }
 
-    /// String case-sensitive: "Ё" != "ё" so no duplicate; "ё" = "ё" is duplicate
     #[test]
     fn test_string_case_sensitive_fixture() {
         let no_dup_code = r#"

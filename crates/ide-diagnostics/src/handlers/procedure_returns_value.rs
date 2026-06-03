@@ -1,7 +1,3 @@
-//! ProcedureReturnsValue diagnostic.
-//!
-//! Reports `Возврат` statements with values inside procedures.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -64,8 +60,6 @@ mod tests {
 
     #[test]
     fn test_procedure_return_without_semicolon_before_endif() {
-        // BSL allows omitting semicolon before КонецЕсли
-        // This should NOT trigger ProcedureReturnsValue diagnostic
         let code = r#"Процедура Тест()
     Если Истина Тогда
         Возврат

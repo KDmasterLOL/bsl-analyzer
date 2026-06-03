@@ -1,42 +1,3 @@
-//! GlobalContextMethodCollision8312 diagnostic.
-//!
-//! Checks for method name collisions with platform 8.3.12 global context methods.
-//!
-//! ## Why?
-//! Starting from platform version 8.3.12, new bitwise operation methods were added
-//! to the global context. User-defined methods with these names will conflict with
-//! platform methods, leading to unexpected behavior.
-//!
-//! ## Conflicting methods (Russian/English)
-//! - ПроверитьБит / CheckBit
-//! - ПроверитьПоБитовойМаске / CheckByBitMask
-//! - УстановитьБит / SetBit
-//! - ПобитовоеИ / BitwiseAnd
-//! - ПобитовоеИли / BitwiseOr
-//! - ПобитовоеНе / BitwiseNot
-//! - ПобитовоеИНе / BitwiseAndNot
-//! - ПобитовоеИсключительноеИли / BitwiseXor
-//! - ПобитовыйСдвигВлево / BitwiseShiftLeft
-//! - ПобитовыйСдвигВправо / BitwiseShiftRight
-//!
-//! ## Bad practice
-//! ```bsl
-//! Функция ПроверитьБит(Число, Позиция)
-//!     // Custom implementation conflicts with platform method
-//!     Возврат (Число % 2) = 1;
-//! КонецФункции
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! Функция ПроверитьБитПользовательский(Число, Позиция)
-//!     Возврат (Число % 2) = 1;
-//! КонецФункции
-//! ```
-//!
-//! ## References
-//! - Source: https://its.1c.ru/db/metod8dev#content:5293:hdoc:pereimenovaniya_metodov_i_svojstv
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -56,9 +17,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic.
-///
-/// Called from lib.rs dispatch when GlobalContextMethodCollision8312 diagnostic is emitted during lowering.
 pub fn from_hir(
     method_name: &str,
     range: TextRange,
@@ -88,7 +46,6 @@ mod tests {
     use crate::test_utils::*;
     use crate::{DiagnosticCode, Severity};
     use expect_test::expect;
-    /// Detects all names that collide with the 8.3.12 global bitwise API.
     #[test]
     fn test_8312() {
         let code = r#"Функция ПроверитьБит()
@@ -167,7 +124,6 @@ mod tests {
             .filter(|d| d.code == DiagnosticCode::GlobalContextMethodCollision8312)
             .collect();
 
-        // Expected 20 diagnostics
         expect![[r#"
             GlobalContextMethodCollision8312 @ 1:9..1:21
               message: Имя метода "ПроверитьБит" конфликтует с методом глобального контекста, появившимся в версии платформы 8.3.12
@@ -240,7 +196,6 @@ mod tests {
         }
     }
 
-    /// Test that methods with prefixes/suffixes don't trigger
     #[test]
     fn test_no_collision_with_prefix_suffix() {
         let code = r#"Функция _ПроверитьБит()
@@ -258,11 +213,9 @@ mod tests {
             .filter(|d| d.code == DiagnosticCode::GlobalContextMethodCollision8312)
             .collect();
 
-        // These methods have prefixes/suffixes so they don't conflict
         expect![[r#""#]].assert_eq(&format_diags(code, &collision_diags));
     }
 
-    /// Test case-insensitive matching (Russian uppercase)
     #[test]
     fn test_case_insensitive_russian() {
         let code = r#"Функция ПРОВЕРИТЬБИТ()
@@ -280,7 +233,6 @@ mod tests {
               severity: Blocker"#]].assert_eq(&format_diags(code, &collision_diags));
     }
 
-    /// Test case-insensitive matching (English mixed case)
     #[test]
     fn test_case_insensitive_english() {
         let code = r#"Function CheckBit()
@@ -298,7 +250,6 @@ EndFunction"#;
               severity: Blocker"#]].assert_eq(&format_diags(code, &collision_diags));
     }
 
-    /// Test multiple conflicting functions
     #[test]
     fn test_multiple_collisions() {
         let code = r#"Функция ПроверитьБит()
@@ -328,7 +279,6 @@ EndFunction"#;
               severity: Blocker"#]].assert_eq(&format_diags(code, &collision_diags));
     }
 
-    /// Test non-conflicting function names
     #[test]
     fn test_no_collision() {
         let code = r#"Функция МояФункция()

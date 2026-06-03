@@ -1,14 +1,3 @@
-//! Global state for the LSP server.
-//!
-//! This module defines the main state structures for the bsl-analyzer LSP server.
-//!
-//! ## Module structure
-//!
-//! - **`global_state`** (this file) — `GlobalState` struct, `new()`, `snapshot()`, LSP transport
-//! - **`analysis_host`** — `AnalysisHost` wrapper around Salsa database
-//! - **`workspace`** — VFS, source roots, file loading, metadata warming
-//! - **`diagnostics_state`** — Diagnostics config management
-
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -30,160 +19,68 @@ use crate::lsp::{PositionEncoding, Progress};
 use crate::mem_docs::MemDocs;
 use crate::task_pool;
 
-/// Task results from background threads.
 #[derive(Debug)]
 pub enum Task {
-    /// Dependency preloading completed for a file.
-    DependenciesPreloaded { file_id: vfs::FileId, count: usize },
-    /// Diagnostics computed in background thread.
+    DependenciesPreloaded {
+        file_id: vfs::FileId,
+        count: usize,
+    },
     DiagnosticsReady {
         uri: Url,
         diagnostics: Vec<lsp_types::Diagnostic>,
         generation: u64,
         completed_at: std::time::Instant,
     },
-    /// Diagnostics cancelled (Salsa query was interrupted).
-    DiagnosticsCancelled { generation: u64, completed_at: std::time::Instant },
-    /// Request to preload external files discovered during semantic highlighting.
-    PreloadExternalFiles { files: Vec<vfs::FileId> },
-    /// Response from an async `on_latency` request handler, ready for the main
-    /// loop to forward to the client and clean up any cancellation token.
-    RequestResult { response: Response },
+    DiagnosticsCancelled {
+        generation: u64,
+        completed_at: std::time::Instant,
+    },
+    PreloadExternalFiles {
+        files: Vec<vfs::FileId>,
+    },
+    RequestResult {
+        response: Response,
+    },
 }
 
-/// The main state of the LSP server (mutable, main thread only).
-///
-/// This struct holds all the mutable state needed by the server:
-/// - LSP communication channel
-/// - Salsa database (via AnalysisHost wrapper)
-/// - Virtual file system
-/// - In-memory document tracking
-/// - Request queue
-///
-/// # Thread Safety
-/// GlobalState is not Send/Sync because it contains the mutable Salsa database.
-/// For concurrent access, use `snapshot()` to create a `GlobalStateSnapshot`.
 pub struct GlobalState {
-    /// Sender for LSP messages to the client.
     pub sender: Sender<Message>,
-
-    /// Queue for tracking pending requests.
     pub req_queue: ReqQueue<(), ()>,
-
-    /// The Salsa database for analysis (wrapped in AnalysisHost).
     pub analysis_host: AnalysisHost,
-
-    /// Virtual file system for managing file contents.
     pub vfs: Arc<RwLock<Vfs>>,
-
-    /// In-memory tracking of opened documents.
     pub mem_docs: MemDocs,
-
-    /// Workspace root directory (from LSP initialize).
     pub workspace_root: Option<PathBuf>,
-
-    /// Project configuration (loaded from .bsl-analyzer.json or .bsl-language-server.json).
     pub project: Option<Project>,
-
-    /// Whether shutdown has been requested.
     pub shutdown_requested: bool,
 
-    /// Receiver for loader messages (file loaded/changed/progress).
-    ///
-    /// **Drop order matters:** declared *before* `loader` so it drops first
-    /// during `GlobalState` teardown. The loader channel is bounded for
-    /// backpressure; if the receiver outlived the loader handle, the worker
-    /// thread could be stuck on a full-capacity `send` while `loader::Drop`
-    /// joins it, deadlocking shutdown. With this order the receiver drops
-    /// first, the next `send` from the worker returns a `SendError`, the
-    /// rayon `for_each` unwinds, and `loader::Drop` joins cleanly.
     pub loader_receiver: Receiver<loader::Message>,
-
-    /// Handle to VFS loader thread for background file loading.
     pub loader: Box<dyn loader::Handle>,
-
-    /// VFS loading progress state (config version counter).
     pub vfs_progress_config_version: u32,
-
-    /// Whether VFS has finished initial loading.
     pub vfs_done: bool,
-
-    /// Task pool for background tasks with result channel.
     pub task_pool: task_pool::Handle<Task>,
-
-    /// Counter for generating unique LSP request IDs.
     pub(crate) next_request_id: AtomicI32,
-
-    /// Current diagnostics configuration (hashable, for Salsa caching).
     pub(crate) diagnostics_config: DiagnosticsConfigInput,
 
-    /// IDE-supplied locale from `InitializeParams.locale` (RFC 4646).
-    ///
-    /// `None` if the client did not advertise a locale during the LSP
-    /// handshake. Read by `update_diagnostics_config` as the LSP-layer
-    /// fallback after the project's `[output] display_language` setting.
     pub(crate) lsp_locale: Option<Locale>,
-
-    /// Negotiated LSP position encoding.
     pub position_encoding: PositionEncoding,
-
-    /// Monotonically increasing generation counter for background diagnostics.
     pub diagnostics_generation: u64,
-
-    /// URI of the most recently changed file pending diagnostics scheduling.
     pub pending_diagnostics_uri: Option<Url>,
 
-    /// Cancellation tokens for in-flight diagnostics computations, keyed by URI.
-    /// Cancelling a token lets the associated background worker unwind cooperatively
-    /// at the next Salsa query boundary, even when no write bumps the global revision.
     pub diagnostics_tokens: HashMap<Url, salsa::CancellationToken>,
-
-    /// Cancellation tokens for `didOpen`-triggered dependency preload tasks,
-    /// keyed by the opened file's `FileId`. Cleaned up on `didClose` and when
-    /// the task completes.
     pub preload_tokens: HashMap<vfs::FileId, salsa::CancellationToken>,
 
-    /// Cancellation tokens for external-file preload tasks triggered by semantic
-    /// highlighting, keyed by the first file in the batch. External files are
-    /// never closed by the client, so these entries are cleared only when the
-    /// task completes (see `handle_task` for `DependenciesPreloaded`).
     pub preload_external_tokens: HashMap<vfs::FileId, salsa::CancellationToken>,
 
-    /// Cancellation tokens for in-flight async LSP requests dispatched via
-    /// `on_latency`, keyed by the LSP request id. Cleared when the request
-    /// produces a `Task::RequestResult` or when the client sends
-    /// `$/cancelRequest`. If the client submits a duplicate id, the existing
-    /// token is cancelled so the superseded worker unwinds cooperatively.
     pub request_tokens: HashMap<lsp_server::RequestId, salsa::CancellationToken>,
-
-    /// Last time progress was reported to the client.
     pub last_progress_report: std::time::Instant,
 
-    /// BSL paths the VFS loader could not read (content=None) plus any BSL
-    /// fids actively evicted from FileSet by `process_changes` because their
-    /// text became absent (Delete or content=None mid-session).
-    ///
-    /// Populated in `server::handle_vfs_msg` (B1 observability) and consulted
-    /// post-`LoadingProgress::Finished` to derive [`Self::degraded_files_count`].
-    /// This is the **single source of truth** for the count — eviction inside
-    /// `process_changes` does not double-count (Codex Round 4 C2 closure).
     pub skipped_bsl: FxHashSet<paths::AbsPathBuf>,
 
-    /// Number of BSL files in the workspace whose text could not be made
-    /// resident. Derived as `skipped_bsl.len()` at the end of cold-start and
-    /// after each `Finished` boundary; surfaced to the smoke harness so the
-    /// Boot scenario can report degraded files without re-scanning Salsa.
     pub degraded_files_count: usize,
 }
 
 impl GlobalState {
-    /// Creates a new GlobalState with the given sender.
     pub fn new(sender: Sender<Message>) -> Self {
-        // Bounded channel applies backpressure to `vfs-notify`'s parallel
-        // loader: when the main loop is still draining one chunked
-        // `Message::Loaded` (UTF-8 + `Arc<str>` conversion + VFS write),
-        // additional chunks block in the rayon scope instead of piling up
-        // and reconstituting the cold-start memory peak.
         let (loader_sender, loader_receiver) = crossbeam_channel::bounded(4);
         let loader = vfs_notify::NotifyHandle::spawn(loader_sender);
 
@@ -224,15 +121,6 @@ impl GlobalState {
         }
     }
 
-    /// Defensive sweep: confirm every BSL `FileId` in any `SourceRoot` has a
-    /// populated `FileTextInput` cell. Returns the number of violations.
-    ///
-    /// The total-VFS invariant — enforced by `handle_vfs_msg`'s B1 hook and
-    /// `process_changes`'s B2-A eviction branch — should keep this at 0. Any
-    /// non-zero return indicates a regression; callers log `error!`.
-    ///
-    /// Safe to call outside tracked queries: uses `Files::try_file_text`
-    /// which returns `Option` instead of panicking.
     pub fn assert_total_vfs_invariant(&self) -> usize {
         use base_db::SourceDatabase;
 
@@ -255,16 +143,10 @@ impl GlobalState {
         violations
     }
 
-    // ========================================================================
-    // LSP transport helpers
-    // ========================================================================
-
-    /// Generates a unique request ID for LSP requests.
     fn next_request_id(&self) -> lsp_server::RequestId {
         lsp_server::RequestId::from(self.next_request_id.fetch_add(1, Ordering::SeqCst))
     }
 
-    /// Reports progress to the LSP client using WorkDoneProgress protocol.
     pub fn report_progress(
         &self,
         title: &str,
@@ -314,14 +196,12 @@ impl GlobalState {
         self.sender.send(notification.into()).ok();
     }
 
-    /// Sends a response to the client.
     pub fn respond(&mut self, response: Response) {
         if let Err(e) = self.sender.send(response.into()) {
             tracing::error!("Failed to send response: {}", e);
         }
     }
 
-    /// Requests the client to refresh semantic tokens for all open files.
     pub fn request_semantic_tokens_refresh(&mut self) {
         use lsp_server::Request;
 
@@ -339,7 +219,6 @@ impl GlobalState {
         }
     }
 
-    /// Creates an immutable snapshot for thread-safe access.
     pub fn snapshot(&self) -> GlobalStateSnapshot {
         GlobalStateSnapshot {
             analysis: self.analysis_host.analysis(),
@@ -355,42 +234,19 @@ impl GlobalState {
     }
 }
 
-/// Immutable snapshot of GlobalState for thread-safe access.
 pub struct GlobalStateSnapshot {
-    /// Immutable analysis API (Salsa snapshot).
     pub analysis: Analysis,
-
-    /// Virtual file system (read-only access).
     pub vfs: Arc<RwLock<Vfs>>,
-
-    /// In-memory document tracking (clone).
     pub mem_docs: MemDocs,
-
-    /// Workspace root directory.
     pub workspace_root: Option<PathBuf>,
-
-    /// Project configuration.
     pub project: Option<Project>,
-
-    /// Current diagnostics configuration (for code action handler).
     pub diagnostics_config: DiagnosticsConfigInput,
-
-    /// Negotiated LSP position encoding.
     pub position_encoding: PositionEncoding,
-
-    /// Whether VFS loading has completed.
     pub vfs_done: bool,
-
-    /// Task sender for triggering background work from handlers.
     pub task_sender: Sender<Task>,
 }
 
 impl GlobalStateSnapshot {
-    /// Gets the FileId for a URL.
-    ///
-    /// Used by the synchronous formatting handlers that still dispatch via
-    /// `on_sync`; async read handlers use `LatencyRequestContext::file_id_for_url`
-    /// against a frozen VFS snapshot instead.
     pub fn file_id_for_url(&self, url: &Url) -> anyhow::Result<vfs::FileId> {
         let path = url.to_file_path().map_err(|_| anyhow::anyhow!("Invalid file URL: {}", url))?;
         if !project_model::is_bsl_source_path(&path) {

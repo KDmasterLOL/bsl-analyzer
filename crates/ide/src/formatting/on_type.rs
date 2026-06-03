@@ -1,9 +1,3 @@
-//! On-type formatting.
-//!
-//! Handles automatic formatting when typing specific characters:
-//! - `;` - format the current line
-//! - `\n` (Enter) - auto-indent the new line
-
 use syntax::{SyntaxKind, SyntaxNode, TextRange, TextSize};
 
 use super::config::FormattingConfig;
@@ -12,13 +6,11 @@ use super::line_tokens::{
     analyze_line_tokens, is_line_block_end, is_line_block_start, is_line_middle_keyword,
 };
 
-/// Result of on-type formatting.
 #[derive(Debug, Clone)]
 pub struct OnTypeResult {
     pub edits: Vec<TextEdit>,
 }
 
-/// Handles on-type formatting when a character is typed.
 pub fn on_char_typed(
     root: &SyntaxNode,
     offset: TextSize,
@@ -32,7 +24,6 @@ pub fn on_char_typed(
     }
 }
 
-/// Handles formatting when semicolon is typed.
 fn on_semicolon_typed(
     root: &SyntaxNode,
     offset: TextSize,
@@ -40,27 +31,22 @@ fn on_semicolon_typed(
 ) -> Option<OnTypeResult> {
     let text = root.text().to_string();
 
-    // Find the line containing the semicolon
     let line_start = find_line_start(&text, offset);
-    let line_end = offset; // Semicolon position
+    let line_end = offset;
 
-    // Get the line content
     let line_start_usize = u32::from(line_start) as usize;
     let line_end_usize = u32::from(line_end) as usize;
     let line = &text[line_start_usize..line_end_usize.min(text.len())];
 
-    // Calculate expected indent
     let indent_level = calculate_indent_for_line(root, line_start, line);
     let expected_indent = config.indent_for_level(indent_level);
 
-    // Get current indent
     let current_indent = get_line_indent(line);
 
     if current_indent == expected_indent {
         return None;
     }
 
-    // Create edit to fix indent
     let trimmed = line.trim_start();
     let new_line = format!("{}{}", expected_indent, trimmed);
 
@@ -69,7 +55,6 @@ fn on_semicolon_typed(
     })
 }
 
-/// Handles formatting when Enter is pressed.
 fn on_newline_typed(
     root: &SyntaxNode,
     offset: TextSize,
@@ -77,7 +62,6 @@ fn on_newline_typed(
 ) -> Option<OnTypeResult> {
     let text = root.text().to_string();
 
-    // The offset is after the newline, we need the previous line
     let newline_pos = u32::from(offset).saturating_sub(1);
     if newline_pos == 0 {
         return None;
@@ -86,30 +70,25 @@ fn on_newline_typed(
     let prev_line_end = TextSize::from(newline_pos);
     let prev_line_start = find_line_start(&text, prev_line_end);
 
-    // Get previous line content
     let prev_start = u32::from(prev_line_start) as usize;
     let prev_end = newline_pos as usize;
     let prev_line = &text[prev_start..prev_end.min(text.len())];
 
-    // Calculate indent for the new line based on previous line
     let mut indent_level = calculate_indent_for_line(root, prev_line_start, prev_line);
 
     let tokens = analyze_line_tokens(prev_line.trim());
 
-    // Increase indent after block-starting keywords
     if is_line_block_start(&tokens) && !is_line_block_end(&tokens) {
         indent_level += 1;
     }
 
     let expected_indent = config.indent_for_level(indent_level);
 
-    // Insert indent at the cursor position (after newline)
     Some(OnTypeResult {
         edits: vec![TextEdit { range: TextRange::new(offset, offset), new_text: expected_indent }],
     })
 }
 
-/// Finds the start of the line containing the given offset.
 fn find_line_start(text: &str, offset: TextSize) -> TextSize {
     let offset_usize = u32::from(offset) as usize;
     let before = &text[..offset_usize.min(text.len())];
@@ -120,16 +99,13 @@ fn find_line_start(text: &str, offset: TextSize) -> TextSize {
     }
 }
 
-/// Gets the indent string from a line.
 fn get_line_indent(line: &str) -> String {
     let trimmed = line.trim_start();
     let indent_len = line.len() - trimmed.len();
     line[..indent_len].to_string()
 }
 
-/// Calculates the expected indent level for a line.
 fn calculate_indent_for_line(root: &SyntaxNode, line_start: TextSize, line: &str) -> u32 {
-    // Count parent blocks at this position
     let mut indent = 0u32;
 
     if let Some(token) = root.token_at_offset(line_start).right_biased() {
@@ -156,15 +132,12 @@ fn calculate_indent_for_line(root: &SyntaxNode, line_start: TextSize, line: &str
         }
     }
 
-    // Adjust for keywords on this line
     let tokens = analyze_line_tokens(line.trim());
 
-    // Block end keywords reduce indent for themselves
     if is_line_block_end(&tokens) {
         indent = indent.saturating_sub(1);
     }
 
-    // Middle keywords (Иначе, Исключение) are at same level as their block start
     if is_line_middle_keyword(&tokens) {
         indent = indent.saturating_sub(1);
     }

@@ -1,5 +1,3 @@
-//! Adapter for platform-defined global functions (`НачатьТранзакцию`, …).
-
 use bsl_platform::{
     global_function_query, GlobalFunction, MethodDocs, PlatformDataInner, TypeNameInput,
 };
@@ -15,11 +13,6 @@ pub(super) fn build(db: &dyn RootDatabase, name: &str) -> Option<SymbolSignature
     Some(from_global_function(&function, docs.as_ref()))
 }
 
-/// Build a [`SymbolSignature`] from an already-resolved [`GlobalFunction`].
-///
-/// Exposed so completion (which already holds fetched globals from
-/// `all_global_functions` / prefix iteration) can render them without an
-/// extra Salsa lookup.
 pub fn from_global_function(
     function: &GlobalFunction,
     docs: Option<&MethodDocs>,

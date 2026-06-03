@@ -1,5 +1,3 @@
-//! Conversion from LSP protocol types to internal types.
-
 use anyhow::{anyhow, Result};
 use ide::TextRange;
 use line_index::{LineCol, LineIndex, TextSize};
@@ -9,7 +7,6 @@ use vfs::FileId;
 use crate::global_state::{GlobalState, GlobalStateSnapshot};
 use crate::lsp::PositionEncoding;
 
-/// Converts a URL to a FileId.
 pub fn file_id(state: &GlobalState, url: &Url) -> Result<FileId> {
     let path = url.to_file_path().map_err(|_| anyhow!("Invalid file URL: {}", url))?;
 
@@ -19,14 +16,10 @@ pub fn file_id(state: &GlobalState, url: &Url) -> Result<FileId> {
     vfs.file_id(&vfs_path).ok_or_else(|| anyhow!("File not in VFS: {}", url))
 }
 
-/// Converts a URL to a FileId from a frozen snapshot.
 pub fn file_id_snapshot(snapshot: &GlobalStateSnapshot, url: &Url) -> Result<FileId> {
     snapshot.file_id_for_url(url)
 }
 
-/// Converts a UTF-16 LSP position to a text offset.
-///
-/// Use [`offset_with_encoding`] when the client negotiated another encoding.
 pub fn offset(line_index: &LineIndex, text: &str, position: Position) -> Result<TextSize> {
     offset_with_encoding(line_index, text, position, PositionEncoding::Utf16)
 }
@@ -74,7 +67,6 @@ pub fn offset_with_encoding(
     Ok(result)
 }
 
-/// Converts a UTF-16 LSP range to a text range.
 pub fn text_range(
     line_index: &LineIndex,
     text: &str,

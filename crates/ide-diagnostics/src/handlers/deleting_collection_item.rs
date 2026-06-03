@@ -1,52 +1,3 @@
-//! DeletingCollectionItem diagnostic.
-//!
-//! Detects deletion of collection items within a ForEach loop iterating over that same collection.
-//!
-//! ## Why?
-//! Deleting elements during `ForEach` iteration causes:
-//! - Collection indices to change during iteration
-//! - Some elements to be skipped
-//! - Potential runtime errors
-//! - Unexpected behavior in production code
-//!
-//! ## Bad practice
-//! ```bsl
-//! Для Каждого Элемент Из Коллекция Цикл
-//!     Коллекция.Удалить(Элемент); // Error: Deleting from iterated collection!
-//! КонецЦикла;
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! // Option 1: Reverse loop by index
-//! Для Индекс = Коллекция.Количество() - 1 По 0 Цикл -1
-//!     Коллекция.Удалить(Индекс);
-//! КонецЦикла;
-//!
-//! // Option 2: Collect items to delete
-//! УдаляемыеЭлементы = Новый Массив;
-//! Для Каждого Элемент Из Коллекция Цикл
-//!     Если УсловиеУдаления(Элемент) Тогда
-//!         УдаляемыеЭлементы.Добавить(Элемент);
-//!     КонецЕсли;
-//! КонецЦикла;
-//!
-//! Для Каждого Элемент Из УдаляемыеЭлементы Цикл
-//!     Коллекция.Удалить(Элемент);
-//! КонецЦикла;
-//! ```
-//!
-//! ## Configuration
-//! - **Enabled by default:** Yes
-//! - **Severity:** Error (MAJOR)
-//! - **Tags:** STANDARD, ERROR
-//! - **Minutes to fix:** 5
-//!
-//! ## Implementation
-//!
-//! Integrated through local HIR body diagnostics and adapted to the local
-//! syntax and semantic model.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -67,9 +18,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     clean_code_attribute: CleanCodeAttribute::Intentional,
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic.
-///
-/// Called from lib.rs dispatch when `BodyDiagnostic::DeletingCollectionItem` is encountered.
 pub fn from_hir(
     collection: &str,
     range: TextRange,
@@ -197,7 +145,6 @@ EndProcedure
 
     #[test]
     fn test_good_different_collection_nested_field() {
-        // НеЭтаКоллекция.Удалить while iterating Коллекция — no error
         let code = r#"
 Процедура Тест()
 Для Каждого Элемент Из Коллекция Цикл
@@ -217,7 +164,6 @@ EndProcedure
 
     #[test]
     fn test_good_global_delete_nested_field() {
-        // Global Удалить() while iterating — no error
         let code = r#"
 Процедура Тест()
 Для Каждого Элемент Из Коллекция Цикл
@@ -237,7 +183,6 @@ EndProcedure
 
     #[test]
     fn test_error_chained_field_collection() {
-        // error1: Коллекция.ЕщеКоллекция.Удалить while iterating Коллекция.ЕщеКоллекция
         let code = r#"
 Процедура Тест()
 Для Каждого Элемент Из Коллекция.ЕщеКоллекция Цикл
@@ -260,7 +205,6 @@ EndProcedure
 
     #[test]
     fn test_error_simple_english() {
-        // error2: mass.delete(elem)
         let code = r#"
 Procedure Test()
 for each elem in mass do
@@ -281,7 +225,6 @@ EndProcedure
 
     #[test]
     fn test_error_parenthesized_arg() {
-        // error3: mass.delete((elem)) — extra parens around arg
         let code = r#"
 Procedure Test()
 for each elem in mass do
@@ -302,7 +245,6 @@ EndProcedure
 
     #[test]
     fn test_error_simple_russian_no_condition() {
-        // error4: Коллекция.Удалить(Элемент) directly in loop without If
         let code = r#"
 Процедура Тест()
 Для Каждого Элемент Из Коллекция Цикл
@@ -323,7 +265,6 @@ EndProcedure
 
     #[test]
     fn test_error_inside_if_in_loop() {
-        // error5: delete inside If inside ForEach
         let code = r#"
 Процедура Тест()
 Для Каждого Элемент Из Коллекция Цикл
@@ -346,7 +287,6 @@ EndProcedure
 
     #[test]
     fn test_error_expression_arg() {
-        // error6: mass.delete(elem+1)
         let code = r#"
 Procedure Test()
 for each elem in mass do
@@ -367,7 +307,6 @@ EndProcedure
 
     #[test]
     fn test_error_chained_method_calls() {
-        // error7: mass.mass1().mass2 chained collection
         let code = r#"
 Procedure Test()
 for each elem in mass.mass1().mass2 do
@@ -388,7 +327,6 @@ EndProcedure
 
     #[test]
     fn test_good_different_collection_after_loop() {
-        // good: Коллекция1.Удалить while iterating Коллекция — no error
         let code = r#"
 Процедура Тест()
 Для Каждого Элемент Из Коллекция Цикл
@@ -408,8 +346,6 @@ EndProcedure
 
     #[test]
     fn test_break_after_delete_simple() {
-        // Простой тест: Delete + Прервать в ForEach - безопасный паттерн
-        // Simple test: Delete + Break in ForEach - safe pattern
         let code = r#"
 Процедура Тест()
     Для Каждого Элемент Из Коллекция Цикл
@@ -431,8 +367,6 @@ EndProcedure
 
     #[test]
     fn test_break_after_delete_nested_loops() {
-        // Вложенные циклы с Delete + Break — безопасный паттерн
-        // Nested loops with Delete + Break — safe pattern
         let code = r#"
 Процедура ПередЗаписью()
     // Внешний цикл по элементам для удаления
@@ -459,8 +393,6 @@ EndProcedure
 
     #[test]
     fn test_return_after_delete() {
-        // Delete + Возврат - тоже безопасный паттерн
-        // Delete + Return is also safe
         let code = r#"
 Процедура Тест()
     Для Каждого Элемент Из Коллекция Цикл
@@ -482,8 +414,6 @@ EndProcedure
 
     #[test]
     fn test_delete_without_break_still_error() {
-        // Delete без Break/Return - всё ещё ошибка
-        // Delete without Break/Return - still an error
         let code = r#"
 Процедура Тест()
     Для Каждого Элемент Из Коллекция Цикл

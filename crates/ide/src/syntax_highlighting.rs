@@ -1,20 +1,3 @@
-//! Semantic syntax highlighting for BSL.
-//!
-//! This module provides semantic highlighting by analyzing the HIR
-//! and assigning semantic token types and modifiers to each token.
-//!
-//! ## Architecture
-//!
-//! 1. **Syntactic highlighting** - Keywords, literals, comments, operators (by token kind)
-//! 2. **Semantic highlighting** - Function calls, variables, parameters (via HIR + name resolution)
-//! 3. **SDBL highlighting** - SDBL keywords, operators, functions in string literals (via sdbl-hir)
-//!
-//! Semantic highlighting requires name resolution to distinguish:
-//! - Function calls from variables
-//! - Parameters from local variables
-//! - Module variables from local variables
-//! - Builtin functions from user-defined (TODO)
-
 mod sdbl;
 
 use ide_db::{RootDatabase, TextRange};
@@ -24,51 +7,30 @@ use syntax::{
 };
 use vfs::FileId;
 
-/// Semantic token type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HlTag {
-    /// Keywords (Процедура, Функция, Если, etc.)
     Keyword,
-    /// Function names
     Function,
-    /// Procedure names
     Procedure,
-    /// Parameter names
     Parameter,
-    /// Variable names
     Variable,
-    /// String literals
     StringLiteral,
-    /// Number literals
     NumberLiteral,
-    /// Boolean literals (Истина, Ложь, True, False)
     BooleanLiteral,
-    /// Comments
     Comment,
-    /// Preprocessor directives (#Если, #Область, etc.)
     Preprocessor,
-    /// Annotations (&НаКлиенте, &НаСервере, etc.)
     Annotation,
-    /// Property access (Object.Property)
     Property,
-    /// Operators (+, -, *, /, =, etc.)
     Operator,
-    /// Unresolved reference (identifier not found in metadata)
     UnresolvedReference,
-    /// Built-in platform function (НачатьТранзакцию, Формат, Сообщить, etc.)
     BuiltinFunction,
-    /// Type names / Class names (SDBL table names: Справочник.Валюты)
     Type,
-    /// Enum member / Constant (SDBL field aliases: КАК АлиасПоля)
     EnumMember,
-    /// Namespace / Module (SDBL table aliases: Валюты.Наименование)
     Namespace,
-    /// Class (SDBL MDO types: Справочник, Документ, Перечисление)
     Class,
 }
 
 impl HlTag {
-    /// Returns the LSP semantic token type name.
     pub fn as_str(&self) -> &'static str {
         match self {
             HlTag::Keyword => "keyword",
@@ -94,7 +56,6 @@ impl HlTag {
     }
 }
 
-/// Semantic token modifiers (bitflags).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct HlMod(u32);
 
@@ -118,7 +79,6 @@ impl HlMod {
         (self.0 & modifier.0) != 0
     }
 
-    /// Returns LSP semantic token modifier names.
     pub fn as_strings(&self) -> Vec<&'static str> {
         let mut result = Vec::new();
         if self.contains(HlMod::EXPORT) {
@@ -140,7 +100,6 @@ impl HlMod {
     }
 }
 
-/// A highlighted range with semantic token type and modifiers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HlRange {
     pub range: TextRange,
@@ -148,40 +107,20 @@ pub struct HlRange {
     pub modifiers: HlMod,
 }
 
-/// Result of semantic highlighting.
-///
-/// Contains highlights and any external files that were resolved during highlighting.
-/// External files can be preloaded in background to reduce latency when navigating to them.
 #[derive(Debug, Clone)]
 pub struct HighlightResult {
-    /// Semantic highlights for the file.
     pub highlights: Vec<HlRange>,
-    /// External files resolved during highlighting (CommonModules, Manager modules, etc.).
-    /// These can be preloaded in background for faster goto_definition.
     pub resolved_external_files: Vec<FileId>,
 }
 
-/// Context for semantic highlighting that caches ExprScopes for methods.
-///
-/// This struct lives only during a single `highlight()` call and provides:
-/// - Cached ExprScopes for each method (avoids rebuilding for every token)
-/// - Database and file context
-/// - SDBL context (line index, tracked literals)
-/// - Resolved external files (for preloading)
 pub(crate) struct HighlightContext<'db, DB: RootDatabase> {
     pub(crate) db: &'db DB,
     pub(crate) file_id: FileId,
 
-    /// Line index for SDBL position mapping optimization (built once for entire file)
-    /// Eliminates 100× rebuilds for files with many SDBL queries
     pub(crate) line_index: Option<Vec<usize>>,
 
-    /// SDBL literal ranges to skip STRING token highlighting
-    /// When a literal contains SDBL, its tokens are highlighted by sdbl module
     pub(crate) sdbl_literal_ranges: rustc_hash::FxHashSet<TextRange>,
 
-    /// External files resolved during highlighting.
-    /// Collected to enable preloading for faster goto_definition.
     pub(crate) resolved_external_files: rustc_hash::FxHashSet<FileId>,
 }
 
@@ -196,15 +135,10 @@ impl<'db, DB: RootDatabase> HighlightContext<'db, DB> {
         }
     }
 }
-/// Generates semantic highlighting for a file.
-///
-/// Returns both highlights and any external files that were resolved during highlighting.
-/// External files can be preloaded in background for faster goto_definition.
 pub fn highlight<DB: RootDatabase>(db: &DB, file_id: FileId) -> HighlightResult {
     let parse = db.parse(file_id);
     let root = parse.syntax_node();
 
-    // Build line index ONCE for entire file (optimization for SDBL position mapping)
     let input = db.file_text_input(file_id);
     let bsl_source = input.text(db);
     let line_index = ide_diagnostics::sdbl_utils::build_line_index_shared(&bsl_source);
@@ -222,23 +156,19 @@ pub fn highlight<DB: RootDatabase>(db: &DB, file_id: FileId) -> HighlightResult 
     }
 }
 
-/// Recursively traverse AST and collect highlights.
 fn traverse_node<DB: RootDatabase>(
     ctx: &mut HighlightContext<DB>,
     node: &SyntaxNode,
     highlights: &mut Vec<HlRange>,
 ) {
-    // Highlight tokens based on their type
     for token in node.children_with_tokens() {
         match token {
             syntax::NodeOrToken::Token(token) => {
-                // 1. Definition site (proc/func/param/var name; handles keyword-recovery).
                 if let Some(hl) = highlight_def_site_token(&token) {
                     highlights.push(hl);
                     continue;
                 }
 
-                // 2. Resolved semantic highlighting for name tokens at use sites.
                 if token.kind().is_name_token() {
                     if let Some(hl) = highlight_name_semantic(ctx, &token) {
                         highlights.push(hl);
@@ -246,31 +176,25 @@ fn traverse_node<DB: RootDatabase>(
                     }
                 }
 
-                // 3. Syntactic fallback.
                 if let Some(hl) = highlight_token(&token, ctx) {
                     highlights.push(hl);
                 }
             }
             syntax::NodeOrToken::Node(node) => {
-                // Check for SDBL in string literals BEFORE other processing
                 if node.kind() == SyntaxKind::LITERAL {
                     if let Some(sdbl_highlights) = sdbl::highlight_sdbl_in_literal(ctx, &node) {
-                        // Track this literal as containing SDBL to skip STRING token highlighting
                         ctx.sdbl_literal_ranges.insert(node.text_range());
                         highlights.extend(sdbl_highlights);
-                        continue; // Skip children - SDBL tokens override STRING highlighting
+                        continue;
                     }
                 }
 
-                // Recurse into children. Definition-site highlights are handled
-                // per-token above, so no node-level highlighter is needed here.
                 traverse_node(ctx, &node, highlights);
             }
         }
     }
 }
 
-/// Highlight a name token using the shared type-aware semantic symbol API.
 fn highlight_name_semantic<DB: RootDatabase>(
     ctx: &mut HighlightContext<DB>,
     token: &SyntaxToken,
@@ -298,8 +222,6 @@ fn highlight_name_semantic<DB: RootDatabase>(
         },
     };
 
-    // Collect external file IDs for preloading
-    // This enables warming up caches before user navigates via goto_definition
     if let Some(definition) = &symbol.definition {
         match definition {
             hir::Definition::MdoManagerModule { file_id, .. } if *file_id != ctx.file_id => {
@@ -317,14 +239,12 @@ fn highlight_name_semantic<DB: RootDatabase>(
 
     let mut modifiers = HlMod::new();
 
-    // Add EXPORT modifier for exported symbols
     if let Some(definition) = &symbol.definition {
         if definition.is_export(ctx.db) {
             modifiers = modifiers.with(HlMod::EXPORT);
         }
     }
 
-    // Add EXPORT modifier for builtin functions
     if matches!(
         symbol.definition,
         Some(hir::Definition::BuiltinFunction(_))
@@ -340,7 +260,6 @@ fn highlight_name_semantic<DB: RootDatabase>(
     Some(HlRange { range, tag, modifiers })
 }
 
-/// Highlight a single token based on its syntax kind.
 fn highlight_token<DB: RootDatabase>(
     token: &SyntaxToken,
     ctx: &HighlightContext<DB>,
@@ -348,7 +267,6 @@ fn highlight_token<DB: RootDatabase>(
     let kind = token.kind();
     let range = token.text_range();
 
-    // Skip STRING tokens if parent is a SDBL literal (already highlighted by sdbl module)
     if kind.is_string_literal() {
         if let Some(parent) = token.parent() {
             if ctx.sdbl_literal_ranges.contains(&parent.text_range()) {
@@ -357,7 +275,6 @@ fn highlight_token<DB: RootDatabase>(
         }
     }
 
-    // Order matters: boolean literals are also keywords, so check them first
     let tag = if kind.is_boolean_literal() {
         HlTag::BooleanLiteral
     } else if kind.is_string_literal() {
@@ -381,17 +298,6 @@ fn highlight_token<DB: RootDatabase>(
     Some(HlRange { range, tag, modifiers: HlMod::new() })
 }
 
-/// Detects whether a token is the name token of a definition site
-/// (ProcedureDef/FunctionDef/Param/VarDef) and produces the corresponding highlight.
-///
-/// Runs before `highlight_ident_semantic` and `highlight_token` in the traversal.
-/// At definition sites the syntactic role (Procedure, Function, Parameter, Variable
-/// with DEFINITION or DECLARATION modifier) is the source of truth, so we don't
-/// pay for name resolution here. EXPORT comes from the AST `export_keyword()`
-/// directly, which lets the modifier survive parser recovery when the resolver fails.
-///
-/// Handles keyword-as-name parser recovery for procedures and functions via
-/// `name_or_keyword()`.
 fn highlight_def_site_token(token: &SyntaxToken) -> Option<HlRange> {
     let parent = token.parent()?;
     let range = token.text_range();
@@ -444,20 +350,6 @@ fn highlight_def_site_token(token: &SyntaxToken) -> Option<HlRange> {
     }
 }
 
-/// Final normalization pass for `highlight()`: sorts highlights and removes
-/// any overlapping entries.
-///
-/// The use-case-layer contract is that consumers (LSP semantic-tokens encoder,
-/// future TextMate/HTML dumps, tests) receive a `Vec<HlRange>` where:
-/// - ranges are sorted by start offset;
-/// - no two ranges overlap.
-///
-/// `highlight_def_site_token` already eliminates the systematic Procedure/Function/
-/// Param/Variable producer dup; this pass is defense-in-depth against future
-/// producers (annotation handling, region-name highlighting, async modifiers, etc.).
-///
-/// Conflict resolution priority for equal or partially-overlapping ranges:
-/// DEFINITION > DECLARATION > resolved-semantic > syntactic fallback.
 fn normalize_highlights(highlights: Vec<HlRange>) -> Vec<HlRange> {
     if highlights.len() < 2 {
         return highlights;
@@ -531,14 +423,12 @@ mod tests {
         let mut db = RootDatabaseImpl::default();
         let file_id = FileId(0);
 
-        // Set up source root
         let mut file_set = FileSet::new();
         file_set.insert(file_id, VfsPath::new("/test.bsl"));
         let source_root = SourceRoot::new_local(file_set);
         db.set_source_root(SourceRootId(0), source_root);
         db.set_file_source_root(file_id, SourceRootId(0));
 
-        // Set file contents
         db.set_file_text(file_id, source);
 
         (db, file_id)
@@ -575,11 +465,9 @@ mod tests {
         let (db, file_id) = create_db_with_file(code);
         let highlights = highlight(&db, file_id);
 
-        // Check that parameters are highlighted as Parameter
         let param_highlights: Vec<_> =
             highlights.highlights.iter().filter(|hl| hl.tag == HlTag::Parameter).collect();
 
-        // Should find 4 parameter usages: 2 declarations + 2 usages
         assert!(
             param_highlights.len() >= 4,
             "Expected at least 4 parameter highlights, got {}",
@@ -598,7 +486,6 @@ mod tests {
         let (db, file_id) = create_db_with_file(code);
         let highlights = highlight(&db, file_id);
 
-        // Check that local variables are highlighted as Variable
         let var_highlights: Vec<_> = highlights
             .highlights
             .iter()
@@ -609,7 +496,6 @@ mod tests {
             })
             .collect();
 
-        // Should find at least 2 variable highlights: 1 declaration + 1 usage
         assert!(
             var_highlights.len() >= 2,
             "Expected at least 2 variable highlights, got {}",
@@ -656,11 +542,9 @@ mod tests {
         let (db, file_id) = create_db_with_file(code);
         let highlights = highlight(&db, file_id);
 
-        // Check parameters
         let param_count =
             highlights.highlights.iter().filter(|hl| hl.tag == HlTag::Parameter).count();
 
-        // Check local variables (excluding module-level)
         let local_var_count = highlights
             .highlights
             .iter()
@@ -671,7 +555,6 @@ mod tests {
             })
             .count();
 
-        // Should find 2 parameter usages and 3 local variable usages
         assert!(param_count >= 2, "Expected at least 2 parameter highlights");
         assert!(local_var_count >= 3, "Expected at least 3 local variable highlights");
     }
@@ -687,7 +570,6 @@ mod tests {
         let (db, file_id) = create_db_with_file(code);
         let highlights = highlight(&db, file_id);
 
-        // All three variants of "Параметр" should be highlighted
         let param_count =
             highlights.highlights.iter().filter(|hl| hl.tag == HlTag::Parameter).count();
 
@@ -712,13 +594,9 @@ mod tests {
         let (db, file_id) = create_db_with_file(code);
         let highlights = highlight(&db, file_id);
 
-        // Both module and local variables should be highlighted
         let var_highlights: Vec<_> =
             highlights.highlights.iter().filter(|hl| hl.tag == HlTag::Variable).collect();
 
-        // Should find at least 5 variable highlights:
-        // 1 module var declaration + 1 module var usage
-        // + 1 local var declaration + 2 local var usages
         assert!(
             var_highlights.len() >= 5,
             "Expected at least 5 variable highlights (module + local), got {}",
@@ -744,7 +622,6 @@ mod tests {
         let (db, file_id) = create_db_with_file(code);
         let highlights = highlight(&db, file_id);
 
-        // Each method's parameters and locals should be independently highlighted
         let param_count =
             highlights.highlights.iter().filter(|hl| hl.tag == HlTag::Parameter).count();
 
@@ -758,7 +635,6 @@ mod tests {
             })
             .count();
 
-        // Should find 4 parameter usages (2 per method) and 6 variable usages (3 per method)
         assert!(param_count >= 4, "Expected at least 4 parameter highlights");
         assert!(var_count >= 6, "Expected at least 6 local variable highlights");
     }
@@ -774,7 +650,6 @@ mod tests {
         let (db, file_id) = create_db_with_file(code);
         let highlights = highlight(&db, file_id);
 
-        // Find SELECT keyword - should be highlighted as Keyword
         let select_kw = highlights.highlights.iter().find(|hl| {
             hl.tag == HlTag::Keyword
                 && code[hl.range.start().into()..hl.range.end().into()] == *"SELECT"
@@ -782,7 +657,6 @@ mod tests {
 
         assert!(select_kw.is_some(), "SELECT should be highlighted as Keyword");
 
-        // Find FROM keyword - should be highlighted as Keyword
         let from_kw = highlights.highlights.iter().find(|hl| {
             hl.tag == HlTag::Keyword
                 && code[hl.range.start().into()..hl.range.end().into()] == *"FROM"
@@ -805,7 +679,6 @@ mod tests {
         let (db, file_id) = create_db_with_file(code);
         let highlights = highlight(&db, file_id);
 
-        // Find ВЫБРАТЬ keyword
         let select_kw = highlights.highlights.iter().find(|hl| {
             hl.tag == HlTag::Keyword && {
                 let text = &code[hl.range.start().into()..hl.range.end().into()];
@@ -815,7 +688,6 @@ mod tests {
 
         assert!(select_kw.is_some(), "ВЫБРАТЬ should be highlighted as Keyword");
 
-        // Find ИЗ keyword
         let from_kw = highlights.highlights.iter().find(|hl| {
             hl.tag == HlTag::Keyword && {
                 let text = &code[hl.range.start().into()..hl.range.end().into()];
@@ -863,7 +735,6 @@ mod tests {
         let (db, file_id) = create_db_with_file(code);
         let highlights = highlight(&db, file_id);
 
-        // Find SUM function - should be highlighted as Function
         let sum_fn = highlights.highlights.iter().find(|hl| {
             hl.tag == HlTag::Function
                 && code[hl.range.start().into()..hl.range.end().into()] == *"SUM"
@@ -883,7 +754,6 @@ mod tests {
         let (db, file_id) = create_db_with_file(code);
         let highlights = highlight(&db, file_id);
 
-        // Find = operator - should be highlighted as Operator
         let eq_op = highlights
             .highlights
             .iter()
@@ -893,10 +763,8 @@ mod tests {
             })
             .count();
 
-        // Should find at least one = operator in SDBL (ignore the BSL assignment)
         assert!(eq_op >= 1, "= should be highlighted as Operator");
 
-        // Find AND operator - should be highlighted as Operator
         let and_op = highlights.highlights.iter().find(|hl| {
             hl.tag == HlTag::Operator
                 && code[hl.range.start().into()..hl.range.end().into()] == *"AND"
@@ -916,11 +784,9 @@ mod tests {
         let (db, file_id) = create_db_with_file(code);
         let highlights = highlight(&db, file_id);
 
-        // The string "SELECT" is too short (< 15 chars) so should be highlighted as StringLiteral
         let string_highlights: Vec<_> =
             highlights.highlights.iter().filter(|hl| hl.tag == HlTag::StringLiteral).collect();
 
-        // Should have at least one string literal
         assert!(!string_highlights.is_empty(), "Short strings should remain as StringLiteral");
     }
 
@@ -939,7 +805,6 @@ mod tests {
         let (db, file_id) = create_db_with_file(code);
         let highlights = highlight(&db, file_id);
 
-        // Find all КАК (AS) keywords - should be highlighted as Keyword
         let as_keywords: Vec<_> = highlights
             .highlights
             .iter()
@@ -951,7 +816,6 @@ mod tests {
             })
             .collect();
 
-        // Should find 3 КАК keywords (2 in field aliases + 1 in table alias)
         assert_eq!(as_keywords.len(), 3, "Expected 3 КАК keywords, got {}", as_keywords.len());
     }
 
@@ -970,7 +834,6 @@ mod tests {
         let (db, file_id) = create_db_with_file(code);
         let highlights = highlight(&db, file_id);
 
-        // Find field aliases - should be highlighted as EnumMember
         let field_aliases: Vec<_> = highlights
             .highlights
             .iter()
@@ -989,7 +852,6 @@ mod tests {
             field_aliases.len()
         );
 
-        // Find table alias - should be highlighted as Namespace
         let table_aliases: Vec<_> = highlights
             .highlights
             .iter()
@@ -1001,13 +863,11 @@ mod tests {
             })
             .collect();
 
-        // Should find table alias after КАК
         assert!(
             !table_aliases.is_empty(),
             "Expected table alias 'Валюты' highlighted as Namespace"
         );
 
-        // Find table name - should be highlighted as Type
         let table_names: Vec<_> = highlights
             .highlights
             .iter()
@@ -1052,7 +912,6 @@ mod tests {
             }
         }
 
-        // Check that different elements have different tags
         let mut has_type = false;
         let mut has_namespace = false;
         let mut has_enum_member = false;
@@ -1099,7 +958,6 @@ mod tests {
         let (db, file_id) = create_db_with_file(code);
         let highlights = highlight(&db, file_id);
 
-        // Find all AS keywords - should be highlighted as Keyword
         let as_keywords: Vec<_> = highlights
             .highlights
             .iter()
@@ -1109,7 +967,6 @@ mod tests {
             })
             .collect();
 
-        // Should find 2 AS keywords (1 in field alias + 1 in table alias)
         assert_eq!(as_keywords.len(), 2, "Expected 2 AS keywords, got {}", as_keywords.len());
     }
 
@@ -1126,7 +983,6 @@ mod tests {
         let (db, file_id) = create_db_with_file(code);
         let highlights = highlight(&db, file_id);
 
-        // Debug: print all highlights
         eprintln!("\n=== All highlights ===");
         for hl in highlights.highlights.iter() {
             let text = &code[hl.range.start().into()..hl.range.end().into()];
@@ -1136,7 +992,6 @@ mod tests {
         }
         eprintln!("======================\n");
 
-        // Check НачатьТранзакцию - should be highlighted as BuiltinFunction with EXPORT modifier
         let begin_trans = highlights.highlights.iter().find(|hl| {
             hl.tag == HlTag::BuiltinFunction
                 && code[hl.range.start().into()..hl.range.end().into()] == *"НачатьТранзакцию"
@@ -1148,7 +1003,6 @@ mod tests {
             "BuiltinFunction should have EXPORT modifier (defaultLibrary)"
         );
 
-        // Check Сообщить
         let message_fn = highlights.highlights.iter().find(|hl| {
             hl.tag == HlTag::BuiltinFunction
                 && code[hl.range.start().into()..hl.range.end().into()] == *"Сообщить"
@@ -1156,7 +1010,6 @@ mod tests {
 
         assert!(message_fn.is_some(), "Сообщить should be highlighted as BuiltinFunction");
 
-        // Check Формат
         let format_fn = highlights.highlights.iter().find(|hl| {
             hl.tag == HlTag::BuiltinFunction
                 && code[hl.range.start().into()..hl.range.end().into()] == *"Формат"
@@ -1185,7 +1038,6 @@ mod tests {
         let (db, file_id) = create_db_with_file(code);
         let highlights = highlight(&db, file_id);
 
-        // МояФункция should be Function (user-defined)
         let my_func_call = highlights.highlights.iter().find(|hl| {
             hl.tag == HlTag::Function
                 && code[hl.range.start().into()..hl.range.end().into()] == *"МояФункция"
@@ -1197,7 +1049,6 @@ mod tests {
             "МояФункция should be highlighted as Function (not builtin)"
         );
 
-        // НачатьТранзакцию should be BuiltinFunction
         let builtin_call = highlights.highlights.iter().find(|hl| {
             hl.tag == HlTag::BuiltinFunction
                 && code[hl.range.start().into()..hl.range.end().into()] == *"НачатьТранзакцию"
@@ -1220,7 +1071,6 @@ mod tests {
         let (db, file_id) = create_db_with_file(code);
         let highlights = highlight(&db, file_id);
 
-        // "Документы" should be highlighted as Class (MDO plural form)
         let documents_highlight = highlights.highlights.iter().find(|hl| {
             hl.tag == HlTag::Class
                 && code[hl.range.start().into()..hl.range.end().into()] == *"Документы"
@@ -1261,7 +1111,6 @@ EndFunction
         let (db, file_id) = create_db_with_file(code);
         let highlights = highlight(&db, file_id);
 
-        // Count all Class highlights that match "документы" in any case
         let documents_highlights: Vec<_> = highlights
             .highlights
             .iter()
@@ -1330,8 +1179,6 @@ EndFunction
         let (db, file_id) = create_db_with_file(code);
         let highlights = highlight(&db, file_id);
 
-        // All occurrences of "Документы" should be Variable, not Class
-        // because local variable shadows the global MDO plural form
         let documents_as_variable = highlights
             .highlights
             .iter()
@@ -1348,7 +1195,6 @@ EndFunction
             "Local variable 'Документы' should shadow global MDO plural (expected >=3 Variable highlights)"
         );
 
-        // Ensure NO Class highlights for "Документы"
         let documents_as_class = highlights.highlights.iter().any(|hl| {
             hl.tag == HlTag::Class && {
                 let text = &code[hl.range.start().into()..hl.range.end().into()];
@@ -1401,11 +1247,9 @@ EndFunction
 КонецФункции
 "#;
 
-        // No metadata configuration loaded
         let (db, file_id) = create_db_with_file(code);
         let highlights = highlight(&db, file_id);
 
-        // "ПКО" should NOT be highlighted as Type (no configuration)
         let metadata_name_highlight = highlights.highlights.iter().any(|hl| {
             hl.tag == HlTag::Type && code[hl.range.start().into()..hl.range.end().into()] == *"ПКО"
         });
@@ -1415,7 +1259,6 @@ EndFunction
             "ПКО should not be highlighted as Type (no configuration loaded)"
         );
 
-        // "Документы" should still be highlighted as Class
         let plural_highlight = highlights.highlights.iter().any(|hl| {
             hl.tag == HlTag::Class
                 && code[hl.range.start().into()..hl.range.end().into()] == *"Документы"
@@ -1469,18 +1312,6 @@ EndFunction
     #[test]
     #[ignore = "Track 3 Phase G dep: requires CfeFixtureBuilder (§8 CFE harness)"]
     fn test_highlight_manager_module_method() {
-        // This test verifies that manager module methods are properly highlighted
-        // Example: РегистрыСведений.ОчередьЗапросовERP.ДобавитьВОчередь()
-        //          ^^^^^^^^^^^^^^^^ ^^^^^^^^^^^^^^^^^ ^^^^^^^^^^^^^^^^
-        //          Class            Type              Function (manager method)
-        //
-        // NOTE: This currently requires:
-        // 1. Workspace scope in Semantics::resolve_name_to_definition()
-        // 2. Manager module file registered in workspace
-        // 3. resolve_three_level() implementation in resolver
-        //
-        // When these are implemented, this test should pass and demonstrate that
-        // the Definition API correctly resolves manager module methods.
         let code = r#"
 Процедура Тест()
     РегистрыСведений.ОчередьЗапросовERP.ДобавитьВОчередь();
@@ -1490,15 +1321,12 @@ EndFunction
         let (db, file_id) = create_db_with_file(code);
         let highlights = highlight(&db, file_id);
 
-        // РегистрыСведений → Class ✅
         let plural_highlight = highlights.highlights.iter().any(|hl| {
             hl.tag == HlTag::Class
                 && code[hl.range.start().into()..hl.range.end().into()] == *"РегистрыСведений"
         });
         assert!(plural_highlight, "РегистрыСведений should be highlighted as Class");
 
-        // ОчередьЗапросовERP → Type (would require configuration)
-        // ДобавитьВОчередь → Function (manager method - requires workspace scope)
         let method_highlight = highlights.highlights.iter().any(|hl| {
             hl.tag == HlTag::Function
                 && code[hl.range.start().into()..hl.range.end().into()] == *"ДобавитьВОчередь"
@@ -1517,7 +1345,6 @@ EndFunction
     Возврат Запрос;
 КонецФункции
 "#;
-        // Print code with byte positions
         eprintln!("\n=== Source code with positions ===");
         for (i, line) in code.lines().enumerate() {
             let line_start = code.lines().take(i).map(|l| l.len() + 1).sum::<usize>();
@@ -1527,20 +1354,17 @@ EndFunction
         let (db, file_id) = create_db_with_file(code);
         let highlights = highlight(&db, file_id);
 
-        // Debug: print all highlights with their ranges and text
         eprintln!("\n=== All highlights ===");
         for hl in &highlights.highlights {
             let text = &code[hl.range.start().into()..hl.range.end().into()];
             eprintln!("Range {:?}, Tag {:?}, Text: '{}'", hl.range, hl.tag, text);
         }
 
-        // Find ЕСТЬNULL - should be highlighted (as function or identifier)
         let estnull = highlights.highlights.iter().find(|hl| {
             let text = &code[hl.range.start().into()..hl.range.end().into()];
             text == "ЕСТЬNULL"
         });
 
-        // Find ДокЗаказКлиента - should be highlighted as one complete token
         let doc_orders = highlights
             .highlights
             .iter()
@@ -1557,11 +1381,8 @@ EndFunction
             eprintln!("  Text: '{}', Tag: {:?}", text, hl.tag);
         }
 
-        // ЕСТЬNULL should be found
         assert!(estnull.is_some(), "ЕСТЬNULL should be highlighted");
 
-        // ДокЗаказКлиента should be highlighted as one complete token
-        // (not broken like "Е(ДокЗаказКлиен")
         let complete_token = doc_orders.iter().find(|hl| {
             let text = &code[hl.range.start().into()..hl.range.end().into()];
             text == "ДокЗаказКлиента"
@@ -1596,13 +1417,11 @@ EndFunction
             eprintln!("Range {:?}, Tag {:?}, Text: '{}'", hl.range, hl.tag, text);
         }
 
-        // Find ЕСТЬNULL
         let estnull = highlights.highlights.iter().find(|hl| {
             let text = &code[hl.range.start().into()..hl.range.end().into()];
             text == "ЕСТЬNULL"
         });
 
-        // Find ДокЗаказКлиента
         let doc_orders = highlights.highlights.iter().find(|hl| {
             let text = &code[hl.range.start().into()..hl.range.end().into()];
             text == "ДокЗаказКлиента"
@@ -1640,7 +1459,6 @@ EndFunction
 
         let highlights = highlight(&db, file_id);
 
-        // Find ПРЕДСТАВЛЕНИЕ tokens
         let presentation_highlights: Vec<_> = highlights
             .highlights
             .iter()
@@ -1656,7 +1474,6 @@ EndFunction
             eprintln!("Range {:?}, Tag {:?}, Text: '{}'", hl.range, hl.tag, text);
         }
 
-        // Check both ПРЕДСТАВЛЕНИЕ occurrences
         let presentation_count = highlights
             .highlights
             .iter()
@@ -1691,14 +1508,12 @@ EndFunction
         eprintln!("\n=== Bonus Query Test ===");
         eprintln!("Total highlights: {}", highlights.highlights.len());
 
-        // Print all highlights
         eprintln!("\n=== All highlights ===");
         for hl in &highlights.highlights {
             let text = &code[hl.range.start().into()..hl.range.end().into()];
             eprintln!("Range {:?}, Tag {:?}, Text: '{}'", hl.range, hl.tag, text);
         }
 
-        // Check for important tokens
         let tokens = ["ЗНАЧЕНИЕ", "Партнер", "Проведен", "ПометкаУдаления", "НЕ"];
         for token in tokens {
             let found = highlights.highlights.iter().any(|hl| {
@@ -1708,7 +1523,6 @@ EndFunction
             eprintln!("{}: {}", token, if found { "✓" } else { "✗" });
         }
 
-        // Find where highlighting stops
         let last_keyword_pos = highlights
             .highlights
             .iter()
@@ -1728,7 +1542,6 @@ EndFunction
             }
         }
 
-        // Check SDBL parsing
         let sdbl_hirs = db.sdbl_hir_in_file(file_id);
         let sdbl_queries = db.all_sdbl_in_file(file_id);
         eprintln!("\nSDBL HIR entries: {}", sdbl_hirs.len());
@@ -1783,14 +1596,12 @@ EndFunction
 "#;
         let (db, file_id) = create_db_with_file(code);
 
-        // Get SDBL HIR
         let sdbl_hirs = db.sdbl_hir_in_file(file_id);
         eprintln!("\n=== SDBL HIR entries: {} ===", sdbl_hirs.len());
 
         for (_expr_id, sdbl_pkg) in sdbl_hirs.iter() {
             eprintln!("\n=== ALL Source map tokens by category ===");
 
-            // Print all builtin functions
             let builtin_funcs =
                 sdbl_pkg.source_map.tokens_by_category(sdbl_hir::TokenCategory::BuiltinFunction);
             eprintln!("BuiltinFunction: {} tokens", builtin_funcs.len());
@@ -1798,7 +1609,6 @@ EndFunction
                 eprintln!("  - '{}' at SDBL range {:?}", token.text, token.range);
             }
 
-            // Print all aggregate functions for comparison
             let agg_funcs =
                 sdbl_pkg.source_map.tokens_by_category(sdbl_hir::TokenCategory::AggregateFunction);
             eprintln!("AggregateFunction: {} tokens", agg_funcs.len());
@@ -1816,7 +1626,6 @@ EndFunction
             }
         }
 
-        // Find both functions
         let estnull = highlights.highlights.iter().find(|hl| {
             let text = &code[hl.range.start().into()..hl.range.end().into()];
             text == "ЕСТЬNULL"
@@ -1856,13 +1665,11 @@ EndFunction
         eprintln!("\n=== JOIN with Tabular Section Test ===");
         eprintln!("Total highlights: {}", highlights.highlights.len());
 
-        // Print all SDBL highlights
         let sdbl_highlights: Vec<_> = highlights
             .highlights
             .iter()
             .filter(|h| {
                 let start: usize = h.range.start().into();
-                // Filter for SDBL content (inside string literal)
                 start > code.find('"').unwrap_or(0)
             })
             .collect();
@@ -1875,7 +1682,6 @@ EndFunction
             eprintln!("Range {:?}, Tag {:?}, Text: '{}'", hl.range, hl.tag, text);
         }
 
-        // Check SDBL HIR and source map
         let sdbl_hirs = db.sdbl_hir_in_file(file_id);
         eprintln!("\nSDBL HIR entries: {}", sdbl_hirs.len());
 
@@ -1908,7 +1714,6 @@ EndFunction
             }
         }
 
-        // Check that JOIN table is highlighted
         let join_highlights = sdbl_highlights.iter().any(|h| {
             let start: usize = h.range.start().into();
             let end: usize = h.range.end().into();
@@ -1950,7 +1755,6 @@ EndFunction
         eprintln!("\n=== Complex Nested JOIN Test ===");
         eprintln!("Total highlights: {}", highlights.highlights.len());
 
-        // Print SDBL highlights
         let sdbl_highlights: Vec<_> = highlights
             .highlights
             .iter()
@@ -1968,7 +1772,6 @@ EndFunction
             eprintln!("Range {:?}, Tag {:?}, Text: '{}'", hl.range, hl.tag, text);
         }
 
-        // Check SDBL HIR
         let sdbl_hirs = db.sdbl_hir_in_file(file_id);
         eprintln!("\nSDBL HIR entries: {}", sdbl_hirs.len());
 
@@ -2003,7 +1806,6 @@ EndFunction
             }
         }
 
-        // Check that JOIN tables are highlighted
         let inner_join_highlighted = sdbl_highlights.iter().any(|h| {
             let start: usize = h.range.start().into();
             let end: usize = h.range.end().into();
@@ -2025,12 +1827,6 @@ EndFunction
         assert!(left_join_highlighted, "LEFT JOIN table ЗаказКлиента should be highlighted");
     }
 
-    // ---------------------------------------------------------------------
-    // Invariant tests for the use-case-layer non-overlap contract
-    // ---------------------------------------------------------------------
-
-    /// Returns the (line, byte-start, byte-end) tuple of every highlight that
-    /// covers the given source substring, helping locate-then-assert checks.
     fn highlights_for(highlights: &[HlRange], code: &str, needle: &str) -> Vec<HlRange> {
         highlights
             .iter()
@@ -2140,8 +1936,6 @@ EndFunction
 
     #[test]
     fn test_highlight_def_site_unresolved_falls_back_to_ast() {
-        // Truncated body: parser recovers, name resolution may fail at def site,
-        // but the AST-driven classifier must still emit DEFINITION.
         let code = "Процедура Тест(\n";
         let (db, file_id) = create_db_with_file(code);
         let result = highlight(&db, file_id);
@@ -2166,8 +1960,6 @@ EndFunction
         assert!(name_hls[0].modifiers.contains(HlMod::DEFINITION));
     }
 
-    /// Mixed corpus: procedures, functions, params, vars, SDBL literal, annotation.
-    /// Asserts the use-case-layer non-overlap contract end-to-end.
     #[test]
     fn test_highlight_no_overlap_corpus() {
         let code = r#"
@@ -2189,13 +1981,10 @@ EndFunction
         let result = highlight(&db, file_id);
         assert_sorted_non_overlapping(&result.highlights);
 
-        // Spot-check: each named definition lands exactly once.
         for needle in
             ["Обработать", "Тест", "МодульнаяПеременная", "Локальная", "Параметр1", "Параметр2"]
         {
             let hls = highlights_for(&result.highlights, code, needle);
-            // At least the declaration; usage sites add more, but the *declaration*
-            // must be unique (no dup with DEFINITION/DECLARATION mod).
             let decl_hls: Vec<_> = hls
                 .iter()
                 .filter(|hl| {
@@ -2211,9 +2000,6 @@ EndFunction
         }
     }
 
-    /// Probe: parser accepts `Асинх Процедура` (async modifier). The async
-    /// keyword is excluded from `name_or_keyword()` so the def-site classifier
-    /// must still find the IDENT and the result must be overlap-free.
     #[test]
     fn test_highlight_async_procedure_no_overlap() {
         let code = "Асинх Процедура Х()\nКонецПроцедуры\n";
@@ -2227,9 +2013,6 @@ EndFunction
         assert!(name_hls[0].modifiers.contains(HlMod::DEFINITION));
     }
 
-    /// Probe: `&Перед(...)` extension annotation. Annotation arguments are a
-    /// separate node (LITERAL etc.) inside the annotation; the def-site
-    /// classifier should still correctly mark the procedure name.
     #[test]
     fn test_highlight_extension_annotation_no_overlap() {
         let code = "&Перед(\"ОригинальныйМетод\")\nПроцедура НовыйМетод()\nКонецПроцедуры\n";

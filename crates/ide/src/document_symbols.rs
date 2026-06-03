@@ -1,8 +1,3 @@
-//! Document symbols for outline/breadcrumbs.
-//!
-//! Uses Salsa-cached `ItemTree` and `RegionTree` to build a hierarchical
-//! list of symbols (procedures, functions, variables, regions).
-
 use hir::ModItem;
 use ide_db::SymbolKind;
 use vfs::FileId;
@@ -16,7 +11,6 @@ pub(crate) fn document_symbols(
     let item_tree = db.item_tree(file_id);
     let region_tree = db.region_tree(file_id);
 
-    // Collect flat items from ItemTree
     let mut items: Vec<DocumentSymbol> = Vec::new();
     for mod_item in item_tree.top_level_items() {
         let sym = match mod_item {
@@ -54,12 +48,10 @@ pub(crate) fn document_symbols(
         items.push(sym);
     }
 
-    // If no regions, return flat list
     if region_tree.is_empty() {
         return items;
     }
 
-    // Build region symbols with nested items
     fn build_region(
         db_region_tree: &hir::RegionTree,
         region_idx: hir::RegionIdx,
@@ -68,15 +60,12 @@ pub(crate) fn document_symbols(
         let region = db_region_tree.region(region_idx);
         let region_range = region.range;
 
-        // Collect items that fall within this region
         let mut children: Vec<DocumentSymbol> = Vec::new();
 
-        // Add child regions first
         for &child_idx in db_region_tree.children(region_idx) {
             children.push(build_region(db_region_tree, child_idx, items));
         }
 
-        // Move items whose source_range is contained within region_range
         let mut i = 0;
         while i < items.len() {
             if region_range.contains_range(items[i].range) {
@@ -100,7 +89,6 @@ pub(crate) fn document_symbols(
         result.push(build_region(&region_tree, root_idx, &mut items));
     }
 
-    // Remaining items not inside any region go to top level
     result.append(&mut items);
 
     result
@@ -172,7 +160,6 @@ mod tests {
 КонецПроцедуры"#,
         );
         let symbols = document_symbols(&db, file_id);
-        // Region + Проц2 at top level
         assert_eq!(symbols.len(), 2);
         assert_eq!(symbols[0].name, "ПрограммныйИнтерфейс");
         assert_eq!(symbols[0].kind, SymbolKind::Region);

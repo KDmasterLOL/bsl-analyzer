@@ -1,5 +1,3 @@
-//! StreamingProvider implementation.
-
 use std::sync::Arc;
 
 use base_db::SourceRootId;
@@ -17,43 +15,26 @@ use crate::provider::{AnalysisProvider, VisibleConfigWithRoot};
 use super::global_context::GlobalContext;
 use super::shared_state::SharedState;
 
-/// Streaming analysis provider.
-///
-/// Implements `AnalysisProvider` by:
-/// - Using `GlobalContext` for shared data (configuration, symbol trees)
-/// - Using `SharedState` for per-file cache (parse, item_tree) during processing
-/// - Computing on-the-fly when cache miss
 pub struct StreamingProvider {
-    /// Shared global context.
     global: Arc<GlobalContext>,
-
-    /// Optional shared state for caching.
-    /// When Some, provider checks cache first for parse/item_tree.
     shared_state: Option<Arc<SharedState>>,
 }
 
 impl StreamingProvider {
-    /// Create a new StreamingProvider with the given global context.
     pub fn new(global: Arc<GlobalContext>) -> Self {
         Self { global, shared_state: None }
     }
 
-    /// Create a new StreamingProvider with shared state for caching.
     pub fn with_shared_state(global: Arc<GlobalContext>, shared_state: Arc<SharedState>) -> Self {
         Self { global, shared_state: Some(shared_state) }
     }
 
-    /// Get the global context.
     pub fn global(&self) -> &GlobalContext {
         &self.global
     }
 }
 
 impl AnalysisProvider for StreamingProvider {
-    // ========================================================================
-    // Global Data (from GlobalContext)
-    // ========================================================================
-
     fn configuration(&self) -> Option<Arc<Configuration>> {
         self.global.configuration.clone()
     }
@@ -78,20 +59,13 @@ impl AnalysisProvider for StreamingProvider {
         self.global.module_index.clone()
     }
 
-    // ========================================================================
-    // Per-file Data (cached via SharedState or computed on-the-fly)
-    // ========================================================================
-
     fn parse(&self, file_id: FileId) -> Parse<SyntaxNode> {
-        // Check cache first
         if let Some(ref shared_state) = self.shared_state {
             if let Some(parsed) = shared_state.get_parsed_file(file_id) {
                 return (*parsed.parse).clone();
             }
         }
 
-        // Cache miss - parse from disk
-        // Use SharedState's file_reader if available (for tracking), otherwise global's
         let text = if let Some(ref shared_state) = self.shared_state {
             shared_state.file_reader().read(file_id).unwrap_or_default()
         } else {
@@ -101,15 +75,12 @@ impl AnalysisProvider for StreamingProvider {
     }
 
     fn file_text(&self, file_id: FileId) -> String {
-        // Check cache first
         if let Some(ref shared_state) = self.shared_state {
             if let Some(parsed) = shared_state.get_parsed_file(file_id) {
                 return parsed.text.to_string();
             }
         }
 
-        // Cache miss - read from disk
-        // Use SharedState's file_reader if available (for tracking), otherwise global's
         if let Some(ref shared_state) = self.shared_state {
             shared_state.file_reader().read(file_id).unwrap_or_default()
         } else {
@@ -118,32 +89,27 @@ impl AnalysisProvider for StreamingProvider {
     }
 
     fn item_tree(&self, file_id: FileId) -> Arc<ItemTree> {
-        // Check cache first
         if let Some(ref shared_state) = self.shared_state {
             if let Some(parsed) = shared_state.get_parsed_file(file_id) {
                 return Arc::clone(&parsed.item_tree);
             }
         }
 
-        // Cache miss - build from parse
         let parse = self.parse(file_id);
         Arc::new(ItemTree::from_parse(&parse))
     }
 
     fn symbol_tree(&self, module_id: ModuleId) -> Arc<SymbolTree> {
-        // Check SharedState first (published during streaming processing)
         if let Some(ref shared_state) = self.shared_state {
             if let Some(tree) = shared_state.get_symbol_tree(module_id.file_id) {
                 return tree;
             }
         }
 
-        // Check pre-built symbol tree from global context
         if let Some(tree) = self.global.symbol_trees.get(&module_id.file_id) {
             return tree.clone();
         }
 
-        // Build on-the-fly if not available
         let item_tree = self.item_tree(module_id.file_id);
         let parse = self.parse(module_id.file_id);
         let source_text = self.file_text(module_id.file_id);
@@ -151,14 +117,12 @@ impl AnalysisProvider for StreamingProvider {
     }
 
     fn module_bodies(&self, module_id: ModuleId) -> Arc<ModuleBodies> {
-        // Check ParsedFile cache (lazy computation via OnceLock)
         if let Some(ref shared_state) = self.shared_state {
             if let Some(parsed) = shared_state.get_parsed_file(module_id.file_id) {
                 return parsed.module_bodies();
             }
         }
 
-        // Fallback - compute on-the-fly
         let parse = self.parse(module_id.file_id);
         Arc::new(ModuleBodies::from_parse(&parse, module_id))
     }
@@ -168,20 +132,14 @@ impl AnalysisProvider for StreamingProvider {
         _id: bsl_types::kind::TypeId,
         _locale: base_db::Locale,
     ) -> String {
-        // Streaming mode does not run inference (see `infer`), so no
-        // TypeId-bearing inference diagnostic ever reaches this provider.
         String::new()
     }
 
     fn infer(&self, _file_id: FileId) -> Arc<InferenceResult> {
-        // Streaming mode does not run type inference today. Returning the
-        // default explicitly documents the opt-out rather than relying on
-        // the trait's default impl (which would do the same thing silently).
         Arc::new(InferenceResult::default())
     }
 
     fn module_metadata(&self, module_id: ModuleId) -> Arc<ModuleMetadata> {
-        // Check ParsedFile cache (lazy computation via OnceLock)
         if let Some(ref shared_state) = self.shared_state {
             if let Some(parsed) = shared_state.get_parsed_file(module_id.file_id) {
                 let configuration = self.global.configuration.as_deref();
@@ -189,7 +147,6 @@ impl AnalysisProvider for StreamingProvider {
             }
         }
 
-        // Fallback - compute on-the-fly (when not in streaming mode or cache miss)
         let file_path_str = match self.file_path(module_id.file_id) {
             Some(path) => path,
             None => {
@@ -205,7 +162,6 @@ impl AnalysisProvider for StreamingProvider {
     }
 
     fn call_summary(&self, module_id: ModuleId) -> Arc<hir::ModuleCallSummary> {
-        // Check ParsedFile cache (lazy computation via OnceLock)
         if let Some(ref shared_state) = self.shared_state {
             if let Some(parsed) = shared_state.get_parsed_file(module_id.file_id) {
                 let configuration = self.global.configuration.as_deref();
@@ -213,7 +169,6 @@ impl AnalysisProvider for StreamingProvider {
             }
         }
 
-        // Fallback - compute on-the-fly (when not in streaming mode or cache miss)
         let item_tree = self.item_tree(module_id.file_id);
         let module_bodies = self.module_bodies(module_id);
         let metadata = self.module_metadata(module_id);
@@ -223,12 +178,6 @@ impl AnalysisProvider for StreamingProvider {
     }
 
     fn line_index(&self, file_id: FileId) -> Arc<line_index::LineIndex> {
-        // Hot path: diagnostic collection asks for a line index per finding
-        // while walking a 25k-file workspace. Re-allocating a fresh index
-        // each time dominated the profile at ~43% self time, so share the
-        // per-file index cached on `ParsedFile` when we have shared state.
-        // Fallback rebuilds on-the-fly for callers that skip Phase-1
-        // caching (legacy paths / tests).
         if let Some(shared) = &self.shared_state {
             if let Some(parsed) = shared.get_parsed_file(file_id) {
                 return parsed.line_index();
@@ -246,23 +195,16 @@ impl AnalysisProvider for StreamingProvider {
     }
 
     fn file_source_root_id(&self, _file_id: FileId) -> SourceRootId {
-        // In streaming mode, all files belong to a single synthetic source root
         SourceRootId(0)
     }
 
-    // ========================================================================
-    // Dataflow Analysis (computed on-the-fly)
-    // ========================================================================
-
     fn module_cfgs(&self, file_id: FileId) -> Arc<hir::cfg::ModuleCfgs> {
-        // Check ParsedFile cache (lazy computation via OnceLock)
         if let Some(ref shared_state) = self.shared_state {
             if let Some(parsed) = shared_state.get_parsed_file(file_id) {
                 return parsed.module_cfgs();
             }
         }
 
-        // Fallback - compute on-the-fly
         let module_id = ModuleId::new(file_id);
         let module_bodies = self.module_bodies(module_id);
 
@@ -325,7 +267,6 @@ impl AnalysisProvider for StreamingProvider {
                 None => continue,
             };
 
-            // Build definition index from body with parameters
             let params: Vec<_> = body
                 .params()
                 .map(|param_id| {
@@ -336,7 +277,6 @@ impl AnalysisProvider for StreamingProvider {
             let def_index =
                 hir::dataflow::reaching_defs::DefinitionIndex::from_body_with_params(body, params);
 
-            // Initialize entry state with parameters
             let mut initial_defs =
                 hir::dataflow::reaching_defs::ReachingDefs::new(def_index.clone());
             for param_id in body.params() {
@@ -346,7 +286,6 @@ impl AnalysisProvider for StreamingProvider {
                 initial_defs.insert(&def);
             }
 
-            // Run dataflow analysis
             let transfer = hir::dataflow::reaching_defs::ReachingDefsTransfer;
             let mut solver = hir::dataflow::DataflowSolver::new(cfg, body.clone(), transfer);
             solver.set_max_iterations(hir::dataflow::DEFAULT_MAX_ITERATIONS);
@@ -365,11 +304,6 @@ impl AnalysisProvider for StreamingProvider {
     }
 
     fn module_security_state(&self, file_id: FileId) -> Arc<crate::effects::ModuleSecurityState> {
-        // §1.4c override for streaming: the security-state lattice is
-        // per-method (no cross-method dependency edges), so the same
-        // on-the-fly compute pattern as `module_path_terminates` works
-        // here. Run `dataflow::security_state::analyze` against each
-        // method body and assemble the batch.
         let module_id = ModuleId::new(file_id);
         let module_cfgs = self.module_cfgs(file_id);
         let module_bodies = self.module_bodies(module_id);
@@ -384,10 +318,6 @@ impl AnalysisProvider for StreamingProvider {
                 methods.insert(local_id, Arc::new(result));
             }
         }
-        // Codex round-1 MAJOR fix: cover module-level (top-level) code
-        // too. Streaming mode has no `module_level_cfg_query` Salsa
-        // cache, so build the CFG on-the-fly the same way
-        // `module_level_cfg_query` does.
         let module_level = module_bodies
             .module_code()
             .filter(|body| !body.body_stmts_typed().is_empty())
@@ -399,25 +329,11 @@ impl AnalysisProvider for StreamingProvider {
                 ));
                 hir::dataflow::security_state::analyze(cfg, body.clone()).map(Arc::new)
             });
-        // The `ModuleSecurityState` fields are private — use the
-        // crate-private constructor exposed below to keep the trait
-        // boundary clean.
         Arc::new(crate::effects::ModuleSecurityState::from_methods_with_module_level(
             methods,
             module_level,
         ))
     }
-
-    // Note: `method_effect_summary` deliberately uses the trait's
-    // default impl (returns `EffectSummary::EMPTY`). Cross-module
-    // recursion resolution requires Salsa cycle handling, which is
-    // unsafe to do on-the-fly without caching — see §1.4c default-impl
-    // rationale in `provider.rs`.
-
-    // Track 2 Phase B §6.3 — complexity-metric overrides. Both are
-    // pure HIR-/CFG-walks with no cross-module dependencies, so the
-    // on-the-fly compute pattern (matching `module_security_state`
-    // above) works in streaming mode without Salsa caching.
 
     fn module_hir_metrics(&self, file_id: FileId) -> Arc<crate::queries::ModuleHirMetrics> {
         let module_id = ModuleId::new(file_id);
@@ -436,11 +352,6 @@ impl AnalysisProvider for StreamingProvider {
         Arc::new(crate::queries::ModuleHirMetrics::from_methods(methods, module_code))
     }
 
-    /// Per-method shim — Codex stop-hook fix: without this override
-    /// the trait default returned `HirMethodMetrics::default()` for
-    /// every method in streaming mode, silently zeroing every
-    /// migrated complexity diagnostic. Look up against the
-    /// streaming-computed module batch.
     fn method_hir_metrics(&self, method: hir::MethodId) -> Arc<hir::metrics::HirMethodMetrics> {
         let batch = self.module_hir_metrics(method.module.file_id);
         batch
@@ -452,9 +363,6 @@ impl AnalysisProvider for StreamingProvider {
         let module_id = ModuleId::new(file_id);
         let module_cfgs = self.module_cfgs(file_id);
         let module_bodies = self.module_bodies(module_id);
-        // Track 2 Phase B §6.5: SonarQube-style cyclomatic = textbook
-        // V(G) + boolean_ops + ternary (see `module_cyclomatic_query`
-        // in `queries.rs` for the rationale).
         let module_metrics = self.module_hir_metrics(file_id);
         let mut methods: FxHashMap<u32, u32> = FxHashMap::default();
         for (local_id, _body) in module_bodies.iter_bodies() {
@@ -469,10 +377,6 @@ impl AnalysisProvider for StreamingProvider {
         Arc::new(crate::queries::ModuleCyclomatic::from_methods(methods))
     }
 
-    /// Per-method shim. Codex stop-hook fix: without this override the
-    /// trait default returned `1` (the conventional base) for every
-    /// method, silently masking all `CyclomaticComplexity` diagnostics
-    /// in streaming mode.
     fn method_cyclomatic(&self, method: hir::MethodId) -> u32 {
         self.module_cyclomatic(method.module.file_id).get(method.local_id)
     }
@@ -511,7 +415,6 @@ impl AnalysisProvider for StreamingProvider {
     }
 
     fn sdbl_hir_in_file(&self, file_id: FileId) -> crate::SdblHirEntries {
-        // Check ParsedFile cache (lazy computation via OnceLock)
         if let Some(ref shared_state) = self.shared_state {
             if let Some(parsed) = shared_state.get_parsed_file(file_id) {
                 let configuration = self.configuration();
@@ -519,14 +422,12 @@ impl AnalysisProvider for StreamingProvider {
             }
         }
 
-        // Fallback - compute on-the-fly (when not in streaming mode or cache miss)
         let sdbl_queries = self.all_sdbl_in_file(file_id);
         let configuration = self.configuration();
 
         let mut result = Vec::with_capacity(sdbl_queries.len());
         for (sdbl_expr_id, query_info) in sdbl_queries.iter() {
             if let Some(ref sdbl_ast) = query_info.query_ast {
-                // Pass Arc<Configuration> directly to avoid cloning
                 let sdbl_package = sdbl_hir::lower_sdbl_to_hir(sdbl_ast, configuration.clone());
                 result.push((*sdbl_expr_id, Arc::new(sdbl_package)));
             }
@@ -544,7 +445,6 @@ impl AnalysisProvider for StreamingProvider {
 
         let mut result = Vec::new();
 
-        // Collect from all method bodies (procedures and functions)
         for (local_id, body) in module_bodies.iter_bodies() {
             for (expr_id, query_info) in body.sdbl_exprs() {
                 let sdbl_expr_id = hir::SdblExprId::from_method(local_id, expr_id);
@@ -552,7 +452,6 @@ impl AnalysisProvider for StreamingProvider {
             }
         }
 
-        // Collect from module-level code (statements outside methods)
         if let Some(module_code) = module_bodies.module_code() {
             for (expr_id, query_info) in module_code.sdbl_exprs() {
                 let sdbl_expr_id = hir::SdblExprId::from_module_code(expr_id);
@@ -560,7 +459,6 @@ impl AnalysisProvider for StreamingProvider {
             }
         }
 
-        // Sort by position in file for deterministic output
         result.sort_by_key(|(_, query_info)| query_info.bsl_literal_range.start());
 
         Arc::new(result)
@@ -572,7 +470,6 @@ impl AnalysisProvider for StreamingProvider {
     }
 
     fn method_docs(&self, method_id: hir::MethodId) -> Option<Arc<hir::MethodDocs>> {
-        // Get docs from SymbolTree (parsed once during construction)
         let symbol_tree = self.symbol_tree(method_id.module);
         let method = symbol_tree.find_method_by_id(method_id)?;
         method.docs.clone()
@@ -588,16 +485,11 @@ impl AnalysisProvider for StreamingProvider {
         &self,
         method_id: hir::MethodId,
     ) -> Option<Arc<hir::dataflow::reaching_defs::ReachingDefsResult>> {
-        // Get module-level reaching definitions
         let module_reaching_defs = self.module_reaching_definitions(method_id.module.file_id);
-
-        // Extract result for specific method
         module_reaching_defs.get(method_id.local_id).cloned()
     }
 
     fn file_external_refs(&self, _module_id: hir::ModuleId) -> Arc<Vec<hir::ExternalRef>> {
-        // Not supported in streaming mode: cross-module diagnostics
-        // (e.g. PrivilegedModuleMethodCall) will silently skip these checks.
         tracing::debug!("file_external_refs not supported in streaming mode");
         Arc::new(Vec::new())
     }
@@ -606,8 +498,6 @@ impl AnalysisProvider for StreamingProvider {
         &self,
         _module_id: hir::ModuleId,
     ) -> Option<Arc<hir::dataflow::DataflowResult<hir::dataflow::liveness::Liveness>>> {
-        // Not supported in streaming mode: unused module-level variable
-        // detection will be skipped.
         tracing::debug!("module_level_liveness_analysis not supported in streaming mode");
         None
     }
@@ -714,7 +604,6 @@ mod tests {
         files.insert(file_id, "Процедура Тест() Экспорт КонецПроцедуры".to_string());
 
         let mut file_set = FileSet::default();
-        // VFS path = config_root + relative URI
         file_set.insert(
             file_id,
             VfsPath::new("/project/src/cf/CommonModules/МойМодуль/Ext/Module.bsl"),
@@ -732,7 +621,6 @@ mod tests {
 
         let provider = StreamingProvider::new(global);
 
-        // Should resolve: config_root + relative_uri → VfsPath → FileId
         let resolved = provider.resolve_module_file("CommonModules/МойМодуль/Ext/Module.bsl");
         assert_eq!(resolved, Some(file_id));
     }
@@ -758,7 +646,6 @@ mod tests {
 
         let provider = StreamingProvider::new(global);
 
-        // Without config_root, should return None
         let resolved = provider.resolve_module_file("CommonModules/МойМодуль/Ext/Module.bsl");
         assert_eq!(resolved, None);
     }
@@ -784,7 +671,6 @@ mod tests {
 
         let provider = StreamingProvider::new(global);
 
-        // File not in VFS — should return None
         let resolved =
             provider.resolve_module_file("CommonModules/НесуществующийМодуль/Ext/Module.bsl");
         assert_eq!(resolved, None);

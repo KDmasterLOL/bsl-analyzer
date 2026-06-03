@@ -1,16 +1,3 @@
-//! Integration tests for `resolve_qualified_call` via the `db.infer()` query.
-//!
-//! These tests exercise the full inference pipeline for `Module.Method()`
-//! calls and verify the outcomes visible to the inference layer:
-//! - return type inferred, no diagnostic (happy path)
-//! - `UnresolvedMethodKind::{MethodNotFound, MethodNotExport, ReceiverNotResolved}`
-//! - case-insensitive module name lookup
-//!
-//! Prior to the `module_index`-based rewrite, this path went through
-//! `db.workspace_symbols()` which forced `symbol_tree` on every file in the
-//! source root. The tests below were added alongside that rewrite so the
-//! behaviour is regression-proof regardless of which index is used.
-
 use hir::{HirDatabase, InferenceDiagnostic, UnresolvedMethodKind};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
@@ -49,14 +36,6 @@ fn unresolved_kinds(db: &RootDatabaseImpl, file_id: FileId) -> Vec<UnresolvedMet
         .collect()
 }
 
-/// Returns `(required_count, total_count, found)` triples for every
-/// `MismatchedArgCount` in the file's inference result.
-///
-/// `MismatchedArgCount` is emitted by `infer_qualified_call` *after*
-/// `resolve_qualified_call` succeeds, which is the positive signal we want:
-/// firing the diagnostic proves the module + method actually resolved
-/// through `module_index` + `symbol_tree` and the looked-up method's
-/// parameter count was compared against the call.
 fn mismatched_arg_counts(db: &RootDatabaseImpl, file_id: FileId) -> Vec<(usize, usize, usize)> {
     let infer = db.infer(file_id);
     infer
@@ -104,11 +83,6 @@ const POSITIVE_RESOLUTION_FIXTURE: &str = r#"
 
 #[test]
 fn successful_resolution_triggers_arg_count_check() {
-    // Positive evidence that resolve_qualified_call actually found the
-    // method: infer_qualified_call only emits MismatchedArgCount *after*
-    // resolution succeeds, using the resolved method's parameter count.
-    // The fixture declares 2 params and the call passes 0, so we must see
-    // exactly `(expected: 2, found: 0)`.
     let (db, file_id) = setup_fixture(POSITIVE_RESOLUTION_FIXTURE);
     let unresolved = unresolved_kinds(&db, file_id);
     assert!(unresolved.is_empty(), "Resolution must succeed, got unresolved: {:?}", unresolved);
@@ -153,15 +127,6 @@ const MISSING_MODULE_FIXTURE: &str = r#"
 
 #[test]
 fn missing_module_reports_receiver_not_resolved() {
-    // Phase 2 of the qualified-call refactor split the previous
-    // `MethodNotFound` collapse into two kinds: `ReceiverNotResolved`
-    // when the module name doesn't resolve anywhere (the cascade
-    // gate's gate-5 exhaustion), `MethodNotFound` when the module
-    // is reachable but the method is missing (gate 3 →
-    // `infer_qualified_call`). The fixture's
-    // `НесуществующийМодуль` is the former case — see
-    // `infer_invalidation::infer_invalidates_when_config_set_changes`
-    // for the same observation under the visibility gate.
     let (db, file_id) = setup_fixture(MISSING_MODULE_FIXTURE);
     let kinds = unresolved_kinds(&db, file_id);
     assert_eq!(
@@ -209,16 +174,6 @@ const SHADOWING_FIXTURE: &str = r#"
 
 #[test]
 fn local_shadowing_skips_qualified_resolution() {
-    // When a local variable shadows a CommonModule name, the cascade
-    // gate in `dispatch_bare_ident_field_call` short-circuits silent
-    // at gate 1 / gate 2 — `resolver.resolve_name` returns the
-    // declared local (or `body_declares_binding` /
-    // `assigned_var_names` covers an implicit one), so the gate
-    // never reaches the `user_common_module_exists` step and
-    // `UnresolvedMethodCall` is not emitted. Phase 2 of the
-    // qualified-call refactor moved this disambiguation out of
-    // lowering's `maybe_lower_as_qualified_call`; the observable
-    // behaviour is the same — no diagnostic on a shadowed receiver.
     let (db, file_id) = setup_fixture(SHADOWING_FIXTURE);
     let kinds = unresolved_kinds(&db, file_id);
     assert!(
@@ -239,15 +194,6 @@ const FOR_EACH_PROPERTY_CHAIN_FIXTURE: &str = r#"
 
 #[test]
 fn for_each_iterator_property_chain_does_not_emit_unresolved() {
-    // `Для Каждого X Из ...` introduces `X` as a local variable. A chain of
-    // the form `X.Свойство.Метод()` is a property access followed by a method
-    // call on the resulting value — NOT a three-level manager call. Before
-    // the fix, `lower_for_each_stmt` did not register the iterator in
-    // `local_vars`, so `analyze_qualified_call` promoted the chain into
-    // `Expr::QualifiedPath["ТекЭлемент", "СохраненныеНастройки", "Получить"]`
-    // and `infer_three_level_call` emitted `UnresolvedMethodCall` with a
-    // misleading "не найден в модуле 'ТекЭлемент.СохраненныеНастройки'"
-    // message. This test pins the corrected behaviour.
     let (db, file_id) = setup_fixture(FOR_EACH_PROPERTY_CHAIN_FIXTURE);
     let kinds = unresolved_kinds(&db, file_id);
     assert!(
@@ -268,10 +214,6 @@ const FOR_ITERATOR_PROPERTY_CHAIN_FIXTURE: &str = r#"
 
 #[test]
 fn for_iterator_property_chain_does_not_emit_unresolved() {
-    // Symmetric to the `Для Каждого` case: classic `Для I = 1 По 10` also
-    // introduces `I` as a local. `lower_for_stmt` must register it in
-    // `local_vars` so the iterator never gets misclassified as the leading
-    // segment of a three-level manager call.
     let (db, file_id) = setup_fixture(FOR_ITERATOR_PROPERTY_CHAIN_FIXTURE);
     let kinds = unresolved_kinds(&db, file_id);
     assert!(
@@ -291,18 +233,6 @@ const IMPLICIT_LOCAL_UNKNOWN_RHS_FIXTURE: &str = r#"
 
 #[test]
 fn implicit_local_with_unknown_rhs_is_not_misclassified_as_common_module() {
-    // Regression for cascade-gate gate 2 in
-    // `dispatch_bare_ident_field_call`: an implicit local from
-    // `Stmt::Assign` whose RHS infers to `Ty::Unknown` must not be
-    // mistaken for an unresolved CommonModule receiver.
-    //
-    // `Х` lives in `InferenceContext::var_types` only — it is neither
-    // a `Body::Binding` (so `body_declares_binding` misses) nor a
-    // `Resolver::resolve_local` hit (no `Scope::ExprScope` in the
-    // body resolver). Without a `var_types` probe in gate 2 the
-    // cascade falls through to gate 5 and emits a misleading
-    // `ReceiverNotResolved` for an entirely valid local-variable
-    // call.
     let (db, file_id) = setup_fixture(IMPLICIT_LOCAL_UNKNOWN_RHS_FIXTURE);
     let kinds = unresolved_kinds(&db, file_id);
     assert!(
@@ -321,14 +251,6 @@ const NON_MDO_LEADING_IDENT_FIXTURE: &str = r#"
 
 #[test]
 fn non_mdo_leading_ident_does_not_emit_unresolved() {
-    // Defensive coverage for the `MdoType::from_plural` gate added to
-    // `analyze_qualified_call`. The leading identifier is undeclared, so
-    // the local-vars and param-names shadow checks both miss it — the only
-    // thing that can stop the ThreeLevel classification is the new MDO
-    // gate. Without that gate, `analyze_qualified_call` would promote
-    // `НеобъявленнаяПеременная.Подсвойство.Метод()` into
-    // `Expr::QualifiedPath` and `infer_three_level_call` would emit a
-    // misleading UnresolvedMethodCall.
     let (db, file_id) = setup_fixture(NON_MDO_LEADING_IDENT_FIXTURE);
     let kinds = unresolved_kinds(&db, file_id);
     assert!(
@@ -352,10 +274,6 @@ const CASE_INSENSITIVE_FIXTURE: &str = r#"
 
 #[test]
 fn case_insensitive_module_name_resolves() {
-    // BSL is case-insensitive. module_index stores names lowercased, so
-    // "общегоназначения" must resolve to "ОбщегоНазначения". We assert both
-    // the negative (no UnresolvedMethodCall) and the positive evidence
-    // (MismatchedArgCount fired → method was actually looked up).
     let (db, file_id) = setup_fixture(CASE_INSENSITIVE_FIXTURE);
     let kinds = unresolved_kinds(&db, file_id);
     assert!(kinds.is_empty(), "Expected case-insensitive module lookup, got: {:?}", kinds);
@@ -382,10 +300,6 @@ const RUSSIAN_LAYOUT_FIXTURE: &str = r#"
 
 #[test]
 fn russian_layout_resolves() {
-    // module_index.parse_module_path accepts both Designer layouts:
-    //   CommonModules/<Name>/Ext/Module.bsl  (English)
-    //   ОбщиеМодули/<Name>/Ext/Module.bsl    (Russian)
-    // Codex flagged the lack of an integration test for the Russian path.
     let (db, file_id) = setup_fixture(RUSSIAN_LAYOUT_FIXTURE);
     let kinds = unresolved_kinds(&db, file_id);
     assert!(kinds.is_empty(), "Russian-layout CommonModule must resolve, got: {:?}", kinds);
@@ -411,30 +325,6 @@ const USER_MODULE_SHADOWS_PLATFORM_GLOBAL_FIXTURE: &str = r#"
 
 #[test]
 fn user_common_module_shadows_same_named_platform_global() {
-    // Phase 5 follow-up — codex stop-time review surfaced a regression
-    // window where `infer_path_name` step 5 resolved a name like
-    // `Метаданные` (a known platform global container) into
-    // `Ty::PlatformObject(КонфигурацияМетаданныеОбъект)` even when the
-    // workspace shipped a CommonModule with the same name. Result:
-    // `Метаданные.МойМетод()` would type-check against the platform
-    // catalogue instead of the user CommonModule's SymbolTree, and a
-    // typo'd call would be silenced (no UMC) because lookup_method
-    // resolved the wrong `Ty`.
-    //
-    // The fix mirrors the cascade gate's gate 3 ordering inside
-    // `infer_path_name`: skip the platform fallback when
-    // `Resolver::user_common_module_exists` claims the receiver. The
-    // call now flows through the cascade gate (Field-shape, gate 3
-    // → infer_qualified_call) and emits MethodNotFound for the
-    // missing method.
-    //
-    // Discriminating shape: the user CM has `ОдинЭкспортируемыйМетод`
-    // (NOT `ЗаведомоОтсутствующийМетод`) and the platform global
-    // `Метаданные` does NOT expose `ЗаведомоОтсутствующийМетод`
-    // either — but if step 5 wins, `lookup_method` on
-    // `Ty::PlatformObject` returns None silently (gate `receiver_display_name`
-    // skips PlatformObject), no diagnostic. If gate 3 wins,
-    // `MethodNotFound` fires.
     let (db, file_id) = setup_fixture(USER_MODULE_SHADOWS_PLATFORM_GLOBAL_FIXTURE);
     let kinds = unresolved_kinds(&db, file_id);
     assert_eq!(

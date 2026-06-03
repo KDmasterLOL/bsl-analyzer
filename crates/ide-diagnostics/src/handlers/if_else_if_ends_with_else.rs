@@ -1,38 +1,3 @@
-//! IfElseIfEndsWithElse diagnostic
-//!
-//! Detects if-elseif chains that don't end with else clause.
-//!
-//! ## Why?
-//! If-elseif chains without else can lead to unhandled cases:
-//! - All possible branches should be covered
-//! - Else clause makes code intentions explicit
-//! - Prevents silent bugs from unhandled conditions
-//! - Better code readability
-//!
-//! ## Bad practice
-//! ```bsl
-//! Процедура Тест(Значение)
-//!     Если Значение = 1 Тогда
-//!         // ...
-//!     ИначеЕсли Значение = 2 Тогда
-//!         // ...
-//!     КонецЕсли; // Missing else!
-//! КонецПроцедуры
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! Процедура Тест(Значение)
-//!     Если Значение = 1 Тогда
-//!         // ...
-//!     ИначеЕсли Значение = 2 Тогда
-//!         // ...
-//!     Иначе
-//!         // Handle other cases
-//!     КонецЕсли;
-//! КонецПроцедуры
-//! ```
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -52,9 +17,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic.
-///
-/// Called from lib.rs dispatch when IfElseIfEndsWithElse diagnostic is emitted during lowering.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     crate::simple_hir_diagnostic(
         DiagnosticCode::IfElseIfEndsWithElse,
@@ -217,7 +179,6 @@ mod tests {
         );
     }
 
-    /// FizzBuzz pattern: if/elseif without else warns; with else passes
     #[test]
     fn test_fizzbuzz_without_else_warns() {
         let code = r#"Процедура Тест(x)
@@ -240,7 +201,6 @@ mod tests {
         );
     }
 
-    /// FizzBuzz pattern with else - should pass
     #[test]
     fn test_fizzbuzz_with_else_passes() {
         let code = r#"Процедура Тест(x)

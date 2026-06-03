@@ -1,35 +1,3 @@
-//! CanonicalSpellingKeywords diagnostic
-//!
-//! Checks that BSL keywords use canonical spelling (capitalized).
-//!
-//! ## Why?
-//! Consistent keyword spelling improves code readability and maintainability.
-//! BSL is case-insensitive, but canonical style uses capitalized keywords.
-//!
-//! ## Bad practice
-//! ```bsl
-//! функция Тест()
-//!     если Истина тогда
-//!         возврат 1;
-//!     конецесли;
-//!     ВОЗВРАТ 0;
-//! конецфункции
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! Функция Тест()
-//!     Если Истина Тогда
-//!         Возврат 1;
-//!     КонецЕсли;
-//!     Возврат 0;
-//! КонецФункции
-//! ```
-//!
-//! ## Configuration
-//! - No parameters
-//! - Can be disabled via config
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
@@ -49,12 +17,10 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Check if text contains Cyrillic characters
 fn is_cyrillic(text: &str) -> bool {
     text.chars().any(|c| matches!(c, '\u{0400}'..='\u{04FF}'))
 }
 
-/// Check if a token is inside a preprocessor directive
 fn is_in_preprocessor(token: &SyntaxToken) -> bool {
     let mut current = token.parent();
     while let Some(node) = current {
@@ -72,7 +38,6 @@ fn is_in_preprocessor(token: &SyntaxToken) -> bool {
     false
 }
 
-/// Check preprocessor symbols (Сервер, Клиент, etc.)
 fn check_preproc_symbol(actual: &str) -> Option<String> {
     let lower = actual.to_lowercase();
     match lower.as_str() {
@@ -112,16 +77,11 @@ fn check_preproc_symbol(actual: &str) -> Option<String> {
     }
 }
 
-/// Check if a keyword matches one of the canonical forms
-///
-/// Returns None if already canonical, otherwise returns suggested canonical form
 fn check_keyword(actual: &str, canonical_forms: &[&str]) -> Option<String> {
     if canonical_forms.contains(&actual) {
-        return None; // Already canonical
+        return None;
     }
 
-    // Suggest first matching language canonical form
-    // Prefer same script (Cyrillic vs Latin)
     let is_cyrillic_input = is_cyrillic(actual);
     canonical_forms
         .iter()
@@ -130,12 +90,10 @@ fn check_keyword(actual: &str, canonical_forms: &[&str]) -> Option<String> {
         .map(|&s| s.to_string())
 }
 
-/// Check a single token for canonical spelling
 fn check_token_canonical(token: &SyntaxToken) -> Option<String> {
     let actual = token.text();
 
     match token.kind() {
-        // Procedure/Function keywords
         SyntaxKind::KW_PROCEDURE => check_keyword(actual, &["Процедура", "Procedure"]),
         SyntaxKind::KW_END_PROCEDURE => check_keyword(actual, &["КонецПроцедуры", "EndProcedure"]),
         SyntaxKind::KW_FUNCTION => check_keyword(actual, &["Функция", "Function"]),
@@ -143,19 +101,14 @@ fn check_token_canonical(token: &SyntaxToken) -> Option<String> {
         SyntaxKind::KW_EXPORT => check_keyword(actual, &["Экспорт", "Export"]),
         SyntaxKind::KW_VAL => check_keyword(actual, &["Знач", "Val"]),
 
-        // Control flow keywords
         SyntaxKind::KW_IF => check_keyword(actual, &["Если", "If"]),
         SyntaxKind::KW_THEN => check_keyword(actual, &["Тогда", "Then"]),
         SyntaxKind::KW_ELSIF => check_keyword(actual, &["ИначеЕсли", "ElsIf"]),
         SyntaxKind::KW_ELSE => check_keyword(actual, &["Иначе", "Else"]),
         SyntaxKind::KW_END_IF => check_keyword(actual, &["КонецЕсли", "EndIf"]),
 
-        // Loop keywords
         SyntaxKind::KW_FOR => check_keyword(actual, &["Для", "For"]),
-        SyntaxKind::KW_EACH => {
-            // Special case: "каждого" and "each" (lowercase) are also canonical
-            check_keyword(actual, &["Каждого", "каждого", "Each", "each"])
-        }
+        SyntaxKind::KW_EACH => check_keyword(actual, &["Каждого", "каждого", "Each", "each"]),
         SyntaxKind::KW_IN => check_keyword(actual, &["Из", "In"]),
         SyntaxKind::KW_TO => check_keyword(actual, &["По", "To"]),
         SyntaxKind::KW_WHILE => check_keyword(actual, &["Пока", "While"]),
@@ -166,41 +119,33 @@ fn check_token_canonical(token: &SyntaxToken) -> Option<String> {
         SyntaxKind::KW_BREAK => check_keyword(actual, &["Прервать", "Break"]),
         SyntaxKind::KW_GOTO => check_keyword(actual, &["Перейти", "Goto"]),
 
-        // Exception handling
         SyntaxKind::KW_TRY => check_keyword(actual, &["Попытка", "Try"]),
         SyntaxKind::KW_EXCEPT => check_keyword(actual, &["Исключение", "Except"]),
         SyntaxKind::KW_END_TRY => check_keyword(actual, &["КонецПопытки", "EndTry"]),
         SyntaxKind::KW_RAISE => check_keyword(actual, &["ВызватьИсключение", "Raise"]),
 
-        // Variable and value keywords
         SyntaxKind::KW_VAR => check_keyword(actual, &["Перем", "Var"]),
         SyntaxKind::KW_NEW => check_keyword(actual, &["Новый", "New"]),
         SyntaxKind::KW_EXECUTE => check_keyword(actual, &["Выполнить", "Execute"]),
 
-        // Event handlers
         SyntaxKind::KW_ADD_HANDLER => check_keyword(actual, &["ДобавитьОбработчик", "AddHandler"]),
         SyntaxKind::KW_REMOVE_HANDLER => {
             check_keyword(actual, &["УдалитьОбработчик", "RemoveHandler"])
         }
 
-        // Async/Await
         SyntaxKind::KW_ASYNC => check_keyword(actual, &["Асинх", "Async"]),
         SyntaxKind::KW_AWAIT => check_keyword(actual, &["Ждать", "Await"]),
 
-        // Logical operators (special rules: multiple canonical forms)
         SyntaxKind::KW_AND => check_keyword(actual, &["И", "And", "AND"]),
         SyntaxKind::KW_OR => check_keyword(actual, &["Или", "ИЛИ", "Or", "OR"]),
         SyntaxKind::KW_NOT => check_keyword(actual, &["Не", "НЕ", "Not", "NOT"]),
 
-        // Boolean literals
         SyntaxKind::KW_TRUE => check_keyword(actual, &["Истина", "True"]),
         SyntaxKind::KW_FALSE => check_keyword(actual, &["Ложь", "False"]),
 
-        // Special values
         SyntaxKind::KW_UNDEFINED => check_keyword(actual, &["Неопределено", "Undefined"]),
         SyntaxKind::KW_NULL => check_keyword(actual, &["NULL", "Null"]),
 
-        // Preprocessor directives
         SyntaxKind::PRE_IF => check_keyword(actual, &["#Если", "#If"]),
         SyntaxKind::PRE_ELSIF => check_keyword(actual, &["#ИначеЕсли", "#ElsIf"]),
         SyntaxKind::PRE_ELSE => check_keyword(actual, &["#Иначе", "#Else"]),
@@ -210,7 +155,6 @@ fn check_token_canonical(token: &SyntaxToken) -> Option<String> {
         SyntaxKind::PRE_USE => check_keyword(actual, &["#Использовать", "#Use"]),
         SyntaxKind::PRE_INSERT => check_keyword(actual, &["#Вставить", "#Insert"]),
 
-        // Annotations
         SyntaxKind::ANN_AT_CLIENT => check_keyword(actual, &["&НаКлиенте", "&AtClient"]),
         SyntaxKind::ANN_AT_SERVER => check_keyword(actual, &["&НаСервере", "&AtServer"]),
         SyntaxKind::ANN_AT_SERVER_NO_CONTEXT => {
@@ -224,17 +168,14 @@ fn check_token_canonical(token: &SyntaxToken) -> Option<String> {
             &["&НаКлиентеНаСервереБезКонтекста", "&AtClientAtServerNoContext"],
         ),
 
-        // Preprocessor symbols (IDENT tokens inside preprocessor)
         SyntaxKind::IDENT if is_in_preprocessor(token) => check_preproc_symbol(actual),
 
         _ => None,
     }
 }
 
-/// Main entry point for CanonicalSpellingKeywords diagnostic
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::CanonicalSpellingKeywords;
-    // Check if disabled
     if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
@@ -243,10 +184,8 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let root = parse.syntax_node();
     let mut diagnostics = Vec::new();
 
-    // Traverse all tokens (including those in composite nodes)
     for element in root.descendants_with_tokens() {
         if let Some(token) = element.into_token() {
-            // Skip trivia (whitespace, comments, newlines)
             if matches!(
                 token.kind(),
                 SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE | SyntaxKind::COMMENT
@@ -254,7 +193,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                 continue;
             }
 
-            // Check canonical spelling
             if let Some(canonical) = check_token_canonical(&token) {
                 let range = token.text_range();
                 diagnostics.push(Diagnostic {
@@ -296,7 +234,6 @@ mod tests {
         let config = DiagnosticsConfig::default();
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
-        // All keywords are canonical, should NOT detect
         assert_eq!(diagnostics.len(), 0);
     }
 
@@ -309,7 +246,6 @@ mod tests {
         let config = DiagnosticsConfig::default();
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
-        // Should detect 3 non-canonical keywords
         assert!(diagnostics.len() >= 3);
         assert_eq!(diagnostics[0].code, DiagnosticCode::CanonicalSpellingKeywords);
     }
@@ -323,7 +259,6 @@ mod tests {
         let config = DiagnosticsConfig::default();
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
-        // Should detect 3 non-canonical keywords
         assert!(diagnostics.len() >= 3);
     }
 
@@ -338,7 +273,6 @@ mod tests {
         let config = DiagnosticsConfig::default();
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
-        // Should detect: ЕслИ, ТогдА, ИнаЧе, КонецЕсЛи
         assert!(diagnostics.len() >= 4);
     }
 
@@ -364,8 +298,6 @@ mod tests {
         let config = DiagnosticsConfig::default();
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
-        // Should detect only non-canonical lowercase forms
-        // Note: lexer may not recognize mixed-case as keywords
         assert!(!diagnostics.is_empty(), "Should detect lowercase logical operators");
     }
 
@@ -385,8 +317,6 @@ mod tests {
         let config = DiagnosticsConfig::default();
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
-        // Both "Каждого" and "каждого" are canonical, should NOT detect
-        // Only other non-canonical would be detected
         for diag in &diagnostics {
             assert!(!diag.message.contains("Каждого"));
             assert!(!diag.message.contains("каждого"));

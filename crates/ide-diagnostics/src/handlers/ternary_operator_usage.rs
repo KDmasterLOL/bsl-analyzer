@@ -17,7 +17,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates a diagnostic from HIR lowering data for any ternary `?(...)` usage.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     crate::simple_hir_diagnostic(
         DiagnosticCode::TernaryOperatorUsage,
@@ -111,7 +110,6 @@ mod tests {
         let code = r#"Процедура Тест()
     Результат = ?(Условие, Истина, Ложь);
 КонецПроцедуры"#;
-        // Use default config (not all_enabled) to test that diagnostic is disabled by default
         let diagnostics =
             check_hir_diagnostic_with_config(code, DiagnosticsConfig::default(), |ctx| {
                 crate::diagnostics(ctx)
@@ -119,6 +117,6 @@ mod tests {
         let diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::TernaryOperatorUsage).collect();
 
-        assert_eq!(diags.len(), 0, "Should be disabled by default"); // snapshot-skip: custom default-config assertion intentionally retained.
+        assert_eq!(diags.len(), 0, "Should be disabled by default");
     }
 }

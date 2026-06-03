@@ -1,39 +1,3 @@
-//! CompilationDirectiveLost diagnostic.
-//!
-//! Detects functions/procedures without compilation directives (&НаСервере, &НаКлиенте, etc.)
-//! in FormModule and CommandModule contexts.
-//!
-//! ## Why?
-//! In form modules and command modules, every procedure/function should have a compilation
-//! directive indicating where it executes (&AtServer, &AtClient, &AtServerNoContext, etc.).
-//! Missing directives lead to unpredictable behavior.
-//!
-//! ## Bad practice
-//! ```bsl
-//! &НаСервере
-//! Процедура МетодНаСервере()
-//! КонецПроцедуры
-//!
-//! Процедура МетодБезДирективы()  // Error! Missing &НаСервере or &НаКлиенте
-//! КонецПроцедуры
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! &НаСервере
-//! Процедура МетодНаСервере()
-//! КонецПроцедуры
-//!
-//! &НаКлиенте
-//! Процедура МетодНаКлиенте()
-//! КонецПроцедуры
-//! ```
-//!
-//! ## Implementation
-//!
-//! Uses HIR ItemTree for efficient cached access to method annotations.
-//! Only applies to FormModule and CommandModule (not CommonModule).
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -60,10 +24,8 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    // Get module metadata via HIR (cached by Salsa)
     let metadata = ctx.module_metadata();
 
-    // Only check FormModule and CommandModule
     if !matches!(
         metadata.module_type,
         bsl_metadata::ModuleType::FormModule | bsl_metadata::ModuleType::CommandModule
@@ -71,18 +33,15 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    // Get ItemTree (cached by Salsa)
     let item_tree = ctx.item_tree();
     let mut diagnostics = Vec::new();
 
-    // Check procedures without compilation directives
     for (_, proc) in item_tree.procedures() {
         if proc.annotations.is_empty() {
             diagnostics.push(make_diagnostic(&proc.name, proc.name_range, code, ctx));
         }
     }
 
-    // Check functions without compilation directives
     for (_, func) in item_tree.functions() {
         if func.annotations.is_empty() {
             diagnostics.push(make_diagnostic(&func.name, func.name_range, code, ctx));
@@ -123,13 +82,10 @@ mod tests {
     use ide_db::RootDatabaseImpl;
     use std::rc::Rc;
     use vfs::{FileId, FileSet, VfsPath};
-    /// Helper to check diagnostics for code in a FormModule context.
     fn check_as_form_module(code: &str) -> Vec<Diagnostic> {
         let mut db = RootDatabaseImpl::new();
         let file_id = FileId::from_raw(1);
 
-        // Set up file with FormModule path pattern
-        // Pattern: <TypePlural>/<Name>/Forms/<Form>/Ext/Form/Module.bsl
         let mut file_set = FileSet::default();
         file_set.insert(
             file_id,
@@ -148,12 +104,10 @@ mod tests {
         check(&ctx)
     }
 
-    /// Helper to check that regular modules don't trigger diagnostics.
     fn check_as_regular_module(code: &str) -> Vec<Diagnostic> {
         let mut db = RootDatabaseImpl::new();
         let file_id = FileId::from_raw(1);
 
-        // Set up file with regular path (not FormModule or CommandModule)
         let mut file_set = FileSet::default();
         file_set.insert(file_id, VfsPath::new("/test.bsl"));
         let source_root = SourceRoot::new_local(file_set);
@@ -189,9 +143,6 @@ mod tests {
             CompilationDirectiveLost @ 10:9..10:23
               message: Пропущена директива компиляции для 'НужнаДиректива'. В модулях форм и команд требуется указывать &НаСервере, &НаКлиенте и т.д.
               severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
-
-        // Line 10 (1-indexed) = line 9 (0-indexed)
-        // "Функция НужнаДиректива()" - name "НужнаДиректива" at columns 8-22
     }
 
     #[test]
@@ -280,7 +231,6 @@ EndFunction
 
     #[test]
     fn test_regular_module_not_checked() {
-        // Methods without directives in regular module should NOT trigger this diagnostic
         let code = "Процедура БезДирективы()\nКонецПроцедуры";
         let diagnostics = check_as_regular_module(code);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));

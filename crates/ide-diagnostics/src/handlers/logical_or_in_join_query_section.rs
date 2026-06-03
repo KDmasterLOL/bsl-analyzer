@@ -1,9 +1,3 @@
-//! LogicalOrInJoinQuerySection diagnostic.
-//!
-//! Detects `OR` / `ИЛИ` operators in SDBL join conditions when they compare
-//! different fields.
-//!
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -22,7 +16,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Single-pass dispatch for LogicalOrInJoinQuerySection.
 pub(crate) fn dispatch(
     ctx: &DiagnosticsContext,
     diag: &sdbl_hir::SdblDiagnostic,
@@ -43,7 +36,6 @@ pub(crate) fn dispatch(
     }
 }
 
-/// Runs the LogicalOrInJoinQuerySection diagnostic (standalone, used in tests).
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     crate::sdbl_utils::collect_sdbl_via_dispatch(
         ctx,
@@ -60,8 +52,6 @@ mod tests {
 
     #[test]
     fn test_logical_or_in_join_query_section() {
-        // Large inline regression fixture for OR-in-JOIN coverage.
-        // 8 OR diagnostics in JOIN conditions across nested joins.
         let code = r#"Процедура ПолучиттьРеализациюТовара()
 
 	Запрос = Новый Запрос;
@@ -104,6 +94,7 @@ mod tests {
 // так как планировщик запросов имеет возможность преобразовывать такое условие в IN, тем самым оптимизируя.
 
 //Итоговое количество срабатываний - 8."#;
+
         check_diagnostics_snapshot_for(
             code,
             DiagnosticCode::LogicalOrInJoinQuerySection,
@@ -169,7 +160,6 @@ mod tests {
 
     #[test]
     fn test_multiple_fields_trigger() {
-        // Test on single line first
         let code = r#"
 Процедура Тест()
     Запрос.Текст = "SELECT * FROM T1 INNER JOIN T2 ON T1.ID = T2.ID AND (T1.Amount > 100 OR T2.Price > 500)";
@@ -228,16 +218,6 @@ EndProcedure
 
     #[test]
     fn test_three_part_field_path_no_leak() {
-        // Regression for PARSER-BUG-002b lowering follow-up.
-        // `Т.В.Поле` is a single three-part qualified reference.
-        // Pre-fix, the qualified branch in `extract_field_names_from_expr`
-        // matched the leading `Т.В` pair and bumped `i += 3`, leaving
-        // the trailing `.Поле` segment unattached — `Поле` then fell to
-        // the unqualified-strict-IDENT branch and was inserted as a
-        // separate field, inflating the distinct-field count and
-        // producing a false-positive diagnostic for `T.В.Поле = 1 OR
-        // T.В.Поле = 2`. Greedy chain consumption now collapses the
-        // entire dotted path into one entry.
         let code = r#"
 Процедура Тест()
     Запрос = "ВЫБРАТЬ * ИЗ Т1
@@ -255,15 +235,6 @@ EndProcedure
 
     #[test]
     fn test_undefined_literal_in_or_is_not_field() {
-        // Regression for PARSER-BUG-002b lowering follow-up.
-        // `НЕОПРЕДЕЛЕНО` is a `KW_UNDEFINED` token. Pre-fix,
-        // `extract_field_names_from_expr`'s widened name-token walk
-        // treated bare `НЕОПРЕДЕЛЕНО` as a field, inflating the
-        // distinct-field count and producing a false-positive
-        // `LogicalOrInJoinQuerySection` diagnostic when the OR was
-        // actually on a single field. Post-fix, the unqualified
-        // branch requires strict `IDENT`, so bare soft-keyword
-        // literals are skipped.
         let code = r#"
 Процедура Тест()
     Запрос = "ВЫБРАТЬ * ИЗ Т1

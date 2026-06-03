@@ -1,5 +1,3 @@
-//! Reports local variables that are declared or assigned but never read.
-
 use rustc_hash::FxHashSet;
 
 use crate::define_metadata;
@@ -29,12 +27,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Build a set of lowercase attribute names that should not be flagged as unused.
-///
-/// In ObjectModule, assignments to names like `Дата`, `Номер`, `Автор` set object
-/// attributes, not local variables. In FormModule, assignments to form attribute names
-/// (e.g. `Замечание = Параметры.Замечание`) write to form attributes displayed in UI.
-/// This function collects all such names so the diagnostic can skip them.
 fn build_attribute_names_to_skip(ctx: &DiagnosticsContext) -> FxHashSet<String> {
     let metadata = ctx.module_metadata();
 
@@ -64,25 +56,17 @@ fn build_attribute_names_to_skip(ctx: &DiagnosticsContext) -> FxHashSet<String> 
             names
         }
         bsl_metadata::ModuleType::FormModule => {
-            // Standard managed form properties accessible as variables in form module.
-            // These are built-in properties of every managed form (ФормаКлиентскогоПриложения).
             const STANDARD_FORM_PROPERTIES: &[&str] = &[
-                // Заголовок / Title
                 "заголовок",
                 "title",
-                // АвтоЗаголовок / AutoTitle
                 "автозаголовок",
                 "autotitle",
-                // Модифицированность / Modified
                 "модифицированность",
                 "modified",
-                // ТолькоПросмотр / ReadOnly
                 "толькопросмотр",
                 "readonly",
-                // КлючСохраненияПоложенияОкна / WindowOptionsKey
                 "ключсохраненияположенияокна",
                 "windowoptionskey",
-                // КлючНазначенияИспользования / PurposeUseKey
                 "ключназначенияиспользования",
                 "purposeusekey",
             ];
@@ -102,18 +86,6 @@ fn build_attribute_names_to_skip(ctx: &DiagnosticsContext) -> FxHashSet<String> 
     }
 }
 
-/// Collect UnusedLocalVariable diagnostics using liveness analysis.
-///
-/// This function performs dataflow-based detection of unused local variables:
-/// 1. Loads module-level liveness analysis ONCE (batch processed via Salsa)
-/// 2. Iterates over all methods and performs cheap HashMap lookups
-/// 3. Checks which declared variables are never live
-/// 4. Generates diagnostics for unused variables
-///
-/// **Performance:**
-/// - Module-level batch processing: all methods analyzed in one pass
-/// - CFG shared across multiple analyses (built once per module)
-/// - Expected 3-5x speedup vs per-method queries
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::UnusedLocalVariable;
 
@@ -123,18 +95,13 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     let mut diagnostics = Vec::new();
 
-    // Build object attribute names set once for the entire module
     let skip_attr_names = build_attribute_names_to_skip(ctx);
 
-    // Load module_bodies ONCE for the entire file
     let module_bodies = ctx.module_bodies();
 
-    // Load module-level liveness ONCE (Salsa cached, batch processed)
     let module_liveness = ctx.module_liveness();
     let module_cfgs = ctx.module_cfgs();
 
-    // Check each method for unused local variables
-    // Use module-level liveness results (cheap HashMap lookups)
     for (local_id, body) in module_bodies.iter_bodies() {
         diagnostics.extend(check_method_with_module_liveness(
             local_id,
@@ -148,21 +115,14 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         ));
     }
 
-    // Check module-level code for unused variables
     diagnostics.extend(check_module_level_code(code, ctx, &skip_attr_names));
 
-    // Check explicit module-level variable declarations (Перем X;)
-    // that are not referenced by any method body or module-level code
     diagnostics.extend(check_module_var_declarations(&module_bodies, code, ctx));
 
     diagnostics
 }
 
-/// Check a single method for unused variables using module-level liveness (optimized).
-///
-/// This function uses pre-loaded module-level liveness and CFG results (batch processed
-/// via Salsa), avoiding direct construction and leveraging Salsa caching.
-#[allow(clippy::too_many_arguments)] // skip_attr_names needed to filter ObjectModule attributes
+#[allow(clippy::too_many_arguments, reason = "skip_attr_names is part of object-module filtering")]
 fn check_method_with_module_liveness(
     local_id: u32,
     body: &hir::Body,
@@ -175,13 +135,11 @@ fn check_method_with_module_liveness(
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
-    // Get source_map
     let source_map = match module_bodies.source_map(local_id) {
         Some(sm) => sm,
         None => return diagnostics,
     };
 
-    // Get CFG from module-level collection (cheap HashMap lookup)
     let cfg = match module_cfgs.get(local_id) {
         Some(cfg) => cfg,
         None => {
@@ -190,7 +148,6 @@ fn check_method_with_module_liveness(
         }
     };
 
-    // Get liveness result from module-level collection (cheap HashMap lookup)
     let liveness_result = match module_liveness.get(local_id) {
         Some(result) => result,
         None => {
@@ -199,7 +156,6 @@ fn check_method_with_module_liveness(
         }
     };
 
-    // Get CFG entry point
     let entry = match cfg.entry_point() {
         Some(e) => e,
         None => {
@@ -208,7 +164,6 @@ fn check_method_with_module_liveness(
         }
     };
 
-    // Get live variables at entry point (IN set) — used for var_index access
     let live_at_entry = match liveness_result.block_in(entry) {
         Some(live) => live,
         None => {
@@ -217,38 +172,21 @@ fn check_method_with_module_liveness(
         }
     };
 
-    // Collect all declared variables (explicit VarDecl, For, ForEach) and parameters
     let mut declared_vars = rustc_hash::FxHashSet::default();
 
-    // Add parameters
     for param_id in body.params() {
         let binding = body.binding(param_id);
         declared_vars.insert(binding.name.as_str().to_lowercase());
     }
 
-    // Get var_index from liveness result (already computed during liveness analysis)
     let var_index = live_at_entry.var_index();
 
-    // Build union of all live sets across all blocks (O(B) - iterate all blocks once).
-    //
-    // A variable is "used" if it appears live in ANY IN or OUT set across the entire
-    // CFG. Using only IN[entry] is insufficient because variables used inside
-    // sub-graphs (e.g., inside TryExcept blocks) get killed by prior assignments
-    // in the entry block before they propagate back to IN[entry].
-    //
-    // This union covers all cases:
-    //  - Variables used in the entry block appear in IN[entry] (via the backward
-    //    transfer's accidental forward-order processing).
-    //  - Variables used only after the entry block appear in OUT[entry] or
-    //    IN/OUT of successor blocks.
     let mut all_live_union = fixedbitset::FixedBitSet::with_capacity(var_index.size());
     for (_, in_state, out_state) in liveness_result.blocks() {
         all_live_union.union_with(in_state.live_vars());
         all_live_union.union_with(out_state.live_vars());
     }
 
-    // Check each declared variable
-    // 1. Check VarDecl bindings
     for stmt_id in body.body_stmts() {
         if let hir::Stmt::VarDecl { bindings } = body.stmt(stmt_id) {
             for &binding_id in bindings.iter() {
@@ -256,18 +194,14 @@ fn check_method_with_module_liveness(
                 let binding = body.binding(binding_id_opaque);
                 declared_vars.insert(binding.name.as_str().to_lowercase());
 
-                // Variable is unused if it's not live anywhere in the CFG.
-                // Fast path: use pre-computed binding index (O(1), no allocation)
                 let is_unused = if let Some(idx) = var_index.get_index_by_binding(binding_id_opaque)
                 {
                     !all_live_union.contains(idx)
                 } else {
-                    // Fallback to string-based check against entry (conservative)
                     !live_at_entry.is_live(binding.name.as_str())
                 };
 
                 if is_unused {
-                    // Get source range for the variable name
                     if let Some(range) = source_map.binding_range(binding_id_opaque) {
                         diagnostics.push(create_diagnostic(
                             binding.name.as_str(),
@@ -281,14 +215,12 @@ fn check_method_with_module_liveness(
         }
     }
 
-    // 2. Check For loop variables
     for stmt_id in body.body_stmts() {
         if let hir::Stmt::For { var, .. } = body.stmt(stmt_id) {
             let var_opaque = BindingId::from_idx(*var);
             let binding = body.binding(var_opaque);
             declared_vars.insert(binding.name.as_str().to_lowercase());
 
-            // Fast path: use pre-computed binding index (O(1), no allocation)
             let is_unused = if let Some(idx) = var_index.get_index_by_binding(var_opaque) {
                 !all_live_union.contains(idx)
             } else {
@@ -303,14 +235,12 @@ fn check_method_with_module_liveness(
         }
     }
 
-    // 3. Check ForEach loop variables
     for stmt_id in body.body_stmts() {
         if let hir::Stmt::ForEach { var, .. } = body.stmt(stmt_id) {
             let var_opaque = BindingId::from_idx(*var);
             let binding = body.binding(var_opaque);
             declared_vars.insert(binding.name.as_str().to_lowercase());
 
-            // Fast path: use pre-computed binding index (O(1), no allocation)
             let is_unused = if let Some(idx) = var_index.get_index_by_binding(var_opaque) {
                 !all_live_union.contains(idx)
             } else {
@@ -325,23 +255,18 @@ fn check_method_with_module_liveness(
         }
     }
 
-    // 4. Check implicit variables (assigned without Перем)
-    // These are variables in Assign statements that are not declared
     let mut implicit_vars: rustc_hash::FxHashMap<String, (String, ide_db::TextRange)> =
         rustc_hash::FxHashMap::default();
 
     for stmt_id in body.body_stmts() {
         if let hir::Stmt::Assign { target, .. } = body.stmt(stmt_id) {
-            // Check if target is a simple path (variable assignment)
             let target_opaque = hir::ExprId::from_idx(*target);
             if let hir::Expr::Path(name) = body.expr(target_opaque) {
                 let lowercase_name = name.as_str().to_lowercase();
 
-                // Skip if already declared, is a parameter, or is an object attribute
                 if !declared_vars.contains(&lowercase_name)
                     && !skip_attr_names.contains(&lowercase_name)
                 {
-                    // This is an implicit variable - save it with its first assignment location
                     if let std::collections::hash_map::Entry::Vacant(e) =
                         implicit_vars.entry(lowercase_name)
                     {
@@ -354,13 +279,10 @@ fn check_method_with_module_liveness(
         }
     }
 
-    // Check each implicit variable against the all_live_union already computed above (O(V))
     for (lowercase_name, (original_name, range)) in implicit_vars {
-        // Fast path: check against pre-computed union (O(1) per variable)
         let is_live_anywhere = if let Some(idx) = var_index.get_index(&lowercase_name) {
             all_live_union.contains(idx)
         } else {
-            // Variable not in index - can't be live
             false
         };
 
@@ -372,10 +294,6 @@ fn check_method_with_module_liveness(
     diagnostics
 }
 
-/// Check module-level code for unused variables.
-///
-/// Analyzes code outside procedures/functions (module initialization code).
-/// Uses liveness analysis to detect variables that are assigned but never read.
 fn check_module_level_code(
     code: DiagnosticCode,
     ctx: &DiagnosticsContext,
@@ -383,19 +301,16 @@ fn check_module_level_code(
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
-    // Get module bodies via ctx (works in both LSP and streaming mode)
     let module_bodies = ctx.module_bodies();
 
-    // Get module-level code result (body + source_map)
     let lower_result = match module_bodies.module_code_result() {
         Some(result) => result,
-        None => return diagnostics, // No module-level code
+        None => return diagnostics,
     };
 
     let body = &lower_result.body;
     let source_map = &lower_result.source_map;
 
-    // Run liveness analysis via provider (cached by Salsa in LSP mode)
     let liveness_result = match ctx.module_level_liveness_analysis() {
         Some(result) => result,
         None => {
@@ -404,24 +319,19 @@ fn check_module_level_code(
         }
     };
 
-    // Module-level code typically has implicit variables (no Перем declarations).
-    // We need to find all implicit variable assignments.
     let mut implicit_vars: rustc_hash::FxHashMap<String, (String, ide_db::TextRange)> =
         rustc_hash::FxHashMap::default();
 
     for stmt_id in body.body_stmts() {
         if let hir::Stmt::Assign { target, .. } = body.stmt(stmt_id) {
-            // Check if target is a simple path (variable assignment)
             let target_opaque = hir::ExprId::from_idx(*target);
             if let hir::Expr::Path(name) = body.expr(target_opaque) {
                 let lowercase_name = name.as_str().to_lowercase();
 
-                // Skip object attributes (in ObjectModule, these set object fields)
                 if skip_attr_names.contains(&lowercase_name) {
                     continue;
                 }
 
-                // Save first assignment location for each variable
                 if let std::collections::hash_map::Entry::Vacant(e) =
                     implicit_vars.entry(lowercase_name)
                 {
@@ -433,10 +343,7 @@ fn check_module_level_code(
         }
     }
 
-    // Check if implicit variables are unused
-    // For implicit variables, check if they're ever live in any block
     for (lowercase_name, (original_name, range)) in implicit_vars {
-        // Check if variable is live in any block (either IN or OUT state)
         let is_live_anywhere = liveness_result.blocks().any(|(_, in_state, out_state)| {
             in_state.is_live(&lowercase_name) || out_state.is_live(&lowercase_name)
         });
@@ -449,10 +356,6 @@ fn check_module_level_code(
     diagnostics
 }
 
-/// Check explicit module-level variable declarations (Перем X;).
-///
-/// Detects `Перем` declarations that are not referenced by any method body
-/// or module-level code. Exported variables are skipped.
 fn check_module_var_declarations(
     module_bodies: &hir::ModuleBodies,
     code: DiagnosticCode,
@@ -487,7 +390,6 @@ fn check_module_var_declarations(
     diagnostics
 }
 
-/// Create diagnostic for an unused variable.
 fn create_diagnostic(
     name: &str,
     range: TextRange,
@@ -618,7 +520,6 @@ mod tests {
 
     #[test]
     fn test_assigned_but_never_read() {
-        // Variable is assigned but its value is never read - should trigger diagnostic
         let code = r#"Процедура Тест()
     Перем ТолькоПрисвоение;
     ТолькоПрисвоение = 10;
@@ -636,7 +537,6 @@ mod tests {
 
     #[test]
     fn test_assigned_and_read() {
-        // Variable is assigned AND read - should NOT trigger
         let code = r#"Процедура Тест()
     Перем Значение;
     Значение = 10;
@@ -648,7 +548,6 @@ mod tests {
 
     #[test]
     fn test_multiple_assignments_no_read() {
-        // Multiple assignments but never read
         let code = r#"Процедура Тест()
     Перем Результат;
     Результат = ПервоеДействие();
@@ -667,7 +566,6 @@ mod tests {
 
     #[test]
     fn test_field_assignment_base_is_read() {
-        // When assigning to Obj.Field, Obj IS read (we access it)
         let code = r#"Процедура Тест()
     Перем Структура;
     Структура = Новый Структура;
@@ -679,7 +577,6 @@ mod tests {
 
     #[test]
     fn test_index_assignment_base_is_read() {
-        // When assigning to Arr[i], Arr IS read
         let code = r#"Процедура Тест()
     Перем Массив;
     Массив = Новый Массив;
@@ -689,19 +586,8 @@ mod tests {
         check_diagnostics_snapshot_for(code, DiagnosticCode::UnusedLocalVariable, expect![[r#""#]]);
     }
 
-    /// Test based on test fixture content (UnusedLocalVariableDiagnostic.bsl)
-    ///
-    /// Expected 5 diagnostics total:
-    /// - Line 1, col 6-36: module variable (NOT YET IMPLEMENTED - module-level)
-    /// - Line 19, col 10-35: `ЛокальнаяБезИспользования` - declared but never used ✓
-    /// - Line 19, col 37-63: `ТолькоСПрисвоениемЗначения` - assigned but never read ✓
-    /// - Line 24, col 4-28: `ВПроцедуреНеИспользуемая` - assigned but never read ✓
-    /// - Line 83, col 0-25: module-level code (NOT YET IMPLEMENTED - module-level)
-    ///
-    /// This test covers only the local variables we currently handle (3 of 5).
     #[test]
     fn test_fixture_local_variables_in_function() {
-        // Excerpt from test fixture: function Вторая()
         let code = r#"Функция Вторая()
     Перем ЛокальнаяБезИспользования, ТолькоСПрисвоениемЗначения, ЛокальнаяСИспользованием;
 
@@ -740,12 +626,8 @@ mod tests {
         );
     }
 
-    /// Test module-level variable tracking.
-    ///
-    /// Module-level variables should be flagged if unused, unless exported.
     #[test]
     fn test_module_level_unused_variable() {
-        // Module-level variable that is never used
         let code = r#"Перем НеИспользуемая;
 
 Процедура Тест()
@@ -764,7 +646,6 @@ mod tests {
 
     #[test]
     fn test_module_level_export_variable_not_flagged() {
-        // Exported module-level variable should NOT be flagged
         let code = r#"Перем ЭкспортнаяПеременная Экспорт;
 
 Процедура Тест()
@@ -776,7 +657,6 @@ mod tests {
 
     #[test]
     fn test_module_level_used_variable() {
-        // Module-level variable used in a method should NOT be flagged
         let code = r#"Перем ИспользуемаяПеременная;
 
 Процедура Тест()
@@ -788,7 +668,6 @@ mod tests {
 
     #[test]
     fn test_module_level_code_unused_variable() {
-        // Module-level code: variable assigned but never read
         let code = r#"НеИспользуемаяВМодуле = 30;
 ИспользуемаяВМодуле = 40;
 Сообщить(ИспользуемаяВМодуле);"#;
@@ -805,8 +684,6 @@ mod tests {
 
     #[test]
     fn test_var_used_in_while_condition() {
-        // Variable used in While condition should NOT trigger diagnostic
-        // Real-world case from user: loop control variable
         let code = r#"Процедура ЗапускПроцессовДО()
     ЕстьЗадания = Истина;
     Пока ЕстьЗадания Цикл
@@ -818,18 +695,6 @@ mod tests {
         check_diagnostics_snapshot_for(code, DiagnosticCode::UnusedLocalVariable, expect![[r#""#]]);
     }
 
-    /// Full test fixture test.
-    ///
-    /// Expected 5 diagnostics:
-    /// - hasRange(1, 6, 36): Line 1, `ПеременнаяМодуляНеИспользуемая` with `&НаКлиенте`
-    /// - hasRange(19, 10, 35): Line 19, `ЛокальнаяБезИспользования`
-    /// - hasRange(19, 37, 63): Line 19, `ТолькоСПрисвоениемЗначения`
-    /// - hasRange(24, 4, 28): Line 24, `ВПроцедуреНеИспользуемая`
-    /// - hasRange(83, 0, 25): Line 83, `ВнеПроцедурНеИспользуемая`
-    ///
-    /// Note: Uses 0-indexed lines. Implementation may differ because:
-    /// - We don't handle `&НаКлиенте`/`&НаСервере` annotations (both vars with same name flagged)
-    /// - We may detect additional unused variables
     #[test]
     fn test_detects_unused_local_variables_in_fixture() {
         let code = r#"&НаКлиенте
@@ -958,9 +823,6 @@ mod tests {
 
     #[test]
     fn test_foreach_collection_variable_is_used() {
-        // Regression test for: implicit variable used as ForEach collection
-        // should NOT trigger unused variable diagnostic
-        // Real-world example from user report
         let code = r#"Процедура ОжидатьЗавершенияВыполненияЗадания(КлючЗадания)
     Отбор = Новый Структура;
     Отбор.Вставить("Ключ", КлючЗадания);
@@ -979,8 +841,6 @@ mod tests {
 
     #[test]
     fn test_for_loop_bound_variable_is_used() {
-        // Regression test: variable used as For loop upper bound
-        // should NOT trigger unused variable diagnostic
         let code = r#"Процедура Тест()
     КоличествоКолонок = 4;
     Для Сч = 1 По КоличествоКолонок Цикл
@@ -993,7 +853,6 @@ mod tests {
 
     #[test]
     fn test_for_loop_from_bound_variable_is_used() {
-        // Variable used as For loop lower bound (from)
         let code = r#"Процедура Тест()
     Начало = 1;
     Для Сч = Начало По 10 Цикл
@@ -1004,7 +863,6 @@ mod tests {
         check_diagnostics_snapshot_for(code, DiagnosticCode::UnusedLocalVariable, expect![[r#""#]]);
     }
 
-    /// Helper to create ObjectModule metadata with given MDO.
     fn make_object_module_metadata(mdo: bsl_metadata::MetadataObject) -> hir::ModuleMetadata {
         hir::ModuleMetadata {
             module_type: bsl_metadata::ModuleType::ObjectModule,
@@ -1046,7 +904,6 @@ mod tests {
         let unused_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
 
-        // snapshot-skip: metadata-backed diagnostic assertion intentionally retained.
         assert_eq!(
             unused_diags.len(),
             0,
@@ -1076,7 +933,6 @@ mod tests {
         let unused_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
 
-        // snapshot-skip: metadata-backed diagnostic assertion intentionally retained.
         assert_eq!(
             unused_diags.len(),
             0,
@@ -1102,16 +958,14 @@ mod tests {
         let unused_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
 
-        // snapshot-skip: metadata-backed diagnostic assertion intentionally retained.
         assert_eq!(
             unused_diags.len(),
             1,
             "True unused variable should still be flagged in ObjectModule"
         );
-        assert!(unused_diags[0].message.contains("НеАтрибутОбъекта")); // snapshot-skip: metadata-backed message assertion intentionally retained.
+        assert!(unused_diags[0].message.contains("НеАтрибутОбъекта"));
     }
 
-    /// Helper to create FormModule metadata with given form attributes.
     fn make_form_module_metadata(attribute_names: Vec<&str>) -> hir::ModuleMetadata {
         let mut form = bsl_metadata::Form::new(
             "ТестоваяФорма".to_string(),
@@ -1153,7 +1007,6 @@ mod tests {
         let unused_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
 
-        // snapshot-skip: metadata-backed diagnostic assertion intentionally retained.
         assert_eq!(
             unused_diags.len(),
             0,
@@ -1166,7 +1019,6 @@ mod tests {
     fn test_standard_form_property_not_flagged_in_form_module() {
         use crate::test_utils::check_metadata_diagnostic;
 
-        // Form with no custom attributes — only standard properties should be skipped
         let metadata = make_form_module_metadata(vec![]);
 
         let code = r#"&НаСервере
@@ -1178,7 +1030,6 @@ mod tests {
         let unused_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
 
-        // snapshot-skip: metadata-backed diagnostic assertion intentionally retained.
         assert_eq!(
             unused_diags.len(),
             0,
@@ -1203,13 +1054,12 @@ mod tests {
         let unused_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
 
-        // snapshot-skip: metadata-backed diagnostic assertion intentionally retained.
         assert_eq!(
             unused_diags.len(),
             1,
             "True unused variable should still be flagged in FormModule"
         );
-        assert!(unused_diags[0].message.contains("НеРеквизитФормы")); // snapshot-skip: metadata-backed message assertion intentionally retained.
+        assert!(unused_diags[0].message.contains("НеРеквизитФормы"));
     }
 
     #[test]
@@ -1226,13 +1076,12 @@ mod tests {
         let unused_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
 
-        // snapshot-skip: metadata-backed diagnostic assertion intentionally retained.
         assert_eq!(
             unused_diags.len(),
             1,
             "Form attribute name should be flagged in CommonModule (not a form context)"
         );
-        assert!(unused_diags[0].message.contains("Замечание")); // snapshot-skip: metadata-backed message assertion intentionally retained.
+        assert!(unused_diags[0].message.contains("Замечание"));
     }
 
     #[test]
@@ -1249,20 +1098,14 @@ mod tests {
         let unused_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
 
-        // snapshot-skip: metadata-backed diagnostic assertion intentionally retained.
         assert_eq!(
             unused_diags.len(),
             1,
             "Same name should be flagged in CommonModule (not an object attribute)"
         );
-        assert!(unused_diags[0].message.contains("Дата")); // snapshot-skip: metadata-backed message assertion intentionally retained.
+        assert!(unused_diags[0].message.contains("Дата"));
     }
 
-    /// Variable declared with Перем and used inside/after TryExcept should not be flagged.
-    ///
-    /// Bug: backward liveness analysis was not propagating liveness through TryExcept
-    /// vertex properly, so reads inside try/except blocks didn't make the variable
-    /// live at the entry point.
     #[test]
     fn test_var_used_in_try_except_not_flagged() {
         let code = r#"Функция Тест()

@@ -1,5 +1,3 @@
-//! Build utilities for bsl-analyzer.
-
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -10,13 +8,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Run all tests
     Test,
-
-    /// Build release binary
     Build,
-
-    /// Generate AST from grammar
     Codegen,
 }
 

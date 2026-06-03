@@ -1,11 +1,8 @@
-//! Diff-based diagnostic filtering.
-
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-/// Input JSON format from rtools diff-report.
 #[derive(Debug, Deserialize)]
 pub struct DiffFilterInput {
     pub base_ref: String,
@@ -13,26 +10,18 @@ pub struct DiffFilterInput {
     pub files: HashMap<String, FileDiff>,
 }
 
-/// Per-file diff information.
 #[derive(Debug, Deserialize)]
 pub struct FileDiff {
-    /// Changed line ranges (1-based, inclusive).
-    ///
-    /// `None` means a new file; `Some([])` means no relevant changes.
     pub hunks: Option<Vec<[u32; 2]>>,
 }
 
-/// A range of changed lines (1-based, inclusive).
 #[derive(Debug, Clone)]
 pub struct Hunk {
-    /// Start line, 1-based.
     pub start: u32,
-    /// End line, 1-based and inclusive.
     pub end: u32,
 }
 
 impl Hunk {
-    /// Checks whether this hunk overlaps a 0-based inclusive line range.
     pub fn overlaps(&self, start_0based: u32, end_0based: u32) -> bool {
         let start_1based = start_0based + 1;
         let end_1based = end_0based + 1;
@@ -41,18 +30,15 @@ impl Hunk {
     }
 }
 
-/// Runtime filter for diff-based diagnostics filtering.
 #[derive(Debug, Clone)]
 pub struct DiffFilter {
     pub base_ref: String,
     pub head_ref: String,
-    /// Maps normalized paths to hunks.
     files: HashMap<PathBuf, Option<Vec<Hunk>>>,
     filename_index: HashMap<String, Vec<PathBuf>>,
 }
 
 impl DiffFilter {
-    /// Load diff filter from a JSON file.
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
         let input: DiffFilterInput = serde_json::from_str(&content)?;
@@ -83,7 +69,6 @@ impl DiffFilter {
         Self { base_ref: input.base_ref, head_ref: input.head_ref, files, filename_index }
     }
 
-    /// Check if a file should be analyzed.
     pub fn should_analyze(&self, path: &Path) -> bool {
         match self.find_file(path) {
             Some(Some(hunks)) => !hunks.is_empty(),
@@ -92,7 +77,6 @@ impl DiffFilter {
         }
     }
 
-    /// Checks whether a diagnostic overlaps changed lines.
     pub fn diagnostic_in_diff(
         &self,
         path: &Path,
@@ -108,10 +92,6 @@ impl DiffFilter {
         }
     }
 
-    /// Find file in the filter by suffix matching.
-    ///
-    /// Diff paths may be relative to the repository root while analysis paths
-    /// are relative to `source_dir`, so either path may be a suffix of the other.
     fn find_file(&self, path: &Path) -> Option<&Option<Vec<Hunk>>> {
         let normalized = normalize_path(&path.to_string_lossy());
 

@@ -1,33 +1,21 @@
-//! Domain model for SDBL completion items.
-
 use crate::completion::{CompletionItem, CompletionItemKind};
 
-/// Domain model for SDBL completion item.
-///
-/// This is a domain representation that can be converted to IDE's CompletionItem.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SdblCompletionItem {
-    /// Label shown in completion list.
     pub label: String,
 
-    /// Kind of completion item (Field, Type, Keyword, etc.).
     pub kind: CompletionItemKind,
 
-    /// Detail text (type information, etc.).
     pub detail: Option<String>,
 
-    /// Documentation text (long description).
     pub documentation: Option<String>,
 
-    /// Sort text (for ordering in completion list).
     pub sort_text: Option<String>,
 
-    /// Filter text (for filtering when user types).
     pub filter_text: Option<String>,
 }
 
 impl SdblCompletionItem {
-    /// Create a new completion item.
     pub fn new(label: impl Into<String>, kind: CompletionItemKind) -> Self {
         Self {
             label: label.into(),
@@ -39,27 +27,23 @@ impl SdblCompletionItem {
         }
     }
 
-    /// Set detail text.
     pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
         self.detail = Some(detail.into());
         self
     }
 
-    /// Set documentation text.
     pub fn with_documentation(mut self, documentation: impl Into<String>) -> Self {
         self.documentation = Some(documentation.into());
         self
     }
 
-    /// Set sort text.
-    #[allow(dead_code)] // Used in tests
+    #[allow(dead_code, reason = "used by completion tests")]
     pub fn with_sort_text(mut self, sort_text: impl Into<String>) -> Self {
         self.sort_text = Some(sort_text.into());
         self
     }
 
-    /// Check if item matches prefix (case-insensitive).
-    #[allow(dead_code)] // Used in tests
+    #[allow(dead_code, reason = "used by completion tests")]
     pub fn matches_prefix(&self, prefix: &str) -> bool {
         if prefix.is_empty() {
             return true;
@@ -68,14 +52,13 @@ impl SdblCompletionItem {
         self.label.to_lowercase().starts_with(&prefix_lower)
     }
 
-    /// Convert to IDE's CompletionItem.
     pub fn into_completion_item(self) -> CompletionItem {
         CompletionItem {
             label: self.label.clone(),
             kind: self.kind,
             detail: self.detail,
             documentation: self.documentation,
-            insert_text: self.label.clone(), // Default: insert same as label
+            insert_text: self.label.clone(),
             sort_text: self.sort_text,
             filter_text: self.filter_text,
             source: None,

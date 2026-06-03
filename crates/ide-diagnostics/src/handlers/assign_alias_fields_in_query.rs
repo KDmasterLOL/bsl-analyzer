@@ -1,42 +1,3 @@
-//! AssignAliasFieldsInQuery diagnostic.
-//!
-//! Checks that all fields in SDBL subqueries have explicit aliases with AS/КАК keyword.
-//!
-//! ## Why?
-//! Subqueries are often used in FROM clauses. Explicit aliases make queries more readable
-//! and maintainable. Without AS keyword, it's unclear whether the identifier is an alias
-//! or part of the field expression.
-//!
-//! ## Bad practice
-//! ```bsl
-//! Query = "SELECT * FROM (SELECT Ref FROM Catalog.Products) AS Sub";
-//!         // Error: 'Ref' should be 'Ref AS Ref' (missing AS keyword)
-//!
-//! Query = "SELECT * FROM (SELECT Name, Code FROM Catalog.Products) AS Sub";
-//!         // Error: both 'Name' and 'Code' need explicit AS keyword
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! Query = "SELECT * FROM (SELECT Ref AS Ref FROM Catalog.Products) AS Sub";
-//!
-//! Query = "SELECT * FROM (SELECT * FROM Table) AS Sub"; // OK: asterisk doesn't need alias
-//!
-//! Query = "SELECT Name FROM Catalog.Products"; // OK: main query not checked
-//! ```
-//!
-//! ## Rules
-//! - Result-shaping SELECT clauses are checked: standalone queries, first
-//!   UNION branches, and nested subqueries.
-//! - Secondary UNION branches are skipped because result column names are
-//!   defined by the first SELECT in the UNION chain.
-//! - Asterisk fields (`*`, `Table.*`) don't require aliases.
-//! - AS/КАК keyword must be explicit (implicit aliases are forbidden).
-//!
-//! ## Implementation
-//!
-//! Uses SDBL HIR diagnostics collected during lowering and maps them back to BSL ranges.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
@@ -57,10 +18,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Builds a quick-fix for missing alias.
-///
-/// - No alias (`field_name = None`): insert ` КАК <raw_name>` at end of expression.
-/// - Implicit alias without AS (`field_name = Some`): insert `КАК ` before alias identifier.
 pub(crate) fn build_alias_fix(
     field_name: &Option<String>,
     raw_name: &Option<String>,
@@ -68,7 +25,6 @@ pub(crate) fn build_alias_fix(
 ) -> Vec<Fix> {
     match (field_name, raw_name) {
         (None, Some(name)) => {
-            // No alias at all → insert " КАК <raw_name>" at end of expression
             let insert = bsl_range.end();
             vec![Fix {
                 label: format!("Добавить псевдоним КАК {}", name),
@@ -79,7 +35,6 @@ pub(crate) fn build_alias_fix(
             }]
         }
         (Some(name), _) => {
-            // Implicit alias without AS → insert "КАК " before alias identifier
             let alias_byte_len = name.len() as u32;
             let insert = bsl_range.end() - line_index::TextSize::from(alias_byte_len);
             vec![Fix {
@@ -94,7 +49,6 @@ pub(crate) fn build_alias_fix(
     }
 }
 
-/// Single-pass dispatch for AssignAliasFieldsInQuery.
 pub(crate) fn dispatch(
     ctx: &DiagnosticsContext,
     diag: &sdbl_hir::SdblDiagnostic,
@@ -122,7 +76,6 @@ pub(crate) fn dispatch(
     }
 }
 
-/// Runs the AssignAliasFieldsInQuery diagnostic (standalone, used in tests).
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     crate::sdbl_utils::collect_sdbl_via_dispatch(
         ctx,
@@ -138,9 +91,6 @@ mod tests {
     use expect_test::expect;
     use parser::parse_sdbl;
 
-    /// Helper to check a standalone SDBL query using HIR (for testing).
-    ///
-    /// Parses the query, lowers to HIR, and extracts AliasWithoutAsKeyword diagnostics.
     fn check_standalone_query(query_text: &str) -> Vec<Diagnostic> {
         use sdbl_hir::lower_sdbl_to_hir;
 
@@ -185,14 +135,12 @@ mod tests {
 
     #[test]
     fn test_field_with_explicit_as() {
-        // Should pass - has AS keyword
         let query = "SELECT Name AS ProductName FROM Products";
         check_standalone_query_snapshot(query, expect![[r#""#]]);
     }
 
     #[test]
     fn test_field_without_as_keyword() {
-        // Should fail - implicit alias (no AS keyword)
         let query = "SELECT Name ProductName FROM Products";
         check_standalone_query_snapshot(
             query,
@@ -205,7 +153,6 @@ mod tests {
 
     #[test]
     fn test_field_without_alias() {
-        // Should fail - no alias at all
         let query = "SELECT Name FROM Products";
         check_standalone_query_snapshot(
             query,
@@ -218,21 +165,18 @@ mod tests {
 
     #[test]
     fn test_asterisk_field() {
-        // Should pass - asterisk doesn't need alias
         let query = "SELECT * FROM Products";
         check_standalone_query_snapshot(query, expect![[r#""#]]);
     }
 
     #[test]
     fn test_table_asterisk() {
-        // Should pass - Table.* doesn't need alias
         let query = "SELECT Products.* FROM Products";
         check_standalone_query_snapshot(query, expect![[r#""#]]);
     }
 
     #[test]
     fn test_multiple_fields_mixed() {
-        // Mixed: some with AS, some without
         let query = "SELECT Name AS ProductName, Code ProductCode, Price FROM Products";
         check_standalone_query_snapshot(
             query,
@@ -248,22 +192,18 @@ mod tests {
 
     #[test]
     fn test_russian_kak_keyword() {
-        // Russian КАК keyword should work
         let query = "ВЫБРАТЬ Имя КАК ИмяПродукта ИЗ Товары";
         check_standalone_query_snapshot(query, expect![[r#""#]]);
     }
 
     #[test]
     fn test_union_query() {
-        // UNION result column names are defined by the first SELECT.
-        // Secondary UNION branches do not need field aliases.
         let query = "SELECT Name AS N FROM Products UNION SELECT Title FROM Services";
         check_standalone_query_snapshot(query, expect![[r#""#]]);
     }
 
     #[test]
     fn test_sdbl_russian_query() {
-        // Test that SDBL parser handles Russian queries
         let query = "ВЫБРАТЬ Артикул, Наименование КАК ИмяТовара ИЗ Справочник.Номенклатура";
 
         check_standalone_query_snapshot(
@@ -277,7 +217,6 @@ mod tests {
 
     #[test]
     fn test_query_with_comments() {
-        // Test query with inline comments - comments should not affect diagnostics
         let query = r#"ВЫБРАТЬ
 	Товары.Артикул, // Неправильно
 	Товары.Артикул КАК АртикулТовара, // Правильно
@@ -313,7 +252,6 @@ mod tests {
         use test_fixture::Fixture;
         use vfs::VfsPath;
 
-        // Test simple query without comments using HIR
         let code = r#"Процедура Тест()
 Запрос = "ВЫБРАТЬ Товары.Артикул, Товары.Цена ЦенаПродажи ИЗ Справочник.Номенклатура КАК Товары";
 КонецПроцедуры"#;
@@ -334,10 +272,7 @@ mod tests {
 
         let sdbl_hirs = db.sdbl_hir_in_file(file_id);
 
-        // snapshot-skip: HIR extraction plumbing assertion, not diagnostic shape.
         assert_eq!(sdbl_hirs.len(), 1);
-        // Should have at least 1 diagnostic (field without alias)
-        // snapshot-skip: HIR extraction plumbing assertion, not diagnostic shape.
         assert!(
             !sdbl_hirs[0].1.queries()[0].hir.diagnostics.is_empty(),
             "Expected diagnostics for fields without AS keyword"
@@ -351,7 +286,6 @@ mod tests {
         use test_fixture::Fixture;
         use vfs::VfsPath;
 
-        // Test 1: Code wrapped in procedure
         let code_wrapped = r#"Процедура Тест()
     Запрос = "ВЫБРАТЬ Товары.Артикул, Товары.Цена ЦенаПродажи ИЗ Справочник.Номенклатура КАК Товары";
 КонецПроцедуры"#;
@@ -372,7 +306,6 @@ mod tests {
 
         let sdbl_hirs_wrapped = db.sdbl_hir_in_file(file_id);
 
-        // Test 2: Code at module level (no procedure)
         let code_unwrapped = r#"Запрос = "ВЫБРАТЬ Товары.Артикул, Товары.Цена ЦенаПродажи ИЗ Справочник.Номенклатура КАК Товары";"#;
 
         let fixture_text = format!("//- /test.bsl\n{}", code_unwrapped);
@@ -391,15 +324,11 @@ mod tests {
 
         let sdbl_hirs_unwrapped = db.sdbl_hir_in_file(file_id);
 
-        // Both should work
-        // snapshot-skip: HIR extraction plumbing assertion, not diagnostic shape.
         assert!(!sdbl_hirs_wrapped.is_empty() || !sdbl_hirs_unwrapped.is_empty());
     }
 
     #[test]
     fn test_union_with_diagnostics() {
-        // Alias check covers the first SELECT in a UNION chain. Secondary
-        // branches are matched by position and do not define result names.
         let query = r#"ВЫБРАТЬ
 	Товары.Артикул,
 	Товары.Артикул КАК АртикулТовара,
@@ -430,8 +359,6 @@ mod tests {
 
     #[test]
     fn test_top_clause_with_explicit_alias() {
-        // Test that ПЕРВЫЕ (TOP) clause doesn't cause false positives
-        // Field has explicit КАК keyword, should pass
         let query = r#"ВЫБРАТЬ ПЕРВЫЕ 100
 Спр.Номенклатура КАК Номенклатура
 ИЗ
@@ -442,23 +369,19 @@ mod tests {
 
     #[test]
     fn test_top_clause_parsing() {
-        // Verify that TOP clause parses correctly and doesn't break diagnostics
         let query = r#"ВЫБРАТЬ ПЕРВЫЕ 100
 Спр.Номенклатура КАК Номенклатура
 ИЗ
 Справочник.Номенклатура КАК Спр"#;
 
         let parse = parser::parse_sdbl(query);
-        // snapshot-skip: SDBL parser-internal assertion, not diagnostic shape.
         assert!(!parse.has_errors(), "Parse should not have errors");
 
-        // Field has explicit alias with КАК - no diagnostics expected
         check_standalone_query_snapshot(query, expect![[r#""#]]);
     }
 
     #[test]
     fn test_top_clause_without_alias() {
-        // Test that ПЕРВЫЕ (TOP) clause still detects missing alias
         let query = r#"ВЫБРАТЬ ПЕРВЫЕ 100
 Спр.Номенклатура
 ИЗ
@@ -475,7 +398,6 @@ mod tests {
 
     #[test]
     fn test_top_clause_implicit_alias() {
-        // Test that ПЕРВЫЕ (TOP) clause detects implicit alias (without КАК)
         let query = r#"ВЫБРАТЬ ПЕРВЫЕ 100
 Спр.Номенклатура Номенклатура
 ИЗ
@@ -492,30 +414,22 @@ mod tests {
 
     #[test]
     fn test_distinct_clause() {
-        // Test DISTINCT keyword
         let query = "SELECT DISTINCT Name AS ProductName FROM Products";
         check_standalone_query_snapshot(query, expect![[r#""#]]);
     }
 
     #[test]
     fn test_distinct_top_combination() {
-        // Test DISTINCT TOP combination
         let query = "ВЫБРАТЬ РАЗЛИЧНЫЕ ПЕРВЫЕ 10 Код КАК К ИЗ Товары";
         check_standalone_query_snapshot(query, expect![[r#""#]]);
     }
 
     #[test]
     fn test_top_distinct_order() {
-        // Test TOP DISTINCT order (also valid)
         let query = "SELECT TOP 50 DISTINCT Name AS N FROM Products";
         check_standalone_query_snapshot(query, expect![[r#""#]]);
     }
 
-    /// A query with UNION checks aliases only in the first SELECT.
-    ///
-    /// Expected 2 diagnostics: Валюты.Ссылка has no alias and Валюты.Код uses
-    /// an implicit alias. The secondary UNION SELECT is ignored because it does
-    /// not define result column names.
     #[test]
     fn test_query_with_union_two_diagnostics() {
         let code = r#"Запрос = Новый Запрос;
@@ -549,7 +463,6 @@ mod tests {
         );
     }
 
-    /// Second query (separate statement) also generates diagnostics independently.
     #[test]
     fn test_second_query_with_union_two_diagnostics() {
         let code = r#"Запрос = Новый Запрос;
@@ -607,7 +520,6 @@ mod tests {
         );
     }
 
-    /// Nested subquery - field inside subquery without alias triggers diagnostic.
     #[test]
     fn test_nested_subquery_field_without_alias() {
         let code = r#"Запрос1 = Новый Запрос;
@@ -630,10 +542,6 @@ mod tests {
         );
     }
 
-    /// Regression guard for UNION field aliases.
-    ///
-    /// Main SELECT is fully aliased; UNION part has a missing alias. This is OK:
-    /// secondary UNION branches do not define result column names.
     #[test]
     fn test_union_part_does_not_emit_when_alias_missing() {
         let query = "SELECT Name AS Name FROM Products UNION ALL SELECT Title FROM Services";
@@ -666,7 +574,6 @@ mod tests {
         );
     }
 
-    /// Query with leading newline and field without alias.
     #[test]
     fn test_query_with_leading_newline_field_without_alias() {
         let code = "ТекстЗапроса = \"\n\t|ВЫБРАТЬ\n\t|\tВТ_ТЧ.НомерСтроки\n\t|ИЗ\n\t|\t&ВТ_Цены КАК ВТ_Цены\n\t|;\n\t|\n\t|ВЫБРАТЬ\n\t|\t\" + ПоляТЧДокумента + \"\n\t|ИЗ\n\t|\t&ВТ_ТЧ КАК Товары\";";

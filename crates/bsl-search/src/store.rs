@@ -1,10 +1,3 @@
-//! SQLite-backed persistent storage for search index.
-//!
-//! Stores file hashes, code chunks, embedding vectors, and platform
-//! documentation. Supports multiple collections (e.g. "code", "platform")
-//! within a single database. Survives process restarts and supports
-//! incremental updates.
-
 use crate::chunker::Chunk;
 use crate::document::Document;
 use crate::error::SearchError;
@@ -12,35 +5,155 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-/// Persistent store for search index data.
 pub struct Store {
     conn: Connection,
 }
 
+/// Bumped whenever the embedding text composed by
+/// `document::semantic_text_for_indexed_document` changes shape. Stored in the SQLite
+/// `user_version` pragma; on mismatch the store clears file hashes so the next index
+/// re-embeds everything, rather than mixing old- and new-format vectors in one space
+/// (file-hash gating would otherwise keep stale-format embeddings indefinitely).
+const EMBED_TEXT_VERSION: i64 = 1;
+
+/// The structural version of the SQLite schema, recorded in the `meta` table — the
+/// search-index counterpart to the call graph's `graph_db::SCHEMA_VERSION`. Bump this
+/// whenever a table's shape changes in a way the additive `ALTER TABLE` migrations in
+/// [`Store::init_schema`] cannot reconcile; on mismatch the derived cache is wiped and
+/// rebuilt. Distinct from [`EMBED_TEXT_VERSION`], which only forces a soft re-embed and
+/// leaves the schema intact. A pre-versioning database (no `meta` row) is treated as
+/// already current — the additive migrations keep it compatible — so upgrading does not
+/// trigger a needless full re-index.
+const SCHEMA_VERSION: i64 = 1;
+
 impl Store {
-    /// Open or create a search index database at the given path.
     pub fn open(path: &Path) -> Result<Self, SearchError> {
         let conn = Connection::open(path)?;
         let store = Self { conn };
-        store.init_schema()?;
+        store.apply_pragmas()?;
+        store.migrate_structural_schema()?;
+        store.migrate_embed_text_version()?;
         Ok(store)
     }
 
-    /// Create an in-memory store (for testing).
+    /// Connection-level pragmas. Set outside any transaction — `journal_mode` is a no-op
+    /// inside one — so the WAL mode that makes [`Self::migrate_structural_schema`]
+    /// crash-atomic is actually in force before that transaction runs.
+    fn apply_pragmas(&self) -> Result<(), SearchError> {
+        self.conn.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA synchronous = NORMAL;
+             PRAGMA foreign_keys = ON;",
+        )?;
+        Ok(())
+    }
+
+    /// Reconcile the structural schema in a single transaction: wipe a stale cache,
+    /// (re)create the current tables, and stamp the version atomically. Under WAL a
+    /// crash mid-reconcile rolls back to the prior consistent state, so the next open
+    /// never sees a half-wiped database it would mistake for a pre-versioning one (whose
+    /// data must be kept). Distinct from [`Self::migrate_embed_text_version`], a soft
+    /// re-embed that leaves the schema intact.
+    fn migrate_structural_schema(&self) -> Result<(), SearchError> {
+        let tx = self.conn.unchecked_transaction()?;
+        if let Some(stored) = Self::stored_schema_version(&tx)? {
+            if stored != SCHEMA_VERSION {
+                tracing::info!(
+                    from = stored,
+                    to = SCHEMA_VERSION,
+                    "search index schema changed; wiping derived cache to rebuild"
+                );
+                Self::wipe_all_tables(&tx)?;
+            }
+        }
+        Self::create_schema(&tx)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?1)",
+            params![SCHEMA_VERSION.to_string()],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The structural schema version recorded in `meta`, or `None` for a fresh or
+    /// pre-versioning database (no `meta` table, or no `schema_version` row).
+    fn stored_schema_version(conn: &Connection) -> Result<Option<i64>, SearchError> {
+        let has_meta = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'",
+                [],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !has_meta {
+            return Ok(None);
+        }
+        let version = conn
+            .query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .optional()?
+            .and_then(|v| v.parse().ok());
+        Ok(version)
+    }
+
+    /// Drop every table so [`Self::create_schema`] can recreate the current structure.
+    /// FTS5 virtual tables are dropped first so their shadow tables vanish before the
+    /// generic enumeration runs (dropping a shadow table directly is an error).
+    fn wipe_all_tables(conn: &Connection) -> Result<(), SearchError> {
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS chunks_fts; DROP TABLE IF EXISTS overlay_chunks_fts;",
+        )?;
+        let names: Vec<String> = {
+            let mut stmt = conn.prepare(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+            )?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            rows.collect::<Result<_, _>>()?
+        };
+        for name in names {
+            conn.execute(&format!("DROP TABLE IF EXISTS \"{name}\""), [])?;
+        }
+        Ok(())
+    }
+
+    /// Force a full re-embed when the embedding-text format has changed since this
+    /// database was built (see [`EMBED_TEXT_VERSION`]). A fresh database just records
+    /// the current version.
+    fn migrate_embed_text_version(&self) -> Result<(), SearchError> {
+        let version: i64 = self.conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version != EMBED_TEXT_VERSION {
+            let cleared = self.conn.execute("UPDATE files SET hash = zeroblob(0)", [])?;
+            self.conn.pragma_update(None, "user_version", EMBED_TEXT_VERSION)?;
+            if cleared > 0 {
+                tracing::info!(
+                    cleared,
+                    from = version,
+                    to = EMBED_TEXT_VERSION,
+                    "embed-text format changed; cleared file hashes to force re-embed"
+                );
+            }
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     pub fn in_memory() -> Result<Self, SearchError> {
         let conn = Connection::open_in_memory()?;
         let store = Self { conn };
-        store.init_schema()?;
+        store.apply_pragmas()?;
+        store.migrate_structural_schema()?;
         Ok(store)
     }
 
-    fn init_schema(&self) -> Result<(), SearchError> {
-        self.conn.execute_batch(
+    fn create_schema(conn: &Connection) -> Result<(), SearchError> {
+        conn.execute_batch(
             "
-            PRAGMA journal_mode = WAL;
-            PRAGMA synchronous = NORMAL;
-            PRAGMA foreign_keys = ON;
+            CREATE TABLE IF NOT EXISTS meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
 
             CREATE TABLE IF NOT EXISTS files (
                 id         INTEGER PRIMARY KEY,
@@ -60,7 +173,8 @@ impl Store {
                 line_start  INTEGER NOT NULL,
                 line_end    INTEGER NOT NULL,
                 text        TEXT    NOT NULL,
-                embedding   BLOB
+                embedding   BLOB,
+                graph_context TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_chunks_file
@@ -74,16 +188,13 @@ impl Store {
             ",
         )?;
 
-        // Migration: add collection column to existing databases.
-        let _ = self
-            .conn
+        let _ = conn
             .execute("ALTER TABLE files ADD COLUMN collection TEXT NOT NULL DEFAULT 'code'", []);
+        // Idempotent column add for databases created before graph-enriched embeddings;
+        // the error when it already exists is intentionally ignored.
+        let _ = conn.execute("ALTER TABLE chunks ADD COLUMN graph_context TEXT", []);
 
-        // Overlay-only tables: baseline metadata, overlay tombstones, and
-        // overlay-specific file/chunk storage. These are created alongside the
-        // existing schema but are only populated when a Postgres baseline is
-        // configured.
-        self.conn.execute_batch(
+        conn.execute_batch(
             "
             -- Baseline manifest metadata for workspace code.
             -- Stores the selected snapshot identity and manifest snapshot.
@@ -172,7 +283,6 @@ impl Store {
         Ok(())
     }
 
-    /// Get the stored hash for a file path, if any.
     pub fn file_hash(&self, path: &str) -> Result<Option<Vec<u8>>, SearchError> {
         let hash = self
             .conn
@@ -183,8 +293,6 @@ impl Store {
         Ok(hash)
     }
 
-    /// Insert or update a file record.
-    /// Returns the file id.
     pub fn upsert_file(
         &self,
         path: &str,
@@ -205,9 +313,7 @@ impl Store {
         Ok(self.conn.last_insert_rowid())
     }
 
-    /// Remove a file and all its chunks (CASCADE) and FTS entries.
     pub fn remove_file(&self, path: &str) -> Result<(), SearchError> {
-        // Clean FTS entries before CASCADE deletes chunks.
         self.conn.execute(
             "DELETE FROM chunks_fts WHERE rowid IN (
                  SELECT c.id FROM chunks c
@@ -220,13 +326,11 @@ impl Store {
         Ok(())
     }
 
-    /// Delete all chunks belonging to a file.
     pub fn delete_chunks_for_file(&self, file_id: i64) -> Result<(), SearchError> {
         self.conn.execute("DELETE FROM chunks WHERE file_id = ?1", params![file_id])?;
         Ok(())
     }
 
-    /// Insert a chunk for a file. Returns the chunk id.
     pub fn insert_chunk(
         &self,
         file_id: i64,
@@ -262,8 +366,6 @@ impl Store {
         Ok(self.conn.last_insert_rowid())
     }
 
-    /// Reindex a file: delete old chunks, insert new ones.
-    /// Runs in a single transaction for atomicity.
     pub fn reindex_file(
         &mut self,
         path: &str,
@@ -271,10 +373,22 @@ impl Store {
         chunks: &[Chunk],
         embeddings: Option<&[Vec<f32>]>,
     ) -> Result<i64, SearchError> {
-        self.reindex_file_in_collection(path, hash, "code", chunks, embeddings)
+        self.reindex_file_in_collection(path, hash, "code", chunks, embeddings, None)
     }
 
-    /// Reindex a file within a specific collection.
+    /// As [`Self::reindex_file`], but persists each chunk's graph context (parallel to
+    /// `chunks`) so a later reconstruction re-embeds with the same enriched text.
+    pub fn reindex_file_with_context(
+        &mut self,
+        path: &str,
+        hash: &[u8],
+        chunks: &[Chunk],
+        embeddings: Option<&[Vec<f32>]>,
+        graph_contexts: Option<&[Option<String>]>,
+    ) -> Result<i64, SearchError> {
+        self.reindex_file_in_collection(path, hash, "code", chunks, embeddings, graph_contexts)
+    }
+
     pub fn reindex_file_in_collection(
         &mut self,
         path: &str,
@@ -282,10 +396,10 @@ impl Store {
         collection: &str,
         chunks: &[Chunk],
         embeddings: Option<&[Vec<f32>]>,
+        graph_contexts: Option<&[Option<String>]>,
     ) -> Result<i64, SearchError> {
         let tx = self.conn.transaction()?;
 
-        // Upsert file.
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -300,21 +414,18 @@ impl Store {
         let file_id: i64 =
             tx.query_row("SELECT id FROM files WHERE path = ?1", params![path], |row| row.get(0))?;
 
-        // Delete old FTS entries for this file's chunks.
         tx.execute(
             "DELETE FROM chunks_fts WHERE rowid IN (SELECT id FROM chunks WHERE file_id = ?1)",
             params![file_id],
         )?;
 
-        // Delete old chunks.
         tx.execute("DELETE FROM chunks WHERE file_id = ?1", params![file_id])?;
 
-        // Insert new chunks and sync FTS index.
         {
             let mut stmt = tx.prepare(
                 "INSERT INTO chunks (file_id, kind, symbol_name, is_export, annotations,
-                                     line_start, line_end, text, embedding)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                                     line_start, line_end, text, embedding, graph_context)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             )?;
             let mut fts_stmt =
                 tx.prepare("INSERT INTO chunks_fts(rowid, symbol_name, text) VALUES (?1, ?2, ?3)")?;
@@ -333,6 +444,8 @@ impl Store {
                 let embedding_blob: Option<Vec<u8>> = embeddings
                     .and_then(|embs| embs.get(i))
                     .map(|e| e.iter().flat_map(|f| f.to_le_bytes()).collect());
+                let graph_context: Option<&str> =
+                    graph_contexts.and_then(|gc| gc.get(i)).and_then(|g| g.as_deref());
 
                 stmt.execute(params![
                     file_id,
@@ -344,6 +457,7 @@ impl Store {
                     chunk.line_end,
                     chunk.text,
                     embedding_blob,
+                    graph_context,
                 ])?;
 
                 let chunk_id = tx.last_insert_rowid();
@@ -355,10 +469,6 @@ impl Store {
         Ok(file_id)
     }
 
-    /// Reindex documents in a collection (e.g. platform reference).
-    ///
-    /// Documents are stored as chunks under a virtual file path.
-    /// Uses the same FTS and embedding infrastructure as code chunks.
     pub fn reindex_documents(
         &mut self,
         collection: &str,
@@ -385,14 +495,12 @@ impl Store {
                 row.get(0)
             })?;
 
-        // Delete old FTS entries.
         tx.execute(
             "DELETE FROM chunks_fts WHERE rowid IN (SELECT id FROM chunks WHERE file_id = ?1)",
             params![file_id],
         )?;
         tx.execute("DELETE FROM chunks WHERE file_id = ?1", params![file_id])?;
 
-        // Insert documents as chunks.
         {
             let mut stmt = tx.prepare(
                 "INSERT INTO chunks (file_id, kind, symbol_name, is_export, annotations,
@@ -481,8 +589,6 @@ impl Store {
         Ok(file_id)
     }
 
-    /// Load all embeddings with their chunk ids for building the HNSW index.
-    /// Returns (chunk_id, embedding) pairs.
     pub fn load_all_embeddings(&self, dim: usize) -> Result<Vec<(i64, Vec<f32>)>, SearchError> {
         let mut stmt =
             self.conn.prepare("SELECT id, embedding FROM chunks WHERE embedding IS NOT NULL")?;
@@ -507,7 +613,6 @@ impl Store {
         Ok(result)
     }
 
-    /// Get chunk metadata by id (for returning search results).
     pub fn chunk_by_id(&self, chunk_id: i64) -> Result<Option<ChunkInfo>, SearchError> {
         let info = self
             .conn
@@ -536,7 +641,6 @@ impl Store {
         Ok(info)
     }
 
-    /// Get all indexed file paths with their hashes.
     pub fn all_files(&self) -> Result<Vec<(String, Vec<u8>)>, SearchError> {
         let mut stmt = self.conn.prepare("SELECT path, hash FROM files")?;
         let rows =
@@ -549,7 +653,6 @@ impl Store {
         Ok(result)
     }
 
-    /// Get all indexed file paths with their hashes for a single collection.
     pub fn all_files_in_collection(
         &self,
         collection: &str,
@@ -566,7 +669,6 @@ impl Store {
         Ok(result)
     }
 
-    /// Remove all persisted rows for one collection from the primary code/docs tables.
     pub fn clear_collection(&self, collection: &str) -> Result<(), SearchError> {
         self.conn.execute(
             "DELETE FROM chunks_fts WHERE rowid IN (
@@ -580,26 +682,26 @@ impl Store {
         Ok(())
     }
 
-    /// Total number of chunks in the store.
     pub fn chunk_count(&self) -> Result<usize, SearchError> {
         let count: i64 =
             self.conn.query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))?;
         Ok(count as usize)
     }
 
-    /// Load indexed documents, optionally filtered by collection.
     pub fn load_indexed_documents(
         &self,
         collection: Option<&str>,
     ) -> Result<Vec<crate::IndexedDocument>, SearchError> {
         let query = if collection.is_some() {
-            "SELECT f.collection, f.path, c.symbol_name, c.kind, c.line_start, c.line_end, c.text
+            "SELECT f.collection, f.path, c.symbol_name, c.kind, c.line_start, c.line_end, c.text,
+                    c.graph_context
              FROM chunks c
              JOIN files f ON f.id = c.file_id
              WHERE f.collection = ?1
              ORDER BY f.collection, f.path, c.line_start, c.line_end, c.symbol_name"
         } else {
-            "SELECT f.collection, f.path, c.symbol_name, c.kind, c.line_start, c.line_end, c.text
+            "SELECT f.collection, f.path, c.symbol_name, c.kind, c.line_start, c.line_end, c.text,
+                    c.graph_context
              FROM chunks c
              JOIN files f ON f.id = c.file_id
              ORDER BY f.collection, f.path, c.line_start, c.line_end, c.symbol_name"
@@ -618,6 +720,7 @@ impl Store {
                     line_end: row.get::<_, i64>(5)? as u32,
                     content_hash: blake3::hash(text.as_bytes()).to_hex().to_string(),
                     text,
+                    graph_context: row.get(7)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?
@@ -633,6 +736,7 @@ impl Store {
                     line_end: row.get::<_, i64>(5)? as u32,
                     content_hash: blake3::hash(text.as_bytes()).to_hex().to_string(),
                     text,
+                    graph_context: row.get(7)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?
@@ -641,19 +745,12 @@ impl Store {
         Ok(rows)
     }
 
-    /// Full-text search across chunk symbol names and text.
-    ///
-    /// If `collection` is `Some`, only searches within that collection.
-    /// Returns chunk ids with FTS5 rank scores, ordered by relevance.
     pub fn text_search(
         &self,
         query: &str,
         limit: usize,
         collection: Option<&str>,
     ) -> Result<Vec<TextSearchResult>, SearchError> {
-        // Wrap query in double quotes for FTS5 to treat it as a literal phrase.
-        // This prevents FTS5 syntax errors on dots, parentheses, and other special chars
-        // (e.g. "БонусныеБаллы.Остатки" or "СообщитьПользователю()").
         let escaped = format!("\"{}\"", query.replace('"', "\"\""));
         let results = if let Some(coll) = collection {
             let mut stmt = self.conn.prepare(
@@ -685,10 +782,6 @@ impl Store {
         Ok(results)
     }
 
-    /// Rebuild the FTS5 index from existing chunk data.
-    ///
-    /// Clears and repopulates the standalone FTS5 table from chunks.
-    /// Useful after schema migration or if the index gets out of sync.
     pub fn rebuild_fts(&self) -> Result<(), SearchError> {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute("DELETE FROM chunks_fts", [])?;
@@ -701,20 +794,17 @@ impl Store {
         Ok(())
     }
 
-    /// Check if the FTS index is populated.
     pub fn fts_count(&self) -> Result<usize, SearchError> {
         let count: i64 =
             self.conn.query_row("SELECT COUNT(*) FROM chunks_fts", [], |row| row.get(0))?;
         Ok(count as usize)
     }
 
-    /// Total number of indexed files.
     pub fn file_count(&self) -> Result<usize, SearchError> {
         let count: i64 = self.conn.query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))?;
         Ok(count as usize)
     }
 
-    /// Count chunks with embeddings in a specific collection.
     pub fn embedding_count_by_collection(&self, collection: &str) -> Result<usize, SearchError> {
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM chunks c
@@ -726,7 +816,6 @@ impl Store {
         Ok(count as usize)
     }
 
-    /// Clear file hashes for a collection so they get re-indexed.
     pub fn clear_file_hashes(&self, collection: &str) -> Result<usize, SearchError> {
         let count = self.conn.execute(
             "UPDATE files SET hash = zeroblob(0) WHERE collection = ?1",
@@ -735,10 +824,6 @@ impl Store {
         Ok(count)
     }
 
-    /// Clear file hashes only for files that have no embeddings in their chunks.
-    ///
-    /// This allows `index_directory` to re-process only files that lack
-    /// embeddings, without touching files already fully indexed.
     pub fn clear_file_hashes_without_embeddings(
         &self,
         collection: &str,
@@ -754,12 +839,6 @@ impl Store {
         Ok(count)
     }
 
-    // -----------------------------------------------------------------------
-    // Baseline manifest metadata persistence
-    // -----------------------------------------------------------------------
-
-    /// Persist the selected baseline manifest metadata for workspace code.
-    /// This is the only baseline state stored locally — no code documents.
     pub fn upsert_baseline_manifest(
         &self,
         snapshot_id: &str,
@@ -821,7 +900,6 @@ impl Store {
         Ok(())
     }
 
-    /// Returns the stored baseline manifest metadata, if any.
     pub fn load_baseline_manifest(&self) -> Result<Option<BaselineManifestRecord>, SearchError> {
         let record = self
             .conn
@@ -871,18 +949,12 @@ impl Store {
         Ok(Some(fingerprints))
     }
 
-    /// Clear the stored baseline manifest metadata.
     pub fn clear_baseline_manifest(&self) -> Result<(), SearchError> {
         self.conn.execute("DELETE FROM baseline_manifest_files", [])?;
         self.conn.execute("DELETE FROM baseline_manifest WHERE id = 1", [])?;
         Ok(())
     }
 
-    // -----------------------------------------------------------------------
-    // Overlay tombstones
-    // -----------------------------------------------------------------------
-
-    /// Record a tombstone for a deleted baseline file.
     pub fn insert_overlay_tombstone(
         &self,
         path: &str,
@@ -901,13 +973,11 @@ impl Store {
         Ok(())
     }
 
-    /// Remove a tombstone (e.g. when a previously deleted file is restored).
     pub fn remove_overlay_tombstone(&self, path: &str) -> Result<(), SearchError> {
         self.conn.execute("DELETE FROM overlay_tombstones WHERE path = ?1", params![path])?;
         Ok(())
     }
 
-    /// Returns all tombstone paths for a collection.
     pub fn overlay_tombstone_paths(
         &self,
         collection: &str,
@@ -922,19 +992,12 @@ impl Store {
         Ok(paths)
     }
 
-    /// Clear all tombstones for a collection.
     pub fn clear_overlay_tombstones(&self, collection: &str) -> Result<(), SearchError> {
         self.conn
             .execute("DELETE FROM overlay_tombstones WHERE collection = ?1", params![collection])?;
         Ok(())
     }
 
-    // -----------------------------------------------------------------------
-    // Overlay files and chunks
-    // -----------------------------------------------------------------------
-
-    /// Upsert an overlay file with its chunks and FTS entries atomically.
-    /// Returns the overlay file id.
     pub fn upsert_overlay_file_with_chunks(
         &mut self,
         path: &str,
@@ -961,14 +1024,12 @@ impl Store {
                 row.get(0)
             })?;
 
-        // Delete old FTS entries and chunks for this overlay file.
         tx.execute(
             "DELETE FROM overlay_chunks_fts WHERE rowid IN (SELECT id FROM overlay_chunks WHERE file_id = ?1)",
             params![file_id],
         )?;
         tx.execute("DELETE FROM overlay_chunks WHERE file_id = ?1", params![file_id])?;
 
-        // Insert new chunks and sync FTS.
         {
             let mut stmt = tx.prepare(
                 "INSERT INTO overlay_chunks (file_id, kind, symbol_name, is_export, annotations,
@@ -1015,7 +1076,6 @@ impl Store {
         Ok(file_id)
     }
 
-    /// Remove an overlay file and all its chunks (CASCADE + FTS).
     pub fn remove_overlay_file(&self, path: &str) -> Result<(), SearchError> {
         self.conn.execute(
             "DELETE FROM overlay_chunks_fts WHERE rowid IN (
@@ -1029,7 +1089,6 @@ impl Store {
         Ok(())
     }
 
-    /// Overlay FTS search: returns chunk ids with rank scores.
     pub fn overlay_text_search(
         &self,
         query: &str,
@@ -1067,7 +1126,6 @@ impl Store {
         Ok(results)
     }
 
-    /// Load overlay chunks by chunk ids (for returning search results).
     pub fn overlay_chunks_by_ids(&self, chunk_ids: &[i64]) -> Result<Vec<ChunkInfo>, SearchError> {
         if chunk_ids.is_empty() {
             return Ok(Vec::new());
@@ -1100,7 +1158,6 @@ impl Store {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    /// Load all overlay embeddings for building the HNSW index.
     pub fn load_overlay_embeddings(&self, dim: usize) -> Result<Vec<(i64, Vec<f32>)>, SearchError> {
         let mut stmt = self
             .conn
@@ -1124,7 +1181,6 @@ impl Store {
         Ok(result)
     }
 
-    /// Count of overlay files in a collection.
     pub fn overlay_file_count(&self, collection: &str) -> Result<usize, SearchError> {
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM overlay_files WHERE collection = ?1",
@@ -1134,7 +1190,6 @@ impl Store {
         Ok(count as usize)
     }
 
-    /// Count of overlay chunks in a collection.
     pub fn overlay_chunk_count(&self, collection: &str) -> Result<usize, SearchError> {
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM overlay_chunks c
@@ -1146,7 +1201,6 @@ impl Store {
         Ok(count as usize)
     }
 
-    /// Count of overlay tombstones in a collection.
     pub fn overlay_tombstone_count(&self, collection: &str) -> Result<usize, SearchError> {
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM overlay_tombstones WHERE collection = ?1",
@@ -1156,10 +1210,6 @@ impl Store {
         Ok(count as usize)
     }
 
-    // -- Overlay fingerprint cache ------------------------------------------
-
-    /// Load persisted overlay fingerprint cache for the given manifest snapshot.
-    /// Returns `None` if the cache belongs to a different snapshot (stale).
     pub fn load_overlay_fingerprint_cache(
         &self,
         manifest_snapshot_id: &str,
@@ -1186,14 +1236,12 @@ impl Store {
             map.insert(path, entry);
         }
         if map.is_empty() {
-            // Check if there are rows for a different snapshot → stale cache.
             let any_rows: bool = self.conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM overlay_fingerprint_cache LIMIT 1)",
                 [],
                 |row| row.get(0),
             )?;
             if any_rows {
-                // Stale cache — different manifest snapshot. Clear it.
                 self.clear_overlay_fingerprint_cache()?;
             }
             return Ok(None);
@@ -1201,13 +1249,11 @@ impl Store {
         Ok(Some(map))
     }
 
-    /// Persist overlay fingerprint cache entries in a single transaction.
     pub fn save_overlay_fingerprint_cache(
         &self,
         manifest_snapshot_id: &str,
         entries: &HashMap<String, PersistedFingerprint>,
     ) -> Result<(), SearchError> {
-        // Clear old entries and insert new ones atomically.
         self.conn.execute("DELETE FROM overlay_fingerprint_cache", [])?;
         let mut stmt = self.conn.prepare(
             "INSERT INTO overlay_fingerprint_cache
@@ -1227,16 +1273,11 @@ impl Store {
         Ok(())
     }
 
-    /// Clear the overlay fingerprint cache.
     pub fn clear_overlay_fingerprint_cache(&self) -> Result<(), SearchError> {
         self.conn.execute("DELETE FROM overlay_fingerprint_cache", [])?;
         Ok(())
     }
 
-    // -- Overlay embedding cache ----------------------------------------------
-
-    /// Load persisted overlay embeddings for the given model and dimension.
-    /// Returns an empty map if no matching embeddings exist.
     pub fn load_overlay_embedding_cache(
         &self,
         model_id: &str,
@@ -1256,7 +1297,6 @@ impl Store {
         let mut map = HashMap::new();
         for row in rows {
             let (hash, blob) = row?;
-            // Decode f32 values from little-endian byte blob.
             if blob.len() % 4 == 0 {
                 let embedding: Vec<f32> = blob
                     .chunks_exact(4)
@@ -1268,7 +1308,6 @@ impl Store {
         Ok(map)
     }
 
-    /// Persist overlay embeddings. Merges with existing entries.
     pub fn save_overlay_embedding_cache(
         &self,
         model_id: &str,
@@ -1288,13 +1327,11 @@ impl Store {
         Ok(())
     }
 
-    /// Clear the overlay embedding cache.
     pub fn clear_overlay_embedding_cache(&self) -> Result<(), SearchError> {
         self.conn.execute("DELETE FROM overlay_embedding_cache", [])?;
         Ok(())
     }
 
-    /// Clear all overlay state (files, chunks, tombstones) for a collection.
     pub fn clear_overlay_state(&self, collection: &str) -> Result<(), SearchError> {
         self.conn.execute(
             "DELETE FROM overlay_chunks_fts WHERE rowid IN (
@@ -1317,16 +1354,12 @@ impl Store {
     }
 }
 
-/// Full-text search result with chunk id and relevance rank.
 #[derive(Debug, Clone)]
 pub struct TextSearchResult {
-    /// Chunk id (matches the SQLite chunks.id).
     pub chunk_id: i64,
-    /// FTS5 rank score (lower is more relevant).
     pub rank: f64,
 }
 
-/// Chunk metadata returned from search results.
 #[derive(Debug, Clone)]
 pub struct ChunkInfo {
     pub file_path: String,
@@ -1340,7 +1373,6 @@ pub struct ChunkInfo {
     pub is_export: bool,
 }
 
-/// Baseline manifest metadata persisted locally.
 #[derive(Debug, Clone)]
 pub struct BaselineManifestRecord {
     pub snapshot_id: String,
@@ -1349,7 +1381,6 @@ pub struct BaselineManifestRecord {
     pub fetched_at: String,
 }
 
-/// Cached file fingerprint from a previous overlay scan.
 #[derive(Debug, Clone)]
 pub struct PersistedFingerprint {
     pub file_size: u64,
@@ -1450,10 +1481,8 @@ mod tests {
             .reindex_file("path/to/module.bsl", hash.as_bytes(), &[sample_chunk("Метод")], None)
             .unwrap();
 
-        // No embeddings stored, so nothing loaded.
         assert_eq!(store.chunk_count().unwrap(), 1);
 
-        // Get chunk id via a direct query.
         let chunk_id: i64 =
             store.conn.query_row("SELECT id FROM chunks LIMIT 1", [], |r| r.get(0)).unwrap();
 
@@ -1530,7 +1559,6 @@ mod tests {
 
         store.reindex_file("test.bsl", hash2.as_bytes(), &[sample_chunk("Новая")], None).unwrap();
 
-        // Old name gone, new name found.
         assert_eq!(store.text_search("Старая", 10, None).unwrap().len(), 0);
         assert_eq!(store.text_search("Новая", 10, None).unwrap().len(), 1);
     }
@@ -1575,10 +1603,6 @@ mod tests {
         assert_eq!(platform_docs.len(), 1);
         assert_eq!(platform_docs[0].collection, "platform");
     }
-
-    // -----------------------------------------------------------------------
-    // Overlay-only store tests
-    // -----------------------------------------------------------------------
 
     #[test]
     fn baseline_manifest_roundtrip() {
@@ -1664,11 +1688,9 @@ mod tests {
         assert_eq!(store.overlay_file_count("code").unwrap(), 1);
         assert_eq!(store.overlay_chunk_count("code").unwrap(), 1);
 
-        // FTS search should find the overlay chunk.
         let results = store.overlay_text_search("OverlayProc", 10, Some("code")).unwrap();
         assert_eq!(results.len(), 1);
 
-        // Remove the overlay file.
         store.remove_overlay_file("src/Overlay.bsl").unwrap();
         assert_eq!(store.overlay_file_count("code").unwrap(), 0);
         assert_eq!(store.overlay_chunk_count("code").unwrap(), 0);
@@ -1714,5 +1736,111 @@ mod tests {
         let loaded = store.load_overlay_embeddings(4).unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].1, embedding);
+    }
+
+    #[test]
+    fn reindex_persists_and_loads_graph_context() {
+        let mut store = Store::in_memory().unwrap();
+        store
+            .reindex_file_with_context(
+                "A.bsl",
+                b"h",
+                &[sample_chunk("Делать")],
+                None,
+                Some(&[Some("Dispatch: server | сервер\nCalls: Иная\n".to_owned())]),
+            )
+            .unwrap();
+        let docs = store.load_indexed_documents(Some("code")).unwrap();
+        assert_eq!(docs.len(), 1);
+        assert_eq!(
+            docs[0].graph_context.as_deref(),
+            Some("Dispatch: server | сервер\nCalls: Иная\n")
+        );
+
+        // A chunk indexed without context round-trips as `None`.
+        store.reindex_file("B.bsl", b"h2", &[sample_chunk("Плейн")], None).unwrap();
+        let b = store
+            .load_indexed_documents(Some("code"))
+            .unwrap()
+            .into_iter()
+            .find(|d| d.path == "B.bsl")
+            .unwrap();
+        assert_eq!(b.graph_context, None);
+    }
+
+    #[test]
+    fn embed_text_version_bump_clears_file_hashes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        {
+            let mut store = Store::open(&path).unwrap();
+            store.reindex_file("A.bsl", b"realhash", &[sample_chunk("Делать")], None).unwrap();
+            assert_eq!(store.file_hash("A.bsl").unwrap().unwrap(), b"realhash");
+            // Simulate a database written by an older embed-text format.
+            store.conn.pragma_update(None, "user_version", 0i64).unwrap();
+        }
+        // Reopening with a version mismatch clears the hash, so the next index
+        // re-embeds the file under the current format instead of keeping a stale vector.
+        let store = Store::open(&path).unwrap();
+        assert!(
+            store.file_hash("A.bsl").unwrap().unwrap().is_empty(),
+            "file hash cleared to force re-embed"
+        );
+
+        // A second open at the same version is a no-op (does not re-clear).
+        let store = Store::open(&path).unwrap();
+        assert!(store.file_hash("A.bsl").unwrap().unwrap().is_empty());
+    }
+
+    #[test]
+    fn open_stamps_current_schema_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        let store = Store::open(&path).unwrap();
+        let stored = Store::stored_schema_version(&store.conn).unwrap();
+        assert_eq!(stored, Some(SCHEMA_VERSION));
+    }
+
+    #[test]
+    fn schema_version_bump_wipes_derived_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        {
+            let mut store = Store::open(&path).unwrap();
+            store.reindex_file("A.bsl", b"realhash", &[sample_chunk("Делать")], None).unwrap();
+            assert_eq!(store.file_count().unwrap(), 1);
+            assert_eq!(store.chunk_count().unwrap(), 1);
+            // Simulate a database written under an older structural schema.
+            store
+                .conn
+                .execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?1)",
+                    params![(SCHEMA_VERSION - 1).to_string()],
+                )
+                .unwrap();
+        }
+        // Reopening with a structural-version mismatch wipes the cache and rebuilds the
+        // current schema; the rows are gone and the version is stamped current.
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.file_count().unwrap(), 0);
+        assert_eq!(store.chunk_count().unwrap(), 0);
+        assert_eq!(Store::stored_schema_version(&store.conn).unwrap(), Some(SCHEMA_VERSION));
+    }
+
+    #[test]
+    fn pre_versioning_database_is_kept_and_stamped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        {
+            let mut store = Store::open(&path).unwrap();
+            store.reindex_file("A.bsl", b"realhash", &[sample_chunk("Делать")], None).unwrap();
+            // Simulate a database created before schema versioning existed.
+            store.conn.execute("DELETE FROM meta WHERE key = 'schema_version'", []).unwrap();
+        }
+        // A missing version row is treated as already-current: the data survives and the
+        // version is stamped, so existing workspaces are not force-reindexed on upgrade.
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.file_count().unwrap(), 1);
+        assert_eq!(Store::stored_schema_version(&store.conn).unwrap(), Some(SCHEMA_VERSION));
     }
 }

@@ -1,5 +1,3 @@
-//! Reports function parameters used as output parameters.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -19,7 +17,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates a diagnostic from the HIR lowering result.
 pub fn from_hir(name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     let code = DiagnosticCode::FunctionOutParameter;
 
@@ -68,12 +65,11 @@ mod tests {
             .filter(|d| d.code == DiagnosticCode::FunctionOutParameter)
             .collect();
 
-        // Only function Б modifies parameter А (by-reference); procedure А is allowed
         expect![[r#"
             FunctionOutParameter @ 6:5..6:6
               message: Функция изменяет параметр 'а'. Используйте возвращаемое значение вместо выходного параметра
               severity: Warning"#]].assert_eq(&format_diags(code, &func_diags));
-        assert!(func_diags[0].message.contains("а")); // snapshot-skip: message-substring assertion intentionally retained.
+        assert!(func_diags[0].message.contains("а"));
     }
 
     #[test]

@@ -1,5 +1,3 @@
-//! Reports method parameters that are declared but never used in the method body.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::utils::platform_event_handlers::is_platform_event_handler;
@@ -47,7 +45,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let module_bodies = ctx.module_bodies();
     let item_tree = ctx.item_tree();
 
-    // Collect handler names with fixed signatures defined by the platform
     let metadata = ctx.module_metadata();
     let mut fixed_signature_handlers: FxHashSet<String> = FxHashSet::default();
     if let Some(ref form) = metadata.form {
@@ -66,17 +63,14 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         }
     }
 
-    // Collect callback method names from NotifyDescription registrations (DRY: reuse call_graph)
     let module_id = hir::ModuleId::new(ctx.file_id);
     let summary = ctx.call_summary(module_id);
     for reg in &summary.notify_regs {
         if reg.target_module.is_none() {
-            // Only suppress for same-module callbacks (ЭтотОбъект/ThisObject)
             fixed_signature_handlers.insert(reg.callback_name.as_str().to_lowercase());
         }
     }
 
-    // Collect attachable method names (prefix-based) into fixed_signature_handlers
     for (local_id, _) in module_bodies.iter_bodies() {
         if let Some(name) = get_method_name(&item_tree, local_id) {
             let lower = name.to_lowercase();
@@ -136,7 +130,6 @@ fn check_method(
         return diagnostics;
     }
 
-    // Form/HTTP/attachable/NotifyDescription handlers have fixed signatures
     if method_name.is_some_and(|name| fixed_signature_handlers.contains(&name.to_lowercase())) {
         return diagnostics;
     }
@@ -370,9 +363,7 @@ mod tests {
         let unused: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedParameters).collect();
 
-        // СписокПриАктивизацииСтроки is a form element event handler — its parameter
-        // signature is fixed by the platform, so unused params should not be flagged
-        assert_eq!(unused.len(), 0); // snapshot-skip: metadata-backed handler assertion intentionally retained.
+        assert_eq!(unused.len(), 0);
     }
 
     #[test]
@@ -420,15 +411,11 @@ mod tests {
         let unused: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedParameters).collect();
 
-        // ЗапросPOST is an HTTP service handler — its parameter
-        // signature is fixed by the platform, so unused params should not be flagged
-        assert_eq!(unused.len(), 0); // snapshot-skip: metadata-backed handler assertion intentionally retained.
+        assert_eq!(unused.len(), 0);
     }
 
     #[test]
     fn test_platform_handler_after_var_def() {
-        // Regression: Перем before procedure shifts item_tree indices
-        // get_method_name must still correctly resolve the method name
         let code = r#"Перем МояПеременная;
 
 Процедура ПриЗаписи(Отказ)
@@ -614,6 +601,6 @@ EndProcedure
         let unused: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedParameters).collect();
 
-        assert_eq!(unused.len(), 0); // snapshot-skip: custom configuration assertion intentionally retained.
+        assert_eq!(unused.len(), 0);
     }
 }

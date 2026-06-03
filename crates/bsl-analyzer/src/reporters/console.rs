@@ -1,10 +1,7 @@
-//! Console reporter for analysis results.
-
 use std::path::Path;
 
 use super::{AnalysisResults, Reporter};
 
-/// Console reporter that prints results to stdout.
 pub struct ConsoleReporter;
 
 impl Reporter for ConsoleReporter {
@@ -20,7 +17,6 @@ impl Reporter for ConsoleReporter {
         println!("Time elapsed: {:.2}s", results.elapsed_secs);
         println!("Speed: {:.0} files/sec", results.files_analyzed as f64 / results.elapsed_secs);
 
-        // Show files with most issues (top 10)
         if !results.diagnostics.is_empty() {
             println!("\nFiles with most issues:");
             let mut sorted = results.diagnostics.clone();

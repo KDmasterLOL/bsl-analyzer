@@ -1,28 +1,3 @@
-//! Clean-room acceptance tests for the Slice 2 structural keyword
-//! vocabulary of `SdblTokenKind`.
-//!
-//! Sources:
-//! - ITS query-language structure —
-//!   <https://its.1c.ru/db/pubqlang/content/10/hdoc>
-//!   (SELECT / FROM / WHERE / GROUP / ORDER / HAVING / TOTALS /
-//!   UNION / ALL / DISTINCT / TOP / INTO clause starters, join
-//!   clause, field aliasing, predicates, CASE expression).
-//! - ITS lexical elements —
-//!   <https://its.1c.ru/db/pubqlang/content/12/hdoc>
-//!   (logical operators, boolean literals, NULL literal, identifier
-//!   longest-match rule).
-//!
-//! Per-test docstring shorthand: `ITS pubqlang/N` refers to the
-//! documentation sub-tree rooted at
-//! `https://its.1c.ru/db/pubqlang/content/N/hdoc` for the given `N`.
-//!
-//! These tests were authored against the specifications above, not
-//! against the existing `tokenize_sdbl` output. The one documented
-//! pre-refactor behaviour preserved here is that `ON`, `BY`, and `ПО`
-//! all lex to a single `KwOnOrBy` kind — see
-//! `docs/legal/sdbl-clean-room-slice2.md` § Preserved pre-refactor
-//! behaviours for rationale and the Slice 9 / Slice 11 split plan.
-
 use lexer::sdbl::{tokenize_sdbl, SdblToken, SdblTokenKind};
 
 fn significant(tokens: &[SdblToken]) -> Vec<(SdblTokenKind, String)> {
@@ -42,12 +17,6 @@ fn single_kind(src: &str) -> SdblTokenKind {
     toks[0].kind
 }
 
-// ---------------------------------------------------------------------------
-// Bilingual acceptance — clause starters
-// ---------------------------------------------------------------------------
-
-/// ITS pubqlang/10 — SELECT clause: the clause starters accept a
-/// Russian and an English spelling, both case-insensitive.
 #[test]
 fn clause_starters_bilingual() {
     let pairs: &[(&str, &str, SdblTokenKind)] = &[
@@ -70,12 +39,6 @@ fn clause_starters_bilingual() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Bilingual acceptance — join family
-// ---------------------------------------------------------------------------
-
-/// ITS pubqlang/10 — join clause: each join modifier and the JOIN
-/// keyword accept a Russian and an English spelling.
 #[test]
 fn join_family_bilingual() {
     let pairs: &[(&str, &str, SdblTokenKind)] = &[
@@ -92,12 +55,6 @@ fn join_family_bilingual() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Bilingual acceptance — aliasing and predicates
-// ---------------------------------------------------------------------------
-
-/// ITS pubqlang/10 — field aliasing and predicates: each accepts a
-/// Russian and an English spelling.
 #[test]
 fn aliasing_and_predicates_bilingual() {
     let pairs: &[(&str, &str, SdblTokenKind)] = &[
@@ -113,12 +70,6 @@ fn aliasing_and_predicates_bilingual() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Bilingual acceptance — CASE family
-// ---------------------------------------------------------------------------
-
-/// ITS pubqlang/10 — conditional expression: CASE / WHEN / THEN /
-/// ELSE / END each accept a Russian and an English spelling.
 #[test]
 fn case_family_bilingual() {
     let pairs: &[(&str, &str, SdblTokenKind)] = &[
@@ -134,12 +85,6 @@ fn case_family_bilingual() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Bilingual acceptance — logical operators and literals
-// ---------------------------------------------------------------------------
-
-/// ITS pubqlang/12 — logical operators: AND / OR / NOT each accept a
-/// Russian and an English spelling.
 #[test]
 fn logical_operators_bilingual() {
     assert_eq!(single_kind("И"), SdblTokenKind::OpAnd);
@@ -150,9 +95,6 @@ fn logical_operators_bilingual() {
     assert_eq!(single_kind("NOT"), SdblTokenKind::OpNot);
 }
 
-/// ITS pubqlang/12 — boolean literals: TRUE and FALSE each accept a
-/// Russian and an English spelling. NULL is English-only by the
-/// grammar.
 #[test]
 fn boolean_and_null_literals() {
     assert_eq!(single_kind("ИСТИНА"), SdblTokenKind::LitTrue);
@@ -162,13 +104,6 @@ fn boolean_and_null_literals() {
     assert_eq!(single_kind("NULL"), SdblTokenKind::LitNull);
 }
 
-// ---------------------------------------------------------------------------
-// Case-insensitivity
-// ---------------------------------------------------------------------------
-
-/// ITS pubqlang/12 — lexical elements: keyword matching is
-/// case-insensitive. Every case-permutation of a keyword lexes to the
-/// same kind with its original text preserved.
 #[test]
 fn case_insensitivity_english() {
     for s in ["SELECT", "Select", "select", "sElEcT"] {
@@ -179,8 +114,6 @@ fn case_insensitivity_english() {
     }
 }
 
-/// ITS pubqlang/12 — lexical elements: case-insensitivity applies to
-/// Russian keyword spellings too.
 #[test]
 fn case_insensitivity_russian() {
     for s in ["ВЫБРАТЬ", "Выбрать", "выбрать", "вЫбРаТь"] {
@@ -191,8 +124,6 @@ fn case_insensitivity_russian() {
     }
 }
 
-/// ITS pubqlang/10 — join clause: case-insensitivity across the join
-/// family in a realistic clause.
 #[test]
 fn case_insensitivity_join_family() {
     assert_eq!(single_kind("Left"), SdblTokenKind::KwLeft);
@@ -201,8 +132,6 @@ fn case_insensitivity_join_family() {
     assert_eq!(single_kind("OUTER"), SdblTokenKind::KwOuter);
 }
 
-/// ITS pubqlang/10 — conditional expression: case-insensitivity of
-/// the CASE family.
 #[test]
 fn case_insensitivity_case_family() {
     assert_eq!(single_kind("Case"), SdblTokenKind::KwCase);
@@ -212,8 +141,6 @@ fn case_insensitivity_case_family() {
     assert_eq!(single_kind("End"), SdblTokenKind::KwEnd);
 }
 
-/// ITS pubqlang/10 — predicates: case-insensitivity across the
-/// predicate family.
 #[test]
 fn case_insensitivity_predicates() {
     assert_eq!(single_kind("Between"), SdblTokenKind::KwBetween);
@@ -221,14 +148,6 @@ fn case_insensitivity_predicates() {
     assert_eq!(single_kind("is"), SdblTokenKind::KwIs);
 }
 
-// ---------------------------------------------------------------------------
-// Non-overlap with Ident (longest-match)
-// ---------------------------------------------------------------------------
-
-/// ITS pubqlang/12 — identifier rule: a Unicode letter followed by
-/// letters, digits, or underscores is a single identifier. Logos
-/// longest-match therefore consumes a keyword-prefixed identifier as
-/// one `Ident`, not as keyword plus suffix.
 #[test]
 fn keyword_prefix_identifiers_lex_as_ident() {
     for s in ["SELECTED", "FROMAGE", "WHEREVER", "ANDROID", "UNIONIZED", "BETWEEN_INDEX"] {
@@ -239,9 +158,6 @@ fn keyword_prefix_identifiers_lex_as_ident() {
     }
 }
 
-/// ITS pubqlang/12 — identifier rule applies to Cyrillic leading
-/// letters too: `ИСТИНАLIKE` is a single identifier spanning Russian
-/// and Latin letters, not `LitTrue` + suffix.
 #[test]
 fn keyword_prefix_identifiers_lex_as_ident_cyrillic() {
     for s in ["ИСТИНАLIKE", "ВЫБРАТЬ_КОЛОНКА", "СОЕДИНЕНИЕ1С"] {
@@ -252,13 +168,6 @@ fn keyword_prefix_identifiers_lex_as_ident_cyrillic() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Longest-match vs Ident priority
-// ---------------------------------------------------------------------------
-
-/// ITS pubqlang/12 — identifier rule: a keyword followed immediately
-/// by a digit becomes an identifier because the digit extends the
-/// identifier run.
 #[test]
 fn keyword_plus_digit_is_ident() {
     for s in ["SELECT1", "FROM2", "WHERE3", "CASE4"] {
@@ -269,8 +178,6 @@ fn keyword_plus_digit_is_ident() {
     }
 }
 
-/// ITS pubqlang/12 — identifier rule: two keywords fused without a
-/// separator are a single identifier, not two keywords.
 #[test]
 fn fused_keywords_lex_as_ident() {
     for s in ["CASEWHEN", "SELECTFROM", "GROUPBY"] {
@@ -280,12 +187,6 @@ fn fused_keywords_lex_as_ident() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Adjacency — keyword followed immediately by a non-identifier char
-// ---------------------------------------------------------------------------
-
-/// ITS pubqlang/10 — SELECT clause: `(` after SELECT separates from
-/// the keyword without whitespace.
 #[test]
 fn select_adjacent_lparen() {
     let toks = significant(&tokenize_sdbl("SELECT("));
@@ -298,8 +199,6 @@ fn select_adjacent_lparen() {
     );
 }
 
-/// ITS pubqlang/10 — parameters and SELECT clause: `&Parameter` after
-/// WHERE separates into keyword and parameter reference.
 #[test]
 fn where_adjacent_parameter() {
     let toks = significant(&tokenize_sdbl("WHERE&P"));
@@ -312,8 +211,6 @@ fn where_adjacent_parameter() {
     );
 }
 
-/// ITS pubqlang/12 — separators: a comma immediately after a boolean
-/// literal separates it from the next token without whitespace.
 #[test]
 fn true_adjacent_comma() {
     let toks = significant(&tokenize_sdbl("TRUE,FALSE"));
@@ -327,8 +224,6 @@ fn true_adjacent_comma() {
     );
 }
 
-/// ITS pubqlang/10 — predicates: `IS NULL` in direct adjacency to
-/// parentheses splits into KwIs / Whitespace / LitNull.
 #[test]
 fn is_null_in_where_adjacency() {
     let toks = significant(&tokenize_sdbl("(X IS NULL)"));
@@ -344,15 +239,6 @@ fn is_null_in_where_adjacency() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// KwOnOrBy — preserved pre-refactor bundling
-// ---------------------------------------------------------------------------
-
-/// ITS pubqlang/10 — join clause (ON) and grouping clause (BY / ПО):
-/// preserved pre-refactor behaviour is that ON, BY, and ПО all lex to
-/// the same `KwOnOrBy` kind; the parser disambiguates by context.
-/// See `docs/legal/sdbl-clean-room-slice2.md` § Preserved pre-refactor
-/// behaviours for the rationale and the Slice 9 / Slice 11 split plan.
 #[test]
 fn on_by_po_share_kwonorby() {
     assert_eq!(single_kind("ON"), SdblTokenKind::KwOnOrBy);
@@ -363,9 +249,6 @@ fn on_by_po_share_kwonorby() {
     assert_eq!(single_kind("по"), SdblTokenKind::KwOnOrBy);
 }
 
-/// ITS pubqlang/10 — text preservation: even though ON / BY / ПО all
-/// resolve to one kind, the original text is preserved unchanged so
-/// the parser can distinguish them when needed.
 #[test]
 fn kwonorby_preserves_original_text() {
     for s in ["ON", "BY", "ПО", "on", "bY", "По"] {
@@ -376,14 +259,6 @@ fn kwonorby_preserves_original_text() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Text preservation (converter-facing invariant)
-// ---------------------------------------------------------------------------
-
-/// ITS pubqlang/12 — lexical elements: every keyword token preserves
-/// its original input text. The downstream converter maps Slice 2
-/// `Kw*` tokens to `TokenKind::Ident` and re-checks the text, so text
-/// fidelity is a load-bearing invariant beyond mere display.
 #[test]
 fn keyword_text_preserved_verbatim() {
     let src = "Выбрать ПЕРВЫЕ 10 a ГДЕ b МЕЖДУ 1 И 10";
@@ -403,12 +278,6 @@ fn keyword_text_preserved_verbatim() {
     assert_eq!(toks, expected.into_iter().map(|(k, t)| (k, t.to_string())).collect::<Vec<_>>());
 }
 
-// ---------------------------------------------------------------------------
-// Representative clause fragments — integration-shaped sanity
-// ---------------------------------------------------------------------------
-
-/// ITS pubqlang/10 — SELECT clause: DISTINCT and TOP modifiers appear
-/// between SELECT and the field list.
 #[test]
 fn select_distinct_top_sequence() {
     let toks: Vec<_> = significant(&tokenize_sdbl("SELECT DISTINCT TOP 5 A"))
@@ -427,8 +296,6 @@ fn select_distinct_top_sequence() {
     );
 }
 
-/// ITS pubqlang/10 — join clause: LEFT OUTER JOIN ... ON ... emits
-/// the expected token sequence with KwOnOrBy on the ON keyword.
 #[test]
 fn left_outer_join_on_sequence() {
     let toks: Vec<_> = significant(&tokenize_sdbl("LEFT OUTER JOIN T ON A = B"))
@@ -450,7 +317,6 @@ fn left_outer_join_on_sequence() {
     );
 }
 
-/// ITS pubqlang/10 — SELECT clause: UNION ALL combines two SELECTs.
 #[test]
 fn union_all_sequence() {
     let toks: Vec<_> = significant(&tokenize_sdbl("SELECT 1 UNION ALL SELECT 2"))
@@ -470,8 +336,6 @@ fn union_all_sequence() {
     );
 }
 
-/// ITS pubqlang/10 — conditional expression: a full CASE / WHEN /
-/// THEN / ELSE / END expression emits the expected keyword sequence.
 #[test]
 fn case_when_then_else_end_sequence() {
     let toks: Vec<_> = significant(&tokenize_sdbl("CASE WHEN X > 0 THEN 1 ELSE 0 END"))
@@ -495,9 +359,6 @@ fn case_when_then_else_end_sequence() {
     );
 }
 
-/// ITS pubqlang/10 — field aliasing: `AS alias` in select-list and
-/// FROM-source position emits KwAs in both slots. Disambiguation
-/// (alias vs CAST target) is a parser-level concern.
 #[test]
 fn as_in_select_and_from_positions() {
     let src = "SELECT A AS B FROM T AS X";
@@ -517,8 +378,6 @@ fn as_in_select_and_from_positions() {
     );
 }
 
-/// ITS pubqlang/10 — predicates: IN with a parenthesised parameter
-/// list emits KwIn plus the parameter.
 #[test]
 fn in_predicate_with_parameter_list() {
     let toks: Vec<_> =
@@ -536,8 +395,6 @@ fn in_predicate_with_parameter_list() {
     );
 }
 
-/// ITS pubqlang/10 — predicates: BETWEEN A AND B emits KwBetween plus
-/// OpAnd as the range delimiter.
 #[test]
 fn between_and_predicate() {
     let toks: Vec<_> =
@@ -554,8 +411,6 @@ fn between_and_predicate() {
     );
 }
 
-/// ITS pubqlang/10 — predicates: LIKE with a string pattern emits
-/// KwLike between the column and the pattern literal.
 #[test]
 fn like_string_pattern() {
     let toks: Vec<_> = tokenize_sdbl("N LIKE \"%x%\"")
@@ -567,124 +422,66 @@ fn like_string_pattern() {
     assert!(matches!(toks[0], SdblTokenKind::Ident));
 }
 
-// ---------------------------------------------------------------------------
-// Slice 2-addendum Bucket-A — RU spelling pins for clause keyword leftovers
-// ---------------------------------------------------------------------------
-//
-// Bucket-A regression-gates pinning the current Russian-spelling lexer
-// behaviour for the 13 Slice 2-addendum variants whose RU spelling has
-// no other test or corpus coverage today (per
-// `docs/legal/sdbl-clean-room-slice2-addendum.md` § Pre-C0b corpus
-// coverage audit). The Slice 2-addendum C2 commit moves these regex
-// declarations under a clean-room banner; these tests ensure the
-// rewrite preserves byte-identical matching for the canonical RU
-// spelling. Per-variant Tier A1 sources are listed in the addendum
-// attestation § Per-variant tier source map.
-//
-// Note on KwPeriods: the canonical RU spelling per v8327doc Глава 8 is
-// `ПЕРИОДАМИ` (instrumental case), not `ПЕРИОДЫ` (nominative). The
-// pre-C2 regex matches `ПЕРИОДЫ`; the C2 fix flips it to `ПЕРИОДАМИ`.
-// No Bucket-A pin is added here for KwPeriods — the regression gates
-// for the canonical / English / legacy-misspelling-now-Ident behaviour
-// land at C2 in the new acceptance file
-// `sdbl_slice2_addendum_clause_keywords.rs`.
-
-/// Slice 2-addendum Bucket-A — `ВОЗР` lexes as `KwAsc`. Source: ITS
-/// pubqlang/16 § Сортировка результата запроса.
 #[test]
 fn slice2_addendum_kw_asc_russian() {
     assert_eq!(single_kind("ВОЗР"), SdblTokenKind::KwAsc);
 }
 
-/// Slice 2-addendum Bucket-A — `УБЫВ` lexes as `KwDesc`. Source: ITS
-/// pubqlang/16 § Сортировка результата запроса.
 #[test]
 fn slice2_addendum_kw_desc_russian() {
     assert_eq!(single_kind("УБЫВ"), SdblTokenKind::KwDesc);
 }
 
-/// Slice 2-addendum Bucket-A — `ИЕРАРХИЯ` lexes as `KwHierarchy`.
-/// Source: ITS pubqlang/27 § Иерархическая упорядоченная выборка
-/// (ORDER BY HIERARCHY).
 #[test]
 fn slice2_addendum_kw_hierarchy_russian() {
     assert_eq!(single_kind("ИЕРАРХИЯ"), SdblTokenKind::KwHierarchy);
 }
 
-/// Slice 2-addendum Bucket-A — `РАЗРЕШЕННЫЕ` lexes as `KwAllowed`.
-/// Source: v8327doc Глава 8 § <Описание запроса> first SELECT-prefix
-/// slot.
 #[test]
 fn slice2_addendum_kw_allowed_russian() {
     assert_eq!(single_kind("РАЗРЕШЕННЫЕ"), SdblTokenKind::KwAllowed);
 }
 
-/// Slice 2-addendum Bucket-A — `ДЛЯ` lexes as `KwFor`. Source:
-/// v8327doc Глава 8 canonical EBNF `[ДЛЯ ИЗМЕНЕНИЯ ...]`.
 #[test]
 fn slice2_addendum_kw_for_russian() {
     assert_eq!(single_kind("ДЛЯ"), SdblTokenKind::KwFor);
 }
 
-/// Slice 2-addendum Bucket-A — `ИЗМЕНЕНИЯ` lexes as `KwUpdate`.
-/// Source: v8327doc Глава 8 canonical EBNF `[ДЛЯ ИЗМЕНЕНИЯ ...]`.
 #[test]
 fn slice2_addendum_kw_update_russian() {
     assert_eq!(single_kind("ИЗМЕНЕНИЯ"), SdblTokenKind::KwUpdate);
 }
 
-/// Slice 2-addendum Bucket-A — `ИНДЕКСИРОВАТЬ` lexes as `KwIndex`.
-/// Source: v8327doc Глава 8 canonical EBNF
-/// `[ИНДЕКСИРОВАТЬ ПО [НАБОРАМ] <Список полей>]`.
 #[test]
 fn slice2_addendum_kw_index_russian() {
     assert_eq!(single_kind("ИНДЕКСИРОВАТЬ"), SdblTokenKind::KwIndex);
 }
 
-/// Slice 2-addendum Bucket-A — `ТОЛЬКО` lexes as `KwOnly`. Source:
-/// v8327doc Глава 8 canonical EBNF `[[ТОЛЬКО] ИЕРАРХИЯ]` in TOTALS BY
-/// group spec.
 #[test]
 fn slice2_addendum_kw_only_russian() {
     assert_eq!(single_kind("ТОЛЬКО"), SdblTokenKind::KwOnly);
 }
 
-/// Slice 2-addendum Bucket-A — `СПЕЦСИМВОЛ` lexes as `KwEscape`.
-/// Source: v8327doc Глава 8 canonical EBNF
-/// `[СПЕЦСИМВОЛ <Литерал типа СТРОКА>]` in LIKE slot.
 #[test]
 fn slice2_addendum_kw_escape_russian() {
     assert_eq!(single_kind("СПЕЦСИМВОЛ"), SdblTokenKind::KwEscape);
 }
 
-/// Slice 2-addendum Bucket-A — `ВЫРАЗИТЬ` lexes as `KwCast`. Source:
-/// v8327doc Глава 8 canonical EBNF
-/// `ВЫРАЗИТЬ ( <Выражение> КАК <Тип значения> )`.
 #[test]
 fn slice2_addendum_kw_cast_russian() {
     assert_eq!(single_kind("ВЫРАЗИТЬ"), SdblTokenKind::KwCast);
 }
 
-/// Slice 2-addendum Bucket-A — `ССЫЛКА` lexes as `KwRefs`. Source:
-/// v8327doc Глава 8 canonical EBNF
-/// `<Выражение> ССЫЛКА <Имя таблицы>` plus pubqlang/40 canonical
-/// example.
 #[test]
 fn slice2_addendum_kw_refs_russian() {
     assert_eq!(single_kind("ССЫЛКА"), SdblTokenKind::KwRefs);
 }
 
-/// Slice 2-addendum Bucket-A — `ТИП` lexes as `KwType`. Source:
-/// v8327doc Глава 8 canonical EBNF `ТИП(<Имя типа>)`.
 #[test]
 fn slice2_addendum_kw_type_russian() {
     assert_eq!(single_kind("ТИП"), SdblTokenKind::KwType);
 }
 
-/// Slice 2-addendum Bucket-A — `ЗНАЧЕНИЕ` lexes as `KwValue`. Source:
-/// pubqlang/31 canonical example
-/// `ЗНАЧЕНИЕ(Справочник.Товары.ПустаяСсылка)` plus prose «литерал
-/// функционального типа ЗНАЧЕНИЕ()».
 #[test]
 fn slice2_addendum_kw_value_russian() {
     assert_eq!(single_kind("ЗНАЧЕНИЕ"), SdblTokenKind::KwValue);

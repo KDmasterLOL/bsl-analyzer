@@ -1,5 +1,3 @@
-//! Reports functions that have no `Возврат` / `Return` at all.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -19,7 +17,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates a diagnostic from the HIR lowering result.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     crate::simple_hir_diagnostic(
         DiagnosticCode::FunctionShouldHaveReturn,
@@ -51,8 +48,6 @@ mod tests {
               message: Функция должна содержать хотя бы один оператор Возврат
               severity: Major"#]]
         .assert_eq(&format_diags(code, &return_diags));
-
-        // Check position: function name "БезВозврата" on line 0
     }
 
     #[test]
@@ -156,17 +151,8 @@ EndFunction"#;
         .assert_eq(&format_diags(code, &return_diags));
     }
 
-    /// Tests fixture cases.
-    /// Asserts: one FunctionShouldHaveReturn diagnostic with range (line 0, cols 8..=26).
     #[test]
     fn test_fixture_only_function_without_return_triggers() {
-        // Mirrors FunctionShouldHaveReturnDiagnostic.bsl:
-        // - ФункцияБезВозврата: no return → diagnostic
-        // - ФункцияСВозвратом: has return → OK
-        // - Procedures: never require return → OK
-        // - Function F with ForEach + Return: OK
-        // - СошибкойРазбора with parse error + Возврат: OK
-        // - СошибкойРазбора2 with parse error in preprocessor, no return: no diagnostic expected
         let code = r#"Функция ФункцияБезВозврата()
     ПолезныйКод = 0;
 КонецФункции
@@ -190,7 +176,6 @@ EndFunction"#;
             .filter(|d| d.code == DiagnosticCode::FunctionShouldHaveReturn)
             .collect();
 
-        // Only ФункцияБезВозврата triggers — hasRange(0, 8, 0, 26)
         expect![[r#"
             FunctionShouldHaveReturn @ 1:9..1:27
               message: Функция должна содержать хотя бы один оператор Возврат

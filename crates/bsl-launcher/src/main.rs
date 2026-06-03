@@ -1,16 +1,3 @@
-//! BSL Analyzer Launcher
-//!
-//! Минимальный бинарник (~1-2 MB) для запуска LSP сервера bsl-analyzer.
-//! Автоматически скачивает, обновляет и верифицирует основное приложение.
-//!
-//! Архитектура:
-//! ```text
-//! bsl-analyzer (launcher) -> скачивает -> bsl-analyzer-app (LSP сервер)
-//!                                              |
-//!                                              v
-//!                                     ~/.bsl-analyzer/bin/
-//! ```
-
 mod cache;
 mod entities;
 mod messages;
@@ -68,16 +55,12 @@ fn main() -> Result<()> {
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
 
-    // Before spawn: install Linux PR_SET_PDEATHSIG via pre_exec.
     parent_death::configure_parent_death(&mut cmd);
 
     let mut child = cmd
         .spawn()
         .with_context(|| format!("Failed to execute bsl-analyzer at {:?}", analyzer_path))?;
 
-    // After spawn: bind to a Windows Job Object. If binding fails we own a
-    // live detached child — the very failure mode this module exists to
-    // prevent — so kill it explicitly before returning the error.
     let _lifecycle = match parent_death::adopt_child(&child) {
         Ok(guard) => guard,
         Err(err) => {

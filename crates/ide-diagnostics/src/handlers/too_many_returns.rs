@@ -1,5 +1,3 @@
-//! Reports methods that contain more return statements than allowed by configuration.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};

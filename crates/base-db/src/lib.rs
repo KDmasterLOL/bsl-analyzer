@@ -1,8 +1,3 @@
-//! Base database for bsl-analyzer.
-//!
-//! This crate provides the foundation for incremental computation using Salsa.
-//! It defines the core database traits and types for managing source files and parsing.
-
 use std::hash::BuildHasherDefault;
 use std::sync::Arc;
 
@@ -23,10 +18,6 @@ pub use input::{
 pub use locale::{Locale, UnknownLocale};
 pub use queries::{method_regions_query, parse_query, resolve_vfs_path_query};
 
-/// The main Salsa database trait for source file operations.
-///
-/// This trait provides access to file contents and source root information.
-/// It uses Salsa for automatic dependency tracking and cache invalidation.
 #[salsa::db]
 pub trait SourceDatabase: salsa::Database {
     fn file_text_input(&self, file_id: FileId) -> FileTextInput;
@@ -41,124 +32,19 @@ pub trait SourceDatabase: salsa::Database {
 
     fn set_source_root(&mut self, source_root_id: SourceRootId, source_root: SourceRoot);
 
-    /// Resolve a VfsPath to FileId within a SourceRoot.
-    ///
-    /// This is a convenience method that wraps resolve_vfs_path_query.
-    /// Used by diagnostics to resolve metadata URIs to FileIds.
     fn resolve_vfs_path(&self, source_root_id: SourceRootId, vfs_path: &VfsPath) -> Option<FileId>;
 }
 
-/// Base-level queries for BSL parsing and region extraction.
-///
-/// # Query Group Organization
-///
-/// This trait defines the foundation layer of BSL analysis queries.
-/// All queries are Salsa-cached and automatically invalidated when file content changes.
-///
-/// **Dependencies:** SourceDatabase (file inputs)
-/// **Used by:** DefDatabase (HIR lowering)
-///
-/// # Query Categories
-///
-/// ## Parsing (Core)
-/// - [`parse`](Self::parse) - BSL file → AST (LRU: 512)
-///
-/// ## Region Analysis
-/// - [`method_regions`](Self::method_regions) - Methods in API regions (LRU: 256)
-///
-/// Module-level regions are exposed via `hir::RegionTree::module_level_regions`.
-///
-/// # Implementation Pattern
-///
-/// Implementations delegate to tracked query functions in the `queries` module:
-///
-/// ```ignore
-/// impl RootQueryDb for MyDatabase {
-///     fn parse(&self, file_id: FileId) -> Parse<SyntaxNode> {
-///         let input = self.file_text_input(file_id);
-///         parse_query(self, input)
-///     }
-/// }
-/// ```
 #[salsa::db]
 pub trait RootQueryDb: SourceDatabase {
-    /// Parse a BSL file into a syntax tree.
-    ///
-    /// This is the foundational query for all BSL analysis. It converts raw BSL source text
-    /// into a concrete syntax tree (CST) using the Rowan library.
-    ///
-    /// # Performance
-    /// - **LRU cache:** 512 files (frequently accessed)
-    /// - **Depends on:** `file_text_input` (Salsa input)
-    /// - **Typical time:** 5-15ms for medium files (after parsing)
-    ///
-    /// # Invalidation
-    /// Automatically invalidated by Salsa when file text changes.
-    ///
-    /// # Implementation
-    /// Should delegate to [`parse_query`].
     fn parse(&self, file_id: FileId) -> syntax::Parse<syntax::SyntaxNode>;
 
-    /// Map method source ranges to their parent API region names.
-    ///
-    /// Returns a HashMap mapping TextRange (of method definitions) to their
-    /// parent API region name (ПрограммныйИнтерфейс, Public, СлужебныйПрограммныйИнтерфейс, Internal).
-    ///
-    /// Only methods inside API regions are included in the map.
-    /// For nested regions, the root (top-level) region name is returned.
-    ///
-    /// # Performance
-    /// - **LRU cache:** 256 files (region analysis is inexpensive)
-    /// - **Depends on:** [`parse`](Self::parse)
-    /// - **Shared usage:** Multiple region-based diagnostics
-    ///
-    /// # Usage Example
-    ///
-    /// ```ignore
-    /// let method_regions = db.method_regions(file_id);
-    /// let item_tree = db.item_tree(file_id);
-    ///
-    /// for (_, proc) in item_tree.procedures() {
-    ///     if let Some(region_name) = method_regions.get(&proc.source_range) {
-    ///         // proc is in an API region named region_name
-    ///     }
-    /// }
-    /// ```
-    ///
-    /// # Implementation
-    /// Should delegate to [`method_regions_query`].
     fn method_regions(
         &self,
         file_id: FileId,
     ) -> Arc<std::collections::HashMap<syntax::TextRange, String>>;
 }
 
-/// Helper structure for managing file state with concurrent access.
-///
-/// Uses DashMap for lock-free concurrent access to Salsa input structs.
-/// `Files` stores Salsa input handles outside Salsa itself.
-///
-/// # Locking invariant (ABBA deadlock prevention)
-///
-/// Setters in this struct MUST NOT hold a DashMap shard guard across a Salsa
-/// setter call. The generated `input.set_<field>(db)` acquires `zalsa_mut()`
-/// internally, which blocks until every live database handle has been
-/// dropped. If a worker thread is blocked acquiring a read-guard on the same
-/// shard (via `file_text()` / `file_source_root()` / `source_root()`) while
-/// the main thread holds the write-guard, the worker cannot release its
-/// database handle and the main thread cannot finish the setter — classic
-/// ABBA.
-///
-/// The fix pattern: look up the existing handle under a short `get()` guard,
-/// copy the Salsa input handle (it is `Copy`), drop the guard, and only then
-/// invoke the Salsa setter. Single-mutator invariant (only the LSP main loop
-/// writes) makes the Vacant/Insert race harmless — `debug_assert!` in the
-/// None branches acts as a tripwire if that invariant is ever violated.
-///
-/// Paired with an early `trigger_cancellation()` at the LSP `process_changes`
-/// entry point (see `AnalysisHost::request_cancellation`) which forces any
-/// long-lived database clones held by background workers to be dropped
-/// before setters run.
 #[derive(Debug, Default, Clone)]
 pub struct Files {
     file_texts: Arc<DashMap<FileId, FileTextInput, BuildHasherDefault<FxHasher>>>,
@@ -171,9 +57,6 @@ impl Files {
         Self::default()
     }
 
-    /// # Panics
-    ///
-    /// Panics if the file has not been set.
     pub fn file_text(&self, file_id: FileId) -> FileTextInput {
         self.file_texts.get(&file_id).map(|entry| *entry.value()).unwrap_or_else(|| {
             tracing::error!(?file_id, "file text not set — this is a programming error, all files must be loaded before queries run");
@@ -181,21 +64,13 @@ impl Files {
         })
     }
 
-    /// Returns None if the file has not been loaded yet.
     pub fn try_file_text(&self, file_id: FileId) -> Option<FileTextInput> {
         self.file_texts.get(&file_id).map(|entry| *entry.value())
     }
 
-    /// Set the text for a file.
-    ///
-    /// This creates or updates a Salsa input. Salsa automatically invalidates
-    /// dependent queries when the text changes.
     pub fn set_file_text(&self, db: &mut dyn SourceDatabase, file_id: FileId, text: &str) {
         use salsa::Setter;
 
-        // Short-lock pattern: look up existing handle under a brief guard,
-        // drop the guard, and only then invoke the Salsa setter. See the
-        // `Files` doc-comment for why this is required.
         let existing = self.file_texts.get(&file_id).map(|e| *e.value());
         match existing {
             Some(input) => {
@@ -212,9 +87,6 @@ impl Files {
         }
     }
 
-    /// Set the text for a file with explicit durability.
-    ///
-    /// This allows setting durability levels for library vs source code.
     pub fn set_file_text_with_durability(
         &self,
         db: &mut dyn SourceDatabase,
@@ -240,18 +112,7 @@ impl Files {
         }
     }
 
-    /// Set the text for a file with automatic durability detection.
-    ///
-    /// Automatically determines durability based on the file's source root:
-    /// - Library files (is_library = true): HIGH durability (rarely change)
-    /// - User code (is_library = false): LOW durability (changes frequently)
-    ///
-    /// This is the recommended method for setting file text in production.
     pub fn set_file_text_smart(&self, db: &mut dyn SourceDatabase, file_id: FileId, text: &str) {
-        // Resolve durability without holding any DashMap guards across the
-        // Salsa setter call below. Salsa input handles are `Copy`, so we
-        // release the shard guards before reading via `source_root_id(db)` /
-        // `root(db)` (those are independent Salsa getters).
         let mapping = self.file_source_roots.get(&file_id).map(|e| *e.value());
         let durability = mapping.and_then(|mapping| {
             let source_root_id = mapping.source_root_id(db);
@@ -278,9 +139,6 @@ impl Files {
         }
     }
 
-    /// # Panics
-    ///
-    /// Panics if the source root has not been set.
     pub fn source_root(&self, source_root_id: SourceRootId) -> SourceRootInput {
         self.source_roots.get(&source_root_id).map(|entry| *entry.value()).unwrap_or_else(|| {
             tracing::error!(?source_root_id, "source root not set — this is a programming error");
@@ -312,9 +170,6 @@ impl Files {
         }
     }
 
-    /// # Panics
-    ///
-    /// Panics if the file source root mapping has not been set.
     pub fn file_source_root(&self, file_id: FileId) -> FileSourceRootInput {
         self.file_source_roots.get(&file_id).map(|entry| *entry.value()).unwrap_or_else(|| {
             tracing::error!(?file_id, "file source root not set — this is a programming error");

@@ -1,27 +1,3 @@
-//! End-to-end regression for Track 1 Step R — `db.configurations`
-//! returns main + CFE in registration order.
-//!
-//! Plan `linear-tumbling-noodle.md` §3.5 requires an integration
-//! test that exercises a multi-config workspace (main project plus
-//! one CFE) against `ConfigsDatabase::configurations`, anchoring
-//! the contract that `hir-def`'s resolver and `hir-ty`'s inference
-//! consume:
-//!
-//! - Main configuration is listed first with `VisibleConfig::name ==
-//!   None`.
-//! - Every registered extension follows in registration order with
-//!   `VisibleConfig::name == Some(<extension-name>)`.
-//! - A CommonModule declared in the CFE only is reachable via the
-//!   CFE's `configuration.find_common_module(name)`, even though
-//!   the main config has no such module.
-//!
-//! Step M's `find_common_module_anywhere` and Step N's resolver-
-//! aware `CommonModuleAssign` already iterate this list under the
-//! hood, but their tests use a single-config setup. This file
-//! pins the multi-config wiring directly so a regression in the
-//! CFE registration path can be caught without going through a
-//! diagnostic-emission detour.
-
 use hir::ConfigsDatabase;
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
@@ -39,10 +15,6 @@ fn extension_common_module_path() -> PathBuf {
     ))
 }
 
-/// Anchor a fictitious BSL file inside the designer's CommonModules
-/// tree so `find_configuration_root` locates the designer fixture's
-/// root and the visible-configurations registry surfaces both
-/// configs.
 fn file_inside_designer() -> PathBuf {
     designer_fixture_path().join("CommonModules/ПервыйОбщийМодуль/Ext/Module.bsl")
 }
@@ -96,10 +68,6 @@ fn cfe_only_common_module_resolves_through_extension_entry() {
 
 #[test]
 fn shared_common_module_lookup_finds_main_independently_of_cfe() {
-    // Designer has `ПервыйОбщийМодуль`; the CFE does not redeclare it.
-    // The main entry must surface it via `find_common_module`, and the
-    // CFE entry must NOT — confirming each `VisibleConfig` carries its
-    // own metadata island (no cross-leakage between main and CFE).
     let (db, file_id) = setup_main_plus_cfe();
     let configs = db.configurations(file_id);
 

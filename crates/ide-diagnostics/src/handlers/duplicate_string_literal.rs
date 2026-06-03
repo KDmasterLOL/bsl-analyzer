@@ -1,49 +1,3 @@
-//! DuplicateStringLiteral diagnostic.
-//!
-//! Detects duplicate string literals that should be replaced with named constants.
-//!
-//! ## Why?
-//! Multiple uses of identical string literals complicate maintenance:
-//! - Risk of missing updates when changing string values
-//! - Can indicate copy-paste errors
-//! - Hard to track all occurrences across the codebase
-//!
-//! ## Bad practice
-//! ```bsl
-//! Процедура ПримерПлохойПрактики()
-//!     Сообщить("Ошибка валидации");
-//!     Если Условие Тогда
-//!         ЗаписьЖурнала("Ошибка валидации");
-//!     КонецЕсли;
-//!     ВызватьИсключение "Ошибка валидации";  // Same string repeated 3 times!
-//! КонецПроцедуры
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! Процедура ПримерХорошейПрактики()
-//!     СообщениеОшибки = "Ошибка валидации";  // Define once
-//!
-//!     Сообщить(СообщениеОшибки);
-//!     Если Условие Тогда
-//!         ЗаписьЖурнала(СообщениеОшибки);
-//!     КонецЕсли;
-//!     ВызватьИсключение СообщениеОшибки;
-//! КонецПроцедуры
-//! ```
-//!
-//! ## Configuration
-//! - **allowedNumberCopies** (default: 2) - Number of occurrences allowed before reporting (≥ 1)
-//! - **analyzeFile** (default: false) - If false: per-method scope; if true: whole-file scope
-//! - **caseSensitive** (default: false) - If false: case-insensitive matching; if true: case matters
-//! - **minTextLength** (default: 5) - Minimum string length INCLUDING quotes (≥ 5)
-//! - **excludedMethods** (default: `["Тип", "Type", "ОписаниеТипов", "TypeDescription"]`) -
-//!   List of method/constructor names whose string arguments are excluded from analysis
-//! - **Enabled by default:** No
-//! - **Severity:** Information (MINOR)
-//! - **Tags:** BADPRACTICE
-//! - **Minutes to fix:** 5
-//!
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -169,7 +123,6 @@ fn collect_strings(
 
     for node in scope.descendants() {
         if node.kind() == SyntaxKind::LITERAL {
-            // Check if this LITERAL contains a STRING token
             let has_string = node.children_with_tokens().any(|elem| {
                 elem.as_token()
                     .map(|t| {
@@ -251,11 +204,6 @@ fn report_duplicates(
     diagnostics
 }
 
-/// Check if a LITERAL node is an argument of a call/constructor from the excluded list.
-///
-/// Supports two CST structures:
-/// - CALL_EXPR { IDENT(node) "Тип", ARG_LIST { ... } }
-/// - NEW_EXPR { KW_NEW, IDENT(token) "ОписаниеТипов", ARG_LIST { ... } }
 fn is_excluded_call_argument(literal: &SyntaxNode, excluded: &[String]) -> bool {
     let call = literal
         .ancestors()
@@ -273,17 +221,12 @@ fn is_excluded_call_argument(literal: &SyntaxNode, excluded: &[String]) -> bool 
     }
 }
 
-/// Extract callee name from CALL_EXPR or NEW_EXPR.
-///
-/// CALL_EXPR has IDENT as a child **node**, NEW_EXPR has IDENT as a child **token**.
 fn extract_callee_name(node: &SyntaxNode) -> Option<String> {
-    // Try child nodes first (CALL_EXPR: IDENT is a node wrapping a token)
     for child in node.children() {
         if child.kind() == SyntaxKind::IDENT {
             return Some(child.text().to_string());
         }
     }
-    // Try child tokens (NEW_EXPR: IDENT is a direct token)
     for elem in node.children_with_tokens() {
         if let Some(token) = elem.as_token() {
             if token.kind() == SyntaxKind::IDENT {
@@ -302,7 +245,6 @@ mod tests {
 
     #[test]
     fn test_duplicate_in_method() {
-        // "Строка2" appears 4 times in one method → 1 diagnostic at first occurrence
         let code = r#"Процедура Метод1()
     Ц = "Строка2";
     Если Ц = "Строка2" Тогда
@@ -316,12 +258,11 @@ mod tests {
             DuplicateStringLiteral @ 2:9..2:18
               message: Необходимо избавиться от многократного использования строкового литерала ""Строка2""
               severity: Information"#]].assert_eq(&format_diags(code, &diagnostics));
-        assert!(diagnostics[0].message.contains("Строка2")); // snapshot-skip: message-substring assertion intentionally retained.
+        assert!(diagnostics[0].message.contains("Строка2"));
     }
 
     #[test]
     fn test_duplicate_case_insensitive_in_method() {
-        // "Строка22"/"строка22"/"СтрОкА22" are 3 occurrences (case-insensitive) → 1 diagnostic
         let code = r#"Процедура Метод2()
     Ц2 = "Строка22";
     Если Ц2 = "Строка22" Тогда
@@ -335,7 +276,7 @@ mod tests {
             DuplicateStringLiteral @ 2:10..2:20
               message: Необходимо избавиться от многократного использования строкового литерала ""Строка22""
               severity: Information"#]].assert_eq(&format_diags(code, &diagnostics));
-        assert!(diagnostics[0].message.contains("Строка22")); // snapshot-skip: message-substring assertion intentionally retained.
+        assert!(diagnostics[0].message.contains("Строка22"));
     }
 
     #[test]
@@ -348,7 +289,6 @@ mod tests {
 КонецПроцедуры
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        // caseSensitive=false (default): groups 3 together (3 > 2) → 1 diagnostic
         expect![[r#"
             DuplicateStringLiteral @ 3:9..3:17
               message: Необходимо избавиться от многократного использования строкового литерала ""Ошибка""
@@ -365,7 +305,6 @@ mod tests {
 КонецПроцедуры
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        // minTextLength=5 (including quotes), "OK" with quotes is 4 chars → filtered
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
@@ -378,7 +317,6 @@ mod tests {
 КонецПроцедуры
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        // allowedNumberCopies=2 (default): 2 occurrences is allowed, need > 2
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
@@ -392,7 +330,6 @@ mod tests {
 КонецПроцедуры
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        // allowedNumberCopies=2: 3 occurrences > 2 → 1 diagnostic
         expect![[r#"
             DuplicateStringLiteral @ 3:9..3:17
               message: Необходимо избавиться от многократного использования строкового литерала ""Текст1""
@@ -437,7 +374,6 @@ mod tests {
 КонецПроцедуры
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        // Only non-Тип() occurrences count: 3 > 2 → 1 diagnostic
         expect![[r#"
             DuplicateStringLiteral @ 5:9..5:34
               message: Необходимо избавиться от многократного использования строкового литерала ""СправочникСсылка.Товары""
@@ -471,8 +407,6 @@ mod tests {
 КонецПроцедуры
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        // analyzeFile=false (default): each method is separate scope
-        // Each method has 2 occurrences, threshold is >2 → 0 diagnostics
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 }

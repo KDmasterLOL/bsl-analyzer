@@ -1,61 +1,3 @@
-//! DuplicateRegion diagnostic.
-//!
-//! Detects duplicate region names at module level.
-//!
-//! ## Why?
-//! Duplicate region names at module level cause confusion and unclear code organization.
-//! Standard region names (Russian/English variants) are treated as duplicates.
-//!
-//! ## Bad practice
-//! ```bsl
-//! #Область ПрограммныйИнтерфейс
-//! // код
-//! #КонецОбласти
-//!
-//! #Region Public  // Duplicate! Same as ПрограммныйИнтерфейс
-//! // код
-//! #EndRegion
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! #Область ПрограммныйИнтерфейс
-//! // код
-//! #КонецОбласти
-//!
-//! #Область СлужебныйПрограммныйИнтерфейс  // Different region
-//! // код
-//! #КонецОбласти
-//! ```
-//!
-//! ## Configuration
-//! - **Enabled by default:** Yes
-//! - **Severity:** Information (INFO)
-//! - **Tags:** STANDARD
-//! - **Minutes to fix:** 1
-//!
-//! ## Standard Region Pairs
-//! The diagnostic recognizes 9 standard BSL region pairs where Russian and English
-//! variants are considered duplicates:
-//! - Public / ПрограммныйИнтерфейс
-//! - Internal / СлужебныйПрограммныйИнтерфейс
-//! - Private / СлужебныеПроцедурыИФункции
-//! - EventHandlers / ОбработчикиСобытий
-//! - FormEventHandlers / ОбработчикиСобытийФормы
-//! - FormHeaderItemsEventHandlers / ОбработчикиСобытийЭлементовШапкиФормы
-//! - FormCommandsEventHandlers / ОбработчикиКомандФормы
-//! - Variables / ОписаниеПеременных
-//! - Initialize / Инициализация
-//!
-//! ## Implementation
-//!
-//! **Uses AST-based checking (not HIR-based) because:**
-//! 1. Requires range of first line (`#Область Name`), not full block or name token only
-//! 2. HIR RegionTree provides: full block range or name token range, but not first line range
-//! 3. Calculating first line from RegionTree would still require parse + manual text processing
-//! 4. No code simplification from HIR migration - same complexity remains
-//! 5. AST approach is optimal: single parse query, minimal dependencies, direct access to needed data
-//!
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -146,7 +88,6 @@ mod tests {
 
     #[test]
     fn test_duplicate_internal_regions() {
-        // СлужебныйПрограммныйИнтерфейс and Internal map to same canonical "Internal"
         let code = r#"#Область СлужебныйПрограммныйИнтерфейс
 // код
 #КонецОбласти
@@ -160,13 +101,11 @@ mod tests {
               message: Нужно удалить дубли раздела "СлужебныйПрограммныйИнтерфейс"
               severity: Hint"#]]
         .assert_eq(&format_diags(code, &diagnostics));
-        // snapshot-skip: message-substring assertion intentionally retained.
         assert!(diagnostics[0].message.contains("СлужебныйПрограммныйИнтерфейс"));
     }
 
     #[test]
     fn test_duplicate_private_regions() {
-        // СлужебныеПроцедурыИФункции and Private map to same canonical "Private"
         let code = r#"#Область СлужебныеПроцедурыИФункции
 // код
 #КонецОбласти
@@ -180,13 +119,11 @@ mod tests {
               message: Нужно удалить дубли раздела "СлужебныеПроцедурыИФункции"
               severity: Hint"#]]
         .assert_eq(&format_diags(code, &diagnostics));
-        // snapshot-skip: message-substring assertion intentionally retained.
         assert!(diagnostics[0].message.contains("СлужебныеПроцедурыИФункции"));
     }
 
     #[test]
     fn test_duplicate_event_handlers_regions() {
-        // EventHandlers and ОбработчикиСобытий map to same canonical "EventHandlers"
         let code = r#"#Region EventHandlers
 // код
 #EndRegion
@@ -200,7 +137,6 @@ mod tests {
               message: Нужно удалить дубли раздела "EventHandlers"
               severity: Hint"#]]
         .assert_eq(&format_diags(code, &diagnostics));
-        // snapshot-skip: message-substring assertion intentionally retained.
         assert!(diagnostics[0].message.contains("EventHandlers"));
     }
 
@@ -255,7 +191,6 @@ mod tests {
               message: Нужно удалить дубли раздела "СлужебныйПрограммныйИнтерфейс"
               severity: Hint"#]]
         .assert_eq(&format_diags(code, &diagnostics));
-        // snapshot-skip: message-substring assertion intentionally retained.
         assert!(diagnostics[0].message.contains("СлужебныйПрограммныйИнтерфейс"));
     }
 

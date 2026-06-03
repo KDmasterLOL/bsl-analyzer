@@ -1,16 +1,3 @@
-//! End-to-end regression for `Для каждого … Из …` loop variable
-//! type inference.
-//!
-//! Pins the wiring from [`crate::iteration_lookup::resolve_iter_element_ty`]
-//! (covered exhaustively at the unit-test layer in
-//! `crates/hir-ty/src/iteration_lookup.rs::tests`) through the Salsa
-//! `infer` pipeline so the loop variable lands in
-//! `InferenceResult::var_types` and downstream IDE features
-//! (hover, goto, diagnostics) see the real element type.
-//!
-//! Each scenario asserts the lower-cased loop variable name maps to the
-//! element type the platform syntax help declares for the receiver.
-
 use hir::{Builders, HirDatabase, TypeId};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
@@ -44,10 +31,6 @@ fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<Typ
 
 #[test]
 fn for_each_over_map_yields_kluch_i_znachenie() {
-    // `Соответствие` iterates `КлючИЗначение` per HBK. The inference
-    // pipeline must surface that as `Ty::PlatformObject("КлючИЗначение")`
-    // on the loop variable so subsequent `.Ключ` / `.Значение` access
-    // resolves through platform property lookup.
     let (db, file_id) = setup(
         r#"
 //- /test.bsl
@@ -71,7 +54,6 @@ fn for_each_over_map_yields_kluch_i_znachenie() {
 
 #[test]
 fn for_each_over_value_table_yields_row() {
-    // `ТаблицаЗначений` iterates `СтрокаТаблицыЗначений` per HBK.
     let (db, file_id) = setup(
         r#"
 //- /test.bsl
@@ -95,7 +77,6 @@ fn for_each_over_value_table_yields_row() {
 
 #[test]
 fn for_each_over_value_list_yields_list_item() {
-    // `СписокЗначений` iterates `ЭлементСпискаЗначений` per HBK.
     let (db, file_id) = setup(
         r#"
 //- /test.bsl
@@ -119,12 +100,6 @@ fn for_each_over_value_list_yields_list_item() {
 
 #[test]
 fn for_each_over_array_overwrites_prior_binding_with_unknown() {
-    // `Массив` iterates `Произвольный` → `Ty::Unknown`. BSL semantics
-    // rebinds the loop variable for the duration of the loop and the
-    // trailing tail (locals are procedure-scoped, no block scope), so
-    // any prior precise type on the same name MUST be shadowed by the
-    // loop's `Ty::Unknown` — leaking the prior `Number` into the body
-    // would mistype `Эл` for everything inside the loop.
     let (db, file_id) = setup(
         r#"
 //- /test.bsl
@@ -138,16 +113,11 @@ fn for_each_over_array_overwrites_prior_binding_with_unknown() {
 "#,
     );
 
-    // Prior `Эл = 1` set var_types["эл"] = Number; the loop overwrote
-    // it with the iteration element type (Unknown for Произвольный).
     assert_eq!(var_ty(&db, file_id, "эл"), Some(db.unknown()));
 }
 
 #[test]
 fn for_each_over_string_leaves_var_types_empty() {
-    // Plain strings have no `Элементы коллекции:` chapter, so
-    // `resolve_iter_element_ty` returns `None` and inference does not
-    // touch `var_types` for the loop variable.
     let (db, file_id) = setup(
         r#"
 //- /test.bsl

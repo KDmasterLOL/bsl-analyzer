@@ -1,66 +1,29 @@
-//! CFG Vertex types
-//!
-//! ## Design Decision: HIR-based CFG
-//!
-//! **Migrated from SyntaxNode to HIR indices (Phase 6.1)**
-//!
-//! Unlike the previous AST-based approach, we now store HIR indices (StmtId, ExprId, BindingId)
-//! from hir_def::Body arenas.
-//!
-//! **Rationale**:
-//! - Enables dataflow analysis (needs HIR statement access)
-//! - More compact (8-byte indices vs Arc<SyntaxNode>)
-//! - Type-safe (StmtId can only reference statements)
-//! - No fragile AST parsing with find() + fallbacks
-//! - Direct integration with HIR-based diagnostics
-//!
-//! **Advantage**:
-//! - Dataflow transfer functions can access Body arenas
-//! - Same Body used in CFG and diagnostics (single source of truth)
-//! - Structured access via pattern matching (no tree traversal)
-
 use cfg_types::{BindingId, ExprId, StmtId};
 use hir_def::Name;
 use syntax::TextRange;
 
-/// Vertex in the control flow graph
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CfgVertex {
-    /// Basic block - sequence of sequential statements
     BasicBlock(BasicBlockVertex),
 
-    /// Conditional branching (if/elsif)
     Conditional(ConditionalVertex),
 
-    /// While loop
     WhileLoop(WhileLoopVertex),
 
-    /// For loop
     ForLoop(ForLoopVertex),
 
-    /// ForEach loop
     ForEachLoop(ForEachLoopVertex),
 
-    /// Try-Except block
     TryExcept(TryExceptVertex),
 
-    /// Label (target for Goto)
     Label(LabelVertex),
 
-    /// Preprocessor conditional (#Если/#ИначеЕсли)
     PreprocCondition(PreprocConditionVertex),
 
-    /// Exit point of the method
     Exit,
 }
 
 impl CfgVertex {
-    /// Get the first statement ID from a BasicBlock vertex, if this is a BasicBlock
-    ///
-    /// For other vertex types, use specific accessors:
-    /// - Conditional/WhileLoop: access `.condition` field directly
-    /// - ForLoop/ForEachLoop: access `.loop_var` field directly
-    /// - Label: access `.name` field directly
     pub fn first_stmt_id(&self) -> Option<StmtId> {
         match self {
             CfgVertex::BasicBlock(v) => v.statements().first().copied(),
@@ -68,7 +31,6 @@ impl CfgVertex {
         }
     }
 
-    /// Get a display name for this vertex type
     pub fn type_name(&self) -> &'static str {
         match self {
             CfgVertex::BasicBlock(_) => "BasicBlock",
@@ -83,7 +45,6 @@ impl CfgVertex {
         }
     }
 
-    /// Check if this is a branching vertex (requires multiple outgoing edges)
     pub fn is_branching(&self) -> bool {
         matches!(
             self,
@@ -96,17 +57,13 @@ impl CfgVertex {
         )
     }
 
-    /// Check if this is a loop vertex
     pub fn is_loop(&self) -> bool {
         matches!(self, CfgVertex::WhileLoop(_) | CfgVertex::ForLoop(_) | CfgVertex::ForEachLoop(_))
     }
 }
 
-/// Basic block vertex - sequence of statements with no branches
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BasicBlockVertex {
-    /// Sequential statements in this basic block
-    /// Stores HIR statement indices from Body arena
     statements: Vec<StmtId>,
 }
 
@@ -146,10 +103,8 @@ impl Default for BasicBlockVertex {
     }
 }
 
-/// Conditional vertex - if/elsif branching
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConditionalVertex {
-    /// Condition expression (HIR index from Body)
     pub condition: ExprId,
 }
 
@@ -159,18 +114,10 @@ impl ConditionalVertex {
     }
 }
 
-/// Preprocessor conditional vertex (#Если/#ИначеЕсли)
-///
-/// Unlike ConditionalVertex, preprocessor conditions are symbolic expressions
-/// (e.g., `Сервер И НЕ Клиент`) that are not runtime-evaluable.
-/// We store TextRange instead of ExprId for diagnostics.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreprocConditionVertex {
-    /// Range of the condition expression (for diagnostics)
     pub condition_range: TextRange,
-    /// Range of the full directive (e.g., `#Если Клиент Тогда`)
     pub directive_range: Option<TextRange>,
-    /// Range of the full `#Если ... #КонецЕсли` block
     pub full_range: Option<TextRange>,
 }
 
@@ -196,10 +143,8 @@ impl PreprocConditionVertex {
     }
 }
 
-/// While loop vertex
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WhileLoopVertex {
-    /// Loop condition (HIR index from Body)
     pub condition: ExprId,
 }
 
@@ -209,16 +154,11 @@ impl WhileLoopVertex {
     }
 }
 
-/// For loop vertex
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForLoopVertex {
-    /// Loop variable (HIR binding from Body)
     pub loop_var: BindingId,
-    /// Start expression (from)
     pub from: ExprId,
-    /// End expression (to)
     pub to: ExprId,
-    /// Statement ID of the for loop (for getting full range in diagnostics)
     pub stmt_id: Option<StmtId>,
 }
 
@@ -232,14 +172,10 @@ impl ForLoopVertex {
     }
 }
 
-/// ForEach loop vertex
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForEachLoopVertex {
-    /// Loop variable (HIR binding from Body)
     pub loop_var: BindingId,
-    /// Collection expression to iterate over
     pub collection: ExprId,
-    /// Statement ID of the foreach loop (for getting full range in diagnostics)
     pub stmt_id: Option<StmtId>,
 }
 
@@ -253,11 +189,6 @@ impl ForEachLoopVertex {
     }
 }
 
-/// Try-Except block vertex
-///
-/// Note: CFG doesn't need to store any data for Try-Except blocks,
-/// just mark their presence in the control flow. Body statements
-/// are tracked in BasicBlock vertices.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TryExceptVertex;
 
@@ -273,10 +204,8 @@ impl Default for TryExceptVertex {
     }
 }
 
-/// Label vertex (for Goto statements)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LabelVertex {
-    /// Label name (HIR Name from Body)
     pub name: Name,
 }
 

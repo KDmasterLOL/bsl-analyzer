@@ -1,13 +1,3 @@
-//! NumberOfParams diagnostic.
-//!
-//! Reports methods with too many parameters.
-//!
-//! ## Track 2 Phase B §6.4 migration
-//! Pre-migration this consumed `BodyDiagnostic::NumberOfParams` from
-//! `lower::mod::emit_method_scoped_diagnostics`; the migrated handler
-//! reads `HirMethodMetrics::params_count` (set by the visitor from
-//! `body.params.len()`).
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -29,8 +19,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 
 const DEFAULT_MAX_PARAMS: i64 = 7;
 
-/// Track 2 Phase B §6.4 — handler-side detection consuming the cached
-/// `HirMethodMetrics::params_count` via `ctx.module_hir_metrics()`.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::NumberOfParams;
     if ctx.is_disabled_with_metadata(code) {
@@ -46,8 +34,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let module_bodies = ctx.module_bodies();
     let item_tree = ctx.item_tree();
 
-    // Sort by `local_id` for deterministic output ordering — see the
-    // matching note in `method_size::check`.
     let mut local_ids: Vec<u32> = module_bodies.iter_bodies().map(|(id, _)| id).collect();
     local_ids.sort_unstable();
 
@@ -189,8 +175,6 @@ mod tests {
 
     #[test]
     fn test_multiple_excess_params() {
-        // NOTE: Using 2-letter names because single "И" is lexed as KwAnd (logical AND),
-        // not as Ident. This is expected BSL behavior - keywords can't be used as identifiers.
         let code = r#"Процедура Тест(Аа, Бб, Вв, Гг, Дд, Ее, Жж, Зз, Ии)
 КонецПроцедуры"#;
         check_diagnostics_snapshot_for(

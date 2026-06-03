@@ -1,20 +1,13 @@
-//! Conversion between parser's NodeKind/TokenKind and syntax's SyntaxKind.
-//!
-//! This module provides mappings to convert parser events into Rowan syntax kinds.
-
 use lexer::TokenKind;
 
 use crate::event::NodeKind;
 
-/// Convert NodeKind to SyntaxKind.
 pub fn node_kind_to_syntax(kind: NodeKind) -> syntax::SyntaxKind {
     use syntax::SyntaxKind as SK;
 
     match kind {
-        // Root
         NodeKind::SourceFile => SK::SOURCE_FILE,
 
-        // Items
         NodeKind::ProcedureDef => SK::PROCEDURE_DEF,
         NodeKind::FunctionDef => SK::FUNCTION_DEF,
         NodeKind::VarDef => SK::VAR_DEF,
@@ -25,7 +18,6 @@ pub fn node_kind_to_syntax(kind: NodeKind) -> syntax::SyntaxKind {
         NodeKind::AnnotationParam => SK::ANNOTATION_PARAM,
         NodeKind::CompilerDirective => SK::COMPILER_DIRECTIVE,
 
-        // Statements
         NodeKind::StmtList => SK::STMT_LIST,
         NodeKind::AssignStmt => SK::ASSIGN_STMT,
         NodeKind::CallStmt => SK::CALL_STMT,
@@ -48,7 +40,6 @@ pub fn node_kind_to_syntax(kind: NodeKind) -> syntax::SyntaxKind {
         NodeKind::RemoveHandlerStmt => SK::REMOVE_HANDLER_STMT,
         NodeKind::EmptyStmt => SK::EMPTY_STMT,
 
-        // Expressions
         NodeKind::Expr => SK::EXPR,
         NodeKind::BinaryExpr => SK::BINARY_EXPR,
         NodeKind::UnaryExpr => SK::UNARY_EXPR,
@@ -63,7 +54,6 @@ pub fn node_kind_to_syntax(kind: NodeKind) -> syntax::SyntaxKind {
         NodeKind::Ident => SK::IDENT,
         NodeKind::ArgList => SK::ARG_LIST,
 
-        // Preprocessor
         NodeKind::PreIfDir => SK::PRE_IF_DIR,
         NodeKind::PreElsIfClause => SK::PRE_ELSIF_CLAUSE,
         NodeKind::PreElseClause => SK::PRE_ELSE_CLAUSE,
@@ -76,7 +66,6 @@ pub fn node_kind_to_syntax(kind: NodeKind) -> syntax::SyntaxKind {
         NodeKind::PreSymbol => SK::PRE_SYMBOL,
         NodeKind::PreBoolOp => SK::PRE_BOOL_OP,
 
-        // SDBL (Query Language)
         NodeKind::SdblQueryPackage => SK::SDBL_QUERY_PACKAGE,
         NodeKind::SdblSelectQuery => SK::SDBL_SELECT_QUERY,
         NodeKind::SdblSubquery => SK::SDBL_SUBQUERY,
@@ -133,18 +122,15 @@ pub fn node_kind_to_syntax(kind: NodeKind) -> syntax::SyntaxKind {
         NodeKind::SdblMissingArg => SK::SDBL_MISSING_ARG,
         NodeKind::SdblError => SK::SDBL_ERROR,
 
-        // Other
         NodeKind::Error => SK::ERROR,
         NodeKind::Comment => SK::COMMENT,
     }
 }
 
-/// Convert TokenKind to SyntaxKind.
 pub fn token_kind_to_syntax(kind: TokenKind) -> syntax::SyntaxKind {
     use syntax::SyntaxKind as SK;
 
     match kind {
-        // Keywords
         TokenKind::KwProcedure => SK::KW_PROCEDURE,
         TokenKind::KwEndProcedure => SK::KW_END_PROCEDURE,
         TokenKind::KwFunction => SK::KW_FUNCTION,
@@ -186,7 +172,6 @@ pub fn token_kind_to_syntax(kind: TokenKind) -> syntax::SyntaxKind {
         TokenKind::KwUndefined => SK::KW_UNDEFINED,
         TokenKind::KwNull => SK::KW_NULL,
 
-        // Preprocessor directives
         TokenKind::PreIf => SK::PRE_IF,
         TokenKind::PreElsIf => SK::PRE_ELSIF,
         TokenKind::PreElse => SK::PRE_ELSE,
@@ -199,7 +184,6 @@ pub fn token_kind_to_syntax(kind: TokenKind) -> syntax::SyntaxKind {
         TokenKind::PreDelete => SK::PRE_DELETE,
         TokenKind::PreEndDelete => SK::PRE_END_DELETE,
 
-        // Annotations
         TokenKind::AnnAtClient => SK::ANN_AT_CLIENT,
         TokenKind::AnnAtServer => SK::ANN_AT_SERVER,
         TokenKind::AnnAtServerNoContext => SK::ANN_AT_SERVER_NO_CONTEXT,
@@ -211,7 +195,6 @@ pub fn token_kind_to_syntax(kind: TokenKind) -> syntax::SyntaxKind {
         TokenKind::AnnChangeAndValidate => SK::ANN_CHANGE_AND_VALIDATE,
         TokenKind::AnnCustom => SK::ANN_CUSTOM,
 
-        // Operators
         TokenKind::Eq => SK::EQ,
         TokenKind::Neq => SK::NEQ,
         TokenKind::Le => SK::LE,
@@ -224,7 +207,6 @@ pub fn token_kind_to_syntax(kind: TokenKind) -> syntax::SyntaxKind {
         TokenKind::Slash => SK::SLASH,
         TokenKind::Percent => SK::PERCENT,
 
-        // Punctuation
         TokenKind::LParen => SK::L_PAREN,
         TokenKind::RParen => SK::R_PAREN,
         TokenKind::LBracket => SK::L_BRACKET,
@@ -240,7 +222,6 @@ pub fn token_kind_to_syntax(kind: TokenKind) -> syntax::SyntaxKind {
         TokenKind::Ampersand => SK::AMPERSAND,
         TokenKind::Exclamation => SK::EXCLAMATION,
 
-        // Literals
         TokenKind::Float => SK::FLOAT,
         TokenKind::Decimal => SK::DECIMAL,
         TokenKind::String => SK::STRING,
@@ -249,16 +230,13 @@ pub fn token_kind_to_syntax(kind: TokenKind) -> syntax::SyntaxKind {
         TokenKind::StringPart => SK::STRING_PART,
         TokenKind::Date => SK::DATE,
 
-        // Identifiers
         TokenKind::Ident => SK::IDENT,
 
-        // Trivia
         TokenKind::Whitespace => SK::WHITESPACE,
         TokenKind::Newline => SK::NEWLINE,
         TokenKind::Comment => SK::COMMENT,
         TokenKind::Bom => SK::BOM,
 
-        // Error fallback
         TokenKind::Error => SK::ERROR,
     }
 }

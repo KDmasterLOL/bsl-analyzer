@@ -1,5 +1,3 @@
-//! Heuristic Hunspell-based typo detector for identifiers and string literals.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -16,7 +14,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     scope: DiagnosticScope::All,
     modules: &[],
     minutes_to_fix: 1,
-    activated_by_default: false, // Disabled: Hunspell generates too many false positives
+    activated_by_default: false,
     compatibility_mode: DiagnosticCompatibilityMode::Undefined,
     tags: &[MetadataTag::Badpractice],
     can_locate_on_project: false,
@@ -292,7 +290,6 @@ fn remove_quotes(text: &str) -> String {
     }
 }
 
-/// Check an identifier token for typos and emit diagnostics.
 fn check_ident_token(
     token: &SyntaxToken,
     acc: &mut Vec<Diagnostic>,
@@ -330,28 +327,18 @@ fn check_ident_token(
     }
 }
 
-/// Find the first IDENT token in a node.
-///
-/// Used for:
-/// - Method names in PROCEDURE_DEF/FUNCTION_DEF
-/// - Variable names in VAR_DEF
-/// - Parameter names in PARAM
 fn find_first_ident_token(node: &SyntaxNode) -> Option<SyntaxToken> {
     node.children_with_tokens()
         .filter_map(|e| e.into_token())
         .find(|token| token.kind() == SyntaxKind::IDENT)
 }
 
-/// Find lValue IDENT token in ASSIGN_STMT (left side of assignment).
-///
-/// The lValue is the first IDENT token before the '=' sign.
 fn find_lvalue_ident_token(node: &SyntaxNode) -> Option<SyntaxToken> {
     for element in node.children_with_tokens() {
         if let SyntaxElement::Token(token) = element {
             if token.kind() == SyntaxKind::IDENT {
                 return Some(token);
             }
-            // Stop at '=' - we only want the left side
             if token.kind() == SyntaxKind::EQ {
                 return None;
             }
@@ -371,31 +358,26 @@ pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &Diagnostic
     let dictionaries = get_dictionaries();
 
     match node.kind() {
-        // Check method names in procedure/function definitions
         SyntaxKind::PROCEDURE_DEF | SyntaxKind::FUNCTION_DEF => {
             if let Some(token) = find_first_ident_token(node) {
                 check_ident_token(&token, acc, ctx, &config, &dictionaries);
             }
         }
-        // Check variable names in declarations
         SyntaxKind::VAR_DEF => {
             if let Some(token) = find_first_ident_token(node) {
                 check_ident_token(&token, acc, ctx, &config, &dictionaries);
             }
         }
-        // Check parameter names
         SyntaxKind::PARAM => {
             if let Some(token) = find_first_ident_token(node) {
                 check_ident_token(&token, acc, ctx, &config, &dictionaries);
             }
         }
-        // Check left side of assignments (lValue)
         SyntaxKind::ASSIGN_STMT => {
             if let Some(token) = find_lvalue_ident_token(node) {
                 check_ident_token(&token, acc, ctx, &config, &dictionaries);
             }
         }
-        // Check string literals
         _ => {
             if let Some(token) = node.first_token() {
                 if token.kind() == SyntaxKind::STRING {
@@ -474,7 +456,6 @@ mod tests {
     ЗапроситьДанныеОКВЭДФССВТранзакции = Истина; // Нет срабатывания. Аббревиатура
 КонецФункции"#;
 
-    /// Helper to create config with Typo explicitly enabled (since it's disabled by default).
     fn config_with_typo_enabled() -> DiagnosticsConfig {
         let mut config = DiagnosticsConfig::default();
         config.enabled.push(DiagnosticCode::Typo);
@@ -560,26 +541,21 @@ mod tests {
         use super::{get_dictionaries, is_valid_word};
         let dictionaries = get_dictionaries();
 
-        // Common Russian words that should be valid
         let should_be_valid = [
-            // Basic words
             "Функция",
             "Процедура",
             "Возврат",
             "Если",
             "Тогда",
-            // Common nouns
             "Результат",
             "Значение",
             "Параметр",
             "Строка",
             "Число",
-            // Verbs
             "Возвращает",
             "Получает",
             "Устанавливает",
             "Проверяет",
-            // Adjectives
             "текущее",
             "новый",
             "старый",

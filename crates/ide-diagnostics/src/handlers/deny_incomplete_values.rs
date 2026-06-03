@@ -1,44 +1,3 @@
-//! DenyIncompleteValues diagnostic.
-//!
-//! Checks that register dimensions have the `DenyIncompleteValues` flag enabled.
-//!
-//! ## Why?
-//! The `DenyIncompleteValues` flag ensures data integrity by preventing records with
-//! incomplete or empty dimension values from being written to the register. Without this
-//! flag, invalid data can accumulate in the register, leading to:
-//! - Data integrity issues
-//! - Incorrect analytical reports
-//! - Difficult-to-debug application errors
-//!
-//! ## Bad practice
-//! ```xml
-//! <Dimension>
-//!   <Properties>
-//!     <Name>Справочник1</Name>
-//!     <DenyIncompleteValues>false</DenyIncompleteValues>  <!-- ← ERROR! -->
-//!   </Properties>
-//! </Dimension>
-//! ```
-//!
-//! ## Good practice
-//! ```xml
-//! <Dimension>
-//!   <Properties>
-//!     <Name>Справочник1</Name>
-//!     <DenyIncompleteValues>true</DenyIncompleteValues>  <!-- ← OK -->
-//!   </Properties>
-//! </Dimension>
-//! ```
-//!
-//! ## Implementation
-//!
-//! Tier 3 diagnostic: Requires metadata (Register, Dimension).
-//! Applies to all 4 register types:
-//! - InformationRegister (Регистр сведений)
-//! - AccumulationRegister (Регистр накопления)
-//! - AccountingRegister (Регистр бухгалтерии)
-//! - CalculationRegister (Регистр расчета)
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode};
@@ -59,9 +18,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Collect diagnostics from module metadata.
-///
-/// Checks register dimensions for DenyIncompleteValues=false flag.
 pub fn from_metadata(
     metadata: &ModuleMetadata,
     ctx: &crate::DiagnosticsContext,
@@ -72,7 +28,6 @@ pub fn from_metadata(
         return Vec::new();
     }
 
-    // Only process register modules
     let Some(ref register) = metadata.register else {
         return Vec::new();
     };
@@ -89,7 +44,6 @@ pub fn from_metadata(
                 format_register_full_name(register)
             );
 
-            // Use range [0, min(9, file_len)) to avoid exceeding file bounds
             let file_len = file_text.len();
             let end_offset = std::cmp::min(9, file_len);
             let range = TextRange::new(0.into(), (end_offset as u32).into());
@@ -108,7 +62,6 @@ pub fn from_metadata(
     diagnostics
 }
 
-/// Format register full name with Russian type prefix.
 fn format_register_full_name(register: &bsl_metadata::Register) -> String {
     let type_prefix = if register.is_information_register() {
         "РегистрСведений"
@@ -152,7 +105,7 @@ mod tests {
             .add_dimension(
                 bsl_metadata::Dimension::builder()
                     .name("Справочник1")
-                    .deny_incomplete_values(false) // Should trigger diagnostic
+                    .deny_incomplete_values(false)
                     .build(),
             )
             .build();
@@ -175,7 +128,7 @@ mod tests {
             .add_dimension(
                 bsl_metadata::Dimension::builder()
                     .name("Справочник1")
-                    .deny_incomplete_values(true) // OK - no diagnostic
+                    .deny_incomplete_values(true)
                     .build(),
             )
             .build();
@@ -196,19 +149,19 @@ mod tests {
             .add_dimension(
                 bsl_metadata::Dimension::builder()
                     .name("Измерение1")
-                    .deny_incomplete_values(false) // Should trigger
+                    .deny_incomplete_values(false)
                     .build(),
             )
             .add_dimension(
                 bsl_metadata::Dimension::builder()
                     .name("Измерение2")
-                    .deny_incomplete_values(true) // OK
+                    .deny_incomplete_values(true)
                     .build(),
             )
             .add_dimension(
                 bsl_metadata::Dimension::builder()
                     .name("Измерение3")
-                    .deny_incomplete_values(false) // Should trigger
+                    .deny_incomplete_values(false)
                     .build(),
             )
             .build();
@@ -313,12 +266,11 @@ mod tests {
             .build();
 
         let metadata = make_metadata_with_register(register);
-        let file_text = "//"; // Very small file (2 chars)
+        let file_text = "//";
         let diagnostics =
             crate::test_utils::check_metadata_diagnostic(metadata, file_text, from_metadata);
 
         assert_eq!(diagnostics.len(), 1);
-        // Range should not exceed file length
         assert_eq!(diagnostics[0].range.end(), 2.into());
     }
 }

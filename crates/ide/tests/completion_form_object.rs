@@ -1,21 +1,3 @@
-//! End-to-end completion regression for `Объект.<dot>` inside a managed
-//! form's BSL module — covers DataProcessor and Report forms whose
-//! MainAttribute carries `cfg:DataProcessorObject.X` / `cfg:ReportObject.X`.
-//!
-//! Existing `Catalog` / `Document` forms work today because
-//! `MetadataKind::object_kind_for` already maps those MDOs. The four new
-//! kinds (DataProcessorObject, ReportObject, BusinessProcessObject,
-//! TaskObject) plus parser + loader support land together; this test
-//! anchors the completion side end-to-end so a regression in any layer
-//! (parser → loader → schema → form_attr → field_lookup → completion)
-//! surfaces immediately.
-//!
-//! Method-surface invariant: methods on `Объект` route through
-//! `ДанныеФормыСтруктура` (the form-data wrapper), NOT through the
-//! object's HBK surface. `Записать()` lives on `*Object` directly and
-//! must NOT appear in completion — the platform deliberately blocks
-//! that call inside a form.
-
 use bsl_platform::PlatformDataInner;
 use ide::{Analysis, CompletionItem};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
@@ -67,8 +49,6 @@ fn completion_on_object_dot_in_data_processor_form_lists_attributes() {
         return;
     }
 
-    // Cursor right after `Объект.` — `АдресСайта` and `СоздаватьГруппы` are
-    // declared in `DataProcessors/ТестоваяОбработка.xml` (sibling).
     let bsl = "Процедура Тест()\n    Х = Объект.;\nКонецПроцедуры\n";
     let cursor = bsl.find("Объект.").expect("anchor") as u32 + "Объект.".len() as u32;
 
@@ -94,10 +74,6 @@ fn completion_on_object_dot_in_data_processor_form_hides_object_methods() {
         return;
     }
 
-    // `Записать()` lives on `DataProcessorObject` directly (HBK), but the
-    // form-data wrapper `ДанныеФормыСтруктура` deliberately does NOT
-    // expose it — calling `Объект.Записать()` from a form is a runtime
-    // error in 1С. Completion must mirror that.
     let bsl = "Процедура Тест()\n    Объект.;\nКонецПроцедуры\n";
     let cursor = bsl.find("Объект.").expect("anchor") as u32 + "Объект.".len() as u32;
 
@@ -114,18 +90,6 @@ fn completion_on_object_dot_in_data_processor_form_hides_object_methods() {
 
 #[test]
 fn completion_after_findrows_index_lists_row_columns() {
-    // Chained access pattern from a real DataProcessor form:
-    //   `Объект.НастройкиЭксель.НайтиСтроки(Отбор)[0].<cursor>`
-    //
-    // Pipeline:
-    // 1. `Объект` → FormData{Structure, Some((DataProcessor, ТестоваяОбработка))}
-    // 2. `.НастройкиЭксель` → MetadataRef{TabularSection{DataProcessor}, "ТестоваяОбработка.НастройкиЭксель"}
-    // 3. `.НайтиСтроки(Отбор)` → TypedArray(MetadataRef{TabularSectionRow, ..})
-    //    (NOT bare Ty::Array — `build_tabular_section_method_info`
-    //    rebinds the HBK `"Массив"` return for НайтиСтроки/FindRows to
-    //    a row-typed array)
-    // 4. `[0]` → MetadataRef{TabularSectionRow, ..} (Expr::Index unwraps TypedArray)
-    // 5. `.<cursor>` → row columns via `enumerate_fields`
     if !has_platform_data() {
         eprintln!("Skipping: no platform data available");
         return;

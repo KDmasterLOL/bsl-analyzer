@@ -1,5 +1,3 @@
-//! Reports assignments where the target is assigned to itself.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -19,7 +17,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates a diagnostic from HIR self-assignment lowering data.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     crate::simple_hir_diagnostic(
         DiagnosticCode::SelfAssign,
@@ -52,7 +49,6 @@ mod tests {
 
     #[test]
     fn test_self_assign_case_insensitive() {
-        // BSL is case-insensitive: А = а should be detected
         let code = r#"Процедура Тест()
     А = а;
 КонецПроцедуры"#;
@@ -76,15 +72,8 @@ mod tests {
         check_diagnostics_snapshot_for(code, DiagnosticCode::SelfAssign, expect![[r#""#]]);
     }
 
-    /// Test based on test fixture content
-    /// Expected: hasSize(2), hasRange(4, 0, 4, 5), hasRange(7, 0, 7, 33)
-    ///
-    /// NOTE: HIR lowering only processes method bodies, so we wrap fixture content in a procedure.
-    /// Line numbers in this test are offset by +1 due to wrapping.
     #[test]
     fn test_fixture_self_assign() {
-        // Content from SelfAssignDiagnostic.bsl wrapped in a procedure
-        // (HIR only processes method bodies)
         let code = r#"Процедура Тест()
     Если А = 1 Тогда
     КонецЕсли;

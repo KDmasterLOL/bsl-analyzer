@@ -20,7 +20,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 
 const DEFAULT_SKIP_SELECT_TOP_ONE: bool = true;
 
-/// Single-pass dispatch for SelectTopWithoutOrderBy.
 pub(crate) fn dispatch(
     ctx: &DiagnosticsContext,
     diag: &sdbl_hir::SdblDiagnostic,
@@ -62,7 +61,6 @@ pub(crate) fn dispatch(
     }
 }
 
-/// Runs the SelectTopWithoutOrderBy diagnostic (standalone, used in tests).
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     crate::sdbl_utils::collect_sdbl_via_dispatch(
         ctx,
@@ -82,7 +80,6 @@ mod tests {
     }
     #[test]
     fn test_top_10_in_batch_order_by_in_other_query() {
-        // TOP 10 in first batch query; second query has ORDER BY - still 1 diagnostic
         let code = r#"
 Процедура Тест()
     Запрос = "ВЫБРАТЬ ПЕРВЫЕ 10
@@ -110,7 +107,6 @@ mod tests {
 
     #[test]
     fn test_top_10_in_where_in_subquery() {
-        // TOP 10 inside a WHERE ... IN (...) subquery - 1 diagnostic
         let code = r#"
 Процедура Тест()
     Запрос = "ВЫБРАТЬ
@@ -136,7 +132,6 @@ mod tests {
 
     #[test]
     fn test_top_1_in_where_in_subquery_skipped_by_default() {
-        // TOP 1 inside a WHERE ... IN (...) subquery - 0 diagnostics with default skipSelectTopOne=true
         let code = r#"
 Процедура Тест()
     Запрос = "ВЫБРАТЬ
@@ -156,7 +151,6 @@ mod tests {
 
     #[test]
     fn test_top_10_in_nested_from_subquery() {
-        // TOP 10 inside a nested FROM subquery - outer query has ORDER BY but inner does not - 1 diagnostic
         let code = r#"
 Процедура Тест()
     Запрос = "ВЫБРАТЬ ПЕРВЫЕ 5
@@ -181,7 +175,6 @@ mod tests {
 
     #[test]
     fn test_top_1_in_nested_from_subquery_skipped_by_default() {
-        // TOP 1 inside a nested FROM subquery - 0 diagnostics with default skipSelectTopOne=true
         let code = r#"
 Процедура Тест()
     Запрос = "ВЫБРАТЬ ПЕРВЫЕ 5
@@ -200,7 +193,6 @@ mod tests {
 
     #[test]
     fn test_top_10_in_where_in_subquery_order_by_only_in_outer() {
-        // TOP 10 in WHERE IN subquery; ORDER BY is only on the outer query - still 1 diagnostic
         let code = r#"
 Процедура Тест()
     Запрос = "ВЫБРАТЬ
@@ -228,8 +220,6 @@ mod tests {
 
     #[test]
     fn test_union_with_where_subquery_and_union_members() {
-        // Query with WHERE IN subquery having TOP 10, then UNION ALL with TOP 10 and TOP 1 - 3 diagnostics
-        // TOP in UNION members is always reported regardless of skipSelectTopOne
         let code = r#"
 Процедура Тест()
     Запрос = "ВЫБРАТЬ
@@ -277,7 +267,6 @@ mod tests {
 
     #[test]
     fn test_complex_union_with_nested_subqueries() {
-        // Outer TOP 1 with ORDER BY (no diag); inner subquery has UNION with TOP 10 in WHERE and TOP 10 in UNION member
         let code = r#"
 Процедура Тест()
     Запрос = "ВЫБРАТЬ ПЕРВЫЕ 1
@@ -319,7 +308,6 @@ mod tests {
 
     #[test]
     fn test_parameter_substitution_in_union_no_top() {
-        // Query with &Parameter substitution in UNION member, no TOP - 0 diagnostics
         let code = r#"
 Процедура Тест()
     Запрос = "ВЫБРАТЬ
@@ -341,7 +329,6 @@ mod tests {
 
     #[test]
     fn test_top_0_with_order_by() {
-        // TOP 0 with ORDER BY - 0 diagnostics
         let code = r#"
 Процедура Тест()
     Запрос = "ВЫБРАТЬ ПЕРВЫЕ 0

@@ -1,38 +1,3 @@
-//! End-to-end invalidation test for the metadata-bridge (M1 Task 1.8).
-//!
-//! Proves that `db.infer(file_id)` transitively depends on
-//! `db.configurations(file_id)` through Salsa: changing the workspace config
-//! set with `set_all_config_paths` invalidates inference and re-runs it, so
-//! the diagnostic surface reflects the new visibility gate outcome.
-//!
-//! Prior to wiring `resolve_qualified_call` through the unified Resolver,
-//! inference bypassed `db.configurations` entirely — flipping the config
-//! set produced no observable change in the inference result.
-//!
-//! # Observable
-//!
-//! The fixture declares a 2-parameter exported method and a call-site that
-//! passes zero arguments. Three states:
-//!
-//! 1. **No config registered** — Resolver falls back to `module_index` and
-//!    resolves `ОбщегоНазначения.ЗначениеРеквизитаОбъекта` →
-//!    `MismatchedArgCount(expected=2, found=0)` is emitted (positive proof
-//!    that resolution succeeded).
-//! 2. **Non-existent config registered** — `load_configuration` returns an
-//!    empty `Configuration`; the visibility gate in the Resolver refuses
-//!    the undeclared module → `UnresolvedMethodCall { ReceiverNotResolved }`
-//!    and no `MismatchedArgCount` (resolution didn't get far enough to
-//!    check arity). Phase 2 of the qualified-call refactor split the
-//!    pre-existing `MethodNotFound` into two kinds: `ReceiverNotResolved`
-//!    when the module name resolves nowhere (cascade-gate exhaustion),
-//!    `MethodNotFound` only when the module is reachable but lacks the
-//!    method — what we're observing here is the first case.
-//! 3. **Reset to empty config list** — back to the baseline from state (1).
-//!
-//! Each transition can only flip the diagnostic surface if `db.infer` was
-//! actually invalidated by `set_all_config_paths`. That's the plumbing
-//! guarantee this test locks in.
-
 use hir::{HirDatabase, InferenceDiagnostic, UnresolvedMethodKind};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
@@ -102,9 +67,6 @@ fn mismatched_arg_counts(db: &RootDatabaseImpl, file_id: FileId) -> Vec<(usize, 
 fn infer_invalidates_when_config_set_changes() {
     let (mut db, file_id) = setup_fixture(FIXTURE);
 
-    // --- State 1: no config registered ------------------------------------
-    // Resolver falls back to path-based `module_index`, so resolution
-    // succeeds and inference emits MismatchedArgCount as positive evidence.
     assert_eq!(
         mismatched_arg_counts(&db, file_id),
         vec![(2, 2, 0)],
@@ -118,11 +80,6 @@ fn infer_invalidates_when_config_set_changes() {
         unresolved_kinds(&db, file_id)
     );
 
-    // --- State 2: register a non-existent config path ---------------------
-    // `load_configuration` produces an empty `Configuration`, so the gate
-    // sees one config with zero declared common_modules. The Resolver must
-    // reject the undeclared module, and inference must re-run — this only
-    // happens if `db.infer` is transitively wired to `db.configurations`.
     db.set_all_config_paths(vec![(None, std::path::PathBuf::from("/does-not-exist"))]);
 
     let kinds = unresolved_kinds(&db, file_id);
@@ -145,10 +102,6 @@ fn infer_invalidates_when_config_set_changes() {
         mismatched_arg_counts(&db, file_id)
     );
 
-    // --- State 3: reset to empty config list ------------------------------
-    // Removing the bogus config must also invalidate `db.infer` and restore
-    // the baseline. This covers the "input removal" direction of Salsa
-    // invalidation that the one-shot 1.6 test doesn't exercise.
     db.set_all_config_paths(vec![]);
 
     assert_eq!(

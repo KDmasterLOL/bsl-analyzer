@@ -19,6 +19,11 @@ parser.workspace = true
 project-model.workspace = true
 sdbl-hir.workspace = true
 syntax.workspace = true
+ide.workspace = true
+base-db.workspace = true
+vfs.workspace = true
+walkdir.workspace = true
+rayon.workspace = true
 
 rmcp = { version = "~1.5", features = ["server", "macros", "transport-io"] }
 schemars = "1.2"
@@ -31,6 +36,8 @@ tracing.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 dirs = "6"
+rusqlite.workspace = true
+rustc-hash = "2.1"
 
 [dev-dependencies]
 expect-test.workspace = true

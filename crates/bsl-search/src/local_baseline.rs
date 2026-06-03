@@ -3,10 +3,6 @@ use crate::error::SearchError;
 use crate::ports::{SnapshotCatalog, SnapshotContentStore};
 use crate::Store;
 
-/// Adapter that exposes the current local SQLite store as a baseline source.
-///
-/// This keeps the application service independent from the storage backend and
-/// lets the same orchestration work with local SQLite and future PostgreSQL.
 pub struct LocalStoreBaselineAdapter<'a> {
     store: &'a Store,
     corpus: CorpusId,
@@ -120,6 +116,7 @@ mod tests {
                 line_end: 2,
                 text: "новый текст".to_owned(),
                 content_hash: "changed".to_owned(),
+                graph_context: None,
             }],
         );
 

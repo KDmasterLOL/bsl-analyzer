@@ -1,33 +1,3 @@
-//! IncorrectLineBreak diagnostic
-//!
-//! Detects incorrect line breaks (forbidden characters at line start/end).
-//!
-//! ## Why?
-//! Incorrect line breaks reduce code readability:
-//! - Closing parenthesis at line start is hard to read
-//! - Logical operators at line end make code flow unclear
-//! - Proper line breaks improve code formatting
-//!
-//! ## Bad practice
-//! ```bsl
-//! Результат = Value1 +    // Operator at end - bad!
-//!     Value2;
-//!
-//! Если (Условие1 ИЛИ     // "ИЛИ" at end - bad!
-//!     Условие2) Тогда
-//! КонецЕсли;
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! Результат = Value1
-//!     + Value2;          // Operator at start - good!
-//!
-//! Если (Условие1
-//!     ИЛИ Условие2) Тогда  // "ИЛИ" at start - good!
-//! КонецЕсли;
-//! ```
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -65,14 +35,12 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     let mut diagnostics = Vec::new();
 
-    // Collect tokens grouped by line for efficient processing
     let mut line_tokens: Vec<Vec<(SyntaxKind, TextRange, String)>> = vec![Vec::new(); lines.len()];
 
     for element in root.descendants_with_tokens() {
         let Some(token) = element.as_token() else { continue };
         let kind = token.kind();
 
-        // Skip whitespace and trivia
         if matches!(kind, SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE) {
             continue;
         }
@@ -85,9 +53,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         }
     }
 
-    // Process in this order: all line-end checks first, then all line-start checks
-
-    // First pass: check line END (operators/keywords at the end)
     for (line_idx, tokens) in line_tokens.iter().enumerate() {
         if tokens.is_empty() {
             continue;
@@ -97,7 +62,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         }
     }
 
-    // Second pass: check line START (forbidden symbols at the beginning)
     for tokens in line_tokens.iter() {
         if tokens.is_empty() {
             continue;
@@ -110,7 +74,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics
 }
 
-/// Operators that should not appear at line end
 fn is_forbidden_at_line_end(kind: SyntaxKind) -> bool {
     matches!(
         kind,
@@ -124,12 +87,10 @@ fn is_forbidden_at_line_end(kind: SyntaxKind) -> bool {
     )
 }
 
-/// Symbols that should not appear at line start
 fn is_forbidden_at_line_start(kind: SyntaxKind) -> bool {
     matches!(kind, SyntaxKind::R_PAREN | SyntaxKind::SEMICOLON)
 }
 
-/// Check for forbidden operators at line end
 fn check_line_end(
     tokens: &[(SyntaxKind, TextRange, String)],
     line_idx: usize,
@@ -137,7 +98,6 @@ fn check_line_end(
     code: DiagnosticCode,
     ctx: &DiagnosticsContext,
 ) -> Option<Diagnostic> {
-    // Skip if next line starts with string literal (multiline string concatenation is OK)
     if let Some(next_line) = lines.get(line_idx + 1) {
         let trimmed = next_line.trim_start();
         if trimmed.starts_with('"') || trimmed.starts_with('|') {
@@ -145,7 +105,6 @@ fn check_line_end(
         }
     }
 
-    // Find last meaningful token (skip comments)
     let last_meaningful = tokens.iter().rev().find(|(kind, _, _)| *kind != SyntaxKind::COMMENT)?;
 
     let (kind, range, text) = last_meaningful;
@@ -164,13 +123,11 @@ fn check_line_end(
     None
 }
 
-/// Check for forbidden symbols at line start
 fn check_line_start(
     tokens: &[(SyntaxKind, TextRange, String)],
     code: DiagnosticCode,
     ctx: &DiagnosticsContext,
 ) -> Option<Diagnostic> {
-    // Get first token on line
     let (kind, range, text) = tokens.first()?;
 
     if is_forbidden_at_line_start(*kind) {
@@ -184,16 +141,11 @@ fn check_line_start(
         });
     }
 
-    // Special case: comma followed by non-whitespace content on same logical position
-    // Pattern: ,\s*\S+ at line start (comma with meaningful content after it)
-    // A lone comma (empty parameter placeholder) is OK
     if *kind == SyntaxKind::COMMA {
-        // Find non-comment tokens after comma
         let meaningful_after: Vec<_> =
             tokens.iter().skip(1).filter(|(k, _, _)| *k != SyntaxKind::COMMENT).collect();
 
         if !meaningful_after.is_empty() {
-            // Comma at start with meaningful content - report the whole expression
             let last_range = meaningful_after.last().map(|(_, r, _)| *r)?;
             let combined_range = TextRange::new(range.start(), last_range.end());
             return Some(Diagnostic {
@@ -214,7 +166,6 @@ fn check_line_start(
 mod tests {
     use super::check;
     use crate::test_utils::check_ast_diagnostic;
-    /// Two operators (+) at line end in simple concatenation - 2 warnings
     #[test]
     fn test_operator_at_end_two_lines() {
         let code = r#"СуммаДокумента = СуммаБезСкидки +
@@ -224,16 +175,14 @@ mod tests {
         assert_eq!(diagnostics.len(), 2, "Should detect 2 operators at line end");
     }
 
-    /// Operator at end with comment before next line - still warns
     #[test]
     fn test_operator_at_end_before_comment() {
-        let code = r#"ПоляОтбора = "Номенклатура,Характеристика,Склад" + // Дополнительный комментарий
+        let code = r#"ПоляОтбора = "Номенклатура,Характеристика,Склад" +
    ДополнительныеПоляОтбора;"#;
         let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "Should detect + at line end even before comment");
     }
 
-    /// Operator at end when next line starts with string literal - should pass
     #[test]
     fn test_operator_before_string_continuation_passes() {
         let code = r#"ТекстЗапроса = ТекстЗапроса +
@@ -245,7 +194,6 @@ mod tests {
         assert_eq!(diagnostics.len(), 0, "String continuation after + should not warn");
     }
 
-    /// ИЛИ at end of line - warns
     #[test]
     fn test_or_keyword_at_line_end() {
         let code = r#"Если (ВидОперации = Перечисления.ВидыОперацийПоступлениеМПЗ.ПоступлениеРозница) ИЛИ
@@ -256,7 +204,6 @@ mod tests {
         assert_eq!(diagnostics.len(), 1, "Should detect ИЛИ at line end");
     }
 
-    /// Comma at line start with meaningful content - warns; lone comma placeholder - passes
     #[test]
     fn test_comma_at_line_start_with_content() {
         let code = r#"ИменаДокументов.Добавить(Метаданные.Документы.СтрокаВыпискиРасход.Имя
@@ -265,26 +212,23 @@ mod tests {
         assert_eq!(diagnostics.len(), 1, "Comma at line start with content should warn");
     }
 
-    /// Lone comma (empty parameter placeholder) at line start - should not warn
     #[test]
     fn test_lone_comma_placeholder_passes() {
         let code = r#"ЗафиксироватьОшибку(
     ИмяСобытияЖР(),
     УровеньЖурналаРегистрации.Ошибка,
-    , // не ошибка
+    ,
     ТекстОшибки);"#;
         let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "Lone comma placeholder should not warn");
     }
 
-    /// Closing paren at line start - warns
     #[test]
     fn test_closing_paren_at_line_start_warns() {
         let code = r#"Результат = Функция(Аргумент1
     , Аргумент2
     );"#;
         let diagnostics = check_ast_diagnostic(code, check);
-        // ) at start and , at start with content
         assert!(!diagnostics.is_empty(), "Should detect ) at line start");
     }
 
@@ -342,7 +286,6 @@ mod tests {
 
     #[test]
     fn test_multiline_string_ok() {
-        // Operator at end is OK when next line is string continuation
         let code = r#"
 Функция Тест()
     Текст = "Строка1" +

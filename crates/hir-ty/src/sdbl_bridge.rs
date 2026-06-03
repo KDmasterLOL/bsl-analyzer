@@ -1,81 +1,3 @@
-//! Bridge from SDBL HIR (`sdbl_hir`) types to BSL types (`hir_def::Ty`).
-//!
-//! The bridge is the single source of truth for "how does an SDBL field
-//! type project onto the BSL type system?". Projection producers mint
-//! kernel `TypeId`s through the caller's `TypeKernelDb`. Callers
-//! (Phase 1.3 inference hooks) consume
-//! `query_to_projection` / `package_to_projections` to attach
-//! [`Projection`] payloads to the new
-//! `TypeKind::Query` / `TypeKind::QueryResult` / `TypeKind::QueryResultSelection` /
-//! `TypeKind::QueryBatchResult` variants seeded in Phase 0.
-//!
-//! ## Mapping table
-//!
-//! | `SdblType` variant            | → `Ty`                                    |
-//! |-------------------------------|-------------------------------------------|
-//! | `Boolean`                     | `Ty::Boolean`                             |
-//! | `String { length }`           | `Ty::String` (length preserved in shadow) |
-//! | `Number { precision, scale }` | `Ty::Number` (dims preserved in shadow)   |
-//! | `Date` / `DateTime`           | `Ty::Date`                                |
-//! | `Ref(MdoRef)`                 | `Ty::MetadataRef { *Ref, name }`          |
-//! | `AnyRef`                      | `Ty::AnyRef`                              |
-//! | `AnyObjectRef { mdo_type }`   | `Ty::AnyMetadataRef { mdo_type }`         |
-//! | `Uuid`                        | `Ty::PlatformObject("УникальныйИдентификатор")` |
-//! | `ValueStorage`                | `Ty::PlatformObject("ХранилищеЗначения")` |
-//! | `DefinedType { underlying: Some(t) }` | `sdbl_type_to_typeid(t)`          |
-//! | `DefinedType { underlying: None }` | `Ty::Unknown`                        |
-//! | `ValueTable`                  | `Ty::ValueTable`                          |
-//! | `Null`                        | `Ty::Null`                                |
-//! | `Aggregate(inner)`            | `sdbl_type_to_typeid(inner)`              |
-//! | `Composite { types }`         | `Ty::union(types.iter().map(...))`        |
-//! | `TabularSectionRef { … }`     | `Ty::MetadataRef { TabularSection, name }`|
-//! | `Unknown` / `Error`           | `Ty::Unknown`                             |
-//!
-//! ## Asterisk expansion
-//!
-//! `FieldHir { is_asterisk: true }` is expanded against the originating
-//! `ResolvedTable::fields()`:
-//!
-//! - Bare `*` — expanded against every table in `SdblHir::all_tables()`
-//!   (FROM ∪ JOINs) in declaration order. Duplicate output names across
-//!   tables are deduped first-wins, mirroring `lookup_field`'s linear
-//!   scan.
-//! - `Т.*` (or `Справочник.Товары.*`) — the lowerer preserves the
-//!   qualifier in `FieldHir::asterisk_qualifier`; the bridge matches it
-//!   case-insensitively against `TableRef::effective_name()` / `full_name`
-//!   and expands the single matching table.
-//!
-//! Mixed `SELECT *, NamedField` produces a projection with the expanded
-//! asterisk first, followed by named fields, deduped by lowercased name
-//! (first occurrence wins). Dedup is bilingual when a `FieldDef`
-//! carries both a Russian and an English spelling — the dedup `seen` set
-//! receives both forms so a later named field that re-projects the
-//! English spelling of an asterisk-expanded Russian field is dropped.
-//!
-//! Asterisks against tables with no resolved metadata (parser-error FROM
-//! / unresolved temp tables) contribute no fields — they degrade the
-//! projection silently rather than emitting placeholder `Unknown`
-//! entries. Surfacing those unresolved sources as diagnostics is the
-//! responsibility of the `ide-diagnostics` / SDBL diagnostic layers,
-//! not the bridge: the bridge is a pure projection extractor and never
-//! emits its own warnings.
-//!
-//! Register virtual tables (`.Обороты(...)`, `.СрезПоследних(...)`) are
-//! pre-processed by the SDBL lowerer (`crates/sdbl-hir/src/lower/from_clause.rs`):
-//! the synthesised columns (`<Resource>Оборот`, etc.) land in
-//! `ResolvedTable::Register::fields` before the bridge runs, so the
-//! bridge expands them transparently without virtual-table-specific code.
-//!
-//! ## What the bridge does NOT do
-//!
-//! - **Variable refinement / data-flow**. The bridge takes a lowered
-//!   `SdblPackage` as input; it does not trace `.Текст = "..."`
-//!   assignments. That lives in `hir-ty::query_text_dataflow` (Phase 2).
-//! - **CASE-WHEN heterogeneity**. SDBL HIR may model `ВЫБОР КОГДА X ТОГДА
-//!   A ИНАЧЕ Б` as `SdblType::Composite`; the bridge's `Composite` arm
-//!   then unions the bridged arm types. If the SDBL lowerer emits a
-//!   single `SdblType` instead, the bridge inherits that decision.
-
 use std::sync::Arc;
 
 use bsl_metadata::MdoType;
@@ -89,12 +11,6 @@ use bsl_types::testing::RootConfigCtx;
 use hir_def::ty::MetadataKind;
 use hir_def::Name;
 
-/// Map a single SDBL field type to its kernel `TypeId`.
-///
-/// Mints the `TypeId` directly through the kernel [`Builders`]. The
-/// mapping is **lossy-structural** — SDBL precision/scale/length facets
-/// drop (they live on the [`SdblTypeShadowFacet`] display shadow). See
-/// the module-level mapping table for the per-variant contract.
 #[allow(dead_code, reason = "Phase 3 §4.C producer — projection callers migrate in 4.C.2")]
 pub fn sdbl_type_to_typeid(db: &dyn TypeKernelDb, t: &sdbl_hir::SdblType) -> TypeId {
     use sdbl_hir::SdblType as S;
@@ -104,10 +20,6 @@ pub fn sdbl_type_to_typeid(db: &dyn TypeKernelDb, t: &sdbl_hir::SdblType) -> Typ
         S::Number { .. } => db.number(None, None),
         S::Date | S::DateTime => db.date(DateComponent::DateTime),
         S::Ref(mdo) => mdo_ref_to_typeid(db, mdo),
-        // Query `ЛюбаяСсылка` → the kernel `AnyRef` supertype, matching the
-        // doc/XML lowering path. Mapping to `Unknown` here would reopen a
-        // down-flow hole (`Unknown` is bidirectionally assignable), letting
-        // a query-typed any-ref slip into a concrete-ref slot unchecked.
         S::AnyRef => db.any_ref(),
         S::AnyObjectRef { mdo_type } => db.any_metadata_ref(*mdo_type),
         S::Uuid => db.platform_object("УникальныйИдентификатор".to_string()),
@@ -131,21 +43,6 @@ pub fn sdbl_type_to_typeid(db: &dyn TypeKernelDb, t: &sdbl_hir::SdblType) -> Typ
     }
 }
 
-/// Map a single SDBL `MdoRef` (reference cell) onto a `MetadataRef`
-/// `TypeId` whose kind is the matching `*Ref` variant for the MDO family.
-///
-/// Mints the id via `db.metadata_ref(.., &RootConfigCtx)`. When the MDO
-/// family has no `*Ref` companion in [`MetadataKind`]
-/// (`ChartOfCharacteristicTypes`, `ChartOfCalculationTypes`, etc.), falls
-/// back to `db.any_metadata_ref(mdo_type)`. That preserves the MDO kind
-/// (so receivers like `<ref>.Метаданные()` and family-wide completion
-/// still work) at the cost of losing the specific name — a strict
-/// improvement over `Unknown` which would silently swallow the SDBL
-/// provenance.
-///
-/// Extending [`MetadataKind`] with the missing `*Ref` variants
-/// (`ChartOfCharacteristicTypesRef`, `ChartOfCalculationTypesRef`, …)
-/// is the proper fix and a deferred follow-up.
 fn mdo_ref_to_typeid(db: &dyn TypeKernelDb, mdo: &sdbl_hir::MdoRef) -> TypeId {
     match ref_kind_for(mdo.mdo_type) {
         Some(kind) => db.metadata_ref(kind, mdo.name.clone(), &RootConfigCtx),
@@ -153,12 +50,6 @@ fn mdo_ref_to_typeid(db: &dyn TypeKernelDb, mdo: &sdbl_hir::MdoRef) -> TypeId {
     }
 }
 
-/// Pick the matching `*Ref` `MetadataKind` for an MDO flavour.
-///
-/// Companion to [`MetadataKind::object_kind_for`] which picks `*Object`;
-/// this one picks `*Ref`. Kept private to the bridge module — public
-/// callers route through [`sdbl_type_to_typeid`] without needing to know
-/// the mapping themselves.
 fn ref_kind_for(mdo: MdoType) -> Option<MetadataKind> {
     Some(match mdo {
         MdoType::Catalog => MetadataKind::CatalogRef,
@@ -172,46 +63,19 @@ fn ref_kind_for(mdo: MdoType) -> Option<MetadataKind> {
         MdoType::AccumulationRegister => MetadataKind::AccumulationRegisterRef,
         MdoType::AccountingRegister => MetadataKind::AccountingRegisterRef,
         MdoType::CalculationRegister => MetadataKind::CalculationRegisterRef,
-        // MDOs without a `*Ref` companion in `MetadataKind` (common
-        // modules, dimensions, constants, …) — SDBL does not put these
-        // in a reference cell, so this returns `None` and the caller
-        // (`mdo_ref_to_typeid`) falls back to `db.any_metadata_ref`.
         _ => return None,
     })
 }
 
-/// Extract a single SELECT query's projection.
-///
-/// Walks the query's `SELECT` field list, expanding asterisks against
-/// the originating `ResolvedTable::fields()` and bridging each named
-/// field's `SdblType` into a `TypeId`. Returns `Some(projection)` when at
-/// least one bridge-able field remains, `None` otherwise — callers
-/// attach a `None` projection to the receiver's `TypeKind::QueryResult` /
-/// `TypeKind::QueryResultSelection` in that case.
-///
-/// Field-name priority for named fields follows
-/// [`sdbl_hir::FieldHir::alias_or_name`]: alias > column name > raw
-/// name. Fields with no recoverable name are dropped.
-///
-/// Duplicate names (across asterisk expansions, across joined tables,
-/// or between an asterisk-expanded field and a named field that
-/// re-projects the same column) are deduped first-wins to mirror
-/// `lookup_field`'s linear scan order.
 pub fn query_to_projection(
     db: &dyn TypeKernelDb,
     q: &sdbl_hir::SdblQuery,
 ) -> Option<Arc<Projection>> {
-    // Capacity is a best-effort hint — asterisk expansion can grow the
-    // result well beyond `select.fields.len()`. Allocating up to the
-    // base length avoids over-reservation on the common no-asterisk path.
     let initial_cap = q.hir.select.fields.len();
     let mut named_fields: Vec<ProjectionField> = Vec::with_capacity(initial_cap);
     let mut shadows: Vec<SdblTypeShadowFacet> = Vec::with_capacity(initial_cap);
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    // Seeds `seen` with every dedup key tied to this insertion so
-    // bilingual collisions and earlier asterisk expansions are caught
-    // first-wins. Returns whether the field was newly inserted.
     let push_unique = |name: Name,
                        alt_keys: &[&str],
                        ty: TypeId,
@@ -228,10 +92,6 @@ pub fn query_to_projection(
             for k in alt_keys {
                 seen.insert(k.to_lowercase());
             }
-            // Uniform `Column` source — `query_to_projection` does not
-            // (yet) discriminate Cast/Aggregate fields. Provenance is
-            // deterministic, so projection equality across reaching defs
-            // (query_text_dataflow) stays stable.
             named_fields.push(ProjectionField::new(
                 name.as_str().to_string(),
                 ty,
@@ -285,10 +145,6 @@ pub fn query_to_projection(
         return None;
     }
 
-    // Invariant: shadow vector indexes mirror the field vector. If this
-    // ever drifts (e.g. someone introduces an early-continue between
-    // the two pushes), every consumer that reads `raw_sdbl_types[i]`
-    // alongside `fields[i]` would silently misalign.
     debug_assert_eq!(
         named_fields.len(),
         shadows.len(),
@@ -302,25 +158,6 @@ pub fn query_to_projection(
     )))
 }
 
-/// Expand an asterisk field against the tables in scope.
-///
-/// - `qualifier == None` (bare `*`): yields all fields from every table
-///   in `hir.all_tables()`, in declaration order (FROM then JOINs).
-/// - `qualifier == Some(q)` (`Т.*`): yields the fields of every table
-///   whose `effective_name()` or `full_name` matches `q`
-///   case-insensitively. In valid SDBL only one table matches —
-///   alias collisions are surfaced as diagnostics elsewhere — but the
-///   bridge stays defensive and emits all matches in declaration order.
-///
-/// The English spelling of bilingual `FieldDef`s is also yielded
-/// alongside the primary name so the upstream dedup `seen` set can
-/// catch later named fields that re-project the English form of an
-/// asterisk-expanded Russian field. The returned shape is
-/// `(primary_name, alt_name_en, ty, shadow)`.
-///
-/// Tables with no resolved metadata (`TableRef::metadata == None`)
-/// contribute nothing — they degrade the projection silently instead
-/// of introducing `Unknown` placeholders.
 fn expand_asterisk(
     db: &dyn TypeKernelDb,
     qualifier: Option<&str>,
@@ -351,12 +188,6 @@ fn expand_asterisk(
     out
 }
 
-/// Extract per-query projections from an entire SDBL package.
-///
-/// Result length equals the package's query count (`pkg.queries().len()`).
-/// Indices align with `pkg.queries()` — `result[i]` is the projection of
-/// the `i`-th sub-query in the batch. Phase 3 attaches the result to
-/// `TypeKind::QueryBatchResult`.
 pub fn package_to_projections(
     db: &dyn TypeKernelDb,
     pkg: &sdbl_hir::SdblPackage,
@@ -374,11 +205,6 @@ mod tests {
         Box::new(SdblType::Number { precision: Some(15), scale: Some(2) })
     }
 
-    /// Pins the per-variant kernel mapping for `sdbl_type_to_typeid`.
-    /// Covers precision/scale + string length (must drop), unknown/error,
-    /// composite-with-unknown (Unknown absorbed by the union
-    /// constructor → bare `Number`), and the ref fallback (MDO family
-    /// without a `*Ref` companion → `any_metadata_ref`).
     #[test]
     fn sdbl_typeid_covers_all_variants() {
         let db = InMemoryDb::new();
@@ -404,7 +230,6 @@ mod tests {
                 SdblType::Ref(sdbl_hir::MdoRef::new(MdoType::Catalog, "Товары")),
                 db.metadata_ref(MetadataKind::CatalogRef, "Товары".to_string(), &RootConfigCtx),
             ),
-            // Ref fallback: CommonModule has no `*Ref` companion → any_metadata_ref.
             (
                 SdblType::Ref(sdbl_hir::MdoRef::new(MdoType::CommonModule, "Х")),
                 db.any_metadata_ref(MdoType::CommonModule),
@@ -417,8 +242,6 @@ mod tests {
                 db.number(None, None),
             ),
             (SdblType::Aggregate(boxed_number()), db.number(None, None)),
-            // Composite{Number, Unknown}: the union constructor absorbs
-            // Unknown, collapsing to the lone Number arm.
             (
                 SdblType::Composite {
                     types: vec![
@@ -448,9 +271,6 @@ mod tests {
 
     #[test]
     fn primitives_bridge_to_structural_ty() {
-        // Display-only attributes (length / precision / scale) drop out
-        // of the structural kernel type — the shadow path preserves them;
-        // here we only check the structural projection.
         let db = InMemoryDb::new();
         assert_eq!(sdbl_type_to_typeid(&db, &SdblType::Boolean), db.boolean());
         assert_eq!(sdbl_type_to_typeid(&db, &SdblType::string()), db.string(None, false));
@@ -476,8 +296,6 @@ mod tests {
 
     #[test]
     fn uuid_and_value_storage_lower_to_platform_objects() {
-        // The bilingual platform-data index resolves both Russian and
-        // English names — Russian is the canonical SDBL-side spelling.
         let db = InMemoryDb::new();
         assert_eq!(
             sdbl_type_to_typeid(&db, &SdblType::Uuid),
@@ -507,9 +325,6 @@ mod tests {
 
     #[test]
     fn any_object_ref_lowers_to_dedicated_variant() {
-        // `AnyObjectRef { Catalog }` is the "some catalog reference, no
-        // specific name" cell — distinct from `ManagerCollection`
-        // which models the global manager container.
         let db = InMemoryDb::new();
         let t = SdblType::AnyObjectRef { mdo_type: MdoType::Catalog };
         assert_eq!(sdbl_type_to_typeid(&db, &t), db.any_metadata_ref(MdoType::Catalog));
@@ -527,8 +342,6 @@ mod tests {
 
     #[test]
     fn defined_type_without_underlying_falls_to_unknown() {
-        // No hir-def-side resolver expansion in Phase 1; bridge surfaces
-        // `Unknown` so callers don't false-positive a type-error.
         let db = InMemoryDb::new();
         let t = SdblType::DefinedType { name: "Деньги".to_string(), underlying_type: None };
         assert_eq!(sdbl_type_to_typeid(&db, &t), db.unknown());
@@ -536,8 +349,6 @@ mod tests {
 
     #[test]
     fn aggregate_strips_wrapper() {
-        // `SUM(Number) → Aggregate(Number)` — the aggregate marker has
-        // no BSL counterpart, so the bridge strips it.
         let db = InMemoryDb::new();
         let t = SdblType::Aggregate(boxed_number());
         assert_eq!(sdbl_type_to_typeid(&db, &t), db.number(None, None));
@@ -545,9 +356,6 @@ mod tests {
 
     #[test]
     fn composite_lowers_via_union() {
-        // The union constructor sorts + dedups; bridge correctness here
-        // is "every arm is bridged once". Order is irrelevant — building
-        // the expected union with the same builder canonicalises both.
         let db = InMemoryDb::new();
         let t = SdblType::Composite {
             types: vec![
@@ -582,20 +390,11 @@ mod tests {
 
     #[test]
     fn ref_kind_for_returns_none_for_managerless_mdo() {
-        // `CommonModule` has no reference cell in `MetadataKind` — SDBL
-        // doesn't put it there either, but the safety hatch keeps the
-        // bridge from panicking on a future SDBL extension.
         assert_eq!(ref_kind_for(MdoType::CommonModule), None);
     }
 
     #[test]
     fn ref_without_matching_metadata_kind_falls_to_any_metadata_ref() {
-        // `ChartOfCharacteristicTypes` is a real MDO family but
-        // `hir-def::MetadataKind` doesn't carry a `*Ref` variant for it
-        // yet. The bridge preserves the MDO kind (so family-wide
-        // completion still works) by routing through `Ty::AnyMetadataRef`
-        // — strictly better than dropping to `Ty::Unknown` and losing
-        // the SDBL provenance.
         let db = InMemoryDb::new();
         let r = SdblType::Ref(sdbl_hir::MdoRef::new(
             MdoType::ChartOfCharacteristicTypes,
@@ -606,11 +405,6 @@ mod tests {
             db.any_metadata_ref(MdoType::ChartOfCharacteristicTypes),
         );
     }
-
-    // ====================================================================
-    // Asterisk expansion — `SELECT *` / `SELECT Т.*` against
-    // `ResolvedTable::fields()`.
-    // ====================================================================
 
     use sdbl_hir::{
         ExprHir, FieldDef, FieldHir, ResolvedTable, SdblHir, SdblQuery, SelectHir, TableRef,
@@ -721,9 +515,6 @@ mod tests {
     #[test]
     fn asterisk_expands_metadata_table_fields() {
         let db = InMemoryDb::new();
-        // `SELECT * FROM Catalog.Товары` — bare asterisk over a single
-        // resolved Metadata table walks every FieldDef and bridges types
-        // structurally.
         let table = mk_metadata_table(
             "Справочник.Товары",
             None,
@@ -736,8 +527,6 @@ mod tests {
         let q = mk_query(vec![mk_asterisk(None)], vec![table]);
         let p = query_to_projection(&db, &q).expect("asterisk over resolved table must project");
         assert_eq!(projection_field_names(&p), vec!["Ссылка", "Наименование", "Цена"]);
-        // Type bridging applies per-field. Asterisk fields lift directly
-        // from the FieldDef's `SdblType` — no aliasing layer.
         assert_eq!(p.fields[1].ty, sdbl_type_to_typeid(&db, &SdblType::String { length: None }));
         assert_eq!(
             p.fields[2].ty,
@@ -748,9 +537,6 @@ mod tests {
     #[test]
     fn qualified_asterisk_expands_only_matching_table() {
         let db = InMemoryDb::new();
-        // `SELECT Т.* FROM Catalog.A AS Т, Catalog.B` — qualifier resolves
-        // by alias against `effective_name()`, NOT by table full_name when
-        // an alias is present.
         let table_a = mk_metadata_table(
             "Справочник.A",
             Some("Т"),
@@ -770,8 +556,6 @@ mod tests {
     #[test]
     fn qualified_asterisk_matches_full_name_when_no_alias() {
         let db = InMemoryDb::new();
-        // `SELECT Справочник.Товары.*` when no alias is set — qualifier
-        // resolves against `full_name`. Case-insensitive comparison.
         let table = mk_metadata_table(
             "Справочник.Товары",
             None,
@@ -786,9 +570,6 @@ mod tests {
     #[test]
     fn bare_asterisk_walks_all_tables_in_declaration_order() {
         let db = InMemoryDb::new();
-        // `SELECT * FROM A, B` — bare asterisk produces A's fields first,
-        // then B's. Order is preserved so `lookup_field`'s linear scan
-        // matches the first-occurrence-wins rule consumers expect.
         let table_a =
             mk_metadata_table("Справочник.A", None, vec![FieldDef::new("X", SdblType::Boolean)]);
         let table_b =
@@ -801,9 +582,6 @@ mod tests {
     #[test]
     fn bare_asterisk_dedupes_duplicate_names_first_wins() {
         let db = InMemoryDb::new();
-        // Two tables both expose `Ссылка`. First-wins dedup keeps the
-        // first table's type (here a CatalogRef) and drops the second's,
-        // mirroring `lookup_field`'s linear scan order.
         let table_a = mk_metadata_table(
             "Справочник.A",
             None,
@@ -828,10 +606,6 @@ mod tests {
     #[test]
     fn mixed_asterisk_and_named_appends_named_after_expansion() {
         let db = InMemoryDb::new();
-        // `SELECT *, NamedField` — asterisk-expanded fields come first,
-        // named field appended. Dedup is by lowercased name first-wins:
-        // a named field that re-projects an asterisk field (same name)
-        // is dropped.
         let table = mk_metadata_table(
             "Справочник.Товары",
             None,
@@ -843,9 +617,7 @@ mod tests {
         let q = mk_query(
             vec![
                 mk_asterisk(None),
-                // Re-projection of an asterisk-expanded name — must be deduped.
                 mk_named("Ссылка", SdblType::reference(MdoType::Catalog, "Товары")),
-                // Distinct name — must be appended.
                 mk_named("Новое", SdblType::Boolean),
             ],
             vec![table],
@@ -857,12 +629,6 @@ mod tests {
     #[test]
     fn asterisk_against_register_walks_combined_fields() {
         let db = InMemoryDb::new();
-        // Register virtual-table fields (`<Resource>Оборот` etc.) are
-        // synthesised by the SDBL lowerer into `Register::fields` before
-        // the bridge runs. Asterisk over a register expands every field
-        // the lowerer prepared — dimensions + resources + attributes when
-        // it's a plain register, or the synthesised virtual-table columns
-        // when it's `.Обороты(...)`.
         let table = mk_register_table(
             "РегистрНакопления.ОстаткиТоваров.Обороты",
             vec![
@@ -895,10 +661,6 @@ mod tests {
     #[test]
     fn asterisk_against_temp_table_expands_subquery_fields() {
         let db = InMemoryDb::new();
-        // `SELECT * FROM ВТ_Имена AS T` — temp tables carry the
-        // originating subquery's SELECT names/types in
-        // `ResolvedTable::TempTable::fields`. The bridge treats them
-        // identically to Metadata tables.
         let table = mk_temp_table(
             "ВТ_Имена",
             Some("T"),
@@ -915,9 +677,6 @@ mod tests {
     #[test]
     fn qualified_asterisk_with_no_matching_table_yields_none() {
         let db = InMemoryDb::new();
-        // `SELECT Z.* FROM Catalog.A AS Т` — qualifier `Z` matches
-        // neither alias nor full_name. Asterisk contributes nothing;
-        // the projection is None because no other fields are present.
         let table = mk_metadata_table(
             "Справочник.A",
             Some("Т"),
@@ -933,9 +692,6 @@ mod tests {
     #[test]
     fn asterisk_against_unresolved_table_yields_none() {
         let db = InMemoryDb::new();
-        // `SELECT * FROM <parse_error>` — TableRef::metadata is None.
-        // The bridge contributes no fields, mirroring the pre-Phase-A
-        // policy for cases where SDBL never resolves the source table.
         let table = TableRef {
             parts: Vec::new(),
             full_name: String::new(),
@@ -953,11 +709,6 @@ mod tests {
     #[test]
     fn bilingual_dedup_drops_named_field_reprojecting_english_spelling() {
         let db = InMemoryDb::new();
-        // `Ссылка` and `Ref` are the bilingual pair for `MetadataKind::CatalogRef`'s
-        // standard reference attribute. An asterisk expansion that yields
-        // `Ссылка` (with `name_en = Some("Ref")`) must seed BOTH spellings
-        // into the dedup set so a later `SELECT *, T.Ref AS R` (or any
-        // named field re-projecting the English spelling) is dropped.
         let table = mk_metadata_table(
             "Справочник.Товары",
             None,
@@ -970,7 +721,6 @@ mod tests {
         let q = mk_query(
             vec![
                 mk_asterisk(None),
-                // English-spelling re-projection — must be deduped.
                 mk_named("Ref", SdblType::reference(MdoType::Catalog, "Товары")),
             ],
             vec![table],
@@ -986,8 +736,6 @@ mod tests {
     #[test]
     fn asterisk_field_with_parse_error_is_skipped() {
         let db = InMemoryDb::new();
-        // Defensive: a parse-error asterisk does not crash expansion;
-        // it's skipped entirely, just like any other parse-error field.
         let table = mk_metadata_table(
             "Справочник.Товары",
             None,
@@ -1002,13 +750,6 @@ mod tests {
     #[test]
     fn cast_projection_field_carries_precise_shadow_display() {
         let db = InMemoryDb::new();
-        // Phase G end-to-end contract: a SELECT field whose expression is
-        // a CAST/ВЫРАЗИТЬ-typed `SdblType::Number { Some(15), Some(2) }`
-        // (the shape the lowerer now produces for
-        // `ВЫРАЗИТЬ(0 КАК Число(15, 2))`) must flow precision/scale into
-        // `SdblTypeShadowFacet.display` via `field.ty.to_string()`. The
-        // structural `Ty` collapses to `Ty::Number` — display lives only
-        // in the shadow lane.
         let cast_field = FieldHir {
             expr: ExprHir::Missing { range: MODULE_RANGE },
             alias: Some(sdbl_hir::Name::from("Цена")),
@@ -1037,9 +778,6 @@ mod tests {
     #[test]
     fn cast_projection_field_renders_precision_only_number() {
         let db = InMemoryDb::new();
-        // Precision-only CAST (`ВЫРАЗИТЬ(0 КАК Число(15))`) is a Phase G
-        // Slice 2 addition — Display now emits `Число(15)` instead of the
-        // bare `Число` it used to collapse to.
         let cast_field = FieldHir {
             expr: ExprHir::Missing { range: MODULE_RANGE },
             alias: Some(sdbl_hir::Name::from("Сумма")),
@@ -1060,12 +798,6 @@ mod tests {
 
     #[test]
     fn composite_with_aggregate_folds_to_single_arm() {
-        // `SUM(Number)` lowers to `Aggregate(Number)` which the bridge
-        // strips to `Number`. A composite of `[Number, Aggregate(Number)]`
-        // must dedup down to a single `Number` after bridging — the
-        // union constructor is responsible for the fold; this test pins
-        // the contract end-to-end so a future refactor that reorders
-        // aggregate handling can't silently break it.
         let db = InMemoryDb::new();
         let t = SdblType::Composite {
             types: vec![

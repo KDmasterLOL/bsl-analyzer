@@ -1,8 +1,3 @@
-//! NonExportMethodsInApiRegion diagnostic.
-//!
-//! Reports non-export methods placed inside API regions such as
-//! `ПрограммныйИнтерфейс` / `Public`.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -37,13 +32,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         .get_bool(DiagnosticCode::NonExportMethodsInApiRegion, "skipAnnotatedMethods")
         .unwrap_or(false);
 
-    // Get HIR structures (both cached via Salsa)
     let region_tree = ctx.region_tree();
     let item_tree = ctx.item_tree();
 
     let mut diagnostics = Vec::new();
 
-    // Check procedures
     for (_, proc) in item_tree.procedures() {
         check_method(
             proc.is_export,
@@ -59,7 +52,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         );
     }
 
-    // Check functions
     for (_, func) in item_tree.functions() {
         check_method(
             func.is_export,
@@ -80,7 +72,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics
 }
 
-/// Check a single method (procedure or function) for placement in an API region.
 #[allow(clippy::too_many_arguments)]
 fn check_method(
     is_export: bool,
@@ -94,17 +85,14 @@ fn check_method(
     ctx: &DiagnosticsContext,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    // Skip exported methods - they're allowed in API regions
     if is_export {
         return;
     }
 
-    // Check if method is inside an API region
     let Some(region_name) = region_tree.root_api_region_for_range(source_range) else {
-        return; // Not in API region - ok
+        return;
     };
 
-    // Optionally skip methods with built-in annotations
     if skip_annotated_methods && has_builtin_annotations(annotations) {
         return;
     }
@@ -123,7 +111,6 @@ fn check_method(
     });
 }
 
-/// Check if method has any built-in annotations recognized by ItemTree lowering.
 fn has_builtin_annotations(annotations: &[Annotation]) -> bool {
     !annotations.is_empty()
 }
@@ -344,7 +331,6 @@ mod tests {
               message: Перенесите неэкспортный метод "АннотированныйМетод" из области "СлужебныйПрограммныйИнтерфейс"
               severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
 
-        // snapshot-skip: specific range arithmetic for the skipped built-in annotation.
         for diag in &diagnostics {
             let (line, _, _, _) = range_to_line_col(code, diag.range);
             assert_ne!(line, 72, "Line 72 should be skipped with skipAnnotatedMethods=true");

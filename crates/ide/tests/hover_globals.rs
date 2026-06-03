@@ -1,8 +1,3 @@
-//! Hover tests for bare HBK global identifiers and the MDO-plural
-//! interaction with the implicit-variable branch.
-//!
-//! The `$0` marker denotes the cursor position.
-
 use ide::Analysis;
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
@@ -61,10 +56,6 @@ fn hbk_globals_available() -> bool {
     !bsl_platform::PlatformDataInner::instance().all_global_properties().is_empty()
 }
 
-// =====================================================================
-// 1. Bare HBK property surfaces rich markup
-// =====================================================================
-
 #[test]
 fn hover_bare_metadata_shows_hbk_property_markup() {
     if !hbk_globals_available() {
@@ -83,18 +74,6 @@ fn hover_bare_metadata_shows_hbk_property_markup() {
     assert!(markup.contains("Только чтение"), "readonly marker missing; markup: {markup}");
 }
 
-// =====================================================================
-// 2. Bare MDO plural combines workspace ManagerCollection + HBK enrichment (Phase D)
-// =====================================================================
-//
-// Pre-Phase-D this test asserted the negative: implicit-variable branch
-// rendered only the workspace shape, no HBK markup. Phase D enriches the
-// rendering with HBK metadata (readonly / description / availability)
-// while keeping the workspace-shape `Тип:` line authoritative. The pin is
-// now twofold: workspace shape (singular `ДокументМенеджер`) must NOT be
-// replaced by HBK's declared plural form (`ДокументыМенеджер`), AND HBK's
-// readonly marker must surface.
-
 #[test]
 fn hover_bare_mdo_plural_combines_workspace_shape_and_hbk() {
     if !hbk_globals_available() {
@@ -108,8 +87,6 @@ fn hover_bare_mdo_plural_combines_workspace_shape_and_hbk() {
 "#,
     )
     .expect("hover should resolve for MDO plural");
-    // Workspace shape stays authoritative — singular manager prefix
-    // (`ДокументМенеджер`), not HBK's plural declared type (`ДокументыМенеджер`).
     assert!(
         markup.contains("ДокументМенеджер"),
         "workspace ManagerCollection shape must surface; markup: {markup}"
@@ -118,16 +95,11 @@ fn hover_bare_mdo_plural_combines_workspace_shape_and_hbk() {
         !markup.contains("ДокументыМенеджер"),
         "HBK declared plural manager type must NOT replace workspace shape; markup: {markup}"
     );
-    // HBK enrichment: readonly is set for all 17 HBK-shipped MDO plurals.
     assert!(
         markup.contains("Только чтение"),
         "HBK readonly marker must surface for MDO plural; markup: {markup}"
     );
 }
-
-// =====================================================================
-// 2b. HBK description surfaces on MDO plural hover (Phase D)
-// =====================================================================
 
 #[test]
 fn hover_mdo_plural_shows_hbk_description_when_present() {
@@ -157,19 +129,6 @@ fn hover_mdo_plural_shows_hbk_description_when_present() {
     );
 }
 
-// =====================================================================
-// 2c. Implicit assignment rebind to a different MDO plural — HBK enrichment
-// suppressed, rebound workspace shape rendered (Phase D)
-// =====================================================================
-//
-// `Документы = Справочники;` rebinds the bareword to
-// `Ty::ManagerCollection(Catalog)`. `resolve_name_to_definition` still
-// returns `Definition::MdoCollectionType(Document)` (implicit locals are
-// invisible to the classifier). Without a gate, the hover would render
-// HBK `Документы` metadata on a binding that holds Catalog — misleading.
-// Pins the inferred-Ty disagreement gate inside the
-// `Definition::MdoCollectionType` arm of `definition_to_hover`.
-
 #[test]
 fn hover_mdo_plural_implicit_rebind_renders_rebound_shape() {
     if !hbk_globals_available() {
@@ -184,38 +143,19 @@ fn hover_mdo_plural_implicit_rebind_renders_rebound_shape() {
 "#,
     )
     .expect("hover should resolve at rebound site");
-    // Rebound to Catalog — workspace shape must surface as СправочникМенеджер.
     assert!(
         markup.contains("СправочникМенеджер"),
         "rebound workspace shape must surface; markup: {markup}"
     );
-    // HBK readonly marker is the Phase D enrichment signal — must NOT
-    // leak when the binding's authoritative type disagrees with the
-    // resolved MDO type.
     assert!(
         !markup.contains("Только чтение"),
         "HBK readonly marker leaked despite rebind disagreement; markup: {markup}"
     );
-    // Bilingual title `**Документы (Documents)**` is the HBK-path
-    // signature; rebind path must not emit it.
     assert!(
         !markup.contains("Документы (Documents)"),
         "HBK bilingual title leaked despite rebind disagreement; markup: {markup}"
     );
 }
-
-// =====================================================================
-// 2d. Primitive-typed implicit shadow suppresses HBK enrichment (Phase D)
-// =====================================================================
-//
-// `Документы = "x";` rebinds the bareword to `Ty::String` (an
-// inference-level implicit local). `resolve_name_to_definition` still
-// returns `Definition::MdoCollectionType(Document)`. The whitelist gate
-// must reject any non-`ManagerCollection(self)` non-`Unknown` Ty as
-// "rebind disagreement" so HBK Document metadata does not leak onto a
-// binding that holds a string. Primitive shadows are common in BSL
-// idioms (config loaders / migration scripts) and the wrong hover here
-// actively misleads.
 
 #[test]
 fn hover_mdo_plural_primitive_shadow_renders_rebound_shape() {
@@ -245,10 +185,6 @@ fn hover_mdo_plural_primitive_shadow_renders_rebound_shape() {
     );
 }
 
-// =====================================================================
-// 3. Local Перем shadows HBK Метаданные (definition_to_hover branch)
-// =====================================================================
-
 #[test]
 fn hover_local_shadowing_metadata_uses_local_hover() {
     if !hbk_globals_available() {
@@ -262,18 +198,11 @@ fn hover_local_shadowing_metadata_uses_local_hover() {
 "#,
     )
     .expect("hover should resolve at Перем declaration");
-    // At the declaration token, hover should describe the local variable,
-    // not the HBK property — `Только чтение` would only appear if we
-    // accidentally rendered the HBK markup.
     assert!(
         !markup.contains("ОбъектМетаданныхКонфигурация"),
         "HBK markup leaked when local Перем shadows the global; markup: {markup}"
     );
 }
-
-// =====================================================================
-// 4. Local Перем shadows MDO plural (Codex pair-review IMPORTANT #2)
-// =====================================================================
 
 #[test]
 fn hover_local_var_shadows_mdo_plural() {
@@ -285,28 +214,17 @@ fn hover_local_var_shadows_mdo_plural() {
 "#,
     )
     .expect("hover should resolve at Перем declaration");
-    // Must not render ManagerCollection or HBK property markup.
     assert!(
         !markup.contains("ДокументыМенеджер"),
         "HBK manager type leaked when local shadows MDO plural; markup: {markup}"
     );
 }
 
-// =====================================================================
-// 4b. Workspace CommonModule shadows HBK property at hover
-// =====================================================================
-
 #[test]
 fn hover_workspace_cm_shadows_hbk_global_property() {
     if !hbk_globals_available() {
         return;
     }
-    // With a workspace CommonModule `Метаданные` in scope, bare `Метаданные`
-    // is shadowed away from HBK by `Resolver::user_common_module_exists`.
-    // Hover must not surface the HBK markup. Whether the IDE then renders a
-    // CommonModule definition hover or returns no hover is an orthogonal
-    // concern (today `resolve_name_to_definition` doesn't surface CMs for
-    // bare-ident position, so None is acceptable).
     let markup = hover_markup(
         r#"//- /CommonModules/Метаданные/Ext/Module.bsl
 Функция Foo() Экспорт
@@ -327,16 +245,6 @@ fn hover_workspace_cm_shadows_hbk_global_property() {
     }
 }
 
-// =====================================================================
-// 1b. Primitive-typed HBK global property still renders rich markup
-// =====================================================================
-//
-// `ПараметрЗапуска` declares `Строка` (primitive). `infer.rs:1500` lowers
-// the declared type via `TyLoweringContext::lower_bare_name` → `Ty::String`.
-// The hover gate must use the same lowering to compare, otherwise a
-// string-name comparison (`Ty::String.platform_type_name() = "String"` vs
-// declared `"Строка"`) would false-negative the property.
-
 #[test]
 fn hover_primitive_typed_global_property_renders_hbk() {
     if !hbk_globals_available() {
@@ -353,12 +261,6 @@ fn hover_primitive_typed_global_property_renders_hbk() {
     )
     .expect("hover should resolve for primitive-typed global property");
 
-    // The implicit-variable fallback in `hover_free_name` would also
-    // surface the title + type, so those alone don't pin HBK rendering.
-    // Use HBK-exclusive markers that `render_property_hover` emits but the
-    // generic fallback does NOT: bilingual title `**Name (EnglishName)**`,
-    // readonly marker for readonly props, or `Доступен с версии:` for
-    // those with min_version.
     let exclusive_marker = format!("**{} ({})**", prop.name, prop.english_name);
     let has_exclusive = markup.contains(&exclusive_marker)
         || (prop.is_readonly && markup.contains("*Только чтение*"))
@@ -374,16 +276,6 @@ fn hover_primitive_typed_global_property_renders_hbk() {
     );
 }
 
-// =====================================================================
-// 4c. Implicit local with different type shadows HBK property at hover
-// =====================================================================
-//
-// Pins the inferred-ty gate in `hover_for_global_property`: if an earlier
-// `infer.rs` cascade step (here: `var_types` step 1, an assigned implicit
-// local) resolves the name to a different `Ty`, HBK markup must NOT
-// surface. The implicit-variable branch in `hover_free_name` then renders
-// the workspace shape.
-
 #[test]
 fn hover_implicit_local_shadows_hbk_property() {
     if !hbk_globals_available() {
@@ -398,9 +290,6 @@ fn hover_implicit_local_shadows_hbk_property() {
 "#,
     )
     .expect("hover should resolve");
-    // Implicit-local assignment makes `Метаданные` a String here; HBK
-    // markup (`ОбъектМетаданныхКонфигурация`, `Только чтение`) must NOT
-    // leak — the workspace-specific inferred type wins.
     assert!(
         !markup.contains("ОбъектМетаданныхКонфигурация"),
         "HBK markup leaked when implicit local shadows the global; markup: {markup}"
@@ -410,10 +299,6 @@ fn hover_implicit_local_shadows_hbk_property() {
         "HBK readonly marker leaked when implicit local shadows the global; markup: {markup}"
     );
 }
-
-// =====================================================================
-// 5. Existing global-function hover path is unaffected
-// =====================================================================
 
 #[test]
 fn hover_bare_global_function_unaffected() {
@@ -431,19 +316,11 @@ fn hover_bare_global_function_unaffected() {
     assert!(markup.contains("НачатьТранзакцию"), "function title missing; markup: {markup}");
 }
 
-// =====================================================================
-// 6. Receiver-path property hover gains min_version / availability when present
-// =====================================================================
-
 #[test]
 fn hover_receiver_property_now_shows_version_and_availability() {
     if !hbk_globals_available() {
         return;
     }
-    // Pick a property that has min_version + context in HBK. `Метаданные`
-    // is a global, not a receiver-property, so probe a receiver-property
-    // that the platform actually exposes. Use bare hover instead — same
-    // `render_property_hover` is exercised.
     let markup = hover_markup(
         r#"//- /test.bsl
 Процедура Тест()

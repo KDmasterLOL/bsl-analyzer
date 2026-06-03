@@ -1,8 +1,3 @@
-//! Adapter for user-defined methods in `ManagerModule.bsl` files
-//! (`Catalogs/<Object>/Ext/ManagerModule.bsl`, `Documents/...`, etc.).
-//!
-//! Closes the gap where signature_help/hover did not consult `module_index.resolve_manager`.
-
 use bsl_metadata::MdoType;
 use hir::{ManagerType, ModItem, ModuleId, Name};
 use ide_db::RootDatabase;

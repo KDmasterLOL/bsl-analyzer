@@ -1,19 +1,9 @@
-//! Builtin type name tables, consolidated from the previously-duplicated
-//! lookups in `hir_def::ty::from_type_name` and `hir_def::ty::doc_types::parse_type_name`.
-//!
-//! The tables are intentionally kept internal to `hir-ty::lower`: outside
-//! consumers go through [`super::TyLoweringContext`] so adding a new primitive
-//! means touching one file.
-
 use bsl_types::builders::Builders;
 use bsl_types::facet::{DateComponent, TableSource};
 use bsl_types::intern::TypeKernelDb;
 use bsl_types::kind::TypeId;
 use hir_def::type_ref::{BuiltinTypeRef, TypeRef};
 
-/// Lower a resolved [`BuiltinTypeRef`] directly into a kernel [`TypeId`].
-///
-/// Mints the `TypeId` directly via [`Builders`] — no legacy `Ty` intermediate.
 pub(super) fn builtin_to_typeid(db: &dyn TypeKernelDb, b: BuiltinTypeRef) -> TypeId {
     match b {
         BuiltinTypeRef::Number => db.number(None, None),
@@ -29,11 +19,6 @@ pub(super) fn builtin_to_typeid(db: &dyn TypeKernelDb, b: BuiltinTypeRef) -> Typ
     }
 }
 
-/// Map a bare type-name token directly into a kernel [`TypeId`].
-///
-/// Mints the `TypeId` directly via [`Builders`] (Array → `db.array(None)`,
-/// Map → `db.map(None, None)`, Builtin → [`builtin_to_typeid`], otherwise →
-/// `db.unknown()`).
 pub fn bare_name_to_typeid(db: &dyn TypeKernelDb, name: &str) -> TypeId {
     match TypeRef::from_bare_name(name) {
         Some(TypeRef::Array(_)) => db.array(None),

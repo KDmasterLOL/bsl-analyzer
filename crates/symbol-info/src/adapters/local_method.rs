@@ -1,5 +1,3 @@
-//! Adapter for methods declared in the caller's own module.
-
 use hir::{ModItem, ModuleId, Name, Resolver};
 use ide_db::RootDatabase;
 use smol_str::SmolStr;

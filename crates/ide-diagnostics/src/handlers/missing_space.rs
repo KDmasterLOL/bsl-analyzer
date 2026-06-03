@@ -1,5 +1,3 @@
-//! Reports missing spaces around configured operators, punctuation, and keywords.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
@@ -27,7 +25,6 @@ const DEFAULT_LIST_FOR_CHECK_LEFT_AND_RIGHT: &str = "+ - * / = % < > <> <= >=";
 const DEFAULT_CHECK_SPACE_TO_RIGHT_OF_UNARY: bool = false;
 const DEFAULT_ALLOW_MULTIPLE_COMMAS: bool = false;
 
-/// Hard-coded set of tokens that indicate the following +/- is unary
 const UNARY_CONTEXT_TOKENS: &[SyntaxKind] = &[
     SyntaxKind::PLUS,
     SyntaxKind::MINUS,
@@ -46,18 +43,12 @@ const UNARY_CONTEXT_TOKENS: &[SyntaxKind] = &[
     SyntaxKind::GE,
 ];
 
-/// Configuration for the diagnostic
 #[derive(Debug, Clone)]
 struct Config {
-    /// Symbols requiring left space only
     left_symbols: HashSet<String>,
-    /// Symbols requiring right space only
     right_symbols: HashSet<String>,
-    /// Symbols requiring both left and right space
     left_right_symbols: HashSet<String>,
-    /// Enforce space after unary +/- operators
     check_space_to_right_of_unary: bool,
-    /// Allow consecutive commas without spaces
     allow_multiple_commas: bool,
 }
 
@@ -65,7 +56,6 @@ impl Config {
     fn from_context(ctx: &DiagnosticsContext) -> Self {
         let code = DiagnosticCode::MissingSpace;
 
-        // Parse space-separated strings into HashSets
         let left_symbols: HashSet<String> = ctx
             .config
             .get_string(code, "listForCheckLeft")
@@ -119,12 +109,10 @@ impl Config {
     }
 }
 
-/// Check if token is trivia (whitespace, newline, comment)
 fn is_trivia(token: &SyntaxToken) -> bool {
     matches!(token.kind(), SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE | SyntaxKind::COMMENT)
 }
 
-/// Keywords requiring space on BOTH sides: OR, AND, IN, TO
 fn is_keyword_with_left_right_space(token: &SyntaxToken) -> bool {
     matches!(
         token.kind(),
@@ -132,12 +120,10 @@ fn is_keyword_with_left_right_space(token: &SyntaxToken) -> bool {
     )
 }
 
-/// Keywords requiring space on LEFT side only: EXPORT, THEN, DO
 fn is_keyword_with_left_space(token: &SyntaxToken) -> bool {
     matches!(token.kind(), SyntaxKind::KW_EXPORT | SyntaxKind::KW_THEN | SyntaxKind::KW_DO)
 }
 
-/// Keywords requiring space on RIGHT side only: IF, ELSIF, WHILE, FOR, NOT, EACH
 fn is_keyword_with_right_space(token: &SyntaxToken) -> bool {
     matches!(
         token.kind(),
@@ -150,43 +136,35 @@ fn is_keyword_with_right_space(token: &SyntaxToken) -> bool {
     )
 }
 
-/// Check if +/- is unary operator by examining previous non-trivia token
 fn is_unary_operator(tokens: &[SyntaxToken], current_index: usize) -> bool {
-    // Find previous non-trivia token
     let mut prev_index = current_index;
     loop {
         if prev_index == 0 {
-            // Start of file - it's unary
             return true;
         }
         prev_index -= 1;
 
         if !is_trivia(&tokens[prev_index]) {
-            // Found non-trivia token
             return UNARY_CONTEXT_TOKENS.contains(&tokens[prev_index].kind());
         }
     }
 }
 
-/// Check if token should be checked for left space
 fn should_check_left(token: &SyntaxToken, config: &Config) -> bool {
     let text = token.text();
     config.left_symbols.contains(text) || is_keyword_with_left_space(token)
 }
 
-/// Check if token should be checked for right space
 fn should_check_right(token: &SyntaxToken, config: &Config) -> bool {
     let text = token.text();
     config.right_symbols.contains(text) || is_keyword_with_right_space(token)
 }
 
-/// Check if token should be checked for both left and right space
 fn should_check_left_right(token: &SyntaxToken, config: &Config) -> bool {
     let text = token.text();
     config.left_right_symbols.contains(text) || is_keyword_with_left_right_space(token)
 }
 
-/// Check for missing left space
 fn check_left_space(
     tokens: &[SyntaxToken],
     index: usize,
@@ -195,19 +173,16 @@ fn check_left_space(
     code: DiagnosticCode,
     ctx: &DiagnosticsContext,
 ) -> Option<Diagnostic> {
-    // First token in file - no left space check
     if index == 0 {
         return None;
     }
 
-    // Find previous non-trivia token
     let mut prev_index = index - 1;
     loop {
         if !is_trivia(&tokens[prev_index]) {
             break;
         }
         if prev_index == 0 {
-            // All tokens before are trivia
             return None;
         }
         prev_index -= 1;
@@ -215,12 +190,10 @@ fn check_left_space(
 
     let prev_token = &tokens[prev_index];
 
-    // Exception: Left paren doesn't require space after it
     if prev_token.kind() == SyntaxKind::L_PAREN {
         return None;
     }
 
-    // Check if there's whitespace immediately to the left (previous token is trivia)
     if index > 0 && is_trivia(&tokens[index - 1]) {
         return None;
     }
@@ -243,7 +216,6 @@ fn check_left_space(
     })
 }
 
-/// Check for missing right space
 fn check_right_space(
     tokens: &[SyntaxToken],
     index: usize,
@@ -252,7 +224,6 @@ fn check_right_space(
     code: DiagnosticCode,
     ctx: &DiagnosticsContext,
 ) -> Option<Diagnostic> {
-    // Special case: unary +/- detection
     if !config.check_space_to_right_of_unary
         && matches!(token.kind(), SyntaxKind::PLUS | SyntaxKind::MINUS)
         && is_unary_operator(tokens, index)
@@ -260,7 +231,6 @@ fn check_right_space(
         return None;
     }
 
-    // Find next non-trivia token
     if index + 1 >= tokens.len() {
         return None;
     }
@@ -278,10 +248,6 @@ fn check_right_space(
 
     let next_token = &tokens[next_index];
 
-    // EOF check (though EOF might not be in tokens list)
-    // The loop above will return None if we reach end of tokens
-
-    // Special case: allow multiple commas if configured
     if config.allow_multiple_commas
         && token.kind() == SyntaxKind::COMMA
         && next_token.kind() == SyntaxKind::COMMA
@@ -289,7 +255,6 @@ fn check_right_space(
         return None;
     }
 
-    // Check if there's whitespace immediately to the right
     if index + 1 < tokens.len() && is_trivia(&tokens[index + 1]) {
         return None;
     }
@@ -312,7 +277,6 @@ fn check_right_space(
     })
 }
 
-/// Check for missing left and/or right space
 fn check_left_right_space(
     tokens: &[SyntaxToken],
     index: usize,
@@ -377,32 +341,27 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let parse = ctx.parse();
     let root = parse.syntax_node();
 
-    // Collect all tokens (including trivia)
     let tokens: Vec<_> = root.descendants_with_tokens().filter_map(|el| el.into_token()).collect();
 
     let mut diagnostics = Vec::new();
 
     for (index, token) in tokens.iter().enumerate() {
-        // Skip trivia tokens
         if is_trivia(token) {
             continue;
         }
 
-        // Check left-only space requirements
         if should_check_left(token, &config) {
             if let Some(diag) = check_left_space(&tokens, index, token, &config, code, ctx) {
                 diagnostics.push(diag);
             }
         }
 
-        // Check right-only space requirements
         if should_check_right(token, &config) {
             if let Some(diag) = check_right_space(&tokens, index, token, &config, code, ctx) {
                 diagnostics.push(diag);
             }
         }
 
-        // Check both left and right space requirements
         if should_check_left_right(token, &config) {
             if let Some(diag) = check_left_right_space(&tokens, index, token, &config, code, ctx) {
                 diagnostics.push(diag);
@@ -426,7 +385,6 @@ mod tests {
         let config = DiagnosticsConfig::default();
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
-        // Expected 44 diagnostics with default configuration
         assert_eq!(diagnostics.len(), 44, "Should find 44 diagnostics");
     }
 
@@ -442,11 +400,6 @@ mod tests {
         let config = DiagnosticsConfig::default();
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
-        // With default config (checkSpaceToRightOfUnary = false):
-        // - Unary minus: no error
-        // - Binary minus: error if missing spaces
-        // By default all operators require spaces, so "А - Б" is correct, no errors expected
-        // Actually looking at the code, there are no spacing errors with default config
         assert_eq!(diagnostics.len(), 0, "Unary operators should not trigger errors by default");
     }
 
@@ -467,7 +420,6 @@ mod tests {
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
-        // With checkSpaceToRightOfUnary = true, should detect missing space after unary minus
         assert_eq!(
             diagnostics.len(),
             1,
@@ -487,8 +439,6 @@ mod tests {
         let config = DiagnosticsConfig::default();
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
-        // Should detect missing space before "Тогда"
-        // The comma and left paren should not trigger errors
         assert!(!diagnostics.is_empty(), "Should detect some spacing errors");
     }
 
@@ -502,7 +452,6 @@ mod tests {
         let config = DiagnosticsConfig::default();
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
-        // Should detect missing space after first comma (before second comma)
         assert!(!diagnostics.is_empty(), "Should detect missing space between commas by default");
     }
 
@@ -523,10 +472,6 @@ mod tests {
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
-        // With allowMultipleCommas = true, consecutive commas are allowed
-        // But still should check other spacing rules
-        // The first comma should still need a space after "60"
-        // Just verifying it doesn't panic - count will vary based on other spacing
         assert!(diagnostics.len() < 10, "Should have fewer errors with allowMultipleCommas");
     }
 
@@ -544,7 +489,6 @@ mod tests {
         let config = DiagnosticsConfig::default();
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
-        // Should detect multiple keyword spacing errors
         assert!(!diagnostics.is_empty(), "Should detect keyword spacing errors");
     }
 
@@ -560,7 +504,6 @@ mod tests {
         let config = DiagnosticsConfig::default();
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
-        // Should detect missing spaces around operators
         assert!(!diagnostics.is_empty(), "Should detect operator spacing errors");
     }
 
@@ -582,7 +525,6 @@ mod tests {
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
-        // Should detect missing spaces around = and +
         assert!(!diagnostics.is_empty(), "Should detect custom symbol spacing");
     }
 }

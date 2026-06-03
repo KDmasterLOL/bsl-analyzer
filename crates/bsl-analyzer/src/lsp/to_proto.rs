@@ -1,5 +1,3 @@
-//! Conversion from internal types to LSP protocol types.
-
 use ide::{Diagnostic as IdeDiagnostic, HlMod, HlRange, HlTag, Severity};
 use ide::{DiagnosticTag as IdeTag, TextRange};
 use line_index::{LineIndex, TextSize};
@@ -11,7 +9,6 @@ use lsp_types::{
 
 use crate::lsp::PositionEncoding;
 
-/// Converts a byte range to a UTF-16 LSP range.
 pub fn range(line_index: &LineIndex, text: &str, range: TextRange) -> Option<Range> {
     range_with_encoding(line_index, text, range, PositionEncoding::Utf16)
 }
@@ -33,20 +30,17 @@ pub fn range_with_encoding(
     Some(Range { start, end })
 }
 
-/// Converts a byte offset to a position whose character is a byte column.
 pub fn position(line_index: &LineIndex, offset: TextSize) -> Option<Position> {
     let line_col = line_index.try_line_col(offset)?;
     Some(Position { line: line_col.line, character: line_col.col })
 }
 
-/// Converts a byte offset to a UTF-16 LSP position.
 pub fn position_utf16(line_index: &LineIndex, text: &str, offset: TextSize) -> Option<Position> {
     let line_col = line_index.try_line_col(offset)?;
     let utf16_col = line_index.utf16_col(text, line_col.line, line_col.col);
     Some(Position { line: line_col.line, character: utf16_col })
 }
 
-/// Maps diagnostic severity to the LSP enum.
 pub fn severity(severity: Severity) -> DiagnosticSeverity {
     match severity {
         Severity::Blocker => DiagnosticSeverity::ERROR,
@@ -59,7 +53,6 @@ pub fn severity(severity: Severity) -> DiagnosticSeverity {
     }
 }
 
-/// Maps diagnostic tags to the LSP enum.
 pub fn diagnostic_tags(tags: &[IdeTag]) -> Option<Vec<DiagnosticTag>> {
     if tags.is_empty() {
         return None;
@@ -75,7 +68,6 @@ pub fn diagnostic_tags(tags: &[IdeTag]) -> Option<Vec<DiagnosticTag>> {
     )
 }
 
-/// Converts an IDE diagnostic to a UTF-16 LSP diagnostic.
 pub fn diagnostic(line_index: &LineIndex, text: &str, diag: &IdeDiagnostic) -> Option<Diagnostic> {
     diagnostic_with_encoding(line_index, text, diag, PositionEncoding::Utf16)
 }
@@ -117,7 +109,6 @@ pub fn diagnostics_with_encoding(
     diags.iter().filter_map(|d| diagnostic_with_encoding(line_index, text, d, encoding)).collect()
 }
 
-/// Converts a URL and byte range to a UTF-16 LSP location.
 pub fn location(
     line_index: &LineIndex,
     text: &str,
@@ -149,7 +140,6 @@ pub fn related_information(
     Some(DiagnosticRelatedInformation { location: loc, message })
 }
 
-/// Converts a diagnostic fix to a UTF-16 LSP code action.
 pub fn code_action(
     line_index: &LineIndex,
     text: &str,
@@ -194,7 +184,6 @@ pub fn code_action_with_encoding(
     })
 }
 
-/// Returns the semantic token types and modifiers advertised to clients.
 pub fn semantic_tokens_legend() -> SemanticTokensLegend {
     let token_types = vec![
         SemanticTokenType::KEYWORD,
@@ -267,10 +256,6 @@ fn token_modifiers_bitset(mods: HlMod) -> u32 {
     bitset
 }
 
-/// Encodes sorted, non-overlapping highlights as UTF-16 LSP semantic tokens.
-///
-/// Invalid input ranges are skipped to avoid emitting an invalid delta stream;
-/// such ranges indicate an `ide::highlight()` contract violation.
 pub fn semantic_tokens(
     line_index: &LineIndex,
     text: &str,
@@ -288,7 +273,6 @@ pub fn semantic_tokens_with_encoding(
     let mut tokens = Vec::with_capacity(highlights.len());
     let mut prev_line = 0;
     let mut prev_start = 0;
-    // Delta encoding cannot represent overlapping or backwards-sorted ranges.
     let mut prev_max_end: Option<TextSize> = None;
 
     for hl in highlights {
@@ -497,7 +481,6 @@ mod tests {
 
         let result = highlight(&db, file_id);
 
-        // `ide::highlight()` must return sorted, non-overlapping ranges.
         for window in result.highlights.windows(2) {
             assert!(
                 window[0].range.start() <= window[1].range.start(),
@@ -538,7 +521,6 @@ mod tests {
             );
         }
 
-        // Regression check: procedure name `Тест` occupies UTF-16 columns 10..14.
         let proc_name_tokens: Vec<_> = absolute
             .iter()
             .filter(|(line, start, end)| *line == 0 && *start == 10 && *end == 14)

@@ -1,22 +1,11 @@
-//! Per-line token classification used by on-type formatting.
-//!
-//! These helpers operate on a single source line and answer questions like
-//! "does this line start a block?" or "is it a middle keyword (Иначе /
-//! Исключение)?". The IR formatter (`ir.rs`) does *not* use them — it works
-//! at the token-graph level directly. They live here because on-type
-//! formatting fires per-keystroke and needs a cheap line-local view that
-//! doesn't require re-parsing the whole document.
-
 use lexer::{tokenize, TokenKind};
 
-/// Information about tokens in a line for formatting decisions.
 pub(crate) struct LineTokens {
     pub first: Option<TokenKind>,
     pub last: Option<TokenKind>,
     pub has_then: bool,
 }
 
-/// Analyzes a line and extracts token information for formatting.
 pub(crate) fn analyze_line_tokens(line: &str) -> LineTokens {
     let tokens = tokenize(line);
 
@@ -34,7 +23,6 @@ pub(crate) fn analyze_line_tokens(line: &str) -> LineTokens {
     LineTokens { first, last, has_then }
 }
 
-/// Checks if the first token is a block-ending keyword.
 pub(crate) fn is_line_block_end(tokens: &LineTokens) -> bool {
     matches!(
         tokens.first,
@@ -50,9 +38,6 @@ pub(crate) fn is_line_block_end(tokens: &LineTokens) -> bool {
     )
 }
 
-/// Checks if the line is a middle keyword (needs dedent for itself).
-/// Middle keywords: Иначе, ИначеЕсли, Исключение, standalone Тогда/Цикл,
-/// or continuation lines (ИЛИ/И) ending with Тогда/Цикл.
 pub(crate) fn is_line_middle_keyword(tokens: &LineTokens) -> bool {
     let starts_middle = matches!(
         tokens.first,
@@ -86,7 +71,6 @@ pub(crate) fn is_line_middle_keyword(tokens: &LineTokens) -> bool {
     ends_with_then_or_do && !starts_block_keyword
 }
 
-/// Checks if the line starts a block (increases indent for following lines).
 pub(crate) fn is_line_block_start(tokens: &LineTokens) -> bool {
     let first = tokens.first;
 

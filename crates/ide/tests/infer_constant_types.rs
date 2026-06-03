@@ -1,28 +1,3 @@
-//! End-to-end regression for per-constant value-type resolution
-//! (Pluck #2 — `Константы.<Имя>.Получить()` / `Установить()`).
-//!
-//! The platform JSON declares `ConstantManager.<Constant Name>.Get`
-//! with `return_type: "Произвольный"`; pluck #1 collapsed that to
-//! `Ty::Unknown` so the gradual rule no longer false-fires
-//! `TypeMismatch` on typed sinks. Pluck #2 reads each constant's
-//! configuration `<Type>` block and rebinds `Получить`'s return / `Установить`'s
-//! first parameter accordingly, so:
-//!
-//! - real `Ty::String` / `Ty::Number` / `Ty::MetadataRef` / `Ty::Union` types
-//!   are surfaced for downstream chained calls and hover;
-//! - typed sinks (`ПустаяСтрока(...)`, `Цел(...)`, JSDoc-typed CommonModule
-//!   parameters) get a real `TypeMismatch` when callers pass an incompatibly
-//!   typed value.
-//!
-//! Designer-fixture inventory (see
-//! `crates/bsl-metadata/fixtures/designer/Constants/`):
-//! - `СтрокаКонст`     → `xs:string` (length 50)
-//! - `ЧислоКонст`      → `xs:decimal` (digits 10, fraction 2)
-//! - `СсылкаКонст`     → `cfg:CatalogRef.Справочник1`
-//! - `СоставнойКонст`  → union of `xs:string` + `cfg:CatalogRef.Справочник1`
-//! - `ПроизвольныйКонст` → no `<Type>` element (untyped → falls back to
-//!   gradual `Ty::Unknown`)
-
 use hir::{
     Builders, HirDatabase, InferenceDiagnostic, MetadataKind, TypeId, TypeKernelDb, TypeKind,
 };
@@ -79,8 +54,6 @@ fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<Typ
 }
 
 fn type_mismatches(db: &RootDatabaseImpl, file_id: FileId) -> Vec<(TypeId, TypeId)> {
-    // Argument `TypeMismatch` lives in `arg_diagnostics` after the
-    // narrowing-aware split. Chain both sources for forward compatibility.
     db.infer(file_id)
         .diagnostics
         .iter()
@@ -145,8 +118,6 @@ fn three_level_get_resolves_catalog_ref_constant() {
 
 #[test]
 fn three_level_get_resolves_composite_constant() {
-    // `СоставнойКонст` declares `xs:string` + `cfg:CatalogRef.Справочник1` —
-    // must lower to a `Ty::Union` containing both members.
     let fixture = r#"
 //- /test.bsl
 Функция Тест()
@@ -177,10 +148,6 @@ fn three_level_get_resolves_composite_constant() {
 
 #[test]
 fn three_level_get_on_untyped_constant_stays_unknown() {
-    // `ПроизвольныйКонст` has no `<Type>` block — `find_constant_type`
-    // returns `None`, the rebind helper does not override, and the
-    // post-fix-#1 platform `Ty::Unknown` stands. The gradual rule then
-    // keeps `ПустаяСтрока(...)` silent.
     let fixture = r#"
 //- /test.bsl
 Функция Тест()
@@ -200,10 +167,6 @@ fn three_level_get_on_untyped_constant_stays_unknown() {
 
 #[test]
 fn three_level_set_typechecks_first_argument() {
-    // `Установить(<Значение>)` parameter is platform-declared
-    // `Произвольный`; the rebind narrows it to the constant's value
-    // type. Passing a String literal into `ЧислоКонст.Установить(...)`
-    // must fire `TypeMismatch { expected: Number, actual: String }`.
     let fixture = r#"
 //- /test.bsl
 Процедура Тест()
@@ -220,7 +183,6 @@ fn three_level_set_typechecks_first_argument() {
 
 #[test]
 fn three_level_set_with_matching_type_is_silent() {
-    // Same call, type-correct argument — no diagnostic.
     let fixture = r#"
 //- /test.bsl
 Процедура Тест()
@@ -237,16 +199,6 @@ fn three_level_set_with_matching_type_is_silent() {
 
 #[test]
 fn typed_sink_silent_on_number_into_string_via_coercion() {
-    // Pin the call-site coercion rule from `is_coercible_to`:
-    // `ПустаяСтрока(<Number>)` lands a typed-Number constant into
-    // a `String`-declared platform sink. BSL implicitly stringifies
-    // any value flowing into a String slot, so this is noise rather
-    // than a runtime bug — the diagnostic must stay silent.
-    //
-    // Live-typing coverage at the qualified-call hook is already
-    // pinned by `three_level_set_typechecks_first_argument` (which
-    // exercises the reverse direction `String → Number`, where the
-    // coercion rule does NOT apply and the diagnostic still fires).
     let fixture = r#"
 //- /test.bsl
 Функция Тест()
@@ -263,11 +215,6 @@ fn typed_sink_silent_on_number_into_string_via_coercion() {
 
 #[test]
 fn two_level_alias_get_resolves_string_constant() {
-    // Variable-aliased manager: `М = Константы.СтрокаКонст` produces a
-    // `Ty::ObjectManager { kind: Constant, name: "СтрокаКонст" }`
-    // receiver. The follow-up `М.Получить()` flows through
-    // `lookup_method` (not `infer_three_level_call`), so this exercises
-    // the *second* call-site hook in `infer.rs`.
     let fixture = r#"
 //- /test.bsl
 Функция Тест()
@@ -282,19 +229,6 @@ fn two_level_alias_get_resolves_string_constant() {
 
 #[test]
 fn untyped_extension_override_shadows_base_typed_constant() {
-    // Regression for the override-iteration bug Codex flagged at
-    // stop-time review: the base configuration declares `ЧислоКонст`
-    // as `Number`; the extension redeclares the same constant **without**
-    // a `<Type>` element. `resolve_constant_value_type` must treat the
-    // extension's declaration-without-type as a successful match (and
-    // return `None` so platform `Ty::Unknown` stands), not fall through
-    // to the base's typed declaration. Otherwise an explicit untyped
-    // override would silently inherit the base type and a
-    // String-into-Number-typed-sink call site would still false-fire.
-    //
-    // Test asserts the typed sink stays silent: extension-shadowed
-    // `ЧислоКонст.Получить()` lands on `Ty::Unknown` (gradual rule),
-    // so `ПустаяСтрока(...)` produces no diagnostic.
     let fixture = r#"
 //- /test.bsl
 Функция Тест()
@@ -317,7 +251,6 @@ fn untyped_extension_override_shadows_base_typed_constant() {
 
 #[test]
 fn typed_sink_silent_on_get_of_string_constant() {
-    // The original session-1 false positive: now silent.
     let fixture = r#"
 //- /test.bsl
 Функция Тест()

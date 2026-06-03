@@ -1,19 +1,8 @@
-//! Role XML parser
-
 use crate::error::{MetadataError, Result};
 use crate::role::{Role, RoleData};
 
 use super::helpers::{child_bool, child_text, find_child, find_mdo_element, parse_uuid, parse_xml};
 
-/// Parse Role XML from Designer format
-///
-/// # Arguments
-///
-/// * `xml` - XML content as string (from Roles/<Name>.xml)
-///
-/// # Returns
-///
-/// Parsed `Role` structure (without rights data)
 pub fn parse_role_xml(xml: &str) -> Result<Role> {
     let _span = tracing::debug_span!("parse_role_xml").entered();
 
@@ -40,20 +29,10 @@ pub fn parse_role_xml(xml: &str) -> Result<Role> {
     Ok(role)
 }
 
-/// Parse Rights XML from Designer format
-///
-/// # Arguments
-///
-/// * `xml` - XML content as string (from Roles/<Name>/Ext/Rights.xml)
-///
-/// # Returns
-///
-/// Parsed `RoleData` structure
 pub fn parse_rights_xml(xml: &str) -> Result<RoleData> {
     let _span = tracing::debug_span!("parse_rights_xml").entered();
 
     let doc = parse_xml(xml)?;
-    // The root element IS the <Rights> element
     let rights_node = doc.root_element();
 
     let set_for_new_objects = child_bool(rights_node, "setForNewObjects");

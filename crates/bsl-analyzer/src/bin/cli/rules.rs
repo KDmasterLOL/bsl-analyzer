@@ -4,31 +4,24 @@ use clap::{Subcommand, ValueEnum};
 
 #[derive(Subcommand)]
 pub enum RulesCommands {
-    /// Export rules in SonarQube-compatible format
     Export {
-        /// Output format
         #[arg(long, value_enum, default_value_t = RulesFormat::Sonarqube)]
         format: RulesFormat,
 
-        /// Language for descriptions (ru, en)
         #[arg(long, default_value = "ru")]
         lang: String,
 
-        /// Output file (default: stdout)
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
 
-    /// List all available diagnostic codes
     List,
 }
 
 #[derive(Debug, Clone, Default, ValueEnum)]
 pub enum RulesFormat {
-    /// SonarQube plugin format (JSON)
     #[default]
     Sonarqube,
-    /// Simple JSON format
     Json,
 }
 
@@ -85,8 +78,6 @@ fn export_rules(lang: &str, format: &RulesFormat) -> serde_json::Value {
 
     let is_ru = lang == "ru";
 
-    // Keep metadata for deprecated diagnostics so existing downstream SonarQube
-    // profiles can still validate rule keys even when the diagnostics no longer emit.
     let rules: Vec<serde_json::Value> = all_diagnostic_codes()
         .filter_map(|code| {
             let metadata = get_metadata(code)?;
@@ -183,7 +174,6 @@ fn tag_to_str(tag: &ide::MetadataTag) -> &'static str {
     }
 }
 
-/// Simple Markdown to HTML conversion for SonarQube descriptions.
 fn markdown_to_html(md: &str) -> String {
     if md.is_empty() {
         return String::new();
@@ -230,7 +220,6 @@ fn markdown_to_html(md: &str) -> String {
 
         if let Some(header) = trimmed.strip_prefix("# ") {
             flush_paragraph(&mut html, &mut current_paragraph);
-            // Skip the main title (first header).
             if !html.is_empty() {
                 html.push_str(&format!("<h3>{}</h3>\n", escape_html(header)));
             }

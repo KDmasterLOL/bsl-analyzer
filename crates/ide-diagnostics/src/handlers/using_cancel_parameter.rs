@@ -1,5 +1,3 @@
-//! Reports unsafe assignments to the `Cancel` / `Отказ` event-handler parameter.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};

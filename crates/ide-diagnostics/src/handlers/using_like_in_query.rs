@@ -1,5 +1,3 @@
-//! Reports usage of `LIKE` / `ПОДОБНО` in query text.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -19,7 +17,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     clean_code_attribute: CleanCodeAttribute::Adaptable,
 };
 
-/// Single-pass dispatch for UsingLikeInQuery.
 pub(crate) fn dispatch(
     ctx: &DiagnosticsContext,
     diag: &sdbl_hir::SdblDiagnostic,
@@ -27,9 +24,6 @@ pub(crate) fn dispatch(
     query_text: &str,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    // Track 2 §4 Slice 4: any LikeUsage (Allowed or Incorrect kind) triggers
-    // UsingLikeInQuery; the IncorrectUseLikeInQuery rule fires additionally
-    // for the Incorrect kind via its own handler.
     if let sdbl_hir::SdblDiagnostic::LikeUsage { range, .. } = diag {
         crate::sdbl_utils::dispatch_simple(
             ctx,

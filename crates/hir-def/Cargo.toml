@@ -12,6 +12,7 @@ syntax.workspace = true
 vfs.workspace = true
 intern.workspace = true
 salsa.workspace = true
+rayon.workspace = true
 rustc-hash.workspace = true
 la-arena.workspace = true
 ordered-float.workspace = true
@@ -19,13 +20,6 @@ smol_str.workspace = true
 smallvec.workspace = true
 text-size.workspace = true
 tracing.workspace = true
-# NOTE: cfg dependency creates circular crate dependency (hir-def → cfg → hir-def)
-# However, this is acceptable because:
-# 1. Cargo supports circular crate dependencies (not same as type cycles)
-# 2. No circular type dependencies: cfg uses hir-def types (StmtId, ExprId), hir-def uses CFG for analysis
-# 3. Enables CFG-based diagnostics in hir-def
-# TODO: Uncomment after cfg-types refactoring completes
-# cfg.workspace = true
 parser.workspace = true
 parser-error.workspace = true
 sdbl-hir.workspace = true

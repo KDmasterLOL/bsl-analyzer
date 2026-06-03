@@ -1,8 +1,3 @@
-//! CommonModuleNameClientServer diagnostic
-//!
-//! ClientServer CommonModules must contain "ClientServer" or "КлиентСервер" in their name.
-//!
-
 use crate::define_common_module_name_check;
 use crate::metadata::*;
 

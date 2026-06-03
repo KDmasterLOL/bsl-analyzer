@@ -1,5 +1,3 @@
-//! Reports `ОтменитьТранзакцию` / `RollbackTransaction` calls in invalid positions.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -200,9 +198,6 @@ EndFunction
 
     #[test]
     fn test_first_rollback_without_local_transaction_snapshot() {
-        // Track 3 Phase C §4.2: this diagnostic is positional only.
-        // Pairing with a concrete Begin/Commit is handled by
-        // PairingBrokenTransaction, not by this handler.
         check_diagnostics_snapshot_for(
             r#"Процедура Тест()
     Попытка

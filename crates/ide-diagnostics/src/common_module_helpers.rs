@@ -1,13 +1,9 @@
-//! Helper functions for CommonModule diagnostics.
-
 use bsl_metadata::traits::{MdObject, Module};
 use bsl_metadata::CommonModule;
 use hir::ModuleMetadata;
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 
-/// Check if module is Client type:
-/// !serverCall && !server && !externalConnection && (clientOrdinary || clientManaged)
 pub fn is_client(module: &CommonModule, ordinary_app_support: bool) -> bool {
     !module.is_server_call()
         && !module.is_server()
@@ -16,8 +12,6 @@ pub fn is_client(module: &CommonModule, ordinary_app_support: bool) -> bool {
         && module.is_client_managed_application()
 }
 
-/// Check if module is ClientServer type:
-/// !serverCall && server && externalConnection && (clientOrdinary || clientManaged)
 pub fn is_client_server(module: &CommonModule, ordinary_app_support: bool) -> bool {
     !module.is_server_call()
         && module.is_server()
@@ -26,8 +20,6 @@ pub fn is_client_server(module: &CommonModule, ordinary_app_support: bool) -> bo
         && module.is_client_managed_application()
 }
 
-/// Check if module is ServerCall type:
-/// serverCall && server && !externalConnection && !clientOrdinary && !clientManaged
 pub fn is_server_call(module: &CommonModule) -> bool {
     module.is_server_call()
         && module.is_server()
@@ -36,8 +28,6 @@ pub fn is_server_call(module: &CommonModule) -> bool {
         && !module.is_client_managed_application()
 }
 
-/// Check if module is Server type:
-/// !serverCall && server && externalConnection && clientOrdinaryIfNeed && !clientManaged
 pub fn is_server(module: &CommonModule, ordinary_app_support: bool) -> bool {
     !module.is_server_call()
         && module.is_server()
@@ -50,7 +40,6 @@ fn is_client_ordinary_app_if_need(module: &CommonModule, ordinary_app_support: b
     module.is_client_ordinary_application() || !ordinary_app_support
 }
 
-/// Find CommonModule metadata for given file
 pub fn find_common_module_for_file(
     ctx: &crate::DiagnosticsContext,
     configuration: &bsl_metadata::Configuration,
@@ -70,28 +59,6 @@ pub fn find_common_module_for_file(
         .cloned()
 }
 
-/// CFE-aware variant of [`find_common_module_for_file`].
-///
-/// Returns the CommonModule whose source file matches the current
-/// file's path, searched across **every** visible configuration (main +
-/// extensions) rather than only the main one. Order is the same as
-/// `DiagnosticsContext::visible_configurations()` — main first, then
-/// extensions in registration order — so the first match is
-/// deterministic.
-///
-/// CommonModule URIs in metadata are stored config-relative
-/// (`CommonModules/{Name}/Ext/Module.bsl`); each candidate URI is
-/// resolved against the entry's `root` before comparison so the
-/// match works under multi-root CFE setups. Providers that don't
-/// supply a meaningful root (streaming/test providers) fall through to
-/// the legacy raw-URI comparison so single-config behaviour is
-/// preserved.
-///
-/// Handlers that key off "is *this file* a CommonModule?" without
-/// caring whether it lives in the main configuration or in an
-/// extension (`ProtectedModule`, `PrivilegedModuleMethodCall`,
-/// `ExecuteExternalCodeInCommonModule`) should prefer this over the
-/// main-only [`find_common_module_for_file`].
 pub fn find_common_module_for_file_anywhere(
     ctx: &crate::DiagnosticsContext,
 ) -> Option<bsl_metadata::CommonModule> {
@@ -102,7 +69,6 @@ pub fn find_common_module_for_file_anywhere(
         let module = visible.config.configuration.common_modules().iter().find(|m| {
             let Some(uri) = m.uri() else { return false };
             if visible.root.as_os_str().is_empty() {
-                // Single-config provider: legacy raw-URI comparison.
                 uri.to_lowercase() == file_path_lower
             } else {
                 visible.root.join(uri).to_string_lossy().to_lowercase() == file_path_lower
@@ -115,10 +81,6 @@ pub fn find_common_module_for_file_anywhere(
     None
 }
 
-/// Reusable check for CommonModuleName* diagnostics.
-///
-/// `name_should_contain` = true  — error if name does NOT contain keyword
-/// `name_should_contain` = false — error if name DOES contain keyword (GlobalClient case)
 pub fn check_common_module_name(
     metadata: &ModuleMetadata,
     ctx: &DiagnosticsContext,
@@ -162,14 +124,8 @@ pub fn check_common_module_name(
     }]
 }
 
-/// Macro to generate METADATA const + `from_metadata` for CommonModuleName* diagnostics.
-///
-/// Eliminates boilerplate in 7 handler files that all delegate to `check_common_module_name()`.
-/// Common fields (scope, modules, minutes_to_fix, etc.) are hardcoded since they're identical
-/// across all CommonModuleName diagnostics.
 #[macro_export]
 macro_rules! define_common_module_name_check {
-    // Variant with explicit clean_code_attribute
     (
         code: $code:ident,
         diagnostic_type: $dtype:expr,
@@ -211,7 +167,6 @@ macro_rules! define_common_module_name_check {
             )
         }
     };
-    // Variant without clean_code_attribute (auto-derived)
     (
         code: $code:ident,
         diagnostic_type: $dtype:expr,

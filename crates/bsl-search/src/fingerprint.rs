@@ -58,6 +58,7 @@ mod tests {
             line_end: 0,
             text: "body".to_owned(),
             content_hash: "hash-a".to_owned(),
+            graph_context: None,
         }];
         let docs_b = vec![IndexedDocument { text: "changed".to_owned(), ..docs_a[0].clone() }];
 

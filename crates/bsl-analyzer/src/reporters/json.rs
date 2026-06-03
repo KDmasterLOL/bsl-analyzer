@@ -1,10 +1,7 @@
-//! JSON reporter for analysis results.
-
 use std::path::Path;
 
 use super::{AnalysisResults, Reporter};
 
-/// JSON reporter that writes results to bsl-json.json file.
 pub struct JsonReporter;
 
 impl Reporter for JsonReporter {

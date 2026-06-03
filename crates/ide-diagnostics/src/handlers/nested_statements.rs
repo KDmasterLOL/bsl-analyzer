@@ -1,19 +1,3 @@
-//! NestedStatements diagnostic.
-//!
-//! Reports control-flow statements nested deeper than the configured limit.
-//!
-//! ## Track 2 Phase B §6.4 migration
-//! Pre-migration the legacy `from_hir` adapter consumed
-//! `BodyDiagnostic::NestedStatements`, which was emitted from
-//! `lower::stmt::exit_nesting_stmt` once per **leaf** nesting statement.
-//! That leaf-emit pattern is preserved here: the `compute_hir_metrics`
-//! visitor records a `NestingLeafMetrics { stmt, depth }` entry for
-//! every innermost nesting statement, and this handler replays the
-//! threshold filter directly against the cached
-//! `module_hir_metrics_query` data — one diagnostic per over-budget
-//! leaf, attached to the leaf's first keyword (`Если` / `Пока` / `Для` /
-//! `Попытка`) recovered through the parse tree.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -36,11 +20,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 
 const DEFAULT_MAX_ALLOWED_LEVEL: i64 = 4;
 
-/// Track 2 Phase B §6.4 — handler-side detection consuming the cached
-/// `HirMethodMetrics::nesting_leaves` via `ctx.module_hir_metrics()`.
-/// Emits one diagnostic per leaf nesting statement whose 1-indexed
-/// depth exceeds the `maxAllowedLevel` config (mirrors the legacy
-/// behaviour the retired `lower::stmt::exit_nesting_stmt` produced).
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::NestedStatements;
     if ctx.is_disabled_with_metadata(code) {
@@ -58,10 +37,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let parse = ctx.parse();
     let root = parse.syntax_node();
 
-    // Sort by `local_id` for deterministic outer-method ordering —
-    // matches the §6.4 cohort follow-up. Inner per-leaf ordering
-    // already comes from HIR allocation order via
-    // `metrics.nesting_leaves`.
     let mut local_ids: Vec<u32> = module_bodies.iter_bodies().map(|(id, _)| id).collect();
     local_ids.sort_unstable();
 
@@ -74,10 +49,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         let Some(source_map) = module_bodies.source_map(local_id) else { continue };
         emit_leaves(ctx, code, &metrics, source_map, &root, max_allowed_level, &mut out);
     }
-    // Module-level code: top-level Если/Пока/Для/Попытка outside any
-    // method body. The legacy lowering-time emit ran for these the same
-    // way it ran for method bodies — preserve that coverage by walking
-    // the synthetic "module body" entry.
     if let Some(metrics) = module_metrics.module_code() {
         if !metrics.nesting_leaves.is_empty() {
             if let Some(lower_result) = module_bodies.module_code_result() {
@@ -122,17 +93,6 @@ fn emit_leaves(
     }
 }
 
-/// Find the first `Если` / `Пока` / `Для` / `Попытка` keyword token
-/// within `stmt_range`. Mirrors the retired
-/// `lower::stmt::get_nesting_keyword_range` behaviour, recovering
-/// keyword precision so the migrated diagnostic preserves the same
-/// per-leaf range the legacy emit produced.
-///
-/// Codex round-A fix: scope the token walk to the covering syntax
-/// element instead of the whole file. Without scoping the cost was
-/// `O(file_tokens × violating_leaves)`, which on 50k-LOC modules with
-/// many deep violations becomes an LSP-latency risk; covering-element
-/// scoping caps each call at `O(stmt_size)`.
 fn first_nesting_keyword(
     root: &SyntaxNode,
     stmt_range: ide_db::TextRange,

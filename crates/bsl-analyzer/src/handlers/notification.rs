@@ -1,5 +1,3 @@
-//! Handlers for LSP notifications.
-
 use std::{sync::Arc, time::Instant};
 
 use anyhow::Result;
@@ -15,20 +13,10 @@ use salsa::Database as _;
 
 use crate::global_state::{GlobalState, Task};
 
-/// Returns `true` when a textDocument notification should reach the BSL
-/// pipeline. Editors may attach this server to non-BSL buffers (XML
-/// metadata, OneScript, plain text) — the pipeline can't analyze them and
-/// the URL guards return `Err`, which would surface as a notification
-/// failure. Silently skipping at the notification boundary is the
-/// LSP-correct response for `didOpen` / `didChange` etc.
 fn is_handled_uri(uri: &Url) -> bool {
     uri.to_file_path().map(|p| project_model::is_bsl_source_path(&p)).unwrap_or(false)
 }
 
-/// Schedules diagnostics computation in a background thread.
-///
-/// Previous in-flight diagnostics for the URI are cancelled via their Salsa
-/// token before a fresh worker is queued.
 pub fn schedule_diagnostics(state: &mut GlobalState, uri: &Url) {
     if let Some(prev) = state.diagnostics_tokens.remove(uri) {
         prev.cancel();
@@ -96,7 +84,6 @@ pub fn schedule_diagnostics(state: &mut GlobalState, uri: &Url) {
     });
 }
 
-/// Handles textDocument/didOpen notification.
 pub fn handle_did_open(state: &mut GlobalState, params: DidOpenTextDocumentParams) -> Result<()> {
     let _p = tracing::info_span!("handle_did_open", uri = %params.text_document.uri).entered();
     if !is_handled_uri(&params.text_document.uri) {
@@ -124,9 +111,6 @@ pub fn handle_did_open(state: &mut GlobalState, params: DidOpenTextDocumentParam
         vfs.set_file_contents(vfs_path, Some(Arc::from(text.as_str())));
     }
 
-    // During cold-start, loader batches also flow through `Vfs::changes`.
-    // Draining here is idempotent with the bulk finish drain, but metadata
-    // cache versioning must wait until `warm_metadata_cache` has populated it.
     let process_start = Instant::now();
     state.process_changes(!vfs_done);
     let process_changes_ms = process_start.elapsed().as_millis() as u64;
@@ -149,9 +133,6 @@ pub fn handle_did_open(state: &mut GlobalState, params: DidOpenTextDocumentParam
     Ok(())
 }
 
-/// Preloads dependencies of a file in the background.
-///
-/// Repeated `didOpen` cancels stale warming tasks for the same head file.
 fn preload_dependencies(state: &mut GlobalState, file_id: vfs::FileId) {
     let discover_start = Instant::now();
     let analysis = state.analysis_host.analysis();
@@ -209,7 +190,6 @@ fn preload_dependencies(state: &mut GlobalState, file_id: vfs::FileId) {
     });
 }
 
-/// Handles textDocument/didChange notification.
 pub fn handle_did_change(
     state: &mut GlobalState,
     params: DidChangeTextDocumentParams,
@@ -250,7 +230,6 @@ pub fn handle_did_change(
         vfs.set_file_contents(vfs_path, Some(Arc::from(text.as_str())));
     }
 
-    // Keep the same cold-start drain semantics as `didOpen`.
     state.process_changes(!state.vfs_done);
 
     tracing::debug!("Document updated successfully: {}", uri);
@@ -260,7 +239,6 @@ pub fn handle_did_change(
     Ok(())
 }
 
-/// Handles textDocument/didClose notification.
 pub fn handle_did_close(state: &mut GlobalState, params: DidCloseTextDocumentParams) -> Result<()> {
     let _p = tracing::info_span!("handle_did_close", uri = %params.text_document.uri).entered();
 
@@ -295,8 +273,6 @@ pub fn handle_did_close(state: &mut GlobalState, params: DidCloseTextDocumentPar
     Ok(())
 }
 
-/// If the saved file is a config file (.bsl-analyzer.json or .bsl-language-server.json),
-/// reloads the project config and recalculates diagnostics for all open documents.
 pub fn handle_did_save(state: &mut GlobalState, params: DidSaveTextDocumentParams) -> Result<()> {
     let _p = tracing::info_span!("handle_did_save", uri = %params.text_document.uri).entered();
 
@@ -321,15 +297,6 @@ pub fn handle_did_save(state: &mut GlobalState, params: DidSaveTextDocumentParam
     Ok(())
 }
 
-/// Handles `$/cancelRequest` notification.
-///
-/// Looks up the `salsa::CancellationToken` tracked by `on_latency` for the
-/// given request id and cancels it. The background worker unwinds
-/// cooperatively at the next Salsa query boundary, producing a
-/// `RequestCanceled` response via the normal `Task::RequestResult` path.
-///
-/// Missing ids are a normal race: the worker may beat cancellation to the
-/// finish line.
 pub fn handle_cancel(state: &mut GlobalState, params: lsp_types::CancelParams) -> Result<()> {
     let id = match params.id {
         lsp_types::NumberOrString::Number(n) => lsp_server::RequestId::from(n),
@@ -387,8 +354,6 @@ mod tests {
         assert!(state.mem_docs.contains(&params.text_document.uri));
         assert_eq!(state.mem_docs.get(&params.text_document.uri), Some(params.text_document.text));
 
-        // Cold-start regression: diagnostics for an opened document must not
-        // wait for the full VFS loader sweep to finish.
         assert!(!state.vfs_done);
         assert_eq!(state.diagnostics_generation, 1);
         assert!(state.diagnostics_tokens.contains_key(&params.text_document.uri));

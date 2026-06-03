@@ -17,5 +17,4 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 
 [features]
-# Automatically enabled by build.rs if 1C platform is found
 platform_docs = []

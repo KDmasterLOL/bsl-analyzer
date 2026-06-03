@@ -1,89 +1,26 @@
-//! Syntactic type references.
-//!
-//! `TypeRef` is the **syntactic** description of a BSL type — what the source
-//! expressed before name resolution happened:
-//!
-//! - JSDoc: `// Ссылка - СправочникСсылка.Товары`
-//! - `Новый Массив`, `Тип("Число")`
-//! - XML metadata: `<Type>cfg:CatalogRef.Товары</Type>`
-//! - `ОписаниеТипов("…")` literals
-//!
-//! To turn a `TypeRef` into a semantic `TypeId` the caller must run
-//! `hir_ty::TyLoweringContext::lower_type_ref_id` — that adapter consults the
-//! resolver and the workspace configuration to pick between the
-//! metadata-reference, platform-object, manager-collection, … kernel kinds.
-//!
-//! # Not to be confused with `symbol_info::domain::TypeRef`
-//!
-//! The `symbol-info` crate ships a *presentation-layer* type also called
-//! `TypeRef`: it carries bilingual display strings for hover/completion and has
-//! no relation to this HIR entity. Consumers that touch both must disambiguate:
-//!
-//! ```ignore
-//! use hir_def::type_ref::TypeRef;                  // syntactic (this module)
-//! use symbol_info::domain::TypeRef as SymTypeRef;  // presentation
-//! ```
-
 use bsl_metadata::{AttributeType, MdoType, PlatformValueType};
 
 use crate::{path::QualifiedName, Name};
 
-/// Syntactic description of a BSL type before name resolution.
-///
-/// Produced by XML, JSDoc, and expression parsers; consumed by
-/// `hir_ty::TyLoweringContext`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TypeRef {
-    /// Primitive builtin (Число, Строка, …).
-    ///
-    /// Consolidates the case-insensitive Ru/En table that `ty_from_bare_name`
-    /// and `ty::doc_types::parse_type_name` historically duplicated.
     Builtin(BuiltinTypeRef),
 
-    /// Qualified name as it appeared in source
-    /// (`СправочникСсылка.Товары`, `Документы.ПКО`, `ОпределяемыйТип.Х`).
-    ///
-    /// Resolution of the head segment against the configuration and platform
-    /// tables is `TyLoweringContext`'s job — this variant carries no semantic
-    /// classification.
     Name(QualifiedName),
 
-    /// `Массив` with an optional element type (`Массив из Число` in JSDoc).
     Array(Option<Box<TypeRef>>),
 
-    /// `Соответствие` with optional `(Ключ, Значение)` types.
     Map(Option<(Box<TypeRef>, Box<TypeRef>)>),
 
-    /// `ЛюбаяСсылка` — matches XML `cfg:AnyRef`, a bare `ЛюбаяСсылка` /
-    /// `AnyRef` doc-comment type, without a concrete name or flavour.
     AnyRef,
 
-    /// `<Flavour>Ссылка` without a concrete name — XML `cfg:AnyObjectRef`
-    /// (e.g. "any catalog reference"). Carries the MDO flavour so
-    /// lowering can mint a kind-scoped `AnyMetadataRef{mdo_type}` instead
-    /// of collapsing to the flavour-less [`Self::AnyRef`].
     AnyRefOf(MdoType),
 
-    /// Union of types — from XML `AttributeType::Composite` and JSDoc
-    /// `"Число, Строка"` (M3 Task 4 parser).
-    ///
-    /// `TyLoweringContext::lower_type_ref_id` feeds each component through the
-    /// same lowering pipeline and then hands the results to the kernel union
-    /// builder (`db.union`), which imposes the flatten/dedup/sort invariant.
-    /// The caller must not pre-normalise — the smart constructor owns the shape.
-    ///
-    /// An empty `Vec` is legal: downstream it collapses to `Ty::Unknown`,
-    /// matching the old "something stated but empty" behaviour.
     Union(Vec<TypeRef>),
 
-    /// Source expressed a type that cannot yet be represented syntactically.
-    /// Preserved as a marker so downstream diagnostics can tell "no type
-    /// stated" from "stated but unsupported" (e.g. unresolved XML references).
     Unknown,
 }
 
-/// Primitive builtin, consolidated from the Ru/En lookup tables previously
-/// duplicated in `ty_from_bare_name` and `doc_types::parse_type_name`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BuiltinTypeRef {
     Number,
@@ -99,9 +36,6 @@ pub enum BuiltinTypeRef {
 }
 
 impl BuiltinTypeRef {
-    /// Case-insensitive, bilingual (RU/EN) lookup. `None` when the name is not
-    /// a primitive builtin — callers usually fall back to collection names
-    /// (`Массив`/`Соответствие`) and then to `TypeRef::Name`.
     pub fn from_name(name: &str) -> Option<Self> {
         match name.to_lowercase().as_str() {
             "число" | "number" => Some(Self::Number),
@@ -120,37 +54,15 @@ impl BuiltinTypeRef {
 }
 
 impl TypeRef {
-    /// Parse a bare, single-segment type name (`Массив`, `Число`, `Соответствие`).
-    ///
-    /// Covers the builtin table plus the two parameterised collection types.
-    /// Returns `None` when the name refers to something that must go through
-    /// the resolver (platform objects, user-defined types) — the caller then
-    /// wraps the name into [`TypeRef::Name`].
     pub fn from_bare_name(name: &str) -> Option<Self> {
         match name.to_lowercase().as_str() {
             "массив" | "array" => Some(TypeRef::Array(None)),
             "соответствие" | "map" => Some(TypeRef::Map(None)),
-            // `ЛюбаяСсылка` / `AnyRef` as a bare type word (doc comments,
-            // `ОписаниеТипов` literals). The XML path reaches `AnyRef` via
-            // `from_attribute_type`; this is the source-text counterpart so
-            // the word does not fall through to an opaque `PlatformObject`.
             "любаяссылка" | "anyref" => Some(TypeRef::AnyRef),
             other => BuiltinTypeRef::from_name(other).map(TypeRef::Builtin),
         }
     }
 
-    /// Bridge from the XML-parsed [`AttributeType`] (owned by `bsl-metadata`)
-    /// into a `TypeRef`.
-    ///
-    /// Lives here — not in `bsl-metadata` — because `bsl-metadata` is
-    /// purposefully ignorant of the HIR layer (reverse-dependency ban). M2
-    /// limits the bridge to synactic rewriting; the `Ty` classification is
-    /// `TyLoweringContext`'s responsibility.
-    ///
-    /// `Unknown` maps to [`TypeRef::Unknown`]; `Composite` builds a
-    /// [`TypeRef::Union`] whose members are each recursively lowered by the
-    /// same pipeline, so a composite of composites flattens at the kernel
-    /// layer when the union builder (`db.union`) runs.
     pub fn from_attribute_type(attr: &AttributeType) -> Self {
         match attr {
             AttributeType::String { .. } => TypeRef::Builtin(BuiltinTypeRef::String),
@@ -165,12 +77,6 @@ impl TypeRef {
                 None => TypeRef::Unknown,
             },
             AttributeType::AnyRef => TypeRef::AnyRef,
-            // `AnyObjectRef { mdo_type }` means "any ref of this flavour"
-            // without a concrete object name — semantically narrower than
-            // `AnyRef`. Carry the flavour through [`TypeRef::AnyRefOf`] so
-            // lowering mints `AnyMetadataRef{mdo_type}` (the kernel kind-
-            // scoped any-ref). Must NOT emit a 1-segment `TypeRef::Name`,
-            // which lowering would misread as a bare platform object.
             AttributeType::AnyObjectRef { mdo_type } => TypeRef::AnyRefOf(*mdo_type),
             AttributeType::Uuid => {
                 TypeRef::Name(QualifiedName::from_segments([Name::new("УникальныйИдентификатор")]))
@@ -192,18 +98,6 @@ impl TypeRef {
     }
 }
 
-/// Bridge a [`PlatformValueType`] into a syntactic [`TypeRef`].
-///
-/// Variants with a dedicated kernel kind go straight to the matching
-/// [`BuiltinTypeRef`] (precise intent, no reliance on spelling tables); the
-/// rest become a single-segment [`TypeRef::Name`] carrying the canonical 1C
-/// name, which lowering resolves to `PlatformObject(<name>)` (whose methods /
-/// properties come from the platform tables).
-///
-/// `TypeDescription` is deliberately NOT mapped to the kernel `TypeDescriptor`
-/// kind — that kind models the `Тип` reflection object (it renders as "Тип"),
-/// whereas `ОписаниеТипов` is a distinct platform object with its own surface
-/// (`СодержитТип`, `ПривестиЗначение`, …). Only `v8:Type` maps to `Тип`.
 fn platform_value_type_to_ref(pvt: PlatformValueType) -> TypeRef {
     match pvt {
         PlatformValueType::ValueList => TypeRef::Builtin(BuiltinTypeRef::ValueList),
@@ -222,24 +116,10 @@ fn platform_value_type_to_ref(pvt: PlatformValueType) -> TypeRef {
     }
 }
 
-/// Synactic English prefix that `bsl-metadata::xml_parser` originally parsed
-/// for an `AttributeType::Ref`.
-///
-/// Must **mirror the XML tokens** in `crates/bsl-metadata/src/xml_parser/type_parser.rs`
-/// `REF_TYPE_MAP`: the bridge's job is round-tripping XML syntax, not inventing
-/// new names. If `REF_TYPE_MAP` grows a new MdoType entry, update this table
-/// and the tests that cover it.
-///
-/// `None` marks `MdoType`s that XML never parses into `Ref`/`AnyObjectRef` —
-/// the bridge then falls back to [`TypeRef::Unknown`] rather than guessing a
-/// wrong prefix.
 fn mdo_ref_prefix(mdo: MdoType) -> Option<&'static str> {
     match mdo {
         MdoType::Catalog => Some("CatalogRef"),
         MdoType::Document => Some("DocumentRef"),
-        // Registers are parsed from `cfg:...RegisterRef` tokens in XML — runtime
-        // semantics (RecordKey vs RecordSet) belong to lowering, not to the
-        // syntactic bridge.
         MdoType::InformationRegister => Some("InformationRegisterRef"),
         MdoType::AccumulationRegister => Some("AccumulationRegisterRef"),
         MdoType::AccountingRegister => Some("AccountingRegisterRef"),
@@ -251,18 +131,9 @@ fn mdo_ref_prefix(mdo: MdoType) -> Option<&'static str> {
         MdoType::Task => Some("TaskRef"),
         MdoType::Enum => Some("EnumRef"),
         MdoType::ExchangePlan => Some("ExchangePlanRef"),
-        // Constants carry a value-manager form (`cfg:ConstantValueManager`) —
-        // keep the XML-original token so lowering can match it.
         MdoType::Constant => Some("ConstantValueManager"),
-        // DataProcessor and Report exist in XML only as `cfg:*Object` (no
-        // ref form) — `REF_TYPE_MAP` carries those tokens so attribute
-        // types referencing a data processor / report from a form's main
-        // attribute round-trip through the same `Ref` shape.
         MdoType::DataProcessor => Some("DataProcessorObject"),
         MdoType::Report => Some("ReportObject"),
-        // The remaining kinds have no reference form in XML; if `AttributeType`
-        // ever carries them through `Ref`/`AnyObjectRef` we prefer Unknown over
-        // an invented name that the resolver would fail on anyway.
         MdoType::ExternalDataSource
         | MdoType::Cube
         | MdoType::DimensionTable
@@ -285,11 +156,8 @@ mod tests {
 
     #[test]
     fn builtin_from_name_rejects_non_primitives() {
-        // Collection types are not primitives — they live on `TypeRef` itself
-        // because they can carry element type parameters.
         assert_eq!(BuiltinTypeRef::from_name("Массив"), None);
         assert_eq!(BuiltinTypeRef::from_name("Соответствие"), None);
-        // User-defined names must go through the resolver, not the builtin table.
         assert_eq!(BuiltinTypeRef::from_name("СправочникСсылка"), None);
         assert_eq!(BuiltinTypeRef::from_name(""), None);
     }
@@ -338,8 +206,6 @@ mod tests {
             TypeRef::from_attribute_type(&AttributeType::Boolean),
             TypeRef::Builtin(BuiltinTypeRef::Boolean)
         );
-        // Date and DateTime collapse to a single syntactic builtin — BSL does
-        // not distinguish them on the type-system level.
         assert_eq!(
             TypeRef::from_attribute_type(&AttributeType::Date),
             TypeRef::Builtin(BuiltinTypeRef::Date)
@@ -354,11 +220,6 @@ mod tests {
     fn typeref_from_attribute_any_ref_and_any_object_ref() {
         assert_eq!(TypeRef::from_attribute_type(&AttributeType::AnyRef), TypeRef::AnyRef);
 
-        // `AnyObjectRef` keeps its `mdo_type` flavour via the kind-scoped
-        // `TypeRef::AnyRefOf`, which lowers to `AnyMetadataRef{mdo_type}`.
-        // It must NOT collapse to the flavour-less `TypeRef::AnyRef`, nor
-        // emit a 1-segment `TypeRef::Name(["DocumentRef"])` that lowering
-        // would misread as `PlatformObject("DocumentRef")`.
         assert_eq!(
             TypeRef::from_attribute_type(&AttributeType::AnyObjectRef {
                 mdo_type: MdoType::Document,
@@ -383,11 +244,6 @@ mod tests {
 
     #[test]
     fn typeref_from_attribute_composite_becomes_union() {
-        // M3 wires `AttributeType::Composite` into `TypeRef::Union` so XML
-        // `ОписаниеТипов` preserves every declared member type through
-        // lowering. The bridge stays syntactic — member order reflects the
-        // XML-parsed order; `TyLoweringContext` + `Ty::union` impose the
-        // final flatten/dedup/sort.
         let attr = AttributeType::Composite {
             types: vec![AttributeType::Boolean, AttributeType::String { length: None }],
         };
@@ -402,9 +258,6 @@ mod tests {
 
     #[test]
     fn typeref_from_attribute_composite_recurses_on_members() {
-        // Every member goes through the same bridge — a composite whose
-        // members are themselves refs must come back with the right prefixes
-        // so downstream lowering can pick a `MetadataKind` per branch.
         let attr = AttributeType::Composite {
             types: vec![
                 AttributeType::Ref { mdo_type: MdoType::Catalog, name: "Товары".to_string() },
@@ -434,8 +287,6 @@ mod tests {
 
     #[test]
     fn typeref_from_attribute_platform_kernel_backed_variants() {
-        // Variants with a dedicated kernel kind map to the matching builtin
-        // for precise intent (no reliance on `from_bare_name` spelling).
         for (pvt, expected) in [
             (PlatformValueType::ValueList, BuiltinTypeRef::ValueList),
             (PlatformValueType::ValueTable, BuiltinTypeRef::ValueTable),
@@ -452,8 +303,6 @@ mod tests {
 
     #[test]
     fn typeref_from_attribute_platform_object_fallback_variants() {
-        // Variants without a kernel kind become a single-segment Name carrying
-        // the canonical 1C name, which lowering turns into PlatformObject.
         for (pvt, name) in [
             (PlatformValueType::ValueTree, "ДеревоЗначений"),
             (PlatformValueType::StandardPeriod, "СтандартныйПериод"),
@@ -461,9 +310,6 @@ mod tests {
             (PlatformValueType::FixedStructure, "ФиксированнаяСтруктура"),
             (PlatformValueType::FixedArray, "ФиксированныйМассив"),
             (PlatformValueType::FixedMap, "ФиксированноеСоответствие"),
-            // ОписаниеТипов is a distinct object from `Тип`, so it must NOT
-            // collapse to the kernel TypeDescriptor (`Тип`) — it stays a named
-            // platform object with its own method surface.
             (PlatformValueType::TypeDescription, "ОписаниеТипов"),
         ] {
             match TypeRef::from_attribute_type(&AttributeType::Platform(pvt)) {
@@ -478,9 +324,6 @@ mod tests {
 
     #[test]
     fn typeref_from_attribute_register_refs_use_xml_token() {
-        // The XML parser (`xml_parser::type_parser::REF_TYPE_MAP`) parses
-        // `cfg:InformationRegisterRef.X` into `Ref{InformationRegister, X}`.
-        // The bridge must round-trip that token, not invent "RecordKey".
         let reg = AttributeType::Ref {
             mdo_type: MdoType::InformationRegister,
             name: "ЦеныНоменклатуры".to_string(),
@@ -512,8 +355,6 @@ mod tests {
 
     #[test]
     fn typeref_from_attribute_constant_uses_value_manager() {
-        // `cfg:ConstantValueManager` is the only Constant form the XML parser
-        // emits — the bridge mirrors the XML token so lowering can resolve it.
         let attr = AttributeType::Ref {
             mdo_type: MdoType::Constant,
             name: "ВалютаУчёта".to_string(),
@@ -529,12 +370,6 @@ mod tests {
 
     #[test]
     fn typeref_from_attribute_unreachable_mdo_kinds_fall_to_unknown() {
-        // These MDO kinds have no XML reference token at all (parser would
-        // never emit `Ref{ExternalDataSource,..}` etc.). If a future parser
-        // extension produced one, Unknown is the safe default. DataProcessor
-        // and Report are NOT in this list anymore — they round-trip through
-        // `cfg:DataProcessorObject` / `cfg:ReportObject` (see
-        // `mdo_ref_prefix` for the mapping).
         for mdo in [
             MdoType::ExternalDataSource,
             MdoType::Cube,
@@ -552,10 +387,6 @@ mod tests {
 
     #[test]
     fn typeref_from_attribute_data_processor_and_report_round_trip_via_object_token() {
-        // `cfg:DataProcessorObject.X` → `Ref{DataProcessor, X}` → on the way
-        // back through `mdo_ref_prefix` we emit `DataProcessorObject` so
-        // lowering can find the resolver entry and `MetadataKind::object_kind_for`
-        // can promote to a usable Object kind. Symmetric for Report.
         for (mdo, prefix) in
             [(MdoType::DataProcessor, "DataProcessorObject"), (MdoType::Report, "ReportObject")]
         {

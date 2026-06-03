@@ -1,13 +1,3 @@
-//! Behavioural tests for the JSDoc → FunctionSignature wiring landed in
-//! Task 11.
-//!
-//! The call sites read `var_types` because `InferenceResult` does not
-//! expose method signatures directly — assigning the call result to a
-//! variable surfaces the lowered return type through the merged
-//! file-level var_types map. Each test sets up a CommonModule with a
-//! JSDoc-annotated method, calls it from `/test.bsl`, and asserts the
-//! resulting `Ty`.
-
 use hir::{
     Builders, DefDatabase, HirDatabase, MetadataKind, ModuleId, TypeId, TypeKernelDb, TypeKind,
 };
@@ -62,9 +52,6 @@ fn assert_metadata_ref(
 
 #[test]
 fn jsdoc_return_type_primitive_flows_into_var_types() {
-    // Simplest case: JSDoc names a primitive return type. The cascade in
-    // `materialise_signature` must lower `TypeRef::Builtin(String)` to
-    // `Ty::String`, so `Х = ОбщегоНазначения.Имя()` types `х` as String.
     let fixture = r#"
 //- /CommonModules/ОбщегоНазначения/Ext/Module.bsl
 // Возвращаемое значение:
@@ -89,12 +76,6 @@ fn jsdoc_return_type_primitive_flows_into_var_types() {
 
 #[test]
 fn jsdoc_catalog_ref_return_lowers_to_metadata_ref() {
-    // Qualified JSDoc return (`СправочникСсылка.Номенклатура`) must
-    // survive the TypeRef round-trip and produce
-    // `Ty::MetadataRef { CatalogRef, Номенклатура }`. This is the first
-    // end-to-end proof that TypeRef → TyLoweringContext → FunctionSignature
-    // honours user-authored JSDoc — the user-visible effect Task 11 was
-    // built for.
     let fixture = r#"
 //- /CommonModules/ОбщегоНазначения/Ext/Module.bsl
 // Возвращаемое значение:
@@ -120,19 +101,6 @@ fn jsdoc_catalog_ref_return_lowers_to_metadata_ref() {
 
 #[test]
 fn missing_jsdoc_surfaces_body_inferred_return() {
-    // Phase O.11 baseline shift: a CommonModule function without JSDoc
-    // now has its return type surfaced through `materialise_signature_enriched`
-    // — the wrapper consults `method_return_type_query` when the
-    // docstring-derived `sig.ret` comes back `Ty::Unknown`. For
-    // `Функция БезКомментария() Возврат Истина КонецФункции` the body
-    // infers `Ty::Boolean`, and the assignment `Х = ...` records that
-    // in `var_types`.
-    //
-    // This replaces the legacy "missing JSDoc keeps Unknown" guard:
-    // cascade typing is precisely the feature that changes that
-    // contract. The explicit-JSDoc-wins precedence is still verified
-    // by the other tests in this file (the enrichment wrapper
-    // short-circuits when `*sig.ret != Ty::Unknown`).
     let fixture = r#"
 //- /CommonModules/ОбщегоНазначения/Ext/Module.bsl
 Функция БезКомментария() Экспорт
@@ -162,10 +130,6 @@ fn missing_jsdoc_surfaces_body_inferred_return() {
 
 #[test]
 fn jsdoc_union_return_lowers_to_ty_union() {
-    // End-to-end: JSDoc `// Возвращаемое значение: Число, Строка` lowers
-    // through `parse_method_doc_types` → `MethodSymbol.return_type_ref` →
-    // `materialise_signature` → `TyLoweringContext::lower_type_ref(Union)`
-    // → `Ty::union(...)`, producing a canonicalised union at the call site.
     let fixture = r#"
 //- /CommonModules/ОбщегоНазначения/Ext/Module.bsl
 // Возвращаемое значение:
@@ -194,10 +158,6 @@ fn jsdoc_union_return_lowers_to_ty_union() {
 
 #[test]
 fn jsdoc_three_level_return_lowers_through_manager_chain() {
-    // Same wiring must hold for three-segment calls:
-    // `Документы.ПКО.ПолучитьСсылку()` should see the manager-module's
-    // JSDoc-annotated return type. Proves `resolve_three_level_call`
-    // funnels through the same `materialise_signature`.
     let fixture = r#"
 //- /Documents/ПКО/Ext/ManagerModule.bsl
 // Возвращаемое значение:

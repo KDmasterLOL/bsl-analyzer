@@ -1,67 +1,38 @@
-//! Basic metadata object types
-//!
-//! Simplified metadata object structure for query validation and diagnostics
-
 use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 use std::sync::OnceLock;
 use uuid::Uuid;
 
-/// Metadata object name as it appears in Designer XML.
 pub type Name = String;
 
-/// Metadata object type (MDO Type)
-///
-/// Represents different types of 1C:Enterprise metadata objects
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum MdoType {
-    /// Справочник / Catalog
     Catalog,
-    /// Документ / Document
     Document,
-    /// Регистр сведений / InformationRegister
     InformationRegister,
-    /// Регистр накопления / AccumulationRegister
     AccumulationRegister,
-    /// Регистр бухгалтерии / AccountingRegister
     AccountingRegister,
-    /// Регистр расчета / CalculationRegister
     CalculationRegister,
-    /// План видов характеристик / ChartOfCharacteristicTypes
     ChartOfCharacteristicTypes,
-    /// План счетов / ChartOfAccounts
     ChartOfAccounts,
-    /// План видов расчета / ChartOfCalculationTypes
     ChartOfCalculationTypes,
-    /// Бизнес-процесс / BusinessProcess
     BusinessProcess,
-    /// Задача / Task
     Task,
-    /// Перечисление / Enum
     Enum,
-    /// План обмена / ExchangePlan
     ExchangePlan,
-    /// Внешний источник данных / ExternalDataSource
     ExternalDataSource,
-    /// Куб внешнего источника данных / Cube (nested in ExternalDataSource)
     Cube,
-    /// Таблица измерения куба / DimensionTable (nested in Cube)
     DimensionTable,
-    /// Константа / Constant
     Constant,
-    /// Обработка / DataProcessor
     DataProcessor,
-    /// Отчет / Report
     Report,
-    /// Общий модуль / CommonModule
     CommonModule,
 }
 
 impl FromStr for MdoType {
     type Err = String;
 
-    /// Parse MDO type from string (case-insensitive, both Russian and English)
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "справочник" | "catalog" => Ok(Self::Catalog),
@@ -102,7 +73,6 @@ impl FromStr for MdoType {
 }
 
 impl MdoType {
-    /// Get Russian name for this MDO type
     pub fn russian_name(&self) -> &'static str {
         match self {
             Self::Catalog => "Справочник",
@@ -128,7 +98,6 @@ impl MdoType {
         }
     }
 
-    /// Get English name for this MDO type
     pub fn english_name(&self) -> &'static str {
         match self {
             Self::Catalog => "Catalog",
@@ -154,14 +123,12 @@ impl MdoType {
         }
     }
 
-    /// Check if the given keyword is the Russian variant (case-insensitive)
     pub fn is_russian_keyword(&self, keyword: &str) -> bool {
         let keyword_lower = keyword.to_lowercase();
         let russian_lower = self.russian_name().to_lowercase();
         keyword_lower == russian_lower
     }
 
-    /// Get all MDO types
     pub fn all() -> &'static [MdoType] {
         &[
             Self::Catalog,
@@ -187,19 +154,6 @@ impl MdoType {
         ]
     }
 
-    /// Parse MDO type from plural form keyword (case-insensitive, bilingual)
-    ///
-    /// Used for object model calls like `Документы.ПКО.Method()` or `Catalogs.Name.Method()`
-    ///
-    /// # Examples
-    /// ```
-    /// use bsl_metadata::MdoType;
-    ///
-    /// assert_eq!(MdoType::from_plural("Документы"), Some(MdoType::Document));
-    /// assert_eq!(MdoType::from_plural("documents"), Some(MdoType::Document));
-    /// assert_eq!(MdoType::from_plural("Справочники"), Some(MdoType::Catalog));
-    /// assert_eq!(MdoType::from_plural("catalogs"), Some(MdoType::Catalog));
-    /// ```
     pub fn from_plural(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "документы" | "documents" => Some(Self::Document),
@@ -240,19 +194,6 @@ impl MdoType {
         }
     }
 
-    /// HBK global-context property matching this MDO type's plural form,
-    /// if any.
-    ///
-    /// Returns `Some(prop)` for the 17 MDO types whose plurals are listed
-    /// as global-context properties in HBK (`Документы` →
-    /// `ДокументыМенеджер`, `Справочники` → `СправочникиМенеджер`, …).
-    /// Returns `None` for `Cube`, `DimensionTable`, `CommonModule` — HBK
-    /// classifies those as nested type descriptors, not bareword globals.
-    ///
-    /// Lazily-built cache: iterates
-    /// `PlatformDataInner::all_global_properties()` on first call and keys
-    /// every property whose name (RU or EN) is recognised by
-    /// [`Self::from_plural`]. Subsequent calls hit the cache.
     pub fn hbk_global_property(self) -> Option<&'static bsl_platform::PlatformProperty> {
         static HBK_MAP: OnceLock<
             rustc_hash::FxHashMap<MdoType, &'static bsl_platform::PlatformProperty>,
@@ -277,10 +218,6 @@ impl MdoType {
             .copied()
     }
 
-    /// Returns the platform manager type prefix for this MDO type.
-    ///
-    /// Used to look up manager methods in platform data.
-    /// Example: `MdoType::Catalog.manager_type_prefix()` returns `Some("CatalogManager")`.
     pub fn manager_type_prefix(&self) -> Option<&'static str> {
         match self {
             Self::Catalog => Some("CatalogManager"),
@@ -304,14 +241,6 @@ impl MdoType {
         }
     }
 
-    /// Russian-localized companion to [`Self::manager_type_prefix`].
-    ///
-    /// Returns the manager-collection name 1С users see in BSL code
-    /// (`Документы` collection element type → `ДокументМенеджер`).
-    /// Mirrors `manager_type_prefix` 1:1 — same set of `Some` arms,
-    /// same `None` set (`Cube`, `DimensionTable`, `CommonModule` have no
-    /// manager form). Used by `Ty::display_name(Locale::Ru)` for the
-    /// `Ty::ManagerCollection` variant.
     pub fn manager_type_prefix_ru(&self) -> Option<&'static str> {
         match self {
             Self::Catalog => Some("СправочникМенеджер"),
@@ -335,24 +264,11 @@ impl MdoType {
         }
     }
 
-    /// Check if a given name is an MDO plural form (case-insensitive).
-    /// Uses O(1) lookup via FxHashSet with lazy static initialization.
-    ///
-    /// # Examples
-    /// ```
-    /// use bsl_metadata::MdoType;
-    ///
-    /// assert!(MdoType::is_plural_form("Документы"));
-    /// assert!(MdoType::is_plural_form("documents"));
-    /// assert!(MdoType::is_plural_form("СПРАВОЧНИКИ"));
-    /// assert!(!MdoType::is_plural_form("Документ"));
-    /// ```
     pub fn is_plural_form(s: &str) -> bool {
         static PLURAL_FORMS: OnceLock<FxHashSet<String>> = OnceLock::new();
 
         let set = PLURAL_FORMS.get_or_init(|| {
             let mut set = FxHashSet::default();
-            // All 20 MDO types, both Russian and English, lowercase
             set.insert("документы".to_string());
             set.insert("documents".to_string());
             set.insert("справочники".to_string());
@@ -401,189 +317,125 @@ impl MdoType {
     }
 }
 
-/// Enumeration value (element of Enum)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnumValue {
-    /// Russian name
     pub name: String,
-    /// English name (optional)
     #[serde(default)]
     pub name_en: Option<String>,
-    /// UUID
     pub uuid: String,
 }
 
-/// Predefined item (for Catalogs, Documents, etc.)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PredefinedItem {
-    /// Russian name
     pub name: String,
-    /// English name (optional)
     #[serde(default)]
     pub name_en: Option<String>,
-    /// UUID
     pub uuid: String,
 }
 
-/// Simple metadata object
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetadataObject {
-    /// Object type
     pub mdo_type: MdoType,
-    /// Object name (Russian)
     pub name: String,
-    /// English name (optional, for bilingual completion)
     #[serde(default)]
     pub name_en: Option<String>,
-    /// Custom attributes (fields) for this object
     #[serde(default)]
     pub attributes: Vec<Attribute>,
-    /// Tabular sections (child collections) for this object
     #[serde(default)]
     pub tabular_sections: Vec<crate::tabular_section::TabularSection>,
-    /// Child objects (e.g., Cubes for ExternalDataSource, DimensionTables for Cube)
     #[serde(default)]
     pub children: Vec<MetadataObject>,
-    /// Enumeration values (for Enum type only)
     #[serde(default)]
     pub enum_values: Vec<EnumValue>,
-    /// Predefined items (for Catalog, Document, etc.)
     #[serde(default)]
     pub predefined_items: Vec<PredefinedItem>,
-    /// Check code uniqueness (for Catalog, ChartOfCharacteristicTypes, ChartOfAccounts)
     #[serde(default)]
     pub check_unique: bool,
-    /// Code series mode (for Catalog, ChartOfCharacteristicTypes, ChartOfAccounts)
     #[serde(default)]
     pub code_series: crate::enums::CodeSeries,
-    /// Declared value type (for Constant only).
-    ///
-    /// Constants in BSL have a single value-type slot, not an attribute
-    /// list — `attributes` stays empty. `Composite` covers union shapes
-    /// (`<Type>Строка</Type><Type>Неопределено</Type>`) without widening
-    /// the attribute model. `None` means the parser saw no `<Type>`
-    /// element or the constant predates type extraction.
     #[serde(default)]
     pub constant_type: Option<AttributeType>,
-    /// Registers written by this document.
-    ///
-    /// Populated from `<RegisterRecords>` in Document XML as
-    /// `(register_type, register_name)` pairs.
     #[serde(default)]
     pub register_records: Vec<(MdoType, Name)>,
-    /// Stable Designer-assigned identifier from the XML root element.
-    ///
-    /// Read from the `uuid="…"` attribute of the typed wrapper (`<Catalog>`,
-    /// `<Document>`, `<Enum>`, …). Stable across configuration saves in 1C,
-    /// which makes it the basis for partitioning workspace-wide indices by
-    /// owner object. `None` when the XML predates the attribute or the
-    /// `MetadataObject` is synthesized in-memory (tests, fixtures).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uuid: Option<Uuid>,
 }
 
-/// Metadata object attribute (custom field).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attribute {
-    /// Russian name
     pub name: String,
-    /// English name (optional)
     #[serde(default)]
     pub name_en: Option<String>,
-    /// Attribute type
     pub attr_type: AttributeType,
 }
 
-/// Standard attribute (built-in by platform)
-///
-/// Standard attributes are predefined by the 1C platform and available on all objects
-/// of certain types. Their presence is controlled by object properties (e.g., CodeLength,
-/// Hierarchical) rather than explicit XML declarations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StandardAttributeKind {
-    // Catalog/Document standard attributes
-    /// Code attribute (Код) - present if CodeLength > 0
-    Code {
-        /// Maximum length of code
-        length: u32,
-    },
-    /// Description attribute (Наименование) - present if DescriptionLength > 0
-    Description {
-        /// Maximum length of description
-        length: u32,
-    },
-    /// Reference attribute (Ссылка) - always present
+    Code { length: u32 },
+    Description { length: u32 },
     Ref,
-    /// Deletion mark attribute (ПометкаУдаления) - always present
     DeletionMark,
-    /// Is folder attribute (ЭтоГруппа) - present if Hierarchical=true
     IsFolder,
-    /// Owner attribute (Владелец) - present if Owners is not empty
     Owner,
-    /// Parent attribute (Родитель) - present if Hierarchical=true
     Parent,
-    /// Predefined attribute (Предопределенный) - always present
     Predefined,
-    /// Predefined data name attribute (ИмяПредопределенныхДанных) - always present
     PredefinedDataName,
 
-    // Document/BusinessProcess/Task standard attributes
-    /// Number attribute (Номер) - present if NumberLength > 0
-    Number {
-        /// Maximum length of number
-        length: u32,
-    },
-    /// Date attribute (Дата) - always present on Document/BusinessProcess/Task
+    Number { length: u32 },
     Date,
-    /// Posted attribute (Проведен) - Document only
     Posted,
-    /// Started attribute (Стартован) - BusinessProcess only
     Started,
-    /// Completed attribute (Завершен) - BusinessProcess only
     Completed,
-    /// HeadTask attribute (ГлавнаяЗадача) - BusinessProcess only
     HeadTask,
-    /// Executed attribute (Выполнена) - Task only
     Executed,
-    /// BusinessProcess attribute (БизнесПроцесс) - Task only
     TaskBusinessProcess,
-    /// RoutePoint attribute (ТочкаМаршрута) - Task only
     RoutePoint,
 
-    // ExchangePlan standard attributes
-    /// ThisNode attribute (ЭтотУзел) - ExchangePlan only
     ThisNode,
 
-    // ChartOfCharacteristicTypes standard attributes
-    /// ValueType attribute (ТипЗначения) - ChartOfCharacteristicTypes only
     ValueType,
 
-    // ChartOfAccounts standard attributes
-    /// Order attribute (Порядок) - ChartOfAccounts only
     Order,
 
-    // Information Register standard attributes
-    /// Active attribute (Активность) - always present
     Active,
-    /// Line number attribute (НомерСтроки) - always present
     LineNumber,
-    /// Recorder attribute (Регистратор) - always present
     Recorder,
-    /// Period attribute (Период) - present if periodicity != Nonperiodical
     Period,
 }
 
 impl StandardAttributeKind {
-    /// Get the AttributeType for this standard attribute
-    ///
-    /// # Arguments
-    ///
-    /// * `mdo_type` - Type of metadata object (for reference types)
-    /// * `object_name` - Name of the object (for reference types)
-    ///
-    /// # Returns
-    ///
-    /// The platform-defined type for this standard attribute
+    /// Every standard-attribute kind. The single enumeration the name helpers below
+    /// derive from, so they cannot drift from the variant set (a missing entry fails
+    /// `standard_attribute_names_cover_every_kind`). Variant payloads are placeholders
+    /// — only the discriminant matters for naming.
+    pub const ALL: &'static [StandardAttributeKind] = &[
+        Self::Code { length: 0 },
+        Self::Description { length: 0 },
+        Self::Ref,
+        Self::DeletionMark,
+        Self::IsFolder,
+        Self::Owner,
+        Self::Parent,
+        Self::Predefined,
+        Self::PredefinedDataName,
+        Self::Number { length: 0 },
+        Self::Date,
+        Self::Posted,
+        Self::Started,
+        Self::Completed,
+        Self::HeadTask,
+        Self::Executed,
+        Self::TaskBusinessProcess,
+        Self::RoutePoint,
+        Self::ThisNode,
+        Self::ValueType,
+        Self::Order,
+        Self::Active,
+        Self::LineNumber,
+        Self::Recorder,
+        Self::Period,
+    ];
+
     pub fn attribute_type(&self, mdo_type: MdoType, object_name: &str) -> AttributeType {
         match self {
             Self::Code { length } => AttributeType::String { length: Some(*length) },
@@ -591,7 +443,7 @@ impl StandardAttributeKind {
             Self::Ref => AttributeType::Ref { mdo_type, name: object_name.to_string() },
             Self::DeletionMark => AttributeType::Boolean,
             Self::IsFolder => AttributeType::Boolean,
-            Self::Owner => AttributeType::Unknown, // Type determined from Owners property
+            Self::Owner => AttributeType::Unknown,
             Self::Parent => AttributeType::Ref { mdo_type, name: object_name.to_string() },
             Self::Predefined => AttributeType::Boolean,
             Self::PredefinedDataName => AttributeType::String { length: None },
@@ -614,7 +466,6 @@ impl StandardAttributeKind {
         }
     }
 
-    /// Get the Russian name for this standard attribute
     pub fn russian_name(&self) -> &'static str {
         match self {
             Self::Code { .. } => "Код",
@@ -645,7 +496,6 @@ impl StandardAttributeKind {
         }
     }
 
-    /// Get the English name for this standard attribute
     pub fn english_name(&self) -> &'static str {
         match self {
             Self::Code { .. } => "Code",
@@ -677,116 +527,58 @@ impl StandardAttributeKind {
     }
 }
 
-/// Attribute type.
+/// Whether `name` is the name (Russian or English) of a platform standard attribute —
+/// one of the fields `add_*_standard_attributes` synthesises onto every object during
+/// configuration load. Derived from [`StandardAttributeKind::ALL`], so it is the single
+/// source of truth: a consumer that wants only user-declared attributes (the call-graph
+/// catalog pass, the SDBL scope builder) filters against this. Case-insensitive.
+///
+/// Name-based by necessity — the synthesised attributes are merged into the same
+/// `attributes` list as user ones with no surviving marker — so a user attribute that
+/// happens to be named exactly like a standard one is treated as standard.
+pub fn is_standard_attribute_name(name: &str) -> bool {
+    // Unicode-aware fold: `eq_ignore_ascii_case` does not fold Cyrillic (С ≠ с), so the
+    // Russian names need full lowercasing.
+    let name = name.to_lowercase();
+    StandardAttributeKind::ALL.iter().any(|kind| {
+        kind.russian_name().to_lowercase() == name || kind.english_name().to_lowercase() == name
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AttributeType {
-    /// String with optional length
-    String {
-        /// Maximum string length
-        length: Option<u32>,
-    },
-    /// Number with precision and scale
-    Number {
-        /// Total number of digits
-        precision: u8,
-        /// Number of digits after decimal point
-        scale: u8,
-    },
-    /// Boolean
+    String { length: Option<u32> },
+    Number { precision: u8, scale: u8 },
     Boolean,
-    /// Date (without time)
     Date,
-    /// DateTime (with time)
     DateTime,
-    /// Reference to another metadata object
-    Ref {
-        /// Referenced metadata object type
-        mdo_type: MdoType,
-        /// Referenced metadata object name
-        name: String,
-    },
-    /// Any reference (ЛюбаяСсылка)
+    Ref { mdo_type: MdoType, name: String },
     AnyRef,
-    /// Any object of specific type (e.g., any Catalog, any Document, any BusinessProcess)
-    ///
-    /// From TypeSet like cfg:CatalogRef, cfg:DocumentRef, cfg:BusinessProcessRef.
-    /// Means "any object of this type" without specifying concrete object name.
-    AnyObjectRef {
-        /// Type of metadata object
-        mdo_type: MdoType,
-    },
-    /// UUID
+    AnyObjectRef { mdo_type: MdoType },
     Uuid,
-    /// ValueStorage (ХранилищеЗначения)
     ValueStorage,
-    /// DefinedType (ОпределяемыйТип)
-    DefinedType {
-        /// Name of the defined type
-        name: String,
-    },
-    /// Composite type (multiple types allowed)
-    ///
-    /// Used when a field can hold values of different types.
-    /// Example: Dimension "ВидДействия" in 1C can be one of 4 enum types.
-    Composite {
-        /// List of allowed types (union type)
-        types: Vec<AttributeType>,
-    },
-    /// Platform value type declared by a `v8:` XDTO token
-    /// (`v8:ValueListType`, `v8:ValueTree`, `v8:StandardPeriod`, …).
-    ///
-    /// Carries only the parsed token classification — the metadata layer
-    /// stays ignorant of the kernel/HIR mapping. `hir_def::type_ref` turns
-    /// each variant into the right `TypeRef` (kernel builtin or a platform
-    /// object name).
+    DefinedType { name: String },
+    Composite { types: Vec<AttributeType> },
     Platform(PlatformValueType),
-    /// Unknown or unsupported type
     Unknown,
 }
 
-/// Platform value types expressible as a form-attribute type via a `v8:`
-/// XDTO serialization token.
-///
-/// This is a fixed, 1C-defined vocabulary (the configuration serialization
-/// format), not free-form text. New platform versions may add tokens but
-/// existing ones never change meaning — an explicit token table is the
-/// legitimate representation, mirroring the existing `cfg:` reference maps.
-///
-/// The bridge to a semantic kernel type lives in `hir_def::type_ref`
-/// (`TypeRef::from_attribute_type`); `bsl-metadata` only classifies the token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PlatformValueType {
-    /// `v8:ValueListType` — СписокЗначений.
     ValueList,
-    /// `v8:ValueTable` — ТаблицаЗначений (column-less; a form attribute with
-    /// `<Columns>` is modelled as a FormData collection upstream instead).
     ValueTable,
-    /// `v8:ValueTree` — ДеревоЗначений.
     ValueTree,
-    /// `v8:StandardPeriod` — СтандартныйПериод.
     StandardPeriod,
-    /// `v8:StandardBeginningDate` — СтандартнаяДатаНачала.
     StandardBeginningDate,
-    /// `v8:TypeDescription` — ОписаниеТипов.
     TypeDescription,
-    /// `v8:FixedStructure` — ФиксированнаяСтруктура.
     FixedStructure,
-    /// `v8:FixedArray` — ФиксированныйМассив.
     FixedArray,
-    /// `v8:FixedMap` — ФиксированноеСоответствие.
     FixedMap,
-    /// `v8:Type` — Тип (the type-reflection object).
     Type,
-    /// `v8:Null` — Null.
     Null,
 }
 
 impl PlatformValueType {
-    /// Canonical 1C (Russian) name of the platform type.
-    ///
-    /// Presentation only — used by [`AttributeType`]'s `Display` and reused by
-    /// the HIR bridge as the `PlatformObject` name for variants without a
-    /// dedicated kernel kind.
     pub fn russian_name(self) -> &'static str {
         match self {
             Self::ValueList => "СписокЗначений",
@@ -805,7 +597,6 @@ impl PlatformValueType {
 }
 
 impl MetadataObject {
-    /// Create new metadata object
     pub fn new(mdo_type: MdoType, name: impl Into<String>) -> Self {
         Self {
             mdo_type,
@@ -824,7 +615,6 @@ impl MetadataObject {
         }
     }
 
-    /// Create with children
     pub fn with_children(
         mdo_type: MdoType,
         name: impl Into<String>,
@@ -847,7 +637,6 @@ impl MetadataObject {
         }
     }
 
-    /// Create with full details
     pub fn with_details(
         mdo_type: MdoType,
         name: impl Into<String>,
@@ -871,48 +660,34 @@ impl MetadataObject {
         }
     }
 
-    /// Registers that this document can record into.
     pub fn register_records(&self) -> &[(MdoType, Name)] {
         &self.register_records
     }
 
-    /// Replace the registers that this document can record into.
     pub fn set_register_records(&mut self, records: Vec<(MdoType, Name)>) {
         self.register_records = records;
     }
 
-    /// Designer-assigned UUID from the typed XML root element, if known.
     pub fn uuid(&self) -> Option<&Uuid> {
         self.uuid.as_ref()
     }
 
-    /// Record the Designer-assigned UUID for this object.
     pub fn set_uuid(&mut self, uuid: Uuid) {
         self.uuid = Some(uuid);
     }
 
-    /// Set the declared value type (for [`MdoType::Constant`]).
     pub fn set_constant_type(&mut self, value: AttributeType) {
         self.constant_type = Some(value);
     }
 
-    /// Set check_unique property
     pub fn set_check_unique(&mut self, value: bool) {
         self.check_unique = value;
     }
 
-    /// Set code_series property
     pub fn set_code_series(&mut self, value: crate::enums::CodeSeries) {
         self.code_series = value;
     }
 
-    /// Check if FindByCode is safe for this object
-    ///
-    /// Returns `true` if both conditions are met:
-    /// - check_unique is true
-    /// - code_series is WholeCatalog (or equivalent)
-    ///
-    /// For objects where these properties don't apply, returns `true`.
     pub fn is_find_by_code_safe(&self) -> bool {
         match self.mdo_type {
             MdoType::Catalog | MdoType::ChartOfCharacteristicTypes | MdoType::ChartOfAccounts => {
@@ -922,39 +697,32 @@ impl MetadataObject {
         }
     }
 
-    /// Add child object
     pub fn add_child(&mut self, child: MetadataObject) {
         self.children.push(child);
     }
 
-    /// Add attribute
     pub fn add_attribute(&mut self, attribute: Attribute) {
         self.attributes.push(attribute);
     }
 
-    /// Add a tabular section
     pub fn add_tabular_section(&mut self, tabular_section: crate::tabular_section::TabularSection) {
         self.tabular_sections.push(tabular_section);
     }
 
-    /// Find child by name (case-insensitive)
     pub fn find_child(&self, name: &str) -> Option<&MetadataObject> {
         let name_lower = name.to_lowercase();
         self.children.iter().find(|child| child.name.to_lowercase() == name_lower)
     }
 
-    /// Check if has child with given name (case-insensitive)
     pub fn has_child(&self, name: &str) -> bool {
         self.find_child(name).is_some()
     }
 
-    /// Find attribute by name (case-insensitive)
     pub fn find_attribute(&self, name: &str) -> Option<&Attribute> {
         let name_lower = name.to_lowercase();
         self.attributes.iter().find(|attr| attr.name.to_lowercase() == name_lower)
     }
 
-    /// Find tabular section by name (case-insensitive, bilingual)
     pub fn find_tabular_section(
         &self,
         name: &str,
@@ -966,7 +734,6 @@ impl MetadataObject {
         })
     }
 
-    /// Find enum value by name (case-insensitive, bilingual)
     pub fn find_enum_value(&self, name: &str) -> Option<&EnumValue> {
         let name_lower = name.to_lowercase();
         self.enum_values.iter().find(|ev| {
@@ -975,7 +742,6 @@ impl MetadataObject {
         })
     }
 
-    /// Find predefined item by name (case-insensitive, bilingual)
     pub fn find_predefined_item(&self, name: &str) -> Option<&PredefinedItem> {
         let name_lower = name.to_lowercase();
         self.predefined_items.iter().find(|pi| {
@@ -1014,14 +780,11 @@ impl std::fmt::Display for AttributeType {
                 write!(f, "ОпределяемыйТип.{}", name)
             }
             Self::Composite { types } => {
-                // Display brief description for composite types
                 if types.is_empty() {
                     write!(f, "Составной тип (пусто)")
                 } else if types.len() == 1 {
-                    // Single type - just show it
                     write!(f, "{}", types[0])
                 } else {
-                    // Multiple types - show brief label
                     write!(f, "Составной тип:")
                 }
             }
@@ -1034,6 +797,26 @@ impl std::fmt::Display for AttributeType {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_standard_attribute_name_matches_every_kind() {
+        // Both name forms of every kind must be recognised, and a clearly
+        // non-standard name must not be.
+        for kind in StandardAttributeKind::ALL {
+            assert!(
+                is_standard_attribute_name(kind.russian_name()),
+                "{} (ru) must be standard",
+                kind.russian_name()
+            );
+            assert!(
+                is_standard_attribute_name(kind.english_name()),
+                "{} (en) must be standard",
+                kind.english_name()
+            );
+        }
+        assert!(is_standard_attribute_name("ссылка"), "case-insensitive");
+        assert!(!is_standard_attribute_name("ИНН"));
+    }
 
     #[test]
     fn test_mdo_type_from_str_russian() {
@@ -1067,14 +850,12 @@ mod tests {
 
     #[test]
     fn test_mdo_type_from_plural() {
-        // Russian plural forms
         assert_eq!(MdoType::from_plural("Документы"), Some(MdoType::Document));
         assert_eq!(MdoType::from_plural("Справочники"), Some(MdoType::Catalog));
         assert_eq!(MdoType::from_plural("РегистрыСведений"), Some(MdoType::InformationRegister));
         assert_eq!(MdoType::from_plural("РегистрыНакопления"), Some(MdoType::AccumulationRegister));
         assert_eq!(MdoType::from_plural("ПланыСчетов"), Some(MdoType::ChartOfAccounts));
 
-        // English plural forms
         assert_eq!(MdoType::from_plural("documents"), Some(MdoType::Document));
         assert_eq!(MdoType::from_plural("catalogs"), Some(MdoType::Catalog));
         assert_eq!(
@@ -1082,11 +863,9 @@ mod tests {
             Some(MdoType::InformationRegister)
         );
 
-        // Case insensitive
         assert_eq!(MdoType::from_plural("ДОКУМЕНТЫ"), Some(MdoType::Document));
         assert_eq!(MdoType::from_plural("CaTaLoGs"), Some(MdoType::Catalog));
 
-        // Invalid input
         assert_eq!(MdoType::from_plural("InvalidType"), None);
         assert_eq!(MdoType::from_plural(""), None);
     }
@@ -1099,7 +878,6 @@ mod tests {
         assert_eq!(obj.name_en, None);
         assert!(obj.attributes.is_empty());
 
-        // Add attributes
         obj.add_attribute(Attribute {
             name: "Код".to_string(),
             name_en: Some("Code".to_string()),
@@ -1114,17 +892,14 @@ mod tests {
 
         assert_eq!(obj.attributes.len(), 2);
 
-        // Find attribute by Russian name (case-insensitive)
         let code_attr = obj.find_attribute("Код").unwrap();
         assert_eq!(code_attr.name, "Код");
         assert_eq!(code_attr.name_en, Some("Code".to_string()));
         assert_eq!(code_attr.attr_type, AttributeType::String { length: Some(10) });
 
-        // Find by Russian name (case-insensitive)
         let rate_attr = obj.find_attribute("курс").unwrap();
         assert_eq!(rate_attr.name, "Курс");
 
-        // Not found
         assert!(obj.find_attribute("НесуществующееПоле").is_none());
     }
 
@@ -1185,7 +960,6 @@ mod tests {
 
     #[test]
     fn test_composite_type_display() {
-        // Single type composite should display as single type
         let single = AttributeType::Composite {
             types: vec![AttributeType::Ref {
                 mdo_type: MdoType::Enum,
@@ -1194,7 +968,6 @@ mod tests {
         };
         assert_eq!(single.to_string(), "Перечисление.ВидДействия");
 
-        // Multiple types composite should show brief label
         let composite = AttributeType::Composite {
             types: vec![
                 AttributeType::Ref {
@@ -1222,7 +995,6 @@ mod tests {
 
     #[test]
     fn test_any_object_ref_display() {
-        // Test AnyObjectRef Display implementation
         let catalog_ref = AttributeType::AnyObjectRef { mdo_type: MdoType::Catalog };
         assert_eq!(catalog_ref.to_string(), "Справочник");
 
@@ -1238,29 +1010,24 @@ mod tests {
 
     #[test]
     fn test_is_plural_form() {
-        // Russian plural forms
         assert!(MdoType::is_plural_form("Документы"));
         assert!(MdoType::is_plural_form("Справочники"));
         assert!(MdoType::is_plural_form("РегистрыСведений"));
 
-        // English plural forms
         assert!(MdoType::is_plural_form("Documents"));
         assert!(MdoType::is_plural_form("Catalogs"));
         assert!(MdoType::is_plural_form("InformationRegisters"));
 
-        // Case-insensitive
         assert!(MdoType::is_plural_form("ДОКУМЕНТЫ"));
         assert!(MdoType::is_plural_form("документы"));
         assert!(MdoType::is_plural_form("ДоКуМеНтЫ"));
         assert!(MdoType::is_plural_form("CATALOGS"));
         assert!(MdoType::is_plural_form("catalogs"));
 
-        // Singular forms should return false
         assert!(!MdoType::is_plural_form("Документ"));
         assert!(!MdoType::is_plural_form("Document"));
         assert!(!MdoType::is_plural_form("Справочник"));
 
-        // Invalid forms
         assert!(!MdoType::is_plural_form(""));
         assert!(!MdoType::is_plural_form("InvalidType"));
     }

@@ -1,5 +1,3 @@
-//! Reports code regions that cannot be reached by control flow.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -32,7 +30,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let module_cfgs = ctx.module_cfgs();
     let source_text = ctx.file_text();
 
-    // Check methods
     for (local_id, _body) in module_bodies.iter_bodies() {
         let Some(source_map) = module_bodies.source_map(local_id) else {
             continue;
@@ -46,11 +43,8 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         };
         let exit = cfg.exit_point();
 
-        // Compute reachable vertices via DFS from entry, following only live edges
         let reachable = compute_reachable_vertices(cfg, entry);
 
-        // Collect vertices that are "locally unreachable" - unreachable due to
-        // a terminator in the same scope, not due to external unreachability.
         let locally_unreachable = compute_locally_unreachable(cfg, &reachable);
 
         let unreachable_ranges = collect_unreachable_ranges(cfg, source_map, entry, exit, |idx| {
@@ -60,12 +54,10 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         create_diagnostics(&mut diagnostics, unreachable_ranges, source_text.as_str(), code, ctx);
     }
 
-    // Check module-level code (statements outside procedures/functions)
     if let Some(module_result) = module_bodies.module_code_result() {
         let body = &module_result.body;
         let source_map = &module_result.source_map;
 
-        // Build CFG for module code
         let cfg = hir::cfg::CfgBuilder::new().build_graph_from_hir(
             body.body_stmts_typed(),
             body,
@@ -94,7 +86,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics
 }
 
-/// Collect ranges of unreachable vertices from CFG.
 fn collect_unreachable_ranges<F>(
     cfg: &hir::cfg::ControlFlowGraph,
     source_map: &hir::BodySourceMap,
@@ -130,7 +121,6 @@ where
     ranges
 }
 
-/// Create diagnostics from merged unreachable ranges.
 fn create_diagnostics(
     diagnostics: &mut Vec<Diagnostic>,
     ranges: Vec<TextRange>,
@@ -151,43 +141,29 @@ fn create_diagnostics(
     }
 }
 
-/// Merge adjacent or overlapping ranges into larger ranges.
-///
-/// This combines multiple unreachable blocks into single diagnostics
-/// so that a whole unreachable block gets one diagnostic.
-///
-/// Ranges are considered adjacent if they are on the same line or adjacent lines
-/// (no blank line between them). This is more reliable than byte-based gaps
-/// because it correctly handles different scopes (e.g., code inside if vs module level).
 fn merge_ranges(mut ranges: Vec<TextRange>, source_text: &str) -> Vec<TextRange> {
     if ranges.is_empty() {
         return ranges;
     }
 
-    // Sort by start position
     ranges.sort_by_key(|r| r.start());
 
     let mut merged: Vec<TextRange> = Vec::new();
     let mut current = ranges[0];
 
     for range in ranges.into_iter().skip(1) {
-        // Count newlines between current range end and next range start
         let gap_start = usize::from(current.end());
         let gap_end = usize::from(range.start());
 
         let should_merge = if gap_end > gap_start && gap_end <= source_text.len() {
             let gap_text = &source_text[gap_start..gap_end];
             let newline_count = gap_text.chars().filter(|&c| c == '\n').count();
-            // Merge if 0 or 1 newline (same line or adjacent lines)
-            // Don't merge if 2+ newlines (blank line between = different scope)
             newline_count <= 1
         } else {
-            // Overlapping or adjacent (no gap)
             true
         };
 
         if should_merge {
-            // Extend current range to include this one
             current = TextRange::new(current.start(), current.end().max(range.end()));
         } else {
             merged.push(current);
@@ -199,10 +175,6 @@ fn merge_ranges(mut ranges: Vec<TextRange>, source_text: &str) -> Vec<TextRange>
     merged
 }
 
-/// Compute reachable vertices from entry point via DFS, following only live edges.
-///
-/// A vertex is reachable if there's a path from entry following edges that are NOT
-/// dead code edges (AdjacentCode).
 fn compute_reachable_vertices(
     cfg: &hir::cfg::ControlFlowGraph,
     entry: hir::cfg::NodeIndex,
@@ -214,10 +186,9 @@ fn compute_reachable_vertices(
 
     while let Some(node) = worklist.pop() {
         if !reachable.insert(node) {
-            continue; // Already visited
+            continue;
         }
 
-        // Follow outgoing edges, but only live ones
         for (target, edge_type) in cfg.outgoing_edges(node) {
             if !edge_type.is_dead_code_edge() && !reachable.contains(&target) {
                 worklist.push(target);
@@ -228,20 +199,12 @@ fn compute_reachable_vertices(
     reachable
 }
 
-/// Compute vertices that are "locally unreachable" - unreachable due to a terminator
-/// in the same scope (return, raise, break, etc.), not due to external unreachability.
-///
-/// A vertex is locally unreachable if it's connected to the reachable part of the graph
-/// when following edges BACKWARDS. Vertices that are completely disconnected from
-/// reachable vertices (e.g., inside an externally unreachable If) are excluded.
 fn compute_locally_unreachable(
     cfg: &hir::cfg::ControlFlowGraph,
     reachable: &std::collections::HashSet<hir::cfg::NodeIndex>,
 ) -> std::collections::HashSet<hir::cfg::NodeIndex> {
     use std::collections::HashSet;
 
-    // Do backward DFS from each unreachable vertex to see if it can reach
-    // a reachable vertex by following edges backwards
     let mut locally_unreachable = HashSet::new();
 
     for (idx, _vertex) in cfg.vertices() {
@@ -249,7 +212,6 @@ fn compute_locally_unreachable(
             continue;
         }
 
-        // Check if this unreachable vertex can reach a reachable vertex backwards
         if can_reach_reachable_backwards(cfg, idx, reachable) {
             locally_unreachable.insert(idx);
         }
@@ -258,7 +220,6 @@ fn compute_locally_unreachable(
     locally_unreachable
 }
 
-/// Check if vertex can reach any reachable vertex by following edges backwards.
 fn can_reach_reachable_backwards(
     cfg: &hir::cfg::ControlFlowGraph,
     start: hir::cfg::NodeIndex,
@@ -274,7 +235,6 @@ fn can_reach_reachable_backwards(
             continue;
         }
 
-        // Check incoming edges
         for (source, _edge_type) in cfg.incoming_edges(node) {
             if reachable.contains(&source) {
                 return true;
@@ -304,29 +264,18 @@ fn get_vertex_range(vertex: &CfgVertex, source_map: &hir::BodySourceMap) -> Opti
 
             Some(TextRange::new(first_range.start(), last_range.end()))
         }
-        // Don't include Conditional vertex range - when whole If is unreachable due to
-        // external control flow, the If header is not shown as unreachable.
-        // Unreachable BasicBlocks inside the If will be reported separately.
         CfgVertex::Conditional(_) => None,
         CfgVertex::WhileLoop(loop_vertex) => source_map.expr_range(loop_vertex.condition),
-        CfgVertex::ForLoop(loop_vertex) => {
-            // Use stmt_id if available for full loop range, otherwise fall back to binding
-            loop_vertex
-                .stmt_id
-                .and_then(|id| source_map.stmt_range(id))
-                .or_else(|| source_map.binding_range(loop_vertex.loop_var))
-        }
-        CfgVertex::ForEachLoop(loop_vertex) => {
-            // Use stmt_id if available for full loop range, otherwise fall back to binding
-            loop_vertex
-                .stmt_id
-                .and_then(|id| source_map.stmt_range(id))
-                .or_else(|| source_map.binding_range(loop_vertex.loop_var))
-        }
+        CfgVertex::ForLoop(loop_vertex) => loop_vertex
+            .stmt_id
+            .and_then(|id| source_map.stmt_range(id))
+            .or_else(|| source_map.binding_range(loop_vertex.loop_var)),
+        CfgVertex::ForEachLoop(loop_vertex) => loop_vertex
+            .stmt_id
+            .and_then(|id| source_map.stmt_range(id))
+            .or_else(|| source_map.binding_range(loop_vertex.loop_var)),
         CfgVertex::TryExcept(_) => None,
         CfgVertex::PreprocCondition(preproc) => {
-            // Use full_range (#Если...#КонецЕсли) when whole block is unreachable
-            // Otherwise fall back to directive_range or condition_range
             preproc.full_range.or(preproc.directive_range).or(Some(preproc.condition_range))
         }
         CfgVertex::Label(_) | CfgVertex::Exit => None,
@@ -836,22 +785,6 @@ mod tests {
         );
     }
 
-    /// Pins Track 1 Step C — `walk_goto_statement_hir` (plan §1.3)
-    /// makes `Перейти ~Метка` a `Direct` edge to the resolved
-    /// `Label` vertex, leaving the block immediately after the
-    /// `Перейти` without a fall-through edge. Statements between
-    /// the `Перейти` and the matching label sit in their own
-    /// basic block whose only potential predecessor is the
-    /// dangling block — none reaches them, so they are unreachable.
-    /// The label and everything beyond it stay reachable through
-    /// the goto edge itself, so no false positive there.
-    ///
-    /// Without Step C this case lowered into an `AdjacentCode`
-    /// (dead) edge and the after-`Перейти` block was treated as
-    /// "reachable but dead" — UnreachableCode never fired. Step O
-    /// pins the post-Step-C live-edge contract: existing
-    /// `compute_reachable_vertices` / `compute_locally_unreachable`
-    /// recognise the new shape automatically.
     #[test]
     fn test_unreachable_after_goto() {
         let code = r#"

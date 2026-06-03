@@ -1,8 +1,3 @@
-//! NestedTernaryOperator diagnostic.
-//!
-//! Reports nested or condition-embedded ternary operators that reduce
-//! readability.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -22,7 +17,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Check a single syntax node for nested ternary operators.
 pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &DiagnosticsContext) {
     let code = DiagnosticCode::NestedTernaryOperator;
 
@@ -31,19 +25,16 @@ pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &Diagnostic
     }
 
     match node.kind() {
-        // Case 1: Ternary in IF condition
         SyntaxKind::IF_STMT => {
             if let Some(condition) = find_if_condition(node) {
                 find_and_report_ternaries(&condition, code, ctx, acc);
             }
         }
-        // Case 2: Ternary in ELSIF condition
         SyntaxKind::ELSIF_CLAUSE => {
             if let Some(condition) = find_elsif_condition(node) {
                 find_and_report_ternaries(&condition, code, ctx, acc);
             }
         }
-        // Case 3: Nested ternary within another ternary
         SyntaxKind::TERNARY_EXPR => {
             for nested in node.descendants().skip(1) {
                 if nested.kind() == SyntaxKind::TERNARY_EXPR {
@@ -55,7 +46,6 @@ pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &Diagnostic
     }
 }
 
-/// Main entry point for the `NestedTernaryOperator` diagnostic.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let _span = tracing::debug_span!("NestedTernaryOperator::check").entered();
 
@@ -78,23 +68,14 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics
 }
 
-/// Find the condition expression of an IF statement.
-///
-/// Structure: `IF_STMT` → `EXPR` (condition) → `THEN` → ...
 fn find_if_condition(if_stmt: &SyntaxNode) -> Option<SyntaxNode> {
     if_stmt.children().find(|n| n.kind() == SyntaxKind::EXPR)
 }
 
-/// Find the condition expression of an ELSIF clause.
-///
-/// Structure: `ELSIF_CLAUSE` → `EXPR` (condition) → ...
 fn find_elsif_condition(elsif_clause: &SyntaxNode) -> Option<SyntaxNode> {
     elsif_clause.children().find(|n| n.kind() == SyntaxKind::EXPR)
 }
 
-/// Find and report all ternary operators within an expression tree.
-///
-/// Used to detect ternary operators in IF/ELSIF conditions.
 fn find_and_report_ternaries(
     condition: &SyntaxNode,
     code: DiagnosticCode,
@@ -108,7 +89,6 @@ fn find_and_report_ternaries(
     }
 }
 
-/// Create a diagnostic for a nested ternary operator.
 fn make_diagnostic(
     node: &SyntaxNode,
     code: DiagnosticCode,

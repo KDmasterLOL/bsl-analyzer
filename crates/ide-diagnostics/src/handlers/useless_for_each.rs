@@ -1,5 +1,3 @@
-//! Reports `Для каждого` / `For Each` loops whose iterator is not meaningfully used.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -20,7 +18,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates a diagnostic from HIR lowering data for an unused loop iterator.
 pub fn from_hir(
     iterator_name: &str,
     range: TextRange,
@@ -31,7 +28,6 @@ pub fn from_hir(
         return None;
     }
 
-    // Skip if iterator name matches a module-level variable
     let symbol_tree = ctx.symbol_tree();
     if symbol_tree.find_variable(&Name::new(iterator_name)).is_some() {
         return None;

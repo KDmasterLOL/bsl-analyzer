@@ -1,50 +1,3 @@
-//! DeprecatedAttributes8312 diagnostic (HIR-based).
-//!
-//! Detects usage of deprecated attributes and methods introduced in 8.3.12.
-//!
-//! **This is a HIR-based diagnostic** - collected during AST→HIR lowering.
-//!
-//! ## Why?
-//! Since 1C:Enterprise 8.3.12, many chart-related attributes, methods, and enums
-//! were deprecated and replaced with new APIs:
-//! - Better chart customization architecture
-//! - More granular control over chart appearance
-//! - Future-proof design
-//!
-//! ## Deprecated items:
-//! 1. **ChartPlotArea attributes**: ShowScale, ShowSeriesScaleLabels, etc.
-//! 2. **Chart/GanttChart/PivotChart attributes**: ShowLegend, ShowTitle, ColorPalette, etc.
-//! 3. **Chart methods**: GetPalette(), SetPalette()
-//! 4. **Global methods**: ClearEventLog()
-//! 5. **Enum names**: ОриентацияМетокДиаграммы → ОриентацияПодписейДиаграммы
-//! 6. **Enum values**: ChildFormItemsGroup.Horizontal → AlwaysHorizontal
-//!
-//! ## Bad practice
-//! ```bsl
-//! Диаграмма.ОтображатьЛегенду = Истина; // ❌ Deprecated
-//! ОбластьПостроенияДиаграммы.ОтображатьШкалу = Ложь; // ❌ Deprecated
-//! ОчиститьЖурналРегистрации(Отбор); // ❌ Deprecated
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! // Use specific legend area properties
-//! Диаграмма.ОбластьЛегендыДиаграммы.Placement = ...;
-//! // Use scale properties
-//! ОбластьПостроенияДиаграммы.ОтображатьШкалы = ...;
-//! ```
-//!
-//! ## Configuration
-//! - **Enabled by default:** Yes
-//! - **Severity:** Information (INFO)
-//! - **Tags:** DEPRECATED
-//! - **Compatibility mode:** 8.3.12+
-//! - **Minutes to fix:** 1
-//!
-//! ## Implementation
-//!
-//! Migrated from token-based to HIR-based approach.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -66,9 +19,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic.
-///
-/// Called from lib.rs dispatch when `BodyDiagnostic::DeprecatedAttribute8312` is encountered.
 pub fn from_hir(
     name: &str,
     kind: DeprecatedKind8312,
@@ -246,10 +196,6 @@ mod tests {
               message: Атрибут "ОриентацияМеток" устарел. Используйте: ШкалаТочек.ОриентацияПодписей
               severity: Hint"#]]
         .assert_eq(&format_diags(code, &diags));
-
-        // Первая диагностика: "ОтображатьШкалу" на строке 2
-
-        // Вторая диагностика: "ОриентацияМеток" на строке 3
     }
 
     #[test]
@@ -272,10 +218,6 @@ EndProcedure
             DeprecatedAttributes8312 @ 4:19..4:40
               message: Attribute "ShowSeriesScaleLabels" is deprecated. Используйте: SeriesScale.ScaleLabelLocation
               severity: Hint"#]].assert_eq(&format_diags(code, &diags));
-
-        // Первая диагностика: "ShowScale" на строке 2
-
-        // Вторая диагностика: "ShowSeriesScaleLabels" на строке 3
     }
 
     #[test]
@@ -302,12 +244,6 @@ EndProcedure
             DeprecatedAttributes8312 @ 5:15..5:28
               message: Атрибут "ПалитраЦветов" устарел. Используйте: ОписаниеПалитрыЦветов.ПалитраЦветов
               severity: Hint"#]].assert_eq(&format_diags(code, &diags));
-
-        // "ОтображатьЛегенду" на строке 2
-
-        // "ОтображатьЗаголовок" на строке 3
-
-        // "ПалитраЦветов" на строке 4
     }
 
     #[test]
@@ -330,10 +266,6 @@ EndProcedure
             DeprecatedAttributes8312 @ 4:15..4:32
               message: Метод "УстановитьПалитру" устарел. Используйте: ОписаниеПалитрыЦветов.УстановитьПалитру
               severity: Hint"#]].assert_eq(&format_diags(code, &diags));
-
-        // "ПолучитьПалитру" на строке 2
-
-        // "УстановитьПалитру" на строке 3
     }
 
     #[test]
@@ -353,8 +285,6 @@ EndProcedure
               message: Глобальный метод "ОчиститьЖурналРегистрации" устарел. Используйте:
               severity: Hint"#]]
         .assert_eq(&format_diags_trim_trailing(code, &diags));
-
-        // "ОчиститьЖурналРегистрации" на строке 2
     }
 
     #[test]
@@ -374,8 +304,6 @@ EndProcedure
               message: Global method "ClearEventLog" is deprecated. Используйте:
               severity: Hint"#]]
         .assert_eq(&format_diags_trim_trailing(code, &diags));
-
-        // "ClearEventLog" на строке 2
     }
 
     #[test]
@@ -395,8 +323,6 @@ EndProcedure
               message: Имя перечисления "Авто" устарело. Используйте:
               severity: Hint"#]]
         .assert_eq(&format_diags_trim_trailing(code, &diags));
-
-        // Диагностика подсвечивает поле "Авто" (а не весь enum ОриентацияМетокДиаграммы)
     }
 
     #[test]
@@ -415,13 +341,10 @@ EndProcedure
             DeprecatedAttributes8312 @ 3:56..3:70
               message: Значение перечисления "Горизонтальная" устарело. Используйте: ГоризонтальнаяВсегда
               severity: Hint"#]].assert_eq(&format_diags(code, &diags));
-
-        // Диагностика подсвечивает значение "Горизонтальная"
     }
 
     #[test]
     fn test_chart_plot_area_all_russian_attributes() {
-        // All 9 deprecated ChartPlotArea attributes in Russian
         let code = r#"Процедура Тест()
     тест = ОбластьПостроенияДиаграммы.ОтображатьШкалу;
     ОбластьПостроенияДиаграммы.ЛинииШкалы = Ложь;
@@ -470,7 +393,6 @@ EndProcedure
 
     #[test]
     fn test_chart_plot_area_all_english_attributes() {
-        // 7 deprecated ChartPlotArea attributes in English (no LineScales/ColorScale in English)
         let code = r#"Procedure Test()
     ChartPlotArea.ShowScale = True;
     ChartPlotArea.ShowSeriesScaleLabels = True;
@@ -511,7 +433,6 @@ EndProcedure"#;
 
     #[test]
     fn test_chart_legend_title_russian() {
-        // ShowLegend/ShowTitle for Диаграмма, ДиаграммаГанта, СводнаяДиаграмма
         let code = r#"Процедура Тест2()
     Диаграмма.ОтображатьЛегенду = Истина;
     Диаграмма.ОтображатьЗаголовок = Истина;
@@ -548,7 +469,6 @@ EndProcedure"#;
 
     #[test]
     fn test_chart_palette_russian() {
-        // Palette-related deprecated attributes
         let code = r#"Процедура Тест2()
     Диаграмма.ПалитраЦветов = Истина;
     Диаграмма.ЦветНачалаГрадиентнойПалитры = Истина;
@@ -577,7 +497,6 @@ EndProcedure"#;
 
     #[test]
     fn test_chart_legend_title_english() {
-        // English ShowLegend/ShowTitle for Chart, GanttChart, PivotChart
         let code = r#"Procedure Test2()
     Chart.ShowLegend = True;
     GanttChart.ShowLegend = True;
@@ -614,7 +533,6 @@ EndProcedure"#;
 
     #[test]
     fn test_chart_palette_english() {
-        // English palette attributes
         let code = r#"Procedure Test2()
     Chart.ColorPalette = True;
     Chart.GradientPaletteStartColor = True;
@@ -643,7 +561,6 @@ EndProcedure"#;
 
     #[test]
     fn test_chart_palette_methods_english() {
-        // English GetPalette/SetPalette deprecated methods
         let code = r#"Procedure Test2()
     Chart.GetPalette();
     Chart.SetPalette(True);
@@ -664,7 +581,6 @@ EndProcedure"#;
 
     #[test]
     fn test_enum_name_russian() {
-        // ОриентацияМетокДиаграммы enum name deprecated
         let code = r#"Процедура Тест3()
     Ориентация = ОриентацияМетокДиаграммы.Авто;
 КонецПроцедуры"#;
@@ -682,7 +598,6 @@ EndProcedure"#;
 
     #[test]
     fn test_enum_value_russian() {
-        // ГруппировкаПодчиненныхЭлементовФормы.Горизонтальная — deprecated enum value
         let code = r#"Процедура Тест5()
     Группировка = ГруппировкаПодчиненныхЭлементовФормы.Горизонтальная;
 КонецПроцедуры"#;
@@ -699,7 +614,6 @@ EndProcedure"#;
 
     #[test]
     fn test_enum_value_english() {
-        // ChildFormItemsGroup.Horizontal — deprecated enum value
         let code = r#"Procedure Test5()
     test = ChildFormItemsGroup.Horizontal;
 EndProcedure"#;

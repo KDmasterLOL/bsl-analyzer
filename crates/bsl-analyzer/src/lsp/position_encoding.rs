@@ -1,8 +1,5 @@
-//! LSP position encoding negotiation.
-
 use lsp_types::{ClientCapabilities, PositionEncodingKind};
 
-/// Encoding used for LSP `Position.character` and semantic-token columns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PositionEncoding {
     Utf8,
@@ -11,11 +8,6 @@ pub enum PositionEncoding {
 }
 
 impl PositionEncoding {
-    /// Prefer UTF-8 when the client explicitly supports it.
-    ///
-    /// Internally the parser and HIR ranges are UTF-8 byte offsets, and Neovim
-    /// applies semantic token columns in byte space. Falling back to UTF-16
-    /// preserves the LSP default for clients that do not advertise UTF-8.
     pub fn negotiate(capabilities: &ClientCapabilities) -> Self {
         let Some(general) = &capabilities.general else {
             return Self::Utf16;

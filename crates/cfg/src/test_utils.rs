@@ -1,18 +1,9 @@
-//! Stable CFG snapshot helpers for topology-focused tests.
-
 use crate::{CfgEdgeType, CfgVertex, ControlFlowGraph};
 use petgraph::algo::dominators::simple_fast;
 use petgraph::graph::NodeIndex;
 use petgraph::visit::EdgeRef;
 use rustc_hash::FxHashMap;
 
-/// Format a CFG using structural fingerprints instead of node indices.
-///
-/// Fingerprints intentionally exclude `NodeIndex` allocation order. Basic
-/// blocks in the current CFG only store opaque HIR statement IDs, not a `Body`,
-/// so ordinary non-empty basic blocks fall back to `CALL_STMT`; terminating
-/// blocks use CFG-local edge topology to recover a more specific statement
-/// kind where possible.
 pub fn format_cfg(cfg: &ControlFlowGraph) -> String {
     let depths = dominator_depths(cfg);
     let mut base_fingerprints = FxHashMap::default();

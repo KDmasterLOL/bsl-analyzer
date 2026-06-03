@@ -1,5 +1,3 @@
-//! Reports functions whose return branches collapse to the same primitive literal.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -19,7 +17,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates a diagnostic from the HIR lowering result.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     crate::simple_hir_diagnostic(
         DiagnosticCode::FunctionReturnsSamePrimitive,
@@ -35,7 +32,6 @@ mod tests {
     use crate::test_utils::*;
     use crate::DiagnosticCode;
     use expect_test::expect;
-    /// All branches always return True — should trigger.
     #[test]
     fn test_fixture_all_branches_return_true() {
         let code = r#"Функция ПроверитьСтроку(Знач СтрокаТаблицы)
@@ -61,7 +57,6 @@ mod tests {
               severity: Major"#]].assert_eq(&format_diags(code, &func_diags));
     }
 
-    /// Same string in all branches — should trigger.
     #[test]
     fn test_fixture_all_branches_return_same_string() {
         let code = r#"Функция Метод1()
@@ -85,7 +80,6 @@ mod tests {
               severity: Major"#]].assert_eq(&format_diags(code, &func_diags));
     }
 
-    /// Same number in all branches — should trigger.
     #[test]
     fn test_fixture_all_branches_return_same_number() {
         let code = r#"Функция СтавкаНДС(Ставка)
@@ -107,7 +101,6 @@ mod tests {
               severity: Major"#]].assert_eq(&format_diags(code, &func_diags));
     }
 
-    /// Attachable method with same Null — skipped by default.
     #[test]
     fn test_fixture_attachable_prefix_skipped() {
         let code = r#"Функция Подключаемый_КакаяТоКоманда(Команда)
@@ -128,7 +121,6 @@ mod tests {
         expect![[r#""#]].assert_eq(&format_diags(code, &func_diags));
     }
 
-    /// Non-attachable function returning same Null — should trigger.
     #[test]
     fn test_fixture_non_attachable_null_triggers() {
         let code = r#"Функция КакаяТоКоманда(Команда)
@@ -152,7 +144,6 @@ mod tests {
               severity: Major"#]].assert_eq(&format_diags(code, &func_diags));
     }
 
-    /// Case-insensitive string comparison: "Значение", "значение", "ЗНАЧЕНИЕ" treated as same.
     #[test]
     fn test_fixture_case_insensitive_string_same() {
         let code = r#"Функция ПроверкаРегистраДляСтрок()

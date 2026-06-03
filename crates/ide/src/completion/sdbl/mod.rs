@@ -1,11 +1,3 @@
-//! SDBL completion module (refactored with Clean Architecture).
-//!
-//! Architecture:
-//! - `domain/` - Domain models and traits (no external dependencies)
-//! - `use_cases/` - Business logic (use cases for different completion scenarios)
-//! - `infrastructure/` - External dependencies (DB access, metadata, scope providers)
-//! - `tests/` - Test fixtures and test suites
-
 pub mod domain;
 pub mod infrastructure;
 pub mod use_cases;
@@ -21,9 +13,6 @@ use use_cases::{
     CompleteNestedElementsUseCase, CompleteNestedFieldsUseCase, CompleteValueElementsUseCase,
 };
 
-/// Main SDBL completion entry point (Facade).
-///
-/// Returns completion suggestions if cursor is inside an SDBL query string.
 pub(super) fn sdbl_completions(
     db: &dyn RootDatabase,
     position: CompletionPosition,
@@ -33,11 +22,9 @@ pub(super) fn sdbl_completions(
 
     tracing::info!("sdbl_completions called: file_id={:?}, offset={:?}", file_id, offset);
 
-    // Get parsed file
     let parse = db.parse(file_id);
     let root = parse.syntax_node();
 
-    // Check if position is inside SDBL query string
     let query_info = detect_sdbl_at_position(&root, offset)?;
 
     tracing::info!(
@@ -46,12 +33,9 @@ pub(super) fn sdbl_completions(
         "detected SDBL query"
     );
 
-    // Create providers
     let metadata_provider = DbMetadataProvider::new(db, file_id);
     let scope_provider = DbScopeProvider::new(db);
 
-    // Try to get Scope for the query at cursor position
-    // Pass BSL literal range and SDBL offset (already converted from BSL offset)
     let scope =
         scope_provider.get_scope(file_id, query_info.bsl_literal_range, query_info.offset_in_query);
     if scope.is_some() {
@@ -60,12 +44,9 @@ pub(super) fn sdbl_completions(
         tracing::debug!("failed to build Scope (no HIR or no tables)");
     }
 
-    // Determine completion context
     let context = detect_context(&query_info.query_text, query_info.offset_in_query);
 
-    // Match on context and call appropriate use case
     let items = match (context, scope.as_ref()) {
-        // Alias field completion - requires scope
         (SdblCompletionContext::AfterTableAlias { alias, prefix }, Some(scope)) => {
             tracing::info!(
                 alias = %alias,
@@ -80,11 +61,9 @@ pub(super) fn sdbl_completions(
                 prefix = %prefix,
                 "completion context: AfterTableAlias but no scope available (HIR failed?)"
             );
-            // Fallback to keywords if no scope
             CompleteKeywordsUseCase::execute(&prefix)
         }
 
-        // Nested field completion - requires scope
         (SdblCompletionContext::AfterNestedField { alias, field_chain, prefix }, Some(scope)) => {
             tracing::info!(
                 alias = %alias,
@@ -101,11 +80,9 @@ pub(super) fn sdbl_completions(
                 prefix = %prefix,
                 "completion context: AfterNestedField but no scope available"
             );
-            // Fallback to keywords if no scope
             CompleteKeywordsUseCase::execute(&prefix)
         }
 
-        // Alias suggestion after AS/КАК
         (SdblCompletionContext::AfterAsKeyword { context: as_context, suggestion }, _) => {
             tracing::info!(
                 ?as_context,
@@ -115,13 +92,11 @@ pub(super) fn sdbl_completions(
             CompleteAliasesUseCase::execute_alias_suggestion(suggestion)
         }
 
-        // JOIN type keywords
         (SdblCompletionContext::JoinTypeKeyword { prefix }, _) => {
             tracing::info!(prefix = %prefix, "completion context: JoinTypeKeyword");
             CompleteJoinTypesUseCase::execute(&prefix)
         }
 
-        // Table aliases after ON - requires scope
         (SdblCompletionContext::AfterOnKeyword { prefix }, Some(scope)) => {
             tracing::info!(
                 prefix = %prefix,
@@ -134,17 +109,14 @@ pub(super) fn sdbl_completions(
                 prefix = %prefix,
                 "completion context: AfterOnKeyword but no scope available"
             );
-            // Fallback to keywords if no scope
             CompleteKeywordsUseCase::execute(&prefix)
         }
 
-        // AfterFromKeyword - suggest MDO types
         (SdblCompletionContext::AfterFromKeyword, _) => {
             tracing::info!("completion context: AfterFromKeyword");
             CompleteMdoUseCase::execute_types("")
         }
 
-        // InsideMdoType - suggest MDO objects
         (SdblCompletionContext::InsideMdoType { mdo_type, prefix }, _) => {
             tracing::info!(
                 ?mdo_type,
@@ -154,7 +126,6 @@ pub(super) fn sdbl_completions(
             CompleteMdoUseCase::execute_objects(&metadata_provider, mdo_type, &prefix)
         }
 
-        // AfterMdoObject - suggest nested elements (tabular sections, virtual tables)
         (SdblCompletionContext::AfterMdoObject { mdo_type, object_name, prefix }, _) => {
             tracing::info!(
                 ?mdo_type,
@@ -170,13 +141,11 @@ pub(super) fn sdbl_completions(
             )
         }
 
-        // InsideValueFunction - suggest MDO types (level 1)
         (SdblCompletionContext::InsideValueFunction, _) => {
             tracing::info!("completion context: InsideValueFunction");
             CompleteMdoUseCase::execute_types("")
         }
 
-        // InsideValueMdoType - suggest MDO objects (level 2)
         (SdblCompletionContext::InsideValueMdoType { mdo_type, prefix, is_russian }, _) => {
             tracing::info!(
                 ?mdo_type,
@@ -187,7 +156,6 @@ pub(super) fn sdbl_completions(
             CompleteMdoUseCase::execute_objects(&metadata_provider, mdo_type, &prefix)
         }
 
-        // InsideValueMdoObject - suggest enum values / predefined items + EmptyRef (level 3)
         (
             SdblCompletionContext::InsideValueMdoObject {
                 mdo_type,
@@ -213,7 +181,6 @@ pub(super) fn sdbl_completions(
             )
         }
 
-        // AfterCastExpression - suggest fields from CAST target type
         (
             SdblCompletionContext::AfterCastExpression {
                 mdo_type,
@@ -241,19 +208,16 @@ pub(super) fn sdbl_completions(
             )
         }
 
-        // SdblKeywords - suggest SDBL keywords
         (SdblCompletionContext::SdblKeywords { prefix }, _) => {
             tracing::info!(prefix = %prefix, "completion context: SdblKeywords");
             CompleteKeywordsUseCase::execute(&prefix)
         }
 
-        // None - no completion
         (SdblCompletionContext::None, _) => {
             tracing::info!("no completion context detected");
             return None;
         }
     };
 
-    // Convert SdblCompletionItem to CompletionItem
     Some(items.into_iter().map(|item| item.into_completion_item()).collect())
 }

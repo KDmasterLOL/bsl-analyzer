@@ -1,22 +1,9 @@
-//! Use case: Complete SDBL keywords.
-
 use crate::completion::sdbl::domain::SdblCompletionItem;
 use crate::completion::CompletionItemKind;
 
-/// Use case for completing SDBL keywords.
-///
-/// This is a pure function (no external dependencies) that returns
-/// SDBL keywords filtered by prefix.
 pub struct CompleteKeywordsUseCase;
 
 impl CompleteKeywordsUseCase {
-    /// Execute the use case: get SDBL keywords matching prefix.
-    ///
-    /// # Arguments
-    /// - `prefix`: Filter prefix (case-insensitive)
-    ///
-    /// # Returns
-    /// List of matching SDBL keywords (Russian + English variants)
     pub fn execute(prefix: &str) -> Vec<SdblCompletionItem> {
         let keywords = Self::sdbl_keywords();
         let prefix_lower = prefix.to_lowercase();
@@ -24,7 +11,6 @@ impl CompleteKeywordsUseCase {
         let mut items = Vec::new();
 
         for (russian, english, description) in &keywords {
-            // Add Russian variant if matches
             if russian.to_lowercase().starts_with(&prefix_lower) || prefix.is_empty() {
                 items.push(
                     SdblCompletionItem::new(*russian, CompletionItemKind::Keyword)
@@ -33,7 +19,6 @@ impl CompleteKeywordsUseCase {
                 );
             }
 
-            // Add English variant if matches
             if english.to_lowercase().starts_with(&prefix_lower) || prefix.is_empty() {
                 items.push(
                     SdblCompletionItem::new(*english, CompletionItemKind::Keyword)
@@ -46,23 +31,19 @@ impl CompleteKeywordsUseCase {
         items
     }
 
-    /// Get list of SDBL keywords with descriptions.
     fn sdbl_keywords() -> Vec<(&'static str, &'static str, &'static str)> {
         vec![
-            // Query structure
             ("ВЫБРАТЬ", "SELECT", "Выбрать данные из таблицы"),
             ("ИЗ", "FROM", "Указать источник данных"),
             ("ГДЕ", "WHERE", "Условие фильтрации"),
             ("СГРУППИРОВАТЬ", "GROUP", "Группировка данных"),
             ("УПОРЯДОЧИТЬ", "ORDER", "Сортировка результатов"),
             ("ПО", "BY", "Указать поля для группировки/сортировки"),
-            // Joins
             ("СОЕДИНЕНИЕ", "JOIN", "Соединение таблиц"),
             ("ЛЕВОЕ", "LEFT", "Левое внешнее соединение"),
             ("ПРАВОЕ", "RIGHT", "Правое внешнее соединение"),
             ("ПОЛНОЕ", "FULL", "Полное внешнее соединение"),
             ("ВНУТРЕННЕЕ", "INNER", "Внутреннее соединение"),
-            // Other keywords
             ("КАК", "AS", "Псевдоним для поля или таблицы"),
             ("И", "AND", "Логическое И"),
             ("ИЛИ", "OR", "Логическое ИЛИ"),
@@ -93,7 +74,6 @@ mod tests {
     #[test]
     fn test_complete_keywords_no_prefix() {
         let items = CompleteKeywordsUseCase::execute("");
-        // Should return all keywords (Russian + English variants)
         assert!(!items.is_empty());
         assert!(items.iter().any(|i| i.label == "ВЫБРАТЬ"));
         assert!(items.iter().any(|i| i.label == "SELECT"));
@@ -102,7 +82,6 @@ mod tests {
     #[test]
     fn test_complete_keywords_russian_prefix() {
         let items = CompleteKeywordsUseCase::execute("ВЫ");
-        // Should return keywords starting with "ВЫ": ВЫБРАТЬ, ВЫРАЗИТЬ
         assert!(items.iter().any(|i| i.label == "ВЫБРАТЬ"));
         assert!(items.iter().any(|i| i.label == "ВЫРАЗИТЬ"));
         assert!(!items.iter().any(|i| i.label == "ИЗ"));
@@ -111,7 +90,6 @@ mod tests {
     #[test]
     fn test_complete_keywords_english_prefix() {
         let items = CompleteKeywordsUseCase::execute("SEL");
-        // Should return SELECT
         assert!(items.iter().any(|i| i.label == "SELECT"));
         assert!(!items.iter().any(|i| i.label == "FROM"));
     }
@@ -120,7 +98,6 @@ mod tests {
     fn test_complete_keywords_case_insensitive() {
         let items_upper = CompleteKeywordsUseCase::execute("SEL");
         let items_lower = CompleteKeywordsUseCase::execute("sel");
-        // Should return same results regardless of case
         assert_eq!(items_upper.len(), items_lower.len());
     }
 

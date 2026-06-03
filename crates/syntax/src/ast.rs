@@ -1,22 +1,11 @@
-//! Typed AST wrappers for syntax nodes.
-//!
-//! This module provides typed access to syntax nodes.
-//!
-//! # Architecture
-//!
-//! AST nodes are zero-cost typed wrappers around untyped SyntaxNode.
-//! They implement the AstNode trait which provides casting and syntax access.
-
 use crate::{SyntaxKind, SyntaxNode, SyntaxToken};
 
-/// Trait for AST nodes.
 pub trait AstNode: Sized {
     fn can_cast(kind: SyntaxKind) -> bool;
     fn cast(node: SyntaxNode) -> Option<Self>;
     fn syntax(&self) -> &SyntaxNode;
 }
 
-/// Source file node.
 #[derive(Debug, Clone)]
 pub struct SourceFile(SyntaxNode);
 
@@ -38,7 +27,6 @@ impl AstNode for SourceFile {
     }
 }
 
-/// Procedure definition.
 #[derive(Debug, Clone)]
 pub struct ProcedureDef(SyntaxNode);
 
@@ -68,7 +56,6 @@ impl ProcedureDef {
             .find(|it| it.kind() == SyntaxKind::IDENT)
     }
 
-    /// Returns the name token, including keyword tokens accepted during error recovery.
     pub fn name_or_keyword(&self) -> Option<SyntaxToken> {
         self.0.children_with_tokens().filter_map(|it| it.into_token()).find(|it| {
             let k = it.kind();
@@ -96,7 +83,6 @@ impl ProcedureDef {
     }
 
     pub fn annotations(&self) -> impl Iterator<Item = Annotation> + '_ {
-        // Annotations are parsed as children of the procedure/function node by annotated_item()
         self.0.children().filter_map(Annotation::cast)
     }
 
@@ -105,7 +91,6 @@ impl ProcedureDef {
     }
 }
 
-/// Function definition.
 #[derive(Debug, Clone)]
 pub struct FunctionDef(SyntaxNode);
 
@@ -135,7 +120,6 @@ impl FunctionDef {
             .find(|it| it.kind() == SyntaxKind::IDENT)
     }
 
-    /// Returns the name token, including keyword tokens accepted during error recovery.
     pub fn name_or_keyword(&self) -> Option<SyntaxToken> {
         self.0.children_with_tokens().filter_map(|it| it.into_token()).find(|it| {
             let k = it.kind();
@@ -163,7 +147,6 @@ impl FunctionDef {
     }
 
     pub fn annotations(&self) -> impl Iterator<Item = Annotation> + '_ {
-        // Annotations are parsed as children of the procedure/function node by annotated_item()
         self.0.children().filter_map(Annotation::cast)
     }
 
@@ -172,7 +155,6 @@ impl FunctionDef {
     }
 }
 
-/// Variable definition.
 #[derive(Debug, Clone)]
 pub struct VarDef(SyntaxNode);
 
@@ -202,9 +184,6 @@ impl VarDef {
             .find(|it| it.kind() == SyntaxKind::IDENT)
     }
 
-    /// Get all variable names declared in this definition.
-    ///
-    /// BSL allows multiple variables in one declaration: Перем Имя1, Имя2, Имя3;
     pub fn names(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
         self.0
             .children_with_tokens()
@@ -224,7 +203,6 @@ impl VarDef {
     }
 }
 
-/// Parameter list.
 #[derive(Debug, Clone)]
 pub struct ParamList(SyntaxNode);
 
@@ -252,7 +230,6 @@ impl ParamList {
     }
 }
 
-/// Parameter definition.
 #[derive(Debug, Clone)]
 pub struct Param(SyntaxNode);
 
@@ -290,22 +267,14 @@ impl Param {
     }
 
     pub fn default_value(&self) -> bool {
-        // If parameter has assignment (=), it has a default value
-        // We check for the presence of additional children beyond just the name
         self.0.children().next().is_some()
     }
 
-    /// Get the default value expression (if any).
-    ///
-    /// For parameters with default values like `Param1 = 123`, returns the expression node.
     pub fn default_value_expr(&self) -> Option<SyntaxNode> {
-        // PARAM structure: IDENT [KW_VAL] [EQ] [EXPR]
-        // Find the EXPR child node
         self.0.children().find(|n| n.kind() == SyntaxKind::EXPR)
     }
 }
 
-/// Assignment statement.
 #[derive(Debug, Clone)]
 pub struct AssignStmt(SyntaxNode);
 
@@ -327,7 +296,6 @@ impl AstNode for AssignStmt {
     }
 }
 
-/// Call statement.
 #[derive(Debug, Clone)]
 pub struct CallStmt(SyntaxNode);
 
@@ -349,7 +317,6 @@ impl AstNode for CallStmt {
     }
 }
 
-/// Return statement.
 #[derive(Debug, Clone)]
 pub struct ReturnStmt(SyntaxNode);
 
@@ -371,7 +338,6 @@ impl AstNode for ReturnStmt {
     }
 }
 
-/// If statement.
 #[derive(Debug, Clone)]
 pub struct IfStmt(SyntaxNode);
 
@@ -393,7 +359,6 @@ impl AstNode for IfStmt {
     }
 }
 
-/// While statement.
 #[derive(Debug, Clone)]
 pub struct WhileStmt(SyntaxNode);
 
@@ -415,7 +380,6 @@ impl AstNode for WhileStmt {
     }
 }
 
-/// For statement.
 #[derive(Debug, Clone)]
 pub struct ForStmt(SyntaxNode);
 
@@ -437,7 +401,6 @@ impl AstNode for ForStmt {
     }
 }
 
-/// For each statement.
 #[derive(Debug, Clone)]
 pub struct ForEachStmt(SyntaxNode);
 
@@ -459,7 +422,6 @@ impl AstNode for ForEachStmt {
     }
 }
 
-/// Try statement.
 #[derive(Debug, Clone)]
 pub struct TryStmt(SyntaxNode);
 
@@ -481,7 +443,6 @@ impl AstNode for TryStmt {
     }
 }
 
-/// Raise statement.
 #[derive(Debug, Clone)]
 pub struct RaiseStmt(SyntaxNode);
 
@@ -503,7 +464,6 @@ impl AstNode for RaiseStmt {
     }
 }
 
-/// Break statement.
 #[derive(Debug, Clone)]
 pub struct BreakStmt(SyntaxNode);
 
@@ -525,7 +485,6 @@ impl AstNode for BreakStmt {
     }
 }
 
-/// Continue statement.
 #[derive(Debug, Clone)]
 pub struct ContinueStmt(SyntaxNode);
 
@@ -547,7 +506,6 @@ impl AstNode for ContinueStmt {
     }
 }
 
-/// Binary expression.
 #[derive(Debug, Clone)]
 pub struct BinaryExpr(SyntaxNode);
 
@@ -569,7 +527,6 @@ impl AstNode for BinaryExpr {
     }
 }
 
-/// Unary expression.
 #[derive(Debug, Clone)]
 pub struct UnaryExpr(SyntaxNode);
 
@@ -591,7 +548,6 @@ impl AstNode for UnaryExpr {
     }
 }
 
-/// Ternary expression (condition ? true_val : false_val).
 #[derive(Debug, Clone)]
 pub struct TernaryExpr(SyntaxNode);
 
@@ -613,7 +569,6 @@ impl AstNode for TernaryExpr {
     }
 }
 
-/// Call expression.
 #[derive(Debug, Clone)]
 pub struct CallExpr(SyntaxNode);
 
@@ -635,7 +590,6 @@ impl AstNode for CallExpr {
     }
 }
 
-/// Index expression (array[index]).
 #[derive(Debug, Clone)]
 pub struct IndexExpr(SyntaxNode);
 
@@ -657,7 +611,6 @@ impl AstNode for IndexExpr {
     }
 }
 
-/// Field access expression (obj.field).
 #[derive(Debug, Clone)]
 pub struct FieldExpr(SyntaxNode);
 
@@ -679,7 +632,6 @@ impl AstNode for FieldExpr {
     }
 }
 
-/// New expression.
 #[derive(Debug, Clone)]
 pub struct NewExpr(SyntaxNode);
 
@@ -701,7 +653,6 @@ impl AstNode for NewExpr {
     }
 }
 
-/// Parenthesized expression.
 #[derive(Debug, Clone)]
 pub struct ParenExpr(SyntaxNode);
 
@@ -723,7 +674,6 @@ impl AstNode for ParenExpr {
     }
 }
 
-/// Literal expression.
 #[derive(Debug, Clone)]
 pub struct Literal(SyntaxNode);
 
@@ -745,7 +695,6 @@ impl AstNode for Literal {
     }
 }
 
-/// Annotation (compiler directive).
 #[derive(Debug, Clone)]
 pub struct Annotation(SyntaxNode);
 
@@ -768,7 +717,6 @@ impl AstNode for Annotation {
 }
 
 impl Annotation {
-    /// Get the annotation kind token (e.g., &НаКлиенте, &AtServer).
     pub fn kind_token(&self) -> Option<SyntaxToken> {
         self.0.children_with_tokens().filter_map(|it| it.into_token()).find(|token| {
             matches!(
@@ -789,9 +737,6 @@ impl Annotation {
     }
 }
 
-/// Preprocessor region directive (#Область/#Region or #КонецОбласти/#EndRegion).
-///
-/// Regions are used to organize code into collapsible sections.
 #[derive(Debug, Clone)]
 pub struct PreRegionDir(SyntaxNode);
 
@@ -814,20 +759,9 @@ impl AstNode for PreRegionDir {
 }
 
 impl PreRegionDir {
-    /// Get region name (text after #Область/#Region).
-    ///
-    /// Returns None for region end directives (#КонецОбласти/#EndRegion).
-    ///
-    /// # Example
-    /// ```text
-    /// #Область ПрограммныйИнтерфейс  // name() = Some("ПрограммныйИнтерфейс")
-    /// #Region Public                 // name() = Some("Public")
-    /// #КонецОбласти                  // name() = None
-    /// ```
     pub fn name(&self) -> Option<String> {
         let text = self.0.text().to_string();
 
-        // Extract first line only (region name is on the first line)
         let first_line = text.lines().next().unwrap_or(&text);
 
         if let Some(stripped) =
@@ -842,7 +776,6 @@ impl PreRegionDir {
         }
     }
 
-    /// Check if this is a region start (#Область / #Region).
     pub fn is_start(&self) -> bool {
         let text = self.0.text().to_string();
         text.starts_with("#Область")
@@ -851,7 +784,6 @@ impl PreRegionDir {
             || text.starts_with("#region")
     }
 
-    /// Check if this is a region end (#КонецОбласти / #EndRegion).
     pub fn is_end(&self) -> bool {
         let text = self.0.text().to_string();
         text.starts_with("#КонецОбласти")
@@ -861,7 +793,6 @@ impl PreRegionDir {
     }
 }
 
-/// Preprocessor symbol reference inside a #Если expression (e.g. Клиент, Сервер, НаКлиенте).
 #[derive(Debug, Clone)]
 pub struct PreSymbol(SyntaxNode);
 
@@ -884,12 +815,10 @@ impl AstNode for PreSymbol {
 }
 
 impl PreSymbol {
-    /// Get lowercase symbol text.
     pub fn text(&self) -> Option<String> {
         self.name_token().map(|token| token.text().to_lowercase())
     }
 
-    /// Get the first identifier token inside the symbol node.
     pub fn name_token(&self) -> Option<SyntaxToken> {
         self.0
             .descendants_with_tokens()
@@ -898,7 +827,6 @@ impl PreSymbol {
     }
 }
 
-/// Preprocessor condition expression — root of the #Если <expr> Тогда AST. Wraps PRE_EXPR.
 #[derive(Debug, Clone)]
 pub struct PreExpr(SyntaxNode);
 
@@ -921,13 +849,11 @@ impl AstNode for PreExpr {
 }
 
 impl PreExpr {
-    /// Iterate over all preprocessor symbols in source order.
     pub fn symbols(&self) -> impl Iterator<Item = PreSymbol> + '_ {
         self.0.descendants().filter_map(PreSymbol::cast)
     }
 }
 
-/// Preprocessor conditional directive (#Если/#If).
 #[derive(Debug, Clone)]
 pub struct PreIfDir(SyntaxNode);
 
@@ -950,30 +876,25 @@ impl AstNode for PreIfDir {
 }
 
 impl PreIfDir {
-    /// Get the condition expression.
     pub fn condition(&self) -> Option<PreExpr> {
         self.0.children().find_map(PreExpr::cast)
     }
 
-    /// Iterate over direct then-branch body nodes.
     pub fn then_body_nodes(&self) -> impl Iterator<Item = SyntaxNode> + '_ {
         self.0.children().filter(|node| node.kind() != SyntaxKind::PRE_EXPR).take_while(|node| {
             !matches!(node.kind(), SyntaxKind::PRE_ELSIF_CLAUSE | SyntaxKind::PRE_ELSE_CLAUSE)
         })
     }
 
-    /// Iterate over #ИначеЕсли/#ElsIf clauses in source order.
     pub fn elsif_clauses(&self) -> impl Iterator<Item = PreElsIfClause> + '_ {
         self.0.children().filter_map(PreElsIfClause::cast)
     }
 
-    /// Get the #Иначе/#Else clause.
     pub fn else_clause(&self) -> Option<PreElseClause> {
         self.0.children().find_map(PreElseClause::cast)
     }
 }
 
-/// Preprocessor conditional #ИначеЕсли/#ElsIf clause.
 #[derive(Debug, Clone)]
 pub struct PreElsIfClause(SyntaxNode);
 
@@ -996,18 +917,15 @@ impl AstNode for PreElsIfClause {
 }
 
 impl PreElsIfClause {
-    /// Get the condition expression.
     pub fn condition(&self) -> Option<PreExpr> {
         self.0.children().find_map(PreExpr::cast)
     }
 
-    /// Iterate over direct clause body nodes.
     pub fn body_nodes(&self) -> impl Iterator<Item = SyntaxNode> + '_ {
         self.0.children().filter(|node| node.kind() != SyntaxKind::PRE_EXPR)
     }
 }
 
-/// Preprocessor conditional #Иначе/#Else clause.
 #[derive(Debug, Clone)]
 pub struct PreElseClause(SyntaxNode);
 
@@ -1030,13 +948,11 @@ impl AstNode for PreElseClause {
 }
 
 impl PreElseClause {
-    /// Iterate over direct else-clause body nodes.
     pub fn body_nodes(&self) -> impl Iterator<Item = SyntaxNode> + '_ {
         self.0.children()
     }
 }
 
-/// Statement list (body of a procedure/function or block).
 #[derive(Debug, Clone)]
 pub struct StmtList(SyntaxNode);
 
@@ -1059,18 +975,11 @@ impl AstNode for StmtList {
 }
 
 impl StmtList {
-    /// Iterate over variable declarations (Перем declarations inside procedures).
-    ///
-    /// Note: In BSL, both module-level and local variables use the same syntax (Перем),
-    /// so they share the same AST node type (VarDef).
     pub fn var_decls(&self) -> impl Iterator<Item = VarDef> + '_ {
         self.0.children().filter_map(VarDef::cast)
     }
 }
 
-/// SDBL query package (root node).
-///
-/// Contains one or more queries separated by semicolons.
 #[derive(Debug, Clone)]
 pub struct SdblQueryPackage(SyntaxNode);
 
@@ -1093,13 +1002,11 @@ impl AstNode for SdblQueryPackage {
 }
 
 impl SdblQueryPackage {
-    /// Get all SELECT queries in this package.
     pub fn queries(&self) -> impl Iterator<Item = SdblSelectQuery> + '_ {
         self.0.children().filter_map(SdblSelectQuery::cast)
     }
 }
 
-/// SDBL SELECT query statement.
 #[derive(Debug, Clone)]
 pub struct SdblSelectQuery(SyntaxNode);
 
@@ -1122,13 +1029,11 @@ impl AstNode for SdblSelectQuery {
 }
 
 impl SdblSelectQuery {
-    /// Get the subquery (includes main query and UNIONs).
     pub fn subquery(&self) -> Option<SdblSubquery> {
         self.0.children().find_map(SdblSubquery::cast)
     }
 }
 
-/// SDBL subquery (main query + optional UNIONs).
 #[derive(Debug, Clone)]
 pub struct SdblSubquery(SyntaxNode);
 
@@ -1151,34 +1056,25 @@ impl AstNode for SdblSubquery {
 }
 
 impl SdblSubquery {
-    /// Get the main query (first direct SdblQuery child, not UNION queries).
-    ///
-    /// CRITICAL for AssignAliasFieldsInQuery: Only main query is checked, not UNIONs.
     pub fn main_query(&self) -> Option<SdblQuery> {
         self.0.children().find_map(SdblQuery::cast)
     }
 
-    /// Get UNION clauses.
     pub fn union_clauses(&self) -> impl Iterator<Item = SdblUnionClause> + '_ {
         self.0.children().filter_map(SdblUnionClause::cast)
     }
 
-    /// Get all queries (main query + queries from UNION clauses).
     pub fn queries(&self) -> impl Iterator<Item = SdblQuery> + '_ {
-        // First the main query
         let main = self.main_query().into_iter();
-        // Then queries from UNION clauses
         let unions = self.union_clauses().filter_map(|union_clause| union_clause.query());
         main.chain(unions)
     }
 
-    /// Get UNION queries (queries from UNION clauses, excluding main query).
     pub fn union_queries(&self) -> impl Iterator<Item = SdblQuery> + '_ {
         self.union_clauses().filter_map(|union_clause| union_clause.query())
     }
 }
 
-/// SDBL UNION clause.
 #[derive(Debug, Clone)]
 pub struct SdblUnionClause(SyntaxNode);
 
@@ -1201,12 +1097,10 @@ impl AstNode for SdblUnionClause {
 }
 
 impl SdblUnionClause {
-    /// Get the query inside this UNION clause.
     pub fn query(&self) -> Option<SdblQuery> {
         self.0.children().find_map(SdblQuery::cast)
     }
 
-    /// Check if this UNION has ALL keyword.
     pub fn has_all(&self) -> bool {
         self.0.children_with_tokens().filter_map(|it| it.into_token()).any(|t| {
             if t.kind() == SyntaxKind::IDENT {
@@ -1219,7 +1113,6 @@ impl SdblUnionClause {
     }
 }
 
-/// Individual SDBL SELECT query.
 #[derive(Debug, Clone)]
 pub struct SdblQuery(SyntaxNode);
 
@@ -1242,33 +1135,27 @@ impl AstNode for SdblQuery {
 }
 
 impl SdblQuery {
-    /// Get the field list.
     pub fn field_list(&self) -> Option<SdblFieldList> {
         self.0.children().find_map(SdblFieldList::cast)
     }
 
-    /// Get the FROM clause.
     pub fn from_clause(&self) -> Option<SdblFromClause> {
         self.0.children().find_map(SdblFromClause::cast)
     }
 
-    /// Get the WHERE clause.
     pub fn where_clause(&self) -> Option<SdblWhereClause> {
         self.0.children().find_map(SdblWhereClause::cast)
     }
 
-    /// Get the GROUP BY clause.
     pub fn group_by_clause(&self) -> Option<SdblGroupClause> {
         self.0.children().find_map(SdblGroupClause::cast)
     }
 
-    /// Get the ORDER BY clause.
     pub fn order_by_clause(&self) -> Option<SdblOrderClause> {
         self.0.children().find_map(SdblOrderClause::cast)
     }
 }
 
-/// SDBL field list.
 #[derive(Debug, Clone)]
 pub struct SdblFieldList(SyntaxNode);
 
@@ -1291,15 +1178,11 @@ impl AstNode for SdblFieldList {
 }
 
 impl SdblFieldList {
-    /// Get all selected fields.
     pub fn fields(&self) -> impl Iterator<Item = SdblSelectedField> + '_ {
         self.0.children().filter_map(SdblSelectedField::cast)
     }
 }
 
-/// SDBL selected field (expression + optional alias).
-///
-/// **CRITICAL FOR AssignAliasFieldsInQuery DIAGNOSTIC**
 #[derive(Debug, Clone)]
 pub struct SdblSelectedField(SyntaxNode);
 
@@ -1322,19 +1205,14 @@ impl AstNode for SdblSelectedField {
 }
 
 impl SdblSelectedField {
-    /// Check if this is an asterisk field (* or Table.*).
-    ///
-    /// Asterisk fields don't need aliases according to diagnostic rules.
     pub fn is_asterisk(&self) -> bool {
         self.0.children().any(|n| n.kind() == SyntaxKind::SDBL_ASTERISK_FIELD)
     }
 
-    /// Get the alias (if present).
     pub fn alias(&self) -> Option<SdblAlias> {
         self.0.children().find_map(SdblAlias::cast)
     }
 
-    /// Get the expression (column reference, function call, etc.).
     pub fn expression(&self) -> Option<SyntaxNode> {
         self.0.children().find(|n| {
             matches!(
@@ -1355,9 +1233,6 @@ impl SdblSelectedField {
     }
 }
 
-/// SDBL alias ([AS] identifier).
-///
-/// **CRITICAL FOR AssignAliasFieldsInQuery DIAGNOSTIC**
 #[derive(Debug, Clone)]
 pub struct SdblAlias(SyntaxNode);
 
@@ -1380,21 +1255,8 @@ impl AstNode for SdblAlias {
 }
 
 impl SdblAlias {
-    /// Check if alias has AS/КАК keyword.
-    ///
-    /// **CRITICAL for AssignAliasFieldsInQuery diagnostic:**
-    /// Returns true if AS/КАК keyword is present (explicit alias).
-    /// Returns false for implicit aliases (just identifier without AS).
-    ///
-    /// # Example
-    /// ```sdbl
-    /// Name AS ProductName  // has_as_keyword() = true
-    /// Name ProductName     // has_as_keyword() = false (implicit alias - error!)
-    /// ```
     pub fn has_as_keyword(&self) -> bool {
         self.0.children_with_tokens().filter_map(|it| it.into_token()).any(|t| {
-            // Check if token is IDENT with text "AS" or "КАК" (case-insensitive)
-            // This is needed because SDBL keywords are mapped to Ident in token converter
             if t.kind() == SyntaxKind::IDENT {
                 let text = t.text();
                 text.eq_ignore_ascii_case("AS") || text.eq_ignore_ascii_case("КАК")
@@ -1404,28 +1266,23 @@ impl SdblAlias {
         })
     }
 
-    /// Get the identifier token (alias name).
     pub fn identifier(&self) -> Option<SyntaxToken> {
-        // Get the last IDENT token (after AS keyword if present)
         self.0
             .children_with_tokens()
             .filter_map(|it| it.into_token())
             .filter(|t| t.kind() == SyntaxKind::IDENT)
             .filter(|t| {
-                // Filter out AS/КАК keywords
                 let text = t.text();
                 !text.eq_ignore_ascii_case("AS") && !text.eq_ignore_ascii_case("КАК")
             })
             .last()
     }
 
-    /// Get the alias name.
     pub fn name(&self) -> Option<String> {
         self.identifier().map(|tok| tok.text().to_string())
     }
 }
 
-/// SDBL asterisk field (* or Table.*).
 #[derive(Debug, Clone)]
 pub struct SdblAsteriskField(SyntaxNode);
 
@@ -1448,19 +1305,6 @@ impl AstNode for SdblAsteriskField {
 }
 
 impl SdblAsteriskField {
-    /// Identifier tokens preceding the trailing `*`, in source order.
-    ///
-    /// Parser grammar (`crates/parser/src/grammar/sdbl/select.rs:412`):
-    /// `asterisk-field := (identifier '.')* '*'`. The qualifier idents are
-    /// stored as direct token children of the node — DOT separators and
-    /// the final STAR are excluded.
-    ///
-    /// - Bare `*` → `[]`
-    /// - `Т.*` → `["Т"]`
-    /// - `Справочник.Товары.*` → `["Справочник", "Товары"]`
-    ///
-    /// Consumers (SDBL HIR lowering) join with `.` to match against
-    /// `TableRef::full_name` / `effective_name()`.
     pub fn qualifier_parts(&self) -> Vec<String> {
         self.0
             .children_with_tokens()
@@ -1471,7 +1315,6 @@ impl SdblAsteriskField {
     }
 }
 
-/// SDBL FROM clause.
 #[derive(Debug, Clone)]
 pub struct SdblFromClause(SyntaxNode);
 
@@ -1494,13 +1337,11 @@ impl AstNode for SdblFromClause {
 }
 
 impl SdblFromClause {
-    /// Get all data sources.
     pub fn data_sources(&self) -> impl Iterator<Item = SdblDataSource> + '_ {
         self.0.children().filter_map(SdblDataSource::cast)
     }
 }
 
-/// SDBL data source (table or subquery in FROM clause).
 #[derive(Debug, Clone)]
 pub struct SdblDataSource(SyntaxNode);
 
@@ -1523,28 +1364,23 @@ impl AstNode for SdblDataSource {
 }
 
 impl SdblDataSource {
-    /// Get the table reference (if this is a table, not a subquery).
     pub fn table_ref(&self) -> Option<SdblTableRef> {
         self.0.children().find_map(SdblTableRef::cast)
     }
 
-    /// Get the subquery (if this is a subquery, not a table).
     pub fn subquery(&self) -> Option<SdblSubquery> {
         self.0.children().find_map(SdblSubquery::cast)
     }
 
-    /// Get the alias (for table or subquery).
     pub fn alias(&self) -> Option<SdblAlias> {
         self.0.children().find_map(SdblAlias::cast)
     }
 
-    /// Get all JOIN clauses attached to this data source.
     pub fn join_clauses(&self) -> impl Iterator<Item = SdblJoinClause> + '_ {
         self.0.children().filter_map(SdblJoinClause::cast)
     }
 }
 
-/// SDBL table reference.
 #[derive(Debug, Clone)]
 pub struct SdblTableRef(SyntaxNode);
 
@@ -1566,7 +1402,6 @@ impl AstNode for SdblTableRef {
     }
 }
 
-/// SDBL JOIN clause.
 #[derive(Debug, Clone)]
 pub struct SdblJoinClause(SyntaxNode);
 
@@ -1589,18 +1424,11 @@ impl AstNode for SdblJoinClause {
 }
 
 impl SdblJoinClause {
-    /// Get the joined data source.
     pub fn data_source(&self) -> Option<SdblDataSource> {
         self.0.children().find_map(SdblDataSource::cast)
     }
 
-    /// Determine the JOIN type from keywords in the clause.
-    ///
-    /// Uses only DIRECT tokens of this node and its parent to avoid picking up
-    /// keywords from nested JOIN clauses (e.g., INNER JOIN containing a nested LEFT JOIN
-    /// must not be misidentified as LEFT).
     pub fn join_type(&self) -> JoinType {
-        // Collect direct tokens of this node (not descendants)
         let own_tokens: String = self
             .0
             .children_with_tokens()
@@ -1609,7 +1437,6 @@ impl SdblJoinClause {
             .join(" ")
             .to_uppercase();
 
-        // Also check parent's direct tokens (join type keywords may be in parent data_source)
         let parent_tokens: String = self
             .0
             .parent()
@@ -1636,7 +1463,6 @@ impl SdblJoinClause {
     }
 }
 
-/// JOIN type enumeration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JoinType {
     Left,
@@ -1645,7 +1471,6 @@ pub enum JoinType {
     Inner,
 }
 
-/// SDBL WHERE clause.
 #[derive(Debug, Clone)]
 pub struct SdblWhereClause(SyntaxNode);
 
@@ -1667,7 +1492,6 @@ impl AstNode for SdblWhereClause {
     }
 }
 
-/// SDBL GROUP BY clause.
 #[derive(Debug, Clone)]
 pub struct SdblGroupClause(SyntaxNode);
 
@@ -1689,7 +1513,6 @@ impl AstNode for SdblGroupClause {
     }
 }
 
-/// SDBL ORDER BY clause.
 #[derive(Debug, Clone)]
 pub struct SdblOrderClause(SyntaxNode);
 
@@ -1928,10 +1751,6 @@ mod preproc_wrappers_tests {
 
     #[test]
     fn pre_if_dir_nested_does_not_leak_branches() {
-        // Outer #Если A Тогда #Если B Тогда C(); #Иначе D(); #КонецЕсли #КонецЕсли
-        // The inner directive's else-clause must not be reachable from the
-        // outer directive's else_clause(), and the outer's then_body_nodes()
-        // must surface exactly one child — the inner PRE_IF_DIR.
         let mut builder = SyntaxTreeBuilder::new();
         builder.start_node(SyntaxKind::SOURCE_FILE);
         builder.start_node(SyntaxKind::PRE_IF_DIR);

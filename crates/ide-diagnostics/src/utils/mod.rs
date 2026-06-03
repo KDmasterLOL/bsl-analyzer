@@ -5,10 +5,6 @@ pub mod preprocessor_symbols;
 
 use crate::{Diagnostic, DiagnosticsContext};
 
-/// Iterate over all method bodies and module-level code, collecting diagnostics.
-///
-/// Calls `f` for each body (method bodies first, then module-level code if present).
-/// Returns the accumulated diagnostics.
 pub(crate) fn for_each_body(
     ctx: &DiagnosticsContext,
     mut f: impl FnMut(&hir::Body, &hir::BodySourceMap, &mut Vec<Diagnostic>),

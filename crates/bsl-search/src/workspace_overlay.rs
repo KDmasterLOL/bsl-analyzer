@@ -1,12 +1,13 @@
 use crate::chunker::Chunker;
-use crate::context::{enrich_chunk_text, file_path_to_module_path};
 use crate::domain::{BaselineRef, CorpusId, DocumentPath, IndexedDocument, SearchOverlay};
 use crate::embedder::Embedder;
 use crate::error::SearchError;
 use crate::lexical::lexical_hits_for_documents;
+use crate::ports::GraphContextProvider;
 use crate::store::Store;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,7 +48,7 @@ pub struct WorkspaceOverlayStats {
     pub pending_dirty_paths: usize,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct WorkspaceOverlayCache {
     entries: HashMap<String, OverlayFileEntry>,
     hidden_paths: HashSet<String>,
@@ -55,6 +56,24 @@ pub struct WorkspaceOverlayCache {
     dirty_paths: HashSet<String>,
     watcher_mode: bool,
     initialized: bool,
+    /// Optional graph-context provider (dependency-inverted). When set, overlay
+    /// (uncommitted-edit) chunks are enriched with their call-graph context before
+    /// embedding, matching the local index.
+    graph_context_provider: Option<Arc<dyn GraphContextProvider>>,
+}
+
+impl std::fmt::Debug for WorkspaceOverlayCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkspaceOverlayCache")
+            .field("entries", &self.entries)
+            .field("hidden_paths", &self.hidden_paths)
+            .field("embedding_cache_len", &self.embedding_cache.len())
+            .field("dirty_paths", &self.dirty_paths)
+            .field("watcher_mode", &self.watcher_mode)
+            .field("initialized", &self.initialized)
+            .field("graph_context", &self.graph_context_provider.is_some())
+            .finish()
+    }
 }
 
 impl WorkspaceOverlayCache {
@@ -62,6 +81,15 @@ impl WorkspaceOverlayCache {
         self.entries.clear();
         self.hidden_paths.clear();
         self.dirty_paths.clear();
+        self.initialized = false;
+    }
+
+    /// Inject the graph-context provider so overlay chunks are enriched like the
+    /// local index. Clears cached entries so they rebuild with context.
+    pub fn set_graph_context_provider(&mut self, provider: Arc<dyn GraphContextProvider>) {
+        self.graph_context_provider = Some(provider);
+        self.entries.clear();
+        self.embedding_cache.clear();
         self.initialized = false;
     }
 
@@ -73,12 +101,6 @@ impl WorkspaceOverlayCache {
         self.dirty_paths.insert(rel_path.into());
     }
 
-    /// Refresh the overlay by comparing workspace files against a remote
-    /// baseline manifest. The manifest provides per-file fingerprints that
-    /// are compared against locally computed normalized chunk hashes.
-    ///
-    /// `manifest_fingerprints` maps relative file paths to their published
-    /// file fingerprint (hex-encoded normalized chunk hash).
     pub fn refresh_with_manifest(
         &mut self,
         manifest_fingerprints: &HashMap<String, String>,
@@ -187,6 +209,7 @@ impl WorkspaceOverlayCache {
                 continue;
             }
 
+            let provider = self.graph_context_provider.clone();
             let entry = build_overlay_entry(
                 &file.rel_path,
                 &content,
@@ -195,6 +218,7 @@ impl WorkspaceOverlayCache {
                 embedder,
                 batch_size,
                 &mut self.embedding_cache,
+                provider.as_deref(),
             )?;
             if baseline_hash.is_some() {
                 hidden_paths.insert(file.rel_path.clone());
@@ -284,6 +308,7 @@ impl WorkspaceOverlayCache {
                 continue;
             }
 
+            let provider = self.graph_context_provider.clone();
             let entry = build_overlay_entry(
                 &rel_path,
                 &content,
@@ -292,6 +317,7 @@ impl WorkspaceOverlayCache {
                 embedder,
                 batch_size,
                 &mut self.embedding_cache,
+                provider.as_deref(),
             )?;
 
             if baseline_hash.is_some() {
@@ -305,10 +331,6 @@ impl WorkspaceOverlayCache {
         Ok(())
     }
 
-    // -----------------------------------------------------------------------
-    // Manifest-based refresh (overlay-only, no SQLite baseline dependency)
-    // -----------------------------------------------------------------------
-
     fn full_refresh_from_manifest(
         &mut self,
         manifest_fingerprints: &HashMap<String, String>,
@@ -317,7 +339,6 @@ impl WorkspaceOverlayCache {
         batch_size: usize,
         store: &Store,
     ) -> Result<(), SearchError> {
-        // Load persisted fingerprint cache from a previous scan.
         let manifest_snapshot_id = store
             .load_baseline_manifest()
             .ok()
@@ -329,7 +350,6 @@ impl WorkspaceOverlayCache {
             .unwrap_or(None)
             .unwrap_or_default();
 
-        // Load persisted embedding cache from a previous scan.
         if self.embedding_cache.is_empty() {
             if let Some(embedder) = embedder {
                 let model_id = embedder.model();
@@ -389,14 +409,10 @@ impl WorkspaceOverlayCache {
                 continue;
             }
 
-            // Fast path: if file metadata (size + mtime) matches the persisted
-            // cache, reuse the stored content_fingerprint without reading the
-            // file.  This skips I/O + parsing + hashing for unchanged files.
             if let Some(cached) = persisted.get(&file.rel_path) {
                 if cached.file_size == file.fingerprint.len
                     && fingerprint_mtime_matches(file.fingerprint.modified, cached)
                 {
-                    // Persist for next restart.
                     updated_persisted.insert(file.rel_path.clone(), cached.clone());
 
                     if baseline_fingerprint
@@ -405,8 +421,6 @@ impl WorkspaceOverlayCache {
                         self.entries.remove(&file.rel_path);
                         continue;
                     }
-                    // File changed from baseline but we still need content for
-                    // building overlay documents — fall through to read.
                 }
             }
 
@@ -417,7 +431,6 @@ impl WorkspaceOverlayCache {
             let file_hash = normalized_file_hash_for_content(&content);
             let local_fp = fingerprint_content(&content, &file.rel_path);
 
-            // Persist this file's fingerprint for next restart.
             if let Some((secs, nanos)) = mtime_to_secs_nanos(file.fingerprint.modified) {
                 updated_persisted.insert(
                     file.rel_path.clone(),
@@ -435,6 +448,7 @@ impl WorkspaceOverlayCache {
                 continue;
             }
 
+            let provider = self.graph_context_provider.clone();
             let entry = build_overlay_entry(
                 &file.rel_path,
                 &content,
@@ -443,6 +457,7 @@ impl WorkspaceOverlayCache {
                 embedder,
                 batch_size,
                 &mut self.embedding_cache,
+                provider.as_deref(),
             )?;
             if baseline_fingerprint.is_some() {
                 hidden_paths.insert(file.rel_path.clone());
@@ -461,7 +476,6 @@ impl WorkspaceOverlayCache {
         self.hidden_paths = hidden_paths;
         self.dirty_paths.clear();
 
-        // Persist updated fingerprint cache for next restart.
         if !updated_persisted.is_empty() {
             if let Err(error) =
                 store.save_overlay_fingerprint_cache(&manifest_snapshot_id, &updated_persisted)
@@ -470,7 +484,6 @@ impl WorkspaceOverlayCache {
             }
         }
 
-        // Persist embedding cache for next restart.
         if let Some(embedder) = embedder {
             if !self.embedding_cache.is_empty() {
                 if let Err(error) = store.save_overlay_embedding_cache(
@@ -557,6 +570,7 @@ impl WorkspaceOverlayCache {
                 continue;
             }
 
+            let provider = self.graph_context_provider.clone();
             let entry = build_overlay_entry(
                 &rel_path,
                 &content,
@@ -565,6 +579,7 @@ impl WorkspaceOverlayCache {
                 embedder,
                 batch_size,
                 &mut self.embedding_cache,
+                provider.as_deref(),
             )?;
 
             if baseline_fingerprint.is_some() {
@@ -697,6 +712,7 @@ fn scan_workspace_files(workspace_root: &Path) -> Vec<WorkspaceFileState> {
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_overlay_entry(
     rel_path: &str,
     content: &str,
@@ -705,8 +721,10 @@ fn build_overlay_entry(
     embedder: Option<&Embedder>,
     batch_size: usize,
     embedding_cache: &mut HashMap<String, Vec<f32>>,
+    graph_context: Option<&dyn GraphContextProvider>,
 ) -> Result<OverlayFileEntry, SearchError> {
-    let (lexical_documents, embedding_inputs) = build_overlay_documents(rel_path, content);
+    let (lexical_documents, embedding_inputs) =
+        build_overlay_documents(rel_path, content, graph_context);
     let vector_documents = if let Some(embedder) = embedder {
         build_overlay_vectors(
             embedder,
@@ -777,9 +795,6 @@ fn normalized_file_hash_for_chunks<'a>(
     hasher.finalize().as_bytes().to_vec()
 }
 
-/// Computes a file fingerprint that matches the Postgres publish-time
-/// `fingerprint_file_documents` algorithm. Returns a hex-encoded blake3 hash.
-/// This is used for comparing local overlay files against the remote manifest.
 pub(crate) fn fingerprint_content(content: &str, rel_path: &str) -> String {
     let documents = Chunker::chunk(content);
     let mut hasher = blake3::Hasher::new();
@@ -807,8 +822,6 @@ pub(crate) fn fingerprint_content(content: &str, rel_path: &str) -> String {
     hasher.finalize().to_hex().to_string()
 }
 
-/// Computes the fingerprint for already-built overlay documents, matching
-/// the Postgres publish-time algorithm.
 pub(crate) fn fingerprint_overlay_documents(
     documents: &[IndexedDocument],
     rel_path: &str,
@@ -832,30 +845,18 @@ pub(crate) fn fingerprint_overlay_documents(
     hasher.finalize().to_hex().to_string()
 }
 
-fn build_overlay_documents(rel_path: &str, content: &str) -> (Vec<IndexedDocument>, Vec<String>) {
+fn build_overlay_documents(
+    rel_path: &str,
+    content: &str,
+    graph_context: Option<&dyn GraphContextProvider>,
+) -> (Vec<IndexedDocument>, Vec<String>) {
     let chunks = Chunker::chunk(content);
-    let module_path = file_path_to_module_path(rel_path);
     let mut lexical_documents = Vec::with_capacity(chunks.len());
     let mut embedding_inputs = Vec::with_capacity(chunks.len());
 
-    for chunk in chunks {
-        let kind = match chunk.kind {
-            crate::chunker::ChunkKind::ModuleHeader => "header",
-            crate::chunker::ChunkKind::Procedure => "procedure",
-            crate::chunker::ChunkKind::Function => "function",
-        };
-        let content_hash = blake3::hash(chunk.text.as_bytes()).to_hex().to_string();
-        let document = IndexedDocument {
-            collection: "code".to_owned(),
-            path: rel_path.to_owned(),
-            symbol_name: chunk.name.clone(),
-            kind: kind.to_owned(),
-            line_start: chunk.line_start,
-            line_end: chunk.line_end,
-            text: chunk.text.clone(),
-            content_hash,
-        };
-        embedding_inputs.push(enrich_chunk_text(&chunk, &module_path));
+    for chunk in &chunks {
+        let document = crate::document::indexed_document_for_chunk(rel_path, chunk, graph_context);
+        embedding_inputs.push(crate::document::semantic_text_for_indexed_document(&document));
         lexical_documents.push(document);
     }
 
@@ -1124,7 +1125,6 @@ mod tests {
 
         let store = Store::open(&workspace.join("search.db")).unwrap();
         let mut cache = WorkspaceOverlayCache::default();
-        // Empty manifest means no baseline — all files are new.
         let manifest: HashMap<String, String> = HashMap::new();
         cache.refresh_with_manifest(&manifest, workspace, None, 32, &store).unwrap();
 
@@ -1142,7 +1142,6 @@ mod tests {
         let file = workspace.join("A.bsl");
         fs::write(&file, content).unwrap();
 
-        // Compute the fingerprint that Postgres would store for this file.
         let fp = fingerprint_content(content, "A.bsl");
         let mut manifest = HashMap::new();
         manifest.insert("A.bsl".to_owned(), fp);
@@ -1152,7 +1151,6 @@ mod tests {
         cache.refresh_with_manifest(&manifest, workspace, None, 32, &store).unwrap();
 
         let overlay = cache.snapshot();
-        // File matches manifest — no overlay entry or hidden path needed.
         assert_eq!(overlay.lexical_documents.len(), 0);
         assert!(!overlay.hidden_paths.contains("A.bsl"));
     }
@@ -1164,7 +1162,6 @@ mod tests {
         let file = workspace.join("A.bsl");
         fs::write(&file, "Процедура Старая()\nКонецПроцедуры").unwrap();
 
-        // Manifest has a different fingerprint (simulating baseline version).
         let mut manifest = HashMap::new();
         manifest.insert("A.bsl".to_owned(), "different-fingerprint".to_owned());
 
@@ -1182,7 +1179,6 @@ mod tests {
     fn manifest_refresh_detects_deleted_baseline_file() {
         let dir = tempdir().unwrap();
         let workspace = dir.path();
-        // No files on disk.
 
         let mut manifest = HashMap::new();
         manifest.insert("A.bsl".to_owned(), "some-fp".to_owned());
@@ -1194,7 +1190,6 @@ mod tests {
 
         let overlay = cache.snapshot();
         assert_eq!(overlay.lexical_documents.len(), 0);
-        // Both files are deleted relative to manifest.
         assert_eq!(overlay.hidden_paths.len(), 2);
         assert!(overlay.hidden_paths.contains("A.bsl"));
         assert!(overlay.hidden_paths.contains("B.bsl"));

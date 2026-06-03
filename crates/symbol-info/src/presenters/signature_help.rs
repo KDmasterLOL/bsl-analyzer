@@ -1,30 +1,19 @@
-//! Renders a [`SymbolSignature`] into a SignatureHelp-shaped view-model.
-//!
-//! Output mirrors LSP `SignatureHelp` semantics but without `lsp_types`
-//! dependency. The IDE crate maps it to `lsp_types::SignatureHelp`.
-
 use crate::domain::{MethodKind, SignatureParam, SignatureSource, SymbolSignature, TypeRef};
 
-/// Domain-only mirror of `lsp_types::SignatureHelp`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignatureHelpView {
-    /// Full signature label, e.g. `"Функция МояФункция(Параметр1, Параметр2): Строка"`.
     pub signature: String,
-    /// Top-level documentation (the method `purpose` line).
     pub doc: Option<String>,
-    /// Index of the active parameter (0-based), if the cursor sits on one.
     pub active_parameter: Option<usize>,
     pub parameters: Vec<ParameterInfoView>,
 }
 
-/// Domain-only mirror of `lsp_types::ParameterInformation`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParameterInfoView {
     pub label: String,
     pub documentation: Option<String>,
 }
 
-/// Render a signature into the view-model.
 pub fn render_signature_help(sig: &SymbolSignature, active_param: usize) -> SignatureHelpView {
     let header = make_header(sig);
     let param_strs: Vec<String> = sig.params.iter().map(format_param).collect();
@@ -52,9 +41,6 @@ fn make_header(sig: &SymbolSignature) -> String {
     let qualifier = sig.qualifier.as_deref().unwrap_or("");
     let core = format!("{}{}{}", prefix, qualifier, sig.name_russian);
     match sig.source {
-        // Platform methods/constructors read more naturally without
-        // `Процедура`/`Функция` — the qualifier/prefix already carries the
-        // receiver or the `Новый` keyword.
         SignatureSource::Platform
         | SignatureSource::PlatformManager
         | SignatureSource::PlatformConstructor => core,

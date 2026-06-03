@@ -1,7 +1,3 @@
-//! NumberOfValuesInStructureConstructor diagnostic.
-//!
-//! Reports structure constructors with too many inline property values.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -39,7 +35,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         check_body(body, source_map, max_values_count, code, ctx, diags);
     });
 
-    // Sort by position (HIR expressions are stored in arena, not source order)
     diagnostics.sort_by_key(|d| (d.range.start(), d.range.end()));
 
     diagnostics
@@ -62,8 +57,6 @@ fn check_body(
             continue;
         }
 
-        // First argument is the key string, rest are values
-        // args.len() > maxValuesCount + 1 means too many values
         if args.len() <= max_values_count + 1 {
             continue;
         }

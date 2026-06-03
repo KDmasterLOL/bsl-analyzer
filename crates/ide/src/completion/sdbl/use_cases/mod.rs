@@ -1,15 +1,3 @@
-//! Use cases for SDBL completion.
-//!
-//! Each use case represents a specific completion scenario:
-//! - complete_keywords: SDBL keywords (SELECT, FROM, WHERE, etc.)
-//! - complete_fields: Table fields/columns
-//! - complete_mdo: MDO types and objects
-//! - complete_aliases: Table aliases
-//! - complete_nested_fields: Nested field references (chains)
-//! - complete_join_types: JOIN type keywords
-//! - complete_nested_elements: Tabular sections and virtual tables
-//! - complete_cast_fields: Fields for CAST expression target types
-
 pub mod complete_aliases;
 pub mod complete_cast_fields;
 pub mod complete_fields;

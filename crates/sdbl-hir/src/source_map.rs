@@ -1,105 +1,46 @@
-//! Source mapping for SDBL HIR to syntax tokens.
-//!
-//! This module provides bidirectional mapping between SDBL HIR and source tokens
-//! for semantic highlighting. Unlike BSL's `BodySourceMap` which maps HIR node IDs
-//! to ranges, `SdblSourceMap` stores explicit token positions for keywords and operators
-//! that are implicit in HIR structure.
-//!
-//! ## Architecture
-//!
-//! ```text
-//! SDBL AST (syntax tokens)
-//!       │
-//!       ▼ lower() + collect_token_positions()
-//! ┌─────────────────────────────────────┐
-//! │         SdblHir                     │  Semantic structure
-//! │  (ExprHir with ranges)              │
-//! └─────────────────────────────────────┘
-//!       +
-//! ┌─────────────────────────────────────┐
-//! │      SdblSourceMap                  │  Token positions
-//! │  ┌──────────────────────────────┐   │
-//! │  │ keywords: Vec<TokenInfo>     │   │  SELECT, FROM, WHERE, etc.
-//! │  │ operators: Vec<TokenInfo>    │   │  =, <>, AND, OR, etc.
-//! │  │ special: Vec<TokenInfo>      │   │  CASE, WHEN, THEN, etc.
-//! │  └──────────────────────────────┘   │
-//! └─────────────────────────────────────┘
-//! ```
-//!
-//! ## Usage
-//!
-//! Used by semantic highlighting to assign token types to keywords/operators
-//! that don't have explicit HIR nodes.
-
 use rustc_hash::FxHashMap;
 use smol_str::SmolStr;
 use syntax::SyntaxKind;
 use text_size::TextRange;
 
-/// Bidirectional mapping between SDBL HIR and source tokens for semantic highlighting.
-///
-/// Stores token positions for keywords and operators that are implicit in HIR structure.
-/// Tokens are grouped by category for efficient queries.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SdblSourceMap {
-    /// SDBL clause keywords (SELECT, FROM, WHERE, GROUP BY, ORDER BY, etc.)
-    /// Sorted by TextRange start for efficient lookup.
     pub(crate) clause_keywords: Vec<TokenInfo>,
 
-    /// Logical/comparison operators (AND, OR, NOT, =, <>, <, >, etc.)
     pub(crate) operators: Vec<TokenInfo>,
 
-    /// Special keywords (IN, BETWEEN, LIKE, IS NULL, CASE, WHEN, THEN, ELSE, END)
     pub(crate) special_keywords: Vec<TokenInfo>,
 
-    /// JOIN-related keywords (JOIN, INNER, LEFT, RIGHT, FULL, OUTER, ON)
     pub(crate) join_keywords: Vec<TokenInfo>,
 
-    /// Query modifiers (DISTINCT, TOP, UNION, ALL)
     pub(crate) modifiers: Vec<TokenInfo>,
 
-    /// Aggregate function names (SUM, AVG, COUNT, MIN, MAX)
-    /// Stored separately because they need different highlighting than regular functions.
     pub(crate) aggregate_functions: Vec<TokenInfo>,
 
-    /// Built-in SDBL functions (ISNULL, CAST, PRESENTATION, VALUE, etc)
     pub(crate) builtin_functions: Vec<TokenInfo>,
 
-    // Identifiers
-    /// MDO type names (Справочник, Документ, Перечисление).
     pub(crate) mdo_types: Vec<TokenInfo>,
 
-    /// Resolved table names (Валюты, Продажи).
     pub(crate) table_names: Vec<TokenInfo>,
 
-    /// Unresolved table names (table not found in metadata).
     pub(crate) unresolved_table_names: Vec<TokenInfo>,
 
-    /// Table aliases (FROM ... AS T1).
     pub(crate) table_aliases: Vec<TokenInfo>,
 
-    /// Resolved field names.
     pub(crate) field_names: Vec<TokenInfo>,
 
-    /// Unresolved field names (field not found or ambiguous).
     pub(crate) unresolved_field_names: Vec<TokenInfo>,
 
-    /// Field aliases (SELECT ... AS Code).
     pub(crate) field_aliases: Vec<TokenInfo>,
 
-    /// Range lookup: TextRange → TokenCategory (for reverse lookup).
-    /// Used by "find token at position" queries.
     range_to_category: FxHashMap<TextRange, TokenCategory>,
 }
 
 impl SdblSourceMap {
-    /// Create a new empty source map.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Get all tokens for semantic highlighting.
-    /// Returns iterator over all tokens sorted by range.
     pub fn all_tokens(&self) -> impl Iterator<Item = (&TokenInfo, TokenCategory)> {
         let clause_iter = self.clause_keywords.iter().map(|t| (t, TokenCategory::ClauseKeyword));
         let op_iter = self.operators.iter().map(|t| (t, TokenCategory::Operator));
@@ -111,7 +52,6 @@ impl SdblSourceMap {
         let builtin_iter =
             self.builtin_functions.iter().map(|t| (t, TokenCategory::BuiltinFunction));
 
-        // Identifiers
         let table_name_iter = self.table_names.iter().map(|t| (t, TokenCategory::TableName));
         let unresolved_table_iter =
             self.unresolved_table_names.iter().map(|t| (t, TokenCategory::UnresolvedTableName));
@@ -136,7 +76,6 @@ impl SdblSourceMap {
             .chain(field_alias_iter)
     }
 
-    /// Find token at a given position.
     pub fn token_at_position(
         &self,
         offset: text_size::TextSize,
@@ -144,7 +83,6 @@ impl SdblSourceMap {
         self.all_tokens().find(|(info, _)| info.range.contains(offset))
     }
 
-    /// Find token by exact range.
     pub fn token_at_range(&self, range: TextRange) -> Option<(&TokenInfo, TokenCategory)> {
         self.range_to_category.get(&range).and_then(|cat| {
             let tokens = self.tokens_by_category(*cat);
@@ -152,7 +90,6 @@ impl SdblSourceMap {
         })
     }
 
-    /// Get all tokens in a specific category.
     pub fn tokens_by_category(&self, category: TokenCategory) -> &[TokenInfo] {
         match category {
             TokenCategory::ClauseKeyword => &self.clause_keywords,
@@ -172,7 +109,6 @@ impl SdblSourceMap {
         }
     }
 
-    /// Add a token to the map.
     pub(crate) fn add_token(&mut self, info: TokenInfo, category: TokenCategory) {
         self.range_to_category.insert(info.range, category);
 
@@ -194,7 +130,6 @@ impl SdblSourceMap {
         }
     }
 
-    /// Sort all token lists by range start (call after lowering completes).
     pub(crate) fn finalize(&mut self) {
         self.clause_keywords.sort_by_key(|t| t.range.start());
         self.operators.sort_by_key(|t| t.range.start());
@@ -212,59 +147,37 @@ impl SdblSourceMap {
     }
 }
 
-/// Information about a single token in SDBL source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TokenInfo {
-    /// Source range of the token.
     pub range: TextRange,
 
-    /// Syntax kind (from lexer/parser).
     pub kind: SyntaxKind,
 
-    /// Original text (case-preserved, for display).
-    /// Stored as SmolStr for memory efficiency (most keywords are <16 chars).
     pub text: SmolStr,
 }
 
 impl TokenInfo {
-    /// Create a new TokenInfo.
     pub fn new(range: TextRange, kind: SyntaxKind, text: impl Into<SmolStr>) -> Self {
         Self { range, kind, text: text.into() }
     }
 }
 
-/// Token category for reverse lookup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TokenCategory {
-    /// Clause keywords (SELECT, FROM, WHERE, GROUP BY, ORDER BY).
     ClauseKeyword,
-    /// Operators (=, <>, AND, OR, +, -, *, /).
     Operator,
-    /// Special keywords (IN, BETWEEN, LIKE, IS NULL, CASE, WHEN, THEN, ELSE, END).
     SpecialKeyword,
-    /// JOIN keywords (JOIN, INNER, LEFT, RIGHT, FULL, OUTER, ON).
     JoinKeyword,
-    /// Modifiers (DISTINCT, TOP, UNION, ALL).
     Modifier,
-    /// Aggregate functions (SUM, AVG, COUNT, MIN, MAX).
     AggregateFunction,
-    /// Built-in SDBL functions (ISNULL, CAST, PRESENTATION, VALUE, etc).
     BuiltinFunction,
 
-    // Identifiers
-    /// MDO type name (first part: Справочник, Документ, Перечисление).
     MdoType,
-    /// Object name (second part: Валюты, Продажи).
     TableName,
-    /// Unresolved table name (table not found in metadata).
     UnresolvedTableName,
-    /// Table alias (FROM ... AS T1).
     TableAlias,
-    /// Resolved field name.
     FieldName,
-    /// Unresolved field name (field not found in metadata, or ambiguous).
     UnresolvedFieldName,
-    /// Field alias (SELECT ... AS Code).
     FieldAlias,
 }
 
@@ -299,14 +212,12 @@ mod tests {
         let token = TokenInfo::new(TextRange::new(0.into(), 6.into()), SyntaxKind::IDENT, "SELECT");
         map.add_token(token, TokenCategory::ClauseKeyword);
 
-        // Position inside SELECT
         let result = map.token_at_position(3.into());
         assert!(result.is_some());
         let (info, category) = result.unwrap();
         assert_eq!(info.text, "SELECT");
         assert_eq!(category, TokenCategory::ClauseKeyword);
 
-        // Position outside
         let result = map.token_at_position(10.into());
         assert!(result.is_none());
     }
@@ -330,7 +241,6 @@ mod tests {
     fn test_finalize_sorts_tokens() {
         let mut map = SdblSourceMap::new();
 
-        // Add tokens in reverse order
         map.add_token(
             TokenInfo::new(TextRange::new(20.into(), 25.into()), SyntaxKind::IDENT, "WHERE"),
             TokenCategory::ClauseKeyword,
@@ -346,7 +256,6 @@ mod tests {
 
         map.finalize();
 
-        // Should be sorted by range start
         assert_eq!(map.clause_keywords[0].text, "SELECT");
         assert_eq!(map.clause_keywords[1].text, "FROM");
         assert_eq!(map.clause_keywords[2].text, "WHERE");

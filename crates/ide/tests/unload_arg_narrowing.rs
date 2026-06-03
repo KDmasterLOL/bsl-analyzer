@@ -1,13 +1,3 @@
-//! Phase H — argument-driven narrowing of `РезультатЗапроса.Выгрузить()`
-//! return type, plus projection carry-over into `Ty::ValueTable`.
-//!
-//! Platform declares the return as `Union([ТаблицаЗначений,
-//! ДеревоЗначений])`; the runtime shape is single-typed and chosen by
-//! the `ОбходРезультатаЗапроса` argument. The narrower drops the wrong
-//! arm when the arg is statically recognisable, and preserves the union
-//! otherwise. When the receiver carries an SDBL projection, the kept
-//! `Ty::ValueTable` arm inherits it via Slice 1b's chain rewrite.
-
 use hir::{DefDatabase, HirDatabase, ModuleId, TypeId, TypeKernelDb, TypeKind};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
@@ -40,11 +30,6 @@ fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<Typ
     db.infer(file_id).var_types.get(var_lower).copied()
 }
 
-/// `ТаблицаЗначений` shows up as the dedicated `Ty::ValueTable`
-/// variant; `ДеревоЗначений` stays as a named `Ty::PlatformObject`.
-/// Both shapes are accepted here so the assertion is robust against
-/// future lowering tweaks (e.g. if `ДеревоЗначений` gains a dedicated
-/// variant).
 fn is_value_table(db: &RootDatabaseImpl, ty: TypeId) -> bool {
     matches!(db.lookup_type(ty), TypeKind::ValueTable(_))
         || matches!(db.lookup_type(ty), TypeKind::PlatformObject(facet) if facet.name.as_str().eq_ignore_ascii_case("ТаблицаЗначений"))
@@ -166,9 +151,6 @@ fn english_by_groups_with_hierarchy_narrows_to_value_tree() {
 
 #[test]
 fn dynamic_arg_keeps_union() {
-    // Variable-bound arg can't be classified statically — both
-    // arms must survive so completion / hover still surface
-    // ТаблицаЗначений + ДеревоЗначений members.
     let fixture = r#"//- /test.bsl
 Функция Тест(ТипОбхода)
     Зап = Новый Запрос("ВЫБРАТЬ 1 КАК Колонка");
@@ -186,9 +168,6 @@ fn dynamic_arg_keeps_union() {
 
 #[test]
 fn projection_carries_into_narrowed_value_table() {
-    // Slice 1b — Phase B synthesises a `Projection` at the
-    // constructor; chain rewrite carries it through to the kept
-    // `Ty::ValueTable` arm after the union narrows.
     let fixture = r#"//- /test.bsl
 Функция Тест()
     Зап = Новый Запрос("ВЫБРАТЬ ""abc"" КАК Имя");
@@ -213,9 +192,6 @@ fn projection_carries_into_narrowed_value_table() {
 
 #[test]
 fn projection_carries_through_direct_iteration_arg() {
-    // Slice 1a + Slice 1b composition — explicit `.Прямой` arg
-    // narrows the union AND the kept ValueTable arm inherits the
-    // projection.
     let fixture = r#"//- /test.bsl
 Функция Тест()
     Зап = Новый Запрос("ВЫБРАТЬ ""x"" КАК Поле1, 1 КАК Поле2");
@@ -235,14 +211,6 @@ fn projection_carries_through_direct_iteration_arg() {
 
 #[test]
 fn tabular_section_unload_unaffected() {
-    // Phase H narrowing must not fire on `ТабличнаяЧасть.Выгрузить`
-    // (single-typed platform return). Since the receiver is not
-    // `Ty::QueryResult` / `Ty::PlatformObject("РезультатЗапроса")`,
-    // the gate in `narrow_unload_return` exits early.
-    //
-    // We assert by checking that calling Выгрузить on a non-QueryResult
-    // receiver still produces a ТаблицаЗначений-typed result — the
-    // gate didn't accidentally collapse the type to something else.
     let fixture = r#"//- /test.bsl
 Функция Тест(Документ)
     ТЗ = Документ.Товары.Выгрузить();
@@ -250,9 +218,5 @@ fn tabular_section_unload_unaffected() {
 КонецФункции
 "#;
     let (db, file_id) = setup(fixture);
-    // We don't assert the exact ty here (the receiver shape varies
-    // by inference); the invariant under test is "narrow_unload_return
-    // didn't panic and didn't break inference for non-QueryResult
-    // receivers". Successful infer + a non-None var_ty satisfies that.
     let _ = var_ty(&db, file_id, "тз");
 }

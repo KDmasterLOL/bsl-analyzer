@@ -1,5 +1,3 @@
-//! Reports procedures and functions named with reserved BSL keywords.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -19,7 +17,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates a diagnostic from HIR lowering data for reserved method names.
 pub fn from_hir(name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     let code = DiagnosticCode::ReservedWordAsMethodName;
 

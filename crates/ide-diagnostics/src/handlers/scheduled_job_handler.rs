@@ -1,5 +1,3 @@
-//! Validates metadata-backed scheduled job handlers from `SessionModule`.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -22,40 +20,22 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Main entry point for ScheduledJobHandler diagnostic.
-///
-/// Validates scheduled job handlers in SessionModule.
-///
-/// ## Algorithm
-///
-/// 1. Early return if disabled or not SessionModule
-/// 2. Load Configuration metadata via Salsa (cached!)
-/// 3. Iterate all scheduled jobs
-/// 4. For each job, perform validation checks
-/// 5. Check for duplicate handlers
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::ScheduledJobHandler;
 
-    // 1. Check if disabled
     if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
-    // 2. SessionModule-only scope
     if !is_session_module(ctx) {
         return Vec::new();
     }
 
-    // 3. Load main configuration — `scheduled_jobs()` is a main-only
-    // collection (CFEs cannot declare new scheduled jobs); the per-handler
-    // CommonModule lookup goes through `find_common_module_anywhere` so
-    // handlers can resolve to a CommonModule defined in a CFE.
     let configuration = match ctx.main_configuration() {
         Some(config) => config,
         None => return Vec::new(),
     };
 
-    // 4. Process all scheduled jobs
     let mut diagnostics = Vec::new();
     let mut handler_usage: FxHashMap<String, Vec<String>> = FxHashMap::default();
 
@@ -63,25 +43,20 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         check_scheduled_job(ctx, job, code, &mut diagnostics, &mut handler_usage);
     }
 
-    // 5. Check for duplicate handlers
     check_duplicate_handlers(ctx, &handler_usage, code, &mut diagnostics);
 
     diagnostics
 }
 
-/// Check if current file is SessionModule
 fn is_session_module(ctx: &DiagnosticsContext) -> bool {
-    // Get file path using ctx.file_path() (CRITICAL: bypasses Salsa for performance)
     let file_path = match ctx.file_path() {
         Some(path) => path,
         None => return false,
     };
 
-    // SessionModule is at Configuration/Ext/SessionModule.bsl
     file_path.ends_with("/Ext/SessionModule.bsl") || file_path.ends_with("\\Ext\\SessionModule.bsl")
 }
 
-/// Validate single scheduled job
 fn check_scheduled_job(
     ctx: &DiagnosticsContext,
     job: &ScheduledJob,
@@ -89,7 +64,6 @@ fn check_scheduled_job(
     diagnostics: &mut Vec<Diagnostic>,
     handler_usage: &mut FxHashMap<String, Vec<String>>,
 ) {
-    // CHECK 1: Empty handler
     if job.method_name().is_empty() {
         diagnostics.push(create_diagnostic(
             ctx,
@@ -101,10 +75,8 @@ fn check_scheduled_job(
         return;
     }
 
-    // CHECK 2: Parse handler format
     let handler = match job.parse_handler() {
         Some(h) if h.method_name.is_empty() => {
-            // Malformed: "CommonModule.ModuleName" (no method)
             diagnostics.push(create_diagnostic(
                 ctx,
                 DiagnosticType::MissingMethod,
@@ -115,15 +87,13 @@ fn check_scheduled_job(
             return;
         }
         Some(h) => h,
-        None => return, // Invalid prefix, ignore
+        None => return,
     };
 
     let full_handler_name = format!("{}.{}", handler.module_name, handler.method_name);
 
-    // Track handler usage for duplicate detection
     handler_usage.entry(full_handler_name.clone()).or_default().push(job.name().to_string());
 
-    // CHECK 3: CommonModule exists somewhere (main or CFE).
     let (_visible, common_module) = match ctx.find_common_module_anywhere(&handler.module_name) {
         Some(found) => found,
         None => {
@@ -138,7 +108,6 @@ fn check_scheduled_job(
         }
     };
 
-    // CHECK 4: CommonModule has Server flag
     if !common_module.is_server() {
         diagnostics.push(create_diagnostic(
             ctx,
@@ -150,21 +119,9 @@ fn check_scheduled_job(
         return;
     }
 
-    // CHECK 5, 6, 7: Method exists, exported, and valid for predefined
     check_method(ctx, job, &handler, &full_handler_name, code, diagnostics);
 }
 
-/// Validate method exists, is exported, and has valid parameters across
-/// CFE-unioned defining files.
-///
-/// 1C extension semantics treat same-name CommonModules across main + CFE
-/// as one logical module whose methods are unioned across all defining
-/// files. We iterate every defining file via
-/// `find_common_module_files_anywhere`; the first exported match becomes
-/// authoritative for the predefined-parameters and empty-body checks.
-/// When no file has the method as export, fall back to "any file at all"
-/// for the non-export diagnostic; only when no defining file has the
-/// method at all do we emit MissingMethod.
 fn check_method(
     ctx: &DiagnosticsContext,
     job: &ScheduledJob,
@@ -180,8 +137,6 @@ fn check_method(
 
     let method_name_obj = Name::new(&handler.method_name);
 
-    // Resolved view of the method we settle on. We extract scalar fields up
-    // front so the symbol_tree borrow doesn't outlive the loop.
     struct Resolved {
         module_id: ModuleId,
         local_id: u32,
@@ -212,7 +167,6 @@ fn check_method(
     }
 
     let Some(resolved) = resolved else {
-        // CHECK 5: Method does not exist in any defining file.
         diagnostics.push(create_diagnostic(
             ctx,
             DiagnosticType::MissingMethod,
@@ -224,7 +178,6 @@ fn check_method(
     };
 
     if !resolved.is_export {
-        // CHECK 6: Method exists but never as export.
         diagnostics.push(create_diagnostic(
             ctx,
             DiagnosticType::NonExportMethod,
@@ -234,7 +187,6 @@ fn check_method(
         ));
     }
 
-    // CHECK 7: Predefined job with parameters
     if job.is_predefined() && !resolved.params_empty {
         diagnostics.push(create_diagnostic(
             ctx,
@@ -245,7 +197,6 @@ fn check_method(
         ));
     }
 
-    // CHECK 8: Empty method body — checked against the file we settled on.
     if is_empty_method(ctx, resolved.module_id, resolved.local_id) {
         diagnostics.push(create_diagnostic(
             ctx,
@@ -257,20 +208,15 @@ fn check_method(
     }
 }
 
-/// Check if method body is empty (no variables and no statements)
 fn is_empty_method(ctx: &DiagnosticsContext, module_id: ModuleId, local_id: u32) -> bool {
-    // Get module bodies for the common module (not current file!)
     let bodies = ctx.module_bodies_for(module_id);
     let Some(body) = bodies.body(local_id) else {
         return false;
     };
 
-    // Method is empty if it has no bindings and no statements
-    // For scheduled job handlers, there should be at least some code
     body.binding_count() == 0 && body.stmt_count() == 0
 }
 
-/// Check for duplicate handler usage
 fn check_duplicate_handlers(
     ctx: &DiagnosticsContext,
     handler_usage: &FxHashMap<String, Vec<String>>,
@@ -293,7 +239,6 @@ fn check_duplicate_handlers(
     }
 }
 
-/// Diagnostic type for different validation failures
 #[derive(Debug, Clone, Copy)]
 enum DiagnosticType {
     EmptyHandler,
@@ -306,9 +251,6 @@ enum DiagnosticType {
     DuplicateHandler,
 }
 
-/// Create diagnostic with Russian error message
-///
-/// All diagnostics are reported at the SessionModule start (line 1, columns 1-9): Range(0, 0, 9)
 fn create_diagnostic(
     ctx: &DiagnosticsContext,
     diagnostic_type: DiagnosticType,
@@ -360,7 +302,6 @@ fn create_diagnostic(
             )
         }
         DiagnosticType::DuplicateHandler => {
-            // For duplicates: job_name contains jobs list, detail contains handler name
             format!(
                 "Исправьте дубли использования одного обработчика \"{}\" в разных регламентных заданиях. Задания: \"{}\"",
                 detail, job_name
@@ -368,11 +309,9 @@ fn create_diagnostic(
         }
     };
 
-    // Get file text to determine safe range
     let file_text = ctx.file_text();
     let file_len = file_text.len();
 
-    // Use range [0, min(9, file_len)): Range(0, 0, 9)
     let end_offset = std::cmp::min(9, file_len);
     let range = TextRange::new(0.into(), (end_offset as u32).into());
 
@@ -397,21 +336,16 @@ mod tests {
     use std::path::PathBuf;
     use vfs::{FileId, FileSet, VfsPath};
     fn check_diagnostic(code: &str, fixtures_dir: &str) -> (Vec<Diagnostic>, String) {
-        // Setup database with VFS
         let mut db = RootDatabaseImpl::new();
 
-        // Create VFS
         let workspace_root = PathBuf::from(fixtures_dir);
 
-        // Create FileSet with SessionModule and required CommonModules
         let mut file_set = FileSet::default();
 
-        // SessionModule file (file_id 0)
         let file_id = FileId(0);
         let session_module_path = VfsPath::new(format!("{}/Ext/SessionModule.bsl", fixtures_dir));
         file_set.insert(file_id, session_module_path);
 
-        // Add ПервыйОбщийМодуль (needed for method validation tests)
         let common_module_file_id = FileId(1);
         let common_module_path = VfsPath::new(format!(
             "{}/CommonModules/ПервыйОбщийМодуль/Ext/Module.bsl",
@@ -422,13 +356,11 @@ mod tests {
         let source_root_id = SourceRootId(0);
         let source_root = SourceRoot::new_local(file_set);
 
-        // Set up database
         db.set_source_root(source_root_id, source_root);
         db.set_file_source_root(file_id, source_root_id);
         db.set_file_source_root(common_module_file_id, source_root_id);
         db.set_file_text(file_id, code);
 
-        // Load the CommonModule code
         let common_module_code = std::fs::read_to_string(format!(
             "{}/CommonModules/ПервыйОбщийМодуль/Ext/Module.bsl",
             fixtures_dir
@@ -436,7 +368,6 @@ mod tests {
         .unwrap_or_default();
         db.set_file_text(common_module_file_id, &common_module_code);
 
-        // Set workspace root via Salsa
         let configuration_path_input = ide_db::metadata::ConfigurationPathInput::new(
             &db,
             workspace_root.to_string_lossy().to_string(),
@@ -456,8 +387,6 @@ mod tests {
         let fixtures_dir =
             concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer");
 
-        // Dummy code for SessionModule
-        // Use ASCII at start for correct byte range check (9 bytes = 9 chars for ASCII)
         let code = "Procedure Test()\nEndProcedure";
         let (diagnostics, file_content) = check_diagnostic(code, fixtures_dir);
 
@@ -487,13 +416,10 @@ mod tests {
         let fixtures_dir =
             concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer");
 
-        // Setup database with VFS
         let mut db = RootDatabaseImpl::new();
 
-        // Create VFS for a non-SessionModule file (CommonModule)
         let vfs_path = VfsPath::new(format!("{}/CommonModules/Test/Ext/Module.bsl", fixtures_dir));
 
-        // Create FileSet and SourceRoot
         let mut file_set = FileSet::default();
         let file_id = FileId(0);
         file_set.insert(file_id, vfs_path.clone());
@@ -501,7 +427,6 @@ mod tests {
         let source_root_id = SourceRootId(0);
         let source_root = SourceRoot::new_local(file_set);
 
-        // Set up database
         db.set_source_root(source_root_id, source_root);
         db.set_file_source_root(file_id, source_root_id);
         db.set_file_text(file_id, "Процедура Тест()\nКонецПроцедуры");

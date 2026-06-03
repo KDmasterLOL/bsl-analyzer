@@ -1,42 +1,3 @@
-//! DeprecatedCurrentDate diagnostic.
-//!
-//! Detects usage of deprecated ТекущаяДата() / CurrentDate() methods.
-//!
-//! ## Why?
-//! The `ТекущаяДата()` / `CurrentDate()` method returns server date/time but with unpredictable timezone behavior.
-//! - On server: returns server's local time
-//! - On client: may return incorrect time due to timezone discrepancies
-//! - Causes bugs in multi-timezone deployments
-//!
-//! ## Bad practice
-//! ```bsl
-//! Процедура ПолучитьДату()
-//!     Возврат ТекущаяДата(); // ❌ Unpredictable timezone!
-//! КонецПроцедуры
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! // On server:
-//! Процедура ПолучитьДату()
-//!     Возврат ТекущаяДатаСеанса(); // ✅ Session date
-//! КонецПроцедуры
-//!
-//! // On client:
-//! Процедура ПолучитьДату()
-//!     Возврат ОбщегоНазначенияКлиент.ДатаСеанса(); // ✅ From StandardLibrary
-//! КонецПроцедуры
-//! ```
-//!
-//! ## Configuration
-//! - **Enabled by default:** Yes
-//! - **Severity:** Error (MAJOR)
-//! - **Tags:** STANDARD, DEPRECATED, UNPREDICTABLE
-//! - **Minutes to fix:** 5
-//!
-//! ## Implementation
-//! **This is a HIR-based diagnostic** - collected during AST→HIR lowering.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -56,11 +17,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic.
-///
-/// Called from lib.rs dispatch when `BodyDiagnostic::DeprecatedCurrentDate` is encountered.
 pub fn from_hir(name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    // Check if the diagnostic is disabled
     let code = DiagnosticCode::DeprecatedCurrentDate;
 
     if ctx.is_disabled_with_metadata(code) {
@@ -112,8 +69,8 @@ mod tests {
               message: Используйте "ТекущаяДатаСеанса" вместо устаревшего "ТекущаяДата"
               severity: Major"#]]
         .assert_eq(&format_diags(code, &deprecated_diags));
-        assert_eq!(deprecated_diags[0].severity, Severity::Major); // ERROR + MAJOR maps to Major
-        assert!(deprecated_diags[0].message.contains("ТекущаяДатаСеанса")); // snapshot-skip: message-substring assertion intentionally retained.
+        assert_eq!(deprecated_diags[0].severity, Severity::Major);
+        assert!(deprecated_diags[0].message.contains("ТекущаяДатаСеанса"));
     }
 
     #[test]
@@ -134,7 +91,7 @@ EndProcedure
               message: Use "CurrentSessionDate" instead of deprecated "CurrentDate"
               severity: Major"#]]
         .assert_eq(&format_diags(code, &deprecated_diags));
-        assert!(deprecated_diags[0].message.contains("CurrentSessionDate")); // snapshot-skip: message-substring assertion intentionally retained.
+        assert!(deprecated_diags[0].message.contains("CurrentSessionDate"));
     }
 
     #[test]
@@ -150,7 +107,6 @@ EndProcedure
             .filter(|d| d.code == DiagnosticCode::DeprecatedCurrentDate)
             .collect();
 
-        // Should not trigger for method calls
         expect![[r#""#]].assert_eq(&format_diags(code, &deprecated_diags));
     }
 
@@ -184,8 +140,6 @@ EndProcedure
 
     #[test]
     fn test_two_procs_one_each_language() {
-        // One deprecated call in Russian and one in English;
-        // session date and object method calls should not trigger.
         let code = r#"
 Процедура А()
     ДатаПроверки = ТекущаяДата();

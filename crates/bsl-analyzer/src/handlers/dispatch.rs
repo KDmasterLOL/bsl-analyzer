@@ -1,5 +1,3 @@
-//! Request and notification dispatching.
-
 use std::fmt;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -11,25 +9,12 @@ use serde::{de::DeserializeOwned, Serialize};
 use crate::frozen_context::{FrozenFilePaths, LatencyRequestContext};
 use crate::global_state::{GlobalState, Task};
 
-/// Dispatcher for LSP requests.
-///
-/// Supports main-thread handlers for state mutations and background handlers
-/// for read-only requests that can tolerate latency.
-///
-/// ```ignore
-/// RequestDispatcher { req: Some(req), global_state: &mut state }
-///     .on_sync_mut::<Shutdown>(|state, ()| { state.shutdown_requested = true; Ok(()) })
-///     .on_latency::<GotoDefinition>(handlers::handle_goto_definition)
-///     .on_sync::<Formatting>(handlers::handle_formatting)
-///     .finish();
-/// ```
 pub struct RequestDispatcher<'a> {
     pub req: Option<Request>,
     pub global_state: &'a mut GlobalState,
 }
 
 impl RequestDispatcher<'_> {
-    /// Handles a request that mutates server state.
     pub fn on_sync_mut<R>(
         &mut self,
         f: fn(&mut GlobalState, R::Params) -> Result<R::Result>,
@@ -53,7 +38,6 @@ impl RequestDispatcher<'_> {
         self
     }
 
-    /// Handles a request against a main-thread snapshot.
     pub fn on_sync<R>(
         &mut self,
         f: fn(crate::global_state::GlobalStateSnapshot, R::Params) -> Result<R::Result>,
@@ -78,12 +62,6 @@ impl RequestDispatcher<'_> {
         self
     }
 
-    /// Handles a read-only request on the task pool.
-    ///
-    /// `LatencyRequestContext` freezes mutable editor state and owns its Salsa
-    /// snapshot, so handlers cannot race with later edits. Every dispatch sends
-    /// exactly one `Task::RequestResult`; cancellation and panics are converted
-    /// to LSP error responses.
     pub fn on_latency<R>(
         &mut self,
         f: fn(LatencyRequestContext, R::Params) -> Result<R::Result>,
@@ -172,14 +150,6 @@ impl RequestDispatcher<'_> {
     }
 }
 
-/// Dispatcher for LSP notifications.
-///
-/// ```ignore
-/// NotificationDispatcher { not: Some(not), global_state: &mut state }
-///     .on_sync_mut::<DidOpenTextDocument>(handlers::handle_did_open)
-///     .on_sync_mut::<DidChangeTextDocument>(handlers::handle_did_change)
-///     .finish();
-/// ```
 pub struct NotificationDispatcher<'a> {
     pub not: Option<Notification>,
     pub global_state: &'a mut GlobalState,
@@ -249,8 +219,6 @@ where
     }
 }
 
-/// Runs a read-only LSP handler on the task pool, producing exactly one
-/// `Response` for success, handler errors, Salsa cancellation, or panic.
 fn run_latency_handler<R>(
     id: RequestId,
     ctx: LatencyRequestContext,

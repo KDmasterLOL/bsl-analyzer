@@ -8,23 +8,18 @@ use std::{
 use clap::ValueEnum;
 use ide_db::metadata;
 
-/// Output format for analysis results.
 #[derive(Debug, Clone, Default, ValueEnum)]
 pub enum OutputFormat {
-    /// Console output with reporters (default)
     #[default]
     Console,
-    /// JSON Lines streaming output (for SonarQube integration)
     Jsonl,
 }
 
-/// Timing result for a single file (used for profiling).
 struct FileTiming {
     path: PathBuf,
     duration: std::time::Duration,
 }
 
-/// Aggregated profiling statistics for `--only-diagnostic` mode.
 struct ProfilingStats {
     diagnostic_name: String,
     total: std::time::Duration,
@@ -173,7 +168,6 @@ fn analyze_salsa(
         project_model::ProjectConfig::load(&source_dir).unwrap_or_default()
     };
 
-    // Validation/logging only — Salsa loads metadata per-file.
     let _metadata = proj_config.load_metadata(&source_dir);
     let configuration_path = proj_config.configuration_path(&source_dir);
 
@@ -195,7 +189,6 @@ fn analyze_salsa(
 
     tracing::info!("Found {} BSL files", bsl_files.len());
 
-    // Build FileSet from ALL files (cross-module resolution needs the full set).
     tracing::info!("Loading files into database");
     let mut file_set = vfs::FileSet::new();
     let mut all_file_ids: Vec<(FileId, PathBuf)> = Vec::new();
@@ -226,14 +219,11 @@ fn analyze_salsa(
         all_file_ids.clone()
     };
 
-    // FileSet drives path resolution (used by sdbl_hir_in_file_query to find
-    // the configuration root).
     let file_set_arc = Arc::new(file_set);
     let source_root_id = base_db::SourceRootId(0);
     let source_root = base_db::SourceRoot::new_local((*file_set_arc).clone());
     db.set_source_root(source_root_id, source_root);
 
-    // Load ALL files into the database (cross-module resolution needs them).
     for (file_id, path) in &all_file_ids {
         let content = fs::read_to_string(path)?;
         db.set_file_source_root(*file_id, source_root_id);
@@ -258,23 +248,14 @@ fn analyze_salsa(
         None
     };
 
-    // Intern the configuration-path input once so Salsa caches the metadata
-    // load across every diagnostic in the workspace.
     let config_path_input = configuration_path
         .as_ref()
         .map(|path| metadata::intern_configuration_path(&db, &path.to_string_lossy(), 0));
 
-    // map_with clones the database once per rayon thread (not per file). The
-    // clone is a Salsa snapshot with per-thread `ZalsaLocal`, so the worker
-    // pool needs no `Mutex`.
-
-    let mut config: DiagnosticsConfig =
-        serde_json::from_value(proj_config.diagnostics.clone()).unwrap_or_default();
-    // Project-level `[output] display_language` only takes effect once
-    // explicitly applied to the typed config — JSON deserialization carries
-    // no locale signal. CLI mode has no LSP `InitializeParams.locale`, so the
-    // resolved value (or the analyzer default) is the only locale source.
-    config.locale = proj_config.output.resolve_locale().unwrap_or_default();
+    let mut config = DiagnosticsConfig::from_project_json(
+        &proj_config.diagnostics,
+        proj_config.output.resolve_locale().unwrap_or_default(),
+    );
 
     if let Some(ref diag_name) = only_diagnostic {
         config.apply_cli_filters(std::slice::from_ref(diag_name), &[]);
@@ -303,7 +284,6 @@ fn analyze_salsa(
             );
             let ctx = DiagnosticsContext::new(&config, *file_id, &provider);
 
-            // Catch panics so a single broken file doesn't abort the workspace.
             let file_start = std::time::Instant::now();
             let diagnostics =
                 match catch_unwind(AssertUnwindSafe(|| ide::compute_diagnostics(&ctx))) {
@@ -343,9 +323,6 @@ fn analyze_salsa(
                     }
                 };
 
-                // Build the line index once per file — per-diagnostic
-                // `to_output()` rebuilt it on every call, dominating the CLI
-                // `analyze` profile at ~43% self time on a 25k-file workspace.
                 let file_line_index = line_index::LineIndex::new(&file_text);
                 let mut diagnostic_outputs: Vec<_> = diagnostics
                     .iter()
@@ -452,7 +429,6 @@ fn analyze_streaming(
 
     let _span = tracing::info_span!("cli_analyze_streaming").entered();
 
-    // Canonicalize so `FileReader::from_disk` doesn't double-join.
     let source_dir = std::fs::canonicalize(&source_dir).unwrap_or(source_dir);
 
     let profiling_enabled = only_diagnostic.is_some();
@@ -476,10 +452,10 @@ fn analyze_streaming(
         project_model::ProjectConfig::load(&source_dir).unwrap_or_default()
     };
 
-    let mut diag_config: DiagnosticsConfig =
-        serde_json::from_value(proj_config.diagnostics.clone()).unwrap_or_default();
-    // Apply `[output] display_language` (CLI streaming has no LSP locale).
-    diag_config.locale = proj_config.output.resolve_locale().unwrap_or_default();
+    let mut diag_config = DiagnosticsConfig::from_project_json(
+        &proj_config.diagnostics,
+        proj_config.output.resolve_locale().unwrap_or_default(),
+    );
 
     if let Some(ref diag_name) = only_diagnostic {
         diag_config.apply_cli_filters(std::slice::from_ref(diag_name), &[]);
@@ -516,7 +492,6 @@ fn analyze_streaming(
         return Ok(());
     }
 
-    // Build FileSet from ALL files (cross-module resolution needs the full set).
     let mut file_set = vfs::FileSet::new();
     let mut all_file_ids: Vec<(FileId, PathBuf)> = Vec::new();
 
@@ -561,7 +536,6 @@ fn analyze_streaming(
 
     match format {
         OutputFormat::Jsonl if diff_filter.is_some() => {
-            // JSONL + diff filtering: collect results, filter, then emit JSONL.
             use std::time::Instant;
 
             use ide::streaming::{DoneEvent, FileEvent, StartEvent};

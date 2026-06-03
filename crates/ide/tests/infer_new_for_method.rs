@@ -1,18 +1,3 @@
-//! Behavioural test for `InferenceContext::new_for_method` (Phase O.7).
-//!
-//! O.7 ships the per-method inference constructor alone; the cascade
-//! query (`method_return_type_query`) and its callers land in later
-//! commits (O.8–O.11). The constructor is a thin wrapper over
-//! `InferenceContext::new` that resolves the salsa-interned
-//! `MethodIdInput` into `(file_id, DefWithBodyId::Method(local_id))`
-//! so callers do not have to thread those fields manually.
-//!
-//! Coverage here uses the existing `module_bodies_query` (develop
-//! surface) to obtain a `&Body` and wraps it in a fresh `Arc<Body>` —
-//! mirroring the pattern in `infer_query` itself
-//! (`crates/hir-ty/src/infer.rs:3100,3107`). The dedicated
-//! `method_body_query` returning `Arc<Body>` lands in O.8.
-
 use hir::{DefDatabase, DefWithBodyId, InferenceContext, MethodIdInput, ModuleId, Name};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
@@ -41,10 +26,6 @@ fn setup(fixture_text: &str) -> (RootDatabaseImpl, FileId) {
     (db, test_file)
 }
 
-/// `new_for_method` derives `file_id` and `DefWithBodyId::Method(local_id)`
-/// from the salsa-interned `MethodIdInput` and produces a working
-/// per-body context that runs `infer_all` + `finish` without invoking
-/// `infer_query` / `module_bodies_query` on its own.
 #[test]
 fn new_for_method_drives_single_body_inference_without_infer_query() {
     let (db, test_fid) = setup(

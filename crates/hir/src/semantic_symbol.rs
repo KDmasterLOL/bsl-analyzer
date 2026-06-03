@@ -1,9 +1,3 @@
-//! Type-aware semantic symbols shared by IDE features.
-//!
-//! This module is the bridge between syntax positions and semantic identity.
-//! IDE crates should ask for a `SemanticSymbol` and project it to their own
-//! wire shape instead of duplicating name-resolution and type-dispatch rules.
-
 use crate::{Definition, Name, NameClass, ReferenceScope, Semantics};
 use bsl_types::builders::Builders;
 use bsl_types::kind::{TypeId, TypeKind};
@@ -12,7 +6,6 @@ use hir_ty::{db::HirDatabase, ImplicitLocalInfo};
 use syntax::{TextRange, TextSize};
 use vfs::FileId;
 
-/// Stable identity for comparing symbol occurrences.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SemanticSymbolKey {
     Definition(Definition),
@@ -21,7 +14,6 @@ pub enum SemanticSymbolKey {
     TypedMember { file_id: FileId, range: TextRange },
 }
 
-/// Coarse semantic kind used by IDE projections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SemanticSymbolKind {
     Function,
@@ -34,7 +26,6 @@ pub enum SemanticSymbolKind {
     Class,
 }
 
-/// A resolved symbol occurrence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SemanticSymbol {
     pub key: SemanticSymbolKey,
@@ -46,12 +37,6 @@ pub struct SemanticSymbol {
 }
 
 impl SemanticSymbol {
-    /// Determine where references to this occurrence can live.
-    ///
-    /// Delegates to [`Definition::reference_scope`] when the symbol carries one,
-    /// otherwise projects the `SemanticSymbolKey` shape: body-scoped locals are
-    /// `FileLocal`, typed-member occurrences map to `Unknown` (they are field
-    /// accesses on a typed receiver, not standalone name bindings).
     pub fn reference_scope(&self, db: &dyn DefDatabase) -> ReferenceScope {
         if let Some(def) = self.definition.as_ref() {
             return def.reference_scope(db);
@@ -67,7 +52,6 @@ impl SemanticSymbol {
     }
 }
 
-/// Source-backed declaration target for a symbol.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymbolDeclaration {
     pub file_id: FileId,
@@ -77,7 +61,6 @@ pub struct SymbolDeclaration {
 }
 
 impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
-    /// Resolve the symbol at `offset` in `file_id`.
     pub fn symbol_at(&self, file_id: FileId, offset: TextSize) -> Option<SemanticSymbol> {
         let parse = self.db.parse(file_id);
         let root = parse.syntax_node();
@@ -85,7 +68,6 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
         self.symbol_for_token(file_id, &token)
     }
 
-    /// Resolve a syntax token to a type-aware semantic symbol.
     pub fn symbol_for_token(
         &self,
         file_id: FileId,
@@ -212,10 +194,6 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
         }
 
         let occurrence_expr = source_map.expr_at_range(token.text_range())?;
-        // Phase O.17: route through the per-owner Salsa cell — owner
-        // is already in hand from `body_for_range`, so we hit exactly
-        // one query (the matching method or module-code) instead of
-        // the file-wide `infer_query` aggregate.
         let routed = crate::infer_owner(self.db, file_id, owner);
         let implicit = routed.implicit_locals().get(&name_lower)?;
         let unknown = self.db.unknown();

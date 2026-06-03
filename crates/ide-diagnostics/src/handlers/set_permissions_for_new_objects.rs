@@ -1,5 +1,3 @@
-//! Checks that only explicitly allowed roles keep `setForNewObjects=true`.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -20,44 +18,26 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Default allowed role names (can have setForNewObjects=true)
 const DEFAULT_FULL_ACCESS_ROLES: &str = "FullAccess,ПолныеПрава";
 
-/// Main entry point for SetPermissionsForNewObjects diagnostic.
-///
-/// Validates that roles don't have "Set permissions for new objects" flag enabled
-/// (except for explicitly allowed roles).
-///
-/// ## Algorithm
-///
-/// 1. Early return if disabled or not ManagedApplicationModule
-/// 2. Load Configuration metadata via Salsa (cached!)
-/// 3. Get allowed roles from config parameter
-/// 4. For each role with setForNewObjects=true that is NOT in allowed list, create diagnostic
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::SetPermissionsForNewObjects;
 
-    // 1. Check if disabled
     if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
-    // 2. ManagedApplicationModule-only scope
     if !is_managed_application_module(ctx) {
         return Vec::new();
     }
 
-    // 3. Load main configuration metadata (roles live only in the main config —
-    // CFE roles do not participate in the main role table).
     let configuration = match ctx.main_configuration() {
         Some(config) => config,
         None => return Vec::new(),
     };
 
-    // 4. Get allowed role names from config parameter
     let allowed_roles = get_allowed_roles(ctx);
 
-    // 5. Find roles with setForNewObjects=true that are NOT in allowed list
     let mut diagnostics = Vec::new();
 
     for role in configuration.roles() {
@@ -69,7 +49,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics
 }
 
-/// Check if current file is ManagedApplicationModule
 fn is_managed_application_module(ctx: &DiagnosticsContext) -> bool {
     let file_path = match ctx.file_path() {
         Some(path) => path,
@@ -80,7 +59,6 @@ fn is_managed_application_module(ctx: &DiagnosticsContext) -> bool {
         || file_path.ends_with("\\Ext\\ManagedApplicationModule.bsl")
 }
 
-/// Get allowed role names from config parameter
 fn get_allowed_roles(ctx: &DiagnosticsContext) -> FxHashSet<String> {
     let names_str = ctx
         .config
@@ -90,9 +68,6 @@ fn get_allowed_roles(ctx: &DiagnosticsContext) -> FxHashSet<String> {
     names_str.split(',').map(|s| s.trim().to_string()).collect()
 }
 
-/// Create diagnostic with Russian error message
-///
-/// All diagnostics are reported at the ManagedApplicationModule start (line 1, columns 1-9).
 fn create_diagnostic(
     ctx: &DiagnosticsContext,
     role_name: &str,
@@ -103,11 +78,9 @@ fn create_diagnostic(
         role_name
     );
 
-    // Get file text to determine safe range
     let file_text = ctx.file_text();
     let file_len = file_text.len();
 
-    // Use range [0, min(9, file_len))
     let end_offset = std::cmp::min(9, file_len);
     let range = TextRange::new(0.into(), (end_offset as u32).into());
 
@@ -132,16 +105,12 @@ mod tests {
     use std::path::PathBuf;
     use vfs::{FileId, FileSet, VfsPath};
     fn check_diagnostic(code: &str, fixtures_dir: &str) -> (Vec<Diagnostic>, String) {
-        // Setup database with VFS
         let mut db = RootDatabaseImpl::new();
 
-        // Create VFS
         let workspace_root = PathBuf::from(fixtures_dir);
 
-        // Create FileSet with ManagedApplicationModule
         let mut file_set = FileSet::default();
 
-        // ManagedApplicationModule file (file_id 0)
         let file_id = FileId(0);
         let module_path =
             VfsPath::new(format!("{}/Ext/ManagedApplicationModule.bsl", fixtures_dir));
@@ -150,12 +119,10 @@ mod tests {
         let source_root_id = SourceRootId(0);
         let source_root = SourceRoot::new_local(file_set);
 
-        // Set up database
         db.set_source_root(source_root_id, source_root);
         db.set_file_source_root(file_id, source_root_id);
         db.set_file_text(file_id, code);
 
-        // Set workspace root via Salsa
         let configuration_path_input = ide_db::metadata::ConfigurationPathInput::new(
             &db,
             workspace_root.to_string_lossy().to_string(),
@@ -175,7 +142,6 @@ mod tests {
         let fixtures_dir =
             concat!(env!("CARGO_MANIFEST_DIR"), "/test_data/set_permissions_for_new_objects");
 
-        // Use ASCII at start for correct byte range check
         let code = "//test - ManagedApplicationModule";
         let (diagnostics, file_content) = check_diagnostic(code, fixtures_dir);
 
@@ -190,13 +156,10 @@ mod tests {
         let fixtures_dir =
             concat!(env!("CARGO_MANIFEST_DIR"), "/test_data/set_permissions_for_new_objects");
 
-        // Setup database with VFS
         let mut db = RootDatabaseImpl::new();
 
-        // Create VFS for a non-ManagedApplicationModule file (CommonModule)
         let vfs_path = VfsPath::new(format!("{}/CommonModules/Test/Ext/Module.bsl", fixtures_dir));
 
-        // Create FileSet and SourceRoot
         let mut file_set = FileSet::default();
         let file_id = FileId(0);
         file_set.insert(file_id, vfs_path);
@@ -204,7 +167,6 @@ mod tests {
         let source_root_id = SourceRootId(0);
         let source_root = SourceRoot::new_local(file_set);
 
-        // Set up database
         db.set_source_root(source_root_id, source_root);
         db.set_file_source_root(file_id, source_root_id);
         db.set_file_text(file_id, "Процедура Тест()\nКонецПроцедуры");
@@ -223,13 +185,10 @@ mod tests {
         let fixtures_dir =
             concat!(env!("CARGO_MANIFEST_DIR"), "/test_data/set_permissions_for_new_objects");
 
-        // Setup database with VFS
         let mut db = RootDatabaseImpl::new();
 
-        // Create VFS
         let workspace_root = PathBuf::from(fixtures_dir);
 
-        // Create FileSet with ManagedApplicationModule
         let mut file_set = FileSet::default();
 
         let file_id = FileId(0);
@@ -240,12 +199,10 @@ mod tests {
         let source_root_id = SourceRootId(0);
         let source_root = SourceRoot::new_local(file_set);
 
-        // Set up database
         db.set_source_root(source_root_id, source_root);
         db.set_file_source_root(file_id, source_root_id);
         db.set_file_text(file_id, "//test");
 
-        // Set workspace root via Salsa
         let configuration_path_input = ide_db::metadata::ConfigurationPathInput::new(
             &db,
             workspace_root.to_string_lossy().to_string(),
@@ -254,7 +211,6 @@ mod tests {
 
         let provider = ide_db::SalsaProvider::new(&db, Some(configuration_path_input));
 
-        // Custom config: only Роль2 is allowed (not ПолныеПрава)
         let mut config = DiagnosticsConfig::default();
         config.parameters.insert(
             DiagnosticCode::SetPermissionsForNewObjects,

@@ -1,22 +1,3 @@
-//! End-to-end regression tests for `MismatchedArgCount` on platform
-//! built-in functions whose signatures carry per-parameter `defaults`
-//! and/or `is_variadic` flags.
-//!
-//! These pin the contract that user-driven the 3-slice fix (Slice 1:
-//! adapter over `bsl_platform::PlatformData::instance()`, Slice 2:
-//! `Ty::Function { defaults, is_variadic, .. }`, Slice 3: arity check
-//! honouring both fields) actually closes the false-positive on calls
-//! like `НСтр("ru = '...'", "ru")` which previously reported
-//! `ожидалось 1, передано 2`.
-//!
-//! The fixtures only exercise builtin globals — no managers, no
-//! `СтандартныеПодсистемыСервер`, no JSDoc — so a regression here points
-//! squarely at the `Ty::Function` arity check or the builtin-signature
-//! adapter. Other dimensions of `MismatchedArgCount` (user methods,
-//! common-module functions, qualified manager calls) are covered by the
-//! existing tests in `infer_invalidation.rs`, `infer_three_level.rs`,
-//! and `resolve_qualified_call.rs`.
-
 use hir::{HirDatabase, InferenceDiagnostic};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
@@ -61,11 +42,6 @@ fn arg_count_diags(db: &RootDatabaseImpl, file_id: FileId) -> Vec<(usize, usize,
 
 #[test]
 fn nstr_two_args_is_accepted() {
-    // The exact regression: `НСтр("...", "ru")` must NOT fire
-    // MismatchedArgCount because `КодЯзыка` is declared optional in
-    // `platform_data.json`. Before Slice 3 the check did
-    // `args.len() != params.len()` and falsely reported
-    // `ожидалось 1, передано 2`.
     let fixture = r#"
 //- /test.bsl
 Процедура Тест()
@@ -83,8 +59,6 @@ fn nstr_two_args_is_accepted() {
 
 #[test]
 fn nstr_one_arg_is_accepted() {
-    // The single-arg form has always been accepted; pin it so a future
-    // regression to `args.len() < required` doesn't creep in.
     let fixture = r#"
 //- /test.bsl
 Процедура Тест()
@@ -101,8 +75,6 @@ fn nstr_one_arg_is_accepted() {
 
 #[test]
 fn nstr_zero_args_fires_mismatch() {
-    // The lower bound (`required`) is still enforced — `НСтр()` with no
-    // template string must produce one MismatchedArgCount.
     let fixture = r#"
 //- /test.bsl
 Процедура Тест()
@@ -119,8 +91,6 @@ fn nstr_zero_args_fires_mismatch() {
 
 #[test]
 fn nstr_three_args_fires_mismatch() {
-    // The upper bound is enforced too: НСтр does NOT have `is_variadic`,
-    // so calling it with 3 arguments must fire one MismatchedArgCount.
     let fixture = r#"
 //- /test.bsl
 Процедура Тест()
@@ -138,9 +108,6 @@ fn nstr_three_args_fires_mismatch() {
 
 #[test]
 fn strtemplate_variadic_accepts_many_args() {
-    // СтрШаблон has the platform-help idiom `Значение1-Значение10` which
-    // the adapter lifts to `is_variadic = true`. Calls with 1, 5, 11 args
-    // must all pass without diagnostics.
     let fixture = r#"
 //- /test.bsl
 Процедура Тест()
@@ -159,8 +126,6 @@ fn strtemplate_variadic_accepts_many_args() {
 
 #[test]
 fn strtemplate_zero_args_fires_mismatch() {
-    // Variadic does NOT mean "all args optional" — the leading required
-    // template parameter still must be passed. `СтрШаблон()` must fire.
     let fixture = r#"
 //- /test.bsl
 Процедура Тест()
@@ -178,8 +143,6 @@ fn strtemplate_zero_args_fires_mismatch() {
 
 #[test]
 fn currentdate_no_args_is_accepted() {
-    // `ТекущаяДата()` is the canonical zero-arity builtin. After Slice 3
-    // the bound check is `0 < 0 || (!variadic && 0 > 0)` → both false.
     let fixture = r#"
 //- /test.bsl
 Процедура Тест()
@@ -196,11 +159,6 @@ fn currentdate_no_args_is_accepted() {
 
 #[test]
 fn min_max_accept_many_args() {
-    // The user's repro: `Мин`/`Макс` accept any number of arguments. HBK
-    // encodes this only in the `Синтаксис:` chapter (`<Значение1>,...,
-    // <ЗначениеN>`); plan C wires the html-parser to detect the
-    // `>,...,<` substring and lift `is_variadic = true` on the trailing
-    // param. Confirmed by `bsl-platform/src/db.rs::test_is_variadic_marks_*`.
     let fixture = r#"
 //- /test.bsl
 Процедура Тест(Мин, Макс)
@@ -219,9 +177,6 @@ fn min_max_accept_many_args() {
 
 #[test]
 fn min_max_zero_args_fires_mismatch() {
-    // Unbounded-variadic does NOT mean "all optional" — the first
-    // `Значение1` is required. `Мин()` / `Макс()` must still fire.
-    // (`Значение1` carries `is_optional = false` in platform_data.json.)
     let fixture = r#"
 //- /test.bsl
 Процедура Тест()
@@ -230,8 +185,6 @@ fn min_max_zero_args_fires_mismatch() {
 "#;
     let (db, file_id) = setup(fixture);
     let diags = arg_count_diags(&db, file_id);
-    // total_count = 1 (the single declared required param), max_args =
-    // None (unbounded). Required floor still fails for zero args.
     assert_eq!(
         diags.len(),
         1,
@@ -243,16 +196,6 @@ fn min_max_zero_args_fires_mismatch() {
 
 #[test]
 fn user_repro_min_max_okr_intervals() {
-    // Verbatim shape from the user's bug report: nested
-    // `Мин(Макс(Окр(...), Мин), Макс)` with three-arg `Окр` (number,
-    // digits, mode). All three builtins must accept their argument
-    // counts without firing MismatchedArgCount.
-    //
-    // Local parameters `Мин` / `Макс` shadow the builtins as VALUES
-    // (the `(Макс - Мин) * Случ` arithmetic) but in CALL position
-    // (`Мин(...)`, `Макс(...)`) BSL resolves to the platform builtin.
-    // This test pins both regressions: variadic arity for the calls,
-    // and the absence of arity false-positives in the inner expressions.
     let fixture = r#"
 //- /test.bsl
 Процедура ВыбратьЧисло(Мин, Макс)

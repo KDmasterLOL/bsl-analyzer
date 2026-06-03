@@ -1,13 +1,3 @@
-//! A [tracing_subscriber::layer::Layer] that exports newline-delimited JSON.
-//!
-//! Usage:
-//!
-//! ```ignore
-//! # use tracing_subscriber::Registry;
-//! let layer = json::TimingLayer::new(std::io::stderr);
-//! Registry::default().with(layer).init();
-//! ```
-
 use std::{io::Write as _, marker::PhantomData, time::Instant};
 
 use rustc_hash::FxHashSet;
@@ -39,9 +29,6 @@ where
     S: Subscriber + for<'span> LookupSpan<'span>,
     W: for<'writer> MakeWriter<'writer> + Send + Sync + 'static,
 {
-    /// Creates a new `TimingLayer` with the given spec and writer.
-    ///
-    /// The spec format is: `span_name|span_name2|...` or `*` for all spans.
     #[allow(clippy::new_ret_no_self)]
     pub fn new(spec: &str, writer: W) -> impl Layer<S> {
         let filter = JsonFilter::from_spec(spec);

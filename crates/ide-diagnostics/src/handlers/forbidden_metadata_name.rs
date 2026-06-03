@@ -1,8 +1,3 @@
-//! ForbiddenMetadataName diagnostic
-//!
-//! Checks that metadata objects are not named using reserved query language words.
-//!
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -33,7 +28,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 
 static FORBIDDEN_NAMES: Lazy<FxHashSet<&'static str>> = Lazy::new(|| {
     [
-        // English
         "accountingregister",
         "accountingregisters",
         "accumulationregister",
@@ -66,7 +60,6 @@ static FORBIDDEN_NAMES: Lazy<FxHashSet<&'static str>> = Lazy::new(|| {
         "informationregisters",
         "task",
         "tasks",
-        // Russian (lowercase)
         "бизнеспроцесс",
         "бизнеспроцессы",
         "документ",

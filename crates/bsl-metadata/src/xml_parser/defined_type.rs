@@ -1,12 +1,9 @@
-//! DefinedType XML parser
-
 use crate::defined_type::DefinedType;
 use crate::error::{MetadataError, Result};
 
 use super::helpers::{child_text, find_child, find_mdo_element, parse_uuid, parse_xml};
 use super::type_parser::parse_type_xml;
 
-/// Parse DefinedType XML from Designer format
 pub fn parse_defined_type_xml(xml: &str) -> Result<DefinedType> {
     let doc = parse_xml(xml)?;
     let mdo = find_mdo_element(&doc)

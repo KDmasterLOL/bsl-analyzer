@@ -1,5 +1,3 @@
-//! Reports `ПродолжитьВызов` / `ProceedWithCall` calls outside `&Вместо` methods.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};

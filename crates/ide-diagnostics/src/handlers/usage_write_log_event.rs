@@ -1,5 +1,3 @@
-//! Reports suspicious usage of `ЗаписьЖурналаРегистрации` / `WriteLogEvent`.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -21,7 +19,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 
 const WRITE_LOG_EVENT_METHOD_PARAMS_COUNT: usize = 5;
 
-/// Creates a diagnostic from HIR BodyDiagnostic::UsageWriteLogEvent.
 #[allow(clippy::too_many_arguments)]
 pub fn from_hir(
     in_except_block: bool,
@@ -40,7 +37,6 @@ pub fn from_hir(
         return None;
     }
 
-    // Check 1: Wrong param count
     if arg_count < WRITE_LOG_EVENT_METHOD_PARAMS_COUNT {
         return Some(Diagnostic {
             code,
@@ -52,7 +48,6 @@ pub fn from_hir(
         });
     }
 
-    // Check 2: Missing log level (2nd param)
     if log_level_empty {
         return Some(Diagnostic {
             code,
@@ -64,7 +59,6 @@ pub fn from_hir(
         });
     }
 
-    // Check 3: Missing comment (5th param)
     if comment_empty {
         return Some(Diagnostic {
             code,
@@ -76,9 +70,7 @@ pub fn from_hir(
         });
     }
 
-    // Check 4: Inside except block validation
     if in_except_block {
-        // Must have Error log level
         if !has_error_log_level {
             return Some(Diagnostic {
                 code,
@@ -90,7 +82,6 @@ pub fn from_hir(
             });
         }
 
-        // Must have DetailErrorDescription or Raise in block
         if !has_detail_error_description && !except_has_raise {
             return Some(Diagnostic {
                 code,
@@ -131,7 +122,6 @@ mod tests {
 
     #[test]
     fn test_two_params_wrong_count() {
-        // 2 args: still too few (need 5)
         let code = r#"
 Процедура Тест()
     ЗаписьЖурналаРегистрации("Событие", УровеньЖурналаРегистрации.Ошибка);
@@ -149,7 +139,6 @@ mod tests {
 
     #[test]
     fn test_four_params_wrong_count() {
-        // 4 args: still too few (need 5)
         let code = r#"
 Процедура Тест()
     ЗаписьЖурналаРегистрации("Событие", УровеньЖурналаРегистрации.Ошибка, , );
@@ -247,7 +236,6 @@ mod tests {
 
     #[test]
     fn test_plain_string_comment_in_except() {
-        // In except: plain string literal as comment (no DetailErrorDescription)
         let code = r#"
 Процедура Тест()
     Попытка
@@ -270,7 +258,6 @@ mod tests {
 
     #[test]
     fn test_concatenation_without_detail_error_in_except() {
-        // In except: variable assigned from concatenation without DetailErrorDescription
         let code = r#"
 Процедура Тест()
     Попытка
@@ -294,7 +281,6 @@ mod tests {
 
     #[test]
     fn test_unassigned_variable_in_except() {
-        // In except: variable used in comment but never assigned in except block
         let code = r#"
 Процедура Тест()
     Попытка
@@ -317,9 +303,6 @@ mod tests {
 
     #[test]
     fn test_variable_assigned_above_try_used_in_except() {
-        // Variable assigned before try block used as comment in except.
-        // The implementation does not flag this: a pre-try assignment is not
-        // considered "in the except block", so no diagnostic is emitted.
         let code = r#"
 Процедура Тест()
     ТекстОшибки = "";
@@ -381,8 +364,6 @@ mod tests {
 
     #[test]
     fn test_variable_with_detail_error() {
-        // Variable tracing: ТекстОшибки = ПодробноеПредставлениеОшибки(...) in except block
-        // resolves to true → no diagnostic
         let code = r#"
 Процедура Тест()
     Попытка
@@ -399,7 +380,6 @@ mod tests {
 
     #[test]
     fn test_brief_error_used_directly_as_comment_in_except() {
-        // КраткоеПредставлениеОшибки used directly as comment → diagnostic
         let code = r#"
 Процедура Тест()
     Попытка
@@ -423,7 +403,6 @@ mod tests {
 
     #[test]
     fn test_variable_traced_to_brief_error_in_except() {
-        // Variable assigned from КраткоеПредставлениеОшибки, then used as comment → diagnostic
         let code = r#"
 Процедура Тест()
     Попытка
@@ -448,8 +427,6 @@ mod tests {
 
     #[test]
     fn test_two_variables_wrong_one_used_in_except() {
-        // Two vars in except: one from КраткоеПредставлениеОшибки, one from ПодробноеПредставлениеОшибки.
-        // The wrong (brief) one is passed as comment → diagnostic.
         let code = r#"
 Процедура Тест()
     Попытка
@@ -475,7 +452,6 @@ mod tests {
 
     #[test]
     fn test_brief_error_concatenated_with_description_in_except() {
-        // Variable assigned from КраткоеПредставлениеОшибки + ОписаниеОшибки() (no ПодробноеПредставлениеОшибки) → diagnostic
         let code = r#"
 Процедура Тест(Знач СсылкаНаДанные, Знач Блокировка)
     Попытка
@@ -503,7 +479,6 @@ mod tests {
 
     #[test]
     fn test_variable_param_used_as_comment_outside_except() {
-        // Param named ПодробноеПредставлениеОшибки used outside try block → no diagnostic
         let code = r#"
 Процедура Тест(Знач ПодробноеПредставлениеОшибки)
     ЗаписьЖурналаРегистрации("Событие",
@@ -516,7 +491,6 @@ mod tests {
 
     #[test]
     fn test_normal_write_log_with_variable_comment_outside_except() {
-        // WriteLog outside try block with variable comment → no diagnostic
         let code = r#"
 Процедура Тест(Знач ИмяСобытия, Знач СсылкаНаДанные)
     ТекстЗаписи = ТекстОтвета();
@@ -533,8 +507,6 @@ mod tests {
 
     #[test]
     fn test_variable_traced_via_string_function_in_except() {
-        // Variable assigned via СтроковыеФункции.ПодставитьПараметрыВСтроку(..., ПодробноеПредставлениеОшибки(...))
-        // then used as comment → no diagnostic (detail error in the call chain)
         let code = r#"
 Процедура Тест(Знач ИмяСобытия, Знач СсылкаНаДанные)
     Попытка
@@ -557,7 +529,6 @@ mod tests {
 
     #[test]
     fn test_variable_traced_via_concatenation_with_detail_error_in_except() {
-        // Variable assigned from concatenation that includes ПодробноеПредставлениеОшибки → no diagnostic
         let code = r#"
 Процедура Тест(Знач ИмяСобытия, Знач СсылкаНаДанные, Знач Выборка)
     Попытка
@@ -581,7 +552,6 @@ mod tests {
 
     #[test]
     fn test_dynamic_log_level_variable_in_except() {
-        // Dynamic log level from function call (not EventLogLevel enum) → no diagnostic for wrong level
         let code = r#"
 Процедура Тест(Знач ИмяСобытия, Знач СсылкаНаДанные, Знач Выборка)
     Попытка
@@ -637,8 +607,6 @@ EndProcedure
 
     #[test]
     fn test_error_processing_module() {
-        // ОбработкаОшибок.ПодробноеПредставлениеОшибки contains the substring → detected.
-        // УровеньЖР is not EventLogLevel enum → assume OK.
         let code = r#"
 Процедура Тест()
     Попытка
@@ -654,7 +622,6 @@ EndProcedure
 
     #[test]
     fn test_error_processing_module_brief_used_directly() {
-        // ОбработкаОшибок.КраткоеПредставлениеОшибки used directly as comment → diagnostic
         let code = r#"
 Процедура Тест()
     Попытка
@@ -678,7 +645,6 @@ EndProcedure
 
     #[test]
     fn test_error_processing_module_variable_traced_to_brief() {
-        // Variable traced to ОбработкаОшибок.КраткоеПредставлениеОшибки → diagnostic
         let code = r#"
 Процедура Тест()
     Попытка
@@ -703,8 +669,6 @@ EndProcedure
 
     #[test]
     fn test_error_processing_module_two_variables_wrong_one_used() {
-        // Two vars: one from ОбработкаОшибок.КраткоеПредставлениеОшибки, one from ОбработкаОшибок.ПодробноеПредставлениеОшибки.
-        // Wrong (brief) one used as comment → diagnostic.
         let code = r#"
 Процедура Тест()
     Попытка
@@ -730,7 +694,6 @@ EndProcedure
 
     #[test]
     fn test_error_processing_module_brief_concatenated_with_description() {
-        // ОбработкаОшибок.КраткоеПредставлениеОшибки + ОписаниеОшибки() → diagnostic
         let code = r#"
 Процедура Тест(Знач СсылкаНаДанные, Знач Блокировка)
     Попытка
@@ -758,7 +721,6 @@ EndProcedure
 
     #[test]
     fn test_error_processing_module_variable_traced_to_detail() {
-        // Variable traced to ОбработкаОшибок.ПодробноеПредставлениеОшибки in except → no diagnostic
         let code = r#"
 Процедура Тест()
     Попытка
@@ -775,7 +737,6 @@ EndProcedure
 
     #[test]
     fn test_error_processing_module_variable_log_level_in_except() {
-        // УровеньЖР (variable log level) with ОбработкаОшибок.ПодробноеПредставлениеОшибки → no diagnostic
         let code = r#"
 Процедура Тест()
     Попытка
@@ -791,7 +752,6 @@ EndProcedure
 
     #[test]
     fn test_error_processing_module_detail_in_string_concat_outside_except() {
-        // ОбработкаОшибок.ПодробноеПредставлениеОшибки in string concatenation outside except → no diagnostic
         let code = r#"
 Процедура Тест(Знач ИмяСобытия)
     ЗаписьЖурналаРегистрации(ИмяСобытия,
@@ -804,8 +764,6 @@ EndProcedure
 
     #[test]
     fn test_error_processing_module_string_function_in_except() {
-        // Variable assigned via СтроковыеФункции.ПодставитьПараметрыВСтроку(..., ОбработкаОшибок.ПодробноеПредставлениеОшибки(...))
-        // → no diagnostic
         let code = r#"
 Процедура Тест(Знач ИмяСобытия, Знач СсылкаНаДанные)
     Попытка
@@ -828,7 +786,6 @@ EndProcedure
 
     #[test]
     fn test_error_processing_module_concatenation_with_detail_in_except() {
-        // Variable from concatenation including ОбработкаОшибок.ПодробноеПредставлениеОшибки → no diagnostic
         let code = r#"
 Процедура Тест(Знач ИмяСобытия, Знач СсылкаНаДанные, Знач Выборка)
     Попытка

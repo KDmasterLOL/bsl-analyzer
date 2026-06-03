@@ -1,5 +1,3 @@
-//! Reports SDBL query texts that contain parse errors.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -19,10 +17,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     clean_code_attribute: CleanCodeAttribute::Intentional,
 };
 
-/// Runs the QueryParseError diagnostic.
-///
-/// Checks SDBL queries for parse errors using `all_sdbl_in_file()`.
-/// Reports structured parse errors projected into BSL source coordinates.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::QueryParseError;
 
@@ -167,7 +161,6 @@ mod tests {
 
     #[test]
     fn test_incomplete_select_with_from() {
-        // Query must have SELECT + keyword (FROM/WHERE/etc) to be detected as SDBL
         let code = r#"
 Процедура Тест()
     Запрос = "ВЫБРАТЬ Поле ИЗ   ";
@@ -222,7 +215,6 @@ mod tests {
 
     #[test]
     fn test_select_constants_without_from() {
-        // Valid SDBL: SELECT without FROM clause (returns constants)
         let code = r#"
 Процедура Тест()
     ТекстЗапроса = "Выбрать 1 КАК ЧисловаяКонстанта, 2, ""Строка""";
@@ -279,7 +271,6 @@ mod tests {
 
     #[test]
     fn test_trailing_dot_triggers_diagnostic() {
-        // Query with trailing dot in REFS - should trigger diagnostic
         let code = r#"
 Процедура Тест()
     Запрос.Текст = "ВЫБРАТЬ Поле ИЗ Т ГДЕ Поле ССЫЛКА Документ.";
@@ -297,7 +288,6 @@ mod tests {
 
     #[test]
     fn test_valid_refs_no_diagnostic() {
-        // Query with complete REFS - should NOT trigger diagnostic
         let code = r#"
 Процедура Тест()
     Запрос.Текст = "ВЫБРАТЬ Поле ИЗ Т ГДЕ Поле ССЫЛКА Документ.ПриходныйОрдер";
@@ -308,7 +298,6 @@ mod tests {
 
     #[test]
     fn test_dynamic_query_with_trailing_dot() {
-        // Dynamic query construction with trailing dot - should trigger diagnostic
         let code = r#"
 Процедура Тест()
     Запрос.Текст = "ВЫБРАТЬ
@@ -331,7 +320,6 @@ mod tests {
 
     #[test]
     fn test_original_user_query_trailing_dot() {
-        // Original user query from issue - should trigger diagnostic
         let code = r#"
 Процедура Тест()
     Запрос.Текст = "ВЫБРАТЬ
@@ -493,8 +481,6 @@ mod tests {
 
     #[test]
     fn test_valid_subquery_with_bsl_comment_between_lines() {
-        // Real-world case: BSL comment between multiline string continuation lines.
-        // The query itself is valid — the comment should be ignored by SDBL extraction.
         let code = r#"
 Процедура Тест()
     Запрос = "ВЫБРАТЬ РАЗРЕШЕННЫЕ

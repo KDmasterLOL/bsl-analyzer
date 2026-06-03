@@ -1,17 +1,3 @@
-//! Specification of standard MDO attributes.
-//!
-//! Source of truth for the standard attribute "shape" — names (Russian +
-//! English), classification, presence conditions, and value kind. The
-//! `bsl-metadata::xml_parser` adapter reads this spec and instantiates
-//! concrete `Attribute`s in `MetadataObject` after evaluating the
-//! conditions against the configuration's MDO properties (CodeLength,
-//! NumberLength, Hierarchical, Owners, Periodicity).
-//!
-//! This crate intentionally does NOT depend on `bsl-metadata`: keeping the
-//! spec on the platform side preserves the dependency rule (`hir-ty` →
-//! `bsl-metadata` → `bsl-platform`, not back).
-
-/// MDO template kinds that have standard attributes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MdoTemplateKind {
     Catalog,
@@ -28,18 +14,13 @@ pub enum MdoTemplateKind {
     CalculationRegister,
 }
 
-/// View perspective of a metadata object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObjectView {
-    /// "ДокументОбъект.<Имя>", "СправочникОбъект.<Имя>" — read-write
     Object,
-    /// "ДокументСсылка.<Имя>", "СправочникСсылка.<Имя>" — read-only
     Ref,
-    /// "РегистрСведенийНаборЗаписей.<Имя>" — record set
     RecordSet,
 }
 
-/// Canonical kind of a standard attribute (language-neutral handle).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StandardKind {
     Code,
@@ -70,7 +51,6 @@ pub enum StandardKind {
 }
 
 impl StandardKind {
-    /// Russian name of this standard attribute.
     pub fn russian_name(self) -> &'static str {
         match self {
             Self::Code => "Код",
@@ -101,7 +81,6 @@ impl StandardKind {
         }
     }
 
-    /// English name of this standard attribute.
     pub fn english_name(self) -> &'static str {
         match self {
             Self::Code => "Code",
@@ -133,7 +112,6 @@ impl StandardKind {
     }
 }
 
-/// Condition under which a standard attribute is present.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PresenceCondition {
     Always,
@@ -145,50 +123,28 @@ pub enum PresenceCondition {
     IsPeriodic,
 }
 
-/// Abstract value kind for a standard attribute.
-///
-/// The concrete `AttributeType` is resolved by the adapter in `bsl-metadata`
-/// which has access to the full type hierarchy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttrValueKind {
     Boolean,
     DateTime,
-    /// Length from `CodeLength` (for Code) or `DescriptionLength` (for Description).
     StringCodeOrDescription,
-    /// Length from `NumberLength`.
     StringNumber,
-    /// Unbounded string (PredefinedDataName, Order).
     StringUnbounded,
-    /// `Number { precision: 10, scale: 0 }` — НомерСтроки.
     NumberLineNumber,
-    /// `Ref { mdo_type, name }` — self-reference (Ссылка, Родитель).
     SelfRef,
-    /// `Ref` built from `Owners` property — Владелец.
     OwnerRef,
-    /// `AnyObjectRef { mdo_type: Document }` — Регистратор.
     AnyDocumentRef,
-    /// Not yet resolved — HeadTask, TaskBusinessProcess, RoutePoint, ValueType.
     Unknown,
 }
 
-/// Full spec for a single standard attribute entry.
 #[derive(Debug, Clone, Copy)]
 pub struct StandardAttrSpec {
     pub kind: StandardKind,
     pub value: AttrValueKind,
     pub condition: PresenceCondition,
-    /// True on `Ref` view (all attrs read-only) or for inherently read-only
-    /// attrs on `Object` view (Ссылка, Предопределенный, ИмяПредопределенныхДанных,
-    /// НомерСтроки).
     pub is_readonly: bool,
 }
 
-// ============================================================================
-// Static spec tables
-// ============================================================================
-
-/// Catalog-base attrs (shared by Catalog, ExchangePlan, ChartOfCharacteristic,
-/// ChartOfAccounts), Object view.
 static CATALOG_BASE_OBJECT: &[StandardAttrSpec] = &[
     StandardAttrSpec {
         kind: StandardKind::Ref,
@@ -641,30 +597,6 @@ static ACCUMULATION_REGISTER_RECORD_SET: &[StandardAttrSpec] = &[
     },
 ];
 
-/// Returns the ordered list of standard attribute specs for `(template_kind, view)`.
-///
-/// The order matches the current `xml_parser/standard_attributes.rs` insertion order.
-///
-/// # Coverage
-///
-/// Specced today: `Object` view for Catalog/ExchangePlan/
-/// ChartOfCharacteristicTypes/ChartOfAccounts/Document/BusinessProcess/Task/
-/// InformationRegister, plus `RecordSet` view for the two register kinds
-/// that already have one. These match the eight pre-population entry
-/// points in `bsl-metadata::xml_parser::standard_attributes`.
-///
-/// Returns `&[]` for:
-/// - `ObjectView::Ref` — the ref view shares spec _shape_ with the object
-///   view but every entry is read-only. Adding a separate Ref table
-///   duplicates content; callers reading a Ref-flavoured `MetadataRef`
-///   today still get standard attributes via the `Object` table because
-///   pre-population in `mdo.attributes` does not branch on view. Phase 1b
-///   will introduce dedicated Ref tables and the corresponding readonly
-///   uplift.
-/// - `MdoTemplateKind::ChartOfCalculationTypes`, `AccountingRegister`,
-///   `CalculationRegister` — these MDO kinds aren't covered by the XML
-///   adapter today (no `add_*_standard_attributes` for them), so there
-///   are no specs to mirror yet.
 pub fn standard_attributes_for(
     kind: MdoTemplateKind,
     view: ObjectView,
@@ -696,7 +628,6 @@ mod tests {
 
     #[test]
     fn russian_name_and_english_name_match_help() {
-        // Spot-check that every StandardKind has non-empty names and they differ.
         let all = [
             StandardKind::Code,
             StandardKind::Description,
@@ -747,7 +678,6 @@ mod tests {
         assert!(kinds.contains(&StandardKind::Ref));
         assert!(kinds.contains(&StandardKind::Date));
         assert!(kinds.contains(&StandardKind::Posted));
-        // Number is conditional (HasNumber), but must be in the spec list
         assert!(kinds.contains(&StandardKind::Number));
     }
 
@@ -773,10 +703,8 @@ mod tests {
     fn exchange_plan_object_view_contains_thisnode_after_catalog_set() {
         let specs = standard_attributes_for(MdoTemplateKind::ExchangePlan, ObjectView::Object);
         let kinds: Vec<StandardKind> = specs.iter().map(|s| s.kind).collect();
-        // Must have all catalog-base attrs
         assert!(kinds.contains(&StandardKind::Ref));
         assert!(kinds.contains(&StandardKind::DeletionMark));
-        // Plus ExchangePlan-specific
         assert!(kinds.contains(&StandardKind::ThisNode));
     }
 
@@ -807,7 +735,6 @@ mod tests {
         assert!(kinds.contains(&StandardKind::Active));
         assert!(kinds.contains(&StandardKind::LineNumber));
         assert!(kinds.contains(&StandardKind::Recorder));
-        // Period is conditional (IsPeriodic) — present in spec but not Always
         let period_spec = specs.iter().find(|s| s.kind == StandardKind::Period);
         assert!(
             period_spec.map(|s| s.condition) == Some(PresenceCondition::IsPeriodic),

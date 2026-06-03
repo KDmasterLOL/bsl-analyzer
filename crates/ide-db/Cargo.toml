@@ -33,6 +33,7 @@ thiserror.workspace = true
 expect-test.workspace = true
 criterion.workspace = true
 tempfile.workspace = true
+rayon.workspace = true
 
 [[bench]]
 name = "salsa_incremental"

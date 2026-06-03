@@ -1,16 +1,6 @@
 #!/bin/bash
 set -euo pipefail
 
-# Скрипт для локальной сборки и публикации релиза bsl-analyzer
-# Использование: ./scripts/release.sh <version> [--upload]
-#
-# Собирает два артефакта:
-#   - bsl-analyzer-{platform}     - launcher для IDE/репозиториев
-#   - bsl-analyzer-app-{platform} - LSP сервер (скачивается с release-server)
-#
-# Переменные окружения:
-#   RELEASE_SERVER_URL   - URL сервера релизов (default: http://localhost:18080)
-#   RELEASE_UPLOAD_TOKEN - токен для загрузки (обязателен для --upload)
 
 VERSION=${1:-}
 UPLOAD=${2:-}
@@ -34,7 +24,6 @@ RELEASE_UPLOAD_TOKEN=${RELEASE_UPLOAD_TOKEN:-}
 
 echo "=== Building bsl-analyzer ${VERSION} ==="
 
-# Определяем текущую платформу
 case "$(uname -s)-$(uname -m)" in
     Linux-x86_64)   PLATFORM_SUFFIX="linux-amd64" ;;
     Linux-aarch64)  PLATFORM_SUFFIX="linux-arm64" ;;
@@ -50,7 +39,6 @@ APP_NAME="bsl-analyzer-app-${PLATFORM_SUFFIX}${BINARY_EXT}"
 
 echo "Platform: ${PLATFORM_SUFFIX}"
 
-# Сборка
 echo "Building release..."
 cargo build --release
 
@@ -67,7 +55,6 @@ if [ ! -f "$APP_PATH" ]; then
     exit 1
 fi
 
-# Размеры бинарников
 get_size() {
     if command -v stat &> /dev/null; then
         stat -c%s "$1" 2>/dev/null || stat -f%z "$1"
@@ -81,7 +68,6 @@ APP_SIZE=$(get_size "$APP_PATH")
 echo "Launcher size: ${LAUNCHER_SIZE} bytes ($(echo "scale=2; ${LAUNCHER_SIZE}/1048576" | bc) MB)"
 echo "App size: ${APP_SIZE} bytes ($(echo "scale=2; ${APP_SIZE}/1048576" | bc) MB)"
 
-# SHA256
 get_sha256() {
     if command -v sha256sum &> /dev/null; then
         sha256sum "$1" | cut -d' ' -f1
@@ -107,7 +93,6 @@ if [ "$UPLOAD" = "--upload" ]; then
     echo ""
     echo "=== Uploading to ${RELEASE_SERVER_URL} ==="
 
-    # Загрузка launcher
     echo "Uploading ${LAUNCHER_NAME}..."
     curl -sf -X POST "${RELEASE_SERVER_URL}/upload" \
         -H "Authorization: Bearer ${RELEASE_UPLOAD_TOKEN}" \
@@ -117,7 +102,6 @@ if [ "$UPLOAD" = "--upload" ]; then
         --data-binary "@${LAUNCHER_PATH}"
     echo " done"
 
-    # Загрузка app
     echo "Uploading ${APP_NAME}..."
     curl -sf -X POST "${RELEASE_SERVER_URL}/upload" \
         -H "Authorization: Bearer ${RELEASE_UPLOAD_TOKEN}" \
@@ -127,7 +111,6 @@ if [ "$UPLOAD" = "--upload" ]; then
         --data-binary "@${APP_PATH}"
     echo " done"
 
-    # Публикация версии
     echo ""
     echo "Publishing version ${VERSION}..."
     curl -sf -X POST "${RELEASE_SERVER_URL}/publish/bsl-analyzer/${VERSION}" \

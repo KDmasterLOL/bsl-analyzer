@@ -1,7 +1,3 @@
-//! LineLength diagnostic
-//!
-//! Checks that BSL code lines do not exceed the configured maximum length.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -60,20 +56,14 @@ impl Config {
     }
 }
 
-/// Information about a line for length checking.
 #[derive(Debug, Clone, Default)]
 struct LineInfo {
-    /// Maximum character position (end column) of code on this line.
     max_code_char_pos: usize,
-    /// Maximum character position including comments.
     max_char_pos: usize,
-    /// Whether this line has any code (non-comment, non-whitespace).
     has_code: bool,
-    /// Whether this line is part of a multiline string.
     is_multiline_string: bool,
 }
 
-/// Main entry point for LineLength diagnostic.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let _span = tracing::debug_span!("LineLength::check").entered();
     let code = DiagnosticCode::LineLength;
@@ -90,30 +80,23 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let file_text = ctx.file_text();
     let file_text = file_text.as_ref();
 
-    // Get line index (cached, using helper method for streaming mode compatibility)
     let line_index = ctx.line_index();
     let num_lines = line_index.len_lines();
 
-    // Pre-allocate line info for all lines
     let mut line_infos: Vec<LineInfo> = vec![LineInfo::default(); num_lines as usize];
 
-    // Find lines that are part of multiline strings (to exclude from checking)
     mark_multiline_string_lines(&root, &line_index, &mut line_infos);
 
-    // Process code tokens to find max code positions per line
     process_code_tokens(&root, file_text, &line_index, &mut line_infos);
 
-    // Find method description comment lines (if needed)
     let method_desc_lines = if !config.check_method_description {
         find_method_description_lines(&root, &line_index)
     } else {
         HashSet::new()
     };
 
-    // Process comments
     process_comments(&root, file_text, &line_index, &mut line_infos, &method_desc_lines, &config);
 
-    // Generate diagnostics
     let diagnostics = generate_diagnostics(
         &line_infos,
         &line_index,
@@ -128,7 +111,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics
 }
 
-/// Mark lines that are part of multiline strings.
 fn mark_multiline_string_lines(
     root: &SyntaxNode,
     line_index: &LineIndex,
@@ -151,7 +133,6 @@ fn mark_multiline_string_lines(
     }
 }
 
-/// Process code tokens and update line info.
 fn process_code_tokens(
     root: &SyntaxNode,
     file_text: &str,
@@ -164,23 +145,19 @@ fn process_code_tokens(
         if let Some(token) = element.into_token() {
             let kind = token.kind();
 
-            // Skip whitespace and newlines
             if kind == SyntaxKind::WHITESPACE || kind == SyntaxKind::NEWLINE {
                 continue;
             }
 
-            // Skip comments (handled separately)
             if kind == SyntaxKind::COMMENT {
                 continue;
             }
 
-            // Skip multiline string parts
             if matches!(kind, SyntaxKind::STRING_PART | SyntaxKind::STRING_TAIL) {
                 prev_token_kind = Some(kind);
                 continue;
             }
 
-            // Skip semicolon after multiline string
             if kind == SyntaxKind::SEMICOLON {
                 if let Some(prev) = prev_token_kind {
                     if matches!(prev, SyntaxKind::STRING_PART | SyntaxKind::STRING_TAIL) {
@@ -195,14 +172,11 @@ fn process_code_tokens(
             let line = end_pos.line as usize;
 
             if let Some(info) = line_infos.get_mut(line) {
-                // Calculate character position (not byte position)
                 let line_start = line_index.line_start(end_pos.line);
                 let byte_col = u32::from(range.end()) - u32::from(line_start);
                 let line_text_start: usize = line_start.into();
                 let line_text_end = (line_text_start + byte_col as usize).min(file_text.len());
 
-                // SAFETY: Ensure line_text_end is on a char boundary to avoid panic.
-                // If range.end() is not on a char boundary (parser bug), round down.
                 let line_text_end = file_text.floor_char_boundary(line_text_end);
 
                 let char_col = file_text[line_text_start..line_text_end].chars().count();
@@ -217,13 +191,11 @@ fn process_code_tokens(
     }
 }
 
-/// Find lines that contain method description comments.
 fn find_method_description_lines(root: &SyntaxNode, line_index: &LineIndex) -> HashSet<u32> {
     use syntax::ast::{FunctionDef, ProcedureDef};
 
     let mut method_desc_lines = HashSet::new();
 
-    // Collect all comments with their line numbers
     let mut comments: Vec<(u32, TextRange)> = Vec::new();
     for element in root.descendants_with_tokens() {
         if let Some(token) = element.into_token() {
@@ -237,7 +209,6 @@ fn find_method_description_lines(root: &SyntaxNode, line_index: &LineIndex) -> H
 
     comments.sort_by_key(|(line, _)| *line);
 
-    // Find method start lines
     for node in root.descendants() {
         let method_start = ProcedureDef::cast(node.clone())
             .map(|proc| proc.syntax().text_range().start())
@@ -248,7 +219,6 @@ fn find_method_description_lines(root: &SyntaxNode, line_index: &LineIndex) -> H
         if let Some(method_start_pos) = method_start {
             let method_line = line_index.line_col(method_start_pos).line;
 
-            // Find contiguous comment block immediately before method
             let mut desc_lines = Vec::new();
             for &(comment_line, _) in comments.iter().rev() {
                 if comment_line >= method_line {
@@ -270,7 +240,6 @@ fn find_method_description_lines(root: &SyntaxNode, line_index: &LineIndex) -> H
     method_desc_lines
 }
 
-/// Process comment tokens and update line info.
 fn process_comments(
     root: &SyntaxNode,
     file_text: &str,
@@ -289,12 +258,10 @@ fn process_comments(
             let start_pos = line_index.line_col(range.start());
             let line = start_pos.line as usize;
 
-            // Skip method description comments if configured
             if !config.check_method_description && method_desc_lines.contains(&(line as u32)) {
                 continue;
             }
 
-            // Skip trailing comments if configured
             if config.exclude_trailing_comments {
                 if let Some(info) = line_infos.get(line) {
                     if info.has_code {
@@ -303,7 +270,6 @@ fn process_comments(
                 }
             }
 
-            // Calculate character position at end of comment
             let end_pos = line_index.line_col(range.end());
             let end_line = end_pos.line as usize;
 
@@ -313,8 +279,6 @@ fn process_comments(
                 let line_text_start: usize = line_start.into();
                 let line_text_end = (line_text_start + byte_col as usize).min(file_text.len());
 
-                // SAFETY: Ensure line_text_end is on a char boundary to avoid panic.
-                // If range.end() is not on a char boundary (parser bug), round down.
                 let line_text_end = file_text.floor_char_boundary(line_text_end);
 
                 let char_col = file_text[line_text_start..line_text_end].chars().count();
@@ -325,7 +289,6 @@ fn process_comments(
     }
 }
 
-/// Generate diagnostics for lines exceeding max length.
 fn generate_diagnostics(
     line_infos: &[LineInfo],
     line_index: &LineIndex,
@@ -337,7 +300,6 @@ fn generate_diagnostics(
     let mut diagnostics = Vec::new();
 
     for (line_num, info) in line_infos.iter().enumerate() {
-        // Skip multiline string lines
         if info.is_multiline_string {
             continue;
         }
@@ -346,14 +308,12 @@ fn generate_diagnostics(
             let line = line_num as u32;
             let line_start = line_index.line_start(line);
 
-            // Calculate byte position for max_char_pos
             let line_text_start: usize = line_start.into();
             let line_range = line_index.line_range(line);
             let line_text_end: usize =
                 line_range.map(|r| r.end().into()).unwrap_or(file_text.len());
             let line_text = &file_text[line_text_start..line_text_end.min(file_text.len())];
 
-            // Find byte offset for max_char_pos characters
             let mut byte_offset = 0usize;
             for (i, ch) in line_text.chars().enumerate() {
                 if i >= info.max_char_pos {
@@ -388,8 +348,6 @@ mod tests {
     use crate::{DiagnosticCode, DiagnosticsConfig};
     use expect_test::expect;
 
-    // Large inline regression fixture for line-length coverage.
-    // Line count and content must remain stable — position assertions depend on it.
     const FIXTURE: &str = r#"А = 0;
 
 А = "фффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффф";
@@ -471,7 +429,6 @@ mod tests {
 
     #[test]
     fn test_utf8_characters() {
-        // Each Cyrillic character is 2 bytes but counts as 1 character
         let code = "А = \"фф\";  // Short line";
         let diagnostics = check_ast_diagnostic(code, check);
 

@@ -1,23 +1,15 @@
-//! Per-module call graph facts extracted from HIR.
-//!
-//! This module defines the types and extraction logic for building
-//! a per-module call summary from HIR bodies and ItemTree metadata.
-//! No cross-module resolution or BFS traversal happens here —
-//! those belong in `ide-diagnostics`.
-
+use bsl_metadata::MdoType;
 use rustc_hash::FxHashMap;
-use syntax::TextRange;
+use syntax::{TextRange, TextSize};
 
 use crate::{
     body::{Body, BodySourceMap, ManagerType},
     hir::{Expr, ExprIdx, Literal},
     item_tree::{AnnotationKind, ItemTree, ModItem},
     name::Name,
-    ModuleBodies,
+    MethodId, ModuleBodies, ModuleId,
 };
 
-/// Per-module call facts extracted from HIR.
-/// No cross-module resolution, no BFS — pure per-module data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleCallSummary {
     pub methods: Vec<MethodSummary>,
@@ -35,7 +27,26 @@ pub struct MethodSummary {
     pub is_export: bool,
 }
 
-/// Dispatch classification computed from `AnnotationKind`.
+/// Per-method facts derivable from the item tree alone — declaration name,
+/// export flag, annotation dispatch, and the name/source ranges — without
+/// lowering any body. This is the compact, resident "Pass A" data a streaming
+/// graph build needs: enumerating methods and their durable-id/source coordinates
+/// must not force the heavy body HIR that the per-module edge projection does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphMethodEntry {
+    pub local_id: u32,
+    pub name: Name,
+    pub is_export: bool,
+    pub dispatch: MethodDispatch,
+    /// Range of the declaration's name token — anchors the start of the signature.
+    pub name_range: TextRange,
+    /// End of the declaration header (closing `)` or export keyword) — anchors the
+    /// end of the full, possibly multi-line, signature slice.
+    pub sig_end: TextSize,
+    /// Range of the whole procedure/function — the `source` slice.
+    pub source_range: TextRange,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MethodDispatch {
     pub can_run_on_client: bool,
@@ -74,9 +85,28 @@ impl MethodDispatch {
     pub fn is_server_only(&self) -> bool {
         self.can_run_on_server && !self.can_run_on_client
     }
+
+    /// Module-level client/server capability from a common module's execution
+    /// context (where dispatch is set per-module, not per-method). `None` for
+    /// `Unknown` — the caller then falls back to per-method annotation dispatch.
+    pub fn from_execution_context(ctx: crate::ExecutionContext) -> Option<Self> {
+        use crate::ExecutionContext;
+        let d = |can_run_on_client, can_run_on_server| Self {
+            can_run_on_client,
+            can_run_on_server,
+            no_context: false,
+        };
+        Some(match ctx {
+            ExecutionContext::Server
+            | ExecutionContext::ServerCall
+            | ExecutionContext::ExternalConnection => d(false, true),
+            ExecutionContext::Client => d(true, false),
+            ExecutionContext::ClientServer => d(true, true),
+            ExecutionContext::Unknown => return None,
+        })
+    }
 }
 
-/// Synchronous call edge within a module.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallEdge {
     pub caller: CallerId,
@@ -89,6 +119,27 @@ pub struct CallEdge {
 pub enum EdgeKind {
     DirectLocal,
     DirectQualifiedModule,
+    /// `Справочники.X.СоздатьЭлемент()` — a manager method that creates an object
+    /// of its metadata type. Target is an [`GraphNode::Mdo`].
+    ManagerCreates,
+    /// Any other touch of an object through its manager (a platform find/select
+    /// method, or a bare `Справочники.X` reference). Target is an [`GraphNode::Mdo`].
+    ManagerAccess,
+    /// The caller runs an SDBL query that reads a metadata object. From a
+    /// `Method`/`ModuleCode` node to the read object's [`GraphNode::Mdo`].
+    QueryRef,
+    /// Structural metadata containment: a metadata object owns a form
+    /// ([`GraphNode::Mdo`] → [`GraphNode::Form`]), or a form owns an item
+    /// ([`GraphNode::Form`] → [`GraphNode::FormItem`]). Derived from form metadata,
+    /// not from code.
+    Contains,
+    /// A form's data model binds to the metadata structure it mirrors. A UI element
+    /// ([`GraphNode::FormItem`]) whose data path is `Объект.<поле>` →
+    /// [`GraphNode::Attribute`]/[`GraphNode::TabularSectionAttribute`] of the backing
+    /// object's field ("which object fields are shown on the form"); a Ref-typed form
+    /// attribute ([`GraphNode::FormAttribute`]) → the [`GraphNode::Mdo`] it is typed
+    /// as. Derived from form metadata, not from code.
+    DataBinding,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -106,7 +157,6 @@ pub enum CallerId {
     ModuleCode,
 }
 
-/// NotifyDescription registration (async, not a call edge).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotifyReg {
     pub caller: CallerId,
@@ -115,7 +165,6 @@ pub struct NotifyReg {
     pub range: TextRange,
 }
 
-/// Idle handler registration (async, not a call edge).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IdleReg {
     pub caller: CallerId,
@@ -124,68 +173,268 @@ pub struct IdleReg {
     pub range: TextRange,
 }
 
-/// Form event entry mapping event type to handler method.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FormEventEntry {
     pub event_type: String,
     pub handler_name: Name,
 }
 
-// ============================================================================
-// Extraction
-// ============================================================================
+/// A module's call edges with each target resolved to a concrete graph node
+/// where possible. Produced by `resolved_module_summary_query`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedModuleSummary {
+    pub module: ModuleId,
+    pub edges: Vec<ResolvedCallEdge>,
+}
 
-/// Extract per-module call summary from HIR.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedCallEdge {
+    pub caller: CallerId,
+    pub target: ResolvedTarget,
+    pub kind: EdgeKind,
+    pub range: TextRange,
+    pub provenance: EdgeProvenance,
+}
+
+/// Resolution outcome for a call edge's target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedTarget {
+    /// Resolved to a concrete method node.
+    Method(MethodId),
+    /// Resolved to a metadata-object node (a manager access that is not a user
+    /// manager-module method — a creation/find platform method or bare reference).
+    Mdo { mdo_type: MdoType, object_name: Name },
+    /// Not resolved to a concrete node; the original target is preserved so
+    /// the gap is surfaced honestly rather than dropped.
+    Unresolved(CallTarget),
+}
+
+/// How much to trust a resolved edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeProvenance {
+    /// Target points at a concrete node by direct lookup (local call, or an
+    /// exported qualified-module call).
+    Resolved,
+    /// Target resolved to a concrete node via metadata inference (e.g. a
+    /// user-defined method on an object's manager module).
+    Inferred,
+    /// Target method exists but is not exported — visible-but-unreachable across modules.
+    VisibilityBlocked,
+    /// Target could not be resolved to a node: missing, or a platform builtin
+    /// (e.g. a manager method like `СоздатьЭлемент`, or a `ЭтотОбъект` platform method).
+    Unresolved,
+}
+
+/// A globally-addressable node in the workspace call graph.
 ///
-/// Iterates all method bodies and module-level code to collect:
-/// - Method summaries with dispatch classification
-/// - Synchronous call edges (DirectLocal, DirectQualifiedModule)
-/// - NotifyDescription registrations
-/// - Idle handler registrations
-/// - Form event entries
+/// Not `Copy`: an `Mdo` node carries a `Name`. Clones are cheap (`SmolStr` is
+/// inline for short names) and the graph stores nodes by reference internally.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum GraphNode {
+    Method(MethodId),
+    /// A module's top-level body (the `CallerId::ModuleCode` caller).
+    ModuleCode(ModuleId),
+    /// A metadata object (catalog, document, register, …) reached through its
+    /// manager. The identity is the metadata type plus the object name as it
+    /// appears in code, canonicalised to a single spelling per object at fold time.
+    Mdo {
+        mdo_type: MdoType,
+        object_name: Name,
+    },
+    /// An attribute (or register dimension/resource, tabular-section column, …) of
+    /// a metadata object, read by an SDBL query. `object_name` shares the `Mdo`
+    /// canonicalisation; `attr_name` is the declared metadata field name.
+    Attribute {
+        mdo_type: MdoType,
+        object_name: Name,
+        attr_name: Name,
+    },
+    /// A managed/ordinary form. Owned by a metadata object (`owner = Some((type,
+    /// object))`) or a common form (`owner = None`). `form_name` is the form's
+    /// directory name in the source tree (edit-stable, single-spelling). The owner
+    /// object name shares the `Mdo` canonicalisation.
+    Form {
+        owner: Option<(MdoType, Name)>,
+        form_name: Name,
+    },
+    /// An item (control/group/field) on a form, identified by its declared element
+    /// name. `owner`/`form_name` mirror the containing [`GraphNode::Form`].
+    FormItem {
+        owner: Option<(MdoType, Name)>,
+        form_name: Name,
+        item_name: Name,
+    },
+    /// A form attribute — an entry in the form's data model (distinct from the UI
+    /// [`GraphNode::FormItem`] controls). `owner`/`form_name` mirror the containing
+    /// [`GraphNode::Form`]; `attr_name` is the declared form-attribute name.
+    FormAttribute {
+        owner: Option<(MdoType, Name)>,
+        form_name: Name,
+        attr_name: Name,
+    },
+    /// A tabular section (табличная часть) of a metadata object. `object_name` shares
+    /// the [`GraphNode::Mdo`] canonicalisation; `section_name` is the declared name.
+    TabularSection {
+        mdo_type: MdoType,
+        object_name: Name,
+        section_name: Name,
+    },
+    /// A column of a tabular section, reached through its [`GraphNode::TabularSection`]
+    /// (the `<object>.<section>.<column>` hierarchy). Distinct identity from a
+    /// top-level [`GraphNode::Attribute`] of the same object.
+    TabularSectionAttribute {
+        mdo_type: MdoType,
+        object_name: Name,
+        section_name: Name,
+        attr_name: Name,
+    },
+}
+
+/// A resolved call edge between two workspace graph nodes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceCallEdge {
+    pub from: GraphNode,
+    pub to: GraphNode,
+    pub kind: EdgeKind,
+    pub provenance: EdgeProvenance,
+    /// A client-capable caller invoking a server-only callee — a client→server
+    /// roundtrip. Dispatch comes from the module's execution context (common
+    /// modules) or per-method `&НаКлиенте`/`&НаСервере` annotations (form/command
+    /// modules). `false` when either endpoint's dispatch is unknown (e.g. a
+    /// `ModuleCode` caller, or a module with `Unknown` context and no annotation).
+    pub crosses_client_to_server: bool,
+}
+
+/// Whole-config call graph: forward (callees) and reverse (callers) adjacency
+/// over the resolved edges of every module, plus per-method client/server
+/// dispatch. Produced by `workspace_call_graph_query`. Only edges whose target
+/// resolved to a concrete node are indexed; unresolved outgoing calls stay
+/// visible per-module via `ResolvedModuleSummary`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkspaceCallGraph {
+    forward: FxHashMap<GraphNode, Vec<WorkspaceCallEdge>>,
+    reverse: FxHashMap<GraphNode, Vec<WorkspaceCallEdge>>,
+    node_dispatch: FxHashMap<GraphNode, MethodDispatch>,
+}
+
+impl WorkspaceCallGraph {
+    pub fn insert(&mut self, edge: WorkspaceCallEdge) {
+        self.forward.entry(edge.from.clone()).or_default().push(edge.clone());
+        self.reverse.entry(edge.to.clone()).or_default().push(edge);
+    }
+
+    pub fn set_dispatch(&mut self, node: GraphNode, dispatch: MethodDispatch) {
+        self.node_dispatch.insert(node, dispatch);
+    }
+
+    /// Client/server dispatch of a node, if known (method nodes only).
+    pub fn dispatch(&self, node: &GraphNode) -> Option<MethodDispatch> {
+        self.node_dispatch.get(node).copied()
+    }
+
+    /// Outgoing resolved calls from `node` (callees).
+    pub fn callees(&self, node: &GraphNode) -> &[WorkspaceCallEdge] {
+        self.forward.get(node).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// Incoming resolved calls to `node` (callers).
+    pub fn callers(&self, node: &GraphNode) -> &[WorkspaceCallEdge] {
+        self.reverse.get(node).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// Every node that participates in the graph: it has an outgoing edge, an
+    /// incoming edge, or a known dispatch. Order is unspecified.
+    pub fn nodes(&self) -> impl Iterator<Item = GraphNode> + '_ {
+        let mut seen = FxHashMap::default();
+        self.forward
+            .keys()
+            .chain(self.reverse.keys())
+            .chain(self.node_dispatch.keys())
+            .filter(move |node| seen.insert((*node).clone(), ()).is_none())
+            .cloned()
+    }
+
+    /// Every resolved edge in the graph (each edge appears once). Order is unspecified.
+    pub fn edges(&self) -> impl Iterator<Item = &WorkspaceCallEdge> + '_ {
+        self.forward.values().flat_map(|edges| edges.iter())
+    }
+
+    /// Number of resolved edges.
+    pub fn edge_count(&self) -> usize {
+        self.forward.values().map(Vec::len).sum()
+    }
+
+    /// Caller-in centrality: how many resolved calls target `node`.
+    pub fn in_degree(&self, node: &GraphNode) -> usize {
+        self.reverse.get(node).map_or(0, Vec::len)
+    }
+}
+
+/// Enumerate a module's methods from the item tree, in top-level declaration
+/// order (so the index is each method's `local_id`). Reads declarations only and
+/// never lowers bodies — cheap enough to run over a whole configuration without
+/// the RAM cost of body HIR.
+pub fn extract_graph_methods(item_tree: &ItemTree) -> Vec<GraphMethodEntry> {
+    let mut methods = Vec::new();
+    for (top_level_idx, item) in item_tree.top_level_items().iter().enumerate() {
+        let local_id = top_level_idx as u32;
+        let entry = match item {
+            ModItem::Procedure(idx) => {
+                let proc = item_tree.procedure(*idx);
+                GraphMethodEntry {
+                    local_id,
+                    name: proc.name.clone(),
+                    is_export: proc.is_export,
+                    dispatch: MethodDispatch::from_annotation(
+                        proc.annotations.first().map(|a| &a.kind),
+                    ),
+                    name_range: proc.name_range,
+                    sig_end: proc.sig_end,
+                    source_range: proc.source_range,
+                }
+            }
+            ModItem::Function(idx) => {
+                let func = item_tree.function(*idx);
+                GraphMethodEntry {
+                    local_id,
+                    name: func.name.clone(),
+                    is_export: func.is_export,
+                    dispatch: MethodDispatch::from_annotation(
+                        func.annotations.first().map(|a| &a.kind),
+                    ),
+                    name_range: func.name_range,
+                    sig_end: func.sig_end,
+                    source_range: func.source_range,
+                }
+            }
+            ModItem::Variable(_) => continue,
+        };
+        methods.push(entry);
+    }
+    methods
+}
+
 pub fn extract_call_summary(
     item_tree: &ItemTree,
     module_bodies: &ModuleBodies,
     form_event_handlers: &[bsl_metadata::FormEventHandler],
 ) -> ModuleCallSummary {
-    // 1. Build method summaries from ItemTree
-    let mut methods = Vec::new();
+    // Method enumeration is the cheap, body-free part — share it with the graph
+    // build. The `local_method_ids` map (lowercased name → first local id) is what
+    // body extraction uses to bind local calls.
+    let graph_methods = extract_graph_methods(item_tree);
     let mut local_method_ids: FxHashMap<String, u32> = FxHashMap::default();
-
-    for (top_level_idx, item) in item_tree.top_level_items().iter().enumerate() {
-        let local_id = top_level_idx as u32;
-        match item {
-            ModItem::Procedure(idx) => {
-                let proc = item_tree.procedure(*idx);
-                let dispatch =
-                    MethodDispatch::from_annotation(proc.annotations.first().map(|a| &a.kind));
-                local_method_ids.entry(proc.name.as_str().to_lowercase()).or_insert(local_id);
-                methods.push(MethodSummary {
-                    local_id,
-                    name: proc.name.clone(),
-                    dispatch,
-                    is_export: proc.is_export,
-                });
-            }
-            ModItem::Function(idx) => {
-                let func = item_tree.function(*idx);
-                let dispatch =
-                    MethodDispatch::from_annotation(func.annotations.first().map(|a| &a.kind));
-                local_method_ids.entry(func.name.as_str().to_lowercase()).or_insert(local_id);
-                methods.push(MethodSummary {
-                    local_id,
-                    name: func.name.clone(),
-                    dispatch,
-                    is_export: func.is_export,
-                });
-            }
-            ModItem::Variable(_) => {}
-        }
+    let mut methods = Vec::with_capacity(graph_methods.len());
+    for method in &graph_methods {
+        local_method_ids.entry(method.name.as_str().to_lowercase()).or_insert(method.local_id);
+        methods.push(MethodSummary {
+            local_id: method.local_id,
+            name: method.name.clone(),
+            dispatch: method.dispatch,
+            is_export: method.is_export,
+        });
     }
 
-    // 2. Extract edges from all method bodies
-    //    Collect local_ids and sort for deterministic order
-    //    (ModuleBodies iterates FxHashMap which is non-deterministic)
     let mut call_edges = Vec::new();
     let mut notify_regs = Vec::new();
     let mut idle_handler_regs = Vec::new();
@@ -209,7 +458,6 @@ pub fn extract_call_summary(
         );
     }
 
-    // 3. Extract edges from module-level code
     if let Some(module_code) = module_bodies.module_code_result() {
         extract_from_body(
             &module_code.body,
@@ -222,7 +470,6 @@ pub fn extract_call_summary(
         );
     }
 
-    // 4. Build form entries
     let form_entries = form_event_handlers
         .iter()
         .map(|h| FormEventEntry {
@@ -272,7 +519,6 @@ fn extract_from_body(
                             call_edges.push(edge);
                         }
                     }
-                    // Field { base: Path(module), field: method } — streaming mode
                     Expr::Field { base: field_base, field } => {
                         if let Some(edge) = field_callee_to_edge(
                             body,
@@ -289,8 +535,6 @@ fn extract_from_body(
                 }
             }
             Expr::New { type_name, args } => {
-                // Static: Новый ОписаниеОповещения("Callback", ЭтотОбъект)
-                // Dynamic: Новый("ОписаниеОповещения", "Callback", ЭтотОбъект)
                 let offsets = match type_name {
                     Some(tn) if is_notify_description(tn) => Some((0, 1)),
                     None if !args.is_empty() => {
@@ -321,28 +565,23 @@ fn extract_from_body(
     }
 }
 
-/// Check if a name (lowercased) matches `ПодключитьОбработчикОжидания` / `AttachIdleHandler`.
 fn is_attach_idle_handler(name_lower: &str) -> bool {
     name_lower == "подключитьобработчикожидания" || name_lower == "attachidlehandler"
 }
 
-/// Check if a type name matches `ОписаниеОповещения` / `NotifyDescription`.
 fn is_notify_description(name: &Name) -> bool {
     is_notify_description_str(name.as_str())
 }
 
-/// Check if a string matches `ОписаниеОповещения` / `NotifyDescription` (case-insensitive).
 fn is_notify_description_str(name: &str) -> bool {
     let lower = name.to_lowercase();
     lower == "описаниеоповещения" || lower == "notifydescription"
 }
 
-/// Check if a name (lowercased) matches `ЭтотОбъект` / `ThisObject`.
 fn is_this_object(name_lower: &str) -> bool {
     name_lower == "этотобъект" || name_lower == "thisobject"
 }
 
-/// Extract an IdleReg from `ПодключитьОбработчикОжидания("Handler", Interval, OneShot)`.
 fn extract_idle_reg(
     body: &Body,
     caller: CallerId,
@@ -363,10 +602,6 @@ fn extract_idle_reg(
     Some(IdleReg { caller, handler_name: Name::new(&handler_name), one_shot, range })
 }
 
-/// Extract a NotifyReg with explicit arg offsets.
-///
-/// Static form: `Новый ОписаниеОповещения("Callback", ЭтотОбъект)` → method_idx=0, target_idx=1
-/// Dynamic form: `Новый("ОписаниеОповещения", "Callback", ЭтотОбъект)` → method_idx=1, target_idx=2
 fn extract_notify_reg_at(
     body: &Body,
     caller: CallerId,
@@ -384,7 +619,6 @@ fn extract_notify_reg_at(
     Some(NotifyReg { caller, callback_name: Name::new(&callback_name), target_module, range })
 }
 
-/// Build a CallEdge from QualifiedPath segments.
 fn qualified_path_to_edge(
     caller: CallerId,
     segments: &[Name],
@@ -416,12 +650,6 @@ fn qualified_path_to_edge(
     }
 }
 
-/// Build a CallEdge from `Call { callee: Field { base, field } }` pattern.
-///
-/// Handles two cases:
-/// - `Field { base: Path(ЭтотОбъект), field: method }` → direct local call
-/// - `Field { base: Path(module), field: method }` → 2-segment qualified call
-/// - `Field { base: Field { base: Path(mdo_type), field: mdo_name }, field: method }` → 3-segment manager access
 fn field_callee_to_edge(
     body: &Body,
     caller: CallerId,
@@ -479,7 +707,6 @@ fn field_callee_to_edge(
     }
 }
 
-/// Extract string content from a string literal expression.
 fn extract_string_literal(body: &Body, idx: ExprIdx) -> Option<String> {
     match body.expr_idx(idx) {
         Expr::Literal(Literal::String(s)) => Some(s.clone()),
@@ -490,6 +717,30 @@ fn extract_string_literal(body: &Body, idx: ExprIdx) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dispatch_from_execution_context_maps_each_variant() {
+        use crate::ExecutionContext;
+
+        for ctx in [
+            ExecutionContext::Server,
+            ExecutionContext::ServerCall,
+            ExecutionContext::ExternalConnection,
+        ] {
+            let d = MethodDispatch::from_execution_context(ctx).unwrap();
+            assert!(d.is_server_only(), "{ctx:?} is server-only");
+        }
+
+        let client = MethodDispatch::from_execution_context(ExecutionContext::Client).unwrap();
+        assert!(client.can_run_on_client && !client.can_run_on_server);
+
+        let both = MethodDispatch::from_execution_context(ExecutionContext::ClientServer).unwrap();
+        assert!(both.can_run_on_client && both.can_run_on_server);
+        assert!(!both.is_server_only());
+
+        // Unknown → no module-level dispatch; caller falls back to annotations.
+        assert!(MethodDispatch::from_execution_context(ExecutionContext::Unknown).is_none());
+    }
 
     #[test]
     fn test_dispatch_from_annotation() {
@@ -525,7 +776,6 @@ mod tests {
         assert!(!d.is_server_only());
         assert!(d.no_context);
 
-        // Extension methods default to client
         let d = MethodDispatch::from_annotation(Some(&AnnotationKind::Before));
         assert!(d.can_run_on_client);
         assert!(!d.can_run_on_server);
@@ -564,6 +814,65 @@ mod tests {
     }
 
     #[test]
+    fn extract_graph_methods_reports_ranges_dispatch_and_export() {
+        let code = "&НаСервере\n\
+                    Функция Считать() Экспорт\n\
+                    Возврат 1;\n\
+                    КонецФункции\n\
+                    \n\
+                    Процедура Делать()\n\
+                    КонецПроцедуры";
+        let parse = parser::parse(code);
+        let item_tree = ItemTree::from_parse(&parse);
+        let methods = extract_graph_methods(&item_tree);
+        assert_eq!(methods.len(), 2);
+
+        let read = &methods[0];
+        assert_eq!(read.local_id, 0);
+        assert_eq!(read.name.as_str(), "Считать");
+        assert!(read.is_export);
+        assert!(read.dispatch.is_server_only());
+        // The name range pinpoints the identifier; the source range spans the
+        // whole declaration — both index back into the original text.
+        let name_slice =
+            &code[usize::from(read.name_range.start())..usize::from(read.name_range.end())];
+        assert_eq!(name_slice, "Считать");
+        let source_slice =
+            &code[usize::from(read.source_range.start())..usize::from(read.source_range.end())];
+        assert!(source_slice.contains("Функция Считать"));
+        assert!(source_slice.contains("КонецФункции"));
+
+        let act = &methods[1];
+        assert_eq!(act.name.as_str(), "Делать");
+        assert!(!act.is_export);
+        assert!(act.dispatch.can_run_on_client && !act.dispatch.can_run_on_server);
+    }
+
+    #[test]
+    fn extract_graph_methods_matches_call_summary_method_list() {
+        // The two enumerations must agree: `extract_call_summary` reuses
+        // `extract_graph_methods`, so the body-free index is the source of truth
+        // for local ids, names, dispatch, and export.
+        let code = "Процедура Альфа() Экспорт\n\
+                    КонецПроцедуры\n\
+                    Функция Бета()\n\
+                    Возврат 0;\n\
+                    КонецФункции";
+        let parse = parser::parse(code);
+        let item_tree = ItemTree::from_parse(&parse);
+        let entries = extract_graph_methods(&item_tree);
+        let summary = parse_and_extract(code);
+
+        assert_eq!(entries.len(), summary.methods.len());
+        for (entry, summary_method) in entries.iter().zip(&summary.methods) {
+            assert_eq!(entry.local_id, summary_method.local_id);
+            assert_eq!(entry.name, summary_method.name);
+            assert_eq!(entry.is_export, summary_method.is_export);
+            assert_eq!(entry.dispatch, summary_method.dispatch);
+        }
+    }
+
+    #[test]
     fn test_extract_call_summary_empty_module() {
         let item_tree = ItemTree::default();
         let module_bodies = ModuleBodies::new();
@@ -597,10 +906,6 @@ mod tests {
         assert_eq!(summary.form_entries[0].handler_name, Name::new("ПриСозданииНаСервере"));
         assert_eq!(summary.form_entries[1].event_type, "OnActivateRow");
     }
-
-    // ====================================================================
-    // Integration tests: parse BSL → extract_call_summary
-    // ====================================================================
 
     fn parse_and_extract(code: &str) -> ModuleCallSummary {
         parse_and_extract_with_handlers(code, &[])
@@ -641,16 +946,13 @@ mod tests {
         assert!(summary.methods[0].dispatch.can_run_on_client);
         assert!(summary.methods[2].dispatch.is_server_only());
 
-        // Two DirectLocal edges: handler→client, client→server
         let local_edges: Vec<_> =
             summary.call_edges.iter().filter(|e| e.kind == EdgeKind::DirectLocal).collect();
         assert_eq!(local_edges.len(), 2);
 
-        // handler (local_id=0) → client (local_id=1)
         assert_eq!(local_edges[0].caller, CallerId::Method(0));
         assert!(matches!(&local_edges[0].target, CallTarget::Local { callee_local_id: 1 }));
 
-        // client (local_id=1) → server (local_id=2)
         assert_eq!(local_edges[1].caller, CallerId::Method(1));
         assert!(matches!(&local_edges[1].target, CallTarget::Local { callee_local_id: 2 }));
     }
@@ -779,8 +1081,6 @@ EndProcedure
 
     #[test]
     fn test_qualified_call_to_nonexistent_method_still_produces_edge() {
-        // Qualified calls to methods that may not exist in the target module
-        // still produce edges — resolution happens lazily during BFS (Phase 3).
         let code = r#"
 Процедура Тест()
     НесуществующийМодуль.НесуществующийМетод();
@@ -878,13 +1178,11 @@ EndProcedure
 "#;
         let summary = parse_and_extract(code);
 
-        // Idle handler goes to idle_handler_regs, NOT to call_edges
         assert_eq!(summary.idle_handler_regs.len(), 1);
         assert_eq!(summary.idle_handler_regs[0].handler_name, Name::new("Обновить"));
         assert!(summary.idle_handler_regs[0].one_shot);
         assert_eq!(summary.idle_handler_regs[0].caller, CallerId::Method(0));
 
-        // No DirectLocal edge for ПодключитьОбработчикОжидания
         let local_edges: Vec<_> =
             summary.call_edges.iter().filter(|e| e.kind == EdgeKind::DirectLocal).collect();
         assert!(local_edges.is_empty(), "Idle handler registration should not produce a call edge");
@@ -922,7 +1220,6 @@ EndProcedure
         assert!(summary.methods[2].dispatch.can_run_on_server);
         assert!(summary.methods[2].dispatch.no_context);
 
-        // No annotation → defaults to client
         assert!(summary.methods[3].dispatch.can_run_on_client);
         assert!(!summary.methods[3].dispatch.can_run_on_server);
     }

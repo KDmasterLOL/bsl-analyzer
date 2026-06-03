@@ -1,16 +1,3 @@
-//! Integration tests for `Expr::Path` inference after Task 1.7 routes name
-//! resolution through the unified [`Resolver`] cascade.
-//!
-//! These lock down the edge cases Codex flagged during review of Task 1.7:
-//! platform-global builtins, names present only in the hand-curated
-//! `hir-ty::builtin` table (but absent from `bsl_platform`'s global-function
-//! index), and BSL implicit locals that must shadow module-level methods.
-//!
-//! `InferenceResult::expr_types` is per-method-body and not merged into the
-//! file-level result, so these tests assert on the file-level `var_types`
-//! map that *is* merged. Feeding the names through `X = Foo(...)` turns the
-//! return type of `Foo` into `var_types["x"]`, which is observable.
-
 use hir::{Builders, DefDatabase, HirDatabase, ModuleId, TypeId};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
@@ -36,7 +23,6 @@ fn setup(fixture_text: &str) -> (RootDatabaseImpl, FileId) {
         .find(|(_, f)| f.path.as_path().to_string_lossy().ends_with("/test.bsl"))
         .map(|(id, _)| *id)
         .expect("fixture must contain /test.bsl");
-    // Ensure HIR bodies are built; infer_query reads them.
     let _ = db.module_bodies(ModuleId::new(test_file));
     (db, test_file)
 }
@@ -45,14 +31,8 @@ fn var_type(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<T
     db.infer(file_id).var_types.get(var_lower).copied()
 }
 
-// ---------- platform-global builtin via Resolver + hir-ty signature ----------
-
 #[test]
 fn path_resolves_platform_builtin_via_resolver() {
-    // `СтрДлина` is in both `bsl_platform`'s global-function index (so
-    // Resolver classifies it as `Resolution::Builtin`) and in
-    // `hir-ty::builtin` (typed signature with ret = Number). The assignment
-    // binds `Х` to the return type, which is observable through var_types.
     let fixture = r#"//- /test.bsl
 Функция Тест()
     Х = СтрДлина("abc");
@@ -67,15 +47,8 @@ fn path_resolves_platform_builtin_via_resolver() {
     );
 }
 
-// ---------- implicit locals shadow module-level methods ----------
-
 #[test]
 fn implicit_local_assignment_shadows_module_procedure() {
-    // BSL has no explicit `Var` declarations. The first assignment inside a
-    // method body creates an implicit local. `Данные = 42` inside `Тест`
-    // must shadow the module-level `Процедура Данные()` so that
-    // `Рез = Данные;` copies the Number from the local, not an Unknown
-    // from the module-procedure branch.
     let fixture = r#"//- /test.bsl
 Процедура Данные() Экспорт
 КонецПроцедуры
@@ -96,10 +69,6 @@ fn implicit_local_assignment_shadows_module_procedure() {
 
 #[test]
 fn implicit_local_assignment_shadows_builtin_in_value_position() {
-    // Builtins are resolved from call syntax (`Строка(...)`), not from a
-    // bare value/receiver token. Once `Строка = 42` creates an implicit
-    // local, `Рез = Строка` must read the local Number rather than collapse
-    // to the platform builtin/function-name fallback.
     let fixture = r#"//- /test.bsl
 Функция Тест()
     Строка = 42;

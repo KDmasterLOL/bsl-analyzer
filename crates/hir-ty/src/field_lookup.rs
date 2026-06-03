@@ -1,25 +1,3 @@
-//! Field lookup on a typed receiver.
-//!
-//! `lookup_field` answers the question "given `x: receiver_ty`, what does
-//! `x.field_name` evaluate to?".
-//!
-//! It is now a thin name filter over [`crate::field_enum::enumerate_fields`]:
-//! the enumeration logic (MDO attribute walk, tabular sections, register
-//! parts, `НомерСтроки` fall-through) lives in `field_enum` so that both
-//! `lookup_field` (point lookup) and `hir::Type::fields()` (full list for
-//! IDE completion) stay in sync without duplicating any traversal.
-//!
-//! # Coverage
-//!
-//! See [`crate::field_enum`] for the complete coverage map.
-//!
-//! # Platform fall-through
-//!
-//! Receivers that are not `Ty::MetadataRef` (after `ThisObject` coercion) are
-//! routed through [`crate::platform_property_lookup::lookup_platform_property`].
-//! These are `Ty::PlatformObject`, collection variants, etc. — they never go
-//! through the enumerator.
-
 pub use crate::field_enum::FieldInfo;
 
 use bsl_config::VisibleConfig;
@@ -32,30 +10,7 @@ use hir_def::Name;
 
 use crate::field_enum::enumerate_fields_inner;
 
-/// Project a `TypeKind::FormData` receiver to the underlying MDO for **field**
-/// resolution.
-///
-/// Fields on a managed-form attribute that wraps an `*Object` MDO behave
-/// like the MDO's attributes — `Объект.Дата` inside a document form must
-/// reach the document's `Дата` declaration, not the form-data wrapper's
-/// platform members. Methods are routed differently (see
-/// [`crate::method_lookup::platform_type_key_id`]); that's why the projection
-/// lives here, in `field_lookup`, not inside a global coercion.
-///
-/// Returns:
-/// - `Some(MetadataRef { *Object, name })` for `Structure` /
-///   `StructureWithCollection` whose `underlying` MDO has an `*Object`
-///   companion in [`MetadataKind::object_kind_for`].
-/// - `None` for `Collection` (no name-keyed fields), for `Structure`s with
-///   no `underlying` (e.g. `ValueTable` attribute without an MDO), and for
-///   underlying MDO kinds without an `*Object` surface.
 pub(crate) fn project_form_data_for_fields_id(db: &dyn TypeKernelDb, ty: TypeId) -> Option<TypeId> {
-    // §4.E.4d: `FormData` carries no `config_id` (its `underlying`
-    // `MdoRefFacet` is `{mdo_type, name}` only), so the projected
-    // `MetadataRef` resolves under `Root`. This is faithful to the prior
-    // `Ty` bridge (which also lost config here) but config-lossy for
-    // CFE-contributed forms — §4.E.4f revisits if FormData gains a
-    // config carrier.
     let TypeKind::FormData { kind, underlying: Some(owner) } = db.lookup_type(ty) else {
         return None;
     };
@@ -72,8 +27,6 @@ fn lookup_form_data_tabular_section_field(
     receiver: TypeId,
     field_name: &Name,
 ) -> Option<FieldInfo> {
-    // Extract owned `(mdo_type, mdo_name)` before the config walk / builder
-    // callback re-borrows `db`.
     let (mdo_type, mdo_name) = match db.lookup_type(receiver) {
         TypeKind::FormData {
             kind: FormDataFacet::Structure | FormDataFacet::StructureWithCollection,
@@ -112,19 +65,6 @@ fn lookup_form_data_tabular_section_field(
     None
 }
 
-/// Resolve a field access on a typed receiver.
-///
-/// Returns `None` when:
-/// - the receiver type has no backing MDO (`Ty::Number`, `Ty::Unknown`,
-///   managers, collectives, platform objects);
-/// - the MDO exists but does not declare the requested attribute or
-///   tabular section;
-/// - the `Ty::MetadataRef` points at an MDO kind whose field lookup is
-///   deferred (registers that haven't been populated yet).
-///
-/// `configs` should be the visible configurations for the receiver's file
-/// (`db.configurations(file_id)`).
-///
 pub fn lookup_field(
     db: &dyn TypeKernelDb,
     configs: &[VisibleConfig],
@@ -140,13 +80,6 @@ fn lookup_field_inner(
     receiver: TypeId,
     field_name: &Name,
 ) -> Option<FieldInfo> {
-    // SDBL projection branch — when `QueryResultSelection` carries a
-    // resolved projection (Phase 1.3b+ synthesises it), field lookup
-    // consults the projection's `(Name, TypeId)` table BEFORE falling
-    // through to the platform `ВыборкаИзРезультатаЗапроса` surface. A miss
-    // in the projection does NOT short-circuit — it falls through so
-    // platform properties like `.НомерСтроки` / `.СледующаяСтрока` still
-    // resolve.
     if let Some(info) = lookup_field_in_query_projection(db, receiver, field_name) {
         return Some(info);
     }
@@ -155,22 +88,8 @@ fn lookup_field_inner(
         return Some(info);
     }
 
-    // Managed-form attribute projection happens BEFORE `ThisObject`
-    // coercion: a `FormData { Structure | StructureWithCollection,
-    // underlying: Some((mdo, n)) }` walks the MDO's attribute table for
-    // field lookup (`Объект.Дата` must reach the document's `Дата`).
-    // Method lookup deliberately doesn't do this — see `FormData` docs.
     let projected_ty = project_form_data_for_fields_id(db, receiver).unwrap_or(receiver);
 
-    // `ThisObject` / `ThisManager` coercion and dispatch split:
-    //   - `MetadataRef { *Object, .. }` (from `ThisObject`) → enumerator;
-    //   - `ObjectManager { kind, name }` (from `ThisManager`) → no
-    //     attribute table here, falls through to the platform-property
-    //     adapter (which returns `None` for `ObjectManager`). Managers
-    //     don't expose attributes through the field-lookup channel; the
-    //     manager-flavoured surface lives on `ManagerCollection` indexing.
-    //   - Union → intersection over live arms (handled below);
-    //   - everything else → platform-property adapter.
     let effective_ty =
         crate::this_object::coerce_to_metadata_ref_id(db, projected_ty).unwrap_or(projected_ty);
 
@@ -184,13 +103,6 @@ fn lookup_field_inner(
         }
         _ => {}
     }
-    // Phase 5 row-aware refinement on `FormControl{Table, Some(b)}`:
-    // `.ВыделенныеСтроки` / `.ТекущаяСтрока` / `.ТекущиеДанные` and their
-    // English aliases override the platform's bare `Массив` (or row-shaped)
-    // property types. Non-refined properties fall through to the
-    // platform-property adapter below. Both run on the ORIGINAL receiver
-    // (not `effective_ty`) — FormControl never gets FormData projection or
-    // ThisObject coercion applied.
     if let Some(refined) = crate::form_items::refine_form_control_property(db, receiver, field_name)
     {
         return Some(refined);
@@ -198,27 +110,6 @@ fn lookup_field_inner(
     lookup_field_via_platform_property(db, receiver, field_name)
 }
 
-/// Resolve a field on a `TypeKind::Union` receiver via **intersection** over
-/// live arms.
-///
-/// Contract — distinct from [`crate::method_lookup::union_lookup`] which
-/// uses first-hit semantics:
-///
-/// - `Undefined` / `Null` arms are stripped (consistent with
-///   [`crate::field_enum::enumerate_fields`] and method lookup).
-/// - If **any** live arm is missing the field, the entire lookup returns
-///   `None`. Safe semantic for `x: A | B`: the field is reachable only
-///   if it exists on every possible runtime shape.
-/// - Single live arm short-circuits via a recursive `lookup_field` call
-///   so the arm's full dispatch pipeline (FormData projection,
-///   ThisObject coercion, FormControl refinement, …) runs again — the
-///   helper deliberately does not bypass the orchestrator for the
-///   degenerate one-arm case.
-/// - Multi-arm result merges per-arm `TypeId` via [`TypeKernelDb::union`]; the first
-///   arm's `name`/`name_en`/`origin` win (cohesion: the surface text
-///   stays stable). `is_readonly` is the **disjunction** —
-///   writeable iff EVERY arm is writeable, i.e. a single read-only arm
-///   makes the union read-only.
 fn lookup_field_in_union_intersection(
     db: &dyn TypeKernelDb,
     configs: &[VisibleConfig],
@@ -254,16 +145,6 @@ fn lookup_field_in_union_intersection(
     })
 }
 
-/// Resolve a field on a `TypeKind::MetadataRef` receiver via bilingual
-/// case-insensitive match over [`crate::field_enum::enumerate_fields`].
-///
-/// The enumerator is the source of truth for "what fields does an MDO
-/// receiver expose?" (standard + user attributes, tabular sections,
-/// register parts, `НомерСтроки` fall-through). This helper is the
-/// thin filter that turns the enumeration into a point lookup.
-///
-/// Caller is expected to pre-coerce `ThisObject` / project `FormData`
-/// before passing the receiver — see [`lookup_field`] orchestrator.
 fn lookup_field_on_metadata_ref(
     db: &dyn TypeKernelDb,
     configs: &[VisibleConfig],
@@ -277,21 +158,6 @@ fn lookup_field_on_metadata_ref(
     })
 }
 
-/// Resolve `<field>` on a `Ty::QueryResultSelection { projection: Some(_) }`
-/// receiver against the SDBL projection table.
-///
-/// Returns `None` when:
-/// - the receiver is not a projection-typed `QueryResultSelection`,
-/// - the projection is `None` (no SDBL trace available — falls through
-///   to the platform `ВыборкаИзРезультатаЗапроса` table for legacy
-///   behaviour),
-/// - the projection doesn't carry `field_name` (caller falls through to
-///   the platform table so `НомерСтроки` / `СледующаяСтрока` /
-///   `Уровень` still resolve).
-///
-/// Case-insensitive bilingual match: BSL field-access is case-folded
-/// the same way platform method lookup is. Same posture as
-/// [`lookup_field_on_metadata_ref`].
 fn lookup_field_in_query_projection(
     db: &dyn TypeKernelDb,
     receiver: TypeId,
@@ -299,46 +165,20 @@ fn lookup_field_in_query_projection(
 ) -> Option<FieldInfo> {
     let projection = match db.lookup_type(receiver) {
         TypeKind::QueryResultSelection(facet) => facet.projection.clone()?,
-        // Phase H Slice 3 — projected `ValueTableRow` mirrors the
-        // `QueryResultSelection` projection lookup so `Для Каждого
-        // Стр Из <ТЗ> → Стр.<column>` resolves through the SDBL
-        // projection slice.
         TypeKind::ValueTableRow(facet) => facet.projection.clone()?,
         _ => return None,
     };
     let needle = field_name.as_str().to_lowercase();
-    projection.fields.iter().find(|f| f.name.as_str().to_lowercase() == needle).map(|f| {
-        FieldInfo {
-            name: Name::new(f.name.as_str()),
-            name_en: None,
-            ty: f.ty,
-            value_ty: None,
-            // SDBL projection fields are not writeable through the
-            // selection cursor — `Выборка.X = ...` is a runtime error.
-            is_readonly: true,
-            // Projection fields surface as user-defined names (the
-            // SELECT alias or column ref the user wrote). `UserAttribute`
-            // origin gives them the right icon and sort band in
-            // completion. A dedicated `SdblProjectionField` variant
-            // can replace this once the IDE differentiates them.
-            origin: crate::field_enum::FieldOrigin::UserAttribute,
-        }
+    projection.fields.iter().find(|f| f.name.as_str().to_lowercase() == needle).map(|f| FieldInfo {
+        name: Name::new(f.name.as_str()),
+        name_en: None,
+        ty: f.ty,
+        value_ty: None,
+        is_readonly: true,
+        origin: crate::field_enum::FieldOrigin::UserAttribute,
     })
 }
 
-/// Resolve a field on every other receiver via the platform-property
-/// adapter.
-///
-/// `lookup_platform_property` itself decides whether the shape is
-/// supported — primitives and managers return `None` — so the wrapper
-/// is safe to call for any non-MetadataRef, non-Union receiver.
-///
-/// **Important:** takes the ORIGINAL `receiver_ty`, not the
-/// projected/coerced `effective_ty`. FormData projection and
-/// `ThisObject` coercion are MetadataRef-specific transforms and must
-/// not leak into the platform-property channel (e.g. a `FormControl`
-/// receiver must keep its `FormControl` identity through this fallback,
-/// not get projected away).
 fn lookup_field_via_platform_property(
     db: &dyn TypeKernelDb,
     receiver: TypeId,
@@ -964,10 +804,6 @@ mod tests {
 
     #[test]
     fn field_lookup_information_register_record_set_synthesizes_filter() {
-        // `<recordSet>.Отбор` must resolve to the synthetic
-        // `RegisterFilter` receiver pinned to the parent register
-        // flavour. The HBK has no `Отбор` property on RecordSet rows;
-        // synthesis lives in `enumerate_register_fields`.
         let mut config = Configuration::new("Test");
         config.add_register(register_with(
             "Курсы",
@@ -992,7 +828,6 @@ mod tests {
             ),
         );
 
-        // English alias must also work (бilingual contract).
         let info_en = lookup_field(&configs, &receiver, &Name::new("Filter"))
             .expect("English alias `.Filter` must resolve too");
         assert_eq!(info_en.ty, info.ty);
@@ -1000,10 +835,6 @@ mod tests {
 
     #[test]
     fn field_lookup_register_filter_dimension_resolves_as_filter_item() {
-        // Inside the synthetic Filter, each register dimension is a
-        // member typed as `Ty::PlatformObject("ЭлементОтбора")` so
-        // platform `FilterItem` methods (`Установить`, …) can apply.
-        // Resources / attributes are intentionally excluded.
         let mut config = Configuration::new("Test");
         config.add_register(register_with(
             "Курсы",
@@ -1029,7 +860,6 @@ mod tests {
             "Filter members must lower to platform `ЭлементОтбора` so FilterItem methods apply",
         );
 
-        // Resources are NOT exposed as Filter members (only dimensions).
         assert!(
             lookup_field(&configs, &filter_receiver, &Name::new("Курс")).is_none(),
             "resources must not appear as Filter members",
@@ -1038,11 +868,6 @@ mod tests {
 
     #[test]
     fn field_lookup_register_filter_dim_named_otbor_loses_to_synthetic() {
-        // Collision contract: a register dimension named `Отбор` must
-        // NOT shadow the synthetic `.Отбор` Filter property — 1С
-        // semantics give the platform property priority. The dimension
-        // remains reachable as `<recordSet>.Отбор.Отбор` (through the
-        // Filter member surface).
         let mut config = Configuration::new("Test");
         config.add_register(register_with(
             "РегСвед",
@@ -1065,7 +890,6 @@ mod tests {
             "synthetic Filter wins over a register dimension named `Отбор`",
         );
 
-        // Dimension stays reachable through the Filter receiver.
         let filter_receiver = metadata_ref(
             MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
             "РегСвед",
@@ -1099,13 +923,6 @@ mod tests {
 
     #[test]
     fn field_lookup_information_register_record_set_pulls_platform_properties() {
-        // After the html-parser fix lets composite-type properties land
-        // in `platform_data.json`, the field enumerator must surface them
-        // on every register record-set receiver. Pin three of the seven
-        // properties HBK declares for `InformationRegisterRecordSet.<Имя>`:
-        // - `Записывать` / `Write` (Boolean)
-        // - `ДополнительныеСвойства` / `AdditionalProperties` (Структура)
-        // - `ЗаписьИсторииДанных` / `WriteDataHistory` (Boolean)
         let mut config = Configuration::new("Test");
         config.add_register(register_with(
             "Курсы",
@@ -1124,16 +941,11 @@ mod tests {
                 "platform property `{prop}` must surface on InformationRegisterRecordSet",
             );
         }
-        // Bilingual contract: English alias resolves too.
         assert!(
             lookup_field(&configs, &receiver, &Name::new("Write")).is_some(),
             "English alias `Write` must resolve via bilingual rsplit on english_name",
         );
 
-        // Accounting-flavour-only property (`БлокироватьДляИзменения` /
-        // `LockForUpdate`) must NOT appear on InformationRegister, but
-        // MUST appear on AccountingRegisterRecordSet — proves per-flavour
-        // platform-prefix routing.
         assert!(
             lookup_field(&configs, &receiver, &Name::new("БлокироватьДляИзменения")).is_none(),
             "Accounting-only property must not leak into InformationRegister surface",
@@ -1142,11 +954,6 @@ mod tests {
 
     #[test]
     fn field_lookup_accounting_register_record_set_has_lock_for_update() {
-        // Cross-flavour pin: AccountingRegisterRecordSet's HBK page declares
-        // `БлокироватьДляИзменения` / `LockForUpdate`, which is absent on
-        // every other record-set flavour. The platform-prefix routing in
-        // `enumerate_register_fields` must thread the right prefix per
-        // receiver kind so these flavour-specific properties surface.
         let mut config = Configuration::new("Test");
         config.add_register(register_with(
             "Хозрасчетный",
@@ -1170,11 +977,6 @@ mod tests {
 
     #[test]
     fn field_lookup_register_filter_synthesized_for_all_record_set_flavours() {
-        // The synthetic `.Отбор` push must fire for every register
-        // record-set kind we declare today (Information / Accumulation
-        // / Accounting / Calculation), with the parent flavour
-        // threaded into RegisterFilter so dimension lookup hits the
-        // right register.
         let mut config = Configuration::new("Test");
         for (name, mdo_type) in [
             ("РегСвед", MdoType::InformationRegister),
@@ -1275,9 +1077,6 @@ mod tests {
 
     #[test]
     fn lookup_field_on_union_with_undefined_resolves_to_arm() {
-        // `НайтиСтроки → Union(TabularSectionRow, Undefined)` — `Undefined`
-        // is filtered out, the single live arm is consulted directly so the
-        // semantic type stays sharp.
         let mut ts = TabularSection::new(Uuid::new_v4(), "Товары");
         ts.set_attributes(vec![TabularSectionAttribute::new(
             Uuid::new_v4(),
@@ -1307,11 +1106,6 @@ mod tests {
 
     #[test]
     fn lookup_field_on_union_intersection_requires_field_in_every_arm() {
-        // Two distinct catalogs sharing the standard attribute `Код` and
-        // each carrying a unique custom attribute. Receiver is
-        // `Union(CatalogRef.A, CatalogRef.B)`:
-        //   - `Код` exists in both → resolves.
-        //   - `OnlyInA` exists only in A → must NOT resolve (intersection).
         let mut config = Configuration::new("Test");
         config.add_metadata_object(catalog(
             "A",
@@ -1352,22 +1146,6 @@ mod tests {
 
     #[test]
     fn lookup_field_on_union_intersection_readonly_merges_via_or() {
-        // OR-merge semantic of `is_readonly` in union intersection
-        // (`lookup_field_in_union_intersection` cohesion rule).
-        //
-        // Construction:
-        //   - arm A = `CatalogObject.A` without a user
-        //     `ДополнительныеСвойства` → HBK platform-property cascade
-        //     surfaces the field as `is_readonly = true`.
-        //   - arm B = `CatalogObject.B` WITH a user attribute named
-        //     `ДополнительныеСвойства` (not a recognised standard, so
-        //     `classify_attr` returns `None` → `UserAttribute, false`).
-        //     `push_unique` blocks the HBK fall-through behind the
-        //     user version, leaving `is_readonly = false`.
-        //
-        // Union merge MUST be `true` (writeable iff EVERY arm writeable —
-        // a single read-only arm makes the union read-only). If the
-        // merge ever flips to AND, this assertion fires.
         let mut config = Configuration::new("Test");
         config.add_metadata_object(catalog("A", vec![]));
         config.add_metadata_object(catalog(
@@ -1388,20 +1166,8 @@ mod tests {
         );
     }
 
-    // -------------------------------------------------------------
-    // Phase A: HBK platform-property cascade on *Object / *Ref MDO
-    // receivers. Symmetric with
-    // `field_lookup_information_register_record_set_pulls_platform_properties`
-    // and pinned per `crates/hir-def/src/ty.rs::MetadataKind::platform_prefix`.
-    // -------------------------------------------------------------
-
     #[test]
     fn field_lookup_document_object_pulls_platform_properties() {
-        // HBK lists 12 properties on `DocumentObject.<Имя>`. Pin the seven
-        // that were invisible before the cascade — they cannot come from
-        // `standard_mdo_attributes::DOCUMENT_OBJECT` (which only specs
-        // Ref/DeletionMark/Number/Date/Posted) and therefore exercise the
-        // new `push_platform_prefix_properties` path.
         let mut config = Configuration::new("Test");
         config.add_metadata_object(document("ПКО", vec![]));
         let configs = wrap(config);
@@ -1427,8 +1193,6 @@ mod tests {
             );
         }
 
-        // Bilingual: English alias resolves via `rsplit('.').next()` on
-        // the composite `english_name` shape.
         assert!(
             lookup_field(&configs, &receiver, &Name::new("AdditionalProperties")).is_some(),
             "English alias AdditionalProperties must resolve through bilingual rsplit",
@@ -1437,17 +1201,6 @@ mod tests {
 
     #[test]
     fn field_lookup_this_object_is_typed_metadata_ref_not_generic_platform_object() {
-        // HBK declares `DocumentObject.<Имя>.ЭтотОбъект` with property type
-        // `ДокументОбъект` (the base name, NOT the composite). Without
-        // specialization the cascade would return
-        // `Ty::PlatformObject("ДокументОбъект")` — chain typing through
-        // `<Doc>.ЭтотОбъект.Записать()` would then break because the
-        // receiver type lost its MDO anchor.
-        //
-        // `specialize_self_ref_ty` promotes the self-base name to a
-        // concrete `Ty::MetadataRef` pinned to this receiver's `mdo_name`.
-        // Pinned both for Document (Object self) and Catalog (Object self),
-        // and for `Ссылка` cascade-side typing (Ref of self).
         let mut config = Configuration::new("Test");
         config.add_metadata_object(document("ПКО", vec![]));
         config.add_metadata_object(catalog("Номенклатура", vec![]));
@@ -1471,10 +1224,6 @@ mod tests {
             "CatalogObject.ЭтотОбъект must specialize to typed self",
         );
 
-        // `Ссылка` on Object: HBK type `ДокументСсылка` → specialize to
-        // MetadataRef{DocumentRef, ПКО}. (Note: when xml_parser
-        // materialises `Ссылка` into mdo.attributes, that wins over
-        // cascade. Here `vec![]` means cascade is the source.)
         let r#ref = lookup_field(&configs, &doc, &Name::new("Ссылка"))
             .expect("Ссылка resolves on DocumentObject via cascade");
         assert_eq!(
@@ -1486,17 +1235,6 @@ mod tests {
 
     #[test]
     fn field_lookup_this_object_specializes_across_yo_spelling_difference() {
-        // HBK ships `ReportObject.<Имя>.ЭтотОбъект` with declared type
-        // `ОтчетОбъект` (no `ё`), while `MetadataKind::display_label`
-        // returns `ОтчётОбъект` (with `ё`). Exact-string comparison
-        // would silently fail and leave `ЭтотОбъект` as a generic
-        // `Ty::PlatformObject`. `eq_yo_insensitive` in
-        // `specialize_self_ref_ty` folds the spellings so the
-        // specialization fires.
-        //
-        // Also pin DataProcessor (no ё mismatch — `ОбработкаОбъект`
-        // matches both sides directly) to ensure the family coverage
-        // is symmetric.
         let mut config = Configuration::new("Test");
         config.add_metadata_object(mdo_of(MdoType::Report, "ОстаткиТоваров", vec![]));
         config.add_metadata_object(mdo_of(MdoType::DataProcessor, "Обработка1", vec![]));
@@ -1539,11 +1277,6 @@ mod tests {
         assert!(lookup_field(&configs, &receiver, &Name::new("ЭтотОбъект")).is_some());
     }
 
-    /// Seed a `Document "ПКО"` with the standard attributes that
-    /// `bsl-metadata::xml_parser::standard_attributes` would materialise
-    /// for an Object-view spec at parse time. Direct `MetadataObject::new`
-    /// does not run that adapter, so tests that pin the
-    /// `mdo.attributes` → HBK cascade priority must seed manually.
     fn document_with_standard_attrs(name: &str) -> MetadataObject {
         document(
             name,
@@ -1562,18 +1295,6 @@ mod tests {
 
     #[test]
     fn field_lookup_document_object_priority_pin_keeps_typed_standard_attrs() {
-        // Priority of `push_unique`: `mdo.attributes` (typed standard attrs
-        // from the spec) push first, HBK cascade pushes last. Where the spec
-        // materializes the attribute (`PresenceCondition::Always`), its type
-        // must win over the HBK fall-through.
-        //
-        // Regression guard: if the push order ever flips, `Дата` could
-        // surface as a `Ty::PlatformObject(...)` rather than `Ty::Date`.
-        //
-        // `Номер` is intentionally NOT pinned: it is `HasNumber`-gated, so
-        // a stripped-down test config leaves it unmaterialized and the
-        // HBK fall-through (declared as `Число|Строка`) wins — that's
-        // documented Phase A behavior, deferred to B1.
         let mut config = Configuration::new("Test");
         config.add_metadata_object(document_with_standard_attrs("ПКО"));
         let configs = wrap(config);
@@ -1600,25 +1321,12 @@ mod tests {
 
     #[test]
     fn field_lookup_document_ref_caveats_and_cascade() {
-        // DocumentRef has a separate HBK prefix (`DocumentRef.<Имя>`) and a
-        // smaller property surface — no `ДополнительныеСвойства`,
-        // no `Движения`, no `ЭтотОбъект`.
-        //
-        // Pins two invariants:
-        //   1. `platform_prefix()` keys differentiate Object vs Ref —
-        //      Object-only properties must NOT leak onto Ref.
-        //   2. B1 caveat: when the configuration's `mdo.attributes` seeds
-        //      `Дата` (Object-view spec, writable), that entry wins
-        //      `push_unique` even on a Ref receiver — so the HBK cascade
-        //      cannot uplift `Дата.is_readonly = true` on DocumentRef
-        //      until the spec gets a Ref-view variant (see B1).
         let mut config = Configuration::new("Test");
         config.add_metadata_object(document_with_standard_attrs("ПКО"));
         let configs = wrap(config);
 
         let receiver = metadata_ref(MetadataKind::DocumentRef, "ПКО");
 
-        // 1) Object-only HBK properties must NOT appear on Ref.
         assert!(
             lookup_field(&configs, &receiver, &Name::new("ДополнительныеСвойства")).is_none(),
             "Object-only property must not leak into DocumentRef surface",
@@ -1632,17 +1340,11 @@ mod tests {
             "ЭтотОбъект is DocumentObject-only per HBK",
         );
 
-        // 2) HBK property declared only on DocumentRef must surface
-        // via the cascade (no mdo.attributes collision).
         assert!(
             lookup_field(&configs, &receiver, &Name::new("ВерсияДанных")).is_some(),
             "DocumentRef.ВерсияДанных must surface via HBK cascade",
         );
 
-        // 3) B1 caveat: standard `Дата` collides with seeded Object-view
-        // mdo.attributes entry → mdo wins, so is_readonly is the
-        // Object-view value (writable). When B1 introduces Ref-view spec
-        // entries, this assertion flips to `is_readonly`.
         let date = lookup_field(&configs, &receiver, &Name::new("Дата"))
             .expect("standard Дата resolves on DocumentRef");
         assert!(
@@ -1653,22 +1355,7 @@ mod tests {
 
     #[test]
     fn field_lookup_cascade_respects_presence_conditional_standard_attrs() {
-        // Codex stop-time review pin: the HBK cascade must NOT surface a
-        // standard attribute whose presence the spec gates on a
-        // configuration property (`HasCode`, `HasNumber`, `Hierarchical`,
-        // `HasOwners`, `IsPeriodic`).
-        //
-        // A `Document` with no `Номер` materialised in `mdo.attributes`
-        // (e.g. the config has no `NumberLength`) must NOT see `Номер`
-        // bleeding in from HBK's `DocumentObject.<Имя>.Номер` declaration
-        // — the spec is the sole arbiter of presence.
-        //
-        // Same for `Код` on a catalog without `CodeLength`, `ЭтоГруппа`
-        // / `Родитель` on a non-hierarchical catalog, `Владелец` on a
-        // catalog without owners.
         let mut config = Configuration::new("Test");
-        // Intentionally NO standard attrs seeded: simulates a doc/catalog
-        // whose XML did not configure HasNumber/HasCode/Hierarchical/HasOwners.
         config.add_metadata_object(document("ПКО", vec![]));
         config.add_metadata_object(catalog("Номенклатура", vec![]));
         let configs = wrap(config);
@@ -1697,7 +1384,6 @@ mod tests {
             "Владелец must NOT leak from HBK when the catalog has no Owners",
         );
 
-        // Counter-pin: non-spec HBK properties still come through.
         assert!(
             lookup_field(&configs, &cat, &Name::new("ДополнительныеСвойства")).is_some(),
             "non-spec HBK properties remain visible after the gate",
@@ -1706,12 +1392,6 @@ mod tests {
 
     #[test]
     fn field_lookup_non_mdo_receivers_unaffected_by_mdo_cascade() {
-        // Negative pin: `MetadataRef{RegisterFilter, ..}` and
-        // `MetadataRef{TabularSectionRow, ..}` dispatch to their own
-        // enumerators (`enumerate_filter_fields` / `enumerate_tabular_row_fields`,
-        // see field_enum.rs:127 and field_enum.rs:131) and never visit
-        // `enumerate_mdo_fields`. They must NOT surface object-flavoured
-        // HBK properties.
         let mut config = Configuration::new("Test");
         config.add_register(register_with(
             "РегСвед",
@@ -1752,16 +1432,10 @@ mod tests {
         );
     }
 
-    // ============================================================
-    // SDBL projection-branch lookup (Phase 1.3 Slice 2)
-    // ============================================================
-
     fn projection_with_two_fields(
         db: &dyn TypeKernelDb,
     ) -> std::sync::Arc<bsl_types::kind::Projection> {
         use bsl_types::kind::{ProjectionField, ProjectionFieldSource, ProjectionOrigin};
-        // Manually-constructed projection mirroring what the bridge
-        // produces for `SELECT Код AS КодТов, Наименование FROM …`.
         std::sync::Arc::new(bsl_types::kind::Projection::new(
             std::sync::Arc::from([
                 ProjectionField::new(
@@ -1795,8 +1469,6 @@ mod tests {
 
     #[test]
     fn sdbl_projection_field_lookup_is_case_insensitive() {
-        // BSL field access is case-folded; the projection lookup
-        // matches the same way platform field/method lookup does.
         let db = InMemoryDb::new();
         let receiver = db.query_result_selection(
             Some(projection_with_two_fields(&db)),
@@ -1808,13 +1480,6 @@ mod tests {
 
     #[test]
     fn sdbl_projection_falls_through_to_platform_on_miss() {
-        // Field not in the projection — must fall through to the
-        // platform `ВыборкаИзРезультатаЗапроса` table so platform
-        // properties like `НомерСтроки` still resolve.
-        // (The exact platform property must exist in `platform_data`;
-        // we don't pin the lookup result here — only that the
-        // projection-branch returned `None` so the orchestrator
-        // continued to the platform fallback.)
         let db = InMemoryDb::new();
         let receiver_id = db.query_result_selection(
             Some(projection_with_two_fields(&db)),
@@ -1829,12 +1494,6 @@ mod tests {
 
     #[test]
     fn sdbl_projection_lookup_no_op_for_none_projection() {
-        // `QueryResultSelection{None}` carries no projection (dynamic
-        // query text or pre-Phase-1.3b lift). The projection branch
-        // must return `None` immediately so the orchestrator falls
-        // through to platform property lookup — preserving the
-        // legacy `Ty::PlatformObject` behaviour for tests that pin
-        // the chain without any SDBL trace.
         let db = InMemoryDb::new();
         let receiver_id = db.query_result_selection(None, ProjectionSource::Unknown);
         assert!(lookup_field_in_query_projection(&db, receiver_id, &Name::new("Имя")).is_none());
@@ -1842,10 +1501,6 @@ mod tests {
 
     #[test]
     fn sdbl_projection_lookup_no_op_for_non_selection_receiver() {
-        // A different receiver shape that happens to carry a
-        // projection (e.g. `Ty::Query{Some(p)}` after Phase 1.3b)
-        // must NOT be served by this branch — the projection
-        // surface only exists on the *selection* cursor.
         let db = InMemoryDb::new();
         let receiver_id = db.query(Arc::from([Some(projection_with_two_fields(&db))]));
         assert!(lookup_field_in_query_projection(&db, receiver_id, &Name::new("КодТов")).is_none());

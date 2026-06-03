@@ -1,33 +1,17 @@
-//! Diagnostics configuration state management.
-//!
-//! Methods on `GlobalState` for managing diagnostics configuration:
-//! - Loading config from project settings
-//! - Converting to Salsa-compatible format
-//! - Cache invalidation via generation counter
-
 use base_db::{DiagnosticsConfigId, DiagnosticsConfigInput, Locale};
 
 use crate::global_state::GlobalState;
 use crate::locale::resolve_locale;
 
 impl GlobalState {
-    /// Gets the Salsa-interned diagnostics config ID.
-    ///
-    /// This ID is used in the `file_diagnostics_query` for Salsa caching.
-    /// The same config produces the same ID (Salsa interning).
     pub fn diagnostics_config_id(&self) -> DiagnosticsConfigId<'_> {
         DiagnosticsConfigId::new(self.analysis_host.raw_database(), self.diagnostics_config.clone())
     }
 
-    /// Gets a reference to the current diagnostics config.
     pub fn diagnostics_config(&self) -> &DiagnosticsConfigInput {
         &self.diagnostics_config
     }
 
-    /// Updates diagnostics config from project settings.
-    ///
-    /// Called when project is loaded or config file changes.
-    /// This invalidates all cached diagnostics (new config ID = new hash).
     pub fn update_diagnostics_config(&mut self) {
         let project_locale = self.project.as_ref().and_then(|p| Self::project_locale(&p.config));
         let locale = resolve_locale(project_locale, self.lsp_locale);
@@ -62,32 +46,15 @@ impl GlobalState {
         }
     }
 
-    /// Resolve the project-level output locale from `[output] display_language`.
-    ///
-    /// Thin delegator to [`project_model::OutputConfig::resolve_locale`] —
-    /// the actual parsing/warning lives in `project-model` so the streaming
-    /// CLI path uses the exact same logic.
     fn project_locale(config: &project_model::ProjectConfig) -> Option<Locale> {
         config.output.resolve_locale()
     }
 
-    /// Converts project diagnostics config to hashable DiagnosticsConfigInput.
-    ///
-    /// Deserializes the raw JSON into `ide::DiagnosticsConfig`,
-    /// then converts to the Salsa-compatible `DiagnosticsConfigInput`.
     fn config_from_project(
         project: &project_model::Project,
         locale: Locale,
     ) -> DiagnosticsConfigInput {
-        let config: ide::DiagnosticsConfig = match serde_json::from_value(
-            project.config.diagnostics.clone(),
-        ) {
-            Ok(config) => config,
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to deserialize diagnostics config, using defaults");
-                ide::DiagnosticsConfig::default()
-            }
-        };
+        let config = ide::DiagnosticsConfig::from_project_json(&project.config.diagnostics, locale);
 
         let disabled: Vec<String> = config.disabled.iter().map(|code| code.to_string()).collect();
         let enabled: Vec<String> = config.enabled.iter().map(|code| code.to_string()).collect();

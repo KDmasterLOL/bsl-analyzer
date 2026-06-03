@@ -1,14 +1,11 @@
 use crate::hir::{JoinType, SdblHir, SdblPackage};
 use crate::lower::lower_sdbl_to_hir;
 
-/// Helper to extract single query HIR for tests (most tests have single query).
 fn single_query_hir(package: &SdblPackage) -> &SdblHir {
     assert_eq!(package.queries().len(), 1, "Expected single query in package");
     &package.queries()[0].hir
 }
 
-/// Helper to create AttributeType from string for tests.
-/// Supports simplified type strings like "Boolean", "TaskRef.Задача", etc.
 fn parse_attr_type_for_test(type_str: &str) -> bsl_metadata::AttributeType {
     use bsl_metadata::{AttributeType, MdoType};
 
@@ -22,7 +19,6 @@ fn parse_attr_type_for_test(type_str: &str) -> bsl_metadata::AttributeType {
             AttributeType::Ref { mdo_type: MdoType::Task, name: name.to_string() }
         }
         s if s.contains('.') => {
-            // Parse "Задача.ЗадачаИсполнителя" as Task.ЗадачаИсполнителя
             let parts: Vec<_> = s.split('.').collect();
             if parts.len() == 2 {
                 let mdo_type = match parts[0] {
@@ -68,35 +64,30 @@ fn test_source_map_collects_keywords() {
 
     let sm = &result.source_map;
 
-    // Should collect SELECT, FROM, WHERE keywords
     assert!(
         sm.clause_keywords.len() >= 3,
         "Expected at least 3 clause keywords (SELECT, FROM, WHERE), got {}",
         sm.clause_keywords.len()
     );
 
-    // Verify SELECT keyword
     let select_token = sm
         .clause_keywords
         .iter()
         .find(|t| t.text.to_uppercase() == "SELECT" || t.text.to_uppercase() == "ВЫБРАТЬ");
     assert!(select_token.is_some(), "Should find SELECT keyword");
 
-    // Verify FROM keyword
     let from_token = sm
         .clause_keywords
         .iter()
         .find(|t| t.text.to_uppercase() == "FROM" || t.text.to_uppercase() == "ИЗ");
     assert!(from_token.is_some(), "Should find FROM keyword");
 
-    // Verify WHERE keyword
     let where_token = sm
         .clause_keywords
         .iter()
         .find(|t| t.text.to_uppercase() == "WHERE" || t.text.to_uppercase() == "ГДЕ");
     assert!(where_token.is_some(), "Should find WHERE keyword");
 
-    // Should collect = operator
     assert!(
         !sm.operators.is_empty(),
         "Expected at least 1 operator (=), got {}",
@@ -112,7 +103,6 @@ fn test_source_map_collects_operators() {
 
     let sm = &result.source_map;
 
-    // Should collect operators: >, AND, <=
     assert!(
         sm.operators.len() >= 3,
         "Expected at least 3 operators (>, AND, <=), got {}",
@@ -122,14 +112,10 @@ fn test_source_map_collects_operators() {
 
 #[test]
 fn test_source_map_collects_join_keywords() {
-    // Note: Parser/lowering may have limited JOIN support
-    // Skip this test for now as JOIN parsing is not fully implemented
-    // TODO: Re-enable when JOIN parsing is complete
     let result = lower_query_with_source_map("SELECT Код FROM Справочник.Товары");
 
     let sm = &result.source_map;
 
-    // Basic test: just verify source map infrastructure works
     assert!(sm.clause_keywords.len() >= 2, "Should have SELECT and FROM keywords");
 }
 
@@ -141,7 +127,6 @@ fn test_source_map_collects_union_keywords() {
 
     let sm = &result.source_map;
 
-    // Should collect UNION and ALL keywords
     assert!(
         sm.modifiers.len() >= 2,
         "Expected at least 2 modifiers (UNION, ALL), got {}",
@@ -188,7 +173,6 @@ fn test_totals_by_only_hierarchy_source_map() {
 
 #[test]
 fn test_aliased_table() {
-    // Note: Parser may not handle AS alias correctly - just verify FROM clause exists
     let hir = lower_query("SELECT Код FROM Справочник.Валюты");
 
     assert_eq!(hir.from.len(), 1);
@@ -209,7 +193,6 @@ fn test_join_detection() {
 fn test_select_fields() {
     let hir = lower_query("SELECT Код, Наименование FROM Справочник.Валюты");
 
-    // Verify we have fields in SELECT clause
     assert!(!hir.select.fields.is_empty());
 }
 
@@ -218,14 +201,12 @@ fn test_source_map_collects_aggregate_functions() {
     let query = "SELECT SUM(Price), AVG(Quantity), COUNT(*), MIN(Date), MAX(Total) FROM Products";
     let result = lower_query_with_source_map(query);
 
-    // Should collect all 5 aggregate function names
     assert!(
         result.source_map.aggregate_functions.len() >= 5,
         "Expected at least 5 aggregate functions, got {}",
         result.source_map.aggregate_functions.len()
     );
 
-    // Verify function names
     let func_names: Vec<String> =
         result.source_map.aggregate_functions.iter().map(|t| t.text.to_string()).collect();
     assert!(func_names.contains(&"SUM".to_string()));
@@ -240,14 +221,12 @@ fn test_source_map_collects_aggregate_functions_russian() {
     let query = "ВЫБРАТЬ СУММА(Цена), СРЕДНЕЕ(Количество), КОЛИЧЕСТВО(*) ИЗ Товары";
     let result = lower_query_with_source_map(query);
 
-    // Should collect 3 aggregate function names (Russian)
     assert!(
         result.source_map.aggregate_functions.len() >= 3,
         "Expected at least 3 aggregate functions, got {}",
         result.source_map.aggregate_functions.len()
     );
 
-    // Verify function names
     let func_names: Vec<String> =
         result.source_map.aggregate_functions.iter().map(|t| t.text.to_string()).collect();
     assert!(func_names.contains(&"СУММА".to_string()));
@@ -260,7 +239,6 @@ fn test_source_map_collects_is_null_keywords() {
     let query = "SELECT * FROM Products WHERE Price IS NULL";
     let result = lower_query_with_source_map(query);
 
-    // Should collect IS and NULL keywords
     let special_keywords: Vec<String> =
         result.source_map.special_keywords.iter().map(|t| t.text.to_string()).collect();
 
@@ -279,7 +257,6 @@ fn test_source_map_collects_is_not_null_keywords() {
     let query = "SELECT * FROM Products WHERE Price IS NOT NULL";
     let result = lower_query_with_source_map(query);
 
-    // Should collect IS, NOT, and NULL keywords
     let special_keywords: Vec<String> =
         result.source_map.special_keywords.iter().map(|t| t.text.to_string()).collect();
     let operators: Vec<String> =
@@ -304,7 +281,6 @@ fn test_source_map_collects_is_null_russian() {
     let query = "ВЫБРАТЬ * ИЗ Товары ГДЕ Цена ЕСТЬ NULL";
     let result = lower_query_with_source_map(query);
 
-    // Should collect ЕСТЬ and NULL keywords (Russian IS NULL)
     let special_keywords: Vec<String> =
         result.source_map.special_keywords.iter().map(|t| t.text.to_string()).collect();
 
@@ -323,7 +299,6 @@ fn test_source_map_collects_in_keyword() {
     let query = "SELECT * FROM Products WHERE Type IN (1, 2, 3)";
     let result = lower_query_with_source_map(query);
 
-    // Should collect IN keyword
     let special_keywords: Vec<String> =
         result.source_map.special_keywords.iter().map(|t| t.text.to_string()).collect();
 
@@ -338,7 +313,6 @@ fn test_source_map_collects_in_keyword_russian() {
     let query = "ВЫБРАТЬ * ИЗ Товары ГДЕ Тип В (1, 2, 3)";
     let result = lower_query_with_source_map(query);
 
-    // Should collect В keyword (Russian IN)
     let special_keywords: Vec<String> =
         result.source_map.special_keywords.iter().map(|t| t.text.to_string()).collect();
 
@@ -353,11 +327,9 @@ fn test_in_expression_value_list() {
     let query = "SELECT * FROM Products WHERE Type IN (1, 2, 3)";
     let result = lower_query_with_source_map(query);
 
-    // Verify HIR contains IN expression
     let hir = single_query_hir(&result);
     assert!(hir.where_clause.is_some(), "Expected WHERE clause");
 
-    // Check that IN keyword is collected
     let special_keywords: Vec<String> =
         result.source_map.special_keywords.iter().map(|t| t.text.to_string()).collect();
     assert!(special_keywords.iter().any(|k| k.eq_ignore_ascii_case("IN")));
@@ -368,7 +340,6 @@ fn test_source_map_collects_distinct_keyword() {
     let query = "SELECT DISTINCT Name FROM Products";
     let result = lower_query_with_source_map(query);
 
-    // Should collect DISTINCT keyword
     let modifiers: Vec<String> =
         result.source_map.modifiers.iter().map(|t| t.text.to_string()).collect();
 
@@ -377,7 +348,6 @@ fn test_source_map_collects_distinct_keyword() {
         "Expected DISTINCT keyword in modifiers"
     );
 
-    // Check HIR
     assert!(single_query_hir(&result).select.distinct);
 }
 
@@ -386,7 +356,6 @@ fn test_source_map_collects_distinct_keyword_russian() {
     let query = "ВЫБРАТЬ РАЗЛИЧНЫЕ Наименование ИЗ Товары";
     let result = lower_query_with_source_map(query);
 
-    // Should collect РАЗЛИЧНЫЕ keyword (Russian DISTINCT)
     let modifiers: Vec<String> =
         result.source_map.modifiers.iter().map(|t| t.text.to_string()).collect();
 
@@ -395,7 +364,6 @@ fn test_source_map_collects_distinct_keyword_russian() {
         "Expected РАЗЛИЧНЫЕ keyword in modifiers"
     );
 
-    // Check HIR
     assert!(single_query_hir(&result).select.distinct);
 }
 
@@ -404,7 +372,6 @@ fn test_source_map_collects_top_keyword() {
     let query = "SELECT TOP 10 Name FROM Products";
     let result = lower_query_with_source_map(query);
 
-    // Should collect TOP keyword
     let modifiers: Vec<String> =
         result.source_map.modifiers.iter().map(|t| t.text.to_string()).collect();
 
@@ -413,7 +380,6 @@ fn test_source_map_collects_top_keyword() {
         "Expected TOP keyword in modifiers"
     );
 
-    // Check HIR
     assert_eq!(single_query_hir(&result).select.top, Some(10));
 }
 
@@ -422,7 +388,6 @@ fn test_source_map_collects_top_keyword_russian() {
     let query = "ВЫБРАТЬ ПЕРВЫЕ 5 Наименование ИЗ Товары";
     let result = lower_query_with_source_map(query);
 
-    // Should collect ПЕРВЫЕ keyword (Russian TOP)
     let modifiers: Vec<String> =
         result.source_map.modifiers.iter().map(|t| t.text.to_string()).collect();
 
@@ -431,7 +396,6 @@ fn test_source_map_collects_top_keyword_russian() {
         "Expected ПЕРВЫЕ keyword in modifiers"
     );
 
-    // Check HIR
     assert_eq!(single_query_hir(&result).select.top, Some(5));
 }
 
@@ -440,14 +404,12 @@ fn test_distinct_and_top_together() {
     let query = "SELECT DISTINCT TOP 20 Name FROM Products";
     let result = lower_query_with_source_map(query);
 
-    // Should collect both DISTINCT and TOP keywords
     let modifiers: Vec<String> =
         result.source_map.modifiers.iter().map(|t| t.text.to_string()).collect();
 
     assert!(modifiers.iter().any(|k| k.eq_ignore_ascii_case("DISTINCT")));
     assert!(modifiers.iter().any(|k| k.eq_ignore_ascii_case("TOP")));
 
-    // Check HIR
     assert!(single_query_hir(&result).select.distinct);
     assert_eq!(single_query_hir(&result).select.top, Some(20));
 }
@@ -457,7 +419,6 @@ fn test_source_map_collects_between_keyword() {
     let query = "SELECT * FROM Products WHERE Price BETWEEN 100 AND 500";
     let result = lower_query_with_source_map(query);
 
-    // Should collect BETWEEN keyword
     let special_keywords: Vec<String> =
         result.source_map.special_keywords.iter().map(|t| t.text.to_string()).collect();
 
@@ -472,7 +433,6 @@ fn test_source_map_collects_between_keyword_russian() {
     let query = "ВЫБРАТЬ * ИЗ Товары ГДЕ Цена МЕЖДУ 100 И 500";
     let result = lower_query_with_source_map(query);
 
-    // Should collect МЕЖДУ keyword (Russian BETWEEN)
     let special_keywords: Vec<String> =
         result.source_map.special_keywords.iter().map(|t| t.text.to_string()).collect();
 
@@ -487,7 +447,6 @@ fn test_source_map_collects_like_keyword() {
     let query = "SELECT * FROM Products WHERE Name LIKE 'Apple%'";
     let result = lower_query_with_source_map(query);
 
-    // Should collect LIKE keyword
     let special_keywords: Vec<String> =
         result.source_map.special_keywords.iter().map(|t| t.text.to_string()).collect();
 
@@ -502,7 +461,6 @@ fn test_source_map_collects_like_keyword_russian() {
     let query = "ВЫБРАТЬ * ИЗ Товары ГДЕ Наименование ПОДОБНО 'Яблоко%'";
     let result = lower_query_with_source_map(query);
 
-    // Should collect ПОДОБНО keyword (Russian LIKE)
     let special_keywords: Vec<String> =
         result.source_map.special_keywords.iter().map(|t| t.text.to_string()).collect();
 
@@ -517,7 +475,6 @@ fn test_source_map_collects_like_escape_keyword() {
     let query = "SELECT * FROM Products WHERE Name LIKE 'App!_le%' ESCAPE '!'";
     let result = lower_query_with_source_map(query);
 
-    // Should collect LIKE keyword (ESCAPE might not be lowered if parser doesn't support it fully)
     let special_keywords: Vec<String> =
         result.source_map.special_keywords.iter().map(|t| t.text.to_string()).collect();
 
@@ -525,20 +482,15 @@ fn test_source_map_collects_like_escape_keyword() {
         special_keywords.iter().any(|k| k.eq_ignore_ascii_case("LIKE")),
         "Expected LIKE keyword"
     );
-    // ESCAPE keyword collection depends on parser support - test may need adjustment
-    if special_keywords.iter().any(|k| k.eq_ignore_ascii_case("ESCAPE")) {
-        // Great, ESCAPE is supported
-    }
+    if special_keywords.iter().any(|k| k.eq_ignore_ascii_case("ESCAPE")) {}
 }
 
 #[test]
 fn test_case_expression_parsed() {
-    // First test if CASE is even being parsed
     let query = "SELECT CASE Status WHEN 1 THEN 'Active' END FROM Products";
     let parse = parser::parse_sdbl(query);
     let tree = format!("{:#?}", parse.syntax_node());
 
-    // Check if CASE node exists
     assert!(tree.contains("SDBL_CASE_EXPR"), "CASE expression not in parse tree");
 }
 
@@ -551,7 +503,6 @@ fn test_source_map_collects_case_keywords() {
     let special_keywords: Vec<String> =
         result.source_map.special_keywords.iter().map(|t| t.text.to_string()).collect();
 
-    // Should collect CASE, WHEN (x2), THEN (x2), ELSE, END
     assert!(
         special_keywords.iter().any(|k| k.eq_ignore_ascii_case("CASE")),
         "Expected CASE keyword, got: {:?}",
@@ -580,7 +531,6 @@ fn test_source_map_collects_case_searched() {
     let special_keywords: Vec<String> =
         result.source_map.special_keywords.iter().map(|t| t.text.to_string()).collect();
 
-    // Searched CASE (no operand)
     assert!(
         special_keywords.iter().any(|k| k.eq_ignore_ascii_case("CASE")),
         "Expected CASE keyword"
@@ -599,7 +549,6 @@ fn test_source_map_collects_case_keywords_russian() {
     let special_keywords: Vec<String> =
         result.source_map.special_keywords.iter().map(|t| t.text.to_string()).collect();
 
-    // Should collect ВЫБОР, КОГДА (x2), ТОГДА (x2), ИНАЧЕ, КОНЕЦ
     assert!(
         special_keywords.iter().any(|k| k.eq_ignore_ascii_case("ВЫБОР")),
         "Expected ВЫБОР keyword"
@@ -627,7 +576,6 @@ fn test_in_expression_not_in() {
     let query = "SELECT * FROM Products WHERE Type NOT IN (1, 2)";
     let result = lower_query_with_source_map(query);
 
-    // NOT IN is now parsed as a single IN_EXPR with negated flag
     let special_keywords: Vec<String> =
         result.source_map.special_keywords.iter().map(|t| t.text.to_string()).collect();
     let operators: Vec<String> =
@@ -681,34 +629,28 @@ fn test_no_into_clause() {
 
 #[test]
 fn test_temp_table_in_union() {
-    // Query creates temporary table in first part, uses it in UNION
     let query = "SELECT Поле1 AS Действие INTO ТаблицаДействий FROM Справочник.Валюты UNION ALL SELECT Действие FROM ТаблицаДействий";
 
     let ast = parser::parse_sdbl(query);
     let result = lower_sdbl_to_hir(&ast, None);
 
-    // New flat list architecture: package contains 2 queries (main + UNION)
     assert_eq!(result.queries().len(), 2, "Expected 2 queries in package (main + UNION)");
 
-    // First query creates temporary table
     let main_hir = &result.queries()[0].hir;
     assert_eq!(main_hir.into_table.as_ref().map(|n| n.as_str()), Some("ТаблицаДействий"));
-    assert_eq!(main_hir.select.fields.len(), 1); // Only one field in first query
+    assert_eq!(main_hir.select.fields.len(), 1);
 
-    // Second query (UNION) references temporary table
     let union_hir = &result.queries()[1].hir;
     assert_eq!(union_hir.from.len(), 1);
 
-    // Check that temporary table is resolved
     let temp_table_ref = &union_hir.from[0];
     assert_eq!(temp_table_ref.full_name, "ТаблицаДействий");
     assert!(temp_table_ref.is_resolved(), "Temporary table should be resolved");
 
-    // Check that it's a TempTable variant
     if let Some(crate::hir::ResolvedTable::TempTable { name, fields }) = &temp_table_ref.metadata {
         assert_eq!(name, "ТаблицаДействий");
-        assert_eq!(fields.len(), 1); // One field from SELECT
-        assert_eq!(fields[0].name.as_str(), "Действие"); // Alias from first query
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].name.as_str(), "Действие");
     } else {
         panic!("Expected TempTable variant, got: {:?}", temp_table_ref.metadata);
     }
@@ -750,33 +692,22 @@ fn test_drop_query_removes_temp_table_from_subsequent_scope() {
     );
 }
 
-// ===== Tabular Section Resolution Tests =====
-
-/// Helper to create a test configuration with a business process that has tabular sections.
 fn create_test_metadata_with_tabular_section() -> bsl_metadata::Configuration {
     use bsl_metadata::{
         tabular_section::{TabularSection, TabularSectionAttribute},
         MdoType, MetadataObject,
     };
 
-    // Use the uuid crate from bsl-metadata's dependencies
-    // We need to import it through a test helper
-    let uuid_nil = *bsl_metadata::tabular_section::TabularSection::new(
-        Default::default(), // Use default UUID for testing
-        "temp",
-    )
-    .uuid();
+    let uuid_nil =
+        *bsl_metadata::tabular_section::TabularSection::new(Default::default(), "temp").uuid();
 
     let mut config = bsl_metadata::Configuration::new("TestConfig");
 
-    // Create BusinessProcess with tabular section
     let mut bp = MetadataObject::new(MdoType::BusinessProcess, "Исполнение");
 
-    // Create tabular section "РезультатыПроверки"
     let mut ts = TabularSection::new(uuid_nil, "РезультатыПроверки");
     ts.set_name_en(Some("CheckResults".to_string()));
 
-    // Create attributes for tabular section
     let mut attr1 = TabularSectionAttribute::new(
         uuid_nil,
         "ЗадачаИсполнителя",
@@ -798,7 +729,6 @@ fn create_test_metadata_with_tabular_section() -> bsl_metadata::Configuration {
     );
     attr3.set_name_en(Some("SentForRevision".to_string()));
 
-    // Set attributes all at once
     ts.set_attributes(vec![attr1, attr2, attr3]);
 
     bp.add_tabular_section(ts);
@@ -817,27 +747,22 @@ fn test_tabular_section_field_resolution() {
     let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(metadata.clone())));
     let hir = single_query_hir(&package);
 
-    // Verify table resolved
     assert_eq!(hir.from.len(), 1);
     let table_ref = &hir.from[0];
     assert_eq!(table_ref.full_name, "БизнесПроцесс.Исполнение.РезультатыПроверки");
     assert!(table_ref.is_resolved(), "Tabular section should be resolved");
 
-    // Verify fields
     let resolved = table_ref.metadata.as_ref().expect("Metadata should be present");
     let fields = resolved.fields();
 
-    // Should have Ссылка + НомерСтроки fields + 3 tabular section attributes
     assert_eq!(fields.len(), 5, "Expected 5 fields: Ссылка + НомерСтроки + 3 attributes");
 
-    // Verify Ссылка field
     let ref_field = fields.iter().find(|f| f.name.as_str() == "Ссылка");
     assert!(ref_field.is_some(), "Missing Ссылка field");
     let ref_field = ref_field.unwrap();
     assert!(ref_field.is_standard, "Ссылка should be marked as standard");
     assert_eq!(ref_field.name_en.as_deref(), Some("Ref"));
 
-    // Verify tabular section attributes
     assert!(fields.iter().any(|f| f.name.as_str() == "ЗадачаИсполнителя"));
     assert!(fields.iter().any(|f| f.name.as_str() == "ЗадачаПроверяющего"));
     assert!(fields.iter().any(|f| f.name.as_str() == "ОтправленоНаДоработку"));
@@ -857,7 +782,6 @@ fn test_tabular_section_nomer_stroki_field() {
     let resolved = table_ref.metadata.as_ref().expect("Metadata should be present");
     let fields = resolved.fields();
 
-    // НомерСтроки must be present as a standard field
     let line_num_field = fields.iter().find(|f| f.name.as_str() == "НомерСтроки");
     assert!(line_num_field.is_some(), "Missing НомерСтроки field");
     let line_num_field = line_num_field.unwrap();
@@ -869,14 +793,12 @@ fn test_tabular_section_nomer_stroki_field() {
 fn test_tabular_section_case_insensitive_matching() {
     let metadata = create_test_metadata_with_tabular_section();
 
-    // Use lowercase tabular section name
     let code = "ВЫБРАТЬ Т.ЗадачаИсполнителя ИЗ БизнесПроцесс.Исполнение.результатыпроверки КАК Т";
 
     let ast = parser::parse_sdbl(code);
     let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(metadata.clone())));
     let hir = single_query_hir(&package);
 
-    // Should still resolve (case-insensitive matching)
     assert_eq!(hir.from.len(), 1);
     let table_ref = &hir.from[0];
     assert!(table_ref.is_resolved(), "Should resolve with case-insensitive matching");
@@ -886,19 +808,16 @@ fn test_tabular_section_case_insensitive_matching() {
 fn test_tabular_section_bilingual_support() {
     let metadata = create_test_metadata_with_tabular_section();
 
-    // Use English tabular section name
     let code = "ВЫБРАТЬ Т.ЗадачаИсполнителя ИЗ БизнесПроцесс.Исполнение.CheckResults КАК Т";
 
     let ast = parser::parse_sdbl(code);
     let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(metadata.clone())));
     let hir = single_query_hir(&package);
 
-    // Should resolve using English name
     assert_eq!(hir.from.len(), 1);
     let table_ref = &hir.from[0];
     assert!(table_ref.is_resolved(), "Should resolve using English name");
 
-    // Verify fields are present
     let resolved = table_ref.metadata.as_ref().expect("Metadata should be present");
     let fields = resolved.fields();
     assert_eq!(fields.len(), 5, "Expected 5 fields");
@@ -908,22 +827,17 @@ fn test_tabular_section_bilingual_support() {
 fn test_tabular_section_not_found() {
     let metadata = create_test_metadata_with_tabular_section();
 
-    // Use non-existent tabular section name
     let code = "ВЫБРАТЬ Т.Поле ИЗ БизнесПроцесс.Исполнение.НесуществующаяТабличнаяЧасть КАК Т";
 
     let ast = parser::parse_sdbl(code);
     let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(metadata.clone())));
     let hir = single_query_hir(&package);
 
-    // Table should not be resolved (tabular section doesn't exist)
     assert_eq!(hir.from.len(), 1);
     let table_ref = &hir.from[0];
 
-    // Metadata should be None because tabular section wasn't found
-    // (add_tabular_section_fields returns early when not found)
     let resolved = table_ref.metadata.as_ref();
     if let Some(r) = resolved {
-        // If metadata is present, it should have only standard fields
         assert_eq!(r.fields().len(), 0, "Should have no fields when tabular section not found");
     }
 }
@@ -934,31 +848,26 @@ fn test_invalid_mdo_type_for_tabular_section() {
 
     let mut config = Configuration::new("TestConfig");
 
-    // Add an InformationRegister (which doesn't support tabular sections)
     let register = MetadataObject::new(MdoType::InformationRegister, "ТестовыйРегистр");
     config.add_metadata_object(register);
 
-    // Try to access non-existent tabular section
     let code = "ВЫБРАТЬ Т.Поле ИЗ РегистрСведений.ТестовыйРегистр.ТабличнаяЧасть КАК Т";
 
     let ast = parser::parse_sdbl(code);
     let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(config.clone())));
     let hir = single_query_hir(&package);
 
-    // Should not resolve (registers don't have tabular sections)
     assert_eq!(hir.from.len(), 1);
     let table_ref = &hir.from[0];
 
     let resolved = table_ref.metadata.as_ref();
     if let Some(r) = resolved {
-        // Should have no fields because MDO type doesn't support tabular sections
         assert_eq!(r.fields().len(), 0, "Should have no fields for invalid MDO type");
     }
 }
 
 #[test]
 fn test_tabular_section_task_ref_type_parsing() {
-    // Test that TaskRef types (Задача.ИмяЗадачи) are parsed correctly
     use bsl_metadata::{
         tabular_section::{TabularSection, TabularSectionAttribute},
         MdoType, MetadataObject,
@@ -971,7 +880,6 @@ fn test_tabular_section_task_ref_type_parsing() {
     let mut bp = MetadataObject::new(MdoType::BusinessProcess, "Исполнение");
     let mut ts = TabularSection::new(uuid_nil, "РезультатыПроверки");
 
-    // Create attribute with Task reference type (Display format from AttributeType)
     let mut attr = TabularSectionAttribute::new(
         uuid_nil,
         "ЗадачаПроверяющего",
@@ -983,14 +891,12 @@ fn test_tabular_section_task_ref_type_parsing() {
     bp.add_tabular_section(ts);
     config.add_metadata_object(bp);
 
-    // Test query
     let code = "ВЫБРАТЬ Т.ЗадачаПроверяющего ИЗ БизнесПроцесс.Исполнение.РезультатыПроверки КАК Т";
 
     let ast = parser::parse_sdbl(code);
     let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(config.clone())));
     let hir = single_query_hir(&package);
 
-    // Verify field resolved
     assert_eq!(hir.from.len(), 1);
     let table_ref = &hir.from[0];
     assert!(table_ref.is_resolved(), "Table should be resolved");
@@ -998,12 +904,10 @@ fn test_tabular_section_task_ref_type_parsing() {
     let resolved = table_ref.metadata.as_ref().expect("Metadata should be present");
     let fields = resolved.fields();
 
-    // Find ЗадачаПроверяющего field
     let field = fields.iter().find(|f| f.name.as_str() == "ЗадачаПроверяющего");
     assert!(field.is_some(), "Should find ЗадачаПроверяющего field");
 
     let field = field.unwrap();
-    // Verify type is correctly parsed as Task reference
     match &field.ty {
         crate::SdblType::Ref(mdo_ref) => {
             assert_eq!(mdo_ref.mdo_type, MdoType::Task, "Should be Task reference");
@@ -1108,7 +1012,6 @@ fn hierarchical_catalog_parent_field_resolves_by_english_name() {
 
 #[test]
 fn test_tabular_section_uuid_type_parsing() {
-    // Test that UUID type (УникальныйИдентификатор) is parsed correctly
     use bsl_metadata::{
         tabular_section::{TabularSection, TabularSectionAttribute},
         MdoType, MetadataObject,
@@ -1121,7 +1024,6 @@ fn test_tabular_section_uuid_type_parsing() {
     let mut bp = MetadataObject::new(MdoType::BusinessProcess, "Исполнение");
     let mut ts = TabularSection::new(uuid_nil, "РезультатыПроверки");
 
-    // Create attribute with UUID type
     let mut attr = TabularSectionAttribute::new(
         uuid_nil,
         "ИдентификаторИсполнителя",
@@ -1133,7 +1035,6 @@ fn test_tabular_section_uuid_type_parsing() {
     bp.add_tabular_section(ts);
     config.add_metadata_object(bp);
 
-    // Test query
     let code =
         "ВЫБРАТЬ Т.ИдентификаторИсполнителя ИЗ БизнесПроцесс.Исполнение.РезультатыПроверки КАК Т";
 
@@ -1141,7 +1042,6 @@ fn test_tabular_section_uuid_type_parsing() {
     let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(config.clone())));
     let hir = single_query_hir(&package);
 
-    // Verify field resolved
     assert_eq!(hir.from.len(), 1);
     let table_ref = &hir.from[0];
     assert!(table_ref.is_resolved(), "Table should be resolved");
@@ -1149,19 +1049,15 @@ fn test_tabular_section_uuid_type_parsing() {
     let resolved = table_ref.metadata.as_ref().expect("Metadata should be present");
     let fields = resolved.fields();
 
-    // Find ИдентификаторИсполнителя field
     let field = fields.iter().find(|f| f.name.as_str() == "ИдентификаторИсполнителя");
     assert!(field.is_some(), "Should find ИдентификаторИсполнителя field");
 
     let field = field.unwrap();
-    // Verify type is correctly parsed as UUID
     assert_eq!(field.ty, crate::SdblType::Uuid, "Should be UUID type");
 }
 
 #[test]
 fn test_incomplete_on_collects_all_tables() {
-    // Test that HIR collects all tables even with incomplete ON conditions
-    // This simulates typing a query where user hasn't finished ON expressions yet
     let query = r#"ВЫБРАТЬ
     Т1.Поле1
 ИЗ
@@ -1181,27 +1077,22 @@ fn test_incomplete_on_collects_all_tables() {
 
     assert_eq!(queries.len(), 1, "Should have 1 query");
 
-    // Lower to HIR
     let hir_package = crate::lower::lower_sdbl_to_hir(&parse, None);
 
     assert_eq!(hir_package.queries.len(), 1, "HIR should have 1 query");
 
     let query_hir = &hir_package.queries[0].hir;
 
-    // Check FROM clause
     assert_eq!(query_hir.from.len(), 1, "Should have 1 FROM table");
     assert_eq!(query_hir.from[0].full_name, "Таблица1");
     assert_eq!(query_hir.from[0].alias.as_ref().map(|s| s.as_str()), Some("Т1"));
 
-    // Check JOINs - should have BOTH joins despite incomplete ON
     assert_eq!(query_hir.joins.len(), 2, "Should collect both nested JOINs");
 
-    // Verify table names
     let join_names: Vec<_> = query_hir.joins.iter().map(|j| j.table.full_name.as_str()).collect();
     assert!(join_names.contains(&"Таблица2"), "Should have Таблица2");
     assert!(join_names.contains(&"Таблица3"), "Should have Таблица3");
 
-    // Verify aliases
     let t2_join = query_hir.joins.iter().find(|j| j.table.full_name == "Таблица2").unwrap();
     assert_eq!(t2_join.table.alias.as_ref().map(|s| s.as_str()), Some("Т2"));
 
@@ -1216,7 +1107,6 @@ fn test_incomplete_on_collects_all_tables() {
 
 #[test]
 fn test_parse_continues_after_incomplete_field() {
-    // Test that parser continues after incomplete field and parses subsequent И clauses
     let query = r#"ВЫБРАТЬ
     Т1.Поле1
 ИЗ
@@ -1228,16 +1118,12 @@ fn test_parse_continues_after_incomplete_field() {
 
     let parse = parser::parse_sdbl(query);
 
-    // Lower to HIR
     let hir_package = crate::lower::lower_sdbl_to_hir(&parse, None);
 
-    // Check if HIR found the query despite parse errors
     assert_eq!(hir_package.queries.len(), 1, "Should have 1 query even with incomplete ON");
 
-    // Check if source_map has tokens for ALL parts of query (including after incomplete field)
     let token_count = hir_package.source_map.all_tokens().count();
 
-    // Should have many tokens (keywords, identifiers, etc.) - even with incomplete fields
     assert!(
         token_count > 10,
         "Should have significant tokens for highlighting, got {}",
@@ -1247,7 +1133,6 @@ fn test_parse_continues_after_incomplete_field() {
 
 #[test]
 fn test_multiple_incomplete_fields_with_operators() {
-    // User's complex example: multiple incomplete fields with = operator
     let query = r#"ВЫБРАТЬ РАЗЛИЧНЫЕ
     ЗадачиЭлементовСхемы.ИмяЭлемента,
     ЗадачиЭлементовСхемы.ЗадачаПроцесса
@@ -1269,10 +1154,8 @@ fn test_multiple_incomplete_fields_with_operators() {
 
     let parse = parser::parse_sdbl(query);
 
-    // Lower to HIR
     let hir_package = crate::lower::lower_sdbl_to_hir(&parse, None);
 
-    // Check token count for highlighting
     let token_count = hir_package.source_map.all_tokens().count();
     assert!(
         token_count > 10,
@@ -1283,7 +1166,6 @@ fn test_multiple_incomplete_fields_with_operators() {
 
 #[test]
 fn test_incomplete_as_alias_in_select() {
-    // User's stress test: incomplete AS keyword without alias
     let query = r#"ВЫБРАТЬ
     Валюты.Наименование КАК
 ИЗ
@@ -1293,7 +1175,6 @@ fn test_incomplete_as_alias_in_select() {
 
     let parse = parser::parse_sdbl(query);
 
-    // Lower to HIR
     let hir_package = crate::lower::lower_sdbl_to_hir(&parse, None);
 
     let token_count = hir_package.source_map.all_tokens().count();
@@ -1307,7 +1188,6 @@ fn test_incomplete_as_alias_in_select() {
 
 #[test]
 fn test_incomplete_table_reference_in_from() {
-    // User's case: incomplete table reference "Справочник." in FROM clause
     let query = r#"ВЫБРАТЬ
     Валюты.Наименование КАК СимвольныйКод
 ИЗ
@@ -1326,12 +1206,10 @@ fn test_incomplete_table_reference_in_from() {
 
     let parse = parser::parse_sdbl(query);
 
-    // Lower to HIR
     let hir_package = crate::lower::lower_sdbl_to_hir(&parse, None);
 
     let token_count = hir_package.source_map.all_tokens().count();
 
-    // Verify parser didn't break on incomplete table ref
     assert!(token_count > 20, "Should have significant tokens despite incomplete table ref");
 }
 
@@ -1348,13 +1226,11 @@ fn test_parse_simple_nested_subquery() {
     let parse = parser::parse_sdbl(query);
     let package = crate::lower::lower_sdbl_to_hir(&parse, None);
 
-    // Verify simple nested subquery works
     assert_eq!(package.queries().len(), 1);
     let query_hir = &package.queries()[0].hir;
     assert_eq!(query_hir.from.len(), 1, "Should have 1 FROM table");
     assert_eq!(query_hir.select.fields.len(), 1, "Should have 1 SELECT field");
 
-    // Verify subquery was lowered to HIR
     let subquery_table = &query_hir.from[0];
     assert_eq!(subquery_table.subquery.len(), 1, "Should have 1 subquery HIR");
 }
@@ -1378,12 +1254,10 @@ fn test_union_in_nested_subquery_lowers_all_queries() {
     let parse = parser::parse_sdbl(query);
     let package = crate::lower::lower_sdbl_to_hir(&parse, None);
 
-    // Должен быть один query в пакете
     assert_eq!(package.queries().len(), 1, "Expected single outer query");
 
     let outer_query = &package.queries()[0];
 
-    // В FROM должна быть одна таблица (nested subquery)
     assert_eq!(outer_query.hir.from.len(), 1, "Expected single table in FROM");
 
     let subquery_table = &outer_query.hir.from[0];
@@ -1393,14 +1267,12 @@ fn test_union_in_nested_subquery_lowers_all_queries() {
         "Expected alias 'Внешний'"
     );
 
-    // КРИТИЧНО: subquery должен содержать 2 HIR (main + UNION)
     assert_eq!(
         subquery_table.subquery.len(),
         2,
         "Subquery должен содержать 2 HIR: main query + UNION query"
     );
 
-    // Проверяем первый query (main)
     let first_query_hir = &subquery_table.subquery[0];
     assert_eq!(first_query_hir.from.len(), 1, "First query should have 1 FROM table");
     assert_eq!(
@@ -1413,7 +1285,6 @@ fn test_union_in_nested_subquery_lowers_all_queries() {
         "First query alias mismatch"
     );
 
-    // Проверяем второй query (UNION)
     let second_query_hir = &subquery_table.subquery[1];
     assert_eq!(second_query_hir.from.len(), 1, "Second query should have 1 FROM table");
     assert_eq!(
@@ -1429,7 +1300,6 @@ fn test_union_in_nested_subquery_lowers_all_queries() {
 
 #[test]
 fn test_deeply_nested_subquery_with_union() {
-    // Проверяем рекурсивную обработку: внутри вложенного запроса ещё один вложенный с UNION
     let query = r#"ВЫБРАТЬ
     Внешний.Контрагент КАК Клиент
 ИЗ (
@@ -1456,7 +1326,6 @@ fn test_deeply_nested_subquery_with_union() {
     let outer_query = &package.queries()[0];
     assert_eq!(outer_query.hir.from.len(), 1, "Outer query should have 1 FROM table");
 
-    // Уровень 1: Внешний subquery (содержит один SELECT)
     let level1_table = &outer_query.hir.from[0];
     assert_eq!(
         level1_table.alias.as_ref().map(|s| s.as_str()),
@@ -1469,7 +1338,6 @@ fn test_deeply_nested_subquery_with_union() {
         "Level 1 should have 1 subquery HIR (no UNION at this level)"
     );
 
-    // Уровень 2: Средний subquery (содержит UNION - 2 запроса)
     let level1_hir = &level1_table.subquery[0];
     assert_eq!(level1_hir.from.len(), 1, "Level 1 HIR should have 1 FROM table");
 
@@ -1485,7 +1353,6 @@ fn test_deeply_nested_subquery_with_union() {
         "Level 2 should have 2 subquery HIRs (UNION at this level)"
     );
 
-    // Уровень 3: Первый запрос UNION (Т1)
     let level3_first_hir = &level2_table.subquery[0];
     assert_eq!(level3_first_hir.from.len(), 1, "Level 3 first query should have 1 FROM table");
     assert_eq!(
@@ -1498,7 +1365,6 @@ fn test_deeply_nested_subquery_with_union() {
         "Level 3 first query alias mismatch"
     );
 
-    // Уровень 3: Второй запрос UNION (Т2)
     let level3_second_hir = &level2_table.subquery[1];
     assert_eq!(level3_second_hir.from.len(), 1, "Level 3 second query should have 1 FROM table");
     assert_eq!(
@@ -1514,7 +1380,6 @@ fn test_deeply_nested_subquery_with_union() {
 
 #[test]
 fn test_union_at_multiple_levels() {
-    // Проверяем UNION на разных уровнях вложенности одновременно
     let query = r#"ВЫБРАТЬ
     Внешний.Поле
 ИЗ (
@@ -1545,7 +1410,6 @@ fn test_union_at_multiple_levels() {
     let outer_query = &package.queries()[0];
     assert_eq!(outer_query.hir.from.len(), 1, "Outer query should have 1 FROM table");
 
-    // Уровень 1: Внешний subquery (содержит UNION - 2 запроса)
     let level1_table = &outer_query.hir.from[0];
     assert_eq!(
         level1_table.alias.as_ref().map(|s| s.as_str()),
@@ -1558,7 +1422,6 @@ fn test_union_at_multiple_levels() {
         "Level 1 should have 2 subquery HIRs (UNION at this level)"
     );
 
-    // Первая ветка UNION на уровне 1
     let level1_first_hir = &level1_table.subquery[0];
     assert_eq!(level1_first_hir.from.len(), 1, "Level 1 first HIR should have 1 FROM table");
 
@@ -1574,7 +1437,6 @@ fn test_union_at_multiple_levels() {
         "Level 2 first table should have 2 subquery HIRs (Т1, Т2)"
     );
 
-    // Проверяем Т1 и Т2
     assert_eq!(level2_first_table.subquery[0].from[0].full_name, "Таблица1");
     assert_eq!(
         level2_first_table.subquery[0].from[0].alias.as_ref().map(|s| s.as_str()),
@@ -1586,7 +1448,6 @@ fn test_union_at_multiple_levels() {
         Some("Т2")
     );
 
-    // Вторая ветка UNION на уровне 1
     let level1_second_hir = &level1_table.subquery[1];
     assert_eq!(level1_second_hir.from.len(), 1, "Level 1 second HIR should have 1 FROM table");
 
@@ -1602,7 +1463,6 @@ fn test_union_at_multiple_levels() {
         "Level 2 second table should have 2 subquery HIRs (Т3, Т4)"
     );
 
-    // Проверяем Т3 и Т4
     assert_eq!(level2_second_table.subquery[0].from[0].full_name, "Таблица3");
     assert_eq!(
         level2_second_table.subquery[0].from[0].alias.as_ref().map(|s| s.as_str()),
@@ -1617,7 +1477,6 @@ fn test_union_at_multiple_levels() {
 
 #[test]
 fn test_tabular_section_in_join_condition() {
-    // Проверяем, что табличная часть корректно обрабатывается в JOIN условиях
     let query = r#"ВЫБРАТЬ
     ЧекККМТовары.Номенклатура КАК Товар,
     ЧекККМ.Номер КАК НомерДокумента,
@@ -1635,7 +1494,6 @@ fn test_tabular_section_in_join_condition() {
 
     let query_hir = &package.queries()[0].hir;
 
-    // Проверяем FROM clause: должна быть табличная часть
     assert_eq!(query_hir.from.len(), 1, "Should have 1 FROM table");
 
     let tabular_table = &query_hir.from[0];
@@ -1654,7 +1512,6 @@ fn test_tabular_section_in_join_condition() {
         "Tabular section should have 3 parts (Документ.ЧекККМ.Товары)"
     );
 
-    // Проверяем JOIN clause: должен быть основной документ
     assert_eq!(query_hir.joins.len(), 1, "Should have 1 JOIN");
 
     let join = &query_hir.joins[0];
@@ -1669,10 +1526,8 @@ fn test_tabular_section_in_join_condition() {
     );
     assert_eq!(document_table.parts.len(), 2, "Document should have 2 parts (Документ.ЧекККМ)");
 
-    // Проверяем SELECT clause: должны быть поля из обеих таблиц
     assert_eq!(query_hir.select.fields.len(), 3, "Should have 3 SELECT fields");
 
-    // Проверяем алиасы полей
     let field_aliases: Vec<_> = query_hir
         .select
         .fields
@@ -1688,7 +1543,6 @@ fn test_tabular_section_in_join_condition() {
 
 #[test]
 fn test_complex_join_with_tabular_and_nested_fields() {
-    // Проверяем сложный случай: JOIN с табличной частью и вложенными полями в условии
     let query = r#"ВЫБРАТЬ
     Товары.Номенклатура.Наименование КАК ТоварНаименование,
     Чек.Партнер.Наименование КАК КлиентНаименование
@@ -1705,19 +1559,15 @@ fn test_complex_join_with_tabular_and_nested_fields() {
 
     let query_hir = &package.queries()[0].hir;
 
-    // Проверяем FROM: табличная часть
     assert_eq!(query_hir.from.len(), 1);
     assert_eq!(query_hir.from[0].full_name, "Документ.ЧекККМ.Товары");
 
-    // Проверяем JOINs: парсер обрабатывает последовательные JOINs как плоский список
-    // Благодаря рекурсивному lowering (commit d66dc345) все JOINs должны быть в одном списке
     assert!(
         !query_hir.joins.is_empty(),
         "Should have at least 1 JOIN, got {}",
         query_hir.joins.len()
     );
 
-    // Проверяем, что все необходимые таблицы присутствуют в JOINs
     let join_tables: Vec<_> = query_hir.joins.iter().map(|j| j.table.full_name.as_str()).collect();
 
     assert!(join_tables.contains(&"Документ.ЧекККМ"), "Should have Document.ЧекККМ in JOINs");
@@ -1726,22 +1576,17 @@ fn test_complex_join_with_tabular_and_nested_fields() {
         "Should have Catalog.Контрагенты in JOINs"
     );
 
-    // Проверяем SELECT: должны быть вложенные поля
     assert_eq!(query_hir.select.fields.len(), 2);
 
-    // Проверяем первое поле: Товары.Номенклатура.Наименование
     let first_field = &query_hir.select.fields[0];
     assert_eq!(first_field.alias.as_ref().map(|a| a.as_str()), Some("ТоварНаименование"));
 
-    // Проверяем второе поле: Чек.Партнер.Наименование
     let second_field = &query_hir.select.fields[1];
     assert_eq!(second_field.alias.as_ref().map(|a| a.as_str()), Some("КлиентНаименование"));
 }
 
 #[test]
 fn test_nested_subquery_with_tabular_section_in_join() {
-    // Проверяем вложенный запрос с nested JOIN (JOIN внутри JOIN)
-    // Используем скобки в условиях и параметры запроса (как в реальных продакшн-запросах)
     let query = r#"ВЫБРАТЬ
     Внешний.Товар КАК ТоварНаименование,
     Внешний.Количество КАК Количество,
@@ -1772,10 +1617,8 @@ fn test_nested_subquery_with_tabular_section_in_join() {
 
     let outer_query = &package.queries()[0];
 
-    // Проверяем внешний SELECT
     assert_eq!(outer_query.hir.select.fields.len(), 3, "Outer query should have 3 SELECT fields");
 
-    // Проверяем FROM: должна быть одна таблица (subquery)
     assert_eq!(outer_query.hir.from.len(), 1, "Outer query should have 1 FROM table");
 
     let subquery_table = &outer_query.hir.from[0];
@@ -1785,20 +1628,16 @@ fn test_nested_subquery_with_tabular_section_in_join() {
         "Subquery alias should be 'Внешний'"
     );
 
-    // КРИТИЧНО: Проверяем, что subquery был спущен в HIR
     assert_eq!(
         subquery_table.subquery.len(),
         1,
         "Should have 1 subquery HIR (nested query with JOIN)"
     );
 
-    // Проверяем содержимое вложенного запроса
     let nested_hir = &subquery_table.subquery[0];
 
-    // Внутренний SELECT должен иметь 5 полей
     assert_eq!(nested_hir.select.fields.len(), 5, "Nested query should have 5 SELECT fields");
 
-    // Проверяем алиасы полей вложенного SELECT
     let nested_field_aliases: Vec<_> = nested_hir
         .select
         .fields
@@ -1824,7 +1663,6 @@ fn test_nested_subquery_with_tabular_section_in_join() {
         "Nested SELECT should have field 'НомерЗаказа'"
     );
 
-    // Проверяем FROM вложенного запроса: табличная часть
     assert_eq!(nested_hir.from.len(), 1, "Nested query should have 1 FROM table");
 
     let nested_tabular_table = &nested_hir.from[0];
@@ -1839,11 +1677,8 @@ fn test_nested_subquery_with_tabular_section_in_join() {
     );
     assert_eq!(nested_tabular_table.parts.len(), 3, "Nested tabular section should have 3 parts");
 
-    // Проверяем JOINs вложенного запроса: должно быть 2 JOIN (INNER + LEFT)
-    // Благодаря рекурсивному lowering (commit d66dc345) вложенные JOINs в плоском списке
     assert_eq!(nested_hir.joins.len(), 2, "Nested query should have 2 JOINs (INNER + nested LEFT)");
 
-    // Собираем информацию о всех JOINs для проверки
     let join_tables: Vec<_> = nested_hir
         .joins
         .iter()
@@ -1852,7 +1687,6 @@ fn test_nested_subquery_with_tabular_section_in_join() {
         })
         .collect();
 
-    // Проверяем, что есть JOIN с Документ.ЧекККМ
     assert!(
         join_tables
             .iter()
@@ -1860,22 +1694,18 @@ fn test_nested_subquery_with_tabular_section_in_join() {
         "Should have JOIN with Документ.ЧекККМ"
     );
 
-    // Проверяем, что есть JOIN с Документ.ЗаказКлиента
     assert!(
         join_tables.iter().any(|(_, name, alias)| *name == "Документ.ЗаказКлиента"
             && *alias == Some("ДокЗаказКлиента")),
         "Should have JOIN with Документ.ЗаказКлиента"
     );
 
-    // Проверяем типы JOINs (независимо от порядка)
     let join_types: Vec<_> = nested_hir.joins.iter().map(|j| j.join_type).collect();
     assert!(join_types.contains(&crate::hir::JoinType::Left), "Should have at least one LEFT JOIN");
 }
 
 #[test]
 fn test_nested_subquery_with_tabular_and_union() {
-    // Комбинированный тест: вложенный запрос с UNION, где обе ветки используют табличные части
-    // Используем скобки в условиях и параметры запроса
     let query = r#"ВЫБРАТЬ
     Данные.Товар,
     Данные.Количество,
@@ -1921,37 +1751,30 @@ fn test_nested_subquery_with_tabular_and_union() {
     let subquery_table = &outer_query.hir.from[0];
     assert_eq!(subquery_table.alias.as_ref().map(|s| s.as_str()), Some("Данные"));
 
-    // КРИТИЧНО: Должно быть 2 HIR (UNION)
     assert_eq!(
         subquery_table.subquery.len(),
         2,
         "Should have 2 subquery HIRs (UNION with 2 branches)"
     );
 
-    // Проверяем первую ветку UNION (Продажа)
     let first_union_hir = &subquery_table.subquery[0];
     assert_eq!(first_union_hir.select.fields.len(), 3, "First UNION branch should have 3 fields");
 
-    // FROM: табличная часть ЧекККМ.Товары
     assert_eq!(first_union_hir.from.len(), 1);
     assert_eq!(first_union_hir.from[0].full_name, "Документ.ЧекККМ.Товары");
     assert_eq!(first_union_hir.from[0].alias.as_ref().map(|s| s.as_str()), Some("Товары"));
 
-    // JOIN: документ ЧекККМ
     assert_eq!(first_union_hir.joins.len(), 1);
     assert_eq!(first_union_hir.joins[0].table.full_name, "Документ.ЧекККМ");
     assert_eq!(first_union_hir.joins[0].table.alias.as_ref().map(|s| s.as_str()), Some("Чек"));
 
-    // Проверяем вторую ветку UNION (Возврат)
     let second_union_hir = &subquery_table.subquery[1];
     assert_eq!(second_union_hir.select.fields.len(), 3, "Second UNION branch should have 3 fields");
 
-    // FROM: табличная часть ЧекККМВозврат.Товары
     assert_eq!(second_union_hir.from.len(), 1);
     assert_eq!(second_union_hir.from[0].full_name, "Документ.ЧекККМВозврат.Товары");
     assert_eq!(second_union_hir.from[0].alias.as_ref().map(|s| s.as_str()), Some("ВозвратТовары"));
 
-    // JOIN: документ ЧекККМВозврат
     assert_eq!(second_union_hir.joins.len(), 1);
     assert_eq!(second_union_hir.joins[0].table.full_name, "Документ.ЧекККМВозврат");
     assert_eq!(second_union_hir.joins[0].table.alias.as_ref().map(|s| s.as_str()), Some("Возврат"));
@@ -1959,12 +1782,6 @@ fn test_nested_subquery_with_tabular_and_union() {
 
 #[test]
 fn test_query_range_includes_all_select_fields_with_case() {
-    // Воспроизводит проблему: второй SELECT с вложенным ВЫРАЗИТЬ(ВЫБОР...)
-    // должен иметь TextRange который включает ВСЕ поля SELECT.
-    //
-    // BUG: cursor на поле "description" не попадает в query range потому что
-    // parser/lowering неправильно определяет границы запроса.
-
     let query = r#"
 ВЫБРАТЬ
     Поле1,
@@ -1991,12 +1808,10 @@ fn test_query_range_includes_all_select_fields_with_case() {
 
     let package = lower_sdbl_to_hir(&parsed, None);
 
-    // Должно быть 2 запроса
     assert_eq!(package.queries.len(), 2, "Should have 2 queries");
 
     let query1_range = package.queries[1].range;
 
-    // Cursor на строке "date" - должен попадать в range
     let date_offset = query.find("date").expect("Should find 'date'");
     assert!(
         query1_range.contains(date_offset.try_into().unwrap()),
@@ -2005,7 +1820,6 @@ fn test_query_range_includes_all_select_fields_with_case() {
         query1_range
     );
 
-    // Cursor на строке "description" - тоже должен попадать в range
     let description_offset = query.find("description").expect("Should find 'description'");
     assert!(
         query1_range.contains(description_offset.try_into().unwrap()),
@@ -2018,7 +1832,6 @@ fn test_query_range_includes_all_select_fields_with_case() {
 
 #[test]
 fn test_leading_whitespace_in_sdbl() {
-    // Regression test: SDBL parser should handle leading whitespace/newlines
     let query = "\nВЫБРАТЬ 1 ИЗ Т";
     let parsed = parser::parse_sdbl(query);
     assert!(!parsed.has_errors(), "Should parse query with leading newline");
@@ -2028,19 +1841,14 @@ fn test_leading_whitespace_in_sdbl() {
     assert_eq!(pkg.queries().count(), 1, "Should have 1 query");
 }
 
-// ===== RefOveruse Diagnostic Tests with Metadata =====
-
-/// Helper to create a config with a Catalog that has a Ref-typed attribute.
 fn create_config_with_ref_attribute() -> bsl_metadata::Configuration {
     use bsl_metadata::{Attribute, AttributeType, MdoType, MetadataObject};
 
     let mut config = bsl_metadata::Configuration::new("TestConfig");
 
-    // Target catalog that will be referenced
     let files_catalog = MetadataObject::new(MdoType::Catalog, "Файлы");
     config.add_metadata_object(files_catalog);
 
-    // Catalog with a Ref-typed attribute "Файл" pointing to Catalog.Файлы
     let mut catalog = MetadataObject::new(MdoType::Catalog, "СлужебныеФайлы");
     catalog.add_attribute(Attribute {
         name: "Файл".to_string(),
@@ -2056,7 +1864,6 @@ fn create_config_with_ref_attribute() -> bsl_metadata::Configuration {
 
 #[test]
 fn test_ref_overuse_with_metadata_ref_at_end() {
-    // Т.Файл is Ref(Catalog.Файлы), so Т.Файл.Ссылка is redundant → 1 diagnostic
     let config = create_config_with_ref_attribute();
 
     let code = "ВЫБРАТЬ Т.Файл.Ссылка КАК Ссылка ИЗ Справочник.СлужебныеФайлы КАК Т";
@@ -2073,7 +1880,6 @@ fn test_ref_overuse_with_metadata_ref_at_end() {
 
 #[test]
 fn test_ref_overuse_with_metadata_non_ref_field() {
-    // Т.ИНН is String, so Т.ИНН.Ссылка does NOT trigger RefOveruse → 0 diagnostics
     use bsl_metadata::{Attribute, AttributeType, MdoType, MetadataObject};
 
     let mut config = bsl_metadata::Configuration::new("TestConfig");
@@ -2103,9 +1909,6 @@ fn test_ref_overuse_with_metadata_non_ref_field() {
 
 #[test]
 fn test_ref_overuse_with_metadata_double_ref() {
-    // Т.Ссылка.Ссылка — Ссылка is at position 1 (standard field, not in metadata fields()),
-    // so resolve_nested_field_type returns Unknown → no diagnostic.
-    // Standard fields like Ссылка are not included in resolved table metadata.
     use bsl_metadata::{MdoType, MetadataObject};
 
     let mut config = bsl_metadata::Configuration::new("TestConfig");
@@ -2130,7 +1933,6 @@ fn test_ref_overuse_with_metadata_double_ref() {
 
 #[test]
 fn test_ref_overuse_with_metadata_ref_in_middle_not_at_end() {
-    // Т.Ссылка.ИНН — Ссылка is at position 1, not >=2, so NOT RefOveruse → 0 diagnostics
     use bsl_metadata::{Attribute, AttributeType, MdoType, MetadataObject};
 
     let mut config = bsl_metadata::Configuration::new("TestConfig");
@@ -2160,7 +1962,6 @@ fn test_ref_overuse_with_metadata_ref_in_middle_not_at_end() {
 
 #[test]
 fn test_ref_overuse_with_metadata_chain_ref_at_end() {
-    // Т.Файл.Ссылка.Дата — Ссылка at position 2, field before it (Файл) is Ref → 1 diagnostic
     let config = create_config_with_ref_attribute();
 
     let code = "ВЫБРАТЬ Т.Файл.Ссылка.Дата КАК Дата ИЗ Справочник.СлужебныеФайлы КАК Т";
@@ -2181,7 +1982,6 @@ fn test_ref_overuse_with_metadata_chain_ref_at_end() {
 
 #[test]
 fn test_ref_overuse_with_metadata_simple_ref_no_error() {
-    // Т.Ссылка — just accessing the reference field of a table, NOT redundant → 0 diagnostics
     use bsl_metadata::{MdoType, MetadataObject};
 
     let mut config = bsl_metadata::Configuration::new("TestConfig");
@@ -2206,9 +2006,6 @@ fn test_ref_overuse_with_metadata_simple_ref_no_error() {
 
 #[test]
 fn test_nested_inner_left_join_types() {
-    // INNER JOIN with nested LEFT JOIN must preserve correct join types.
-    // Previously, join_type() used node.text() which included nested JOIN keywords,
-    // causing INNER to be misidentified as LEFT.
     let sdbl = "ВЫБРАТЬ
     ЧекККМ.Ссылка КАК Документ,
     ЕСТЬNULL(ДокЗаказ.НомерДокумента, \"\") КАК НомерЗаказа
@@ -2221,17 +2018,12 @@ fn test_nested_inner_left_join_types() {
     let hir = lower_query(sdbl);
 
     assert_eq!(hir.joins.len(), 2);
-    // Nested LEFT JOIN comes first (depth-first)
     assert_eq!(hir.joins[0].join_type, crate::hir::JoinType::Left);
     assert!(hir.joins[0].table.alias.as_ref().unwrap().eq_ignore_ascii_case("ДокЗаказ"));
-    // INNER JOIN comes second
     assert_eq!(hir.joins[1].join_type, crate::hir::JoinType::Inner);
     assert!(hir.joins[1].table.alias.as_ref().unwrap().eq_ignore_ascii_case("ЧекККМ"));
 }
 
-// ===== VALUE()/ЗНАЧЕНИЕ() Function Tests =====
-
-/// Helper: create config with an enum that has known values.
 fn create_config_with_enum() -> bsl_metadata::Configuration {
     use bsl_metadata::{metadata_object::EnumValue, MdoType, MetadataObject};
 
@@ -2255,7 +2047,6 @@ fn create_config_with_enum() -> bsl_metadata::Configuration {
 
 #[test]
 fn test_value_function_valid_enum_value_gets_field_name_token() {
-    // VALUE(Enum.GenderEnum.Male) with metadata should produce FieldName token for last part
     let config = create_config_with_enum();
 
     let code = "ВЫБРАТЬ 1 ИЗ Справочник.Тест КАК Т ГДЕ Т.Пол = ЗНАЧЕНИЕ(Перечисление.ПолФизическогоЛица.Мужской)";
@@ -2263,7 +2054,6 @@ fn test_value_function_valid_enum_value_gets_field_name_token() {
     let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(config)));
     let sm = &package.source_map;
 
-    // "Мужской" should be in field_names (resolved)
     let resolved: Vec<String> = sm.field_names.iter().map(|t| t.text.to_string()).collect();
     assert!(
         resolved.iter().any(|t| t == "Мужской"),
@@ -2271,7 +2061,6 @@ fn test_value_function_valid_enum_value_gets_field_name_token() {
         resolved
     );
 
-    // Must NOT appear in unresolved_field_names
     let unresolved: Vec<String> =
         sm.unresolved_field_names.iter().map(|t| t.text.to_string()).collect();
     assert!(
@@ -2283,7 +2072,6 @@ fn test_value_function_valid_enum_value_gets_field_name_token() {
 
 #[test]
 fn test_value_function_invalid_enum_value_gets_unresolved_token() {
-    // VALUE(Enum.X.InvalidValue) with metadata should produce UnresolvedFieldName token
     let config = create_config_with_enum();
 
     let code = "ВЫБРАТЬ 1 ИЗ Справочник.Тест КАК Т ГДЕ Т.Пол = ЗНАЧЕНИЕ(Перечисление.ПолФизическогоЛица.НесуществующееЗначение)";
@@ -2291,7 +2079,6 @@ fn test_value_function_invalid_enum_value_gets_unresolved_token() {
     let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(config)));
     let sm = &package.source_map;
 
-    // "НесуществующееЗначение" should be in unresolved_field_names
     let unresolved: Vec<String> =
         sm.unresolved_field_names.iter().map(|t| t.text.to_string()).collect();
     assert!(
@@ -2303,14 +2090,11 @@ fn test_value_function_invalid_enum_value_gets_unresolved_token() {
 
 #[test]
 fn test_value_function_empty_ref_always_valid() {
-    // VALUE(Catalog.Currencies.ПустаяСсылка) — EmptyRef is always valid regardless of metadata
-    // Use alias "Вал" (longer than single letter) to avoid parser ambiguity
     let code = "ВЫБРАТЬ 1 ИЗ Справочник.Валюты КАК Вал ГДЕ Вал.Пол = ЗНАЧЕНИЕ(Справочник.Валюты.ПустаяСсылка)";
     let ast = parser::parse_sdbl(code);
-    let package = lower_sdbl_to_hir(&ast, None); // no metadata
+    let package = lower_sdbl_to_hir(&ast, None);
     let sm = &package.source_map;
 
-    // "ПустаяСсылка" must be in field_names (not unresolved)
     let resolved: Vec<String> = sm.field_names.iter().map(|t| t.text.to_string()).collect();
     assert!(
         resolved.iter().any(|t| t == "ПустаяСсылка"),
@@ -2329,13 +2113,11 @@ fn test_value_function_empty_ref_always_valid() {
 
 #[test]
 fn test_value_function_without_metadata_graceful_degradation() {
-    // Without metadata, the value part of VALUE() should be FieldName (not unresolved)
     let code = "ВЫБРАТЬ 1 ИЗ Справочник.Тест КАК Т ГДЕ Т.Пол = ЗНАЧЕНИЕ(Перечисление.ПолФизическогоЛица.Мужской)";
     let ast = parser::parse_sdbl(code);
-    let package = lower_sdbl_to_hir(&ast, None); // no metadata
+    let package = lower_sdbl_to_hir(&ast, None);
     let sm = &package.source_map;
 
-    // "Мужской" should NOT appear in unresolved_field_names when there's no metadata
     let unresolved: Vec<String> =
         sm.unresolved_field_names.iter().map(|t| t.text.to_string()).collect();
     assert!(
@@ -2344,7 +2126,6 @@ fn test_value_function_without_metadata_graceful_degradation() {
         unresolved
     );
 
-    // "Мужской" should be in field_names
     let resolved: Vec<String> = sm.field_names.iter().map(|t| t.text.to_string()).collect();
     assert!(
         resolved.iter().any(|t| t == "Мужской"),
@@ -2355,13 +2136,11 @@ fn test_value_function_without_metadata_graceful_degradation() {
 
 #[test]
 fn test_value_function_mdo_type_and_table_name_tokens() {
-    // VALUE() arg parts 0 and 1 should be MdoType and TableName tokens respectively
     let code = "ВЫБРАТЬ 1 ИЗ Справочник.Тест КАК Т ГДЕ Т.Ссылка = ЗНАЧЕНИЕ(Перечисление.ПолФизическогоЛица.Мужской)";
     let ast = parser::parse_sdbl(code);
     let package = lower_sdbl_to_hir(&ast, None);
     let sm = &package.source_map;
 
-    // "Перечисление" should be in mdo_types
     let mdo_types: Vec<String> = sm.mdo_types.iter().map(|t| t.text.to_string()).collect();
     assert!(
         mdo_types.iter().any(|t| t == "Перечисление"),
@@ -2369,7 +2148,6 @@ fn test_value_function_mdo_type_and_table_name_tokens() {
         mdo_types
     );
 
-    // "ПолФизическогоЛица" should be in table_names
     let table_names: Vec<String> = sm.table_names.iter().map(|t| t.text.to_string()).collect();
     assert!(
         table_names.iter().any(|t| t == "ПолФизическогоЛица"),
@@ -2378,7 +2156,6 @@ fn test_value_function_mdo_type_and_table_name_tokens() {
     );
 }
 
-/// Helper: create config with a catalog that has known predefined items.
 fn create_config_with_catalog_predefined() -> bsl_metadata::Configuration {
     use bsl_metadata::{metadata_object::PredefinedItem, MdoType, MetadataObject};
 
@@ -2402,7 +2179,6 @@ fn create_config_with_catalog_predefined() -> bsl_metadata::Configuration {
 
 #[test]
 fn test_value_function_valid_predefined_item_gets_field_name_token() {
-    // VALUE(Catalog.Currencies.Dollar) with metadata should produce FieldName token for last part
     let config = create_config_with_catalog_predefined();
 
     let code = "ВЫБРАТЬ 1 ИЗ Справочник.Валюты КАК Вал ГДЕ Вал.Ссылка = ЗНАЧЕНИЕ(Справочник.Валюты.Доллар)";
@@ -2410,7 +2186,6 @@ fn test_value_function_valid_predefined_item_gets_field_name_token() {
     let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(config)));
     let sm = &package.source_map;
 
-    // "Доллар" should be in field_names (resolved)
     let resolved: Vec<String> = sm.field_names.iter().map(|t| t.text.to_string()).collect();
     assert!(
         resolved.iter().any(|t| t == "Доллар"),
@@ -2418,7 +2193,6 @@ fn test_value_function_valid_predefined_item_gets_field_name_token() {
         resolved
     );
 
-    // Must NOT appear in unresolved_field_names
     let unresolved: Vec<String> =
         sm.unresolved_field_names.iter().map(|t| t.text.to_string()).collect();
     assert!(
@@ -2430,7 +2204,6 @@ fn test_value_function_valid_predefined_item_gets_field_name_token() {
 
 #[test]
 fn test_value_function_invalid_predefined_item_gets_unresolved_token() {
-    // VALUE(Catalog.Currencies.NonExistent) with metadata should produce UnresolvedFieldName token
     let config = create_config_with_catalog_predefined();
 
     let code = "ВЫБРАТЬ 1 ИЗ Справочник.Валюты КАК Вал ГДЕ Вал.Ссылка = ЗНАЧЕНИЕ(Справочник.Валюты.Несуществующий)";
@@ -2438,7 +2211,6 @@ fn test_value_function_invalid_predefined_item_gets_unresolved_token() {
     let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(config)));
     let sm = &package.source_map;
 
-    // "Несуществующий" should be in unresolved_field_names
     let unresolved: Vec<String> =
         sm.unresolved_field_names.iter().map(|t| t.text.to_string()).collect();
     assert!(
@@ -2450,11 +2222,9 @@ fn test_value_function_invalid_predefined_item_gets_unresolved_token() {
 
 #[test]
 fn test_value_function_predefined_item_empty_list_graceful_degradation() {
-    // When predefined_items is empty, should not flag as error (graceful degradation)
     use bsl_metadata::{MdoType, MetadataObject};
 
     let mut config = bsl_metadata::Configuration::new("TestConfig");
-    // Catalog exists but has no predefined_items loaded
     let catalog_obj = MetadataObject::new(MdoType::Catalog, "Валюты");
     config.add_metadata_object(catalog_obj);
 
@@ -2463,7 +2233,6 @@ fn test_value_function_predefined_item_empty_list_graceful_degradation() {
     let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(config)));
     let sm = &package.source_map;
 
-    // "ЛюбоеЗначение" should be in field_names (not unresolved) because predefined_items is empty
     let resolved: Vec<String> = sm.field_names.iter().map(|t| t.text.to_string()).collect();
     assert!(
         resolved.iter().any(|t| t == "ЛюбоеЗначение"),
@@ -2533,9 +2302,6 @@ fn test_join_paren_field_resolution() {
     assert!(!resolved.is_empty(), "Fields inside parens should produce resolved field tokens");
 }
 
-// ===== Virtual Table Field Resolution Tests =====
-
-/// Helper: create a config with an AccumulationRegister that has dimensions and resources.
 fn create_config_with_accumulation_register() -> bsl_metadata::Configuration {
     use bsl_metadata::{
         dimension::DimensionBuilder, register::RegisterResource, MdoType, Register,
@@ -2566,13 +2332,11 @@ fn test_virtual_table_turnovers_field_generation() {
     let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(config)));
     let hir = single_query_hir(&package);
 
-    // Check table resolved as Register
     assert_eq!(hir.from.len(), 1);
     let table_ref = &hir.from[0];
     assert!(table_ref.is_virtual_table);
     let resolved = table_ref.metadata.as_ref().expect("Should have metadata");
 
-    // Check fields: standard (Период, Регистратор, НомерСтроки) + Партнер + СуммаОборот + КоличествоОборот
     let fields = resolved.fields();
     let field_names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
 
@@ -2594,7 +2358,6 @@ fn test_virtual_table_turnovers_field_generation() {
         field_names
     );
 
-    // Raw resource names should NOT be present
     assert!(!field_names.contains(&"Сумма"), "Should NOT have raw Сумма, got: {:?}", field_names);
     assert!(
         !field_names.contains(&"Количество"),
@@ -2602,7 +2365,6 @@ fn test_virtual_table_turnovers_field_generation() {
         field_names
     );
 
-    // No UnknownField diagnostics
     let unknown_diags: Vec<_> = package
         .all_diagnostics()
         .filter(|d| matches!(d, crate::diagnostics::SdblDiagnostic::UnknownField { .. }))
@@ -2702,7 +2464,6 @@ fn test_virtual_table_slice_last_preserves_fields() {
     let resolved = hir.from[0].metadata.as_ref().expect("Should have metadata");
     let field_names: Vec<&str> = resolved.fields().iter().map(|f| f.name.as_str()).collect();
 
-    // SliceLast preserves fields as-is + adds Период
     assert!(field_names.contains(&"Валюта"), "Should have Валюта");
     assert!(field_names.contains(&"Курс"), "Should have Курс (not suffixed)");
     assert!(field_names.contains(&"Период"), "Should have Период");
@@ -2711,13 +2472,11 @@ fn test_virtual_table_slice_last_preserves_fields() {
 #[test]
 fn test_virtual_table_param_scope_resolves_dimension() {
     let config = create_config_with_accumulation_register();
-    // Партнер in the VT condition should resolve as a register dimension
     let code = "ВЫБРАТЬ Т.Партнер ИЗ РегистрНакопления.ИзмененияВНакопленияхКлиента.Обороты(,,, Партнер В (ВЫБРАТЬ 1)) КАК Т";
 
     let ast = parser::parse_sdbl(code);
     let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(config)));
 
-    // No UnknownField diagnostic for Партнер in condition
     let unknown_diags: Vec<_> = package
         .all_diagnostics()
         .filter(|d| {
@@ -2734,14 +2493,12 @@ fn test_virtual_table_param_scope_resolves_dimension() {
 #[test]
 fn test_virtual_table_periodicity_resolved() {
     let config = create_config_with_accumulation_register();
-    // Авто is a periodicity value — should not be unresolved
     let code = "ВЫБРАТЬ Т.Партнер ИЗ РегистрНакопления.ИзмененияВНакопленияхКлиента.Обороты(,, Авто, Партнер В (ВЫБРАТЬ 1)) КАК Т";
 
     let ast = parser::parse_sdbl(code);
     let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(config)));
     let sm = &package.source_map;
 
-    // Авто should be in special_keywords, not in unresolved
     let special: Vec<String> = sm.special_keywords.iter().map(|t| t.text.to_string()).collect();
     let unresolved: Vec<String> =
         sm.unresolved_field_names.iter().map(|t| t.text.to_string()).collect();
@@ -2850,15 +2607,6 @@ fn chart_of_characteristic_ref_and_index_by_are_semantically_highlighted() {
 
 #[test]
 fn defined_type_inside_composite_resolves_through_metadata() {
-    // Codex Q7a regression test.
-    //
-    // `AttributeType::Composite { types: [DefinedType("X"), Boolean] }` —
-    // the original SDBL `resolve_attribute_type` only matched the
-    // top-level `DefinedType` arm and fell through to
-    // `SdblType::from_attribute_type` for `Composite`. The latter is
-    // metadata-unaware: it produces `SdblType::DefinedType { name: "X",
-    // underlying_type: None }` for nested DefinedType arms even when the
-    // underlying type is reachable through the configuration.
     use crate::lower::context::LoweringContext;
     use crate::types::SdblType;
     use bsl_metadata::{AttributeType, Configuration, DefinedType, Uuid};
@@ -2880,10 +2628,6 @@ fn defined_type_inside_composite_resolves_through_metadata() {
 
     let resolved = ctx.resolve_attribute_type(&composite);
 
-    // The composite arm carrying `DefinedType("X")` must reflect that
-    // metadata resolved its underlying — i.e. the DefinedType wrapper is
-    // present *with* `underlying_type: Some(...)`, not the metadata-blind
-    // `None` shape that the bug produced.
     let arms = match &resolved {
         SdblType::Composite { types } => types.clone(),
         other => panic!("expected Composite, got {other:?}"),
@@ -2902,18 +2646,6 @@ fn defined_type_inside_composite_resolves_through_metadata() {
     assert_eq!(*underlying, SdblType::Boolean);
 }
 
-// ============================================================================
-// PARSER-BUG-002b lowering follow-up — soft-keyword table-name parts.
-//
-// Parser-side `at_property_name` accepts SDBL retained-keyword tokens
-// (`KW_IN`/`KW_AND`/`KW_OR`/`KW_NOT`/`KW_TRUE`/`KW_FALSE`/`KW_UNDEFINED`)
-// as property-name slots after a `.`. Lowering's `parse_table_name`
-// must mirror that — otherwise a 2-part path like `Справочник.В`
-// collapses to `["Справочник"]` and silently fails metadata
-// resolution. Regression for the IDENT-only filter at the time of
-// Track 6.1 follow-up PARSER-BUG-002b.
-// ============================================================================
-
 #[test]
 fn test_parse_table_name_keeps_soft_keyword_part_kw_in() {
     let hir = lower_query("ВЫБРАТЬ * ИЗ Справочник.В");
@@ -2931,8 +2663,6 @@ fn test_parse_table_name_keeps_soft_keyword_part_kw_in() {
 
 #[test]
 fn test_parse_table_name_keeps_soft_keyword_part_literal_kw() {
-    // `Истина` is a `KW_TRUE` token; verify the literal-keyword arm of
-    // the retained set survives lowering too.
     let hir = lower_query("ВЫБРАТЬ * ИЗ Справочник.Истина");
     let table = &hir.from[0];
     assert_eq!(
@@ -2946,8 +2676,6 @@ fn test_parse_table_name_keeps_soft_keyword_part_literal_kw() {
 
 #[test]
 fn asterisk_qualifier_lowers_bare_star_as_none() {
-    // Bare `*` carries no qualifier — `asterisk_qualifier == None`. The
-    // bridge interprets that as "expand every table in scope".
     let hir = lower_query("ВЫБРАТЬ * ИЗ Справочник.Товары");
     let field = &hir.select.fields[0];
     assert!(field.is_asterisk);
@@ -2956,30 +2684,11 @@ fn asterisk_qualifier_lowers_bare_star_as_none() {
 
 #[test]
 fn asterisk_qualifier_lowers_aliased_star() {
-    // `Т.*` — qualifier is the single alias identifier, preserved
-    // case-exact. Bridge does case-insensitive matching against the
-    // table's `effective_name()`.
     let hir = lower_query("ВЫБРАТЬ Т.* ИЗ Справочник.Товары КАК Т");
     let field = &hir.select.fields[0];
     assert!(field.is_asterisk);
     assert_eq!(field.asterisk_qualifier.as_deref(), Some("Т"));
 }
-
-// Multi-segment qualifiers (e.g. `Справочник.Товары.*` without an alias)
-// are deliberately NOT recognised by the parser's
-// `is_asterisk_start` gate — they fall through to expression parsing
-// (see `crates/parser/src/grammar/sdbl/select.rs:383`). The bridge's
-// expand_asterisk supports multi-segment matches for forward-compat
-// if a future parser hand-off reaches `asterisk_field` directly, but
-// the end-to-end path from BSL source today is alias-only `Т.*`.
-
-// Phase G — CAST/ВЫРАЗИТЬ target-type lowering.
-//
-// `ВЫРАЗИТЬ(value КАК <SDBL_TYPE>)` resolves the target spec node into a
-// precise `SdblType` (primitive with optional precision/length, or MDO
-// reference) and stores it on the resulting `ExprHir::FunctionCall.ty`,
-// which the SELECT lowerer copies to `FieldHir.ty`. The bridge then
-// renders `SdblTypeShadowFacet.display` via `SdblType::Display`.
 
 fn cast_field_ty(sdbl: &str) -> crate::types::SdblType {
     let hir = lower_query(sdbl);
@@ -3000,7 +2709,6 @@ fn cast_number_precision_only_lowers_to_partial_number() {
     use crate::types::SdblType;
     let ty = cast_field_ty("ВЫБРАТЬ ВЫРАЗИТЬ(0 КАК Число(15)) КАК Цена");
     assert_eq!(ty, SdblType::Number { precision: Some(15), scale: None });
-    // Display extension on `Number { Some(p), None }` — Phase G Slice 2.
     assert_eq!(ty.to_string(), "Число(15)");
 }
 
@@ -3045,15 +2753,51 @@ fn cast_mdo_reference_lowers_to_ref_type() {
 #[test]
 fn cast_unrecognised_primitive_name_collapses_to_unknown() {
     use crate::types::SdblType;
-    // Single-segment IDENT that doesn't match a known primitive — keeps the
-    // pre-Phase-G fallback so we don't pretend to know a made-up type.
     assert_eq!(cast_field_ty("ВЫБРАТЬ ВЫРАЗИТЬ(0 КАК Несуществующий) КАК X"), SdblType::Unknown);
 }
 
 #[test]
 fn cast_unknown_mdo_qualifier_collapses_to_unknown() {
     use crate::types::SdblType;
-    // First segment isn't a valid MdoType — collapses to Unknown rather
-    // than guessing at the prefix.
     assert_eq!(cast_field_ty("ВЫБРАТЬ ВЫРАЗИТЬ(0 КАК Foo.Bar) КАК X"), SdblType::Unknown);
+}
+
+#[test]
+fn collect_resolved_attributes_first_hop_skips_standard() {
+    use crate::hir::SdblHir;
+    use bsl_metadata::{Attribute, AttributeType, Configuration, MdoType, MetadataObject};
+    use std::sync::Arc;
+
+    let mut config = Configuration::new("Test");
+    let mut catalog = MetadataObject::new(MdoType::Catalog, "Валюты");
+    catalog.add_attribute(Attribute {
+        name: "Курс".to_string(),
+        name_en: Some("Rate".to_string()),
+        attr_type: AttributeType::Number { precision: 15, scale: 4 },
+    });
+    catalog.add_attribute(Attribute {
+        name: "Код".to_string(),
+        name_en: Some("Code".to_string()),
+        attr_type: AttributeType::String { length: Some(10) },
+    });
+    config.add_metadata_object(catalog);
+
+    let ast = parser::parse_sdbl("ВЫБРАТЬ Валюты.Курс, Валюты.Код ИЗ Справочник.Валюты КАК Валюты");
+    let package = lower_sdbl_to_hir(&ast, Some(Arc::new(config)));
+
+    let mut attrs: Vec<(MdoType, String, String)> = Vec::new();
+    for query in package.queries() {
+        SdblHir::collect_resolved_attributes(&query.hir, &mut attrs);
+    }
+
+    // Курс (user attribute, qualified by alias) resolves to its attribute node.
+    assert!(
+        attrs.iter().any(|(t, o, a)| *t == MdoType::Catalog && o == "Валюты" && a == "Курс"),
+        "user attribute Валюты.Курс must resolve: {attrs:?}"
+    );
+    // Код is a standard (platform) attribute → skipped.
+    assert!(
+        !attrs.iter().any(|(_, _, a)| a == "Код"),
+        "standard attribute Код must be skipped: {attrs:?}"
+    );
 }

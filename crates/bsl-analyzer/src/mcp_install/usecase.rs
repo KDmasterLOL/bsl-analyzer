@@ -16,7 +16,7 @@ pub(super) fn build_install_plan(mut request: InstallRequest) -> Result<InstallP
 
     validate_preset_scope(&request)?;
     let targets = resolve_targets(request.target, request.scope)?;
-    let spec = preset::build_server_spec(&request);
+    let spec = preset::build_server_spec(&request, &preset::resolve_self_binary());
 
     let actions = targets
         .into_iter()

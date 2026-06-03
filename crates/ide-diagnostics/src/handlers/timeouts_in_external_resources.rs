@@ -1,5 +1,3 @@
-//! Checks that known external-resource objects are created with an explicit timeout.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};

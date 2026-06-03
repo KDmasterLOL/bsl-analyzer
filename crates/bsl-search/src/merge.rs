@@ -2,14 +2,12 @@ use std::collections::HashSet;
 
 use crate::domain::{LexicalHit, OverlayChange, SearchOverlay, SemanticHit};
 
-/// Source of a merged search hit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HitSource {
     Baseline,
     Overlay,
 }
 
-/// Unified hit produced by merging baseline and overlay results.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MergedHit {
     pub collection: String,
@@ -23,15 +21,10 @@ pub struct MergedHit {
     pub source: HitSource,
 }
 
-/// Context for filtering baseline hits against overlay state.
 pub struct MergeContext {
-    /// Paths hidden by local deletes or replacements — baseline hits for
-    /// these `(collection, path)` pairs are excluded from results.
     pub hidden_paths: HashSet<(String, String)>,
 }
 
-/// Build a [`MergeContext`] from an overlay, collecting all paths that
-/// should be hidden in baseline results (deleted + replaced files).
 pub fn build_merge_context(overlay: &SearchOverlay) -> MergeContext {
     let mut hidden_paths = HashSet::new();
     for change in &overlay.changes {
@@ -50,23 +43,12 @@ pub fn build_merge_context(overlay: &SearchOverlay) -> MergeContext {
     MergeContext { hidden_paths }
 }
 
-/// Build a [`MergeContext`] from path-only hidden paths for a single collection.
-///
-/// Used when the overlay cache provides `HashSet<String>` (path only) and
-/// all paths belong to one collection (e.g. `"code"`).
 pub fn merge_context_for_collection(paths: &HashSet<String>, collection: &str) -> MergeContext {
     MergeContext {
         hidden_paths: paths.iter().map(|p| (collection.to_owned(), p.clone())).collect(),
     }
 }
 
-/// Merge baseline and overlay lexical hits into a single ranked list.
-///
-/// 1. Filter baseline hits whose path is hidden by overlay.
-/// 2. Convert both sources to [`MergedHit`].
-/// 3. Sort by score descending; overlay wins ties.
-/// 4. Deduplicate by `(collection, path, symbol_name, line_start, line_end)`.
-/// 5. Truncate to `limit`.
 pub fn merge_lexical(
     baseline_hits: &[LexicalHit],
     overlay_hits: &[LexicalHit],
@@ -103,10 +85,6 @@ pub fn merge_lexical(
     merge_and_rank(baseline_iter, overlay_iter, limit)
 }
 
-/// Merge baseline and overlay semantic hits into a single ranked list.
-///
-/// Same algorithm as [`merge_lexical`] but works with [`SemanticHit`]
-/// (score instead of rank, no text).
 pub fn merge_semantic(
     baseline_hits: &[SemanticHit],
     overlay_hits: &[SemanticHit],
@@ -162,10 +140,8 @@ fn merge_and_rank(
 ) -> Vec<MergedHit> {
     let mut merged: Vec<MergedHit> = baseline.chain(overlay).collect();
 
-    // Sort: score DESC (NaN sorts last via total_cmp), overlay first on tie.
     merged.sort_by(|a, b| {
         b.score.total_cmp(&a.score).then_with(|| {
-            // Overlay (0) before Baseline (1) — lower discriminant wins.
             let ord_a = match a.source {
                 HitSource::Overlay => 0u8,
                 HitSource::Baseline => 1,
@@ -178,7 +154,6 @@ fn merge_and_rank(
         })
     });
 
-    // Dedup: first occurrence (highest score / overlay preference) wins.
     let mut seen = HashSet::new();
     merged.retain(|hit| seen.insert(dedup_key(hit)));
 
@@ -226,7 +201,6 @@ mod tests {
         }
     }
 
-    // 1. Empty overlay returns baseline unchanged.
     #[test]
     fn empty_overlay_returns_baseline_unchanged() {
         let baseline = vec![
@@ -240,7 +214,6 @@ mod tests {
         assert!(result.iter().all(|h| h.source == HitSource::Baseline));
     }
 
-    // 2. Added file appears from overlay.
     #[test]
     fn added_file_appears_from_overlay() {
         let baseline = vec![lexical("code", "src/a.bsl", "Proc1", 0.9)];
@@ -253,7 +226,6 @@ mod tests {
         assert_eq!(result[1].source, HitSource::Baseline);
     }
 
-    // 3. Replaced file hides baseline, overlay visible.
     #[test]
     fn replaced_file_hides_baseline() {
         let baseline = vec![lexical("code", "src/a.bsl", "OldProc", 0.9)];
@@ -265,7 +237,6 @@ mod tests {
         assert_eq!(result[0].source, HitSource::Overlay);
     }
 
-    // 4. Deleted file hides baseline, no overlay for that path.
     #[test]
     fn deleted_file_hides_baseline() {
         let baseline = vec![
@@ -278,7 +249,6 @@ mod tests {
         assert_eq!(result[0].symbol_name, "Proc2");
     }
 
-    // 5. Lexical baseline hits filtered by replacement.
     #[test]
     fn lexical_baseline_filtered_by_replacement() {
         let baseline = vec![
@@ -296,7 +266,6 @@ mod tests {
         assert_eq!(result[1].source, HitSource::Overlay);
     }
 
-    // 6. Semantic baseline hits filtered by replacement.
     #[test]
     fn semantic_baseline_filtered_by_replacement() {
         let baseline = vec![
@@ -313,7 +282,6 @@ mod tests {
         assert_eq!(result[1].source, HitSource::Overlay);
     }
 
-    // 7. Overlay wins ties.
     #[test]
     fn overlay_wins_ties() {
         let baseline = vec![lexical("code", "src/a.bsl", "Proc", 0.85)];
@@ -324,7 +292,6 @@ mod tests {
         assert_eq!(result[1].source, HitSource::Baseline);
     }
 
-    // 8. Degraded semantic mode — empty overlay, baseline only.
     #[test]
     fn degraded_semantic_mode() {
         let baseline = vec![
@@ -337,7 +304,6 @@ mod tests {
         assert!(result.iter().all(|h| h.text.is_none()));
     }
 
-    // build_merge_context correctness.
     #[test]
     fn build_merge_context_collects_hidden_paths() {
         let mut overlay =
@@ -351,7 +317,6 @@ mod tests {
         assert_eq!(ctx.hidden_paths.len(), 2);
     }
 
-    // NaN scores have deterministic ordering via total_cmp (NaN is largest f32).
     #[test]
     fn nan_scores_deterministic_ordering() {
         let baseline = vec![
@@ -360,12 +325,10 @@ mod tests {
         ];
         let result = merge_lexical(&baseline, &[], &empty_context(), 10);
         assert_eq!(result.len(), 2);
-        // NaN is the largest f32 under total_cmp → sorts first in DESC.
         assert_eq!(result[0].symbol_name, "NanHit");
         assert_eq!(result[1].symbol_name, "Good");
     }
 
-    // Identical hit from baseline and overlay dedups to overlay version.
     #[test]
     fn duplicate_hit_dedups_to_overlay() {
         let baseline = vec![lexical("code", "src/a.bsl", "Proc", 0.9)];
@@ -375,7 +338,6 @@ mod tests {
         assert_eq!(result[0].source, HitSource::Overlay);
     }
 
-    // Truncation happens after dedup.
     #[test]
     fn limit_truncates_after_dedup() {
         let baseline = vec![
@@ -396,7 +358,6 @@ mod tests {
         assert!(result.is_empty());
     }
 
-    // End-to-end: build_merge_context feeds into merge_lexical.
     #[test]
     fn end_to_end_context_into_merge() {
         let mut overlay =

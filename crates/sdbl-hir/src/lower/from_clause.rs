@@ -1,18 +1,14 @@
-//! FROM clause lowering and table resolution.
-
 use crate::diagnostics::SdblDiagnostic;
 use crate::hir::{FieldDef, Name, ResolvedTable, TableRef};
-use crate::scope::is_standard_attribute_name;
 use crate::standard_fields::{is_virtual_table_name, virtual_table_type};
 use crate::SdblType;
-use bsl_metadata::MdoType;
+use bsl_metadata::{is_standard_attribute_name, MdoType};
 use syntax::ast::AstNode;
 use text_size::TextRange;
 
 use super::context::LoweringContext;
 
 impl LoweringContext {
-    /// Lower FROM clause.
     pub(super) fn lower_from_clause(
         &mut self,
         from_clause: Option<syntax::ast::SdblFromClause>,
@@ -21,7 +17,6 @@ impl LoweringContext {
             return Vec::new();
         };
 
-        // Record FROM keyword
         self.record_keyword_by_text(
             from.syntax(),
             "FROM",
@@ -32,13 +27,7 @@ impl LoweringContext {
         from.data_sources().map(|ds| self.lower_data_source_in_from(&ds)).collect()
     }
 
-    /// Lower a data source in FROM clause (checks for subquery/virtual table with JOINs).
     fn lower_data_source_in_from(&mut self, ds: &syntax::ast::SdblDataSource) -> TableRef {
-        // Check if this FROM data source has JOINs after subquery
-        // Example: FROM (SELECT ...) AS Sub LEFT JOIN T2 ...
-        // Track 2 §4 Slice 3: subqueries that aggregate (GROUP BY or aggregate
-        // function in SELECT list) are exempted — they are doing something the
-        // underlying table cannot, so the rule does not apply.
         if let Some(subquery) = ds.subquery() {
             if ds.join_clauses().next().is_some() && !subquery_has_aggregation(&subquery) {
                 self.diagnostics.push(SdblDiagnostic::JoinWithSubQuery {
@@ -47,7 +36,6 @@ impl LoweringContext {
             }
         }
 
-        // Check if this FROM data source is a virtual table with JOINs
         if let Some(table_ref) = ds.table_ref() {
             if ds.join_clauses().next().is_some() {
                 let parts: Vec<String> = table_ref
@@ -77,39 +65,21 @@ impl LoweringContext {
         self.lower_data_source(ds)
     }
 
-    /// Lower a data source (table or subquery).
     pub(super) fn lower_data_source(&mut self, ds: &syntax::ast::SdblDataSource) -> TableRef {
-        // Check for subquery
         if let Some(subquery) = ds.subquery() {
-            // NOTE: Diagnostic for "JOIN with subquery" is handled in join_clause.rs:114-117
-            // to avoid duplication. We only check for JOINs INSIDE the subquery here.
-
-            // Process ALL queries in subquery (main query + UNION queries)
             let mut all_hirs = Vec::new();
             let mut all_fields = Vec::new();
 
-            // Determine if there are UNION siblings in this subquery
             let queries: Vec<_> = subquery.queries().collect();
             let has_union_siblings = queries.len() > 1;
 
             for (query_index, query) in queries.into_iter().enumerate() {
-                // NOTE: Diagnostic for JOINs inside subquery is handled by lower_query()
-                // which calls lower_from_clause() -> lower_data_source_in_from()
-                // No need to check here to avoid duplication
-
-                // Push scope frame for nested query (isolate FROM/JOIN tables)
                 self.scope.push_frame();
 
-                // Lower the nested query to HIR
                 let nested_hir = self.lower_query(&query, has_union_siblings, query_index == 0);
 
-                // Pop scope frame
                 self.scope.pop_frame();
 
-                // NOTE: Don't copy nested query diagnostics to parent.
-                // all_diagnostics() recursively collects them from subquery HIR.
-
-                // Extract fields from SELECT for metadata (only from first query)
                 if all_fields.is_empty() {
                     all_fields = nested_hir
                         .select
@@ -126,14 +96,11 @@ impl LoweringContext {
             }
 
             if all_hirs.is_empty() {
-                // Fallback if no queries in subquery (should not happen in valid SDBL)
                 return TableRef::missing(ds.syntax().text_range());
             }
 
-            // Get alias
             let alias_name = ds.alias().and_then(|a| a.name().map(|n| Name::from(n.as_str())));
 
-            // Create TableRef with all subquery HIRs
             return TableRef {
                 parts: Vec::new(),
                 full_name: alias_name.as_ref().map(|a| a.to_string()).unwrap_or_default(),
@@ -156,23 +123,18 @@ impl LoweringContext {
         self.lower_table_ref(&table_ref, ds.alias())
     }
 
-    /// Lower table reference.
     fn lower_table_ref(
         &mut self,
         table_ref: &syntax::ast::SdblTableRef,
         alias: Option<syntax::ast::SdblAlias>,
     ) -> TableRef {
-        // Parse table name parts
         let parts = self.parse_table_name(table_ref);
         let full_name = parts.join(".");
 
-        // Check for virtual table
         let is_virtual = parts.last().map(|p| is_virtual_table_name(p)).unwrap_or(false);
 
-        // Resolve in metadata
         let (_metadata, mut resolved) = self.resolve_table(&parts, table_ref.syntax().text_range());
 
-        // Transform fields for virtual tables (e.g., Обороты → resources get Оборот suffix)
         if is_virtual {
             if let Some(vt_type) = parts.last().and_then(|p| virtual_table_type(p)) {
                 if let Some(r) = resolved.take() {
@@ -181,11 +143,6 @@ impl LoweringContext {
             }
         }
 
-        // NEW: Extract name-token ranges for semantic highlighting. Uses
-        // the same `is_name_token` filter as `parse_table_name` above so
-        // the ranges line up 1:1 with `parts` — without this, a soft-
-        // keyword MDO part (e.g. `Справочник.В`) would be present in
-        // `parts` but missing from `ident_ranges`, breaking the zip below.
         let ident_ranges: Vec<TextRange> = table_ref
             .syntax()
             .children_with_tokens()
@@ -197,10 +154,8 @@ impl LoweringContext {
             })
             .collect();
 
-        // NEW: Record each table name part in source_map
         for (idx, (part, range)) in parts.iter().zip(ident_ranges.iter()).enumerate() {
             let category = if resolved.is_some() {
-                // First part is MDO type (Справочник, Документ), rest are object names
                 if idx == 0 && parts.len() > 1 {
                     crate::source_map::TokenCategory::MdoType
                 } else {
@@ -215,10 +170,8 @@ impl LoweringContext {
             );
         }
 
-        // Get alias
         let alias_name = alias
             .and_then(|a| {
-                // Record AS/КАК keyword in source map for semantic highlighting
                 if a.has_as_keyword() {
                     self.record_keyword_by_text(
                         a.syntax(),
@@ -228,7 +181,6 @@ impl LoweringContext {
                     );
                 }
 
-                // NEW: Record table alias identifier
                 if let Some(ident_token) = a.identifier() {
                     self.source_map.add_token(
                         crate::source_map::TokenInfo::new(
@@ -244,16 +196,9 @@ impl LoweringContext {
             })
             .map(|s| Name::from(s.as_str()));
 
-        // Lower virtual table parameters if this is a virtual table
-        // Virtual table params are expression children inside SDBL_TABLE_REF after L_PAREN
-        // Example: РегистрНакопления.Расчеты.Обороты(&Начало, &Конец, , (A.B, C.D) В ...)
-        // Include ERROR nodes for empty parameter slots (e.g., "Остатки(, )")
         let virtual_table_params = if is_virtual {
             tracing::debug!(table_name = %full_name, "Lowering virtual table parameters");
 
-            // Push temporary scope with register dimensions for VT condition resolution.
-            // This allows unqualified references like `Партнер В (...)` in VT params
-            // to resolve against the register's dimensions.
             let has_vt_scope = if let Some(ref r) = resolved {
                 let dims = r.dimensions();
                 if !dims.is_empty() {
@@ -281,7 +226,6 @@ impl LoweringContext {
                 false
             };
 
-            // Determine VT type for positional parameter handling
             let vt_type = parts.last().and_then(|p| virtual_table_type(p));
             let has_periodicity = vt_type.map(|vt| vt.has_periodicity()).unwrap_or(false);
 
@@ -314,9 +258,6 @@ impl LoweringContext {
                 .into_iter()
                 .enumerate()
                 .map(|(idx, expr)| {
-                    // 3rd parameter (index 2) for Turnovers/BalanceAndTurnovers is periodicity.
-                    // The parser wraps single identifiers in precedence nodes
-                    // (LOGICAL_OR → ... → COLUMN_REF), so find the inner COLUMN_REF.
                     if idx == 2 && has_periodicity {
                         let col_ref = if expr.kind() == syntax::SyntaxKind::SDBL_COLUMN_REF {
                             Some(expr.clone())
@@ -352,7 +293,6 @@ impl LoweringContext {
                 })
                 .collect();
 
-            // Pop temporary VT scope
             if has_vt_scope {
                 self.scope.pop_frame();
             }
@@ -362,7 +302,6 @@ impl LoweringContext {
             Vec::new()
         };
 
-        // Check for VirtualTableCallWithoutParameters diagnostic
         if is_virtual {
             self.check_virtual_table_params(&full_name, &virtual_table_params, table_ref.syntax());
         }
@@ -379,21 +318,6 @@ impl LoweringContext {
         }
     }
 
-    /// Parse table name into parts.
-    ///
-    /// Walks the direct token children and collects name-token text. Virtual
-    /// tables put their parameters in child *nodes* (not direct tokens), so
-    /// the token filter naturally skips them — `Регистр.Расчеты.Обороты(...)`
-    /// yields `["Регистр", "Расчеты", "Обороты"]`.
-    ///
-    /// Uses `SyntaxKind::is_name_token` so that SDBL soft keywords retained
-    /// by `sdbl_token_converter::convert_sdbl_token_kind` (e.g. `KW_IN` for
-    /// `В`, `KW_AND` for `И`, `KW_TRUE` for `Истина`, …) are accepted as
-    /// part names. Post-Dot the parser now treats them as property-name
-    /// slots (PARSER-BUG-002b in `docs/diagnostics-audit/PARSER_FOLLOWUPS.md`);
-    /// the lowering filter must match or 2-part inputs like
-    /// `Справочник.В` would collapse to `["Справочник"]` and silently fail
-    /// metadata resolution.
     fn parse_table_name(&self, table_ref: &syntax::ast::SdblTableRef) -> Vec<String> {
         table_ref
             .syntax()
@@ -407,7 +331,6 @@ impl LoweringContext {
             .collect()
     }
 
-    /// Resolve table in metadata.
     fn resolve_table(
         &mut self,
         parts: &[String],
@@ -415,7 +338,6 @@ impl LoweringContext {
     ) -> (Option<MdoType>, Option<ResolvedTable>) {
         tracing::debug!(parts = ?parts, "Resolving table");
 
-        // Check for temporary tables first (single-part names)
         if parts.len() == 1 {
             let table_name = &parts[0];
             if let Some(temp_table) = self.scope.find_temp_table(table_name) {
@@ -435,36 +357,26 @@ impl LoweringContext {
             return (None, None);
         }
 
-        // Parse MDO type (first part)
         let mdo_type_str = &parts[0];
         let Ok(mdo_type) = mdo_type_str.parse::<MdoType>() else {
-            // Not a standard MDO type - could be alias or virtual table
             tracing::debug!(mdo_type_str = mdo_type_str, "Failed to parse MDO type");
             return (None, None);
         };
 
         let object_name = &parts[1];
 
-        // Handle ExternalDataSource specially (4-part or 6-part paths)
-        // 4-part: ВнешнийИсточникДанных.EDSName.Таблица.TableName
-        // 6-part: ВнешнийИсточникДанных.EDSName.Куб.CubeName.ТаблицаИзмерения.DimTableName
         if mdo_type == MdoType::ExternalDataSource && parts.len() >= 4 {
             return self.resolve_external_data_source(parts, range);
         }
 
-        // Check if this is a 3-part name (tabular section reference)
-        // But NOT if the third part is a virtual table name (СрезПоследних, Остатки, etc.)
         let tabular_section_name = if parts.len() == 3 && !is_virtual_table_name(&parts[2]) {
             Some(parts[2].as_str())
         } else {
             None
         };
 
-        // Check metadata if available
         if let Some(ref metadata) = self.metadata {
-            // Check if object exists in metadata
             let exists = match mdo_type {
-                // For registers, check in registers collection
                 MdoType::InformationRegister
                 | MdoType::AccumulationRegister
                 | MdoType::AccountingRegister
@@ -479,7 +391,6 @@ impl LoweringContext {
                     );
                     found.is_some()
                 }
-                // For other types (Catalog, Document, etc.), check in metadata_objects
                 _ => {
                     let found = metadata.has_metadata_object(mdo_type, object_name);
                     tracing::debug!(
@@ -498,7 +409,6 @@ impl LoweringContext {
                     object_name = object_name,
                     "Table not found in metadata"
                 );
-                // Emit diagnostic: QueryToMissingMetadata
                 self.diagnostics.push(SdblDiagnostic::QueryToMissingMetadata {
                     table_name: parts.join("."),
                     range,
@@ -509,7 +419,6 @@ impl LoweringContext {
             tracing::debug!("No metadata available for validation");
         }
 
-        // Build resolved table
         let full_name_for_logging = parts.join(".");
         let is_register = matches!(
             mdo_type,
@@ -529,14 +438,12 @@ impl LoweringContext {
             "resolve_table: Starting field resolution"
         );
 
-        // Registers (without tabular section) → Register variant with structured fields
         if is_register && tabular_section_name.is_none() {
             let resolved =
                 self.build_register_resolved(mdo_type, object_name, &full_name_for_logging);
             return (Some(mdo_type), resolved);
         }
 
-        // Non-register types and tabular sections → Metadata variant
         let mut fields = Vec::new();
         if self.metadata.is_some() {
             self.add_metadata_fields(
@@ -560,7 +467,6 @@ impl LoweringContext {
         (Some(mdo_type), Some(resolved))
     }
 
-    /// Build `ResolvedTable::Register` with structured dimensions/resources/attributes.
     fn build_register_resolved(
         &self,
         mdo_type: MdoType,
@@ -607,7 +513,6 @@ impl LoweringContext {
             ));
         }
 
-        // Combined fields for API compatibility
         let mut fields = Vec::new();
         fields.extend(dimensions.iter().cloned());
         fields.extend(resources.iter().cloned());
@@ -634,13 +539,6 @@ impl LoweringContext {
         })
     }
 
-    /// Transform register fields for a virtual table type.
-    ///
-    /// Generates synthetic fields based on virtual table semantics:
-    /// - Обороты: resources get `Оборот` suffix
-    /// - Остатки: resources get `Остаток` suffix
-    /// - ОстаткиИОбороты: resources get three suffix variants
-    /// - СрезПоследних/СрезПервых: fields as-is + Период
     fn transform_for_virtual_table(
         resolved: ResolvedTable,
         vt_type: crate::standard_fields::VirtualTableType,
@@ -764,7 +662,6 @@ impl LoweringContext {
                     attributes,
                 }
             }
-            // Changes, RecordsWithExtDimensions, etc. — fields as-is
             _ => ResolvedTable::Register {
                 mdo_type,
                 name: name.clone(),
@@ -782,7 +679,6 @@ impl LoweringContext {
         }
     }
 
-    /// Add fields from metadata to the fields list.
     fn add_metadata_fields(
         &self,
         mdo_type: MdoType,
@@ -796,17 +692,12 @@ impl LoweringContext {
             return;
         };
 
-        // Handle tabular section if 3-part name detected
         if let Some(ts_name) = tabular_section_name {
             self.add_tabular_section_fields(mdo_type, object_name, ts_name, full_name, fields);
-            return; // Early return - don't process as main object
+            return;
         }
 
-        // Continue with existing logic for non-register main objects
-        // (Registers are handled by build_register_resolved() in resolve_table())
         match mdo_type {
-            // For object-like metadata tables, add attributes collected by metadata loading,
-            // including platform standard attributes such as Ссылка/Ref.
             MdoType::Catalog
             | MdoType::Document
             | MdoType::BusinessProcess
@@ -859,7 +750,6 @@ impl LoweringContext {
         }
     }
 
-    /// Add fields from tabular section to the fields list.
     fn add_tabular_section_fields(
         &self,
         mdo_type: MdoType,
@@ -881,7 +771,6 @@ impl LoweringContext {
             "add_tabular_section_fields: Looking up tabular section in metadata"
         );
 
-        // 1. Validate MDO type supports tabular sections
         match mdo_type {
             MdoType::Catalog
             | MdoType::Document
@@ -889,9 +778,7 @@ impl LoweringContext {
             | MdoType::Task
             | MdoType::ExchangePlan
             | MdoType::ChartOfCharacteristicTypes
-            | MdoType::ChartOfAccounts => {
-                // Valid - continue
-            }
+            | MdoType::ChartOfAccounts => {}
             _ => {
                 tracing::debug!(
                     mdo_type = ?mdo_type,
@@ -903,8 +790,6 @@ impl LoweringContext {
             }
         }
 
-        // 2. Find parent object in metadata
-        // Note: parent object may come from extension (not loaded)
         let Some(parent_obj) = metadata.find_metadata_object(mdo_type, object_name) else {
             tracing::debug!(
                 mdo_type = ?mdo_type,
@@ -914,8 +799,6 @@ impl LoweringContext {
             return;
         };
 
-        // 3. Find tabular section by name
-        // Note: tabular section may come from extension (not loaded)
         let Some(tabular_section) = parent_obj.find_tabular_section(tabular_section_name) else {
             tracing::debug!(
                 mdo_type = ?mdo_type,
@@ -935,33 +818,29 @@ impl LoweringContext {
             "Found tabular section in metadata"
         );
 
-        // 4. Add standard Ссылка field (reference to parent object)
         let ref_type = SdblType::reference(mdo_type, object_name);
         fields.push(FieldDef::new_with_names(
             "Ссылка".to_string(),
             Some("Ref".to_string()),
             ref_type,
-            true, // is_standard
+            true,
         ));
 
-        // 4b. Add standard НомерСтроки field
         fields.push(FieldDef::new_with_names(
             "НомерСтроки".to_string(),
             Some("LineNumber".to_string()),
             SdblType::number(),
-            true, // is_standard
+            true,
         ));
 
-        // 5. Add all tabular section attributes
         for attribute in tabular_section.attributes() {
-            // Use structured AttributeType directly (single source of truth)
             let ty = SdblType::from_attribute_type(attribute.attr_type());
 
             fields.push(FieldDef::new_with_names(
                 attribute.name().to_string(),
                 attribute.name_en().map(|s| s.to_string()),
                 ty,
-                false, // Not a standard attribute
+                false,
             ));
         }
 
@@ -974,11 +853,6 @@ impl LoweringContext {
         );
     }
 
-    /// Resolve ExternalDataSource table path.
-    ///
-    /// Handles 4-part and 6-part paths:
-    /// - 4-part: ВнешнийИсточникДанных.EDSName.Таблица.TableName
-    /// - 6-part: ВнешнийИсточникДанных.EDSName.Куб.CubeName.ТаблицаИзмерения.DimTableName
     fn resolve_external_data_source(
         &mut self,
         parts: &[String],
@@ -997,7 +871,6 @@ impl LoweringContext {
             return (Some(MdoType::ExternalDataSource), None);
         };
 
-        // Check if EDS exists
         let eds_obj = metadata.find_metadata_object(MdoType::ExternalDataSource, eds_name);
         if eds_obj.is_none() {
             tracing::debug!(eds_name = %eds_name, "ExternalDataSource not found in metadata");
@@ -1010,13 +883,9 @@ impl LoweringContext {
 
         let eds_obj = eds_obj.unwrap();
 
-        // Check 3rd part: "Таблица"/"Table" or "Куб"/"Cube"
         let container_type = parts[2].to_lowercase();
 
-        // 4-part path: ВнешнийИсточникДанных.EDSName.Таблица.TableName
         if parts.len() == 4 && (container_type == "таблица" || container_type == "table") {
-            // For now, we don't validate individual tables inside EDS
-            // This would require loading Table children which is not yet implemented
             tracing::debug!(
                 eds_name = %eds_name,
                 table_name = %parts[3],
@@ -1025,13 +894,11 @@ impl LoweringContext {
             return (Some(MdoType::ExternalDataSource), None);
         }
 
-        // 6-part path: ВнешнийИсточникДанных.EDSName.Куб.CubeName.ТаблицаИзмерения.DimTableName
         if parts.len() == 6 && (container_type == "куб" || container_type == "cube") {
             let cube_name = &parts[3];
             let dim_table_type = parts[4].to_lowercase();
             let dim_table_name = &parts[5];
 
-            // Validate Cube exists in EDS children
             let cube_obj = eds_obj.find_child(cube_name);
             if cube_obj.is_none() {
                 tracing::debug!(
@@ -1048,7 +915,6 @@ impl LoweringContext {
 
             let cube_obj = cube_obj.unwrap();
 
-            // Validate DimensionTable if path specifies it
             if dim_table_type == "таблицаизмерения" || dim_table_type == "dimensiontable"
             {
                 let dim_table_obj = cube_obj.find_child(dim_table_name);
@@ -1078,7 +944,6 @@ impl LoweringContext {
             return (Some(MdoType::ExternalDataSource), None);
         }
 
-        // Fallback for other patterns
         tracing::debug!(
             parts = ?parts,
             "Unhandled EDS path pattern"
@@ -1086,12 +951,6 @@ impl LoweringContext {
         (Some(MdoType::ExternalDataSource), None)
     }
 
-    /// Resolve [`bsl_metadata::AttributeType`] to [`SdblType`], expanding a
-    /// `DefinedType` reference through the attached metadata.
-    ///
-    /// Recursion is cycle-guarded — `A → B → A` shaped chains in the
-    /// configuration return a `DefinedType` node with `underlying_type = None`
-    /// instead of overflowing the stack.
     pub(crate) fn resolve_attribute_type(
         &self,
         attr_type: &bsl_metadata::AttributeType,
@@ -1111,9 +970,6 @@ impl LoweringContext {
             AttributeType::DefinedType { name } => {
                 let key = name.to_lowercase();
                 if !visited.insert(key.clone()) {
-                    // Cycle detected — return the surface name without an
-                    // underlying type so downstream consumers still see "this
-                    // is some DefinedType" but cannot recurse further.
                     return SdblType::DefinedType { name: name.clone(), underlying_type: None };
                 }
                 let underlying_type =
@@ -1122,20 +978,9 @@ impl LoweringContext {
                             Box::new(self.resolve_attribute_type_inner(underlying, visited))
                         },
                     );
-                // Snapshot/restore: pop the name once we leave its lowering
-                // so sibling `Composite` arms that share an intermediate
-                // DefinedType (`{DefT.A, DefT.B}` both chaining through
-                // `X → terminal`) can each walk through it without
-                // observing a false cycle. Mirrors the BSL HIR fix in
-                // `hir-ty/src/lower/mod.rs::lower_qualified_inner`.
                 visited.remove(&key);
                 SdblType::DefinedType { name: name.clone(), underlying_type }
             }
-            // Recurse into composite arms so nested `DefinedType` references
-            // are resolved through metadata. The metadata-blind
-            // `SdblType::from_attribute_type` would silently drop
-            // `underlying_type`, breaking downstream field resolution
-            // (`Scope::resolve_defined_type_fields`).
             AttributeType::Composite { types } => {
                 let arms: Vec<SdblType> =
                     types.iter().map(|t| self.resolve_attribute_type_inner(t, visited)).collect();
@@ -1147,22 +992,10 @@ impl LoweringContext {
                     SdblType::Composite { types: arms }
                 }
             }
-            // For all other types, use standard conversion
             _ => SdblType::from_attribute_type(attr_type),
         }
     }
 
-    /// Check virtual table parameters and emit diagnostic if missing.
-    ///
-    /// Errors on:
-    /// - Virtual table without parentheses: `СрезПоследних`
-    /// - Virtual table with empty parentheses: `Остатки()`
-    /// - Virtual table where all params after first (period) are empty: `Остатки(&Период, )`
-    ///
-    /// OK:
-    /// - `Остатки(Склад = &Параметр)` - has condition
-    /// - `Остатки(, Склад = &Параметр)` - empty period, but has condition
-    /// - `СрезПоследних(&Период)` - period param provided
     fn check_virtual_table_params(
         &mut self,
         table_name: &str,
@@ -1171,14 +1004,12 @@ impl LoweringContext {
     ) {
         use crate::hir::ExprHir;
 
-        // Check if parentheses are present by looking for L_PAREN token
         let has_parens = table_ref_node
             .children_with_tokens()
             .any(|child| matches!(child, syntax::NodeOrToken::Token(t) if t.kind() == syntax::SyntaxKind::L_PAREN));
 
         let range = table_ref_node.text_range();
 
-        // No parentheses at all - error
         if !has_parens {
             self.diagnostics.push(SdblDiagnostic::VirtualTableCallWithoutParameters {
                 table_name: table_name.to_string(),
@@ -1188,7 +1019,6 @@ impl LoweringContext {
             return;
         }
 
-        // Empty parentheses or all params empty - error
         if params.is_empty() {
             self.diagnostics.push(SdblDiagnostic::VirtualTableCallWithoutParameters {
                 table_name: table_name.to_string(),
@@ -1198,8 +1028,6 @@ impl LoweringContext {
             return;
         }
 
-        // Skip first param (period), check remaining
-        // If there's more than one slot, at least one after first must be non-empty
         if params.len() > 1 {
             let has_non_empty_after_first =
                 params[1..].iter().any(|p| !matches!(p, ExprHir::Missing { .. }));
@@ -1212,24 +1040,9 @@ impl LoweringContext {
                 });
             }
         }
-        // Single param is OK for СрезПоследних(&Период)
     }
 }
 
-/// Returns true if any query (main or UNION part) inside the subquery contains
-/// aggregation — a `GROUP BY` (`СГРУППИРОВАТЬ ПО`) clause or a call to an
-/// aggregate function (`СУММА`/`SUM`, `СРЕДНЕЕ`/`AVG`, `МИНИМУМ`/`MIN`,
-/// `МАКСИМУМ`/`MAX`, `КОЛИЧЕСТВО`/`COUNT`) in its direct SELECT list.
-///
-/// Used to exempt aggregating subqueries from `JoinWithSubQuery` — a subquery
-/// that aggregates is doing something the underlying table cannot, so the
-/// «no joins on subqueries» rule does not apply.
-///
-/// The aggregate-call scan inspects only `SDBL_FUNCTION_CALL` nodes and
-/// matches the first direct `IDENT` child token (the function-name position).
-/// Column references and aliases that happen to be named `Сумма`/`Sum` are
-/// not in function-call position and therefore do not suppress the
-/// diagnostic.
 pub(super) fn subquery_has_aggregation(subquery: &syntax::ast::SdblSubquery) -> bool {
     subquery.queries().any(|q| {
         if q.group_by_clause().is_some() {
@@ -1253,8 +1066,6 @@ fn field_contains_aggregate_call(field: &syntax::ast::SdblSelectedField) -> bool
 }
 
 fn function_call_is_aggregate(call: &syntax::SyntaxNode) -> bool {
-    // First direct IDENT child of an `SDBL_FUNCTION_CALL` is the function
-    // name (matches the dispatch in `lower_function_call`).
     call.children_with_tokens()
         .filter_map(|nt| nt.into_token())
         .find(|t| t.kind() == syntax::SyntaxKind::IDENT)

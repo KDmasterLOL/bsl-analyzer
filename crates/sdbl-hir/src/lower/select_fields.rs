@@ -1,5 +1,3 @@
-//! SELECT field list lowering and limitations (DISTINCT, TOP).
-
 use crate::hir::{ExprHir, FieldHir, Name, SelectHir};
 use crate::types::SdblType;
 use syntax::ast::AstNode;
@@ -7,12 +5,6 @@ use syntax::ast::AstNode;
 use super::context::LoweringContext;
 
 impl LoweringContext {
-    /// Lower SELECT field list.
-    ///
-    /// # Arguments
-    /// * `field_list` - The field list AST node
-    /// * `distinct` - Whether DISTINCT is specified
-    /// * `top` - TOP N limit if specified
     pub(super) fn lower_field_list(
         &mut self,
         field_list: Option<syntax::ast::SdblFieldList>,
@@ -28,9 +20,6 @@ impl LoweringContext {
         SelectHir { fields, distinct, top }
     }
 
-    /// Extract DISTINCT and TOP from query limitations.
-    ///
-    /// Returns (distinct, top_value, top_range).
     pub(super) fn extract_limitations(
         &mut self,
         query_node: &syntax::SyntaxNode,
@@ -39,10 +28,8 @@ impl LoweringContext {
         let mut top = None;
         let mut top_range = None;
 
-        // Find SDBL_LIMITATIONS child
         for child in query_node.children() {
             if child.kind() == syntax::SyntaxKind::SDBL_LIMITATIONS {
-                // Record DISTINCT keyword if present
                 for element in child.descendants_with_tokens() {
                     if let Some(token) = element.as_token() {
                         if token.kind() == syntax::SyntaxKind::IDENT {
@@ -58,10 +45,8 @@ impl LoweringContext {
                     }
                 }
 
-                // Find TOP clause
                 for top_child in child.children() {
                     if top_child.kind() == syntax::SyntaxKind::SDBL_TOP_CLAUSE {
-                        // Record TOP keyword and capture its range
                         for element in top_child.descendants_with_tokens() {
                             if let Some(token) = element.as_token() {
                                 if token.kind() == syntax::SyntaxKind::IDENT {
@@ -77,7 +62,6 @@ impl LoweringContext {
                             }
                         }
 
-                        // Extract TOP count (find first DECIMAL token)
                         for element in top_child.descendants_with_tokens() {
                             if let Some(token) = element.as_token() {
                                 if token.kind() == syntax::SyntaxKind::DECIMAL {
@@ -98,20 +82,13 @@ impl LoweringContext {
         (distinct, top, top_range)
     }
 
-    /// Lower a selected field.
-    ///
-    /// Collects all information needed for diagnostics into HIR fields.
-    /// Diagnostics are emitted in a separate post-lowering phase.
     pub(super) fn lower_selected_field(
         &mut self,
         field: &syntax::ast::SdblSelectedField,
     ) -> FieldHir {
         let field_range = field.syntax().text_range();
 
-        // Check for asterisk
         if field.is_asterisk() {
-            // Preserve the qualifier so the SDBL ↔ Ty bridge can expand
-            // `Т.*` against the originating table. Bare `*` yields None.
             let asterisk_qualifier =
                 field.syntax().children().find_map(syntax::ast::SdblAsteriskField::cast).and_then(
                     |node| {
@@ -137,7 +114,6 @@ impl LoweringContext {
             };
         }
 
-        // Lower expression (expression() returns Option<SyntaxNode>)
         let expr = if let Some(e) = field.expression() {
             tracing::trace!(
                 expr_text = %e.text(),
@@ -156,17 +132,13 @@ impl LoweringContext {
             ExprHir::Missing { range: field_range }
         };
 
-        // Get alias node for processing
         let alias_node = field.alias();
 
-        // Compute has_as_keyword
         let has_as_keyword = alias_node.as_ref().map(|a| a.has_as_keyword()).unwrap_or(false);
 
-        // Get alias name and record tokens
         let alias = alias_node
             .as_ref()
             .and_then(|a| {
-                // Record AS/КАК keyword in source map for semantic highlighting
                 if a.has_as_keyword() {
                     self.record_keyword_by_text(
                         a.syntax(),
@@ -176,7 +148,6 @@ impl LoweringContext {
                     );
                 }
 
-                // Record field alias identifier
                 if let Some(ident_token) = a.identifier() {
                     self.source_map.add_token(
                         crate::source_map::TokenInfo::new(
@@ -192,16 +163,9 @@ impl LoweringContext {
             })
             .map(|s| Name::from(s.as_str()));
 
-        // Get type from expression
         let ty = expr.ty().clone();
 
-        // Extract raw field name from AST (last name-token in expression)
-        // For "Т.ИмяПоля" -> Some("ИмяПоля")
-        // For "Т.В"       -> Some("В")  — soft-keyword KW_IN as property name
-        // For "COUNT(*)"  -> None       — not a simple field
         let raw_name = field.expression().and_then(|expr_node| {
-            // Find last property-name token (skip DOT). Uses `is_name_token`
-            // so soft-keyword field names like `Т.В` extract correctly.
             let mut last_ident = None;
             for element in expr_node.descendants_with_tokens() {
                 if let Some(token) = element.as_token() {
@@ -213,13 +177,11 @@ impl LoweringContext {
             last_ident.map(|s| Name::from(s.as_str()))
         });
 
-        // Compute has_parse_error (once, for later diagnostic check)
         let has_parse_error = field
             .syntax()
             .descendants_with_tokens()
             .any(|el| el.kind() == syntax::SyntaxKind::ERROR);
 
-        // Compute diagnostic_range (trimmed expression + optional alias)
         let diagnostic_range = self.compute_diagnostic_range(field, alias_node.as_ref());
 
         FieldHir {
@@ -236,17 +198,11 @@ impl LoweringContext {
         }
     }
 
-    /// Compute trimmed range for diagnostic highlighting.
-    ///
-    /// Returns:
-    /// - For alias without AS: expression start to alias identifier end
-    /// - For no alias: expression range trimmed of trailing trivia
     fn compute_diagnostic_range(
         &self,
         field: &syntax::ast::SdblSelectedField,
         alias_node: Option<&syntax::ast::SdblAlias>,
     ) -> syntax::TextRange {
-        // Get expression range without trailing trivia
         let expr_range = if let Some(expr) = field.expression() {
             let last_non_trivia = expr.last_token().and_then(|t| {
                 let mut token = t;
@@ -270,7 +226,6 @@ impl LoweringContext {
             field.syntax().text_range()
         };
 
-        // Extend to alias identifier if present (for "Field Alias" without AS)
         if let Some(alias) = alias_node {
             if let Some(alias_ident) = alias.identifier() {
                 return syntax::TextRange::new(expr_range.start(), alias_ident.text_range().end());

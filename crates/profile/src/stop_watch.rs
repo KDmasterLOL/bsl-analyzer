@@ -1,5 +1,3 @@
-//! Like `std::time::Instant`, but also measures memory & CPU cycles.
-
 #![allow(clippy::print_stderr)]
 
 use std::{
@@ -26,9 +24,6 @@ impl StopWatch {
     pub fn start() -> StopWatch {
         #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
         let counter = {
-            // When debugging bsl-analyzer using rr, the perf-related syscalls cause it to abort.
-            // We allow disabling perf by setting the env var `BSL_DISABLE_PERF`.
-
             use std::sync::OnceLock;
             static PERF_ENABLED: OnceLock<bool> = OnceLock::new();
 

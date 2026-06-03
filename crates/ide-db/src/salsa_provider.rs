@@ -1,8 +1,3 @@
-//! Salsa-backed analysis provider.
-//!
-//! Wraps RootDatabase to implement AnalysisProvider trait.
-//! All methods delegate to Salsa queries with full caching.
-
 use std::sync::Arc;
 
 use base_db::{FileIdInput, SourceRootId};
@@ -20,10 +15,6 @@ use crate::{
     RootDatabase,
 };
 
-/// Provider backed by Salsa RootDatabase.
-///
-/// All methods delegate to Salsa queries with full caching.
-/// Used in LSP mode for maximum performance during editing.
 pub struct SalsaProvider<'db> {
     db: &'db dyn RootDatabase,
     configuration_path_input: Option<ConfigurationPathInput<'db>>,
@@ -31,7 +22,6 @@ pub struct SalsaProvider<'db> {
 }
 
 impl<'db> SalsaProvider<'db> {
-    /// Create a new SalsaProvider.
     pub fn new(
         db: &'db dyn RootDatabase,
         configuration_path_input: Option<ConfigurationPathInput<'db>>,
@@ -39,7 +29,6 @@ impl<'db> SalsaProvider<'db> {
         Self { db, configuration_path_input, file_set: None }
     }
 
-    /// Create a SalsaProvider with file_set for fast path resolution.
     pub fn with_file_set(
         db: &'db dyn RootDatabase,
         configuration_path_input: Option<ConfigurationPathInput<'db>>,
@@ -48,7 +37,6 @@ impl<'db> SalsaProvider<'db> {
         Self { db, configuration_path_input, file_set }
     }
 
-    /// Get the underlying database.
     pub fn db(&self) -> &'db dyn RootDatabase {
         self.db
     }
@@ -102,11 +90,6 @@ impl AnalysisProvider for SalsaProvider<'_> {
     }
 
     fn assignment_target_kind(&self, file_id: FileId, name: &str) -> AssignmentResolution {
-        // No expression scopes are pushed: by contract (see provider trait
-        // doc) Local/Param shadowing is caught upstream by Step L's
-        // `existing_binding_kind` payload, so the resolver only needs to
-        // distinguish ModuleVariable / CommonModule / Unknown — all of
-        // which `Resolver::for_module` handles without a body.
         let module_id = ModuleId::new(file_id);
         let resolver = Resolver::for_module(module_id);
         resolver.resolve_assignment_target(self.db, &Name::new(name))
@@ -246,14 +229,11 @@ impl AnalysisProvider for SalsaProvider<'_> {
     }
 
     fn resolve_module_file(&self, relative_uri: &str) -> Option<FileId> {
-        // Resolve relative to configuration root (not workspace root!)
-        // Metadata URIs like "CommonModules/Foo/Ext/Module.bsl" are relative to config root.
         let config_path_input = self.configuration_path_input?;
         let config_root = config_path_input.path(self.db);
         let full_path = std::path::PathBuf::from(&config_root).join(relative_uri);
         let vfs_path = vfs::VfsPath::new(full_path.to_string_lossy().into_owned());
 
-        // Use file_set fast path if available, else fall back to Salsa VFS lookup
         if let Some(file_set) = self.file_set {
             file_set.file_for_path(&vfs_path).copied()
         } else {
@@ -262,17 +242,12 @@ impl AnalysisProvider for SalsaProvider<'_> {
     }
 
     fn file_path(&self, file_id: FileId) -> Option<String> {
-        // Use file_set fast path if available
         if let Some(file_set) = self.file_set {
             let vfs_path = file_set.path_for_file(&file_id)?;
             return Some(vfs_path.as_path().to_string_lossy().to_string());
         }
         crate::vfs_helpers::get_file_path(self.db, file_id).map(|p| p.to_string_lossy().to_string())
     }
-
-    // ========================================================================
-    // Track 2 §1.4c — Security/effect Salsa accessors
-    // ========================================================================
 
     fn method_effect_summary(
         &self,
@@ -286,8 +261,6 @@ impl AnalysisProvider for SalsaProvider<'_> {
         let input = FileIdInput::new(self.db, file_id);
         crate::effects::module_security_state_query(self.db, input)
     }
-
-    // Track 2 Phase B §6.3 — complexity-metric overrides
 
     fn method_hir_metrics(&self, method: hir::MethodId) -> Arc<hir::metrics::HirMethodMetrics> {
         let input = hir::MethodIdInput::new(self.db, method);

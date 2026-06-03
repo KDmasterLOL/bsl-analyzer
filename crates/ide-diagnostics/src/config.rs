@@ -1,35 +1,9 @@
-//! Diagnostics configuration.
-
 use crate::handlers;
 use crate::metadata::{DiagnosticSeverityLevel, DiagnosticType, MetadataTag};
 use crate::{DiagnosticCode, Severity};
 use base_db::{DiagnosticsConfigInput, Locale};
 use std::collections::HashMap;
 
-/// Configuration for diagnostics.
-///
-/// Supports compatible format:
-/// ```json
-/// {
-///   "diagnostics": {
-///     "ordinaryAppSupport": false,
-///     "dataflowMaxIterations": 10000,
-///     "parameters": {
-///       "EmptyCodeBlock": false,
-///       "LineLength": { "maxLength": 120 }
-///     }
-///   }
-/// }
-/// ```
-///
-/// In `parameters`:
-/// - `false` = diagnostic disabled
-/// - `true` = diagnostic enabled (default)
-/// - `{...}` = diagnostic parameters
-///
-/// Metadata override from JSON configuration.
-///
-/// Allows runtime override of compile-time metadata.
 #[derive(Debug, Clone, Default)]
 pub struct MetadataOverride {
     pub severity: Option<DiagnosticSeverityLevel>,
@@ -38,9 +12,6 @@ pub struct MetadataOverride {
     pub lsp_severity: Option<String>,
 }
 
-/// Effective metadata (base + overrides).
-///
-/// Combines compile-time const metadata with runtime config overrides.
 #[derive(Debug, Clone)]
 pub struct EffectiveMetadata {
     base: &'static crate::metadata::DiagnosticMetadata,
@@ -49,7 +20,6 @@ pub struct EffectiveMetadata {
 }
 
 impl EffectiveMetadata {
-    /// Get effective severity (base or override).
     pub fn severity_value(&self) -> Severity {
         if let Some(override_str) = &self.lsp_severity_override {
             return parse_severity(override_str);
@@ -57,13 +27,11 @@ impl EffectiveMetadata {
         self.base.calculate_severity()
     }
 
-    /// Get effective tags (base or override).
     pub fn tags(&self) -> Vec<MetadataTag> {
         self.tags_override.clone().unwrap_or_else(|| self.base.tags.to_vec())
     }
 }
 
-/// Parse severity from string.
 fn parse_severity(s: &str) -> Severity {
     match s.to_lowercase().as_str() {
         "error" => Severity::Error,
@@ -80,30 +48,12 @@ fn parse_severity(s: &str) -> Severity {
 #[derive(Debug, Clone)]
 pub struct DiagnosticsConfig {
     pub disabled: Vec<DiagnosticCode>,
-    /// Diagnostics explicitly enabled (for those disabled by default).
     pub enabled: Vec<DiagnosticCode>,
     pub parameters: HashMap<DiagnosticCode, serde_json::Value>,
     pub ordinary_app_support: bool,
-    /// Maximum iterations for dataflow analysis (default: hir::dataflow::DEFAULT_MAX_ITERATIONS)
-    ///
-    /// Controls convergence limit for liveness analysis and other dataflow algorithms.
-    /// Increase this for very complex methods with deep nesting or many loops.
-    /// Warning is logged if analysis exceeds this limit.
     pub dataflow_max_iterations: usize,
-    /// Metadata overrides from JSON configuration.
-    ///
-    /// Allows runtime override of compile-time metadata (severity, type, tags, lsp_severity).
-    /// Not yet fully implemented - placeholder for Phase 3 completion.
     pub metadata_overrides: HashMap<DiagnosticCode, MetadataOverride>,
-    /// Exclusive mode: if Some, ONLY these diagnostics are enabled.
-    /// Set via --only-diagnostic CLI flag. Overrides disabled/enabled lists.
     pub only_enabled: Option<Vec<DiagnosticCode>>,
-    /// User-facing output locale.
-    ///
-    /// Resolved at the LSP layer from `[output] display_language` (TOML) or
-    /// `InitializeParams.locale` (LSP). Diagnostic emitters consult it via
-    /// [`crate::DiagnosticsContext::locale`] when rendering type names and
-    /// other localized labels.
     pub locale: Locale,
 }
 
@@ -123,10 +73,24 @@ impl Default for DiagnosticsConfig {
 }
 
 impl DiagnosticsConfig {
-    /// Create a config with all diagnostics enabled (including those disabled by default).
-    /// Useful for testing.
+    /// Build the effective diagnostics config from the raw `[diagnostics]` value that
+    /// `project-model` loads from `bsl-analyzer.toml` / `.bsl-analyzer.json` /
+    /// `.bsl-language-server.json`, then stamp the resolved `locale`.
+    ///
+    /// This is the single source of truth shared by every runtime mode (LSP, CLI,
+    /// MCP), so a project's settings apply identically regardless of how the analyzer
+    /// is driven. A malformed config logs a warning and falls back to defaults rather
+    /// than failing the analysis.
+    pub fn from_project_json(diagnostics: &serde_json::Value, locale: Locale) -> Self {
+        let mut config: Self = serde_json::from_value(diagnostics.clone()).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "failed to deserialize project diagnostics config; using defaults");
+            Self::default()
+        });
+        config.locale = locale;
+        config
+    }
+
     pub fn all_enabled() -> Self {
-        // Collect all diagnostics that are disabled by default from metadata registry
         let mut enabled = Vec::new();
         for code in [
             DiagnosticCode::BadWords,
@@ -162,9 +126,6 @@ impl DiagnosticsConfig {
         }
     }
 
-    /// Get effective metadata (base + overrides).
-    ///
-    /// Returns `None` if no metadata is defined for this diagnostic yet.
     pub fn get_effective_metadata(&self, code: DiagnosticCode) -> Option<EffectiveMetadata> {
         let base = handlers::get_metadata(code)?;
         let override_data = self.metadata_overrides.get(&code);
@@ -227,16 +188,12 @@ impl<'de> serde::Deserialize<'de> for DiagnosticsConfig {
                                             enabled.push(code);
                                             parameters.insert(code, value);
                                         }
-                                        _ => {
-                                            // ignore other values
-                                        }
+                                        _ => {}
                                     }
                                 }
-                                // Unknown diagnostic codes are silently ignored
                             }
                         }
                         _ => {
-                            // Skip unknown fields
                             let _: serde_json::Value = map.next_value()?;
                         }
                     }
@@ -250,10 +207,6 @@ impl<'de> serde::Deserialize<'de> for DiagnosticsConfig {
                     dataflow_max_iterations,
                     metadata_overrides: HashMap::new(),
                     only_enabled: None,
-                    // The JSON shape under `diagnostics:` does not carry locale —
-                    // it lives in the project-level `[output]` section. Visitor
-                    // gets a default; the canonical value flows through
-                    // `from_input` (Salsa input → DiagnosticsConfig).
                     locale: Locale::default(),
                 })
             }
@@ -264,31 +217,16 @@ impl<'de> serde::Deserialize<'de> for DiagnosticsConfig {
 }
 
 impl DiagnosticsConfig {
-    /// Check if ANY of the given diagnostics is enabled.
-    ///
-    /// Used for early exit in collectors - if none of the collector's diagnostics
-    /// are enabled, the entire collector can be skipped.
-    ///
-    /// Returns `true` if at least one diagnostic from the list is enabled.
     #[inline]
     pub fn any_enabled(&self, codes: &[DiagnosticCode]) -> bool {
-        // Fast path: if only_enabled is set, check intersection
         if let Some(ref only) = self.only_enabled {
             return codes.iter().any(|code| only.contains(code));
         }
 
-        // Normal mode: at least one must not be disabled
         codes.iter().any(|code| !self.is_disabled(*code))
     }
 
-    /// Check if a diagnostic is disabled.
-    ///
-    /// A diagnostic is disabled if:
-    /// 1. only_enabled is set and code is NOT in that list (exclusive mode from --only-diagnostic), OR
-    /// 2. It's explicitly disabled via configuration, OR
-    /// 3. Has metadata with activatedByDefault=false AND not explicitly enabled AND has no parameters
     pub fn is_disabled(&self, code: DiagnosticCode) -> bool {
-        // Exclusive mode: if only_enabled is set, ONLY those diagnostics are active
         if let Some(ref only) = self.only_enabled {
             return !only.contains(&code);
         }
@@ -297,7 +235,6 @@ impl DiagnosticsConfig {
             return true;
         }
 
-        // Check metadata for activatedByDefault
         if let Some(metadata) = handlers::get_metadata(code) {
             if !metadata.activated_by_default
                 && !self.enabled.contains(&code)
@@ -310,22 +247,18 @@ impl DiagnosticsConfig {
         false
     }
 
-    /// Get a boolean parameter for a diagnostic.
     pub fn get_bool(&self, code: DiagnosticCode, param: &str) -> Option<bool> {
         self.parameters.get(&code).and_then(|v| v.get(param)).and_then(|v| v.as_bool())
     }
 
-    /// Get an integer parameter for a diagnostic.
     pub fn get_int(&self, code: DiagnosticCode, param: &str) -> Option<i64> {
         self.parameters.get(&code).and_then(|v| v.get(param)).and_then(|v| v.as_i64())
     }
 
-    /// Get a string parameter for a diagnostic.
     pub fn get_string(&self, code: DiagnosticCode, param: &str) -> Option<&str> {
         self.parameters.get(&code).and_then(|v| v.get(param)).and_then(|v| v.as_str())
     }
 
-    /// Get a string parameter for a diagnostic (owned version).
     pub fn get_string_param(&self, code: DiagnosticCode, param: &str) -> Option<String> {
         self.parameters
             .get(&code)
@@ -334,7 +267,6 @@ impl DiagnosticsConfig {
             .map(|s| s.to_string())
     }
 
-    /// Get a string array parameter for a diagnostic.
     pub fn get_string_array(&self, code: DiagnosticCode, param: &str) -> Option<Vec<String>> {
         self.parameters
             .get(&code)
@@ -343,10 +275,6 @@ impl DiagnosticsConfig {
             .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
     }
 
-    /// Convert from Salsa-hashable DiagnosticsConfigInput.
-    ///
-    /// This converts the string-based config (used in Salsa for hashability)
-    /// to the typed config (used by diagnostic handlers).
     pub fn from_input(input: &DiagnosticsConfigInput) -> Self {
         let disabled: Vec<DiagnosticCode> =
             input.disabled.iter().filter_map(|s| s.parse().ok()).collect();
@@ -376,14 +304,7 @@ impl DiagnosticsConfig {
         }
     }
 
-    /// Apply CLI filter flags to this config.
-    ///
-    /// - `only_diagnostic`: If non-empty, sets exclusive mode - only these diagnostics run
-    /// - `disable_diagnostic`: Adds these codes to the disabled list
-    ///
-    /// The `only_diagnostic` flag takes precedence over everything else.
     pub fn apply_cli_filters(&mut self, only_diagnostic: &[String], disable_diagnostic: &[String]) {
-        // Apply --only-diagnostic (exclusive mode)
         if !only_diagnostic.is_empty() {
             let codes: Vec<DiagnosticCode> =
                 only_diagnostic.iter().filter_map(|s| s.parse().ok()).collect();
@@ -392,7 +313,6 @@ impl DiagnosticsConfig {
             }
         }
 
-        // Apply --disable-diagnostic (add to disabled list)
         for code_str in disable_diagnostic {
             if let Ok(code) = code_str.parse::<DiagnosticCode>() {
                 if !self.disabled.contains(&code) {
@@ -400,5 +320,53 @@ impl DiagnosticsConfig {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The shared project-config parser turns the raw `[diagnostics]` value into the
+    /// same effective config every runtime mode consumes: a `parameters` entry of
+    /// `false` disables a code, an object enables it with parameters, and the resolved
+    /// locale is stamped over the default.
+    #[test]
+    fn from_project_json_parses_params_and_stamps_locale() {
+        let raw = json!({
+            "parameters": {
+                "Typo": false,
+                "LineLength": { "maxLineLength": 150 },
+            }
+        });
+        let config = DiagnosticsConfig::from_project_json(&raw, Locale::En);
+
+        assert!(config.is_disabled(DiagnosticCode::Typo), "a `false` param disables the code");
+        assert_eq!(
+            config.get_int(DiagnosticCode::LineLength, "maxLineLength"),
+            Some(150),
+            "an object param carries the project threshold"
+        );
+        assert_eq!(config.locale, Locale::En, "the resolved locale overrides the default");
+    }
+
+    /// A malformed config (not an object) must not fail the analysis: it falls back to
+    /// defaults while still stamping the locale.
+    #[test]
+    fn from_project_json_falls_back_on_garbage() {
+        let config = DiagnosticsConfig::from_project_json(&json!("not an object"), Locale::Ru);
+        assert!(config.disabled.is_empty());
+        assert!(config.parameters.is_empty());
+        assert_eq!(config.locale, Locale::Ru);
+    }
+
+    /// An absent `[diagnostics]` section (serde null) yields defaults, not a panic.
+    #[test]
+    fn from_project_json_handles_null() {
+        let config =
+            DiagnosticsConfig::from_project_json(&serde_json::Value::Null, Locale::default());
+        assert!(config.disabled.is_empty());
+        assert!(config.enabled.is_empty());
     }
 }

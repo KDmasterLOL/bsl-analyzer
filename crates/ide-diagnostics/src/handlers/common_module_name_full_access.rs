@@ -1,9 +1,3 @@
-//! CommonModuleNameFullAccess diagnostic
-//!
-//! Privileged CommonModules must contain "FullAccess" or "ПолныеПрава" in their name.
-//!
-//! Type: SECURITY_HOTSPOT
-
 use crate::define_common_module_name_check;
 use crate::metadata::*;
 

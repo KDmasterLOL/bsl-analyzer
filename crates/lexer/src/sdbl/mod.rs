@@ -1,832 +1,273 @@
-//! SDBL (Structured Data Base Language) lexer for 1C:Enterprise query
-//! language.
-//!
-//! ## Provenance
-//!
-//! The `SdblTokenKind` enum below is split by banner comments into
-//! several clearly demarcated provenance sections:
-//!
-//! - **Slice 1 — clean-room.** Whitespace, line terminators, line
-//!   comments, separators, punctuation, comparison and arithmetic
-//!   operators, numeric literals, the string-literal opening quote
-//!   (with content handled by the companion [`strings_mode`] module),
-//!   date literals, identifiers, and parameter references. These
-//!   variants were re-derived from the ITS documentation of the
-//!   1C:Enterprise query language (<https://its.1c.ru/db/pubqlang>)
-//!   and are attested in `docs/legal/sdbl-clean-room-slice1.md`.
-//!
-//! - **Slice 2 — clean-room.** Structural keyword vocabulary: core
-//!   clause starters (SELECT / FROM / WHERE / GROUP / ORDER / HAVING /
-//!   TOTALS / UNION / ALL / DISTINCT / TOP / INTO), the join family
-//!   (JOIN / INNER / LEFT / RIGHT / FULL / OUTER / ON-or-BY),
-//!   field aliasing (AS), basic predicates (IN / BETWEEN / LIKE / IS),
-//!   the CASE family (CASE / WHEN / THEN / ELSE / END), the logical
-//!   operators (AND / OR / NOT), and the boolean and NULL literals
-//!   (TRUE / FALSE / NULL). Attested in
-//!   `docs/legal/sdbl-clean-room-slice2.md`.
-//!
-//! - **Slice 2-addendum — clean-room.** Long-tail clause keywords
-//!   excluded from Slice 2's scope: DROP / AUTOORDER / ASC / DESC /
-//!   HIERARCHY / ALLOWED / FOR / UPDATE / INDEX / ONLY / OVERALL /
-//!   PERIODS / ESCAPE / REFS / CAST / TYPE / VALUE. Re-derived from
-//!   v8327doc Глава 8 «Работа с запросами» (the canonical SDBL
-//!   grammar specification) with pubqlang corroborating examples.
-//!   Attested in `docs/legal/sdbl-clean-room-slice2-addendum.md`.
-//!
-//! - **Slice 3a — clean-room (complete, 2026-05-07).** Primitive
-//!   type literals (Boolean / Number / String / Date), the
-//!   UNDEFINED literal, and the narrow period-type keywords
-//!   carried as dedicated lexer tokens (TENDAYS / HALFYEAR).
-//!   Re-derived from v8327doc Глава 8 «Работа с запросами» with
-//!   pubqlang corroborating examples; the C0a discrepancy audit
-//!   found zero regex defects so the slice is a PRESERVE-shape
-//!   arc. Attested in `docs/legal/sdbl-clean-room-slice3a.md`.
-//!
-//! - **Slices 3b, 4, 5 — pending.** Metadata-object tokens
-//!   (Slice 3b — `Mdo*` minus `MdoExternalDataSource`), built-in
-//!   functions (Slice 4 — `Fn*`), virtual-table tokens and the
-//!   platform-late `MdoExternalDataSource` metadata prefix
-//!   (Slice 5 — `Vt*` plus `MdoExternalDataSource`), and the
-//!   logos error fallback. These remain as carried over from the
-//!   pre-clean-room implementation and will be re-derived by
-//!   subsequent slices.
-//!
-//! All variants share a single longest-match precedence space — the
-//! physical reordering below does not change matching semantics. A
-//! byte-identity golden corpus (`crates/lexer/tests/sdbl_golden_corpus.rs`)
-//! gates any accidental drift.
-
 mod strings_mode;
 
 use logos::Logos;
 use smol_str::SmolStr;
 
-/// Token kinds produced by the SDBL lexer.
-///
-/// Variants support bilingual (Russian + English) spelling where the
-/// underlying language does; the regex on each variant is the single
-/// source of truth.
 #[derive(Logos, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SdblTokenKind {
-    // ============================================================================
-    // CLEAN-ROOM Slice 1 — ITS-derived
-    // ============================================================================
-    //
-    // Every variant in this section carries an inline provenance
-    // comment pointing at the ITS section (or a local mini-spec) it
-    // was re-derived from. Nothing in this block was copied from the
-    // pre-clean-room regex text or from any third-party SDBL grammar.
-    /// Horizontal whitespace: ASCII space, tab, carriage return.
-    // ITS pubqlang/12 — lexical elements: inter-token whitespace.
     #[regex(r"[ \t\r]+")]
     Whitespace,
 
-    /// Line terminator.
-    // ITS pubqlang/12 — lexical elements: newline terminates a line.
     #[token("\n")]
     Newline,
 
-    /// Line comment `// ...` up to end-of-line.
-    // Local spec (see `docs/legal/sdbl-clean-room-slice1.md` § Scope —
-    // line comment): the upstream SDBL grammar at
-    // <https://its.1c.ru/db/pubqlang/content/12/hdoc> does not define
-    // comments; this token is a tooling concession so that queries
-    // extracted from BSL source whose bodies happen to contain `//`
-    // tails survive lexing, and so queries can be annotated during
-    // review. The regex accepts `//` followed by any non-newline run.
     #[regex(r"//[^\n]*")]
     Comment,
 
-    /// Left parenthesis `(`.
-    // ITS pubqlang/12 — separators: opens a parenthesised expression.
     #[token("(")]
     LParen,
 
-    /// Right parenthesis `)`.
-    // ITS pubqlang/12 — separators: closes a parenthesised expression.
     #[token(")")]
     RParen,
 
-    /// Dot `.` — member access and dot-path separator.
-    // ITS pubqlang/12 — separators: joins the parts of a metadata or
-    // field path (e.g. `Catalog.Products.Ref`).
     #[token(".")]
     Dot,
 
-    /// Comma `,` — argument and list-element separator.
-    // ITS pubqlang/12 — separators: separates select-list columns and
-    // function argument lists.
     #[token(",")]
     Comma,
 
-    /// Semicolon `;` — statement / query separator within a batch.
-    // ITS pubqlang/12 — separators: terminates a query in a batch.
     #[token(";")]
     Semicolon,
 
-    /// Hash `#` — temporary-table name marker.
-    // ITS pubqlang/10 — temporary tables: a name prefixed with `#`
-    // identifies a temporary table in `INTO`/`DROP` position.
     #[token("#")]
     Hash,
 
-    /// Bare ampersand `&`. When followed immediately by an
-    /// identifier, the longer `Parameter` match wins; this variant
-    /// only appears when `&` stands alone.
-    // ITS pubqlang/10 — parameters: parameter references start with `&`.
     #[token("&")]
     Ampersand,
 
-    /// Vertical bar `|` — multiline continuation marker used when a
-    /// SDBL query is embedded as a BSL multiline string literal.
-    // Local spec (see `docs/legal/sdbl-clean-room-slice1.md` § Scope —
-    // bar): BSL multiline-string convention, also described in the
-    // mini-spec at the top of `strings_mode`. The bar at the start
-    // of each continuation line is preserved through to the parser
-    // rather than elided, so layout is reconstructible.
     #[token("|")]
     Bar,
 
-    /// Equality operator `=`.
-    // ITS pubqlang/10 — comparison operators: equality.
     #[token("=")]
     Eq,
 
-    /// Inequality operator `<>`. Declared so longest-match picks it
-    /// over the one-char `<` followed by `>`.
-    // ITS pubqlang/10 — comparison operators: inequality.
     #[token("<>")]
     Neq,
 
-    /// Less-or-equal operator `<=`. Longest-match beats `<`.
-    // ITS pubqlang/10 — comparison operators: less-or-equal.
     #[token("<=")]
     Le,
 
-    /// Less-than operator `<`.
-    // ITS pubqlang/10 — comparison operators: less-than.
     #[token("<")]
     Lt,
 
-    /// Greater-or-equal operator `>=`. Longest-match beats `>`.
-    // ITS pubqlang/10 — comparison operators: greater-or-equal.
     #[token(">=")]
     Ge,
 
-    /// Greater-than operator `>`.
-    // ITS pubqlang/10 — comparison operators: greater-than.
     #[token(">")]
     Gt,
 
-    /// Addition operator `+`.
-    // ITS pubqlang/10 — arithmetic operators: addition.
     #[token("+")]
     Plus,
 
-    /// Subtraction operator `-` (also appears as the unary-minus
-    /// prefix; that distinction is parser-level).
-    // ITS pubqlang/10 — arithmetic operators: subtraction / unary minus.
     #[token("-")]
     Minus,
 
-    /// Multiplication operator `*`. The select-all column form is
-    /// parsed as the same token in select-list position.
-    // ITS pubqlang/10 — arithmetic operators: multiplication; doubles
-    // as the `*` select-all wildcard at the parser level.
     #[token("*")]
     Star,
 
-    /// Division operator `/`.
-    // ITS pubqlang/10 — arithmetic operators: division.
     #[token("/")]
     Slash,
 
-    /// Modulo operator `%`.
-    // ITS pubqlang/10 — arithmetic operators: modulo.
     #[token("%")]
     Percent,
 
-    /// Fractional numeric literal (e.g. `3.14`). Declared before the
-    /// integer variant so longest-match picks `3.14` over `3` + `.` +
-    /// `14`.
-    // ITS pubqlang/12 — numeric literals: fractional form is
-    // `DIGITS"."DIGITS`.
     #[regex(r"[0-9]+\.[0-9]+")]
     Float,
 
-    /// Integer numeric literal (e.g. `42`).
-    // ITS pubqlang/12 — numeric literals: integer form is `DIGITS`.
     #[regex(r"[0-9]+")]
     Decimal,
 
-    /// String-literal opening quote. The string body is not produced
-    /// by logos; the top-level tokeniser detects `"` directly and
-    /// hands off to [`strings_mode::scan`], which emits the full run
-    /// as a sequence of `String` tokens.
-    // ITS pubqlang/12 — string literals: `"`-delimited; see the
-    // mini-spec at the top of the `strings_mode` module for the
-    // multiline convention.
     #[token("\"")]
     Quote,
 
-    /// String content or delimiter emitted by the strings-mode
-    /// scanner. Never produced by logos directly.
-    // Local spec: string body structure is defined by the mini-spec
-    // at the top of the `strings_mode` module; see
-    // <https://its.1c.ru/db/pubqlang/content/12/hdoc> for the
-    // upstream `"`-delimited string-literal rule.
     String,
 
-    /// Date literal: `'YYYYMMDD'` (date only) or `'YYYYMMDDhhmmss'`
-    /// (date + time).
-    // ITS pubqlang/12 — date literals: apostrophe-delimited, 8 or 14
-    // decimal digits for calendar date or date-plus-time.
     #[regex(r"'[0-9]{8,14}'")]
     Date,
 
-    /// Identifier: a Unicode letter or underscore followed by any
-    /// number of letters, digits, or underscores. Declared with lower
-    /// priority than keyword variants so reserved words keep their
-    /// specific `Kw*` / `Fn*` kinds.
-    // ITS pubqlang/12 — identifiers: start with a letter or
-    // underscore, continue with letters, digits, or underscores.
     #[regex(r"[_\p{L}][_\p{L}0-9]*", priority = 1)]
     Ident,
 
-    /// Parameter reference `&Name`: a bound query parameter. Matches
-    /// longer than a bare `Ampersand` when an identifier follows the
-    /// `&`, so the longer match wins.
-    // ITS pubqlang/10 — parameters: `&` immediately followed by an
-    // identifier is a named host-bound parameter reference.
     #[regex(r"&[_\p{L}][_\p{L}0-9]*")]
     Parameter,
 
-    // ============================================================================
-    // CLEAN-ROOM Slice 2 — structural keyword vocabulary (ITS pubqlang/10, /12)
-    // ============================================================================
-    //
-    // Every variant in this section carries an inline provenance comment
-    // citing the ITS page it was re-derived from. Nothing in this block
-    // was copied from the pre-clean-room regex text of these variants or
-    // from any third-party SDBL grammar; the sources consulted are
-    // <https://its.1c.ru/db/pubqlang/content/10/hdoc> (query-language
-    // structure: clauses, joins, predicates, CASE expression, field
-    // aliasing) and <https://its.1c.ru/db/pubqlang/content/12/hdoc>
-    // (lexical elements: logical operators, boolean and NULL literals).
-    //
-    // Convenience index (RUS / ENG → Variant — ITS section). The
-    // `#[regex]` attributes below are the single source of truth;
-    // this table is a scanning aid only.
-    //
-    //   Clause starters:
-    //     ВЫБРАТЬ / SELECT          -> KwSelect    (pubqlang/10)
-    //     ИЗ / FROM                 -> KwFrom      (pubqlang/10)
-    //     ПОМЕСТИТЬ / INTO          -> KwInto      (pubqlang/10)
-    //     ГДЕ / WHERE               -> KwWhere     (pubqlang/10)
-    //     СГРУППИРОВАТЬ / GROUP     -> KwGroup     (pubqlang/10)
-    //     УПОРЯДОЧИТЬ / ORDER       -> KwOrder     (pubqlang/10)
-    //     ИМЕЮЩИЕ / HAVING          -> KwHaving    (pubqlang/10)
-    //     ИТОГИ / TOTALS            -> KwTotals    (pubqlang/10)
-    //     ОБЪЕДИНИТЬ / UNION        -> KwUnion     (pubqlang/10)
-    //     ВСЕ / ALL                 -> KwAll       (pubqlang/10)
-    //     РАЗЛИЧНЫЕ / DISTINCT      -> KwDistinct  (pubqlang/10)
-    //     ПЕРВЫЕ / TOP              -> KwTop       (pubqlang/10)
-    //
-    //   Join family:
-    //     СОЕДИНЕНИЕ / JOIN         -> KwJoin      (pubqlang/10)
-    //     ВНУТРЕННЕЕ / INNER        -> KwInner     (pubqlang/10)
-    //     ЛЕВОЕ / LEFT              -> KwLeft      (pubqlang/10)
-    //     ПРАВОЕ / RIGHT            -> KwRight     (pubqlang/10)
-    //     ПОЛНОЕ / FULL             -> KwFull      (pubqlang/10)
-    //     ВНЕШНЕЕ / OUTER           -> KwOuter     (pubqlang/10)
-    //     ПО / ON / BY              -> KwOnOrBy    (pubqlang/10, bundled)
-    //
-    //   Aliasing & predicates:
-    //     КАК / AS                  -> KwAs        (pubqlang/10)
-    //     В / IN                    -> KwIn        (pubqlang/10)
-    //     МЕЖДУ / BETWEEN           -> KwBetween   (pubqlang/10)
-    //     ПОДОБНО / LIKE            -> KwLike      (pubqlang/10)
-    //     ЕСТЬ / IS                 -> KwIs        (pubqlang/10)
-    //
-    //   CASE family:
-    //     ВЫБОР / CASE              -> KwCase      (pubqlang/10)
-    //     КОГДА / WHEN              -> KwWhen      (pubqlang/10)
-    //     ТОГДА / THEN              -> KwThen      (pubqlang/10)
-    //     ИНАЧЕ / ELSE              -> KwElse      (pubqlang/10)
-    //     КОНЕЦ / END               -> KwEnd       (pubqlang/10)
-    //
-    //   Logical operators & literals:
-    //     И / AND                   -> OpAnd       (pubqlang/12)
-    //     ИЛИ / OR                  -> OpOr        (pubqlang/12)
-    //     НЕ / NOT                  -> OpNot       (pubqlang/12)
-    //     ИСТИНА / TRUE             -> LitTrue     (pubqlang/12)
-    //     ЛОЖЬ / FALSE              -> LitFalse    (pubqlang/12)
-    //     NULL                      -> LitNull     (pubqlang/12)
-
-    // --- Clause starters ---
-
-    // ITS pubqlang/10 — SELECT clause: result-set introducer.
     #[regex(r"(?i)выбрать|(?i)select")]
     KwSelect,
 
-    // ITS pubqlang/10 — SELECT clause: FROM introduces the source table list.
     #[regex(r"(?i)из|(?i)from")]
     KwFrom,
 
-    // ITS pubqlang/10 — temporary tables: INTO / ПОМЕСТИТЬ names the
-    // destination temp table for a materialised sub-query.
     #[regex(r"(?i)поместить|(?i)into")]
     KwInto,
 
-    // ITS pubqlang/10 — SELECT clause: WHERE filters the source rows.
     #[regex(r"(?i)где|(?i)where")]
     KwWhere,
 
-    // ITS pubqlang/10 — SELECT clause: GROUP BY opens the grouping list.
     #[regex(r"(?i)сгруппировать|(?i)group")]
     KwGroup,
 
-    // ITS pubqlang/10 — SELECT clause: ORDER BY opens the sort key list.
     #[regex(r"(?i)упорядочить|(?i)order")]
     KwOrder,
 
-    // ITS pubqlang/10 — SELECT clause: HAVING filters the grouped rows.
     #[regex(r"(?i)имеющие|(?i)having")]
     KwHaving,
 
-    // ITS pubqlang/10 — SELECT clause: TOTALS introduces the totals
-    // specification after the main query body.
     #[regex(r"(?i)итоги|(?i)totals")]
     KwTotals,
 
-    // ITS pubqlang/10 — SELECT clause: UNION combines result sets.
     #[regex(r"(?i)объединить|(?i)union")]
     KwUnion,
 
-    // ITS pubqlang/10 — SELECT clause: ALL modifier on UNION (keep
-    // duplicates) and on aggregate-argument position.
     #[regex(r"(?i)все|(?i)all")]
     KwAll,
 
-    // ITS pubqlang/10 — SELECT clause: DISTINCT removes duplicate rows.
     #[regex(r"(?i)различные|(?i)distinct")]
     KwDistinct,
 
-    // ITS pubqlang/10 — SELECT clause: TOP limits the result row count.
     #[regex(r"(?i)первые|(?i)top")]
     KwTop,
 
-    // --- Join family ---
-
-    // ITS pubqlang/10 — join clause: JOIN introduces a joined source.
     #[regex(r"(?i)соединение|(?i)join")]
     KwJoin,
 
-    // ITS pubqlang/10 — join clause: INNER modifier on JOIN.
     #[regex(r"(?i)внутреннее|(?i)inner")]
     KwInner,
 
-    // ITS pubqlang/10 — join clause: LEFT outer-join modifier.
     #[regex(r"(?i)левое|(?i)left")]
     KwLeft,
 
-    // ITS pubqlang/10 — join clause: RIGHT outer-join modifier.
     #[regex(r"(?i)правое|(?i)right")]
     KwRight,
 
-    // ITS pubqlang/10 — join clause: FULL outer-join modifier.
     #[regex(r"(?i)полное|(?i)full")]
     KwFull,
 
-    // ITS pubqlang/10 — join clause: OUTER modifier on LEFT / RIGHT / FULL.
     #[regex(r"(?i)внешнее|(?i)outer")]
     KwOuter,
 
-    // ITS pubqlang/10 — join clause / grouping clause: Russian ПО serves
-    // as both the join-ON predicate introducer and the GROUP-BY /
-    // ORDER-BY key separator. Preserved pre-refactor behaviour: this
-    // lexer emits a single KwOnOrBy kind for ПО / ON / BY and lets the
-    // parser disambiguate by context; see
-    // `docs/legal/sdbl-clean-room-slice2.md` § Preserved pre-refactor
-    // behaviours.
     #[regex(r"(?i)по|(?i)on|(?i)by")]
     KwOnOrBy,
 
-    // --- Aliasing & predicates ---
-
-    // ITS pubqlang/10 — field aliasing: AS binds a column or table name.
     #[regex(r"(?i)как|(?i)as")]
     KwAs,
 
-    // ITS pubqlang/10 — predicates: IN set-membership test.
     #[regex(r"(?i)в|(?i)in")]
     KwIn,
 
-    // ITS pubqlang/10 — predicates: BETWEEN range test (inclusive).
     #[regex(r"(?i)между|(?i)between")]
     KwBetween,
 
-    // ITS pubqlang/10 — predicates: LIKE pattern match.
     #[regex(r"(?i)подобно|(?i)like")]
     KwLike,
 
-    // ITS pubqlang/10 — predicates: IS NULL / IS NOT NULL test.
     #[regex(r"(?i)есть|(?i)is")]
     KwIs,
 
-    // --- CASE family ---
-
-    // ITS pubqlang/10 — conditional expression: CASE opens the
-    // conditional-value expression.
     #[regex(r"(?i)выбор|(?i)case")]
     KwCase,
 
-    // ITS pubqlang/10 — conditional expression: WHEN introduces a
-    // guarded branch.
     #[regex(r"(?i)когда|(?i)when")]
     KwWhen,
 
-    // ITS pubqlang/10 — conditional expression: THEN is the branch value.
     #[regex(r"(?i)тогда|(?i)then")]
     KwThen,
 
-    // ITS pubqlang/10 — conditional expression: ELSE is the default value.
     #[regex(r"(?i)иначе|(?i)else")]
     KwElse,
 
-    // ITS pubqlang/10 — conditional expression: END closes the expression.
     #[regex(r"(?i)конец|(?i)end")]
     KwEnd,
 
-    // --- Logical operators & literals ---
-
-    // ITS pubqlang/12 — logical operators: AND conjunction.
     #[regex(r"(?i)и|(?i)and")]
     OpAnd,
 
-    // ITS pubqlang/12 — logical operators: OR disjunction.
     #[regex(r"(?i)или|(?i)or")]
     OpOr,
 
-    // ITS pubqlang/12 — logical operators: NOT negation.
     #[regex(r"(?i)не|(?i)not")]
     OpNot,
 
-    // ITS pubqlang/12 — boolean literals: TRUE.
     #[regex(r"(?i)истина|(?i)true")]
     LitTrue,
 
-    // ITS pubqlang/12 — boolean literals: FALSE.
     #[regex(r"(?i)ложь|(?i)false")]
     LitFalse,
 
-    // ITS pubqlang/12 — NULL literal: only the English spelling is
-    // defined by the grammar.
     #[regex(r"(?i)null")]
     LitNull,
 
-    // ============================================================================
-    // CLEAN-ROOM Slice 2-addendum — clause keyword leftovers
-    // ============================================================================
-    //
-    // Every variant in this section carries an inline provenance
-    // comment citing the v8327doc Глава 8 page section (and
-    // corroborating pubqlang chapters where applicable) it was
-    // re-derived from. Nothing in this block was copied from the
-    // pre-clean-room regex text of these variants or from any
-    // third-party SDBL lexer; the canonical SDBL grammar source is
-    // the v8.3.27 Developer's Reference Глава 8 «Работа с запросами»
-    // at <https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453>,
-    // with pubqlang chapters at
-    // <https://its.1c.ru/db/pubqlang/content/N/hdoc> providing
-    // corroborating examples. Full per-variant tier classification
-    // and source map lives in
-    // `docs/legal/sdbl-clean-room-slice2-addendum.md` § Per-variant
-    // tier source map.
-    //
-    // Convenience index (RUS / ENG → Variant — primary citation).
-    // The `#[regex]` attributes below are the single source of
-    // truth; this table is a scanning aid only.
-    //
-    //   DROP query:
-    //     УНИЧТОЖИТЬ / DROP              -> KwDrop       (v8327doc Гл. 8)
-    //
-    //   Order-by direction & modifiers:
-    //     ВОЗР / ASC                     -> KwAsc        (pubqlang/16)
-    //     УБЫВ / DESC                    -> KwDesc       (pubqlang/16)
-    //     ИЕРАРХИЯ / HIERARCHY           -> KwHierarchy  (v8327doc Гл. 8 / pubqlang/27)
-    //     АВТОУПОРЯДОЧИВАНИЕ / AUTOORDER -> KwAutoOrder  (pubqlang/17)
-    //
-    //   SELECT prefix qualifier:
-    //     РАЗРЕШЕННЫЕ / ALLOWED          -> KwAllowed    (v8327doc Гл. 8 — Slice 7-addendum)
-    //
-    //   FOR UPDATE / INDEX BY:
-    //     ДЛЯ / FOR                      -> KwFor        (v8327doc Гл. 8)
-    //     ИЗМЕНЕНИЯ / UPDATE             -> KwUpdate     (v8327doc Гл. 8)
-    //     ИНДЕКСИРОВАТЬ / INDEX          -> KwIndex      (v8327doc Гл. 8)
-    //
-    //   TOTALS modifiers:
-    //     ТОЛЬКО / ONLY                  -> KwOnly       (v8327doc Гл. 8)
-    //     ОБЩИЕ / OVERALL                -> KwOverall    (pubqlang/39)
-    //     ПЕРИОДАМИ / PERIODS            -> KwPeriods    (v8327doc Гл. 8 — instrumental case)
-    //
-    //   LIKE / REFS modifiers:
-    //     СПЕЦСИМВОЛ / ESCAPE            -> KwEscape     (v8327doc Гл. 8)
-    //     ССЫЛКА / REFS                  -> KwRefs       (v8327doc Гл. 8 / pubqlang/40)
-    //
-    //   CAST / TYPE / VALUE expressions:
-    //     ВЫРАЗИТЬ / CAST                -> KwCast       (v8327doc Гл. 8 / pubqlang/40)
-    //     ТИП / TYPE                     -> KwType       (v8327doc Гл. 8)
-    //     ЗНАЧЕНИЕ / VALUE               -> KwValue      (pubqlang/31)
-
-    // --- DROP query ---
-
-    // v8327doc Глава 8 — DROP query: `УНИЧТОЖИТЬ <ident>` destroys a
-    // temporary table at end-of-batch (canonical syntax + Term word-
-    // list slot УНИЧТОЖИТЬ ↔ DROP). Corroborating pubqlang/51, /73
-    // describe temp-table lifecycle.
     #[regex(r"(?i)уничтожить|(?i)drop")]
     KwDrop,
 
-    // --- Order-by direction & modifiers ---
-
-    // pubqlang/17 — AUTOORDER: bare-keyword tail clause requesting
-    // automatic ordering by the table's reference field
-    // (`chapter_017.html:17, 32, 52` canonical bare-keyword form).
-    // Bilingual АВТОУПОРЯДОЧИВАНИЕ ↔ AUTOORDER.
     #[regex(r"(?i)автоупорядочивание|(?i)autoorder")]
     KwAutoOrder,
 
-    // pubqlang/16 — ORDER BY direction marker: ascending. Bilingual
-    // ВОЗР ↔ ASC.
     #[regex(r"(?i)возр|(?i)asc")]
     KwAsc,
 
-    // pubqlang/16 — ORDER BY direction marker: descending. Bilingual
-    // УБЫВ ↔ DESC.
     #[regex(r"(?i)убыв|(?i)desc")]
     KwDesc,
 
-    // v8327doc Глава 8 — ORDER BY / TOTALS BY group spec: HIERARCHY
-    // modifier (canonical EBNF `[[ТОЛЬКО] ИЕРАРХИЯ]`). Corroborating
-    // pubqlang/27 (`chapter_027.html:39, 51, 71`)
-    // `УПОРЯДОЧИТЬ ПО Наименование ИЕРАРХИЯ`.
     #[regex(r"(?i)иерархия|(?i)hierarchy")]
     KwHierarchy,
 
-    // --- SELECT prefix qualifier ---
-
-    // v8327doc Глава 8 — SELECT prefix qualifier: РАЗРЕШЕННЫЕ filters
-    // the result set by row-level security (canonical EBNF first-
-    // prefix slot in `<Описание запроса>` + bilingual word-list
-    // РАЗРЕШЕННЫЕ ↔ ALLOWED + RLS-scope prose). Already attested
-    // Tier-A1 by Slice 7-addendum at
-    // `docs/legal/sdbl-clean-room-slice7-addendum.md`.
     #[regex(r"(?i)разрешенные|(?i)allowed")]
     KwAllowed,
 
-    // --- FOR UPDATE / INDEX BY ---
-
-    // v8327doc Глава 8 — FOR UPDATE clause: `[ДЛЯ ИЗМЕНЕНИЯ
-    // [<Список таблиц верхнего уровня>]]` enables row-locking for
-    // the named source tables (canonical EBNF + bilingual word-list
-    // ДЛЯ ↔ FOR + canonical example).
     #[regex(r"(?i)для|(?i)for")]
     KwFor,
 
-    // v8327doc Глава 8 — FOR UPDATE clause companion to KwFor: Term
-    // word-list ИЗМЕНЕНИЯ ↔ UPDATE + combined-Term entry
-    // `ДЛЯ ИЗМЕНЕНИЯ` + canonical EBNF.
     #[regex(r"(?i)изменения|(?i)update")]
     KwUpdate,
 
-    // v8327doc Глава 8 — INDEX BY clause: `[ИНДЕКСИРОВАТЬ ПО
-    // [НАБОРАМ] <Список полей>]` adds an index on temporary-table
-    // fields for downstream join performance (canonical EBNF +
-    // Term word-list ИНДЕКСИРОВАТЬ ↔ INDEX + canonical examples).
     #[regex(r"(?i)индексировать|(?i)index")]
     KwIndex,
 
-    // --- TOTALS modifiers ---
-
-    // v8327doc Глава 8 — TOTALS BY group modifier: `[[ТОЛЬКО]
-    // ИЕРАРХИЯ]` excludes detail rows so only hierarchy aggregates
-    // appear (Term word-list ТОЛЬКО ↔ ONLY + canonical EBNF +
-    // canonical example `Номенклатура ТОЛЬКО ИЕРАРХИЯ`).
     #[regex(r"(?i)только|(?i)only")]
     KwOnly,
 
-    // pubqlang/39 — TOTALS BY group: ОБЩИЕ marks the grand-total
-    // group (`chapter_039.html:13, 25, 29, 48, 49, 51` canonical
-    // `ИТОГИ ... ПО ОБЩИЕ`). Bilingual ОБЩИЕ ↔ OVERALL via the
-    // v8327doc Глава 8 word-list slot.
     #[regex(r"(?i)общие|(?i)overall")]
     KwOverall,
 
-    // v8327doc Глава 8 — TOTALS BY period spec: `[ПЕРИОДАМИ
-    // (<period-types>, <begin>, <end>)]` enables time-bucketed
-    // totals (bilingual word-list ПЕРИОДАМИ ↔ PERIODS + canonical
-    // EBNF in TOTALS group spec + prose «при помощи ключевого слова
-    // ПЕРИОДАМИ» + canonical example
-    // `Период ПЕРИОДАМИ(МИНУТА, ДАТАВРЕМЯ(...), ДАТАВРЕМЯ(...))`).
-    // The Russian spelling is **instrumental case** `ПЕРИОДАМИ` per
-    // the canonical source — the pre-Slice-2-addendum regex matched
-    // the wrong form `ПЕРИОДЫ` (nominative); the C2 fix flips the
-    // Russian alternation to canonical per
-    // `docs/legal/sdbl-clean-room-slice2-addendum.md` § Behaviour
-    // change Option A. Parser-tree invariant — the converter at
-    // `crates/parser/src/sdbl_token_converter.rs` maps
-    // `KwPeriods → TokenKind::Ident` and Slice 11 explicitly defers
-    // structured PERIODS handling to Slice 12, so the regex flip
-    // changes no observable parse-tree shape today.
     #[regex(r"(?i)периодами|(?i)periods")]
     KwPeriods,
 
-    // --- LIKE / REFS modifiers ---
-
-    // v8327doc Глава 8 — LIKE escape clause: `[СПЕЦСИМВОЛ <Литерал
-    // типа СТРОКА>]` overrides the default LIKE escape character
-    // (bilingual word-list СПЕЦСИМВОЛ ↔ ESCAPE + canonical EBNF in
-    // LIKE slot + prose).
     #[regex(r"(?i)спецсимвол|(?i)escape")]
     KwEscape,
 
-    // v8327doc Глава 8 — REFS predicate: `<Выражение> ССЫЛКА <Имя
-    // таблицы>` tests whether a composite-typed expression is a
-    // reference to the named metadata object (Term word-list
-    // ССЫЛКА + canonical EBNF + canonical example). Corroborating
-    // pubqlang/40 (`chapter_040.html:83, 98`) canonical example
-    // `(ОстаткиТоваров.Регистратор ССЫЛКА Документ.ПриходнаяНакладная)`.
     #[regex(r"(?i)ссылка|(?i)refs")]
     KwRefs,
 
-    // --- CAST / TYPE / VALUE expressions ---
-
-    // v8327doc Глава 8 — CAST expression: `ВЫРАЗИТЬ ( <Выражение>
-    // КАК <Тип значения> )` performs composite-type narrowing
-    // (Term word-list ВЫРАЗИТЬ + canonical EBNF). Corroborating
-    // pubqlang/40 (`chapter_040.html:24, 66, 84-86, 99, 102`)
-    // canonical examples and aggregate-result-shape prose.
     #[regex(r"(?i)выразить|(?i)cast")]
     KwCast,
 
-    // v8327doc Глава 8 — TYPE expression: `ТИП(<Имя типа>)`
-    // produces a type-instance value usable as the right-hand side
-    // of a comparison with `ТИПЗНАЧЕНИЯ()` or as the КАК-target of
-    // a ВЫРАЗИТЬ() call (canonical EBNF).
     #[regex(r"(?i)тип|(?i)type")]
     KwType,
 
-    // pubqlang/31 — VALUE expression: `ЗНАЧЕНИЕ(<полный путь>)`
-    // evaluates to a system-enum value or a predefined-data
-    // reference (`chapter_031.html:25` canonical example
-    // `Товары.Родитель = ЗНАЧЕНИЕ(Справочник.Товары.ПустаяСсылка)`;
-    // `:28` prose «литерал функционального типа ЗНАЧЕНИЕ()»).
-    // Corroborating pubqlang/96 (`chapter_096.html:26`)
-    // `ЗНАЧЕНИЕ(Перечисление.ВидыОпераций.ПоступлениеОтПроизводителей)`.
     #[regex(r"(?i)значение|(?i)value")]
     KwValue,
 
-    // ============================================================================
-    // CLEAN-ROOM Slice 3a — primitive types, undefined literal, narrow period vocabulary (complete, 2026-05-07)
-    // ============================================================================
-    //
-    // Every variant in this section carries an inline provenance
-    // comment citing the v8327doc Глава 8 «Работа с запросами»
-    // bilingual word-list row and a contextual EBNF / prose anchor
-    // for the variant's grammar role. Nothing in this block was
-    // copied from the pre-clean-room regex text or from any third-
-    // party SDBL lexer; the canonical SDBL grammar source is the
-    // v8.3.27 Developer's Reference Глава 8 «Работа с запросами»
-    // at <https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453>,
-    // with pubqlang chapters at
-    // <https://its.1c.ru/db/pubqlang/content/N/hdoc> providing
-    // corroborating prose. Full per-variant tier source map, the
-    // C0a discrepancy audit, and the verification recipe live in
-    // `docs/legal/sdbl-clean-room-slice3a.md`. The C0a audit found
-    // zero regex defects, so the seven `#[regex]` bodies below
-    // were not modified at C2 — only the per-variant docstrings,
-    // the thematic separators, and this convenience index are new
-    // in C2 relative to the C1 banner relocation.
-    //
-    // Convenience index (RUS / ENG → Variant — primary citation).
-    // The `#[regex]` attributes below are the single source of
-    // truth; this table is a scanning aid only.
-    //
-    //   Primitive type literals (4):
-    //     БУЛЕВО / BOOLEAN         → TypeBoolean    (CAST type slot 1; <Значение> typed-literal slot)
-    //     ЧИСЛО / NUMBER           → TypeNumber     (CAST type slot 2 with optional length+precision; <Литерал типа Число> EBNF)
-    //     СТРОКА / STRING          → TypeString     (CAST type slot 3 with optional length; <Литерал типа Строка> EBNF)
-    //     ДАТА / DATE              → TypeDate       (CAST type slot 4; <Литерал типа Дата> EBNF via ДАТАВРЕМЯ(...))
-    //
-    //   Undefined literal (1):
-    //     НЕОПРЕДЕЛЕНО / UNDEFINED → LitUndefined   (<Значение> grammar slot, companion to LitNull)
-    //
-    //   Narrow period-type keywords (2):
-    //     ДЕКАДА / TENDAYS         → PeriodTenDays  (ПЕРИОДАМИ(...) period-type slot 9 of 10)
-    //     ПОЛУГОДИЕ / HALFYEAR     → PeriodHalfYear (ПЕРИОДАМИ(...) period-type slot 10 of 10)
-    //
-    // Cross-references: the four `Type*` variants gate the
-    // `<Имя типа>` argument position of the `ТИП(<Имя типа>)`
-    // expression introduced by Slice 2-addendum's `KwType`. Both
-    // `Period*` variants gate the period-type-list argument of the
-    // `ПЕРИОДАМИ(...)` call introduced by Slice 2-addendum's
-    // `KwPeriods`.
-
-    // --- Primitive type literals ---
-
-    // v8327doc Глава 8 — primitive type literal: bilingual word-
-    // list БУЛЕВО ↔ BOOLEAN. Used as the first slot of the
-    // `<Тип значения>` production for the CAST operator
-    // (`ВЫРАЗИТЬ ( <Выражение> КАК <Тип значения> )`) and as a
-    // typed-literal type-tag in the `<Значение>` grammar via
-    // `типа Булево` prose. Cross-ref: `KwType` (Slice 2-addendum)
-    // for the `ТИП(Булево)` form.
     #[regex(r"(?i)булево|(?i)boolean")]
     TypeBoolean,
 
-    // v8327doc Глава 8 — primitive type literal: bilingual word-
-    // list ЧИСЛО ↔ NUMBER. CAST type slot
-    // `Число [(Длина[, Точность])]` accepts optional length and
-    // precision modifiers in parens; the standalone `<Литерал типа
-    // Число>` EBNF is `<Целое число>[.<Целое число>]`. Cross-ref:
-    // `KwType` for `ТИП(Число)`.
     #[regex(r"(?i)число|(?i)number")]
     TypeNumber,
 
-    // v8327doc Глава 8 — primitive type literal: bilingual word-
-    // list СТРОКА ↔ STRING. CAST type slot `Строка [(Длина)]`
-    // accepts an optional length modifier in parens; the
-    // standalone `<Литерал типа Строка>` EBNF is
-    // `"<Последовательность символов>"`. Cross-ref: `KwType` for
-    // `ТИП(Строка)`.
     #[regex(r"(?i)строка|(?i)string")]
     TypeString,
 
-    // v8327doc Глава 8 — primitive type literal: bilingual word-
-    // list ДАТА ↔ DATE. CAST type slot `Дата` (no length /
-    // precision modifiers); the standalone `<Литерал типа Дата>`
-    // EBNF uses the `ДАТАВРЕМЯ(<int>, <int>, <int>[, <int>, <int>,
-    // <int>])` constructor with year/month/day plus optional
-    // hour/minute/second. Cross-ref: `KwType` for `ТИП(Дата)`.
     #[regex(r"(?i)дата|(?i)date")]
     TypeDate,
 
-    // --- Undefined literal ---
-
-    // v8327doc Глава 8 — typed-undefined literal: bilingual
-    // word-list НЕОПРЕДЕЛЕНО ↔ UNDEFINED. Sits in the `<Значение>`
-    // EBNF production alongside ИСТИНА, ЛОЖЬ, the typed numeric /
-    // string / date literals, parameter literals, and NULL. The
-    // companion NULL literal is owned by Slice 2's `LitNull`. The
-    // converter at `crates/parser/src/sdbl_token_converter.rs`
-    // treats the two literals asymmetrically: `LitNull` maps to
-    // `TokenKind::Ident` (parser disambiguates by text via
-    // `at_keyword("NULL")`), while `LitUndefined` maps to a
-    // dedicated `TokenKind::KwUndefined` so the parser can match
-    // it directly without a text probe.
     #[regex(r"(?i)неопределено|(?i)undefined")]
     LitUndefined,
 
-    // --- Narrow period-type keywords ---
-
-    // v8327doc Глава 8 — TOTALS BY period-type literal: bilingual
-    // word-list ДЕКАДА ↔ TENDAYS. Slot 9 of the 10-element
-    // canonical period-type list inside `ПЕРИОДАМИ(<period-types>,
-    // <begin>, <end>)`. The full canonical list (per the TOTALS
-    // group EBNF and matching prose enumeration) is `Секунда |
-    // Минута | Час | День | Неделя | Месяц | Квартал | Год |
-    // Декада | Полугодие`; slots 1-8 are owned by `Fn*` tokens in
-    // the LEGACY block (function-side priority = 2 — they double
-    // as date/time function names). Cross-ref: `KwPeriods`
-    // (Slice 2-addendum) introduces the `ПЕРИОДАМИ` keyword.
     #[regex(r"(?i)декада|(?i)tendays")]
     PeriodTenDays,
 
-    // v8327doc Глава 8 — TOTALS BY period-type literal: bilingual
-    // word-list ПОЛУГОДИЕ ↔ HALFYEAR. Slot 10 (last) of the
-    // 10-element canonical period-type list inside
-    // `ПЕРИОДАМИ(<period-types>, <begin>, <end>)`. See
-    // `PeriodTenDays` above for the full canonical list and the
-    // `Fn*`-shadowing of slots 1-8. Cross-ref: `KwPeriods`
-    // (Slice 2-addendum) introduces the `ПЕРИОДАМИ` keyword.
     #[regex(r"(?i)полугодие|(?i)halfyear")]
     PeriodHalfYear,
 
-    // ============================================================================
-    // LEGACY (Slices 3b, 4, 5 pending — Mdo*/function/virtual-table vocabularies + ExternalDataSource)
-    // ============================================================================
-    //
-    // The variants below are carried over unchanged from the
-    // pre-clean-room implementation. They remain Tier B material
-    // for the duration of the staged migration; the next slices
-    // will re-derive built-in functions (Slice 4 — `Fn*`),
-    // metadata-object tokens (Slice 3b — the 14 `Mdo*` variants
-    // excluding `MdoExternalDataSource`), virtual-table tokens
-    // and the platform-late `MdoExternalDataSource` metadata
-    // prefix (Slice 5 — `Vt*` + `MdoExternalDataSource`) from ITS
-    // documentation. The `Error` fallback is the final clean-up
-    // step.
     #[regex(r"(?i)сумма|(?i)sum")]
     FnSum,
 
@@ -842,8 +283,6 @@ pub enum SdblTokenKind {
     #[regex(r"(?i)количество|(?i)count")]
     FnCount,
 
-    // Note: These also double as period types in TOTALS BY ... PERIODS(...)
-    // The parser will determine context. Functions have higher priority.
     #[regex(r"(?i)год|(?i)year", priority = 2)]
     FnYear,
 
@@ -1018,33 +457,16 @@ pub enum SdblTokenKind {
     #[regex(r"(?i)оборотыдткт|(?i)drcrturnovers")]
     VtDrCrTurnovers,
 
-    /// Logos error fallback for any byte sequence that does not match
-    /// a declared token. Retained unchanged pending the full Slice 1
-    /// → Slice 5 migration.
     Error,
 }
 
-/// An SDBL token with its kind, text, and position.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SdblToken {
-    /// The kind of token
     pub kind: SdblTokenKind,
-    /// The original text of the token
     pub text: SmolStr,
-    /// The byte offset in the source code
     pub offset: usize,
 }
 
-/// Tokenizes SDBL query string into a stream of tokens.
-///
-/// # Example
-///
-/// ```
-/// use lexer::sdbl::tokenize_sdbl;
-///
-/// let tokens = tokenize_sdbl("SELECT Name FROM Catalog.Products");
-/// assert!(tokens.len() > 0);
-/// ```
 pub fn tokenize_sdbl(input: &str) -> Vec<SdblToken> {
     let mut result = Vec::new();
     let mut pos = 0;
@@ -1083,7 +505,6 @@ mod tests {
     #[test]
     fn test_select_statement() {
         let tokens = tokenize_sdbl("SELECT Name FROM Catalog.Products");
-        // SELECT(0) WS(1) Name(2) WS(3) FROM(4) WS(5) Catalog(6) .(7) Products(8)
         assert_eq!(tokens[0].kind, SdblTokenKind::KwSelect);
         assert_eq!(tokens[1].kind, SdblTokenKind::Whitespace);
         assert_eq!(tokens[2].kind, SdblTokenKind::Ident);
@@ -1098,7 +519,6 @@ mod tests {
     #[test]
     fn test_russian_keywords() {
         let tokens = tokenize_sdbl("ВЫБРАТЬ Наименование ИЗ Справочник.Товары");
-        // ВЫБРАТЬ(0) WS(1) Наименование(2) WS(3) ИЗ(4) WS(5) Справочник(6) .(7) Товары(8)
         assert_eq!(tokens[0].kind, SdblTokenKind::KwSelect);
         assert_eq!(tokens[1].kind, SdblTokenKind::Whitespace);
         assert_eq!(tokens[2].kind, SdblTokenKind::Ident);
@@ -1113,7 +533,6 @@ mod tests {
     #[test]
     fn test_where_clause() {
         let tokens = tokenize_sdbl("WHERE Price > 100");
-        // WHERE(0) WS(1) Price(2) WS(3) >(4) WS(5) 100(6)
         assert_eq!(tokens[0].kind, SdblTokenKind::KwWhere);
         assert_eq!(tokens[1].kind, SdblTokenKind::Whitespace);
         assert_eq!(tokens[2].kind, SdblTokenKind::Ident);
@@ -1127,7 +546,6 @@ mod tests {
     fn test_join() {
         let tokens =
             tokenize_sdbl("LEFT JOIN Catalog.Categories ON Products.Category = Categories.Ref");
-        // LEFT(0) WS(1) JOIN(2) WS(3) Catalog(4) .(5) Categories(6) ...
         assert_eq!(tokens[0].kind, SdblTokenKind::KwLeft);
         assert_eq!(tokens[1].kind, SdblTokenKind::Whitespace);
         assert_eq!(tokens[2].kind, SdblTokenKind::KwJoin);
@@ -1138,7 +556,6 @@ mod tests {
     #[test]
     fn test_aggregate_functions() {
         let tokens = tokenize_sdbl("SUM(Amount) AS Total");
-        // SUM(0) ((1) Amount(2) )(3) WS(4) AS(5) WS(6) Total(7)
         assert_eq!(tokens[0].kind, SdblTokenKind::FnSum);
         assert_eq!(tokens[1].kind, SdblTokenKind::LParen);
         assert_eq!(tokens[2].kind, SdblTokenKind::Ident);
@@ -1152,7 +569,6 @@ mod tests {
     #[test]
     fn test_parameters() {
         let tokens = tokenize_sdbl("WHERE Date > &StartDate");
-        // WHERE(0) WS(1) Date(2) WS(3) >(4) WS(5) &StartDate(6)
         assert_eq!(tokens[6].kind, SdblTokenKind::Parameter);
         assert_eq!(tokens[6].text.as_str(), "&StartDate");
     }
@@ -1160,7 +576,6 @@ mod tests {
     #[test]
     fn test_temporary_table() {
         let tokens = tokenize_sdbl("INTO #TempTable");
-        // INTO(0) WS(1) #(2) TempTable(3)
         assert_eq!(tokens[0].kind, SdblTokenKind::KwInto);
         assert_eq!(tokens[1].kind, SdblTokenKind::Whitespace);
         assert_eq!(tokens[2].kind, SdblTokenKind::Hash);
@@ -1170,7 +585,6 @@ mod tests {
     #[test]
     fn test_virtual_table() {
         let tokens = tokenize_sdbl("FROM AccumulationRegister.Stock.Balance");
-        // FROM(0) WS(1) AccumulationRegister(2) .(3) Stock(4) .(5) Balance(6)
         assert_eq!(tokens[0].kind, SdblTokenKind::KwFrom);
         assert_eq!(tokens[1].kind, SdblTokenKind::Whitespace);
         assert_eq!(tokens[2].kind, SdblTokenKind::MdoAccumulationRegister);
@@ -1183,7 +597,6 @@ mod tests {
     #[test]
     fn test_case_expression() {
         let tokens = tokenize_sdbl("CASE WHEN Amount > 0 THEN 1 ELSE 0 END");
-        // CASE(0) WS(1) WHEN(2) WS(3) Amount(4) WS(5) >(6) WS(7) 0(8) WS(9) THEN(10) WS(11) 1(12) WS(13) ELSE(14) WS(15) 0(16) WS(17) END(18)
         assert_eq!(tokens[0].kind, SdblTokenKind::KwCase);
         assert_eq!(tokens[1].kind, SdblTokenKind::Whitespace);
         assert_eq!(tokens[2].kind, SdblTokenKind::KwWhen);
@@ -1207,7 +620,6 @@ mod tests {
     #[test]
     fn test_boolean_literals() {
         let tokens = tokenize_sdbl("TRUE FALSE Истина Ложь");
-        // TRUE(0) WS(1) FALSE(2) WS(3) Истина(4) WS(5) Ложь(6)
         assert_eq!(tokens[0].kind, SdblTokenKind::LitTrue);
         assert_eq!(tokens[1].kind, SdblTokenKind::Whitespace);
         assert_eq!(tokens[2].kind, SdblTokenKind::LitFalse);
@@ -1222,7 +634,6 @@ mod tests {
         let input = "SELECT 1;\n////////////////////////////////////////////////////////////////////////////////\nSELECT 2";
         let tokens = tokenize_sdbl(input);
 
-        // Find semicolon and comment
         let semicolon_pos = tokens.iter().position(|t| t.kind == SdblTokenKind::Semicolon).unwrap();
         let comment_pos = tokens.iter().position(|t| t.kind == SdblTokenKind::Comment);
 
@@ -1246,7 +657,6 @@ mod tests {
     #[test]
     fn test_date_functions() {
         let tokens = tokenize_sdbl("YEAR(Date) MONTH(Date) DAY(Date)");
-        // YEAR(0) ((1) Date(2) )(3) WS(4) MONTH(5) ((6) Date(7) )(8) WS(9) DAY(10) ((11) Date(12) )(13)
         assert_eq!(tokens[0].kind, SdblTokenKind::FnYear);
         assert_eq!(tokens[4].kind, SdblTokenKind::Whitespace);
         assert_eq!(tokens[5].kind, SdblTokenKind::FnMonth);
@@ -1257,7 +667,6 @@ mod tests {
     #[test]
     fn test_string_functions() {
         let tokens = tokenize_sdbl("SUBSTRING(Name, 1, 10) UPPER(Name)");
-        // SUBSTRING(0) ((1) Name(2) ,(3) WS(4) 1(5) ,(6) WS(7) 10(8) )(9) WS(10) UPPER(11) ((12) Name(13) )(14)
         assert_eq!(tokens[0].kind, SdblTokenKind::FnSubstring);
         assert_eq!(tokens[10].kind, SdblTokenKind::Whitespace);
         assert_eq!(tokens[11].kind, SdblTokenKind::FnUpper);
@@ -1266,7 +675,6 @@ mod tests {
     #[test]
     fn test_group_by() {
         let tokens = tokenize_sdbl("GROUP BY Category HAVING COUNT(*) > 5");
-        // GROUP(0) WS(1) BY(2) WS(3) Category(4) WS(5) HAVING(6) WS(7) COUNT(8) ...
         assert_eq!(tokens[0].kind, SdblTokenKind::KwGroup);
         assert_eq!(tokens[1].kind, SdblTokenKind::Whitespace);
         assert_eq!(tokens[2].kind, SdblTokenKind::KwOnOrBy);
@@ -1281,7 +689,6 @@ mod tests {
     #[test]
     fn test_order_by() {
         let tokens = tokenize_sdbl("ORDER BY Name ASC, Price DESC");
-        // ORDER(0) WS(1) BY(2) WS(3) Name(4) WS(5) ASC(6) ,(7) WS(8) Price(9) WS(10) DESC(11)
         assert_eq!(tokens[0].kind, SdblTokenKind::KwOrder);
         assert_eq!(tokens[1].kind, SdblTokenKind::Whitespace);
         assert_eq!(tokens[2].kind, SdblTokenKind::KwOnOrBy);
@@ -1297,7 +704,6 @@ mod tests {
     #[test]
     fn test_union() {
         let tokens = tokenize_sdbl("SELECT * FROM Table1 UNION ALL SELECT * FROM Table2");
-        // SELECT(0) WS(1) *(2) WS(3) FROM(4) WS(5) Table1(6) WS(7) UNION(8) WS(9) ALL(10) WS(11) SELECT(12) ...
         assert_eq!(tokens[8].kind, SdblTokenKind::KwUnion);
         assert_eq!(tokens[9].kind, SdblTokenKind::Whitespace);
         assert_eq!(tokens[10].kind, SdblTokenKind::KwAll);
@@ -1306,7 +712,6 @@ mod tests {
     #[test]
     fn test_distinct_top() {
         let tokens = tokenize_sdbl("SELECT DISTINCT TOP 100 Name");
-        // SELECT(0) WS(1) DISTINCT(2) WS(3) TOP(4) WS(5) 100(6) WS(7) Name(8)
         assert_eq!(tokens[0].kind, SdblTokenKind::KwSelect);
         assert_eq!(tokens[1].kind, SdblTokenKind::Whitespace);
         assert_eq!(tokens[2].kind, SdblTokenKind::KwDistinct);
@@ -1317,7 +722,6 @@ mod tests {
     #[test]
     fn test_in_predicate() {
         let tokens = tokenize_sdbl("WHERE Category IN (&CategoryList)");
-        // WHERE(0) WS(1) Category(2) WS(3) IN(4) WS(5) ((6) &CategoryList(7) )(8)
         assert_eq!(tokens[0].kind, SdblTokenKind::KwWhere);
         assert_eq!(tokens[1].kind, SdblTokenKind::Whitespace);
         assert_eq!(tokens[2].kind, SdblTokenKind::Ident);
@@ -1328,7 +732,6 @@ mod tests {
     #[test]
     fn test_between_predicate() {
         let tokens = tokenize_sdbl("WHERE Price BETWEEN 100 AND 500");
-        // WHERE(0) WS(1) Price(2) WS(3) BETWEEN(4) WS(5) 100(6) WS(7) AND(8) WS(9) 500(10)
         assert_eq!(tokens[0].kind, SdblTokenKind::KwWhere);
         assert_eq!(tokens[1].kind, SdblTokenKind::Whitespace);
         assert_eq!(tokens[2].kind, SdblTokenKind::Ident);
@@ -1342,7 +745,6 @@ mod tests {
     #[test]
     fn test_like_predicate() {
         let tokens = tokenize_sdbl("WHERE Name LIKE \"%Products%\"");
-        // WHERE(0) WS(1) Name(2) WS(3) LIKE(4) WS(5) "%Products%"(6)
         assert_eq!(tokens[0].kind, SdblTokenKind::KwWhere);
         assert_eq!(tokens[1].kind, SdblTokenKind::Whitespace);
         assert_eq!(tokens[2].kind, SdblTokenKind::Ident);
@@ -1355,7 +757,6 @@ mod tests {
     #[test]
     fn test_is_null() {
         let tokens = tokenize_sdbl("WHERE Description IS NULL");
-        // WHERE(0) WS(1) Description(2) WS(3) IS(4) WS(5) NULL(6)
         assert_eq!(tokens[0].kind, SdblTokenKind::KwWhere);
         assert_eq!(tokens[1].kind, SdblTokenKind::Whitespace);
         assert_eq!(tokens[2].kind, SdblTokenKind::Ident);
@@ -1368,7 +769,6 @@ mod tests {
     #[test]
     fn test_cast() {
         let tokens = tokenize_sdbl("CAST(Price AS NUMBER(15, 2))");
-        // CAST(0) ((1) Price(2) WS(3) AS(4) WS(5) NUMBER(6) ((7) 15(8) ,(9) WS(10) 2(11) )(12) )(13)
         assert_eq!(tokens[0].kind, SdblTokenKind::KwCast);
         assert_eq!(tokens[1].kind, SdblTokenKind::LParen);
         assert_eq!(tokens[2].kind, SdblTokenKind::Ident);
@@ -1380,22 +780,14 @@ mod tests {
 
     #[test]
     fn test_multiline_string_behavior() {
-        // Test what happens with strings containing newlines
-        // (after SDBL extraction from BSL multiline strings)
-
-        // Before lexer modification, this will produce ERROR tokens
-        // After modification, should produce String tokens
         let input = "SELECT\n   \"\" AS Field";
         let tokens = tokenize_sdbl(input);
 
-        // Should have: SELECT, Newline, Whitespace, String(""), Whitespace, AS, Whitespace, Ident
         println!("\nMultiline string test tokens:");
         for (i, token) in tokens.iter().enumerate() {
             println!("  {}: {:?} = {:?}", i, token.kind, token.text);
         }
 
-        // After lexer fix, empty string should be a String token
-        // For now, just document what we find
         assert!(!tokens.is_empty(), "Should produce some tokens");
     }
 
@@ -1412,7 +804,6 @@ mod tests {
 
     #[test]
     fn test_string_with_embedded_newline() {
-        // Test a string that contains an embedded newline between quotes.
         let input = "\"text\nmore\"";
         let tokens = tokenize_sdbl(input);
 
@@ -1421,8 +812,6 @@ mod tests {
             println!("  {}: {:?} = {:?}", i, token.kind, token.text);
         }
 
-        // With current regex [^"\n\r], this should NOT match
-        // and produce ERROR or split tokens
         assert!(!tokens.is_empty(), "Should produce tokens");
     }
 

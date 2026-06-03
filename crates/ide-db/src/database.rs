@@ -1,8 +1,3 @@
-//! RootDatabaseImpl — Salsa-backed implementation of RootDatabase.
-//!
-//! This module contains the concrete database struct and all trait implementations
-//! that wire Salsa queries to the trait methods defined in `root_db.rs`.
-
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -14,6 +9,7 @@ use hir::{
 use vfs::FileId;
 
 use crate::features::FeaturesInput;
+use crate::metadata::MetadataDb;
 use crate::queries::{
     line_index_query, liveness_analysis_query, method_cfg_query, module_metadata_query,
     reaching_definitions_query,
@@ -22,43 +18,39 @@ use crate::type_kernel::{TypeKernelHandle, TypeKernelInner, TypeKernelInput};
 use crate::{metadata, queries, vfs_helpers, RootDatabase, SdblHirEntries};
 use hir::{all_sdbl_in_file_query, sdbl_hir_for_file_query};
 
-/// Default implementation of RootDatabase with Salsa integration.
-///
-/// All HIR queries are now managed by Salsa for automatic caching and invalidation!
-/// No manual DashMap caches needed for HIR - Salsa handles everything.
 #[salsa::db]
 pub struct RootDatabaseImpl {
-    /// Salsa storage for incremental computation
     storage: salsa::Storage<Self>,
 
-    /// Base file storage
     files: Files,
 
-    /// Salsa input carrying the workspace-wide set of configuration roots and
-    /// the metadata generation counter.
-    ///
-    /// Lazily initialized on the first call to `set_all_config_paths` /
-    /// `bump_metadata_version`. Queries read `paths` / `version` from this
-    /// input, so mutations propagate through Salsa's invalidation graph.
     workspace_configs_input: parking_lot::RwLock<Option<metadata::WorkspaceConfigsInput>>,
 
-    /// Salsa input carrying workspace-wide feature flags (Task 6.7).
-    ///
-    /// Eagerly created in [`RootDatabaseImpl::new`] with defaults matching
-    /// [`project_model::FeaturesConfig::default`] (every flag on). Today's
-    /// only consumer — `narrow_or_base` in `hir` — is a plain Rust helper,
-    /// so flipping a flag through [`RootDatabaseImpl::set_type_narrowing_enabled`]
-    /// takes effect on the next call. If a future `#[salsa::tracked]`
-    /// query reads from this input, Salsa's standard revision tracking
-    /// kicks in for that query.
     features_input: parking_lot::RwLock<Option<FeaturesInput>>,
 
-    /// Monotonic production type-kernel storage shared by database clones.
     type_kernel: Arc<TypeKernelInner>,
 
-    /// Salsa input whose value is the shared type-kernel handle.
     type_kernel_input: parking_lot::RwLock<Option<TypeKernelInput>>,
+
+    /// Optional process-side cache of loaded configurations, keyed by the interned
+    /// config-root path string (stable and consistent across this build's batch
+    /// databases — not necessarily filesystem-canonical, which does not matter since
+    /// every batch interns the same root the same way). Set only by the batched
+    /// graph build, which opens a fresh
+    /// database per batch: without it each batch would reload the whole
+    /// configuration via [`metadata::load_configuration`] (re-running
+    /// `bsl_metadata::load_from_directory` over every metadata file). A single
+    /// `Arc` is shared across all of one build's batch databases (and their per-job
+    /// clones), so the load happens once. `None` for the long-lived LSP database,
+    /// which already memoises `load_configuration` per revision — there the field is
+    /// absent and loading is unchanged.
+    graph_config_cache: Option<Arc<GraphConfigCache>>,
 }
+
+/// Build-scoped cache of loaded configurations by interned config-root path string.
+/// A fresh instance per build keeps it a content snapshot — a later build (new
+/// instance) never sees a stale entry — so no version key is needed.
+pub type GraphConfigCache = dashmap::DashMap<PathBuf, Arc<bsl_metadata::Configuration>>;
 
 impl Default for RootDatabaseImpl {
     fn default() -> Self {
@@ -71,23 +63,18 @@ impl Clone for RootDatabaseImpl {
         Self {
             storage: self.storage.clone(),
             files: self.files.clone(),
-            // WorkspaceConfigsInput is Copy and tied to the shared storage,
-            // so cloning the handle is safe.
             workspace_configs_input: parking_lot::RwLock::new(*self.workspace_configs_input.read()),
             features_input: parking_lot::RwLock::new(*self.features_input.read()),
             type_kernel: Arc::clone(&self.type_kernel),
             type_kernel_input: parking_lot::RwLock::new(*self.type_kernel_input.read()),
+            // Share the same cache across clones so a per-job db clone sees configs
+            // loaded by its siblings.
+            graph_config_cache: self.graph_config_cache.clone(),
         }
     }
 }
 
 impl RootDatabaseImpl {
-    /// Create a new empty database.
-    ///
-    /// Eagerly creates the singleton [`metadata::WorkspaceConfigsInput`] so
-    /// that tracked queries that read configuration metadata always observe
-    /// a Salsa input and register a proper invalidation dependency — even
-    /// before the LSP layer has published any configuration paths.
     pub fn new() -> Self {
         let type_kernel = Arc::new(TypeKernelInner::new());
         let db = Self {
@@ -97,13 +84,10 @@ impl RootDatabaseImpl {
             features_input: parking_lot::RwLock::new(None),
             type_kernel: Arc::clone(&type_kernel),
             type_kernel_input: parking_lot::RwLock::new(None),
+            graph_config_cache: None,
         };
         let input = metadata::WorkspaceConfigsInput::new(&db, Vec::new(), 0);
         *db.workspace_configs_input.write() = Some(input);
-        // Defaults come from `project_model::FeaturesConfig::default` so
-        // that a fresh database and a freshly-parsed project config agree
-        // on the initial flag values — no risk of silent divergence if a
-        // future default flips.
         let defaults = project_model::FeaturesConfig::default();
         let features = FeaturesInput::new(&db, defaults.type_narrowing);
         *db.features_input.write() = Some(features);
@@ -116,39 +100,30 @@ impl RootDatabaseImpl {
         &self.type_kernel
     }
 
-    /// Handle of the singleton workspace-configs Salsa input.
-    ///
-    /// Invariant: always `Some` after `new()` returns.
+    /// Attach a build-scoped configuration cache shared across this build's batch
+    /// databases. See [`GraphConfigCache`] and the `graph_config_cache` field.
+    pub fn set_graph_config_cache(&mut self, cache: Arc<GraphConfigCache>) {
+        self.graph_config_cache = Some(cache);
+    }
+
     fn workspace_configs(&self) -> metadata::WorkspaceConfigsInput {
         self.workspace_configs_input
             .read()
             .expect("workspace_configs_input is initialized in RootDatabaseImpl::new")
     }
 
-    /// Expose the singleton handle (for consumers that need to read via
-    /// Salsa getters).
     pub fn workspace_configs_input(&self) -> metadata::WorkspaceConfigsInput {
         self.workspace_configs()
     }
 
-    /// Get the current metadata version (for configuration cache invalidation).
     pub fn metadata_version(&self) -> u32 {
         self.workspace_configs().version(self)
     }
 
-    /// Non-panicking probe of the per-file `FileTextInput` cell.
-    ///
-    /// Returns `Some(FileTextInput)` if the cell exists, `None` if the `FileId`
-    /// has never had a text input set. Safe to call **outside** tracked
-    /// queries; inside a tracked query the regular `file_text_input(fid)` path
-    /// is the right choice (panics on missing, but our total-VFS invariant
-    /// guarantees presence for fids reachable through SourceRoot).
     pub fn try_file_text(&self, file_id: vfs::FileId) -> Option<base_db::FileTextInput> {
         self.files.try_file_text(file_id)
     }
 
-    /// Bump metadata version to invalidate configuration cache.
-    /// Call this when .xml metadata files change.
     pub fn bump_metadata_version(&mut self) {
         use salsa::Setter;
         let input = self.workspace_configs();
@@ -156,50 +131,30 @@ impl RootDatabaseImpl {
         input.set_version(self).to(current + 1);
     }
 
-    /// Set all configuration paths: main + extensions.
-    /// Called from LSP when workspace root is set.
     pub fn set_all_config_paths(&mut self, paths: Vec<(Option<String>, std::path::PathBuf)>) {
         use salsa::Setter;
         let input = self.workspace_configs();
         input.set_paths(self).to(paths);
     }
 
-    /// Get all registered configuration paths.
     pub fn all_config_paths(&self) -> Vec<(Option<String>, std::path::PathBuf)> {
         self.workspace_configs().paths(self)
     }
 
-    /// Handle of the singleton features Salsa input.
-    ///
-    /// Invariant: always `Some` after `new()` returns.
     fn features(&self) -> FeaturesInput {
         self.features_input.read().expect("features_input is initialized in RootDatabaseImpl::new")
     }
 
-    /// Whether the type narrowing overlay is enabled for this workspace.
-    ///
-    /// Proxy for the underlying Salsa reader, exposed on the impl so the
-    /// LSP layer can read the flag without importing the trait.
     pub fn type_narrowing_enabled(&self) -> bool {
         self.features().type_narrowing(self)
     }
 
-    /// Toggle the type-narrowing overlay feature flag.
-    ///
-    /// Called by the LSP layer after loading `bsl-analyzer.toml`. The
-    /// next `narrow_or_base` call (or any future Salsa-tracked query that
-    /// reads the same input) observes the new value. Taking a plain
-    /// `bool` keeps this helper callable from contexts that don't want
-    /// to construct a full `FeaturesConfig`.
     pub fn set_type_narrowing_enabled(&mut self, enabled: bool) {
         use salsa::Setter;
         let input = self.features();
         input.set_type_narrowing(self).to(enabled);
     }
 
-    /// Get file path from FileId by traversing SourceRoot.
-    ///
-    /// Returns None if path cannot be resolved.
     pub(crate) fn get_file_path(&self, file_id: FileId) -> Option<PathBuf> {
         let source_root_input = self.file_source_root_input(file_id);
         let source_root_id = source_root_input.source_root_id(self);
@@ -210,37 +165,25 @@ impl RootDatabaseImpl {
         Some(PathBuf::from(vfs_path.as_path()))
     }
 
-    /// Find configuration root directory by searching for Configuration.xml.
-    ///
-    /// Algorithm:
-    /// 1. Start from file's directory
-    /// 2. Look for CommonModules/ subdirectory or Configuration.xml
-    /// 3. Walk up parent directories until found or root reached
-    ///
-    /// Returns None if configuration cannot be found.
     pub(crate) fn find_configuration_root(&self, file_path: &Path) -> Option<PathBuf> {
         let mut current = file_path.parent()?;
 
-        // Walk up the directory tree looking for Configuration markers
         loop {
-            // Check if CommonModules directory exists (typical Designer format structure)
             let common_modules = current.join("CommonModules");
             if common_modules.is_dir() {
                 tracing::debug!(?current, "Found configuration root via CommonModules/");
                 return Some(current.to_path_buf());
             }
 
-            // Check if Configuration.xml exists
             let config_xml = current.join("Configuration.xml");
             if config_xml.is_file() {
                 tracing::debug!(?current, "Found configuration root via Configuration.xml");
                 return Some(current.to_path_buf());
             }
 
-            // Move to parent directory
             current = match current.parent() {
                 Some(parent) if parent != current => parent,
-                _ => return None, // Reached root without finding config
+                _ => return None,
             };
         }
     }
@@ -265,8 +208,6 @@ impl SourceDatabase for RootDatabaseImpl {
 
     fn set_file_text(&mut self, file_id: FileId, text: &str) {
         let files = self.files.clone();
-        // Use smart durability detection based on source root (library vs user code)
-        // This ensures library files get HIGH durability, user files get LOW
         files.set_file_text_smart(self, file_id, text);
     }
 
@@ -422,13 +363,6 @@ impl hir::ConfigsDatabase for RootDatabaseImpl {
         &self,
         file_id: FileId,
     ) -> Option<Arc<bsl_metadata::Configuration>> {
-        // Restored from the historic `visible_configuration_for_file`
-        // helper in `queries.rs`: pick the main config and the
-        // longest-path-prefix extension whose root contains `file_id`,
-        // then merge via `Configuration::merged_with_extension`. Lives
-        // here (not in hir-def) because the path-prefix probe is
-        // filesystem-bound — keeping it in the adapter preserves
-        // hir-def's no-VFS invariant.
         let file_path = vfs_helpers::get_file_path(self, file_id)?;
         let paths = RootDatabaseImpl::all_config_paths(self);
 
@@ -438,7 +372,7 @@ impl hir::ConfigsDatabase for RootDatabaseImpl {
                 &path.to_string_lossy(),
                 self.metadata_version(),
             );
-            metadata::load_configuration(self, path_input)
+            self.load_configuration(path_input)
         };
 
         if paths.is_empty() {
@@ -463,6 +397,22 @@ impl hir::ConfigsDatabase for RootDatabaseImpl {
             (None, Some(extension_path)) => Some(load_at(extension_path)),
             (None, None) => None,
         }
+    }
+
+    fn resolved_module_summary(
+        &self,
+        module_id: ModuleId,
+    ) -> Arc<hir::call_graph::ResolvedModuleSummary> {
+        let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
+        hir::resolved_module_summary_query(self, file_id_input)
+    }
+
+    fn workspace_call_graph(
+        &self,
+        source_root_id: base_db::SourceRootId,
+    ) -> Arc<hir::call_graph::WorkspaceCallGraph> {
+        let source_root_input = self.source_root_input(source_root_id);
+        hir::workspace_call_graph_query(self, source_root_input)
     }
 }
 
@@ -536,7 +486,7 @@ impl RootDatabase for RootDatabaseImpl {
             &config_root.to_string_lossy(),
             self.metadata_version(),
         );
-        Some(metadata::load_configuration(self, path_input))
+        Some(self.load_configuration(path_input))
     }
 
     fn get_all_configurations(
@@ -555,7 +505,7 @@ impl RootDatabase for RootDatabaseImpl {
             .map(|(name, path)| {
                 let path_input =
                     metadata::intern_configuration_path(self, &path.to_string_lossy(), version);
-                let config = metadata::load_configuration(self, path_input);
+                let config = self.load_configuration(path_input);
                 (name, config)
             })
             .collect()
@@ -651,7 +601,32 @@ impl RootDatabase for RootDatabaseImpl {
 }
 
 #[salsa::db]
-impl metadata::MetadataDb for RootDatabaseImpl {}
+impl metadata::MetadataDb for RootDatabaseImpl {
+    /// Override the default loader to consult the build-scoped cache when one is
+    /// attached, so the whole-config metadata load runs once per config root per
+    /// build instead of once per fresh batch database. This is the single chokepoint
+    /// every config read funnels through (the resolver's `find_*`, `module_metadata`,
+    /// `configurations`/`merged_visible_configuration`), so caching here covers them
+    /// all. With no cache attached (the LSP database) it is the plain salsa query.
+    fn load_configuration<'db>(
+        &'db self,
+        path_input: metadata::ConfigurationPathInput<'db>,
+    ) -> Arc<bsl_metadata::Configuration> {
+        let Some(cache) = &self.graph_config_cache else {
+            return metadata::load_configuration(self, path_input);
+        };
+        let key = PathBuf::from(path_input.path(self));
+        if let Some(config) = cache.get(&key) {
+            return Arc::clone(&config);
+        }
+        // Miss: load (the build warms each root sequentially before its parallel
+        // region, so concurrent first-loads of the same root do not occur; a rare
+        // duplicate load would only repeat pure work, never corrupt the result).
+        let config = metadata::load_configuration(self, path_input);
+        cache.insert(key, Arc::clone(&config));
+        config
+    }
+}
 
 #[cfg(test)]
 #[path = "database_impl_tests.rs"]

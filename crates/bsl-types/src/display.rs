@@ -1,13 +1,3 @@
-//! Locale-aware rendering — `display_name(&TypeKind, &dyn DisplayCtx,
-//! &dyn TypeKernelDb) -> String`.
-//!
-//! The only function that renders types as user-visible strings.
-//! `Display` on `TypeKind` (derived) is debug-only.
-//!
-//! See design v5 §4.5 for the contract. Phase 1 covers all `TypeKind`
-//! variants; later phases will refine register-inner / form labels
-//! when callers need them.
-
 use std::fmt::Write;
 
 use crate::facet::{
@@ -19,10 +9,6 @@ use crate::intern::TypeKernelDb;
 use crate::kind::{MetadataKind, Projection, TypeId, TypeKind};
 use bsl_metadata::MdoType;
 
-/// Manager-collection label for an MDO family — `СправочникМенеджер` /
-/// `CatalogManager`, falling back to the generic collection label when the
-/// MDO has no manager-prefix form. Shared by `ManagerCollection` and
-/// `AnyMetadataRef` (Phase 0 aliases the latter to the former's shape).
 fn manager_collection_label(mdo: MdoType, locale: Locale) -> &'static str {
     match locale {
         Locale::Ru => mdo.manager_type_prefix_ru().unwrap_or("МенеджерКоллекция"),
@@ -30,9 +16,6 @@ fn manager_collection_label(mdo: MdoType, locale: Locale) -> &'static str {
     }
 }
 
-/// Locale for user-visible labels. Russian is the BSL native; English
-/// is the alias surface (used for hover-in-EN clients, doc-comment
-/// authors, …).
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 #[non_exhaustive]
 pub enum Locale {
@@ -40,17 +23,12 @@ pub enum Locale {
     En,
 }
 
-/// Rendering context — locale + display preferences.
 pub trait DisplayCtx {
     fn locale(&self) -> Locale;
 
-    /// `true` → hover-style rendering, show precision/length/scale.
-    /// `false` → completion-style, show bare type name only.
     fn precision_visible(&self) -> bool;
 }
 
-/// Trivial sandbox `DisplayCtx`. Production wires its own backed by
-/// user preferences.
 pub struct PlainDisplayCtx {
     pub locale: Locale,
     pub precision_visible: bool,
@@ -80,10 +58,6 @@ impl DisplayCtx for PlainDisplayCtx {
     }
 }
 
-/// Render a `TypeKind` as a user-visible string.
-///
-/// `db` is needed to resolve nested `TypeId`s (Union members, Array
-/// element types, projection field types, …).
 pub fn display_name(kind: &TypeKind, ctx: &dyn DisplayCtx, db: &dyn TypeKernelDb) -> String {
     let mut buf = String::new();
     render(kind, ctx, db, &mut buf);
@@ -136,8 +110,8 @@ fn render(kind: &TypeKind, ctx: &dyn DisplayCtx, db: &dyn TypeKernelDb, buf: &mu
                 render(db.lookup_type(*id), ctx, db, buf);
             }
         }
-        TypeKind::ValueTable(facet) => render_table(facet, ctx, db, /* row */ false, buf),
-        TypeKind::ValueTableRow(facet) => render_table(facet, ctx, db, /* row */ true, buf),
+        TypeKind::ValueTable(facet) => render_table(facet, ctx, db, false, buf),
+        TypeKind::ValueTableRow(facet) => render_table(facet, ctx, db, true, buf),
         TypeKind::ValueStorage => buf.push_str(match ctx.locale() {
             Locale::Ru => "ХранилищеЗначения",
             Locale::En => "ValueStorage",
@@ -149,17 +123,10 @@ fn render(kind: &TypeKind, ctx: &dyn DisplayCtx, db: &dyn TypeKernelDb, buf: &mu
         TypeKind::PlatformObject(PlatformObjectFacet { name }) => buf.push_str(name),
         TypeKind::MetadataRef(facet) => render_meta_ref(facet, ctx, buf),
         TypeKind::MetadataObject(facet) => render_meta_obj(facet, ctx, buf),
-        TypeKind::AnyMetadataRef { mdo_type } => {
-            // A flavour-scoped any-ref reads like the bare reference kind
-            // (`СправочникСсылка`), NOT the manager collection
-            // (`Справочники`) — it denotes "some reference of this
-            // flavour", a value, not the manager. Fall back to the
-            // collection label only for flavours with no `*Ref` kind.
-            match MetadataKind::ref_kind_for(*mdo_type) {
-                Some(kind) => buf.push_str(kind.display_label(ctx.locale())),
-                None => buf.push_str(manager_collection_label(*mdo_type, ctx.locale())),
-            }
-        }
+        TypeKind::AnyMetadataRef { mdo_type } => match MetadataKind::ref_kind_for(*mdo_type) {
+            Some(kind) => buf.push_str(kind.display_label(ctx.locale())),
+            None => buf.push_str(manager_collection_label(*mdo_type, ctx.locale())),
+        },
         TypeKind::AnyRef => buf.push_str(match ctx.locale() {
             Locale::Ru => "ЛюбаяСсылка",
             Locale::En => "AnyRef",
@@ -174,8 +141,6 @@ fn render(kind: &TypeKind, ctx: &dyn DisplayCtx, db: &dyn TypeKernelDb, buf: &mu
             };
             write!(buf, "{}.{}", kind_label, facet.name).unwrap();
         }
-        // Parent-qualified so the owning MDO disambiguates same-named
-        // sections (`Catalog X.Товары` vs `Document X.Товары`).
         TypeKind::TabularSection { parent, name } => {
             buf.push_str(match ctx.locale() {
                 Locale::Ru => "ТабличнаяЧасть<",
@@ -221,9 +186,6 @@ fn render(kind: &TypeKind, ctx: &dyn DisplayCtx, db: &dyn TypeKernelDb, buf: &mu
             write!(buf, "{}.{}", parent.name, name).unwrap();
         }
         TypeKind::FormData { kind, underlying } => {
-            // Concrete platform wrapper (`ДанныеФормыСтруктура` /
-            // `…Коллекция` / `…СтруктураСКоллекцией`) — locale-independent
-            // platform key, mirroring `Ty::display`'s wrapper.
             buf.push_str(kind.platform_type_name());
             if let Some(owner) = underlying {
                 buf.push(':');
@@ -231,9 +193,6 @@ fn render(kind: &TypeKind, ctx: &dyn DisplayCtx, db: &dyn TypeKernelDb, buf: &mu
             }
         }
         TypeKind::FormControl { kind, binding } => {
-            // Per-kind platform wrapper name (`ПолеФормы`, `ТаблицаФормы`,
-            // …) — locale-independent platform key. `Other` has no wrapper;
-            // fall back to the generic localized label.
             buf.push_str(kind.base_platform_type_name().unwrap_or(match ctx.locale() {
                 Locale::Ru => "ЭлементФормы",
                 Locale::En => "FormControl",
@@ -400,11 +359,6 @@ fn render_projection_suffix(
         }
         buf.push_str(&field.name);
         buf.push_str(": ");
-        // Phase 3 §4.G.5d: prefer the SDBL display shadow when captured —
-        // it carries precision/scale/length (`Число(15, 2)`, `Строка(50)`)
-        // that the interned `field.ty` drops. Falls back to kernel rendering
-        // of `field.ty` when no shadow is present (`raw_sdbl_types` is `None`,
-        // or indices don't line up).
         match proj.raw_sdbl_types.as_deref().and_then(|shadows| shadows.get(i)) {
             Some(shadow) => buf.push_str(&shadow.display),
             None => render(db.lookup_type(field.ty), ctx, db, buf),
@@ -414,17 +368,12 @@ fn render_projection_suffix(
 }
 
 fn render_meta_ref(facet: &MetaRefFacet, ctx: &dyn DisplayCtx, buf: &mut String) {
-    // Phase 3 §4.G.5d: `MetadataKind::display_label` is the exhaustive
-    // bilingual label source — no `Debug` leak for kinds (TabularSection,
-    // register refs, …) the old curated match didn't pin.
     buf.push_str(facet.kind.display_label(ctx.locale()));
     buf.push('.');
     buf.push_str(&facet.name);
 }
 
 fn render_meta_obj(facet: &MetaObjFacet, ctx: &dyn DisplayCtx, buf: &mut String) {
-    // Phase 3 §4.G.5d: exhaustive bilingual label via `display_label`
-    // (no `Debug` leak for unlisted object kinds).
     buf.push_str(facet.kind.display_label(ctx.locale()));
     buf.push('.');
     buf.push_str(&facet.name);
@@ -578,7 +527,6 @@ mod tests {
         expect!["Число(15, 2)"].assert_eq(&show(&db, id, &PlainDisplayCtx::hover_ru()));
         expect!["Число"].assert_eq(&show(&db, id, &PlainDisplayCtx::completion_ru()));
         expect!["Number(15, 2)"].assert_eq(&show(&db, id, &PlainDisplayCtx::hover_en()));
-        // Precision-only.
         let p = db.number(Some(10), None);
         expect!["Число(10)"].assert_eq(&show(&db, p, &PlainDisplayCtx::hover_ru()));
     }
@@ -612,11 +560,6 @@ mod tests {
 
     #[test]
     fn metadata_ref_tabular_section_uses_label_not_debug() {
-        // §4.G.5d regression guard: kinds the old curated match didn't pin
-        // (TabularSection, register refs, …) must render through
-        // `MetadataKind::display_label`, NOT the Rust `Debug` shape. A
-        // non-generic name (`Товары`) ensures we're checking the kind label,
-        // not a fixture name that coincidentally contains the expected word.
         let db = InMemoryDb::new();
         let cfg = RootConfigCtx;
         let ts = db.metadata_ref(
@@ -630,9 +573,6 @@ mod tests {
 
     #[test]
     fn any_ref_renders_localized_label() {
-        // `AnyRef` is the `ЛюбаяСсылка` supertype — rendered with the bare
-        // localized word, not the manager-collection label used by the
-        // flavoured `AnyMetadataRef`.
         let db = InMemoryDb::new();
         expect!["ЛюбаяСсылка"].assert_eq(&show(&db, db.any_ref(), &ru()));
         expect!["AnyRef"].assert_eq(&show(&db, db.any_ref(), &en()));
@@ -640,9 +580,6 @@ mod tests {
 
     #[test]
     fn any_metadata_ref_renders_ref_kind_label() {
-        // A flavoured any-ref reads like the bare reference kind
-        // (`СправочникСсылка`), NOT the manager collection (`Справочники`)
-        // — it is a reference value, not the manager.
         let db = InMemoryDb::new();
         let any_catalog = db.any_metadata_ref(MdoType::Catalog);
         expect!["СправочникСсылка"].assert_eq(&show(&db, any_catalog, &ru()));
@@ -651,8 +588,6 @@ mod tests {
 
     #[test]
     fn tabular_section_label_is_parent_qualified() {
-        // The owning MDO is part of the label so `Catalog "X".Товары` and
-        // `Document "X".Товары` don't collide.
         use crate::kind::MetadataKind;
         let db = InMemoryDb::new();
         let cfg = RootConfigCtx;
@@ -672,15 +607,12 @@ mod tests {
         expect!["Массив из Число"].assert_eq(&show(&db, arr, &ru()));
         expect!["Array of Number"].assert_eq(&show(&db, arr, &en()));
 
-        // Bare array — no element clause.
         let bare = db.array(None);
         expect!["Массив"].assert_eq(&show(&db, bare, &ru()));
     }
 
     #[test]
     fn register_inner_variants_use_ctx_locale() {
-        // Labels honour the context locale and are parent-qualified
-        // (`<Регистр>.<Имя>`) so the owning register is visible.
         use crate::kind::MetadataKind;
         let db = InMemoryDb::new();
         let cfg = RootConfigCtx;
@@ -707,14 +639,9 @@ mod tests {
         let n = db.number(None, None);
         let s = db.string(None, false);
         let u = db.union(vec![n, s]);
-        // Member order is canonicalised by sort; either rendering is
-        // valid, but it must be deterministic across re-interns. We
-        // assert determinism (re-intern same id, same string), not the
-        // specific order.
         let rendered = show(&db, u, &ru());
         let u2 = db.union(vec![s, n]);
         assert_eq!(show(&db, u2, &ru()), rendered);
-        // Sanity: rendering matches one of the two valid orderings.
         assert!(rendered == "Число | Строка" || rendered == "Строка | Число", "got {:?}", rendered);
     }
 
@@ -730,23 +657,17 @@ mod tests {
         );
         let qr = db.query_result(Some(proj), crate::facet::ProjectionSource::Sdbl);
 
-        // Hover (with precision_visible) shows the projection columns.
         expect!["РезультатЗапроса { Цена: Число(15, 2), Наименование: Строка }"].assert_eq(&show(
             &db,
             qr,
             &ru(),
         ));
 
-        // Completion mode hides projection.
         expect!["РезультатЗапроса"].assert_eq(&show(&db, qr, &PlainDisplayCtx::completion_ru()));
     }
 
     #[test]
     fn projection_prefers_sdbl_display_shadow() {
-        // §4.G.5d: when `raw_sdbl_types` is captured, the hover suffix must
-        // use the pre-rendered SDBL label (precision/scale/length) rather
-        // than the interned `field.ty` (which drops them). Here `field.ty`
-        // is a bare `Число` (no precision) but the shadow says `Число(15, 2)`.
         use crate::facet::SdblTypeShadowFacet;
         use crate::kind::{Projection, ProjectionField};
 
@@ -762,7 +683,6 @@ mod tests {
         let proj = Arc::new(Projection::new(fields, ProjectionOrigin::SdblQuery, Some(shadows)));
         let qr = db.query_result(Some(proj), crate::facet::ProjectionSource::Sdbl);
 
-        // Shadow wins over the bare interned `field.ty` (`Число`).
         expect!["РезультатЗапроса { Цена: Число(15, 2) }"].assert_eq(&show(&db, qr, &ru()));
     }
 
@@ -817,7 +737,6 @@ mod tests {
             &en(),
         ));
 
-        // The concrete wrapper distinguishes the three form-data shapes.
         let structure = db.mk_form_data(FormDataFacet::Structure, Some(owner.clone()));
         expect!["ДанныеФормыСтруктура:Справочник.Контрагенты"].assert_eq(&show(
             &db,

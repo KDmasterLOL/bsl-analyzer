@@ -1,7 +1,3 @@
-//! Salsa tracked queries for base-db.
-//!
-//! These queries sit below HIR and expose parsed source-level facts.
-
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -11,7 +7,6 @@ use vfs::{FileId, VfsPath};
 
 use crate::input::{FileTextInput, SourceRootInput};
 
-/// Parse file text using the parser's shared token cache.
 #[salsa::tracked(lru = 512)]
 pub fn parse_query(db: &dyn salsa::Database, input: FileTextInput) -> Parse<SyntaxNode> {
     let _span = tracing::info_span!("parse").entered();
@@ -20,17 +15,6 @@ pub fn parse_query(db: &dyn salsa::Database, input: FileTextInput) -> Parse<Synt
     parser::parse_with_shared_cache(&text)
 }
 
-/// Map method source ranges to their root API region name.
-///
-/// Nested regions report the top-level region, not the immediate parent:
-/// ```bsl
-/// #Region Public
-///     #Region Internal
-///         Procedure MyProc()  // Maps to "Public" (root), not "Internal"
-///         EndProcedure
-///     #EndRegion
-/// #EndRegion
-/// ```
 #[salsa::tracked(lru = 256)]
 pub fn method_regions_query(
     db: &dyn salsa::Database,
@@ -93,7 +77,6 @@ fn is_api_region(name: &str) -> bool {
     API_REGIONS.contains(&name.to_lowercase().as_str())
 }
 
-/// Resolve a path string to `FileId` within a source root.
 #[salsa::tracked(lru = 256)]
 pub fn resolve_vfs_path_query(
     db: &dyn salsa::Database,

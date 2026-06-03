@@ -1,55 +1,3 @@
-//! InternetAccess diagnostic.
-//!
-//! Detects internet access operations for security review.
-//!
-//! ## Why?
-//! Internet access creates security vulnerabilities:
-//! - Potential for unauthorized data exfiltration
-//! - May expose internal systems to external threats
-//! - Creates attack vectors for command & control
-//! - Uncontrolled HTTP/FTP/mail operations
-//!
-//! This diagnostic is a **security audit tool** - disabled by default.
-//! Enable it for code review, especially when auditing third-party or contractor code.
-//!
-//! ## What is detected
-//!
-//! ### Constructor patterns (NEW_EXPRESSION):
-//! - FTPСоединение/FTPConnection - FTP connections
-//! - HTTPСоединение/HTTPConnection - HTTP connections
-//! - WSОпределения/WSDefinitions - Web service definitions
-//! - WSПрокси/WSProxy - Web service proxies
-//! - ИнтернетПочтовыйПрофиль/InternetMailProfile - Internet mail profiles
-//! - ИнтернетПочта/InternetMail - Internet mail
-//! - Почта/Mail - Mail operations
-//! - HTTPЗапрос/HTTPRequest - HTTP requests
-//! - ИнтернетПрокси/InternetProxy - Internet proxy
-//!
-//! ## Bad practice
-//! ```bsl
-//! Процедура ОтправитьДанные()
-//!     // Internet access without authorization check
-//!     HTTPСоединение = Новый HTTPСоединение("external-server.com", 80);
-//!     FTPСоединение = Новый FTPСоединение("ftp.example.com", 21);
-//!     Почта = Новый ИнтернетПочта();
-//! КонецПроцедуры
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! // Review and verify internet access is authorized
-//! // Implement proper access control and validation
-//! // Use secure protocols (HTTPS, FTPS)
-//! // Validate destination URLs/addresses
-//! ```
-//!
-//! ## Configuration
-//! - **Enabled by default:** No (security audit tool)
-//! - **Severity:** Warning (MAJOR VULNERABILITY)
-//! - **Type:** VULNERABILITY
-//! - **Tags:** SUSPICIOUS
-//! - **Minutes to fix:** 60
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -71,19 +19,10 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Track 2 §1.6: Constructor lookup against the security registry —
-/// `Category::Internet` covers FTP / HTTP / WS / mail / proxy types.
-/// The legacy hardcoded `NEW_EXPRESSION_PATTERNS` list is gone; the
-/// registry parity test in `bsl-platform/tests/security_registry.rs`
-/// asserts every legacy name is present, so behaviour is preserved.
 fn is_internet_constructor(name: &str) -> bool {
     registry().lookup_constructor(name).is_some_and(|e| matches!(e.category, Category::Internet))
 }
 
-/// HIR-based check for internet access operations.
-///
-/// Scans all method bodies and module-level code for NEW expressions
-/// that create internet access types (HTTP, FTP, Mail, etc.).
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::InternetAccess;
 
@@ -114,10 +53,6 @@ fn create_diagnostic(
     }
 }
 
-/// Check a single body (method or module-level code) for internet access operations.
-///
-/// Scans all expressions in the body looking for NEW expressions that match
-/// internet access patterns.
 fn check_body_for_internet_access(
     body: &hir::Body,
     source_map: &hir::BodySourceMap,
@@ -129,13 +64,11 @@ fn check_body_for_internet_access(
         if let Expr::New { type_name, args } = expr {
             let mut detected = false;
 
-            // Pattern 1: Новый HTTPСоединение(...)
             if let Some(name) = type_name {
                 if is_internet_constructor(name.as_str()) {
                     detected = true;
                 }
             } else if !args.is_empty() {
-                // Pattern 2: Новый("HTTPСоединение")
                 if let Expr::Literal(Literal::String(s)) = body.expr(ExprId::from_idx(args[0])) {
                     if is_internet_constructor(s) {
                         detected = true;

@@ -1,25 +1,3 @@
-//! Cross-procedure SDBL projection propagation.
-//!
-//! Pins the end-to-end invariant that a helper which builds and returns
-//! a query
-//!
-//! ```bsl
-//! Функция СоздатьЗапрос()
-//!     Зап = Новый Запрос;
-//!     Зап.Текст = "ВЫБРАТЬ ""abc"" КАК Имя";
-//!     Возврат Зап;
-//! КонецФункции
-//!
-//! Результат = СоздатьЗапрос().Выполнить().Выбрать().Имя
-//! ```
-//!
-//! propagates its refined projection through `method_return_type_query`
-//! so the trailing `.Имя` on the caller side still types as
-//! `Ty::String`. The helper body lives in a different `BodyInferenceResult`
-//! than the caller, so the projection must survive the cross-method
-//! Salsa boundary (Phase B synthesis + Phase D variable-state refinement
-//! + Phase J method-graph cascade).
-
 use hir::{Builders, DefDatabase, HirDatabase, ModuleId, TypeId};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
@@ -54,13 +32,6 @@ fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<Typ
 
 #[test]
 fn helper_returning_refined_query_propagates_projection_to_caller() {
-    // Phase F closes this gap: `infer_path_name` upgrades a
-    // projection-less `Ty::Query{[None]}` (or legacy
-    // `PlatformObject("Запрос")`) binding by running the same
-    // reaching-defs walk Phase D applies at chain dispatch. The
-    // helper's `Возврат Зап;` now resolves to `Ty::Query{[Some(p)]}`,
-    // `method_return_type_query` caches it, and the caller's chain
-    // surfaces `.Имя` as `Ty::String`.
     let fixture = r#"//- /test.bsl
 Функция СоздатьЗапрос() Экспорт
     Зап = Новый Запрос;
@@ -83,10 +54,6 @@ fn helper_returning_refined_query_propagates_projection_to_caller() {
 
 #[test]
 fn helper_with_constructor_literal_propagates_projection() {
-    // Companion to the variable-refinement test above — the helper
-    // produces the projection at constructor time (Phase B), no
-    // Phase D walk needed. Pins that Phase B synthesis survives the
-    // same cross-method boundary.
     let fixture = r#"//- /test.bsl
 Функция СоздатьЗапрос() Экспорт
     Возврат Новый Запрос("ВЫБРАТЬ ""abc"" КАК Имя");
@@ -107,11 +74,6 @@ fn helper_with_constructor_literal_propagates_projection() {
 
 #[test]
 fn divergent_text_writes_collapse_to_unknown() {
-    // Phase F preserves Phase D's all-or-nothing rule: when reaching
-    // defs disagree on the literal SDBL text, the projection collapses
-    // and the caller's `.Имя` types as `Unknown`. Without this, two
-    // divergent SELECTs would silently pick one — worse than no
-    // refinement.
     let fixture = r#"//- /test.bsl
 Функция СоздатьЗапрос(Флаг) Экспорт
     Зап = Новый Запрос;
@@ -139,9 +101,6 @@ fn divergent_text_writes_collapse_to_unknown() {
 
 #[test]
 fn dynamic_text_write_collapses_to_unknown() {
-    // RHS is a function call, not a string literal — the dataflow
-    // walk rejects it (`projection_from_text_assignment` requires
-    // `Expr::Literal(String)`). Caller surfaces Unknown.
     let fixture = r#"//- /test.bsl
 Функция ПолучитьТекст()
     Возврат "ВЫБРАТЬ ""abc"" КАК Имя";
@@ -169,11 +128,6 @@ fn dynamic_text_write_collapses_to_unknown() {
 
 #[test]
 fn no_text_write_keeps_projection_none() {
-    // Bare `Зап = Новый Запрос;` with no `.Текст` write — reaching
-    // defs find nothing for `зап.текст`, refinement returns None, and
-    // the caller's chain produces `Ty::Unknown` on the trailing
-    // `.Имя`. Pins that Phase F doesn't fabricate a projection out of
-    // an unrefined binding.
     let fixture = r#"//- /test.bsl
 Функция СоздатьЗапрос() Экспорт
     Зап = Новый Запрос;
@@ -194,24 +148,12 @@ fn no_text_write_keeps_projection_none() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Phase F follow-ups — pinned as `#[ignore]` so the fixtures exist and
-// can be flipped to active tests when the underlying support lands. Each
-// case names the missing primitive in the ignore reason. Per Codex
-// round-1 review of the Phase F plan (REVISE on area E): keep fixtures
-// in-repo to prevent silent regression.
-// ---------------------------------------------------------------------------
-
 #[test]
 #[ignore = "Phase F follow-up: loop-carried `.Текст += ...` append idiom needs \
             string-concatenation reasoning in projection_from_text_assignment; \
             today the +=-style write fails the `Expr::Literal(String)` gate and \
             collapses to None (acceptable, but no caller-side wire-through yet)."]
 fn loop_carried_text_append_recovers_to_projection() {
-    // Iterative builder idiom — projection only knowable if the
-    // dataflow walk concatenates literal fragments across the loop
-    // back-edge. Out of Phase F scope; Phase D's append-rejection
-    // policy applies.
     let fixture = r#"//- /test.bsl
 Функция СоздатьЗапрос(Условия) Экспорт
     Зап = Новый Запрос;
@@ -240,10 +182,6 @@ fn loop_carried_text_append_recovers_to_projection() {
             def for the param binding's `.Текст`, so refinement returns None. \
             Closing this gap needs callee/caller cross-method dataflow."]
 fn parameter_query_with_text_write_in_caller_propagates() {
-    // The helper receives a `Запрос` argument and the caller assigns
-    // its text before passing it in. Phase F's module-local
-    // reaching-defs don't cross the parameter boundary. Cross-method
-    // dataflow would be a separate phase.
     let fixture = r#"//- /test.bsl
 Функция Выполнить(Зап) Экспорт
     Возврат Зап.Выполнить().Выбрать().Имя;
@@ -269,10 +207,6 @@ fn parameter_query_with_text_write_in_caller_propagates() {
             symbol needs scope resolution before refinement; today the gate \
             only checks var_types and may miss shadowing. Out of Phase F scope."]
 fn cfe_shadowed_binding_refines_through_local_only() {
-    // `Запрос` is also a platform constructor name; the local
-    // `Запрос = Новый Запрос;` shadows it. Phase F currently relies
-    // on var_types having already captured the local — but a CFE
-    // extension that publishes a `Запрос` global could intervene.
     let fixture = r#"//- /test.bsl
 Функция СоздатьЗапрос() Экспорт
     Запрос = Новый Запрос;
@@ -293,22 +227,8 @@ fn cfe_shadowed_binding_refines_through_local_only() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Batched-package support (Phase D follow-up shipped 2026-05-23 alongside
-// Phase F). 1С `Запрос.Выполнить()` returns the result of the *last* query
-// in a batched SDBL package; `ПОМЕСТИТЬ`/staging SELECTs produce no rows.
-// The refinement and chain-rewrite layers now agree on that semantics.
-// ---------------------------------------------------------------------------
-
 #[test]
 fn batched_text_assignment_picks_last_query_projection() {
-    // ERP-style: a temp-table `ПОМЕСТИТЬ` stages a sub-query, then a
-    // final SELECT joins against it. Runtime returns only the final
-    // SELECT's rows. The dataflow walk produces a per-sub-query
-    // projection vector; `.Выполнить()` reads the last entry; the
-    // trailing `.Выгрузить()` carries the projection into the
-    // returned ValueTable and the caller's iteration row sees the
-    // final query's fields.
     let fixture = r#"//- /test.bsl
 Функция ПолучитьТЗ() Экспорт
     Зап = Новый Запрос;
@@ -334,10 +254,6 @@ fn batched_text_assignment_picks_last_query_projection() {
 
 #[test]
 fn batched_text_assignment_drops_staging_columns() {
-    // Negative: a column that exists only in a `ПОМЕСТИТЬ` staging
-    // sub-query must NOT leak into the final selection's projection.
-    // Reading it on the iteration row types as Unknown (conservative
-    // var_types track drops Unknown, so the binding stays absent).
     let fixture = r#"//- /test.bsl
 Функция ПолучитьТЗ() Экспорт
     Зап = Новый Запрос;

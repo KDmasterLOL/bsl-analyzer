@@ -1,7 +1,3 @@
-//! SeveralCompilerDirectives diagnostic.
-//!
-//! Checks that a module variable or method has no more than one compiler directive.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};

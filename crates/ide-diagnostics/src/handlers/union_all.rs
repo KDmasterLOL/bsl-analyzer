@@ -1,5 +1,3 @@
-//! Reports `UNION` / `ОБЪЕДИНИТЬ` usages without `ALL` / `ВСЕ`.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -19,7 +17,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     clean_code_attribute: CleanCodeAttribute::Adaptable,
 };
 
-/// Single-pass dispatch for UnionAll.
 pub(crate) fn dispatch(
     ctx: &DiagnosticsContext,
     diag: &sdbl_hir::SdblDiagnostic,

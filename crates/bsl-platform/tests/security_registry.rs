@@ -1,16 +1,6 @@
-//! Audit tests for the curated security registry.
-//!
-//! These tests guard the `bsl-platform/src/security/` catalogue against
-//! the kinds of mistakes that const-data is prone to: typos that break
-//! bilingual lookup, duplicate `(name, kind)` keys that would silently
-//! mask one entry with another, and category usages out of step with
-//! what handlers expect.
-
 use bsl_platform::security::{registry, Category, EntryKind, SecurityEntry};
 use std::collections::HashSet;
 
-/// Every entry must have a non-empty `ru` field. Empty `en` is allowed
-/// (RU-only APIs); empty `ru` is not.
 #[test]
 fn every_entry_has_russian_name() {
     for entry in registry().entries() {
@@ -18,9 +8,6 @@ fn every_entry_has_russian_name() {
     }
 }
 
-/// `(lower_ru, kind)` and `(lower_en, kind)` must each be unique across
-/// the catalogue. A duplicate would mean two entries collide on lookup
-/// and `SecurityRegistry::build` would silently drop one.
 #[test]
 fn no_duplicate_lookup_keys() {
     let mut seen: HashSet<(String, EntryKind)> = HashSet::new();
@@ -29,8 +16,6 @@ fn no_duplicate_lookup_keys() {
         assert!(seen.insert((ru_key.clone(), entry.kind)), "duplicate RU key: {entry:?}",);
         if !entry.en.is_empty() {
             let en_key = entry.en.to_lowercase();
-            // Some types share the same lexeme on both sides (`xBase`);
-            // that is not a duplicate, just a bilingual coincidence.
             if en_key != ru_key {
                 assert!(seen.insert((en_key, entry.kind)), "duplicate EN key: {entry:?}",);
             }
@@ -38,8 +23,6 @@ fn no_duplicate_lookup_keys() {
     }
 }
 
-/// Round-trip: looking up by RU name returns the same entry as looking
-/// up by EN name (when EN exists), regardless of case.
 #[test]
 fn bilingual_lookup_round_trip() {
     let reg = registry();
@@ -48,7 +31,6 @@ fn bilingual_lookup_round_trip() {
             .unwrap_or_else(|| panic!("RU lookup failed for {entry:?}"));
         assert_eq!(by_ru.ru, entry.ru, "RU lookup returned wrong entry");
 
-        // Case insensitivity on the RU side.
         let by_ru_upper = lookup_by_kind(reg, &entry.ru.to_uppercase(), entry.kind);
         assert!(by_ru_upper.is_some(), "uppercase RU lookup failed for {entry:?}");
 
@@ -56,7 +38,6 @@ fn bilingual_lookup_round_trip() {
             let by_en = lookup_by_kind(reg, entry.en, entry.kind)
                 .unwrap_or_else(|| panic!("EN lookup failed for {entry:?}"));
             assert_eq!(by_en.ru, entry.ru, "EN lookup returned wrong entry");
-            // Case insensitivity on the EN side.
             assert!(
                 lookup_by_kind(reg, &entry.en.to_lowercase(), entry.kind).is_some(),
                 "lowercase EN lookup failed for {entry:?}",
@@ -65,7 +46,6 @@ fn bilingual_lookup_round_trip() {
     }
 }
 
-/// Empty / unknown lookups return `None` rather than panicking.
 #[test]
 fn empty_and_unknown_lookups_return_none() {
     let reg = registry();
@@ -106,9 +86,6 @@ fn lc_empty_string_returns_none() {
     assert!(reg.lookup_constructor_lc("").is_none());
 }
 
-/// Categories that the security handlers in §1.6 will switch over to
-/// must each have at least one entry — otherwise the migration will
-/// trip the first time the handler queries the registry.
 #[test]
 fn each_handler_category_has_entries() {
     let reg = registry();
@@ -129,10 +106,6 @@ fn each_handler_category_has_entries() {
     }
 }
 
-/// Every constructor entry must have RU and EN spellings. Constructors
-/// with no English alias would silently break `Новый("FileStream", ...)`
-/// detection in some BSL fixtures. Global methods can stay RU-only
-/// (existing behaviour for `ЗапуститьПрограмму` etc.).
 #[test]
 fn constructors_are_fully_bilingual() {
     for entry in registry().entries() {
@@ -142,12 +115,6 @@ fn constructors_are_fully_bilingual() {
     }
 }
 
-/// `Role::ModeBool` only makes sense on lifetime-controlling APIs. The
-/// §1.2 saturating-counter lattice in `dataflow` will route exactly
-/// these entries through the privilege/safe-mode transfer functions —
-/// other categories must not silently leak in. Polarity is also pinned
-/// here: `SetSafeMode` is the only API where `False` opens the unsafe
-/// frame; the other two open when `True`.
 #[test]
 fn mode_bool_role_only_on_mode_categories() {
     use bsl_platform::security::Role;
@@ -161,8 +128,6 @@ fn mode_bool_role_only_on_mode_categories() {
                 matches!(entry.category, Category::PrivilegedMode | Category::SafeMode),
                 "ModeBool param on non-mode category: {entry:?}",
             );
-            // Pin the three polarity assignments so a future edit can't
-            // silently flip one and corrupt §1.2 dataflow semantics.
             let expected_open_on_true = matches!(
                 entry.ru,
                 "УстановитьПривилегированныйРежим" | "УстановитьОтключениеБезопасногоРежима",
@@ -182,19 +147,10 @@ fn mode_bool_role_only_on_mode_categories() {
     }
 }
 
-/// Cross-check: every name accepted by the legacy hardcoded recognizers
-/// in `crates/hir-def/src/body/lower/expr.rs` is reachable through the
-/// registry. The list is the post-cleanup canonical superset; legacy
-/// expr.rs entries that were morphologically wrong (`…Асинч` instead of
-/// `…Асинх`, genitive forms like `НачатьКопированияФайла` instead of
-/// `НачатьКопированиеФайла`) are intentionally NOT replicated — they
-/// were latent bugs that never matched real platform method names. The
-/// §1.6 migration deletes those legacy spellings.
 #[test]
 fn legacy_recognizer_parity() {
     let reg = registry();
 
-    // is_external_app_method (RU + EN) — expr.rs:1679
     for &name in &[
         "командасистемы",
         "system",
@@ -206,8 +162,6 @@ fn legacy_recognizer_parity() {
         "beginrunningapplication",
         "запуститьприложениеасинх",
         "runappasync",
-        // RU-only in legacy; registry stores `en: ""` so EN lookup is
-        // not asserted here.
         "запуститьпрограмму",
         "открытьпроводник",
         "открытьфайл",
@@ -218,12 +172,10 @@ fn legacy_recognizer_parity() {
         );
     }
 
-    // is_os_users_method (RU + EN) — expr.rs:1663
     for &name in &["пользователиос", "osusers"] {
         assert!(reg.lookup_global(name).is_some(), "missing OS-users name: {name}");
     }
 
-    // is_file_system_type — expr.rs:1714 (NEW expression types)
     for &name in &[
         "file",
         "файл",
@@ -265,11 +217,6 @@ fn legacy_recognizer_parity() {
         );
     }
 
-    // is_file_system_method — expr.rs:1949 (canonical-only superset).
-    // The 14 legacy buggy spellings (`…Асинч` typos and genitive verbal
-    // nouns) are intentionally NOT covered — see test doc-comment and
-    // `registry.rs` module-doc. Each canonical-equivalent IS covered
-    // below to ensure §1.6 handlers can reach them.
     for &name in &[
         "значениевфайл",
         "valuetofile",
@@ -346,10 +293,6 @@ fn legacy_recognizer_parity() {
         );
     }
 
-    // Internet constructors — `internet_access.rs::NEW_EXPRESSION_PATTERNS`
-    // (line 77) and `using_hardcode_secret_information.rs:38` both
-    // enumerate the same set; cover each name explicitly so §1.6 cannot
-    // silently drop one during migration.
     for &name in &[
         "ftpсоединение",
         "ftpconnection",
@@ -376,18 +319,10 @@ fn legacy_recognizer_parity() {
         );
     }
 
-    // is_write_log_event_method — expr.rs:1774. Lives under
-    // `Category::Logging` because the §2 catch-body classifier consults
-    // the same registry to recognize `LogsOnly` clauses.
     for &name in &["записьжурналарегистрации", "writelogevent"] {
         assert!(reg.lookup_global(name).is_some(), "WriteLogEvent name not in registry: {name}",);
     }
 
-    // is_safe_mode_method, is_safe_mode_query, is_set_privileged_mode —
-    // diagnostics.rs:191/197/209. `ПривилегированныйРежим` getter is
-    // listed separately (it has no legacy `is_*` predicate today, but
-    // is referenced by §1.5 guard-predicate detection and downstream
-    // `IsInRoleMethod` handler).
     for &name in &[
         "установитьбезопасныйрежим",
         "setsafemode",
@@ -409,30 +344,11 @@ fn legacy_recognizer_parity() {
     }
 }
 
-/// Track 2 §1.6 Group A category-parity guard.
-///
-/// The legacy recognizers in `hir-def/body/lower/expr.rs` filter on a
-/// fixed `Category` (e.g. `is_file_system_method` checks
-/// `Category::FileSystem` on `EntryKind::GlobalMethod`). After the §1.6
-/// swap, an entry whose name appears in the legacy list but whose
-/// registry `category` is the wrong one would silently stop being
-/// detected — `legacy_recognizer_parity` only asserts `is_some()`,
-/// missing this class of regression.
-///
-/// This test pins the contract: **every** name covered by a migrated
-/// predicate (full enumeration matching `legacy_recognizer_parity`,
-/// not a representative sample — Codex round-2 MAJOR fix) is reachable
-/// AND classified under the predicate's filter category. If a future
-/// PR reassigns any name's category in `registry.rs` (e.g. moves
-/// `КопироватьФайл` from `FileSystem` to `Internet`), the migrated
-/// `is_file_system_method` will silently lose detection — this test
-/// fails first and forces an explicit decision.
 #[test]
 fn legacy_recognizer_category_parity() {
     let reg = registry();
 
     let global_cases: &[(&str, &str, Category)] = &[
-        // is_external_app_method — Category::ExternalApp
         ("командасистемы", "is_external_app_method", Category::ExternalApp),
         ("system", "is_external_app_method", Category::ExternalApp),
         ("запуститьсистему", "is_external_app_method", Category::ExternalApp),
@@ -446,36 +362,18 @@ fn legacy_recognizer_category_parity() {
         ("запуститьпрограмму", "is_external_app_method", Category::ExternalApp),
         ("открытьпроводник", "is_external_app_method", Category::ExternalApp),
         ("открытьфайл", "is_external_app_method", Category::ExternalApp),
-        // is_os_users_method — Category::OsUsers
         ("пользователиос", "is_os_users_method", Category::OsUsers),
         ("osusers", "is_os_users_method", Category::OsUsers),
-        // is_global_eval_call (`execute_external_code_in_common_module`) —
-        // Category::ExecuteExternalCode (Track 2 §1.6 Group B).
         ("вычислить", "is_global_eval_call", Category::ExecuteExternalCode),
         ("eval", "is_global_eval_call", Category::ExecuteExternalCode),
-        // is_safe_mode_method (DisableSafeMode handler — `hir-def/body/
-        // lower/diagnostics.rs`) — Category::SafeMode covers both
-        // setter flavours.
         ("установитьбезопасныйрежим", "is_safe_mode_method", Category::SafeMode),
         ("setsafemode", "is_safe_mode_method", Category::SafeMode),
         ("установитьотключениебезопасногорежима", "is_safe_mode_method", Category::SafeMode),
         ("setsafemodedisabled", "is_safe_mode_method", Category::SafeMode),
-        // is_safe_mode_query (UnsafeSafeModeMethodCall handler) —
-        // Category::SafeModeQuery distinguishes the getter from the
-        // setters above so the predicate stays strict.
         ("безопасныйрежим", "is_safe_mode_query", Category::SafeModeQuery),
         ("safemode", "is_safe_mode_query", Category::SafeModeQuery),
-        // is_set_privileged_mode (SetPrivilegedMode handler) —
-        // Category::PrivilegedMode is for the setter only; the
-        // getter `ПривилегированныйРежим` lives under
-        // `Category::PrivilegedModeQuery`, so the category filter
-        // alone preserves the legacy strictness.
         ("установитьпривилегированныйрежим", "is_set_privileged_mode", Category::PrivilegedMode),
         ("setprivilegedmode", "is_set_privileged_mode", Category::PrivilegedMode),
-        // is_file_system_method — Category::FileSystem (canonical-only
-        // superset). Full enumeration matches `legacy_recognizer_parity`
-        // — Codex round-2 MAJOR: a representative sample lets a
-        // category reassignment outside the sample slip past silently.
         ("значениевфайл", "is_file_system_method", Category::FileSystem),
         ("valuetofile", "is_file_system_method", Category::FileSystem),
         ("копироватьфайл", "is_file_system_method", Category::FileSystem),
@@ -568,12 +466,7 @@ fn legacy_recognizer_category_parity() {
         );
     }
 
-    // Constructor cases — full enumeration matches the legacy lists
-    // covered by `legacy_recognizer_parity` (Codex round-2 MAJOR fix:
-    // representative samples leak silent regressions for any name the
-    // sample omits).
     let constructor_cases: &[(&str, &str, Category)] = &[
-        // is_file_system_type — Category::FileSystem (32 names).
         ("file", "is_file_system_type", Category::FileSystem),
         ("файл", "is_file_system_type", Category::FileSystem),
         ("xbase", "is_file_system_type", Category::FileSystem),
@@ -607,7 +500,6 @@ fn legacy_recognizer_category_parity() {
         ("записьданных", "is_file_system_type", Category::FileSystem),
         ("datareader", "is_file_system_type", Category::FileSystem),
         ("чтениеданных", "is_file_system_type", Category::FileSystem),
-        // internet_access::is_internet_constructor — Category::Internet (18 names).
         ("ftpсоединение", "is_internet_constructor", Category::Internet),
         ("ftpconnection", "is_internet_constructor", Category::Internet),
         ("httpсоединение", "is_internet_constructor", Category::Internet),

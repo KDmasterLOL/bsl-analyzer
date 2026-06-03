@@ -1,44 +1,3 @@
-//! Member lookup on manager-global receivers.
-//!
-//! `Ty::ManagerCollection(kind)` (`Справочники`, `Документы`, …) and
-//! `Ty::ObjectManager { kind, name }` (`Справочники.Валюты`) are the two
-//! manager-global shapes that BSL surfaces on the global scope. Both
-//! live outside the attribute/method tables used by
-//! [`crate::field_lookup`]: their members come from the MDO itself
-//! (enum cases, predefined items) or from the visible-configurations'
-//! MDO index (when a plural manager is specialised by name).
-//!
-//! This module is the semantic complement to
-//! [`crate::field_lookup`]: both are driven from `Expr::Field` in
-//! `infer.rs` and share the same "walk visible configurations, pick
-//! latest-wins" iteration order.
-//!
-//! # Dispatch table
-//!
-//! | Receiver | `.member` resolves to |
-//! |---|---|
-//! | `ManagerCollection(kind)` | `ObjectManager { kind, member }` if the MDO named `member` exists under `kind` (either the plain MDO vec or, for register flavours, the registers vec). |
-//! | `ObjectManager { Enum, owner }` | `MetadataRef { EnumRef, owner }` when `member` matches `mdo.enum_values`. |
-//! | `ObjectManager { Catalog, owner }` | `MetadataRef { CatalogRef, owner }` when `member` matches `mdo.predefined_items`. |
-//! | `ObjectManager { ChartOfAccounts, owner }` | `MetadataRef { ChartOfAccountsRef, owner }` — same, via predefined items. |
-//! | anything else | `None` (caller's fall-through). |
-//!
-//! The returned `MetadataRef` carries the OWNER's identifier (`owner_name`,
-//! e.g. `"Валюты"`) — a predefined item / enum value is a value of the
-//! owner's ref type, not a distinct type itself. This mirrors how
-//! `bsl-platform` surfaces manager members in `platform_data.json`.
-//!
-//! # Scope boundary (M4 Task 3)
-//!
-//! The predefined-item / enum-value table is narrowed to the three
-//! families the plan names (`Enum`, `Catalog`, `ChartOfAccounts`). Other
-//! MDO families either carry no predefined items by construction
-//! (`Document`) or need additional XML-parser coverage before their
-//! `mdo.predefined_items` is populated (`ChartOfCharacteristicTypes`,
-//! `ChartOfCalculationTypes`). Extending the match arm in
-//! [`predefined_ref_kind_for`] is the single edit needed when they
-//! land.
-
 use bsl_config::VisibleConfig;
 use bsl_metadata::{MdoType, MetadataObject};
 use bsl_types::builders::Builders;
@@ -49,25 +8,11 @@ use hir_def::Name;
 
 use crate::this_object::FixedConfigCtx;
 
-/// Result of a successful manager-member lookup.
-///
-/// Parity with [`crate::field_lookup::FieldInfo`]: carries only the
-/// lowered `Ty` today. Future additions (docs, provenance MDO handle)
-/// extend this struct rather than widening [`lookup_manager_field`]'s
-/// return signature.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagerMemberInfo {
-    /// Type of the member after promotion / predefined-item lookup
-    /// (kernel handle, §4.G.2).
     pub ty: TypeId,
 }
 
-/// Single adapter entry for `Expr::Field` on a manager-global receiver.
-///
-/// Dispatches on the receiver shape and delegates to the matching
-/// helper; returns `None` for receivers outside the manager family so
-/// the caller can keep its existing fall-through (`field_lookup`
-/// already covered `Ty::MetadataRef`; everything else stays `Unknown`).
 pub fn lookup_manager_field(
     db: &dyn TypeKernelDb,
     configs: &[VisibleConfig],
@@ -83,8 +28,6 @@ fn lookup_manager_field_inner(
     receiver: TypeId,
     member: &Name,
 ) -> Option<ManagerMemberInfo> {
-    // Extract owned receiver data before any config walk / builder
-    // callback re-borrows `db`.
     enum Shape {
         Collection(MdoType),
         Manager { mdo: MdoType, name: String, config_id: ConfigId },
@@ -108,14 +51,6 @@ fn lookup_manager_field_inner(
     }
 }
 
-/// `ManagerCollection(kind).<MdoName>` → `ObjectManager { kind, MdoName }`.
-///
-/// The promotion only fires when the MDO named `mdo_name` actually
-/// exists under `kind` in at least one visible configuration —
-/// promoting a non-existent MDO would let typos silently type-check.
-/// Walks both the plain `metadata_objects` vec (Catalog/Document/Enum/…)
-/// and the `registers` vec (InformationRegister/…), so
-/// `РегистрыСведений.РегистрСведений1` promotes too.
 fn promote_collection_member(
     db: &dyn TypeKernelDb,
     configs: &[VisibleConfig],
@@ -128,26 +63,11 @@ fn promote_collection_member(
             || cfg.configuration.find_register_by_type_and_name(kind, needle).is_some()
     });
 
-    exists.then(|| {
-        // `ManagerCollection` carries no `config_id`, so the promoted
-        // `ObjectManager` resolves under `Root` — faithful to the prior
-        // `Ty` bridge default. Config-lossy for CFE managers; revisited
-        // if `ManagerCollection` ever gains a config carrier.
-        ManagerMemberInfo {
-            ty: db.object_manager(kind, mdo_name.as_str().to_string(), &RootConfigCtx),
-        }
+    exists.then(|| ManagerMemberInfo {
+        ty: db.object_manager(kind, mdo_name.as_str().to_string(), &RootConfigCtx),
     })
 }
 
-/// Resolve a predefined-item / enum-value member on an
-/// `Ty::ObjectManager` receiver.
-///
-/// The lookup tests `mdo.enum_values` for `Enum` and `mdo.predefined_items`
-/// for `Catalog` / `ChartOfAccounts`, both case-insensitively and
-/// bilingually (the helpers on [`MetadataObject`] already handle that).
-/// On hit, the returned `Ty::MetadataRef` carries the OWNER's name —
-/// a predefined item is a value of the owner's ref kind, so the name
-/// shouldn't switch to the member.
 pub(crate) fn lookup_predefined(
     db: &dyn TypeKernelDb,
     configs: &[VisibleConfig],
@@ -167,19 +87,11 @@ pub(crate) fn lookup_predefined(
     };
 
     hit.then(|| {
-        // The receiver `ObjectManager` facet carried a `config_id`; thread
-        // it onto the resolved ref so a CFE-scoped manager keeps its
-        // extension config (the old `Ty` path defaulted to `Root`).
         let cfg = FixedConfigCtx(config_id.clone());
         ManagerMemberInfo { ty: db.metadata_ref(ref_kind, owner_name.to_string(), &cfg) }
     })
 }
 
-/// Map an owner's `MdoType` to the `MetadataKind` of its reference form.
-///
-/// Returning `None` short-circuits the rest of the lookup: a `Document`
-/// owner has no predefined-item surface, so the adapter bails before
-/// walking the MDO's empty `predefined_items` vec.
 fn predefined_ref_kind_for(kind: MdoType) -> Option<MetadataKind> {
     match kind {
         MdoType::Enum => Some(MetadataKind::EnumRef),
@@ -189,10 +101,6 @@ fn predefined_ref_kind_for(kind: MdoType) -> Option<MetadataKind> {
     }
 }
 
-/// Look up an MDO in the visible configurations, latest-wins.
-///
-/// Same iteration order as `field_lookup::find_mdo`: reverse so
-/// extensions override main on name collisions.
 fn find_mdo<'a>(
     configs: &'a [VisibleConfig],
     kind: MdoType,
@@ -261,10 +169,6 @@ mod tests {
 
     #[test]
     fn promotion_manager_collection_to_object_manager_when_mdo_exists() {
-        // `Справочники.Валюты` → `ObjectManager { Catalog, "Валюты" }`.
-        // Baseline for the 3-seg chain: step 2 must promote, not stay at
-        // `Ty::Unknown`. Without this the plan's `Перечисления.Состояния.Активен`
-        // gap example never gets past the first `.Состояния` hop.
         let mut config = Configuration::new("Test");
         config.add_metadata_object(catalog("Валюты", vec![]));
         let configs = wrap(config);
@@ -285,10 +189,6 @@ mod tests {
 
     #[test]
     fn promotion_returns_none_when_mdo_not_in_config() {
-        // Typo safety: `Справочники.ОпечаткаВИмени` must stay None so the
-        // caller can fall through to `Ty::Unknown` (and, eventually,
-        // emit an UnresolvedName-style diagnostic). Promoting a
-        // non-existent name would let typos silently type-check.
         let configs = wrap(Configuration::new("Test"));
         let db = InMemoryDb::new();
         assert!(lookup_manager_field(
@@ -302,10 +202,6 @@ mod tests {
 
     #[test]
     fn promotion_works_for_registers_via_registers_vec() {
-        // Registers live in `Configuration.registers` (separate from
-        // `metadata_objects`). The promotion must consult both so
-        // `РегистрыСведений.РегистрСведений1` resolves. Pins the dual
-        // lookup in `promote_collection_member`.
         let mut config = Configuration::new("Test");
         config.add_register(
             bsl_metadata::Register::builder()
@@ -335,9 +231,6 @@ mod tests {
 
     #[test]
     fn lookup_enum_value_resolves_to_enum_ref() {
-        // `Перечисления.Состояния.Активен` → `EnumRef.Состояния`.
-        // The returned `MetadataRef` name must be the OWNER's name, not
-        // `Активен` — a member is a value of the owner's ref type.
         let mut config = Configuration::new("Test");
         config.add_metadata_object(enum_mdo("Состояния", vec!["Активен", "Закрыт"]));
         let configs = wrap(config);
@@ -358,8 +251,6 @@ mod tests {
 
     #[test]
     fn lookup_catalog_predefined_resolves_to_catalog_ref() {
-        // `Справочники.Валюты.Доллар` (predefined item) → `CatalogRef.Валюты`.
-        // Mirrors the plan's second example literally.
         let mut config = Configuration::new("Test");
         config.add_metadata_object(catalog("Валюты", vec!["Доллар", "Евро"]));
         let configs = wrap(config);
@@ -380,8 +271,6 @@ mod tests {
 
     #[test]
     fn lookup_chart_of_accounts_predefined_resolves_to_chart_of_accounts_ref() {
-        // Symmetry guard: ChartOfAccounts uses the same predefined-items
-        // table as Catalog and must produce the matching `ChartOfAccountsRef`.
         let mut config = Configuration::new("Test");
         config.add_metadata_object(chart_of_accounts("Хозрасчетный", vec!["Касса"]));
         let configs = wrap(config);
@@ -406,10 +295,6 @@ mod tests {
 
     #[test]
     fn lookup_unknown_member_returns_none() {
-        // A member name that does not appear in the MDO's predefined /
-        // enum-values list must return None. Keeps the adapter honest
-        // so the caller's `UnresolvedField` path can fire on authoritative
-        // receivers if/when that gets wired.
         let mut config = Configuration::new("Test");
         config.add_metadata_object(catalog("Валюты", vec!["Доллар"]));
         let configs = wrap(config);
@@ -426,16 +311,8 @@ mod tests {
 
     #[test]
     fn lookup_on_unsupported_owner_kind_returns_none() {
-        // Task 3 deliberately excludes kinds without a predefined-items
-        // / enum-values surface: `Document` has none, `Task` /
-        // `BusinessProcess` / `ExchangePlan` aren't covered yet. The
-        // adapter must return None so the caller's fall-through handles
-        // the miss without fabricating a bogus MetadataRef.
         let mut config = Configuration::new("Test");
         let doc = MetadataObject::new(MdoType::Document, "ПКО");
-        // Document carries no predefined_items / enum_values by
-        // construction; the adapter must bail at `predefined_ref_kind_for`
-        // without ever reaching for attributes / tabular sections.
         config.add_metadata_object(doc);
         let configs = wrap(config);
         let db = InMemoryDb::new();
@@ -451,9 +328,6 @@ mod tests {
 
     #[test]
     fn lookup_on_non_manager_receiver_returns_none() {
-        // Receivers outside the manager family must not produce any
-        // member info — `field_lookup` is the path for `MetadataRef`,
-        // and everything else is a miss.
         let configs = wrap(Configuration::new("Test"));
         let db = InMemoryDb::new();
         for ty in [
@@ -474,11 +348,6 @@ mod tests {
 
     #[test]
     fn promotion_extension_wins_on_collision() {
-        // Parity with `field_lookup`'s extension-override test:
-        // extensions iterate last, so their MDO declarations win when a
-        // main-config MDO has the same `(kind, name)`. Registers follow
-        // the same rule via the `|| find_register_by_type_and_name(...)`
-        // branch, covered by the promotion call.
         let mut main = Configuration::new("Main");
         main.add_metadata_object(catalog("Валюты", vec!["Доллар"]));
         let mut ext = Configuration::new("Ext");
@@ -489,9 +358,6 @@ mod tests {
         ];
         let db = InMemoryDb::new();
 
-        // Promotion doesn't distinguish main from ext here — both have
-        // `Валюты`; the test pins that *some* config hit produces the
-        // promotion. Predefined-item lookup on top:
         let info = lookup_manager_field(
             &db,
             &configs,
@@ -504,9 +370,6 @@ mod tests {
             db.metadata_ref(MetadataKind::CatalogRef, "Валюты".to_string(), &RootConfigCtx)
         );
 
-        // `Доллар` (declared only in main) must NOT resolve — the ext
-        // shadows the main MDO entirely, matching the reverse-iteration
-        // rule.
         assert!(lookup_manager_field(
             &db,
             &configs,

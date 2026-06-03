@@ -1,7 +1,3 @@
-//! LSP server main loop.
-//!
-//! This module implements the core event loop for the LSP server.
-
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -23,17 +19,9 @@ use crate::{
     lsp::{PositionEncoding, Progress},
 };
 
-/// Runs the main LSP server loop.
-///
-/// This function:
-/// 1. Performs the LSP initialize handshake
-/// 2. Creates the GlobalState
-/// 3. Runs the event loop
-/// 4. Handles shutdown
 pub fn main_loop(connection: Connection) -> Result<()> {
     tracing::info!("BSL Analyzer LSP server starting");
 
-    // Perform initialize handshake
     let (initialize_id, initialize_params) =
         connection.initialize_start().context("Failed to start initialization")?;
 
@@ -47,7 +35,6 @@ pub fn main_loop(connection: Connection) -> Result<()> {
 
     let position_encoding = PositionEncoding::negotiate(&initialize_params.capabilities);
 
-    // Build server capabilities
     let server_capabilities = server_capabilities(position_encoding);
 
     let initialize_result = lsp_types::InitializeResult {
@@ -72,34 +59,18 @@ pub fn main_loop(connection: Connection) -> Result<()> {
 
     tracing::info!("LSP server initialized");
 
-    // Create global state
     let mut state = GlobalState::new(connection.sender);
     state.position_encoding = position_encoding;
 
-    // Initialize empty SourceRoot(0) to prevent race condition where files
-    // are opened via LSP before VFS loader finishes
     state.init_empty_source_root();
 
-    // Capture the IDE-supplied locale (RFC 4646) so that diagnostics_state
-    // can use it as a fallback when `[output] display_language` is unset.
-    // Must run BEFORE `set_workspace_root`, which triggers
-    // `update_diagnostics_config` and freezes the locale into the Salsa
-    // input.
     state.lsp_locale = initialize_params.locale.as_deref().map(parse_lsp_locale);
     if let Some(locale) = state.lsp_locale {
         tracing::info!(?locale, "client supplied LSP locale");
     }
 
-    // Extract workspace root from initialize params
     let workspace_root = extract_workspace_root(&initialize_params);
 
-    // Set workspace root in LSP state. `set_workspace_root` is what
-    // triggers `update_diagnostics_config` and folds the LSP-supplied
-    // locale into the Salsa input — without it, `diagnostics_config`
-    // stays at its default (`Locale::Ru`) and the client's `"en-US"`
-    // is silently ignored. The no-workspace-root branch must therefore
-    // still run `update_diagnostics_config` so hover and completion
-    // (which read `diagnostics_config.locale`) see the LSP fallback.
     if let Some(ref root) = workspace_root {
         state.set_workspace_root(root.clone());
     } else {
@@ -107,14 +78,12 @@ pub fn main_loop(connection: Connection) -> Result<()> {
         state.update_diagnostics_config();
     }
 
-    // Run event loop
     run_event_loop(&mut state, &connection.receiver)?;
 
     tracing::info!("LSP server shutting down");
     Ok(())
 }
 
-/// Extracts the workspace root path from LSP initialize params.
 fn extract_workspace_root(params: &InitializeParams) -> Option<PathBuf> {
     #[allow(deprecated)]
     if let Some(ref root_uri) = params.root_uri {
@@ -128,16 +97,11 @@ fn extract_workspace_root(params: &InitializeParams) -> Option<PathBuf> {
     }
 }
 
-/// Runs the main event loop.
-///
-/// Handles incoming LSP messages, VFS loader messages, and background task results.
-/// Uses event coalescing (drain loops) to batch rapid changes before scheduling diagnostics.
 fn run_event_loop(state: &mut GlobalState, receiver: &Receiver<Message>) -> Result<()> {
     loop {
         select! {
             recv(receiver) -> msg => {
                 handle_lsp_msg(state, msg?)?;
-                // Drain pending LSP messages to coalesce rapid changes (e.g., 50dd)
                 while let Ok(msg) = receiver.try_recv() {
                     handle_lsp_msg(state, msg)?;
                 }
@@ -145,8 +109,6 @@ fn run_event_loop(state: &mut GlobalState, receiver: &Receiver<Message>) -> Resu
 
             recv(&state.loader_receiver) -> msg => {
                 handle_loader_msg(state, msg?)?;
-                // Don't drain loader messages - process one at a time
-                // to allow progress updates to be displayed
             }
 
             recv(&state.task_pool.receiver) -> task => {
@@ -161,8 +123,6 @@ fn run_event_loop(state: &mut GlobalState, receiver: &Receiver<Message>) -> Resu
             break;
         }
 
-        // Schedule pending diagnostics after all events drained.
-        // This ensures rapid changes (e.g., 50dd) are coalesced into a single diagnostic run.
         if let Some(uri) = state.pending_diagnostics_uri.take() {
             crate::handlers::schedule_diagnostics(state, &uri);
         }
@@ -171,7 +131,6 @@ fn run_event_loop(state: &mut GlobalState, receiver: &Receiver<Message>) -> Resu
     Ok(())
 }
 
-/// Handles a single LSP message (request, notification, or response).
 fn handle_lsp_msg(state: &mut GlobalState, msg: Message) -> Result<()> {
     match msg {
         Message::Request(req) => {
@@ -191,7 +150,6 @@ fn handle_lsp_msg(state: &mut GlobalState, msg: Message) -> Result<()> {
     Ok(())
 }
 
-/// Handles a VFS loader message.
 fn handle_loader_msg(state: &mut GlobalState, msg: vfs::loader::Message) -> Result<()> {
     match msg {
         vfs::loader::Message::Progress { n_total, n_done, config_version: _, dir: _ } => {
@@ -201,21 +159,10 @@ fn handle_loader_msg(state: &mut GlobalState, msg: vfs::loader::Message) -> Resu
                     let finalize_start = std::time::Instant::now();
                     tracing::info!("VFS loading complete");
 
-                    // Loader batches were already streamed into VFS as they arrived
-                    // (see `Message::Loaded`/`Changed` arm below), so no buffered
-                    // payload needs draining here. We only need the single Salsa
-                    // flush over the accumulated `Vfs::changes`.
-                    //
-                    // During the cold-start sync every workspace file shows up as a
-                    // VFS change, including all `.xml` metadata files. Suppress the
-                    // metadata bump for this sweep so it does not invalidate the
-                    // configuration cache immediately before `warm_metadata_cache`
-                    // populates it.
                     state.process_changes(true);
 
                     state.init_source_root();
 
-                    // Eagerly load metadata to warm Salsa cache
                     state.report_progress(
                         "Loading",
                         Progress::Report,
@@ -224,11 +171,6 @@ fn handle_loader_msg(state: &mut GlobalState, msg: vfs::loader::Message) -> Resu
                     );
                     state.warm_metadata_cache();
 
-                    // Total-VFS invariant scan (O.2): single source of truth
-                    // for the degraded count is `skipped_bsl.len()` populated
-                    // by the B1 hook in `handle_vfs_msg`. The defensive scan
-                    // catches any FileSet/FileTextInput discrepancy that
-                    // slipped past B1 + B2-A — should always be 0.
                     state.degraded_files_count = state.skipped_bsl.len();
                     let extra_violations = state.assert_total_vfs_invariant();
                     if extra_violations > 0 {
@@ -248,12 +190,10 @@ fn handle_loader_msg(state: &mut GlobalState, msg: vfs::loader::Message) -> Resu
                     state.vfs_done = true;
                     state.report_progress("Loading", Progress::End, Some("Done".into()), Some(1.0));
 
-                    // Schedule diagnostics for files that were opened before VFS finished
                     for uri in state.mem_docs.uris() {
                         crate::handlers::notification::schedule_diagnostics(state, &uri);
                     }
 
-                    // Request client to refresh semantic tokens for all open files
                     state.request_semantic_tokens_refresh();
 
                     tracing::info!(
@@ -292,36 +232,11 @@ fn handle_loader_msg(state: &mut GlobalState, msg: vfs::loader::Message) -> Resu
             }
         }
         vfs::loader::Message::Loaded { files } | vfs::loader::Message::Changed { files } => {
-            // Stream straight into VFS in both phases. handle_vfs_msg converts
-            // each file's `Vec<u8>` to `Arc<str>` and drops the bytes per entry,
-            // so we never accumulate raw payloads in the application layer.
-            //
-            // During cold-start (`vfs_done == false`) the loader path here does
-            // not sync Salsa — changes pile up in `Vfs::changes`. They are
-            // drained either by the bulk `process_changes` at
-            // `LoadingProgress::Finished` below, or earlier by a `didOpen` /
-            // `didChange` handler that fires during cold-start (those drains
-            // pass `suppress_metadata_bump = true`, see `notification.rs`).
-            // After cold-start this call performs the immediate Salsa sync.
             let count = files.len();
             handle_vfs_msg(state, files, state.vfs_done)?;
             tracing::debug!(count, vfs_done = state.vfs_done, "streamed VFS batch");
         }
         vfs::loader::Message::WatchOnly { files } => {
-            // Mirror the mini-batching strategy used for content batches
-            // (`handle_vfs_msg`): allocate FileIds for each watch-only path
-            // under short-held write locks so latency-sensitive read
-            // snapshots from hover/completion/goto are not starved during
-            // the cold-start sweep on ERP-scale workspaces.
-            //
-            // Cold-start (`vfs_done == false`): registrations alone, no
-            // metadata bump — `LoadingProgress::Finished` later calls
-            // `warm_metadata_cache` which reads XML straight from disk.
-            // Runtime (`vfs_done == true`): bump `metadata_version` so the
-            // bsl-metadata Salsa cache invalidates and the next query
-            // re-reads from disk. `register_watch_only` is idempotent so
-            // duplicate registrations across overlapping watch events
-            // remain cheap.
             const VFS_WATCH_ONLY_BATCH: usize = 64;
             let count = files.len();
             for chunk in files.chunks(VFS_WATCH_ONLY_BATCH) {
@@ -331,11 +246,6 @@ fn handle_loader_msg(state: &mut GlobalState, msg: vfs::loader::Message) -> Resu
                 }
             }
             if state.vfs_done {
-                // Wake outstanding Salsa snapshots before any setter, mirroring
-                // the ABBA-prevention pattern in `process_changes`
-                // (`base_db::Files`). `bump_metadata_version` would otherwise
-                // race a live background snapshot reading the stale metadata
-                // cache between this `vfs.write()` release and the bump.
                 state.analysis_host.request_cancellation();
                 state.analysis_host.raw_database_mut().bump_metadata_version();
             }
@@ -345,7 +255,6 @@ fn handle_loader_msg(state: &mut GlobalState, msg: vfs::loader::Message) -> Resu
     Ok(())
 }
 
-/// Handles a background task result.
 fn handle_task(state: &mut GlobalState, task: crate::global_state::Task) -> Result<()> {
     use crate::global_state::Task;
 
@@ -385,17 +294,10 @@ fn handle_task(state: &mut GlobalState, task: crate::global_state::Task) -> Resu
         }
         Task::DependenciesPreloaded { file_id, count } => {
             tracing::debug!(file_id = file_id.0, count, "dependencies preloaded");
-            // Best-effort cleanup. If a rapid re-spawn replaced our token
-            // between worker completion and this handler, the newer entry
-            // is evicted and its worker becomes uncancellable — worst case
-            // is wasted CPU on a redundant cache warmer.
             state.preload_tokens.remove(&file_id);
             state.preload_external_tokens.remove(&file_id);
         }
         Task::RequestResult { response } => {
-            // Best-effort cleanup: a concurrent `$/cancelRequest` may have
-            // already removed the entry. Missing is fine — the worker
-            // beat the cancel to the finish line.
             state.request_tokens.remove(&response.id);
             state.respond(response);
         }
@@ -436,15 +338,6 @@ fn handle_task(state: &mut GlobalState, task: crate::global_state::Task) -> Resu
     Ok(())
 }
 
-/// Handle VFS messages from the loader thread.
-///
-/// This function processes file contents received from the background loader thread
-/// and updates the VFS. Salsa database sync is deferred until VFS loading completes
-/// to allow progress messages to be processed immediately.
-///
-/// # Arguments
-/// * `sync_to_salsa` - If true, immediately sync VFS changes to Salsa database.
-///   During initial loading this should be false to avoid blocking on Salsa.
 fn handle_vfs_msg(
     state: &mut GlobalState,
     files: Vec<(paths::AbsPathBuf, Option<Vec<u8>>)>,
@@ -452,28 +345,12 @@ fn handle_vfs_msg(
 ) -> Result<()> {
     use std::sync::Arc;
 
-    /// Number of files written under a single `vfs.write()` lock acquisition.
-    /// Releasing the lock between mini-batches lets latency-sensitive task-pool
-    /// workers (hover/completion/goto) grab a read snapshot during cold-start
-    /// instead of blocking for the full chunk.
     const VFS_WRITE_MINI_BATCH: usize = 16;
 
-    // Phase 1: convert raw bytes to `Arc<str>` and filter `mem_docs` paths
-    // outside any VFS lock. UTF-8 validation + Arc allocation for a 64 MiB
-    // chunk is non-trivial, and holding `vfs.write()` across it would block
-    // every read snapshot taken by background latency tasks.
-    //
-    // Side effect: for BSL paths whose conversion ends up with `None`
-    // content (loader could not read OR bytes are not UTF-8), record the
-    // `AbsPathBuf` in `state.skipped_bsl`. VFS treats `(Deleted|new, None)`
-    // as a no-op and never emits a `Change` for `process_changes` to see,
-    // so this is the only place observability can hook the skip.
     let mut converted: Vec<(vfs::VfsPath, Option<Arc<str>>)> = Vec::with_capacity(files.len());
     for (path, contents) in files {
         let std_path: &std::path::Path = path.as_ref();
 
-        // Skip files managed by the LSP client (in MemDocs) — their
-        // content comes from didOpen/didChange, not disk.
         if let Ok(url) = lsp_types::Url::from_file_path(std_path) {
             if state.mem_docs.contains(&url) {
                 continue;
@@ -482,11 +359,6 @@ fn handle_vfs_msg(
 
         let vfs_path = vfs::VfsPath::new(std_path);
 
-        // Convert Vec<u8> to Arc<str>, stripping UTF-8 BOM if present.
-        // BOM (0xEF 0xBB 0xBF) is common in BSL files from 1C:Enterprise,
-        // but LSP clients like VS Code strip it when sending file
-        // content. Without this, VFS would see a "modify" change on
-        // every didOpen.
         let contents_str = contents.and_then(|bytes| {
             String::from_utf8(bytes).ok().map(|s| {
                 let s = s.strip_prefix('\u{FEFF}').unwrap_or(&s);
@@ -494,11 +366,8 @@ fn handle_vfs_msg(
             })
         });
 
-        // B1 observability hook (total-VFS invariant, O.2).
         if project_model::is_bsl_source_path(std_path) {
             let mutated = if contents_str.is_some() {
-                // Re-entry path: a previously-skipped BSL file became
-                // readable (watch-update). Drop the registry entry.
                 state.skipped_bsl.remove(&path)
             } else if state.skipped_bsl.insert(path.clone()) {
                 tracing::warn!(
@@ -517,7 +386,6 @@ fn handle_vfs_msg(
         converted.push((vfs_path, contents_str));
     }
 
-    // Phase 2: drain into VFS in mini-batches under short-held write locks.
     for chunk in converted.chunks(VFS_WRITE_MINI_BATCH) {
         let mut vfs = state.vfs.write();
         for (vfs_path, contents_str) in chunk {
@@ -525,19 +393,12 @@ fn handle_vfs_msg(
         }
     }
 
-    // Loader-driven cold-start batches pass `sync_to_salsa = false`: the bytes
-    // are now in `Vfs::changes` but Salsa is not synced here. The eventual
-    // drain happens at `LoadingProgress::Finished`, or sooner if a `didOpen` /
-    // `didChange` arrives during cold-start (those handlers call
-    // `process_changes` directly).
     if !sync_to_salsa {
         return Ok(());
     }
 
-    // Process changes and sync to Salsa database
     let (_, config_changed) = state.process_changes(false);
 
-    // If config changed, schedule diagnostics for all open files
     if config_changed {
         tracing::info!("config changed, scheduling diagnostics refresh for all open documents");
         for uri in state.opened_document_uris() {
@@ -548,7 +409,6 @@ fn handle_vfs_msg(
     Ok(())
 }
 
-/// Handles an LSP request.
 fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
     use lsp_types::request::{
         CodeActionRequest, Completion, DocumentHighlightRequest, DocumentSymbolRequest,
@@ -563,8 +423,6 @@ fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
             state.shutdown_requested = true;
             Ok(())
         })
-        // Read-only latency-sensitive requests run on the task pool so the
-        // main loop stays responsive to $/cancelRequest and subsequent edits.
         .on_latency::<GotoDefinition>(crate::handlers::handle_goto_definition)
         .on_latency::<References>(crate::handlers::handle_find_references)
         .on_latency::<DocumentHighlightRequest>(crate::handlers::handle_document_highlight)
@@ -575,9 +433,6 @@ fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
         .on_latency::<DocumentSymbolRequest>(crate::handlers::handle_document_symbol)
         .on_latency::<CodeActionRequest>(crate::handlers::handle_code_action)
         .on_latency::<SignatureHelpRequest>(crate::handlers::handle_signature_help)
-        // Formatting stays synchronous: clients (VS Code, Helix, Neovim)
-        // run save-and-format synchronously, and our formatter is fast
-        // enough that task-pool dispatch would add latency, not hide it.
         .on_sync::<Formatting>(crate::handlers::handle_formatting)
         .on_sync::<RangeFormatting>(crate::handlers::handle_range_formatting)
         .on_sync::<OnTypeFormatting>(crate::handlers::handle_on_type_formatting)
@@ -586,14 +441,12 @@ fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
     Ok(())
 }
 
-/// Handles an LSP notification.
 fn handle_notification(state: &mut GlobalState, not: Notification) -> Result<()> {
     use lsp_types::notification::{
         Cancel, DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument,
         DidSaveTextDocument,
     };
 
-    // Check for exit notification (special case - ends the loop)
     if not.method == Exit::METHOD {
         tracing::info!("Received exit notification");
         state.shutdown_requested = true;
@@ -611,31 +464,21 @@ fn handle_notification(state: &mut GlobalState, not: Notification) -> Result<()>
     Ok(())
 }
 
-/// Returns the server capabilities.
-///
-/// This tells the client what features the server supports.
 fn server_capabilities(position_encoding: PositionEncoding) -> ServerCapabilities {
     let legend = crate::lsp::semantic_tokens_legend();
 
     ServerCapabilities {
-        // The server converts every LSP Position/Range and semantic token
-        // coordinate through UTF-16. Make that explicit for clients whose
-        // default differs from the spec, notably around Cyrillic identifiers.
         position_encoding: Some(position_encoding.as_lsp_kind()),
 
-        // Text document synchronization
         text_document_sync: Some(TextDocumentSyncCapability::Kind(
             TextDocumentSyncKind::INCREMENTAL,
         )),
 
-        // Navigation
         definition_provider: Some(lsp_types::OneOf::Left(true)),
         references_provider: Some(lsp_types::OneOf::Left(true)),
 
-        // Hover information
         hover_provider: Some(lsp_types::HoverProviderCapability::Simple(true)),
 
-        // Code completion
         completion_provider: Some(lsp_types::CompletionOptions {
             resolve_provider: None,
             trigger_characters: Some(vec![".".to_string()]),
@@ -644,7 +487,6 @@ fn server_capabilities(position_encoding: PositionEncoding) -> ServerCapabilitie
             completion_item: None,
         }),
 
-        // Semantic tokens (syntax highlighting)
         semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
             SemanticTokensOptions {
                 work_done_progress_options: WorkDoneProgressOptions { work_done_progress: None },
@@ -654,32 +496,24 @@ fn server_capabilities(position_encoding: PositionEncoding) -> ServerCapabilitie
             },
         )),
 
-        // Document symbols (outline, breadcrumbs)
         document_symbol_provider: Some(lsp_types::OneOf::Left(true)),
 
-        // Document highlights (same-document occurrences)
         document_highlight_provider: Some(lsp_types::OneOf::Left(true)),
 
-        // Folding ranges
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
 
-        // Code actions (quick fixes)
         code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
 
-        // Signature help (parameter hints)
         signature_help_provider: Some(SignatureHelpOptions {
             trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
             retrigger_characters: Some(vec![",".to_string()]),
             work_done_progress_options: WorkDoneProgressOptions { work_done_progress: None },
         }),
 
-        // Document formatting
         document_formatting_provider: Some(lsp_types::OneOf::Left(true)),
 
-        // Range formatting
         document_range_formatting_provider: Some(lsp_types::OneOf::Left(true)),
 
-        // On-type formatting
         document_on_type_formatting_provider: Some(lsp_types::DocumentOnTypeFormattingOptions {
             first_trigger_character: ";".to_string(),
             more_trigger_character: Some(vec!["\n".to_string()]),
@@ -699,7 +533,6 @@ mod tests {
 
         assert_eq!(caps.position_encoding, Some(PositionEncoding::Utf8.as_lsp_kind()));
 
-        // Text sync should be incremental
         match caps.text_document_sync {
             Some(TextDocumentSyncCapability::Kind(kind)) => {
                 assert_eq!(kind, TextDocumentSyncKind::INCREMENTAL);

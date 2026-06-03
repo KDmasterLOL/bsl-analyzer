@@ -1,5 +1,3 @@
-//! Salsa database trait for type inference queries.
-
 use bsl_types::kind::TypeId;
 use hir_def::{ConfigsDatabase, DefWithBodyId, ExprId, MethodIdInput};
 use std::sync::Arc;
@@ -11,170 +9,28 @@ use crate::infer::{
 use crate::narrow::NarrowState;
 use crate::proc_signature::ProcSignature;
 
-/// Database trait for HIR type inference.
-///
-/// This trait extends DefDatabase with type-related queries.
-/// All queries are cached by Salsa for incremental computation.
-///
-/// # Implementation Pattern
-///
-/// Implementations delegate to tracked query functions in the `infer` module:
-///
-/// ```ignore
-/// impl HirDatabase for MyDatabase {
-///     fn infer(&self, file_id: FileId) -> Arc<InferenceResult> {
-///         crate::infer::infer_query(self, file_id)
-///     }
-/// }
-/// ```
 #[salsa::db]
 pub trait HirDatabase: ConfigsDatabase + bsl_types::intern::TypeKernelDb {
-    /// Infer types for all expressions in a file.
-    ///
-    /// This is the main entry point for type inference. It runs type inference
-    /// on all methods/functions in the module and returns the complete inference result.
-    ///
-    /// # Caching
-    ///
-    /// Results are cached by Salsa and invalidated when the file or its dependencies change.
-    ///
-    /// # Performance
-    /// - **LRU cache:** 256 files
-    /// - **Depends on:** [`module_bodies`](hir_def::DefDatabase::module_bodies)
-    /// - **Typical time:** ~10-50ms for medium files
-    ///
-    /// # Implementation
-    /// Should delegate to [`crate::infer::infer_query`].
     fn infer(&self, file_id: FileId) -> Arc<InferenceResult>;
 
-    /// Get type of a specific expression in a specific body.
-    ///
-    /// `ExprId` is only unique within a single `Body`, so callers must
-    /// disambiguate with `DefWithBodyId` — `Method(local_id)` for a
-    /// procedure / function body, `ModuleCode` for module-level code.
-    /// The IDE-facing `Semantics::type_of_expr(SyntaxNode)` derives the
-    /// owner automatically via `BodySourceMap`.
-    ///
-    /// # Returns
-    ///
-    /// - The interned [`TypeId`] for `(owner, expr)`.
-    /// - The kernel `Unknown` id if inference produced no entry for that pair.
-    ///
-    /// # Implementation
-    /// Should delegate to [`crate::infer::type_of_expr_query`].
     fn type_of_expr(&self, file_id: FileId, owner: DefWithBodyId, expr: ExprId) -> TypeId;
 
-    /// Run narrowing analysis on a single body (ADR-01 Option A).
-    ///
-    /// Returns the `Arc`-shared [`dataflow::DataflowResult`] produced by the
-    /// [`NarrowState`] lattice over the body's CFG. [`Semantics::type_of_expr`]
-    /// consumes it to overlay narrowed types on `Expr::Path` references — the
-    /// Task 6.5 invariant that hovers on a guard's receiver see the pre-narrow
-    /// type while hovers inside the then / else body see the narrowed one
-    /// falls out structurally from CFG vertex placement.
-    ///
-    /// Returns `None` when `owner` does not resolve to a body in this file,
-    /// or (impossibly) when the solver fails to converge.
-    ///
-    /// # Implementation
-    /// Should delegate to [`crate::narrow::narrow_query`].
-    ///
-    /// [`Semantics::type_of_expr`]: https://docs.rs/hir/latest/hir/struct.Semantics.html#method.type_of_expr
     fn narrow(
         &self,
         file_id: FileId,
         owner: DefWithBodyId,
     ) -> Option<Arc<dataflow::DataflowResult<NarrowState>>>;
 
-    /// Narrowing-aware argument type-mismatch diagnostics for `file_id`.
-    ///
-    /// Consumes [`HirDatabase::infer`] (for the per-call-site
-    /// `(args, params)` shape recorded during inference) and
-    /// [`HirDatabase::narrow`] (for the per-program-point overlay).
-    /// Each emitted [`InferenceDiagnostic::TypeMismatch`] is paired
-    /// with its owning [`DefWithBodyId`] so ide-diagnostics can resolve
-    /// the body-local `ExprId` through the right `BodySourceMap`.
-    ///
-    /// Inference itself no longer emits argument-`TypeMismatch`
-    /// diagnostics — moving them out lets this query consult the
-    /// narrowing overlay before deciding, so guards like
-    /// `If X <> Undefined Then …` correctly suppress false positives.
-    /// `MismatchedArgCount` stays inside `infer_query` (no narrowing
-    /// dependency).
-    ///
-    /// # Implementation
-    /// Should delegate to [`crate::arg_diagnostics::arg_diagnostics_query`].
     fn arg_diagnostics(&self, file_id: FileId) -> Arc<Vec<(DefWithBodyId, InferenceDiagnostic)>>;
 
-    /// Whether the type narrowing overlay (ADR-01 Option A) is enabled.
-    ///
-    /// Implementations read the current value from a Salsa input hosted
-    /// by `ide_db`, so the method always observes the latest value set
-    /// through the corresponding setter — but note: the only current
-    /// consumer, [`narrow_or_base`] in `hir`, is a plain Rust helper
-    /// called from `Semantics::type_of_expr`, not a Salsa-tracked query.
-    /// Flipping the flag therefore takes effect on the next call, not
-    /// by Salsa invalidation. If a future query is added that reads
-    /// this flag from a `#[salsa::tracked]` function, Salsa revision
-    /// tracking *will* kick in for that query.
-    ///
-    /// Consumers inside hir use it as a short-circuit before calling
-    /// [`HirDatabase::narrow`].
-    ///
-    /// [`narrow_or_base`]: ../../../hir/fn.narrow_or_base.html
     fn type_narrowing_enabled(&self) -> bool;
 
-    /// Lower a workspace-defined method's `(params, return_ty)` signature
-    /// from its docstring.
-    ///
-    /// Returns gradual `Ty::Unknown` for any parameter / return slot the
-    /// docstring omits — call sites consuming this signature must accept
-    /// `Unknown` actuals via the existing `is_assignable` rule.
-    ///
-    /// # Implementation
-    /// Should delegate to [`crate::proc_signature::proc_signature_query`].
     fn proc_signature(&self, method_input: MethodIdInput<'_>) -> Arc<ProcSignature>;
 
-    /// Phase O.13 — per-method inference primitive (Lni.5 surface).
-    ///
-    /// Returns the inference output for a single method body, keyed
-    /// on the salsa-interned [`MethodIdInput`]. Narrow callers
-    /// (hover, completion, `narrow_query`, `type_of_expr_query`)
-    /// route through [`crate::infer::InferOwnerResult::Method`] and
-    /// read this directly, bypassing the file-wide `infer_query`
-    /// aggregate.
-    ///
-    /// O.13 lands the trait signature with a `todo!()` default
-    /// implementation in [`crate::RootDatabaseImpl`] for compile-fence
-    /// purposes (Codex Round 4 C3); the real Salsa-tracked query body
-    /// is wired in O.15.
     fn infer_method(&self, method: MethodIdInput<'_>) -> Arc<BodyInferenceResult>;
 
-    /// Phase O.13 — module-code inference primitive (Lni.4 surface).
-    ///
-    /// Returns the inference output for the file's
-    /// [`DefWithBodyId::ModuleCode`] body — module-level `Перем`
-    /// declarations, top-level assignments, and any other module-code
-    /// expressions. Narrow callers targeting module-level scope route
-    /// through [`crate::infer::InferOwnerResult::ModuleCode`].
-    ///
-    /// O.13 lands the trait signature with a `todo!()` default
-    /// implementation in [`crate::RootDatabaseImpl`] for compile-fence
-    /// purposes (Codex Round 4 C3); the real Salsa-tracked query body
-    /// is wired in O.14.
     fn infer_module_code(&self, file_id: FileId) -> Arc<ModuleCodeInferenceResult>;
 
-    /// Per-module reaching-definitions collection (Phase D port).
-    ///
-    /// Mirrors the same-named ide-db query on `RootDatabase` but is
-    /// addressable through the lower `HirDatabase` trait so hir-ty
-    /// can consume reaching-defs without a cross-crate upcall. The
-    /// returned `ModuleReachingDefs` keys results by method `local_id`;
-    /// callers slice it for the method they're refining.
-    ///
-    /// Phase D consumer: [`crate::query_text_dataflow::refine_query_at_dispatch`]
-    /// reads `defs_for_var_at_stmt("var.Текст", stmt_id)` to resolve a
-    /// `Зап.Текст = "..."` literal back to its `ExprId`.
     fn module_reaching_definitions(
         &self,
         file_id: FileId,

@@ -16,7 +16,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Reports parser errors produced by the BSL syntax parser.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::ParseError;
 
@@ -182,7 +181,6 @@ HHH"#;
 
     #[test]
     fn test_no_parse_error_for_bom() {
-        // UTF-8 BOM at start of file should not trigger ParseError
         let code = "\u{FEFF}Процедура Тест()\n    А = 1;\nКонецПроцедуры";
         let diagnostics = check_ast_diagnostic(code, super::check);
         let parse_errors: Vec<_> =
@@ -256,7 +254,6 @@ HHH"#;
 
     #[test]
     fn test_no_parse_error_for_bom_with_region() {
-        // UTF-8 BOM + CRLF + #Область (common in 1C exports)
         let code =
             "\u{FEFF}\r\n#Область Test\r\nПроцедура Тест()\r\nКонецПроцедуры\r\n#КонецОбласти";
         let diagnostics = check_ast_diagnostic(code, super::check);
@@ -423,9 +420,6 @@ HHH"#;
 
     #[test]
     fn test_no_parse_error_for_enum_value_named_new() {
-        // Enum values may be named `Новый` (a keyword), so accessing one as a
-        // property must NOT report "Ожидалось имя свойства после '.'".
-        // Real corpus example: `Перечисления.ГрадацииКачества.Новый`.
         let code = r#"
 Процедура Тест()
     Качество = Перечисления.ГрадацииКачества.Новый;
@@ -436,9 +430,6 @@ HHH"#;
 
     #[test]
     fn test_no_parse_error_for_property_named_function() {
-        // `Функция` is a valid property / enum-value name after `.`
-        // (e.g. `Перечисления.X.Функция`, `ПараметрыПечати.Функция`), even
-        // though it is also the function-declaration keyword.
         let code = r#"
 Процедура Тест()
     Если ПараметрыПечати.Функция Тогда
@@ -451,9 +442,6 @@ HHH"#;
 
     #[test]
     fn test_no_parse_error_for_multiline_chained_function_property() {
-        // A line break after `.` is valid for ordinary property chains, so a
-        // `Функция` property on the next line must still parse cleanly — the
-        // declaration-shape guard only fires for a `Функция Имя(` header.
         let code = r#"
 Процедура Тест()
     Значение = ПараметрыПечати.

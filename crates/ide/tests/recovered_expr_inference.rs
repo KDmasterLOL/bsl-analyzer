@@ -1,16 +1,3 @@
-//! Inference behaviour for expressions recovered from parser `ERROR`
-//! nodes (see `crates/hir-def/src/body/lower/stmt.rs::try_lower_recovered_expr_stmt`).
-//!
-//! Two invariants pinned here:
-//!
-//! 1. **Type still flows** — the receiver of a bare `obj.field` access
-//!    carries the same `Ty` it would inside a well-formed statement.
-//!    Completion/hover depend on this.
-//! 2. **Diagnostics stay silent** — inference must not emit
-//!    `UnresolvedField` / `UnresolvedMethodCall` / `TypeMismatch` /
-//!    `MismatchedArgCount` on recovered expressions. Otherwise the
-//!    editor flickers diagnostics at the user while they're still typing.
-
 use hir::{HirDatabase, InferenceDiagnostic};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
@@ -39,10 +26,6 @@ fn setup(fixture_text: &str) -> (RootDatabaseImpl, FileId) {
     (db, test_file)
 }
 
-/// Recovered `FIELD_EXPR` inside an ERROR-wrapped statement must not
-/// trigger `UnresolvedField` noise. `Сп` has a real type, but the
-/// expression is anchored to unfinished syntax — the user is still
-/// typing.
 #[test]
 fn recovered_field_access_does_not_emit_unresolved_field() {
     let (db, file_id) = setup(
@@ -72,14 +55,8 @@ fn recovered_field_access_does_not_emit_unresolved_field() {
     );
 }
 
-/// Recovery is limited to bare-statement position. A well-formed call
-/// inside the same body must still be inferred normally. This pins that
-/// the recovery marker doesn't leak past its own subtree.
 #[test]
 fn well_formed_call_next_to_recovered_is_not_silenced() {
-    // `Сп.В` is recovered (silent). The preceding `Сп.Добавить(1);` is
-    // a normal CALL_STMT — it doesn't pass through recovery. If it ever
-    // started triggering diagnostics, this test would catch it.
     let (db, file_id) = setup(
         r#"//- /test.bsl
 Процедура Тест()
@@ -90,6 +67,5 @@ fn well_formed_call_next_to_recovered_is_not_silenced() {
 "#,
     );
 
-    // Sanity — inference ran without panicking.
     let _infer = db.infer(file_id);
 }

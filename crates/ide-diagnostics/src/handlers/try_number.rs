@@ -1,5 +1,3 @@
-//! Detects `Число()` / `Number()` calls inside `try` blocks.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -19,9 +17,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic.
-///
-/// Called from hir_dispatch when `BodyDiagnostic::TryNumber` is encountered.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     crate::simple_hir_diagnostic(
         DiagnosticCode::TryNumber,
@@ -168,9 +163,6 @@ F = Number();
 
     #[test]
     fn test_try_with_mixed_body_still_flags_number_snapshot() {
-        // Track 3 Phase C §4.2: TryNumber does not infer exception
-        // intent; any global Number/Число call in a try body is flagged
-        // even when the try body also contains unrelated operations.
         check_diagnostics_snapshot_for(
             r#"Процедура Тест(Строка)
     Попытка
