@@ -140,10 +140,15 @@ pub struct NeighborsResult {
     /// `max_nodes` cap. Lets an agent see the true fan-out even when only the
     /// top-centrality slice is returned in `nodes`.
     pub total: usize,
+    /// Count of neighbours returned in `nodes` (after the `max_nodes` cap). Always
+    /// equals `nodes.len()`; surfaced explicitly so an agent need not count.
+    pub returned: usize,
+    /// Count of neighbours dropped by the `max_nodes` cap (`total - returned`). The
+    /// `dropped` field is a bounded sample of these, not the full set.
+    pub dropped_count: usize,
     /// A bounded sample of the ids dropped by the `max_nodes` cap, taken from the
     /// ranked tail so the highest-centrality dropped nodes (those just past the cut)
-    /// come first. Capped at [`MAX_DROPPED_SAMPLE`]; the full dropped count is
-    /// `total - nodes.len()`.
+    /// come first. Capped at [`MAX_DROPPED_SAMPLE`]; the full count is `dropped_count`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub dropped: Vec<String>,
 }
@@ -1528,11 +1533,14 @@ impl<'a> GraphCtx<'a> {
             .map(|e| self.edge_ref(e))
             .collect();
 
+        let returned = discovered.len();
         Ok(NeighborsResult {
             root: self.node_ref(root, params.detail),
             nodes,
             edges,
             total,
+            returned,
+            dropped_count: total - returned,
             dropped,
         })
     }

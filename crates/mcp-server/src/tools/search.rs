@@ -938,6 +938,13 @@ pub fn search_status(
         let _ = writeln!(out, "  Chunks:   {done}/{total}");
     }
 
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "Note: code snippets are secret-redacted (credential-like values shown as ***); \
+         treat snippet text as sanitized, not byte-exact."
+    );
+
     Ok(CallToolResult::success(vec![Content::text(out)]))
 }
 

@@ -124,7 +124,7 @@ pub fn loading(detail: Option<&str>) -> CallToolResult {
 /// independent of the on-disk SQLite cache layout in [`crate::graph_db`]).
 fn schema_json() -> Value {
     json!({
-        "schema_version": "7",
+        "schema_version": "8",
         "actions": ["overview", "schema", "node", "source", "neighbors", "callers", "callees"],
         "node_kinds": ["method", "module", "mdo", "attribute", "tabular_section", "form", "form_item", "form_attribute"],
         "notes": "since version 7 `node(module/<scope>)` resolves for any code module and returns a `methods` array ({id, name, is_export}) of the module's members; module membership is served on demand and is not a graph edge, so `neighbors(module/…)` stays empty",
@@ -133,8 +133,12 @@ fn schema_json() -> Value {
         "dispatch": ["client", "server"],
         "neighbors_result": {
             "total": "usize — distinct neighbours discovered, before the max_nodes cap",
-            "dropped": "string[] — bounded sample of dropped ids; full count is total - nodes.len()"
+            "returned": "usize — neighbours returned in `nodes` (after the cap)",
+            "dropped_count": "usize — neighbours dropped by the cap (total - returned)",
+            "dropped": "string[] — bounded sample of the dropped ids (highest-centrality first)"
         },
+        "redaction": "method source/snippets emitted by `node`/`neighbors`/`source` (and search) are secret-redacted: values that look like credentials are replaced with `***`. Structural string literals (field lists, query fragments) may also be masked; treat source as sanitized, not byte-exact.",
+        "revision_note": "the graph `revision` is independent of the `diagnostics` tool's `generation` — they are separate subsystems with separate freshness counters and do not correlate.",
         "envelope": {
             "revision": "u64 — snapshot generation the answer was computed at",
             "stale": "bool — workspace drifted on disk since this snapshot",
@@ -204,7 +208,7 @@ mod tests {
         // changes; `total` since this revision, `form`/`form_item` + `contains` since
         // version 3, `form_attribute` since version 4, `tabular_section` since version
         // 5, and the `data_binding` edge since version 6.
-        assert_eq!(schema["schema_version"], "7");
+        assert_eq!(schema["schema_version"], "8");
         assert!(
             schema["neighbors_result"]["total"].is_string(),
             "neighbours result must document the `total` field"
@@ -245,7 +249,7 @@ mod tests {
     #[test]
     fn schema_and_loading_populate_structured_content() {
         assert_structured_mirrors_text(&schema());
-        assert_eq!(schema().structured_content.unwrap()["schema_version"], "7");
+        assert_eq!(schema().structured_content.unwrap()["schema_version"], "8");
 
         assert_structured_mirrors_text(&loading(Some("indexing")));
         let body = loading(Some("indexing")).structured_content.unwrap();

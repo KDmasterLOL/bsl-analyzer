@@ -1581,6 +1581,10 @@ mod tests {
         assert_eq!(mem.total, 3, "all three tied callers counted");
         assert_eq!(mem.nodes.len(), 1);
         assert_eq!(mem.dropped.len(), 2);
+        // Explicit counts: returned matches nodes, dropped_count = total - returned.
+        assert_eq!(mem.returned, 1);
+        assert_eq!(mem.dropped_count, 2);
+        assert_eq!(mem.dropped_count, mem.total - mem.returned);
         // The cut resolves identically on both paths, not just by count.
         assert_eq!(
             serde_json::to_value(&mem).unwrap(),

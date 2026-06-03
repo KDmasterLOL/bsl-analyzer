@@ -639,11 +639,14 @@ impl GraphDb {
             })
             .collect();
 
+        let returned = nodes.len();
         Ok(Ok(NeighborsResult {
             root: self.node_ref(&root, params.detail),
             nodes,
             edges,
             total,
+            returned,
+            dropped_count: total - returned,
             dropped,
         }))
     }
