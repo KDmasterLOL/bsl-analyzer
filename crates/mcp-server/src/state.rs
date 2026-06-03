@@ -631,6 +631,27 @@ impl SharedState {
             BaselineHashMode::RawFileBytes,
         );
 
+        // Enrich semantic embeddings with each method's call-graph context when the
+        // graph database is already built. Best-effort: if it is absent (the graph is
+        // built lazily on first `graph` tool use) the embeddings are simply graph-free
+        // this run and pick up context on a later reindex once the graph exists.
+        if engine.has_semantic() {
+            let graph_path = crate::graph_query::graph_db_path(workspace_root);
+            match crate::graph_query::GraphDb::open(&graph_path) {
+                Ok(graph_db) => {
+                    engine.set_graph_context_provider(Arc::new(
+                        crate::graph_query::GraphDbContextProvider::new(graph_db),
+                    ));
+                    tracing::info!("graph-enriched embeddings enabled");
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        "graph database unavailable; embeddings without graph context: {e}"
+                    );
+                }
+            }
+        }
+
         if engine.has_semantic() {
             match engine.index_directory(&source_path, Some(progress)) {
                 Ok(indexed) => {

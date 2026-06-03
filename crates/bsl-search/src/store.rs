@@ -9,12 +9,40 @@ pub struct Store {
     conn: Connection,
 }
 
+/// Bumped whenever the embedding text composed by
+/// `document::semantic_text_for_indexed_document` changes shape. Stored in the SQLite
+/// `user_version` pragma; on mismatch the store clears file hashes so the next index
+/// re-embeds everything, rather than mixing old- and new-format vectors in one space
+/// (file-hash gating would otherwise keep stale-format embeddings indefinitely).
+const EMBED_TEXT_VERSION: i64 = 1;
+
 impl Store {
     pub fn open(path: &Path) -> Result<Self, SearchError> {
         let conn = Connection::open(path)?;
         let store = Self { conn };
         store.init_schema()?;
+        store.migrate_embed_text_version()?;
         Ok(store)
+    }
+
+    /// Force a full re-embed when the embedding-text format has changed since this
+    /// database was built (see [`EMBED_TEXT_VERSION`]). A fresh database just records
+    /// the current version.
+    fn migrate_embed_text_version(&self) -> Result<(), SearchError> {
+        let version: i64 = self.conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version != EMBED_TEXT_VERSION {
+            let cleared = self.conn.execute("UPDATE files SET hash = zeroblob(0)", [])?;
+            self.conn.pragma_update(None, "user_version", EMBED_TEXT_VERSION)?;
+            if cleared > 0 {
+                tracing::info!(
+                    cleared,
+                    from = version,
+                    to = EMBED_TEXT_VERSION,
+                    "embed-text format changed; cleared file hashes to force re-embed"
+                );
+            }
+        }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -1591,5 +1619,29 @@ mod tests {
         let loaded = store.load_overlay_embeddings(4).unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].1, embedding);
+    }
+
+    #[test]
+    fn embed_text_version_bump_clears_file_hashes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        {
+            let mut store = Store::open(&path).unwrap();
+            store.reindex_file("A.bsl", b"realhash", &[sample_chunk("Делать")], None).unwrap();
+            assert_eq!(store.file_hash("A.bsl").unwrap().unwrap(), b"realhash");
+            // Simulate a database written by an older embed-text format.
+            store.conn.pragma_update(None, "user_version", 0i64).unwrap();
+        }
+        // Reopening with a version mismatch clears the hash, so the next index
+        // re-embeds the file under the current format instead of keeping a stale vector.
+        let store = Store::open(&path).unwrap();
+        assert!(
+            store.file_hash("A.bsl").unwrap().unwrap().is_empty(),
+            "file hash cleared to force re-embed"
+        );
+
+        // A second open at the same version is a no-op (does not re-clear).
+        let store = Store::open(&path).unwrap();
+        assert!(store.file_hash("A.bsl").unwrap().unwrap().is_empty());
     }
 }
