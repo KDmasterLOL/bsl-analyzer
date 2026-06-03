@@ -630,6 +630,29 @@ impl GraphDb {
             }
         }
 
+        // Distribution + connector-loss over the deduped full neighbourhood (every
+        // discovered edge, before the node-cap edge-survival filter), mirroring the
+        // in-memory serve path so the counts are byte-identical.
+        let mut counted: std::collections::HashSet<(String, String, String)> =
+            std::collections::HashSet::new();
+        let mut by_kind: std::collections::BTreeMap<&'static str, usize> =
+            std::collections::BTreeMap::new();
+        let mut by_provenance: std::collections::BTreeMap<&'static str, usize> =
+            std::collections::BTreeMap::new();
+        let mut connectors_dropped = false;
+        for e in &out_edges {
+            if !counted.insert((e.from.clone(), e.to.clone(), e.kind.clone())) {
+                continue;
+            }
+            *by_kind.entry(edge_kind(&e.kind)).or_default() += 1;
+            *by_provenance.entry(provenance(&e.provenance)).or_default() += 1;
+            let survives = (e.from == root.id || kept.contains(&e.from))
+                && (e.to == root.id || kept.contains(&e.to));
+            if !survives {
+                connectors_dropped = true;
+            }
+        }
+
         // Keep only edges whose endpoints both survived; dedup by (from, to, kind)
         // so a `Both` sweep that meets an edge from each end emits it once.
         let mut seen_edges: std::collections::HashSet<(String, String, String)> =
@@ -659,6 +682,9 @@ impl GraphDb {
             returned,
             dropped_count: total - returned,
             dropped,
+            by_kind,
+            by_provenance,
+            connectors_dropped,
         }))
     }
 

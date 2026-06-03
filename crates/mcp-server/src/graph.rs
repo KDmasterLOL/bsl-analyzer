@@ -1222,6 +1222,11 @@ mod tests {
         let all_kinds: Vec<&str> = all.edges.iter().map(|e| e.kind).collect();
         assert!(all_kinds.contains(&"call"), "kinds: {all_kinds:?}");
         assert!(all_kinds.contains(&"query_ref"), "kinds: {all_kinds:?}");
+        // Grouped distribution mirrors the edges; nothing was capped here.
+        assert_eq!(all.by_kind.get("call"), Some(&1), "by_kind: {:?}", all.by_kind);
+        assert_eq!(all.by_kind.get("query_ref"), Some(&1), "by_kind: {:?}", all.by_kind);
+        assert_eq!(all.by_provenance.values().sum::<usize>(), all.edges.len());
+        assert!(!all.connectors_dropped, "no nodes capped, so no connectors dropped");
 
         // edge_kinds=["query_ref"] keeps only the query_ref edge.
         let qr = gdb.neighbors(&mk(vec!["query_ref".to_owned()])).unwrap().unwrap();

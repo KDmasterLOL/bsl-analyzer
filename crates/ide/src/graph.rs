@@ -151,6 +151,18 @@ pub struct NeighborsResult {
     /// come first. Capped at [`MAX_DROPPED_SAMPLE`]; the full count is `dropped_count`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub dropped: Vec<String>,
+    /// Distribution of the discovered neighbourhood's edges by kind (deduped, over the
+    /// full neighbourhood before the node cap), so an agent can size an `edge_kinds`
+    /// filter without fetching every edge. Empty when there are no edges.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub by_kind: BTreeMap<&'static str, usize>,
+    /// The same distribution by edge provenance.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub by_provenance: BTreeMap<&'static str, usize>,
+    /// `true` when the `max_nodes` cap dropped a node that was the endpoint of a
+    /// neighbourhood edge, so some edges were omitted from `edges` — a heads-up that the
+    /// returned `nodes` can include some whose connecting edge is not shown.
+    pub connectors_dropped: bool,
 }
 
 /// Upper bound on the `dropped` id sample returned in [`NeighborsResult`]; a hot
@@ -1538,6 +1550,27 @@ impl<'a> GraphCtx<'a> {
             .map(|e| self.edge_ref(e))
             .collect();
 
+        // Distribution + connector-loss over the deduped full neighbourhood (every
+        // discovered edge, before the node-cap edge-survival filter), so the counts
+        // describe what is connected to the root, not just what survived the cap.
+        let mut counted: std::collections::HashSet<(GraphNode, GraphNode, EdgeKind)> =
+            std::collections::HashSet::new();
+        let mut by_kind: BTreeMap<&'static str, usize> = BTreeMap::new();
+        let mut by_provenance: BTreeMap<&'static str, usize> = BTreeMap::new();
+        let mut connectors_dropped = false;
+        for e in &out_edges {
+            if !counted.insert((e.from.clone(), e.to.clone(), e.kind)) {
+                continue;
+            }
+            *by_kind.entry(edge_kind_label(e.kind)).or_default() += 1;
+            *by_provenance.entry(provenance_label(e)).or_default() += 1;
+            let survives = (e.from == root || kept.contains(&e.from))
+                && (e.to == root || kept.contains(&e.to));
+            if !survives {
+                connectors_dropped = true;
+            }
+        }
+
         let returned = discovered.len();
         Ok(NeighborsResult {
             root: self.node_ref(root, params.detail),
@@ -1547,6 +1580,9 @@ impl<'a> GraphCtx<'a> {
             returned,
             dropped_count: total - returned,
             dropped,
+            by_kind,
+            by_provenance,
+            connectors_dropped,
         })
     }
 
