@@ -17,8 +17,8 @@ use std::path::Path;
 use std::str::FromStr;
 
 use ide::{
-    catalog_entry, diagnostic_catalog, DiagnosticCode, DiagnosticsConfig, DocumentSymbol, Locale,
-    SeverityBucket, SymbolKind, TextRange,
+    catalog_entry, diagnostic_catalog, DiagnosticCode, DocumentSymbol, Locale, SeverityBucket,
+    SymbolKind, TextRange,
 };
 use rmcp::model::CallToolResult;
 use serde_json::{json, Value};
@@ -139,7 +139,9 @@ pub(crate) fn file_findings(
     };
     let analysis = resident.analysis();
     let file_text = analysis.file_text(file_id);
-    let diagnostics = analysis.diagnostics(file_id, &DiagnosticsConfig::default());
+    // Analyse against the project's effective config (the single source of truth shared
+    // with LSP and CLI), so disabled rules and tuned thresholds are honoured.
+    let diagnostics = analysis.diagnostics(file_id, resident.config());
     // Method spans for the graph bridge: each finding inside a method carries the
     // method's durable graph id so the agent can pivot to `graph callers`.
     let methods = method_ranges(&analysis.document_symbols(file_id));
@@ -190,7 +192,7 @@ pub(crate) fn workspace_findings(
     opts: &SweepOptions,
     generation: u64,
 ) -> Value {
-    let sweep = resident.workspace_aggregates(&DiagnosticsConfig::default(), opts);
+    let sweep = resident.workspace_aggregates(resident.config(), opts);
     let aggregates: Vec<Value> = sweep
         .aggregates
         .iter()
@@ -533,7 +535,7 @@ mod tests {
             match state
                 .read(|resident, generation| file_findings(resident, path, filters, generation))
             {
-                ResidentOutcome::Ready(v) => v,
+                ResidentOutcome::Ready(v, _) => v,
                 _ => panic!("expected Ready outcome"),
             }
         }
@@ -597,9 +599,52 @@ mod tests {
             assert_eq!(body["findings"].as_array().unwrap().len(), 0);
         }
 
+        /// The project's diagnostics settings reach the findings end-to-end, not just
+        /// the resident's stored config: the same module yields a LineLength finding
+        /// under a tiny threshold and none under a huge one.
+        #[test]
+        fn file_findings_honor_project_threshold() {
+            let body = "Функция Ф() Экспорт\n\tВозврат 1;\nКонецФункции\n";
+            let has_line_length = |v: &Value| {
+                v["findings"].as_array().unwrap().iter().any(|f| f["code"] == "LineLength")
+            };
+
+            // A tiny maxLineLength fires LineLength on ordinary lines.
+            let tight = tempfile::tempdir().unwrap();
+            write_common_module(tight.path(), "Модуль", body);
+            write(
+                tight.path(),
+                "bsl-analyzer.toml",
+                "[diagnostics.parameters.LineLength]\nmaxLineLength = 5\n",
+            );
+            let tight_state = ready_state(tight.path());
+            let tight_body = run(
+                &tight_state,
+                &tight.path().join("CommonModules/Модуль/Ext/Module.bsl"),
+                &default_filters(),
+            );
+            assert!(has_line_length(&tight_body), "tiny threshold fires LineLength");
+
+            // A huge maxLineLength suppresses it for the same module.
+            let loose = tempfile::tempdir().unwrap();
+            write_common_module(loose.path(), "Модуль", body);
+            write(
+                loose.path(),
+                "bsl-analyzer.toml",
+                "[diagnostics.parameters.LineLength]\nmaxLineLength = 5000\n",
+            );
+            let loose_state = ready_state(loose.path());
+            let loose_body = run(
+                &loose_state,
+                &loose.path().join("CommonModules/Модуль/Ext/Module.bsl"),
+                &default_filters(),
+            );
+            assert!(!has_line_length(&loose_body), "huge threshold suppresses LineLength");
+        }
+
         fn run_workspace(state: &DiagnosticsState, opts: &SweepOptions) -> Value {
-            match state.read(|resident, gen| (workspace_findings(resident, opts, gen), gen)) {
-                ResidentOutcome::Ready((v, _)) => v,
+            match state.read(|resident, gen| workspace_findings(resident, opts, gen)) {
+                ResidentOutcome::Ready(v, _) => v,
                 _ => panic!("expected Ready outcome"),
             }
         }

@@ -54,15 +54,7 @@ impl GlobalState {
         project: &project_model::Project,
         locale: Locale,
     ) -> DiagnosticsConfigInput {
-        let config: ide::DiagnosticsConfig = match serde_json::from_value(
-            project.config.diagnostics.clone(),
-        ) {
-            Ok(config) => config,
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to deserialize diagnostics config, using defaults");
-                ide::DiagnosticsConfig::default()
-            }
-        };
+        let config = ide::DiagnosticsConfig::from_project_json(&project.config.diagnostics, locale);
 
         let disabled: Vec<String> = config.disabled.iter().map(|code| code.to_string()).collect();
         let enabled: Vec<String> = config.enabled.iter().map(|code| code.to_string()).collect();

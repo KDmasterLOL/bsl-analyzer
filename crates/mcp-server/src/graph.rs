@@ -793,7 +793,15 @@ pub(crate) fn read_stored_sig_hashes(
 /// visibility checks, registered on every database (full or per-batch) just like
 /// the LSP workspace loader does.
 pub(crate) fn config_metadata_paths(workspace_root: &Path) -> Vec<(Option<String>, PathBuf)> {
-    let project = project_model::Project::new(workspace_root);
+    project_config_paths(&project_model::Project::new(workspace_root))
+}
+
+/// The config/metadata paths for an already-loaded project: the configuration source
+/// root plus every extension root. Split out so a caller that also needs the project's
+/// diagnostics settings loads [`project_model::Project`] only once.
+pub(crate) fn project_config_paths(
+    project: &project_model::Project,
+) -> Vec<(Option<String>, PathBuf)> {
     let mut config_paths: Vec<(Option<String>, PathBuf)> =
         vec![(None, project.source_path().to_path_buf())];
     for (name, ext_path) in project.extension_paths() {

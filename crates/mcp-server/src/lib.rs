@@ -599,18 +599,15 @@ impl McpServer {
         };
 
         tokio::task::spawn_blocking(move || {
-            // `generation` is supplied by `read` under the lock, so `result_id` and the
-            // envelope `revision` describe the exact resident state that was queried.
+            // `generation` is supplied by `read` under the lock (so `result_id` describes
+            // the exact resident state queried), and the freshness verdict is computed
+            // under that same lock and returned alongside — the envelope is atomic.
             let outcome = diag.read(|resident, generation| {
-                let result =
-                    tools::diagnostics::file_findings(resident, &path, &filters, generation);
-                (result, generation)
+                tools::diagnostics::file_findings(resident, &path, &filters, generation)
             });
             use crate::diagnostics_state::ResidentOutcome;
             match outcome {
-                ResidentOutcome::Ready((result, generation)) => {
-                    let mut freshness = diag.freshness();
-                    freshness.revision = generation;
+                ResidentOutcome::Ready(result, freshness) => {
                     Ok(tools::diagnostics::envelope(freshness, result))
                 }
                 ResidentOutcome::Loading => Ok(tools::diagnostics::loading()),
@@ -674,12 +671,10 @@ impl McpServer {
 
         tokio::task::spawn_blocking(move || {
             let outcome = diag.read(|resident, generation| {
-                (tools::diagnostics::workspace_findings(resident, &opts, generation), generation)
+                tools::diagnostics::workspace_findings(resident, &opts, generation)
             });
             match outcome {
-                ResidentOutcome::Ready((result, generation)) => {
-                    let mut freshness = diag.freshness();
-                    freshness.revision = generation;
+                ResidentOutcome::Ready(result, freshness) => {
                     Ok(tools::diagnostics::envelope(freshness, result))
                 }
                 ResidentOutcome::Loading => Ok(tools::diagnostics::loading()),

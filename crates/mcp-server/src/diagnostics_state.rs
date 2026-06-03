@@ -35,8 +35,8 @@ use ide::{Analysis, RootDatabaseImpl};
 use vfs::FileId;
 
 use crate::graph::{
-    build_source_root, classify_changes, config_metadata_paths, db_for_files, enumerate_bsl_files,
-    scan_file_stats, FileStat,
+    build_source_root, classify_changes, db_for_files, enumerate_bsl_files, scan_file_stats,
+    FileStat,
 };
 
 /// Minimum time between on-disk drift scans, mirroring the graph's throttle. A scan
@@ -98,6 +98,10 @@ pub(crate) struct DiagnosticsResident {
     db: RootDatabaseImpl,
     /// Canonical-path string → FileId for every resident `.bsl`.
     by_path: HashMap<String, FileId>,
+    /// The project's effective diagnostics settings, loaded from `bsl-analyzer.toml` /
+    /// `.bsl-analyzer.json` the same way LSP and CLI do — so `file`/`workspace` honour
+    /// the project's disabled rules and thresholds, not analyzer defaults.
+    config: ide::DiagnosticsConfig,
 }
 
 impl DiagnosticsResident {
@@ -115,6 +119,12 @@ impl DiagnosticsResident {
 
     pub(crate) fn file_count(&self) -> usize {
         self.by_path.len()
+    }
+
+    /// The project's effective diagnostics config, the single source of truth shared
+    /// with LSP and CLI. `file` and `workspace` analyse against this, never defaults.
+    pub(crate) fn config(&self) -> &ide::DiagnosticsConfig {
+        &self.config
     }
 
     /// Workspace-wide diagnostics aggregated per code (the `workspace` action). Runs
@@ -231,9 +241,12 @@ struct ScanCache {
     config_fp: u64,
 }
 
-/// Outcome of a resident read: the closure's result, or why it could not run.
+/// Outcome of a resident read: the closure's result paired with the freshness verdict
+/// computed under the SAME lock hold (so the envelope is atomic — `revision`/`stale`/
+/// `reload` always describe the exact generation the result was read from), or why the
+/// read could not run.
 pub(crate) enum ResidentOutcome<R> {
-    Ready(R),
+    Ready(R, Freshness),
     /// Idle or loading — the agent should retry shortly.
     Loading,
     /// Reference profile.
@@ -338,8 +351,10 @@ impl DiagnosticsState {
     /// `f` MUST NOT call back into `&self` methods that lock `inner` (`status`,
     /// `generation`, `freshness`, …): the lock is held across `f` and is non-reentrant,
     /// so doing so self-deadlocks. The current generation is passed to `f` so it can
-    /// stamp a freshness handle consistent with the resident state it reads — never
-    /// call `generation()` inside `f`.
+    /// stamp a result id consistent with the resident state it reads — never call
+    /// `generation()` inside `f`. The freshness verdict is returned alongside the
+    /// result, computed under the same lock, so the caller need not (and must not)
+    /// re-sample it.
     pub(crate) fn read<F, R>(&self, f: F) -> ResidentOutcome<R>
     where
         F: FnOnce(&DiagnosticsResident, u64) -> R,
@@ -351,11 +366,26 @@ impl DiagnosticsState {
         // generation read under the lock matches the resident content `f` will query.
         self.poll_drift();
 
+        // Snapshot the drift scan BEFORE taking the inner lock (scan → inner order,
+        // matching `freshness`), so the freshness verdict and the result are computed
+        // from one consistent resident state. Without this, a reload finishing between
+        // the read and a separate freshness sample could report `stale: false` for an
+        // already-superseded generation.
+        let scan = if matches!(self.status(), DiagnosticsStatus::Ready { .. }) {
+            self.workspace_root.as_deref().and_then(|root| self.throttled_scan(root))
+        } else {
+            None
+        };
+
         let inner = lock_recover(&self.inner);
         let generation = inner.generation;
         match &inner.status {
             DiagnosticsStatus::Ready { .. } => match inner.resident.as_ref() {
-                Some(resident) => ResidentOutcome::Ready(f(resident, generation)),
+                Some(resident) => {
+                    let freshness = compute_freshness(&inner, scan.as_ref());
+                    let result = f(resident, generation);
+                    ResidentOutcome::Ready(result, freshness)
+                }
                 None => ResidentOutcome::Loading,
             },
             DiagnosticsStatus::Idle | DiagnosticsStatus::Loading => ResidentOutcome::Loading,
@@ -364,18 +394,13 @@ impl DiagnosticsState {
         }
     }
 
-    /// The freshness token for the currently published resident, computed against the
-    /// latest (throttled) disk scan. `stale` is true while a reload is in flight or the
-    /// disk has drifted since the last apply.
-    pub(crate) fn freshness(&self) -> Freshness {
-        let drift = self.current_drift();
-        let inner = lock_recover(&self.inner);
-        Freshness {
-            revision: inner.generation,
-            stale: drift.map(|d| !d.is_empty()).unwrap_or(false)
-                || inner.reload == ReloadState::Running,
-            reload: inner.reload.label(),
-        }
+    /// The resident's current generation, bumped on every build / reload / incremental
+    /// apply. Test-only observation point; production reads it under the lock via
+    /// [`Self::read`], which returns it folded into the freshness verdict.
+    #[cfg(test)]
+    pub(crate) fn generation(&self) -> u64 {
+        self.poll_drift();
+        lock_recover(&self.inner).generation
     }
 
     /// Detect and handle on-disk drift since the last build/apply. Incremental for
@@ -555,7 +580,15 @@ impl DiagnosticsState {
         root: &Path,
     ) -> anyhow::Result<(DiagnosticsResident, HashMap<String, u64>, u64)> {
         let files = enumerate_bsl_files(root);
-        let config_paths = config_metadata_paths(root);
+        // Load the project once: its config paths feed the db inputs, and its
+        // `[diagnostics]` settings + locale become the resident's effective config, so
+        // `file`/`workspace` honour the same project rules as LSP and CLI.
+        let project = project_model::Project::new(root);
+        let config_paths = crate::graph::project_config_paths(&project);
+        let config = ide::DiagnosticsConfig::from_project_json(
+            &project.config.diagnostics,
+            project.config.output.resolve_locale().unwrap_or_default(),
+        );
         let source_root = build_source_root(&files);
         // `all_files` is passed as the batch, so every text is loaded resident — this is
         // the LSP model, not the graph's per-batch fold.
@@ -574,7 +607,7 @@ impl DiagnosticsState {
             .collect();
         let config_fp = config_fingerprint(root);
 
-        Ok((DiagnosticsResident { db, by_path }, stats, config_fp))
+        Ok((DiagnosticsResident { db, by_path, config }, stats, config_fp))
     }
 
     /// The throttled disk scan: at most one walk per drift interval, its result shared
@@ -590,26 +623,6 @@ impl DiagnosticsState {
         let config_fp = config_fingerprint(root);
         *cache = Some(ScanCache { at: Instant::now(), stats: stats.clone(), config_fp });
         Some(OwnedScan { stats, config_fp })
-    }
-
-    /// The current drift set against the last apply, for [`Self::freshness`]. Cheap:
-    /// reuses the throttled scan.
-    fn current_drift(&self) -> Option<crate::graph::WorkspaceDiff> {
-        let root = self.workspace_root.as_deref()?;
-        if !matches!(self.status(), DiagnosticsStatus::Ready { .. }) {
-            return None;
-        }
-        let scan = self.throttled_scan(root)?;
-        let inner = lock_recover(&self.inner);
-        if inner.config_fp != scan.config_fp {
-            // Represent config drift as a non-empty diff so `stale` reports true.
-            return Some(crate::graph::WorkspaceDiff {
-                added: vec![CONFIG_FILES[0].to_string()],
-                removed: Vec::new(),
-                modified: Vec::new(),
-            });
-        }
-        Some(classify_changes(&inner.stats, &scan.stats))
     }
 
     /// The single idle sweeper, spawned once per handle and living until shutdown. Each
@@ -653,6 +666,24 @@ impl DiagnosticsState {
 struct OwnedScan {
     stats: Vec<FileStat>,
     config_fp: u64,
+}
+
+/// The freshness verdict for `inner` against an optional drift `scan`. Computed by the
+/// caller while holding the inner lock, so the verdict (`revision`/`stale`/`reload`) is
+/// atomic with the generation a read serves. `scan` is `None` when the db is not Ready
+/// (nothing to compare), making `stale` depend only on an in-flight reload.
+fn compute_freshness(inner: &Inner, scan: Option<&OwnedScan>) -> Freshness {
+    let drifted = match scan {
+        Some(s) => {
+            inner.config_fp != s.config_fp || !classify_changes(&inner.stats, &s.stats).is_empty()
+        }
+        None => false,
+    };
+    Freshness {
+        revision: inner.generation,
+        stale: drifted || inner.reload == ReloadState::Running,
+        reload: inner.reload.label(),
+    }
 }
 
 /// Canonicalise a path to the same key the loader indexed by (`enumerate_bsl_files`
@@ -772,9 +803,87 @@ mod tests {
             analysis.diagnostics(file_id, &DiagnosticsConfig::default()).len()
         });
         match out {
-            ResidentOutcome::Ready(_count) => {}
+            ResidentOutcome::Ready(_count, _) => {}
             _ => panic!("expected Ready outcome from a loaded db"),
         }
+    }
+
+    /// The resident loads the project's `bsl-analyzer.toml` and exposes it as the
+    /// effective config, so `file`/`workspace` honour the same disabled rules and tuned
+    /// thresholds as LSP and CLI — not analyzer defaults.
+    #[test]
+    fn resident_config_reflects_project_toml() {
+        use ide::DiagnosticCode;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        write(
+            root,
+            "bsl-analyzer.toml",
+            "[source]\nroot = \".\"\n\n\
+             [diagnostics.parameters]\n\
+             Typo = false\n\n\
+             [diagnostics.parameters.LineLength]\n\
+             maxLineLength = 200\n",
+        );
+
+        let state = DiagnosticsState::for_workspace(root.to_path_buf());
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let out = state.read(|resident, _gen| {
+            let config = resident.config();
+            (
+                config.is_disabled(DiagnosticCode::Typo),
+                config.get_int(DiagnosticCode::LineLength, "maxLineLength"),
+            )
+        });
+        match out {
+            ResidentOutcome::Ready((typo_disabled, line_len), _) => {
+                assert!(typo_disabled, "project toml disables Typo");
+                assert_eq!(line_len, Some(200), "project toml sets the LineLength threshold");
+            }
+            _ => panic!("expected Ready outcome"),
+        }
+    }
+
+    /// Editing `bsl-analyzer.toml` is structural drift: the resident fully reloads and
+    /// re-derives its effective config, so a later `file`/`workspace` sees the new
+    /// settings — the same single source LSP and CLI would pick up.
+    #[test]
+    fn config_edit_triggers_reload_with_new_config() {
+        use ide::DiagnosticCode;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        write(root, "bsl-analyzer.toml", "[diagnostics.parameters]\nTypo = false\n");
+
+        let mut state = DiagnosticsState::for_workspace(root.to_path_buf());
+        state.drift_interval = Duration::from_millis(0); // scan every read
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let typo0 = state.read(|r, _| r.config().is_disabled(DiagnosticCode::Typo));
+        assert!(matches!(typo0, ResidentOutcome::Ready(true, _)), "initial toml disables Typo");
+
+        // Flip the config; mtime/len change is what config drift keys on.
+        std::thread::sleep(Duration::from_millis(10));
+        write(root, "bsl-analyzer.toml", "[diagnostics.parameters]\nTypo = true\n");
+
+        // A read sees config drift → full reload (off-thread); poll until it lands.
+        let mut reloaded = false;
+        for _ in 0..200 {
+            if let ResidentOutcome::Ready(false, _) =
+                state.read(|r, _| r.config().is_disabled(DiagnosticCode::Typo))
+            {
+                reloaded = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(reloaded, "config edit reloads the resident with the updated diagnostics config");
     }
 
     /// A disabled handle never loads and reads degrade to `Disabled`.
@@ -799,7 +908,7 @@ mod tests {
         state.drift_interval = Duration::from_millis(0); // scan every read
         state.ensure_loading();
         wait_ready(&state);
-        let gen0 = state.freshness().revision;
+        let gen0 = state.generation();
 
         // Modify the body; mtime/len change is what the drift scan keys on.
         std::thread::sleep(Duration::from_millis(10));
@@ -813,13 +922,13 @@ mod tests {
         let _ = state.read(|_, _| ());
         // Give a beat in case the apply raced; then re-read.
         for _ in 0..50 {
-            if state.freshness().revision > gen0 {
+            if state.generation() > gen0 {
                 break;
             }
             std::thread::sleep(Duration::from_millis(10));
             let _ = state.read(|_, _| ());
         }
-        assert!(state.freshness().revision > gen0, "incremental apply should bump the generation");
+        assert!(state.generation() > gen0, "incremental apply should bump the generation");
         assert!(
             matches!(state.status(), DiagnosticsStatus::Ready { .. }),
             "incremental apply stays Ready, no rebuild churn"
@@ -830,7 +939,9 @@ mod tests {
             resident.analysis().file_text(file_id)
         });
         match text {
-            ResidentOutcome::Ready(t) => assert!(t.contains("Возврат 1"), "edited text resident"),
+            ResidentOutcome::Ready(t, _) => {
+                assert!(t.contains("Возврат 1"), "edited text resident")
+            }
             _ => panic!("expected Ready"),
         }
     }

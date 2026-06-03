@@ -4,7 +4,7 @@ use std::thread;
 
 use crossbeam_channel::unbounded;
 use rustc_hash::FxHashMap;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 use vfs::{file_set::FileSet, FileId};
 
 use hir::{ItemTree, ModuleId, SymbolTree, WorkspaceSymbols};
@@ -299,18 +299,7 @@ impl AnalysisOrchestrator {
         };
 
         let output_locale = proj_config.output.resolve_locale().unwrap_or_default();
-
-        match serde_json::from_value::<DiagnosticsConfig>(proj_config.diagnostics) {
-            Ok(mut config) => {
-                info!("Loaded diagnostics config from project file");
-                config.locale = output_locale;
-                config
-            }
-            Err(e) => {
-                warn!(error = %e, "Failed to parse diagnostics config, using default");
-                DiagnosticsConfig { locale: output_locale, ..Default::default() }
-            }
-        }
+        DiagnosticsConfig::from_project_json(&proj_config.diagnostics, output_locale)
     }
 
     fn spawn_workers(

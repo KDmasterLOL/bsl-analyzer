@@ -73,6 +73,23 @@ impl Default for DiagnosticsConfig {
 }
 
 impl DiagnosticsConfig {
+    /// Build the effective diagnostics config from the raw `[diagnostics]` value that
+    /// `project-model` loads from `bsl-analyzer.toml` / `.bsl-analyzer.json` /
+    /// `.bsl-language-server.json`, then stamp the resolved `locale`.
+    ///
+    /// This is the single source of truth shared by every runtime mode (LSP, CLI,
+    /// MCP), so a project's settings apply identically regardless of how the analyzer
+    /// is driven. A malformed config logs a warning and falls back to defaults rather
+    /// than failing the analysis.
+    pub fn from_project_json(diagnostics: &serde_json::Value, locale: Locale) -> Self {
+        let mut config: Self = serde_json::from_value(diagnostics.clone()).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "failed to deserialize project diagnostics config; using defaults");
+            Self::default()
+        });
+        config.locale = locale;
+        config
+    }
+
     pub fn all_enabled() -> Self {
         let mut enabled = Vec::new();
         for code in [
@@ -303,5 +320,53 @@ impl DiagnosticsConfig {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The shared project-config parser turns the raw `[diagnostics]` value into the
+    /// same effective config every runtime mode consumes: a `parameters` entry of
+    /// `false` disables a code, an object enables it with parameters, and the resolved
+    /// locale is stamped over the default.
+    #[test]
+    fn from_project_json_parses_params_and_stamps_locale() {
+        let raw = json!({
+            "parameters": {
+                "Typo": false,
+                "LineLength": { "maxLineLength": 150 },
+            }
+        });
+        let config = DiagnosticsConfig::from_project_json(&raw, Locale::En);
+
+        assert!(config.is_disabled(DiagnosticCode::Typo), "a `false` param disables the code");
+        assert_eq!(
+            config.get_int(DiagnosticCode::LineLength, "maxLineLength"),
+            Some(150),
+            "an object param carries the project threshold"
+        );
+        assert_eq!(config.locale, Locale::En, "the resolved locale overrides the default");
+    }
+
+    /// A malformed config (not an object) must not fail the analysis: it falls back to
+    /// defaults while still stamping the locale.
+    #[test]
+    fn from_project_json_falls_back_on_garbage() {
+        let config = DiagnosticsConfig::from_project_json(&json!("not an object"), Locale::Ru);
+        assert!(config.disabled.is_empty());
+        assert!(config.parameters.is_empty());
+        assert_eq!(config.locale, Locale::Ru);
+    }
+
+    /// An absent `[diagnostics]` section (serde null) yields defaults, not a panic.
+    #[test]
+    fn from_project_json_handles_null() {
+        let config =
+            DiagnosticsConfig::from_project_json(&serde_json::Value::Null, Locale::default());
+        assert!(config.disabled.is_empty());
+        assert!(config.enabled.is_empty());
     }
 }

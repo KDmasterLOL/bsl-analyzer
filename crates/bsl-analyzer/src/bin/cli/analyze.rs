@@ -252,9 +252,10 @@ fn analyze_salsa(
         .as_ref()
         .map(|path| metadata::intern_configuration_path(&db, &path.to_string_lossy(), 0));
 
-    let mut config: DiagnosticsConfig =
-        serde_json::from_value(proj_config.diagnostics.clone()).unwrap_or_default();
-    config.locale = proj_config.output.resolve_locale().unwrap_or_default();
+    let mut config = DiagnosticsConfig::from_project_json(
+        &proj_config.diagnostics,
+        proj_config.output.resolve_locale().unwrap_or_default(),
+    );
 
     if let Some(ref diag_name) = only_diagnostic {
         config.apply_cli_filters(std::slice::from_ref(diag_name), &[]);
@@ -451,9 +452,10 @@ fn analyze_streaming(
         project_model::ProjectConfig::load(&source_dir).unwrap_or_default()
     };
 
-    let mut diag_config: DiagnosticsConfig =
-        serde_json::from_value(proj_config.diagnostics.clone()).unwrap_or_default();
-    diag_config.locale = proj_config.output.resolve_locale().unwrap_or_default();
+    let mut diag_config = DiagnosticsConfig::from_project_json(
+        &proj_config.diagnostics,
+        proj_config.output.resolve_locale().unwrap_or_default(),
+    );
 
     if let Some(ref diag_name) = only_diagnostic {
         diag_config.apply_cli_filters(std::slice::from_ref(diag_name), &[]);
