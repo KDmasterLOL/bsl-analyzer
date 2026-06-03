@@ -1228,6 +1228,26 @@ mod tests {
         assert_eq!(all.by_provenance.values().sum::<usize>(), all.edges.len());
         assert!(!all.connectors_dropped, "no nodes capped, so no connectors dropped");
 
+        // Out-direction traversal reports its callees and no callers.
+        assert_eq!(all.out_total, Some(2), "two callees (Бета.ШагБ + Номенклатура query)");
+        assert_eq!(all.in_total, None, "dir=out reports no caller count");
+
+        // dir=both surfaces directional fan-out: 2 callees, 0 callers of ШагА.
+        let both = gdb
+            .neighbors(&ide::NeighborsParams {
+                id: "method/common/Альфа/ШагА",
+                dir: ide::Direction::Both,
+                depth: 1,
+                max_nodes: 50,
+                detail: ide::GraphDetail::Names,
+                provenance_filter: Vec::new(),
+                edge_kind_filter: Vec::new(),
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(both.out_total, Some(2), "both: callees counted");
+        assert_eq!(both.in_total, Some(0), "both: no callers of ШагА");
+
         // edge_kinds=["query_ref"] keeps only the query_ref edge.
         let qr = gdb.neighbors(&mk(vec!["query_ref".to_owned()])).unwrap().unwrap();
         assert!(!qr.edges.is_empty(), "query_ref edge present");

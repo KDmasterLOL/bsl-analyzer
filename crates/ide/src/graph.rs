@@ -163,6 +163,16 @@ pub struct NeighborsResult {
     /// neighbourhood edge, so some edges were omitted from `edges` — a heads-up that the
     /// returned `nodes` can include some whose connecting edge is not shown.
     pub connectors_dropped: bool,
+    /// Distinct callees (out-edge targets) discovered, present only when the traversal
+    /// went outward (`dir=out`/`both`). Lets a `dir=both` caller see a small outbound
+    /// count even when inbound callers dominate the `max_nodes` cap, instead of assuming
+    /// there are none — then refine with `dir=out`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub out_total: Option<usize>,
+    /// Distinct callers (in-edge sources) discovered, present only when the traversal went
+    /// inward (`dir=in`/`both`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub in_total: Option<usize>,
 }
 
 /// Upper bound on the `dropped` id sample returned in [`NeighborsResult`]; a hot
@@ -1494,6 +1504,11 @@ impl<'a> GraphCtx<'a> {
         let mut seen: std::collections::HashSet<GraphNode> = std::collections::HashSet::new();
         seen.insert(root.clone());
         let mut out_edges: Vec<&WorkspaceCallEdge> = Vec::new();
+        // Distinct non-root nodes reached downstream (as an edge target) vs upstream (as
+        // an edge source), so a `Both` traversal can report each direction's fan-out.
+        let mut out_reached: std::collections::HashSet<GraphNode> =
+            std::collections::HashSet::new();
+        let mut in_reached: std::collections::HashSet<GraphNode> = std::collections::HashSet::new();
         let mut frontier = vec![root.clone()];
 
         for _ in 0..depth {
@@ -1506,7 +1521,15 @@ impl<'a> GraphCtx<'a> {
                         continue;
                     }
                     out_edges.push(edge);
-                    let other = if &edge.from == node { &edge.to } else { &edge.from };
+                    let downstream = &edge.from == node;
+                    let other = if downstream { &edge.to } else { &edge.from };
+                    if *other != root {
+                        if downstream {
+                            out_reached.insert(other.clone());
+                        } else {
+                            in_reached.insert(other.clone());
+                        }
+                    }
                     if seen.insert(other.clone()) {
                         next.push(other.clone());
                         visited.push(other.clone());
@@ -1518,6 +1541,10 @@ impl<'a> GraphCtx<'a> {
             }
             frontier = next;
         }
+        let out_total =
+            matches!(params.dir, Direction::Out | Direction::Both).then_some(out_reached.len());
+        let in_total =
+            matches!(params.dir, Direction::In | Direction::Both).then_some(in_reached.len());
 
         // Centrality-ranked tail-drop of discovered (non-root) nodes. Tie-break by
         // durable id so a cut through equal-centrality nodes keeps/drops the same
@@ -1583,6 +1610,8 @@ impl<'a> GraphCtx<'a> {
             by_kind,
             by_provenance,
             connectors_dropped,
+            out_total,
+            in_total,
         })
     }
 

@@ -582,6 +582,10 @@ impl GraphDb {
         seen.insert(root.id.clone());
         let mut discovered: Vec<String> = Vec::new();
         let mut out_edges: Vec<StoredEdge> = Vec::new();
+        // Distinct non-root nodes reached downstream vs upstream (mirrors the in-memory
+        // path) so a `Both` traversal reports each direction's fan-out.
+        let mut out_reached: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut in_reached: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut frontier = vec![root.id.clone()];
 
         for _ in 0..depth {
@@ -593,8 +597,15 @@ impl GraphDb {
                     &params.provenance_filter,
                     &params.edge_kind_filter,
                 )? {
-                    let other =
-                        if &edge.from == node_id { edge.to.clone() } else { edge.from.clone() };
+                    let downstream = &edge.from == node_id;
+                    let other = if downstream { edge.to.clone() } else { edge.from.clone() };
+                    if other != root.id {
+                        if downstream {
+                            out_reached.insert(other.clone());
+                        } else {
+                            in_reached.insert(other.clone());
+                        }
+                    }
                     out_edges.push(edge);
                     if seen.insert(other.clone()) {
                         next.push(other.clone());
@@ -607,6 +618,10 @@ impl GraphDb {
             }
             frontier = next;
         }
+        let out_total =
+            matches!(params.dir, Direction::Out | Direction::Both).then_some(out_reached.len());
+        let in_total =
+            matches!(params.dir, Direction::In | Direction::Both).then_some(in_reached.len());
 
         // Centrality-ranked tail-drop of discovered (non-root) nodes.
         let mut ranked: Vec<(usize, String)> = Vec::with_capacity(discovered.len());
@@ -685,6 +700,8 @@ impl GraphDb {
             by_kind,
             by_provenance,
             connectors_dropped,
+            out_total,
+            in_total,
         }))
     }
 
