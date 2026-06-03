@@ -175,5 +175,6 @@ EMBEDDING_MODEL=Qwen/Qwen3-Embedding-0.6B \
 
 ## Что читать дальше
 
+- `docs/mcp/SETUP.md` — установка с нуля (бинарник, PATH, LSP-плагин, верификация)
 - `docs/mcp/TOOLS_AND_EXTENSION.md` — доступные инструменты, prerequisites и расширение 1С
 - `docs/central-postgres-search/README.md` — shared baseline и overlay для поиска

@@ -37,12 +37,17 @@ pub fn run(command: ExtensionCommands) -> Result<(), Box<dyn Error + Send + Sync
             eprintln!("Extension exported to: {}", output.display());
             eprintln!("Files: {count}");
             eprintln!();
-            eprintln!("To install into 1C infobase:");
+            eprintln!("To install into a 1C infobase (Designer):");
+            eprintln!("  1. Конфигурация -> Расширения конфигурации -> add the exported folder");
             eprintln!(
-                "  rtools config extension import -d <database> -e BSL_Analyzer -i {}",
-                output.display()
+                "  2. Администрирование -> Публикация на веб-сервере -> enable HTTP services"
             );
-            eprintln!("  rtools config extension apply -d <database> -e BSL_Analyzer");
+            eprintln!(
+                "  3. Grant the role BSL_ОсновнаяРоль to the user the MCP server connects as"
+            );
+            eprintln!();
+            eprintln!("Verify: curl http://<host>/<base>/hs/bsl-analyzer/version");
+            eprintln!("Full guide: docs/mcp/TOOLS_AND_EXTENSION.md");
         }
     }
 

@@ -14,20 +14,45 @@
 | `reference` | `its_help` | вопросы к ИТС / 1С:Напарник | `NAPARNIK_TOKEN` |
 | `workspace` | `metadata` | обзор объектов конфигурации, реквизитов, форм и дерева метаданных | `--source-dir` |
 | `workspace` | `search(action=find_code\|search_code\|status)` | поиск по коду проекта | `EMBEDDING_URL` только для `search_code` |
+| `workspace` | `graph` | граф вызовов: `overview`, `schema`, `node`, `source`, `neighbors`, `callers`, `callees` | `--source-dir` |
+| `workspace` | `diagnostics` | диагностики кода: `catalog`/`schema` (без базы), `file` (находки по файлу), `workspace` (агрегаты по конфигурации) | `--source-dir` |
 | `workspace` | `query` | `validate` для SDBL, а также `execute` для `SELECT` | `--onec-url` нужен для live-валидации через платформу и для `execute` |
 | `workspace` | `execute` | `check`, `run`, `eval` для BSL-кода | `--onec-url` нужен для `run` и `eval` |
 | `workspace` | `debug` | attach, breakpoints, step, stack trace, locals, eval | `--onec-url` и доступ к отладочному контуру |
+
+`graph` и `diagnostics` — два семантических примитива, которые недоступны через grep:
+граф отвечает «кто кого вызывает», диагностики — «где недостижимый код / несоответствие
+типа / неразрешённый вызов / неиспользуемая переменная». Они связаны: каждая находка
+`diagnostics file` несёт `graph_id` метода, который можно передать в `graph callers` для
+анализа влияния.
 
 ## Что работает без подключения к базе 1С
 
 Без HTTP-сервиса 1С доступны:
 
 - весь профиль `reference`;
-- в `workspace`: `metadata`, поиск по коду и `query(action=validate)` с локальным
-  парсером.
+- в `workspace`: `metadata`, `graph`, `diagnostics`, поиск по коду и
+  `query(action=validate)` с локальным парсером.
 
 Для `query(action=execute)`, `execute(action=run|eval)` и для отладки нужно
 живое подключение к базе через `--onec-url`.
+
+## Диагностики и граф: проектный конфиг и резидентная база
+
+`diagnostics` и `graph` — статический анализ, базе 1С они не нужны.
+
+**Единый источник настроек.** `diagnostics` берёт правила и пороги из проектного
+`bsl-analyzer.toml` (секция `[diagnostics]`) — ровно так же, как LSP и CLI. Один и тот
+же файл управляет диагностиками во всех режимах: отключённые правила
+(`ПравилоX = false`) и пороги (`[diagnostics.parameters.LineLength] maxLineLength = 150`)
+применяются одинаково в редакторе, в `analyze` и в MCP. Настраивается один раз.
+
+**Ленивая резидентная база.** Первый вызов `diagnostics file`/`workspace` (или `graph`)
+строит в памяти резидентную базу по всем `.bsl` проекта — как у LSP-сервера. На крупной
+конфигурации (ERP, ~25 тыс. файлов) это занимает ~20 секунд и держит около 2.8 ГБ RAM;
+первый ответ может прийти как `{"status":"loading"}` — нужно повторить запрос через
+пару секунд. После периода простоя база выгружается и при следующем обращении строится
+заново.
 
 ## Переменные окружения и prerequisites
 
@@ -165,5 +190,6 @@ bsl-analyzer mcp serve \
 
 ## Что читать дальше
 
+- `docs/mcp/SETUP.md` — установка с нуля (бинарник, PATH, LSP-плагин, верификация)
 - `docs/mcp/README.md` — установка профилей, scope'ы и `mcp install`
 - `docs/central-postgres-search/README.md` — centralized baseline для поиска
