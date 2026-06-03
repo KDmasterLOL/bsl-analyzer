@@ -1,16 +1,16 @@
 # bsl-analyzer: установка с нуля (LSP + MCP)
 
-Пошаговая инструкция «от пустого репозитория 1С до работающих LSP и MCP». Рассчитана
-на то, что AI-ассистент (Claude Code и т.п.) или человек проходит её один раз для
+Пошаговый **сценарий** «от пустого репозитория 1С до работающих LSP и MCP». Рассчитан
+на то, что AI-ассистент (Claude Code и т.п.) или человек проходит его один раз для
 конкретного проекта.
 
-`bsl-analyzer` — это LSP + MCP сервер для 1С:Enterprise:
+`bsl-analyzer` — это LSP + MCP сервер для 1C:Enterprise:
 
 - **LSP** (Claude Code, Linux/macOS): навигация, диагностики, автодополнение в редакторе;
 - **MCP**: два профиля — `reference` (справка платформы/ИТС) и `workspace` (анализ
   конкретной конфигурации: код, метаданные, граф вызовов, диагностики, SDBL, live-база).
 
-Глубокие справочники, на которые ссылается эта инструкция:
+Глубокие справочники, на которые ссылается этот сценарий:
 
 - установка MCP-профилей и `mcp install` — [`README.md`](README.md);
 - список инструментов и расширение 1С — [`TOOLS_AND_EXTENSION.md`](TOOLS_AND_EXTENSION.md).
@@ -18,24 +18,48 @@
 Минимальная версия: **0.2.x** (команды `mcp` и `extension`, инструменты `graph` и
 `diagnostics`).
 
-> Эта инструкция самодостаточна и не требует `rtools`. Расширение 1С (нужно только для
-> live-инструментов) загружается вручную через конфигуратор — см. шаг 5.
+> Этот сценарий самодостаточен: всё, что нужно, скачивается из публичных GitHub Releases.
 
 ---
 
-## Шаг 1. Бинарник в PATH
+## ⚠️ Агенту: это сценарий с тремя обязательными развилками
+
+Не проходи happy path молча. В установке есть **три решения, которые должен принять
+пользователь** — на каждом ОСТАНОВИСЬ и спроси, не выбирай за него:
+
+1. **Развилка A — семантический поиск (embeddings).** Шаг 4.
+2. **Развилка B — живая база 1С (live-инструменты).** Шаг 6.
+3. **Развилка C — MCP стандартов v8std.** Шаг 7.
+
+Setup НЕ считается завершённым, пока пользователь не ответил на все три и пока не выдан
+**финальный чеклист** (шаг 9). Если на развилку ответили «нет» — это валидный ответ, но
+он должен быть явно зафиксирован в чеклисте, а не пропущен.
+
+---
+
+## Шаг 1. Лаунчер в PATH (НЕ app, НЕ зеркало)
+
+Ставим **лаунчер** `bsl-analyzer` — тонкую обёртку, которая сама скачивает и
+авто-обновляет рабочий бинарник (`bsl-analyzer-app`) в `~/.bsl-analyzer/bin/`. Лаунчер —
+это ваша единственная точка входа в PATH.
+
+> **Типичная ошибка установки — не делайте так:**
+> - ❌ не качайте `bsl-analyzer-app-*` напрямую — это рабочий бинарник без авто-обновления;
+> - ✅ качайте ассет **лаунчера** `bsl-analyzer-<platform>` из **GitHub Releases**.
 
 ### Linux / macOS
 
 ```bash
-PLATFORM="$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')"
-VERSION=$(curl -fsSL https://dev.runsystems.ru/releases/bsl-analyzer/latest | tr -d '[:space:]')
+# Linux x86_64 -> bsl-analyzer-linux-amd64
+# macOS Apple Silicon -> bsl-analyzer-darwin-arm64
+ASSET="bsl-analyzer-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/;s/arm64/arm64/')"
 mkdir -p ~/.local/bin
-curl -fsSL -o ~/.local/bin/bsl-analyzer "https://dev.runsystems.ru/releases/bsl-analyzer/${VERSION}/bsl-analyzer-${PLATFORM}"
+curl -fsSL -o ~/.local/bin/bsl-analyzer \
+  "https://github.com/itrous/bsl-analyzer/releases/latest/download/${ASSET}"
 chmod +x ~/.local/bin/bsl-analyzer
 ```
 
-Убедитесь, что `~/.local/bin` есть в `PATH` (иначе добавьте в `~/.zshrc` / `~/.bashrc`):
+Убедитесь, что `~/.local/bin` есть в `PATH`:
 
 ```bash
 echo $PATH | tr ':' '\n' | grep -q "$HOME/.local/bin" || echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
@@ -44,20 +68,21 @@ echo $PATH | tr ':' '\n' | grep -q "$HOME/.local/bin" || echo 'export PATH="$HOM
 ### Windows (PowerShell)
 
 ```powershell
-$version = (Invoke-RestMethod "https://dev.runsystems.ru/releases/bsl-analyzer/latest").Trim()
 $dir = "$env:LOCALAPPDATA\bsl-analyzer"
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
-Invoke-WebRequest "https://dev.runsystems.ru/releases/bsl-analyzer/$version/bsl-analyzer-windows-amd64.exe" -OutFile "$dir\bsl-analyzer.exe"
+Invoke-WebRequest "https://github.com/itrous/bsl-analyzer/releases/latest/download/bsl-analyzer-windows-amd64.exe" -OutFile "$dir\bsl-analyzer.exe"
 [Environment]::SetEnvironmentVariable("Path", "$env:Path;$dir", "User")
 ```
 
-### Проверка
+### Проверка (обязательная) — лаунчер и app по отдельности
 
 ```bash
-bsl-analyzer --version
+bsl-analyzer --launcher-version   # версия лаунчера
+bsl-analyzer --launcher-update    # скачать/обновить рабочий app-бинарник
+bsl-analyzer --version            # версия app (лаунчер пере-исполняет app); ждём 0.2.x+
 ```
 
-Версия должна быть `0.2.x` или новее.
+Если `--version` отдаёт версию `0.2.x` или новее — лаунчер скачал app и связка работает.
 
 ---
 
@@ -66,9 +91,7 @@ bsl-analyzer --version
 Пропустите для Cursor и Windows — там используется только MCP.
 
 > IDE запускает серверы в урезанном окружении, где `~/.local/bin` может не быть в PATH.
-> Узнайте полный путь и используйте его в `command`: `which bsl-analyzer`.
-
-Создайте файлы плагина:
+> Узнайте полный путь к **лаунчеру** и используйте его в `command`: `which bsl-analyzer`.
 
 ```bash
 mkdir -p ~/.claude/plugins/bsl-lsp/.claude-plugin
@@ -84,7 +107,8 @@ mkdir -p ~/.claude/plugins/bsl-lsp/.claude-plugin
 }
 ```
 
-`~/.claude/plugins/bsl-lsp/.lsp.json` (подставьте полный путь из `which bsl-analyzer`):
+`~/.claude/plugins/bsl-lsp/.lsp.json` (подставьте путь из `which bsl-analyzer` — это путь
+**лаунчера** `~/.local/bin/bsl-analyzer`, не app):
 
 ```json
 {
@@ -104,50 +128,94 @@ mkdir -p ~/.claude/plugins/bsl-lsp/.claude-plugin
 
 ---
 
-## Шаг 3. Установка MCP
+## Шаг 3. Установка MCP + проверка пути `command`
 
-Используйте нативную команду — она надёжнее ручной правки JSON и сама пишет конфиг для
-выбранного клиента (Codex / Gemini / Claude / Cursor) в нужный scope:
+Нативная команда сама пишет конфиг для выбранного клиента (Codex / Gemini / Claude /
+Cursor) в нужный scope:
 
 ```bash
 bsl-analyzer mcp install --target all --preset recommended --source-dir .
 ```
 
 `recommended` ставит `reference` глобально (user) и `workspace` для текущего проекта
-(project). Параметры окружения (`--env EMBEDDING_URL=...`, `--env NAPARNIK_TOKEN=...`),
-подключение к базе (`--onec-url/--onec-user/--onec-password`), отдельные профили и
-scope'ы, флаги `--dry-run`/`--force` — всё описано в [`README.md`](README.md).
+(project). Клиенты, scope'ы, флаги `--dry-run`/`--force` — в [`README.md`](README.md).
 
-Поддерживаемые клиенты: `claude`, `codex`, `cursor`, `gemini` (или `--target all`).
-По клиентам:
+### ⚠️ Ловушка: `mcp install` может записать путь app вместо лаунчера
 
-- **Claude / Gemini** — через их CLI (`claude mcp add` / `gemini mcp add`);
-- **Codex** — user-scope через `codex mcp add` (нужен установленный `codex` CLI),
-  project-scope пишется напрямую в `.codex/config.toml` (`[mcp_servers.bsl-analyzer]`);
-- **Cursor** — merge в `mcp.json`.
+`mcp install` записывает в `command` путь **запущенного бинарника**. Если вы запустили
+его через лаунчер, лаунчер пере-исполняет app, и в конфиг попадёт путь app
+(`~/.bsl-analyzer/bin/bsl-analyzer-app`), а не лаунчера. Тогда **авто-обновление
+обходится** — MCP-клиент будет вечно держать ту версию app, что была на момент установки.
 
-> **PATH и абсолютный путь.** `mcp install` подставляет в `command` **абсолютный путь**
-> к текущему бинарнику (через `current_exe`), поэтому сервер стартует даже когда
-> AI-клиент запускает его в урезанном окружении без `~/.local/bin` в `PATH`. Отдельно
-> прописывать путь не нужно. Если позже переместите бинарник — перезапустите
-> `mcp install` (или `--force`), чтобы обновить путь в конфигах.
-
-Проверка регистрации сервера в Codex:
+**Обязательно проверьте записанный путь:**
 
 ```bash
 codex mcp list
 ```
 
-Полнотекстовый поиск работает без эмбеддингов; семантический (`search_code`/`search_docs`)
-включается переменной `EMBEDDING_URL` — см. [`README.md`](README.md#эмбеддинги-и-семантический-поиск).
+Ожидаемый `command`:
+
+```
+/home/<user>/.local/bin/bsl-analyzer
+```
+
+Если там `~/.bsl-analyzer/bin/bsl-analyzer-app` — **замените на путь лаунчера** вручную.
+Для Codex (project scope) в `.codex/config.toml`:
+
+```toml
+[mcp_servers.bsl-analyzer]
+command = "/home/<user>/.local/bin/bsl-analyzer"
+```
+
+(Аналогично проверьте/поправьте конфиг своего клиента: Claude, Gemini, Cursor.)
+
+> **PATH-независимость.** Путь в `command` — абсолютный, поэтому сервер стартует даже
+> когда AI-клиент запускает его без `~/.local/bin` в `PATH`. Важно лишь, чтобы это был
+> путь **лаунчера**, а не app.
 
 ---
 
-## Шаг 4. Проектный конфиг `bsl-analyzer.toml` (единый источник настроек)
+## Шаг 4. 🔀 Развилка A — семантический поиск (embeddings)
+
+**Спросите пользователя: включаем семантический поиск (`search_code`/`search_docs`)?**
+
+- **Нет** → полнотекстовый поиск (`find_code`/`find_docs`), `metadata`, `graph`,
+  `diagnostics`, SDBL — **всё работает без эмбеддингов**. Переходите к шагу 5.
+- **Да** → нужен доступ к OpenAI-совместимому embedder'у и четыре переменные:
+
+  | Переменная | Назначение | Дефолт |
+  |-----------|-----------|--------|
+  | `EMBEDDING_URL` | базовый URL embedder'а | — (обязательно) |
+  | `EMBEDDING_MODEL` | имя модели | `Qwen/Qwen3-Embedding-0.6B` |
+  | `EMBEDDING_DIM` | размерность вектора (должна совпасть с моделью) | `1024` |
+  | `EMBEDDING_API_KEY` | ключ (для сервисов с Bearer-авторизацией) | — (опц.) |
+
+  Установка с прописыванием env прямо в MCP-конфиг:
+
+  ```bash
+  bsl-analyzer mcp install --target all --preset recommended --source-dir . \
+    --env EMBEDDING_URL=https://your-embedder/v1 \
+    --env EMBEDDING_MODEL=Qwen/Qwen3-Embedding-0.6B \
+    --env EMBEDDING_DIM=1024 \
+    --env EMBEDDING_API_KEY=sk-...
+  ```
+
+  **Проверка, что семантика реально поднялась** — вызовите MCP-инструмент `search` с
+  `action=status` и найдите строку `Semantic:`:
+
+  - `Semantic: available...` — семантика работает;
+  - `Semantic: not configured (set EMBEDDING_URL)` — эмбеддинги не подхватились;
+  - `Semantic: failed...` / `syncing...` — не готова / строится.
+
+  Подробности про `EMBEDDING_PROVIDER`, batch/concurrency и выбор модели —
+  [`TOOLS_AND_EXTENSION.md`](TOOLS_AND_EXTENSION.md#переменные-окружения-и-prerequisites).
+
+---
+
+## Шаг 5. Проектный конфиг `bsl-analyzer.toml` (единый источник настроек)
 
 Один файл в корне проекта управляет диагностиками **во всех режимах** — LSP, CLI
-(`analyze`) и MCP (`diagnostics`). Отключённые правила и пороги применяются одинаково
-везде, настраивается один раз:
+(`analyze`) и MCP (`diagnostics`):
 
 ```toml
 [source]
@@ -166,42 +234,92 @@ complexityThreshold = 30
 После правки `bsl-analyzer.toml` MCP-сервер сам перестроит резидентную базу под новые
 настройки при следующем обращении к `diagnostics`.
 
----
-
-## Шаг 5. Расширение 1С — только для live-инструментов (опционально)
-
-Нужно лишь для `query(action=execute)`, `execute(action=run|eval)` и `debug`. Если
-живая база не нужна — пропустите.
-
-Выгрузите встроенное расширение и загрузите его **вручную** через конфигуратор:
-
-```bash
-bsl-analyzer extension export -o ./bsl-extension
-```
-
-Затем в конфигураторе:
-
-1. `Конфигурация -> Расширения конфигурации` — добавить каталог `./bsl-extension`;
-2. `Администрирование -> Публикация на веб-сервере` — включить публикацию HTTP-сервисов;
-3. назначить роль `BSL_ОсновнаяРоль` пользователю, под которым подключается MCP.
-
-Проверка:
-
-```bash
-curl http://<хост>/<база>/hs/bsl-analyzer/version
-```
-
-Полные детали (права, VRD, шаги публикации) — в
-[`TOOLS_AND_EXTENSION.md`](TOOLS_AND_EXTENSION.md#подключение-live-инструментов-к-базе-1с).
+> Если конфиг содержит локальные пути/секреты — добавьте его в `.gitignore` (фиксируется
+> в финальном чеклисте, шаг 9).
 
 ---
 
-## Шаг 6. Верификация
+## Шаг 6. 🔀 Развилка B — живая база 1С (live-инструменты)
+
+`query(action=execute)`, `execute(action=run|eval)` и `debug` работают **только** с
+опубликованным HTTP-сервисом из встроенного расширения `BSL_Analyzer`.
+
+**Спросите пользователя: нужна живая база (live-инструменты)?**
+
+- **Нет** → пропустите; в финальном чеклисте зафиксируйте
+  **«live-инструменты не настроены»**. Статический анализ (graph/diagnostics/metadata/
+  search/SDBL-validate) при этом полностью работает.
+- **Да** → выгрузите расширение и загрузите его **вручную** через конфигуратор:
+
+  ```bash
+  bsl-analyzer extension export -o ./bsl-extension
+  ```
+
+  Затем в конфигураторе:
+
+  1. `Конфигурация -> Расширения конфигурации` — добавить каталог `./bsl-extension`;
+  2. `Администрирование -> Публикация на веб-сервере` — включить публикацию HTTP-сервисов;
+  3. назначить роль `BSL_ОсновнаяРоль` пользователю, под которым подключается MCP.
+
+  Проверка:
+
+  ```bash
+  curl http://<хост>/<база>/hs/bsl-analyzer/version
+  ```
+
+  Полные детали (права, VRD, шаги публикации) — в
+  [`TOOLS_AND_EXTENSION.md`](TOOLS_AND_EXTENSION.md#подключение-live-инструментов-к-базе-1с).
+
+---
+
+## Шаг 7. 🔀 Развилка C — MCP стандартов v8std
+
+**STOP. Спросите пользователя: ставим ли публичный MCP-сервер стандартов v8std?** Не
+завершайте setup, пока пользователь не ответил. Это отдельный шаг, а не «по желанию».
+
+`v8std` (`https://ai.v8std.ru/mcp`, HTTP, без токена) дополняет наш инструментарий:
+
+- `v8std_search` — поиск стандарта по фразе, номеру или коду диагностики;
+- `v8std_get_page` / `v8std_get_related` — полный текст и связанные страницы;
+- `v8std_explain_snippet` — какие стандарты применимы к фрагменту кода;
+- `v8std_explain_diagnostics` — расшифровка предупреждений ACC, BSL Language Server, EDT.
+
+Почему вместе: наш `diagnostics` находит проблему, а `v8std_explain_diagnostics`
+объясняет, *почему* это нарушение и какой стандарт его требует.
+
+- **Нет** → зафиксируйте в чеклисте «v8std: declined».
+- **Да** → установите:
+
+  **Claude Code:**
+
+  ```bash
+  claude mcp add --transport http v8std https://ai.v8std.ru/mcp
+  ```
+
+  **Codex** — `codex mcp add v8std --url https://ai.v8std.ru/mcp`, либо вручную в
+  `.codex/config.toml`:
+
+  ```toml
+  [mcp_servers.v8std]
+  url = "https://ai.v8std.ru/mcp"
+  ```
+
+  **Cursor** — в `.cursor/mcp.json` (поле `url`; для Antigravity — `serverUrl`):
+
+  ```json
+  { "mcpServers": { "v8std": { "url": "https://ai.v8std.ru/mcp" } } }
+  ```
+
+> **Приватность:** это публичный сервис, ему уходит текст запроса. Не отправляйте через
+> него проприетарный код; для чувствительных проектов используйте локальное развёртывание.
+
+---
+
+## Шаг 8. Верификация инструментов
 
 Перезапустите IDE и проверьте по слоям.
 
-**LSP** (Claude Code, Linux/macOS): откройте `.bsl` — должны работать навигация и
-диагностики в редакторе.
+**LSP** (Claude Code, Linux/macOS): откройте `.bsl` — навигация и диагностики в редакторе.
 
 **MCP** — инструменты сгруппированы, действие задаётся параметром `action`:
 
@@ -214,71 +332,40 @@ curl http://<хост>/<база>/hs/bsl-analyzer/version
 | диагностики файла | `diagnostics` (action=`file`, path=…) | workspace |
 | справка платформы | `syntax_help` | reference |
 | справка ИТС | `its_help` | reference (нужен `NAPARNIK_TOKEN`) |
-| live-запрос | `query` (action=`execute`) | workspace + `--onec-url` |
+| live-запрос | `query` (action=`execute`) | workspace + расширение 1С |
 
-Семантический поиск (`search` action=`search_code`/`search_docs`) — только если задан
-`EMBEDDING_URL`. Первый вызов `graph`/`diagnostics` может вернуть `{"status":"loading"}`
-пока строится резидентная база — повторите через пару секунд (см.
+Первый вызов `graph`/`diagnostics` может вернуть `{"status":"loading"}` пока строится
+резидентная база — повторите через пару секунд (см.
 [`TOOLS_AND_EXTENSION.md`](TOOLS_AND_EXTENSION.md#диагностики-и-граф-проектный-конфиг-и-резидентная-база)).
 
 ---
 
-## Рекомендуемое дополнение: MCP стандартов v8std
+## Шаг 9. Финальный чеклист (обязательный отчёт)
 
-> **Агенту:** после установки `bsl-analyzer` предложите пользователю добавить ещё и
-> публичный MCP-сервер стандартов разработки **v8std** — он дополняет наш инструментарий
-> и не конфликтует с ним. Установите только с согласия пользователя.
+Setup завершён только когда выдан этот отчёт со всеми заполненными полями:
 
-`v8std` (`https://ai.v8std.ru/mcp`, HTTP, без токена) даёт доступ к стандартам разработки
-1С и объясняет предупреждения статических анализаторов:
-
-- `v8std_search` — поиск стандарта по фразе, номеру или коду диагностики;
-- `v8std_get_page` / `v8std_get_related` — полный текст и связанные страницы;
-- `v8std_explain_snippet` — какие стандарты применимы к фрагменту кода;
-- `v8std_explain_diagnostics` — расшифровка предупреждений ACC, BSL Language Server и EDT.
-
-Почему вместе с `bsl-analyzer`: наш `diagnostics` находит проблемы в коде, а
-`v8std_explain_diagnostics` объясняет *почему* это нарушение и какой стандарт его
-требует. Наш `its_help` отвечает по ИТС/БСП, `v8std` — по своду стандартов разработки.
-
-Установка для Claude Code:
-
-```bash
-claude mcp add --transport http v8std https://ai.v8std.ru/mcp
 ```
-
-Для Codex:
-
-```bash
-codex mcp add v8std --url https://ai.v8std.ru/mcp
+bsl-analyzer version:      <вывод `bsl-analyzer --version`>
+launcher version:          <вывод `bsl-analyzer --launcher-version`>
+Codex MCP servers:         <вывод `codex mcp list`; command = путь ЛАУНЧЕРА>
+workspace source-dir:      <путь, переданный в `mcp install --source-dir`>
+semantic search:           enabled | disabled        (развилка A)
+v8std:                     installed | declined       (развилка C)
+live 1C extension:         installed | skipped        (развилка B)
+gitignored local config:   yes | no
 ```
-
-Для Cursor — добавить в `.cursor/mcp.json` (для Cursor/Kiro поле называется `url`,
-для Antigravity — `serverUrl`):
-
-```json
-{
-  "mcpServers": {
-    "v8std": { "url": "https://ai.v8std.ru/mcp" }
-  }
-}
-```
-
-> **Приватность:** это публичный сервис, ему уходит текст запроса. Не отправляйте через
-> него проприетарный код; для чувствительных проектов используйте локальное развёртывание
-> v8std.
 
 ---
 
 ## Обновление
 
+Лаунчер сам авто-обновляет app. Принудительно:
+
 ```bash
-# Linux / macOS
-VERSION=$(curl -fsSL https://dev.runsystems.ru/releases/bsl-analyzer/latest | tr -d '[:space:]')
-PLATFORM="$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')"
-curl -fsSL -o ~/.local/bin/bsl-analyzer "https://dev.runsystems.ru/releases/bsl-analyzer/${VERSION}/bsl-analyzer-${PLATFORM}"
-chmod +x ~/.local/bin/bsl-analyzer
+bsl-analyzer --launcher-update        # обновить app-бинарник
+bsl-analyzer --launcher-self-update   # обновить сам лаунчер
 ```
 
-После обновления бинарника, если используется расширение, выгрузите и загрузите его
-заново (шаг 5).
+Сам лаунчер (точку входа в PATH) при необходимости можно перекачать из GitHub Releases —
+см. шаг 1. После обновления, если используется расширение 1С, выгрузите и загрузите его
+заново (шаг 6).

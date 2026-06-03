@@ -44,6 +44,16 @@ dataflow.
 
 ## Установка
 
+### Расширение для редактора (VS Code / Cursor / VSCodium)
+
+Самый простой способ получить подсветку, навигацию и диагностики прямо в редакторе —
+поставить расширение `bsl-analyzer-lsp`:
+
+- **VS Code Marketplace** (VS Code): <https://marketplace.visualstudio.com/items?itemName=ElishevKirill.bsl-analyzer-lsp>
+- **Open VSX** (Cursor, Windsurf, VSCodium и другие редакторы на Open VSX): <https://open-vsx.org/extension/ElishevKirill/bsl-analyzer-lsp>
+
+Для CLI-анализа и MCP-интеграции с AI-агентами поставьте бинарник ниже.
+
 ### Linux / macOS
 
 <!-- INSTALL_URL:gitlab -->
