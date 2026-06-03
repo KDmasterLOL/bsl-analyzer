@@ -76,9 +76,23 @@ pub struct NodeRef {
     pub dispatch: Vec<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_export: Option<bool>,
+    /// The module's own methods, populated only for a `module` node so an agent can
+    /// discover a module's members directly from `node(module/…)` without a separate
+    /// traversal. `None` for every other node kind.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub methods: Option<Vec<ModuleMethod>>,
     /// Whether this id round-trips back to a node on its own. `false` for
     /// path-fallback nodes seen only as an edge endpoint.
     pub addressable: bool,
+}
+
+/// A member method of a `module` node, surfaced in [`NodeRef::methods`].
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ModuleMethod {
+    pub id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_export: Option<bool>,
 }
 
 /// A resolved call edge, projected for the agent.
@@ -1081,6 +1095,7 @@ impl<'a> GraphCtx<'a> {
                     source: None,
                     dispatch: Vec::new(),
                     is_export: None,
+                    methods: None,
                     addressable,
                 }
             }
@@ -1098,6 +1113,7 @@ impl<'a> GraphCtx<'a> {
                 source: None,
                 dispatch: Vec::new(),
                 is_export: None,
+                methods: None,
                 addressable,
             },
             GraphNode::FormItem { owner, form_name, item_name } => NodeRef {
@@ -1115,6 +1131,7 @@ impl<'a> GraphCtx<'a> {
                 source: None,
                 dispatch: Vec::new(),
                 is_export: None,
+                methods: None,
                 addressable,
             },
             GraphNode::FormAttribute { owner, form_name, attr_name } => NodeRef {
@@ -1132,6 +1149,7 @@ impl<'a> GraphCtx<'a> {
                 source: None,
                 dispatch: Vec::new(),
                 is_export: None,
+                methods: None,
                 addressable,
             },
             GraphNode::TabularSection { mdo_type, object_name, section_name } => NodeRef {
@@ -1149,6 +1167,7 @@ impl<'a> GraphCtx<'a> {
                 source: None,
                 dispatch: Vec::new(),
                 is_export: None,
+                methods: None,
                 addressable,
             },
             GraphNode::TabularSectionAttribute {
@@ -1172,6 +1191,7 @@ impl<'a> GraphCtx<'a> {
                 source: None,
                 dispatch: Vec::new(),
                 is_export: None,
+                methods: None,
                 addressable,
             },
         }
@@ -1196,6 +1216,7 @@ impl<'a> GraphCtx<'a> {
             source: None,
             dispatch: Vec::new(),
             is_export: None,
+            methods: None,
             addressable,
         }
     }
@@ -1230,6 +1251,7 @@ impl<'a> GraphCtx<'a> {
             source: None,
             dispatch,
             is_export: Some(m.is_export()),
+            methods: None,
             addressable,
         };
 
@@ -1266,6 +1288,10 @@ impl<'a> GraphCtx<'a> {
                 .map(dispatch_labels)
                 .unwrap_or_default(),
             is_export: None,
+            // The member-method list is served from the on-disk graph (the production
+            // path); the in-memory serving path resolves the module node itself but does
+            // not enumerate members here.
+            methods: None,
             addressable,
         }
     }

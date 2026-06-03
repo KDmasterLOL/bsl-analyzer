@@ -22,8 +22,8 @@ pub use graph::{
     build_workspace_graph_rows, classify_graph_id, method_graph_id, method_id_for_path,
     reproject_changed_modules, scope_for_path, BatchDbOpener, Direction, EdgeRef,
     GraphBuildSummary, GraphContext, GraphDetail, GraphError, GraphIdKind, GraphOverview,
-    GraphRowSink, NeighborsParams, NeighborsResult, NodeRef, NodeResult, ReprojectedRows,
-    SourceItem, SourceResult, MAX_DROPPED_SAMPLE,
+    GraphRowSink, ModuleMethod, NeighborsParams, NeighborsResult, NodeRef, NodeResult,
+    ReprojectedRows, SourceItem, SourceResult, MAX_DROPPED_SAMPLE,
 };
 pub use hir::graph_index;
 pub use hir::ModuleId;

@@ -1167,6 +1167,58 @@ mod tests {
         assert_eq!(in_degree, 1, "Сервер.Считать is called once");
     }
 
+    /// A common module with no module-level edge has no stored `module` row, yet
+    /// `node(module/common/X)` resolves on demand and lists the module's members; a module
+    /// with no methods reports `not_found`.
+    #[test]
+    fn module_node_resolves_on_demand_and_lists_members() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let (_db, files) = load_workspace_db(root).expect("workspace loads");
+        let out = graph_db_path(root);
+        fs::create_dir_all(out.parent().unwrap()).unwrap();
+        build_graph_database(
+            root,
+            &out,
+            1,
+            &crate::graph_db::GraphMeta {
+                revision: 1,
+                fingerprint: 0,
+                files,
+                built_at: "t".to_string(),
+            },
+        )
+        .expect("graph database builds");
+        let gdb = GraphDb::open(&out).expect("graph database opens");
+
+        // The module is NOT a stored node (no module-level edge in the fixture)...
+        let stored_module_rows: i64 = Connection::open(&out)
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM nodes WHERE id = 'module/common/Сервер'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored_module_rows, 0, "module has no stored row");
+
+        // ...yet node(module/common/Сервер) resolves on demand and lists its members.
+        let resolved =
+            gdb.node("module/common/Сервер", ide::GraphDetail::Names).unwrap().expect("resolves");
+        assert_eq!(resolved.node.kind, "module");
+        let methods = resolved.node.methods.expect("module node carries its methods");
+        assert!(
+            methods.iter().any(|m| m.id == "method/common/Сервер/Считать" && m.name == "Считать"),
+            "members listed: {methods:?}"
+        );
+
+        // A module with no methods cannot be synthesized → not_found.
+        let missing = gdb.node("module/common/НетТакого", ide::GraphDetail::Names).unwrap();
+        assert!(missing.is_err(), "module with no members is not_found");
+    }
+
     /// A metadata object reached by a manager call in one module and by an SDBL
     /// query in another, across separate batches (`batch_size = 1`), must get the
     /// SAME durable `Mdo` node id from the streaming build as the in-memory fold.

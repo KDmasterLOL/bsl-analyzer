@@ -58,6 +58,24 @@ fn row_to_stored(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredNode> {
     })
 }
 
+/// The `[lo, hi)` id range that selects a module's member methods. A `module/<scope>`
+/// id's methods are `method/<scope>/<name>`; a `module/file/<rel>` id's methods are
+/// `method/file/<rel>::<name>` (the `::` member separator). The half-open upper bound is
+/// the prefix with its last (ASCII separator) byte incremented, so the scan rides the
+/// `id` primary-key index and never matches a sibling scope. `None` for a non-module id.
+fn method_id_range(module_id: &str) -> Option<(String, String)> {
+    let scope = module_id.strip_prefix("module/")?;
+    if scope.is_empty() {
+        return None;
+    }
+    let sep = if scope.starts_with("file/") { "::" } else { "/" };
+    let prefix = format!("method/{scope}{sep}");
+    let mut upper = prefix.clone();
+    let last = upper.pop()?; // ASCII '/' or ':'
+    upper.push(((last as u8) + 1) as char);
+    Some((prefix, upper))
+}
+
 /// Map a stored node kind to the agent-facing static label `NodeRef` expects.
 fn node_kind(kind: &str) -> &'static str {
     match kind {
@@ -200,6 +218,16 @@ impl GraphDb {
         if let Some(node) = self.fetch_node(id)? {
             return Ok(Ok(node));
         }
+        // A `module/<scope>` id has no stored row unless the module happened to be a
+        // module-level edge endpoint. Synthesize it from its member methods (addressed by
+        // the `method/<scope>/…` id prefix) so `node(module/…)` resolves and lists members
+        // — without polluting the graph with module nodes/edges.
+        if matches!(&kind, GraphIdKind::Module { .. } | GraphIdKind::ModuleFile { .. }) {
+            return Ok(match self.synthesize_module_node(id)? {
+                Some(node) => Ok(node),
+                None => Err(GraphError::NotFound { id: id.to_string() }),
+            });
+        }
         // Case-insensitive fallback for metadata ids only. Both the prefix and the
         // comparison target are rebuilt from the PARSED type's English name (not the
         // raw id segment), so a localized type spelling (`Справочник` → `Catalog`)
@@ -295,6 +323,59 @@ impl GraphDb {
         Ok(Err(GraphError::NotFound { id: id.to_string() }))
     }
 
+    /// Synthesize a `module` node from its member methods. A module has a stored row only
+    /// when it was an edge endpoint, but its methods are always present as
+    /// `method/<scope>/…` rows; the first member supplies the module's file and display
+    /// name. `None` when the module has no methods (then `node` reports `not_found`).
+    fn synthesize_module_node(&self, id: &str) -> anyhow::Result<Option<StoredNode>> {
+        let Some((lo, hi)) = method_id_range(id) else { return Ok(None) };
+        let first: Option<(Option<String>, Option<String>)> = self
+            .conn
+            .query_row(
+                "SELECT file, module FROM nodes WHERE kind = 'method' AND id >= ?1 AND id < ?2 \
+                 ORDER BY id LIMIT 1",
+                params![lo, hi],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .context("probing module members")?;
+        let Some((file, module_display)) = first else { return Ok(None) };
+        let name = module_display.clone().unwrap_or_else(|| id.to_string());
+        Ok(Some(StoredNode {
+            id: id.to_string(),
+            kind: "module".to_string(),
+            name: name.clone(),
+            qualified: name,
+            module: module_display,
+            file,
+            name_offset: None,
+            sig_end: None,
+            src_start: None,
+            src_end: None,
+            dispatch: None,
+            is_export: None,
+            addressable: true,
+        }))
+    }
+
+    /// The member methods of a `module/<scope>` node, addressed by the `method/<scope>/…`
+    /// id prefix (the durable scope, NOT the `module` display column).
+    fn module_members(&self, module_id: &str) -> anyhow::Result<Vec<ide::ModuleMethod>> {
+        let Some((lo, hi)) = method_id_range(module_id) else { return Ok(Vec::new()) };
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, is_export FROM nodes WHERE kind = 'method' AND id >= ?1 AND id < ?2 \
+             ORDER BY name",
+        )?;
+        let rows = stmt.query_map(params![lo, hi], |r| {
+            Ok(ide::ModuleMethod {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                is_export: r.get::<_, Option<i64>>(2)?.map(|v| v != 0),
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().context("listing module members")
+    }
+
     fn in_degree(&self, id: &str) -> anyhow::Result<usize> {
         let d: Option<i64> = self
             .conn
@@ -337,6 +418,9 @@ impl GraphDb {
             source: None,
             dispatch: dispatch_labels(&n.dispatch),
             is_export: n.is_export,
+            // Populated by `node()` for a `module` node (the member list); a separate
+            // query, so it is not done in this projection helper.
+            methods: None,
             addressable: n.addressable,
         };
         if n.kind == "method" && matches!(detail, GraphDetail::Signatures | GraphDetail::Bodies) {
@@ -419,7 +503,17 @@ impl GraphDb {
         id: &str,
         detail: GraphDetail,
     ) -> anyhow::Result<Result<NodeResult, GraphError>> {
-        Ok(self.resolve_stored(id)?.map(|n| NodeResult { node: self.node_ref(&n, detail) }))
+        let stored = match self.resolve_stored(id)? {
+            Ok(n) => n,
+            Err(e) => return Ok(Err(e)),
+        };
+        let mut node = self.node_ref(&stored, detail);
+        // A `module` node lists its members so an agent discovers them from `node(module/…)`
+        // directly, without a traversal.
+        if stored.kind == "module" {
+            node.methods = Some(self.module_members(&stored.id)?);
+        }
+        Ok(Ok(NodeResult { node }))
     }
 
     fn directed_edges(
@@ -723,4 +817,35 @@ fn clamp_source(src: String, max_chars: usize) -> (String, bool) {
         end -= 1;
     }
     (src[..end].to_string(), true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::method_id_range;
+
+    #[test]
+    fn method_id_range_covers_each_module_form() {
+        // Common/manager/object modules use the `/` member separator.
+        let (lo, hi) = method_id_range("module/common/Сервер").unwrap();
+        assert_eq!(lo, "method/common/Сервер/");
+        assert_eq!(hi, "method/common/Сервер0"); // '/' (0x2F) bumped to '0' (0x30)
+        assert!("method/common/Сервер/Считать" >= lo.as_str());
+        assert!("method/common/Сервер/Считать" < hi.as_str());
+        // A sibling scope (longer name sharing the prefix) is NOT in range.
+        assert!("method/common/СерверДва/М" >= hi.as_str());
+
+        let (lo, _) = method_id_range("module/manager/Catalog/Товары").unwrap();
+        assert_eq!(lo, "method/manager/Catalog/Товары/");
+
+        // File modules use the `::` member separator.
+        let (lo, hi) = method_id_range("module/file/src/cf/Forms/A/Module.bsl").unwrap();
+        assert_eq!(lo, "method/file/src/cf/Forms/A/Module.bsl::");
+        assert_eq!(hi, "method/file/src/cf/Forms/A/Module.bsl:;"); // ':' bumped to ';'
+        assert!("method/file/src/cf/Forms/A/Module.bsl::ПриОткрытии" >= lo.as_str());
+        assert!("method/file/src/cf/Forms/A/Module.bsl::ПриОткрытии" < hi.as_str());
+
+        // Not a module id (no `module/` prefix), and an empty scope.
+        assert!(method_id_range("method/common/X/Y").is_none());
+        assert!(method_id_range("module/").is_none());
+    }
 }
