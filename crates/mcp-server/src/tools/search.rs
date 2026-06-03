@@ -9,6 +9,7 @@ use rmcp::ErrorData as McpError;
 use serde_json::json;
 use std::collections::HashSet;
 use std::fmt::Write;
+use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use tracing::warn;
@@ -43,8 +44,12 @@ pub fn find_code(
                                 "No results found (overlay is warming up, only baseline search available).",
                             )]));
                         }
+                        // Engine lock is busy, so these are external-baseline direct hits
+                        // with no reachable workspace root. Module-keyed methods still get a
+                        // graph_id (root-independent); a path-fallback hit would be dropped,
+                        // which is fine here — baseline paths are relative, not absolute.
                         return Ok(CallToolResult::success(vec![Content::text(format_code_hits(
-                            &hits,
+                            &hits, None,
                         ))]));
                     }
                     DirectResult::Terminal(error) => {
@@ -113,7 +118,8 @@ pub fn find_code(
         return Ok(CallToolResult::success(vec![Content::text("No results found.")]));
     }
 
-    Ok(CallToolResult::success(vec![Content::text(format_code_hits(&hits))]))
+    let workspace_root = guard.as_ref().and_then(|e| e.workspace_root());
+    Ok(CallToolResult::success(vec![Content::text(format_code_hits(&hits, workspace_root))]))
 }
 
 pub fn search_code(
@@ -174,7 +180,10 @@ pub fn search_code(
                 if hits.is_empty() {
                     return Ok(CallToolResult::success(vec![Content::text("No results found.")]));
                 }
-                return Ok(CallToolResult::success(vec![Content::text(format_code_hits(&hits))]));
+                return Ok(CallToolResult::success(vec![Content::text(format_code_hits(
+                    &hits,
+                    engine.workspace_root(),
+                ))]));
             }
             DirectResult::Terminal(error) => {
                 return Err(external_baseline_mcp_error(&error));
@@ -209,7 +218,10 @@ pub fn search_code(
         return Ok(CallToolResult::success(vec![Content::text("No results found.")]));
     }
 
-    Ok(CallToolResult::success(vec![Content::text(format_code_hits(&hits))]))
+    Ok(CallToolResult::success(vec![Content::text(format_code_hits(
+        &hits,
+        engine.workspace_root(),
+    ))]))
 }
 
 #[derive(Debug)]
@@ -1107,10 +1119,12 @@ fn ensure_reference_baseline_runtime_ready(
     Ok(())
 }
 
-/// Durable graph id for a code-search hit, when it names a method in an
-/// indexable module. Returns `None` for headers, non-method symbols, and
-/// non-module files (forms, platform docs).
-fn graph_id_for_hit(hit: &SearchHit) -> Option<String> {
+/// Durable graph id for a code-search hit, when it names a method. Returns `None` for
+/// headers and non-method symbols. Module-keyed methods (common/object/manager) resolve
+/// regardless of `workspace_root`; form/command/file-module methods fall back to the
+/// `method/file/<rel>::<name>` id the graph also mints. Hit paths are already root-relative,
+/// so `workspace_root` is only a safety net for an unexpectedly absolute path.
+fn graph_id_for_hit(hit: &SearchHit, workspace_root: Option<&Path>) -> Option<String> {
     if hit.symbol_name.is_empty() {
         return None;
     }
@@ -1120,10 +1134,10 @@ fn graph_id_for_hit(hit: &SearchHit) -> Option<String> {
     if !is_method {
         return None;
     }
-    ide::method_id_for_path(&hit.file_path, &hit.symbol_name)
+    ide::method_graph_id(&hit.file_path, &hit.symbol_name, workspace_root)
 }
 
-fn format_code_hits(hits: &[bsl_search::SearchHit]) -> String {
+fn format_code_hits(hits: &[bsl_search::SearchHit], workspace_root: Option<&Path>) -> String {
     let mut out = String::new();
 
     for (i, hit) in hits.iter().enumerate() {
@@ -1141,7 +1155,7 @@ fn format_code_hits(hits: &[bsl_search::SearchHit]) -> String {
         );
         // Bridge into the call graph: surface the durable node id so the agent
         // can pivot to `graph` callers/callees/source.
-        if let Some(id) = graph_id_for_hit(hit) {
+        if let Some(id) = graph_id_for_hit(hit, workspace_root) {
             let _ = writeln!(out, "  graph_id: {id}");
         }
 
@@ -1347,32 +1361,37 @@ mod tests {
 
     #[test]
     fn graph_id_bridges_method_hits_in_modules() {
-        // A method in a common module gets a durable graph id.
+        // A method in a common module gets a durable, root-independent graph id.
         assert_eq!(
-            super::graph_id_for_hit(&code_hit(
-                "/src/CommonModules/Утилиты/Ext/Module.bsl",
-                "ПроверитьИНН",
-                "procedure",
-            )),
+            super::graph_id_for_hit(
+                &code_hit("CommonModules/Утилиты/Ext/Module.bsl", "ПроверитьИНН", "procedure"),
+                None,
+            ),
             Some("method/common/Утилиты/ПроверитьИНН".to_owned()),
         );
         // A non-method symbol gets no id.
         assert_eq!(
-            super::graph_id_for_hit(&code_hit(
-                "/src/CommonModules/Утилиты/Ext/Module.bsl",
-                "МодульнаяПерем",
-                "variable",
-            )),
+            super::graph_id_for_hit(
+                &code_hit("CommonModules/Утилиты/Ext/Module.bsl", "МодульнаяПерем", "variable"),
+                None,
+            ),
             None,
         );
-        // A method in a non-indexable module (form) gets no id.
+        // A method in a form module falls back to the `method/file/<rel>::<name>` id the
+        // graph also mints — using the relative hit path the search overlay stores.
         assert_eq!(
-            super::graph_id_for_hit(&code_hit(
-                "/src/Catalogs/Контрагенты/Forms/Форма/Ext/Form/Module.bsl",
-                "ПриОткрытии",
-                "procedure",
-            )),
-            None,
+            super::graph_id_for_hit(
+                &code_hit(
+                    "Catalogs/Контрагенты/Forms/Форма/Ext/Form/Module.bsl",
+                    "ПриОткрытии",
+                    "procedure",
+                ),
+                None,
+            ),
+            Some(
+                "method/file/Catalogs/Контрагенты/Forms/Форма/Ext/Form/Module.bsl::ПриОткрытии"
+                    .to_owned()
+            ),
         );
     }
 

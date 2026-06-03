@@ -477,7 +477,8 @@ impl McpServer {
                 "overview" => tools::graph::overview(gdb, p.top.unwrap_or(20)),
                 "node" => {
                     let id = require(p.id, "id", "node")?;
-                    let detail = tools::graph::detail_from(p.detail.as_deref());
+                    let detail = tools::graph::detail_from(p.detail.as_deref())
+                        .map_err(|e| McpError::invalid_params(e, None))?;
                     tools::graph::node(gdb, &id, detail)
                 }
                 "source" => {
@@ -495,14 +496,17 @@ impl McpServer {
                     let dir = match action {
                         "callers" => ide::Direction::In,
                         "callees" => ide::Direction::Out,
-                        _ => tools::graph::direction_from(p.dir.as_deref()),
+                        _ => tools::graph::direction_from(p.dir.as_deref())
+                            .map_err(|e| McpError::invalid_params(e, None))?,
                     };
+                    let detail = tools::graph::detail_from(p.detail.as_deref())
+                        .map_err(|e| McpError::invalid_params(e, None))?;
                     let neighbors = ide::NeighborsParams {
                         id: &id,
                         dir,
                         depth: p.depth.unwrap_or(1),
                         max_nodes: p.max_nodes.unwrap_or(50),
-                        detail: tools::graph::detail_from(p.detail.as_deref()),
+                        detail,
                         provenance_filter: p.provenance.clone(),
                     };
                     tools::graph::neighbors(gdb, &neighbors)

@@ -102,6 +102,10 @@ pub(crate) struct DiagnosticsResident {
     /// `.bsl-analyzer.json` the same way LSP and CLI do — so `file`/`workspace` honour
     /// the project's disabled rules and thresholds, not analyzer defaults.
     config: ide::DiagnosticsConfig,
+    /// The workspace root the resident was built against — the SAME root the graph build
+    /// uses (`source_dir`), so an absolute finding path strips to the graph encoder's rel
+    /// and the `method/file/<rel>::<name>` graph bridge resolves.
+    workspace_root: PathBuf,
 }
 
 impl DiagnosticsResident {
@@ -109,6 +113,12 @@ impl DiagnosticsResident {
     /// the loader did. `None` when the path is not a resident workspace `.bsl`.
     pub(crate) fn file_id_for(&self, path: &Path) -> Option<FileId> {
         self.by_path.get(&canonical_key(path)).copied()
+    }
+
+    /// The workspace root the resident was built against (the graph's `source_dir`),
+    /// used to bridge findings to durable `method/file/<rel>::<name>` graph ids.
+    pub(crate) fn workspace_root(&self) -> &Path {
+        &self.workspace_root
     }
 
     /// An `Analysis` view over a cloned db handle. The clone shares the Salsa storage
@@ -607,7 +617,11 @@ impl DiagnosticsState {
             .collect();
         let config_fp = config_fingerprint(root);
 
-        Ok((DiagnosticsResident { db, by_path, config }, stats, config_fp))
+        Ok((
+            DiagnosticsResident { db, by_path, config, workspace_root: root.to_path_buf() },
+            stats,
+            config_fp,
+        ))
     }
 
     /// The throttled disk scan: at most one walk per drift interval, its result shared

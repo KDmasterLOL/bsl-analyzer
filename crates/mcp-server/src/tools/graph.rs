@@ -17,19 +17,26 @@ use crate::graph_query::GraphDb;
 use crate::tools::redact::redact_secrets;
 use crate::tools::response::structured;
 
-pub fn detail_from(s: Option<&str>) -> GraphDetail {
+/// Parse the `detail` enum. `None` keeps the default (`signatures`); an unknown value is
+/// rejected (mirrors `diagnostics::parse_min_severity`) so a caller is never silently served
+/// a different view than it asked for.
+pub fn detail_from(s: Option<&str>) -> Result<GraphDetail, String> {
     match s {
-        Some("names") => GraphDetail::Names,
-        Some("bodies") => GraphDetail::Bodies,
-        _ => GraphDetail::Signatures,
+        None | Some("signatures") => Ok(GraphDetail::Signatures),
+        Some("names") => Ok(GraphDetail::Names),
+        Some("bodies") => Ok(GraphDetail::Bodies),
+        Some(other) => Err(format!("unknown detail '{other}'; expected names|signatures|bodies")),
     }
 }
 
-pub fn direction_from(s: Option<&str>) -> Direction {
+/// Parse the `dir` enum. `None` keeps the default (`in`); an unknown value is rejected so a
+/// caller is never silently given the opposite traversal direction.
+pub fn direction_from(s: Option<&str>) -> Result<Direction, String> {
     match s {
-        Some("out") => Direction::Out,
-        Some("both") => Direction::Both,
-        _ => Direction::In,
+        None | Some("in") => Ok(Direction::In),
+        Some("out") => Ok(Direction::Out),
+        Some("both") => Ok(Direction::Both),
+        Some(other) => Err(format!("unknown dir '{other}'; expected in|out|both")),
     }
 }
 
@@ -166,6 +173,28 @@ fn redact_opt(source: &mut Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detail_from_defaults_then_rejects_unknown() {
+        assert_eq!(detail_from(None), Ok(GraphDetail::Signatures));
+        assert_eq!(detail_from(Some("signatures")), Ok(GraphDetail::Signatures));
+        assert_eq!(detail_from(Some("names")), Ok(GraphDetail::Names));
+        assert_eq!(detail_from(Some("bodies")), Ok(GraphDetail::Bodies));
+        // An unknown value errors rather than silently defaulting.
+        let err = detail_from(Some("everything")).unwrap_err();
+        assert!(err.contains("everything") && err.contains("names|signatures|bodies"), "{err}");
+    }
+
+    #[test]
+    fn direction_from_defaults_then_rejects_unknown() {
+        assert_eq!(direction_from(None), Ok(Direction::In));
+        assert_eq!(direction_from(Some("in")), Ok(Direction::In));
+        assert_eq!(direction_from(Some("out")), Ok(Direction::Out));
+        assert_eq!(direction_from(Some("both")), Ok(Direction::Both));
+        // An unknown value errors rather than silently giving the default direction.
+        let err = direction_from(Some("sideways")).unwrap_err();
+        assert!(err.contains("sideways") && err.contains("in|out|both"), "{err}");
+    }
 
     #[test]
     fn schema_advertises_the_current_contract_shape() {

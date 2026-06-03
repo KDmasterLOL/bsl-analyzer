@@ -171,7 +171,7 @@ pub(crate) fn file_findings(
             truncated = true;
             continue;
         }
-        let graph_id = graph_id_for(diag.range, &methods, path);
+        let graph_id = graph_id_for(diag.range, &methods, path, resident.workspace_root());
         findings.push(finding_value(diag, &out, bucket, graph_id, filters.detailed));
     }
 
@@ -268,12 +268,19 @@ fn collect_methods(symbols: &[DocumentSymbol], out: &mut Vec<(String, TextRange)
     }
 }
 
-/// The durable graph id of the method whose span contains `range`, if any. `None`
-/// when the finding is not inside a method (module body) or the file is not an
-/// indexable user module (forms, commands) — `graph_id` is best-effort decoration.
-fn graph_id_for(range: TextRange, methods: &[(String, TextRange)], path: &Path) -> Option<String> {
+/// The durable graph id of the method whose span contains `range`, if any. `None` when the
+/// finding is not inside a method (module body). Module-keyed methods (common/object/manager)
+/// resolve regardless of `workspace_root`; form/command/file-module methods fall back to the
+/// `method/file/<rel>::<name>` id the graph also mints — `workspace_root` strips an absolute
+/// request path to the encoder's rel. `graph_id` is best-effort decoration.
+fn graph_id_for(
+    range: TextRange,
+    methods: &[(String, TextRange)],
+    path: &Path,
+    workspace_root: &Path,
+) -> Option<String> {
     let name = methods.iter().find(|(_, r)| r.contains_range(range)).map(|(n, _)| n.as_str())?;
-    ide::method_id_for_path(&path.to_string_lossy(), name)
+    ide::method_graph_id(&path.to_string_lossy(), name, Some(workspace_root))
 }
 
 /// The pull-model freshness handle: `<path>@<generation>@<content-hash>`. The content
@@ -693,20 +700,25 @@ mod tests {
             children: Vec::new(),
         };
         let methods = method_ranges(std::slice::from_ref(&method));
+        let root = std::path::Path::new("/ws");
         let module = std::path::Path::new("/ws/CommonModules/Сервер/Ext/Module.bsl");
 
         // A finding inside the method span resolves to the method's durable graph id.
         let inside = TextRange::new(30u32.into(), 35u32.into());
         assert_eq!(
-            graph_id_for(inside, &methods, module).as_deref(),
+            graph_id_for(inside, &methods, module, root).as_deref(),
             Some("method/common/Сервер/Считать")
         );
         // A module-body finding (outside any method) carries no graph id.
         let outside = TextRange::new(0u32.into(), 5u32.into());
-        assert_eq!(graph_id_for(outside, &methods, module), None);
-        // A non-indexable file (a form) has no method graph id even inside a method.
+        assert_eq!(graph_id_for(outside, &methods, module, root), None);
+        // A form module: a finding inside a method now falls back to the
+        // `method/file/<rel>::<name>` id the graph mints, with the rel stripped to `root`.
         let form = std::path::Path::new("/ws/CommonForms/Форма/Ext/Form/Module.bsl");
-        assert_eq!(graph_id_for(inside, &methods, form), None);
+        assert_eq!(
+            graph_id_for(inside, &methods, form, root).as_deref(),
+            Some("method/file/CommonForms/Форма/Ext/Form/Module.bsl::Считать")
+        );
     }
 
     #[test]

@@ -733,10 +733,7 @@ impl<'a> GraphCtx<'a> {
     }
 
     fn rel_path(&self, abs: &str) -> Option<String> {
-        let root = self.workspace_root?;
-        let root_str = root.to_str()?.replace('\\', "/");
-        let stripped = abs.strip_prefix(&root_str)?;
-        Some(stripped.trim_start_matches('/').to_string())
+        workspace_rel_path(abs, self.workspace_root?)
     }
 
     // ---- id encoding --------------------------------------------------------
@@ -1547,6 +1544,60 @@ impl<'a> GraphCtx<'a> {
 pub fn method_id_for_path(path: &str, method_name: &str) -> Option<String> {
     let key = module_key_for_path(path)?;
     Some(format!("method/{}/{method_name}", encode_scope(&key)))
+}
+
+/// Workspace-relative form of `abs` under `root`, matching the id encoder's rel
+/// ([`GraphRowEncoder::rel_path`]): `\` → `/`, leading `/` trimmed. Returns `None`
+/// when `abs` is not under `root`. STRING-level strip (no filesystem canonicalization)
+/// so a caller reproduces the encoder's exact rel rather than the real path — but with a
+/// component-boundary check so a sibling like `/ws/project` is not mistaken for being
+/// under `/ws/proj` (which would mint a garbled, non-resolving rel).
+pub(crate) fn workspace_rel_path(abs: &str, root: &Path) -> Option<String> {
+    let root_str = root.to_str()?.replace('\\', "/");
+    let abs = abs.replace('\\', "/");
+    let root_str = root_str.trim_end_matches('/');
+    let stripped = abs.strip_prefix(root_str)?;
+    // `abs` must be `root` itself or continue at a path boundary (`root/<rel>`), never a
+    // longer-named sibling that merely shares the prefix string.
+    if !stripped.is_empty() && !stripped.starts_with('/') {
+        return None;
+    }
+    let rel = stripped.trim_start_matches('/').to_string();
+    if rel.is_empty() {
+        return None;
+    }
+    Some(rel)
+}
+
+/// Durable id for `method_name` at `path`, module-keyed when possible, otherwise the
+/// `method/file/<rel>::<name>` path-fallback the graph encoder also mints (see
+/// [`GraphRowEncoder::encode_method`]) so form/command/file-module methods stay addressable.
+///
+/// `workspace_root` is the root the graph was built against; it is needed only to strip an
+/// absolute `path` down to the encoder's rel. A relative `path` (already root-relative, as
+/// produced by the search overlay) is used directly and resolves even without a root. Returns
+/// `None` when neither form yields a resolvable id (e.g. an absolute path with no root, or a
+/// path not under the root) — a wrong, non-resolving id is worse than no decoration.
+///
+/// Distinct from [`method_id_for_path`], which stays module-keyed-only for the graph-enriched
+/// embedding path that deliberately does not enrich path-fallback methods.
+pub fn method_graph_id(
+    path: &str,
+    method_name: &str,
+    workspace_root: Option<&Path>,
+) -> Option<String> {
+    if let Some(key) = module_key_for_path(path) {
+        return Some(format!("method/{}/{method_name}", encode_scope(&key)));
+    }
+    let rel = if Path::new(path).is_absolute() {
+        workspace_rel_path(path, workspace_root?)?
+    } else {
+        path.replace('\\', "/").trim_start_matches('/').to_string()
+    };
+    if rel.is_empty() {
+        return None;
+    }
+    Some(format!("method/file/{rel}::{method_name}"))
 }
 
 /// The parsed shape of a durable graph id, independent of any database. Drives
@@ -2408,6 +2459,113 @@ mod tests {
             }
             assert!(seen >= 1, "the loose-path method must surface as a node");
         }
+    }
+
+    /// The real gate for the search/diagnostics graph_id bridge: `method_graph_id` must mint
+    /// the SAME path-fallback id the encoder stored for a loose-path method, and that id must
+    /// resolve back to the method node — both for an absolute path (stripped by the root) and
+    /// for the already-relative form the search overlay stores.
+    #[test]
+    fn method_graph_id_matches_encoder_and_round_trips_for_path_fallback() {
+        use std::path::Path;
+
+        let a = workspace(&[(
+            "/ws/proj/scripts/loose.bsl",
+            "Процедура Свободный() Экспорт КонецПроцедуры",
+        )]);
+        let root = Path::new("/ws/proj");
+
+        // The durable id the encoder stores for the loose method.
+        let db = a.database();
+        let graph = db.workspace_call_graph(ROOT);
+        let ctx = GraphCtx::new(db, ROOT, Some(root));
+        let encoder_id = graph
+            .nodes()
+            .find(|n| matches!(n, GraphNode::Method(_)))
+            .map(|n| ctx.encode_node(&n).0)
+            .expect("loose method node");
+        assert_eq!(encoder_id, "method/file/scripts/loose.bsl::Свободный");
+
+        // Absolute path → stripped by the root to the encoder's rel.
+        assert_eq!(
+            method_graph_id("/ws/proj/scripts/loose.bsl", "Свободный", Some(root)).as_deref(),
+            Some(encoder_id.as_str()),
+        );
+        // Already-relative path (search-overlay form) → used directly; root unused.
+        assert_eq!(
+            method_graph_id("scripts/loose.bsl", "Свободный", None).as_deref(),
+            Some(encoder_id.as_str()),
+        );
+        // The minted id resolves back to the node (round-trip, not just a string match).
+        assert!(
+            a.graph_node(ROOT, Some(root), &encoder_id, GraphDetail::Names).is_ok(),
+            "minted path-fallback id must resolve"
+        );
+    }
+
+    #[test]
+    fn method_graph_id_module_keyed_is_root_independent() {
+        use std::path::Path;
+        // A recognised module path is prefix-independent: same id with or without a root,
+        // absolute or relative.
+        for path in [
+            "/anything/CommonModules/Утилиты/Ext/Module.bsl",
+            "CommonModules/Утилиты/Ext/Module.bsl",
+        ] {
+            for root in [Some(Path::new("/ws")), None] {
+                assert_eq!(
+                    method_graph_id(path, "Сложить", root).as_deref(),
+                    Some("method/common/Утилиты/Сложить"),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn method_graph_id_file_fallback_normalization() {
+        use std::path::Path;
+        let root = Path::new("/ws/proj");
+
+        // Absolute path under the root → rel form.
+        assert_eq!(
+            method_graph_id("/ws/proj/a/b/Module.bsl", "M", Some(root)).as_deref(),
+            Some("method/file/a/b/Module.bsl::M"),
+        );
+        // Trailing slash on the root is tolerated (matches the encoder's rel).
+        assert_eq!(
+            method_graph_id("/ws/proj/a/b/Module.bsl", "M", Some(Path::new("/ws/proj/")))
+                .as_deref(),
+            Some("method/file/a/b/Module.bsl::M"),
+        );
+        // Backslash path is normalised to forward slashes.
+        assert_eq!(
+            method_graph_id(r"a\b\Module.bsl", "M", None).as_deref(),
+            Some("method/file/a/b/Module.bsl::M"),
+        );
+        // Absolute path NOT under the root → None (never emit a non-resolving id).
+        assert_eq!(method_graph_id("/elsewhere/Module.bsl", "M", Some(root)), None);
+        // A longer-named sibling that merely shares the prefix string is NOT under the root.
+        assert_eq!(method_graph_id("/ws/project/a/Module.bsl", "M", Some(root)), None);
+        // Absolute path with no root → None.
+        assert_eq!(method_graph_id("/ws/proj/a/Module.bsl", "M", None), None);
+    }
+
+    #[test]
+    fn workspace_rel_path_strips_and_normalizes() {
+        use std::path::Path;
+        assert_eq!(
+            workspace_rel_path("/ws/proj/a/b.bsl", Path::new("/ws/proj")).as_deref(),
+            Some("a/b.bsl"),
+        );
+        assert_eq!(
+            workspace_rel_path("/ws/proj/a/b.bsl", Path::new("/ws/proj/")).as_deref(),
+            Some("a/b.bsl"),
+        );
+        assert_eq!(workspace_rel_path("/other/a.bsl", Path::new("/ws/proj")), None);
+        // Sibling sharing the prefix string but not a path component → not under the root.
+        assert_eq!(workspace_rel_path("/ws/project/a.bsl", Path::new("/ws/proj")), None);
+        // The root itself (no rel remainder) → None.
+        assert_eq!(workspace_rel_path("/ws/proj", Path::new("/ws/proj")), None);
     }
 
     /// Forms never enter the in-memory `workspace_call_graph` (they are emitted only
