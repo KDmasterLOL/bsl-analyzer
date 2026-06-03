@@ -40,6 +40,24 @@ pub fn direction_from(s: Option<&str>) -> Result<Direction, String> {
     }
 }
 
+/// The agent-facing edge-kind labels accepted by the `edge_kinds` neighbour filter.
+const EDGE_KINDS: [&str; 6] =
+    ["call", "manager_creates", "manager_access", "query_ref", "contains", "data_binding"];
+
+/// Validate an `edge_kinds` filter: every entry must be a known edge-kind label, so a
+/// typo fails fast rather than silently matching nothing.
+pub fn validate_edge_kinds(kinds: &[String]) -> Result<(), String> {
+    for k in kinds {
+        if !EDGE_KINDS.contains(&k.as_str()) {
+            return Err(format!(
+                "unknown edge_kind '{k}'; expected one of {}",
+                EDGE_KINDS.join("|")
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// An infrastructure failure (e.g. a SQL read error) surfaced in-band so the agent
 /// sees a structured error rather than a dropped tool call.
 fn internal(e: anyhow::Error) -> Value {
@@ -124,13 +142,17 @@ pub fn loading(detail: Option<&str>) -> CallToolResult {
 /// independent of the on-disk SQLite cache layout in [`crate::graph_db`]).
 fn schema_json() -> Value {
     json!({
-        "schema_version": "8",
+        "schema_version": "9",
         "actions": ["overview", "schema", "node", "source", "neighbors", "callers", "callees"],
         "node_kinds": ["method", "module", "mdo", "attribute", "tabular_section", "form", "form_item", "form_attribute"],
         "notes": "since version 7 `node(module/<scope>)` resolves for any code module and returns a `methods` array ({id, name, is_export}) of the module's members; module membership is served on demand and is not a graph edge, so `neighbors(module/…)` stays empty",
         "edge_kinds": ["call", "manager_creates", "manager_access", "query_ref", "contains", "data_binding"],
         "provenance": ["resolved", "inferred", "visibility_blocked", "unresolved"],
         "dispatch": ["client", "server"],
+        "neighbors_params": {
+            "provenance": "string[] — keep only edges with these provenances (empty = all)",
+            "edge_kinds": "string[] — keep only edges of these kinds (call|manager_creates|manager_access|query_ref|contains|data_binding); empty = all. Combine with provenance to isolate e.g. only query_ref metadata impact"
+        },
         "neighbors_result": {
             "total": "usize — distinct neighbours discovered, before the max_nodes cap",
             "returned": "usize — neighbours returned in `nodes` (after the cap)",
@@ -191,6 +213,14 @@ mod tests {
     }
 
     #[test]
+    fn validate_edge_kinds_accepts_known_rejects_unknown() {
+        assert!(validate_edge_kinds(&[]).is_ok());
+        assert!(validate_edge_kinds(&["query_ref".to_owned(), "contains".to_owned()]).is_ok());
+        let err = validate_edge_kinds(&["calls".to_owned()]).unwrap_err();
+        assert!(err.contains("calls") && err.contains("query_ref"), "{err}");
+    }
+
+    #[test]
     fn direction_from_defaults_then_rejects_unknown() {
         assert_eq!(direction_from(None), Ok(Direction::In));
         assert_eq!(direction_from(Some("in")), Ok(Direction::In));
@@ -208,7 +238,7 @@ mod tests {
         // changes; `total` since this revision, `form`/`form_item` + `contains` since
         // version 3, `form_attribute` since version 4, `tabular_section` since version
         // 5, and the `data_binding` edge since version 6.
-        assert_eq!(schema["schema_version"], "8");
+        assert_eq!(schema["schema_version"], "9");
         assert!(
             schema["neighbors_result"]["total"].is_string(),
             "neighbours result must document the `total` field"
@@ -249,7 +279,7 @@ mod tests {
     #[test]
     fn schema_and_loading_populate_structured_content() {
         assert_structured_mirrors_text(&schema());
-        assert_eq!(schema().structured_content.unwrap()["schema_version"], "8");
+        assert_eq!(schema().structured_content.unwrap()["schema_version"], "9");
 
         assert_structured_mirrors_text(&loading(Some("indexing")));
         let body = loading(Some("indexing")).structured_content.unwrap();

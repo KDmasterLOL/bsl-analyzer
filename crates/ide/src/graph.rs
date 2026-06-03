@@ -202,6 +202,9 @@ pub struct NeighborsParams<'a> {
     pub detail: GraphDetail,
     /// Keep only edges whose provenance is in this set, when non-empty.
     pub provenance_filter: Vec<String>,
+    /// Keep only edges whose kind label (call/manager_access/query_ref/contains/…) is in
+    /// this set, when non-empty. Independent of `provenance_filter` (both must pass).
+    pub edge_kind_filter: Vec<String>,
 }
 
 /// A method's outbound graph context, rendered for embedding enrichment. A semantic
@@ -1485,7 +1488,9 @@ impl<'a> GraphCtx<'a> {
             let mut next: Vec<GraphNode> = Vec::new();
             for node in &frontier {
                 for edge in self.directed_edges(node, params.dir) {
-                    if !self.provenance_allowed(edge, &params.provenance_filter) {
+                    if !self.provenance_allowed(edge, &params.provenance_filter)
+                        || !edge_kind_allowed(edge.kind, &params.edge_kind_filter)
+                    {
                         continue;
                     }
                     out_edges.push(edge);
@@ -1889,6 +1894,13 @@ fn edge_kind_label(kind: EdgeKind) -> &'static str {
     }
 }
 
+/// Whether an edge of `kind` passes an `edge_kinds` filter: an empty filter admits all,
+/// otherwise the edge's agent-facing label must be listed. Shared shape with the SQLite
+/// serve path, which filters on the stored kind string.
+pub(crate) fn edge_kind_allowed(kind: EdgeKind, filter: &[String]) -> bool {
+    filter.is_empty() || filter.iter().any(|k| k == edge_kind_label(kind))
+}
+
 /// Whether a stored form node's owner (`node`) equals a parsed-id owner (`query`),
 /// comparing the object name case-insensitively. `None` (common form) matches `None`.
 fn form_owner_matches(node: Option<(MdoType, &str)>, query: &Option<(MdoType, String)>) -> bool {
@@ -2133,6 +2145,7 @@ mod tests {
             max_nodes: 50,
             detail: GraphDetail::Names,
             provenance_filter: Vec::new(),
+            edge_kind_filter: Vec::new(),
         };
         let res = a.graph_neighbors(ROOT, None, &params).expect("neighbors resolve");
         assert_eq!(res.root.id, "method/common/Сервер/Считать");
@@ -2162,6 +2175,7 @@ mod tests {
             max_nodes: 0,
             detail: GraphDetail::Names,
             provenance_filter: Vec::new(),
+            edge_kind_filter: Vec::new(),
         };
         let res = a.graph_neighbors(ROOT, None, &params).expect("neighbors resolve");
         // The cap drops the sole caller, but `total` still reflects the real fan-out.
@@ -2212,6 +2226,7 @@ mod tests {
             max_nodes: 50,
             detail: GraphDetail::Names,
             provenance_filter: Vec::new(),
+            edge_kind_filter: Vec::new(),
         };
         let res = a.graph_neighbors(ROOT, None, &params).unwrap();
         assert!(res.nodes.iter().any(|n| n.id == "method/common/Вызыватель/Делать"));
@@ -2250,6 +2265,7 @@ mod tests {
             max_nodes: 50,
             detail: GraphDetail::Names,
             provenance_filter: Vec::new(),
+            edge_kind_filter: Vec::new(),
         };
         let res = a.graph_neighbors(ROOT, None, &params).unwrap();
         assert!(res.nodes.iter().any(|n| n.id == "method/common/Вызыватель/Делать"));
@@ -2357,6 +2373,7 @@ mod tests {
             max_nodes: 50,
             detail: GraphDetail::Names,
             provenance_filter: vec!["inferred".to_string()],
+            edge_kind_filter: Vec::new(),
         };
         let res = a.graph_neighbors(ROOT, None, &params).unwrap();
         // The only incoming edge is `resolved`, so the inferred-only filter drops it.

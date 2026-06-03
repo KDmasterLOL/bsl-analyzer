@@ -96,6 +96,10 @@ struct GraphParams {
     /// Keep only edges with these provenances (resolved/inferred/visibility_blocked/unresolved).
     #[serde(default)]
     provenance: Vec<String>,
+    /// Keep only edges of these kinds (call/manager_creates/manager_access/query_ref/
+    /// contains/data_binding) — lets metadata-impact queries isolate e.g. only `query_ref`.
+    #[serde(default)]
+    edge_kinds: Vec<String>,
     /// How many top-centrality methods to include in `overview` (default: 20).
     top: Option<usize>,
 }
@@ -501,6 +505,8 @@ impl McpServer {
                     };
                     let detail = tools::graph::detail_from(p.detail.as_deref())
                         .map_err(|e| McpError::invalid_params(e, None))?;
+                    tools::graph::validate_edge_kinds(&p.edge_kinds)
+                        .map_err(|e| McpError::invalid_params(e, None))?;
                     let neighbors = ide::NeighborsParams {
                         id: &id,
                         dir,
@@ -508,6 +514,7 @@ impl McpServer {
                         max_nodes: p.max_nodes.unwrap_or(50),
                         detail,
                         provenance_filter: p.provenance.clone(),
+                        edge_kind_filter: p.edge_kinds.clone(),
                     };
                     tools::graph::neighbors(gdb, &neighbors)
                 }

@@ -1006,6 +1006,7 @@ mod tests {
                 max_nodes: 50,
                 detail: ide::GraphDetail::Names,
                 provenance_filter: Vec::new(),
+                edge_kind_filter: Vec::new(),
             })
             .expect("query")
             .expect("neighbors resolve");
@@ -1165,6 +1166,67 @@ mod tests {
             )
             .unwrap();
         assert_eq!(in_degree, 1, "Сервер.Считать is called once");
+    }
+
+    /// `edge_kinds` narrows a neighbours query to the requested edge kinds: a method with
+    /// both a `call` and a `query_ref` out-edge returns both unfiltered, only the query_ref
+    /// edge under `edge_kinds=["query_ref"]`.
+    #[test]
+    fn neighbors_edge_kinds_filter_isolates_one_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        write_catalog(root, "Номенклатура", 1);
+        write_common_module(
+            root,
+            "Бета",
+            true,
+            "&НаСервере\nПроцедура ШагБ() Экспорт КонецПроцедуры",
+        );
+        write_common_module(
+            root,
+            "Альфа",
+            true,
+            "&НаСервере\nПроцедура ШагА() Экспорт\nБета.ШагБ();\n\
+             Запрос = \"ВЫБРАТЬ Код ИЗ Справочник.Номенклатура\";\nКонецПроцедуры",
+        );
+
+        let out = graph_db_path(root);
+        fs::create_dir_all(out.parent().unwrap()).unwrap();
+        build_graph_database(
+            root,
+            &out,
+            1,
+            &crate::graph_db::GraphMeta {
+                revision: 1,
+                fingerprint: 0,
+                files: 0,
+                built_at: "t".to_string(),
+            },
+        )
+        .expect("graph database builds");
+        let gdb = GraphDb::open(&out).expect("graph database opens");
+
+        let mk = |kinds: Vec<String>| ide::NeighborsParams {
+            id: "method/common/Альфа/ШагА",
+            dir: ide::Direction::Out,
+            depth: 1,
+            max_nodes: 50,
+            detail: ide::GraphDetail::Names,
+            provenance_filter: Vec::new(),
+            edge_kind_filter: kinds,
+        };
+
+        // Unfiltered: both the call to Бета.ШагБ and the query_ref to Номенклатура.
+        let all = gdb.neighbors(&mk(Vec::new())).unwrap().unwrap();
+        let all_kinds: Vec<&str> = all.edges.iter().map(|e| e.kind).collect();
+        assert!(all_kinds.contains(&"call"), "kinds: {all_kinds:?}");
+        assert!(all_kinds.contains(&"query_ref"), "kinds: {all_kinds:?}");
+
+        // edge_kinds=["query_ref"] keeps only the query_ref edge.
+        let qr = gdb.neighbors(&mk(vec!["query_ref".to_owned()])).unwrap().unwrap();
+        assert!(!qr.edges.is_empty(), "query_ref edge present");
+        assert!(qr.edges.iter().all(|e| e.kind == "query_ref"), "edges: {:?}", qr.edges);
     }
 
     /// A common module with no module-level edge has no stored `module` row, yet
@@ -1350,6 +1412,7 @@ mod tests {
             max_nodes: 50,
             detail: ide::GraphDetail::Signatures,
             provenance_filter: Vec::new(),
+            edge_kind_filter: Vec::new(),
         };
         let mem_nb = serde_json::to_value(
             analysis.graph_neighbors(GRAPH_SOURCE_ROOT, Some(root), &params).unwrap(),
@@ -1519,6 +1582,7 @@ mod tests {
             max_nodes: 50,
             detail: ide::GraphDetail::Names,
             provenance_filter: Vec::new(),
+            edge_kind_filter: Vec::new(),
         };
         let mem_nb = serde_json::to_value(
             analysis.graph_neighbors(GRAPH_SOURCE_ROOT, Some(root), &params).unwrap(),
@@ -1574,6 +1638,7 @@ mod tests {
             max_nodes: 1,
             detail: ide::GraphDetail::Names,
             provenance_filter: Vec::new(),
+            edge_kind_filter: Vec::new(),
         };
         let mem = analysis.graph_neighbors(GRAPH_SOURCE_ROOT, Some(root), &params).unwrap();
         let sql = gdb.neighbors(&params).unwrap().unwrap();
@@ -2278,6 +2343,7 @@ mod tests {
                 max_nodes: 50,
                 detail: ide::GraphDetail::Names,
                 provenance_filter: Vec::new(),
+                edge_kind_filter: Vec::new(),
             })
             .unwrap()
             .expect("form node resolves");
@@ -2611,6 +2677,7 @@ mod tests {
                 max_nodes: 50,
                 detail: ide::GraphDetail::Names,
                 provenance_filter: Vec::new(),
+                edge_kind_filter: Vec::new(),
             })
             .unwrap()
             .expect("attribute node resolves");

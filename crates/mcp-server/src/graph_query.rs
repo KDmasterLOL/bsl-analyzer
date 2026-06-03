@@ -520,14 +520,15 @@ impl GraphDb {
         &self,
         node_id: &str,
         dir: Direction,
-        filter: &[String],
+        provenance_filter: &[String],
+        kind_filter: &[String],
     ) -> anyhow::Result<Vec<StoredEdge>> {
         let mut edges = Vec::new();
         if matches!(dir, Direction::Out | Direction::Both) {
-            self.collect_edges("from_id", node_id, filter, &mut edges)?;
+            self.collect_edges("from_id", node_id, provenance_filter, kind_filter, &mut edges)?;
         }
         if matches!(dir, Direction::In | Direction::Both) {
-            self.collect_edges("to_id", node_id, filter, &mut edges)?;
+            self.collect_edges("to_id", node_id, provenance_filter, kind_filter, &mut edges)?;
         }
         Ok(edges)
     }
@@ -536,7 +537,8 @@ impl GraphDb {
         &self,
         column: &str,
         node_id: &str,
-        filter: &[String],
+        provenance_filter: &[String],
+        kind_filter: &[String],
         out: &mut Vec<StoredEdge>,
     ) -> anyhow::Result<()> {
         let mut stmt = self.conn.prepare(&format!(
@@ -553,7 +555,11 @@ impl GraphDb {
         })?;
         for row in rows {
             let edge = row?;
-            if filter.is_empty() || filter.iter().any(|p| *p == provenance(&edge.provenance)) {
+            let prov_ok = provenance_filter.is_empty()
+                || provenance_filter.iter().any(|p| *p == provenance(&edge.provenance));
+            let kind_ok =
+                kind_filter.is_empty() || kind_filter.iter().any(|k| *k == edge_kind(&edge.kind));
+            if prov_ok && kind_ok {
                 out.push(edge);
             }
         }
@@ -581,7 +587,12 @@ impl GraphDb {
         for _ in 0..depth {
             let mut next = Vec::new();
             for node_id in &frontier {
-                for edge in self.directed_edges(node_id, params.dir, &params.provenance_filter)? {
+                for edge in self.directed_edges(
+                    node_id,
+                    params.dir,
+                    &params.provenance_filter,
+                    &params.edge_kind_filter,
+                )? {
                     let other =
                         if &edge.from == node_id { edge.to.clone() } else { edge.from.clone() };
                     out_edges.push(edge);
@@ -673,7 +684,7 @@ impl GraphDb {
             |kind: &str| matches!(kind, "manager_creates" | "manager_access" | "query_ref");
         let mut calls = Vec::new();
         let mut reads = Vec::new();
-        for edge in self.directed_edges(id, Direction::Out, &[])? {
+        for edge in self.directed_edges(id, Direction::Out, &[], &[])? {
             match classify_graph_id(&edge.to) {
                 Ok(GraphIdKind::Method { name, .. }) | Ok(GraphIdKind::MethodFile { name, .. })
                     if edge.kind == "call" =>
