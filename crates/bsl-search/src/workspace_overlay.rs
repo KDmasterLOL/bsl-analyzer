@@ -3,9 +3,11 @@ use crate::domain::{BaselineRef, CorpusId, DocumentPath, IndexedDocument, Search
 use crate::embedder::Embedder;
 use crate::error::SearchError;
 use crate::lexical::lexical_hits_for_documents;
+use crate::ports::GraphContextProvider;
 use crate::store::Store;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,7 +48,7 @@ pub struct WorkspaceOverlayStats {
     pub pending_dirty_paths: usize,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct WorkspaceOverlayCache {
     entries: HashMap<String, OverlayFileEntry>,
     hidden_paths: HashSet<String>,
@@ -54,6 +56,24 @@ pub struct WorkspaceOverlayCache {
     dirty_paths: HashSet<String>,
     watcher_mode: bool,
     initialized: bool,
+    /// Optional graph-context provider (dependency-inverted). When set, overlay
+    /// (uncommitted-edit) chunks are enriched with their call-graph context before
+    /// embedding, matching the local index.
+    graph_context_provider: Option<Arc<dyn GraphContextProvider>>,
+}
+
+impl std::fmt::Debug for WorkspaceOverlayCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkspaceOverlayCache")
+            .field("entries", &self.entries)
+            .field("hidden_paths", &self.hidden_paths)
+            .field("embedding_cache_len", &self.embedding_cache.len())
+            .field("dirty_paths", &self.dirty_paths)
+            .field("watcher_mode", &self.watcher_mode)
+            .field("initialized", &self.initialized)
+            .field("graph_context", &self.graph_context_provider.is_some())
+            .finish()
+    }
 }
 
 impl WorkspaceOverlayCache {
@@ -61,6 +81,15 @@ impl WorkspaceOverlayCache {
         self.entries.clear();
         self.hidden_paths.clear();
         self.dirty_paths.clear();
+        self.initialized = false;
+    }
+
+    /// Inject the graph-context provider so overlay chunks are enriched like the
+    /// local index. Clears cached entries so they rebuild with context.
+    pub fn set_graph_context_provider(&mut self, provider: Arc<dyn GraphContextProvider>) {
+        self.graph_context_provider = Some(provider);
+        self.entries.clear();
+        self.embedding_cache.clear();
         self.initialized = false;
     }
 
@@ -180,6 +209,7 @@ impl WorkspaceOverlayCache {
                 continue;
             }
 
+            let provider = self.graph_context_provider.clone();
             let entry = build_overlay_entry(
                 &file.rel_path,
                 &content,
@@ -188,6 +218,7 @@ impl WorkspaceOverlayCache {
                 embedder,
                 batch_size,
                 &mut self.embedding_cache,
+                provider.as_deref(),
             )?;
             if baseline_hash.is_some() {
                 hidden_paths.insert(file.rel_path.clone());
@@ -277,6 +308,7 @@ impl WorkspaceOverlayCache {
                 continue;
             }
 
+            let provider = self.graph_context_provider.clone();
             let entry = build_overlay_entry(
                 &rel_path,
                 &content,
@@ -285,6 +317,7 @@ impl WorkspaceOverlayCache {
                 embedder,
                 batch_size,
                 &mut self.embedding_cache,
+                provider.as_deref(),
             )?;
 
             if baseline_hash.is_some() {
@@ -415,6 +448,7 @@ impl WorkspaceOverlayCache {
                 continue;
             }
 
+            let provider = self.graph_context_provider.clone();
             let entry = build_overlay_entry(
                 &file.rel_path,
                 &content,
@@ -423,6 +457,7 @@ impl WorkspaceOverlayCache {
                 embedder,
                 batch_size,
                 &mut self.embedding_cache,
+                provider.as_deref(),
             )?;
             if baseline_fingerprint.is_some() {
                 hidden_paths.insert(file.rel_path.clone());
@@ -535,6 +570,7 @@ impl WorkspaceOverlayCache {
                 continue;
             }
 
+            let provider = self.graph_context_provider.clone();
             let entry = build_overlay_entry(
                 &rel_path,
                 &content,
@@ -543,6 +579,7 @@ impl WorkspaceOverlayCache {
                 embedder,
                 batch_size,
                 &mut self.embedding_cache,
+                provider.as_deref(),
             )?;
 
             if baseline_fingerprint.is_some() {
@@ -675,6 +712,7 @@ fn scan_workspace_files(workspace_root: &Path) -> Vec<WorkspaceFileState> {
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_overlay_entry(
     rel_path: &str,
     content: &str,
@@ -683,8 +721,10 @@ fn build_overlay_entry(
     embedder: Option<&Embedder>,
     batch_size: usize,
     embedding_cache: &mut HashMap<String, Vec<f32>>,
+    graph_context: Option<&dyn GraphContextProvider>,
 ) -> Result<OverlayFileEntry, SearchError> {
-    let (lexical_documents, embedding_inputs) = build_overlay_documents(rel_path, content);
+    let (lexical_documents, embedding_inputs) =
+        build_overlay_documents(rel_path, content, graph_context);
     let vector_documents = if let Some(embedder) = embedder {
         build_overlay_vectors(
             embedder,
@@ -805,16 +845,17 @@ pub(crate) fn fingerprint_overlay_documents(
     hasher.finalize().to_hex().to_string()
 }
 
-fn build_overlay_documents(rel_path: &str, content: &str) -> (Vec<IndexedDocument>, Vec<String>) {
+fn build_overlay_documents(
+    rel_path: &str,
+    content: &str,
+    graph_context: Option<&dyn GraphContextProvider>,
+) -> (Vec<IndexedDocument>, Vec<String>) {
     let chunks = Chunker::chunk(content);
     let mut lexical_documents = Vec::with_capacity(chunks.len());
     let mut embedding_inputs = Vec::with_capacity(chunks.len());
 
-    // Graph enrichment for the overlay (uncommitted-edit) path is wired in a later
-    // step; pass `None` so overlay documents share the same construction + embed-text
-    // builder as the local index, just without graph context for now.
     for chunk in &chunks {
-        let document = crate::document::indexed_document_for_chunk(rel_path, chunk, None);
+        let document = crate::document::indexed_document_for_chunk(rel_path, chunk, graph_context);
         embedding_inputs.push(crate::document::semantic_text_for_indexed_document(&document));
         lexical_documents.push(document);
     }

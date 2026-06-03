@@ -243,6 +243,9 @@ impl SearchEngine {
         &mut self,
         provider: Arc<dyn crate::ports::GraphContextProvider>,
     ) {
+        if let Ok(mut cache) = self.workspace_overlay_cache.lock() {
+            cache.set_graph_context_provider(provider.clone());
+        }
         self.graph_context_provider = Some(provider);
     }
 
@@ -294,16 +297,23 @@ impl SearchEngine {
             }
 
             let provider = self.graph_context_provider.as_deref();
-            let texts: Vec<String> = chunks
+            let docs: Vec<crate::IndexedDocument> = chunks
                 .iter()
-                .map(|c| {
-                    let doc = crate::document::indexed_document_for_chunk(&rel_path, c, provider);
-                    crate::document::semantic_text_for_indexed_document(&doc)
-                })
+                .map(|c| crate::document::indexed_document_for_chunk(&rel_path, c, provider))
                 .collect();
+            let texts: Vec<String> =
+                docs.iter().map(crate::document::semantic_text_for_indexed_document).collect();
+            let graph_contexts: Vec<Option<String>> =
+                docs.iter().map(|d| d.graph_context.clone()).collect();
 
             total_chunks += chunks.len();
-            tasks.push(FileTask { rel_path, hash: hash.as_bytes().to_vec(), chunks, texts });
+            tasks.push(FileTask {
+                rel_path,
+                hash: hash.as_bytes().to_vec(),
+                chunks,
+                texts,
+                graph_contexts,
+            });
         }
 
         if tasks.is_empty() {
@@ -369,6 +379,7 @@ impl SearchEngine {
                             rel_path: task.rel_path,
                             hash: task.hash,
                             chunks: task.chunks,
+                            graph_contexts: task.graph_contexts,
                             embeddings: match error {
                                 None => Ok(embeddings),
                                 Some(e) => Err(e),
@@ -395,11 +406,12 @@ impl SearchEngine {
         while let Ok(result) = result_rx.recv() {
             match result.embeddings {
                 Ok(embeddings) => {
-                    self.store.reindex_file(
+                    self.store.reindex_file_with_context(
                         &result.rel_path,
                         &result.hash,
                         &result.chunks,
                         Some(&embeddings),
+                        Some(&result.graph_contexts),
                     )?;
                     indexed += 1;
                     debug!(file = %result.rel_path, chunks = result.chunks.len(), "file indexed");
@@ -1140,12 +1152,16 @@ struct FileTask {
     hash: Vec<u8>,
     chunks: Vec<crate::chunker::Chunk>,
     texts: Vec<String>,
+    /// Per-chunk graph context (parallel to `chunks`), persisted so a later
+    /// reconstruction-from-storage re-embeds with the same enriched text.
+    graph_contexts: Vec<Option<String>>,
 }
 
 struct FileResult {
     rel_path: String,
     hash: Vec<u8>,
     chunks: Vec<crate::chunker::Chunk>,
+    graph_contexts: Vec<Option<String>>,
     embeddings: Result<Vec<Vec<f32>>, SearchError>,
 }
 

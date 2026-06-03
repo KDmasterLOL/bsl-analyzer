@@ -78,7 +78,8 @@ impl Store {
                 line_start  INTEGER NOT NULL,
                 line_end    INTEGER NOT NULL,
                 text        TEXT    NOT NULL,
-                embedding   BLOB
+                embedding   BLOB,
+                graph_context TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_chunks_file
@@ -95,6 +96,9 @@ impl Store {
         let _ = self
             .conn
             .execute("ALTER TABLE files ADD COLUMN collection TEXT NOT NULL DEFAULT 'code'", []);
+        // Idempotent column add for databases created before graph-enriched embeddings;
+        // the error when it already exists is intentionally ignored.
+        let _ = self.conn.execute("ALTER TABLE chunks ADD COLUMN graph_context TEXT", []);
 
         self.conn.execute_batch(
             "
@@ -275,7 +279,20 @@ impl Store {
         chunks: &[Chunk],
         embeddings: Option<&[Vec<f32>]>,
     ) -> Result<i64, SearchError> {
-        self.reindex_file_in_collection(path, hash, "code", chunks, embeddings)
+        self.reindex_file_in_collection(path, hash, "code", chunks, embeddings, None)
+    }
+
+    /// As [`Self::reindex_file`], but persists each chunk's graph context (parallel to
+    /// `chunks`) so a later reconstruction re-embeds with the same enriched text.
+    pub fn reindex_file_with_context(
+        &mut self,
+        path: &str,
+        hash: &[u8],
+        chunks: &[Chunk],
+        embeddings: Option<&[Vec<f32>]>,
+        graph_contexts: Option<&[Option<String>]>,
+    ) -> Result<i64, SearchError> {
+        self.reindex_file_in_collection(path, hash, "code", chunks, embeddings, graph_contexts)
     }
 
     pub fn reindex_file_in_collection(
@@ -285,6 +302,7 @@ impl Store {
         collection: &str,
         chunks: &[Chunk],
         embeddings: Option<&[Vec<f32>]>,
+        graph_contexts: Option<&[Option<String>]>,
     ) -> Result<i64, SearchError> {
         let tx = self.conn.transaction()?;
 
@@ -312,8 +330,8 @@ impl Store {
         {
             let mut stmt = tx.prepare(
                 "INSERT INTO chunks (file_id, kind, symbol_name, is_export, annotations,
-                                     line_start, line_end, text, embedding)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                                     line_start, line_end, text, embedding, graph_context)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             )?;
             let mut fts_stmt =
                 tx.prepare("INSERT INTO chunks_fts(rowid, symbol_name, text) VALUES (?1, ?2, ?3)")?;
@@ -332,6 +350,8 @@ impl Store {
                 let embedding_blob: Option<Vec<u8>> = embeddings
                     .and_then(|embs| embs.get(i))
                     .map(|e| e.iter().flat_map(|f| f.to_le_bytes()).collect());
+                let graph_context: Option<&str> =
+                    graph_contexts.and_then(|gc| gc.get(i)).and_then(|g| g.as_deref());
 
                 stmt.execute(params![
                     file_id,
@@ -343,6 +363,7 @@ impl Store {
                     chunk.line_end,
                     chunk.text,
                     embedding_blob,
+                    graph_context,
                 ])?;
 
                 let chunk_id = tx.last_insert_rowid();
@@ -578,13 +599,15 @@ impl Store {
         collection: Option<&str>,
     ) -> Result<Vec<crate::IndexedDocument>, SearchError> {
         let query = if collection.is_some() {
-            "SELECT f.collection, f.path, c.symbol_name, c.kind, c.line_start, c.line_end, c.text
+            "SELECT f.collection, f.path, c.symbol_name, c.kind, c.line_start, c.line_end, c.text,
+                    c.graph_context
              FROM chunks c
              JOIN files f ON f.id = c.file_id
              WHERE f.collection = ?1
              ORDER BY f.collection, f.path, c.line_start, c.line_end, c.symbol_name"
         } else {
-            "SELECT f.collection, f.path, c.symbol_name, c.kind, c.line_start, c.line_end, c.text
+            "SELECT f.collection, f.path, c.symbol_name, c.kind, c.line_start, c.line_end, c.text,
+                    c.graph_context
              FROM chunks c
              JOIN files f ON f.id = c.file_id
              ORDER BY f.collection, f.path, c.line_start, c.line_end, c.symbol_name"
@@ -603,7 +626,7 @@ impl Store {
                     line_end: row.get::<_, i64>(5)? as u32,
                     content_hash: blake3::hash(text.as_bytes()).to_hex().to_string(),
                     text,
-                    graph_context: None,
+                    graph_context: row.get(7)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?
@@ -619,7 +642,7 @@ impl Store {
                     line_end: row.get::<_, i64>(5)? as u32,
                     content_hash: blake3::hash(text.as_bytes()).to_hex().to_string(),
                     text,
-                    graph_context: None,
+                    graph_context: row.get(7)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?
@@ -1619,6 +1642,36 @@ mod tests {
         let loaded = store.load_overlay_embeddings(4).unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].1, embedding);
+    }
+
+    #[test]
+    fn reindex_persists_and_loads_graph_context() {
+        let mut store = Store::in_memory().unwrap();
+        store
+            .reindex_file_with_context(
+                "A.bsl",
+                b"h",
+                &[sample_chunk("Делать")],
+                None,
+                Some(&[Some("Dispatch: server | сервер\nCalls: Иная\n".to_owned())]),
+            )
+            .unwrap();
+        let docs = store.load_indexed_documents(Some("code")).unwrap();
+        assert_eq!(docs.len(), 1);
+        assert_eq!(
+            docs[0].graph_context.as_deref(),
+            Some("Dispatch: server | сервер\nCalls: Иная\n")
+        );
+
+        // A chunk indexed without context round-trips as `None`.
+        store.reindex_file("B.bsl", b"h2", &[sample_chunk("Плейн")], None).unwrap();
+        let b = store
+            .load_indexed_documents(Some("code"))
+            .unwrap()
+            .into_iter()
+            .find(|d| d.path == "B.bsl")
+            .unwrap();
+        assert_eq!(b.graph_context, None);
     }
 
     #[test]
