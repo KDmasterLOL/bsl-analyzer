@@ -290,11 +290,19 @@ impl PostgresBaselineAdapter {
                     line_start INTEGER NOT NULL,
                     line_end INTEGER NOT NULL,
                     content_hash TEXT NOT NULL REFERENCES {}(content_hash) ON DELETE RESTRICT,
+                    graph_context TEXT,
                     PRIMARY KEY (file_object_id, ordinal)
                 )",
                 self.table("file_object_items"),
                 self.table("file_objects"),
                 self.table("content_objects")
+            ),
+            // Idempotent column add for central databases created before
+            // graph-enriched embeddings; pre-existing rows keep NULL (no context,
+            // matching their pre-enrichment embeddings).
+            format!(
+                "ALTER TABLE {} ADD COLUMN IF NOT EXISTS graph_context TEXT",
+                self.table("file_object_items")
             ),
             format!(
                 "CREATE TABLE IF NOT EXISTS {} (
@@ -1202,7 +1210,8 @@ impl SnapshotContentStore for PostgresBaselineAdapter {
                     foi.line_start,
                     foi.line_end,
                     co.text,
-                    foi.content_hash
+                    foi.content_hash,
+                    foi.graph_context
              FROM {} foi
              JOIN {} co ON co.content_hash = foi.content_hash
              WHERE foi.file_object_id = ANY($1)
@@ -1220,6 +1229,7 @@ impl SnapshotContentStore for PostgresBaselineAdapter {
                 line_end: row.get::<_, i32>("line_end") as u32,
                 text: row.get("text"),
                 content_hash: row.get("content_hash"),
+                graph_context: row.get("graph_context"),
             });
         }
 
@@ -1236,7 +1246,7 @@ impl SnapshotContentStore for PostgresBaselineAdapter {
                         line_end: item.line_end,
                         text: item.text.clone(),
                         content_hash: item.content_hash.clone(),
-                        graph_context: None,
+                        graph_context: item.graph_context.clone(),
                     });
                 }
             }
@@ -1709,6 +1719,7 @@ struct FileObjectItem {
     line_end: u32,
     text: String,
     content_hash: String,
+    graph_context: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1726,6 +1737,7 @@ struct FileObjectItemRow {
     line_start: i32,
     line_end: i32,
     content_hash: String,
+    graph_context: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -2306,6 +2318,7 @@ fn try_insert_file_object(
             line_start: document.line_start as i32,
             line_end: document.line_end as i32,
             content_hash: document.content_hash.clone(),
+            graph_context: document.graph_context.clone(),
         });
     }
 
@@ -2380,18 +2393,19 @@ fn insert_file_object_items(
     for batch in rows.chunks(FILE_OBJECT_ITEM_BATCH_SIZE) {
         let mut values = Vec::with_capacity(batch.len());
         let mut params: Vec<&(dyn postgres::types::ToSql + Sync)> =
-            Vec::with_capacity(batch.len() * 7);
+            Vec::with_capacity(batch.len() * 8);
         for (index, row) in batch.iter().enumerate() {
-            let base = index * 7;
+            let base = index * 8;
             values.push(format!(
-                "(${}, ${}, ${}, ${}, ${}, ${}, ${})",
+                "(${}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
                 base + 1,
                 base + 2,
                 base + 3,
                 base + 4,
                 base + 5,
                 base + 6,
-                base + 7
+                base + 7,
+                base + 8
             ));
             params.push(&row.file_object_id);
             params.push(&row.ordinal);
@@ -2400,10 +2414,12 @@ fn insert_file_object_items(
             params.push(&row.line_start);
             params.push(&row.line_end);
             params.push(&row.content_hash);
+            params.push(&row.graph_context);
         }
         let query = format!(
             "INSERT INTO {} (
-                file_object_id, ordinal, symbol_name, kind, line_start, line_end, content_hash
+                file_object_id, ordinal, symbol_name, kind, line_start, line_end, content_hash,
+                graph_context
              ) VALUES {}",
             adapter.table("file_object_items"),
             values.join(", ")
