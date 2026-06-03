@@ -1234,6 +1234,42 @@ mod tests {
         assert!(qr.edges.iter().all(|e| e.kind == "query_ref"), "edges: {:?}", qr.edges);
     }
 
+    /// `node(detail=bodies)` caps its source output at `max_output_tokens`: a tiny budget
+    /// truncates the body and flags `budget_exhausted`, a generous budget leaves it whole.
+    #[test]
+    fn node_bodies_respect_output_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let (_db, files) = load_workspace_db(root).expect("workspace loads");
+        let out = graph_db_path(root);
+        fs::create_dir_all(out.parent().unwrap()).unwrap();
+        build_graph_database(
+            root,
+            &out,
+            1,
+            &crate::graph_db::GraphMeta {
+                revision: 1,
+                fingerprint: 0,
+                files,
+                built_at: "t".to_string(),
+            },
+        )
+        .expect("graph database builds");
+        let gdb = GraphDb::open(&out).expect("graph database opens");
+
+        let id = "method/common/Сервер/Считать";
+        // Tiny budget (1 token ≈ 4 chars) truncates the body and flags exhaustion.
+        let tight = crate::tools::graph::node(&gdb, id, ide::GraphDetail::Bodies, 1);
+        assert_eq!(tight["budget_exhausted"], serde_json::json!(true));
+        assert!(tight["node"]["source"].as_str().unwrap().len() <= 4, "{tight:?}");
+        // A generous budget keeps the whole body and sets no exhaustion flag.
+        let loose = crate::tools::graph::node(&gdb, id, ide::GraphDetail::Bodies, 10_000);
+        assert!(loose.get("budget_exhausted").is_none(), "{loose:?}");
+        assert!(loose["node"]["source"].as_str().unwrap().contains("Считать"), "{loose:?}");
+    }
+
     /// A common module with no module-level edge has no stored `module` row, yet
     /// `node(module/common/X)` resolves on demand and lists the module's members; a module
     /// with no methods reports `not_found`.

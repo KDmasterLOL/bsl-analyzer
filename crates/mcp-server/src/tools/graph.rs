@@ -71,25 +71,65 @@ pub fn overview(graph: &GraphDb, top: usize) -> Value {
     }
 }
 
-pub fn node(graph: &GraphDb, id: &str, detail: GraphDetail) -> Value {
+/// Default body-output budget (in tokens, ~4 chars each) for `node`/`neighbors` at
+/// `detail=bodies`, so a `bodies` request can never return an unbounded payload the way an
+/// uncapped manager-method body could. Overridable via `max_output_tokens`.
+pub const DEFAULT_BODY_BUDGET_TOKENS: usize = 6000;
+
+/// Truncate `source` to the `remaining` char budget on a char boundary, decrementing the
+/// budget. Returns `true` if it had to truncate (or drop) the body. `None`/empty sources
+/// (the non-`bodies` details) consume nothing.
+fn clamp_to_budget(source: &mut Option<String>, remaining: &mut usize) -> bool {
+    let Some(text) = source else { return false };
+    if text.len() <= *remaining {
+        *remaining -= text.len();
+        return false;
+    }
+    let mut end = *remaining;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    *remaining = 0;
+    true
+}
+
+pub fn node(graph: &GraphDb, id: &str, detail: GraphDetail, max_output_tokens: usize) -> Value {
     match graph.node(id, detail) {
         Ok(Ok(mut result)) => {
             redact_opt(&mut result.node.source);
-            to_value(&result)
+            let mut remaining = max_output_tokens.saturating_mul(4);
+            let truncated = clamp_to_budget(&mut result.node.source, &mut remaining);
+            let mut value = to_value(&result);
+            if truncated {
+                value["budget_exhausted"] = json!(true);
+            }
+            value
         }
         Ok(Err(err)) => to_value(&err),
         Err(e) => internal(e),
     }
 }
 
-pub fn neighbors(graph: &GraphDb, params: &NeighborsParams<'_>) -> Value {
+pub fn neighbors(graph: &GraphDb, params: &NeighborsParams<'_>, max_output_tokens: usize) -> Value {
     match graph.neighbors(params) {
         Ok(Ok(mut result)) => {
             redact_opt(&mut result.root.source);
             for node in &mut result.nodes {
                 redact_opt(&mut node.source);
             }
-            to_value(&result)
+            // Cumulative body budget across the root then the (centrality-ordered) nodes,
+            // so a `detail=bodies` traversal stays within the output budget.
+            let mut remaining = max_output_tokens.saturating_mul(4);
+            let mut truncated = clamp_to_budget(&mut result.root.source, &mut remaining);
+            for node in &mut result.nodes {
+                truncated |= clamp_to_budget(&mut node.source, &mut remaining);
+            }
+            let mut value = to_value(&result);
+            if truncated {
+                value["budget_exhausted"] = json!(true);
+            }
+            value
         }
         Ok(Err(err)) => to_value(&err),
         Err(e) => internal(e),
@@ -142,7 +182,7 @@ pub fn loading(detail: Option<&str>) -> CallToolResult {
 /// independent of the on-disk SQLite cache layout in [`crate::graph_db`]).
 fn schema_json() -> Value {
     json!({
-        "schema_version": "10",
+        "schema_version": "11",
         "actions": ["overview", "schema", "node", "source", "neighbors", "callers", "callees"],
         "node_kinds": ["method", "module", "mdo", "attribute", "tabular_section", "form", "form_item", "form_attribute"],
         "notes": "since version 7 `node(module/<scope>)` resolves for any code module and returns a `methods` array ({id, name, is_export}) of the module's members; module membership is served on demand and is not a graph edge, so `neighbors(module/…)` stays empty",
@@ -162,6 +202,7 @@ fn schema_json() -> Value {
             "by_provenance": "{ provenance: count } — same distribution by provenance",
             "connectors_dropped": "bool — true when the cap dropped a node that was an edge endpoint, so some edges are omitted (nodes may appear without their connecting edge)"
         },
+        "body_budget": "`node`/`neighbors` at detail=bodies cap cumulative source output at max_output_tokens (~4 chars/token; default 6000); a truncated response carries `budget_exhausted: true`",
         "redaction": "method source/snippets emitted by `node`/`neighbors`/`source` (and search) are secret-redacted: values that look like credentials are replaced with `***`. Structural string literals (field lists, query fragments) may also be masked; treat source as sanitized, not byte-exact.",
         "revision_note": "the graph `revision` is independent of the `diagnostics` tool's `generation` — they are separate subsystems with separate freshness counters and do not correlate.",
         "envelope": {
@@ -241,7 +282,7 @@ mod tests {
         // changes; `total` since this revision, `form`/`form_item` + `contains` since
         // version 3, `form_attribute` since version 4, `tabular_section` since version
         // 5, and the `data_binding` edge since version 6.
-        assert_eq!(schema["schema_version"], "10");
+        assert_eq!(schema["schema_version"], "11");
         assert!(
             schema["neighbors_result"]["total"].is_string(),
             "neighbours result must document the `total` field"
@@ -282,7 +323,7 @@ mod tests {
     #[test]
     fn schema_and_loading_populate_structured_content() {
         assert_structured_mirrors_text(&schema());
-        assert_eq!(schema().structured_content.unwrap()["schema_version"], "10");
+        assert_eq!(schema().structured_content.unwrap()["schema_version"], "11");
 
         assert_structured_mirrors_text(&loading(Some("indexing")));
         let body = loading(Some("indexing")).structured_content.unwrap();

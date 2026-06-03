@@ -83,7 +83,9 @@ struct GraphParams {
     /// Durable node ids (required for `source`).
     #[serde(default)]
     ids: Vec<String>,
-    /// Output budget for `source`, in tokens (~4 chars each; default 4000).
+    /// Output budget in tokens (~4 chars each) for source-bearing actions: `source`
+    /// (default 4000) and `node`/`neighbors` at `detail=bodies` (default 6000). When the
+    /// body output is truncated the response carries `budget_exhausted: true`.
     max_output_tokens: Option<usize>,
     /// names | signatures | bodies (default: signatures).
     detail: Option<String>,
@@ -483,7 +485,9 @@ impl McpServer {
                     let id = require(p.id, "id", "node")?;
                     let detail = tools::graph::detail_from(p.detail.as_deref())
                         .map_err(|e| McpError::invalid_params(e, None))?;
-                    tools::graph::node(gdb, &id, detail)
+                    let budget =
+                        p.max_output_tokens.unwrap_or(tools::graph::DEFAULT_BODY_BUDGET_TOKENS);
+                    tools::graph::node(gdb, &id, detail, budget)
                 }
                 "source" => {
                     if p.ids.is_empty() {
@@ -516,7 +520,9 @@ impl McpServer {
                         provenance_filter: p.provenance.clone(),
                         edge_kind_filter: p.edge_kinds.clone(),
                     };
-                    tools::graph::neighbors(gdb, &neighbors)
+                    let budget =
+                        p.max_output_tokens.unwrap_or(tools::graph::DEFAULT_BODY_BUDGET_TOKENS);
+                    tools::graph::neighbors(gdb, &neighbors, budget)
                 }
                 other => {
                     return Err(McpError::invalid_params(
