@@ -1094,6 +1094,72 @@ pub fn project_workspace_catalog_edges<DB: ConfigsDatabase>(
     edges
 }
 
+/// Project event-subscription handler edges: each `ПодпискаНаСобытие` links its
+/// subscription node (`Mdo{EventSubscription, name}`) to the exported common-module
+/// method named in its handler. Config-level and full-build only, like the catalog
+/// pass — the only edits that can invalidate such an edge (the handler method being
+/// added, removed, renamed, or its `Экспорт` toggled) all change the handler module's
+/// [`GraphIndex::module_sig_hash`], which fails the body-only precondition and forces a
+/// full rebuild rather than a body-only reproject. A handler that does not resolve to an
+/// exported method yields no edge (and hence no subscription node), mirroring every
+/// other unresolved target.
+pub fn project_workspace_subscription_edges<DB: ConfigsDatabase>(
+    db: &DB,
+    representative: FileId,
+    index: &GraphIndex,
+    state: &mut GraphBuildState,
+) -> Vec<WorkspaceCallEdge> {
+    // Resolve the handler's common module by name through the source-root module index,
+    // not the visibility-gated resolver: a subscription's handler is named by
+    // configuration metadata and is referenced regardless of code-visibility scoping,
+    // matching the `MissingEventSubscriptionHandler` diagnostic's "anywhere" lookup.
+    let source_root_id = db.file_source_root_input(representative).source_root_id(db);
+    let module_index = db.module_index(source_root_id);
+
+    // Collect (subscription, handler module, handler method) deterministically so the
+    // shared canonicalization sees a load-order-independent first-seen spelling.
+    let mut subs: Vec<(String, crate::name::Name, crate::name::Name)> = Vec::new();
+    for visible in db.configurations(representative) {
+        for sub in visible.configuration.event_subscriptions() {
+            let Some(handler) = sub.parse_handler() else { continue };
+            if handler.method_name.is_empty() {
+                continue;
+            }
+            subs.push((
+                sub.name().to_string(),
+                crate::name::Name::new(&handler.module_name),
+                crate::name::Name::new(&handler.method_name),
+            ));
+        }
+    }
+    subs.sort();
+    subs.dedup();
+
+    let mut edges = Vec::new();
+    let mut seen: FxHashSet<(GraphNode, GraphNode)> = FxHashSet::default();
+    for (sub_name, module_name, method_name) in &subs {
+        let Some(handler_file) = module_index.resolve_common_module(module_name) else { continue };
+        let module_id = ModuleId::new(handler_file);
+        let Some(m) = index.find_method(module_id, method_name) else { continue };
+        if !m.is_export {
+            continue;
+        }
+        let object_name = state.mdo_canonical.canonical(MdoType::EventSubscription, sub_name);
+        let from = GraphNode::Mdo { mdo_type: MdoType::EventSubscription, object_name };
+        let to = GraphNode::Method(MethodId { module: module_id, local_id: m.local_id });
+        if seen.insert((from.clone(), to.clone())) {
+            edges.push(WorkspaceCallEdge {
+                from,
+                to,
+                kind: EdgeKind::EventSubscriptionRef,
+                provenance: EdgeProvenance::StringResolved,
+                crosses_client_to_server: false,
+            });
+        }
+    }
+    edges
+}
+
 fn contains_edge(from: GraphNode, to: GraphNode) -> WorkspaceCallEdge {
     WorkspaceCallEdge {
         from,

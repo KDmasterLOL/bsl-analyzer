@@ -1456,3 +1456,110 @@ fn project_batch_edges_resolves_across_batches() {
         );
     }
 }
+
+#[test]
+fn event_subscription_links_to_its_exported_handler() {
+    use bsl_metadata::MdoType;
+    use hir::call_graph::{EdgeKind, EdgeProvenance, GraphNode};
+    use hir::graph_index::{project_workspace_subscription_edges, GraphBuildState, GraphIndex};
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("src/cf");
+    std::fs::create_dir_all(root.join("EventSubscriptions")).unwrap();
+    std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+    std::fs::write(
+        root.join("EventSubscriptions/ПриЗаписи.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <EventSubscription uuid="00000000-0000-0000-0000-000000000010">
+        <Properties>
+            <Name>ПриЗаписи</Name>
+            <Source><Type>cfg:CatalogObject.Номенклатура</Type></Source>
+            <Event>OnWrite</Event>
+            <Handler>CommonModule.ОбщийМодуль.Обработчик</Handler>
+        </Properties>
+    </EventSubscription>
+</MetaDataObject>"#,
+    )
+    .unwrap();
+
+    let mut db = RootDatabaseImpl::new();
+    db.set_all_config_paths(vec![(None, root.clone())]);
+
+    let file_id = FileId(0);
+    let file_path = root.join("CommonModules/ОбщийМодуль/Ext/Module.bsl");
+    let mut file_set = FileSet::new();
+    file_set.insert(file_id, VfsPath::new(file_path.to_string_lossy().as_ref()));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(file_id, SourceRootId(0));
+    db.set_file_text(file_id, "Процедура Обработчик(Источник, Отказ) Экспорт\nКонецПроцедуры");
+
+    let modules = [ModuleId::new(file_id)];
+    let pool = rayon::ThreadPoolBuilder::new().build().unwrap();
+    let mut index = GraphIndex::new();
+    index.add_batch(&pool, &db, &modules);
+
+    let mut state = GraphBuildState::new();
+    let edges = project_workspace_subscription_edges(&db, file_id, &index, &mut state);
+
+    let sub = edges
+        .iter()
+        .find(|e| e.kind == EdgeKind::EventSubscriptionRef)
+        .expect("the subscription handler resolves to one event_subscription edge");
+    assert_eq!(sub.provenance, EdgeProvenance::StringResolved);
+    assert!(
+        matches!(&sub.from, GraphNode::Mdo { mdo_type, object_name }
+            if *mdo_type == MdoType::EventSubscription && object_name.as_str() == "ПриЗаписи"),
+        "edge source is the subscription's Mdo node"
+    );
+    assert!(matches!(&sub.to, GraphNode::Method(_)), "edge target is the handler method");
+}
+
+#[test]
+fn event_subscription_with_missing_handler_yields_no_edge() {
+    use hir::call_graph::EdgeKind;
+    use hir::graph_index::{project_workspace_subscription_edges, GraphBuildState, GraphIndex};
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("src/cf");
+    std::fs::create_dir_all(root.join("EventSubscriptions")).unwrap();
+    std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+    std::fs::write(
+        root.join("EventSubscriptions/Сирота.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <EventSubscription uuid="00000000-0000-0000-0000-000000000011">
+        <Properties>
+            <Name>Сирота</Name>
+            <Event>OnWrite</Event>
+            <Handler>CommonModule.ОбщийМодуль.НетТакого</Handler>
+        </Properties>
+    </EventSubscription>
+</MetaDataObject>"#,
+    )
+    .unwrap();
+
+    let mut db = RootDatabaseImpl::new();
+    db.set_all_config_paths(vec![(None, root.clone())]);
+
+    let file_id = FileId(0);
+    let file_path = root.join("CommonModules/ОбщийМодуль/Ext/Module.bsl");
+    let mut file_set = FileSet::new();
+    file_set.insert(file_id, VfsPath::new(file_path.to_string_lossy().as_ref()));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(file_id, SourceRootId(0));
+    // Handler module exists but the named method does not → no edge.
+    db.set_file_text(file_id, "Процедура Другой() Экспорт\nКонецПроцедуры");
+
+    let modules = [ModuleId::new(file_id)];
+    let pool = rayon::ThreadPoolBuilder::new().build().unwrap();
+    let mut index = GraphIndex::new();
+    index.add_batch(&pool, &db, &modules);
+
+    let mut state = GraphBuildState::new();
+    let edges = project_workspace_subscription_edges(&db, file_id, &index, &mut state);
+    assert!(
+        !edges.iter().any(|e| e.kind == EdgeKind::EventSubscriptionRef),
+        "an unresolved handler must not produce an edge"
+    );
+}
