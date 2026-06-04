@@ -110,6 +110,9 @@ fn edge_kind(kind: &str) -> &'static str {
         "query_ref" => "query_ref",
         "contains" => "contains",
         "data_binding" => "data_binding",
+        "notify_ref" => "notify_ref",
+        "idle_handler" => "idle_handler",
+        "event_subscription" => "event_subscription",
         _ => "call",
     }
 }
@@ -119,6 +122,7 @@ fn provenance(p: &str) -> &'static str {
         "inferred" => "inferred",
         "visibility_blocked" => "visibility_blocked",
         "unresolved" => "unresolved",
+        "string_resolved" => "string_resolved",
         _ => "resolved",
     }
 }
@@ -953,8 +957,21 @@ fn clamp_source(src: String, max_chars: usize) -> (String, bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::{method_id_range, GraphDb};
+    use super::{edge_kind, method_id_range, provenance, GraphDb};
     use rusqlite::{params, Connection};
+
+    #[test]
+    fn stored_callback_edge_kinds_round_trip_not_collapsed_to_call() {
+        // Regression: the normalizers fell through to "call"/"resolved" for unknown
+        // stored strings, so persisted callback edges served as plain calls.
+        assert_eq!(edge_kind("notify_ref"), "notify_ref");
+        assert_eq!(edge_kind("idle_handler"), "idle_handler");
+        assert_eq!(edge_kind("event_subscription"), "event_subscription");
+        assert_eq!(provenance("string_resolved"), "string_resolved");
+        // The catch-all still normalizes a genuinely unknown string.
+        assert_eq!(edge_kind("call"), "call");
+        assert_eq!(provenance("resolved"), "resolved");
+    }
 
     /// A minimal in-memory graph holding only the `nodes` columns `resolve` reads.
     fn graph_db_with_nodes(rows: &[(&str, &str)]) -> GraphDb {

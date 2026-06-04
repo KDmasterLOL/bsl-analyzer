@@ -25,9 +25,10 @@ use vfs::FileId;
 
 use crate::graph::{config_metadata_paths, db_for_files, enumerate_bsl_files};
 
-/// Bumped whenever the table layout changes so a stale on-disk cache from an
-/// older binary is rejected (via the `meta` row) and rebuilt.
-pub(crate) const SCHEMA_VERSION: u32 = 4;
+/// Bumped whenever the table layout OR the persisted edge/node content changes so a
+/// stale on-disk cache from an older binary is rejected (via the `meta` row) and
+/// rebuilt. Version 5 adds the `notify_ref`/`idle_handler` callback edges.
+pub(crate) const SCHEMA_VERSION: u32 = 5;
 
 /// One file's persisted identity in the `files` table: its stat-only fingerprint
 /// and (for `.bsl`) its resolution-signature hash. Persisting these per path lets a
