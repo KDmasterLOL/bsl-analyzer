@@ -137,7 +137,8 @@ fn mdo_ref_prefix(mdo: MdoType) -> Option<&'static str> {
         MdoType::ExternalDataSource
         | MdoType::Cube
         | MdoType::DimensionTable
-        | MdoType::CommonModule => None,
+        | MdoType::CommonModule
+        | MdoType::EventSubscription => None,
     }
 }
 

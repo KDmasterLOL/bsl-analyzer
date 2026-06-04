@@ -769,7 +769,10 @@ impl ManagerType {
             MdoType::ExchangePlan => Some(Self::ExchangePlans),
             MdoType::ExternalDataSource => Some(Self::ExternalDataSources),
             MdoType::Constant => Some(Self::Constants),
-            MdoType::Cube | MdoType::DimensionTable | MdoType::CommonModule => None,
+            MdoType::Cube
+            | MdoType::DimensionTable
+            | MdoType::CommonModule
+            | MdoType::EventSubscription => None,
         }
     }
 
