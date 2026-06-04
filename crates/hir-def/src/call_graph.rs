@@ -157,11 +157,27 @@ pub enum CallerId {
     ModuleCode,
 }
 
+/// Where a `Новый ОписаниеОповещения` callback's handler lives, decided purely
+/// syntactically from the second constructor argument. Kept distinct from a bare
+/// `Option` because "no module" and "receiver we can't classify" must not collapse:
+/// the graph resolves `ThisObject` to a current-module method but must NOT invent an
+/// edge for an `Unsupported` receiver.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotifyTarget {
+    /// `ЭтотОбъект` / `ЭтаФорма` (or English forms) — handler is in the current module.
+    ThisObject,
+    /// A bare identifier receiver — treated as a (common) module name to resolve.
+    Module(Name),
+    /// Receiver is not a plain identifier (a call, index, `Неопределено`, …) or is
+    /// absent: the handler module cannot be decided syntactically.
+    Unsupported,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotifyReg {
     pub caller: CallerId,
     pub callback_name: Name,
-    pub target_module: Option<Name>,
+    pub target: NotifyTarget,
     pub range: TextRange,
 }
 
@@ -582,6 +598,14 @@ fn is_this_object(name_lower: &str) -> bool {
     name_lower == "этотобъект" || name_lower == "thisobject"
 }
 
+/// A self-receiver for a callback registration: the object form (`ЭтотОбъект`) or the
+/// managed-form form (`ЭтаФорма`). Both mean "the handler lives in the current module".
+/// Wider than [`is_this_object`] because `ОписаниеОповещения` is most common in form
+/// modules, where `ЭтаФорма` is the idiomatic receiver.
+fn is_this_receiver(name_lower: &str) -> bool {
+    is_this_object(name_lower) || name_lower == "этаформа" || name_lower == "thisform"
+}
+
 fn extract_idle_reg(
     body: &Body,
     caller: CallerId,
@@ -611,12 +635,14 @@ fn extract_notify_reg_at(
     range: TextRange,
 ) -> Option<NotifyReg> {
     let callback_name = extract_string_literal(body, *args.get(method_idx)?)?;
-    let target_module = args.get(target_idx).and_then(|&idx| match body.expr_idx(idx) {
-        Expr::Path(name) if is_this_object(&name.as_str().to_lowercase()) => None,
-        Expr::Path(name) => Some(name.clone()),
-        _ => None,
-    });
-    Some(NotifyReg { caller, callback_name: Name::new(&callback_name), target_module, range })
+    let target = match args.get(target_idx).map(|&idx| body.expr_idx(idx)) {
+        Some(Expr::Path(name)) if is_this_receiver(&name.as_str().to_lowercase()) => {
+            NotifyTarget::ThisObject
+        }
+        Some(Expr::Path(name)) => NotifyTarget::Module(name.clone()),
+        _ => NotifyTarget::Unsupported,
+    };
+    Some(NotifyReg { caller, callback_name: Name::new(&callback_name), target, range })
 }
 
 fn qualified_path_to_edge(
@@ -1116,7 +1142,11 @@ EndProcedure
         assert_eq!(summary.notify_regs.len(), 1);
         assert_eq!(summary.notify_regs[0].caller, CallerId::ModuleCode);
         assert_eq!(summary.notify_regs[0].callback_name, Name::new("ОбработатьОповещение"));
-        assert!(summary.notify_regs[0].target_module.is_none(), "ЭтотОбъект means current module");
+        assert_eq!(
+            summary.notify_regs[0].target,
+            NotifyTarget::ThisObject,
+            "ЭтотОбъект means current module"
+        );
     }
 
     #[test]
@@ -1134,7 +1164,46 @@ EndProcedure
         assert_eq!(summary.notify_regs.len(), 1);
         assert_eq!(summary.notify_regs[0].caller, CallerId::Method(0));
         assert_eq!(summary.notify_regs[0].callback_name, Name::new("HandleResult"));
-        assert!(summary.notify_regs[0].target_module.is_none());
+        assert_eq!(summary.notify_regs[0].target, NotifyTarget::ThisObject);
+    }
+
+    #[test]
+    fn test_notify_description_this_form_is_this_object() {
+        let code = r#"
+Процедура Тест()
+    Оповещение = Новый ОписаниеОповещения("ПослеЗакрытия", ЭтаФорма, Параметры);
+КонецПроцедуры
+"#;
+        let summary = parse_and_extract(code);
+        assert_eq!(summary.notify_regs.len(), 1);
+        assert_eq!(summary.notify_regs[0].target, NotifyTarget::ThisObject);
+    }
+
+    #[test]
+    fn test_notify_description_common_module_target() {
+        let code = r#"
+Процедура Тест()
+    Оповещение = Новый ОписаниеОповещения("ОбработатьРезультат", МойОбщийМодуль);
+КонецПроцедуры
+"#;
+        let summary = parse_and_extract(code);
+        assert_eq!(summary.notify_regs.len(), 1);
+        assert_eq!(
+            summary.notify_regs[0].target,
+            NotifyTarget::Module(Name::new("МойОбщийМодуль"))
+        );
+    }
+
+    #[test]
+    fn test_notify_description_unsupported_receiver() {
+        let code = r#"
+Процедура Тест()
+    Оповещение = Новый ОписаниеОповещения("ОбработатьРезультат", Объекты[0]);
+КонецПроцедуры
+"#;
+        let summary = parse_and_extract(code);
+        assert_eq!(summary.notify_regs.len(), 1);
+        assert_eq!(summary.notify_regs[0].target, NotifyTarget::Unsupported);
     }
 
     #[test]
