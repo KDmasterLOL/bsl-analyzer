@@ -72,6 +72,17 @@ pub fn with_shared_node_cache<T>(f: impl FnOnce(&mut NodeCache) -> T) -> T {
     SHARED_NODE_CACHE.with_borrow_mut(f)
 }
 
+/// Drop the calling thread's shared green-node cache. The cache holds strong
+/// `GreenNode`/`GreenToken` references for cross-parse subtree deduplication and
+/// never evicts, so on a thread that parses tens of thousands of unrelated files
+/// (a whole-workspace graph build) it grows unbounded and pins every parsed tree's
+/// green storage long after the `Parse` itself is dropped. Resetting it releases
+/// those references; nodes still held by a live `Parse` survive (green storage is
+/// refcounted). Call only between parses, never mid-tree-build.
+pub fn clear_shared_node_cache() {
+    SHARED_NODE_CACHE.with_borrow_mut(|cache| *cache = NodeCache::default());
+}
+
 pub struct SyntaxTreeBuilder<'cache> {
     errors: Vec<SyntaxError>,
     inner: GreenNodeBuilder<'cache>,

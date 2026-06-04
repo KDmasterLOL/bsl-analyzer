@@ -496,12 +496,25 @@ pub fn build_workspace_graph_rows(
     // that parallelises internally (e.g. metadata loading) to this build's threads.
     let pool = rayon::ThreadPoolBuilder::new().build()?;
 
+    // Release the green-node caches accumulated on the driver thread and every pool
+    // worker. The parser dedups subtrees through a thread-local `NodeCache` that holds
+    // strong green-node references and never evicts; across a whole-workspace build
+    // (tens of thousands of unrelated files, re-parsed once per pass) it would otherwise
+    // grow without bound and pin every parsed tree's green storage long after its
+    // `Parse`/Salsa memo and per-batch database are dropped. Clearing it between batches
+    // bounds that residency to a single batch's worth of trees.
+    let clear_node_caches = || {
+        syntax::clear_shared_node_cache();
+        pool.broadcast(|_| syntax::clear_shared_node_cache());
+    };
+
     // Build the index batch-by-batch: it must cover every resolution target, but
     // only one batch's item trees are resident while it is assembled.
     let mut index = GraphIndex::new();
     for batch in modules.chunks(batch_size) {
         let db = open_batch(batch);
         index.add_batch(&pool, &db, batch);
+        clear_node_caches();
     }
 
     // Capture each module's body-free signature hash from the resident index, for
@@ -583,11 +596,13 @@ pub fn build_workspace_graph_rows(
                 unresolved_calls.push((scope, method_lower, file));
             }
         }
+        clear_node_caches();
     }
     for batch in modules.chunks(batch_size) {
         let db = open_batch(batch);
         let edges = project_batch_query_edges(&pool, &db, batch, &mut state);
         emit(&edges, &mut summary, &mut seen_aux, sink)?;
+        clear_node_caches();
     }
     summary.unresolved_calls = unresolved_calls;
 
@@ -603,6 +618,7 @@ pub fn build_workspace_graph_rows(
         let db = open_batch(batch);
         let edges = project_batch_form_edges(&pool, &db, batch, paths, &mut state);
         emit(&edges, &mut summary, &mut seen_aux, sink)?;
+        clear_node_caches();
     }
 
     // Phase D — `contains` edges from the metadata catalog: `mdo → attribute`,
@@ -710,12 +726,21 @@ pub fn reproject_changed_modules(
     let batch_size = batch_size.max(1);
     let pool = rayon::ThreadPoolBuilder::new().build()?;
 
+    // See `build_workspace_graph_rows`: the parser's thread-local green-node cache never
+    // evicts, so without clearing it between batches every parsed tree's green storage
+    // stays pinned for the whole index build.
+    let clear_node_caches = || {
+        syntax::clear_shared_node_cache();
+        pool.broadcast(|_| syntax::clear_shared_node_cache());
+    };
+
     // Full index over every module: a changed module's qualified/manager call into an
     // unchanged module must still resolve, so the index cannot be limited to `changed`.
     let mut index = GraphIndex::new();
     for batch in all_modules.chunks(batch_size) {
         let db = open_batch(batch);
         index.add_batch(&pool, &db, batch);
+        clear_node_caches();
     }
 
     let encoder = GraphRowEncoder::new(&index, paths, workspace_root);
