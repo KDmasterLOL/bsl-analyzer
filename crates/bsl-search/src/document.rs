@@ -1,6 +1,6 @@
-use crate::chunker::{Chunk, ChunkKind};
 use crate::domain::IndexedDocument;
 use crate::ports::GraphContextProvider;
+use code_chunk::{Chunk, ChunkKind};
 
 #[derive(Debug, Clone)]
 pub struct Document {

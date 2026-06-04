@@ -1,4 +1,3 @@
-use crate::chunker::Chunker;
 use crate::document::Document;
 use crate::embedder::{Embedder, EmbedderConfig};
 use crate::error::SearchError;
@@ -16,6 +15,7 @@ use crate::{
     semantic_key_for_indexed_document, semantic_text_for_indexed_document,
     BaselineOverlaySearchService, BaselineRef, CorpusId,
 };
+use code_chunk::Chunker;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -446,6 +446,174 @@ impl SearchEngine {
             info!(indexed, total_vectors = self.index.len(), "indexing complete");
         }
         Ok(indexed)
+    }
+
+    /// Ingest one file's chunks produced by the fused graph pass: writes chunk text,
+    /// FTS rows, and the per-chunk graph context with NO embedding (filled later by
+    /// [`Self::embed_pending_chunks_standalone`]), and records the file hash so an
+    /// unchanged file is skipped next run. Chunks and contexts originate in the graph
+    /// build, so no
+    /// parsing or graph round-trip happens here — this is purely the storage write.
+    pub fn ingest_fused_file(
+        &mut self,
+        rel_path: &str,
+        hash: &[u8],
+        chunks: &[crate::Chunk],
+        graph_contexts: &[Option<String>],
+    ) -> Result<(), SearchError> {
+        self.store.reindex_file_with_context(rel_path, hash, chunks, None, Some(graph_contexts))?;
+        Ok(())
+    }
+
+    /// Run the fused embedding pass against a database without holding a live
+    /// [`SearchEngine`]: opens its own connection (WAL — concurrent readers, single
+    /// writer) so the engine's outer mutex stays free for lexical search during the
+    /// long HTTP-bound embed. Returns the freshly built [`VectorIndex`] for the caller
+    /// to swap into the live engine via [`Self::set_vector_index`].
+    pub fn embed_pending_chunks_standalone(
+        db_path: &Path,
+        config: &SearchConfig,
+        progress: Option<&Arc<IndexProgress>>,
+    ) -> Result<VectorIndex, SearchError> {
+        let store = Store::open(db_path)?;
+        let dim = config.embedder.dim.unwrap_or(1024);
+        let embedder = Embedder::new(config.embedder.clone());
+        Self::run_embedding_pass(
+            &store,
+            &embedder,
+            dim,
+            config.execution.batch_size(),
+            config.execution.concurrency(),
+            progress,
+        )
+    }
+
+    /// Atomically swap the in-memory vector index of a live engine. Brief operation
+    /// held under the engine's outer mutex (the same lock semantic queries take while
+    /// reading `self.index`), so a concurrent reader sees either the old or the new
+    /// index, never a torn one.
+    pub fn set_vector_index(&mut self, index: VectorIndex) {
+        self.index = index;
+    }
+
+    /// Core of the fused embedding phase, free of any borrow on a live engine so it can
+    /// run against either `self.store` or a standalone connection. Reads the `code`
+    /// chunks still missing an embedding, embeds their semantic text concurrently,
+    /// updates each row, then builds and returns the vector index.
+    fn run_embedding_pass(
+        store: &Store,
+        embedder: &Embedder,
+        dim: usize,
+        batch_size: usize,
+        concurrency: usize,
+        progress: Option<&Arc<IndexProgress>>,
+    ) -> Result<VectorIndex, SearchError> {
+        let pending = store.load_pending_embedding_documents("code")?;
+        if pending.is_empty() {
+            let data = store.load_all_embeddings(dim)?;
+            return VectorIndex::build(dim, &data);
+        }
+
+        let items: Vec<(i64, String)> = pending
+            .into_iter()
+            .map(|(id, doc)| (id, crate::document::semantic_text_for_indexed_document(&doc)))
+            .collect();
+        let total = items.len();
+
+        let total_batches = total.div_ceil(batch_size);
+        if let Some(p) = &progress {
+            p.active.store(true, Ordering::Relaxed);
+            p.total_files.store(0, Ordering::Relaxed);
+            p.total_chunks.store(total, Ordering::Relaxed);
+            p.total_batches.store(total_batches, Ordering::Relaxed);
+            p.done_batches.store(0, Ordering::Relaxed);
+            p.done_chunks.store(0, Ordering::Relaxed);
+        }
+
+        let concurrency = concurrency.min(total_batches.max(1));
+        info!(chunks = total, batches = total_batches, concurrency, "embedding fused chunks");
+
+        // Fan batches of (chunk_id, text) out to embedder workers; the main thread
+        // applies each batch's vectors (SQLite is single-writer). Nothing larger than
+        // one batch is held per worker, so peak RAM stays bounded by the batch size.
+        let (task_tx, task_rx) = crossbeam_channel::bounded::<Vec<(i64, String)>>(concurrency * 2);
+        #[allow(clippy::type_complexity)]
+        let (result_tx, result_rx) = crossbeam_channel::bounded::<
+            Result<Vec<(i64, Vec<f32>)>, SearchError>,
+        >(concurrency * 2);
+
+        let workers: Vec<std::thread::JoinHandle<()>> = (0..concurrency)
+            .map(|_| {
+                let rx = task_rx.clone();
+                let tx = result_tx.clone();
+                let emb = embedder.clone();
+                let prog = progress.cloned();
+                std::thread::spawn(move || {
+                    while let Ok(batch) = rx.recv() {
+                        let refs: Vec<&str> = batch.iter().map(|(_, t)| t.as_str()).collect();
+                        let out = match emb.embed_batch(&refs) {
+                            Ok(embs) => {
+                                if let Some(p) = &prog {
+                                    p.done_chunks.fetch_add(batch.len(), Ordering::Relaxed);
+                                    p.done_batches.fetch_add(1, Ordering::Relaxed);
+                                }
+                                Ok(batch.iter().map(|(id, _)| *id).zip(embs).collect())
+                            }
+                            Err(e) => Err(e),
+                        };
+                        if tx.send(out).is_err() {
+                            break;
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        drop(task_rx);
+        drop(result_tx);
+
+        let producer = {
+            let batches: Vec<Vec<(i64, String)>> =
+                items.chunks(batch_size).map(<[(i64, String)]>::to_vec).collect();
+            std::thread::spawn(move || {
+                for batch in batches {
+                    if task_tx.send(batch).is_err() {
+                        break;
+                    }
+                }
+            })
+        };
+
+        let mut embedded = 0usize;
+        let mut errors = 0usize;
+        while let Ok(result) = result_rx.recv() {
+            match result {
+                Ok(pairs) => {
+                    for (id, emb) in pairs {
+                        store.set_chunk_embedding(id, &emb)?;
+                        embedded += 1;
+                    }
+                }
+                Err(e) => {
+                    warn!("embedding batch failed after retries, skipping: {e}");
+                    errors += 1;
+                }
+            }
+        }
+
+        let _ = producer.join();
+        for w in workers {
+            let _ = w.join();
+        }
+        if let Some(p) = &progress {
+            p.active.store(false, Ordering::Relaxed);
+        }
+
+        let data = store.load_all_embeddings(dim)?;
+        let index = VectorIndex::build(dim, &data)?;
+
+        info!(embedded, errors, total_vectors = index.len(), "fused embedding complete");
+        Ok(index)
     }
 
     pub fn index_directory_fts(&mut self, root: &Path) -> Result<usize, SearchError> {
@@ -1154,7 +1322,7 @@ impl SearchEngine {
 struct FileTask {
     rel_path: String,
     hash: Vec<u8>,
-    chunks: Vec<crate::chunker::Chunk>,
+    chunks: Vec<code_chunk::Chunk>,
     texts: Vec<String>,
     /// Per-chunk graph context (parallel to `chunks`), persisted so a later
     /// reconstruction-from-storage re-embeds with the same enriched text.
@@ -1164,7 +1332,7 @@ struct FileTask {
 struct FileResult {
     rel_path: String,
     hash: Vec<u8>,
-    chunks: Vec<crate::chunker::Chunk>,
+    chunks: Vec<code_chunk::Chunk>,
     graph_contexts: Vec<Option<String>>,
     embeddings: Result<Vec<Vec<f32>>, SearchError>,
 }

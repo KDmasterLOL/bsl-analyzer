@@ -17,6 +17,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use bsl_metadata::MdoType;
+use code_chunk::{base_chunk_name, ChunkKind, Chunker};
 use hir::call_graph::{EdgeKind, MethodDispatch};
 use hir::graph_index::{
     display_scope, encode_scope, form_qualified_prefix, form_scope, project_batch_call_edges,
@@ -28,7 +29,7 @@ use hir::{
     module_key_for_path, ConfigsDatabase, DefDatabase, GraphNode, MethodId, ModuleId, ModuleIndex,
     ModuleKey, Semantics, WorkspaceCallEdge, WorkspaceCallGraph,
 };
-use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
+use ide_db::base_db::{RootQueryDb, SourceDatabase, SourceRoot, SourceRootId};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Serialize;
 use vfs::FileId;
@@ -464,6 +465,163 @@ pub type GraphRowSink<'s> =
 /// database needs only its own texts.
 pub type BatchDbOpener<'s> = dyn FnMut(&[ModuleId]) -> RootDatabaseImpl + 's;
 
+/// A code chunk projected as a byproduct of the graph pass, for the fused search
+/// index. Mirrors the rows the standalone indexer derives from
+/// [`code_chunk::Chunker`], plus the outbound graph context attached to method
+/// chunks — rendered from the SAME projected edges the graph persists, so it is
+/// byte-identical to [`Analysis::graph_context_for_method`] /
+/// `GraphDb::graph_context`. `graph_context` is `None` for module-header chunks and
+/// for a method the graph does not resolve.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChunkRow {
+    pub path: String,
+    pub symbol: String,
+    pub kind: ChunkKind,
+    pub is_export: bool,
+    pub annotations: Vec<String>,
+    pub line_start: u32,
+    pub line_end: u32,
+    pub text: String,
+    pub graph_context: Option<String>,
+}
+
+/// Per-batch sink for the fused chunk stream produced alongside the graph rows.
+/// Receives one batch's complete [`ChunkRow`]s (text + already-rendered context) as
+/// each batch's edges are finalised, so the producer never holds more than one
+/// batch's chunk text — the same bounded-RAM property the graph row sink relies on.
+/// The error is boxed so this layer stays agnostic of the storage backend.
+pub trait FusedChunkSink {
+    fn emit_chunks(
+        &mut self,
+        chunks: &[ChunkRow],
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+}
+
+/// Accumulated outbound facts for one source method, gathered from the projected
+/// call/query edges across the build passes, then rendered into a [`GraphContext`].
+#[derive(Default)]
+struct MethodEdgeFacts {
+    calls: Vec<String>,
+    reads: Vec<String>,
+}
+
+/// Fold a batch's projected edges into the per-method context accumulator, mirroring
+/// `GraphDb::graph_context`'s edge-kind filtering exactly: `call` edges contribute
+/// callee names, metadata-touch edges (`manager_*` / `query_ref`) to an `Mdo` or
+/// `Attribute` contribute `Тип.Объект[.Реквизит]` reads. Other edge kinds and
+/// targets are ignored, matching the stored-graph renderer.
+fn accumulate_method_edges(
+    edges: &[WorkspaceCallEdge],
+    acc: &mut FxHashMap<MethodId, MethodEdgeFacts>,
+    index: &GraphIndex,
+) {
+    for edge in edges {
+        let from = match &edge.from {
+            GraphNode::Method(m) => *m,
+            _ => continue,
+        };
+        match edge.kind {
+            EdgeKind::DirectLocal | EdgeKind::DirectQualifiedModule => {
+                if let GraphNode::Method(to) = &edge.to {
+                    if let Some(entry) = index.method_entry(*to) {
+                        acc.entry(from).or_default().calls.push(entry.name.as_str().to_string());
+                    }
+                }
+            }
+            EdgeKind::ManagerCreates | EdgeKind::ManagerAccess | EdgeKind::QueryRef => {
+                let read = match &edge.to {
+                    GraphNode::Mdo { mdo_type, object_name } => {
+                        Some(format!("{}.{}", mdo_type.russian_name(), object_name.as_str()))
+                    }
+                    GraphNode::Attribute { mdo_type, object_name, attr_name } => Some(format!(
+                        "{}.{}.{}",
+                        mdo_type.russian_name(),
+                        object_name.as_str(),
+                        attr_name.as_str()
+                    )),
+                    _ => None,
+                };
+                if let Some(read) = read {
+                    acc.entry(from).or_default().reads.push(read);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Chunk one batch's modules and stream the rows with their graph context attached.
+/// Method chunks get the context rendered from `facts` (the accumulated projected
+/// edges) plus the resident index's effective dispatch and the declaration
+/// signature; module-header chunks carry no context, mirroring the standalone
+/// indexer. Holds only this batch's chunk text, then hands it to `fused`.
+fn emit_fused_chunks(
+    db: &RootDatabaseImpl,
+    batch: &[ModuleId],
+    paths: &FxHashMap<FileId, String>,
+    index: &GraphIndex,
+    facts: &mut FxHashMap<MethodId, MethodEdgeFacts>,
+    fused: &mut dyn FusedChunkSink,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut rows: Vec<ChunkRow> = Vec::new();
+    for &module in batch {
+        let Some(path) = paths.get(&module.file_id) else { continue };
+        let file_id = module.file_id;
+
+        // Render each method's outbound context once, keyed by lowercased name so a
+        // split method's parts (which share a base name) all resolve to it.
+        let mut ctx_by_name: FxHashMap<String, String> = FxHashMap::default();
+        if let Some(entries) = index.module_method_entries(module) {
+            for entry in entries {
+                let mid = MethodId { module, local_id: entry.local_id };
+                let dispatch = index
+                    .dispatch(&GraphNode::Method(mid))
+                    .map(dispatch_labels)
+                    .unwrap_or_default();
+                let signature =
+                    signature_line(db, file_id, entry.name_range.start(), entry.sig_end);
+                // Take (not borrow) the method's facts: each method is rendered exactly
+                // once, in its own batch's query pass, so removing it here bounds the
+                // accumulator to the methods not yet emitted instead of holding every
+                // method's calls/reads for the whole build.
+                let (mut calls, mut reads) = match facts.remove(&mid) {
+                    Some(f) => (f.calls, f.reads),
+                    None => (Vec::new(), Vec::new()),
+                };
+                calls.sort();
+                calls.dedup();
+                reads.sort();
+                reads.dedup();
+                let ctx = GraphContext { dispatch, signature, calls, reads };
+                ctx_by_name.insert(entry.name.as_str().to_lowercase(), ctx.render());
+            }
+        }
+
+        let parse = db.parse(file_id);
+        let source = db.file_text_input(file_id).text(db).clone();
+        for chunk in Chunker::chunk_parsed(&parse.syntax_node(), &source) {
+            let graph_context = match chunk.kind {
+                ChunkKind::Procedure | ChunkKind::Function => {
+                    ctx_by_name.get(&base_chunk_name(&chunk.name).to_lowercase()).cloned()
+                }
+                ChunkKind::ModuleHeader => None,
+            };
+            rows.push(ChunkRow {
+                path: path.clone(),
+                symbol: chunk.name,
+                kind: chunk.kind,
+                is_export: chunk.is_export,
+                annotations: chunk.annotations,
+                line_start: chunk.line_start,
+                line_end: chunk.line_end,
+                text: chunk.text,
+                graph_context,
+            });
+        }
+    }
+    fused.emit_chunks(&rows)
+}
+
 /// Project the whole-workspace call graph into durable node/edge rows in bounded
 /// batches, streaming each batch to `sink` rather than materialising the full
 /// graph in memory. The compact [`GraphIndex`] (a per-module method table) is
@@ -485,6 +643,7 @@ pub fn build_workspace_graph_rows(
     batch_size: usize,
     open_batch: &mut BatchDbOpener<'_>,
     sink: &mut GraphRowSink<'_>,
+    mut fused: Option<&mut dyn FusedChunkSink>,
 ) -> Result<GraphBuildSummary, Box<dyn std::error::Error + Send + Sync>> {
     let batch_size = batch_size.max(1);
 
@@ -586,10 +745,20 @@ pub fn build_workspace_graph_rows(
     };
     let file_of = |m: ModuleId| -> Option<String> { paths.get(&m.file_id).cloned() };
 
+    // Per-method outbound facts for the fused chunk context, accumulated from the
+    // SAME projected edges the graph persists (so the rendered context is byte-
+    // identical to the stored-graph renderer). Lightweight — names and read strings,
+    // never method bodies — so holding it across all batches stays bounded. Only
+    // populated when a fused sink is attached.
+    let mut method_edge_facts: FxHashMap<MethodId, MethodEdgeFacts> = FxHashMap::default();
+
     let mut unresolved_calls: Vec<(String, String, String)> = Vec::new();
     for batch in modules.chunks(batch_size) {
         let db = open_batch(batch);
         let proj = project_batch_call_edges(&pool, &db, batch, &index, &mut state);
+        if fused.is_some() {
+            accumulate_method_edges(&proj.edges, &mut method_edge_facts, &index);
+        }
         emit(&proj.edges, &mut summary, &mut seen_aux, sink)?;
         for (caller, target, method_lower) in proj.unresolved {
             if let (Some(scope), Some(file)) = (scope_of(target), file_of(caller)) {
@@ -601,7 +770,19 @@ pub fn build_workspace_graph_rows(
     for batch in modules.chunks(batch_size) {
         let db = open_batch(batch);
         let edges = project_batch_query_edges(&pool, &db, batch, &mut state);
+        if fused.is_some() {
+            accumulate_method_edges(&edges, &mut method_edge_facts, &index);
+        }
         emit(&edges, &mut summary, &mut seen_aux, sink)?;
+        // Phase 2 of the fused chunk pass: every batch's call/manager edges are now
+        // accumulated and this batch's query reads were just folded in, so each
+        // method in this batch has its complete outbound fact set. Chunk the batch's
+        // modules (one parse, the batch db is still open), attach the rendered
+        // context to method chunks, and stream the rows — holding only this batch's
+        // chunk text.
+        if let Some(fused) = fused.as_deref_mut() {
+            emit_fused_chunks(&db, batch, paths, &index, &mut method_edge_facts, fused)?;
+        }
         clear_node_caches();
     }
     summary.unresolved_calls = unresolved_calls;

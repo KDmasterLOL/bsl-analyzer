@@ -1,6 +1,6 @@
-use crate::chunker::Chunk;
 use crate::document::Document;
 use crate::error::SearchError;
+use code_chunk::Chunk;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -39,10 +39,17 @@ impl Store {
     /// Connection-level pragmas. Set outside any transaction — `journal_mode` is a no-op
     /// inside one — so the WAL mode that makes [`Self::migrate_structural_schema`]
     /// crash-atomic is actually in force before that transaction runs.
+    ///
+    /// `busy_timeout` matters once two connections write the same database: the
+    /// background embedding pass opens its own connection (WAL: many readers, one
+    /// writer) while the overlay watcher keeps writing through the live engine. Without
+    /// a timeout a writer that finds the WAL lock held returns `SQLITE_BUSY`
+    /// immediately; with it SQLite retries internally for the configured window.
     fn apply_pragmas(&self) -> Result<(), SearchError> {
         self.conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
+             PRAGMA busy_timeout = 30000;
              PRAGMA foreign_keys = ON;",
         )?;
         Ok(())
@@ -338,9 +345,9 @@ impl Store {
         embedding: Option<&[f32]>,
     ) -> Result<i64, SearchError> {
         let kind_str = match chunk.kind {
-            crate::chunker::ChunkKind::ModuleHeader => "header",
-            crate::chunker::ChunkKind::Procedure => "procedure",
-            crate::chunker::ChunkKind::Function => "function",
+            code_chunk::ChunkKind::ModuleHeader => "header",
+            code_chunk::ChunkKind::Procedure => "procedure",
+            code_chunk::ChunkKind::Function => "function",
         };
         let annotations =
             if chunk.annotations.is_empty() { None } else { Some(chunk.annotations.join(",")) };
@@ -432,9 +439,9 @@ impl Store {
 
             for (i, chunk) in chunks.iter().enumerate() {
                 let kind_str = match chunk.kind {
-                    crate::chunker::ChunkKind::ModuleHeader => "header",
-                    crate::chunker::ChunkKind::Procedure => "procedure",
-                    crate::chunker::ChunkKind::Function => "function",
+                    code_chunk::ChunkKind::ModuleHeader => "header",
+                    code_chunk::ChunkKind::Procedure => "procedure",
+                    code_chunk::ChunkKind::Function => "function",
                 };
                 let annotations = if chunk.annotations.is_empty() {
                     None
@@ -745,6 +752,55 @@ impl Store {
         Ok(rows)
     }
 
+    /// Chunks in `collection` whose embedding has not been computed yet, each paired
+    /// with its row id. Powers the fused cold-build's separate embedding phase: the
+    /// graph pass writes chunk text + FTS + graph context with a NULL embedding, then
+    /// this lists exactly what still needs a vector — so embedding stays decoupled
+    /// from the graph build's lifecycle.
+    pub fn load_pending_embedding_documents(
+        &self,
+        collection: &str,
+    ) -> Result<Vec<(i64, crate::IndexedDocument)>, SearchError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT c.id, f.collection, f.path, c.symbol_name, c.kind, c.line_start, c.line_end,
+                    c.text, c.graph_context
+             FROM chunks c
+             JOIN files f ON f.id = c.file_id
+             WHERE f.collection = ?1 AND c.embedding IS NULL
+             ORDER BY f.path, c.line_start, c.line_end, c.symbol_name",
+        )?;
+        let rows = stmt
+            .query_map(params![collection], |row| {
+                let id: i64 = row.get(0)?;
+                let text: String = row.get(7)?;
+                Ok((
+                    id,
+                    crate::IndexedDocument {
+                        collection: row.get(1)?,
+                        path: row.get(2)?,
+                        symbol_name: row.get(3)?,
+                        kind: row.get(4)?,
+                        line_start: row.get::<_, i64>(5)? as u32,
+                        line_end: row.get::<_, i64>(6)? as u32,
+                        content_hash: blake3::hash(text.as_bytes()).to_hex().to_string(),
+                        text,
+                        graph_context: row.get(8)?,
+                    },
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Set one chunk's embedding by row id, leaving its text/FTS/context untouched —
+    /// the write half of the fused build's embedding phase.
+    pub fn set_chunk_embedding(&self, chunk_id: i64, embedding: &[f32]) -> Result<(), SearchError> {
+        let blob: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
+        self.conn
+            .execute("UPDATE chunks SET embedding = ?2 WHERE id = ?1", params![chunk_id, blob])?;
+        Ok(())
+    }
+
     pub fn text_search(
         &self,
         query: &str,
@@ -828,11 +884,17 @@ impl Store {
         &self,
         collection: &str,
     ) -> Result<usize, SearchError> {
+        // Clear the skip hash for any file that has even one un-embedded chunk, not
+        // only files with zero embeddings. A partially embedded file (some chunks
+        // vectored, some still NULL — e.g. a build interrupted mid-corpus, or the fused
+        // cold-build's embedding phase failing after the chunks were written) must be
+        // re-indexed in full on the next run; the previous `NOT IN (… IS NOT NULL)`
+        // predicate kept such a file's hash and skipped it forever.
         let count = self.conn.execute(
             "UPDATE files SET hash = zeroblob(0)
              WHERE collection = ?1
-               AND id NOT IN (
-                   SELECT DISTINCT file_id FROM chunks WHERE embedding IS NOT NULL
+               AND id IN (
+                   SELECT DISTINCT file_id FROM chunks WHERE embedding IS NULL
                )",
             params![collection],
         )?;
@@ -1042,9 +1104,9 @@ impl Store {
 
             for (i, chunk) in chunks.iter().enumerate() {
                 let kind_str = match chunk.kind {
-                    crate::chunker::ChunkKind::ModuleHeader => "header",
-                    crate::chunker::ChunkKind::Procedure => "procedure",
-                    crate::chunker::ChunkKind::Function => "function",
+                    code_chunk::ChunkKind::ModuleHeader => "header",
+                    code_chunk::ChunkKind::Procedure => "procedure",
+                    code_chunk::ChunkKind::Function => "function",
                 };
                 let annotations = if chunk.annotations.is_empty() {
                     None
@@ -1392,7 +1454,7 @@ pub struct PersistedFingerprint {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chunker::{Chunk, ChunkKind};
+    use code_chunk::{Chunk, ChunkKind};
 
     fn sample_chunk(name: &str) -> Chunk {
         Chunk {

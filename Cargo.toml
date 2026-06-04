@@ -6,7 +6,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.14"
+version = "0.2.15"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["BSL Analyzer Contributors"]
@@ -26,6 +26,7 @@ bsl-platform = { path = "crates/bsl-platform" }
 bsl-types = { path = "crates/bsl-types" }
 cfg = { path = "crates/cfg" }
 cfg-types = { path = "crates/cfg-types" }
+code-chunk = { path = "crates/code-chunk" }
 dataflow = { path = "crates/dataflow" }
 ide = { path = "crates/ide" }
 ide-db = { path = "crates/ide-db" }

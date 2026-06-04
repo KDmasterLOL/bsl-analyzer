@@ -30,12 +30,30 @@ pub struct Chunk {
 
 const MAX_CHUNK_BYTES: usize = 32 * 1024;
 
+/// Suffix [`split_large_chunk`] appends to each part of an over-large method chunk.
+const PART_SUFFIX: &str = " (часть ";
+
+/// The declaration name a chunk belongs to, undoing the `" (часть N)"` suffix that
+/// [`split_large_chunk`] appends when a method exceeds [`MAX_CHUNK_BYTES`]. For an
+/// unsplit chunk this is the name unchanged; for a split part it is the shared base
+/// name, so a consumer keying per method (e.g. attaching one graph context to every
+/// part) groups the parts correctly.
+pub fn base_chunk_name(name: &str) -> &str {
+    match name.find(PART_SUFFIX) {
+        Some(i) => &name[..i],
+        None => name,
+    }
+}
+
 pub struct Chunker;
 
 impl Chunker {
     pub fn chunk(source: &str) -> Vec<Chunk> {
         let parse = parser::parse(source);
-        let root = parse.syntax_node();
+        Self::chunk_parsed(&parse.syntax_node(), source)
+    }
+
+    pub fn chunk_parsed(root: &syntax::SyntaxNode, source: &str) -> Vec<Chunk> {
         let line_index = LineIndex::new(source);
 
         let mut chunks = Vec::new();
@@ -116,7 +134,7 @@ fn split_large_chunk(chunk: Chunk) -> Vec<Chunk> {
                 name: if chunk.name.is_empty() {
                     String::new()
                 } else {
-                    format!("{} (часть {})", chunk.name, part_num)
+                    format!("{}{}{})", chunk.name, PART_SUFFIX, part_num)
                 },
                 is_export: chunk.is_export,
                 annotations: chunk.annotations.clone(),
@@ -290,5 +308,29 @@ mod tests {
     fn whitespace_only_no_chunks() {
         let chunks = Chunker::chunk("   \n\n  \n");
         assert!(chunks.is_empty());
+    }
+
+    #[test]
+    fn chunk_parsed_matches_chunk() {
+        let source = "\
+Процедура Первая() Экспорт
+КонецПроцедуры
+
+Функция Вторая()
+    Возврат 42;
+КонецФункции";
+        let parse = parser::parse(source);
+        let via_parsed = Chunker::chunk_parsed(&parse.syntax_node(), source);
+        let via_source = Chunker::chunk(source);
+        assert_eq!(via_parsed.len(), via_source.len());
+        for (a, b) in via_parsed.iter().zip(via_source.iter()) {
+            assert_eq!(a.kind, b.kind);
+            assert_eq!(a.name, b.name);
+            assert_eq!(a.is_export, b.is_export);
+            assert_eq!(a.annotations, b.annotations);
+            assert_eq!(a.line_start, b.line_start);
+            assert_eq!(a.line_end, b.line_end);
+            assert_eq!(a.text, b.text);
+        }
     }
 }

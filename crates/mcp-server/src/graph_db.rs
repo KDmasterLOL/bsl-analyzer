@@ -320,6 +320,29 @@ pub fn build_graph_database(
     batch_size: usize,
     meta: &GraphMeta,
 ) -> anyhow::Result<GraphBuildSummary> {
+    build_graph_database_inner(workspace_root, out_path, batch_size, meta, None)
+}
+
+/// As [`build_graph_database`], but also streams the search index's code chunks (with
+/// graph context) from the same parse pass into `chunk_sink` — the compute half of the
+/// graph/search fusion. The graph rows written are byte-identical to the plain build.
+pub fn build_graph_database_fused(
+    workspace_root: &Path,
+    out_path: &Path,
+    batch_size: usize,
+    meta: &GraphMeta,
+    chunk_sink: &mut dyn ide::FusedChunkSink,
+) -> anyhow::Result<GraphBuildSummary> {
+    build_graph_database_inner(workspace_root, out_path, batch_size, meta, Some(chunk_sink))
+}
+
+fn build_graph_database_inner(
+    workspace_root: &Path,
+    out_path: &Path,
+    batch_size: usize,
+    meta: &GraphMeta,
+    chunk_sink: Option<&mut dyn ide::FusedChunkSink>,
+) -> anyhow::Result<GraphBuildSummary> {
     let files = enumerate_bsl_files(workspace_root);
     let config_paths = config_metadata_paths(workspace_root);
     let modules: Vec<ModuleId> = files.iter().map(|(f, _)| ModuleId::new(*f)).collect();
@@ -364,6 +387,7 @@ pub fn build_graph_database(
             batch_size,
             &mut open_batch,
             &mut sink,
+            chunk_sink,
         )
         .map_err(|e| anyhow::anyhow!("{e}"))?
     };

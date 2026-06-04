@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use base_db::{SourceDatabase, SourceRoot, SourceRootId};
+use bsl_search::SearchEngine;
 use ide::RootDatabaseImpl;
 use vfs::{file_set::FileSet, FileId, VfsPath};
 use walkdir::WalkDir;
@@ -239,6 +240,119 @@ impl GraphState {
         }
     }
 
+    /// Claim the initial build for an external builder (the fused cold-build path).
+    /// Transitions `Idle → Loading` like [`Self::ensure_loading`] but spawns no loader
+    /// thread — the caller builds the graph itself and publishes it via
+    /// [`Self::adopt_prebuilt`]. Returns `false` for a disabled graph or one already
+    /// loading/ready/failed, in which case the caller must not build (the normal
+    /// lifecycle owns it).
+    pub(crate) fn try_begin_external_build(&self) -> bool {
+        if self.workspace_root.is_none() {
+            return false;
+        }
+        let mut inner = lock_recover(&self.inner);
+        if inner.status != GraphStatus::Idle {
+            return false;
+        }
+        inner.status = GraphStatus::Loading;
+        true
+    }
+
+    /// Publish a graph database an external builder wrote and atomically renamed into
+    /// [`graph_db_path`]. Mirrors the tail of [`Self::run_load`]: clears the scan
+    /// cache and sets `published` + `Ready`. `force_stale` is already stamped into the
+    /// file's meta (read back by a snapshot's freshness token), so it is not tracked
+    /// here. Call only after a successful [`Self::try_begin_external_build`] + rename.
+    pub(crate) fn adopt_prebuilt(&self, generation: u64, fingerprint: u64, files: usize) {
+        *lock_recover(&self.scan) = None;
+        let mut inner = lock_recover(&self.inner);
+        inner.published = Some(Published { generation, fingerprint, reload: ReloadState::Idle });
+        inner.status = GraphStatus::Ready { files };
+    }
+
+    /// Abandon a claimed external build that did not produce a usable database, so the
+    /// normal lazy/eager path can rebuild. Reverts `Loading → Idle`.
+    pub(crate) fn abort_external_build(&self) {
+        let mut inner = lock_recover(&self.inner);
+        if inner.status == GraphStatus::Loading {
+            inner.status = GraphStatus::Idle;
+        }
+    }
+
+    /// Drive the SqliteLocal startup graph decision in one place: claim the build,
+    /// then either reuse a fresh cached graph, build the graph + search chunks in one
+    /// fused pass (when an embedder is available), or fall back to a normal lazy graph
+    /// build. Returns whether the fused pass already populated the search index, so
+    /// the caller knows whether it still needs the standalone indexer.
+    pub(crate) fn start_workspace_graph(
+        &self,
+        engine: &mut SearchEngine,
+        source_path: &Path,
+    ) -> FusedStartup {
+        let Some(workspace_root) = self.workspace_root.clone() else {
+            return FusedStartup::Standalone;
+        };
+        if !self.try_begin_external_build() {
+            // A concurrent path (e.g. a graph tool call) already owns the build; index
+            // the search engine the normal way against whatever graph it produces.
+            return FusedStartup::Standalone;
+        }
+        if self.try_publish_cached(&workspace_root) {
+            // Warm start: the graph is reused from disk and the persisted search index
+            // is reused by the standalone indexer's hash-skip (a near no-op).
+            return FusedStartup::Standalone;
+        }
+        if !engine.has_semantic() {
+            // No embedder → no fused semantic pass; build the graph normally and let
+            // the caller build the FTS-only index.
+            self.abort_external_build();
+            self.ensure_loading();
+            return FusedStartup::Standalone;
+        }
+        match self.run_fused_cold_build(engine, source_path) {
+            Ok(()) => FusedStartup::Fused,
+            Err(e) => {
+                tracing::warn!("fused cold-build failed; falling back to standalone index: {e}");
+                self.abort_external_build();
+                self.ensure_loading();
+                FusedStartup::Standalone
+            }
+        }
+    }
+
+    /// Build the graph and the search index's chunks (with graph context) in a single
+    /// parse pass, then publish the graph. Embeddings are filled separately by the
+    /// caller ([`SearchEngine::embed_pending_chunks_standalone`]) so HTTP latency never blocks the
+    /// graph lifecycle. Assumes the build was already claimed via
+    /// [`Self::try_begin_external_build`].
+    fn run_fused_cold_build(
+        &self,
+        engine: &mut SearchEngine,
+        source_path: &Path,
+    ) -> anyhow::Result<()> {
+        let Some(workspace_root) = self.workspace_root.clone() else {
+            anyhow::bail!("fused build on a non-workspace graph");
+        };
+        let generation =
+            lock_recover(&self.inner).published.as_ref().map(|p| p.generation).unwrap_or(0) + 1;
+
+        let source_path = source_path.to_path_buf();
+        let mut sink = FusedChunkWriter::new(engine, source_path);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            build_and_publish_graph_file(&workspace_root, generation, Some(&mut sink))
+        }));
+        let (files, fp_pre, force_stale) = match outcome {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => anyhow::bail!("fused graph build panicked"),
+        };
+        if force_stale {
+            tracing::warn!("fused graph build straddled a disk write; snapshot marked stale");
+        }
+        self.adopt_prebuilt(generation, fp_pre, files);
+        Ok(())
+    }
+
     /// Snapshot the graph for a blocking query, if built. The returned
     /// [`GraphSnapshot`] owns a read-only SQLite handle and its freshness token,
     /// and can be moved onto a blocking task without holding the lock during the
@@ -354,52 +468,7 @@ impl GraphState {
 
         tracing::info!(?workspace_root, is_reload, generation, "graph database build started");
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            // Bracket the build with two fingerprint scans. The build reads files
-            // between them, so when `fp_pre == fp_post` the disk did not move and the
-            // graph provably reflects exactly that state — publish it fresh. When they
-            // differ the build straddled a write and is an indeterminate mix; we still
-            // publish it but mark it `force_stale` so freshness reports it stale until
-            // a clean reload replaces it, even under an ABA rollback to `fp_pre`.
-            let fp_pre = workspace_fingerprint(&workspace_root);
-            let out_path = graph_db_path(&workspace_root);
-            // Build into a sibling temp file and rename atomically, so a reader always
-            // sees a complete database — the previous one until the swap, never a
-            // half-written file.
-            let tmp_path = out_path.with_extension("db.building");
-            if let Some(parent) = out_path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            let built_at = chrono::Utc::now().to_rfc3339();
-            let summary = crate::graph_db::build_graph_database(
-                &workspace_root,
-                &tmp_path,
-                GRAPH_BUILD_BATCH,
-                &crate::graph_db::GraphMeta {
-                    revision: generation,
-                    fingerprint: fp_pre,
-                    files: 0,
-                    built_at,
-                },
-            )?;
-            let fp_post = workspace_fingerprint(&workspace_root);
-            let force_stale = fp_pre != fp_post;
-            // Stamp the build-determined freshness into the file's own meta before
-            // it is swapped in, so a served snapshot reads `force_stale` (and the
-            // true file count) from the exact build it serves rather than from a
-            // separately-locked field that a concurrent reload could desync.
-            {
-                let conn = rusqlite::Connection::open(&tmp_path)?;
-                conn.execute(
-                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('force_stale', ?1)",
-                    rusqlite::params![if force_stale { "1" } else { "0" }],
-                )?;
-                conn.execute(
-                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('files', ?1)",
-                    rusqlite::params![summary.modules.to_string()],
-                )?;
-            }
-            std::fs::rename(&tmp_path, &out_path)?;
-            anyhow::Ok((summary.modules, fp_pre, force_stale))
+            build_and_publish_graph_file(&workspace_root, generation, None)
         }));
 
         match outcome {
@@ -787,6 +856,146 @@ pub(crate) fn classify_changes(
     modified.sort();
     removed.sort();
     WorkspaceDiff { added, removed, modified }
+}
+
+/// Whether the SqliteLocal startup graph decision already populated the search index.
+pub(crate) enum FusedStartup {
+    /// Fused cold-build ran: graph + search chunks were written from one parse pass;
+    /// the caller must fill embeddings via [`SearchEngine::embed_pending_chunks_standalone`].
+    Fused,
+    /// Graph served from cache or built the normal lazy way; the caller indexes the
+    /// search engine via the standalone path.
+    Standalone,
+}
+
+/// Build the graph into the canonical path with the full publication bracket:
+/// fingerprint the workspace before and after (so a build that straddled a disk write
+/// is marked `force_stale`), stamp that marker plus the file count into the file's own
+/// meta, then atomically rename the temp file into place — a reader sees the previous
+/// database until the swap, never a half-written one. Shared by the lazy loader
+/// ([`GraphState::run_load`]) and the fused cold build; when `chunk_sink` is present,
+/// the search index's chunks are streamed from the same parse pass. Returns
+/// `(files, fp_pre, force_stale)`.
+fn build_and_publish_graph_file(
+    workspace_root: &Path,
+    generation: u64,
+    chunk_sink: Option<&mut dyn ide::FusedChunkSink>,
+) -> anyhow::Result<(usize, u64, bool)> {
+    let fp_pre = workspace_fingerprint(workspace_root);
+    let out_path = graph_db_path(workspace_root);
+    let tmp_path = out_path.with_extension("db.building");
+    if let Some(parent) = out_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let built_at = chrono::Utc::now().to_rfc3339();
+    let meta = crate::graph_db::GraphMeta {
+        revision: generation,
+        fingerprint: fp_pre,
+        files: 0,
+        built_at,
+    };
+    let summary = match chunk_sink {
+        Some(sink) => crate::graph_db::build_graph_database_fused(
+            workspace_root,
+            &tmp_path,
+            GRAPH_BUILD_BATCH,
+            &meta,
+            sink,
+        )?,
+        None => crate::graph_db::build_graph_database(
+            workspace_root,
+            &tmp_path,
+            GRAPH_BUILD_BATCH,
+            &meta,
+        )?,
+    };
+    let fp_post = workspace_fingerprint(workspace_root);
+    let force_stale = fp_pre != fp_post;
+    {
+        let conn = rusqlite::Connection::open(&tmp_path)?;
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('force_stale', ?1)",
+            rusqlite::params![if force_stale { "1" } else { "0" }],
+        )?;
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('files', ?1)",
+            rusqlite::params![summary.modules.to_string()],
+        )?;
+    }
+    std::fs::rename(&tmp_path, &out_path)?;
+    Ok((summary.modules, fp_pre, force_stale))
+}
+
+/// Translates the graph pass's [`ide::ChunkRow`] stream into the search store for the
+/// fused cold build. Filters to files under the search source root, writes each file's
+/// chunks + FTS + graph context with NO embedding (filled later by
+/// [`SearchEngine::embed_pending_chunks_standalone`]), and records the blake3 of the file's bytes
+/// as the skip hash — matching the standalone indexer so a later run reuses unchanged
+/// files.
+struct FusedChunkWriter<'e> {
+    engine: &'e mut SearchEngine,
+    /// Canonical, `/`-normalised search source root: derives the stored relative path
+    /// and excludes files outside it (e.g. extension modules the local index omits).
+    source_prefix: String,
+}
+
+impl<'e> FusedChunkWriter<'e> {
+    fn new(engine: &'e mut SearchEngine, source_path: PathBuf) -> Self {
+        let source_prefix =
+            source_path.canonicalize().unwrap_or(source_path).to_string_lossy().replace('\\', "/");
+        Self { engine, source_prefix }
+    }
+}
+
+impl ide::FusedChunkSink for FusedChunkWriter<'_> {
+    fn emit_chunks(
+        &mut self,
+        rows: &[ide::ChunkRow],
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // The producer emits a module's chunks consecutively, so group consecutive
+        // same-path rows into one per-file write (each module appears once per batch).
+        let mut groups: Vec<(String, Vec<bsl_search::Chunk>, Vec<Option<String>>)> = Vec::new();
+        for row in rows {
+            if groups.last().map(|(p, _, _)| p.as_str()) != Some(row.path.as_str()) {
+                groups.push((row.path.clone(), Vec::new(), Vec::new()));
+            }
+            let (_, chunks, ctxs) = groups.last_mut().expect("just pushed");
+            chunks.push(bsl_search::Chunk {
+                kind: row.kind,
+                name: row.symbol.clone(),
+                is_export: row.is_export,
+                annotations: row.annotations.clone(),
+                line_start: row.line_start,
+                line_end: row.line_end,
+                text: row.text.clone(),
+            });
+            ctxs.push(row.graph_context.clone());
+        }
+
+        let prefix = self.source_prefix.trim_end_matches('/');
+        for (abs, chunks, ctxs) in &groups {
+            // Require a path-separator boundary after the prefix so a sibling whose name
+            // merely starts with the source dir's string (e.g. `…/cf` vs `…/cf_ext`) is
+            // not mistaken for a file inside the source root.
+            let Some(rel) = abs
+                .strip_prefix(prefix)
+                .filter(|rest| rest.starts_with('/'))
+                .map(|s| s.trim_start_matches('/'))
+            else {
+                continue; // outside the search source root (e.g. an extension module)
+            };
+            if rel.is_empty() {
+                continue;
+            }
+            let bytes = match std::fs::read(abs) {
+                Ok(b) => b,
+                Err(_) => continue, // unreadable now → leave for the standalone indexer
+            };
+            let hash = bsl_search::content_blake3(&bytes);
+            self.engine.ingest_fused_file(rel, &hash, chunks, ctxs)?;
+        }
+        Ok(())
+    }
 }
 
 /// Read the stored per-file fingerprints from a built graph's `files` table. Any
@@ -1622,6 +1831,88 @@ mod tests {
         )
         .expect("provider resolves the method");
         assert!(via_provider.contains("\nCalls: Считать\n"), "{via_provider}");
+    }
+
+    /// The fused build streams the search index's chunks from the same parse pass that
+    /// produces the graph, attaching each method's graph context. That context must be
+    /// byte-identical to `GraphDb::graph_context` for the stored graph (so a chunk
+    /// enriched by the fused path keys the same embedding as the round-trip path), and
+    /// module-header chunks must carry no context.
+    #[test]
+    fn fused_chunks_carry_graph_context_matching_stored_graph() {
+        #[derive(Default)]
+        struct CollectingSink {
+            rows: Vec<ide::ChunkRow>,
+        }
+        impl ide::FusedChunkSink for CollectingSink {
+            fn emit_chunks(
+                &mut self,
+                chunks: &[ide::ChunkRow],
+            ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+                self.rows.extend_from_slice(chunks);
+                Ok(())
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_common_module(
+            root,
+            "Вызыватель",
+            false,
+            "Процедура Делать() Экспорт\n\
+             Сервер.Считать();\n\
+             Справочники.Контрагенты.НайтиПоКоду();\n\
+             КонецПроцедуры",
+        );
+        write_common_module(root, "Сервер", true, "Функция Считать() Экспорт КонецФункции");
+
+        let (_db, files) = load_workspace_db(root).expect("workspace loads");
+        let out = graph_db_path(root);
+        fs::create_dir_all(out.parent().unwrap()).unwrap();
+        let mut sink = CollectingSink::default();
+        crate::graph_db::build_graph_database_fused(
+            root,
+            &out,
+            1,
+            &crate::graph_db::GraphMeta {
+                revision: 1,
+                fingerprint: 0,
+                files,
+                built_at: "t".to_string(),
+            },
+            &mut sink,
+        )
+        .expect("fused graph database builds");
+        let gdb = GraphDb::open(&out).expect("graph database opens");
+
+        let canon_root = root.canonicalize().unwrap().to_string_lossy().replace('\\', "/");
+        let mut methods_checked = 0;
+        for row in &sink.rows {
+            match row.kind {
+                bsl_search::ChunkKind::Procedure | bsl_search::ChunkKind::Function => {
+                    let rel = row.path.strip_prefix(&canon_root).unwrap().trim_start_matches('/');
+                    let id = ide::method_id_for_path(rel, &row.symbol).expect("durable id");
+                    let expected = gdb.graph_context(&id).unwrap();
+                    assert_eq!(
+                        row.graph_context, expected,
+                        "fused context for {} diverges from the stored graph",
+                        row.symbol
+                    );
+                    methods_checked += 1;
+                }
+                bsl_search::ChunkKind::ModuleHeader => {
+                    assert_eq!(row.graph_context, None, "header chunk must have no context");
+                }
+            }
+        }
+        assert_eq!(methods_checked, 2, "both methods should be chunked and checked");
+
+        // The calling method's context carries its call and metadata read.
+        let caller = sink.rows.iter().find(|r| r.symbol == "Делать").unwrap();
+        let ctx = caller.graph_context.as_deref().expect("caller has context");
+        assert!(ctx.contains("\nCalls: Считать\n"), "{ctx}");
+        assert!(ctx.contains("\nReads: Справочник.Контрагенты\n"), "{ctx}");
     }
 
     /// The build parallelises per-module resolution within a batch. A batch holding

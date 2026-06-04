@@ -12,6 +12,7 @@ salsa.workspace = true
 ide-diagnostics.workspace = true
 ide-assists.workspace = true
 hir.workspace = true
+code-chunk.workspace = true
 lexer.workspace = true
 parser.workspace = true
 syntax.workspace = true
