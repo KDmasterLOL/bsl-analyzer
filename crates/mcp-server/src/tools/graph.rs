@@ -183,6 +183,29 @@ pub fn schema() -> CallToolResult {
     structured(schema_json())
 }
 
+/// The `status` action: the graph's lifecycle snapshot (mirrors `diagnostics status`), so an
+/// agent can start the lazy build and poll its progress instead of reading a flat `loading`
+/// envelope from a data action.
+pub fn status(report: &crate::graph::GraphStatusReport) -> CallToolResult {
+    let mut body = json!({ "state": report.state });
+    if let Some(files) = report.files {
+        body["files"] = json!(files);
+    }
+    if let Some(revision) = report.revision {
+        body["revision"] = json!(revision);
+    }
+    if let Some(stale) = report.stale {
+        body["stale"] = json!(stale);
+    }
+    if let Some(reload) = report.reload {
+        body["reload"] = json!(reload);
+    }
+    if let Some(error) = &report.error {
+        body["error"] = json!(error);
+    }
+    structured(body)
+}
+
 /// A transient "still indexing" result, emitted while the background load runs.
 /// Not an error — the agent should retry shortly.
 pub fn loading(detail: Option<&str>) -> CallToolResult {
@@ -199,8 +222,9 @@ pub fn loading(detail: Option<&str>) -> CallToolResult {
 /// independent of the on-disk SQLite cache layout in [`crate::graph_db`]).
 fn schema_json() -> Value {
     json!({
-        "schema_version": "14",
-        "actions": ["overview", "schema", "node", "source", "neighbors", "callers", "callees", "resolve"],
+        "schema_version": "15",
+        "actions": ["overview", "schema", "status", "node", "source", "neighbors", "callers", "callees", "resolve"],
+        "status": "since version 15 `status` returns the graph lifecycle ({state: disabled|loading|ready|failed, and when ready: files, revision, stale, reload}) and kicks the lazy build — poll it instead of reading a flat `loading` envelope from a data action (mirrors `diagnostics status`).",
         "node_kinds": ["method", "module", "mdo", "attribute", "tabular_section", "form", "form_item", "form_attribute"],
         "notes": "since version 7 `node(module/<scope>)` resolves for any code module and returns a `methods` array ({id, name, is_export}) of the module's members; module membership is served on demand and is not a graph edge, so `neighbors(module/…)` stays empty",
         "resolve": "since version 13 `resolve(query)` returns candidate durable ids ({id, kind, match}) for an imprecise query — wrong casing, a bare method/object name, or a partial id — so a `not_found` from `node`/`neighbors` is recoverable without guessing. `match` is exact|case_insensitive|name|substring (strongest first); the list is capped (default 20). It is symbol/id-oriented, NOT a natural-language search: a free-text phrase (e.g. several object/form/method words) returns no candidates — use `search_code` for semantic lookup, then pass the emitted `graph_id` here.",
@@ -296,20 +320,63 @@ mod tests {
     }
 
     #[test]
+    fn status_formats_ready_and_failed_shapes() {
+        use crate::graph::GraphStatusReport;
+        let ready = GraphStatusReport {
+            state: "ready",
+            files: Some(10),
+            revision: Some(3),
+            stale: Some(false),
+            reload: Some("none"),
+            error: None,
+        };
+        let body = status(&ready).structured_content.unwrap();
+        assert_eq!(body["state"], "ready");
+        assert_eq!(body["files"], 10);
+        assert_eq!(body["revision"], 3);
+        assert_eq!(body["reload"], "none");
+        assert!(body.get("error").is_none(), "ready has no error: {body}");
+
+        let failed = GraphStatusReport {
+            state: "failed",
+            files: None,
+            revision: None,
+            stale: None,
+            reload: None,
+            error: Some("boom".to_string()),
+        };
+        let body = status(&failed).structured_content.unwrap();
+        assert_eq!(body["state"], "failed");
+        assert_eq!(body["error"], "boom");
+        // Unset fields are omitted, never null.
+        assert!(body.get("files").is_none() && body.get("revision").is_none(), "{body}");
+    }
+
+    #[test]
+    fn status_reports_disabled_for_non_workspace_graph() {
+        let report = crate::graph::GraphState::disabled().status_report();
+        let body = status(&report).structured_content.unwrap();
+        assert_eq!(body["state"], "disabled");
+        assert!(body.get("files").is_none());
+    }
+
+    #[test]
     fn schema_advertises_the_current_contract_shape() {
         let schema = schema_json();
         // The contract version must be bumped in lockstep with response-shape
         // changes; `total` since this revision, `form`/`form_item` + `contains` since
         // version 3, `form_attribute` since version 4, `tabular_section` since version
-        // 5, the `data_binding` edge since version 6, and the source `skipped_budget_exhausted`
-        // marker + omit-empty body since version 14.
-        assert_eq!(schema["schema_version"], "14");
+        // 5, the `data_binding` edge since version 6, the source `skipped_budget_exhausted`
+        // marker + omit-empty body since version 14, and the `status` action since version 15.
+        assert_eq!(schema["schema_version"], "15");
         assert!(
             schema["neighbors_result"]["total"].is_string(),
             "neighbours result must document the `total` field"
         );
         let actions = schema["actions"].as_array().unwrap();
         assert!(actions.iter().any(|a| a == "resolve"), "resolve action must be advertised");
+        assert!(actions.iter().any(|a| a == "status"), "status action must be advertised");
+        assert!(schema["status"].is_string(), "status must be documented");
         assert!(schema["resolve"].is_string(), "resolve must be documented");
         let node_kinds = schema["node_kinds"].as_array().unwrap();
         assert!(node_kinds.iter().any(|k| k == "form"));
@@ -347,7 +414,7 @@ mod tests {
     #[test]
     fn schema_and_loading_populate_structured_content() {
         assert_structured_mirrors_text(&schema());
-        assert_eq!(schema().structured_content.unwrap()["schema_version"], "14");
+        assert_eq!(schema().structured_content.unwrap()["schema_version"], "15");
 
         assert_structured_mirrors_text(&loading(Some("indexing")));
         let body = loading(Some("indexing")).structured_content.unwrap();

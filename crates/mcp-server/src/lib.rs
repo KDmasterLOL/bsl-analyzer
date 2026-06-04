@@ -459,6 +459,16 @@ impl McpServer {
             return Ok(tools::graph::schema());
         }
 
+        // `status` reports the graph lifecycle (and kicks the lazy build) so an agent can start
+        // it and poll progress instead of reading a flat `loading` envelope from a data action.
+        if p.action == "status" {
+            graph.ensure_loading();
+            let report = tokio::task::spawn_blocking(move || graph.status_report())
+                .await
+                .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?;
+            return Ok(tools::graph::status(&report));
+        }
+
         // Lazily trigger the background load on first use.
         graph.ensure_loading();
 
@@ -539,8 +549,8 @@ impl McpServer {
                 other => {
                     return Err(McpError::invalid_params(
                         format!(
-                            "Unknown action '{other}'. Expected: overview, schema, node, source, \
-                             neighbors, callers, callees, resolve"
+                            "Unknown action '{other}'. Expected: overview, schema, status, node, \
+                             source, neighbors, callers, callees, resolve"
                         ),
                         None,
                     ))
