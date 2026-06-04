@@ -46,7 +46,6 @@ pub(crate) enum WorkspaceSearchMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SemanticRuntimeStatus {
     Disabled,
-    #[allow(dead_code, reason = "status display uses this once overlay sync is implemented")]
     OverlaySyncing,
     Ready,
     Failed(String),

@@ -57,6 +57,33 @@ impl SemanticUnavailable {
     }
 }
 
+/// Acquire the engine guard, briefly retrying on transient contention. A background overlay
+/// sync (and the file watcher's per-change dirty-marking) momentarily holds the engine lock
+/// even after the index is ready, which a single `try_lock` would surface to a concurrent
+/// `search_code` as a misleading "overlay warming up" — the race `search(status)=ready`
+/// contradicts. Returns `None` only if the lock stays contended past the short budget (the
+/// genuine still-building / long-priming case), where the caller's warming fallback is right.
+/// Runs on a `spawn_blocking` thread, so the brief sleeps do not stall the async runtime.
+fn try_acquire_engine(
+    engine: &Arc<Mutex<Option<SearchEngine>>>,
+) -> Option<std::sync::MutexGuard<'_, Option<SearchEngine>>> {
+    const ATTEMPTS: usize = 5;
+    const DELAY: std::time::Duration = std::time::Duration::from_millis(20);
+    for attempt in 0..ATTEMPTS {
+        match engine.try_lock() {
+            Ok(guard) => return Some(guard),
+            // A poisoned lock will not recover by waiting — fall back immediately.
+            Err(std::sync::TryLockError::Poisoned(_)) => return None,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if attempt + 1 < ATTEMPTS {
+                    std::thread::sleep(DELAY);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Produce lexical (FTS5) code hits, separated from presentation. Hard policy/terminal
 /// failures are `Err`; a still-warming index is `Pending`. Lexical search is always available
 /// (it is the baseline), so this never returns `Unavailable`.
@@ -74,9 +101,9 @@ fn lexical_code_hits(
         configured_baseline,
         external_baseline.as_ref(),
     )?;
-    let guard = match engine.try_lock() {
-        Ok(g) => g,
-        Err(_) => {
+    let guard = match try_acquire_engine(engine) {
+        Some(g) => g,
+        None => {
             if let Some(source) = external_baseline {
                 match try_direct_lexical_code_no_overlay(&source, query, limit) {
                     DirectResult::Found(hits) => {
@@ -180,9 +207,9 @@ fn semantic_code_hits(
         .lock()
         .map_err(|e| McpError::internal_error(format!("semantic runtime lock error: {e}"), None))?
         .clone();
-    let guard = match engine.try_lock() {
-        Ok(g) => g,
-        Err(_) => {
+    let guard = match try_acquire_engine(engine) {
+        Some(g) => g,
+        None => {
             return Ok(CodeHits::Pending(
                 "Semantic search overlay is warming up. Lexical search is available while the overlay is prepared."
                     .to_owned(),
@@ -785,6 +812,12 @@ pub fn search_status(
 
         let search_state = match &semantic_runtime {
             SemanticRuntimeStatus::Failed(_) => "ready (semantic runtime failed)",
+            // Honest about the window the watcher/overlay sync briefly holds the engine lock:
+            // a concurrent search_code can transiently return "warming up" even though the
+            // index itself is ready — so the agent knows to simply retry, not that it is broken.
+            SemanticRuntimeStatus::OverlaySyncing => {
+                "ready — overlay syncing (a concurrent search_code may briefly say \"warming up\"; retry shortly)"
+            }
             _ => "ready",
         };
         let _ = writeln!(out, "Search index: {search_state}");
@@ -2105,8 +2138,30 @@ mod tests {
         let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
 
         assert!(text.contains("Search index: ready"));
+        // The top line is honest that a concurrent search_code may transiently warm-up during
+        // the sync, resolving the "status=ready but search says warming" contradiction.
+        assert!(
+            text.contains("overlay syncing") && text.contains("warming up"),
+            "status must flag the transient warming window: {text}",
+        );
         assert!(text.contains("Semantic: syncing local overlay embeddings against remote baseline"));
         assert!(text.contains("Indexing in progress: 25%"));
+    }
+
+    #[test]
+    fn try_acquire_engine_waits_out_transient_contention_then_gives_up() {
+        let engine: Arc<Mutex<Option<SearchEngine>>> = Arc::new(Mutex::new(None));
+        // Uncontended: the guard is acquired immediately.
+        assert!(super::try_acquire_engine(&engine).is_some());
+
+        // Held for the whole call → every retry fails → None (the genuine still-busy case the
+        // caller degrades on). The guard is dropped here, not held across the assert.
+        let held = engine.lock().unwrap();
+        assert!(super::try_acquire_engine(&engine).is_none());
+        drop(held);
+
+        // Released → acquirable again.
+        assert!(super::try_acquire_engine(&engine).is_some());
     }
 
     #[test]
