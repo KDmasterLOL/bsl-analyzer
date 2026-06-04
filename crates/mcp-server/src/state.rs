@@ -122,6 +122,13 @@ impl SharedState {
         }
 
         let graph = GraphState::for_workspace(source_dir.clone());
+        // Build the call graph eagerly for the local workspace so graph-enriched
+        // embeddings and graph tools find a ready database instead of paying the
+        // build on first use. Search does not block on it: the current run indexes
+        // immediately and picks up graph context on a later incremental reindex.
+        if workspace_search_mode == WorkspaceSearchMode::SqliteLocal {
+            graph.ensure_loading();
+        }
         let diagnostics = DiagnosticsState::for_workspace(source_dir.clone());
 
         Self {
