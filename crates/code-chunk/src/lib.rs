@@ -35,7 +35,10 @@ pub struct Chunker;
 impl Chunker {
     pub fn chunk(source: &str) -> Vec<Chunk> {
         let parse = parser::parse(source);
-        let root = parse.syntax_node();
+        Self::chunk_parsed(&parse.syntax_node(), source)
+    }
+
+    pub fn chunk_parsed(root: &syntax::SyntaxNode, source: &str) -> Vec<Chunk> {
         let line_index = LineIndex::new(source);
 
         let mut chunks = Vec::new();
@@ -290,5 +293,29 @@ mod tests {
     fn whitespace_only_no_chunks() {
         let chunks = Chunker::chunk("   \n\n  \n");
         assert!(chunks.is_empty());
+    }
+
+    #[test]
+    fn chunk_parsed_matches_chunk() {
+        let source = "\
+Процедура Первая() Экспорт
+КонецПроцедуры
+
+Функция Вторая()
+    Возврат 42;
+КонецФункции";
+        let parse = parser::parse(source);
+        let via_parsed = Chunker::chunk_parsed(&parse.syntax_node(), source);
+        let via_source = Chunker::chunk(source);
+        assert_eq!(via_parsed.len(), via_source.len());
+        for (a, b) in via_parsed.iter().zip(via_source.iter()) {
+            assert_eq!(a.kind, b.kind);
+            assert_eq!(a.name, b.name);
+            assert_eq!(a.is_export, b.is_export);
+            assert_eq!(a.annotations, b.annotations);
+            assert_eq!(a.line_start, b.line_start);
+            assert_eq!(a.line_end, b.line_end);
+            assert_eq!(a.text, b.text);
+        }
     }
 }

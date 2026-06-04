@@ -9,9 +9,7 @@ rust-version.workspace = true
 doctest = false
 
 [dependencies]
-syntax.workspace = true
-parser.workspace = true
-lexer.workspace = true
+code-chunk.workspace = true
 
 rusqlite.workspace = true
 postgres = "0.19"

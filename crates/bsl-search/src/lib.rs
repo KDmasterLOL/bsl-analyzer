@@ -1,5 +1,4 @@
 mod baseline_runtime;
-mod chunker;
 mod context;
 mod document;
 mod domain;
@@ -21,7 +20,7 @@ mod store;
 mod workspace_overlay;
 
 pub use baseline_runtime::BaselineOverlaySearchService;
-pub use chunker::{Chunk, ChunkKind, Chunker};
+pub use code_chunk::{Chunk, ChunkKind, Chunker};
 pub use context::file_path_to_module_path;
 pub use document::{
     semantic_key_for_indexed_document, semantic_text_for_indexed_document, Document,

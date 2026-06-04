@@ -1,4 +1,3 @@
-use crate::chunker::Chunker;
 use crate::document::Document;
 use crate::embedder::{Embedder, EmbedderConfig};
 use crate::error::SearchError;
@@ -16,6 +15,7 @@ use crate::{
     semantic_key_for_indexed_document, semantic_text_for_indexed_document,
     BaselineOverlaySearchService, BaselineRef, CorpusId,
 };
+use code_chunk::Chunker;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -1154,7 +1154,7 @@ impl SearchEngine {
 struct FileTask {
     rel_path: String,
     hash: Vec<u8>,
-    chunks: Vec<crate::chunker::Chunk>,
+    chunks: Vec<code_chunk::Chunk>,
     texts: Vec<String>,
     /// Per-chunk graph context (parallel to `chunks`), persisted so a later
     /// reconstruction-from-storage re-embeds with the same enriched text.
@@ -1164,7 +1164,7 @@ struct FileTask {
 struct FileResult {
     rel_path: String,
     hash: Vec<u8>,
-    chunks: Vec<crate::chunker::Chunk>,
+    chunks: Vec<code_chunk::Chunk>,
     graph_contexts: Vec<Option<String>>,
     embeddings: Result<Vec<Vec<f32>>, SearchError>,
 }

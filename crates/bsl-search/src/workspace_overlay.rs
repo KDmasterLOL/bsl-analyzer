@@ -1,10 +1,10 @@
-use crate::chunker::Chunker;
 use crate::domain::{BaselineRef, CorpusId, DocumentPath, IndexedDocument, SearchOverlay};
 use crate::embedder::Embedder;
 use crate::error::SearchError;
 use crate::lexical::lexical_hits_for_documents;
 use crate::ports::GraphContextProvider;
 use crate::store::Store;
+use code_chunk::Chunker;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -800,9 +800,9 @@ pub(crate) fn fingerprint_content(content: &str, rel_path: &str) -> String {
     let mut hasher = blake3::Hasher::new();
     for chunk in &documents {
         let kind = match chunk.kind {
-            crate::chunker::ChunkKind::ModuleHeader => "header",
-            crate::chunker::ChunkKind::Procedure => "procedure",
-            crate::chunker::ChunkKind::Function => "function",
+            code_chunk::ChunkKind::ModuleHeader => "header",
+            code_chunk::ChunkKind::Procedure => "procedure",
+            code_chunk::ChunkKind::Function => "function",
         };
         let content_hash = blake3::hash(chunk.text.as_bytes()).to_hex().to_string();
         hasher.update("code".as_bytes());

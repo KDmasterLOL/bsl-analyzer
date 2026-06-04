@@ -368,17 +368,15 @@ name = "bsl-search"
 version = "0.2.14"
 dependencies = [
  "blake3",
+ "code-chunk",
  "crossbeam-channel",
  "expect-test",
- "lexer",
- "parser",
  "postgres",
  "project-model",
  "r2d2_postgres",
  "rusqlite",
  "serde",
  "serde_json",
- "syntax",
  "tempfile",
  "thiserror 1.0.69",
  "tracing",
@@ -604,6 +602,15 @@ name = "cmov"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f88a43d011fc4a6876cb7344703e297c71dda42494fee094d5f7c76bf13f746"
+
+[[package]]
+name = "code-chunk"
+version = "0.2.14"
+dependencies = [
+ "lexer",
+ "parser",
+ "syntax",
+]
 
 [[package]]
 name = "codespan-reporting"

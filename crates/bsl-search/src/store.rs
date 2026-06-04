@@ -1,6 +1,6 @@
-use crate::chunker::Chunk;
 use crate::document::Document;
 use crate::error::SearchError;
+use code_chunk::Chunk;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -338,9 +338,9 @@ impl Store {
         embedding: Option<&[f32]>,
     ) -> Result<i64, SearchError> {
         let kind_str = match chunk.kind {
-            crate::chunker::ChunkKind::ModuleHeader => "header",
-            crate::chunker::ChunkKind::Procedure => "procedure",
-            crate::chunker::ChunkKind::Function => "function",
+            code_chunk::ChunkKind::ModuleHeader => "header",
+            code_chunk::ChunkKind::Procedure => "procedure",
+            code_chunk::ChunkKind::Function => "function",
         };
         let annotations =
             if chunk.annotations.is_empty() { None } else { Some(chunk.annotations.join(",")) };
@@ -432,9 +432,9 @@ impl Store {
 
             for (i, chunk) in chunks.iter().enumerate() {
                 let kind_str = match chunk.kind {
-                    crate::chunker::ChunkKind::ModuleHeader => "header",
-                    crate::chunker::ChunkKind::Procedure => "procedure",
-                    crate::chunker::ChunkKind::Function => "function",
+                    code_chunk::ChunkKind::ModuleHeader => "header",
+                    code_chunk::ChunkKind::Procedure => "procedure",
+                    code_chunk::ChunkKind::Function => "function",
                 };
                 let annotations = if chunk.annotations.is_empty() {
                     None
@@ -1042,9 +1042,9 @@ impl Store {
 
             for (i, chunk) in chunks.iter().enumerate() {
                 let kind_str = match chunk.kind {
-                    crate::chunker::ChunkKind::ModuleHeader => "header",
-                    crate::chunker::ChunkKind::Procedure => "procedure",
-                    crate::chunker::ChunkKind::Function => "function",
+                    code_chunk::ChunkKind::ModuleHeader => "header",
+                    code_chunk::ChunkKind::Procedure => "procedure",
+                    code_chunk::ChunkKind::Function => "function",
                 };
                 let annotations = if chunk.annotations.is_empty() {
                     None
@@ -1392,7 +1392,7 @@ pub struct PersistedFingerprint {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chunker::{Chunk, ChunkKind};
+    use code_chunk::{Chunk, ChunkKind};
 
     fn sample_chunk(name: &str) -> Chunk {
         Chunk {
