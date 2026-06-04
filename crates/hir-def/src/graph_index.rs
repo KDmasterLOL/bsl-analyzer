@@ -221,6 +221,13 @@ impl GraphIndex {
         self.node_dispatch.keys().copied()
     }
 
+    /// One module's method declaration facts in declaration order, for a streaming
+    /// consumer that needs each method's name/ranges/dispatch without re-scanning the
+    /// whole-workspace node set per module. `None` if the module is not indexed.
+    pub fn module_method_entries(&self, module: ModuleId) -> Option<&[GraphMethodEntry]> {
+        self.methods.get(&module).map(|m| m.all.as_slice())
+    }
+
     /// Method lookup mirroring `SymbolTree::find_method` (lowercased, first-wins).
     /// Returns the same `{local_id, is_export}` the Salsa symbol tree would, so the
     /// reconstructed `MethodId` is identical.

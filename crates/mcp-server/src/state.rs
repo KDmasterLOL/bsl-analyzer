@@ -83,6 +83,13 @@ impl SharedState {
             WorkspaceSearchMode::SqliteLocal
         };
 
+        // Created before the search-init thread so it can own the workspace graph: for
+        // a local SQLite workspace the search-init drives a single fused parse pass
+        // that builds the graph AND the search index, then publishes the graph through
+        // this handle. A clone (cheap, shared `Arc`s) goes to the search thread; this
+        // copy stays in `SharedState` for graph-tool serving and drift/reload.
+        let graph = GraphState::for_workspace(source_dir.clone());
+
         Self::spawn_workspace_search_init(
             Arc::clone(&search_engine),
             Arc::clone(&index_progress),
@@ -90,6 +97,7 @@ impl SharedState {
             source_dir.clone(),
             Arc::clone(&watcher_ready),
             baseline_runtime.external_baseline.clone(),
+            graph.clone(),
         );
 
         {
@@ -121,14 +129,6 @@ impl SharedState {
             }
         }
 
-        let graph = GraphState::for_workspace(source_dir.clone());
-        // Build the call graph eagerly for the local workspace so graph-enriched
-        // embeddings and graph tools find a ready database instead of paying the
-        // build on first use. Search does not block on it: the current run indexes
-        // immediately and picks up graph context on a later incremental reindex.
-        if workspace_search_mode == WorkspaceSearchMode::SqliteLocal {
-            graph.ensure_loading();
-        }
         let diagnostics = DiagnosticsState::for_workspace(source_dir.clone());
 
         Self {
@@ -156,6 +156,7 @@ impl SharedState {
         workspace_root: PathBuf,
         watcher_ready: Arc<AtomicBool>,
         external_baseline: Option<Arc<ExternalBaselineService>>,
+        graph: GraphState,
     ) {
         std::thread::Builder::new()
             .name("bsl-search-init".to_owned())
@@ -166,6 +167,7 @@ impl SharedState {
                     &index_progress,
                     &watcher_ready,
                     external_baseline,
+                    &graph,
                 );
 
                 let Some(init) = init else {
@@ -557,6 +559,7 @@ impl SharedState {
         progress: &Arc<IndexProgress>,
         watcher_ready: &Arc<AtomicBool>,
         external_baseline: Option<Arc<ExternalBaselineService>>,
+        graph: &GraphState,
     ) -> Option<WorkspaceSearchInit> {
         crate::cache::ensure_workspace_cache_dir(workspace_root).ok();
         let db_path = crate::cache::search_db_path(workspace_root);
@@ -662,10 +665,27 @@ impl SharedState {
             BaselineHashMode::RawFileBytes,
         );
 
-        // Enrich semantic embeddings with each method's call-graph context when the
-        // graph database is already built. Best-effort: if it is absent (the graph is
-        // built lazily on first `graph` tool use) the embeddings are simply graph-free
-        // this run and pick up context on a later reindex once the graph exists.
+        // Fused cold-build: the graph owns the startup build decision. When it builds
+        // the graph fresh it streams the search chunks (with graph context) from the
+        // same parse pass, so this run only has to fill embeddings — no second parse,
+        // no graph round-trip. On a warm cache, a missing embedder, or any failure it
+        // returns `Standalone` and we fall through to the standalone indexer below.
+        if let crate::graph::FusedStartup::Fused =
+            graph.start_workspace_graph(&mut engine, &source_path)
+        {
+            match engine.embed_pending_chunks(Some(progress)) {
+                Ok(embedded) => {
+                    tracing::info!(embedded, "fused index: FTS + semantic built from graph pass")
+                }
+                Err(e) => tracing::warn!("fused index: embedding phase failed: {e}"),
+            }
+            return Some(WorkspaceSearchInit { engine, mode: WorkspaceSearchMode::SqliteLocal });
+        }
+
+        // Standalone path (warm cache, no embedder, or fused fallback). Enrich semantic
+        // embeddings with each method's call-graph context when the graph database is
+        // already built; if absent (still building) the embeddings are graph-free this
+        // run and pick up context on a later reindex.
         if engine.has_semantic() {
             let graph_path = crate::cache::graph_db_path(workspace_root);
             match crate::graph_query::GraphDb::open(&graph_path) {
@@ -957,6 +977,7 @@ impl SharedState {
                 root,
                 watcher_ready,
                 self.external_baseline.clone(),
+                self.graph.clone(),
             );
         }
     }
@@ -1138,6 +1159,7 @@ mod tests {
             &progress,
             &watcher_ready,
             Some(external),
+            &crate::graph::GraphState::disabled(),
         );
 
         assert!(init.is_none());
@@ -1197,6 +1219,7 @@ mod tests {
             &progress,
             &watcher_ready,
             Some(external),
+            &crate::graph::GraphState::disabled(),
         );
 
         assert!(init.is_none());

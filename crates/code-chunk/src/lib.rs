@@ -30,6 +30,21 @@ pub struct Chunk {
 
 const MAX_CHUNK_BYTES: usize = 32 * 1024;
 
+/// Suffix [`split_large_chunk`] appends to each part of an over-large method chunk.
+const PART_SUFFIX: &str = " (часть ";
+
+/// The declaration name a chunk belongs to, undoing the `" (часть N)"` suffix that
+/// [`split_large_chunk`] appends when a method exceeds [`MAX_CHUNK_BYTES`]. For an
+/// unsplit chunk this is the name unchanged; for a split part it is the shared base
+/// name, so a consumer keying per method (e.g. attaching one graph context to every
+/// part) groups the parts correctly.
+pub fn base_chunk_name(name: &str) -> &str {
+    match name.find(PART_SUFFIX) {
+        Some(i) => &name[..i],
+        None => name,
+    }
+}
+
 pub struct Chunker;
 
 impl Chunker {
@@ -119,7 +134,7 @@ fn split_large_chunk(chunk: Chunk) -> Vec<Chunk> {
                 name: if chunk.name.is_empty() {
                     String::new()
                 } else {
-                    format!("{} (часть {})", chunk.name, part_num)
+                    format!("{}{}{})", chunk.name, PART_SUFFIX, part_num)
                 },
                 is_export: chunk.is_export,
                 annotations: chunk.annotations.clone(),

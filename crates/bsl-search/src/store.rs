@@ -745,6 +745,55 @@ impl Store {
         Ok(rows)
     }
 
+    /// Chunks in `collection` whose embedding has not been computed yet, each paired
+    /// with its row id. Powers the fused cold-build's separate embedding phase: the
+    /// graph pass writes chunk text + FTS + graph context with a NULL embedding, then
+    /// this lists exactly what still needs a vector — so embedding stays decoupled
+    /// from the graph build's lifecycle.
+    pub fn load_pending_embedding_documents(
+        &self,
+        collection: &str,
+    ) -> Result<Vec<(i64, crate::IndexedDocument)>, SearchError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT c.id, f.collection, f.path, c.symbol_name, c.kind, c.line_start, c.line_end,
+                    c.text, c.graph_context
+             FROM chunks c
+             JOIN files f ON f.id = c.file_id
+             WHERE f.collection = ?1 AND c.embedding IS NULL
+             ORDER BY f.path, c.line_start, c.line_end, c.symbol_name",
+        )?;
+        let rows = stmt
+            .query_map(params![collection], |row| {
+                let id: i64 = row.get(0)?;
+                let text: String = row.get(7)?;
+                Ok((
+                    id,
+                    crate::IndexedDocument {
+                        collection: row.get(1)?,
+                        path: row.get(2)?,
+                        symbol_name: row.get(3)?,
+                        kind: row.get(4)?,
+                        line_start: row.get::<_, i64>(5)? as u32,
+                        line_end: row.get::<_, i64>(6)? as u32,
+                        content_hash: blake3::hash(text.as_bytes()).to_hex().to_string(),
+                        text,
+                        graph_context: row.get(8)?,
+                    },
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Set one chunk's embedding by row id, leaving its text/FTS/context untouched —
+    /// the write half of the fused build's embedding phase.
+    pub fn set_chunk_embedding(&self, chunk_id: i64, embedding: &[f32]) -> Result<(), SearchError> {
+        let blob: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
+        self.conn
+            .execute("UPDATE chunks SET embedding = ?2 WHERE id = ?1", params![chunk_id, blob])?;
+        Ok(())
+    }
+
     pub fn text_search(
         &self,
         query: &str,
@@ -828,11 +877,17 @@ impl Store {
         &self,
         collection: &str,
     ) -> Result<usize, SearchError> {
+        // Clear the skip hash for any file that has even one un-embedded chunk, not
+        // only files with zero embeddings. A partially embedded file (some chunks
+        // vectored, some still NULL — e.g. a build interrupted mid-corpus, or the fused
+        // cold-build's embedding phase failing after the chunks were written) must be
+        // re-indexed in full on the next run; the previous `NOT IN (… IS NOT NULL)`
+        // predicate kept such a file's hash and skipped it forever.
         let count = self.conn.execute(
             "UPDATE files SET hash = zeroblob(0)
              WHERE collection = ?1
-               AND id NOT IN (
-                   SELECT DISTINCT file_id FROM chunks WHERE embedding IS NOT NULL
+               AND id IN (
+                   SELECT DISTINCT file_id FROM chunks WHERE embedding IS NULL
                )",
             params![collection],
         )?;

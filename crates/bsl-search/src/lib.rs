@@ -21,6 +21,13 @@ mod workspace_overlay;
 
 pub use baseline_runtime::BaselineOverlaySearchService;
 pub use code_chunk::{Chunk, ChunkKind, Chunker};
+
+/// blake3 of a file's bytes, as the skip hash the local index keys on (see
+/// `Store::file_hash`). Exposed so a fused producer in another crate records the SAME
+/// hash the standalone indexer does, keeping an unchanged file reusable across runs.
+pub fn content_blake3(bytes: &[u8]) -> Vec<u8> {
+    blake3::hash(bytes).as_bytes().to_vec()
+}
 pub use context::file_path_to_module_path;
 pub use document::{
     semantic_key_for_indexed_document, semantic_text_for_indexed_document, Document,

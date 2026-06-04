@@ -448,6 +448,146 @@ impl SearchEngine {
         Ok(indexed)
     }
 
+    /// Ingest one file's chunks produced by the fused graph pass: writes chunk text,
+    /// FTS rows, and the per-chunk graph context with NO embedding (filled later by
+    /// [`Self::embed_pending_chunks`]), and records the file hash so an unchanged file
+    /// is skipped next run. Chunks and contexts originate in the graph build, so no
+    /// parsing or graph round-trip happens here — this is purely the storage write.
+    pub fn ingest_fused_file(
+        &mut self,
+        rel_path: &str,
+        hash: &[u8],
+        chunks: &[crate::Chunk],
+        graph_contexts: &[Option<String>],
+    ) -> Result<(), SearchError> {
+        self.store.reindex_file_with_context(rel_path, hash, chunks, None, Some(graph_contexts))?;
+        Ok(())
+    }
+
+    /// Compute and persist embeddings for chunks the fused cold-build wrote without
+    /// vectors. The fused graph pass emits chunk text + FTS + graph context with a
+    /// NULL embedding so it never blocks the graph lifecycle on HTTP latency; this is
+    /// the decoupled second phase that fills the vectors. Reads the `code` chunks
+    /// still missing an embedding, embeds their semantic text concurrently, updates
+    /// each row, then rebuilds the vector index. Returns the number embedded.
+    pub fn embed_pending_chunks(
+        &mut self,
+        progress: Option<&Arc<IndexProgress>>,
+    ) -> Result<usize, SearchError> {
+        let embedder = self.embedder.as_ref().ok_or_else(|| {
+            SearchError::Embedder(
+                "Cannot generate embeddings: embedder not configured. Set EMBEDDING_URL.".into(),
+            )
+        })?;
+
+        let pending = self.store.load_pending_embedding_documents("code")?;
+        if pending.is_empty() {
+            return Ok(0);
+        }
+
+        let items: Vec<(i64, String)> = pending
+            .into_iter()
+            .map(|(id, doc)| (id, crate::document::semantic_text_for_indexed_document(&doc)))
+            .collect();
+        let total = items.len();
+
+        let batch_size = self.batch_size;
+        let total_batches = total.div_ceil(batch_size);
+        if let Some(p) = &progress {
+            p.active.store(true, Ordering::Relaxed);
+            p.total_files.store(0, Ordering::Relaxed);
+            p.total_chunks.store(total, Ordering::Relaxed);
+            p.total_batches.store(total_batches, Ordering::Relaxed);
+            p.done_batches.store(0, Ordering::Relaxed);
+            p.done_chunks.store(0, Ordering::Relaxed);
+        }
+
+        let concurrency = self.concurrency.min(total_batches.max(1));
+        info!(chunks = total, batches = total_batches, concurrency, "embedding fused chunks");
+
+        // Fan batches of (chunk_id, text) out to embedder workers; the main thread
+        // applies each batch's vectors (SQLite is single-writer). Nothing larger than
+        // one batch is held per worker, so peak RAM stays bounded by the batch size.
+        let (task_tx, task_rx) = crossbeam_channel::bounded::<Vec<(i64, String)>>(concurrency * 2);
+        #[allow(clippy::type_complexity)]
+        let (result_tx, result_rx) = crossbeam_channel::bounded::<
+            Result<Vec<(i64, Vec<f32>)>, SearchError>,
+        >(concurrency * 2);
+
+        let workers: Vec<std::thread::JoinHandle<()>> = (0..concurrency)
+            .map(|_| {
+                let rx = task_rx.clone();
+                let tx = result_tx.clone();
+                let emb = embedder.clone();
+                let prog = progress.cloned();
+                std::thread::spawn(move || {
+                    while let Ok(batch) = rx.recv() {
+                        let refs: Vec<&str> = batch.iter().map(|(_, t)| t.as_str()).collect();
+                        let out = match emb.embed_batch(&refs) {
+                            Ok(embs) => {
+                                if let Some(p) = &prog {
+                                    p.done_chunks.fetch_add(batch.len(), Ordering::Relaxed);
+                                    p.done_batches.fetch_add(1, Ordering::Relaxed);
+                                }
+                                Ok(batch.iter().map(|(id, _)| *id).zip(embs).collect())
+                            }
+                            Err(e) => Err(e),
+                        };
+                        if tx.send(out).is_err() {
+                            break;
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        drop(task_rx);
+        drop(result_tx);
+
+        let producer = {
+            let batches: Vec<Vec<(i64, String)>> =
+                items.chunks(batch_size).map(<[(i64, String)]>::to_vec).collect();
+            std::thread::spawn(move || {
+                for batch in batches {
+                    if task_tx.send(batch).is_err() {
+                        break;
+                    }
+                }
+            })
+        };
+
+        let mut embedded = 0usize;
+        let mut errors = 0usize;
+        while let Ok(result) = result_rx.recv() {
+            match result {
+                Ok(pairs) => {
+                    for (id, emb) in pairs {
+                        self.store.set_chunk_embedding(id, &emb)?;
+                        embedded += 1;
+                    }
+                }
+                Err(e) => {
+                    warn!("embedding batch failed after retries, skipping: {e}");
+                    errors += 1;
+                }
+            }
+        }
+
+        let _ = producer.join();
+        for w in workers {
+            let _ = w.join();
+        }
+        if let Some(p) = &progress {
+            p.active.store(false, Ordering::Relaxed);
+        }
+
+        let data = self.store.load_all_embeddings(self.dim)?;
+        self.index = VectorIndex::build(self.dim, &data)?;
+
+        info!(embedded, errors, total_vectors = self.index.len(), "fused embedding complete");
+        Ok(embedded)
+    }
+
     pub fn index_directory_fts(&mut self, root: &Path) -> Result<usize, SearchError> {
         let bsl_files: Vec<std::path::PathBuf> = walkdir::WalkDir::new(root)
             .into_iter()
