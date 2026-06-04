@@ -227,6 +227,16 @@ fn semantic_code_hits(
         return Ok(CodeHits::Unavailable(SemanticUnavailable::RuntimeFailed));
     }
 
+    // The fused engine is published before its vectors exist. Degrade to lexical until
+    // the background pass swaps in a populated index, rather than searching the empty
+    // one and reporting a silent zero.
+    if let SemanticRuntimeStatus::Indexing = semantic_runtime {
+        return Ok(CodeHits::Pending(
+            "RAG semantic index is still building; lexical search is available in the meantime."
+                .to_owned(),
+        ));
+    }
+
     if !engine.has_semantic() {
         return Ok(CodeHits::Unavailable(SemanticUnavailable::NotConfigured));
     }
@@ -332,16 +342,16 @@ pub fn hybrid_code(
         fetch,
     )?;
 
-    let (mut hits, note): (Vec<FusedHit>, Option<&str>) = match semantic {
+    let (mut hits, note): (Vec<FusedHit>, Option<String>) = match semantic {
         CodeHits::Ready { hits: sem_hits, .. } => {
             (fuse_rrf(&lex_hits, &sem_hits, RRF_K, limit), None)
         }
         // Semantic could not serve — degrade to lexical-only. Every hit is then lexical, so it
         // is wrapped as a `FusedHit` with `Modality::Lexical` to keep the display uniform.
-        CodeHits::Pending(_) => {
-            (lexical_only(lex_hits), Some("semantic skipped: overlay warming up"))
-        }
-        CodeHits::Unavailable(reason) => (lexical_only(lex_hits), Some(reason.note())),
+        // Surface the precise upstream pending reason (overlay warmup, local RAG indexing, or
+        // index build) verbatim rather than collapsing them to one generic note.
+        CodeHits::Pending(message) => (lexical_only(lex_hits), Some(message)),
+        CodeHits::Unavailable(reason) => (lexical_only(lex_hits), Some(reason.note().to_owned())),
     };
     hits.truncate(limit);
 
@@ -823,6 +833,9 @@ pub fn search_status(
             SemanticRuntimeStatus::OverlaySyncing => {
                 "ready — overlay syncing (a concurrent search_code may briefly say \"warming up\"; retry shortly)"
             }
+            SemanticRuntimeStatus::Indexing => {
+                "ready (lexical) — semantic index building in background"
+            }
             _ => "ready",
         };
         let _ = writeln!(out, "Search index: {search_state}");
@@ -846,6 +859,10 @@ pub fn search_status(
                 }
                 WorkspaceSearchMode::SqliteLocal => "syncing local semantic index".to_owned(),
             },
+            SemanticRuntimeStatus::Indexing => with_index_progress(
+                "building local semantic index in background".to_owned(),
+                progress,
+            ),
             SemanticRuntimeStatus::Ready => match workspace_search_mode {
                 WorkspaceSearchMode::PostgresRemoteOverlay => {
                     if semantic {
@@ -883,6 +900,9 @@ pub fn search_status(
                         match (&semantic_runtime, workspace_search_mode.clone()) {
                             (SemanticRuntimeStatus::Disabled, _) => {
                                 "not configured (set EMBEDDING_URL)".to_owned()
+                            }
+                            (SemanticRuntimeStatus::Indexing, _) => {
+                                "local sqlite semantic index building in background".to_owned()
                             }
                             (
                                 SemanticRuntimeStatus::OverlaySyncing,
@@ -2069,6 +2089,57 @@ mod tests {
         // A failed semantic runtime is a soft shortfall the hybrid path degrades past, not a
         // hard error.
         assert!(matches!(outcome, CodeHits::Unavailable(SemanticUnavailable::RuntimeFailed)));
+    }
+
+    #[test]
+    fn semantic_core_reports_pending_when_indexing() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("workspace-search.db");
+        let engine = Arc::new(Mutex::new(Some(SearchEngine::fts_only(&db_path).unwrap())));
+        let outcome = semantic_code_hits(
+            &engine,
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::Indexing)),
+            WorkspaceSearchMode::SqliteLocal,
+            None,
+            None,
+            "обработка проведения документа",
+            10,
+        )
+        .unwrap();
+
+        // While the background embedding pass fills the published-but-empty index, semantic
+        // degrades to lexical via Pending instead of searching the empty index.
+        assert!(matches!(outcome, CodeHits::Pending(_)));
+    }
+
+    #[test]
+    fn hybrid_serves_lexical_while_semantic_indexing() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        fs::write(workspace.join("CommonModule.bsl"), "Процедура ПроверитьИНН()\nКонецПроцедуры")
+            .unwrap();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.index_directory_fts(workspace).unwrap();
+        engine.set_workspace_root(workspace);
+
+        let result = hybrid_code(
+            &Arc::new(Mutex::new(Some(engine))),
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::Indexing)),
+            WorkspaceSearchMode::SqliteLocal,
+            None,
+            None,
+            None,
+            &IndexProgress::new(),
+            "ПроверитьИНН",
+            10,
+        )
+        .unwrap();
+        let text = result.content[0].raw.as_text().expect("text content").text.as_str();
+
+        // The lexical hit comes back immediately, with the precise indexing-specific note.
+        assert!(text.contains("ПроверитьИНН"), "{text}");
+        assert!(text.contains("-- RAG semantic index is still building"), "{text}");
     }
 
     #[test]

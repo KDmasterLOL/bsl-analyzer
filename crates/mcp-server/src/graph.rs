@@ -322,7 +322,7 @@ impl GraphState {
 
     /// Build the graph and the search index's chunks (with graph context) in a single
     /// parse pass, then publish the graph. Embeddings are filled separately by the
-    /// caller ([`SearchEngine::embed_pending_chunks`]) so HTTP latency never blocks the
+    /// caller ([`SearchEngine::embed_pending_chunks_standalone`]) so HTTP latency never blocks the
     /// graph lifecycle. Assumes the build was already claimed via
     /// [`Self::try_begin_external_build`].
     fn run_fused_cold_build(
@@ -861,7 +861,7 @@ pub(crate) fn classify_changes(
 /// Whether the SqliteLocal startup graph decision already populated the search index.
 pub(crate) enum FusedStartup {
     /// Fused cold-build ran: graph + search chunks were written from one parse pass;
-    /// the caller must fill embeddings via [`SearchEngine::embed_pending_chunks`].
+    /// the caller must fill embeddings via [`SearchEngine::embed_pending_chunks_standalone`].
     Fused,
     /// Graph served from cache or built the normal lazy way; the caller indexes the
     /// search engine via the standalone path.
@@ -929,7 +929,7 @@ fn build_and_publish_graph_file(
 /// Translates the graph pass's [`ide::ChunkRow`] stream into the search store for the
 /// fused cold build. Filters to files under the search source root, writes each file's
 /// chunks + FTS + graph context with NO embedding (filled later by
-/// [`SearchEngine::embed_pending_chunks`]), and records the blake3 of the file's bytes
+/// [`SearchEngine::embed_pending_chunks_standalone`]), and records the blake3 of the file's bytes
 /// as the skip hash — matching the standalone indexer so a later run reuses unchanged
 /// files.
 struct FusedChunkWriter<'e> {

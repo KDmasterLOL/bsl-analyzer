@@ -47,6 +47,11 @@ pub(crate) enum WorkspaceSearchMode {
 pub(crate) enum SemanticRuntimeStatus {
     Disabled,
     OverlaySyncing,
+    /// The local SQLite semantic index is being built in the background after the
+    /// engine was published early: lexical search and the call graph are already live,
+    /// while the RAG vectors fill in over the longer embedding pass. Distinct from
+    /// [`Self::OverlaySyncing`], which is the remote-baseline overlay warmup.
+    Indexing,
     Ready,
     Failed(String),
 }
@@ -54,6 +59,19 @@ pub(crate) enum SemanticRuntimeStatus {
 struct WorkspaceSearchInit {
     engine: SearchEngine,
     mode: WorkspaceSearchMode,
+    /// Set by the fused cold-build path: the engine is published with FTS + graph
+    /// context already written but embeddings still NULL, and this carries what the
+    /// background pass needs to fill them on its own connection. `None` means the
+    /// engine is fully ready (warm cache, FTS-only, or standalone reindex).
+    pending_embed: Option<PendingEmbed>,
+}
+
+/// Inputs for the background embedding pass: its own database path and embedder config
+/// so [`bsl_search::SearchEngine::embed_pending_chunks_standalone`] opens a separate WAL
+/// connection and never holds the live engine's mutex during the long embed.
+struct PendingEmbed {
+    db_path: PathBuf,
+    config: bsl_search::SearchConfig,
 }
 
 impl SharedState {
@@ -170,7 +188,7 @@ impl SharedState {
                     &graph,
                 );
 
-                let Some(init) = init else {
+                let Some(mut init) = init else {
                     Self::set_semantic_runtime_status(
                         &semantic_runtime,
                         SemanticRuntimeStatus::Failed(
@@ -181,18 +199,88 @@ impl SharedState {
                     return;
                 };
 
-                let semantic_status =
-                    Self::semantic_runtime_status_for_mode(&init.engine, &init.mode);
+                let pending_embed = init.pending_embed.take();
                 let needs_overlay_warmup =
                     matches!(init.mode, WorkspaceSearchMode::PostgresRemoteOverlay);
+
+                // When the fused build deferred embeddings, mark the runtime `Indexing`
+                // BEFORE the engine becomes visible. The published engine still has an
+                // empty vector index; without this ordering a concurrent semantic query
+                // could reach `engine.search` on that empty index and return a silent
+                // zero instead of degrading to lexical.
+                let status_after_publish = match &pending_embed {
+                    Some(_) => {
+                        Self::set_semantic_runtime_status(
+                            &semantic_runtime,
+                            SemanticRuntimeStatus::Indexing,
+                        );
+                        None
+                    }
+                    None => Some(Self::semantic_runtime_status_for_mode(&init.engine, &init.mode)),
+                };
 
                 if let Ok(mut guard) = search_engine.lock() {
                     *guard = Some(init.engine);
                 }
 
-                Self::set_semantic_runtime_status(&semantic_runtime, semantic_status);
+                if let Some(status) = status_after_publish {
+                    Self::set_semantic_runtime_status(&semantic_runtime, status);
+                }
 
                 tracing::info!("search engine initialization complete");
+
+                if let Some(pending) = pending_embed {
+                    let search_engine = Arc::clone(&search_engine);
+                    let semantic_runtime = Arc::clone(&semantic_runtime);
+                    let index_progress = Arc::clone(&index_progress);
+                    std::thread::Builder::new()
+                        .name("bsl-search-embed".to_owned())
+                        .spawn(move || {
+                            tracing::info!("background embedding pass started");
+                            match SearchEngine::embed_pending_chunks_standalone(
+                                &pending.db_path,
+                                &pending.config,
+                                Some(&index_progress),
+                            ) {
+                                Ok(index) => {
+                                    let swapped = match search_engine.lock() {
+                                        Ok(mut guard) => match guard.as_mut() {
+                                            Some(engine) => {
+                                                engine.set_vector_index(index);
+                                                true
+                                            }
+                                            None => false,
+                                        },
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                "background embedding: engine lock error: {e}"
+                                            );
+                                            false
+                                        }
+                                    };
+                                    if swapped {
+                                        Self::set_semantic_runtime_status(
+                                            &semantic_runtime,
+                                            SemanticRuntimeStatus::Ready,
+                                        );
+                                        tracing::info!(
+                                            "background embedding pass complete; semantic index live"
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!("background embedding pass failed: {e}");
+                                    Self::set_semantic_runtime_status(
+                                        &semantic_runtime,
+                                        SemanticRuntimeStatus::Failed(format!(
+                                            "background embedding failed: {e}"
+                                        )),
+                                    );
+                                }
+                            }
+                        })
+                        .ok();
+                }
 
                 if needs_overlay_warmup {
                     Self::set_semantic_runtime_status(
@@ -637,6 +725,7 @@ impl SharedState {
             return Some(WorkspaceSearchInit {
                 engine,
                 mode: WorkspaceSearchMode::PostgresRemoteOverlay,
+                pending_embed: None,
             });
         }
 
@@ -673,13 +762,17 @@ impl SharedState {
         if let crate::graph::FusedStartup::Fused =
             graph.start_workspace_graph(&mut engine, &source_path)
         {
-            match engine.embed_pending_chunks(Some(progress)) {
-                Ok(embedded) => {
-                    tracing::info!(embedded, "fused index: FTS + semantic built from graph pass")
-                }
-                Err(e) => tracing::warn!("fused index: embedding phase failed: {e}"),
-            }
-            return Some(WorkspaceSearchInit { engine, mode: WorkspaceSearchMode::SqliteLocal });
+            // FTS chunks and graph context are written; embeddings are still NULL. Hand
+            // the engine back immediately so lexical search and the graph go live in
+            // minutes, and defer the ~hours-long embedding pass to a background thread
+            // on its own connection (see `spawn_workspace_search_init`).
+            let pending_embed = Self::embedding_config()
+                .map(|config| PendingEmbed { db_path: db_path.clone(), config });
+            return Some(WorkspaceSearchInit {
+                engine,
+                mode: WorkspaceSearchMode::SqliteLocal,
+                pending_embed,
+            });
         }
 
         // Standalone path (warm cache, no embedder, or fused fallback). Enrich semantic
@@ -728,7 +821,11 @@ impl SharedState {
             }
         }
 
-        Some(WorkspaceSearchInit { engine, mode: WorkspaceSearchMode::SqliteLocal })
+        Some(WorkspaceSearchInit {
+            engine,
+            mode: WorkspaceSearchMode::SqliteLocal,
+            pending_embed: None,
+        })
     }
 
     fn init_reference_search_engine(

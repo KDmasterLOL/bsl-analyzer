@@ -39,10 +39,17 @@ impl Store {
     /// Connection-level pragmas. Set outside any transaction — `journal_mode` is a no-op
     /// inside one — so the WAL mode that makes [`Self::migrate_structural_schema`]
     /// crash-atomic is actually in force before that transaction runs.
+    ///
+    /// `busy_timeout` matters once two connections write the same database: the
+    /// background embedding pass opens its own connection (WAL: many readers, one
+    /// writer) while the overlay watcher keeps writing through the live engine. Without
+    /// a timeout a writer that finds the WAL lock held returns `SQLITE_BUSY`
+    /// immediately; with it SQLite retries internally for the configured window.
     fn apply_pragmas(&self) -> Result<(), SearchError> {
         self.conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
+             PRAGMA busy_timeout = 30000;
              PRAGMA foreign_keys = ON;",
         )?;
         Ok(())
