@@ -41,8 +41,16 @@ pub fn direction_from(s: Option<&str>) -> Result<Direction, String> {
 }
 
 /// The agent-facing edge-kind labels accepted by the `edge_kinds` neighbour filter.
-const EDGE_KINDS: [&str; 6] =
-    ["call", "manager_creates", "manager_access", "query_ref", "contains", "data_binding"];
+const EDGE_KINDS: [&str; 8] = [
+    "call",
+    "manager_creates",
+    "manager_access",
+    "query_ref",
+    "contains",
+    "data_binding",
+    "notify_ref",
+    "idle_handler",
+];
 
 /// Validate an `edge_kinds` filter: every entry must be a known edge-kind label, so a
 /// typo fails fast rather than silently matching nothing.
@@ -222,18 +230,19 @@ pub fn loading(detail: Option<&str>) -> CallToolResult {
 /// independent of the on-disk SQLite cache layout in [`crate::graph_db`]).
 fn schema_json() -> Value {
     json!({
-        "schema_version": "15",
+        "schema_version": "16",
         "actions": ["overview", "schema", "status", "node", "source", "neighbors", "callers", "callees", "resolve"],
         "status": "since version 15 `status` returns the graph lifecycle ({state: disabled|loading|ready|failed, and when ready: files, revision, stale, reload}) and kicks the lazy build — poll it instead of reading a flat `loading` envelope from a data action (mirrors `diagnostics status`).",
         "node_kinds": ["method", "module", "mdo", "attribute", "tabular_section", "form", "form_item", "form_attribute"],
         "notes": "since version 7 `node(module/<scope>)` resolves for any code module and returns a `methods` array ({id, name, is_export}) of the module's members; module membership is served on demand and is not a graph edge, so `neighbors(module/…)` stays empty",
         "resolve": "since version 13 `resolve(query)` returns candidate durable ids ({id, kind, match}) for an imprecise query — wrong casing, a bare method/object name, or a partial id — so a `not_found` from `node`/`neighbors` is recoverable without guessing. `match` is exact|case_insensitive|name|substring (strongest first); the list is capped (default 20). It is symbol/id-oriented, NOT a natural-language search: a free-text phrase (e.g. several object/form/method words) returns no candidates — use `search_code` for semantic lookup, then pass the emitted `graph_id` here.",
-        "edge_kinds": ["call", "manager_creates", "manager_access", "query_ref", "contains", "data_binding"],
-        "provenance": ["resolved", "inferred", "visibility_blocked", "unresolved"],
+        "edge_kinds": ["call", "manager_creates", "manager_access", "query_ref", "contains", "data_binding", "notify_ref", "idle_handler"],
+        "edge_kinds_note": "since version 16 string-dispatched callbacks are edges: `notify_ref` (Новый ОписаниеОповещения) and `idle_handler` (ПодключитьОбработчикОжидания) link a method to the handler named by a string literal. They carry `string_resolved` provenance and are kept separate from `call`, so `edge_kinds=[call]` stays a pure 'who really calls whom'. Resolution is conservative: only ЭтотОбъект/ЭтаФорма handlers and explicit common-module handlers resolve (idle handlers resolve in the current module only — a handler placed in another allowed module is intentionally not modelled, not guessed); unresolved receivers produce no edge.",
+        "provenance": ["resolved", "inferred", "visibility_blocked", "unresolved", "string_resolved"],
         "dispatch": ["client", "server"],
         "neighbors_params": {
             "provenance": "string[] — keep only edges with these provenances (empty = all)",
-            "edge_kinds": "string[] — keep only edges of these kinds (call|manager_creates|manager_access|query_ref|contains|data_binding); empty = all. Combine with provenance to isolate e.g. only query_ref metadata impact"
+            "edge_kinds": "string[] — keep only edges of these kinds (call|manager_creates|manager_access|query_ref|contains|data_binding|notify_ref|idle_handler); empty = all. Combine with provenance to isolate e.g. only query_ref metadata impact"
         },
         "neighbors_result": {
             "total": "usize — distinct neighbours discovered, before the max_nodes cap",
@@ -367,8 +376,9 @@ mod tests {
         // changes; `total` since this revision, `form`/`form_item` + `contains` since
         // version 3, `form_attribute` since version 4, `tabular_section` since version
         // 5, the `data_binding` edge since version 6, the source `skipped_budget_exhausted`
-        // marker + omit-empty body since version 14, and the `status` action since version 15.
-        assert_eq!(schema["schema_version"], "15");
+        // marker + omit-empty body since version 14, the `status` action since version 15,
+        // and the `notify_ref`/`idle_handler` callback edges since version 16.
+        assert_eq!(schema["schema_version"], "16");
         assert!(
             schema["neighbors_result"]["total"].is_string(),
             "neighbours result must document the `total` field"
@@ -386,6 +396,10 @@ mod tests {
         let edge_kinds = schema["edge_kinds"].as_array().unwrap();
         assert!(edge_kinds.iter().any(|k| k == "contains"));
         assert!(edge_kinds.iter().any(|k| k == "data_binding"));
+        assert!(edge_kinds.iter().any(|k| k == "notify_ref"));
+        assert!(edge_kinds.iter().any(|k| k == "idle_handler"));
+        let provenance = schema["provenance"].as_array().unwrap();
+        assert!(provenance.iter().any(|p| p == "string_resolved"));
     }
 
     /// The text content block must parse back to exactly the `structuredContent`
@@ -414,7 +428,7 @@ mod tests {
     #[test]
     fn schema_and_loading_populate_structured_content() {
         assert_structured_mirrors_text(&schema());
-        assert_eq!(schema().structured_content.unwrap()["schema_version"], "15");
+        assert_eq!(schema().structured_content.unwrap()["schema_version"], "16");
 
         assert_structured_mirrors_text(&loading(Some("indexing")));
         let body = loading(Some("indexing")).structured_content.unwrap();
