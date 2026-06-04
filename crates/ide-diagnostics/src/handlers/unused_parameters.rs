@@ -66,7 +66,10 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let module_id = hir::ModuleId::new(ctx.file_id);
     let summary = ctx.call_summary(module_id);
     for reg in &summary.notify_regs {
-        if reg.target_module.is_none() {
+        // A callback handled in the current module (or whose receiver we cannot
+        // classify) keeps the platform-fixed signature, so its parameters are not
+        // "unused". A handler resolved to another module is checked there instead.
+        if matches!(reg.target, hir::NotifyTarget::ThisObject | hir::NotifyTarget::Unsupported) {
             fixed_signature_handlers.insert(reg.callback_name.as_str().to_lowercase());
         }
     }

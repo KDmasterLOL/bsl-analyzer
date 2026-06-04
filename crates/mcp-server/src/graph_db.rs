@@ -25,9 +25,11 @@ use vfs::FileId;
 
 use crate::graph::{config_metadata_paths, db_for_files, enumerate_bsl_files};
 
-/// Bumped whenever the table layout changes so a stale on-disk cache from an
-/// older binary is rejected (via the `meta` row) and rebuilt.
-pub(crate) const SCHEMA_VERSION: u32 = 4;
+/// Bumped whenever the table layout OR the persisted edge/node content changes so a
+/// stale on-disk cache from an older binary is rejected (via the `meta` row) and
+/// rebuilt. Version 5 adds the `notify_ref`/`idle_handler` callback edges; version 6
+/// adds the `event_subscription` handler edges.
+pub(crate) const SCHEMA_VERSION: u32 = 6;
 
 /// One file's persisted identity in the `files` table: its stat-only fingerprint
 /// and (for `.bsl`) its resolution-signature hash. Persisting these per path lets a
@@ -977,6 +979,25 @@ pub fn caller_delta_plan(
     let changed_files: std::collections::BTreeSet<&str> =
         sig_changed.iter().map(|(f, _)| *f).collect();
     let placeholders = changed_files.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+
+    // A signature change in an event-subscription handler module can invalidate its
+    // config-level `mdo -> method` subscription edge — but that edge's source is a
+    // fileless `mdo` node, so the resolved-caller fan-out below (which requires
+    // `n2.file IS NOT NULL`) never selects it, and the body-only reproject never
+    // re-derives Phase F. Bail to a full rebuild so a removed/unexported/renamed
+    // handler cannot leave a dangling subscription edge.
+    {
+        let sql = format!(
+            "SELECT 1 FROM edges e JOIN nodes n1 ON e.to_id = n1.id \
+             WHERE n1.file IN ({placeholders}) AND n1.kind = 'method' \
+             AND e.kind = 'event_subscription' LIMIT 1"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        if stmt.exists(rusqlite::params_from_iter(changed_files.iter()))? {
+            return Ok(None);
+        }
+    }
+
     let sql = format!(
         "SELECT DISTINCT n2.file FROM edges e \
          JOIN nodes n1 ON e.to_id = n1.id \
@@ -1193,5 +1214,43 @@ mod tests {
         let conn = open(&path);
         let nodes: i64 = conn.query_row("SELECT COUNT(*) FROM nodes", [], |r| r.get(0)).unwrap();
         assert_eq!(nodes, 0, "create() discards the prior file");
+    }
+
+    #[test]
+    fn caller_delta_bails_to_full_rebuild_for_subscription_handler() {
+        // A signature change in a module that handles an event subscription must NOT take
+        // the body-only caller-delta path: the subscription's `mdo -> method` edge has a
+        // fileless source the delta never revisits, so it would go stale. The planner must
+        // return None (force a full rebuild).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bsl-graph.db");
+
+        let handler = method_node("method/common/X/Обработчик", "Обработчик");
+        let mut subscription = method_node("mdo/EventSubscription/ПриЗаписи", "ПриЗаписи");
+        subscription.kind = "mdo";
+        subscription.module = None;
+        subscription.file = None; // config-level node: no owning file
+        subscription.is_export = None;
+
+        let mut w = GraphDbWriter::create(&path).unwrap();
+        w.write_nodes(&[handler, subscription]).unwrap();
+        let mut sub_edge = edge("mdo/EventSubscription/ПриЗаписи", "method/common/X/Обработчик");
+        sub_edge.kind = "event_subscription";
+        sub_edge.provenance = "string_resolved";
+        w.write_edges(&[sub_edge]).unwrap();
+        w.finalize(&GraphMeta { revision: 1, fingerprint: 1, files: 1, built_at: "t".to_string() })
+            .unwrap();
+
+        let profile = ModuleProfile {
+            sig_hash: 999,
+            exported_lower: std::collections::BTreeSet::new(),
+            has_collision: false,
+        };
+        let plan =
+            caller_delta_plan(&path, &[("CommonModules/X/Ext/Module.bsl", &profile)]).unwrap();
+        assert!(
+            plan.is_none(),
+            "a signature change to a subscription handler module must force a full rebuild"
+        );
     }
 }

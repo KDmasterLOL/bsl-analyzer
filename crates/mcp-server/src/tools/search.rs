@@ -349,7 +349,12 @@ pub fn hybrid_code(
         return Ok(CallToolResult::success(vec![Content::text("No results found.")]));
     }
 
-    let mut out = format_code_hits(&hits, workspace_root.as_deref(), graph_root);
+    // Explain the per-hit modality tag once, up front — a leading line does not shift the
+    // per-hit `graph_id:` parsing (which is relative to each `#N` line).
+    let mut out = String::from(
+        "Modality tag per hit: [L] lexical-only · [S] semantic-only · [L+S] found by both (strongest signal).\n",
+    );
+    out.push_str(&format_code_hits(&hits, workspace_root.as_deref(), graph_root));
     if let Some(note) = note {
         // Append AFTER the hit lines — never before — so a client parsing `graph_id:` lines
         // positionally is not shifted.

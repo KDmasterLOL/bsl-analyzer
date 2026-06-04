@@ -248,6 +248,20 @@ pub fn get_object_structure(
     let mdo_type: MdoType =
         object_type.parse().map_err(|e: String| McpError::invalid_params(e, None))?;
 
+    // An event subscription is not a data-bearing object: it lives in its own catalog,
+    // so it is looked up by name rather than via `find_metadata_object`/`find_register`.
+    if mdo_type == MdoType::EventSubscription {
+        return match config.find_event_subscription(object_name) {
+            Some(sub) => Ok(CallToolResult::success(vec![Content::text(
+                format_event_subscription_structure(sub),
+            )])),
+            None => Err(McpError::invalid_params(
+                format!("ПодпискаНаСобытие.{} не найдена в конфигурации", object_name),
+                None,
+            )),
+        };
+    }
+
     if let Some(obj) = config.find_metadata_object(mdo_type, object_name) {
         return Ok(CallToolResult::success(vec![Content::text(format_metadata_object_structure(
             obj, mdo_type,
@@ -262,6 +276,25 @@ pub fn get_object_structure(
         format!("Объект {}.{} не найден в конфигурации", mdo_type.russian_name(), object_name),
         None,
     ))
+}
+
+fn format_event_subscription_structure(sub: &bsl_metadata::EventSubscription) -> String {
+    fn dash(s: &str) -> &str {
+        if s.is_empty() {
+            "—"
+        } else {
+            s
+        }
+    }
+    let mut out = format!("# ПодпискаНаСобытие.{}\n\n", sub.name());
+    writeln!(out, "- Источник: {}", dash(sub.source())).ok();
+    writeln!(out, "- Событие: {}", dash(sub.event())).ok();
+    writeln!(out, "- Обработчик: {}", dash(sub.handler_string())).ok();
+    if let Some(handler) = sub.parse_handler() {
+        writeln!(out, "  - Модуль: {}", handler.module_name).ok();
+        writeln!(out, "  - Метод: {}", handler.method_name).ok();
+    }
+    out
 }
 
 fn format_metadata_object_structure(
@@ -480,7 +513,7 @@ fn forms_in_container(
             .map_err(|e| McpError::internal_error(format!("Ошибка чтения формы: {e}"), None))?;
         let form = bsl_metadata::xml_parser::parse_form_xml(&xml)
             .map_err(|e| McpError::internal_error(format!("Ошибка разбора формы: {e}"), None))?;
-        Ok(CallToolResult::success(vec![Content::text(format_form(&form))]))
+        Ok(CallToolResult::success(vec![Content::text(format_form(&form, Some(fname)))]))
     } else {
         let mut form_names = Vec::new();
         if let Ok(entries) = std::fs::read_dir(container) {
@@ -508,10 +541,25 @@ fn forms_in_container(
     }
 }
 
-fn format_form(form: &bsl_metadata::Form) -> String {
-    let mut out = format!("# Форма: {}\n\n", form.name());
+/// Render a parsed form. `requested_name` is the form name the caller asked for: `Ext/Form.xml`
+/// holds the managed-form *content* (items, attributes, handlers) but not the form's own name or
+/// UUID — those live in the parent object's metadata — so the parsed name is usually empty and
+/// the UUID nil. Fall back to the requested name for the heading, and label a nil UUID as
+/// unavailable instead of printing a misleading all-zero one.
+fn format_form(form: &bsl_metadata::Form, requested_name: Option<&str>) -> String {
+    let title = match (form.name(), requested_name) {
+        (name, _) if !name.is_empty() => name,
+        (_, Some(requested)) => requested,
+        (_, None) => "<имя недоступно>",
+    };
+    let mut out = format!("# Форма: {title}\n\n");
     let _ = writeln!(out, "- Тип: {:?}", form.form_type());
-    let _ = writeln!(out, "- UUID: {}", form.uuid());
+    let uuid = form.uuid();
+    if uuid.is_nil() {
+        let _ = writeln!(out, "- UUID: недоступен (хранится в метаданных объекта, не в Form.xml)");
+    } else {
+        let _ = writeln!(out, "- UUID: {uuid}");
+    }
 
     if !form.attributes.is_empty() {
         let _ = writeln!(out, "\n## Реквизиты формы ({})\n", form.attributes.len());
@@ -600,6 +648,7 @@ fn mdo_type_to_dir(object_type: &str) -> Option<&'static str> {
         "exchangeplan" | "планобмена" => Some("ExchangePlans"),
         "businessprocess" | "бизнеспроцесс" => Some("BusinessProcesses"),
         "task" | "задача" => Some("Tasks"),
+        "eventsubscription" | "подписканасобытие" => Some("EventSubscriptions"),
         _ => None,
     }
 }
@@ -745,6 +794,30 @@ mod tests {
     }
 
     #[test]
+    fn test_object_structure_event_subscription() {
+        // Regression: `ПодпискаНаСобытие` used to fail to parse as an MDO type ("Unknown
+        // MDO type"); it now resolves and reports its source/event/handler.
+        let config = fixture_config();
+        let result =
+            get_object_structure(&config, "ПодпискаНаСобытие", "ПриЗаписиСправочника").unwrap();
+        let text = extract_text(&result);
+        assert!(text.contains("ПодпискаНаСобытие.ПриЗаписиСправочника"), "header");
+        assert!(text.contains("Событие: OnWrite"), "event");
+        assert!(
+            text.contains("Обработчик: CommonModule.ОбщийПодпискиНаСобытия.ПриЗаписиСправочника"),
+            "handler string"
+        );
+        assert!(text.contains("Метод: ПриЗаписиСправочника"), "parsed handler method");
+    }
+
+    #[test]
+    fn test_object_structure_event_subscription_not_found_is_graceful() {
+        let config = fixture_config();
+        // A missing subscription is an in-band invalid-params error, not a parse crash.
+        assert!(get_object_structure(&config, "ПодпискаНаСобытие", "НетТакой").is_err());
+    }
+
+    #[test]
     fn test_object_structure_not_found() {
         let config = fixture_config();
         let result = get_object_structure(&config, "Catalog", "НесуществующийОбъект");
@@ -796,6 +869,15 @@ mod tests {
         let text = extract_text(&result);
 
         assert!(text.contains("# Форма:"), "should have form header");
+        // The heading carries a name (parsed, or the requested form name as fallback when
+        // Ext/Form.xml omits it), never a blank title.
+        assert!(!text.contains("# Форма: \n"), "heading must not be blank: {text}");
+        // A nil UUID (the common case — Form.xml carries no UUID) is labelled, never printed as
+        // a misleading all-zero UUID.
+        assert!(
+            !text.contains("00000000-0000-0000-0000-000000000000"),
+            "nil UUID must be labelled, not printed as zeros: {text}",
+        );
     }
 
     #[test]

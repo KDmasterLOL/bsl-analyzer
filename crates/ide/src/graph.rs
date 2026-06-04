@@ -21,8 +21,8 @@ use hir::call_graph::{EdgeKind, MethodDispatch};
 use hir::graph_index::{
     display_scope, encode_scope, form_qualified_prefix, form_scope, project_batch_call_edges,
     project_batch_form_edges, project_batch_query_edges, project_form_binding_edges,
-    project_workspace_catalog_edges, EdgeRow, GraphBuildState, GraphIndex, GraphRowEncoder,
-    NodeRow,
+    project_workspace_catalog_edges, project_workspace_subscription_edges, EdgeRow,
+    GraphBuildState, GraphIndex, GraphRowEncoder, NodeRow,
 };
 use hir::{
     module_key_for_path, ConfigsDatabase, DefDatabase, GraphNode, MethodId, ModuleId, ModuleIndex,
@@ -627,6 +627,18 @@ pub fn build_workspace_graph_rows(
     // like the form/catalog passes it joins.
     let binding_edges = project_form_binding_edges(&state);
     emit(&binding_edges, &mut summary, &mut seen_aux, sink)?;
+
+    // Phase F — `event_subscription` edges: each `ПодпискаНаСобытие` → its exported
+    // handler method. Config-level, resolved through the resident index, sharing `state`
+    // so the subscription's `Mdo` node is first-seen here (its `EventSubscription` type
+    // never collides with the data objects above). Full-build only: a handler change that
+    // could invalidate the edge moves the handler module's signature hash, forcing a full
+    // rebuild rather than a body-only reproject.
+    if let Some(first) = modules.chunks(batch_size).next() {
+        let db = open_batch(first);
+        let edges = project_workspace_subscription_edges(&db, first[0].file_id, &index, &mut state);
+        emit(&edges, &mut summary, &mut seen_aux, sink)?;
+    }
 
     // After both passes the canonicalization state knows every object's spelling(s);
     // record the inconsistently-cased ones for the incremental fast-path gate. Sorted
@@ -2101,6 +2113,7 @@ fn provenance_label(edge: &WorkspaceCallEdge) -> &'static str {
         Inferred => "inferred",
         VisibilityBlocked => "visibility_blocked",
         Unresolved => "unresolved",
+        StringResolved => "string_resolved",
     }
 }
 
@@ -2114,6 +2127,9 @@ fn edge_kind_label(kind: EdgeKind) -> &'static str {
         EdgeKind::QueryRef => "query_ref",
         EdgeKind::Contains => "contains",
         EdgeKind::DataBinding => "data_binding",
+        EdgeKind::NotifyRef => "notify_ref",
+        EdgeKind::IdleHandler => "idle_handler",
+        EdgeKind::EventSubscriptionRef => "event_subscription",
     }
 }
 

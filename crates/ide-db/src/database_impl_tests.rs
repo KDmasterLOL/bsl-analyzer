@@ -1249,9 +1249,18 @@ fn workspace_call_graph_via_index_matches_salsa_fold() {
              Справочники.Контрагенты.НетТакого();\n\
              Справочники.Номенклатура.СоздатьЭлемент();\n\
              Справочники.Номенклатура.НайтиПоКоду();\n\
+             Оп1 = Новый ОписаниеОповещения(\"ЛокальныйОбработчик\", ЭтотОбъект);\n\
+             Оп2 = Новый ОписаниеОповещения(\"Считать\", Сервер);\n\
+             Оп3 = Новый ОписаниеОповещения(\"Приватная\", Сервер);\n\
+             Оп4 = Новый ОписаниеОповещения(\"Что\", Объекты[0]);\n\
+             ПодключитьОбработчикОжидания(\"ОбновитьЭкран\", 1, Истина);\n\
              КонецПроцедуры\n\
              &НаКлиенте\n\
-             Процедура ЛокальнаяЦель() Экспорт КонецПроцедуры",
+             Процедура ЛокальнаяЦель() Экспорт КонецПроцедуры\n\
+             &НаКлиенте\n\
+             Процедура ЛокальныйОбработчик(Результат, Параметры) Экспорт КонецПроцедуры\n\
+             &НаКлиенте\n\
+             Процедура ОбновитьЭкран() Экспорт КонецПроцедуры",
         ),
         (
             "/src/CommonModules/Сервер/Ext/Module.bsl",
@@ -1328,6 +1337,33 @@ fn workspace_call_graph_via_index_matches_salsa_fold() {
         has(&|e| e.kind == EdgeKind::ManagerAccess
             && matches!(e.target, ResolvedTarget::Mdo { .. })),
         "platform find / absent manager method → Mdo + ManagerAccess"
+    );
+    // String-dispatched callbacks: ЭтотОбъект handler + exported cross-module handler
+    // both resolve to a NotifyRef method edge with StringResolved provenance.
+    assert_eq!(
+        caller
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::NotifyRef
+                && e.provenance == EdgeProvenance::StringResolved
+                && matches!(e.target, ResolvedTarget::Method(_)))
+            .count(),
+        2,
+        "ОписаниеОповещения(ЭтотОбъект) + ОписаниеОповещения(exported Сервер) → 2 NotifyRef methods"
+    );
+    assert!(
+        has(&|e| e.kind == EdgeKind::IdleHandler
+            && e.provenance == EdgeProvenance::StringResolved
+            && matches!(e.target, ResolvedTarget::Method(_))),
+        "ПодключитьОбработчикОжидания → IdleHandler method"
+    );
+    // The non-exported callback (Приватная) is surfaced VisibilityBlocked, never as an
+    // edge; the unsupported receiver (Объекты[0]) yields nothing at all.
+    assert!(
+        !has(&|e| e.kind == EdgeKind::NotifyRef
+            && matches!(&e.target, ResolvedTarget::Method(_))
+            && e.provenance == EdgeProvenance::VisibilityBlocked),
+        "VisibilityBlocked callbacks carry an Unresolved target, not a Method"
     );
 
     for &module in &modules {
@@ -1419,4 +1455,111 @@ fn project_batch_edges_resolves_across_batches() {
             "edge multiplicity differs between batched build and fold: {edge:?}"
         );
     }
+}
+
+#[test]
+fn event_subscription_links_to_its_exported_handler() {
+    use bsl_metadata::MdoType;
+    use hir::call_graph::{EdgeKind, EdgeProvenance, GraphNode};
+    use hir::graph_index::{project_workspace_subscription_edges, GraphBuildState, GraphIndex};
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("src/cf");
+    std::fs::create_dir_all(root.join("EventSubscriptions")).unwrap();
+    std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+    std::fs::write(
+        root.join("EventSubscriptions/ПриЗаписи.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <EventSubscription uuid="00000000-0000-0000-0000-000000000010">
+        <Properties>
+            <Name>ПриЗаписи</Name>
+            <Source><Type>cfg:CatalogObject.Номенклатура</Type></Source>
+            <Event>OnWrite</Event>
+            <Handler>CommonModule.ОбщийМодуль.Обработчик</Handler>
+        </Properties>
+    </EventSubscription>
+</MetaDataObject>"#,
+    )
+    .unwrap();
+
+    let mut db = RootDatabaseImpl::new();
+    db.set_all_config_paths(vec![(None, root.clone())]);
+
+    let file_id = FileId(0);
+    let file_path = root.join("CommonModules/ОбщийМодуль/Ext/Module.bsl");
+    let mut file_set = FileSet::new();
+    file_set.insert(file_id, VfsPath::new(file_path.to_string_lossy().as_ref()));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(file_id, SourceRootId(0));
+    db.set_file_text(file_id, "Процедура Обработчик(Источник, Отказ) Экспорт\nКонецПроцедуры");
+
+    let modules = [ModuleId::new(file_id)];
+    let pool = rayon::ThreadPoolBuilder::new().build().unwrap();
+    let mut index = GraphIndex::new();
+    index.add_batch(&pool, &db, &modules);
+
+    let mut state = GraphBuildState::new();
+    let edges = project_workspace_subscription_edges(&db, file_id, &index, &mut state);
+
+    let sub = edges
+        .iter()
+        .find(|e| e.kind == EdgeKind::EventSubscriptionRef)
+        .expect("the subscription handler resolves to one event_subscription edge");
+    assert_eq!(sub.provenance, EdgeProvenance::StringResolved);
+    assert!(
+        matches!(&sub.from, GraphNode::Mdo { mdo_type, object_name }
+            if *mdo_type == MdoType::EventSubscription && object_name.as_str() == "ПриЗаписи"),
+        "edge source is the subscription's Mdo node"
+    );
+    assert!(matches!(&sub.to, GraphNode::Method(_)), "edge target is the handler method");
+}
+
+#[test]
+fn event_subscription_with_missing_handler_yields_no_edge() {
+    use hir::call_graph::EdgeKind;
+    use hir::graph_index::{project_workspace_subscription_edges, GraphBuildState, GraphIndex};
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("src/cf");
+    std::fs::create_dir_all(root.join("EventSubscriptions")).unwrap();
+    std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+    std::fs::write(
+        root.join("EventSubscriptions/Сирота.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <EventSubscription uuid="00000000-0000-0000-0000-000000000011">
+        <Properties>
+            <Name>Сирота</Name>
+            <Event>OnWrite</Event>
+            <Handler>CommonModule.ОбщийМодуль.НетТакого</Handler>
+        </Properties>
+    </EventSubscription>
+</MetaDataObject>"#,
+    )
+    .unwrap();
+
+    let mut db = RootDatabaseImpl::new();
+    db.set_all_config_paths(vec![(None, root.clone())]);
+
+    let file_id = FileId(0);
+    let file_path = root.join("CommonModules/ОбщийМодуль/Ext/Module.bsl");
+    let mut file_set = FileSet::new();
+    file_set.insert(file_id, VfsPath::new(file_path.to_string_lossy().as_ref()));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(file_id, SourceRootId(0));
+    // Handler module exists but the named method does not → no edge.
+    db.set_file_text(file_id, "Процедура Другой() Экспорт\nКонецПроцедуры");
+
+    let modules = [ModuleId::new(file_id)];
+    let pool = rayon::ThreadPoolBuilder::new().build().unwrap();
+    let mut index = GraphIndex::new();
+    index.add_batch(&pool, &db, &modules);
+
+    let mut state = GraphBuildState::new();
+    let edges = project_workspace_subscription_edges(&db, file_id, &index, &mut state);
+    assert!(
+        !edges.iter().any(|e| e.kind == EdgeKind::EventSubscriptionRef),
+        "an unresolved handler must not produce an edge"
+    );
 }

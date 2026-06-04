@@ -365,6 +365,27 @@ pub fn resolve_module_summary_via_index(
         });
     }
 
+    // Resolve string-dispatched callbacks through the resident index, mirroring the
+    // qualified-call strategy above so the result is byte-identical to the Salsa fold.
+    let find_local = |name: &crate::name::Name| {
+        index.find_method(module, name).map(|m| MethodId { module, local_id: m.local_id })
+    };
+    let find_qualified =
+        |module_name: &crate::name::Name, method_name: &crate::name::Name| match resolver
+            .locate_common_module(db, module_name)
+        {
+            Ok(target_module) => match index.find_method(target_module, method_name) {
+                Some(m) if m.is_export => crate::queries::QualifiedLookup::Resolved(MethodId {
+                    module: target_module,
+                    local_id: m.local_id,
+                }),
+                Some(_) => crate::queries::QualifiedLookup::VisibilityBlocked,
+                None => crate::queries::QualifiedLookup::Absent,
+            },
+            Err(_) => crate::queries::QualifiedLookup::Absent,
+        };
+    edges.extend(crate::queries::resolve_callback_edges(&summary, find_local, find_qualified));
+
     ResolvedModuleSummary { module, edges }
 }
 
@@ -459,6 +480,20 @@ pub fn extract_unresolved_refs(
                 }
             }
             _ => {}
+        }
+    }
+    // A `Новый ОписаниеОповещения("Метод", ОбщийМодуль)` whose handler is currently
+    // missing or non-exported: record it so that exporting/adding the method later
+    // triggers an incremental reproject of the callback edge. `ЭтотОбъект` and idle
+    // handlers target the current module and are already covered by the module's own
+    // `module_call_summary` invalidation.
+    for reg in &summary.notify_regs {
+        if let crate::call_graph::NotifyTarget::Module(module_name) = &reg.target {
+            if let Ok(target) = resolver.locate_common_module(db, module_name) {
+                if unresolved(index.find_method(target, &reg.callback_name)) {
+                    out.push((target, reg.callback_name.as_str().to_lowercase()));
+                }
+            }
         }
     }
     out
@@ -1059,6 +1094,72 @@ pub fn project_workspace_catalog_edges<DB: ConfigsDatabase>(
     edges
 }
 
+/// Project event-subscription handler edges: each `ПодпискаНаСобытие` links its
+/// subscription node (`Mdo{EventSubscription, name}`) to the exported common-module
+/// method named in its handler. Config-level and full-build only, like the catalog
+/// pass — the only edits that can invalidate such an edge (the handler method being
+/// added, removed, renamed, or its `Экспорт` toggled) all change the handler module's
+/// [`GraphIndex::module_sig_hash`], which fails the body-only precondition and forces a
+/// full rebuild rather than a body-only reproject. A handler that does not resolve to an
+/// exported method yields no edge (and hence no subscription node), mirroring every
+/// other unresolved target.
+pub fn project_workspace_subscription_edges<DB: ConfigsDatabase>(
+    db: &DB,
+    representative: FileId,
+    index: &GraphIndex,
+    state: &mut GraphBuildState,
+) -> Vec<WorkspaceCallEdge> {
+    // Resolve the handler's common module by name through the source-root module index,
+    // not the visibility-gated resolver: a subscription's handler is named by
+    // configuration metadata and is referenced regardless of code-visibility scoping,
+    // matching the `MissingEventSubscriptionHandler` diagnostic's "anywhere" lookup.
+    let source_root_id = db.file_source_root_input(representative).source_root_id(db);
+    let module_index = db.module_index(source_root_id);
+
+    // Collect (subscription, handler module, handler method) deterministically so the
+    // shared canonicalization sees a load-order-independent first-seen spelling.
+    let mut subs: Vec<(String, crate::name::Name, crate::name::Name)> = Vec::new();
+    for visible in db.configurations(representative) {
+        for sub in visible.configuration.event_subscriptions() {
+            let Some(handler) = sub.parse_handler() else { continue };
+            if handler.method_name.is_empty() {
+                continue;
+            }
+            subs.push((
+                sub.name().to_string(),
+                crate::name::Name::new(&handler.module_name),
+                crate::name::Name::new(&handler.method_name),
+            ));
+        }
+    }
+    subs.sort();
+    subs.dedup();
+
+    let mut edges = Vec::new();
+    let mut seen: FxHashSet<(GraphNode, GraphNode)> = FxHashSet::default();
+    for (sub_name, module_name, method_name) in &subs {
+        let Some(handler_file) = module_index.resolve_common_module(module_name) else { continue };
+        let module_id = ModuleId::new(handler_file);
+        let Some(m) = index.find_method(module_id, method_name) else { continue };
+        if !m.is_export {
+            continue;
+        }
+        let object_name = state.mdo_canonical.canonical(MdoType::EventSubscription, sub_name);
+        let from = GraphNode::Mdo { mdo_type: MdoType::EventSubscription, object_name };
+        let to = GraphNode::Method(MethodId { module: module_id, local_id: m.local_id });
+        if seen.insert((from.clone(), to.clone())) {
+            edges.push(WorkspaceCallEdge {
+                from,
+                to,
+                kind: EdgeKind::EventSubscriptionRef,
+                provenance: EdgeProvenance::StringResolved,
+                crosses_client_to_server: false,
+            });
+        }
+    }
+    edges
+}
+
 fn contains_edge(from: GraphNode, to: GraphNode) -> WorkspaceCallEdge {
     WorkspaceCallEdge {
         from,
@@ -1192,6 +1293,9 @@ fn edge_kind_label(kind: EdgeKind) -> &'static str {
         EdgeKind::QueryRef => "query_ref",
         EdgeKind::Contains => "contains",
         EdgeKind::DataBinding => "data_binding",
+        EdgeKind::NotifyRef => "notify_ref",
+        EdgeKind::IdleHandler => "idle_handler",
+        EdgeKind::EventSubscriptionRef => "event_subscription",
     }
 }
 
@@ -1224,6 +1328,7 @@ fn provenance_label(p: EdgeProvenance) -> &'static str {
         EdgeProvenance::Inferred => "inferred",
         EdgeProvenance::VisibilityBlocked => "visibility_blocked",
         EdgeProvenance::Unresolved => "unresolved",
+        EdgeProvenance::StringResolved => "string_resolved",
     }
 }
 

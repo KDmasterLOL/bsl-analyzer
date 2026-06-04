@@ -127,7 +127,10 @@ fn get_plural_collection_name(
         MdoType::Constant => Some(("константы", "constants")),
         MdoType::DataProcessor => Some(("обработки", "dataprocessors")),
         MdoType::Report => Some(("отчеты", "reports")),
-        MdoType::Cube | MdoType::DimensionTable | MdoType::CommonModule => None,
+        MdoType::Cube
+        | MdoType::DimensionTable
+        | MdoType::CommonModule
+        | MdoType::EventSubscription => None,
     }
 }
 

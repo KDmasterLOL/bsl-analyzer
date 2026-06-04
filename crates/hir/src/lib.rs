@@ -52,8 +52,8 @@ pub use hir_def::DefDatabase;
 
 pub use hir_def::call_graph;
 pub use hir_def::call_graph::{
-    EdgeProvenance, GraphNode, ModuleCallSummary, ResolvedCallEdge, ResolvedModuleSummary,
-    ResolvedTarget, WorkspaceCallEdge, WorkspaceCallGraph,
+    EdgeProvenance, GraphNode, ModuleCallSummary, NotifyTarget, ResolvedCallEdge,
+    ResolvedModuleSummary, ResolvedTarget, WorkspaceCallEdge, WorkspaceCallGraph,
 };
 pub use hir_def::docs::{
     is_dotted_type_reference, MethodDocs, ParameterDoc, TypeDoc, VariableDocs,

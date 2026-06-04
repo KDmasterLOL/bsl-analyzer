@@ -28,6 +28,12 @@ pub enum MdoType {
     DataProcessor,
     Report,
     CommonModule,
+    /// An event subscription (`ПодпискаНаСобытие`). Unlike the data-bearing objects
+    /// above it has no manager, ref type, or attributes — it only binds a platform
+    /// event to a handler method. It is deliberately excluded from [`MdoType::all`]
+    /// so it never surfaces in metadata-object enumeration/completion, and every
+    /// type-facing mapping (manager prefix, `MetadataKind`) yields `None` for it.
+    EventSubscription,
 }
 
 impl FromStr for MdoType {
@@ -67,6 +73,9 @@ impl FromStr for MdoType {
             "обработка" | "dataprocessor" => Ok(Self::DataProcessor),
             "отчет" | "report" => Ok(Self::Report),
             "общиймодуль" | "commonmodule" => Ok(Self::CommonModule),
+            "подписканасобытие" | "eventsubscription" => {
+                Ok(Self::EventSubscription)
+            }
             _ => Err(format!("Unknown MDO type: {}", s)),
         }
     }
@@ -95,6 +104,7 @@ impl MdoType {
             Self::DataProcessor => "Обработка",
             Self::Report => "Отчет",
             Self::CommonModule => "ОбщийМодуль",
+            Self::EventSubscription => "ПодпискаНаСобытие",
         }
     }
 
@@ -120,6 +130,7 @@ impl MdoType {
             Self::DataProcessor => "DataProcessor",
             Self::Report => "Report",
             Self::CommonModule => "CommonModule",
+            Self::EventSubscription => "EventSubscription",
         }
     }
 
@@ -237,7 +248,9 @@ impl MdoType {
             Self::Constant => Some("ConstantManager"),
             Self::DataProcessor => Some("DataProcessorManager"),
             Self::Report => Some("ReportManager"),
-            Self::Cube | Self::DimensionTable | Self::CommonModule => None,
+            Self::Cube | Self::DimensionTable | Self::CommonModule | Self::EventSubscription => {
+                None
+            }
         }
     }
 
@@ -260,7 +273,9 @@ impl MdoType {
             Self::Constant => Some("КонстантаМенеджер"),
             Self::DataProcessor => Some("ОбработкаМенеджер"),
             Self::Report => Some("ОтчетМенеджер"),
-            Self::Cube | Self::DimensionTable | Self::CommonModule => None,
+            Self::Cube | Self::DimensionTable | Self::CommonModule | Self::EventSubscription => {
+                None
+            }
         }
     }
 
@@ -846,6 +861,18 @@ mod tests {
     fn test_mdo_type_names() {
         assert_eq!(MdoType::Catalog.russian_name(), "Справочник");
         assert_eq!(MdoType::Catalog.english_name(), "Catalog");
+    }
+
+    #[test]
+    fn test_event_subscription_parses_and_names_but_is_typeless() {
+        assert_eq!("ПодпискаНаСобытие".parse::<MdoType>().ok(), Some(MdoType::EventSubscription));
+        assert_eq!("EventSubscription".parse::<MdoType>().ok(), Some(MdoType::EventSubscription));
+        assert_eq!(MdoType::EventSubscription.russian_name(), "ПодпискаНаСобытие");
+        assert_eq!(MdoType::EventSubscription.english_name(), "EventSubscription");
+        // Not a data-bearing object: no manager and no ref/object MetadataKind.
+        assert_eq!(MdoType::EventSubscription.manager_type_prefix(), None);
+        // Excluded from the enumerated set so it never surfaces in MDO completion.
+        assert!(!MdoType::all().contains(&MdoType::EventSubscription));
     }
 
     #[test]

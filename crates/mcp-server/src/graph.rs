@@ -125,6 +125,24 @@ pub(crate) struct Freshness {
     pub reload: &'static str,
 }
 
+/// The graph's lifecycle snapshot for the `status` action — the parallel of the
+/// `diagnostics` status, so an agent can start the lazy build and poll its progress
+/// instead of polling a data action and reading a flat `loading` envelope.
+pub(crate) struct GraphStatusReport {
+    /// `disabled` | `loading` | `ready` | `failed`.
+    pub state: &'static str,
+    /// Indexed `.bsl` file count (when `ready`).
+    pub files: Option<usize>,
+    /// Served snapshot generation (when `ready`).
+    pub revision: Option<u64>,
+    /// Whether the workspace drifted on disk since the build (when `ready`).
+    pub stale: Option<bool>,
+    /// Background reload state `none`/`running`/`failed` (when `ready`).
+    pub reload: Option<&'static str>,
+    /// Failure message (when `failed`).
+    pub error: Option<String>,
+}
+
 /// Handle to the workspace call graph. Cheap to clone (shared `Arc`s).
 ///
 /// Loading is lazy: the SQLite graph is built off the workspace on first use, so a
@@ -160,6 +178,40 @@ impl GraphState {
 
     pub(crate) fn status(&self) -> GraphStatus {
         lock_recover(&self.inner).status.clone()
+    }
+
+    /// Lifecycle snapshot for the `status` action. For a ready graph it also reports the
+    /// served revision and on-disk freshness (and, like every freshness check, kicks an async
+    /// reload on drift) — so this walks the filesystem and must be called from a blocking
+    /// context. A `Ready` status whose snapshot momentarily cannot be opened is reported as
+    /// `loading` (a reload is renaming the file into place), never as a torn read.
+    pub(crate) fn status_report(&self) -> GraphStatusReport {
+        let report = |state: &'static str| GraphStatusReport {
+            state,
+            files: None,
+            revision: None,
+            stale: None,
+            reload: None,
+            error: None,
+        };
+        match self.status() {
+            GraphStatus::Disabled => report("disabled"),
+            GraphStatus::Idle | GraphStatus::Loading => report("loading"),
+            GraphStatus::Failed(msg) => GraphStatusReport { error: Some(msg), ..report("failed") },
+            GraphStatus::Ready { files } => match self.snapshot() {
+                Some(snapshot) => {
+                    let freshness = self.freshness(&snapshot);
+                    GraphStatusReport {
+                        files: Some(files),
+                        revision: Some(freshness.revision),
+                        stale: Some(freshness.stale),
+                        reload: Some(freshness.reload),
+                        ..report("ready")
+                    }
+                }
+                None => report("loading"),
+            },
+        }
     }
 
     /// Trigger the background load if this is the first call. Transitions
