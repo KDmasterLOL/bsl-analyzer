@@ -480,7 +480,7 @@ fn forms_in_container(
             .map_err(|e| McpError::internal_error(format!("Ошибка чтения формы: {e}"), None))?;
         let form = bsl_metadata::xml_parser::parse_form_xml(&xml)
             .map_err(|e| McpError::internal_error(format!("Ошибка разбора формы: {e}"), None))?;
-        Ok(CallToolResult::success(vec![Content::text(format_form(&form))]))
+        Ok(CallToolResult::success(vec![Content::text(format_form(&form, Some(fname)))]))
     } else {
         let mut form_names = Vec::new();
         if let Ok(entries) = std::fs::read_dir(container) {
@@ -508,10 +508,25 @@ fn forms_in_container(
     }
 }
 
-fn format_form(form: &bsl_metadata::Form) -> String {
-    let mut out = format!("# Форма: {}\n\n", form.name());
+/// Render a parsed form. `requested_name` is the form name the caller asked for: `Ext/Form.xml`
+/// holds the managed-form *content* (items, attributes, handlers) but not the form's own name or
+/// UUID — those live in the parent object's metadata — so the parsed name is usually empty and
+/// the UUID nil. Fall back to the requested name for the heading, and label a nil UUID as
+/// unavailable instead of printing a misleading all-zero one.
+fn format_form(form: &bsl_metadata::Form, requested_name: Option<&str>) -> String {
+    let title = match (form.name(), requested_name) {
+        (name, _) if !name.is_empty() => name,
+        (_, Some(requested)) => requested,
+        (_, None) => "<имя недоступно>",
+    };
+    let mut out = format!("# Форма: {title}\n\n");
     let _ = writeln!(out, "- Тип: {:?}", form.form_type());
-    let _ = writeln!(out, "- UUID: {}", form.uuid());
+    let uuid = form.uuid();
+    if uuid.is_nil() {
+        let _ = writeln!(out, "- UUID: недоступен (хранится в метаданных объекта, не в Form.xml)");
+    } else {
+        let _ = writeln!(out, "- UUID: {uuid}");
+    }
 
     if !form.attributes.is_empty() {
         let _ = writeln!(out, "\n## Реквизиты формы ({})\n", form.attributes.len());
@@ -796,6 +811,15 @@ mod tests {
         let text = extract_text(&result);
 
         assert!(text.contains("# Форма:"), "should have form header");
+        // The heading carries a name (parsed, or the requested form name as fallback when
+        // Ext/Form.xml omits it), never a blank title.
+        assert!(!text.contains("# Форма: \n"), "heading must not be blank: {text}");
+        // A nil UUID (the common case — Form.xml carries no UUID) is labelled, never printed as
+        // a misleading all-zero UUID.
+        assert!(
+            !text.contains("00000000-0000-0000-0000-000000000000"),
+            "nil UUID must be labelled, not printed as zeros: {text}",
+        );
     }
 
     #[test]
