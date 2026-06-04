@@ -830,9 +830,13 @@ impl GraphDb {
 
         for id in ids {
             let item = match self.resolve_stored(id)? {
-                Err(err) => {
-                    SourceItem { id: id.clone(), source: None, error: Some(err), truncated: false }
-                }
+                Err(err) => SourceItem {
+                    id: id.clone(),
+                    source: None,
+                    error: Some(err),
+                    truncated: false,
+                    skipped_budget_exhausted: false,
+                },
                 Ok(n) if n.kind != "method" => {
                     let reason = if n.kind == "module" {
                         "module-body source is not served; request a method"
@@ -847,6 +851,7 @@ impl GraphDb {
                             reason: reason.into(),
                         }),
                         truncated: false,
+                        skipped_budget_exhausted: false,
                     }
                 }
                 Ok(n) => match (n.file.as_deref(), n.src_start, n.src_end) {
@@ -858,6 +863,7 @@ impl GraphDb {
                                 source: None,
                                 error: None,
                                 truncated: true,
+                                skipped_budget_exhausted: true,
                             }
                         }
                         Some(src) => {
@@ -870,6 +876,7 @@ impl GraphDb {
                                 source: Some(text),
                                 error: None,
                                 truncated,
+                                skipped_budget_exhausted: false,
                             }
                         }
                         None => SourceItem {
@@ -877,6 +884,7 @@ impl GraphDb {
                             source: None,
                             error: Some(GraphError::NotFound { id: id.clone() }),
                             truncated: false,
+                            skipped_budget_exhausted: false,
                         },
                     },
                     _ => SourceItem {
@@ -884,6 +892,7 @@ impl GraphDb {
                         source: None,
                         error: Some(GraphError::NotFound { id: id.clone() }),
                         truncated: false,
+                        skipped_budget_exhausted: false,
                     },
                 },
             };

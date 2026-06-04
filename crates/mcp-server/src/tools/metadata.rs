@@ -88,10 +88,45 @@ fn format_summary_tree(config: &Configuration) -> Result<CallToolResult, McpErro
     Ok(CallToolResult::success(vec![Content::text(out)]))
 }
 
+/// Map a user-supplied category filter to a canonical category the tree understands.
+///
+/// The strict [`MdoType`] parser only knows the singular RU/EN names (`Справочник`/`Catalog`),
+/// but an agent naturally tries the on-disk directory / plural forms (`Catalogs`, `Справочники`)
+/// or over-qualifies a category with an object (`Справочник.Пользователи`). Normalise those to
+/// the singular so the filter just works instead of erroring on a reasonable input.
+fn normalize_filter_category(raw: &str) -> String {
+    // `Справочник.Пользователи` — a category over-qualified with an object name; keep the head.
+    let head = raw.split('.').next().unwrap_or(raw).trim();
+    // English plurals ARE the directory names (`Catalogs`, `Documents`); stripping a trailing
+    // ASCII `s` recovers the singular the parser knows, with no per-type table to maintain.
+    let depluralised = head.strip_suffix('s').filter(|s| !s.is_empty());
+    if let Some(en) = depluralised {
+        if en.parse::<MdoType>().is_ok() {
+            return en.to_string();
+        }
+    }
+    // Russian plurals the parser does not enumerate (the few categories an agent commonly asks
+    // for by plural). Anything else passes through unchanged for the parser / special-case match.
+    match head.to_lowercase().as_str() {
+        "справочники" => "Справочник".to_string(),
+        "документы" => "Документ".to_string(),
+        "отчеты" | "отчёты" => "Отчет".to_string(),
+        "обработки" => "Обработка".to_string(),
+        "перечисления" => "Перечисление".to_string(),
+        "задачи" => "Задача".to_string(),
+        "константы" => "Константа".to_string(),
+        "бизнеспроцессы" => "БизнесПроцесс".to_string(),
+        "планыобмена" => "ПланОбмена".to_string(),
+        _ => head.to_string(),
+    }
+}
+
 fn format_filtered_tree(
     config: &Configuration,
-    category: &str,
+    raw_category: &str,
 ) -> Result<CallToolResult, McpError> {
+    let category = normalize_filter_category(raw_category);
+    let category = category.as_str();
     let mut out = String::new();
     let mut found = false;
 
@@ -173,7 +208,7 @@ fn format_filtered_tree(
 
     if !found {
         return Err(McpError::invalid_params(
-            format!("Категория '{category}' не найдена. Вызовите get_metadata_tree без фильтра для списка категорий."),
+            format!("Категория '{raw_category}' не найдена. Вызовите get_metadata_tree без фильтра для списка категорий."),
             None,
         ));
     }
@@ -599,6 +634,36 @@ mod tests {
 
         assert!(text.contains("Справочник"), "should have category name");
         assert!(text.contains("Справочник1"), "should list Справочник1");
+    }
+
+    #[test]
+    fn filter_category_accepts_plural_and_overqualified_aliases() {
+        // English directory/plural form.
+        assert_eq!(normalize_filter_category("Catalogs"), "Catalog");
+        assert_eq!(normalize_filter_category("Documents"), "Document");
+        // Russian plural.
+        assert_eq!(normalize_filter_category("Справочники"), "Справочник");
+        assert_eq!(normalize_filter_category("Отчёты"), "Отчет");
+        // Over-qualified with an object name — keep the category head.
+        assert_eq!(normalize_filter_category("Справочник.Пользователи"), "Справочник");
+        // The canonical singular passes through untouched.
+        assert_eq!(normalize_filter_category("Справочник"), "Справочник");
+        // A non-plural unknown is left for the parser / special-case match to handle.
+        assert_eq!(normalize_filter_category("ОбщиеМодули"), "ОбщиеМодули");
+    }
+
+    #[test]
+    fn test_metadata_tree_filter_plural_and_dotted_resolve() {
+        let config = fixture_config();
+        for input in ["Catalogs", "Справочники", "Справочник.Справочник1"]
+        {
+            let result = get_metadata_tree(&config, &[], Some(input.into())).unwrap();
+            let text = extract_text(&result);
+            assert!(
+                text.contains("Справочник1"),
+                "filter `{input}` should list Справочник1: {text}"
+            );
+        }
     }
 
     #[test]

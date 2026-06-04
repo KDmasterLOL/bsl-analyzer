@@ -1,8 +1,27 @@
 use crate::state::SharedState;
+use crate::tools::response::structured;
 use rmcp::model::{CallToolResult, Content};
 use rmcp::ErrorData as McpError;
+use serde_json::json;
 use std::collections::HashMap;
 use std::fmt::Write;
+
+/// Static contract for cold-start discovery, mirroring `graph`/`diagnostics` schema so the
+/// query tool is self-describing instead of revealing its actions only through an error.
+pub fn schema() -> CallToolResult {
+    structured(json!({
+        "schema_version": "1",
+        "actions": ["validate", "execute", "schema"],
+        "validate": "syntax-check an SDBL query. Works offline via the local parser; with --onec-url it additionally runs live platform validation.",
+        "execute": "run a SELECT query against the live 1C base (requires --onec-url). `limit` caps rows; `parameters` binds named query parameters.",
+        "params": {
+            "query": "the SDBL text (required for validate and execute)",
+            "limit": "max rows for execute (optional)",
+            "parameters": "object of name → value bindings for execute (optional)"
+        },
+        "prerequisites": "validate needs nothing for offline syntax checks; execute (and live validation) need --onec-url / --onec-user / --onec-password"
+    }))
+}
 
 pub async fn validate_query(state: &SharedState, query: &str) -> Result<CallToolResult, McpError> {
     if query.trim().is_empty() {
@@ -159,6 +178,19 @@ mod tests {
 
     fn extract_text(result: &CallToolResult) -> &str {
         result.content[0].raw.as_text().expect("expected text content").text.as_str()
+    }
+
+    #[test]
+    fn schema_advertises_every_action() {
+        let result = schema();
+        let body = result.structured_content.expect("schema is structured");
+        let actions = body["actions"].as_array().expect("actions array");
+        for action in ["validate", "execute", "schema"] {
+            assert!(
+                actions.iter().any(|a| a == action),
+                "schema must advertise `{action}`: {body}",
+            );
+        }
     }
 
     #[test]

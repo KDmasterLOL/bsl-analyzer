@@ -191,6 +191,11 @@ pub struct SourceItem {
     /// The source was cut short to stay within the output budget.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub truncated: bool,
+    /// No source at all was served because an earlier item already exhausted the budget —
+    /// distinct from a method that genuinely has no body. Retry with a larger
+    /// `max_output_tokens` or request this id alone.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub skipped_budget_exhausted: bool,
 }
 
 /// Budgeted source for a set of nodes.
@@ -1367,9 +1372,13 @@ impl<'a> GraphCtx<'a> {
 
         for id in ids {
             let item = match self.resolve_id(id) {
-                Err(err) => {
-                    SourceItem { id: id.clone(), source: None, error: Some(err), truncated: false }
-                }
+                Err(err) => SourceItem {
+                    id: id.clone(),
+                    source: None,
+                    error: Some(err),
+                    truncated: false,
+                    skipped_budget_exhausted: false,
+                },
                 Ok(GraphNode::Method(method)) => match self.method_source(method) {
                     Some(src) => {
                         if used >= budget_chars {
@@ -1379,6 +1388,7 @@ impl<'a> GraphCtx<'a> {
                                 source: None,
                                 error: None,
                                 truncated: true,
+                                skipped_budget_exhausted: true,
                             }
                         } else {
                             let remaining = budget_chars - used;
@@ -1390,6 +1400,7 @@ impl<'a> GraphCtx<'a> {
                                 source: Some(text),
                                 error: None,
                                 truncated,
+                                skipped_budget_exhausted: false,
                             }
                         }
                     }
@@ -1398,6 +1409,7 @@ impl<'a> GraphCtx<'a> {
                         source: None,
                         error: Some(GraphError::NotFound { id: id.clone() }),
                         truncated: false,
+                        skipped_budget_exhausted: false,
                     },
                 },
                 Ok(GraphNode::ModuleCode(_)) => SourceItem {
@@ -1408,6 +1420,7 @@ impl<'a> GraphCtx<'a> {
                         reason: "module-body source is not served; request a method".to_string(),
                     }),
                     truncated: false,
+                    skipped_budget_exhausted: false,
                 },
                 Ok(GraphNode::Mdo { .. })
                 | Ok(GraphNode::Attribute { .. })
@@ -1423,6 +1436,7 @@ impl<'a> GraphCtx<'a> {
                         reason: "a metadata node has no source; request a method".to_string(),
                     }),
                     truncated: false,
+                    skipped_budget_exhausted: false,
                 },
             };
             items.push(item);
@@ -2570,6 +2584,31 @@ mod tests {
             result.items.iter().filter_map(|i| i.source.as_ref()).map(String::len).sum();
         assert!(emitted <= 4, "emitted {emitted} bytes must stay within the 4-byte budget");
         assert!(result.items.iter().all(|i| i.truncated || i.source.is_none()));
+    }
+
+    #[test]
+    fn source_item_skipped_budget_flag_serializes_only_when_set() {
+        // A budget-skipped item carries the flag so a client does not misread its absent
+        // source as a method with no body; an ordinary item omits the flag entirely.
+        let skipped = SourceItem {
+            id: "method/common/М/А".to_string(),
+            source: None,
+            error: None,
+            truncated: true,
+            skipped_budget_exhausted: true,
+        };
+        let v = serde_json::to_value(&skipped).unwrap();
+        assert_eq!(v["skipped_budget_exhausted"], serde_json::json!(true));
+
+        let served = SourceItem {
+            id: "method/common/М/Б".to_string(),
+            source: Some("Процедура Б() КонецПроцедуры".to_string()),
+            error: None,
+            truncated: false,
+            skipped_budget_exhausted: false,
+        };
+        let v = serde_json::to_value(&served).unwrap();
+        assert!(v.get("skipped_budget_exhausted").is_none(), "flag must be omitted when false");
     }
 
     #[test]

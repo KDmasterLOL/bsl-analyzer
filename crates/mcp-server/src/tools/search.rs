@@ -232,6 +232,19 @@ fn semantic_code_hits(
     Ok(CodeHits::Ready { hits, workspace_root })
 }
 
+/// Append live indexing progress to a "still building" message so the failed `search_code`
+/// response carries the same signal as `search(status)`, instead of a flat "try again" that
+/// hides whether the build is progressing or stuck.
+fn with_index_progress(message: String, progress: &IndexProgress) -> String {
+    if progress.is_active() {
+        let done_b = progress.done_batches.load(Ordering::Relaxed);
+        let total_b = progress.total_batches.load(Ordering::Relaxed);
+        format!("{message} (indexing {}% — {done_b}/{total_b} batches)", progress.percent())
+    } else {
+        message
+    }
+}
+
 /// The unified code search: run lexical and semantic, fuse by RRF, and degrade to lexical
 /// (with a trailing note) when semantic cannot serve. This is what the `search_code` action
 /// dispatches to.
@@ -246,6 +259,7 @@ pub fn hybrid_code(
     configured_baseline: Option<&ConfiguredBaselineStatus>,
     external_baseline: Option<Arc<ExternalBaselineService>>,
     graph_root: Option<&Path>,
+    index_progress: &IndexProgress,
     query: &str,
     limit: usize,
 ) -> Result<CallToolResult, McpError> {
@@ -266,14 +280,18 @@ pub fn hybrid_code(
         // Lexical is the floor: if it cannot serve yet, the whole search cannot — emit its
         // message unchanged rather than claiming a (nonexistent) lexical-only result.
         CodeHits::Pending(message) => {
-            return Ok(CallToolResult::success(vec![Content::text(message)]));
+            return Ok(CallToolResult::success(vec![Content::text(with_index_progress(
+                message,
+                index_progress,
+            ))]));
         }
         // Lexical search is always available, so it never reports a semantic shortfall; treat
         // it defensively as "still building".
         CodeHits::Unavailable(_) => {
-            return Ok(CallToolResult::success(vec![Content::text(
+            return Ok(CallToolResult::success(vec![Content::text(with_index_progress(
                 "Search index is being built, please try again in a moment.".to_owned(),
-            )]));
+                index_progress,
+            ))]));
         }
     };
 
@@ -1485,6 +1503,24 @@ mod tests {
     }
 
     #[test]
+    fn index_progress_suffix_appended_only_when_active() {
+        use std::sync::atomic::Ordering;
+        let progress = IndexProgress::new();
+        // Inactive → message unchanged (no misleading 0% appended).
+        assert_eq!(super::with_index_progress("building".to_owned(), &progress), "building");
+        // Active → the percent + batch counts from `search(status)` are surfaced inline.
+        progress.active.store(true, Ordering::Relaxed);
+        progress.total_chunks.store(100, Ordering::Relaxed);
+        progress.done_chunks.store(77, Ordering::Relaxed);
+        progress.total_batches.store(10, Ordering::Relaxed);
+        progress.done_batches.store(7, Ordering::Relaxed);
+        assert_eq!(
+            super::with_index_progress("building".to_owned(), &progress),
+            "building (indexing 77% — 7/10 batches)",
+        );
+    }
+
+    #[test]
     fn graph_id_bridges_method_hits_in_modules() {
         // The graph was built from the repo root; the search engine indexes paths relative to
         // the nested configuration root (`src/cf`). These are the two roots the bridge spans.
@@ -1982,6 +2018,7 @@ mod tests {
             None,
             None,
             None,
+            &IndexProgress::new(),
             "ПроверитьИНН",
             10,
         )
@@ -2066,6 +2103,7 @@ mod tests {
             Some(&configured),
             None,
             None,
+            &IndexProgress::new(),
             "Процедура",
             10,
         )
@@ -2099,6 +2137,7 @@ mod tests {
             }),
             None,
             None,
+            &IndexProgress::new(),
             "ТестоваПроцедура",
             10,
         )
@@ -2140,6 +2179,7 @@ mod tests {
             }),
             Some(retryable_postgres_source()),
             None,
+            &IndexProgress::new(),
             "ТестоваПроцедура",
             10,
         )
@@ -2175,6 +2215,7 @@ mod tests {
             }),
             Some(retryable_postgres_source()),
             None,
+            &IndexProgress::new(),
             "НесуществующееСлово",
             10,
         )

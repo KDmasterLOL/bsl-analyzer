@@ -63,7 +63,8 @@ struct SyntaxHelpParams {
 #[derive(Deserialize, JsonSchema)]
 struct QueryParams {
     action: String,
-    query: String,
+    /// SDBL text — required for `validate`/`execute`, omitted for `schema`.
+    query: Option<String>,
     limit: Option<u32>,
     parameters: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
@@ -278,6 +279,7 @@ impl McpServer {
                 // The graph keys file ids against the repo (workspace) root; pass it so search
                 // can mint form/file `graph_id`s with the same `src/cf/…` prefix the graph uses.
                 let graph_root = self.state.workspace_root().cloned();
+                let index_progress = self.state.index_progress().clone();
                 tokio::task::spawn_blocking(move || {
                     tools::search::hybrid_code(
                         &engine,
@@ -286,6 +288,7 @@ impl McpServer {
                         configured_baseline.as_ref(),
                         external_baseline,
                         graph_root.as_deref(),
+                        &index_progress,
                         &query,
                         limit,
                     )
@@ -304,12 +307,17 @@ impl McpServer {
     async fn query(&self, params: Parameters<QueryParams>) -> Result<CallToolResult, McpError> {
         let p = params.0;
         match p.action.as_str() {
-            "validate" => tools::query::validate_query(&self.state, &p.query).await,
+            "schema" => Ok(tools::query::schema()),
+            "validate" => {
+                let query = require(p.query, "query", "validate")?;
+                tools::query::validate_query(&self.state, &query).await
+            }
             "execute" => {
-                tools::query::execute_query(&self.state, &p.query, p.limit, p.parameters).await
+                let query = require(p.query, "query", "execute")?;
+                tools::query::execute_query(&self.state, &query, p.limit, p.parameters).await
             }
             other => Err(McpError::invalid_params(
-                format!("Unknown action '{other}'. Expected: validate, execute"),
+                format!("Unknown action '{other}'. Expected: validate, execute, schema"),
                 None,
             )),
         }

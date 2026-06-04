@@ -16,7 +16,7 @@
 | `workspace` | `search(action=search_code\|status)` | поиск по коду проекта (лексика + семантика, RRF-фузия) | `EMBEDDING_URL` включает семантику; без него работает лексика |
 | `workspace` | `graph` | граф вызовов: `overview`, `schema`, `node`, `source`, `neighbors`, `callers`, `callees`, `resolve` | `--source-dir` |
 | `workspace` | `diagnostics` | диагностики кода: `catalog`/`schema` (без базы), `file` (находки по файлу), `workspace` (агрегаты по конфигурации) | `--source-dir` |
-| `workspace` | `query` | `validate` для SDBL, а также `execute` для `SELECT` | `--onec-url` нужен для live-валидации через платформу и для `execute` |
+| `workspace` | `query` | `schema` (контракт без базы), `validate` для SDBL, а также `execute` для `SELECT` | `--onec-url` нужен для live-валидации через платформу и для `execute` |
 | `workspace` | `execute` | `check`, `run`, `eval` для BSL-кода | `--onec-url` нужен для `run` и `eval` |
 | `workspace` | `debug` | attach, breakpoints, step, stack trace, locals, eval | `--onec-url` и доступ к отладочному контуру |
 
