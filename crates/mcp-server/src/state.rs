@@ -21,6 +21,10 @@ pub struct SharedState {
     configuration: Arc<RwLock<Option<Configuration>>>,
     extensions: Arc<RwLock<Vec<(String, Configuration)>>>,
     workspace_root: Option<PathBuf>,
+    /// The configuration root (the `Configuration.xml`-bearing directory, e.g. `src/cf`),
+    /// which may be nested under `workspace_root`. File-tree lookups such as
+    /// `metadata(form)` resolve object directories relative to THIS root, not the repo root.
+    source_root: Option<PathBuf>,
     onec_client: Option<OnecClient>,
     debug_session: Arc<Mutex<Option<bsl_debug::session::DebugSession>>>,
     search_engine: Arc<Mutex<Option<SearchEngine>>>,
@@ -57,6 +61,7 @@ impl SharedState {
     pub fn workspace(source_dir: PathBuf) -> Self {
         let project = project_model::Project::new(&source_dir);
         let config_path = project.source_path();
+        let source_root = config_path.to_path_buf();
         let configuration = bsl_metadata::load_from_directory(config_path)
             .map_err(|e| {
                 tracing::warn!(?config_path, "failed to load configuration: {e}");
@@ -124,6 +129,7 @@ impl SharedState {
             configuration: Arc::new(RwLock::new(configuration)),
             extensions: Arc::new(RwLock::new(extensions)),
             workspace_root: Some(source_dir),
+            source_root: Some(source_root),
             onec_client: None,
             debug_session: Arc::new(Mutex::new(None)),
             search_engine,
@@ -266,6 +272,7 @@ impl SharedState {
             configuration: Arc::new(RwLock::new(None)),
             extensions: Arc::new(RwLock::new(Vec::new())),
             workspace_root: None,
+            source_root: None,
             onec_client: None,
             debug_session: Arc::new(Mutex::new(None)),
             search_engine,
@@ -284,6 +291,7 @@ impl SharedState {
             configuration: Arc::new(RwLock::new(None)),
             extensions: Arc::new(RwLock::new(Vec::new())),
             workspace_root: None,
+            source_root: None,
             onec_client: None,
             debug_session: Arc::new(Mutex::new(None)),
             search_engine: Arc::new(Mutex::new(None)),
@@ -356,6 +364,13 @@ impl SharedState {
 
     pub fn workspace_root(&self) -> Option<&PathBuf> {
         self.workspace_root.as_ref()
+    }
+
+    /// The configuration root (`Configuration.xml`-bearing directory, e.g. `src/cf`), under
+    /// which metadata object directories live. Falls back to `workspace_root` when no nested
+    /// configuration root was discovered (a flat layout where the two coincide).
+    pub fn source_root(&self) -> Option<&PathBuf> {
+        self.source_root.as_ref().or(self.workspace_root.as_ref())
     }
 
     pub fn debug_session(&self) -> &Arc<Mutex<Option<bsl_debug::session::DebugSession>>> {

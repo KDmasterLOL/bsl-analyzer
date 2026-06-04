@@ -235,12 +235,17 @@ fn semantic_code_hits(
 /// The unified code search: run lexical and semantic, fuse by RRF, and degrade to lexical
 /// (with a trailing note) when semantic cannot serve. This is what the `search_code` action
 /// dispatches to.
+// This is the tool-dispatch boundary: each argument is an independent runtime handle or
+// per-request value pulled straight from `SharedState`, with no natural sub-grouping that a
+// context struct would not make more obscure than the flat list.
+#[allow(clippy::too_many_arguments)]
 pub fn hybrid_code(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
     semantic_runtime: &Arc<Mutex<SemanticRuntimeStatus>>,
     workspace_search_mode: WorkspaceSearchMode,
     configured_baseline: Option<&ConfiguredBaselineStatus>,
     external_baseline: Option<Arc<ExternalBaselineService>>,
+    graph_root: Option<&Path>,
     query: &str,
     limit: usize,
 ) -> Result<CallToolResult, McpError> {
@@ -298,7 +303,7 @@ pub fn hybrid_code(
         return Ok(CallToolResult::success(vec![Content::text("No results found.")]));
     }
 
-    let mut out = format_code_hits(&hits, workspace_root.as_deref());
+    let mut out = format_code_hits(&hits, workspace_root.as_deref(), graph_root);
     if let Some(note) = note {
         // Append AFTER the hit lines — never before — so a client parsing `graph_id:` lines
         // positionally is not shifted.
@@ -1211,10 +1216,20 @@ fn ensure_reference_baseline_runtime_ready(
 
 /// Durable graph id for a code-search hit, when it names a method. Returns `None` for
 /// headers and non-method symbols. Module-keyed methods (common/object/manager) resolve
-/// regardless of `workspace_root`; form/command/file-module methods fall back to the
-/// `method/file/<rel>::<name>` id the graph also mints. Hit paths are already root-relative,
-/// so `workspace_root` is only a safety net for an unexpectedly absolute path.
-fn graph_id_for_hit(hit: &SearchHit, workspace_root: Option<&Path>) -> Option<String> {
+/// regardless of root; form/command/file-module methods fall back to the
+/// `method/file/<rel>::<name>` id the graph also mints.
+///
+/// The call graph keys file paths against `graph_root` (the repo root it was built from), but
+/// search hit paths are relative to `engine_root` (the configuration root, e.g. `src/cf`,
+/// nested under it). So we re-anchor the hit to an absolute path via `engine_root`, then let
+/// [`ide::method_graph_id`] strip `graph_root` back down — yielding the same `src/cf/…` prefix
+/// the graph minted, so a form/file method id resolves in `graph` instead of `not_found`.
+/// (Module-keyed ids are prefix-independent, so they are unaffected by the re-anchoring.)
+fn graph_id_for_hit(
+    hit: &SearchHit,
+    engine_root: Option<&Path>,
+    graph_root: Option<&Path>,
+) -> Option<String> {
     if hit.symbol_name.is_empty() {
         return None;
     }
@@ -1224,10 +1239,30 @@ fn graph_id_for_hit(hit: &SearchHit, workspace_root: Option<&Path>) -> Option<St
     if !is_method {
         return None;
     }
-    ide::method_graph_id(&hit.file_path, &hit.symbol_name, workspace_root)
+    let hit_is_absolute = Path::new(&hit.file_path).is_absolute();
+    match engine_root {
+        // Engine-relative hit: re-anchor to an absolute path so `method_graph_id` strips the
+        // graph root back to the `src/cf/…` rel the graph keyed against.
+        Some(root) if !hit_is_absolute => {
+            let abs = root.join(&hit.file_path);
+            ide::method_graph_id(&abs.to_string_lossy(), &hit.symbol_name, graph_root)
+        }
+        // Already an absolute hit path: strip the graph root directly.
+        _ if hit_is_absolute => ide::method_graph_id(&hit.file_path, &hit.symbol_name, graph_root),
+        // Unanchored relative hit (e.g. a remote-baseline direct hit whose workspace root is
+        // unreachable): the config-root prefix cannot be reconstructed, so a `method/file/…`
+        // fallback id would not resolve in `graph`. Keep only the root-independent module-keyed
+        // id and drop the path fallback — a missing id beats a wrong one.
+        _ => ide::method_graph_id(&hit.file_path, &hit.symbol_name, None)
+            .filter(|id| !id.starts_with("method/file/")),
+    }
 }
 
-fn format_code_hits(hits: &[bsl_search::SearchHit], workspace_root: Option<&Path>) -> String {
+fn format_code_hits(
+    hits: &[bsl_search::SearchHit],
+    engine_root: Option<&Path>,
+    graph_root: Option<&Path>,
+) -> String {
     let mut out = String::new();
 
     for (i, hit) in hits.iter().enumerate() {
@@ -1245,7 +1280,7 @@ fn format_code_hits(hits: &[bsl_search::SearchHit], workspace_root: Option<&Path
         );
         // Bridge into the call graph: surface the durable node id so the agent
         // can pivot to `graph` callers/callees/source.
-        if let Some(id) = graph_id_for_hit(hit, workspace_root) {
+        if let Some(id) = graph_id_for_hit(hit, engine_root, graph_root) {
             let _ = writeln!(out, "  graph_id: {id}");
         }
 
@@ -1451,11 +1486,18 @@ mod tests {
 
     #[test]
     fn graph_id_bridges_method_hits_in_modules() {
-        // A method in a common module gets a durable, root-independent graph id.
+        // The graph was built from the repo root; the search engine indexes paths relative to
+        // the nested configuration root (`src/cf`). These are the two roots the bridge spans.
+        let engine_root = std::path::Path::new("/repo/src/cf");
+        let graph_root = std::path::Path::new("/repo");
+
+        // A method in a common module gets a durable, prefix-independent graph id — the
+        // re-anchoring through the two roots does not perturb a module-keyed id.
         assert_eq!(
             super::graph_id_for_hit(
                 &code_hit("CommonModules/Утилиты/Ext/Module.bsl", "ПроверитьИНН", "procedure"),
-                None,
+                Some(engine_root),
+                Some(graph_root),
             ),
             Some("method/common/Утилиты/ПроверитьИНН".to_owned()),
         );
@@ -1463,12 +1505,32 @@ mod tests {
         assert_eq!(
             super::graph_id_for_hit(
                 &code_hit("CommonModules/Утилиты/Ext/Module.bsl", "МодульнаяПерем", "variable"),
-                None,
+                Some(engine_root),
+                Some(graph_root),
             ),
             None,
         );
-        // A method in a form module falls back to the `method/file/<rel>::<name>` id the
-        // graph also mints — using the relative hit path the search overlay stores.
+        // A form-module method falls back to `method/file/<rel>::<name>`, and the rel MUST
+        // carry the `src/cf/` prefix the graph minted — otherwise `graph(node)` returns
+        // `not_found`. The engine-relative hit path is re-anchored to the graph root to add it.
+        assert_eq!(
+            super::graph_id_for_hit(
+                &code_hit(
+                    "Catalogs/Контрагенты/Forms/Форма/Ext/Form/Module.bsl",
+                    "ПриОткрытии",
+                    "procedure",
+                ),
+                Some(engine_root),
+                Some(graph_root),
+            ),
+            Some(
+                "method/file/src/cf/Catalogs/Контрагенты/Forms/Форма/Ext/Form/Module.bsl::ПриОткрытии"
+                    .to_owned()
+            ),
+        );
+        // With no engine root (e.g. a remote-baseline hit whose root is unreachable) the bridge
+        // cannot reconstruct the `src/cf/` prefix, so a path-fallback id would not resolve — it
+        // is dropped rather than emitted prefix-less and wrong.
         assert_eq!(
             super::graph_id_for_hit(
                 &code_hit(
@@ -1477,11 +1539,18 @@ mod tests {
                     "procedure",
                 ),
                 None,
+                None,
             ),
-            Some(
-                "method/file/Catalogs/Контрагенты/Forms/Форма/Ext/Form/Module.bsl::ПриОткрытии"
-                    .to_owned()
+            None,
+        );
+        // A module-keyed id is root-independent, so it still resolves even unanchored.
+        assert_eq!(
+            super::graph_id_for_hit(
+                &code_hit("CommonModules/Утилиты/Ext/Module.bsl", "ПроверитьИНН", "procedure"),
+                None,
+                None,
             ),
+            Some("method/common/Утилиты/ПроверитьИНН".to_owned()),
         );
     }
 
@@ -1912,6 +1981,7 @@ mod tests {
             WorkspaceSearchMode::SqliteLocal,
             None,
             None,
+            None,
             "ПроверитьИНН",
             10,
         )
@@ -1995,6 +2065,7 @@ mod tests {
             WorkspaceSearchMode::PostgresRemoteOverlay,
             Some(&configured),
             None,
+            None,
             "Процедура",
             10,
         )
@@ -2026,6 +2097,7 @@ mod tests {
                 issue: Some("failed to resolve PostgreSQL reader credentials".to_owned()),
                 support: None,
             }),
+            None,
             None,
             "ТестоваПроцедура",
             10,
@@ -2067,6 +2139,7 @@ mod tests {
                 support: None,
             }),
             Some(retryable_postgres_source()),
+            None,
             "ТестоваПроцедура",
             10,
         )
@@ -2101,6 +2174,7 @@ mod tests {
                 support: None,
             }),
             Some(retryable_postgres_source()),
+            None,
             "НесуществующееСлово",
             10,
         )

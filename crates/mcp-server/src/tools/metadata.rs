@@ -381,14 +381,18 @@ pub fn get_configuration_info(
     Ok(CallToolResult::success(vec![Content::text(out)]))
 }
 
+/// Read a catalog/document/… object's forms from disk. `source_root` MUST be the
+/// configuration root (the `Configuration.xml`-bearing directory, e.g. `src/cf`), since the
+/// object form directory is `<source_root>/<TypeDir>/<object>/Forms` — passing the repo root
+/// when the configuration is nested under `src/cf` makes every form look missing.
 pub fn get_form_structure(
-    workspace_root: Option<&std::path::Path>,
+    source_root: Option<&std::path::Path>,
     object_type: &str,
     object_name: &str,
     form_name: Option<&str>,
 ) -> Result<CallToolResult, McpError> {
-    let root = workspace_root.ok_or_else(|| {
-        McpError::invalid_params("Workspace root не задан, формы недоступны", None)
+    let root = source_root.ok_or_else(|| {
+        McpError::invalid_params("Configuration root не задан, формы недоступны", None)
     })?;
 
     let type_dir = mdo_type_to_dir(object_type).ok_or_else(|| {
@@ -548,6 +552,31 @@ mod tests {
 
     fn extract_text(result: &CallToolResult) -> &str {
         result.content[0].raw.as_text().expect("expected text content").text.as_str()
+    }
+
+    #[test]
+    fn get_form_structure_lists_forms_under_the_given_root() {
+        // The object form directory is `<root>/<TypeDir>/<object>/Forms`. Passing the repo root
+        // when the configuration is nested under `src/cf` makes every form look missing — so the
+        // caller must pass the configuration root. This locks that the function resolves forms
+        // relative to whatever root it is handed (the config root in production).
+        let tmp = tempfile::tempdir().unwrap();
+        let forms = tmp.path().join("Catalogs").join("Пользователи").join("Forms");
+        std::fs::create_dir_all(forms.join("ФормаСписка")).unwrap();
+        std::fs::create_dir_all(forms.join("ФормаЭлемента")).unwrap();
+
+        let result = get_form_structure(Some(tmp.path()), "Catalog", "Пользователи", None).unwrap();
+        let text = extract_text(&result);
+        assert!(text.contains("ФормаСписка"), "should list ФормаСписка: {text}");
+        assert!(text.contains("ФормаЭлемента"), "should list ФормаЭлемента: {text}");
+
+        // A wrong root (the repo root, missing the `src/cf` config segment) finds nothing.
+        let repo_root = tmp.path().join("repo_root_without_config");
+        std::fs::create_dir_all(&repo_root).unwrap();
+        assert!(
+            get_form_structure(Some(&repo_root), "Catalog", "Пользователи", None).is_err(),
+            "a root without the object tree must error, not silently succeed",
+        );
     }
 
     #[test]
