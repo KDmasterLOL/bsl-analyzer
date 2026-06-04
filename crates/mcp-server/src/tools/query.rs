@@ -1,8 +1,27 @@
 use crate::state::SharedState;
+use crate::tools::response::structured;
 use rmcp::model::{CallToolResult, Content};
 use rmcp::ErrorData as McpError;
+use serde_json::json;
 use std::collections::HashMap;
 use std::fmt::Write;
+
+/// Static contract for cold-start discovery, mirroring `graph`/`diagnostics` schema so the
+/// query tool is self-describing instead of revealing its actions only through an error.
+pub fn schema() -> CallToolResult {
+    structured(json!({
+        "schema_version": "1",
+        "actions": ["validate", "execute", "schema"],
+        "validate": "syntax-check an SDBL query. Works offline via the local parser; with --onec-url it additionally runs live platform validation.",
+        "execute": "run a SELECT query against the live 1C base (requires --onec-url). `limit` caps rows; `parameters` binds named query parameters.",
+        "params": {
+            "query": "the SDBL text (required for validate and execute)",
+            "limit": "max rows for execute (optional)",
+            "parameters": "object of name → value bindings for execute (optional)"
+        },
+        "prerequisites": "validate needs nothing for offline syntax checks; execute (and live validation) need --onec-url / --onec-user / --onec-password"
+    }))
+}
 
 pub async fn validate_query(state: &SharedState, query: &str) -> Result<CallToolResult, McpError> {
     if query.trim().is_empty() {
@@ -51,18 +70,30 @@ fn validate_query_local(query: &str) -> Result<CallToolResult, McpError> {
     if error_nodes.is_empty() {
         Ok(CallToolResult::success(vec![Content::text("✓ Запрос синтаксически корректен")]))
     } else {
-        let mut out = format!("✗ Найдено ошибок: {}\n\n", error_nodes.len());
+        // The parser can emit overlapping ERROR/SDBL_ERROR nodes at the same offset (e.g. a
+        // trailing `ГДЕ` yields two "unexpected end" nodes at the same position), which rendered
+        // the identical diagnostic twice. Collapse byte-identical lines, preserving first order,
+        // so the count and listing reflect distinct errors.
+        let mut seen = std::collections::HashSet::new();
+        let mut lines: Vec<String> = Vec::new();
         for node in &error_nodes {
             let range = node.text_range();
             let start = u32::from(range.start()) as usize;
             let end = u32::from(range.end()) as usize;
             let fragment = query.get(start..end).unwrap_or("…");
-            if fragment.trim().is_empty() {
-                let _ = writeln!(out, "- [{}] неожиданный конец выражения", start);
+            let line = if fragment.trim().is_empty() {
+                format!("- [{start}] неожиданный конец выражения")
             } else {
-                let _ =
-                    writeln!(out, "- [{}..{}] неожиданный фрагмент: `{}`", start, end, fragment);
+                format!("- [{start}..{end}] неожиданный фрагмент: `{fragment}`")
+            };
+            if seen.insert(line.clone()) {
+                lines.push(line);
             }
+        }
+
+        let mut out = format!("✗ Найдено ошибок: {}\n\n", lines.len());
+        for line in &lines {
+            let _ = writeln!(out, "{line}");
         }
         Ok(CallToolResult::success(vec![Content::text(out)]))
     }
@@ -162,6 +193,19 @@ mod tests {
     }
 
     #[test]
+    fn schema_advertises_every_action() {
+        let result = schema();
+        let body = result.structured_content.expect("schema is structured");
+        let actions = body["actions"].as_array().expect("actions array");
+        for action in ["validate", "execute", "schema"] {
+            assert!(
+                actions.iter().any(|a| a == action),
+                "schema must advertise `{action}`: {body}",
+            );
+        }
+    }
+
+    #[test]
     fn test_validate_query_valid() {
         let _state = test_shared_state();
         let result = validate_query_local("ВЫБРАТЬ 1").unwrap();
@@ -189,6 +233,24 @@ mod tests {
             validate_query_local("ВЫБРАТЬ Наименование ИЗ Справочник.Номенклатура ГДЕ").unwrap();
         let text = extract_text(&result);
         assert!(text.contains("✗"), "incomplete WHERE should produce errors");
+    }
+
+    #[test]
+    fn validate_does_not_report_the_same_error_twice() {
+        // `ВЫБРАТЬ ИЗ ГДЕ` made the parser emit overlapping error nodes at the same offset,
+        // which previously listed the identical diagnostic twice. Each rendered line must be
+        // unique, and the reported count must match the listed lines.
+        let result = validate_query_local("ВЫБРАТЬ ИЗ ГДЕ").unwrap();
+        let text = extract_text(&result);
+        let error_lines: Vec<&str> = text.lines().filter(|l| l.starts_with("- [")).collect();
+        let mut unique = error_lines.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(error_lines.len(), unique.len(), "duplicate error line(s): {text}");
+        assert!(
+            text.contains(&format!("Найдено ошибок: {}", error_lines.len())),
+            "reported count must match listed lines: {text}",
+        );
     }
 
     #[test]

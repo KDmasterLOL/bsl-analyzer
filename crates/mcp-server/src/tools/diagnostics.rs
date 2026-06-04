@@ -152,6 +152,18 @@ pub(crate) fn parse_min_severity(s: Option<&str>) -> Result<SeverityBucket, Stri
     }
 }
 
+/// Parse the `file` action's `detail` enum into the `detailed` flag. `None`/`concise` keep
+/// the compact view; `detailed` adds internal severity + fix. An unknown value is an error
+/// rather than a silent default, so a caller is never served a different view than it asked
+/// for (mirrors [`parse_min_severity`] and the `graph` enum validators).
+pub(crate) fn parse_detail(s: Option<&str>) -> Result<bool, String> {
+    match s {
+        None | Some("concise") => Ok(false),
+        Some("detailed") => Ok(true),
+        Some(other) => Err(format!("unknown detail '{other}'; expected concise|detailed")),
+    }
+}
+
 /// Compute the `file` action's result body from the resident database: resolve the
 /// path to its FileId, run diagnostics, then filter (codes / range / floor), bucket
 /// severity, and shape findings + the full `counts` histogram + a content-hash
@@ -478,6 +490,16 @@ mod tests {
         assert_eq!(parse_min_severity(Some("error")).unwrap(), SeverityBucket::Error);
         assert_eq!(parse_min_severity(Some("hint")).unwrap(), SeverityBucket::Hint);
         assert!(parse_min_severity(Some("blocker")).is_err());
+    }
+
+    #[test]
+    fn detail_defaults_to_concise_and_rejects_unknown() {
+        assert!(!parse_detail(None).unwrap());
+        assert!(!parse_detail(Some("concise")).unwrap());
+        assert!(parse_detail(Some("detailed")).unwrap());
+        // An unknown value errors rather than silently falling back to concise.
+        let err = parse_detail(Some("bogus")).unwrap_err();
+        assert!(err.contains("bogus") && err.contains("concise|detailed"), "{err}");
     }
 
     #[test]

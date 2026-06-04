@@ -44,13 +44,14 @@ dataflow.
 
 ## Установка
 
-### Расширение для редактора (VS Code / Cursor / VSCodium)
+### Расширение для редактора (VS Code / Cursor / VSCodium / Zed)
 
 Самый простой способ получить подсветку, навигацию и диагностики прямо в редакторе —
 поставить расширение `bsl-analyzer-lsp`:
 
 - **VS Code Marketplace** (VS Code): <https://marketplace.visualstudio.com/items?itemName=ElishevKirill.bsl-analyzer-lsp>
 - **Open VSX** (Cursor, Windsurf, VSCodium и другие редакторы на Open VSX): <https://open-vsx.org/extension/ElishevKirill/bsl-analyzer-lsp>
+- **Zed** (расширение `bsl`): <https://zed.dev/extensions/bsl>
 
 Для CLI-анализа и MCP-интеграции с AI-агентами поставьте бинарник ниже.
 
@@ -187,7 +188,7 @@ bsl-analyzer (LSP/CLI/MCP)
 - [rust-analyzer](https://github.com/rust-lang/rust-analyzer) — архитектурный референс: Salsa, Rowan, слойная организация `syntax → hir-def → hir-ty → ide`, подход к инкрементальной компиляции и LSP-фичам. Бóльшая часть структуры крейтов в `bsl-analyzer` следует именно этому образцу.
 - [bsl-language-server](https://github.com/1c-syntax/bsl-language-server) — статический анализатор BSL (Java, LGPL-3.0); источник формализации диагностических правил и стандартов качества кода 1С.
 - [1c-syntax](https://github.com/1c-syntax) — сообщество разработчиков инструментов для 1С.
-- [RDT1C](https://github.com/Segate-ekb/1c_RDT) — «Инструменты разработчика» для 1С; использован как референс для модуля `naparnik`.
+- [RDT1C](https://github.com/tormozit/RDT1C) — «Инструменты разработчика» для 1С; использован как референс для модуля `naparnik`.
 
 ## Лицензия
 

@@ -43,7 +43,7 @@ pub use external_baseline::{
     SemanticPublishProgress,
 };
 pub use fingerprint::{fingerprint_documents, fingerprint_indexed_documents};
-pub use hybrid::{fuse_rrf, RRF_K};
+pub use hybrid::{fuse_rrf, FusedHit, Modality, RRF_K};
 pub use index::{SearchResult, VectorIndex};
 pub use local_baseline::LocalStoreBaselineAdapter;
 pub use merge::{

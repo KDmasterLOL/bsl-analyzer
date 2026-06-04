@@ -63,7 +63,8 @@ struct SyntaxHelpParams {
 #[derive(Deserialize, JsonSchema)]
 struct QueryParams {
     action: String,
-    query: String,
+    /// SDBL text — required for `validate`/`execute`, omitted for `schema`.
+    query: Option<String>,
     limit: Option<u32>,
     parameters: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
@@ -223,12 +224,13 @@ impl McpServer {
                 tools::metadata::get_object_structure(&config, &object_type, &object_name)
             }
             "form" => {
+                // `object_name` is required for an object's forms but not for `CommonForm`
+                // (a top-level form), so the requirement is enforced inside get_form_structure.
                 let object_type = require(p.object_type, "object_type", "form")?;
-                let object_name = require(p.object_name, "object_name", "form")?;
                 tools::metadata::get_form_structure(
-                    self.state.workspace_root().map(|p| p.as_path()),
+                    self.state.source_root().map(|p| p.as_path()),
                     &object_type,
-                    &object_name,
+                    p.object_name.as_deref(),
                     p.form_name.as_deref(),
                 )
             }
@@ -275,6 +277,10 @@ impl McpServer {
                 let workspace_search_mode = self.state.workspace_search_mode();
                 let configured_baseline = self.state.configured_baseline();
                 let external_baseline = self.state.external_baseline();
+                // The graph keys file ids against the repo (workspace) root; pass it so search
+                // can mint form/file `graph_id`s with the same `src/cf/…` prefix the graph uses.
+                let graph_root = self.state.workspace_root().cloned();
+                let index_progress = self.state.index_progress().clone();
                 tokio::task::spawn_blocking(move || {
                     tools::search::hybrid_code(
                         &engine,
@@ -282,6 +288,8 @@ impl McpServer {
                         workspace_search_mode,
                         configured_baseline.as_ref(),
                         external_baseline,
+                        graph_root.as_deref(),
+                        &index_progress,
                         &query,
                         limit,
                     )
@@ -300,12 +308,17 @@ impl McpServer {
     async fn query(&self, params: Parameters<QueryParams>) -> Result<CallToolResult, McpError> {
         let p = params.0;
         match p.action.as_str() {
-            "validate" => tools::query::validate_query(&self.state, &p.query).await,
+            "schema" => Ok(tools::query::schema()),
+            "validate" => {
+                let query = require(p.query, "query", "validate")?;
+                tools::query::validate_query(&self.state, &query).await
+            }
             "execute" => {
-                tools::query::execute_query(&self.state, &p.query, p.limit, p.parameters).await
+                let query = require(p.query, "query", "execute")?;
+                tools::query::execute_query(&self.state, &query, p.limit, p.parameters).await
             }
             other => Err(McpError::invalid_params(
-                format!("Unknown action '{other}'. Expected: validate, execute"),
+                format!("Unknown action '{other}'. Expected: validate, execute, schema"),
                 None,
             )),
         }
@@ -583,7 +596,7 @@ impl McpServer {
     /// analysis database, behind the lazy-load lifecycle and freshness envelope.
     async fn diagnostics_file(&self, p: DiagnosticsParams) -> Result<CallToolResult, McpError> {
         use crate::diagnostics_state::DiagnosticsStatus;
-        use tools::diagnostics::{parse_min_severity, FileFilters};
+        use tools::diagnostics::{parse_detail, parse_min_severity, FileFilters};
 
         let diag = self.state.diagnostics().clone();
         let path = require(p.path, "path", "file")?;
@@ -611,6 +624,8 @@ impl McpServer {
 
         let min_severity = parse_min_severity(p.min_severity.as_deref())
             .map_err(|e| McpError::invalid_params(e, None))?;
+        let detailed =
+            parse_detail(p.detail.as_deref()).map_err(|e| McpError::invalid_params(e, None))?;
         let range = match (p.range_start, p.range_end) {
             (Some(s), Some(e)) => Some((s, e)),
             (Some(s), None) => Some((s, usize::MAX)),
@@ -622,7 +637,7 @@ impl McpServer {
             codes: p.codes,
             range,
             max_findings: p.max_findings.unwrap_or(tools::diagnostics::DEFAULT_MAX_FINDINGS),
-            detailed: p.detail.as_deref() == Some("detailed"),
+            detailed,
         };
 
         tokio::task::spawn_blocking(move || {

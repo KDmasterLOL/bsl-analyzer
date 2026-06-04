@@ -14,6 +14,35 @@ use crate::engine::SearchHit;
 /// making the fusion less sensitive to any single modality's exact ordering.
 pub const RRF_K: f32 = 60.0;
 
+/// Which retrieval modalities surfaced a fused hit. `Both` — found by lexical AND semantic —
+/// is the strongest signal (the two independent rankers agreed), which a bare RRF score (a
+/// small float clustered near `1/(k+1)`) does not make legible to the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Modality {
+    Lexical,
+    Semantic,
+    Both,
+}
+
+impl Modality {
+    /// A compact agent-facing tag for the search listing.
+    pub fn tag(self) -> &'static str {
+        match self {
+            Modality::Lexical => "L",
+            Modality::Semantic => "S",
+            Modality::Both => "L+S",
+        }
+    }
+}
+
+/// A fused search hit plus the modalities that surfaced it. The fused RRF score remains on
+/// `hit.score` (it drives ordering); `modality` is the legible cross-modal-agreement signal.
+#[derive(Debug, Clone)]
+pub struct FusedHit {
+    pub hit: SearchHit,
+    pub modality: Modality,
+}
+
 /// A hit's identity across modalities: the same chunk found by lexical and semantic search
 /// must collapse to one fused result. Mirrors [`crate::merge`]'s dedup key.
 type FusionKey = (String, String, String, u32, u32);
@@ -43,12 +72,13 @@ pub fn fuse_rrf(
     semantic: &[SearchHit],
     k: f32,
     limit: usize,
-) -> Vec<SearchHit> {
-    // Representative record per key, plus its accumulated RRF score. Lexical is inserted
-    // first so its (text-bearing) record wins as the representative on collision.
-    let mut acc: HashMap<FusionKey, (SearchHit, f32)> = HashMap::new();
+) -> Vec<FusedHit> {
+    // Representative record per key, its accumulated RRF score, and which modalities surfaced
+    // it (`from_lexical`, `from_semantic`). Lexical is inserted first so its (text-bearing)
+    // record wins as the representative on collision.
+    let mut acc: HashMap<FusionKey, (SearchHit, f32, bool, bool)> = HashMap::new();
 
-    let mut absorb = |list: &[SearchHit], prefer_existing_text: bool| {
+    let mut absorb = |list: &[SearchHit], is_lexical: bool, prefer_existing_text: bool| {
         // A key that repeats within one list contributes only its best (first) rank — the
         // engine direct paths do not contractually dedup, and double-counting one document's
         // rank would distort the fused order. Rank advances only on a first-seen key.
@@ -63,31 +93,44 @@ pub fn fuse_rrf(
             let contribution = 1.0 / (k + (rank as f32) + 1.0);
             rank += 1;
             acc.entry(key)
-                .and_modify(|(rep, score)| {
+                .and_modify(|(rep, score, from_lex, from_sem)| {
                     *score += contribution;
+                    if is_lexical {
+                        *from_lex = true;
+                    } else {
+                        *from_sem = true;
+                    }
                     // Keep whichever record carries a snippet; the lexical pass runs first,
                     // so this only replaces an empty-text semantic representative.
                     if !prefer_existing_text && rep.text.is_empty() && !hit.text.is_empty() {
                         *rep = hit.clone();
                     }
                 })
-                .or_insert_with(|| (hit.clone(), contribution));
+                .or_insert_with(|| (hit.clone(), contribution, is_lexical, !is_lexical));
         }
     };
 
-    absorb(lexical, true);
-    absorb(semantic, false);
+    absorb(lexical, true, true);
+    absorb(semantic, false, false);
 
-    let mut fused: Vec<SearchHit> = acc
+    let mut fused: Vec<FusedHit> = acc
         .into_iter()
-        .map(|(_, (mut rep, score))| {
+        .map(|(_, (mut rep, score, from_lex, from_sem))| {
             rep.score = score;
-            rep
+            let modality = match (from_lex, from_sem) {
+                (true, true) => Modality::Both,
+                (false, true) => Modality::Semantic,
+                _ => Modality::Lexical,
+            };
+            FusedHit { hit: rep, modality }
         })
         .collect();
 
     fused.sort_by(|a, b| {
-        b.score.total_cmp(&a.score).then_with(|| fusion_key(a).cmp(&fusion_key(b)))
+        b.hit
+            .score
+            .total_cmp(&a.hit.score)
+            .then_with(|| fusion_key(&a.hit).cmp(&fusion_key(&b.hit)))
     });
     fused.truncate(limit);
     fused
@@ -114,8 +157,8 @@ mod tests {
         SearchHit { text: String::new(), ..lexical(path, symbol) }
     }
 
-    fn keys(hits: &[SearchHit]) -> Vec<&str> {
-        hits.iter().map(|h| h.symbol_name.as_str()).collect()
+    fn keys(hits: &[FusedHit]) -> Vec<&str> {
+        hits.iter().map(|h| h.hit.symbol_name.as_str()).collect()
     }
 
     #[test]
@@ -125,9 +168,11 @@ mod tests {
         let lex = vec![lexical("a.bsl", "LexTop"), lexical("s.bsl", "Shared")];
         let sem = vec![semantic("b.bsl", "SemTop"), semantic("s.bsl", "Shared")];
         let fused = fuse_rrf(&lex, &sem, RRF_K, 10);
-        assert_eq!(fused[0].symbol_name, "Shared");
+        assert_eq!(fused[0].hit.symbol_name, "Shared");
+        // Found by both modalities — the strongest signal.
+        assert_eq!(fused[0].modality, Modality::Both);
         // The representative kept the lexical record, so the snippet survives.
-        assert_eq!(fused[0].text, "procedure Shared");
+        assert_eq!(fused[0].hit.text, "procedure Shared");
         assert_eq!(fused.len(), 3);
     }
 
@@ -139,8 +184,10 @@ mod tests {
         // Both rank-1 in their own list → equal score → key tie-break (collection,path,...):
         // "a.bsl" < "b.bsl".
         assert_eq!(keys(&fused), vec!["LexOnly", "SemOnly"]);
+        assert_eq!(fused[0].modality, Modality::Lexical);
+        assert_eq!(fused[1].modality, Modality::Semantic);
         // A semantic-only hit has no snippet text.
-        assert_eq!(fused[1].text, "");
+        assert_eq!(fused[1].hit.text, "");
     }
 
     #[test]
@@ -148,6 +195,7 @@ mod tests {
         let lex = vec![lexical("a.bsl", "P1"), lexical("b.bsl", "P2"), lexical("c.bsl", "P3")];
         let fused = fuse_rrf(&lex, &[], RRF_K, 10);
         assert_eq!(keys(&fused), vec!["P1", "P2", "P3"]);
+        assert!(fused.iter().all(|h| h.modality == Modality::Lexical));
     }
 
     #[test]
@@ -166,7 +214,7 @@ mod tests {
         assert_eq!(fused.len(), 2);
         assert_eq!(keys(&fused), vec!["Top", "Dup"]);
         // `Top` (rank 1) and `Dup` (best rank 2) keep their single-occurrence RRF scores.
-        assert_eq!(fused[0].score, 1.0 / (RRF_K + 1.0));
-        assert_eq!(fused[1].score, 1.0 / (RRF_K + 2.0));
+        assert_eq!(fused[0].hit.score, 1.0 / (RRF_K + 1.0));
+        assert_eq!(fused[1].hit.score, 1.0 / (RRF_K + 2.0));
     }
 }

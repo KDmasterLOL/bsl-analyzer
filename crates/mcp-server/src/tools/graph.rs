@@ -99,7 +99,14 @@ fn clamp_to_budget(source: &mut Option<String>, remaining: &mut usize) -> bool {
     while end > 0 && !text.is_char_boundary(end) {
         end -= 1;
     }
-    text.truncate(end);
+    if end == 0 {
+        // No budget left for even a partial body — drop the field entirely rather than emit an
+        // empty string that reads like a method with no body. The response's `budget_exhausted`
+        // flag signals why the source is absent.
+        *source = None;
+    } else {
+        text.truncate(end);
+    }
     *remaining = 0;
     true
 }
@@ -192,7 +199,7 @@ pub fn loading(detail: Option<&str>) -> CallToolResult {
 /// independent of the on-disk SQLite cache layout in [`crate::graph_db`]).
 fn schema_json() -> Value {
     json!({
-        "schema_version": "13",
+        "schema_version": "14",
         "actions": ["overview", "schema", "node", "source", "neighbors", "callers", "callees", "resolve"],
         "node_kinds": ["method", "module", "mdo", "attribute", "tabular_section", "form", "form_item", "form_attribute"],
         "notes": "since version 7 `node(module/<scope>)` resolves for any code module and returns a `methods` array ({id, name, is_export}) of the module's members; module membership is served on demand and is not a graph edge, so `neighbors(module/…)` stays empty",
@@ -215,8 +222,8 @@ fn schema_json() -> Value {
             "out_total": "usize — distinct callees discovered (present for dir=out/both); a small value under dir=both means few outbound calls even when inbound callers fill the cap — refine with dir=out",
             "in_total": "usize — distinct callers discovered (present for dir=in/both)"
         },
-        "body_budget": "`node`/`neighbors` at detail=bodies cap cumulative source output at max_output_tokens (~4 chars/token; default 6000); a truncated response carries `budget_exhausted: true`",
-        "redaction": "method source/snippets emitted by `node`/`neighbors`/`source` (and search) are secret-redacted: values that look like credentials are replaced with `***`. Structural string literals (field lists, query fragments) may also be masked; treat source as sanitized, not byte-exact.",
+        "body_budget": "`node`/`neighbors` at detail=bodies cap cumulative source output at max_output_tokens (~4 chars/token; default 6000); a truncated response carries `budget_exhausted: true`. A body fully starved by the budget is omitted (its `source` field is absent), not emitted as an empty string. In `source`, an item skipped because an earlier item exhausted the budget carries `skipped_budget_exhausted: true` (distinct from a method with no body) — retry it with a larger budget or alone.",
+        "redaction": "method source/snippets emitted by `node`/`neighbors`/`source` (and search) are secret-redacted: a string literal is replaced with `***` when a sensitive marker (a credential-named identifier like `Токен`, or a key like `Вставить(\"Пароль\", …)`) precedes it in the same statement. Structural literals (field lists, type names) and localized messages are preserved; treat source as sanitized, not byte-exact.",
         "revision_note": "the graph `revision` is independent of the `diagnostics` tool's `generation` — they are separate subsystems with separate freshness counters and do not correlate.",
         "envelope": {
             "revision": "u64 — snapshot generation the answer was computed at",
@@ -294,8 +301,9 @@ mod tests {
         // The contract version must be bumped in lockstep with response-shape
         // changes; `total` since this revision, `form`/`form_item` + `contains` since
         // version 3, `form_attribute` since version 4, `tabular_section` since version
-        // 5, and the `data_binding` edge since version 6.
-        assert_eq!(schema["schema_version"], "13");
+        // 5, the `data_binding` edge since version 6, and the source `skipped_budget_exhausted`
+        // marker + omit-empty body since version 14.
+        assert_eq!(schema["schema_version"], "14");
         assert!(
             schema["neighbors_result"]["total"].is_string(),
             "neighbours result must document the `total` field"
@@ -339,7 +347,7 @@ mod tests {
     #[test]
     fn schema_and_loading_populate_structured_content() {
         assert_structured_mirrors_text(&schema());
-        assert_eq!(schema().structured_content.unwrap()["schema_version"], "13");
+        assert_eq!(schema().structured_content.unwrap()["schema_version"], "14");
 
         assert_structured_mirrors_text(&loading(Some("indexing")));
         let body = loading(Some("indexing")).structured_content.unwrap();

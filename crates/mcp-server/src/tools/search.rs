@@ -2,8 +2,8 @@ use crate::baseline::{ConfiguredBaselineStatus, ExternalBaselineService, Externa
 use crate::state::{SemanticRuntimeStatus, WorkspaceSearchMode};
 use bsl_search::{
     fuse_rrf, lexical_hits_for_resolved_view, merge_context_for_collection, merge_lexical,
-    merge_semantic, IndexProgress, LexicalHit, SearchEngine, SearchError, SearchHit, SemanticHit,
-    RRF_K,
+    merge_semantic, FusedHit, IndexProgress, LexicalHit, Modality, SearchEngine, SearchError,
+    SearchHit, SemanticHit, RRF_K,
 };
 use rmcp::model::{CallToolResult, Content};
 use rmcp::ErrorData as McpError;
@@ -57,6 +57,33 @@ impl SemanticUnavailable {
     }
 }
 
+/// Acquire the engine guard, briefly retrying on transient contention. A background overlay
+/// sync (and the file watcher's per-change dirty-marking) momentarily holds the engine lock
+/// even after the index is ready, which a single `try_lock` would surface to a concurrent
+/// `search_code` as a misleading "overlay warming up" — the race `search(status)=ready`
+/// contradicts. Returns `None` only if the lock stays contended past the short budget (the
+/// genuine still-building / long-priming case), where the caller's warming fallback is right.
+/// Runs on a `spawn_blocking` thread, so the brief sleeps do not stall the async runtime.
+fn try_acquire_engine(
+    engine: &Arc<Mutex<Option<SearchEngine>>>,
+) -> Option<std::sync::MutexGuard<'_, Option<SearchEngine>>> {
+    const ATTEMPTS: usize = 5;
+    const DELAY: std::time::Duration = std::time::Duration::from_millis(20);
+    for attempt in 0..ATTEMPTS {
+        match engine.try_lock() {
+            Ok(guard) => return Some(guard),
+            // A poisoned lock will not recover by waiting — fall back immediately.
+            Err(std::sync::TryLockError::Poisoned(_)) => return None,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if attempt + 1 < ATTEMPTS {
+                    std::thread::sleep(DELAY);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Produce lexical (FTS5) code hits, separated from presentation. Hard policy/terminal
 /// failures are `Err`; a still-warming index is `Pending`. Lexical search is always available
 /// (it is the baseline), so this never returns `Unavailable`.
@@ -74,9 +101,9 @@ fn lexical_code_hits(
         configured_baseline,
         external_baseline.as_ref(),
     )?;
-    let guard = match engine.try_lock() {
-        Ok(g) => g,
-        Err(_) => {
+    let guard = match try_acquire_engine(engine) {
+        Some(g) => g,
+        None => {
             if let Some(source) = external_baseline {
                 match try_direct_lexical_code_no_overlay(&source, query, limit) {
                     DirectResult::Found(hits) => {
@@ -180,9 +207,9 @@ fn semantic_code_hits(
         .lock()
         .map_err(|e| McpError::internal_error(format!("semantic runtime lock error: {e}"), None))?
         .clone();
-    let guard = match engine.try_lock() {
-        Ok(g) => g,
-        Err(_) => {
+    let guard = match try_acquire_engine(engine) {
+        Some(g) => g,
+        None => {
             return Ok(CodeHits::Pending(
                 "Semantic search overlay is warming up. Lexical search is available while the overlay is prepared."
                     .to_owned(),
@@ -232,15 +259,34 @@ fn semantic_code_hits(
     Ok(CodeHits::Ready { hits, workspace_root })
 }
 
+/// Append live indexing progress to a "still building" message so the failed `search_code`
+/// response carries the same signal as `search(status)`, instead of a flat "try again" that
+/// hides whether the build is progressing or stuck.
+fn with_index_progress(message: String, progress: &IndexProgress) -> String {
+    if progress.is_active() {
+        let done_b = progress.done_batches.load(Ordering::Relaxed);
+        let total_b = progress.total_batches.load(Ordering::Relaxed);
+        format!("{message} (indexing {}% — {done_b}/{total_b} batches)", progress.percent())
+    } else {
+        message
+    }
+}
+
 /// The unified code search: run lexical and semantic, fuse by RRF, and degrade to lexical
 /// (with a trailing note) when semantic cannot serve. This is what the `search_code` action
 /// dispatches to.
+// This is the tool-dispatch boundary: each argument is an independent runtime handle or
+// per-request value pulled straight from `SharedState`, with no natural sub-grouping that a
+// context struct would not make more obscure than the flat list.
+#[allow(clippy::too_many_arguments)]
 pub fn hybrid_code(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
     semantic_runtime: &Arc<Mutex<SemanticRuntimeStatus>>,
     workspace_search_mode: WorkspaceSearchMode,
     configured_baseline: Option<&ConfiguredBaselineStatus>,
     external_baseline: Option<Arc<ExternalBaselineService>>,
+    graph_root: Option<&Path>,
+    index_progress: &IndexProgress,
     query: &str,
     limit: usize,
 ) -> Result<CallToolResult, McpError> {
@@ -261,14 +307,18 @@ pub fn hybrid_code(
         // Lexical is the floor: if it cannot serve yet, the whole search cannot — emit its
         // message unchanged rather than claiming a (nonexistent) lexical-only result.
         CodeHits::Pending(message) => {
-            return Ok(CallToolResult::success(vec![Content::text(message)]));
+            return Ok(CallToolResult::success(vec![Content::text(with_index_progress(
+                message,
+                index_progress,
+            ))]));
         }
         // Lexical search is always available, so it never reports a semantic shortfall; treat
         // it defensively as "still building".
         CodeHits::Unavailable(_) => {
-            return Ok(CallToolResult::success(vec![Content::text(
+            return Ok(CallToolResult::success(vec![Content::text(with_index_progress(
                 "Search index is being built, please try again in a moment.".to_owned(),
-            )]));
+                index_progress,
+            ))]));
         }
     };
 
@@ -282,15 +332,16 @@ pub fn hybrid_code(
         fetch,
     )?;
 
-    let (mut hits, note): (Vec<SearchHit>, Option<&str>) = match semantic {
+    let (mut hits, note): (Vec<FusedHit>, Option<&str>) = match semantic {
         CodeHits::Ready { hits: sem_hits, .. } => {
             (fuse_rrf(&lex_hits, &sem_hits, RRF_K, limit), None)
         }
+        // Semantic could not serve — degrade to lexical-only. Every hit is then lexical, so it
+        // is wrapped as a `FusedHit` with `Modality::Lexical` to keep the display uniform.
         CodeHits::Pending(_) => {
-            // Semantic overlay still warming — degrade to lexical for this call.
-            (lex_hits, Some("semantic skipped: overlay warming up"))
+            (lexical_only(lex_hits), Some("semantic skipped: overlay warming up"))
         }
-        CodeHits::Unavailable(reason) => (lex_hits, Some(reason.note())),
+        CodeHits::Unavailable(reason) => (lexical_only(lex_hits), Some(reason.note())),
     };
     hits.truncate(limit);
 
@@ -298,7 +349,7 @@ pub fn hybrid_code(
         return Ok(CallToolResult::success(vec![Content::text("No results found.")]));
     }
 
-    let mut out = format_code_hits(&hits, workspace_root.as_deref());
+    let mut out = format_code_hits(&hits, workspace_root.as_deref(), graph_root);
     if let Some(note) = note {
         // Append AFTER the hit lines — never before — so a client parsing `graph_id:` lines
         // positionally is not shifted.
@@ -761,6 +812,12 @@ pub fn search_status(
 
         let search_state = match &semantic_runtime {
             SemanticRuntimeStatus::Failed(_) => "ready (semantic runtime failed)",
+            // Honest about the window the watcher/overlay sync briefly holds the engine lock:
+            // a concurrent search_code can transiently return "warming up" even though the
+            // index itself is ready — so the agent knows to simply retry, not that it is broken.
+            SemanticRuntimeStatus::OverlaySyncing => {
+                "ready — overlay syncing (a concurrent search_code may briefly say \"warming up\"; retry shortly)"
+            }
             _ => "ready",
         };
         let _ = writeln!(out, "Search index: {search_state}");
@@ -1211,10 +1268,20 @@ fn ensure_reference_baseline_runtime_ready(
 
 /// Durable graph id for a code-search hit, when it names a method. Returns `None` for
 /// headers and non-method symbols. Module-keyed methods (common/object/manager) resolve
-/// regardless of `workspace_root`; form/command/file-module methods fall back to the
-/// `method/file/<rel>::<name>` id the graph also mints. Hit paths are already root-relative,
-/// so `workspace_root` is only a safety net for an unexpectedly absolute path.
-fn graph_id_for_hit(hit: &SearchHit, workspace_root: Option<&Path>) -> Option<String> {
+/// regardless of root; form/command/file-module methods fall back to the
+/// `method/file/<rel>::<name>` id the graph also mints.
+///
+/// The call graph keys file paths against `graph_root` (the repo root it was built from), but
+/// search hit paths are relative to `engine_root` (the configuration root, e.g. `src/cf`,
+/// nested under it). So we re-anchor the hit to an absolute path via `engine_root`, then let
+/// [`ide::method_graph_id`] strip `graph_root` back down — yielding the same `src/cf/…` prefix
+/// the graph minted, so a form/file method id resolves in `graph` instead of `not_found`.
+/// (Module-keyed ids are prefix-independent, so they are unaffected by the re-anchoring.)
+fn graph_id_for_hit(
+    hit: &SearchHit,
+    engine_root: Option<&Path>,
+    graph_root: Option<&Path>,
+) -> Option<String> {
     if hit.symbol_name.is_empty() {
         return None;
     }
@@ -1224,19 +1291,48 @@ fn graph_id_for_hit(hit: &SearchHit, workspace_root: Option<&Path>) -> Option<St
     if !is_method {
         return None;
     }
-    ide::method_graph_id(&hit.file_path, &hit.symbol_name, workspace_root)
+    let hit_is_absolute = Path::new(&hit.file_path).is_absolute();
+    match engine_root {
+        // Engine-relative hit: re-anchor to an absolute path so `method_graph_id` strips the
+        // graph root back to the `src/cf/…` rel the graph keyed against.
+        Some(root) if !hit_is_absolute => {
+            let abs = root.join(&hit.file_path);
+            ide::method_graph_id(&abs.to_string_lossy(), &hit.symbol_name, graph_root)
+        }
+        // Already an absolute hit path: strip the graph root directly.
+        _ if hit_is_absolute => ide::method_graph_id(&hit.file_path, &hit.symbol_name, graph_root),
+        // Unanchored relative hit (e.g. a remote-baseline direct hit whose workspace root is
+        // unreachable): the config-root prefix cannot be reconstructed, so a `method/file/…`
+        // fallback id would not resolve in `graph`. Keep only the root-independent module-keyed
+        // id and drop the path fallback — a missing id beats a wrong one.
+        _ => ide::method_graph_id(&hit.file_path, &hit.symbol_name, None)
+            .filter(|id| !id.starts_with("method/file/")),
+    }
 }
 
-fn format_code_hits(hits: &[bsl_search::SearchHit], workspace_root: Option<&Path>) -> String {
+/// Wrap lexical-only hits (the semantic-unavailable degrade path) as `FusedHit`s so the
+/// formatter handles one type. Each carries `Modality::Lexical`.
+fn lexical_only(hits: Vec<SearchHit>) -> Vec<FusedHit> {
+    hits.into_iter().map(|hit| FusedHit { hit, modality: Modality::Lexical }).collect()
+}
+
+fn format_code_hits(
+    hits: &[FusedHit],
+    engine_root: Option<&Path>,
+    graph_root: Option<&Path>,
+) -> String {
     let mut out = String::new();
 
-    for (i, hit) in hits.iter().enumerate() {
+    for (i, fused) in hits.iter().enumerate() {
+        let hit = &fused.hit;
         let name = if hit.symbol_name.is_empty() { "<header>" } else { &hit.symbol_name };
+        // The modality tag (L / S / L+S) replaces the bare RRF score: `L+S` means lexical and
+        // semantic agreed (the strongest signal), which the small fused score does not convey.
         let _ = writeln!(
             out,
-            "#{} [{:.3}] {}:{}-{} :: {} ({})",
+            "#{} [{}] {}:{}-{} :: {} ({})",
             i + 1,
-            hit.score,
+            fused.modality.tag(),
             hit.file_path,
             hit.line_start + 1,
             hit.line_end,
@@ -1245,7 +1341,7 @@ fn format_code_hits(hits: &[bsl_search::SearchHit], workspace_root: Option<&Path
         );
         // Bridge into the call graph: surface the durable node id so the agent
         // can pivot to `graph` callers/callees/source.
-        if let Some(id) = graph_id_for_hit(hit, workspace_root) {
+        if let Some(id) = graph_id_for_hit(hit, engine_root, graph_root) {
             let _ = writeln!(out, "  graph_id: {id}");
         }
 
@@ -1367,8 +1463,9 @@ mod tests {
     use crate::baseline::RefreshableExternalBaselineSource;
     use crate::state::WorkspaceSearchMode;
     use bsl_search::{
-        lexical_hits_for_resolved_view, BaselineRef, CorpusId, Document, IndexProgress,
-        IndexedDocument, LexicalHit, ResolvedView, SearchEngine, SearchError, SemanticHit,
+        lexical_hits_for_resolved_view, BaselineRef, CorpusId, Document, FusedHit, IndexProgress,
+        IndexedDocument, LexicalHit, Modality, ResolvedView, SearchEngine, SearchError,
+        SemanticHit,
     };
     use project_model::{
         ResolvedWorkspaceBaselineSupport, SearchBaselineSupportState, SearchPostgresConfig,
@@ -1450,12 +1547,59 @@ mod tests {
     }
 
     #[test]
+    fn format_code_hits_shows_modality_tag() {
+        let hits = vec![
+            FusedHit {
+                hit: code_hit("CommonModules/М/Ext/Module.bsl", "Оба", "procedure"),
+                modality: Modality::Both,
+            },
+            FusedHit {
+                hit: code_hit("CommonModules/М/Ext/Module.bsl", "Лекс", "procedure"),
+                modality: Modality::Lexical,
+            },
+            FusedHit {
+                hit: code_hit("CommonModules/М/Ext/Module.bsl", "Сем", "procedure"),
+                modality: Modality::Semantic,
+            },
+        ];
+        let out = super::format_code_hits(&hits, None, None);
+        assert!(out.contains("#1 [L+S]"), "both-modality hit tagged L+S: {out}");
+        assert!(out.contains("#2 [L]"), "lexical-only hit tagged L: {out}");
+        assert!(out.contains("#3 [S]"), "semantic-only hit tagged S: {out}");
+    }
+
+    #[test]
+    fn index_progress_suffix_appended_only_when_active() {
+        use std::sync::atomic::Ordering;
+        let progress = IndexProgress::new();
+        // Inactive → message unchanged (no misleading 0% appended).
+        assert_eq!(super::with_index_progress("building".to_owned(), &progress), "building");
+        // Active → the percent + batch counts from `search(status)` are surfaced inline.
+        progress.active.store(true, Ordering::Relaxed);
+        progress.total_chunks.store(100, Ordering::Relaxed);
+        progress.done_chunks.store(77, Ordering::Relaxed);
+        progress.total_batches.store(10, Ordering::Relaxed);
+        progress.done_batches.store(7, Ordering::Relaxed);
+        assert_eq!(
+            super::with_index_progress("building".to_owned(), &progress),
+            "building (indexing 77% — 7/10 batches)",
+        );
+    }
+
+    #[test]
     fn graph_id_bridges_method_hits_in_modules() {
-        // A method in a common module gets a durable, root-independent graph id.
+        // The graph was built from the repo root; the search engine indexes paths relative to
+        // the nested configuration root (`src/cf`). These are the two roots the bridge spans.
+        let engine_root = std::path::Path::new("/repo/src/cf");
+        let graph_root = std::path::Path::new("/repo");
+
+        // A method in a common module gets a durable, prefix-independent graph id — the
+        // re-anchoring through the two roots does not perturb a module-keyed id.
         assert_eq!(
             super::graph_id_for_hit(
                 &code_hit("CommonModules/Утилиты/Ext/Module.bsl", "ПроверитьИНН", "procedure"),
-                None,
+                Some(engine_root),
+                Some(graph_root),
             ),
             Some("method/common/Утилиты/ПроверитьИНН".to_owned()),
         );
@@ -1463,12 +1607,32 @@ mod tests {
         assert_eq!(
             super::graph_id_for_hit(
                 &code_hit("CommonModules/Утилиты/Ext/Module.bsl", "МодульнаяПерем", "variable"),
-                None,
+                Some(engine_root),
+                Some(graph_root),
             ),
             None,
         );
-        // A method in a form module falls back to the `method/file/<rel>::<name>` id the
-        // graph also mints — using the relative hit path the search overlay stores.
+        // A form-module method falls back to `method/file/<rel>::<name>`, and the rel MUST
+        // carry the `src/cf/` prefix the graph minted — otherwise `graph(node)` returns
+        // `not_found`. The engine-relative hit path is re-anchored to the graph root to add it.
+        assert_eq!(
+            super::graph_id_for_hit(
+                &code_hit(
+                    "Catalogs/Контрагенты/Forms/Форма/Ext/Form/Module.bsl",
+                    "ПриОткрытии",
+                    "procedure",
+                ),
+                Some(engine_root),
+                Some(graph_root),
+            ),
+            Some(
+                "method/file/src/cf/Catalogs/Контрагенты/Forms/Форма/Ext/Form/Module.bsl::ПриОткрытии"
+                    .to_owned()
+            ),
+        );
+        // With no engine root (e.g. a remote-baseline hit whose root is unreachable) the bridge
+        // cannot reconstruct the `src/cf/` prefix, so a path-fallback id would not resolve — it
+        // is dropped rather than emitted prefix-less and wrong.
         assert_eq!(
             super::graph_id_for_hit(
                 &code_hit(
@@ -1477,11 +1641,18 @@ mod tests {
                     "procedure",
                 ),
                 None,
+                None,
             ),
-            Some(
-                "method/file/Catalogs/Контрагенты/Forms/Форма/Ext/Form/Module.bsl::ПриОткрытии"
-                    .to_owned()
+            None,
+        );
+        // A module-keyed id is root-independent, so it still resolves even unanchored.
+        assert_eq!(
+            super::graph_id_for_hit(
+                &code_hit("CommonModules/Утилиты/Ext/Module.bsl", "ПроверитьИНН", "procedure"),
+                None,
+                None,
             ),
+            Some("method/common/Утилиты/ПроверитьИНН".to_owned()),
         );
     }
 
@@ -1912,6 +2083,8 @@ mod tests {
             WorkspaceSearchMode::SqliteLocal,
             None,
             None,
+            None,
+            &IndexProgress::new(),
             "ПроверитьИНН",
             10,
         )
@@ -1965,8 +2138,30 @@ mod tests {
         let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
 
         assert!(text.contains("Search index: ready"));
+        // The top line is honest that a concurrent search_code may transiently warm-up during
+        // the sync, resolving the "status=ready but search says warming" contradiction.
+        assert!(
+            text.contains("overlay syncing") && text.contains("warming up"),
+            "status must flag the transient warming window: {text}",
+        );
         assert!(text.contains("Semantic: syncing local overlay embeddings against remote baseline"));
         assert!(text.contains("Indexing in progress: 25%"));
+    }
+
+    #[test]
+    fn try_acquire_engine_waits_out_transient_contention_then_gives_up() {
+        let engine: Arc<Mutex<Option<SearchEngine>>> = Arc::new(Mutex::new(None));
+        // Uncontended: the guard is acquired immediately.
+        assert!(super::try_acquire_engine(&engine).is_some());
+
+        // Held for the whole call → every retry fails → None (the genuine still-busy case the
+        // caller degrades on). The guard is dropped here, not held across the assert.
+        let held = engine.lock().unwrap();
+        assert!(super::try_acquire_engine(&engine).is_none());
+        drop(held);
+
+        // Released → acquirable again.
+        assert!(super::try_acquire_engine(&engine).is_some());
     }
 
     #[test]
@@ -1995,6 +2190,8 @@ mod tests {
             WorkspaceSearchMode::PostgresRemoteOverlay,
             Some(&configured),
             None,
+            None,
+            &IndexProgress::new(),
             "Процедура",
             10,
         )
@@ -2027,6 +2224,8 @@ mod tests {
                 support: None,
             }),
             None,
+            None,
+            &IndexProgress::new(),
             "ТестоваПроцедура",
             10,
         )
@@ -2067,6 +2266,8 @@ mod tests {
                 support: None,
             }),
             Some(retryable_postgres_source()),
+            None,
+            &IndexProgress::new(),
             "ТестоваПроцедура",
             10,
         )
@@ -2101,6 +2302,8 @@ mod tests {
                 support: None,
             }),
             Some(retryable_postgres_source()),
+            None,
+            &IndexProgress::new(),
             "НесуществующееСлово",
             10,
         )

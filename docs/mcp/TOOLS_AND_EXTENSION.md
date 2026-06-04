@@ -16,7 +16,7 @@
 | `workspace` | `search(action=search_code\|status)` | поиск по коду проекта (лексика + семантика, RRF-фузия) | `EMBEDDING_URL` включает семантику; без него работает лексика |
 | `workspace` | `graph` | граф вызовов: `overview`, `schema`, `node`, `source`, `neighbors`, `callers`, `callees`, `resolve` | `--source-dir` |
 | `workspace` | `diagnostics` | диагностики кода: `catalog`/`schema` (без базы), `file` (находки по файлу), `workspace` (агрегаты по конфигурации) | `--source-dir` |
-| `workspace` | `query` | `validate` для SDBL, а также `execute` для `SELECT` | `--onec-url` нужен для live-валидации через платформу и для `execute` |
+| `workspace` | `query` | `schema` (контракт без базы), `validate` для SDBL, а также `execute` для `SELECT` | `--onec-url` нужен для live-валидации через платформу и для `execute` |
 | `workspace` | `execute` | `check`, `run`, `eval` для BSL-кода | `--onec-url` нужен для `run` и `eval` |
 | `workspace` | `debug` | attach, breakpoints, step, stack trace, locals, eval | `--onec-url` и доступ к отладочному контуру |
 
@@ -65,6 +65,13 @@
 
 Без этой переменной `search_code` возвращает только лексические результаты с пометкой
 `-- semantic skipped: … --`; в `reference` остаётся полнотекстовый `find_docs`.
+
+Каждый результат `search_code` помечен модальностью, нашедшей его: `[L+S]` — найден и
+лексикой, и семантикой (наиболее сильный сигнал: оба ранкера согласились), `[L]` — только
+лексика, `[S]` — только семантика. Это заменяет малоинформативный RRF-балл. Сниппеты
+секрет-редактируются: строковый литерал маскируется как `***`, только если в той же
+инструкции ему предшествует чувствительный маркер (идентификатор вроде `Токен` или ключ
+`Вставить("Пароль", …)`); структурные литералы и сообщения сохраняются.
 
 ### `EMBEDDING_API_KEY`
 

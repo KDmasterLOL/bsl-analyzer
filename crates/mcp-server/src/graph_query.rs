@@ -403,20 +403,42 @@ impl GraphDb {
     }
 
     /// Near-miss id lookup: rank every node's durable id against an imprecise `query`
-    /// (wrong casing, bare method/object name, or partial id), capped at `limit`. Feeds the
-    /// full `(id, kind)` node set through the shared [`ide::rank_resolve_candidates`] ranker,
-    /// so the candidate list is byte-identical to the in-memory `Analysis::graph_resolve`.
+    /// (wrong casing, bare method/object name, or partial id), capped at `limit`, through the
+    /// shared [`ide::rank_resolve_candidates`] ranker.
+    ///
+    /// Stored nodes alone are not enough: module nodes are synthesized on demand and generally
+    /// absent from the table (only persisted when they happen to be an edge endpoint), so a
+    /// wrong-cased `module/common/<name>` query would find no candidate even though
+    /// `graph(node)` recovers it. So we ALSO derive each owning-module id from its method rows
+    /// (the same union [`Self::count_modules`] uses), deduped against the stored set — matching
+    /// the in-memory `Analysis::graph_resolve`, which sees module nodes directly.
     pub fn resolve(&self, query: &str, limit: usize) -> anyhow::Result<ide::ResolveResult> {
-        let mut stmt = self.conn.prepare("SELECT id, kind FROM nodes")?;
-        let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .context("scanning nodes for resolve")?;
-        let candidates = ide::rank_resolve_candidates(
-            rows.iter().map(|(id, kind)| (id.clone(), node_kind(kind))),
-            query,
-            limit,
-        );
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut candidates: Vec<(String, &'static str)> = Vec::new();
+        {
+            let mut stmt = self.conn.prepare("SELECT id, kind FROM nodes")?;
+            let rows = stmt
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .context("scanning nodes for resolve")?;
+            for (id, kind) in rows {
+                if seen.insert(id.clone()) {
+                    candidates.push((id, node_kind(&kind)));
+                }
+            }
+        }
+        {
+            let mut stmt = self.conn.prepare("SELECT id FROM nodes WHERE kind='method'")?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            for id in rows {
+                if let Some(module) = ide::module_id_of_method(&id?) {
+                    if seen.insert(module.clone()) {
+                        candidates.push((module, node_kind("module")));
+                    }
+                }
+            }
+        }
+        let candidates = ide::rank_resolve_candidates(candidates.into_iter(), query, limit);
         Ok(ide::ResolveResult { query: query.to_string(), candidates })
     }
 
@@ -808,9 +830,13 @@ impl GraphDb {
 
         for id in ids {
             let item = match self.resolve_stored(id)? {
-                Err(err) => {
-                    SourceItem { id: id.clone(), source: None, error: Some(err), truncated: false }
-                }
+                Err(err) => SourceItem {
+                    id: id.clone(),
+                    source: None,
+                    error: Some(err),
+                    truncated: false,
+                    skipped_budget_exhausted: false,
+                },
                 Ok(n) if n.kind != "method" => {
                     let reason = if n.kind == "module" {
                         "module-body source is not served; request a method"
@@ -825,6 +851,7 @@ impl GraphDb {
                             reason: reason.into(),
                         }),
                         truncated: false,
+                        skipped_budget_exhausted: false,
                     }
                 }
                 Ok(n) => match (n.file.as_deref(), n.src_start, n.src_end) {
@@ -836,6 +863,7 @@ impl GraphDb {
                                 source: None,
                                 error: None,
                                 truncated: true,
+                                skipped_budget_exhausted: true,
                             }
                         }
                         Some(src) => {
@@ -848,6 +876,7 @@ impl GraphDb {
                                 source: Some(text),
                                 error: None,
                                 truncated,
+                                skipped_budget_exhausted: false,
                             }
                         }
                         None => SourceItem {
@@ -855,6 +884,7 @@ impl GraphDb {
                             source: None,
                             error: Some(GraphError::NotFound { id: id.clone() }),
                             truncated: false,
+                            skipped_budget_exhausted: false,
                         },
                     },
                     _ => SourceItem {
@@ -862,6 +892,7 @@ impl GraphDb {
                         source: None,
                         error: Some(GraphError::NotFound { id: id.clone() }),
                         truncated: false,
+                        skipped_budget_exhausted: false,
                     },
                 },
             };
@@ -922,7 +953,53 @@ fn clamp_source(src: String, max_chars: usize) -> (String, bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::method_id_range;
+    use super::{method_id_range, GraphDb};
+    use rusqlite::{params, Connection};
+
+    /// A minimal in-memory graph holding only the `nodes` columns `resolve` reads.
+    fn graph_db_with_nodes(rows: &[(&str, &str)]) -> GraphDb {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE nodes (id TEXT NOT NULL, kind TEXT NOT NULL);").unwrap();
+        for (id, kind) in rows {
+            conn.execute("INSERT INTO nodes (id, kind) VALUES (?1, ?2)", params![id, kind])
+                .unwrap();
+        }
+        GraphDb { conn }
+    }
+
+    #[test]
+    fn resolve_recovers_wrong_cased_module_id_from_member_methods() {
+        // Module nodes are synthesized on demand and not stored; only the methods are. A
+        // wrong-cased `module/...` query must still resolve via the owning-module id derived
+        // from a member method (the bug: it previously found nothing).
+        let db = graph_db_with_nodes(&[(
+            "method/common/СтроковыеФункцииКлиентСервер/ПодставитьПараметрыВСтроку",
+            "method",
+        )]);
+        let res = db.resolve("module/common/строковыефункцииклиентсервер", 10).unwrap();
+        let module = res
+            .candidates
+            .iter()
+            .find(|c| c.kind == "module")
+            .expect("a module candidate is derived from the member method");
+        assert_eq!(module.id, "module/common/СтроковыеФункцииКлиентСервер");
+        assert_eq!(module.match_kind, "case_insensitive");
+    }
+
+    #[test]
+    fn resolve_does_not_duplicate_a_stored_module() {
+        // A module that is BOTH stored (an edge endpoint) and derivable from its methods must
+        // appear once, not twice — the derived id is deduped against the stored set.
+        let db = graph_db_with_nodes(&[
+            ("module/common/Сервер", "module"),
+            ("method/common/Сервер/Считать", "method"),
+        ]);
+        let res = db.resolve("module/common/Сервер", 10).unwrap();
+        let modules: Vec<_> =
+            res.candidates.iter().filter(|c| c.id == "module/common/Сервер").collect();
+        assert_eq!(modules.len(), 1);
+        assert_eq!(modules[0].match_kind, "exact");
+    }
 
     #[test]
     fn method_id_range_covers_each_module_form() {

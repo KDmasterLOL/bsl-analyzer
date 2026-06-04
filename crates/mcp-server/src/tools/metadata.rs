@@ -88,10 +88,45 @@ fn format_summary_tree(config: &Configuration) -> Result<CallToolResult, McpErro
     Ok(CallToolResult::success(vec![Content::text(out)]))
 }
 
+/// Map a user-supplied category filter to a canonical category the tree understands.
+///
+/// The strict [`MdoType`] parser only knows the singular RU/EN names (`Справочник`/`Catalog`),
+/// but an agent naturally tries the on-disk directory / plural forms (`Catalogs`, `Справочники`)
+/// or over-qualifies a category with an object (`Справочник.Пользователи`). Normalise those to
+/// the singular so the filter just works instead of erroring on a reasonable input.
+fn normalize_filter_category(raw: &str) -> String {
+    // `Справочник.Пользователи` — a category over-qualified with an object name; keep the head.
+    let head = raw.split('.').next().unwrap_or(raw).trim();
+    // English plurals ARE the directory names (`Catalogs`, `Documents`); stripping a trailing
+    // ASCII `s` recovers the singular the parser knows, with no per-type table to maintain.
+    let depluralised = head.strip_suffix('s').filter(|s| !s.is_empty());
+    if let Some(en) = depluralised {
+        if en.parse::<MdoType>().is_ok() {
+            return en.to_string();
+        }
+    }
+    // Russian plurals the parser does not enumerate (the few categories an agent commonly asks
+    // for by plural). Anything else passes through unchanged for the parser / special-case match.
+    match head.to_lowercase().as_str() {
+        "справочники" => "Справочник".to_string(),
+        "документы" => "Документ".to_string(),
+        "отчеты" | "отчёты" => "Отчет".to_string(),
+        "обработки" => "Обработка".to_string(),
+        "перечисления" => "Перечисление".to_string(),
+        "задачи" => "Задача".to_string(),
+        "константы" => "Константа".to_string(),
+        "бизнеспроцессы" => "БизнесПроцесс".to_string(),
+        "планыобмена" => "ПланОбмена".to_string(),
+        _ => head.to_string(),
+    }
+}
+
 fn format_filtered_tree(
     config: &Configuration,
-    category: &str,
+    raw_category: &str,
 ) -> Result<CallToolResult, McpError> {
+    let category = normalize_filter_category(raw_category);
+    let category = category.as_str();
     let mut out = String::new();
     let mut found = false;
 
@@ -173,7 +208,7 @@ fn format_filtered_tree(
 
     if !found {
         return Err(McpError::invalid_params(
-            format!("Категория '{category}' не найдена. Вызовите get_metadata_tree без фильтра для списка категорий."),
+            format!("Категория '{raw_category}' не найдена. Вызовите get_metadata_tree без фильтра для списка категорий."),
             None,
         ));
     }
@@ -381,30 +416,60 @@ pub fn get_configuration_info(
     Ok(CallToolResult::success(vec![Content::text(out)]))
 }
 
+/// Read forms from disk. `source_root` MUST be the configuration root (the
+/// `Configuration.xml`-bearing directory, e.g. `src/cf`) — passing the repo root when the
+/// configuration is nested under `src/cf` makes every form look missing.
+///
+/// `object_name` is required for an object's forms (`<TypeDir>/<object>/Forms/…`) but ignored
+/// for `CommonForm`, which is a top-level form with no parent object (`CommonForms/<Form>/…`).
 pub fn get_form_structure(
-    workspace_root: Option<&std::path::Path>,
+    source_root: Option<&std::path::Path>,
     object_type: &str,
-    object_name: &str,
+    object_name: Option<&str>,
     form_name: Option<&str>,
 ) -> Result<CallToolResult, McpError> {
-    let root = workspace_root.ok_or_else(|| {
-        McpError::invalid_params("Workspace root не задан, формы недоступны", None)
+    let root = source_root.ok_or_else(|| {
+        McpError::invalid_params("Configuration root не задан, формы недоступны", None)
     })?;
 
+    // CommonForm has no parent object: its forms live directly under `CommonForms/<Form>`,
+    // not `<TypeDir>/<object>/Forms/<Form>`, so it takes a distinct path and no `object_name`.
+    // `to_lowercase` (not `eq_ignore_ascii_case`) so the Cyrillic alias folds case too.
+    if matches!(object_type.to_lowercase().as_str(), "commonform" | "общаяформа") {
+        return forms_in_container(&root.join("CommonForms"), form_name, "ОбщаяФорма");
+    }
+
+    let object_name = object_name.ok_or_else(|| {
+        McpError::invalid_params(
+            "'object_name' обязателен для форм объекта (кроме CommonForm)",
+            None,
+        )
+    })?;
     let type_dir = mdo_type_to_dir(object_type).ok_or_else(|| {
         McpError::invalid_params(format!("Неизвестный тип объекта: {object_type}"), None)
     })?;
 
     let forms_dir = root.join(type_dir).join(object_name).join("Forms");
-    if !forms_dir.exists() {
+    forms_in_container(&forms_dir, form_name, &format!("{object_type}.{object_name}"))
+}
+
+/// Read a single form (when `form_name` is given) or list every form directory inside
+/// `container` (`.../Forms` for an object, `CommonForms` for a common form). `title` labels
+/// the listing header and the empty-set error.
+fn forms_in_container(
+    container: &std::path::Path,
+    form_name: Option<&str>,
+    title: &str,
+) -> Result<CallToolResult, McpError> {
+    if !container.exists() {
         return Err(McpError::invalid_params(
-            format!("Каталог форм не найден: {}", forms_dir.display()),
+            format!("Каталог форм не найден: {}", container.display()),
             None,
         ));
     }
 
     if let Some(fname) = form_name {
-        let form_xml_path = forms_dir.join(fname).join("Ext").join("Form.xml");
+        let form_xml_path = container.join(fname).join("Ext").join("Form.xml");
         if !form_xml_path.exists() {
             return Err(McpError::invalid_params(
                 format!("Форма не найдена: {}", form_xml_path.display()),
@@ -418,7 +483,7 @@ pub fn get_form_structure(
         Ok(CallToolResult::success(vec![Content::text(format_form(&form))]))
     } else {
         let mut form_names = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(&forms_dir) {
+        if let Ok(entries) = std::fs::read_dir(container) {
             for entry in entries.flatten() {
                 if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
                     if let Some(name) = entry.file_name().to_str() {
@@ -430,13 +495,10 @@ pub fn get_form_structure(
         form_names.sort();
 
         if form_names.is_empty() {
-            return Err(McpError::invalid_params(
-                format!("Формы не найдены для {object_type}.{object_name}"),
-                None,
-            ));
+            return Err(McpError::invalid_params(format!("Формы не найдены для {title}"), None));
         }
 
-        let mut out = format!("# Формы {object_type}.{object_name}\n\n");
+        let mut out = format!("# Формы {title}\n\n");
         for name in &form_names {
             let _ = writeln!(out, "- {name}");
         }
@@ -551,6 +613,60 @@ mod tests {
     }
 
     #[test]
+    fn get_form_structure_lists_forms_under_the_given_root() {
+        // The object form directory is `<root>/<TypeDir>/<object>/Forms`. Passing the repo root
+        // when the configuration is nested under `src/cf` makes every form look missing — so the
+        // caller must pass the configuration root. This locks that the function resolves forms
+        // relative to whatever root it is handed (the config root in production).
+        let tmp = tempfile::tempdir().unwrap();
+        let forms = tmp.path().join("Catalogs").join("Пользователи").join("Forms");
+        std::fs::create_dir_all(forms.join("ФормаСписка")).unwrap();
+        std::fs::create_dir_all(forms.join("ФормаЭлемента")).unwrap();
+
+        let result =
+            get_form_structure(Some(tmp.path()), "Catalog", Some("Пользователи"), None).unwrap();
+        let text = extract_text(&result);
+        assert!(text.contains("ФормаСписка"), "should list ФормаСписка: {text}");
+        assert!(text.contains("ФормаЭлемента"), "should list ФормаЭлемента: {text}");
+
+        // A wrong root (the repo root, missing the `src/cf` config segment) finds nothing.
+        let repo_root = tmp.path().join("repo_root_without_config");
+        std::fs::create_dir_all(&repo_root).unwrap();
+        assert!(
+            get_form_structure(Some(&repo_root), "Catalog", Some("Пользователи"), None).is_err(),
+            "a root without the object tree must error, not silently succeed",
+        );
+    }
+
+    #[test]
+    fn get_form_structure_lists_common_forms_without_object_name() {
+        // CommonForm is a top-level form: it lives under `CommonForms/<Form>`, has no parent
+        // object, and so must resolve with object_name = None (the protocol's failing case).
+        let tmp = tempfile::tempdir().unwrap();
+        let common = tmp.path().join("CommonForms");
+        std::fs::create_dir_all(common.join("ОтправкаSMS")).unwrap();
+        std::fs::create_dir_all(common.join("Настройки")).unwrap();
+
+        let result = get_form_structure(Some(tmp.path()), "CommonForm", None, None).unwrap();
+        let text = extract_text(&result);
+        assert!(text.contains("ОтправкаSMS"), "should list ОтправкаSMS: {text}");
+        assert!(text.contains("Настройки"), "should list Настройки: {text}");
+
+        // The localized type name resolves to the same place.
+        assert!(get_form_structure(Some(tmp.path()), "ОбщаяФорма", None, None).is_ok());
+    }
+
+    #[test]
+    fn get_form_structure_requires_object_name_for_object_forms() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = get_form_structure(Some(tmp.path()), "Catalog", None, None).unwrap_err();
+        assert!(
+            format!("{err:?}").contains("object_name"),
+            "object forms must still require object_name: {err:?}",
+        );
+    }
+
+    #[test]
     fn test_metadata_tree_summary() {
         let config = fixture_config();
         let result = get_metadata_tree(&config, &[], None).unwrap();
@@ -570,6 +686,36 @@ mod tests {
 
         assert!(text.contains("Справочник"), "should have category name");
         assert!(text.contains("Справочник1"), "should list Справочник1");
+    }
+
+    #[test]
+    fn filter_category_accepts_plural_and_overqualified_aliases() {
+        // English directory/plural form.
+        assert_eq!(normalize_filter_category("Catalogs"), "Catalog");
+        assert_eq!(normalize_filter_category("Documents"), "Document");
+        // Russian plural.
+        assert_eq!(normalize_filter_category("Справочники"), "Справочник");
+        assert_eq!(normalize_filter_category("Отчёты"), "Отчет");
+        // Over-qualified with an object name — keep the category head.
+        assert_eq!(normalize_filter_category("Справочник.Пользователи"), "Справочник");
+        // The canonical singular passes through untouched.
+        assert_eq!(normalize_filter_category("Справочник"), "Справочник");
+        // A non-plural unknown is left for the parser / special-case match to handle.
+        assert_eq!(normalize_filter_category("ОбщиеМодули"), "ОбщиеМодули");
+    }
+
+    #[test]
+    fn test_metadata_tree_filter_plural_and_dotted_resolve() {
+        let config = fixture_config();
+        for input in ["Catalogs", "Справочники", "Справочник.Справочник1"]
+        {
+            let result = get_metadata_tree(&config, &[], Some(input.into())).unwrap();
+            let text = extract_text(&result);
+            assert!(
+                text.contains("Справочник1"),
+                "filter `{input}` should list Справочник1: {text}"
+            );
+        }
     }
 
     #[test]
@@ -631,7 +777,7 @@ mod tests {
         let fixture_root =
             concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer");
         let root = std::path::Path::new(fixture_root);
-        let result = get_form_structure(Some(root), "Document", "Документ1", None).unwrap();
+        let result = get_form_structure(Some(root), "Document", Some("Документ1"), None).unwrap();
         let text = extract_text(&result);
 
         assert!(text.contains("Формы Document.Документ1"), "should have forms header");
@@ -645,7 +791,7 @@ mod tests {
             concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer");
         let root = std::path::Path::new(fixture_root);
         let result =
-            get_form_structure(Some(root), "Document", "Документ1", Some("ФормаДокумента"))
+            get_form_structure(Some(root), "Document", Some("Документ1"), Some("ФормаДокумента"))
                 .unwrap();
         let text = extract_text(&result);
 
@@ -654,7 +800,7 @@ mod tests {
 
     #[test]
     fn test_form_structure_no_workspace() {
-        let result = get_form_structure(None, "Catalog", "Test", None);
+        let result = get_form_structure(None, "Catalog", Some("Test"), None);
         assert!(result.is_err(), "should fail without workspace root");
     }
 
@@ -663,8 +809,12 @@ mod tests {
         let fixture_root =
             concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer");
         let root = std::path::Path::new(fixture_root);
-        let result =
-            get_form_structure(Some(root), "Document", "Документ1", Some("НесуществующаяФорма"));
+        let result = get_form_structure(
+            Some(root),
+            "Document",
+            Some("Документ1"),
+            Some("НесуществующаяФорма"),
+        );
 
         assert!(result.is_err(), "should fail for missing form");
     }
