@@ -71,6 +71,16 @@ pub fn overview(graph: &GraphDb, top: usize) -> Value {
     }
 }
 
+/// Default cap on the candidate ids returned by `resolve`.
+pub const DEFAULT_RESOLVE_LIMIT: usize = 20;
+
+pub fn resolve(graph: &GraphDb, query: &str, limit: usize) -> Value {
+    match graph.resolve(query, limit) {
+        Ok(result) => to_value(&result),
+        Err(e) => internal(e),
+    }
+}
+
 /// Default body-output budget (in tokens, ~4 chars each) for `node`/`neighbors` at
 /// `detail=bodies`, so a `bodies` request can never return an unbounded payload the way an
 /// uncapped manager-method body could. Overridable via `max_output_tokens`.
@@ -182,10 +192,11 @@ pub fn loading(detail: Option<&str>) -> CallToolResult {
 /// independent of the on-disk SQLite cache layout in [`crate::graph_db`]).
 fn schema_json() -> Value {
     json!({
-        "schema_version": "12",
-        "actions": ["overview", "schema", "node", "source", "neighbors", "callers", "callees"],
+        "schema_version": "13",
+        "actions": ["overview", "schema", "node", "source", "neighbors", "callers", "callees", "resolve"],
         "node_kinds": ["method", "module", "mdo", "attribute", "tabular_section", "form", "form_item", "form_attribute"],
         "notes": "since version 7 `node(module/<scope>)` resolves for any code module and returns a `methods` array ({id, name, is_export}) of the module's members; module membership is served on demand and is not a graph edge, so `neighbors(module/…)` stays empty",
+        "resolve": "since version 13 `resolve(query)` returns candidate durable ids ({id, kind, match}) for an imprecise query — wrong casing, a bare method/object name, or a partial id — so a `not_found` from `node`/`neighbors` is recoverable without guessing. `match` is exact|case_insensitive|name|substring (strongest first); the list is capped (default 20).",
         "edge_kinds": ["call", "manager_creates", "manager_access", "query_ref", "contains", "data_binding"],
         "provenance": ["resolved", "inferred", "visibility_blocked", "unresolved"],
         "dispatch": ["client", "server"],
@@ -284,11 +295,14 @@ mod tests {
         // changes; `total` since this revision, `form`/`form_item` + `contains` since
         // version 3, `form_attribute` since version 4, `tabular_section` since version
         // 5, and the `data_binding` edge since version 6.
-        assert_eq!(schema["schema_version"], "12");
+        assert_eq!(schema["schema_version"], "13");
         assert!(
             schema["neighbors_result"]["total"].is_string(),
             "neighbours result must document the `total` field"
         );
+        let actions = schema["actions"].as_array().unwrap();
+        assert!(actions.iter().any(|a| a == "resolve"), "resolve action must be advertised");
+        assert!(schema["resolve"].is_string(), "resolve must be documented");
         let node_kinds = schema["node_kinds"].as_array().unwrap();
         assert!(node_kinds.iter().any(|k| k == "form"));
         assert!(node_kinds.iter().any(|k| k == "form_item"));
@@ -325,7 +339,7 @@ mod tests {
     #[test]
     fn schema_and_loading_populate_structured_content() {
         assert_structured_mirrors_text(&schema());
-        assert_eq!(schema().structured_content.unwrap()["schema_version"], "12");
+        assert_eq!(schema().structured_content.unwrap()["schema_version"], "13");
 
         assert_structured_mirrors_text(&loading(Some("indexing")));
         let body = loading(Some("indexing")).structured_content.unwrap();

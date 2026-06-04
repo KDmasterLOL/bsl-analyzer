@@ -76,10 +76,13 @@ struct ExecuteParams {
 
 #[derive(Deserialize, JsonSchema)]
 struct GraphParams {
-    /// overview | schema | node | source | neighbors | callers | callees
+    /// overview | schema | node | source | neighbors | callers | callees | resolve
     action: String,
     /// Durable node id (required for node/neighbors/callers/callees).
     id: Option<String>,
+    /// Imprecise lookup string (required for `resolve`): wrong casing, a bare method/object
+    /// name, or a partial id.
+    query: Option<String>,
     /// Durable node ids (required for `source`).
     #[serde(default)]
     ids: Vec<String>,
@@ -481,6 +484,11 @@ impl McpServer {
             let gdb = &snapshot.graph;
             let value = match p.action.as_str() {
                 "overview" => tools::graph::overview(gdb, p.top.unwrap_or(20)),
+                "resolve" => {
+                    let query = require(p.query, "query", "resolve")?;
+                    let limit = p.top.unwrap_or(tools::graph::DEFAULT_RESOLVE_LIMIT);
+                    tools::graph::resolve(gdb, &query, limit)
+                }
                 "node" => {
                     let id = require(p.id, "id", "node")?;
                     let detail = tools::graph::detail_from(p.detail.as_deref())
@@ -528,7 +536,7 @@ impl McpServer {
                     return Err(McpError::invalid_params(
                         format!(
                             "Unknown action '{other}'. Expected: overview, schema, node, source, \
-                             neighbors, callers, callees"
+                             neighbors, callers, callees, resolve"
                         ),
                         None,
                     ))

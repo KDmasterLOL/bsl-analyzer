@@ -378,6 +378,19 @@ impl Analysis {
         Ok(NodeResult { node: ctx.node_ref(node, detail) })
     }
 
+    /// Rank candidate durable ids for an imprecise `query` (wrong casing, bare name, or
+    /// partial id), capped at `limit`, so an agent can recover a canonical id.
+    pub fn graph_resolve(
+        &self,
+        source_root_id: SourceRootId,
+        workspace_root: Option<&Path>,
+        query: &str,
+        limit: usize,
+    ) -> ResolveResult {
+        let ctx = GraphCtx::new(self.database(), source_root_id, workspace_root);
+        ctx.resolve(query, limit)
+    }
+
     /// Traverse callers/callees from a node up to `depth`, bounded by `max_nodes`.
     pub fn graph_neighbors(
         &self,
@@ -1434,7 +1447,6 @@ impl<'a> GraphCtx<'a> {
 
     fn overview(&self, top_n: usize) -> GraphOverview {
         let mut methods = 0usize;
-        let mut modules = 0usize;
         let mut mdos = 0usize;
         let mut attributes = 0usize;
         let mut tabular_sections = 0usize;
@@ -1442,11 +1454,24 @@ impl<'a> GraphCtx<'a> {
         let mut form_items = 0usize;
         let mut form_attributes = 0usize;
         let mut node_count = 0usize;
+        // The true module population: every module that owns a method, plus any module
+        // body seen as a node (a `module/<scope>` node exists only when it is an edge
+        // endpoint, so counting those alone undercounts — see the method-derived union).
+        let mut module_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
         for node in self.graph.nodes() {
             node_count += 1;
             match node {
-                GraphNode::Method(_) => methods += 1,
-                GraphNode::ModuleCode(_) => modules += 1,
+                GraphNode::Method(_) => {
+                    methods += 1;
+                    let (id, _) = self.encode_node(&node);
+                    if let Some(module) = module_id_of_method(&id) {
+                        module_ids.insert(module);
+                    }
+                }
+                GraphNode::ModuleCode(_) => {
+                    let (id, _) = self.encode_node(&node);
+                    module_ids.insert(id);
+                }
                 GraphNode::Mdo { .. } => mdos += 1,
                 GraphNode::Attribute { .. } => attributes += 1,
                 GraphNode::TabularSectionAttribute { .. } => attributes += 1,
@@ -1456,6 +1481,7 @@ impl<'a> GraphCtx<'a> {
                 GraphNode::FormAttribute { .. } => form_attributes += 1,
             }
         }
+        let modules = module_ids.len();
 
         let mut edge_provenance: BTreeMap<&'static str, usize> = BTreeMap::new();
         let mut client_to_server_edges = 0usize;
@@ -1494,6 +1520,21 @@ impl<'a> GraphCtx<'a> {
             edge_provenance,
             client_to_server_edges,
         }
+    }
+
+    /// Near-miss id lookup: rank every node's durable id against an imprecise `query`
+    /// (wrong casing, bare method/object name, or partial id), so an agent can recover a
+    /// canonical id from a `not_found` without guessing.
+    fn resolve(&self, query: &str, limit: usize) -> ResolveResult {
+        let candidates = rank_resolve_candidates(
+            self.graph.nodes().map(|node| {
+                let (id, _) = self.encode_node(&node);
+                (id, graph_node_kind(&node))
+            }),
+            query,
+            limit,
+        );
+        ResolveResult { query: query.to_string(), candidates }
     }
 
     fn neighbors(&self, params: &NeighborsParams<'_>) -> Result<NeighborsResult, GraphError> {
@@ -1702,6 +1743,109 @@ pub fn method_graph_id(
         return None;
     }
     Some(format!("method/file/{rel}::{method_name}"))
+}
+
+/// The durable `module/<scope>` id that owns a `method/<scope>/<name>` (or
+/// `method/file/<rel>::<name>`) id. The inverse of [`method_id_range`]'s lower bound:
+/// it strips the trailing method segment, keeping the same `::`/`/` member grammar.
+/// `None` for any id that is not a method id.
+pub fn module_id_of_method(method_id: &str) -> Option<String> {
+    let rest = method_id.strip_prefix("method/")?;
+    if let Some(rel) = rest.strip_prefix("file/") {
+        // `file/<rel>::<name>` — the file module is everything before the `::`. The `::` is
+        // required: a `file/<rel>` with no member separator is not a method id.
+        let (rel, _name) = rel.split_once("::")?;
+        if rel.is_empty() {
+            return None;
+        }
+        return Some(format!("module/file/{rel}"));
+    }
+    // `<scope>/<name>` — the module scope is everything before the last `/`.
+    let scope = rest.rsplit_once('/')?.0;
+    if scope.is_empty() {
+        return None;
+    }
+    Some(format!("module/{scope}"))
+}
+
+/// The trailing name segment of a durable id: the part after the last `::` (a file
+/// module's member separator) or, failing that, the last `/`. Used by
+/// [`rank_resolve_candidates`] to match a bare method/object name against full ids.
+fn resolve_name_segment(id: &str) -> &str {
+    if let Some(pos) = id.rfind("::") {
+        return &id[pos + 2..];
+    }
+    id.rsplit_once('/').map_or(id, |(_, tail)| tail)
+}
+
+/// A single near-miss candidate for [`ResolveResult`]: a durable id that an agent's
+/// `query` could have meant, with the match strength that surfaced it.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ResolveCandidate {
+    pub id: String,
+    pub kind: &'static str,
+    /// How `query` matched: `exact` | `case_insensitive` | `name` | `substring`
+    /// (strongest first).
+    #[serde(rename = "match")]
+    pub match_kind: &'static str,
+}
+
+/// The result of `graph(action=resolve)`: the candidate durable ids an imprecise
+/// `query` (wrong casing, bare name, or partial id) could resolve to, so an agent can
+/// recover from a `not_found` without guessing.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ResolveResult {
+    pub query: String,
+    pub candidates: Vec<ResolveCandidate>,
+}
+
+/// Rank durable ids against an imprecise `query`, strongest match first then id-ascending,
+/// capped at `limit`. Both serve paths (in-memory [`Analysis::graph_resolve`] and SQLite)
+/// feed their full `(id, kind)` node set through this one ranker, so the candidate lists
+/// stay byte-identical regardless of scan order. An empty `query` matches nothing.
+pub fn rank_resolve_candidates(
+    nodes: impl Iterator<Item = (String, &'static str)>,
+    query: &str,
+    limit: usize,
+) -> Vec<ResolveCandidate> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let q_lower = query.to_lowercase();
+    let mut ranked: Vec<(u8, ResolveCandidate)> = nodes
+        .filter_map(|(id, kind)| {
+            let (rank, match_kind) = if id == query {
+                (0, "exact")
+            } else if id.to_lowercase() == q_lower {
+                (1, "case_insensitive")
+            } else if resolve_name_segment(&id).to_lowercase() == q_lower {
+                (2, "name")
+            } else if id.to_lowercase().contains(&q_lower) {
+                (3, "substring")
+            } else {
+                return None;
+            };
+            Some((rank, ResolveCandidate { id, kind, match_kind }))
+        })
+        .collect();
+    ranked.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.id.cmp(&b.1.id)));
+    ranked.truncate(limit);
+    ranked.into_iter().map(|(_, c)| c).collect()
+}
+
+/// The agent-facing kind label for a [`GraphNode`], matching the SQLite serve path's
+/// `node_kind`. A tabular-section attribute is reported as a plain `attribute`.
+fn graph_node_kind(node: &GraphNode) -> &'static str {
+    match node {
+        GraphNode::Method(_) => "method",
+        GraphNode::ModuleCode(_) => "module",
+        GraphNode::Mdo { .. } => "mdo",
+        GraphNode::Attribute { .. } | GraphNode::TabularSectionAttribute { .. } => "attribute",
+        GraphNode::TabularSection { .. } => "tabular_section",
+        GraphNode::Form { .. } => "form",
+        GraphNode::FormItem { .. } => "form_item",
+        GraphNode::FormAttribute { .. } => "form_attribute",
+    }
 }
 
 /// The parsed shape of a durable graph id, independent of any database. Drives
@@ -2682,6 +2826,67 @@ mod tests {
         assert_eq!(workspace_rel_path("/ws/project/a.bsl", Path::new("/ws/proj")), None);
         // The root itself (no rel remainder) → None.
         assert_eq!(workspace_rel_path("/ws/proj", Path::new("/ws/proj")), None);
+    }
+
+    #[test]
+    fn module_id_of_method_inverts_each_member_separator() {
+        // Keyed scope: strip the trailing `/<method>`.
+        assert_eq!(
+            module_id_of_method("method/common/Сервер/Считать").as_deref(),
+            Some("module/common/Сервер"),
+        );
+        assert_eq!(
+            module_id_of_method("method/manager/Catalog/Товары/Найти").as_deref(),
+            Some("module/manager/Catalog/Товары"),
+        );
+        // File module: keep `file/<rel>`, drop the `::<method>` member.
+        assert_eq!(
+            module_id_of_method("method/file/src/cf/Forms/A/Module.bsl::ПриОткрытии").as_deref(),
+            Some("module/file/src/cf/Forms/A/Module.bsl"),
+        );
+        // Not a method id, or no member segment → None.
+        assert_eq!(module_id_of_method("module/common/Сервер"), None);
+        assert_eq!(module_id_of_method("mdo/Catalog/Товары"), None);
+        assert_eq!(module_id_of_method("method/file/::M"), None);
+        // A `file/<rel>` with no `::` member separator is malformed, not a module bucket.
+        assert_eq!(module_id_of_method("method/file/src/Module.bsl"), None);
+    }
+
+    #[test]
+    fn rank_resolve_orders_by_match_strength_then_id() {
+        let nodes = || {
+            [
+                ("method/common/Сервер/Считать".to_string(), "method"),
+                ("method/common/Клиент/считать".to_string(), "method"),
+                ("method/common/Прочее/СчитатьВсё".to_string(), "method"),
+                ("module/common/Сервер".to_string(), "module"),
+            ]
+            .into_iter()
+        };
+
+        // Exact id wins outright.
+        let exact = rank_resolve_candidates(nodes(), "method/common/Сервер/Считать", 10);
+        assert_eq!(exact[0].id, "method/common/Сервер/Считать");
+        assert_eq!(exact[0].match_kind, "exact");
+
+        // A bare name matches both case-spellings as `name` (id-ascending), ahead of the
+        // `substring`-only `СчитатьВсё`.
+        let by_name = rank_resolve_candidates(nodes(), "Считать", 10);
+        let labels: Vec<_> =
+            by_name.iter().map(|c| (c.id.as_str(), c.match_kind, c.kind)).collect();
+        assert_eq!(
+            labels,
+            vec![
+                ("method/common/Клиент/считать", "name", "method"),
+                ("method/common/Сервер/Считать", "name", "method"),
+                ("method/common/Прочее/СчитатьВсё", "substring", "method"),
+            ],
+        );
+
+        // The cap is honoured.
+        assert_eq!(rank_resolve_candidates(nodes(), "common", 2).len(), 2);
+        // Empty query matches nothing.
+        assert!(rank_resolve_candidates(nodes(), "", 10).is_empty());
     }
 
     /// Forms never enter the in-memory `workspace_call_graph` (they are emitted only

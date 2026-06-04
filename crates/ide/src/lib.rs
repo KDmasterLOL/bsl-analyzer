@@ -20,10 +20,11 @@ pub use folding::{FoldingRange, FoldingRangeKind};
 pub use formatting::{FormattingConfig, FormattingResult};
 pub use graph::{
     build_workspace_graph_rows, classify_graph_id, method_graph_id, method_id_for_path,
-    reproject_changed_modules, scope_for_path, BatchDbOpener, Direction, EdgeRef,
-    GraphBuildSummary, GraphContext, GraphDetail, GraphError, GraphIdKind, GraphOverview,
-    GraphRowSink, ModuleMethod, NeighborsParams, NeighborsResult, NodeRef, NodeResult,
-    ReprojectedRows, SourceItem, SourceResult, MAX_DROPPED_SAMPLE,
+    module_id_of_method, rank_resolve_candidates, reproject_changed_modules, scope_for_path,
+    BatchDbOpener, Direction, EdgeRef, GraphBuildSummary, GraphContext, GraphDetail, GraphError,
+    GraphIdKind, GraphOverview, GraphRowSink, ModuleMethod, NeighborsParams, NeighborsResult,
+    NodeRef, NodeResult, ReprojectedRows, ResolveCandidate, ResolveResult, SourceItem,
+    SourceResult, MAX_DROPPED_SAMPLE,
 };
 pub use hir::graph_index;
 pub use hir::ModuleId;

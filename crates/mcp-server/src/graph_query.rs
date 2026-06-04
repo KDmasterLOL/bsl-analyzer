@@ -376,6 +376,50 @@ impl GraphDb {
         rows.collect::<rusqlite::Result<Vec<_>>>().context("listing module members")
     }
 
+    /// The true distinct-module count: every module that owns a method (derived from the
+    /// `method/<scope>/…` id prefix via [`ide::module_id_of_method`]) unioned with any
+    /// `module`-kind row (a module body persisted only because it was an edge endpoint).
+    /// Counting `kind='module'` rows alone undercounts, since module nodes are synthesized
+    /// on demand and not generally stored — the symptom the agent saw as `modules=13`.
+    fn count_modules(&self) -> anyhow::Result<usize> {
+        let mut modules: std::collections::HashSet<String> = std::collections::HashSet::new();
+        {
+            let mut stmt = self.conn.prepare("SELECT id FROM nodes WHERE kind='module'")?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            for id in rows {
+                modules.insert(id?);
+            }
+        }
+        {
+            let mut stmt = self.conn.prepare("SELECT id FROM nodes WHERE kind='method'")?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            for id in rows {
+                if let Some(module) = ide::module_id_of_method(&id?) {
+                    modules.insert(module);
+                }
+            }
+        }
+        Ok(modules.len())
+    }
+
+    /// Near-miss id lookup: rank every node's durable id against an imprecise `query`
+    /// (wrong casing, bare method/object name, or partial id), capped at `limit`. Feeds the
+    /// full `(id, kind)` node set through the shared [`ide::rank_resolve_candidates`] ranker,
+    /// so the candidate list is byte-identical to the in-memory `Analysis::graph_resolve`.
+    pub fn resolve(&self, query: &str, limit: usize) -> anyhow::Result<ide::ResolveResult> {
+        let mut stmt = self.conn.prepare("SELECT id, kind FROM nodes")?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("scanning nodes for resolve")?;
+        let candidates = ide::rank_resolve_candidates(
+            rows.iter().map(|(id, kind)| (id.clone(), node_kind(kind))),
+            query,
+            limit,
+        );
+        Ok(ide::ResolveResult { query: query.to_string(), candidates })
+    }
+
     fn in_degree(&self, id: &str) -> anyhow::Result<usize> {
         let d: Option<i64> = self
             .conn
@@ -441,7 +485,7 @@ impl GraphDb {
     pub fn overview(&self, top_n: usize) -> anyhow::Result<GraphOverview> {
         let nodes = self.count("SELECT COUNT(*) FROM nodes")?;
         let methods = self.count("SELECT COUNT(*) FROM nodes WHERE kind='method'")?;
-        let modules = self.count("SELECT COUNT(*) FROM nodes WHERE kind='module'")?;
+        let modules = self.count_modules()?;
         let mdos = self.count("SELECT COUNT(*) FROM nodes WHERE kind='mdo'")?;
         let attributes = self.count("SELECT COUNT(*) FROM nodes WHERE kind='attribute'")?;
         let tabular_sections =

@@ -1136,7 +1136,16 @@ mod tests {
 
         assert_eq!(count("SELECT COUNT(*) FROM nodes"), overview.nodes);
         assert_eq!(count("SELECT COUNT(*) FROM nodes WHERE kind='method'"), overview.methods);
-        assert_eq!(count("SELECT COUNT(*) FROM nodes WHERE kind='module'"), overview.modules);
+        // `overview.modules` is the true distinct-module population (every module that owns a
+        // method, plus any persisted module-body node), so it is >= the module rows actually
+        // stored — module nodes are synthesized on demand, not generally persisted.
+        let stored_module_rows = count("SELECT COUNT(*) FROM nodes WHERE kind='module'");
+        assert!(
+            overview.modules >= stored_module_rows,
+            "reported modules {} >= stored module rows {stored_module_rows}",
+            overview.modules,
+        );
+        assert!(overview.modules > 0, "the sample workspace has code modules");
         assert_eq!(count("SELECT COUNT(*) FROM nodes WHERE kind='mdo'"), overview.mdos);
         assert_eq!(count("SELECT COUNT(*) FROM nodes WHERE kind='attribute'"), overview.attributes);
         assert_eq!(count("SELECT COUNT(*) FROM edges"), overview.edges);
@@ -1627,6 +1636,24 @@ mod tests {
                 .unwrap();
         let sql_overview = serde_json::to_value(gdb.overview(10).unwrap()).unwrap();
         assert_eq!(mem_overview, sql_overview, "overview JSON from a multi-module batch");
+        // The module count is the true distinct-module population (both common modules
+        // own methods), not just the module nodes that happen to be edge endpoints.
+        assert_eq!(sql_overview["modules"], 2, "both common modules counted: {sql_overview}");
+
+        // `resolve` parity: a bare method name yields the same candidates from both paths.
+        let mem_resolve =
+            serde_json::to_value(analysis.graph_resolve(GRAPH_SOURCE_ROOT, Some(root), "ШагБ", 10))
+                .unwrap();
+        let sql_resolve = serde_json::to_value(gdb.resolve("ШагБ", 10).unwrap()).unwrap();
+        assert_eq!(mem_resolve, sql_resolve, "resolve candidates from a multi-module batch");
+        assert!(
+            sql_resolve["candidates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c["id"] == "method/common/Бета/ШагБ" && c["match"] == "name"),
+            "ШагБ resolves to its durable id by name: {sql_resolve}"
+        );
         // Guard the coverage: the query pass really produced edges across the batch,
         // so the parallel SDBL collection path is genuinely exercised, not vacuous.
         assert!(
