@@ -266,7 +266,8 @@ impl McpServer {
                 .await
                 .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
             }
-            "find_code" | "search_code" => {
+            // `search_code` is the unified lexical+semantic code search (RRF-fused).
+            "search_code" => {
                 let query = require(p.query, "query", &p.action)?;
                 let limit = p.limit.unwrap_or(10).min(50);
                 let engine = self.state.search_engine().clone();
@@ -274,17 +275,8 @@ impl McpServer {
                 let workspace_search_mode = self.state.workspace_search_mode();
                 let configured_baseline = self.state.configured_baseline();
                 let external_baseline = self.state.external_baseline();
-                let action = p.action.clone();
-                tokio::task::spawn_blocking(move || match action.as_str() {
-                    "find_code" => tools::search::find_code(
-                        &engine,
-                        workspace_search_mode,
-                        configured_baseline.as_ref(),
-                        external_baseline,
-                        &query,
-                        limit,
-                    ),
-                    "search_code" => tools::search::search_code(
+                tokio::task::spawn_blocking(move || {
+                    tools::search::hybrid_code(
                         &engine,
                         &semantic_runtime,
                         workspace_search_mode,
@@ -292,14 +284,13 @@ impl McpServer {
                         external_baseline,
                         &query,
                         limit,
-                    ),
-                    _ => unreachable!(),
+                    )
                 })
                 .await
                 .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
             }
             other => Err(McpError::invalid_params(
-                format!("Unknown action '{other}'. Expected: find_code, search_code, status"),
+                format!("Unknown action '{other}'. Expected: search_code, status"),
                 None,
             )),
         }

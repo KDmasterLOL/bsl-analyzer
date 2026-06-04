@@ -13,8 +13,8 @@
 | `reference` | `syntax_help` | точечная справка по типу, методу или глобальной функции | ничего |
 | `reference` | `its_help` | вопросы к ИТС / 1С:Напарник | `NAPARNIK_TOKEN` |
 | `workspace` | `metadata` | обзор объектов конфигурации, реквизитов, форм и дерева метаданных | `--source-dir` |
-| `workspace` | `search(action=find_code\|search_code\|status)` | поиск по коду проекта | `EMBEDDING_URL` только для `search_code` |
-| `workspace` | `graph` | граф вызовов: `overview`, `schema`, `node`, `source`, `neighbors`, `callers`, `callees` | `--source-dir` |
+| `workspace` | `search(action=search_code\|status)` | поиск по коду проекта (лексика + семантика, RRF-фузия) | `EMBEDDING_URL` включает семантику; без него работает лексика |
+| `workspace` | `graph` | граф вызовов: `overview`, `schema`, `node`, `source`, `neighbors`, `callers`, `callees`, `resolve` | `--source-dir` |
 | `workspace` | `diagnostics` | диагностики кода: `catalog`/`schema` (без базы), `file` (находки по файлу), `workspace` (агрегаты по конфигурации) | `--source-dir` |
 | `workspace` | `query` | `validate` для SDBL, а также `execute` для `SELECT` | `--onec-url` нужен для live-валидации через платформу и для `execute` |
 | `workspace` | `execute` | `check`, `run`, `eval` для BSL-кода | `--onec-url` нужен для `run` и `eval` |
@@ -58,13 +58,13 @@
 
 ### `EMBEDDING_URL`
 
-Включает семантический поиск:
+Включает семантическую составляющую поиска:
 
 - `search_docs` в `reference`;
-- `search_code` в `workspace`.
+- семантическую ветвь `search_code` в `workspace` (лексическая ветвь работает всегда).
 
-Без этой переменной остаётся доступен полнотекстовый поиск (`find_docs`,
-`find_code`).
+Без этой переменной `search_code` возвращает только лексические результаты с пометкой
+`-- semantic skipped: … --`; в `reference` остаётся полнотекстовый `find_docs`.
 
 ### `EMBEDDING_API_KEY`
 

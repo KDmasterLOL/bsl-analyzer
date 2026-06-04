@@ -135,10 +135,11 @@ bsl-analyzer mcp serve \
 
 ## Эмбеддинги и семантический поиск
 
-Семантические режимы поиска требуют `EMBEDDING_URL`:
+Семантическая составляющая поиска требует `EMBEDDING_URL`:
 
 - `search(action=search_docs)` в профиле `reference`;
-- `search(action=search_code)` в профиле `workspace`.
+- семантическая ветвь `search(action=search_code)` в профиле `workspace`
+  (лексическая ветвь `search_code` работает и без неё).
 
 Если embedding-провайдер требует Bearer-авторизацию
 (например, OpenRouter, OpenAI или совместимый сервис), дополнительно задайте
@@ -161,8 +162,9 @@ EMBEDDING_MODEL=Qwen/Qwen3-Embedding-0.6B \
   bsl-analyzer mcp serve --profile reference
 ```
 
-Если `EMBEDDING_URL` не задан, полнотекстовый поиск (`find_docs`, `find_code`)
-остаётся доступным.
+Если `EMBEDDING_URL` не задан, остаётся полнотекстовый `find_docs` в `reference`, а
+`search_code` в `workspace` возвращает лексические результаты с пометкой
+`-- semantic skipped: … --`.
 
 Сейчас `bsl-analyzer` для embedding API поддерживает стандартный заголовок
 `Authorization: Bearer ...` через `EMBEDDING_API_KEY`. Если конкретный

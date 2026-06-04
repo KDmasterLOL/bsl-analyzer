@@ -1,8 +1,9 @@
 use crate::baseline::{ConfiguredBaselineStatus, ExternalBaselineService, ExternalBaselineState};
 use crate::state::{SemanticRuntimeStatus, WorkspaceSearchMode};
 use bsl_search::{
-    lexical_hits_for_resolved_view, merge_context_for_collection, merge_lexical, merge_semantic,
-    IndexProgress, LexicalHit, SearchEngine, SearchError, SearchHit, SemanticHit,
+    fuse_rrf, lexical_hits_for_resolved_view, merge_context_for_collection, merge_lexical,
+    merge_semantic, IndexProgress, LexicalHit, SearchEngine, SearchError, SearchHit, SemanticHit,
+    RRF_K,
 };
 use rmcp::model::{CallToolResult, Content};
 use rmcp::ErrorData as McpError;
@@ -19,14 +20,54 @@ const DIRECT_SEARCH_MAX_WINDOW_MULTIPLIER: usize = 10;
 const DIRECT_SEARCH_MIN_MAX_WINDOW: usize = 100;
 const DIRECT_SEARCH_MAX_REFILL_ROUNDS: usize = 4;
 
-pub fn find_code(
+/// How much wider than the caller's `limit` each modality is queried before fusion, so a hit
+/// ranked just outside `limit` in one modality but boosted by the other can still surface.
+const HYBRID_FETCH_MULTIPLIER: usize = 2;
+
+/// The outcome of producing one modality's code hits, separated from presentation so the
+/// hybrid path can fuse two modalities. Hard policy/terminal failures stay `Err(McpError)`;
+/// these soft states let `hybrid_code` reproduce today's lexical messages and degrade
+/// gracefully on a semantic shortfall.
+enum CodeHits {
+    /// Hits (possibly empty) plus the workspace root for the graph-id bridge.
+    Ready { hits: Vec<SearchHit>, workspace_root: Option<std::path::PathBuf> },
+    /// The index/overlay is still warming or building — no hits yet, emit `message`.
+    Pending(String),
+    /// The semantic modality cannot serve this request; `hybrid_code` degrades to lexical.
+    Unavailable(SemanticUnavailable),
+}
+
+/// Why semantic search could not serve a request — carried so `hybrid_code` can name the
+/// reason in its degradation note instead of hard-failing the whole search.
+enum SemanticUnavailable {
+    NotConfigured,
+    RuntimeFailed,
+    BaselineNotReady,
+    BaselineRequired,
+}
+
+impl SemanticUnavailable {
+    fn note(&self) -> &'static str {
+        match self {
+            Self::NotConfigured => "semantic skipped: not configured (set EMBEDDING_URL)",
+            Self::RuntimeFailed => "semantic skipped: runtime initialization failed",
+            Self::BaselineNotReady => "semantic skipped: PostgreSQL baseline semantic not ready",
+            Self::BaselineRequired => "semantic skipped: requires PostgreSQL baseline serving",
+        }
+    }
+}
+
+/// Produce lexical (FTS5) code hits, separated from presentation. Hard policy/terminal
+/// failures are `Err`; a still-warming index is `Pending`. Lexical search is always available
+/// (it is the baseline), so this never returns `Unavailable`.
+fn lexical_code_hits(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
     workspace_search_mode: WorkspaceSearchMode,
     configured_baseline: Option<&ConfiguredBaselineStatus>,
     external_baseline: Option<Arc<ExternalBaselineService>>,
     query: &str,
     limit: usize,
-) -> Result<CallToolResult, McpError> {
+) -> Result<CodeHits, McpError> {
     ensure_workspace_search_allowed(configured_baseline)?;
     ensure_workspace_baseline_runtime_ready(
         workspace_search_mode,
@@ -40,17 +81,16 @@ pub fn find_code(
                 match try_direct_lexical_code_no_overlay(&source, query, limit) {
                     DirectResult::Found(hits) => {
                         if hits.is_empty() {
-                            return Ok(CallToolResult::success(vec![Content::text(
-                                "No results found (overlay is warming up, only baseline search available).",
-                            )]));
+                            return Ok(CodeHits::Pending(
+                                "No results found (overlay is warming up, only baseline search available)."
+                                    .to_owned(),
+                            ));
                         }
                         // Engine lock is busy, so these are external-baseline direct hits
                         // with no reachable workspace root. Module-keyed methods still get a
                         // graph_id (root-independent); a path-fallback hit would be dropped,
                         // which is fine here — baseline paths are relative, not absolute.
-                        return Ok(CallToolResult::success(vec![Content::text(format_code_hits(
-                            &hits, None,
-                        ))]));
+                        return Ok(CodeHits::Ready { hits, workspace_root: None });
                     }
                     DirectResult::Terminal(error) => {
                         return Err(external_baseline_mcp_error(&error));
@@ -58,9 +98,9 @@ pub fn find_code(
                     DirectResult::Unavailable => {}
                 }
             }
-            return Ok(CallToolResult::success(vec![Content::text(
-                "Search index overlay is warming up, please try again in a moment.",
-            )]));
+            return Ok(CodeHits::Pending(
+                "Search index overlay is warming up, please try again in a moment.".to_owned(),
+            ));
         }
     };
 
@@ -97,32 +137,31 @@ pub fn find_code(
                     return Err(external_baseline_mcp_error(&error));
                 }
                 DirectResult::Unavailable => {
-                    return Ok(CallToolResult::success(vec![Content::text(
-                        "Search index is being built, please try again in a moment.",
-                    )]));
+                    return Ok(CodeHits::Pending(
+                        "Search index is being built, please try again in a moment.".to_owned(),
+                    ));
                 }
             },
         }
     } else {
         let Some(engine) = guard.as_ref() else {
-            return Ok(CallToolResult::success(vec![Content::text(
-                "Search index is being built, please try again in a moment.",
-            )]));
+            return Ok(CodeHits::Pending(
+                "Search index is being built, please try again in a moment.".to_owned(),
+            ));
         };
         engine
             .text_search(query, limit, Some("code"))
             .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?
     };
 
-    if hits.is_empty() {
-        return Ok(CallToolResult::success(vec![Content::text("No results found.")]));
-    }
-
-    let workspace_root = guard.as_ref().and_then(|e| e.workspace_root());
-    Ok(CallToolResult::success(vec![Content::text(format_code_hits(&hits, workspace_root))]))
+    let workspace_root = guard.as_ref().and_then(|e| e.workspace_root()).map(Path::to_path_buf);
+    Ok(CodeHits::Ready { hits, workspace_root })
 }
 
-pub fn search_code(
+/// Produce semantic (pgvector) code hits, separated from presentation. Hard policy/terminal
+/// failures are `Err`; a still-warming index is `Pending`; a semantic shortfall that
+/// `hybrid_code` can degrade past is `Unavailable`.
+fn semantic_code_hits(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
     semantic_runtime: &Arc<Mutex<SemanticRuntimeStatus>>,
     workspace_search_mode: WorkspaceSearchMode,
@@ -130,7 +169,7 @@ pub fn search_code(
     external_baseline: Option<Arc<ExternalBaselineService>>,
     query: &str,
     limit: usize,
-) -> Result<CallToolResult, McpError> {
+) -> Result<CodeHits, McpError> {
     ensure_workspace_search_allowed(configured_baseline)?;
     ensure_workspace_baseline_runtime_ready(
         workspace_search_mode.clone(),
@@ -144,84 +183,128 @@ pub fn search_code(
     let guard = match engine.try_lock() {
         Ok(g) => g,
         Err(_) => {
-            return Ok(CallToolResult::success(vec![Content::text(
-                "Semantic search overlay is warming up. Use find_code for lexical search while overlay is being prepared.",
-            )]));
+            return Ok(CodeHits::Pending(
+                "Semantic search overlay is warming up. Lexical search is available while the overlay is prepared."
+                    .to_owned(),
+            ));
         }
     };
     if guard.is_none() {
-        return Ok(CallToolResult::success(vec![Content::text(
-            "Search index is being built, please try again in a moment.",
-        )]));
+        return Ok(CodeHits::Pending(
+            "Search index is being built, please try again in a moment.".to_owned(),
+        ));
     }
     let engine = guard.as_ref().expect("checked above");
 
-    if let SemanticRuntimeStatus::Failed(error) = semantic_runtime {
-        return Err(McpError::invalid_params(
-            "Semantic search is temporarily unavailable because semantic runtime initialization failed. Inspect search(action=status).",
-            Some(json!({
-                "reasonCode": "semantic_runtime_failed",
-                "details": error,
-            })),
-        ));
+    if let SemanticRuntimeStatus::Failed(_) = semantic_runtime {
+        return Ok(CodeHits::Unavailable(SemanticUnavailable::RuntimeFailed));
     }
 
     if !engine.has_semantic() {
-        return Err(McpError::invalid_params(
-            "Semantic search not available. Set EMBEDDING_URL environment variable \
-             and restart. Use find_code for text search instead.",
-            None,
-        ));
+        return Ok(CodeHits::Unavailable(SemanticUnavailable::NotConfigured));
     }
 
     if let Some(source) = external_baseline {
         match try_direct_semantic_code(engine, &source, query, limit) {
             DirectResult::Found(hits) => {
-                if hits.is_empty() {
-                    return Ok(CallToolResult::success(vec![Content::text("No results found.")]));
-                }
-                return Ok(CallToolResult::success(vec![Content::text(format_code_hits(
-                    &hits,
-                    engine.workspace_root(),
-                ))]));
+                let workspace_root = engine.workspace_root().map(Path::to_path_buf);
+                return Ok(CodeHits::Ready { hits, workspace_root });
             }
             DirectResult::Terminal(error) => {
                 return Err(external_baseline_mcp_error(&error));
             }
             DirectResult::Unavailable => {
                 if matches!(workspace_search_mode, WorkspaceSearchMode::PostgresRemoteOverlay) {
-                    return Err(McpError::invalid_params(
-                        "Semantic search is unavailable because PostgreSQL baseline semantic serving is not ready. Restart MCP after fixing baseline serving and retry.",
-                        Some(json!({
-                            "reasonCode": "baseline_semantic_unavailable",
-                        })),
-                    ));
+                    return Ok(CodeHits::Unavailable(SemanticUnavailable::BaselineNotReady));
                 }
             }
         }
     }
 
     if matches!(workspace_search_mode, WorkspaceSearchMode::PostgresRemoteOverlay) {
-        return Err(McpError::invalid_params(
-            "Semantic search requires PostgreSQL baseline semantic serving in postgres mode.",
-            Some(json!({
-                "reasonCode": "baseline_semantic_required",
-            })),
-        ));
+        return Ok(CodeHits::Unavailable(SemanticUnavailable::BaselineRequired));
     }
 
     let hits = engine
         .search(query, limit, Some("code"))
         .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?;
+    let workspace_root = engine.workspace_root().map(Path::to_path_buf);
+    Ok(CodeHits::Ready { hits, workspace_root })
+}
+
+/// The unified code search: run lexical and semantic, fuse by RRF, and degrade to lexical
+/// (with a trailing note) when semantic cannot serve. This is what the `search_code` action
+/// dispatches to.
+pub fn hybrid_code(
+    engine: &Arc<Mutex<Option<SearchEngine>>>,
+    semantic_runtime: &Arc<Mutex<SemanticRuntimeStatus>>,
+    workspace_search_mode: WorkspaceSearchMode,
+    configured_baseline: Option<&ConfiguredBaselineStatus>,
+    external_baseline: Option<Arc<ExternalBaselineService>>,
+    query: &str,
+    limit: usize,
+) -> Result<CallToolResult, McpError> {
+    // Over-fetch each modality so a hit ranked just outside `limit` in one but boosted by the
+    // other can still surface after fusion.
+    let fetch = limit.saturating_mul(HYBRID_FETCH_MULTIPLIER).max(limit);
+
+    let lexical = lexical_code_hits(
+        engine,
+        workspace_search_mode.clone(),
+        configured_baseline,
+        external_baseline.clone(),
+        query,
+        fetch,
+    )?;
+    let (lex_hits, workspace_root) = match lexical {
+        CodeHits::Ready { hits, workspace_root } => (hits, workspace_root),
+        // Lexical is the floor: if it cannot serve yet, the whole search cannot — emit its
+        // message unchanged rather than claiming a (nonexistent) lexical-only result.
+        CodeHits::Pending(message) => {
+            return Ok(CallToolResult::success(vec![Content::text(message)]));
+        }
+        // Lexical search is always available, so it never reports a semantic shortfall; treat
+        // it defensively as "still building".
+        CodeHits::Unavailable(_) => {
+            return Ok(CallToolResult::success(vec![Content::text(
+                "Search index is being built, please try again in a moment.".to_owned(),
+            )]));
+        }
+    };
+
+    let semantic = semantic_code_hits(
+        engine,
+        semantic_runtime,
+        workspace_search_mode,
+        configured_baseline,
+        external_baseline,
+        query,
+        fetch,
+    )?;
+
+    let (mut hits, note): (Vec<SearchHit>, Option<&str>) = match semantic {
+        CodeHits::Ready { hits: sem_hits, .. } => {
+            (fuse_rrf(&lex_hits, &sem_hits, RRF_K, limit), None)
+        }
+        CodeHits::Pending(_) => {
+            // Semantic overlay still warming — degrade to lexical for this call.
+            (lex_hits, Some("semantic skipped: overlay warming up"))
+        }
+        CodeHits::Unavailable(reason) => (lex_hits, Some(reason.note())),
+    };
+    hits.truncate(limit);
 
     if hits.is_empty() {
         return Ok(CallToolResult::success(vec![Content::text("No results found.")]));
     }
 
-    Ok(CallToolResult::success(vec![Content::text(format_code_hits(
-        &hits,
-        engine.workspace_root(),
-    ))]))
+    let mut out = format_code_hits(&hits, workspace_root.as_deref());
+    if let Some(note) = note {
+        // Append AFTER the hit lines — never before — so a client parsing `graph_id:` lines
+        // positionally is not shifted.
+        let _ = writeln!(out, "-- {note} --");
+    }
+    Ok(CallToolResult::success(vec![Content::text(out)]))
 }
 
 #[derive(Debug)]
@@ -1276,10 +1359,10 @@ fn shorten_fingerprint(fingerprint: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        external_baseline_mcp_error, find_code, find_docs, map_reference_baseline_resolution,
-        merge_direct_lexical_with_refill, merge_direct_semantic_with_refill, search_code,
-        search_docs, search_status, ConfiguredBaselineStatus, DirectResult,
-        ExternalBaselineService, SemanticRuntimeStatus,
+        external_baseline_mcp_error, find_docs, hybrid_code, map_reference_baseline_resolution,
+        merge_direct_lexical_with_refill, merge_direct_semantic_with_refill, search_docs,
+        search_status, semantic_code_hits, CodeHits, ConfiguredBaselineStatus, DirectResult,
+        ExternalBaselineService, SemanticRuntimeStatus, SemanticUnavailable,
     };
     use crate::baseline::RefreshableExternalBaselineSource;
     use crate::state::WorkspaceSearchMode;
@@ -1792,11 +1875,11 @@ mod tests {
     }
 
     #[test]
-    fn search_code_returns_runtime_failure_error_when_semantic_runtime_failed() {
+    fn semantic_core_reports_unavailable_when_runtime_failed() {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("workspace-search.db");
         let engine = Arc::new(Mutex::new(Some(SearchEngine::fts_only(&db_path).unwrap())));
-        let error = search_code(
+        let outcome = semantic_code_hits(
             &engine,
             &Arc::new(Mutex::new(SemanticRuntimeStatus::Failed("overlay sync failed".to_owned()))),
             WorkspaceSearchMode::SqliteLocal,
@@ -1805,17 +1888,40 @@ mod tests {
             "обработка проведения документа",
             10,
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert_eq!(error.code, ErrorCode::INVALID_PARAMS);
-        assert_eq!(
-            error
-                .data
-                .as_ref()
-                .and_then(|data| data.get("reasonCode"))
-                .and_then(|value| value.as_str()),
-            Some("semantic_runtime_failed")
-        );
+        // A failed semantic runtime is a soft shortfall the hybrid path degrades past, not a
+        // hard error.
+        assert!(matches!(outcome, CodeHits::Unavailable(SemanticUnavailable::RuntimeFailed)));
+    }
+
+    #[test]
+    fn hybrid_degrades_to_lexical_with_note_when_semantic_runtime_failed() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        fs::write(workspace.join("CommonModule.bsl"), "Процедура ПроверитьИНН()\nКонецПроцедуры")
+            .unwrap();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.index_directory_fts(workspace).unwrap();
+        engine.set_workspace_root(workspace);
+
+        let result = hybrid_code(
+            &Arc::new(Mutex::new(Some(engine))),
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::Failed("overlay sync failed".to_owned()))),
+            WorkspaceSearchMode::SqliteLocal,
+            None,
+            None,
+            "ПроверитьИНН",
+            10,
+        )
+        .unwrap();
+        let text = result.content[0].raw.as_text().expect("text content").text.as_str();
+
+        // The lexical hit still comes back...
+        assert!(text.contains("ПроверитьИНН"), "{text}");
+        // ...with a trailing note explaining semantic was skipped (after the hit lines).
+        assert!(text.contains("-- semantic skipped: runtime initialization failed --"), "{text}");
     }
 
     #[test]
@@ -1864,7 +1970,7 @@ mod tests {
     }
 
     #[test]
-    fn find_code_returns_structured_error_when_workspace_branch_is_expired() {
+    fn code_search_returns_structured_error_when_workspace_branch_is_expired() {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("workspace-search.db");
         let engine = Arc::new(Mutex::new(Some(SearchEngine::fts_only(&db_path).unwrap())));
@@ -1883,8 +1989,9 @@ mod tests {
             }),
         };
 
-        let error = find_code(
+        let error = hybrid_code(
             &engine,
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
             WorkspaceSearchMode::PostgresRemoteOverlay,
             Some(&configured),
             None,
@@ -1898,7 +2005,7 @@ mod tests {
     }
 
     #[test]
-    fn find_code_rejects_local_fallback_when_postgres_baseline_is_unavailable() {
+    fn code_search_rejects_local_fallback_when_postgres_baseline_is_unavailable() {
         let dir = tempdir().unwrap();
         let workspace = dir.path();
         let file = workspace.join("CommonModule.bsl");
@@ -1909,8 +2016,9 @@ mod tests {
         engine.index_directory_fts(workspace).unwrap();
         engine.set_workspace_root(workspace);
 
-        let error = find_code(
+        let error = hybrid_code(
             &Arc::new(Mutex::new(Some(engine))),
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
             WorkspaceSearchMode::PostgresRemoteOverlay,
             Some(&ConfiguredBaselineStatus {
                 backend: "postgres",
@@ -1937,7 +2045,7 @@ mod tests {
     }
 
     #[test]
-    fn find_code_surfaces_retry_exhausted_external_baseline_errors() {
+    fn code_search_surfaces_retry_exhausted_external_baseline_errors() {
         let dir = tempdir().unwrap();
         let workspace = dir.path();
         let file = workspace.join("CommonModule.bsl");
@@ -1948,8 +2056,9 @@ mod tests {
         engine.index_directory_fts(workspace).unwrap();
         engine.set_workspace_root(workspace);
 
-        let error = find_code(
+        let error = hybrid_code(
             &Arc::new(Mutex::new(Some(engine))),
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
             WorkspaceSearchMode::PostgresRemoteOverlay,
             Some(&ConfiguredBaselineStatus {
                 backend: "postgres",
@@ -1976,13 +2085,14 @@ mod tests {
     }
 
     #[test]
-    fn find_code_surfaces_retry_exhausted_errors_for_empty_queries() {
+    fn code_search_surfaces_retry_exhausted_errors_for_empty_queries() {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("workspace-search.db");
         let engine = Arc::new(Mutex::new(Some(SearchEngine::fts_only(&db_path).unwrap())));
 
-        let error = find_code(
+        let error = hybrid_code(
             &engine,
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
             WorkspaceSearchMode::PostgresRemoteOverlay,
             Some(&ConfiguredBaselineStatus {
                 backend: "postgres",
