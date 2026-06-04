@@ -365,6 +365,27 @@ pub fn resolve_module_summary_via_index(
         });
     }
 
+    // Resolve string-dispatched callbacks through the resident index, mirroring the
+    // qualified-call strategy above so the result is byte-identical to the Salsa fold.
+    let find_local = |name: &crate::name::Name| {
+        index.find_method(module, name).map(|m| MethodId { module, local_id: m.local_id })
+    };
+    let find_qualified =
+        |module_name: &crate::name::Name, method_name: &crate::name::Name| match resolver
+            .locate_common_module(db, module_name)
+        {
+            Ok(target_module) => match index.find_method(target_module, method_name) {
+                Some(m) if m.is_export => crate::queries::QualifiedLookup::Resolved(MethodId {
+                    module: target_module,
+                    local_id: m.local_id,
+                }),
+                Some(_) => crate::queries::QualifiedLookup::VisibilityBlocked,
+                None => crate::queries::QualifiedLookup::Absent,
+            },
+            Err(_) => crate::queries::QualifiedLookup::Absent,
+        };
+    edges.extend(crate::queries::resolve_callback_edges(&summary, find_local, find_qualified));
+
     ResolvedModuleSummary { module, edges }
 }
 
@@ -459,6 +480,20 @@ pub fn extract_unresolved_refs(
                 }
             }
             _ => {}
+        }
+    }
+    // A `Новый ОписаниеОповещения("Метод", ОбщийМодуль)` whose handler is currently
+    // missing or non-exported: record it so that exporting/adding the method later
+    // triggers an incremental reproject of the callback edge. `ЭтотОбъект` and idle
+    // handlers target the current module and are already covered by the module's own
+    // `module_call_summary` invalidation.
+    for reg in &summary.notify_regs {
+        if let crate::call_graph::NotifyTarget::Module(module_name) = &reg.target {
+            if let Ok(target) = resolver.locate_common_module(db, module_name) {
+                if unresolved(index.find_method(target, &reg.callback_name)) {
+                    out.push((target, reg.callback_name.as_str().to_lowercase()));
+                }
+            }
         }
     }
     out
@@ -1192,6 +1227,9 @@ fn edge_kind_label(kind: EdgeKind) -> &'static str {
         EdgeKind::QueryRef => "query_ref",
         EdgeKind::Contains => "contains",
         EdgeKind::DataBinding => "data_binding",
+        EdgeKind::NotifyRef => "notify_ref",
+        EdgeKind::IdleHandler => "idle_handler",
+        EdgeKind::EventSubscriptionRef => "event_subscription",
     }
 }
 
@@ -1224,6 +1262,7 @@ fn provenance_label(p: EdgeProvenance) -> &'static str {
         EdgeProvenance::Inferred => "inferred",
         EdgeProvenance::VisibilityBlocked => "visibility_blocked",
         EdgeProvenance::Unresolved => "unresolved",
+        EdgeProvenance::StringResolved => "string_resolved",
     }
 }
 

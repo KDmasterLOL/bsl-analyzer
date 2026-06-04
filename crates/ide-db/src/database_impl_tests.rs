@@ -1249,9 +1249,18 @@ fn workspace_call_graph_via_index_matches_salsa_fold() {
              Справочники.Контрагенты.НетТакого();\n\
              Справочники.Номенклатура.СоздатьЭлемент();\n\
              Справочники.Номенклатура.НайтиПоКоду();\n\
+             Оп1 = Новый ОписаниеОповещения(\"ЛокальныйОбработчик\", ЭтотОбъект);\n\
+             Оп2 = Новый ОписаниеОповещения(\"Считать\", Сервер);\n\
+             Оп3 = Новый ОписаниеОповещения(\"Приватная\", Сервер);\n\
+             Оп4 = Новый ОписаниеОповещения(\"Что\", Объекты[0]);\n\
+             ПодключитьОбработчикОжидания(\"ОбновитьЭкран\", 1, Истина);\n\
              КонецПроцедуры\n\
              &НаКлиенте\n\
-             Процедура ЛокальнаяЦель() Экспорт КонецПроцедуры",
+             Процедура ЛокальнаяЦель() Экспорт КонецПроцедуры\n\
+             &НаКлиенте\n\
+             Процедура ЛокальныйОбработчик(Результат, Параметры) Экспорт КонецПроцедуры\n\
+             &НаКлиенте\n\
+             Процедура ОбновитьЭкран() Экспорт КонецПроцедуры",
         ),
         (
             "/src/CommonModules/Сервер/Ext/Module.bsl",
@@ -1328,6 +1337,33 @@ fn workspace_call_graph_via_index_matches_salsa_fold() {
         has(&|e| e.kind == EdgeKind::ManagerAccess
             && matches!(e.target, ResolvedTarget::Mdo { .. })),
         "platform find / absent manager method → Mdo + ManagerAccess"
+    );
+    // String-dispatched callbacks: ЭтотОбъект handler + exported cross-module handler
+    // both resolve to a NotifyRef method edge with StringResolved provenance.
+    assert_eq!(
+        caller
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::NotifyRef
+                && e.provenance == EdgeProvenance::StringResolved
+                && matches!(e.target, ResolvedTarget::Method(_)))
+            .count(),
+        2,
+        "ОписаниеОповещения(ЭтотОбъект) + ОписаниеОповещения(exported Сервер) → 2 NotifyRef methods"
+    );
+    assert!(
+        has(&|e| e.kind == EdgeKind::IdleHandler
+            && e.provenance == EdgeProvenance::StringResolved
+            && matches!(e.target, ResolvedTarget::Method(_))),
+        "ПодключитьОбработчикОжидания → IdleHandler method"
+    );
+    // The non-exported callback (Приватная) is surfaced VisibilityBlocked, never as an
+    // edge; the unsupported receiver (Объекты[0]) yields nothing at all.
+    assert!(
+        !has(&|e| e.kind == EdgeKind::NotifyRef
+            && matches!(&e.target, ResolvedTarget::Method(_))
+            && e.provenance == EdgeProvenance::VisibilityBlocked),
+        "VisibilityBlocked callbacks carry an Unresolved target, not a Method"
     );
 
     for &module in &modules {

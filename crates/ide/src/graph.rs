@@ -2101,6 +2101,7 @@ fn provenance_label(edge: &WorkspaceCallEdge) -> &'static str {
         Inferred => "inferred",
         VisibilityBlocked => "visibility_blocked",
         Unresolved => "unresolved",
+        StringResolved => "string_resolved",
     }
 }
 
@@ -2114,6 +2115,9 @@ fn edge_kind_label(kind: EdgeKind) -> &'static str {
         EdgeKind::QueryRef => "query_ref",
         EdgeKind::Contains => "contains",
         EdgeKind::DataBinding => "data_binding",
+        EdgeKind::NotifyRef => "notify_ref",
+        EdgeKind::IdleHandler => "idle_handler",
+        EdgeKind::EventSubscriptionRef => "event_subscription",
     }
 }
 

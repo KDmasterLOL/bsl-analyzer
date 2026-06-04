@@ -180,7 +180,95 @@ pub fn resolved_module_summary_query<'db>(
         });
     }
 
+    let find_local = |name: &crate::name::Name| resolver.resolve_module_method(db, name);
+    let find_qualified =
+        |module_name: &crate::name::Name, method_name: &crate::name::Name| match resolver
+            .resolve_qualified_method(db, module_name, method_name)
+        {
+            Ok(r) if r.is_export => QualifiedLookup::Resolved(r.method_id),
+            Ok(_) => QualifiedLookup::VisibilityBlocked,
+            Err(_) => QualifiedLookup::Absent,
+        };
+    edges.extend(resolve_callback_edges(&summary, find_local, find_qualified));
+
     Arc::new(crate::call_graph::ResolvedModuleSummary { module: module_id, edges })
+}
+
+/// Outcome of resolving a callback handler named by a string literal to a method in a
+/// (common) module: exported method found, found-but-not-exported, or absent.
+pub(crate) enum QualifiedLookup {
+    Resolved(crate::MethodId),
+    VisibilityBlocked,
+    Absent,
+}
+
+/// Project a module's string-dispatched callback registrations (`Новый
+/// ОписаниеОповещения`, `ПодключитьОбработчикОжидания`) into resolved graph edges.
+///
+/// The two callers (the Salsa fold and the resident-index build) resolve methods by
+/// different mechanisms but must produce byte-identical edges, so the lookup strategy
+/// is injected: `find_local` resolves a handler in the current module, `find_qualified`
+/// resolves a handler in a named common module. A handler that does not resolve yields
+/// no edge — `Unresolved` targets are dropped in projection anyway, and inventing edges
+/// for unknown receivers is worse than omitting them.
+pub(crate) fn resolve_callback_edges(
+    summary: &crate::call_graph::ModuleCallSummary,
+    find_local: impl Fn(&crate::name::Name) -> Option<crate::MethodId>,
+    find_qualified: impl Fn(&crate::name::Name, &crate::name::Name) -> QualifiedLookup,
+) -> Vec<crate::call_graph::ResolvedCallEdge> {
+    use crate::call_graph::{
+        CallTarget, EdgeKind, EdgeProvenance, NotifyTarget, ResolvedCallEdge, ResolvedTarget,
+    };
+
+    let mut out = Vec::new();
+
+    for reg in &summary.notify_regs {
+        let resolved = match &reg.target {
+            NotifyTarget::ThisObject => find_local(&reg.callback_name)
+                .map(|m| (ResolvedTarget::Method(m), EdgeProvenance::StringResolved)),
+            NotifyTarget::Module(module_name) => {
+                match find_qualified(module_name, &reg.callback_name) {
+                    QualifiedLookup::Resolved(m) => {
+                        Some((ResolvedTarget::Method(m), EdgeProvenance::StringResolved))
+                    }
+                    // Surfaced as a visible-but-unreachable gap, mirroring qualified
+                    // calls; the projection drops it, so no workspace edge appears.
+                    QualifiedLookup::VisibilityBlocked => Some((
+                        ResolvedTarget::Unresolved(CallTarget::QualifiedModule {
+                            module_name: module_name.clone(),
+                            method_name: reg.callback_name.clone(),
+                        }),
+                        EdgeProvenance::VisibilityBlocked,
+                    )),
+                    QualifiedLookup::Absent => None,
+                }
+            }
+            NotifyTarget::Unsupported => None,
+        };
+        if let Some((target, provenance)) = resolved {
+            out.push(ResolvedCallEdge {
+                caller: reg.caller,
+                target,
+                kind: EdgeKind::NotifyRef,
+                range: reg.range,
+                provenance,
+            });
+        }
+    }
+
+    for reg in &summary.idle_handler_regs {
+        if let Some(m) = find_local(&reg.handler_name) {
+            out.push(ResolvedCallEdge {
+                caller: reg.caller,
+                target: ResolvedTarget::Method(m),
+                kind: EdgeKind::IdleHandler,
+                range: reg.range,
+                provenance: EdgeProvenance::StringResolved,
+            });
+        }
+    }
+
+    out
 }
 
 /// Classify a platform manager method into a metadata-object edge kind. Creation

@@ -140,6 +140,18 @@ pub enum EdgeKind {
     /// attribute ([`GraphNode::FormAttribute`]) → the [`GraphNode::Mdo`] it is typed
     /// as. Derived from form metadata, not from code.
     DataBinding,
+    /// A `Новый ОписаниеОповещения("Метод", …)` callback: the registering method (or
+    /// module body) links to the handler named by the string literal. Not a direct
+    /// call — the platform invokes it later — so it is kept separate from `call`.
+    NotifyRef,
+    /// A `ПодключитьОбработчикОжидания("Метод", …)` idle handler: the registering
+    /// method links to the named handler in the current module. Like `NotifyRef`,
+    /// dispatched by the platform, not a direct call.
+    IdleHandler,
+    /// A `ПодпискаНаСобытие` metadata object links to its handler method. From the
+    /// subscription's [`GraphNode::Mdo`] to the handler [`GraphNode::Method`]. Derived
+    /// from configuration metadata, not from code.
+    EventSubscriptionRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -239,6 +251,11 @@ pub enum EdgeProvenance {
     /// Target could not be resolved to a node: missing, or a platform builtin
     /// (e.g. a manager method like `СоздатьЭлемент`, or a `ЭтотОбъект` platform method).
     Unresolved,
+    /// Target was resolved from a string literal (a callback name in
+    /// `ОписаниеОповещения` / `ПодключитьОбработчикОжидания`, or a subscription
+    /// handler), not from a static call. Lower trust than `Resolved`: consumers can
+    /// filter string-dispatch edges out of "who really calls whom".
+    StringResolved,
 }
 
 /// A globally-addressable node in the workspace call graph.
