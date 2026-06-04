@@ -2,8 +2,8 @@ use crate::baseline::{ConfiguredBaselineStatus, ExternalBaselineService, Externa
 use crate::state::{SemanticRuntimeStatus, WorkspaceSearchMode};
 use bsl_search::{
     fuse_rrf, lexical_hits_for_resolved_view, merge_context_for_collection, merge_lexical,
-    merge_semantic, IndexProgress, LexicalHit, SearchEngine, SearchError, SearchHit, SemanticHit,
-    RRF_K,
+    merge_semantic, FusedHit, IndexProgress, LexicalHit, Modality, SearchEngine, SearchError,
+    SearchHit, SemanticHit, RRF_K,
 };
 use rmcp::model::{CallToolResult, Content};
 use rmcp::ErrorData as McpError;
@@ -305,15 +305,16 @@ pub fn hybrid_code(
         fetch,
     )?;
 
-    let (mut hits, note): (Vec<SearchHit>, Option<&str>) = match semantic {
+    let (mut hits, note): (Vec<FusedHit>, Option<&str>) = match semantic {
         CodeHits::Ready { hits: sem_hits, .. } => {
             (fuse_rrf(&lex_hits, &sem_hits, RRF_K, limit), None)
         }
+        // Semantic could not serve — degrade to lexical-only. Every hit is then lexical, so it
+        // is wrapped as a `FusedHit` with `Modality::Lexical` to keep the display uniform.
         CodeHits::Pending(_) => {
-            // Semantic overlay still warming — degrade to lexical for this call.
-            (lex_hits, Some("semantic skipped: overlay warming up"))
+            (lexical_only(lex_hits), Some("semantic skipped: overlay warming up"))
         }
-        CodeHits::Unavailable(reason) => (lex_hits, Some(reason.note())),
+        CodeHits::Unavailable(reason) => (lexical_only(lex_hits), Some(reason.note())),
     };
     hits.truncate(limit);
 
@@ -1276,20 +1277,29 @@ fn graph_id_for_hit(
     }
 }
 
+/// Wrap lexical-only hits (the semantic-unavailable degrade path) as `FusedHit`s so the
+/// formatter handles one type. Each carries `Modality::Lexical`.
+fn lexical_only(hits: Vec<SearchHit>) -> Vec<FusedHit> {
+    hits.into_iter().map(|hit| FusedHit { hit, modality: Modality::Lexical }).collect()
+}
+
 fn format_code_hits(
-    hits: &[bsl_search::SearchHit],
+    hits: &[FusedHit],
     engine_root: Option<&Path>,
     graph_root: Option<&Path>,
 ) -> String {
     let mut out = String::new();
 
-    for (i, hit) in hits.iter().enumerate() {
+    for (i, fused) in hits.iter().enumerate() {
+        let hit = &fused.hit;
         let name = if hit.symbol_name.is_empty() { "<header>" } else { &hit.symbol_name };
+        // The modality tag (L / S / L+S) replaces the bare RRF score: `L+S` means lexical and
+        // semantic agreed (the strongest signal), which the small fused score does not convey.
         let _ = writeln!(
             out,
-            "#{} [{:.3}] {}:{}-{} :: {} ({})",
+            "#{} [{}] {}:{}-{} :: {} ({})",
             i + 1,
-            hit.score,
+            fused.modality.tag(),
             hit.file_path,
             hit.line_start + 1,
             hit.line_end,
@@ -1420,8 +1430,9 @@ mod tests {
     use crate::baseline::RefreshableExternalBaselineSource;
     use crate::state::WorkspaceSearchMode;
     use bsl_search::{
-        lexical_hits_for_resolved_view, BaselineRef, CorpusId, Document, IndexProgress,
-        IndexedDocument, LexicalHit, ResolvedView, SearchEngine, SearchError, SemanticHit,
+        lexical_hits_for_resolved_view, BaselineRef, CorpusId, Document, FusedHit, IndexProgress,
+        IndexedDocument, LexicalHit, Modality, ResolvedView, SearchEngine, SearchError,
+        SemanticHit,
     };
     use project_model::{
         ResolvedWorkspaceBaselineSupport, SearchBaselineSupportState, SearchPostgresConfig,
@@ -1500,6 +1511,28 @@ mod tests {
             line_end: 1,
             score: 1.0,
         }
+    }
+
+    #[test]
+    fn format_code_hits_shows_modality_tag() {
+        let hits = vec![
+            FusedHit {
+                hit: code_hit("CommonModules/М/Ext/Module.bsl", "Оба", "procedure"),
+                modality: Modality::Both,
+            },
+            FusedHit {
+                hit: code_hit("CommonModules/М/Ext/Module.bsl", "Лекс", "procedure"),
+                modality: Modality::Lexical,
+            },
+            FusedHit {
+                hit: code_hit("CommonModules/М/Ext/Module.bsl", "Сем", "procedure"),
+                modality: Modality::Semantic,
+            },
+        ];
+        let out = super::format_code_hits(&hits, None, None);
+        assert!(out.contains("#1 [L+S]"), "both-modality hit tagged L+S: {out}");
+        assert!(out.contains("#2 [L]"), "lexical-only hit tagged L: {out}");
+        assert!(out.contains("#3 [S]"), "semantic-only hit tagged S: {out}");
     }
 
     #[test]

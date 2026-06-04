@@ -223,7 +223,7 @@ fn schema_json() -> Value {
             "in_total": "usize — distinct callers discovered (present for dir=in/both)"
         },
         "body_budget": "`node`/`neighbors` at detail=bodies cap cumulative source output at max_output_tokens (~4 chars/token; default 6000); a truncated response carries `budget_exhausted: true`. A body fully starved by the budget is omitted (its `source` field is absent), not emitted as an empty string. In `source`, an item skipped because an earlier item exhausted the budget carries `skipped_budget_exhausted: true` (distinct from a method with no body) — retry it with a larger budget or alone.",
-        "redaction": "method source/snippets emitted by `node`/`neighbors`/`source` (and search) are secret-redacted: values that look like credentials are replaced with `***`. Structural string literals (field lists, query fragments) may also be masked; treat source as sanitized, not byte-exact.",
+        "redaction": "method source/snippets emitted by `node`/`neighbors`/`source` (and search) are secret-redacted: a string literal is replaced with `***` when a sensitive marker (a credential-named identifier like `Токен`, or a key like `Вставить(\"Пароль\", …)`) precedes it in the same statement. Structural literals (field lists, type names) and localized messages are preserved; treat source as sanitized, not byte-exact.",
         "revision_note": "the graph `revision` is independent of the `diagnostics` tool's `generation` — they are separate subsystems with separate freshness counters and do not correlate.",
         "envelope": {
             "revision": "u64 — snapshot generation the answer was computed at",
