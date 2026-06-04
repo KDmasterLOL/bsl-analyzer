@@ -224,12 +224,13 @@ impl McpServer {
                 tools::metadata::get_object_structure(&config, &object_type, &object_name)
             }
             "form" => {
+                // `object_name` is required for an object's forms but not for `CommonForm`
+                // (a top-level form), so the requirement is enforced inside get_form_structure.
                 let object_type = require(p.object_type, "object_type", "form")?;
-                let object_name = require(p.object_name, "object_name", "form")?;
                 tools::metadata::get_form_structure(
                     self.state.source_root().map(|p| p.as_path()),
                     &object_type,
-                    &object_name,
+                    p.object_name.as_deref(),
                     p.form_name.as_deref(),
                 )
             }
