@@ -631,6 +631,10 @@ impl SearchEngine {
         embedder.embed(query)
     }
 
+    pub fn workspace_root(&self) -> Option<&std::path::Path> {
+        self.workspace_root.as_deref()
+    }
+
     pub fn set_workspace_root(&mut self, workspace_root: impl Into<std::path::PathBuf>) {
         self.workspace_root = Some(workspace_root.into());
         if let Ok(mut cache) = self.workspace_overlay_cache.lock() {

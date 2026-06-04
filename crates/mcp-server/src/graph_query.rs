@@ -58,6 +58,24 @@ fn row_to_stored(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredNode> {
     })
 }
 
+/// The `[lo, hi)` id range that selects a module's member methods. A `module/<scope>`
+/// id's methods are `method/<scope>/<name>`; a `module/file/<rel>` id's methods are
+/// `method/file/<rel>::<name>` (the `::` member separator). The half-open upper bound is
+/// the prefix with its last (ASCII separator) byte incremented, so the scan rides the
+/// `id` primary-key index and never matches a sibling scope. `None` for a non-module id.
+fn method_id_range(module_id: &str) -> Option<(String, String)> {
+    let scope = module_id.strip_prefix("module/")?;
+    if scope.is_empty() {
+        return None;
+    }
+    let sep = if scope.starts_with("file/") { "::" } else { "/" };
+    let prefix = format!("method/{scope}{sep}");
+    let mut upper = prefix.clone();
+    let last = upper.pop()?; // ASCII '/' or ':'
+    upper.push(((last as u8) + 1) as char);
+    Some((prefix, upper))
+}
+
 /// Map a stored node kind to the agent-facing static label `NodeRef` expects.
 fn node_kind(kind: &str) -> &'static str {
     match kind {
@@ -200,6 +218,16 @@ impl GraphDb {
         if let Some(node) = self.fetch_node(id)? {
             return Ok(Ok(node));
         }
+        // A `module/<scope>` id has no stored row unless the module happened to be a
+        // module-level edge endpoint. Synthesize it from its member methods (addressed by
+        // the `method/<scope>/…` id prefix) so `node(module/…)` resolves and lists members
+        // — without polluting the graph with module nodes/edges.
+        if matches!(&kind, GraphIdKind::Module { .. } | GraphIdKind::ModuleFile { .. }) {
+            return Ok(match self.synthesize_module_node(id)? {
+                Some(node) => Ok(node),
+                None => Err(GraphError::NotFound { id: id.to_string() }),
+            });
+        }
         // Case-insensitive fallback for metadata ids only. Both the prefix and the
         // comparison target are rebuilt from the PARSED type's English name (not the
         // raw id segment), so a localized type spelling (`Справочник` → `Catalog`)
@@ -295,6 +323,103 @@ impl GraphDb {
         Ok(Err(GraphError::NotFound { id: id.to_string() }))
     }
 
+    /// Synthesize a `module` node from its member methods. A module has a stored row only
+    /// when it was an edge endpoint, but its methods are always present as
+    /// `method/<scope>/…` rows; the first member supplies the module's file and display
+    /// name. `None` when the module has no methods (then `node` reports `not_found`).
+    fn synthesize_module_node(&self, id: &str) -> anyhow::Result<Option<StoredNode>> {
+        let Some((lo, hi)) = method_id_range(id) else { return Ok(None) };
+        let first: Option<(Option<String>, Option<String>)> = self
+            .conn
+            .query_row(
+                "SELECT file, module FROM nodes WHERE kind = 'method' AND id >= ?1 AND id < ?2 \
+                 ORDER BY id LIMIT 1",
+                params![lo, hi],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .context("probing module members")?;
+        let Some((file, module_display)) = first else { return Ok(None) };
+        let name = module_display.clone().unwrap_or_else(|| id.to_string());
+        Ok(Some(StoredNode {
+            id: id.to_string(),
+            kind: "module".to_string(),
+            name: name.clone(),
+            qualified: name,
+            module: module_display,
+            file,
+            name_offset: None,
+            sig_end: None,
+            src_start: None,
+            src_end: None,
+            dispatch: None,
+            is_export: None,
+            addressable: true,
+        }))
+    }
+
+    /// The member methods of a `module/<scope>` node, addressed by the `method/<scope>/…`
+    /// id prefix (the durable scope, NOT the `module` display column).
+    fn module_members(&self, module_id: &str) -> anyhow::Result<Vec<ide::ModuleMethod>> {
+        let Some((lo, hi)) = method_id_range(module_id) else { return Ok(Vec::new()) };
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, is_export FROM nodes WHERE kind = 'method' AND id >= ?1 AND id < ?2 \
+             ORDER BY name",
+        )?;
+        let rows = stmt.query_map(params![lo, hi], |r| {
+            Ok(ide::ModuleMethod {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                is_export: r.get::<_, Option<i64>>(2)?.map(|v| v != 0),
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().context("listing module members")
+    }
+
+    /// The true distinct-module count: every module that owns a method (derived from the
+    /// `method/<scope>/…` id prefix via [`ide::module_id_of_method`]) unioned with any
+    /// `module`-kind row (a module body persisted only because it was an edge endpoint).
+    /// Counting `kind='module'` rows alone undercounts, since module nodes are synthesized
+    /// on demand and not generally stored — the symptom the agent saw as `modules=13`.
+    fn count_modules(&self) -> anyhow::Result<usize> {
+        let mut modules: std::collections::HashSet<String> = std::collections::HashSet::new();
+        {
+            let mut stmt = self.conn.prepare("SELECT id FROM nodes WHERE kind='module'")?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            for id in rows {
+                modules.insert(id?);
+            }
+        }
+        {
+            let mut stmt = self.conn.prepare("SELECT id FROM nodes WHERE kind='method'")?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            for id in rows {
+                if let Some(module) = ide::module_id_of_method(&id?) {
+                    modules.insert(module);
+                }
+            }
+        }
+        Ok(modules.len())
+    }
+
+    /// Near-miss id lookup: rank every node's durable id against an imprecise `query`
+    /// (wrong casing, bare method/object name, or partial id), capped at `limit`. Feeds the
+    /// full `(id, kind)` node set through the shared [`ide::rank_resolve_candidates`] ranker,
+    /// so the candidate list is byte-identical to the in-memory `Analysis::graph_resolve`.
+    pub fn resolve(&self, query: &str, limit: usize) -> anyhow::Result<ide::ResolveResult> {
+        let mut stmt = self.conn.prepare("SELECT id, kind FROM nodes")?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("scanning nodes for resolve")?;
+        let candidates = ide::rank_resolve_candidates(
+            rows.iter().map(|(id, kind)| (id.clone(), node_kind(kind))),
+            query,
+            limit,
+        );
+        Ok(ide::ResolveResult { query: query.to_string(), candidates })
+    }
+
     fn in_degree(&self, id: &str) -> anyhow::Result<usize> {
         let d: Option<i64> = self
             .conn
@@ -337,6 +462,9 @@ impl GraphDb {
             source: None,
             dispatch: dispatch_labels(&n.dispatch),
             is_export: n.is_export,
+            // Populated by `node()` for a `module` node (the member list); a separate
+            // query, so it is not done in this projection helper.
+            methods: None,
             addressable: n.addressable,
         };
         if n.kind == "method" && matches!(detail, GraphDetail::Signatures | GraphDetail::Bodies) {
@@ -357,7 +485,7 @@ impl GraphDb {
     pub fn overview(&self, top_n: usize) -> anyhow::Result<GraphOverview> {
         let nodes = self.count("SELECT COUNT(*) FROM nodes")?;
         let methods = self.count("SELECT COUNT(*) FROM nodes WHERE kind='method'")?;
-        let modules = self.count("SELECT COUNT(*) FROM nodes WHERE kind='module'")?;
+        let modules = self.count_modules()?;
         let mdos = self.count("SELECT COUNT(*) FROM nodes WHERE kind='mdo'")?;
         let attributes = self.count("SELECT COUNT(*) FROM nodes WHERE kind='attribute'")?;
         let tabular_sections =
@@ -419,21 +547,32 @@ impl GraphDb {
         id: &str,
         detail: GraphDetail,
     ) -> anyhow::Result<Result<NodeResult, GraphError>> {
-        Ok(self.resolve_stored(id)?.map(|n| NodeResult { node: self.node_ref(&n, detail) }))
+        let stored = match self.resolve_stored(id)? {
+            Ok(n) => n,
+            Err(e) => return Ok(Err(e)),
+        };
+        let mut node = self.node_ref(&stored, detail);
+        // A `module` node lists its members so an agent discovers them from `node(module/…)`
+        // directly, without a traversal.
+        if stored.kind == "module" {
+            node.methods = Some(self.module_members(&stored.id)?);
+        }
+        Ok(Ok(NodeResult { node }))
     }
 
     fn directed_edges(
         &self,
         node_id: &str,
         dir: Direction,
-        filter: &[String],
+        provenance_filter: &[String],
+        kind_filter: &[String],
     ) -> anyhow::Result<Vec<StoredEdge>> {
         let mut edges = Vec::new();
         if matches!(dir, Direction::Out | Direction::Both) {
-            self.collect_edges("from_id", node_id, filter, &mut edges)?;
+            self.collect_edges("from_id", node_id, provenance_filter, kind_filter, &mut edges)?;
         }
         if matches!(dir, Direction::In | Direction::Both) {
-            self.collect_edges("to_id", node_id, filter, &mut edges)?;
+            self.collect_edges("to_id", node_id, provenance_filter, kind_filter, &mut edges)?;
         }
         Ok(edges)
     }
@@ -442,7 +581,8 @@ impl GraphDb {
         &self,
         column: &str,
         node_id: &str,
-        filter: &[String],
+        provenance_filter: &[String],
+        kind_filter: &[String],
         out: &mut Vec<StoredEdge>,
     ) -> anyhow::Result<()> {
         let mut stmt = self.conn.prepare(&format!(
@@ -459,7 +599,11 @@ impl GraphDb {
         })?;
         for row in rows {
             let edge = row?;
-            if filter.is_empty() || filter.iter().any(|p| *p == provenance(&edge.provenance)) {
+            let prov_ok = provenance_filter.is_empty()
+                || provenance_filter.iter().any(|p| *p == provenance(&edge.provenance));
+            let kind_ok =
+                kind_filter.is_empty() || kind_filter.iter().any(|k| *k == edge_kind(&edge.kind));
+            if prov_ok && kind_ok {
                 out.push(edge);
             }
         }
@@ -482,14 +626,30 @@ impl GraphDb {
         seen.insert(root.id.clone());
         let mut discovered: Vec<String> = Vec::new();
         let mut out_edges: Vec<StoredEdge> = Vec::new();
+        // Distinct non-root nodes reached downstream vs upstream (mirrors the in-memory
+        // path) so a `Both` traversal reports each direction's fan-out.
+        let mut out_reached: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut in_reached: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut frontier = vec![root.id.clone()];
 
         for _ in 0..depth {
             let mut next = Vec::new();
             for node_id in &frontier {
-                for edge in self.directed_edges(node_id, params.dir, &params.provenance_filter)? {
-                    let other =
-                        if &edge.from == node_id { edge.to.clone() } else { edge.from.clone() };
+                for edge in self.directed_edges(
+                    node_id,
+                    params.dir,
+                    &params.provenance_filter,
+                    &params.edge_kind_filter,
+                )? {
+                    let downstream = &edge.from == node_id;
+                    let other = if downstream { edge.to.clone() } else { edge.from.clone() };
+                    if other != root.id {
+                        if downstream {
+                            out_reached.insert(other.clone());
+                        } else {
+                            in_reached.insert(other.clone());
+                        }
+                    }
                     out_edges.push(edge);
                     if seen.insert(other.clone()) {
                         next.push(other.clone());
@@ -502,6 +662,10 @@ impl GraphDb {
             }
             frontier = next;
         }
+        let out_total =
+            matches!(params.dir, Direction::Out | Direction::Both).then_some(out_reached.len());
+        let in_total =
+            matches!(params.dir, Direction::In | Direction::Both).then_some(in_reached.len());
 
         // Centrality-ranked tail-drop of discovered (non-root) nodes.
         let mut ranked: Vec<(usize, String)> = Vec::with_capacity(discovered.len());
@@ -525,6 +689,29 @@ impl GraphDb {
             }
         }
 
+        // Distribution + connector-loss over the deduped full neighbourhood (every
+        // discovered edge, before the node-cap edge-survival filter), mirroring the
+        // in-memory serve path so the counts are byte-identical.
+        let mut counted: std::collections::HashSet<(String, String, String)> =
+            std::collections::HashSet::new();
+        let mut by_kind: std::collections::BTreeMap<&'static str, usize> =
+            std::collections::BTreeMap::new();
+        let mut by_provenance: std::collections::BTreeMap<&'static str, usize> =
+            std::collections::BTreeMap::new();
+        let mut connectors_dropped = false;
+        for e in &out_edges {
+            if !counted.insert((e.from.clone(), e.to.clone(), e.kind.clone())) {
+                continue;
+            }
+            *by_kind.entry(edge_kind(&e.kind)).or_default() += 1;
+            *by_provenance.entry(provenance(&e.provenance)).or_default() += 1;
+            let survives = (e.from == root.id || kept.contains(&e.from))
+                && (e.to == root.id || kept.contains(&e.to));
+            if !survives {
+                connectors_dropped = true;
+            }
+        }
+
         // Keep only edges whose endpoints both survived; dedup by (from, to, kind)
         // so a `Both` sweep that meets an edge from each end emits it once.
         let mut seen_edges: std::collections::HashSet<(String, String, String)> =
@@ -545,12 +732,20 @@ impl GraphDb {
             })
             .collect();
 
+        let returned = nodes.len();
         Ok(Ok(NeighborsResult {
             root: self.node_ref(&root, params.detail),
             nodes,
             edges,
             total,
+            returned,
+            dropped_count: total - returned,
             dropped,
+            by_kind,
+            by_provenance,
+            connectors_dropped,
+            out_total,
+            in_total,
         }))
     }
 
@@ -576,7 +771,7 @@ impl GraphDb {
             |kind: &str| matches!(kind, "manager_creates" | "manager_access" | "query_ref");
         let mut calls = Vec::new();
         let mut reads = Vec::new();
-        for edge in self.directed_edges(id, Direction::Out, &[])? {
+        for edge in self.directed_edges(id, Direction::Out, &[], &[])? {
             match classify_graph_id(&edge.to) {
                 Ok(GraphIdKind::Method { name, .. }) | Ok(GraphIdKind::MethodFile { name, .. })
                     if edge.kind == "call" =>
@@ -723,4 +918,35 @@ fn clamp_source(src: String, max_chars: usize) -> (String, bool) {
         end -= 1;
     }
     (src[..end].to_string(), true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::method_id_range;
+
+    #[test]
+    fn method_id_range_covers_each_module_form() {
+        // Common/manager/object modules use the `/` member separator.
+        let (lo, hi) = method_id_range("module/common/Сервер").unwrap();
+        assert_eq!(lo, "method/common/Сервер/");
+        assert_eq!(hi, "method/common/Сервер0"); // '/' (0x2F) bumped to '0' (0x30)
+        assert!("method/common/Сервер/Считать" >= lo.as_str());
+        assert!("method/common/Сервер/Считать" < hi.as_str());
+        // A sibling scope (longer name sharing the prefix) is NOT in range.
+        assert!("method/common/СерверДва/М" >= hi.as_str());
+
+        let (lo, _) = method_id_range("module/manager/Catalog/Товары").unwrap();
+        assert_eq!(lo, "method/manager/Catalog/Товары/");
+
+        // File modules use the `::` member separator.
+        let (lo, hi) = method_id_range("module/file/src/cf/Forms/A/Module.bsl").unwrap();
+        assert_eq!(lo, "method/file/src/cf/Forms/A/Module.bsl::");
+        assert_eq!(hi, "method/file/src/cf/Forms/A/Module.bsl:;"); // ':' bumped to ';'
+        assert!("method/file/src/cf/Forms/A/Module.bsl::ПриОткрытии" >= lo.as_str());
+        assert!("method/file/src/cf/Forms/A/Module.bsl::ПриОткрытии" < hi.as_str());
+
+        // Not a module id (no `module/` prefix), and an empty scope.
+        assert!(method_id_range("method/common/X/Y").is_none());
+        assert!(method_id_range("module/").is_none());
+    }
 }

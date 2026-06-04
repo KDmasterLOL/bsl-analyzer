@@ -8,6 +8,7 @@ mod engine;
 mod error;
 mod external_baseline;
 mod fingerprint;
+mod hybrid;
 mod index;
 mod lexical;
 mod local_baseline;
@@ -42,6 +43,7 @@ pub use external_baseline::{
     SemanticPublishProgress,
 };
 pub use fingerprint::{fingerprint_documents, fingerprint_indexed_documents};
+pub use hybrid::{fuse_rrf, RRF_K};
 pub use index::{SearchResult, VectorIndex};
 pub use local_baseline::LocalStoreBaselineAdapter;
 pub use merge::{

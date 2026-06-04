@@ -17,20 +17,45 @@ use crate::graph_query::GraphDb;
 use crate::tools::redact::redact_secrets;
 use crate::tools::response::structured;
 
-pub fn detail_from(s: Option<&str>) -> GraphDetail {
+/// Parse the `detail` enum. `None` keeps the default (`signatures`); an unknown value is
+/// rejected (mirrors `diagnostics::parse_min_severity`) so a caller is never silently served
+/// a different view than it asked for.
+pub fn detail_from(s: Option<&str>) -> Result<GraphDetail, String> {
     match s {
-        Some("names") => GraphDetail::Names,
-        Some("bodies") => GraphDetail::Bodies,
-        _ => GraphDetail::Signatures,
+        None | Some("signatures") => Ok(GraphDetail::Signatures),
+        Some("names") => Ok(GraphDetail::Names),
+        Some("bodies") => Ok(GraphDetail::Bodies),
+        Some(other) => Err(format!("unknown detail '{other}'; expected names|signatures|bodies")),
     }
 }
 
-pub fn direction_from(s: Option<&str>) -> Direction {
+/// Parse the `dir` enum. `None` keeps the default (`in`); an unknown value is rejected so a
+/// caller is never silently given the opposite traversal direction.
+pub fn direction_from(s: Option<&str>) -> Result<Direction, String> {
     match s {
-        Some("out") => Direction::Out,
-        Some("both") => Direction::Both,
-        _ => Direction::In,
+        None | Some("in") => Ok(Direction::In),
+        Some("out") => Ok(Direction::Out),
+        Some("both") => Ok(Direction::Both),
+        Some(other) => Err(format!("unknown dir '{other}'; expected in|out|both")),
     }
+}
+
+/// The agent-facing edge-kind labels accepted by the `edge_kinds` neighbour filter.
+const EDGE_KINDS: [&str; 6] =
+    ["call", "manager_creates", "manager_access", "query_ref", "contains", "data_binding"];
+
+/// Validate an `edge_kinds` filter: every entry must be a known edge-kind label, so a
+/// typo fails fast rather than silently matching nothing.
+pub fn validate_edge_kinds(kinds: &[String]) -> Result<(), String> {
+    for k in kinds {
+        if !EDGE_KINDS.contains(&k.as_str()) {
+            return Err(format!(
+                "unknown edge_kind '{k}'; expected one of {}",
+                EDGE_KINDS.join("|")
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// An infrastructure failure (e.g. a SQL read error) surfaced in-band so the agent
@@ -46,25 +71,75 @@ pub fn overview(graph: &GraphDb, top: usize) -> Value {
     }
 }
 
-pub fn node(graph: &GraphDb, id: &str, detail: GraphDetail) -> Value {
+/// Default cap on the candidate ids returned by `resolve`.
+pub const DEFAULT_RESOLVE_LIMIT: usize = 20;
+
+pub fn resolve(graph: &GraphDb, query: &str, limit: usize) -> Value {
+    match graph.resolve(query, limit) {
+        Ok(result) => to_value(&result),
+        Err(e) => internal(e),
+    }
+}
+
+/// Default body-output budget (in tokens, ~4 chars each) for `node`/`neighbors` at
+/// `detail=bodies`, so a `bodies` request can never return an unbounded payload the way an
+/// uncapped manager-method body could. Overridable via `max_output_tokens`.
+pub const DEFAULT_BODY_BUDGET_TOKENS: usize = 6000;
+
+/// Truncate `source` to the `remaining` char budget on a char boundary, decrementing the
+/// budget. Returns `true` if it had to truncate (or drop) the body. `None`/empty sources
+/// (the non-`bodies` details) consume nothing.
+fn clamp_to_budget(source: &mut Option<String>, remaining: &mut usize) -> bool {
+    let Some(text) = source else { return false };
+    if text.len() <= *remaining {
+        *remaining -= text.len();
+        return false;
+    }
+    let mut end = *remaining;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    *remaining = 0;
+    true
+}
+
+pub fn node(graph: &GraphDb, id: &str, detail: GraphDetail, max_output_tokens: usize) -> Value {
     match graph.node(id, detail) {
         Ok(Ok(mut result)) => {
             redact_opt(&mut result.node.source);
-            to_value(&result)
+            let mut remaining = max_output_tokens.saturating_mul(4);
+            let truncated = clamp_to_budget(&mut result.node.source, &mut remaining);
+            let mut value = to_value(&result);
+            if truncated {
+                value["budget_exhausted"] = json!(true);
+            }
+            value
         }
         Ok(Err(err)) => to_value(&err),
         Err(e) => internal(e),
     }
 }
 
-pub fn neighbors(graph: &GraphDb, params: &NeighborsParams<'_>) -> Value {
+pub fn neighbors(graph: &GraphDb, params: &NeighborsParams<'_>, max_output_tokens: usize) -> Value {
     match graph.neighbors(params) {
         Ok(Ok(mut result)) => {
             redact_opt(&mut result.root.source);
             for node in &mut result.nodes {
                 redact_opt(&mut node.source);
             }
-            to_value(&result)
+            // Cumulative body budget across the root then the (centrality-ordered) nodes,
+            // so a `detail=bodies` traversal stays within the output budget.
+            let mut remaining = max_output_tokens.saturating_mul(4);
+            let mut truncated = clamp_to_budget(&mut result.root.source, &mut remaining);
+            for node in &mut result.nodes {
+                truncated |= clamp_to_budget(&mut node.source, &mut remaining);
+            }
+            let mut value = to_value(&result);
+            if truncated {
+                value["budget_exhausted"] = json!(true);
+            }
+            value
         }
         Ok(Err(err)) => to_value(&err),
         Err(e) => internal(e),
@@ -117,16 +192,32 @@ pub fn loading(detail: Option<&str>) -> CallToolResult {
 /// independent of the on-disk SQLite cache layout in [`crate::graph_db`]).
 fn schema_json() -> Value {
     json!({
-        "schema_version": "6",
-        "actions": ["overview", "schema", "node", "source", "neighbors", "callers", "callees"],
+        "schema_version": "13",
+        "actions": ["overview", "schema", "node", "source", "neighbors", "callers", "callees", "resolve"],
         "node_kinds": ["method", "module", "mdo", "attribute", "tabular_section", "form", "form_item", "form_attribute"],
+        "notes": "since version 7 `node(module/<scope>)` resolves for any code module and returns a `methods` array ({id, name, is_export}) of the module's members; module membership is served on demand and is not a graph edge, so `neighbors(module/…)` stays empty",
+        "resolve": "since version 13 `resolve(query)` returns candidate durable ids ({id, kind, match}) for an imprecise query — wrong casing, a bare method/object name, or a partial id — so a `not_found` from `node`/`neighbors` is recoverable without guessing. `match` is exact|case_insensitive|name|substring (strongest first); the list is capped (default 20).",
         "edge_kinds": ["call", "manager_creates", "manager_access", "query_ref", "contains", "data_binding"],
         "provenance": ["resolved", "inferred", "visibility_blocked", "unresolved"],
         "dispatch": ["client", "server"],
+        "neighbors_params": {
+            "provenance": "string[] — keep only edges with these provenances (empty = all)",
+            "edge_kinds": "string[] — keep only edges of these kinds (call|manager_creates|manager_access|query_ref|contains|data_binding); empty = all. Combine with provenance to isolate e.g. only query_ref metadata impact"
+        },
         "neighbors_result": {
             "total": "usize — distinct neighbours discovered, before the max_nodes cap",
-            "dropped": "string[] — bounded sample of dropped ids; full count is total - nodes.len()"
+            "returned": "usize — neighbours returned in `nodes` (after the cap)",
+            "dropped_count": "usize — neighbours dropped by the cap (total - returned)",
+            "dropped": "string[] — bounded sample of the dropped ids (highest-centrality first)",
+            "by_kind": "{ kind: count } — edge-kind distribution of the full neighbourhood (before the cap), to size an edge_kinds filter",
+            "by_provenance": "{ provenance: count } — same distribution by provenance",
+            "connectors_dropped": "bool — true when the cap dropped a node that was an edge endpoint, so some edges are omitted (nodes may appear without their connecting edge)",
+            "out_total": "usize — distinct callees discovered (present for dir=out/both); a small value under dir=both means few outbound calls even when inbound callers fill the cap — refine with dir=out",
+            "in_total": "usize — distinct callers discovered (present for dir=in/both)"
         },
+        "body_budget": "`node`/`neighbors` at detail=bodies cap cumulative source output at max_output_tokens (~4 chars/token; default 6000); a truncated response carries `budget_exhausted: true`",
+        "redaction": "method source/snippets emitted by `node`/`neighbors`/`source` (and search) are secret-redacted: values that look like credentials are replaced with `***`. Structural string literals (field lists, query fragments) may also be masked; treat source as sanitized, not byte-exact.",
+        "revision_note": "the graph `revision` is independent of the `diagnostics` tool's `generation` — they are separate subsystems with separate freshness counters and do not correlate.",
         "envelope": {
             "revision": "u64 — snapshot generation the answer was computed at",
             "stale": "bool — workspace drifted on disk since this snapshot",
@@ -168,17 +259,50 @@ mod tests {
     use super::*;
 
     #[test]
+    fn detail_from_defaults_then_rejects_unknown() {
+        assert_eq!(detail_from(None), Ok(GraphDetail::Signatures));
+        assert_eq!(detail_from(Some("signatures")), Ok(GraphDetail::Signatures));
+        assert_eq!(detail_from(Some("names")), Ok(GraphDetail::Names));
+        assert_eq!(detail_from(Some("bodies")), Ok(GraphDetail::Bodies));
+        // An unknown value errors rather than silently defaulting.
+        let err = detail_from(Some("everything")).unwrap_err();
+        assert!(err.contains("everything") && err.contains("names|signatures|bodies"), "{err}");
+    }
+
+    #[test]
+    fn validate_edge_kinds_accepts_known_rejects_unknown() {
+        assert!(validate_edge_kinds(&[]).is_ok());
+        assert!(validate_edge_kinds(&["query_ref".to_owned(), "contains".to_owned()]).is_ok());
+        let err = validate_edge_kinds(&["calls".to_owned()]).unwrap_err();
+        assert!(err.contains("calls") && err.contains("query_ref"), "{err}");
+    }
+
+    #[test]
+    fn direction_from_defaults_then_rejects_unknown() {
+        assert_eq!(direction_from(None), Ok(Direction::In));
+        assert_eq!(direction_from(Some("in")), Ok(Direction::In));
+        assert_eq!(direction_from(Some("out")), Ok(Direction::Out));
+        assert_eq!(direction_from(Some("both")), Ok(Direction::Both));
+        // An unknown value errors rather than silently giving the default direction.
+        let err = direction_from(Some("sideways")).unwrap_err();
+        assert!(err.contains("sideways") && err.contains("in|out|both"), "{err}");
+    }
+
+    #[test]
     fn schema_advertises_the_current_contract_shape() {
         let schema = schema_json();
         // The contract version must be bumped in lockstep with response-shape
         // changes; `total` since this revision, `form`/`form_item` + `contains` since
         // version 3, `form_attribute` since version 4, `tabular_section` since version
         // 5, and the `data_binding` edge since version 6.
-        assert_eq!(schema["schema_version"], "6");
+        assert_eq!(schema["schema_version"], "13");
         assert!(
             schema["neighbors_result"]["total"].is_string(),
             "neighbours result must document the `total` field"
         );
+        let actions = schema["actions"].as_array().unwrap();
+        assert!(actions.iter().any(|a| a == "resolve"), "resolve action must be advertised");
+        assert!(schema["resolve"].is_string(), "resolve must be documented");
         let node_kinds = schema["node_kinds"].as_array().unwrap();
         assert!(node_kinds.iter().any(|k| k == "form"));
         assert!(node_kinds.iter().any(|k| k == "form_item"));
@@ -215,7 +339,7 @@ mod tests {
     #[test]
     fn schema_and_loading_populate_structured_content() {
         assert_structured_mirrors_text(&schema());
-        assert_eq!(schema().structured_content.unwrap()["schema_version"], "6");
+        assert_eq!(schema().structured_content.unwrap()["schema_version"], "13");
 
         assert_structured_mirrors_text(&loading(Some("indexing")));
         let body = loading(Some("indexing")).structured_content.unwrap();

@@ -167,9 +167,10 @@ codex mcp list
 
 ## Шаг 4. 🔀 Развилка A — семантический поиск (embeddings)
 
-**Спросите пользователя: включаем семантический поиск (`search_code`/`search_docs`)?**
+**Спросите пользователя: включаем семантическую составляющую поиска (`search_code`/`search_docs`)?**
 
-- **Нет** → полнотекстовый поиск (`find_code`/`find_docs`), `metadata`, `graph`,
+- **Нет** → `search_code` работает в лексическом режиме (с пометкой
+  `-- semantic skipped: … --`), плюс `find_docs`, `metadata`, `graph`,
   `diagnostics`, SDBL — **всё работает без эмбеддингов**. Переходите к шагу 5.
 - **Да** → нужен доступ к OpenAI-совместимому embedder'у и четыре переменные:
 
@@ -316,7 +317,7 @@ complexityThreshold = 30
 | Проверка | Вызов | Профиль |
 |----------|-------|---------|
 | метаданные | `metadata` (action=`info`) | workspace |
-| поиск по коду | `search` (action=`find_code`) | workspace |
+| поиск по коду | `search` (action=`search_code`) | workspace |
 | граф вызовов | `graph` (action=`overview`) | workspace |
 | каталог диагностик | `diagnostics` (action=`catalog`) | workspace |
 | диагностики файла | `diagnostics` (action=`file`, path=…) | workspace |

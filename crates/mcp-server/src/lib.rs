@@ -76,14 +76,19 @@ struct ExecuteParams {
 
 #[derive(Deserialize, JsonSchema)]
 struct GraphParams {
-    /// overview | schema | node | source | neighbors | callers | callees
+    /// overview | schema | node | source | neighbors | callers | callees | resolve
     action: String,
     /// Durable node id (required for node/neighbors/callers/callees).
     id: Option<String>,
+    /// Imprecise lookup string (required for `resolve`): wrong casing, a bare method/object
+    /// name, or a partial id.
+    query: Option<String>,
     /// Durable node ids (required for `source`).
     #[serde(default)]
     ids: Vec<String>,
-    /// Output budget for `source`, in tokens (~4 chars each; default 4000).
+    /// Output budget in tokens (~4 chars each) for source-bearing actions: `source`
+    /// (default 4000) and `node`/`neighbors` at `detail=bodies` (default 6000). When the
+    /// body output is truncated the response carries `budget_exhausted: true`.
     max_output_tokens: Option<usize>,
     /// names | signatures | bodies (default: signatures).
     detail: Option<String>,
@@ -96,6 +101,10 @@ struct GraphParams {
     /// Keep only edges with these provenances (resolved/inferred/visibility_blocked/unresolved).
     #[serde(default)]
     provenance: Vec<String>,
+    /// Keep only edges of these kinds (call/manager_creates/manager_access/query_ref/
+    /// contains/data_binding) — lets metadata-impact queries isolate e.g. only `query_ref`.
+    #[serde(default)]
+    edge_kinds: Vec<String>,
     /// How many top-centrality methods to include in `overview` (default: 20).
     top: Option<usize>,
 }
@@ -257,7 +266,8 @@ impl McpServer {
                 .await
                 .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
             }
-            "find_code" | "search_code" => {
+            // `search_code` is the unified lexical+semantic code search (RRF-fused).
+            "search_code" => {
                 let query = require(p.query, "query", &p.action)?;
                 let limit = p.limit.unwrap_or(10).min(50);
                 let engine = self.state.search_engine().clone();
@@ -265,17 +275,8 @@ impl McpServer {
                 let workspace_search_mode = self.state.workspace_search_mode();
                 let configured_baseline = self.state.configured_baseline();
                 let external_baseline = self.state.external_baseline();
-                let action = p.action.clone();
-                tokio::task::spawn_blocking(move || match action.as_str() {
-                    "find_code" => tools::search::find_code(
-                        &engine,
-                        workspace_search_mode,
-                        configured_baseline.as_ref(),
-                        external_baseline,
-                        &query,
-                        limit,
-                    ),
-                    "search_code" => tools::search::search_code(
+                tokio::task::spawn_blocking(move || {
+                    tools::search::hybrid_code(
                         &engine,
                         &semantic_runtime,
                         workspace_search_mode,
@@ -283,14 +284,13 @@ impl McpServer {
                         external_baseline,
                         &query,
                         limit,
-                    ),
-                    _ => unreachable!(),
+                    )
                 })
                 .await
                 .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
             }
             other => Err(McpError::invalid_params(
-                format!("Unknown action '{other}'. Expected: find_code, search_code, status"),
+                format!("Unknown action '{other}'. Expected: search_code, status"),
                 None,
             )),
         }
@@ -475,10 +475,18 @@ impl McpServer {
             let gdb = &snapshot.graph;
             let value = match p.action.as_str() {
                 "overview" => tools::graph::overview(gdb, p.top.unwrap_or(20)),
+                "resolve" => {
+                    let query = require(p.query, "query", "resolve")?;
+                    let limit = p.top.unwrap_or(tools::graph::DEFAULT_RESOLVE_LIMIT);
+                    tools::graph::resolve(gdb, &query, limit)
+                }
                 "node" => {
                     let id = require(p.id, "id", "node")?;
-                    let detail = tools::graph::detail_from(p.detail.as_deref());
-                    tools::graph::node(gdb, &id, detail)
+                    let detail = tools::graph::detail_from(p.detail.as_deref())
+                        .map_err(|e| McpError::invalid_params(e, None))?;
+                    let budget =
+                        p.max_output_tokens.unwrap_or(tools::graph::DEFAULT_BODY_BUDGET_TOKENS);
+                    tools::graph::node(gdb, &id, detail, budget)
                 }
                 "source" => {
                     if p.ids.is_empty() {
@@ -495,23 +503,31 @@ impl McpServer {
                     let dir = match action {
                         "callers" => ide::Direction::In,
                         "callees" => ide::Direction::Out,
-                        _ => tools::graph::direction_from(p.dir.as_deref()),
+                        _ => tools::graph::direction_from(p.dir.as_deref())
+                            .map_err(|e| McpError::invalid_params(e, None))?,
                     };
+                    let detail = tools::graph::detail_from(p.detail.as_deref())
+                        .map_err(|e| McpError::invalid_params(e, None))?;
+                    tools::graph::validate_edge_kinds(&p.edge_kinds)
+                        .map_err(|e| McpError::invalid_params(e, None))?;
                     let neighbors = ide::NeighborsParams {
                         id: &id,
                         dir,
                         depth: p.depth.unwrap_or(1),
                         max_nodes: p.max_nodes.unwrap_or(50),
-                        detail: tools::graph::detail_from(p.detail.as_deref()),
+                        detail,
                         provenance_filter: p.provenance.clone(),
+                        edge_kind_filter: p.edge_kinds.clone(),
                     };
-                    tools::graph::neighbors(gdb, &neighbors)
+                    let budget =
+                        p.max_output_tokens.unwrap_or(tools::graph::DEFAULT_BODY_BUDGET_TOKENS);
+                    tools::graph::neighbors(gdb, &neighbors, budget)
                 }
                 other => {
                     return Err(McpError::invalid_params(
                         format!(
                             "Unknown action '{other}'. Expected: overview, schema, node, source, \
-                             neighbors, callers, callees"
+                             neighbors, callers, callees, resolve"
                         ),
                         None,
                     ))
@@ -545,10 +561,19 @@ impl McpServer {
                 };
                 Ok(tools::diagnostics::catalog(locale, &p.codes))
             }
+            // `status` reports the resident lifecycle (and kicks the lazy build) so an
+            // agent can start it and poll progress instead of a flat `loading`.
+            "status" => {
+                let diag = self.state.diagnostics();
+                diag.ensure_loading();
+                Ok(tools::diagnostics::status(&diag.status_report()))
+            }
             "file" => self.diagnostics_file(p).await,
             "workspace" => self.diagnostics_workspace(p).await,
             other => Err(McpError::invalid_params(
-                format!("Unknown action '{other}'. Expected: catalog, schema, file, workspace"),
+                format!(
+                    "Unknown action '{other}'. Expected: catalog, schema, status, file, workspace"
+                ),
                 None,
             )),
         }
@@ -579,7 +604,7 @@ impl McpServer {
                 ))
             }
             DiagnosticsStatus::Idle | DiagnosticsStatus::Loading => {
-                return Ok(tools::diagnostics::loading())
+                return Ok(tools::diagnostics::loading(&diag.status_report()))
             }
             DiagnosticsStatus::Ready { .. } => {}
         }
@@ -612,7 +637,7 @@ impl McpServer {
                 ResidentOutcome::Ready(result, freshness) => {
                     Ok(tools::diagnostics::envelope(freshness, result))
                 }
-                ResidentOutcome::Loading => Ok(tools::diagnostics::loading()),
+                ResidentOutcome::Loading => Ok(tools::diagnostics::loading(&diag.status_report())),
                 ResidentOutcome::Disabled => Err(McpError::invalid_params(
                     "diagnostics 'file' is only available in the workspace profile",
                     None,
@@ -655,7 +680,7 @@ impl McpServer {
                 ))
             }
             DiagnosticsStatus::Idle | DiagnosticsStatus::Loading => {
-                return Ok(tools::diagnostics::loading())
+                return Ok(tools::diagnostics::loading(&diag.status_report()))
             }
             DiagnosticsStatus::Ready { .. } => {}
         }
@@ -679,7 +704,7 @@ impl McpServer {
                 ResidentOutcome::Ready(result, freshness) => {
                     Ok(tools::diagnostics::envelope(freshness, result))
                 }
-                ResidentOutcome::Loading => Ok(tools::diagnostics::loading()),
+                ResidentOutcome::Loading => Ok(tools::diagnostics::loading(&diag.status_report())),
                 ResidentOutcome::Disabled => Err(McpError::invalid_params(
                     "diagnostics 'workspace' is only available in the workspace profile",
                     None,

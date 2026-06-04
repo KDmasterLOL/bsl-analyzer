@@ -76,9 +76,23 @@ pub struct NodeRef {
     pub dispatch: Vec<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_export: Option<bool>,
+    /// The module's own methods, populated only for a `module` node so an agent can
+    /// discover a module's members directly from `node(module/…)` without a separate
+    /// traversal. `None` for every other node kind.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub methods: Option<Vec<ModuleMethod>>,
     /// Whether this id round-trips back to a node on its own. `false` for
     /// path-fallback nodes seen only as an edge endpoint.
     pub addressable: bool,
+}
+
+/// A member method of a `module` node, surfaced in [`NodeRef::methods`].
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ModuleMethod {
+    pub id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_export: Option<bool>,
 }
 
 /// A resolved call edge, projected for the agent.
@@ -126,12 +140,39 @@ pub struct NeighborsResult {
     /// `max_nodes` cap. Lets an agent see the true fan-out even when only the
     /// top-centrality slice is returned in `nodes`.
     pub total: usize,
+    /// Count of neighbours returned in `nodes` (after the `max_nodes` cap). Always
+    /// equals `nodes.len()`; surfaced explicitly so an agent need not count.
+    pub returned: usize,
+    /// Count of neighbours dropped by the `max_nodes` cap (`total - returned`). The
+    /// `dropped` field is a bounded sample of these, not the full set.
+    pub dropped_count: usize,
     /// A bounded sample of the ids dropped by the `max_nodes` cap, taken from the
     /// ranked tail so the highest-centrality dropped nodes (those just past the cut)
-    /// come first. Capped at [`MAX_DROPPED_SAMPLE`]; the full dropped count is
-    /// `total - nodes.len()`.
+    /// come first. Capped at [`MAX_DROPPED_SAMPLE`]; the full count is `dropped_count`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub dropped: Vec<String>,
+    /// Distribution of the discovered neighbourhood's edges by kind (deduped, over the
+    /// full neighbourhood before the node cap), so an agent can size an `edge_kinds`
+    /// filter without fetching every edge. Empty when there are no edges.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub by_kind: BTreeMap<&'static str, usize>,
+    /// The same distribution by edge provenance.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub by_provenance: BTreeMap<&'static str, usize>,
+    /// `true` when the `max_nodes` cap dropped a node that was the endpoint of a
+    /// neighbourhood edge, so some edges were omitted from `edges` — a heads-up that the
+    /// returned `nodes` can include some whose connecting edge is not shown.
+    pub connectors_dropped: bool,
+    /// Distinct callees (out-edge targets) discovered, present only when the traversal
+    /// went outward (`dir=out`/`both`). Lets a `dir=both` caller see a small outbound
+    /// count even when inbound callers dominate the `max_nodes` cap, instead of assuming
+    /// there are none — then refine with `dir=out`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub out_total: Option<usize>,
+    /// Distinct callers (in-edge sources) discovered, present only when the traversal went
+    /// inward (`dir=in`/`both`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub in_total: Option<usize>,
 }
 
 /// Upper bound on the `dropped` id sample returned in [`NeighborsResult`]; a hot
@@ -183,6 +224,9 @@ pub struct NeighborsParams<'a> {
     pub detail: GraphDetail,
     /// Keep only edges whose provenance is in this set, when non-empty.
     pub provenance_filter: Vec<String>,
+    /// Keep only edges whose kind label (call/manager_access/query_ref/contains/…) is in
+    /// this set, when non-empty. Independent of `provenance_filter` (both must pass).
+    pub edge_kind_filter: Vec<String>,
 }
 
 /// A method's outbound graph context, rendered for embedding enrichment. A semantic
@@ -332,6 +376,19 @@ impl Analysis {
         let ctx = GraphCtx::new(self.database(), source_root_id, workspace_root);
         let node = ctx.resolve_id(id)?;
         Ok(NodeResult { node: ctx.node_ref(node, detail) })
+    }
+
+    /// Rank candidate durable ids for an imprecise `query` (wrong casing, bare name, or
+    /// partial id), capped at `limit`, so an agent can recover a canonical id.
+    pub fn graph_resolve(
+        &self,
+        source_root_id: SourceRootId,
+        workspace_root: Option<&Path>,
+        query: &str,
+        limit: usize,
+    ) -> ResolveResult {
+        let ctx = GraphCtx::new(self.database(), source_root_id, workspace_root);
+        ctx.resolve(query, limit)
     }
 
     /// Traverse callers/callees from a node up to `depth`, bounded by `max_nodes`.
@@ -733,10 +790,7 @@ impl<'a> GraphCtx<'a> {
     }
 
     fn rel_path(&self, abs: &str) -> Option<String> {
-        let root = self.workspace_root?;
-        let root_str = root.to_str()?.replace('\\', "/");
-        let stripped = abs.strip_prefix(&root_str)?;
-        Some(stripped.trim_start_matches('/').to_string())
+        workspace_rel_path(abs, self.workspace_root?)
     }
 
     // ---- id encoding --------------------------------------------------------
@@ -1084,6 +1138,7 @@ impl<'a> GraphCtx<'a> {
                     source: None,
                     dispatch: Vec::new(),
                     is_export: None,
+                    methods: None,
                     addressable,
                 }
             }
@@ -1101,6 +1156,7 @@ impl<'a> GraphCtx<'a> {
                 source: None,
                 dispatch: Vec::new(),
                 is_export: None,
+                methods: None,
                 addressable,
             },
             GraphNode::FormItem { owner, form_name, item_name } => NodeRef {
@@ -1118,6 +1174,7 @@ impl<'a> GraphCtx<'a> {
                 source: None,
                 dispatch: Vec::new(),
                 is_export: None,
+                methods: None,
                 addressable,
             },
             GraphNode::FormAttribute { owner, form_name, attr_name } => NodeRef {
@@ -1135,6 +1192,7 @@ impl<'a> GraphCtx<'a> {
                 source: None,
                 dispatch: Vec::new(),
                 is_export: None,
+                methods: None,
                 addressable,
             },
             GraphNode::TabularSection { mdo_type, object_name, section_name } => NodeRef {
@@ -1152,6 +1210,7 @@ impl<'a> GraphCtx<'a> {
                 source: None,
                 dispatch: Vec::new(),
                 is_export: None,
+                methods: None,
                 addressable,
             },
             GraphNode::TabularSectionAttribute {
@@ -1175,6 +1234,7 @@ impl<'a> GraphCtx<'a> {
                 source: None,
                 dispatch: Vec::new(),
                 is_export: None,
+                methods: None,
                 addressable,
             },
         }
@@ -1199,6 +1259,7 @@ impl<'a> GraphCtx<'a> {
             source: None,
             dispatch: Vec::new(),
             is_export: None,
+            methods: None,
             addressable,
         }
     }
@@ -1233,6 +1294,7 @@ impl<'a> GraphCtx<'a> {
             source: None,
             dispatch,
             is_export: Some(m.is_export()),
+            methods: None,
             addressable,
         };
 
@@ -1269,6 +1331,10 @@ impl<'a> GraphCtx<'a> {
                 .map(dispatch_labels)
                 .unwrap_or_default(),
             is_export: None,
+            // The member-method list is served from the on-disk graph (the production
+            // path); the in-memory serving path resolves the module node itself but does
+            // not enumerate members here.
+            methods: None,
             addressable,
         }
     }
@@ -1381,7 +1447,6 @@ impl<'a> GraphCtx<'a> {
 
     fn overview(&self, top_n: usize) -> GraphOverview {
         let mut methods = 0usize;
-        let mut modules = 0usize;
         let mut mdos = 0usize;
         let mut attributes = 0usize;
         let mut tabular_sections = 0usize;
@@ -1389,11 +1454,24 @@ impl<'a> GraphCtx<'a> {
         let mut form_items = 0usize;
         let mut form_attributes = 0usize;
         let mut node_count = 0usize;
+        // The true module population: every module that owns a method, plus any module
+        // body seen as a node (a `module/<scope>` node exists only when it is an edge
+        // endpoint, so counting those alone undercounts — see the method-derived union).
+        let mut module_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
         for node in self.graph.nodes() {
             node_count += 1;
             match node {
-                GraphNode::Method(_) => methods += 1,
-                GraphNode::ModuleCode(_) => modules += 1,
+                GraphNode::Method(_) => {
+                    methods += 1;
+                    let (id, _) = self.encode_node(&node);
+                    if let Some(module) = module_id_of_method(&id) {
+                        module_ids.insert(module);
+                    }
+                }
+                GraphNode::ModuleCode(_) => {
+                    let (id, _) = self.encode_node(&node);
+                    module_ids.insert(id);
+                }
                 GraphNode::Mdo { .. } => mdos += 1,
                 GraphNode::Attribute { .. } => attributes += 1,
                 GraphNode::TabularSectionAttribute { .. } => attributes += 1,
@@ -1403,6 +1481,7 @@ impl<'a> GraphCtx<'a> {
                 GraphNode::FormAttribute { .. } => form_attributes += 1,
             }
         }
+        let modules = module_ids.len();
 
         let mut edge_provenance: BTreeMap<&'static str, usize> = BTreeMap::new();
         let mut client_to_server_edges = 0usize;
@@ -1443,6 +1522,21 @@ impl<'a> GraphCtx<'a> {
         }
     }
 
+    /// Near-miss id lookup: rank every node's durable id against an imprecise `query`
+    /// (wrong casing, bare method/object name, or partial id), so an agent can recover a
+    /// canonical id from a `not_found` without guessing.
+    fn resolve(&self, query: &str, limit: usize) -> ResolveResult {
+        let candidates = rank_resolve_candidates(
+            self.graph.nodes().map(|node| {
+                let (id, _) = self.encode_node(&node);
+                (id, graph_node_kind(&node))
+            }),
+            query,
+            limit,
+        );
+        ResolveResult { query: query.to_string(), candidates }
+    }
+
     fn neighbors(&self, params: &NeighborsParams<'_>) -> Result<NeighborsResult, GraphError> {
         let root = self.resolve_id(params.id)?;
         let depth = params.depth.max(1);
@@ -1451,17 +1545,32 @@ impl<'a> GraphCtx<'a> {
         let mut seen: std::collections::HashSet<GraphNode> = std::collections::HashSet::new();
         seen.insert(root.clone());
         let mut out_edges: Vec<&WorkspaceCallEdge> = Vec::new();
+        // Distinct non-root nodes reached downstream (as an edge target) vs upstream (as
+        // an edge source), so a `Both` traversal can report each direction's fan-out.
+        let mut out_reached: std::collections::HashSet<GraphNode> =
+            std::collections::HashSet::new();
+        let mut in_reached: std::collections::HashSet<GraphNode> = std::collections::HashSet::new();
         let mut frontier = vec![root.clone()];
 
         for _ in 0..depth {
             let mut next: Vec<GraphNode> = Vec::new();
             for node in &frontier {
                 for edge in self.directed_edges(node, params.dir) {
-                    if !self.provenance_allowed(edge, &params.provenance_filter) {
+                    if !self.provenance_allowed(edge, &params.provenance_filter)
+                        || !edge_kind_allowed(edge.kind, &params.edge_kind_filter)
+                    {
                         continue;
                     }
                     out_edges.push(edge);
-                    let other = if &edge.from == node { &edge.to } else { &edge.from };
+                    let downstream = &edge.from == node;
+                    let other = if downstream { &edge.to } else { &edge.from };
+                    if *other != root {
+                        if downstream {
+                            out_reached.insert(other.clone());
+                        } else {
+                            in_reached.insert(other.clone());
+                        }
+                    }
                     if seen.insert(other.clone()) {
                         next.push(other.clone());
                         visited.push(other.clone());
@@ -1473,6 +1582,10 @@ impl<'a> GraphCtx<'a> {
             }
             frontier = next;
         }
+        let out_total =
+            matches!(params.dir, Direction::Out | Direction::Both).then_some(out_reached.len());
+        let in_total =
+            matches!(params.dir, Direction::In | Direction::Both).then_some(in_reached.len());
 
         // Centrality-ranked tail-drop of discovered (non-root) nodes. Tie-break by
         // durable id so a cut through equal-centrality nodes keeps/drops the same
@@ -1505,12 +1618,41 @@ impl<'a> GraphCtx<'a> {
             .map(|e| self.edge_ref(e))
             .collect();
 
+        // Distribution + connector-loss over the deduped full neighbourhood (every
+        // discovered edge, before the node-cap edge-survival filter), so the counts
+        // describe what is connected to the root, not just what survived the cap.
+        let mut counted: std::collections::HashSet<(GraphNode, GraphNode, EdgeKind)> =
+            std::collections::HashSet::new();
+        let mut by_kind: BTreeMap<&'static str, usize> = BTreeMap::new();
+        let mut by_provenance: BTreeMap<&'static str, usize> = BTreeMap::new();
+        let mut connectors_dropped = false;
+        for e in &out_edges {
+            if !counted.insert((e.from.clone(), e.to.clone(), e.kind)) {
+                continue;
+            }
+            *by_kind.entry(edge_kind_label(e.kind)).or_default() += 1;
+            *by_provenance.entry(provenance_label(e)).or_default() += 1;
+            let survives = (e.from == root || kept.contains(&e.from))
+                && (e.to == root || kept.contains(&e.to));
+            if !survives {
+                connectors_dropped = true;
+            }
+        }
+
+        let returned = discovered.len();
         Ok(NeighborsResult {
             root: self.node_ref(root, params.detail),
             nodes,
             edges,
             total,
+            returned,
+            dropped_count: total - returned,
             dropped,
+            by_kind,
+            by_provenance,
+            connectors_dropped,
+            out_total,
+            in_total,
         })
     }
 
@@ -1547,6 +1689,163 @@ impl<'a> GraphCtx<'a> {
 pub fn method_id_for_path(path: &str, method_name: &str) -> Option<String> {
     let key = module_key_for_path(path)?;
     Some(format!("method/{}/{method_name}", encode_scope(&key)))
+}
+
+/// Workspace-relative form of `abs` under `root`, matching the id encoder's rel
+/// ([`GraphRowEncoder::rel_path`]): `\` → `/`, leading `/` trimmed. Returns `None`
+/// when `abs` is not under `root`. STRING-level strip (no filesystem canonicalization)
+/// so a caller reproduces the encoder's exact rel rather than the real path — but with a
+/// component-boundary check so a sibling like `/ws/project` is not mistaken for being
+/// under `/ws/proj` (which would mint a garbled, non-resolving rel).
+pub(crate) fn workspace_rel_path(abs: &str, root: &Path) -> Option<String> {
+    let root_str = root.to_str()?.replace('\\', "/");
+    let abs = abs.replace('\\', "/");
+    let root_str = root_str.trim_end_matches('/');
+    let stripped = abs.strip_prefix(root_str)?;
+    // `abs` must be `root` itself or continue at a path boundary (`root/<rel>`), never a
+    // longer-named sibling that merely shares the prefix string.
+    if !stripped.is_empty() && !stripped.starts_with('/') {
+        return None;
+    }
+    let rel = stripped.trim_start_matches('/').to_string();
+    if rel.is_empty() {
+        return None;
+    }
+    Some(rel)
+}
+
+/// Durable id for `method_name` at `path`, module-keyed when possible, otherwise the
+/// `method/file/<rel>::<name>` path-fallback the graph encoder also mints (see
+/// [`GraphRowEncoder::encode_method`]) so form/command/file-module methods stay addressable.
+///
+/// `workspace_root` is the root the graph was built against; it is needed only to strip an
+/// absolute `path` down to the encoder's rel. A relative `path` (already root-relative, as
+/// produced by the search overlay) is used directly and resolves even without a root. Returns
+/// `None` when neither form yields a resolvable id (e.g. an absolute path with no root, or a
+/// path not under the root) — a wrong, non-resolving id is worse than no decoration.
+///
+/// Distinct from [`method_id_for_path`], which stays module-keyed-only for the graph-enriched
+/// embedding path that deliberately does not enrich path-fallback methods.
+pub fn method_graph_id(
+    path: &str,
+    method_name: &str,
+    workspace_root: Option<&Path>,
+) -> Option<String> {
+    if let Some(key) = module_key_for_path(path) {
+        return Some(format!("method/{}/{method_name}", encode_scope(&key)));
+    }
+    let rel = if Path::new(path).is_absolute() {
+        workspace_rel_path(path, workspace_root?)?
+    } else {
+        path.replace('\\', "/").trim_start_matches('/').to_string()
+    };
+    if rel.is_empty() {
+        return None;
+    }
+    Some(format!("method/file/{rel}::{method_name}"))
+}
+
+/// The durable `module/<scope>` id that owns a `method/<scope>/<name>` (or
+/// `method/file/<rel>::<name>`) id. The inverse of [`method_id_range`]'s lower bound:
+/// it strips the trailing method segment, keeping the same `::`/`/` member grammar.
+/// `None` for any id that is not a method id.
+pub fn module_id_of_method(method_id: &str) -> Option<String> {
+    let rest = method_id.strip_prefix("method/")?;
+    if let Some(rel) = rest.strip_prefix("file/") {
+        // `file/<rel>::<name>` — the file module is everything before the `::`. The `::` is
+        // required: a `file/<rel>` with no member separator is not a method id.
+        let (rel, _name) = rel.split_once("::")?;
+        if rel.is_empty() {
+            return None;
+        }
+        return Some(format!("module/file/{rel}"));
+    }
+    // `<scope>/<name>` — the module scope is everything before the last `/`.
+    let scope = rest.rsplit_once('/')?.0;
+    if scope.is_empty() {
+        return None;
+    }
+    Some(format!("module/{scope}"))
+}
+
+/// The trailing name segment of a durable id: the part after the last `::` (a file
+/// module's member separator) or, failing that, the last `/`. Used by
+/// [`rank_resolve_candidates`] to match a bare method/object name against full ids.
+fn resolve_name_segment(id: &str) -> &str {
+    if let Some(pos) = id.rfind("::") {
+        return &id[pos + 2..];
+    }
+    id.rsplit_once('/').map_or(id, |(_, tail)| tail)
+}
+
+/// A single near-miss candidate for [`ResolveResult`]: a durable id that an agent's
+/// `query` could have meant, with the match strength that surfaced it.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ResolveCandidate {
+    pub id: String,
+    pub kind: &'static str,
+    /// How `query` matched: `exact` | `case_insensitive` | `name` | `substring`
+    /// (strongest first).
+    #[serde(rename = "match")]
+    pub match_kind: &'static str,
+}
+
+/// The result of `graph(action=resolve)`: the candidate durable ids an imprecise
+/// `query` (wrong casing, bare name, or partial id) could resolve to, so an agent can
+/// recover from a `not_found` without guessing.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ResolveResult {
+    pub query: String,
+    pub candidates: Vec<ResolveCandidate>,
+}
+
+/// Rank durable ids against an imprecise `query`, strongest match first then id-ascending,
+/// capped at `limit`. Both serve paths (in-memory [`Analysis::graph_resolve`] and SQLite)
+/// feed their full `(id, kind)` node set through this one ranker, so the candidate lists
+/// stay byte-identical regardless of scan order. An empty `query` matches nothing.
+pub fn rank_resolve_candidates(
+    nodes: impl Iterator<Item = (String, &'static str)>,
+    query: &str,
+    limit: usize,
+) -> Vec<ResolveCandidate> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let q_lower = query.to_lowercase();
+    let mut ranked: Vec<(u8, ResolveCandidate)> = nodes
+        .filter_map(|(id, kind)| {
+            let (rank, match_kind) = if id == query {
+                (0, "exact")
+            } else if id.to_lowercase() == q_lower {
+                (1, "case_insensitive")
+            } else if resolve_name_segment(&id).to_lowercase() == q_lower {
+                (2, "name")
+            } else if id.to_lowercase().contains(&q_lower) {
+                (3, "substring")
+            } else {
+                return None;
+            };
+            Some((rank, ResolveCandidate { id, kind, match_kind }))
+        })
+        .collect();
+    ranked.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.id.cmp(&b.1.id)));
+    ranked.truncate(limit);
+    ranked.into_iter().map(|(_, c)| c).collect()
+}
+
+/// The agent-facing kind label for a [`GraphNode`], matching the SQLite serve path's
+/// `node_kind`. A tabular-section attribute is reported as a plain `attribute`.
+fn graph_node_kind(node: &GraphNode) -> &'static str {
+    match node {
+        GraphNode::Method(_) => "method",
+        GraphNode::ModuleCode(_) => "module",
+        GraphNode::Mdo { .. } => "mdo",
+        GraphNode::Attribute { .. } | GraphNode::TabularSectionAttribute { .. } => "attribute",
+        GraphNode::TabularSection { .. } => "tabular_section",
+        GraphNode::Form { .. } => "form",
+        GraphNode::FormItem { .. } => "form_item",
+        GraphNode::FormAttribute { .. } => "form_attribute",
+    }
 }
 
 /// The parsed shape of a durable graph id, independent of any database. Drives
@@ -1804,6 +2103,13 @@ fn edge_kind_label(kind: EdgeKind) -> &'static str {
     }
 }
 
+/// Whether an edge of `kind` passes an `edge_kinds` filter: an empty filter admits all,
+/// otherwise the edge's agent-facing label must be listed. Shared shape with the SQLite
+/// serve path, which filters on the stored kind string.
+pub(crate) fn edge_kind_allowed(kind: EdgeKind, filter: &[String]) -> bool {
+    filter.is_empty() || filter.iter().any(|k| k == edge_kind_label(kind))
+}
+
 /// Whether a stored form node's owner (`node`) equals a parsed-id owner (`query`),
 /// comparing the object name case-insensitively. `None` (common form) matches `None`.
 fn form_owner_matches(node: Option<(MdoType, &str)>, query: &Option<(MdoType, String)>) -> bool {
@@ -2048,6 +2354,7 @@ mod tests {
             max_nodes: 50,
             detail: GraphDetail::Names,
             provenance_filter: Vec::new(),
+            edge_kind_filter: Vec::new(),
         };
         let res = a.graph_neighbors(ROOT, None, &params).expect("neighbors resolve");
         assert_eq!(res.root.id, "method/common/Сервер/Считать");
@@ -2077,6 +2384,7 @@ mod tests {
             max_nodes: 0,
             detail: GraphDetail::Names,
             provenance_filter: Vec::new(),
+            edge_kind_filter: Vec::new(),
         };
         let res = a.graph_neighbors(ROOT, None, &params).expect("neighbors resolve");
         // The cap drops the sole caller, but `total` still reflects the real fan-out.
@@ -2127,6 +2435,7 @@ mod tests {
             max_nodes: 50,
             detail: GraphDetail::Names,
             provenance_filter: Vec::new(),
+            edge_kind_filter: Vec::new(),
         };
         let res = a.graph_neighbors(ROOT, None, &params).unwrap();
         assert!(res.nodes.iter().any(|n| n.id == "method/common/Вызыватель/Делать"));
@@ -2165,6 +2474,7 @@ mod tests {
             max_nodes: 50,
             detail: GraphDetail::Names,
             provenance_filter: Vec::new(),
+            edge_kind_filter: Vec::new(),
         };
         let res = a.graph_neighbors(ROOT, None, &params).unwrap();
         assert!(res.nodes.iter().any(|n| n.id == "method/common/Вызыватель/Делать"));
@@ -2272,6 +2582,7 @@ mod tests {
             max_nodes: 50,
             detail: GraphDetail::Names,
             provenance_filter: vec!["inferred".to_string()],
+            edge_kind_filter: Vec::new(),
         };
         let res = a.graph_neighbors(ROOT, None, &params).unwrap();
         // The only incoming edge is `resolved`, so the inferred-only filter drops it.
@@ -2408,6 +2719,174 @@ mod tests {
             }
             assert!(seen >= 1, "the loose-path method must surface as a node");
         }
+    }
+
+    /// The real gate for the search/diagnostics graph_id bridge: `method_graph_id` must mint
+    /// the SAME path-fallback id the encoder stored for a loose-path method, and that id must
+    /// resolve back to the method node — both for an absolute path (stripped by the root) and
+    /// for the already-relative form the search overlay stores.
+    #[test]
+    fn method_graph_id_matches_encoder_and_round_trips_for_path_fallback() {
+        use std::path::Path;
+
+        let a = workspace(&[(
+            "/ws/proj/scripts/loose.bsl",
+            "Процедура Свободный() Экспорт КонецПроцедуры",
+        )]);
+        let root = Path::new("/ws/proj");
+
+        // The durable id the encoder stores for the loose method.
+        let db = a.database();
+        let graph = db.workspace_call_graph(ROOT);
+        let ctx = GraphCtx::new(db, ROOT, Some(root));
+        let encoder_id = graph
+            .nodes()
+            .find(|n| matches!(n, GraphNode::Method(_)))
+            .map(|n| ctx.encode_node(&n).0)
+            .expect("loose method node");
+        assert_eq!(encoder_id, "method/file/scripts/loose.bsl::Свободный");
+
+        // Absolute path → stripped by the root to the encoder's rel.
+        assert_eq!(
+            method_graph_id("/ws/proj/scripts/loose.bsl", "Свободный", Some(root)).as_deref(),
+            Some(encoder_id.as_str()),
+        );
+        // Already-relative path (search-overlay form) → used directly; root unused.
+        assert_eq!(
+            method_graph_id("scripts/loose.bsl", "Свободный", None).as_deref(),
+            Some(encoder_id.as_str()),
+        );
+        // The minted id resolves back to the node (round-trip, not just a string match).
+        assert!(
+            a.graph_node(ROOT, Some(root), &encoder_id, GraphDetail::Names).is_ok(),
+            "minted path-fallback id must resolve"
+        );
+    }
+
+    #[test]
+    fn method_graph_id_module_keyed_is_root_independent() {
+        use std::path::Path;
+        // A recognised module path is prefix-independent: same id with or without a root,
+        // absolute or relative.
+        for path in [
+            "/anything/CommonModules/Утилиты/Ext/Module.bsl",
+            "CommonModules/Утилиты/Ext/Module.bsl",
+        ] {
+            for root in [Some(Path::new("/ws")), None] {
+                assert_eq!(
+                    method_graph_id(path, "Сложить", root).as_deref(),
+                    Some("method/common/Утилиты/Сложить"),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn method_graph_id_file_fallback_normalization() {
+        use std::path::Path;
+        let root = Path::new("/ws/proj");
+
+        // Absolute path under the root → rel form.
+        assert_eq!(
+            method_graph_id("/ws/proj/a/b/Module.bsl", "M", Some(root)).as_deref(),
+            Some("method/file/a/b/Module.bsl::M"),
+        );
+        // Trailing slash on the root is tolerated (matches the encoder's rel).
+        assert_eq!(
+            method_graph_id("/ws/proj/a/b/Module.bsl", "M", Some(Path::new("/ws/proj/")))
+                .as_deref(),
+            Some("method/file/a/b/Module.bsl::M"),
+        );
+        // Backslash path is normalised to forward slashes.
+        assert_eq!(
+            method_graph_id(r"a\b\Module.bsl", "M", None).as_deref(),
+            Some("method/file/a/b/Module.bsl::M"),
+        );
+        // Absolute path NOT under the root → None (never emit a non-resolving id).
+        assert_eq!(method_graph_id("/elsewhere/Module.bsl", "M", Some(root)), None);
+        // A longer-named sibling that merely shares the prefix string is NOT under the root.
+        assert_eq!(method_graph_id("/ws/project/a/Module.bsl", "M", Some(root)), None);
+        // Absolute path with no root → None.
+        assert_eq!(method_graph_id("/ws/proj/a/Module.bsl", "M", None), None);
+    }
+
+    #[test]
+    fn workspace_rel_path_strips_and_normalizes() {
+        use std::path::Path;
+        assert_eq!(
+            workspace_rel_path("/ws/proj/a/b.bsl", Path::new("/ws/proj")).as_deref(),
+            Some("a/b.bsl"),
+        );
+        assert_eq!(
+            workspace_rel_path("/ws/proj/a/b.bsl", Path::new("/ws/proj/")).as_deref(),
+            Some("a/b.bsl"),
+        );
+        assert_eq!(workspace_rel_path("/other/a.bsl", Path::new("/ws/proj")), None);
+        // Sibling sharing the prefix string but not a path component → not under the root.
+        assert_eq!(workspace_rel_path("/ws/project/a.bsl", Path::new("/ws/proj")), None);
+        // The root itself (no rel remainder) → None.
+        assert_eq!(workspace_rel_path("/ws/proj", Path::new("/ws/proj")), None);
+    }
+
+    #[test]
+    fn module_id_of_method_inverts_each_member_separator() {
+        // Keyed scope: strip the trailing `/<method>`.
+        assert_eq!(
+            module_id_of_method("method/common/Сервер/Считать").as_deref(),
+            Some("module/common/Сервер"),
+        );
+        assert_eq!(
+            module_id_of_method("method/manager/Catalog/Товары/Найти").as_deref(),
+            Some("module/manager/Catalog/Товары"),
+        );
+        // File module: keep `file/<rel>`, drop the `::<method>` member.
+        assert_eq!(
+            module_id_of_method("method/file/src/cf/Forms/A/Module.bsl::ПриОткрытии").as_deref(),
+            Some("module/file/src/cf/Forms/A/Module.bsl"),
+        );
+        // Not a method id, or no member segment → None.
+        assert_eq!(module_id_of_method("module/common/Сервер"), None);
+        assert_eq!(module_id_of_method("mdo/Catalog/Товары"), None);
+        assert_eq!(module_id_of_method("method/file/::M"), None);
+        // A `file/<rel>` with no `::` member separator is malformed, not a module bucket.
+        assert_eq!(module_id_of_method("method/file/src/Module.bsl"), None);
+    }
+
+    #[test]
+    fn rank_resolve_orders_by_match_strength_then_id() {
+        let nodes = || {
+            [
+                ("method/common/Сервер/Считать".to_string(), "method"),
+                ("method/common/Клиент/считать".to_string(), "method"),
+                ("method/common/Прочее/СчитатьВсё".to_string(), "method"),
+                ("module/common/Сервер".to_string(), "module"),
+            ]
+            .into_iter()
+        };
+
+        // Exact id wins outright.
+        let exact = rank_resolve_candidates(nodes(), "method/common/Сервер/Считать", 10);
+        assert_eq!(exact[0].id, "method/common/Сервер/Считать");
+        assert_eq!(exact[0].match_kind, "exact");
+
+        // A bare name matches both case-spellings as `name` (id-ascending), ahead of the
+        // `substring`-only `СчитатьВсё`.
+        let by_name = rank_resolve_candidates(nodes(), "Считать", 10);
+        let labels: Vec<_> =
+            by_name.iter().map(|c| (c.id.as_str(), c.match_kind, c.kind)).collect();
+        assert_eq!(
+            labels,
+            vec![
+                ("method/common/Клиент/считать", "name", "method"),
+                ("method/common/Сервер/Считать", "name", "method"),
+                ("method/common/Прочее/СчитатьВсё", "substring", "method"),
+            ],
+        );
+
+        // The cap is honoured.
+        assert_eq!(rank_resolve_candidates(nodes(), "common", 2).len(), 2);
+        // Empty query matches nothing.
+        assert!(rank_resolve_candidates(nodes(), "", 10).is_empty());
     }
 
     /// Forms never enter the in-memory `workspace_call_graph` (they are emitted only

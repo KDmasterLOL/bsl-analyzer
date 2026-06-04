@@ -23,7 +23,7 @@ use ide::{
 use rmcp::model::CallToolResult;
 use serde_json::{json, Value};
 
-use crate::diagnostics_state::{DiagnosticsResident, Freshness, SweepOptions};
+use crate::diagnostics_state::{DiagnosticsResident, Freshness, StatusReport, SweepOptions};
 use crate::tools::response::structured;
 
 /// Server-side cap on returned findings, honouring Anthropic's tool-response budget.
@@ -92,11 +92,43 @@ pub fn schema() -> CallToolResult {
 }
 
 /// A transient "still building the resident database" result, emitted while the
-/// background load runs. Not an error — the agent should retry shortly.
-pub fn loading() -> CallToolResult {
-    structured(
-        json!({ "status": "loading", "detail": "diagnostics database is building; retry shortly" }),
-    )
+/// background load runs. Not an error — the agent should retry shortly. Carries the
+/// lifecycle snapshot (`state`/`generation`/`elapsed_ms`) so the agent can tell a
+/// progressing build from a stuck or failed one instead of polling a flat `loading`.
+pub fn loading(report: &StatusReport) -> CallToolResult {
+    let mut body = json!({
+        "status": "loading",
+        "detail": "diagnostics database is building; retry shortly",
+        "state": report.state,
+        "generation": report.generation,
+    });
+    if let Some(ms) = report.elapsed_ms {
+        body["elapsed_ms"] = json!(ms);
+    }
+    if let Some(err) = &report.error {
+        body["error"] = json!(err);
+    }
+    structured(body)
+}
+
+/// The `status` action: the resident lifecycle snapshot, always available (no resident
+/// db required), so an agent can poll readiness/progress without a flat `loading`.
+pub fn status(report: &StatusReport) -> CallToolResult {
+    let mut body = json!({
+        "state": report.state,
+        "generation": report.generation,
+        "reload": report.reload,
+    });
+    if let Some(files) = report.files {
+        body["files"] = json!(files);
+    }
+    if let Some(ms) = report.elapsed_ms {
+        body["elapsed_ms"] = json!(ms);
+    }
+    if let Some(err) = &report.error {
+        body["error"] = json!(err);
+    }
+    structured(body)
 }
 
 /// Wrap a `file` result in the freshness envelope, matching the `graph` tool.
@@ -171,7 +203,7 @@ pub(crate) fn file_findings(
             truncated = true;
             continue;
         }
-        let graph_id = graph_id_for(diag.range, &methods, path);
+        let graph_id = graph_id_for(diag.range, &methods, path, resident.workspace_root());
         findings.push(finding_value(diag, &out, bucket, graph_id, filters.detailed));
     }
 
@@ -268,12 +300,19 @@ fn collect_methods(symbols: &[DocumentSymbol], out: &mut Vec<(String, TextRange)
     }
 }
 
-/// The durable graph id of the method whose span contains `range`, if any. `None`
-/// when the finding is not inside a method (module body) or the file is not an
-/// indexable user module (forms, commands) — `graph_id` is best-effort decoration.
-fn graph_id_for(range: TextRange, methods: &[(String, TextRange)], path: &Path) -> Option<String> {
+/// The durable graph id of the method whose span contains `range`, if any. `None` when the
+/// finding is not inside a method (module body). Module-keyed methods (common/object/manager)
+/// resolve regardless of `workspace_root`; form/command/file-module methods fall back to the
+/// `method/file/<rel>::<name>` id the graph also mints — `workspace_root` strips an absolute
+/// request path to the encoder's rel. `graph_id` is best-effort decoration.
+fn graph_id_for(
+    range: TextRange,
+    methods: &[(String, TextRange)],
+    path: &Path,
+    workspace_root: &Path,
+) -> Option<String> {
     let name = methods.iter().find(|(_, r)| r.contains_range(range)).map(|(n, _)| n.as_str())?;
-    ide::method_id_for_path(&path.to_string_lossy(), name)
+    ide::method_graph_id(&path.to_string_lossy(), name, Some(workspace_root))
 }
 
 /// The pull-model freshness handle: `<path>@<generation>@<content-hash>`. The content
@@ -313,9 +352,17 @@ impl Counts {
 
 fn schema_json() -> Value {
     json!({
-        "schema_version": "4",
-        "actions": ["catalog", "schema", "file", "workspace"],
+        "schema_version": "5",
+        "actions": ["catalog", "schema", "status", "file", "workspace"],
         "severities": ["error", "warning", "info", "hint"],
+        "status_result": {
+            "state": "disabled | idle | loading | ready | failed — resident lifecycle",
+            "generation": "u64 — bumped on each build/reload (independent of the graph tool's revision)",
+            "files": "usize — resident .bsl count (present when ready)",
+            "reload": "none | running | failed — background reload state",
+            "elapsed_ms": "u64 — ms since the current build started (present while loading)",
+            "error": "string — failure message (present when failed)"
+        },
         "catalog_entry": {
             "code": "string — stable diagnostic code (e.g. CyclomaticComplexity)",
             "title": "string — localized name",
@@ -406,11 +453,13 @@ mod tests {
         let result = schema();
         assert_structured_mirrors_text(&result);
         let body = body_of(&result);
-        assert_eq!(body["schema_version"], "4");
+        assert_eq!(body["schema_version"], "5");
         let actions = body["actions"].as_array().unwrap();
         assert!(actions.iter().any(|a| a == "catalog"));
+        assert!(actions.iter().any(|a| a == "status"));
         assert!(actions.iter().any(|a| a == "file"));
         assert!(actions.iter().any(|a| a == "workspace"));
+        assert!(body["status_result"]["state"].is_string(), "status action advertised");
         assert!(body["finding"]["graph_id"].is_string(), "graph bridge advertised");
         assert!(body["workspace_result"]["aggregates"].is_string(), "workspace advertised");
         let sev = body["severities"].as_array().unwrap();
@@ -693,20 +742,25 @@ mod tests {
             children: Vec::new(),
         };
         let methods = method_ranges(std::slice::from_ref(&method));
+        let root = std::path::Path::new("/ws");
         let module = std::path::Path::new("/ws/CommonModules/Сервер/Ext/Module.bsl");
 
         // A finding inside the method span resolves to the method's durable graph id.
         let inside = TextRange::new(30u32.into(), 35u32.into());
         assert_eq!(
-            graph_id_for(inside, &methods, module).as_deref(),
+            graph_id_for(inside, &methods, module, root).as_deref(),
             Some("method/common/Сервер/Считать")
         );
         // A module-body finding (outside any method) carries no graph id.
         let outside = TextRange::new(0u32.into(), 5u32.into());
-        assert_eq!(graph_id_for(outside, &methods, module), None);
-        // A non-indexable file (a form) has no method graph id even inside a method.
+        assert_eq!(graph_id_for(outside, &methods, module, root), None);
+        // A form module: a finding inside a method now falls back to the
+        // `method/file/<rel>::<name>` id the graph mints, with the rel stripped to `root`.
         let form = std::path::Path::new("/ws/CommonForms/Форма/Ext/Form/Module.bsl");
-        assert_eq!(graph_id_for(inside, &methods, form), None);
+        assert_eq!(
+            graph_id_for(inside, &methods, form, root).as_deref(),
+            Some("method/file/CommonForms/Форма/Ext/Form/Module.bsl::Считать")
+        );
     }
 
     #[test]

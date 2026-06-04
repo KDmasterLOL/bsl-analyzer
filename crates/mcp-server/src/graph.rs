@@ -1006,6 +1006,7 @@ mod tests {
                 max_nodes: 50,
                 detail: ide::GraphDetail::Names,
                 provenance_filter: Vec::new(),
+                edge_kind_filter: Vec::new(),
             })
             .expect("query")
             .expect("neighbors resolve");
@@ -1135,7 +1136,16 @@ mod tests {
 
         assert_eq!(count("SELECT COUNT(*) FROM nodes"), overview.nodes);
         assert_eq!(count("SELECT COUNT(*) FROM nodes WHERE kind='method'"), overview.methods);
-        assert_eq!(count("SELECT COUNT(*) FROM nodes WHERE kind='module'"), overview.modules);
+        // `overview.modules` is the true distinct-module population (every module that owns a
+        // method, plus any persisted module-body node), so it is >= the module rows actually
+        // stored — module nodes are synthesized on demand, not generally persisted.
+        let stored_module_rows = count("SELECT COUNT(*) FROM nodes WHERE kind='module'");
+        assert!(
+            overview.modules >= stored_module_rows,
+            "reported modules {} >= stored module rows {stored_module_rows}",
+            overview.modules,
+        );
+        assert!(overview.modules > 0, "the sample workspace has code modules");
         assert_eq!(count("SELECT COUNT(*) FROM nodes WHERE kind='mdo'"), overview.mdos);
         assert_eq!(count("SELECT COUNT(*) FROM nodes WHERE kind='attribute'"), overview.attributes);
         assert_eq!(count("SELECT COUNT(*) FROM edges"), overview.edges);
@@ -1165,6 +1175,180 @@ mod tests {
             )
             .unwrap();
         assert_eq!(in_degree, 1, "Сервер.Считать is called once");
+    }
+
+    /// `edge_kinds` narrows a neighbours query to the requested edge kinds: a method with
+    /// both a `call` and a `query_ref` out-edge returns both unfiltered, only the query_ref
+    /// edge under `edge_kinds=["query_ref"]`.
+    #[test]
+    fn neighbors_edge_kinds_filter_isolates_one_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        write_catalog(root, "Номенклатура", 1);
+        write_common_module(
+            root,
+            "Бета",
+            true,
+            "&НаСервере\nПроцедура ШагБ() Экспорт КонецПроцедуры",
+        );
+        write_common_module(
+            root,
+            "Альфа",
+            true,
+            "&НаСервере\nПроцедура ШагА() Экспорт\nБета.ШагБ();\n\
+             Запрос = \"ВЫБРАТЬ Код ИЗ Справочник.Номенклатура\";\nКонецПроцедуры",
+        );
+
+        let out = graph_db_path(root);
+        fs::create_dir_all(out.parent().unwrap()).unwrap();
+        build_graph_database(
+            root,
+            &out,
+            1,
+            &crate::graph_db::GraphMeta {
+                revision: 1,
+                fingerprint: 0,
+                files: 0,
+                built_at: "t".to_string(),
+            },
+        )
+        .expect("graph database builds");
+        let gdb = GraphDb::open(&out).expect("graph database opens");
+
+        let mk = |kinds: Vec<String>| ide::NeighborsParams {
+            id: "method/common/Альфа/ШагА",
+            dir: ide::Direction::Out,
+            depth: 1,
+            max_nodes: 50,
+            detail: ide::GraphDetail::Names,
+            provenance_filter: Vec::new(),
+            edge_kind_filter: kinds,
+        };
+
+        // Unfiltered: both the call to Бета.ШагБ and the query_ref to Номенклатура.
+        let all = gdb.neighbors(&mk(Vec::new())).unwrap().unwrap();
+        let all_kinds: Vec<&str> = all.edges.iter().map(|e| e.kind).collect();
+        assert!(all_kinds.contains(&"call"), "kinds: {all_kinds:?}");
+        assert!(all_kinds.contains(&"query_ref"), "kinds: {all_kinds:?}");
+        // Grouped distribution mirrors the edges; nothing was capped here.
+        assert_eq!(all.by_kind.get("call"), Some(&1), "by_kind: {:?}", all.by_kind);
+        assert_eq!(all.by_kind.get("query_ref"), Some(&1), "by_kind: {:?}", all.by_kind);
+        assert_eq!(all.by_provenance.values().sum::<usize>(), all.edges.len());
+        assert!(!all.connectors_dropped, "no nodes capped, so no connectors dropped");
+
+        // Out-direction traversal reports its callees and no callers.
+        assert_eq!(all.out_total, Some(2), "two callees (Бета.ШагБ + Номенклатура query)");
+        assert_eq!(all.in_total, None, "dir=out reports no caller count");
+
+        // dir=both surfaces directional fan-out: 2 callees, 0 callers of ШагА.
+        let both = gdb
+            .neighbors(&ide::NeighborsParams {
+                id: "method/common/Альфа/ШагА",
+                dir: ide::Direction::Both,
+                depth: 1,
+                max_nodes: 50,
+                detail: ide::GraphDetail::Names,
+                provenance_filter: Vec::new(),
+                edge_kind_filter: Vec::new(),
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(both.out_total, Some(2), "both: callees counted");
+        assert_eq!(both.in_total, Some(0), "both: no callers of ШагА");
+
+        // edge_kinds=["query_ref"] keeps only the query_ref edge.
+        let qr = gdb.neighbors(&mk(vec!["query_ref".to_owned()])).unwrap().unwrap();
+        assert!(!qr.edges.is_empty(), "query_ref edge present");
+        assert!(qr.edges.iter().all(|e| e.kind == "query_ref"), "edges: {:?}", qr.edges);
+    }
+
+    /// `node(detail=bodies)` caps its source output at `max_output_tokens`: a tiny budget
+    /// truncates the body and flags `budget_exhausted`, a generous budget leaves it whole.
+    #[test]
+    fn node_bodies_respect_output_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let (_db, files) = load_workspace_db(root).expect("workspace loads");
+        let out = graph_db_path(root);
+        fs::create_dir_all(out.parent().unwrap()).unwrap();
+        build_graph_database(
+            root,
+            &out,
+            1,
+            &crate::graph_db::GraphMeta {
+                revision: 1,
+                fingerprint: 0,
+                files,
+                built_at: "t".to_string(),
+            },
+        )
+        .expect("graph database builds");
+        let gdb = GraphDb::open(&out).expect("graph database opens");
+
+        let id = "method/common/Сервер/Считать";
+        // Tiny budget (1 token ≈ 4 chars) truncates the body and flags exhaustion.
+        let tight = crate::tools::graph::node(&gdb, id, ide::GraphDetail::Bodies, 1);
+        assert_eq!(tight["budget_exhausted"], serde_json::json!(true));
+        assert!(tight["node"]["source"].as_str().unwrap().len() <= 4, "{tight:?}");
+        // A generous budget keeps the whole body and sets no exhaustion flag.
+        let loose = crate::tools::graph::node(&gdb, id, ide::GraphDetail::Bodies, 10_000);
+        assert!(loose.get("budget_exhausted").is_none(), "{loose:?}");
+        assert!(loose["node"]["source"].as_str().unwrap().contains("Считать"), "{loose:?}");
+    }
+
+    /// A common module with no module-level edge has no stored `module` row, yet
+    /// `node(module/common/X)` resolves on demand and lists the module's members; a module
+    /// with no methods reports `not_found`.
+    #[test]
+    fn module_node_resolves_on_demand_and_lists_members() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let (_db, files) = load_workspace_db(root).expect("workspace loads");
+        let out = graph_db_path(root);
+        fs::create_dir_all(out.parent().unwrap()).unwrap();
+        build_graph_database(
+            root,
+            &out,
+            1,
+            &crate::graph_db::GraphMeta {
+                revision: 1,
+                fingerprint: 0,
+                files,
+                built_at: "t".to_string(),
+            },
+        )
+        .expect("graph database builds");
+        let gdb = GraphDb::open(&out).expect("graph database opens");
+
+        // The module is NOT a stored node (no module-level edge in the fixture)...
+        let stored_module_rows: i64 = Connection::open(&out)
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM nodes WHERE id = 'module/common/Сервер'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored_module_rows, 0, "module has no stored row");
+
+        // ...yet node(module/common/Сервер) resolves on demand and lists its members.
+        let resolved =
+            gdb.node("module/common/Сервер", ide::GraphDetail::Names).unwrap().expect("resolves");
+        assert_eq!(resolved.node.kind, "module");
+        let methods = resolved.node.methods.expect("module node carries its methods");
+        assert!(
+            methods.iter().any(|m| m.id == "method/common/Сервер/Считать" && m.name == "Считать"),
+            "members listed: {methods:?}"
+        );
+
+        // A module with no methods cannot be synthesized → not_found.
+        let missing = gdb.node("module/common/НетТакого", ide::GraphDetail::Names).unwrap();
+        assert!(missing.is_err(), "module with no members is not_found");
     }
 
     /// A metadata object reached by a manager call in one module and by an SDBL
@@ -1298,6 +1482,7 @@ mod tests {
             max_nodes: 50,
             detail: ide::GraphDetail::Signatures,
             provenance_filter: Vec::new(),
+            edge_kind_filter: Vec::new(),
         };
         let mem_nb = serde_json::to_value(
             analysis.graph_neighbors(GRAPH_SOURCE_ROOT, Some(root), &params).unwrap(),
@@ -1451,6 +1636,24 @@ mod tests {
                 .unwrap();
         let sql_overview = serde_json::to_value(gdb.overview(10).unwrap()).unwrap();
         assert_eq!(mem_overview, sql_overview, "overview JSON from a multi-module batch");
+        // The module count is the true distinct-module population (both common modules
+        // own methods), not just the module nodes that happen to be edge endpoints.
+        assert_eq!(sql_overview["modules"], 2, "both common modules counted: {sql_overview}");
+
+        // `resolve` parity: a bare method name yields the same candidates from both paths.
+        let mem_resolve =
+            serde_json::to_value(analysis.graph_resolve(GRAPH_SOURCE_ROOT, Some(root), "ШагБ", 10))
+                .unwrap();
+        let sql_resolve = serde_json::to_value(gdb.resolve("ШагБ", 10).unwrap()).unwrap();
+        assert_eq!(mem_resolve, sql_resolve, "resolve candidates from a multi-module batch");
+        assert!(
+            sql_resolve["candidates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c["id"] == "method/common/Бета/ШагБ" && c["match"] == "name"),
+            "ШагБ resolves to its durable id by name: {sql_resolve}"
+        );
         // Guard the coverage: the query pass really produced edges across the batch,
         // so the parallel SDBL collection path is genuinely exercised, not vacuous.
         assert!(
@@ -1467,6 +1670,7 @@ mod tests {
             max_nodes: 50,
             detail: ide::GraphDetail::Names,
             provenance_filter: Vec::new(),
+            edge_kind_filter: Vec::new(),
         };
         let mem_nb = serde_json::to_value(
             analysis.graph_neighbors(GRAPH_SOURCE_ROOT, Some(root), &params).unwrap(),
@@ -1522,6 +1726,7 @@ mod tests {
             max_nodes: 1,
             detail: ide::GraphDetail::Names,
             provenance_filter: Vec::new(),
+            edge_kind_filter: Vec::new(),
         };
         let mem = analysis.graph_neighbors(GRAPH_SOURCE_ROOT, Some(root), &params).unwrap();
         let sql = gdb.neighbors(&params).unwrap().unwrap();
@@ -1529,6 +1734,10 @@ mod tests {
         assert_eq!(mem.total, 3, "all three tied callers counted");
         assert_eq!(mem.nodes.len(), 1);
         assert_eq!(mem.dropped.len(), 2);
+        // Explicit counts: returned matches nodes, dropped_count = total - returned.
+        assert_eq!(mem.returned, 1);
+        assert_eq!(mem.dropped_count, 2);
+        assert_eq!(mem.dropped_count, mem.total - mem.returned);
         // The cut resolves identically on both paths, not just by count.
         assert_eq!(
             serde_json::to_value(&mem).unwrap(),
@@ -2222,6 +2431,7 @@ mod tests {
                 max_nodes: 50,
                 detail: ide::GraphDetail::Names,
                 provenance_filter: Vec::new(),
+                edge_kind_filter: Vec::new(),
             })
             .unwrap()
             .expect("form node resolves");
@@ -2555,6 +2765,7 @@ mod tests {
                 max_nodes: 50,
                 detail: ide::GraphDetail::Names,
                 provenance_filter: Vec::new(),
+                edge_kind_filter: Vec::new(),
             })
             .unwrap()
             .expect("attribute node resolves");
