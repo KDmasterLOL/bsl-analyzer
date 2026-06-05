@@ -16,7 +16,7 @@ use interprocess::local_socket::tokio::prelude::*;
 use interprocess::local_socket::tokio::Listener as TokioListener;
 use interprocess::local_socket::tokio::Stream as TokioStream;
 use interprocess::local_socket::ListenerOptions;
-use tokio::time::{interval, MissedTickBehavior};
+use tokio::time::{interval, Instant, MissedTickBehavior};
 
 use crate::broker::name::{backend_name, BackendKey};
 use crate::{serve_stream, McpServer};
@@ -52,13 +52,17 @@ async fn serve(server: McpServer, listener: TokioListener, idle: Duration) -> an
         "broker backend listening"
     );
 
-    // `active` counts in-flight sessions; `total` counts every accepted session.
-    // Idle = no active session AND no new session across one full `idle` window.
+    // `active` counts in-flight sessions. The backend exits once it has had no active
+    // session continuously for `idle`. `idle_since` marks when the current idle stretch
+    // began (set at startup since there are no connections yet, cleared on any accept,
+    // (re)started once a poll observes zero active sessions). Polling at a fraction of
+    // `idle` makes the exit land ~`idle` after the last disconnect, not up to 2×.
     let active = Arc::new(AtomicU64::new(0));
-    let total = Arc::new(AtomicU64::new(0));
-    let mut last_total = 0u64;
+    let mut idle_since = Some(Instant::now());
+    let mut served = 0u64;
 
-    let mut ticker = interval(idle);
+    let poll = (idle / 4).clamp(Duration::from_millis(100), Duration::from_secs(15));
+    let mut ticker = interval(poll);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     ticker.tick().await; // consume the immediate first tick
 
@@ -70,7 +74,8 @@ async fn serve(server: McpServer, listener: TokioListener, idle: Duration) -> an
                     tracing::warn!("rejected backend connection from an unauthorized peer");
                     continue;
                 }
-                let served = total.fetch_add(1, Ordering::SeqCst) + 1;
+                idle_since = None; // activity resets the idle clock
+                served += 1;
                 // The guard decrements `active` on drop, so a panicking session task
                 // can never strand the count and keep the backend alive forever.
                 let guard = ActiveGuard::new(Arc::clone(&active));
@@ -88,12 +93,18 @@ async fn serve(server: McpServer, listener: TokioListener, idle: Duration) -> an
                 });
             }
             _ = ticker.tick() => {
-                let seen = total.load(Ordering::SeqCst);
-                if active.load(Ordering::SeqCst) == 0 && seen == last_total {
-                    tracing::info!("idle with no connections; shutting down backend");
-                    break;
+                if active.load(Ordering::SeqCst) == 0 {
+                    let since = *idle_since.get_or_insert_with(Instant::now);
+                    if since.elapsed() >= idle {
+                        tracing::info!(
+                            idle_secs = idle.as_secs(),
+                            "no connections for the idle window; shutting down backend"
+                        );
+                        break;
+                    }
+                } else {
+                    idle_since = None;
                 }
-                last_total = seen;
             }
         }
     }

@@ -51,8 +51,8 @@ async fn one_backend_serves_many_sessions_then_idles_out() {
     // Budgets are generous because this binary runs alongside the heavy workspace
     // concurrency test, so binding/connecting can lag under CPU contention. The idle
     // window must exceed connection latency, or the backend would idle-exit before the
-    // clients connect.
-    let idle = Duration::from_secs(8);
+    // clients connect (the daemon starts its idle clock at startup).
+    let idle = Duration::from_secs(15);
     let owner = tokio::spawn(broker::daemon::run(|| Ok(reference_server()), key_for(&src), idle));
 
     // Two concurrent client sessions, each doing a full MCP initialize handshake
