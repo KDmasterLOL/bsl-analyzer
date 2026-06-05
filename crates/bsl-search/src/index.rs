@@ -1,4 +1,5 @@
 use crate::error::SearchError;
+use std::path::Path;
 use usearch::ffi::{IndexOptions, MetricKind, ScalarKind};
 
 pub struct VectorIndex {
@@ -97,6 +98,40 @@ impl VectorIndex {
 
     pub fn is_empty(&self) -> bool {
         self.count == 0
+    }
+
+    /// Stable signature of the HNSW build parameters. Folded into the persisted index's
+    /// sidecar so an index built with different options (a future tuning change) is
+    /// rejected and rebuilt rather than loaded under mismatched assumptions.
+    pub fn options_signature(dim: usize) -> String {
+        // Mirror `Self::new`'s IndexOptions; bump the leading tag if the field set changes.
+        format!("v1:cos:f32:dim={dim}:conn=16:eadd=128:esearch=64:multi=0")
+    }
+
+    /// Serialize the HNSW index to `path` (usearch's own binary format). Pairs with
+    /// [`Self::load`]; the caller persists atomically (temp + rename) in [`crate::vector_persist`].
+    pub fn save(&self, path: &Path) -> Result<(), SearchError> {
+        let p = path
+            .to_str()
+            .ok_or_else(|| SearchError::Index("non-utf8 vector index path".to_owned()))?;
+        self.index
+            .save(p)
+            .map_err(|e| SearchError::Index(format!("failed to save vector index: {e}")))
+    }
+
+    /// Load a persisted HNSW index from `path` into RAM (not mmap — decoupled from the file
+    /// so a later re-save can overwrite it safely). usearch reads dim/metric from the file
+    /// header and rejects only a major-version mismatch, so the sidecar guards the rest.
+    pub fn load(dim: usize, path: &Path) -> Result<Self, SearchError> {
+        let p = path
+            .to_str()
+            .ok_or_else(|| SearchError::Index("non-utf8 vector index path".to_owned()))?;
+        let mut idx = Self::new(dim)?;
+        idx.index
+            .load(p)
+            .map_err(|e| SearchError::Index(format!("failed to load vector index: {e}")))?;
+        idx.count = idx.index.size();
+        Ok(idx)
     }
 
     pub fn needs_rebuild(&self) -> bool {
