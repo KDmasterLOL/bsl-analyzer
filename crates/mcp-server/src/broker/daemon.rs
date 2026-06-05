@@ -128,17 +128,21 @@ async fn serve(
                 spawn_session(&server, &active, conn, served);
             }
             _ = ticker.tick() => {
-                if active.load(Ordering::SeqCst) == 0 {
+                // The backend is "busy" while a client is connected OR a long background
+                // index/embedding pass is still running. Idle-exiting mid-embed would kill
+                // the pass and waste the work already paid for, so the timer only counts
+                // down once both are quiet.
+                if active.load(Ordering::SeqCst) != 0 || server.background_work_active() {
+                    idle_since = None;
+                } else {
                     let since = *idle_since.get_or_insert_with(Instant::now);
                     if since.elapsed() >= idle {
                         tracing::info!(
                             idle_secs = idle.as_secs(),
-                            "no connections for the idle window; shutting down backend"
+                            "no connections or background work for the idle window; shutting down backend"
                         );
                         break;
                     }
-                } else {
-                    idle_since = None;
                 }
             }
         }

@@ -8,7 +8,7 @@ use notify::{
     Config as NotifyConfig, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
 };
 use onec_client::Client as OnecClient;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::{
     env,
@@ -35,6 +35,30 @@ pub struct SharedState {
     configured_baseline: Option<ConfiguredBaselineStatus>,
     graph: GraphState,
     diagnostics: DiagnosticsState,
+    /// Number of background index/embedding tasks currently in flight. The broker
+    /// backend keeps itself alive while this is non-zero so it never idle-exits (and
+    /// kills) a long embedding pass. Incremented at the start of each such task and
+    /// decremented by [`BackgroundWorkGuard`] on every exit path — including early `?`
+    /// returns and panics — so it can never get stuck above zero.
+    background_indexers: Arc<AtomicUsize>,
+}
+
+/// RAII counter for in-flight background indexing. Increments on construction and
+/// decrements on drop (including unwind), so a panicking or early-returning indexing
+/// task always releases its hold and the broker's liveness signal returns to idle.
+struct BackgroundWorkGuard(Arc<AtomicUsize>);
+
+impl BackgroundWorkGuard {
+    fn new(counter: &Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Self(Arc::clone(counter))
+    }
+}
+
+impl Drop for BackgroundWorkGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +113,7 @@ impl SharedState {
         let search_engine: Arc<Mutex<Option<SearchEngine>>> = Arc::new(Mutex::new(None));
         let index_progress = IndexProgress::new();
         let semantic_runtime = Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled));
+        let background_indexers = Arc::new(AtomicUsize::new(0));
         let watcher_ready = Arc::new(AtomicBool::new(false));
         let baseline_runtime = BaselineRuntime::workspace(Some(&project.root), &project.config);
         let workspace_search_mode = if baseline_runtime
@@ -112,6 +137,7 @@ impl SharedState {
             Arc::clone(&search_engine),
             Arc::clone(&index_progress),
             Arc::clone(&semantic_runtime),
+            Arc::clone(&background_indexers),
             source_dir.clone(),
             Arc::clone(&watcher_ready),
             baseline_runtime.external_baseline.clone(),
@@ -164,13 +190,20 @@ impl SharedState {
             configured_baseline: Some(baseline_runtime.configured_baseline),
             graph,
             diagnostics,
+            background_indexers,
         }
     }
 
+    // Each argument is a distinct shared handle the spawned init thread must own (engine,
+    // progress, runtime status, indexer counter, roots, baseline, graph). Bundling them
+    // into a context struct would only move the same fields behind one name without
+    // clarifying anything, so the small over-arity is accepted here.
+    #[allow(clippy::too_many_arguments)]
     fn spawn_workspace_search_init(
         search_engine: Arc<Mutex<Option<SearchEngine>>>,
         index_progress: Arc<IndexProgress>,
         semantic_runtime: Arc<Mutex<SemanticRuntimeStatus>>,
+        background_indexers: Arc<AtomicUsize>,
         workspace_root: PathBuf,
         watcher_ready: Arc<AtomicBool>,
         external_baseline: Option<Arc<ExternalBaselineService>>,
@@ -179,6 +212,9 @@ impl SharedState {
         std::thread::Builder::new()
             .name("bsl-search-init".to_owned())
             .spawn(move || {
+                // Held for the whole init (incl. a multi-minute fused cold build) so the
+                // broker stays alive even if the launching client disconnects mid-build.
+                let _init_guard = BackgroundWorkGuard::new(&background_indexers);
                 tracing::info!("search engine initialization started in background");
                 let init = Self::init_workspace_search_engine(
                     &workspace_root,
@@ -232,9 +268,13 @@ impl SharedState {
                     let search_engine = Arc::clone(&search_engine);
                     let semantic_runtime = Arc::clone(&semantic_runtime);
                     let index_progress = Arc::clone(&index_progress);
+                    // Take the hold BEFORE spawning so the count never dips to zero between
+                    // this init thread ending and the embed thread starting.
+                    let embed_guard = BackgroundWorkGuard::new(&background_indexers);
                     std::thread::Builder::new()
                         .name("bsl-search-embed".to_owned())
                         .spawn(move || {
+                            let _embed_guard = embed_guard;
                             tracing::info!("background embedding pass started");
                             match SearchEngine::embed_pending_chunks_standalone(
                                 &pending.db_path,
@@ -288,9 +328,11 @@ impl SharedState {
                     );
                     let search_engine = Arc::clone(&search_engine);
                     let semantic_runtime = Arc::clone(&semantic_runtime);
+                    let warmup_guard = BackgroundWorkGuard::new(&background_indexers);
                     std::thread::Builder::new()
                         .name("bsl-search-overlay-warmup".to_owned())
                         .spawn(move || {
+                            let _warmup_guard = warmup_guard;
                             tracing::info!("workspace overlay semantic warmup started");
                             let result = match search_engine.lock() {
                                 Ok(guard) => match guard.as_ref() {
@@ -327,6 +369,7 @@ impl SharedState {
         let search_engine: Arc<Mutex<Option<SearchEngine>>> = Arc::new(Mutex::new(None));
         let index_progress = IndexProgress::new();
         let semantic_runtime = Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled));
+        let background_indexers = Arc::new(AtomicUsize::new(0));
         let project_config = project_root.as_deref().and_then(project_model::ProjectConfig::load);
         let baseline_runtime = BaselineRuntime::reference(project_config.as_ref());
 
@@ -335,9 +378,11 @@ impl SharedState {
             let progress_arc = Arc::clone(&index_progress);
             let semantic_runtime_arc = Arc::clone(&semantic_runtime);
             let external_baseline = baseline_runtime.external_baseline.clone();
+            let init_guard = BackgroundWorkGuard::new(&background_indexers);
             std::thread::Builder::new()
                 .name("bsl-search-reference-init".to_owned())
                 .spawn(move || {
+                    let _init_guard = init_guard;
                     tracing::info!("reference search engine initialization started in background");
                     let engine =
                         Self::init_reference_search_engine(&progress_arc, external_baseline);
@@ -378,6 +423,7 @@ impl SharedState {
             configured_baseline: Some(baseline_runtime.configured_baseline),
             graph: GraphState::disabled(),
             diagnostics: DiagnosticsState::disabled(),
+            background_indexers,
         }
     }
 
@@ -397,6 +443,7 @@ impl SharedState {
             configured_baseline: None,
             graph: GraphState::disabled(),
             diagnostics: DiagnosticsState::disabled(),
+            background_indexers: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -478,6 +525,16 @@ impl SharedState {
 
     pub fn index_progress(&self) -> &Arc<IndexProgress> {
         &self.index_progress
+    }
+
+    /// Whether a long-running background index/embedding task is in flight. The broker
+    /// backend uses this so it does not idle-exit (and kill the task) just because no
+    /// client is currently connected — the expensive embedding run, which can take far
+    /// longer than the idle window, must be allowed to finish so its already-spent work
+    /// is not wasted on the next cold start. Backed by a guarded counter that is released
+    /// on every task exit path (including panics), so the signal cannot get stuck.
+    pub fn background_indexing_active(&self) -> bool {
+        self.background_indexers.load(Ordering::SeqCst) > 0
     }
 
     pub(crate) fn semantic_runtime(&self) -> Arc<Mutex<SemanticRuntimeStatus>> {
@@ -729,21 +786,13 @@ impl SharedState {
 
         let mut engine = Self::open_search_engine(&db_path)?;
 
-        if engine.has_semantic() {
-            let code_embeddings = engine.embedding_count_by_collection("code").unwrap_or(0);
-            let code_chunks = engine.chunk_count().unwrap_or(0);
-            if code_chunks > 0 && code_embeddings < code_chunks {
-                let cleared = engine.clear_file_hashes_without_embeddings("code").unwrap_or(0);
-                if cleared > 0 {
-                    tracing::info!(
-                        code_embeddings,
-                        code_chunks,
-                        cleared,
-                        "cleared hashes for code files without embeddings"
-                    );
-                }
-            }
-        }
+        // A restart with partially embedded code must resume, not re-embed. The deferred
+        // embedding pass already selects exactly the NULL-embedding chunks
+        // (`load_pending_embedding_documents`), so an interrupted run picks up where it
+        // left off regardless of file hashes. Clearing the hashes here would instead force
+        // `index_directory_deferred` to DELETE+reinsert those files' chunks with NULL
+        // embeddings, throwing away vectors already paid for — the opposite of resume.
+        // Changed files are still detected and re-embedded via their content-hash mismatch.
 
         Self::configure_workspace_engine(
             &mut engine,
@@ -1086,6 +1135,7 @@ impl SharedState {
                 Arc::clone(&self.search_engine),
                 Arc::clone(&self.index_progress),
                 Arc::clone(&self.semantic_runtime),
+                Arc::clone(&self.background_indexers),
                 root,
                 watcher_ready,
                 self.external_baseline.clone(),
@@ -1174,7 +1224,7 @@ impl SharedState {
 
 #[cfg(test)]
 mod tests {
-    use super::SharedState;
+    use super::{BackgroundWorkGuard, SharedState};
     use crate::baseline::{ExternalBaselineService, RefreshableExternalBaselineSource};
     use bsl_search::{
         BaselineRef, CorpusId, Document, ExternalBaselineConfig, IndexedDocument, SearchEngine,
@@ -1213,6 +1263,31 @@ mod tests {
                 env::remove_var(self.key);
             }
         }
+    }
+
+    #[test]
+    fn background_work_guard_releases_on_every_path_including_panic() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        {
+            let _g1 = BackgroundWorkGuard::new(&counter);
+            assert_eq!(counter.load(Ordering::SeqCst), 1);
+            let _g2 = BackgroundWorkGuard::new(&counter);
+            assert_eq!(counter.load(Ordering::SeqCst), 2, "nested tasks stack");
+        }
+        assert_eq!(counter.load(Ordering::SeqCst), 0, "both holds released on scope exit");
+
+        // The embedding pass can bail via `?` or panic mid-run; the broker's liveness
+        // signal must still fall back to idle, or the daemon would never shut down.
+        let counter2 = Arc::clone(&counter);
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _g = BackgroundWorkGuard::new(&counter2);
+            assert_eq!(counter2.load(Ordering::SeqCst), 1);
+            panic!("simulated indexing-task panic");
+        }));
+        assert!(unwound.is_err(), "the task panicked");
+        assert_eq!(counter.load(Ordering::SeqCst), 0, "the hold was released on unwind");
     }
 
     #[test]
