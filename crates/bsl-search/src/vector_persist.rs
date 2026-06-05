@@ -9,13 +9,17 @@
 //! Validity is content-true, not a count/rowid proxy:
 //! - scalar gates (schema, usearch version, build options, model, dim, embed-text version)
 //!   fail fast on a configuration change;
-//! - [`data_digest`] over the exact rows a rebuild would index catches a re-embed, an in-place
-//!   vector update, or a crash between writing embeddings and re-saving the index;
+//! - the `embedding_generation` counter (a DB-trigger-maintained monotonic version of the
+//!   `(chunks.id, chunks.embedding)` set — see [`crate::store`]) catches a re-embed, an in-place
+//!   vector update, or a crash between writing embeddings and re-saving the index, with a single
+//!   one-row read instead of scanning every embedding BLOB;
 //! - `index_sha` binds the sidecar to a specific index file, so a torn write from two backends
 //!   (e.g. during a version rollout that shares the same database) or a truncated/corrupt file
 //!   is rejected rather than loaded — no cross-process lock needed.
 //!
-//! Every step degrades to "rebuild": a missing/old/corrupt file is never served as if valid.
+//! Every step degrades to "rebuild": a missing/old/corrupt file is never served as if valid. A
+//! destructive structural-schema wipe resets the generation counter, so the store deletes these
+//! artifacts ([`remove_artifacts`]) in that path — a reset counter can never match a stale sidecar.
 
 use std::fs;
 use std::io::Write;
@@ -27,7 +31,7 @@ use crate::error::SearchError;
 use crate::index::VectorIndex;
 use crate::store::{Store, EMBED_TEXT_VERSION};
 
-const SIDECAR_SCHEMA: u32 = 1;
+const SIDECAR_SCHEMA: u32 = 2;
 
 /// What the persisted index was built from. The loader rebuilds unless every field still
 /// matches the current database and the on-disk index file.
@@ -40,8 +44,9 @@ struct Sidecar {
     dim: usize,
     embed_text_version: i64,
     count: usize,
-    /// [`data_digest`] of the embeddings the index was built from.
-    embedding_digest: String,
+    /// The `embedding_generation` the index was built at. The load-time content check is a single
+    /// read of the current counter against this value — no BLOB scan.
+    generation: i64,
     /// blake3 of the saved index file — binds this sidecar to that exact file.
     index_sha: String,
 }
@@ -61,6 +66,30 @@ fn sidecar_path(db_path: &Path) -> PathBuf {
     sibling(db_path, "usearch.json")
 }
 
+/// Remove the persisted index + sidecar beside `db_path`. Called by the store when it wipes the
+/// structural schema: that wipe resets `embedding_generation` to 0, so a surviving gen-0 sidecar +
+/// matching index could false-accept over the emptied database. The sidecar is deleted FIRST and
+/// its removal is fallible — `try_load` reads the sidecar before anything else, so its absence alone
+/// prevents a stale load, and a failure to remove it must abort the wipe (the caller propagates the
+/// error before committing) rather than leave an emptied DB paired with a loadable sidecar. A
+/// already-absent sidecar is success. The index file is harmless without a sidecar, so its removal
+/// stays best-effort.
+pub(crate) fn remove_artifacts(db_path: &Path) -> Result<(), SearchError> {
+    remove_file_if_exists(&sidecar_path(db_path))?;
+    let _ = fs::remove_file(index_path(db_path));
+    Ok(())
+}
+
+fn remove_file_if_exists(path: &Path) -> Result<(), SearchError> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => {
+            Err(SearchError::Index(format!("remove stale vector sidecar {}: {e}", path.display())))
+        }
+    }
+}
+
 /// `<db_path>.<ext>` (kept beside the database so it shares the project's `.build` dir).
 fn sibling(db_path: &Path, ext: &str) -> PathBuf {
     let mut s = db_path.as_os_str().to_os_string();
@@ -78,33 +107,12 @@ fn file_blake3(path: &Path) -> Result<String, SearchError> {
     Ok(hasher.finalize().to_hex().to_string())
 }
 
-/// Order-independent content fingerprint of the EXACT `(id, vector)` rows that go into the
-/// index. Computed from the in-memory build data — never re-read from the database — so the
-/// sidecar can never describe a different snapshot than the saved HNSW, and its domain matches
-/// the index exactly (the same dim-filtered set `load_all_embeddings` produces). Folds
-/// `blake3(id_le || vector_le_bytes)` of each row by XOR; `chunks.id` is unique, so there is no
-/// cancellation. A re-embed, an in-place vector change, or a dropped/added row all move it.
-fn data_digest(data: &[(i64, Vec<f32>)]) -> String {
-    let mut acc = [0u8; 32];
-    for (id, vector) in data {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(&id.to_le_bytes());
-        for value in vector {
-            hasher.update(&value.to_le_bytes());
-        }
-        for (a, b) in acc.iter_mut().zip(hasher.finalize().as_bytes()) {
-            *a ^= b;
-        }
-    }
-    blake3::Hash::from(acc).to_hex().to_string()
-}
-
 /// Try to load a persisted index consistent with the current embeddings. `None` means the
 /// caller must rebuild (and should then [`persist`]). Never returns a stale/wrong index.
 pub fn try_load(store: &Store, key: &PersistKey) -> Option<VectorIndex> {
     let sidecar = read_sidecar(&sidecar_path(key.db_path))?;
 
-    // Cheap scalar gates first — avoid the BLOB scan when configuration plainly changed.
+    // Cheap scalar gates first — fail fast when configuration plainly changed.
     if sidecar.schema != SIDECAR_SCHEMA
         || sidecar.usearch_version != usearch::version()
         || sidecar.options != VectorIndex::options_signature(key.dim)
@@ -115,12 +123,12 @@ pub fn try_load(store: &Store, key: &PersistKey) -> Option<VectorIndex> {
         return None;
     }
 
-    // Content gate: re-derive the digest from exactly the rows a rebuild would index right now
-    // (`load_all_embeddings` applies the same dim filter), so the persisted index must match the
-    // current embeddings — catching a re-embed, an in-place vector update, or a crash between
-    // writing embeddings and re-saving the index.
-    let data = store.load_all_embeddings(key.dim).ok()?;
-    if data.len() != sidecar.count || data_digest(&data) != sidecar.embedding_digest {
+    // Content gate (O(1)): the `embedding_generation` counter advances on every write that can
+    // change the indexed `(chunks.id, chunks.embedding)` set, so an unchanged counter means the
+    // current embeddings are exactly what this index was built from — no BLOB scan needed. Any
+    // re-embed, in-place vector update, insert, or delete (including a structural wipe, after which
+    // the artifacts are gone) moves it and forces a rebuild.
+    if store.embedding_generation().ok()? != sidecar.generation {
         return None;
     }
 
@@ -137,15 +145,12 @@ pub fn try_load(store: &Store, key: &PersistKey) -> Option<VectorIndex> {
     Some(index)
 }
 
-/// Persist `index` + sidecar, fingerprinting `data` — the exact rows the index was built from in
-/// the same snapshot, NOT a fresh database read (which could capture a later mutation and make
-/// the sidecar vouch for a stale index). Best-effort: callers log the error and continue (the
-/// next start just rebuilds), so a persistence failure never breaks search.
-pub fn persist(
-    index: &VectorIndex,
-    key: &PersistKey,
-    data: &[(i64, Vec<f32>)],
-) -> Result<(), SearchError> {
+/// Persist `index` + sidecar at `generation` — the `embedding_generation` of the SAME snapshot the
+/// index was built from (captured via `Store::load_all_embeddings_with_generation`), NOT a fresh
+/// read (which could advance past the built data and make the sidecar vouch for a stale index).
+/// Best-effort: callers log the error and continue (the next start just rebuilds), so a persistence
+/// failure never breaks search.
+pub fn persist(index: &VectorIndex, key: &PersistKey, generation: i64) -> Result<(), SearchError> {
     let idx_path = index_path(key.db_path);
 
     // Write the index to a unique temp (never a shared `.tmp`, which would itself race), fsync,
@@ -170,8 +175,8 @@ pub fn persist(
         model_id: key.model_id.to_owned(),
         dim: key.dim,
         embed_text_version: EMBED_TEXT_VERSION,
-        count: data.len(),
-        embedding_digest: data_digest(data),
+        count: index.len(),
+        generation,
         index_sha,
     };
     write_sidecar(&sidecar_path(key.db_path), &sidecar)
@@ -258,12 +263,12 @@ mod tests {
         PersistKey { db_path: store.db_path(), model_id: "test-model", dim: DIM }
     }
 
-    /// Build the index from the current embeddings and persist it, fingerprinting the exact
-    /// build data (as the engine does).
+    /// Build the index from the current embeddings and persist it, stamping the snapshot's
+    /// generation (as the engine does via `load_all_embeddings_with_generation`).
     fn build_and_persist(store: &Store) {
-        let data = store.load_all_embeddings(DIM).unwrap();
+        let (generation, data) = store.load_all_embeddings_with_generation(DIM).unwrap();
         let index = VectorIndex::build(DIM, &data).unwrap();
-        persist(&index, &key(store), &data).unwrap();
+        persist(&index, &key(store), generation).unwrap();
     }
 
     #[test]
@@ -302,10 +307,36 @@ mod tests {
         build_and_persist(&store);
         assert!(try_load(&store, &key(&store)).is_some());
 
-        // Replace one embedding in place (same row id, same count) — the content digest must
-        // notice and force a rebuild, where a count/rowid proxy would wrongly accept it.
+        // Replace one embedding in place (same row id, same count) — the generation counter must
+        // advance and force a rebuild, where a count/rowid proxy would wrongly accept it.
         let id = store.load_all_embeddings(DIM).unwrap()[0].0;
         store.set_chunk_embedding(id, &emb(99.0)).unwrap();
+        assert!(try_load(&store, &key(&store)).is_none());
+    }
+
+    #[test]
+    fn inserted_chunk_means_rebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = seeded_store(dir.path(), 3);
+        build_and_persist(&store);
+        assert!(try_load(&store, &key(&store)).is_some());
+
+        // A new embedded chunk in another file advances the generation even though the existing
+        // rows are untouched, so the persisted index (missing the new vector) is rebuilt.
+        store.reindex_file("g.bsl", b"h1", &[chunk("New")], Some(&[emb(7.0)])).unwrap();
+        assert!(try_load(&store, &key(&store)).is_none());
+    }
+
+    #[test]
+    fn removed_file_means_rebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = seeded_store(dir.path(), 3);
+        build_and_persist(&store);
+        assert!(try_load(&store, &key(&store)).is_some());
+
+        // Deleting the file cascades to its chunks; `files_gen_del` advances the generation so the
+        // index built over the now-deleted vectors is rejected.
+        store.remove_file("f.bsl").unwrap();
         assert!(try_load(&store, &key(&store)).is_none());
     }
 

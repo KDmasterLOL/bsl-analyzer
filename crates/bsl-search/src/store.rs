@@ -10,6 +10,10 @@ pub struct Store {
     path: PathBuf,
 }
 
+/// The embeddings the vector index is built from (`(chunk_id, vector)` rows) paired with the
+/// `embedding_generation` they were read at, as one consistent snapshot.
+pub type EmbeddingsSnapshot = (i64, Vec<(i64, Vec<f32>)>);
+
 /// Bumped whenever the embedding text composed by
 /// `document::semantic_text_for_indexed_document` changes shape. Stored in the SQLite
 /// `user_version` pragma; on mismatch the store clears file hashes so the next index
@@ -81,11 +85,31 @@ impl Store {
             }
         }
         Self::create_schema(&tx)?;
+        Self::ensure_embedding_generation(&tx, &self.path)?;
         tx.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?1)",
             params![SCHEMA_VERSION.to_string()],
         )?;
         tx.commit()?;
+        Ok(())
+    }
+
+    /// Guarantee the `embedding_generation` counter exists, and invalidate stale vector artifacts
+    /// whenever it has to be (re)created. The counter is absent in exactly three cases — a fresh
+    /// database, one just wiped by [`Self::wipe_all_tables`] above, or a corrupt one that lost the
+    /// row — and in all of them a persisted index/sidecar cannot be trusted against the
+    /// freshly-reset counter (the wipe drops the row via `DROP TABLE`, firing no trigger, so a
+    /// surviving generation-0 sidecar would otherwise false-accept). So when the row is missing we
+    /// remove the artifacts FIRST, fallibly: a sidecar that cannot be deleted aborts the migration
+    /// before `tx.commit()` (the transaction rolls back) rather than leave an emptied/reset database
+    /// next to a loadable sidecar. Seeding only after a successful removal keeps the counter and the
+    /// on-disk artifacts consistent. A normal open (row present) skips all of this.
+    fn ensure_embedding_generation(tx: &Connection, db_path: &Path) -> Result<(), SearchError> {
+        if Self::read_embedding_generation(tx)? != Self::MISSING_GENERATION {
+            return Ok(());
+        }
+        crate::vector_persist::remove_artifacts(db_path)?;
+        tx.execute("INSERT INTO meta (key, value) VALUES ('embedding_generation', '0')", [])?;
         Ok(())
     }
 
@@ -114,10 +138,18 @@ impl Store {
 
     /// Drop every table so [`Self::create_schema`] can recreate the current structure.
     /// FTS5 virtual tables are dropped first so their shadow tables vanish before the
-    /// generic enumeration runs (dropping a shadow table directly is an error).
+    /// generic enumeration runs (dropping a shadow table directly is an error). The
+    /// `embedding_generation` triggers are dropped before any table: dropping the parent
+    /// `files` table runs its FK `ON DELETE CASCADE` onto `chunks` (foreign keys are ON and
+    /// the pragma cannot be toggled inside this transaction), which would otherwise fire
+    /// `chunks_gen_del` against an already-dropped `meta` table and abort the wipe.
     fn wipe_all_tables(conn: &Connection) -> Result<(), SearchError> {
         conn.execute_batch(
-            "DROP TABLE IF EXISTS chunks_fts; DROP TABLE IF EXISTS overlay_chunks_fts;",
+            "DROP TRIGGER IF EXISTS chunks_gen_ins;
+             DROP TRIGGER IF EXISTS chunks_gen_upd;
+             DROP TRIGGER IF EXISTS chunks_gen_del;
+             DROP TRIGGER IF EXISTS files_gen_del;
+             DROP TABLE IF EXISTS chunks_fts; DROP TABLE IF EXISTS overlay_chunks_fts;",
         )?;
         let names: Vec<String> = {
             let mut stmt = conn.prepare(
@@ -294,6 +326,51 @@ impl Store {
             ",
         )?;
 
+        Self::create_embedding_generation_triggers(conn)?;
+
+        Ok(())
+    }
+
+    /// A monotonic counter bumped by triggers on every write that can change the set of
+    /// `(chunks.id, chunks.embedding)` rows the vector index is built from. The persisted index's
+    /// sidecar records the generation it was built at, so [`crate::vector_persist::try_load`] can
+    /// confirm "nothing changed since" with a single-row read instead of scanning every embedding
+    /// BLOB (see `embedding_generation` / `load_all_embeddings_with_generation`).
+    ///
+    /// Coverage (auditable contract): `insert_chunk` and all `reindex_*` inserts fire
+    /// `chunks_gen_ins`; the reindex delete-phases and `delete_chunks_for_file` fire `chunks_gen_del`;
+    /// `set_chunk_embedding` fires `chunks_gen_upd`; `remove_file` / `clear_collection` delete `files`
+    /// rows (and cascade to `chunks`) and fire `files_gen_del`. The `files_gen_del` trigger makes the
+    /// counter advance on a file removal regardless of the `recursive_triggers` pragma, so we never
+    /// depend on whether an FK cascade fires the `chunks` delete trigger. `upsert_file`,
+    /// `clear_file_hashes`, and `migrate_embed_text_version` touch only `files` metadata, not the
+    /// indexed embedding set, and intentionally do not bump. Over-bumping is safe (only forces a
+    /// rebuild); under-bumping would serve a stale index, so the triggers err toward bumping. A
+    /// destructive `wipe_all_tables` resets the counter (DROP TABLE fires no trigger); the counter
+    /// row itself is (re)seeded by [`Self::ensure_embedding_generation`], which deletes any stale
+    /// persisted artifacts whenever it has to recreate the row so the reset can never match a
+    /// pre-wipe sidecar. These triggers reference the `meta` row but do not create it.
+    fn create_embedding_generation_triggers(conn: &Connection) -> Result<(), SearchError> {
+        conn.execute_batch(
+            "
+            CREATE TRIGGER IF NOT EXISTS chunks_gen_ins AFTER INSERT ON chunks BEGIN
+                UPDATE meta SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)
+                WHERE key = 'embedding_generation';
+            END;
+            CREATE TRIGGER IF NOT EXISTS chunks_gen_upd AFTER UPDATE OF embedding ON chunks BEGIN
+                UPDATE meta SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)
+                WHERE key = 'embedding_generation';
+            END;
+            CREATE TRIGGER IF NOT EXISTS chunks_gen_del AFTER DELETE ON chunks BEGIN
+                UPDATE meta SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)
+                WHERE key = 'embedding_generation';
+            END;
+            CREATE TRIGGER IF NOT EXISTS files_gen_del AFTER DELETE ON files BEGIN
+                UPDATE meta SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)
+                WHERE key = 'embedding_generation';
+            END;
+            ",
+        )?;
         Ok(())
     }
 
@@ -604,8 +681,55 @@ impl Store {
     }
 
     pub fn load_all_embeddings(&self, dim: usize) -> Result<Vec<(i64, Vec<f32>)>, SearchError> {
+        Self::read_all_embeddings(&self.conn, dim)
+    }
+
+    /// The embeddings the vector index is built from, paired with the `embedding_generation` they
+    /// were read at — both captured in one read transaction so the generation exactly describes
+    /// this snapshot of the data. The persisted index records this generation; a later cold start
+    /// that sees the same generation can trust the index without re-reading every BLOB (a concurrent
+    /// writer that bumps the generation during the long HNSW build only makes a later load rebuild).
+    pub fn load_all_embeddings_with_generation(
+        &self,
+        dim: usize,
+    ) -> Result<EmbeddingsSnapshot, SearchError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let generation = Self::read_embedding_generation(&tx)?;
+        let data = Self::read_all_embeddings(&tx, dim)?;
+        // Read-only: drop the transaction without committing.
+        Ok((generation, data))
+    }
+
+    /// The current `embedding_generation` counter (O(1) single-row read). `Store::open` always
+    /// seeds the row, so a missing row means corrupt/foreign state; it maps to `-1`, a sentinel
+    /// that can never equal a real generation (which is `>= 0`, since a fresh build can stamp 0),
+    /// so a stale gen-0 sidecar cannot validate against a database whose counter has gone missing.
+    pub fn embedding_generation(&self) -> Result<i64, SearchError> {
+        Self::read_embedding_generation(&self.conn)
+    }
+
+    /// Missing-row sentinel (see [`Self::embedding_generation`]): distinct from every persisted
+    /// generation so it never produces a false-accept.
+    const MISSING_GENERATION: i64 = -1;
+
+    fn read_embedding_generation(conn: &Connection) -> Result<i64, SearchError> {
+        let generation = conn
+            .query_row(
+                "SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'embedding_generation'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .unwrap_or(Self::MISSING_GENERATION);
+        Ok(generation)
+    }
+
+    fn read_all_embeddings(
+        conn: &Connection,
+        dim: usize,
+    ) -> Result<Vec<(i64, Vec<f32>)>, SearchError> {
         let mut stmt =
-            self.conn.prepare("SELECT id, embedding FROM chunks WHERE embedding IS NOT NULL")?;
+            conn.prepare("SELECT id, embedding FROM chunks WHERE embedding IS NOT NULL")?;
 
         let rows = stmt.query_map([], |row| {
             let id: i64 = row.get(0)?;
@@ -1486,6 +1610,189 @@ mod tests {
         assert!(file_id > 0);
         assert_eq!(store.file_count().unwrap(), 1);
         assert_eq!(store.chunk_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn embedding_generation_advances_on_indexed_set_changes() {
+        let mut store = Store::in_memory().unwrap();
+        // Pin the conservative pragma: the cascade bump must hold even with recursive triggers off.
+        store.conn.execute_batch("PRAGMA recursive_triggers = OFF;").unwrap();
+
+        let g0 = store.embedding_generation().unwrap();
+
+        // Insert two chunks -> two INSERT trigger firings.
+        store
+            .reindex_file("m.bsl", b"h0", &[sample_chunk("Один"), sample_chunk("Два")], None)
+            .unwrap();
+        let g_after_insert = store.embedding_generation().unwrap();
+        assert!(g_after_insert > g0, "insert must advance the generation");
+
+        // In-place embedding update -> UPDATE OF embedding trigger.
+        let id: i64 =
+            store.conn.query_row("SELECT id FROM chunks LIMIT 1", [], |r| r.get(0)).unwrap();
+        store.set_chunk_embedding(id, &[0.1_f32, 0.2, 0.3]).unwrap();
+        let g_after_update = store.embedding_generation().unwrap();
+        assert!(g_after_update > g_after_insert, "embedding update must advance the generation");
+
+        // A non-embedding column update must NOT advance it (the index is unaffected).
+        store
+            .conn
+            .execute("UPDATE chunks SET line_end = line_end + 1 WHERE id = ?1", params![id])
+            .unwrap();
+        assert_eq!(
+            store.embedding_generation().unwrap(),
+            g_after_update,
+            "a non-embedding update must not advance the generation"
+        );
+
+        // File removal cascades to chunks; `files_gen_del` guarantees an advance regardless of
+        // whether the cascade fires the chunk delete trigger.
+        store.remove_file("m.bsl").unwrap();
+        assert!(
+            store.embedding_generation().unwrap() > g_after_update,
+            "file removal (cascade delete) must advance the generation"
+        );
+        assert_eq!(store.chunk_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn structural_wipe_removes_persisted_vector_artifacts() {
+        use crate::index::VectorIndex;
+
+        const DIM: usize = 4;
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("search.db");
+
+        // Seed one embedded chunk and persist a vector index + sidecar beside the DB.
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            let emb = vec![0.1_f32, 0.2, 0.3, 0.4];
+            store.reindex_file("f.bsl", b"h0", &[sample_chunk("П")], Some(&[emb])).unwrap();
+            let (generation, data) = store.load_all_embeddings_with_generation(DIM).unwrap();
+            let index = VectorIndex::build(DIM, &data).unwrap();
+            let key = crate::vector_persist::PersistKey {
+                db_path: store.db_path(),
+                model_id: "test-model",
+                dim: DIM,
+            };
+            crate::vector_persist::persist(&index, &key, generation).unwrap();
+
+            // Simulate a future structural-schema change: stamp a different version so the next
+            // open wipes the derived cache (which drops `meta` and resets the generation counter).
+            store
+                .conn
+                .execute("UPDATE meta SET value = '999' WHERE key = 'schema_version'", [])
+                .unwrap();
+        }
+
+        let usearch = dir.path().join("search.db.usearch");
+        let sidecar = dir.path().join("search.db.usearch.json");
+        assert!(usearch.exists() && sidecar.exists(), "artifacts persisted before the wipe");
+
+        // Reopening sees the version mismatch, wipes the tables, and must delete the stale
+        // artifacts so the reset generation (0) can never match the old sidecar.
+        let store = Store::open(&db_path).unwrap();
+        assert_eq!(store.chunk_count().unwrap(), 0, "wipe emptied the chunks");
+        assert!(!usearch.exists(), "stale index file removed by the wipe");
+        assert!(!sidecar.exists(), "stale sidecar removed by the wipe");
+        let key = crate::vector_persist::PersistKey {
+            db_path: store.db_path(),
+            model_id: "test-model",
+            dim: DIM,
+        };
+        assert!(
+            crate::vector_persist::try_load(&store, &key).is_none(),
+            "no stale index is served over the emptied database"
+        );
+    }
+
+    #[test]
+    fn structural_wipe_aborts_when_stale_sidecar_cannot_be_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("search.db");
+
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            store
+                .reindex_file(
+                    "f.bsl",
+                    b"h0",
+                    &[sample_chunk("П")],
+                    Some(&[vec![0.1, 0.2, 0.3, 0.4]]),
+                )
+                .unwrap();
+            store
+                .conn
+                .execute("UPDATE meta SET value = '999' WHERE key = 'schema_version'", [])
+                .unwrap();
+        }
+
+        // Make the sidecar path un-removable as a plain file by turning it into a (non-empty)
+        // directory, so `fs::remove_file` fails with a non-`NotFound` error. The wipe must abort
+        // rather than empty the DB while a loadable sidecar survives.
+        let sidecar = dir.path().join("search.db.usearch.json");
+        std::fs::create_dir_all(sidecar.join("blocker")).unwrap();
+
+        assert!(
+            Store::open(&db_path).is_err(),
+            "a structural wipe must fail closed when the stale sidecar cannot be removed"
+        );
+
+        // Once the obstruction is gone, the wipe proceeds and the DB is reconciled.
+        std::fs::remove_dir_all(&sidecar).unwrap();
+        let store = Store::open(&db_path).unwrap();
+        assert_eq!(store.chunk_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn missing_generation_row_on_current_schema_invalidates_artifacts() {
+        use crate::index::VectorIndex;
+
+        const DIM: usize = 4;
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("search.db");
+
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            store
+                .reindex_file(
+                    "f.bsl",
+                    b"h0",
+                    &[sample_chunk("П")],
+                    Some(&[vec![0.1, 0.2, 0.3, 0.4]]),
+                )
+                .unwrap();
+            let (generation, data) = store.load_all_embeddings_with_generation(DIM).unwrap();
+            let index = VectorIndex::build(DIM, &data).unwrap();
+            let key = crate::vector_persist::PersistKey {
+                db_path: store.db_path(),
+                model_id: "test-model",
+                dim: DIM,
+            };
+            crate::vector_persist::persist(&index, &key, generation).unwrap();
+            assert!(crate::vector_persist::try_load(&store, &key).is_some());
+
+            // Corruption: the counter row vanishes while the schema version stays current, so no
+            // structural wipe runs. The reset counter must not silently come back as 0 and validate
+            // the old sidecar (which would serve a possibly-stale index).
+            store.conn.execute("DELETE FROM meta WHERE key = 'embedding_generation'", []).unwrap();
+        }
+
+        let sidecar = dir.path().join("search.db.usearch.json");
+        assert!(sidecar.exists(), "sidecar present before the corrupt reopen");
+
+        let store = Store::open(&db_path).unwrap();
+        assert_eq!(store.embedding_generation().unwrap(), 0, "counter reseeded");
+        assert!(!sidecar.exists(), "stale sidecar removed when the counter had to be recreated");
+        let key = crate::vector_persist::PersistKey {
+            db_path: store.db_path(),
+            model_id: "test-model",
+            dim: DIM,
+        };
+        assert!(
+            crate::vector_persist::try_load(&store, &key).is_none(),
+            "no stale index is served after the counter was recreated"
+        );
     }
 
     #[test]

@@ -202,28 +202,28 @@ impl SearchEngine {
         dim: usize,
         embedder: Option<&Embedder>,
     ) -> Result<VectorIndex, SearchError> {
-        let data = store.load_all_embeddings(dim)?;
+        let (generation, data) = store.load_all_embeddings_with_generation(dim)?;
         let index = VectorIndex::build(dim, &data)?;
-        Self::persist_built(store, dim, embedder, &index, &data);
+        Self::persist_built(store, dim, embedder, &index, generation);
         Ok(index)
     }
 
-    /// Persist a freshly built `index` fingerprinted by the exact `data` it was built from.
-    /// Best-effort and gated: only a model-backed, file-backed engine with a non-empty index
-    /// writes a sidecar; in-memory/FTS-only/overlay engines and the pre-embedding empty state
-    /// are skipped.
+    /// Persist a freshly built `index` stamped with the `embedding_generation` of the snapshot it
+    /// was built from. Best-effort and gated: only a model-backed, file-backed engine with a
+    /// non-empty index writes a sidecar; in-memory/FTS-only/overlay engines and the pre-embedding
+    /// empty state are skipped.
     fn persist_built(
         store: &Store,
         dim: usize,
         embedder: Option<&Embedder>,
         index: &VectorIndex,
-        data: &[(i64, Vec<f32>)],
+        generation: i64,
     ) {
         if index.is_empty() {
             return;
         }
         if let Some(key) = Self::persist_key(store, dim, embedder) {
-            if let Err(e) = crate::vector_persist::persist(index, &key, data) {
+            if let Err(e) = crate::vector_persist::persist(index, &key, generation) {
                 warn!("failed to persist vector index: {e}");
             }
         }
@@ -580,9 +580,9 @@ impl SearchEngine {
     ) -> Result<VectorIndex, SearchError> {
         let pending = store.load_pending_embedding_documents("code")?;
         if pending.is_empty() {
-            let data = store.load_all_embeddings(dim)?;
+            let (generation, data) = store.load_all_embeddings_with_generation(dim)?;
             let index = VectorIndex::build(dim, &data)?;
-            Self::persist_built(store, dim, Some(embedder), &index, &data);
+            Self::persist_built(store, dim, Some(embedder), &index, generation);
             return Ok(index);
         }
 
@@ -681,9 +681,9 @@ impl SearchEngine {
             p.active.store(false, Ordering::Relaxed);
         }
 
-        let data = store.load_all_embeddings(dim)?;
+        let (generation, data) = store.load_all_embeddings_with_generation(dim)?;
         let index = VectorIndex::build(dim, &data)?;
-        Self::persist_built(store, dim, Some(embedder), &index, &data);
+        Self::persist_built(store, dim, Some(embedder), &index, generation);
 
         info!(embedded, errors, total_vectors = index.len(), "fused embedding complete");
         Ok(index)
