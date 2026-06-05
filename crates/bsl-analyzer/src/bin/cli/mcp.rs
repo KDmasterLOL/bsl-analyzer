@@ -268,10 +268,12 @@ fn require_workspace_broker(
     })
 }
 
-/// Idle window after which a backend with no live connections exits. Overridable via
-/// `BSL_MCP_IDLE_SECS` (used by tests for a short window).
+/// Idle window after which a backend with no live connections exits. While any client
+/// is open its proxy holds the connection, which keeps the backend alive regardless;
+/// this window only governs how long to stay warm *after the last client disconnects*,
+/// so a quick reopen reuses the backend. Default 120s; override via `BSL_MCP_IDLE_SECS`.
 fn broker_idle_timeout() -> Duration {
-    let secs = env::var("BSL_MCP_IDLE_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(1800);
+    let secs = env::var("BSL_MCP_IDLE_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(120);
     Duration::from_secs(secs)
 }
 
