@@ -57,31 +57,70 @@ impl SemanticUnavailable {
     }
 }
 
-/// Acquire the engine guard, briefly retrying on transient contention. A background overlay
-/// sync (and the file watcher's per-change dirty-marking) momentarily holds the engine lock
-/// even after the index is ready, which a single `try_lock` would surface to a concurrent
-/// `search_code` as a misleading "overlay warming up" — the race `search(status)=ready`
-/// contradicts. Returns `None` only if the lock stays contended past the short budget (the
-/// genuine still-building / long-priming case), where the caller's warming fallback is right.
-/// Runs on a `spawn_blocking` thread, so the brief sleeps do not stall the async runtime.
+/// Why [`try_acquire_engine`] could not hand back the engine guard. The two cases need
+/// different caller responses, so they stay distinct rather than collapsing into one `None`:
+/// a poisoned lock is a real failure (retrying is futile), a timeout is a stall (retrying or
+/// degrading to the baseline is reasonable).
+enum AcquireFailure {
+    /// A holder panicked while holding the lock; waiting cannot recover it.
+    Poisoned,
+    /// The lock stayed held past the safety cap — a genuine stall, not ordinary contention.
+    TimedOut,
+}
+
+/// A poisoned engine lock means a prior operation panicked mid-search; the engine state may be
+/// inconsistent and retrying is futile, so this is a hard internal error rather than the
+/// "warming up / try again" advice a transient state would warrant.
+fn engine_lock_poisoned_error() -> McpError {
+    McpError::internal_error(
+        "search engine lock is poisoned (a prior operation panicked); restart the MCP server"
+            .to_owned(),
+        None,
+    )
+}
+
+/// Acquire the engine guard, *blocking* (queueing) on contention instead of bailing out.
+///
+/// The engine owns a `!Sync` rusqlite connection, so every search must serialize on this lock
+/// — that serialization is mandatory, not a coarseness to widen away (see
+/// [`crate::state::SharedSearchEngine`]). What this MUST NOT do is surface ordinary contention
+/// as a failure: an overlay prime, or a peer search inside its (now tightly bounded) embedding
+/// round-trip, holds the lock for seconds, and a short `try_lock` budget turned that into a
+/// misleading "overlay warming up" for every other `search_code` in a concurrent batch. So we
+/// wait for the lock and return real results once it frees. Polling (rather than parking) keeps
+/// the brief sleeps on the `spawn_blocking` thread without pulling in a timed-lock dependency.
 fn try_acquire_engine(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
-) -> Option<std::sync::MutexGuard<'_, Option<SearchEngine>>> {
-    const ATTEMPTS: usize = 5;
-    const DELAY: std::time::Duration = std::time::Duration::from_millis(20);
-    for attempt in 0..ATTEMPTS {
+) -> Result<std::sync::MutexGuard<'_, Option<SearchEngine>>, AcquireFailure> {
+    // Bounds a pathological hang (a deadlock bug, a never-returning holder) without ever
+    // tripping on the ordinary multi-second holds — an overlay prime or a slow embed. The query
+    // embed under the lock is itself capped (see `Embedder::INTERACTIVE_TIMEOUT`), so this cap
+    // only ever fires on a real stall, never on a routine concurrent search.
+    const MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+    const POLL: std::time::Duration = std::time::Duration::from_millis(25);
+    acquire_engine_within(engine, MAX_WAIT, POLL)
+}
+
+/// The acquire loop, parameterized over the wait budget so tests can exercise the timeout path
+/// without a 30-second sleep. Production callers go through [`try_acquire_engine`].
+fn acquire_engine_within<'a>(
+    engine: &'a Arc<Mutex<Option<SearchEngine>>>,
+    max_wait: std::time::Duration,
+    poll: std::time::Duration,
+) -> Result<std::sync::MutexGuard<'a, Option<SearchEngine>>, AcquireFailure> {
+    let start = std::time::Instant::now();
+    loop {
         match engine.try_lock() {
-            Ok(guard) => return Some(guard),
-            // A poisoned lock will not recover by waiting — fall back immediately.
-            Err(std::sync::TryLockError::Poisoned(_)) => return None,
+            Ok(guard) => return Ok(guard),
+            Err(std::sync::TryLockError::Poisoned(_)) => return Err(AcquireFailure::Poisoned),
             Err(std::sync::TryLockError::WouldBlock) => {
-                if attempt + 1 < ATTEMPTS {
-                    std::thread::sleep(DELAY);
+                if start.elapsed() >= max_wait {
+                    return Err(AcquireFailure::TimedOut);
                 }
+                std::thread::sleep(poll);
             }
         }
     }
-    None
 }
 
 /// Produce lexical (FTS5) code hits, separated from presentation. Hard policy/terminal
@@ -102,8 +141,9 @@ fn lexical_code_hits(
         external_baseline.as_ref(),
     )?;
     let guard = match try_acquire_engine(engine) {
-        Some(g) => g,
-        None => {
+        Ok(g) => g,
+        Err(AcquireFailure::Poisoned) => return Err(engine_lock_poisoned_error()),
+        Err(AcquireFailure::TimedOut) => {
             if let Some(source) = external_baseline {
                 match try_direct_lexical_code_no_overlay(&source, query, limit) {
                     DirectResult::Found(hits) => {
@@ -126,7 +166,8 @@ fn lexical_code_hits(
                 }
             }
             return Ok(CodeHits::Pending(
-                "Search index overlay is warming up, please try again in a moment.".to_owned(),
+                "Search index is busy (a long operation is holding it); please try again in a moment."
+                    .to_owned(),
             ));
         }
     };
@@ -208,10 +249,11 @@ fn semantic_code_hits(
         .map_err(|e| McpError::internal_error(format!("semantic runtime lock error: {e}"), None))?
         .clone();
     let guard = match try_acquire_engine(engine) {
-        Some(g) => g,
-        None => {
+        Ok(g) => g,
+        Err(AcquireFailure::Poisoned) => return Err(engine_lock_poisoned_error()),
+        Err(AcquireFailure::TimedOut) => {
             return Ok(CodeHits::Pending(
-                "Semantic search overlay is warming up. Lexical search is available while the overlay is prepared."
+                "Semantic search is busy (a long operation is holding the index). Lexical search is available in the meantime."
                     .to_owned(),
             ));
         }
@@ -828,10 +870,11 @@ pub fn search_status(
         let search_state = match &semantic_runtime {
             SemanticRuntimeStatus::Failed(_) => "ready (semantic runtime failed)",
             // Honest about the window the watcher/overlay sync briefly holds the engine lock:
-            // a concurrent search_code can transiently return "warming up" even though the
-            // index itself is ready — so the agent knows to simply retry, not that it is broken.
+            // a concurrent search_code now queues behind that hold (it blocks on the engine
+            // mutex rather than failing) and returns real results once the sync frees the lock,
+            // so the agent should expect a brief wait, not a "warming up" error.
             SemanticRuntimeStatus::OverlaySyncing => {
-                "ready — overlay syncing (a concurrent search_code may briefly say \"warming up\"; retry shortly)"
+                "ready — overlay syncing (a concurrent search_code briefly queues behind the sync, then returns results)"
             }
             SemanticRuntimeStatus::Indexing => {
                 "ready (lexical) — semantic index building in background"
@@ -2214,30 +2257,101 @@ mod tests {
         let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
 
         assert!(text.contains("Search index: ready"));
-        // The top line is honest that a concurrent search_code may transiently warm-up during
-        // the sync, resolving the "status=ready but search says warming" contradiction.
+        // The top line is honest that a concurrent search_code briefly queues behind the sync
+        // (it blocks rather than failing), resolving the "status=ready but search says warming"
+        // contradiction without promising an error the blocking contract no longer returns.
         assert!(
-            text.contains("overlay syncing") && text.contains("warming up"),
-            "status must flag the transient warming window: {text}",
+            text.contains("overlay syncing") && text.contains("queues behind the sync"),
+            "status must flag the transient queue window: {text}",
         );
         assert!(text.contains("Semantic: syncing local overlay embeddings against remote baseline"));
         assert!(text.contains("Indexing in progress: 25%"));
     }
 
     #[test]
-    fn try_acquire_engine_waits_out_transient_contention_then_gives_up() {
+    fn try_acquire_engine_queues_until_the_lock_frees() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Barrier;
+        use std::time::{Duration, Instant};
+
         let engine: Arc<Mutex<Option<SearchEngine>>> = Arc::new(Mutex::new(None));
         // Uncontended: the guard is acquired immediately.
-        assert!(super::try_acquire_engine(&engine).is_some());
+        assert!(super::try_acquire_engine(&engine).is_ok());
 
-        // Held for the whole call → every retry fails → None (the genuine still-busy case the
-        // caller degrades on). The guard is dropped here, not held across the assert.
+        // A peer holds the lock for a known interval, as an overlay prime or a slow embedding
+        // round-trip would. The acquire must QUEUE — block rather than bail with a misleading
+        // "warming up" — and then succeed once the holder releases, so a concurrent batch all
+        // get real results instead of half of them failing.
+        const HOLD: Duration = Duration::from_millis(300);
         let held = engine.lock().unwrap();
-        assert!(super::try_acquire_engine(&engine).is_none());
+        // The barrier guarantees the probe has reached the acquire call while the lock is still
+        // held, so a passing test can't be an artifact of the probe starting after the release.
+        let gate = Arc::new(Barrier::new(2));
+        let entered = Arc::new(AtomicBool::new(false));
+        let probe = {
+            let engine = Arc::clone(&engine);
+            let gate = Arc::clone(&gate);
+            let entered = Arc::clone(&entered);
+            std::thread::spawn(move || {
+                gate.wait();
+                entered.store(true, Ordering::SeqCst);
+                let started = Instant::now();
+                let acquired = super::try_acquire_engine(&engine).is_ok();
+                (acquired, started.elapsed())
+            })
+        };
+        gate.wait();
+        // Keep holding well past the point the probe is blocking on the lock.
+        std::thread::sleep(HOLD);
+        assert!(entered.load(Ordering::SeqCst), "probe must reach the acquire under contention");
         drop(held);
+        let (acquired, waited) = probe.join().unwrap();
+        assert!(acquired, "acquire must succeed once the lock frees");
+        // It blocked for ~the hold, not bailed immediately — i.e. it really queued.
+        assert!(waited >= HOLD / 2, "acquire returned too fast to have queued: {waited:?}");
+    }
 
-        // Released → acquirable again.
-        assert!(super::try_acquire_engine(&engine).is_some());
+    #[test]
+    fn acquire_engine_times_out_when_the_lock_stays_held() {
+        use std::time::{Duration, Instant};
+
+        let engine: Arc<Mutex<Option<SearchEngine>>> = Arc::new(Mutex::new(None));
+        // Held for the whole call with a tiny cap: the acquire must give up as `TimedOut` (the
+        // caller degrades to baseline / "busy, retry"), and only after roughly the cap elapsed.
+        let held = engine.lock().unwrap();
+        let cap = Duration::from_millis(150);
+        let started = Instant::now();
+        let outcome = super::acquire_engine_within(&engine, cap, Duration::from_millis(10));
+        let waited = started.elapsed();
+        assert!(matches!(outcome, Err(super::AcquireFailure::TimedOut)));
+        assert!(waited >= cap, "must wait out the cap before giving up: {waited:?}");
+        drop(held);
+    }
+
+    #[test]
+    fn acquire_engine_reports_poison_immediately() {
+        use std::time::{Duration, Instant};
+
+        let engine: Arc<Mutex<Option<SearchEngine>>> = Arc::new(Mutex::new(None));
+        // A holder panics, poisoning the lock. Waiting cannot recover it, so the acquire must
+        // report `Poisoned` at once — not spin out the cap — so the caller can surface a hard
+        // error instead of "warming up". A large cap proves it returns without waiting it out.
+        let poisoner = {
+            let engine = Arc::clone(&engine);
+            std::thread::spawn(move || {
+                let _held = engine.lock().unwrap();
+                panic!("poison the engine lock");
+            })
+        };
+        assert!(poisoner.join().is_err());
+        let started = Instant::now();
+        let outcome = super::acquire_engine_within(
+            &engine,
+            Duration::from_secs(30),
+            Duration::from_millis(10),
+        );
+        assert!(matches!(outcome, Err(super::AcquireFailure::Poisoned)));
+        assert!(started.elapsed() < Duration::from_secs(1), "poison must not block on the cap");
     }
 
     #[test]

@@ -16,6 +16,14 @@ use std::{
 };
 use tokio::sync::RwLock;
 
+/// The search engine behind a mutex. It MUST stay a `Mutex` (not an `RwLock`): the engine
+/// owns a `rusqlite::Connection`, which is `Send` but `!Sync` — its internal statement cache
+/// mutates through a `RefCell` even on read-only SQL, so two threads may never hold `&engine`
+/// at once. Searches therefore serialize here by necessity. The "overlay warming up" failure
+/// under a concurrent batch is fixed in [`crate::tools::search`] by *blocking* on this lock
+/// (queueing) rather than bailing out on brief contention, not by widening the lock.
+pub(crate) type SharedSearchEngine = Arc<Mutex<Option<SearchEngine>>>;
+
 #[derive(Clone)]
 pub struct SharedState {
     configuration: Arc<RwLock<Option<Configuration>>>,
@@ -27,7 +35,7 @@ pub struct SharedState {
     source_root: Option<PathBuf>,
     onec_client: Option<OnecClient>,
     debug_session: Arc<Mutex<Option<bsl_debug::session::DebugSession>>>,
-    search_engine: Arc<Mutex<Option<SearchEngine>>>,
+    search_engine: SharedSearchEngine,
     index_progress: Arc<IndexProgress>,
     semantic_runtime: Arc<Mutex<SemanticRuntimeStatus>>,
     workspace_search_mode: WorkspaceSearchMode,
@@ -110,7 +118,7 @@ impl SharedState {
             })
             .ok();
 
-        let search_engine: Arc<Mutex<Option<SearchEngine>>> = Arc::new(Mutex::new(None));
+        let search_engine: SharedSearchEngine = Arc::new(Mutex::new(None));
         let index_progress = IndexProgress::new();
         let semantic_runtime = Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled));
         let background_indexers = Arc::new(AtomicUsize::new(0));
@@ -200,7 +208,7 @@ impl SharedState {
     // clarifying anything, so the small over-arity is accepted here.
     #[allow(clippy::too_many_arguments)]
     fn spawn_workspace_search_init(
-        search_engine: Arc<Mutex<Option<SearchEngine>>>,
+        search_engine: SharedSearchEngine,
         index_progress: Arc<IndexProgress>,
         semantic_runtime: Arc<Mutex<SemanticRuntimeStatus>>,
         background_indexers: Arc<AtomicUsize>,
@@ -366,7 +374,7 @@ impl SharedState {
     }
 
     pub fn reference(project_root: Option<PathBuf>) -> Self {
-        let search_engine: Arc<Mutex<Option<SearchEngine>>> = Arc::new(Mutex::new(None));
+        let search_engine: SharedSearchEngine = Arc::new(Mutex::new(None));
         let index_progress = IndexProgress::new();
         let semantic_runtime = Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled));
         let background_indexers = Arc::new(AtomicUsize::new(0));
@@ -519,7 +527,7 @@ impl SharedState {
         &self.debug_session
     }
 
-    pub fn search_engine(&self) -> &Arc<Mutex<Option<SearchEngine>>> {
+    pub fn search_engine(&self) -> &SharedSearchEngine {
         &self.search_engine
     }
 
@@ -1161,7 +1169,7 @@ impl SharedState {
     }
 
     fn run_workspace_overlay_watcher(
-        engine: Arc<Mutex<Option<SearchEngine>>>,
+        engine: SharedSearchEngine,
         watch_root: PathBuf,
         watcher_ready: Arc<AtomicBool>,
     ) {
@@ -1200,7 +1208,7 @@ impl SharedState {
         }
     }
 
-    fn handle_workspace_watch_event(engine: &Arc<Mutex<Option<SearchEngine>>>, event: &Event) {
+    fn handle_workspace_watch_event(engine: &SharedSearchEngine, event: &Event) {
         if !matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_))
         {
             return;
