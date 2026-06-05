@@ -140,7 +140,7 @@ fn run_mcp_serve(args: McpServeArgs) -> Result<(), Box<dyn Error + Send + Sync>>
         .into());
     }
 
-    match args.mode {
+    match resolve_serve_mode(args.mode) {
         McpServeMode::Stdio => {
             run_mcp_server(profile, args.source_dir, args.onec_url, &args.onec_user, &password)
         }
@@ -149,6 +149,26 @@ fn run_mcp_serve(args: McpServeArgs) -> Result<(), Box<dyn Error + Send + Sync>>
             run_mcp_daemon(profile, args.source_dir, args.onec_url, &args.onec_user, &password)
         }
     }
+}
+
+/// Resolve the effective serve mode. An explicit `--mode` always wins; otherwise the
+/// `BSL_MCP_BROKER` env var promotes the default (stdio) to broker. The env path
+/// exists because some clients reconstruct the server argv and drop extra flags when
+/// importing `.mcp.json` (Codex does this), but they DO propagate the `env` block —
+/// so an env switch is the only activation that reaches every client. The re-exec'd
+/// daemon is launched with explicit `--mode daemon`, which takes precedence here, so
+/// inheriting the env var cannot turn it back into a proxy.
+fn resolve_serve_mode(flag: McpServeMode) -> McpServeMode {
+    match flag {
+        McpServeMode::Stdio if env_flag_enabled("BSL_MCP_BROKER") => McpServeMode::Broker,
+        other => other,
+    }
+}
+
+fn env_flag_enabled(key: &str) -> bool {
+    env::var(key)
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
 }
 
 /// The broker proxy: connect to (or launch) the shared per-project backend and relay
