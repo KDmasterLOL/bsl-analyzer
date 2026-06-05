@@ -32,11 +32,32 @@ const RESPAWN_INTERVAL: Duration = Duration::from_secs(3);
 /// bound across many backend generations.
 const MAX_LOG_BYTES: u64 = 4 * 1024 * 1024;
 
+/// Outcome of a proxy attempt, separating a pre-session connect failure from a
+/// mid-session relay failure — they need different handling by the caller.
+pub enum ProxyOutcome {
+    /// The session was served to completion (or the client disconnected normally).
+    Served,
+    /// The backend could not be reached or launched. No stdin was consumed yet, so the
+    /// caller may safely fall back to serving the client directly over stdio.
+    Unavailable(anyhow::Error),
+}
+
 /// Connect to the backend for `key`, launching it via `daemon_cmd` if it is not yet
 /// reachable, then relay stdio to it until either side closes.
-pub async fn connect_or_launch(key: BackendKey, daemon_cmd: Command) -> anyhow::Result<()> {
-    let stream = connect_with_launch(&key, daemon_cmd).await?;
-    relay_stdio(stream).await
+///
+/// A connect-phase failure is returned as [`ProxyOutcome::Unavailable`] (stdin
+/// untouched → safe to fall back). A relay-phase failure propagates as `Err`: by then
+/// the stdin pump has consumed bytes, so re-serving on the same stream would be wrong.
+pub async fn connect_or_launch(
+    key: BackendKey,
+    daemon_cmd: Command,
+) -> anyhow::Result<ProxyOutcome> {
+    let stream = match connect_with_launch(&key, daemon_cmd).await {
+        Ok(stream) => stream,
+        Err(e) => return Ok(ProxyOutcome::Unavailable(e)),
+    };
+    relay_stdio(stream).await?;
+    Ok(ProxyOutcome::Served)
 }
 
 async fn connect_with_launch(

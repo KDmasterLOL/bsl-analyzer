@@ -140,35 +140,58 @@ fn run_mcp_serve(args: McpServeArgs) -> Result<(), Box<dyn Error + Send + Sync>>
         .into());
     }
 
-    match resolve_serve_mode(args.mode) {
+    match resolve_serve_mode(args.mode, profile) {
         McpServeMode::Stdio => {
             run_mcp_server(profile, args.source_dir, args.onec_url, &args.onec_user, &password)
         }
-        McpServeMode::Broker => run_mcp_broker(profile, &args),
+        McpServeMode::Broker => run_mcp_broker(profile, &args, &password),
         McpServeMode::Daemon => {
             run_mcp_daemon(profile, args.source_dir, args.onec_url, &args.onec_user, &password)
         }
     }
 }
 
-/// Resolve the effective serve mode. An explicit `--mode` always wins; otherwise the
-/// `BSL_MCP_BROKER` env var promotes the default (stdio) to broker. The env path
-/// exists because some clients reconstruct the server argv and drop extra flags when
-/// importing `.mcp.json` (Codex does this), but they DO propagate the `env` block —
-/// so an env switch is the only activation that reaches every client. The re-exec'd
-/// daemon is launched with explicit `--mode daemon`, which takes precedence here, so
-/// inheriting the env var cannot turn it back into a proxy.
-fn resolve_serve_mode(flag: McpServeMode) -> McpServeMode {
-    match flag {
-        McpServeMode::Stdio if env_flag_enabled("BSL_MCP_BROKER") => McpServeMode::Broker,
-        other => other,
+/// Resolve the effective serve mode.
+///
+/// An explicit `--mode` always wins (the re-exec'd daemon passes `--mode daemon`, so
+/// inheriting the env switch can't turn it back into a proxy). Otherwise the broker
+/// applies only to the heavy `workspace` profile, decided by env then platform:
+///
+/// - `BSL_MCP_BROKER` is an explicit opt-in/out on any OS. It is the only signal that
+///   reaches Codex: Codex imports a project's `.mcp.json` but reconstructs the argv
+///   (dropping extra flags) and does not propagate its `env` block — so the activation
+///   has to live in the binary's own default, not the client config.
+/// - With no override, unix defaults to the broker (validated there); Windows stays on
+///   direct stdio until the named-pipe path is exercised in the field. The broker is
+///   still reachable on Windows via explicit `--mode broker` / `BSL_MCP_BROKER=1`.
+fn resolve_serve_mode(flag: McpServeMode, profile: mcp_server::McpProfile) -> McpServeMode {
+    if !matches!(flag, McpServeMode::Stdio) {
+        return flag;
+    }
+    if !matches!(profile, mcp_server::McpProfile::Workspace) {
+        return McpServeMode::Stdio;
+    }
+    match env_broker_override() {
+        Some(true) => return McpServeMode::Broker,
+        Some(false) => return McpServeMode::Stdio,
+        None => {}
+    }
+    if cfg!(unix) {
+        McpServeMode::Broker
+    } else {
+        McpServeMode::Stdio
     }
 }
 
-fn env_flag_enabled(key: &str) -> bool {
-    env::var(key)
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(false)
+/// `BSL_MCP_BROKER` parsed as an explicit tristate: `Some(true|false)` for a recognized
+/// truthy/falsy value, `None` when unset or unrecognized (defer to the platform default).
+fn env_broker_override() -> Option<bool> {
+    let value = env::var("BSL_MCP_BROKER").ok()?;
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
 }
 
 /// The broker proxy: connect to (or launch) the shared per-project backend and relay
@@ -177,6 +200,7 @@ fn env_flag_enabled(key: &str) -> bool {
 fn run_mcp_broker(
     profile: mcp_server::McpProfile,
     args: &McpServeArgs,
+    onec_password: &str,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let source_dir = require_workspace_broker(profile, args.source_dir.clone())?;
 
@@ -212,8 +236,25 @@ fn run_mcp_broker(
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     let result = rt.block_on(mcp_server::broker::proxy::connect_or_launch(key, cmd));
     drop(rt);
-    result?;
-    Ok(())
+
+    use mcp_server::broker::proxy::ProxyOutcome;
+    match result? {
+        ProxyOutcome::Served => Ok(()),
+        // Connect-phase failure only: no client bytes were relayed yet, so fall back to
+        // serving directly over stdio (the stdio server answers the pending `initialize`
+        // cleanly). A relay-phase failure surfaced as `Err` above and is fatal — we must
+        // not re-serve on a half-consumed stdin.
+        ProxyOutcome::Unavailable(e) => {
+            tracing::warn!(error = %e, "broker backend unavailable; serving directly over stdio");
+            run_mcp_server(
+                profile,
+                Some(source_dir),
+                args.onec_url.clone(),
+                &args.onec_user,
+                onec_password,
+            )
+        }
+    }
 }
 
 /// The shared backend: build the resident state once and serve every connecting
