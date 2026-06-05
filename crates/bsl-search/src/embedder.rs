@@ -25,7 +25,13 @@ impl Default for EmbedderConfig {
 
 pub struct Embedder {
     config: EmbedderConfig,
+    /// Resilient agent for the unattended batch indexing pass: a long global timeout, paired
+    /// with [`Self::MAX_RETRIES`] in [`Self::embed_batch`].
     agent: ureq::Agent,
+    /// Tight agent for interactive single-query embeds ([`Self::embed`]). A `search_code` caller
+    /// is waiting and the engine mutex is held across the call, so the query embed must fail
+    /// fast instead of inheriting the batch path's minutes-long timeout-and-retry budget.
+    interactive_agent: ureq::Agent,
 }
 
 impl Clone for Embedder {
@@ -35,12 +41,20 @@ impl Clone for Embedder {
 }
 
 impl Embedder {
+    /// Global timeout for an interactive query embed. Bounds how long [`Self::embed`] can hold
+    /// the engine mutex, so one slow embed cannot stall every concurrent `search_code`.
+    const INTERACTIVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
+
     pub fn new(config: EmbedderConfig) -> Self {
         let agent = ureq::Agent::config_builder()
             .timeout_global(Some(std::time::Duration::from_secs(120)))
             .build()
             .new_agent();
-        Self { config, agent }
+        let interactive_agent = ureq::Agent::config_builder()
+            .timeout_global(Some(Self::INTERACTIVE_TIMEOUT))
+            .build()
+            .new_agent();
+        Self { config, agent, interactive_agent }
     }
 
     pub fn dim(&self) -> usize {
@@ -75,6 +89,14 @@ impl Embedder {
     }
 
     fn embed_batch_once(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, SearchError> {
+        self.embed_batch_once_with(&self.agent, texts)
+    }
+
+    fn embed_batch_once_with(
+        &self,
+        agent: &ureq::Agent,
+        texts: &[&str],
+    ) -> Result<Vec<Vec<f32>>, SearchError> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
@@ -91,7 +113,7 @@ impl Embedder {
             provider: provider_routing,
         };
 
-        let mut req = self.agent.post(&url);
+        let mut req = agent.post(&url);
         if let Some(ref key) = self.config.api_key {
             req = req.header("Authorization", &format!("Bearer {key}"));
         }
@@ -137,9 +159,23 @@ impl Embedder {
         Ok(embeddings)
     }
 
+    /// Embed a single interactive query, fail-fast. Unlike [`Self::embed_batch`] (the resilient
+    /// indexing path), this makes ONE attempt on the tight-timeout [`Self::interactive_agent`]:
+    /// the caller is an interactive `search_code` holding the engine mutex, so a stuck embedding
+    /// service must surface an error in seconds rather than retry for minutes and block every
+    /// concurrent search. A transient failure is the caller's to retry as a whole search.
     pub fn embed(&self, text: &str) -> Result<Vec<f32>, SearchError> {
-        let mut results = self.embed_batch(&[text])?;
+        let mut results = self.embed_batch_once_with(&self.interactive_agent, &[text])?;
         results.pop().ok_or_else(|| SearchError::Embedder("empty result".into()))
+    }
+
+    /// Embed a batch fail-fast on the interactive agent. For the workspace-overlay refresh, which
+    /// runs while the engine mutex is held (an interactive semantic search or the warmup prime):
+    /// it must NOT inherit the indexing path's minutes-long retry budget and stall every
+    /// concurrent search. A transient failure just leaves those chunks un-embedded until the next
+    /// refresh re-attempts them; lexical search stays available meanwhile.
+    pub fn embed_batch_interactive(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, SearchError> {
+        self.embed_batch_once_with(&self.interactive_agent, texts)
     }
 
     pub fn health_check(&self) -> Result<(), SearchError> {

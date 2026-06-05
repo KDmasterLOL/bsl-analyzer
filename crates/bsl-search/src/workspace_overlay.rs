@@ -890,7 +890,9 @@ fn build_overlay_vectors(
     for (batch_indexes, batch_inputs) in
         missing_indexes.chunks(batch_size.max(1)).zip(missing_inputs.chunks(batch_size.max(1)))
     {
-        let embeddings = embedder.embed_batch(batch_inputs)?;
+        // The overlay refresh always runs with the engine mutex held (interactive search or the
+        // warmup prime), so the embed must be fail-fast, not the indexing path's 120s x 10 retry.
+        let embeddings = embedder.embed_batch_interactive(batch_inputs)?;
         for (idx, embedding) in batch_indexes.iter().copied().zip(embeddings) {
             embedding_cache.insert(documents[idx].content_hash.clone(), embedding.clone());
             vectors[idx] = Some(embedding);
