@@ -28,6 +28,11 @@ test:
   script:
     - cargo fmt --all -- --check
     - cargo clippy --all-targets --all-features
+    # Unit tests must run hermetically: the proit group injects EMBEDDING_*/OpenRouter
+    # credentials into every job, which would make the reference backend do live embedding
+    # warmup and hold the broker daemon past its idle-exit window (broker::tests fail). Tests
+    # that need an embedder set the env themselves; here we drop the inherited credentials.
+    - unset EMBEDDING_URL EMBEDDING_API_KEY EMBEDDING_MODEL EMBEDDING_PROVIDER OPENROUTER_API_KEY
     - cargo test --all --no-fail-fast
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
