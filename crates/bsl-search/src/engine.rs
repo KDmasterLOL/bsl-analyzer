@@ -155,8 +155,7 @@ impl SearchEngine {
         let dim = embedder_config.dim.unwrap_or(1024);
         let embedder = Embedder::new(embedder_config);
 
-        let data = store.load_all_embeddings(dim)?;
-        let index = VectorIndex::build(dim, &data)?;
+        let index = Self::load_or_build_index(&store, dim, Some(&embedder))?;
         info!(vectors = index.len(), dim, "search index loaded");
 
         Self::ensure_fts(&store)?;
@@ -173,6 +172,75 @@ impl SearchEngine {
             workspace_baseline_hash_mode: BaselineHashMode::RawFileBytes,
             graph_context_provider: None,
         })
+    }
+
+    /// Load a persisted vector index when it still matches the current embeddings, otherwise
+    /// build it from SQLite and persist the result. Rebuilding the HNSW is the dominant cold-
+    /// start cost; loading a prebuilt one is ~40x faster (see `examples/bench_vector_index.rs`).
+    /// Only a real, model-backed, file-backed engine persists — in-memory and embedder-less
+    /// (FTS-only / overlay) engines fall back to a plain build with no sidecar.
+    fn load_or_build_index(
+        store: &Store,
+        dim: usize,
+        embedder: Option<&Embedder>,
+    ) -> Result<VectorIndex, SearchError> {
+        if let Some(key) = Self::persist_key(store, dim, embedder) {
+            if let Some(index) = crate::vector_persist::try_load(store, &key) {
+                info!(vectors = index.len(), "loaded persisted vector index");
+                return Ok(index);
+            }
+        }
+        Self::build_persisted_index(store, dim, embedder)
+    }
+
+    /// Build the vector index from SQLite and persist it (best-effort) when persistence applies.
+    /// The persisted fingerprint is taken from the SAME `data` snapshot the index is built from —
+    /// never a fresh DB read — so the sidecar can never describe a different state than the saved
+    /// index. An empty index is not persisted (e.g. before the deferred embedding pass runs).
+    fn build_persisted_index(
+        store: &Store,
+        dim: usize,
+        embedder: Option<&Embedder>,
+    ) -> Result<VectorIndex, SearchError> {
+        let data = store.load_all_embeddings(dim)?;
+        let index = VectorIndex::build(dim, &data)?;
+        Self::persist_built(store, dim, embedder, &index, &data);
+        Ok(index)
+    }
+
+    /// Persist a freshly built `index` fingerprinted by the exact `data` it was built from.
+    /// Best-effort and gated: only a model-backed, file-backed engine with a non-empty index
+    /// writes a sidecar; in-memory/FTS-only/overlay engines and the pre-embedding empty state
+    /// are skipped.
+    fn persist_built(
+        store: &Store,
+        dim: usize,
+        embedder: Option<&Embedder>,
+        index: &VectorIndex,
+        data: &[(i64, Vec<f32>)],
+    ) {
+        if index.is_empty() {
+            return;
+        }
+        if let Some(key) = Self::persist_key(store, dim, embedder) {
+            if let Err(e) = crate::vector_persist::persist(index, &key, data) {
+                warn!("failed to persist vector index: {e}");
+            }
+        }
+    }
+
+    /// The persistence identity for this engine's index, or `None` when persistence does not
+    /// apply (no embedder, or an in-memory database).
+    fn persist_key<'a>(
+        store: &'a Store,
+        dim: usize,
+        embedder: Option<&'a Embedder>,
+    ) -> Option<crate::vector_persist::PersistKey<'a>> {
+        let model_id = embedder?.model();
+        if store.db_path() == Path::new(":memory:") {
+            return None;
+        }
+        Some(crate::vector_persist::PersistKey { db_path: store.db_path(), model_id, dim })
     }
 
     pub fn fts_only(db_path: &Path) -> Result<Self, SearchError> {
@@ -432,8 +500,7 @@ impl SearchEngine {
             p.active.store(false, Ordering::Relaxed);
         }
 
-        let data = self.store.load_all_embeddings(self.dim)?;
-        self.index = VectorIndex::build(self.dim, &data)?;
+        self.index = Self::build_persisted_index(&self.store, self.dim, self.embedder.as_ref())?;
 
         if errors > 0 {
             info!(
@@ -478,6 +545,9 @@ impl SearchEngine {
         let store = Store::open(db_path)?;
         let dim = config.embedder.dim.unwrap_or(1024);
         let embedder = Embedder::new(config.embedder.clone());
+        // `run_embedding_pass` persists the built index from this background thread (it owns the
+        // standalone store), NOT after the caller's `set_vector_index` swap which holds the live
+        // engine lock — so the ~1.5s save never blocks concurrent search and the swap is instant.
         Self::run_embedding_pass(
             &store,
             &embedder,
@@ -511,7 +581,9 @@ impl SearchEngine {
         let pending = store.load_pending_embedding_documents("code")?;
         if pending.is_empty() {
             let data = store.load_all_embeddings(dim)?;
-            return VectorIndex::build(dim, &data);
+            let index = VectorIndex::build(dim, &data)?;
+            Self::persist_built(store, dim, Some(embedder), &index, &data);
+            return Ok(index);
         }
 
         let items: Vec<(i64, String)> = pending
@@ -611,6 +683,7 @@ impl SearchEngine {
 
         let data = store.load_all_embeddings(dim)?;
         let index = VectorIndex::build(dim, &data)?;
+        Self::persist_built(store, dim, Some(embedder), &index, &data);
 
         info!(embedded, errors, total_vectors = index.len(), "fused embedding complete");
         Ok(index)
@@ -826,8 +899,8 @@ impl SearchEngine {
                 Some(&all_embeddings),
             )?;
 
-            let data = self.store.load_all_embeddings(self.dim)?;
-            self.index = VectorIndex::build(self.dim, &data)?;
+            self.index =
+                Self::build_persisted_index(&self.store, self.dim, self.embedder.as_ref())?;
         } else {
             self.store.reindex_documents(
                 collection,
@@ -1338,8 +1411,7 @@ impl SearchEngine {
             p.active.store(false, Ordering::Relaxed);
         }
 
-        let data = self.store.load_all_embeddings(self.dim)?;
-        self.index = VectorIndex::build(self.dim, &data)?;
+        self.index = Self::build_persisted_index(&self.store, self.dim, self.embedder.as_ref())?;
         Ok(indexed)
     }
 
@@ -1379,8 +1451,7 @@ impl SearchEngine {
 
     pub fn remove_file(&mut self, rel_path: &str) -> Result<(), SearchError> {
         self.store.remove_file(rel_path)?;
-        let data = self.store.load_all_embeddings(self.dim)?;
-        self.index = VectorIndex::build(self.dim, &data)?;
+        self.index = Self::build_persisted_index(&self.store, self.dim, self.embedder.as_ref())?;
         Ok(())
     }
 }

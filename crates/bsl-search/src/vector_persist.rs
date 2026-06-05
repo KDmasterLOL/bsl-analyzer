@@ -1,0 +1,322 @@
+//! Persisting the in-memory usearch vector index next to its SQLite database.
+//!
+//! Rebuilding the HNSW from every embedding at each cold start is the dominant warmup cost
+//! (measured ~392s for ~695k vectors; see `examples/bench_vector_index.rs`). Loading a
+//! prebuilt index is ~10s. This module saves the index to `<db>.usearch` with a
+//! `<db>.usearch.json` sidecar that lets a later start validate the file against the current
+//! embeddings and fall back to a rebuild whenever anything is off.
+//!
+//! Validity is content-true, not a count/rowid proxy:
+//! - scalar gates (schema, usearch version, build options, model, dim, embed-text version)
+//!   fail fast on a configuration change;
+//! - [`data_digest`] over the exact rows a rebuild would index catches a re-embed, an in-place
+//!   vector update, or a crash between writing embeddings and re-saving the index;
+//! - `index_sha` binds the sidecar to a specific index file, so a torn write from two backends
+//!   (e.g. during a version rollout that shares the same database) or a truncated/corrupt file
+//!   is rejected rather than loaded — no cross-process lock needed.
+//!
+//! Every step degrades to "rebuild": a missing/old/corrupt file is never served as if valid.
+
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+use crate::error::SearchError;
+use crate::index::VectorIndex;
+use crate::store::{Store, EMBED_TEXT_VERSION};
+
+const SIDECAR_SCHEMA: u32 = 1;
+
+/// What the persisted index was built from. The loader rebuilds unless every field still
+/// matches the current database and the on-disk index file.
+#[derive(Serialize, Deserialize)]
+struct Sidecar {
+    schema: u32,
+    usearch_version: String,
+    options: String,
+    model_id: String,
+    dim: usize,
+    embed_text_version: i64,
+    count: usize,
+    /// [`data_digest`] of the embeddings the index was built from.
+    embedding_digest: String,
+    /// blake3 of the saved index file — binds this sidecar to that exact file.
+    index_sha: String,
+}
+
+/// Inputs that identify a persisted index for a given engine.
+pub struct PersistKey<'a> {
+    pub db_path: &'a Path,
+    pub model_id: &'a str,
+    pub dim: usize,
+}
+
+fn index_path(db_path: &Path) -> PathBuf {
+    sibling(db_path, "usearch")
+}
+
+fn sidecar_path(db_path: &Path) -> PathBuf {
+    sibling(db_path, "usearch.json")
+}
+
+/// `<db_path>.<ext>` (kept beside the database so it shares the project's `.build` dir).
+fn sibling(db_path: &Path, ext: &str) -> PathBuf {
+    let mut s = db_path.as_os_str().to_os_string();
+    s.push(".");
+    s.push(ext);
+    PathBuf::from(s)
+}
+
+fn file_blake3(path: &Path) -> Result<String, SearchError> {
+    let mut hasher = blake3::Hasher::new();
+    let mut file = fs::File::open(path)
+        .map_err(|e| SearchError::Index(format!("open index for hashing: {e}")))?;
+    std::io::copy(&mut file, &mut hasher)
+        .map_err(|e| SearchError::Index(format!("hash index file: {e}")))?;
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
+/// Order-independent content fingerprint of the EXACT `(id, vector)` rows that go into the
+/// index. Computed from the in-memory build data — never re-read from the database — so the
+/// sidecar can never describe a different snapshot than the saved HNSW, and its domain matches
+/// the index exactly (the same dim-filtered set `load_all_embeddings` produces). Folds
+/// `blake3(id_le || vector_le_bytes)` of each row by XOR; `chunks.id` is unique, so there is no
+/// cancellation. A re-embed, an in-place vector change, or a dropped/added row all move it.
+fn data_digest(data: &[(i64, Vec<f32>)]) -> String {
+    let mut acc = [0u8; 32];
+    for (id, vector) in data {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&id.to_le_bytes());
+        for value in vector {
+            hasher.update(&value.to_le_bytes());
+        }
+        for (a, b) in acc.iter_mut().zip(hasher.finalize().as_bytes()) {
+            *a ^= b;
+        }
+    }
+    blake3::Hash::from(acc).to_hex().to_string()
+}
+
+/// Try to load a persisted index consistent with the current embeddings. `None` means the
+/// caller must rebuild (and should then [`persist`]). Never returns a stale/wrong index.
+pub fn try_load(store: &Store, key: &PersistKey) -> Option<VectorIndex> {
+    let sidecar = read_sidecar(&sidecar_path(key.db_path))?;
+
+    // Cheap scalar gates first — avoid the BLOB scan when configuration plainly changed.
+    if sidecar.schema != SIDECAR_SCHEMA
+        || sidecar.usearch_version != usearch::version()
+        || sidecar.options != VectorIndex::options_signature(key.dim)
+        || sidecar.model_id != key.model_id
+        || sidecar.dim != key.dim
+        || sidecar.embed_text_version != EMBED_TEXT_VERSION
+    {
+        return None;
+    }
+
+    // Content gate: re-derive the digest from exactly the rows a rebuild would index right now
+    // (`load_all_embeddings` applies the same dim filter), so the persisted index must match the
+    // current embeddings — catching a re-embed, an in-place vector update, or a crash between
+    // writing embeddings and re-saving the index.
+    let data = store.load_all_embeddings(key.dim).ok()?;
+    if data.len() != sidecar.count || data_digest(&data) != sidecar.embedding_digest {
+        return None;
+    }
+
+    // File gate: reject a torn/corrupt index whose bytes do not match this sidecar.
+    let idx_path = index_path(key.db_path);
+    if file_blake3(&idx_path).ok()? != sidecar.index_sha {
+        return None;
+    }
+
+    let index = VectorIndex::load(key.dim, &idx_path).ok()?;
+    if index.len() != sidecar.count {
+        return None;
+    }
+    Some(index)
+}
+
+/// Persist `index` + sidecar, fingerprinting `data` — the exact rows the index was built from in
+/// the same snapshot, NOT a fresh database read (which could capture a later mutation and make
+/// the sidecar vouch for a stale index). Best-effort: callers log the error and continue (the
+/// next start just rebuilds), so a persistence failure never breaks search.
+pub fn persist(
+    index: &VectorIndex,
+    key: &PersistKey,
+    data: &[(i64, Vec<f32>)],
+) -> Result<(), SearchError> {
+    let idx_path = index_path(key.db_path);
+
+    // Write the index to a unique temp (never a shared `.tmp`, which would itself race), fsync,
+    // then atomically rename into place.
+    let tmp = unique_temp(&idx_path);
+    index.save(&tmp)?;
+    fsync_file(&tmp)?;
+    // Hash OUR temp's exact bytes BEFORE publishing. Hashing the shared `<db>.usearch` after the
+    // rename would race a competing writer that overwrites it in between, pairing this sidecar's
+    // digest with another writer's index. Hashing the temp binds the sidecar to the bytes this
+    // writer published; if another writer's index wins the path, the load-time file hash mismatches
+    // and rejects rather than loading a mixed snapshot.
+    let index_sha = file_blake3(&tmp)?;
+    fs::rename(&tmp, &idx_path)
+        .map_err(|e| SearchError::Index(format!("install vector index: {e}")))?;
+    fsync_parent_dir(&idx_path);
+
+    let sidecar = Sidecar {
+        schema: SIDECAR_SCHEMA,
+        usearch_version: usearch::version().to_owned(),
+        options: VectorIndex::options_signature(key.dim),
+        model_id: key.model_id.to_owned(),
+        dim: key.dim,
+        embed_text_version: EMBED_TEXT_VERSION,
+        count: data.len(),
+        embedding_digest: data_digest(data),
+        index_sha,
+    };
+    write_sidecar(&sidecar_path(key.db_path), &sidecar)
+}
+
+fn read_sidecar(path: &Path) -> Option<Sidecar> {
+    let bytes = fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn write_sidecar(path: &Path, sidecar: &Sidecar) -> Result<(), SearchError> {
+    let json = serde_json::to_vec_pretty(sidecar)
+        .map_err(|e| SearchError::Index(format!("serialize index sidecar: {e}")))?;
+    let tmp = unique_temp(path);
+    {
+        let mut file = fs::File::create(&tmp)
+            .map_err(|e| SearchError::Index(format!("create sidecar temp: {e}")))?;
+        file.write_all(&json)
+            .map_err(|e| SearchError::Index(format!("write sidecar temp: {e}")))?;
+        file.sync_all().map_err(|e| SearchError::Index(format!("fsync sidecar temp: {e}")))?;
+    }
+    fs::rename(&tmp, path).map_err(|e| SearchError::Index(format!("install index sidecar: {e}")))
+}
+
+fn fsync_file(path: &Path) -> Result<(), SearchError> {
+    fs::File::open(path)
+        .and_then(|f| f.sync_all())
+        .map_err(|e| SearchError::Index(format!("fsync index temp: {e}")))
+}
+
+/// Best-effort fsync of the directory so a rename survives power loss; never fatal (the rename
+/// itself is already atomic for in-process consistency, this only hardens crash durability).
+fn fsync_parent_dir(path: &Path) {
+    if let Some(dir) = path.parent() {
+        if let Ok(handle) = fs::File::open(dir) {
+            let _ = handle.sync_all();
+        }
+    }
+}
+
+/// A unique sibling temp path. Uniqueness (pid + the target's own bytes) keeps two concurrent
+/// writers from clobbering each other's in-progress file before the atomic rename.
+fn unique_temp(target: &Path) -> PathBuf {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    sibling(target, &format!("tmp-{}-{}", std::process::id(), stamp))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use code_chunk::{Chunk, ChunkKind};
+
+    const DIM: usize = 8;
+
+    fn chunk(name: &str) -> Chunk {
+        Chunk {
+            kind: ChunkKind::Procedure,
+            name: name.to_owned(),
+            is_export: true,
+            annotations: vec![],
+            line_start: 0,
+            line_end: 1,
+            text: format!("Процедура {name}() КонецПроцедуры"),
+        }
+    }
+
+    fn emb(seed: f32) -> Vec<f32> {
+        (0..DIM).map(|i| seed + i as f32 * 0.01).collect()
+    }
+
+    /// A file-backed store seeded with `n` embedded chunks (in-memory stores can't persist).
+    fn seeded_store(dir: &Path, n: usize) -> Store {
+        let mut store = Store::open(&dir.join("search.db")).unwrap();
+        let chunks: Vec<Chunk> = (0..n).map(|i| chunk(&format!("P{i}"))).collect();
+        let embs: Vec<Vec<f32>> = (0..n).map(|i| emb(i as f32)).collect();
+        store.reindex_file("f.bsl", b"h0", &chunks, Some(&embs)).unwrap();
+        store
+    }
+
+    fn key(store: &Store) -> PersistKey<'_> {
+        PersistKey { db_path: store.db_path(), model_id: "test-model", dim: DIM }
+    }
+
+    /// Build the index from the current embeddings and persist it, fingerprinting the exact
+    /// build data (as the engine does).
+    fn build_and_persist(store: &Store) {
+        let data = store.load_all_embeddings(DIM).unwrap();
+        let index = VectorIndex::build(DIM, &data).unwrap();
+        persist(&index, &key(store), &data).unwrap();
+    }
+
+    #[test]
+    fn persist_then_load_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = seeded_store(dir.path(), 5);
+        build_and_persist(&store);
+
+        let loaded = try_load(&store, &key(&store)).expect("a valid sidecar loads");
+        assert_eq!(loaded.len(), 5);
+        // The loaded index answers queries.
+        assert!(!loaded.search(&emb(0.0), 3).unwrap().is_empty());
+    }
+
+    #[test]
+    fn missing_sidecar_means_rebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = seeded_store(dir.path(), 3);
+        assert!(try_load(&store, &key(&store)).is_none());
+    }
+
+    #[test]
+    fn model_mismatch_means_rebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = seeded_store(dir.path(), 3);
+        build_and_persist(&store);
+
+        let other = PersistKey { db_path: store.db_path(), model_id: "other-model", dim: DIM };
+        assert!(try_load(&store, &other).is_none());
+    }
+
+    #[test]
+    fn changed_embedding_means_rebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = seeded_store(dir.path(), 3);
+        build_and_persist(&store);
+        assert!(try_load(&store, &key(&store)).is_some());
+
+        // Replace one embedding in place (same row id, same count) — the content digest must
+        // notice and force a rebuild, where a count/rowid proxy would wrongly accept it.
+        let id = store.load_all_embeddings(DIM).unwrap()[0].0;
+        store.set_chunk_embedding(id, &emb(99.0)).unwrap();
+        assert!(try_load(&store, &key(&store)).is_none());
+    }
+
+    #[test]
+    fn corrupt_index_file_means_rebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = seeded_store(dir.path(), 3);
+        build_and_persist(&store);
+
+        // Truncate/garble the index file: its bytes no longer match `index_sha`.
+        std::fs::write(index_path(store.db_path()), b"not a usearch index").unwrap();
+        assert!(try_load(&store, &key(&store)).is_none());
+    }
+}

@@ -17,6 +17,7 @@ mod publish;
 mod resolved_view_search;
 mod resolver;
 mod store;
+mod vector_persist;
 mod workspace_overlay;
 
 pub use baseline_runtime::BaselineOverlaySearchService;

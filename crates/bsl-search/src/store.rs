@@ -3,10 +3,11 @@ use crate::error::SearchError;
 use code_chunk::Chunk;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub struct Store {
     conn: Connection,
+    path: PathBuf,
 }
 
 /// Bumped whenever the embedding text composed by
@@ -14,7 +15,7 @@ pub struct Store {
 /// `user_version` pragma; on mismatch the store clears file hashes so the next index
 /// re-embeds everything, rather than mixing old- and new-format vectors in one space
 /// (file-hash gating would otherwise keep stale-format embeddings indefinitely).
-const EMBED_TEXT_VERSION: i64 = 1;
+pub(crate) const EMBED_TEXT_VERSION: i64 = 1;
 
 /// The structural version of the SQLite schema, recorded in the `meta` table — the
 /// search-index counterpart to the call graph's `graph_db::SCHEMA_VERSION`. Bump this
@@ -29,11 +30,17 @@ const SCHEMA_VERSION: i64 = 1;
 impl Store {
     pub fn open(path: &Path) -> Result<Self, SearchError> {
         let conn = Connection::open(path)?;
-        let store = Self { conn };
+        let store = Self { conn, path: path.to_path_buf() };
         store.apply_pragmas()?;
         store.migrate_structural_schema()?;
         store.migrate_embed_text_version()?;
         Ok(store)
+    }
+
+    /// The database file this store was opened from — the anchor for the sibling persisted
+    /// vector-index files (see [`crate::vector_persist`]).
+    pub fn db_path(&self) -> &Path {
+        &self.path
     }
 
     /// Connection-level pragmas. Set outside any transaction — `journal_mode` is a no-op
@@ -148,7 +155,7 @@ impl Store {
     #[cfg(test)]
     pub fn in_memory() -> Result<Self, SearchError> {
         let conn = Connection::open_in_memory()?;
-        let store = Self { conn };
+        let store = Self { conn, path: PathBuf::from(":memory:") };
         store.apply_pragmas()?;
         store.migrate_structural_schema()?;
         Ok(store)
