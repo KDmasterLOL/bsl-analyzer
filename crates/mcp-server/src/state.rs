@@ -182,7 +182,6 @@ impl SharedState {
                 tracing::info!("search engine initialization started in background");
                 let init = Self::init_workspace_search_engine(
                     &workspace_root,
-                    &index_progress,
                     &watcher_ready,
                     external_baseline,
                     &graph,
@@ -644,7 +643,6 @@ impl SharedState {
 
     fn init_workspace_search_engine(
         workspace_root: &std::path::Path,
-        progress: &Arc<IndexProgress>,
         watcher_ready: &Arc<AtomicBool>,
         external_baseline: Option<Arc<ExternalBaselineService>>,
         graph: &GraphState,
@@ -797,23 +795,40 @@ impl SharedState {
         }
 
         if engine.has_semantic() {
-            match engine.index_directory(&source_path, Some(progress)) {
+            // Same publish-early contract as the fused path, for the rare standalone
+            // semantic cold start (fused build failed but an embedder is configured):
+            // write FTS + chunks + graph context synchronously but WITHOUT embeddings (no
+            // HTTP) so the engine publishes within minutes, then defer the hours-long
+            // embedding to the background pass instead of blocking publication on a
+            // synchronous `index_directory`. The graph context set above is persisted with
+            // the chunks, so the deferred vectors are graph-enriched just as
+            // `index_directory` would have produced.
+            match engine.index_directory_deferred(&source_path) {
                 Ok(indexed) => {
                     if indexed > 0 {
-                        tracing::info!(indexed, "FTS + semantic index updated");
+                        tracing::info!(indexed, "FTS + graph context written; embedding deferred");
                     }
                 }
-                Err(e) => {
-                    tracing::warn!("failed to build semantic index, falling back to FTS: {e}");
-                    if engine.chunk_count().unwrap_or(0) == 0 {
-                        match engine.index_directory_fts(&source_path) {
-                            Ok(indexed) => tracing::info!(indexed, "FTS index built (fallback)"),
-                            Err(e2) => tracing::warn!("failed to build FTS index: {e2}"),
-                        }
-                    }
-                }
+                Err(e) => tracing::warn!("failed to write deferred index: {e}"),
             }
-        } else if engine.chunk_count().unwrap_or(0) == 0 {
+
+            // Schedule the background pass only when chunks actually lack vectors. A warm
+            // restart has none pending, so it stays `Ready` with no transient downgrade.
+            let code_chunks = engine.chunk_count().unwrap_or(0);
+            let code_embeddings = engine.embedding_count_by_collection("code").unwrap_or(0);
+            let pending_embed = (code_chunks > code_embeddings)
+                .then(Self::embedding_config)
+                .flatten()
+                .map(|config| PendingEmbed { db_path: db_path.clone(), config });
+
+            return Some(WorkspaceSearchInit {
+                engine,
+                mode: WorkspaceSearchMode::SqliteLocal,
+                pending_embed,
+            });
+        }
+
+        if engine.chunk_count().unwrap_or(0) == 0 {
             tracing::info!(?source_path, "building FTS index from source files");
             match engine.index_directory_fts(&source_path) {
                 Ok(indexed) => tracing::info!(indexed, "FTS index built"),
@@ -1162,12 +1177,11 @@ mod tests {
     use super::SharedState;
     use crate::baseline::{ExternalBaselineService, RefreshableExternalBaselineSource};
     use bsl_search::{
-        BaselineRef, CorpusId, Document, ExternalBaselineConfig, IndexProgress, IndexedDocument,
-        SearchEngine,
+        BaselineRef, CorpusId, Document, ExternalBaselineConfig, IndexedDocument, SearchEngine,
     };
     use std::env;
     use std::fs;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex, OnceLock};
     use tempfile::tempdir;
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -1236,7 +1250,6 @@ mod tests {
         assert_eq!(stale_engine.file_count().unwrap(), 1);
         drop(stale_engine);
 
-        let progress = Arc::new(IndexProgress::default());
         let watcher_ready = Arc::new(AtomicBool::new(false));
         let external = ExternalBaselineService::for_test(
             RefreshableExternalBaselineSource::for_test(
@@ -1253,7 +1266,6 @@ mod tests {
 
         let init = SharedState::init_workspace_search_engine(
             workspace,
-            &progress,
             &watcher_ready,
             Some(external),
             &crate::graph::GraphState::disabled(),
@@ -1264,7 +1276,6 @@ mod tests {
         assert_eq!(reopened.file_count().unwrap(), 0);
         assert!(reopened.text_search("ПризрачнаяПроцедура", 10, Some("code")).unwrap().is_empty());
         assert!(reopened.store().load_baseline_manifest().unwrap().is_none());
-        assert_eq!(progress.done_batches.load(Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -1296,7 +1307,6 @@ mod tests {
             .unwrap();
         drop(stale_engine);
 
-        let progress = Arc::new(IndexProgress::default());
         let watcher_ready = Arc::new(AtomicBool::new(false));
         let external = ExternalBaselineService::for_test(
             RefreshableExternalBaselineSource::for_test(
@@ -1313,7 +1323,6 @@ mod tests {
 
         let init = SharedState::init_workspace_search_engine(
             workspace,
-            &progress,
             &watcher_ready,
             Some(external),
             &crate::graph::GraphState::disabled(),
@@ -1323,7 +1332,39 @@ mod tests {
         let reopened = SearchEngine::fts_only(&db_path).unwrap();
         assert_eq!(reopened.file_count().unwrap(), 0);
         assert!(reopened.store().load_baseline_manifest().unwrap().is_none());
-        assert_eq!(progress.done_batches.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn workspace_standalone_semantic_fallback_publishes_before_embedding() {
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        // A configured embedder makes the engine semantic, but the URL is unreachable:
+        // the point is that init must NOT run the synchronous embed here. It writes the
+        // FTS chunks and defers embedding, so init returns promptly with work pending.
+        let _embedding_url = EnvVarGuard::set("EMBEDDING_URL", "http://127.0.0.1:9/v1");
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        crate::cache::ensure_workspace_cache_dir(workspace).unwrap();
+        fs::write(workspace.join("CommonModule.bsl"), "Процедура СделатьЧтоТо()\nКонецПроцедуры")
+            .unwrap();
+
+        let watcher_ready = Arc::new(AtomicBool::new(false));
+        // A disabled graph has no workspace root, so the fused path is skipped and the
+        // standalone semantic branch runs — the path that previously embedded inline.
+        let init = SharedState::init_workspace_search_engine(
+            workspace,
+            &watcher_ready,
+            None,
+            &crate::graph::GraphState::disabled(),
+        )
+        .expect("standalone init should produce an engine");
+
+        // FTS chunks are written (lexical search goes live)...
+        assert!(init.engine.chunk_count().unwrap() > 0);
+        // ...the unreachable embedder was never called, so no vectors exist yet...
+        assert_eq!(init.engine.vector_count(), 0);
+        // ...and the embedding work is handed to the background pass.
+        assert!(init.pending_embed.is_some());
     }
 
     #[test]
