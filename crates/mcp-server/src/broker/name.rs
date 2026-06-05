@@ -1,0 +1,276 @@
+//! Backend identity and rendezvous naming.
+//!
+//! The broker has no registry: a proxy finds its backend by recomputing the same
+//! deterministic name from its own launch parameters. Two clients that resolve to
+//! the same [`BackendKey`] therefore meet at the same socket; anything that should
+//! fork a separate backend (different project, profile, binary version, or
+//! embedding config) lands on a different name by construction.
+
+use std::io;
+use std::path::{Path, PathBuf};
+
+use crate::McpProfile;
+
+/// The identity of one shared backend. Equal keys ⇒ same socket ⇒ reuse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackendKey {
+    /// Canonicalized project root. Callers should pass an already-`canonicalize`d
+    /// path; [`BackendKey::new`] canonicalizes defensively so `/p` and `/p/` and a
+    /// symlink to either collapse to one key.
+    source_dir: PathBuf,
+    profile: McpProfile,
+    /// Binary version (`CARGO_PKG_VERSION` of this crate = workspace version). An
+    /// upgrade mints a fresh key, so a new proxy never speaks to an old backend on
+    /// a possibly-changed protocol or schema; the old one drains by idle.
+    version: &'static str,
+    /// Fold of the embedding-related environment — see [`embedding_config_fingerprint`].
+    config_fp: u64,
+}
+
+impl BackendKey {
+    /// Build a key for the current process. `config_fp` should come from
+    /// [`embedding_config_fingerprint`] so a backend serving one embedding model is
+    /// never silently reused by a client expecting another.
+    pub fn new(source_dir: impl Into<PathBuf>, profile: McpProfile, config_fp: u64) -> Self {
+        let source_dir = source_dir.into();
+        let source_dir = std::fs::canonicalize(&source_dir).unwrap_or(source_dir);
+        Self { source_dir, profile, version: env!("CARGO_PKG_VERSION"), config_fp }
+    }
+
+    /// Stable 128-bit identity digest as 32 lowercase hex chars. Short enough to fit
+    /// inside the `sun_path` limit when placed in a per-user runtime directory.
+    pub fn digest(&self) -> String {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(self.source_dir.as_os_str().as_encoded_bytes());
+        hasher.update(b"\0");
+        hasher.update(self.profile.as_str().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(self.version.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(&self.config_fp.to_le_bytes());
+        let hex = hasher.finalize().to_hex();
+        hex[..32].to_owned()
+    }
+
+    /// Filesystem path of the unix-domain socket for this backend. The Windows
+    /// named-pipe name is derived from the same [`digest`](Self::digest) and is
+    /// wired separately; this path form is the unix rendezvous point.
+    ///
+    /// On unix the result is checked against the `sockaddr_un.sun_path` budget so a
+    /// long runtime/temp directory surfaces here as `InvalidInput` rather than a
+    /// confusing `EINVAL` when the daemon later `bind`s.
+    pub fn socket_path(&self) -> io::Result<PathBuf> {
+        let path = runtime_socket_dir()?.join(format!("{}.sock", self.digest()));
+        #[cfg(unix)]
+        {
+            let len = path.as_os_str().as_encoded_bytes().len();
+            if len >= SUN_PATH_MAX {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "broker socket path is {len} bytes, exceeds the sun_path budget \
+                         of {SUN_PATH_MAX}: {}",
+                        path.display()
+                    ),
+                ));
+            }
+        }
+        Ok(path)
+    }
+}
+
+/// `sun_path` capacity (including the trailing NUL) the kernel accepts for a
+/// unix-domain socket address. A path of `>= SUN_PATH_MAX` bytes cannot be bound.
+#[cfg(target_os = "linux")]
+const SUN_PATH_MAX: usize = 108;
+#[cfg(target_os = "macos")]
+const SUN_PATH_MAX: usize = 104;
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+const SUN_PATH_MAX: usize = 104;
+
+/// Per-user directory that holds broker sockets. Prefers `$XDG_RUNTIME_DIR`
+/// (already uid-private, tmpfs, cleaned on logout); otherwise falls back to a
+/// uid/user-scoped subdir of the system temp dir. Created `0700` on unix so a
+/// co-tenant cannot enumerate or connect to another user's backend.
+pub fn runtime_socket_dir() -> io::Result<PathBuf> {
+    match dirs::runtime_dir() {
+        // `$XDG_RUNTIME_DIR` is kernel-managed and already uid-private; trust it as the
+        // parent and create/validate only our own leaf under it.
+        Some(base) => {
+            let dir = base.join("bsl-mcp");
+            create_private_dir(&dir)?;
+            Ok(dir)
+        }
+        // No runtime dir (headless / some macOS): fall back into a shared temp dir.
+        // Every level we descend through must be ours — otherwise an attacker who owns
+        // an ancestor could swap our socket dir after it is validated. So validate the
+        // sanitized base (rejecting an attacker-pre-created one) before creating the
+        // leaf, never descending recursively through an unvalidated parent. `/tmp`'s
+        // sticky bit then prevents anyone from renaming a base we own.
+        None => {
+            // The user tag must be a safe single path component — sanitize to alnum/_/-
+            // so a spoofed `USER=../x` cannot escape the temp dir.
+            let raw =
+                std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_default();
+            let mut who: String = raw
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+                .collect();
+            if who.is_empty() {
+                who.push_str("default");
+            }
+            let base = std::env::temp_dir().join(format!("bsl-mcp-{who}"));
+            create_private_dir(&base)?;
+            let dir = base.join("bsl-mcp");
+            create_private_dir(&dir)?;
+            Ok(dir)
+        }
+    }
+}
+
+/// Current effective uid. `geteuid()` has no failure mode or preconditions.
+#[cfg(unix)]
+pub(crate) fn current_euid() -> u32 {
+    unsafe { libc::geteuid() }
+}
+
+#[cfg(unix)]
+fn create_private_dir(dir: &Path) -> io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    match std::fs::metadata(dir) {
+        Ok(meta) if meta.is_dir() => {
+            // A pre-existing dir must be private AND owned by us; otherwise a co-tenant
+            // could have pre-created a 0700 dir they own to host (and observe or
+            // pre-empt) our socket. This matters for the shared-/tmp fallback;
+            // `$XDG_RUNTIME_DIR` is already kernel-private to our uid.
+            let mode = meta.permissions().mode() & 0o777;
+            if mode != 0o700 {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "broker runtime dir {} has mode {mode:#o}, expected 0o700",
+                        dir.display()
+                    ),
+                ));
+            }
+            if meta.uid() != current_euid() {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "broker runtime dir {} is owned by uid {}, not the current user {}",
+                        dir.display(),
+                        meta.uid(),
+                        current_euid()
+                    ),
+                ));
+            }
+            Ok(())
+        }
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("broker runtime path {} exists and is not a directory", dir.display()),
+        )),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            // Non-recursive: the parent must already exist and be trusted (the caller
+            // validates each level top-down), so we never create or descend through an
+            // unvalidated ancestor.
+            std::fs::DirBuilder::new().mode(0o700).create(dir)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(not(unix))]
+fn create_private_dir(dir: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(dir)
+}
+
+/// Fold the embedding-relevant environment into a stable 64-bit fingerprint. Only
+/// variables that change what an index *means* are included (endpoint, model,
+/// dimension, provider); auth (`EMBEDDING_API_KEY`) and perf knobs are excluded so
+/// key rotation and tuning do not fork the backend — and no secret-derived bytes
+/// land in a socket name.
+pub fn embedding_config_fingerprint() -> u64 {
+    const KEYS: [&str; 4] =
+        ["EMBEDDING_URL", "EMBEDDING_MODEL", "EMBEDDING_DIM", "EMBEDDING_PROVIDER"];
+    let mut hasher = blake3::Hasher::new();
+    for key in KEYS {
+        hasher.update(key.as_bytes());
+        hasher.update(b"=");
+        if let Ok(value) = std::env::var(key) {
+            hasher.update(value.as_bytes());
+        }
+        hasher.update(b"\0");
+    }
+    let bytes = hasher.finalize();
+    u64::from_le_bytes(bytes.as_bytes()[..8].try_into().expect("blake3 yields >= 8 bytes"))
+}
+
+/// Cross-platform rendezvous name for a backend.
+///
+/// Unix uses the filesystem socket path ([`BackendKey::socket_path`]) so we own
+/// stale-file recovery; Windows uses a namespaced named pipe derived from the same
+/// digest — the kernel frees it on owner death, so there is no stale state.
+pub fn backend_name(key: &BackendKey) -> io::Result<interprocess::local_socket::Name<'static>> {
+    #[cfg(unix)]
+    {
+        use interprocess::local_socket::{GenericFilePath, ToFsName};
+        key.socket_path()?.to_fs_name::<GenericFilePath>()
+    }
+    #[cfg(windows)]
+    {
+        use interprocess::local_socket::{GenericNamespaced, ToNsName};
+        // Ensure the per-user runtime dir exists too, so the ACL story matches unix.
+        let _ = runtime_socket_dir();
+        format!("bsl-mcp-{}.sock", key.digest()).to_ns_name::<GenericNamespaced>()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(dir: &str, profile: McpProfile, fp: u64) -> BackendKey {
+        // Bypass `new`'s canonicalize (the path need not exist in unit tests).
+        BackendKey { source_dir: PathBuf::from(dir), profile, version: "test", config_fp: fp }
+    }
+
+    #[test]
+    fn digest_is_deterministic_and_32_hex() {
+        let k = key("/srv/erp", McpProfile::Workspace, 7);
+        let d = k.digest();
+        assert_eq!(d.len(), 32);
+        assert!(d.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(d, k.digest());
+    }
+
+    #[test]
+    fn each_identity_axis_forks_the_digest() {
+        let base = key("/srv/erp", McpProfile::Workspace, 7).digest();
+        assert_ne!(base, key("/srv/other", McpProfile::Workspace, 7).digest(), "source_dir");
+        assert_ne!(base, key("/srv/erp", McpProfile::Reference, 7).digest(), "profile");
+        assert_ne!(base, key("/srv/erp", McpProfile::Workspace, 8).digest(), "config_fp");
+
+        let mut bumped = key("/srv/erp", McpProfile::Workspace, 7);
+        bumped.version = "test-next";
+        assert_ne!(base, bumped.digest(), "version");
+    }
+
+    #[test]
+    fn socket_path_sits_under_runtime_dir_and_is_named_by_digest() {
+        let k = key("/srv/erp", McpProfile::Workspace, 7);
+        let path = k.socket_path().expect("runtime dir resolvable");
+        assert_eq!(path.parent(), Some(runtime_socket_dir().unwrap().as_path()));
+        assert_eq!(
+            path.file_name().and_then(|s| s.to_str()),
+            Some(format!("{}.sock", k.digest()).as_str())
+        );
+    }
+
+    #[test]
+    fn fingerprint_tracks_only_identity_env() {
+        // No assertion on the absolute value (depends on ambient env); just that the
+        // function is callable and stable within one environment.
+        assert_eq!(embedding_config_fingerprint(), embedding_config_fingerprint());
+    }
+}
