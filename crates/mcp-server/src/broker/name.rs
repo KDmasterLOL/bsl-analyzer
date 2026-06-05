@@ -88,26 +88,78 @@ const SUN_PATH_MAX: usize = 104;
 #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
 const SUN_PATH_MAX: usize = 104;
 
-/// Per-user directory that holds broker sockets. Prefers `$XDG_RUNTIME_DIR`
-/// (already uid-private, tmpfs, cleaned on logout); otherwise falls back to a
-/// uid/user-scoped subdir of the system temp dir. Created `0700` on unix so a
-/// co-tenant cannot enumerate or connect to another user's backend.
+/// Which parent directory a broker socket lives under. The variants are ordered by the
+/// precedence in [`socket_dir_source`]; `Xdg` and `CanonicalRunUser` are both kernel/systemd
+/// managed and uid-private, so they share the trusted-parent handling.
+enum SocketDirSource {
+    /// `$XDG_RUNTIME_DIR` was set.
+    Xdg(PathBuf),
+    /// `$XDG_RUNTIME_DIR` was unset, but the canonical `/run/user/<euid>` runtime dir exists
+    /// and is ours — the same tmpfs the env var would have pointed to.
+    CanonicalRunUser(PathBuf),
+    /// No per-user runtime dir at all (headless / non-systemd / macOS): use shared temp.
+    TmpFallback,
+}
+
+/// Pure precedence decision (no filesystem or env access, so it is unit-testable): an explicit
+/// `$XDG_RUNTIME_DIR` wins, else the canonical per-user runtime dir if one was found, else the
+/// shared-temp fallback. The middle tier is what lets a spawner that *drops* `$XDG_RUNTIME_DIR`
+/// (e.g. Codex launching the backend) still rendezvous with one that keeps it at the standard
+/// `/run/user/<euid>`, instead of forking a second multi-GB backend under `/tmp`. It does NOT
+/// converge a process that deliberately points `$XDG_RUNTIME_DIR` at a *non-standard* path with
+/// one that dropped the variable — the explicit env still wins above, which is the right call
+/// and an unavoidable split short of propagating the variable.
+fn socket_dir_source(xdg: Option<PathBuf>, canonical_run_user: Option<PathBuf>) -> SocketDirSource {
+    if let Some(base) = xdg {
+        return SocketDirSource::Xdg(base);
+    }
+    if let Some(base) = canonical_run_user {
+        return SocketDirSource::CanonicalRunUser(base);
+    }
+    SocketDirSource::TmpFallback
+}
+
+/// The canonical per-user runtime dir `/run/user/<euid>` — the path `$XDG_RUNTIME_DIR` is set to
+/// on a logind system — but only when it is, by its own metadata, a directory we own at mode
+/// `0700`. `None` (→ temp fallback) otherwise. The trust is self-contained: `symlink_metadata`
+/// (not `metadata`) refuses a symlink standing in for the dir, and the owner+mode check matches
+/// the bar [`create_private_dir`] holds our own leaves to — we don't assume "it's systemd's".
+/// Keyed on `euid`, never `$USER`/env, so two processes for the same user agree on the path.
+#[cfg(unix)]
+fn canonical_run_user_dir() -> Option<PathBuf> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let base = PathBuf::from(format!("/run/user/{}", current_euid()));
+    let meta = std::fs::symlink_metadata(&base).ok()?;
+    let ours = meta.is_dir()
+        && meta.uid() == current_euid()
+        && (meta.permissions().mode() & 0o777) == 0o700;
+    ours.then_some(base)
+}
+
+/// Per-user directory that holds broker sockets. Prefers `$XDG_RUNTIME_DIR`, then the canonical
+/// `/run/user/<euid>` (so a dropped env var doesn't split the rendezvous), then a uid/user-scoped
+/// subdir of the system temp dir. Created `0700` on unix so a co-tenant cannot enumerate or
+/// connect to another user's backend.
 pub fn runtime_socket_dir() -> io::Result<PathBuf> {
-    match dirs::runtime_dir() {
-        // `$XDG_RUNTIME_DIR` is kernel-managed and already uid-private; trust it as the
-        // parent and create/validate only our own leaf under it.
-        Some(base) => {
+    #[cfg(unix)]
+    let canonical = canonical_run_user_dir();
+    #[cfg(not(unix))]
+    let canonical = None;
+
+    match socket_dir_source(dirs::runtime_dir(), canonical) {
+        // Both are kernel/systemd managed and already uid-private; trust them as the parent
+        // and create/validate only our own leaf under it.
+        SocketDirSource::Xdg(base) | SocketDirSource::CanonicalRunUser(base) => {
             let dir = base.join("bsl-mcp");
             create_private_dir(&dir)?;
             Ok(dir)
         }
-        // No runtime dir (headless / some macOS): fall back into a shared temp dir.
-        // Every level we descend through must be ours — otherwise an attacker who owns
-        // an ancestor could swap our socket dir after it is validated. So validate the
-        // sanitized base (rejecting an attacker-pre-created one) before creating the
-        // leaf, never descending recursively through an unvalidated parent. `/tmp`'s
-        // sticky bit then prevents anyone from renaming a base we own.
-        None => {
+        // Fall back into a shared temp dir. Every level we descend through must be ours —
+        // otherwise an attacker who owns an ancestor could swap our socket dir after it is
+        // validated. So validate the sanitized base (rejecting an attacker-pre-created one)
+        // before creating the leaf, never descending recursively through an unvalidated
+        // parent. `/tmp`'s sticky bit then prevents anyone from renaming a base we own.
+        SocketDirSource::TmpFallback => {
             // The user tag must be a safe single path component — sanitize to alnum/_/-
             // so a spoofed `USER=../x` cannot escape the temp dir.
             let raw =
@@ -272,5 +324,27 @@ mod tests {
         // No assertion on the absolute value (depends on ambient env); just that the
         // function is callable and stable within one environment.
         assert_eq!(embedding_config_fingerprint(), embedding_config_fingerprint());
+    }
+
+    #[test]
+    fn socket_dir_source_falls_back_to_canonical_when_xdg_is_dropped() {
+        use super::{socket_dir_source, SocketDirSource};
+        let xdg = PathBuf::from("/run/user/1000");
+        let canonical = PathBuf::from("/run/user/1000");
+
+        // $XDG_RUNTIME_DIR set → it wins outright.
+        assert!(matches!(
+            socket_dir_source(Some(xdg.clone()), Some(canonical.clone())),
+            SocketDirSource::Xdg(p) if p == xdg
+        ));
+        // The regression this fix targets: a spawner (e.g. Codex) dropped $XDG_RUNTIME_DIR but
+        // the canonical /run/user/<euid> is there — use it, NOT the /tmp fallback, so both
+        // processes meet at the same socket instead of forking a second backend.
+        assert!(matches!(
+            socket_dir_source(None, Some(canonical.clone())),
+            SocketDirSource::CanonicalRunUser(p) if p == canonical
+        ));
+        // Neither available → shared-temp fallback.
+        assert!(matches!(socket_dir_source(None, None), SocketDirSource::TmpFallback));
     }
 }
