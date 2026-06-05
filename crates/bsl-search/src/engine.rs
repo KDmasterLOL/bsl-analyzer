@@ -616,6 +616,72 @@ impl SearchEngine {
         Ok(index)
     }
 
+    /// Index workspace files for *deferred* embedding: chunk each changed file, attach
+    /// its graph context via the configured provider, and persist chunk + FTS rows with a
+    /// NULL embedding. The vectors are filled later by
+    /// [`Self::embed_pending_chunks_standalone`], which reads back the stored graph
+    /// context. Unlike [`Self::index_directory_fts`] this preserves graph context, so the
+    /// deferred embeddings are graph-enriched whenever a provider is set — matching what
+    /// the synchronous [`Self::index_directory`] would have produced, without blocking on
+    /// the embed. Returns the number of files (re)indexed.
+    pub fn index_directory_deferred(&mut self, root: &Path) -> Result<usize, SearchError> {
+        let bsl_files: Vec<std::path::PathBuf> = walkdir::WalkDir::new(root)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bsl")))
+            .map(|e| e.into_path())
+            .collect();
+
+        info!(total_files = bsl_files.len(), "scanning BSL files (deferred embedding)");
+
+        let provider = self.graph_context_provider.as_deref();
+        let mut indexed = 0;
+        for file_path in &bsl_files {
+            let content = match std::fs::read_to_string(file_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(?file_path, "failed to read file: {e}");
+                    continue;
+                }
+            };
+
+            let hash = blake3::hash(content.as_bytes());
+            let rel_path =
+                file_path.strip_prefix(root).unwrap_or(file_path).to_string_lossy().to_string();
+
+            if let Some(stored_hash) = self.store.file_hash(&rel_path)? {
+                if stored_hash == hash.as_bytes() {
+                    continue;
+                }
+            }
+
+            let chunks = Chunker::chunk(&content);
+            if chunks.is_empty() {
+                continue;
+            }
+
+            let graph_contexts: Vec<Option<String>> = chunks
+                .iter()
+                .map(|c| {
+                    crate::document::indexed_document_for_chunk(&rel_path, c, provider)
+                        .graph_context
+                })
+                .collect();
+
+            self.store.reindex_file_with_context(
+                &rel_path,
+                hash.as_bytes(),
+                &chunks,
+                None,
+                Some(&graph_contexts),
+            )?;
+            indexed += 1;
+        }
+
+        info!(indexed, total_chunks = self.store.chunk_count()?, "deferred indexing complete");
+        Ok(indexed)
+    }
+
     pub fn index_directory_fts(&mut self, root: &Path) -> Result<usize, SearchError> {
         let bsl_files: Vec<std::path::PathBuf> = walkdir::WalkDir::new(root)
             .into_iter()
@@ -1393,6 +1459,42 @@ mod tests {
         let hits = engine.text_search("НоваяПроцедура", 10, Some("code")).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].symbol_name, "НоваяПроцедура");
+    }
+
+    #[test]
+    fn index_directory_deferred_preserves_graph_context_without_embedding() {
+        struct StubProvider;
+        impl crate::ports::GraphContextProvider for StubProvider {
+            fn graph_context(
+                &self,
+                _rel_path: &str,
+                symbol_name: &str,
+                _kind: &str,
+            ) -> Option<String> {
+                Some(format!("calls: {symbol_name}_helper"))
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        fs::write(workspace.join("CommonModule.bsl"), "Процедура Тест()\nКонецПроцедуры").unwrap();
+
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_graph_context_provider(std::sync::Arc::new(StubProvider));
+
+        let indexed = engine.index_directory_deferred(workspace).unwrap();
+        assert_eq!(indexed, 1);
+
+        // Chunks are written with graph context but no vectors yet — the deferred
+        // background pass embeds the stored, already-enriched text.
+        assert_eq!(engine.vector_count(), 0);
+        let pending = engine.store().load_pending_embedding_documents("code").unwrap();
+        let method = pending
+            .iter()
+            .find(|(_, doc)| doc.symbol_name == "Тест")
+            .expect("method chunk should be pending embedding");
+        assert_eq!(method.1.graph_context.as_deref(), Some("calls: Тест_helper"));
     }
 
     #[test]

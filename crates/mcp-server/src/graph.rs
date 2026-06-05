@@ -992,6 +992,23 @@ impl ide::FusedChunkSink for FusedChunkWriter<'_> {
                 Err(_) => continue, // unreadable now → leave for the standalone indexer
             };
             let hash = bsl_search::content_blake3(&bytes);
+            // Skip a file whose content is byte-identical to what is already stored: its
+            // chunks and (paid-for) embeddings are kept. Re-ingesting would DELETE+reinsert
+            // them with a NULL embedding and force a needless re-embed of the whole corpus on
+            // every graph rebuild — the exact cost this avoids. The graph itself still rebuilds
+            // fully (its own concern); only the embeddings stay incremental.
+            //
+            // Trade-off: the stored graph context records a method's *outbound* edges (whom it
+            // calls / which metadata it reads). If a CALLEE is renamed or removed, an unchanged
+            // caller's stored context can name the old target until that caller is itself
+            // touched (or a `force_stale` rebuild re-ingests it). We accept this small
+            // cross-file staleness in the embedding's context rather than re-embed every caller
+            // of any changed symbol — embeddings are an approximation and this self-heals on the
+            // next edit of the affected file.
+            if self.engine.store().file_hash(rel).ok().flatten().as_deref() == Some(hash.as_slice())
+            {
+                continue;
+            }
             self.engine.ingest_fused_file(rel, &hash, chunks, ctxs)?;
         }
         Ok(())
@@ -1913,6 +1930,78 @@ mod tests {
         let ctx = caller.graph_context.as_deref().expect("caller has context");
         assert!(ctx.contains("\nCalls: Считать\n"), "{ctx}");
         assert!(ctx.contains("\nReads: Справочник.Контрагенты\n"), "{ctx}");
+    }
+
+    /// Resume/incremental contract for the fused embedding pass. Re-running the fused
+    /// writer over an UNCHANGED file must not wipe its already-computed embedding — a
+    /// restart resumes instead of paying to re-embed the whole corpus on every graph
+    /// rebuild. A CHANGED file must be re-ingested back to a pending (NULL) embedding so
+    /// only the change is recomputed.
+    #[test]
+    fn fused_writer_preserves_embeddings_for_unchanged_files() {
+        use ide::FusedChunkSink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path();
+        let file = source.join("CommonModule.bsl");
+        fs::write(&file, "Процедура Делать() Экспорт\nКонецПроцедуры").unwrap();
+
+        let db_path = source.join("bsl-search.db");
+        let mut engine = bsl_search::SearchEngine::fts_only(&db_path).unwrap();
+
+        let abs = file.canonicalize().unwrap().to_string_lossy().replace('\\', "/");
+        let row = ide::ChunkRow {
+            path: abs,
+            symbol: "Делать".to_owned(),
+            kind: bsl_search::ChunkKind::Procedure,
+            is_export: true,
+            annotations: Vec::new(),
+            line_start: 1,
+            line_end: 2,
+            text: "Процедура Делать() Экспорт\nКонецПроцедуры".to_owned(),
+            graph_context: None,
+        };
+
+        {
+            let mut writer = FusedChunkWriter::new(&mut engine, source.to_path_buf());
+            writer.emit_chunks(std::slice::from_ref(&row)).unwrap();
+        }
+
+        // One chunk written; its embedding is still NULL, so it is pending.
+        let pending = engine.store().load_pending_embedding_documents("code").unwrap();
+        assert_eq!(pending.len(), 1, "the freshly ingested chunk is pending");
+        let chunk_id = pending[0].0;
+
+        // Pay for its embedding, then confirm nothing is pending.
+        engine.store().set_chunk_embedding(chunk_id, &vec![0.1_f32; 1024]).unwrap();
+        assert!(
+            engine.store().load_pending_embedding_documents("code").unwrap().is_empty(),
+            "after embedding, nothing is pending"
+        );
+
+        // Re-run the fused writer over the UNCHANGED file: the embedding must survive.
+        {
+            let mut writer = FusedChunkWriter::new(&mut engine, source.to_path_buf());
+            writer.emit_chunks(std::slice::from_ref(&row)).unwrap();
+        }
+        assert!(
+            engine.store().load_pending_embedding_documents("code").unwrap().is_empty(),
+            "an unchanged file keeps its embedding across a fused rebuild (resume, not re-embed)"
+        );
+        assert_eq!(engine.chunk_count().unwrap(), 1, "no duplicate chunk");
+
+        // Change the file on disk: the next fused pass re-ingests it to a pending
+        // embedding, so only the changed file is recomputed.
+        fs::write(&file, "Процедура Делать() Экспорт\nВыполнить();\nКонецПроцедуры").unwrap();
+        {
+            let mut writer = FusedChunkWriter::new(&mut engine, source.to_path_buf());
+            writer.emit_chunks(std::slice::from_ref(&row)).unwrap();
+        }
+        assert_eq!(
+            engine.store().load_pending_embedding_documents("code").unwrap().len(),
+            1,
+            "a changed file is re-ingested back to a pending embedding"
+        );
     }
 
     /// The build parallelises per-module resolution within a batch. A batch holding

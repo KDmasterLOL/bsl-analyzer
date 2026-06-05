@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, env, error::Error, io, path::PathBuf};
+use std::{collections::BTreeMap, env, error::Error, io, path::PathBuf, time::Duration};
 
 use clap::{Args, Subcommand, ValueEnum};
 
@@ -17,6 +17,14 @@ pub struct McpServeArgs {
     #[arg(short = 's', long = "source-dir", required_if_eq("runtime_profile", "workspace"))]
     source_dir: Option<PathBuf>,
 
+    /// Connection mode. `stdio` (default) serves one client directly. `broker`
+    /// connects to a shared per-project backend (launching it if absent) and relays
+    /// — so many clients/reviews reuse one heavy process. `daemon` *is* that backend
+    /// and is launched internally by a broker proxy; it is not meant to be run
+    /// directly.
+    #[arg(long = "mode", value_enum, default_value = "stdio")]
+    mode: McpServeMode,
+
     #[arg(long)]
     onec_url: Option<String>,
 
@@ -25,6 +33,13 @@ pub struct McpServeArgs {
 
     #[arg(long, default_value = "")]
     onec_password: String,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum McpServeMode {
+    Stdio,
+    Broker,
+    Daemon,
 }
 
 #[derive(Args)]
@@ -101,7 +116,15 @@ pub fn run(command: McpCommand) -> Result<(), Box<dyn Error + Send + Sync>> {
 }
 
 fn run_mcp_serve(args: McpServeArgs) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let password = decode_password(&args.onec_password);
+    // The broker passes the 1C credential to the detached daemon via the environment
+    // (not argv, which `ps` would expose for the backend's whole lifetime), so fall
+    // back to it when the flag is absent.
+    let raw_password = if args.onec_password.is_empty() {
+        env::var("BSL_ONEC_PASSWORD").unwrap_or_default()
+    } else {
+        args.onec_password.clone()
+    };
+    let password = decode_password(&raw_password);
     let profile = match args.runtime_profile {
         McpProfileCli::Workspace => mcp_server::McpProfile::Workspace,
         McpProfileCli::Reference => mcp_server::McpProfile::Reference,
@@ -117,7 +140,182 @@ fn run_mcp_serve(args: McpServeArgs) -> Result<(), Box<dyn Error + Send + Sync>>
         .into());
     }
 
-    run_mcp_server(profile, args.source_dir, args.onec_url, &args.onec_user, &password)
+    match resolve_serve_mode(args.mode, profile) {
+        McpServeMode::Stdio => {
+            run_mcp_server(profile, args.source_dir, args.onec_url, &args.onec_user, &password)
+        }
+        McpServeMode::Broker => run_mcp_broker(profile, &args, &password),
+        McpServeMode::Daemon => {
+            run_mcp_daemon(profile, args.source_dir, args.onec_url, &args.onec_user, &password)
+        }
+    }
+}
+
+/// Resolve the effective serve mode.
+///
+/// An explicit `--mode` always wins (the re-exec'd daemon passes `--mode daemon`, so
+/// inheriting the env switch can't turn it back into a proxy). Otherwise the broker
+/// applies only to the heavy `workspace` profile, decided by env then platform:
+///
+/// - `BSL_MCP_BROKER` is an explicit opt-in/out on any OS. It is the only signal that
+///   reaches Codex: Codex imports a project's `.mcp.json` but reconstructs the argv
+///   (dropping extra flags) and does not propagate its `env` block — so the activation
+///   has to live in the binary's own default, not the client config.
+/// - With no override, unix defaults to the broker (validated there); Windows stays on
+///   direct stdio until the named-pipe path is exercised in the field. The broker is
+///   still reachable on Windows via explicit `--mode broker` / `BSL_MCP_BROKER=1`.
+fn resolve_serve_mode(flag: McpServeMode, profile: mcp_server::McpProfile) -> McpServeMode {
+    if !matches!(flag, McpServeMode::Stdio) {
+        return flag;
+    }
+    if !matches!(profile, mcp_server::McpProfile::Workspace) {
+        return McpServeMode::Stdio;
+    }
+    match env_broker_override() {
+        Some(true) => return McpServeMode::Broker,
+        Some(false) => return McpServeMode::Stdio,
+        None => {}
+    }
+    if cfg!(unix) {
+        McpServeMode::Broker
+    } else {
+        McpServeMode::Stdio
+    }
+}
+
+/// `BSL_MCP_BROKER` parsed as an explicit tristate: `Some(true|false)` for a recognized
+/// truthy/falsy value, `None` when unset or unrecognized (defer to the platform default).
+fn env_broker_override() -> Option<bool> {
+    let value = env::var("BSL_MCP_BROKER").ok()?;
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+/// The broker proxy: connect to (or launch) the shared per-project backend and relay
+/// stdio to it. The backend is this same binary re-executed with `--mode daemon` and
+/// the same launch parameters, so it resolves to the same backend identity.
+fn run_mcp_broker(
+    profile: mcp_server::McpProfile,
+    args: &McpServeArgs,
+    onec_password: &str,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let source_dir = require_workspace_broker(profile, args.source_dir.clone())?;
+
+    let key = mcp_server::broker::BackendKey::new(
+        &source_dir,
+        profile,
+        mcp_server::broker::embedding_config_fingerprint(),
+    );
+
+    let mut cmd = std::process::Command::new(env::current_exe()?);
+    cmd.arg("mcp")
+        .arg("serve")
+        .arg("--profile")
+        .arg("workspace")
+        .arg("--source-dir")
+        .arg(&source_dir)
+        .arg("--mode")
+        .arg("daemon");
+    if let Some(url) = &args.onec_url {
+        cmd.arg("--onec-url").arg(url);
+    }
+    if !args.onec_user.is_empty() {
+        cmd.arg("--onec-user").arg(&args.onec_user);
+    }
+    // Credential via environment, not argv: the daemon is long-lived, and argv is
+    // visible in `ps`. Passed in the form we received it (possibly `base64:`) so the
+    // daemon decodes it exactly as a direct invocation would.
+    if !args.onec_password.is_empty() {
+        cmd.env("BSL_ONEC_PASSWORD", &args.onec_password);
+    }
+
+    tracing::info!(?source_dir, "Starting MCP broker proxy");
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let result = rt.block_on(mcp_server::broker::proxy::connect_or_launch(key, cmd));
+    drop(rt);
+
+    use mcp_server::broker::proxy::ProxyOutcome;
+    match result? {
+        ProxyOutcome::Served => Ok(()),
+        // Connect-phase failure only: no client bytes were relayed yet, so fall back to
+        // serving directly over stdio (the stdio server answers the pending `initialize`
+        // cleanly). A relay-phase failure surfaced as `Err` above and is fatal — we must
+        // not re-serve on a half-consumed stdin.
+        ProxyOutcome::Unavailable(e) => {
+            tracing::warn!(error = %e, "broker backend unavailable; serving directly over stdio");
+            run_mcp_server(
+                profile,
+                Some(source_dir),
+                args.onec_url.clone(),
+                &args.onec_user,
+                onec_password,
+            )
+        }
+    }
+}
+
+/// The shared backend: build the resident state once and serve every connecting
+/// proxy from it until idle.
+fn run_mcp_daemon(
+    profile: mcp_server::McpProfile,
+    source_dir: Option<PathBuf>,
+    onec_url: Option<String>,
+    onec_user: &str,
+    onec_password: &str,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let source_dir = require_workspace_broker(profile, source_dir)?;
+
+    let key = mcp_server::broker::BackendKey::new(
+        &source_dir,
+        profile,
+        mcp_server::broker::embedding_config_fingerprint(),
+    );
+
+    // Build only after the daemon wins the bind, so a race loser never starts a
+    // competing workspace build against the same per-project databases.
+    let onec_user = onec_user.to_owned();
+    let onec_password = onec_password.to_owned();
+    let build = move || {
+        build_server(profile, Some(source_dir), onec_url, &onec_user, &onec_password)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    };
+
+    tracing::info!("Starting MCP broker backend (daemon)");
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let result = rt.block_on(mcp_server::broker::daemon::run(build, key, broker_idle_timeout()));
+    drop(rt);
+    result?;
+    Ok(())
+}
+
+/// Broker/daemon modes serve the heavy workspace backend and key on its source dir.
+fn require_workspace_broker(
+    profile: mcp_server::McpProfile,
+    source_dir: Option<PathBuf>,
+) -> Result<PathBuf, Box<dyn Error + Send + Sync>> {
+    if !matches!(profile, mcp_server::McpProfile::Workspace) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "broker/daemon modes require --profile workspace",
+        )
+        .into());
+    }
+    source_dir.ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "broker/daemon modes require --source-dir")
+            .into()
+    })
+}
+
+/// Idle window after which a backend with no live connections exits. While any client
+/// is open its proxy holds the connection, which keeps the backend alive regardless;
+/// this window only governs how long to stay warm *after the last client disconnects*,
+/// so a quick reopen reuses the backend. Default 120s; override via `BSL_MCP_IDLE_SECS`.
+fn broker_idle_timeout() -> Duration {
+    let secs = env::var("BSL_MCP_IDLE_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(120);
+    Duration::from_secs(secs)
 }
 
 fn run_mcp_install(args: McpInstallArgs) -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -246,6 +444,29 @@ fn run_mcp_server(
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     tracing::info!(?profile, ?source_dir, ?onec_url, "Starting MCP server (stdio)");
 
+    let server = build_server(profile, source_dir, onec_url, onec_user, onec_password)?;
+    let shutdown_guard = server.clone();
+
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let serve_result = rt.block_on(mcp_server::serve_stdio(server));
+
+    drop(rt);
+    shutdown_guard.shutdown();
+    drop(shutdown_guard);
+
+    serve_result?;
+    Ok(())
+}
+
+/// Build the MCP server (resident state + tool router) for a profile. Shared by the
+/// stdio path and the broker backend so both construct identical state.
+fn build_server(
+    profile: mcp_server::McpProfile,
+    source_dir: Option<PathBuf>,
+    onec_url: Option<String>,
+    onec_user: &str,
+    onec_password: &str,
+) -> Result<mcp_server::McpServer, Box<dyn Error + Send + Sync>> {
     let state = match profile {
         mcp_server::McpProfile::Workspace => {
             let source_dir = source_dir.ok_or_else(|| {
@@ -265,18 +486,7 @@ fn run_mcp_server(
         mcp_server::McpProfile::Reference => mcp_server::SharedState::reference(source_dir),
     };
 
-    let server = mcp_server::McpServer::new(profile, state);
-    let shutdown_guard = server.clone();
-
-    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
-    let serve_result = rt.block_on(mcp_server::serve_stdio(server));
-
-    drop(rt);
-    shutdown_guard.shutdown();
-    drop(shutdown_guard);
-
-    serve_result?;
-    Ok(())
+    Ok(mcp_server::McpServer::new(profile, state))
 }
 
 fn resolve_scope(

@@ -1,4 +1,5 @@
 mod baseline;
+pub mod broker;
 mod cache;
 mod diagnostics_state;
 mod graph;
@@ -17,9 +18,19 @@ pub use state::SharedState;
 use state::WorkspaceSearchMode;
 
 pub async fn serve_stdio(server: McpServer) -> anyhow::Result<()> {
+    serve_stream(server, rmcp::transport::stdio()).await
+}
+
+/// Serve one MCP session over an arbitrary bidirectional transport. The transport
+/// carries framed JSON-RPC; MCP handling is identical whether the bytes come from
+/// stdio (`serve_stdio`) or a local socket (the broker). This is the single seam
+/// stdio and socket serving share.
+pub async fn serve_stream<T, A>(server: McpServer, transport: T) -> anyhow::Result<()>
+where
+    T: rmcp::transport::IntoTransport<rmcp::RoleServer, std::io::Error, A>,
+{
     use rmcp::ServiceExt;
-    let stdio = rmcp::transport::stdio();
-    let session = server.serve(stdio).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+    let session = server.serve(transport).await.map_err(|e| anyhow::anyhow!("{e}"))?;
     session.waiting().await.map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(())
 }
@@ -36,6 +47,17 @@ use serde::Deserialize;
 pub enum McpProfile {
     Workspace,
     Reference,
+}
+
+impl McpProfile {
+    /// Stable lowercase tag for the profile. Used as part of the broker backend
+    /// identity, so it must stay byte-stable across releases.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            McpProfile::Workspace => "workspace",
+            McpProfile::Reference => "reference",
+        }
+    }
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -189,6 +211,14 @@ impl McpServer {
 
     pub fn shutdown(&self) {
         self.state.shutdown();
+    }
+
+    /// Whether a long-running background index/embedding pass is still in flight. The
+    /// broker backend polls this to avoid idle-exiting (and killing the pass) while it
+    /// works, so an expensive embedding run finishes instead of restarting on every cold
+    /// start. See [`SharedState::background_indexing_active`].
+    pub fn background_work_active(&self) -> bool {
+        self.state.background_indexing_active()
     }
 
     #[tool(name = "metadata", annotations(read_only_hint = true))]
