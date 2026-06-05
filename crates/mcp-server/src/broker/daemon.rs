@@ -21,6 +21,11 @@ use tokio::time::{interval, Instant, MissedTickBehavior};
 use crate::broker::name::{backend_name, BackendKey};
 use crate::{serve_stream, McpServer};
 
+/// Cap on connections held while the resident state builds. The listener keeps draining
+/// past this (so a concurrent liveness probe still succeeds), but excess connections are
+/// dropped rather than parked, bounding memory against a runaway local client.
+const MAX_PARKED_DURING_BUILD: usize = 128;
+
 /// Run the backend for `key`. `build` is invoked only after this process wins the
 /// bind, so the expensive state construction (which spawns background builds
 /// touching the project DBs) never runs in a race loser.
@@ -51,10 +56,18 @@ where
             }
             accepted = listener.accept() => {
                 let conn = accepted?;
-                if peer_authorized(&conn) {
-                    parked.push(conn);
-                } else {
+                if !peer_authorized(&conn) {
                     tracing::warn!("rejected backend connection from an unauthorized peer");
+                } else if parked.len() >= MAX_PARKED_DURING_BUILD {
+                    // Keep draining the backlog past the cap so a concurrent liveness
+                    // probe still succeeds, but drop the excess instead of parking it —
+                    // bounding memory against a runaway local client during a long build.
+                    tracing::warn!(
+                        cap = MAX_PARKED_DURING_BUILD,
+                        "too many connections during build; dropping excess"
+                    );
+                } else {
+                    parked.push(conn);
                 }
             }
         }
@@ -214,7 +227,24 @@ async fn bind(key: &BackendKey) -> anyhow::Result<Option<TokioListener>> {
 /// listener (queued in its backlog even mid-build); a refused/not-found connect
 /// means the name is stale.
 async fn probe_live(key: &BackendKey) -> anyhow::Result<bool> {
-    Ok(TokioStream::connect(backend_name(key)?).await.is_ok())
+    match TokioStream::connect(backend_name(key)?).await {
+        Ok(_) => Ok(true),
+        // Only a clearly-absent listener counts as stale. Any other (transient) connect
+        // error is treated as live, so we never unlink+rebind a backend that is actually
+        // up — the conservative choice for the reclaim decision.
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "liveness probe inconclusive; assuming the backend is live");
+            Ok(true)
+        }
+    }
 }
 
 /// Reject a peer running as a different user. On unix this reads `SO_PEERCRED`; the
