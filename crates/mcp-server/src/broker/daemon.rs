@@ -189,14 +189,16 @@ impl Drop for ActiveGuard {
 /// - `Ok(None)` — another live backend already owns it; defer to it.
 /// - `Err(..)` — a real failure.
 ///
-/// On `AddrInUse` we probe with a connect: a successful connect means a live owner
-/// (defer); a refused connect on unix means a stale socket file from a crashed
-/// backend, which we reclaim and rebind once — and if a concurrent cold-starter
-/// beats us to that rebind, we defer to it rather than erroring.
+/// When the name is already taken we probe with a connect: a successful connect means
+/// a live owner (defer); otherwise the name is stale. On unix that stale name is a
+/// leftover socket file from a crashed backend, which we reclaim and rebind once (and if
+/// a concurrent cold-starter beats us to the rebind, we defer to it). On Windows the
+/// named pipe instance vanishes with its owner, so a stale name just means the pipe is
+/// already gone and we rebind directly.
 async fn bind(key: &BackendKey) -> anyhow::Result<Option<TokioListener>> {
     match ListenerOptions::new().name(backend_name(key)?).create_tokio() {
         Ok(listener) => Ok(Some(listener)),
-        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+        Err(e) if is_name_in_use(&e) => {
             if probe_live(key).await? {
                 return Ok(None);
             }
@@ -207,7 +209,7 @@ async fn bind(key: &BackendKey) -> anyhow::Result<Option<TokioListener>> {
                 let _ = std::fs::remove_file(&path);
                 match ListenerOptions::new().name(backend_name(key)?).create_tokio() {
                     Ok(listener) => Ok(Some(listener)),
-                    Err(e2) if e2.kind() == std::io::ErrorKind::AddrInUse => {
+                    Err(e2) if is_name_in_use(&e2) => {
                         // A concurrent cold-starter rebound first; defer to it.
                         if probe_live(key).await? {
                             Ok(None)
@@ -220,11 +222,42 @@ async fn bind(key: &BackendKey) -> anyhow::Result<Option<TokioListener>> {
             }
             #[cfg(not(unix))]
             {
-                Err(e.into())
+                // No file to unlink: a non-live probe means the previous pipe owner is
+                // gone, so the name is free. Rebind once; if a concurrent starter won the
+                // race, defer to it rather than erroring.
+                match ListenerOptions::new().name(backend_name(key)?).create_tokio() {
+                    Ok(listener) => Ok(Some(listener)),
+                    Err(e2) if is_name_in_use(&e2) => {
+                        if probe_live(key).await? {
+                            Ok(None)
+                        } else {
+                            Err(e2.into())
+                        }
+                    }
+                    Err(e2) => Err(e2.into()),
+                }
             }
         }
         Err(e) => Err(e.into()),
     }
+}
+
+/// Whether a failed bind means the rendezvous name is already taken (so we should probe
+/// and defer/reclaim rather than error out). Unix reports `AddrInUse`; Windows fails the
+/// `CreateNamedPipe` of an already-existing instance with `ERROR_ACCESS_DENIED` (5)
+/// instead, so we map that to the same "name in use" decision.
+fn is_name_in_use(e: &std::io::Error) -> bool {
+    if e.kind() == std::io::ErrorKind::AddrInUse {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        const ERROR_ACCESS_DENIED: i32 = 5;
+        if e.raw_os_error() == Some(ERROR_ACCESS_DENIED) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Is a backend actually accepting on this name? A successful connect proves a live
