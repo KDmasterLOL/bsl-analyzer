@@ -89,6 +89,45 @@ async fn one_backend_serves_many_sessions_then_idles_out() {
     exited.unwrap().expect("owner task joined").expect("owner run ok");
 }
 
+/// Regression: while the first backend is still doing its (slow) build, a second
+/// launch for the same key must DEFER, not reclaim the socket — a bound-but-not-yet-
+/// accepting backend must not look stale. And a client that connects mid-build must be
+/// parked and served once the build completes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn second_launch_defers_while_first_is_still_building() {
+    let src = TempDir::new().unwrap();
+    let key = key_for(&src);
+
+    // First backend: a deliberately slow build so the window "bound but not built" is
+    // wide. The daemon must accept (and park) connections during this window.
+    let slow_build = || {
+        std::thread::sleep(Duration::from_secs(2));
+        Ok(reference_server())
+    };
+    let first =
+        tokio::spawn(broker::daemon::run(slow_build, key_for(&src), Duration::from_secs(15)));
+
+    // A client connects during the build — the connect must succeed (backlog drained),
+    // proving the socket is live (not stealable).
+    let stream = connect_within(&key, Duration::from_secs(10)).await;
+
+    // A second launch for the same key, while the first is still building, must defer
+    // promptly. If it stole the socket it would become a second owner and block on its
+    // own serve loop until idle (15s), tripping this timeout.
+    let second =
+        broker::daemon::run(|| Ok(reference_server()), key_for(&src), Duration::from_secs(15));
+    tokio::time::timeout(Duration::from_secs(8), second)
+        .await
+        .expect("second launch defers while the first is building (no socket steal)")
+        .expect("second launch ok");
+
+    // The connection parked during the build is served once the build completes.
+    let client = ().serve(stream).await.expect("parked session served after build");
+    assert!(client.peer_info().is_some(), "parked session saw server info");
+    client.cancel().await.ok();
+    first.abort();
+}
+
 /// M3 concurrency: many sessions sharing one workspace backend must serve in
 /// parallel without deadlocking. Each session is an in-memory duplex pair fed to
 /// `serve_stream` from one cloned `McpServer` — exactly how the daemon serves N

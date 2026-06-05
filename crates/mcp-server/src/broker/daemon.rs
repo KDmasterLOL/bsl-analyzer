@@ -29,26 +29,55 @@ use crate::{serve_stream, McpServer};
 /// idle, and when another live backend already owned the name (nothing to do).
 pub async fn run<F>(build: F, key: BackendKey, idle: Duration) -> anyhow::Result<()>
 where
-    F: FnOnce() -> anyhow::Result<McpServer>,
+    F: FnOnce() -> anyhow::Result<McpServer> + Send + 'static,
 {
     let Some(listener) = bind(&key).await? else {
         tracing::info!("backend already serving this project; nothing to do");
         return Ok(());
     };
 
-    let server = build()?;
+    // Build off the async runtime, and start accepting immediately. A bound socket that
+    // isn't being accepted looks dead to a second daemon's liveness probe during the
+    // multi-minute cold build — which would make that daemon reclaim (steal) our socket
+    // and split the project across two backends. Draining the backlog from the first
+    // accept keeps the probe honest; connections that arrive mid-build are parked and
+    // served once the resident state is ready.
+    let mut build_handle = tokio::task::spawn_blocking(build);
+    let mut parked: Vec<TokioStream> = Vec::new();
+    let server = loop {
+        tokio::select! {
+            built = &mut build_handle => {
+                break built.map_err(|e| anyhow::anyhow!("backend build task panicked: {e}"))??;
+            }
+            accepted = listener.accept() => {
+                let conn = accepted?;
+                if peer_authorized(&conn) {
+                    parked.push(conn);
+                } else {
+                    tracing::warn!("rejected backend connection from an unauthorized peer");
+                }
+            }
+        }
+    };
+
     let guard = server.clone();
     // Flush/persist resident state on the way out (success or failure), mirroring
     // the stdio path, before the process exits.
-    let result = serve(server, listener, idle).await;
+    let result = serve(server, listener, parked, idle).await;
     guard.shutdown();
     result
 }
 
-async fn serve(server: McpServer, listener: TokioListener, idle: Duration) -> anyhow::Result<()> {
+async fn serve(
+    server: McpServer,
+    listener: TokioListener,
+    parked: Vec<TokioStream>,
+    idle: Duration,
+) -> anyhow::Result<()> {
     tracing::info!(
         pid = std::process::id(),
         idle_secs = idle.as_secs(),
+        parked = parked.len(),
         "broker backend listening"
     );
 
@@ -60,6 +89,13 @@ async fn serve(server: McpServer, listener: TokioListener, idle: Duration) -> an
     let active = Arc::new(AtomicU64::new(0));
     let mut idle_since = Some(Instant::now());
     let mut served = 0u64;
+
+    // Serve the connections that arrived during the build first.
+    for conn in parked {
+        idle_since = None;
+        served += 1;
+        spawn_session(&server, &active, conn, served);
+    }
 
     let poll = (idle / 4).clamp(Duration::from_millis(100), Duration::from_secs(15));
     let mut ticker = interval(poll);
@@ -76,21 +112,7 @@ async fn serve(server: McpServer, listener: TokioListener, idle: Duration) -> an
                 }
                 idle_since = None; // activity resets the idle clock
                 served += 1;
-                // The guard decrements `active` on drop, so a panicking session task
-                // can never strand the count and keep the backend alive forever.
-                let guard = ActiveGuard::new(Arc::clone(&active));
-                tracing::debug!(
-                    active = active.load(Ordering::SeqCst),
-                    served,
-                    "broker accepted a session"
-                );
-                let session = server.clone();
-                tokio::spawn(async move {
-                    let _guard = guard;
-                    if let Err(e) = serve_stream(session, conn).await {
-                        tracing::warn!(error = %e, "broker session ended with error");
-                    }
-                });
+                spawn_session(&server, &active, conn, served);
             }
             _ = ticker.tick() => {
                 if active.load(Ordering::SeqCst) == 0 {
@@ -110,6 +132,21 @@ async fn serve(server: McpServer, listener: TokioListener, idle: Duration) -> an
     }
 
     Ok(())
+}
+
+/// Serve one accepted connection on its own task. The [`ActiveGuard`] decrements the
+/// active-session count on drop, so a panicking session can never strand the count and
+/// keep the backend alive forever.
+fn spawn_session(server: &McpServer, active: &Arc<AtomicU64>, conn: TokioStream, served: u64) {
+    let guard = ActiveGuard::new(Arc::clone(active));
+    tracing::debug!(active = active.load(Ordering::SeqCst), served, "broker accepted a session");
+    let session = server.clone();
+    tokio::spawn(async move {
+        let _guard = guard;
+        if let Err(e) = serve_stream(session, conn).await {
+            tracing::warn!(error = %e, "broker session ended with error");
+        }
+    });
 }
 
 /// Decrements the active-session count on drop (including unwind), so the idle
