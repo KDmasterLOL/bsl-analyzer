@@ -131,7 +131,8 @@ fn get_plural_collection_name(
         | MdoType::DimensionTable
         | MdoType::CommonModule
         | MdoType::EventSubscription
-        | MdoType::Subsystem => None,
+        | MdoType::Subsystem
+        | MdoType::Role => None,
     }
 }
 

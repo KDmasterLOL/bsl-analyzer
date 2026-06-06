@@ -1264,6 +1264,191 @@ fn subsystem_membership_edge(from: GraphNode, to: GraphNode) -> WorkspaceCallEdg
     }
 }
 
+/// Project role reference edges: from each role's `Mdo` node (type [`MdoType::Role`]) to every
+/// metadata object the role grants rights on. Pure config-driven (like the catalog and
+/// subsystem passes), full-build only — a `Rights.xml` change is metadata drift that forces a
+/// full rebuild, so the incremental reproject never runs this and both paths stay identical.
+///
+/// Two reference sources:
+/// - **direct object-rights** (`<object>` entries) → provenance `resolved`;
+/// - **RLS condition objects**: an object named only inside a `restrictionByCondition` query is
+///   recovered by [`rls_condition_objects`] and emitted as `inferred`.
+///
+/// Direct edges are emitted first into a shared `(from,to)` seen set, so an RLS edge to an
+/// already-linked object is suppressed and `resolved` wins. Role and object names are
+/// canonicalized through the shared `mdo_canonical` so they coincide with the objects' own
+/// nodes from other passes.
+pub fn project_workspace_role_edges<DB: ConfigsDatabase>(
+    db: &DB,
+    representative: FileId,
+    state: &mut GraphBuildState,
+) -> Vec<WorkspaceCallEdge> {
+    // Direct object-rights references and the RLS condition texts to resolve, gathered
+    // deterministically so canonicalization sees a load-order-independent first-seen spelling.
+    let mut direct: Vec<(String, MdoType, String)> = Vec::new();
+    // (role_name, parent_type, parent_name, condition)
+    let mut rls: Vec<(String, MdoType, String, String)> = Vec::new();
+    for visible in db.configurations(representative) {
+        for role in visible.configuration.roles() {
+            for obj in role.objects() {
+                direct.push((role.name().to_string(), obj.mdo_type, obj.name.clone()));
+                for condition in &obj.restrictions {
+                    rls.push((
+                        role.name().to_string(),
+                        obj.mdo_type,
+                        obj.name.clone(),
+                        condition.clone(),
+                    ));
+                }
+            }
+        }
+    }
+    direct.sort();
+    direct.dedup();
+    rls.sort();
+    rls.dedup();
+
+    let merged = db.merged_visible_configuration(representative);
+
+    let mut edges = Vec::new();
+    let mut seen: FxHashSet<(GraphNode, GraphNode)> = FxHashSet::default();
+
+    let role_node = |state: &mut GraphBuildState, role_name: &str| GraphNode::Mdo {
+        mdo_type: MdoType::Role,
+        object_name: state.mdo_canonical.canonical(MdoType::Role, role_name),
+    };
+
+    // Direct object-rights edges first so `resolved` wins any (role, object) collision with RLS.
+    for (role_name, mdo_type, obj_name) in &direct {
+        let from = role_node(state, role_name);
+        let to = GraphNode::Mdo {
+            mdo_type: *mdo_type,
+            object_name: state.mdo_canonical.canonical(*mdo_type, obj_name),
+        };
+        if seen.insert((from.clone(), to.clone())) {
+            edges.push(role_reference_edge(from, to, EdgeProvenance::Resolved));
+        }
+    }
+
+    // RLS condition objects: objects named inside the restriction query but not already granted
+    // a direct right. The parent object itself is filtered out by `rls_condition_objects`.
+    for (role_name, parent_type, parent_name, condition) in &rls {
+        for (mdo_type, obj_name) in
+            rls_condition_objects(*parent_type, parent_name, condition, &merged)
+        {
+            let from = role_node(state, role_name);
+            let to = GraphNode::Mdo {
+                mdo_type,
+                object_name: state.mdo_canonical.canonical(mdo_type, &obj_name),
+            };
+            if seen.insert((from.clone(), to.clone())) {
+                edges.push(role_reference_edge(from, to, EdgeProvenance::Inferred));
+            }
+        }
+    }
+    edges
+}
+
+/// Resolve the metadata objects named inside an RLS restriction `condition` by wrapping it in a
+/// synthetic query over the restricted object and reading the resolved tables. The parent
+/// object (the wrapper's own `ИЗ` table) is excluded — it is already covered by the direct
+/// object-rights edge.
+///
+/// A bare condition fragment resolves no tables on its own (`parse_sdbl` needs a top-level
+/// `ВЫБРАТЬ … ИЗ`), so wrapping is required. To avoid a malformed or injected condition leaking
+/// spurious top-level tables, the result is taken only when the wrapper parses cleanly and
+/// reduces to exactly one top-level query; a condition that is itself a full query (`ВЫБРАТЬ`/
+/// `SELECT`) is skipped rather than spliced after `ГДЕ`. Legacy `#`-macro templates parse with
+/// errors and are dropped here — harmless, since the restricted object is still linked directly.
+fn rls_condition_objects(
+    parent_type: MdoType,
+    parent_name: &str,
+    condition: &str,
+    config: &Option<std::sync::Arc<bsl_metadata::Configuration>>,
+) -> Vec<(MdoType, String)> {
+    let cond = strip_leading_where(condition);
+    if cond.is_empty() {
+        return Vec::new();
+    }
+    // A condition that is itself a SELECT is not a boolean fragment; never splice it after `ГДЕ`.
+    let head = cond.split_whitespace().next().unwrap_or("").to_lowercase();
+    if head == "выбрать" || head == "select" {
+        return Vec::new();
+    }
+
+    let wrapped = format!(
+        "ВЫБРАТЬ 1 ИЗ {}.{} КАК {} ГДЕ {}",
+        parent_type.russian_name(),
+        parent_name,
+        parent_name,
+        cond
+    );
+    let parse = parser::parse_sdbl(&wrapped);
+    if parse.has_errors() {
+        return Vec::new();
+    }
+    let package = sdbl_hir::lower_sdbl_to_hir(&parse, config.clone());
+    // Exactly one top-level query: a `;`-separated injection would add another and is rejected.
+    if package.queries().len() != 1 {
+        return Vec::new();
+    }
+
+    let mut resolved = Vec::new();
+    for query in package.queries() {
+        query.hir.collect_resolved_tables(&mut resolved);
+    }
+    let parent_lower = parent_name.to_lowercase();
+    let mut out = Vec::new();
+    let mut seen: FxHashSet<(MdoType, String)> = FxHashSet::default();
+    for table in resolved {
+        let (mdo_type, name) = match table {
+            sdbl_hir::ResolvedTable::Metadata { mdo_type, name, .. }
+            | sdbl_hir::ResolvedTable::Register { mdo_type, name, .. } => (*mdo_type, name.clone()),
+            sdbl_hir::ResolvedTable::TempTable { .. } => continue,
+        };
+        // Skip the wrapper's own FROM table (the restricted object) — already linked directly.
+        if mdo_type == parent_type && name.to_lowercase() == parent_lower {
+            continue;
+        }
+        if seen.insert((mdo_type, name.to_lowercase())) {
+            out.push((mdo_type, name));
+        }
+    }
+    out
+}
+
+/// Strip a single leading `ГДЕ` / `WHERE` keyword (bilingual, case-insensitive) from an RLS
+/// condition so it can be spliced after the wrapper's own `ГДЕ`.
+fn strip_leading_where(condition: &str) -> &str {
+    let trimmed = condition.trim();
+    // Lowercase to fold case for both ASCII (`WHERE`) and Cyrillic (`ГДЕ`); lowercasing keeps the
+    // byte length stable for these alphabets, so the offset is valid back in `trimmed`.
+    let lower = trimmed.to_lowercase();
+    for kw in ["где", "where"] {
+        if let Some(rest) = lower.strip_prefix(kw) {
+            // Only strip a standalone keyword (followed by whitespace), not an identifier prefix.
+            if rest.starts_with(char::is_whitespace) {
+                return trimmed[kw.len()..].trim_start();
+            }
+        }
+    }
+    trimmed
+}
+
+fn role_reference_edge(
+    from: GraphNode,
+    to: GraphNode,
+    provenance: EdgeProvenance,
+) -> WorkspaceCallEdge {
+    WorkspaceCallEdge {
+        from,
+        to,
+        kind: EdgeKind::RoleReference,
+        provenance,
+        crosses_client_to_server: false,
+    }
+}
+
 fn contains_edge(from: GraphNode, to: GraphNode) -> WorkspaceCallEdge {
     WorkspaceCallEdge {
         from,
@@ -1402,6 +1587,7 @@ fn edge_kind_label(kind: EdgeKind) -> &'static str {
         EdgeKind::EventSubscriptionRef => "event_subscription",
         EdgeKind::RegisterMovement => "register_movement",
         EdgeKind::SubsystemMembership => "subsystem_membership",
+        EdgeKind::RoleReference => "role_reference",
     }
 }
 
@@ -1796,5 +1982,61 @@ impl<'a> GraphRowEncoder<'a> {
             provenance: provenance_label(edge.provenance),
             crosses: edge.crosses_client_to_server,
         }
+    }
+}
+
+#[cfg(test)]
+mod role_rls_tests {
+    use super::{rls_condition_objects, strip_leading_where};
+    use bsl_metadata::{Configuration, MdoType, MetadataObject};
+    use std::sync::Arc;
+
+    fn config() -> Option<Arc<Configuration>> {
+        let mut c = Configuration::new("Test");
+        c.add_metadata_object(MetadataObject::new(MdoType::Catalog, "Контрагенты"));
+        c.add_metadata_object(MetadataObject::new(MdoType::Catalog, "Организации"));
+        Some(Arc::new(c))
+    }
+
+    fn objs(condition: &str) -> Vec<(MdoType, String)> {
+        rls_condition_objects(MdoType::Catalog, "Контрагенты", condition, &config())
+    }
+
+    #[test]
+    fn strip_leading_where_is_bilingual_and_keyword_bounded() {
+        assert_eq!(strip_leading_where("ГДЕ Х = 1"), "Х = 1");
+        assert_eq!(strip_leading_where("  где Х = 1"), "Х = 1");
+        assert_eq!(strip_leading_where("WHERE X = 1"), "X = 1");
+        assert_eq!(strip_leading_where("where X = 1"), "X = 1");
+        // Not a standalone keyword — `Гдето` must not be truncated to `то`.
+        assert_eq!(strip_leading_where("Гдето = 1"), "Гдето = 1");
+    }
+
+    #[test]
+    fn rls_recovers_subquery_object_and_excludes_parent() {
+        let found = objs("Контрагенты.Ссылка В (ВЫБРАТЬ Ссылка ИЗ Справочник.Организации)");
+        // The subquery object is recovered; the wrapper's own FROM (the parent) is excluded.
+        assert_eq!(found, vec![(MdoType::Catalog, "Организации".to_string())]);
+    }
+
+    #[test]
+    fn rls_rejects_semicolon_injection() {
+        // A second `;`-separated top-level query must not leak its table as a role reference.
+        assert!(
+            objs("Контрагенты.Удален = ЛОЖЬ; ВЫБРАТЬ Ссылка ИЗ Справочник.Организации").is_empty(),
+            "a multi-statement injection is rejected wholesale"
+        );
+    }
+
+    #[test]
+    fn rls_skips_full_query_condition() {
+        // A condition that is itself a SELECT is not spliced after `ГДЕ`.
+        assert!(objs("ВЫБРАТЬ Ссылка ИЗ Справочник.Организации").is_empty());
+    }
+
+    #[test]
+    fn rls_drops_macro_template_without_false_edge() {
+        // A legacy `#`-macro template parses with errors → dropped; no spurious object.
+        assert!(objs("#ПоЗначениям(\"Справочник.Организации\")").is_empty());
     }
 }

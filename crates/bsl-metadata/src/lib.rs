@@ -47,7 +47,7 @@ pub use register::{
     AccumulationRegisterType, Register, RegisterAttribute, RegisterBuilder, RegisterPeriodicity,
     RegisterResource,
 };
-pub use role::{Role, RoleData};
+pub use role::{Role, RoleData, RoleObjectRef};
 pub use scheduled_job::{ScheduledJob, ScheduledJobHandler};
 pub use subsystem::Subsystem;
 pub use tabular_section::{TabularSection, TabularSectionAttribute};

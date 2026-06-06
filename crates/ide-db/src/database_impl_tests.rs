@@ -1693,6 +1693,95 @@ fn subsystem_membership_links_to_member_objects() {
 }
 
 #[test]
+fn role_links_to_object_rights_and_rls_condition_object() {
+    use bsl_metadata::MdoType;
+    use hir::call_graph::{EdgeKind, EdgeProvenance, GraphNode};
+    use hir::graph_index::{project_workspace_role_edges, GraphBuildState};
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("src/cf");
+    std::fs::create_dir_all(root.join("Catalogs")).unwrap();
+    std::fs::create_dir_all(root.join("Roles/ТестоваяРоль/Ext")).unwrap();
+    std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+
+    let catalog = |name: &str| {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Catalog uuid="00000000-0000-0000-0000-0000000000{:02}">
+        <Properties><Name>{name}</Name></Properties>
+    </Catalog>
+</MetaDataObject>"#,
+            name.len()
+        )
+    };
+    std::fs::write(root.join("Catalogs/Контрагенты.xml"), catalog("Контрагенты")).unwrap();
+    std::fs::write(root.join("Catalogs/Организации.xml"), catalog("Организации")).unwrap();
+
+    std::fs::write(
+        root.join("Roles/ТестоваяРоль.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Role uuid="00000000-0000-0000-0000-0000000000aa">
+        <Properties><Name>ТестоваяРоль</Name></Properties>
+    </Role>
+</MetaDataObject>"#,
+    )
+    .unwrap();
+    // Direct read right on Контрагенты, restricted by an RLS condition that names Организации
+    // only inside its subquery — so Организации is reachable solely through the RLS text.
+    std::fs::write(
+        root.join("Roles/ТестоваяРоль/Ext/Rights.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<Rights xmlns="http://v8.1c.ru/8.2/roles" version="2.10">
+    <setForNewObjects>false</setForNewObjects>
+    <object>
+        <name>Catalog.Контрагенты</name>
+        <right>
+            <name>Read</name>
+            <value>true</value>
+            <restrictionByCondition>
+                <condition>Контрагенты.Ссылка В (ВЫБРАТЬ Ссылка ИЗ Справочник.Организации)</condition>
+            </restrictionByCondition>
+        </right>
+    </object>
+</Rights>"#,
+    )
+    .unwrap();
+
+    let mut db = RootDatabaseImpl::new();
+    db.set_all_config_paths(vec![(None, root.clone())]);
+    let file_id = FileId(0);
+    let mut file_set = FileSet::new();
+    file_set.insert(file_id, VfsPath::new(root.join("X.bsl").to_string_lossy().as_ref()));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(file_id, SourceRootId(0));
+    db.set_file_text(file_id, "Процедура Х() КонецПроцедуры");
+
+    let mut state = GraphBuildState::new();
+    let edges = project_workspace_role_edges(&db, file_id, &mut state);
+
+    let role_edge = |to_name: &str, prov: EdgeProvenance| {
+        edges.iter().any(|e| {
+            e.kind == EdgeKind::RoleReference
+                && e.provenance == prov
+                && matches!(&e.from, GraphNode::Mdo { mdo_type, object_name }
+                    if *mdo_type == MdoType::Role && object_name.as_str() == "ТестоваяРоль")
+                && matches!(&e.to, GraphNode::Mdo { mdo_type, object_name }
+                    if *mdo_type == MdoType::Catalog && object_name.as_str() == to_name)
+        })
+    };
+    assert!(
+        role_edge("Контрагенты", EdgeProvenance::Resolved),
+        "direct object-rights edge role → Контрагенты is `resolved`"
+    );
+    assert!(
+        role_edge("Организации", EdgeProvenance::Inferred),
+        "RLS condition object role → Организации is `inferred` (parsed from the restriction text)"
+    );
+}
+
+#[test]
 fn event_subscription_with_missing_handler_yields_no_edge() {
     use hir::call_graph::EdgeKind;
     use hir::graph_index::{project_workspace_subscription_edges, GraphBuildState, GraphIndex};

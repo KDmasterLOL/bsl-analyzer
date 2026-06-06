@@ -34,7 +34,9 @@ use crate::graph::{config_metadata_paths, db_for_files, enumerate_bsl_files};
 /// `Движения.<Регистр>.<метод>()` movements become `register_movement` edges. Version 8
 /// resolves idle handlers to a unique global common module (new cross-module edges).
 /// Version 9 adds `subsystem_membership` edges (subsystem → member object / child subsystem).
-pub(crate) const SCHEMA_VERSION: u32 = 9;
+/// Version 10 adds `role_reference` edges (role → object it grants rights on, plus RLS
+/// condition objects).
+pub(crate) const SCHEMA_VERSION: u32 = 10;
 
 /// One file's persisted identity in the `files` table: its stat-only fingerprint
 /// and (for `.bsl`) its resolution-signature hash. Persisting these per path lets a

@@ -139,7 +139,8 @@ fn mdo_ref_prefix(mdo: MdoType) -> Option<&'static str> {
         | MdoType::DimensionTable
         | MdoType::CommonModule
         | MdoType::EventSubscription
-        | MdoType::Subsystem => None,
+        | MdoType::Subsystem
+        | MdoType::Role => None,
     }
 }
 

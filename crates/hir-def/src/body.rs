@@ -773,7 +773,8 @@ impl ManagerType {
             | MdoType::DimensionTable
             | MdoType::CommonModule
             | MdoType::EventSubscription
-            | MdoType::Subsystem => None,
+            | MdoType::Subsystem
+            | MdoType::Role => None,
         }
     }
 

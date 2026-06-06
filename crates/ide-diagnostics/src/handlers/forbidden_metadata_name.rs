@@ -142,6 +142,7 @@ fn get_mdo_type_russian(mdo_type: &bsl_metadata::MdoType) -> &'static str {
         MdoType::DimensionTable => "ТаблицаИзмерения",
         MdoType::EventSubscription => "ПодпискаНаСобытие",
         MdoType::Subsystem => "Подсистема",
+        MdoType::Role => "Роль",
     }
 }
 

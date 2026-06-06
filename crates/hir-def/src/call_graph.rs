@@ -169,6 +169,14 @@ pub enum EdgeKind {
     /// metadata (the subsystem's `Content`/`ChildObjects`), not from code. Lets an impact
     /// analysis answer "which subsystems must be updated if I delete this object".
     SubsystemMembership,
+    /// A role references a metadata object it grants rights on. From the role's
+    /// [`GraphNode::Mdo`] (type `MdoType::Role`) to the referenced object's
+    /// [`GraphNode::Mdo`]. Derived from configuration metadata (`Rights.xml`), not from code:
+    /// a direct object-rights entry is `resolved`, while an object named only inside an RLS
+    /// restriction condition is `inferred` (parsed from the restriction query text). Lets an
+    /// impact analysis answer "which roles grant rights on / restrict this object" before
+    /// deleting or renaming it.
+    RoleReference,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
