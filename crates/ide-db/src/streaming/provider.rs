@@ -496,10 +496,22 @@ impl AnalysisProvider for StreamingProvider {
 
     fn module_level_liveness_analysis(
         &self,
-        _module_id: hir::ModuleId,
+        module_id: hir::ModuleId,
     ) -> Option<Arc<hir::dataflow::DataflowResult<hir::dataflow::liveness::Liveness>>> {
-        tracing::debug!("module_level_liveness_analysis not supported in streaming mode");
-        None
+        let module_bodies = self.module_bodies(module_id);
+        let body = module_bodies.module_code()?;
+
+        let cfg =
+            hir::cfg::CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), body, None);
+        let var_index = hir::dataflow::liveness::VariableIndex::from_body(body);
+
+        let result = hir::dataflow::liveness::liveness_analysis_direct(
+            body,
+            &cfg,
+            var_index,
+            hir::dataflow::DEFAULT_MAX_ITERATIONS,
+        )?;
+        Some(Arc::new(result))
     }
 
     fn resolve_vfs_path(
@@ -595,6 +607,48 @@ mod tests {
         let module_id = ModuleId::new(file_id);
         let bodies = provider.module_bodies(module_id);
         assert_eq!(bodies.iter_bodies().count(), 1);
+    }
+
+    fn provider_with_source(source: &str) -> (StreamingProvider, FileId) {
+        let mut files = FxHashMap::default();
+        let file_id = FileId(0);
+        files.insert(file_id, source.to_string());
+
+        let mut file_set = FileSet::default();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+
+        let global = Arc::new(GlobalContext {
+            configuration: None,
+            symbol_trees: FxHashMap::default(),
+            workspace_symbols: Arc::new(WorkspaceSymbols::default()),
+            module_index: Arc::new(ModuleIndex::new()),
+            file_set: Arc::new(file_set),
+            file_reader: FileReader::in_memory(files),
+            config_root: None,
+        });
+
+        (StreamingProvider::new(global), file_id)
+    }
+
+    #[test]
+    fn module_level_liveness_present_for_module_code() {
+        let (provider, file_id) = provider_with_source("А = 1;\nБ = А + 2;");
+        let module_id = ModuleId::new(file_id);
+        assert!(
+            provider.module_level_liveness_analysis(module_id).is_some(),
+            "module-level liveness must be computed in streaming mode"
+        );
+    }
+
+    #[test]
+    fn module_level_liveness_present_for_procedure_only_module() {
+        let (provider, file_id) =
+            provider_with_source("Процедура Тест()\n  А = 1;\nКонецПроцедуры");
+        let module_id = ModuleId::new(file_id);
+        assert!(
+            provider.module_level_liveness_analysis(module_id).is_some(),
+            "module-level code region is always lowered, so liveness is computed even with no top-level statements"
+        );
     }
 
     #[test]
