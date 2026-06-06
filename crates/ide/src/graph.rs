@@ -2365,6 +2365,7 @@ fn edge_kind_label(kind: EdgeKind) -> &'static str {
         EdgeKind::NotifyRef => "notify_ref",
         EdgeKind::IdleHandler => "idle_handler",
         EdgeKind::EventSubscriptionRef => "event_subscription",
+        EdgeKind::RegisterMovement => "register_movement",
     }
 }
 

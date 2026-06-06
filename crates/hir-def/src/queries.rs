@@ -165,6 +165,22 @@ pub fn resolved_module_summary_query<'db>(
                 EdgeProvenance::Inferred,
                 EdgeKind::ManagerAccess,
             ),
+            // A `Движения.<Регистр>` movement touch: resolve the register name to its
+            // metadata type from config. The edge is about the register object it touches.
+            CallTarget::RegisterMovement { register_name } => {
+                match resolver.resolve_register_by_name(db, register_name) {
+                    Some((mdo_type, object_name)) => (
+                        ResolvedTarget::Mdo { mdo_type, object_name },
+                        EdgeProvenance::Inferred,
+                        EdgeKind::RegisterMovement,
+                    ),
+                    None => (
+                        ResolvedTarget::Unresolved(edge.target.clone()),
+                        EdgeProvenance::Unresolved,
+                        edge.kind,
+                    ),
+                }
+            }
             // A `ЭтотОбъект` call that reached here is a platform object method
             // (local user methods were already resolved at extraction time).
             CallTarget::ThisObjectMethod { .. } | CallTarget::Unresolved => (

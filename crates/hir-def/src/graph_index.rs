@@ -360,6 +360,22 @@ pub fn resolve_module_summary_via_index(
                 EdgeProvenance::Inferred,
                 EdgeKind::ManagerAccess,
             ),
+            // A `Движения.<Регистр>` movement touch: resolve the register name to its
+            // metadata type from config, identical to the Salsa fold so the graphs match.
+            CallTarget::RegisterMovement { register_name } => {
+                match resolver.resolve_register_by_name(db, register_name) {
+                    Some((mdo_type, object_name)) => (
+                        ResolvedTarget::Mdo { mdo_type, object_name },
+                        EdgeProvenance::Inferred,
+                        EdgeKind::RegisterMovement,
+                    ),
+                    None => (
+                        ResolvedTarget::Unresolved(edge.target.clone()),
+                        EdgeProvenance::Unresolved,
+                        edge.kind,
+                    ),
+                }
+            }
             CallTarget::ThisObjectMethod { .. } | CallTarget::Unresolved => (
                 ResolvedTarget::Unresolved(edge.target.clone()),
                 EdgeProvenance::Unresolved,
@@ -1307,6 +1323,7 @@ fn edge_kind_label(kind: EdgeKind) -> &'static str {
         EdgeKind::NotifyRef => "notify_ref",
         EdgeKind::IdleHandler => "idle_handler",
         EdgeKind::EventSubscriptionRef => "event_subscription",
+        EdgeKind::RegisterMovement => "register_movement",
     }
 }
 

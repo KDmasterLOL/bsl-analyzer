@@ -129,6 +129,28 @@ impl Resolver {
         db.module_index(source_root_id).resolve_common_module(module_name).is_some()
     }
 
+    /// Resolve a bare register name (from a `Движения.<Регистр>` movement touch) to its
+    /// metadata type and canonical name. The movement syntax carries only the register
+    /// name; the configuration's register index supplies the type (Accumulation /
+    /// Information / Accounting / Calculation). Returns `None` when no register of that
+    /// name is visible, so an unresolved movement is surfaced honestly rather than guessed.
+    pub fn resolve_register_by_name(
+        &self,
+        db: &dyn ConfigsDatabase,
+        register_name: &Name,
+    ) -> Option<(bsl_metadata::MdoType, Name)> {
+        if !self.scopes.iter().any(|s| matches!(s, Scope::WorkspaceScope)) {
+            return None;
+        }
+        let module_id = self.module_id()?;
+        let needle = register_name.as_str();
+        db.configurations(module_id.file_id).iter().rev().find_map(|cfg| {
+            cfg.configuration
+                .find_register(needle)
+                .map(|reg| (reg.mdo_type(), Name::new(reg.name())))
+        })
+    }
+
     pub fn resolve_assignment_target(
         &self,
         db: &dyn ConfigsDatabase,

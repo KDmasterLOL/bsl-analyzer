@@ -152,14 +152,42 @@ pub enum EdgeKind {
     /// subscription's [`GraphNode::Mdo`] to the handler [`GraphNode::Method`]. Derived
     /// from configuration metadata, not from code.
     EventSubscriptionRef,
+    /// A document touches register records through a `Движения.<Регистр>.<метод>()` call
+    /// (`Добавить`/`Записать`/`Очистить`/`Загрузить`/`Выгрузить`). From the writing
+    /// `Method`/`ModuleCode` node to the touched register's [`GraphNode::Mdo`]. The
+    /// register name is literal; its type is resolved from configuration metadata.
+    ///
+    /// Scope: only the *call* form is modelled. A bare property read that captures the
+    /// collection for later use (`НаборЗаписей = Движения.<Регистр>;` then writes through
+    /// the variable) is not — that needs receiver dataflow, which lowering does not do.
+    /// At the document grain this rarely loses coverage, because a document that records
+    /// movements to a register also writes it through one of the call forms above.
+    RegisterMovement,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum CallTarget {
-    Local { callee_local_id: u32 },
-    QualifiedModule { module_name: Name, method_name: Name },
-    ManagerAccess { manager_type: ManagerType, object_name: Name, method_name: Option<Name> },
-    ThisObjectMethod { method_name: Name },
+    Local {
+        callee_local_id: u32,
+    },
+    QualifiedModule {
+        module_name: Name,
+        method_name: Name,
+    },
+    ManagerAccess {
+        manager_type: ManagerType,
+        object_name: Name,
+        method_name: Option<Name>,
+    },
+    ThisObjectMethod {
+        method_name: Name,
+    },
+    /// A `[получатель.]Движения.<Регистр>.<метод>()` document movement touch. The register
+    /// name is the literal token; lowering stays syntax-only, so the register's metadata
+    /// type is resolved later from configuration (see `Resolver::resolve_register_by_name`).
+    RegisterMovement {
+        register_name: Name,
+    },
     Unresolved,
 }
 
@@ -626,6 +654,20 @@ fn is_this_object(name_lower: &str) -> bool {
     name_lower == "этотобъект" || name_lower == "thisobject"
 }
 
+/// Recognise the `Движения` (RU) / `RegisterRecords` (EN) collection of a document's
+/// register records, whether named bare (`Движения`) or reached through a receiver
+/// (`Об.Движения`, `ЭтотОбъект.Движения`). The last path segment is what matters, so both
+/// a plain identifier and a field access are accepted.
+fn is_register_records(expr: &Expr) -> bool {
+    let segment = match expr {
+        Expr::Path(name) => name.as_str(),
+        Expr::Field { field, .. } => field.as_str(),
+        _ => return false,
+    };
+    let lower = segment.to_lowercase();
+    lower == "движения" || lower == "registerrecords"
+}
+
 /// A self-receiver for a callback registration: the object form (`ЭтотОбъект`) or the
 /// managed-form form (`ЭтаФорма`). Both mean "the handler lives in the current module".
 /// Wider than [`is_this_object`] because `ОписаниеОповещения` is most common in form
@@ -741,7 +783,20 @@ fn field_callee_to_edge(
             }
         }
         Expr::Field { base: inner_base, field: inner_field } => {
-            if let Expr::Path(mdo_type_name) = body.expr_idx(*inner_base) {
+            let inner = body.expr_idx(*inner_base);
+            // `[получатель.]Движения.<Регистр>.<метод>()` — a document movement write/read.
+            // The `Движения` collection is reached either bare (implicit `ЭтотОбъект`) or
+            // through a receiver (`Об.Движения`, `ЭтотОбъект.Движения`); either way the
+            // register name is `inner_field`. Its metadata type is resolved from config later.
+            if is_register_records(inner) {
+                return Some(CallEdge {
+                    caller,
+                    target: CallTarget::RegisterMovement { register_name: inner_field.clone() },
+                    kind: EdgeKind::RegisterMovement,
+                    range,
+                });
+            }
+            if let Expr::Path(mdo_type_name) = inner {
                 let target =
                     if let Some(manager_type) = ManagerType::from_name(mdo_type_name.as_str()) {
                         CallTarget::ManagerAccess {
@@ -1289,6 +1344,54 @@ EndProcedure
             } if object_name.as_str() == "ПриходнаяНакладная"
                 && method.as_str() == "СоздатьЭлемент"
         ));
+    }
+
+    #[test]
+    fn test_register_movement_bare_and_with_receiver() {
+        // `Движения.<Регистр>.<метод>()` is a movement touch in three idiomatic forms:
+        // bare (implicit ЭтотОбъект), through `ЭтотОбъект.`, and through an object variable.
+        let code = r#"
+Процедура ОбработкаПроведения()
+    Движение = Движения.ТоварыНаСкладах.Добавить();
+    ЭтотОбъект.Движения.ТоварыНаСкладах.Очистить();
+    Об.Движения.Взаиморасчеты.Записать();
+КонецПроцедуры
+"#;
+        let summary = parse_and_extract(code);
+        let movement_registers: Vec<&str> = summary
+            .call_edges
+            .iter()
+            .filter_map(|e| match &e.target {
+                CallTarget::RegisterMovement { register_name } => Some(register_name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(movement_registers, ["ТоварыНаСкладах", "ТоварыНаСкладах", "Взаиморасчеты"]);
+        assert!(summary
+            .call_edges
+            .iter()
+            .all(|e| !matches!(&e.target, CallTarget::RegisterMovement { .. })
+                || e.kind == EdgeKind::RegisterMovement));
+    }
+
+    #[test]
+    #[ignore = "known gap: a bare `Var = Движения.X` property read (no call) is not modelled \
+                — capturing the recordset into a variable needs receiver dataflow; tracked here"]
+    fn register_movement_property_read_is_a_known_gap() {
+        let code = r#"
+Процедура ОбработкаПроведения()
+    НаборЗаписей = Движения.ТоварыНаСкладах;
+КонецПроцедуры
+"#;
+        let summary = parse_and_extract(code);
+        assert!(
+            summary
+                .call_edges
+                .iter()
+                .any(|e| matches!(&e.target, CallTarget::RegisterMovement { register_name }
+                    if register_name.as_str() == "ТоварыНаСкладах")),
+            "a captured-recordset property read should also count as a register touch"
+        );
     }
 
     #[test]

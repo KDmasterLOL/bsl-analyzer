@@ -113,6 +113,7 @@ fn edge_kind(kind: &str) -> &'static str {
         "notify_ref" => "notify_ref",
         "idle_handler" => "idle_handler",
         "event_subscription" => "event_subscription",
+        "register_movement" => "register_movement",
         _ => "call",
     }
 }

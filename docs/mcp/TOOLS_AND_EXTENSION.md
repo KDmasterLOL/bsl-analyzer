@@ -14,7 +14,7 @@
 | `reference` | `its_help` | вопросы к ИТС / 1С:Напарник | `NAPARNIK_TOKEN` |
 | `workspace` | `metadata` | обзор объектов конфигурации, реквизитов, форм и дерева метаданных | `--source-dir` |
 | `workspace` | `search(action=search_code\|status)` | поиск по коду проекта (лексика + семантика, «умная» фузия с точным ярусом по имени символа) | `EMBEDDING_URL` включает семантику; без него работает лексика |
-| `workspace` | `graph` | граф вызовов: `overview`, `schema`, `status`, `node`, `source`, `neighbors`, `callers`, `callees`, `resolve`; виды рёбер включают строковую диспетчеризацию `notify_ref` (`ОписаниеОповещения`), `idle_handler` (`ПодключитьОбработчикОжидания`) и `event_subscription` (`ПодпискаНаСобытие` → обработчик) с провенансом `string_resolved` | `--source-dir` |
+| `workspace` | `graph` | граф вызовов: `overview`, `schema`, `status`, `node`, `source`, `neighbors`, `callers`, `callees`, `resolve`; виды рёбер включают строковую диспетчеризацию `notify_ref` (`ОписаниеОповещения`), `idle_handler` (`ПодключитьОбработчикОжидания`) и `event_subscription` (`ПодпискаНаСобытие` → обработчик) с провенансом `string_resolved`, а также `register_movement` (`Движения.<Регистр>.<метод>()` → регистр) для анализа влияния на регистр перед удалением/переименованием | `--source-dir` |
 | `workspace` | `diagnostics` | диагностики кода: `catalog`/`schema` (без базы), `file` (находки по файлу), `workspace` (агрегаты по конфигурации) | `--source-dir` |
 | `workspace` | `query` | `schema` (контракт без базы), `validate` для SDBL, а также `execute` для `SELECT` | `--onec-url` нужен для live-валидации через платформу и для `execute` |
 | `workspace` | `execute` | `check`, `run`, `eval` для BSL-кода | `--onec-url` нужен для `run` и `eval` |

@@ -417,6 +417,37 @@ fn test_resolver_cross_module_gated_by_configurations() {
 }
 
 #[test]
+fn resolve_register_by_name_maps_to_configured_mdo_type() {
+    use bsl_metadata::MdoType;
+    use hir::{ModuleId, Name, Resolver};
+
+    let mut db = RootDatabaseImpl::new();
+    let file = FileId(0);
+    let mut file_set = FileSet::new();
+    file_set.insert(file, VfsPath::new("/Documents/Док/Ext/ObjectModule.bsl"));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(file, SourceRootId(0));
+    db.set_file_text(file, "Процедура ОбработкаПроведения() КонецПроцедуры");
+
+    let config_path =
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer").to_string();
+    db.set_all_config_paths(vec![(None, std::path::PathBuf::from(config_path))]);
+
+    let resolver = Resolver::with_workspace_scope(ModuleId::new(file));
+
+    // The movement syntax carries only the register name; the config supplies the type.
+    assert_eq!(
+        resolver.resolve_register_by_name(&db, &Name::new("РегистрСведений1")),
+        Some((MdoType::InformationRegister, Name::new("РегистрСведений1"))),
+        "a register name must resolve to its configured metadata type"
+    );
+    // BSL is case-insensitive.
+    assert!(resolver.resolve_register_by_name(&db, &Name::new("регистрсведений1")).is_some());
+    // An unknown name is surfaced as unresolved rather than guessed.
+    assert_eq!(resolver.resolve_register_by_name(&db, &Name::new("НетТакогоРегистра")), None);
+}
+
+#[test]
 fn test_all_sdbl_in_file_basic() {
     let mut db = RootDatabaseImpl::new();
     let file_id = FileId(0);
@@ -1375,6 +1406,57 @@ fn workspace_call_graph_via_index_matches_salsa_fold() {
             "per-module ResolvedModuleSummary must match for {module:?}"
         );
     }
+}
+
+/// A `Движения.<Регистр>` movement must resolve to the register's `Mdo` node — and the
+/// Salsa fold and the resident index must agree — given a configuration that supplies the
+/// register's metadata type. Uses the checked-in designer fixture (which defines the
+/// `РегистрСведений1` information register).
+#[test]
+fn register_movement_resolves_to_register_mdo_in_both_paths() {
+    use bsl_metadata::MdoType;
+    use hir::call_graph::{EdgeKind, EdgeProvenance, ResolvedTarget};
+    use hir::graph_index::{resolve_module_summary_via_index, GraphIndex};
+    use hir::ConfigsDatabase;
+
+    let mut db = RootDatabaseImpl::new();
+    let caller = FileId(0);
+    let mut file_set = FileSet::new();
+    file_set.insert(caller, VfsPath::new("/Documents/Док/Ext/ObjectModule.bsl"));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(caller, SourceRootId(0));
+    db.set_file_text(
+        caller,
+        "Процедура ОбработкаПроведения()\n\
+         Движения.РегистрСведений1.Записать();\n\
+         КонецПроцедуры",
+    );
+
+    let config_path =
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer").to_string();
+    db.set_all_config_paths(vec![(None, std::path::PathBuf::from(config_path))]);
+
+    let is_register_edge = |e: &hir::ResolvedCallEdge| {
+        e.kind == EdgeKind::RegisterMovement
+            && e.provenance == EdgeProvenance::Inferred
+            && matches!(&e.target, ResolvedTarget::Mdo { mdo_type, object_name }
+                if *mdo_type == MdoType::InformationRegister
+                    && object_name.as_str() == "РегистрСведений1")
+    };
+
+    let salsa_summary = db.resolved_module_summary(ModuleId::new(caller));
+    assert!(
+        salsa_summary.edges.iter().any(is_register_edge),
+        "Движения.РегистрСведений1.Записать() must resolve to the register's Mdo node"
+    );
+
+    let modules = vec![ModuleId::new(caller)];
+    let index = GraphIndex::build(&db, &modules);
+    let index_summary = resolve_module_summary_via_index(&db, ModuleId::new(caller), &index);
+    assert_eq!(
+        index_summary, *salsa_summary,
+        "the resident index must resolve register movements identically to the Salsa fold"
+    );
 }
 
 /// The batched build path: a call from a module in one batch to a module in
