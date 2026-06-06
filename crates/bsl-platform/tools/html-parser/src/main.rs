@@ -47,6 +47,8 @@ struct TypeInfo {
     context: Option<ContextAvailability>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     iter_element_types: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    xdto_name: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -464,6 +466,7 @@ fn parse_type_html(html_path: &Path, _type_dir: &Path) -> Result<Option<TypeInfo
                     let context = scraper_parser::extract_context(&html_content);
                     let iter_element_types =
                         scraper_parser::extract_iter_element_types(&html_content);
+                    let xdto_name = scraper_parser::extract_xdto_name(&html_content);
 
                     return Ok(Some(TypeInfo {
                         name: russian,
@@ -471,6 +474,7 @@ fn parse_type_html(html_path: &Path, _type_dir: &Path) -> Result<Option<TypeInfo
                         min_version,
                         context,
                         iter_element_types,
+                        xdto_name,
                     }));
                 }
             }

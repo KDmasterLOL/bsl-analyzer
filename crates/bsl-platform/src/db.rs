@@ -40,11 +40,29 @@ impl PlatformDataInner {
 
         let mut types_by_name = FxHashMap::default();
 
+        // Several types can declare the same XDTO name (e.g. `Field`, `Parameter`
+        // across data-composition types); such an alias is ambiguous and must not
+        // be indexed, or it would resolve to an arbitrary one of them.
+        let mut xdto_counts: FxHashMap<SmolStr, u32> = FxHashMap::default();
+        for ty in &types {
+            if let Some(xdto) = &ty.xdto_name {
+                *xdto_counts.entry(xdto.to_lowercase().into()).or_insert(0) += 1;
+            }
+        }
+
         for (idx, ty) in types.iter().enumerate() {
             let ru_key: SmolStr = ty.name.to_lowercase().into();
             let en_key: SmolStr = ty.english_name.to_lowercase().into();
             types_by_name.insert(ru_key, idx);
             types_by_name.insert(en_key, idx);
+            // The XDTO name is an additional, non-overriding alias: index it only
+            // when unambiguous, and never let it shadow a type's own key.
+            if let Some(xdto) = &ty.xdto_name {
+                let key: SmolStr = xdto.to_lowercase().into();
+                if xdto_counts.get(&key) == Some(&1) {
+                    types_by_name.entry(key).or_insert(idx);
+                }
+            }
         }
 
         let methods: Vec<PlatformMethod> =
@@ -570,6 +588,34 @@ mod tests {
         assert!(data.get_type(name).is_some());
         assert!(data.get_type(&name.to_lowercase()).is_some());
         assert!(data.get_type(&name.to_uppercase()).is_some());
+    }
+
+    #[test]
+    fn test_get_type_by_unique_xdto_name() {
+        let data = PlatformDataInner::instance();
+        if data.all_types().is_empty() {
+            return;
+        }
+        // `FlowchartContextType` is the unique XDTO name of `ГрафическаяСхема`.
+        let via_xdto = data.get_type("FlowchartContextType");
+        let via_class = data.get_type("GraphicalSchema");
+        assert!(via_xdto.is_some(), "unique XDTO name must resolve");
+        assert_eq!(
+            via_xdto.map(|t| t.english_name.as_str()),
+            via_class.map(|t| t.english_name.as_str()),
+            "XDTO alias must resolve to the same type as the class name"
+        );
+    }
+
+    #[test]
+    fn test_ambiguous_xdto_name_is_not_indexed() {
+        let data = PlatformDataInner::instance();
+        if data.all_types().is_empty() {
+            return;
+        }
+        // `ParameterValue` is the XDTO name of several data-composition types and
+        // is not itself a class name, so it must not resolve to an arbitrary one.
+        assert!(data.get_type("ParameterValue").is_none());
     }
 
     #[test]

@@ -403,6 +403,16 @@ mod tests {
     }
 
     #[test]
+    fn xdto_named_token_resolves_to_class_type() {
+        // `FlowchartContextType` is the XDTO type name of `ГрафическаяСхема`;
+        // the token must resolve to the class type via the catalogue's XDTO alias.
+        assert_eq!(
+            parse_single_type("d5p1:FlowchartContextType", &qualifiers()).unwrap(),
+            AttributeType::PlatformNamed("ГрафическаяСхема".to_string()),
+        );
+    }
+
+    #[test]
     fn platform_token_resolution_is_namespace_prefix_agnostic() {
         // 1C emits the same logical type under version-namespaced prefixes;
         // both must resolve to the same Russian type name.
