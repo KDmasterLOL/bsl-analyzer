@@ -411,7 +411,13 @@ pub fn resolve_module_summary_via_index(
             },
             Err(_) => crate::queries::QualifiedLookup::Absent,
         };
-    edges.extend(crate::queries::resolve_callback_edges(&summary, find_local, find_qualified));
+    let global_modules = resolver.global_common_module_names(db);
+    edges.extend(crate::queries::resolve_callback_edges(
+        &summary,
+        find_local,
+        find_qualified,
+        &global_modules,
+    ));
 
     ResolvedModuleSummary { module, edges }
 }

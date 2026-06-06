@@ -1459,6 +1459,59 @@ fn register_movement_resolves_to_register_mdo_in_both_paths() {
     );
 }
 
+/// A global-context `ПодключитьОбработчикОжидания` handler that lives in a global common
+/// module (not the calling module) must resolve cross-module, per the platform help. Uses
+/// the designer fixture, which declares one global common module (`ГлобальныйСерверныйМодуль`).
+#[test]
+fn idle_handler_resolves_to_a_global_common_module() {
+    use hir::call_graph::{EdgeKind, EdgeProvenance, ResolvedTarget};
+    use hir::ConfigsDatabase;
+
+    let mut db = RootDatabaseImpl::new();
+    let caller = FileId(0);
+    let global = FileId(1);
+    let mut file_set = FileSet::new();
+    file_set.insert(caller, VfsPath::new("/CommonModules/Вызыватель/Ext/Module.bsl"));
+    file_set
+        .insert(global, VfsPath::new("/CommonModules/ГлобальныйСерверныйМодуль/Ext/Module.bsl"));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(caller, SourceRootId(0));
+    db.set_file_source_root(global, SourceRootId(0));
+    db.set_file_text(
+        caller,
+        "Процедура Старт() Экспорт\n\
+         ПодключитьОбработчикОжидания(\"ОбновитьЭкран\", 5);\n\
+         КонецПроцедуры",
+    );
+    db.set_file_text(global, "Процедура ОбновитьЭкран() Экспорт КонецПроцедуры");
+
+    let config_path =
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer").to_string();
+    db.set_all_config_paths(vec![(None, std::path::PathBuf::from(config_path))]);
+
+    let is_global_idle = |e: &hir::ResolvedCallEdge| {
+        e.kind == EdgeKind::IdleHandler
+            && e.provenance == EdgeProvenance::StringResolved
+            && matches!(&e.target, ResolvedTarget::Method(m) if m.module == ModuleId::new(global))
+    };
+
+    let salsa_summary = db.resolved_module_summary(ModuleId::new(caller));
+    assert!(
+        salsa_summary.edges.iter().any(is_global_idle),
+        "an idle handler exported by a global common module must resolve cross-module"
+    );
+
+    // The resident index must resolve the cross-module idle handler identically.
+    use hir::graph_index::{resolve_module_summary_via_index, GraphIndex};
+    let modules = vec![ModuleId::new(caller), ModuleId::new(global)];
+    let index = GraphIndex::build(&db, &modules);
+    let index_summary = resolve_module_summary_via_index(&db, ModuleId::new(caller), &index);
+    assert_eq!(
+        index_summary, *salsa_summary,
+        "the resident index must resolve cross-module idle handlers identically to the Salsa fold"
+    );
+}
+
 /// The batched build path: a call from a module in one batch to a module in
 /// another must resolve through the resident `GraphIndex`, even though the target
 /// module's text is absent from the batch's database. Asserts the edge SET

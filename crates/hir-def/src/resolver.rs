@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use bsl_config::VisibleConfig;
+use bsl_metadata::MdObject;
 
 use crate::configs::ConfigsDatabase;
 use crate::scope::{ExprScopes, ScopeId};
@@ -149,6 +150,36 @@ impl Resolver {
                 .find_register(needle)
                 .map(|reg| (reg.mdo_type(), Name::new(reg.name())))
         })
+    }
+
+    /// Names of the configuration's GLOBAL common modules — those whose exported
+    /// procedures are callable unqualified. These are the candidate modules for a
+    /// global-context `ПодключитьОбработчикОжидания` handler, which names the procedure
+    /// without a module qualifier. Deduplicated across visible configs (extension overlays).
+    ///
+    /// Two deliberate scope choices, both in service of impact analysis:
+    /// - Modules are NOT filtered by client/server dispatch. The help requires an idle
+    ///   handler to be client-side, but the graph models the *named reference* — if such a
+    ///   handler names a server-only method, renaming that method still breaks the
+    ///   registration, so the edge must exist. Dispatch validity is a diagnostic concern.
+    /// - The application module (`МодульПриложения`) — the help's other global-context host
+    ///   — is not yet enumerated here; only global common modules are. A handler living in
+    ///   the application module is a known, currently-unmodelled gap.
+    pub fn global_common_module_names(&self, db: &dyn ConfigsDatabase) -> Vec<Name> {
+        if !self.scopes.iter().any(|s| matches!(s, Scope::WorkspaceScope)) {
+            return Vec::new();
+        }
+        let Some(module_id) = self.module_id() else { return Vec::new() };
+        let mut names = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for cfg in db.configurations(module_id.file_id).iter() {
+            for cm in cfg.configuration.common_modules() {
+                if cm.is_global() && seen.insert(cm.name().to_lowercase()) {
+                    names.push(Name::new(cm.name()));
+                }
+            }
+        }
+        names
     }
 
     pub fn resolve_assignment_target(
