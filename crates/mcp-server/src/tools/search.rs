@@ -1,9 +1,9 @@
 use crate::baseline::{ConfiguredBaselineStatus, ExternalBaselineService, ExternalBaselineState};
 use crate::state::{SemanticRuntimeStatus, WorkspaceSearchMode};
 use bsl_search::{
-    fuse_rrf, lexical_hits_for_resolved_view, merge_context_for_collection, merge_lexical,
-    merge_semantic, FusedHit, IndexProgress, LexicalHit, Modality, SearchEngine, SearchError,
-    SearchHit, SemanticHit, RRF_K,
+    fuse_smart, lexical_hits_for_resolved_view, merge_context_for_collection, merge_lexical,
+    merge_semantic, FusedHit, IndexProgress, LexicalHit, SearchEngine, SearchError, SearchHit,
+    SemanticHit,
 };
 use rmcp::model::{CallToolResult, Content};
 use rmcp::ErrorData as McpError;
@@ -324,9 +324,9 @@ fn with_index_progress(message: String, progress: &IndexProgress) -> String {
     }
 }
 
-/// The unified code search: run lexical and semantic, fuse by RRF, and degrade to lexical
-/// (with a trailing note) when semantic cannot serve. This is what the `search_code` action
-/// dispatches to.
+/// The unified code search: run lexical and semantic, fuse by `fuse_smart` (exact-symbol tier
+/// then semantic tail), and degrade to lexical (with a trailing note) when semantic cannot serve.
+/// This is what the `search_code` action dispatches to.
 // This is the tool-dispatch boundary: each argument is an independent runtime handle or
 // per-request value pulled straight from `SharedState`, with no natural sub-grouping that a
 // context struct would not make more obscure than the flat list.
@@ -386,14 +386,16 @@ pub fn hybrid_code(
 
     let (mut hits, note): (Vec<FusedHit>, Option<String>) = match semantic {
         CodeHits::Ready { hits: sem_hits, .. } => {
-            (fuse_rrf(&lex_hits, &sem_hits, RRF_K, limit), None)
+            (fuse_smart(&lex_hits, &sem_hits, query, limit), None)
         }
-        // Semantic could not serve — degrade to lexical-only. Every hit is then lexical, so it
-        // is wrapped as a `FusedHit` with `Modality::Lexical` to keep the display uniform.
-        // Surface the precise upstream pending reason (overlay warmup, local RAG indexing, or
-        // index build) verbatim rather than collapsing them to one generic note.
-        CodeHits::Pending(message) => (lexical_only(lex_hits), Some(message)),
-        CodeHits::Unavailable(reason) => (lexical_only(lex_hits), Some(reason.note().to_owned())),
+        // Semantic could not serve — degrade to lexical-only by fusing against an empty semantic
+        // list, so the exact-symbol tier still floats. Surface the precise upstream pending reason
+        // (overlay warmup, local RAG indexing, or index build) verbatim rather than collapsing
+        // them to one generic note.
+        CodeHits::Pending(message) => (fuse_smart(&lex_hits, &[], query, limit), Some(message)),
+        CodeHits::Unavailable(reason) => {
+            (fuse_smart(&lex_hits, &[], query, limit), Some(reason.note().to_owned()))
+        }
     };
     hits.truncate(limit);
 
@@ -404,7 +406,7 @@ pub fn hybrid_code(
     // Explain the per-hit modality tag once, up front — a leading line does not shift the
     // per-hit `graph_id:` parsing (which is relative to each `#N` line).
     let mut out = String::from(
-        "Modality tag per hit: [L] lexical-only · [S] semantic-only · [L+S] found by both (strongest signal).\n",
+        "Modality tag per hit: [L] lexical-only · [S] semantic-only · [L+S] found by both (cross-modal agreement).\n",
     );
     out.push_str(&format_code_hits(&hits, workspace_root.as_deref(), graph_root));
     if let Some(note) = note {
@@ -1378,12 +1380,6 @@ fn graph_id_for_hit(
     }
 }
 
-/// Wrap lexical-only hits (the semantic-unavailable degrade path) as `FusedHit`s so the
-/// formatter handles one type. Each carries `Modality::Lexical`.
-fn lexical_only(hits: Vec<SearchHit>) -> Vec<FusedHit> {
-    hits.into_iter().map(|hit| FusedHit { hit, modality: Modality::Lexical }).collect()
-}
-
 fn format_code_hits(
     hits: &[FusedHit],
     engine_root: Option<&Path>,
@@ -1394,8 +1390,8 @@ fn format_code_hits(
     for (i, fused) in hits.iter().enumerate() {
         let hit = &fused.hit;
         let name = if hit.symbol_name.is_empty() { "<header>" } else { &hit.symbol_name };
-        // The modality tag (L / S / L+S) replaces the bare RRF score: `L+S` means lexical and
-        // semantic agreed (the strongest signal), which the small fused score does not convey.
+        // The modality tag (L / S / L+S) carries the cross-modal signal instead of a numeric
+        // score: `L+S` means lexical and semantic both surfaced the chunk (they agreed).
         let _ = writeln!(
             out,
             "#{} [{}] {}:{}-{} :: {} ({})",
@@ -2214,6 +2210,57 @@ mod tests {
         assert!(text.contains("ПроверитьИНН"), "{text}");
         // ...with a trailing note explaining semantic was skipped (after the hit lines).
         assert!(text.contains("-- semantic skipped: runtime initialization failed --"), "{text}");
+    }
+
+    #[test]
+    fn hybrid_degrade_note_follows_hit_lines_and_empty_results_suppress_it() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        fs::write(workspace.join("CommonModule.bsl"), "Процедура ПроверитьИНН()\nКонецПроцедуры")
+            .unwrap();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.index_directory_fts(workspace).unwrap();
+        engine.set_workspace_root(workspace);
+        let engine = Arc::new(Mutex::new(Some(engine)));
+        let failed = Arc::new(Mutex::new(SemanticRuntimeStatus::Failed("boom".to_owned())));
+
+        // A matching query: the degrade note must appear strictly AFTER the hit line so a client
+        // parsing `graph_id:` lines positionally is never shifted by it.
+        let hit_result = hybrid_code(
+            &engine,
+            &failed,
+            WorkspaceSearchMode::SqliteLocal,
+            None,
+            None,
+            None,
+            &IndexProgress::new(),
+            "ПроверитьИНН",
+            10,
+        )
+        .unwrap();
+        let text = hit_result.content[0].raw.as_text().expect("text").text.as_str();
+        let hit_pos = text.find("ПроверитьИНН").expect("hit line present");
+        let note_pos = text.find("-- semantic skipped").expect("note present");
+        assert!(note_pos > hit_pos, "note must trail the hit lines: {text}");
+
+        // A query that matches nothing degrades to an empty fused list: "No results found" and the
+        // semantic-skip note is suppressed (no dangling note without any hits).
+        let empty_result = hybrid_code(
+            &engine,
+            &failed,
+            WorkspaceSearchMode::SqliteLocal,
+            None,
+            None,
+            None,
+            &IndexProgress::new(),
+            "несуществующийидентификатор",
+            10,
+        )
+        .unwrap();
+        let empty_text = empty_result.content[0].raw.as_text().expect("text").text.as_str();
+        assert_eq!(empty_text, "No results found.");
+        assert!(!empty_text.contains("--"), "no trailing note without hits: {empty_text}");
     }
 
     #[test]

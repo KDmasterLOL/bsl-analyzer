@@ -298,7 +298,8 @@ impl McpServer {
                 .await
                 .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
             }
-            // `search_code` is the unified lexical+semantic code search (RRF-fused).
+            // `search_code` is the unified lexical+semantic code search (smart-fused: exact-symbol
+            // tier then semantic tail).
             "search_code" => {
                 let query = require(p.query, "query", &p.action)?;
                 let limit = p.limit.unwrap_or(10).min(50);
