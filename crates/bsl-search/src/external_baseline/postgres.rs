@@ -1279,8 +1279,13 @@ impl BaselineLexicalSearch for PostgresBaselineAdapter {
         collection: Option<&str>,
         limit: usize,
     ) -> Result<Vec<LexicalHit>, SearchError> {
-        let query_text = query.trim();
-        if query_text.is_empty() {
+        // OR the per-term `plainto_tsquery`s instead of passing the whole query to a single
+        // `plainto_tsquery` (which ANDs every lexeme): a multi-word query must surface a chunk
+        // that contains any term, with `ts_rank` lifting chunks that contain more of them. Each
+        // term is a bound parameter, so no tsquery operator can be injected.
+        let terms: Vec<String> =
+            crate::lexical::query_terms(query).into_iter().map(str::to_owned).collect();
+        if terms.is_empty() {
             return Ok(Vec::new());
         }
 
@@ -1289,6 +1294,20 @@ impl BaselineLexicalSearch for PostgresBaselineAdapter {
             collection.map(str::trim).filter(|value| !value.is_empty()).map(ToOwned::to_owned);
         let limit = limit.clamp(1, 200) as i64;
         let mut client = self.connect()?;
+
+        let snapshot_id = snapshot_id.to_owned();
+        let mut params: Vec<&(dyn postgres::types::ToSql + Sync)> = vec![&snapshot_id];
+        let tsquery_expr = format!(
+            "({})",
+            terms
+                .iter()
+                .map(|term| {
+                    params.push(term);
+                    format!("plainto_tsquery('simple', ${})", params.len())
+                })
+                .collect::<Vec<_>>()
+                .join(" || ")
+        );
         let mut sql = format!(
             "SELECT collection,
                     path,
@@ -1297,16 +1316,13 @@ impl BaselineLexicalSearch for PostgresBaselineAdapter {
                     line_start,
                     line_end,
                     text,
-                    ts_rank(tsv, plainto_tsquery('simple', $2), 32) AS rank
+                    ts_rank(tsv, {tsquery_expr}, 32) AS rank
              FROM {}
              WHERE snapshot_id = $1
-               AND tsv @@ plainto_tsquery('simple', $2)",
+               AND tsv @@ {tsquery_expr}",
             self.table("serving_lexical")
         );
 
-        let snapshot_id = snapshot_id.to_owned();
-        let query_text = query_text.to_owned();
-        let mut params: Vec<&(dyn postgres::types::ToSql + Sync)> = vec![&snapshot_id, &query_text];
         if let Some(collection) = collection.as_ref() {
             sql.push_str(&format!(" AND collection = ${}", params.len() + 1));
             params.push(collection);

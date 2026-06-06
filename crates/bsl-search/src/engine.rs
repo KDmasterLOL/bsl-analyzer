@@ -1225,7 +1225,11 @@ impl SearchEngine {
         let mut hits = Vec::with_capacity(results.len());
         for result in results {
             if let Some(info) = self.store.chunk_by_id(result.chunk_id)? {
-                let score = 1.0 / (1.0 - result.rank as f32);
+                // FTS5 bm25 `rank` is negative and *smaller is better*. Map it to a [0,1) score
+                // that *increases* with relevance so any later descending re-sort (the overlay
+                // merge in `text_search_with_workspace_overlay`) keeps the strongest match first
+                // rather than inverting it.
+                let score = 1.0 - 1.0 / (1.0 - result.rank as f32);
                 hits.push(SearchHit {
                     collection: info.collection,
                     file_path: info.file_path,

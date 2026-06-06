@@ -938,7 +938,9 @@ impl Store {
         limit: usize,
         collection: Option<&str>,
     ) -> Result<Vec<TextSearchResult>, SearchError> {
-        let escaped = format!("\"{}\"", query.replace('"', "\"\""));
+        let Some(match_query) = crate::lexical::fts5_match_query(query) else {
+            return Ok(Vec::new());
+        };
         let results = if let Some(coll) = collection {
             let mut stmt = self.conn.prepare(
                 "SELECT chunks_fts.rowid, chunks_fts.rank
@@ -949,7 +951,7 @@ impl Store {
                  ORDER BY chunks_fts.rank
                  LIMIT ?3",
             )?;
-            let rows = stmt.query_map(params![escaped, coll, limit as i64], |row| {
+            let rows = stmt.query_map(params![match_query, coll, limit as i64], |row| {
                 Ok(TextSearchResult { chunk_id: row.get(0)?, rank: row.get(1)? })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
@@ -961,7 +963,7 @@ impl Store {
                  ORDER BY rank
                  LIMIT ?2",
             )?;
-            let rows = stmt.query_map(params![escaped, limit as i64], |row| {
+            let rows = stmt.query_map(params![match_query, limit as i64], |row| {
                 Ok(TextSearchResult { chunk_id: row.get(0)?, rank: row.get(1)? })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
@@ -1288,7 +1290,9 @@ impl Store {
         limit: usize,
         collection: Option<&str>,
     ) -> Result<Vec<TextSearchResult>, SearchError> {
-        let escaped = format!("\"{}\"", query.replace('"', "\"\""));
+        let Some(match_query) = crate::lexical::fts5_match_query(query) else {
+            return Ok(Vec::new());
+        };
         let results = if let Some(coll) = collection {
             let mut stmt = self.conn.prepare(
                 "SELECT overlay_chunks_fts.rowid, overlay_chunks_fts.rank
@@ -1299,7 +1303,7 @@ impl Store {
                  ORDER BY overlay_chunks_fts.rank
                  LIMIT ?3",
             )?;
-            let rows = stmt.query_map(params![escaped, coll, limit as i64], |row| {
+            let rows = stmt.query_map(params![match_query, coll, limit as i64], |row| {
                 Ok(TextSearchResult { chunk_id: row.get(0)?, rank: row.get(1)? })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
@@ -1311,7 +1315,7 @@ impl Store {
                  ORDER BY rank
                  LIMIT ?2",
             )?;
-            let rows = stmt.query_map(params![escaped, limit as i64], |row| {
+            let rows = stmt.query_map(params![match_query, limit as i64], |row| {
                 Ok(TextSearchResult { chunk_id: row.get(0)?, rank: row.get(1)? })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
@@ -1922,6 +1926,50 @@ mod tests {
 
         let results = store.text_search("СообщитьПользователю", 10, None).unwrap();
         assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn fts_multi_term_query_matches_any_term() {
+        let mut store = Store::in_memory().unwrap();
+
+        // One chunk carries only the identifier; the other carries the identifier and the extra
+        // words. A multi-word query used to be wrapped as one phrase, matching neither; with the
+        // OR fix both surface.
+        let mut only_id = sample_chunk("Прочее");
+        only_id.text = "Процедура Прочее()\n    ВызватьHTTПМетод();\nКонецПроцедуры".to_owned();
+        let mut full = sample_chunk("Отправщик");
+        full.text =
+            "Процедура Отправщик()\n    ВызватьHTTПМетод(); // отправка запроса\nКонецПроцедуры"
+                .to_owned();
+
+        store.reindex_file("a.bsl", b"h0", &[only_id], None).unwrap();
+        store.reindex_file("b.bsl", b"h1", &[full], None).unwrap();
+
+        let results = store.text_search("ВызватьHTTПМетод отправка запроса", 10, None).unwrap();
+        assert_eq!(results.len(), 2, "OR semantics must surface a chunk matching any term");
+    }
+
+    #[test]
+    fn fts_dotted_call_term_matches_indexed_code() {
+        let mut store = Store::in_memory().unwrap();
+        let mut chunk = sample_chunk("Отправщик");
+        chunk.text =
+            "Процедура Отправщик()\n    КоннекторHTTP.ВызватьМетод();\nКонецПроцедуры".to_owned();
+        store.reindex_file("a.bsl", b"h0", &[chunk], None).unwrap();
+
+        // The dotted call is one quoted token; unicode61 makes it an adjacency phrase that still
+        // matches the same dotted call in the body.
+        let results = store.text_search("КоннекторHTTP.ВызватьМетод()", 10, None).unwrap();
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn fts_punctuation_only_query_is_empty_not_error() {
+        let mut store = Store::in_memory().unwrap();
+        store.reindex_file("a.bsl", b"h0", &[sample_chunk("Метод")], None).unwrap();
+        // No usable term -> empty result, never an FTS5 syntax error.
+        assert!(store.text_search("()", 10, None).unwrap().is_empty());
+        assert!(store.text_search("   ", 10, None).unwrap().is_empty());
     }
 
     #[test]
