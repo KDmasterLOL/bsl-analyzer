@@ -248,10 +248,6 @@ fn analyze_salsa(
         None
     };
 
-    let config_path_input = configuration_path
-        .as_ref()
-        .map(|path| metadata::intern_configuration_path(&db, &path.to_string_lossy(), 0));
-
     let mut config = DiagnosticsConfig::from_project_json(
         &proj_config.diagnostics,
         proj_config.output.resolve_locale().unwrap_or_default(),
@@ -274,93 +270,131 @@ fn analyze_salsa(
     let workspace_dir_arc = Arc::new(workspace_dir.clone());
     let source_dir_arc = Arc::new(source_dir.clone());
     let diff_filter_arc = Arc::new(diff_filter);
-    let results: Vec<(Option<FileAnalysis>, Option<FileTiming>)> = file_ids
-        .par_iter()
-        .map_with(db.clone(), |db_snapshot, (file_id, path)| {
-            let provider = ide_db::SalsaProvider::with_file_set(
-                db_snapshot,
-                config_path_input,
-                Some(&file_set_arc),
-            );
-            let ctx = DiagnosticsContext::new(&config, *file_id, &provider);
+    // Process in chunks, trimming salsa's LRU caches and the parser's green-node
+    // cache between chunks. A single-revision batch never trips salsa's automatic
+    // (revision-boundary) eviction, so without this every file's heavy memos
+    // (parse/HIR/inference) stay resident at once. Each query is trimmed only to
+    // its own `lru` cap, so the durable cross-module currency (method return
+    // types, generously capped) is largely retained while the heavy per-file
+    // memos fall out once their chunk is done.
+    let chunk_size = std::env::var("BSL_SALSA_CHUNK")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(1000);
+    let mut results: Vec<(Option<FileAnalysis>, Option<FileTiming>)> =
+        Vec::with_capacity(file_ids.len());
+    for chunk in file_ids.chunks(chunk_size) {
+        let mut chunk_results: Vec<(Option<FileAnalysis>, Option<FileTiming>)> = {
+            let config_path_input = configuration_path
+                .as_ref()
+                .map(|path| metadata::intern_configuration_path(&db, &path.to_string_lossy(), 0));
+            chunk
+                .par_iter()
+                .map_with(db.clone(), |db_snapshot, (file_id, path)| {
+                    let provider = ide_db::SalsaProvider::with_file_set(
+                        db_snapshot,
+                        config_path_input,
+                        Some(&file_set_arc),
+                    );
+                    let ctx = DiagnosticsContext::new(&config, *file_id, &provider);
 
-            let file_start = std::time::Instant::now();
-            let diagnostics =
-                match catch_unwind(AssertUnwindSafe(|| ide::compute_diagnostics(&ctx))) {
-                    Ok(diags) => diags,
-                    Err(e) => {
-                        tracing::error!("Panic analyzing {:?}: {:?}", path, e);
-                        return (None, None);
+                    let file_start = std::time::Instant::now();
+                    let diagnostics =
+                        match catch_unwind(AssertUnwindSafe(|| ide::compute_diagnostics(&ctx))) {
+                            Ok(diags) => diags,
+                            Err(e) => {
+                                tracing::error!("Panic analyzing {:?}: {:?}", path, e);
+                                return (None, None);
+                            }
+                        };
+                    let elapsed = file_start.elapsed();
+
+                    let timing = if profiling_enabled {
+                        Some(FileTiming { path: path.clone(), duration: elapsed })
+                    } else {
+                        None
+                    };
+
+                    let count = processed.fetch_add(1, Ordering::Relaxed) + 1;
+                    if let Some(ref pb) = &*progress_arc {
+                        pb.set_position(count as u64);
+                        pb.set_message(format!(
+                            "{:.0} files/sec",
+                            count as f64 / start.elapsed().as_secs_f64()
+                        ));
                     }
-                };
-            let elapsed = file_start.elapsed();
 
-            let timing = if profiling_enabled {
-                Some(FileTiming { path: path.clone(), duration: elapsed })
-            } else {
-                None
-            };
+                    let file_analysis = if !diagnostics.is_empty() {
+                        let file_text = match fs::read_to_string(path) {
+                            Ok(text) => text,
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to read file {:?} for diagnostic conversion: {}",
+                                    path,
+                                    e
+                                );
+                                return (None, timing);
+                            }
+                        };
 
-            let count = processed.fetch_add(1, Ordering::Relaxed) + 1;
-            if let Some(ref pb) = &*progress_arc {
-                pb.set_position(count as u64);
-                pb.set_message(format!(
-                    "{:.0} files/sec",
-                    count as f64 / start.elapsed().as_secs_f64()
-                ));
-            }
+                        let file_line_index = line_index::LineIndex::new(&file_text);
+                        let mut diagnostic_outputs: Vec<_> = diagnostics
+                            .iter()
+                            .map(|d| d.to_output_with_index(&file_text, &file_line_index))
+                            .collect();
 
-            let file_analysis = if !diagnostics.is_empty() {
-                let file_text = match fs::read_to_string(path) {
-                    Ok(text) => text,
-                    Err(e) => {
-                        tracing::warn!(
-                            "Failed to read file {:?} for diagnostic conversion: {}",
-                            path,
-                            e
-                        );
-                        return (None, timing);
-                    }
-                };
+                        if let Some(ref filter) = *diff_filter_arc {
+                            let rel_path = path.strip_prefix(&*source_dir_arc).unwrap_or(path);
+                            diagnostic_outputs.retain(|d| {
+                                filter.diagnostic_in_diff(
+                                    rel_path,
+                                    d.start_line as u32,
+                                    d.end_line as u32,
+                                )
+                            });
+                        }
 
-                let file_line_index = line_index::LineIndex::new(&file_text);
-                let mut diagnostic_outputs: Vec<_> = diagnostics
-                    .iter()
-                    .map(|d| d.to_output_with_index(&file_text, &file_line_index))
-                    .collect();
+                        if diagnostic_outputs.is_empty() {
+                            None
+                        } else {
+                            Some(FileAnalysis {
+                                path: path.clone(),
+                                relative_path: path
+                                    .strip_prefix(&*workspace_dir_arc)
+                                    .unwrap_or(path)
+                                    .to_path_buf(),
+                                diagnostics: diagnostic_outputs,
+                            })
+                        }
+                    } else {
+                        None
+                    };
 
-                if let Some(ref filter) = *diff_filter_arc {
-                    let rel_path = path.strip_prefix(&*source_dir_arc).unwrap_or(path);
-                    diagnostic_outputs.retain(|d| {
-                        filter.diagnostic_in_diff(rel_path, d.start_line as u32, d.end_line as u32)
-                    });
-                }
+                    (file_analysis, timing)
+                })
+                .collect()
+        };
+        results.append(&mut chunk_results);
 
-                if diagnostic_outputs.is_empty() {
-                    None
-                } else {
-                    Some(FileAnalysis {
-                        path: path.clone(),
-                        relative_path: path
-                            .strip_prefix(&*workspace_dir_arc)
-                            .unwrap_or(path)
-                            .to_path_buf(),
-                        diagnostics: diagnostic_outputs,
-                    })
-                }
-            } else {
-                None
-            };
-
-            (file_analysis, timing)
-        })
-        .collect();
+        // `config_path_input` (which borrows `&db`) is now out of scope, so the
+        // exclusive `&mut db` borrow is free: trim the salsa memos beyond their
+        // caps, then release the parser's thread-local green-node caches (which
+        // salsa does not own) on the driver and every rayon worker.
+        db.enforce_lru();
+        syntax::clear_shared_node_cache();
+        rayon::broadcast(|_| syntax::clear_shared_node_cache());
+    }
 
     if let Some(ref pb) = &*progress_arc {
         pb.finish_with_message("Analysis complete");
     }
 
     let elapsed = start.elapsed();
+
+    if std::env::var_os("BSL_MEM_REPORT").is_some() {
+        report_salsa_memory(&db);
+    }
 
     let (file_analyses, timings): (Vec<_>, Vec<_>) = results.into_iter().unzip();
     let all_diagnostics: Vec<FileAnalysis> = file_analyses.into_iter().flatten().collect();
@@ -408,6 +442,68 @@ fn analyze_salsa(
     tracing::info!("Analysis complete");
 
     Ok(())
+}
+
+/// Dump salsa's per-ingredient memory snapshot plus process RSS, so the gap
+/// between RSS and salsa-tracked bytes exposes untracked residency (parser
+/// green-node cache, file-text inputs, allocator retention). Sorted by live
+/// entry count: a query whose count tracks the file total is retaining
+/// everything (LRU not evicting).
+fn report_salsa_memory(db: &ide::RootDatabaseImpl) {
+    let mut rows = db.memory_report();
+    rows.sort_by_key(|(_, count, ..)| std::cmp::Reverse(*count));
+
+    let (mut tc, mut tm, mut tf, mut th) = (0usize, 0usize, 0usize, 0usize);
+    for (_, c, m, f, h) in &rows {
+        tc += c;
+        tm += m;
+        tf += f;
+        th += h.unwrap_or(0);
+    }
+
+    let proc_kb = |key: &str| -> Option<u64> {
+        let status = std::fs::read_to_string("/proc/self/status").ok()?;
+        status
+            .lines()
+            .find(|l| l.starts_with(key))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|v| v.parse::<u64>().ok())
+    };
+
+    eprintln!("\n=== salsa memory_usage (top 40 ingredients by live entry count) ===");
+    eprintln!(
+        "{:<48}{:>10}{:>12}{:>12}{:>12}",
+        "ingredient", "count", "meta_KB", "fields_KB", "heap_KB"
+    );
+    for (name, c, m, f, h) in rows.iter().take(40) {
+        let heap_s =
+            h.map(|x| format!("{:.1}", x as f64 / 1024.0)).unwrap_or_else(|| "-".to_string());
+        eprintln!(
+            "{:<48}{:>10}{:>12.1}{:>12.1}{:>12}",
+            name,
+            c,
+            *m as f64 / 1024.0,
+            *f as f64 / 1024.0,
+            heap_s
+        );
+    }
+    eprintln!(
+        "--- salsa totals: entries={} meta={:.1}MB fields={:.1}MB heap={:.1}MB (heap reported only for some ingredients) ---",
+        tc,
+        tm as f64 / 1048576.0,
+        tf as f64 / 1048576.0,
+        th as f64 / 1048576.0
+    );
+    if let (Some(hwm), Some(rss)) = (proc_kb("VmHWM:"), proc_kb("VmRSS:")) {
+        let salsa_mb = (tm + tf + th) as f64 / 1048576.0;
+        eprintln!(
+            "--- process: VmHWM(peak)={:.1}MB VmRSS(now)={:.1}MB | salsa-tracked={:.1}MB | untracked(node-cache+text+alloc)~={:.1}MB ---",
+            hwm as f64 / 1024.0,
+            rss as f64 / 1024.0,
+            salsa_mb,
+            rss as f64 / 1024.0 - salsa_mb
+        );
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

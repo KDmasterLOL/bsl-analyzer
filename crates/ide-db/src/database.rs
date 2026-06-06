@@ -100,6 +100,40 @@ impl RootDatabaseImpl {
         &self.type_kernel
     }
 
+    /// Run salsa's LRU trim now, dropping memoized values beyond each query's
+    /// configured `lru` cap and releasing their heap. salsa only trims
+    /// automatically at a revision boundary, so a single-revision batch (seed
+    /// inputs once, never mutate) must call this explicitly — e.g. between
+    /// chunks of files — to bound resident memory. Requires exclusive `&mut`
+    /// access and blocks on any live snapshot, so never call it mid-`par_iter`.
+    pub fn enforce_lru(&mut self) {
+        salsa::Database::trigger_lru_eviction(self);
+    }
+
+    /// Per-ingredient memory snapshot for diagnostics tooling, via salsa's
+    /// `memory_usage` introspection (the `salsa_unstable` feature). Each tuple is
+    /// `(ingredient name, live entry count, salsa metadata bytes, field stack bytes,
+    /// optional heap bytes)`. `heap` is `None` unless the ingredient implements a
+    /// `heap_size` hook, so the strongest signal here is `count` (whether LRU is
+    /// actually evicting) rather than absolute bytes.
+    pub fn memory_report(&self) -> Vec<(&'static str, usize, usize, usize, Option<usize>)> {
+        let db: &dyn salsa::Database = self;
+        let info = db.memory_usage();
+        info.structs
+            .iter()
+            .chain(info.queries.values())
+            .map(|ing| {
+                (
+                    ing.debug_name(),
+                    ing.count(),
+                    ing.size_of_metadata(),
+                    ing.size_of_fields(),
+                    ing.heap_size_of_fields(),
+                )
+            })
+            .collect()
+    }
+
     /// Attach a build-scoped configuration cache shared across this build's batch
     /// databases. See [`GraphConfigCache`] and the `graph_config_cache` field.
     pub fn set_graph_config_cache(&mut self, cache: Arc<GraphConfigCache>) {
