@@ -34,6 +34,12 @@ pub enum MdoType {
     /// so it never surfaces in metadata-object enumeration/completion, and every
     /// type-facing mapping (manager prefix, `MetadataKind`) yields `None` for it.
     EventSubscription,
+    /// A subsystem (`Подсистема`) — an organisational container listing member objects
+    /// and child subsystems. Like [`MdoType::EventSubscription`] it is not a data-bearing,
+    /// manager-backed type: it is excluded from [`MdoType::all`] and every type-facing
+    /// mapping yields `None`. It exists so the call graph can carry subsystem-membership
+    /// edges to a subsystem node.
+    Subsystem,
 }
 
 impl FromStr for MdoType {
@@ -76,6 +82,7 @@ impl FromStr for MdoType {
             "подписканасобытие" | "eventsubscription" => {
                 Ok(Self::EventSubscription)
             }
+            "подсистема" | "subsystem" => Ok(Self::Subsystem),
             _ => Err(format!("Unknown MDO type: {}", s)),
         }
     }
@@ -105,6 +112,7 @@ impl MdoType {
             Self::Report => "Отчет",
             Self::CommonModule => "ОбщийМодуль",
             Self::EventSubscription => "ПодпискаНаСобытие",
+            Self::Subsystem => "Подсистема",
         }
     }
 
@@ -131,6 +139,7 @@ impl MdoType {
             Self::Report => "Report",
             Self::CommonModule => "CommonModule",
             Self::EventSubscription => "EventSubscription",
+            Self::Subsystem => "Subsystem",
         }
     }
 
@@ -248,9 +257,11 @@ impl MdoType {
             Self::Constant => Some("ConstantManager"),
             Self::DataProcessor => Some("DataProcessorManager"),
             Self::Report => Some("ReportManager"),
-            Self::Cube | Self::DimensionTable | Self::CommonModule | Self::EventSubscription => {
-                None
-            }
+            Self::Cube
+            | Self::DimensionTable
+            | Self::CommonModule
+            | Self::EventSubscription
+            | Self::Subsystem => None,
         }
     }
 
@@ -273,9 +284,11 @@ impl MdoType {
             Self::Constant => Some("КонстантаМенеджер"),
             Self::DataProcessor => Some("ОбработкаМенеджер"),
             Self::Report => Some("ОтчетМенеджер"),
-            Self::Cube | Self::DimensionTable | Self::CommonModule | Self::EventSubscription => {
-                None
-            }
+            Self::Cube
+            | Self::DimensionTable
+            | Self::CommonModule
+            | Self::EventSubscription
+            | Self::Subsystem => None,
         }
     }
 

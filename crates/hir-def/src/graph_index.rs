@@ -1193,6 +1193,77 @@ pub fn project_workspace_subscription_edges<DB: ConfigsDatabase>(
     edges
 }
 
+/// Project subsystem membership into edges: from each subsystem's `Mdo` node to every
+/// member metadata object it contains and to every child subsystem. Pure config-driven
+/// (like the catalog and subscription passes), no body lowering. Member/child node names
+/// are canonicalized through the shared `mdo_canonical` so they coincide with the object's
+/// own nodes from other passes.
+pub fn project_workspace_subsystem_edges<DB: ConfigsDatabase>(
+    db: &DB,
+    representative: FileId,
+    state: &mut GraphBuildState,
+) -> Vec<WorkspaceCallEdge> {
+    // Collect deterministically so canonicalization sees a load-order-independent
+    // first-seen spelling.
+    let mut members: Vec<(String, MdoType, String)> = Vec::new();
+    let mut children: Vec<(String, String)> = Vec::new();
+    for visible in db.configurations(representative) {
+        for subsystem in visible.configuration.subsystems() {
+            for (mdo_type, member_name) in subsystem.content() {
+                members.push((subsystem.name().to_string(), *mdo_type, member_name.clone()));
+            }
+            for child in subsystem.child_subsystems() {
+                children.push((subsystem.name().to_string(), child.clone()));
+            }
+        }
+    }
+    members.sort();
+    members.dedup();
+    children.sort();
+    children.dedup();
+
+    let mut edges = Vec::new();
+    let mut seen: FxHashSet<(GraphNode, GraphNode)> = FxHashSet::default();
+
+    for (sub_name, mdo_type, member_name) in &members {
+        let from = GraphNode::Mdo {
+            mdo_type: MdoType::Subsystem,
+            object_name: state.mdo_canonical.canonical(MdoType::Subsystem, sub_name),
+        };
+        let to = GraphNode::Mdo {
+            mdo_type: *mdo_type,
+            object_name: state.mdo_canonical.canonical(*mdo_type, member_name),
+        };
+        if seen.insert((from.clone(), to.clone())) {
+            edges.push(subsystem_membership_edge(from, to));
+        }
+    }
+    for (sub_name, child_name) in &children {
+        let from = GraphNode::Mdo {
+            mdo_type: MdoType::Subsystem,
+            object_name: state.mdo_canonical.canonical(MdoType::Subsystem, sub_name),
+        };
+        let to = GraphNode::Mdo {
+            mdo_type: MdoType::Subsystem,
+            object_name: state.mdo_canonical.canonical(MdoType::Subsystem, child_name),
+        };
+        if seen.insert((from.clone(), to.clone())) {
+            edges.push(subsystem_membership_edge(from, to));
+        }
+    }
+    edges
+}
+
+fn subsystem_membership_edge(from: GraphNode, to: GraphNode) -> WorkspaceCallEdge {
+    WorkspaceCallEdge {
+        from,
+        to,
+        kind: EdgeKind::SubsystemMembership,
+        provenance: EdgeProvenance::Resolved,
+        crosses_client_to_server: false,
+    }
+}
+
 fn contains_edge(from: GraphNode, to: GraphNode) -> WorkspaceCallEdge {
     WorkspaceCallEdge {
         from,
@@ -1330,6 +1401,7 @@ fn edge_kind_label(kind: EdgeKind) -> &'static str {
         EdgeKind::IdleHandler => "idle_handler",
         EdgeKind::EventSubscriptionRef => "event_subscription",
         EdgeKind::RegisterMovement => "register_movement",
+        EdgeKind::SubsystemMembership => "subsystem_membership",
     }
 }
 

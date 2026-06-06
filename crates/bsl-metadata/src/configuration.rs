@@ -43,6 +43,9 @@ pub struct Configuration {
     #[serde(rename = "roles", default)]
     roles: Vec<Role>,
 
+    #[serde(rename = "subsystems", default)]
+    subsystems: Vec<crate::subsystem::Subsystem>,
+
     #[serde(rename = "httpServices", default)]
     http_services: Vec<HTTPService>,
 
@@ -118,6 +121,7 @@ impl Configuration {
             defined_types: Vec::new(),
             scheduled_jobs: Vec::new(),
             roles: Vec::new(),
+            subsystems: Vec::new(),
             uri_to_module: HashMap::new(),
             name_to_common_module: HashMap::new(),
             name_to_register: HashMap::new(),
@@ -335,6 +339,19 @@ impl Configuration {
             }
         }
 
+        for ext_subsystem in &extension.subsystems {
+            if let Some(base) = self
+                .subsystems
+                .iter_mut()
+                .find(|s| s.name().eq_ignore_ascii_case(ext_subsystem.name()))
+            {
+                // An extension can add objects/child subsystems to an existing subsystem.
+                base.merge_from(ext_subsystem);
+            } else {
+                self.add_subsystem(ext_subsystem.clone());
+            }
+        }
+
         self.build_caches();
     }
 
@@ -422,6 +439,14 @@ impl Configuration {
         let idx = self.event_subscriptions.len();
         self.name_to_event_subscription.insert(subscription.name().to_lowercase(), idx);
         self.event_subscriptions.push(subscription);
+    }
+
+    pub fn subsystems(&self) -> &[crate::subsystem::Subsystem] {
+        &self.subsystems
+    }
+
+    pub(crate) fn add_subsystem(&mut self, subsystem: crate::subsystem::Subsystem) {
+        self.subsystems.push(subsystem);
     }
 
     pub fn defined_types(&self) -> &[DefinedType] {

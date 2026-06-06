@@ -12,6 +12,7 @@ mod register;
 mod role;
 mod scheduled_job;
 mod standard_attributes;
+mod subsystem;
 mod type_parser;
 mod web_service;
 
@@ -34,6 +35,7 @@ pub use register::{
 };
 pub use role::{parse_rights_xml, parse_role_xml};
 pub use scheduled_job::parse_scheduled_job_xml;
+pub use subsystem::parse_subsystem_xml;
 pub use web_service::parse_web_service_xml;
 
 #[cfg(test)]

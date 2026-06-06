@@ -1652,6 +1652,47 @@ fn event_subscription_links_to_its_exported_handler() {
 }
 
 #[test]
+fn subsystem_membership_links_to_member_objects() {
+    use bsl_metadata::MdoType;
+    use hir::call_graph::{EdgeKind, EdgeProvenance, GraphNode};
+    use hir::graph_index::{project_workspace_subsystem_edges, GraphBuildState};
+
+    // The designer fixture's `Подсистема1` contains an information register and a catalog.
+    let mut db = RootDatabaseImpl::new();
+    let config_path = std::path::PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../bsl-metadata/fixtures/designer"
+    ));
+    db.set_all_config_paths(vec![(None, config_path)]);
+
+    let file_id = FileId(0);
+    let mut file_set = FileSet::new();
+    file_set.insert(file_id, VfsPath::new("/Documents/Док/Ext/ObjectModule.bsl"));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(file_id, SourceRootId(0));
+    db.set_file_text(file_id, "Процедура Х() КонецПроцедуры");
+
+    let mut state = GraphBuildState::new();
+    let edges = project_workspace_subsystem_edges(&db, file_id, &mut state);
+
+    let membership_to = |to_type: MdoType, to_name: &str| {
+        edges.iter().any(|e| {
+            e.kind == EdgeKind::SubsystemMembership
+                && e.provenance == EdgeProvenance::Resolved
+                && matches!(&e.from, GraphNode::Mdo { mdo_type, object_name }
+                    if *mdo_type == MdoType::Subsystem && object_name.as_str() == "Подсистема1")
+                && matches!(&e.to, GraphNode::Mdo { mdo_type, object_name }
+                    if *mdo_type == to_type && object_name.as_str() == to_name)
+        })
+    };
+    assert!(
+        membership_to(MdoType::InformationRegister, "РегистрСведений1"),
+        "subsystem → information-register member edge"
+    );
+    assert!(membership_to(MdoType::Catalog, "Справочник1"), "subsystem → catalog member edge");
+}
+
+#[test]
 fn event_subscription_with_missing_handler_yields_no_edge() {
     use hir::call_graph::EdgeKind;
     use hir::graph_index::{project_workspace_subscription_edges, GraphBuildState, GraphIndex};

@@ -22,8 +22,9 @@ use hir::call_graph::{EdgeKind, MethodDispatch};
 use hir::graph_index::{
     display_scope, encode_scope, form_qualified_prefix, form_scope, project_batch_call_edges,
     project_batch_form_edges, project_batch_query_edges, project_form_binding_edges,
-    project_workspace_catalog_edges, project_workspace_subscription_edges, EdgeRow,
-    GraphBuildState, GraphIndex, GraphRowEncoder, NodeRow,
+    project_workspace_catalog_edges, project_workspace_subscription_edges,
+    project_workspace_subsystem_edges, EdgeRow, GraphBuildState, GraphIndex, GraphRowEncoder,
+    NodeRow,
 };
 use hir::{
     module_key_for_path, ConfigsDatabase, DefDatabase, GraphNode, MethodId, ModuleId, ModuleIndex,
@@ -843,6 +844,16 @@ pub fn build_workspace_graph_rows(
     if let Some(first) = modules.chunks(batch_size).next() {
         let db = open_batch(first);
         let edges = project_workspace_subscription_edges(&db, first[0].file_id, &index, &mut state);
+        emit(&edges, &mut summary, &mut seen_aux, sink)?;
+    }
+
+    // Phase G — `subsystem_membership` edges: each subsystem → its member objects and
+    // child subsystems. Config-level, pure metadata, sharing `state` so member names
+    // canonicalize to the same spelling as their own nodes from the catalog pass.
+    // Full-build only, like the metadata passes above.
+    if let Some(first) = modules.chunks(batch_size).next() {
+        let db = open_batch(first);
+        let edges = project_workspace_subsystem_edges(&db, first[0].file_id, &mut state);
         emit(&edges, &mut summary, &mut seen_aux, sink)?;
     }
 
@@ -2366,6 +2377,7 @@ fn edge_kind_label(kind: EdgeKind) -> &'static str {
         EdgeKind::IdleHandler => "idle_handler",
         EdgeKind::EventSubscriptionRef => "event_subscription",
         EdgeKind::RegisterMovement => "register_movement",
+        EdgeKind::SubsystemMembership => "subsystem_membership",
     }
 }
 

@@ -163,6 +163,12 @@ pub enum EdgeKind {
     /// At the document grain this rarely loses coverage, because a document that records
     /// movements to a register also writes it through one of the call forms above.
     RegisterMovement,
+    /// A subsystem contains a metadata object or a child subsystem. From the subsystem's
+    /// [`GraphNode::Mdo`] (type [`MdoType::Subsystem`]) to the member object's
+    /// [`GraphNode::Mdo`], or to a child subsystem's node. Derived from configuration
+    /// metadata (the subsystem's `Content`/`ChildObjects`), not from code. Lets an impact
+    /// analysis answer "which subsystems must be updated if I delete this object".
+    SubsystemMembership,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

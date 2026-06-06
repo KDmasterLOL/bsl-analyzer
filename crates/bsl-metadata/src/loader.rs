@@ -55,6 +55,7 @@ struct LoadedMetadata {
     web_services: Vec<crate::web_service::WebService>,
     data_processors: Vec<MetadataObject>,
     reports: Vec<MetadataObject>,
+    subsystems: Vec<crate::subsystem::Subsystem>,
 }
 
 fn load_all_metadata_parallel(path: &Path) -> LoadedMetadata {
@@ -83,6 +84,7 @@ fn load_all_metadata_parallel(path: &Path) -> LoadedMetadata {
     let web_services = Mutex::new(Vec::new());
     let data_processors = Mutex::new(Vec::new());
     let reports = Mutex::new(Vec::new());
+    let subsystems = Mutex::new(Vec::new());
 
     rayon::scope(|s| {
         s.spawn(|_| {
@@ -162,6 +164,7 @@ fn load_all_metadata_parallel(path: &Path) -> LoadedMetadata {
                 load_data_processors_parallel(&path.join("DataProcessors"))
         });
         s.spawn(|_| *reports.lock().unwrap() = load_reports_parallel(&path.join("Reports")));
+        s.spawn(|_| *subsystems.lock().unwrap() = load_subsystems(&path.join("Subsystems")));
     });
 
     let result = LoadedMetadata {
@@ -189,6 +192,7 @@ fn load_all_metadata_parallel(path: &Path) -> LoadedMetadata {
         web_services: web_services.into_inner().unwrap(),
         data_processors: data_processors.into_inner().unwrap(),
         reports: reports.into_inner().unwrap(),
+        subsystems: subsystems.into_inner().unwrap(),
     };
 
     tracing::info!(
@@ -280,8 +284,44 @@ fn build_configuration(loaded: LoadedMetadata) -> Configuration {
     for svc in loaded.web_services {
         config.add_web_service(svc);
     }
+    for subsystem in loaded.subsystems {
+        config.add_subsystem(subsystem);
+    }
 
     config
+}
+
+/// Load every subsystem `.xml` under `Subsystems/`, recursing into nested
+/// `<Name>/Subsystems/` directories. Each file directly inside a `Subsystems` directory is
+/// one subsystem; the parent/child relationship is carried in each subsystem's
+/// `child_subsystems`, not inferred from the directory layout.
+fn load_subsystems(dir: &Path) -> Vec<crate::subsystem::Subsystem> {
+    let mut out = Vec::new();
+    collect_subsystems(dir, &mut out);
+    out
+}
+
+fn collect_subsystems(dir: &Path, out: &mut Vec<crate::subsystem::Subsystem>) {
+    if !dir.exists() {
+        return;
+    }
+    let entries: Vec<_> = match fs::read_dir(dir) {
+        Ok(entries) => entries.filter_map(|e| e.ok()).collect(),
+        Err(_) => return,
+    };
+    for entry in entries {
+        let path = entry.path();
+        if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("xml") {
+            if let Ok(xml) = fs::read_to_string(&path) {
+                if let Ok(subsystem) = xml_parser::parse_subsystem_xml(&xml) {
+                    out.push(subsystem);
+                }
+            }
+        } else if path.is_dir() {
+            // Nested subsystems live under `<Name>/Subsystems/`.
+            collect_subsystems(&path.join("Subsystems"), out);
+        }
+    }
 }
 
 fn load_common_modules_parallel(dir: &Path) -> Vec<crate::common_module::CommonModule> {

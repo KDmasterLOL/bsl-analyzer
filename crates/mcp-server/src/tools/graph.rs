@@ -231,14 +231,14 @@ pub fn loading(detail: Option<&str>) -> CallToolResult {
 /// independent of the on-disk SQLite cache layout in [`crate::graph_db`]).
 fn schema_json() -> Value {
     json!({
-        "schema_version": "20",
+        "schema_version": "21",
         "actions": ["overview", "schema", "status", "node", "source", "neighbors", "callers", "callees", "resolve"],
         "status": "since version 15 `status` returns the graph lifecycle ({state: disabled|loading|ready|failed, and when ready: files, revision, stale, reload}) and kicks the lazy build — poll it instead of reading a flat `loading` envelope from a data action (mirrors `diagnostics status`).",
         "node_kinds": ["method", "module", "mdo", "attribute", "tabular_section", "form", "form_item", "form_attribute"],
         "notes": "since version 7 `node(module/<scope>)` resolves for any code module and returns a `methods` array ({id, name, is_export}) of the module's members; module membership is served on demand and is not a graph edge, so `neighbors(module/…)` stays empty",
         "resolve": "since version 13 `resolve(query)` returns candidate durable ids ({id, kind, match}) for an imprecise query — wrong casing, a bare method/object name, or a partial id — so a `not_found` from `node`/`neighbors` is recoverable without guessing. `match` is exact|case_insensitive|name|substring (strongest first); the list is capped (default 20). It is symbol/id-oriented, NOT a natural-language search: a free-text phrase (e.g. several object/form/method words) returns no candidates — use `search_code` for semantic lookup, then pass the emitted `graph_id` here.",
-        "edge_kinds": ["call", "manager_creates", "manager_access", "query_ref", "register_movement", "contains", "data_binding", "notify_ref", "idle_handler", "event_subscription"],
-        "edge_kinds_note": "since version 16 string-dispatched callbacks are edges: `notify_ref` (Новый ОписаниеОповещения) and `idle_handler` (ПодключитьОбработчикОжидания) link a method to the handler named by a string literal; since version 17 `event_subscription` links a `ПодпискаНаСобытие` metadata node to its exported handler method. All three carry `string_resolved` provenance and are kept separate from `call`, so `edge_kinds=[call]` stays a pure 'who really calls whom'. Resolution is conservative: only ЭтотОбъект/ЭтаФорма handlers and explicit common-module handlers resolve; unresolved receivers/handlers produce no edge. Since version 20 an idle handler resolves in the current module and, failing that, in a UNIQUE global common module that exports the named procedure (an ambiguous name exported by several global modules is left unresolved, not guessed). The edge models the named reference regardless of the target's client/server dispatch (validity is a diagnostics concern, and the reference matters for rename impact either way); a handler hosted in the application module (`МодульПриложения`) is a known unmodelled case. Since version 18 both handlers of a `Новый ОписаниеОповещения` are modelled: the success handler (ИмяПроцедуры, Модуль) and the error handler (ИмяПроцедурыОбработкиОшибки, МодульОбработкиОшибки) each become a `notify_ref` edge under the same resolution rules. Since version 19 `register_movement` links a document method/module that writes or reads register records via `Движения.<Регистр>.<метод>()` (Добавить/Записать/Очистить/Загрузить/Выгрузить, bare or through a receiver) to the touched register's `mdo` node; the register type is resolved from configuration (provenance `inferred`, like other metadata-object touches).",
+        "edge_kinds": ["call", "manager_creates", "manager_access", "query_ref", "register_movement", "contains", "data_binding", "notify_ref", "idle_handler", "event_subscription", "subsystem_membership"],
+        "edge_kinds_note": "since version 16 string-dispatched callbacks are edges: `notify_ref` (Новый ОписаниеОповещения) and `idle_handler` (ПодключитьОбработчикОжидания) link a method to the handler named by a string literal; since version 17 `event_subscription` links a `ПодпискаНаСобытие` metadata node to its exported handler method. All three carry `string_resolved` provenance and are kept separate from `call`, so `edge_kinds=[call]` stays a pure 'who really calls whom'. Resolution is conservative: only ЭтотОбъект/ЭтаФорма handlers and explicit common-module handlers resolve; unresolved receivers/handlers produce no edge. Since version 20 an idle handler resolves in the current module and, failing that, in a UNIQUE global common module that exports the named procedure (an ambiguous name exported by several global modules is left unresolved, not guessed). The edge models the named reference regardless of the target's client/server dispatch (validity is a diagnostics concern, and the reference matters for rename impact either way); a handler hosted in the application module (`МодульПриложения`) is a known unmodelled case. Since version 18 both handlers of a `Новый ОписаниеОповещения` are modelled: the success handler (ИмяПроцедуры, Модуль) and the error handler (ИмяПроцедурыОбработкиОшибки, МодульОбработкиОшибки) each become a `notify_ref` edge under the same resolution rules. Since version 19 `register_movement` links a document method/module that writes or reads register records via `Движения.<Регистр>.<метод>()` (Добавить/Записать/Очистить/Загрузить/Выгрузить, bare or through a receiver) to the touched register's `mdo` node; the register type is resolved from configuration (provenance `inferred`, like other metadata-object touches). Since version 21 `subsystem_membership` links a subsystem (an `mdo` node of type `Subsystem`) to each metadata object it contains and to each child subsystem, derived from the subsystem's `Content`/`ChildObjects` (provenance `resolved`); `neighbors(mdo/<Type>/<Object>, dir=in, edge_kinds=[subsystem_membership])` answers 'which subsystems contain this object'.",
         "provenance": ["resolved", "inferred", "visibility_blocked", "unresolved", "string_resolved"],
         "provenance_note": "since version 18 a fully-literal `Коллекция.Объект.Метод()` manager-module call whose exported method is found is `resolved` (the manager module is uniquely determined — as trustworthy as a qualified `Модуль.Метод()` call); `inferred` now means the edge points at a metadata-object node (a platform manager method like СоздатьЭлемент, or a bare `Справочники.X` reference), not a code node.",
         "dispatch": ["client", "server"],
@@ -384,8 +384,9 @@ mod tests {
         // `event_subscription` edge since version 17, and the `confidence` summary +
         // resolved literal manager dispatch + notify error-handler edge since version 18,
         // the `register_movement` edge (Движения.<Регистр>) since version 19, and
-        // cross-module idle-handler resolution since version 20.
-        assert_eq!(schema["schema_version"], "20");
+        // cross-module idle-handler resolution since version 20, and the
+        // `subsystem_membership` edge since version 21.
+        assert_eq!(schema["schema_version"], "21");
         assert!(
             schema["neighbors_result"]["total"].is_string(),
             "neighbours result must document the `total` field"
@@ -440,7 +441,7 @@ mod tests {
     #[test]
     fn schema_and_loading_populate_structured_content() {
         assert_structured_mirrors_text(&schema());
-        assert_eq!(schema().structured_content.unwrap()["schema_version"], "20");
+        assert_eq!(schema().structured_content.unwrap()["schema_version"], "21");
 
         assert_structured_mirrors_text(&loading(Some("indexing")));
         let body = loading(Some("indexing")).structured_content.unwrap();
