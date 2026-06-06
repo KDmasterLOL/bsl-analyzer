@@ -616,6 +616,19 @@ pub enum PlatformValueType {
     FixedMap,
     Type,
     Null,
+    FormattedString,
+    SpreadsheetDocument,
+    FormattedDocument,
+    Picture,
+    Color,
+    Font,
+    Chart,
+    GanttChart,
+    SettingsComposer,
+    DataCompositionFilter,
+    DynamicList,
+    ConstantsSet,
+    ReportBuilder,
 }
 
 impl PlatformValueType {
@@ -632,6 +645,19 @@ impl PlatformValueType {
             Self::FixedMap => "ФиксированноеСоответствие",
             Self::Type => "Тип",
             Self::Null => "Null",
+            Self::FormattedString => "ФорматированнаяСтрока",
+            Self::SpreadsheetDocument => "ТабличныйДокумент",
+            Self::FormattedDocument => "ФорматированныйДокумент",
+            Self::Picture => "Картинка",
+            Self::Color => "Цвет",
+            Self::Font => "Шрифт",
+            Self::Chart => "Диаграмма",
+            Self::GanttChart => "ДиаграммаГанта",
+            Self::SettingsComposer => "КомпоновщикНастроекКомпоновкиДанных",
+            Self::DataCompositionFilter => "ОтборКомпоновкиДанных",
+            Self::DynamicList => "ДинамическийСписок",
+            Self::ConstantsSet => "КонстантыНабор",
+            Self::ReportBuilder => "ПостроительОтчета",
         }
     }
 }

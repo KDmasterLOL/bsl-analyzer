@@ -248,12 +248,36 @@ fn parse_platform_value_type(type_str: &str) -> Option<PlatformValueType> {
         "v8:FixedMap" => PlatformValueType::FixedMap,
         "v8:Type" => PlatformValueType::Type,
         "v8:Null" => PlatformValueType::Null,
+        "v8ui:FormattedString" => PlatformValueType::FormattedString,
+        "v8ui:Picture" => PlatformValueType::Picture,
+        "v8ui:Color" => PlatformValueType::Color,
+        "v8ui:Font" => PlatformValueType::Font,
+        "mxl:SpreadsheetDocument" => PlatformValueType::SpreadsheetDocument,
+        "fd:FormattedDocument" => PlatformValueType::FormattedDocument,
+        "d7p1:Chart" => PlatformValueType::Chart,
+        "d5p1:GanttChart" => PlatformValueType::GanttChart,
+        "dcsset:SettingsComposer" => PlatformValueType::SettingsComposer,
+        "dcsset:Filter" => PlatformValueType::DataCompositionFilter,
+        _ => return None,
+    };
+    Some(pvt)
+}
+
+fn parse_cfg_platform_type(type_str: &str) -> Option<PlatformValueType> {
+    let pvt = match type_str {
+        "cfg:DynamicList" => PlatformValueType::DynamicList,
+        "cfg:ConstantsSet" => PlatformValueType::ConstantsSet,
+        "cfg:ReportBuilder" => PlatformValueType::ReportBuilder,
         _ => return None,
     };
     Some(pvt)
 }
 
 fn parse_reference_type(type_str: &str) -> Result<AttributeType> {
+    if let Some(pvt) = parse_cfg_platform_type(type_str) {
+        return Ok(AttributeType::Platform(pvt));
+    }
+
     if let Some((_, mdo_type)) = OBJECT_TYPE_MAP.iter().find(|(k, _)| *k == type_str) {
         tracing::info!(type_str = %type_str, "Matched object type special case");
         return Ok(AttributeType::AnyObjectRef { mdo_type: *mdo_type });
@@ -270,6 +294,11 @@ fn parse_reference_type(type_str: &str) -> Result<AttributeType> {
 
     if let Some((_, mdo_type)) = REF_TYPE_MAP.iter().find(|(k, _)| *k == ref_type) {
         return Ok(AttributeType::Ref { mdo_type: *mdo_type, name });
+    }
+
+    if ref_type.ends_with("RecordManager") {
+        tracing::debug!(type_str = %type_str, "record-manager type not modelled yet; treated as Unknown");
+        return Ok(AttributeType::Unknown);
     }
 
     tracing::warn!(
@@ -307,6 +336,16 @@ mod tests {
             ("v8:FixedMap", PlatformValueType::FixedMap),
             ("v8:Type", PlatformValueType::Type),
             ("v8:Null", PlatformValueType::Null),
+            ("v8ui:FormattedString", PlatformValueType::FormattedString),
+            ("v8ui:Picture", PlatformValueType::Picture),
+            ("v8ui:Color", PlatformValueType::Color),
+            ("v8ui:Font", PlatformValueType::Font),
+            ("mxl:SpreadsheetDocument", PlatformValueType::SpreadsheetDocument),
+            ("fd:FormattedDocument", PlatformValueType::FormattedDocument),
+            ("d7p1:Chart", PlatformValueType::Chart),
+            ("d5p1:GanttChart", PlatformValueType::GanttChart),
+            ("dcsset:SettingsComposer", PlatformValueType::SettingsComposer),
+            ("dcsset:Filter", PlatformValueType::DataCompositionFilter),
         ] {
             assert_eq!(parse_platform_value_type(token), Some(expected), "token {token}");
             assert_eq!(
@@ -315,6 +354,29 @@ mod tests {
                 "single-type {token}",
             );
         }
+    }
+
+    #[test]
+    fn cfg_whole_token_platform_types_resolve() {
+        for (token, expected) in [
+            ("cfg:DynamicList", PlatformValueType::DynamicList),
+            ("cfg:ConstantsSet", PlatformValueType::ConstantsSet),
+            ("cfg:ReportBuilder", PlatformValueType::ReportBuilder),
+        ] {
+            assert_eq!(
+                parse_single_type(token, &qualifiers()).unwrap(),
+                AttributeType::Platform(expected),
+                "cfg platform token {token}",
+            );
+        }
+    }
+
+    #[test]
+    fn record_manager_token_is_silently_unknown() {
+        assert_eq!(
+            parse_single_type("cfg:InformationRegisterRecordManager.Курсы", &qualifiers()).unwrap(),
+            AttributeType::Unknown,
+        );
     }
 
     #[test]
