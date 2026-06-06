@@ -319,13 +319,17 @@ pub fn resolve_module_summary_via_index(
                 };
                 match resolver.locate_manager_module(db, *manager_type, object_name) {
                     Ok(target_module) => match index.find_method(target_module, method_name) {
-                        // A user manager-module method: the edge is about the method.
+                        // A user manager-module method on a fully-literal
+                        // `Коллекция.Объект.Метод()` path: the object name is a token and its
+                        // manager module is uniquely determined, so locating the exported method
+                        // is a direct lookup — as trustworthy as a qualified `Модуль.Метод()`
+                        // call. The edge is about the method.
                         Some(m) if m.is_export => (
                             ResolvedTarget::Method(MethodId {
                                 module: target_module,
                                 local_id: m.local_id,
                             }),
-                            EdgeProvenance::Inferred,
+                            EdgeProvenance::Resolved,
                             edge.kind,
                         ),
                         Some(_) => (

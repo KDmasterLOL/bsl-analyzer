@@ -939,9 +939,10 @@ fn test_resolved_module_summary_manager_access() {
     let summary = db.resolved_module_summary(ModuleId::new(caller));
     let mgr_module = ModuleId::new(mgr);
 
-    // A user-defined, exported manager-module method resolves to its node (Inferred).
+    // A user-defined, exported manager-module method on a fully-literal path resolves to
+    // its node with Resolved trust (the manager module is uniquely determined).
     assert!(
-        summary.edges.iter().any(|e| e.provenance == EdgeProvenance::Inferred
+        summary.edges.iter().any(|e| e.provenance == EdgeProvenance::Resolved
             && matches!(&e.target, ResolvedTarget::Method(m) if m.module == mgr_module)),
         "Справочники.Контрагенты.НайтиПоИНН should resolve to the manager-module method"
     );
@@ -1324,9 +1325,9 @@ fn workspace_call_graph_via_index_matches_salsa_fold() {
         "unknown module / ThisObject method → Unresolved"
     );
     assert!(
-        has(&|e| e.provenance == EdgeProvenance::Inferred
-            && matches!(e.target, ResolvedTarget::Method(_))),
-        "exported manager-module method (НайтиПоИНН) → Inferred method"
+        has(&|e| e.provenance == EdgeProvenance::Resolved
+            && matches!(&e.target, ResolvedTarget::Method(m) if m.module == ModuleId::new(FileId(2)))),
+        "exported manager-module method (НайтиПоИНН) on a literal path → Resolved method in the manager module"
     );
     assert!(
         has(&|e| e.kind == EdgeKind::ManagerCreates

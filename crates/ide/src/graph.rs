@@ -160,6 +160,15 @@ pub struct NeighborsResult {
     /// The same distribution by edge provenance.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub by_provenance: BTreeMap<&'static str, usize>,
+    /// One-glance trust summary of the shown edges derived from `by_provenance`, so a
+    /// consumer (e.g. an impact analysis before a rename/delete) need not reduce the
+    /// histogram itself: `resolved_only` — every edge is a direct static resolution;
+    /// `contains_inferred` — at least one edge is metadata-inferred or string-dispatched
+    /// (a concrete target, lower trust than a direct call). Unresolvable edges are dropped
+    /// from the graph, so this rates the shown edges, not recall. Omitted when the
+    /// neighbourhood has no edges (no trust claim to make).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<&'static str>,
     /// `true` when the `max_nodes` cap dropped a node that was the endpoint of a
     /// neighbourhood edge, so some edges were omitted from `edges` — a heads-up that the
     /// returned `nodes` can include some whose connecting edge is not shown.
@@ -1872,6 +1881,7 @@ impl<'a> GraphCtx<'a> {
         }
 
         let returned = discovered.len();
+        let confidence = (!by_provenance.is_empty()).then(|| confidence_label(&by_provenance));
         Ok(NeighborsResult {
             root: self.node_ref(root, params.detail),
             nodes,
@@ -1882,6 +1892,7 @@ impl<'a> GraphCtx<'a> {
             dropped,
             by_kind,
             by_provenance,
+            confidence,
             connectors_dropped,
             out_total,
             in_total,
@@ -2312,6 +2323,24 @@ fn dispatch_labels(d: MethodDispatch) -> Vec<&'static str> {
     labels
 }
 
+/// Reduce a provenance histogram to a one-glance trust label for the *shown* edges:
+/// `resolved_only` when every edge is a direct static resolution, else
+/// `contains_inferred` (at least one edge is metadata-inferred or string-dispatched —
+/// a concrete target, but lower trust than a direct call). Edges that could not be
+/// resolved are dropped from the graph entirely (see `project_module_call_edges`), so
+/// this describes the trust of the edges that are shown, not graph recall. Any
+/// non-`resolved` label therefore counts as `contains_inferred`. Caller passes only
+/// non-empty maps. Shared with the SQLite serve path so both graphs report identically.
+pub fn confidence_label(by_provenance: &BTreeMap<&'static str, usize>) -> &'static str {
+    let total: usize = by_provenance.values().copied().sum();
+    let resolved = by_provenance.get("resolved").copied().unwrap_or(0);
+    if resolved == total {
+        "resolved_only"
+    } else {
+        "contains_inferred"
+    }
+}
+
 fn provenance_label(edge: &WorkspaceCallEdge) -> &'static str {
     use hir::EdgeProvenance::*;
     match edge.provenance {
@@ -2663,7 +2692,8 @@ mod tests {
         assert_eq!(node.node.id, id);
         assert_eq!(node.node.qualified, "Справочник.Контрагенты.МодульМенеджера.НайтиПоИНН");
 
-        // And the caller reaches it via an inferred edge.
+        // And the caller reaches it via a resolved edge (literal manager path, the
+        // manager module is uniquely determined).
         let params = NeighborsParams {
             id,
             dir: Direction::In,
@@ -2675,7 +2705,12 @@ mod tests {
         };
         let res = a.graph_neighbors(ROOT, None, &params).unwrap();
         assert!(res.nodes.iter().any(|n| n.id == "method/common/Вызыватель/Делать"));
-        assert!(res.edges.iter().any(|e| e.provenance == "inferred"));
+        assert!(res.edges.iter().any(|e| e.provenance == "resolved"));
+        assert_eq!(
+            res.confidence,
+            Some("resolved_only"),
+            "a literal manager-method neighbourhood is fully resolved"
+        );
     }
 
     #[test]
@@ -2719,6 +2754,11 @@ mod tests {
             .iter()
             .any(|e| e.kind == "manager_creates" && e.provenance == "inferred"));
         assert!(res.edges.iter().any(|e| e.kind == "manager_access"));
+        assert_eq!(
+            res.confidence,
+            Some("contains_inferred"),
+            "platform manager touches resolve to Mdo nodes → inferred, not fully resolved"
+        );
     }
 
     #[test]

@@ -759,6 +759,7 @@ impl GraphDb {
             .collect();
 
         let returned = nodes.len();
+        let confidence = (!by_provenance.is_empty()).then(|| ide::confidence_label(&by_provenance));
         Ok(Ok(NeighborsResult {
             root: self.node_ref(&root, params.detail),
             nodes,
@@ -769,6 +770,7 @@ impl GraphDb {
             dropped,
             by_kind,
             by_provenance,
+            confidence,
             connectors_dropped,
             out_total,
             in_total,

@@ -231,15 +231,16 @@ pub fn loading(detail: Option<&str>) -> CallToolResult {
 /// independent of the on-disk SQLite cache layout in [`crate::graph_db`]).
 fn schema_json() -> Value {
     json!({
-        "schema_version": "17",
+        "schema_version": "18",
         "actions": ["overview", "schema", "status", "node", "source", "neighbors", "callers", "callees", "resolve"],
         "status": "since version 15 `status` returns the graph lifecycle ({state: disabled|loading|ready|failed, and when ready: files, revision, stale, reload}) and kicks the lazy build — poll it instead of reading a flat `loading` envelope from a data action (mirrors `diagnostics status`).",
         "node_kinds": ["method", "module", "mdo", "attribute", "tabular_section", "form", "form_item", "form_attribute"],
         "notes": "since version 7 `node(module/<scope>)` resolves for any code module and returns a `methods` array ({id, name, is_export}) of the module's members; module membership is served on demand and is not a graph edge, so `neighbors(module/…)` stays empty",
         "resolve": "since version 13 `resolve(query)` returns candidate durable ids ({id, kind, match}) for an imprecise query — wrong casing, a bare method/object name, or a partial id — so a `not_found` from `node`/`neighbors` is recoverable without guessing. `match` is exact|case_insensitive|name|substring (strongest first); the list is capped (default 20). It is symbol/id-oriented, NOT a natural-language search: a free-text phrase (e.g. several object/form/method words) returns no candidates — use `search_code` for semantic lookup, then pass the emitted `graph_id` here.",
         "edge_kinds": ["call", "manager_creates", "manager_access", "query_ref", "contains", "data_binding", "notify_ref", "idle_handler", "event_subscription"],
-        "edge_kinds_note": "since version 16 string-dispatched callbacks are edges: `notify_ref` (Новый ОписаниеОповещения) and `idle_handler` (ПодключитьОбработчикОжидания) link a method to the handler named by a string literal; since version 17 `event_subscription` links a `ПодпискаНаСобытие` metadata node to its exported handler method. All three carry `string_resolved` provenance and are kept separate from `call`, so `edge_kinds=[call]` stays a pure 'who really calls whom'. Resolution is conservative: only ЭтотОбъект/ЭтаФорма handlers and explicit common-module handlers resolve (idle handlers resolve in the current module only — a handler placed in another allowed module is intentionally not modelled, not guessed); unresolved receivers/handlers produce no edge.",
+        "edge_kinds_note": "since version 16 string-dispatched callbacks are edges: `notify_ref` (Новый ОписаниеОповещения) and `idle_handler` (ПодключитьОбработчикОжидания) link a method to the handler named by a string literal; since version 17 `event_subscription` links a `ПодпискаНаСобытие` metadata node to its exported handler method. All three carry `string_resolved` provenance and are kept separate from `call`, so `edge_kinds=[call]` stays a pure 'who really calls whom'. Resolution is conservative: only ЭтотОбъект/ЭтаФорма handlers and explicit common-module handlers resolve (idle handlers resolve in the current module only — a handler placed in another allowed module is intentionally not modelled, not guessed); unresolved receivers/handlers produce no edge. Since version 18 both handlers of a `Новый ОписаниеОповещения` are modelled: the success handler (ИмяПроцедуры, Модуль) and the error handler (ИмяПроцедурыОбработкиОшибки, МодульОбработкиОшибки) each become a `notify_ref` edge under the same resolution rules.",
         "provenance": ["resolved", "inferred", "visibility_blocked", "unresolved", "string_resolved"],
+        "provenance_note": "since version 18 a fully-literal `Коллекция.Объект.Метод()` manager-module call whose exported method is found is `resolved` (the manager module is uniquely determined — as trustworthy as a qualified `Модуль.Метод()` call); `inferred` now means the edge points at a metadata-object node (a platform manager method like СоздатьЭлемент, or a bare `Справочники.X` reference), not a code node.",
         "dispatch": ["client", "server"],
         "neighbors_params": {
             "provenance": "string[] — keep only edges with these provenances (empty = all)",
@@ -252,6 +253,7 @@ fn schema_json() -> Value {
             "dropped": "string[] — bounded sample of the dropped ids (highest-centrality first)",
             "by_kind": "{ kind: count } — edge-kind distribution of the full neighbourhood (before the cap), to size an edge_kinds filter",
             "by_provenance": "{ provenance: count } — same distribution by provenance",
+            "confidence": "resolved_only | contains_inferred — since version 18 a one-glance trust summary of the shown edges reduced from by_provenance (resolved_only when every edge is resolved, else contains_inferred for any metadata-inferred/string-dispatched edge). Unresolvable calls are dropped from the graph, so this rates shown-edge trust, not recall. Omitted when the neighbourhood has no edges. Lets an impact analysis decide at a glance whether to trust the answer or supplement it with search_code",
             "connectors_dropped": "bool — true when the cap dropped a node that was an edge endpoint, so some edges are omitted (nodes may appear without their connecting edge)",
             "out_total": "usize — distinct callees discovered (present for dir=out/both); a small value under dir=both means few outbound calls even when inbound callers fill the cap — refine with dir=out",
             "in_total": "usize — distinct callers discovered (present for dir=in/both)"
@@ -378,12 +380,17 @@ mod tests {
         // version 3, `form_attribute` since version 4, `tabular_section` since version
         // 5, the `data_binding` edge since version 6, the source `skipped_budget_exhausted`
         // marker + omit-empty body since version 14, the `status` action since version 15,
-        // the `notify_ref`/`idle_handler` callback edges since version 16, and the
-        // `event_subscription` edge since version 17.
-        assert_eq!(schema["schema_version"], "17");
+        // the `notify_ref`/`idle_handler` callback edges since version 16, the
+        // `event_subscription` edge since version 17, and the `confidence` summary +
+        // resolved literal manager dispatch + notify error-handler edge since version 18.
+        assert_eq!(schema["schema_version"], "18");
         assert!(
             schema["neighbors_result"]["total"].is_string(),
             "neighbours result must document the `total` field"
+        );
+        assert!(
+            schema["neighbors_result"]["confidence"].is_string(),
+            "neighbours result must document the `confidence` summary"
         );
         let actions = schema["actions"].as_array().unwrap();
         assert!(actions.iter().any(|a| a == "resolve"), "resolve action must be advertised");
@@ -431,7 +438,7 @@ mod tests {
     #[test]
     fn schema_and_loading_populate_structured_content() {
         assert_structured_mirrors_text(&schema());
-        assert_eq!(schema().structured_content.unwrap()["schema_version"], "17");
+        assert_eq!(schema().structured_content.unwrap()["schema_version"], "18");
 
         assert_structured_mirrors_text(&loading(Some("indexing")));
         let body = loading(Some("indexing")).structured_content.unwrap();

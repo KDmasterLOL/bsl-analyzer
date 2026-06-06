@@ -106,9 +106,15 @@ fn format_type_info(
 ) -> Result<CallToolResult, McpError> {
     let mut out = format!("# {} / {}\n\n", pt.name, pt.english_name);
 
+    format_constructors(&mut out, platform, &pt.name);
+
     let methods = platform.get_type_methods(&pt.name);
     if methods.is_empty() {
-        let _ = writeln!(out, "Методов нет.");
+        // Only call a type method-less if it also has no constructor surface — otherwise
+        // the constructor section above already carries its real API.
+        if platform.get_constructors(&pt.name).is_empty() {
+            let _ = writeln!(out, "Методов нет.");
+        }
     } else {
         let _ = writeln!(out, "## Методы ({})\n", methods.len());
         let _ = writeln!(out, "| Имя | English | Возвращает |");
@@ -166,12 +172,24 @@ fn format_method_signature(
 }
 
 fn format_docs(out: &mut String, docs: &bsl_platform::MethodDocs) {
-    if !docs.description.is_empty() {
-        let _ = writeln!(out, "## Описание\n\n{}\n", docs.description);
+    format_doc_body(out, &docs.description, &docs.params, &docs.examples, docs.notes.as_deref());
+}
+
+/// Render the shared documentation body (description / params / examples / notes).
+/// Methods and constructors carry the same doc fields, so both render through here.
+fn format_doc_body(
+    out: &mut String,
+    description: &str,
+    params: &[bsl_platform::ParamDocs],
+    examples: &[bsl_platform::CodeExample],
+    notes: Option<&str>,
+) {
+    if !description.is_empty() {
+        let _ = writeln!(out, "## Описание\n\n{description}\n");
     }
-    if !docs.params.is_empty() {
+    if !params.is_empty() {
         let _ = writeln!(out, "## Параметры\n");
-        for p in &docs.params {
+        for p in params {
             if let Some(ref def) = p.default_value {
                 let _ = writeln!(out, "- **{}** (по умолчанию: {def}): {}", p.name, p.description);
             } else {
@@ -180,18 +198,73 @@ fn format_docs(out: &mut String, docs: &bsl_platform::MethodDocs) {
         }
         out.push('\n');
     }
-    if !docs.examples.is_empty() {
+    if !examples.is_empty() {
         let _ = writeln!(out, "## Примеры\n");
-        for ex in &docs.examples {
+        for ex in examples {
             if let Some(ref desc) = ex.description {
                 let _ = writeln!(out, "{desc}\n");
             }
             let _ = writeln!(out, "```bsl\n{}\n```\n", ex.code);
         }
     }
-    if let Some(ref notes) = docs.notes {
+    if let Some(notes) = notes {
         let _ = writeln!(out, "## Примечания\n\n{notes}\n");
     }
+}
+
+/// Render a type's constructors (`Новый Тип(…)`). A type whose entire API is its
+/// constructor (`ОписаниеОповещения`, `Граница`, `ОписаниеТипов`) would otherwise show
+/// only "Методов нет." and hide its real surface.
+fn format_constructors(out: &mut String, platform: &PlatformDataInner, type_name: &str) {
+    let constructors = platform.get_constructors(type_name);
+    if constructors.is_empty() {
+        return;
+    }
+    let _ = writeln!(out, "## Конструкторы ({})\n", constructors.len());
+    let many = constructors.len() > 1;
+    for ctor in &constructors {
+        if many {
+            if let Some(ref variant) = ctor.variant_name {
+                let _ = writeln!(out, "### {variant}\n");
+            }
+        }
+        let docs = platform.get_constructor_docs(ctor.id);
+        match docs.as_ref().filter(|d| !d.syntax.is_empty()) {
+            Some(d) => {
+                let _ = writeln!(out, "```bsl\n{}\n```\n", d.syntax);
+            }
+            None => format_constructor_signature(out, type_name, &ctor.parameters),
+        }
+        if let Some(d) = docs.as_ref() {
+            format_doc_body(out, &d.description, &d.params, &d.examples, d.notes.as_deref());
+        }
+    }
+}
+
+/// Fallback constructor signature built from parameter metadata when prose docs carry
+/// no ready-made `syntax` string.
+fn format_constructor_signature(
+    out: &mut String,
+    type_name: &str,
+    params: &[bsl_platform::MethodParam],
+) {
+    let _ = write!(out, "```bsl\nНовый {type_name}(");
+    for (i, p) in params.iter().enumerate() {
+        if i > 0 {
+            let _ = write!(out, ", ");
+        }
+        if p.is_optional {
+            let _ = write!(out, "[");
+        }
+        let _ = write!(out, "{}", p.name);
+        if let Some(ref pt) = p.param_type {
+            let _ = write!(out, ": {pt}");
+        }
+        if p.is_optional {
+            let _ = write!(out, "]");
+        }
+    }
+    let _ = writeln!(out, ")\n```\n");
 }
 
 #[cfg(test)]
@@ -225,6 +298,34 @@ mod tests {
         let result = bsl_syntax_help("Array", None).unwrap();
         let text = extract_text(&result);
         assert!(text.contains("Массив") || text.contains("Array"), "should find by english name");
+    }
+
+    #[test]
+    fn test_syntax_help_constructor_only_type_renders_constructor() {
+        let platform = PlatformDataInner::instance();
+        // Skip only when no platform data is generated at all. Do NOT guard on the
+        // constructor lookup itself — that would mask a bilingual-keying regression (the
+        // RU type name `ОписаниеОповещения` must resolve to the constructor keyed under
+        // the EN `CallbackDescription`), which is exactly what this test protects.
+        if platform.all_constructors().is_empty() {
+            return;
+        }
+        assert!(
+            !platform.get_constructors("ОписаниеОповещения").is_empty(),
+            "RU type name must resolve to the CallbackDescription constructor"
+        );
+
+        let result = bsl_syntax_help("ОписаниеОповещения", None).unwrap();
+        let text = extract_text(&result);
+        assert!(text.contains("Конструктор"), "constructor-only type must show its constructor");
+        assert!(
+            text.contains("Новый") || text.contains("ИмяПроцедуры"),
+            "should show the Новый syntax or its parameters"
+        );
+        assert!(
+            !text.contains("Методов нет."),
+            "must not claim no surface when a constructor exists"
+        );
     }
 
     #[test]

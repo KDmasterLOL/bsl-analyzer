@@ -133,9 +133,12 @@ pub fn resolved_module_summary_query<'db>(
                 method_name: Some(method_name),
             } => match resolver.resolve_manager_method(db, *manager_type, object_name, method_name)
             {
-                // A user manager-module method: keep the edge about the method.
+                // A user manager-module method on a fully-literal `Коллекция.Объект.Метод()`
+                // path: the object name is a token and its manager module is uniquely
+                // determined, so locating the exported method is a direct lookup — as
+                // trustworthy as a qualified `Модуль.Метод()` call. The edge is about the method.
                 Ok(r) if r.is_export => {
-                    (ResolvedTarget::Method(r.method_id), EdgeProvenance::Inferred, edge.kind)
+                    (ResolvedTarget::Method(r.method_id), EdgeProvenance::Resolved, edge.kind)
                 }
                 Ok(_) => (
                     ResolvedTarget::Unresolved(edge.target.clone()),
