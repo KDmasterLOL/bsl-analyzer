@@ -417,6 +417,37 @@ fn test_resolver_cross_module_gated_by_configurations() {
 }
 
 #[test]
+fn resolve_register_by_name_maps_to_configured_mdo_type() {
+    use bsl_metadata::MdoType;
+    use hir::{ModuleId, Name, Resolver};
+
+    let mut db = RootDatabaseImpl::new();
+    let file = FileId(0);
+    let mut file_set = FileSet::new();
+    file_set.insert(file, VfsPath::new("/Documents/Док/Ext/ObjectModule.bsl"));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(file, SourceRootId(0));
+    db.set_file_text(file, "Процедура ОбработкаПроведения() КонецПроцедуры");
+
+    let config_path =
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer").to_string();
+    db.set_all_config_paths(vec![(None, std::path::PathBuf::from(config_path))]);
+
+    let resolver = Resolver::with_workspace_scope(ModuleId::new(file));
+
+    // The movement syntax carries only the register name; the config supplies the type.
+    assert_eq!(
+        resolver.resolve_register_by_name(&db, &Name::new("РегистрСведений1")),
+        Some((MdoType::InformationRegister, Name::new("РегистрСведений1"))),
+        "a register name must resolve to its configured metadata type"
+    );
+    // BSL is case-insensitive.
+    assert!(resolver.resolve_register_by_name(&db, &Name::new("регистрсведений1")).is_some());
+    // An unknown name is surfaced as unresolved rather than guessed.
+    assert_eq!(resolver.resolve_register_by_name(&db, &Name::new("НетТакогоРегистра")), None);
+}
+
+#[test]
 fn test_all_sdbl_in_file_basic() {
     let mut db = RootDatabaseImpl::new();
     let file_id = FileId(0);
@@ -939,9 +970,10 @@ fn test_resolved_module_summary_manager_access() {
     let summary = db.resolved_module_summary(ModuleId::new(caller));
     let mgr_module = ModuleId::new(mgr);
 
-    // A user-defined, exported manager-module method resolves to its node (Inferred).
+    // A user-defined, exported manager-module method on a fully-literal path resolves to
+    // its node with Resolved trust (the manager module is uniquely determined).
     assert!(
-        summary.edges.iter().any(|e| e.provenance == EdgeProvenance::Inferred
+        summary.edges.iter().any(|e| e.provenance == EdgeProvenance::Resolved
             && matches!(&e.target, ResolvedTarget::Method(m) if m.module == mgr_module)),
         "Справочники.Контрагенты.НайтиПоИНН should resolve to the manager-module method"
     );
@@ -1324,9 +1356,9 @@ fn workspace_call_graph_via_index_matches_salsa_fold() {
         "unknown module / ThisObject method → Unresolved"
     );
     assert!(
-        has(&|e| e.provenance == EdgeProvenance::Inferred
-            && matches!(e.target, ResolvedTarget::Method(_))),
-        "exported manager-module method (НайтиПоИНН) → Inferred method"
+        has(&|e| e.provenance == EdgeProvenance::Resolved
+            && matches!(&e.target, ResolvedTarget::Method(m) if m.module == ModuleId::new(FileId(2)))),
+        "exported manager-module method (НайтиПоИНН) on a literal path → Resolved method in the manager module"
     );
     assert!(
         has(&|e| e.kind == EdgeKind::ManagerCreates
@@ -1374,6 +1406,110 @@ fn workspace_call_graph_via_index_matches_salsa_fold() {
             "per-module ResolvedModuleSummary must match for {module:?}"
         );
     }
+}
+
+/// A `Движения.<Регистр>` movement must resolve to the register's `Mdo` node — and the
+/// Salsa fold and the resident index must agree — given a configuration that supplies the
+/// register's metadata type. Uses the checked-in designer fixture (which defines the
+/// `РегистрСведений1` information register).
+#[test]
+fn register_movement_resolves_to_register_mdo_in_both_paths() {
+    use bsl_metadata::MdoType;
+    use hir::call_graph::{EdgeKind, EdgeProvenance, ResolvedTarget};
+    use hir::graph_index::{resolve_module_summary_via_index, GraphIndex};
+    use hir::ConfigsDatabase;
+
+    let mut db = RootDatabaseImpl::new();
+    let caller = FileId(0);
+    let mut file_set = FileSet::new();
+    file_set.insert(caller, VfsPath::new("/Documents/Док/Ext/ObjectModule.bsl"));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(caller, SourceRootId(0));
+    db.set_file_text(
+        caller,
+        "Процедура ОбработкаПроведения()\n\
+         Движения.РегистрСведений1.Записать();\n\
+         КонецПроцедуры",
+    );
+
+    let config_path =
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer").to_string();
+    db.set_all_config_paths(vec![(None, std::path::PathBuf::from(config_path))]);
+
+    let is_register_edge = |e: &hir::ResolvedCallEdge| {
+        e.kind == EdgeKind::RegisterMovement
+            && e.provenance == EdgeProvenance::Inferred
+            && matches!(&e.target, ResolvedTarget::Mdo { mdo_type, object_name }
+                if *mdo_type == MdoType::InformationRegister
+                    && object_name.as_str() == "РегистрСведений1")
+    };
+
+    let salsa_summary = db.resolved_module_summary(ModuleId::new(caller));
+    assert!(
+        salsa_summary.edges.iter().any(is_register_edge),
+        "Движения.РегистрСведений1.Записать() must resolve to the register's Mdo node"
+    );
+
+    let modules = vec![ModuleId::new(caller)];
+    let index = GraphIndex::build(&db, &modules);
+    let index_summary = resolve_module_summary_via_index(&db, ModuleId::new(caller), &index);
+    assert_eq!(
+        index_summary, *salsa_summary,
+        "the resident index must resolve register movements identically to the Salsa fold"
+    );
+}
+
+/// A global-context `ПодключитьОбработчикОжидания` handler that lives in a global common
+/// module (not the calling module) must resolve cross-module, per the platform help. Uses
+/// the designer fixture, which declares one global common module (`ГлобальныйСерверныйМодуль`).
+#[test]
+fn idle_handler_resolves_to_a_global_common_module() {
+    use hir::call_graph::{EdgeKind, EdgeProvenance, ResolvedTarget};
+    use hir::ConfigsDatabase;
+
+    let mut db = RootDatabaseImpl::new();
+    let caller = FileId(0);
+    let global = FileId(1);
+    let mut file_set = FileSet::new();
+    file_set.insert(caller, VfsPath::new("/CommonModules/Вызыватель/Ext/Module.bsl"));
+    file_set
+        .insert(global, VfsPath::new("/CommonModules/ГлобальныйСерверныйМодуль/Ext/Module.bsl"));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(caller, SourceRootId(0));
+    db.set_file_source_root(global, SourceRootId(0));
+    db.set_file_text(
+        caller,
+        "Процедура Старт() Экспорт\n\
+         ПодключитьОбработчикОжидания(\"ОбновитьЭкран\", 5);\n\
+         КонецПроцедуры",
+    );
+    db.set_file_text(global, "Процедура ОбновитьЭкран() Экспорт КонецПроцедуры");
+
+    let config_path =
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer").to_string();
+    db.set_all_config_paths(vec![(None, std::path::PathBuf::from(config_path))]);
+
+    let is_global_idle = |e: &hir::ResolvedCallEdge| {
+        e.kind == EdgeKind::IdleHandler
+            && e.provenance == EdgeProvenance::StringResolved
+            && matches!(&e.target, ResolvedTarget::Method(m) if m.module == ModuleId::new(global))
+    };
+
+    let salsa_summary = db.resolved_module_summary(ModuleId::new(caller));
+    assert!(
+        salsa_summary.edges.iter().any(is_global_idle),
+        "an idle handler exported by a global common module must resolve cross-module"
+    );
+
+    // The resident index must resolve the cross-module idle handler identically.
+    use hir::graph_index::{resolve_module_summary_via_index, GraphIndex};
+    let modules = vec![ModuleId::new(caller), ModuleId::new(global)];
+    let index = GraphIndex::build(&db, &modules);
+    let index_summary = resolve_module_summary_via_index(&db, ModuleId::new(caller), &index);
+    assert_eq!(
+        index_summary, *salsa_summary,
+        "the resident index must resolve cross-module idle handlers identically to the Salsa fold"
+    );
 }
 
 /// The batched build path: a call from a module in one batch to a module in
@@ -1513,6 +1649,136 @@ fn event_subscription_links_to_its_exported_handler() {
         "edge source is the subscription's Mdo node"
     );
     assert!(matches!(&sub.to, GraphNode::Method(_)), "edge target is the handler method");
+}
+
+#[test]
+fn subsystem_membership_links_to_member_objects() {
+    use bsl_metadata::MdoType;
+    use hir::call_graph::{EdgeKind, EdgeProvenance, GraphNode};
+    use hir::graph_index::{project_workspace_subsystem_edges, GraphBuildState};
+
+    // The designer fixture's `Подсистема1` contains an information register and a catalog.
+    let mut db = RootDatabaseImpl::new();
+    let config_path = std::path::PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../bsl-metadata/fixtures/designer"
+    ));
+    db.set_all_config_paths(vec![(None, config_path)]);
+
+    let file_id = FileId(0);
+    let mut file_set = FileSet::new();
+    file_set.insert(file_id, VfsPath::new("/Documents/Док/Ext/ObjectModule.bsl"));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(file_id, SourceRootId(0));
+    db.set_file_text(file_id, "Процедура Х() КонецПроцедуры");
+
+    let mut state = GraphBuildState::new();
+    let edges = project_workspace_subsystem_edges(&db, file_id, &mut state);
+
+    let membership_to = |to_type: MdoType, to_name: &str| {
+        edges.iter().any(|e| {
+            e.kind == EdgeKind::SubsystemMembership
+                && e.provenance == EdgeProvenance::Resolved
+                && matches!(&e.from, GraphNode::Mdo { mdo_type, object_name }
+                    if *mdo_type == MdoType::Subsystem && object_name.as_str() == "Подсистема1")
+                && matches!(&e.to, GraphNode::Mdo { mdo_type, object_name }
+                    if *mdo_type == to_type && object_name.as_str() == to_name)
+        })
+    };
+    assert!(
+        membership_to(MdoType::InformationRegister, "РегистрСведений1"),
+        "subsystem → information-register member edge"
+    );
+    assert!(membership_to(MdoType::Catalog, "Справочник1"), "subsystem → catalog member edge");
+}
+
+#[test]
+fn role_links_to_object_rights_and_rls_condition_object() {
+    use bsl_metadata::MdoType;
+    use hir::call_graph::{EdgeKind, EdgeProvenance, GraphNode};
+    use hir::graph_index::{project_workspace_role_edges, GraphBuildState};
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("src/cf");
+    std::fs::create_dir_all(root.join("Catalogs")).unwrap();
+    std::fs::create_dir_all(root.join("Roles/ТестоваяРоль/Ext")).unwrap();
+    std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+
+    let catalog = |name: &str| {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Catalog uuid="00000000-0000-0000-0000-0000000000{:02}">
+        <Properties><Name>{name}</Name></Properties>
+    </Catalog>
+</MetaDataObject>"#,
+            name.len()
+        )
+    };
+    std::fs::write(root.join("Catalogs/Контрагенты.xml"), catalog("Контрагенты")).unwrap();
+    std::fs::write(root.join("Catalogs/Организации.xml"), catalog("Организации")).unwrap();
+
+    std::fs::write(
+        root.join("Roles/ТестоваяРоль.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Role uuid="00000000-0000-0000-0000-0000000000aa">
+        <Properties><Name>ТестоваяРоль</Name></Properties>
+    </Role>
+</MetaDataObject>"#,
+    )
+    .unwrap();
+    // Direct read right on Контрагенты, restricted by an RLS condition that names Организации
+    // only inside its subquery — so Организации is reachable solely through the RLS text.
+    std::fs::write(
+        root.join("Roles/ТестоваяРоль/Ext/Rights.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<Rights xmlns="http://v8.1c.ru/8.2/roles" version="2.10">
+    <setForNewObjects>false</setForNewObjects>
+    <object>
+        <name>Catalog.Контрагенты</name>
+        <right>
+            <name>Read</name>
+            <value>true</value>
+            <restrictionByCondition>
+                <condition>Контрагенты.Ссылка В (ВЫБРАТЬ Ссылка ИЗ Справочник.Организации)</condition>
+            </restrictionByCondition>
+        </right>
+    </object>
+</Rights>"#,
+    )
+    .unwrap();
+
+    let mut db = RootDatabaseImpl::new();
+    db.set_all_config_paths(vec![(None, root.clone())]);
+    let file_id = FileId(0);
+    let mut file_set = FileSet::new();
+    file_set.insert(file_id, VfsPath::new(root.join("X.bsl").to_string_lossy().as_ref()));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(file_id, SourceRootId(0));
+    db.set_file_text(file_id, "Процедура Х() КонецПроцедуры");
+
+    let mut state = GraphBuildState::new();
+    let edges = project_workspace_role_edges(&db, file_id, &mut state);
+
+    let role_edge = |to_name: &str, prov: EdgeProvenance| {
+        edges.iter().any(|e| {
+            e.kind == EdgeKind::RoleReference
+                && e.provenance == prov
+                && matches!(&e.from, GraphNode::Mdo { mdo_type, object_name }
+                    if *mdo_type == MdoType::Role && object_name.as_str() == "ТестоваяРоль")
+                && matches!(&e.to, GraphNode::Mdo { mdo_type, object_name }
+                    if *mdo_type == MdoType::Catalog && object_name.as_str() == to_name)
+        })
+    };
+    assert!(
+        role_edge("Контрагенты", EdgeProvenance::Resolved),
+        "direct object-rights edge role → Контрагенты is `resolved`"
+    );
+    assert!(
+        role_edge("Организации", EdgeProvenance::Inferred),
+        "RLS condition object role → Организации is `inferred` (parsed from the restriction text)"
+    );
 }
 
 #[test]

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use bsl_config::VisibleConfig;
+use bsl_metadata::MdObject;
 
 use crate::configs::ConfigsDatabase;
 use crate::scope::{ExprScopes, ScopeId};
@@ -127,6 +128,58 @@ impl Resolver {
 
         let source_root_id = db.file_source_root_input(file_id).source_root_id(db);
         db.module_index(source_root_id).resolve_common_module(module_name).is_some()
+    }
+
+    /// Resolve a bare register name (from a `Движения.<Регистр>` movement touch) to its
+    /// metadata type and canonical name. The movement syntax carries only the register
+    /// name; the configuration's register index supplies the type (Accumulation /
+    /// Information / Accounting / Calculation). Returns `None` when no register of that
+    /// name is visible, so an unresolved movement is surfaced honestly rather than guessed.
+    pub fn resolve_register_by_name(
+        &self,
+        db: &dyn ConfigsDatabase,
+        register_name: &Name,
+    ) -> Option<(bsl_metadata::MdoType, Name)> {
+        if !self.scopes.iter().any(|s| matches!(s, Scope::WorkspaceScope)) {
+            return None;
+        }
+        let module_id = self.module_id()?;
+        let needle = register_name.as_str();
+        db.configurations(module_id.file_id).iter().rev().find_map(|cfg| {
+            cfg.configuration
+                .find_register(needle)
+                .map(|reg| (reg.mdo_type(), Name::new(reg.name())))
+        })
+    }
+
+    /// Names of the configuration's GLOBAL common modules — those whose exported
+    /// procedures are callable unqualified. These are the candidate modules for a
+    /// global-context `ПодключитьОбработчикОжидания` handler, which names the procedure
+    /// without a module qualifier. Deduplicated across visible configs (extension overlays).
+    ///
+    /// Two deliberate scope choices, both in service of impact analysis:
+    /// - Modules are NOT filtered by client/server dispatch. The help requires an idle
+    ///   handler to be client-side, but the graph models the *named reference* — if such a
+    ///   handler names a server-only method, renaming that method still breaks the
+    ///   registration, so the edge must exist. Dispatch validity is a diagnostic concern.
+    /// - The application module (`МодульПриложения`) — the help's other global-context host
+    ///   — is not yet enumerated here; only global common modules are. A handler living in
+    ///   the application module is a known, currently-unmodelled gap.
+    pub fn global_common_module_names(&self, db: &dyn ConfigsDatabase) -> Vec<Name> {
+        if !self.scopes.iter().any(|s| matches!(s, Scope::WorkspaceScope)) {
+            return Vec::new();
+        }
+        let Some(module_id) = self.module_id() else { return Vec::new() };
+        let mut names = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for cfg in db.configurations(module_id.file_id).iter() {
+            for cm in cfg.configuration.common_modules() {
+                if cm.is_global() && seen.insert(cm.name().to_lowercase()) {
+                    names.push(Name::new(cm.name()));
+                }
+            }
+        }
+        names
     }
 
     pub fn resolve_assignment_target(

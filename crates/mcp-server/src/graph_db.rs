@@ -28,8 +28,15 @@ use crate::graph::{config_metadata_paths, db_for_files, enumerate_bsl_files};
 /// Bumped whenever the table layout OR the persisted edge/node content changes so a
 /// stale on-disk cache from an older binary is rejected (via the `meta` row) and
 /// rebuilt. Version 5 adds the `notify_ref`/`idle_handler` callback edges; version 6
-/// adds the `event_subscription` handler edges.
-pub(crate) const SCHEMA_VERSION: u32 = 6;
+/// adds the `event_subscription` handler edges; version 7 changes persisted edge
+/// content again — literal manager dispatch now stores `resolved` provenance, a
+/// `Новый ОписаниеОповещения` error handler becomes a second `notify_ref` edge, and
+/// `Движения.<Регистр>.<метод>()` movements become `register_movement` edges. Version 8
+/// resolves idle handlers to a unique global common module (new cross-module edges).
+/// Version 9 adds `subsystem_membership` edges (subsystem → member object / child subsystem).
+/// Version 10 adds `role_reference` edges (role → object it grants rights on, plus RLS
+/// condition objects).
+pub(crate) const SCHEMA_VERSION: u32 = 10;
 
 /// One file's persisted identity in the `files` table: its stat-only fingerprint
 /// and (for `.bsl`) its resolution-signature hash. Persisting these per path lets a

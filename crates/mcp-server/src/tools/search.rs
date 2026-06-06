@@ -1,9 +1,10 @@
 use crate::baseline::{ConfiguredBaselineStatus, ExternalBaselineService, ExternalBaselineState};
 use crate::state::{SemanticRuntimeStatus, WorkspaceSearchMode};
+use crate::tools::response::structured;
 use bsl_search::{
-    fuse_rrf, lexical_hits_for_resolved_view, merge_context_for_collection, merge_lexical,
-    merge_semantic, FusedHit, IndexProgress, LexicalHit, Modality, SearchEngine, SearchError,
-    SearchHit, SemanticHit, RRF_K,
+    fuse_smart, lexical_hits_for_resolved_view, merge_context_for_collection, merge_lexical,
+    merge_semantic, FusedHit, IndexProgress, LexicalHit, SearchEngine, SearchError, SearchHit,
+    SemanticHit,
 };
 use rmcp::model::{CallToolResult, Content};
 use rmcp::ErrorData as McpError;
@@ -324,9 +325,44 @@ fn with_index_progress(message: String, progress: &IndexProgress) -> String {
     }
 }
 
-/// The unified code search: run lexical and semantic, fuse by RRF, and degrade to lexical
-/// (with a trailing note) when semantic cannot serve. This is what the `search_code` action
-/// dispatches to.
+/// Poll-back hint (ms) for a not-ready `search_code` response. Index build and overlay
+/// warmup advance on a multi-second cadence, so a sub-second retry just spins.
+const SEARCH_NOT_READY_RETRY_MS: u64 = 1500;
+
+/// A structured "index not ready yet" envelope for `search_code`, mirroring the `graph`
+/// tool's loading envelope so a programmatic poller reads JSON — a machine `status`, a
+/// retry hint, and a live `progress.active` flag — instead of parsing prose. The human
+/// `detail` (the upstream pending reason, verbatim) is preserved for people.
+///
+/// `progress.active` is always present so a poller can tell "a build is running" (going)
+/// from "no build counting yet" (idle/pre-index); the numeric counters are attached ONLY
+/// while `active`, because [`IndexProgress`] is never `reset()` — an inactive object can
+/// still hold stale totals from a finished or failed attempt, and reporting those as
+/// current progress would mislead. The pretty-JSON text mirror keeps the response readable.
+fn search_not_ready(detail: &str, progress: &IndexProgress) -> CallToolResult {
+    let mut prog = json!({ "active": progress.is_active() });
+    if progress.is_active() {
+        prog["pct"] = json!(progress.percent());
+        prog["batches"] = json!({
+            "done": progress.done_batches.load(Ordering::Relaxed),
+            "total": progress.total_batches.load(Ordering::Relaxed),
+        });
+        prog["chunks"] = json!({
+            "done": progress.done_chunks.load(Ordering::Relaxed),
+            "total": progress.total_chunks.load(Ordering::Relaxed),
+        });
+    }
+    structured(json!({
+        "status": "not_ready",
+        "detail": detail,
+        "retry_after_ms": SEARCH_NOT_READY_RETRY_MS,
+        "progress": prog,
+    }))
+}
+
+/// The unified code search: run lexical and semantic, fuse by `fuse_smart` (exact-symbol tier
+/// then semantic tail), and degrade to lexical (with a trailing note) when semantic cannot serve.
+/// This is what the `search_code` action dispatches to.
 // This is the tool-dispatch boundary: each argument is an independent runtime handle or
 // per-request value pulled straight from `SharedState`, with no natural sub-grouping that a
 // context struct would not make more obscure than the flat list.
@@ -356,21 +392,19 @@ pub fn hybrid_code(
     )?;
     let (lex_hits, workspace_root) = match lexical {
         CodeHits::Ready { hits, workspace_root } => (hits, workspace_root),
-        // Lexical is the floor: if it cannot serve yet, the whole search cannot — emit its
-        // message unchanged rather than claiming a (nonexistent) lexical-only result.
+        // Lexical is the floor: if it cannot serve yet, the whole search cannot — return a
+        // structured not-ready envelope (machine status + live counters + retry hint),
+        // matching the graph tool, rather than a bare sentence a poller must parse.
         CodeHits::Pending(message) => {
-            return Ok(CallToolResult::success(vec![Content::text(with_index_progress(
-                message,
-                index_progress,
-            ))]));
+            return Ok(search_not_ready(&message, index_progress));
         }
         // Lexical search is always available, so it never reports a semantic shortfall; treat
         // it defensively as "still building".
         CodeHits::Unavailable(_) => {
-            return Ok(CallToolResult::success(vec![Content::text(with_index_progress(
-                "Search index is being built, please try again in a moment.".to_owned(),
+            return Ok(search_not_ready(
+                "Search index is being built, please try again in a moment.",
                 index_progress,
-            ))]));
+            ));
         }
     };
 
@@ -386,14 +420,16 @@ pub fn hybrid_code(
 
     let (mut hits, note): (Vec<FusedHit>, Option<String>) = match semantic {
         CodeHits::Ready { hits: sem_hits, .. } => {
-            (fuse_rrf(&lex_hits, &sem_hits, RRF_K, limit), None)
+            (fuse_smart(&lex_hits, &sem_hits, query, limit), None)
         }
-        // Semantic could not serve — degrade to lexical-only. Every hit is then lexical, so it
-        // is wrapped as a `FusedHit` with `Modality::Lexical` to keep the display uniform.
-        // Surface the precise upstream pending reason (overlay warmup, local RAG indexing, or
-        // index build) verbatim rather than collapsing them to one generic note.
-        CodeHits::Pending(message) => (lexical_only(lex_hits), Some(message)),
-        CodeHits::Unavailable(reason) => (lexical_only(lex_hits), Some(reason.note().to_owned())),
+        // Semantic could not serve — degrade to lexical-only by fusing against an empty semantic
+        // list, so the exact-symbol tier still floats. Surface the precise upstream pending reason
+        // (overlay warmup, local RAG indexing, or index build) verbatim rather than collapsing
+        // them to one generic note.
+        CodeHits::Pending(message) => (fuse_smart(&lex_hits, &[], query, limit), Some(message)),
+        CodeHits::Unavailable(reason) => {
+            (fuse_smart(&lex_hits, &[], query, limit), Some(reason.note().to_owned()))
+        }
     };
     hits.truncate(limit);
 
@@ -404,7 +440,7 @@ pub fn hybrid_code(
     // Explain the per-hit modality tag once, up front — a leading line does not shift the
     // per-hit `graph_id:` parsing (which is relative to each `#N` line).
     let mut out = String::from(
-        "Modality tag per hit: [L] lexical-only · [S] semantic-only · [L+S] found by both (strongest signal).\n",
+        "Modality tag per hit: [L] lexical-only · [S] semantic-only · [L+S] found by both (cross-modal agreement).\n",
     );
     out.push_str(&format_code_hits(&hits, workspace_root.as_deref(), graph_root));
     if let Some(note) = note {
@@ -1132,18 +1168,26 @@ pub fn search_status(
         }
     }
 
+    // Always surface a progress signal while the index is building (engine not yet ready)
+    // or an overlay re-index is active — never a bare "building" line with nothing to poll.
+    // Live counters are shown ONLY while `active` (a build is genuinely counting); an
+    // inactive build object can hold stale totals from a finished/failed attempt (it is
+    // never reset()), so we report a phase line instead of misleading numbers.
+    let index_building = guard.as_ref().is_none();
     if progress.is_active() {
         let total = progress.total_chunks.load(Ordering::Relaxed);
         let done = progress.done_chunks.load(Ordering::Relaxed);
         let total_b = progress.total_batches.load(Ordering::Relaxed);
         let done_b = progress.done_batches.load(Ordering::Relaxed);
         let pct = progress.percent();
-        let heading = "Indexing in progress";
 
         let _ = writeln!(out);
-        let _ = writeln!(out, "{heading}: {pct}%");
+        let _ = writeln!(out, "Indexing in progress: {pct}%");
         let _ = writeln!(out, "  Batches:  {done_b}/{total_b}");
         let _ = writeln!(out, "  Chunks:   {done}/{total}");
+    } else if index_building {
+        let _ = writeln!(out);
+        let _ = writeln!(out, "Indexing pending: initializing (no live counters yet)");
     }
 
     let _ = writeln!(out);
@@ -1378,12 +1422,6 @@ fn graph_id_for_hit(
     }
 }
 
-/// Wrap lexical-only hits (the semantic-unavailable degrade path) as `FusedHit`s so the
-/// formatter handles one type. Each carries `Modality::Lexical`.
-fn lexical_only(hits: Vec<SearchHit>) -> Vec<FusedHit> {
-    hits.into_iter().map(|hit| FusedHit { hit, modality: Modality::Lexical }).collect()
-}
-
 fn format_code_hits(
     hits: &[FusedHit],
     engine_root: Option<&Path>,
@@ -1394,8 +1432,8 @@ fn format_code_hits(
     for (i, fused) in hits.iter().enumerate() {
         let hit = &fused.hit;
         let name = if hit.symbol_name.is_empty() { "<header>" } else { &hit.symbol_name };
-        // The modality tag (L / S / L+S) replaces the bare RRF score: `L+S` means lexical and
-        // semantic agreed (the strongest signal), which the small fused score does not convey.
+        // The modality tag (L / S / L+S) carries the cross-modal signal instead of a numeric
+        // score: `L+S` means lexical and semantic both surfaced the chunk (they agreed).
         let _ = writeln!(
             out,
             "#{} [{}] {}:{}-{} :: {} ({})",
@@ -2217,6 +2255,57 @@ mod tests {
     }
 
     #[test]
+    fn hybrid_degrade_note_follows_hit_lines_and_empty_results_suppress_it() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        fs::write(workspace.join("CommonModule.bsl"), "Процедура ПроверитьИНН()\nКонецПроцедуры")
+            .unwrap();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.index_directory_fts(workspace).unwrap();
+        engine.set_workspace_root(workspace);
+        let engine = Arc::new(Mutex::new(Some(engine)));
+        let failed = Arc::new(Mutex::new(SemanticRuntimeStatus::Failed("boom".to_owned())));
+
+        // A matching query: the degrade note must appear strictly AFTER the hit line so a client
+        // parsing `graph_id:` lines positionally is never shifted by it.
+        let hit_result = hybrid_code(
+            &engine,
+            &failed,
+            WorkspaceSearchMode::SqliteLocal,
+            None,
+            None,
+            None,
+            &IndexProgress::new(),
+            "ПроверитьИНН",
+            10,
+        )
+        .unwrap();
+        let text = hit_result.content[0].raw.as_text().expect("text").text.as_str();
+        let hit_pos = text.find("ПроверитьИНН").expect("hit line present");
+        let note_pos = text.find("-- semantic skipped").expect("note present");
+        assert!(note_pos > hit_pos, "note must trail the hit lines: {text}");
+
+        // A query that matches nothing degrades to an empty fused list: "No results found" and the
+        // semantic-skip note is suppressed (no dangling note without any hits).
+        let empty_result = hybrid_code(
+            &engine,
+            &failed,
+            WorkspaceSearchMode::SqliteLocal,
+            None,
+            None,
+            None,
+            &IndexProgress::new(),
+            "несуществующийидентификатор",
+            10,
+        )
+        .unwrap();
+        let empty_text = empty_result.content[0].raw.as_text().expect("text").text.as_str();
+        assert_eq!(empty_text, "No results found.");
+        assert!(!empty_text.contains("--"), "no trailing note without hits: {empty_text}");
+    }
+
+    #[test]
     fn search_status_reports_overlay_sync_for_postgres_mode() {
         let dir = tempdir().unwrap();
         let workspace = dir.path();
@@ -2266,6 +2355,110 @@ mod tests {
         );
         assert!(text.contains("Semantic: syncing local overlay embeddings against remote baseline"));
         assert!(text.contains("Indexing in progress: 25%"));
+    }
+
+    #[test]
+    fn search_status_emits_progress_signal_while_building() {
+        // Engine not built yet (guard is None) and no active re-index: the status must carry
+        // an honest progress signal — a "pending" phase line — never a bare "building" line a
+        // poller cannot act on. Live numbers are withheld here because an inactive progress
+        // object can hold stale totals (it is never reset()), so we must not print them.
+        let engine: Arc<Mutex<Option<SearchEngine>>> = Arc::new(Mutex::new(None));
+        let progress = Arc::new(IndexProgress::default());
+
+        let result = search_status(
+            &engine,
+            &progress,
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::Ready)),
+            WorkspaceSearchMode::SqliteLocal,
+            None,
+            None,
+        )
+        .unwrap();
+        let text = result.content[0].raw.as_text().expect("text").text.as_str();
+
+        assert!(text.contains("building"), "building state must be labelled: {text}");
+        assert!(
+            text.contains("Indexing pending: initializing"),
+            "a pending phase line must appear while building, not a bare line: {text}"
+        );
+        // No live counter lines when not actively indexing (would be stale/misleading).
+        assert!(
+            !text.contains("Indexing in progress"),
+            "must not claim active indexing while merely pending: {text}"
+        );
+    }
+
+    #[test]
+    fn hybrid_code_not_ready_returns_structured_envelope() {
+        // No engine and no baseline: lexical cannot serve, so the whole search is not ready.
+        // It must come back as a structured envelope (machine status + retry hint + live
+        // counters) mirroring the graph tool, not a bare sentence a poller has to parse.
+        let engine: Arc<Mutex<Option<SearchEngine>>> = Arc::new(Mutex::new(None));
+        let runtime = Arc::new(Mutex::new(SemanticRuntimeStatus::Ready));
+        let progress = Arc::new(IndexProgress::default());
+        progress.active.store(true, Ordering::Relaxed);
+        progress.total_chunks.store(100, Ordering::Relaxed);
+        progress.done_chunks.store(40, Ordering::Relaxed);
+        progress.total_batches.store(10, Ordering::Relaxed);
+        progress.done_batches.store(4, Ordering::Relaxed);
+
+        let result = hybrid_code(
+            &engine,
+            &runtime,
+            WorkspaceSearchMode::SqliteLocal,
+            None,
+            None,
+            None,
+            &progress,
+            "ПроверитьИНН",
+            10,
+        )
+        .unwrap();
+
+        let body = result.structured_content.as_ref().expect("structured not-ready envelope");
+        assert_eq!(body["status"], "not_ready");
+        assert_eq!(body["retry_after_ms"], 1500);
+        assert_eq!(body["progress"]["active"], true);
+        assert_eq!(body["progress"]["pct"], 40);
+        assert_eq!(body["progress"]["chunks"]["done"], 40);
+        assert_eq!(body["progress"]["batches"]["total"], 10);
+
+        // The text block is the JSON mirror (machine-parseable), not prose.
+        let text = result.content[0].raw.as_text().expect("text mirror").text.as_str();
+        assert!(text.contains("\"status\": \"not_ready\""), "text mirror must be JSON: {text}");
+    }
+
+    #[test]
+    fn hybrid_code_not_ready_omits_counters_when_inactive() {
+        // An inactive progress object may hold stale totals (it is never reset()), so a
+        // not-ready envelope must carry the `active=false` flag but NO numeric counters —
+        // never report a finished/failed attempt's leftover numbers as current progress.
+        let engine: Arc<Mutex<Option<SearchEngine>>> = Arc::new(Mutex::new(None));
+        let runtime = Arc::new(Mutex::new(SemanticRuntimeStatus::Ready));
+        let progress = Arc::new(IndexProgress::default());
+        // Simulate stale leftovers from a prior attempt: nonzero totals, but not active.
+        progress.total_chunks.store(100, Ordering::Relaxed);
+        progress.done_chunks.store(100, Ordering::Relaxed);
+
+        let result = hybrid_code(
+            &engine,
+            &runtime,
+            WorkspaceSearchMode::SqliteLocal,
+            None,
+            None,
+            None,
+            &progress,
+            "ПроверитьИНН",
+            10,
+        )
+        .unwrap();
+
+        let body = result.structured_content.as_ref().expect("structured not-ready envelope");
+        assert_eq!(body["status"], "not_ready");
+        assert_eq!(body["progress"]["active"], false);
+        assert!(body["progress"]["pct"].is_null(), "no stale pct when inactive: {body}");
+        assert!(body["progress"]["chunks"].is_null(), "no stale counters when inactive: {body}");
     }
 
     #[test]

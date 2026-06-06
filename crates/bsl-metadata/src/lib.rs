@@ -15,6 +15,7 @@ pub mod metadata_resolver;
 pub mod register;
 pub mod role;
 pub mod scheduled_job;
+pub mod subsystem;
 pub mod tabular_section;
 pub mod traits;
 pub mod web_service;
@@ -46,8 +47,9 @@ pub use register::{
     AccumulationRegisterType, Register, RegisterAttribute, RegisterBuilder, RegisterPeriodicity,
     RegisterResource,
 };
-pub use role::{Role, RoleData};
+pub use role::{Role, RoleData, RoleObjectRef};
 pub use scheduled_job::{ScheduledJob, ScheduledJobHandler};
+pub use subsystem::Subsystem;
 pub use tabular_section::{TabularSection, TabularSectionAttribute};
 pub use traits::{MdObject, Module};
 pub use uuid::Uuid;

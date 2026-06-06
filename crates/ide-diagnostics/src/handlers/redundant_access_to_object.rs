@@ -130,7 +130,9 @@ fn get_plural_collection_name(
         MdoType::Cube
         | MdoType::DimensionTable
         | MdoType::CommonModule
-        | MdoType::EventSubscription => None,
+        | MdoType::EventSubscription
+        | MdoType::Subsystem
+        | MdoType::Role => None,
     }
 }
 

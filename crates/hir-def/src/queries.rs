@@ -133,9 +133,12 @@ pub fn resolved_module_summary_query<'db>(
                 method_name: Some(method_name),
             } => match resolver.resolve_manager_method(db, *manager_type, object_name, method_name)
             {
-                // A user manager-module method: keep the edge about the method.
+                // A user manager-module method on a fully-literal `Коллекция.Объект.Метод()`
+                // path: the object name is a token and its manager module is uniquely
+                // determined, so locating the exported method is a direct lookup — as
+                // trustworthy as a qualified `Модуль.Метод()` call. The edge is about the method.
                 Ok(r) if r.is_export => {
-                    (ResolvedTarget::Method(r.method_id), EdgeProvenance::Inferred, edge.kind)
+                    (ResolvedTarget::Method(r.method_id), EdgeProvenance::Resolved, edge.kind)
                 }
                 Ok(_) => (
                     ResolvedTarget::Unresolved(edge.target.clone()),
@@ -162,6 +165,22 @@ pub fn resolved_module_summary_query<'db>(
                 EdgeProvenance::Inferred,
                 EdgeKind::ManagerAccess,
             ),
+            // A `Движения.<Регистр>` movement touch: resolve the register name to its
+            // metadata type from config. The edge is about the register object it touches.
+            CallTarget::RegisterMovement { register_name } => {
+                match resolver.resolve_register_by_name(db, register_name) {
+                    Some((mdo_type, object_name)) => (
+                        ResolvedTarget::Mdo { mdo_type, object_name },
+                        EdgeProvenance::Inferred,
+                        EdgeKind::RegisterMovement,
+                    ),
+                    None => (
+                        ResolvedTarget::Unresolved(edge.target.clone()),
+                        EdgeProvenance::Unresolved,
+                        edge.kind,
+                    ),
+                }
+            }
             // A `ЭтотОбъект` call that reached here is a platform object method
             // (local user methods were already resolved at extraction time).
             CallTarget::ThisObjectMethod { .. } | CallTarget::Unresolved => (
@@ -189,7 +208,8 @@ pub fn resolved_module_summary_query<'db>(
             Ok(_) => QualifiedLookup::VisibilityBlocked,
             Err(_) => QualifiedLookup::Absent,
         };
-    edges.extend(resolve_callback_edges(&summary, find_local, find_qualified));
+    let global_modules = resolver.global_common_module_names(db);
+    edges.extend(resolve_callback_edges(&summary, find_local, find_qualified, &global_modules));
 
     Arc::new(crate::call_graph::ResolvedModuleSummary { module: module_id, edges })
 }
@@ -208,13 +228,16 @@ pub(crate) enum QualifiedLookup {
 /// The two callers (the Salsa fold and the resident-index build) resolve methods by
 /// different mechanisms but must produce byte-identical edges, so the lookup strategy
 /// is injected: `find_local` resolves a handler in the current module, `find_qualified`
-/// resolves a handler in a named common module. A handler that does not resolve yields
-/// no edge — `Unresolved` targets are dropped in projection anyway, and inventing edges
-/// for unknown receivers is worse than omitting them.
+/// resolves a handler in a named common module. `global_module_names` lists the
+/// configuration's global common modules (shared by both callers), used to resolve a
+/// global-context idle handler that names no module. A handler that does not resolve
+/// yields no edge — `Unresolved` targets are dropped in projection anyway, and inventing
+/// edges for unknown receivers is worse than omitting them.
 pub(crate) fn resolve_callback_edges(
     summary: &crate::call_graph::ModuleCallSummary,
     find_local: impl Fn(&crate::name::Name) -> Option<crate::MethodId>,
     find_qualified: impl Fn(&crate::name::Name, &crate::name::Name) -> QualifiedLookup,
+    global_module_names: &[crate::name::Name],
 ) -> Vec<crate::call_graph::ResolvedCallEdge> {
     use crate::call_graph::{
         CallTarget, EdgeKind, EdgeProvenance, NotifyTarget, ResolvedCallEdge, ResolvedTarget,
@@ -257,7 +280,14 @@ pub(crate) fn resolve_callback_edges(
     }
 
     for reg in &summary.idle_handler_regs {
-        if let Some(m) = find_local(&reg.handler_name) {
+        // `ПодключитьОбработчикОжидания` names an exported procedure of the current module
+        // (a form/object module) OR — in the global context — of a global common module.
+        // The current module wins; otherwise resolve across the global common modules and
+        // accept only a UNIQUE match, since the name carries no module qualifier.
+        let target = find_local(&reg.handler_name).or_else(|| {
+            unique_global_handler(global_module_names, &find_qualified, &reg.handler_name)
+        });
+        if let Some(m) = target {
             out.push(ResolvedCallEdge {
                 caller: reg.caller,
                 target: ResolvedTarget::Method(m),
@@ -269,6 +299,27 @@ pub(crate) fn resolve_callback_edges(
     }
 
     out
+}
+
+/// Resolve an unqualified idle-handler name across the configuration's global common
+/// modules, returning the method only when EXACTLY ONE global module exports it. The name
+/// has no module qualifier, so an ambiguous match (two distinct exporting modules) is left
+/// unresolved rather than guessed — consistent with the "don't invent edges" rule.
+fn unique_global_handler(
+    global_module_names: &[crate::name::Name],
+    find_qualified: &impl Fn(&crate::name::Name, &crate::name::Name) -> QualifiedLookup,
+    handler: &crate::name::Name,
+) -> Option<crate::MethodId> {
+    let mut found: Option<crate::MethodId> = None;
+    for module_name in global_module_names {
+        if let QualifiedLookup::Resolved(m) = find_qualified(module_name, handler) {
+            match found {
+                Some(prev) if prev != m => return None,
+                _ => found = Some(m),
+            }
+        }
+    }
+    found
 }
 
 /// Classify a platform manager method into a metadata-object edge kind. Creation
@@ -803,4 +854,60 @@ pub fn file_dependencies_query<'db>(
     deps.dedup();
 
     Arc::new(deps)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{unique_global_handler, QualifiedLookup};
+    use crate::name::Name;
+    use crate::{MethodId, ModuleId};
+    use vfs::FileId;
+
+    /// The unqualified idle-handler name has no module, so a name exported by two distinct
+    /// global common modules is ambiguous and must NOT be guessed; a single exporter resolves.
+    #[test]
+    fn unique_global_handler_resolves_only_an_unambiguous_match() {
+        let names = [Name::new("МодульА"), Name::new("МодульБ")];
+        let m_a = MethodId { module: ModuleId::new(FileId(1)), local_id: 0 };
+        let m_b = MethodId { module: ModuleId::new(FileId(2)), local_id: 0 };
+
+        let both = |module: &Name, _h: &Name| {
+            if module.as_str() == "МодульА" {
+                QualifiedLookup::Resolved(m_a)
+            } else {
+                QualifiedLookup::Resolved(m_b)
+            }
+        };
+        assert_eq!(
+            unique_global_handler(&names, &both, &Name::new("Обработчик")),
+            None,
+            "two distinct global exporters → ambiguous → no edge"
+        );
+
+        let one = |module: &Name, _h: &Name| {
+            if module.as_str() == "МодульА" {
+                QualifiedLookup::Resolved(m_a)
+            } else {
+                QualifiedLookup::Absent
+            }
+        };
+        assert_eq!(
+            unique_global_handler(&names, &one, &Name::new("Обработчик")),
+            Some(m_a),
+            "a single global exporter resolves"
+        );
+
+        // Non-exported (visibility-blocked) candidates are not matches.
+        let blocked = |_m: &Name, _h: &Name| QualifiedLookup::VisibilityBlocked;
+        assert_eq!(unique_global_handler(&names, &blocked, &Name::new("Обработчик")), None);
+
+        // The SAME method seen via two module names (e.g. an extension overlay listing the
+        // module twice) is not ambiguous — dedup by MethodId keeps it resolved.
+        let same = |_m: &Name, _h: &Name| QualifiedLookup::Resolved(m_a);
+        assert_eq!(
+            unique_global_handler(&names, &same, &Name::new("Обработчик")),
+            Some(m_a),
+            "the same method via two names is one method, not an ambiguous pair"
+        );
+    }
 }

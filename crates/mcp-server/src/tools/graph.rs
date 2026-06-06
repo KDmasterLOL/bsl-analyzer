@@ -41,7 +41,7 @@ pub fn direction_from(s: Option<&str>) -> Result<Direction, String> {
 }
 
 /// The agent-facing edge-kind labels accepted by the `edge_kinds` neighbour filter.
-const EDGE_KINDS: [&str; 9] = [
+const EDGE_KINDS: [&str; 12] = [
     "call",
     "manager_creates",
     "manager_access",
@@ -51,6 +51,9 @@ const EDGE_KINDS: [&str; 9] = [
     "notify_ref",
     "idle_handler",
     "event_subscription",
+    "register_movement",
+    "subsystem_membership",
+    "role_reference",
 ];
 
 /// Validate an `edge_kinds` filter: every entry must be a known edge-kind label, so a
@@ -231,19 +234,20 @@ pub fn loading(detail: Option<&str>) -> CallToolResult {
 /// independent of the on-disk SQLite cache layout in [`crate::graph_db`]).
 fn schema_json() -> Value {
     json!({
-        "schema_version": "17",
+        "schema_version": "22",
         "actions": ["overview", "schema", "status", "node", "source", "neighbors", "callers", "callees", "resolve"],
-        "status": "since version 15 `status` returns the graph lifecycle ({state: disabled|loading|ready|failed, and when ready: files, revision, stale, reload}) and kicks the lazy build — poll it instead of reading a flat `loading` envelope from a data action (mirrors `diagnostics status`).",
+        "status": "`status` returns the graph lifecycle ({state: disabled|loading|ready|failed, and when ready: files, revision, stale, reload}) and kicks the lazy build — poll it instead of reading a flat `loading` envelope from a data action (mirrors `diagnostics status`).",
         "node_kinds": ["method", "module", "mdo", "attribute", "tabular_section", "form", "form_item", "form_attribute"],
-        "notes": "since version 7 `node(module/<scope>)` resolves for any code module and returns a `methods` array ({id, name, is_export}) of the module's members; module membership is served on demand and is not a graph edge, so `neighbors(module/…)` stays empty",
-        "resolve": "since version 13 `resolve(query)` returns candidate durable ids ({id, kind, match}) for an imprecise query — wrong casing, a bare method/object name, or a partial id — so a `not_found` from `node`/`neighbors` is recoverable without guessing. `match` is exact|case_insensitive|name|substring (strongest first); the list is capped (default 20). It is symbol/id-oriented, NOT a natural-language search: a free-text phrase (e.g. several object/form/method words) returns no candidates — use `search_code` for semantic lookup, then pass the emitted `graph_id` here.",
-        "edge_kinds": ["call", "manager_creates", "manager_access", "query_ref", "contains", "data_binding", "notify_ref", "idle_handler", "event_subscription"],
-        "edge_kinds_note": "since version 16 string-dispatched callbacks are edges: `notify_ref` (Новый ОписаниеОповещения) and `idle_handler` (ПодключитьОбработчикОжидания) link a method to the handler named by a string literal; since version 17 `event_subscription` links a `ПодпискаНаСобытие` metadata node to its exported handler method. All three carry `string_resolved` provenance and are kept separate from `call`, so `edge_kinds=[call]` stays a pure 'who really calls whom'. Resolution is conservative: only ЭтотОбъект/ЭтаФорма handlers and explicit common-module handlers resolve (idle handlers resolve in the current module only — a handler placed in another allowed module is intentionally not modelled, not guessed); unresolved receivers/handlers produce no edge.",
+        "notes": "`node(module/<scope>)` resolves for any code module and returns a `methods` array ({id, name, is_export}) of the module's members; module membership is served on demand and is not a graph edge, so `neighbors(module/…)` stays empty",
+        "resolve": "`resolve(query)` returns candidate durable ids ({id, kind, match}) for an imprecise query — wrong casing, a bare method/object name, or a partial id — so a `not_found` from `node`/`neighbors` is recoverable without guessing. `match` is exact|case_insensitive|name|substring (strongest first); the list is capped (default 20). It is symbol/id-oriented, NOT a natural-language search: a free-text phrase (e.g. several object/form/method words) returns no candidates — use `search_code` for semantic lookup, then pass the emitted `graph_id` here.",
+        "edge_kinds": ["call", "manager_creates", "manager_access", "query_ref", "register_movement", "contains", "data_binding", "notify_ref", "idle_handler", "event_subscription", "subsystem_membership", "role_reference"],
+        "edge_kinds_note": "All edge kinds below are kept separate from `call`, so `edge_kinds=[call]` is a pure 'who really calls whom'. String-dispatched callbacks (provenance `string_resolved`, resolved conservatively — only ЭтотОбъект/ЭтаФорма and explicit common-module handlers resolve, an unresolved receiver/handler produces no edge): `notify_ref` (Новый ОписаниеОповещения) links the registering method/module body to BOTH the success handler (ИмяПроцедуры, Модуль) and the error handler (ИмяПроцедурыОбработкиОшибки, МодульОбработкиОшибки) named by string literals; `idle_handler` (ПодключитьОбработчикОжидания) links to the named handler, resolved in the current module or, failing that, in a UNIQUE global common module exporting it (an ambiguous name exported by several global modules is left unresolved, not guessed); `event_subscription` links a `ПодпискаНаСобытие` `mdo` node to its exported handler method. The reference is modelled regardless of the target's client/server dispatch (validity is a diagnostics concern; the reference matters for rename impact either way); a handler hosted in the application module (`МодульПриложения`) is a known unmodelled case. Metadata-reference edges: `register_movement` links a document method/module that writes or reads register records via `Движения.<Регистр>.<метод>()` (Добавить/Записать/Очистить/Загрузить/Выгрузить, bare or through a receiver) to the register's `mdo` node, type resolved from configuration (provenance `inferred`); `subsystem_membership` links a subsystem `mdo` node (type `Subsystem`) to each metadata object it contains and each child subsystem, from its `Content`/`ChildObjects` (provenance `resolved`); `role_reference` links a role `mdo` node (type `Role`) to each object it grants rights on (`resolved`) plus each object named only inside an RLS `restrictionByCondition` query (`inferred`, parsed from the restriction text), while top-level reusable `restrictionTemplate` conditions are not parsed (no host object to resolve against) — a known recall gap. `neighbors(mdo/<Type>/<Object>, dir=in, edge_kinds=[subsystem_membership])` / `[role_reference]` answer 'which subsystems contain' / 'which roles grant rights on or restrict' this object.",
         "provenance": ["resolved", "inferred", "visibility_blocked", "unresolved", "string_resolved"],
+        "provenance_note": "a fully-literal `Коллекция.Объект.Метод()` manager-module call whose exported method is found is `resolved` (the manager module is uniquely determined — as trustworthy as a qualified `Модуль.Метод()` call); `inferred` means the edge points at a metadata-object node (a platform manager method like СоздатьЭлемент, or a bare `Справочники.X` reference), not a code node.",
         "dispatch": ["client", "server"],
         "neighbors_params": {
             "provenance": "string[] — keep only edges with these provenances (empty = all)",
-            "edge_kinds": "string[] — keep only edges of these kinds (call|manager_creates|manager_access|query_ref|contains|data_binding|notify_ref|idle_handler|event_subscription); empty = all. Combine with provenance to isolate e.g. only query_ref metadata impact"
+            "edge_kinds": "string[] — keep only edges of these kinds (call|manager_creates|manager_access|query_ref|register_movement|contains|data_binding|notify_ref|idle_handler|event_subscription|subsystem_membership|role_reference); empty = all. Combine with provenance to isolate e.g. only query_ref+register_movement metadata impact on a register before delete/rename"
         },
         "neighbors_result": {
             "total": "usize — distinct neighbours discovered, before the max_nodes cap",
@@ -252,6 +256,7 @@ fn schema_json() -> Value {
             "dropped": "string[] — bounded sample of the dropped ids (highest-centrality first)",
             "by_kind": "{ kind: count } — edge-kind distribution of the full neighbourhood (before the cap), to size an edge_kinds filter",
             "by_provenance": "{ provenance: count } — same distribution by provenance",
+            "confidence": "resolved_only | contains_inferred — a one-glance trust summary of the shown edges reduced from by_provenance (resolved_only when every edge is resolved, else contains_inferred for any metadata-inferred/string-dispatched edge). Unresolvable calls are dropped from the graph, so this rates shown-edge trust, not recall. Omitted when the neighbourhood has no edges. Lets an impact analysis decide at a glance whether to trust the answer or supplement it with search_code",
             "connectors_dropped": "bool — true when the cap dropped a node that was an edge endpoint, so some edges are omitted (nodes may appear without their connecting edge)",
             "out_total": "usize — distinct callees discovered (present for dir=out/both); a small value under dir=both means few outbound calls even when inbound callers fill the cap — refine with dir=out",
             "in_total": "usize — distinct callers discovered (present for dir=in/both)"
@@ -373,17 +378,34 @@ mod tests {
     #[test]
     fn schema_advertises_the_current_contract_shape() {
         let schema = schema_json();
-        // The contract version must be bumped in lockstep with response-shape
-        // changes; `total` since this revision, `form`/`form_item` + `contains` since
-        // version 3, `form_attribute` since version 4, `tabular_section` since version
-        // 5, the `data_binding` edge since version 6, the source `skipped_budget_exhausted`
-        // marker + omit-empty body since version 14, the `status` action since version 15,
-        // the `notify_ref`/`idle_handler` callback edges since version 16, and the
-        // `event_subscription` edge since version 17.
-        assert_eq!(schema["schema_version"], "17");
+        // The contract version must be bumped in lockstep with any response-shape change
+        // (a new action, node/edge kind, or result field). The history of what each bump
+        // added lives in git, not here.
+        assert_eq!(schema["schema_version"], "22");
+        // The validating `edge_kinds` allowlist and the schema-advertised list must not drift:
+        // every advertised kind except the implicit `call` umbrella must be an accepted filter,
+        // and the allowlist must advertise no kind the schema omits.
+        let advertised: Vec<&str> =
+            schema["edge_kinds"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+        for kind in &advertised {
+            assert!(
+                EDGE_KINDS.contains(kind),
+                "schema advertises edge_kind '{kind}' the validator allowlist rejects"
+            );
+        }
+        for kind in EDGE_KINDS {
+            assert!(
+                advertised.contains(&kind),
+                "validator allowlist accepts edge_kind '{kind}' the schema does not advertise"
+            );
+        }
         assert!(
             schema["neighbors_result"]["total"].is_string(),
             "neighbours result must document the `total` field"
+        );
+        assert!(
+            schema["neighbors_result"]["confidence"].is_string(),
+            "neighbours result must document the `confidence` summary"
         );
         let actions = schema["actions"].as_array().unwrap();
         assert!(actions.iter().any(|a| a == "resolve"), "resolve action must be advertised");
@@ -431,7 +453,7 @@ mod tests {
     #[test]
     fn schema_and_loading_populate_structured_content() {
         assert_structured_mirrors_text(&schema());
-        assert_eq!(schema().structured_content.unwrap()["schema_version"], "17");
+        assert_eq!(schema().structured_content.unwrap()["schema_version"], "22");
 
         assert_structured_mirrors_text(&loading(Some("indexing")));
         let body = loading(Some("indexing")).structured_content.unwrap();

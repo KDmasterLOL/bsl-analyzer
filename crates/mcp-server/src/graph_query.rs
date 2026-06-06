@@ -113,6 +113,9 @@ fn edge_kind(kind: &str) -> &'static str {
         "notify_ref" => "notify_ref",
         "idle_handler" => "idle_handler",
         "event_subscription" => "event_subscription",
+        "register_movement" => "register_movement",
+        "subsystem_membership" => "subsystem_membership",
+        "role_reference" => "role_reference",
         _ => "call",
     }
 }
@@ -759,6 +762,7 @@ impl GraphDb {
             .collect();
 
         let returned = nodes.len();
+        let confidence = (!by_provenance.is_empty()).then(|| ide::confidence_label(&by_provenance));
         Ok(Ok(NeighborsResult {
             root: self.node_ref(&root, params.detail),
             nodes,
@@ -769,6 +773,7 @@ impl GraphDb {
             dropped,
             by_kind,
             by_provenance,
+            confidence,
             connectors_dropped,
             out_total,
             in_total,

@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::metadata_object::MdoType;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Role {
     #[serde(rename = "uuid")]
@@ -23,6 +25,26 @@ pub struct RoleData {
 
     #[serde(rename = "independentRightsOfChildObjects", default)]
     independent_rights_of_child_objects: bool,
+
+    /// Metadata objects the role grants rights on, parsed from `Rights.xml`. Lets the call
+    /// graph carry role → object reference edges for impact analysis ("which roles grant
+    /// rights on this object"). Excludes the `Configuration.*` session/admin pseudo-object,
+    /// which is not a real metadata object.
+    #[serde(rename = "objects", default)]
+    objects: Vec<RoleObjectRef>,
+}
+
+/// One metadata object referenced by a role's rights, plus the RLS restriction condition
+/// texts attached to that object's rights (if any). The condition text is row-level-security
+/// query text that may name further objects; it is resolved lazily by the graph build, not
+/// here.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RoleObjectRef {
+    pub mdo_type: MdoType,
+    pub name: String,
+    /// RLS `restrictionByCondition` condition texts on this object's rights.
+    #[serde(default)]
+    pub restrictions: Vec<String>,
 }
 
 impl Role {
@@ -46,6 +68,11 @@ impl Role {
     pub fn data(&self) -> &RoleData {
         &self.data
     }
+
+    /// Metadata objects this role grants rights on (excludes the `Configuration.*` pseudo-object).
+    pub fn objects(&self) -> &[RoleObjectRef] {
+        &self.data.objects
+    }
 }
 
 impl RoleData {
@@ -58,6 +85,7 @@ impl RoleData {
             set_for_new_objects,
             set_for_attributes_by_default,
             independent_rights_of_child_objects,
+            objects: Vec::new(),
         }
     }
 
@@ -71,6 +99,15 @@ impl RoleData {
 
     pub fn independent_rights_of_child_objects(&self) -> bool {
         self.independent_rights_of_child_objects
+    }
+
+    pub fn objects(&self) -> &[RoleObjectRef] {
+        &self.objects
+    }
+
+    pub fn with_objects(mut self, objects: Vec<RoleObjectRef>) -> Self {
+        self.objects = objects;
+        self
     }
 }
 
