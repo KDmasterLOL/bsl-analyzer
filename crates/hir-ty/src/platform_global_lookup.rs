@@ -44,6 +44,42 @@ pub fn resolve_platform_global_property_type(db: &dyn TypeKernelDb, name: &Name)
     Some(lowering.lower_bare_name_id(db, &Name::new(declared.as_str())))
 }
 
+/// Resolve a bare identifier that names a platform **system enumeration**
+/// (`ВидДвиженияБухгалтерии`, `ВидСравненияКомпоновкиДанных`, …) to its platform
+/// object type, so member access such as `ВидДвиженияБухгалтерии.Дебет` resolves
+/// against the enum's members.
+///
+/// System enums are the platform types that may be referenced directly by name
+/// as a value: they have no constructor and no methods, and their members are
+/// enum values — modelled as properties that carry **no declared type** (a value
+/// like `Дебет` simply *is* the enum). Constructible value types
+/// (`ТаблицаЗначений`, `Массив`, …) carry a constructor and instance methods, and
+/// property-bearing objects (`ПолеНастройки`, `ПараметрыОбменаДанными`) have
+/// members with concrete types; both are excluded, since a bare type name is not
+/// a value for them.
+pub fn resolve_platform_system_enum_type(db: &dyn TypeKernelDb, name: &Name) -> Option<TypeId> {
+    let platform = bsl_platform::PlatformDataInner::instance();
+    let ty = platform.get_type(name.as_str())?;
+    let english = ty.english_name.as_str();
+
+    if !platform.get_constructors(english).is_empty() {
+        return None;
+    }
+    if !platform.get_type_methods(english).is_empty() {
+        return None;
+    }
+
+    let members = platform.get_type_properties(english);
+    if members.is_empty() {
+        return None;
+    }
+    if members.iter().any(|m| !m.property_types.is_empty()) {
+        return None;
+    }
+
+    Some(db.platform_object(ty.name.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -64,5 +100,55 @@ mod tests {
             &Name::new("ЗаведомоНеСуществуетГлобалПлатформы"),
         );
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn system_enum_resolves_to_platform_object() {
+        let db = bsl_types::testing::InMemoryDb::default();
+        let id = resolve_platform_system_enum_type(&db, &Name::new("ВидДвиженияБухгалтерии"))
+            .expect("system enum must resolve to its platform object");
+        assert_eq!(id, db.platform_object("ВидДвиженияБухгалтерии".to_string()));
+    }
+
+    #[test]
+    fn constructible_value_type_is_not_a_bare_enum_value() {
+        let db = bsl_types::testing::InMemoryDb::default();
+        // ТаблицаЗначений has a constructor and methods — not referenceable as a bare value.
+        assert!(resolve_platform_system_enum_type(&db, &Name::new("ТаблицаЗначений")).is_none());
+    }
+
+    #[test]
+    fn property_bearing_object_is_not_a_bare_enum_value() {
+        let db = bsl_types::testing::InMemoryDb::default();
+        // No ctor/methods, but its members carry concrete types — an object, not an enum.
+        assert!(resolve_platform_system_enum_type(&db, &Name::new("CustomField")).is_none());
+        assert!(
+            resolve_platform_system_enum_type(&db, &Name::new("DataExchangeParameters")).is_none()
+        );
+    }
+
+    #[test]
+    fn unknown_name_is_not_a_system_enum() {
+        let db = bsl_types::testing::InMemoryDb::default();
+        assert!(resolve_platform_system_enum_type(&db, &Name::new("ЗаведомоНеТип")).is_none());
+    }
+
+    #[test]
+    fn system_enum_member_resolves_end_to_end() {
+        let db = bsl_types::testing::InMemoryDb::default();
+        let receiver = resolve_platform_system_enum_type(&db, &Name::new("ВидДвиженияБухгалтерии"))
+            .expect("bare enum name must type as a platform object");
+
+        let member = crate::field_lookup::lookup_field(&db, &[], receiver, &Name::new("Дебет"));
+        assert!(
+            member.is_some(),
+            "`ВидДвиженияБухгалтерии.Дебет` must resolve as an enum member via platform properties"
+        );
+
+        assert!(
+            crate::field_lookup::lookup_field(&db, &[], receiver, &Name::new("НетТакогоЧлена"))
+                .is_none(),
+            "a non-existent enum member must not resolve"
+        );
     }
 }

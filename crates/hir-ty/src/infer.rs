@@ -949,6 +949,15 @@ impl<'db> InferenceContext<'db> {
             }
         }
 
+        if !user_shadows && !workspace_owns_common_module {
+            if let Some(id) =
+                crate::platform_global_lookup::resolve_platform_system_enum_type(self.db, name)
+            {
+                trace!("resolved {} as platform system enum → {:?}", name, id);
+                return id;
+            }
+        }
+
         match resolved {
             Some(Resolution::Method(_)) | Some(Resolution::Variable(_)) => self.db.unknown(),
             Some(Resolution::Builtin(_)) | Some(Resolution::Local(_)) | None => self.db.unknown(),
