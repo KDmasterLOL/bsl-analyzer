@@ -93,6 +93,9 @@ impl TypeRef {
                 TypeRef::Union(members)
             }
             AttributeType::Platform(pvt) => platform_value_type_to_ref(*pvt),
+            AttributeType::PlatformNamed(name) => {
+                TypeRef::Name(QualifiedName::from_segments([Name::new(name)]))
+            }
             AttributeType::Unknown => TypeRef::Unknown,
         }
     }

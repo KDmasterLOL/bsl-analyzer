@@ -227,12 +227,27 @@ fn parse_single_type(type_str: &str, qualifiers: &TypeQualifiers) -> Result<Attr
 
         _ => match parse_platform_value_type(type_str) {
             Some(pvt) => Ok(AttributeType::Platform(pvt)),
-            None => {
-                tracing::warn!(type_str = %type_str, "unknown type");
-                Ok(AttributeType::Unknown)
-            }
+            None => match resolve_platform_named(type_str) {
+                Some(resolved) => Ok(resolved),
+                None => {
+                    tracing::warn!(type_str = %type_str, "unknown type");
+                    Ok(AttributeType::Unknown)
+                }
+            },
         },
     }
+}
+
+/// Resolve a namespaced platform token (`<prefix>:<LocalName>`) against the
+/// platform catalogue by its local name. 1C emits the same logical type under
+/// version-namespaced prefixes (`d5p1:`/`d7p1:`/…), so matching whole tokens is
+/// fragile; the local name after the last `:` is the stable key, and the
+/// catalogue is indexed bilingually, so the English local name resolves to the
+/// canonical Russian name.
+fn resolve_platform_named(type_str: &str) -> Option<AttributeType> {
+    let (_prefix, local) = type_str.rsplit_once(':')?;
+    let ty = bsl_platform::PlatformDataInner::instance().get_type(local)?;
+    Some(AttributeType::PlatformNamed(ty.name.to_string()))
 }
 
 fn parse_platform_value_type(type_str: &str) -> Option<PlatformValueType> {
@@ -372,6 +387,38 @@ mod tests {
     }
 
     #[test]
+    fn namespaced_platform_tokens_resolve_via_catalogue() {
+        for (token, expected_ru) in [
+            ("d5p1:TextDocument", "ТекстовыйДокумент"),
+            ("pdfdoc:PDFDocument", "ДокументPDF"),
+            ("ent:AccountingRecordType", "ВидДвиженияБухгалтерии"),
+            ("d5p1:GeographicalSchema", "ГеографическаяСхема"),
+        ] {
+            assert_eq!(
+                parse_single_type(token, &qualifiers()).unwrap(),
+                AttributeType::PlatformNamed(expected_ru.to_string()),
+                "token {token}",
+            );
+        }
+    }
+
+    #[test]
+    fn platform_token_resolution_is_namespace_prefix_agnostic() {
+        // 1C emits the same logical type under version-namespaced prefixes;
+        // both must resolve to the same Russian type name.
+        let d5 = parse_single_type("d5p1:Chart", &qualifiers()).unwrap();
+        assert_eq!(d5, AttributeType::PlatformNamed("Диаграмма".to_string()));
+    }
+
+    #[test]
+    fn unknown_namespaced_token_stays_unknown() {
+        assert_eq!(
+            parse_single_type("zzz:DefinitelyNotAType", &qualifiers()).unwrap(),
+            AttributeType::Unknown,
+        );
+    }
+
+    #[test]
     fn record_manager_token_is_silently_unknown() {
         assert_eq!(
             parse_single_type("cfg:InformationRegisterRecordManager.Курсы", &qualifiers()).unwrap(),
@@ -391,11 +438,21 @@ mod tests {
     }
 
     #[test]
-    fn fill_checking_and_unrelated_tokens_stay_unknown() {
+    fn fill_checking_is_not_a_value_type_but_resolves_via_catalogue() {
+        // Not one of the hand-modelled kernel value types...
         assert_eq!(parse_platform_value_type("v8:FillChecking"), None);
-        assert_eq!(parse_platform_value_type("v8:Nonsense"), None);
+        // ...but it is a real platform type, so the catalogue fallback resolves it.
         assert_eq!(
             parse_single_type("v8:FillChecking", &qualifiers()).unwrap(),
+            AttributeType::PlatformNamed("ПроверкаЗаполнения".to_string())
+        );
+    }
+
+    #[test]
+    fn truly_unknown_token_stays_unknown() {
+        assert_eq!(parse_platform_value_type("v8:Nonsense"), None);
+        assert_eq!(
+            parse_single_type("v8:Nonsense", &qualifiers()).unwrap(),
             AttributeType::Unknown
         );
     }

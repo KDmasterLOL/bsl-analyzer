@@ -587,19 +587,37 @@ pub fn is_standard_attribute_name(name: &str) -> bool {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AttributeType {
-    String { length: Option<u32> },
-    Number { precision: u8, scale: u8 },
+    String {
+        length: Option<u32>,
+    },
+    Number {
+        precision: u8,
+        scale: u8,
+    },
     Boolean,
     Date,
     DateTime,
-    Ref { mdo_type: MdoType, name: String },
+    Ref {
+        mdo_type: MdoType,
+        name: String,
+    },
     AnyRef,
-    AnyObjectRef { mdo_type: MdoType },
+    AnyObjectRef {
+        mdo_type: MdoType,
+    },
     Uuid,
     ValueStorage,
-    DefinedType { name: String },
-    Composite { types: Vec<AttributeType> },
+    DefinedType {
+        name: String,
+    },
+    Composite {
+        types: Vec<AttributeType>,
+    },
     Platform(PlatformValueType),
+    /// A platform type identified by its canonical Russian name, resolved from
+    /// the platform catalogue by stripping the XML namespace prefix
+    /// (`v8ui:`, `mxl:`, `d5p1:`, …) and looking the local name up there.
+    PlatformNamed(String),
     Unknown,
 }
 
@@ -855,6 +873,7 @@ impl std::fmt::Display for AttributeType {
                 }
             }
             Self::Platform(pvt) => write!(f, "{}", pvt.russian_name()),
+            Self::PlatformNamed(name) => write!(f, "{}", name),
             Self::Unknown => write!(f, "Неизвестно"),
         }
     }
