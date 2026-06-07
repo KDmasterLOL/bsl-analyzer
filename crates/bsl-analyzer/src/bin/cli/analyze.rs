@@ -227,7 +227,11 @@ fn analyze_salsa(
     for (file_id, path) in &all_file_ids {
         let content = fs::read_to_string(path)?;
         db.set_file_source_root(*file_id, source_root_id);
-        db.set_file_text(*file_id, &content);
+        // Disk-backed: record only the content revision and drop the text. The
+        // text is re-read from disk on demand by `file_text_query` (LRU-evictable,
+        // verified against this revision), so the whole workspace's source is not
+        // held resident as salsa inputs for the entire run.
+        db.set_file_revision_from_disk(*file_id, base_db::content_revision(&content));
     }
 
     tracing::info!(
