@@ -25,6 +25,15 @@ impl DefinedType {
     pub fn underlying_type(&self) -> &AttributeType {
         &self.underlying_type
     }
+
+    /// Overlay an extension's refinement of this defined type onto the base. A
+    /// defined type holds a single underlying type, so — like the scalar fields in
+    /// [`MetadataObject::apply_extension_overlay`](crate::MetadataObject::apply_extension_overlay)
+    /// — the extension's underlying type wins. Keeps the whole-config merge and the
+    /// per-MDO path on one rule.
+    pub fn apply_extension_overlay(&mut self, overlay: &DefinedType) {
+        self.underlying_type = overlay.underlying_type.clone();
+    }
 }
 
 #[derive(Default)]

@@ -342,7 +342,15 @@ impl Configuration {
         }
 
         for ext_defined_type in &extension.defined_types {
-            if self.find_defined_type(ext_defined_type.name()).is_none() {
+            if let Some(idx) = self
+                .defined_types
+                .iter()
+                .position(|base| base.name().eq_ignore_ascii_case(ext_defined_type.name()))
+            {
+                // An extension can refine a borrowed defined type's composition, so
+                // take the extension's underlying type rather than ignore it.
+                self.defined_types[idx].apply_extension_overlay(ext_defined_type);
+            } else {
                 self.add_defined_type(ext_defined_type.clone());
             }
         }
@@ -691,6 +699,38 @@ mod tests {
         assert_eq!(dims, ["Изм1", "Изм2"], "base + extension measurements");
         assert_eq!(res, ["Рес1", "Рес2"], "base + extension resources");
         assert_eq!(attrs, ["Рекв1"], "extension attribute added to the borrowed register");
+    }
+
+    #[test]
+    fn merge_extension_overlay_refines_borrowed_defined_type() {
+        use crate::defined_type::DefinedType;
+        use uuid::Uuid;
+
+        let mut base = Configuration::new("Base");
+        base.add_defined_type(
+            DefinedType::builder()
+                .uuid(Uuid::new_v4())
+                .name("ОпределяемыйТип1")
+                .underlying_type(AttributeType::String { length: Some(10) })
+                .build(),
+        );
+
+        let refined = AttributeType::Ref {
+            mdo_type: MdoType::Catalog,
+            name: "Номенклатура".into(),
+        };
+        let mut extension = Configuration::new("Extension");
+        extension.add_defined_type(
+            DefinedType::builder()
+                .uuid(Uuid::new_v4())
+                .name("ОпределяемыйТип1")
+                .underlying_type(refined.clone())
+                .build(),
+        );
+
+        let merged = base.merged_with_extension(&extension);
+        let dt = merged.find_defined_type("ОпределяемыйТип1").expect("merged defined type");
+        assert_eq!(dt.underlying_type(), &refined, "extension refinement of the defined type wins");
     }
 
     #[test]
