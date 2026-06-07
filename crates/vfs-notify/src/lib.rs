@@ -79,6 +79,24 @@ enum Event {
     NotifyEvent(NotifyEvent),
 }
 
+/// What a single path from a filesystem event should produce, derived from the
+/// path's current on-disk state plus the watch configuration. A REMOVED path
+/// (no longer stat-able) is still classified by path so its deletion is
+/// delivered instead of being silently dropped.
+#[derive(Debug, PartialEq, Eq)]
+enum EventPathAction {
+    /// Not watched, or an irrelevant directory event — ignore.
+    Ignore,
+    /// A directory under a watched root appeared — start watching it.
+    WatchDir,
+    /// A watched content file that exists — (re)load its bytes.
+    LoadContent,
+    /// A watched watch-only file changed (exists or removed) — signal only.
+    WatchOnly,
+    /// A watched content file was removed — deliver as a deletion.
+    Delete,
+}
+
 impl NotifyActor {
     fn new(sender: loader::Sender, shutdown: Arc<AtomicBool>) -> NotifyActor {
         NotifyActor {
@@ -275,32 +293,17 @@ impl NotifyActor {
                                 else {
                                     continue;
                                 };
-                                let Ok(meta) = fs::metadata(&path) else {
-                                    continue;
-                                };
-                                if meta.file_type().is_dir()
-                                    && self
-                                        .watched_dir_entries
-                                        .iter()
-                                        .any(|dir| dir.contains_dir(&path))
-                                {
-                                    self.watch(path.as_ref());
-                                    continue;
-                                }
-                                if !meta.file_type().is_file() {
-                                    continue;
-                                }
-
-                                let mode = self.classify_watched_path(&path);
-                                match mode {
-                                    Some(loader::LoadMode::LoadContent) => {
+                                match self.classify_event_path(&path) {
+                                    EventPathAction::WatchDir => self.watch(path.as_ref()),
+                                    EventPathAction::LoadContent => {
                                         let contents = read(&path);
                                         changed_files.push((path, contents));
                                     }
-                                    Some(loader::LoadMode::WatchOnly) => {
-                                        watch_only_files.push(path);
-                                    }
-                                    None => continue,
+                                    EventPathAction::WatchOnly => watch_only_files.push(path),
+                                    // Deliver the removal as a deletion (`None`
+                                    // contents) so the consumer can tombstone it.
+                                    EventPathAction::Delete => changed_files.push((path, None)),
+                                    EventPathAction::Ignore => {}
                                 }
                             }
                             if !changed_files.is_empty() {
@@ -442,6 +445,50 @@ impl NotifyActor {
         }
         if !watch_only_buf.is_empty() && !aborted {
             send_watch_only(watch_only_buf);
+        }
+    }
+
+    /// Decide what a single changed path should produce, tolerating removals.
+    /// Existing paths are routed by their on-disk type; a path that no longer
+    /// exists (a removal) is classified by path alone — a watched content file
+    /// becomes a [`EventPathAction::Delete`] (so the consumer tombstones it)
+    /// rather than being dropped because `fs::metadata` failed.
+    ///
+    /// Known limitation: a *coalesced* directory removal (where a watch backend
+    /// reports only the directory path, not each child) classifies as `Ignore` —
+    /// the directory has no extension, so its descendants are not individually
+    /// tombstoned. On inotify (Linux) each child file under a recursive watch
+    /// emits its own removal event, which IS handled, so this only affects
+    /// backends that collapse a subtree delete into one directory event.
+    fn classify_event_path(&self, path: &AbsPathBuf) -> EventPathAction {
+        match fs::metadata(path) {
+            Ok(meta) => {
+                if meta.file_type().is_dir() {
+                    if self.watched_dir_entries.iter().any(|dir| dir.contains_dir(path)) {
+                        return EventPathAction::WatchDir;
+                    }
+                    return EventPathAction::Ignore;
+                }
+                if !meta.file_type().is_file() {
+                    return EventPathAction::Ignore;
+                }
+                match self.classify_watched_path(path) {
+                    Some(loader::LoadMode::LoadContent) => EventPathAction::LoadContent,
+                    Some(loader::LoadMode::WatchOnly) => EventPathAction::WatchOnly,
+                    None => EventPathAction::Ignore,
+                }
+            }
+            // Only an actual absence (`NotFound`) is a removal. A transient stat
+            // error (permissions, interrupted, a momentary race) must NOT tombstone
+            // an existing file, so anything else is ignored and left as-is.
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                match self.classify_watched_path(path) {
+                    Some(loader::LoadMode::LoadContent) => EventPathAction::Delete,
+                    Some(loader::LoadMode::WatchOnly) => EventPathAction::WatchOnly,
+                    None => EventPathAction::Ignore,
+                }
+            }
+            Err(_) => EventPathAction::Ignore,
         }
     }
 
@@ -819,6 +866,30 @@ mod tests {
         assert_eq!(actor.classify_watched_path(&bsl), Some(loader::LoadMode::LoadContent));
         assert_eq!(actor.classify_watched_path(&xml), Some(loader::LoadMode::WatchOnly));
         assert_eq!(actor.classify_watched_path(&other), None);
+    }
+
+    #[test]
+    fn classify_event_path_delivers_removals_and_loads_existing() {
+        let (_g, root) = fixture_mixed(0, 0, 0);
+        let dirs = dirs_for(&root, &["bsl"], &["xml"]);
+        let actor = actor_with_watched_dirs(vec![dirs]);
+
+        let join = |name: &str| {
+            AbsPathBuf::assert_utf8(AsRef::<std::path::Path>::as_ref(&root).join(name))
+        };
+
+        // A removed (no longer stat-able) watched content file must be delivered
+        // as a deletion, not dropped — this is the regression guard.
+        assert_eq!(actor.classify_event_path(&join("Gone.bsl")), EventPathAction::Delete);
+        // A removed watch-only file routes to metadata invalidation.
+        assert_eq!(actor.classify_event_path(&join("Gone.xml")), EventPathAction::WatchOnly);
+        // A removed unwatched file is ignored.
+        assert_eq!(actor.classify_event_path(&join("Gone.md")), EventPathAction::Ignore);
+
+        // An existing watched content file still loads its bytes.
+        let existing = join("Module.bsl");
+        std::fs::write(AsRef::<std::path::Path>::as_ref(&existing), b"x").unwrap();
+        assert_eq!(actor.classify_event_path(&existing), EventPathAction::LoadContent);
     }
 
     #[test]
