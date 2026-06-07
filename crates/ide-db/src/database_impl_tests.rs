@@ -9,6 +9,35 @@ use super::RootDatabaseImpl;
 use crate::RootDatabase;
 
 #[test]
+fn parse_mdo_query_parses_catalog_from_overlay() {
+    use crate::metadata::{parse_mdo_query, MdoFiles};
+    use bsl_metadata::MdoType;
+
+    let mut db = RootDatabaseImpl::new();
+    let file_id = FileId(0);
+
+    let mut file_set = FileSet::new();
+    file_set.insert(file_id, VfsPath::new("/Catalogs/Справочник1.xml"));
+    let source_root = SourceRoot::new_local(file_set);
+    db.set_source_root(SourceRootId(0), source_root);
+    db.set_file_source_root(file_id, SourceRootId(0));
+
+    let xml = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../bsl-metadata/fixtures/designer/Catalogs/Справочник1.xml"
+    ));
+    db.set_file_text(file_id, xml);
+
+    let files = MdoFiles::new(&db, MdoType::Catalog, file_id, None);
+    let mdo = parse_mdo_query(&db, files).expect("catalog parsed via per-MDO query");
+    assert_eq!(mdo.name, "Справочник1");
+
+    // Re-query without any change returns the memoised Arc.
+    let again = parse_mdo_query(&db, files).expect("catalog parsed again");
+    assert!(Arc::ptr_eq(&mdo, &again), "parse_mdo_query should memoise");
+}
+
+#[test]
 fn test_root_database_basic() {
     let mut db = RootDatabaseImpl::new();
     let file_id = FileId(0);

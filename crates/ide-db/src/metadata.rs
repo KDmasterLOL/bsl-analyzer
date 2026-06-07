@@ -79,6 +79,39 @@ pub fn load_configuration<'db>(
     Arc::new(config)
 }
 
+/// The composing files of a single metadata object: the main `<Name>.xml` and an
+/// optional `Ext/Predefined.xml`, plus the kind that selects the parser. Interned
+/// so [`parse_mdo_query`] keys on the file identities; the per-file content
+/// revisions drive invalidation, so editing one MDO's XML re-parses only it.
+#[salsa::interned(debug)]
+pub struct MdoFiles<'db> {
+    pub mdo_type: bsl_metadata::MdoType,
+    pub main: vfs::FileId,
+    pub predefined: Option<vfs::FileId>,
+}
+
+/// Parse one metadata object from its composing files, read through the versioned
+/// VFS (`file_text`). Memoised per MDO and backdated on an unchanged object, so a
+/// reload re-parses only the files that actually changed and only that object's
+/// consumers are invalidated.
+#[salsa::tracked(lru = 8192)]
+pub fn parse_mdo_query<'db>(
+    db: &'db dyn base_db::SourceDatabase,
+    files: MdoFiles<'db>,
+) -> Option<Arc<bsl_metadata::MetadataObject>> {
+    let _span = tracing::info_span!("parse_mdo").entered();
+
+    let main_text = db.file_text(files.main(db));
+    let predefined_text = files.predefined(db).map(|fid| db.file_text(fid));
+
+    bsl_metadata::parse_metadata_object_from_texts(
+        files.mdo_type(db),
+        &main_text,
+        predefined_text.as_deref(),
+    )
+    .map(Arc::new)
+}
+
 #[salsa::db]
 pub trait MetadataDb: salsa::Database {
     fn load_configuration<'db>(
