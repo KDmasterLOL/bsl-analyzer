@@ -507,13 +507,20 @@ impl GlobalState {
                     let Some(main) = enroll_metadata_file(
                         &mut vfs,
                         &d.main,
+                        true,
                         &mut metadata_file_set,
                         &mut revisions,
                     ) else {
                         continue;
                     };
                     let predefined = d.predefined.as_ref().and_then(|p| {
-                        enroll_metadata_file(&mut vfs, p, &mut metadata_file_set, &mut revisions)
+                        enroll_metadata_file(
+                            &mut vfs,
+                            p,
+                            true,
+                            &mut metadata_file_set,
+                            &mut revisions,
+                        )
                     });
                     entries.push(MdoEntry { kind: d.mdo_type, name: d.name, main, predefined });
                 }
@@ -541,6 +548,118 @@ impl GlobalState {
             file_count,
             elapsed_ms = start.elapsed().as_millis() as u64,
             "bootstrapped metadata substrate",
+        );
+    }
+
+    /// Incrementally refresh the metadata substrate for the config roots that own
+    /// any of `changed_paths` (a post-boot metadata WatchOnly batch: content edits,
+    /// adds, removes, renames). Re-discovers each affected root's structure
+    /// (stat-only, no content read), then:
+    /// - reads on disk **only** the changed or brand-new composing files, bumping
+    ///   their revision so `parse_mdo_query` re-parses just those MDOs; unchanged
+    ///   MDOs keep their revision and stay memoised;
+    /// - augments root(1) with any new composing files (removed files linger
+    ///   harmlessly — nothing in a listing references them);
+    /// - re-sets a root's structure listing **only** when its entries actually
+    ///   changed (add / remove / rename), so a pure content edit does not churn
+    ///   `config_index`.
+    ///
+    /// Vanished mains drop out of the re-discovered structure (and so out of the
+    /// listing), tombstoning them: `resolve_metadata_object` then returns `None`.
+    /// Runs after the boot bootstrap (root(1) already exists).
+    pub fn refresh_metadata_substrate(&mut self, changed_paths: &[PathBuf]) {
+        use base_db::{SourceDatabase, SourceRoot, METADATA_SOURCE_ROOT};
+        use ide_db::metadata::MdoEntry;
+
+        if changed_paths.is_empty() {
+            return;
+        }
+
+        let config_paths = self.analysis_host.raw_database().all_config_paths();
+        let mut affected: Vec<PathBuf> = Vec::new();
+        for (_, root) in &config_paths {
+            if !affected.iter().any(|r| r == root)
+                && changed_paths.iter().any(|p| p.starts_with(root))
+            {
+                affected.push(root.clone());
+            }
+        }
+        if affected.is_empty() {
+            return;
+        }
+
+        let changed_set: HashSet<&Path> = changed_paths.iter().map(|p| p.as_path()).collect();
+
+        let mut metadata_file_set = {
+            let db = self.analysis_host.raw_database();
+            db.source_root_input(METADATA_SOURCE_ROOT).root(db).file_set().clone()
+        };
+        let files_before = metadata_file_set.len();
+
+        let mut new_file_ids: Vec<FileId> = Vec::new();
+        let mut revisions: Vec<(FileId, u64)> = Vec::new();
+        let mut listings: Vec<(String, Vec<MdoEntry>)> = Vec::new();
+
+        {
+            let mut vfs = self.vfs.write();
+            for root in &affected {
+                let discovered = bsl_metadata::discover_metadata_structure(root);
+                let mut entries = Vec::with_capacity(discovered.len());
+                for d in discovered {
+                    let Some(main) = enroll_refresh(
+                        &mut vfs,
+                        &d.main,
+                        &changed_set,
+                        &mut metadata_file_set,
+                        &mut new_file_ids,
+                        &mut revisions,
+                    ) else {
+                        continue;
+                    };
+                    let predefined = d.predefined.as_ref().and_then(|p| {
+                        enroll_refresh(
+                            &mut vfs,
+                            p,
+                            &changed_set,
+                            &mut metadata_file_set,
+                            &mut new_file_ids,
+                            &mut revisions,
+                        )
+                    });
+                    entries.push(MdoEntry { kind: d.mdo_type, name: d.name, main, predefined });
+                }
+                listings.push((root.to_string_lossy().to_string(), entries));
+            }
+        }
+
+        let reread = revisions.len();
+        let added = new_file_ids.len();
+
+        let db = self.analysis_host.raw_database_mut();
+        if metadata_file_set.len() != files_before {
+            db.set_source_root(METADATA_SOURCE_ROOT, SourceRoot::new_local(metadata_file_set));
+        }
+        for fid in &new_file_ids {
+            db.set_file_source_root(*fid, METADATA_SOURCE_ROOT);
+        }
+        for (fid, revision) in &revisions {
+            db.set_file_revision_from_disk(*fid, *revision);
+        }
+        for (root, entries) in listings {
+            let structure_changed = match db.metadata_listing(&root) {
+                Some(input) => *input.entries(db) != entries,
+                None => true,
+            };
+            if structure_changed {
+                db.set_metadata_listing(&root, entries);
+            }
+        }
+
+        tracing::debug!(
+            roots = affected.len(),
+            reread,
+            added,
+            "refreshed metadata substrate incrementally",
         );
     }
 
@@ -624,22 +743,63 @@ impl GlobalState {
     }
 }
 
-/// Intern a metadata composing file's path to a stable [`FileId`], add it to the
-/// metadata file set, and record its on-disk content revision. Returns `None` when
-/// the file cannot be read (discovered then vanished), so the caller drops it from
-/// the MDO. `alloc_file_id` is idempotent: an already-watched path keeps its id.
+/// Intern a metadata composing file's path to a stable [`FileId`] and add it to
+/// the metadata file set. When `must_read`, also read the file and record its
+/// on-disk content revision (returning `None` if the file cannot be read —
+/// discovered then vanished — so the caller drops it from the MDO); when not, the
+/// file keeps whatever revision it already has (an unchanged file on an
+/// incremental refresh). `alloc_file_id` is idempotent: an already-watched path
+/// keeps its id.
 fn enroll_metadata_file(
     vfs: &mut vfs::Vfs,
     path: &Path,
+    must_read: bool,
     file_set: &mut vfs::file_set::FileSet,
     revisions: &mut Vec<(FileId, u64)>,
 ) -> Option<FileId> {
-    let text = base_db::read_disk_text(path).ok()?;
     let vfs_path = VfsPath::new(path.to_path_buf());
+    let revision = if must_read {
+        Some(base_db::content_revision(&base_db::read_disk_text(path).ok()?))
+    } else {
+        None
+    };
     let file_id = vfs.alloc_file_id(vfs_path.clone());
     file_set.insert(file_id, vfs_path);
-    revisions.push((file_id, base_db::content_revision(&text)));
+    if let Some(revision) = revision {
+        revisions.push((file_id, revision));
+    }
     Some(file_id)
+}
+
+/// Enroll a composing file during an incremental refresh: intern it, ensure it is
+/// in the metadata file set, and (re)read its revision only if it changed or is
+/// brand-new — an unchanged, already-enrolled file keeps its boot revision and is
+/// not read. A newly added file is recorded in `new_file_ids` so the caller maps
+/// its source root. Returns `None` only when a changed/new file cannot be read
+/// (vanished), so the caller drops that MDO.
+fn enroll_refresh(
+    vfs: &mut vfs::Vfs,
+    path: &Path,
+    changed: &HashSet<&Path>,
+    file_set: &mut vfs::file_set::FileSet,
+    new_file_ids: &mut Vec<FileId>,
+    revisions: &mut Vec<(FileId, u64)>,
+) -> Option<FileId> {
+    let vfs_path = VfsPath::new(path.to_path_buf());
+    let is_new = file_set.file_for_path(&vfs_path).is_none();
+
+    if changed.contains(path) || is_new {
+        let revision = base_db::content_revision(&base_db::read_disk_text(path).ok()?);
+        let file_id = vfs.alloc_file_id(vfs_path.clone());
+        file_set.insert(file_id, vfs_path);
+        if is_new {
+            new_file_ids.push(file_id);
+        }
+        revisions.push((file_id, revision));
+        Some(file_id)
+    } else {
+        file_set.file_for_path(&vfs_path).copied()
+    }
 }
 
 fn path_in_workspace(

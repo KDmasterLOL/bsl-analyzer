@@ -253,6 +253,16 @@ fn handle_loader_msg(state: &mut GlobalState, msg: vfs::loader::Message) -> Resu
             // Refresh open documents so their diagnostics reflect the new metadata.
             if state.vfs_done {
                 state.analysis_host.request_cancellation();
+                // Per-MDO substrate: re-discover the affected roots and re-read only
+                // the changed/new XML, so resolve_metadata_object reflects the edit at
+                // MDO granularity (and a disk-backed file_text never reads stale bytes).
+                let changed: Vec<std::path::PathBuf> = files
+                    .iter()
+                    .map(|p| AsRef::<std::path::Path>::as_ref(p).to_path_buf())
+                    .collect();
+                state.refresh_metadata_substrate(&changed);
+                // Coarse path: load_configuration is still the authoritative consumer
+                // until the per-MDO resolvers are migrated, so keep bumping its root.
                 state
                     .analysis_host
                     .raw_database_mut()

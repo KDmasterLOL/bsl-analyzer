@@ -495,6 +495,85 @@ mod vfs_race_tests {
     }
 
     #[test]
+    fn refresh_metadata_substrate_is_incremental_and_tracks_structure() {
+        use ide_db::metadata::resolve_metadata_object;
+
+        fn catalog_xml(name: &str, uuid: &str) -> String {
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Catalog uuid="{uuid}">
+        <Properties><Name>{name}</Name><CodeLength>9</CodeLength></Properties>
+    </Catalog>
+</MetaDataObject>"#
+            )
+        }
+
+        let cat = bsl_metadata::MdoType::Catalog;
+        let root = std::env::temp_dir().join(format!(
+            "bsl_refresh_meta_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let catalogs = root.join("Catalogs");
+        std::fs::create_dir_all(&catalogs).unwrap();
+        let write = |name: &str, uuid: &str| {
+            std::fs::write(catalogs.join(format!("{name}.xml")), catalog_xml(name, uuid)).unwrap()
+        };
+        write("Справочник1", "00000000-0000-0000-0000-000000000001");
+        write("Товары", "00000000-0000-0000-0000-000000000002");
+
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender);
+        state.init_empty_source_root();
+        state.analysis_host.raw_database_mut().set_all_config_paths(vec![(None, root.clone())]);
+        state.bootstrap_metadata_substrate();
+
+        let root_key = root.to_string_lossy().to_string();
+        let resolve = |state: &GlobalState, name: &str| {
+            let db = state.analysis_host.raw_database();
+            let listing = db.metadata_listing(&root_key).unwrap();
+            resolve_metadata_object(db, listing, cat, name.to_string())
+        };
+
+        let c1 = resolve(&state, "Справочник1").expect("Справочник1");
+        let tovary = resolve(&state, "Товары").expect("Товары");
+
+        // CONTENT edit to Товары: re-read only it. Товары re-parses; Справочник1
+        // stays memoised (no full re-bootstrap, no sibling churn).
+        write("Товары", "00000000-0000-0000-0000-0000000000ff");
+        state.refresh_metadata_substrate(&[catalogs.join("Товары.xml")]);
+        assert!(
+            Arc::ptr_eq(&c1, &resolve(&state, "Справочник1").unwrap()),
+            "a content edit to Товары must not re-resolve the sibling"
+        );
+        assert!(
+            !Arc::ptr_eq(&tovary, &resolve(&state, "Товары").unwrap()),
+            "Товары re-parses after its content changed"
+        );
+        let c1 = resolve(&state, "Справочник1").unwrap();
+
+        // STRUCTURE add: a brand-new catalog appears and resolves; the absent-key
+        // miss from before is invalidated through config_index.
+        assert!(resolve(&state, "Услуги").is_none(), "Услуги absent before the add");
+        write("Услуги", "00000000-0000-0000-0000-000000000003");
+        state.refresh_metadata_substrate(&[catalogs.join("Услуги.xml")]);
+        assert_eq!(resolve(&state, "Услуги").expect("Услуги after add").name, "Услуги");
+        assert!(
+            Arc::ptr_eq(&c1, &resolve(&state, "Справочник1").unwrap()),
+            "a structure add must not re-resolve an untouched sibling"
+        );
+
+        // STRUCTURE remove: deleting a catalog tombstones it (resolve -> None).
+        std::fs::remove_file(catalogs.join("Товары.xml")).unwrap();
+        state.refresh_metadata_substrate(&[catalogs.join("Товары.xml")]);
+        assert!(resolve(&state, "Товары").is_none(), "removed catalog resolves to None");
+        assert_eq!(resolve(&state, "Услуги").expect("Услуги still present").name, "Услуги");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn init_source_root_excludes_metadata_from_root0() {
         use base_db::{SourceDatabase, BSL_SOURCE_ROOT};
 
