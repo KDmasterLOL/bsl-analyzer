@@ -763,6 +763,60 @@ pub fn discover_defined_type_structure(root: &Path) -> Vec<DiscoveredDefinedType
     out
 }
 
+/// One discovered common module in a config root's *structure* listing: its name,
+/// its metadata XML path, and the path of its `Ext/Module.bsl` if present. Common
+/// modules carry only metadata (flags + name), so they get a dedicated discovery
+/// struct rather than riding [`DiscoveredMdo`]; `module_file` backs a reverse
+/// "which common module owns this `.bsl`" lookup that the metadata-XML identity
+/// alone cannot answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredCommonModule {
+    pub name: String,
+    pub main: PathBuf,
+    pub module_file: Option<PathBuf>,
+}
+
+/// Walk one config root and list its common modules by structure only (name + main
+/// XML path + `Ext/Module.bsl` path). Common modules use the `<name>/` dir + sibling
+/// `<name>.xml` layout (the module source lives at `<name>/Ext/Module.bsl`), parsed
+/// by [`parse_common_module_from_text`], so they get their own discovery + parse
+/// query while sharing the per-config-root structure listing.
+pub fn discover_common_module_structure(root: &Path) -> Vec<DiscoveredCommonModule> {
+    let dir = root.join("CommonModules");
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut out = Vec::new();
+    for entry in entries.filter_map(|e| e.ok()) {
+        let module_dir = entry.path();
+        if !module_dir.is_dir() {
+            continue;
+        }
+        let Some(name) = module_dir.file_name().and_then(|n| n.to_str()) else { continue };
+        let main = dir.join(format!("{name}.xml"));
+        if !main.exists() {
+            continue;
+        }
+        let module_bsl = module_dir.join("Ext/Module.bsl");
+        let module_file = module_bsl.exists().then_some(module_bsl);
+        out.push(DiscoveredCommonModule { name: name.to_string(), main, module_file });
+    }
+    // Stable order so a structure listing built from this compares equal across
+    // watch events on an unchanged filesystem (see `discover_metadata_structure`).
+    out.sort_by(|a, b| (a.name.to_lowercase(), &a.main).cmp(&(b.name.to_lowercase(), &b.main)));
+    out
+}
+
+/// Parse one common module from its main XML text. The common-module counterpart of
+/// [`parse_defined_type_from_text`]; the per-common-module Salsa query calls it after
+/// reading the text through the versioned VFS. Only metadata (flags + name) is read;
+/// the module body is resolved separately through the symbol tree.
+pub fn parse_common_module_from_text(main_xml: &str) -> Option<crate::common_module::CommonModule> {
+    xml_parser::parse_common_module_xml(main_xml).ok()
+}
+
 /// Parse one defined type from its main XML text. The defined-type counterpart of
 /// [`parse_register_from_text`]; the per-defined-type Salsa query calls it after
 /// reading the text through the versioned VFS.

@@ -339,18 +339,26 @@ impl RootDatabaseImpl {
         root: &str,
         entries: Vec<metadata::MdoEntry>,
         defined_types: Vec<metadata::DefinedTypeEntry>,
+        common_modules: Vec<metadata::CommonModuleEntry>,
     ) {
         use salsa::Setter;
         let key = metadata::canonicalize_configuration_path(root);
         let entries = Arc::new(entries);
         let defined_types = Arc::new(defined_types);
+        let common_modules = Arc::new(common_modules);
         match self.metadata_listings.get(&key).map(|e| *e.value()) {
             Some(input) => {
                 input.set_entries(self).to(entries);
                 input.set_defined_types(self).to(defined_types);
+                input.set_common_modules(self).to(common_modules);
             }
             None => {
-                let input = metadata::MetadataListingInput::new(self, entries, defined_types);
+                let input = metadata::MetadataListingInput::new(
+                    self,
+                    entries,
+                    defined_types,
+                    common_modules,
+                );
                 self.metadata_listings.insert(key, input);
             }
         }
@@ -511,6 +519,121 @@ impl RootDatabaseImpl {
         resolve_in(ext_listing)
             .or_else(|| resolve_in(main_listing))
             .map(|underlying| (*underlying).clone())
+    }
+
+    /// The common-module counterpart of [`resolve_metadata_object_for_file`]:
+    /// resolve a common module's metadata by name visible to `file_id` — the base
+    /// config plus the file's own extension, with the extension winning. A main-config
+    /// common module is visible everywhere; an extension's common module is visible
+    /// only within that extension (a *sibling* extension's modules are not), the same
+    /// scoping as metadata objects. Per-common-module when the substrate is populated,
+    /// falling back to a per-config scan otherwise — `merge_extension_overlay` does
+    /// not fold common modules into the merged configuration, so the fallback cannot
+    /// go through `merged_visible_configuration`.
+    pub fn resolve_common_module_for_file(
+        &self,
+        file_id: FileId,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::CommonModule>> {
+        let (main_listing, ext_listing, bootstrapped) = self.metadata_listings_for_file(file_id)?;
+
+        if bootstrapped {
+            let resolve_in = |listing: Option<metadata::MetadataListingInput>| {
+                listing.and_then(|l| metadata::resolve_common_module(self, l, name.to_string()))
+            };
+            return resolve_in(ext_listing).or_else(|| resolve_in(main_listing));
+        }
+
+        let file_path = vfs_helpers::get_file_path(self, file_id)?;
+        let paths = RootDatabaseImpl::all_config_paths(self);
+
+        let find_in = |root: &std::path::Path| -> Option<Arc<bsl_metadata::CommonModule>> {
+            let path_input = metadata::intern_configuration_path(
+                self,
+                &root.to_string_lossy(),
+                self.config_root_revision_for_path(root),
+            );
+            self.load_configuration(path_input).find_common_module(name).cloned().map(Arc::new)
+        };
+
+        if paths.is_empty() {
+            let config_root = vfs_helpers::find_configuration_root(self, &file_path)?;
+            return find_in(&config_root);
+        }
+
+        let main_path = paths.iter().find_map(|(label, path)| label.is_none().then_some(path));
+        let extension_path = paths
+            .iter()
+            .filter(|(label, path)| label.is_some() && file_path.starts_with(path))
+            .max_by_key(|(_, path)| path.as_os_str().len())
+            .map(|(_, path)| path);
+
+        extension_path.and_then(|p| find_in(p)).or_else(|| main_path.and_then(|p| find_in(p)))
+    }
+
+    /// Resolve the common module that owns the `Ext/Module.bsl` whose id is
+    /// `module_file_id` (typically the file currently being analysed), composing the
+    /// roots visible to it. Answers "is this `.bsl` a common module's source, and if
+    /// so which?" via the per-root reverse index when the substrate is populated,
+    /// falling back to a root-relative URI scan over the merged configuration's
+    /// common modules otherwise.
+    pub fn common_module_for_file_id(
+        &self,
+        module_file_id: FileId,
+    ) -> Option<Arc<bsl_metadata::CommonModule>> {
+        let (main_listing, ext_listing, bootstrapped) =
+            self.metadata_listings_for_file(module_file_id)?;
+
+        if bootstrapped {
+            let resolve_in = |listing: Option<metadata::MetadataListingInput>| {
+                listing
+                    .and_then(|l| metadata::resolve_common_module_by_file(self, l, module_file_id))
+            };
+            return resolve_in(ext_listing).or_else(|| resolve_in(main_listing));
+        }
+
+        use bsl_metadata::traits::Module;
+
+        let file_path = vfs_helpers::get_file_path(self, module_file_id)?;
+        let file_path_lower = file_path.to_string_lossy().to_lowercase();
+        let paths = RootDatabaseImpl::all_config_paths(self);
+
+        let load_at = |path: &std::path::Path| -> Arc<bsl_metadata::Configuration> {
+            let path_input = metadata::intern_configuration_path(
+                self,
+                &path.to_string_lossy(),
+                self.config_root_revision_for_path(path),
+            );
+            self.load_configuration(path_input)
+        };
+
+        let find_in = |root: &std::path::Path| -> Option<Arc<bsl_metadata::CommonModule>> {
+            let config = load_at(root);
+            config
+                .common_modules()
+                .iter()
+                .find(|m| {
+                    m.uri().is_some_and(|uri| {
+                        root.join(uri).to_string_lossy().to_lowercase() == file_path_lower
+                    })
+                })
+                .cloned()
+                .map(Arc::new)
+        };
+
+        if paths.is_empty() {
+            let config_root = vfs_helpers::find_configuration_root(self, &file_path)?;
+            return find_in(&config_root);
+        }
+
+        let main_path = paths.iter().find_map(|(name, path)| name.is_none().then_some(path));
+        let extension_path = paths
+            .iter()
+            .filter(|(name, path)| name.is_some() && file_path.starts_with(path))
+            .max_by_key(|(_, path)| path.as_os_str().len())
+            .map(|(_, path)| path);
+
+        main_path.and_then(|p| find_in(p)).or_else(|| extension_path.and_then(|p| find_in(p)))
     }
 
     fn features(&self) -> FeaturesInput {
@@ -779,6 +902,19 @@ impl hir::ConfigsDatabase for RootDatabaseImpl {
         RootDatabaseImpl::resolve_defined_type_for_file(self, file_id, name)
     }
 
+    fn resolve_common_module(
+        &self,
+        file_id: FileId,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::CommonModule>> {
+        RootDatabaseImpl::resolve_common_module_for_file(self, file_id, name)
+    }
+
+    fn has_config_root(&self, file_id: FileId) -> bool {
+        !RootDatabaseImpl::all_config_paths(self).is_empty()
+            || RootDatabase::get_configuration(self, file_id).is_some()
+    }
+
     fn recorders_for_register(
         &self,
         file_id: FileId,
@@ -955,6 +1091,13 @@ impl RootDatabase for RootDatabaseImpl {
 
     fn all_config_paths(&self) -> Vec<(Option<String>, std::path::PathBuf)> {
         RootDatabaseImpl::all_config_paths(self)
+    }
+
+    fn common_module_for_file_id(
+        &self,
+        module_file_id: FileId,
+    ) -> Option<Arc<bsl_metadata::CommonModule>> {
+        RootDatabaseImpl::common_module_for_file_id(self, module_file_id)
     }
 
     fn all_sdbl_in_file(

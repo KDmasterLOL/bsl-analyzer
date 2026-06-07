@@ -44,6 +44,24 @@ pub trait ConfigsDatabase: DefDatabase {
     /// [`bsl_metadata::resolve_defined_type_terminal`] in the type-lowering layer.
     fn resolve_defined_type(&self, file_id: FileId, name: &str) -> Option<AttributeType>;
 
+    /// Resolve the common module `name` visible to `file_id` at per-common-module
+    /// Salsa granularity: base + the file's own extension (which replaces the module
+    /// wholesale). Used for by-name visibility/flag checks; the module's body is
+    /// resolved separately through the symbol tree. Depending on this records a
+    /// dependency on just that common module.
+    fn resolve_common_module(
+        &self,
+        file_id: FileId,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::CommonModule>>;
+
+    /// Whether `file_id` belongs to a configured project (has at least one visible
+    /// config root). In the workspace path this reads only the config-paths input,
+    /// so callers can gate on config presence — distinguishing "no config, defer to
+    /// the module index" from "config present, name genuinely absent" — without
+    /// taking a dependency on the whole loaded configuration.
+    fn has_config_root(&self, file_id: FileId) -> bool;
+
     /// The documents recording into the register `(parent, register_name)` visible
     /// to `file_id` — a cross-MDO reverse relation aggregated across the base and
     /// the file's extension. Returns owned names (not a borrow) so a db-backed

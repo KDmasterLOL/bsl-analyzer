@@ -55,11 +55,6 @@ impl Resolver {
         }
     }
 
-    fn module_visible_in_configs(configs: &[VisibleConfig], module_name: &Name) -> bool {
-        let needle = module_name.as_str();
-        configs.iter().rev().any(|cfg| cfg.configuration.find_common_module(needle).is_some())
-    }
-
     fn mdo_visible_in_configs(
         configs: &[VisibleConfig],
         mdo_type: bsl_metadata::MdoType,
@@ -119,9 +114,8 @@ impl Resolver {
         let Some(module_id) = self.module_id() else { return false };
         let file_id = module_id.file_id;
 
-        let configurations = db.configurations(file_id);
-        if !configurations.is_empty()
-            && !Self::module_visible_in_configs(&configurations, module_name)
+        if db.has_config_root(file_id)
+            && db.resolve_common_module(file_id, module_name.as_str()).is_none()
         {
             return false;
         }
@@ -197,8 +191,7 @@ impl Resolver {
             return AssignmentResolution::ModuleVariable(var_id);
         }
         if let Some(module_id) = self.module_id() {
-            let configs = db.configurations(module_id.file_id);
-            if Self::module_visible_in_configs(&configs, name) {
+            if db.resolve_common_module(module_id.file_id, name.as_str()).is_some() {
                 return AssignmentResolution::CommonModule(name.clone());
             }
         }
@@ -291,9 +284,8 @@ impl Resolver {
 
         let file_id = module_id.file_id;
 
-        let configurations = db.configurations(file_id);
-        if !configurations.is_empty()
-            && !Self::module_visible_in_configs(&configurations, module_name)
+        if db.has_config_root(file_id)
+            && db.resolve_common_module(file_id, module_name.as_str()).is_none()
         {
             return Err(QualifiedMethodError::NotVisibleInConfigs);
         }
@@ -804,36 +796,6 @@ mod tests {
 
         let with_all = Resolver::with_builtins_and_workspace(module_id);
         assert!(with_all.has_builtins());
-    }
-
-    fn make_visible_config(ext_name: Option<&str>, module_names: &[&str]) -> VisibleConfig {
-        let mut configuration = bsl_metadata::Configuration::new("test");
-        for name in module_names {
-            let module = bsl_metadata::CommonModule::builder().name(*name).build();
-            configuration.add_common_module(module);
-        }
-        VisibleConfig {
-            name: ext_name.map(|s| s.to_string()),
-            configuration: std::sync::Arc::new(configuration),
-        }
-    }
-
-    #[test]
-    fn test_module_visible_in_configs_matches_extension_and_main() {
-        let main = make_visible_config(None, &["ОбщегоНазначения"]);
-        let ext = make_visible_config(Some("BMS_RU_UT"), &["ТестовыйМодуль"]);
-        let configs = vec![main, ext];
-
-        assert!(Resolver::module_visible_in_configs(&configs, &Name::new("ОбщегоНазначения")));
-        assert!(Resolver::module_visible_in_configs(&configs, &Name::new("ТестовыйМодуль")));
-        assert!(Resolver::module_visible_in_configs(&configs, &Name::new("общегоназначения")));
-        assert!(!Resolver::module_visible_in_configs(&configs, &Name::new("НетТакогоМодуля")));
-    }
-
-    #[test]
-    fn test_module_visible_empty_configs_returns_false() {
-        let empty: Vec<VisibleConfig> = Vec::new();
-        assert!(!Resolver::module_visible_in_configs(&empty, &Name::new("Anything")));
     }
 
     #[test]

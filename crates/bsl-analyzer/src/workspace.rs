@@ -10,6 +10,16 @@ use vfs::{loader, FileId, VfsPath};
 
 use crate::global_state::GlobalState;
 
+/// One config root's discovered structure listing as built during bootstrap /
+/// refresh: the root path plus its MDOs, defined types, and common modules, ready
+/// to hand to `RootDatabaseImpl::set_metadata_listing`.
+type RootStructureListing = (
+    String,
+    Vec<ide_db::metadata::MdoEntry>,
+    Vec<ide_db::metadata::DefinedTypeEntry>,
+    Vec<ide_db::metadata::CommonModuleEntry>,
+);
+
 /// What a [`GlobalState::process_changes`] batch did, so the caller can decide
 /// whether already-open documents need re-analysis and re-publishing.
 #[derive(Debug, Default, Clone, Copy)]
@@ -151,8 +161,16 @@ impl GlobalState {
         let mut config_file_changed = false;
         let mut bsl_source_changed = false;
         let mut changed_metadata_paths: Vec<std::path::PathBuf> = Vec::new();
+        // Common module body `.bsl` files that were added or removed (not merely
+        // edited): their per-MDO listing `module_file` entry must be rebuilt.
+        let mut changed_common_module_bodies: Vec<std::path::PathBuf> = Vec::new();
 
         for file in changed_files {
+            // Capture the change kind before `file.change` is consumed below; only an
+            // add or remove (not a content edit) can change a common module's
+            // `module_file` listing entry.
+            let change_is_structural =
+                matches!(file.change, vfs::Change::Create(..) | vfs::Change::Delete);
             let text = match file.change {
                 vfs::Change::Create(content, _) | vfs::Change::Modify(content, _) => Some(content),
                 vfs::Change::Delete => None,
@@ -175,6 +193,9 @@ impl GlobalState {
                 if project_model::is_metadata_path(path_path) {
                     tracing::info!(path = %path_path.display(), "metadata XML file changed");
                     changed_metadata_paths.push(path_path.to_path_buf());
+                }
+                if change_is_structural && project_model::is_common_module_body_path(path_path) {
+                    changed_common_module_bodies.push(path_path.to_path_buf());
                 }
                 project_model::is_bsl_source_path(path_path)
             };
@@ -258,6 +279,15 @@ impl GlobalState {
                     db.bump_config_for_path(path);
                 }
             }
+        }
+
+        // A common module body `.bsl` add/remove changes the per-MDO common-module
+        // listing (its `module_file` reverse-index entry), but the body is ordinary
+        // source — it never flows through the metadata-XML refresh path. Re-discover
+        // the owning roots so the reverse index reflects the new/removed body. (The
+        // initial sync is suppressed; the post-sync bootstrap rebuilds the listings.)
+        if !suppress_metadata_bump && !changed_common_module_bodies.is_empty() {
+            self.refresh_metadata_substrate(&changed_common_module_bodies);
         }
 
         tracing::info!(
@@ -485,7 +515,7 @@ impl GlobalState {
     /// watched path. Runs after `init_source_root` and re-runs on reload.
     pub fn bootstrap_metadata_substrate(&mut self) {
         use base_db::{SourceDatabase, SourceRoot, METADATA_SOURCE_ROOT};
-        use ide_db::metadata::{DefinedTypeEntry, MdoEntry};
+        use ide_db::metadata::{CommonModuleEntry, DefinedTypeEntry, MdoEntry};
 
         let start = Instant::now();
 
@@ -496,7 +526,7 @@ impl GlobalState {
 
         let mut metadata_file_set = vfs::file_set::FileSet::new();
         let mut revisions: Vec<(FileId, u64)> = Vec::new();
-        let mut listings: Vec<(String, Vec<MdoEntry>, Vec<DefinedTypeEntry>)> = Vec::new();
+        let mut listings: Vec<RootStructureListing> = Vec::new();
 
         {
             let mut vfs = self.vfs.write();
@@ -538,11 +568,39 @@ impl GlobalState {
                     };
                     defined_types.push(DefinedTypeEntry { name: d.name, main });
                 }
-                listings.push((root_path.to_string_lossy().to_string(), entries, defined_types));
+                let mut common_modules = Vec::new();
+                for d in bsl_metadata::discover_common_module_structure(root_path) {
+                    let Some(main) = enroll_metadata_file(
+                        &mut vfs,
+                        &d.main,
+                        true,
+                        &mut metadata_file_set,
+                        &mut revisions,
+                    ) else {
+                        continue;
+                    };
+                    // The module's `Ext/Module.bsl` is BSL source owned by root(0),
+                    // not a metadata file — look up the analyzer's existing FileId for
+                    // it (bootstrap runs after `init_source_root`, so it is already
+                    // interned) rather than enrolling a duplicate. `None` when the
+                    // path is absent or unloaded; the reverse lookup then misses,
+                    // which is correct.
+                    let module_file = d
+                        .module_file
+                        .as_ref()
+                        .and_then(|p| vfs.file_id(&vfs::VfsPath::new(p.to_path_buf())));
+                    common_modules.push(CommonModuleEntry { name: d.name, main, module_file });
+                }
+                listings.push((
+                    root_path.to_string_lossy().to_string(),
+                    entries,
+                    defined_types,
+                    common_modules,
+                ));
             }
         }
 
-        let mdo_count: usize = listings.iter().map(|(_, e, _)| e.len()).sum();
+        let mdo_count: usize = listings.iter().map(|(_, e, _, _)| e.len()).sum();
         let file_count = revisions.len();
 
         let db = self.analysis_host.raw_database_mut();
@@ -553,8 +611,8 @@ impl GlobalState {
         for (fid, revision) in &revisions {
             db.set_file_revision_from_disk(*fid, *revision);
         }
-        for (root, entries, defined_types) in listings {
-            db.set_metadata_listing(&root, entries, defined_types);
+        for (root, entries, defined_types, common_modules) in listings {
+            db.set_metadata_listing(&root, entries, defined_types, common_modules);
         }
 
         tracing::info!(
@@ -584,7 +642,7 @@ impl GlobalState {
     /// substrate input actually changed, so callers can gate a diagnostics refresh.
     pub fn refresh_metadata_substrate(&mut self, changed_paths: &[PathBuf]) -> bool {
         use base_db::{SourceDatabase, SourceRoot, METADATA_SOURCE_ROOT};
-        use ide_db::metadata::{DefinedTypeEntry, MdoEntry};
+        use ide_db::metadata::{CommonModuleEntry, DefinedTypeEntry, MdoEntry};
 
         if changed_paths.is_empty() {
             return false;
@@ -613,7 +671,7 @@ impl GlobalState {
 
         let mut new_file_ids: Vec<FileId> = Vec::new();
         let mut revisions: Vec<(FileId, u64)> = Vec::new();
-        let mut listings: Vec<(String, Vec<MdoEntry>, Vec<DefinedTypeEntry>)> = Vec::new();
+        let mut listings: Vec<RootStructureListing> = Vec::new();
 
         {
             let mut vfs = self.vfs.write();
@@ -658,7 +716,33 @@ impl GlobalState {
                     };
                     defined_types.push(DefinedTypeEntry { name: d.name, main });
                 }
-                listings.push((root.to_string_lossy().to_string(), entries, defined_types));
+                let mut common_modules = Vec::new();
+                for d in bsl_metadata::discover_common_module_structure(root) {
+                    let Some(main) = enroll_refresh(
+                        &mut vfs,
+                        &d.main,
+                        &changed_set,
+                        &mut metadata_file_set,
+                        &mut new_file_ids,
+                        &mut revisions,
+                    ) else {
+                        continue;
+                    };
+                    // The module's `Ext/Module.bsl` is BSL source owned by root(0),
+                    // not a metadata file — reuse the analyzer's existing FileId for
+                    // it rather than enrolling a duplicate (see `bootstrap_metadata_substrate`).
+                    let module_file = d
+                        .module_file
+                        .as_ref()
+                        .and_then(|p| vfs.file_id(&vfs::VfsPath::new(p.to_path_buf())));
+                    common_modules.push(CommonModuleEntry { name: d.name, main, module_file });
+                }
+                listings.push((
+                    root.to_string_lossy().to_string(),
+                    entries,
+                    defined_types,
+                    common_modules,
+                ));
             }
         }
 
@@ -678,15 +762,17 @@ impl GlobalState {
             db.set_file_revision_from_disk(*fid, *revision);
             changed = true;
         }
-        for (root, entries, defined_types) in listings {
+        for (root, entries, defined_types, common_modules) in listings {
             let structure_changed = match db.metadata_listing(&root) {
                 Some(input) => {
-                    *input.entries(db) != entries || *input.defined_types(db) != defined_types
+                    *input.entries(db) != entries
+                        || *input.defined_types(db) != defined_types
+                        || *input.common_modules(db) != common_modules
                 }
                 None => true,
             };
             if structure_changed {
-                db.set_metadata_listing(&root, entries, defined_types);
+                db.set_metadata_listing(&root, entries, defined_types, common_modules);
                 changed = true;
             }
         }

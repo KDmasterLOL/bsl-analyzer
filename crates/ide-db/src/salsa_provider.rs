@@ -83,6 +83,10 @@ impl AnalysisProvider for SalsaProvider<'_> {
             .collect()
     }
 
+    fn common_module_for_file(&self, file_id: FileId) -> Option<Arc<bsl_metadata::CommonModule>> {
+        self.db.common_module_for_file_id(file_id)
+    }
+
     fn workspace_symbols(&self, source_root_id: SourceRootId) -> Arc<hir::WorkspaceSymbols> {
         self.db.workspace_symbols(source_root_id)
     }

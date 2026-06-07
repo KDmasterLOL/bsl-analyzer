@@ -1,4 +1,4 @@
-use bsl_metadata::traits::{MdObject, Module};
+use bsl_metadata::traits::MdObject;
 use bsl_metadata::CommonModule;
 use hir::ModuleMetadata;
 
@@ -40,45 +40,10 @@ fn is_client_ordinary_app_if_need(module: &CommonModule, ordinary_app_support: b
     module.is_client_ordinary_application() || !ordinary_app_support
 }
 
-pub fn find_common_module_for_file(
-    ctx: &crate::DiagnosticsContext,
-    configuration: &bsl_metadata::Configuration,
-) -> Option<bsl_metadata::CommonModule> {
-    let file_path = ctx.file_path()?;
-
-    configuration
-        .common_modules()
-        .iter()
-        .find(|module| {
-            if let Some(module_uri) = module.uri() {
-                module_uri.to_lowercase() == file_path.to_lowercase()
-            } else {
-                false
-            }
-        })
-        .cloned()
-}
-
 pub fn find_common_module_for_file_anywhere(
     ctx: &crate::DiagnosticsContext,
 ) -> Option<bsl_metadata::CommonModule> {
-    let file_path = ctx.file_path()?;
-    let file_path_lower = file_path.to_lowercase();
-
-    for visible in ctx.visible_configurations() {
-        let module = visible.config.configuration.common_modules().iter().find(|m| {
-            let Some(uri) = m.uri() else { return false };
-            if visible.root.as_os_str().is_empty() {
-                uri.to_lowercase() == file_path_lower
-            } else {
-                visible.root.join(uri).to_string_lossy().to_lowercase() == file_path_lower
-            }
-        });
-        if let Some(module) = module {
-            return Some(module.clone());
-        }
-    }
-    None
+    ctx.common_module_for_file().map(|module| (*module).clone())
 }
 
 pub fn check_common_module_name(

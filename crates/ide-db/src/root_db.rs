@@ -19,6 +19,14 @@ pub trait RootDatabase:
 
     fn all_config_paths(&self) -> Vec<(Option<String>, std::path::PathBuf)>;
 
+    /// The common module that owns the `Ext/Module.bsl` whose id is `module_file_id`
+    /// (typically the file being analysed), or `None` if it is not a common module's
+    /// body. Per-common-module Salsa granularity when the substrate is populated.
+    fn common_module_for_file_id(
+        &self,
+        module_file_id: FileId,
+    ) -> Option<Arc<bsl_metadata::CommonModule>>;
+
     fn all_sdbl_in_file(
         &self,
         file_id: FileId,

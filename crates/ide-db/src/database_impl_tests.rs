@@ -84,6 +84,7 @@ fn resolve_metadata_object_isolates_content_and_structure() {
             predefined: None,
         }]),
         Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
     );
     assert_eq!(config_index(&db, listing).len(), 1);
 
@@ -178,6 +179,7 @@ fn resolve_defined_type_isolates_content_and_structure() {
         Arc::new(vec![DefinedTypeEntry {
             name: "ДенежнаяСумма".to_string(), main: f1
         }]),
+        Arc::new(Vec::new()),
     );
     assert_eq!(defined_type_index(&db, listing).lookup("денежнаясумма"), Some(f1));
 
@@ -201,6 +203,83 @@ fn resolve_defined_type_isolates_content_and_structure() {
     // A structure removal tombstones it.
     listing.set_defined_types(&mut db).to(Arc::new(Vec::new()));
     assert!(resolve_defined_type(&db, listing, "ДенежнаяСумма".to_string()).is_none());
+}
+
+#[test]
+fn resolve_common_module_by_name_and_by_body_file() {
+    use crate::metadata::{
+        common_module_index, resolve_common_module, resolve_common_module_by_file,
+        CommonModuleEntry, MetadataListingInput,
+    };
+    use bsl_metadata::traits::MdObject;
+    use salsa::Setter;
+
+    fn common_module_xml(name: &str, global: bool) -> String {
+        format!(
+            concat!(
+                "<MetaDataObject>",
+                "<CommonModule uuid=\"00000000-0000-0000-0000-000000000020\">",
+                "<Properties><Name>{}</Name><Global>{}</Global><Server>true</Server></Properties>",
+                "</CommonModule></MetaDataObject>"
+            ),
+            name, global
+        )
+    }
+
+    let mut db = RootDatabaseImpl::new();
+    let xml_file = FileId(0);
+    let bsl_file = FileId(1);
+
+    let mut file_set = FileSet::new();
+    file_set.insert(xml_file, VfsPath::new("/CommonModules/ОбщегоНазначения.xml"));
+    file_set.insert(bsl_file, VfsPath::new("/CommonModules/ОбщегоНазначения/Ext/Module.bsl"));
+    db.set_source_root(SourceRootId(1), SourceRoot::new_local(file_set));
+    db.set_file_source_root(xml_file, SourceRootId(1));
+    db.set_file_source_root(bsl_file, SourceRootId(1));
+    db.set_file_text(xml_file, &common_module_xml("ОбщегоНазначения", true));
+
+    let listing = MetadataListingInput::new(
+        &db,
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+        Arc::new(vec![CommonModuleEntry {
+            name: "ОбщегоНазначения".to_string(),
+            main: xml_file,
+            module_file: Some(bsl_file),
+        }]),
+    );
+
+    // Both the by-name lookup and the by-body reverse index derive from the listing.
+    assert_eq!(common_module_index(&db, listing).lookup("общегоназначения"), Some(xml_file));
+
+    let m = resolve_common_module(&db, listing, "ОбщегоНазначения".to_string())
+        .expect("module resolves by name");
+    assert_eq!(m.name(), "ОбщегоНазначения");
+    assert!(m.is_global());
+
+    // Case-insensitive; an absent name is None (the miss depends on the index).
+    assert!(resolve_common_module(&db, listing, "общегоназначения".to_string()).is_some());
+    assert!(resolve_common_module(&db, listing, "Нет".to_string()).is_none());
+
+    // Reverse lookup: the module owning its `Ext/Module.bsl`; a non-body file is None.
+    let by_file = resolve_common_module_by_file(&db, listing, bsl_file)
+        .expect("module resolves by its body file");
+    assert_eq!(by_file.name(), "ОбщегоНазначения");
+    assert!(resolve_common_module_by_file(&db, listing, FileId(99)).is_none());
+
+    // Re-resolving unchanged memoises.
+    let m_again = resolve_common_module(&db, listing, "ОбщегоНазначения".to_string()).unwrap();
+    assert!(Arc::ptr_eq(&m, &m_again), "unchanged resolution must memoise");
+
+    // A content edit re-parses the flags.
+    db.set_file_text(xml_file, &common_module_xml("ОбщегоНазначения", false));
+    let m_edited = resolve_common_module(&db, listing, "ОбщегоНазначения".to_string()).unwrap();
+    assert!(!m_edited.is_global(), "content edit must re-parse");
+
+    // A structure removal tombstones both lookups.
+    listing.set_common_modules(&mut db).to(Arc::new(Vec::new()));
+    assert!(resolve_common_module(&db, listing, "ОбщегоНазначения".to_string()).is_none());
+    assert!(resolve_common_module_by_file(&db, listing, bsl_file).is_none());
 }
 
 #[test]

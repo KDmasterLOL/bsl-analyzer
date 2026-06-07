@@ -134,7 +134,19 @@ fn common_module_assign_emits_for_cfe_only_module() {
         (None, designer_fixture_path()),
         (Some("РасширениеОбщегоМодуля".to_string()), extension_common_module_path()),
     ];
-    let (db, file_id) = build_db_with_configs(text, config_paths);
+    // Common modules are extension-private: an extension-only module is visible only
+    // within that extension, so the analyzed file must live inside it (a base-config
+    // file would correctly NOT see `РасширениеТолькоМодуль`).
+    let file_id = FileId::from_raw(1);
+    let mut db = RootDatabaseImpl::new();
+    let mut file_set = FileSet::default();
+    let caller_path =
+        extension_common_module_path().join("CommonModules/Вызывающий/Ext/Module.bsl");
+    file_set.insert(file_id, VfsPath::new(caller_path.to_string_lossy().to_string()));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(file_id, SourceRootId(0));
+    db.set_file_text(file_id, text);
+    db.set_all_config_paths(config_paths);
     let config = DiagnosticsConfig::all_enabled();
     let provider = SalsaProvider::new(&db, None);
     let ctx = DiagnosticsContext::new(&config, file_id, &provider);

@@ -32,6 +32,24 @@ pub fn is_metadata_path(path: &Path) -> bool {
     matches!(file_role(path), FileRole::MetadataWatched)
 }
 
+/// Whether `path` is a common module's body source — the
+/// `…/CommonModules/<Name>/Ext/Module.bsl` layout the designer export uses.
+///
+/// Such a file is ordinary BSL source (so it flows through the source-change path,
+/// not the metadata-XML one), yet creating or deleting it changes a common module's
+/// per-MDO structure listing (its `module_file` reverse-index entry). Callers use
+/// this to also refresh the metadata substrate on a common-module body add/remove.
+pub fn is_common_module_body_path(path: &Path) -> bool {
+    if path.file_name().and_then(|n| n.to_str()) != Some("Module.bsl") {
+        return false;
+    }
+    let ext_dir = path.parent();
+    let common_modules_dir = ext_dir.and_then(|p| p.parent()).and_then(|p| p.parent());
+    ext_dir.and_then(|p| p.file_name()).and_then(|n| n.to_str()) == Some("Ext")
+        && common_modules_dir.and_then(|p| p.file_name()).and_then(|n| n.to_str())
+            == Some("CommonModules")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -76,6 +94,24 @@ mod tests {
         assert_eq!(file_role(Path::new("/ws/M.Bsl")), FileRole::Source);
         assert_eq!(file_role(Path::new("/ws/Form.XML")), FileRole::MetadataWatched);
         assert_eq!(file_role(Path::new("/ws/Form.Xml")), FileRole::MetadataWatched);
+    }
+
+    #[test]
+    fn recognizes_common_module_body_layout() {
+        assert!(is_common_module_body_path(Path::new(
+            "/ws/cf/CommonModules/ОбщегоНазначения/Ext/Module.bsl"
+        )));
+        // Extension roots use the same layout.
+        assert!(is_common_module_body_path(Path::new(
+            "/ws/cfe/A/CommonModules/Расш/Ext/Module.bsl"
+        )));
+        // Not a common module body: object module, wrong filename, or wrong nesting.
+        assert!(!is_common_module_body_path(Path::new(
+            "/ws/cf/Catalogs/Товары/Ext/ManagerModule.bsl"
+        )));
+        assert!(!is_common_module_body_path(Path::new("/ws/cf/CommonModules/М/Ext/Form.bsl")));
+        assert!(!is_common_module_body_path(Path::new("/ws/cf/CommonModules/Module.bsl")));
+        assert!(!is_common_module_body_path(Path::new("/ws/cf/Reports/CommonModules.bsl")));
     }
 
     #[test]

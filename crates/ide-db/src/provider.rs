@@ -37,6 +37,32 @@ pub trait AnalysisProvider {
             .unwrap_or_default()
     }
 
+    /// The common module whose `Ext/Module.bsl` is `file_id` (i.e. the file is the
+    /// module's own body), if any — answering "is this file a common module, and
+    /// which?". The default scans the file's visible configs by root-relative URI;
+    /// the salsa-backed provider overrides it with a per-common-module reverse index.
+    fn common_module_for_file(&self, file_id: FileId) -> Option<Arc<bsl_metadata::CommonModule>> {
+        use bsl_metadata::traits::Module;
+
+        let file_path = self.file_path(file_id)?;
+        let file_path_lower = file_path.to_lowercase();
+        for visible in self.visible_configurations(file_id) {
+            let found = visible.config.configuration.common_modules().iter().find(|m| {
+                m.uri().is_some_and(|uri| {
+                    if visible.root.as_os_str().is_empty() {
+                        uri.to_lowercase() == file_path_lower
+                    } else {
+                        visible.root.join(uri).to_string_lossy().to_lowercase() == file_path_lower
+                    }
+                })
+            });
+            if let Some(m) = found {
+                return Some(Arc::new(m.clone()));
+            }
+        }
+        None
+    }
+
     fn workspace_symbols(&self, source_root_id: SourceRootId) -> Arc<hir::WorkspaceSymbols>;
 
     fn module_index(&self, source_root_id: SourceRootId) -> Arc<ModuleIndex>;

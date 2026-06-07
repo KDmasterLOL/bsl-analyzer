@@ -95,6 +95,13 @@ impl<'a> DiagnosticsContext<'a> {
         self.provider.file_path(self.file_id)
     }
 
+    /// The common module this file is the body of (its `Ext/Module.bsl`), if any.
+    /// Routes through the per-common-module reverse index when the substrate is
+    /// populated, so it depends on just that module rather than the whole config.
+    pub fn common_module_for_file(&self) -> Option<Arc<bsl_metadata::CommonModule>> {
+        self.provider.common_module_for_file(self.file_id)
+    }
+
     fn query<T>(&self, f: impl FnOnce(&dyn ide_db::AnalysisProvider) -> T) -> T {
         f(self.provider)
     }

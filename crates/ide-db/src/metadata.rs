@@ -134,18 +134,31 @@ pub struct DefinedTypeEntry {
     pub main: vfs::FileId,
 }
 
+/// One discovered common module in a config root's *structure* listing: its name,
+/// the [`vfs::FileId`] of its metadata XML, and the [`vfs::FileId`] of its
+/// `Ext/Module.bsl` (the module source) when present. The module-file id backs the
+/// reverse "which common module owns this `.bsl`" lookup ([`CommonModuleIndex`]'s
+/// `by_module_file`); it is `None` for protected/binary modules with no source.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct CommonModuleEntry {
+    pub name: String,
+    pub main: vfs::FileId,
+    pub module_file: Option<vfs::FileId>,
+}
+
 /// The per-config-root *structure* input: the MDOs and defined types that exist in
 /// one config root (base config or one extension). Set out-of-query by the
 /// bootstrap; re-set only when the directory structure changes. Keeping it per-root
 /// means an extension's MDOs never collide with the base config's in
 /// [`config_index`], and a structure change in one root does not invalidate
-/// another. `entries` (MDOs + registers) and `defined_types` are separate fields,
-/// so a defined-type structure change does not invalidate [`config_index`] and
-/// vice versa.
+/// another. `entries` (MDOs + registers), `defined_types`, and `common_modules` are
+/// separate fields, so a structure change to one family does not invalidate the
+/// indexes derived from the others.
 #[salsa::input(debug)]
 pub struct MetadataListingInput {
     pub entries: Arc<Vec<MdoEntry>>,
     pub defined_types: Arc<Vec<DefinedTypeEntry>>,
+    pub common_modules: Arc<Vec<CommonModuleEntry>>,
 }
 
 /// The composing-file identities for one MDO, as held in a [`ConfigIndex`].
@@ -326,6 +339,107 @@ pub fn resolve_defined_type(
     let main = index.lookup(&name)?;
     let file = DefinedTypeFile::new(db, main);
     parse_defined_type_query(db, file)
+}
+
+/// The main XML file of a single common module, interned so
+/// [`parse_common_module_query`] keys on the file identity; its content revision
+/// drives invalidation, so editing one common module re-parses only it.
+#[salsa::interned(debug)]
+pub struct CommonModuleFile<'db> {
+    pub main: vfs::FileId,
+}
+
+/// Parse one common module's metadata from its main XML, read through the versioned
+/// VFS. The common-module counterpart of [`parse_defined_type_query`]; only metadata
+/// (flags + name) is read — the module body is resolved through the symbol tree.
+/// Backdates on unchanged metadata.
+#[salsa::tracked(lru = 8192)]
+pub fn parse_common_module_query(
+    db: &dyn base_db::SourceDatabase,
+    file: CommonModuleFile<'_>,
+) -> Option<Arc<bsl_metadata::CommonModule>> {
+    let _span = tracing::info_span!("parse_common_module").entered();
+
+    let main_text = db.file_text(file.main(db));
+    bsl_metadata::parse_common_module_from_text(&main_text).map(Arc::new)
+}
+
+/// A config root's common-module lookup, derived from its [`MetadataListingInput`]'s
+/// `common_modules` field: `lowercased-name -> main XML` for the by-name resolution,
+/// and `module-file id -> name` for the reverse "which common module owns this
+/// `.bsl`" lookup. Tracked on that field alone, so a content edit leaves it memoised.
+#[derive(Default, PartialEq, Eq, Debug)]
+pub struct CommonModuleIndex {
+    by_name: std::collections::HashMap<String, vfs::FileId>,
+    by_module_file: std::collections::HashMap<vfs::FileId, String>,
+}
+
+impl CommonModuleIndex {
+    pub fn lookup(&self, name: &str) -> Option<vfs::FileId> {
+        self.by_name.get(&name.to_lowercase()).copied()
+    }
+
+    /// The lowercased name of the common module whose `Ext/Module.bsl` is
+    /// `module_file`, if any.
+    pub fn name_for_module_file(&self, module_file: vfs::FileId) -> Option<&str> {
+        self.by_module_file.get(&module_file).map(String::as_str)
+    }
+}
+
+/// Build a config root's common-module lookup from its structure listing.
+#[salsa::tracked]
+pub fn common_module_index(
+    db: &dyn base_db::SourceDatabase,
+    listing: MetadataListingInput,
+) -> Arc<CommonModuleIndex> {
+    let _span = tracing::info_span!("common_module_index").entered();
+
+    let entries = listing.common_modules(db);
+    let mut by_name = std::collections::HashMap::with_capacity(entries.len());
+    let mut by_module_file = std::collections::HashMap::new();
+    for entry in entries.iter() {
+        by_name.insert(entry.name.to_lowercase(), entry.main);
+        if let Some(module_file) = entry.module_file {
+            by_module_file.insert(module_file, entry.name.to_lowercase());
+        }
+    }
+    Arc::new(CommonModuleIndex { by_name, by_module_file })
+}
+
+/// Resolve a single common module's metadata by name within one config root, at
+/// per-common-module Salsa granularity. The common-module counterpart of
+/// [`resolve_defined_type`]; extension overlay across roots is composed by callers
+/// (an extension replaces the module wholesale).
+#[salsa::tracked]
+pub fn resolve_common_module(
+    db: &dyn base_db::SourceDatabase,
+    listing: MetadataListingInput,
+    name: String,
+) -> Option<Arc<bsl_metadata::CommonModule>> {
+    let _span = tracing::info_span!("resolve_common_module").entered();
+
+    let index = common_module_index(db, listing);
+    let main = index.lookup(&name)?;
+    let file = CommonModuleFile::new(db, main);
+    parse_common_module_query(db, file)
+}
+
+/// Resolve the common module whose `Ext/Module.bsl` is `module_file` within one
+/// config root. Answers "which common module owns this `.bsl`?" via the reverse
+/// index, then parses that module's metadata at per-common-module granularity.
+#[salsa::tracked]
+pub fn resolve_common_module_by_file(
+    db: &dyn base_db::SourceDatabase,
+    listing: MetadataListingInput,
+    module_file: vfs::FileId,
+) -> Option<Arc<bsl_metadata::CommonModule>> {
+    let _span = tracing::info_span!("resolve_common_module_by_file").entered();
+
+    let index = common_module_index(db, listing);
+    let name = index.name_for_module_file(module_file)?;
+    let main = index.lookup(name)?;
+    let file = CommonModuleFile::new(db, main);
+    parse_common_module_query(db, file)
 }
 
 #[salsa::db]

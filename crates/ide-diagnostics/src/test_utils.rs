@@ -797,7 +797,16 @@ pub fn check_with_cfe(source: &str, fixture: test_fixture::CfeFixture) -> Vec<Di
 
     let mut file_set = FileSet::default();
     let caller_file_id = FileId(0);
-    let caller_path = fixture.root().join("CommonModules/Caller/Ext/Module.bsl");
+    // Common modules are extension-private — a base-config file cannot see an
+    // extension's common modules (the same scoping as metadata objects). So a fixture
+    // that exercises an extension's module must place the analyzed caller inside that
+    // extension, mirroring real usage. Fall back to the base root when there are none.
+    let caller_root = fixture
+        .extensions()
+        .first()
+        .map(|ext| ext.root().to_path_buf())
+        .unwrap_or_else(|| fixture.root().to_path_buf());
+    let caller_path = caller_root.join("CommonModules/Caller/Ext/Module.bsl");
     file_set.insert(caller_file_id, VfsPath::new(caller_path.to_string_lossy().into_owned()));
 
     let mut module_files = Vec::new();

@@ -652,6 +652,150 @@ mod vfs_race_tests {
     }
 
     #[test]
+    fn bootstrapped_common_module_resolves_by_name_and_by_body_file() {
+        use base_db::{SourceDatabase, SourceRoot, BSL_SOURCE_ROOT};
+        use bsl_metadata::traits::MdObject;
+
+        let root = std::env::temp_dir().join(format!(
+            "bsl_common_module_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let cf = root.join("src/cf");
+        let cm_dir = cf.join("CommonModules");
+        std::fs::create_dir_all(cm_dir.join("МойМодуль/Ext")).unwrap();
+        std::fs::write(cf.join("Configuration.xml"), "<Configuration/>").unwrap();
+        std::fs::write(
+            cm_dir.join("МойМодуль.xml"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <CommonModule uuid="00000000-0000-0000-0000-000000000021">
+        <Properties><Name>МойМодуль</Name><Global>true</Global><Server>true</Server><Privileged>true</Privileged></Properties>
+    </CommonModule>
+</MetaDataObject>"#,
+        )
+        .unwrap();
+        let bsl_path = cm_dir.join("МойМодуль/Ext/Module.bsl");
+        std::fs::write(&bsl_path, "Функция Ф() Экспорт КонецФункции").unwrap();
+
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender);
+        state.init_empty_source_root();
+
+        // Intern the module body into the VFS BEFORE the bootstrap, mirroring the
+        // real boot order (`init_source_root` runs before
+        // `bootstrap_metadata_substrate`). Discovery then resolves the body's FileId
+        // through the same interner the analyzer uses — the path-normalization parity
+        // the by-body reverse index depends on.
+        let bsl_vfs_path = vfs::VfsPath::new(bsl_path.to_string_lossy().as_ref());
+        let bsl_file = state.vfs.write().alloc_file_id(bsl_vfs_path.clone());
+        {
+            let mut file_set = vfs::file_set::FileSet::new();
+            file_set.insert(bsl_file, bsl_vfs_path);
+            let db = state.analysis_host.raw_database_mut();
+            db.set_source_root(BSL_SOURCE_ROOT, SourceRoot::new_local(file_set));
+            db.set_file_source_root(bsl_file, BSL_SOURCE_ROOT);
+            db.set_file_text(bsl_file, "Функция Ф() Экспорт КонецФункции");
+        }
+
+        state.analysis_host.raw_database_mut().set_all_config_paths(vec![(None, cf.clone())]);
+        state.bootstrap_metadata_substrate();
+
+        let db = state.analysis_host.raw_database();
+
+        // By-name resolution through the per-common-module substrate, flags intact.
+        let by_name = db
+            .resolve_common_module_for_file(bsl_file, "МойМодуль")
+            .expect("common module resolves by name through the bootstrapped substrate");
+        assert!(by_name.is_global() && by_name.is_privileged(), "metadata flags survive parsing");
+        // Case-insensitive, like the whole-config lookup.
+        assert!(db.resolve_common_module_for_file(bsl_file, "моймодуль").is_some());
+
+        // By-body reverse index: the FileId the analyzer holds for Module.bsl maps
+        // back to its common module — proves discovery interned the same path/FileId.
+        let by_file = db
+            .common_module_for_file_id(bsl_file)
+            .expect("Module.bsl resolves to its common module via the reverse index");
+        assert_eq!(by_file.name(), "МойМодуль");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn bootstrapped_common_module_scopes_base_everywhere_extension_private() {
+        use base_db::{SourceDatabase, SourceRoot, BSL_SOURCE_ROOT};
+
+        // Common-module visibility (same scoping as metadata objects): a main-config
+        // common module is visible everywhere, but an extension's common module is
+        // visible only within that extension — a sibling extension's modules are not.
+        let root =
+            std::env::temp_dir().join(format!("bsl_cm_xext_{}_{}", std::process::id(), line!()));
+        let base = root.join("src/cf");
+        let ext_a = root.join("src/cfe/A");
+        let ext_b = root.join("src/cfe/B");
+        for dir in [&base, &ext_a, &ext_b] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("Configuration.xml"), "<Configuration/>").unwrap();
+        }
+        let common_module = |dir: &std::path::Path, name: &str, uuid: &str| {
+            std::fs::create_dir_all(dir.join(format!("CommonModules/{name}/Ext"))).unwrap();
+            std::fs::write(
+                dir.join(format!("CommonModules/{name}.xml")),
+                format!(
+                    r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <CommonModule uuid="{uuid}"><Properties><Name>{name}</Name><Server>true</Server></Properties></CommonModule>
+</MetaDataObject>"#
+                ),
+            )
+            .unwrap();
+            std::fs::write(
+                dir.join(format!("CommonModules/{name}/Ext/Module.bsl")),
+                "Процедура П() Экспорт КонецПроцедуры",
+            )
+            .unwrap();
+        };
+        common_module(&base, "ОбщийБаза", "00000000-0000-0000-0000-000000000ba1");
+        common_module(&ext_b, "ОбщийБ", "00000000-0000-0000-0000-0000000000b1");
+
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender);
+        state.init_empty_source_root();
+        state.analysis_host.raw_database_mut().set_all_config_paths(vec![
+            (None, base.clone()),
+            (Some("A".to_string()), ext_a.clone()),
+            (Some("B".to_string()), ext_b.clone()),
+        ]);
+        state.bootstrap_metadata_substrate();
+
+        // A .bsl file living in extension A (after bootstrap, so its FileId does not
+        // collide with the bootstrap-interned XML ids).
+        let a_bsl = ext_a.join("CommonModules/М/Ext/Module.bsl");
+        let a_vp = vfs::VfsPath::new(a_bsl.to_string_lossy().as_ref());
+        let a_file = state.vfs.write().alloc_file_id(a_vp.clone());
+        {
+            let db = state.analysis_host.raw_database_mut();
+            let mut fs = vfs::file_set::FileSet::new();
+            fs.insert(a_file, a_vp);
+            db.set_source_root(BSL_SOURCE_ROOT, SourceRoot::new_local(fs));
+            db.set_file_source_root(a_file, BSL_SOURCE_ROOT);
+            db.set_file_text(a_file, "Процедура Т() КонецПроцедуры");
+        }
+
+        let db = state.analysis_host.raw_database();
+        assert!(
+            db.resolve_common_module_for_file(a_file, "ОбщийБаза").is_some(),
+            "a main-config common module must be visible to a file in extension A"
+        );
+        assert!(
+            db.resolve_common_module_for_file(a_file, "ОбщийБ").is_none(),
+            "a sibling extension B's common module must NOT be visible to a file in extension A"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn resolve_metadata_object_for_file_scopes_base_and_extensions() {
         // Pins the 1C visibility rules for per-MDO resolution:
         //  - a file in the base config sees only the base (extensions invisible);
