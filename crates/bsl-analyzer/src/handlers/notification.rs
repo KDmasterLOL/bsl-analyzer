@@ -337,7 +337,8 @@ mod tests {
     use crossbeam_channel::{unbounded, Receiver};
     use lsp_server::Message;
     use lsp_types::{
-        TextDocumentContentChangeEvent, TextDocumentItem, VersionedTextDocumentIdentifier,
+        TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
+        VersionedTextDocumentIdentifier,
     };
 
     fn create_test_state() -> (GlobalState, Receiver<Message>) {
@@ -376,6 +377,61 @@ mod tests {
         assert!(!state.vfs_done);
         assert_eq!(state.diagnostics_generation, 1);
         assert!(state.diagnostics_tokens.contains_key(&params.text_document.uri));
+    }
+
+    #[test]
+    fn did_close_drops_overlay_and_re_keys_open_file_to_disk() {
+        use base_db::SourceDatabase;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("mod.bsl");
+        std::fs::write(&path, "Процедура НаДиске() КонецПроцедуры").expect("write");
+
+        let (mut state, _receiver) = create_test_state();
+        let uri = lsp_types::Url::from_file_path(&path).unwrap();
+
+        // Open with an unsaved edit (buffer differs from disk) → resident overlay.
+        handle_did_open(
+            &mut state,
+            DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: uri.clone(),
+                    language_id: "bsl".to_string(),
+                    version: 1,
+                    text: "Процедура Буфер() КонецПроцедуры".to_string(),
+                },
+            },
+        )
+        .unwrap();
+
+        let file_id = state.vfs_file_for_url(&uri).unwrap();
+        assert!(state.open_files.contains(&file_id), "open file is tracked in open_files");
+        {
+            let db = state.analysis_host.raw_database_mut();
+            assert!(db.try_file_text(file_id).is_some(), "open file keeps a resident overlay");
+            assert_eq!(&*db.file_text(file_id), "Процедура Буфер() КонецПроцедуры");
+        }
+
+        // Close: the editor buffer is gone, so the file re-keys to its on-disk
+        // content (the unsaved edit is discarded) and the overlay is dropped so
+        // the text becomes disk-backed / evictable.
+        handle_did_close(
+            &mut state,
+            DidCloseTextDocumentParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+            },
+        )
+        .unwrap();
+
+        assert!(!state.open_files.contains(&file_id), "closed file is removed from open_files");
+        {
+            let db = state.analysis_host.raw_database_mut();
+            assert!(
+                db.try_file_text(file_id).is_none(),
+                "closed file overlay is cleared (disk-backed)"
+            );
+            assert_eq!(&*db.file_text(file_id), "Процедура НаДиске() КонецПроцедуры");
+        }
     }
 
     #[test]
