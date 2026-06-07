@@ -5,6 +5,15 @@ use vfs::FileId;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SourceRootId(pub u32);
 
+/// The source root holding `.bsl` files. BSL iterators (workspace symbols,
+/// directory removal, graph build) scan this root exclusively.
+pub const BSL_SOURCE_ROOT: SourceRootId = SourceRootId(0);
+
+/// The source root holding watched metadata XML. Kept separate from
+/// [`BSL_SOURCE_ROOT`] so the BSL iterators never see metadata files, while each
+/// XML still has a root through which `file_text`'s disk read resolves its path.
+pub const METADATA_SOURCE_ROOT: SourceRootId = SourceRootId(1);
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SourceRoot {
     pub is_library: bool,

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use syntax::{Parse, SyntaxNode, TextRange};
@@ -7,6 +7,17 @@ use vfs::{FileId, VfsPath};
 
 use crate::input::{content_revision, FileIdInput, SourceRootInput};
 use crate::SourceDatabase;
+
+/// Read a file's text from disk verbatim — no BOM stripping, no normalization.
+///
+/// The single disk-read primitive shared by [`file_text_query`] and the
+/// out-of-Salsa metadata bootstrap that computes content revisions. Routing both
+/// through this function guarantees the bootstrap's `content_revision(read_disk_text(p))`
+/// hash matches what `file_text_query` recomputes on a later disk re-read, so a
+/// disk-backed file never spuriously fails [`assert_revision`].
+pub fn read_disk_text(path: &Path) -> std::io::Result<String> {
+    std::fs::read_to_string(path)
+}
 
 #[salsa::tracked(lru = 512)]
 pub fn parse_query<'db>(db: &'db dyn SourceDatabase, input: FileIdInput<'db>) -> Parse<SyntaxNode> {
@@ -37,7 +48,7 @@ pub fn file_text_query<'db>(db: &'db dyn SourceDatabase, input: FileIdInput<'db>
     }
 
     let path = disk_path(db, file_id);
-    let text = std::fs::read_to_string(&path).unwrap_or_else(|err| {
+    let text = read_disk_text(&path).unwrap_or_else(|err| {
         tracing::error!(?file_id, ?path, %err, "file_text: disk read failed");
         panic!("file_text: cannot read {path:?} for {file_id:?}: {err}")
     });

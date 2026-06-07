@@ -13,10 +13,13 @@ mod queries;
 pub use change::FileChange;
 pub use input::{
     content_revision, DiagnosticsConfigId, DiagnosticsConfigInput, FileIdInput, FileRevisionInput,
-    FileSourceRootInput, FileTextInput, SourceRoot, SourceRootId, SourceRootInput,
+    FileSourceRootInput, FileTextInput, SourceRoot, SourceRootId, SourceRootInput, BSL_SOURCE_ROOT,
+    METADATA_SOURCE_ROOT,
 };
 pub use locale::{Locale, UnknownLocale};
-pub use queries::{file_text_query, method_regions_query, parse_query, resolve_vfs_path_query};
+pub use queries::{
+    file_text_query, method_regions_query, parse_query, read_disk_text, resolve_vfs_path_query,
+};
 
 #[salsa::db]
 pub trait SourceDatabase: salsa::Database {
@@ -475,6 +478,22 @@ mod tests {
 
         let result = db.parse(file_id);
         assert!(!result.has_errors());
+    }
+
+    #[test]
+    fn read_disk_text_preserves_bom_verbatim() {
+        let dir = std::env::temp_dir().join(format!("bsl_rdt_bom_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bom.bsl");
+        // A leading BOM plus body; read_disk_text must not strip it, so the
+        // revision computed here matches what file_text_query recomputes on read.
+        let raw = "\u{FEFF}Процедура Т() КонецПроцедуры";
+        std::fs::write(&path, raw).unwrap();
+
+        let got = queries::read_disk_text(&path).unwrap();
+        assert_eq!(got, raw);
+        assert_eq!(input::content_revision(&got), input::content_revision(raw));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

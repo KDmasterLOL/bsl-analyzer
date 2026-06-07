@@ -408,20 +408,25 @@ impl GlobalState {
     }
 
     pub fn init_source_root(&mut self) {
-        use base_db::{SourceDatabase, SourceRoot, SourceRootId};
+        use base_db::{SourceDatabase, SourceRoot, BSL_SOURCE_ROOT, METADATA_SOURCE_ROOT};
 
         let start = Instant::now();
-        let source_root_id = SourceRootId(0);
 
         let allowed_roots = self.workspace_allowed_roots();
         let open_paths = self.open_doc_paths();
 
         let vfs = self.vfs.read();
-        let db = self.analysis_host.raw_database_mut();
-        let existing_source_root = db.source_root_input(source_root_id);
-        let mut file_set = existing_source_root.root(db).file_set().clone();
 
-        let mut vfs_files_added = 0;
+        // Rebuild both roots FRESH from the current VFS, partitioned by file role:
+        // `.bsl` sources into root(0), watched metadata XML into the dedicated
+        // metadata root(1). A fresh rebuild (no merge with the previous set) means
+        // a renamed/removed file's stale entry cannot linger across a reload. The
+        // partition keeps metadata XML out of the BSL iterators (which scan root(0))
+        // while still giving each XML a source root so `file_text`'s disk read can
+        // resolve its path.
+        let mut bsl_file_set = vfs::file_set::FileSet::new();
+        let mut metadata_file_set = vfs::file_set::FileSet::new();
+
         let mut vfs_files_skipped = 0;
 
         for file_id_raw in 0..vfs.num_file_ids() {
@@ -435,16 +440,20 @@ impl GlobalState {
                 continue;
             }
 
-            if file_set.path_for_file(&file_id).is_none() {
-                vfs_files_added += 1;
+            if project_model::is_bsl_source_path(path.as_path()) {
+                bsl_file_set.insert(file_id, path.clone());
+            } else if project_model::is_metadata_path(path.as_path()) {
+                metadata_file_set.insert(file_id, path.clone());
+            } else {
+                vfs_files_skipped += 1;
             }
-            file_set.insert(file_id, path.clone());
         }
 
-        let total_files = file_set.len();
+        let bsl_files = bsl_file_set.len();
+        let metadata_files = metadata_file_set.len();
         drop(vfs);
 
-        if total_files == 0 {
+        if bsl_files == 0 && metadata_files == 0 {
             tracing::warn!(
                 elapsed_ms = start.elapsed().as_millis() as u64,
                 "no files in VFS during init_source_root",
@@ -452,22 +461,27 @@ impl GlobalState {
             return;
         }
 
-        let source_root = SourceRoot::new_local(file_set);
-        db.set_source_root(source_root_id, source_root);
+        let db = self.analysis_host.raw_database_mut();
 
-        let source_root_input = db.source_root_input(source_root_id);
-        let indexed_files: Vec<_> = source_root_input.root(db).iter().collect();
+        db.set_source_root(BSL_SOURCE_ROOT, SourceRoot::new_local(bsl_file_set));
+        db.set_source_root(METADATA_SOURCE_ROOT, SourceRoot::new_local(metadata_file_set));
 
-        for file_id in indexed_files {
-            db.set_file_source_root(file_id, source_root_id);
+        let bsl_ids: Vec<_> = db.source_root_input(BSL_SOURCE_ROOT).root(db).iter().collect();
+        for file_id in bsl_ids {
+            db.set_file_source_root(file_id, BSL_SOURCE_ROOT);
+        }
+        let metadata_ids: Vec<_> =
+            db.source_root_input(METADATA_SOURCE_ROOT).root(db).iter().collect();
+        for file_id in metadata_ids {
+            db.set_file_source_root(file_id, METADATA_SOURCE_ROOT);
         }
 
         tracing::info!(
-            total_files,
-            vfs_files_added,
+            bsl_files,
+            metadata_files,
             vfs_files_skipped,
             elapsed_ms = start.elapsed().as_millis() as u64,
-            "updated SourceRoot with VFS files (merged)",
+            "rebuilt source roots from VFS (bsl + metadata, fresh)",
         );
     }
 

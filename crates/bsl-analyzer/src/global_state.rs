@@ -396,6 +396,47 @@ mod vfs_race_tests {
     }
 
     #[test]
+    fn init_source_root_partitions_bsl_and_metadata() {
+        use base_db::{SourceDatabase, BSL_SOURCE_ROOT, METADATA_SOURCE_ROOT};
+
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender);
+        state.init_empty_source_root();
+
+        let bsl_a = "/proj/CommonModules/М/Ext/Module.bsl";
+        let bsl_b = "/proj/Catalogs/Товары/Ext/ObjectModule.bsl";
+        let xml_a = "/proj/Catalogs/Товары.xml";
+        let xml_b = "/proj/Catalogs/Товары/Ext/Predefined.xml";
+        {
+            let mut vfs = state.vfs.write();
+            for p in [bsl_a, bsl_b, xml_a, xml_b] {
+                vfs.set_file_contents(vfs::VfsPath::new(p), Some(Arc::from("x")));
+            }
+        }
+        state.process_changes(false);
+        state.init_source_root();
+
+        let db = state.analysis_host.raw_database_mut();
+        let bsl_root = db.source_root_input(BSL_SOURCE_ROOT).root(db);
+        let meta_root = db.source_root_input(METADATA_SOURCE_ROOT).root(db);
+
+        let in_root = |root: &base_db::SourceRoot, p: &str| {
+            root.file_set().file_for_path(&vfs::VfsPath::new(p)).is_some()
+        };
+
+        assert!(in_root(&bsl_root, bsl_a) && in_root(&bsl_root, bsl_b), "bsl in root(0)");
+        assert!(!in_root(&bsl_root, xml_a) && !in_root(&bsl_root, xml_b), "xml NOT in root(0)");
+        assert!(in_root(&meta_root, xml_a) && in_root(&meta_root, xml_b), "xml in root(1)");
+        assert!(!in_root(&meta_root, bsl_a) && !in_root(&meta_root, bsl_b), "bsl NOT in root(1)");
+
+        // Each file's source-root mapping agrees with the partition, so a later
+        // `file_text` disk read resolves the path through the correct root.
+        let fid = |p: &str| meta_root.file_set().file_for_path(&vfs::VfsPath::new(p)).copied();
+        let xml_a_id = fid(xml_a).unwrap();
+        assert_eq!(db.file_source_root_input(xml_a_id).source_root_id(db), METADATA_SOURCE_ROOT);
+    }
+
+    #[test]
     fn remove_directories_tombstones_descendants_only() {
         use base_db::{SourceDatabase, SourceRootId};
 
