@@ -362,11 +362,14 @@ impl RootDatabaseImpl {
     /// does per object: the main object overlaid with the extension's via
     /// [`MetadataObject::apply_extension_overlay`], or whichever side alone exists.
     ///
-    /// Additive foundation for the consumer migration — it does not yet replace any
-    /// `get_configuration`/`merged_visible_configuration` call site, and
-    /// `load_configuration` stays authoritative. A pin test asserts parity with the
-    /// merged whole-config lookup. Returns `None` when the file has no registered
-    /// config root (no listing), matching "no configuration → no metadata".
+    /// Replaces a `merged_visible_configuration().find_metadata_object` lookup for
+    /// the migrated consumers. When the per-MDO substrate is populated (the LSP
+    /// bootstrap ran), it resolves through the per-MDO queries so the caller depends
+    /// on only that MDO — editing an unrelated MDO does not invalidate it. When the
+    /// substrate is absent (batch analysis, the graph build's per-batch DBs, tests —
+    /// none run the bootstrap), it falls back to the whole-config merged lookup, so
+    /// the result is identical to today and narrowing simply does not apply there.
+    /// Returns `None` when the file has no registered config root.
     pub fn resolve_metadata_object_for_file(
         &self,
         file_id: FileId,
@@ -376,11 +379,6 @@ impl RootDatabaseImpl {
         let file_path = vfs_helpers::get_file_path(self, file_id)?;
         let paths = RootDatabaseImpl::all_config_paths(self);
 
-        let resolve_in = |root: &std::path::Path| -> Option<Arc<bsl_metadata::MetadataObject>> {
-            let listing = self.metadata_listing(&root.to_string_lossy())?;
-            metadata::resolve_metadata_object(self, listing, mdo_type, name.to_string())
-        };
-
         let main_path = paths.iter().find_map(|(label, path)| label.is_none().then_some(path));
         let extension_path = paths
             .iter()
@@ -388,8 +386,33 @@ impl RootDatabaseImpl {
             .max_by_key(|(_, path)| path.as_os_str().len())
             .map(|(_, path)| path);
 
-        let main_mdo = main_path.and_then(|p| resolve_in(p));
-        let ext_mdo = extension_path.and_then(|p| resolve_in(p));
+        let listing_for = |root: &std::path::Path| self.metadata_listing(&root.to_string_lossy());
+
+        // Per-MDO path requires the structure listing for each root the resolution
+        // touches. The bootstrap sets every root's listing together, so a missing
+        // one for a root we need means "not bootstrapped" → fall back to the merged
+        // whole-config lookup (identical result, no narrowing).
+        let main_listing = main_path.map(|p| listing_for(p));
+        let ext_listing = extension_path.map(|p| listing_for(p));
+        let bootstrapped =
+            !matches!(main_listing, Some(None)) && !matches!(ext_listing, Some(None));
+
+        if !bootstrapped {
+            use hir::ConfigsDatabase;
+            return self
+                .merged_visible_configuration(file_id)?
+                .find_metadata_object(mdo_type, name)
+                .cloned()
+                .map(Arc::new);
+        }
+
+        let resolve_in = |listing: Option<Option<metadata::MetadataListingInput>>| {
+            listing.flatten().and_then(|l| {
+                metadata::resolve_metadata_object(self, l, mdo_type, name.to_string())
+            })
+        };
+        let main_mdo = resolve_in(main_listing);
+        let ext_mdo = resolve_in(ext_listing);
 
         match (main_mdo, ext_mdo) {
             (Some(main), Some(ext)) => {
@@ -641,6 +664,15 @@ impl hir::ConfigsDatabase for RootDatabaseImpl {
             .into_iter()
             .map(|(name, configuration)| hir::VisibleConfig { name, configuration })
             .collect()
+    }
+
+    fn resolve_metadata_object(
+        &self,
+        file_id: FileId,
+        mdo_type: bsl_metadata::MdoType,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::MetadataObject>> {
+        RootDatabaseImpl::resolve_metadata_object_for_file(self, file_id, mdo_type, name)
     }
 
     fn merged_visible_configuration(

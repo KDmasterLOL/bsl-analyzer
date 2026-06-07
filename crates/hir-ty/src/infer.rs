@@ -1795,23 +1795,15 @@ impl<'db> InferenceContext<'db> {
     }
 
     fn resolve_constant_value_type(&self, mdo_name: &Name) -> Option<TypeId> {
-        let configs = self.db.configurations(self.file_id);
-        if configs.is_empty() {
-            return None;
-        }
-        let needle = mdo_name.as_str();
-        for vc in configs.iter().rev() {
-            let Some(mdo) =
-                vc.configuration.find_metadata_object(bsl_metadata::MdoType::Constant, needle)
-            else {
-                continue;
-            };
-            return mdo.constant_type.as_ref().map(|attr| {
-                let type_ref = hir_def::TypeRef::from_attribute_type(attr);
-                TyLoweringContext::new().lower_type_ref_id(self.db, &type_ref)
-            });
-        }
-        None
+        let mdo = self.db.resolve_metadata_object(
+            self.file_id,
+            bsl_metadata::MdoType::Constant,
+            mdo_name.as_str(),
+        )?;
+        mdo.constant_type.as_ref().map(|attr| {
+            let type_ref = hir_def::TypeRef::from_attribute_type(attr);
+            TyLoweringContext::new().lower_type_ref_id(self.db, &type_ref)
+        })
     }
 
     fn refine_constant_method(

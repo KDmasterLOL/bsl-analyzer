@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use bsl_metadata::Configuration;
+use bsl_metadata::{Configuration, MdoType, MetadataObject};
 use vfs::FileId;
 
 use crate::DefDatabase;
@@ -12,6 +12,22 @@ pub trait ConfigsDatabase: DefDatabase {
     fn configurations(&self, file_id: FileId) -> Vec<VisibleConfig>;
 
     fn merged_visible_configuration(&self, file_id: FileId) -> Option<Arc<Configuration>>;
+
+    /// Resolve a single MetadataObject-family object (catalog, document, enum,
+    /// constant, …) visible to `file_id` at per-MDO Salsa granularity: the base
+    /// config composed with the file's own extension (extension priority), with no
+    /// other extension visible. Depending on this records a dependency on just that
+    /// MDO, so editing an unrelated MDO does not invalidate the caller — unlike
+    /// reading the whole [`configurations`]/[`merged_visible_configuration`].
+    ///
+    /// Registers are not covered yet (separate type/query); callers needing them
+    /// keep using [`configurations`] until a register resolver lands.
+    fn resolve_metadata_object(
+        &self,
+        file_id: FileId,
+        mdo_type: MdoType,
+        name: &str,
+    ) -> Option<Arc<MetadataObject>>;
 
     fn resolved_module_summary(
         &self,
