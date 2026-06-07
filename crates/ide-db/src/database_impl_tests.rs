@@ -38,6 +38,111 @@ fn parse_mdo_query_parses_catalog_from_overlay() {
 }
 
 #[test]
+fn resolve_metadata_object_isolates_content_and_structure() {
+    use crate::metadata::{config_index, resolve_metadata_object, MdoEntry, MetadataListingInput};
+    use bsl_metadata::MdoType;
+    use salsa::Setter;
+
+    fn catalog_xml(name: &str, uuid: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Catalog uuid="{uuid}">
+        <Properties><Name>{name}</Name><CodeLength>9</CodeLength></Properties>
+    </Catalog>
+</MetaDataObject>"#
+        )
+    }
+
+    let mut db = RootDatabaseImpl::new();
+    let f1 = FileId(0);
+    let f2 = FileId(1);
+
+    let mut file_set = FileSet::new();
+    file_set.insert(f1, VfsPath::new("/Catalogs/Справочник1.xml"));
+    file_set.insert(f2, VfsPath::new("/Catalogs/Товары.xml"));
+    db.set_source_root(SourceRootId(1), SourceRoot::new_local(file_set));
+    db.set_file_source_root(f1, SourceRootId(1));
+    db.set_file_source_root(f2, SourceRootId(1));
+
+    db.set_file_text(
+        f1,
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../bsl-metadata/fixtures/designer/Catalogs/Справочник1.xml"
+        )),
+    );
+    db.set_file_text(f2, &catalog_xml("Товары", "00000000-0000-0000-0000-000000000002"));
+
+    // Structure listing carries only Справочник1 at first.
+    let listing = MetadataListingInput::new(
+        &db,
+        Arc::new(vec![MdoEntry {
+            kind: MdoType::Catalog,
+            name: "Справочник1".to_string(),
+            main: f1,
+            predefined: None,
+        }]),
+    );
+    assert_eq!(config_index(&db, listing).len(), 1);
+
+    let c1 = resolve_metadata_object(&db, listing, MdoType::Catalog, "Справочник1".to_string())
+        .expect("Справочник1 resolves");
+    assert_eq!(c1.name, "Справочник1");
+
+    // Case-insensitive lookup.
+    assert!(
+        resolve_metadata_object(&db, listing, MdoType::Catalog, "справочник1".to_string())
+            .is_some(),
+        "lookup must be case-insensitive"
+    );
+
+    // An absent name resolves to None — and this miss depends on config_index,
+    // so adding the MDO later must invalidate it.
+    assert!(
+        resolve_metadata_object(&db, listing, MdoType::Catalog, "Товары".to_string()).is_none(),
+        "Товары is not in the listing yet"
+    );
+
+    // Re-resolving an unchanged MDO returns the memoised Arc.
+    let c1_again =
+        resolve_metadata_object(&db, listing, MdoType::Catalog, "Справочник1".to_string()).unwrap();
+    assert!(Arc::ptr_eq(&c1, &c1_again), "unchanged resolution must memoise");
+
+    // Structure change: add Товары to the listing.
+    listing.set_entries(&mut db).to(Arc::new(vec![
+        MdoEntry {
+            kind: MdoType::Catalog,
+            name: "Справочник1".to_string(),
+            main: f1,
+            predefined: None,
+        },
+        MdoEntry {
+            kind: MdoType::Catalog, name: "Товары".to_string(), main: f2, predefined: None
+        },
+    ]));
+
+    let tovary = resolve_metadata_object(&db, listing, MdoType::Catalog, "Товары".to_string())
+        .expect("Товары resolves after being added to the structure");
+    assert_eq!(tovary.name, "Товары");
+
+    // The sibling (Справочник1) is untouched by a content edit to Товары: a
+    // content edit re-parses only the edited MDO.
+    let c1_before_edit =
+        resolve_metadata_object(&db, listing, MdoType::Catalog, "Справочник1".to_string()).unwrap();
+    db.set_file_text(f2, &catalog_xml("Товары", "00000000-0000-0000-0000-000000000099"));
+    let tovary_after =
+        resolve_metadata_object(&db, listing, MdoType::Catalog, "Товары".to_string()).unwrap();
+    assert_eq!(tovary_after.name, "Товары");
+    let c1_after_edit =
+        resolve_metadata_object(&db, listing, MdoType::Catalog, "Справочник1".to_string()).unwrap();
+    assert!(
+        Arc::ptr_eq(&c1_before_edit, &c1_after_edit),
+        "a content edit to one MDO must not re-resolve a sibling"
+    );
+}
+
+#[test]
 fn test_root_database_basic() {
     let mut db = RootDatabaseImpl::new();
     let file_id = FileId(0);

@@ -112,6 +112,100 @@ pub fn parse_mdo_query<'db>(
     .map(Arc::new)
 }
 
+/// One discovered metadata object in a config root's *structure* listing: which
+/// kind, its name, and the [`vfs::FileId`]s of its composing files. Carries no
+/// parsed content — only identities — so the listing changes on add/remove/rename
+/// of an MDO, never on a content edit within one.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct MdoEntry {
+    pub kind: bsl_metadata::MdoType,
+    pub name: String,
+    pub main: vfs::FileId,
+    pub predefined: Option<vfs::FileId>,
+}
+
+/// The per-config-root *structure* input: the list of MDOs that exist in one
+/// config root (base config or one extension). Set out-of-query by the bootstrap;
+/// re-set only when the directory structure changes. Keeping it per-root means an
+/// extension's MDOs never collide with the base config's in [`config_index`], and
+/// a structure change in one root does not invalidate another.
+#[salsa::input(debug)]
+pub struct MetadataListingInput {
+    pub entries: Arc<Vec<MdoEntry>>,
+}
+
+/// The composing-file identities for one MDO, as held in a [`ConfigIndex`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct MdoFileIds {
+    pub main: vfs::FileId,
+    pub predefined: Option<vfs::FileId>,
+}
+
+/// A config root's `(kind, lowercased-name) -> files` lookup, derived from its
+/// [`MetadataListingInput`]. Built by [`config_index`]; depends only on the
+/// structure input, so a content edit leaves it memoised.
+#[derive(Default, PartialEq, Eq, Debug)]
+pub struct ConfigIndex {
+    by_name: std::collections::HashMap<(bsl_metadata::MdoType, String), MdoFileIds>,
+}
+
+impl ConfigIndex {
+    pub fn lookup(&self, kind: bsl_metadata::MdoType, name: &str) -> Option<MdoFileIds> {
+        self.by_name.get(&(kind, name.to_lowercase())).copied()
+    }
+
+    pub fn len(&self) -> usize {
+        self.by_name.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_name.is_empty()
+    }
+}
+
+/// Build a config root's name lookup from its structure listing. Tracked on the
+/// listing input alone, so it re-runs only on a structure change (add/remove/
+/// rename), not on a content edit — those flow through [`parse_mdo_query`].
+#[salsa::tracked]
+pub fn config_index(
+    db: &dyn base_db::SourceDatabase,
+    listing: MetadataListingInput,
+) -> Arc<ConfigIndex> {
+    let _span = tracing::info_span!("config_index").entered();
+
+    let entries = listing.entries(db);
+    let mut by_name = std::collections::HashMap::with_capacity(entries.len());
+    for entry in entries.iter() {
+        by_name.insert(
+            (entry.kind, entry.name.to_lowercase()),
+            MdoFileIds { main: entry.main, predefined: entry.predefined },
+        );
+    }
+    Arc::new(ConfigIndex { by_name })
+}
+
+/// Resolve a single metadata object within one config root, at per-MDO Salsa
+/// granularity. Depends on [`config_index`] (structure) to map the name to its
+/// files, then on [`parse_mdo_query`] (content) for that one MDO. A content edit
+/// re-parses only the edited MDO and re-runs only this resolution for it; sibling
+/// resolutions in the same root stay memoised. An add/remove re-runs
+/// `config_index`, so an absent-name miss correctly invalidates when the MDO later
+/// appears. Extension overlay across roots is composed by callers, not here.
+#[salsa::tracked]
+pub fn resolve_metadata_object(
+    db: &dyn base_db::SourceDatabase,
+    listing: MetadataListingInput,
+    mdo_type: bsl_metadata::MdoType,
+    name: String,
+) -> Option<Arc<bsl_metadata::MetadataObject>> {
+    let _span = tracing::info_span!("resolve_metadata_object").entered();
+
+    let index = config_index(db, listing);
+    let ids = index.lookup(mdo_type, &name)?;
+    let files = MdoFiles::new(db, mdo_type, ids.main, ids.predefined);
+    parse_mdo_query(db, files)
+}
+
 #[salsa::db]
 pub trait MetadataDb: salsa::Database {
     fn load_configuration<'db>(
