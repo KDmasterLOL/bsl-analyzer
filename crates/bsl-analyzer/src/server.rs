@@ -262,6 +262,20 @@ fn handle_loader_msg(state: &mut GlobalState, msg: vfs::loader::Message) -> Resu
             }
             tracing::debug!(count, vfs_done = state.vfs_done, "registered WatchOnly batch",);
         }
+        vfs::loader::Message::RemovedRecursive { paths } => {
+            // A removed directory subtree (a watch backend reported only the
+            // directory, not each child). Expand it against the file set and
+            // tombstone descendants; ignore during the initial scan.
+            if state.vfs_done {
+                let n = paths.len();
+                if state.remove_directories(&paths) {
+                    for uri in state.opened_document_uris() {
+                        crate::handlers::notification::schedule_diagnostics(state, &uri);
+                    }
+                }
+                tracing::info!(removed_paths = n, "processed removed directory subtree");
+            }
+        }
     }
     Ok(())
 }
@@ -361,14 +375,13 @@ fn handle_vfs_msg(
     let mut converted: Vec<(vfs::VfsPath, Option<Arc<str>>)> = Vec::with_capacity(files.len());
     for (path, contents) in files {
         let std_path: &std::path::Path = path.as_ref();
-
-        if let Ok(url) = lsp_types::Url::from_file_path(std_path) {
-            if state.mem_docs.contains(&url) {
-                continue;
-            }
-        }
-
         let vfs_path = vfs::VfsPath::new(std_path);
+
+        // An open editor buffer is authoritative for unsaved content, so a
+        // disk-sourced change here must not clobber its overlay.
+        if state.is_open_document_path(std_path, &vfs_path) {
+            continue;
+        }
 
         let contents_str = contents.and_then(|bytes| {
             String::from_utf8(bytes).ok().map(|s| {

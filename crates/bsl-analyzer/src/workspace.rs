@@ -276,6 +276,54 @@ impl GlobalState {
         }
     }
 
+    /// Handle a removed directory subtree (delivered when a watch backend reports
+    /// only the directory, not each child). Tombstones every loaded, closed file
+    /// under one of `removed`, and invalidates the metadata of the owning config
+    /// roots (a removed directory may have held metadata XML that, when coalesced,
+    /// never arrived as its own event). Open files are left untouched — their
+    /// editor buffer is authoritative. Returns whether open documents should be
+    /// re-analyzed.
+    pub fn remove_directories(&mut self, removed: &[paths::AbsPathBuf]) -> bool {
+        use base_db::{SourceDatabase, SourceRootId};
+
+        if removed.is_empty() {
+            return false;
+        }
+
+        let mut descendants: Vec<VfsPath> = Vec::new();
+        {
+            let db = self.analysis_host.raw_database();
+            let source_root = db.source_root_input(SourceRootId(0)).root(db);
+            let file_set = source_root.file_set();
+            for file_id in file_set.iter() {
+                if self.open_files.contains(&file_id) {
+                    continue;
+                }
+                let Some(vfs_path) = file_set.path_for_file(&file_id) else { continue };
+                if removed.iter().any(|dir| vfs_path.as_path().starts_with(dir)) {
+                    descendants.push(vfs_path.clone());
+                }
+            }
+        }
+
+        if !descendants.is_empty() {
+            let mut vfs = self.vfs.write();
+            for vfs_path in &descendants {
+                vfs.set_file_contents(vfs_path.clone(), None);
+            }
+        }
+
+        self.analysis_host.request_cancellation();
+        self.analysis_host
+            .raw_database_mut()
+            .bump_config_for_paths(removed.iter().map(|p| p.as_ref()));
+
+        // Apply the tombstones. We always invalidated a config root above, which
+        // `ChangeOutcome` does not reflect, so a refresh is warranted regardless.
+        self.process_changes(false);
+        true
+    }
+
     pub fn reload_project_config(&mut self) -> bool {
         let Some(root) = self.workspace_root.clone() else {
             return false;
@@ -336,6 +384,23 @@ impl GlobalState {
 
     fn open_doc_paths(&self) -> HashSet<PathBuf> {
         self.mem_docs.uris().into_iter().filter_map(|u| u.to_file_path().ok()).collect()
+    }
+
+    /// Whether the editor currently has this path open as a document. Checks the
+    /// `FileId` open-set (the authority `process_changes` uses to choose overlay
+    /// vs disk) as well as the URL-keyed buffer set, because the file-watcher's
+    /// URL encoding can differ from the client's didOpen URL — a mismatch would
+    /// otherwise let a disk-sourced change overwrite an open file's unsaved
+    /// overlay.
+    pub fn is_open_document_path(&self, std_path: &Path, vfs_path: &VfsPath) -> bool {
+        let by_url =
+            Url::from_file_path(std_path).map(|url| self.mem_docs.contains(&url)).unwrap_or(false);
+        let by_id = self
+            .vfs
+            .read()
+            .file_id(vfs_path)
+            .is_some_and(|file_id| self.open_files.contains(&file_id));
+        by_url || by_id
     }
 
     pub fn opened_document_uris(&self) -> Vec<Url> {

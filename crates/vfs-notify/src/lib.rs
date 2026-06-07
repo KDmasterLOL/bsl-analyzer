@@ -95,6 +95,10 @@ enum EventPathAction {
     WatchOnly,
     /// A watched content file was removed — deliver as a deletion.
     Delete,
+    /// A path under a watched root was removed but is not a watched file — most
+    /// likely a removed directory whose subtree must be expanded by the consumer
+    /// (the loader cannot enumerate children that no longer exist on disk).
+    DeleteSubtree,
 }
 
 impl NotifyActor {
@@ -286,6 +290,7 @@ impl NotifyActor {
                         ) {
                             let mut changed_files: Vec<(AbsPathBuf, Option<Vec<u8>>)> = Vec::new();
                             let mut watch_only_files: Vec<AbsPathBuf> = Vec::new();
+                            let mut removed_recursive: Vec<AbsPathBuf> = Vec::new();
                             for path in event.paths {
                                 let Some(path) = Utf8PathBuf::from_path_buf(path)
                                     .ok()
@@ -303,6 +308,7 @@ impl NotifyActor {
                                     // Deliver the removal as a deletion (`None`
                                     // contents) so the consumer can tombstone it.
                                     EventPathAction::Delete => changed_files.push((path, None)),
+                                    EventPathAction::DeleteSubtree => removed_recursive.push(path),
                                     EventPathAction::Ignore => {}
                                 }
                             }
@@ -311,6 +317,11 @@ impl NotifyActor {
                             }
                             if !watch_only_files.is_empty() {
                                 self.send(loader::Message::WatchOnly { files: watch_only_files });
+                            }
+                            if !removed_recursive.is_empty() {
+                                self.send(loader::Message::RemovedRecursive {
+                                    paths: removed_recursive,
+                                });
                             }
                         }
                     }
@@ -485,11 +496,24 @@ impl NotifyActor {
                 match self.classify_watched_path(path) {
                     Some(loader::LoadMode::LoadContent) => EventPathAction::Delete,
                     Some(loader::LoadMode::WatchOnly) => EventPathAction::WatchOnly,
+                    // An extension-less path under a watched root that is gone is
+                    // most likely a removed directory; hand it to the consumer to
+                    // expand into its loaded descendants. (Removed unwatched FILES
+                    // have an extension and are ignored — nothing tracks them.)
+                    None if path.extension().is_none() && self.within_watched_root(path) => {
+                        EventPathAction::DeleteSubtree
+                    }
                     None => EventPathAction::Ignore,
                 }
             }
             Err(_) => EventPathAction::Ignore,
         }
+    }
+
+    /// Whether `path` lies under one of the watched directory roots (used to
+    /// recognize a removed directory, which has no extension to classify by).
+    fn within_watched_root(&self, path: &AbsPathBuf) -> bool {
+        self.watched_dir_entries.iter().any(|dir| dir.contains_dir(path))
     }
 
     fn classify_watched_path(&self, path: &AbsPathBuf) -> Option<loader::LoadMode> {
@@ -883,8 +907,11 @@ mod tests {
         assert_eq!(actor.classify_event_path(&join("Gone.bsl")), EventPathAction::Delete);
         // A removed watch-only file routes to metadata invalidation.
         assert_eq!(actor.classify_event_path(&join("Gone.xml")), EventPathAction::WatchOnly);
-        // A removed unwatched file is ignored.
+        // A removed unwatched FILE (has an extension) is ignored.
         assert_eq!(actor.classify_event_path(&join("Gone.md")), EventPathAction::Ignore);
+        // A removed extension-less path under a watched root looks like a removed
+        // directory → handed to the consumer to expand into descendants.
+        assert_eq!(actor.classify_event_path(&join("RemovedDir")), EventPathAction::DeleteSubtree);
 
         // An existing watched content file still loads its bytes.
         let existing = join("Module.bsl");

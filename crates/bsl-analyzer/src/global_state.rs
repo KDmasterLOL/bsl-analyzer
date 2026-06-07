@@ -396,6 +396,71 @@ mod vfs_race_tests {
     }
 
     #[test]
+    fn remove_directories_tombstones_descendants_only() {
+        use base_db::{SourceDatabase, SourceRootId};
+
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender);
+        state.init_empty_source_root();
+
+        let inside_a = "/proj/Catalogs/X/Ext/ObjectModule.bsl";
+        let inside_b = "/proj/Catalogs/X/Forms/F/Ext/Form/Module.bsl";
+        let outside = "/proj/Catalogs/Y/Ext/ObjectModule.bsl";
+        {
+            let mut vfs = state.vfs.write();
+            for p in [inside_a, inside_b, outside] {
+                vfs.set_file_contents(
+                    vfs::VfsPath::new(p),
+                    Some(Arc::from("Процедура А() КонецПроцедуры")),
+                );
+            }
+        }
+        state.process_changes(false);
+
+        let in_file_set = |state: &GlobalState, p: &str| {
+            let db = state.analysis_host.raw_database();
+            let sr = db.source_root_input(SourceRootId(0)).root(db);
+            sr.file_set().file_for_path(&vfs::VfsPath::new(p)).is_some()
+        };
+        assert!(in_file_set(&state, inside_a) && in_file_set(&state, outside), "baseline loaded");
+
+        // Remove the directory subtree "Catalogs/X".
+        let removed =
+            vec![paths::AbsPathBuf::assert_utf8(std::path::PathBuf::from("/proj/Catalogs/X"))];
+        let refreshed = state.remove_directories(&removed);
+
+        assert!(refreshed, "a subtree removal should request an open-document refresh");
+        assert!(!in_file_set(&state, inside_a), "descendant ObjectModule must be tombstoned");
+        assert!(!in_file_set(&state, inside_b), "nested descendant must be tombstoned");
+        assert!(in_file_set(&state, outside), "a sibling directory must be untouched");
+    }
+
+    #[test]
+    fn is_open_document_path_detects_open_by_file_id() {
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender);
+        state.init_empty_source_root();
+
+        let p = "/proj/CommonModules/М/Ext/Module.bsl";
+        let vfs_path = vfs::VfsPath::new(p);
+        // Mark the file open by FileId ONLY (no mem_docs URL entry) — this models a
+        // watcher URL that doesn't byte-match the client's didOpen URL.
+        let file_id = state.vfs.write().alloc_file_id(vfs_path.clone());
+        state.open_files.insert(file_id);
+
+        assert!(
+            state.is_open_document_path(std::path::Path::new(p), &vfs_path),
+            "an open file must be recognized by its FileId even without a mem_docs URL"
+        );
+
+        let other = "/proj/CommonModules/Other/Ext/Module.bsl";
+        assert!(
+            !state.is_open_document_path(std::path::Path::new(other), &vfs::VfsPath::new(other)),
+            "an unknown file is not open"
+        );
+    }
+
+    #[test]
     fn closed_file_disk_backed_and_overlay_to_disk_transition() {
         use base_db::SourceDatabase;
 

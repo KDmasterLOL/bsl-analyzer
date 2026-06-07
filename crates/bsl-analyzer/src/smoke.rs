@@ -373,6 +373,8 @@ fn bootstrap_smoke(args: &SmokeArgs) -> Result<SmokeBootstrap, String> {
                     vfs.register_watch_only(vfs::VfsPath::new(path.as_path()));
                 }
             }
+            // Batch smoke loads a snapshot once; live removals don't apply.
+            loader::Message::RemovedRecursive { .. } => {}
         }
     }
 
