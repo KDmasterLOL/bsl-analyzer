@@ -247,7 +247,7 @@ fn handle_loader_msg(state: &mut GlobalState, msg: vfs::loader::Message) -> Resu
             }
             if state.vfs_done {
                 state.analysis_host.request_cancellation();
-                state.analysis_host.raw_database_mut().bump_metadata_version();
+                state.analysis_host.raw_database_mut().bump_all_config_revisions();
             }
             tracing::debug!(count, vfs_done = state.vfs_done, "registered WatchOnly batch",);
         }

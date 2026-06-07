@@ -66,5 +66,7 @@ pub trait RootDatabase:
 
     fn as_any(&self) -> &dyn std::any::Any;
 
-    fn metadata_version(&self) -> u32;
+    /// The Salsa-tracked config revision token for the root owning `path` (see
+    /// [`RootDatabaseImpl::config_root_revision_for_path`](crate::RootDatabaseImpl::config_root_revision_for_path)).
+    fn config_root_revision_for_path(&self, path: &std::path::Path) -> u32;
 }

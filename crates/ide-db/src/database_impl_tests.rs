@@ -667,6 +667,82 @@ fn test_module_metadata_cache_invalidation() {
     let _metadata2 = db.module_metadata(module_id);
 }
 
+/// A metadata XML change under one config root must reload only that root's
+/// configuration; a sibling root's loaded `Configuration` stays memoized.
+#[test]
+fn metadata_xml_change_invalidates_only_its_config_root() {
+    fn write_catalog(dir: &std::path::Path, name: &str, uuid: &str) {
+        std::fs::create_dir_all(dir.join("Catalogs")).unwrap();
+        std::fs::write(
+            dir.join(format!("Catalogs/{name}.xml")),
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Catalog uuid="{uuid}">
+        <Properties><Name>{name}</Name><CodeLength>9</CodeLength></Properties>
+    </Catalog>
+</MetaDataObject>"#,
+            ),
+        )
+        .unwrap();
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let main_root = temp.path().join("src/cf");
+    let ext_root = temp.path().join("src/cfe/X");
+    std::fs::create_dir_all(&main_root).unwrap();
+    std::fs::create_dir_all(&ext_root).unwrap();
+    std::fs::write(main_root.join("Configuration.xml"), "<Configuration/>").unwrap();
+    std::fs::write(ext_root.join("Configuration.xml"), "<Configuration/>").unwrap();
+    write_catalog(&main_root, "Товары", "00000000-0000-0000-0000-000000000001");
+    write_catalog(&ext_root, "ДопДанные", "00000000-0000-0000-0000-000000000002");
+
+    let mut db = RootDatabaseImpl::new();
+    db.set_all_config_paths(vec![
+        (None, main_root.clone()),
+        (Some("X".to_string()), ext_root.clone()),
+    ]);
+
+    let main_file = FileId(0);
+    let ext_file = FileId(1);
+    let mut file_set = FileSet::new();
+    let main_path = main_root.join("CommonModules/М/Ext/Module.bsl");
+    let ext_path = ext_root.join("CommonModules/М/Ext/Module.bsl");
+    file_set.insert(main_file, VfsPath::new(main_path.to_string_lossy().as_ref()));
+    file_set.insert(ext_file, VfsPath::new(ext_path.to_string_lossy().as_ref()));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(main_file, SourceRootId(0));
+    db.set_file_source_root(ext_file, SourceRootId(0));
+    db.set_file_text(main_file, "Процедура Т() КонецПроцедуры");
+    db.set_file_text(ext_file, "Процедура Т() КонецПроцедуры");
+
+    let main_before = db.get_configuration(main_file).expect("main config loads");
+    let ext_before = db.get_configuration(ext_file).expect("ext config loads");
+    assert_eq!(main_before.metadata_objects().len(), 1);
+
+    // Add a second catalog to the MAIN root only, then bump that root.
+    let new_xml = main_root.join("Catalogs/Услуги.xml");
+    write_catalog(&main_root, "Услуги", "00000000-0000-0000-0000-000000000003");
+    db.bump_config_for_path(&new_xml);
+
+    let main_after = db.get_configuration(main_file).expect("main config reloads");
+    let ext_after = db.get_configuration(ext_file).expect("ext config still loads");
+
+    assert!(
+        !Arc::ptr_eq(&main_before, &main_after),
+        "main root's config must reload after its XML changed"
+    );
+    assert_eq!(
+        main_after.metadata_objects().len(),
+        2,
+        "reloaded main config must reflect the added catalog"
+    );
+    assert!(
+        Arc::ptr_eq(&ext_before, &ext_after),
+        "sibling extension config must stay memoized — its XML did not change"
+    );
+}
+
 #[test]
 fn test_sdbl_hir_in_file_basic() {
     let mut db = RootDatabaseImpl::new();

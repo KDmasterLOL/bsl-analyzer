@@ -66,12 +66,14 @@ impl AnalysisProvider for SalsaProvider<'_> {
             };
         }
 
-        let version = self.db.metadata_version();
         paths
             .into_iter()
             .map(|(name, path)| {
-                let path_input =
-                    intern_configuration_path(self.db, &path.to_string_lossy(), version);
+                let path_input = intern_configuration_path(
+                    self.db,
+                    &path.to_string_lossy(),
+                    self.db.config_root_revision_for_path(&path),
+                );
                 let configuration = load_configuration(self.db, path_input);
                 VisibleConfigWithRoot {
                     config: bsl_config::VisibleConfig { name, configuration },

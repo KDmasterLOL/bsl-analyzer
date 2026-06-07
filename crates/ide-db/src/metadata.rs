@@ -6,19 +6,29 @@ use std::sync::Arc;
 #[salsa::interned(debug)]
 pub struct ConfigurationPathInput {
     pub path: String,
-    pub version: u32,
+    pub root_revision: u32,
 }
 
 pub fn intern_configuration_path<'db>(
     db: &'db dyn salsa::Database,
     raw_path: &str,
-    version: u32,
+    root_revision: u32,
 ) -> ConfigurationPathInput<'db> {
     let canonical = canonicalize_configuration_path(raw_path);
-    ConfigurationPathInput::new(db, canonical, version)
+    ConfigurationPathInput::new(db, canonical, root_revision)
 }
 
-fn canonicalize_configuration_path(raw_path: &str) -> String {
+/// Per-config-root revision counter, as a Salsa input so that config-dependent
+/// queries which read it (via [`intern_configuration_path`] callers running
+/// inside a tracked query) record a dependency on the specific root. Bumping one
+/// root's revision then invalidates only the queries that touched that root,
+/// instead of a single global counter invalidating every configuration.
+#[salsa::input(debug)]
+pub struct ConfigRevisionInput {
+    pub revision: u32,
+}
+
+pub(crate) fn canonicalize_configuration_path(raw_path: &str) -> String {
     if cfg!(windows) {
         let trimmed = raw_path.strip_prefix(r"\\?\").unwrap_or(raw_path);
         let mut s = trimmed.replace('\\', "/");
@@ -34,7 +44,6 @@ fn canonicalize_configuration_path(raw_path: &str) -> String {
 #[salsa::input(debug)]
 pub struct WorkspaceConfigsInput {
     pub paths: Vec<(Option<String>, PathBuf)>,
-    pub version: u32,
 }
 
 // Keyed by config root (base config + each extension), so the cache holds one entry

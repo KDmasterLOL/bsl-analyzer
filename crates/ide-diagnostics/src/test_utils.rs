@@ -762,8 +762,11 @@ pub fn check_with_config_xml(
     }
 
     let config_path = project.root().to_string_lossy();
-    let config_path_input =
-        intern_configuration_path(&db, config_path.as_ref(), db.metadata_version());
+    let config_path_input = intern_configuration_path(
+        &db,
+        config_path.as_ref(),
+        db.config_root_revision_for_path(std::path::Path::new(config_path.as_ref())),
+    );
     let provider = ide_db::SalsaProvider::new(&db, Some(config_path_input));
     let config = crate::DiagnosticsConfig::all_enabled();
     let ctx = crate::DiagnosticsContext::new(&config, caller_file_id, &provider);
@@ -818,8 +821,11 @@ pub fn check_with_cfe(source: &str, fixture: test_fixture::CfeFixture) -> Vec<Di
     }
 
     let config_path = fixture.root().to_string_lossy();
-    let config_path_input =
-        intern_configuration_path(&db, config_path.as_ref(), db.metadata_version());
+    let config_path_input = intern_configuration_path(
+        &db,
+        config_path.as_ref(),
+        db.config_root_revision_for_path(std::path::Path::new(config_path.as_ref())),
+    );
     let provider = ide_db::SalsaProvider::new(&db, Some(config_path_input));
     let config = crate::DiagnosticsConfig::all_enabled();
     let ctx = crate::DiagnosticsContext::new(&config, caller_file_id, &provider);

@@ -135,7 +135,7 @@ impl GlobalState {
         let mut file_set = source_root.file_set().clone();
         let mut file_set_modified = false;
         let mut config_file_changed = false;
-        let mut metadata_xml_changed = false;
+        let mut changed_metadata_paths: Vec<std::path::PathBuf> = Vec::new();
 
         for file in changed_files {
             let text = match file.change {
@@ -157,9 +157,9 @@ impl GlobalState {
                     tracing::info!(path = %path_path.display(), "config file changed");
                     config_file_changed = true;
                 }
-                if !metadata_xml_changed && project_model::is_metadata_path(path_path) {
+                if project_model::is_metadata_path(path_path) {
                     tracing::info!(path = %path_path.display(), "metadata XML file changed");
-                    metadata_xml_changed = true;
+                    changed_metadata_paths.push(path_path.to_path_buf());
                 }
                 project_model::is_bsl_source_path(path_path)
             };
@@ -231,12 +231,15 @@ impl GlobalState {
             }
         }
 
-        if metadata_xml_changed {
+        if !changed_metadata_paths.is_empty() {
             if suppress_metadata_bump {
-                tracing::debug!("suppressing metadata version bump during initial sync");
+                tracing::debug!("suppressing metadata revision bump during initial sync");
             } else {
-                tracing::info!("bumping metadata version after XML change");
-                self.analysis_host.raw_database_mut().bump_metadata_version();
+                let db = self.analysis_host.raw_database_mut();
+                for path in &changed_metadata_paths {
+                    tracing::info!(path = %path.display(), "bumping config revision after XML change");
+                    db.bump_config_for_path(path);
+                }
             }
         }
 
@@ -398,7 +401,7 @@ impl GlobalState {
         let path_input = ide_db::metadata::intern_configuration_path(
             db,
             &config_path.to_string_lossy(),
-            db.metadata_version(),
+            db.config_root_revision_for_path(config_path),
         );
 
         let config = ide_db::metadata::load_configuration(db, path_input);
@@ -415,7 +418,7 @@ impl GlobalState {
             let ext_path_input = ide_db::metadata::intern_configuration_path(
                 db,
                 &ext_path.to_string_lossy(),
-                db.metadata_version(),
+                db.config_root_revision_for_path(ext_path),
             );
             let ext_config = ide_db::metadata::load_configuration(db, ext_path_input);
             tracing::info!(

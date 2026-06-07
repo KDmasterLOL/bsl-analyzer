@@ -16,7 +16,11 @@ pub fn configuration_path_for_file<'db>(
 ) -> Option<ConfigurationPathInput<'db>> {
     let file_path = crate::vfs_helpers::get_file_path(db, file_id)?;
     let config_root = crate::vfs_helpers::find_configuration_root(db, &file_path)?;
-    Some(intern_configuration_path(db, &config_root.to_string_lossy(), db.metadata_version()))
+    Some(intern_configuration_path(
+        db,
+        &config_root.to_string_lossy(),
+        db.config_root_revision_for_path(&file_path),
+    ))
 }
 
 #[salsa::tracked(lru = 128)]

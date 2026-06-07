@@ -1,5 +1,9 @@
+use std::hash::BuildHasherDefault;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+use dashmap::DashMap;
+use rustc_hash::FxHasher;
 
 use base_db::{FileIdInput, Files, RootQueryDb, SourceDatabase, SourceRoot, SourceRootId};
 use hir::{
@@ -25,6 +29,19 @@ pub struct RootDatabaseImpl {
     files: Files,
 
     workspace_configs_input: parking_lot::RwLock<Option<metadata::WorkspaceConfigsInput>>,
+
+    /// Per-config-root revision inputs, keyed by the canonical root path. Shared
+    /// across cloned database handles (snapshots) so every handle reads and bumps
+    /// the same Salsa input for a root. A config-dependent query reads the input
+    /// for its file's root (recording a Salsa dependency); bumping that root's
+    /// revision invalidates only those queries, not every configuration.
+    config_revisions:
+        Arc<DashMap<String, metadata::ConfigRevisionInput, BuildHasherDefault<FxHasher>>>,
+
+    /// Fallback revision input for files that match no registered config root
+    /// (e.g. a single file opened without a workspace). Such reads record a
+    /// dependency here; coarse "everything changed" events bump it.
+    global_config_revision: parking_lot::RwLock<Option<metadata::ConfigRevisionInput>>,
 
     features_input: parking_lot::RwLock<Option<FeaturesInput>>,
 
@@ -64,6 +81,8 @@ impl Clone for RootDatabaseImpl {
             storage: self.storage.clone(),
             files: self.files.clone(),
             workspace_configs_input: parking_lot::RwLock::new(*self.workspace_configs_input.read()),
+            config_revisions: Arc::clone(&self.config_revisions),
+            global_config_revision: parking_lot::RwLock::new(*self.global_config_revision.read()),
             features_input: parking_lot::RwLock::new(*self.features_input.read()),
             type_kernel: Arc::clone(&self.type_kernel),
             type_kernel_input: parking_lot::RwLock::new(*self.type_kernel_input.read()),
@@ -81,13 +100,17 @@ impl RootDatabaseImpl {
             storage: salsa::Storage::default(),
             files: Files::new(),
             workspace_configs_input: parking_lot::RwLock::new(None),
+            config_revisions: Arc::new(DashMap::default()),
+            global_config_revision: parking_lot::RwLock::new(None),
             features_input: parking_lot::RwLock::new(None),
             type_kernel: Arc::clone(&type_kernel),
             type_kernel_input: parking_lot::RwLock::new(None),
             graph_config_cache: None,
         };
-        let input = metadata::WorkspaceConfigsInput::new(&db, Vec::new(), 0);
+        let input = metadata::WorkspaceConfigsInput::new(&db, Vec::new());
         *db.workspace_configs_input.write() = Some(input);
+        let global_config_revision = metadata::ConfigRevisionInput::new(&db, 0);
+        *db.global_config_revision.write() = Some(global_config_revision);
         let defaults = project_model::FeaturesConfig::default();
         let features = FeaturesInput::new(&db, defaults.type_narrowing);
         *db.features_input.write() = Some(features);
@@ -150,23 +173,115 @@ impl RootDatabaseImpl {
         self.workspace_configs()
     }
 
-    pub fn metadata_version(&self) -> u32 {
-        self.workspace_configs().version(self)
+    fn global_config_revision_input(&self) -> metadata::ConfigRevisionInput {
+        self.global_config_revision
+            .read()
+            .expect("global_config_revision is initialized in RootDatabaseImpl::new")
+    }
+
+    /// The current revision for a registered config root, as recorded in its
+    /// Salsa [`ConfigRevisionInput`](metadata::ConfigRevisionInput). Reading the
+    /// input field here records a dependency on that specific root for the
+    /// enclosing tracked query, so a later [`bump_config_revision`] invalidates
+    /// only the queries that touched this root. Unregistered roots fall back to
+    /// the global revision input, so they still record a dependency (coarse).
+    pub fn config_revision(&self, root: &str) -> u32 {
+        let key = metadata::canonicalize_configuration_path(root);
+        match self.config_revisions.get(&key).map(|e| *e.value()) {
+            Some(input) => input.revision(self),
+            None => self.global_config_revision_input().revision(self),
+        }
+    }
+
+    /// The longest registered config root that is a prefix of `path` (the same
+    /// matching rule used by both reads and bumps, so their revision keys always
+    /// agree). Reading the workspace config paths records a dependency, so a
+    /// workspace reload invalidates every config-dependent query.
+    fn longest_config_root_for_path(&self, path: &Path) -> Option<PathBuf> {
+        self.all_config_paths()
+            .into_iter()
+            .map(|(_, p)| p)
+            .filter(|root| path.starts_with(root))
+            .max_by_key(|root| root.as_os_str().len())
+    }
+
+    /// The revision token to fold into a config's interned key for any reader
+    /// concerned with `path` (a source file or a config root). Derives the root
+    /// by [`longest_config_root_for_path`] so file readers and per-root config
+    /// readers share one key; unmatched paths use the global fallback revision.
+    pub fn config_root_revision_for_path(&self, path: &Path) -> u32 {
+        match self.longest_config_root_for_path(path) {
+            Some(root) => self.config_revision(&root.to_string_lossy()),
+            None => self.global_config_revision_input().revision(self),
+        }
     }
 
     pub fn try_file_text(&self, file_id: vfs::FileId) -> Option<base_db::FileTextInput> {
         self.files.try_file_text(file_id)
     }
 
-    pub fn bump_metadata_version(&mut self) {
+    /// Create the [`ConfigRevisionInput`](metadata::ConfigRevisionInput) for a
+    /// root if it does not exist yet. Must be called outside any tracked query
+    /// (Salsa forbids creating inputs during query execution). Idempotent: an
+    /// existing root keeps its accumulated revision so previously recorded
+    /// dependencies stay valid across workspace reloads.
+    pub fn ensure_config_revision_input(&mut self, root: &str) {
+        let key = metadata::canonicalize_configuration_path(root);
+        if self.config_revisions.contains_key(&key) {
+            return;
+        }
+        let input = metadata::ConfigRevisionInput::new(self, 0);
+        self.config_revisions.insert(key, input);
+    }
+
+    /// Bump one config root's revision, invalidating only the queries that read
+    /// that root's configuration. Creates the input first if needed.
+    pub fn bump_config_revision(&mut self, root: &str) {
         use salsa::Setter;
-        let input = self.workspace_configs();
-        let current = input.version(self);
-        input.set_version(self).to(current + 1);
+        self.ensure_config_revision_input(root);
+        let key = metadata::canonicalize_configuration_path(root);
+        let input = match self.config_revisions.get(&key).map(|e| *e.value()) {
+            Some(input) => input,
+            None => return,
+        };
+        let current = input.revision(self);
+        input.set_revision(self).to(current.wrapping_add(1));
+    }
+
+    /// Bump the revision for the config root that owns `path`, matched the same
+    /// way reads derive their revision key. A path under no registered root bumps
+    /// the global fallback instead.
+    pub fn bump_config_for_path(&mut self, path: &Path) {
+        use salsa::Setter;
+        match self.longest_config_root_for_path(path) {
+            Some(root) => self.bump_config_revision(&root.to_string_lossy()),
+            None => {
+                let input = self.global_config_revision_input();
+                let current = input.revision(self);
+                input.set_revision(self).to(current.wrapping_add(1));
+            }
+        }
+    }
+
+    /// Bump every config revision (all registered roots plus the global
+    /// fallback). Used when the change is not attributable to a single root
+    /// (e.g. metadata watch registration completing after the bootstrap load).
+    pub fn bump_all_config_revisions(&mut self) {
+        use salsa::Setter;
+        let mut inputs: Vec<metadata::ConfigRevisionInput> =
+            self.config_revisions.iter().map(|e| *e.value()).collect();
+        inputs.push(self.global_config_revision_input());
+        for input in inputs {
+            let current = input.revision(self);
+            input.set_revision(self).to(current.wrapping_add(1));
+        }
     }
 
     pub fn set_all_config_paths(&mut self, paths: Vec<(Option<String>, std::path::PathBuf)>) {
         use salsa::Setter;
+        for (_, path) in &paths {
+            self.ensure_config_revision_input(&path.to_string_lossy());
+        }
         let input = self.workspace_configs();
         input.set_paths(self).to(paths);
     }
@@ -426,7 +541,7 @@ impl hir::ConfigsDatabase for RootDatabaseImpl {
             let path_input = metadata::intern_configuration_path(
                 self,
                 &path.to_string_lossy(),
-                self.metadata_version(),
+                self.config_root_revision_for_path(path),
             );
             self.load_configuration(path_input)
         };
@@ -540,7 +655,7 @@ impl RootDatabase for RootDatabaseImpl {
         let path_input = metadata::intern_configuration_path(
             self,
             &config_root.to_string_lossy(),
-            self.metadata_version(),
+            self.config_root_revision_for_path(&file_path),
         );
         Some(self.load_configuration(path_input))
     }
@@ -549,7 +664,6 @@ impl RootDatabase for RootDatabaseImpl {
         &self,
         file_id: FileId,
     ) -> Vec<(Option<String>, Arc<bsl_metadata::Configuration>)> {
-        let version = self.metadata_version();
         let all_paths = RootDatabaseImpl::all_config_paths(self);
 
         if all_paths.is_empty() {
@@ -559,8 +673,11 @@ impl RootDatabase for RootDatabaseImpl {
         all_paths
             .into_iter()
             .map(|(name, path)| {
-                let path_input =
-                    metadata::intern_configuration_path(self, &path.to_string_lossy(), version);
+                let path_input = metadata::intern_configuration_path(
+                    self,
+                    &path.to_string_lossy(),
+                    self.config_root_revision_for_path(&path),
+                );
                 let config = self.load_configuration(path_input);
                 (name, config)
             })
@@ -651,8 +768,8 @@ impl RootDatabase for RootDatabaseImpl {
         self
     }
 
-    fn metadata_version(&self) -> u32 {
-        RootDatabaseImpl::metadata_version(self)
+    fn config_root_revision_for_path(&self, path: &Path) -> u32 {
+        RootDatabaseImpl::config_root_revision_for_path(self, path)
     }
 }
 
