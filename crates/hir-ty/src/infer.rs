@@ -1783,15 +1783,9 @@ impl<'db> InferenceContext<'db> {
     }
 
     fn mdo_declared(&self, mdo_type: bsl_metadata::MdoType, mdo_name: &Name) -> bool {
-        let configs = self.db.configurations(self.file_id);
-        if configs.is_empty() {
-            return false;
-        }
         let needle = mdo_name.as_str();
-        configs.iter().any(|vc| {
-            vc.configuration.find_metadata_object(mdo_type, needle).is_some()
-                || vc.configuration.find_register_by_type_and_name(mdo_type, needle).is_some()
-        })
+        self.db.resolve_metadata_object(self.file_id, mdo_type, needle).is_some()
+            || self.db.resolve_register(self.file_id, mdo_type, needle).is_some()
     }
 
     fn resolve_constant_value_type(&self, mdo_name: &Name) -> Option<TypeId> {

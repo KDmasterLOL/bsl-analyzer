@@ -501,7 +501,8 @@ impl GlobalState {
         {
             let mut vfs = self.vfs.write();
             for (_, root_path) in &config_paths {
-                let discovered = bsl_metadata::discover_metadata_structure(root_path);
+                let mut discovered = bsl_metadata::discover_metadata_structure(root_path);
+                discovered.extend(bsl_metadata::discover_register_structure(root_path));
                 let mut entries = Vec::with_capacity(discovered.len());
                 for d in discovered {
                     let Some(main) = enroll_metadata_file(
@@ -604,7 +605,8 @@ impl GlobalState {
         {
             let mut vfs = self.vfs.write();
             for root in &affected {
-                let discovered = bsl_metadata::discover_metadata_structure(root);
+                let mut discovered = bsl_metadata::discover_metadata_structure(root);
+                discovered.extend(bsl_metadata::discover_register_structure(root));
                 let mut entries = Vec::with_capacity(discovered.len());
                 for d in discovered {
                     let Some(main) = enroll_refresh(

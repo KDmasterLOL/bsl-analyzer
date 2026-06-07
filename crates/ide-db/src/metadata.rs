@@ -206,6 +206,41 @@ pub fn resolve_metadata_object(
     parse_mdo_query(db, files)
 }
 
+/// Parse one register from its main XML, read through the versioned VFS. The
+/// register counterpart of [`parse_mdo_query`]; keyed on the same interned
+/// [`MdoFiles`] (registers have no predefined sidecar) but a separate tracked fn,
+/// so a register and an object never share a memo. Backdates on an unchanged
+/// register.
+#[salsa::tracked(lru = 8192)]
+pub fn parse_register_query(
+    db: &dyn base_db::SourceDatabase,
+    files: MdoFiles<'_>,
+) -> Option<Arc<bsl_metadata::Register>> {
+    let _span = tracing::info_span!("parse_register").entered();
+
+    let main_text = db.file_text(files.main(db));
+    bsl_metadata::parse_register_from_text(files.mdo_type(db), &main_text).map(Arc::new)
+}
+
+/// Resolve a single register within one config root, the register counterpart of
+/// [`resolve_metadata_object`]. Shares [`config_index`] (the listing carries
+/// register entries too) but parses via [`parse_register_query`]. Extension
+/// overlay across roots is composed by callers.
+#[salsa::tracked]
+pub fn resolve_register(
+    db: &dyn base_db::SourceDatabase,
+    listing: MetadataListingInput,
+    mdo_type: bsl_metadata::MdoType,
+    name: String,
+) -> Option<Arc<bsl_metadata::Register>> {
+    let _span = tracing::info_span!("resolve_register").entered();
+
+    let index = config_index(db, listing);
+    let ids = index.lookup(mdo_type, &name)?;
+    let files = MdoFiles::new(db, mdo_type, ids.main, ids.predefined);
+    parse_register_query(db, files)
+}
+
 #[salsa::db]
 pub trait MetadataDb: salsa::Database {
     fn load_configuration<'db>(

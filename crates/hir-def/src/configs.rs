@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use bsl_metadata::{Configuration, MdoType, MetadataObject};
+use bsl_metadata::{Configuration, MdoType, MetadataObject, Register};
 use vfs::FileId;
 
 use crate::DefDatabase;
@@ -28,6 +28,15 @@ pub trait ConfigsDatabase: DefDatabase {
         mdo_type: MdoType,
         name: &str,
     ) -> Option<Arc<MetadataObject>>;
+
+    /// The register counterpart of [`resolve_metadata_object`] (registers are a
+    /// separate type). Same per-MDO granularity and base + own-extension scoping.
+    fn resolve_register(
+        &self,
+        file_id: FileId,
+        mdo_type: MdoType,
+        name: &str,
+    ) -> Option<Arc<Register>>;
 
     fn resolved_module_summary(
         &self,

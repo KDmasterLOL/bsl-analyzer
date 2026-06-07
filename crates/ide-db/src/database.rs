@@ -356,26 +356,20 @@ impl RootDatabaseImpl {
         self.metadata_listings.get(&key).map(|e| *e.value())
     }
 
-    /// Resolve a single metadata object visible to `file_id` at per-MDO Salsa
-    /// granularity, composing the main config with the file's applicable extension
-    /// exactly as [`merged_visible_configuration`](hir::ConfigsDatabase::merged_visible_configuration)
-    /// does per object: the main object overlaid with the extension's via
-    /// [`MetadataObject::apply_extension_overlay`], or whichever side alone exists.
-    ///
-    /// Replaces a `merged_visible_configuration().find_metadata_object` lookup for
-    /// the migrated consumers. When the per-MDO substrate is populated (the LSP
-    /// bootstrap ran), it resolves through the per-MDO queries so the caller depends
-    /// on only that MDO — editing an unrelated MDO does not invalidate it. When the
-    /// substrate is absent (batch analysis, the graph build's per-batch DBs, tests —
-    /// none run the bootstrap), it falls back to the whole-config merged lookup, so
-    /// the result is identical to today and narrowing simply does not apply there.
-    /// Returns `None` when the file has no registered config root.
-    pub fn resolve_metadata_object_for_file(
+    /// For `file_id`: the structure listings of the main config root and the file's
+    /// applicable extension root (the longest extension path that is a prefix of the
+    /// file), plus whether the per-MDO substrate is populated (the bootstrap ran for
+    /// the roots this resolution touches). `None` if the file has no config root.
+    /// Shared by the object and register per-file resolvers so they pick the same
+    /// roots and make the same bootstrapped-vs-fallback decision.
+    fn metadata_listings_for_file(
         &self,
         file_id: FileId,
-        mdo_type: bsl_metadata::MdoType,
-        name: &str,
-    ) -> Option<Arc<bsl_metadata::MetadataObject>> {
+    ) -> Option<(
+        Option<metadata::MetadataListingInput>,
+        Option<metadata::MetadataListingInput>,
+        bool,
+    )> {
         let file_path = vfs_helpers::get_file_path(self, file_id)?;
         let paths = RootDatabaseImpl::all_config_paths(self);
 
@@ -386,16 +380,35 @@ impl RootDatabaseImpl {
             .max_by_key(|(_, path)| path.as_os_str().len())
             .map(|(_, path)| path);
 
-        let listing_for = |root: &std::path::Path| self.metadata_listing(&root.to_string_lossy());
-
-        // Per-MDO path requires the structure listing for each root the resolution
-        // touches. The bootstrap sets every root's listing together, so a missing
-        // one for a root we need means "not bootstrapped" → fall back to the merged
-        // whole-config lookup (identical result, no narrowing).
-        let main_listing = main_path.map(|p| listing_for(p));
-        let ext_listing = extension_path.map(|p| listing_for(p));
+        let main_listing = main_path.map(|p| self.metadata_listing(&p.to_string_lossy()));
+        let ext_listing = extension_path.map(|p| self.metadata_listing(&p.to_string_lossy()));
+        // The bootstrap sets every root's listing together, so a root we need that
+        // has none means "not bootstrapped" (batch/graph/tests) → caller falls back.
         let bootstrapped =
             !matches!(main_listing, Some(None)) && !matches!(ext_listing, Some(None));
+
+        Some((main_listing.flatten(), ext_listing.flatten(), bootstrapped))
+    }
+
+    /// Resolve a single metadata object visible to `file_id` at per-MDO Salsa
+    /// granularity, composing the main config with the file's applicable extension
+    /// via [`MetadataObject::apply_extension_overlay`] (or whichever side alone
+    /// exists) — exactly as `merged_visible_configuration` does per object.
+    ///
+    /// Replaces a `merged_visible_configuration().find_metadata_object` lookup for
+    /// the migrated consumers. When the per-MDO substrate is populated (the LSP
+    /// bootstrap ran), it resolves through the per-MDO queries so the caller depends
+    /// on only that MDO — editing an unrelated MDO does not invalidate it. When the
+    /// substrate is absent (batch analysis, the graph build's per-batch DBs, tests),
+    /// it falls back to the whole-config merged lookup: identical result, no
+    /// narrowing. Returns `None` when the file has no registered config root.
+    pub fn resolve_metadata_object_for_file(
+        &self,
+        file_id: FileId,
+        mdo_type: bsl_metadata::MdoType,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::MetadataObject>> {
+        let (main_listing, ext_listing, bootstrapped) = self.metadata_listings_for_file(file_id)?;
 
         if !bootstrapped {
             use hir::ConfigsDatabase;
@@ -406,15 +419,49 @@ impl RootDatabaseImpl {
                 .map(Arc::new);
         }
 
-        let resolve_in = |listing: Option<Option<metadata::MetadataListingInput>>| {
-            listing.flatten().and_then(|l| {
+        let resolve_in = |listing: Option<metadata::MetadataListingInput>| {
+            listing.and_then(|l| {
                 metadata::resolve_metadata_object(self, l, mdo_type, name.to_string())
             })
         };
-        let main_mdo = resolve_in(main_listing);
-        let ext_mdo = resolve_in(ext_listing);
+        match (resolve_in(main_listing), resolve_in(ext_listing)) {
+            (Some(main), Some(ext)) => {
+                let mut merged = (*main).clone();
+                merged.apply_extension_overlay(&ext);
+                Some(Arc::new(merged))
+            }
+            (Some(main), None) => Some(main),
+            (None, Some(ext)) => Some(ext),
+            (None, None) => None,
+        }
+    }
 
-        match (main_mdo, ext_mdo) {
+    /// The register counterpart of [`resolve_metadata_object_for_file`]: resolve a
+    /// single register visible to `file_id`, composing main + the file's extension
+    /// via [`bsl_metadata::Register::apply_extension_overlay`]. Per-MDO when the
+    /// substrate is populated, falling back to
+    /// `merged_visible_configuration().find_register_by_type_and_name` otherwise.
+    pub fn resolve_register_for_file(
+        &self,
+        file_id: FileId,
+        mdo_type: bsl_metadata::MdoType,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::Register>> {
+        let (main_listing, ext_listing, bootstrapped) = self.metadata_listings_for_file(file_id)?;
+
+        if !bootstrapped {
+            use hir::ConfigsDatabase;
+            return self
+                .merged_visible_configuration(file_id)?
+                .find_register_by_type_and_name(mdo_type, name)
+                .cloned()
+                .map(Arc::new);
+        }
+
+        let resolve_in = |listing: Option<metadata::MetadataListingInput>| {
+            listing.and_then(|l| metadata::resolve_register(self, l, mdo_type, name.to_string()))
+        };
+        match (resolve_in(main_listing), resolve_in(ext_listing)) {
             (Some(main), Some(ext)) => {
                 let mut merged = (*main).clone();
                 merged.apply_extension_overlay(&ext);
@@ -673,6 +720,15 @@ impl hir::ConfigsDatabase for RootDatabaseImpl {
         name: &str,
     ) -> Option<Arc<bsl_metadata::MetadataObject>> {
         RootDatabaseImpl::resolve_metadata_object_for_file(self, file_id, mdo_type, name)
+    }
+
+    fn resolve_register(
+        &self,
+        file_id: FileId,
+        mdo_type: bsl_metadata::MdoType,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::Register>> {
+        RootDatabaseImpl::resolve_register_for_file(self, file_id, mdo_type, name)
     }
 
     fn merged_visible_configuration(

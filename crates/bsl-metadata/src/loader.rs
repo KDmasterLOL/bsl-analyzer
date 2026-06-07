@@ -674,6 +674,58 @@ fn discover_loose_xml(dir: &Path, mdo_type: MdoType, out: &mut Vec<DiscoveredMdo
     }
 }
 
+/// Designer folder names for the register kinds, each stored as a loose
+/// `<name>.xml` (no dir, no predefined) like enums/constants.
+const REGISTER_DIRS: &[(&str, MdoType)] = &[
+    ("InformationRegisters", MdoType::InformationRegister),
+    ("AccumulationRegisters", MdoType::AccumulationRegister),
+    ("AccountingRegisters", MdoType::AccountingRegister),
+    ("CalculationRegisters", MdoType::CalculationRegister),
+];
+
+/// Walk one config root and list its registers by structure only (kind + main XML
+/// path), the register counterpart of [`discover_metadata_structure`]. Registers
+/// are a separate type (`Register`, not `MetadataObject`) parsed by
+/// [`parse_register_from_text`], so they get their own discovery + parse query
+/// while sharing the per-config-root structure listing and `config_index`.
+pub fn discover_register_structure(root: &Path) -> Vec<DiscoveredMdo> {
+    let mut out = Vec::new();
+    for (subdir, mdo_type) in REGISTER_DIRS {
+        discover_loose_xml(&root.join(subdir), *mdo_type, &mut out);
+    }
+    out.sort_by(|a, b| {
+        (a.mdo_type as u32, a.name.to_lowercase(), &a.main).cmp(&(
+            b.mdo_type as u32,
+            b.name.to_lowercase(),
+            &b.main,
+        ))
+    });
+    out
+}
+
+/// The XML parser for a register kind, or `None` for non-register kinds.
+fn register_parser(mdo_type: MdoType) -> Option<fn(&str) -> Result<crate::register::Register>> {
+    use xml_parser::*;
+    Some(match mdo_type {
+        MdoType::InformationRegister => parse_information_register_xml,
+        MdoType::AccumulationRegister => parse_accumulation_register_xml,
+        MdoType::AccountingRegister => parse_accounting_register_xml,
+        MdoType::CalculationRegister => parse_calculation_register_xml,
+        _ => return None,
+    })
+}
+
+/// Parse one register of `mdo_type` from its main XML text. The register
+/// counterpart of [`parse_metadata_object_from_texts`]; the per-register Salsa
+/// query calls it after reading the text through the versioned VFS. Returns `None`
+/// for non-register kinds.
+pub fn parse_register_from_text(
+    mdo_type: MdoType,
+    main_xml: &str,
+) -> Option<crate::register::Register> {
+    register_parser(mdo_type)?(main_xml).ok()
+}
+
 fn load_enums_parallel(dir: &Path) -> Vec<MetadataObject> {
     if !dir.exists() {
         return Vec::new();
@@ -1023,6 +1075,24 @@ mod tests {
             discovered.contains(&(MdoType::Catalog, "Справочник1".to_string())),
             "fixture sanity: Справочник1 catalog is present"
         );
+    }
+
+    #[test]
+    fn discover_register_structure_matches_directory_load() {
+        use std::collections::BTreeSet;
+
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/designer");
+
+        let discovered: BTreeSet<(MdoType, String)> = discover_register_structure(Path::new(path))
+            .into_iter()
+            .map(|d| (d.mdo_type, d.name))
+            .collect();
+
+        let config = load_from_directory(path).unwrap();
+        let from_load: BTreeSet<(MdoType, String)> =
+            config.registers().iter().map(|r| (r.mdo_type(), r.name().to_string())).collect();
+
+        assert_eq!(discovered, from_load, "register discovery must match the directory loader");
     }
 
     #[test]

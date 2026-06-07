@@ -747,6 +747,50 @@ mod vfs_race_tests {
     }
 
     #[test]
+    fn bootstrap_resolves_register_per_mdo() {
+        use base_db::{SourceDatabase, SourceRoot, BSL_SOURCE_ROOT};
+
+        // The real designer fixture (guaranteed-parseable register XML).
+        let root = std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../bsl-metadata/fixtures/designer"
+        ));
+
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender);
+        state.init_empty_source_root();
+        state.analysis_host.raw_database_mut().set_all_config_paths(vec![(None, root.clone())]);
+        state.bootstrap_metadata_substrate();
+
+        let bsl_path = root.join("CommonModules/М/Ext/Module.bsl");
+        let vp = vfs::VfsPath::new(bsl_path.to_string_lossy().as_ref());
+        let fid = state.vfs.write().alloc_file_id(vp.clone());
+        let db = state.analysis_host.raw_database_mut();
+        let mut fs = vfs::file_set::FileSet::new();
+        fs.insert(fid, vp);
+        db.set_source_root(BSL_SOURCE_ROOT, SourceRoot::new_local(fs));
+        db.set_file_source_root(fid, BSL_SOURCE_ROOT);
+        db.set_file_text(fid, "Процедура Т() КонецПроцедуры");
+
+        let db = state.analysis_host.raw_database();
+        // Register resolves through the bootstrapped per-MDO path...
+        let reg = db
+            .resolve_register_for_file(
+                fid,
+                bsl_metadata::MdoType::InformationRegister,
+                "РегистрСведений1",
+            )
+            .expect("register resolves per-MDO from the fixture");
+        assert_eq!(reg.name(), "РегистрСведений1");
+        // ...and an object kind does not resolve through the register query.
+        assert!(
+            db.resolve_register_for_file(fid, bsl_metadata::MdoType::Catalog, "Справочник1",)
+                .is_none(),
+            "a catalog must not resolve as a register"
+        );
+    }
+
+    #[test]
     fn init_source_root_excludes_metadata_from_root0() {
         use base_db::{SourceDatabase, BSL_SOURCE_ROOT};
 

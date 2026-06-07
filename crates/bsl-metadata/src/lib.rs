@@ -38,8 +38,8 @@ pub use http_service::{
     HTTPServiceURLTemplate, HTTPServiceURLTemplateBuilder,
 };
 pub use loader::{
-    discover_metadata_structure, load_from_directory, parse_metadata_object_from_texts,
-    DiscoveredMdo,
+    discover_metadata_structure, discover_register_structure, load_from_directory,
+    parse_metadata_object_from_texts, parse_register_from_text, DiscoveredMdo,
 };
 pub use metadata_object::{
     is_standard_attribute_name, Attribute, AttributeType, MdoType, MetadataObject, Name,
