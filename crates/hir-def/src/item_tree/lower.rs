@@ -354,7 +354,7 @@ mod tests {
     #[salsa::db]
     impl RootQueryDb for TestDb {
         fn parse(&self, file_id: FileId) -> syntax::Parse<syntax::SyntaxNode> {
-            let input = self.file_text_input(file_id);
+            let input = base_db::FileIdInput::new(self, file_id);
             base_db::parse_query(self, input)
         }
 
@@ -362,7 +362,7 @@ mod tests {
             &self,
             file_id: FileId,
         ) -> std::sync::Arc<std::collections::HashMap<syntax::TextRange, String>> {
-            let input = self.file_text_input(file_id);
+            let input = base_db::FileIdInput::new(self, file_id);
             base_db::method_regions_query(self, input)
         }
     }

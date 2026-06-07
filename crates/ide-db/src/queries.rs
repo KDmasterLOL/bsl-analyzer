@@ -336,8 +336,7 @@ pub fn line_index_query<'db>(
     let file_id = file_id_input.file_id(db);
     let _span = tracing::info_span!("line_index", ?file_id).entered();
 
-    let file_text_input = db.file_text_input(file_id);
-    let file_text = file_text_input.text(db);
+    let file_text = db.file_text(file_id);
 
     Arc::new(line_index::LineIndex::new(file_text.as_ref()))
 }

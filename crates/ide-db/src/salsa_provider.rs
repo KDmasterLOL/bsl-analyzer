@@ -104,8 +104,7 @@ impl AnalysisProvider for SalsaProvider<'_> {
     }
 
     fn file_text(&self, file_id: FileId) -> String {
-        let input = self.db.file_text_input(file_id);
-        input.text(self.db).clone()
+        self.db.file_text(file_id).to_string()
     }
 
     fn item_tree(&self, file_id: FileId) -> Arc<ItemTree> {

@@ -122,8 +122,7 @@ impl Analysis {
 
     pub fn file_text(&self, file_id: FileId) -> String {
         use ide_db::base_db::SourceDatabase;
-        let input = self.db.file_text_input(file_id);
-        input.text(&self.db).clone()
+        self.db.file_text(file_id).to_string()
     }
 
     pub fn file_diagnostics_cached(

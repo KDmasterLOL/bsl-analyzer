@@ -298,7 +298,7 @@ mod vfs_race_tests {
         let text1 = {
             use base_db::SourceDatabase;
             let db = state.analysis_host.raw_database_mut();
-            db.file_text_input(file_id).text(db)
+            db.file_text(file_id)
         };
         assert!(text1.contains("Test"));
 
@@ -316,7 +316,7 @@ mod vfs_race_tests {
         let text2 = {
             use base_db::SourceDatabase;
             let db = state.analysis_host.raw_database_mut();
-            db.file_text_input(file_id).text(db)
+            db.file_text(file_id)
         };
         assert!(text2.contains("Test"));
         assert_eq!(text1, text2, "file lost after merge!");

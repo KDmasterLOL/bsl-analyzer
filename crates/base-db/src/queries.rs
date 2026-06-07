@@ -5,14 +5,14 @@ use std::sync::Arc;
 use syntax::{Parse, SyntaxNode, TextRange};
 use vfs::{FileId, VfsPath};
 
-use crate::input::{content_revision, FileIdInput, FileTextInput, SourceRootInput};
+use crate::input::{content_revision, FileIdInput, SourceRootInput};
 use crate::SourceDatabase;
 
 #[salsa::tracked(lru = 512)]
-pub fn parse_query(db: &dyn salsa::Database, input: FileTextInput) -> Parse<SyntaxNode> {
+pub fn parse_query<'db>(db: &'db dyn SourceDatabase, input: FileIdInput<'db>) -> Parse<SyntaxNode> {
     let _span = tracing::info_span!("parse").entered();
 
-    let text = input.text(db);
+    let text = file_text_query(db, input);
     parser::parse_with_shared_cache(&text)
 }
 
@@ -65,9 +65,9 @@ fn disk_path(db: &dyn SourceDatabase, file_id: FileId) -> PathBuf {
 }
 
 #[salsa::tracked(lru = 256)]
-pub fn method_regions_query(
-    db: &dyn salsa::Database,
-    input: FileTextInput,
+pub fn method_regions_query<'db>(
+    db: &'db dyn SourceDatabase,
+    input: FileIdInput<'db>,
 ) -> Arc<HashMap<TextRange, String>> {
     let _span = tracing::info_span!("method_regions").entered();
 

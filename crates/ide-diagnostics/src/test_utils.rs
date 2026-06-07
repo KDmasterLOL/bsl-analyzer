@@ -441,8 +441,7 @@ impl ide_db::provider::AnalysisProvider for MetadataTestProvider {
 
     fn file_text(&self, file_id: vfs::FileId) -> String {
         use ide_db::base_db::SourceDatabase;
-        let input = self.db.file_text_input(file_id);
-        input.text(&self.db).to_string()
+        self.db.file_text(file_id).to_string()
     }
 
     fn item_tree(&self, file_id: vfs::FileId) -> std::sync::Arc<hir::ItemTree> {
@@ -515,8 +514,7 @@ impl ide_db::provider::AnalysisProvider for MetadataTestProvider {
 
     fn line_index(&self, file_id: vfs::FileId) -> std::sync::Arc<line_index::LineIndex> {
         use ide_db::base_db::SourceDatabase;
-        let input = self.db.file_text_input(file_id);
-        std::sync::Arc::new(line_index::LineIndex::new(&input.text(&self.db)))
+        std::sync::Arc::new(line_index::LineIndex::new(&self.db.file_text(file_id)))
     }
 
     fn file_path(&self, _file_id: vfs::FileId) -> Option<String> {

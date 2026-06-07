@@ -139,8 +139,7 @@ pub fn highlight<DB: RootDatabase>(db: &DB, file_id: FileId) -> HighlightResult 
     let parse = db.parse(file_id);
     let root = parse.syntax_node();
 
-    let input = db.file_text_input(file_id);
-    let bsl_source = input.text(db);
+    let bsl_source = db.file_text(file_id);
     let line_index = ide_diagnostics::sdbl_utils::build_line_index_shared(&bsl_source);
 
     let mut ctx = HighlightContext::new(db, file_id, Some(line_index));
