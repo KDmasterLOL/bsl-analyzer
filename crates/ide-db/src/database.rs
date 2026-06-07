@@ -356,6 +356,53 @@ impl RootDatabaseImpl {
         self.metadata_listings.get(&key).map(|e| *e.value())
     }
 
+    /// Resolve a single metadata object visible to `file_id` at per-MDO Salsa
+    /// granularity, composing the main config with the file's applicable extension
+    /// exactly as [`merged_visible_configuration`](hir::ConfigsDatabase::merged_visible_configuration)
+    /// does per object: the main object overlaid with the extension's via
+    /// [`MetadataObject::apply_extension_overlay`], or whichever side alone exists.
+    ///
+    /// Additive foundation for the consumer migration — it does not yet replace any
+    /// `get_configuration`/`merged_visible_configuration` call site, and
+    /// `load_configuration` stays authoritative. A pin test asserts parity with the
+    /// merged whole-config lookup. Returns `None` when the file has no registered
+    /// config root (no listing), matching "no configuration → no metadata".
+    pub fn resolve_metadata_object_for_file(
+        &self,
+        file_id: FileId,
+        mdo_type: bsl_metadata::MdoType,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::MetadataObject>> {
+        let file_path = vfs_helpers::get_file_path(self, file_id)?;
+        let paths = RootDatabaseImpl::all_config_paths(self);
+
+        let resolve_in = |root: &std::path::Path| -> Option<Arc<bsl_metadata::MetadataObject>> {
+            let listing = self.metadata_listing(&root.to_string_lossy())?;
+            metadata::resolve_metadata_object(self, listing, mdo_type, name.to_string())
+        };
+
+        let main_path = paths.iter().find_map(|(label, path)| label.is_none().then_some(path));
+        let extension_path = paths
+            .iter()
+            .filter(|(label, path)| label.is_some() && file_path.starts_with(path))
+            .max_by_key(|(_, path)| path.as_os_str().len())
+            .map(|(_, path)| path);
+
+        let main_mdo = main_path.and_then(|p| resolve_in(p));
+        let ext_mdo = extension_path.and_then(|p| resolve_in(p));
+
+        match (main_mdo, ext_mdo) {
+            (Some(main), Some(ext)) => {
+                let mut merged = (*main).clone();
+                merged.apply_extension_overlay(&ext);
+                Some(Arc::new(merged))
+            }
+            (Some(main), None) => Some(main),
+            (None, Some(ext)) => Some(ext),
+            (None, None) => None,
+        }
+    }
+
     fn features(&self) -> FeaturesInput {
         self.features_input.read().expect("features_input is initialized in RootDatabaseImpl::new")
     }

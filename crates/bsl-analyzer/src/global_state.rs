@@ -574,6 +574,84 @@ mod vfs_race_tests {
     }
 
     #[test]
+    fn resolve_metadata_object_for_file_matches_merged_visible_configuration() {
+        use base_db::{SourceDatabase, SourceRoot, BSL_SOURCE_ROOT};
+        use hir::ConfigsDatabase;
+
+        let cat = bsl_metadata::MdoType::Catalog;
+        let root = std::env::temp_dir().join(format!(
+            "bsl_resolve_parity_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let main_root = root.join("src/cf");
+        let ext_root = root.join("src/cfe/X");
+        std::fs::create_dir_all(main_root.join("Catalogs")).unwrap();
+        std::fs::create_dir_all(ext_root.join("Catalogs")).unwrap();
+        std::fs::write(main_root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        std::fs::write(ext_root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        // Same catalog in both roots; the extension adopts it (ObjectBelonging), so
+        // the resolved object goes through the main + extension overlay path.
+        std::fs::write(
+            main_root.join("Catalogs/Номенклатура.xml"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Catalog uuid="00000000-0000-0000-0000-000000000001">
+        <Properties><Name>Номенклатура</Name><CodeLength>9</CodeLength></Properties>
+    </Catalog>
+</MetaDataObject>"#,
+        )
+        .unwrap();
+        std::fs::write(
+            ext_root.join("Catalogs/Номенклатура.xml"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Catalog uuid="00000000-0000-0000-0000-000000000002">
+        <Properties><ObjectBelonging>Adopted</ObjectBelonging><Name>Номенклатура</Name></Properties>
+    </Catalog>
+</MetaDataObject>"#,
+        )
+        .unwrap();
+
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender);
+        state.init_empty_source_root();
+        state.analysis_host.raw_database_mut().set_all_config_paths(vec![
+            (None, main_root.clone()),
+            (Some("X".to_string()), ext_root.clone()),
+        ]);
+        state.bootstrap_metadata_substrate();
+
+        // A .bsl file living in the extension's scope: it must see the merged object.
+        // Allocate via the VFS *after* the bootstrap so its FileId does not collide
+        // with the ones the bootstrap already interned for the catalog XMLs.
+        let bsl_path = ext_root.join("CommonModules/М/Ext/Module.bsl");
+        let bsl_vfs_path = vfs::VfsPath::new(bsl_path.to_string_lossy().as_ref());
+        let file_id = state.vfs.write().alloc_file_id(bsl_vfs_path.clone());
+        let mut file_set = vfs::file_set::FileSet::new();
+        file_set.insert(file_id, bsl_vfs_path);
+        let db = state.analysis_host.raw_database_mut();
+        db.set_source_root(BSL_SOURCE_ROOT, SourceRoot::new_local(file_set));
+        db.set_file_source_root(file_id, BSL_SOURCE_ROOT);
+        db.set_file_text(file_id, "Процедура Т() КонецПроцедуры");
+
+        let db = state.analysis_host.raw_database();
+        let per_mdo = db
+            .resolve_metadata_object_for_file(file_id, cat, "Номенклатура")
+            .expect("per-MDO resolve finds the merged catalog");
+        let whole = db.merged_visible_configuration(file_id).expect("merged config loads");
+        let from_whole =
+            whole.find_metadata_object(cat, "Номенклатура").expect("merged config has the catalog");
+
+        assert_eq!(
+            &*per_mdo, from_whole,
+            "per-MDO resolve (with extension overlay) must equal the merged whole-config lookup"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn init_source_root_excludes_metadata_from_root0() {
         use base_db::{SourceDatabase, BSL_SOURCE_ROOT};
 
