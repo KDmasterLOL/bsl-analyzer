@@ -518,6 +518,42 @@ where
     Some(mdo)
 }
 
+/// The XML parser for a content-parsed metadata-object kind, or `None` for kinds
+/// that are not assembled into a [`MetadataObject`] from a single XML text here
+/// (registers, roles, subsystems, defined types, services, and name-only "simple"
+/// objects, which have their own loaders / are constructed by name).
+fn metadata_object_parser(mdo_type: MdoType) -> Option<fn(&str) -> Result<MetadataObject>> {
+    use xml_parser::*;
+    Some(match mdo_type {
+        MdoType::Catalog => parse_catalog_xml,
+        MdoType::Document => parse_document_xml,
+        MdoType::BusinessProcess => parse_business_process_xml,
+        MdoType::Task => parse_task_xml,
+        MdoType::ExchangePlan => parse_exchange_plan_xml,
+        MdoType::ChartOfCharacteristicTypes => parse_chart_of_characteristic_types_xml,
+        MdoType::ChartOfAccounts => parse_chart_of_accounts_xml,
+        MdoType::DataProcessor => parse_data_processor_xml,
+        MdoType::Report => parse_report_xml,
+        MdoType::Enum => parse_enum_xml,
+        MdoType::Constant => parse_constant_xml,
+        _ => return None,
+    })
+}
+
+/// Parse one metadata object of `mdo_type` from its already-read composing XML
+/// texts (the main `<Name>.xml` plus an optional `Ext/Predefined.xml`). This is
+/// the content-parsing entry the per-MDO Salsa query calls after reading the
+/// texts through the versioned VFS. Returns `None` for kinds not content-parsed
+/// into a [`MetadataObject`] here (see [`metadata_object_parser`]).
+pub fn parse_metadata_object_from_texts(
+    mdo_type: MdoType,
+    main_xml: &str,
+    predefined_xml: Option<&str>,
+) -> Option<MetadataObject> {
+    let parser = metadata_object_parser(mdo_type)?;
+    build_metadata_object(main_xml, predefined_xml, &parser)
+}
+
 fn load_enums_parallel(dir: &Path) -> Vec<MetadataObject> {
     if !dir.exists() {
         return Vec::new();
@@ -819,6 +855,23 @@ fn load_simple_metadata_objects_parallel(dir: &Path, mdo_type: MdoType) -> Vec<M
 mod tests {
     use super::*;
     use crate::traits::Module;
+
+    #[test]
+    fn parse_metadata_object_from_texts_matches_directory_load() {
+        let xml = include_str!("../fixtures/designer/Catalogs/Справочник1.xml");
+        let parsed = parse_metadata_object_from_texts(MdoType::Catalog, xml, None)
+            .expect("catalog parsed from text");
+        assert_eq!(parsed.name, "Справочник1");
+
+        // The per-MDO text parse must equal what the directory loader yields for
+        // the same object (this fixture catalog has no Predefined sidecar).
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/designer");
+        let config = load_from_directory(path).unwrap();
+        let from_dir = config
+            .find_metadata_object(MdoType::Catalog, "Справочник1")
+            .expect("catalog from directory load");
+        assert_eq!(&parsed, from_dir);
+    }
 
     #[test]
     fn test_load_from_directory() {
