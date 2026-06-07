@@ -37,7 +37,10 @@ pub use http_service::{
     HTTPService, HTTPServiceBuilder, HTTPServiceMethod, HTTPServiceMethodBuilder,
     HTTPServiceURLTemplate, HTTPServiceURLTemplateBuilder,
 };
-pub use loader::{load_from_directory, parse_metadata_object_from_texts};
+pub use loader::{
+    discover_metadata_structure, load_from_directory, parse_metadata_object_from_texts,
+    DiscoveredMdo,
+};
 pub use metadata_object::{
     is_standard_attribute_name, Attribute, AttributeType, MdoType, MetadataObject, Name,
     PlatformValueType,
