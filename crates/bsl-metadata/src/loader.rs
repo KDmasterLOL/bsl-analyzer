@@ -468,22 +468,14 @@ where
                     return None;
                 }
 
-                let xml = fs::read_to_string(&xml_path).ok()?;
-                let mut mdo = parser(&xml).ok()?;
-
+                let main_xml = fs::read_to_string(&xml_path).ok()?;
                 let predefined_path = path.join("Ext").join("Predefined.xml");
-                if predefined_path.exists() {
-                    if let Ok(predefined_xml) = fs::read_to_string(&predefined_path) {
-                        mdo.predefined_items = xml_parser::parse_predefined_xml(&predefined_xml);
-                        tracing::debug!(
-                            name = %name,
-                            count = mdo.predefined_items.len(),
-                            "Loaded predefined items"
-                        );
-                    }
-                }
+                let predefined_xml = predefined_path
+                    .exists()
+                    .then(|| fs::read_to_string(&predefined_path).ok())
+                    .flatten();
 
-                Some(mdo)
+                build_metadata_object(&main_xml, predefined_xml.as_deref(), &parser)
             } else if path.extension().and_then(|e| e.to_str()) == Some("xml") {
                 let file_stem = path.file_stem()?.to_str()?;
 
@@ -492,12 +484,38 @@ where
                 }
 
                 let xml = fs::read_to_string(&path).ok()?;
-                parser(&xml).ok()
+                build_metadata_object(&xml, None, &parser)
             } else {
                 None
             }
         })
         .collect()
+}
+
+/// Build one metadata object from its already-read composing XML texts: the main
+/// `<name>.xml` plus an optional `Ext/Predefined.xml`. Pure (no filesystem access)
+/// so it can back a per-MDO Salsa parse query whose reads go through the versioned
+/// VFS, while the directory loaders above supply the texts from disk.
+fn build_metadata_object<F>(
+    main_xml: &str,
+    predefined_xml: Option<&str>,
+    parser: &F,
+) -> Option<MetadataObject>
+where
+    F: Fn(&str) -> Result<MetadataObject> + ?Sized,
+{
+    let mut mdo = parser(main_xml).ok()?;
+
+    if let Some(predefined_xml) = predefined_xml {
+        mdo.predefined_items = xml_parser::parse_predefined_xml(predefined_xml);
+        tracing::debug!(
+            name = %mdo.name,
+            count = mdo.predefined_items.len(),
+            "Loaded predefined items"
+        );
+    }
+
+    Some(mdo)
 }
 
 fn load_enums_parallel(dir: &Path) -> Vec<MetadataObject> {
