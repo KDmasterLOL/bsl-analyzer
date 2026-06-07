@@ -100,6 +100,7 @@ impl PartialEq for Configuration {
             && self.defined_types == other.defined_types
             && self.scheduled_jobs == other.scheduled_jobs
             && self.roles == other.roles
+            && self.subsystems == other.subsystems
             && self.http_services == other.http_services
             && self.web_services == other.web_services
             && self.use_managed_form_in_ordinary_application
@@ -686,6 +687,22 @@ mod tests {
 
         assert!(catalog.find_attribute("Родитель").is_some());
         assert!(catalog.find_attribute("БУС_Артикул").is_some());
+    }
+
+    #[test]
+    fn equality_reflects_subsystem_changes() {
+        let base = Configuration::new("Cfg");
+
+        let mut with_subsystem = base.clone();
+        with_subsystem.add_subsystem(crate::subsystem::Subsystem::new("Продажи"));
+
+        // A subsystem-only difference must be observable: Salsa relies on this
+        // equality to decide whether a reload invalidates downstream consumers.
+        assert_ne!(base, with_subsystem);
+
+        let mut also_with_subsystem = base.clone();
+        also_with_subsystem.add_subsystem(crate::subsystem::Subsystem::new("Продажи"));
+        assert_eq!(with_subsystem, also_with_subsystem);
     }
 
     #[test]
