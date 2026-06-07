@@ -20,8 +20,7 @@ pub trait ConfigsDatabase: DefDatabase {
     /// MDO, so editing an unrelated MDO does not invalidate the caller — unlike
     /// reading the whole [`configurations`]/[`merged_visible_configuration`].
     ///
-    /// Registers are not covered yet (separate type/query); callers needing them
-    /// keep using [`configurations`] until a register resolver lands.
+    /// Registers are a separate type/query; resolve them via [`resolve_register`].
     fn resolve_metadata_object(
         &self,
         file_id: FileId,

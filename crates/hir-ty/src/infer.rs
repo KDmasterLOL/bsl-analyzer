@@ -700,6 +700,8 @@ impl<'db> InferenceContext<'db> {
 
                 let configs = self.db.configurations(self.file_id);
                 let resolver = self.get_resolver();
+                let obj_resolver =
+                    crate::object_resolver::DbObjectResolver::new(self.db, self.file_id);
                 if let Some(info) =
                     crate::form_items::lookup_form_item_field(self.db, &resolver, base_ty, field)
                 {
@@ -708,9 +710,12 @@ impl<'db> InferenceContext<'db> {
                     crate::field_lookup::lookup_field(self.db, &configs, base_ty, field)
                 {
                     info.ty
-                } else if let Some(info) =
-                    crate::manager_lookup::lookup_manager_field(self.db, &configs, base_ty, field)
-                {
+                } else if let Some(info) = crate::manager_lookup::lookup_manager_field(
+                    self.db,
+                    &obj_resolver,
+                    base_ty,
+                    field,
+                ) {
                     info.ty
                 } else {
                     let base_kind = self.db.lookup_type(base_ty);
