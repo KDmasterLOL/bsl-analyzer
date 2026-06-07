@@ -1,3 +1,4 @@
+use rustc_hash::FxHasher;
 use vfs::file_set::FileSet;
 use vfs::FileId;
 
@@ -40,6 +41,27 @@ impl SourceRoot {
 #[salsa::input(debug)]
 pub struct FileTextInput {
     pub text: String,
+}
+
+/// Content revision of a file: a 64-bit content hash with the byte length folded
+/// in. Used as the salsa invalidation key for `file_text_query` and as the
+/// verification token a disk re-read must match before its bytes may be returned
+/// (so an evicted+rederived text is sound). The model is probabilistic — a hash
+/// collision at the same length would alias two contents — which is acceptable
+/// for analysis caching but not a cryptographic guarantee.
+#[salsa::input(debug)]
+pub struct FileRevisionInput {
+    pub revision: u64,
+}
+
+/// Compute the [`FileRevisionInput`] value for some text. Folds the byte length
+/// into the hash so same-hash-different-length contents cannot alias.
+pub fn content_revision(text: &str) -> u64 {
+    use std::hash::Hasher;
+    let mut hasher = FxHasher::default();
+    hasher.write_usize(text.len());
+    hasher.write(text.as_bytes());
+    hasher.finish()
 }
 
 #[salsa::input(debug)]

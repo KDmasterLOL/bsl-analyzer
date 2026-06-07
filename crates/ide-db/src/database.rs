@@ -232,6 +232,24 @@ impl SourceDatabase for RootDatabaseImpl {
         self.files.file_text(file_id)
     }
 
+    fn try_file_text_input(&self, file_id: FileId) -> Option<base_db::FileTextInput> {
+        self.files.try_file_text(file_id)
+    }
+
+    fn file_revision_input(&self, file_id: FileId) -> base_db::FileRevisionInput {
+        self.files.file_revision(file_id)
+    }
+
+    fn file_text(&self, file_id: FileId) -> std::sync::Arc<str> {
+        let input = base_db::FileIdInput::new(self, file_id);
+        base_db::file_text_query(self, input)
+    }
+
+    fn set_file_revision_from_disk(&mut self, file_id: FileId, revision: u64) {
+        let files = self.files.clone();
+        files.set_file_revision_from_disk(self, file_id, revision);
+    }
+
     fn source_root_input(&self, source_root_id: SourceRootId) -> base_db::SourceRootInput {
         self.files.source_root(source_root_id)
     }
