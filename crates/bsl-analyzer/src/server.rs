@@ -279,7 +279,15 @@ fn handle_loader_msg(state: &mut GlobalState, msg: vfs::loader::Message) -> Resu
             // tombstone descendants; ignore during the initial scan.
             if state.vfs_done {
                 let n = paths.len();
-                if state.remove_directories(&paths) {
+                let bsl_removed = state.remove_directories(&paths);
+                // A removed subtree can also drop metadata MDOs; re-discovering the
+                // owning roots tombstones them from the per-MDO listings.
+                let removed: Vec<std::path::PathBuf> = paths
+                    .iter()
+                    .map(|p| AsRef::<std::path::Path>::as_ref(p).to_path_buf())
+                    .collect();
+                let meta_changed = state.refresh_metadata_substrate(&removed);
+                if bsl_removed || meta_changed {
                     for uri in state.opened_document_uris() {
                         crate::handlers::notification::schedule_diagnostics(state, &uri);
                     }

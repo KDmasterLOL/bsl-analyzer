@@ -566,13 +566,14 @@ impl GlobalState {
     ///
     /// Vanished mains drop out of the re-discovered structure (and so out of the
     /// listing), tombstoning them: `resolve_metadata_object` then returns `None`.
-    /// Runs after the boot bootstrap (root(1) already exists).
-    pub fn refresh_metadata_substrate(&mut self, changed_paths: &[PathBuf]) {
+    /// Runs after the boot bootstrap (root(1) already exists). Returns whether any
+    /// substrate input actually changed, so callers can gate a diagnostics refresh.
+    pub fn refresh_metadata_substrate(&mut self, changed_paths: &[PathBuf]) -> bool {
         use base_db::{SourceDatabase, SourceRoot, METADATA_SOURCE_ROOT};
         use ide_db::metadata::MdoEntry;
 
         if changed_paths.is_empty() {
-            return;
+            return false;
         }
 
         let config_paths = self.analysis_host.raw_database().all_config_paths();
@@ -585,7 +586,7 @@ impl GlobalState {
             }
         }
         if affected.is_empty() {
-            return;
+            return false;
         }
 
         let changed_set: HashSet<&Path> = changed_paths.iter().map(|p| p.as_path()).collect();
@@ -636,14 +637,17 @@ impl GlobalState {
         let added = new_file_ids.len();
 
         let db = self.analysis_host.raw_database_mut();
+        let mut changed = false;
         if metadata_file_set.len() != files_before {
             db.set_source_root(METADATA_SOURCE_ROOT, SourceRoot::new_local(metadata_file_set));
+            changed = true;
         }
         for fid in &new_file_ids {
             db.set_file_source_root(*fid, METADATA_SOURCE_ROOT);
         }
         for (fid, revision) in &revisions {
             db.set_file_revision_from_disk(*fid, *revision);
+            changed = true;
         }
         for (root, entries) in listings {
             let structure_changed = match db.metadata_listing(&root) {
@@ -652,6 +656,7 @@ impl GlobalState {
             };
             if structure_changed {
                 db.set_metadata_listing(&root, entries);
+                changed = true;
             }
         }
 
@@ -659,8 +664,10 @@ impl GlobalState {
             roots = affected.len(),
             reread,
             added,
+            changed,
             "refreshed metadata substrate incrementally",
         );
+        changed
     }
 
     pub fn warm_metadata_cache(&mut self) {
