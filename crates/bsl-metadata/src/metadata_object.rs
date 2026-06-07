@@ -752,6 +752,58 @@ impl MetadataObject {
         self.register_records = records;
     }
 
+    /// Apply an extension overlay onto this object, replacing same-named members
+    /// and recursing into children. This is the single source of truth for
+    /// per-object extension merge semantics, shared by whole-configuration merge
+    /// ([`crate::Configuration::merge_extension_overlay`]) and per-object
+    /// resolution.
+    pub fn apply_extension_overlay(&mut self, overlay: &MetadataObject) {
+        if overlay.name_en.is_some() {
+            self.name_en = overlay.name_en.clone();
+        }
+        if overlay.constant_type.is_some() {
+            self.constant_type = overlay.constant_type.clone();
+        }
+
+        for attr in &overlay.attributes {
+            self.attributes.retain(|existing| !existing.name.eq_ignore_ascii_case(&attr.name));
+            self.attributes.push(attr.clone());
+        }
+
+        for tabular_section in &overlay.tabular_sections {
+            self.tabular_sections
+                .retain(|existing| !existing.name().eq_ignore_ascii_case(tabular_section.name()));
+            self.tabular_sections.push(tabular_section.clone());
+        }
+
+        for child in &overlay.children {
+            if let Some(base_child) = self.children.iter_mut().find(|existing| {
+                existing.mdo_type == child.mdo_type
+                    && existing.name.eq_ignore_ascii_case(&child.name)
+            }) {
+                base_child.apply_extension_overlay(child);
+            } else {
+                self.children.push(child.clone());
+            }
+        }
+
+        for enum_value in &overlay.enum_values {
+            self.enum_values
+                .retain(|existing| !existing.name.eq_ignore_ascii_case(&enum_value.name));
+            self.enum_values.push(enum_value.clone());
+        }
+
+        for predefined_item in &overlay.predefined_items {
+            self.predefined_items
+                .retain(|existing| !existing.name.eq_ignore_ascii_case(&predefined_item.name));
+            self.predefined_items.push(predefined_item.clone());
+        }
+
+        if !overlay.register_records().is_empty() {
+            self.set_register_records(overlay.register_records().to_vec());
+        }
+    }
+
     pub fn uuid(&self) -> Option<&Uuid> {
         self.uuid.as_ref()
     }

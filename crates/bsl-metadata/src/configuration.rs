@@ -322,7 +322,7 @@ impl Configuration {
             if let Some(base_obj) = self.metadata_objects.iter_mut().find(|obj| {
                 obj.mdo_type == ext_obj.mdo_type && obj.name.eq_ignore_ascii_case(&ext_obj.name)
             }) {
-                merge_metadata_object_overlay(base_obj, ext_obj);
+                base_obj.apply_extension_overlay(ext_obj);
             } else {
                 self.add_metadata_object(ext_obj.clone());
             }
@@ -523,51 +523,6 @@ impl Configuration {
         let idx = self.web_services.len();
         self.name_to_web_service.insert(web_service.name().to_lowercase(), idx);
         self.web_services.push(web_service);
-    }
-}
-
-fn merge_metadata_object_overlay(base: &mut MetadataObject, overlay: &MetadataObject) {
-    if overlay.name_en.is_some() {
-        base.name_en = overlay.name_en.clone();
-    }
-    if overlay.constant_type.is_some() {
-        base.constant_type = overlay.constant_type.clone();
-    }
-
-    for attr in &overlay.attributes {
-        base.attributes.retain(|existing| !existing.name.eq_ignore_ascii_case(&attr.name));
-        base.attributes.push(attr.clone());
-    }
-
-    for tabular_section in &overlay.tabular_sections {
-        base.tabular_sections
-            .retain(|existing| !existing.name().eq_ignore_ascii_case(tabular_section.name()));
-        base.tabular_sections.push(tabular_section.clone());
-    }
-
-    for child in &overlay.children {
-        if let Some(base_child) = base.children.iter_mut().find(|existing| {
-            existing.mdo_type == child.mdo_type && existing.name.eq_ignore_ascii_case(&child.name)
-        }) {
-            merge_metadata_object_overlay(base_child, child);
-        } else {
-            base.children.push(child.clone());
-        }
-    }
-
-    for enum_value in &overlay.enum_values {
-        base.enum_values.retain(|existing| !existing.name.eq_ignore_ascii_case(&enum_value.name));
-        base.enum_values.push(enum_value.clone());
-    }
-
-    for predefined_item in &overlay.predefined_items {
-        base.predefined_items
-            .retain(|existing| !existing.name.eq_ignore_ascii_case(&predefined_item.name));
-        base.predefined_items.push(predefined_item.clone());
-    }
-
-    if !overlay.register_records().is_empty() {
-        base.set_register_records(overlay.register_records().to_vec());
     }
 }
 
