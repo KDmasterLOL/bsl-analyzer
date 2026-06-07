@@ -10,6 +10,20 @@ use vfs::{loader, FileId, VfsPath};
 
 use crate::global_state::GlobalState;
 
+/// What a [`GlobalState::process_changes`] batch did, so the caller can decide
+/// whether already-open documents need re-analysis and re-publishing.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ChangeOutcome {
+    /// A project config file (`bsl-analyzer.toml` / `.json`) changed, triggering
+    /// a full project reload.
+    pub config_file_changed: bool,
+    /// A change was applied that can affect the analysis of *other* documents — a
+    /// metadata XML edit or any `.bsl` source content (add / modify / delete). Open
+    /// documents must be re-analyzed even though their own buffers did not change
+    /// (e.g. files pulled in by `git pull` while editing).
+    pub affects_open_documents: bool,
+}
+
 impl GlobalState {
     pub fn init_empty_source_root(&mut self) {
         use base_db::{SourceDatabase, SourceRoot, SourceRootId};
@@ -110,7 +124,7 @@ impl GlobalState {
         );
     }
 
-    pub fn process_changes(&mut self, suppress_metadata_bump: bool) -> (bool, bool) {
+    pub fn process_changes(&mut self, suppress_metadata_bump: bool) -> ChangeOutcome {
         use base_db::SourceDatabase;
 
         let start = Instant::now();
@@ -119,7 +133,7 @@ impl GlobalState {
         let vfs_take_elapsed_ms = take_start.elapsed().as_millis() as u64;
         if changed_files.is_empty() {
             tracing::debug!(vfs_take_elapsed_ms, "process_changes: no VFS changes");
-            return (false, false);
+            return ChangeOutcome::default();
         }
 
         let file_count = changed_files.len();
@@ -135,6 +149,7 @@ impl GlobalState {
         let mut file_set = source_root.file_set().clone();
         let mut file_set_modified = false;
         let mut config_file_changed = false;
+        let mut bsl_source_changed = false;
         let mut changed_metadata_paths: Vec<std::path::PathBuf> = Vec::new();
 
         for file in changed_files {
@@ -169,6 +184,7 @@ impl GlobalState {
                     file_set.remove(file.file_id);
                     db.set_file_text(file.file_id, "");
                     file_set_modified = true;
+                    bsl_source_changed = true;
                     tracing::warn!(
                         file_id = file.file_id.0,
                         "BSL file evicted from FileSet (deleted or unreadable); FileTextInput tombstoned",
@@ -214,6 +230,7 @@ impl GlobalState {
                             base_db::content_revision(&text),
                         );
                     }
+                    bsl_source_changed = true;
                 }
             }
         }
@@ -250,7 +267,13 @@ impl GlobalState {
             "process_changes complete",
         );
 
-        (true, config_file_changed)
+        // A suppressed batch (initial sync) neither reloaded the project nor bumped
+        // metadata, so it must not claim those as observable changes.
+        let metadata_changed = !suppress_metadata_bump && !changed_metadata_paths.is_empty();
+        ChangeOutcome {
+            config_file_changed: !suppress_metadata_bump && config_file_changed,
+            affects_open_documents: bsl_source_changed || metadata_changed,
+        }
     }
 
     pub fn reload_project_config(&mut self) -> bool {

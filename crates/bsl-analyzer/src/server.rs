@@ -245,9 +245,20 @@ fn handle_loader_msg(state: &mut GlobalState, msg: vfs::loader::Message) -> Resu
                     vfs.register_watch_only(vfs::VfsPath::new(path.as_path()));
                 }
             }
+            // Metadata XML is watch-only (content not loaded into Salsa), so its
+            // edits arrive here, NOT through `process_changes`. After the initial
+            // scan these are live changes — e.g. a `git pull` touching XML —
+            // each of which invalidates the configuration of its owning root.
+            // Refresh open documents so their diagnostics reflect the new metadata.
             if state.vfs_done {
                 state.analysis_host.request_cancellation();
-                state.analysis_host.raw_database_mut().bump_all_config_revisions();
+                state
+                    .analysis_host
+                    .raw_database_mut()
+                    .bump_config_for_paths(files.iter().map(|p| p.as_ref()));
+                for uri in state.opened_document_uris() {
+                    crate::handlers::notification::schedule_diagnostics(state, &uri);
+                }
             }
             tracing::debug!(count, vfs_done = state.vfs_done, "registered WatchOnly batch",);
         }
@@ -260,7 +271,11 @@ fn handle_task(state: &mut GlobalState, task: crate::global_state::Task) -> Resu
 
     match task {
         Task::DiagnosticsReady { uri, diagnostics, generation, completed_at } => {
-            if generation >= state.diagnostics_generation {
+            let current = state.diagnostics_generation.get(&uri).copied().unwrap_or(0);
+            // Publish only the latest schedule for this uri (`== current`) and only
+            // while it is still open — a result that finished after the document was
+            // closed must not be published for a closed file.
+            if generation == current && state.mem_docs.contains(&uri) {
                 let publish_delay_ms = completed_at.elapsed().as_millis() as u64;
                 let diagnostic_count = diagnostics.len();
                 let allocated_mb = profile::memory_usage().allocated.megabytes();
@@ -278,11 +293,7 @@ fn handle_task(state: &mut GlobalState, task: crate::global_state::Task) -> Resu
                     Notification::new("textDocument/publishDiagnostics".to_string(), params);
                 state.sender.send(notification.into())?;
             } else {
-                tracing::debug!(
-                    generation,
-                    current = state.diagnostics_generation,
-                    "discarding stale diagnostics"
-                );
+                tracing::debug!(generation, current, "discarding stale diagnostics");
             }
         }
         Task::DiagnosticsCancelled { generation, completed_at } => {
@@ -397,10 +408,19 @@ fn handle_vfs_msg(
         return Ok(());
     }
 
-    let (_, config_changed) = state.process_changes(false);
+    let outcome = state.process_changes(false);
 
-    if config_changed {
-        tracing::info!("config changed, scheduling diagnostics refresh for all open documents");
+    // External (non-open) file changes — e.g. a `git pull` touching modules or
+    // metadata — invalidate the Salsa cache but do not by themselves re-publish
+    // diagnostics for documents the editor already has open. Reschedule those so
+    // their diagnostics reflect the new disk state. Open files are filtered out of
+    // this batch above (their editor buffer is authoritative), so this fires only
+    // for genuine external changes, not for saves of open buffers.
+    if outcome.config_file_changed || outcome.affects_open_documents {
+        tracing::info!(
+            config_file_changed = outcome.config_file_changed,
+            "external change: scheduling diagnostics refresh for all open documents"
+        );
         for uri in state.opened_document_uris() {
             crate::handlers::notification::schedule_diagnostics(state, &uri);
         }
@@ -558,5 +578,29 @@ mod tests {
         };
 
         assert_eq!(PositionEncoding::negotiate(&caps), PositionEncoding::Utf8);
+    }
+
+    #[test]
+    fn handle_task_does_not_publish_diagnostics_for_a_closed_document() {
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let mut state = crate::global_state::GlobalState::new(sender);
+
+        let uri = lsp_types::Url::parse("file:///gone.bsl").unwrap();
+        // A diagnostics task that finished with the current generation, but for a
+        // document that is NOT open (closed before the result arrived).
+        state.diagnostics_generation.insert(uri.clone(), 1);
+        let task = crate::global_state::Task::DiagnosticsReady {
+            uri,
+            diagnostics: Vec::new(),
+            generation: 1,
+            completed_at: std::time::Instant::now(),
+        };
+
+        handle_task(&mut state, task).unwrap();
+
+        assert!(
+            receiver.try_recv().is_err(),
+            "diagnostics for a closed document must not be published"
+        );
     }
 }

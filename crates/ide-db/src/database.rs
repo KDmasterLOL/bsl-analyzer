@@ -263,6 +263,37 @@ impl RootDatabaseImpl {
         }
     }
 
+    /// Bump the revision for every config root that owns one of `paths`, each
+    /// root at most once (so an N-file batch under one root is a single revision
+    /// write, not N). Paths under no registered root bump the global fallback once.
+    pub fn bump_config_for_paths<'a, I>(&mut self, paths: I)
+    where
+        I: IntoIterator<Item = &'a Path>,
+    {
+        use salsa::Setter;
+        let mut roots: Vec<String> = Vec::new();
+        let mut bump_global = false;
+        for path in paths {
+            match self.longest_config_root_for_path(path) {
+                Some(root) => {
+                    let key = metadata::canonicalize_configuration_path(&root.to_string_lossy());
+                    if !roots.contains(&key) {
+                        roots.push(key);
+                    }
+                }
+                None => bump_global = true,
+            }
+        }
+        for key in &roots {
+            self.bump_config_revision(key);
+        }
+        if bump_global {
+            let input = self.global_config_revision_input();
+            let current = input.revision(self);
+            input.set_revision(self).to(current.wrapping_add(1));
+        }
+    }
+
     /// Bump every config revision (all registered roots plus the global
     /// fallback). Used when the change is not attributable to a single root
     /// (e.g. metadata watch registration completing after the bootstrap load).

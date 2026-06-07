@@ -63,7 +63,13 @@ pub struct GlobalState {
 
     pub(crate) lsp_locale: Option<Locale>,
     pub position_encoding: PositionEncoding,
-    pub diagnostics_generation: u64,
+    /// Per-URI publish generation. Each scheduled diagnostics computation gets the
+    /// next generation for ITS uri; a completed task publishes only if it is still
+    /// the latest for that uri. Keyed per-uri (not a single global counter) so
+    /// scheduling several documents in one batch — e.g. refreshing all open docs
+    /// after an external change — does not let one document's newer generation
+    /// discard another document's result.
+    pub diagnostics_generation: HashMap<Url, u64>,
     pub pending_diagnostics_uri: Option<Url>,
 
     pub diagnostics_tokens: HashMap<Url, salsa::CancellationToken>,
@@ -116,7 +122,7 @@ impl GlobalState {
             ),
             lsp_locale: None,
             position_encoding: PositionEncoding::default(),
-            diagnostics_generation: 0,
+            diagnostics_generation: HashMap::new(),
             pending_diagnostics_uri: None,
             diagnostics_tokens: HashMap::new(),
             preload_tokens: HashMap::new(),
@@ -334,6 +340,59 @@ mod vfs_race_tests {
         };
         assert!(text2.contains("Test"));
         assert_eq!(text1, text2, "file lost after merge!");
+    }
+
+    #[test]
+    fn external_changes_report_affects_open_documents() {
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender);
+        state.init_empty_source_root();
+
+        // No pending VFS changes → nothing to refresh.
+        let empty = state.process_changes(false);
+        assert!(!empty.affects_open_documents);
+        assert!(!empty.config_file_changed);
+
+        // A closed .bsl file changing on disk affects analysis of other (open) docs.
+        {
+            let mut vfs = state.vfs.write();
+            vfs.set_file_contents(
+                vfs::VfsPath::new("/cf/CommonModules/М/Ext/Module.bsl"),
+                Some(Arc::from("Процедура А() Экспорт КонецПроцедуры")),
+            );
+        }
+        let bsl = state.process_changes(false);
+        assert!(bsl.affects_open_documents, "a .bsl change must mark open docs for refresh");
+        assert!(!bsl.config_file_changed);
+
+        // A metadata XML change likewise affects open docs (cross-config metadata).
+        {
+            let mut vfs = state.vfs.write();
+            vfs.set_file_contents(
+                vfs::VfsPath::new("/cf/Catalogs/Товары.xml"),
+                Some(Arc::from("<MetaDataObject/>")),
+            );
+        }
+        let meta = state.process_changes(false);
+        assert!(
+            meta.affects_open_documents,
+            "a metadata XML change must mark open docs for refresh"
+        );
+        assert!(!meta.config_file_changed);
+
+        // A suppressed batch (initial sync) must not claim metadata changes.
+        {
+            let mut vfs = state.vfs.write();
+            vfs.set_file_contents(
+                vfs::VfsPath::new("/cf/Catalogs/Услуги.xml"),
+                Some(Arc::from("<MetaDataObject/>")),
+            );
+        }
+        let suppressed = state.process_changes(true);
+        assert!(
+            !suppressed.affects_open_documents,
+            "a suppressed initial-sync batch bumps nothing, so it reports no refresh"
+        );
     }
 
     #[test]

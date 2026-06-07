@@ -22,9 +22,6 @@ pub fn schedule_diagnostics(state: &mut GlobalState, uri: &Url) {
         prev.cancel();
     }
 
-    state.diagnostics_generation += 1;
-    let generation = state.diagnostics_generation;
-
     let file_id = match crate::lsp::file_id(state, uri) {
         Ok(id) => id,
         Err(_) => return,
@@ -32,6 +29,15 @@ pub fn schedule_diagnostics(state: &mut GlobalState, uri: &Url) {
     let text = match state.mem_docs.get(uri) {
         Some(t) => t,
         None => return,
+    };
+
+    // Advance the generation only once the schedule will actually spawn, so a
+    // no-op call (unresolved file / not an open buffer) cannot orphan a prior
+    // in-flight result by leaving `current` ahead of every spawned task.
+    let generation = {
+        let g = state.diagnostics_generation.entry(uri.clone()).or_insert(0);
+        *g += 1;
+        *g
     };
 
     let db = state.analysis_host.raw_database().clone();
@@ -375,8 +381,43 @@ mod tests {
         assert_eq!(state.mem_docs.get(&params.text_document.uri), Some(params.text_document.text));
 
         assert!(!state.vfs_done);
-        assert_eq!(state.diagnostics_generation, 1);
+        assert_eq!(state.diagnostics_generation.get(&params.text_document.uri).copied(), Some(1));
         assert!(state.diagnostics_tokens.contains_key(&params.text_document.uri));
+    }
+
+    #[test]
+    fn diagnostics_generation_is_tracked_per_uri() {
+        let (mut state, _receiver) = create_test_state();
+
+        let a = lsp_types::Url::parse("file:///a.bsl").unwrap();
+        let b = lsp_types::Url::parse("file:///b.bsl").unwrap();
+        for (uri, text) in
+            [(&a, "Процедура А() КонецПроцедуры"), (&b, "Процедура Б() КонецПроцедуры")]
+        {
+            handle_did_open(
+                &mut state,
+                DidOpenTextDocumentParams {
+                    text_document: TextDocumentItem {
+                        uri: uri.clone(),
+                        language_id: "bsl".to_string(),
+                        version: 1,
+                        text: text.to_string(),
+                    },
+                },
+            )
+            .unwrap();
+        }
+
+        // Each document carries its own generation: opening B must NOT advance A's,
+        // otherwise A's in-flight diagnostics task would be discarded as stale and
+        // never published (the multi-document refresh bug).
+        assert_eq!(state.diagnostics_generation.get(&a).copied(), Some(1));
+        assert_eq!(state.diagnostics_generation.get(&b).copied(), Some(1));
+
+        // Re-scheduling A advances only A's generation.
+        schedule_diagnostics(&mut state, &a);
+        assert_eq!(state.diagnostics_generation.get(&a).copied(), Some(2));
+        assert_eq!(state.diagnostics_generation.get(&b).copied(), Some(1));
     }
 
     #[test]
