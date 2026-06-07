@@ -652,6 +652,101 @@ mod vfs_race_tests {
     }
 
     #[test]
+    fn resolve_metadata_object_for_file_scopes_base_and_extensions() {
+        // Pins the 1C visibility rules for per-MDO resolution:
+        //  - a file in the base config sees only the base (extensions invisible);
+        //  - a file in extension A sees base + A merged (A priority), never B;
+        //  - extensions do not bleed into each other.
+        let cat = bsl_metadata::MdoType::Catalog;
+        let root = std::env::temp_dir().join(format!(
+            "bsl_resolve_scope_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let base = root.join("src/cf");
+        let ext_a = root.join("src/cfe/A");
+        let ext_b = root.join("src/cfe/B");
+        for dir in [&base, &ext_a, &ext_b] {
+            std::fs::create_dir_all(dir.join("Catalogs")).unwrap();
+            std::fs::write(dir.join("Configuration.xml"), "<Configuration/>").unwrap();
+        }
+        let catalog = |name: &str, uuid: &str| {
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Catalog uuid="{uuid}"><Properties><Name>{name}</Name><CodeLength>9</CodeLength></Properties></Catalog>
+</MetaDataObject>"#
+            )
+        };
+        std::fs::write(
+            base.join("Catalogs/Общий.xml"),
+            catalog("Общий", "00000000-0000-0000-0000-000000000001"),
+        )
+        .unwrap();
+        std::fs::write(
+            ext_a.join("Catalogs/ТолькоА.xml"),
+            catalog("ТолькоА", "00000000-0000-0000-0000-00000000000a"),
+        )
+        .unwrap();
+        std::fs::write(
+            ext_b.join("Catalogs/ТолькоБ.xml"),
+            catalog("ТолькоБ", "00000000-0000-0000-0000-00000000000b"),
+        )
+        .unwrap();
+
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender);
+        state.init_empty_source_root();
+        state.analysis_host.raw_database_mut().set_all_config_paths(vec![
+            (None, base.clone()),
+            (Some("A".to_string()), ext_a.clone()),
+            (Some("B".to_string()), ext_b.clone()),
+        ]);
+        state.bootstrap_metadata_substrate();
+
+        // Allocate one .bsl file per scope (after the bootstrap, so FileIds don't
+        // collide with the catalog XML ids).
+        let mut make_file = |dir: &std::path::Path| {
+            use base_db::{SourceDatabase, SourceRoot, BSL_SOURCE_ROOT};
+            let p = dir.join("CommonModules/М/Ext/Module.bsl");
+            let vp = vfs::VfsPath::new(p.to_string_lossy().as_ref());
+            let fid = state.vfs.write().alloc_file_id(vp.clone());
+            let db = state.analysis_host.raw_database_mut();
+            let sr = db.source_root_input(BSL_SOURCE_ROOT).root(db);
+            let mut fs = sr.file_set().clone();
+            fs.insert(fid, vp);
+            db.set_source_root(BSL_SOURCE_ROOT, SourceRoot::new_local(fs));
+            db.set_file_source_root(fid, BSL_SOURCE_ROOT);
+            db.set_file_text(fid, "Процедура Т() КонецПроцедуры");
+            fid
+        };
+        let base_file = make_file(&base);
+        let a_file = make_file(&ext_a);
+        let b_file = make_file(&ext_b);
+
+        let db = state.analysis_host.raw_database();
+        let r = |fid: vfs::FileId, name: &str| {
+            db.resolve_metadata_object_for_file(fid, cat, name).map(|m| m.name.clone())
+        };
+
+        // Base file: only base objects, no extension objects.
+        assert_eq!(r(base_file, "Общий").as_deref(), Some("Общий"));
+        assert_eq!(r(base_file, "ТолькоА"), None, "base must not see extension A's object");
+        assert_eq!(r(base_file, "ТолькоБ"), None, "base must not see extension B's object");
+
+        // Extension A: base + A, never B.
+        assert_eq!(r(a_file, "Общий").as_deref(), Some("Общий"), "A sees base objects");
+        assert_eq!(r(a_file, "ТолькоА").as_deref(), Some("ТолькоА"), "A sees its own object");
+        assert_eq!(r(a_file, "ТолькоБ"), None, "A must not see extension B's object");
+
+        // Extension B: base + B, never A.
+        assert_eq!(r(b_file, "ТолькоБ").as_deref(), Some("ТолькоБ"), "B sees its own object");
+        assert_eq!(r(b_file, "ТолькоА"), None, "B must not see extension A's object");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn init_source_root_excludes_metadata_from_root0() {
         use base_db::{SourceDatabase, BSL_SOURCE_ROOT};
 
