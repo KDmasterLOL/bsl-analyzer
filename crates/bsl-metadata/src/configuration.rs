@@ -329,7 +329,14 @@ impl Configuration {
         }
 
         for ext_reg in &extension.registers {
-            if self.find_register_by_type_and_name(ext_reg.mdo_type(), ext_reg.name()).is_none() {
+            if let Some(idx) = self.registers.iter().position(|base| {
+                base.mdo_type() == ext_reg.mdo_type()
+                    && base.name().eq_ignore_ascii_case(ext_reg.name())
+            }) {
+                // An extension can add measurements/resources/attributes to a
+                // borrowed register, so merge rather than ignore the adopted copy.
+                self.registers[idx].apply_extension_overlay(ext_reg);
+            } else {
                 self.add_register(ext_reg.clone());
             }
         }
@@ -642,6 +649,48 @@ mod tests {
 
         assert!(catalog.find_attribute("Родитель").is_some());
         assert!(catalog.find_attribute("БУС_Артикул").is_some());
+    }
+
+    #[test]
+    fn merge_extension_overlay_merges_borrowed_register_fields() {
+        use crate::dimension::Dimension;
+        use crate::register::{Register, RegisterAttribute, RegisterResource};
+        use uuid::Uuid;
+
+        let mut base = Configuration::new("Base");
+        base.add_register(
+            Register::builder()
+                .name("РегистрСведений1")
+                .mdo_type(MdoType::InformationRegister)
+                .add_dimension(Dimension::builder().name("Изм1").build())
+                .add_resource(RegisterResource::new(Uuid::new_v4(), "Рес1"))
+                .build(),
+        );
+
+        let mut extension = Configuration::new("Extension");
+        extension.add_register(
+            Register::builder()
+                .name("РегистрСведений1")
+                .mdo_type(MdoType::InformationRegister)
+                .add_dimension(Dimension::builder().name("Изм2").build())
+                .add_resource(RegisterResource::new(Uuid::new_v4(), "Рес2"))
+                .add_attribute(RegisterAttribute::new(Uuid::new_v4(), "Рекв1"))
+                .build(),
+        );
+
+        let merged = base.merged_with_extension(&extension);
+        let reg = merged
+            .find_register_by_type_and_name(MdoType::InformationRegister, "РегистрСведений1")
+            .expect("merged register");
+
+        // An extension that borrows the register adds its measurement, resource and
+        // attribute — the base's own fields are preserved (not replaced wholesale).
+        let dims: Vec<&str> = reg.dimensions().iter().map(|d| d.name()).collect();
+        let res: Vec<&str> = reg.resources().iter().map(|r| r.name()).collect();
+        let attrs: Vec<&str> = reg.attributes().iter().map(|a| a.name()).collect();
+        assert_eq!(dims, ["Изм1", "Изм2"], "base + extension measurements");
+        assert_eq!(res, ["Рес1", "Рес2"], "base + extension resources");
+        assert_eq!(attrs, ["Рекв1"], "extension attribute added to the borrowed register");
     }
 
     #[test]
