@@ -389,10 +389,16 @@ impl RootDatabaseImpl {
 
         let main_listing = main_path.map(|p| self.metadata_listing(&p.to_string_lossy()));
         let ext_listing = extension_path.map(|p| self.metadata_listing(&p.to_string_lossy()));
-        // The bootstrap sets every root's listing together, so a root we need that
-        // has none means "not bootstrapped" (batch/graph/tests) → caller falls back.
+        // "Bootstrapped" requires the main root's listing to actually be set. When
+        // there is no main config root at all (`all_config_paths` empty — the batch
+        // / CLI path that never calls `set_workspace_configs`), `main_listing` is
+        // `None`, which must read as "not bootstrapped" so the caller falls back to
+        // the whole-config lookup. A main root present but without a listing
+        // (`Some(None)`, batch/graph/tests) is likewise not bootstrapped. Only a
+        // listing actually present (`Some(Some(_))`, the LSP bootstrap) — with no
+        // applicable extension root left unbootstrapped — enables the per-MDO path.
         let bootstrapped =
-            !matches!(main_listing, Some(None)) && !matches!(ext_listing, Some(None));
+            matches!(main_listing, Some(Some(_))) && !matches!(ext_listing, Some(None));
 
         Some((main_listing.flatten(), ext_listing.flatten(), bootstrapped))
     }
