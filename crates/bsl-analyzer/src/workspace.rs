@@ -451,13 +451,15 @@ impl GlobalState {
         if bsl_files == 0 {
             tracing::warn!(
                 elapsed_ms = start.elapsed().as_millis() as u64,
-                "no .bsl files in VFS during init_source_root",
+                "no .bsl files in VFS during init_source_root (root(0) rebuilt empty)",
             );
-            return;
         }
 
         let db = self.analysis_host.raw_database_mut();
 
+        // Publish the fresh set unconditionally — even empty — so a reload that
+        // removed the last `.bsl` file clears the previous root(0) instead of
+        // leaving stale entries alive.
         db.set_source_root(BSL_SOURCE_ROOT, SourceRoot::new_local(bsl_file_set));
 
         let bsl_ids: Vec<_> = db.source_root_input(BSL_SOURCE_ROOT).root(db).iter().collect();
