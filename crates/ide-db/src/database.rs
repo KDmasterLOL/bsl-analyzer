@@ -38,6 +38,13 @@ pub struct RootDatabaseImpl {
     config_revisions:
         Arc<DashMap<String, metadata::ConfigRevisionInput, BuildHasherDefault<FxHasher>>>,
 
+    /// Per-config-root metadata *structure* inputs, keyed by the canonical root
+    /// path. Shared across cloned handles like [`config_revisions`]. Each holds the
+    /// list of MDOs discovered in that root; a structure change re-sets it, driving
+    /// `config_index`/`resolve_metadata_object` re-derivation for that root only.
+    metadata_listings:
+        Arc<DashMap<String, metadata::MetadataListingInput, BuildHasherDefault<FxHasher>>>,
+
     /// Fallback revision input for files that match no registered config root
     /// (e.g. a single file opened without a workspace). Such reads record a
     /// dependency here; coarse "everything changed" events bump it.
@@ -82,6 +89,7 @@ impl Clone for RootDatabaseImpl {
             files: self.files.clone(),
             workspace_configs_input: parking_lot::RwLock::new(*self.workspace_configs_input.read()),
             config_revisions: Arc::clone(&self.config_revisions),
+            metadata_listings: Arc::clone(&self.metadata_listings),
             global_config_revision: parking_lot::RwLock::new(*self.global_config_revision.read()),
             features_input: parking_lot::RwLock::new(*self.features_input.read()),
             type_kernel: Arc::clone(&self.type_kernel),
@@ -101,6 +109,7 @@ impl RootDatabaseImpl {
             files: Files::new(),
             workspace_configs_input: parking_lot::RwLock::new(None),
             config_revisions: Arc::new(DashMap::default()),
+            metadata_listings: Arc::new(DashMap::default()),
             global_config_revision: parking_lot::RwLock::new(None),
             features_input: parking_lot::RwLock::new(None),
             type_kernel: Arc::clone(&type_kernel),
@@ -319,6 +328,32 @@ impl RootDatabaseImpl {
 
     pub fn all_config_paths(&self) -> Vec<(Option<String>, std::path::PathBuf)> {
         self.workspace_configs().paths(self)
+    }
+
+    /// Set (or update) one config root's metadata structure listing. Must run
+    /// outside any tracked query. On reload it updates the existing input in place
+    /// so previously recorded `config_index`/`resolve_metadata_object` dependencies
+    /// stay valid and re-derive from the new structure.
+    pub fn set_metadata_listing(&mut self, root: &str, entries: Vec<metadata::MdoEntry>) {
+        use salsa::Setter;
+        let key = metadata::canonicalize_configuration_path(root);
+        let entries = Arc::new(entries);
+        match self.metadata_listings.get(&key).map(|e| *e.value()) {
+            Some(input) => {
+                input.set_entries(self).to(entries);
+            }
+            None => {
+                let input = metadata::MetadataListingInput::new(self, entries);
+                self.metadata_listings.insert(key, input);
+            }
+        }
+    }
+
+    /// The metadata structure-listing input for a config root, if one was set.
+    /// Resolution consumers fold this through `resolve_metadata_object`.
+    pub fn metadata_listing(&self, root: &str) -> Option<metadata::MetadataListingInput> {
+        let key = metadata::canonicalize_configuration_path(root);
+        self.metadata_listings.get(&key).map(|e| *e.value())
     }
 
     fn features(&self) -> FeaturesInput {

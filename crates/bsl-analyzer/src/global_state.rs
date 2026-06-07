@@ -396,8 +396,107 @@ mod vfs_race_tests {
     }
 
     #[test]
-    fn init_source_root_partitions_bsl_and_metadata() {
-        use base_db::{SourceDatabase, BSL_SOURCE_ROOT, METADATA_SOURCE_ROOT};
+    fn bootstrap_metadata_substrate_resolves_and_reloads_per_mdo() {
+        use ide_db::metadata::resolve_metadata_object;
+
+        fn catalog_xml(name: &str, uuid: &str) -> String {
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Catalog uuid="{uuid}">
+        <Properties><Name>{name}</Name><CodeLength>9</CodeLength></Properties>
+    </Catalog>
+</MetaDataObject>"#
+            )
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "bsl_bootstrap_meta_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let catalogs = root.join("Catalogs");
+        std::fs::create_dir_all(&catalogs).unwrap();
+        std::fs::write(
+            catalogs.join("Справочник1.xml"),
+            catalog_xml("Справочник1", "00000000-0000-0000-0000-000000000001"),
+        )
+        .unwrap();
+        std::fs::write(
+            catalogs.join("Товары.xml"),
+            catalog_xml("Товары", "00000000-0000-0000-0000-000000000002"),
+        )
+        .unwrap();
+
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender);
+        state.init_empty_source_root();
+        state.analysis_host.raw_database_mut().set_all_config_paths(vec![(None, root.clone())]);
+
+        state.bootstrap_metadata_substrate();
+
+        let root_key = root.to_string_lossy().to_string();
+        let db = state.analysis_host.raw_database();
+        let listing = db.metadata_listing(&root_key).expect("listing set for the config root");
+
+        let c1 = resolve_metadata_object(
+            db,
+            listing,
+            bsl_metadata::MdoType::Catalog,
+            "Справочник1".to_string(),
+        )
+        .expect("Справочник1 resolves from disk via the bootstrap");
+        assert_eq!(c1.name, "Справочник1");
+        let tovary_before = resolve_metadata_object(
+            db,
+            listing,
+            bsl_metadata::MdoType::Catalog,
+            "Товары".to_string(),
+        )
+        .expect("Товары resolves");
+        assert_eq!(tovary_before.name, "Товары");
+
+        // Edit Товары on disk, re-run the bootstrap (mirrors a reload). Товары
+        // re-parses; the sibling Справочник1 stays memoised (per-MDO granularity).
+        std::fs::write(
+            catalogs.join("Товары.xml"),
+            catalog_xml("Товары", "00000000-0000-0000-0000-0000000000ff"),
+        )
+        .unwrap();
+        state.bootstrap_metadata_substrate();
+
+        let db = state.analysis_host.raw_database();
+        let listing = db.metadata_listing(&root_key).unwrap();
+        let c1_after = resolve_metadata_object(
+            db,
+            listing,
+            bsl_metadata::MdoType::Catalog,
+            "Справочник1".to_string(),
+        )
+        .unwrap();
+        assert!(
+            Arc::ptr_eq(&c1, &c1_after),
+            "a content edit to Товары must not re-parse the sibling Справочник1"
+        );
+        let tovary_after = resolve_metadata_object(
+            db,
+            listing,
+            bsl_metadata::MdoType::Catalog,
+            "Товары".to_string(),
+        )
+        .unwrap();
+        assert_eq!(tovary_after.name, "Товары");
+        assert!(
+            !Arc::ptr_eq(&tovary_before, &tovary_after),
+            "Товары re-parses after its XML changed on disk"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn init_source_root_excludes_metadata_from_root0() {
+        use base_db::{SourceDatabase, BSL_SOURCE_ROOT};
 
         let (sender, _receiver) = crossbeam_channel::unbounded();
         let mut state = GlobalState::new(sender);
@@ -418,22 +517,15 @@ mod vfs_race_tests {
 
         let db = state.analysis_host.raw_database_mut();
         let bsl_root = db.source_root_input(BSL_SOURCE_ROOT).root(db);
-        let meta_root = db.source_root_input(METADATA_SOURCE_ROOT).root(db);
 
         let in_root = |root: &base_db::SourceRoot, p: &str| {
             root.file_set().file_for_path(&vfs::VfsPath::new(p)).is_some()
         };
 
+        // root(0) holds the .bsl sources and never the metadata XML; metadata files
+        // belong to the bootstrap-owned metadata root(1).
         assert!(in_root(&bsl_root, bsl_a) && in_root(&bsl_root, bsl_b), "bsl in root(0)");
         assert!(!in_root(&bsl_root, xml_a) && !in_root(&bsl_root, xml_b), "xml NOT in root(0)");
-        assert!(in_root(&meta_root, xml_a) && in_root(&meta_root, xml_b), "xml in root(1)");
-        assert!(!in_root(&meta_root, bsl_a) && !in_root(&meta_root, bsl_b), "bsl NOT in root(1)");
-
-        // Each file's source-root mapping agrees with the partition, so a later
-        // `file_text` disk read resolves the path through the correct root.
-        let fid = |p: &str| meta_root.file_set().file_for_path(&vfs::VfsPath::new(p)).copied();
-        let xml_a_id = fid(xml_a).unwrap();
-        assert_eq!(db.file_source_root_input(xml_a_id).source_root_id(db), METADATA_SOURCE_ROOT);
     }
 
     #[test]

@@ -351,6 +351,7 @@ fn bootstrap_smoke(args: &SmokeArgs) -> Result<SmokeBootstrap, String> {
             loader::Message::Progress { n_done: LoadingProgress::Finished, .. } => {
                 state.process_changes(true);
                 state.init_source_root();
+                state.bootstrap_metadata_substrate();
                 state.warm_metadata_cache();
                 state.degraded_files_count = state.skipped_bsl.len();
                 let extra = state.assert_total_vfs_invariant();

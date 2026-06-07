@@ -162,6 +162,7 @@ fn handle_loader_msg(state: &mut GlobalState, msg: vfs::loader::Message) -> Resu
                     state.process_changes(true);
 
                     state.init_source_root();
+                    state.bootstrap_metadata_substrate();
 
                     state.report_progress(
                         "Loading",

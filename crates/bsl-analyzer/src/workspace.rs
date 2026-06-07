@@ -408,7 +408,7 @@ impl GlobalState {
     }
 
     pub fn init_source_root(&mut self) {
-        use base_db::{SourceDatabase, SourceRoot, BSL_SOURCE_ROOT, METADATA_SOURCE_ROOT};
+        use base_db::{SourceDatabase, SourceRoot, BSL_SOURCE_ROOT};
 
         let start = Instant::now();
 
@@ -417,15 +417,13 @@ impl GlobalState {
 
         let vfs = self.vfs.read();
 
-        // Rebuild both roots FRESH from the current VFS, partitioned by file role:
-        // `.bsl` sources into root(0), watched metadata XML into the dedicated
-        // metadata root(1). A fresh rebuild (no merge with the previous set) means
-        // a renamed/removed file's stale entry cannot linger across a reload. The
-        // partition keeps metadata XML out of the BSL iterators (which scan root(0))
-        // while still giving each XML a source root so `file_text`'s disk read can
-        // resolve its path.
+        // Rebuild root(0) FRESH from the current VFS, `.bsl` sources only. A fresh
+        // rebuild (no merge with the previous set) means a renamed/removed file's
+        // stale entry cannot linger across a reload, and excluding metadata XML
+        // keeps it out of the BSL iterators that scan root(0). Metadata composing
+        // files live in the dedicated metadata root(1), owned by
+        // [`bootstrap_metadata_substrate`].
         let mut bsl_file_set = vfs::file_set::FileSet::new();
-        let mut metadata_file_set = vfs::file_set::FileSet::new();
 
         let mut vfs_files_skipped = 0;
 
@@ -442,21 +440,18 @@ impl GlobalState {
 
             if project_model::is_bsl_source_path(path.as_path()) {
                 bsl_file_set.insert(file_id, path.clone());
-            } else if project_model::is_metadata_path(path.as_path()) {
-                metadata_file_set.insert(file_id, path.clone());
             } else {
                 vfs_files_skipped += 1;
             }
         }
 
         let bsl_files = bsl_file_set.len();
-        let metadata_files = metadata_file_set.len();
         drop(vfs);
 
-        if bsl_files == 0 && metadata_files == 0 {
+        if bsl_files == 0 {
             tracing::warn!(
                 elapsed_ms = start.elapsed().as_millis() as u64,
-                "no files in VFS during init_source_root",
+                "no .bsl files in VFS during init_source_root",
             );
             return;
         }
@@ -464,24 +459,86 @@ impl GlobalState {
         let db = self.analysis_host.raw_database_mut();
 
         db.set_source_root(BSL_SOURCE_ROOT, SourceRoot::new_local(bsl_file_set));
-        db.set_source_root(METADATA_SOURCE_ROOT, SourceRoot::new_local(metadata_file_set));
 
         let bsl_ids: Vec<_> = db.source_root_input(BSL_SOURCE_ROOT).root(db).iter().collect();
         for file_id in bsl_ids {
             db.set_file_source_root(file_id, BSL_SOURCE_ROOT);
         }
-        let metadata_ids: Vec<_> =
-            db.source_root_input(METADATA_SOURCE_ROOT).root(db).iter().collect();
-        for file_id in metadata_ids {
-            db.set_file_source_root(file_id, METADATA_SOURCE_ROOT);
-        }
 
         tracing::info!(
             bsl_files,
-            metadata_files,
             vfs_files_skipped,
             elapsed_ms = start.elapsed().as_millis() as u64,
-            "rebuilt source roots from VFS (bsl + metadata, fresh)",
+            "rebuilt root(0) from VFS (.bsl only, fresh)",
+        );
+    }
+
+    /// Build the metadata Salsa substrate from the filesystem: for each config
+    /// root, discover its content-parsed MDOs, intern their composing files as
+    /// versioned VFS inputs in the dedicated metadata root(1), record each file's
+    /// on-disk content revision (text read on demand, not retained), and set the
+    /// per-root structure listing that `resolve_metadata_object` reads. The walk is
+    /// filesystem-authoritative (it does not enumerate VFS WatchOnly entries);
+    /// `alloc_file_id` is idempotent, so it reuses the FileId already interned for a
+    /// watched path. Runs after `init_source_root` and re-runs on reload.
+    pub fn bootstrap_metadata_substrate(&mut self) {
+        use base_db::{SourceDatabase, SourceRoot, METADATA_SOURCE_ROOT};
+        use ide_db::metadata::MdoEntry;
+
+        let start = Instant::now();
+
+        let config_paths = self.analysis_host.raw_database().all_config_paths();
+        if config_paths.is_empty() {
+            return;
+        }
+
+        let mut metadata_file_set = vfs::file_set::FileSet::new();
+        let mut revisions: Vec<(FileId, u64)> = Vec::new();
+        let mut listings: Vec<(String, Vec<MdoEntry>)> = Vec::new();
+
+        {
+            let mut vfs = self.vfs.write();
+            for (_, root_path) in &config_paths {
+                let discovered = bsl_metadata::discover_metadata_structure(root_path);
+                let mut entries = Vec::with_capacity(discovered.len());
+                for d in discovered {
+                    let Some(main) = enroll_metadata_file(
+                        &mut vfs,
+                        &d.main,
+                        &mut metadata_file_set,
+                        &mut revisions,
+                    ) else {
+                        continue;
+                    };
+                    let predefined = d.predefined.as_ref().and_then(|p| {
+                        enroll_metadata_file(&mut vfs, p, &mut metadata_file_set, &mut revisions)
+                    });
+                    entries.push(MdoEntry { kind: d.mdo_type, name: d.name, main, predefined });
+                }
+                listings.push((root_path.to_string_lossy().to_string(), entries));
+            }
+        }
+
+        let mdo_count: usize = listings.iter().map(|(_, e)| e.len()).sum();
+        let file_count = revisions.len();
+
+        let db = self.analysis_host.raw_database_mut();
+        db.set_source_root(METADATA_SOURCE_ROOT, SourceRoot::new_local(metadata_file_set));
+        for (fid, _) in &revisions {
+            db.set_file_source_root(*fid, METADATA_SOURCE_ROOT);
+        }
+        for (fid, revision) in &revisions {
+            db.set_file_revision_from_disk(*fid, *revision);
+        }
+        for (root, entries) in listings {
+            db.set_metadata_listing(&root, entries);
+        }
+
+        tracing::info!(
+            mdo_count,
+            file_count,
+            elapsed_ms = start.elapsed().as_millis() as u64,
+            "bootstrapped metadata substrate",
         );
     }
 
@@ -563,6 +620,24 @@ impl GlobalState {
         Url::from_file_path(std_path)
             .map_err(|_| anyhow!("Failed to convert path to URL: {:?}", std_path))
     }
+}
+
+/// Intern a metadata composing file's path to a stable [`FileId`], add it to the
+/// metadata file set, and record its on-disk content revision. Returns `None` when
+/// the file cannot be read (discovered then vanished), so the caller drops it from
+/// the MDO. `alloc_file_id` is idempotent: an already-watched path keeps its id.
+fn enroll_metadata_file(
+    vfs: &mut vfs::Vfs,
+    path: &Path,
+    file_set: &mut vfs::file_set::FileSet,
+    revisions: &mut Vec<(FileId, u64)>,
+) -> Option<FileId> {
+    let text = base_db::read_disk_text(path).ok()?;
+    let vfs_path = VfsPath::new(path.to_path_buf());
+    let file_id = vfs.alloc_file_id(vfs_path.clone());
+    file_set.insert(file_id, vfs_path);
+    revisions.push((file_id, base_db::content_revision(&text)));
+    Some(file_id)
 }
 
 fn path_in_workspace(
