@@ -485,7 +485,7 @@ impl GlobalState {
     /// watched path. Runs after `init_source_root` and re-runs on reload.
     pub fn bootstrap_metadata_substrate(&mut self) {
         use base_db::{SourceDatabase, SourceRoot, METADATA_SOURCE_ROOT};
-        use ide_db::metadata::MdoEntry;
+        use ide_db::metadata::{DefinedTypeEntry, MdoEntry};
 
         let start = Instant::now();
 
@@ -496,7 +496,7 @@ impl GlobalState {
 
         let mut metadata_file_set = vfs::file_set::FileSet::new();
         let mut revisions: Vec<(FileId, u64)> = Vec::new();
-        let mut listings: Vec<(String, Vec<MdoEntry>)> = Vec::new();
+        let mut listings: Vec<(String, Vec<MdoEntry>, Vec<DefinedTypeEntry>)> = Vec::new();
 
         {
             let mut vfs = self.vfs.write();
@@ -525,11 +525,24 @@ impl GlobalState {
                     });
                     entries.push(MdoEntry { kind: d.mdo_type, name: d.name, main, predefined });
                 }
-                listings.push((root_path.to_string_lossy().to_string(), entries));
+                let mut defined_types = Vec::new();
+                for d in bsl_metadata::discover_defined_type_structure(root_path) {
+                    let Some(main) = enroll_metadata_file(
+                        &mut vfs,
+                        &d.main,
+                        true,
+                        &mut metadata_file_set,
+                        &mut revisions,
+                    ) else {
+                        continue;
+                    };
+                    defined_types.push(DefinedTypeEntry { name: d.name, main });
+                }
+                listings.push((root_path.to_string_lossy().to_string(), entries, defined_types));
             }
         }
 
-        let mdo_count: usize = listings.iter().map(|(_, e)| e.len()).sum();
+        let mdo_count: usize = listings.iter().map(|(_, e, _)| e.len()).sum();
         let file_count = revisions.len();
 
         let db = self.analysis_host.raw_database_mut();
@@ -540,8 +553,8 @@ impl GlobalState {
         for (fid, revision) in &revisions {
             db.set_file_revision_from_disk(*fid, *revision);
         }
-        for (root, entries) in listings {
-            db.set_metadata_listing(&root, entries);
+        for (root, entries, defined_types) in listings {
+            db.set_metadata_listing(&root, entries, defined_types);
         }
 
         tracing::info!(
@@ -571,7 +584,7 @@ impl GlobalState {
     /// substrate input actually changed, so callers can gate a diagnostics refresh.
     pub fn refresh_metadata_substrate(&mut self, changed_paths: &[PathBuf]) -> bool {
         use base_db::{SourceDatabase, SourceRoot, METADATA_SOURCE_ROOT};
-        use ide_db::metadata::MdoEntry;
+        use ide_db::metadata::{DefinedTypeEntry, MdoEntry};
 
         if changed_paths.is_empty() {
             return false;
@@ -600,7 +613,7 @@ impl GlobalState {
 
         let mut new_file_ids: Vec<FileId> = Vec::new();
         let mut revisions: Vec<(FileId, u64)> = Vec::new();
-        let mut listings: Vec<(String, Vec<MdoEntry>)> = Vec::new();
+        let mut listings: Vec<(String, Vec<MdoEntry>, Vec<DefinedTypeEntry>)> = Vec::new();
 
         {
             let mut vfs = self.vfs.write();
@@ -631,7 +644,21 @@ impl GlobalState {
                     });
                     entries.push(MdoEntry { kind: d.mdo_type, name: d.name, main, predefined });
                 }
-                listings.push((root.to_string_lossy().to_string(), entries));
+                let mut defined_types = Vec::new();
+                for d in bsl_metadata::discover_defined_type_structure(root) {
+                    let Some(main) = enroll_refresh(
+                        &mut vfs,
+                        &d.main,
+                        &changed_set,
+                        &mut metadata_file_set,
+                        &mut new_file_ids,
+                        &mut revisions,
+                    ) else {
+                        continue;
+                    };
+                    defined_types.push(DefinedTypeEntry { name: d.name, main });
+                }
+                listings.push((root.to_string_lossy().to_string(), entries, defined_types));
             }
         }
 
@@ -651,13 +678,15 @@ impl GlobalState {
             db.set_file_revision_from_disk(*fid, *revision);
             changed = true;
         }
-        for (root, entries) in listings {
+        for (root, entries, defined_types) in listings {
             let structure_changed = match db.metadata_listing(&root) {
-                Some(input) => *input.entries(db) != entries,
+                Some(input) => {
+                    *input.entries(db) != entries || *input.defined_types(db) != defined_types
+                }
                 None => true,
             };
             if structure_changed {
-                db.set_metadata_listing(&root, entries);
+                db.set_metadata_listing(&root, entries, defined_types);
                 changed = true;
             }
         }

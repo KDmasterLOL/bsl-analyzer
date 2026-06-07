@@ -49,7 +49,9 @@ pub use manager_lookup::{lookup_manager_field, ManagerMemberInfo};
 pub use method_lookup::{lookup_method, MethodInfo};
 pub use method_resolution::{resolve_qualified_call, MethodResolution};
 pub use module_implicit::module_implicit_fields;
-pub use object_resolver::{ConfigsObjectResolver, DbObjectResolver, ObjectResolver};
+pub use object_resolver::{
+    ConfigsObjectResolver, DbMetadataResolver, DbObjectResolver, ObjectResolver,
+};
 pub use platform_global_lookup::resolve_platform_global_property_type;
 pub use platform_manager_lookup::{
     resolve_platform_manager_method, resolve_platform_metadata_ref_method, PlatformMethodResolution,

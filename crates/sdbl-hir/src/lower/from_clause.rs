@@ -975,7 +975,7 @@ impl LoweringContext {
                 let underlying_type =
                     self.metadata.as_ref().and_then(|m| m.resolve_defined_type(name)).map(
                         |underlying| {
-                            Box::new(self.resolve_attribute_type_inner(underlying, visited))
+                            Box::new(self.resolve_attribute_type_inner(&underlying, visited))
                         },
                     );
                 visited.remove(&key);

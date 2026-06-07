@@ -83,6 +83,7 @@ fn resolve_metadata_object_isolates_content_and_structure() {
             main: f1,
             predefined: None,
         }]),
+        Arc::new(Vec::new()),
     );
     assert_eq!(config_index(&db, listing).len(), 1);
 
@@ -140,6 +141,66 @@ fn resolve_metadata_object_isolates_content_and_structure() {
         Arc::ptr_eq(&c1_before_edit, &c1_after_edit),
         "a content edit to one MDO must not re-resolve a sibling"
     );
+}
+
+#[test]
+fn resolve_defined_type_isolates_content_and_structure() {
+    use crate::metadata::{
+        defined_type_index, resolve_defined_type, DefinedTypeEntry, MetadataListingInput,
+    };
+    use bsl_metadata::AttributeType;
+    use salsa::Setter;
+
+    fn defined_type_xml(name: &str, inner: &str) -> String {
+        format!(
+            concat!(
+                "<MetaDataObject>",
+                "<DefinedType uuid=\"00000000-0000-0000-0000-000000000010\">",
+                "<Properties><Name>{}</Name><Type><Type>{}</Type></Type></Properties>",
+                "</DefinedType></MetaDataObject>"
+            ),
+            name, inner
+        )
+    }
+
+    let mut db = RootDatabaseImpl::new();
+    let f1 = FileId(0);
+
+    let mut file_set = FileSet::new();
+    file_set.insert(f1, VfsPath::new("/DefinedTypes/ДенежнаяСумма.xml"));
+    db.set_source_root(SourceRootId(1), SourceRoot::new_local(file_set));
+    db.set_file_source_root(f1, SourceRootId(1));
+    db.set_file_text(f1, &defined_type_xml("ДенежнаяСумма", "xs:boolean"));
+
+    let listing = MetadataListingInput::new(
+        &db,
+        Arc::new(Vec::new()),
+        Arc::new(vec![DefinedTypeEntry {
+            name: "ДенежнаяСумма".to_string(), main: f1
+        }]),
+    );
+    assert_eq!(defined_type_index(&db, listing).lookup("денежнаясумма"), Some(f1));
+
+    let t1 = resolve_defined_type(&db, listing, "ДенежнаяСумма".to_string())
+        .expect("ДенежнаяСумма resolves");
+    assert_eq!(*t1, AttributeType::Boolean);
+
+    // Case-insensitive, and an absent name is None (the miss depends on the index).
+    assert!(resolve_defined_type(&db, listing, "денежнаясумма".to_string()).is_some());
+    assert!(resolve_defined_type(&db, listing, "Нет".to_string()).is_none());
+
+    // Re-resolving unchanged memoises.
+    let t1_again = resolve_defined_type(&db, listing, "ДенежнаяСумма".to_string()).unwrap();
+    assert!(Arc::ptr_eq(&t1, &t1_again), "unchanged resolution must memoise");
+
+    // A content edit re-parses to the new underlying type.
+    db.set_file_text(f1, &defined_type_xml("ДенежнаяСумма", "xs:string"));
+    let t1_edited = resolve_defined_type(&db, listing, "ДенежнаяСумма".to_string()).unwrap();
+    assert!(matches!(*t1_edited, AttributeType::String { .. }), "content edit must re-parse");
+
+    // A structure removal tombstones it.
+    listing.set_defined_types(&mut db).to(Arc::new(Vec::new()));
+    assert!(resolve_defined_type(&db, listing, "ДенежнаяСумма".to_string()).is_none());
 }
 
 #[test]

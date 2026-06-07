@@ -112,7 +112,7 @@ impl<'a> TyLoweringContext<'a> {
             let mut chain_visited = HashSet::new();
             let result = resolve_defined_type_terminal(resolver, name, &mut chain_visited)
                 .map(|underlying| {
-                    let tref = TypeRef::from_attribute_type(underlying);
+                    let tref = TypeRef::from_attribute_type(&underlying);
                     self.lower_type_ref_id_inner(db, &tref, visited)
                 })
                 .unwrap_or_else(|| db.unknown());
@@ -504,8 +504,8 @@ mod tests {
     }
 
     impl MetadataResolver for MockResolver {
-        fn resolve_defined_type(&self, name: &str) -> Option<&AttributeType> {
-            self.0.get(&name.to_lowercase())
+        fn resolve_defined_type(&self, name: &str) -> Option<AttributeType> {
+            self.0.get(&name.to_lowercase()).cloned()
         }
     }
 

@@ -334,16 +334,23 @@ impl RootDatabaseImpl {
     /// outside any tracked query. On reload it updates the existing input in place
     /// so previously recorded `config_index`/`resolve_metadata_object` dependencies
     /// stay valid and re-derive from the new structure.
-    pub fn set_metadata_listing(&mut self, root: &str, entries: Vec<metadata::MdoEntry>) {
+    pub fn set_metadata_listing(
+        &mut self,
+        root: &str,
+        entries: Vec<metadata::MdoEntry>,
+        defined_types: Vec<metadata::DefinedTypeEntry>,
+    ) {
         use salsa::Setter;
         let key = metadata::canonicalize_configuration_path(root);
         let entries = Arc::new(entries);
+        let defined_types = Arc::new(defined_types);
         match self.metadata_listings.get(&key).map(|e| *e.value()) {
             Some(input) => {
                 input.set_entries(self).to(entries);
+                input.set_defined_types(self).to(defined_types);
             }
             None => {
-                let input = metadata::MetadataListingInput::new(self, entries);
+                let input = metadata::MetadataListingInput::new(self, entries, defined_types);
                 self.metadata_listings.insert(key, input);
             }
         }
@@ -471,6 +478,33 @@ impl RootDatabaseImpl {
             (None, Some(ext)) => Some(ext),
             (None, None) => None,
         }
+    }
+
+    /// The defined-type counterpart of [`resolve_metadata_object_for_file`]:
+    /// resolve a defined type's underlying type visible to `file_id`. A defined
+    /// type's overlay replaces the underlying type wholesale, so the file's
+    /// applicable extension wins outright over the base (no field merge). Per-
+    /// defined-type when the substrate is populated, falling back to
+    /// `merged_visible_configuration().resolve_defined_type` otherwise.
+    pub fn resolve_defined_type_for_file(
+        &self,
+        file_id: FileId,
+        name: &str,
+    ) -> Option<bsl_metadata::AttributeType> {
+        let (main_listing, ext_listing, bootstrapped) = self.metadata_listings_for_file(file_id)?;
+
+        if !bootstrapped {
+            use bsl_metadata::MetadataResolver;
+            use hir::ConfigsDatabase;
+            return self.merged_visible_configuration(file_id)?.resolve_defined_type(name);
+        }
+
+        let resolve_in = |listing: Option<metadata::MetadataListingInput>| {
+            listing.and_then(|l| metadata::resolve_defined_type(self, l, name.to_string()))
+        };
+        resolve_in(ext_listing)
+            .or_else(|| resolve_in(main_listing))
+            .map(|underlying| (*underlying).clone())
     }
 
     fn features(&self) -> FeaturesInput {
@@ -729,6 +763,14 @@ impl hir::ConfigsDatabase for RootDatabaseImpl {
         name: &str,
     ) -> Option<Arc<bsl_metadata::Register>> {
         RootDatabaseImpl::resolve_register_for_file(self, file_id, mdo_type, name)
+    }
+
+    fn resolve_defined_type(
+        &self,
+        file_id: FileId,
+        name: &str,
+    ) -> Option<bsl_metadata::AttributeType> {
+        RootDatabaseImpl::resolve_defined_type_for_file(self, file_id, name)
     }
 
     fn merged_visible_configuration(

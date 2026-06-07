@@ -726,6 +726,50 @@ pub fn parse_register_from_text(
     register_parser(mdo_type)?(main_xml).ok()
 }
 
+/// One discovered defined type in a config root's *structure* listing: its name
+/// and the main XML path. Defined types are global (keyed by name, no `MdoType`,
+/// no predefined sidecar), so they get a dedicated discovery struct rather than
+/// riding [`DiscoveredMdo`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredDefinedType {
+    pub name: String,
+    pub main: PathBuf,
+}
+
+/// Walk one config root and list its defined types by structure only (name + main
+/// XML path), the defined-type counterpart of [`discover_register_structure`].
+/// Defined types are stored as loose `<name>.xml` under `DefinedTypes/` and parsed
+/// by [`parse_defined_type_from_text`], so they get their own discovery + parse
+/// query while sharing the per-config-root structure listing.
+pub fn discover_defined_type_structure(root: &Path) -> Vec<DiscoveredDefinedType> {
+    let dir = root.join("DefinedTypes");
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut out = Vec::new();
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("xml") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+        out.push(DiscoveredDefinedType { name: stem.to_string(), main: path });
+    }
+    // Stable order so a structure listing built from this compares equal across
+    // watch events on an unchanged filesystem (see `discover_metadata_structure`).
+    out.sort_by(|a, b| (a.name.to_lowercase(), &a.main).cmp(&(b.name.to_lowercase(), &b.main)));
+    out
+}
+
+/// Parse one defined type from its main XML text. The defined-type counterpart of
+/// [`parse_register_from_text`]; the per-defined-type Salsa query calls it after
+/// reading the text through the versioned VFS.
+pub fn parse_defined_type_from_text(main_xml: &str) -> Option<crate::defined_type::DefinedType> {
+    xml_parser::parse_defined_type_xml(main_xml).ok()
+}
+
 fn load_enums_parallel(dir: &Path) -> Vec<MetadataObject> {
     if !dir.exists() {
         return Vec::new();
@@ -1093,6 +1137,45 @@ mod tests {
             config.registers().iter().map(|r| (r.mdo_type(), r.name().to_string())).collect();
 
         assert_eq!(discovered, from_load, "register discovery must match the directory loader");
+    }
+
+    #[test]
+    fn discover_defined_type_structure_matches_directory_load() {
+        use std::collections::BTreeSet;
+
+        let root = std::env::temp_dir().join(format!(
+            "bsl_discover_dt_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let dt_dir = root.join("DefinedTypes");
+        std::fs::create_dir_all(&dt_dir).unwrap();
+        let xml = |name: &str| {
+            format!(
+                concat!(
+                    "<MetaDataObject>",
+                    "<DefinedType uuid=\"00000000-0000-0000-0000-000000000001\">",
+                    "<Properties><Name>{}</Name>",
+                    "<Type><Type>xs:boolean</Type></Type>",
+                    "</Properties></DefinedType></MetaDataObject>"
+                ),
+                name
+            )
+        };
+        std::fs::write(dt_dir.join("ОтметкаВремени.xml"), xml("ОтметкаВремени")).unwrap();
+        std::fs::write(dt_dir.join("ДенежнаяСумма.xml"), xml("ДенежнаяСумма")).unwrap();
+
+        let discovered: BTreeSet<String> =
+            discover_defined_type_structure(&root).into_iter().map(|d| d.name).collect();
+
+        let config = load_from_directory(&root).unwrap();
+        let from_load: BTreeSet<String> =
+            config.defined_types().iter().map(|d| d.name().to_string()).collect();
+
+        assert_eq!(discovered, from_load, "defined-type discovery must match the directory loader",);
+        assert!(discovered.contains("ДенежнаяСумма"), "fixture sanity");
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

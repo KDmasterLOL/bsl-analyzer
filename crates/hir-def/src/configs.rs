@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use bsl_metadata::{Configuration, MdoType, MetadataObject, Register};
+use bsl_metadata::{AttributeType, Configuration, MdoType, MetadataObject, Register};
 use vfs::FileId;
 
 use crate::DefDatabase;
@@ -36,6 +36,13 @@ pub trait ConfigsDatabase: DefDatabase {
         mdo_type: MdoType,
         name: &str,
     ) -> Option<Arc<Register>>;
+
+    /// Resolve the underlying type of the defined type `name` visible to
+    /// `file_id`, at per-defined-type Salsa granularity. Base + the file's own
+    /// extension (which replaces the underlying type wholesale). Returns the
+    /// terminal type only after one hop; defined-type chains are unwound by
+    /// [`bsl_metadata::resolve_defined_type_terminal`] in the type-lowering layer.
+    fn resolve_defined_type(&self, file_id: FileId, name: &str) -> Option<AttributeType>;
 
     fn resolved_module_summary(
         &self,

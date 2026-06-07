@@ -4,20 +4,25 @@ use crate::metadata_object::AttributeType;
 use crate::Configuration;
 
 pub trait MetadataResolver: std::fmt::Debug {
-    fn resolve_defined_type(&self, name: &str) -> Option<&AttributeType>;
+    /// The underlying type of the defined type `name`, or `None` if unknown.
+    ///
+    /// Returns an owned [`AttributeType`] (not a borrow) so a db-backed resolver
+    /// can hand back a value composed fresh from a per-defined-type Salsa cell,
+    /// rather than borrowing from a long-lived `Configuration`.
+    fn resolve_defined_type(&self, name: &str) -> Option<AttributeType>;
 }
 
 impl MetadataResolver for Configuration {
-    fn resolve_defined_type(&self, name: &str) -> Option<&AttributeType> {
-        self.find_defined_type(name).map(|dt| dt.underlying_type())
+    fn resolve_defined_type(&self, name: &str) -> Option<AttributeType> {
+        self.find_defined_type(name).map(|dt| dt.underlying_type().clone())
     }
 }
 
-pub fn resolve_defined_type_terminal<'a, R>(
-    resolver: &'a R,
+pub fn resolve_defined_type_terminal<R>(
+    resolver: &R,
     name: &str,
     visited: &mut HashSet<String>,
-) -> Option<&'a AttributeType>
+) -> Option<AttributeType>
 where
     R: MetadataResolver + ?Sized,
 {
@@ -26,12 +31,11 @@ where
         if !visited.insert(current.to_lowercase()) {
             return None;
         }
-        let underlying = resolver.resolve_defined_type(&current)?;
-        match underlying {
+        match resolver.resolve_defined_type(&current)? {
             AttributeType::DefinedType { name: next } => {
-                current = next.clone();
+                current = next;
             }
-            _ => return Some(underlying),
+            other => return Some(other),
         }
     }
 }
@@ -114,6 +118,6 @@ mod tests {
         let mut visited = HashSet::new();
         let underlying = resolve_defined_type_terminal(&cfg, "денежнаясумма", &mut visited)
             .expect("case-insensitive lookup");
-        assert_eq!(underlying, &AttributeType::Boolean);
+        assert_eq!(underlying, AttributeType::Boolean);
     }
 }

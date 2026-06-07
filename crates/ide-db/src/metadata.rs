@@ -124,14 +124,28 @@ pub struct MdoEntry {
     pub predefined: Option<vfs::FileId>,
 }
 
-/// The per-config-root *structure* input: the list of MDOs that exist in one
-/// config root (base config or one extension). Set out-of-query by the bootstrap;
-/// re-set only when the directory structure changes. Keeping it per-root means an
-/// extension's MDOs never collide with the base config's in [`config_index`], and
-/// a structure change in one root does not invalidate another.
+/// One discovered defined type in a config root's *structure* listing: its name
+/// and the [`vfs::FileId`] of its main XML. Defined types are global (keyed by
+/// name, no kind, no predefined sidecar), so they ride a separate field of the
+/// listing rather than [`MdoEntry`].
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct DefinedTypeEntry {
+    pub name: String,
+    pub main: vfs::FileId,
+}
+
+/// The per-config-root *structure* input: the MDOs and defined types that exist in
+/// one config root (base config or one extension). Set out-of-query by the
+/// bootstrap; re-set only when the directory structure changes. Keeping it per-root
+/// means an extension's MDOs never collide with the base config's in
+/// [`config_index`], and a structure change in one root does not invalidate
+/// another. `entries` (MDOs + registers) and `defined_types` are separate fields,
+/// so a defined-type structure change does not invalidate [`config_index`] and
+/// vice versa.
 #[salsa::input(debug)]
 pub struct MetadataListingInput {
     pub entries: Arc<Vec<MdoEntry>>,
+    pub defined_types: Arc<Vec<DefinedTypeEntry>>,
 }
 
 /// The composing-file identities for one MDO, as held in a [`ConfigIndex`].
@@ -239,6 +253,79 @@ pub fn resolve_register(
     let ids = index.lookup(mdo_type, &name)?;
     let files = MdoFiles::new(db, mdo_type, ids.main, ids.predefined);
     parse_register_query(db, files)
+}
+
+/// The main XML file of a single defined type, interned so
+/// [`parse_defined_type_query`] keys on the file identity; its content revision
+/// drives invalidation, so editing one defined type re-parses only it.
+#[salsa::interned(debug)]
+pub struct DefinedTypeFile<'db> {
+    pub main: vfs::FileId,
+}
+
+/// Parse one defined type from its main XML, read through the versioned VFS, and
+/// return its underlying type (the resolution unit; an extension overlay replaces
+/// it wholesale). The defined-type counterpart of [`parse_register_query`].
+/// Backdates on an unchanged underlying type.
+#[salsa::tracked(lru = 8192)]
+pub fn parse_defined_type_query(
+    db: &dyn base_db::SourceDatabase,
+    file: DefinedTypeFile<'_>,
+) -> Option<Arc<bsl_metadata::AttributeType>> {
+    let _span = tracing::info_span!("parse_defined_type").entered();
+
+    let main_text = db.file_text(file.main(db));
+    bsl_metadata::parse_defined_type_from_text(&main_text)
+        .map(|dt| Arc::new(dt.underlying_type().clone()))
+}
+
+/// A config root's `lowercased-name -> defined-type file` lookup, derived from its
+/// [`MetadataListingInput`]'s `defined_types` field. Tracked on that field alone,
+/// so a content edit leaves it memoised and an MDO structure change does not
+/// invalidate it.
+#[derive(Default, PartialEq, Eq, Debug)]
+pub struct DefinedTypeIndex {
+    by_name: std::collections::HashMap<String, vfs::FileId>,
+}
+
+impl DefinedTypeIndex {
+    pub fn lookup(&self, name: &str) -> Option<vfs::FileId> {
+        self.by_name.get(&name.to_lowercase()).copied()
+    }
+}
+
+/// Build a config root's defined-type name lookup from its structure listing.
+#[salsa::tracked]
+pub fn defined_type_index(
+    db: &dyn base_db::SourceDatabase,
+    listing: MetadataListingInput,
+) -> Arc<DefinedTypeIndex> {
+    let _span = tracing::info_span!("defined_type_index").entered();
+
+    let entries = listing.defined_types(db);
+    let mut by_name = std::collections::HashMap::with_capacity(entries.len());
+    for entry in entries.iter() {
+        by_name.insert(entry.name.to_lowercase(), entry.main);
+    }
+    Arc::new(DefinedTypeIndex { by_name })
+}
+
+/// Resolve a single defined type's underlying type within one config root, at
+/// per-defined-type Salsa granularity. The defined-type counterpart of
+/// [`resolve_metadata_object`]; extension overlay across roots is composed by
+/// callers (an extension replaces the underlying type wholesale).
+#[salsa::tracked]
+pub fn resolve_defined_type(
+    db: &dyn base_db::SourceDatabase,
+    listing: MetadataListingInput,
+    name: String,
+) -> Option<Arc<bsl_metadata::AttributeType>> {
+    let _span = tracing::info_span!("resolve_defined_type").entered();
+
+    let index = defined_type_index(db, listing);
+    let main = index.lookup(&name)?;
+    let file = DefinedTypeFile::new(db, main);
+    parse_defined_type_query(db, file)
 }
 
 #[salsa::db]
