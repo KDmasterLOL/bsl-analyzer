@@ -600,6 +600,17 @@ pub fn discover_metadata_structure(root: &Path) -> Vec<DiscoveredMdo> {
     for (subdir, mdo_type) in SIMPLE_XML_DIRS {
         discover_loose_xml(&root.join(subdir), *mdo_type, &mut out);
     }
+    // `read_dir` yields entries in an unspecified order, so sort to a stable key:
+    // a structure listing built from this must compare equal across calls when the
+    // filesystem is unchanged, otherwise every watch event would needlessly re-set
+    // the listing input.
+    out.sort_by(|a, b| {
+        (a.mdo_type as u32, a.name.to_lowercase(), &a.main).cmp(&(
+            b.mdo_type as u32,
+            b.name.to_lowercase(),
+            &b.main,
+        ))
+    });
     out
 }
 
@@ -1011,6 +1022,17 @@ mod tests {
         assert!(
             discovered.contains(&(MdoType::Catalog, "Справочник1".to_string())),
             "fixture sanity: Справочник1 catalog is present"
+        );
+    }
+
+    #[test]
+    fn discover_metadata_structure_order_is_stable() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/designer");
+        // Repeated discovery must yield byte-identical Vecs so a structure listing
+        // compares equal across watch events on an unchanged filesystem.
+        assert_eq!(
+            discover_metadata_structure(Path::new(path)),
+            discover_metadata_structure(Path::new(path)),
         );
     }
 
