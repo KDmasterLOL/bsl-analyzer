@@ -44,6 +44,18 @@ pub trait ConfigsDatabase: DefDatabase {
     /// [`bsl_metadata::resolve_defined_type_terminal`] in the type-lowering layer.
     fn resolve_defined_type(&self, file_id: FileId, name: &str) -> Option<AttributeType>;
 
+    /// The documents recording into the register `(parent, register_name)` visible
+    /// to `file_id` — a cross-MDO reverse relation aggregated across the base and
+    /// the file's extension. Returns owned names (not a borrow) so a db-backed
+    /// resolver can compose them. Not yet narrowed to a reverse index, so it still
+    /// depends on the whole visible configuration.
+    fn recorders_for_register(
+        &self,
+        file_id: FileId,
+        parent: MdoType,
+        register_name: &str,
+    ) -> Vec<String>;
+
     fn resolved_module_summary(
         &self,
         module_id: crate::ModuleId,

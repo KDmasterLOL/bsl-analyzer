@@ -493,13 +493,19 @@ impl<'db> InferenceContext<'db> {
                     }
                     Expr::Field { base, field } => {
                         let base_ty = self.infer_expr(ExprId::from_idx(*base));
-                        let configs = self.db.configurations(self.file_id);
+                        let obj_resolver =
+                            crate::object_resolver::DbObjectResolver::new(self.db, self.file_id);
                         let resolver = self.get_resolver();
                         let info = crate::form_items::lookup_form_item_field(
                             self.db, &resolver, base_ty, field,
                         )
                         .or_else(|| {
-                            crate::field_lookup::lookup_field(self.db, &configs, base_ty, field)
+                            crate::field_lookup::lookup_field(
+                                self.db,
+                                &obj_resolver,
+                                base_ty,
+                                field,
+                            )
                         });
                         if let Some(info) = info {
                             if info.is_readonly {
@@ -698,7 +704,6 @@ impl<'db> InferenceContext<'db> {
             Expr::Field { base, field } => {
                 let base_ty = self.infer_expr(ExprId::from_idx(*base));
 
-                let configs = self.db.configurations(self.file_id);
                 let resolver = self.get_resolver();
                 let obj_resolver =
                     crate::object_resolver::DbObjectResolver::new(self.db, self.file_id);
@@ -707,7 +712,7 @@ impl<'db> InferenceContext<'db> {
                 {
                     info.ty
                 } else if let Some(info) =
-                    crate::field_lookup::lookup_field(self.db, &configs, base_ty, field)
+                    crate::field_lookup::lookup_field(self.db, &obj_resolver, base_ty, field)
                 {
                     info.ty
                 } else if let Some(info) = crate::manager_lookup::lookup_manager_field(

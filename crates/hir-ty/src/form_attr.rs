@@ -1,5 +1,4 @@
-use bsl_config::VisibleConfig;
-use bsl_metadata::{AttributeType, FormAttribute};
+use bsl_metadata::{AttributeType, FormAttribute, MetadataResolver};
 use bsl_types::builders::Builders;
 use bsl_types::facet::{FormDataFacet, MdoRefFacet};
 use bsl_types::intern::TypeKernelDb;
@@ -13,7 +12,7 @@ use crate::field_enum::attribute_type_to_typeid;
 pub fn lower_form_attribute_to_typeid(
     db: &dyn TypeKernelDb,
     attr: &FormAttribute,
-    configs: &[VisibleConfig],
+    resolver: &dyn MetadataResolver,
 ) -> TypeId {
     let has_columns = !attr.columns.is_empty();
 
@@ -41,7 +40,7 @@ pub fn lower_form_attribute_to_typeid(
         return db.mk_form_data(FormDataFacet::Collection, None);
     }
 
-    attribute_type_to_typeid(db, &attr.attr_type, configs)
+    attribute_type_to_typeid(db, &attr.attr_type, resolver)
 }
 
 pub(crate) fn resolve_form_attribute(
@@ -58,13 +57,14 @@ pub(crate) fn resolve_form_attribute(
     let form = metadata.form.as_ref()?;
     let attr = form.find_attribute(name.as_str())?;
 
-    let configs = db.configurations(module_id.file_id);
-    Some(lower_form_attribute_to_typeid(db, attr, &configs))
+    let obj_resolver = crate::object_resolver::DbObjectResolver::new(db, module_id.file_id);
+    Some(lower_form_attribute_to_typeid(db, attr, &obj_resolver))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::object_resolver::ConfigsObjectResolver;
     use bsl_metadata::{FormAttributeColumn, MdoType};
     use bsl_types::kind::TypeKind;
     use bsl_types::testing::InMemoryDb;
@@ -120,14 +120,20 @@ mod tests {
     fn primitive_attribute_lowers_through_generic_adapter() {
         let db = InMemoryDb::new();
         let attr = plain("Замечание", AttributeType::String { length: Some(100) });
-        assert_eq!(lower_form_attribute_to_typeid(&db, &attr, &[]), db.string(None, false));
+        assert_eq!(
+            lower_form_attribute_to_typeid(&db, &attr, &ConfigsObjectResolver(&[])),
+            db.string(None, false)
+        );
     }
 
     #[test]
     fn boolean_attribute_lowers_to_boolean() {
         let db = InMemoryDb::new();
         let attr = plain("Флаг", AttributeType::Boolean);
-        assert_eq!(lower_form_attribute_to_typeid(&db, &attr, &[]), db.boolean());
+        assert_eq!(
+            lower_form_attribute_to_typeid(&db, &attr, &ConfigsObjectResolver(&[])),
+            db.boolean()
+        );
     }
 
     #[test]
@@ -135,7 +141,10 @@ mod tests {
         use bsl_metadata::PlatformValueType;
         let db = InMemoryDb::new();
         let attr = plain("СценарииВыгрузки", AttributeType::Platform(PlatformValueType::ValueList));
-        assert_eq!(lower_form_attribute_to_typeid(&db, &attr, &[]), db.value_list(None));
+        assert_eq!(
+            lower_form_attribute_to_typeid(&db, &attr, &ConfigsObjectResolver(&[])),
+            db.value_list(None)
+        );
     }
 
     #[test]
@@ -143,7 +152,7 @@ mod tests {
         use bsl_metadata::PlatformValueType;
         let db = InMemoryDb::new();
         let attr = plain("Дерево", AttributeType::Platform(PlatformValueType::ValueTree));
-        let id = lower_form_attribute_to_typeid(&db, &attr, &[]);
+        let id = lower_form_attribute_to_typeid(&db, &attr, &ConfigsObjectResolver(&[]));
         assert_eq!(id, db.platform_object("ДеревоЗначений".to_string()));
     }
 
@@ -156,7 +165,7 @@ mod tests {
             },
         );
         let db = InMemoryDb::new();
-        let id = lower_form_attribute_to_typeid(&db, &attr, &[]);
+        let id = lower_form_attribute_to_typeid(&db, &attr, &ConfigsObjectResolver(&[]));
         assert_metadata_ref(&db, id, MetadataKind::CatalogRef, "Контрагенты");
     }
 
@@ -167,7 +176,7 @@ mod tests {
             AttributeType::Ref { mdo_type: MdoType::Document, name: "Заказ".to_string() },
         );
         let db = InMemoryDb::new();
-        let id = lower_form_attribute_to_typeid(&db, &attr, &[]);
+        let id = lower_form_attribute_to_typeid(&db, &attr, &ConfigsObjectResolver(&[]));
         assert_form_data(&db, id, FormDataFacet::Structure, Some((MdoType::Document, "Заказ")));
     }
 
@@ -181,7 +190,7 @@ mod tests {
             },
         );
         let db = InMemoryDb::new();
-        let id = lower_form_attribute_to_typeid(&db, &attr, &[]);
+        let id = lower_form_attribute_to_typeid(&db, &attr, &ConfigsObjectResolver(&[]));
         assert_form_data(
             &db,
             id,
@@ -197,7 +206,7 @@ mod tests {
             AttributeType::Ref { mdo_type: MdoType::Report, name: "Анализ".to_string() },
         );
         let db = InMemoryDb::new();
-        let id = lower_form_attribute_to_typeid(&db, &attr, &[]);
+        let id = lower_form_attribute_to_typeid(&db, &attr, &ConfigsObjectResolver(&[]));
         assert_form_data(&db, id, FormDataFacet::Structure, Some((MdoType::Report, "Анализ")));
     }
 
@@ -211,7 +220,7 @@ mod tests {
             },
         );
         let db = InMemoryDb::new();
-        let id = lower_form_attribute_to_typeid(&db, &attr, &[]);
+        let id = lower_form_attribute_to_typeid(&db, &attr, &ConfigsObjectResolver(&[]));
         assert_form_data(
             &db,
             id,
@@ -229,7 +238,7 @@ mod tests {
             },
         );
         let db = InMemoryDb::new();
-        let id = lower_form_attribute_to_typeid(&db, &attr, &[]);
+        let id = lower_form_attribute_to_typeid(&db, &attr, &ConfigsObjectResolver(&[]));
         assert_form_data(
             &db,
             id,
@@ -245,7 +254,7 @@ mod tests {
             AttributeType::Ref { mdo_type: MdoType::InformationRegister, name: "X".to_string() },
         );
         let db = InMemoryDb::new();
-        let id = lower_form_attribute_to_typeid(&db, &attr, &[]);
+        let id = lower_form_attribute_to_typeid(&db, &attr, &ConfigsObjectResolver(&[]));
         assert_metadata_ref(&db, id, MetadataKind::InformationRegisterRef, "X");
     }
 
@@ -253,7 +262,7 @@ mod tests {
     fn main_attribute_with_bare_object_kind_yields_form_data_without_underlying() {
         let attr = main_attr("Объект", AttributeType::AnyObjectRef { mdo_type: MdoType::Catalog });
         let db = InMemoryDb::new();
-        let id = lower_form_attribute_to_typeid(&db, &attr, &[]);
+        let id = lower_form_attribute_to_typeid(&db, &attr, &ConfigsObjectResolver(&[]));
         assert_form_data(&db, id, FormDataFacet::Structure, None);
     }
 
@@ -269,7 +278,7 @@ mod tests {
             }],
         };
         let db = InMemoryDb::new();
-        let id = lower_form_attribute_to_typeid(&db, &attr, &[]);
+        let id = lower_form_attribute_to_typeid(&db, &attr, &ConfigsObjectResolver(&[]));
         assert_form_data(&db, id, FormDataFacet::Collection, None);
     }
 
@@ -285,7 +294,7 @@ mod tests {
             }],
         };
         let db = InMemoryDb::new();
-        let id = lower_form_attribute_to_typeid(&db, &attr, &[]);
+        let id = lower_form_attribute_to_typeid(&db, &attr, &ConfigsObjectResolver(&[]));
         assert_form_data(&db, id, FormDataFacet::Collection, None);
     }
 
@@ -293,7 +302,10 @@ mod tests {
     fn unknown_attribute_lowers_to_unknown() {
         let db = InMemoryDb::new();
         let attr = plain("БезТипа", AttributeType::Unknown);
-        assert_eq!(lower_form_attribute_to_typeid(&db, &attr, &[]), db.unknown());
+        assert_eq!(
+            lower_form_attribute_to_typeid(&db, &attr, &ConfigsObjectResolver(&[])),
+            db.unknown()
+        );
     }
 
     #[test]
@@ -311,7 +323,7 @@ mod tests {
             }],
         };
         let db = InMemoryDb::new();
-        let id = lower_form_attribute_to_typeid(&db, &attr, &[]);
+        let id = lower_form_attribute_to_typeid(&db, &attr, &ConfigsObjectResolver(&[]));
         assert_form_data(
             &db,
             id,
@@ -372,8 +384,19 @@ mod tests {
             FormDataFacet::Structure,
             Some(MdoRefFacet::new(MdoType::Document, "Заказ".to_string())),
         );
-        let _ = field_lookup::lookup_field(&db, &[], receiver, &Name::new("Дата"));
+        let _ = field_lookup::lookup_field(
+            &db,
+            &ConfigsObjectResolver(&[]),
+            receiver,
+            &Name::new("Дата"),
+        );
         let table = db.mk_form_data(FormDataFacet::Collection, None);
-        assert!(field_lookup::lookup_field(&db, &[], table, &Name::new("Дата")).is_none());
+        assert!(field_lookup::lookup_field(
+            &db,
+            &ConfigsObjectResolver(&[]),
+            table,
+            &Name::new("Дата")
+        )
+        .is_none());
     }
 }

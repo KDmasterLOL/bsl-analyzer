@@ -137,9 +137,9 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
             return None;
         }
 
-        let configs = self.db.configurations(file_id);
+        let obj_resolver = hir_ty::DbObjectResolver::new(self.db, file_id);
         let name = Name::new(token.text());
-        let field = hir_ty::lookup_field(self.db, &configs, receiver_id, &name)?;
+        let field = hir_ty::lookup_field(self.db, &obj_resolver, receiver_id, &name)?;
         Some(SemanticSymbol {
             key: SemanticSymbolKey::TypedMember { file_id, range: token.text_range() },
             name: field.name,

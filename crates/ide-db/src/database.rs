@@ -773,6 +773,26 @@ impl hir::ConfigsDatabase for RootDatabaseImpl {
         RootDatabaseImpl::resolve_defined_type_for_file(self, file_id, name)
     }
 
+    fn recorders_for_register(
+        &self,
+        file_id: FileId,
+        parent: bsl_metadata::MdoType,
+        register_name: &str,
+    ) -> Vec<String> {
+        // A reverse relation (all documents writing to the register) cannot narrow
+        // to one MDO, so it reads the whole merged visible configuration for now; a
+        // per-document reverse index is a follow-up.
+        self.merged_visible_configuration(file_id)
+            .map(|config| {
+                config
+                    .recorders_for_register(parent, register_name)
+                    .iter()
+                    .map(|n| n.as_str().to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn merged_visible_configuration(
         &self,
         file_id: FileId,
