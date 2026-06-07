@@ -525,7 +525,7 @@ fn pick_sample_bsl_file(state: &GlobalState) -> Option<vfs::FileId> {
             if !project_model::is_bsl_source_path(std_path) {
                 return None;
             }
-            db.try_file_text(fid)?;
+            db.try_file_revision_input(fid)?;
             Some((std_path.to_string_lossy().into_owned(), fid))
         })
         .collect();
@@ -653,7 +653,7 @@ fn enumerate_bsl_roots(state: &GlobalState, cap: usize) -> Vec<vfs::FileId> {
             if !project_model::is_bsl_source_path(std_path) {
                 return None;
             }
-            db.try_file_text(fid)?;
+            db.try_file_revision_input(fid)?;
             Some((std_path.to_string_lossy().into_owned(), fid))
         })
         .collect();

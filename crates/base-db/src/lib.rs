@@ -26,6 +26,8 @@ pub trait SourceDatabase: salsa::Database {
 
     fn file_revision_input(&self, file_id: FileId) -> FileRevisionInput;
 
+    fn try_file_revision_input(&self, file_id: FileId) -> Option<FileRevisionInput>;
+
     fn source_root_input(&self, source_root_id: SourceRootId) -> SourceRootInput;
 
     fn file_source_root_input(&self, file_id: FileId) -> FileSourceRootInput;
@@ -148,16 +150,26 @@ impl Files {
         })
     }
 
+    pub fn try_file_revision(&self, file_id: FileId) -> Option<FileRevisionInput> {
+        self.file_revisions.get(&file_id).map(|entry| *entry.value())
+    }
+
     /// Register a file's content revision WITHOUT storing its text (the
     /// disk-backed path): `file_text_query` will read the file from disk on
     /// demand and verify the bytes hash to this revision. Used by batch analysis
-    /// to keep closed files evictable instead of resident.
+    /// and for closed LSP files to keep them evictable instead of resident.
+    ///
+    /// Drops any existing in-memory overlay for the file in the SAME exclusive
+    /// update so `file_text_query` (which prefers the overlay) actually falls
+    /// through to the disk read. Without this, a once-open file's stale overlay
+    /// would be hash-checked against the new disk revision and panic.
     pub fn set_file_revision_from_disk(
         &self,
         db: &mut dyn SourceDatabase,
         file_id: FileId,
         revision: u64,
     ) {
+        self.file_texts.remove(&file_id);
         self.set_file_revision(db, file_id, revision);
     }
 
@@ -308,6 +320,10 @@ mod tests {
 
         fn file_revision_input(&self, file_id: FileId) -> FileRevisionInput {
             self.files.file_revision(file_id)
+        }
+
+        fn try_file_revision_input(&self, file_id: FileId) -> Option<FileRevisionInput> {
+            self.files.try_file_revision(file_id)
         }
 
         fn file_text(&self, file_id: FileId) -> Arc<str> {

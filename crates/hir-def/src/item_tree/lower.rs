@@ -300,6 +300,10 @@ mod tests {
             self.files.file_revision(file_id)
         }
 
+        fn try_file_revision_input(&self, file_id: FileId) -> Option<base_db::FileRevisionInput> {
+            self.files.try_file_revision(file_id)
+        }
+
         fn file_text(&self, file_id: FileId) -> std::sync::Arc<str> {
             let input = base_db::FileIdInput::new(self, file_id);
             base_db::file_text_query(self, input)

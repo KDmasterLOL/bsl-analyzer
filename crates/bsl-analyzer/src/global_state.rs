@@ -77,6 +77,13 @@ pub struct GlobalState {
     pub skipped_bsl: FxHashSet<paths::AbsPathBuf>,
 
     pub degraded_files_count: usize,
+
+    /// File ids of currently-open editor documents, resolved at didOpen time.
+    /// `process_changes` keys text storage on this (overlay for open files,
+    /// disk-backed revision for closed) — by `FileId`, not by `Url`, so client
+    /// URL encoding/casing can't misclassify an open buffer as closed and route
+    /// unsaved edits to a stale disk read.
+    pub open_files: FxHashSet<vfs::FileId>,
 }
 
 impl GlobalState {
@@ -118,6 +125,7 @@ impl GlobalState {
             last_progress_report: std::time::Instant::now(),
             skipped_bsl: FxHashSet::default(),
             degraded_files_count: 0,
+            open_files: FxHashSet::default(),
         }
     }
 
@@ -135,8 +143,11 @@ impl GlobalState {
             if !ide_db::is_bsl_source(file_set, fid) {
                 continue;
             }
-            if db.try_file_text(fid).is_none() {
-                tracing::warn!(file_id = fid.0, "BSL fid in SourceRoot has no FileTextInput");
+            // "Loaded" now means a content revision is registered (disk-backed or
+            // overlay), not that an overlay text is resident — closed files are
+            // disk-backed and legitimately have no `FileTextInput`.
+            if db.try_file_revision_input(fid).is_none() {
+                tracing::warn!(file_id = fid.0, "BSL fid in SourceRoot has no content revision");
                 violations += 1;
             }
         }
@@ -286,6 +297,9 @@ mod vfs_race_tests {
 
         let uri = lsp_types::Url::parse("file:///user.bsl").unwrap();
         let file_id = state.vfs_file_for_url(&uri).unwrap();
+        // Open document: text lives in the resident overlay, not on disk (this
+        // synthetic file has no disk path for the disk-backed path to read).
+        state.open_files.insert(file_id);
 
         {
             let vfs_path = vfs::VfsPath::new(uri.to_file_path().unwrap());
@@ -320,5 +334,72 @@ mod vfs_race_tests {
         };
         assert!(text2.contains("Test"));
         assert_eq!(text1, text2, "file lost after merge!");
+    }
+
+    #[test]
+    fn closed_file_disk_backed_and_overlay_to_disk_transition() {
+        use base_db::SourceDatabase;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("mod.bsl");
+        std::fs::write(&path, "Процедура А() КонецПроцедуры").expect("write");
+
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender);
+        state.init_empty_source_root();
+
+        let uri = Url::from_file_path(&path).unwrap();
+        let file_id = state.vfs_file_for_url(&uri).unwrap();
+
+        // 1) A closed file (not in open_files) is disk-backed: its text is read
+        //    from disk on demand, not stored as a resident overlay.
+        {
+            let mut vfs = state.vfs.write();
+            vfs.set_file_contents(
+                vfs::VfsPath::new(path.clone()),
+                Some(Arc::from("Процедура А() КонецПроцедуры")),
+            );
+        }
+        state.process_changes(false);
+        {
+            let db = state.analysis_host.raw_database_mut();
+            assert!(db.try_file_text(file_id).is_none(), "closed file must have no overlay");
+            assert_eq!(&*db.file_text(file_id), "Процедура А() КонецПроцедуры");
+        }
+
+        // 2) Opening it stores an authoritative overlay (an unsaved edit not yet
+        //    on disk).
+        state.open_files.insert(file_id);
+        {
+            let mut vfs = state.vfs.write();
+            vfs.set_file_contents(
+                vfs::VfsPath::new(path.clone()),
+                Some(Arc::from("Процедура Б() КонецПроцедуры")),
+            );
+        }
+        state.process_changes(false);
+        {
+            let db = state.analysis_host.raw_database_mut();
+            assert_eq!(&*db.file_text(file_id), "Процедура Б() КонецПроцедуры");
+        }
+
+        // 3) Disk changes under us, then the file closes: re-keying to disk must
+        //    clear the stale overlay and read the new disk bytes WITHOUT a
+        //    revision-mismatch panic (regression guard for the overlay-clear).
+        std::fs::write(&path, "Процедура В() КонецПроцедуры").expect("rewrite");
+        state.open_files.remove(&file_id);
+        {
+            let disk = std::fs::read_to_string(&path).unwrap();
+            let db = state.analysis_host.raw_database_mut();
+            db.set_file_revision_from_disk(file_id, base_db::content_revision(&disk));
+        }
+        {
+            let db = state.analysis_host.raw_database_mut();
+            assert!(
+                db.try_file_text(file_id).is_none(),
+                "overlay must be cleared on disk transition"
+            );
+            assert_eq!(&*db.file_text(file_id), "Процедура В() КонецПроцедуры");
+        }
     }
 }

@@ -191,20 +191,29 @@ impl GlobalState {
             }
 
             if let Some(text) = text {
-                let path_str = {
-                    let vfs = self.vfs.read();
-                    format!("{:?}", vfs.file_path(file.file_id))
-                };
                 let store_in_salsa = ide_db::is_bsl_source(&file_set, file.file_id);
-                tracing::debug!(
-                    file_id = file.file_id.0,
-                    path = %path_str,
-                    text_len = text.len(),
-                    store_in_salsa,
-                    "process_changes: file text"
-                );
                 if store_in_salsa {
-                    db.set_file_text(file.file_id, &text);
+                    // Open editor buffers are the source of truth for unsaved
+                    // content, so they stay a resident overlay. Closed files are
+                    // recorded by content revision only and re-read from disk on
+                    // demand (LRU-evictable), so a whole workspace's closed-file
+                    // text is not pinned in memory. Open-ness is keyed by `FileId`
+                    // (resolved at didOpen) to avoid URL-encoding misclassification.
+                    let is_open = self.open_files.contains(&file.file_id);
+                    tracing::debug!(
+                        file_id = file.file_id.0,
+                        text_len = text.len(),
+                        is_open,
+                        "process_changes: file text"
+                    );
+                    if is_open {
+                        db.set_file_text(file.file_id, &text);
+                    } else {
+                        db.set_file_revision_from_disk(
+                            file.file_id,
+                            base_db::content_revision(&text),
+                        );
+                    }
                 }
             }
         }

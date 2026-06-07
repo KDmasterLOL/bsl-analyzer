@@ -102,6 +102,9 @@ pub fn handle_did_open(state: &mut GlobalState, params: DidOpenTextDocumentParam
     state.mem_docs.insert(uri.clone(), text.clone(), version);
 
     let file_id = state.vfs_file_for_url(&uri)?;
+    // Mark open BEFORE process_changes so the edit is stored as a resident
+    // overlay (authoritative for unsaved content), not disk-backed.
+    state.open_files.insert(file_id);
 
     {
         let vfs_path = vfs::VfsPath::new(
@@ -253,6 +256,22 @@ pub fn handle_did_close(state: &mut GlobalState, params: DidCloseTextDocumentPar
         Ok(file_id) => {
             if let Some(token) = state.preload_tokens.remove(&file_id) {
                 token.cancel();
+            }
+            state.open_files.remove(&file_id);
+            // The file is no longer open: drop its editor-buffer overlay and
+            // re-key on the on-disk content so its text becomes LRU-evictable
+            // (discarding any unsaved edits, which the client also discards).
+            // If it isn't readable from disk (e.g. never saved), keep the
+            // overlay as a safe fallback rather than leave a dangling revision.
+            let disk = {
+                let vfs = state.vfs.read();
+                let path = vfs.file_path(file_id).as_path().to_path_buf();
+                std::fs::read_to_string(path).ok()
+            };
+            if let Some(content) = disk {
+                use base_db::SourceDatabase;
+                let db = state.analysis_host.raw_database_mut();
+                db.set_file_revision_from_disk(file_id, base_db::content_revision(&content));
             }
         }
         Err(e) => {
