@@ -159,7 +159,17 @@ fn handle_loader_msg(state: &mut GlobalState, msg: vfs::loader::Message) -> Resu
                     let finalize_start = std::time::Instant::now();
                     tracing::info!("VFS loading complete");
 
+                    // Boot-phase memory breakdown. Source batches were drained
+                    // into Salsa incrementally as they streamed, so the text
+                    // high-water (`boot_peak_text_bytes`) stayed near one loader
+                    // chunk and this final `process_changes` is a near no-op; the
+                    // remaining resident growth is the metadata substrate.
+                    let mb = |b: u64| b / (1024 * 1024);
+                    let rss_peak = state.boot_peak_rss_bytes;
+                    let text_high_water = state.boot_peak_text_bytes;
+
                     state.process_changes(true);
+                    let rss_after_load = crate::smoke::read_rss_bytes().unwrap_or(0);
 
                     state.init_source_root();
                     state.bootstrap_metadata_substrate();
@@ -171,6 +181,16 @@ fn handle_loader_msg(state: &mut GlobalState, msg: vfs::loader::Message) -> Resu
                         Some(0.95),
                     );
                     state.warm_metadata_cache();
+                    let rss_steady = crate::smoke::read_rss_bytes().unwrap_or(0);
+
+                    tracing::info!(
+                        rss_peak_mb = mb(rss_peak),
+                        rss_after_load_mb = mb(rss_after_load),
+                        rss_steady_mb = mb(rss_steady),
+                        text_high_water_mb = mb(text_high_water),
+                        metadata_resident_mb = mb(rss_steady.saturating_sub(rss_after_load)),
+                        "boot memory profile: source text drained incrementally during load",
+                    );
 
                     state.degraded_files_count = state.skipped_bsl.len();
                     let extra_violations = state.assert_total_vfs_invariant();
@@ -433,6 +453,29 @@ fn handle_vfs_msg(
     }
 
     if !sync_to_salsa {
+        // Sample the streaming high-water BEFORE draining: this batch's text was
+        // just written to the VFS and prior batches have already drained, so the
+        // pending text is ~one loader chunk and RSS is at its per-batch peak.
+        let (_pending_files, pending_text_bytes) = state.vfs.read().pending_change_bytes();
+        state.boot_peak_text_bytes = state.boot_peak_text_bytes.max(pending_text_bytes as u64);
+        if let Some(rss) = crate::smoke::read_rss_bytes() {
+            state.boot_peak_rss_bytes = state.boot_peak_rss_bytes.max(rss);
+            tracing::debug!(
+                rss_mb = rss / (1024 * 1024),
+                pending_text_mb = pending_text_bytes / (1024 * 1024),
+                "boot load: batch buffered, draining to Salsa"
+            );
+        }
+
+        // Boot phase: drain THIS batch into Salsa now, suppressing the
+        // metadata/config reload (the post-load `init_source_root` +
+        // `bootstrap_metadata_substrate` rebuild the source root and metadata
+        // substrate once). Closed files are recorded by content revision and
+        // their text dropped, so the whole corpus never piles up as resident
+        // text in `Vfs::changes` — draining per batch keeps the load-time text
+        // high-water at ~one chunk instead of the entire corpus held until a
+        // single end-of-load flush.
+        state.process_changes(true);
         return Ok(());
     }
 

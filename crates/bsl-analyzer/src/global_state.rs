@@ -90,6 +90,17 @@ pub struct GlobalState {
     /// URL encoding/casing can't misclassify an open buffer as closed and route
     /// unsaved edits to a stale disk read.
     pub open_files: FxHashSet<vfs::FileId>,
+
+    /// High-water mark of process RSS observed while streaming the initial VFS
+    /// load (before `vfs_done`). Sampled per loaded batch, just before that
+    /// batch is drained into Salsa, so it captures the true streaming peak.
+    pub boot_peak_rss_bytes: u64,
+
+    /// High-water mark of source text buffered in `Vfs::changes` during the
+    /// initial load, sampled per batch before it drains. With incremental
+    /// draining this stays near one loader chunk; a regression that reverted to
+    /// a single end-of-load flush would show it climb to the whole-corpus size.
+    pub boot_peak_text_bytes: u64,
 }
 
 impl GlobalState {
@@ -132,6 +143,8 @@ impl GlobalState {
             skipped_bsl: FxHashSet::default(),
             degraded_files_count: 0,
             open_files: FxHashSet::default(),
+            boot_peak_rss_bytes: 0,
+            boot_peak_text_bytes: 0,
         }
     }
 

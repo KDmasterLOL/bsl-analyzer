@@ -225,6 +225,23 @@ impl Vfs {
         std::mem::take(&mut self.changes).into_iter().map(|(_, change)| change).collect()
     }
 
+    /// Number of pending changes and the total bytes of source text they hold
+    /// (the live `Arc<str>` payloads of `Create`/`Modify`; deletions count zero
+    /// bytes). Read-only instrumentation: sampled per loaded batch during the
+    /// initial load to track the buffered-text high-water before each batch is
+    /// drained into Salsa.
+    pub fn pending_change_bytes(&self) -> (usize, usize) {
+        let bytes = self
+            .changes
+            .values()
+            .map(|c| match &c.change {
+                Change::Create(text, _) | Change::Modify(text, _) => text.len(),
+                Change::Delete => 0,
+            })
+            .sum();
+        (self.changes.len(), bytes)
+    }
+
     pub fn file_path(&self, file_id: FileId) -> &VfsPath {
         self.interner.lookup(file_id)
     }
