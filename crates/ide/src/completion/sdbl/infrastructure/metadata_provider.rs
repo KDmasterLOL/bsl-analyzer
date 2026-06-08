@@ -1,5 +1,5 @@
 use crate::completion::sdbl::domain::MetadataProvider;
-use bsl_metadata::Configuration;
+use bsl_metadata::{Configuration, MdoType, MetadataObject, Register};
 use ide_db::RootDatabase;
 use std::sync::Arc;
 use vfs::FileId;
@@ -18,5 +18,17 @@ impl<'a> DbMetadataProvider<'a> {
 impl MetadataProvider for DbMetadataProvider<'_> {
     fn get_configuration(&self) -> Option<Arc<Configuration>> {
         self.db.get_configuration(self.file_id)
+    }
+
+    fn resolve_metadata_object(
+        &self,
+        mdo_type: MdoType,
+        name: &str,
+    ) -> Option<Arc<MetadataObject>> {
+        self.db.resolve_metadata_object(self.file_id, mdo_type, name)
+    }
+
+    fn resolve_register(&self, mdo_type: MdoType, name: &str) -> Option<Arc<Register>> {
+        self.db.resolve_register(self.file_id, mdo_type, name)
     }
 }

@@ -16,16 +16,7 @@ impl CompleteValueElementsUseCase {
 
         items.extend(Self::empty_ref_items(prefix, is_russian));
 
-        let Some(config) = metadata.get_configuration() else {
-            tracing::debug!(
-                ?mdo_type,
-                object_name = %object_name,
-                "CompleteValueElementsUseCase::execute: no configuration available"
-            );
-            return items;
-        };
-
-        let Some(mdo) = Self::find_metadata_object(&config, mdo_type, object_name) else {
+        let Some(mdo) = metadata.resolve_metadata_object(mdo_type, object_name) else {
             tracing::debug!(
                 ?mdo_type,
                 object_name = %object_name,
@@ -123,20 +114,6 @@ impl CompleteValueElementsUseCase {
                 )
             })
             .collect()
-    }
-
-    fn find_metadata_object(
-        config: &bsl_metadata::Configuration,
-        mdo_type: MdoType,
-        object_name: &str,
-    ) -> Option<bsl_metadata::MetadataObject> {
-        let name_lower = object_name.to_lowercase();
-
-        config
-            .metadata_objects()
-            .iter()
-            .find(|obj| obj.mdo_type == mdo_type && obj.name.to_lowercase() == name_lower)
-            .cloned()
     }
 }
 

@@ -36,15 +36,29 @@ pub(super) fn sdbl_completions(
     let metadata_provider = DbMetadataProvider::new(db, file_id);
     let scope_provider = DbScopeProvider::new(db);
 
-    let scope =
-        scope_provider.get_scope(file_id, query_info.bsl_literal_range, query_info.offset_in_query);
-    if scope.is_some() {
-        tracing::debug!("successfully built Scope from query HIR");
-    } else {
-        tracing::debug!("failed to build Scope (no HIR or no tables)");
-    }
-
     let context = detect_context(&query_info.query_text, query_info.offset_in_query);
+
+    // Build the table Scope only for contexts that consume it. The Scope is built
+    // from the file's whole configuration (`get_scope` -> `get_configuration`), so
+    // deferring it keeps the per-MDO contexts (object / value / type completion,
+    // which dispatch straight to `resolve_metadata_object` / `resolve_register`)
+    // off that broad per-keystroke dependency.
+    let needs_scope = matches!(
+        context,
+        SdblCompletionContext::AfterTableAlias { .. }
+            | SdblCompletionContext::AfterNestedField { .. }
+            | SdblCompletionContext::AfterOnKeyword { .. }
+            | SdblCompletionContext::AfterCastExpression { .. }
+    );
+    let scope = needs_scope
+        .then(|| {
+            scope_provider.get_scope(
+                file_id,
+                query_info.bsl_literal_range,
+                query_info.offset_in_query,
+            )
+        })
+        .flatten();
 
     let items = match (context, scope.as_ref()) {
         (SdblCompletionContext::AfterTableAlias { alias, prefix }, Some(scope)) => {
