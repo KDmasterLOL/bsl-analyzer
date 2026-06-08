@@ -159,6 +159,7 @@ mod tests {
                     ),
                     FieldDef::new("Код", SdblType::string()),
                 ],
+                field_model_complete: false,
             }),
             is_virtual_table: false,
             virtual_table_params: Vec::new(),

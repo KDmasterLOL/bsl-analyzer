@@ -92,11 +92,18 @@ impl LoweringContext<'_> {
             if let Some(alias) = table_alias_str {
                 if self.scope.find_field_def(Some(alias), column_name_str).is_none() {
                     if let Some(table) = self.scope.find_table(alias) {
-                        if table.metadata.is_some() {
+                        // First-hop only: a nested `Т.Поле.ПодПоле` validates just
+                        // `Поле`. Emission is gated on `field_model_complete` so
+                        // we never flag a missing field on a table whose field
+                        // set may be incomplete (extensions, virtual tables, …).
+                        if table.metadata.as_ref().is_some_and(|m| m.field_model_complete()) {
                             self.diagnostics.push(SdblDiagnostic::UnknownField {
                                 table_name: table.full_name.clone(),
                                 field_name: column_name_str.to_string(),
-                                range: node.text_range(),
+                                range: ident_ranges
+                                    .get(1)
+                                    .copied()
+                                    .unwrap_or_else(|| node.text_range()),
                             });
                         }
                     }

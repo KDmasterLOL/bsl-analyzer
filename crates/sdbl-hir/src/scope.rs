@@ -562,6 +562,7 @@ mod tests {
                 mdo_type: MdoType::Catalog,
                 name: name.to_string(),
                 fields,
+                field_model_complete: false,
             }),
             is_virtual_table: false,
             virtual_table_params: Vec::new(),

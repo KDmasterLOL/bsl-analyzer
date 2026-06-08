@@ -647,7 +647,9 @@ fn test_temp_table_in_union() {
     assert_eq!(temp_table_ref.full_name, "ТаблицаДействий");
     assert!(temp_table_ref.is_resolved(), "Temporary table should be resolved");
 
-    if let Some(crate::hir::ResolvedTable::TempTable { name, fields }) = &temp_table_ref.metadata {
+    if let Some(crate::hir::ResolvedTable::TempTable { name, fields, .. }) =
+        &temp_table_ref.metadata
+    {
         assert_eq!(name, "ТаблицаДействий");
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].name.as_str(), "Действие");
@@ -2798,5 +2800,85 @@ fn collect_resolved_attributes_first_hop_skips_standard() {
     assert!(
         !attrs.iter().any(|(_, _, a)| a == "Код"),
         "standard attribute Код must be skipped: {attrs:?}"
+    );
+}
+
+fn unknown_fields(package: &crate::SdblPackage) -> Vec<String> {
+    package
+        .all_diagnostics()
+        .filter_map(|d| match d {
+            crate::diagnostics::SdblDiagnostic::UnknownField { field_name, .. } => {
+                Some(field_name.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn accounting_register_main_table_is_incomplete_so_diagnostic_stays_silent() {
+    use bsl_metadata::{
+        dimension::DimensionBuilder, register::RegisterResource, MdoType, Register,
+    };
+
+    let mut config = bsl_metadata::Configuration::new("TestConfig");
+    let register = Register::builder()
+        .name("Хозрасчетный")
+        .mdo_type(MdoType::AccountingRegister)
+        .dimensions(vec![DimensionBuilder::default().name("Организация").build()])
+        .resources(vec![RegisterResource::new(Default::default(), "Сумма")])
+        .build();
+    config.add_register(register);
+
+    // The accounting main-table field model is not enumerable yet (Дт/Кт split,
+    // correspondence flag), so it is gated incomplete — no false positive even
+    // on a clearly-unknown field.
+    let code = "ВЫБРАТЬ Т.НетТакогоПоля ИЗ РегистрБухгалтерии.Хозрасчетный КАК Т";
+    let ast = parser::parse_sdbl(code);
+    let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(config)));
+
+    assert!(
+        unknown_fields(&package).is_empty(),
+        "accounting register must stay silent, got: {:?}",
+        unknown_fields(&package)
+    );
+}
+
+#[test]
+fn calculation_register_main_table_is_modeled() {
+    use bsl_metadata::{
+        dimension::DimensionBuilder, register::RegisterResource, MdoType, Register,
+    };
+
+    let make_config = || {
+        let mut config = bsl_metadata::Configuration::new("TestConfig");
+        let register = Register::builder()
+            .name("Начисления")
+            .mdo_type(MdoType::CalculationRegister)
+            .dimensions(vec![DimensionBuilder::default().name("Сотрудник").build()])
+            .resources(vec![RegisterResource::new(Default::default(), "Результат")])
+            .build();
+        config.add_register(register);
+        config
+    };
+
+    // Standard calc-register fields + a user dimension resolve cleanly.
+    let valid = "ВЫБРАТЬ Т.ВидРасчета, Т.ПериодРегистрации, Т.Сторно, Т.Сотрудник ИЗ РегистрРасчета.Начисления КАК Т";
+    let ast = parser::parse_sdbl(valid);
+    let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(make_config())));
+    assert!(
+        unknown_fields(&package).is_empty(),
+        "valid calc-register fields must resolve, got: {:?}",
+        unknown_fields(&package)
+    );
+
+    // A genuinely-unknown field fires (model is complete here).
+    let bad = "ВЫБРАТЬ Т.НетТакогоПоля ИЗ РегистрРасчета.Начисления КАК Т";
+    let ast = parser::parse_sdbl(bad);
+    let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(make_config())));
+    assert_eq!(
+        unknown_fields(&package),
+        vec!["НетТакогоПоля".to_string()],
+        "unknown calc-register field must fire"
     );
 }

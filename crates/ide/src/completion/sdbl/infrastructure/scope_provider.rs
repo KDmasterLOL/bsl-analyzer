@@ -185,6 +185,7 @@ impl ScopeProvider for DbScopeProvider<'_> {
                     metadata: Some(sdbl_hir::ResolvedTable::TempTable {
                         name: temp_name.to_string(),
                         fields: temp_fields,
+                        field_model_complete: false,
                     }),
                     is_virtual_table: false,
                     virtual_table_params: Vec::new(),
