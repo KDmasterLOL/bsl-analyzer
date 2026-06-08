@@ -1,9 +1,49 @@
 use std::sync::Arc;
 
 use base_db::FileIdInput;
+use bsl_metadata::{
+    AttributeType, MdoType, MetadataObject, MetadataResolver, QueryMetadataResolver, Register,
+};
+use vfs::FileId;
 
 use crate::configs::ConfigsDatabase;
 use crate::{DefDatabase, ModuleId, SdblExprId};
+
+/// Db-backed metadata resolution for SDBL lowering: routes each lookup through
+/// the file-scoped per-MDO [`ConfigsDatabase`] accessors so lowering a query
+/// depends on just the metadata objects it references, not the whole merged
+/// `Configuration`. Mirrors hir-ty's `DbObjectResolver` but lives here because
+/// `sdbl_hir_for_file_query` only holds a `&dyn ConfigsDatabase`.
+struct DbSdblResolver<'a> {
+    db: &'a dyn ConfigsDatabase,
+    file_id: FileId,
+}
+
+impl std::fmt::Debug for DbSdblResolver<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DbSdblResolver").field("file_id", &self.file_id).finish()
+    }
+}
+
+impl MetadataResolver for DbSdblResolver<'_> {
+    fn resolve_defined_type(&self, name: &str) -> Option<AttributeType> {
+        self.db.resolve_defined_type(self.file_id, name)
+    }
+}
+
+impl QueryMetadataResolver for DbSdblResolver<'_> {
+    fn resolve_metadata_object(
+        &self,
+        mdo_type: MdoType,
+        name: &str,
+    ) -> Option<Arc<MetadataObject>> {
+        self.db.resolve_metadata_object(self.file_id, mdo_type, name)
+    }
+
+    fn resolve_register(&self, mdo_type: MdoType, name: &str) -> Option<Arc<Register>> {
+        self.db.resolve_register(self.file_id, mdo_type, name)
+    }
+}
 
 pub type SdblInFile = Vec<(SdblExprId, syntax::SdblQueryInfo)>;
 
@@ -54,12 +94,18 @@ pub fn sdbl_hir_for_file_query<'db>(
         return Arc::new(Vec::new());
     }
 
-    let configuration = db.merged_visible_configuration(file_id);
+    // Resolve metadata per-MDO instead of depending on the whole merged config, so
+    // editing an unrelated metadata object does not re-lower this file's queries.
+    // Gate on visible config presence to keep the old "no config => no validation"
+    // behaviour: a standalone module with no config must not flag every table.
+    let resolver = DbSdblResolver { db, file_id };
+    let resolver_ref: Option<&dyn QueryMetadataResolver> =
+        db.file_has_visible_config(file_id).then_some(&resolver as &dyn QueryMetadataResolver);
 
     let mut result = Vec::with_capacity(sdbl_queries.len());
     for (expr_id, query_info) in sdbl_queries.iter() {
         if let Some(ref sdbl_ast) = query_info.query_ast {
-            let sdbl_package = sdbl_hir::lower_sdbl_to_hir(sdbl_ast, configuration.clone());
+            let sdbl_package = sdbl_hir::lower_sdbl_to_hir_with_resolver(sdbl_ast, resolver_ref);
             result.push((*expr_id, Arc::new(sdbl_package)));
         }
     }

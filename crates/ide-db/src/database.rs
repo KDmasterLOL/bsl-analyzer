@@ -915,6 +915,23 @@ impl hir::ConfigsDatabase for RootDatabaseImpl {
             || RootDatabase::get_configuration(self, file_id).is_some()
     }
 
+    fn file_has_visible_config(&self, file_id: FileId) -> bool {
+        let Some(file_path) = vfs_helpers::get_file_path(self, file_id) else {
+            return false;
+        };
+
+        let paths = RootDatabaseImpl::all_config_paths(self);
+        if paths.is_empty() {
+            return vfs_helpers::find_configuration_root(self, &file_path).is_some();
+        }
+
+        let has_main = paths.iter().any(|(name, _)| name.is_none());
+        let has_applicable_extension =
+            paths.iter().any(|(name, path)| name.is_some() && file_path.starts_with(path));
+
+        has_main || has_applicable_extension
+    }
+
     fn recorders_for_register(
         &self,
         file_id: FileId,

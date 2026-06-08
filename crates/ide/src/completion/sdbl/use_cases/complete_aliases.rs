@@ -49,7 +49,7 @@ mod tests {
     use sdbl_hir::{ResolvedTable, TableRef};
     use smol_str::SmolStr;
 
-    fn make_test_scope_with_aliases() -> Scope {
+    fn make_test_scope_with_aliases() -> Scope<'static> {
         let mut scope = Scope::new();
 
         let table1 = TableRef {

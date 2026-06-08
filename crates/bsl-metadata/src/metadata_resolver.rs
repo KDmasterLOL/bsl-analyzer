@@ -1,7 +1,8 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use crate::metadata_object::AttributeType;
-use crate::Configuration;
+use crate::{Configuration, MdoType, MetadataObject, Register};
 
 pub trait MetadataResolver: std::fmt::Debug {
     /// The underlying type of the defined type `name`, or `None` if unknown.
@@ -15,6 +16,34 @@ pub trait MetadataResolver: std::fmt::Debug {
 impl MetadataResolver for Configuration {
     fn resolve_defined_type(&self, name: &str) -> Option<AttributeType> {
         self.find_defined_type(name).map(|dt| dt.underlying_type().clone())
+    }
+}
+
+/// Metadata-object and register resolution surface for query (SDBL) lowering.
+///
+/// Returning owned `Arc`s (not borrows) lets a db-backed resolver hand back
+/// per-MDO objects composed fresh from their own Salsa cells, so lowering a
+/// query depends on just the metadata objects it references instead of the whole
+/// `Configuration`. The [`Configuration`] impl serves the cold call sites (graph
+/// build, streaming, tests) that still carry a whole config.
+pub trait QueryMetadataResolver: MetadataResolver {
+    fn resolve_metadata_object(&self, mdo_type: MdoType, name: &str)
+        -> Option<Arc<MetadataObject>>;
+
+    fn resolve_register(&self, mdo_type: MdoType, name: &str) -> Option<Arc<Register>>;
+}
+
+impl QueryMetadataResolver for Configuration {
+    fn resolve_metadata_object(
+        &self,
+        mdo_type: MdoType,
+        name: &str,
+    ) -> Option<Arc<MetadataObject>> {
+        self.find_metadata_object(mdo_type, name).cloned().map(Arc::new)
+    }
+
+    fn resolve_register(&self, mdo_type: MdoType, name: &str) -> Option<Arc<Register>> {
+        self.find_register_by_type_and_name(mdo_type, name).cloned().map(Arc::new)
     }
 }
 

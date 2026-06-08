@@ -4,7 +4,7 @@ use syntax::ast::AstNode;
 
 use super::context::LoweringContext;
 
-impl LoweringContext {
+impl LoweringContext<'_> {
     pub(super) fn lower_field_list(
         &mut self,
         field_list: Option<syntax::ast::SdblFieldList>,

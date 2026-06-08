@@ -4,7 +4,7 @@ use syntax::ast::AstNode;
 
 use super::context::LoweringContext;
 
-impl LoweringContext {
+impl LoweringContext<'_> {
     pub(super) fn lower_where_clause(
         &mut self,
         where_clause: &syntax::ast::SdblWhereClause,

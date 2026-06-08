@@ -14,5 +14,5 @@ pub trait ScopeProvider {
         file_id: FileId,
         bsl_literal_range: syntax::TextRange,
         sdbl_offset: TextSize,
-    ) -> Option<Scope>;
+    ) -> Option<Scope<'static>>;
 }

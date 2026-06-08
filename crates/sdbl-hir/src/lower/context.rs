@@ -1,27 +1,28 @@
-use std::sync::Arc;
-
-use bsl_metadata::Configuration;
+use bsl_metadata::QueryMetadataResolver;
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
 use crate::diagnostics::SdblDiagnostic;
 use crate::scope::Scope;
 use crate::source_map::{SdblSourceMap, TokenCategory, TokenInfo};
 
-pub struct LoweringContext {
-    pub(super) metadata: Option<Arc<Configuration>>,
+pub struct LoweringContext<'a> {
+    pub(super) resolver: Option<&'a dyn QueryMetadataResolver>,
 
-    pub(super) scope: Scope,
+    pub(super) scope: Scope<'a>,
 
     pub(super) diagnostics: Vec<SdblDiagnostic>,
 
     pub(super) source_map: SdblSourceMap,
 }
 
-impl LoweringContext {
-    pub fn new(metadata: Option<Arc<Configuration>>) -> Self {
+impl<'a> LoweringContext<'a> {
+    pub fn new(resolver: Option<&'a dyn QueryMetadataResolver>) -> Self {
         Self {
-            scope: Scope::new_with_metadata(metadata.clone()),
-            metadata,
+            scope: match resolver {
+                Some(resolver) => Scope::new_with_resolver(resolver),
+                None => Scope::new(),
+            },
+            resolver,
             diagnostics: Vec::new(),
             source_map: SdblSourceMap::new(),
         }

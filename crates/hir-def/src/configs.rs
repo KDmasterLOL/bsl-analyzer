@@ -62,6 +62,10 @@ pub trait ConfigsDatabase: DefDatabase {
     /// taking a dependency on the whole loaded configuration.
     fn has_config_root(&self, file_id: FileId) -> bool;
 
+    /// Whether `file_id` has a visible main configuration or an applicable
+    /// extension configuration without loading the merged configuration.
+    fn file_has_visible_config(&self, file_id: FileId) -> bool;
+
     /// The documents recording into the register `(parent, register_name)` visible
     /// to `file_id` — a cross-MDO reverse relation aggregated across the base and
     /// the file's extension. Returns owned names (not a borrow) so a db-backed

@@ -8,7 +8,7 @@ use text_size::TextRange;
 
 use super::context::LoweringContext;
 
-impl LoweringContext {
+impl LoweringContext<'_> {
     pub(super) fn lower_from_clause(
         &mut self,
         from_clause: Option<syntax::ast::SdblFromClause>,
@@ -375,24 +375,23 @@ impl LoweringContext {
             None
         };
 
-        if let Some(ref metadata) = self.metadata {
+        if let Some(resolver) = self.resolver {
             let exists = match mdo_type {
                 MdoType::InformationRegister
                 | MdoType::AccumulationRegister
                 | MdoType::AccountingRegister
                 | MdoType::CalculationRegister => {
-                    let found = metadata.find_register_by_type_and_name(mdo_type, object_name);
+                    let found = resolver.resolve_register(mdo_type, object_name).is_some();
                     tracing::debug!(
                         mdo_type = ?mdo_type,
                         object_name = %object_name,
-                        found = found.is_some(),
-                        total_registers = metadata.registers().len(),
+                        found = found,
                         "Checking register in metadata"
                     );
-                    found.is_some()
+                    found
                 }
                 _ => {
-                    let found = metadata.has_metadata_object(mdo_type, object_name);
+                    let found = resolver.resolve_metadata_object(mdo_type, object_name).is_some();
                     tracing::debug!(
                         mdo_type = ?mdo_type,
                         object_name = %object_name,
@@ -434,7 +433,7 @@ impl LoweringContext {
             object_name = %object_name,
             tabular_section = ?tabular_section_name,
             is_register = is_register,
-            has_metadata = self.metadata.is_some(),
+            has_metadata = self.resolver.is_some(),
             "resolve_table: Starting field resolution"
         );
 
@@ -445,7 +444,7 @@ impl LoweringContext {
         }
 
         let mut fields = Vec::new();
-        if self.metadata.is_some() {
+        if self.resolver.is_some() {
             self.add_metadata_fields(
                 mdo_type,
                 object_name,
@@ -473,8 +472,7 @@ impl LoweringContext {
         object_name: &str,
         full_name: &str,
     ) -> Option<ResolvedTable> {
-        let metadata = self.metadata.as_ref()?;
-        let register = metadata.find_register_by_type_and_name(mdo_type, object_name)?;
+        let register = self.resolver?.resolve_register(mdo_type, object_name)?;
 
         let mut dimensions = Vec::new();
         for dim in register.dimensions() {
@@ -687,7 +685,7 @@ impl LoweringContext {
         full_name: &str,
         fields: &mut Vec<FieldDef>,
     ) {
-        let Some(ref metadata) = self.metadata else {
+        let Some(resolver) = self.resolver else {
             tracing::debug!("No metadata available for field resolution");
             return;
         };
@@ -713,7 +711,7 @@ impl LoweringContext {
                     "add_metadata_fields: Looking up metadata object"
                 );
 
-                if let Some(obj) = metadata.find_metadata_object(mdo_type, object_name) {
+                if let Some(obj) = resolver.resolve_metadata_object(mdo_type, object_name) {
                     let initial_count = fields.len();
 
                     for attribute in &obj.attributes {
@@ -758,7 +756,7 @@ impl LoweringContext {
         full_name: &str,
         fields: &mut Vec<FieldDef>,
     ) {
-        let Some(ref metadata) = self.metadata else {
+        let Some(resolver) = self.resolver else {
             tracing::debug!("No metadata available for tabular section resolution");
             return;
         };
@@ -790,7 +788,7 @@ impl LoweringContext {
             }
         }
 
-        let Some(parent_obj) = metadata.find_metadata_object(mdo_type, object_name) else {
+        let Some(parent_obj) = resolver.resolve_metadata_object(mdo_type, object_name) else {
             tracing::debug!(
                 mdo_type = ?mdo_type,
                 object_name = %object_name,
@@ -866,12 +864,12 @@ impl LoweringContext {
             "Resolving ExternalDataSource path"
         );
 
-        let Some(ref metadata) = self.metadata else {
+        let Some(resolver) = self.resolver else {
             tracing::debug!("No metadata available for EDS validation");
             return (Some(MdoType::ExternalDataSource), None);
         };
 
-        let eds_obj = metadata.find_metadata_object(MdoType::ExternalDataSource, eds_name);
+        let eds_obj = resolver.resolve_metadata_object(MdoType::ExternalDataSource, eds_name);
         if eds_obj.is_none() {
             tracing::debug!(eds_name = %eds_name, "ExternalDataSource not found in metadata");
             self.diagnostics.push(SdblDiagnostic::QueryToMissingMetadata {
@@ -964,7 +962,7 @@ impl LoweringContext {
         attr_type: &bsl_metadata::AttributeType,
         visited: &mut std::collections::HashSet<String>,
     ) -> SdblType {
-        use bsl_metadata::{AttributeType, MetadataResolver};
+        use bsl_metadata::AttributeType;
 
         match attr_type {
             AttributeType::DefinedType { name } => {
@@ -973,11 +971,9 @@ impl LoweringContext {
                     return SdblType::DefinedType { name: name.clone(), underlying_type: None };
                 }
                 let underlying_type =
-                    self.metadata.as_ref().and_then(|m| m.resolve_defined_type(name)).map(
-                        |underlying| {
-                            Box::new(self.resolve_attribute_type_inner(&underlying, visited))
-                        },
-                    );
+                    self.resolver.and_then(|r| r.resolve_defined_type(name)).map(|underlying| {
+                        Box::new(self.resolve_attribute_type_inner(&underlying, visited))
+                    });
                 visited.remove(&key);
                 SdblType::DefinedType { name: name.clone(), underlying_type }
             }

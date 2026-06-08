@@ -757,6 +757,63 @@ fn test_all_sdbl_in_file_basic() {
 }
 
 #[test]
+fn sdbl_hir_resolves_tables_via_per_mdo_accessors() {
+    use sdbl_hir::ResolvedTable;
+
+    fn db_with_query(with_config: bool) -> (RootDatabaseImpl, FileId) {
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId(0);
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+        db.set_file_source_root(file_id, SourceRootId(0));
+        db.set_file_text(
+            file_id,
+            r#"Процедура Тест()
+    Запрос = "ВЫБРАТЬ Код ИЗ Справочник.Справочник1";
+КонецПроцедуры"#,
+        );
+        if with_config {
+            let config_path =
+                concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer");
+            db.set_all_config_paths(vec![(None, std::path::PathBuf::from(config_path))]);
+        }
+        (db, file_id)
+    }
+
+    fn from_table_fields(entries: &crate::SdblHirEntries) -> Vec<String> {
+        let package = &entries.first().expect("one SDBL package").1;
+        let query = package.queries().first().expect("one query");
+        let table = query.hir.from.first().expect("one FROM table");
+        match &table.metadata {
+            Some(ResolvedTable::Metadata { fields, .. }) => {
+                fields.iter().map(|f| f.name.clone()).collect()
+            }
+            other => panic!("FROM table must resolve to a metadata table, got {other:?}"),
+        }
+    }
+
+    // With a config root the db-backed resolver resolves Справочник1 through the
+    // per-MDO accessor, so the FROM table carries its declared attributes.
+    let (db, file_id) = db_with_query(true);
+    let fields = from_table_fields(&db.sdbl_hir_in_file(file_id));
+    assert!(
+        fields.iter().any(|f| f == "Реквизит1"),
+        "resolved table must expose its declared attribute, got: {fields:?}"
+    );
+
+    // Without any config root the resolver is gated off (has_config_root == false),
+    // so lowering resolves no fields — preserving the pre-narrowing contract that a
+    // standalone module with no config does not validate query tables.
+    let (db, file_id) = db_with_query(false);
+    let fields = from_table_fields(&db.sdbl_hir_in_file(file_id));
+    assert!(
+        fields.is_empty(),
+        "without a config root the table must carry no resolved fields, got: {fields:?}"
+    );
+}
+
+#[test]
 fn test_all_sdbl_in_file_keyword_filter() {
     let mut db = RootDatabaseImpl::new();
     let file_id = FileId(0);

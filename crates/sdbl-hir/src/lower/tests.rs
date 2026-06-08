@@ -2610,7 +2610,6 @@ fn defined_type_inside_composite_resolves_through_metadata() {
     use crate::lower::context::LoweringContext;
     use crate::types::SdblType;
     use bsl_metadata::{AttributeType, Configuration, DefinedType, Uuid};
-    use std::sync::Arc;
 
     let mut config = Configuration::new("Test");
     config.add_defined_type(
@@ -2621,7 +2620,7 @@ fn defined_type_inside_composite_resolves_through_metadata() {
             .build(),
     );
 
-    let ctx = LoweringContext::new(Some(Arc::new(config)));
+    let ctx = LoweringContext::new(Some(&config as &dyn bsl_metadata::QueryMetadataResolver));
     let composite = AttributeType::Composite {
         types: vec![AttributeType::DefinedType { name: "X".to_string() }, AttributeType::Boolean],
     };
