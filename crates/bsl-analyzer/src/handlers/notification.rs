@@ -279,9 +279,12 @@ pub fn handle_did_close(state: &mut GlobalState, params: DidCloseTextDocumentPar
                 std::fs::read_to_string(path).ok()
             };
             if let Some(content) = disk {
-                use base_db::SourceDatabase;
                 let db = state.analysis_host.raw_database_mut();
-                db.set_file_revision_from_disk(file_id, base_db::content_revision(&content));
+                ide_host_core::set_file_text_source(
+                    db,
+                    file_id,
+                    ide_host_core::FileTextSource::Disk(&content),
+                );
             }
         }
         Err(e) => {

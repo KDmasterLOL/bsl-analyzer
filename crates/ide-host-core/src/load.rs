@@ -15,6 +15,41 @@ use ide::RootDatabaseImpl;
 use vfs::file_set::FileSet;
 use vfs::{FileId, VfsPath};
 
+/// How a file's text is registered as a salsa input. The DRIVER decides which
+/// variant (is the buffer open? was the file deleted?); this is the single place
+/// that maps each intent to the right salsa mutation, so the "overlay vs disk-backed
+/// vs tombstone" encoding — the exact distinction whose accidental conflation pins a
+/// whole workspace's text resident — lives in one tunable spot.
+pub enum FileTextSource<'a> {
+    /// An open editor buffer is authoritative: its text is pinned as a resident
+    /// overlay (`set_file_text`), source of truth for unsaved content.
+    Overlay(&'a str),
+    /// A closed / disk-backed file: registered by content revision only (the text is
+    /// re-read on demand under the salsa LRU). The caller passes the text it already
+    /// read; the revision is derived here so callers cannot diverge on the hash.
+    Disk(&'a str),
+    /// A deleted or unreadable file: an empty overlay so a later query yields `""`
+    /// instead of panicking on a disk re-read. FileSet removal (if any) stays with
+    /// the driver — this only sets the text state.
+    Tombstone,
+}
+
+/// Apply one file's [`FileTextSource`] to `db`. A leaf salsa mutation only: it does
+/// not touch the source root / FileSet, project config, or any driver lifecycle.
+pub fn set_file_text_source(
+    db: &mut RootDatabaseImpl,
+    file_id: FileId,
+    source: FileTextSource<'_>,
+) {
+    match source {
+        FileTextSource::Overlay(text) => db.set_file_text(file_id, text),
+        FileTextSource::Disk(text) => {
+            db.set_file_revision_from_disk(file_id, content_revision(text))
+        }
+        FileTextSource::Tombstone => db.set_file_text(file_id, ""),
+    }
+}
+
 /// Build a whole-workspace [`SourceRoot`]: a `FileId ↔ path` map over EVERY file, so
 /// cross-module resolution through the module index can find any target's `FileId`.
 /// Cheap to clone (the map is `Arc`-backed).
@@ -44,10 +79,10 @@ pub fn register_files_disk_backed(
     for (file_id, path) in files {
         db.set_file_source_root(*file_id, source_root_id);
         match read_disk_text(path) {
-            Ok(text) => db.set_file_revision_from_disk(*file_id, content_revision(&text)),
+            Ok(text) => set_file_text_source(db, *file_id, FileTextSource::Disk(&text)),
             Err(e) => {
                 tracing::warn!(path = %path.display(), "resident load: read failed: {e}");
-                db.set_file_text(*file_id, "");
+                set_file_text_source(db, *file_id, FileTextSource::Tombstone);
                 unreadable.push((path.clone(), e));
             }
         }
@@ -80,5 +115,33 @@ mod tests {
         assert!(db.try_file_text(FileId(0)).is_none(), "readable file must be disk-backed");
         let text = Analysis::from_database(db.clone()).file_text(FileId(0));
         assert!(text.contains("Процедура"), "disk-backed text is read on demand");
+    }
+
+    #[test]
+    fn file_text_source_variants() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.bsl");
+        std::fs::write(&path, "Текст").unwrap();
+        let files = vec![(FileId(0), path)];
+        let root = base_db::SourceRootId(0);
+        let mut db = RootDatabaseImpl::default();
+        db.set_source_root(root, build_source_root(&files));
+        db.set_file_source_root(FileId(0), root);
+
+        let read = |db: &RootDatabaseImpl| Analysis::from_database(db.clone()).file_text(FileId(0));
+
+        // Overlay: editor buffer pinned as a resident input.
+        set_file_text_source(&mut db, FileId(0), FileTextSource::Overlay("буфер"));
+        assert!(db.try_file_text(FileId(0)).is_some(), "overlay is pinned");
+        assert_eq!(&*read(&db), "буфер");
+
+        // Disk: overlay dropped, text re-read from disk and verified against the revision.
+        set_file_text_source(&mut db, FileId(0), FileTextSource::Disk("Текст"));
+        assert!(db.try_file_text(FileId(0)).is_none(), "disk-backed is not pinned");
+        assert_eq!(&*read(&db), "Текст");
+
+        // Tombstone: empty overlay.
+        set_file_text_source(&mut db, FileId(0), FileTextSource::Tombstone);
+        assert_eq!(&*read(&db), "");
     }
 }

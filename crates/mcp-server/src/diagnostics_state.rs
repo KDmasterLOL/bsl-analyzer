@@ -518,7 +518,7 @@ impl DiagnosticsState {
     /// rebuild (after dropping the lock). Idempotent against a racing apply, and bumps the
     /// generation only when content actually moved.
     fn apply_incremental(&self, modified: &[String], scan: &OwnedScan) {
-        use base_db::SourceDatabase;
+        use ide_host_core::{set_file_text_source, FileTextSource};
 
         let new_fp: HashMap<&str, u64> =
             scan.stats.iter().map(|s| (s.path.as_str(), s.fingerprint())).collect();
@@ -545,12 +545,14 @@ impl DiagnosticsState {
                     break;
                 };
                 match base_db::read_disk_text(Path::new(path)) {
-                    Ok(text) => resident
-                        .db
-                        .set_file_revision_from_disk(file_id, base_db::content_revision(&text)),
-                    // Unreadable now: pin an empty overlay so a later query yields `""`
+                    Ok(text) => {
+                        set_file_text_source(&mut resident.db, file_id, FileTextSource::Disk(&text))
+                    }
+                    // Unreadable now: an empty overlay so a later query yields `""`
                     // instead of panicking on the disk re-read, matching the load path.
-                    Err(_) => resident.db.set_file_text(file_id, ""),
+                    Err(_) => {
+                        set_file_text_source(&mut resident.db, file_id, FileTextSource::Tombstone)
+                    }
                 }
                 stats.insert(path.clone(), fp);
                 applied += 1;

@@ -203,7 +203,11 @@ impl GlobalState {
             if is_bsl_path && text.is_none() {
                 if file_set.path_for_file(&file.file_id).is_some() {
                     file_set.remove(file.file_id);
-                    db.set_file_text(file.file_id, "");
+                    ide_host_core::set_file_text_source(
+                        db,
+                        file.file_id,
+                        ide_host_core::FileTextSource::Tombstone,
+                    );
                     file_set_modified = true;
                     bsl_source_changed = true;
                     tracing::warn!(
@@ -243,14 +247,12 @@ impl GlobalState {
                         is_open,
                         "process_changes: file text"
                     );
-                    if is_open {
-                        db.set_file_text(file.file_id, &text);
+                    let source = if is_open {
+                        ide_host_core::FileTextSource::Overlay(&text)
                     } else {
-                        db.set_file_revision_from_disk(
-                            file.file_id,
-                            base_db::content_revision(&text),
-                        );
-                    }
+                        ide_host_core::FileTextSource::Disk(&text)
+                    };
+                    ide_host_core::set_file_text_source(db, file.file_id, source);
                     bsl_source_changed = true;
                 }
             }

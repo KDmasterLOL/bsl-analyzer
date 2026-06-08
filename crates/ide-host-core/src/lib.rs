@@ -7,7 +7,9 @@
 
 mod load;
 
-pub use load::{build_source_root, register_files_disk_backed};
+pub use load::{
+    build_source_root, register_files_disk_backed, set_file_text_source, FileTextSource,
+};
 
 use ide::{Analysis, RootDatabaseImpl};
 use salsa::Database as _;
