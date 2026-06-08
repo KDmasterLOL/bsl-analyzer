@@ -402,12 +402,8 @@ fn stream_loader_batch(state: &mut GlobalState, files: Vec<(paths::AbsPathBuf, O
         let std_path: &std::path::Path = path.as_ref();
         let vfs_path = vfs::VfsPath::new(std_path);
 
-        let contents_str = contents.and_then(|bytes| {
-            String::from_utf8(bytes).ok().map(|s| {
-                let s = s.strip_prefix('\u{FEFF}').unwrap_or(&s);
-                Arc::from(s)
-            })
-        });
+        let contents_str =
+            contents.and_then(|bytes| base_db::decode_disk_bytes(&bytes).map(Arc::from));
 
         if project_model::is_bsl_source_path(std_path) {
             let mutated = if contents_str.is_some() {

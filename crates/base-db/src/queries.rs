@@ -19,6 +19,20 @@ pub fn read_disk_text(path: &Path) -> std::io::Result<String> {
     std::fs::read_to_string(path)
 }
 
+/// Decode in-memory file bytes to source text under the exact same contract as
+/// [`read_disk_text`]: valid UTF-8 only, verbatim — no BOM strip, no newline
+/// normalization. The VFS loader holds the bytes the watcher read, not a path,
+/// so it cannot call [`read_disk_text`]; routing it through this keeps the text
+/// it stores (and the content revision derived from it) byte-identical to what
+/// [`file_text_query`] recomputes on a later disk re-read. Stripping anything
+/// here desyncs the recorded revision from the on-read hash and trips
+/// [`assert_revision`]. The lexer consumes a leading BOM as its own token, so
+/// preserving it is correct and keeps text offsets aligned with the editor's
+/// document.
+pub fn decode_disk_bytes(bytes: &[u8]) -> Option<String> {
+    std::str::from_utf8(bytes).ok().map(str::to_owned)
+}
+
 #[salsa::tracked(lru = 512)]
 pub fn parse_query<'db>(db: &'db dyn SourceDatabase, input: FileIdInput<'db>) -> Parse<SyntaxNode> {
     let _span = tracing::info_span!("parse").entered();

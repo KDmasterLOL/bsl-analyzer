@@ -18,7 +18,8 @@ pub use input::{
 };
 pub use locale::{Locale, UnknownLocale};
 pub use queries::{
-    file_text_query, method_regions_query, parse_query, read_disk_text, resolve_vfs_path_query,
+    decode_disk_bytes, file_text_query, method_regions_query, parse_query, read_disk_text,
+    resolve_vfs_path_query,
 };
 
 #[salsa::db]
@@ -494,6 +495,19 @@ mod tests {
         assert_eq!(got, raw);
         assert_eq!(input::content_revision(&got), input::content_revision(raw));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn decode_disk_bytes_matches_read_disk_text_verbatim() {
+        // The VFS loader decodes watcher bytes via `decode_disk_bytes`; its output
+        // must hash identically to `read_disk_text`'s disk re-read, or a BOM-led
+        // file's recorded revision (from the loader) diverges from the on-read hash
+        // and `file_text_query` trips `assert_revision`. 1C BSL files are saved with
+        // a UTF-8 BOM, so the BOM must survive both paths.
+        let raw = "\u{FEFF}Процедура Т() КонецПроцедуры";
+        let decoded = queries::decode_disk_bytes(raw.as_bytes()).unwrap();
+        assert_eq!(decoded, raw);
+        assert_eq!(input::content_revision(&decoded), input::content_revision(raw));
     }
 
     #[test]
