@@ -86,6 +86,21 @@ pub trait AnalysisProvider {
         merged.map(Arc::new)
     }
 
+    /// The common module `name` visible to `file_id` — base config plus the file's
+    /// own extension (an extension's common module is visible only within that
+    /// extension). The default scans the file's visible configs; the salsa-backed
+    /// provider overrides it with the per-common-module accessor.
+    fn resolve_common_module(
+        &self,
+        file_id: FileId,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::CommonModule>> {
+        self.visible_configurations(file_id)
+            .into_iter()
+            .find_map(|visible| visible.config.configuration.find_common_module(name).cloned())
+            .map(Arc::new)
+    }
+
     fn workspace_symbols(&self, source_root_id: SourceRootId) -> Arc<hir::WorkspaceSymbols>;
 
     fn module_index(&self, source_root_id: SourceRootId) -> Arc<ModuleIndex>;

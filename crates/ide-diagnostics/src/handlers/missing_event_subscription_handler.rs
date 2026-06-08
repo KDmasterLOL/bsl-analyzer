@@ -84,7 +84,7 @@ fn check_event_subscription(
         None => return,
     };
 
-    let (_visible, common_module) = match ctx.find_common_module_anywhere(&handler.module_name) {
+    let common_module = match ctx.resolve_common_module(&handler.module_name) {
         Some(found) => found,
         None => {
             diagnostics.push(create_diagnostic(

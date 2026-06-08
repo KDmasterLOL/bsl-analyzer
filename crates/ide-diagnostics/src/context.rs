@@ -68,23 +68,17 @@ impl<'a> DiagnosticsContext<'a> {
         out
     }
 
-    pub fn find_common_module_anywhere(
-        &self,
-        name: &str,
-    ) -> Option<(ide_db::provider::VisibleConfigWithRoot, bsl_metadata::CommonModule)> {
-        for visible in self.visible_configurations() {
-            if let Some(common_module) = visible.config.configuration.find_common_module(name) {
-                let module = common_module.clone();
-                return Some((visible, module));
-            }
-        }
-        None
+    /// The common module `name` visible to this file (base + its own extension),
+    /// at per-common-module Salsa granularity. Replaces the former all-configs
+    /// `find_common_module_anywhere`/`is_common_module_anywhere` scans, which were
+    /// over-permissive (a sibling extension's module was visible) and depended on
+    /// the whole configuration.
+    pub fn resolve_common_module(&self, name: &str) -> Option<Arc<bsl_metadata::CommonModule>> {
+        self.provider.resolve_common_module(self.file_id, name)
     }
 
     pub fn is_common_module_anywhere(&self, name: &str) -> bool {
-        self.visible_configurations()
-            .iter()
-            .any(|visible| visible.config.configuration.find_common_module(name).is_some())
+        self.resolve_common_module(name).is_some()
     }
 
     pub fn assignment_target_kind(&self, name: &str) -> hir::AssignmentResolution {

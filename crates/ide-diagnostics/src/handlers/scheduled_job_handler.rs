@@ -94,7 +94,7 @@ fn check_scheduled_job(
 
     handler_usage.entry(full_handler_name.clone()).or_default().push(job.name().to_string());
 
-    let (_visible, common_module) = match ctx.find_common_module_anywhere(&handler.module_name) {
+    let common_module = match ctx.resolve_common_module(&handler.module_name) {
         Some(found) => found,
         None => {
             diagnostics.push(create_diagnostic(
