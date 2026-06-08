@@ -35,7 +35,7 @@ use ide::{Analysis, RootDatabaseImpl};
 use vfs::FileId;
 
 use crate::graph::{
-    build_source_root, classify_changes, db_for_files, enumerate_bsl_files, scan_file_stats,
+    build_source_root, classify_changes, db_for_files_lazy, enumerate_bsl_files, scan_file_stats,
     FileStat,
 };
 
@@ -509,12 +509,14 @@ impl DiagnosticsState {
         }
     }
 
-    /// Apply `set_file_text` for each modified `.bsl`, re-reading from disk. The entire
-    /// resolve→read→set→record sequence runs under ONE lock hold, so a concurrent full
-    /// rebuild (which also takes the lock) cannot swap the resident mid-apply and make
-    /// us write stale text. A modified path with no resident FileId is a structural
-    /// change: we bail to a full rebuild (after dropping the lock). Idempotent against a
-    /// racing apply, and bumps the generation only when text actually moved.
+    /// Re-key each modified `.bsl` to its on-disk content revision, re-reading from disk.
+    /// Disk-backed (not an overlay) so the edited file's text stays LRU-evictable like the
+    /// rest of the resident, mirroring the load path. The entire resolve→read→set→record
+    /// sequence runs under ONE lock hold, so a concurrent full rebuild (which also takes
+    /// the lock) cannot swap the resident mid-apply and make us record a stale revision. A
+    /// modified path with no resident FileId is a structural change: we bail to a full
+    /// rebuild (after dropping the lock). Idempotent against a racing apply, and bumps the
+    /// generation only when content actually moved.
     fn apply_incremental(&self, modified: &[String], scan: &OwnedScan) {
         use base_db::SourceDatabase;
 
@@ -542,8 +544,14 @@ impl DiagnosticsState {
                     needs_rebuild = true; // a modified path we never indexed → structural
                     break;
                 };
-                let text = std::fs::read_to_string(path).unwrap_or_default();
-                resident.db.set_file_text(file_id, &text);
+                match base_db::read_disk_text(Path::new(path)) {
+                    Ok(text) => resident
+                        .db
+                        .set_file_revision_from_disk(file_id, base_db::content_revision(&text)),
+                    // Unreadable now: pin an empty overlay so a later query yields `""`
+                    // instead of panicking on the disk re-read, matching the load path.
+                    Err(_) => resident.db.set_file_text(file_id, ""),
+                }
                 stats.insert(path.clone(), fp);
                 applied += 1;
             }
@@ -677,9 +685,11 @@ impl DiagnosticsState {
             project.config.output.resolve_locale().unwrap_or_default(),
         );
         let source_root = build_source_root(&files);
-        // `all_files` is passed as the batch, so every text is loaded resident — this is
-        // the LSP model, not the graph's per-batch fold.
-        let db = db_for_files(&source_root, &files, &config_paths, None);
+        // Disk-backed: register each file's content revision and drop its text, so the
+        // whole-workspace resident is not pinned as salsa inputs (which OOMs on a large
+        // config). `file_text_query` re-reads on demand under its LRU cap — the same
+        // model the LSP server and CLI `analyze` use.
+        let db = db_for_files_lazy(&source_root, &files, &config_paths, None);
 
         let mut by_path = HashMap::with_capacity(files.len());
         for (file_id, path) in &files {
@@ -896,6 +906,39 @@ mod tests {
         match out {
             ResidentOutcome::Ready(_count, _) => {}
             _ => panic!("expected Ready outcome from a loaded db"),
+        }
+    }
+
+    /// The resident is disk-backed: a workspace file is registered by content revision,
+    /// not pinned as a `FileTextInput` overlay, so `file_text_query` re-reads it from disk
+    /// under the LRU cap. This is what keeps a whole-workspace resident from OOMing. The
+    /// file's text must still be queryable (diagnostics ran above), it just must not be
+    /// held resident as a salsa input.
+    #[test]
+    fn resident_text_is_disk_backed_not_pinned() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let state = DiagnosticsState::for_workspace(root.to_path_buf());
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let path = module_path(root, "Сервер");
+        let out = state.read(|resident, _gen| {
+            let file_id = resident.file_id_for(&path).expect("path resolves to a resident FileId");
+            // No overlay pinned: the text is sourced from disk on demand.
+            let pinned = resident.db.try_file_text(file_id).is_some();
+            // ...yet it is still queryable (read through file_text_query).
+            let len = resident.analysis().file_text(file_id).len();
+            (pinned, len)
+        });
+        match out {
+            ResidentOutcome::Ready((pinned, len), _) => {
+                assert!(!pinned, "workspace file must be disk-backed, not pinned as an overlay");
+                assert!(len > 0, "disk-backed text must still be readable on demand");
+            }
+            _ => panic!("expected Ready outcome"),
         }
     }
 

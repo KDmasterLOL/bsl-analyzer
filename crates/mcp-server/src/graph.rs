@@ -1169,6 +1169,44 @@ pub(crate) fn db_for_files(
     db
 }
 
+/// Like [`db_for_files`] but disk-backed: registers each file's content revision
+/// instead of pinning its text as a salsa input, then drops the text. The resident
+/// diagnostics database holds the WHOLE workspace, so the eager `set_file_text` path
+/// would pin every file's `Arc<str>` in the overlay map (outside the salsa LRU) and
+/// OOM on a large config. Here `file_text_query` re-reads each file from disk on
+/// demand under its `lru` cap (`base_db::queries::file_text_query`), verifying the
+/// bytes against the recorded revision — the same disk-backed contract the LSP server
+/// and the CLI `analyze` path use, so only the working set's text stays resident.
+///
+/// `file_source_root` is set for every file (not just a batch): `file_text_query`
+/// derives the on-disk path through it, so a lazily-read file must have it. An
+/// unreadable file falls back to an empty overlay so a later query yields `""`
+/// instead of panicking on the disk re-read.
+pub(crate) fn db_for_files_lazy(
+    source_root: &SourceRoot,
+    all_files: &[(FileId, PathBuf)],
+    config_paths: &[(Option<String>, PathBuf)],
+    config_cache: Option<&Arc<ide::GraphConfigCache>>,
+) -> RootDatabaseImpl {
+    let mut db = RootDatabaseImpl::default();
+    if let Some(cache) = config_cache {
+        db.set_graph_config_cache(Arc::clone(cache));
+    }
+    db.set_source_root(GRAPH_SOURCE_ROOT, source_root.clone());
+    for (file_id, path) in all_files {
+        db.set_file_source_root(*file_id, GRAPH_SOURCE_ROOT);
+        match base_db::read_disk_text(path) {
+            Ok(text) => db.set_file_revision_from_disk(*file_id, base_db::content_revision(&text)),
+            Err(e) => {
+                tracing::warn!(path = %path.display(), "diagnostics load: read failed: {e}");
+                db.set_file_text(*file_id, "");
+            }
+        }
+    }
+    db.set_all_config_paths(config_paths.to_vec());
+    db
+}
+
 /// Walk the configuration source and extension directories, load every `.bsl`
 /// file into a fresh database, and register the config metadata paths. Test-only:
 /// the production graph is built straight into SQLite per batch, never as one
