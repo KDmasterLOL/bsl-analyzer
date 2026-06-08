@@ -48,7 +48,9 @@ pub fn schedule_diagnostics(state: &mut GlobalState, uri: &Url) {
     let queued_at = Instant::now();
     tracing::info!(%uri, generation, vfs_done = state.vfs_done, "diagnostics scheduled");
 
+    let analysis_guard = state.note_analysis_spawned();
     state.task_pool.pool.spawn(move || {
+        let _analysis_guard = analysis_guard;
         let started_at = Instant::now();
         let queue_wait_ms = started_at.duration_since(queued_at).as_millis() as u64;
         tracing::info!(%uri, generation, queue_wait_ms, "diagnostics worker started");
@@ -171,7 +173,9 @@ fn preload_dependencies(state: &mut GlobalState, file_id: vfs::FileId) {
     state.preload_tokens.insert(file_id, task.cancellation_token());
     let queued_at = Instant::now();
 
+    let analysis_guard = state.note_analysis_spawned();
     state.task_pool.pool.spawn(move || {
+        let _analysis_guard = analysis_guard;
         let started_at = Instant::now();
         let queue_wait_ms = started_at.duration_since(queued_at).as_millis() as u64;
         let count = match salsa::Cancelled::catch(std::panic::AssertUnwindSafe(|| task.run())) {

@@ -382,7 +382,9 @@ fn handle_task(state: &mut GlobalState, task: crate::global_state::Task) -> Resu
             }
             state.preload_external_tokens.insert(first_file, task.cancellation_token());
 
+            let analysis_guard = state.note_analysis_spawned();
             state.task_pool.pool.spawn(move || {
+                let _analysis_guard = analysis_guard;
                 let count = match salsa::Cancelled::catch(std::panic::AssertUnwindSafe(|| {
                     task.run()
                 })) {
@@ -397,6 +399,12 @@ fn handle_task(state: &mut GlobalState, task: crate::global_state::Task) -> Resu
                 };
                 Task::DependenciesPreloaded { file_id: first_file, count }
             });
+        }
+        Task::AnalysisProgressTick { epoch } => {
+            state.handle_analysis_progress_tick(epoch);
+        }
+        Task::AnalysisJobFinished => {
+            state.note_analysis_finished();
         }
     }
     Ok(())

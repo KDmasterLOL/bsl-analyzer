@@ -19,6 +19,10 @@ use crate::lsp::{PositionEncoding, Progress};
 use crate::mem_docs::MemDocs;
 use crate::task_pool;
 
+/// How long background analysis must stay busy before the "Analyzing" indicator
+/// appears. Fast per-file opens finish within this window and show nothing.
+const ANALYSIS_PROGRESS_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(200);
+
 #[derive(Debug)]
 pub enum Task {
     DependenciesPreloaded {
@@ -41,6 +45,31 @@ pub enum Task {
     RequestResult {
         response: Response,
     },
+    /// Debounce timer fired for a background-analysis busy burst. If the burst
+    /// (`epoch`) is still the current one and still running, it promotes to a
+    /// `window/workDoneProgress` "Analyzing" indicator; otherwise it is a no-op.
+    AnalysisProgressTick {
+        epoch: u64,
+    },
+    /// One background analysis job finished (returned normally or unwound).
+    /// Posted by [`AnalysisGuard`] on drop so the in-flight counter is always
+    /// balanced even if the job panicked before producing its result task.
+    AnalysisJobFinished,
+}
+
+/// RAII token for one in-flight background analysis job. It is moved into the
+/// spawned closure; whether the job returns normally or panics, dropping it posts
+/// a [`Task::AnalysisJobFinished`] back to the event loop. This guarantees the
+/// in-flight counter is decremented (and the "Analyzing" indicator cannot stick
+/// open) without depending on the job's own result task being produced.
+pub struct AnalysisGuard {
+    sender: Sender<Task>,
+}
+
+impl Drop for AnalysisGuard {
+    fn drop(&mut self) {
+        let _ = self.sender.send(Task::AnalysisJobFinished);
+    }
 }
 
 pub struct GlobalState {
@@ -101,6 +130,22 @@ pub struct GlobalState {
     /// draining this stays near one loader chunk; a regression that reverted to
     /// a single end-of-load flush would show it climb to the whole-corpus size.
     pub boot_peak_text_bytes: u64,
+
+    /// Number of background analysis jobs (per-file dependency preload + type
+    /// inference / diagnostics) currently in flight. Drives the debounced
+    /// "Analyzing" work-done progress: it begins when this stays positive past
+    /// the debounce and ends when it returns to zero.
+    analysis_in_flight: u32,
+
+    /// Whether the "Analyzing" work-done progress has an open Begin awaiting its
+    /// End (i.e. the indicator is currently shown).
+    analysis_progress_active: bool,
+
+    /// Monotonic id of the current busy burst, bumped on each rising edge from
+    /// zero in-flight. A debounce tick only promotes to a visible indicator if
+    /// its captured epoch still matches, so a stale timer from an already-ended
+    /// burst is ignored.
+    analysis_epoch: u64,
 }
 
 impl GlobalState {
@@ -145,6 +190,58 @@ impl GlobalState {
             open_files: FxHashSet::default(),
             boot_peak_rss_bytes: 0,
             boot_peak_text_bytes: 0,
+            analysis_in_flight: 0,
+            analysis_progress_active: false,
+            analysis_epoch: 0,
+        }
+    }
+
+    /// Record that a background analysis job was just spawned. On the rising edge
+    /// from idle it arms a one-shot debounce: a short-lived timer thread posts an
+    /// [`Task::AnalysisProgressTick`] back to the event loop, so a burst that
+    /// finishes within the debounce window never shows an indicator (no flicker),
+    /// while a longer one promotes to a visible "Analyzing" progress.
+    #[must_use = "the returned AnalysisGuard must be moved into the analysis job so \
+                  it decrements the in-flight counter when the job ends"]
+    pub fn note_analysis_spawned(&mut self) -> AnalysisGuard {
+        self.analysis_in_flight += 1;
+        if self.analysis_in_flight == 1 {
+            self.analysis_epoch = self.analysis_epoch.wrapping_add(1);
+            let epoch = self.analysis_epoch;
+            let sender = self.task_pool.pool.sender.clone();
+            if let Err(err) = std::thread::Builder::new()
+                .name("bsl-analysis-debounce".to_owned())
+                .spawn(move || {
+                    std::thread::sleep(ANALYSIS_PROGRESS_DEBOUNCE);
+                    let _ = sender.send(Task::AnalysisProgressTick { epoch });
+                })
+            {
+                tracing::debug!(?err, "could not spawn analysis-progress debounce thread");
+            }
+        }
+        AnalysisGuard { sender: self.task_pool.pool.sender.clone() }
+    }
+
+    /// Record that a background analysis job finished. When the last one drains,
+    /// end the "Analyzing" indicator if it was shown.
+    pub fn note_analysis_finished(&mut self) {
+        self.analysis_in_flight = self.analysis_in_flight.saturating_sub(1);
+        if self.analysis_in_flight == 0 && self.analysis_progress_active {
+            self.analysis_progress_active = false;
+            self.report_progress("Analyzing", Progress::End, None, None);
+        }
+    }
+
+    /// Handle a debounce tick: show the "Analyzing" indicator only if this is
+    /// still the current busy burst, work is still in flight, and nothing is
+    /// shown yet.
+    pub fn handle_analysis_progress_tick(&mut self, epoch: u64) {
+        if epoch == self.analysis_epoch
+            && self.analysis_in_flight > 0
+            && !self.analysis_progress_active
+        {
+            self.analysis_progress_active = true;
+            self.report_progress("Analyzing", Progress::Begin, Some("Analyzing…".to_owned()), None);
         }
     }
 
@@ -1111,5 +1208,100 @@ mod vfs_race_tests {
             );
             assert_eq!(&*db.file_text(file_id), "Процедура В() КонецПроцедуры");
         }
+    }
+
+    fn progress_kinds(receiver: &Receiver<Message>) -> Vec<String> {
+        let mut kinds = Vec::new();
+        while let Ok(msg) = receiver.try_recv() {
+            if let Message::Notification(not) = msg {
+                if not.method == "$/progress" {
+                    if let Some(kind) =
+                        not.params.get("value").and_then(|v| v.get("kind")).and_then(|k| k.as_str())
+                    {
+                        kinds.push(kind.to_owned());
+                    }
+                }
+            }
+        }
+        kinds
+    }
+
+    #[test]
+    fn analysis_progress_shows_after_debounce_and_ends_when_idle() {
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender);
+
+        // Two concurrent jobs in flight; the rising edge armed one debounce epoch.
+        // The guards model the in-flight jobs; completion is simulated below via
+        // the same `note_analysis_finished` the guard's task triggers on the loop.
+        let _guard_a = state.note_analysis_spawned();
+        let _guard_b = state.note_analysis_spawned();
+        let epoch = state.analysis_epoch;
+
+        // A tick from a different burst must not show anything.
+        state.handle_analysis_progress_tick(epoch.wrapping_sub(1));
+        assert!(!state.analysis_progress_active, "stale-epoch tick must not show the indicator");
+
+        // The current burst's tick promotes to a visible Begin.
+        state.handle_analysis_progress_tick(epoch);
+        assert!(state.analysis_progress_active);
+
+        // A duplicate same-epoch tick must not re-Begin.
+        state.handle_analysis_progress_tick(epoch);
+
+        // The indicator stays while any job remains and ends only when the last drains.
+        state.note_analysis_finished();
+        assert!(state.analysis_progress_active, "indicator stays while work remains");
+        state.note_analysis_finished();
+        assert!(!state.analysis_progress_active, "indicator ends when the last job drains");
+
+        // Exactly one Begin and one End, despite the duplicate tick.
+        assert_eq!(progress_kinds(&receiver), vec!["begin".to_owned(), "end".to_owned()]);
+    }
+
+    #[test]
+    fn analysis_progress_skips_indicator_for_fast_burst() {
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender);
+
+        // A burst that finishes before its debounce tick is delivered.
+        let _guard = state.note_analysis_spawned();
+        let epoch = state.analysis_epoch;
+        state.note_analysis_finished();
+        assert_eq!(state.analysis_in_flight, 0);
+
+        // A `finished` while nothing is shown must not emit an End.
+        state.handle_analysis_progress_tick(epoch);
+        assert!(!state.analysis_progress_active);
+        assert!(progress_kinds(&receiver).is_empty(), "a fast burst emits no progress");
+    }
+
+    #[test]
+    fn analysis_progress_ignores_prior_burst_tick_after_new_burst() {
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender);
+
+        // Burst A starts and finishes within its debounce (no indicator yet).
+        let _guard_a = state.note_analysis_spawned();
+        let epoch_a = state.analysis_epoch;
+        state.note_analysis_finished();
+        assert_eq!(state.analysis_in_flight, 0);
+
+        // Burst B starts; its rising edge bumps the epoch.
+        let _guard_b = state.note_analysis_spawned();
+        let epoch_b = state.analysis_epoch;
+        assert_ne!(epoch_a, epoch_b, "a new burst must get a fresh epoch");
+
+        // A's late debounce tick must be ignored — it must not show B's indicator.
+        state.handle_analysis_progress_tick(epoch_a);
+        assert!(!state.analysis_progress_active, "stale prior-burst tick must not begin");
+
+        // B's own tick shows the indicator; finishing B ends it.
+        state.handle_analysis_progress_tick(epoch_b);
+        assert!(state.analysis_progress_active);
+        state.note_analysis_finished();
+        assert!(!state.analysis_progress_active);
+
+        assert_eq!(progress_kinds(&receiver), vec!["begin".to_owned(), "end".to_owned()]);
     }
 }
