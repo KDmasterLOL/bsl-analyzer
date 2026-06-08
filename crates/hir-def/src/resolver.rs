@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use bsl_config::VisibleConfig;
 use bsl_metadata::MdObject;
 
 use crate::configs::ConfigsDatabase;
@@ -55,16 +54,15 @@ impl Resolver {
         }
     }
 
-    fn mdo_visible_in_configs(
-        configs: &[VisibleConfig],
+    fn mdo_visible(
+        db: &dyn ConfigsDatabase,
+        file_id: vfs::FileId,
         mdo_type: bsl_metadata::MdoType,
         mdo_name: &Name,
     ) -> bool {
         let needle = mdo_name.as_str();
-        configs.iter().rev().any(|cfg| {
-            cfg.configuration.find_metadata_object(mdo_type, needle).is_some()
-                || cfg.configuration.find_register_by_type_and_name(mdo_type, needle).is_some()
-        })
+        db.resolve_metadata_object(file_id, mdo_type, needle).is_some()
+            || db.resolve_register(file_id, mdo_type, needle).is_some()
     }
 
     pub fn push_expr_scope(mut self, scopes: Arc<ExprScopes>, scope_id: ScopeId) -> Self {
@@ -380,9 +378,8 @@ impl Resolver {
         })?;
 
         let current_file_id = current_module_id.file_id;
-        let configurations = db.configurations(current_file_id);
-        if !configurations.is_empty()
-            && !Self::mdo_visible_in_configs(&configurations, mdo_type, mdo_name)
+        if db.file_has_visible_config(current_file_id)
+            && !Self::mdo_visible(db, current_file_id, mdo_type, mdo_name)
         {
             return Err(QualifiedMethodError::NotVisibleInConfigs);
         }
@@ -450,9 +447,8 @@ impl Resolver {
         })?;
 
         let current_file_id = current_module_id.file_id;
-        let configurations = db.configurations(current_file_id);
-        if !configurations.is_empty()
-            && !Self::mdo_visible_in_configs(&configurations, mdo_type, mdo_name)
+        if db.file_has_visible_config(current_file_id)
+            && !Self::mdo_visible(db, current_file_id, mdo_type, mdo_name)
         {
             tracing::debug!(
                 "resolve_aliased_manager_method: {:?} '{}' not declared in any visible config",
@@ -519,9 +515,8 @@ impl Resolver {
         })?;
 
         let current_file_id = current_module_id.file_id;
-        let configurations = db.configurations(current_file_id);
-        if !configurations.is_empty()
-            && !Self::mdo_visible_in_configs(&configurations, mdo_type, mdo_name)
+        if db.file_has_visible_config(current_file_id)
+            && !Self::mdo_visible(db, current_file_id, mdo_type, mdo_name)
         {
             tracing::debug!(
                 "resolve_object_module_method: {:?} '{}' not declared in any visible config",
@@ -588,9 +583,8 @@ impl Resolver {
         })?;
 
         let current_file_id = current_module_id.file_id;
-        let configurations = db.configurations(current_file_id);
-        if !configurations.is_empty()
-            && !Self::mdo_visible_in_configs(&configurations, mdo_type, mdo_name)
+        if db.file_has_visible_config(current_file_id)
+            && !Self::mdo_visible(db, current_file_id, mdo_type, mdo_name)
         {
             tracing::debug!(
                 "resolve_record_set_module_method: {:?} '{}' not declared in any visible config",
