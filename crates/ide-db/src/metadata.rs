@@ -174,11 +174,22 @@ pub struct MdoFileIds {
 #[derive(Default, PartialEq, Eq, Debug)]
 pub struct ConfigIndex {
     by_name: std::collections::HashMap<(bsl_metadata::MdoType, String), MdoFileIds>,
+    /// Registers keyed by name alone (no kind), for callers that know only the
+    /// register name (e.g. a `Движения.<Register>` movement touch). A register
+    /// name is unique within a config root, so this carries its kind alongside.
+    register_by_name: std::collections::HashMap<String, (bsl_metadata::MdoType, MdoFileIds)>,
 }
 
 impl ConfigIndex {
     pub fn lookup(&self, kind: bsl_metadata::MdoType, name: &str) -> Option<MdoFileIds> {
         self.by_name.get(&(kind, name.to_lowercase())).copied()
+    }
+
+    pub fn lookup_register_by_name(
+        &self,
+        name: &str,
+    ) -> Option<(bsl_metadata::MdoType, MdoFileIds)> {
+        self.register_by_name.get(&name.to_lowercase()).copied()
     }
 
     pub fn len(&self) -> usize {
@@ -202,13 +213,15 @@ pub fn config_index(
 
     let entries = listing.entries(db);
     let mut by_name = std::collections::HashMap::with_capacity(entries.len());
+    let mut register_by_name = std::collections::HashMap::new();
     for entry in entries.iter() {
-        by_name.insert(
-            (entry.kind, entry.name.to_lowercase()),
-            MdoFileIds { main: entry.main, predefined: entry.predefined },
-        );
+        let ids = MdoFileIds { main: entry.main, predefined: entry.predefined };
+        by_name.insert((entry.kind, entry.name.to_lowercase()), ids);
+        if entry.kind.is_register() {
+            register_by_name.insert(entry.name.to_lowercase(), (entry.kind, ids));
+        }
     }
-    Arc::new(ConfigIndex { by_name })
+    Arc::new(ConfigIndex { by_name, register_by_name })
 }
 
 /// Resolve a single metadata object within one config root, at per-MDO Salsa
@@ -265,6 +278,26 @@ pub fn resolve_register(
     let index = config_index(db, listing);
     let ids = index.lookup(mdo_type, &name)?;
     let files = MdoFiles::new(db, mdo_type, ids.main, ids.predefined);
+    parse_register_query(db, files)
+}
+
+/// Resolve a register within one config root by NAME alone (its kind is unknown
+/// to the caller — e.g. a `Движения.<Register>` movement touch). Shares
+/// [`config_index`]'s name-only register map, then parses the one register via
+/// [`parse_register_query`]. Same per-MDO granularity and absent-name
+/// invalidation as [`resolve_register`]; extension overlay across roots is
+/// composed by callers.
+#[salsa::tracked]
+pub fn resolve_register_by_name(
+    db: &dyn base_db::SourceDatabase,
+    listing: MetadataListingInput,
+    name: String,
+) -> Option<Arc<bsl_metadata::Register>> {
+    let _span = tracing::info_span!("resolve_register_by_name").entered();
+
+    let index = config_index(db, listing);
+    let (kind, ids) = index.lookup_register_by_name(&name)?;
+    let files = MdoFiles::new(db, kind, ids.main, ids.predefined);
     parse_register_query(db, files)
 }
 

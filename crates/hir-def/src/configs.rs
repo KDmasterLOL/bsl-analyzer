@@ -37,6 +37,11 @@ pub trait ConfigsDatabase: DefDatabase {
         name: &str,
     ) -> Option<Arc<Register>>;
 
+    /// Resolve a register visible to `file_id` by NAME alone, when the caller does
+    /// not know its kind (e.g. a `Движения.<Register>` movement touch). Same
+    /// per-MDO granularity and base + own-extension scoping as [`resolve_register`].
+    fn resolve_register_by_name(&self, file_id: FileId, name: &str) -> Option<Arc<Register>>;
+
     /// Resolve the underlying type of the defined type `name` visible to
     /// `file_id`, at per-defined-type Salsa granularity. Base + the file's own
     /// extension (which replaces the underlying type wholesale). Returns the

@@ -136,12 +136,8 @@ impl Resolver {
             return None;
         }
         let module_id = self.module_id()?;
-        let needle = register_name.as_str();
-        db.configurations(module_id.file_id).iter().rev().find_map(|cfg| {
-            cfg.configuration
-                .find_register(needle)
-                .map(|reg| (reg.mdo_type(), Name::new(reg.name())))
-        })
+        db.resolve_register_by_name(module_id.file_id, register_name.as_str())
+            .map(|reg| (reg.mdo_type(), Name::new(reg.name())))
     }
 
     /// Names of the configuration's GLOBAL common modules — those whose exported

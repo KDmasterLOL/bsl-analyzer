@@ -494,6 +494,46 @@ impl RootDatabaseImpl {
         }
     }
 
+    /// Resolve a register visible to `file_id` by NAME alone (its kind unknown to
+    /// the caller). The by-name counterpart of [`resolve_register_for_file`], with
+    /// the same main + file's-extension overlay and per-MDO-or-fallback split.
+    pub fn resolve_register_by_name_for_file(
+        &self,
+        file_id: FileId,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::Register>> {
+        let (main_listing, ext_listing, bootstrapped) = self.metadata_listings_for_file(file_id)?;
+
+        if !bootstrapped {
+            use hir::ConfigsDatabase;
+            return self
+                .merged_visible_configuration(file_id)?
+                .find_register(name)
+                .cloned()
+                .map(Arc::new);
+        }
+
+        let resolve_in = |listing: Option<metadata::MetadataListingInput>| {
+            listing.and_then(|l| metadata::resolve_register_by_name(self, l, name.to_string()))
+        };
+        match (resolve_in(main_listing), resolve_in(ext_listing)) {
+            // Same name in base and extension: a borrowed register (same kind)
+            // merges; a same-name register of a *different* kind is not a borrow,
+            // so the extension's wins outright — mirroring `merge_extension_overlay`
+            // (which adds rather than merges on a kind mismatch, and `find_register`
+            // then returns the extension's).
+            (Some(main), Some(ext)) if main.mdo_type() == ext.mdo_type() => {
+                let mut merged = (*main).clone();
+                merged.apply_extension_overlay(&ext);
+                Some(Arc::new(merged))
+            }
+            (Some(_), Some(ext)) => Some(ext),
+            (Some(main), None) => Some(main),
+            (None, Some(ext)) => Some(ext),
+            (None, None) => None,
+        }
+    }
+
     /// The defined-type counterpart of [`resolve_metadata_object_for_file`]:
     /// resolve a defined type's underlying type visible to `file_id`. A defined
     /// type's overlay replaces the underlying type wholesale, so the file's
@@ -892,6 +932,14 @@ impl hir::ConfigsDatabase for RootDatabaseImpl {
         name: &str,
     ) -> Option<Arc<bsl_metadata::Register>> {
         RootDatabaseImpl::resolve_register_for_file(self, file_id, mdo_type, name)
+    }
+
+    fn resolve_register_by_name(
+        &self,
+        file_id: FileId,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::Register>> {
+        RootDatabaseImpl::resolve_register_by_name_for_file(self, file_id, name)
     }
 
     fn resolve_defined_type(

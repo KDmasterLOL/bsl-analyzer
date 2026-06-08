@@ -145,6 +145,58 @@ fn resolve_metadata_object_isolates_content_and_structure() {
 }
 
 #[test]
+fn resolve_register_by_name_resolves_via_listing_substrate() {
+    use crate::metadata::{resolve_register_by_name, MdoEntry, MetadataListingInput};
+    use bsl_metadata::MdoType;
+
+    let mut db = RootDatabaseImpl::new();
+    let f = FileId(0);
+    let mut file_set = FileSet::new();
+    file_set.insert(f, VfsPath::new("/InformationRegisters/РегистрСведений1.xml"));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(f, SourceRootId(0));
+    db.set_file_text(
+        f,
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../bsl-metadata/fixtures/designer/InformationRegisters/РегистрСведений1.xml"
+        )),
+    );
+
+    // The register lives in `entries` (MDOs + registers share the listing), keyed
+    // by a register MdoType, so the name-only index picks it up.
+    let listing = MetadataListingInput::new(
+        &db,
+        Arc::new(vec![MdoEntry {
+            kind: MdoType::InformationRegister,
+            name: "РегистрСведений1".to_string(),
+            main: f,
+            predefined: None,
+        }]),
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+    );
+
+    let reg = resolve_register_by_name(&db, listing, "РегистрСведений1".to_string())
+        .expect("register resolves by name alone");
+    assert_eq!(reg.mdo_type(), MdoType::InformationRegister);
+    assert_eq!(reg.name(), "РегистрСведений1");
+
+    // BSL is case-insensitive.
+    assert!(
+        resolve_register_by_name(&db, listing, "регистрсведений1".to_string()).is_some(),
+        "by-name lookup must be case-insensitive"
+    );
+
+    // An unrelated name resolves to None — and this miss depends on config_index,
+    // so adding the register later would invalidate it.
+    assert!(
+        resolve_register_by_name(&db, listing, "НетТакогоРегистра".to_string()).is_none(),
+        "unknown register name must not resolve"
+    );
+}
+
+#[test]
 fn resolve_defined_type_isolates_content_and_structure() {
     use crate::metadata::{
         defined_type_index, resolve_defined_type, DefinedTypeEntry, MetadataListingInput,

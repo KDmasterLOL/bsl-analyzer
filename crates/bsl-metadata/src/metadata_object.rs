@@ -97,6 +97,19 @@ impl FromStr for MdoType {
 }
 
 impl MdoType {
+    /// Whether this kind is a register (its objects live in `Configuration`'s
+    /// register list, resolved by `find_register_by_type_and_name`, not the
+    /// metadata-object list).
+    pub fn is_register(&self) -> bool {
+        matches!(
+            self,
+            Self::InformationRegister
+                | Self::AccumulationRegister
+                | Self::AccountingRegister
+                | Self::CalculationRegister
+        )
+    }
+
     pub fn russian_name(&self) -> &'static str {
         match self {
             Self::Catalog => "Справочник",
