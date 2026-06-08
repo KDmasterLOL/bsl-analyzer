@@ -260,6 +260,7 @@ dependencies = [
  "hir",
  "ide",
  "ide-db",
+ "ide-host-core",
  "indicatif",
  "lexer",
  "line-index",
@@ -1964,6 +1965,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ide-host-core"
+version = "0.2.25"
+dependencies = [
+ "base-db",
+ "ide",
+ "salsa",
+ "tempfile",
+ "tracing",
+ "vfs",
+]
+
+[[package]]
 name = "ident_case"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2427,6 +2440,7 @@ dependencies = [
  "dirs",
  "expect-test",
  "ide",
+ "ide-host-core",
  "interprocess",
  "libc",
  "naparnik",

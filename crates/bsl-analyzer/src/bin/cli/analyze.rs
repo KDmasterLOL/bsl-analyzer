@@ -224,14 +224,14 @@ fn analyze_salsa(
     let source_root = base_db::SourceRoot::new_local((*file_set_arc).clone());
     db.set_source_root(source_root_id, source_root);
 
-    for (file_id, path) in &all_file_ids {
-        let content = fs::read_to_string(path)?;
-        db.set_file_source_root(*file_id, source_root_id);
-        // Disk-backed: record only the content revision and drop the text. The
-        // text is re-read from disk on demand by `file_text_query` (LRU-evictable,
-        // verified against this revision), so the whole workspace's source is not
-        // held resident as salsa inputs for the entire run.
-        db.set_file_revision_from_disk(*file_id, base_db::content_revision(&content));
+    // Disk-backed: record each file's content revision and drop the text (re-read on
+    // demand by `file_text_query` under the salsa LRU, verified against the revision),
+    // via the shared resident-load primitive. A file that cannot be read aborts the
+    // run, preserving the previous `?` behaviour.
+    let unreadable =
+        ide_host_core::register_files_disk_backed(&mut db, source_root_id, &all_file_ids);
+    if let Some((path, err)) = unreadable.into_iter().next() {
+        return Err(format!("failed to read BSL file {}: {err}", path.display()).into());
     }
 
     tracing::info!(

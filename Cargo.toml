@@ -30,6 +30,7 @@ code-chunk = { path = "crates/code-chunk" }
 dataflow = { path = "crates/dataflow" }
 ide = { path = "crates/ide" }
 ide-db = { path = "crates/ide-db" }
+ide-host-core = { path = "crates/ide-host-core" }
 ide-diagnostics = { path = "crates/ide-diagnostics" }
 ide-assists = { path = "crates/ide-assists" }
 hir = { path = "crates/hir" }

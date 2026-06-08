@@ -21,7 +21,7 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 use base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use bsl_search::SearchEngine;
 use ide::RootDatabaseImpl;
-use vfs::{file_set::FileSet, FileId, VfsPath};
+use vfs::FileId;
 use walkdir::WalkDir;
 
 use crate::cache::graph_db_path;
@@ -1122,17 +1122,7 @@ pub(crate) fn enumerate_bsl_files(workspace_root: &Path) -> Vec<(FileId, PathBuf
     entries
 }
 
-/// The whole-workspace source root: a file-id ↔ path map covering EVERY file, so
-/// cross-module resolution through the module index can find any target's
-/// [`FileId`]. Built once per build and shared (cheaply cloned — the map is
-/// `Arc`-backed) into every per-batch database.
-pub(crate) fn build_source_root(all_files: &[(FileId, PathBuf)]) -> SourceRoot {
-    let mut file_set = FileSet::new();
-    for (file_id, path) in all_files {
-        file_set.insert(*file_id, VfsPath::new(path.clone()));
-    }
-    SourceRoot::new_local(file_set)
-}
+pub(crate) use ide_host_core::build_source_root;
 
 /// Build a batch database that shares the whole-workspace `source_root` (so any
 /// target is addressable by path through the module index) but loads text only for
@@ -1193,16 +1183,7 @@ pub(crate) fn db_for_files_lazy(
         db.set_graph_config_cache(Arc::clone(cache));
     }
     db.set_source_root(GRAPH_SOURCE_ROOT, source_root.clone());
-    for (file_id, path) in all_files {
-        db.set_file_source_root(*file_id, GRAPH_SOURCE_ROOT);
-        match base_db::read_disk_text(path) {
-            Ok(text) => db.set_file_revision_from_disk(*file_id, base_db::content_revision(&text)),
-            Err(e) => {
-                tracing::warn!(path = %path.display(), "diagnostics load: read failed: {e}");
-                db.set_file_text(*file_id, "");
-            }
-        }
-    }
+    ide_host_core::register_files_disk_backed(&mut db, GRAPH_SOURCE_ROOT, all_files);
     db.set_all_config_paths(config_paths.to_vec());
     db
 }
