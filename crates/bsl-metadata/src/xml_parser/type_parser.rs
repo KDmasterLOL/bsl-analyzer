@@ -147,7 +147,10 @@ pub(crate) fn parse_type_xml(type_node: roxmltree::Node<'_, '_>) -> Result<Attri
 
     match all_types.len() {
         0 => {
-            tracing::warn!(
+            // A `<Type/>` with no resolvable entries is an ordinary, frequent shape in
+            // metadata XML (e.g. an attribute typed only by a type set we don't model),
+            // not an error — log at debug so it does not flood a whole-config scan.
+            tracing::debug!(
                 types = ?type_strs,
                 type_sets = ?type_set_strs,
                 "parse_type_xml: no types collected, returning Unknown"
