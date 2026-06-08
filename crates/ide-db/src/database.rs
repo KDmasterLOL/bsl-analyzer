@@ -676,6 +676,79 @@ impl RootDatabaseImpl {
         main_path.and_then(|p| find_in(p)).or_else(|| extension_path.and_then(|p| find_in(p)))
     }
 
+    /// The `Ext/Module.bsl` body file id(s) of the common module `name` visible to
+    /// `file_id` — base + the file's own extension. A borrowed module has a base
+    /// body and an extension body; both are returned so method/parameter validation
+    /// sees the merged surface. The scoped counterpart of the former all-config
+    /// `find_common_module_files_anywhere`: body ids come straight from the substrate
+    /// when bootstrapped, otherwise from a scoped root-relative URI scan.
+    pub fn resolve_common_module_files_for_file(&self, file_id: FileId, name: &str) -> Vec<FileId> {
+        let Some((main_listing, ext_listing, bootstrapped)) =
+            self.metadata_listings_for_file(file_id)
+        else {
+            return Vec::new();
+        };
+
+        let mut out: Vec<FileId> = Vec::new();
+
+        if bootstrapped {
+            for listing in [ext_listing, main_listing].into_iter().flatten() {
+                if let Some(fid) =
+                    metadata::common_module_index(self, listing).lookup_module_file(name)
+                {
+                    if !out.contains(&fid) {
+                        out.push(fid);
+                    }
+                }
+            }
+            return out;
+        }
+
+        use bsl_metadata::traits::Module;
+
+        let Some(file_path) = vfs_helpers::get_file_path(self, file_id) else {
+            return out;
+        };
+        let paths = RootDatabaseImpl::all_config_paths(self);
+
+        let body_in = |root: &std::path::Path| -> Option<FileId> {
+            let path_input = metadata::intern_configuration_path(
+                self,
+                &root.to_string_lossy(),
+                self.config_root_revision_for_path(root),
+            );
+            let config = self.load_configuration(path_input);
+            let uri = config.find_common_module(name)?.uri()?;
+            let vfs_path = vfs::VfsPath::new(root.join(uri).to_string_lossy().into_owned());
+            self.resolve_vfs_path(SourceRootId(0), &vfs_path)
+        };
+
+        if paths.is_empty() {
+            if let Some(root) = vfs_helpers::find_configuration_root(self, &file_path) {
+                if let Some(fid) = body_in(&root) {
+                    out.push(fid);
+                }
+            }
+            return out;
+        }
+
+        let main_path = paths.iter().find_map(|(label, path)| label.is_none().then_some(path));
+        let extension_path = paths
+            .iter()
+            .filter(|(label, path)| label.is_some() && file_path.starts_with(path))
+            .max_by_key(|(_, path)| path.as_os_str().len())
+            .map(|(_, path)| path);
+
+        for root in [extension_path, main_path].into_iter().flatten() {
+            if let Some(fid) = body_in(root) {
+                if !out.contains(&fid) {
+                    out.push(fid);
+                }
+            }
+        }
+        out
+    }
+
     fn features(&self) -> FeaturesInput {
         self.features_input.read().expect("features_input is initialized in RootDatabaseImpl::new")
     }
@@ -1163,6 +1236,10 @@ impl RootDatabase for RootDatabaseImpl {
         module_file_id: FileId,
     ) -> Option<Arc<bsl_metadata::CommonModule>> {
         RootDatabaseImpl::common_module_for_file_id(self, module_file_id)
+    }
+
+    fn resolve_common_module_files(&self, file_id: FileId, name: &str) -> Vec<FileId> {
+        RootDatabaseImpl::resolve_common_module_files_for_file(self, file_id, name)
     }
 
     fn all_sdbl_in_file(

@@ -118,7 +118,7 @@ fn check_method(
     code: DiagnosticCode,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let module_files = ctx.find_common_module_files_anywhere(&handler.module_name);
+    let module_files = ctx.common_module_body_files(&handler.module_name);
     if module_files.is_empty() {
         return;
     }

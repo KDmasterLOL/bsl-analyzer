@@ -405,11 +405,20 @@ pub fn parse_common_module_query(
 pub struct CommonModuleIndex {
     by_name: std::collections::HashMap<String, vfs::FileId>,
     by_module_file: std::collections::HashMap<vfs::FileId, String>,
+    /// `lowercased-name -> Ext/Module.bsl id`, for resolving a common module's
+    /// body file scoped to this root (method/parameter validation needs the body,
+    /// not the metadata XML). Absent for modules whose body was not enrolled.
+    module_file_by_name: std::collections::HashMap<String, vfs::FileId>,
 }
 
 impl CommonModuleIndex {
     pub fn lookup(&self, name: &str) -> Option<vfs::FileId> {
         self.by_name.get(&name.to_lowercase()).copied()
+    }
+
+    /// The `Ext/Module.bsl` id of the common module `name` in this root, if known.
+    pub fn lookup_module_file(&self, name: &str) -> Option<vfs::FileId> {
+        self.module_file_by_name.get(&name.to_lowercase()).copied()
     }
 
     /// The lowercased name of the common module whose `Ext/Module.bsl` is
@@ -430,13 +439,15 @@ pub fn common_module_index(
     let entries = listing.common_modules(db);
     let mut by_name = std::collections::HashMap::with_capacity(entries.len());
     let mut by_module_file = std::collections::HashMap::new();
+    let mut module_file_by_name = std::collections::HashMap::new();
     for entry in entries.iter() {
         by_name.insert(entry.name.to_lowercase(), entry.main);
         if let Some(module_file) = entry.module_file {
             by_module_file.insert(module_file, entry.name.to_lowercase());
+            module_file_by_name.insert(entry.name.to_lowercase(), module_file);
         }
     }
-    Arc::new(CommonModuleIndex { by_name, by_module_file })
+    Arc::new(CommonModuleIndex { by_name, by_module_file, module_file_by_name })
 }
 
 /// Resolve a single common module's metadata by name within one config root, at

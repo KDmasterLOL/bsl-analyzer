@@ -301,8 +301,15 @@ fn resolve_common_module_by_name_and_by_body_file() {
         }]),
     );
 
-    // Both the by-name lookup and the by-body reverse index derive from the listing.
+    // The by-name lookup, the body-file-by-name lookup, and the by-body reverse
+    // index all derive from the listing.
     assert_eq!(common_module_index(&db, listing).lookup("общегоназначения"), Some(xml_file));
+    assert_eq!(
+        common_module_index(&db, listing).lookup_module_file("общегоназначения"),
+        Some(bsl_file),
+        "the body Ext/Module.bsl must be resolvable by name for method/param validation"
+    );
+    assert!(common_module_index(&db, listing).lookup_module_file("Нет").is_none());
 
     let m = resolve_common_module(&db, listing, "ОбщегоНазначения".to_string())
         .expect("module resolves by name");

@@ -101,6 +101,37 @@ pub trait AnalysisProvider {
             .map(Arc::new)
     }
 
+    /// The `Ext/Module.bsl` body file id(s) of the common module `name` visible to
+    /// `file_id`, for diagnostics that validate the module body (handler method
+    /// existence/export, required parameters). The default resolves bodies by
+    /// root-relative URI across the file's visible configs; the salsa-backed
+    /// provider overrides it with the substrate, scoped base + the file's own
+    /// extension.
+    fn resolve_common_module_files(&self, file_id: FileId, name: &str) -> Vec<FileId> {
+        use bsl_metadata::traits::Module;
+
+        let mut out = Vec::new();
+        for visible in self.visible_configurations(file_id) {
+            let Some(uri) =
+                visible.config.configuration.find_common_module(name).and_then(|m| m.uri())
+            else {
+                continue;
+            };
+            let resolved = if visible.root.as_os_str().is_empty() {
+                self.resolve_module_file(uri)
+            } else {
+                let vfs_path = VfsPath::new(visible.root.join(uri).to_string_lossy().into_owned());
+                self.resolve_vfs_path(SourceRootId(0), &vfs_path)
+            };
+            if let Some(fid) = resolved {
+                if !out.contains(&fid) {
+                    out.push(fid);
+                }
+            }
+        }
+        out
+    }
+
     fn workspace_symbols(&self, source_root_id: SourceRootId) -> Arc<hir::WorkspaceSymbols>;
 
     fn module_index(&self, source_root_id: SourceRootId) -> Arc<ModuleIndex>;

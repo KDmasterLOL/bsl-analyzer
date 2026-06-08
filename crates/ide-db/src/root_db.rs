@@ -27,6 +27,11 @@ pub trait RootDatabase:
         module_file_id: FileId,
     ) -> Option<Arc<bsl_metadata::CommonModule>>;
 
+    /// The `Ext/Module.bsl` body file id(s) of the common module `name` visible to
+    /// `file_id` (base + the file's own extension). For method/parameter validation
+    /// that must read the module body, scoped extension-private like the metadata.
+    fn resolve_common_module_files(&self, file_id: FileId, name: &str) -> Vec<FileId>;
+
     fn all_sdbl_in_file(
         &self,
         file_id: FileId,

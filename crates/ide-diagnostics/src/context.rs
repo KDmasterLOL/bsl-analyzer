@@ -36,36 +36,12 @@ impl<'a> DiagnosticsContext<'a> {
         self.provider.visible_configurations(self.file_id)
     }
 
-    pub fn find_common_module_files_anywhere(&self, name: &str) -> Vec<vfs::FileId> {
-        use bsl_metadata::traits::Module;
-
-        let mut out = Vec::new();
-        for visible in self.visible_configurations() {
-            let Some(common_module) = visible.config.configuration.find_common_module(name) else {
-                continue;
-            };
-            let Some(uri) = common_module.uri() else { continue };
-
-            let resolved = if visible.root.as_os_str().is_empty() {
-                self.resolve_module_file(uri)
-            } else {
-                let full_path = visible.root.join(uri);
-                let vfs_path = vfs::VfsPath::new(full_path.to_string_lossy().into_owned());
-                self.resolve_vfs_path(base_db::SourceRootId(0), &vfs_path)
-            };
-
-            if let Some(file_id) = resolved {
-                out.push(file_id);
-            } else {
-                tracing::debug!(
-                    module = %name,
-                    ext = ?visible.config.name,
-                    root = %visible.root.display(),
-                    "CommonModule file not found in VFS",
-                );
-            }
-        }
-        out
+    /// The `Ext/Module.bsl` body file id(s) of the common module `name` visible to
+    /// this file — base + its own extension. For diagnostics that read the module
+    /// body (handler method existence/export, required parameters). Scoped
+    /// extension-private through the per-common-module substrate.
+    pub fn common_module_body_files(&self, name: &str) -> Vec<vfs::FileId> {
+        self.provider.resolve_common_module_files(self.file_id, name)
     }
 
     /// The common module `name` visible to this file (base + its own extension),
