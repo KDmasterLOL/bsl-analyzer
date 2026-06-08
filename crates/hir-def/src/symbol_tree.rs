@@ -408,8 +408,7 @@ pub fn symbol_tree_query<'db>(
     let file_id = file_id_input.file_id(db);
     let item_tree = db.item_tree(file_id);
     let parse = db.parse(file_id);
-    let file_text = db.file_text_input(file_id);
-    let source_text = file_text.text(db);
+    let source_text = db.file_text(file_id);
     let module_id = crate::ModuleId::new(file_id);
     std::sync::Arc::new(SymbolTree::from_item_tree(&item_tree, module_id, &parse, &source_text))
 }

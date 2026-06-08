@@ -10,7 +10,7 @@ use text_size::TextRange;
 
 use super::context::LoweringContext;
 
-impl LoweringContext {
+impl LoweringContext<'_> {
     pub(in crate::lower) fn lower_expr(&mut self, node: &syntax::SyntaxNode) -> ExprHir {
         use syntax::SyntaxKind;
 
@@ -124,7 +124,7 @@ impl LoweringContext {
             } else {
                 let field_exists =
                     self.scope.find_field_def(table_alias_str, column_name_str).is_some();
-                let can_validate_field = self.metadata.is_some()
+                let can_validate_field = self.resolver.is_some()
                     && match table_alias_str {
                         Some(alias) => self
                             .scope
@@ -525,9 +525,8 @@ impl LoweringContext {
                 let is_valid = if is_empty_ref {
                     true
                 } else if mdo_type == bsl_metadata::MdoType::Enum {
-                    self.metadata
-                        .as_ref()
-                        .and_then(|config| config.find_metadata_object(mdo_type, object_name))
+                    self.resolver
+                        .and_then(|r| r.resolve_metadata_object(mdo_type, object_name))
                         .map(|obj| obj.find_enum_value(value_name).is_some())
                         .unwrap_or(true)
                 } else if matches!(
@@ -537,9 +536,8 @@ impl LoweringContext {
                         | bsl_metadata::MdoType::ChartOfCharacteristicTypes
                         | bsl_metadata::MdoType::ChartOfAccounts
                 ) {
-                    self.metadata
-                        .as_ref()
-                        .and_then(|config| config.find_metadata_object(mdo_type, object_name))
+                    self.resolver
+                        .and_then(|r| r.resolve_metadata_object(mdo_type, object_name))
                         .map(|obj| {
                             if obj.predefined_items.is_empty() {
                                 true

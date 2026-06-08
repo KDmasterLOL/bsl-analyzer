@@ -463,6 +463,12 @@ fn lookup_on_form_control(
     })
 }
 
+fn push_unique_sig(sigs: &mut Vec<Vec<TypeId>>, sig: Vec<TypeId>) {
+    if !sigs.contains(&sig) {
+        sigs.push(sig);
+    }
+}
+
 fn union_lookup(
     db: &dyn TypeKernelDb,
     members: &[TypeId],
@@ -475,19 +481,38 @@ fn union_lookup(
         .filter(|id| !matches!(db.lookup_type(*id), TypeKind::Undefined | TypeKind::Null))
         .collect();
     let mut returns: Vec<TypeId> = Vec::with_capacity(live.len());
-    let mut chosen_signature: Option<(Vec<TypeId>, Vec<Vec<TypeId>>)> = None;
+    // A union receiver is an over-approximation: at runtime the value is exactly
+    // one arm. Gather every arm's signature(s); an argument accepted by ANY arm
+    // must not be a mismatch (e.g. a String key on `Структура | Массив` is valid
+    // via `Структура.Вставить`, even though `Массив.Вставить` wants a numeric
+    // index). Taking only the first arm's signature emits a false positive
+    // whenever the arms disagree.
+    let mut sigs: Vec<Vec<TypeId>> = Vec::new();
     let mut hit_any = false;
     for m in live {
         if let Some(info) = lookup_method_inner(db, m, method_name, refine_ctx) {
             hit_any = true;
             returns.push(info.return_ty);
-            if chosen_signature.is_none() {
-                chosen_signature = Some((info.params, info.overloads));
+            if info.overloads.is_empty() {
+                push_unique_sig(&mut sigs, info.params);
+            } else {
+                for ov in info.overloads {
+                    push_unique_sig(&mut sigs, ov);
+                }
             }
         }
     }
-    let (params, overloads) = chosen_signature.unwrap_or_default();
-    hit_any.then(|| MethodInfo { return_ty: db.union(returns), params, overloads })
+    hit_any.then(|| {
+        // When every arm shares one signature, present it as a plain signature
+        // (no overloads) so single-shape unions behave exactly as a single
+        // receiver; emit overloads only when the arms genuinely diverge.
+        let (params, overloads) = if sigs.len() <= 1 {
+            (sigs.into_iter().next().unwrap_or_default(), Vec::new())
+        } else {
+            (sigs[0].clone(), sigs)
+        };
+        MethodInfo { return_ty: db.union(returns), params, overloads }
+    })
 }
 
 pub fn platform_type_key_id(db: &dyn TypeKernelDb, id: TypeId) -> Option<String> {
@@ -1183,6 +1208,34 @@ mod tests {
     fn method_lookup_unknown_method_returns_none() {
         let db = InMemoryDb::new();
         assert!(lookup(&db, db.array(None), &Name::new("НеСуществуетТакогоМетода")).is_none());
+    }
+
+    #[test]
+    fn union_lookup_merges_all_arm_signatures() {
+        let db = InMemoryDb::new();
+        let recv = db.union(vec![db.array(None), db.structure(None)]);
+        let info = lookup(&db, recv, &Name::new("Вставить"))
+            .expect("Вставить must resolve on a Массив | Структура union");
+
+        // Every arm's signature must be present so an argument accepted by EITHER
+        // arm is not reported as a mismatch (a union receiver is an
+        // over-approximation). Массив.Вставить wants a numeric index;
+        // Структура.Вставить wants a string key.
+        let first_accepts = |arg: TypeId| {
+            info.overloads
+                .iter()
+                .any(|ov| ov.first().is_some_and(|&p| crate::subtype::is_coercible_to(&db, arg, p)))
+        };
+        assert!(
+            first_accepts(db.string(None, false)),
+            "Структура.Вставить arm must accept a String key, got overloads {:?}",
+            info.overloads
+        );
+        assert!(
+            first_accepts(db.number(None, None)),
+            "Массив.Вставить arm must accept a numeric index, got overloads {:?}",
+            info.overloads
+        );
     }
 
     #[test]

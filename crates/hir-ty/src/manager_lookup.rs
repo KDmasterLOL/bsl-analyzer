@@ -1,4 +1,5 @@
-use bsl_config::VisibleConfig;
+use std::sync::Arc;
+
 use bsl_metadata::{MdoType, MetadataObject};
 use bsl_types::builders::Builders;
 use bsl_types::intern::TypeKernelDb;
@@ -6,6 +7,7 @@ use bsl_types::kind::{ConfigId, MetadataKind, TypeId, TypeKind};
 use bsl_types::testing::RootConfigCtx;
 use hir_def::Name;
 
+use crate::object_resolver::ObjectResolver;
 use crate::this_object::FixedConfigCtx;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,16 +17,16 @@ pub struct ManagerMemberInfo {
 
 pub fn lookup_manager_field(
     db: &dyn TypeKernelDb,
-    configs: &[VisibleConfig],
+    resolver: &dyn ObjectResolver,
     receiver: TypeId,
     member: &Name,
 ) -> Option<ManagerMemberInfo> {
-    lookup_manager_field_inner(db, configs, receiver, member)
+    lookup_manager_field_inner(db, resolver, receiver, member)
 }
 
 fn lookup_manager_field_inner(
     db: &dyn TypeKernelDb,
-    configs: &[VisibleConfig],
+    resolver: &dyn ObjectResolver,
     receiver: TypeId,
     member: &Name,
 ) -> Option<ManagerMemberInfo> {
@@ -43,9 +45,9 @@ fn lookup_manager_field_inner(
         _ => Shape::Other,
     };
     match shape {
-        Shape::Collection(kind) => promote_collection_member(db, configs, kind, member),
+        Shape::Collection(kind) => promote_collection_member(db, resolver, kind, member),
         Shape::Manager { mdo, name, config_id } => {
-            lookup_predefined(db, configs, mdo, &name, member, &config_id)
+            lookup_predefined(db, resolver, mdo, &name, member, &config_id)
         }
         Shape::Other => None,
     }
@@ -53,15 +55,13 @@ fn lookup_manager_field_inner(
 
 fn promote_collection_member(
     db: &dyn TypeKernelDb,
-    configs: &[VisibleConfig],
+    resolver: &dyn ObjectResolver,
     kind: MdoType,
     mdo_name: &Name,
 ) -> Option<ManagerMemberInfo> {
     let needle = mdo_name.as_str();
-    let exists = configs.iter().rev().any(|cfg| {
-        cfg.configuration.find_metadata_object(kind, needle).is_some()
-            || cfg.configuration.find_register_by_type_and_name(kind, needle).is_some()
-    });
+    let exists = resolver.resolve_metadata_object(kind, needle).is_some()
+        || resolver.resolve_register(kind, needle).is_some();
 
     exists.then(|| ManagerMemberInfo {
         ty: db.object_manager(kind, mdo_name.as_str().to_string(), &RootConfigCtx),
@@ -70,14 +70,14 @@ fn promote_collection_member(
 
 pub(crate) fn lookup_predefined(
     db: &dyn TypeKernelDb,
-    configs: &[VisibleConfig],
+    resolver: &dyn ObjectResolver,
     kind: MdoType,
     owner_name: &str,
     member_name: &Name,
     config_id: &ConfigId,
 ) -> Option<ManagerMemberInfo> {
     let ref_kind = predefined_ref_kind_for(kind)?;
-    let mdo = find_mdo(configs, kind, owner_name)?;
+    let mdo = find_mdo(resolver, kind, owner_name)?;
     let hit = match kind {
         MdoType::Enum => mdo.find_enum_value(member_name.as_str()).is_some(),
         MdoType::Catalog | MdoType::ChartOfAccounts => {
@@ -101,12 +101,12 @@ fn predefined_ref_kind_for(kind: MdoType) -> Option<MetadataKind> {
     }
 }
 
-fn find_mdo<'a>(
-    configs: &'a [VisibleConfig],
+fn find_mdo(
+    resolver: &dyn ObjectResolver,
     kind: MdoType,
     name: &str,
-) -> Option<&'a MetadataObject> {
-    configs.iter().rev().find_map(|cfg| cfg.configuration.find_metadata_object(kind, name))
+) -> Option<Arc<MetadataObject>> {
+    resolver.resolve_metadata_object(kind, name)
 }
 
 #[cfg(test)]
@@ -117,13 +117,15 @@ mod tests {
     use bsl_metadata::Configuration;
     use bsl_types::testing::InMemoryDb;
 
+    use crate::object_resolver::ConfigsObjectResolver;
+
     fn lookup_manager_field(
         db: &InMemoryDb,
         configs: &[VisibleConfig],
         base_ty: TypeId,
         member: &Name,
     ) -> Option<ManagerMemberInfo> {
-        super::lookup_manager_field(db, configs, base_ty, member)
+        super::lookup_manager_field(db, &ConfigsObjectResolver(configs), base_ty, member)
     }
     use std::sync::Arc;
 
@@ -347,7 +349,7 @@ mod tests {
     }
 
     #[test]
-    fn promotion_extension_wins_on_collision() {
+    fn promotion_merges_base_and_extension_predefined_items() {
         let mut main = Configuration::new("Main");
         main.add_metadata_object(catalog("Валюты", vec!["Доллар"]));
         let mut ext = Configuration::new("Ext");
@@ -358,24 +360,20 @@ mod tests {
         ];
         let db = InMemoryDb::new();
 
-        let info = lookup_manager_field(
-            &db,
-            &configs,
-            db.object_manager(MdoType::Catalog, "Валюты".to_string(), &RootConfigCtx),
-            &Name::new("Евро"),
-        )
-        .expect("extension-declared predefined item must resolve");
-        assert_eq!(
-            info.ty,
-            db.metadata_ref(MetadataKind::CatalogRef, "Валюты".to_string(), &RootConfigCtx)
-        );
-
-        assert!(lookup_manager_field(
-            &db,
-            &configs,
-            db.object_manager(MdoType::Catalog, "Валюты".to_string(), &RootConfigCtx),
-            &Name::new("Доллар"),
-        )
-        .is_none());
+        // An extension that borrows Валюты and adds the predefined Евро does not
+        // hide the base's Доллар — both predefined items resolve on the merged MDO.
+        for item in ["Евро", "Доллар"] {
+            let info = lookup_manager_field(
+                &db,
+                &configs,
+                db.object_manager(MdoType::Catalog, "Валюты".to_string(), &RootConfigCtx),
+                &Name::new(item),
+            )
+            .unwrap_or_else(|| panic!("predefined item {item} must resolve on the merged catalog"));
+            assert_eq!(
+                info.ty,
+                db.metadata_ref(MetadataKind::CatalogRef, "Валюты".to_string(), &RootConfigCtx)
+            );
+        }
     }
 }

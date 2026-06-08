@@ -83,6 +83,7 @@ pub fn resolve_platform_system_enum_type(db: &dyn TypeKernelDb, name: &Name) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::object_resolver::ConfigsObjectResolver;
 
     #[test]
     fn resolve_platform_global_property_type_returns_declared_ty_for_known_global() {
@@ -139,15 +140,25 @@ mod tests {
         let receiver = resolve_platform_system_enum_type(&db, &Name::new("ВидДвиженияБухгалтерии"))
             .expect("bare enum name must type as a platform object");
 
-        let member = crate::field_lookup::lookup_field(&db, &[], receiver, &Name::new("Дебет"));
+        let member = crate::field_lookup::lookup_field(
+            &db,
+            &ConfigsObjectResolver(&[]),
+            receiver,
+            &Name::new("Дебет"),
+        );
         assert!(
             member.is_some(),
             "`ВидДвиженияБухгалтерии.Дебет` must resolve as an enum member via platform properties"
         );
 
         assert!(
-            crate::field_lookup::lookup_field(&db, &[], receiver, &Name::new("НетТакогоЧлена"))
-                .is_none(),
+            crate::field_lookup::lookup_field(
+                &db,
+                &ConfigsObjectResolver(&[]),
+                receiver,
+                &Name::new("НетТакогоЧлена")
+            )
+            .is_none(),
             "a non-existent enum member must not resolve"
         );
     }

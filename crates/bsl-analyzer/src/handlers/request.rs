@@ -1063,7 +1063,8 @@ mod tests {
 "#;
 
         state.mem_docs.insert(uri.clone(), source.to_string(), 1);
-        state.vfs_file_for_url(&uri).unwrap();
+        let open_file_id = state.vfs_file_for_url(&uri).unwrap();
+        state.open_files.insert(open_file_id);
         {
             let mut vfs = state.vfs.write();
             vfs.set_file_contents(
@@ -1103,7 +1104,8 @@ mod tests {
         let source = "#Область Public\nПроцедура Тест()\n    Если Истина Тогда\n        Сообщить(1);\n    КонецЕсли;\nКонецПроцедуры\n#КонецОбласти";
 
         state.mem_docs.insert(uri.clone(), source.to_string(), 1);
-        state.vfs_file_for_url(&uri).unwrap();
+        let open_file_id = state.vfs_file_for_url(&uri).unwrap();
+        state.open_files.insert(open_file_id);
         {
             let mut vfs = state.vfs.write();
             vfs.set_file_contents(
@@ -1146,7 +1148,11 @@ mod tests {
 
         let source_file_id = state.vfs_file_for_url(&source_uri).unwrap();
         let target_file_id = state.vfs_file_for_url(&target_uri).unwrap();
+        // Both open: text lives in the resident overlay (these synthetic files
+        // have no disk path for the disk-backed path to read).
         state.mem_docs.insert(source_uri.clone(), source_text.to_string(), 1);
+        state.open_files.insert(source_file_id);
+        state.open_files.insert(target_file_id);
 
         {
             let mut vfs = state.vfs.write();
@@ -1208,7 +1214,8 @@ mod tests {
         let source = "short";
 
         state.mem_docs.insert(uri.clone(), source.to_string(), 1);
-        state.vfs_file_for_url(&uri).unwrap();
+        let open_file_id = state.vfs_file_for_url(&uri).unwrap();
+        state.open_files.insert(open_file_id);
         {
             let mut vfs = state.vfs.write();
             vfs.set_file_contents(

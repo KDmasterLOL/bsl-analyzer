@@ -159,9 +159,20 @@ fn handle_loader_msg(state: &mut GlobalState, msg: vfs::loader::Message) -> Resu
                     let finalize_start = std::time::Instant::now();
                     tracing::info!("VFS loading complete");
 
+                    // Boot-phase memory breakdown. Source batches were drained
+                    // into Salsa incrementally as they streamed, so the text
+                    // high-water (`boot_peak_text_bytes`) stayed near one loader
+                    // chunk and this final `process_changes` is a near no-op; the
+                    // remaining resident growth is the metadata substrate.
+                    let mb = |b: u64| b / (1024 * 1024);
+                    let rss_peak = state.boot_peak_rss_bytes;
+                    let text_high_water = state.boot_peak_text_bytes;
+
                     state.process_changes(true);
+                    let rss_after_load = crate::smoke::read_rss_bytes().unwrap_or(0);
 
                     state.init_source_root();
+                    state.bootstrap_metadata_substrate();
 
                     state.report_progress(
                         "Loading",
@@ -170,6 +181,16 @@ fn handle_loader_msg(state: &mut GlobalState, msg: vfs::loader::Message) -> Resu
                         Some(0.95),
                     );
                     state.warm_metadata_cache();
+                    let rss_steady = crate::smoke::read_rss_bytes().unwrap_or(0);
+
+                    tracing::info!(
+                        rss_peak_mb = mb(rss_peak),
+                        rss_after_load_mb = mb(rss_after_load),
+                        rss_steady_mb = mb(rss_steady),
+                        text_high_water_mb = mb(text_high_water),
+                        metadata_resident_mb = mb(rss_steady.saturating_sub(rss_after_load)),
+                        "boot memory profile: source text drained incrementally during load",
+                    );
 
                     state.degraded_files_count = state.skipped_bsl.len();
                     let extra_violations = state.assert_total_vfs_invariant();
@@ -245,11 +266,54 @@ fn handle_loader_msg(state: &mut GlobalState, msg: vfs::loader::Message) -> Resu
                     vfs.register_watch_only(vfs::VfsPath::new(path.as_path()));
                 }
             }
+            // Metadata XML is watch-only (content not loaded into Salsa), so its
+            // edits arrive here, NOT through `process_changes`. After the initial
+            // scan these are live changes — e.g. a `git pull` touching XML —
+            // each of which invalidates the configuration of its owning root.
+            // Refresh open documents so their diagnostics reflect the new metadata.
             if state.vfs_done {
                 state.analysis_host.request_cancellation();
-                state.analysis_host.raw_database_mut().bump_metadata_version();
+                // Per-MDO substrate: re-discover the affected roots and re-read only
+                // the changed/new XML, so resolve_metadata_object reflects the edit at
+                // MDO granularity (and a disk-backed file_text never reads stale bytes).
+                let changed: Vec<std::path::PathBuf> = files
+                    .iter()
+                    .map(|p| AsRef::<std::path::Path>::as_ref(p).to_path_buf())
+                    .collect();
+                state.refresh_metadata_substrate(&changed);
+                // Coarse path: load_configuration is still the authoritative consumer
+                // until the per-MDO resolvers are migrated, so keep bumping its root.
+                state
+                    .analysis_host
+                    .raw_database_mut()
+                    .bump_config_for_paths(files.iter().map(|p| p.as_ref()));
+                for uri in state.opened_document_uris() {
+                    crate::handlers::notification::schedule_diagnostics(state, &uri);
+                }
             }
             tracing::debug!(count, vfs_done = state.vfs_done, "registered WatchOnly batch",);
+        }
+        vfs::loader::Message::RemovedRecursive { paths } => {
+            // A removed directory subtree (a watch backend reported only the
+            // directory, not each child). Expand it against the file set and
+            // tombstone descendants; ignore during the initial scan.
+            if state.vfs_done {
+                let n = paths.len();
+                let bsl_removed = state.remove_directories(&paths);
+                // A removed subtree can also drop metadata MDOs; re-discovering the
+                // owning roots tombstones them from the per-MDO listings.
+                let removed: Vec<std::path::PathBuf> = paths
+                    .iter()
+                    .map(|p| AsRef::<std::path::Path>::as_ref(p).to_path_buf())
+                    .collect();
+                let meta_changed = state.refresh_metadata_substrate(&removed);
+                if bsl_removed || meta_changed {
+                    for uri in state.opened_document_uris() {
+                        crate::handlers::notification::schedule_diagnostics(state, &uri);
+                    }
+                }
+                tracing::info!(removed_paths = n, "processed removed directory subtree");
+            }
         }
     }
     Ok(())
@@ -260,7 +324,11 @@ fn handle_task(state: &mut GlobalState, task: crate::global_state::Task) -> Resu
 
     match task {
         Task::DiagnosticsReady { uri, diagnostics, generation, completed_at } => {
-            if generation >= state.diagnostics_generation {
+            let current = state.diagnostics_generation.get(&uri).copied().unwrap_or(0);
+            // Publish only the latest schedule for this uri (`== current`) and only
+            // while it is still open — a result that finished after the document was
+            // closed must not be published for a closed file.
+            if generation == current && state.mem_docs.contains(&uri) {
                 let publish_delay_ms = completed_at.elapsed().as_millis() as u64;
                 let diagnostic_count = diagnostics.len();
                 let allocated_mb = profile::memory_usage().allocated.megabytes();
@@ -278,11 +346,7 @@ fn handle_task(state: &mut GlobalState, task: crate::global_state::Task) -> Resu
                     Notification::new("textDocument/publishDiagnostics".to_string(), params);
                 state.sender.send(notification.into())?;
             } else {
-                tracing::debug!(
-                    generation,
-                    current = state.diagnostics_generation,
-                    "discarding stale diagnostics"
-                );
+                tracing::debug!(generation, current, "discarding stale diagnostics");
             }
         }
         Task::DiagnosticsCancelled { generation, completed_at } => {
@@ -318,7 +382,9 @@ fn handle_task(state: &mut GlobalState, task: crate::global_state::Task) -> Resu
             }
             state.preload_external_tokens.insert(first_file, task.cancellation_token());
 
+            let analysis_guard = state.note_analysis_spawned();
             state.task_pool.pool.spawn(move || {
+                let _analysis_guard = analysis_guard;
                 let count = match salsa::Cancelled::catch(std::panic::AssertUnwindSafe(|| {
                     task.run()
                 })) {
@@ -333,6 +399,12 @@ fn handle_task(state: &mut GlobalState, task: crate::global_state::Task) -> Resu
                 };
                 Task::DependenciesPreloaded { file_id: first_file, count }
             });
+        }
+        Task::AnalysisProgressTick { epoch } => {
+            state.handle_analysis_progress_tick(epoch);
+        }
+        Task::AnalysisJobFinished => {
+            state.note_analysis_finished();
         }
     }
     Ok(())
@@ -350,21 +422,16 @@ fn handle_vfs_msg(
     let mut converted: Vec<(vfs::VfsPath, Option<Arc<str>>)> = Vec::with_capacity(files.len());
     for (path, contents) in files {
         let std_path: &std::path::Path = path.as_ref();
-
-        if let Ok(url) = lsp_types::Url::from_file_path(std_path) {
-            if state.mem_docs.contains(&url) {
-                continue;
-            }
-        }
-
         let vfs_path = vfs::VfsPath::new(std_path);
 
-        let contents_str = contents.and_then(|bytes| {
-            String::from_utf8(bytes).ok().map(|s| {
-                let s = s.strip_prefix('\u{FEFF}').unwrap_or(&s);
-                Arc::from(s)
-            })
-        });
+        // An open editor buffer is authoritative for unsaved content, so a
+        // disk-sourced change here must not clobber its overlay.
+        if state.is_open_document_path(std_path, &vfs_path) {
+            continue;
+        }
+
+        let contents_str =
+            contents.and_then(|bytes| base_db::decode_disk_bytes(&bytes).map(Arc::from));
 
         if project_model::is_bsl_source_path(std_path) {
             let mutated = if contents_str.is_some() {
@@ -394,13 +461,45 @@ fn handle_vfs_msg(
     }
 
     if !sync_to_salsa {
+        // Sample the streaming high-water BEFORE draining: this batch's text was
+        // just written to the VFS and prior batches have already drained, so the
+        // pending text is ~one loader chunk and RSS is at its per-batch peak.
+        let (_pending_files, pending_text_bytes) = state.vfs.read().pending_change_bytes();
+        state.boot_peak_text_bytes = state.boot_peak_text_bytes.max(pending_text_bytes as u64);
+        if let Some(rss) = crate::smoke::read_rss_bytes() {
+            state.boot_peak_rss_bytes = state.boot_peak_rss_bytes.max(rss);
+            tracing::debug!(
+                rss_mb = rss / (1024 * 1024),
+                pending_text_mb = pending_text_bytes / (1024 * 1024),
+                "boot load: batch buffered, draining to Salsa"
+            );
+        }
+
+        // Boot phase: drain THIS batch into Salsa now, suppressing the
+        // metadata/config reload (the post-load `init_source_root` +
+        // `bootstrap_metadata_substrate` rebuild the source root and metadata
+        // substrate once). Closed files are recorded by content revision and
+        // their text dropped, so the whole corpus never piles up as resident
+        // text in `Vfs::changes` — draining per batch keeps the load-time text
+        // high-water at ~one chunk instead of the entire corpus held until a
+        // single end-of-load flush.
+        state.process_changes(true);
         return Ok(());
     }
 
-    let (_, config_changed) = state.process_changes(false);
+    let outcome = state.process_changes(false);
 
-    if config_changed {
-        tracing::info!("config changed, scheduling diagnostics refresh for all open documents");
+    // External (non-open) file changes — e.g. a `git pull` touching modules or
+    // metadata — invalidate the Salsa cache but do not by themselves re-publish
+    // diagnostics for documents the editor already has open. Reschedule those so
+    // their diagnostics reflect the new disk state. Open files are filtered out of
+    // this batch above (their editor buffer is authoritative), so this fires only
+    // for genuine external changes, not for saves of open buffers.
+    if outcome.config_file_changed || outcome.affects_open_documents {
+        tracing::info!(
+            config_file_changed = outcome.config_file_changed,
+            "external change: scheduling diagnostics refresh for all open documents"
+        );
         for uri in state.opened_document_uris() {
             crate::handlers::notification::schedule_diagnostics(state, &uri);
         }
@@ -558,5 +657,29 @@ mod tests {
         };
 
         assert_eq!(PositionEncoding::negotiate(&caps), PositionEncoding::Utf8);
+    }
+
+    #[test]
+    fn handle_task_does_not_publish_diagnostics_for_a_closed_document() {
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let mut state = crate::global_state::GlobalState::new(sender);
+
+        let uri = lsp_types::Url::parse("file:///gone.bsl").unwrap();
+        // A diagnostics task that finished with the current generation, but for a
+        // document that is NOT open (closed before the result arrived).
+        state.diagnostics_generation.insert(uri.clone(), 1);
+        let task = crate::global_state::Task::DiagnosticsReady {
+            uri,
+            diagnostics: Vec::new(),
+            generation: 1,
+            completed_at: std::time::Instant::now(),
+        };
+
+        handle_task(&mut state, task).unwrap();
+
+        assert!(
+            receiver.try_recv().is_err(),
+            "diagnostics for a closed document must not be published"
+        );
     }
 }

@@ -139,7 +139,7 @@ mod tests {
         }
     }
 
-    fn make_test_scope_with_document() -> Scope {
+    fn make_test_scope_with_document() -> Scope<'static> {
         let mut config = Configuration::new("TestConfig");
         let document = bsl_metadata::MetadataObject {
             mdo_type: MdoType::Document,

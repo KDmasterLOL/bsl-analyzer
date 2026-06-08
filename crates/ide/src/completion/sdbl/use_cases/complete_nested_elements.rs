@@ -35,12 +35,7 @@ impl CompleteNestedElementsUseCase {
         object_name: &str,
         prefix: &str,
     ) -> Vec<SdblCompletionItem> {
-        let Some(config) = metadata_provider.get_configuration() else {
-            tracing::debug!("no configuration available");
-            return Vec::new();
-        };
-
-        let Some(object) = config.find_metadata_object(mdo_type, object_name) else {
+        let Some(object) = metadata_provider.resolve_metadata_object(mdo_type, object_name) else {
             tracing::debug!(
                 ?mdo_type,
                 object_name = %object_name,
@@ -83,12 +78,10 @@ impl CompleteNestedElementsUseCase {
         register_name: &str,
         prefix: &str,
     ) -> Vec<SdblCompletionItem> {
-        let Some(config) = metadata_provider.get_configuration() else {
-            tracing::debug!("no configuration available");
-            return Vec::new();
-        };
-
-        let Some(register) = config.find_register(register_name) else {
+        // `resolve_register` filters by kind, so a name that exists under a
+        // different register kind resolves to `None` here (the old explicit
+        // `mdo_type` mismatch guard is subsumed).
+        let Some(register) = metadata_provider.resolve_register(mdo_type, register_name) else {
             tracing::debug!(
                 ?mdo_type,
                 register_name = %register_name,
@@ -96,16 +89,6 @@ impl CompleteNestedElementsUseCase {
             );
             return Vec::new();
         };
-
-        if register.mdo_type() != mdo_type {
-            tracing::debug!(
-                ?mdo_type,
-                found_type = ?register.mdo_type(),
-                register_name = %register_name,
-                "register type mismatch"
-            );
-            return Vec::new();
-        }
 
         let virtual_tables = register.virtual_tables();
 

@@ -9,6 +9,339 @@ use super::RootDatabaseImpl;
 use crate::RootDatabase;
 
 #[test]
+fn parse_mdo_query_parses_catalog_from_overlay() {
+    use crate::metadata::{parse_mdo_query, MdoFiles};
+    use bsl_metadata::MdoType;
+
+    let mut db = RootDatabaseImpl::new();
+    let file_id = FileId(0);
+
+    let mut file_set = FileSet::new();
+    file_set.insert(file_id, VfsPath::new("/Catalogs/Справочник1.xml"));
+    let source_root = SourceRoot::new_local(file_set);
+    db.set_source_root(SourceRootId(0), source_root);
+    db.set_file_source_root(file_id, SourceRootId(0));
+
+    let xml = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../bsl-metadata/fixtures/designer/Catalogs/Справочник1.xml"
+    ));
+    db.set_file_text(file_id, xml);
+
+    let files = MdoFiles::new(&db, MdoType::Catalog, file_id, None);
+    let mdo = parse_mdo_query(&db, files).expect("catalog parsed via per-MDO query");
+    assert_eq!(mdo.name, "Справочник1");
+
+    // Re-query without any change returns the memoised Arc.
+    let again = parse_mdo_query(&db, files).expect("catalog parsed again");
+    assert!(Arc::ptr_eq(&mdo, &again), "parse_mdo_query should memoise");
+}
+
+#[test]
+fn resolve_metadata_object_isolates_content_and_structure() {
+    use crate::metadata::{config_index, resolve_metadata_object, MdoEntry, MetadataListingInput};
+    use bsl_metadata::MdoType;
+    use salsa::Setter;
+
+    fn catalog_xml(name: &str, uuid: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Catalog uuid="{uuid}">
+        <Properties><Name>{name}</Name><CodeLength>9</CodeLength></Properties>
+    </Catalog>
+</MetaDataObject>"#
+        )
+    }
+
+    let mut db = RootDatabaseImpl::new();
+    let f1 = FileId(0);
+    let f2 = FileId(1);
+
+    let mut file_set = FileSet::new();
+    file_set.insert(f1, VfsPath::new("/Catalogs/Справочник1.xml"));
+    file_set.insert(f2, VfsPath::new("/Catalogs/Товары.xml"));
+    db.set_source_root(SourceRootId(1), SourceRoot::new_local(file_set));
+    db.set_file_source_root(f1, SourceRootId(1));
+    db.set_file_source_root(f2, SourceRootId(1));
+
+    db.set_file_text(
+        f1,
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../bsl-metadata/fixtures/designer/Catalogs/Справочник1.xml"
+        )),
+    );
+    db.set_file_text(f2, &catalog_xml("Товары", "00000000-0000-0000-0000-000000000002"));
+
+    // Structure listing carries only Справочник1 at first.
+    let listing = MetadataListingInput::new(
+        &db,
+        Arc::new(vec![MdoEntry {
+            kind: MdoType::Catalog,
+            name: "Справочник1".to_string(),
+            main: f1,
+            predefined: None,
+        }]),
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+    );
+    assert_eq!(config_index(&db, listing).len(), 1);
+
+    let c1 = resolve_metadata_object(&db, listing, MdoType::Catalog, "Справочник1".to_string())
+        .expect("Справочник1 resolves");
+    assert_eq!(c1.name, "Справочник1");
+
+    // Case-insensitive lookup.
+    assert!(
+        resolve_metadata_object(&db, listing, MdoType::Catalog, "справочник1".to_string())
+            .is_some(),
+        "lookup must be case-insensitive"
+    );
+
+    // An absent name resolves to None — and this miss depends on config_index,
+    // so adding the MDO later must invalidate it.
+    assert!(
+        resolve_metadata_object(&db, listing, MdoType::Catalog, "Товары".to_string()).is_none(),
+        "Товары is not in the listing yet"
+    );
+
+    // Re-resolving an unchanged MDO returns the memoised Arc.
+    let c1_again =
+        resolve_metadata_object(&db, listing, MdoType::Catalog, "Справочник1".to_string()).unwrap();
+    assert!(Arc::ptr_eq(&c1, &c1_again), "unchanged resolution must memoise");
+
+    // Structure change: add Товары to the listing.
+    listing.set_entries(&mut db).to(Arc::new(vec![
+        MdoEntry {
+            kind: MdoType::Catalog,
+            name: "Справочник1".to_string(),
+            main: f1,
+            predefined: None,
+        },
+        MdoEntry {
+            kind: MdoType::Catalog, name: "Товары".to_string(), main: f2, predefined: None
+        },
+    ]));
+
+    let tovary = resolve_metadata_object(&db, listing, MdoType::Catalog, "Товары".to_string())
+        .expect("Товары resolves after being added to the structure");
+    assert_eq!(tovary.name, "Товары");
+
+    // The sibling (Справочник1) is untouched by a content edit to Товары: a
+    // content edit re-parses only the edited MDO.
+    let c1_before_edit =
+        resolve_metadata_object(&db, listing, MdoType::Catalog, "Справочник1".to_string()).unwrap();
+    db.set_file_text(f2, &catalog_xml("Товары", "00000000-0000-0000-0000-000000000099"));
+    let tovary_after =
+        resolve_metadata_object(&db, listing, MdoType::Catalog, "Товары".to_string()).unwrap();
+    assert_eq!(tovary_after.name, "Товары");
+    let c1_after_edit =
+        resolve_metadata_object(&db, listing, MdoType::Catalog, "Справочник1".to_string()).unwrap();
+    assert!(
+        Arc::ptr_eq(&c1_before_edit, &c1_after_edit),
+        "a content edit to one MDO must not re-resolve a sibling"
+    );
+}
+
+#[test]
+fn resolve_register_by_name_resolves_via_listing_substrate() {
+    use crate::metadata::{resolve_register_by_name, MdoEntry, MetadataListingInput};
+    use bsl_metadata::MdoType;
+
+    let mut db = RootDatabaseImpl::new();
+    let f = FileId(0);
+    let mut file_set = FileSet::new();
+    file_set.insert(f, VfsPath::new("/InformationRegisters/РегистрСведений1.xml"));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(f, SourceRootId(0));
+    db.set_file_text(
+        f,
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../bsl-metadata/fixtures/designer/InformationRegisters/РегистрСведений1.xml"
+        )),
+    );
+
+    // The register lives in `entries` (MDOs + registers share the listing), keyed
+    // by a register MdoType, so the name-only index picks it up.
+    let listing = MetadataListingInput::new(
+        &db,
+        Arc::new(vec![MdoEntry {
+            kind: MdoType::InformationRegister,
+            name: "РегистрСведений1".to_string(),
+            main: f,
+            predefined: None,
+        }]),
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+    );
+
+    let reg = resolve_register_by_name(&db, listing, "РегистрСведений1".to_string())
+        .expect("register resolves by name alone");
+    assert_eq!(reg.mdo_type(), MdoType::InformationRegister);
+    assert_eq!(reg.name(), "РегистрСведений1");
+
+    // BSL is case-insensitive.
+    assert!(
+        resolve_register_by_name(&db, listing, "регистрсведений1".to_string()).is_some(),
+        "by-name lookup must be case-insensitive"
+    );
+
+    // An unrelated name resolves to None — and this miss depends on config_index,
+    // so adding the register later would invalidate it.
+    assert!(
+        resolve_register_by_name(&db, listing, "НетТакогоРегистра".to_string()).is_none(),
+        "unknown register name must not resolve"
+    );
+}
+
+#[test]
+fn resolve_defined_type_isolates_content_and_structure() {
+    use crate::metadata::{
+        defined_type_index, resolve_defined_type, DefinedTypeEntry, MetadataListingInput,
+    };
+    use bsl_metadata::AttributeType;
+    use salsa::Setter;
+
+    fn defined_type_xml(name: &str, inner: &str) -> String {
+        format!(
+            concat!(
+                "<MetaDataObject>",
+                "<DefinedType uuid=\"00000000-0000-0000-0000-000000000010\">",
+                "<Properties><Name>{}</Name><Type><Type>{}</Type></Type></Properties>",
+                "</DefinedType></MetaDataObject>"
+            ),
+            name, inner
+        )
+    }
+
+    let mut db = RootDatabaseImpl::new();
+    let f1 = FileId(0);
+
+    let mut file_set = FileSet::new();
+    file_set.insert(f1, VfsPath::new("/DefinedTypes/ДенежнаяСумма.xml"));
+    db.set_source_root(SourceRootId(1), SourceRoot::new_local(file_set));
+    db.set_file_source_root(f1, SourceRootId(1));
+    db.set_file_text(f1, &defined_type_xml("ДенежнаяСумма", "xs:boolean"));
+
+    let listing = MetadataListingInput::new(
+        &db,
+        Arc::new(Vec::new()),
+        Arc::new(vec![DefinedTypeEntry {
+            name: "ДенежнаяСумма".to_string(), main: f1
+        }]),
+        Arc::new(Vec::new()),
+    );
+    assert_eq!(defined_type_index(&db, listing).lookup("денежнаясумма"), Some(f1));
+
+    let t1 = resolve_defined_type(&db, listing, "ДенежнаяСумма".to_string())
+        .expect("ДенежнаяСумма resolves");
+    assert_eq!(*t1, AttributeType::Boolean);
+
+    // Case-insensitive, and an absent name is None (the miss depends on the index).
+    assert!(resolve_defined_type(&db, listing, "денежнаясумма".to_string()).is_some());
+    assert!(resolve_defined_type(&db, listing, "Нет".to_string()).is_none());
+
+    // Re-resolving unchanged memoises.
+    let t1_again = resolve_defined_type(&db, listing, "ДенежнаяСумма".to_string()).unwrap();
+    assert!(Arc::ptr_eq(&t1, &t1_again), "unchanged resolution must memoise");
+
+    // A content edit re-parses to the new underlying type.
+    db.set_file_text(f1, &defined_type_xml("ДенежнаяСумма", "xs:string"));
+    let t1_edited = resolve_defined_type(&db, listing, "ДенежнаяСумма".to_string()).unwrap();
+    assert!(matches!(*t1_edited, AttributeType::String { .. }), "content edit must re-parse");
+
+    // A structure removal tombstones it.
+    listing.set_defined_types(&mut db).to(Arc::new(Vec::new()));
+    assert!(resolve_defined_type(&db, listing, "ДенежнаяСумма".to_string()).is_none());
+}
+
+#[test]
+fn resolve_common_module_by_name_and_by_body_file() {
+    use crate::metadata::{
+        common_module_index, resolve_common_module, resolve_common_module_by_file,
+        CommonModuleEntry, MetadataListingInput,
+    };
+    use bsl_metadata::traits::MdObject;
+    use salsa::Setter;
+
+    fn common_module_xml(name: &str, global: bool) -> String {
+        format!(
+            concat!(
+                "<MetaDataObject>",
+                "<CommonModule uuid=\"00000000-0000-0000-0000-000000000020\">",
+                "<Properties><Name>{}</Name><Global>{}</Global><Server>true</Server></Properties>",
+                "</CommonModule></MetaDataObject>"
+            ),
+            name, global
+        )
+    }
+
+    let mut db = RootDatabaseImpl::new();
+    let xml_file = FileId(0);
+    let bsl_file = FileId(1);
+
+    let mut file_set = FileSet::new();
+    file_set.insert(xml_file, VfsPath::new("/CommonModules/ОбщегоНазначения.xml"));
+    file_set.insert(bsl_file, VfsPath::new("/CommonModules/ОбщегоНазначения/Ext/Module.bsl"));
+    db.set_source_root(SourceRootId(1), SourceRoot::new_local(file_set));
+    db.set_file_source_root(xml_file, SourceRootId(1));
+    db.set_file_source_root(bsl_file, SourceRootId(1));
+    db.set_file_text(xml_file, &common_module_xml("ОбщегоНазначения", true));
+
+    let listing = MetadataListingInput::new(
+        &db,
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+        Arc::new(vec![CommonModuleEntry {
+            name: "ОбщегоНазначения".to_string(),
+            main: xml_file,
+            module_file: Some(bsl_file),
+        }]),
+    );
+
+    // The by-name lookup, the body-file-by-name lookup, and the by-body reverse
+    // index all derive from the listing.
+    assert_eq!(common_module_index(&db, listing).lookup("общегоназначения"), Some(xml_file));
+    assert_eq!(
+        common_module_index(&db, listing).lookup_module_file("общегоназначения"),
+        Some(bsl_file),
+        "the body Ext/Module.bsl must be resolvable by name for method/param validation"
+    );
+    assert!(common_module_index(&db, listing).lookup_module_file("Нет").is_none());
+
+    let m = resolve_common_module(&db, listing, "ОбщегоНазначения".to_string())
+        .expect("module resolves by name");
+    assert_eq!(m.name(), "ОбщегоНазначения");
+    assert!(m.is_global());
+
+    // Case-insensitive; an absent name is None (the miss depends on the index).
+    assert!(resolve_common_module(&db, listing, "общегоназначения".to_string()).is_some());
+    assert!(resolve_common_module(&db, listing, "Нет".to_string()).is_none());
+
+    // Reverse lookup: the module owning its `Ext/Module.bsl`; a non-body file is None.
+    let by_file = resolve_common_module_by_file(&db, listing, bsl_file)
+        .expect("module resolves by its body file");
+    assert_eq!(by_file.name(), "ОбщегоНазначения");
+    assert!(resolve_common_module_by_file(&db, listing, FileId(99)).is_none());
+
+    // Re-resolving unchanged memoises.
+    let m_again = resolve_common_module(&db, listing, "ОбщегоНазначения".to_string()).unwrap();
+    assert!(Arc::ptr_eq(&m, &m_again), "unchanged resolution must memoise");
+
+    // A content edit re-parses the flags.
+    db.set_file_text(xml_file, &common_module_xml("ОбщегоНазначения", false));
+    let m_edited = resolve_common_module(&db, listing, "ОбщегоНазначения".to_string()).unwrap();
+    assert!(!m_edited.is_global(), "content edit must re-parse");
+
+    // A structure removal tombstones both lookups.
+    listing.set_common_modules(&mut db).to(Arc::new(Vec::new()));
+    assert!(resolve_common_module(&db, listing, "ОбщегоНазначения".to_string()).is_none());
+    assert!(resolve_common_module_by_file(&db, listing, bsl_file).is_none());
+}
+
+#[test]
 fn test_root_database_basic() {
     let mut db = RootDatabaseImpl::new();
     let file_id = FileId(0);
@@ -483,6 +816,63 @@ fn test_all_sdbl_in_file_basic() {
 }
 
 #[test]
+fn sdbl_hir_resolves_tables_via_per_mdo_accessors() {
+    use sdbl_hir::ResolvedTable;
+
+    fn db_with_query(with_config: bool) -> (RootDatabaseImpl, FileId) {
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId(0);
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+        db.set_file_source_root(file_id, SourceRootId(0));
+        db.set_file_text(
+            file_id,
+            r#"Процедура Тест()
+    Запрос = "ВЫБРАТЬ Код ИЗ Справочник.Справочник1";
+КонецПроцедуры"#,
+        );
+        if with_config {
+            let config_path =
+                concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer");
+            db.set_all_config_paths(vec![(None, std::path::PathBuf::from(config_path))]);
+        }
+        (db, file_id)
+    }
+
+    fn from_table_fields(entries: &crate::SdblHirEntries) -> Vec<String> {
+        let package = &entries.first().expect("one SDBL package").1;
+        let query = package.queries().first().expect("one query");
+        let table = query.hir.from.first().expect("one FROM table");
+        match &table.metadata {
+            Some(ResolvedTable::Metadata { fields, .. }) => {
+                fields.iter().map(|f| f.name.clone()).collect()
+            }
+            other => panic!("FROM table must resolve to a metadata table, got {other:?}"),
+        }
+    }
+
+    // With a config root the db-backed resolver resolves Справочник1 through the
+    // per-MDO accessor, so the FROM table carries its declared attributes.
+    let (db, file_id) = db_with_query(true);
+    let fields = from_table_fields(&db.sdbl_hir_in_file(file_id));
+    assert!(
+        fields.iter().any(|f| f == "Реквизит1"),
+        "resolved table must expose its declared attribute, got: {fields:?}"
+    );
+
+    // Without any config root the resolver is gated off (has_config_root == false),
+    // so lowering resolves no fields — preserving the pre-narrowing contract that a
+    // standalone module with no config does not validate query tables.
+    let (db, file_id) = db_with_query(false);
+    let fields = from_table_fields(&db.sdbl_hir_in_file(file_id));
+    assert!(
+        fields.is_empty(),
+        "without a config root the table must carry no resolved fields, got: {fields:?}"
+    );
+}
+
+#[test]
 fn test_all_sdbl_in_file_keyword_filter() {
     let mut db = RootDatabaseImpl::new();
     let file_id = FileId(0);
@@ -665,6 +1055,82 @@ fn test_module_metadata_cache_invalidation() {
 
     db.set_file_text(file_id, "Процедура Тест2() КонецПроцедуры");
     let _metadata2 = db.module_metadata(module_id);
+}
+
+/// A metadata XML change under one config root must reload only that root's
+/// configuration; a sibling root's loaded `Configuration` stays memoized.
+#[test]
+fn metadata_xml_change_invalidates_only_its_config_root() {
+    fn write_catalog(dir: &std::path::Path, name: &str, uuid: &str) {
+        std::fs::create_dir_all(dir.join("Catalogs")).unwrap();
+        std::fs::write(
+            dir.join(format!("Catalogs/{name}.xml")),
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Catalog uuid="{uuid}">
+        <Properties><Name>{name}</Name><CodeLength>9</CodeLength></Properties>
+    </Catalog>
+</MetaDataObject>"#,
+            ),
+        )
+        .unwrap();
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let main_root = temp.path().join("src/cf");
+    let ext_root = temp.path().join("src/cfe/X");
+    std::fs::create_dir_all(&main_root).unwrap();
+    std::fs::create_dir_all(&ext_root).unwrap();
+    std::fs::write(main_root.join("Configuration.xml"), "<Configuration/>").unwrap();
+    std::fs::write(ext_root.join("Configuration.xml"), "<Configuration/>").unwrap();
+    write_catalog(&main_root, "Товары", "00000000-0000-0000-0000-000000000001");
+    write_catalog(&ext_root, "ДопДанные", "00000000-0000-0000-0000-000000000002");
+
+    let mut db = RootDatabaseImpl::new();
+    db.set_all_config_paths(vec![
+        (None, main_root.clone()),
+        (Some("X".to_string()), ext_root.clone()),
+    ]);
+
+    let main_file = FileId(0);
+    let ext_file = FileId(1);
+    let mut file_set = FileSet::new();
+    let main_path = main_root.join("CommonModules/М/Ext/Module.bsl");
+    let ext_path = ext_root.join("CommonModules/М/Ext/Module.bsl");
+    file_set.insert(main_file, VfsPath::new(main_path.to_string_lossy().as_ref()));
+    file_set.insert(ext_file, VfsPath::new(ext_path.to_string_lossy().as_ref()));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(main_file, SourceRootId(0));
+    db.set_file_source_root(ext_file, SourceRootId(0));
+    db.set_file_text(main_file, "Процедура Т() КонецПроцедуры");
+    db.set_file_text(ext_file, "Процедура Т() КонецПроцедуры");
+
+    let main_before = db.get_configuration(main_file).expect("main config loads");
+    let ext_before = db.get_configuration(ext_file).expect("ext config loads");
+    assert_eq!(main_before.metadata_objects().len(), 1);
+
+    // Add a second catalog to the MAIN root only, then bump that root.
+    let new_xml = main_root.join("Catalogs/Услуги.xml");
+    write_catalog(&main_root, "Услуги", "00000000-0000-0000-0000-000000000003");
+    db.bump_config_for_path(&new_xml);
+
+    let main_after = db.get_configuration(main_file).expect("main config reloads");
+    let ext_after = db.get_configuration(ext_file).expect("ext config still loads");
+
+    assert!(
+        !Arc::ptr_eq(&main_before, &main_after),
+        "main root's config must reload after its XML changed"
+    );
+    assert_eq!(
+        main_after.metadata_objects().len(),
+        2,
+        "reloaded main config must reflect the added catalog"
+    );
+    assert!(
+        Arc::ptr_eq(&ext_before, &ext_after),
+        "sibling extension config must stay memoized — its XML did not change"
+    );
 }
 
 #[test]

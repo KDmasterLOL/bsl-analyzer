@@ -12,7 +12,7 @@ use crate::form_attr::lower_form_attribute_to_typeid;
 pub fn module_implicit_fields(db: &dyn HirDatabase, file_id: FileId) -> Vec<FieldInfo> {
     let module_id = ModuleId::new(file_id);
     let metadata = db.module_metadata(module_id);
-    let configs = db.configurations(file_id);
+    let obj_resolver = crate::object_resolver::DbObjectResolver::new(db, file_id);
 
     match metadata.module_type {
         ModuleType::ObjectModule => {
@@ -21,7 +21,7 @@ pub fn module_implicit_fields(db: &dyn HirDatabase, file_id: FileId) -> Vec<Fiel
                 return Vec::new();
             };
             let receiver = db.metadata_ref(kind, mdo.name.clone(), &RootConfigCtx);
-            enumerate_fields_inner(db, &configs, receiver)
+            enumerate_fields_inner(db, &obj_resolver, receiver)
         }
         ModuleType::RecordSetModule => {
             let Some((mdo_type, name)) = module_owner_mdo(&metadata) else {
@@ -31,7 +31,7 @@ pub fn module_implicit_fields(db: &dyn HirDatabase, file_id: FileId) -> Vec<Fiel
                 return Vec::new();
             };
             let receiver = db.metadata_ref(kind, name.as_str().to_string(), &RootConfigCtx);
-            enumerate_fields_inner(db, &configs, receiver)
+            enumerate_fields_inner(db, &obj_resolver, receiver)
         }
         ModuleType::ManagerModule => Vec::new(),
         ModuleType::FormModule => {
@@ -43,7 +43,7 @@ pub fn module_implicit_fields(db: &dyn HirDatabase, file_id: FileId) -> Vec<Fiel
                 .map(|attr| FieldInfo {
                     name: Name::new(&attr.name),
                     name_en: None,
-                    ty: lower_form_attribute_to_typeid(db, attr, &configs),
+                    ty: lower_form_attribute_to_typeid(db, attr, &obj_resolver),
                     value_ty: None,
                     is_readonly: false,
                     origin: if attr.is_main {

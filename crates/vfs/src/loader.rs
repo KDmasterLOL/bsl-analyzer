@@ -59,6 +59,14 @@ pub enum Message {
     WatchOnly {
         files: Vec<AbsPathBuf>,
     },
+    /// One or more paths were removed and may be directories. The loader cannot
+    /// enumerate a removed subtree's children (they no longer exist on disk), so
+    /// the consumer — which holds the file set — expands each path to its loaded
+    /// descendants and removes them. A removed plain file produces no descendants
+    /// and is a harmless no-op here (it is already delivered via `Changed`).
+    RemovedRecursive {
+        paths: Vec<AbsPathBuf>,
+    },
 }
 
 pub type Sender = crossbeam_channel::Sender<Message>;
@@ -169,6 +177,9 @@ impl fmt::Debug for Message {
             }
             Message::WatchOnly { files } => {
                 f.debug_struct("WatchOnly").field("n_files", &files.len()).finish()
+            }
+            Message::RemovedRecursive { paths } => {
+                f.debug_struct("RemovedRecursive").field("n_paths", &paths.len()).finish()
             }
             Message::Progress { n_total, n_done, dir, config_version } => f
                 .debug_struct("Progress")

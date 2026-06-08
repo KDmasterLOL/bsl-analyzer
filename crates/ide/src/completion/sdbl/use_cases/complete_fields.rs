@@ -50,7 +50,7 @@ mod tests {
     use smol_str::SmolStr;
     use syntax::TextRange;
 
-    fn make_test_scope() -> Scope {
+    fn make_test_scope() -> Scope<'static> {
         let mut scope = Scope::new();
 
         let table = TableRef {

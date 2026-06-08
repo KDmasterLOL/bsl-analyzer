@@ -48,8 +48,8 @@ pub fn from_hir(
     }
 
     let display_name = ctx
-        .find_common_module_anywhere(variable_name)
-        .map(|(_visible, common_module)| common_module.name().to_string())
+        .resolve_common_module(variable_name)
+        .map(|common_module| common_module.name().to_string())
         .unwrap_or_else(|| variable_name.to_string());
 
     Some(Diagnostic {

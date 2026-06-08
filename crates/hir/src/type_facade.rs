@@ -166,8 +166,8 @@ impl<'db, DB: ConfigsDatabase + TypeKernelDb> Type<'db, DB> {
     }
 
     pub fn field_type(&self, field_name: &Name) -> Self {
-        let configs = self.db.configurations(self.file_id);
-        let id = lookup_field(self.db, &configs, self.id, field_name)
+        let obj_resolver = hir_ty::DbObjectResolver::new(self.db, self.file_id);
+        let id = lookup_field(self.db, &obj_resolver, self.id, field_name)
             .map(|info| info.ty)
             .unwrap_or_else(|| self.db.unknown());
         Self::from_id(self.db, self.file_id, id)
@@ -200,8 +200,8 @@ impl<'db, DB: ConfigsDatabase + TypeKernelDb> Type<'db, DB> {
     }
 
     pub fn fields(&self) -> Vec<Field> {
-        let configs = self.db.configurations(self.file_id);
-        enumerate_fields(self.db, &configs, self.id)
+        let obj_resolver = hir_ty::DbObjectResolver::new(self.db, self.file_id);
+        enumerate_fields(self.db, &obj_resolver, self.id)
             .into_iter()
             .map(|info| Field {
                 name: info.name.clone(),

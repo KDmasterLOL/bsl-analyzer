@@ -112,7 +112,11 @@ fn parse_metadata_object_xml(xml: &str, mdo_type: MdoType) -> Result<MetadataObj
     if let Some(child_objects) = find_child(mdo_node, "ChildObjects") {
         for child in child_objects.children().filter(|n| n.is_element()) {
             match child.tag_name().name() {
-                "Attribute" | "Resource" | "Dimension" => {
+                // `AddressingAttribute` is a Task's addressing requisite
+                // (Исполнитель, РольИсполнителя, …) — same `Properties>Name>Type`
+                // shape as a regular attribute and a real member of the task
+                // object, so resolve it like one.
+                "Attribute" | "Resource" | "Dimension" | "AddressingAttribute" => {
                     attributes.push(parse_attribute_node(child)?);
                 }
                 "TabularSection" => {
@@ -304,6 +308,35 @@ mod tests {
             mdo.uuid().map(|u| u.to_string()),
             Some("9de71b46-e9bf-4b0b-8f3c-4abcd6a385dd".to_string())
         );
+    }
+
+    #[test]
+    fn parse_task_xml_reads_addressing_attributes_as_attributes() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.20">
+    <Task uuid="0408002c-9255-43a2-8022-82f02ee0e8f4">
+        <Properties><Name>ЗадачаИсполнителя</Name></Properties>
+        <ChildObjects>
+            <AddressingAttribute uuid="11111111-1111-1111-1111-111111111111">
+                <Properties>
+                    <Name>Исполнитель</Name>
+                    <Type><v8:Type>cfg:CatalogRef.Пользователи</v8:Type></Type>
+                </Properties>
+            </AddressingAttribute>
+            <Attribute uuid="22222222-2222-2222-2222-222222222222">
+                <Properties>
+                    <Name>Описание</Name>
+                    <Type><v8:Type>xs:string</v8:Type></Type>
+                </Properties>
+            </Attribute>
+        </ChildObjects>
+    </Task>
+</MetaDataObject>"#;
+        let mdo = parse_task_xml(xml).unwrap();
+        assert_eq!(mdo.mdo_type, MdoType::Task);
+        let names: Vec<&str> = mdo.attributes.iter().map(|a| a.name.as_str()).collect();
+        assert!(names.contains(&"Исполнитель"), "addressing attribute must resolve: {names:?}");
+        assert!(names.contains(&"Описание"), "regular attribute still present: {names:?}");
     }
 
     #[test]

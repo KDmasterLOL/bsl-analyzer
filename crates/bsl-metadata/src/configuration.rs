@@ -100,6 +100,7 @@ impl PartialEq for Configuration {
             && self.defined_types == other.defined_types
             && self.scheduled_jobs == other.scheduled_jobs
             && self.roles == other.roles
+            && self.subsystems == other.subsystems
             && self.http_services == other.http_services
             && self.web_services == other.web_services
             && self.use_managed_form_in_ordinary_application
@@ -321,20 +322,35 @@ impl Configuration {
             if let Some(base_obj) = self.metadata_objects.iter_mut().find(|obj| {
                 obj.mdo_type == ext_obj.mdo_type && obj.name.eq_ignore_ascii_case(&ext_obj.name)
             }) {
-                merge_metadata_object_overlay(base_obj, ext_obj);
+                base_obj.apply_extension_overlay(ext_obj);
             } else {
                 self.add_metadata_object(ext_obj.clone());
             }
         }
 
         for ext_reg in &extension.registers {
-            if self.find_register_by_type_and_name(ext_reg.mdo_type(), ext_reg.name()).is_none() {
+            if let Some(idx) = self.registers.iter().position(|base| {
+                base.mdo_type() == ext_reg.mdo_type()
+                    && base.name().eq_ignore_ascii_case(ext_reg.name())
+            }) {
+                // An extension can add measurements/resources/attributes to a
+                // borrowed register, so merge rather than ignore the adopted copy.
+                self.registers[idx].apply_extension_overlay(ext_reg);
+            } else {
                 self.add_register(ext_reg.clone());
             }
         }
 
         for ext_defined_type in &extension.defined_types {
-            if self.find_defined_type(ext_defined_type.name()).is_none() {
+            if let Some(idx) = self
+                .defined_types
+                .iter()
+                .position(|base| base.name().eq_ignore_ascii_case(ext_defined_type.name()))
+            {
+                // An extension can refine a borrowed defined type's composition, so
+                // take the extension's underlying type rather than ignore it.
+                self.defined_types[idx].apply_extension_overlay(ext_defined_type);
+            } else {
                 self.add_defined_type(ext_defined_type.clone());
             }
         }
@@ -525,51 +541,6 @@ impl Configuration {
     }
 }
 
-fn merge_metadata_object_overlay(base: &mut MetadataObject, overlay: &MetadataObject) {
-    if overlay.name_en.is_some() {
-        base.name_en = overlay.name_en.clone();
-    }
-    if overlay.constant_type.is_some() {
-        base.constant_type = overlay.constant_type.clone();
-    }
-
-    for attr in &overlay.attributes {
-        base.attributes.retain(|existing| !existing.name.eq_ignore_ascii_case(&attr.name));
-        base.attributes.push(attr.clone());
-    }
-
-    for tabular_section in &overlay.tabular_sections {
-        base.tabular_sections
-            .retain(|existing| !existing.name().eq_ignore_ascii_case(tabular_section.name()));
-        base.tabular_sections.push(tabular_section.clone());
-    }
-
-    for child in &overlay.children {
-        if let Some(base_child) = base.children.iter_mut().find(|existing| {
-            existing.mdo_type == child.mdo_type && existing.name.eq_ignore_ascii_case(&child.name)
-        }) {
-            merge_metadata_object_overlay(base_child, child);
-        } else {
-            base.children.push(child.clone());
-        }
-    }
-
-    for enum_value in &overlay.enum_values {
-        base.enum_values.retain(|existing| !existing.name.eq_ignore_ascii_case(&enum_value.name));
-        base.enum_values.push(enum_value.clone());
-    }
-
-    for predefined_item in &overlay.predefined_items {
-        base.predefined_items
-            .retain(|existing| !existing.name.eq_ignore_ascii_case(&predefined_item.name));
-        base.predefined_items.push(predefined_item.clone());
-    }
-
-    if !overlay.register_records().is_empty() {
-        base.set_register_records(overlay.register_records().to_vec());
-    }
-}
-
 fn index_document_recorders(
     recorders_by_register: &mut HashMap<(MdoType, Name), Vec<Name>>,
     object: &MetadataObject,
@@ -686,6 +657,96 @@ mod tests {
 
         assert!(catalog.find_attribute("Родитель").is_some());
         assert!(catalog.find_attribute("БУС_Артикул").is_some());
+    }
+
+    #[test]
+    fn merge_extension_overlay_merges_borrowed_register_fields() {
+        use crate::dimension::Dimension;
+        use crate::register::{Register, RegisterAttribute, RegisterResource};
+        use uuid::Uuid;
+
+        let mut base = Configuration::new("Base");
+        base.add_register(
+            Register::builder()
+                .name("РегистрСведений1")
+                .mdo_type(MdoType::InformationRegister)
+                .add_dimension(Dimension::builder().name("Изм1").build())
+                .add_resource(RegisterResource::new(Uuid::new_v4(), "Рес1"))
+                .build(),
+        );
+
+        let mut extension = Configuration::new("Extension");
+        extension.add_register(
+            Register::builder()
+                .name("РегистрСведений1")
+                .mdo_type(MdoType::InformationRegister)
+                .add_dimension(Dimension::builder().name("Изм2").build())
+                .add_resource(RegisterResource::new(Uuid::new_v4(), "Рес2"))
+                .add_attribute(RegisterAttribute::new(Uuid::new_v4(), "Рекв1"))
+                .build(),
+        );
+
+        let merged = base.merged_with_extension(&extension);
+        let reg = merged
+            .find_register_by_type_and_name(MdoType::InformationRegister, "РегистрСведений1")
+            .expect("merged register");
+
+        // An extension that borrows the register adds its measurement, resource and
+        // attribute — the base's own fields are preserved (not replaced wholesale).
+        let dims: Vec<&str> = reg.dimensions().iter().map(|d| d.name()).collect();
+        let res: Vec<&str> = reg.resources().iter().map(|r| r.name()).collect();
+        let attrs: Vec<&str> = reg.attributes().iter().map(|a| a.name()).collect();
+        assert_eq!(dims, ["Изм1", "Изм2"], "base + extension measurements");
+        assert_eq!(res, ["Рес1", "Рес2"], "base + extension resources");
+        assert_eq!(attrs, ["Рекв1"], "extension attribute added to the borrowed register");
+    }
+
+    #[test]
+    fn merge_extension_overlay_refines_borrowed_defined_type() {
+        use crate::defined_type::DefinedType;
+        use uuid::Uuid;
+
+        let mut base = Configuration::new("Base");
+        base.add_defined_type(
+            DefinedType::builder()
+                .uuid(Uuid::new_v4())
+                .name("ОпределяемыйТип1")
+                .underlying_type(AttributeType::String { length: Some(10) })
+                .build(),
+        );
+
+        let refined = AttributeType::Ref {
+            mdo_type: MdoType::Catalog,
+            name: "Номенклатура".into(),
+        };
+        let mut extension = Configuration::new("Extension");
+        extension.add_defined_type(
+            DefinedType::builder()
+                .uuid(Uuid::new_v4())
+                .name("ОпределяемыйТип1")
+                .underlying_type(refined.clone())
+                .build(),
+        );
+
+        let merged = base.merged_with_extension(&extension);
+        let dt = merged.find_defined_type("ОпределяемыйТип1").expect("merged defined type");
+        assert_eq!(dt.underlying_type(), &refined, "extension refinement of the defined type wins");
+    }
+
+    #[test]
+    fn equality_reflects_subsystem_changes() {
+        let base = Configuration::new("Cfg");
+
+        let mut with_subsystem = base.clone();
+        with_subsystem.add_subsystem(crate::subsystem::Subsystem::new("Продажи"));
+
+        // A subsystem-only difference must be observable: Salsa relies on this
+        // equality to decide whether a reload invalidates downstream consumers.
+        assert_ne!(base, with_subsystem);
+
+        let mut also_with_subsystem = base.clone();
+        also_with_subsystem.add_subsystem(crate::subsystem::Subsystem::new("Продажи"));
+        assert_eq!(with_subsystem, also_with_subsystem);
     }
 
     #[test]

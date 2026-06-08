@@ -4,7 +4,7 @@ use syntax::SyntaxKind;
 
 use crate::lower::context::LoweringContext;
 
-impl LoweringContext {
+impl LoweringContext<'_> {
     pub(super) fn lower_case_expr(&mut self, node: &syntax::SyntaxNode) -> ExprHir {
         self.record_keyword_by_text(
             node,

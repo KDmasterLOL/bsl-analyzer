@@ -6,19 +6,29 @@ use std::sync::Arc;
 #[salsa::interned(debug)]
 pub struct ConfigurationPathInput {
     pub path: String,
-    pub version: u32,
+    pub root_revision: u32,
 }
 
 pub fn intern_configuration_path<'db>(
     db: &'db dyn salsa::Database,
     raw_path: &str,
-    version: u32,
+    root_revision: u32,
 ) -> ConfigurationPathInput<'db> {
     let canonical = canonicalize_configuration_path(raw_path);
-    ConfigurationPathInput::new(db, canonical, version)
+    ConfigurationPathInput::new(db, canonical, root_revision)
 }
 
-fn canonicalize_configuration_path(raw_path: &str) -> String {
+/// Per-config-root revision counter, as a Salsa input so that config-dependent
+/// queries which read it (via [`intern_configuration_path`] callers running
+/// inside a tracked query) record a dependency on the specific root. Bumping one
+/// root's revision then invalidates only the queries that touched that root,
+/// instead of a single global counter invalidating every configuration.
+#[salsa::input(debug)]
+pub struct ConfigRevisionInput {
+    pub revision: u32,
+}
+
+pub(crate) fn canonicalize_configuration_path(raw_path: &str) -> String {
     if cfg!(windows) {
         let trimmed = raw_path.strip_prefix(r"\\?\").unwrap_or(raw_path);
         let mut s = trimmed.replace('\\', "/");
@@ -34,7 +44,6 @@ fn canonicalize_configuration_path(raw_path: &str) -> String {
 #[salsa::input(debug)]
 pub struct WorkspaceConfigsInput {
     pub paths: Vec<(Option<String>, PathBuf)>,
-    pub version: u32,
 }
 
 // Keyed by config root (base config + each extension), so the cache holds one entry
@@ -68,6 +77,413 @@ pub fn load_configuration<'db>(
     );
 
     Arc::new(config)
+}
+
+/// The composing files of a single metadata object: the main `<Name>.xml` and an
+/// optional `Ext/Predefined.xml`, plus the kind that selects the parser. Interned
+/// so [`parse_mdo_query`] keys on the file identities; the per-file content
+/// revisions drive invalidation, so editing one MDO's XML re-parses only it.
+#[salsa::interned(debug)]
+pub struct MdoFiles<'db> {
+    pub mdo_type: bsl_metadata::MdoType,
+    pub main: vfs::FileId,
+    pub predefined: Option<vfs::FileId>,
+}
+
+/// Parse one metadata object from its composing files, read through the versioned
+/// VFS (`file_text`). Memoised per MDO and backdated on an unchanged object, so a
+/// reload re-parses only the files that actually changed and only that object's
+/// consumers are invalidated.
+#[salsa::tracked(lru = 8192)]
+pub fn parse_mdo_query<'db>(
+    db: &'db dyn base_db::SourceDatabase,
+    files: MdoFiles<'db>,
+) -> Option<Arc<bsl_metadata::MetadataObject>> {
+    let _span = tracing::info_span!("parse_mdo").entered();
+
+    let main_text = db.file_text(files.main(db));
+    let predefined_text = files.predefined(db).map(|fid| db.file_text(fid));
+
+    bsl_metadata::parse_metadata_object_from_texts(
+        files.mdo_type(db),
+        &main_text,
+        predefined_text.as_deref(),
+    )
+    .map(Arc::new)
+}
+
+/// One discovered metadata object in a config root's *structure* listing: which
+/// kind, its name, and the [`vfs::FileId`]s of its composing files. Carries no
+/// parsed content — only identities — so the listing changes on add/remove/rename
+/// of an MDO, never on a content edit within one.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct MdoEntry {
+    pub kind: bsl_metadata::MdoType,
+    pub name: String,
+    pub main: vfs::FileId,
+    pub predefined: Option<vfs::FileId>,
+}
+
+/// One discovered defined type in a config root's *structure* listing: its name
+/// and the [`vfs::FileId`] of its main XML. Defined types are global (keyed by
+/// name, no kind, no predefined sidecar), so they ride a separate field of the
+/// listing rather than [`MdoEntry`].
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct DefinedTypeEntry {
+    pub name: String,
+    pub main: vfs::FileId,
+}
+
+/// One discovered common module in a config root's *structure* listing: its name,
+/// the [`vfs::FileId`] of its metadata XML, and the [`vfs::FileId`] of its
+/// `Ext/Module.bsl` (the module source) when present. The module-file id backs the
+/// reverse "which common module owns this `.bsl`" lookup ([`CommonModuleIndex`]'s
+/// `by_module_file`); it is `None` for protected/binary modules with no source.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct CommonModuleEntry {
+    pub name: String,
+    pub main: vfs::FileId,
+    pub module_file: Option<vfs::FileId>,
+}
+
+/// The per-config-root *structure* input: the MDOs and defined types that exist in
+/// one config root (base config or one extension). Set out-of-query by the
+/// bootstrap; re-set only when the directory structure changes. Keeping it per-root
+/// means an extension's MDOs never collide with the base config's in
+/// [`config_index`], and a structure change in one root does not invalidate
+/// another. `entries` (MDOs + registers), `defined_types`, and `common_modules` are
+/// separate fields, so a structure change to one family does not invalidate the
+/// indexes derived from the others.
+#[salsa::input(debug)]
+pub struct MetadataListingInput {
+    pub entries: Arc<Vec<MdoEntry>>,
+    pub defined_types: Arc<Vec<DefinedTypeEntry>>,
+    pub common_modules: Arc<Vec<CommonModuleEntry>>,
+}
+
+/// The composing-file identities for one MDO, as held in a [`ConfigIndex`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct MdoFileIds {
+    pub main: vfs::FileId,
+    pub predefined: Option<vfs::FileId>,
+}
+
+/// A config root's `(kind, lowercased-name) -> files` lookup, derived from its
+/// [`MetadataListingInput`]. Built by [`config_index`]; depends only on the
+/// structure input, so a content edit leaves it memoised.
+#[derive(Default, PartialEq, Eq, Debug)]
+pub struct ConfigIndex {
+    by_name: std::collections::HashMap<(bsl_metadata::MdoType, String), MdoFileIds>,
+    /// Registers keyed by name alone (no kind), for callers that know only the
+    /// register name (e.g. a `Движения.<Register>` movement touch). A register
+    /// name is unique within a config root, so this carries its kind alongside.
+    register_by_name: std::collections::HashMap<String, (bsl_metadata::MdoType, MdoFileIds)>,
+}
+
+impl ConfigIndex {
+    pub fn lookup(&self, kind: bsl_metadata::MdoType, name: &str) -> Option<MdoFileIds> {
+        self.by_name.get(&(kind, name.to_lowercase())).copied()
+    }
+
+    pub fn lookup_register_by_name(
+        &self,
+        name: &str,
+    ) -> Option<(bsl_metadata::MdoType, MdoFileIds)> {
+        self.register_by_name.get(&name.to_lowercase()).copied()
+    }
+
+    pub fn len(&self) -> usize {
+        self.by_name.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_name.is_empty()
+    }
+}
+
+/// Build a config root's name lookup from its structure listing. Tracked on the
+/// listing input alone, so it re-runs only on a structure change (add/remove/
+/// rename), not on a content edit — those flow through [`parse_mdo_query`].
+#[salsa::tracked]
+pub fn config_index(
+    db: &dyn base_db::SourceDatabase,
+    listing: MetadataListingInput,
+) -> Arc<ConfigIndex> {
+    let _span = tracing::info_span!("config_index").entered();
+
+    let entries = listing.entries(db);
+    let mut by_name = std::collections::HashMap::with_capacity(entries.len());
+    let mut register_by_name = std::collections::HashMap::new();
+    for entry in entries.iter() {
+        let ids = MdoFileIds { main: entry.main, predefined: entry.predefined };
+        by_name.insert((entry.kind, entry.name.to_lowercase()), ids);
+        if entry.kind.is_register() {
+            register_by_name.insert(entry.name.to_lowercase(), (entry.kind, ids));
+        }
+    }
+    Arc::new(ConfigIndex { by_name, register_by_name })
+}
+
+/// Resolve a single metadata object within one config root, at per-MDO Salsa
+/// granularity. Depends on [`config_index`] (structure) to map the name to its
+/// files, then on [`parse_mdo_query`] (content) for that one MDO. A content edit
+/// re-parses only the edited MDO and re-runs only this resolution for it; sibling
+/// resolutions in the same root stay memoised. An add/remove re-runs
+/// `config_index`, so an absent-name miss correctly invalidates when the MDO later
+/// appears. Extension overlay across roots is composed by callers, not here.
+#[salsa::tracked]
+pub fn resolve_metadata_object(
+    db: &dyn base_db::SourceDatabase,
+    listing: MetadataListingInput,
+    mdo_type: bsl_metadata::MdoType,
+    name: String,
+) -> Option<Arc<bsl_metadata::MetadataObject>> {
+    let _span = tracing::info_span!("resolve_metadata_object").entered();
+
+    let index = config_index(db, listing);
+    let ids = index.lookup(mdo_type, &name)?;
+    let files = MdoFiles::new(db, mdo_type, ids.main, ids.predefined);
+    parse_mdo_query(db, files)
+}
+
+/// Parse one register from its main XML, read through the versioned VFS. The
+/// register counterpart of [`parse_mdo_query`]; keyed on the same interned
+/// [`MdoFiles`] (registers have no predefined sidecar) but a separate tracked fn,
+/// so a register and an object never share a memo. Backdates on an unchanged
+/// register.
+#[salsa::tracked(lru = 8192)]
+pub fn parse_register_query(
+    db: &dyn base_db::SourceDatabase,
+    files: MdoFiles<'_>,
+) -> Option<Arc<bsl_metadata::Register>> {
+    let _span = tracing::info_span!("parse_register").entered();
+
+    let main_text = db.file_text(files.main(db));
+    bsl_metadata::parse_register_from_text(files.mdo_type(db), &main_text).map(Arc::new)
+}
+
+/// Resolve a single register within one config root, the register counterpart of
+/// [`resolve_metadata_object`]. Shares [`config_index`] (the listing carries
+/// register entries too) but parses via [`parse_register_query`]. Extension
+/// overlay across roots is composed by callers.
+#[salsa::tracked]
+pub fn resolve_register(
+    db: &dyn base_db::SourceDatabase,
+    listing: MetadataListingInput,
+    mdo_type: bsl_metadata::MdoType,
+    name: String,
+) -> Option<Arc<bsl_metadata::Register>> {
+    let _span = tracing::info_span!("resolve_register").entered();
+
+    let index = config_index(db, listing);
+    let ids = index.lookup(mdo_type, &name)?;
+    let files = MdoFiles::new(db, mdo_type, ids.main, ids.predefined);
+    parse_register_query(db, files)
+}
+
+/// Resolve a register within one config root by NAME alone (its kind is unknown
+/// to the caller — e.g. a `Движения.<Register>` movement touch). Shares
+/// [`config_index`]'s name-only register map, then parses the one register via
+/// [`parse_register_query`]. Same per-MDO granularity and absent-name
+/// invalidation as [`resolve_register`]; extension overlay across roots is
+/// composed by callers.
+#[salsa::tracked]
+pub fn resolve_register_by_name(
+    db: &dyn base_db::SourceDatabase,
+    listing: MetadataListingInput,
+    name: String,
+) -> Option<Arc<bsl_metadata::Register>> {
+    let _span = tracing::info_span!("resolve_register_by_name").entered();
+
+    let index = config_index(db, listing);
+    let (kind, ids) = index.lookup_register_by_name(&name)?;
+    let files = MdoFiles::new(db, kind, ids.main, ids.predefined);
+    parse_register_query(db, files)
+}
+
+/// The main XML file of a single defined type, interned so
+/// [`parse_defined_type_query`] keys on the file identity; its content revision
+/// drives invalidation, so editing one defined type re-parses only it.
+#[salsa::interned(debug)]
+pub struct DefinedTypeFile<'db> {
+    pub main: vfs::FileId,
+}
+
+/// Parse one defined type from its main XML, read through the versioned VFS, and
+/// return its underlying type (the resolution unit; an extension overlay replaces
+/// it wholesale). The defined-type counterpart of [`parse_register_query`].
+/// Backdates on an unchanged underlying type.
+#[salsa::tracked(lru = 8192)]
+pub fn parse_defined_type_query(
+    db: &dyn base_db::SourceDatabase,
+    file: DefinedTypeFile<'_>,
+) -> Option<Arc<bsl_metadata::AttributeType>> {
+    let _span = tracing::info_span!("parse_defined_type").entered();
+
+    let main_text = db.file_text(file.main(db));
+    bsl_metadata::parse_defined_type_from_text(&main_text)
+        .map(|dt| Arc::new(dt.underlying_type().clone()))
+}
+
+/// A config root's `lowercased-name -> defined-type file` lookup, derived from its
+/// [`MetadataListingInput`]'s `defined_types` field. Tracked on that field alone,
+/// so a content edit leaves it memoised and an MDO structure change does not
+/// invalidate it.
+#[derive(Default, PartialEq, Eq, Debug)]
+pub struct DefinedTypeIndex {
+    by_name: std::collections::HashMap<String, vfs::FileId>,
+}
+
+impl DefinedTypeIndex {
+    pub fn lookup(&self, name: &str) -> Option<vfs::FileId> {
+        self.by_name.get(&name.to_lowercase()).copied()
+    }
+}
+
+/// Build a config root's defined-type name lookup from its structure listing.
+#[salsa::tracked]
+pub fn defined_type_index(
+    db: &dyn base_db::SourceDatabase,
+    listing: MetadataListingInput,
+) -> Arc<DefinedTypeIndex> {
+    let _span = tracing::info_span!("defined_type_index").entered();
+
+    let entries = listing.defined_types(db);
+    let mut by_name = std::collections::HashMap::with_capacity(entries.len());
+    for entry in entries.iter() {
+        by_name.insert(entry.name.to_lowercase(), entry.main);
+    }
+    Arc::new(DefinedTypeIndex { by_name })
+}
+
+/// Resolve a single defined type's underlying type within one config root, at
+/// per-defined-type Salsa granularity. The defined-type counterpart of
+/// [`resolve_metadata_object`]; extension overlay across roots is composed by
+/// callers (an extension replaces the underlying type wholesale).
+#[salsa::tracked]
+pub fn resolve_defined_type(
+    db: &dyn base_db::SourceDatabase,
+    listing: MetadataListingInput,
+    name: String,
+) -> Option<Arc<bsl_metadata::AttributeType>> {
+    let _span = tracing::info_span!("resolve_defined_type").entered();
+
+    let index = defined_type_index(db, listing);
+    let main = index.lookup(&name)?;
+    let file = DefinedTypeFile::new(db, main);
+    parse_defined_type_query(db, file)
+}
+
+/// The main XML file of a single common module, interned so
+/// [`parse_common_module_query`] keys on the file identity; its content revision
+/// drives invalidation, so editing one common module re-parses only it.
+#[salsa::interned(debug)]
+pub struct CommonModuleFile<'db> {
+    pub main: vfs::FileId,
+}
+
+/// Parse one common module's metadata from its main XML, read through the versioned
+/// VFS. The common-module counterpart of [`parse_defined_type_query`]; only metadata
+/// (flags + name) is read — the module body is resolved through the symbol tree.
+/// Backdates on unchanged metadata.
+#[salsa::tracked(lru = 8192)]
+pub fn parse_common_module_query(
+    db: &dyn base_db::SourceDatabase,
+    file: CommonModuleFile<'_>,
+) -> Option<Arc<bsl_metadata::CommonModule>> {
+    let _span = tracing::info_span!("parse_common_module").entered();
+
+    let main_text = db.file_text(file.main(db));
+    bsl_metadata::parse_common_module_from_text(&main_text).map(Arc::new)
+}
+
+/// A config root's common-module lookup, derived from its [`MetadataListingInput`]'s
+/// `common_modules` field: `lowercased-name -> main XML` for the by-name resolution,
+/// and `module-file id -> name` for the reverse "which common module owns this
+/// `.bsl`" lookup. Tracked on that field alone, so a content edit leaves it memoised.
+#[derive(Default, PartialEq, Eq, Debug)]
+pub struct CommonModuleIndex {
+    by_name: std::collections::HashMap<String, vfs::FileId>,
+    by_module_file: std::collections::HashMap<vfs::FileId, String>,
+    /// `lowercased-name -> Ext/Module.bsl id`, for resolving a common module's
+    /// body file scoped to this root (method/parameter validation needs the body,
+    /// not the metadata XML). Absent for modules whose body was not enrolled.
+    module_file_by_name: std::collections::HashMap<String, vfs::FileId>,
+}
+
+impl CommonModuleIndex {
+    pub fn lookup(&self, name: &str) -> Option<vfs::FileId> {
+        self.by_name.get(&name.to_lowercase()).copied()
+    }
+
+    /// The `Ext/Module.bsl` id of the common module `name` in this root, if known.
+    pub fn lookup_module_file(&self, name: &str) -> Option<vfs::FileId> {
+        self.module_file_by_name.get(&name.to_lowercase()).copied()
+    }
+
+    /// The lowercased name of the common module whose `Ext/Module.bsl` is
+    /// `module_file`, if any.
+    pub fn name_for_module_file(&self, module_file: vfs::FileId) -> Option<&str> {
+        self.by_module_file.get(&module_file).map(String::as_str)
+    }
+}
+
+/// Build a config root's common-module lookup from its structure listing.
+#[salsa::tracked]
+pub fn common_module_index(
+    db: &dyn base_db::SourceDatabase,
+    listing: MetadataListingInput,
+) -> Arc<CommonModuleIndex> {
+    let _span = tracing::info_span!("common_module_index").entered();
+
+    let entries = listing.common_modules(db);
+    let mut by_name = std::collections::HashMap::with_capacity(entries.len());
+    let mut by_module_file = std::collections::HashMap::new();
+    let mut module_file_by_name = std::collections::HashMap::new();
+    for entry in entries.iter() {
+        by_name.insert(entry.name.to_lowercase(), entry.main);
+        if let Some(module_file) = entry.module_file {
+            by_module_file.insert(module_file, entry.name.to_lowercase());
+            module_file_by_name.insert(entry.name.to_lowercase(), module_file);
+        }
+    }
+    Arc::new(CommonModuleIndex { by_name, by_module_file, module_file_by_name })
+}
+
+/// Resolve a single common module's metadata by name within one config root, at
+/// per-common-module Salsa granularity. The common-module counterpart of
+/// [`resolve_defined_type`]; extension overlay across roots is composed by callers
+/// (an extension replaces the module wholesale).
+#[salsa::tracked]
+pub fn resolve_common_module(
+    db: &dyn base_db::SourceDatabase,
+    listing: MetadataListingInput,
+    name: String,
+) -> Option<Arc<bsl_metadata::CommonModule>> {
+    let _span = tracing::info_span!("resolve_common_module").entered();
+
+    let index = common_module_index(db, listing);
+    let main = index.lookup(&name)?;
+    let file = CommonModuleFile::new(db, main);
+    parse_common_module_query(db, file)
+}
+
+/// Resolve the common module whose `Ext/Module.bsl` is `module_file` within one
+/// config root. Answers "which common module owns this `.bsl`?" via the reverse
+/// index, then parses that module's metadata at per-common-module granularity.
+#[salsa::tracked]
+pub fn resolve_common_module_by_file(
+    db: &dyn base_db::SourceDatabase,
+    listing: MetadataListingInput,
+    module_file: vfs::FileId,
+) -> Option<Arc<bsl_metadata::CommonModule>> {
+    let _span = tracing::info_span!("resolve_common_module_by_file").entered();
+
+    let index = common_module_index(db, listing);
+    let name = index.name_for_module_file(module_file)?;
+    let main = index.lookup(name)?;
+    let file = CommonModuleFile::new(db, main);
+    parse_common_module_query(db, file)
 }
 
 #[salsa::db]

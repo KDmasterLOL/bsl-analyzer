@@ -22,9 +22,6 @@ pub fn schedule_diagnostics(state: &mut GlobalState, uri: &Url) {
         prev.cancel();
     }
 
-    state.diagnostics_generation += 1;
-    let generation = state.diagnostics_generation;
-
     let file_id = match crate::lsp::file_id(state, uri) {
         Ok(id) => id,
         Err(_) => return,
@@ -32,6 +29,15 @@ pub fn schedule_diagnostics(state: &mut GlobalState, uri: &Url) {
     let text = match state.mem_docs.get(uri) {
         Some(t) => t,
         None => return,
+    };
+
+    // Advance the generation only once the schedule will actually spawn, so a
+    // no-op call (unresolved file / not an open buffer) cannot orphan a prior
+    // in-flight result by leaving `current` ahead of every spawned task.
+    let generation = {
+        let g = state.diagnostics_generation.entry(uri.clone()).or_insert(0);
+        *g += 1;
+        *g
     };
 
     let db = state.analysis_host.raw_database().clone();
@@ -42,7 +48,9 @@ pub fn schedule_diagnostics(state: &mut GlobalState, uri: &Url) {
     let queued_at = Instant::now();
     tracing::info!(%uri, generation, vfs_done = state.vfs_done, "diagnostics scheduled");
 
+    let analysis_guard = state.note_analysis_spawned();
     state.task_pool.pool.spawn(move || {
+        let _analysis_guard = analysis_guard;
         let started_at = Instant::now();
         let queue_wait_ms = started_at.duration_since(queued_at).as_millis() as u64;
         tracing::info!(%uri, generation, queue_wait_ms, "diagnostics worker started");
@@ -102,6 +110,9 @@ pub fn handle_did_open(state: &mut GlobalState, params: DidOpenTextDocumentParam
     state.mem_docs.insert(uri.clone(), text.clone(), version);
 
     let file_id = state.vfs_file_for_url(&uri)?;
+    // Mark open BEFORE process_changes so the edit is stored as a resident
+    // overlay (authoritative for unsaved content), not disk-backed.
+    state.open_files.insert(file_id);
 
     {
         let vfs_path = vfs::VfsPath::new(
@@ -162,7 +173,9 @@ fn preload_dependencies(state: &mut GlobalState, file_id: vfs::FileId) {
     state.preload_tokens.insert(file_id, task.cancellation_token());
     let queued_at = Instant::now();
 
+    let analysis_guard = state.note_analysis_spawned();
     state.task_pool.pool.spawn(move || {
+        let _analysis_guard = analysis_guard;
         let started_at = Instant::now();
         let queue_wait_ms = started_at.duration_since(queued_at).as_millis() as u64;
         let count = match salsa::Cancelled::catch(std::panic::AssertUnwindSafe(|| task.run())) {
@@ -254,6 +267,22 @@ pub fn handle_did_close(state: &mut GlobalState, params: DidCloseTextDocumentPar
             if let Some(token) = state.preload_tokens.remove(&file_id) {
                 token.cancel();
             }
+            state.open_files.remove(&file_id);
+            // The file is no longer open: drop its editor-buffer overlay and
+            // re-key on the on-disk content so its text becomes LRU-evictable
+            // (discarding any unsaved edits, which the client also discards).
+            // If it isn't readable from disk (e.g. never saved), keep the
+            // overlay as a safe fallback rather than leave a dangling revision.
+            let disk = {
+                let vfs = state.vfs.read();
+                let path = vfs.file_path(file_id).as_path().to_path_buf();
+                std::fs::read_to_string(path).ok()
+            };
+            if let Some(content) = disk {
+                use base_db::SourceDatabase;
+                let db = state.analysis_host.raw_database_mut();
+                db.set_file_revision_from_disk(file_id, base_db::content_revision(&content));
+            }
         }
         Err(e) => {
             tracing::warn!(%uri, error = %e, "didClose: could not resolve file_id for preload cleanup")
@@ -318,7 +347,8 @@ mod tests {
     use crossbeam_channel::{unbounded, Receiver};
     use lsp_server::Message;
     use lsp_types::{
-        TextDocumentContentChangeEvent, TextDocumentItem, VersionedTextDocumentIdentifier,
+        TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
+        VersionedTextDocumentIdentifier,
     };
 
     fn create_test_state() -> (GlobalState, Receiver<Message>) {
@@ -355,8 +385,98 @@ mod tests {
         assert_eq!(state.mem_docs.get(&params.text_document.uri), Some(params.text_document.text));
 
         assert!(!state.vfs_done);
-        assert_eq!(state.diagnostics_generation, 1);
+        assert_eq!(state.diagnostics_generation.get(&params.text_document.uri).copied(), Some(1));
         assert!(state.diagnostics_tokens.contains_key(&params.text_document.uri));
+    }
+
+    #[test]
+    fn diagnostics_generation_is_tracked_per_uri() {
+        let (mut state, _receiver) = create_test_state();
+
+        let a = lsp_types::Url::parse("file:///a.bsl").unwrap();
+        let b = lsp_types::Url::parse("file:///b.bsl").unwrap();
+        for (uri, text) in
+            [(&a, "Процедура А() КонецПроцедуры"), (&b, "Процедура Б() КонецПроцедуры")]
+        {
+            handle_did_open(
+                &mut state,
+                DidOpenTextDocumentParams {
+                    text_document: TextDocumentItem {
+                        uri: uri.clone(),
+                        language_id: "bsl".to_string(),
+                        version: 1,
+                        text: text.to_string(),
+                    },
+                },
+            )
+            .unwrap();
+        }
+
+        // Each document carries its own generation: opening B must NOT advance A's,
+        // otherwise A's in-flight diagnostics task would be discarded as stale and
+        // never published (the multi-document refresh bug).
+        assert_eq!(state.diagnostics_generation.get(&a).copied(), Some(1));
+        assert_eq!(state.diagnostics_generation.get(&b).copied(), Some(1));
+
+        // Re-scheduling A advances only A's generation.
+        schedule_diagnostics(&mut state, &a);
+        assert_eq!(state.diagnostics_generation.get(&a).copied(), Some(2));
+        assert_eq!(state.diagnostics_generation.get(&b).copied(), Some(1));
+    }
+
+    #[test]
+    fn did_close_drops_overlay_and_re_keys_open_file_to_disk() {
+        use base_db::SourceDatabase;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("mod.bsl");
+        std::fs::write(&path, "Процедура НаДиске() КонецПроцедуры").expect("write");
+
+        let (mut state, _receiver) = create_test_state();
+        let uri = lsp_types::Url::from_file_path(&path).unwrap();
+
+        // Open with an unsaved edit (buffer differs from disk) → resident overlay.
+        handle_did_open(
+            &mut state,
+            DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: uri.clone(),
+                    language_id: "bsl".to_string(),
+                    version: 1,
+                    text: "Процедура Буфер() КонецПроцедуры".to_string(),
+                },
+            },
+        )
+        .unwrap();
+
+        let file_id = state.vfs_file_for_url(&uri).unwrap();
+        assert!(state.open_files.contains(&file_id), "open file is tracked in open_files");
+        {
+            let db = state.analysis_host.raw_database_mut();
+            assert!(db.try_file_text(file_id).is_some(), "open file keeps a resident overlay");
+            assert_eq!(&*db.file_text(file_id), "Процедура Буфер() КонецПроцедуры");
+        }
+
+        // Close: the editor buffer is gone, so the file re-keys to its on-disk
+        // content (the unsaved edit is discarded) and the overlay is dropped so
+        // the text becomes disk-backed / evictable.
+        handle_did_close(
+            &mut state,
+            DidCloseTextDocumentParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+            },
+        )
+        .unwrap();
+
+        assert!(!state.open_files.contains(&file_id), "closed file is removed from open_files");
+        {
+            let db = state.analysis_host.raw_database_mut();
+            assert!(
+                db.try_file_text(file_id).is_none(),
+                "closed file overlay is cleared (disk-backed)"
+            );
+            assert_eq!(&*db.file_text(file_id), "Процедура НаДиске() КонецПроцедуры");
+        }
     }
 
     #[test]

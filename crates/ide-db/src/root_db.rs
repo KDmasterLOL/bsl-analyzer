@@ -19,6 +19,19 @@ pub trait RootDatabase:
 
     fn all_config_paths(&self) -> Vec<(Option<String>, std::path::PathBuf)>;
 
+    /// The common module that owns the `Ext/Module.bsl` whose id is `module_file_id`
+    /// (typically the file being analysed), or `None` if it is not a common module's
+    /// body. Per-common-module Salsa granularity when the substrate is populated.
+    fn common_module_for_file_id(
+        &self,
+        module_file_id: FileId,
+    ) -> Option<Arc<bsl_metadata::CommonModule>>;
+
+    /// The `Ext/Module.bsl` body file id(s) of the common module `name` visible to
+    /// `file_id` (base + the file's own extension). For method/parameter validation
+    /// that must read the module body, scoped extension-private like the metadata.
+    fn resolve_common_module_files(&self, file_id: FileId, name: &str) -> Vec<FileId>;
+
     fn all_sdbl_in_file(
         &self,
         file_id: FileId,
@@ -66,5 +79,7 @@ pub trait RootDatabase:
 
     fn as_any(&self) -> &dyn std::any::Any;
 
-    fn metadata_version(&self) -> u32;
+    /// The Salsa-tracked config revision token for the root owning `path` (see
+    /// [`RootDatabaseImpl::config_root_revision_for_path`](crate::RootDatabaseImpl::config_root_revision_for_path)).
+    fn config_root_revision_for_path(&self, path: &std::path::Path) -> u32;
 }

@@ -54,8 +54,10 @@ bsl-search = { path = "crates/bsl-search" }
 naparnik = { path = "crates/naparnik" }
 symbol-info = { path = "crates/symbol-info" }
 
-salsa = { version = "0.26", features = ["rayon", "macros"] }
-salsa-macros = "0.26"
+# `salsa_unstable` (already a salsa default feature) gates `Database::memory_usage`,
+# used by `RootDatabaseImpl::memory_report` for per-ingredient memory diagnostics.
+salsa = { version = "0.27", features = ["rayon", "macros", "salsa_unstable"] }
+salsa-macros = "0.27"
 
 lsp-types = "0.95"
 lsp-server = "0.7"

@@ -89,7 +89,7 @@ fn check_qualified_call(
             .entered();
 
     let name = Name::new(method_name);
-    let module_files = ctx.find_common_module_files_anywhere(module_name);
+    let module_files = ctx.common_module_body_files(module_name);
     if module_files.is_empty() {
         tracing::debug!("bailout: no CommonModule found in any visible configuration");
         return None;

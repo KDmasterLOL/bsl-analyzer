@@ -4,7 +4,7 @@ use crate::metadata_object::{MdoType, MetadataObject};
 use crate::traits::MdObject;
 use crate::xml_parser;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 pub fn load_from_directory(path: impl AsRef<Path>) -> Result<Configuration> {
@@ -468,22 +468,14 @@ where
                     return None;
                 }
 
-                let xml = fs::read_to_string(&xml_path).ok()?;
-                let mut mdo = parser(&xml).ok()?;
-
+                let main_xml = fs::read_to_string(&xml_path).ok()?;
                 let predefined_path = path.join("Ext").join("Predefined.xml");
-                if predefined_path.exists() {
-                    if let Ok(predefined_xml) = fs::read_to_string(&predefined_path) {
-                        mdo.predefined_items = xml_parser::parse_predefined_xml(&predefined_xml);
-                        tracing::debug!(
-                            name = %name,
-                            count = mdo.predefined_items.len(),
-                            "Loaded predefined items"
-                        );
-                    }
-                }
+                let predefined_xml = predefined_path
+                    .exists()
+                    .then(|| fs::read_to_string(&predefined_path).ok())
+                    .flatten();
 
-                Some(mdo)
+                build_metadata_object(&main_xml, predefined_xml.as_deref(), &parser)
             } else if path.extension().and_then(|e| e.to_str()) == Some("xml") {
                 let file_stem = path.file_stem()?.to_str()?;
 
@@ -492,12 +484,344 @@ where
                 }
 
                 let xml = fs::read_to_string(&path).ok()?;
-                parser(&xml).ok()
+                build_metadata_object(&xml, None, &parser)
             } else {
                 None
             }
         })
         .collect()
+}
+
+/// Build one metadata object from its already-read composing XML texts: the main
+/// `<name>.xml` plus an optional `Ext/Predefined.xml`. Pure (no filesystem access)
+/// so it can back a per-MDO Salsa parse query whose reads go through the versioned
+/// VFS, while the directory loaders above supply the texts from disk.
+fn build_metadata_object<F>(
+    main_xml: &str,
+    predefined_xml: Option<&str>,
+    parser: &F,
+) -> Option<MetadataObject>
+where
+    F: Fn(&str) -> Result<MetadataObject> + ?Sized,
+{
+    let mut mdo = parser(main_xml).ok()?;
+
+    if let Some(predefined_xml) = predefined_xml {
+        mdo.predefined_items = xml_parser::parse_predefined_xml(predefined_xml);
+        tracing::debug!(
+            name = %mdo.name,
+            count = mdo.predefined_items.len(),
+            "Loaded predefined items"
+        );
+    }
+
+    Some(mdo)
+}
+
+/// The XML parser for a content-parsed metadata-object kind, or `None` for kinds
+/// that are not assembled into a [`MetadataObject`] from a single XML text here
+/// (registers, roles, subsystems, defined types, services, and name-only "simple"
+/// objects, which have their own loaders / are constructed by name).
+fn metadata_object_parser(mdo_type: MdoType) -> Option<fn(&str) -> Result<MetadataObject>> {
+    use xml_parser::*;
+    Some(match mdo_type {
+        MdoType::Catalog => parse_catalog_xml,
+        MdoType::Document => parse_document_xml,
+        MdoType::BusinessProcess => parse_business_process_xml,
+        MdoType::Task => parse_task_xml,
+        MdoType::ExchangePlan => parse_exchange_plan_xml,
+        MdoType::ChartOfCharacteristicTypes => parse_chart_of_characteristic_types_xml,
+        MdoType::ChartOfAccounts => parse_chart_of_accounts_xml,
+        MdoType::DataProcessor => parse_data_processor_xml,
+        MdoType::Report => parse_report_xml,
+        MdoType::Enum => parse_enum_xml,
+        MdoType::Constant => parse_constant_xml,
+        _ => return None,
+    })
+}
+
+/// Parse one metadata object of `mdo_type` from its already-read composing XML
+/// texts (the main `<Name>.xml` plus an optional `Ext/Predefined.xml`). This is
+/// the content-parsing entry the per-MDO Salsa query calls after reading the
+/// texts through the versioned VFS. Returns `None` for kinds not content-parsed
+/// into a [`MetadataObject`] here (see [`metadata_object_parser`]).
+pub fn parse_metadata_object_from_texts(
+    mdo_type: MdoType,
+    main_xml: &str,
+    predefined_xml: Option<&str>,
+) -> Option<MetadataObject> {
+    let parser = metadata_object_parser(mdo_type)?;
+    build_metadata_object(main_xml, predefined_xml, &parser)
+}
+
+/// One discovered metadata object's *structure*: its kind and the disk paths of
+/// its composing files (the main `<Name>.xml` and an optional `Ext/Predefined.xml`),
+/// without reading or parsing any content. The `name` is the file/dir stem, which
+/// the designer export keeps equal to the object's `<Name>` (the same invariant the
+/// directory loaders rely on when locating `<name>.xml` inside a `<name>/` dir).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredMdo {
+    pub mdo_type: MdoType,
+    pub name: String,
+    pub main: PathBuf,
+    pub predefined: Option<PathBuf>,
+}
+
+/// Designer folder names for the content-parsed MetadataObject kinds that use the
+/// `<name>/` dir + sibling `<name>.xml` + optional `Ext/Predefined.xml` layout.
+const METADATA_OBJECT_DIRS: &[(&str, MdoType)] = &[
+    ("Catalogs", MdoType::Catalog),
+    ("Documents", MdoType::Document),
+    ("BusinessProcesses", MdoType::BusinessProcess),
+    ("Tasks", MdoType::Task),
+    ("ExchangePlans", MdoType::ExchangePlan),
+    ("ChartsOfCharacteristicTypes", MdoType::ChartOfCharacteristicTypes),
+    ("ChartsOfAccounts", MdoType::ChartOfAccounts),
+    ("DataProcessors", MdoType::DataProcessor),
+    ("Reports", MdoType::Report),
+];
+
+/// Designer folder names for the content-parsed kinds stored as a loose
+/// `<name>.xml` per object (no dir, no predefined sidecar).
+const SIMPLE_XML_DIRS: &[(&str, MdoType)] =
+    &[("Enums", MdoType::Enum), ("Constants", MdoType::Constant)];
+
+/// Walk one config root and list its content-parsed MetadataObject-family MDOs by
+/// structure only (kind + composing-file paths), reusing the same per-kind layout
+/// rules as the directory loaders without reading content. This backs the per-MDO
+/// Salsa substrate: each composing file becomes a versioned VFS input, and parsing
+/// happens lazily in the per-MDO query. Kinds with their own shapes (registers,
+/// roles, subsystems, services, name-only objects) are out of scope here.
+pub fn discover_metadata_structure(root: &Path) -> Vec<DiscoveredMdo> {
+    let mut out = Vec::new();
+    for (subdir, mdo_type) in METADATA_OBJECT_DIRS {
+        discover_dir_with_predefined(&root.join(subdir), *mdo_type, &mut out);
+    }
+    for (subdir, mdo_type) in SIMPLE_XML_DIRS {
+        discover_loose_xml(&root.join(subdir), *mdo_type, &mut out);
+    }
+    // `read_dir` yields entries in an unspecified order, so sort to a stable key:
+    // a structure listing built from this must compare equal across calls when the
+    // filesystem is unchanged, otherwise every watch event would needlessly re-set
+    // the listing input.
+    out.sort_by(|a, b| {
+        (a.mdo_type as u32, a.name.to_lowercase(), &a.main).cmp(&(
+            b.mdo_type as u32,
+            b.name.to_lowercase(),
+            &b.main,
+        ))
+    });
+    out
+}
+
+fn discover_dir_with_predefined(dir: &Path, mdo_type: MdoType, out: &mut Vec<DiscoveredMdo>) {
+    let entries: Vec<_> = match fs::read_dir(dir) {
+        Ok(entries) => entries.filter_map(|e| e.ok()).collect(),
+        Err(_) => return,
+    };
+
+    let dir_names: std::collections::HashSet<String> = entries
+        .iter()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.is_dir() {
+                path.file_name()?.to_str().map(|s| s.to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    for entry in entries {
+        let path = entry.path();
+        if path.is_dir() {
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+            let main = dir.join(format!("{name}.xml"));
+            if !main.exists() {
+                continue;
+            }
+            let predefined_path = path.join("Ext").join("Predefined.xml");
+            let predefined = predefined_path.exists().then_some(predefined_path);
+            out.push(DiscoveredMdo { mdo_type, name: name.to_string(), main, predefined });
+        } else if path.extension().and_then(|e| e.to_str()) == Some("xml") {
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+            if dir_names.contains(stem) {
+                continue;
+            }
+            out.push(DiscoveredMdo {
+                mdo_type,
+                name: stem.to_string(),
+                main: path,
+                predefined: None,
+            });
+        }
+    }
+}
+
+fn discover_loose_xml(dir: &Path, mdo_type: MdoType, out: &mut Vec<DiscoveredMdo>) {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("xml") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+        out.push(DiscoveredMdo { mdo_type, name: stem.to_string(), main: path, predefined: None });
+    }
+}
+
+/// Designer folder names for the register kinds, each stored as a loose
+/// `<name>.xml` (no dir, no predefined) like enums/constants.
+const REGISTER_DIRS: &[(&str, MdoType)] = &[
+    ("InformationRegisters", MdoType::InformationRegister),
+    ("AccumulationRegisters", MdoType::AccumulationRegister),
+    ("AccountingRegisters", MdoType::AccountingRegister),
+    ("CalculationRegisters", MdoType::CalculationRegister),
+];
+
+/// Walk one config root and list its registers by structure only (kind + main XML
+/// path), the register counterpart of [`discover_metadata_structure`]. Registers
+/// are a separate type (`Register`, not `MetadataObject`) parsed by
+/// [`parse_register_from_text`], so they get their own discovery + parse query
+/// while sharing the per-config-root structure listing and `config_index`.
+pub fn discover_register_structure(root: &Path) -> Vec<DiscoveredMdo> {
+    let mut out = Vec::new();
+    for (subdir, mdo_type) in REGISTER_DIRS {
+        discover_loose_xml(&root.join(subdir), *mdo_type, &mut out);
+    }
+    out.sort_by(|a, b| {
+        (a.mdo_type as u32, a.name.to_lowercase(), &a.main).cmp(&(
+            b.mdo_type as u32,
+            b.name.to_lowercase(),
+            &b.main,
+        ))
+    });
+    out
+}
+
+/// The XML parser for a register kind, or `None` for non-register kinds.
+fn register_parser(mdo_type: MdoType) -> Option<fn(&str) -> Result<crate::register::Register>> {
+    use xml_parser::*;
+    Some(match mdo_type {
+        MdoType::InformationRegister => parse_information_register_xml,
+        MdoType::AccumulationRegister => parse_accumulation_register_xml,
+        MdoType::AccountingRegister => parse_accounting_register_xml,
+        MdoType::CalculationRegister => parse_calculation_register_xml,
+        _ => return None,
+    })
+}
+
+/// Parse one register of `mdo_type` from its main XML text. The register
+/// counterpart of [`parse_metadata_object_from_texts`]; the per-register Salsa
+/// query calls it after reading the text through the versioned VFS. Returns `None`
+/// for non-register kinds.
+pub fn parse_register_from_text(
+    mdo_type: MdoType,
+    main_xml: &str,
+) -> Option<crate::register::Register> {
+    register_parser(mdo_type)?(main_xml).ok()
+}
+
+/// One discovered defined type in a config root's *structure* listing: its name
+/// and the main XML path. Defined types are global (keyed by name, no `MdoType`,
+/// no predefined sidecar), so they get a dedicated discovery struct rather than
+/// riding [`DiscoveredMdo`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredDefinedType {
+    pub name: String,
+    pub main: PathBuf,
+}
+
+/// Walk one config root and list its defined types by structure only (name + main
+/// XML path), the defined-type counterpart of [`discover_register_structure`].
+/// Defined types are stored as loose `<name>.xml` under `DefinedTypes/` and parsed
+/// by [`parse_defined_type_from_text`], so they get their own discovery + parse
+/// query while sharing the per-config-root structure listing.
+pub fn discover_defined_type_structure(root: &Path) -> Vec<DiscoveredDefinedType> {
+    let dir = root.join("DefinedTypes");
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut out = Vec::new();
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("xml") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+        out.push(DiscoveredDefinedType { name: stem.to_string(), main: path });
+    }
+    // Stable order so a structure listing built from this compares equal across
+    // watch events on an unchanged filesystem (see `discover_metadata_structure`).
+    out.sort_by(|a, b| (a.name.to_lowercase(), &a.main).cmp(&(b.name.to_lowercase(), &b.main)));
+    out
+}
+
+/// One discovered common module in a config root's *structure* listing: its name,
+/// its metadata XML path, and the path of its `Ext/Module.bsl` if present. Common
+/// modules carry only metadata (flags + name), so they get a dedicated discovery
+/// struct rather than riding [`DiscoveredMdo`]; `module_file` backs a reverse
+/// "which common module owns this `.bsl`" lookup that the metadata-XML identity
+/// alone cannot answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredCommonModule {
+    pub name: String,
+    pub main: PathBuf,
+    pub module_file: Option<PathBuf>,
+}
+
+/// Walk one config root and list its common modules by structure only (name + main
+/// XML path + `Ext/Module.bsl` path). Common modules use the `<name>/` dir + sibling
+/// `<name>.xml` layout (the module source lives at `<name>/Ext/Module.bsl`), parsed
+/// by [`parse_common_module_from_text`], so they get their own discovery + parse
+/// query while sharing the per-config-root structure listing.
+pub fn discover_common_module_structure(root: &Path) -> Vec<DiscoveredCommonModule> {
+    let dir = root.join("CommonModules");
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut out = Vec::new();
+    for entry in entries.filter_map(|e| e.ok()) {
+        let module_dir = entry.path();
+        if !module_dir.is_dir() {
+            continue;
+        }
+        let Some(name) = module_dir.file_name().and_then(|n| n.to_str()) else { continue };
+        let main = dir.join(format!("{name}.xml"));
+        if !main.exists() {
+            continue;
+        }
+        let module_bsl = module_dir.join("Ext/Module.bsl");
+        let module_file = module_bsl.exists().then_some(module_bsl);
+        out.push(DiscoveredCommonModule { name: name.to_string(), main, module_file });
+    }
+    // Stable order so a structure listing built from this compares equal across
+    // watch events on an unchanged filesystem (see `discover_metadata_structure`).
+    out.sort_by(|a, b| (a.name.to_lowercase(), &a.main).cmp(&(b.name.to_lowercase(), &b.main)));
+    out
+}
+
+/// Parse one common module from its main XML text. The common-module counterpart of
+/// [`parse_defined_type_from_text`]; the per-common-module Salsa query calls it after
+/// reading the text through the versioned VFS. Only metadata (flags + name) is read;
+/// the module body is resolved separately through the symbol tree.
+pub fn parse_common_module_from_text(main_xml: &str) -> Option<crate::common_module::CommonModule> {
+    xml_parser::parse_common_module_xml(main_xml).ok()
+}
+
+/// Parse one defined type from its main XML text. The defined-type counterpart of
+/// [`parse_register_from_text`]; the per-defined-type Salsa query calls it after
+/// reading the text through the versioned VFS.
+pub fn parse_defined_type_from_text(main_xml: &str) -> Option<crate::defined_type::DefinedType> {
+    xml_parser::parse_defined_type_xml(main_xml).ok()
 }
 
 fn load_enums_parallel(dir: &Path) -> Vec<MetadataObject> {
@@ -801,6 +1125,147 @@ fn load_simple_metadata_objects_parallel(dir: &Path, mdo_type: MdoType) -> Vec<M
 mod tests {
     use super::*;
     use crate::traits::Module;
+
+    #[test]
+    fn parse_metadata_object_from_texts_matches_directory_load() {
+        let xml = include_str!("../fixtures/designer/Catalogs/Справочник1.xml");
+        let parsed = parse_metadata_object_from_texts(MdoType::Catalog, xml, None)
+            .expect("catalog parsed from text");
+        assert_eq!(parsed.name, "Справочник1");
+
+        // The per-MDO text parse must equal what the directory loader yields for
+        // the same object (this fixture catalog has no Predefined sidecar).
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/designer");
+        let config = load_from_directory(path).unwrap();
+        let from_dir = config
+            .find_metadata_object(MdoType::Catalog, "Справочник1")
+            .expect("catalog from directory load");
+        assert_eq!(&parsed, from_dir);
+    }
+
+    #[test]
+    fn discover_metadata_structure_matches_directory_load() {
+        use std::collections::BTreeSet;
+
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/designer");
+
+        // The structure walk must find exactly the content-parsed MetadataObject
+        // family that the full directory load yields — pinning the discovery rules
+        // against drift from the loaders they mirror.
+        let kinds: BTreeSet<MdoType> =
+            METADATA_OBJECT_DIRS.iter().chain(SIMPLE_XML_DIRS.iter()).map(|(_, k)| *k).collect();
+
+        let discovered: BTreeSet<(MdoType, String)> = discover_metadata_structure(Path::new(path))
+            .into_iter()
+            .map(|d| (d.mdo_type, d.name))
+            .collect();
+
+        let config = load_from_directory(path).unwrap();
+        let from_load: BTreeSet<(MdoType, String)> = config
+            .metadata_objects()
+            .iter()
+            .filter(|o| kinds.contains(&o.mdo_type))
+            .map(|o| (o.mdo_type, o.name.clone()))
+            .collect();
+
+        assert_eq!(discovered, from_load, "discovery must match the directory loader");
+        assert!(
+            discovered.contains(&(MdoType::Catalog, "Справочник1".to_string())),
+            "fixture sanity: Справочник1 catalog is present"
+        );
+    }
+
+    #[test]
+    fn discover_register_structure_matches_directory_load() {
+        use std::collections::BTreeSet;
+
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/designer");
+
+        let discovered: BTreeSet<(MdoType, String)> = discover_register_structure(Path::new(path))
+            .into_iter()
+            .map(|d| (d.mdo_type, d.name))
+            .collect();
+
+        let config = load_from_directory(path).unwrap();
+        let from_load: BTreeSet<(MdoType, String)> =
+            config.registers().iter().map(|r| (r.mdo_type(), r.name().to_string())).collect();
+
+        assert_eq!(discovered, from_load, "register discovery must match the directory loader");
+    }
+
+    #[test]
+    fn discover_defined_type_structure_matches_directory_load() {
+        use std::collections::BTreeSet;
+
+        let root = std::env::temp_dir().join(format!(
+            "bsl_discover_dt_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let dt_dir = root.join("DefinedTypes");
+        std::fs::create_dir_all(&dt_dir).unwrap();
+        let xml = |name: &str| {
+            format!(
+                concat!(
+                    "<MetaDataObject>",
+                    "<DefinedType uuid=\"00000000-0000-0000-0000-000000000001\">",
+                    "<Properties><Name>{}</Name>",
+                    "<Type><Type>xs:boolean</Type></Type>",
+                    "</Properties></DefinedType></MetaDataObject>"
+                ),
+                name
+            )
+        };
+        std::fs::write(dt_dir.join("ОтметкаВремени.xml"), xml("ОтметкаВремени")).unwrap();
+        std::fs::write(dt_dir.join("ДенежнаяСумма.xml"), xml("ДенежнаяСумма")).unwrap();
+
+        let discovered: BTreeSet<String> =
+            discover_defined_type_structure(&root).into_iter().map(|d| d.name).collect();
+
+        let config = load_from_directory(&root).unwrap();
+        let from_load: BTreeSet<String> =
+            config.defined_types().iter().map(|d| d.name().to_string()).collect();
+
+        assert_eq!(discovered, from_load, "defined-type discovery must match the directory loader",);
+        assert!(discovered.contains("ДенежнаяСумма"), "fixture sanity");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn discover_metadata_structure_order_is_stable() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/designer");
+        // Repeated discovery must yield byte-identical Vecs so a structure listing
+        // compares equal across watch events on an unchanged filesystem.
+        assert_eq!(
+            discover_metadata_structure(Path::new(path)),
+            discover_metadata_structure(Path::new(path)),
+        );
+    }
+
+    #[test]
+    fn discover_metadata_structure_attaches_predefined_sidecar() {
+        let root = std::env::temp_dir().join(format!(
+            "bsl_discover_predef_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let cat_dir = root.join("Catalogs").join("Товары");
+        std::fs::create_dir_all(cat_dir.join("Ext")).unwrap();
+        std::fs::write(root.join("Catalogs/Товары.xml"), "<MetaDataObject/>").unwrap();
+        std::fs::write(cat_dir.join("Ext/Predefined.xml"), "<Predefined/>").unwrap();
+
+        let discovered = discover_metadata_structure(&root);
+        let tovary = discovered
+            .iter()
+            .find(|d| d.name == "Товары")
+            .expect("Товары discovered from its dir + sibling xml");
+        assert_eq!(tovary.mdo_type, MdoType::Catalog);
+        assert_eq!(tovary.main, root.join("Catalogs/Товары.xml"));
+        assert_eq!(tovary.predefined, Some(cat_dir.join("Ext/Predefined.xml")));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     #[test]
     fn test_load_from_directory() {

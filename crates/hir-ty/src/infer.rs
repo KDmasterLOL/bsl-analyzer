@@ -493,13 +493,19 @@ impl<'db> InferenceContext<'db> {
                     }
                     Expr::Field { base, field } => {
                         let base_ty = self.infer_expr(ExprId::from_idx(*base));
-                        let configs = self.db.configurations(self.file_id);
+                        let obj_resolver =
+                            crate::object_resolver::DbObjectResolver::new(self.db, self.file_id);
                         let resolver = self.get_resolver();
                         let info = crate::form_items::lookup_form_item_field(
                             self.db, &resolver, base_ty, field,
                         )
                         .or_else(|| {
-                            crate::field_lookup::lookup_field(self.db, &configs, base_ty, field)
+                            crate::field_lookup::lookup_field(
+                                self.db,
+                                &obj_resolver,
+                                base_ty,
+                                field,
+                            )
                         });
                         if let Some(info) = info {
                             if info.is_readonly {
@@ -698,19 +704,23 @@ impl<'db> InferenceContext<'db> {
             Expr::Field { base, field } => {
                 let base_ty = self.infer_expr(ExprId::from_idx(*base));
 
-                let configs = self.db.configurations(self.file_id);
                 let resolver = self.get_resolver();
+                let obj_resolver =
+                    crate::object_resolver::DbObjectResolver::new(self.db, self.file_id);
                 if let Some(info) =
                     crate::form_items::lookup_form_item_field(self.db, &resolver, base_ty, field)
                 {
                     info.ty
                 } else if let Some(info) =
-                    crate::field_lookup::lookup_field(self.db, &configs, base_ty, field)
+                    crate::field_lookup::lookup_field(self.db, &obj_resolver, base_ty, field)
                 {
                     info.ty
-                } else if let Some(info) =
-                    crate::manager_lookup::lookup_manager_field(self.db, &configs, base_ty, field)
-                {
+                } else if let Some(info) = crate::manager_lookup::lookup_manager_field(
+                    self.db,
+                    &obj_resolver,
+                    base_ty,
+                    field,
+                ) {
                     info.ty
                 } else {
                     let base_kind = self.db.lookup_type(base_ty);
@@ -1783,35 +1793,21 @@ impl<'db> InferenceContext<'db> {
     }
 
     fn mdo_declared(&self, mdo_type: bsl_metadata::MdoType, mdo_name: &Name) -> bool {
-        let configs = self.db.configurations(self.file_id);
-        if configs.is_empty() {
-            return false;
-        }
         let needle = mdo_name.as_str();
-        configs.iter().any(|vc| {
-            vc.configuration.find_metadata_object(mdo_type, needle).is_some()
-                || vc.configuration.find_register_by_type_and_name(mdo_type, needle).is_some()
-        })
+        self.db.resolve_metadata_object(self.file_id, mdo_type, needle).is_some()
+            || self.db.resolve_register(self.file_id, mdo_type, needle).is_some()
     }
 
     fn resolve_constant_value_type(&self, mdo_name: &Name) -> Option<TypeId> {
-        let configs = self.db.configurations(self.file_id);
-        if configs.is_empty() {
-            return None;
-        }
-        let needle = mdo_name.as_str();
-        for vc in configs.iter().rev() {
-            let Some(mdo) =
-                vc.configuration.find_metadata_object(bsl_metadata::MdoType::Constant, needle)
-            else {
-                continue;
-            };
-            return mdo.constant_type.as_ref().map(|attr| {
-                let type_ref = hir_def::TypeRef::from_attribute_type(attr);
-                TyLoweringContext::new().lower_type_ref_id(self.db, &type_ref)
-            });
-        }
-        None
+        let mdo = self.db.resolve_metadata_object(
+            self.file_id,
+            bsl_metadata::MdoType::Constant,
+            mdo_name.as_str(),
+        )?;
+        mdo.constant_type.as_ref().map(|attr| {
+            let type_ref = hir_def::TypeRef::from_attribute_type(attr);
+            TyLoweringContext::new().lower_type_ref_id(self.db, &type_ref)
+        })
     }
 
     fn refine_constant_method(

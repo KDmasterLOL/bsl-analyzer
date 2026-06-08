@@ -216,6 +216,36 @@ impl Register {
         self.enable_totals_slice_last
     }
 
+    /// Overlay an extension's adopted copy of this register onto the base: merge
+    /// dimensions, resources, and attributes by name (1C lets an extension add new
+    /// measurements/resources/attributes to a borrowed register, or replace a
+    /// same-named one), and take the extension's scalar settings where it specifies
+    /// them. Mirrors [`MetadataObject::apply_extension_overlay`](crate::MetadataObject::apply_extension_overlay)
+    /// so the whole-config merge and the per-register resolver share one rule.
+    pub fn apply_extension_overlay(&mut self, overlay: &Register) {
+        for dimension in &overlay.dimensions {
+            self.dimensions
+                .retain(|existing| !existing.name().eq_ignore_ascii_case(dimension.name()));
+            self.dimensions.push(dimension.clone());
+        }
+        for resource in &overlay.resources {
+            self.resources
+                .retain(|existing| !existing.name().eq_ignore_ascii_case(resource.name()));
+            self.resources.push(resource.clone());
+        }
+        for attribute in &overlay.attributes {
+            self.attributes
+                .retain(|existing| !existing.name().eq_ignore_ascii_case(attribute.name()));
+            self.attributes.push(attribute.clone());
+        }
+        if overlay.periodicity.is_some() {
+            self.periodicity = overlay.periodicity;
+        }
+        if overlay.register_type.is_some() {
+            self.register_type = overlay.register_type;
+        }
+    }
+
     pub fn virtual_tables(&self) -> Vec<&'static str> {
         match self.mdo_type {
             MdoType::InformationRegister => self.info_register_virtual_tables(),

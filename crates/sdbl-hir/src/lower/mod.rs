@@ -17,7 +17,7 @@ use crate::source_map::SdblSourceMap;
 
 pub use context::LoweringContext;
 
-use bsl_metadata::Configuration;
+use bsl_metadata::{Configuration, QueryMetadataResolver};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SdblLowerResult {
@@ -26,9 +26,23 @@ pub struct SdblLowerResult {
     pub source_map: SdblSourceMap,
 }
 
+/// Lower SDBL against a whole `Configuration`. Used by the cold call sites
+/// (graph build, streaming, tests) that carry a merged config. The hot, Salsa-
+/// cached path goes through [`lower_sdbl_to_hir_with_resolver`] with a db-backed
+/// per-MDO resolver so it depends only on the metadata objects it touches.
 pub fn lower_sdbl_to_hir(
     sdbl_ast: &Parse<syntax::SyntaxNode>,
     metadata: Option<std::sync::Arc<Configuration>>,
+) -> crate::hir::SdblPackage {
+    lower_sdbl_to_hir_with_resolver(
+        sdbl_ast,
+        metadata.as_deref().map(|config| config as &dyn QueryMetadataResolver),
+    )
+}
+
+pub fn lower_sdbl_to_hir_with_resolver(
+    sdbl_ast: &Parse<syntax::SyntaxNode>,
+    resolver: Option<&dyn QueryMetadataResolver>,
 ) -> crate::hir::SdblPackage {
     let _span = tracing::debug_span!("lower_sdbl_to_hir").entered();
 
@@ -39,7 +53,7 @@ pub fn lower_sdbl_to_hir(
         return crate::hir::SdblPackage::empty();
     };
 
-    let mut ctx = LoweringContext::new(metadata);
+    let mut ctx = LoweringContext::new(resolver);
 
     let mut sdbl_queries = Vec::new();
     let mut select_index = 0;
@@ -202,7 +216,7 @@ pub fn lower_sdbl_to_hir(
     crate::hir::SdblPackage { queries: sdbl_queries, source_map: ctx.source_map }
 }
 
-impl LoweringContext {
+impl LoweringContext<'_> {
     pub(crate) fn lower_query(
         &mut self,
         query: &syntax::ast::SdblQuery,

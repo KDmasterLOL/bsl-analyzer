@@ -16,7 +16,11 @@ pub fn configuration_path_for_file<'db>(
 ) -> Option<ConfigurationPathInput<'db>> {
     let file_path = crate::vfs_helpers::get_file_path(db, file_id)?;
     let config_root = crate::vfs_helpers::find_configuration_root(db, &file_path)?;
-    Some(intern_configuration_path(db, &config_root.to_string_lossy(), db.metadata_version()))
+    Some(intern_configuration_path(
+        db,
+        &config_root.to_string_lossy(),
+        db.config_root_revision_for_path(&file_path),
+    ))
 }
 
 #[salsa::tracked(lru = 128)]
@@ -336,8 +340,7 @@ pub fn line_index_query<'db>(
     let file_id = file_id_input.file_id(db);
     let _span = tracing::info_span!("line_index", ?file_id).entered();
 
-    let file_text_input = db.file_text_input(file_id);
-    let file_text = file_text_input.text(db);
+    let file_text = db.file_text(file_id);
 
     Arc::new(line_index::LineIndex::new(file_text.as_ref()))
 }

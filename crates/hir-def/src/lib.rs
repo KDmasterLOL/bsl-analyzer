@@ -423,8 +423,7 @@ pub fn lower_module_bodies(db: &dyn base_db::RootQueryDb, module_id: ModuleId) -
     let parse = db.parse(module_id.file_id);
     let root = parse.syntax_node();
 
-    let file_text_input = db.file_text_input(module_id.file_id);
-    let file_text = file_text_input.text(db);
+    let file_text = db.file_text(module_id.file_id);
     let line_index = std::sync::Arc::new(line_index::LineIndex::new(&file_text));
 
     ModuleBodies::lower_from_root(&root, module_id, Some(line_index))
