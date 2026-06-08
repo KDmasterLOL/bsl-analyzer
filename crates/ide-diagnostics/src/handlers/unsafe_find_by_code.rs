@@ -43,9 +43,7 @@ pub fn from_hir(
         return None;
     };
 
-    let mdo = ctx.visible_configurations().iter().rev().find_map(|vc| {
-        vc.config.configuration.find_metadata_object(mdo_type, object_name).cloned()
-    })?;
+    let mdo = ctx.resolve_metadata_object(mdo_type, object_name)?;
 
     if mdo.is_find_by_code_safe() {
         return None;

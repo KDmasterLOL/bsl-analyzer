@@ -63,6 +63,29 @@ pub trait AnalysisProvider {
         None
     }
 
+    /// The metadata object `(mdo_type, name)` visible to `file_id`, merged across
+    /// the file's visible configs (base + applicable extension) via
+    /// `apply_extension_overlay`. The default folds whatever `visible_configurations`
+    /// returns; the salsa-backed provider overrides it with the per-MDO accessor so
+    /// it depends on just that object instead of the whole configuration.
+    fn resolve_metadata_object(
+        &self,
+        file_id: FileId,
+        mdo_type: bsl_metadata::MdoType,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::MetadataObject>> {
+        let mut merged: Option<bsl_metadata::MetadataObject> = None;
+        for visible in self.visible_configurations(file_id) {
+            if let Some(found) = visible.config.configuration.find_metadata_object(mdo_type, name) {
+                match &mut merged {
+                    Some(base) => base.apply_extension_overlay(found),
+                    None => merged = Some(found.clone()),
+                }
+            }
+        }
+        merged.map(Arc::new)
+    }
+
     fn workspace_symbols(&self, source_root_id: SourceRootId) -> Arc<hir::WorkspaceSymbols>;
 
     fn module_index(&self, source_root_id: SourceRootId) -> Arc<ModuleIndex>;

@@ -102,6 +102,16 @@ impl<'a> DiagnosticsContext<'a> {
         self.provider.common_module_for_file(self.file_id)
     }
 
+    /// The metadata object `(mdo_type, name)` visible to this file, resolved
+    /// per-MDO (base + the file's own extension) so it depends on just that object.
+    pub fn resolve_metadata_object(
+        &self,
+        mdo_type: bsl_metadata::MdoType,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::MetadataObject>> {
+        self.provider.resolve_metadata_object(self.file_id, mdo_type, name)
+    }
+
     fn query<T>(&self, f: impl FnOnce(&dyn ide_db::AnalysisProvider) -> T) -> T {
         f(self.provider)
     }

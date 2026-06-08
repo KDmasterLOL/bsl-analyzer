@@ -87,6 +87,15 @@ impl AnalysisProvider for SalsaProvider<'_> {
         self.db.common_module_for_file_id(file_id)
     }
 
+    fn resolve_metadata_object(
+        &self,
+        file_id: FileId,
+        mdo_type: bsl_metadata::MdoType,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::MetadataObject>> {
+        self.db.resolve_metadata_object(file_id, mdo_type, name)
+    }
+
     fn workspace_symbols(&self, source_root_id: SourceRootId) -> Arc<hir::WorkspaceSymbols> {
         self.db.workspace_symbols(source_root_id)
     }
