@@ -194,6 +194,18 @@ impl LoweringContext<'_> {
                 }
             }
 
+            ExprHir::BinaryOp { op: crate::hir::BinaryOp::Or, lhs, rhs, .. } => {
+                // `Т.Поле ЕСТЬ NULL ИЛИ <выражение>`: the NULL case is handled
+                // by the sibling disjunct, so the table's fields inside the
+                // other operand are deliberate.
+                if !self.condition_handles_table_null(rhs, protected_table) {
+                    self.find_unprotected_refs(lhs, protected_table, unprotected_refs);
+                }
+                if !self.condition_handles_table_null(lhs, protected_table) {
+                    self.find_unprotected_refs(rhs, protected_table, unprotected_refs);
+                }
+            }
+
             ExprHir::BinaryOp { lhs, rhs, .. } => {
                 self.find_unprotected_refs(lhs, protected_table, unprotected_refs);
                 self.find_unprotected_refs(rhs, protected_table, unprotected_refs);
@@ -215,12 +227,36 @@ impl LoweringContext<'_> {
                 if let Some(op) = operand {
                     self.find_unprotected_refs(op, protected_table, unprotected_refs);
                 }
+                // Branch conditions guard the table: ВЫБОР runs its КОГДА
+                // clauses in order, so once a condition of the form
+                // `Т ЕСТЬ NULL` has been passed, every later branch (and
+                // ИНАЧЕ) executes only when the table's row is present.
+                // The operand form compares values and carries no NULL
+                // semantics, so it gets no guard tracking.
+                let mut known_not_null = false;
                 for when in when_clauses {
-                    self.find_unprotected_refs(&when.condition, protected_table, unprotected_refs);
-                    self.find_unprotected_refs(&when.result, protected_table, unprotected_refs);
+                    if !known_not_null {
+                        self.find_unprotected_refs(
+                            &when.condition,
+                            protected_table,
+                            unprotected_refs,
+                        );
+                    }
+                    let then_guarded = known_not_null
+                        || (operand.is_none()
+                            && self
+                                .condition_implies_table_present(&when.condition, protected_table));
+                    if !then_guarded {
+                        self.find_unprotected_refs(&when.result, protected_table, unprotected_refs);
+                    }
+                    known_not_null = known_not_null
+                        || (operand.is_none()
+                            && self.condition_handles_table_null(&when.condition, protected_table));
                 }
-                if let Some(else_e) = else_expr {
-                    self.find_unprotected_refs(else_e, protected_table, unprotected_refs);
+                if !known_not_null {
+                    if let Some(else_e) = else_expr {
+                        self.find_unprotected_refs(else_e, protected_table, unprotected_refs);
+                    }
                 }
             }
 
@@ -302,6 +338,97 @@ impl LoweringContext<'_> {
 
             _ => false,
         }
+    }
+
+    /// Does this condition handle the NULL case of `table` positively, i.e.
+    /// does `Т.Поле ЕСТЬ NULL` dominate it through ИЛИ-combinations? Then the
+    /// condition being FALSE guarantees the table's row is present, and a
+    /// sibling disjunct sees the NULL case explicitly handled. И-combinations
+    /// give no such guarantee: `Т ЕСТЬ NULL И X` can be false with a NULL row.
+    /// Only a direct column reference observes NULL — wrappers like
+    /// ЕСТЬNULL(…) never yield NULL, so an IS-NULL test over them is
+    /// constant-false and proves nothing.
+    fn condition_handles_table_null(&self, expr: &ExprHir, table: &str) -> bool {
+        match expr {
+            ExprHir::IsNull { expr: inner, negated: false, .. } => {
+                self.is_direct_column_of_table(inner, table)
+            }
+            ExprHir::BinaryOp { op: crate::hir::BinaryOp::Or, lhs, rhs, .. } => {
+                self.condition_handles_table_null(lhs, table)
+                    || self.condition_handles_table_null(rhs, table)
+            }
+            _ => false,
+        }
+    }
+
+    /// Does this condition being TRUE guarantee the table's row is present
+    /// (not NULL)? Covers `Т.Поле ЕСТЬ НЕ NULL`, `НЕ (Т.Поле ЕСТЬ NULL)`, and
+    /// the sentinel test `ЕСТЬNULL(Т.Поле, З) <> З`: an absent row turns the
+    /// call into the fallback `З`, the inequality fails, and the branch is
+    /// skipped. A conjunct guarantee suffices for И; for ИЛИ both operands
+    /// must guarantee.
+    fn condition_implies_table_present(&self, expr: &ExprHir, table: &str) -> bool {
+        match expr {
+            ExprHir::IsNull { expr: inner, negated: true, .. } => {
+                self.is_direct_column_of_table(inner, table)
+            }
+            ExprHir::UnaryOp { op: crate::hir::UnaryOp::Not, expr: inner, .. } => {
+                self.condition_handles_table_null(inner, table)
+            }
+            ExprHir::BinaryOp { op: crate::hir::BinaryOp::And, lhs, rhs, .. } => {
+                self.condition_implies_table_present(lhs, table)
+                    || self.condition_implies_table_present(rhs, table)
+            }
+            ExprHir::BinaryOp { op: crate::hir::BinaryOp::Or, lhs, rhs, .. } => {
+                self.condition_implies_table_present(lhs, table)
+                    && self.condition_implies_table_present(rhs, table)
+            }
+            ExprHir::BinaryOp { op: crate::hir::BinaryOp::Ne, lhs, rhs, .. } => {
+                self.is_isnull_sentinel_test(lhs, rhs, table)
+                    || self.is_isnull_sentinel_test(rhs, lhs, table)
+            }
+            _ => false,
+        }
+    }
+
+    /// `ЕСТЬNULL(Т.Поле, <литерал>)` compared via `<>` against the SAME
+    /// literal: with the row absent the call yields exactly that fallback, the
+    /// inequality is guaranteed false, and the branch cannot execute. Any
+    /// other comparison shape (equality, a different literal, a non-literal
+    /// fallback) can still select the branch on an absent row and must not
+    /// count as a guard.
+    fn is_isnull_sentinel_test(
+        &self,
+        isnull_side: &ExprHir,
+        sentinel_side: &ExprHir,
+        table: &str,
+    ) -> bool {
+        let ExprHir::FunctionCall { function: crate::hir::FunctionKind::Isnull, args, .. } =
+            isnull_side
+        else {
+            return false;
+        };
+        let (Some(column), Some(fallback)) = (args.first(), args.get(1)) else {
+            return false;
+        };
+        if !self.is_direct_column_of_table(column, table) {
+            return false;
+        }
+        match (fallback, sentinel_side) {
+            (
+                ExprHir::Literal { value: fallback_value, .. },
+                ExprHir::Literal { value: sentinel_value, .. },
+            ) => fallback_value == sentinel_value,
+            _ => false,
+        }
+    }
+
+    fn is_direct_column_of_table(&self, expr: &ExprHir, table: &str) -> bool {
+        matches!(
+            expr,
+            ExprHir::ColumnRef { parts, .. }
+                if parts.len() >= 2 && parts[0].eq_ignore_ascii_case(table)
+        )
     }
 
     #[allow(clippy::only_used_in_recursion)]

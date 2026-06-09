@@ -324,6 +324,299 @@ mod tests {
     }
 
     #[test]
+    fn case_else_guarded_by_when_is_null_silent() {
+        let code = r#"Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст =
+    "ВЫБРАТЬ ВЫБОР
+    |    КОГДА Сотрудники.Ссылка ЕСТЬ NULL
+    |        ТОГДА 0
+    |    ИНАЧЕ Сотрудники.Ссылка
+    |КОНЕЦ КАК Поле
+    |ИЗ Справочник.Склады КАК Склады
+    |ЛЕВОЕ СОЕДИНЕНИЕ Справочник.Сотрудники КАК Сотрудники
+    |ПО Склады.Кладовщик = Сотрудники.Ссылка
+    |";
+КонецПроцедуры"#;
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FieldsFromJoinsWithoutIsNull,
+            expect![[r#""#]],
+        );
+    }
+
+    #[test]
+    fn case_then_guarded_by_is_not_null_silent() {
+        let code = r#"Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст =
+    "ВЫБРАТЬ ВЫБОР
+    |    КОГДА Сотрудники.Ссылка ЕСТЬ НЕ NULL
+    |        ТОГДА Сотрудники.Ссылка
+    |    ИНАЧЕ 0
+    |КОНЕЦ КАК Поле
+    |ИЗ Справочник.Склады КАК Склады
+    |ЛЕВОЕ СОЕДИНЕНИЕ Справочник.Сотрудники КАК Сотрудники
+    |ПО Склады.Кладовщик = Сотрудники.Ссылка
+    |";
+КонецПроцедуры"#;
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FieldsFromJoinsWithoutIsNull,
+            expect![[r#""#]],
+        );
+    }
+
+    #[test]
+    fn case_then_guarded_by_isnull_comparison_silent() {
+        let code = r#"Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст =
+    "ВЫБРАТЬ ВЫБОР
+    |    КОГДА ЕСТЬNULL(Сотрудники.Флаг, ЛОЖЬ) <> ЛОЖЬ
+    |        ТОГДА Сотрудники.Ссылка
+    |    ИНАЧЕ 0
+    |КОНЕЦ КАК Поле
+    |ИЗ Справочник.Склады КАК Склады
+    |ЛЕВОЕ СОЕДИНЕНИЕ Справочник.Сотрудники КАК Сотрудники
+    |ПО Склады.Кладовщик = Сотрудники.Ссылка
+    |";
+КонецПроцедуры"#;
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FieldsFromJoinsWithoutIsNull,
+            expect![[r#""#]],
+        );
+    }
+
+    #[test]
+    fn case_following_branches_guarded_by_first_is_null_silent() {
+        let code = r#"Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст =
+    "ВЫБРАТЬ ВЫБОР
+    |    КОГДА Сотрудники.Ссылка ЕСТЬ NULL
+    |        ТОГДА 0
+    |    КОГДА Сотрудники.Флаг
+    |        ТОГДА Сотрудники.Ссылка
+    |    ИНАЧЕ Сотрудники.Организация
+    |КОНЕЦ КАК Поле
+    |ИЗ Справочник.Склады КАК Склады
+    |ЛЕВОЕ СОЕДИНЕНИЕ Справочник.Сотрудники КАК Сотрудники
+    |ПО Склады.Кладовщик = Сотрудники.Ссылка
+    |";
+КонецПроцедуры"#;
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FieldsFromJoinsWithoutIsNull,
+            expect![[r#""#]],
+        );
+    }
+
+    #[test]
+    fn where_disjunction_with_is_null_guards_other_operand() {
+        let code = r#"Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст =
+    "ВЫБРАТЬ Склады.Ссылка
+    |ИЗ Справочник.Склады КАК Склады
+    |ЛЕВОЕ СОЕДИНЕНИЕ Справочник.Сотрудники КАК Сотрудники
+    |ПО Склады.Кладовщик = Сотрудники.Ссылка
+    |ГДЕ (Сотрудники.Ссылка ЕСТЬ NULL ИЛИ Сотрудники.Наименование <> Склады.Наименование)
+    |";
+КонецПроцедуры"#;
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FieldsFromJoinsWithoutIsNull,
+            expect![[r#""#]],
+        );
+    }
+
+    #[test]
+    fn case_else_after_is_null_conjunction_still_fires() {
+        let code = r#"Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст =
+    "ВЫБРАТЬ ВЫБОР
+    |    КОГДА Сотрудники.Ссылка ЕСТЬ NULL И Склады.Флаг
+    |        ТОГДА 0
+    |    ИНАЧЕ Сотрудники.Ссылка
+    |КОНЕЦ КАК Поле
+    |ИЗ Справочник.Склады КАК Склады
+    |ЛЕВОЕ СОЕДИНЕНИЕ Справочник.Сотрудники КАК Сотрудники
+    |ПО Склады.Кладовщик = Сотрудники.Ссылка
+    |";
+КонецПроцедуры"#;
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FieldsFromJoinsWithoutIsNull,
+            expect![[r#"
+                FieldsFromJoinsWithoutIsNull @ 7:16..8:6
+                  message: Для полей из ЛЕВОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
+                  severity: Critical"#]],
+        );
+    }
+
+    #[test]
+    fn case_guard_for_other_table_still_fires() {
+        let code = r#"Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст =
+    "ВЫБРАТЬ ВЫБОР
+    |    КОГДА Склады.Ссылка ЕСТЬ NULL
+    |        ТОГДА 0
+    |    ИНАЧЕ Сотрудники.Ссылка
+    |КОНЕЦ КАК Поле
+    |ИЗ Справочник.Склады КАК Склады
+    |ЛЕВОЕ СОЕДИНЕНИЕ Справочник.Сотрудники КАК Сотрудники
+    |ПО Склады.Кладовщик = Сотрудники.Ссылка
+    |";
+КонецПроцедуры"#;
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FieldsFromJoinsWithoutIsNull,
+            expect![[r#"
+                FieldsFromJoinsWithoutIsNull @ 7:16..8:6
+                  message: Для полей из ЛЕВОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
+                  severity: Critical"#]],
+        );
+    }
+
+    #[test]
+    fn case_then_after_is_not_null_disjunction_still_fires() {
+        let code = r#"Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст =
+    "ВЫБРАТЬ ВЫБОР
+    |    КОГДА Сотрудники.Ссылка ЕСТЬ НЕ NULL ИЛИ Склады.Флаг
+    |        ТОГДА Сотрудники.Ссылка
+    |    ИНАЧЕ 0
+    |КОНЕЦ КАК Поле
+    |ИЗ Справочник.Склады КАК Склады
+    |ЛЕВОЕ СОЕДИНЕНИЕ Справочник.Сотрудники КАК Сотрудники
+    |ПО Склады.Кладовщик = Сотрудники.Ссылка
+    |";
+КонецПроцедуры"#;
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FieldsFromJoinsWithoutIsNull,
+            expect![[r#"
+                FieldsFromJoinsWithoutIsNull @ 6:20..7:10
+                  message: Для полей из ЛЕВОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
+                  severity: Critical"#]],
+        );
+    }
+
+    #[test]
+    fn case_then_after_isnull_equality_still_fires() {
+        // ЕСТЬNULL(Поле, ЛОЖЬ) = ЛОЖЬ selects ТОГДА exactly when the row is
+        // absent (the fallback satisfies the equality), so the raw field in
+        // ТОГДА is a genuine NULL hazard.
+        let code = r#"Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст =
+    "ВЫБРАТЬ ВЫБОР
+    |    КОГДА ЕСТЬNULL(Сотрудники.Флаг, ЛОЖЬ) = ЛОЖЬ
+    |        ТОГДА Сотрудники.Ссылка
+    |    ИНАЧЕ 0
+    |КОНЕЦ КАК Поле
+    |ИЗ Справочник.Склады КАК Склады
+    |ЛЕВОЕ СОЕДИНЕНИЕ Справочник.Сотрудники КАК Сотрудники
+    |ПО Склады.Кладовщик = Сотрудники.Ссылка
+    |";
+КонецПроцедуры"#;
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FieldsFromJoinsWithoutIsNull,
+            expect![[r#"
+                FieldsFromJoinsWithoutIsNull @ 6:20..7:10
+                  message: Для полей из ЛЕВОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
+                  severity: Critical"#]],
+        );
+    }
+
+    #[test]
+    fn case_then_after_isnull_inequality_with_other_literal_still_fires() {
+        // ЕСТЬNULL(Поле, ЛОЖЬ) <> ИСТИНА is TRUE on an absent row (fallback
+        // ЛОЖЬ differs from ИСТИНА), so ТОГДА executes with NULL fields.
+        let code = r#"Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст =
+    "ВЫБРАТЬ ВЫБОР
+    |    КОГДА ЕСТЬNULL(Сотрудники.Флаг, ЛОЖЬ) <> ИСТИНА
+    |        ТОГДА Сотрудники.Ссылка
+    |    ИНАЧЕ 0
+    |КОНЕЦ КАК Поле
+    |ИЗ Справочник.Склады КАК Склады
+    |ЛЕВОЕ СОЕДИНЕНИЕ Справочник.Сотрудники КАК Сотрудники
+    |ПО Склады.Кладовщик = Сотрудники.Ссылка
+    |";
+КонецПроцедуры"#;
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FieldsFromJoinsWithoutIsNull,
+            expect![[r#"
+                FieldsFromJoinsWithoutIsNull @ 6:20..7:10
+                  message: Для полей из ЛЕВОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
+                  severity: Critical"#]],
+        );
+    }
+
+    #[test]
+    fn case_else_after_wrapped_is_null_still_fires() {
+        // ЕСТЬNULL(…) never yields NULL, so `ЕСТЬNULL(…) ЕСТЬ NULL` is
+        // constant-false: ИНАЧЕ always executes, including on absent rows.
+        let code = r#"Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст =
+    "ВЫБРАТЬ ВЫБОР
+    |    КОГДА ЕСТЬNULL(Сотрудники.Код, 0) ЕСТЬ NULL
+    |        ТОГДА 0
+    |    ИНАЧЕ Сотрудники.Ссылка
+    |КОНЕЦ КАК Поле
+    |ИЗ Справочник.Склады КАК Склады
+    |ЛЕВОЕ СОЕДИНЕНИЕ Справочник.Сотрудники КАК Сотрудники
+    |ПО Склады.Кладовщик = Сотрудники.Ссылка
+    |";
+КонецПроцедуры"#;
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FieldsFromJoinsWithoutIsNull,
+            expect![[r#"
+                FieldsFromJoinsWithoutIsNull @ 7:16..8:6
+                  message: Для полей из ЛЕВОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
+                  severity: Critical"#]],
+        );
+    }
+
+    #[test]
+    fn case_then_after_wrapped_is_not_null_still_fires() {
+        // ЕСТЬNULL(…) never yields NULL, so `ЕСТЬNULL(…) ЕСТЬ НЕ NULL` is
+        // constant-true: ТОГДА executes on absent rows too.
+        let code = r#"Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст =
+    "ВЫБРАТЬ ВЫБОР
+    |    КОГДА ЕСТЬNULL(Сотрудники.Код, 0) ЕСТЬ НЕ NULL
+    |        ТОГДА Сотрудники.Ссылка
+    |    ИНАЧЕ 0
+    |КОНЕЦ КАК Поле
+    |ИЗ Справочник.Склады КАК Склады
+    |ЛЕВОЕ СОЕДИНЕНИЕ Справочник.Сотрудники КАК Сотрудники
+    |ПО Склады.Кладовщик = Сотрудники.Ссылка
+    |";
+КонецПроцедуры"#;
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FieldsFromJoinsWithoutIsNull,
+            expect![[r#"
+                FieldsFromJoinsWithoutIsNull @ 6:20..7:10
+                  message: Для полей из ЛЕВОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
+                  severity: Critical"#]],
+        );
+    }
+
+    #[test]
     fn track3_full_outer_join_classification_snapshot() {
         check_diagnostics_snapshot_for(
             r#"Процедура Тест()
