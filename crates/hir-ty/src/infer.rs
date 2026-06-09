@@ -21,6 +21,122 @@ use crate::lower::TyLoweringContext;
 use crate::method_resolution;
 use crate::platform_manager_lookup::{resolve_platform_manager_method, PlatformMethodResolution};
 
+/// Heap-size estimators wired into salsa's `heap_size` hook (the `salsa_unstable`
+/// memory report). salsa's default reports only the fixed slot stack size — the
+/// `Arc` pointer — so the collections behind these memoised results are otherwise
+/// invisible. These return an approximate live-heap byte count: hashbrown table
+/// capacity is derived from length (load factor 7/8, rounded to a power of two),
+/// owned `String`/`Vec` payloads are summed, and small `Copy` ids are counted by
+/// `size_of`. Over-approximate by design; the goal is a per-ingredient memory map,
+/// not exact accounting.
+pub(crate) mod heap_estimate {
+    use super::*;
+    use std::mem::size_of;
+
+    /// Approximate live bytes of an `FxHashMap`/hashbrown table holding `len`
+    /// entries of `(K, V)`: one control byte plus the `(K, V)` slot per bucket,
+    /// with bucket count grown to the next power of two above `len / (7/8)`.
+    pub(super) fn map_table_bytes<K, V>(len: usize) -> usize {
+        if len == 0 {
+            return 0;
+        }
+        // `checked_*`/`saturating_*` guard the (theoretically) unbounded `len`:
+        // `next_power_of_two` panics in debug and wraps to 0 in release near
+        // `usize::MAX`. Real inference maps are body-arena-bounded, so this never
+        // triggers, but it keeps the estimator total.
+        let cap = (len * 8 / 7 + 1).checked_next_power_of_two().unwrap_or(len);
+        cap.saturating_mul(size_of::<K>() + size_of::<V>() + 1)
+    }
+
+    pub(super) fn vec_bytes<T>(len: usize) -> usize {
+        len * size_of::<T>()
+    }
+
+    /// Heap of the `expr`/`binding`-keyed maps plus their owned-string and
+    /// nested-vec payloads, shared by all three inference-result shapes.
+    fn body_maps_heap(
+        var_types: &FxHashMap<String, TypeId>,
+        implicit_locals: &FxHashMap<String, ImplicitLocalInfo>,
+        binding_types: &FxHashMap<BindingId, TypeId>,
+        expr_types: &FxHashMap<ExprId, TypeId>,
+        diagnostics_len: usize,
+        call_arg_bindings_len: usize,
+    ) -> usize {
+        let mut b = map_table_bytes::<ExprId, TypeId>(expr_types.len());
+        b += map_table_bytes::<BindingId, TypeId>(binding_types.len());
+        b += map_table_bytes::<String, TypeId>(var_types.len());
+        for k in var_types.keys() {
+            b += k.capacity();
+        }
+        b += map_table_bytes::<String, ImplicitLocalInfo>(implicit_locals.len());
+        for (k, info) in implicit_locals {
+            b += k.capacity() + vec_bytes::<ImplicitLocalAssignment>(info.assignments.len());
+        }
+        b += vec_bytes::<InferenceDiagnostic>(diagnostics_len);
+        b += vec_bytes::<CallArgBinding>(call_arg_bindings_len);
+        b
+    }
+
+    pub(crate) fn inference_result_heap(v: &Arc<InferenceResult>) -> usize {
+        let r = &**v;
+        let mut b = size_of::<InferenceResult>();
+        b +=
+            map_table_bytes::<DefWithBodyId, FxHashMap<ExprId, TypeId>>(r.expr_types_by_body.len());
+        for inner in r.expr_types_by_body.values() {
+            b += map_table_bytes::<ExprId, TypeId>(inner.len());
+        }
+        b += map_table_bytes::<DefWithBodyId, FxHashMap<BindingId, TypeId>>(
+            r.binding_types_by_body.len(),
+        );
+        for inner in r.binding_types_by_body.values() {
+            b += map_table_bytes::<BindingId, TypeId>(inner.len());
+        }
+        b += map_table_bytes::<String, TypeId>(r.var_types.len());
+        for k in r.var_types.keys() {
+            b += k.capacity();
+        }
+        b += map_table_bytes::<DefWithBodyId, FxHashMap<String, ImplicitLocalInfo>>(
+            r.implicit_locals_by_body.len(),
+        );
+        for inner in r.implicit_locals_by_body.values() {
+            b += map_table_bytes::<String, ImplicitLocalInfo>(inner.len());
+            for (k, info) in inner {
+                b += k.capacity() + vec_bytes::<ImplicitLocalAssignment>(info.assignments.len());
+            }
+        }
+        b += vec_bytes::<(DefWithBodyId, InferenceDiagnostic)>(r.diagnostics.len());
+        b += vec_bytes::<CallArgBinding>(r.call_arg_bindings.len());
+        b
+    }
+
+    pub(crate) fn body_inference_result_heap(v: &Arc<BodyInferenceResult>) -> usize {
+        let r = &**v;
+        size_of::<BodyInferenceResult>()
+            + body_maps_heap(
+                &r.var_types,
+                &r.implicit_locals,
+                &r.binding_types,
+                &r.expr_types,
+                r.diagnostics.len(),
+                r.call_arg_bindings.len(),
+            )
+            + vec_bytes::<ExprId>(r.return_expr_ids.len())
+    }
+
+    pub(crate) fn module_code_inference_result_heap(v: &Arc<ModuleCodeInferenceResult>) -> usize {
+        let r = &**v;
+        size_of::<ModuleCodeInferenceResult>()
+            + body_maps_heap(
+                &r.var_types,
+                &r.implicit_locals,
+                &r.binding_types,
+                &r.expr_types,
+                r.diagnostics.len(),
+                r.call_arg_bindings.len(),
+            )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct InferenceResult {
     pub expr_types_by_body: FxHashMap<DefWithBodyId, FxHashMap<ExprId, TypeId>>,
@@ -1937,7 +2053,7 @@ fn mdo_kind_to_plural(kind: hir_def::ty::MetadataKind) -> Option<&'static str> {
     mdo_type_to_plural(mdo)
 }
 
-#[salsa::tracked(lru = 256)]
+#[salsa::tracked(lru = 256, heap_size = heap_estimate::inference_result_heap)]
 pub fn infer_query<'db>(
     db: &'db dyn HirDatabase,
     file_id_input: FileIdInput<'db>,
@@ -1995,7 +2111,7 @@ pub fn infer_query<'db>(
     Arc::new(result)
 }
 
-#[salsa::tracked(lru = 1024)]
+#[salsa::tracked(lru = 1024, heap_size = heap_estimate::module_code_inference_result_heap)]
 pub fn infer_module_code_query<'db>(
     db: &'db dyn HirDatabase,
     file_id_input: FileIdInput<'db>,

@@ -80,7 +80,7 @@ pub fn method_return_type_cycle<'db>(
     }
 }
 
-#[salsa::tracked(lru = 16384)]
+#[salsa::tracked(lru = 16384, heap_size = crate::infer::heap_estimate::body_inference_result_heap)]
 pub fn infer_method_query<'db>(
     db: &'db dyn HirDatabase,
     method: MethodIdInput<'db>,

@@ -288,7 +288,9 @@ fn analyze_salsa(
         .unwrap_or(1000);
     let mut results: Vec<(Option<FileAnalysis>, Option<FileTiming>)> =
         Vec::with_capacity(file_ids.len());
-    for chunk in file_ids.chunks(chunk_size) {
+    let report_mem = std::env::var_os("BSL_MEM_REPORT").is_some();
+    let num_chunks = file_ids.len().div_ceil(chunk_size);
+    for (chunk_idx, chunk) in file_ids.chunks(chunk_size).enumerate() {
         let mut chunk_results: Vec<(Option<FileAnalysis>, Option<FileTiming>)> = {
             let config_path_input = configuration_path
                 .as_ref()
@@ -381,6 +383,15 @@ fn analyze_salsa(
         };
         results.append(&mut chunk_results);
 
+        // Snapshot the salsa memory map at its high-water mark: the final chunk's
+        // memos are all still live here, before the trim below evicts them. Without
+        // this the only report (post-loop) reflects the post-eviction trough, which
+        // understates the working set by an order of magnitude.
+        if report_mem && chunk_idx + 1 == num_chunks {
+            eprintln!("\n##### salsa memory at PEAK (last chunk, pre-eviction) #####");
+            report_salsa_memory(&db);
+        }
+
         // `config_path_input` (which borrows `&db`) is now out of scope, so the
         // exclusive `&mut db` borrow is free: trim the salsa memos beyond their
         // caps, then release the parser's thread-local green-node caches (which
@@ -396,7 +407,8 @@ fn analyze_salsa(
 
     let elapsed = start.elapsed();
 
-    if std::env::var_os("BSL_MEM_REPORT").is_some() {
+    if report_mem {
+        eprintln!("\n##### salsa memory at TROUGH (post-eviction) #####");
         report_salsa_memory(&db);
     }
 
