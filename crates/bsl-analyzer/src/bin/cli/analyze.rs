@@ -171,23 +171,37 @@ fn analyze_salsa(
     let _metadata = proj_config.load_metadata(&source_dir);
     let configuration_path = proj_config.configuration_path(&source_dir);
 
+    // Scope the file walk to the configuration source root (+ extension roots)
+    // instead of the raw `-s` dir, so vendored/build copies such as
+    // `.build/vendor` are not analyzed as a duplicate configuration.
+    let project = project_model::Project::with_config(&source_dir, proj_config.clone());
+    let source_roots = project.source_roots();
+
     tracing::info!("Creating database");
     let mut db = RootDatabaseImpl::default();
 
-    tracing::info!("Finding BSL files in {:?}", source_dir);
+    tracing::info!("Finding BSL files in {:?}", source_roots);
     let mut bsl_files = Vec::new();
-    for entry in WalkDir::new(&source_dir).follow_links(true) {
-        let entry = entry?;
-        if entry.file_type().is_file() {
-            if let Some(ext) = entry.path().extension() {
-                if ext == "bsl" {
-                    bsl_files.push(entry.path().to_path_buf());
+    let mut seen = std::collections::HashSet::new();
+    for root in &source_roots {
+        for entry in WalkDir::new(root).follow_links(true) {
+            let entry = entry?;
+            if entry.file_type().is_file()
+                && entry.path().extension().is_some_and(|ext| ext == "bsl")
+            {
+                let path = entry.path().to_path_buf();
+                if seen.insert(path.clone()) {
+                    bsl_files.push(path);
                 }
             }
         }
     }
 
-    tracing::info!("Found {} BSL files", bsl_files.len());
+    tracing::info!(
+        "Found {} BSL files across {} source root(s)",
+        bsl_files.len(),
+        source_roots.len()
+    );
 
     tracing::info!("Loading files into database");
     let mut file_set = vfs::FileSet::new();
@@ -581,23 +595,37 @@ fn analyze_streaming(
         "Loaded DiagnosticsConfig (streaming mode)"
     );
 
-    tracing::info!("Finding BSL files in {:?}", source_dir);
+    // Scope the file walk to the configuration source root (+ extension roots)
+    // instead of the raw `-s` dir, so vendored/build copies such as
+    // `.build/vendor` are not analyzed as a duplicate configuration.
+    let project = project_model::Project::with_config(&source_dir, proj_config.clone());
+    let source_roots = project.source_roots();
+
+    tracing::info!("Finding BSL files in {:?}", source_roots);
     let mut bsl_files = Vec::new();
-    for entry in WalkDir::new(&source_dir).follow_links(true) {
-        let entry = entry?;
-        if entry.file_type().is_file() {
-            if let Some(ext) = entry.path().extension() {
-                if ext == "bsl" {
-                    bsl_files.push(entry.path().to_path_buf());
+    let mut seen = std::collections::HashSet::new();
+    for root in &source_roots {
+        for entry in WalkDir::new(root).follow_links(true) {
+            let entry = entry?;
+            if entry.file_type().is_file()
+                && entry.path().extension().is_some_and(|ext| ext == "bsl")
+            {
+                let path = entry.path().to_path_buf();
+                if seen.insert(path.clone()) {
+                    bsl_files.push(path);
                 }
             }
         }
     }
 
-    tracing::info!("Found {} BSL files", bsl_files.len());
+    tracing::info!(
+        "Found {} BSL files across {} source root(s)",
+        bsl_files.len(),
+        source_roots.len()
+    );
 
     if bsl_files.is_empty() {
-        tracing::warn!("No BSL files found in {:?}", source_dir);
+        tracing::warn!("No BSL files found in {:?}", source_roots);
         if !matches!(format, OutputFormat::Jsonl) {
             println!("No BSL files found!");
         }

@@ -21,6 +21,14 @@ impl Project {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         let root = root.into();
         let config = ProjectConfig::load(&root).unwrap_or_default();
+        Self::with_config(root, config)
+    }
+
+    /// Like [`Project::new`] but with an already-resolved config, so a caller that
+    /// loaded the config from an explicit path (e.g. the CLI `--config` flag) keeps
+    /// it instead of having `bsl-analyzer.toml` re-discovered under `root`.
+    pub fn with_config(root: impl Into<PathBuf>, config: ProjectConfig) -> Self {
+        let root = root.into();
         let source_path = Self::discover_source_path(&root, &config);
         let extension_paths = Self::resolve_extensions(&root, &config);
         Self { root, config, source_path, extension_paths }
@@ -28,6 +36,16 @@ impl Project {
 
     pub fn source_path(&self) -> &Path {
         self.source_path.as_deref().unwrap_or(&self.root)
+    }
+
+    /// Directories to scan for BSL sources: the configuration source root plus each
+    /// resolved extension root. Scoping a file walk to these (instead of the raw
+    /// project root) excludes vendored/build copies like `.build/vendor` that would
+    /// otherwise be analyzed as a duplicate configuration.
+    pub fn source_roots(&self) -> Vec<PathBuf> {
+        let mut roots = vec![self.source_path().to_path_buf()];
+        roots.extend(self.extension_paths.iter().map(|(_, path)| path.clone()));
+        roots
     }
 
     pub fn configuration_path(&self) -> Option<&Path> {

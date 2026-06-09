@@ -407,11 +407,7 @@ impl GlobalState {
 
     fn workspace_allowed_roots(&self) -> Vec<PathBuf> {
         let Some(project) = self.project.as_ref() else { return Vec::new() };
-        let mut roots = vec![project.source_path().to_path_buf()];
-        for (_name, ext_path) in project.extension_paths() {
-            roots.push(ext_path.clone());
-        }
-        roots
+        project.source_roots()
     }
 
     fn open_doc_paths(&self) -> HashSet<PathBuf> {
