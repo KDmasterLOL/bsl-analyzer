@@ -172,6 +172,36 @@ impl RootDatabaseImpl {
         self.graph_config_cache = Some(cache);
     }
 
+    /// Warm body inference for every method of a large module in parallel, before
+    /// the sequential `infer_query` fold reads them from cache. Method inferences
+    /// are independent salsa cells — each infers its own body and pulls callee
+    /// return types via the cycle-handled `method_return_type`, never recursing
+    /// into another `infer_method` — so this is plain demand-parallelism, cycle
+    /// safe. The payoff is when this module is the straggler tail of its batch
+    /// chunk: the inner `par_iter` reclaims the cores left idle by the finished
+    /// files. Returns the number of methods warmed, or 0 if the module has fewer
+    /// than `min_methods` (priming a small module is pure overhead).
+    pub fn prime_module_inference(&self, file_id: FileId, min_methods: usize) -> usize {
+        use hir::HirDatabase;
+        use rayon::prelude::*;
+
+        let module_id = ModuleId { file_id };
+        let method_ids: Vec<hir::MethodId> = self
+            .module_bodies(module_id)
+            .iter_bodies()
+            .map(|(local_id, _)| hir::MethodId { module: module_id, local_id })
+            .collect();
+        if method_ids.len() < min_methods {
+            return 0;
+        }
+        let n = method_ids.len();
+        method_ids.par_iter().for_each_with(self.clone(), |db, &method_id| {
+            let method_input = hir::MethodIdInput::new(&*db, method_id);
+            let _ = db.infer_method(method_input);
+        });
+        n
+    }
+
     fn workspace_configs(&self) -> metadata::WorkspaceConfigsInput {
         self.workspace_configs_input
             .read()

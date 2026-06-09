@@ -28,6 +28,7 @@ parking_lot.workspace = true
 crossbeam-channel.workspace = true
 crossbeam-utils.workspace = true
 thiserror.workspace = true
+rayon.workspace = true
 
 [dev-dependencies]
 expect-test.workspace = true

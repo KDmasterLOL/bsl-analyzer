@@ -304,6 +304,13 @@ fn analyze_salsa(
         Vec::with_capacity(file_ids.len());
     let report_mem = std::env::var_os("BSL_MEM_REPORT").is_some();
     let chunk_profile = std::env::var_os("BSL_CHUNK_PROFILE").is_some();
+    // Opt-in (`BSL_PRIME_GIANTS=<N>`): for modules with >= N methods, warm body
+    // inference in parallel before computing diagnostics, so a giant module does
+    // not stall its chunk single-threaded (the dominant straggler cost).
+    let prime_giants: Option<usize> = std::env::var("BSL_PRIME_GIANTS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n > 0);
     let num_chunks = file_ids.len().div_ceil(chunk_size);
     for (chunk_idx, chunk) in file_ids.chunks(chunk_size).enumerate() {
         // Per-chunk timing to separate the parallel phase from the serial tail
@@ -318,6 +325,9 @@ fn analyze_salsa(
             chunk
                 .par_iter()
                 .map_with(db.clone(), |db_snapshot, (file_id, path)| {
+                    if let Some(min) = prime_giants {
+                        db_snapshot.prime_module_inference(*file_id, min);
+                    }
                     let provider = ide_db::SalsaProvider::with_file_set(
                         db_snapshot,
                         config_path_input,
