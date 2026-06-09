@@ -303,8 +303,14 @@ fn analyze_salsa(
     let mut results: Vec<(Option<FileAnalysis>, Option<FileTiming>)> =
         Vec::with_capacity(file_ids.len());
     let report_mem = std::env::var_os("BSL_MEM_REPORT").is_some();
+    let chunk_profile = std::env::var_os("BSL_CHUNK_PROFILE").is_some();
     let num_chunks = file_ids.len().div_ceil(chunk_size);
     for (chunk_idx, chunk) in file_ids.chunks(chunk_size).enumerate() {
+        // Per-chunk timing to separate the parallel phase from the serial tail
+        // (the slowest single file's straggler wait) and the single-threaded
+        // `enforce_lru` trim — the two work-starvation sources between chunks.
+        let max_file_us = std::sync::atomic::AtomicU64::new(0);
+        let par_start = std::time::Instant::now();
         let mut chunk_results: Vec<(Option<FileAnalysis>, Option<FileTiming>)> = {
             let config_path_input = configuration_path
                 .as_ref()
@@ -329,6 +335,7 @@ fn analyze_salsa(
                             }
                         };
                     let elapsed = file_start.elapsed();
+                    max_file_us.fetch_max(elapsed.as_micros() as u64, Ordering::Relaxed);
 
                     let timing = if profiling_enabled {
                         Some(FileTiming { path: path.clone(), duration: elapsed })
@@ -395,6 +402,7 @@ fn analyze_salsa(
                 })
                 .collect()
         };
+        let par_wall = par_start.elapsed();
         results.append(&mut chunk_results);
 
         // Snapshot the salsa memory map at its high-water mark: the final chunk's
@@ -410,9 +418,21 @@ fn analyze_salsa(
         // exclusive `&mut db` borrow is free: trim the salsa memos beyond their
         // caps, then release the parser's thread-local green-node caches (which
         // salsa does not own) on the driver and every rayon worker.
+        let evict_start = std::time::Instant::now();
         db.enforce_lru();
         syntax::clear_shared_node_cache();
         rayon::broadcast(|_| syntax::clear_shared_node_cache());
+        if chunk_profile {
+            eprintln!(
+                "chunk {:>3}/{}: files={} par={:.2}s straggler_max={:.2}s evict={:.2}s",
+                chunk_idx + 1,
+                num_chunks,
+                chunk.len(),
+                par_wall.as_secs_f64(),
+                max_file_us.load(Ordering::Relaxed) as f64 / 1e6,
+                evict_start.elapsed().as_secs_f64(),
+            );
+        }
     }
 
     if let Some(ref pb) = &*progress_arc {
