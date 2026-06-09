@@ -79,6 +79,12 @@ pub struct Configuration {
     #[serde(skip)]
     name_to_web_service: HashMap<String, usize>,
 
+    /// `(mdo_type, lowercased name) -> index`, so [`Configuration::find_metadata_object`]
+    /// is O(1) instead of an O(all-objects) scan that lowercased every object's
+    /// (Cyrillic) name on each lookup.
+    #[serde(skip)]
+    metadata_objects_by_key: HashMap<(MdoType, String), usize>,
+
     #[serde(skip)]
     recorders_by_register: HashMap<(MdoType, Name), Vec<Name>>,
 
@@ -132,6 +138,7 @@ impl Configuration {
             name_to_role: HashMap::new(),
             name_to_http_service: HashMap::new(),
             name_to_web_service: HashMap::new(),
+            metadata_objects_by_key: HashMap::new(),
             recorders_by_register: HashMap::new(),
             use_managed_form_in_ordinary_application: false,
             use_ordinary_form_in_managed_application: false,
@@ -208,7 +215,15 @@ impl Configuration {
         self.name_to_role.clear();
         self.name_to_http_service.clear();
         self.name_to_web_service.clear();
+        self.metadata_objects_by_key.clear();
         self.recorders_by_register.clear();
+
+        for (idx, object) in self.metadata_objects.iter().enumerate() {
+            // First occurrence wins, matching the replaced `.iter().find()` scan.
+            self.metadata_objects_by_key
+                .entry((object.mdo_type, object.name.to_lowercase()))
+                .or_insert(idx);
+        }
 
         for (idx, module) in self.common_modules.iter().enumerate() {
             if let Some(uri) = module.uri() {
@@ -314,6 +329,13 @@ impl Configuration {
 
     pub fn add_metadata_object(&mut self, object: MetadataObject) {
         index_document_recorders(&mut self.recorders_by_register, &object);
+        let idx = self.metadata_objects.len();
+        // First occurrence wins, matching the replaced `.iter().find()` scan: a
+        // later same-(type,name) object (e.g. a case-only-differing extension
+        // overlay) must not shadow the base object the scan would have returned.
+        self.metadata_objects_by_key
+            .entry((object.mdo_type, object.name.to_lowercase()))
+            .or_insert(idx);
         self.metadata_objects.push(object);
     }
 
@@ -398,10 +420,8 @@ impl Configuration {
     }
 
     pub fn find_metadata_object(&self, mdo_type: MdoType, name: &str) -> Option<&MetadataObject> {
-        let name_lower = name.to_lowercase();
-        self.metadata_objects
-            .iter()
-            .find(|obj| obj.mdo_type == mdo_type && obj.name.to_lowercase() == name_lower)
+        let idx = *self.metadata_objects_by_key.get(&(mdo_type, name.to_lowercase()))?;
+        self.metadata_objects.get(idx)
     }
 
     pub fn find_constant_type(&self, name: &str) -> Option<&AttributeType> {

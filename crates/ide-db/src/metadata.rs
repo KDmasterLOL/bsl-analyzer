@@ -762,17 +762,14 @@ pub(crate) fn find_common_module_by_uri(
     configuration: &bsl_metadata::Configuration,
     file_path: &Path,
 ) -> Option<bsl_metadata::CommonModule> {
-    let file_uri = file_path.to_string_lossy().to_string();
+    let file_uri_lower = file_path.to_string_lossy().to_lowercase();
 
     configuration
         .common_modules()
         .iter()
-        .find(|module| {
-            if let Some(module_uri) = module.uri() {
-                module_uri.to_lowercase() == file_uri.to_lowercase()
-            } else {
-                false
-            }
+        .find(|module| match module.uri() {
+            Some(module_uri) => module_uri.to_lowercase() == file_uri_lower,
+            None => false,
         })
         .cloned()
 }

@@ -591,11 +591,20 @@ impl StandardAttributeKind {
 /// happens to be named exactly like a standard one is treated as standard.
 pub fn is_standard_attribute_name(name: &str) -> bool {
     // Unicode-aware fold: `eq_ignore_ascii_case` does not fold Cyrillic (С ≠ с), so the
-    // Russian names need full lowercasing.
-    let name = name.to_lowercase();
-    StandardAttributeKind::ALL.iter().any(|kind| {
-        kind.russian_name().to_lowercase() == name || kind.english_name().to_lowercase() == name
-    })
+    // Russian names need full lowercasing. The kind names are constant, so fold them
+    // once into a set rather than on every call (this is a hot resolution check).
+    use std::collections::HashSet;
+    use std::sync::OnceLock;
+    static NAMES: OnceLock<HashSet<String>> = OnceLock::new();
+    let names = NAMES.get_or_init(|| {
+        StandardAttributeKind::ALL
+            .iter()
+            .flat_map(|kind| {
+                [kind.russian_name().to_lowercase(), kind.english_name().to_lowercase()]
+            })
+            .collect()
+    });
+    names.contains(&name.to_lowercase())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
