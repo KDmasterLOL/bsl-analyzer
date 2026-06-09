@@ -67,7 +67,10 @@ pub struct NodeRef {
     pub id: String,
     pub kind: &'static str,
     pub name: String,
-    pub qualified: String,
+    /// The display path of a metadata node (russian type name + object path). Omitted
+    /// for code nodes (`method`/`module`), where it would only restate `module` + `name`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qualified: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub module: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -84,8 +87,15 @@ pub struct NodeRef {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub methods: Option<Vec<ModuleMethod>>,
     /// Whether this id round-trips back to a node on its own. `false` for
-    /// path-fallback nodes seen only as an edge endpoint.
+    /// path-fallback nodes seen only as an edge endpoint. Serialized only when
+    /// `false` (the informative case); absent means addressable.
+    #[serde(skip_serializing_if = "is_true")]
     pub addressable: bool,
+}
+
+/// `skip_serializing_if` helper: the field is emitted only when `false`.
+fn is_true(v: &bool) -> bool {
+    *v
 }
 
 /// A member method of a `module` node, surfaced in [`NodeRef::methods`].
@@ -97,11 +107,15 @@ pub struct ModuleMethod {
     pub is_export: Option<bool>,
 }
 
-/// A resolved call edge, projected for the agent.
+/// A resolved call edge, projected for the agent. In a neighbours response the
+/// traversal root's id is carried once in `root`, not repeated per edge: an absent
+/// `from`/`to` means that endpoint is the root node.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct EdgeRef {
-    pub from: String,
-    pub to: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
     pub kind: &'static str,
     pub provenance: &'static str,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -188,8 +202,9 @@ pub struct NeighborsResult {
 
 /// Upper bound on the `dropped` id sample returned in [`NeighborsResult`]; a hot
 /// node can have tens of thousands of low-centrality callers and emitting them all
-/// would bloat the response without helping the agent (the count lives in `total`).
-pub const MAX_DROPPED_SAMPLE: usize = 50;
+/// would bloat the response without helping the agent (the count lives in `total`,
+/// and the sample only needs to show what kind of nodes sit just past the cut).
+pub const MAX_DROPPED_SAMPLE: usize = 10;
 
 /// Source for one requested node.
 #[derive(Debug, Clone, Serialize)]
@@ -1385,7 +1400,7 @@ impl<'a> GraphCtx<'a> {
                     id,
                     kind: "attribute",
                     name,
-                    qualified,
+                    qualified: Some(qualified),
                     module: None,
                     signature: None,
                     source: None,
@@ -1396,11 +1411,11 @@ impl<'a> GraphCtx<'a> {
                 }
             }
             GraphNode::Form { owner, form_name } => NodeRef {
-                qualified: format!(
+                qualified: Some(format!(
                     "{}.Форма.{}",
                     form_qualified_prefix(&owner),
                     form_name.as_str()
-                ),
+                )),
                 name: form_name.as_str().to_string(),
                 kind: "form",
                 id,
@@ -1413,12 +1428,12 @@ impl<'a> GraphCtx<'a> {
                 addressable,
             },
             GraphNode::FormItem { owner, form_name, item_name } => NodeRef {
-                qualified: format!(
+                qualified: Some(format!(
                     "{}.Форма.{}.{}",
                     form_qualified_prefix(&owner),
                     form_name.as_str(),
                     item_name.as_str()
-                ),
+                )),
                 name: item_name.as_str().to_string(),
                 kind: "form_item",
                 id,
@@ -1431,12 +1446,12 @@ impl<'a> GraphCtx<'a> {
                 addressable,
             },
             GraphNode::FormAttribute { owner, form_name, attr_name } => NodeRef {
-                qualified: format!(
+                qualified: Some(format!(
                     "{}.Форма.{}.Реквизит.{}",
                     form_qualified_prefix(&owner),
                     form_name.as_str(),
                     attr_name.as_str()
-                ),
+                )),
                 name: attr_name.as_str().to_string(),
                 kind: "form_attribute",
                 id,
@@ -1449,12 +1464,12 @@ impl<'a> GraphCtx<'a> {
                 addressable,
             },
             GraphNode::TabularSection { mdo_type, object_name, section_name } => NodeRef {
-                qualified: format!(
+                qualified: Some(format!(
                     "{}.{}.ТабличнаяЧасть.{}",
                     mdo_type.russian_name(),
                     object_name.as_str(),
                     section_name.as_str()
-                ),
+                )),
                 name: section_name.as_str().to_string(),
                 kind: "tabular_section",
                 id,
@@ -1472,13 +1487,13 @@ impl<'a> GraphCtx<'a> {
                 section_name,
                 attr_name,
             } => NodeRef {
-                qualified: format!(
+                qualified: Some(format!(
                     "{}.{}.{}.{}",
                     mdo_type.russian_name(),
                     object_name.as_str(),
                     section_name.as_str(),
                     attr_name.as_str()
-                ),
+                )),
                 name: attr_name.as_str().to_string(),
                 kind: "attribute",
                 id,
@@ -1506,7 +1521,7 @@ impl<'a> GraphCtx<'a> {
             id,
             kind: "mdo",
             name,
-            qualified,
+            qualified: Some(qualified),
             module: None,
             signature: None,
             source: None,
@@ -1527,10 +1542,6 @@ impl<'a> GraphCtx<'a> {
         let m = hir::Method::new(self.db, method);
         let name = m.name().as_str().to_string();
         let module_display = self.module_display(method.module);
-        let qualified = match &module_display {
-            Some(scope) => format!("{scope}.{name}"),
-            None => name.clone(),
-        };
         let dispatch = self
             .graph
             .dispatch(&GraphNode::Method(method))
@@ -1541,7 +1552,7 @@ impl<'a> GraphCtx<'a> {
             id,
             kind: "method",
             name,
-            qualified,
+            qualified: None,
             module: module_display,
             signature: None,
             source: None,
@@ -1573,8 +1584,8 @@ impl<'a> GraphCtx<'a> {
         NodeRef {
             id,
             kind: "module",
-            name: name.clone(),
-            qualified: name,
+            name,
+            qualified: None,
             module: display,
             signature: None,
             source: None,
@@ -1604,7 +1615,10 @@ impl<'a> GraphCtx<'a> {
         let text = self.db.file_text(file_id);
         let start = u32::from(range.start()) as usize;
         let end = u32::from(range.end()) as usize;
-        text.get(start..end).map(str::to_string)
+        // Line endings are normalized to LF before redaction and budget clamping:
+        // consumers read the source, they do not need byte-exact CRLF, and the CR
+        // would only inflate the JSON escaping.
+        text.get(start..end).map(|s| s.replace("\r\n", "\n"))
     }
 
     fn method_source(&self, method: MethodId) -> Option<String> {
@@ -1877,7 +1891,7 @@ impl<'a> GraphCtx<'a> {
                 (e.from == root || kept.contains(&e.from)) && (e.to == root || kept.contains(&e.to))
             })
             .filter(|e| seen_edges.insert((e.from.clone(), e.to.clone(), e.kind)))
-            .map(|e| self.edge_ref(e))
+            .map(|e| self.edge_ref(e, &root))
             .collect();
 
         // Distribution + connector-loss over the deduped full neighbourhood (every
@@ -1934,10 +1948,13 @@ impl<'a> GraphCtx<'a> {
         filter.is_empty() || filter.iter().any(|p| p == provenance_label(edge))
     }
 
-    fn edge_ref(&self, edge: &WorkspaceCallEdge) -> EdgeRef {
+    /// Project an edge for the agent. An endpoint equal to `root` is omitted
+    /// (`None`), since the neighbours response already carries the root node once.
+    fn edge_ref(&self, edge: &WorkspaceCallEdge, root: &GraphNode) -> EdgeRef {
+        let endpoint = |n: &GraphNode| (n != root).then(|| self.encode_node(n).0);
         EdgeRef {
-            from: self.encode_node(&edge.from).0,
-            to: self.encode_node(&edge.to).0,
+            from: endpoint(&edge.from),
+            to: endpoint(&edge.to),
             kind: edge_kind_label(edge.kind),
             provenance: provenance_label(edge),
             crosses_client_to_server: edge.crosses_client_to_server,
@@ -2479,7 +2496,7 @@ mod tests {
         assert_eq!(node.id, "method/common/Сервер/Считать");
         assert_eq!(node.kind, "method");
         assert_eq!(node.name, "Считать");
-        assert_eq!(node.qualified, "ОбщийМодуль.Сервер.Считать");
+        assert_eq!(node.qualified, None, "code nodes do not serve qualified");
         assert_eq!(node.is_export, Some(true));
         assert_eq!(node.dispatch, vec!["server"]);
         // Full header through the export keyword, not just the name.
@@ -2655,9 +2672,9 @@ mod tests {
         let edge = res
             .edges
             .iter()
-            .find(|e| e.to == "method/common/Сервер/Считать")
-            .expect("an incoming edge to the server method");
-        assert_eq!(edge.from, "method/common/Клиент/Главная");
+            .find(|e| e.to.is_none())
+            .expect("an incoming edge to the root, its endpoint elided");
+        assert_eq!(edge.from.as_deref(), Some("method/common/Клиент/Главная"));
         assert_eq!(edge.kind, "call");
         assert_eq!(edge.provenance, "resolved");
         assert!(edge.crosses_client_to_server);
@@ -2714,7 +2731,7 @@ mod tests {
         let node =
             a.graph_node(ROOT, None, id, GraphDetail::Names).expect("manager method resolves");
         assert_eq!(node.node.id, id);
-        assert_eq!(node.node.qualified, "Справочник.Контрагенты.МодульМенеджера.НайтиПоИНН");
+        assert_eq!(node.node.qualified, None, "code nodes do not serve qualified");
 
         // And the caller reaches it via a resolved edge (literal manager path, the
         // manager module is uniquely determined).
@@ -2754,7 +2771,7 @@ mod tests {
         assert_eq!(node.node.id, id);
         assert_eq!(node.node.kind, "mdo");
         assert_eq!(node.node.name, "Контрагенты");
-        assert_eq!(node.node.qualified, "Справочник.Контрагенты");
+        assert_eq!(node.node.qualified.as_deref(), Some("Справочник.Контрагенты"));
         assert!(node.node.addressable);
 
         let ov = a.graph_overview(ROOT, None, 10);
@@ -2971,7 +2988,9 @@ mod tests {
             let serve = ctx.node_ref(node.clone(), GraphDetail::Names);
             assert_eq!(row.kind, serve.kind, "kind for {node:?}");
             assert_eq!(row.name, serve.name, "name for {node:?}");
-            assert_eq!(row.qualified, serve.qualified, "qualified for {node:?}");
+            let expected_qualified =
+                (!matches!(serve.kind, "method" | "module")).then(|| row.qualified.clone());
+            assert_eq!(expected_qualified, serve.qualified, "qualified for {node:?}");
             assert_eq!(row.module, serve.module, "module for {node:?}");
             assert_eq!(row.dispatch, serve.dispatch, "dispatch for {node:?}");
             assert_eq!(row.is_export, serve.is_export, "is_export for {node:?}");
@@ -2984,12 +3003,11 @@ mod tests {
 
         for edge in graph.edges() {
             let row = encoder.edge_row(edge);
-            let serve = ctx.edge_ref(edge);
-            assert_eq!(row.from_id, serve.from);
-            assert_eq!(row.to_id, serve.to);
-            assert_eq!(row.kind, serve.kind);
-            assert_eq!(row.provenance, serve.provenance);
-            assert_eq!(row.crosses, serve.crosses_client_to_server);
+            assert_eq!(row.from_id, ctx.encode_node(&edge.from).0);
+            assert_eq!(row.to_id, ctx.encode_node(&edge.to).0);
+            assert_eq!(row.kind, edge_kind_label(edge.kind));
+            assert_eq!(row.provenance, provenance_label(edge));
+            assert_eq!(row.crosses, edge.crosses_client_to_server);
         }
     }
 
@@ -3296,7 +3314,7 @@ mod tests {
             let serve = ctx.node_ref(node.clone(), GraphDetail::Names);
             assert_eq!(row.kind, serve.kind, "kind for {node:?}");
             assert_eq!(row.name, serve.name, "name for {node:?}");
-            assert_eq!(row.qualified, serve.qualified, "qualified for {node:?}");
+            assert_eq!(Some(row.qualified.clone()), serve.qualified, "qualified for {node:?}");
             assert_eq!(row.addressable, serve.addressable, "addressable for {node:?}");
         }
 
@@ -3324,11 +3342,10 @@ mod tests {
             crosses_client_to_server: false,
         };
         let row = encoder.edge_row(&edge);
-        let serve = ctx.edge_ref(&edge);
         assert_eq!(row.kind, "contains");
-        assert_eq!(row.kind, serve.kind);
-        assert_eq!(row.from_id, serve.from);
-        assert_eq!(row.to_id, serve.to);
+        assert_eq!(row.kind, edge_kind_label(edge.kind));
+        assert_eq!(row.from_id, ctx.encode_node(&edge.from).0);
+        assert_eq!(row.to_id, ctx.encode_node(&edge.to).0);
         assert_eq!(row.provenance, "resolved");
     }
 }

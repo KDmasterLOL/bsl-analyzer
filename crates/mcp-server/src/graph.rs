@@ -1293,6 +1293,7 @@ mod tests {
             .expect("durable id resolves from the on-disk graph");
         assert_eq!(node.node.name, "Считать");
         assert_eq!(node.node.dispatch, vec!["server"]);
+        assert_eq!(node.node.qualified, None, "code nodes do not serve qualified");
 
         // Callers traversal reaches the client method via the resolved edge.
         let callers = gdb
@@ -1308,6 +1309,10 @@ mod tests {
             .expect("query")
             .expect("neighbors resolve");
         assert!(callers.nodes.iter().any(|n| n.id == "method/common/Клиент/Главная"));
+        // The root endpoint is elided from served edges (absent = root), matching
+        // the in-memory serve path.
+        let edge = callers.edges.iter().find(|e| e.to.is_none()).expect("edge into the root");
+        assert_eq!(edge.from.as_deref(), Some("method/common/Клиент/Главная"));
     }
 
     /// Seed a graph database at the workspace's cache path as a prior process run

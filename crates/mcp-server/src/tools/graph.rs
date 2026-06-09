@@ -234,10 +234,11 @@ pub fn loading(detail: Option<&str>) -> CallToolResult {
 /// independent of the on-disk SQLite cache layout in [`crate::graph_db`]).
 fn schema_json() -> Value {
     json!({
-        "schema_version": "22",
+        "schema_version": "23",
         "actions": ["overview", "schema", "status", "node", "source", "neighbors", "callers", "callees", "resolve"],
         "status": "`status` returns the graph lifecycle ({state: disabled|loading|ready|failed, and when ready: files, revision, stale, reload}) and kicks the lazy build — poll it instead of reading a flat `loading` envelope from a data action (mirrors `diagnostics status`).",
         "node_kinds": ["method", "module", "mdo", "attribute", "tabular_section", "form", "form_item", "form_attribute"],
+        "node_shape": "`qualified` (russified display path) is emitted only for metadata nodes — for code nodes it would restate `module` + `name`; `addressable` is emitted only when false (absent = the id round-trips)",
         "notes": "`node(module/<scope>)` resolves for any code module and returns a `methods` array ({id, name, is_export}) of the module's members; module membership is served on demand and is not a graph edge, so `neighbors(module/…)` stays empty",
         "resolve": "`resolve(query)` returns candidate durable ids ({id, kind, match}) for an imprecise query — wrong casing, a bare method/object name, or a partial id — so a `not_found` from `node`/`neighbors` is recoverable without guessing. `match` is exact|case_insensitive|name|substring (strongest first); the list is capped (default 20). It is symbol/id-oriented, NOT a natural-language search: a free-text phrase (e.g. several object/form/method words) returns no candidates — use `search_code` for semantic lookup, then pass the emitted `graph_id` here.",
         "edge_kinds": ["call", "manager_creates", "manager_access", "query_ref", "register_movement", "contains", "data_binding", "notify_ref", "idle_handler", "event_subscription", "subsystem_membership", "role_reference"],
@@ -250,10 +251,11 @@ fn schema_json() -> Value {
             "edge_kinds": "string[] — keep only edges of these kinds (call|manager_creates|manager_access|query_ref|register_movement|contains|data_binding|notify_ref|idle_handler|event_subscription|subsystem_membership|role_reference); empty = all. Combine with provenance to isolate e.g. only query_ref+register_movement metadata impact on a register before delete/rename"
         },
         "neighbors_result": {
+            "edges": "edge endpoints equal to the traversal root are omitted: an absent `from`/`to` means the root node (its full ref is carried once in `root`)",
             "total": "usize — distinct neighbours discovered, before the max_nodes cap",
             "returned": "usize — neighbours returned in `nodes` (after the cap)",
             "dropped_count": "usize — neighbours dropped by the cap (total - returned)",
-            "dropped": "string[] — bounded sample of the dropped ids (highest-centrality first)",
+            "dropped": "string[] — bounded sample (max 10) of the dropped ids (highest-centrality first); the full count is dropped_count",
             "by_kind": "{ kind: count } — edge-kind distribution of the full neighbourhood (before the cap), to size an edge_kinds filter",
             "by_provenance": "{ provenance: count } — same distribution by provenance",
             "confidence": "resolved_only | contains_inferred — a one-glance trust summary of the shown edges reduced from by_provenance (resolved_only when every edge is resolved, else contains_inferred for any metadata-inferred/string-dispatched edge). Unresolvable calls are dropped from the graph, so this rates shown-edge trust, not recall. Omitted when the neighbourhood has no edges. Lets an impact analysis decide at a glance whether to trust the answer or supplement it with search_code",
@@ -262,14 +264,14 @@ fn schema_json() -> Value {
             "in_total": "usize — distinct callers discovered (present for dir=in/both)"
         },
         "body_budget": "`node`/`neighbors` at detail=bodies cap cumulative source output at max_output_tokens (~4 chars/token; default 6000); a truncated response carries `budget_exhausted: true`. A body fully starved by the budget is omitted (its `source` field is absent), not emitted as an empty string. In `source`, an item skipped because an earlier item exhausted the budget carries `skipped_budget_exhausted: true` (distinct from a method with no body) — retry it with a larger budget or alone.",
-        "redaction": "method source/snippets emitted by `node`/`neighbors`/`source` (and search) are secret-redacted: a string literal is replaced with `***` when a sensitive marker (a credential-named identifier like `Токен`, or a key like `Вставить(\"Пароль\", …)`) precedes it in the same statement. Structural literals (field lists, type names) and localized messages are preserved; treat source as sanitized, not byte-exact.",
+        "redaction": "method source/snippets emitted by `node`/`neighbors`/`source` (and search) are secret-redacted: a string literal is replaced with `***` when a sensitive marker (a credential-named identifier like `Токен`, or a key like `Вставить(\"Пароль\", …)`) precedes it in the same statement. Structural literals (field lists, type names) and localized messages are preserved. Method source served by the graph actions additionally has line endings normalized to LF (search snippets are byte-exact apart from redaction). Treat source as sanitized, not byte-exact.",
         "revision_note": "the graph `revision` is independent of the `diagnostics` tool's `generation` — they are separate subsystems with separate freshness counters and do not correlate.",
         "envelope": {
             "revision": "u64 — snapshot generation the answer was computed at",
             "stale": "bool — workspace drifted on disk since this snapshot",
             "reload": "none | running | failed — background re-index state",
             "result": "the action's payload (or an {error} object)",
-            "delivery": "carried both as MCP structuredContent and a mirrored JSON text block; identical payload"
+            "delivery": "the payload lives in MCP structuredContent; the JSON text block is a compatibility mirror for clients without structured-output support — a host injects exactly one copy into model context"
         },
         "id_format": {
             "method_common": "method/common/<Module>/<Method>",
@@ -381,7 +383,7 @@ mod tests {
         // The contract version must be bumped in lockstep with any response-shape change
         // (a new action, node/edge kind, or result field). The history of what each bump
         // added lives in git, not here.
-        assert_eq!(schema["schema_version"], "22");
+        assert_eq!(schema["schema_version"], "23");
         // The validating `edge_kinds` allowlist and the schema-advertised list must not drift:
         // every advertised kind except the implicit `call` umbrella must be an accepted filter,
         // and the allowlist must advertise no kind the schema omits.
@@ -453,7 +455,7 @@ mod tests {
     #[test]
     fn schema_and_loading_populate_structured_content() {
         assert_structured_mirrors_text(&schema());
-        assert_eq!(schema().structured_content.unwrap()["schema_version"], "22");
+        assert_eq!(schema().structured_content.unwrap()["schema_version"], "23");
 
         assert_structured_mirrors_text(&loading(Some("indexing")));
         let body = loading(Some("indexing")).structured_content.unwrap();

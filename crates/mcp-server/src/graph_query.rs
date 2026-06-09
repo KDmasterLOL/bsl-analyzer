@@ -476,16 +476,22 @@ impl GraphDb {
 
     fn slice(&self, file: &str, start: u32, end: u32) -> Option<String> {
         let text = std::fs::read_to_string(file).ok()?;
-        text.get(start as usize..end as usize).map(str::to_string)
+        // Line endings are normalized to LF before redaction and budget clamping:
+        // consumers read the source, they do not need byte-exact CRLF, and the CR
+        // would only inflate the JSON escaping.
+        text.get(start as usize..end as usize).map(|s| s.replace("\r\n", "\n"))
     }
 
     /// Project a stored node to its agent-facing [`NodeRef`] at `detail`.
     fn node_ref(&self, n: &StoredNode, detail: GraphDetail) -> NodeRef {
+        let kind = node_kind(&n.kind);
         let mut node = NodeRef {
             id: n.id.clone(),
-            kind: node_kind(&n.kind),
+            kind,
             name: n.name.clone(),
-            qualified: n.qualified.clone(),
+            // For code nodes the stored qualified merely restates module + name, so it
+            // is not served; metadata nodes keep their russified display path.
+            qualified: (!matches!(kind, "method" | "module")).then(|| n.qualified.clone()),
             module: n.module.clone(),
             signature: None,
             source: None,
@@ -742,7 +748,8 @@ impl GraphDb {
         }
 
         // Keep only edges whose endpoints both survived; dedup by (from, to, kind)
-        // so a `Both` sweep that meets an edge from each end emits it once.
+        // so a `Both` sweep that meets an edge from each end emits it once. An
+        // endpoint equal to the root is omitted (the response carries the root once).
         let mut seen_edges: std::collections::HashSet<(String, String, String)> =
             std::collections::HashSet::new();
         let edges = out_edges
@@ -753,11 +760,11 @@ impl GraphDb {
             })
             .filter(|e| seen_edges.insert((e.from.clone(), e.to.clone(), e.kind.clone())))
             .map(|e| EdgeRef {
-                from: e.from,
-                to: e.to,
                 kind: edge_kind(&e.kind),
                 provenance: provenance(&e.provenance),
                 crosses_client_to_server: e.crosses,
+                from: (e.from != root.id).then_some(e.from),
+                to: (e.to != root.id).then_some(e.to),
             })
             .collect();
 
