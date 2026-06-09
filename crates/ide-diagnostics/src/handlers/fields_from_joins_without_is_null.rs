@@ -3,8 +3,12 @@ use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use sdbl_hir;
 
+// CodeSmell, not Error: an unguarded outer-join field is a standard-conformance
+// recommendation, and the vendor codebase legitimately mass-produces the
+// pattern (self-joins where NULL is impossible by construction). Warning-level
+// keeps the signal without drowning real errors.
 pub const METADATA: DiagnosticMetadata = define_metadata! {
-    diagnostic_type: DiagnosticType::Error,
+    diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Critical,
     scope: DiagnosticScope::All,
     modules: &[],
@@ -86,7 +90,7 @@ mod tests {
             expect![[r#"
                 FieldsFromJoinsWithoutIsNull @ 4:14..5:6
                   message: Для полей из ЛЕВОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
-                  severity: Critical"#]],
+                  severity: Warning"#]],
         );
     }
 
@@ -108,7 +112,7 @@ mod tests {
             expect![[r#"
                 FieldsFromJoinsWithoutIsNull @ 4:14..4:32
                   message: Для полей из ЛЕВОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
-                  severity: Critical"#]],
+                  severity: Warning"#]],
         );
     }
 
@@ -131,7 +135,7 @@ mod tests {
             expect![[r#"
                 FieldsFromJoinsWithoutIsNull @ 8:10..9:6
                   message: Для полей из ЛЕВОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
-                  severity: Critical"#]],
+                  severity: Warning"#]],
         );
     }
 
@@ -153,7 +157,7 @@ mod tests {
             expect![[r#"
                 FieldsFromJoinsWithoutIsNull @ 4:14..4:28
                   message: Для полей из ПРАВОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
-                  severity: Critical"#]],
+                  severity: Warning"#]],
         );
     }
 
@@ -196,13 +200,13 @@ mod tests {
             expect![[r#"
                 FieldsFromJoinsWithoutIsNull @ 4:14..4:32
                   message: Для полей из ПОЛНОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
-                  severity: Critical
+                  severity: Warning
                 FieldsFromJoinsWithoutIsNull @ 5:6..5:20
                   message: Для полей из ПОЛНОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
-                  severity: Critical
+                  severity: Warning
                 FieldsFromJoinsWithoutIsNull @ 6:6..6:29
                   message: Для полей из ПОЛНОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
-                  severity: Critical"#]],
+                  severity: Warning"#]],
         );
     }
 
@@ -243,7 +247,7 @@ mod tests {
             expect![[r#"
                 FieldsFromJoinsWithoutIsNull @ 4:14..5:6
                   message: Для полей из ЛЕВОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
-                  severity: Critical"#]],
+                  severity: Warning"#]],
         );
     }
 
@@ -319,7 +323,7 @@ mod tests {
             expect![[r#"
                 FieldsFromJoinsWithoutIsNull @ 3:14..3:44
                   message: Для полей из ЛЕВОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
-                  severity: Critical"#]],
+                  severity: Warning"#]],
         );
     }
 
@@ -453,7 +457,7 @@ mod tests {
             expect![[r#"
                 FieldsFromJoinsWithoutIsNull @ 7:16..8:6
                   message: Для полей из ЛЕВОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
-                  severity: Critical"#]],
+                  severity: Warning"#]],
         );
     }
 
@@ -478,7 +482,7 @@ mod tests {
             expect![[r#"
                 FieldsFromJoinsWithoutIsNull @ 7:16..8:6
                   message: Для полей из ЛЕВОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
-                  severity: Critical"#]],
+                  severity: Warning"#]],
         );
     }
 
@@ -503,7 +507,7 @@ mod tests {
             expect![[r#"
                 FieldsFromJoinsWithoutIsNull @ 6:20..7:10
                   message: Для полей из ЛЕВОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
-                  severity: Critical"#]],
+                  severity: Warning"#]],
         );
     }
 
@@ -531,7 +535,7 @@ mod tests {
             expect![[r#"
                 FieldsFromJoinsWithoutIsNull @ 6:20..7:10
                   message: Для полей из ЛЕВОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
-                  severity: Critical"#]],
+                  severity: Warning"#]],
         );
     }
 
@@ -558,7 +562,7 @@ mod tests {
             expect![[r#"
                 FieldsFromJoinsWithoutIsNull @ 6:20..7:10
                   message: Для полей из ЛЕВОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
-                  severity: Critical"#]],
+                  severity: Warning"#]],
         );
     }
 
@@ -585,7 +589,7 @@ mod tests {
             expect![[r#"
                 FieldsFromJoinsWithoutIsNull @ 7:16..8:6
                   message: Для полей из ЛЕВОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
-                  severity: Critical"#]],
+                  severity: Warning"#]],
         );
     }
 
@@ -612,7 +616,7 @@ mod tests {
             expect![[r#"
                 FieldsFromJoinsWithoutIsNull @ 6:20..7:10
                   message: Для полей из ЛЕВОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
-                  severity: Critical"#]],
+                  severity: Warning"#]],
         );
     }
 
@@ -632,10 +636,10 @@ mod tests {
             expect![[r#"
                 FieldsFromJoinsWithoutIsNull @ 4:17..4:31
                   message: Для полей из ПОЛНОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
-                  severity: Critical
+                  severity: Warning
                 FieldsFromJoinsWithoutIsNull @ 5:17..5:32
                   message: Для полей из ПОЛНОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
-                  severity: Critical"#]],
+                  severity: Warning"#]],
         );
     }
 
@@ -674,7 +678,7 @@ mod tests {
             expect![[r#"
                 FieldsFromJoinsWithoutIsNull @ 5:13..5:27
                   message: Для полей из ПРАВОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
-                  severity: Critical"#]],
+                  severity: Warning"#]],
         );
     }
 }
