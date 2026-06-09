@@ -55,6 +55,12 @@ pub struct Configuration {
     #[serde(skip)]
     uri_to_module: HashMap<String, usize>,
 
+    /// Lowercased common-module URI -> index, so a case-insensitive URI lookup is
+    /// O(1) instead of an O(all-modules) scan that re-lowercased every module's
+    /// (Cyrillic) joined path on each file resolution.
+    #[serde(skip)]
+    uri_lower_to_common_module: HashMap<String, usize>,
+
     #[serde(skip)]
     name_to_common_module: HashMap<String, usize>,
 
@@ -79,6 +85,12 @@ pub struct Configuration {
     #[serde(skip)]
     name_to_web_service: HashMap<String, usize>,
 
+    /// `(mdo_type, lowercased name) -> index`, so [`Configuration::find_metadata_object`]
+    /// is O(1) instead of an O(all-objects) scan that lowercased every object's
+    /// (Cyrillic) name on each lookup.
+    #[serde(skip)]
+    metadata_objects_by_key: HashMap<(MdoType, String), usize>,
+
     #[serde(skip)]
     recorders_by_register: HashMap<(MdoType, Name), Vec<Name>>,
 
@@ -100,6 +112,7 @@ impl PartialEq for Configuration {
             && self.defined_types == other.defined_types
             && self.scheduled_jobs == other.scheduled_jobs
             && self.roles == other.roles
+            && self.subsystems == other.subsystems
             && self.http_services == other.http_services
             && self.web_services == other.web_services
             && self.use_managed_form_in_ordinary_application
@@ -123,6 +136,7 @@ impl Configuration {
             roles: Vec::new(),
             subsystems: Vec::new(),
             uri_to_module: HashMap::new(),
+            uri_lower_to_common_module: HashMap::new(),
             name_to_common_module: HashMap::new(),
             name_to_register: HashMap::new(),
             name_to_event_subscription: HashMap::new(),
@@ -131,6 +145,7 @@ impl Configuration {
             name_to_role: HashMap::new(),
             name_to_http_service: HashMap::new(),
             name_to_web_service: HashMap::new(),
+            metadata_objects_by_key: HashMap::new(),
             recorders_by_register: HashMap::new(),
             use_managed_form_in_ordinary_application: false,
             use_ordinary_form_in_managed_application: false,
@@ -199,6 +214,7 @@ impl Configuration {
     #[allow(dead_code)]
     fn build_caches(&mut self) {
         self.uri_to_module.clear();
+        self.uri_lower_to_common_module.clear();
         self.name_to_common_module.clear();
         self.name_to_register.clear();
         self.name_to_event_subscription.clear();
@@ -207,11 +223,21 @@ impl Configuration {
         self.name_to_role.clear();
         self.name_to_http_service.clear();
         self.name_to_web_service.clear();
+        self.metadata_objects_by_key.clear();
         self.recorders_by_register.clear();
+
+        for (idx, object) in self.metadata_objects.iter().enumerate() {
+            // First occurrence wins, matching the replaced `.iter().find()` scan.
+            self.metadata_objects_by_key
+                .entry((object.mdo_type, object.name.to_lowercase()))
+                .or_insert(idx);
+        }
 
         for (idx, module) in self.common_modules.iter().enumerate() {
             if let Some(uri) = module.uri() {
                 self.uri_to_module.insert(uri.to_string(), idx);
+                // First occurrence wins, matching the replaced `.iter().find()` scan.
+                self.uri_lower_to_common_module.entry(uri.to_lowercase()).or_insert(idx);
             }
             self.name_to_common_module.insert(module.name().to_lowercase(), idx);
         }
@@ -266,6 +292,12 @@ impl Configuration {
         self.name_to_common_module.get(&name_lower).and_then(|&idx| self.common_modules.get(idx))
     }
 
+    /// Case-insensitive lookup by root-relative URI. `uri_lower` must already be
+    /// lowercased by the caller (the relative path of the module body file).
+    pub fn find_common_module_by_uri_lower(&self, uri_lower: &str) -> Option<&CommonModule> {
+        self.uri_lower_to_common_module.get(uri_lower).and_then(|&idx| self.common_modules.get(idx))
+    }
+
     pub fn find_module_by_uri(&self, uri: &str) -> Option<&dyn Module> {
         self.uri_to_module
             .get(uri)
@@ -285,6 +317,8 @@ impl Configuration {
 
         if let Some(uri) = module.uri() {
             self.uri_to_module.insert(uri.to_string(), idx);
+            // First occurrence wins, matching the replaced `.iter().find()` scan.
+            self.uri_lower_to_common_module.entry(uri.to_lowercase()).or_insert(idx);
         }
         self.name_to_common_module.insert(module.name().to_lowercase(), idx);
 
@@ -313,6 +347,13 @@ impl Configuration {
 
     pub fn add_metadata_object(&mut self, object: MetadataObject) {
         index_document_recorders(&mut self.recorders_by_register, &object);
+        let idx = self.metadata_objects.len();
+        // First occurrence wins, matching the replaced `.iter().find()` scan: a
+        // later same-(type,name) object (e.g. a case-only-differing extension
+        // overlay) must not shadow the base object the scan would have returned.
+        self.metadata_objects_by_key
+            .entry((object.mdo_type, object.name.to_lowercase()))
+            .or_insert(idx);
         self.metadata_objects.push(object);
     }
 
@@ -321,20 +362,35 @@ impl Configuration {
             if let Some(base_obj) = self.metadata_objects.iter_mut().find(|obj| {
                 obj.mdo_type == ext_obj.mdo_type && obj.name.eq_ignore_ascii_case(&ext_obj.name)
             }) {
-                merge_metadata_object_overlay(base_obj, ext_obj);
+                base_obj.apply_extension_overlay(ext_obj);
             } else {
                 self.add_metadata_object(ext_obj.clone());
             }
         }
 
         for ext_reg in &extension.registers {
-            if self.find_register_by_type_and_name(ext_reg.mdo_type(), ext_reg.name()).is_none() {
+            if let Some(idx) = self.registers.iter().position(|base| {
+                base.mdo_type() == ext_reg.mdo_type()
+                    && base.name().eq_ignore_ascii_case(ext_reg.name())
+            }) {
+                // An extension can add measurements/resources/attributes to a
+                // borrowed register, so merge rather than ignore the adopted copy.
+                self.registers[idx].apply_extension_overlay(ext_reg);
+            } else {
                 self.add_register(ext_reg.clone());
             }
         }
 
         for ext_defined_type in &extension.defined_types {
-            if self.find_defined_type(ext_defined_type.name()).is_none() {
+            if let Some(idx) = self
+                .defined_types
+                .iter()
+                .position(|base| base.name().eq_ignore_ascii_case(ext_defined_type.name()))
+            {
+                // An extension can refine a borrowed defined type's composition, so
+                // take the extension's underlying type rather than ignore it.
+                self.defined_types[idx].apply_extension_overlay(ext_defined_type);
+            } else {
                 self.add_defined_type(ext_defined_type.clone());
             }
         }
@@ -382,10 +438,8 @@ impl Configuration {
     }
 
     pub fn find_metadata_object(&self, mdo_type: MdoType, name: &str) -> Option<&MetadataObject> {
-        let name_lower = name.to_lowercase();
-        self.metadata_objects
-            .iter()
-            .find(|obj| obj.mdo_type == mdo_type && obj.name.to_lowercase() == name_lower)
+        let idx = *self.metadata_objects_by_key.get(&(mdo_type, name.to_lowercase()))?;
+        self.metadata_objects.get(idx)
     }
 
     pub fn find_constant_type(&self, name: &str) -> Option<&AttributeType> {
@@ -525,51 +579,6 @@ impl Configuration {
     }
 }
 
-fn merge_metadata_object_overlay(base: &mut MetadataObject, overlay: &MetadataObject) {
-    if overlay.name_en.is_some() {
-        base.name_en = overlay.name_en.clone();
-    }
-    if overlay.constant_type.is_some() {
-        base.constant_type = overlay.constant_type.clone();
-    }
-
-    for attr in &overlay.attributes {
-        base.attributes.retain(|existing| !existing.name.eq_ignore_ascii_case(&attr.name));
-        base.attributes.push(attr.clone());
-    }
-
-    for tabular_section in &overlay.tabular_sections {
-        base.tabular_sections
-            .retain(|existing| !existing.name().eq_ignore_ascii_case(tabular_section.name()));
-        base.tabular_sections.push(tabular_section.clone());
-    }
-
-    for child in &overlay.children {
-        if let Some(base_child) = base.children.iter_mut().find(|existing| {
-            existing.mdo_type == child.mdo_type && existing.name.eq_ignore_ascii_case(&child.name)
-        }) {
-            merge_metadata_object_overlay(base_child, child);
-        } else {
-            base.children.push(child.clone());
-        }
-    }
-
-    for enum_value in &overlay.enum_values {
-        base.enum_values.retain(|existing| !existing.name.eq_ignore_ascii_case(&enum_value.name));
-        base.enum_values.push(enum_value.clone());
-    }
-
-    for predefined_item in &overlay.predefined_items {
-        base.predefined_items
-            .retain(|existing| !existing.name.eq_ignore_ascii_case(&predefined_item.name));
-        base.predefined_items.push(predefined_item.clone());
-    }
-
-    if !overlay.register_records().is_empty() {
-        base.set_register_records(overlay.register_records().to_vec());
-    }
-}
-
 fn index_document_recorders(
     recorders_by_register: &mut HashMap<(MdoType, Name), Vec<Name>>,
     object: &MetadataObject,
@@ -623,6 +632,35 @@ mod tests {
         let found_uri = config.find_module_by_uri("CommonModules/TestModule/Ext/Module.bsl");
         assert!(found_uri.is_some());
         assert_eq!(found_uri.unwrap().name(), "TestModule");
+    }
+
+    #[test]
+    fn find_common_module_by_uri_lower_is_case_insensitive_and_first_wins() {
+        let mut config = Configuration::new("Test");
+
+        // Populated via the incremental `add_common_module` (disk-loader) path, not
+        // `build_caches`, so the folded URI index must be filled there too.
+        let first = CommonModule::builder()
+            .name("Первый")
+            .uri(Some("CommonModules/Первый/Ext/Module.bsl"))
+            .return_values_reuse(ReturnValueReuse::DuringRequest)
+            .build();
+        config.add_common_module(first);
+
+        // A second module colliding on the (lowercased) URI must not displace the first.
+        let shadow = CommonModule::builder()
+            .name("Второй")
+            .uri(Some("commonmodules/первый/ext/module.bsl"))
+            .return_values_reuse(ReturnValueReuse::DuringRequest)
+            .build();
+        config.add_common_module(shadow);
+
+        let needle = "CommonModules/Первый/Ext/Module.bsl".to_lowercase();
+        let found = config.find_common_module_by_uri_lower(&needle);
+        assert!(found.is_some(), "folded URI index must be populated via add_common_module");
+        assert_eq!(found.unwrap().name(), "Первый", "first occurrence wins on URI collision");
+
+        assert!(config.find_common_module_by_uri_lower("nope/missing.bsl").is_none());
     }
 
     #[test]
@@ -686,6 +724,96 @@ mod tests {
 
         assert!(catalog.find_attribute("Родитель").is_some());
         assert!(catalog.find_attribute("БУС_Артикул").is_some());
+    }
+
+    #[test]
+    fn merge_extension_overlay_merges_borrowed_register_fields() {
+        use crate::dimension::Dimension;
+        use crate::register::{Register, RegisterAttribute, RegisterResource};
+        use uuid::Uuid;
+
+        let mut base = Configuration::new("Base");
+        base.add_register(
+            Register::builder()
+                .name("РегистрСведений1")
+                .mdo_type(MdoType::InformationRegister)
+                .add_dimension(Dimension::builder().name("Изм1").build())
+                .add_resource(RegisterResource::new(Uuid::new_v4(), "Рес1"))
+                .build(),
+        );
+
+        let mut extension = Configuration::new("Extension");
+        extension.add_register(
+            Register::builder()
+                .name("РегистрСведений1")
+                .mdo_type(MdoType::InformationRegister)
+                .add_dimension(Dimension::builder().name("Изм2").build())
+                .add_resource(RegisterResource::new(Uuid::new_v4(), "Рес2"))
+                .add_attribute(RegisterAttribute::new(Uuid::new_v4(), "Рекв1"))
+                .build(),
+        );
+
+        let merged = base.merged_with_extension(&extension);
+        let reg = merged
+            .find_register_by_type_and_name(MdoType::InformationRegister, "РегистрСведений1")
+            .expect("merged register");
+
+        // An extension that borrows the register adds its measurement, resource and
+        // attribute — the base's own fields are preserved (not replaced wholesale).
+        let dims: Vec<&str> = reg.dimensions().iter().map(|d| d.name()).collect();
+        let res: Vec<&str> = reg.resources().iter().map(|r| r.name()).collect();
+        let attrs: Vec<&str> = reg.attributes().iter().map(|a| a.name()).collect();
+        assert_eq!(dims, ["Изм1", "Изм2"], "base + extension measurements");
+        assert_eq!(res, ["Рес1", "Рес2"], "base + extension resources");
+        assert_eq!(attrs, ["Рекв1"], "extension attribute added to the borrowed register");
+    }
+
+    #[test]
+    fn merge_extension_overlay_refines_borrowed_defined_type() {
+        use crate::defined_type::DefinedType;
+        use uuid::Uuid;
+
+        let mut base = Configuration::new("Base");
+        base.add_defined_type(
+            DefinedType::builder()
+                .uuid(Uuid::new_v4())
+                .name("ОпределяемыйТип1")
+                .underlying_type(AttributeType::String { length: Some(10) })
+                .build(),
+        );
+
+        let refined = AttributeType::Ref {
+            mdo_type: MdoType::Catalog,
+            name: "Номенклатура".into(),
+        };
+        let mut extension = Configuration::new("Extension");
+        extension.add_defined_type(
+            DefinedType::builder()
+                .uuid(Uuid::new_v4())
+                .name("ОпределяемыйТип1")
+                .underlying_type(refined.clone())
+                .build(),
+        );
+
+        let merged = base.merged_with_extension(&extension);
+        let dt = merged.find_defined_type("ОпределяемыйТип1").expect("merged defined type");
+        assert_eq!(dt.underlying_type(), &refined, "extension refinement of the defined type wins");
+    }
+
+    #[test]
+    fn equality_reflects_subsystem_changes() {
+        let base = Configuration::new("Cfg");
+
+        let mut with_subsystem = base.clone();
+        with_subsystem.add_subsystem(crate::subsystem::Subsystem::new("Продажи"));
+
+        // A subsystem-only difference must be observable: Salsa relies on this
+        // equality to decide whether a reload invalidates downstream consumers.
+        assert_ne!(base, with_subsystem);
+
+        let mut also_with_subsystem = base.clone();
+        also_with_subsystem.add_subsystem(crate::subsystem::Subsystem::new("Продажи"));
+        assert_eq!(with_subsystem, also_with_subsystem);
     }
 
     #[test]

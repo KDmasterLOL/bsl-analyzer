@@ -8,7 +8,7 @@ use text_size::TextRange;
 
 use super::context::LoweringContext;
 
-impl LoweringContext {
+impl LoweringContext<'_> {
     pub(super) fn lower_from_clause(
         &mut self,
         from_clause: Option<syntax::ast::SdblFromClause>,
@@ -108,6 +108,7 @@ impl LoweringContext {
                 metadata: Some(crate::hir::ResolvedTable::TempTable {
                     name: alias_name.map(|a| a.to_string()).unwrap_or_default(),
                     fields: all_fields,
+                    field_model_complete: false,
                 }),
                 is_virtual_table: false,
                 virtual_table_params: Vec::new(),
@@ -211,6 +212,7 @@ impl LoweringContext {
                             mdo_type: MdoType::AccumulationRegister,
                             name: String::new(),
                             fields: dims.to_vec(),
+                            field_model_complete: false,
                         }),
                         is_virtual_table: false,
                         virtual_table_params: Vec::new(),
@@ -347,6 +349,7 @@ impl LoweringContext {
                     Some(ResolvedTable::TempTable {
                         name: temp_table.name.clone(),
                         fields: temp_table.fields.clone(),
+                        field_model_complete: false,
                     }),
                 );
             }
@@ -375,24 +378,23 @@ impl LoweringContext {
             None
         };
 
-        if let Some(ref metadata) = self.metadata {
+        if let Some(resolver) = self.resolver {
             let exists = match mdo_type {
                 MdoType::InformationRegister
                 | MdoType::AccumulationRegister
                 | MdoType::AccountingRegister
                 | MdoType::CalculationRegister => {
-                    let found = metadata.find_register_by_type_and_name(mdo_type, object_name);
+                    let found = resolver.resolve_register(mdo_type, object_name).is_some();
                     tracing::debug!(
                         mdo_type = ?mdo_type,
                         object_name = %object_name,
-                        found = found.is_some(),
-                        total_registers = metadata.registers().len(),
+                        found = found,
                         "Checking register in metadata"
                     );
-                    found.is_some()
+                    found
                 }
                 _ => {
-                    let found = metadata.has_metadata_object(mdo_type, object_name);
+                    let found = resolver.resolve_metadata_object(mdo_type, object_name).is_some();
                     tracing::debug!(
                         mdo_type = ?mdo_type,
                         object_name = %object_name,
@@ -434,7 +436,7 @@ impl LoweringContext {
             object_name = %object_name,
             tabular_section = ?tabular_section_name,
             is_register = is_register,
-            has_metadata = self.metadata.is_some(),
+            has_metadata = self.resolver.is_some(),
             "resolve_table: Starting field resolution"
         );
 
@@ -445,15 +447,17 @@ impl LoweringContext {
         }
 
         let mut fields = Vec::new();
-        if self.metadata.is_some() {
+        let complete = if self.resolver.is_some() {
             self.add_metadata_fields(
                 mdo_type,
                 object_name,
                 tabular_section_name,
                 &full_name_for_logging,
                 &mut fields,
-            );
-        }
+            )
+        } else {
+            false
+        };
 
         tracing::debug!(
             mdo_type = ?mdo_type,
@@ -462,7 +466,12 @@ impl LoweringContext {
             "Resolved table with fields"
         );
 
-        let resolved = ResolvedTable::Metadata { mdo_type, name: object_name.clone(), fields };
+        let resolved = ResolvedTable::Metadata {
+            mdo_type,
+            name: object_name.clone(),
+            fields,
+            field_model_complete: complete,
+        };
 
         (Some(mdo_type), Some(resolved))
     }
@@ -473,8 +482,7 @@ impl LoweringContext {
         object_name: &str,
         full_name: &str,
     ) -> Option<ResolvedTable> {
-        let metadata = self.metadata.as_ref()?;
-        let register = metadata.find_register_by_type_and_name(mdo_type, object_name)?;
+        let register = self.resolver?.resolve_register(mdo_type, object_name)?;
 
         let mut dimensions = Vec::new();
         for dim in register.dimensions() {
@@ -518,6 +526,14 @@ impl LoweringContext {
         fields.extend(resources.iter().cloned());
         fields.extend(attributes.iter().cloned());
 
+        // Standard fields of the register main table, per ITS query-language
+        // reference (pubqlang ch.82/92/130 + accounting ch.111). Each kind has
+        // its own fixed set; conditional fields (e.g. calc-register action/base
+        // periods) are over-added — that is an acceptable false-negative, while
+        // the diagnostic contract forbids only false-positives.
+        let (standard_fields, field_model_complete) = Self::register_standard_fields(mdo_type);
+        fields.extend(standard_fields);
+
         tracing::debug!(
             mdo_type = ?mdo_type,
             object_name = object_name,
@@ -526,6 +542,7 @@ impl LoweringContext {
             resources = resources.len(),
             attributes = attributes.len(),
             total_fields = fields.len(),
+            field_model_complete,
             "Built Register resolved table"
         );
 
@@ -536,7 +553,76 @@ impl LoweringContext {
             dimensions,
             resources,
             attributes,
+            field_model_complete,
         })
+    }
+
+    /// Standard (platform) fields of a register MAIN table, paired with whether
+    /// the resulting field model is exhaustive enough to drive the unknown-field
+    /// diagnostic. Sets follow the ITS query-language reference (pubqlang
+    /// ch.82/92/111/130).
+    fn register_standard_fields(mdo_type: MdoType) -> (Vec<FieldDef>, bool) {
+        match mdo_type {
+            MdoType::AccumulationRegister => (
+                vec![
+                    FieldDef::standard("Период", "Period", SdblType::Date),
+                    FieldDef::standard("Регистратор", "Recorder", SdblType::AnyRef),
+                    FieldDef::standard("Активность", "Active", SdblType::Boolean),
+                    FieldDef::standard("НомерСтроки", "LineNumber", SdblType::number()),
+                    FieldDef::standard("МоментВремени", "PointInTime", SdblType::DateTime),
+                    FieldDef::standard("ВидДвижения", "RecordType", SdblType::string()),
+                ],
+                true,
+            ),
+            // Регистратор/НомерСтроки/Активность/МоментВремени exist only in
+            // "Подчинение регистратору" mode; over-adding them is FN-safe.
+            MdoType::InformationRegister => (
+                vec![
+                    FieldDef::standard("Период", "Period", SdblType::Date),
+                    FieldDef::standard("Регистратор", "Recorder", SdblType::AnyRef),
+                    FieldDef::standard("Активность", "Active", SdblType::Boolean),
+                    FieldDef::standard("НомерСтроки", "LineNumber", SdblType::number()),
+                    FieldDef::standard("МоментВремени", "PointInTime", SdblType::DateTime),
+                ],
+                true,
+            ),
+            // No plain `Период` here — `ПериодРегистрации` is the anchor. The
+            // action-/base-period fields are conditional on register properties;
+            // over-adding them is FN-safe.
+            MdoType::CalculationRegister => (
+                vec![
+                    FieldDef::standard("Регистратор", "Recorder", SdblType::AnyRef),
+                    FieldDef::standard("НомерСтроки", "LineNumber", SdblType::number()),
+                    FieldDef::standard("Активность", "Active", SdblType::Boolean),
+                    FieldDef::standard("ВидРасчета", "CalculationType", SdblType::AnyRef),
+                    FieldDef::standard("Сторно", "Reversal", SdblType::Boolean),
+                    FieldDef::standard("ПериодРегистрации", "RegistrationPeriod", SdblType::Date),
+                    FieldDef::standard("ПериодДействия", "ActionPeriod", SdblType::Date),
+                    FieldDef::standard("ПериодДействияНачало", "ActionPeriodBegin", SdblType::Date),
+                    FieldDef::standard("ПериодДействияКонец", "ActionPeriodEnd", SdblType::Date),
+                    FieldDef::standard("БазовыйПериодНачало", "BasePeriodBegin", SdblType::Date),
+                    FieldDef::standard("БазовыйПериодКонец", "BasePeriodEnd", SdblType::Date),
+                ],
+                true,
+            ),
+            // Accounting main-table fields need per-dimension/resource "balanced"
+            // flags and the register's correspondence-support flag to synthesise
+            // the Дт/Кт-suffixed names and СчетДт/СчетКт (ITS ch.111) — neither is
+            // parsed into the metadata model yet. Until that lands, expose only
+            // the always-fixed fields for completion and keep the model
+            // INCOMPLETE so the unknown-field diagnostic stays silent (no FPs).
+            MdoType::AccountingRegister => (
+                vec![
+                    FieldDef::standard("Период", "Period", SdblType::Date),
+                    FieldDef::standard("Регистратор", "Recorder", SdblType::AnyRef),
+                    FieldDef::standard("НомерСтроки", "LineNumber", SdblType::number()),
+                    FieldDef::standard("Активность", "Active", SdblType::Boolean),
+                    FieldDef::standard("МоментВремени", "PointInTime", SdblType::DateTime),
+                ],
+                false,
+            ),
+            _ => (Vec::new(), false),
+        }
     }
 
     fn transform_for_virtual_table(
@@ -580,6 +666,7 @@ impl LoweringContext {
                     dimensions,
                     resources: new_resources,
                     attributes: Vec::new(),
+                    field_model_complete: false,
                 }
             }
             VirtualTableType::Balance => {
@@ -606,6 +693,7 @@ impl LoweringContext {
                     dimensions,
                     resources: new_resources,
                     attributes: Vec::new(),
+                    field_model_complete: false,
                 }
             }
             VirtualTableType::BalanceAndTurnovers => {
@@ -645,6 +733,7 @@ impl LoweringContext {
                     dimensions,
                     resources: new_resources,
                     attributes: Vec::new(),
+                    field_model_complete: false,
                 }
             }
             VirtualTableType::SliceLast | VirtualTableType::SliceFirst => {
@@ -660,6 +749,7 @@ impl LoweringContext {
                     dimensions,
                     resources,
                     attributes,
+                    field_model_complete: false,
                 }
             }
             _ => ResolvedTable::Register {
@@ -675,10 +765,13 @@ impl LoweringContext {
                 dimensions,
                 resources,
                 attributes,
+                field_model_complete: false,
             },
         }
     }
 
+    /// Returns `true` only when the produced field set is exhaustive for the
+    /// table's schema (so an unknown-field diagnostic is false-positive safe).
     fn add_metadata_fields(
         &self,
         mdo_type: MdoType,
@@ -686,15 +779,20 @@ impl LoweringContext {
         tabular_section_name: Option<&str>,
         full_name: &str,
         fields: &mut Vec<FieldDef>,
-    ) {
-        let Some(ref metadata) = self.metadata else {
+    ) -> bool {
+        let Some(resolver) = self.resolver else {
             tracing::debug!("No metadata available for field resolution");
-            return;
+            return false;
         };
 
         if let Some(ts_name) = tabular_section_name {
-            self.add_tabular_section_fields(mdo_type, object_name, ts_name, full_name, fields);
-            return;
+            return self.add_tabular_section_fields(
+                mdo_type,
+                object_name,
+                ts_name,
+                full_name,
+                fields,
+            );
         }
 
         match mdo_type {
@@ -713,7 +811,7 @@ impl LoweringContext {
                     "add_metadata_fields: Looking up metadata object"
                 );
 
-                if let Some(obj) = metadata.find_metadata_object(mdo_type, object_name) {
+                if let Some(obj) = resolver.resolve_metadata_object(mdo_type, object_name) {
                     let initial_count = fields.len();
 
                     for attribute in &obj.attributes {
@@ -728,6 +826,34 @@ impl LoweringContext {
                         ));
                     }
 
+                    // Virtual query fields present on every reference table but
+                    // absent from StandardAttributeKind (ITS ch.18 / §8.3).
+                    fields.push(FieldDef::standard(
+                        "Представление",
+                        "Presentation",
+                        SdblType::string(),
+                    ));
+                    fields.push(FieldDef::standard(
+                        "ВерсияДанных",
+                        "DataVersion",
+                        SdblType::string(),
+                    ));
+
+                    // Tabular-section names are valid columns of the parent
+                    // (ITS ch.26, type РезультатЗапроса).
+                    for ts in &obj.tabular_sections {
+                        fields.push(FieldDef::new_with_names(
+                            ts.name().to_string(),
+                            ts.name_en().map(|s| s.to_string()),
+                            SdblType::TabularSectionRef {
+                                parent_mdo_type: mdo_type,
+                                parent_mdo_name: object_name.to_string(),
+                                ts_name: ts.name().to_string(),
+                            },
+                            true,
+                        ));
+                    }
+
                     tracing::debug!(
                         mdo_type = ?mdo_type,
                         object_name = object_name,
@@ -736,6 +862,7 @@ impl LoweringContext {
                         total_fields = fields.len(),
                         "Added metadata fields to object"
                     );
+                    true
                 } else {
                     tracing::debug!(
                         full_name = %full_name,
@@ -743,13 +870,16 @@ impl LoweringContext {
                         object_name = %object_name,
                         "Metadata object not found (may be from extension)"
                     );
+                    false
                 }
             }
 
-            _ => {}
+            _ => false,
         }
     }
 
+    /// Returns `true` only when both the parent object and the named tabular
+    /// section resolved (the field set is then exhaustive).
     fn add_tabular_section_fields(
         &self,
         mdo_type: MdoType,
@@ -757,10 +887,10 @@ impl LoweringContext {
         tabular_section_name: &str,
         full_name: &str,
         fields: &mut Vec<FieldDef>,
-    ) {
-        let Some(ref metadata) = self.metadata else {
+    ) -> bool {
+        let Some(resolver) = self.resolver else {
             tracing::debug!("No metadata available for tabular section resolution");
-            return;
+            return false;
         };
 
         tracing::debug!(
@@ -786,17 +916,17 @@ impl LoweringContext {
                     tabular_section_name = %tabular_section_name,
                     "MDO type does not support tabular sections"
                 );
-                return;
+                return false;
             }
         }
 
-        let Some(parent_obj) = metadata.find_metadata_object(mdo_type, object_name) else {
+        let Some(parent_obj) = resolver.resolve_metadata_object(mdo_type, object_name) else {
             tracing::debug!(
                 mdo_type = ?mdo_type,
                 object_name = %object_name,
                 "Parent object not found in metadata (may be from extension)"
             );
-            return;
+            return false;
         };
 
         let Some(tabular_section) = parent_obj.find_tabular_section(tabular_section_name) else {
@@ -809,7 +939,7 @@ impl LoweringContext {
                     .collect::<Vec<_>>(),
                 "Tabular section not found in parent object (may be from extension)"
             );
-            return;
+            return false;
         };
 
         tracing::debug!(
@@ -851,6 +981,8 @@ impl LoweringContext {
             total_fields = fields.len(),
             "Added tabular section fields"
         );
+
+        true
     }
 
     fn resolve_external_data_source(
@@ -866,12 +998,12 @@ impl LoweringContext {
             "Resolving ExternalDataSource path"
         );
 
-        let Some(ref metadata) = self.metadata else {
+        let Some(resolver) = self.resolver else {
             tracing::debug!("No metadata available for EDS validation");
             return (Some(MdoType::ExternalDataSource), None);
         };
 
-        let eds_obj = metadata.find_metadata_object(MdoType::ExternalDataSource, eds_name);
+        let eds_obj = resolver.resolve_metadata_object(MdoType::ExternalDataSource, eds_name);
         if eds_obj.is_none() {
             tracing::debug!(eds_name = %eds_name, "ExternalDataSource not found in metadata");
             self.diagnostics.push(SdblDiagnostic::QueryToMissingMetadata {
@@ -964,7 +1096,7 @@ impl LoweringContext {
         attr_type: &bsl_metadata::AttributeType,
         visited: &mut std::collections::HashSet<String>,
     ) -> SdblType {
-        use bsl_metadata::{AttributeType, MetadataResolver};
+        use bsl_metadata::AttributeType;
 
         match attr_type {
             AttributeType::DefinedType { name } => {
@@ -973,11 +1105,9 @@ impl LoweringContext {
                     return SdblType::DefinedType { name: name.clone(), underlying_type: None };
                 }
                 let underlying_type =
-                    self.metadata.as_ref().and_then(|m| m.resolve_defined_type(name)).map(
-                        |underlying| {
-                            Box::new(self.resolve_attribute_type_inner(underlying, visited))
-                        },
-                    );
+                    self.resolver.and_then(|r| r.resolve_defined_type(name)).map(|underlying| {
+                        Box::new(self.resolve_attribute_type_inner(&underlying, visited))
+                    });
                 visited.remove(&key);
                 SdblType::DefinedType { name: name.clone(), underlying_type }
             }

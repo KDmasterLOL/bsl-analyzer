@@ -50,7 +50,7 @@ mod tests {
     use smol_str::SmolStr;
     use syntax::TextRange;
 
-    fn make_test_scope() -> Scope {
+    fn make_test_scope() -> Scope<'static> {
         let mut scope = Scope::new();
 
         let table = TableRef {
@@ -70,6 +70,7 @@ mod tests {
                     FieldDef::standard("Наименование", "Description", SdblType::string()),
                     FieldDef::new("ПолноеНаименование", SdblType::string()),
                 ],
+                field_model_complete: false,
             }),
             is_virtual_table: false,
             virtual_table_params: Vec::new(),
@@ -169,6 +170,7 @@ mod tests {
             metadata: Some(ResolvedTable::TempTable {
                 name: "ТемпТаблица".to_string(),
                 fields: temp_fields,
+                field_model_complete: false,
             }),
             is_virtual_table: false,
             virtual_table_params: vec![],
@@ -213,6 +215,7 @@ mod tests {
                 mdo_type: MdoType::Document,
                 name: "Товары".to_string(),
                 fields: tabular_fields,
+                field_model_complete: false,
             }),
             is_virtual_table: false,
             virtual_table_params: Vec::new(),
@@ -239,6 +242,7 @@ mod tests {
                 mdo_type: MdoType::Document,
                 name: "ЧекККМ".to_string(),
                 fields: document_fields,
+                field_model_complete: false,
             }),
             is_virtual_table: false,
             virtual_table_params: Vec::new(),
@@ -330,6 +334,7 @@ mod tests {
             metadata: Some(ResolvedTable::TempTable {
                 name: "ВТ_Данные".to_string(),
                 fields: temp_fields,
+                field_model_complete: false,
             }),
             is_virtual_table: false,
             virtual_table_params: vec![],
@@ -406,6 +411,7 @@ mod tests {
             metadata: Some(ResolvedTable::TempTable {
                 name: "ВТ_Данные".to_string(),
                 fields: temp_fields,
+                field_model_complete: false,
             }),
             is_virtual_table: false,
             virtual_table_params: vec![],

@@ -20,7 +20,7 @@ impl ScopeProvider for DbScopeProvider<'_> {
         file_id: FileId,
         bsl_literal_range: syntax::TextRange,
         sdbl_offset: TextSize,
-    ) -> Option<Scope> {
+    ) -> Option<Scope<'static>> {
         let _span = tracing::info_span!(
             "DbScopeProvider::get_scope",
             ?file_id,
@@ -185,6 +185,7 @@ impl ScopeProvider for DbScopeProvider<'_> {
                     metadata: Some(sdbl_hir::ResolvedTable::TempTable {
                         name: temp_name.to_string(),
                         fields: temp_fields,
+                        field_model_complete: false,
                     }),
                     is_virtual_table: false,
                     virtual_table_params: Vec::new(),

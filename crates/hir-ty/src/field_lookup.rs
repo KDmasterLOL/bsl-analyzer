@@ -1,6 +1,5 @@
 pub use crate::field_enum::FieldInfo;
 
-use bsl_config::VisibleConfig;
 use bsl_types::builders::Builders;
 use bsl_types::facet::FormDataFacet;
 use bsl_types::intern::TypeKernelDb;
@@ -9,6 +8,7 @@ use bsl_types::testing::RootConfigCtx;
 use hir_def::Name;
 
 use crate::field_enum::enumerate_fields_inner;
+use crate::object_resolver::MetadataResolution;
 
 pub(crate) fn project_form_data_for_fields_id(db: &dyn TypeKernelDb, ty: TypeId) -> Option<TypeId> {
     let TypeKind::FormData { kind, underlying: Some(owner) } = db.lookup_type(ty) else {
@@ -23,7 +23,7 @@ pub(crate) fn project_form_data_for_fields_id(db: &dyn TypeKernelDb, ty: TypeId)
 
 fn lookup_form_data_tabular_section_field(
     db: &dyn TypeKernelDb,
-    configs: &[VisibleConfig],
+    resolver: &dyn MetadataResolution,
     receiver: TypeId,
     field_name: &Name,
 ) -> Option<FieldInfo> {
@@ -36,47 +36,39 @@ fn lookup_form_data_tabular_section_field(
     };
 
     let needle = field_name.as_str().to_lowercase();
-    for cfg in configs.iter().rev() {
-        let Some(mdo) = cfg.configuration.find_metadata_object(mdo_type, mdo_name.as_str()) else {
-            continue;
-        };
-        let Some(ts) = mdo.tabular_sections.iter().find(|ts| {
-            ts.name().to_lowercase() == needle
-                || ts.name_en().is_some_and(|en| en.to_lowercase() == needle)
-        }) else {
-            continue;
-        };
+    let mdo = resolver.resolve_metadata_object(mdo_type, mdo_name.as_str())?;
+    let ts = mdo.tabular_sections.iter().find(|ts| {
+        ts.name().to_lowercase() == needle
+            || ts.name_en().is_some_and(|en| en.to_lowercase() == needle)
+    })?;
 
-        let qualified = format!("{}.{}", mdo_name.as_str(), ts.name());
-        let ty = db.mk_form_data(
-            FormDataFacet::Collection,
-            Some(bsl_types::facet::MdoRefFacet::new(mdo_type, qualified)),
-        );
-        return Some(FieldInfo {
-            name: Name::new(ts.name()),
-            name_en: ts.name_en().filter(|s| !s.is_empty()).map(Name::new),
-            ty,
-            value_ty: None,
-            is_readonly: false,
-            origin: crate::field_enum::FieldOrigin::TabularSection,
-        });
-    }
-
-    None
+    let qualified = format!("{}.{}", mdo_name.as_str(), ts.name());
+    let ty = db.mk_form_data(
+        FormDataFacet::Collection,
+        Some(bsl_types::facet::MdoRefFacet::new(mdo_type, qualified)),
+    );
+    Some(FieldInfo {
+        name: Name::new(ts.name()),
+        name_en: ts.name_en().filter(|s| !s.is_empty()).map(Name::new),
+        ty,
+        value_ty: None,
+        is_readonly: false,
+        origin: crate::field_enum::FieldOrigin::TabularSection,
+    })
 }
 
 pub fn lookup_field(
     db: &dyn TypeKernelDb,
-    configs: &[VisibleConfig],
+    resolver: &dyn MetadataResolution,
     receiver: TypeId,
     field_name: &Name,
 ) -> Option<FieldInfo> {
-    lookup_field_inner(db, configs, receiver, field_name)
+    lookup_field_inner(db, resolver, receiver, field_name)
 }
 
 fn lookup_field_inner(
     db: &dyn TypeKernelDb,
-    configs: &[VisibleConfig],
+    resolver: &dyn MetadataResolution,
     receiver: TypeId,
     field_name: &Name,
 ) -> Option<FieldInfo> {
@@ -84,7 +76,7 @@ fn lookup_field_inner(
         return Some(info);
     }
 
-    if let Some(info) = lookup_form_data_tabular_section_field(db, configs, receiver, field_name) {
+    if let Some(info) = lookup_form_data_tabular_section_field(db, resolver, receiver, field_name) {
         return Some(info);
     }
 
@@ -96,10 +88,10 @@ fn lookup_field_inner(
     match db.lookup_type(effective_ty) {
         TypeKind::Union(arms) => {
             let arms = arms.to_vec();
-            return lookup_field_in_union_intersection(db, configs, &arms, field_name);
+            return lookup_field_in_union_intersection(db, resolver, &arms, field_name);
         }
         TypeKind::MetadataRef(_) => {
-            return lookup_field_on_metadata_ref(db, configs, effective_ty, field_name);
+            return lookup_field_on_metadata_ref(db, resolver, effective_ty, field_name);
         }
         _ => {}
     }
@@ -112,7 +104,7 @@ fn lookup_field_inner(
 
 fn lookup_field_in_union_intersection(
     db: &dyn TypeKernelDb,
-    configs: &[VisibleConfig],
+    resolver: &dyn MetadataResolution,
     arms: &[TypeId],
     field_name: &Name,
 ) -> Option<FieldInfo> {
@@ -125,11 +117,11 @@ fn lookup_field_in_union_intersection(
         return None;
     }
     if live.len() == 1 {
-        return lookup_field_inner(db, configs, live[0], field_name);
+        return lookup_field_inner(db, resolver, live[0], field_name);
     }
     let mut per_arm: Vec<FieldInfo> = Vec::with_capacity(live.len());
     for arm in &live {
-        let info = lookup_field_inner(db, configs, *arm, field_name)?;
+        let info = lookup_field_inner(db, resolver, *arm, field_name)?;
         per_arm.push(info);
     }
     let first = &per_arm[0];
@@ -147,12 +139,12 @@ fn lookup_field_in_union_intersection(
 
 fn lookup_field_on_metadata_ref(
     db: &dyn TypeKernelDb,
-    configs: &[VisibleConfig],
+    resolver: &dyn MetadataResolution,
     effective_ty: TypeId,
     field_name: &Name,
 ) -> Option<FieldInfo> {
     let needle = field_name.as_str().to_lowercase();
-    enumerate_fields_inner(db, configs, effective_ty).into_iter().find(|f| {
+    enumerate_fields_inner(db, resolver, effective_ty).into_iter().find(|f| {
         f.name.as_str().to_lowercase() == needle
             || f.name_en.as_ref().is_some_and(|en| en.as_str().to_lowercase() == needle)
     })
@@ -198,6 +190,8 @@ fn lookup_field_via_platform_property(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::object_resolver::ConfigsObjectResolver;
+    use bsl_config::VisibleConfig;
     use bsl_types::builders::Builders;
     use bsl_types::facet::ProjectionSource;
     use bsl_types::kind::TypeKind;
@@ -263,12 +257,12 @@ mod tests {
     ) -> Option<FieldInfoForTest> {
         let db = Rc::new(InMemoryDb::new());
         let receiver = receiver_ty.intern(&db);
-        super::lookup_field(db.as_ref(), configs, receiver, field_name).map(|info| {
-            FieldInfoForTest {
+        super::lookup_field(db.as_ref(), &ConfigsObjectResolver(configs), receiver, field_name).map(
+            |info| FieldInfoForTest {
                 ty: ActualType { db: Rc::clone(&db), id: info.ty },
                 is_readonly: info.is_readonly,
-            }
-        })
+            },
+        )
     }
     use bsl_metadata::tabular_section::{TabularSection, TabularSectionAttribute};
     use bsl_metadata::{Attribute, AttributeType, Configuration, MdoType, MetadataObject};
@@ -1461,8 +1455,9 @@ mod tests {
             Some(projection_with_two_fields(&db)),
             ProjectionSource::Unknown,
         );
-        let info = super::lookup_field(&db, &[], receiver, &Name::new("КодТов"))
-            .expect("projection field must resolve");
+        let info =
+            super::lookup_field(&db, &ConfigsObjectResolver(&[]), receiver, &Name::new("КодТов"))
+                .expect("projection field must resolve");
         assert_eq!(info.ty, db.string(None, false));
         assert!(info.is_readonly, "SDBL projection fields are read-only");
     }
@@ -1474,8 +1469,20 @@ mod tests {
             Some(projection_with_two_fields(&db)),
             ProjectionSource::Unknown,
         );
-        assert!(super::lookup_field(&db, &[], receiver, &Name::new("кодтов")).is_some());
-        assert!(super::lookup_field(&db, &[], receiver, &Name::new("НАИМЕНОВАНИЕ")).is_some());
+        assert!(super::lookup_field(
+            &db,
+            &ConfigsObjectResolver(&[]),
+            receiver,
+            &Name::new("кодтов")
+        )
+        .is_some());
+        assert!(super::lookup_field(
+            &db,
+            &ConfigsObjectResolver(&[]),
+            receiver,
+            &Name::new("НАИМЕНОВАНИЕ")
+        )
+        .is_some());
     }
 
     #[test]

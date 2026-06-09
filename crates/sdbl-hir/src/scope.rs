@@ -1,18 +1,40 @@
 use std::sync::Arc;
 
+use bsl_metadata::QueryMetadataResolver;
 use rustc_hash::FxHashMap;
 
 use crate::hir::{FieldDef, Name, TableRef};
 use crate::types::SdblType;
 
+/// Where a [`Scope`] gets its metadata answers.
+///
+/// `Config` owns an `Arc<Configuration>` so a scope built for completion can be
+/// returned by value (no borrow escapes). `Resolver` borrows a db-backed
+/// per-MDO resolver used transiently during query lowering — that scope is never
+/// returned, so the borrow stays local.
 #[derive(Debug)]
-pub struct Scope {
-    frames: Vec<ScopeFrame>,
-
-    metadata: Option<Arc<bsl_metadata::Configuration>>,
+enum MetaSource<'a> {
+    Config(Arc<bsl_metadata::Configuration>),
+    Resolver(&'a dyn QueryMetadataResolver),
 }
 
-impl Default for Scope {
+impl MetaSource<'_> {
+    fn resolver(&self) -> &dyn QueryMetadataResolver {
+        match self {
+            MetaSource::Config(config) => &**config,
+            MetaSource::Resolver(resolver) => *resolver,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct Scope<'a> {
+    frames: Vec<ScopeFrame>,
+
+    metadata: Option<MetaSource<'a>>,
+}
+
+impl Default for Scope<'_> {
     fn default() -> Self {
         Self::new()
     }
@@ -32,13 +54,17 @@ pub struct TempTableDef {
     pub fields: Vec<FieldDef>,
 }
 
-impl Scope {
+impl<'a> Scope<'a> {
     pub fn new() -> Self {
         Self { frames: vec![ScopeFrame::default()], metadata: None }
     }
 
     pub fn new_with_metadata(metadata: Option<Arc<bsl_metadata::Configuration>>) -> Self {
-        Self { frames: vec![ScopeFrame::default()], metadata }
+        Self { frames: vec![ScopeFrame::default()], metadata: metadata.map(MetaSource::Config) }
+    }
+
+    pub fn new_with_resolver(resolver: &'a dyn QueryMetadataResolver) -> Self {
+        Self { frames: vec![ScopeFrame::default()], metadata: Some(MetaSource::Resolver(resolver)) }
     }
 
     pub fn push_frame(&mut self) {
@@ -378,9 +404,9 @@ impl Scope {
     }
 
     fn resolve_ref_fields(&self, mdo_ref: &crate::types::MdoRef) -> Option<Vec<FieldDef>> {
-        let config = self.metadata.as_ref()?;
+        let resolver = self.metadata.as_ref()?.resolver();
 
-        let mdo_object = config.find_metadata_object(mdo_ref.mdo_type, &mdo_ref.name)?;
+        let mdo_object = resolver.resolve_metadata_object(mdo_ref.mdo_type, &mdo_ref.name)?;
 
         let mut fields = Vec::new();
 
@@ -416,9 +442,9 @@ impl Scope {
         parent_mdo_name: &str,
         ts_name: &str,
     ) -> Option<Vec<FieldDef>> {
-        let config = self.metadata.as_ref()?;
+        let resolver = self.metadata.as_ref()?.resolver();
 
-        let mdo_object = config.find_metadata_object(parent_mdo_type, parent_mdo_name)?;
+        let mdo_object = resolver.resolve_metadata_object(parent_mdo_type, parent_mdo_name)?;
 
         let ts = mdo_object.find_tabular_section(ts_name)?;
 
@@ -536,6 +562,7 @@ mod tests {
                 mdo_type: MdoType::Catalog,
                 name: name.to_string(),
                 fields,
+                field_model_complete: false,
             }),
             is_virtual_table: false,
             virtual_table_params: Vec::new(),

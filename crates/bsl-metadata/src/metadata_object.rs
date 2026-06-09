@@ -97,6 +97,19 @@ impl FromStr for MdoType {
 }
 
 impl MdoType {
+    /// Whether this kind is a register (its objects live in `Configuration`'s
+    /// register list, resolved by `find_register_by_type_and_name`, not the
+    /// metadata-object list).
+    pub fn is_register(&self) -> bool {
+        matches!(
+            self,
+            Self::InformationRegister
+                | Self::AccumulationRegister
+                | Self::AccountingRegister
+                | Self::CalculationRegister
+        )
+    }
+
     pub fn russian_name(&self) -> &'static str {
         match self {
             Self::Catalog => "Справочник",
@@ -578,28 +591,55 @@ impl StandardAttributeKind {
 /// happens to be named exactly like a standard one is treated as standard.
 pub fn is_standard_attribute_name(name: &str) -> bool {
     // Unicode-aware fold: `eq_ignore_ascii_case` does not fold Cyrillic (С ≠ с), so the
-    // Russian names need full lowercasing.
-    let name = name.to_lowercase();
-    StandardAttributeKind::ALL.iter().any(|kind| {
-        kind.russian_name().to_lowercase() == name || kind.english_name().to_lowercase() == name
-    })
+    // Russian names need full lowercasing. The kind names are constant, so fold them
+    // once into a set rather than on every call (this is a hot resolution check).
+    use std::collections::HashSet;
+    use std::sync::OnceLock;
+    static NAMES: OnceLock<HashSet<String>> = OnceLock::new();
+    let names = NAMES.get_or_init(|| {
+        StandardAttributeKind::ALL
+            .iter()
+            .flat_map(|kind| {
+                [kind.russian_name().to_lowercase(), kind.english_name().to_lowercase()]
+            })
+            .collect()
+    });
+    names.contains(&name.to_lowercase())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AttributeType {
-    String { length: Option<u32> },
-    Number { precision: u8, scale: u8 },
+    String {
+        length: Option<u32>,
+    },
+    Number {
+        precision: u8,
+        scale: u8,
+    },
     Boolean,
     Date,
     DateTime,
-    Ref { mdo_type: MdoType, name: String },
+    Ref {
+        mdo_type: MdoType,
+        name: String,
+    },
     AnyRef,
-    AnyObjectRef { mdo_type: MdoType },
+    AnyObjectRef {
+        mdo_type: MdoType,
+    },
     Uuid,
     ValueStorage,
-    DefinedType { name: String },
-    Composite { types: Vec<AttributeType> },
+    DefinedType {
+        name: String,
+    },
+    Composite {
+        types: Vec<AttributeType>,
+    },
     Platform(PlatformValueType),
+    /// A platform type identified by its canonical Russian name, resolved from
+    /// the platform catalogue by stripping the XML namespace prefix
+    /// (`v8ui:`, `mxl:`, `d5p1:`, …) and looking the local name up there.
+    PlatformNamed(String),
     Unknown,
 }
 
@@ -616,6 +656,19 @@ pub enum PlatformValueType {
     FixedMap,
     Type,
     Null,
+    FormattedString,
+    SpreadsheetDocument,
+    FormattedDocument,
+    Picture,
+    Color,
+    Font,
+    Chart,
+    GanttChart,
+    SettingsComposer,
+    DataCompositionFilter,
+    DynamicList,
+    ConstantsSet,
+    ReportBuilder,
 }
 
 impl PlatformValueType {
@@ -632,6 +685,19 @@ impl PlatformValueType {
             Self::FixedMap => "ФиксированноеСоответствие",
             Self::Type => "Тип",
             Self::Null => "Null",
+            Self::FormattedString => "ФорматированнаяСтрока",
+            Self::SpreadsheetDocument => "ТабличныйДокумент",
+            Self::FormattedDocument => "ФорматированныйДокумент",
+            Self::Picture => "Картинка",
+            Self::Color => "Цвет",
+            Self::Font => "Шрифт",
+            Self::Chart => "Диаграмма",
+            Self::GanttChart => "ДиаграммаГанта",
+            Self::SettingsComposer => "КомпоновщикНастроекКомпоновкиДанных",
+            Self::DataCompositionFilter => "ОтборКомпоновкиДанных",
+            Self::DynamicList => "ДинамическийСписок",
+            Self::ConstantsSet => "КонстантыНабор",
+            Self::ReportBuilder => "ПостроительОтчета",
         }
     }
 }
@@ -706,6 +772,58 @@ impl MetadataObject {
 
     pub fn set_register_records(&mut self, records: Vec<(MdoType, Name)>) {
         self.register_records = records;
+    }
+
+    /// Apply an extension overlay onto this object, replacing same-named members
+    /// and recursing into children. This is the single source of truth for
+    /// per-object extension merge semantics, shared by whole-configuration merge
+    /// ([`crate::Configuration::merge_extension_overlay`]) and per-object
+    /// resolution.
+    pub fn apply_extension_overlay(&mut self, overlay: &MetadataObject) {
+        if overlay.name_en.is_some() {
+            self.name_en = overlay.name_en.clone();
+        }
+        if overlay.constant_type.is_some() {
+            self.constant_type = overlay.constant_type.clone();
+        }
+
+        for attr in &overlay.attributes {
+            self.attributes.retain(|existing| !existing.name.eq_ignore_ascii_case(&attr.name));
+            self.attributes.push(attr.clone());
+        }
+
+        for tabular_section in &overlay.tabular_sections {
+            self.tabular_sections
+                .retain(|existing| !existing.name().eq_ignore_ascii_case(tabular_section.name()));
+            self.tabular_sections.push(tabular_section.clone());
+        }
+
+        for child in &overlay.children {
+            if let Some(base_child) = self.children.iter_mut().find(|existing| {
+                existing.mdo_type == child.mdo_type
+                    && existing.name.eq_ignore_ascii_case(&child.name)
+            }) {
+                base_child.apply_extension_overlay(child);
+            } else {
+                self.children.push(child.clone());
+            }
+        }
+
+        for enum_value in &overlay.enum_values {
+            self.enum_values
+                .retain(|existing| !existing.name.eq_ignore_ascii_case(&enum_value.name));
+            self.enum_values.push(enum_value.clone());
+        }
+
+        for predefined_item in &overlay.predefined_items {
+            self.predefined_items
+                .retain(|existing| !existing.name.eq_ignore_ascii_case(&predefined_item.name));
+            self.predefined_items.push(predefined_item.clone());
+        }
+
+        if !overlay.register_records().is_empty() {
+            self.set_register_records(overlay.register_records().to_vec());
+        }
     }
 
     pub fn uuid(&self) -> Option<&Uuid> {
@@ -829,6 +947,7 @@ impl std::fmt::Display for AttributeType {
                 }
             }
             Self::Platform(pvt) => write!(f, "{}", pvt.russian_name()),
+            Self::PlatformNamed(name) => write!(f, "{}", name),
             Self::Unknown => write!(f, "Неизвестно"),
         }
     }

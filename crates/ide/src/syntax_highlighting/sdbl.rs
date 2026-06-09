@@ -31,8 +31,7 @@ pub(super) fn highlight_sdbl_in_literal<DB: RootDatabase>(
 
     let ((_expr_id, sdbl_package), (_query_expr_id, query_info)) = sdbl_entry;
 
-    let input = ctx.db.file_text_input(ctx.file_id);
-    let bsl_source = input.text(ctx.db);
+    let bsl_source = ctx.db.file_text(ctx.file_id);
     let mapper = if let Some(ref line_starts) = ctx.line_index {
         ide_diagnostics::sdbl_utils::SdblPositionMapper::from_query_info(
             query_info,

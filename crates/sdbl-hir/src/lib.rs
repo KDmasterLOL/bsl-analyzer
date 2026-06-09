@@ -16,7 +16,7 @@ pub use hir::{
     OrderByHir, OrderByItem, ResolvedTable, SdblHir, SdblPackage, SdblQuery, SelectHir, TableRef,
     UnionHir, WhenClause,
 };
-pub use lower::{lower_sdbl_to_hir, SdblLowerResult};
+pub use lower::{lower_sdbl_to_hir, lower_sdbl_to_hir_with_resolver, SdblLowerResult};
 pub use position_detector::detect_sdbl_at_position;
 pub use scope::Scope;
 pub use source_map::{SdblSourceMap, TokenCategory, TokenInfo};

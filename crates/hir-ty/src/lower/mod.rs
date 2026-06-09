@@ -1,5 +1,4 @@
 pub(crate) mod builtin_names;
-pub(crate) mod metadata_resolver;
 pub mod type_string;
 
 use std::collections::HashSet;
@@ -74,8 +73,17 @@ impl<'a> TyLoweringContext<'a> {
             }
         }
 
+        // A bare metadata-kind name with no specific object (e.g.
+        // `РегистрНакопленияНаборЗаписей`, `СправочникСсылка`) names "any value of
+        // this kind" — we cannot model it precisely. Lower to `Any` (the top type)
+        // rather than `Unknown`: both are permissive in assignability, but the type
+        // kernel drops `Unknown` from a union (`T | Unknown == T`) while `Any`
+        // dominates it (`T | Any == Any`). A doc-comment that lists such a kind among
+        // a union of accepted types (e.g. `ЛюбаяСсылка, …НаборЗаписей, ТаблицаЗначений`)
+        // must stay permissive instead of silently narrowing to the modellable arms
+        // and then flagging a concrete record set as a type mismatch.
         if metadata_kind_from_prefix(raw).is_some() {
-            return db.unknown();
+            return db.any();
         }
 
         db.platform_object(raw.to_string())
@@ -112,7 +120,7 @@ impl<'a> TyLoweringContext<'a> {
             let mut chain_visited = HashSet::new();
             let result = resolve_defined_type_terminal(resolver, name, &mut chain_visited)
                 .map(|underlying| {
-                    let tref = TypeRef::from_attribute_type(underlying);
+                    let tref = TypeRef::from_attribute_type(&underlying);
                     self.lower_type_ref_id_inner(db, &tref, visited)
                 })
                 .unwrap_or_else(|| db.unknown());
@@ -327,11 +335,14 @@ mod tests {
     }
 
     #[test]
-    fn ty_lowering_bare_metadata_prefix_without_name_is_unknown() {
+    fn ty_lowering_bare_metadata_prefix_without_name_is_any() {
+        // A bare kind prefix with no object names "any value of this kind"; it lowers
+        // to `Any` (permissive top) so that, listed among a doc-comment union of
+        // accepted types, it dominates the union instead of being dropped as Unknown.
         let db = InMemoryDb::new();
-        assert_eq!(ctx().lower_bare_name_id(&db, &Name::new("СправочникСсылка")), db.unknown());
-        assert_eq!(ctx().lower_bare_name_id(&db, &Name::new("CatalogRef")), db.unknown());
-        assert_eq!(ctx().lower_bare_name_id(&db, &Name::new("documentobject")), db.unknown());
+        assert_eq!(ctx().lower_bare_name_id(&db, &Name::new("СправочникСсылка")), db.any());
+        assert_eq!(ctx().lower_bare_name_id(&db, &Name::new("CatalogRef")), db.any());
+        assert_eq!(ctx().lower_bare_name_id(&db, &Name::new("documentobject")), db.any());
     }
 
     #[test]
@@ -504,8 +515,8 @@ mod tests {
     }
 
     impl MetadataResolver for MockResolver {
-        fn resolve_defined_type(&self, name: &str) -> Option<&AttributeType> {
-            self.0.get(&name.to_lowercase())
+        fn resolve_defined_type(&self, name: &str) -> Option<AttributeType> {
+            self.0.get(&name.to_lowercase()).cloned()
         }
     }
 
@@ -683,7 +694,7 @@ mod tests {
             (TypeRef::Unknown, db.unknown()),
             (name("Число"), db.number(None, None)),
             (name("Документы"), db.manager_collection(MdoType::Document)),
-            (name("СправочникСсылка"), db.unknown()),
+            (name("СправочникСсылка"), db.any()),
             (name("Запрос"), db.platform_object("Запрос".to_string())),
             (
                 qual("СправочникСсылка", "Товары"),

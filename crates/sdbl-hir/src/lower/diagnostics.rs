@@ -2,7 +2,7 @@ use super::context::LoweringContext;
 use crate::diagnostics::SdblDiagnostic;
 use crate::hir::{ExprHir, JoinHir, SdblHir, TableRef};
 
-impl LoweringContext {
+impl LoweringContext<'_> {
     pub(super) fn check_joins_for_unprotected_fields(&mut self, hir: &SdblHir) {
         let protected_tables = self.find_tables_protected_by_where(hir);
 

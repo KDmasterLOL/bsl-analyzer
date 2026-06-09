@@ -6,7 +6,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.25"
+version = "0.2.26"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["BSL Analyzer Contributors"]
@@ -30,6 +30,7 @@ code-chunk = { path = "crates/code-chunk" }
 dataflow = { path = "crates/dataflow" }
 ide = { path = "crates/ide" }
 ide-db = { path = "crates/ide-db" }
+ide-host-core = { path = "crates/ide-host-core" }
 ide-diagnostics = { path = "crates/ide-diagnostics" }
 ide-assists = { path = "crates/ide-assists" }
 hir = { path = "crates/hir" }
@@ -54,8 +55,10 @@ bsl-search = { path = "crates/bsl-search" }
 naparnik = { path = "crates/naparnik" }
 symbol-info = { path = "crates/symbol-info" }
 
-salsa = { version = "0.26", features = ["rayon", "macros"] }
-salsa-macros = "0.26"
+# `salsa_unstable` (already a salsa default feature) gates `Database::memory_usage`,
+# used by `RootDatabaseImpl::memory_report` for per-ingredient memory diagnostics.
+salsa = { version = "0.27", features = ["rayon", "macros", "salsa_unstable"] }
+salsa-macros = "0.27"
 
 lsp-types = "0.95"
 lsp-server = "0.7"

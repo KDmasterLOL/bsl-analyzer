@@ -21,7 +21,7 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 use base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use bsl_search::SearchEngine;
 use ide::RootDatabaseImpl;
-use vfs::{file_set::FileSet, FileId, VfsPath};
+use vfs::FileId;
 use walkdir::WalkDir;
 
 use crate::cache::graph_db_path;
@@ -1122,17 +1122,7 @@ pub(crate) fn enumerate_bsl_files(workspace_root: &Path) -> Vec<(FileId, PathBuf
     entries
 }
 
-/// The whole-workspace source root: a file-id ↔ path map covering EVERY file, so
-/// cross-module resolution through the module index can find any target's
-/// [`FileId`]. Built once per build and shared (cheaply cloned — the map is
-/// `Arc`-backed) into every per-batch database.
-pub(crate) fn build_source_root(all_files: &[(FileId, PathBuf)]) -> SourceRoot {
-    let mut file_set = FileSet::new();
-    for (file_id, path) in all_files {
-        file_set.insert(*file_id, VfsPath::new(path.clone()));
-    }
-    SourceRoot::new_local(file_set)
-}
+pub(crate) use ide_host_core::build_source_root;
 
 /// Build a batch database that shares the whole-workspace `source_root` (so any
 /// target is addressable by path through the module index) but loads text only for
@@ -1165,6 +1155,35 @@ pub(crate) fn db_for_files(
             }
         }
     }
+    db.set_all_config_paths(config_paths.to_vec());
+    db
+}
+
+/// Like [`db_for_files`] but disk-backed: registers each file's content revision
+/// instead of pinning its text as a salsa input, then drops the text. The resident
+/// diagnostics database holds the WHOLE workspace, so the eager `set_file_text` path
+/// would pin every file's `Arc<str>` in the overlay map (outside the salsa LRU) and
+/// OOM on a large config. Here `file_text_query` re-reads each file from disk on
+/// demand under its `lru` cap (`base_db::queries::file_text_query`), verifying the
+/// bytes against the recorded revision — the same disk-backed contract the LSP server
+/// and the CLI `analyze` path use, so only the working set's text stays resident.
+///
+/// `file_source_root` is set for every file (not just a batch): `file_text_query`
+/// derives the on-disk path through it, so a lazily-read file must have it. An
+/// unreadable file falls back to an empty overlay so a later query yields `""`
+/// instead of panicking on the disk re-read.
+pub(crate) fn db_for_files_lazy(
+    source_root: &SourceRoot,
+    all_files: &[(FileId, PathBuf)],
+    config_paths: &[(Option<String>, PathBuf)],
+    config_cache: Option<&Arc<ide::GraphConfigCache>>,
+) -> RootDatabaseImpl {
+    let mut db = RootDatabaseImpl::default();
+    if let Some(cache) = config_cache {
+        db.set_graph_config_cache(Arc::clone(cache));
+    }
+    db.set_source_root(GRAPH_SOURCE_ROOT, source_root.clone());
+    ide_host_core::register_files_disk_backed(&mut db, GRAPH_SOURCE_ROOT, all_files);
     db.set_all_config_paths(config_paths.to_vec());
     db
 }

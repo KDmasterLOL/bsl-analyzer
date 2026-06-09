@@ -147,7 +147,10 @@ pub(crate) fn parse_type_xml(type_node: roxmltree::Node<'_, '_>) -> Result<Attri
 
     match all_types.len() {
         0 => {
-            tracing::warn!(
+            // A `<Type/>` with no resolvable entries is an ordinary, frequent shape in
+            // metadata XML (e.g. an attribute typed only by a type set we don't model),
+            // not an error — log at debug so it does not flood a whole-config scan.
+            tracing::debug!(
                 types = ?type_strs,
                 type_sets = ?type_set_strs,
                 "parse_type_xml: no types collected, returning Unknown"
@@ -227,12 +230,27 @@ fn parse_single_type(type_str: &str, qualifiers: &TypeQualifiers) -> Result<Attr
 
         _ => match parse_platform_value_type(type_str) {
             Some(pvt) => Ok(AttributeType::Platform(pvt)),
-            None => {
-                tracing::warn!(type_str = %type_str, "unknown type");
-                Ok(AttributeType::Unknown)
-            }
+            None => match resolve_platform_named(type_str) {
+                Some(resolved) => Ok(resolved),
+                None => {
+                    tracing::warn!(type_str = %type_str, "unknown type");
+                    Ok(AttributeType::Unknown)
+                }
+            },
         },
     }
+}
+
+/// Resolve a namespaced platform token (`<prefix>:<LocalName>`) against the
+/// platform catalogue by its local name. 1C emits the same logical type under
+/// version-namespaced prefixes (`d5p1:`/`d7p1:`/…), so matching whole tokens is
+/// fragile; the local name after the last `:` is the stable key, and the
+/// catalogue is indexed bilingually, so the English local name resolves to the
+/// canonical Russian name.
+fn resolve_platform_named(type_str: &str) -> Option<AttributeType> {
+    let (_prefix, local) = type_str.rsplit_once(':')?;
+    let ty = bsl_platform::PlatformDataInner::instance().get_type(local)?;
+    Some(AttributeType::PlatformNamed(ty.name.to_string()))
 }
 
 fn parse_platform_value_type(type_str: &str) -> Option<PlatformValueType> {
@@ -248,12 +266,36 @@ fn parse_platform_value_type(type_str: &str) -> Option<PlatformValueType> {
         "v8:FixedMap" => PlatformValueType::FixedMap,
         "v8:Type" => PlatformValueType::Type,
         "v8:Null" => PlatformValueType::Null,
+        "v8ui:FormattedString" => PlatformValueType::FormattedString,
+        "v8ui:Picture" => PlatformValueType::Picture,
+        "v8ui:Color" => PlatformValueType::Color,
+        "v8ui:Font" => PlatformValueType::Font,
+        "mxl:SpreadsheetDocument" => PlatformValueType::SpreadsheetDocument,
+        "fd:FormattedDocument" => PlatformValueType::FormattedDocument,
+        "d7p1:Chart" => PlatformValueType::Chart,
+        "d5p1:GanttChart" => PlatformValueType::GanttChart,
+        "dcsset:SettingsComposer" => PlatformValueType::SettingsComposer,
+        "dcsset:Filter" => PlatformValueType::DataCompositionFilter,
+        _ => return None,
+    };
+    Some(pvt)
+}
+
+fn parse_cfg_platform_type(type_str: &str) -> Option<PlatformValueType> {
+    let pvt = match type_str {
+        "cfg:DynamicList" => PlatformValueType::DynamicList,
+        "cfg:ConstantsSet" => PlatformValueType::ConstantsSet,
+        "cfg:ReportBuilder" => PlatformValueType::ReportBuilder,
         _ => return None,
     };
     Some(pvt)
 }
 
 fn parse_reference_type(type_str: &str) -> Result<AttributeType> {
+    if let Some(pvt) = parse_cfg_platform_type(type_str) {
+        return Ok(AttributeType::Platform(pvt));
+    }
+
     if let Some((_, mdo_type)) = OBJECT_TYPE_MAP.iter().find(|(k, _)| *k == type_str) {
         tracing::info!(type_str = %type_str, "Matched object type special case");
         return Ok(AttributeType::AnyObjectRef { mdo_type: *mdo_type });
@@ -270,6 +312,11 @@ fn parse_reference_type(type_str: &str) -> Result<AttributeType> {
 
     if let Some((_, mdo_type)) = REF_TYPE_MAP.iter().find(|(k, _)| *k == ref_type) {
         return Ok(AttributeType::Ref { mdo_type: *mdo_type, name });
+    }
+
+    if ref_type.ends_with("RecordManager") {
+        tracing::debug!(type_str = %type_str, "record-manager type not modelled yet; treated as Unknown");
+        return Ok(AttributeType::Unknown);
     }
 
     tracing::warn!(
@@ -307,6 +354,16 @@ mod tests {
             ("v8:FixedMap", PlatformValueType::FixedMap),
             ("v8:Type", PlatformValueType::Type),
             ("v8:Null", PlatformValueType::Null),
+            ("v8ui:FormattedString", PlatformValueType::FormattedString),
+            ("v8ui:Picture", PlatformValueType::Picture),
+            ("v8ui:Color", PlatformValueType::Color),
+            ("v8ui:Font", PlatformValueType::Font),
+            ("mxl:SpreadsheetDocument", PlatformValueType::SpreadsheetDocument),
+            ("fd:FormattedDocument", PlatformValueType::FormattedDocument),
+            ("d7p1:Chart", PlatformValueType::Chart),
+            ("d5p1:GanttChart", PlatformValueType::GanttChart),
+            ("dcsset:SettingsComposer", PlatformValueType::SettingsComposer),
+            ("dcsset:Filter", PlatformValueType::DataCompositionFilter),
         ] {
             assert_eq!(parse_platform_value_type(token), Some(expected), "token {token}");
             assert_eq!(
@@ -315,6 +372,71 @@ mod tests {
                 "single-type {token}",
             );
         }
+    }
+
+    #[test]
+    fn cfg_whole_token_platform_types_resolve() {
+        for (token, expected) in [
+            ("cfg:DynamicList", PlatformValueType::DynamicList),
+            ("cfg:ConstantsSet", PlatformValueType::ConstantsSet),
+            ("cfg:ReportBuilder", PlatformValueType::ReportBuilder),
+        ] {
+            assert_eq!(
+                parse_single_type(token, &qualifiers()).unwrap(),
+                AttributeType::Platform(expected),
+                "cfg platform token {token}",
+            );
+        }
+    }
+
+    #[test]
+    fn namespaced_platform_tokens_resolve_via_catalogue() {
+        for (token, expected_ru) in [
+            ("d5p1:TextDocument", "ТекстовыйДокумент"),
+            ("pdfdoc:PDFDocument", "ДокументPDF"),
+            ("ent:AccountingRecordType", "ВидДвиженияБухгалтерии"),
+            ("d5p1:GeographicalSchema", "ГеографическаяСхема"),
+        ] {
+            assert_eq!(
+                parse_single_type(token, &qualifiers()).unwrap(),
+                AttributeType::PlatformNamed(expected_ru.to_string()),
+                "token {token}",
+            );
+        }
+    }
+
+    #[test]
+    fn xdto_named_token_resolves_to_class_type() {
+        // `FlowchartContextType` is the XDTO type name of `ГрафическаяСхема`;
+        // the token must resolve to the class type via the catalogue's XDTO alias.
+        assert_eq!(
+            parse_single_type("d5p1:FlowchartContextType", &qualifiers()).unwrap(),
+            AttributeType::PlatformNamed("ГрафическаяСхема".to_string()),
+        );
+    }
+
+    #[test]
+    fn platform_token_resolution_is_namespace_prefix_agnostic() {
+        // 1C emits the same logical type under version-namespaced prefixes;
+        // both must resolve to the same Russian type name.
+        let d5 = parse_single_type("d5p1:Chart", &qualifiers()).unwrap();
+        assert_eq!(d5, AttributeType::PlatformNamed("Диаграмма".to_string()));
+    }
+
+    #[test]
+    fn unknown_namespaced_token_stays_unknown() {
+        assert_eq!(
+            parse_single_type("zzz:DefinitelyNotAType", &qualifiers()).unwrap(),
+            AttributeType::Unknown,
+        );
+    }
+
+    #[test]
+    fn record_manager_token_is_silently_unknown() {
+        assert_eq!(
+            parse_single_type("cfg:InformationRegisterRecordManager.Курсы", &qualifiers()).unwrap(),
+            AttributeType::Unknown,
+        );
     }
 
     #[test]
@@ -329,11 +451,21 @@ mod tests {
     }
 
     #[test]
-    fn fill_checking_and_unrelated_tokens_stay_unknown() {
+    fn fill_checking_is_not_a_value_type_but_resolves_via_catalogue() {
+        // Not one of the hand-modelled kernel value types...
         assert_eq!(parse_platform_value_type("v8:FillChecking"), None);
-        assert_eq!(parse_platform_value_type("v8:Nonsense"), None);
+        // ...but it is a real platform type, so the catalogue fallback resolves it.
         assert_eq!(
             parse_single_type("v8:FillChecking", &qualifiers()).unwrap(),
+            AttributeType::PlatformNamed("ПроверкаЗаполнения".to_string())
+        );
+    }
+
+    #[test]
+    fn truly_unknown_token_stays_unknown() {
+        assert_eq!(parse_platform_value_type("v8:Nonsense"), None);
+        assert_eq!(
+            parse_single_type("v8:Nonsense", &qualifiers()).unwrap(),
             AttributeType::Unknown
         );
     }

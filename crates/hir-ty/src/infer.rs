@@ -21,6 +21,122 @@ use crate::lower::TyLoweringContext;
 use crate::method_resolution;
 use crate::platform_manager_lookup::{resolve_platform_manager_method, PlatformMethodResolution};
 
+/// Heap-size estimators wired into salsa's `heap_size` hook (the `salsa_unstable`
+/// memory report). salsa's default reports only the fixed slot stack size — the
+/// `Arc` pointer — so the collections behind these memoised results are otherwise
+/// invisible. These return an approximate live-heap byte count: hashbrown table
+/// capacity is derived from length (load factor 7/8, rounded to a power of two),
+/// owned `String`/`Vec` payloads are summed, and small `Copy` ids are counted by
+/// `size_of`. Over-approximate by design; the goal is a per-ingredient memory map,
+/// not exact accounting.
+pub(crate) mod heap_estimate {
+    use super::*;
+    use std::mem::size_of;
+
+    /// Approximate live bytes of an `FxHashMap`/hashbrown table holding `len`
+    /// entries of `(K, V)`: one control byte plus the `(K, V)` slot per bucket,
+    /// with bucket count grown to the next power of two above `len / (7/8)`.
+    pub(super) fn map_table_bytes<K, V>(len: usize) -> usize {
+        if len == 0 {
+            return 0;
+        }
+        // `checked_*`/`saturating_*` guard the (theoretically) unbounded `len`:
+        // `next_power_of_two` panics in debug and wraps to 0 in release near
+        // `usize::MAX`. Real inference maps are body-arena-bounded, so this never
+        // triggers, but it keeps the estimator total.
+        let cap = (len * 8 / 7 + 1).checked_next_power_of_two().unwrap_or(len);
+        cap.saturating_mul(size_of::<K>() + size_of::<V>() + 1)
+    }
+
+    pub(super) fn vec_bytes<T>(len: usize) -> usize {
+        len * size_of::<T>()
+    }
+
+    /// Heap of the `expr`/`binding`-keyed maps plus their owned-string and
+    /// nested-vec payloads, shared by all three inference-result shapes.
+    fn body_maps_heap(
+        var_types: &FxHashMap<String, TypeId>,
+        implicit_locals: &FxHashMap<String, ImplicitLocalInfo>,
+        binding_types: &FxHashMap<BindingId, TypeId>,
+        expr_types: &FxHashMap<ExprId, TypeId>,
+        diagnostics_len: usize,
+        call_arg_bindings_len: usize,
+    ) -> usize {
+        let mut b = map_table_bytes::<ExprId, TypeId>(expr_types.len());
+        b += map_table_bytes::<BindingId, TypeId>(binding_types.len());
+        b += map_table_bytes::<String, TypeId>(var_types.len());
+        for k in var_types.keys() {
+            b += k.capacity();
+        }
+        b += map_table_bytes::<String, ImplicitLocalInfo>(implicit_locals.len());
+        for (k, info) in implicit_locals {
+            b += k.capacity() + vec_bytes::<ImplicitLocalAssignment>(info.assignments.len());
+        }
+        b += vec_bytes::<InferenceDiagnostic>(diagnostics_len);
+        b += vec_bytes::<CallArgBinding>(call_arg_bindings_len);
+        b
+    }
+
+    pub(crate) fn inference_result_heap(v: &Arc<InferenceResult>) -> usize {
+        let r = &**v;
+        let mut b = size_of::<InferenceResult>();
+        b +=
+            map_table_bytes::<DefWithBodyId, FxHashMap<ExprId, TypeId>>(r.expr_types_by_body.len());
+        for inner in r.expr_types_by_body.values() {
+            b += map_table_bytes::<ExprId, TypeId>(inner.len());
+        }
+        b += map_table_bytes::<DefWithBodyId, FxHashMap<BindingId, TypeId>>(
+            r.binding_types_by_body.len(),
+        );
+        for inner in r.binding_types_by_body.values() {
+            b += map_table_bytes::<BindingId, TypeId>(inner.len());
+        }
+        b += map_table_bytes::<String, TypeId>(r.var_types.len());
+        for k in r.var_types.keys() {
+            b += k.capacity();
+        }
+        b += map_table_bytes::<DefWithBodyId, FxHashMap<String, ImplicitLocalInfo>>(
+            r.implicit_locals_by_body.len(),
+        );
+        for inner in r.implicit_locals_by_body.values() {
+            b += map_table_bytes::<String, ImplicitLocalInfo>(inner.len());
+            for (k, info) in inner {
+                b += k.capacity() + vec_bytes::<ImplicitLocalAssignment>(info.assignments.len());
+            }
+        }
+        b += vec_bytes::<(DefWithBodyId, InferenceDiagnostic)>(r.diagnostics.len());
+        b += vec_bytes::<CallArgBinding>(r.call_arg_bindings.len());
+        b
+    }
+
+    pub(crate) fn body_inference_result_heap(v: &Arc<BodyInferenceResult>) -> usize {
+        let r = &**v;
+        size_of::<BodyInferenceResult>()
+            + body_maps_heap(
+                &r.var_types,
+                &r.implicit_locals,
+                &r.binding_types,
+                &r.expr_types,
+                r.diagnostics.len(),
+                r.call_arg_bindings.len(),
+            )
+            + vec_bytes::<ExprId>(r.return_expr_ids.len())
+    }
+
+    pub(crate) fn module_code_inference_result_heap(v: &Arc<ModuleCodeInferenceResult>) -> usize {
+        let r = &**v;
+        size_of::<ModuleCodeInferenceResult>()
+            + body_maps_heap(
+                &r.var_types,
+                &r.implicit_locals,
+                &r.binding_types,
+                &r.expr_types,
+                r.diagnostics.len(),
+                r.call_arg_bindings.len(),
+            )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct InferenceResult {
     pub expr_types_by_body: FxHashMap<DefWithBodyId, FxHashMap<ExprId, TypeId>>,
@@ -493,13 +609,19 @@ impl<'db> InferenceContext<'db> {
                     }
                     Expr::Field { base, field } => {
                         let base_ty = self.infer_expr(ExprId::from_idx(*base));
-                        let configs = self.db.configurations(self.file_id);
+                        let obj_resolver =
+                            crate::object_resolver::DbObjectResolver::new(self.db, self.file_id);
                         let resolver = self.get_resolver();
                         let info = crate::form_items::lookup_form_item_field(
                             self.db, &resolver, base_ty, field,
                         )
                         .or_else(|| {
-                            crate::field_lookup::lookup_field(self.db, &configs, base_ty, field)
+                            crate::field_lookup::lookup_field(
+                                self.db,
+                                &obj_resolver,
+                                base_ty,
+                                field,
+                            )
                         });
                         if let Some(info) = info {
                             if info.is_readonly {
@@ -698,19 +820,23 @@ impl<'db> InferenceContext<'db> {
             Expr::Field { base, field } => {
                 let base_ty = self.infer_expr(ExprId::from_idx(*base));
 
-                let configs = self.db.configurations(self.file_id);
                 let resolver = self.get_resolver();
+                let obj_resolver =
+                    crate::object_resolver::DbObjectResolver::new(self.db, self.file_id);
                 if let Some(info) =
                     crate::form_items::lookup_form_item_field(self.db, &resolver, base_ty, field)
                 {
                     info.ty
                 } else if let Some(info) =
-                    crate::field_lookup::lookup_field(self.db, &configs, base_ty, field)
+                    crate::field_lookup::lookup_field(self.db, &obj_resolver, base_ty, field)
                 {
                     info.ty
-                } else if let Some(info) =
-                    crate::manager_lookup::lookup_manager_field(self.db, &configs, base_ty, field)
-                {
+                } else if let Some(info) = crate::manager_lookup::lookup_manager_field(
+                    self.db,
+                    &obj_resolver,
+                    base_ty,
+                    field,
+                ) {
                     info.ty
                 } else {
                     let base_kind = self.db.lookup_type(base_ty);
@@ -945,6 +1071,15 @@ impl<'db> InferenceContext<'db> {
                 crate::platform_global_lookup::resolve_platform_global_property_type(self.db, name)
             {
                 trace!("resolved {} as platform global → {:?}", name, id);
+                return id;
+            }
+        }
+
+        if !user_shadows && !workspace_owns_common_module {
+            if let Some(id) =
+                crate::platform_global_lookup::resolve_platform_system_enum_type(self.db, name)
+            {
+                trace!("resolved {} as platform system enum → {:?}", name, id);
                 return id;
             }
         }
@@ -1774,35 +1909,21 @@ impl<'db> InferenceContext<'db> {
     }
 
     fn mdo_declared(&self, mdo_type: bsl_metadata::MdoType, mdo_name: &Name) -> bool {
-        let configs = self.db.configurations(self.file_id);
-        if configs.is_empty() {
-            return false;
-        }
         let needle = mdo_name.as_str();
-        configs.iter().any(|vc| {
-            vc.configuration.find_metadata_object(mdo_type, needle).is_some()
-                || vc.configuration.find_register_by_type_and_name(mdo_type, needle).is_some()
-        })
+        self.db.resolve_metadata_object(self.file_id, mdo_type, needle).is_some()
+            || self.db.resolve_register(self.file_id, mdo_type, needle).is_some()
     }
 
     fn resolve_constant_value_type(&self, mdo_name: &Name) -> Option<TypeId> {
-        let configs = self.db.configurations(self.file_id);
-        if configs.is_empty() {
-            return None;
-        }
-        let needle = mdo_name.as_str();
-        for vc in configs.iter().rev() {
-            let Some(mdo) =
-                vc.configuration.find_metadata_object(bsl_metadata::MdoType::Constant, needle)
-            else {
-                continue;
-            };
-            return mdo.constant_type.as_ref().map(|attr| {
-                let type_ref = hir_def::TypeRef::from_attribute_type(attr);
-                TyLoweringContext::new().lower_type_ref_id(self.db, &type_ref)
-            });
-        }
-        None
+        let mdo = self.db.resolve_metadata_object(
+            self.file_id,
+            bsl_metadata::MdoType::Constant,
+            mdo_name.as_str(),
+        )?;
+        mdo.constant_type.as_ref().map(|attr| {
+            let type_ref = hir_def::TypeRef::from_attribute_type(attr);
+            TyLoweringContext::new().lower_type_ref_id(self.db, &type_ref)
+        })
     }
 
     fn refine_constant_method(
@@ -1932,7 +2053,7 @@ fn mdo_kind_to_plural(kind: hir_def::ty::MetadataKind) -> Option<&'static str> {
     mdo_type_to_plural(mdo)
 }
 
-#[salsa::tracked(lru = 256)]
+#[salsa::tracked(lru = 256, heap_size = heap_estimate::inference_result_heap)]
 pub fn infer_query<'db>(
     db: &'db dyn HirDatabase,
     file_id_input: FileIdInput<'db>,
@@ -1990,7 +2111,7 @@ pub fn infer_query<'db>(
     Arc::new(result)
 }
 
-#[salsa::tracked(lru = 1024)]
+#[salsa::tracked(lru = 1024, heap_size = heap_estimate::module_code_inference_result_heap)]
 pub fn infer_module_code_query<'db>(
     db: &'db dyn HirDatabase,
     file_id_input: FileIdInput<'db>,

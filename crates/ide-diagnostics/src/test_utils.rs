@@ -441,8 +441,7 @@ impl ide_db::provider::AnalysisProvider for MetadataTestProvider {
 
     fn file_text(&self, file_id: vfs::FileId) -> String {
         use ide_db::base_db::SourceDatabase;
-        let input = self.db.file_text_input(file_id);
-        input.text(&self.db).to_string()
+        self.db.file_text(file_id).to_string()
     }
 
     fn item_tree(&self, file_id: vfs::FileId) -> std::sync::Arc<hir::ItemTree> {
@@ -515,8 +514,7 @@ impl ide_db::provider::AnalysisProvider for MetadataTestProvider {
 
     fn line_index(&self, file_id: vfs::FileId) -> std::sync::Arc<line_index::LineIndex> {
         use ide_db::base_db::SourceDatabase;
-        let input = self.db.file_text_input(file_id);
-        std::sync::Arc::new(line_index::LineIndex::new(&input.text(&self.db)))
+        std::sync::Arc::new(line_index::LineIndex::new(&self.db.file_text(file_id)))
     }
 
     fn file_path(&self, _file_id: vfs::FileId) -> Option<String> {
@@ -764,8 +762,11 @@ pub fn check_with_config_xml(
     }
 
     let config_path = project.root().to_string_lossy();
-    let config_path_input =
-        intern_configuration_path(&db, config_path.as_ref(), db.metadata_version());
+    let config_path_input = intern_configuration_path(
+        &db,
+        config_path.as_ref(),
+        db.config_root_revision_for_path(std::path::Path::new(config_path.as_ref())),
+    );
     let provider = ide_db::SalsaProvider::new(&db, Some(config_path_input));
     let config = crate::DiagnosticsConfig::all_enabled();
     let ctx = crate::DiagnosticsContext::new(&config, caller_file_id, &provider);
@@ -796,7 +797,16 @@ pub fn check_with_cfe(source: &str, fixture: test_fixture::CfeFixture) -> Vec<Di
 
     let mut file_set = FileSet::default();
     let caller_file_id = FileId(0);
-    let caller_path = fixture.root().join("CommonModules/Caller/Ext/Module.bsl");
+    // Common modules are extension-private — a base-config file cannot see an
+    // extension's common modules (the same scoping as metadata objects). So a fixture
+    // that exercises an extension's module must place the analyzed caller inside that
+    // extension, mirroring real usage. Fall back to the base root when there are none.
+    let caller_root = fixture
+        .extensions()
+        .first()
+        .map(|ext| ext.root().to_path_buf())
+        .unwrap_or_else(|| fixture.root().to_path_buf());
+    let caller_path = caller_root.join("CommonModules/Caller/Ext/Module.bsl");
     file_set.insert(caller_file_id, VfsPath::new(caller_path.to_string_lossy().into_owned()));
 
     let mut module_files = Vec::new();
@@ -820,8 +830,11 @@ pub fn check_with_cfe(source: &str, fixture: test_fixture::CfeFixture) -> Vec<Di
     }
 
     let config_path = fixture.root().to_string_lossy();
-    let config_path_input =
-        intern_configuration_path(&db, config_path.as_ref(), db.metadata_version());
+    let config_path_input = intern_configuration_path(
+        &db,
+        config_path.as_ref(),
+        db.config_root_revision_for_path(std::path::Path::new(config_path.as_ref())),
+    );
     let provider = ide_db::SalsaProvider::new(&db, Some(config_path_input));
     let config = crate::DiagnosticsConfig::all_enabled();
     let ctx = crate::DiagnosticsContext::new(&config, caller_file_id, &provider);

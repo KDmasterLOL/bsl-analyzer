@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use bsl_config::VisibleConfig;
 use bsl_metadata::{Form, FormElement};
 use bsl_types::builders::Builders;
 use bsl_types::facet::{
@@ -17,6 +16,7 @@ use crate::db::HirDatabase;
 use crate::field_enum::{FieldInfo, FieldOrigin};
 use crate::field_lookup;
 use crate::form_attr::lower_form_attribute_to_typeid;
+use crate::object_resolver::MetadataResolution;
 
 pub const FORM_ITEMS_TYPE_RU: &str = "ВсеЭлементыФормы";
 pub const FORM_ITEMS_TYPE_EN: &str = "FormAllItems";
@@ -44,11 +44,11 @@ pub(crate) fn lookup_form_item_field(
     let metadata = db.module_metadata(module_id);
     let form = metadata.form.as_ref()?;
     let element = form.find_element(field.as_str())?;
-    let configs = db.configurations(module_id.file_id);
+    let obj_resolver = crate::object_resolver::DbObjectResolver::new(db, module_id.file_id);
     Some(FieldInfo {
         name: Name::new(&element.name),
         name_en: None,
-        ty: lower_form_element(db, form, element, &configs),
+        ty: lower_form_element(db, form, element, &obj_resolver),
         value_ty: None,
         is_readonly: true,
         origin: FieldOrigin::PlatformProperty,
@@ -59,13 +59,13 @@ pub(crate) fn lower_form_element(
     db: &dyn TypeKernelDb,
     form: &Form,
     element: &FormElement,
-    configs: &[VisibleConfig],
+    resolver: &dyn MetadataResolution,
 ) -> TypeId {
     let binding = element
         .data_path
         .as_deref()
         .filter(|dp| !dp.starts_with('~'))
-        .and_then(|dp| resolve_data_path(db, dp, form, configs));
+        .and_then(|dp| resolve_data_path(db, dp, form, resolver));
     db.mk_form_control(element.kind, binding)
 }
 
@@ -132,17 +132,17 @@ fn resolve_data_path(
     db: &dyn TypeKernelDb,
     data_path: &str,
     form: &Form,
-    configs: &[VisibleConfig],
+    resolver: &dyn MetadataResolution,
 ) -> Option<FormBindingFacet> {
     let segments: Vec<Name> =
         data_path.split('.').filter(|s| !s.is_empty()).map(Name::new).collect();
     let (head, rest) = segments.split_first()?;
 
     let attr = form.find_attribute(head.as_str())?;
-    let mut current_id = lower_form_attribute_to_typeid(db, attr, configs);
+    let mut current_id = lower_form_attribute_to_typeid(db, attr, resolver);
 
     for seg in rest {
-        let info = field_lookup::lookup_field(db, configs, current_id, seg)?;
+        let info = field_lookup::lookup_field(db, resolver, current_id, seg)?;
         current_id = info.ty;
     }
 
@@ -174,6 +174,8 @@ fn resolve_data_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::object_resolver::ConfigsObjectResolver;
+    use bsl_config::VisibleConfig;
     use bsl_types::facet::TableSource;
     use bsl_types::testing::InMemoryDb;
 
@@ -183,7 +185,7 @@ mod tests {
         element: &FormElement,
         configs: &[VisibleConfig],
     ) -> TypeId {
-        super::lower_form_element(db, form, element, configs)
+        super::lower_form_element(db, form, element, &ConfigsObjectResolver(configs))
     }
 
     fn refine_form_control_property(
@@ -299,7 +301,7 @@ mod tests {
             None,
         );
         let db = InMemoryDb::new();
-        let id = super::lower_form_element(&db, &form, &element, &[]);
+        let id = super::lower_form_element(&db, &form, &element, &ConfigsObjectResolver(&[]));
         match db.lookup_type(id) {
             TypeKind::FormControl { kind: FormElementFacet::Field, binding: Some(b) } => {
                 assert_eq!(b.path.len(), 1);
@@ -344,7 +346,7 @@ mod tests {
             None,
         );
         let db = InMemoryDb::new();
-        let id = super::lower_form_element(&db, &form, &element, &configs);
+        let id = super::lower_form_element(&db, &form, &element, &ConfigsObjectResolver(&configs));
         match db.lookup_type(id) {
             TypeKind::FormControl { kind: FormElementFacet::Table, binding: Some(b) } => {
                 assert_eq!(b.path.len(), 2);
@@ -620,7 +622,7 @@ mod tests {
             None,
         );
         let db = InMemoryDb::new();
-        let id = super::lower_form_element(&db, &form, &element, &[]);
+        let id = super::lower_form_element(&db, &form, &element, &ConfigsObjectResolver(&[]));
         match db.lookup_type(id) {
             TypeKind::FormControl { kind: FormElementFacet::Field, binding: Some(b) } => {
                 assert_eq!(b.path.len(), 1);

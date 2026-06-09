@@ -37,6 +37,101 @@ pub trait AnalysisProvider {
             .unwrap_or_default()
     }
 
+    /// The common module whose `Ext/Module.bsl` is `file_id` (i.e. the file is the
+    /// module's own body), if any — answering "is this file a common module, and
+    /// which?". The default scans the file's visible configs by root-relative URI;
+    /// the salsa-backed provider overrides it with a per-common-module reverse index.
+    fn common_module_for_file(&self, file_id: FileId) -> Option<Arc<bsl_metadata::CommonModule>> {
+        use bsl_metadata::traits::Module;
+
+        let file_path = self.file_path(file_id)?;
+        let file_path_lower = file_path.to_lowercase();
+        for visible in self.visible_configurations(file_id) {
+            let found = visible.config.configuration.common_modules().iter().find(|m| {
+                m.uri().is_some_and(|uri| {
+                    if visible.root.as_os_str().is_empty() {
+                        uri.to_lowercase() == file_path_lower
+                    } else {
+                        visible.root.join(uri).to_string_lossy().to_lowercase() == file_path_lower
+                    }
+                })
+            });
+            if let Some(m) = found {
+                return Some(Arc::new(m.clone()));
+            }
+        }
+        None
+    }
+
+    /// The metadata object `(mdo_type, name)` visible to `file_id`, merged across
+    /// the file's visible configs (base + applicable extension) via
+    /// `apply_extension_overlay`. The default folds whatever `visible_configurations`
+    /// returns; the salsa-backed provider overrides it with the per-MDO accessor so
+    /// it depends on just that object instead of the whole configuration.
+    fn resolve_metadata_object(
+        &self,
+        file_id: FileId,
+        mdo_type: bsl_metadata::MdoType,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::MetadataObject>> {
+        let mut merged: Option<bsl_metadata::MetadataObject> = None;
+        for visible in self.visible_configurations(file_id) {
+            if let Some(found) = visible.config.configuration.find_metadata_object(mdo_type, name) {
+                match &mut merged {
+                    Some(base) => base.apply_extension_overlay(found),
+                    None => merged = Some(found.clone()),
+                }
+            }
+        }
+        merged.map(Arc::new)
+    }
+
+    /// The common module `name` visible to `file_id` — base config plus the file's
+    /// own extension (an extension's common module is visible only within that
+    /// extension). The default scans the file's visible configs; the salsa-backed
+    /// provider overrides it with the per-common-module accessor.
+    fn resolve_common_module(
+        &self,
+        file_id: FileId,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::CommonModule>> {
+        self.visible_configurations(file_id)
+            .into_iter()
+            .find_map(|visible| visible.config.configuration.find_common_module(name).cloned())
+            .map(Arc::new)
+    }
+
+    /// The `Ext/Module.bsl` body file id(s) of the common module `name` visible to
+    /// `file_id`, for diagnostics that validate the module body (handler method
+    /// existence/export, required parameters). The default resolves bodies by
+    /// root-relative URI across the file's visible configs; the salsa-backed
+    /// provider overrides it with the substrate, scoped base + the file's own
+    /// extension.
+    fn resolve_common_module_files(&self, file_id: FileId, name: &str) -> Vec<FileId> {
+        use bsl_metadata::traits::Module;
+
+        let mut out = Vec::new();
+        for visible in self.visible_configurations(file_id) {
+            let Some(uri) =
+                visible.config.configuration.find_common_module(name).and_then(|m| m.uri())
+            else {
+                continue;
+            };
+            let resolved = if visible.root.as_os_str().is_empty() {
+                self.resolve_module_file(uri)
+            } else {
+                let vfs_path = VfsPath::new(visible.root.join(uri).to_string_lossy().into_owned());
+                self.resolve_vfs_path(SourceRootId(0), &vfs_path)
+            };
+            if let Some(fid) = resolved {
+                if !out.contains(&fid) {
+                    out.push(fid);
+                }
+            }
+        }
+        out
+    }
+
     fn workspace_symbols(&self, source_root_id: SourceRootId) -> Arc<hir::WorkspaceSymbols>;
 
     fn module_index(&self, source_root_id: SourceRootId) -> Arc<ModuleIndex>;

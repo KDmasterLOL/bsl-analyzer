@@ -35,7 +35,7 @@ use ide::{Analysis, RootDatabaseImpl};
 use vfs::FileId;
 
 use crate::graph::{
-    build_source_root, classify_changes, db_for_files, enumerate_bsl_files, scan_file_stats,
+    build_source_root, classify_changes, db_for_files_lazy, enumerate_bsl_files, scan_file_stats,
     FileStat,
 };
 
@@ -350,6 +350,15 @@ impl DiagnosticsState {
         lock_recover(&self.inner).status.clone()
     }
 
+    /// Whether a resident build or reload is in flight. The broker backend ORs this
+    /// into its background-work signal so it does not idle-exit (and kill) a cold
+    /// diagnostics build during a client-disconnect window — the build runs on its own
+    /// thread and would otherwise be invisible to the idle timer, wasting its work.
+    pub(crate) fn is_busy(&self) -> bool {
+        let inner = lock_recover(&self.inner);
+        inner.status == DiagnosticsStatus::Loading || inner.reload == ReloadState::Running
+    }
+
     /// A lifecycle snapshot for the `status` action and the enriched `loading` envelope.
     pub(crate) fn status_report(&self) -> StatusReport {
         let inner = lock_recover(&self.inner);
@@ -509,14 +518,16 @@ impl DiagnosticsState {
         }
     }
 
-    /// Apply `set_file_text` for each modified `.bsl`, re-reading from disk. The entire
-    /// resolve→read→set→record sequence runs under ONE lock hold, so a concurrent full
-    /// rebuild (which also takes the lock) cannot swap the resident mid-apply and make
-    /// us write stale text. A modified path with no resident FileId is a structural
-    /// change: we bail to a full rebuild (after dropping the lock). Idempotent against a
-    /// racing apply, and bumps the generation only when text actually moved.
+    /// Re-key each modified `.bsl` to its on-disk content revision, re-reading from disk.
+    /// Disk-backed (not an overlay) so the edited file's text stays LRU-evictable like the
+    /// rest of the resident, mirroring the load path. The entire resolve→read→set→record
+    /// sequence runs under ONE lock hold, so a concurrent full rebuild (which also takes
+    /// the lock) cannot swap the resident mid-apply and make us record a stale revision. A
+    /// modified path with no resident FileId is a structural change: we bail to a full
+    /// rebuild (after dropping the lock). Idempotent against a racing apply, and bumps the
+    /// generation only when content actually moved.
     fn apply_incremental(&self, modified: &[String], scan: &OwnedScan) {
-        use base_db::SourceDatabase;
+        use ide_host_core::{set_file_text_source, FileTextSource};
 
         let new_fp: HashMap<&str, u64> =
             scan.stats.iter().map(|s| (s.path.as_str(), s.fingerprint())).collect();
@@ -542,8 +553,16 @@ impl DiagnosticsState {
                     needs_rebuild = true; // a modified path we never indexed → structural
                     break;
                 };
-                let text = std::fs::read_to_string(path).unwrap_or_default();
-                resident.db.set_file_text(file_id, &text);
+                match base_db::read_disk_text(Path::new(path)) {
+                    Ok(text) => {
+                        set_file_text_source(&mut resident.db, file_id, FileTextSource::Disk(&text))
+                    }
+                    // Unreadable now: an empty overlay so a later query yields `""`
+                    // instead of panicking on the disk re-read, matching the load path.
+                    Err(_) => {
+                        set_file_text_source(&mut resident.db, file_id, FileTextSource::Tombstone)
+                    }
+                }
                 stats.insert(path.clone(), fp);
                 applied += 1;
             }
@@ -677,9 +696,11 @@ impl DiagnosticsState {
             project.config.output.resolve_locale().unwrap_or_default(),
         );
         let source_root = build_source_root(&files);
-        // `all_files` is passed as the batch, so every text is loaded resident — this is
-        // the LSP model, not the graph's per-batch fold.
-        let db = db_for_files(&source_root, &files, &config_paths, None);
+        // Disk-backed: register each file's content revision and drop its text, so the
+        // whole-workspace resident is not pinned as salsa inputs (which OOMs on a large
+        // config). `file_text_query` re-reads on demand under its LRU cap — the same
+        // model the LSP server and CLI `analyze` use.
+        let db = db_for_files_lazy(&source_root, &files, &config_paths, None);
 
         let mut by_path = HashMap::with_capacity(files.len());
         for (file_id, path) in &files {
@@ -899,6 +920,39 @@ mod tests {
         }
     }
 
+    /// The resident is disk-backed: a workspace file is registered by content revision,
+    /// not pinned as a `FileTextInput` overlay, so `file_text_query` re-reads it from disk
+    /// under the LRU cap. This is what keeps a whole-workspace resident from OOMing. The
+    /// file's text must still be queryable (diagnostics ran above), it just must not be
+    /// held resident as a salsa input.
+    #[test]
+    fn resident_text_is_disk_backed_not_pinned() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let state = DiagnosticsState::for_workspace(root.to_path_buf());
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let path = module_path(root, "Сервер");
+        let out = state.read(|resident, _gen| {
+            let file_id = resident.file_id_for(&path).expect("path resolves to a resident FileId");
+            // No overlay pinned: the text is sourced from disk on demand.
+            let pinned = resident.db.try_file_text(file_id).is_some();
+            // ...yet it is still queryable (read through file_text_query).
+            let len = resident.analysis().file_text(file_id).len();
+            (pinned, len)
+        });
+        match out {
+            ResidentOutcome::Ready((pinned, len), _) => {
+                assert!(!pinned, "workspace file must be disk-backed, not pinned as an overlay");
+                assert!(len > 0, "disk-backed text must still be readable on demand");
+            }
+            _ => panic!("expected Ready outcome"),
+        }
+    }
+
     /// The resident loads the project's `bsl-analyzer.toml` and exposes it as the
     /// effective config, so `file`/`workspace` honour the same disabled rules and tuned
     /// thresholds as LSP and CLI — not analyzer defaults.
@@ -975,6 +1029,28 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(reloaded, "config edit reloads the resident with the updated diagnostics config");
+    }
+
+    /// `is_busy` is true while a build is `Loading` or a reload is `Running`, and false
+    /// otherwise — the signal the broker ORs in so it keeps the backend alive through a
+    /// cold diagnostics build but lets it idle-exit once the resident is settled.
+    #[test]
+    fn is_busy_reflects_loading_and_reload() {
+        let state = DiagnosticsState::for_workspace(std::env::temp_dir());
+        assert!(!state.is_busy(), "idle is not busy");
+
+        lock_recover(&state.inner).status = DiagnosticsStatus::Loading;
+        assert!(state.is_busy(), "loading is busy");
+
+        {
+            let mut inner = lock_recover(&state.inner);
+            inner.status = DiagnosticsStatus::Ready { files: 0 };
+            inner.reload = ReloadState::Running;
+        }
+        assert!(state.is_busy(), "a running reload is busy even when ready");
+
+        lock_recover(&state.inner).reload = ReloadState::Idle;
+        assert!(!state.is_busy(), "ready with no reload is not busy");
     }
 
     /// A disabled handle never loads and reads degrade to `Disabled`.

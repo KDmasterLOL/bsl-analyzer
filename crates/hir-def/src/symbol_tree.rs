@@ -399,7 +399,10 @@ impl From<&Param> for ParamSymbol {
     }
 }
 
-#[salsa::tracked(lru = 512)]
+// Condensed per-module symbol list (no green-tree pin): on the cross-module call
+// resolution path. High cap keeps it across chunk-boundary LRU trims so a later
+// chunk resolving a call into this module doesn't re-derive it (re-parse + lower).
+#[salsa::tracked(lru = 32768)]
 pub fn symbol_tree_query<'db>(
     db: &'db dyn crate::DefDatabase,
     file_id_input: base_db::FileIdInput<'db>,
@@ -408,8 +411,7 @@ pub fn symbol_tree_query<'db>(
     let file_id = file_id_input.file_id(db);
     let item_tree = db.item_tree(file_id);
     let parse = db.parse(file_id);
-    let file_text = db.file_text_input(file_id);
-    let source_text = file_text.text(db);
+    let source_text = db.file_text(file_id);
     let module_id = crate::ModuleId::new(file_id);
     std::sync::Arc::new(SymbolTree::from_item_tree(&item_tree, module_id, &parse, &source_text))
 }

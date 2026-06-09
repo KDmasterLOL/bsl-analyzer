@@ -314,7 +314,10 @@ fn check_module_level_code(
     let liveness_result = match ctx.module_level_liveness_analysis() {
         Some(result) => result,
         None => {
-            tracing::warn!("Liveness analysis failed for module-level code: {:?}", ctx.file_id);
+            tracing::debug!(
+                file_id = ?ctx.file_id,
+                "no module-level liveness result; skipping module-level unused-variable check"
+            );
             return diagnostics;
         }
     };

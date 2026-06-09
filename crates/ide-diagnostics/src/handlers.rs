@@ -150,6 +150,7 @@ pub mod type_mismatch;
 pub mod typo;
 pub mod unary_plus_in_concatenation;
 pub mod union_all;
+pub mod unknown_field_in_query;
 pub mod unknown_preprocessor_symbol;
 pub mod unreachable_code;
 pub mod unresolved_field;
@@ -393,6 +394,7 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::QueryNestedFieldsByDot => Some(&query_nested_fields_by_dot::METADATA),
         DiagnosticCode::QueryParseError => Some(&query_parse_error::METADATA),
         DiagnosticCode::QueryToMissingMetadata => Some(&query_to_missing_metadata::METADATA),
+        DiagnosticCode::UnknownFieldInQuery => Some(&unknown_field_in_query::METADATA),
         DiagnosticCode::RefOveruse => Some(&ref_overuse::METADATA),
         DiagnosticCode::SelectTopWithoutOrderBy => Some(&select_top_without_order_by::METADATA),
         DiagnosticCode::UnionAll => Some(&union_all::METADATA),

@@ -213,12 +213,13 @@ impl McpServer {
         self.state.shutdown();
     }
 
-    /// Whether a long-running background index/embedding pass is still in flight. The
-    /// broker backend polls this to avoid idle-exiting (and killing the pass) while it
-    /// works, so an expensive embedding run finishes instead of restarting on every cold
-    /// start. See [`SharedState::background_indexing_active`].
+    /// Whether long-running background work is still in flight — a search/embedding
+    /// pass OR a diagnostics resident build/reload. The broker backend polls this to
+    /// avoid idle-exiting (and killing the work) while it runs, so an expensive
+    /// embedding run or a cold diagnostics build finishes instead of restarting on the
+    /// next request. See [`SharedState::background_indexing_active`].
     pub fn background_work_active(&self) -> bool {
-        self.state.background_indexing_active()
+        self.state.background_indexing_active() || self.state.diagnostics().is_busy()
     }
 
     #[tool(name = "metadata", annotations(read_only_hint = true))]

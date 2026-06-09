@@ -36,55 +36,25 @@ impl<'a> DiagnosticsContext<'a> {
         self.provider.visible_configurations(self.file_id)
     }
 
-    pub fn find_common_module_files_anywhere(&self, name: &str) -> Vec<vfs::FileId> {
-        use bsl_metadata::traits::Module;
-
-        let mut out = Vec::new();
-        for visible in self.visible_configurations() {
-            let Some(common_module) = visible.config.configuration.find_common_module(name) else {
-                continue;
-            };
-            let Some(uri) = common_module.uri() else { continue };
-
-            let resolved = if visible.root.as_os_str().is_empty() {
-                self.resolve_module_file(uri)
-            } else {
-                let full_path = visible.root.join(uri);
-                let vfs_path = vfs::VfsPath::new(full_path.to_string_lossy().into_owned());
-                self.resolve_vfs_path(base_db::SourceRootId(0), &vfs_path)
-            };
-
-            if let Some(file_id) = resolved {
-                out.push(file_id);
-            } else {
-                tracing::debug!(
-                    module = %name,
-                    ext = ?visible.config.name,
-                    root = %visible.root.display(),
-                    "CommonModule file not found in VFS",
-                );
-            }
-        }
-        out
+    /// The `Ext/Module.bsl` body file id(s) of the common module `name` visible to
+    /// this file — base + its own extension. For diagnostics that read the module
+    /// body (handler method existence/export, required parameters). Scoped
+    /// extension-private through the per-common-module substrate.
+    pub fn common_module_body_files(&self, name: &str) -> Vec<vfs::FileId> {
+        self.provider.resolve_common_module_files(self.file_id, name)
     }
 
-    pub fn find_common_module_anywhere(
-        &self,
-        name: &str,
-    ) -> Option<(ide_db::provider::VisibleConfigWithRoot, bsl_metadata::CommonModule)> {
-        for visible in self.visible_configurations() {
-            if let Some(common_module) = visible.config.configuration.find_common_module(name) {
-                let module = common_module.clone();
-                return Some((visible, module));
-            }
-        }
-        None
+    /// The common module `name` visible to this file (base + its own extension),
+    /// at per-common-module Salsa granularity. Replaces the former all-configs
+    /// `find_common_module_anywhere`/`is_common_module_anywhere` scans, which were
+    /// over-permissive (a sibling extension's module was visible) and depended on
+    /// the whole configuration.
+    pub fn resolve_common_module(&self, name: &str) -> Option<Arc<bsl_metadata::CommonModule>> {
+        self.provider.resolve_common_module(self.file_id, name)
     }
 
     pub fn is_common_module_anywhere(&self, name: &str) -> bool {
-        self.visible_configurations()
-            .iter()
-            .any(|visible| visible.config.configuration.find_common_module(name).is_some())
+        self.resolve_common_module(name).is_some()
     }
 
     pub fn assignment_target_kind(&self, name: &str) -> hir::AssignmentResolution {
@@ -93,6 +63,23 @@ impl<'a> DiagnosticsContext<'a> {
 
     pub fn file_path(&self) -> Option<String> {
         self.provider.file_path(self.file_id)
+    }
+
+    /// The common module this file is the body of (its `Ext/Module.bsl`), if any.
+    /// Routes through the per-common-module reverse index when the substrate is
+    /// populated, so it depends on just that module rather than the whole config.
+    pub fn common_module_for_file(&self) -> Option<Arc<bsl_metadata::CommonModule>> {
+        self.provider.common_module_for_file(self.file_id)
+    }
+
+    /// The metadata object `(mdo_type, name)` visible to this file, resolved
+    /// per-MDO (base + the file's own extension) so it depends on just that object.
+    pub fn resolve_metadata_object(
+        &self,
+        mdo_type: bsl_metadata::MdoType,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::MetadataObject>> {
+        self.provider.resolve_metadata_object(self.file_id, mdo_type, name)
     }
 
     fn query<T>(&self, f: impl FnOnce(&dyn ide_db::AnalysisProvider) -> T) -> T {

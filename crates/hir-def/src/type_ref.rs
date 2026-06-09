@@ -93,6 +93,9 @@ impl TypeRef {
                 TypeRef::Union(members)
             }
             AttributeType::Platform(pvt) => platform_value_type_to_ref(*pvt),
+            AttributeType::PlatformNamed(name) => {
+                TypeRef::Name(QualifiedName::from_segments([Name::new(name)]))
+            }
             AttributeType::Unknown => TypeRef::Unknown,
         }
     }
@@ -110,7 +113,20 @@ fn platform_value_type_to_ref(pvt: PlatformValueType) -> TypeRef {
         | PlatformValueType::TypeDescription
         | PlatformValueType::FixedStructure
         | PlatformValueType::FixedArray
-        | PlatformValueType::FixedMap => {
+        | PlatformValueType::FixedMap
+        | PlatformValueType::FormattedString
+        | PlatformValueType::SpreadsheetDocument
+        | PlatformValueType::FormattedDocument
+        | PlatformValueType::Picture
+        | PlatformValueType::Color
+        | PlatformValueType::Font
+        | PlatformValueType::Chart
+        | PlatformValueType::GanttChart
+        | PlatformValueType::SettingsComposer
+        | PlatformValueType::DataCompositionFilter
+        | PlatformValueType::DynamicList
+        | PlatformValueType::ConstantsSet
+        | PlatformValueType::ReportBuilder => {
             TypeRef::Name(QualifiedName::from_segments([Name::new(pvt.russian_name())]))
         }
     }
@@ -314,6 +330,12 @@ mod tests {
             (PlatformValueType::FixedArray, "ФиксированныйМассив"),
             (PlatformValueType::FixedMap, "ФиксированноеСоответствие"),
             (PlatformValueType::TypeDescription, "ОписаниеТипов"),
+            (PlatformValueType::FormattedString, "ФорматированнаяСтрока"),
+            (PlatformValueType::SpreadsheetDocument, "ТабличныйДокумент"),
+            (PlatformValueType::Picture, "Картинка"),
+            (PlatformValueType::Color, "Цвет"),
+            (PlatformValueType::DynamicList, "ДинамическийСписок"),
+            (PlatformValueType::ConstantsSet, "КонстантыНабор"),
         ] {
             match TypeRef::from_attribute_type(&AttributeType::Platform(pvt)) {
                 TypeRef::Name(qname) => {

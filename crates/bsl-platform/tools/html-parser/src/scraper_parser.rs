@@ -34,6 +34,34 @@ pub fn extract_version(html_content: &str) -> Option<String> {
     None
 }
 
+/// Extract the XDTO type name a type page declares (e.g. `ГрафическаяСхема`
+/// carries `Имя типа XDTO: FlowchartContextType`). Configuration XML serializes
+/// some attribute types by this XDTO name rather than the class name, so it is
+/// needed to resolve such tokens back to the platform type.
+pub fn extract_xdto_name(html_content: &str) -> Option<String> {
+    const MARKER: &str = "Имя типа XDTO: ";
+    let html = Html::parse_fragment(html_content);
+
+    for text_node in html.root_element().descendants() {
+        if let Some(text) = text_node.value().as_text() {
+            if let Some(pos) = text.text.find(MARKER) {
+                // The marker is followed by `<Name>.` (a sentence period), so the
+                // name runs up to the first non-identifier char. `.` must NOT be
+                // accepted here or the trailing period would be captured; every
+                // real 1C XDTO name is a plain alnum/underscore identifier.
+                let name: String = text.text[pos + MARKER.len()..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .collect();
+                if !name.is_empty() {
+                    return Some(name);
+                }
+            }
+        }
+    }
+    None
+}
+
 pub fn extract_context(html_content: &str) -> Option<ContextAvailability> {
     let html = Html::parse_fragment(html_content);
     let chapter_sel = Selector::parse(CHAPTER_SELECTOR).unwrap();
@@ -343,7 +371,11 @@ fn extract_type_from_text(text: &str) -> Option<String> {
 /// Crucially this **still honours real terminators** when present —
 /// only the truly-no-terminator branch falls back to a 200-char cap.
 /// This protects against the `Тип: . <br>…` shape that some platform
-/// HBK pages use to say "Тип: ")?;
+/// HBK pages use to say "no specific parameter type": the literal
+/// empty-type-with-`.` must surface as `None`, not as a 200-char slice
+/// of the description that happens to live behind the `<br>`.
+fn extract_type_from_text_unterminated(text: &str) -> Option<String> {
+    let pos = text.find("Тип: ")?;
     let after = &text[pos + "Тип: ".len()..];
     let end =
         after.find('.').or_else(|| after.find('\n')).or_else(|| after.find("<br")).unwrap_or_else(
@@ -358,7 +390,20 @@ fn extract_type_from_text(text: &str) -> Option<String> {
 ///
 /// Comma normalisation is needed because the sibling walk in
 /// [`extract_param_type`] pushes a trailing `' '` after every element's
-/// text content, which combined with HTML's `", "))
+/// text content, which combined with HTML's whitespace can leave empty
+/// segments between commas that must be dropped.
+fn finalize_type_substring(raw: &str) -> Option<String> {
+    let cleaned = strip_html_tags(raw);
+    let trimmed = cleaned.trim().trim_end_matches('.').trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let normalised: Vec<&str> =
+        trimmed.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+    if normalised.is_empty() {
+        None
+    } else {
+        Some(normalised.join(", "))
     }
 }
 
@@ -1402,7 +1447,10 @@ pub struct KeywordDocumentation {
 
 /// Extracts keyword name from H1 title.
 ///
-/// Format: "h1.V8SH_pagetitle").ok()?;
+/// Format: "Для (For)" or "Процедура (Procedure)"; returns (russian, english).
+pub fn extract_keyword_name(html_content: &str) -> Option<(String, String)> {
+    let html = Html::parse_fragment(html_content);
+    let h1_selector = Selector::parse("h1.V8SH_pagetitle").ok()?;
 
     for h1 in html.select(&h1_selector) {
         let text = h1.text().collect::<String>();

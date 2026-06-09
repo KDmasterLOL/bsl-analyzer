@@ -112,8 +112,7 @@ pub fn method_docs_query(db: &dyn DefDatabase, method: MethodId) -> Option<Arc<M
         ModItem::Variable(_) => return None,
     };
 
-    let file_text = db.file_text_input(method.module.file_id);
-    let source_text = file_text.text(db);
+    let source_text = db.file_text(method.module.file_id);
     let offset: usize = source_range.start().into();
     let comments = extract_leading_comments_at_offset(offset, &source_text)?;
 

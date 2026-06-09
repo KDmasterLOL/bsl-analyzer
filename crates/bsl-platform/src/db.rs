@@ -14,8 +14,14 @@ pub const GLOBAL_CONTEXT_OWNER: &str = "Global context";
 pub struct PlatformDataInner {
     types: Vec<PlatformType>,
     types_by_name: FxHashMap<SmolStr, usize>,
+    /// Case-folded English name per type, parallel to `types`, so resolving a
+    /// type's canonical key costs no per-call `to_lowercase`.
+    type_en_folded: Vec<SmolStr>,
     methods: Vec<PlatformMethod>,
     methods_by_name: FxHashMap<(SmolStr, SmolStr), usize>,
+    /// Folded English type name → indices of that type's methods. Replaces the
+    /// O(all-methods) per-call `to_lowercase` scan in [`get_type_methods`].
+    methods_by_type: FxHashMap<SmolStr, Vec<usize>>,
     global_functions: Vec<GlobalFunction>,
     global_functions_by_name: FxHashMap<SmolStr, usize>,
     method_docs_by_id: FxHashMap<u32, usize>,
@@ -25,6 +31,9 @@ pub struct PlatformDataInner {
     constructor_docs_by_id: FxHashMap<u32, usize>,
     properties: Vec<PlatformProperty>,
     properties_by_name: FxHashMap<(SmolStr, SmolStr), usize>,
+    /// Folded English type name → indices of that type's properties. Replaces the
+    /// O(all-properties) per-call `to_lowercase` scan in [`get_type_properties`].
+    properties_by_type: FxHashMap<SmolStr, Vec<usize>>,
     property_docs_by_id: FxHashMap<u32, usize>,
     global_properties_by_name: FxHashMap<SmolStr, usize>,
 }
@@ -40,17 +49,38 @@ impl PlatformDataInner {
 
         let mut types_by_name = FxHashMap::default();
 
+        // Several types can declare the same XDTO name (e.g. `Field`, `Parameter`
+        // across data-composition types); such an alias is ambiguous and must not
+        // be indexed, or it would resolve to an arbitrary one of them.
+        let mut xdto_counts: FxHashMap<SmolStr, u32> = FxHashMap::default();
+        for ty in &types {
+            if let Some(xdto) = &ty.xdto_name {
+                *xdto_counts.entry(xdto.to_lowercase().into()).or_insert(0) += 1;
+            }
+        }
+
+        let mut type_en_folded: Vec<SmolStr> = Vec::with_capacity(types.len());
         for (idx, ty) in types.iter().enumerate() {
             let ru_key: SmolStr = ty.name.to_lowercase().into();
             let en_key: SmolStr = ty.english_name.to_lowercase().into();
+            type_en_folded.push(en_key.clone());
             types_by_name.insert(ru_key, idx);
             types_by_name.insert(en_key, idx);
+            // The XDTO name is an additional, non-overriding alias: index it only
+            // when unambiguous, and never let it shadow a type's own key.
+            if let Some(xdto) = &ty.xdto_name {
+                let key: SmolStr = xdto.to_lowercase().into();
+                if xdto_counts.get(&key) == Some(&1) {
+                    types_by_name.entry(key).or_insert(idx);
+                }
+            }
         }
 
         let methods: Vec<PlatformMethod> =
             crate::generated::PLATFORM_METHODS.iter().map(PlatformMethod::from).collect();
 
         let mut methods_by_name = FxHashMap::default();
+        let mut methods_by_type: FxHashMap<SmolStr, Vec<usize>> = FxHashMap::default();
 
         let mut type_en_to_ru: FxHashMap<SmolStr, SmolStr> = FxHashMap::default();
         for ty in &types {
@@ -64,6 +94,7 @@ impl PlatformDataInner {
             let ru_method_key: SmolStr = method.name.to_lowercase().into();
             let en_method_key: SmolStr = method.english_name.to_lowercase().into();
 
+            methods_by_type.entry(en_type_key.clone()).or_default().push(idx);
             methods_by_name.insert((en_type_key.clone(), ru_method_key.clone()), idx);
             methods_by_name.insert((en_type_key.clone(), en_method_key.clone()), idx);
 
@@ -119,11 +150,13 @@ impl PlatformDataInner {
             crate::generated::PLATFORM_PROPERTIES.iter().map(PlatformProperty::from).collect();
 
         let mut properties_by_name = FxHashMap::default();
+        let mut properties_by_type: FxHashMap<SmolStr, Vec<usize>> = FxHashMap::default();
         for (idx, prop) in properties.iter().enumerate() {
             let en_type_key: SmolStr = prop.type_name.to_lowercase().into();
             let ru_prop_key: SmolStr = prop.name.to_lowercase().into();
             let en_prop_key: SmolStr = prop.english_name.to_lowercase().into();
 
+            properties_by_type.entry(en_type_key.clone()).or_default().push(idx);
             properties_by_name.insert((en_type_key.clone(), ru_prop_key.clone()), idx);
             properties_by_name.insert((en_type_key.clone(), en_prop_key.clone()), idx);
 
@@ -152,8 +185,10 @@ impl PlatformDataInner {
         Self {
             types,
             types_by_name,
+            type_en_folded,
             methods,
             methods_by_name,
+            methods_by_type,
             global_functions,
             global_functions_by_name,
             method_docs_by_id,
@@ -163,6 +198,7 @@ impl PlatformDataInner {
             constructor_docs_by_id,
             properties,
             properties_by_name,
+            properties_by_type,
             property_docs_by_id,
             global_properties_by_name,
         }
@@ -191,12 +227,14 @@ impl PlatformDataInner {
 
     pub fn get_type_methods(&self, type_name: &str) -> Vec<&PlatformMethod> {
         let type_key: SmolStr = type_name.to_lowercase().into();
-        let en_type_key = if let Some(idx) = self.types_by_name.get(&type_key) {
-            self.types[*idx].english_name.to_lowercase().into()
-        } else {
-            type_key
+        let en_type_key: SmolStr = match self.types_by_name.get(&type_key) {
+            Some(&idx) => self.type_en_folded[idx].clone(),
+            None => type_key,
         };
-        self.methods.iter().filter(|m| m.type_name.to_lowercase() == en_type_key.as_str()).collect()
+        match self.methods_by_type.get(&en_type_key) {
+            Some(idxs) => idxs.iter().map(|&i| &self.methods[i]).collect(),
+            None => Vec::new(),
+        }
     }
 
     pub fn get_manager_methods(&self, manager_prefix: &str) -> Vec<&PlatformMethod> {
@@ -253,15 +291,14 @@ impl PlatformDataInner {
 
     pub fn get_type_properties(&self, type_name: &str) -> Vec<&PlatformProperty> {
         let type_key: SmolStr = type_name.to_lowercase().into();
-        let en_type_key = if let Some(idx) = self.types_by_name.get(&type_key) {
-            self.types[*idx].english_name.to_lowercase().into()
-        } else {
-            type_key
+        let en_type_key: SmolStr = match self.types_by_name.get(&type_key) {
+            Some(&idx) => self.type_en_folded[idx].clone(),
+            None => type_key,
         };
-        self.properties
-            .iter()
-            .filter(|p| p.type_name.to_lowercase() == en_type_key.as_str())
-            .collect()
+        match self.properties_by_type.get(&en_type_key) {
+            Some(idxs) => idxs.iter().map(|&i| &self.properties[i]).collect(),
+            None => Vec::new(),
+        }
     }
 
     pub fn get_manager_properties(&self, manager_prefix: &str) -> Vec<&PlatformProperty> {
@@ -570,6 +607,34 @@ mod tests {
         assert!(data.get_type(name).is_some());
         assert!(data.get_type(&name.to_lowercase()).is_some());
         assert!(data.get_type(&name.to_uppercase()).is_some());
+    }
+
+    #[test]
+    fn test_get_type_by_unique_xdto_name() {
+        let data = PlatformDataInner::instance();
+        if data.all_types().is_empty() {
+            return;
+        }
+        // `FlowchartContextType` is the unique XDTO name of `ГрафическаяСхема`.
+        let via_xdto = data.get_type("FlowchartContextType");
+        let via_class = data.get_type("GraphicalSchema");
+        assert!(via_xdto.is_some(), "unique XDTO name must resolve");
+        assert_eq!(
+            via_xdto.map(|t| t.english_name.as_str()),
+            via_class.map(|t| t.english_name.as_str()),
+            "XDTO alias must resolve to the same type as the class name"
+        );
+    }
+
+    #[test]
+    fn test_ambiguous_xdto_name_is_not_indexed() {
+        let data = PlatformDataInner::instance();
+        if data.all_types().is_empty() {
+            return;
+        }
+        // `ParameterValue` is the XDTO name of several data-composition types and
+        // is not itself a class name, so it must not resolve to an arbitrary one.
+        assert!(data.get_type("ParameterValue").is_none());
     }
 
     #[test]

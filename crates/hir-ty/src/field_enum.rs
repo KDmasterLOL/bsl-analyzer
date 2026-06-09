@@ -1,5 +1,6 @@
-use bsl_config::VisibleConfig;
-use bsl_metadata::{AttributeType, MdoType, MetadataObject, RegisterPeriodicity};
+use std::sync::Arc;
+
+use bsl_metadata::{AttributeType, MdoType, MetadataObject, MetadataResolver, RegisterPeriodicity};
 use bsl_platform::{
     standard_attributes_for, MdoTemplateKind, ObjectView, PlatformData, StandardKind,
 };
@@ -12,8 +13,8 @@ use hir_def::ty::MetadataKind;
 use hir_def::type_ref::TypeRef;
 use hir_def::Name;
 
-use crate::lower::metadata_resolver::ConfigsResolver;
 use crate::lower::TyLoweringContext;
+use crate::object_resolver::{MetadataResolution, ObjectResolver};
 use crate::this_object::FixedConfigCtx;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,15 +43,15 @@ pub struct FieldInfo {
 
 pub fn enumerate_fields(
     db: &dyn TypeKernelDb,
-    configs: &[VisibleConfig],
+    resolver: &dyn MetadataResolution,
     receiver: TypeId,
 ) -> Vec<FieldInfo> {
-    enumerate_fields_inner(db, configs, receiver)
+    enumerate_fields_inner(db, resolver, receiver)
 }
 
 pub(crate) fn enumerate_fields_inner(
     db: &dyn TypeKernelDb,
-    configs: &[VisibleConfig],
+    resolver: &dyn MetadataResolution,
     receiver: TypeId,
 ) -> Vec<FieldInfo> {
     let projected_form_data = crate::field_lookup::project_form_data_for_fields_id(db, receiver);
@@ -90,7 +91,7 @@ pub(crate) fn enumerate_fields_inner(
                 if matches!(db.lookup_type(arm), TypeKind::Undefined | TypeKind::Null) {
                     continue;
                 }
-                for info in enumerate_fields_inner(db, configs, arm) {
+                for info in enumerate_fields_inner(db, resolver, arm) {
                     push_unique(&mut out, &mut seen, info);
                 }
             }
@@ -98,13 +99,13 @@ pub(crate) fn enumerate_fields_inner(
         }
         Shape::MetadataRef { kind, name, config_id } => {
             if let Some(mdo_type) = mdo_type_for_kind(kind) {
-                return enumerate_mdo_fields(db, configs, kind, mdo_type, &name, &config_id);
+                return enumerate_mdo_fields(db, resolver, kind, mdo_type, &name, &config_id);
             }
             if let Some(parent) = register_parent_for_kind(kind) {
-                return enumerate_register_fields(db, configs, kind, parent, &name, &config_id);
+                return enumerate_register_fields(db, resolver, kind, parent, &name, &config_id);
             }
             if let MetadataKind::RegisterFilter { parent } = kind {
-                return enumerate_filter_fields(db, configs, parent, &name);
+                return enumerate_filter_fields(db, resolver, parent, &name);
             }
             if let MetadataKind::TabularSectionRow { parent } = kind {
                 let Some((parent_name, section_name)) = split_parent_section(name.as_str()) else {
@@ -112,7 +113,7 @@ pub(crate) fn enumerate_fields_inner(
                 };
                 return enumerate_tabular_row_fields(
                     db,
-                    configs,
+                    resolver,
                     parent,
                     parent_name,
                     section_name,
@@ -282,88 +283,83 @@ fn name_in_spec(spec_names: &std::collections::HashSet<String>, ru: &str, en: &s
 
 fn enumerate_mdo_fields(
     db: &dyn TypeKernelDb,
-    configs: &[VisibleConfig],
+    resolver: &dyn MetadataResolution,
     kind: MetadataKind,
     mdo_type: MdoType,
     mdo_name: &Name,
     config_id: &ConfigId,
 ) -> Vec<FieldInfo> {
-    for cfg in configs.iter().rev() {
-        let Some(mdo) = cfg.configuration.find_metadata_object(mdo_type, mdo_name.as_str()) else {
-            continue;
+    let Some(mdo) = resolver.resolve_metadata_object(mdo_type, mdo_name.as_str()) else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::with_capacity(mdo.attributes.len() + mdo.tabular_sections.len());
+    let mut seen: std::collections::HashSet<Name> =
+        std::collections::HashSet::with_capacity(out.capacity() * 2);
+
+    let template = mdo_template_kind_for(mdo_type);
+
+    for attr in &mdo.attributes {
+        let spec = classify_attr(template, &attr.name);
+        let (origin, is_readonly) = match spec {
+            Some(s) => (FieldOrigin::StandardAttribute, s.is_readonly),
+            None => (FieldOrigin::UserAttribute, false),
         };
-
-        let mut out = Vec::with_capacity(mdo.attributes.len() + mdo.tabular_sections.len());
-        let mut seen: std::collections::HashSet<Name> =
-            std::collections::HashSet::with_capacity(out.capacity() * 2);
-
-        let template = mdo_template_kind_for(mdo_type);
-
-        for attr in &mdo.attributes {
-            let spec = classify_attr(template, &attr.name);
-            let (origin, is_readonly) = match spec {
-                Some(s) => (FieldOrigin::StandardAttribute, s.is_readonly),
-                None => (FieldOrigin::UserAttribute, false),
-            };
-            let info = FieldInfo {
-                name: Name::new(&attr.name),
-                name_en: attr.name_en.as_deref().filter(|s| !s.is_empty()).map(Name::new),
-                ty: attribute_type_to_typeid(db, &attr.attr_type, configs),
-                value_ty: None,
-                is_readonly,
-                origin,
-            };
-            push_unique(&mut out, &mut seen, info);
-        }
-
-        for ts in &mdo.tabular_sections {
-            let qualified = format!("{}.{}", mdo_name.as_str(), ts.name());
-            let info = FieldInfo {
-                name: Name::new(ts.name()),
-                name_en: ts.name_en().filter(|s| !s.is_empty()).map(Name::new),
-                ty: db.metadata_ref(
-                    MetadataKind::TabularSection { parent: mdo_type },
-                    qualified,
-                    &RootConfigCtx,
-                ),
-                value_ty: None,
-                is_readonly: false,
-                origin: FieldOrigin::TabularSection,
-            };
-            push_unique(&mut out, &mut seen, info);
-        }
-
-        push_platform_prefix_properties(
-            db,
-            kind,
-            mdo_type,
-            mdo_name,
-            config_id,
-            &mut out,
-            &mut seen,
-            |_| None,
-        );
-
-        return out;
+        let info = FieldInfo {
+            name: Name::new(&attr.name),
+            name_en: attr.name_en.as_deref().filter(|s| !s.is_empty()).map(Name::new),
+            ty: attribute_type_to_typeid(db, &attr.attr_type, resolver),
+            value_ty: None,
+            is_readonly,
+            origin,
+        };
+        push_unique(&mut out, &mut seen, info);
     }
-    Vec::new()
+
+    for ts in &mdo.tabular_sections {
+        let qualified = format!("{}.{}", mdo_name.as_str(), ts.name());
+        let info = FieldInfo {
+            name: Name::new(ts.name()),
+            name_en: ts.name_en().filter(|s| !s.is_empty()).map(Name::new),
+            ty: db.metadata_ref(
+                MetadataKind::TabularSection { parent: mdo_type },
+                qualified,
+                &RootConfigCtx,
+            ),
+            value_ty: None,
+            is_readonly: false,
+            origin: FieldOrigin::TabularSection,
+        };
+        push_unique(&mut out, &mut seen, info);
+    }
+
+    push_platform_prefix_properties(
+        db,
+        kind,
+        mdo_type,
+        mdo_name,
+        config_id,
+        &mut out,
+        &mut seen,
+        |_| None,
+    );
+
+    out
 }
 
 fn enumerate_register_fields(
     db: &dyn TypeKernelDb,
-    configs: &[VisibleConfig],
+    resolver: &dyn MetadataResolution,
     kind: MetadataKind,
     parent: MdoType,
     register_name: &Name,
     config_id: &ConfigId,
 ) -> Vec<FieldInfo> {
-    for cfg in configs.iter().rev() {
-        let Some(register) =
-            cfg.configuration.find_register_by_type_and_name(parent, register_name.as_str())
-        else {
-            continue;
-        };
+    let Some(register) = resolver.resolve_register(parent, register_name.as_str()) else {
+        return Vec::new();
+    };
 
+    {
         let cap = register.dimensions().len()
             + register.resources().len()
             + register.attributes().len()
@@ -398,7 +394,7 @@ fn enumerate_register_fields(
                     MetadataKind::RegisterDimension { parent },
                     register_name,
                     dim.name(),
-                    configs,
+                    resolver,
                 ),
                 value_ty: None,
                 is_readonly: false,
@@ -417,7 +413,7 @@ fn enumerate_register_fields(
                     MetadataKind::RegisterResource { parent },
                     register_name,
                     res.name(),
-                    configs,
+                    resolver,
                 ),
                 value_ty: None,
                 is_readonly: false,
@@ -428,7 +424,7 @@ fn enumerate_register_fields(
 
         for attr in register.attributes() {
             let recorder_override = (is_record_kind(kind) && is_recorder_name(attr.name()))
-                .then(|| recorder_union_typeid(db, configs, parent, register_name))
+                .then(|| recorder_union_typeid(db, resolver, parent, register_name))
                 .flatten();
             let ty = recorder_override.unwrap_or_else(|| {
                 register_part_typeid(
@@ -437,7 +433,7 @@ fn enumerate_register_fields(
                     MetadataKind::RegisterAttribute { parent },
                     register_name,
                     attr.name(),
-                    configs,
+                    resolver,
                 )
             });
             let info = FieldInfo {
@@ -461,16 +457,15 @@ fn enumerate_register_fields(
             &mut seen,
             |prop_name| {
                 if is_record_kind(kind) && is_recorder_name(prop_name) {
-                    recorder_union_typeid(db, configs, parent, register_name)
+                    recorder_union_typeid(db, resolver, parent, register_name)
                 } else {
                     None
                 }
             },
         );
 
-        return out;
+        out
     }
-    Vec::new()
 }
 
 fn is_recorder_name(name: &str) -> bool {
@@ -482,23 +477,15 @@ fn is_recorder_name(name: &str) -> bool {
 
 fn recorder_union_typeid(
     db: &dyn TypeKernelDb,
-    configs: &[VisibleConfig],
+    resolver: &dyn ObjectResolver,
     parent: MdoType,
     register_name: &Name,
 ) -> Option<TypeId> {
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut docs: Vec<TypeId> = Vec::new();
-    for cfg in configs {
-        for name in cfg.configuration.recorders_for_register(parent, register_name.as_str()) {
-            if seen.insert(name.to_lowercase()) {
-                docs.push(db.metadata_ref(
-                    MetadataKind::DocumentRef,
-                    name.to_string(),
-                    &RootConfigCtx,
-                ));
-            }
-        }
-    }
+    let docs: Vec<TypeId> = resolver
+        .recorders_for_register(parent, register_name.as_str())
+        .into_iter()
+        .map(|name| db.metadata_ref(MetadataKind::DocumentRef, name, &RootConfigCtx))
+        .collect();
     if docs.is_empty() {
         None
     } else {
@@ -508,66 +495,60 @@ fn recorder_union_typeid(
 
 fn enumerate_filter_fields(
     db: &dyn TypeKernelDb,
-    configs: &[VisibleConfig],
+    resolver: &dyn MetadataResolution,
     parent: MdoType,
     register_name: &Name,
 ) -> Vec<FieldInfo> {
-    for cfg in configs.iter().rev() {
-        let Some(register) =
-            cfg.configuration.find_register_by_type_and_name(parent, register_name.as_str())
-        else {
-            continue;
+    let Some(register) = resolver.resolve_register(parent, register_name.as_str()) else {
+        return Vec::new();
+    };
+
+    let standard_keys = standard_filter_keys(parent, register.periodicity());
+    let mut out = Vec::with_capacity(register.dimensions().len() + standard_keys.len());
+    let mut seen: std::collections::HashSet<Name> =
+        std::collections::HashSet::with_capacity(out.capacity() * 2);
+
+    for dim in register.dimensions() {
+        let value_ty = dim
+            .attr_type()
+            .map(|attr_type| attribute_type_to_typeid(db, attr_type, resolver))
+            .unwrap_or_else(|| db.unknown());
+        let info = FieldInfo {
+            name: Name::new(dim.name()),
+            name_en: None,
+            ty: db.platform_object("ЭлементОтбора".to_string()),
+            value_ty: Some(value_ty),
+            is_readonly: false,
+            origin: FieldOrigin::RegisterDimension,
         };
-
-        let standard_keys = standard_filter_keys(parent, register.periodicity());
-        let mut out = Vec::with_capacity(register.dimensions().len() + standard_keys.len());
-        let mut seen: std::collections::HashSet<Name> =
-            std::collections::HashSet::with_capacity(out.capacity() * 2);
-
-        for dim in register.dimensions() {
-            let value_ty = dim
-                .attr_type()
-                .map(|attr_type| attribute_type_to_typeid(db, attr_type, configs))
-                .unwrap_or_else(|| db.unknown());
-            let info = FieldInfo {
-                name: Name::new(dim.name()),
-                name_en: None,
-                ty: db.platform_object("ЭлементОтбора".to_string()),
-                value_ty: Some(value_ty),
-                is_readonly: false,
-                origin: FieldOrigin::RegisterDimension,
-            };
-            push_unique(&mut out, &mut seen, info);
-        }
-
-        for key in standard_keys {
-            let value_ty =
-                standard_filter_key_value_typeid(db, configs, parent, register_name, key);
-            let info = FieldInfo {
-                name: Name::new(key),
-                name_en: None,
-                ty: db.platform_object("ЭлементОтбора".to_string()),
-                value_ty: Some(value_ty),
-                is_readonly: false,
-                origin: FieldOrigin::PlatformProperty,
-            };
-            push_unique(&mut out, &mut seen, info);
-        }
-
-        return out;
+        push_unique(&mut out, &mut seen, info);
     }
-    Vec::new()
+
+    for key in standard_keys {
+        let value_ty = standard_filter_key_value_typeid(db, resolver, parent, register_name, key);
+        let info = FieldInfo {
+            name: Name::new(key),
+            name_en: None,
+            ty: db.platform_object("ЭлементОтбора".to_string()),
+            value_ty: Some(value_ty),
+            is_readonly: false,
+            origin: FieldOrigin::PlatformProperty,
+        };
+        push_unique(&mut out, &mut seen, info);
+    }
+
+    out
 }
 
 fn standard_filter_key_value_typeid(
     db: &dyn TypeKernelDb,
-    configs: &[VisibleConfig],
+    resolver: &dyn MetadataResolution,
     parent: MdoType,
     register_name: &Name,
     key: &str,
 ) -> TypeId {
     match key {
-        "Регистратор" => recorder_union_typeid(db, configs, parent, register_name)
+        "Регистратор" => recorder_union_typeid(db, resolver, parent, register_name)
             .unwrap_or_else(|| db.unknown()),
         "Период" | "ПериодРегистрации" => db.date(DateComponent::DateTime),
         "Активность" => db.boolean(),
@@ -602,13 +583,12 @@ fn standard_filter_keys(
 
 fn enumerate_tabular_row_fields(
     db: &dyn TypeKernelDb,
-    configs: &[VisibleConfig],
+    resolver: &dyn MetadataResolution,
     parent: MdoType,
     parent_name: &str,
     section_name: &str,
 ) -> Vec<FieldInfo> {
-    let mdo = find_mdo(configs, parent, parent_name);
-    let Some(mdo) = mdo else {
+    let Some(mdo) = find_mdo(resolver, parent, parent_name) else {
         return Vec::new();
     };
     let Some(ts) = mdo.find_tabular_section(section_name) else {
@@ -621,7 +601,7 @@ fn enumerate_tabular_row_fields(
         .map(|attr| FieldInfo {
             name: Name::new(attr.name()),
             name_en: attr.name_en().filter(|s| !s.is_empty()).map(Name::new),
-            ty: attribute_type_to_typeid(db, attr.attr_type(), configs),
+            ty: attribute_type_to_typeid(db, attr.attr_type(), resolver),
             value_ty: None,
             is_readonly: false,
             origin: FieldOrigin::TabularSectionRowColumn,
@@ -720,22 +700,21 @@ pub(crate) fn split_parent_section(name: &str) -> Option<(&str, &str)> {
     Some((parent, section))
 }
 
-pub(crate) fn find_mdo<'a>(
-    configs: &'a [VisibleConfig],
+pub(crate) fn find_mdo(
+    resolver: &dyn ObjectResolver,
     mdo_type: MdoType,
     name: &str,
-) -> Option<&'a MetadataObject> {
-    configs.iter().rev().find_map(|cfg| cfg.configuration.find_metadata_object(mdo_type, name))
+) -> Option<Arc<MetadataObject>> {
+    resolver.resolve_metadata_object(mdo_type, name)
 }
 
 pub(crate) fn attribute_type_to_typeid(
     db: &dyn TypeKernelDb,
     attr_type: &AttributeType,
-    configs: &[VisibleConfig],
+    resolver: &dyn MetadataResolver,
 ) -> TypeId {
     let type_ref = TypeRef::from_attribute_type(attr_type);
-    let resolver = ConfigsResolver(configs);
-    TyLoweringContext::with_resolver(&resolver).lower_type_ref_id(db, &type_ref)
+    TyLoweringContext::with_resolver(resolver).lower_type_ref_id(db, &type_ref)
 }
 
 pub(crate) fn register_part_typeid(
@@ -744,10 +723,10 @@ pub(crate) fn register_part_typeid(
     fallback_kind: MetadataKind,
     register_name: &Name,
     part_name: &str,
-    configs: &[VisibleConfig],
+    resolver: &dyn MetadataResolver,
 ) -> TypeId {
     match attr_type {
-        Some(at) => attribute_type_to_typeid(db, at, configs),
+        Some(at) => attribute_type_to_typeid(db, at, resolver),
         None => db.metadata_ref(
             fallback_kind,
             format!("{}.{}", register_name.as_str(), part_name),
@@ -774,16 +753,58 @@ pub(crate) fn mdo_template_kind_for(mdo_type: MdoType) -> Option<MdoTemplateKind
     }
 }
 
-fn classify_attr<'a>(
+/// Folded (lowercased) bilingual attribute name -> spec, per template, for the
+/// `Object` view. Built once; replaces a per-call linear scan that re-lowercased
+/// every spec's Cyrillic `russian_name` on each attribute classification.
+fn standard_attr_object_index() -> &'static std::collections::HashMap<
+    MdoTemplateKind,
+    std::collections::HashMap<String, &'static bsl_platform::StandardAttrSpec>,
+> {
+    use std::collections::HashMap;
+    use std::sync::OnceLock;
+
+    static INDEX: OnceLock<
+        HashMap<MdoTemplateKind, HashMap<String, &'static bsl_platform::StandardAttrSpec>>,
+    > = OnceLock::new();
+
+    INDEX.get_or_init(|| {
+        const TEMPLATES: [MdoTemplateKind; 12] = [
+            MdoTemplateKind::Catalog,
+            MdoTemplateKind::Document,
+            MdoTemplateKind::BusinessProcess,
+            MdoTemplateKind::Task,
+            MdoTemplateKind::ChartOfAccounts,
+            MdoTemplateKind::ChartOfCharacteristicTypes,
+            MdoTemplateKind::ChartOfCalculationTypes,
+            MdoTemplateKind::ExchangePlan,
+            MdoTemplateKind::InformationRegister,
+            MdoTemplateKind::AccumulationRegister,
+            MdoTemplateKind::AccountingRegister,
+            MdoTemplateKind::CalculationRegister,
+        ];
+        TEMPLATES
+            .into_iter()
+            .map(|tmpl| {
+                let mut by_name: HashMap<String, &'static bsl_platform::StandardAttrSpec> =
+                    HashMap::new();
+                // First occurrence wins, matching the replaced `.iter().find()` scan.
+                for spec in standard_attributes_for(tmpl, ObjectView::Object) {
+                    by_name.entry(spec.kind.russian_name().to_lowercase()).or_insert(spec);
+                    by_name.entry(spec.kind.english_name().to_lowercase()).or_insert(spec);
+                }
+                (tmpl, by_name)
+            })
+            .collect()
+    })
+}
+
+fn classify_attr(
     template: Option<MdoTemplateKind>,
     attr_name: &str,
-) -> Option<&'a bsl_platform::StandardAttrSpec> {
+) -> Option<&'static bsl_platform::StandardAttrSpec> {
     let tmpl = template?;
     let needle = attr_name.to_lowercase();
-    standard_attributes_for(tmpl, ObjectView::Object).iter().find(|spec| {
-        spec.kind.russian_name().to_lowercase() == needle
-            || spec.kind.english_name().to_lowercase() == needle
-    })
+    standard_attr_object_index().get(&tmpl)?.get(&needle).copied()
 }
 
 fn push_unique(
@@ -809,6 +830,8 @@ fn push_unique(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::object_resolver::ConfigsObjectResolver;
+    use bsl_config::VisibleConfig;
     use bsl_types::facet::MdoRefFacet;
     use std::rc::Rc;
 
@@ -873,7 +896,7 @@ mod tests {
     ) -> Vec<FieldInfoForTest> {
         let db = Rc::new(InMemoryDb::new());
         let receiver = receiver_ty.intern(&db);
-        super::enumerate_fields(db.as_ref(), configs, receiver)
+        super::enumerate_fields(db.as_ref(), &ConfigsObjectResolver(configs), receiver)
             .into_iter()
             .map(|info| FieldInfoForTest {
                 name: info.name,
@@ -957,7 +980,10 @@ mod tests {
         let configs = wrap(config);
         let attr_type =
             AttributeType::DefinedType { name: "ДенежнаяСумма".to_string() };
-        assert_eq!(attribute_type_to_typeid(&db, &attr_type, &configs), db.number(None, None));
+        assert_eq!(
+            attribute_type_to_typeid(&db, &attr_type, &ConfigsObjectResolver(&configs)),
+            db.number(None, None)
+        );
     }
 
     fn wrap(config: Configuration) -> Vec<VisibleConfig> {

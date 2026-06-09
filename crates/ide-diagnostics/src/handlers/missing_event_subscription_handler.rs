@@ -84,7 +84,7 @@ fn check_event_subscription(
         None => return,
     };
 
-    let (_visible, common_module) = match ctx.find_common_module_anywhere(&handler.module_name) {
+    let common_module = match ctx.resolve_common_module(&handler.module_name) {
         Some(found) => found,
         None => {
             diagnostics.push(create_diagnostic(
@@ -118,7 +118,7 @@ fn check_method(
     code: DiagnosticCode,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let module_files = ctx.find_common_module_files_anywhere(&handler.module_name);
+    let module_files = ctx.common_module_body_files(&handler.module_name);
     if module_files.is_empty() {
         return;
     }

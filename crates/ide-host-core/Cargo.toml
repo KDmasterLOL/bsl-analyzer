@@ -1,0 +1,19 @@
+[package]
+name = "ide-host-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+doctest = false
+
+[dependencies]
+ide.workspace = true
+base-db.workspace = true
+vfs.workspace = true
+salsa.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

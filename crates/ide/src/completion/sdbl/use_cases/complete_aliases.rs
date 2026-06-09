@@ -49,7 +49,7 @@ mod tests {
     use sdbl_hir::{ResolvedTable, TableRef};
     use smol_str::SmolStr;
 
-    fn make_test_scope_with_aliases() -> Scope {
+    fn make_test_scope_with_aliases() -> Scope<'static> {
         let mut scope = Scope::new();
 
         let table1 = TableRef {
@@ -60,6 +60,7 @@ mod tests {
                 mdo_type: MdoType::Catalog,
                 name: "Валюты".to_string(),
                 fields: Vec::new(),
+                field_model_complete: false,
             }),
             is_virtual_table: false,
             virtual_table_params: Vec::new(),
@@ -75,6 +76,7 @@ mod tests {
                 mdo_type: MdoType::Catalog,
                 name: "Контрагенты".to_string(),
                 fields: Vec::new(),
+                field_model_complete: false,
             }),
             is_virtual_table: false,
             virtual_table_params: Vec::new(),
@@ -90,6 +92,7 @@ mod tests {
                 mdo_type: MdoType::Document,
                 name: "Продажа".to_string(),
                 fields: Vec::new(),
+                field_model_complete: false,
             }),
             is_virtual_table: false,
             virtual_table_params: Vec::new(),

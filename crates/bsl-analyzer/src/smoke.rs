@@ -351,6 +351,7 @@ fn bootstrap_smoke(args: &SmokeArgs) -> Result<SmokeBootstrap, String> {
             loader::Message::Progress { n_done: LoadingProgress::Finished, .. } => {
                 state.process_changes(true);
                 state.init_source_root();
+                state.bootstrap_metadata_substrate();
                 state.warm_metadata_cache();
                 state.degraded_files_count = state.skipped_bsl.len();
                 let extra = state.assert_total_vfs_invariant();
@@ -373,6 +374,8 @@ fn bootstrap_smoke(args: &SmokeArgs) -> Result<SmokeBootstrap, String> {
                     vfs.register_watch_only(vfs::VfsPath::new(path.as_path()));
                 }
             }
+            // Batch smoke loads a snapshot once; live removals don't apply.
+            loader::Message::RemovedRecursive { .. } => {}
         }
     }
 
@@ -399,12 +402,8 @@ fn stream_loader_batch(state: &mut GlobalState, files: Vec<(paths::AbsPathBuf, O
         let std_path: &std::path::Path = path.as_ref();
         let vfs_path = vfs::VfsPath::new(std_path);
 
-        let contents_str = contents.and_then(|bytes| {
-            String::from_utf8(bytes).ok().map(|s| {
-                let s = s.strip_prefix('\u{FEFF}').unwrap_or(&s);
-                Arc::from(s)
-            })
-        });
+        let contents_str =
+            contents.and_then(|bytes| base_db::decode_disk_bytes(&bytes).map(Arc::from));
 
         if project_model::is_bsl_source_path(std_path) {
             let mutated = if contents_str.is_some() {
@@ -525,7 +524,7 @@ fn pick_sample_bsl_file(state: &GlobalState) -> Option<vfs::FileId> {
             if !project_model::is_bsl_source_path(std_path) {
                 return None;
             }
-            db.try_file_text(fid)?;
+            db.try_file_revision_input(fid)?;
             Some((std_path.to_string_lossy().into_owned(), fid))
         })
         .collect();
@@ -653,7 +652,7 @@ fn enumerate_bsl_roots(state: &GlobalState, cap: usize) -> Vec<vfs::FileId> {
             if !project_model::is_bsl_source_path(std_path) {
                 return None;
             }
-            db.try_file_text(fid)?;
+            db.try_file_revision_input(fid)?;
             Some((std_path.to_string_lossy().into_owned(), fid))
         })
         .collect();

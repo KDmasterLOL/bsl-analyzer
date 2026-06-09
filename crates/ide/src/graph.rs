@@ -608,7 +608,7 @@ fn emit_fused_chunks(
         }
 
         let parse = db.parse(file_id);
-        let source = db.file_text_input(file_id).text(db).clone();
+        let source = db.file_text(file_id);
         for chunk in Chunker::chunk_parsed(&parse.syntax_node(), &source) {
             let graph_context = match chunk.kind {
                 ChunkKind::Procedure | ChunkKind::Function => {
@@ -1601,7 +1601,7 @@ impl<'a> GraphCtx<'a> {
     }
 
     fn slice(&self, file_id: FileId, range: syntax::TextRange) -> Option<String> {
-        let text = self.db.file_text_input(file_id).text(self.db).clone();
+        let text = self.db.file_text(file_id);
         let start = u32::from(range.start()) as usize;
         let end = u32::from(range.end()) as usize;
         text.get(start..end).map(str::to_string)
@@ -2323,7 +2323,7 @@ fn signature_line(
     name_offset: syntax::TextSize,
     sig_end: syntax::TextSize,
 ) -> Option<String> {
-    let text = db.file_text_input(file_id).text(db).clone();
+    let text = db.file_text(file_id);
     let name = (u32::from(name_offset) as usize).min(text.len());
     let end = (u32::from(sig_end) as usize).min(text.len());
     if name > end || !text.is_char_boundary(name) || !text.is_char_boundary(end) {

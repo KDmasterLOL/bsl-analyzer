@@ -37,12 +37,19 @@ pub use http_service::{
     HTTPService, HTTPServiceBuilder, HTTPServiceMethod, HTTPServiceMethodBuilder,
     HTTPServiceURLTemplate, HTTPServiceURLTemplateBuilder,
 };
-pub use loader::load_from_directory;
+pub use loader::{
+    discover_common_module_structure, discover_defined_type_structure, discover_metadata_structure,
+    discover_register_structure, load_from_directory, parse_common_module_from_text,
+    parse_defined_type_from_text, parse_metadata_object_from_texts, parse_register_from_text,
+    DiscoveredCommonModule, DiscoveredDefinedType, DiscoveredMdo,
+};
 pub use metadata_object::{
     is_standard_attribute_name, Attribute, AttributeType, MdoType, MetadataObject, Name,
     PlatformValueType,
 };
-pub use metadata_resolver::{resolve_defined_type_terminal, MetadataResolver};
+pub use metadata_resolver::{
+    resolve_defined_type_terminal, MetadataResolver, QueryMetadataResolver,
+};
 pub use register::{
     AccumulationRegisterType, Register, RegisterAttribute, RegisterBuilder, RegisterPeriodicity,
     RegisterResource,

@@ -17,8 +17,7 @@ pub enum FoldingRangeKind {
 pub fn folding_ranges<DB: RootDatabase>(db: &DB, file_id: FileId) -> Vec<FoldingRange> {
     let _span = tracing::info_span!("folding_ranges", ?file_id).entered();
 
-    let input = db.file_text_input(file_id);
-    let text = input.text(db);
+    let text = db.file_text(file_id);
     let line_index = LineIndex::new(&text);
     let parse = db.parse(file_id);
     let root = parse.syntax_node();

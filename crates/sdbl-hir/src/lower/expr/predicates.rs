@@ -12,7 +12,7 @@ fn is_column_ref_pattern(expr: &ExprHir) -> bool {
     }
 }
 
-impl LoweringContext {
+impl LoweringContext<'_> {
     fn lower_in_subquery(&mut self, node: &syntax::SyntaxNode) -> SdblHir {
         use syntax::ast::AstNode;
 

@@ -91,7 +91,7 @@ mod tests {
     use smol_str::SmolStr;
     use std::sync::Arc;
 
-    fn make_test_scope_with_metadata() -> Scope {
+    fn make_test_scope_with_metadata() -> Scope<'static> {
         let mut config = bsl_metadata::Configuration::new("TestConfig");
         let catalog = bsl_metadata::MetadataObject {
             mdo_type: bsl_metadata::MdoType::Catalog,
@@ -159,6 +159,7 @@ mod tests {
                     ),
                     FieldDef::new("Код", SdblType::string()),
                 ],
+                field_model_complete: false,
             }),
             is_virtual_table: false,
             virtual_table_params: Vec::new(),

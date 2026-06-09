@@ -1,3 +1,3 @@
 use super::context::LoweringContext;
 
-impl LoweringContext {}
+impl LoweringContext<'_> {}

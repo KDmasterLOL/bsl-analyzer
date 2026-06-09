@@ -8,7 +8,7 @@ use syntax::ast::AstNode;
 
 use super::context::LoweringContext;
 
-impl LoweringContext {
+impl LoweringContext<'_> {
     pub(super) fn lower_joins(&mut self, query: &syntax::ast::SdblQuery) -> Vec<JoinHir> {
         let Some(from_clause) = query.from_clause() else {
             return Vec::new();

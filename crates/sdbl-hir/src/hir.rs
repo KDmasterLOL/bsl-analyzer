@@ -456,6 +456,7 @@ pub enum ResolvedTable {
         mdo_type: MdoType,
         name: String,
         fields: Vec<FieldDef>,
+        field_model_complete: bool,
     },
 
     Register {
@@ -465,15 +466,29 @@ pub enum ResolvedTable {
         dimensions: Vec<FieldDef>,
         resources: Vec<FieldDef>,
         attributes: Vec<FieldDef>,
+        field_model_complete: bool,
     },
 
     TempTable {
         name: String,
         fields: Vec<FieldDef>,
+        field_model_complete: bool,
     },
 }
 
 impl ResolvedTable {
+    /// True only when the field set is provably exhaustive for the table's
+    /// schema, so an unknown-field diagnostic on this table is false-positive
+    /// safe. Default is `false` by construction: callers must opt in only on
+    /// fully-modeled tables.
+    pub fn field_model_complete(&self) -> bool {
+        match self {
+            Self::Metadata { field_model_complete, .. }
+            | Self::Register { field_model_complete, .. }
+            | Self::TempTable { field_model_complete, .. } => *field_model_complete,
+        }
+    }
+
     pub fn find_field(&self, name: &str) -> Option<&FieldDef> {
         let name_lower = name.to_lowercase();
         self.fields().iter().find(|f| {

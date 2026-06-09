@@ -66,12 +66,14 @@ impl AnalysisProvider for SalsaProvider<'_> {
             };
         }
 
-        let version = self.db.metadata_version();
         paths
             .into_iter()
             .map(|(name, path)| {
-                let path_input =
-                    intern_configuration_path(self.db, &path.to_string_lossy(), version);
+                let path_input = intern_configuration_path(
+                    self.db,
+                    &path.to_string_lossy(),
+                    self.db.config_root_revision_for_path(&path),
+                );
                 let configuration = load_configuration(self.db, path_input);
                 VisibleConfigWithRoot {
                     config: bsl_config::VisibleConfig { name, configuration },
@@ -79,6 +81,31 @@ impl AnalysisProvider for SalsaProvider<'_> {
                 }
             })
             .collect()
+    }
+
+    fn common_module_for_file(&self, file_id: FileId) -> Option<Arc<bsl_metadata::CommonModule>> {
+        self.db.common_module_for_file_id(file_id)
+    }
+
+    fn resolve_metadata_object(
+        &self,
+        file_id: FileId,
+        mdo_type: bsl_metadata::MdoType,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::MetadataObject>> {
+        self.db.resolve_metadata_object(file_id, mdo_type, name)
+    }
+
+    fn resolve_common_module(
+        &self,
+        file_id: FileId,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::CommonModule>> {
+        self.db.resolve_common_module(file_id, name)
+    }
+
+    fn resolve_common_module_files(&self, file_id: FileId, name: &str) -> Vec<FileId> {
+        self.db.resolve_common_module_files(file_id, name)
     }
 
     fn workspace_symbols(&self, source_root_id: SourceRootId) -> Arc<hir::WorkspaceSymbols> {
@@ -104,8 +131,7 @@ impl AnalysisProvider for SalsaProvider<'_> {
     }
 
     fn file_text(&self, file_id: FileId) -> String {
-        let input = self.db.file_text_input(file_id);
-        input.text(self.db).clone()
+        self.db.file_text(file_id).to_string()
     }
 
     fn item_tree(&self, file_id: FileId) -> Arc<ItemTree> {

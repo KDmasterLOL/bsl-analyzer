@@ -7,6 +7,10 @@ pub struct PlatformType {
     pub min_version: Option<SmolStr>,
     pub context: Option<ContextAvailability>,
     pub iter_element_types: Vec<SmolStr>,
+    /// XDTO type name declared by the type's help page, when present. Some
+    /// configuration XML serializes attribute types by this name rather than
+    /// the class name (e.g. `ГрафическаяСхема` ↔ `FlowchartContextType`).
+    pub xdto_name: Option<SmolStr>,
 }
 
 #[doc(hidden)]
@@ -17,6 +21,7 @@ pub struct RawPlatformType {
     pub min_version: Option<&'static str>,
     pub context: Option<RawContextAvailability>,
     pub iter_element_types: &'static [&'static str],
+    pub xdto_name: Option<&'static str>,
 }
 
 impl From<&RawPlatformType> for PlatformType {
@@ -27,6 +32,7 @@ impl From<&RawPlatformType> for PlatformType {
             min_version: raw.min_version.map(SmolStr::from),
             context: raw.context.as_ref().map(ContextAvailability::from),
             iter_element_types: raw.iter_element_types.iter().map(|s| SmolStr::new(*s)).collect(),
+            xdto_name: raw.xdto_name.map(SmolStr::from),
         }
     }
 }

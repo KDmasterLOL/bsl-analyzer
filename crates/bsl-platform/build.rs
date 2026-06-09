@@ -640,6 +640,12 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
                 code.push_str("        iter_element_types: &[],\n");
             }
 
+            if let Some(xdto) = ty.get("xdto_name").and_then(|v| v.as_str()) {
+                code.push_str(&format!("        xdto_name: Some({:?}),\n", xdto));
+            } else {
+                code.push_str("        xdto_name: None,\n");
+            }
+
             code.push_str("    },\n");
         }
         code.push_str("];\n\n");

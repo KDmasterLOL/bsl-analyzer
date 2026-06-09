@@ -1,23 +1,57 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use crate::metadata_object::AttributeType;
-use crate::Configuration;
+use crate::{Configuration, MdoType, MetadataObject, Register};
 
 pub trait MetadataResolver: std::fmt::Debug {
-    fn resolve_defined_type(&self, name: &str) -> Option<&AttributeType>;
+    /// The underlying type of the defined type `name`, or `None` if unknown.
+    ///
+    /// Returns an owned [`AttributeType`] (not a borrow) so a db-backed resolver
+    /// can hand back a value composed fresh from a per-defined-type Salsa cell,
+    /// rather than borrowing from a long-lived `Configuration`.
+    fn resolve_defined_type(&self, name: &str) -> Option<AttributeType>;
 }
 
 impl MetadataResolver for Configuration {
-    fn resolve_defined_type(&self, name: &str) -> Option<&AttributeType> {
-        self.find_defined_type(name).map(|dt| dt.underlying_type())
+    fn resolve_defined_type(&self, name: &str) -> Option<AttributeType> {
+        self.find_defined_type(name).map(|dt| dt.underlying_type().clone())
     }
 }
 
-pub fn resolve_defined_type_terminal<'a, R>(
-    resolver: &'a R,
+/// Metadata-object and register resolution surface for query (SDBL) lowering.
+///
+/// Returning owned `Arc`s (not borrows) lets a db-backed resolver hand back
+/// per-MDO objects composed fresh from their own Salsa cells, so lowering a
+/// query depends on just the metadata objects it references instead of the whole
+/// `Configuration`. The [`Configuration`] impl serves the cold call sites (graph
+/// build, streaming, tests) that still carry a whole config.
+pub trait QueryMetadataResolver: MetadataResolver {
+    fn resolve_metadata_object(&self, mdo_type: MdoType, name: &str)
+        -> Option<Arc<MetadataObject>>;
+
+    fn resolve_register(&self, mdo_type: MdoType, name: &str) -> Option<Arc<Register>>;
+}
+
+impl QueryMetadataResolver for Configuration {
+    fn resolve_metadata_object(
+        &self,
+        mdo_type: MdoType,
+        name: &str,
+    ) -> Option<Arc<MetadataObject>> {
+        self.find_metadata_object(mdo_type, name).cloned().map(Arc::new)
+    }
+
+    fn resolve_register(&self, mdo_type: MdoType, name: &str) -> Option<Arc<Register>> {
+        self.find_register_by_type_and_name(mdo_type, name).cloned().map(Arc::new)
+    }
+}
+
+pub fn resolve_defined_type_terminal<R>(
+    resolver: &R,
     name: &str,
     visited: &mut HashSet<String>,
-) -> Option<&'a AttributeType>
+) -> Option<AttributeType>
 where
     R: MetadataResolver + ?Sized,
 {
@@ -26,12 +60,11 @@ where
         if !visited.insert(current.to_lowercase()) {
             return None;
         }
-        let underlying = resolver.resolve_defined_type(&current)?;
-        match underlying {
+        match resolver.resolve_defined_type(&current)? {
             AttributeType::DefinedType { name: next } => {
-                current = next.clone();
+                current = next;
             }
-            _ => return Some(underlying),
+            other => return Some(other),
         }
     }
 }
@@ -114,6 +147,6 @@ mod tests {
         let mut visited = HashSet::new();
         let underlying = resolve_defined_type_terminal(&cfg, "денежнаясумма", &mut visited)
             .expect("case-insensitive lookup");
-        assert_eq!(underlying, &AttributeType::Boolean);
+        assert_eq!(underlying, AttributeType::Boolean);
     }
 }
