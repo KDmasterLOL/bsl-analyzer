@@ -25,10 +25,15 @@ pub fn from_hir(
     ctx: &DiagnosticsContext,
 ) -> Option<Diagnostic> {
     let locale = ctx.locale();
-    let message = format!(
-        "Несоответствие типов: ожидалось '{}', получено '{}'",
-        ctx.kernel_type_display(expected, locale),
-        ctx.kernel_type_display(actual, locale)
-    );
+    let expected_label = ctx.kernel_type_display(expected, locale);
+    let actual_label = ctx.kernel_type_display(actual, locale);
+    // Distinct internal types can share a display name (e.g. a doc-derived
+    // nominal type vs the inferred platform type). A message whose two sides
+    // render identically is self-contradictory and not actionable — drop it.
+    if expected_label == actual_label {
+        return None;
+    }
+    let message =
+        format!("Несоответствие типов: ожидалось '{expected_label}', получено '{actual_label}'");
     crate::simple_hir_diagnostic(DiagnosticCode::TypeMismatch, message, range, ctx)
 }

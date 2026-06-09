@@ -14,7 +14,9 @@ use hir_def::{DefWithBodyId, ExprId, Name};
 use vfs::FileId;
 
 use crate::db::HirDatabase;
-use crate::lower::type_string::{lower_param_type_string_typeid, lower_return_type_string_typeid};
+use crate::lower::type_string::{
+    is_tabular_row_type_name, lower_param_type_string_typeid, lower_return_type_string_typeid,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MethodInfo {
@@ -750,11 +752,6 @@ fn rewrite_row_array_for_method(
 fn is_row_array_method(name: &str) -> bool {
     let lc = name.to_lowercase();
     matches!(lc.as_str(), "найтистроки" | "findrows")
-}
-
-fn is_tabular_row_type_name(name: &str) -> bool {
-    let lc = name.to_lowercase();
-    lc == "строка табличной части" || lc == "line of a tabular section"
 }
 
 #[cfg(test)]

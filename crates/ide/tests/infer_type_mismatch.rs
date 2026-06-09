@@ -524,10 +524,6 @@ fn type_mismatch_silent_on_vendor_doc_query_and_value_list_params() {
 }
 
 #[test]
-#[ignore = "doc alternatives after a prose colon lower into a phantom type: the LAST \
-            comma segment together with its parenthetical tail becomes the expected type \
-            ('СправочникСсылка.Справочник1 (Необязательный)') and the first alternative \
-            is dropped — fires on an arg matching the first alternative"]
 fn type_mismatch_silent_when_doc_alternatives_follow_prose_colon() {
     // Vendor doc shape: prose, then a colon, then comma-separated alternatives
     // with a trailing parenthetical. An argument matching the FIRST listed
