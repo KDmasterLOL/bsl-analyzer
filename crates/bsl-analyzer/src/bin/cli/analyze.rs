@@ -295,11 +295,15 @@ fn analyze_salsa(
     // its own `lru` cap, so the durable cross-module currency (method return
     // types, generously capped) is largely retained while the heavy per-file
     // memos fall out once their chunk is done.
+    // Chunk size is the peak-memory <-> wall-time knob (the in-chunk working set
+    // is the peak, bounded only by this). On ERP 500 trims peak RSS ~25% vs 1000
+    // (~6.0 GB vs ~8.1 GB) for ~+5% wall, so it is the default; override via
+    // `BSL_SALSA_CHUNK` (larger = faster + more RSS, smaller = leaner + slower).
     let chunk_size = std::env::var("BSL_SALSA_CHUNK")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|n| *n > 0)
-        .unwrap_or(1000);
+        .unwrap_or(500);
     let mut results: Vec<(Option<FileAnalysis>, Option<FileTiming>)> =
         Vec::with_capacity(file_ids.len());
     let report_mem = std::env::var_os("BSL_MEM_REPORT").is_some();
