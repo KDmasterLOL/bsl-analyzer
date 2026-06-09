@@ -18,6 +18,16 @@ fn is_handled_uri(uri: &Url) -> bool {
 }
 
 pub fn schedule_diagnostics(state: &mut GlobalState, uri: &Url) {
+    // While the workspace is still loading, the source root and metadata
+    // substrate are incomplete: a result computed now is either cancelled by
+    // the next streamed VFS batch (each drain bumps the Salsa revision) or
+    // published against a half-loaded world as false positives. The vfs_done
+    // finalize reschedules every open document, so deferring loses nothing.
+    if !state.vfs_done {
+        tracing::debug!(%uri, "diagnostics deferred until workspace load completes");
+        return;
+    }
+
     if let Some(prev) = state.diagnostics_tokens.remove(uri) {
         prev.cancel();
     }
@@ -146,8 +156,14 @@ pub fn handle_did_open(state: &mut GlobalState, params: DidOpenTextDocumentParam
         }
     }
 
+    // Dependency discovery walks the (still cold and incomplete) database
+    // synchronously on the event-loop thread, so during the initial load it
+    // both stalls VFS batch draining and warms caches the next revision bump
+    // throws away. The vfs_done finalize preloads open documents instead.
     let preload_start = Instant::now();
-    preload_dependencies(state, file_id);
+    if vfs_done {
+        preload_dependencies(state, file_id);
+    }
     let preload_dispatch_ms = preload_start.elapsed().as_millis() as u64;
 
     schedule_diagnostics(state, &uri);
@@ -164,7 +180,7 @@ pub fn handle_did_open(state: &mut GlobalState, params: DidOpenTextDocumentParam
     Ok(())
 }
 
-fn preload_dependencies(state: &mut GlobalState, file_id: vfs::FileId) {
+pub(crate) fn preload_dependencies(state: &mut GlobalState, file_id: vfs::FileId) {
     let discover_start = Instant::now();
     let analysis = state.analysis_host.analysis();
     let deps = analysis.file_dependencies(file_id);
@@ -407,6 +423,10 @@ mod tests {
         let source_root = SourceRoot::new_local(file_set);
         db.set_source_root(source_root_id, source_root);
 
+        // No VFS loader runs in tests, so the `Finished` event that normally
+        // flips this flag never arrives; model a fully loaded workspace.
+        state.vfs_done = true;
+
         (state, receiver)
     }
 
@@ -429,9 +449,41 @@ mod tests {
         assert!(state.mem_docs.contains(&params.text_document.uri));
         assert_eq!(state.mem_docs.get(&params.text_document.uri), Some(params.text_document.text));
 
-        assert!(!state.vfs_done);
         assert_eq!(state.diagnostics_generation.get(&params.text_document.uri).copied(), Some(1));
         assert!(state.diagnostics_tokens.contains_key(&params.text_document.uri));
+    }
+
+    #[test]
+    fn did_open_before_vfs_done_defers_diagnostics_and_preload() {
+        let (mut state, _receiver) = create_test_state();
+        state.vfs_done = false;
+
+        let uri = lsp_types::Url::parse("file:///test.bsl").unwrap();
+        handle_did_open(
+            &mut state,
+            DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: uri.clone(),
+                    language_id: "bsl".to_string(),
+                    version: 1,
+                    text: "Процедура Тест() КонецПроцедуры".to_string(),
+                },
+            },
+        )
+        .unwrap();
+
+        // The document is tracked, but no analysis is spawned against the
+        // half-loaded workspace: the vfs_done finalize replays it instead.
+        assert!(state.mem_docs.contains(&uri));
+        assert_eq!(state.diagnostics_generation.get(&uri), None);
+        assert!(!state.diagnostics_tokens.contains_key(&uri));
+        assert!(state.preload_tokens.is_empty());
+
+        // Once the workspace finishes loading, scheduling works again.
+        state.vfs_done = true;
+        schedule_diagnostics(&mut state, &uri);
+        assert_eq!(state.diagnostics_generation.get(&uri).copied(), Some(1));
+        assert!(state.diagnostics_tokens.contains_key(&uri));
     }
 
     #[test]
