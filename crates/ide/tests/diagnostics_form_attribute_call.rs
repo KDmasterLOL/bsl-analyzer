@@ -181,6 +181,33 @@ fn value_list_form_attribute_types_to_kernel_value_list() {
 }
 
 #[test]
+#[ignore = "an attribute declared with an empty <Type/> is not recognised as a form \
+            attribute: the receiver falls through to common-module resolution and \
+            surfaces UnresolvedMethodCall(ReceiverNotResolved)"]
+fn untyped_form_attribute_method_call_not_resolved_as_module() {
+    if !has_platform_data() {
+        eprintln!("Skipping: no platform data available");
+        return;
+    }
+
+    // Designer emits an empty <Type/> for untyped form attributes. A method
+    // call on such an attribute must not fall through to common-module
+    // resolution: the receiver IS a form attribute, merely untyped, so no
+    // UnresolvedMethodCall may surface.
+    let bsl = "Процедура Тест()\n    \
+        СтруктураРеквизитовФормы.Вставить(\"НастройкиВидимости\", 1);\n\
+        КонецПроцедуры\n";
+    let (db, file_id) = setup_form_module(data_processor_module_path(), bsl);
+
+    let kinds = unresolved_kinds(&db, file_id);
+    assert!(
+        kinds.is_empty(),
+        "method call on an untyped form attribute must not produce UnresolvedMethodCall, got: {:?}",
+        kinds
+    );
+}
+
+#[test]
 fn findrows_chain_no_unresolved_method_call() {
     if !has_platform_data() {
         eprintln!("Skipping: no platform data available");
