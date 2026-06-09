@@ -16,7 +16,9 @@ pub struct ProcSignature {
     pub return_ty: TypeId,
 }
 
-#[salsa::tracked(lru = 1024)]
+// Cross-module call-resolution currency (declared params + return type, cheap):
+// high cap keeps it across chunk-boundary LRU trims so dependent chunks reuse it.
+#[salsa::tracked(lru = 262144)]
 pub fn proc_signature_query<'db>(
     db: &'db dyn HirDatabase,
     method_input: MethodIdInput<'db>,

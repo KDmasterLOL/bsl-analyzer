@@ -149,7 +149,10 @@ pub enum AnnotationKind {
     ChangeAndValidate,
 }
 
-#[salsa::tracked(lru = 512)]
+// Condensed module item index (no green-tree pin): feeds symbol/name resolution
+// across modules. High cap keeps it across chunk-boundary LRU trims so a later
+// chunk doesn't re-lower it from a re-parse.
+#[salsa::tracked(lru = 32768)]
 pub fn item_tree_query<'db>(
     db: &'db dyn base_db::RootQueryDb,
     file_id_input: base_db::FileIdInput<'db>,

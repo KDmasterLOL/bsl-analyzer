@@ -7,8 +7,12 @@ use hir_def::MethodIdInput;
 use crate::db::HirDatabase;
 use crate::infer::{BodyInferenceResult, InferenceContext};
 
+// Cross-module return-type currency: just a `TypeId` per entry, so a high cap is
+// cheap. Keeping it resident across the batch's chunk-boundary LRU trims lets a
+// later chunk read a callee's inferred return type instead of re-inferring its
+// whole body.
 #[salsa::tracked(
-    lru = 16384,
+    lru = 262144,
     cycle_fn = method_return_type_cycle,
     cycle_initial = method_return_type_initial,
 )]
