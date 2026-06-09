@@ -753,16 +753,58 @@ pub(crate) fn mdo_template_kind_for(mdo_type: MdoType) -> Option<MdoTemplateKind
     }
 }
 
-fn classify_attr<'a>(
+/// Folded (lowercased) bilingual attribute name -> spec, per template, for the
+/// `Object` view. Built once; replaces a per-call linear scan that re-lowercased
+/// every spec's Cyrillic `russian_name` on each attribute classification.
+fn standard_attr_object_index() -> &'static std::collections::HashMap<
+    MdoTemplateKind,
+    std::collections::HashMap<String, &'static bsl_platform::StandardAttrSpec>,
+> {
+    use std::collections::HashMap;
+    use std::sync::OnceLock;
+
+    static INDEX: OnceLock<
+        HashMap<MdoTemplateKind, HashMap<String, &'static bsl_platform::StandardAttrSpec>>,
+    > = OnceLock::new();
+
+    INDEX.get_or_init(|| {
+        const TEMPLATES: [MdoTemplateKind; 12] = [
+            MdoTemplateKind::Catalog,
+            MdoTemplateKind::Document,
+            MdoTemplateKind::BusinessProcess,
+            MdoTemplateKind::Task,
+            MdoTemplateKind::ChartOfAccounts,
+            MdoTemplateKind::ChartOfCharacteristicTypes,
+            MdoTemplateKind::ChartOfCalculationTypes,
+            MdoTemplateKind::ExchangePlan,
+            MdoTemplateKind::InformationRegister,
+            MdoTemplateKind::AccumulationRegister,
+            MdoTemplateKind::AccountingRegister,
+            MdoTemplateKind::CalculationRegister,
+        ];
+        TEMPLATES
+            .into_iter()
+            .map(|tmpl| {
+                let mut by_name: HashMap<String, &'static bsl_platform::StandardAttrSpec> =
+                    HashMap::new();
+                // First occurrence wins, matching the replaced `.iter().find()` scan.
+                for spec in standard_attributes_for(tmpl, ObjectView::Object) {
+                    by_name.entry(spec.kind.russian_name().to_lowercase()).or_insert(spec);
+                    by_name.entry(spec.kind.english_name().to_lowercase()).or_insert(spec);
+                }
+                (tmpl, by_name)
+            })
+            .collect()
+    })
+}
+
+fn classify_attr(
     template: Option<MdoTemplateKind>,
     attr_name: &str,
-) -> Option<&'a bsl_platform::StandardAttrSpec> {
+) -> Option<&'static bsl_platform::StandardAttrSpec> {
     let tmpl = template?;
     let needle = attr_name.to_lowercase();
-    standard_attributes_for(tmpl, ObjectView::Object).iter().find(|spec| {
-        spec.kind.russian_name().to_lowercase() == needle
-            || spec.kind.english_name().to_lowercase() == needle
-    })
+    standard_attr_object_index().get(&tmpl)?.get(&needle).copied()
 }
 
 fn push_unique(

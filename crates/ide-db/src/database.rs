@@ -632,8 +632,6 @@ impl RootDatabaseImpl {
             return resolve_in(ext_listing).or_else(|| resolve_in(main_listing));
         }
 
-        use bsl_metadata::traits::Module;
-
         let file_path = vfs_helpers::get_file_path(self, module_file_id)?;
         let file_path_lower = file_path.to_string_lossy().to_lowercase();
         let paths = RootDatabaseImpl::all_config_paths(self);
@@ -649,16 +647,15 @@ impl RootDatabaseImpl {
 
         let find_in = |root: &std::path::Path| -> Option<Arc<bsl_metadata::CommonModule>> {
             let config = load_at(root);
-            config
-                .common_modules()
-                .iter()
-                .find(|m| {
-                    m.uri().is_some_and(|uri| {
-                        root.join(uri).to_string_lossy().to_lowercase() == file_path_lower
-                    })
-                })
-                .cloned()
-                .map(Arc::new)
+            // `root.join(uri).to_lowercase() == file_path_lower` reduces to a relative
+            // lookup: strip the (lowercased) root prefix and match the module's folded
+            // root-relative URI, so the O(all-modules) per-call Cyrillic re-fold is gone.
+            // The separator between root and remainder is mandatory so a sibling whose
+            // name merely starts with the root (`/cfg` vs `/cfgX`) is not a false match.
+            let root_lower = root.to_string_lossy().to_lowercase();
+            let root_lower = root_lower.strip_suffix(['/', '\\']).unwrap_or(&root_lower);
+            let rel = file_path_lower.strip_prefix(root_lower)?.strip_prefix(['/', '\\'])?;
+            config.find_common_module_by_uri_lower(rel).cloned().map(Arc::new)
         };
 
         if paths.is_empty() {

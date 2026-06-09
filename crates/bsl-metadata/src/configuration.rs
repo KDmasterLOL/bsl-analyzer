@@ -55,6 +55,12 @@ pub struct Configuration {
     #[serde(skip)]
     uri_to_module: HashMap<String, usize>,
 
+    /// Lowercased common-module URI -> index, so a case-insensitive URI lookup is
+    /// O(1) instead of an O(all-modules) scan that re-lowercased every module's
+    /// (Cyrillic) joined path on each file resolution.
+    #[serde(skip)]
+    uri_lower_to_common_module: HashMap<String, usize>,
+
     #[serde(skip)]
     name_to_common_module: HashMap<String, usize>,
 
@@ -130,6 +136,7 @@ impl Configuration {
             roles: Vec::new(),
             subsystems: Vec::new(),
             uri_to_module: HashMap::new(),
+            uri_lower_to_common_module: HashMap::new(),
             name_to_common_module: HashMap::new(),
             name_to_register: HashMap::new(),
             name_to_event_subscription: HashMap::new(),
@@ -207,6 +214,7 @@ impl Configuration {
     #[allow(dead_code)]
     fn build_caches(&mut self) {
         self.uri_to_module.clear();
+        self.uri_lower_to_common_module.clear();
         self.name_to_common_module.clear();
         self.name_to_register.clear();
         self.name_to_event_subscription.clear();
@@ -228,6 +236,8 @@ impl Configuration {
         for (idx, module) in self.common_modules.iter().enumerate() {
             if let Some(uri) = module.uri() {
                 self.uri_to_module.insert(uri.to_string(), idx);
+                // First occurrence wins, matching the replaced `.iter().find()` scan.
+                self.uri_lower_to_common_module.entry(uri.to_lowercase()).or_insert(idx);
             }
             self.name_to_common_module.insert(module.name().to_lowercase(), idx);
         }
@@ -282,6 +292,12 @@ impl Configuration {
         self.name_to_common_module.get(&name_lower).and_then(|&idx| self.common_modules.get(idx))
     }
 
+    /// Case-insensitive lookup by root-relative URI. `uri_lower` must already be
+    /// lowercased by the caller (the relative path of the module body file).
+    pub fn find_common_module_by_uri_lower(&self, uri_lower: &str) -> Option<&CommonModule> {
+        self.uri_lower_to_common_module.get(uri_lower).and_then(|&idx| self.common_modules.get(idx))
+    }
+
     pub fn find_module_by_uri(&self, uri: &str) -> Option<&dyn Module> {
         self.uri_to_module
             .get(uri)
@@ -301,6 +317,8 @@ impl Configuration {
 
         if let Some(uri) = module.uri() {
             self.uri_to_module.insert(uri.to_string(), idx);
+            // First occurrence wins, matching the replaced `.iter().find()` scan.
+            self.uri_lower_to_common_module.entry(uri.to_lowercase()).or_insert(idx);
         }
         self.name_to_common_module.insert(module.name().to_lowercase(), idx);
 
@@ -614,6 +632,35 @@ mod tests {
         let found_uri = config.find_module_by_uri("CommonModules/TestModule/Ext/Module.bsl");
         assert!(found_uri.is_some());
         assert_eq!(found_uri.unwrap().name(), "TestModule");
+    }
+
+    #[test]
+    fn find_common_module_by_uri_lower_is_case_insensitive_and_first_wins() {
+        let mut config = Configuration::new("Test");
+
+        // Populated via the incremental `add_common_module` (disk-loader) path, not
+        // `build_caches`, so the folded URI index must be filled there too.
+        let first = CommonModule::builder()
+            .name("Первый")
+            .uri(Some("CommonModules/Первый/Ext/Module.bsl"))
+            .return_values_reuse(ReturnValueReuse::DuringRequest)
+            .build();
+        config.add_common_module(first);
+
+        // A second module colliding on the (lowercased) URI must not displace the first.
+        let shadow = CommonModule::builder()
+            .name("Второй")
+            .uri(Some("commonmodules/первый/ext/module.bsl"))
+            .return_values_reuse(ReturnValueReuse::DuringRequest)
+            .build();
+        config.add_common_module(shadow);
+
+        let needle = "CommonModules/Первый/Ext/Module.bsl".to_lowercase();
+        let found = config.find_common_module_by_uri_lower(&needle);
+        assert!(found.is_some(), "folded URI index must be populated via add_common_module");
+        assert_eq!(found.unwrap().name(), "Первый", "first occurrence wins on URI collision");
+
+        assert!(config.find_common_module_by_uri_lower("nope/missing.bsl").is_none());
     }
 
     #[test]
