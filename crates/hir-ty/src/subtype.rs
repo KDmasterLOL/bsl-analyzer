@@ -49,13 +49,17 @@ pub fn is_assignable(db: &dyn TypeKernelDb, from: TypeId, to: TypeId) -> bool {
         return true;
     }
 
+    if is_concrete_to_generic_platform_bridge(from_kind, to_kind) {
+        return true;
+    }
+
     if is_array_bridge(db, from_kind, to_kind) {
         return true;
     }
 
     if matches!(from_kind, TypeKind::ThisObject { .. } | TypeKind::ThisManager { .. }) {
         if let Some(coerced) = crate::this_object::coerce_to_metadata_ref_id(db, from) {
-            if coerced == to {
+            if is_assignable(db, coerced, to) {
                 return true;
             }
         }
@@ -114,15 +118,122 @@ fn is_tabular_row_bridge(a: &TypeKind, b: &TypeKind) -> bool {
 fn is_spreadsheet_area_bridge(from: &TypeKind, to: &TypeKind) -> bool {
     fn is_spreadsheet(t: &TypeKind) -> bool {
         matches!(t, TypeKind::PlatformObject(facet)
-            if facet.name.eq_ignore_ascii_case("ТабличныйДокумент")
-                || facet.name.eq_ignore_ascii_case("SpreadsheetDocument"))
+            if platform_name_eq_ci(&facet.name, "ТабличныйДокумент", "SpreadsheetDocument"))
     }
     fn is_area(t: &TypeKind) -> bool {
         matches!(t, TypeKind::PlatformObject(facet)
-            if facet.name.eq_ignore_ascii_case("ОбластьЯчеекТабличногоДокумента")
-                || facet.name.eq_ignore_ascii_case("SpreadsheetDocumentRange"))
+        if platform_name_eq_ci(
+            &facet.name,
+            "ОбластьЯчеекТабличногоДокумента",
+            "SpreadsheetDocumentRange",
+        ))
     }
     is_spreadsheet(from) && is_area(to)
+}
+
+/// BSL identifiers are case-insensitive and doc authors spell platform names
+/// in arbitrary case; `eq_ignore_ascii_case` folds only ASCII, so Cyrillic
+/// names need the full Unicode lowercase fold.
+fn platform_name_eq_ci(actual: &str, ru: &str, en: &str) -> bool {
+    actual.eq_ignore_ascii_case(en) || actual.to_lowercase() == ru.to_lowercase()
+}
+
+/// Vendor docs widely annotate parameters with a GENERIC platform name —
+/// ДокументМенеджер, СправочникОбъект, ТабличнаяЧасть, ДанныеФормыСтруктура —
+/// while the call site passes the concretely typed value, and by platform
+/// semantics the concrete value IS the generic (`Документы.X` is a
+/// `ДокументМенеджер`). One direction only: a generic value is never admitted
+/// where a concrete one is required, and concrete-vs-other-concrete keeps
+/// firing.
+fn is_concrete_to_generic_platform_bridge(from: &TypeKind, to: &TypeKind) -> bool {
+    let TypeKind::PlatformObject(to_facet) = to else {
+        return false;
+    };
+    let matches = |(ru, en): (&str, &str)| platform_name_eq_ci(&to_facet.name, ru, en);
+    match from {
+        TypeKind::ObjectManager(f) => generic_manager_names(f.mdo).is_some_and(matches),
+        TypeKind::ThisManager { owner, .. } => {
+            generic_manager_names(owner.mdo_type).is_some_and(matches)
+        }
+        TypeKind::ThisObject { owner, .. } => {
+            generic_object_names(owner.mdo_type).is_some_and(matches)
+        }
+        TypeKind::FormData { kind, .. } => {
+            let en = match kind {
+                bsl_types::facet::FormDataFacet::Structure => "FormDataStructure",
+                bsl_types::facet::FormDataFacet::Collection => "FormDataCollection",
+                bsl_types::facet::FormDataFacet::StructureWithCollection => {
+                    "FormDataStructureAndCollection"
+                }
+            };
+            matches((kind.platform_type_name(), en))
+        }
+        TypeKind::MetadataRef(f) => match f.kind {
+            MetadataKind::TabularSection { .. } => matches(("ТабличнаяЧасть", "TabularSection")),
+            kind => object_mdo_of_kind(kind).and_then(generic_object_names).is_some_and(matches),
+        },
+        _ => false,
+    }
+}
+
+fn object_mdo_of_kind(kind: MetadataKind) -> Option<bsl_metadata::MdoType> {
+    use bsl_metadata::MdoType as M;
+    match kind {
+        MetadataKind::CatalogObject => Some(M::Catalog),
+        MetadataKind::DocumentObject => Some(M::Document),
+        MetadataKind::TaskObject => Some(M::Task),
+        MetadataKind::BusinessProcessObject => Some(M::BusinessProcess),
+        MetadataKind::ExchangePlanObject => Some(M::ExchangePlan),
+        MetadataKind::ChartOfAccountsObject => Some(M::ChartOfAccounts),
+        MetadataKind::DataProcessorObject => Some(M::DataProcessor),
+        MetadataKind::ReportObject => Some(M::Report),
+        _ => None,
+    }
+}
+
+fn generic_manager_names(mdo: bsl_metadata::MdoType) -> Option<(&'static str, &'static str)> {
+    use bsl_metadata::MdoType as M;
+    Some(match mdo {
+        M::Catalog => ("СправочникМенеджер", "CatalogManager"),
+        M::Document => ("ДокументМенеджер", "DocumentManager"),
+        M::Enum => ("ПеречислениеМенеджер", "EnumManager"),
+        M::InformationRegister => ("РегистрСведенийМенеджер", "InformationRegisterManager"),
+        M::AccumulationRegister => ("РегистрНакопленияМенеджер", "AccumulationRegisterManager"),
+        M::AccountingRegister => ("РегистрБухгалтерииМенеджер", "AccountingRegisterManager"),
+        M::CalculationRegister => ("РегистрРасчетаМенеджер", "CalculationRegisterManager"),
+        M::ExchangePlan => ("ПланОбменаМенеджер", "ExchangePlanManager"),
+        M::ChartOfAccounts => ("ПланСчетовМенеджер", "ChartOfAccountsManager"),
+        M::ChartOfCharacteristicTypes => {
+            ("ПланВидовХарактеристикМенеджер", "ChartOfCharacteristicTypesManager")
+        }
+        M::ChartOfCalculationTypes => {
+            ("ПланВидовРасчетаМенеджер", "ChartOfCalculationTypesManager")
+        }
+        M::Task => ("ЗадачаМенеджер", "TaskManager"),
+        M::BusinessProcess => ("БизнесПроцессМенеджер", "BusinessProcessManager"),
+        M::DataProcessor => ("ОбработкаМенеджер", "DataProcessorManager"),
+        M::Report => ("ОтчетМенеджер", "ReportManager"),
+        _ => return None,
+    })
+}
+
+fn generic_object_names(mdo: bsl_metadata::MdoType) -> Option<(&'static str, &'static str)> {
+    use bsl_metadata::MdoType as M;
+    Some(match mdo {
+        M::Catalog => ("СправочникОбъект", "CatalogObject"),
+        M::Document => ("ДокументОбъект", "DocumentObject"),
+        M::Task => ("ЗадачаОбъект", "TaskObject"),
+        M::BusinessProcess => ("БизнесПроцессОбъект", "BusinessProcessObject"),
+        M::ExchangePlan => ("ПланОбменаОбъект", "ExchangePlanObject"),
+        M::ChartOfAccounts => ("ПланСчетовОбъект", "ChartOfAccountsObject"),
+        M::ChartOfCharacteristicTypes => {
+            ("ПланВидовХарактеристикОбъект", "ChartOfCharacteristicTypesObject")
+        }
+        M::ChartOfCalculationTypes => ("ПланВидовРасчетаОбъект", "ChartOfCalculationTypesObject"),
+        M::DataProcessor => ("ОбработкаОбъект", "DataProcessorObject"),
+        M::Report => ("ОтчетОбъект", "ReportObject"),
+        _ => return None,
+    })
 }
 
 fn is_array_bridge(db: &dyn TypeKernelDb, from: &TypeKind, to: &TypeKind) -> bool {
@@ -138,6 +249,15 @@ fn is_array_bridge(db: &dyn TypeKernelDb, from: &TypeKind, to: &TypeKind) -> boo
 
 pub fn is_coercible_to(db: &dyn TypeKernelDb, from: TypeId, to: TypeId) -> bool {
     if matches!(db.lookup_type(to), TypeKind::String(_)) {
+        return true;
+    }
+    // СообщитьПользователю and friends document the parameter as ЛюбаяСсылка
+    // yet are canonically called with ЭтотОбъект — БСП resolves the object to
+    // its ref internally. Argument-position policy only: in the lattice an
+    // object stays distinct from a ref.
+    if matches!(db.lookup_type(from), TypeKind::ThisObject { .. })
+        && matches!(db.lookup_type(to), TypeKind::AnyRef)
+    {
         return true;
     }
     // An argument of a union type is an over-approximation: at runtime exactly
@@ -182,8 +302,7 @@ pub fn is_coercible_to(db: &dyn TypeKernelDb, from: TypeId, to: TypeId) -> bool 
 
 fn is_binary_data(kind: &TypeKind) -> bool {
     matches!(kind, TypeKind::PlatformObject(facet)
-        if facet.name.eq_ignore_ascii_case("ДвоичныеДанные")
-            || facet.name.eq_ignore_ascii_case("BinaryData"))
+        if platform_name_eq_ci(&facet.name, "ДвоичныеДанные", "BinaryData"))
 }
 
 #[cfg(test)]
@@ -602,6 +721,114 @@ mod tests {
         let unrelated = db.platform_object("ТаблицаЗначений".to_string());
         assert!(!is_assignable(&db, spreadsheet, unrelated));
         assert!(!is_assignable(&db, unrelated, area));
+    }
+
+    #[test]
+    fn concrete_manager_assignable_to_generic_manager_one_way() {
+        let db = InMemoryDb::new();
+        let manager = db.object_manager(
+            bsl_metadata::MdoType::Document,
+            "ПКО".to_string(),
+            &bsl_types::testing::RootConfigCtx,
+        );
+        let generic_ru = db.platform_object("ДокументМенеджер".to_string());
+        let generic_en = db.platform_object("DocumentManager".to_string());
+        assert!(is_assignable(&db, manager, generic_ru));
+        assert!(is_assignable(&db, manager, generic_en));
+        assert!(
+            !is_assignable(&db, generic_ru, manager),
+            "a generic manager must not be admitted where a concrete one is required"
+        );
+        let wrong_kind = db.platform_object("СправочникМенеджер".to_string());
+        assert!(
+            !is_assignable(&db, manager, wrong_kind),
+            "a document manager is not a catalog manager"
+        );
+    }
+
+    #[test]
+    fn this_object_assignable_to_generic_object_name() {
+        let db = InMemoryDb::new();
+        let owner = bsl_types::facet::MdoRefFacet::new(
+            bsl_metadata::MdoType::Document,
+            "ЗаказДавальца".to_string(),
+        );
+        let this_object = db.mk_this_object(bsl_types::kind::ConfigId::Root, owner.clone());
+        let generic = db.platform_object("ДокументОбъект".to_string());
+        assert!(is_assignable(&db, this_object, generic));
+        let wrong = db.platform_object("СправочникОбъект".to_string());
+        assert!(!is_assignable(&db, this_object, wrong));
+
+        let this_manager = db.mk_this_manager(bsl_types::kind::ConfigId::Root, owner);
+        let generic_manager = db.platform_object("ДокументМенеджер".to_string());
+        assert!(is_assignable(&db, this_manager, generic_manager));
+    }
+
+    #[test]
+    fn tabular_section_assignable_to_generic_tabular_section() {
+        let db = InMemoryDb::new();
+        let ts = metadata_ref_id(
+            &db,
+            MetadataKind::TabularSection { parent: bsl_metadata::MdoType::Document },
+            "ЗаказДавальца.Товары",
+        );
+        assert!(is_assignable(&db, ts, db.platform_object("ТабличнаяЧасть".to_string())));
+        assert!(!is_assignable(&db, ts, db.platform_object("СправочникОбъект".to_string())));
+    }
+
+    #[test]
+    fn typed_form_data_assignable_to_generic_form_data_name() {
+        let db = InMemoryDb::new();
+        let owner = bsl_types::facet::MdoRefFacet::new(
+            bsl_metadata::MdoType::Document,
+            "Анкета".to_string(),
+        );
+        let typed = db.mk_form_data(bsl_types::facet::FormDataFacet::Structure, Some(owner));
+        let generic = db.platform_object("ДанныеФормыСтруктура".to_string());
+        assert!(is_assignable(&db, typed, generic));
+        let other = db.platform_object("ДанныеФормыКоллекция".to_string());
+        assert!(
+            !is_assignable(&db, typed, other),
+            "a structure is not a collection — only the matching generic name widens"
+        );
+    }
+
+    #[test]
+    fn generic_bridge_is_cyrillic_case_insensitive() {
+        let db = InMemoryDb::new();
+        let manager = db.object_manager(
+            bsl_metadata::MdoType::Document,
+            "ПКО".to_string(),
+            &bsl_types::testing::RootConfigCtx,
+        );
+        let lowercase = db.platform_object("документМенеджер".to_string());
+        assert!(
+            is_assignable(&db, manager, lowercase),
+            "BSL identifiers are case-insensitive, Cyrillic included"
+        );
+    }
+
+    #[test]
+    fn this_object_coercible_to_any_ref_argument_only() {
+        let db = InMemoryDb::new();
+        let owner = bsl_types::facet::MdoRefFacet::new(
+            bsl_metadata::MdoType::Document,
+            "ЗаказДавальца".to_string(),
+        );
+        let this_object = db.mk_this_object(bsl_types::kind::ConfigId::Root, owner.clone());
+        assert!(
+            is_coercible_to(&db, this_object, db.any_ref()),
+            "СообщитьПользователю(..., ЭтотОбъект, ...) is the canonical БСП call"
+        );
+        assert!(
+            !is_assignable(&db, this_object, db.any_ref()),
+            "in the lattice an object stays distinct from a ref"
+        );
+        let this_manager = db.mk_this_manager(bsl_types::kind::ConfigId::Root, owner);
+        assert!(
+            !is_coercible_to(&db, this_manager, db.any_ref()),
+            "a manager is not a ref under any policy"
+        );
     }
 
     #[test]

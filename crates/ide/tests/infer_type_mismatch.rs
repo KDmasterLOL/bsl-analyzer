@@ -634,6 +634,33 @@ fn type_mismatch_silent_on_get_area_result_into_area_param() {
 }
 
 #[test]
+fn type_mismatch_silent_on_concrete_manager_into_generic_manager_param() {
+    // Vendor doc shape: the param is annotated with the GENERIC platform name
+    // (ДокументМенеджер) while the call passes a concrete manager
+    // (Документы.Документ1) — by platform semantics the concrete IS the
+    // generic.
+    let fixture = r#"
+//- /CommonModules/ПервыйОбщийМодуль/Ext/Module.bsl
+// Параметры:
+//   МенеджерДокумента - ДокументМенеджер - менеджер документа.
+Процедура ПараметрыУказанияСерий(МенеджерДокумента) Экспорт
+КонецПроцедуры
+
+//- /test.bsl
+Процедура Тест()
+    ПервыйОбщийМодуль.ПараметрыУказанияСерий(Документы.Документ1);
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    let rendered = rendered_mismatches(&db, file_id);
+    assert!(
+        rendered.is_empty(),
+        "a concrete document manager satisfies a ДокументМенеджер-documented param, \
+         got {rendered:?}"
+    );
+}
+
+#[test]
 fn type_mismatch_fires_on_area_value_into_spreadsheet_param() {
     // The spreadsheet-area bridge is one-way: a value documented as
     // ОбластьЯчеекТабличногоДокумента must NOT be admitted where a full
