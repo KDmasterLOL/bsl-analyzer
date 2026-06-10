@@ -134,6 +134,9 @@ pub enum AttrValueKind {
     SelfRef,
     OwnerRef,
     AnyDocumentRef,
+    /// The `ОписаниеТипов` of a chart of characteristic types — its standard
+    /// `ТипЗначения` attribute.
+    TypeDescription,
     Unknown,
 }
 
@@ -324,7 +327,7 @@ static CHART_OF_CHARACTERISTIC_TYPES_OBJECT: &[StandardAttrSpec] = &[
     },
     StandardAttrSpec {
         kind: StandardKind::ValueType,
-        value: AttrValueKind::Unknown,
+        value: AttrValueKind::TypeDescription,
         condition: PresenceCondition::Always,
         is_readonly: false,
     },

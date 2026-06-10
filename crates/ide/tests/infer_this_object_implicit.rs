@@ -25,6 +25,11 @@ fn common_module_path() -> PathBuf {
     designer_fixture_path().join("CommonModules/ПервыйОбщийМодуль/Ext/Module.bsl")
 }
 
+fn chart_of_characteristic_types_object_module_path() -> PathBuf {
+    designer_fixture_path()
+        .join("ChartsOfCharacteristicTypes/ПланВидовХарактеристик1/Ext/ObjectModule.bsl")
+}
+
 fn data_processor_form_module_path() -> PathBuf {
     designer_fixture_path().join("DataProcessors/ТестоваяОбработка/Forms/Форма/Ext/Form/Module.bsl")
 }
@@ -47,6 +52,10 @@ fn setup_data_processor(text: &str) -> (RootDatabaseImpl, FileId) {
 
 fn setup_catalog(text: &str) -> (RootDatabaseImpl, FileId) {
     setup_at(catalog_object_module_path(), text)
+}
+
+fn setup_chart_of_characteristic_types(text: &str) -> (RootDatabaseImpl, FileId) {
+    setup_at(chart_of_characteristic_types_object_module_path(), text)
 }
 
 fn has_platform_data() -> bool {
@@ -224,6 +233,131 @@ fn implicit_tabular_section_method_not_found() {
 "#;
     let (db, file_id) = setup_data_processor(text);
     assert_eq!(unresolved_method_kinds(&db, file_id), vec![UnresolvedMethodKind::MethodNotFound]);
+}
+
+#[test]
+fn chart_of_characteristic_types_implicit_value_type_standard_attribute() {
+    if !has_platform_data() {
+        return;
+    }
+    // `ТипЗначения` is the План видов характеристик standard attribute (type
+    // ОписаниеТипов), reached implicitly via ЭтотОбъект, NOT a local variable.
+    let text = r#"
+Процедура ПередЗаписью(Отказ)
+    Если ТипЗначения.СодержитТип(Тип("СправочникСсылка.Справочник1")) Тогда
+    КонецЕсли;
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup_chart_of_characteristic_types(text);
+    assert!(
+        unresolved_method_kinds(&db, file_id).is_empty(),
+        "ТипЗначения.СодержитТип must resolve via the implicit object standard attribute, got {:?}",
+        unresolved_method_kinds(&db, file_id)
+    );
+}
+
+#[test]
+fn chart_of_characteristic_types_implicit_tabular_section_method() {
+    if !has_platform_data() {
+        return;
+    }
+    let text = r#"
+Процедура ПередЗаписью(Отказ)
+    Если ДоступныеОперации.Количество() > 0 Тогда
+        ДоступныеОперации.Очистить();
+    КонецЕсли;
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup_chart_of_characteristic_types(text);
+    assert!(
+        unresolved_method_kinds(&db, file_id).is_empty(),
+        "tabular-section .Количество()/.Очистить() must resolve on a ПВХ object, got {:?}",
+        unresolved_method_kinds(&db, file_id)
+    );
+}
+
+#[test]
+fn chart_of_characteristic_types_tabular_section_value_position() {
+    let text = r#"
+Функция Тест()
+    Р = ДоступныеОперации;
+    Возврат Р;
+КонецФункции
+"#;
+    let (db, file_id) = setup_chart_of_characteristic_types(text);
+    assert_metadata_ref(
+        &db,
+        var_ty(&db, file_id, "р"),
+        MetadataKind::TabularSection { parent: MdoType::ChartOfCharacteristicTypes },
+        "ПланВидовХарактеристик1.ДоступныеОперации",
+    );
+}
+
+#[test]
+fn chart_of_characteristic_types_implicit_ref_self_attribute() {
+    if !has_platform_data() {
+        return;
+    }
+    // `Ссылка` is the План видов характеристик standard self-reference, reached
+    // implicitly via ЭтотОбъект; its ref methods must resolve.
+    let text = r#"
+Процедура ПередЗаписью(Отказ)
+    Если Не Ссылка.Пустая() Тогда
+    КонецЕсли;
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup_chart_of_characteristic_types(text);
+    assert!(
+        unresolved_method_kinds(&db, file_id).is_empty(),
+        "Ссылка.Пустая() must resolve via the implicit object self-reference, got {:?}",
+        unresolved_method_kinds(&db, file_id)
+    );
+}
+
+#[test]
+fn chart_of_characteristic_types_ref_value_position() {
+    let text = r#"
+Функция Тест()
+    Р = Ссылка;
+    Возврат Р;
+КонецФункции
+"#;
+    let (db, file_id) = setup_chart_of_characteristic_types(text);
+    assert_metadata_ref(
+        &db,
+        var_ty(&db, file_id, "р"),
+        MetadataKind::ChartOfCharacteristicTypesRef,
+        "ПланВидовХарактеристик1",
+    );
+}
+
+#[test]
+fn chart_of_characteristic_types_manager_created_object_carries_kind() {
+    if !has_platform_data() {
+        return;
+    }
+    // A manager-created object (`СоздатьЭлемент()` → ПланВидовХарактеристикОбъект)
+    // must carry the concrete CCT object kind, so its standard attr resolves.
+    let text = r#"
+Функция Тест()
+    Об = ПланыВидовХарактеристик.ПланВидовХарактеристик1.СоздатьЭлемент();
+    Если Об.ТипЗначения.СодержитТип(Тип("СправочникСсылка.Справочник1")) Тогда
+    КонецЕсли;
+    Возврат Об;
+КонецФункции
+"#;
+    let (db, file_id) = setup_chart_of_characteristic_types(text);
+    assert_metadata_ref(
+        &db,
+        var_ty(&db, file_id, "об"),
+        MetadataKind::ChartOfCharacteristicTypesObject,
+        "ПланВидовХарактеристик1",
+    );
+    assert!(
+        unresolved_method_kinds(&db, file_id).is_empty(),
+        "created-object standard attr must resolve, got {:?}",
+        unresolved_method_kinds(&db, file_id)
+    );
 }
 
 #[test]

@@ -49,6 +49,8 @@ pub enum MetadataKind {
     ExchangePlanObject,
     ChartOfAccountsRef,
     ChartOfAccountsObject,
+    ChartOfCharacteristicTypesRef,
+    ChartOfCharacteristicTypesObject,
     InformationRegisterRef,
     AccumulationRegisterRef,
     AccountingRegisterRef,
@@ -72,6 +74,9 @@ impl MetadataKind {
             MdoType::BusinessProcess => Some(MetadataKind::BusinessProcessObject),
             MdoType::DataProcessor => Some(MetadataKind::DataProcessorObject),
             MdoType::Report => Some(MetadataKind::ReportObject),
+            MdoType::ChartOfCharacteristicTypes => {
+                Some(MetadataKind::ChartOfCharacteristicTypesObject)
+            }
             _ => None,
         }
     }
@@ -85,6 +90,9 @@ impl MetadataKind {
             MdoType::BusinessProcess => Some(MetadataKind::BusinessProcessRef),
             MdoType::ExchangePlan => Some(MetadataKind::ExchangePlanRef),
             MdoType::ChartOfAccounts => Some(MetadataKind::ChartOfAccountsRef),
+            MdoType::ChartOfCharacteristicTypes => {
+                Some(MetadataKind::ChartOfCharacteristicTypesRef)
+            }
             MdoType::InformationRegister => Some(MetadataKind::InformationRegisterRef),
             MdoType::AccumulationRegister => Some(MetadataKind::AccumulationRegisterRef),
             MdoType::AccountingRegister => Some(MetadataKind::AccountingRegisterRef),
@@ -112,6 +120,7 @@ impl MetadataKind {
             Self::BusinessProcessRef => Some(MdoType::BusinessProcess),
             Self::ExchangePlanRef => Some(MdoType::ExchangePlan),
             Self::ChartOfAccountsRef => Some(MdoType::ChartOfAccounts),
+            Self::ChartOfCharacteristicTypesRef => Some(MdoType::ChartOfCharacteristicTypes),
             Self::InformationRegisterRef => Some(MdoType::InformationRegister),
             Self::AccumulationRegisterRef => Some(MdoType::AccumulationRegister),
             Self::AccountingRegisterRef => Some(MdoType::AccountingRegister),
@@ -137,6 +146,8 @@ impl MetadataKind {
             Self::ExchangePlanObject => Some("ExchangePlanObject"),
             Self::ChartOfAccountsRef => Some("ChartOfAccountsRef"),
             Self::ChartOfAccountsObject => Some("ChartOfAccountsObject"),
+            Self::ChartOfCharacteristicTypesRef => Some("ChartOfCharacteristicTypesRef"),
+            Self::ChartOfCharacteristicTypesObject => Some("ChartOfCharacteristicTypesObject"),
             Self::InformationRegisterRecordManager => Some("InformationRegisterRecordManager"),
             Self::InformationRegisterRecordSet => Some("InformationRegisterRecordSet"),
             Self::AccumulationRegisterRecordSet => Some("AccumulationRegisterRecordSet"),
@@ -199,6 +210,10 @@ impl MetadataKind {
             (Self::ChartOfAccountsRef, true) => "ChartOfAccountsRef",
             (Self::ChartOfAccountsObject, false) => "ПланСчетовОбъект",
             (Self::ChartOfAccountsObject, true) => "ChartOfAccountsObject",
+            (Self::ChartOfCharacteristicTypesRef, false) => "ПланВидовХарактеристикСсылка",
+            (Self::ChartOfCharacteristicTypesRef, true) => "ChartOfCharacteristicTypesRef",
+            (Self::ChartOfCharacteristicTypesObject, false) => "ПланВидовХарактеристикОбъект",
+            (Self::ChartOfCharacteristicTypesObject, true) => "ChartOfCharacteristicTypesObject",
             (Self::InformationRegisterRef, false) => "РегистрСведенийКлючЗаписи",
             (Self::InformationRegisterRef, true) => "InformationRegisterRef",
             (Self::InformationRegisterRecordManager, false) => "РегистрСведенийМенеджерЗаписи",

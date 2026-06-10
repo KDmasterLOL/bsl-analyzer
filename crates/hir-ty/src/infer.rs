@@ -2045,6 +2045,10 @@ fn mdo_kind_to_plural(kind: hir_def::ty::MetadataKind) -> Option<&'static str> {
         MetadataKind::ChartOfAccountsRef | MetadataKind::ChartOfAccountsObject => {
             bsl_metadata::MdoType::ChartOfAccounts
         }
+        MetadataKind::ChartOfCharacteristicTypesRef
+        | MetadataKind::ChartOfCharacteristicTypesObject => {
+            bsl_metadata::MdoType::ChartOfCharacteristicTypes
+        }
         MetadataKind::InformationRegisterRecordManager
         | MetadataKind::InformationRegisterRecordSet => bsl_metadata::MdoType::InformationRegister,
         MetadataKind::AccumulationRegisterRecordSet => bsl_metadata::MdoType::AccumulationRegister,

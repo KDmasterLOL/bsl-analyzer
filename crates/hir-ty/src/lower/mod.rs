@@ -175,6 +175,12 @@ fn metadata_kind_from_prefix(prefix: &str) -> Option<MetadataKind> {
         "chartofaccountsobject" | "плансчетовобъект" => {
             Some(MetadataKind::ChartOfAccountsObject)
         }
+        "chartofcharacteristictypesref" | "планвидовхарактеристикссылка" => {
+            Some(MetadataKind::ChartOfCharacteristicTypesRef)
+        }
+        "chartofcharacteristictypesobject" | "планвидовхарактеристикобъект" => {
+            Some(MetadataKind::ChartOfCharacteristicTypesObject)
+        }
         "informationregisterrecordmanager" | "регистрсведенийменеджерзаписи" => {
             Some(MetadataKind::InformationRegisterRecordManager)
         }
@@ -348,9 +354,7 @@ mod tests {
 
     #[test]
     fn ty_lowering_qualified_unmodelled_prefix_is_unknown() {
-        for prefix in
-            ["ChartOfCharacteristicTypesRef", "ChartOfCalculationTypesRef", "ConstantValueManager"]
-        {
+        for prefix in ["ChartOfCalculationTypesRef", "ConstantValueManager"] {
             let db = InMemoryDb::new();
             let qname = QualifiedName::from_segments([Name::new(prefix), Name::new("Х")]);
             assert_eq!(
@@ -372,6 +376,10 @@ mod tests {
             ("ПланСчетовСсылка", MetadataKind::ChartOfAccountsRef),
             ("ChartOfAccountsObject", MetadataKind::ChartOfAccountsObject),
             ("ПланСчетовОбъект", MetadataKind::ChartOfAccountsObject),
+            ("ChartOfCharacteristicTypesObject", MetadataKind::ChartOfCharacteristicTypesObject),
+            ("ПланВидовХарактеристикОбъект", MetadataKind::ChartOfCharacteristicTypesObject),
+            ("ChartOfCharacteristicTypesRef", MetadataKind::ChartOfCharacteristicTypesRef),
+            ("ПланВидовХарактеристикСсылка", MetadataKind::ChartOfCharacteristicTypesRef),
         ] {
             let db = InMemoryDb::new();
             let qname = QualifiedName::from_segments([Name::new(prefix), Name::new("Х")]);

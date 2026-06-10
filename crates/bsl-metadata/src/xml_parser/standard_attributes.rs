@@ -93,6 +93,7 @@ fn build_attr_type(spec: &StandardAttrSpec, p: &MdoProperties, mdo_type: MdoType
         AttrValueKind::AnyDocumentRef => {
             AttributeType::AnyObjectRef { mdo_type: MdoType::Document }
         }
+        AttrValueKind::TypeDescription => AttributeType::PlatformNamed("ОписаниеТипов".to_string()),
         AttrValueKind::Unknown => AttributeType::Unknown,
     }
 }

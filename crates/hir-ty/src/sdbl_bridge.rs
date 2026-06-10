@@ -59,6 +59,7 @@ fn ref_kind_for(mdo: MdoType) -> Option<MetadataKind> {
         MdoType::BusinessProcess => MetadataKind::BusinessProcessRef,
         MdoType::ExchangePlan => MetadataKind::ExchangePlanRef,
         MdoType::ChartOfAccounts => MetadataKind::ChartOfAccountsRef,
+        MdoType::ChartOfCharacteristicTypes => MetadataKind::ChartOfCharacteristicTypesRef,
         MdoType::InformationRegister => MetadataKind::InformationRegisterRef,
         MdoType::AccumulationRegister => MetadataKind::AccumulationRegisterRef,
         MdoType::AccountingRegister => MetadataKind::AccountingRegisterRef,
@@ -397,12 +398,29 @@ mod tests {
     fn ref_without_matching_metadata_kind_falls_to_any_metadata_ref() {
         let db = InMemoryDb::new();
         let r = SdblType::Ref(sdbl_hir::MdoRef::new(
+            MdoType::ChartOfCalculationTypes,
+            "ОсновныеНачисления",
+        ));
+        assert_eq!(
+            sdbl_type_to_typeid(&db, &r),
+            db.any_metadata_ref(MdoType::ChartOfCalculationTypes),
+        );
+    }
+
+    #[test]
+    fn chart_of_characteristic_types_ref_lowers_to_concrete_metadata_ref() {
+        let db = InMemoryDb::new();
+        let r = SdblType::Ref(sdbl_hir::MdoRef::new(
             MdoType::ChartOfCharacteristicTypes,
             "ВидыНоменклатуры",
         ));
         assert_eq!(
             sdbl_type_to_typeid(&db, &r),
-            db.any_metadata_ref(MdoType::ChartOfCharacteristicTypes),
+            db.metadata_ref(
+                MetadataKind::ChartOfCharacteristicTypesRef,
+                "ВидыНоменклатуры".to_string(),
+                &RootConfigCtx,
+            ),
         );
     }
 

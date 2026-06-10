@@ -80,7 +80,7 @@ pub(crate) fn lookup_predefined(
     let mdo = find_mdo(resolver, kind, owner_name)?;
     let hit = match kind {
         MdoType::Enum => mdo.find_enum_value(member_name.as_str()).is_some(),
-        MdoType::Catalog | MdoType::ChartOfAccounts => {
+        MdoType::Catalog | MdoType::ChartOfAccounts | MdoType::ChartOfCharacteristicTypes => {
             mdo.find_predefined_item(member_name.as_str()).is_some()
         }
         _ => false,
@@ -97,6 +97,7 @@ fn predefined_ref_kind_for(kind: MdoType) -> Option<MetadataKind> {
         MdoType::Enum => Some(MetadataKind::EnumRef),
         MdoType::Catalog => Some(MetadataKind::CatalogRef),
         MdoType::ChartOfAccounts => Some(MetadataKind::ChartOfAccountsRef),
+        MdoType::ChartOfCharacteristicTypes => Some(MetadataKind::ChartOfCharacteristicTypesRef),
         _ => None,
     }
 }
@@ -159,6 +160,18 @@ mod tests {
 
     fn chart_of_accounts(name: &str, predefined: Vec<&str>) -> MetadataObject {
         let mut mdo = MetadataObject::new(MdoType::ChartOfAccounts, name);
+        for n in predefined {
+            mdo.predefined_items.push(PredefinedItem {
+                name: n.to_string(),
+                name_en: None,
+                uuid: String::new(),
+            });
+        }
+        mdo
+    }
+
+    fn chart_of_characteristic_types(name: &str, predefined: Vec<&str>) -> MetadataObject {
+        let mut mdo = MetadataObject::new(MdoType::ChartOfCharacteristicTypes, name);
         for n in predefined {
             mdo.predefined_items.push(PredefinedItem {
                 name: n.to_string(),
@@ -290,6 +303,37 @@ mod tests {
             db.metadata_ref(
                 MetadataKind::ChartOfAccountsRef,
                 "Хозрасчетный".to_string(),
+                &RootConfigCtx,
+            )
+        );
+    }
+
+    #[test]
+    fn lookup_chart_of_characteristic_types_predefined_resolves_to_ref() {
+        let mut config = Configuration::new("Test");
+        config.add_metadata_object(chart_of_characteristic_types(
+            "СтатьиРасходов",
+            vec!["ОсновноеПодразделение"],
+        ));
+        let configs = wrap(config);
+        let db = InMemoryDb::new();
+
+        let info = lookup_manager_field(
+            &db,
+            &configs,
+            db.object_manager(
+                MdoType::ChartOfCharacteristicTypes,
+                "СтатьиРасходов".to_string(),
+                &RootConfigCtx,
+            ),
+            &Name::new("ОсновноеПодразделение"),
+        )
+        .expect("chart-of-characteristic-types predefined item must resolve");
+        assert_eq!(
+            info.ty,
+            db.metadata_ref(
+                MetadataKind::ChartOfCharacteristicTypesRef,
+                "СтатьиРасходов".to_string(),
                 &RootConfigCtx,
             )
         );

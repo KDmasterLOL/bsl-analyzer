@@ -147,6 +147,8 @@ pub(crate) fn metadata_kind_to_prefix_and_mdo(
         MetadataKind::ChartOfAccountsRef | MetadataKind::ChartOfAccountsObject => {
             MdoType::ChartOfAccounts
         }
+        MetadataKind::ChartOfCharacteristicTypesRef
+        | MetadataKind::ChartOfCharacteristicTypesObject => MdoType::ChartOfCharacteristicTypes,
         MetadataKind::InformationRegisterRecordManager
         | MetadataKind::InformationRegisterRecordSet
         | MetadataKind::InformationRegisterRecord => MdoType::InformationRegister,
@@ -209,6 +211,14 @@ pub(crate) fn map_generic_metadata_return_type(
         ("ПланСчетовОбъект" | "ChartOfAccountsObject", MdoType::ChartOfAccounts) => {
             MetadataKind::ChartOfAccountsObject
         }
+        (
+            "ПланВидовХарактеристикСсылка" | "ChartOfCharacteristicTypesRef",
+            MdoType::ChartOfCharacteristicTypes,
+        ) => MetadataKind::ChartOfCharacteristicTypesRef,
+        (
+            "ПланВидовХарактеристикОбъект" | "ChartOfCharacteristicTypesObject",
+            MdoType::ChartOfCharacteristicTypes,
+        ) => MetadataKind::ChartOfCharacteristicTypesObject,
         ("ЗадачаОбъект" | "TaskObject", MdoType::Task) => MetadataKind::TaskObject,
         ("БизнесПроцессОбъект" | "BusinessProcessObject", MdoType::BusinessProcess) => {
             MetadataKind::BusinessProcessObject
