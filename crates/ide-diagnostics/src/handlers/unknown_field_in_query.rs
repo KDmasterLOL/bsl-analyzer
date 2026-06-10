@@ -189,6 +189,45 @@ mod tests {
     }
 
     #[test]
+    fn negative_document_point_in_time() {
+        // МоментВремени is a query-only virtual field of document tables.
+        check_with_designer(
+            "ВЫБРАТЬ Т.МоментВремени ИЗ Документ.Документ1 КАК Т",
+            expect![[r#""#]],
+        );
+    }
+
+    #[test]
+    fn negative_chart_of_accounts_standard_fields() {
+        // Родитель is unconditional (no Hierarchical property in the XML);
+        // Вид/Забалансовый/accounting flags/ВидыСубконто are account-row fields.
+        check_with_designer(
+            "ВЫБРАТЬ Т.Родитель, Т.Порядок, Т.Вид, Т.Забалансовый, Т.Валютный, Т.ВидыСубконто ИЗ ПланСчетов.ПланСчетов1 КАК Т",
+            expect![[r#""#]],
+        );
+    }
+
+    #[test]
+    fn negative_chart_of_accounts_ext_dimension_table() {
+        check_with_designer(
+            "ВЫБРАТЬ Т.НомерСтроки, Т.ВидСубконто, Т.Предопределенное, Т.ТолькоОбороты, Т.Суммовой ИЗ ПланСчетов.ПланСчетов1.ВидыСубконто КАК Т",
+            expect![[r#""#]],
+        );
+    }
+
+    #[test]
+    fn positive_unknown_field_on_chart_of_accounts() {
+        // The chart-of-accounts model is exhaustive, so the gate stays on.
+        check_with_designer(
+            "ВЫБРАТЬ Т.НетТакогоПоля ИЗ ПланСчетов.ПланСчетов1 КАК Т",
+            expect![[r#"
+                UnknownFieldInQuery @ 3:31..3:44
+                  message: Поле "НетТакогоПоля" не найдено в таблице "ПланСчетов.ПланСчетов1" запроса
+                  severity: Blocker"#]],
+        );
+    }
+
+    #[test]
     fn bilingual_unknown_field_english_table() {
         check_with_designer(
             "SELECT T.NoSuchField FROM Catalog.Справочник1 AS T",

@@ -839,6 +839,18 @@ impl LoweringContext<'_> {
                         SdblType::string(),
                     ));
 
+                    // МоментВремени is a query-only virtual field of document
+                    // tables (date + ref); it has no BSL object-model
+                    // counterpart, so it lives here rather than in the
+                    // standard-attribute synthesiser.
+                    if mdo_type == MdoType::Document {
+                        fields.push(FieldDef::standard(
+                            "МоментВремени",
+                            "PointInTime",
+                            SdblType::DateTime,
+                        ));
+                    }
+
                     // Tabular-section names are valid columns of the parent
                     // (ITS ch.26, type РезультатЗапроса).
                     for ts in &obj.tabular_sections {
@@ -862,7 +874,12 @@ impl LoweringContext<'_> {
                         total_fields = fields.len(),
                         "Added metadata fields to object"
                     );
-                    true
+                    // Charts of calculation types are loaded through the generic
+                    // object parser, which synthesises no standard attributes for
+                    // them (Ссылка/Код/Наименование/… are missing), so the field
+                    // set is not exhaustive and must not drive the unknown-field
+                    // diagnostic.
+                    mdo_type != MdoType::ChartOfCalculationTypes
                 } else {
                     tracing::debug!(
                         full_name = %full_name,

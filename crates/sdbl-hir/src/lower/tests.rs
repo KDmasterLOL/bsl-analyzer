@@ -971,6 +971,37 @@ fn hierarchical_catalog_parent_field_is_resolved() {
 }
 
 #[test]
+fn chart_of_calculation_types_unknown_field_gate_stays_off() {
+    // Charts of calculation types are loaded through the generic object parser,
+    // which synthesises no standard attributes (Ссылка/Код/… are missing from
+    // the model), so unknown-field must not fire on their tables.
+    let mut config = bsl_metadata::Configuration::new("TestConfig");
+    let mut mdo = bsl_metadata::MetadataObject::new(
+        bsl_metadata::MdoType::ChartOfCalculationTypes,
+        "ОсновныеНачисления",
+    );
+    mdo.add_attribute(bsl_metadata::Attribute {
+        name: "СпособРасчета".to_string(),
+        name_en: None,
+        attr_type: bsl_metadata::AttributeType::Unknown,
+    });
+    config.add_metadata_object(mdo);
+
+    let code = "ВЫБРАТЬ Т.Ссылка, Т.СпособРасчета ИЗ ПланВидовРасчета.ОсновныеНачисления КАК Т";
+    let ast = parser::parse_sdbl(code);
+    let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(config)));
+
+    let unknown_diags: Vec<_> = package
+        .all_diagnostics()
+        .filter(|diag| matches!(diag, crate::diagnostics::SdblDiagnostic::UnknownField { .. }))
+        .collect();
+    assert!(
+        unknown_diags.is_empty(),
+        "incomplete calc-type model must keep the gate off: {unknown_diags:?}"
+    );
+}
+
+#[test]
 fn hierarchical_catalog_parent_field_resolves_by_english_name() {
     let catalog_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
 <MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">

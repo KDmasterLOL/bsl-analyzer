@@ -279,6 +279,21 @@ pub(crate) fn add_chart_of_accounts_standard_attributes(
         MdoTemplateKind::ChartOfAccounts,
         ObjectView::Object,
     );
+    // `Вид` and `Забалансовый` are standard chart-of-accounts fields, but they are
+    // deliberately NOT StandardAttributeKind members: `is_standard_attribute_name`
+    // is a name-only global set, and «Вид» is a common user attribute name on other
+    // objects — listing it there would hide those user attributes from every
+    // standard-name filter (graph catalog, SDBL scope builder).
+    attributes.push(Attribute {
+        name: "Вид".to_string(),
+        name_en: Some("Type".to_string()),
+        attr_type: AttributeType::PlatformNamed("ВидСчета".to_string()),
+    });
+    attributes.push(Attribute {
+        name: "Забалансовый".to_string(),
+        name_en: Some("OffBalance".to_string()),
+        attr_type: AttributeType::Boolean,
+    });
 }
 
 pub(crate) fn add_information_register_standard_attributes_as_attrs(

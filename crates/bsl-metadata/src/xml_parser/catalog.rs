@@ -1,6 +1,6 @@
 use crate::enums::CodeSeries;
 use crate::error::{MetadataError, Result};
-use crate::metadata_object::{Attribute, MdoType, MetadataObject};
+use crate::metadata_object::{Attribute, AttributeType, MdoType, MetadataObject};
 use crate::tabular_section::{TabularSection, TabularSectionAttribute};
 use std::str::FromStr;
 
@@ -109,15 +109,27 @@ fn parse_metadata_object_xml(xml: &str, mdo_type: MdoType) -> Result<MetadataObj
         _ => {}
     }
 
+    let mut ext_dimension_flags = Vec::new();
     if let Some(child_objects) = find_child(mdo_node, "ChildObjects") {
         for child in child_objects.children().filter(|n| n.is_element()) {
             match child.tag_name().name() {
                 // `AddressingAttribute` is a Task's addressing requisite
                 // (Исполнитель, РольИсполнителя, …) — same `Properties>Name>Type`
                 // shape as a regular attribute and a real member of the task
-                // object, so resolve it like one.
-                "Attribute" | "Resource" | "Dimension" | "AddressingAttribute" => {
+                // object, so resolve it like one. `AccountingFlag` is a
+                // chart-of-accounts accounting flag — a Boolean column of the
+                // account itself, same node shape.
+                "Attribute"
+                | "Resource"
+                | "Dimension"
+                | "AddressingAttribute"
+                | "AccountingFlag" => {
                     attributes.push(parse_attribute_node(child)?);
+                }
+                // Ext-dimension accounting flags are columns of the implicit
+                // ВидыСубконто tabular section, not of the account row.
+                "ExtDimensionAccountingFlag" => {
+                    ext_dimension_flags.push(parse_attribute_node(child)?);
                 }
                 "TabularSection" => {
                     tabular_sections.push(parse_tabular_section_node(child)?);
@@ -125,6 +137,10 @@ fn parse_metadata_object_xml(xml: &str, mdo_type: MdoType) -> Result<MetadataObj
                 _ => {}
             }
         }
+    }
+
+    if mdo_type == MdoType::ChartOfAccounts {
+        tabular_sections.push(build_ext_dimension_types_section(props_node, ext_dimension_flags));
     }
 
     let mut mdo = MetadataObject::new(mdo_type, properties.name.clone());
@@ -166,6 +182,46 @@ fn parse_metadata_object_xml(xml: &str, mdo_type: MdoType) -> Result<MetadataObj
     );
 
     Ok(mdo)
+}
+
+/// The implicit `ВидыСубконто` tabular section every chart of accounts carries.
+/// Its row holds the ext-dimension kind (typed by the `ExtDimensionTypes`
+/// chart-of-characteristic-types property), the predefined/turnovers-only flags
+/// and one column per ext-dimension accounting flag declared in the XML;
+/// `НомерСтроки`/`Ссылка` come from the generic tabular-section machinery.
+fn build_ext_dimension_types_section(
+    props_node: roxmltree::Node<'_, '_>,
+    ext_dimension_flags: Vec<Attribute>,
+) -> TabularSection {
+    let ext_dim_kind_type = child_text(props_node, "ExtDimensionTypes")
+        .and_then(|raw| {
+            let (prefix, name) = raw.split_once('.')?;
+            let mdo_type = MdoType::from_str(prefix).ok()?;
+            Some(AttributeType::Ref { mdo_type, name: name.to_string() })
+        })
+        .unwrap_or(AttributeType::Unknown);
+
+    let nil_uuid = uuid::Uuid::nil();
+    let mut section = TabularSection::new(nil_uuid, "ВидыСубконто");
+    section.set_name_en(Some("ExtDimensionTypes".to_string()));
+
+    let mut columns = Vec::new();
+    for (name, name_en, attr_type) in [
+        ("ВидСубконто", "ExtDimensionType", ext_dim_kind_type),
+        ("Предопределенное", "Predefined", AttributeType::Boolean),
+        ("ТолькоОбороты", "TurnoversOnly", AttributeType::Boolean),
+    ] {
+        let mut column = TabularSectionAttribute::new(nil_uuid, name, attr_type);
+        column.set_name_en(Some(name_en.to_string()));
+        columns.push(column);
+    }
+    for flag in ext_dimension_flags {
+        let mut column = TabularSectionAttribute::new(nil_uuid, flag.name, flag.attr_type);
+        column.set_name_en(flag.name_en);
+        columns.push(column);
+    }
+    section.set_attributes(columns);
+    section
 }
 
 fn parse_register_records(props_node: roxmltree::Node<'_, '_>) -> Vec<(MdoType, String)> {
@@ -307,6 +363,69 @@ mod tests {
         assert_eq!(
             mdo.uuid().map(|u| u.to_string()),
             Some("9de71b46-e9bf-4b0b-8f3c-4abcd6a385dd".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_chart_of_accounts_xml_builds_full_account_row() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.20">
+    <ChartOfAccounts uuid="b1c40e57-2a31-44f0-9c91-1d70f25ad101">
+        <Properties>
+            <Name>Хозрасчетный</Name>
+            <ExtDimensionTypes>ChartOfCharacteristicTypes.ВидыСубконто1</ExtDimensionTypes>
+            <CodeLength>10</CodeLength>
+            <DescriptionLength>50</DescriptionLength>
+        </Properties>
+        <ChildObjects>
+            <Attribute uuid="11111111-1111-1111-1111-111111111111">
+                <Properties>
+                    <Name>Долгосрочный</Name>
+                    <Type><v8:Type>xs:boolean</v8:Type></Type>
+                </Properties>
+            </Attribute>
+            <AccountingFlag uuid="22222222-2222-2222-2222-222222222222">
+                <Properties>
+                    <Name>Валютный</Name>
+                    <Type><v8:Type>xs:boolean</v8:Type></Type>
+                </Properties>
+            </AccountingFlag>
+            <ExtDimensionAccountingFlag uuid="33333333-3333-3333-3333-333333333333">
+                <Properties>
+                    <Name>Суммовой</Name>
+                    <Type><v8:Type>xs:boolean</v8:Type></Type>
+                </Properties>
+            </ExtDimensionAccountingFlag>
+        </ChildObjects>
+    </ChartOfAccounts>
+</MetaDataObject>"#;
+        let mdo = parse_chart_of_accounts_xml(xml).unwrap();
+        let names: Vec<&str> = mdo.attributes.iter().map(|a| a.name.as_str()).collect();
+        for expected in ["Родитель", "Порядок", "Вид", "Забалансовый", "Валютный", "Долгосрочный"]
+        {
+            assert!(names.contains(&expected), "account row must have {expected}: {names:?}");
+        }
+        assert!(!names.contains(&"ЭтоГруппа"), "charts of accounts have no folders: {names:?}");
+        assert!(
+            !names.contains(&"Суммовой"),
+            "ext-dimension flag belongs to ВидыСубконто, not the account row: {names:?}"
+        );
+
+        let subkonto =
+            mdo.find_tabular_section("ВидыСубконто").expect("implicit ВидыСубконто section");
+        let columns: Vec<&str> = subkonto.attributes().iter().map(|a| a.name()).collect();
+        for expected in ["ВидСубконто", "Предопределенное", "ТолькоОбороты", "Суммовой"]
+        {
+            assert!(columns.contains(&expected), "ВидыСубконто must have {expected}: {columns:?}");
+        }
+        let kind_column = subkonto.attributes().iter().find(|a| a.name() == "ВидСубконто").unwrap();
+        assert_eq!(
+            kind_column.attr_type(),
+            &AttributeType::Ref {
+                mdo_type: MdoType::ChartOfCharacteristicTypes,
+                name: "ВидыСубконто1".to_string()
+            },
+            "ВидСубконто is typed by the ExtDimensionTypes property"
         );
     }
 

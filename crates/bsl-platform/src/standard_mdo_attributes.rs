@@ -355,16 +355,13 @@ static CHART_OF_ACCOUNTS_OBJECT: &[StandardAttrSpec] = &[
         condition: PresenceCondition::HasDescription,
         is_readonly: false,
     },
-    StandardAttrSpec {
-        kind: StandardKind::IsFolder,
-        value: AttrValueKind::Boolean,
-        condition: PresenceCondition::Hierarchical,
-        is_readonly: false,
-    },
+    // A chart of accounts is always hierarchical (accounts/sub-accounts) and its
+    // XML carries no `Hierarchical` property, so `Родитель` is unconditional.
+    // There is no `ЭтоГруппа` field at all: the hierarchy has no folder rows.
     StandardAttrSpec {
         kind: StandardKind::Parent,
         value: AttrValueKind::SelfRef,
-        condition: PresenceCondition::Hierarchical,
+        condition: PresenceCondition::Always,
         is_readonly: false,
     },
     StandardAttrSpec {
@@ -725,6 +722,21 @@ mod tests {
         let kinds: Vec<StandardKind> = specs.iter().map(|s| s.kind).collect();
         assert!(kinds.contains(&StandardKind::Order));
         assert!(kinds.contains(&StandardKind::Ref));
+    }
+
+    #[test]
+    fn chart_of_accounts_parent_is_unconditional_and_no_folder_flag() {
+        let specs = standard_attributes_for(MdoTemplateKind::ChartOfAccounts, ObjectView::Object);
+        let parent = specs.iter().find(|s| s.kind == StandardKind::Parent).unwrap();
+        assert_eq!(
+            parent.condition,
+            PresenceCondition::Always,
+            "chart-of-accounts XML has no Hierarchical property; Родитель must not be gated on it"
+        );
+        assert!(
+            !specs.iter().any(|s| s.kind == StandardKind::IsFolder),
+            "chart-of-accounts tables have no ЭтоГруппа field"
+        );
     }
 
     #[test]
