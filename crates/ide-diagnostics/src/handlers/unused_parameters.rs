@@ -357,6 +357,7 @@ mod tests {
             form: Some(Arc::new(form)),
             http_service: None,
             web_service: None,
+            integration_service: None,
         };
 
         let diagnostics =
@@ -405,6 +406,7 @@ mod tests {
             form: None,
             http_service: Some(Arc::new(http_service)),
             web_service: None,
+            integration_service: None,
         };
 
         let diagnostics =

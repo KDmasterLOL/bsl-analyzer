@@ -506,11 +506,23 @@ pub fn get_module_type_from_uri(file_uri: &str) -> Option<bsl_metadata::ModuleTy
         return None;
     }
 
-    if parts.len() >= 2
-        && parts[parts.len() - 2] == "Ext"
-        && parts[parts.len() - 1] == "ManagedApplicationModule.bsl"
-    {
-        return Some(bsl_metadata::ModuleType::ManagedApplicationModule);
+    if parts.len() >= 2 && parts[parts.len() - 2] == "Ext" {
+        match parts[parts.len() - 1] {
+            "ManagedApplicationModule.bsl" => {
+                return Some(bsl_metadata::ModuleType::ManagedApplicationModule);
+            }
+            "OrdinaryApplicationModule.bsl" => {
+                return Some(bsl_metadata::ModuleType::OrdinaryApplicationModule);
+            }
+            "ApplicationModule.bsl" => {
+                return Some(bsl_metadata::ModuleType::ApplicationModule);
+            }
+            "SessionModule.bsl" => return Some(bsl_metadata::ModuleType::SessionModule),
+            "ExternalConnectionModule.bsl" => {
+                return Some(bsl_metadata::ModuleType::ExternalConnectionModule);
+            }
+            _ => {}
+        }
     }
 
     if let Some(cm_idx) = parts.iter().position(|&p| p == "CommonModules") {
@@ -528,6 +540,12 @@ pub fn get_module_type_from_uri(file_uri: &str) -> Option<bsl_metadata::ModuleTy
     if let Some(idx) = parts.iter().position(|&p| p == "WebServices") {
         if parts.len() >= idx + 4 {
             return Some(bsl_metadata::ModuleType::WebServiceModule);
+        }
+    }
+
+    if let Some(idx) = parts.iter().position(|&p| p == "IntegrationServices") {
+        if parts.len() >= idx + 4 {
+            return Some(bsl_metadata::ModuleType::IntegrationServiceModule);
         }
     }
 
@@ -816,6 +834,7 @@ pub fn build_module_metadata(
     let mut form = None;
     let mut http_service = None;
     let mut web_service = None;
+    let mut integration_service = None;
 
     if let Some(config) = configuration {
         match module_type {
@@ -858,6 +877,9 @@ pub fn build_module_metadata(
             bsl_metadata::ModuleType::WebServiceModule => {
                 web_service = find_web_service_by_path(config, file_path);
             }
+            bsl_metadata::ModuleType::IntegrationServiceModule => {
+                integration_service = find_integration_service_by_path(config, file_path);
+            }
             _ => {}
         }
     }
@@ -875,6 +897,7 @@ pub fn build_module_metadata(
         form,
         http_service,
         web_service,
+        integration_service,
     }
 }
 
@@ -906,6 +929,21 @@ pub(crate) fn find_web_service_by_path(
     let name = parts.get(ws_idx + 1)?;
 
     configuration.find_web_service(name).map(|ws| Arc::new(ws.clone()))
+}
+
+pub(crate) fn find_integration_service_by_path(
+    configuration: &bsl_metadata::Configuration,
+    file_path: &Path,
+) -> Option<Arc<bsl_metadata::IntegrationService>> {
+    let file_str = file_path.to_string_lossy().replace('\\', "/");
+
+    let parts: Vec<&str> = file_str.split('/').collect();
+
+    let is_idx = parts.iter().position(|&p| p == "IntegrationServices")?;
+
+    let name = parts.get(is_idx + 1)?;
+
+    configuration.find_integration_service(name).map(|svc| Arc::new(svc.clone()))
 }
 
 #[cfg(test)]
@@ -1230,6 +1268,24 @@ mod tests {
     }
 
     #[test]
+    fn test_build_module_metadata_populates_integration_service() {
+        let fixture_root = std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../bsl-metadata/fixtures/designer"
+        ));
+        let config = bsl_metadata::load_from_directory(&fixture_root).unwrap();
+
+        let bsl_path = fixture_root.join("IntegrationServices/ОбменСообщениями/Ext/Module.bsl");
+        let metadata = build_module_metadata(&bsl_path, Some(&config));
+
+        assert_eq!(metadata.module_type, bsl_metadata::ModuleType::IntegrationServiceModule);
+        let service =
+            metadata.integration_service.as_ref().expect("integration service should be populated");
+        let handlers: Vec<_> = service.receive_handlers().collect();
+        assert_eq!(handlers, vec!["ОбработатьСообщениеОбычныйПриоритет"]);
+    }
+
+    #[test]
     fn test_get_module_type_object_module() {
         let uri = "Catalogs/Номенклатура/Ext/ObjectModule.bsl";
         assert_eq!(get_module_type_from_uri(uri), Some(bsl_metadata::ModuleType::ObjectModule));
@@ -1253,6 +1309,31 @@ mod tests {
         assert_eq!(
             get_module_type_from_uri(uri),
             Some(bsl_metadata::ModuleType::ManagedApplicationModule)
+        );
+    }
+
+    #[test]
+    fn test_get_module_type_application_family() {
+        assert_eq!(
+            get_module_type_from_uri("Ext/SessionModule.bsl"),
+            Some(bsl_metadata::ModuleType::SessionModule)
+        );
+        assert_eq!(
+            get_module_type_from_uri("Configuration/Ext/SessionModule.bsl"),
+            Some(bsl_metadata::ModuleType::SessionModule)
+        );
+        assert_eq!(
+            get_module_type_from_uri("Ext/OrdinaryApplicationModule.bsl"),
+            Some(bsl_metadata::ModuleType::OrdinaryApplicationModule)
+        );
+        assert_eq!(
+            get_module_type_from_uri("Ext/ExternalConnectionModule.bsl"),
+            Some(bsl_metadata::ModuleType::ExternalConnectionModule)
+        );
+        // A common module's Ext/Module.bsl must NOT be swallowed by the Ext arm.
+        assert_eq!(
+            get_module_type_from_uri("CommonModules/Foo/Ext/Module.bsl"),
+            Some(bsl_metadata::ModuleType::CommonModule)
         );
     }
 

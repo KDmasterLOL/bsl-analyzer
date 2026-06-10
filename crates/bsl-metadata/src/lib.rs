@@ -9,6 +9,7 @@ pub mod error;
 pub mod event_subscription;
 pub mod form;
 pub mod http_service;
+pub mod integration_service;
 pub mod loader;
 pub mod metadata_object;
 pub mod metadata_resolver;
@@ -36,6 +37,10 @@ pub use form::{
 pub use http_service::{
     HTTPService, HTTPServiceBuilder, HTTPServiceMethod, HTTPServiceMethodBuilder,
     HTTPServiceURLTemplate, HTTPServiceURLTemplateBuilder,
+};
+pub use integration_service::{
+    IntegrationService, IntegrationServiceBuilder, IntegrationServiceChannel,
+    IntegrationServiceChannelBuilder,
 };
 pub use loader::{
     discover_common_module_structure, discover_defined_type_structure, discover_metadata_structure,

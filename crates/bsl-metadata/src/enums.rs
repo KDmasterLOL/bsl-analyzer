@@ -55,6 +55,8 @@ pub enum ModuleType {
     HTTPServiceModule,
     #[serde(rename = "WEBServiceModule")]
     WebServiceModule,
+    #[serde(rename = "IntegrationServiceModule")]
+    IntegrationServiceModule,
     #[serde(other)]
     #[default]
     Unknown,

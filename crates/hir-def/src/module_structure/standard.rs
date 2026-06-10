@@ -56,7 +56,8 @@ fn standard_patterns(module_type: ModuleType) -> Vec<RegionPattern> {
         ModuleType::CommandModule
         | ModuleType::SessionModule
         | ModuleType::HTTPServiceModule
-        | ModuleType::WebServiceModule => {
+        | ModuleType::WebServiceModule
+        | ModuleType::IntegrationServiceModule => {
             patterns.extend([Exact("ОбработчикиСобытий", "EventHandlers")]);
         }
         ModuleType::ExternalConnectionModule => {

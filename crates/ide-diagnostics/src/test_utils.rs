@@ -1032,6 +1032,7 @@ pub fn make_common_module_metadata(module: bsl_metadata::CommonModule) -> hir::M
         register: None,
         http_service: None,
         web_service: None,
+        integration_service: None,
         form: None,
     }
 }
@@ -1048,6 +1049,7 @@ pub fn make_common_module_metadata_with_ctx(
         register: None,
         http_service: None,
         web_service: None,
+        integration_service: None,
         form: None,
     }
 }
@@ -1063,6 +1065,7 @@ pub fn make_non_common_module_metadata(
         register: None,
         http_service: None,
         web_service: None,
+        integration_service: None,
         form: None,
     }
 }
