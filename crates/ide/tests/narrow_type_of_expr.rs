@@ -422,3 +422,101 @@ fn is_assignable_to_sees_narrowed_ty_from_semantics() {
          predicate consumes the narrowed overlay, not the base `Ty::Number` from `Х = 42`"
     );
 }
+
+#[test]
+fn narrowed_type_at_after_terminating_undefined_guard_keeps_complement() {
+    let fixture = r#"
+//- /test.bsl
+Процедура П()
+    Если Истина Тогда
+        Х = 42;
+    Иначе
+        Х = Неопределено;
+    КонецЕсли;
+    Если Х = Неопределено Тогда
+        Возврат;
+    КонецЕсли;
+    Б = Х;
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    let owner = first_method_owner(&db, file_id);
+    let parse = db.parse(file_id);
+    let root = parse.syntax_node();
+
+    let after_guard = nth_ident_expr_at_distinct_position(&root, "Х", 0);
+    let expr_id = expr_id_at_range(&db, file_id, after_guard.text_range());
+
+    let result = narrow_query(&db, file_id, owner).expect("narrow_query must converge");
+    assert_eq!(
+        narrowed_type_at(&db, &result, expr_id.to_idx(), &Name::new("Х")),
+        Some(db.number(None, None)),
+        "after `Если Х = Неопределено Тогда Возврат` the then-branch terminates, so the \
+         inverted guard must survive the merge: `Х` is Number, not Number|Неопределено"
+    );
+}
+
+#[test]
+fn narrowed_type_at_after_non_terminating_undefined_guard_drops() {
+    let fixture = r#"
+//- /test.bsl
+Процедура П()
+    Если Истина Тогда
+        Х = 42;
+    Иначе
+        Х = Неопределено;
+    КонецЕсли;
+    Если Х = Неопределено Тогда
+        Б = 1;
+    КонецЕсли;
+    В = Х;
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    let owner = first_method_owner(&db, file_id);
+    let parse = db.parse(file_id);
+    let root = parse.syntax_node();
+
+    let after_guard = nth_ident_expr_at_distinct_position(&root, "Х", 0);
+    let expr_id = expr_id_at_range(&db, file_id, after_guard.text_range());
+
+    let result = narrow_query(&db, file_id, owner).expect("narrow_query must converge");
+    assert_eq!(
+        narrowed_type_at(&db, &result, expr_id.to_idx(), &Name::new("Х")),
+        Some(db.union(vec![db.number(None, None), db.undefined()])),
+        "a non-terminating then-branch reaches the merge, so both arms survive: \
+         the tracked set equals the base union — no effective narrowing"
+    );
+}
+
+#[test]
+fn narrowed_type_at_after_terminating_raise_guard_keeps_complement() {
+    let fixture = r#"
+//- /test.bsl
+Процедура П()
+    Если Истина Тогда
+        Х = 42;
+    Иначе
+        Х = Неопределено;
+    КонецЕсли;
+    Если Х = Неопределено Тогда
+        ВызватьИсключение "нет значения";
+    КонецЕсли;
+    Б = Х;
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    let owner = first_method_owner(&db, file_id);
+    let parse = db.parse(file_id);
+    let root = parse.syntax_node();
+
+    let after_guard = nth_ident_expr_at_distinct_position(&root, "Х", 0);
+    let expr_id = expr_id_at_range(&db, file_id, after_guard.text_range());
+
+    let result = narrow_query(&db, file_id, owner).expect("narrow_query must converge");
+    assert_eq!(
+        narrowed_type_at(&db, &result, expr_id.to_idx(), &Name::new("Х")),
+        Some(db.number(None, None)),
+        "ВызватьИсключение terminates the then-branch the same way Возврат does"
+    );
+}
