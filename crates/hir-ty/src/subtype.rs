@@ -49,6 +49,10 @@ pub fn is_assignable(db: &dyn TypeKernelDb, from: TypeId, to: TypeId) -> bool {
         return true;
     }
 
+    if is_value_table_bridge(from_kind, to_kind) {
+        return true;
+    }
+
     if is_concrete_to_generic_platform_bridge(from_kind, to_kind) {
         return true;
     }
@@ -107,6 +111,24 @@ fn is_tabular_row_bridge(a: &TypeKind, b: &TypeKind) -> bool {
     }
     (is_row_metadata_ref(a) && is_row_platform_object(b))
         || (is_row_platform_object(a) && is_row_metadata_ref(b))
+}
+
+/// Both sides are `ТаблицаЗначений`. The projection — best-effort column tracking
+/// recovered from query/form inference — is metadata, not a distinct type: a value
+/// with a concrete projection IS a `ТаблицаЗначений`, so it satisfies a parameter
+/// documented as the bare type (projection `None`), which is how `Выгрузить()`
+/// feeding a `Неопределено | ТаблицаЗначений` slot must be admitted. When BOTH
+/// sides carry a projection, require equality so genuinely different inferred
+/// shapes still surface. Soundness is symmetric (one BSL type), so this lives in
+/// `is_assignable`, not just argument-position coercion.
+fn is_value_table_bridge(from: &TypeKind, to: &TypeKind) -> bool {
+    let (TypeKind::ValueTable(a), TypeKind::ValueTable(b)) = (from, to) else {
+        return false;
+    };
+    match (&a.projection, &b.projection) {
+        (None, _) | (_, None) => true,
+        (Some(pa), Some(pb)) => pa == pb,
+    }
 }
 
 /// `ТабличныйДокумент.ПолучитьОбласть(…)` returns `ТабличныйДокумент` (so the
@@ -840,5 +862,59 @@ mod tests {
         assert!(is_assignable(&db, never, number), "Never ≤ A (bottom)");
         assert!(!is_assignable(&db, number, never), "A ≤ Never must fail (not reflexive)");
         assert!(is_assignable(&db, never, never), "Never ≤ Never (reflexive)");
+    }
+
+    fn projected_value_table(db: &dyn TypeKernelDb, col: &str) -> TypeId {
+        use bsl_types::facet::TableSource;
+        use bsl_types::kind::{
+            Projection, ProjectionField, ProjectionFieldSource, ProjectionOrigin,
+        };
+        let proj = Arc::new(Projection::new(
+            Arc::from([ProjectionField::new(
+                col.to_string(),
+                db.string(None, false),
+                ProjectionFieldSource::Column,
+            )]),
+            ProjectionOrigin::SdblQuery,
+            None,
+        ));
+        db.value_table(Some(proj), TableSource::SdblUnload)
+    }
+
+    #[test]
+    fn value_table_projection_coerces_to_bare_union_member() {
+        use bsl_types::facet::TableSource;
+        let db = InMemoryDb::new();
+
+        // `Запрос.Выполнить().Выгрузить()` — a projected ValueTable.
+        let arg = projected_value_table(&db, "ШтрихкодУпаковки");
+        // A callee documents the slot as `Неопределено | ТаблицаЗначений`: the
+        // ValueTable member is bare (no projection).
+        let bare = db.value_table(None, TableSource::Unknown);
+        let param = db.union(vec![db.undefined(), bare]);
+
+        assert!(
+            is_coercible_to(&db, arg, param),
+            "a projected ValueTable must satisfy a bare ТаблицаЗначений union member"
+        );
+        assert!(
+            is_assignable(&db, arg, bare),
+            "the union .any() path relies on direct assignability"
+        );
+    }
+
+    #[test]
+    fn value_table_distinct_projections_stay_distinct_but_bridge_the_bare_type() {
+        use bsl_types::facet::TableSource;
+        let db = InMemoryDb::new();
+        let a = projected_value_table(&db, "A");
+        let b = projected_value_table(&db, "B");
+        let bare = db.value_table(None, TableSource::Unknown);
+
+        // Two fully-projected, differently-shaped tables remain distinguishable.
+        assert!(!is_assignable(&db, a, b));
+        // Either is interchangeable with the bare type, both directions.
+        assert!(is_assignable(&db, a, bare));
+        assert!(is_assignable(&db, bare, a));
     }
 }
