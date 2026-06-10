@@ -418,11 +418,11 @@ mod tests {
 КонецФункции
 
 Процедура Проц3()
-    // §2.2: nested try without re-raise IS Silent — outer except
-    // has Stmt::Try as "other", and the classifier conservatively
-    // treats any stmt-kind that isn't Raise / log-call as Silent
-    // (cannot prove the nested try ultimately propagates without
-    // inter-procedural analysis).
+    // Nested try without re-raise keeps the outer handler Silent:
+    // a Raise inside the nested try body would be caught by the
+    // nested handler and never escape, and the nested handler here
+    // is empty, so nothing in the outer except logs or rethrows the
+    // original exception.
     Попытка
         Действие();
     Исключение
@@ -499,11 +499,11 @@ mod tests {
 КонецФункции
 
 Процедура Проц3()
-    // §2.2: nested try without re-raise IS Silent — outer except
-    // has Stmt::Try as "other", and the classifier conservatively
-    // treats any stmt-kind that isn't Raise / log-call as Silent
-    // (cannot prove the nested try ultimately propagates without
-    // inter-procedural analysis).
+    // Nested try without re-raise keeps the outer handler Silent:
+    // a Raise inside the nested try body would be caught by the
+    // nested handler and never escape, and the nested handler here
+    // is empty, so nothing in the outer except logs or rethrows the
+    // original exception.
     Попытка
         Действие();
     Исключение
@@ -534,6 +534,47 @@ mod tests {
             MissingCodeTryCatchEx @ 55:9..55:19
               message: Отсутствует код в блоке исключения
               severity: Major"#]].assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
+    fn conditional_reraise_does_not_emit() {
+        // Suppressing one known error and rethrowing everything else is a
+        // legitimate handler; the Raise lives on a nested path.
+        let code = r#"Процедура Тест()
+    Попытка
+        Действие();
+    Исключение
+        Если ИнформацияОбОшибке().Описание <> ТекстИсключенияДублирование Тогда
+            ВызватьИсключение;
+        КонецЕсли;
+    КонецПопытки;
+КонецПроцедуры"#;
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingCodeTryCatchEx,
+            expect![[r#""#]],
+        );
+    }
+
+    #[test]
+    fn conditional_swallow_still_emits() {
+        let code = r#"Процедура Тест()
+    Попытка
+        Действие();
+    Исключение
+        Если Условие Тогда
+            Х = 1;
+        КонецЕсли;
+    КонецПопытки;
+КонецПроцедуры"#;
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingCodeTryCatchEx,
+            expect![[r#"
+                MissingCodeTryCatchEx @ 4:5..4:15
+                  message: Блок исключения молча подавляет ошибку: добавьте `ВызватьИсключение` или вызов журналирования
+                  severity: Major"#]],
+        );
     }
 
     #[test]
