@@ -970,24 +970,76 @@ fn hierarchical_catalog_parent_field_is_resolved() {
     );
 }
 
-#[test]
-fn chart_of_calculation_types_unknown_field_gate_stays_off() {
-    // Charts of calculation types are loaded through the generic object parser,
-    // which synthesises no standard attributes (Ссылка/Код/… are missing from
-    // the model), so unknown-field must not fire on their tables.
-    let mut config = bsl_metadata::Configuration::new("TestConfig");
-    let mut mdo = bsl_metadata::MetadataObject::new(
-        bsl_metadata::MdoType::ChartOfCalculationTypes,
-        "ОсновныеНачисления",
-    );
-    mdo.add_attribute(bsl_metadata::Attribute {
-        name: "СпособРасчета".to_string(),
-        name_en: None,
-        attr_type: bsl_metadata::AttributeType::Unknown,
-    });
-    config.add_metadata_object(mdo);
+const CHART_OF_CALCULATION_TYPES_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.10">
+    <ChartOfCalculationTypes uuid="b1c40e57-2a31-44f0-9c91-1d70f25ad301">
+        <Properties>
+            <Name>ОсновныеНачисления</Name>
+            <DescriptionLength>50</DescriptionLength>
+            <DependenceOnCalculationTypes>OnActionPeriod</DependenceOnCalculationTypes>
+        </Properties>
+        <ChildObjects>
+            <Attribute uuid="11111111-1111-1111-1111-111111111111">
+                <Properties>
+                    <Name>СпособРасчета</Name>
+                    <Type><v8:Type>xs:string</v8:Type></Type>
+                </Properties>
+            </Attribute>
+        </ChildObjects>
+    </ChartOfCalculationTypes>
+</MetaDataObject>"#;
 
-    let code = "ВЫБРАТЬ Т.Ссылка, Т.СпособРасчета ИЗ ПланВидовРасчета.ОсновныеНачисления КАК Т";
+fn config_with_calculation_types() -> bsl_metadata::Configuration {
+    let mut config = bsl_metadata::Configuration::new("TestConfig");
+    let mdo = bsl_metadata::xml_parser::parse_chart_of_calculation_types_xml(
+        CHART_OF_CALCULATION_TYPES_XML,
+    )
+    .unwrap();
+    config.add_metadata_object(mdo);
+    config
+}
+
+#[test]
+fn chart_of_calculation_types_valid_fields_resolve() {
+    // Content-parsed charts of calculation types carry their standard attributes
+    // (Ссылка/ПериодДействияБазовый), user attributes, and the dependency tabular
+    // section names, so a query over valid fields must not raise unknown-field.
+    let config = config_with_calculation_types();
+    let code =
+        "ВЫБРАТЬ Т.Ссылка, Т.СпособРасчета, Т.ПериодДействияБазовый, Т.ВытесняющиеВидыРасчета \
+                ИЗ ПланВидовРасчета.ОсновныеНачисления КАК Т";
+    let ast = parser::parse_sdbl(code);
+    let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(config)));
+
+    let unknown_diags: Vec<_> = package
+        .all_diagnostics()
+        .filter(|diag| matches!(diag, crate::diagnostics::SdblDiagnostic::UnknownField { .. }))
+        .collect();
+    assert!(unknown_diags.is_empty(), "valid calc-type fields must resolve: {unknown_diags:?}");
+}
+
+#[test]
+fn chart_of_calculation_types_unknown_field_now_fires() {
+    // The model is exhaustive, so the unknown-field gate is on: a bogus field is flagged.
+    let config = config_with_calculation_types();
+    let code = "ВЫБРАТЬ Т.НесуществующееПоле ИЗ ПланВидовРасчета.ОсновныеНачисления КАК Т";
+    let ast = parser::parse_sdbl(code);
+    let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(config)));
+
+    let unknown: Vec<_> =
+        package.source_map.unresolved_field_names.iter().map(|t| t.text.as_str()).collect();
+    assert!(
+        unknown.contains(&"НесуществующееПоле"),
+        "an unknown calc-type field must be flagged: {unknown:?}"
+    );
+}
+
+#[test]
+fn chart_of_calculation_types_dependency_tabular_section_fields_resolve() {
+    // A direct query over a dependency tabular section resolves its ВидРасчета column.
+    let config = config_with_calculation_types();
+    let code = "ВЫБРАТЬ Т.ВидРасчета, Т.Ссылка \
+                ИЗ ПланВидовРасчета.ОсновныеНачисления.ВытесняющиеВидыРасчета КАК Т";
     let ast = parser::parse_sdbl(code);
     let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(config)));
 
@@ -997,7 +1049,7 @@ fn chart_of_calculation_types_unknown_field_gate_stays_off() {
         .collect();
     assert!(
         unknown_diags.is_empty(),
-        "incomplete calc-type model must keep the gate off: {unknown_diags:?}"
+        "dependency tabular-section fields must resolve: {unknown_diags:?}"
     );
 }
 

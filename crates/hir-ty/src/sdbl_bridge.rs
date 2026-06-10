@@ -60,6 +60,7 @@ fn ref_kind_for(mdo: MdoType) -> Option<MetadataKind> {
         MdoType::ExchangePlan => MetadataKind::ExchangePlanRef,
         MdoType::ChartOfAccounts => MetadataKind::ChartOfAccountsRef,
         MdoType::ChartOfCharacteristicTypes => MetadataKind::ChartOfCharacteristicTypesRef,
+        MdoType::ChartOfCalculationTypes => MetadataKind::ChartOfCalculationTypesRef,
         MdoType::InformationRegister => MetadataKind::InformationRegisterRef,
         MdoType::AccumulationRegister => MetadataKind::AccumulationRegisterRef,
         MdoType::AccountingRegister => MetadataKind::AccountingRegisterRef,
@@ -397,13 +398,25 @@ mod tests {
     #[test]
     fn ref_without_matching_metadata_kind_falls_to_any_metadata_ref() {
         let db = InMemoryDb::new();
+        let r =
+            SdblType::Ref(sdbl_hir::MdoRef::new(MdoType::ExternalDataSource, "ВнешнийИсточник"));
+        assert_eq!(sdbl_type_to_typeid(&db, &r), db.any_metadata_ref(MdoType::ExternalDataSource),);
+    }
+
+    #[test]
+    fn chart_of_calculation_types_ref_lowers_to_concrete_metadata_ref() {
+        let db = InMemoryDb::new();
         let r = SdblType::Ref(sdbl_hir::MdoRef::new(
             MdoType::ChartOfCalculationTypes,
             "ОсновныеНачисления",
         ));
         assert_eq!(
             sdbl_type_to_typeid(&db, &r),
-            db.any_metadata_ref(MdoType::ChartOfCalculationTypes),
+            db.metadata_ref(
+                MetadataKind::ChartOfCalculationTypesRef,
+                "ОсновныеНачисления".to_string(),
+                &RootConfigCtx,
+            ),
         );
     }
 

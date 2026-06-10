@@ -7,7 +7,7 @@ use std::str::FromStr;
 use super::helpers::{child_text, find_child, find_mdo_element, parse_uuid, parse_xml};
 use super::standard_attributes::{
     add_business_process_standard_attributes, add_catalog_standard_attributes,
-    add_chart_of_accounts_standard_attributes,
+    add_chart_of_accounts_standard_attributes, add_chart_of_calculation_types_standard_attributes,
     add_chart_of_characteristic_types_standard_attributes, add_document_standard_attributes,
     add_exchange_plan_standard_attributes, add_information_register_standard_attributes_as_attrs,
     add_task_standard_attributes, MdoProperties,
@@ -47,6 +47,11 @@ pub fn parse_exchange_plan_xml(xml: &str) -> Result<MetadataObject> {
 pub fn parse_chart_of_accounts_xml(xml: &str) -> Result<MetadataObject> {
     let _span = tracing::debug_span!("parse_chart_of_accounts_xml").entered();
     parse_metadata_object_xml(xml, MdoType::ChartOfAccounts)
+}
+
+pub fn parse_chart_of_calculation_types_xml(xml: &str) -> Result<MetadataObject> {
+    let _span = tracing::debug_span!("parse_chart_of_calculation_types_xml").entered();
+    parse_metadata_object_xml(xml, MdoType::ChartOfCalculationTypes)
 }
 
 pub fn parse_data_processor_xml(xml: &str) -> Result<MetadataObject> {
@@ -99,6 +104,13 @@ fn parse_metadata_object_xml(xml: &str, mdo_type: MdoType) -> Result<MetadataObj
         MdoType::ChartOfAccounts => {
             add_chart_of_accounts_standard_attributes(&mut attributes, &properties, mdo_type);
         }
+        MdoType::ChartOfCalculationTypes => {
+            add_chart_of_calculation_types_standard_attributes(
+                &mut attributes,
+                &properties,
+                mdo_type,
+            );
+        }
         MdoType::InformationRegister => {
             add_information_register_standard_attributes_as_attrs(
                 &mut attributes,
@@ -141,6 +153,10 @@ fn parse_metadata_object_xml(xml: &str, mdo_type: MdoType) -> Result<MetadataObj
 
     if mdo_type == MdoType::ChartOfAccounts {
         tabular_sections.push(build_ext_dimension_types_section(props_node, ext_dimension_flags));
+    }
+
+    if mdo_type == MdoType::ChartOfCalculationTypes && properties.depends_on_calculation_types() {
+        tabular_sections.extend(build_calculation_type_dependency_sections(&properties.name));
     }
 
     let mut mdo = MetadataObject::new(mdo_type, properties.name.clone());
@@ -222,6 +238,39 @@ fn build_ext_dimension_types_section(
     }
     section.set_attributes(columns);
     section
+}
+
+/// The three standard tabular sections every dependent chart of calculation types
+/// carries: `ВытесняющиеВидыРасчета`, `ВедущиеВидыРасчета`, `БазовыеВидыРасчета`.
+/// Each row points at another calculation type of the same chart through its
+/// `ВидРасчета` column (self-ref); `НомерСтроки`/`Ссылка` come from the generic
+/// tabular-section machinery. The platform omits all three when the chart does not
+/// depend on calculation types, which the caller already gated on.
+fn build_calculation_type_dependency_sections(chart_name: &str) -> Vec<TabularSection> {
+    let nil_uuid = uuid::Uuid::nil();
+    [
+        ("ВытесняющиеВидыРасчета", "DisplacingCalculationTypes"),
+        ("ВедущиеВидыРасчета", "LeadingCalculationTypes"),
+        ("БазовыеВидыРасчета", "BaseCalculationTypes"),
+    ]
+    .into_iter()
+    .map(|(name, name_en)| {
+        let mut section = TabularSection::new(nil_uuid, name);
+        section.set_name_en(Some(name_en.to_string()));
+
+        let mut column = TabularSectionAttribute::new(
+            nil_uuid,
+            "ВидРасчета",
+            AttributeType::Ref {
+                mdo_type: MdoType::ChartOfCalculationTypes,
+                name: chart_name.to_string(),
+            },
+        );
+        column.set_name_en(Some("CalculationType".to_string()));
+        section.set_attributes(vec![column]);
+        section
+    })
+    .collect()
 }
 
 fn parse_register_records(props_node: roxmltree::Node<'_, '_>) -> Vec<(MdoType, String)> {
@@ -426,6 +475,77 @@ mod tests {
                 name: "ВидыСубконто1".to_string()
             },
             "ВидСубконто is typed by the ExtDimensionTypes property"
+        );
+    }
+
+    #[test]
+    fn parse_chart_of_calculation_types_xml_builds_dependency_sections() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.20">
+    <ChartOfCalculationTypes uuid="b1c40e57-2a31-44f0-9c91-1d70f25ad201">
+        <Properties>
+            <Name>ОсновныеНачисления</Name>
+            <DescriptionLength>50</DescriptionLength>
+            <DependenceOnCalculationTypes>OnActionPeriod</DependenceOnCalculationTypes>
+        </Properties>
+        <ChildObjects>
+            <Attribute uuid="11111111-1111-1111-1111-111111111111">
+                <Properties>
+                    <Name>СпособРасчета</Name>
+                    <Type><v8:Type>xs:string</v8:Type></Type>
+                </Properties>
+            </Attribute>
+        </ChildObjects>
+    </ChartOfCalculationTypes>
+</MetaDataObject>"#;
+        let mdo = parse_chart_of_calculation_types_xml(xml).unwrap();
+        let names: Vec<&str> = mdo.attributes.iter().map(|a| a.name.as_str()).collect();
+        for expected in ["Ссылка", "Наименование", "Предопределенный", "ПериодДействияБазовый"]
+        {
+            assert!(names.contains(&expected), "ПВР row must have {expected}: {names:?}");
+        }
+
+        for expected in ["ВытесняющиеВидыРасчета", "ВедущиеВидыРасчета", "БазовыеВидыРасчета"]
+        {
+            let section = mdo
+                .find_tabular_section(expected)
+                .unwrap_or_else(|| panic!("dependent ПВР must carry {expected}"));
+            let kind_column =
+                section.attributes().iter().find(|a| a.name() == "ВидРасчета").unwrap();
+            assert_eq!(
+                kind_column.attr_type(),
+                &AttributeType::Ref {
+                    mdo_type: MdoType::ChartOfCalculationTypes,
+                    name: "ОсновныеНачисления".to_string()
+                },
+                "{expected}.ВидРасчета is a self-reference to the chart"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_chart_of_calculation_types_xml_independent_has_no_dependency_sections() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.20">
+    <ChartOfCalculationTypes uuid="b1c40e57-2a31-44f0-9c91-1d70f25ad202">
+        <Properties>
+            <Name>ПростыеНачисления</Name>
+            <DependenceOnCalculationTypes>DontUse</DependenceOnCalculationTypes>
+        </Properties>
+    </ChartOfCalculationTypes>
+</MetaDataObject>"#;
+        let mdo = parse_chart_of_calculation_types_xml(xml).unwrap();
+        for absent in ["ВытесняющиеВидыРасчета", "ВедущиеВидыРасчета", "БазовыеВидыРасчета"]
+        {
+            assert!(
+                mdo.find_tabular_section(absent).is_none(),
+                "independent ПВР must not carry {absent}"
+            );
+        }
+        let names: Vec<&str> = mdo.attributes.iter().map(|a| a.name.as_str()).collect();
+        assert!(
+            !names.contains(&"ПериодДействияБазовый"),
+            "independent ПВР has no ПериодДействияБазовый: {names:?}"
         );
     }
 

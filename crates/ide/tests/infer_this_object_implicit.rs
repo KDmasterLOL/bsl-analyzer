@@ -30,6 +30,10 @@ fn chart_of_characteristic_types_object_module_path() -> PathBuf {
         .join("ChartsOfCharacteristicTypes/ПланВидовХарактеристик1/Ext/ObjectModule.bsl")
 }
 
+fn chart_of_calculation_types_object_module_path() -> PathBuf {
+    designer_fixture_path().join("ChartsOfCalculationTypes/ПланВидовРасчета1/Ext/ObjectModule.bsl")
+}
+
 fn data_processor_form_module_path() -> PathBuf {
     designer_fixture_path().join("DataProcessors/ТестоваяОбработка/Forms/Форма/Ext/Form/Module.bsl")
 }
@@ -56,6 +60,10 @@ fn setup_catalog(text: &str) -> (RootDatabaseImpl, FileId) {
 
 fn setup_chart_of_characteristic_types(text: &str) -> (RootDatabaseImpl, FileId) {
     setup_at(chart_of_characteristic_types_object_module_path(), text)
+}
+
+fn setup_chart_of_calculation_types(text: &str) -> (RootDatabaseImpl, FileId) {
+    setup_at(chart_of_calculation_types_object_module_path(), text)
 }
 
 fn has_platform_data() -> bool {
@@ -356,6 +364,129 @@ fn chart_of_characteristic_types_manager_created_object_carries_kind() {
     assert!(
         unresolved_method_kinds(&db, file_id).is_empty(),
         "created-object standard attr must resolve, got {:?}",
+        unresolved_method_kinds(&db, file_id)
+    );
+}
+
+#[test]
+fn chart_of_calculation_types_implicit_dependency_tabular_section_method() {
+    if !has_platform_data() {
+        return;
+    }
+    // The displacing/leading/base standard tabular sections of a dependent chart of
+    // calculation types are reached implicitly via ЭтотОбъект; their methods resolve.
+    let text = r#"
+Процедура ПередЗаписью(Отказ)
+    Если ВытесняющиеВидыРасчета.Количество() > 0 Тогда
+        ВедущиеВидыРасчета.Очистить();
+        БазовыеВидыРасчета.Очистить();
+    КонецЕсли;
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup_chart_of_calculation_types(text);
+    assert!(
+        unresolved_method_kinds(&db, file_id).is_empty(),
+        "dependency tabular-section methods must resolve on a ПВР object, got {:?}",
+        unresolved_method_kinds(&db, file_id)
+    );
+}
+
+#[test]
+fn chart_of_calculation_types_implicit_user_tabular_section_method() {
+    if !has_platform_data() {
+        return;
+    }
+    let text = r#"
+Процедура ПередЗаписью(Отказ)
+    Если Показатели.Количество() > 0 Тогда
+        Показатели.Очистить();
+    КонецЕсли;
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup_chart_of_calculation_types(text);
+    assert!(
+        unresolved_method_kinds(&db, file_id).is_empty(),
+        "user tabular-section .Количество()/.Очистить() must resolve on a ПВР object, got {:?}",
+        unresolved_method_kinds(&db, file_id)
+    );
+}
+
+#[test]
+fn chart_of_calculation_types_dependency_tabular_section_value_position() {
+    let text = r#"
+Функция Тест()
+    Р = ВытесняющиеВидыРасчета;
+    Возврат Р;
+КонецФункции
+"#;
+    let (db, file_id) = setup_chart_of_calculation_types(text);
+    assert_metadata_ref(
+        &db,
+        var_ty(&db, file_id, "р"),
+        MetadataKind::TabularSection { parent: MdoType::ChartOfCalculationTypes },
+        "ПланВидовРасчета1.ВытесняющиеВидыРасчета",
+    );
+}
+
+#[test]
+fn chart_of_calculation_types_implicit_ref_self_attribute() {
+    if !has_platform_data() {
+        return;
+    }
+    let text = r#"
+Процедура ПередЗаписью(Отказ)
+    Если Не Ссылка.Пустая() Тогда
+    КонецЕсли;
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup_chart_of_calculation_types(text);
+    assert!(
+        unresolved_method_kinds(&db, file_id).is_empty(),
+        "Ссылка.Пустая() must resolve via the implicit object self-reference, got {:?}",
+        unresolved_method_kinds(&db, file_id)
+    );
+}
+
+#[test]
+fn chart_of_calculation_types_ref_value_position() {
+    let text = r#"
+Функция Тест()
+    Р = Ссылка;
+    Возврат Р;
+КонецФункции
+"#;
+    let (db, file_id) = setup_chart_of_calculation_types(text);
+    assert_metadata_ref(
+        &db,
+        var_ty(&db, file_id, "р"),
+        MetadataKind::ChartOfCalculationTypesRef,
+        "ПланВидовРасчета1",
+    );
+}
+
+#[test]
+fn chart_of_calculation_types_manager_created_object_carries_kind() {
+    if !has_platform_data() {
+        return;
+    }
+    let text = r#"
+Функция Тест()
+    Об = ПланыВидовРасчета.ПланВидовРасчета1.СоздатьВидРасчета();
+    Если Не Об.Ссылка.Пустая() Тогда
+    КонецЕсли;
+    Возврат Об;
+КонецФункции
+"#;
+    let (db, file_id) = setup_chart_of_calculation_types(text);
+    assert_metadata_ref(
+        &db,
+        var_ty(&db, file_id, "об"),
+        MetadataKind::ChartOfCalculationTypesObject,
+        "ПланВидовРасчета1",
+    );
+    assert!(
+        unresolved_method_kinds(&db, file_id).is_empty(),
+        "created-object self-reference must resolve, got {:?}",
         unresolved_method_kinds(&db, file_id)
     );
 }

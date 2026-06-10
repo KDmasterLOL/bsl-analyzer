@@ -643,6 +643,9 @@ pub(crate) fn mdo_type_for_kind(kind: MetadataKind) -> Option<MdoType> {
         | MetadataKind::ChartOfCharacteristicTypesObject => {
             Some(MdoType::ChartOfCharacteristicTypes)
         }
+        MetadataKind::ChartOfCalculationTypesRef | MetadataKind::ChartOfCalculationTypesObject => {
+            Some(MdoType::ChartOfCalculationTypes)
+        }
         MetadataKind::InformationRegisterRecordManager
         | MetadataKind::InformationRegisterRecordSet
         | MetadataKind::InformationRegisterRecord

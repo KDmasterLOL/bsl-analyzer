@@ -851,6 +851,10 @@ impl MetadataObject {
             MdoType::Catalog | MdoType::ChartOfCharacteristicTypes | MdoType::ChartOfAccounts => {
                 self.check_unique && self.code_series.is_whole()
             }
+            // A chart of calculation types is flat (no hierarchy/owner) and has no
+            // code-series scoping, so enabled uniqueness control already makes codes
+            // unique across the whole chart — НайтиПоКоду is then unambiguous.
+            MdoType::ChartOfCalculationTypes => self.check_unique,
             _ => true,
         }
     }

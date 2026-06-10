@@ -80,7 +80,10 @@ pub(crate) fn lookup_predefined(
     let mdo = find_mdo(resolver, kind, owner_name)?;
     let hit = match kind {
         MdoType::Enum => mdo.find_enum_value(member_name.as_str()).is_some(),
-        MdoType::Catalog | MdoType::ChartOfAccounts | MdoType::ChartOfCharacteristicTypes => {
+        MdoType::Catalog
+        | MdoType::ChartOfAccounts
+        | MdoType::ChartOfCharacteristicTypes
+        | MdoType::ChartOfCalculationTypes => {
             mdo.find_predefined_item(member_name.as_str()).is_some()
         }
         _ => false,
@@ -98,6 +101,7 @@ fn predefined_ref_kind_for(kind: MdoType) -> Option<MetadataKind> {
         MdoType::Catalog => Some(MetadataKind::CatalogRef),
         MdoType::ChartOfAccounts => Some(MetadataKind::ChartOfAccountsRef),
         MdoType::ChartOfCharacteristicTypes => Some(MetadataKind::ChartOfCharacteristicTypesRef),
+        MdoType::ChartOfCalculationTypes => Some(MetadataKind::ChartOfCalculationTypesRef),
         _ => None,
     }
 }

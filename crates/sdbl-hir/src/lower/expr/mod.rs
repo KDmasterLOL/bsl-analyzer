@@ -541,6 +541,7 @@ impl LoweringContext<'_> {
                     bsl_metadata::MdoType::Catalog
                         | bsl_metadata::MdoType::Document
                         | bsl_metadata::MdoType::ChartOfCharacteristicTypes
+                        | bsl_metadata::MdoType::ChartOfCalculationTypes
                         | bsl_metadata::MdoType::ChartOfAccounts
                 ) {
                     self.resolver

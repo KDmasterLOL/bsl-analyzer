@@ -20,6 +20,7 @@ pub(crate) struct MdoProperties {
     pub periodicity: Option<String>,
     pub check_unique: bool,
     pub code_series: Option<String>,
+    pub dependence_on_calculation_types: Option<String>,
 }
 
 impl MdoProperties {
@@ -33,6 +34,8 @@ impl MdoProperties {
         let periodicity =
             child_text(props_node, "InformationRegisterPeriodicity").map(|s| s.to_string());
         let code_series = child_text(props_node, "CodeSeries").map(|s| s.to_string());
+        let dependence_on_calculation_types =
+            child_text(props_node, "DependenceOnCalculationTypes").map(|s| s.to_string());
 
         let owners = find_child(props_node, "Owners")
             .map(|owners_node| {
@@ -55,7 +58,15 @@ impl MdoProperties {
             periodicity,
             check_unique,
             code_series,
+            dependence_on_calculation_types,
         }
+    }
+
+    /// A chart of calculation types depends on calculation types — and so carries the
+    /// displacing/leading/base standard tabular sections and the `ПериодДействияБазовый`
+    /// standard attribute — unless its dependency is `DontUse` (НеЗависит).
+    pub(crate) fn depends_on_calculation_types(&self) -> bool {
+        self.dependence_on_calculation_types.as_deref().is_some_and(|dep| dep != "DontUse")
     }
 }
 
@@ -70,6 +81,7 @@ fn condition_satisfied(cond: PresenceCondition, p: &MdoProperties) -> bool {
         PresenceCondition::IsPeriodic => {
             p.periodicity.as_deref().unwrap_or("Nonperiodical") != "Nonperiodical"
         }
+        PresenceCondition::DependsOnCalculationTypes => p.depends_on_calculation_types(),
     }
 }
 
@@ -264,6 +276,20 @@ pub(crate) fn add_chart_of_characteristic_types_standard_attributes(
         properties,
         mdo_type,
         MdoTemplateKind::ChartOfCharacteristicTypes,
+        ObjectView::Object,
+    );
+}
+
+pub(crate) fn add_chart_of_calculation_types_standard_attributes(
+    attributes: &mut Vec<Attribute>,
+    properties: &MdoProperties,
+    mdo_type: MdoType,
+) {
+    add_standard_attributes_from_spec(
+        attributes,
+        properties,
+        mdo_type,
+        MdoTemplateKind::ChartOfCalculationTypes,
         ObjectView::Object,
     );
 }

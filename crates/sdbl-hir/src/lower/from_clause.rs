@@ -874,12 +874,7 @@ impl LoweringContext<'_> {
                         total_fields = fields.len(),
                         "Added metadata fields to object"
                     );
-                    // Charts of calculation types are loaded through the generic
-                    // object parser, which synthesises no standard attributes for
-                    // them (Ссылка/Код/Наименование/… are missing), so the field
-                    // set is not exhaustive and must not drive the unknown-field
-                    // diagnostic.
-                    mdo_type != MdoType::ChartOfCalculationTypes
+                    true
                 } else {
                     tracing::debug!(
                         full_name = %full_name,
@@ -925,6 +920,7 @@ impl LoweringContext<'_> {
             | MdoType::Task
             | MdoType::ExchangePlan
             | MdoType::ChartOfCharacteristicTypes
+            | MdoType::ChartOfCalculationTypes
             | MdoType::ChartOfAccounts => {}
             _ => {
                 tracing::debug!(

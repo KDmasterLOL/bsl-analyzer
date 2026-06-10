@@ -181,6 +181,12 @@ fn metadata_kind_from_prefix(prefix: &str) -> Option<MetadataKind> {
         "chartofcharacteristictypesobject" | "планвидовхарактеристикобъект" => {
             Some(MetadataKind::ChartOfCharacteristicTypesObject)
         }
+        "chartofcalculationtypesref" | "планвидоврасчетассылка" => {
+            Some(MetadataKind::ChartOfCalculationTypesRef)
+        }
+        "chartofcalculationtypesobject" | "планвидоврасчетаобъект" => {
+            Some(MetadataKind::ChartOfCalculationTypesObject)
+        }
         "informationregisterrecordmanager" | "регистрсведенийменеджерзаписи" => {
             Some(MetadataKind::InformationRegisterRecordManager)
         }
@@ -354,15 +360,14 @@ mod tests {
 
     #[test]
     fn ty_lowering_qualified_unmodelled_prefix_is_unknown() {
-        for prefix in ["ChartOfCalculationTypesRef", "ConstantValueManager"] {
-            let db = InMemoryDb::new();
-            let qname = QualifiedName::from_segments([Name::new(prefix), Name::new("Х")]);
-            assert_eq!(
-                ctx().lower_qualified_id(&db, &qname),
-                db.unknown(),
-                "expected Unknown for `{prefix}.Х`"
-            );
-        }
+        let prefix = "ConstantValueManager";
+        let db = InMemoryDb::new();
+        let qname = QualifiedName::from_segments([Name::new(prefix), Name::new("Х")]);
+        assert_eq!(
+            ctx().lower_qualified_id(&db, &qname),
+            db.unknown(),
+            "expected Unknown for `{prefix}.Х`"
+        );
     }
 
     #[test]
@@ -380,6 +385,10 @@ mod tests {
             ("ПланВидовХарактеристикОбъект", MetadataKind::ChartOfCharacteristicTypesObject),
             ("ChartOfCharacteristicTypesRef", MetadataKind::ChartOfCharacteristicTypesRef),
             ("ПланВидовХарактеристикСсылка", MetadataKind::ChartOfCharacteristicTypesRef),
+            ("ChartOfCalculationTypesObject", MetadataKind::ChartOfCalculationTypesObject),
+            ("ПланВидовРасчетаОбъект", MetadataKind::ChartOfCalculationTypesObject),
+            ("ChartOfCalculationTypesRef", MetadataKind::ChartOfCalculationTypesRef),
+            ("ПланВидовРасчетаСсылка", MetadataKind::ChartOfCalculationTypesRef),
         ] {
             let db = InMemoryDb::new();
             let qname = QualifiedName::from_segments([Name::new(prefix), Name::new("Х")]);

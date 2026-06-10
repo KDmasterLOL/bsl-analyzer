@@ -144,10 +144,8 @@ fn load_all_metadata_parallel(path: &Path) -> LoadedMetadata {
                 load_charts_of_accounts_parallel(&path.join("ChartsOfAccounts"))
         });
         s.spawn(|_| {
-            *charts_calc_types.lock().unwrap() = load_simple_metadata_objects_parallel(
-                &path.join("ChartsOfCalculationTypes"),
-                MdoType::ChartOfCalculationTypes,
-            )
+            *charts_calc_types.lock().unwrap() =
+                load_charts_of_calculation_types_parallel(&path.join("ChartsOfCalculationTypes"))
         });
         s.spawn(|_| {
             *external_data_sources.lock().unwrap() = load_simple_metadata_objects_parallel(
@@ -432,6 +430,10 @@ fn load_charts_of_accounts_parallel(dir: &Path) -> Vec<MetadataObject> {
     load_metadata_objects_parallel(dir, xml_parser::parse_chart_of_accounts_xml)
 }
 
+fn load_charts_of_calculation_types_parallel(dir: &Path) -> Vec<MetadataObject> {
+    load_metadata_objects_parallel(dir, xml_parser::parse_chart_of_calculation_types_xml)
+}
+
 fn load_data_processors_parallel(dir: &Path) -> Vec<MetadataObject> {
     load_metadata_objects_parallel(dir, xml_parser::parse_data_processor_xml)
 }
@@ -541,6 +543,7 @@ fn metadata_object_parser(mdo_type: MdoType) -> Option<fn(&str) -> Result<Metada
         MdoType::Task => parse_task_xml,
         MdoType::ExchangePlan => parse_exchange_plan_xml,
         MdoType::ChartOfCharacteristicTypes => parse_chart_of_characteristic_types_xml,
+        MdoType::ChartOfCalculationTypes => parse_chart_of_calculation_types_xml,
         MdoType::ChartOfAccounts => parse_chart_of_accounts_xml,
         MdoType::DataProcessor => parse_data_processor_xml,
         MdoType::Report => parse_report_xml,
@@ -586,6 +589,7 @@ const METADATA_OBJECT_DIRS: &[(&str, MdoType)] = &[
     ("Tasks", MdoType::Task),
     ("ExchangePlans", MdoType::ExchangePlan),
     ("ChartsOfCharacteristicTypes", MdoType::ChartOfCharacteristicTypes),
+    ("ChartsOfCalculationTypes", MdoType::ChartOfCalculationTypes),
     ("ChartsOfAccounts", MdoType::ChartOfAccounts),
     ("DataProcessors", MdoType::DataProcessor),
     ("Reports", MdoType::Report),

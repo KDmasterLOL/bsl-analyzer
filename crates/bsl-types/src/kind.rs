@@ -51,6 +51,8 @@ pub enum MetadataKind {
     ChartOfAccountsObject,
     ChartOfCharacteristicTypesRef,
     ChartOfCharacteristicTypesObject,
+    ChartOfCalculationTypesRef,
+    ChartOfCalculationTypesObject,
     InformationRegisterRef,
     AccumulationRegisterRef,
     AccountingRegisterRef,
@@ -77,6 +79,7 @@ impl MetadataKind {
             MdoType::ChartOfCharacteristicTypes => {
                 Some(MetadataKind::ChartOfCharacteristicTypesObject)
             }
+            MdoType::ChartOfCalculationTypes => Some(MetadataKind::ChartOfCalculationTypesObject),
             _ => None,
         }
     }
@@ -93,6 +96,7 @@ impl MetadataKind {
             MdoType::ChartOfCharacteristicTypes => {
                 Some(MetadataKind::ChartOfCharacteristicTypesRef)
             }
+            MdoType::ChartOfCalculationTypes => Some(MetadataKind::ChartOfCalculationTypesRef),
             MdoType::InformationRegister => Some(MetadataKind::InformationRegisterRef),
             MdoType::AccumulationRegister => Some(MetadataKind::AccumulationRegisterRef),
             MdoType::AccountingRegister => Some(MetadataKind::AccountingRegisterRef),
@@ -121,6 +125,7 @@ impl MetadataKind {
             Self::ExchangePlanRef => Some(MdoType::ExchangePlan),
             Self::ChartOfAccountsRef => Some(MdoType::ChartOfAccounts),
             Self::ChartOfCharacteristicTypesRef => Some(MdoType::ChartOfCharacteristicTypes),
+            Self::ChartOfCalculationTypesRef => Some(MdoType::ChartOfCalculationTypes),
             Self::InformationRegisterRef => Some(MdoType::InformationRegister),
             Self::AccumulationRegisterRef => Some(MdoType::AccumulationRegister),
             Self::AccountingRegisterRef => Some(MdoType::AccountingRegister),
@@ -148,6 +153,8 @@ impl MetadataKind {
             Self::ChartOfAccountsObject => Some("ChartOfAccountsObject"),
             Self::ChartOfCharacteristicTypesRef => Some("ChartOfCharacteristicTypesRef"),
             Self::ChartOfCharacteristicTypesObject => Some("ChartOfCharacteristicTypesObject"),
+            Self::ChartOfCalculationTypesRef => Some("ChartOfCalculationTypesRef"),
+            Self::ChartOfCalculationTypesObject => Some("ChartOfCalculationTypesObject"),
             Self::InformationRegisterRecordManager => Some("InformationRegisterRecordManager"),
             Self::InformationRegisterRecordSet => Some("InformationRegisterRecordSet"),
             Self::AccumulationRegisterRecordSet => Some("AccumulationRegisterRecordSet"),
@@ -214,6 +221,10 @@ impl MetadataKind {
             (Self::ChartOfCharacteristicTypesRef, true) => "ChartOfCharacteristicTypesRef",
             (Self::ChartOfCharacteristicTypesObject, false) => "ПланВидовХарактеристикОбъект",
             (Self::ChartOfCharacteristicTypesObject, true) => "ChartOfCharacteristicTypesObject",
+            (Self::ChartOfCalculationTypesRef, false) => "ПланВидовРасчетаСсылка",
+            (Self::ChartOfCalculationTypesRef, true) => "ChartOfCalculationTypesRef",
+            (Self::ChartOfCalculationTypesObject, false) => "ПланВидовРасчетаОбъект",
+            (Self::ChartOfCalculationTypesObject, true) => "ChartOfCalculationTypesObject",
             (Self::InformationRegisterRef, false) => "РегистрСведенийКлючЗаписи",
             (Self::InformationRegisterRef, true) => "InformationRegisterRef",
             (Self::InformationRegisterRecordManager, false) => "РегистрСведенийМенеджерЗаписи",
