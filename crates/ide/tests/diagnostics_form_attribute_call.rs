@@ -205,6 +205,60 @@ fn untyped_form_attribute_method_call_not_resolved_as_module() {
 }
 
 #[test]
+fn value_tree_attribute_is_form_data_tree() {
+    if !has_platform_data() {
+        eprintln!("Skipping: no platform data available");
+        return;
+    }
+
+    let bsl = "Процедура Тест()\n    \
+        Дерево = ДеревоРазделов;\n\
+        КонецПроцедуры\n";
+    let (db, file_id) = setup_form_module(data_processor_module_path(), bsl);
+
+    let ty = var_ty(&db, file_id, "дерево").expect("дерево must be typed");
+    assert!(
+        matches!(db.lookup_type(ty), TypeKind::FormData { kind: hir::FormDataFacet::Tree, .. }),
+        "v8:ValueTree form attribute must lower to ДанныеФормыДерево, got {:?}",
+        db.lookup_type(ty)
+    );
+}
+
+#[test]
+fn value_tree_find_by_id_returns_tree_item() {
+    if !has_platform_data() {
+        eprintln!("Skipping: no platform data available");
+        return;
+    }
+
+    let bsl = "Процедура Тест()\n    \
+        Строка = ДеревоРазделов.НайтиПоИдентификатору(1);\n\
+        КонецПроцедуры\n";
+    let (db, file_id) = setup_form_module(data_processor_module_path(), bsl);
+
+    let kinds = unresolved_kinds(&db, file_id);
+    assert!(
+        kinds.is_empty(),
+        "ДанныеФормыДерево.НайтиПоИдентификатору must resolve, got: {:?}",
+        kinds
+    );
+
+    let row = var_ty(&db, file_id, "строка").expect("строка must be typed");
+    let members: Vec<String> = match db.lookup_type(row) {
+        TypeKind::Union(ms) => ms.iter().map(|m| format!("{:?}", db.lookup_type(*m))).collect(),
+        other => vec![format!("{other:?}")],
+    };
+    assert!(
+        members.iter().any(|m| m.contains("ДанныеФормыЭлементДерева")),
+        "FindByID on a form data tree must return ДанныеФормыЭлементДерева, got {members:?}"
+    );
+    assert!(
+        !members.iter().any(|m| m.contains("ДанныеФормыЭлементКоллекции")),
+        "tree FindByID must not return a collection item, got {members:?}"
+    );
+}
+
+#[test]
 fn unknown_bare_receiver_still_unresolved() {
     if !has_platform_data() {
         eprintln!("Skipping: no platform data available");

@@ -162,6 +162,7 @@ pub use hir_ty::{
 };
 
 pub use bsl_types::builders::Builders;
+pub use bsl_types::facet::FormDataFacet;
 use syntax::{ast::AstNode, TextRange, TextSize};
 use vfs::FileId;
 

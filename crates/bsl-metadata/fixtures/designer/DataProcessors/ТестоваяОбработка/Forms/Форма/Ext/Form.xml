@@ -23,5 +23,17 @@
 			</Title>
 			<Type/>
 		</Attribute>
+		<Attribute name="ДеревоРазделов" id="4">
+			<Type>
+				<v8:Type>v8:ValueTree</v8:Type>
+			</Type>
+			<Columns>
+				<Column name="Раздел" id="5">
+					<Type>
+						<v8:Type>xs:string</v8:Type>
+					</Type>
+				</Column>
+			</Columns>
+		</Attribute>
 	</Attributes>
 </Form>

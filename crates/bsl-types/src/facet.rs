@@ -100,6 +100,7 @@ pub enum FormDataFacet {
     Structure,
     Collection,
     StructureWithCollection,
+    Tree,
 }
 
 impl FormDataFacet {
@@ -108,6 +109,7 @@ impl FormDataFacet {
             Self::Structure => "ДанныеФормыСтруктура",
             Self::Collection => "ДанныеФормыКоллекция",
             Self::StructureWithCollection => "ДанныеФормыСтруктураСКоллекцией",
+            Self::Tree => "ДанныеФормыДерево",
         }
     }
 }

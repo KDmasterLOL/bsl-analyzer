@@ -532,6 +532,7 @@ pub fn platform_type_key_id(db: &dyn TypeKernelDb, id: TypeId) -> Option<String>
                 FormDataFacet::Structure => "ДанныеФормыСтруктура",
                 FormDataFacet::Collection => "ДанныеФормыКоллекция",
                 FormDataFacet::StructureWithCollection => "ДанныеФормыСтруктураСКоллекцией",
+                FormDataFacet::Tree => "ДанныеФормыДерево",
             }
             .to_string(),
         ),

@@ -165,6 +165,7 @@ fn is_concrete_to_generic_platform_bridge(from: &TypeKind, to: &TypeKind) -> boo
                 bsl_types::facet::FormDataFacet::StructureWithCollection => {
                     "FormDataStructureAndCollection"
                 }
+                bsl_types::facet::FormDataFacet::Tree => "FormDataTree",
             };
             matches((kind.platform_type_name(), en))
         }

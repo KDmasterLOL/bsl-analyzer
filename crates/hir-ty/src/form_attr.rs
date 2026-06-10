@@ -36,6 +36,15 @@ pub fn lower_form_attribute_to_typeid(
         }
     }
 
+    // A value-tree attribute is ДанныеФормыДерево on a managed form; the
+    // generic Collection shape is the value-table/tabular-section case.
+    if matches!(
+        &attr.attr_type,
+        AttributeType::Platform(bsl_metadata::PlatformValueType::ValueTree)
+    ) {
+        return db.mk_form_data(FormDataFacet::Tree, None);
+    }
+
     if has_columns {
         return db.mk_form_data(FormDataFacet::Collection, None);
     }
@@ -148,12 +157,47 @@ mod tests {
     }
 
     #[test]
+    fn value_tree_attribute_lowers_to_form_data_tree() {
+        use bsl_metadata::PlatformValueType;
+        use bsl_types::facet::FormDataFacet;
+        let db = InMemoryDb::new();
+        let mut attr =
+            plain("ДеревоРазделов", AttributeType::Platform(PlatformValueType::ValueTree));
+        attr.columns = vec![FormAttributeColumn {
+            name: "Раздел".to_string(),
+            attr_type: AttributeType::Unknown,
+        }];
+        let ty = lower_form_attribute_to_typeid(&db, &attr, &ConfigsObjectResolver(&[]));
+        match db.lookup_type(ty) {
+            TypeKind::FormData { kind, underlying } => {
+                assert_eq!(*kind, FormDataFacet::Tree);
+                assert!(underlying.is_none());
+            }
+            other => panic!("expected FormData(Tree), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn value_tree_attribute_without_columns_still_lowers_to_tree() {
+        use bsl_metadata::PlatformValueType;
+        use bsl_types::facet::FormDataFacet;
+        let db = InMemoryDb::new();
+        let attr = plain("Дерево", AttributeType::Platform(PlatformValueType::ValueTree));
+        let ty = lower_form_attribute_to_typeid(&db, &attr, &ConfigsObjectResolver(&[]));
+        match db.lookup_type(ty) {
+            TypeKind::FormData { kind, .. } => assert_eq!(*kind, FormDataFacet::Tree),
+            other => panic!("expected FormData(Tree), got {other:?}"),
+        }
+    }
+
+    #[test]
     fn platform_object_fallback_attribute_lowers_to_platform_object() {
         use bsl_metadata::PlatformValueType;
         let db = InMemoryDb::new();
-        let attr = plain("Дерево", AttributeType::Platform(PlatformValueType::ValueTree));
+        let attr =
+            plain("Документ", AttributeType::Platform(PlatformValueType::SpreadsheetDocument));
         let id = lower_form_attribute_to_typeid(&db, &attr, &ConfigsObjectResolver(&[]));
-        assert_eq!(id, db.platform_object("ДеревоЗначений".to_string()));
+        assert_eq!(id, db.platform_object("ТабличныйДокумент".to_string()));
     }
 
     #[test]
