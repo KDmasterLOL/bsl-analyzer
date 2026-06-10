@@ -634,6 +634,45 @@ fn type_mismatch_silent_on_get_area_result_into_area_param() {
 }
 
 #[test]
+fn type_mismatch_fires_on_area_value_into_spreadsheet_param() {
+    // The spreadsheet-area bridge is one-way: a value documented as
+    // ОбластьЯчеекТабличногоДокумента must NOT be admitted where a full
+    // ТабличныйДокумент is required (e.g. СкомпоноватьРезультат, Присоединить).
+    let fixture = r#"
+//- /CommonModules/ПервыйОбщийМодуль/Ext/Module.bsl
+// Параметры:
+//   Док - ТабличныйДокумент - целевой табличный документ.
+Процедура Присоединить(Док) Экспорт
+КонецПроцедуры
+
+// Возвращаемое значение:
+//   ОбластьЯчеекТабличногоДокумента - область.
+Функция ТекущаяОбласть() Экспорт
+    Возврат Неопределено;
+КонецФункции
+
+//- /test.bsl
+Процедура Тест()
+    Область = ПервыйОбщийМодуль.ТекущаяОбласть();
+    ПервыйОбщийМодуль.Присоединить(Область);
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    let rendered = rendered_mismatches(&db, file_id);
+    assert_eq!(
+        rendered.len(),
+        1,
+        "an area value into a full-document param must keep firing, got {rendered:?}"
+    );
+    assert!(
+        rendered[0].0.contains("ТабличныйДокумент")
+            && rendered[0].1.contains("ОбластьЯчеекТабличногоДокумента"),
+        "expected the full document on the expected side and the area on the actual side, \
+         got {rendered:?}"
+    );
+}
+
+#[test]
 fn bare_identifier_matching_global_function_is_not_function_typed() {
     let fixture = r#"
 //- /test.bsl

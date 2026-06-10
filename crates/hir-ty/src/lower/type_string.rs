@@ -24,7 +24,7 @@ pub fn lower_param_type_string_typeid(db: &dyn TypeKernelDb, raw: &str) -> TypeI
         return db.unknown();
     }
     if segments.iter().any(|s| is_arbitrary_type_name(s)) {
-        return db.unknown();
+        return db.any();
     }
     if segments.len() == 1 {
         return bare_name_to_typeid(db, segments[0]);
@@ -41,8 +41,11 @@ pub fn lower_return_type_string_typeid(db: &dyn TypeKernelDb, raw: &str) -> Type
     if segments.is_empty() {
         return db.unknown();
     }
+    // A documented «Произвольный» is a contract, not missing information:
+    // it lowers to the sticky Any so signature enrichment never replaces it
+    // with a body-inferred type.
     if segments.iter().any(|s| is_arbitrary_type_name(s)) {
-        return db.unknown();
+        return db.any();
     }
     if segments.iter().all(|s| segment_is_valid_type(s)) {
         db.union(segments.iter().map(|s| lower_platform_type_name_typeid(db, s)).collect())
@@ -53,7 +56,7 @@ pub fn lower_return_type_string_typeid(db: &dyn TypeKernelDb, raw: &str) -> Type
 
 pub fn lower_platform_type_name_typeid(db: &dyn TypeKernelDb, name: &str) -> TypeId {
     if is_arbitrary_type_name(name) {
-        return db.unknown();
+        return db.any();
     }
     let id = bare_name_to_typeid(db, name);
     if id != db.unknown() {
@@ -101,7 +104,7 @@ mod tests {
     fn type_string_typeid_covers_core_branches() {
         let db = InMemoryDb::new();
         assert_eq!(lower_param_type_string_typeid(&db, ""), db.unknown());
-        assert_eq!(lower_param_type_string_typeid(&db, "Произвольный"), db.unknown());
+        assert_eq!(lower_param_type_string_typeid(&db, "Произвольный"), db.any());
         assert_eq!(lower_param_type_string_typeid(&db, "Число"), db.number(None, None));
         assert_eq!(lower_param_type_string_typeid(&db, "Строка табличной части"), db.unknown());
         assert_eq!(
@@ -139,11 +142,11 @@ mod tests {
     }
 
     #[test]
-    fn lower_param_arbitrary_collapses_to_unknown() {
+    fn lower_param_arbitrary_collapses_to_any() {
         let db = InMemoryDb::new();
-        assert_eq!(lower_param_type_string_typeid(&db, "Произвольный"), db.unknown());
-        assert_eq!(lower_param_type_string_typeid(&db, "Произвольный, Неопределено"), db.unknown());
-        assert_eq!(lower_param_type_string_typeid(&db, "Arbitrary, Undefined"), db.unknown());
+        assert_eq!(lower_param_type_string_typeid(&db, "Произвольный"), db.any());
+        assert_eq!(lower_param_type_string_typeid(&db, "Произвольный, Неопределено"), db.any());
+        assert_eq!(lower_param_type_string_typeid(&db, "Arbitrary, Undefined"), db.any());
     }
 
     #[test]
@@ -218,23 +221,20 @@ mod tests {
     }
 
     #[test]
-    fn lower_return_arbitrary_collapses() {
+    fn lower_return_arbitrary_collapses_to_any() {
         let db = InMemoryDb::new();
-        assert_eq!(
-            lower_return_type_string_typeid(&db, "Произвольный, Неопределено"),
-            db.unknown()
-        );
+        assert_eq!(lower_return_type_string_typeid(&db, "Произвольный, Неопределено"), db.any());
         assert_eq!(
             lower_return_type_string_typeid(&db, "  Произвольный  ,  Неопределено"),
-            db.unknown()
+            db.any()
         );
     }
 
     #[test]
-    fn lower_platform_type_name_arbitrary_to_unknown() {
+    fn lower_platform_type_name_arbitrary_to_any() {
         let db = InMemoryDb::new();
-        assert_eq!(lower_platform_type_name_typeid(&db, "Произвольный"), db.unknown());
-        assert_eq!(lower_platform_type_name_typeid(&db, "Arbitrary"), db.unknown());
+        assert_eq!(lower_platform_type_name_typeid(&db, "Произвольный"), db.any());
+        assert_eq!(lower_platform_type_name_typeid(&db, "Arbitrary"), db.any());
     }
 
     #[test]

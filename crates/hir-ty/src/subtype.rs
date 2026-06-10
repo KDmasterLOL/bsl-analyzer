@@ -45,6 +45,10 @@ pub fn is_assignable(db: &dyn TypeKernelDb, from: TypeId, to: TypeId) -> bool {
         return true;
     }
 
+    if is_spreadsheet_area_bridge(from_kind, to_kind) {
+        return true;
+    }
+
     if is_array_bridge(db, from_kind, to_kind) {
         return true;
     }
@@ -101,6 +105,26 @@ fn is_tabular_row_bridge(a: &TypeKind, b: &TypeKind) -> bool {
         || (is_row_platform_object(a) && is_row_metadata_ref(b))
 }
 
+/// `ТабличныйДокумент.ПолучитьОбласть(…)` returns `ТабличныйДокумент` (so the
+/// platform documents it), while callees document the receiving parameter as
+/// `ОбластьЯчеекТабличногоДокумента` — the canonical print pattern passes one
+/// into the other. One direction only: an area value flows into an
+/// area-documented slot; nothing area-typed is admitted where a full
+/// spreadsheet document is required.
+fn is_spreadsheet_area_bridge(from: &TypeKind, to: &TypeKind) -> bool {
+    fn is_spreadsheet(t: &TypeKind) -> bool {
+        matches!(t, TypeKind::PlatformObject(facet)
+            if facet.name.eq_ignore_ascii_case("ТабличныйДокумент")
+                || facet.name.eq_ignore_ascii_case("SpreadsheetDocument"))
+    }
+    fn is_area(t: &TypeKind) -> bool {
+        matches!(t, TypeKind::PlatformObject(facet)
+            if facet.name.eq_ignore_ascii_case("ОбластьЯчеекТабличногоДокумента")
+                || facet.name.eq_ignore_ascii_case("SpreadsheetDocumentRange"))
+    }
+    is_spreadsheet(from) && is_area(to)
+}
+
 fn is_array_bridge(db: &dyn TypeKernelDb, from: &TypeKind, to: &TypeKind) -> bool {
     match (from, to) {
         (TypeKind::Array(a), TypeKind::Array(b)) => match (a.element, b.element) {
@@ -116,7 +140,50 @@ pub fn is_coercible_to(db: &dyn TypeKernelDb, from: TypeId, to: TypeId) -> bool 
     if matches!(db.lookup_type(to), TypeKind::String(_)) {
         return true;
     }
+    // An argument of a union type is an over-approximation: at runtime exactly
+    // one member flows in. Yet a blanket "any member fits" rule would mask
+    // real bugs (a dynamic РезультатЗапроса.Выгрузить yields ТаблицаЗначений |
+    // ДеревоЗначений, and loading the tree arm into a ТабличнаяЧасть is a
+    // genuine error), so acceptance is narrow:
+    // - «flag» members (Неопределено/Null) must EACH fit on their own —
+    //   passing a maybe-absent value into a slot that does not admit absence
+    //   is exactly the bug this check exists to catch;
+    // - of the regular members one must fit, and every non-fitting regular
+    //   member must be ДвоичныеДанные: that is the template-payload ambiguity
+    //   (ПолучитьМакет returns ДвоичныеДанные | ТабличныйДокумент and the
+    //   author knows the template's kind), where flagging the canonical print
+    //   flow is noise. Any other non-fitting alternative keeps the call
+    //   flagged.
+    // This is argument-position policy, NOT subtype truth: is_assignable
+    // keeps the sound all-members rule that function variance relies on.
+    if let TypeKind::Union(parts) = db.lookup_type(from) {
+        let mut has_regular = false;
+        let mut some_regular_fits = false;
+        let mut nonfitting_regular_all_binary = true;
+        for part in parts.iter() {
+            let part_kind = db.lookup_type(*part);
+            if matches!(part_kind, TypeKind::Undefined | TypeKind::Null) {
+                if !is_assignable(db, *part, to) {
+                    return false;
+                }
+            } else {
+                has_regular = true;
+                if is_coercible_to(db, *part, to) {
+                    some_regular_fits = true;
+                } else if !is_binary_data(part_kind) {
+                    nonfitting_regular_all_binary = false;
+                }
+            }
+        }
+        return !has_regular || (some_regular_fits && nonfitting_regular_all_binary);
+    }
     is_assignable(db, from, to)
+}
+
+fn is_binary_data(kind: &TypeKind) -> bool {
+    matches!(kind, TypeKind::PlatformObject(facet)
+        if facet.name.eq_ignore_ascii_case("ДвоичныеДанные")
+            || facet.name.eq_ignore_ascii_case("BinaryData"))
 }
 
 #[cfg(test)]
@@ -447,6 +514,94 @@ mod tests {
         let db = InMemoryDb::new();
         assert!(!is_assignable(&db, db.number(None, None), db.any_ref()));
         assert!(!is_assignable(&db, db.string(None, false), db.any_ref()));
+    }
+
+    #[test]
+    fn union_arg_coercible_when_a_regular_member_fits() {
+        let db = InMemoryDb::new();
+        let spreadsheet = db.platform_object("ТабличныйДокумент".to_string());
+        let binary = db.platform_object("ДвоичныеДанные".to_string());
+        let from = db.union(vec![binary, spreadsheet]);
+        assert!(
+            is_coercible_to(&db, from, spreadsheet),
+            "a union argument with a fitting regular member is an over-approximation, not a bug"
+        );
+        assert!(
+            !is_assignable(&db, from, spreadsheet),
+            "the lattice keeps the sound all-members rule for unions"
+        );
+    }
+
+    #[test]
+    fn union_arg_with_binary_alternative_accepted_for_same_shape() {
+        // The complementary positive to the rejection below: the SAME fitting
+        // arm (ТаблицаЗначений), but the alternative is the binary payload —
+        // the template-ambiguity carve-out applies and the call passes.
+        let db = InMemoryDb::new();
+        let table = db.value_table(None, bsl_types::facet::TableSource::Unknown);
+        let binary = db.platform_object("ДвоичныеДанные".to_string());
+        let from = db.union(vec![table, binary]);
+        assert!(is_coercible_to(&db, from, table));
+    }
+
+    #[test]
+    fn union_arg_with_non_binary_alternative_rejected() {
+        // A dynamic РезультатЗапроса.Выгрузить yields ТаблицаЗначений |
+        // ДеревоЗначений; loading the tree arm into a flat ТаблицаЗначений
+        // slot is a genuine error and must keep firing — the existential
+        // acceptance is reserved for the binary-payload template ambiguity.
+        let db = InMemoryDb::new();
+        let table = db.value_table(None, bsl_types::facet::TableSource::Unknown);
+        let tree = db.platform_object("ДеревоЗначений".to_string());
+        let from = db.union(vec![table, tree]);
+        assert!(!is_coercible_to(&db, from, table));
+    }
+
+    #[test]
+    fn union_arg_with_undefined_flag_member_rejected() {
+        let db = InMemoryDb::new();
+        let structure = db.structure(None);
+        let from = db.union(vec![structure, db.undefined()]);
+        assert!(
+            !is_coercible_to(&db, from, structure),
+            "a maybe-absent value into a slot that does not admit absence must keep firing"
+        );
+    }
+
+    #[test]
+    fn union_arg_with_null_flag_into_ref_passes() {
+        let db = InMemoryDb::new();
+        let cat = metadata_ref_id(&db, MetadataKind::CatalogRef, "Контрагенты");
+        let from = db.union(vec![cat, db.null()]);
+        assert!(
+            is_coercible_to(&db, from, cat),
+            "Null flows into ref slots by the null-to-ref rule, so the flag member fits"
+        );
+    }
+
+    #[test]
+    fn union_arg_without_fitting_regular_member_rejected() {
+        let db = InMemoryDb::new();
+        let from = db.union(vec![db.number(None, None), db.boolean()]);
+        let to = db.date(bsl_types::facet::DateComponent::DateTime);
+        assert!(!is_coercible_to(&db, from, to));
+    }
+
+    #[test]
+    fn spreadsheet_document_assignable_to_area_param_one_way() {
+        let db = InMemoryDb::new();
+        let spreadsheet = db.platform_object("ТабличныйДокумент".to_string());
+        let area = db.platform_object("ОбластьЯчеекТабличногоДокумента".to_string());
+        let area_en = db.platform_object("SpreadsheetDocumentRange".to_string());
+        assert!(is_assignable(&db, spreadsheet, area));
+        assert!(is_assignable(&db, spreadsheet, area_en));
+        assert!(
+            !is_assignable(&db, area, spreadsheet),
+            "an area value must not be admitted where a full spreadsheet document is required"
+        );
+        let unrelated = db.platform_object("ТаблицаЗначений".to_string());
+        assert!(!is_assignable(&db, spreadsheet, unrelated));
+        assert!(!is_assignable(&db, unrelated, area));
     }
 
     #[test]

@@ -1352,10 +1352,10 @@ mod tests {
     }
 
     #[test]
-    fn to_method_info_arbitrary_return_lowers_to_unknown() {
+    fn to_method_info_arbitrary_return_lowers_to_any() {
         let db = InMemoryDb::new();
         let info = to_type_method_info(&db, &test_method(Some("Произвольный"), None));
-        assert_eq!(info.return_ty, db.unknown());
+        assert_eq!(info.return_ty, db.any());
     }
 
     #[test]
@@ -1588,14 +1588,14 @@ mod tests {
     }
 
     #[test]
-    fn method_lookup_tabular_section_find_params_preserve_arbitrary_as_unknown() {
+    fn method_lookup_tabular_section_find_params_preserve_arbitrary_as_any() {
         let db = InMemoryDb::new();
         let r = ts_receiver(&db, MdoType::Catalog, "X.Y");
         let info = lookup(&db, r, &Name::new("Найти")).expect("TabularSection.Найти must resolve");
         assert_eq!(
             info.params,
-            vec![db.unknown(), db.string(None, false)],
-            "Произвольный must stay Unknown; only the row generic is rebound",
+            vec![db.any(), db.string(None, false)],
+            "Произвольный lowers to the sticky Any; only the row generic is rebound",
         );
     }
 

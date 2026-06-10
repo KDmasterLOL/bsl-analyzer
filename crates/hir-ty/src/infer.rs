@@ -1939,8 +1939,12 @@ impl<'db> InferenceContext<'db> {
         if !is_get && !is_set {
             return;
         }
-        let needs_override = (is_get && self.is_unknown(*return_ty))
-            || (is_set && params.first().is_some_and(|id| self.is_unknown(*id)));
+        // The platform documents Получить/Установить with «Произвольный» — a
+        // placeholder the constant's metadata makes precise, so both wildcard
+        // lowerings (Unknown and the sticky Any) are refinable here.
+        let is_wildcard = |id: TypeId| id == self.db.unknown() || id == self.db.any();
+        let needs_override = (is_get && is_wildcard(*return_ty))
+            || (is_set && params.first().is_some_and(|id| is_wildcard(*id)));
         if !needs_override {
             return;
         }

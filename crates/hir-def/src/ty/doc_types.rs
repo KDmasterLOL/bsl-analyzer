@@ -194,7 +194,7 @@ fn parse_type_name(name: &str) -> TypeRef {
     }
 
     match trimmed.to_lowercase().as_str() {
-        "произвольный" | "any" | "arbitrary" => return TypeRef::Unknown,
+        "произвольный" | "any" | "arbitrary" => return TypeRef::Any,
         _ => {}
     }
 
@@ -390,7 +390,7 @@ mod tests {
             }
             other => panic!("expected TypeRef::Name, got {other:?}"),
         }
-        assert_eq!(hints.ret, TypeRef::Unknown);
+        assert_eq!(hints.ret, TypeRef::Any);
     }
 
     #[test]
@@ -699,7 +699,7 @@ mod tests {
             TypeRef::Union(parts) => {
                 assert_eq!(parts.len(), 2);
                 assert_eq!(parts[0], TypeRef::Builtin(BuiltinTypeRef::String));
-                assert_eq!(parts[1], TypeRef::Unknown);
+                assert_eq!(parts[1], TypeRef::Any);
             }
             other => panic!("expected TypeRef::Union, got {other:?}"),
         }

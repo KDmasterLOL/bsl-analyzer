@@ -99,10 +99,20 @@ fn resolve_union(db: &dyn TypeKernelDb, arms: &[TypeId]) -> Option<TypeId> {
     let resolved: Option<Vec<TypeId>> =
         alive.iter().map(|t| resolve_iter_element_ty_inner(db, *t)).collect();
     let resolved = resolved?;
-    if resolved.len() == 1 {
-        Some(resolved[0])
+    // A wildcard element (an untyped «Массив» iterates per the platform docs
+    // as Произвольный) must not absorb a concrete sibling arm: the union
+    // receiver is an over-approximation and the concrete arm is what the loop
+    // variable is actually shaped like.
+    let concrete: Vec<TypeId> = resolved
+        .iter()
+        .copied()
+        .filter(|t| !matches!(db.lookup_type(*t), TypeKind::Unknown | TypeKind::Any))
+        .collect();
+    let picked = if concrete.is_empty() { resolved } else { concrete };
+    if picked.len() == 1 {
+        Some(picked[0])
     } else {
-        Some(db.union(resolved))
+        Some(db.union(picked))
     }
 }
 
@@ -149,10 +159,10 @@ mod tests {
     }
 
     #[test]
-    fn array_yields_unknown_per_platform_arbitrary() {
+    fn array_yields_any_per_platform_arbitrary() {
         let db = InMemoryDb::new();
         let elem = resolve(&db, db.array(None));
-        assert_eq!(elem, Some(db.unknown()));
+        assert_eq!(elem, Some(db.any()));
     }
 
     #[test]
@@ -219,7 +229,7 @@ mod tests {
     fn union_receiver_with_unknown_arm_absorbs_to_concrete_iterable() {
         let db = InMemoryDb::new();
         let union = db.union(vec![db.unknown(), db.array(None)]);
-        assert_eq!(resolve(&db, union), Some(db.unknown()));
+        assert_eq!(resolve(&db, union), Some(db.any()));
 
         let union = db.union(vec![db.unknown(), db.array(Some(db.string(None, false)))]);
         assert_eq!(resolve(&db, union), Some(db.string(None, false)));
@@ -250,7 +260,7 @@ mod tests {
         let db = InMemoryDb::new();
         let union = db.union(vec![db.array(None), db.undefined()]);
         let elem = resolve(&db, union);
-        assert_eq!(elem, Some(db.unknown()));
+        assert_eq!(elem, Some(db.any()));
     }
 
     #[test]
