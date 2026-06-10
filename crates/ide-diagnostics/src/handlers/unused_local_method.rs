@@ -9,7 +9,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::All,
-    modules: &[bsl_metadata::ModuleType::CommonModule, bsl_metadata::ModuleType::ObjectModule, bsl_metadata::ModuleType::HTTPServiceModule],
+    modules: &[bsl_metadata::ModuleType::CommonModule, bsl_metadata::ModuleType::ObjectModule, bsl_metadata::ModuleType::HTTPServiceModule, bsl_metadata::ModuleType::WebServiceModule],
     minutes_to_fix: 1,
     activated_by_default: true,
     compatibility_mode: DiagnosticCompatibilityMode::Undefined,
@@ -83,6 +83,14 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         for (_template, method) in http_service.all_methods() {
             if !method.is_handler_empty() {
                 called_methods.insert(method.handler().to_lowercase());
+            }
+        }
+    }
+
+    if let Some(ref web_service) = metadata.web_service {
+        for operation in web_service.operations() {
+            if !operation.is_handler_empty() {
+                called_methods.insert(operation.procedure_name().to_lowercase());
             }
         }
     }
@@ -594,6 +602,55 @@ mod tests {
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalMethod).collect();
 
         assert_eq!(unused_diags.len(), 1);
+        assert!(unused_diags[0].message.contains("НеИспользуемая"));
+    }
+
+    #[test]
+    fn test_web_service_operation_handler_not_flagged() {
+        use std::sync::Arc;
+
+        let code = r#"
+Функция GetJobsCount(СтрокаПараметров)
+    Возврат 0;
+КонецФункции
+
+Функция НеИспользуемая()
+    Возврат 1;
+КонецФункции
+"#;
+
+        let operation = bsl_metadata::WebServiceOperationBuilder::new()
+            .name("GetJobsCount")
+            .procedure_name("GetJobsCount")
+            .build();
+        let web_service = bsl_metadata::WebServiceBuilder::new()
+            .name("WMSMobileClientExchange")
+            .add_operation(operation)
+            .build();
+
+        let metadata = hir::ModuleMetadata {
+            module_type: bsl_metadata::ModuleType::WebServiceModule,
+            execution_context: None,
+            common_module: None,
+            mdo: None,
+            register: None,
+            form: None,
+            http_service: None,
+            web_service: Some(Arc::new(web_service)),
+        };
+
+        let diagnostics =
+            crate::test_utils::check_metadata_diagnostic(metadata, code, |_metadata, ctx| {
+                super::check(ctx)
+            });
+        let unused_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalMethod).collect();
+
+        assert_eq!(
+            unused_diags.len(),
+            1,
+            "operation-bound method must be exempt, unbound one must stay flagged: {unused_diags:?}"
+        );
         assert!(unused_diags[0].message.contains("НеИспользуемая"));
     }
 
