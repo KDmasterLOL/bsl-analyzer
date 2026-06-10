@@ -99,7 +99,7 @@ fn for_each_over_value_list_yields_list_item() {
 }
 
 #[test]
-fn for_each_over_array_overwrites_prior_binding_with_unknown() {
+fn for_each_over_array_overwrites_prior_binding_with_any() {
     let (db, file_id) = setup(
         r#"
 //- /test.bsl
@@ -113,7 +113,7 @@ fn for_each_over_array_overwrites_prior_binding_with_unknown() {
 "#,
     );
 
-    assert_eq!(var_ty(&db, file_id, "эл"), Some(db.unknown()));
+    assert_eq!(var_ty(&db, file_id, "эл"), Some(db.any()));
 }
 
 #[test]

@@ -145,11 +145,21 @@ fn single_path_arg(args: &[ExprIdx], body: &Body) -> Option<Name> {
 pub struct NarrowState {
     narrowed: FxHashMap<Name, Box<[TypeId]>>,
     pending_guard: Option<Guard>,
+    /// Bottom of the lattice: the state arriving over a dead-code edge (the
+    /// fall-through from a branch every path of which returned or raised).
+    /// Joining with it is identity, so `Если Х = Неопределено Тогда Возврат
+    /// КонецЕсли` keeps the inverted guard after the block instead of being
+    /// diluted by the terminated then-branch.
+    unreachable: bool,
 }
 
 impl NarrowState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn unreachable_bottom() -> Self {
+        Self { unreachable: true, ..Self::default() }
     }
 
     pub fn get(&self, name: &Name) -> Option<&[TypeId]> {
@@ -167,13 +177,27 @@ impl NarrowState {
 
 impl Lattice for NarrowState {
     fn join(&self, other: &Self) -> Self {
+        if self.unreachable {
+            return NarrowState {
+                narrowed: other.narrowed.clone(),
+                pending_guard: None,
+                unreachable: other.unreachable,
+            };
+        }
+        if other.unreachable {
+            return NarrowState {
+                narrowed: self.narrowed.clone(),
+                pending_guard: None,
+                unreachable: false,
+            };
+        }
         let mut narrowed = FxHashMap::default();
         for (k, arms_self) in &self.narrowed {
             if let Some(arms_other) = other.narrowed.get(k) {
                 narrowed.insert(k.clone(), merge_arm_sets(arms_self, arms_other));
             }
         }
-        NarrowState { narrowed, pending_guard: None }
+        NarrowState { narrowed, pending_guard: None, unreachable: false }
     }
 }
 
@@ -194,7 +218,7 @@ impl<'db> NarrowingTransfer<'db> {
                 let arms = if on_true {
                     self.refine_matched_with_base(matched, var)
                 } else {
-                    self.complement_of(var, matched)
+                    self.complement_of(state, var, matched)
                 };
                 insert_if_informative(state, var, arms);
             }
@@ -202,13 +226,13 @@ impl<'db> NarrowingTransfer<'db> {
                 let arms = if on_true {
                     arm_set_from_type_id(self.db, self.db.undefined())
                 } else {
-                    self.complement_of(var, self.db.undefined())
+                    self.complement_of(state, var, self.db.undefined())
                 };
                 insert_if_informative(state, var, arms);
             }
             Guard::IsNotUndefined { var } => {
                 let arms = if on_true {
-                    self.complement_of(var, self.db.undefined())
+                    self.complement_of(state, var, self.db.undefined())
                 } else {
                     arm_set_from_type_id(self.db, self.db.undefined())
                 };
@@ -250,7 +274,20 @@ impl<'db> NarrowingTransfer<'db> {
         }
     }
 
-    fn complement_of(&self, var: &Name, matched: TypeId) -> Box<[TypeId]> {
+    fn complement_of(&self, state: &NarrowState, var: &Name, matched: TypeId) -> Box<[TypeId]> {
+        // The tracked arm set is the flow-sensitive type at this point —
+        // subtract from it when it actually carries the matched arm (the
+        // first-occurrence base below may be a single assignment's type and
+        // miss arms that joined in later).
+        if !is_array_kind(self.db, matched) {
+            if let Some(arms) = state.narrowed.get(&fold_name(var)) {
+                if arms.contains(&matched) {
+                    let remaining: Vec<TypeId> =
+                        arms.iter().copied().filter(|m| *m != matched).collect();
+                    return normalize_arms(self.db, remaining);
+                }
+            }
+        }
         let Some(&base) = self.base_types.get(&fold_name(var)) else {
             return Box::new([]);
         };
@@ -313,7 +350,11 @@ impl Transfer<NarrowState> for NarrowingTransfer<'_> {
     }
 
     fn transfer_edge(&self, edge_kind: CfgEdgeType, state: &NarrowState) -> NarrowState {
+        if edge_kind.is_dead_code_edge() {
+            return NarrowState::unreachable_bottom();
+        }
         let mut new_state = state.clone();
+        new_state.unreachable = false;
         let pending = new_state.pending_guard.take();
         match (edge_kind, pending) {
             (CfgEdgeType::TrueBranch, Some(g)) => self.apply_guard(&mut new_state, &g, true),

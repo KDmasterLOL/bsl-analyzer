@@ -18,6 +18,16 @@ fn is_handled_uri(uri: &Url) -> bool {
 }
 
 pub fn schedule_diagnostics(state: &mut GlobalState, uri: &Url) {
+    // While the workspace is still loading, the source root and metadata
+    // substrate are incomplete: a result computed now is either cancelled by
+    // the next streamed VFS batch (each drain bumps the Salsa revision) or
+    // published against a half-loaded world as false positives. The vfs_done
+    // finalize reschedules every open document, so deferring loses nothing.
+    if !state.vfs_done {
+        tracing::debug!(%uri, "diagnostics deferred until workspace load completes");
+        return;
+    }
+
     if let Some(prev) = state.diagnostics_tokens.remove(uri) {
         prev.cancel();
     }
@@ -126,8 +136,34 @@ pub fn handle_did_open(state: &mut GlobalState, params: DidOpenTextDocumentParam
     state.process_changes(!vfs_done);
     let process_changes_ms = process_start.elapsed().as_millis() as u64;
 
+    // An open buffer must be the resident overlay. The VFS dedups by content
+    // hash, so a reopen whose buffer matches the last known content produces no
+    // change event and `process_changes` never runs — yet didClose re-keyed the
+    // file to its disk revision, and disk bytes differ from the editor buffer
+    // when the file carries a BOM (the editor strips it). Left disk-backed, every
+    // text offset is computed over the BOM'd disk text while positions are mapped
+    // through the BOM-less editor text, shifting all ranges. Re-pin explicitly.
+    {
+        use base_db::SourceDatabase as _;
+        if state.analysis_host.raw_database().try_file_text_input(file_id).is_none() {
+            state.analysis_host.request_cancellation();
+            let db = state.analysis_host.raw_database_mut();
+            ide_host_core::set_file_text_source(
+                db,
+                file_id,
+                ide_host_core::FileTextSource::Overlay(&text),
+            );
+        }
+    }
+
+    // Dependency discovery walks the (still cold and incomplete) database
+    // synchronously on the event-loop thread, so during the initial load it
+    // both stalls VFS batch draining and warms caches the next revision bump
+    // throws away. The vfs_done finalize preloads open documents instead.
     let preload_start = Instant::now();
-    preload_dependencies(state, file_id);
+    if vfs_done {
+        preload_dependencies(state, file_id);
+    }
     let preload_dispatch_ms = preload_start.elapsed().as_millis() as u64;
 
     schedule_diagnostics(state, &uri);
@@ -144,7 +180,7 @@ pub fn handle_did_open(state: &mut GlobalState, params: DidOpenTextDocumentParam
     Ok(())
 }
 
-fn preload_dependencies(state: &mut GlobalState, file_id: vfs::FileId) {
+pub(crate) fn preload_dependencies(state: &mut GlobalState, file_id: vfs::FileId) {
     let discover_start = Instant::now();
     let analysis = state.analysis_host.analysis();
     let deps = analysis.file_dependencies(file_id);
@@ -273,18 +309,40 @@ pub fn handle_did_close(state: &mut GlobalState, params: DidCloseTextDocumentPar
             // (discarding any unsaved edits, which the client also discards).
             // If it isn't readable from disk (e.g. never saved), keep the
             // overlay as a safe fallback rather than leave a dangling revision.
-            let disk = {
-                let vfs = state.vfs.read();
-                let path = vfs.file_path(file_id).as_path().to_path_buf();
-                std::fs::read_to_string(path).ok()
-            };
+            let vfs_path = state.vfs.read().file_path(file_id).clone();
+            let disk = std::fs::read_to_string(vfs_path.as_path()).ok();
             if let Some(content) = disk {
-                let db = state.analysis_host.raw_database_mut();
-                ide_host_core::set_file_text_source(
-                    db,
-                    file_id,
-                    ide_host_core::FileTextSource::Disk(&content),
-                );
+                // Route the disk text through the VFS so its content hash
+                // reflects what is actually on disk. Leaving the last editor
+                // buffer's hash behind would dedup a later disk-change event
+                // whose bytes happen to equal that buffer (e.g. an upstream
+                // BOM strip), pointing the recorded revision at content the
+                // disk no longer has.
+                let vfs_changed = state
+                    .vfs
+                    .write()
+                    .set_file_contents(vfs_path, Some(Arc::from(content.as_str())));
+                if vfs_changed {
+                    let vfs_done = state.vfs_done;
+                    // Only this close's own write can be pending here (every VFS
+                    // mutation site drains synchronously on the main loop), and
+                    // its outcome is deliberately dropped: this file's change
+                    // always reports affecting open documents, but acting on
+                    // that would re-analyze every open document on each close
+                    // of a BOM-carrying file for a semantic no-op.
+                    state.process_changes(!vfs_done);
+                } else {
+                    // The VFS already holds the disk text (buffer was saved),
+                    // so no change event will flip the source; drop the
+                    // overlay directly to make the text disk-backed.
+                    state.analysis_host.request_cancellation();
+                    let db = state.analysis_host.raw_database_mut();
+                    ide_host_core::set_file_text_source(
+                        db,
+                        file_id,
+                        ide_host_core::FileTextSource::Disk(&content),
+                    );
+                }
             }
         }
         Err(e) => {
@@ -365,6 +423,10 @@ mod tests {
         let source_root = SourceRoot::new_local(file_set);
         db.set_source_root(source_root_id, source_root);
 
+        // No VFS loader runs in tests, so the `Finished` event that normally
+        // flips this flag never arrives; model a fully loaded workspace.
+        state.vfs_done = true;
+
         (state, receiver)
     }
 
@@ -387,9 +449,41 @@ mod tests {
         assert!(state.mem_docs.contains(&params.text_document.uri));
         assert_eq!(state.mem_docs.get(&params.text_document.uri), Some(params.text_document.text));
 
-        assert!(!state.vfs_done);
         assert_eq!(state.diagnostics_generation.get(&params.text_document.uri).copied(), Some(1));
         assert!(state.diagnostics_tokens.contains_key(&params.text_document.uri));
+    }
+
+    #[test]
+    fn did_open_before_vfs_done_defers_diagnostics_and_preload() {
+        let (mut state, _receiver) = create_test_state();
+        state.vfs_done = false;
+
+        let uri = lsp_types::Url::parse("file:///test.bsl").unwrap();
+        handle_did_open(
+            &mut state,
+            DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: uri.clone(),
+                    language_id: "bsl".to_string(),
+                    version: 1,
+                    text: "Процедура Тест() КонецПроцедуры".to_string(),
+                },
+            },
+        )
+        .unwrap();
+
+        // The document is tracked, but no analysis is spawned against the
+        // half-loaded workspace: the vfs_done finalize replays it instead.
+        assert!(state.mem_docs.contains(&uri));
+        assert_eq!(state.diagnostics_generation.get(&uri), None);
+        assert!(!state.diagnostics_tokens.contains_key(&uri));
+        assert!(state.preload_tokens.is_empty());
+
+        // Once the workspace finishes loading, scheduling works again.
+        state.vfs_done = true;
+        schedule_diagnostics(&mut state, &uri);
+        assert_eq!(state.diagnostics_generation.get(&uri).copied(), Some(1));
+        assert!(state.diagnostics_tokens.contains_key(&uri));
     }
 
     #[test]
@@ -480,6 +574,124 @@ mod tests {
             );
             assert_eq!(&*db.file_text(file_id), "Процедура НаДиске() КонецПроцедуры");
         }
+    }
+
+    #[test]
+    fn reopen_after_close_restores_editor_overlay_for_bom_file() {
+        use base_db::SourceDatabase;
+
+        // On disk the file carries a UTF-8 BOM; the editor strips it from the
+        // buffer, so the didOpen text hashes identically to the previous open's
+        // VFS content and the VFS dedups the reopen — no change event reaches
+        // process_changes.
+        let editor_text = "Процедура Тест() КонецПроцедуры";
+        let disk_text = format!("\u{FEFF}{editor_text}");
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("mod.bsl");
+        std::fs::write(&path, &disk_text).expect("write");
+
+        let (mut state, _receiver) = create_test_state();
+        let uri = lsp_types::Url::from_file_path(&path).unwrap();
+
+        let open = |state: &mut GlobalState| {
+            handle_did_open(
+                state,
+                DidOpenTextDocumentParams {
+                    text_document: TextDocumentItem {
+                        uri: uri.clone(),
+                        language_id: "bsl".to_string(),
+                        version: 1,
+                        text: editor_text.to_string(),
+                    },
+                },
+            )
+            .unwrap();
+        };
+
+        open(&mut state);
+        let file_id = state.vfs_file_for_url(&uri).unwrap();
+        assert_eq!(&*state.analysis_host.raw_database_mut().file_text(file_id), editor_text);
+
+        // Close re-keys to the disk revision (BOM included).
+        handle_did_close(
+            &mut state,
+            DidCloseTextDocumentParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+            },
+        )
+        .unwrap();
+        assert_eq!(&*state.analysis_host.raw_database_mut().file_text(file_id), disk_text);
+
+        // Reopen: the buffer must become the overlay again even though the VFS
+        // deduped the open. Without the re-pin the file stays disk-backed and
+        // every highlight offset is computed over the BOM'd text while positions
+        // map through the BOM-less buffer — all ranges shift.
+        open(&mut state);
+        {
+            let db = state.analysis_host.raw_database_mut();
+            assert!(
+                db.try_file_text(file_id).is_some(),
+                "reopened file must hold a resident overlay"
+            );
+            assert_eq!(&*db.file_text(file_id), editor_text);
+        }
+    }
+
+    #[test]
+    fn disk_change_after_close_is_seen_even_when_bytes_match_last_buffer() {
+        use base_db::SourceDatabase;
+
+        // Disk carries a BOM, the editor buffer doesn't. After didClose the VFS
+        // must hold the BOM'd disk text — otherwise a later disk change whose
+        // bytes equal the last buffer (an upstream BOM strip via git pull)
+        // hash-dedups into nothing and the recorded revision points at content
+        // the disk no longer has.
+        let editor_text = "Процедура Тест() КонецПроцедуры";
+        let disk_text = format!("\u{FEFF}{editor_text}");
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("mod.bsl");
+        std::fs::write(&path, &disk_text).expect("write");
+
+        let (mut state, _receiver) = create_test_state();
+        let uri = lsp_types::Url::from_file_path(&path).unwrap();
+
+        handle_did_open(
+            &mut state,
+            DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: uri.clone(),
+                    language_id: "bsl".to_string(),
+                    version: 1,
+                    text: editor_text.to_string(),
+                },
+            },
+        )
+        .unwrap();
+        let file_id = state.vfs_file_for_url(&uri).unwrap();
+
+        handle_did_close(
+            &mut state,
+            DidCloseTextDocumentParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+            },
+        )
+        .unwrap();
+        assert_eq!(&*state.analysis_host.raw_database_mut().file_text(file_id), disk_text);
+
+        // git pull rewrites the file to the BOM-less form — byte-identical to
+        // the last editor buffer. The watcher delivers the new content.
+        std::fs::write(&path, editor_text).expect("rewrite");
+        let vfs_path = state.vfs.read().file_path(file_id).clone();
+        let changed =
+            state.vfs.write().set_file_contents(vfs_path, Some(std::sync::Arc::from(editor_text)));
+        assert!(changed, "the watcher event must not dedup against a stale buffer hash");
+        state.process_changes(false);
+
+        // The re-keyed revision must match the new disk bytes (a stale revision
+        // makes this read panic on the hash check).
+        assert_eq!(&*state.analysis_host.raw_database_mut().file_text(file_id), editor_text);
     }
 
     #[test]

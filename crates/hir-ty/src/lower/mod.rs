@@ -56,6 +56,7 @@ impl<'a> TyLoweringContext<'a> {
             }
             TypeRef::AnyRef => db.any_ref(),
             TypeRef::AnyRefOf(mdo) => db.any_metadata_ref(*mdo),
+            TypeRef::Any => db.any(),
             TypeRef::Unknown => db.unknown(),
         }
     }

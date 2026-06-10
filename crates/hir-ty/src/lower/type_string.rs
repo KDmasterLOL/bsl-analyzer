@@ -24,7 +24,7 @@ pub fn lower_param_type_string_typeid(db: &dyn TypeKernelDb, raw: &str) -> TypeI
         return db.unknown();
     }
     if segments.iter().any(|s| is_arbitrary_type_name(s)) {
-        return db.unknown();
+        return db.any();
     }
     if segments.len() == 1 {
         return bare_name_to_typeid(db, segments[0]);
@@ -41,8 +41,11 @@ pub fn lower_return_type_string_typeid(db: &dyn TypeKernelDb, raw: &str) -> Type
     if segments.is_empty() {
         return db.unknown();
     }
+    // A documented «Произвольный» is a contract, not missing information:
+    // it lowers to the sticky Any so signature enrichment never replaces it
+    // with a body-inferred type.
     if segments.iter().any(|s| is_arbitrary_type_name(s)) {
-        return db.unknown();
+        return db.any();
     }
     if segments.iter().all(|s| segment_is_valid_type(s)) {
         db.union(segments.iter().map(|s| lower_platform_type_name_typeid(db, s)).collect())
@@ -53,14 +56,43 @@ pub fn lower_return_type_string_typeid(db: &dyn TypeKernelDb, raw: &str) -> Type
 
 pub fn lower_platform_type_name_typeid(db: &dyn TypeKernelDb, name: &str) -> TypeId {
     if is_arbitrary_type_name(name) {
-        return db.unknown();
+        return db.any();
     }
     let id = bare_name_to_typeid(db, name);
-    if id == db.unknown() {
+    if id != db.unknown() {
+        return id;
+    }
+    // A PlatformObject participates in nominal comparisons, so its name must be
+    // a real type: doc comments and platform dumps put free prose in the type
+    // position, and a prose-named phantom later contradicts the genuinely
+    // inferred type in every comparison. Identifier shape keeps the common case
+    // independent of registry seeding; the registry lookup admits legitimate
+    // space-bearing platform names («Виртуальный каталог», «Внешний модуль»);
+    // the tabular-row phrase is allowlisted separately because the row rewrite
+    // in method lookup and the subtype bridge key on it while the registry does
+    // not list it as a type.
+    if is_type_name_shaped(name)
+        || is_tabular_row_type_name(name)
+        || PlatformData::instance().get_type(name).is_some()
+    {
         db.platform_object(name.to_string())
     } else {
-        id
+        db.unknown()
     }
+}
+
+pub(crate) fn is_tabular_row_type_name(name: &str) -> bool {
+    let lc = name.trim().to_lowercase();
+    lc == "строка табличной части" || lc == "line of a tabular section"
+}
+
+fn is_type_name_shaped(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_alphabetic() || first == '_')
+        && chars.all(|c| c.is_alphanumeric() || c == '_' || c == '.')
 }
 
 #[cfg(test)]
@@ -72,17 +104,14 @@ mod tests {
     fn type_string_typeid_covers_core_branches() {
         let db = InMemoryDb::new();
         assert_eq!(lower_param_type_string_typeid(&db, ""), db.unknown());
-        assert_eq!(lower_param_type_string_typeid(&db, "Произвольный"), db.unknown());
+        assert_eq!(lower_param_type_string_typeid(&db, "Произвольный"), db.any());
         assert_eq!(lower_param_type_string_typeid(&db, "Число"), db.number(None, None));
         assert_eq!(lower_param_type_string_typeid(&db, "Строка табличной части"), db.unknown());
         assert_eq!(
             lower_param_type_string_typeid(&db, "Число, Строка"),
             db.union(vec![db.number(None, None), db.string(None, false)])
         );
-        assert_eq!(
-            lower_return_type_string_typeid(&db, "Ссылка на объект, либо"),
-            db.platform_object("Ссылка на объект, либо".to_string())
-        );
+        assert_eq!(lower_return_type_string_typeid(&db, "Ссылка на объект, либо"), db.unknown());
         assert_eq!(
             lower_platform_type_name_typeid(&db, "Запрос"),
             db.platform_object("Запрос".to_string())
@@ -113,11 +142,11 @@ mod tests {
     }
 
     #[test]
-    fn lower_param_arbitrary_collapses_to_unknown() {
+    fn lower_param_arbitrary_collapses_to_any() {
         let db = InMemoryDb::new();
-        assert_eq!(lower_param_type_string_typeid(&db, "Произвольный"), db.unknown());
-        assert_eq!(lower_param_type_string_typeid(&db, "Произвольный, Неопределено"), db.unknown());
-        assert_eq!(lower_param_type_string_typeid(&db, "Arbitrary, Undefined"), db.unknown());
+        assert_eq!(lower_param_type_string_typeid(&db, "Произвольный"), db.any());
+        assert_eq!(lower_param_type_string_typeid(&db, "Произвольный, Неопределено"), db.any());
+        assert_eq!(lower_param_type_string_typeid(&db, "Arbitrary, Undefined"), db.any());
     }
 
     #[test]
@@ -163,19 +192,16 @@ mod tests {
     }
 
     #[test]
-    fn lower_return_multi_invalid_falls_back_to_raw_platform_object() {
+    fn lower_return_multi_invalid_collapses_to_unknown() {
         let db = InMemoryDb::new();
-        assert_eq!(
-            lower_return_type_string_typeid(&db, "Ссылка на объект, либо"),
-            db.platform_object("Ссылка на объект, либо".to_string())
-        );
+        assert_eq!(lower_return_type_string_typeid(&db, "Ссылка на объект, либо"), db.unknown());
     }
 
     #[test]
-    fn lower_return_mixed_separator_with_prose_segment_falls_back() {
+    fn lower_return_mixed_separator_with_prose_segment_collapses_to_unknown() {
         let raw = "ТабличныйДокумент, ТекстовыйДокумент; другой объект";
         let db = InMemoryDb::new();
-        assert_eq!(lower_return_type_string_typeid(&db, raw), db.platform_object(raw.to_string()));
+        assert_eq!(lower_return_type_string_typeid(&db, raw), db.unknown());
     }
 
     #[test]
@@ -195,23 +221,20 @@ mod tests {
     }
 
     #[test]
-    fn lower_return_arbitrary_collapses() {
+    fn lower_return_arbitrary_collapses_to_any() {
         let db = InMemoryDb::new();
-        assert_eq!(
-            lower_return_type_string_typeid(&db, "Произвольный, Неопределено"),
-            db.unknown()
-        );
+        assert_eq!(lower_return_type_string_typeid(&db, "Произвольный, Неопределено"), db.any());
         assert_eq!(
             lower_return_type_string_typeid(&db, "  Произвольный  ,  Неопределено"),
-            db.unknown()
+            db.any()
         );
     }
 
     #[test]
-    fn lower_platform_type_name_arbitrary_to_unknown() {
+    fn lower_platform_type_name_arbitrary_to_any() {
         let db = InMemoryDb::new();
-        assert_eq!(lower_platform_type_name_typeid(&db, "Произвольный"), db.unknown());
-        assert_eq!(lower_platform_type_name_typeid(&db, "Arbitrary"), db.unknown());
+        assert_eq!(lower_platform_type_name_typeid(&db, "Произвольный"), db.any());
+        assert_eq!(lower_platform_type_name_typeid(&db, "Arbitrary"), db.any());
     }
 
     #[test]
@@ -220,6 +243,37 @@ mod tests {
         assert_eq!(
             lower_platform_type_name_typeid(&db, "Запрос"),
             db.platform_object("Запрос".to_string())
+        );
+    }
+
+    #[test]
+    fn lower_platform_type_name_prose_collapses_to_unknown() {
+        let db = InMemoryDb::new();
+        assert_eq!(
+            lower_platform_type_name_typeid(&db, "имя редактируемого регистра"),
+            db.unknown()
+        );
+        assert_eq!(
+            lower_platform_type_name_typeid(&db, "Справочник1 (Необязательный)"),
+            db.unknown()
+        );
+        assert_eq!(
+            lower_platform_type_name_typeid(&db, "Форма клиентского приложения"),
+            db.unknown()
+        );
+    }
+
+    #[test]
+    fn lower_platform_type_name_spaced_registry_name_survives() {
+        let data = PlatformData::instance();
+        if data.get_type("Виртуальный каталог").is_none() {
+            return;
+        }
+        let db = InMemoryDb::new();
+        assert_eq!(
+            lower_platform_type_name_typeid(&db, "Виртуальный каталог"),
+            db.platform_object("Виртуальный каталог".to_string()),
+            "a space-bearing name listed in the platform registry must stay representable"
         );
     }
 

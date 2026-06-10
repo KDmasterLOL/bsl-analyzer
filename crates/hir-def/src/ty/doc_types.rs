@@ -175,6 +175,9 @@ fn parse_type_name(name: &str) -> TypeRef {
             .filter(|s| !s.is_empty())
             .map(parse_type_name)
             .collect();
+        if members.iter().all(|m| *m == TypeRef::Unknown) {
+            return TypeRef::Unknown;
+        }
         return match members.len() {
             0 => TypeRef::Unknown,
             1 => members.into_iter().next().unwrap(),
@@ -191,22 +194,40 @@ fn parse_type_name(name: &str) -> TypeRef {
     }
 
     match trimmed.to_lowercase().as_str() {
-        "произвольный" | "any" | "arbitrary" => return TypeRef::Unknown,
+        "произвольный" | "any" | "arbitrary" => return TypeRef::Any,
         _ => {}
     }
 
+    // Anything past this point becomes a nominal type that downstream lowering
+    // trusts verbatim, so only identifier-shaped names may pass: doc comments
+    // routinely put free prose, colons and parenthetical remarks in the type
+    // position, and a prose-named type later fails every comparison against the
+    // genuinely inferred type.
     if trimmed.contains('.') {
         let segments: Vec<Name> = trimmed
             .split('.')
             .map(|seg| Name::new(seg.trim()))
             .filter(|n| !n.as_str().is_empty())
             .collect();
-        if segments.len() >= 2 {
+        if segments.len() >= 2 && segments.iter().all(|n| is_identifier_like(n.as_str())) {
             return TypeRef::Name(QualifiedName::from_segments(segments));
         }
+        return TypeRef::Unknown;
     }
 
-    TypeRef::Name(QualifiedName::from_segments([Name::new(trimmed)]))
+    if is_identifier_like(trimmed) {
+        TypeRef::Name(QualifiedName::from_segments([Name::new(trimmed)]))
+    } else {
+        TypeRef::Unknown
+    }
+}
+
+fn is_identifier_like(s: &str) -> bool {
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_alphabetic() || first == '_') && chars.all(|c| c.is_alphanumeric() || c == '_')
 }
 
 fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
@@ -369,7 +390,7 @@ mod tests {
             }
             other => panic!("expected TypeRef::Name, got {other:?}"),
         }
-        assert_eq!(hints.ret, TypeRef::Unknown);
+        assert_eq!(hints.ret, TypeRef::Any);
     }
 
     #[test]
@@ -678,10 +699,61 @@ mod tests {
             TypeRef::Union(parts) => {
                 assert_eq!(parts.len(), 2);
                 assert_eq!(parts[0], TypeRef::Builtin(BuiltinTypeRef::String));
-                assert_eq!(parts[1], TypeRef::Unknown);
+                assert_eq!(parts[1], TypeRef::Any);
             }
             other => panic!("expected TypeRef::Union, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_type_name_rejects_prose_and_parenthetical_tails() {
+        assert_eq!(
+            parse_type_name("СправочникСсылка.Справочник1 (Необязательный)"),
+            TypeRef::Unknown,
+            "a parenthetical tail must not leak into a nominal type name"
+        );
+        assert_eq!(
+            parse_type_name("Ссылка на документ видов: ДокументСсылка.Документ1"),
+            TypeRef::Unknown,
+            "free prose before a dotted name must not become a qualified type"
+        );
+        assert_eq!(
+            parse_type_name("имя редактируемого регистра"),
+            TypeRef::Unknown,
+            "multi-word prose must not become a nominal type"
+        );
+        assert_eq!(
+            parse_type_name(
+                "Ссылка на документ видов: ДокументСсылка.Документ1, \
+                 СправочникСсылка.Справочник1 (Необязательный)"
+            ),
+            TypeRef::Unknown,
+            "a comma list whose every member is invalid must collapse to Unknown"
+        );
+    }
+
+    #[test]
+    fn parse_type_name_keeps_valid_members_of_mixed_comma_list() {
+        let parsed = parse_type_name("СправочникСсылка.Номенклатура, совсем не тип");
+        match parsed {
+            TypeRef::Union(members) => {
+                assert_eq!(members.len(), 2);
+                assert!(matches!(members[0], TypeRef::Name(_)));
+                assert_eq!(
+                    members[1],
+                    TypeRef::Unknown,
+                    "the invalid member must lower to Unknown (canonicalized away at the \
+                     kernel level) instead of becoming a phantom that can never match"
+                );
+            }
+            other => panic!("expected TypeRef::Union, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_type_name_keeps_identifier_shaped_names() {
+        assert!(matches!(parse_type_name("ПроизвольныйТип"), TypeRef::Name(_)));
+        assert!(matches!(parse_type_name("СправочникСсылка.Номенклатура"), TypeRef::Name(_)));
     }
 
     #[test]

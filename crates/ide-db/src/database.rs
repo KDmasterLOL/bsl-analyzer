@@ -173,14 +173,16 @@ impl RootDatabaseImpl {
     }
 
     /// Warm body inference for every method of a large module in parallel, before
-    /// the sequential `infer_query` fold reads them from cache. Method inferences
-    /// are independent salsa cells — each infers its own body and pulls callee
-    /// return types via the cycle-handled `method_return_type`, never recursing
-    /// into another `infer_method` — so this is plain demand-parallelism, cycle
-    /// safe. The payoff is when this module is the straggler tail of its batch
-    /// chunk: the inner `par_iter` reclaims the cores left idle by the finished
-    /// files. Returns the number of methods warmed, or 0 if the module has fewer
-    /// than `min_methods` (priming a small module is pure overhead).
+    /// the sequential `infer_query` fold reads them from cache. Each method infers
+    /// its own body and pulls callee return types via `method_return_type`, which
+    /// projects `infer_method` — so a method's inference can recurse into another
+    /// `infer_method`. Both queries carry salsa Fixpoint recovery, so recursive and
+    /// mutually recursive call SCCs converge rather than panic, and the warming
+    /// stays cycle safe under cross-thread demand. The payoff is when this module is
+    /// the straggler tail of its batch chunk: the inner `par_iter` reclaims the
+    /// cores left idle by the finished files. Returns the number of methods warmed,
+    /// or 0 if the module has fewer than `min_methods` (priming a small module is
+    /// pure overhead).
     pub fn prime_module_inference(&self, file_id: FileId, min_methods: usize) -> usize {
         use hir::HirDatabase;
         use rayon::prelude::*;

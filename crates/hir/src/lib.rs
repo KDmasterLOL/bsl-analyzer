@@ -16,7 +16,10 @@ pub use name_classify::{classify_token, NameClass};
 pub use semantic_symbol::{
     SemanticSymbol, SemanticSymbolKey, SemanticSymbolKind, SymbolDeclaration,
 };
-pub use type_facade::{kernel_type_label, module_implicit_fields, Field, HirFieldOrigin, Type};
+pub use type_facade::{
+    kernel_type_label, module_implicit_field_names, module_implicit_fields, Field, HirFieldOrigin,
+    Type,
+};
 
 pub use hir_def::{all_sdbl_in_file_query, sdbl_hir_for_file_query, SdblHirEntries, SdblInFile};
 pub use hir_def::{
@@ -159,6 +162,7 @@ pub use hir_ty::{
 };
 
 pub use bsl_types::builders::Builders;
+pub use bsl_types::facet::FormDataFacet;
 use syntax::{ast::AstNode, TextRange, TextSize};
 use vfs::FileId;
 

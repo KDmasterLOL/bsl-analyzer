@@ -14,7 +14,9 @@ use hir_def::{DefWithBodyId, ExprId, Name};
 use vfs::FileId;
 
 use crate::db::HirDatabase;
-use crate::lower::type_string::{lower_param_type_string_typeid, lower_return_type_string_typeid};
+use crate::lower::type_string::{
+    is_tabular_row_type_name, lower_param_type_string_typeid, lower_return_type_string_typeid,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MethodInfo {
@@ -530,6 +532,7 @@ pub fn platform_type_key_id(db: &dyn TypeKernelDb, id: TypeId) -> Option<String>
                 FormDataFacet::Structure => "ДанныеФормыСтруктура",
                 FormDataFacet::Collection => "ДанныеФормыКоллекция",
                 FormDataFacet::StructureWithCollection => "ДанныеФормыСтруктураСКоллекцией",
+                FormDataFacet::Tree => "ДанныеФормыДерево",
             }
             .to_string(),
         ),
@@ -750,11 +753,6 @@ fn rewrite_row_array_for_method(
 fn is_row_array_method(name: &str) -> bool {
     let lc = name.to_lowercase();
     matches!(lc.as_str(), "найтистроки" | "findrows")
-}
-
-fn is_tabular_row_type_name(name: &str) -> bool {
-    let lc = name.to_lowercase();
-    lc == "строка табличной части" || lc == "line of a tabular section"
 }
 
 #[cfg(test)]
@@ -1355,10 +1353,10 @@ mod tests {
     }
 
     #[test]
-    fn to_method_info_arbitrary_return_lowers_to_unknown() {
+    fn to_method_info_arbitrary_return_lowers_to_any() {
         let db = InMemoryDb::new();
         let info = to_type_method_info(&db, &test_method(Some("Произвольный"), None));
-        assert_eq!(info.return_ty, db.unknown());
+        assert_eq!(info.return_ty, db.any());
     }
 
     #[test]
@@ -1591,14 +1589,14 @@ mod tests {
     }
 
     #[test]
-    fn method_lookup_tabular_section_find_params_preserve_arbitrary_as_unknown() {
+    fn method_lookup_tabular_section_find_params_preserve_arbitrary_as_any() {
         let db = InMemoryDb::new();
         let r = ts_receiver(&db, MdoType::Catalog, "X.Y");
         let info = lookup(&db, r, &Name::new("Найти")).expect("TabularSection.Найти must resolve");
         assert_eq!(
             info.params,
-            vec![db.unknown(), db.string(None, false)],
-            "Произвольный must stay Unknown; only the row generic is rebound",
+            vec![db.any(), db.string(None, false)],
+            "Произвольный lowers to the sticky Any; only the row generic is rebound",
         );
     }
 

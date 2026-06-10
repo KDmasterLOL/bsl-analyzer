@@ -76,6 +76,10 @@ pub fn main_loop(connection: Connection) -> Result<()> {
     } else {
         tracing::warn!("No workspace root provided by client");
         state.update_diagnostics_config();
+        // Without a workspace root no VFS loader runs, so no `Finished` event
+        // will ever flip this flag — mark the (empty) workspace as loaded or
+        // diagnostics would stay deferred forever.
+        state.vfs_done = true;
     }
 
     run_event_loop(&mut state, &connection.receiver)?;
@@ -211,7 +215,13 @@ fn handle_loader_msg(state: &mut GlobalState, msg: vfs::loader::Message) -> Resu
                     state.vfs_done = true;
                     state.report_progress("Loading", Progress::End, Some("Done".into()), Some(1.0));
 
+                    // Documents opened during the load had their dependency
+                    // preload and diagnostics deferred; replay both now that
+                    // the source root and metadata substrate are complete.
                     for uri in state.mem_docs.uris() {
+                        if let Ok(file_id) = state.vfs_file_for_url(&uri) {
+                            crate::handlers::notification::preload_dependencies(state, file_id);
+                        }
                         crate::handlers::notification::schedule_diagnostics(state, &uri);
                     }
 
@@ -657,6 +667,51 @@ mod tests {
         };
 
         assert_eq!(PositionEncoding::negotiate(&caps), PositionEncoding::Utf8);
+    }
+
+    #[test]
+    fn vfs_done_finalize_replays_deferred_diagnostics_for_open_documents() {
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = crate::global_state::GlobalState::new(sender);
+        state.init_empty_source_root();
+        assert!(!state.vfs_done);
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("mod.bsl");
+        std::fs::write(&path, "Процедура Тест() КонецПроцедуры").expect("write");
+        let uri = lsp_types::Url::from_file_path(&path).unwrap();
+
+        crate::handlers::notification::handle_did_open(
+            &mut state,
+            lsp_types::DidOpenTextDocumentParams {
+                text_document: lsp_types::TextDocumentItem {
+                    uri: uri.clone(),
+                    language_id: "bsl".to_string(),
+                    version: 1,
+                    text: "Процедура Тест() КонецПроцедуры".to_string(),
+                },
+            },
+        )
+        .unwrap();
+
+        // Opened while the workspace was still loading: nothing scheduled yet.
+        assert_eq!(state.diagnostics_generation.get(&uri), None);
+        assert!(!state.diagnostics_tokens.contains_key(&uri));
+
+        handle_loader_msg(
+            &mut state,
+            vfs::loader::Message::Progress {
+                n_total: 1,
+                n_done: vfs::loader::LoadingProgress::Finished,
+                dir: None,
+                config_version: 0,
+            },
+        )
+        .unwrap();
+
+        assert!(state.vfs_done);
+        assert_eq!(state.diagnostics_generation.get(&uri).copied(), Some(1));
+        assert!(state.diagnostics_tokens.contains_key(&uri));
     }
 
     #[test]

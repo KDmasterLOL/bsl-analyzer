@@ -268,6 +268,24 @@ pub fn module_implicit_fields<DB: hir_ty::db::HirDatabase>(db: &DB, file_id: Fil
     hir_ty::module_implicit_fields(db, file_id).into_iter().map(field_from_info).collect()
 }
 
+/// Lowercased ru/en names of the module's implicit context fields, for
+/// consumers that only need name membership (e.g. unused-variable analysis).
+pub fn module_implicit_field_names(
+    db: &dyn hir_ty::db::HirDatabase,
+    file_id: FileId,
+) -> Vec<String> {
+    hir_ty::module_implicit_fields(db, file_id)
+        .into_iter()
+        .flat_map(|info| {
+            let mut names = vec![info.name.as_str().to_lowercase()];
+            if let Some(en) = &info.name_en {
+                names.push(en.as_str().to_lowercase());
+            }
+            names
+        })
+        .collect()
+}
+
 fn method_dto_from_platform(db: &dyn TypeKernelDb, method: &PlatformMethod) -> Method {
     let params = method
         .parameters

@@ -399,6 +399,306 @@ fn type_mismatch_still_fires_on_number_to_any_ref_param() {
     );
 }
 
+fn rendered_mismatches(db: &RootDatabaseImpl, file_id: FileId) -> Vec<(String, String)> {
+    mismatches(db, file_id)
+        .into_iter()
+        .map(|(expected, actual)| {
+            (
+                hir::Type::from_id(db, file_id, expected).display_name(ide_db::base_db::Locale::Ru),
+                hir::Type::from_id(db, file_id, actual).display_name(ide_db::base_db::Locale::Ru),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn type_mismatch_fires_on_concrete_ref_where_other_concrete_ref_documented() {
+    // A swapped-arguments bug: the callee documents a concrete catalog ref,
+    // the caller passes a ref of a DIFFERENT catalog. Any widening of concrete
+    // refs to generic supertypes must keep flagging concrete-vs-concrete.
+    let fixture = r#"
+//- /CommonModules/ПервыйОбщийМодуль/Ext/Module.bsl
+// Параметры:
+//		Счет - СправочникСсылка.Справочник1 - Банковский счет организации;
+Процедура ЗаполнитьСчета(Счет = Неопределено) Экспорт
+КонецПроцедуры
+
+// Возвращаемое значение:
+//   СправочникСсылка.СправочникСМенеджером - ссылка
+Функция СчетКонтрагента() Экспорт
+    Возврат Неопределено;
+КонецФункции
+
+//- /test.bsl
+Процедура Тест()
+    СчетКонтрагента = ПервыйОбщийМодуль.СчетКонтрагента();
+    ПервыйОбщийМодуль.ЗаполнитьСчета(СчетКонтрагента);
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    let rendered = rendered_mismatches(&db, file_id);
+    assert_eq!(
+        rendered.len(),
+        1,
+        "a wrong concrete ref must fire exactly one TypeMismatch, got {rendered:?}"
+    );
+    assert!(
+        rendered[0].0.contains("Справочник1") && rendered[0].1.contains("СправочникСМенеджером"),
+        "expected/actual must surface both concrete catalog refs, got {rendered:?}"
+    );
+}
+
+#[test]
+fn type_mismatch_fires_on_undefined_bearing_result_into_structure_param() {
+    // A real-bug shape: a function returns Неопределено on several paths and a
+    // value on the rest; its result flows unchecked into a doc-typed Структура
+    // param. The Неопределено arm must keep this call flagged.
+    let fixture = r#"
+//- /CommonModules/ПервыйОбщийМодуль/Ext/Module.bsl
+// Параметры:
+//   СтруктураДанных - Структура - данные объекта.
+Процедура ОбработатьДанные(СтруктураДанных) Экспорт
+КонецПроцедуры
+
+//- /test.bsl
+Функция ДанныеОбъекта(Режим)
+    Если Режим = 1 Тогда
+        Возврат Неопределено;
+    ИначеЕсли Режим = 2 Тогда
+        Возврат Неопределено;
+    ИначеЕсли Режим = 3 Тогда
+        Возврат Неопределено;
+    КонецЕсли;
+    Возврат Новый Структура;
+КонецФункции
+
+Процедура Тест()
+    ПервыйОбщийМодуль.ОбработатьДанные(ДанныеОбъекта(2));
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    let rendered = rendered_mismatches(&db, file_id);
+    assert!(
+        !rendered.is_empty(),
+        "Неопределено-bearing result into a Структура param must fire TypeMismatch"
+    );
+}
+
+#[test]
+fn type_mismatch_silent_on_vendor_doc_query_and_value_list_params() {
+    // Vendor doc shape (БСП-проведение, tab-indented): `Запрос - Запрос - …`
+    // and `ТекстыЗапроса - СписокЗначений ИЗ Строка - …`. Arguments built with
+    // exactly those platform types must pass: the doc type and the inferred
+    // type are the same platform type and must compare equal.
+    let fixture = r#"
+//- /CommonModules/ПроведениеДокументов/Ext/Module.bsl
+// Инициализирует данные документа для проведения.
+//
+// Параметры:
+//	Запрос - Запрос - запрос, хранящий параметры, используемые в списке запросов.
+//	ТекстыЗапроса - СписокЗначений ИЗ Строка - список текстов запросов и их имен.
+//	ДопПараметры - см. ПроведениеДокументов.ДопПараметрыИнициализироватьДанныеДокументаДляПроведения
+//
+// Возвращаемое значение:
+//	Структура Из КлючИЗначение - Таблицы проведения:
+//			* Ключ - Строка - Имя таблицы
+//			* Значение - ТаблицаЗначений - Таблица данных проведения
+//
+Функция ИнициализироватьДанныеДокументаДляПроведения(Запрос, ТекстыЗапроса, ДопПараметры = Неопределено) Экспорт
+    Возврат Неопределено;
+КонецФункции
+
+//- /test.bsl
+Процедура Тест()
+    Запрос = Новый Запрос;
+    ТекстыЗапроса = Новый СписокЗначений;
+    Результат = ПроведениеДокументов.ИнициализироватьДанныеДокументаДляПроведения(Запрос, ТекстыЗапроса);
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    let rendered = rendered_mismatches(&db, file_id);
+    assert!(
+        rendered.is_empty(),
+        "args matching the documented platform types must not fire, got {rendered:?}"
+    );
+}
+
+#[test]
+fn type_mismatch_silent_when_doc_alternatives_follow_prose_colon() {
+    // Vendor doc shape: prose, then a colon, then comma-separated alternatives
+    // with a trailing parenthetical. An argument matching the FIRST listed
+    // alternative must pass.
+    let fixture = r#"
+//- /CommonModules/ПервыйОбщийМодуль/Ext/Module.bsl
+// Параметры:
+//   ОтменяемыйДокумент - Ссылка на документ видов: ДокументСсылка.Документ1, СправочникСсылка.Справочник1 (Необязательный)
+Процедура ОтменитьДокумент(ОтменяемыйДокумент) Экспорт
+КонецПроцедуры
+
+// Возвращаемое значение:
+//   ДокументСсылка.Документ1 - ссылка
+Функция ТекущийДокумент() Экспорт
+    Возврат Неопределено;
+КонецФункции
+
+//- /test.bsl
+Процедура Тест()
+    Документ = ПервыйОбщийМодуль.ТекущийДокумент();
+    ПервыйОбщийМодуль.ОтменитьДокумент(Документ);
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    let rendered = rendered_mismatches(&db, file_id);
+    assert!(
+        rendered.is_empty(),
+        "arg matching the first documented alternative must not fire, got {rendered:?}"
+    );
+}
+
+#[test]
+fn doc_return_arbitrary_keeps_call_result_unconstrained() {
+    // Vendor doc shape: «Возвращаемое значение: Произвольный - …» with prose
+    // continuation lines. Произвольный must stay sticky (Any): the call result
+    // must satisfy any documented param type, and body inference must not
+    // replace the documented Произвольный with a narrower type.
+    let fixture = r#"
+//- /CommonModules/ОбщегоНазначения/Ext/Module.bsl
+// Параметры:
+//  Ссылка    - ЛюбаяСсылка - объект, значения реквизитов которого необходимо получить.
+//            - Строка      - полное имя предопределенного элемента, значения реквизитов которого необходимо получить.
+//  ИмяРеквизита       - Строка - имя получаемого реквизита.
+//
+// Возвращаемое значение:
+//  Произвольный - если в параметр Ссылка передана пустая ссылка, то возвращается Неопределено.
+//                 Если в параметр Ссылка передана ссылка несуществующего объекта (битая ссылка),
+//                 то возвращается Неопределено.
+//
+Функция ЗначениеРеквизитаОбъекта(Ссылка, ИмяРеквизита) Экспорт
+    Возврат "строковое значение";
+КонецФункции
+
+//- /CommonModules/ПервыйОбщийМодуль/Ext/Module.bsl
+// Параметры:
+//   Склад - СправочникСсылка.Справочник1 - склад-отправитель.
+Процедура ПринятьСклад(Склад) Экспорт
+КонецПроцедуры
+
+//- /test.bsl
+Процедура Тест(Распоряжение)
+    СкладОтправитель = ОбщегоНазначения.ЗначениеРеквизитаОбъекта(Распоряжение, "СкладОтправитель");
+    ПервыйОбщийМодуль.ПринятьСклад(СкладОтправитель);
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    let rendered = rendered_mismatches(&db, file_id);
+    assert!(
+        rendered.is_empty(),
+        "result of a Произвольный-documented function must satisfy any param type, got {rendered:?}"
+    );
+}
+
+#[test]
+fn type_mismatch_silent_on_get_area_result_into_area_param() {
+    // Canonical БСП print pattern: ТабличныйДокумент.ПолучитьОбласть(имя)
+    // returns ТабличныйДокумент (platform data), while vendor docs annotate the
+    // receiving param as ОбластьЯчеекТабличногоДокумента. Both sides describe
+    // the same canonical flow — it must not fire.
+    let fixture = r#"
+//- /CommonModules/ШтрихкодированиеПечатныхФорм/Ext/Module.bsl
+// Вывести штрихкод в табличный документ
+//
+// Параметры:
+//  ТабличныйДокумент - ТабличныйДокумент - Табличный документ
+//  Макет - ТабличныйДокумент
+//  ОбластьМакета - ОбластьЯчеекТабличногоДокумента - Область
+//  Ссылка - ЛюбаяСсылка - Ссылка на документ из которого будет вычислен штрихкод.
+//
+Процедура ВывестиШтрихкодВТабличныйДокумент(ТабличныйДокумент, Макет, Знач ОбластьМакета, Ссылка) Экспорт
+КонецПроцедуры
+
+//- /test.bsl
+Процедура Тест(Ссылка)
+    ТабличныйДокумент = Новый ТабличныйДокумент;
+    Макет = Новый ТабличныйДокумент;
+    ОбластьЗаголовок = Макет.ПолучитьОбласть("Заголовок");
+    ШтрихкодированиеПечатныхФорм.ВывестиШтрихкодВТабличныйДокумент(ТабличныйДокумент, Макет, ОбластьЗаголовок, Ссылка);
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    let rendered = rendered_mismatches(&db, file_id);
+    assert!(
+        rendered.is_empty(),
+        "ПолучитьОбласть result into a documented area param is the canonical \
+         print flow and must not fire, got {rendered:?}"
+    );
+}
+
+#[test]
+fn type_mismatch_silent_on_concrete_manager_into_generic_manager_param() {
+    // Vendor doc shape: the param is annotated with the GENERIC platform name
+    // (ДокументМенеджер) while the call passes a concrete manager
+    // (Документы.Документ1) — by platform semantics the concrete IS the
+    // generic.
+    let fixture = r#"
+//- /CommonModules/ПервыйОбщийМодуль/Ext/Module.bsl
+// Параметры:
+//   МенеджерДокумента - ДокументМенеджер - менеджер документа.
+Процедура ПараметрыУказанияСерий(МенеджерДокумента) Экспорт
+КонецПроцедуры
+
+//- /test.bsl
+Процедура Тест()
+    ПервыйОбщийМодуль.ПараметрыУказанияСерий(Документы.Документ1);
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    let rendered = rendered_mismatches(&db, file_id);
+    assert!(
+        rendered.is_empty(),
+        "a concrete document manager satisfies a ДокументМенеджер-documented param, \
+         got {rendered:?}"
+    );
+}
+
+#[test]
+fn type_mismatch_fires_on_area_value_into_spreadsheet_param() {
+    // The spreadsheet-area bridge is one-way: a value documented as
+    // ОбластьЯчеекТабличногоДокумента must NOT be admitted where a full
+    // ТабличныйДокумент is required (e.g. СкомпоноватьРезультат, Присоединить).
+    let fixture = r#"
+//- /CommonModules/ПервыйОбщийМодуль/Ext/Module.bsl
+// Параметры:
+//   Док - ТабличныйДокумент - целевой табличный документ.
+Процедура Присоединить(Док) Экспорт
+КонецПроцедуры
+
+// Возвращаемое значение:
+//   ОбластьЯчеекТабличногоДокумента - область.
+Функция ТекущаяОбласть() Экспорт
+    Возврат Неопределено;
+КонецФункции
+
+//- /test.bsl
+Процедура Тест()
+    Область = ПервыйОбщийМодуль.ТекущаяОбласть();
+    ПервыйОбщийМодуль.Присоединить(Область);
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    let rendered = rendered_mismatches(&db, file_id);
+    assert_eq!(
+        rendered.len(),
+        1,
+        "an area value into a full-document param must keep firing, got {rendered:?}"
+    );
+    assert!(
+        rendered[0].0.contains("ТабличныйДокумент")
+            && rendered[0].1.contains("ОбластьЯчеекТабличногоДокумента"),
+        "expected the full document on the expected side and the area on the actual side, \
+         got {rendered:?}"
+    );
+}
+
 #[test]
 fn bare_identifier_matching_global_function_is_not_function_typed() {
     let fixture = r#"

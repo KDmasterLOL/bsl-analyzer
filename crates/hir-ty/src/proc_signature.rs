@@ -191,11 +191,11 @@ mod tests {
     }
 
     #[test]
-    fn return_arbitrary_returns_some_unknown_not_none() {
+    fn return_arbitrary_returns_some_any_not_none() {
         let db = InMemoryDb::new();
         let d = docs(Vec::new(), vec![typedoc("Произвольный"), typedoc("Неопределено")]);
         let ret = lower_return_from_docs(&db, &d);
-        assert_eq!(ret, Some(db.unknown()));
+        assert_eq!(ret, Some(db.any()));
     }
 
     #[test]

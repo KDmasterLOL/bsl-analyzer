@@ -24,6 +24,12 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 const MONITORED_PROCEDURES: &[&str] =
     &["передзаписью", "beforewrite", "призаписи", "onwrite", "передудалением", "beforedelete"];
 
+/// Library functions whose body is a `ОбменДанными.Загрузка`-derived check, so
+/// guarding the handler with them is equivalent to the literal check. The БСП/ЗУП
+/// wrapper is recognised out of the box; projects extend the list through the
+/// `guardWrappers` parameter.
+const DEFAULT_GUARD_WRAPPERS: &[&str] = &["ЗарплатаКадры.ОтключитьБизнесЛогикуПриЗаписи"];
+
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::DataExchangeLoading;
     if ctx.is_disabled_with_metadata(code) {
@@ -36,6 +42,17 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     let find_first =
         ctx.config.get_bool(DiagnosticCode::DataExchangeLoading, "findFirst").unwrap_or(false);
+
+    let guard_wrappers: Vec<(String, String)> = ctx
+        .config
+        .get_string_array(code, "guardWrappers")
+        .unwrap_or_else(|| DEFAULT_GUARD_WRAPPERS.iter().map(|s| s.to_string()).collect())
+        .iter()
+        .filter_map(|entry| {
+            let (module, function) = entry.split_once('.')?;
+            Some((module.trim().to_lowercase(), function.trim().to_lowercase()))
+        })
+        .collect();
 
     let item_tree = ctx.item_tree();
     let module_bodies = ctx.module_bodies();
@@ -54,7 +71,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                 }
 
                 if let Some(body) = module_bodies.body(local_id) {
-                    if !has_guard_pattern(body, find_first) {
+                    if !has_guard_pattern(body, find_first, &guard_wrappers) {
                         diagnostics.push(Diagnostic {
                             code: DiagnosticCode::DataExchangeLoading,
                             message: "Отсутствует проверка условия ОбменДанными.Загрузка в обработчике события. \
@@ -101,7 +118,7 @@ fn is_monitored_procedure(name: &Name) -> bool {
     MONITORED_PROCEDURES.contains(&lower_name.as_str())
 }
 
-fn has_guard_pattern(body: &Body, find_first: bool) -> bool {
+fn has_guard_pattern(body: &Body, find_first: bool, wrappers: &[(String, String)]) -> bool {
     let stmts_to_check: Vec<StmtId> = if find_first {
         body.body_stmts()
             .filter(|&stmt_id| !matches!(body.stmt(stmt_id), Stmt::VarDecl { .. }))
@@ -112,7 +129,7 @@ fn has_guard_pattern(body: &Body, find_first: bool) -> bool {
     };
 
     for &stmt_id in &stmts_to_check {
-        if is_guard_if_statement(body, stmt_id) {
+        if is_guard_if_statement(body, stmt_id, wrappers) {
             return true;
         }
     }
@@ -120,12 +137,16 @@ fn has_guard_pattern(body: &Body, find_first: bool) -> bool {
     false
 }
 
-fn is_guard_if_statement(body: &Body, stmt_id: StmtId) -> bool {
+fn is_guard_if_statement(body: &Body, stmt_id: StmtId, wrappers: &[(String, String)]) -> bool {
     let stmt = body.stmt(stmt_id);
 
     match stmt {
         Stmt::If(if_stmt) => {
-            if !condition_has_data_exchange_load(body, ExprId::from_idx(if_stmt.condition)) {
+            if !condition_has_data_exchange_load(
+                body,
+                ExprId::from_idx(if_stmt.condition),
+                wrappers,
+            ) {
                 return false;
             }
 
@@ -137,7 +158,11 @@ fn is_guard_if_statement(body: &Body, stmt_id: StmtId) -> bool {
     }
 }
 
-fn condition_has_data_exchange_load(body: &Body, expr_id: ExprId) -> bool {
+fn condition_has_data_exchange_load(
+    body: &Body,
+    expr_id: ExprId,
+    wrappers: &[(String, String)],
+) -> bool {
     let expr = body.expr(expr_id);
 
     match expr {
@@ -145,20 +170,45 @@ fn condition_has_data_exchange_load(body: &Body, expr_id: ExprId) -> bool {
             if is_data_exchange_load_field(body, ExprId::from_idx(*base), field) {
                 return true;
             }
-            condition_has_data_exchange_load(body, ExprId::from_idx(*base))
+            condition_has_data_exchange_load(body, ExprId::from_idx(*base), wrappers)
         }
 
         Expr::BinaryOp { lhs, rhs, .. } => {
-            condition_has_data_exchange_load(body, ExprId::from_idx(*lhs))
-                || condition_has_data_exchange_load(body, ExprId::from_idx(*rhs))
+            condition_has_data_exchange_load(body, ExprId::from_idx(*lhs), wrappers)
+                || condition_has_data_exchange_load(body, ExprId::from_idx(*rhs), wrappers)
         }
 
         Expr::UnaryOp { expr, .. } => {
-            condition_has_data_exchange_load(body, ExprId::from_idx(*expr))
+            condition_has_data_exchange_load(body, ExprId::from_idx(*expr), wrappers)
+        }
+
+        // `Модуль.Функция(...)` lowers to Call with a Field callee; requiring a
+        // plain Path base keeps nested receivers (`А.Б.Функция()`) from matching
+        // a `Б.Функция` wrapper entry.
+        Expr::Call { callee, .. } => {
+            if let Expr::Field { base, field } = body.expr(ExprId::from_idx(*callee)) {
+                is_guard_wrapper_call(body, ExprId::from_idx(*base), field, wrappers)
+            } else {
+                false
+            }
         }
 
         _ => false,
     }
+}
+
+fn is_guard_wrapper_call(
+    body: &Body,
+    receiver_id: ExprId,
+    method: &Name,
+    wrappers: &[(String, String)],
+) -> bool {
+    let Expr::Path(module_name) = body.expr(receiver_id) else {
+        return false;
+    };
+    let module_lower = module_name.as_str().to_lowercase();
+    let method_lower = method.as_str().to_lowercase();
+    wrappers.iter().any(|(module, function)| *module == module_lower && *function == method_lower)
 }
 
 fn is_data_exchange_load_field(body: &Body, base_id: ExprId, field: &Name) -> bool {
@@ -401,6 +451,110 @@ EndProcedure"#;
 КонецПроцедуры"#;
         let diagnostics = check_ast_diagnostic(code, check);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
+    fn test_default_wrapper_guard_ok() {
+        let code = r#"Процедура ПередЗаписью(Отказ, РежимЗаписи, РежимПроведения)
+    Если ЗарплатаКадры.ОтключитьБизнесЛогикуПриЗаписи(ЭтотОбъект) Тогда
+        Возврат;
+    КонецЕсли;
+    ВыполнитьЧтоТо();
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
+    fn test_wrapper_without_return_still_flags() {
+        let code = r#"Процедура ПередЗаписью(Отказ)
+    Если ЗарплатаКадры.ОтключитьБизнесЛогикуПриЗаписи(ЭтотОбъект) Тогда
+        Сообщить("Загрузка");
+    КонецЕсли;
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        expect![[r#"
+            DataExchangeLoading @ 1:11..1:23
+              message: Отсутствует проверка условия ОбменДанными.Загрузка в обработчике события. Необходимо добавить проверку для предотвращения выполнения логики при обмене данными
+              severity: Critical"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
+    fn test_same_function_on_other_module_still_flags() {
+        let code = r#"Процедура ПередЗаписью(Отказ)
+    Если МойМодуль.ОтключитьБизнесЛогикуПриЗаписи(ЭтотОбъект) Тогда
+        Возврат;
+    КонецЕсли;
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        expect![[r#"
+            DataExchangeLoading @ 1:11..1:23
+              message: Отсутствует проверка условия ОбменДанными.Загрузка в обработчике события. Необходимо добавить проверку для предотвращения выполнения логики при обмене данными
+              severity: Critical"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
+    fn test_custom_wrapper_from_config() {
+        let code = r#"Процедура ПередЗаписью(Отказ)
+    Если Обмен.ЭтоЗагрузка(ЭтотОбъект) Тогда
+        Возврат;
+    КонецЕсли;
+КонецПроцедуры"#;
+        let mut config = DiagnosticsConfig::default();
+        config.parameters.insert(
+            DiagnosticCode::DataExchangeLoading,
+            serde_json::json!({"guardWrappers": ["Обмен.ЭтоЗагрузка"]}),
+        );
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
+    fn test_custom_wrapper_list_replaces_default() {
+        let code = r#"Процедура ПередЗаписью(Отказ)
+    Если ЗарплатаКадры.ОтключитьБизнесЛогикуПриЗаписи(ЭтотОбъект) Тогда
+        Возврат;
+    КонецЕсли;
+КонецПроцедуры"#;
+        let mut config = DiagnosticsConfig::default();
+        config.parameters.insert(
+            DiagnosticCode::DataExchangeLoading,
+            serde_json::json!({"guardWrappers": ["Обмен.ЭтоЗагрузка"]}),
+        );
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        expect![[r#"
+            DataExchangeLoading @ 1:11..1:23
+              message: Отсутствует проверка условия ОбменДанными.Загрузка в обработчике события. Необходимо добавить проверку для предотвращения выполнения логики при обмене данными
+              severity: Critical"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
+    fn test_wrapper_in_disjunction_ok() {
+        let code = r#"Процедура ПриЗаписи(Отказ)
+    Если ЗарплатаКадры.ОтключитьБизнесЛогикуПриЗаписи(ЭтотОбъект) Или ПропуститьПроверки Тогда
+        Возврат;
+    КонецЕсли;
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
+    fn test_unrelated_call_in_condition_still_flags() {
+        let code = r#"Процедура ПередЗаписью(Отказ)
+    Если ПроверитьЧтоТо(ЭтотОбъект) Тогда
+        Возврат;
+    КонецЕсли;
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        expect![[r#"
+            DataExchangeLoading @ 1:11..1:23
+              message: Отсутствует проверка условия ОбменДанными.Загрузка в обработчике события. Необходимо добавить проверку для предотвращения выполнения логики при обмене данными
+              severity: Critical"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]

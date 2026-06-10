@@ -207,7 +207,9 @@
 			<Constant>ПроизвольныйКонст</Constant>
 			<Catalog>Справочник1</Catalog>
 			<InformationRegister>РегистрСведений1</InformationRegister>
+			<AccumulationRegister>РегистрНакопления1</AccumulationRegister>
 			<Document>Документ1</Document>
+			<ChartOfAccounts>ПланСчетов1</ChartOfAccounts>
 			<ScheduledJob>РегламентноеЗадание1</ScheduledJob>
 			<ScheduledJob>РегламентноеЗадание2</ScheduledJob>
 			<ScheduledJob>РегламентноеЗаданиеНесуществующийМетод</ScheduledJob>

@@ -503,7 +503,7 @@ mod metadata_tests {
     fn test_fields_from_joins_without_is_null_metadata() {
         let meta = get_metadata(DiagnosticCode::FieldsFromJoinsWithoutIsNull).unwrap();
 
-        assert_eq!(meta.diagnostic_type, DiagnosticType::Error);
+        assert_eq!(meta.diagnostic_type, DiagnosticType::CodeSmell);
         assert_eq!(meta.severity, DiagnosticSeverityLevel::Critical);
         assert!(!meta.activated_by_default);
         assert_eq!(
@@ -511,7 +511,7 @@ mod metadata_tests {
             &[MetadataTag::Sql, MetadataTag::Suspicious, MetadataTag::Unpredictable]
         );
 
-        assert_eq!(meta.calculate_severity(), crate::Severity::Critical);
+        assert_eq!(meta.calculate_severity(), crate::Severity::Warning);
     }
 
     #[test]

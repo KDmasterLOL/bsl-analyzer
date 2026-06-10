@@ -108,6 +108,10 @@ impl<'a> DiagnosticsContext<'a> {
         self.query(|p| p.module_metadata(module_id))
     }
 
+    pub fn module_implicit_field_names(&self) -> Vec<String> {
+        self.query(|p| p.module_implicit_field_names(self.file_id))
+    }
+
     pub fn symbol_tree(&self) -> Arc<hir::SymbolTree> {
         let module_id = hir::ModuleId::new(self.file_id);
         self.symbol_tree_for(module_id)

@@ -2426,7 +2426,9 @@ mod tests {
 
         // The text block is the JSON mirror (machine-parseable), not prose.
         let text = result.content[0].raw.as_text().expect("text mirror").text.as_str();
-        assert!(text.contains("\"status\": \"not_ready\""), "text mirror must be JSON: {text}");
+        let mirror: serde_json::Value =
+            serde_json::from_str(text).expect("text mirror must be valid JSON");
+        assert_eq!(&mirror, body, "text mirror must match structuredContent");
     }
 
     #[test]

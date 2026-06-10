@@ -45,13 +45,21 @@ pub fn is_assignable(db: &dyn TypeKernelDb, from: TypeId, to: TypeId) -> bool {
         return true;
     }
 
+    if is_spreadsheet_area_bridge(from_kind, to_kind) {
+        return true;
+    }
+
+    if is_concrete_to_generic_platform_bridge(from_kind, to_kind) {
+        return true;
+    }
+
     if is_array_bridge(db, from_kind, to_kind) {
         return true;
     }
 
     if matches!(from_kind, TypeKind::ThisObject { .. } | TypeKind::ThisManager { .. }) {
         if let Some(coerced) = crate::this_object::coerce_to_metadata_ref_id(db, from) {
-            if coerced == to {
+            if is_assignable(db, coerced, to) {
                 return true;
             }
         }
@@ -101,6 +109,134 @@ fn is_tabular_row_bridge(a: &TypeKind, b: &TypeKind) -> bool {
         || (is_row_platform_object(a) && is_row_metadata_ref(b))
 }
 
+/// `ТабличныйДокумент.ПолучитьОбласть(…)` returns `ТабличныйДокумент` (so the
+/// platform documents it), while callees document the receiving parameter as
+/// `ОбластьЯчеекТабличногоДокумента` — the canonical print pattern passes one
+/// into the other. One direction only: an area value flows into an
+/// area-documented slot; nothing area-typed is admitted where a full
+/// spreadsheet document is required.
+fn is_spreadsheet_area_bridge(from: &TypeKind, to: &TypeKind) -> bool {
+    fn is_spreadsheet(t: &TypeKind) -> bool {
+        matches!(t, TypeKind::PlatformObject(facet)
+            if platform_name_eq_ci(&facet.name, "ТабличныйДокумент", "SpreadsheetDocument"))
+    }
+    fn is_area(t: &TypeKind) -> bool {
+        matches!(t, TypeKind::PlatformObject(facet)
+        if platform_name_eq_ci(
+            &facet.name,
+            "ОбластьЯчеекТабличногоДокумента",
+            "SpreadsheetDocumentRange",
+        ))
+    }
+    is_spreadsheet(from) && is_area(to)
+}
+
+/// BSL identifiers are case-insensitive and doc authors spell platform names
+/// in arbitrary case; `eq_ignore_ascii_case` folds only ASCII, so Cyrillic
+/// names need the full Unicode lowercase fold.
+fn platform_name_eq_ci(actual: &str, ru: &str, en: &str) -> bool {
+    actual.eq_ignore_ascii_case(en) || actual.to_lowercase() == ru.to_lowercase()
+}
+
+/// Vendor docs widely annotate parameters with a GENERIC platform name —
+/// ДокументМенеджер, СправочникОбъект, ТабличнаяЧасть, ДанныеФормыСтруктура —
+/// while the call site passes the concretely typed value, and by platform
+/// semantics the concrete value IS the generic (`Документы.X` is a
+/// `ДокументМенеджер`). One direction only: a generic value is never admitted
+/// where a concrete one is required, and concrete-vs-other-concrete keeps
+/// firing.
+fn is_concrete_to_generic_platform_bridge(from: &TypeKind, to: &TypeKind) -> bool {
+    let TypeKind::PlatformObject(to_facet) = to else {
+        return false;
+    };
+    let matches = |(ru, en): (&str, &str)| platform_name_eq_ci(&to_facet.name, ru, en);
+    match from {
+        TypeKind::ObjectManager(f) => generic_manager_names(f.mdo).is_some_and(matches),
+        TypeKind::ThisManager { owner, .. } => {
+            generic_manager_names(owner.mdo_type).is_some_and(matches)
+        }
+        TypeKind::ThisObject { owner, .. } => {
+            generic_object_names(owner.mdo_type).is_some_and(matches)
+        }
+        TypeKind::FormData { kind, .. } => {
+            let en = match kind {
+                bsl_types::facet::FormDataFacet::Structure => "FormDataStructure",
+                bsl_types::facet::FormDataFacet::Collection => "FormDataCollection",
+                bsl_types::facet::FormDataFacet::StructureWithCollection => {
+                    "FormDataStructureAndCollection"
+                }
+                bsl_types::facet::FormDataFacet::Tree => "FormDataTree",
+            };
+            matches((kind.platform_type_name(), en))
+        }
+        TypeKind::MetadataRef(f) => match f.kind {
+            MetadataKind::TabularSection { .. } => matches(("ТабличнаяЧасть", "TabularSection")),
+            kind => object_mdo_of_kind(kind).and_then(generic_object_names).is_some_and(matches),
+        },
+        _ => false,
+    }
+}
+
+fn object_mdo_of_kind(kind: MetadataKind) -> Option<bsl_metadata::MdoType> {
+    use bsl_metadata::MdoType as M;
+    match kind {
+        MetadataKind::CatalogObject => Some(M::Catalog),
+        MetadataKind::DocumentObject => Some(M::Document),
+        MetadataKind::TaskObject => Some(M::Task),
+        MetadataKind::BusinessProcessObject => Some(M::BusinessProcess),
+        MetadataKind::ExchangePlanObject => Some(M::ExchangePlan),
+        MetadataKind::ChartOfAccountsObject => Some(M::ChartOfAccounts),
+        MetadataKind::DataProcessorObject => Some(M::DataProcessor),
+        MetadataKind::ReportObject => Some(M::Report),
+        _ => None,
+    }
+}
+
+fn generic_manager_names(mdo: bsl_metadata::MdoType) -> Option<(&'static str, &'static str)> {
+    use bsl_metadata::MdoType as M;
+    Some(match mdo {
+        M::Catalog => ("СправочникМенеджер", "CatalogManager"),
+        M::Document => ("ДокументМенеджер", "DocumentManager"),
+        M::Enum => ("ПеречислениеМенеджер", "EnumManager"),
+        M::InformationRegister => ("РегистрСведенийМенеджер", "InformationRegisterManager"),
+        M::AccumulationRegister => ("РегистрНакопленияМенеджер", "AccumulationRegisterManager"),
+        M::AccountingRegister => ("РегистрБухгалтерииМенеджер", "AccountingRegisterManager"),
+        M::CalculationRegister => ("РегистрРасчетаМенеджер", "CalculationRegisterManager"),
+        M::ExchangePlan => ("ПланОбменаМенеджер", "ExchangePlanManager"),
+        M::ChartOfAccounts => ("ПланСчетовМенеджер", "ChartOfAccountsManager"),
+        M::ChartOfCharacteristicTypes => {
+            ("ПланВидовХарактеристикМенеджер", "ChartOfCharacteristicTypesManager")
+        }
+        M::ChartOfCalculationTypes => {
+            ("ПланВидовРасчетаМенеджер", "ChartOfCalculationTypesManager")
+        }
+        M::Task => ("ЗадачаМенеджер", "TaskManager"),
+        M::BusinessProcess => ("БизнесПроцессМенеджер", "BusinessProcessManager"),
+        M::DataProcessor => ("ОбработкаМенеджер", "DataProcessorManager"),
+        M::Report => ("ОтчетМенеджер", "ReportManager"),
+        _ => return None,
+    })
+}
+
+fn generic_object_names(mdo: bsl_metadata::MdoType) -> Option<(&'static str, &'static str)> {
+    use bsl_metadata::MdoType as M;
+    Some(match mdo {
+        M::Catalog => ("СправочникОбъект", "CatalogObject"),
+        M::Document => ("ДокументОбъект", "DocumentObject"),
+        M::Task => ("ЗадачаОбъект", "TaskObject"),
+        M::BusinessProcess => ("БизнесПроцессОбъект", "BusinessProcessObject"),
+        M::ExchangePlan => ("ПланОбменаОбъект", "ExchangePlanObject"),
+        M::ChartOfAccounts => ("ПланСчетовОбъект", "ChartOfAccountsObject"),
+        M::ChartOfCharacteristicTypes => {
+            ("ПланВидовХарактеристикОбъект", "ChartOfCharacteristicTypesObject")
+        }
+        M::ChartOfCalculationTypes => ("ПланВидовРасчетаОбъект", "ChartOfCalculationTypesObject"),
+        M::DataProcessor => ("ОбработкаОбъект", "DataProcessorObject"),
+        M::Report => ("ОтчетОбъект", "ReportObject"),
+        _ => return None,
+    })
+}
+
 fn is_array_bridge(db: &dyn TypeKernelDb, from: &TypeKind, to: &TypeKind) -> bool {
     match (from, to) {
         (TypeKind::Array(a), TypeKind::Array(b)) => match (a.element, b.element) {
@@ -116,7 +252,58 @@ pub fn is_coercible_to(db: &dyn TypeKernelDb, from: TypeId, to: TypeId) -> bool 
     if matches!(db.lookup_type(to), TypeKind::String(_)) {
         return true;
     }
+    // СообщитьПользователю and friends document the parameter as ЛюбаяСсылка
+    // yet are canonically called with ЭтотОбъект — БСП resolves the object to
+    // its ref internally. Argument-position policy only: in the lattice an
+    // object stays distinct from a ref.
+    if matches!(db.lookup_type(from), TypeKind::ThisObject { .. })
+        && matches!(db.lookup_type(to), TypeKind::AnyRef)
+    {
+        return true;
+    }
+    // An argument of a union type is an over-approximation: at runtime exactly
+    // one member flows in. Yet a blanket "any member fits" rule would mask
+    // real bugs (a dynamic РезультатЗапроса.Выгрузить yields ТаблицаЗначений |
+    // ДеревоЗначений, and loading the tree arm into a ТабличнаяЧасть is a
+    // genuine error), so acceptance is narrow:
+    // - «flag» members (Неопределено/Null) must EACH fit on their own —
+    //   passing a maybe-absent value into a slot that does not admit absence
+    //   is exactly the bug this check exists to catch;
+    // - of the regular members one must fit, and every non-fitting regular
+    //   member must be ДвоичныеДанные: that is the template-payload ambiguity
+    //   (ПолучитьМакет returns ДвоичныеДанные | ТабличныйДокумент and the
+    //   author knows the template's kind), where flagging the canonical print
+    //   flow is noise. Any other non-fitting alternative keeps the call
+    //   flagged.
+    // This is argument-position policy, NOT subtype truth: is_assignable
+    // keeps the sound all-members rule that function variance relies on.
+    if let TypeKind::Union(parts) = db.lookup_type(from) {
+        let mut has_regular = false;
+        let mut some_regular_fits = false;
+        let mut nonfitting_regular_all_binary = true;
+        for part in parts.iter() {
+            let part_kind = db.lookup_type(*part);
+            if matches!(part_kind, TypeKind::Undefined | TypeKind::Null) {
+                if !is_assignable(db, *part, to) {
+                    return false;
+                }
+            } else {
+                has_regular = true;
+                if is_coercible_to(db, *part, to) {
+                    some_regular_fits = true;
+                } else if !is_binary_data(part_kind) {
+                    nonfitting_regular_all_binary = false;
+                }
+            }
+        }
+        return !has_regular || (some_regular_fits && nonfitting_regular_all_binary);
+    }
     is_assignable(db, from, to)
+}
+
+fn is_binary_data(kind: &TypeKind) -> bool {
+    matches!(kind, TypeKind::PlatformObject(facet)
+        if platform_name_eq_ci(&facet.name, "ДвоичныеДанные", "BinaryData"))
 }
 
 #[cfg(test)]
@@ -447,6 +634,202 @@ mod tests {
         let db = InMemoryDb::new();
         assert!(!is_assignable(&db, db.number(None, None), db.any_ref()));
         assert!(!is_assignable(&db, db.string(None, false), db.any_ref()));
+    }
+
+    #[test]
+    fn union_arg_coercible_when_a_regular_member_fits() {
+        let db = InMemoryDb::new();
+        let spreadsheet = db.platform_object("ТабличныйДокумент".to_string());
+        let binary = db.platform_object("ДвоичныеДанные".to_string());
+        let from = db.union(vec![binary, spreadsheet]);
+        assert!(
+            is_coercible_to(&db, from, spreadsheet),
+            "a union argument with a fitting regular member is an over-approximation, not a bug"
+        );
+        assert!(
+            !is_assignable(&db, from, spreadsheet),
+            "the lattice keeps the sound all-members rule for unions"
+        );
+    }
+
+    #[test]
+    fn union_arg_with_binary_alternative_accepted_for_same_shape() {
+        // The complementary positive to the rejection below: the SAME fitting
+        // arm (ТаблицаЗначений), but the alternative is the binary payload —
+        // the template-ambiguity carve-out applies and the call passes.
+        let db = InMemoryDb::new();
+        let table = db.value_table(None, bsl_types::facet::TableSource::Unknown);
+        let binary = db.platform_object("ДвоичныеДанные".to_string());
+        let from = db.union(vec![table, binary]);
+        assert!(is_coercible_to(&db, from, table));
+    }
+
+    #[test]
+    fn union_arg_with_non_binary_alternative_rejected() {
+        // A dynamic РезультатЗапроса.Выгрузить yields ТаблицаЗначений |
+        // ДеревоЗначений; loading the tree arm into a flat ТаблицаЗначений
+        // slot is a genuine error and must keep firing — the existential
+        // acceptance is reserved for the binary-payload template ambiguity.
+        let db = InMemoryDb::new();
+        let table = db.value_table(None, bsl_types::facet::TableSource::Unknown);
+        let tree = db.platform_object("ДеревоЗначений".to_string());
+        let from = db.union(vec![table, tree]);
+        assert!(!is_coercible_to(&db, from, table));
+    }
+
+    #[test]
+    fn union_arg_with_undefined_flag_member_rejected() {
+        let db = InMemoryDb::new();
+        let structure = db.structure(None);
+        let from = db.union(vec![structure, db.undefined()]);
+        assert!(
+            !is_coercible_to(&db, from, structure),
+            "a maybe-absent value into a slot that does not admit absence must keep firing"
+        );
+    }
+
+    #[test]
+    fn union_arg_with_null_flag_into_ref_passes() {
+        let db = InMemoryDb::new();
+        let cat = metadata_ref_id(&db, MetadataKind::CatalogRef, "Контрагенты");
+        let from = db.union(vec![cat, db.null()]);
+        assert!(
+            is_coercible_to(&db, from, cat),
+            "Null flows into ref slots by the null-to-ref rule, so the flag member fits"
+        );
+    }
+
+    #[test]
+    fn union_arg_without_fitting_regular_member_rejected() {
+        let db = InMemoryDb::new();
+        let from = db.union(vec![db.number(None, None), db.boolean()]);
+        let to = db.date(bsl_types::facet::DateComponent::DateTime);
+        assert!(!is_coercible_to(&db, from, to));
+    }
+
+    #[test]
+    fn spreadsheet_document_assignable_to_area_param_one_way() {
+        let db = InMemoryDb::new();
+        let spreadsheet = db.platform_object("ТабличныйДокумент".to_string());
+        let area = db.platform_object("ОбластьЯчеекТабличногоДокумента".to_string());
+        let area_en = db.platform_object("SpreadsheetDocumentRange".to_string());
+        assert!(is_assignable(&db, spreadsheet, area));
+        assert!(is_assignable(&db, spreadsheet, area_en));
+        assert!(
+            !is_assignable(&db, area, spreadsheet),
+            "an area value must not be admitted where a full spreadsheet document is required"
+        );
+        let unrelated = db.platform_object("ТаблицаЗначений".to_string());
+        assert!(!is_assignable(&db, spreadsheet, unrelated));
+        assert!(!is_assignable(&db, unrelated, area));
+    }
+
+    #[test]
+    fn concrete_manager_assignable_to_generic_manager_one_way() {
+        let db = InMemoryDb::new();
+        let manager = db.object_manager(
+            bsl_metadata::MdoType::Document,
+            "ПКО".to_string(),
+            &bsl_types::testing::RootConfigCtx,
+        );
+        let generic_ru = db.platform_object("ДокументМенеджер".to_string());
+        let generic_en = db.platform_object("DocumentManager".to_string());
+        assert!(is_assignable(&db, manager, generic_ru));
+        assert!(is_assignable(&db, manager, generic_en));
+        assert!(
+            !is_assignable(&db, generic_ru, manager),
+            "a generic manager must not be admitted where a concrete one is required"
+        );
+        let wrong_kind = db.platform_object("СправочникМенеджер".to_string());
+        assert!(
+            !is_assignable(&db, manager, wrong_kind),
+            "a document manager is not a catalog manager"
+        );
+    }
+
+    #[test]
+    fn this_object_assignable_to_generic_object_name() {
+        let db = InMemoryDb::new();
+        let owner = bsl_types::facet::MdoRefFacet::new(
+            bsl_metadata::MdoType::Document,
+            "ЗаказДавальца".to_string(),
+        );
+        let this_object = db.mk_this_object(bsl_types::kind::ConfigId::Root, owner.clone());
+        let generic = db.platform_object("ДокументОбъект".to_string());
+        assert!(is_assignable(&db, this_object, generic));
+        let wrong = db.platform_object("СправочникОбъект".to_string());
+        assert!(!is_assignable(&db, this_object, wrong));
+
+        let this_manager = db.mk_this_manager(bsl_types::kind::ConfigId::Root, owner);
+        let generic_manager = db.platform_object("ДокументМенеджер".to_string());
+        assert!(is_assignable(&db, this_manager, generic_manager));
+    }
+
+    #[test]
+    fn tabular_section_assignable_to_generic_tabular_section() {
+        let db = InMemoryDb::new();
+        let ts = metadata_ref_id(
+            &db,
+            MetadataKind::TabularSection { parent: bsl_metadata::MdoType::Document },
+            "ЗаказДавальца.Товары",
+        );
+        assert!(is_assignable(&db, ts, db.platform_object("ТабличнаяЧасть".to_string())));
+        assert!(!is_assignable(&db, ts, db.platform_object("СправочникОбъект".to_string())));
+    }
+
+    #[test]
+    fn typed_form_data_assignable_to_generic_form_data_name() {
+        let db = InMemoryDb::new();
+        let owner = bsl_types::facet::MdoRefFacet::new(
+            bsl_metadata::MdoType::Document,
+            "Анкета".to_string(),
+        );
+        let typed = db.mk_form_data(bsl_types::facet::FormDataFacet::Structure, Some(owner));
+        let generic = db.platform_object("ДанныеФормыСтруктура".to_string());
+        assert!(is_assignable(&db, typed, generic));
+        let other = db.platform_object("ДанныеФормыКоллекция".to_string());
+        assert!(
+            !is_assignable(&db, typed, other),
+            "a structure is not a collection — only the matching generic name widens"
+        );
+    }
+
+    #[test]
+    fn generic_bridge_is_cyrillic_case_insensitive() {
+        let db = InMemoryDb::new();
+        let manager = db.object_manager(
+            bsl_metadata::MdoType::Document,
+            "ПКО".to_string(),
+            &bsl_types::testing::RootConfigCtx,
+        );
+        let lowercase = db.platform_object("документМенеджер".to_string());
+        assert!(
+            is_assignable(&db, manager, lowercase),
+            "BSL identifiers are case-insensitive, Cyrillic included"
+        );
+    }
+
+    #[test]
+    fn this_object_coercible_to_any_ref_argument_only() {
+        let db = InMemoryDb::new();
+        let owner = bsl_types::facet::MdoRefFacet::new(
+            bsl_metadata::MdoType::Document,
+            "ЗаказДавальца".to_string(),
+        );
+        let this_object = db.mk_this_object(bsl_types::kind::ConfigId::Root, owner.clone());
+        assert!(
+            is_coercible_to(&db, this_object, db.any_ref()),
+            "СообщитьПользователю(..., ЭтотОбъект, ...) is the canonical БСП call"
+        );
+        assert!(
+            !is_assignable(&db, this_object, db.any_ref()),
+            "in the lattice an object stays distinct from a ref"
+        );
+        let this_manager = db.mk_this_manager(bsl_types::kind::ConfigId::Root, owner);
+        assert!(
+            !is_coercible_to(&db, this_manager, db.any_ref()),
+            "a manager is not a ref under any policy"
+        );
     }
 
     #[test]

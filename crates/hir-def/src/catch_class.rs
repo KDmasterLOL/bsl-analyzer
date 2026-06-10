@@ -17,22 +17,10 @@ pub fn classify_catch_body(body: &Body, except: &[StmtIdx]) -> CatchBodyClass {
         return CatchBodyClass::Empty;
     }
 
-    let mut has_raise = false;
-    let mut has_log = false;
-    let mut has_rollback = false;
-    let mut has_other = false;
-
-    for &stmt_idx in except.iter() {
-        match body.stmt_idx(stmt_idx) {
-            Stmt::Raise { .. } => has_raise = true,
-            Stmt::Expr(expr_id) => match recovery_kind(body, *expr_id) {
-                RecoveryKind::Log => has_log = true,
-                RecoveryKind::Rollback => has_rollback = true,
-                RecoveryKind::None => has_other = true,
-            },
-            _ => has_other = true,
-        }
-    }
+    let mut flags = RecoveryFlags::default();
+    scan_stmts(body, except, true, &mut flags);
+    let RecoveryFlags { raise: has_raise, log: has_log, rollback: has_rollback, other: has_other } =
+        flags;
 
     if let Some(pure) = match (has_raise, has_log, has_rollback, has_other) {
         (true, false, false, false) => Some(CatchBodyClass::RaisesOnly),
@@ -50,6 +38,67 @@ pub fn classify_catch_body(body: &Body, except: &[StmtIdx]) -> CatchBodyClass {
         CatchBodyClass::RollbackOnly
     } else {
         CatchBodyClass::Silent
+    }
+}
+
+#[derive(Default)]
+struct RecoveryFlags {
+    raise: bool,
+    log: bool,
+    rollback: bool,
+    other: bool,
+}
+
+/// Collects recovery actions on every control-flow path of the handler:
+/// a `Raise` (or log/rollback call) inside an `Если`/loop branch is a real
+/// conditional rethrow, so the branching statements themselves are
+/// transparent. `raise_escapes` is false inside a nested `Попытка` body —
+/// a `Raise` there is caught by the nested handler and never leaves the
+/// outer one; only the nested handler's own statements rethrow outward.
+fn scan_stmts(body: &Body, stmts: &[StmtIdx], raise_escapes: bool, flags: &mut RecoveryFlags) {
+    for &stmt_idx in stmts.iter() {
+        match body.stmt_idx(stmt_idx) {
+            Stmt::Raise { .. } => {
+                if raise_escapes {
+                    flags.raise = true;
+                } else {
+                    flags.other = true;
+                }
+            }
+            Stmt::Expr(expr_id) => match recovery_kind(body, *expr_id) {
+                RecoveryKind::Log => flags.log = true,
+                RecoveryKind::Rollback => flags.rollback = true,
+                RecoveryKind::None => flags.other = true,
+            },
+            Stmt::If(if_stmt) => {
+                scan_stmts(body, &if_stmt.then_branch, raise_escapes, flags);
+                for (_, branch) in if_stmt.elsif_branches.iter() {
+                    scan_stmts(body, branch, raise_escapes, flags);
+                }
+                if let Some(branch) = &if_stmt.else_branch {
+                    scan_stmts(body, branch, raise_escapes, flags);
+                }
+            }
+            Stmt::PreprocIf(preproc) => {
+                scan_stmts(body, &preproc.then_branch, raise_escapes, flags);
+                for (_, _, branch) in preproc.elsif_branches.iter() {
+                    scan_stmts(body, branch, raise_escapes, flags);
+                }
+                if let Some(branch) = &preproc.else_branch {
+                    scan_stmts(body, branch, raise_escapes, flags);
+                }
+            }
+            Stmt::While { body: loop_body, .. }
+            | Stmt::For { body: loop_body, .. }
+            | Stmt::ForEach { body: loop_body, .. } => {
+                scan_stmts(body, loop_body, raise_escapes, flags);
+            }
+            Stmt::Try { body: try_body, except } => {
+                scan_stmts(body, try_body, false, flags);
+                scan_stmts(body, except, raise_escapes, flags);
+            }
+            _ => flags.other = true,
+        }
     }
 }
 
@@ -240,6 +289,145 @@ mod tests {
         );
         let except = first_try_except(&body);
         assert_eq!(classify_catch_body(&body, except), CatchBodyClass::LogsOnly);
+    }
+
+    #[test]
+    fn conditional_raise_in_if_is_raises_only() {
+        let body = parse_lower(
+            r#"
+Процедура Тест()
+    Попытка
+        Действие();
+    Исключение
+        Если ИнформацияОбОшибке().Описание <> ТекстИсключенияДублирование Тогда
+            ВызватьИсключение;
+        КонецЕсли;
+    КонецПопытки;
+КонецПроцедуры
+"#,
+        );
+        let except = first_try_except(&body);
+        assert_eq!(classify_catch_body(&body, except), CatchBodyClass::RaisesOnly);
+    }
+
+    #[test]
+    fn raise_in_else_branch_counts() {
+        let body = parse_lower(
+            r#"
+Процедура Тест()
+    Попытка
+        Действие();
+    Исключение
+        Если ИзвестнаяОшибка Тогда
+            Лог = 1;
+        Иначе
+            ВызватьИсключение;
+        КонецЕсли;
+    КонецПопытки;
+КонецПроцедуры
+"#,
+        );
+        let except = first_try_except(&body);
+        assert_eq!(classify_catch_body(&body, except), CatchBodyClass::Mixed);
+    }
+
+    #[test]
+    fn conditional_log_is_logs_only() {
+        let body = parse_lower(
+            r#"
+Процедура Тест()
+    Попытка
+        Действие();
+    Исключение
+        Если НужноЛогировать Тогда
+            Сообщить("error");
+        КонецЕсли;
+    КонецПопытки;
+КонецПроцедуры
+"#,
+        );
+        let except = first_try_except(&body);
+        assert_eq!(classify_catch_body(&body, except), CatchBodyClass::LogsOnly);
+    }
+
+    #[test]
+    fn raise_in_loop_counts() {
+        let body = parse_lower(
+            r#"
+Процедура Тест()
+    Попытка
+        Действие();
+    Исключение
+        Для Каждого Ошибка Из Ошибки Цикл
+            ВызватьИсключение;
+        КонецЦикла;
+    КонецПопытки;
+КонецПроцедуры
+"#,
+        );
+        let except = first_try_except(&body);
+        assert_eq!(classify_catch_body(&body, except), CatchBodyClass::RaisesOnly);
+    }
+
+    #[test]
+    fn conditional_swallow_is_still_silent() {
+        let body = parse_lower(
+            r#"
+Процедура Тест()
+    Попытка
+        Действие();
+    Исключение
+        Если Условие Тогда
+            Х = 1;
+        КонецЕсли;
+    КонецПопытки;
+КонецПроцедуры
+"#,
+        );
+        let except = first_try_except(&body);
+        assert_eq!(classify_catch_body(&body, except), CatchBodyClass::Silent);
+    }
+
+    #[test]
+    fn raise_inside_nested_try_body_does_not_count() {
+        // The nested handler catches it before it can leave the outer one.
+        let body = parse_lower(
+            r#"
+Процедура Тест()
+    Попытка
+        Действие();
+    Исключение
+        Попытка
+            ВызватьИсключение;
+        Исключение
+        КонецПопытки;
+    КонецПопытки;
+КонецПроцедуры
+"#,
+        );
+        let except = first_try_except(&body);
+        assert_eq!(classify_catch_body(&body, except), CatchBodyClass::Silent);
+    }
+
+    #[test]
+    fn raise_inside_nested_try_handler_counts() {
+        let body = parse_lower(
+            r#"
+Процедура Тест()
+    Попытка
+        Действие();
+    Исключение
+        Попытка
+            ЗаписатьОшибку();
+        Исключение
+            ВызватьИсключение;
+        КонецПопытки;
+    КонецПопытки;
+КонецПроцедуры
+"#,
+        );
+        let except = first_try_except(&body);
+        assert_eq!(classify_catch_body(&body, except), CatchBodyClass::Mixed);
     }
 
     #[test]

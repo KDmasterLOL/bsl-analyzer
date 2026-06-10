@@ -18,6 +18,12 @@ pub enum TypeRef {
 
     Union(Vec<TypeRef>),
 
+    /// An explicitly documented «Произвольный»: unconstrained by contract.
+    /// Distinct from [`TypeRef::Unknown`] (no information): enrichment may
+    /// replace an Unknown return with body inference, but a declared
+    /// Произвольный must stay sticky.
+    Any,
+
     Unknown,
 }
 
