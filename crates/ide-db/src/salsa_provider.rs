@@ -126,6 +126,10 @@ impl AnalysisProvider for SalsaProvider<'_> {
         hir::kernel_type_label(self.db, id, locale, false)
     }
 
+    fn module_implicit_field_names(&self, file_id: FileId) -> Vec<String> {
+        hir::module_implicit_field_names(self.db, file_id)
+    }
+
     fn parse(&self, file_id: FileId) -> Parse<SyntaxNode> {
         self.db.parse(file_id)
     }

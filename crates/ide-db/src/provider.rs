@@ -140,6 +140,14 @@ pub trait AnalysisProvider {
         AssignmentResolution::Unknown
     }
 
+    /// Lowercased ru/en names of the module's implicit context fields (object
+    /// attributes, register dimensions/resources/attributes, form attributes,
+    /// platform record-set properties such as БлокироватьДляИзменения). Empty
+    /// for providers without type information.
+    fn module_implicit_field_names(&self, _file_id: FileId) -> Vec<String> {
+        Vec::new()
+    }
+
     fn kernel_type_display(&self, id: bsl_types::kind::TypeId, locale: base_db::Locale) -> String;
 
     fn parse(&self, file_id: FileId) -> Parse<SyntaxNode>;

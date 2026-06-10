@@ -55,6 +55,32 @@ fn build_attribute_names_to_skip(ctx: &DiagnosticsContext) -> FxHashSet<String> 
 
             names
         }
+        bsl_metadata::ModuleType::RecordSetModule => {
+            let register = match &metadata.register {
+                Some(register) => register,
+                None => return FxHashSet::default(),
+            };
+
+            let mut names = FxHashSet::default();
+
+            for dim in register.dimensions() {
+                names.insert(dim.name().to_lowercase());
+            }
+            for res in register.resources() {
+                names.insert(res.name().to_lowercase());
+                if let Some(en) = res.name_en() {
+                    names.insert(en.to_lowercase());
+                }
+            }
+            for attr in register.attributes() {
+                names.insert(attr.name().to_lowercase());
+                if let Some(en) = attr.name_en() {
+                    names.insert(en.to_lowercase());
+                }
+            }
+
+            names
+        }
         bsl_metadata::ModuleType::FormModule => {
             const STANDARD_FORM_PROPERTIES: &[&str] = &[
                 "заголовок",
@@ -95,7 +121,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     let mut diagnostics = Vec::new();
 
-    let skip_attr_names = build_attribute_names_to_skip(ctx);
+    let mut skip_attr_names = build_attribute_names_to_skip(ctx);
+    // Type-aware providers also surface platform context properties
+    // (БлокироватьДляИзменения, ОбменДанными, ДополнительныеСвойства, …):
+    // assigning one is a side effect on the module context, not a local.
+    skip_attr_names.extend(ctx.module_implicit_field_names());
 
     let module_bodies = ctx.module_bodies();
 
@@ -1107,6 +1137,126 @@ mod tests {
             "Same name should be flagged in CommonModule (not an object attribute)"
         );
         assert!(unused_diags[0].message.contains("Дата"));
+    }
+
+    fn make_record_set_module_metadata() -> hir::ModuleMetadata {
+        use bsl_metadata::{dimension::DimensionBuilder, register::RegisterResource};
+        let register = bsl_metadata::Register::builder()
+            .name("Остатки")
+            .mdo_type(bsl_metadata::MdoType::AccumulationRegister)
+            .dimensions(vec![DimensionBuilder::default().name("Склад").build()])
+            .resources(vec![RegisterResource::new(Default::default(), "Количество")])
+            .build();
+
+        hir::ModuleMetadata {
+            module_type: bsl_metadata::ModuleType::RecordSetModule,
+            execution_context: None,
+            common_module: None,
+            mdo: None,
+            register: Some(std::sync::Arc::new(register)),
+            http_service: None,
+            web_service: None,
+            form: None,
+        }
+    }
+
+    #[test]
+    fn test_register_fields_not_flagged_in_record_set_module() {
+        use crate::test_utils::check_metadata_diagnostic;
+
+        let metadata = make_record_set_module_metadata();
+
+        let code = r#"Процедура ПередЗаписью(Отказ, Замещение)
+    Склад = Справочники.Склады.ОсновнойСклад();
+    Количество = 0;
+КонецПроцедуры"#;
+
+        let diagnostics = check_metadata_diagnostic(metadata, code, |_meta, ctx| super::check(ctx));
+        let unused_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
+
+        assert_eq!(
+            unused_diags.len(),
+            0,
+            "Register dimensions/resources should not be flagged in RecordSetModule, got: {:?}",
+            unused_diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_true_unused_still_flagged_in_record_set_module() {
+        use crate::test_utils::check_metadata_diagnostic;
+
+        let metadata = make_record_set_module_metadata();
+
+        let code = r#"Процедура ПередЗаписью(Отказ, Замещение)
+    НеПолеРегистра = 42;
+КонецПроцедуры"#;
+
+        let diagnostics = check_metadata_diagnostic(metadata, code, |_meta, ctx| super::check(ctx));
+        let unused_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
+
+        assert_eq!(
+            unused_diags.len(),
+            1,
+            "True unused variable should still be flagged in RecordSetModule"
+        );
+        assert!(unused_diags[0].message.contains("НеПолеРегистра"));
+    }
+
+    #[test]
+    fn test_record_set_platform_property_not_flagged_with_salsa() {
+        use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
+        use ide_db::RootDatabaseImpl;
+        use std::path::PathBuf;
+        use vfs::{FileId, FileSet, VfsPath};
+
+        let fixtures_dir =
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer");
+
+        // Assigning the platform record-set property is a side effect (managed
+        // lock on write), not a local variable.
+        let code = r#"Процедура ПередЗаписью(Отказ, Замещение)
+    БлокироватьДляИзменения = Истина;
+КонецПроцедуры"#;
+
+        let mut db = RootDatabaseImpl::new();
+        let workspace_root = PathBuf::from(fixtures_dir);
+
+        let mut file_set = FileSet::default();
+        let file_id = FileId(0);
+        let module_path = VfsPath::new(format!(
+            "{}/AccumulationRegisters/РегистрНакопления1/Ext/RecordSetModule.bsl",
+            fixtures_dir
+        ));
+        file_set.insert(file_id, module_path);
+
+        let source_root_id = SourceRootId(0);
+        db.set_source_root(source_root_id, SourceRoot::new_local(file_set));
+        db.set_file_source_root(file_id, source_root_id);
+        db.set_file_text(file_id, code);
+
+        let configuration_path_input = ide_db::metadata::ConfigurationPathInput::new(
+            &db,
+            workspace_root.to_string_lossy().to_string(),
+            0,
+        );
+
+        let provider = ide_db::SalsaProvider::new(&db, Some(configuration_path_input));
+        let config = crate::DiagnosticsConfig::all_enabled();
+        let ctx = crate::DiagnosticsContext::new(&config, file_id, &provider);
+
+        let diagnostics = super::check(&ctx);
+        let unused_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
+
+        assert_eq!(
+            unused_diags.len(),
+            0,
+            "БлокироватьДляИзменения is a platform record-set property, got: {:?}",
+            unused_diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
     }
 
     #[test]
