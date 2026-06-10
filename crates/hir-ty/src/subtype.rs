@@ -195,8 +195,32 @@ fn is_concrete_to_generic_platform_bridge(from: &TypeKind, to: &TypeKind) -> boo
             MetadataKind::TabularSection { .. } => matches(("ТабличнаяЧасть", "TabularSection")),
             kind => object_mdo_of_kind(kind).and_then(generic_object_names).is_some_and(matches),
         },
+        TypeKind::FormControl { kind, .. } => {
+            generic_form_control_names(*kind).is_some_and(matches)
+        }
         _ => false,
     }
+}
+
+/// A form control (`Элементы.<имя>`) IS its generic platform type —
+/// `Элементы.Список` is a `ТаблицаФормы`, an input field is a `ПолеФормы` —
+/// while БСП command/handler helpers document the parameter with that generic
+/// name. One direction only, like the manager/object generics above.
+fn generic_form_control_names(
+    kind: bsl_types::facet::FormElementFacet,
+) -> Option<(&'static str, &'static str)> {
+    use bsl_metadata::FormElementKind as K;
+    Some(match kind {
+        K::Table => ("ТаблицаФормы", "FormTable"),
+        K::Field => ("ПолеФормы", "FormField"),
+        K::Group | K::UsualGroup | K::Pages | K::Page | K::CommandBar | K::ButtonGroup => {
+            ("ГруппаФормы", "FormGroup")
+        }
+        K::Button => ("КнопкаФормы", "FormButton"),
+        K::Decoration => ("ДекорацияФормы", "FormDecoration"),
+        K::Addition => ("ДополнениеЭлементаФормы", "FormItemAddition"),
+        K::Other => return None,
+    })
 }
 
 fn object_mdo_of_kind(kind: MetadataKind) -> Option<bsl_metadata::MdoType> {
@@ -283,6 +307,22 @@ pub fn is_coercible_to(db: &dyn TypeKernelDb, from: TypeId, to: TypeId) -> bool 
     {
         return true;
     }
+    // A document/catalog tabular section shares the whole row API with
+    // ТаблицаЗначений (НайтиСтроки, Добавить, Итог, Свернуть, indexing), and
+    // vendor helpers that fill or scan a named column routinely document the
+    // slot as the bare ТаблицаЗначений (alone or as a union member) yet are
+    // called with `Объект.<ТЧ>`. This is argument-position policy, NOT subtype
+    // truth: a tabular section is NOT a ValueTable in the lattice (it lacks the
+    // column surface — Колонки, Индексы, Скопировать), so is_assignable keeps
+    // them distinct and function variance stays sound; only at the call
+    // boundary do we admit the idiom. One direction only — a real ТаблицаЗначений
+    // is never accepted where a concrete tabular section is required.
+    if matches!(db.lookup_type(from), TypeKind::MetadataRef(facet)
+        if matches!(facet.kind, MetadataKind::TabularSection { .. }))
+        && to_admits_bare_value_table(db, to)
+    {
+        return true;
+    }
     // An argument of a union type is an over-approximation: at runtime exactly
     // one member flows in. Yet a blanket "any member fits" rule would mask
     // real bugs (a dynamic РезультатЗапроса.Выгрузить yields ТаблицаЗначений |
@@ -321,6 +361,20 @@ pub fn is_coercible_to(db: &dyn TypeKernelDb, from: TypeId, to: TypeId) -> bool 
         return !has_regular || (some_regular_fits && nonfitting_regular_all_binary);
     }
     is_assignable(db, from, to)
+}
+
+/// A parameter slot accepts the bare ТаблицаЗначений — directly or as one
+/// member of a documented union (`ТаблицаЗначений, РезультатЗапроса, …`).
+/// Projected value tables never reach parameter position (doc types lower with
+/// projection `None`); a carried projection therefore signals an inferred,
+/// column-shaped target the tabular section is not proven to satisfy, so it is
+/// excluded.
+fn to_admits_bare_value_table(db: &dyn TypeKernelDb, to: TypeId) -> bool {
+    match db.lookup_type(to) {
+        TypeKind::ValueTable(facet) => facet.projection.is_none(),
+        TypeKind::Union(parts) => parts.iter().any(|p| to_admits_bare_value_table(db, *p)),
+        _ => false,
+    }
 }
 
 fn is_binary_data(kind: &TypeKind) -> bool {
@@ -901,6 +955,92 @@ mod tests {
             is_assignable(&db, arg, bare),
             "the union .any() path relies on direct assignability"
         );
+    }
+
+    #[test]
+    fn tabular_section_coercible_to_bare_value_table_argument_only() {
+        use bsl_types::facet::TableSource;
+        let db = InMemoryDb::new();
+        // `ЗаполнитьДатыОтгрузкиВТаблице(Дата, Объект.Продукция, …)` — the helper
+        // documents the slot as the bare `ТаблицаЗначений`.
+        let ts = metadata_ref_id(
+            &db,
+            MetadataKind::TabularSection { parent: bsl_metadata::MdoType::Document },
+            "ЗаказДавальца.Продукция",
+        );
+        let value_table = db.value_table(None, TableSource::Unknown);
+        assert!(
+            is_coercible_to(&db, ts, value_table),
+            "a tabular section satisfies a ТаблицаЗначений slot at the call boundary"
+        );
+        // A documented union slot `ТаблицаЗначений, РезультатЗапроса, Массив`
+        // still admits the tabular section through its bare ValueTable member.
+        let union_slot = db.union(vec![
+            value_table,
+            db.platform_object("РезультатЗапроса".to_string()),
+            db.array(None),
+        ]);
+        assert!(is_coercible_to(&db, ts, union_slot), "the bare ВТ union member admits it");
+
+        assert!(
+            !is_assignable(&db, ts, value_table),
+            "in the lattice a tabular section stays distinct from a ValueTable"
+        );
+        assert!(
+            !is_coercible_to(&db, value_table, ts),
+            "one direction only — a real ТаблицаЗначений is not a concrete tabular section"
+        );
+        // A column-shaped (projected) target is an inferred slot, not a doc
+        // type; the tabular section is not proven to carry those columns.
+        let projected = projected_value_table(&db, "Номенклатура");
+        assert!(
+            !is_coercible_to(&db, ts, projected),
+            "a projected ValueTable target is not admitted without proven column shape"
+        );
+    }
+
+    #[test]
+    fn form_table_control_assignable_to_generic_form_table_one_way() {
+        use bsl_types::facet::FormElementFacet;
+        let db = InMemoryDb::new();
+        // `Элементы.Список` is a form table control passed into a parameter
+        // documented `ТаблицаФормы` (a union member in the БСП command helper).
+        let control = db.mk_form_control(FormElementFacet::Table, None);
+        let generic_ru = db.platform_object("ТаблицаФормы".to_string());
+        let generic_en = db.platform_object("FormTable".to_string());
+        assert!(is_assignable(&db, control, generic_ru));
+        assert!(is_assignable(&db, control, generic_en));
+        assert!(
+            !is_assignable(&db, generic_ru, control),
+            "a generic ТаблицаФормы must not be admitted where a concrete control is required"
+        );
+        let wrong = db.platform_object("ПолеФормы".to_string());
+        assert!(
+            !is_assignable(&db, control, wrong),
+            "a table control is not a ПолеФормы — only the matching generic name widens"
+        );
+        let field = db.mk_form_control(FormElementFacet::Field, None);
+        assert!(is_assignable(&db, field, db.platform_object("ПолеФормы".to_string())));
+    }
+
+    #[test]
+    fn form_group_family_all_widen_to_generic_form_group() {
+        use bsl_types::facet::FormElementFacet as K;
+        let db = InMemoryDb::new();
+        let group_ru = db.platform_object("ГруппаФормы".to_string());
+        let group_en = db.platform_object("FormGroup".to_string());
+        for kind in [K::Group, K::UsualGroup, K::Pages, K::Page, K::CommandBar, K::ButtonGroup] {
+            let control = db.mk_form_control(kind, None);
+            assert!(is_assignable(&db, control, group_ru), "{kind:?} widens to ГруппаФормы");
+            assert!(is_assignable(&db, control, group_en), "{kind:?} widens to FormGroup");
+            assert!(
+                !is_assignable(&db, control, db.platform_object("ТаблицаФормы".to_string())),
+                "{kind:?} is a group, not a ТаблицаФормы"
+            );
+        }
+        // An untyped `Other` control widens to nothing.
+        let other = db.mk_form_control(K::Other, None);
+        assert!(!is_assignable(&db, other, group_ru));
     }
 
     #[test]
