@@ -62,6 +62,17 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         }
     }
 
+    // The platform invokes these by the registered string name:
+    // ПодключитьОбработчикОжидания and Новый ОписаниеОповещения (both handler
+    // slots). Like the receiver-blind MethodCall collection below, names count
+    // regardless of which module the registration targets.
+    for reg in &summary.notify_regs {
+        called_methods.insert(reg.callback_name.as_str().to_lowercase());
+    }
+    for reg in &summary.idle_handler_regs {
+        called_methods.insert(reg.handler_name.as_str().to_lowercase());
+    }
+
     let module_bodies = ctx.module_bodies();
     for (_, body) in module_bodies.iter_bodies() {
         collect_method_call_names(body, &mut called_methods);
@@ -603,6 +614,54 @@ mod tests {
 
         assert_eq!(unused_diags.len(), 1);
         assert!(unused_diags[0].message.contains("НеИспользуемая"));
+    }
+
+    #[test]
+    fn test_idle_handler_callback_not_flagged() {
+        let code = r#"
+Процедура ПриОткрытии() Экспорт
+    ПодключитьОбработчикОжидания("ОкончаниеПостроенияФормы", 0.1, Истина);
+КонецПроцедуры
+
+Процедура ОкончаниеПостроенияФормы()
+КонецПроцедуры
+
+Процедура НеИспользуемая()
+КонецПроцедуры
+"#;
+
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnusedLocalMethod,
+            expect![[r#"
+                UnusedLocalMethod @ 9:11..9:25
+                  message: Неиспользуемый локальный метод "НеИспользуемая"
+                  severity: Warning"#]],
+        );
+    }
+
+    #[test]
+    fn test_notify_description_callback_not_flagged() {
+        let code = r#"
+Процедура ОткрытьВыбор() Экспорт
+    Оповещение = Новый ОписаниеОповещения("ПослеВыбораФайла", ЭтотОбъект);
+КонецПроцедуры
+
+Процедура ПослеВыбораФайла(Результат, ДополнительныеПараметры) Экспорт
+КонецПроцедуры
+
+Процедура НеИспользуемая()
+КонецПроцедуры
+"#;
+
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnusedLocalMethod,
+            expect![[r#"
+                UnusedLocalMethod @ 9:11..9:25
+                  message: Неиспользуемый локальный метод "НеИспользуемая"
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
