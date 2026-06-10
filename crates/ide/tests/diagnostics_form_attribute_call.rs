@@ -181,9 +181,6 @@ fn value_list_form_attribute_types_to_kernel_value_list() {
 }
 
 #[test]
-#[ignore = "an attribute declared with an empty <Type/> is not recognised as a form \
-            attribute: the receiver falls through to common-module resolution and \
-            surfaces UnresolvedMethodCall(ReceiverNotResolved)"]
 fn untyped_form_attribute_method_call_not_resolved_as_module() {
     if !has_platform_data() {
         eprintln!("Skipping: no platform data available");
@@ -203,6 +200,29 @@ fn untyped_form_attribute_method_call_not_resolved_as_module() {
     assert!(
         kinds.is_empty(),
         "method call on an untyped form attribute must not produce UnresolvedMethodCall, got: {:?}",
+        kinds
+    );
+}
+
+#[test]
+fn unknown_bare_receiver_still_unresolved() {
+    if !has_platform_data() {
+        eprintln!("Skipping: no platform data available");
+        return;
+    }
+
+    // A bare receiver that is neither declared nor a form attribute must keep
+    // surfacing ReceiverNotResolved — the untyped-attribute arm is name-gated.
+    let bsl = "Процедура Тест()\n    \
+        НетТакогоРеквизитаИМодуля.Вставить(\"Ключ\", 1);\n\
+        КонецПроцедуры\n";
+    let (db, file_id) = setup_form_module(data_processor_module_path(), bsl);
+
+    let kinds = unresolved_kinds(&db, file_id);
+    assert_eq!(
+        kinds,
+        vec![UnresolvedMethodKind::ReceiverNotResolved],
+        "unknown bare receiver must still be reported, got: {:?}",
         kinds
     );
 }

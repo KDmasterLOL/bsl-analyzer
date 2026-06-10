@@ -1736,6 +1736,18 @@ impl<'db> InferenceContext<'db> {
             return None;
         }
 
+        // A form attribute shadows module and global names for a bare receiver.
+        // A typed attribute never reaches this dispatch (its receiver infers to
+        // a real type); an untyped one (empty <Type/> in Form.xml) lowers to
+        // Unknown and lands here — it is still a form attribute, not an
+        // unresolved module, so stay silent per gradual typing.
+        if crate::form_attr::resolve_form_attribute(self.db, &resolver, module_name).is_some() {
+            for arg in args {
+                self.infer_expr(*arg);
+            }
+            return Some(self.db.unknown());
+        }
+
         if resolver.user_common_module_exists(self.db, module_name) {
             let arg_presence: Vec<bool> = args
                 .iter()
