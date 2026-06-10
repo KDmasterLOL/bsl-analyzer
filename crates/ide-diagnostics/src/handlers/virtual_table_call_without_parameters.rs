@@ -130,7 +130,7 @@ mod tests {
     Запрос = Новый Запрос;
     Запрос.Текст =
     "Выбрать Т.Ссылка
-    |Из РегистрНакопления.Склады.Остатки(&Период, ) как Т //<-- считаем ошибкой
+    |Из РегистрНакопления.Склады.Остатки(&Период, ) как Т //<-- не ошибка: период передан
     |";
 
 КонецПроцедуры
@@ -146,9 +146,6 @@ mod tests {
                   message: Не следует использовать виртуальные таблицы без параметров
                   severity: Major
                 VirtualTableCallWithoutParameters @ 59:9..59:45
-                  message: Не следует использовать виртуальные таблицы без параметров
-                  severity: Major
-                VirtualTableCallWithoutParameters @ 79:9..79:52
                   message: Не следует использовать виртуальные таблицы без параметров
                   severity: Major"#]],
         );
@@ -231,7 +228,9 @@ mod tests {
     }
 
     #[test]
-    fn test_virtual_table_empty_second_param() {
+    fn test_virtual_table_period_with_trailing_empty_param_ok() {
+        // A named period with a blank trailing condition is still a
+        // parameterised call.
         let code = r#"
 Процедура Тест()
     Запрос = "ВЫБРАТЬ * ИЗ РегистрНакопления.Склады.Остатки(&Период, )";
@@ -240,10 +239,7 @@ mod tests {
         check_diagnostics_snapshot_for(
             code,
             DiagnosticCode::VirtualTableCallWithoutParameters,
-            expect![[r#"
-                VirtualTableCallWithoutParameters @ 3:28..3:71
-                  message: Не следует использовать виртуальные таблицы без параметров
-                  severity: Major"#]],
+            expect![[r#""#]],
         );
     }
 

@@ -1166,26 +1166,16 @@ impl LoweringContext<'_> {
             return;
         }
 
-        if params.is_empty() {
+        // "Without parameters" means no argument was actually passed: a call
+        // like СрезПоследних(&Период, ) names the period and already addresses
+        // the diagnostic's concern; only all-blank argument lists are flagged.
+        let has_argument = params.iter().any(|p| !matches!(p, ExprHir::Missing { .. }));
+        if !has_argument {
             self.diagnostics.push(SdblDiagnostic::VirtualTableCallWithoutParameters {
                 table_name: table_name.to_string(),
                 expected_params: vec!["Период".to_string(), "Условие".to_string()],
                 range,
             });
-            return;
-        }
-
-        if params.len() > 1 {
-            let has_non_empty_after_first =
-                params[1..].iter().any(|p| !matches!(p, ExprHir::Missing { .. }));
-
-            if !has_non_empty_after_first {
-                self.diagnostics.push(SdblDiagnostic::VirtualTableCallWithoutParameters {
-                    table_name: table_name.to_string(),
-                    expected_params: vec!["Условие".to_string()],
-                    range,
-                });
-            }
         }
     }
 }
