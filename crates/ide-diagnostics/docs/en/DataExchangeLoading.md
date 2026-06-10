@@ -34,6 +34,17 @@ Procedure BeforeWrite(Cancel)
 EndProcedure
 ```
 
+## Parameters
+
+- `guardWrappers` — a list of `Module.Function` entries recognised as an
+  equivalent of the `DataExchange.Load` check (the function body is a
+  condition derived from `DataExchange.Load`). Default:
+  `["ЗарплатаКадры.ОтключитьБизнесЛогикуПриЗаписи"]`. A configured list
+  replaces the default entirely. A wrapper call counts only inside a guard
+  condition whose then-branch returns — same as the literal check.
+- `findFirst` — when `true`, only the first executable statement of the
+  handler is searched for the guard (default `false` — the whole body).
+
 ## Sources
 
 - [ITS: Using DataExchange.Load in object event handlers (RU)](https://its.1c.ru/db/v8std#content:773)
