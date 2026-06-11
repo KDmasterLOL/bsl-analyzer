@@ -57,6 +57,10 @@ pub fn is_assignable(db: &dyn TypeKernelDb, from: TypeId, to: TypeId) -> bool {
         return true;
     }
 
+    if is_platform_object_supertype_bridge(from_kind, to_kind) {
+        return true;
+    }
+
     if is_array_bridge(db, from_kind, to_kind) {
         return true;
     }
@@ -220,6 +224,41 @@ fn generic_form_control_names(
         K::Decoration => ("ДекорацияФормы", "FormDecoration"),
         K::Addition => ("ДополнениеЭлементаФормы", "FormItemAddition"),
         K::Other => return None,
+    })
+}
+
+/// `УправляемаяФорма`/`ManagedForm` is the version-older NAME of the managed
+/// form whose current name is `ФормаКлиентскогоПриложения`/`ClientApplicationForm`
+/// — the same runtime type (the platform dump carries the whole surface on the
+/// new name and leaves the old name an empty alias). БСП helpers still annotate
+/// parameters with the deprecated name while the call site passes the form
+/// module's `ЭтотОбъект`. Both sides are plain `PlatformObject` names, so
+/// `is_concrete_to_generic_platform_bridge` (which keys on richer `from` kinds)
+/// cannot express this. One direction only.
+///
+/// Deliberately NOT here, despite looking similar:
+/// - `ФормаКлиентскогоПриложения` → `Форма`. `Форма` is the legacy ORDINARY-form
+///   type, a different paradigm with members the managed form lacks (`Обновить`,
+///   `ПодключитьОбработчикИзмененияДанных`, `Стиль`, `ЭлементыФормы`, …); a
+///   parameter genuinely typed `Форма` is a stale/loose annotation, not a
+///   supertype the managed form satisfies.
+/// - `ВсеЭлементыФормы` → `ЭлементыФормы`. Not a subtype relation — `ЭлементыФормы`
+///   has `Получить`/`Индекс` that `ВсеЭлементыФормы` lacks (it carries the
+///   mutators `Добавить`/`Удалить`/… instead).
+fn is_platform_object_supertype_bridge(from: &TypeKind, to: &TypeKind) -> bool {
+    let (TypeKind::PlatformObject(from_facet), TypeKind::PlatformObject(to_facet)) = (from, to)
+    else {
+        return false;
+    };
+    const SUPERTYPES: &[(&str, &str, &str, &str)] = &[(
+        "ФормаКлиентскогоПриложения",
+        "ClientApplicationForm",
+        "УправляемаяФорма",
+        "ManagedForm",
+    )];
+    SUPERTYPES.iter().any(|(sub_ru, sub_en, sup_ru, sup_en)| {
+        platform_name_eq_ci(&from_facet.name, sub_ru, sub_en)
+            && platform_name_eq_ci(&to_facet.name, sup_ru, sup_en)
     })
 }
 
@@ -870,6 +909,43 @@ mod tests {
             !is_assignable(&db, typed, other),
             "a structure is not a collection — only the matching generic name widens"
         );
+    }
+
+    #[test]
+    fn managed_form_admits_its_deprecated_synonym_name() {
+        let db = InMemoryDb::new();
+        let form = db.platform_object("ФормаКлиентскогоПриложения".to_string());
+        for synonym in ["УправляемаяФорма", "управляемаяформа", "ManagedForm"]
+        {
+            assert!(
+                is_assignable(&db, form, db.platform_object(synonym.to_string())),
+                "ФормаКлиентскогоПриложения must satisfy its deprecated synonym {synonym:?}"
+            );
+        }
+        assert!(
+            !is_assignable(&db, db.platform_object("УправляемаяФорма".to_string()), form),
+            "one direction only"
+        );
+        // `Форма` is the legacy ordinary-form type with its own API, NOT a
+        // supertype the managed form satisfies — must keep firing.
+        assert!(!is_assignable(&db, form, db.platform_object("Форма".to_string())));
+        assert!(!is_assignable(&db, form, db.platform_object("Form".to_string())));
+        assert!(
+            !is_assignable(&db, form, db.platform_object("Структура".to_string())),
+            "the bridge must not open unrelated platform objects"
+        );
+    }
+
+    #[test]
+    fn all_form_items_is_not_widened_to_form_items_collection() {
+        let db = InMemoryDb::new();
+        // ВсеЭлементыФормы and ЭлементыФормы are NOT in a subtype relation: the
+        // latter has Получить/Индекс that the former lacks, so the bridge must
+        // not admit one for the other in either direction.
+        let all = db.platform_object("ВсеЭлементыФормы".to_string());
+        let items = db.platform_object("ЭлементыФормы".to_string());
+        assert!(!is_assignable(&db, all, items));
+        assert!(!is_assignable(&db, items, all));
     }
 
     #[test]

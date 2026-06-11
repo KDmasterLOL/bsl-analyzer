@@ -181,6 +181,7 @@ fn tag_to_kind(tag: &str) -> FormElementKind {
         | "RadioButtonField"
         | "HTMLField"
         | "PictureField"
+        | "SpreadSheetDocumentField"
         | "SpreadsheetDocumentField"
         | "TextField"
         | "ProgressBarField"
@@ -832,6 +833,7 @@ mod tests {
             ("RadioButtonField", FormElementKind::Field),
             ("HTMLField", FormElementKind::Field),
             ("PictureField", FormElementKind::Field),
+            ("SpreadSheetDocumentField", FormElementKind::Field),
             ("SpreadsheetDocumentField", FormElementKind::Field),
             ("TextField", FormElementKind::Field),
             ("ProgressBarField", FormElementKind::Field),
@@ -897,6 +899,24 @@ mod tests {
 
         let group_children: Vec<_> = form.children_of(1).map(|e| e.name.as_str()).collect();
         assert_eq!(group_children, vec!["ПолеВГруппе", "КнопкаВГруппе"]);
+    }
+
+    #[test]
+    fn test_spreadsheet_document_field_parses_as_field() {
+        // Report forms expose their result as a SpreadSheetDocumentField (note the
+        // capital S in "Sheet" — the canonical 1C tag); it must type as ПолеФормы.
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.10">
+    <ChildItems>
+        <SpreadSheetDocumentField name="Результат" id="3">
+            <DataPath>Результат</DataPath>
+        </SpreadSheetDocumentField>
+    </ChildItems>
+</Form>"#;
+        let form = parse_form_xml(xml).unwrap();
+        let result = form.find_element("Результат").unwrap();
+        assert_eq!(result.kind, FormElementKind::Field);
+        assert_eq!(result.kind.base_platform_type_name(), Some("ПолеФормы"));
     }
 
     #[test]
