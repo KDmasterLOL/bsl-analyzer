@@ -14,9 +14,8 @@ use hir_def::{DefWithBodyId, ExprId, Name};
 use vfs::FileId;
 
 use crate::db::HirDatabase;
-use crate::lower::type_string::{
-    is_tabular_row_type_name, lower_param_type_string_typeid, lower_return_type_string_typeid,
-};
+use crate::lower::type_string::{lower_param_type_string_typeid, lower_return_type_string_typeid};
+use crate::platform_type_name::is_tabular_row_name;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MethodInfo {
@@ -717,7 +716,7 @@ fn rewrite_row_generic(
     section_name: &Name,
 ) -> TypeId {
     match db.lookup_type(id) {
-        TypeKind::PlatformObject(f) if is_tabular_row_type_name(&f.name) => db.metadata_ref(
+        TypeKind::PlatformObject(f) if is_tabular_row_name(&f.name) => db.metadata_ref(
             MetadataKind::TabularSectionRow { parent },
             section_name.as_str().to_string(),
             &RootConfigCtx,

@@ -71,19 +71,19 @@ pub fn lower_platform_type_name_typeid(db: &dyn TypeKernelDb, name: &str) -> Typ
     // the tabular-row phrase is allowlisted separately because the row rewrite
     // in method lookup and the subtype bridge key on it while the registry does
     // not list it as a type.
+    //
+    // This raw-string path carries platform-corpus names and the internal
+    // standard-attribute generics (`Ссылка`/SelfRef and friends), not the user
+    // doc-comment typos the bare-name lowering gate degrades, so it deliberately
+    // keeps the identifier-shape fallback rather than the corpus-only gate.
     if is_type_name_shaped(name)
-        || is_tabular_row_type_name(name)
+        || crate::platform_type_name::is_tabular_row_name(name)
         || PlatformData::instance().get_type(name).is_some()
     {
         db.platform_object(name.to_string())
     } else {
         db.unknown()
     }
-}
-
-pub(crate) fn is_tabular_row_type_name(name: &str) -> bool {
-    let lc = name.trim().to_lowercase();
-    lc == "строка табличной части" || lc == "line of a tabular section"
 }
 
 fn is_type_name_shaped(name: &str) -> bool {

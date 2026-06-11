@@ -110,8 +110,7 @@ fn is_tabular_row_bridge(a: &TypeKind, b: &TypeKind) -> bool {
     }
     fn is_row_platform_object(ty: &TypeKind) -> bool {
         matches!(ty, TypeKind::PlatformObject(facet)
-            if facet.name.eq_ignore_ascii_case("Line of a tabular section")
-                || facet.name.to_lowercase() == "строка табличной части")
+            if crate::platform_type_name::is_tabular_row_name(&facet.name))
     }
     (is_row_metadata_ref(a) && is_row_platform_object(b))
         || (is_row_platform_object(a) && is_row_metadata_ref(b))
@@ -213,18 +212,7 @@ fn is_concrete_to_generic_platform_bridge(from: &TypeKind, to: &TypeKind) -> boo
 fn generic_form_control_names(
     kind: bsl_types::facet::FormElementFacet,
 ) -> Option<(&'static str, &'static str)> {
-    use bsl_metadata::FormElementKind as K;
-    Some(match kind {
-        K::Table => ("ТаблицаФормы", "FormTable"),
-        K::Field => ("ПолеФормы", "FormField"),
-        K::Group | K::UsualGroup | K::Pages | K::Page | K::CommandBar | K::ButtonGroup => {
-            ("ГруппаФормы", "FormGroup")
-        }
-        K::Button => ("КнопкаФормы", "FormButton"),
-        K::Decoration => ("ДекорацияФормы", "FormDecoration"),
-        K::Addition => ("ДополнениеЭлементаФормы", "FormItemAddition"),
-        K::Other => return None,
-    })
+    crate::platform_type_name::form_control_name_for(kind)
 }
 
 /// `УправляемаяФорма`/`ManagedForm` is the version-older NAME of the managed
@@ -280,48 +268,11 @@ fn object_mdo_of_kind(kind: MetadataKind) -> Option<bsl_metadata::MdoType> {
 }
 
 fn generic_manager_names(mdo: bsl_metadata::MdoType) -> Option<(&'static str, &'static str)> {
-    use bsl_metadata::MdoType as M;
-    Some(match mdo {
-        M::Catalog => ("СправочникМенеджер", "CatalogManager"),
-        M::Document => ("ДокументМенеджер", "DocumentManager"),
-        M::Enum => ("ПеречислениеМенеджер", "EnumManager"),
-        M::InformationRegister => ("РегистрСведенийМенеджер", "InformationRegisterManager"),
-        M::AccumulationRegister => ("РегистрНакопленияМенеджер", "AccumulationRegisterManager"),
-        M::AccountingRegister => ("РегистрБухгалтерииМенеджер", "AccountingRegisterManager"),
-        M::CalculationRegister => ("РегистрРасчетаМенеджер", "CalculationRegisterManager"),
-        M::ExchangePlan => ("ПланОбменаМенеджер", "ExchangePlanManager"),
-        M::ChartOfAccounts => ("ПланСчетовМенеджер", "ChartOfAccountsManager"),
-        M::ChartOfCharacteristicTypes => {
-            ("ПланВидовХарактеристикМенеджер", "ChartOfCharacteristicTypesManager")
-        }
-        M::ChartOfCalculationTypes => {
-            ("ПланВидовРасчетаМенеджер", "ChartOfCalculationTypesManager")
-        }
-        M::Task => ("ЗадачаМенеджер", "TaskManager"),
-        M::BusinessProcess => ("БизнесПроцессМенеджер", "BusinessProcessManager"),
-        M::DataProcessor => ("ОбработкаМенеджер", "DataProcessorManager"),
-        M::Report => ("ОтчетМенеджер", "ReportManager"),
-        _ => return None,
-    })
+    crate::platform_type_name::manager_name_for(mdo)
 }
 
 fn generic_object_names(mdo: bsl_metadata::MdoType) -> Option<(&'static str, &'static str)> {
-    use bsl_metadata::MdoType as M;
-    Some(match mdo {
-        M::Catalog => ("СправочникОбъект", "CatalogObject"),
-        M::Document => ("ДокументОбъект", "DocumentObject"),
-        M::Task => ("ЗадачаОбъект", "TaskObject"),
-        M::BusinessProcess => ("БизнесПроцессОбъект", "BusinessProcessObject"),
-        M::ExchangePlan => ("ПланОбменаОбъект", "ExchangePlanObject"),
-        M::ChartOfAccounts => ("ПланСчетовОбъект", "ChartOfAccountsObject"),
-        M::ChartOfCharacteristicTypes => {
-            ("ПланВидовХарактеристикОбъект", "ChartOfCharacteristicTypesObject")
-        }
-        M::ChartOfCalculationTypes => ("ПланВидовРасчетаОбъект", "ChartOfCalculationTypesObject"),
-        M::DataProcessor => ("ОбработкаОбъект", "DataProcessorObject"),
-        M::Report => ("ОтчетОбъект", "ReportObject"),
-        _ => return None,
-    })
+    crate::platform_type_name::object_name_for(mdo)
 }
 
 fn is_array_bridge(db: &dyn TypeKernelDb, from: &TypeKind, to: &TypeKind) -> bool {
@@ -529,10 +480,20 @@ mod tests {
             MetadataKind::TabularSectionRow { parent: bsl_metadata::MdoType::Catalog },
             "X.Y",
         );
-        let generic_ru = db.platform_object("Строка табличной части".to_string());
-        let generic_en = db.platform_object("Line of a tabular section".to_string());
-        assert!(is_assignable(&db, row, generic_ru));
-        assert!(is_assignable(&db, row, generic_en));
+        // Both the spaced platform spelling and the compact doc-comment spelling
+        // (RU + EN) must bridge, so a parameter documented with either matches a
+        // real tabular-section row value.
+        for name in [
+            "Строка табличной части",
+            "Line of a tabular section",
+            "СтрокаТабличнойЧасти",
+            "TabularSectionRow",
+        ] {
+            assert!(
+                is_assignable(&db, row, db.platform_object(name.to_string())),
+                "row must be assignable to {name:?}"
+            );
+        }
     }
 
     #[test]

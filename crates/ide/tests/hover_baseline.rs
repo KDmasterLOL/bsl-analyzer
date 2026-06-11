@@ -247,6 +247,9 @@ fn hover_local_var_carries_inferred_primitive_type() {
 
 #[test]
 fn hover_on_unknown_platform_type_in_new_falls_back_to_name_only() {
+    // A construction is authoritative: `Новый X` types the variable as `X` even
+    // when the corpus does not model `X`, so hover keeps the constructor name.
+    // (Only an *annotation* with an unrecognised name degrades to Unknown.)
     let fixture = r#"//- /test.bsl
 Резу$0льтат = Новый КонвейерДанныхЗаказов;
 "#;

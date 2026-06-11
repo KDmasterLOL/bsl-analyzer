@@ -4,9 +4,10 @@ pub mod type_string;
 use std::collections::HashSet;
 
 use bsl_metadata::{resolve_defined_type_terminal, MdoType, MetadataResolver};
+use bsl_platform::PlatformData;
 use bsl_types::builders::Builders;
 use bsl_types::intern::TypeKernelDb;
-use bsl_types::kind::{MetadataKind, TypeId};
+use bsl_types::kind::{MetadataKind, TypeId, TypeKind};
 use bsl_types::testing::RootConfigCtx;
 use hir_def::path::QualifiedName;
 use hir_def::type_ref::TypeRef;
@@ -46,7 +47,9 @@ impl<'a> TyLoweringContext<'a> {
             TypeRef::Map(_) => db.map(None, None),
             TypeRef::Name(qname) => match qname.len() {
                 0 => db.unknown(),
-                1 => self.lower_bare_name_id(db, qname.first()),
+                1 => {
+                    degrade_unrecognised_annotation(db, self.lower_bare_name_id(db, qname.first()))
+                }
                 _ => self.lower_qualified_id_inner(db, qname, visited),
             },
             TypeRef::Union(parts) => {
@@ -87,6 +90,15 @@ impl<'a> TyLoweringContext<'a> {
             return db.any();
         }
 
+        // A bare name that resolves to no known type is lowered to a nominal
+        // phantom `PlatformObject`. This is authoritative: a construction
+        // `Новый X` defines the variable's type as `X` (and the IDE keys hover /
+        // go-to-definition / document-symbols on it) even when the corpus does
+        // not model `X`. Where the name is only a *hypothesis* — a doc-comment /
+        // parameter type that may be a typo — the annotation entry point
+        // [`Self::lower_type_ref_id`] post-filters an unrecognised phantom down to
+        // Unknown (see `degrade_unrecognised_annotation`); that filter is NOT
+        // applied here, so constructions keep their type.
         db.platform_object(raw.to_string())
     }
 
@@ -135,6 +147,25 @@ impl<'a> TyLoweringContext<'a> {
             None => db.unknown(),
         }
     }
+}
+
+/// In an *annotation* position (a doc-comment / parameter / return type), a name
+/// that lowered to a phantom `PlatformObject` is only trustworthy when it is a
+/// real type — the corpus or one of the curated real-but-uncorpused families. An
+/// unrecognised phantom there is a doc-comment typo (`СпискоЗначений`) or free
+/// prose (`документ`), which matches no genuinely inferred value and so only ever
+/// produces false `TypeMismatch`; degrade it to Unknown. Constructions never
+/// reach this filter (they lower through `lower_bare_name_id` directly), so a
+/// `Новый X` keeps its type.
+fn degrade_unrecognised_annotation(db: &dyn TypeKernelDb, id: TypeId) -> TypeId {
+    if let TypeKind::PlatformObject(facet) = db.lookup_type(id) {
+        if PlatformData::instance().get_type(&facet.name).is_none()
+            && !crate::platform_type_name::is_known_non_corpus_type_name(&facet.name)
+        {
+            return db.unknown();
+        }
+    }
+    id
 }
 
 fn is_defined_type_prefix(prefix: &str) -> bool {
@@ -347,6 +378,61 @@ mod tests {
         );
     }
 
+    fn annotation_name(db: &InMemoryDb, name: &str) -> TypeId {
+        ctx().lower_type_ref_id(db, &TypeRef::Name(QualifiedName::from_segments([Name::new(name)])))
+    }
+
+    #[test]
+    fn ty_lowering_annotation_degrades_unrecognised_name_construction_keeps_it() {
+        let db = InMemoryDb::new();
+        for junk in ["СпискоЗначений", "документ", "СправочникОбъектИмяСправочника", "Структра"]
+        {
+            // In an annotation (doc-comment / parameter type) an unrecognised name
+            // is a typo / prose that only ever produces false positives — degrade.
+            assert_eq!(
+                annotation_name(&db, junk),
+                db.unknown(),
+                "annotation {junk:?} must degrade to Unknown"
+            );
+            // The same name in a construction (`Новый junk`) is authoritative and
+            // keeps its nominal type, so the IDE can hover / navigate it.
+            assert_eq!(
+                ctx().lower_bare_name_id(&db, &Name::new(junk)),
+                db.platform_object(junk.to_string()),
+                "construction {junk:?} must keep its nominal type"
+            );
+        }
+    }
+
+    #[test]
+    fn ty_lowering_annotation_keeps_real_uncorpused_families() {
+        let db = InMemoryDb::new();
+        // Real platform types absent from the corpus stay nominal even as an
+        // annotation, so doc-typed parameters keep matching real values.
+        for name in [
+            // Generic managers — bridge targets with subtype tests; must stay nominal.
+            "ДокументМенеджер",
+            "DocumentManager",
+            "РегистрСведенийМенеджер",
+            "ОбъектМетаданных",
+            "ОбъектМетаданныхСправочник",
+            "ТабличнаяЧасть",
+            "СтрокаТабличнойЧасти",
+            "НаборЗаписей",
+            "РегистрНакопленияЗапись",
+            "РасширениеУправляемойФормыДляОбъектов",
+            "ВнешняяКомпонента",
+            "УправляемаяФорма",
+            "ТипXDTO",
+        ] {
+            assert_eq!(
+                annotation_name(&db, name),
+                db.platform_object(name.to_string()),
+                "{name:?} is a real (uncorpused) type and must keep its phantom"
+            );
+        }
+    }
+
     #[test]
     fn ty_lowering_bare_metadata_prefix_without_name_is_any() {
         // A bare kind prefix with no object names "any value of this kind"; it lowers
@@ -356,6 +442,16 @@ mod tests {
         assert_eq!(ctx().lower_bare_name_id(&db, &Name::new("СправочникСсылка")), db.any());
         assert_eq!(ctx().lower_bare_name_id(&db, &Name::new("CatalogRef")), db.any());
         assert_eq!(ctx().lower_bare_name_id(&db, &Name::new("documentobject")), db.any());
+        // Generic object and record-set kind names resolve to the permissive `Any`
+        // at this branch BEFORE the bare-name fallback gate — a deliberate
+        // pre-existing choice (narrowing them to a nominal phantom would falsely
+        // flag a concrete record set listed among a documented union). The
+        // unknown-name degradation gate does NOT change this.
+        assert_eq!(ctx().lower_bare_name_id(&db, &Name::new("СправочникОбъект")), db.any());
+        assert_eq!(
+            ctx().lower_bare_name_id(&db, &Name::new("РегистрСведенийНаборЗаписей")),
+            db.any()
+        );
     }
 
     #[test]
