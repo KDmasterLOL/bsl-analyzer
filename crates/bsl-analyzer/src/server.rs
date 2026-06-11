@@ -127,8 +127,14 @@ fn run_event_loop(state: &mut GlobalState, receiver: &Receiver<Message>) -> Resu
             break;
         }
 
-        if let Some(uri) = state.pending_diagnostics_uri.take() {
-            crate::handlers::schedule_diagnostics(state, &uri);
+        // The capacity gate keeps this from spinning: a schedule that finds the
+        // pool still saturated would requeue the same URI, and the loop only
+        // re-runs on a genuine wake (a finished worker frees a slot and posts
+        // its result task).
+        if !state.pending_diagnostics_uris.is_empty() && state.task_pool.pool.has_capacity() {
+            for uri in std::mem::take(&mut state.pending_diagnostics_uris) {
+                crate::handlers::schedule_diagnostics(state, &uri);
+            }
         }
     }
 
@@ -379,6 +385,12 @@ fn handle_task(state: &mut GlobalState, task: crate::global_state::Task) -> Resu
             if files.is_empty() {
                 return Ok(());
             }
+            // Cache warming only — when the pool is saturated, skip it rather
+            // than park the event loop in the bounded job queue.
+            if !state.task_pool.pool.has_capacity() {
+                tracing::debug!("task pool saturated; external preload skipped");
+                return Ok(());
+            }
             let file_count = files.len();
             let file_ids: Vec<u32> = files.iter().map(|f| f.0).collect();
             tracing::debug!(?file_ids, "preloading external files from semantic highlighting");
@@ -393,7 +405,7 @@ fn handle_task(state: &mut GlobalState, task: crate::global_state::Task) -> Resu
             state.preload_external_tokens.insert(first_file, task.cancellation_token());
 
             let analysis_guard = state.note_analysis_spawned();
-            state.task_pool.pool.spawn(move || {
+            let spawned = state.task_pool.pool.try_spawn(move || {
                 let _analysis_guard = analysis_guard;
                 let count = match salsa::Cancelled::catch(std::panic::AssertUnwindSafe(|| {
                     task.run()
@@ -409,6 +421,15 @@ fn handle_task(state: &mut GlobalState, task: crate::global_state::Task) -> Resu
                 };
                 Task::DependenciesPreloaded { file_id: first_file, count }
             });
+            if spawned.is_err() {
+                // Unreachable after the capacity check above; a skipped warm-up
+                // costs only latency.
+                tracing::debug!(
+                    file_id = first_file.0,
+                    "task pool rejected external preload job; skipped"
+                );
+                state.preload_external_tokens.remove(&first_file);
+            }
         }
         Task::AnalysisProgressTick { epoch } => {
             state.handle_analysis_progress_tick(epoch);

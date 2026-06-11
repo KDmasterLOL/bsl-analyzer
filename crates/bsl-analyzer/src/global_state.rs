@@ -99,7 +99,11 @@ pub struct GlobalState {
     /// after an external change — does not let one document's newer generation
     /// discard another document's result.
     pub diagnostics_generation: HashMap<Url, u64>,
-    pub pending_diagnostics_uri: Option<Url>,
+    /// Documents whose diagnostics should be (re)scheduled by the event loop
+    /// once it finishes the current message: didChange debouncing lands here,
+    /// and so does a schedule that found the task pool saturated — the loop
+    /// retries when a worker frees a queue slot. Deduplicated by URI.
+    pub pending_diagnostics_uris: Vec<Url>,
 
     pub diagnostics_tokens: HashMap<Url, salsa::CancellationToken>,
     pub preload_tokens: HashMap<vfs::FileId, salsa::CancellationToken>,
@@ -179,7 +183,7 @@ impl GlobalState {
             lsp_locale: None,
             position_encoding: PositionEncoding::default(),
             diagnostics_generation: HashMap::new(),
-            pending_diagnostics_uri: None,
+            pending_diagnostics_uris: Vec::new(),
             diagnostics_tokens: HashMap::new(),
             preload_tokens: HashMap::new(),
             preload_external_tokens: HashMap::new(),
@@ -242,6 +246,14 @@ impl GlobalState {
         {
             self.analysis_progress_active = true;
             self.report_progress("Analyzing", Progress::Begin, Some("Analyzing…".to_owned()), None);
+        }
+    }
+
+    /// Queue a document for diagnostics (re)scheduling at the bottom of the
+    /// event loop, deduplicated by URI.
+    pub fn enqueue_pending_diagnostics(&mut self, uri: Url) {
+        if !self.pending_diagnostics_uris.contains(&uri) {
+            self.pending_diagnostics_uris.push(uri);
         }
     }
 

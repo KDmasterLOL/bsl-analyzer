@@ -71,7 +71,6 @@ pub struct LatencyRequestContext {
     pub project: Option<Project>,
     pub diagnostics_config: DiagnosticsConfigInput,
     pub position_encoding: PositionEncoding,
-    pub vfs_done: bool,
     pub task_sender: Sender<Task>,
     pub mem_docs: FrozenMemDocs,
     pub file_paths: FrozenFilePaths,

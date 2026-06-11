@@ -78,6 +78,37 @@ impl RequestDispatcher<'_> {
 
         tracing::debug!("Handling {} on task pool (id: {})", R::METHOD, req.id);
 
+        // While the workspace is still loading, analysis would run over a
+        // half-loaded source root (wrong results), and its db clone is exactly
+        // what every streamed VFS batch's revision bump must wait on — the wait
+        // that freezes the load. Decline instead: ContentModified is the
+        // benign "state changed, retry if still needed" code clients swallow
+        // silently, and the vfs_done finalize replays diagnostics and requests
+        // a semantic-tokens refresh, so nothing is permanently lost.
+        if !self.global_state.vfs_done {
+            tracing::debug!(method = R::METHOD, id = ?req.id, "declining request: workspace loading");
+            self.global_state.respond(Response::new_err(
+                req.id,
+                ErrorCode::ContentModified as i32,
+                "workspace is still loading".to_string(),
+            ));
+            return self;
+        }
+
+        // A saturated task pool must not park the event loop in `try_spawn`'s
+        // bounded queue (nor pin another db clone into a queued closure).
+        // Checked before building the context: the event loop is the only job
+        // producer, so capacity observed here cannot be taken by anyone else.
+        if !self.global_state.task_pool.pool.has_capacity() {
+            tracing::warn!(method = R::METHOD, id = ?req.id, "declining request: task pool saturated");
+            self.global_state.respond(Response::new_err(
+                req.id,
+                ErrorCode::ContentModified as i32,
+                "server is busy, please retry".to_string(),
+            ));
+            return self;
+        }
+
         let db = self.global_state.analysis_host.raw_database().clone();
         let token = db.cancellation_token();
         let analysis = ide::Analysis::from_database(db);
@@ -93,17 +124,28 @@ impl RequestDispatcher<'_> {
             project: self.global_state.project.clone(),
             diagnostics_config: self.global_state.diagnostics_config().clone(),
             position_encoding: self.global_state.position_encoding,
-            vfs_done: self.global_state.vfs_done,
             task_sender: self.global_state.task_pool.pool.sender.clone(),
             mem_docs: self.global_state.mem_docs.freeze(),
             file_paths: FrozenFilePaths::freeze(&self.global_state.vfs.read()),
         };
 
         let id = req.id;
-        self.global_state.task_pool.pool.spawn(move || {
-            let response = run_latency_handler::<R>(id, ctx, params, f);
+        let job_id = id.clone();
+        let spawned = self.global_state.task_pool.pool.try_spawn(move || {
+            let response = run_latency_handler::<R>(job_id, ctx, params, f);
             Task::RequestResult { response }
         });
+        if let Err(err) = spawned {
+            // Unreachable after the capacity check above; kept so a queue
+            // hiccup degrades to a declined request instead of a lost one.
+            tracing::warn!(method = R::METHOD, request_id = ?id, ?err, "task pool rejected request job");
+            self.global_state.request_tokens.remove(&id);
+            self.global_state.respond(Response::new_err(
+                id,
+                ErrorCode::ContentModified as i32,
+                "server is busy, please retry".to_string(),
+            ));
+        }
         self
     }
 
@@ -306,9 +348,41 @@ mod tests {
     }
 
     #[test]
+    fn on_latency_declines_with_content_modified_while_loading() {
+        let (sender, receiver) = unbounded();
+        let mut state = GlobalState::new(sender);
+        assert!(!state.vfs_done, "default GlobalState models a loading workspace");
+
+        let req = Request::new(
+            lsp_server::RequestId::from(5),
+            HoverRequest::METHOD.to_string(),
+            serde_json::to_value(hover_params()).unwrap(),
+        );
+
+        RequestDispatcher { req: Some(req), global_state: &mut state }
+            .on_latency::<HoverRequest>(|_ctx, _p| Ok(None))
+            .finish();
+
+        // Declined synchronously: no job spawned, no token registered.
+        assert!(state.request_tokens.is_empty(), "no cancellation token for a declined request");
+        assert!(
+            state.task_pool.receiver.try_recv().is_err(),
+            "no task pool job for a declined request"
+        );
+        let msg = receiver.try_recv().expect("immediate response");
+        let lsp_server::Message::Response(response) = msg else {
+            panic!("expected a response, got {msg:?}");
+        };
+        assert_eq!(response.id, lsp_server::RequestId::from(5));
+        let err = response.error.expect("loading decline is an error response");
+        assert_eq!(err.code, ErrorCode::ContentModified as i32);
+    }
+
+    #[test]
     fn on_latency_happy_path() {
         let (sender, _receiver) = unbounded();
         let mut state = GlobalState::new(sender);
+        state.vfs_done = true;
 
         let req = Request::new(
             lsp_server::RequestId::from(42),
@@ -336,6 +410,7 @@ mod tests {
     fn on_latency_panic_becomes_internal_error() {
         let (sender, _receiver) = unbounded();
         let mut state = GlobalState::new(sender);
+        state.vfs_done = true;
 
         let req = Request::new(
             lsp_server::RequestId::from(7),
@@ -364,6 +439,7 @@ mod tests {
     fn on_latency_duplicate_id_cancels_previous() {
         let (sender, _receiver) = unbounded();
         let mut state = GlobalState::new(sender);
+        state.vfs_done = true;
 
         let id = lsp_server::RequestId::from(99);
 
