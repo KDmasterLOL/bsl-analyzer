@@ -124,6 +124,58 @@ mod tests {
         );
     }
 
+    // Common-module-by-name rollout (`BSL_COMMON_MODULE_BY_NAME`): run with the env set,
+    //   BSL_COMMON_MODULE_BY_NAME=1 cargo test -p ide-diagnostics -- --ignored common_module_by_name
+    // Two-file fixtures (the harness analyses the last file by hash order; a self-referential
+    // module name keeps it to two files, like the tests above).
+    #[test]
+    #[ignore = "gated on BSL_COMMON_MODULE_BY_NAME; run with env set"]
+    fn common_module_by_name_missing_method_fires() {
+        let fixture = r#"
+//- /CommonModules/ОбщегоНазначения/Ext/Module.bsl
+Функция ОбщийМодуль(Имя) Экспорт
+    Возврат Неопределено;
+КонецФункции
+
+//- /test.bsl
+Процедура Тест()
+    Модуль = ОбщегоНазначения.ОбщийМодуль("ОбщегоНазначения");
+    Модуль.НесуществующийМетод();
+КонецПроцедуры
+"#;
+        let diags = check_hir_diagnostic_with_fixtures(fixture);
+        let umc: Vec<_> =
+            diags.iter().filter(|d| d.code == DiagnosticCode::UnresolvedMethodCall).collect();
+        assert_eq!(umc.len(), 1, "expected one UnresolvedMethodCall, got: {diags:?}");
+        assert!(
+            umc[0].message.contains("НесуществующийМетод"),
+            "message must name the missing method, got: {}",
+            umc[0].message
+        );
+    }
+
+    #[test]
+    #[ignore = "gated on BSL_COMMON_MODULE_BY_NAME; run with env set"]
+    fn common_module_by_name_existing_method_silent() {
+        let fixture = r#"
+//- /CommonModules/ОбщегоНазначения/Ext/Module.bsl
+Функция ОбщийМодуль(Имя) Экспорт
+    Возврат Неопределено;
+КонецФункции
+
+//- /test.bsl
+Процедура Тест()
+    Модуль = ОбщегоНазначения.ОбщийМодуль("ОбщегоНазначения");
+    Модуль.ОбщийМодуль("Прочее");
+КонецПроцедуры
+"#;
+        let diags = check_hir_diagnostic_with_fixtures(fixture);
+        assert!(
+            diags.iter().all(|d| d.code != DiagnosticCode::UnresolvedMethodCall),
+            "resolved common-module method via ОбщийМодуль must stay silent: {diags:?}"
+        );
+    }
+
     #[test]
     fn platform_global_method_call_resolves_silently() {
         let code = r#"

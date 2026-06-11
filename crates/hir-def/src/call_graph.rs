@@ -570,6 +570,7 @@ fn extract_from_body(
     notify_regs: &mut Vec<NotifyReg>,
     idle_handler_regs: &mut Vec<IdleReg>,
 ) {
+    let common_bindings = crate::common_module_ref::common_module_var_bindings(body);
     for (expr_id, expr) in body.exprs_iter() {
         match expr {
             Expr::Call { callee, args } => {
@@ -607,6 +608,7 @@ fn extract_from_body(
                             field,
                             range,
                             local_method_ids,
+                            &common_bindings,
                         ) {
                             call_edges.push(edge);
                         }
@@ -767,6 +769,7 @@ fn field_callee_to_edge(
     field: &Name,
     range: TextRange,
     local_method_ids: &FxHashMap<String, u32>,
+    common_bindings: &FxHashMap<String, Name>,
 ) -> Option<CallEdge> {
     match body.expr_idx(field_base) {
         Expr::Path(module_name) => {
@@ -785,10 +788,14 @@ fn field_callee_to_edge(
                     };
                 Some(CallEdge { caller, target, kind: EdgeKind::DirectLocal, range })
             } else {
+                // A receiver bound to `ОбщегоНазначения.ОбщийМодуль("Имя")` is the named
+                // common module, not the (meaningless) variable name it is held in.
+                let resolved_module =
+                    common_bindings.get(&module_name_lower).unwrap_or(module_name);
                 Some(CallEdge {
                     caller,
                     target: CallTarget::QualifiedModule {
-                        module_name: module_name.clone(),
+                        module_name: resolved_module.clone(),
                         method_name: field.clone(),
                     },
                     kind: EdgeKind::DirectQualifiedModule,
@@ -1101,6 +1108,37 @@ mod tests {
                 if module_name.as_str() == "ОбщийМодуль"
                     && method_name.as_str() == "ВнешнийМетод"
         ));
+    }
+
+    #[test]
+    fn common_module_via_obshchiy_modul_resolves_to_named_module() {
+        let code = r#"
+Процедура МойМетод()
+    Модуль = ОбщегоНазначения.ОбщийМодуль("РаботаСФайлами");
+    Модуль.СохранитьФайл();
+КонецПроцедуры
+"#;
+        let summary = parse_and_extract(code);
+        let edge = summary
+            .call_edges
+            .iter()
+            .find(|e| {
+                matches!(
+                    &e.target,
+                    CallTarget::QualifiedModule { method_name, .. }
+                        if method_name.as_str() == "СохранитьФайл"
+                )
+            })
+            .expect("call through the bound variable must produce a qualified edge");
+        assert!(
+            matches!(
+                &edge.target,
+                CallTarget::QualifiedModule { module_name, .. }
+                    if module_name.as_str() == "РаботаСФайлами"
+            ),
+            "receiver bound to ОбщийМодуль(\"РаботаСФайлами\") must resolve to that module, got {:?}",
+            edge.target
+        );
     }
 
     #[test]

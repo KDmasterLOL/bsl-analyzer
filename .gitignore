@@ -51,3 +51,4 @@ plans/
 /data/
 bsl-platform-shcntx/
 bsl-json.json
+.bsl-ls-cache/

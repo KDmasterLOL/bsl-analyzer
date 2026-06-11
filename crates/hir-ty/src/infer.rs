@@ -277,6 +277,11 @@ pub struct InferenceContext<'db> {
     diagnostics: Vec<InferenceDiagnostic>,
 
     call_arg_bindings: Vec<CallArgBinding>,
+
+    /// var(lowercased) → common-module name for receivers obtained via
+    /// `ОбщегоНазначения[Клиент].ОбщийМодуль("Имя")`. Empty unless the diagnostic
+    /// rollout gate is enabled, so the lookup is a no-op by default.
+    common_module_var_bindings: FxHashMap<String, Name>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -443,6 +448,11 @@ impl<'db> InferenceContext<'db> {
             diagnostics: Vec::new(),
             call_arg_bindings: Vec::new(),
             return_expr_ids: Vec::new(),
+            common_module_var_bindings: if hir_def::common_module_ref::diagnostics_enabled() {
+                hir_def::common_module_ref::common_module_var_bindings(body)
+            } else {
+                FxHashMap::default()
+            },
         }
     }
 
@@ -1184,6 +1194,23 @@ impl<'db> InferenceContext<'db> {
         if let Expr::Field { base, field } = callee_expr {
             let base_id = ExprId::from_idx(*base);
             let method_name = field.clone();
+
+            // A receiver bound to `ОбщийМодуль("Имя")` resolves its methods against the
+            // named common module, regardless of the opaque declared return type of
+            // `ОбщийМодуль`. The map is empty unless the rollout gate is enabled.
+            if !self.common_module_var_bindings.is_empty() {
+                let bound_module = if let Expr::Path(path_name) = self.body.expr(base_id) {
+                    self.common_module_var_bindings.get(&path_name.as_str().to_lowercase()).cloned()
+                } else {
+                    None
+                };
+                if let Some(module) = bound_module {
+                    let return_ty = self.infer_qualified_call(&module, &method_name, args, callee);
+                    self.expr_types.insert(callee, self.db.unknown());
+                    return return_ty;
+                }
+            }
+
             let receiver_ty = self.infer_expr(base_id);
 
             if self.is_unknown(receiver_ty) {
