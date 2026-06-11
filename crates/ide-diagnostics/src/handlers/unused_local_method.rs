@@ -106,6 +106,12 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         }
     }
 
+    if let Some(ref integration_service) = metadata.integration_service {
+        for handler in integration_service.receive_handlers() {
+            called_methods.insert(handler.to_lowercase());
+        }
+    }
+
     let mut diagnostics = Vec::new();
 
     for (_, proc) in item_tree.procedures() {
@@ -116,6 +122,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             &proc.annotations,
             &attachable_prefixes,
             &called_methods,
+            metadata.module_type,
             code,
             ctx,
         ) {
@@ -131,6 +138,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             &func.annotations,
             &attachable_prefixes,
             &called_methods,
+            metadata.module_type,
             code,
             ctx,
         ) {
@@ -157,6 +165,7 @@ fn check_method_unused(
     annotations: &[hir::Annotation],
     attachable_prefixes: &[String],
     called_methods: &FxHashSet<String>,
+    module_type: bsl_metadata::ModuleType,
     code: DiagnosticCode,
     ctx: &DiagnosticsContext,
 ) -> Option<Diagnostic> {
@@ -174,7 +183,7 @@ fn check_method_unused(
         return None;
     }
 
-    if is_handler_method(&name_lower) {
+    if is_handler_method(&name_lower, module_type) {
         return None;
     }
 
@@ -208,8 +217,30 @@ fn is_attachable_method(name_lower: &str, prefixes: &[String]) -> bool {
     prefixes.iter().any(|prefix| name_lower.starts_with(prefix))
 }
 
-fn is_handler_method(name_lower: &str) -> bool {
-    crate::utils::platform_event_handlers::is_platform_event_handler(name_lower)
+fn is_handler_method(name_lower: &str, module_type: bsl_metadata::ModuleType) -> bool {
+    use crate::utils::platform_event_handlers as peh;
+    use bsl_metadata::ModuleType;
+
+    if peh::is_platform_event_handler(name_lower) {
+        return true;
+    }
+
+    match module_type {
+        ModuleType::ManagedApplicationModule => {
+            peh::is_managed_application_module_event_handler(name_lower)
+        }
+        // The generic `ApplicationModule` is the pre-split single application module;
+        // treat it as the ordinary application module (lifecycle + external event),
+        // never the managed-only UI handlers.
+        ModuleType::OrdinaryApplicationModule | ModuleType::ApplicationModule => {
+            peh::is_ordinary_application_module_event_handler(name_lower)
+        }
+        ModuleType::ExternalConnectionModule => {
+            peh::is_external_connection_module_event_handler(name_lower)
+        }
+        ModuleType::SessionModule => peh::is_session_module_event_handler(name_lower),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -603,6 +634,7 @@ mod tests {
             form: None,
             http_service: Some(Arc::new(http_service)),
             web_service: None,
+            integration_service: None,
         };
 
         let diagnostics =
@@ -696,6 +728,7 @@ mod tests {
             form: None,
             http_service: None,
             web_service: Some(Arc::new(web_service)),
+            integration_service: None,
         };
 
         let diagnostics =
@@ -755,6 +788,7 @@ mod tests {
             form: Some(Arc::new(form)),
             http_service: None,
             web_service: None,
+            integration_service: None,
         };
 
         let diagnostics =
@@ -772,6 +806,170 @@ mod tests {
             unused_diags.iter().map(|d| &d.message).collect::<Vec<_>>()
         );
         assert!(unused_diags[0].message.contains("НеИспользуемая"));
+    }
+
+    #[test]
+    fn test_integration_service_channel_handler_not_flagged() {
+        use std::sync::Arc;
+
+        let code = r#"
+Процедура ОбработатьСообщениеОбычныйПриоритет(Сообщение, Отказ)
+КонецПроцедуры
+
+Процедура НеИспользуемая()
+КонецПроцедуры
+"#;
+
+        let channel = bsl_metadata::IntegrationServiceChannelBuilder::new()
+            .name("input_from_SM_normal_priority")
+            .receive_message_processing("ОбработатьСообщениеОбычныйПриоритет")
+            .build();
+        let service = bsl_metadata::IntegrationServiceBuilder::new()
+            .name("ОбменСообщениями")
+            .add_channel(channel)
+            .build();
+
+        let metadata = hir::ModuleMetadata {
+            module_type: bsl_metadata::ModuleType::IntegrationServiceModule,
+            execution_context: None,
+            common_module: None,
+            mdo: None,
+            register: None,
+            form: None,
+            http_service: None,
+            web_service: None,
+            integration_service: Some(Arc::new(service)),
+        };
+
+        let diagnostics =
+            crate::test_utils::check_metadata_diagnostic(metadata, code, |_metadata, ctx| {
+                super::check(ctx)
+            });
+        let unused_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalMethod).collect();
+
+        assert_eq!(
+            unused_diags.len(),
+            1,
+            "channel-bound handler must be exempt, unbound one must stay flagged: {unused_diags:?}"
+        );
+        assert!(unused_diags[0].message.contains("НеИспользуемая"));
+    }
+
+    fn module_metadata(module_type: bsl_metadata::ModuleType) -> hir::ModuleMetadata {
+        hir::ModuleMetadata {
+            module_type,
+            execution_context: None,
+            common_module: None,
+            mdo: None,
+            register: None,
+            form: None,
+            http_service: None,
+            web_service: None,
+            integration_service: None,
+        }
+    }
+
+    fn unused_in_module(
+        module_type: bsl_metadata::ModuleType,
+        code_text: &str,
+    ) -> Vec<crate::Diagnostic> {
+        let diagnostics = crate::test_utils::check_metadata_diagnostic(
+            module_metadata(module_type),
+            code_text,
+            |_metadata, ctx| super::check(ctx),
+        );
+        diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::UnusedLocalMethod).collect()
+    }
+
+    #[test]
+    fn test_application_module_event_handlers_not_flagged() {
+        let code = r#"
+Процедура ПередНачаломРаботыСистемы()
+КонецПроцедуры
+
+Процедура ОбработкаВнешнегоСобытия(Источник, Событие, Данные)
+КонецПроцедуры
+
+Процедура ПриГлобальномПоиске(СтрокаПоиска, ПланПоиска)
+КонецПроцедуры
+
+Процедура НеИспользуемая()
+КонецПроцедуры
+"#;
+        let diags = unused_in_module(bsl_metadata::ModuleType::ManagedApplicationModule, code);
+        assert_eq!(
+            diags.len(),
+            1,
+            "only the genuinely unused method must stay flagged: {:?}",
+            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+        assert!(diags[0].message.contains("НеИспользуемая"));
+    }
+
+    #[test]
+    fn test_session_module_handler_not_flagged() {
+        let code = r#"
+Процедура УстановкаПараметровСеанса(ИменаПараметровСеанса)
+КонецПроцедуры
+
+Процедура НеИспользуемая()
+КонецПроцедуры
+"#;
+        let diags = unused_in_module(bsl_metadata::ModuleType::SessionModule, code);
+        assert_eq!(diags.len(), 1, "{:?}", diags.iter().map(|d| &d.message).collect::<Vec<_>>());
+        assert!(diags[0].message.contains("НеИспользуемая"));
+    }
+
+    #[test]
+    fn test_application_handler_name_in_common_module_still_flagged() {
+        // Strict module-kind gating: an application-module handler NAME living in a
+        // common module is not a platform entry point there and must stay flagged.
+        let code = r#"
+Процедура ПередНачаломРаботыСистемы()
+КонецПроцедуры
+"#;
+        let diags = unused_in_module(bsl_metadata::ModuleType::CommonModule, code);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("ПередНачаломРаботыСистемы"));
+    }
+
+    #[test]
+    fn test_external_connection_module_only_run_lifecycle_exempt() {
+        // The non-interactive external connection invokes start/exit only. A
+        // managed-only UI handler and the interactive "before" hook are NOT entry
+        // points here and must stay flagged.
+        let code = r#"
+Процедура ПриНачалеРаботыСистемы()
+КонецПроцедуры
+
+Процедура ПередНачаломРаботыСистемы()
+КонецПроцедуры
+
+Процедура ПриГлобальномПоиске(СтрокаПоиска, ПланПоиска)
+КонецПроцедуры
+"#;
+        let diags = unused_in_module(bsl_metadata::ModuleType::ExternalConnectionModule, code);
+        let names: Vec<_> = diags.iter().map(|d| d.message.clone()).collect();
+        assert_eq!(diags.len(), 2, "{names:?}");
+        assert!(names.iter().any(|m| m.contains("ПередНачаломРаботыСистемы")));
+        assert!(names.iter().any(|m| m.contains("ПриГлобальномПоиске")));
+    }
+
+    #[test]
+    fn test_ordinary_application_module_no_managed_ui_handlers() {
+        // Ordinary application exposes lifecycle + external event, but the
+        // managed-only global-search handler must stay flagged.
+        let code = r#"
+Процедура ПередНачаломРаботыСистемы()
+КонецПроцедуры
+
+Процедура ПриГлобальномПоиске(СтрокаПоиска, ПланПоиска)
+КонецПроцедуры
+"#;
+        let diags = unused_in_module(bsl_metadata::ModuleType::OrdinaryApplicationModule, code);
+        assert_eq!(diags.len(), 1, "{:?}", diags.iter().map(|d| &d.message).collect::<Vec<_>>());
+        assert!(diags[0].message.contains("ПриГлобальномПоиске"));
     }
 
     #[test]

@@ -29,7 +29,10 @@ impl CompleteValueElementsUseCase {
             MdoType::Enum => {
                 items.extend(Self::enum_value_items(&mdo, prefix));
             }
-            MdoType::Catalog | MdoType::Document | MdoType::ChartOfCharacteristicTypes => {
+            MdoType::Catalog
+            | MdoType::Document
+            | MdoType::ChartOfCharacteristicTypes
+            | MdoType::ChartOfCalculationTypes => {
                 items.extend(Self::predefined_items(&mdo, prefix));
             }
             _ => {}

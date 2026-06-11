@@ -49,7 +49,15 @@ pub fn is_assignable(db: &dyn TypeKernelDb, from: TypeId, to: TypeId) -> bool {
         return true;
     }
 
+    if is_value_table_bridge(from_kind, to_kind) {
+        return true;
+    }
+
     if is_concrete_to_generic_platform_bridge(from_kind, to_kind) {
+        return true;
+    }
+
+    if is_platform_object_supertype_bridge(from_kind, to_kind) {
         return true;
     }
 
@@ -102,11 +110,28 @@ fn is_tabular_row_bridge(a: &TypeKind, b: &TypeKind) -> bool {
     }
     fn is_row_platform_object(ty: &TypeKind) -> bool {
         matches!(ty, TypeKind::PlatformObject(facet)
-            if facet.name.eq_ignore_ascii_case("Line of a tabular section")
-                || facet.name.to_lowercase() == "строка табличной части")
+            if crate::platform_type_name::is_tabular_row_name(&facet.name))
     }
     (is_row_metadata_ref(a) && is_row_platform_object(b))
         || (is_row_platform_object(a) && is_row_metadata_ref(b))
+}
+
+/// Both sides are `ТаблицаЗначений`. The projection — best-effort column tracking
+/// recovered from query/form inference — is metadata, not a distinct type: a value
+/// with a concrete projection IS a `ТаблицаЗначений`, so it satisfies a parameter
+/// documented as the bare type (projection `None`), which is how `Выгрузить()`
+/// feeding a `Неопределено | ТаблицаЗначений` slot must be admitted. When BOTH
+/// sides carry a projection, require equality so genuinely different inferred
+/// shapes still surface. Soundness is symmetric (one BSL type), so this lives in
+/// `is_assignable`, not just argument-position coercion.
+fn is_value_table_bridge(from: &TypeKind, to: &TypeKind) -> bool {
+    let (TypeKind::ValueTable(a), TypeKind::ValueTable(b)) = (from, to) else {
+        return false;
+    };
+    match (&a.projection, &b.projection) {
+        (None, _) | (_, None) => true,
+        (Some(pa), Some(pb)) => pa == pb,
+    }
 }
 
 /// `ТабличныйДокумент.ПолучитьОбласть(…)` returns `ТабличныйДокумент` (so the
@@ -173,8 +198,56 @@ fn is_concrete_to_generic_platform_bridge(from: &TypeKind, to: &TypeKind) -> boo
             MetadataKind::TabularSection { .. } => matches(("ТабличнаяЧасть", "TabularSection")),
             kind => object_mdo_of_kind(kind).and_then(generic_object_names).is_some_and(matches),
         },
+        TypeKind::FormControl { kind, .. } => {
+            generic_form_control_names(*kind).is_some_and(matches)
+        }
         _ => false,
     }
+}
+
+/// A form control (`Элементы.<имя>`) IS its generic platform type —
+/// `Элементы.Список` is a `ТаблицаФормы`, an input field is a `ПолеФормы` —
+/// while БСП command/handler helpers document the parameter with that generic
+/// name. One direction only, like the manager/object generics above.
+fn generic_form_control_names(
+    kind: bsl_types::facet::FormElementFacet,
+) -> Option<(&'static str, &'static str)> {
+    crate::platform_type_name::form_control_name_for(kind)
+}
+
+/// `УправляемаяФорма`/`ManagedForm` is the version-older NAME of the managed
+/// form whose current name is `ФормаКлиентскогоПриложения`/`ClientApplicationForm`
+/// — the same runtime type (the platform dump carries the whole surface on the
+/// new name and leaves the old name an empty alias). БСП helpers still annotate
+/// parameters with the deprecated name while the call site passes the form
+/// module's `ЭтотОбъект`. Both sides are plain `PlatformObject` names, so
+/// `is_concrete_to_generic_platform_bridge` (which keys on richer `from` kinds)
+/// cannot express this. One direction only.
+///
+/// Deliberately NOT here, despite looking similar:
+/// - `ФормаКлиентскогоПриложения` → `Форма`. `Форма` is the legacy ORDINARY-form
+///   type, a different paradigm with members the managed form lacks (`Обновить`,
+///   `ПодключитьОбработчикИзмененияДанных`, `Стиль`, `ЭлементыФормы`, …); a
+///   parameter genuinely typed `Форма` is a stale/loose annotation, not a
+///   supertype the managed form satisfies.
+/// - `ВсеЭлементыФормы` → `ЭлементыФормы`. Not a subtype relation — `ЭлементыФормы`
+///   has `Получить`/`Индекс` that `ВсеЭлементыФормы` lacks (it carries the
+///   mutators `Добавить`/`Удалить`/… instead).
+fn is_platform_object_supertype_bridge(from: &TypeKind, to: &TypeKind) -> bool {
+    let (TypeKind::PlatformObject(from_facet), TypeKind::PlatformObject(to_facet)) = (from, to)
+    else {
+        return false;
+    };
+    const SUPERTYPES: &[(&str, &str, &str, &str)] = &[(
+        "ФормаКлиентскогоПриложения",
+        "ClientApplicationForm",
+        "УправляемаяФорма",
+        "ManagedForm",
+    )];
+    SUPERTYPES.iter().any(|(sub_ru, sub_en, sup_ru, sup_en)| {
+        platform_name_eq_ci(&from_facet.name, sub_ru, sub_en)
+            && platform_name_eq_ci(&to_facet.name, sup_ru, sup_en)
+    })
 }
 
 fn object_mdo_of_kind(kind: MetadataKind) -> Option<bsl_metadata::MdoType> {
@@ -188,53 +261,18 @@ fn object_mdo_of_kind(kind: MetadataKind) -> Option<bsl_metadata::MdoType> {
         MetadataKind::ChartOfAccountsObject => Some(M::ChartOfAccounts),
         MetadataKind::DataProcessorObject => Some(M::DataProcessor),
         MetadataKind::ReportObject => Some(M::Report),
+        MetadataKind::ChartOfCharacteristicTypesObject => Some(M::ChartOfCharacteristicTypes),
+        MetadataKind::ChartOfCalculationTypesObject => Some(M::ChartOfCalculationTypes),
         _ => None,
     }
 }
 
 fn generic_manager_names(mdo: bsl_metadata::MdoType) -> Option<(&'static str, &'static str)> {
-    use bsl_metadata::MdoType as M;
-    Some(match mdo {
-        M::Catalog => ("СправочникМенеджер", "CatalogManager"),
-        M::Document => ("ДокументМенеджер", "DocumentManager"),
-        M::Enum => ("ПеречислениеМенеджер", "EnumManager"),
-        M::InformationRegister => ("РегистрСведенийМенеджер", "InformationRegisterManager"),
-        M::AccumulationRegister => ("РегистрНакопленияМенеджер", "AccumulationRegisterManager"),
-        M::AccountingRegister => ("РегистрБухгалтерииМенеджер", "AccountingRegisterManager"),
-        M::CalculationRegister => ("РегистрРасчетаМенеджер", "CalculationRegisterManager"),
-        M::ExchangePlan => ("ПланОбменаМенеджер", "ExchangePlanManager"),
-        M::ChartOfAccounts => ("ПланСчетовМенеджер", "ChartOfAccountsManager"),
-        M::ChartOfCharacteristicTypes => {
-            ("ПланВидовХарактеристикМенеджер", "ChartOfCharacteristicTypesManager")
-        }
-        M::ChartOfCalculationTypes => {
-            ("ПланВидовРасчетаМенеджер", "ChartOfCalculationTypesManager")
-        }
-        M::Task => ("ЗадачаМенеджер", "TaskManager"),
-        M::BusinessProcess => ("БизнесПроцессМенеджер", "BusinessProcessManager"),
-        M::DataProcessor => ("ОбработкаМенеджер", "DataProcessorManager"),
-        M::Report => ("ОтчетМенеджер", "ReportManager"),
-        _ => return None,
-    })
+    crate::platform_type_name::manager_name_for(mdo)
 }
 
 fn generic_object_names(mdo: bsl_metadata::MdoType) -> Option<(&'static str, &'static str)> {
-    use bsl_metadata::MdoType as M;
-    Some(match mdo {
-        M::Catalog => ("СправочникОбъект", "CatalogObject"),
-        M::Document => ("ДокументОбъект", "DocumentObject"),
-        M::Task => ("ЗадачаОбъект", "TaskObject"),
-        M::BusinessProcess => ("БизнесПроцессОбъект", "BusinessProcessObject"),
-        M::ExchangePlan => ("ПланОбменаОбъект", "ExchangePlanObject"),
-        M::ChartOfAccounts => ("ПланСчетовОбъект", "ChartOfAccountsObject"),
-        M::ChartOfCharacteristicTypes => {
-            ("ПланВидовХарактеристикОбъект", "ChartOfCharacteristicTypesObject")
-        }
-        M::ChartOfCalculationTypes => ("ПланВидовРасчетаОбъект", "ChartOfCalculationTypesObject"),
-        M::DataProcessor => ("ОбработкаОбъект", "DataProcessorObject"),
-        M::Report => ("ОтчетОбъект", "ReportObject"),
-        _ => return None,
-    })
+    crate::platform_type_name::object_name_for(mdo)
 }
 
 fn is_array_bridge(db: &dyn TypeKernelDb, from: &TypeKind, to: &TypeKind) -> bool {
@@ -258,6 +296,22 @@ pub fn is_coercible_to(db: &dyn TypeKernelDb, from: TypeId, to: TypeId) -> bool 
     // object stays distinct from a ref.
     if matches!(db.lookup_type(from), TypeKind::ThisObject { .. })
         && matches!(db.lookup_type(to), TypeKind::AnyRef)
+    {
+        return true;
+    }
+    // A document/catalog tabular section shares the whole row API with
+    // ТаблицаЗначений (НайтиСтроки, Добавить, Итог, Свернуть, indexing), and
+    // vendor helpers that fill or scan a named column routinely document the
+    // slot as the bare ТаблицаЗначений (alone or as a union member) yet are
+    // called with `Объект.<ТЧ>`. This is argument-position policy, NOT subtype
+    // truth: a tabular section is NOT a ValueTable in the lattice (it lacks the
+    // column surface — Колонки, Индексы, Скопировать), so is_assignable keeps
+    // them distinct and function variance stays sound; only at the call
+    // boundary do we admit the idiom. One direction only — a real ТаблицаЗначений
+    // is never accepted where a concrete tabular section is required.
+    if matches!(db.lookup_type(from), TypeKind::MetadataRef(facet)
+        if matches!(facet.kind, MetadataKind::TabularSection { .. }))
+        && to_admits_bare_value_table(db, to)
     {
         return true;
     }
@@ -299,6 +353,20 @@ pub fn is_coercible_to(db: &dyn TypeKernelDb, from: TypeId, to: TypeId) -> bool 
         return !has_regular || (some_regular_fits && nonfitting_regular_all_binary);
     }
     is_assignable(db, from, to)
+}
+
+/// A parameter slot accepts the bare ТаблицаЗначений — directly or as one
+/// member of a documented union (`ТаблицаЗначений, РезультатЗапроса, …`).
+/// Projected value tables never reach parameter position (doc types lower with
+/// projection `None`); a carried projection therefore signals an inferred,
+/// column-shaped target the tabular section is not proven to satisfy, so it is
+/// excluded.
+fn to_admits_bare_value_table(db: &dyn TypeKernelDb, to: TypeId) -> bool {
+    match db.lookup_type(to) {
+        TypeKind::ValueTable(facet) => facet.projection.is_none(),
+        TypeKind::Union(parts) => parts.iter().any(|p| to_admits_bare_value_table(db, *p)),
+        _ => false,
+    }
 }
 
 fn is_binary_data(kind: &TypeKind) -> bool {
@@ -412,10 +480,20 @@ mod tests {
             MetadataKind::TabularSectionRow { parent: bsl_metadata::MdoType::Catalog },
             "X.Y",
         );
-        let generic_ru = db.platform_object("Строка табличной части".to_string());
-        let generic_en = db.platform_object("Line of a tabular section".to_string());
-        assert!(is_assignable(&db, row, generic_ru));
-        assert!(is_assignable(&db, row, generic_en));
+        // Both the spaced platform spelling and the compact doc-comment spelling
+        // (RU + EN) must bridge, so a parameter documented with either matches a
+        // real tabular-section row value.
+        for name in [
+            "Строка табличной части",
+            "Line of a tabular section",
+            "СтрокаТабличнойЧасти",
+            "TabularSectionRow",
+        ] {
+            assert!(
+                is_assignable(&db, row, db.platform_object(name.to_string())),
+                "row must be assignable to {name:?}"
+            );
+        }
     }
 
     #[test]
@@ -795,6 +873,43 @@ mod tests {
     }
 
     #[test]
+    fn managed_form_admits_its_deprecated_synonym_name() {
+        let db = InMemoryDb::new();
+        let form = db.platform_object("ФормаКлиентскогоПриложения".to_string());
+        for synonym in ["УправляемаяФорма", "управляемаяформа", "ManagedForm"]
+        {
+            assert!(
+                is_assignable(&db, form, db.platform_object(synonym.to_string())),
+                "ФормаКлиентскогоПриложения must satisfy its deprecated synonym {synonym:?}"
+            );
+        }
+        assert!(
+            !is_assignable(&db, db.platform_object("УправляемаяФорма".to_string()), form),
+            "one direction only"
+        );
+        // `Форма` is the legacy ordinary-form type with its own API, NOT a
+        // supertype the managed form satisfies — must keep firing.
+        assert!(!is_assignable(&db, form, db.platform_object("Форма".to_string())));
+        assert!(!is_assignable(&db, form, db.platform_object("Form".to_string())));
+        assert!(
+            !is_assignable(&db, form, db.platform_object("Структура".to_string())),
+            "the bridge must not open unrelated platform objects"
+        );
+    }
+
+    #[test]
+    fn all_form_items_is_not_widened_to_form_items_collection() {
+        let db = InMemoryDb::new();
+        // ВсеЭлементыФормы and ЭлементыФормы are NOT in a subtype relation: the
+        // latter has Получить/Индекс that the former lacks, so the bridge must
+        // not admit one for the other in either direction.
+        let all = db.platform_object("ВсеЭлементыФормы".to_string());
+        let items = db.platform_object("ЭлементыФормы".to_string());
+        assert!(!is_assignable(&db, all, items));
+        assert!(!is_assignable(&db, items, all));
+    }
+
+    #[test]
     fn generic_bridge_is_cyrillic_case_insensitive() {
         let db = InMemoryDb::new();
         let manager = db.object_manager(
@@ -840,5 +955,145 @@ mod tests {
         assert!(is_assignable(&db, never, number), "Never ≤ A (bottom)");
         assert!(!is_assignable(&db, number, never), "A ≤ Never must fail (not reflexive)");
         assert!(is_assignable(&db, never, never), "Never ≤ Never (reflexive)");
+    }
+
+    fn projected_value_table(db: &dyn TypeKernelDb, col: &str) -> TypeId {
+        use bsl_types::facet::TableSource;
+        use bsl_types::kind::{
+            Projection, ProjectionField, ProjectionFieldSource, ProjectionOrigin,
+        };
+        let proj = Arc::new(Projection::new(
+            Arc::from([ProjectionField::new(
+                col.to_string(),
+                db.string(None, false),
+                ProjectionFieldSource::Column,
+            )]),
+            ProjectionOrigin::SdblQuery,
+            None,
+        ));
+        db.value_table(Some(proj), TableSource::SdblUnload)
+    }
+
+    #[test]
+    fn value_table_projection_coerces_to_bare_union_member() {
+        use bsl_types::facet::TableSource;
+        let db = InMemoryDb::new();
+
+        // `Запрос.Выполнить().Выгрузить()` — a projected ValueTable.
+        let arg = projected_value_table(&db, "ШтрихкодУпаковки");
+        // A callee documents the slot as `Неопределено | ТаблицаЗначений`: the
+        // ValueTable member is bare (no projection).
+        let bare = db.value_table(None, TableSource::Unknown);
+        let param = db.union(vec![db.undefined(), bare]);
+
+        assert!(
+            is_coercible_to(&db, arg, param),
+            "a projected ValueTable must satisfy a bare ТаблицаЗначений union member"
+        );
+        assert!(
+            is_assignable(&db, arg, bare),
+            "the union .any() path relies on direct assignability"
+        );
+    }
+
+    #[test]
+    fn tabular_section_coercible_to_bare_value_table_argument_only() {
+        use bsl_types::facet::TableSource;
+        let db = InMemoryDb::new();
+        // `ЗаполнитьДатыОтгрузкиВТаблице(Дата, Объект.Продукция, …)` — the helper
+        // documents the slot as the bare `ТаблицаЗначений`.
+        let ts = metadata_ref_id(
+            &db,
+            MetadataKind::TabularSection { parent: bsl_metadata::MdoType::Document },
+            "ЗаказДавальца.Продукция",
+        );
+        let value_table = db.value_table(None, TableSource::Unknown);
+        assert!(
+            is_coercible_to(&db, ts, value_table),
+            "a tabular section satisfies a ТаблицаЗначений slot at the call boundary"
+        );
+        // A documented union slot `ТаблицаЗначений, РезультатЗапроса, Массив`
+        // still admits the tabular section through its bare ValueTable member.
+        let union_slot = db.union(vec![
+            value_table,
+            db.platform_object("РезультатЗапроса".to_string()),
+            db.array(None),
+        ]);
+        assert!(is_coercible_to(&db, ts, union_slot), "the bare ВТ union member admits it");
+
+        assert!(
+            !is_assignable(&db, ts, value_table),
+            "in the lattice a tabular section stays distinct from a ValueTable"
+        );
+        assert!(
+            !is_coercible_to(&db, value_table, ts),
+            "one direction only — a real ТаблицаЗначений is not a concrete tabular section"
+        );
+        // A column-shaped (projected) target is an inferred slot, not a doc
+        // type; the tabular section is not proven to carry those columns.
+        let projected = projected_value_table(&db, "Номенклатура");
+        assert!(
+            !is_coercible_to(&db, ts, projected),
+            "a projected ValueTable target is not admitted without proven column shape"
+        );
+    }
+
+    #[test]
+    fn form_table_control_assignable_to_generic_form_table_one_way() {
+        use bsl_types::facet::FormElementFacet;
+        let db = InMemoryDb::new();
+        // `Элементы.Список` is a form table control passed into a parameter
+        // documented `ТаблицаФормы` (a union member in the БСП command helper).
+        let control = db.mk_form_control(FormElementFacet::Table, None);
+        let generic_ru = db.platform_object("ТаблицаФормы".to_string());
+        let generic_en = db.platform_object("FormTable".to_string());
+        assert!(is_assignable(&db, control, generic_ru));
+        assert!(is_assignable(&db, control, generic_en));
+        assert!(
+            !is_assignable(&db, generic_ru, control),
+            "a generic ТаблицаФормы must not be admitted where a concrete control is required"
+        );
+        let wrong = db.platform_object("ПолеФормы".to_string());
+        assert!(
+            !is_assignable(&db, control, wrong),
+            "a table control is not a ПолеФормы — only the matching generic name widens"
+        );
+        let field = db.mk_form_control(FormElementFacet::Field, None);
+        assert!(is_assignable(&db, field, db.platform_object("ПолеФормы".to_string())));
+    }
+
+    #[test]
+    fn form_group_family_all_widen_to_generic_form_group() {
+        use bsl_types::facet::FormElementFacet as K;
+        let db = InMemoryDb::new();
+        let group_ru = db.platform_object("ГруппаФормы".to_string());
+        let group_en = db.platform_object("FormGroup".to_string());
+        for kind in [K::Group, K::UsualGroup, K::Pages, K::Page, K::CommandBar, K::ButtonGroup] {
+            let control = db.mk_form_control(kind, None);
+            assert!(is_assignable(&db, control, group_ru), "{kind:?} widens to ГруппаФормы");
+            assert!(is_assignable(&db, control, group_en), "{kind:?} widens to FormGroup");
+            assert!(
+                !is_assignable(&db, control, db.platform_object("ТаблицаФормы".to_string())),
+                "{kind:?} is a group, not a ТаблицаФормы"
+            );
+        }
+        // An untyped `Other` control widens to nothing.
+        let other = db.mk_form_control(K::Other, None);
+        assert!(!is_assignable(&db, other, group_ru));
+    }
+
+    #[test]
+    fn value_table_distinct_projections_stay_distinct_but_bridge_the_bare_type() {
+        use bsl_types::facet::TableSource;
+        let db = InMemoryDb::new();
+        let a = projected_value_table(&db, "A");
+        let b = projected_value_table(&db, "B");
+        let bare = db.value_table(None, TableSource::Unknown);
+
+        // Two fully-projected, differently-shaped tables remain distinguishable.
+        assert!(!is_assignable(&db, a, b));
+        // Either is interchangeable with the bare type, both directions.
+        assert!(is_assignable(&db, a, bare));
+        assert!(is_assignable(&db, bare, a));
     }
 }

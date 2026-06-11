@@ -905,6 +905,7 @@ mod tests {
             register: None,
             http_service: None,
             web_service: None,
+            integration_service: None,
             form: None,
         }
     }
@@ -1018,6 +1019,7 @@ mod tests {
             register: None,
             http_service: None,
             web_service: None,
+            integration_service: None,
             form: Some(std::sync::Arc::new(form)),
         }
     }
@@ -1156,6 +1158,7 @@ mod tests {
             register: Some(std::sync::Arc::new(register)),
             http_service: None,
             web_service: None,
+            integration_service: None,
             form: None,
         }
     }

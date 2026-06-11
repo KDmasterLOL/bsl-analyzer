@@ -56,6 +56,8 @@ static OBJECT_TYPE_MAP: &[(&str, MdoType)] = &[
     ("cfg:TaskObject", MdoType::Task),
     ("cfg:DataProcessorObject", MdoType::DataProcessor),
     ("cfg:ReportObject", MdoType::Report),
+    ("cfg:ChartOfCharacteristicTypesObject", MdoType::ChartOfCharacteristicTypes),
+    ("cfg:ChartOfCalculationTypesObject", MdoType::ChartOfCalculationTypes),
     ("cfg:BusinessProcessRoutePointRef", MdoType::BusinessProcess),
 ];
 
@@ -428,6 +430,22 @@ mod tests {
         assert_eq!(
             parse_single_type("zzz:DefinitelyNotAType", &qualifiers()).unwrap(),
             AttributeType::Unknown,
+        );
+    }
+
+    #[test]
+    fn undotted_chart_of_characteristic_types_object_token_is_any_object_ref() {
+        assert_eq!(
+            parse_single_type("cfg:ChartOfCharacteristicTypesObject", &qualifiers()).unwrap(),
+            AttributeType::AnyObjectRef { mdo_type: MdoType::ChartOfCharacteristicTypes },
+        );
+    }
+
+    #[test]
+    fn undotted_chart_of_calculation_types_object_token_is_any_object_ref() {
+        assert_eq!(
+            parse_single_type("cfg:ChartOfCalculationTypesObject", &qualifiers()).unwrap(),
+            AttributeType::AnyObjectRef { mdo_type: MdoType::ChartOfCalculationTypes },
         );
     }
 

@@ -53,6 +53,7 @@ struct LoadedMetadata {
     external_data_sources: Vec<MetadataObject>,
     http_services: Vec<crate::http_service::HTTPService>,
     web_services: Vec<crate::web_service::WebService>,
+    integration_services: Vec<crate::integration_service::IntegrationService>,
     data_processors: Vec<MetadataObject>,
     reports: Vec<MetadataObject>,
     subsystems: Vec<crate::subsystem::Subsystem>,
@@ -82,6 +83,7 @@ fn load_all_metadata_parallel(path: &Path) -> LoadedMetadata {
     let external_data_sources = Mutex::new(Vec::new());
     let http_services = Mutex::new(Vec::new());
     let web_services = Mutex::new(Vec::new());
+    let integration_services = Mutex::new(Vec::new());
     let data_processors = Mutex::new(Vec::new());
     let reports = Mutex::new(Vec::new());
     let subsystems = Mutex::new(Vec::new());
@@ -142,10 +144,8 @@ fn load_all_metadata_parallel(path: &Path) -> LoadedMetadata {
                 load_charts_of_accounts_parallel(&path.join("ChartsOfAccounts"))
         });
         s.spawn(|_| {
-            *charts_calc_types.lock().unwrap() = load_simple_metadata_objects_parallel(
-                &path.join("ChartsOfCalculationTypes"),
-                MdoType::ChartOfCalculationTypes,
-            )
+            *charts_calc_types.lock().unwrap() =
+                load_charts_of_calculation_types_parallel(&path.join("ChartsOfCalculationTypes"))
         });
         s.spawn(|_| {
             *external_data_sources.lock().unwrap() = load_simple_metadata_objects_parallel(
@@ -158,6 +158,10 @@ fn load_all_metadata_parallel(path: &Path) -> LoadedMetadata {
         });
         s.spawn(|_| {
             *web_services.lock().unwrap() = load_web_services_parallel(&path.join("WebServices"))
+        });
+        s.spawn(|_| {
+            *integration_services.lock().unwrap() =
+                load_integration_services_parallel(&path.join("IntegrationServices"))
         });
         s.spawn(|_| {
             *data_processors.lock().unwrap() =
@@ -190,6 +194,7 @@ fn load_all_metadata_parallel(path: &Path) -> LoadedMetadata {
         external_data_sources: external_data_sources.into_inner().unwrap(),
         http_services: http_services.into_inner().unwrap(),
         web_services: web_services.into_inner().unwrap(),
+        integration_services: integration_services.into_inner().unwrap(),
         data_processors: data_processors.into_inner().unwrap(),
         reports: reports.into_inner().unwrap(),
         subsystems: subsystems.into_inner().unwrap(),
@@ -283,6 +288,9 @@ fn build_configuration(loaded: LoadedMetadata) -> Configuration {
     }
     for svc in loaded.web_services {
         config.add_web_service(svc);
+    }
+    for svc in loaded.integration_services {
+        config.add_integration_service(svc);
     }
     for subsystem in loaded.subsystems {
         config.add_subsystem(subsystem);
@@ -422,6 +430,10 @@ fn load_charts_of_accounts_parallel(dir: &Path) -> Vec<MetadataObject> {
     load_metadata_objects_parallel(dir, xml_parser::parse_chart_of_accounts_xml)
 }
 
+fn load_charts_of_calculation_types_parallel(dir: &Path) -> Vec<MetadataObject> {
+    load_metadata_objects_parallel(dir, xml_parser::parse_chart_of_calculation_types_xml)
+}
+
 fn load_data_processors_parallel(dir: &Path) -> Vec<MetadataObject> {
     load_metadata_objects_parallel(dir, xml_parser::parse_data_processor_xml)
 }
@@ -531,6 +543,7 @@ fn metadata_object_parser(mdo_type: MdoType) -> Option<fn(&str) -> Result<Metada
         MdoType::Task => parse_task_xml,
         MdoType::ExchangePlan => parse_exchange_plan_xml,
         MdoType::ChartOfCharacteristicTypes => parse_chart_of_characteristic_types_xml,
+        MdoType::ChartOfCalculationTypes => parse_chart_of_calculation_types_xml,
         MdoType::ChartOfAccounts => parse_chart_of_accounts_xml,
         MdoType::DataProcessor => parse_data_processor_xml,
         MdoType::Report => parse_report_xml,
@@ -576,6 +589,7 @@ const METADATA_OBJECT_DIRS: &[(&str, MdoType)] = &[
     ("Tasks", MdoType::Task),
     ("ExchangePlans", MdoType::ExchangePlan),
     ("ChartsOfCharacteristicTypes", MdoType::ChartOfCharacteristicTypes),
+    ("ChartsOfCalculationTypes", MdoType::ChartOfCalculationTypes),
     ("ChartsOfAccounts", MdoType::ChartOfAccounts),
     ("DataProcessors", MdoType::DataProcessor),
     ("Reports", MdoType::Report),
@@ -1091,6 +1105,39 @@ fn load_web_services_parallel(dir: &Path) -> Vec<crate::web_service::WebService>
         .collect()
 }
 
+fn load_integration_services_parallel(
+    dir: &Path,
+) -> Vec<crate::integration_service::IntegrationService> {
+    if !dir.exists() {
+        return Vec::new();
+    }
+
+    let entries: Vec<_> = match fs::read_dir(dir) {
+        Ok(entries) => entries.filter_map(|e| e.ok()).collect(),
+        Err(_) => return Vec::new(),
+    };
+
+    entries
+        .into_iter()
+        .filter_map(|entry| {
+            let service_dir = entry.path();
+            if !service_dir.is_dir() {
+                return None;
+            }
+
+            let name = service_dir.file_name()?.to_str()?;
+            let xml_path = dir.join(format!("{}.xml", name));
+
+            if !xml_path.exists() {
+                return None;
+            }
+
+            let xml = fs::read_to_string(&xml_path).ok()?;
+            xml_parser::parse_integration_service_xml(&xml, name).ok()
+        })
+        .collect()
+}
+
 fn load_simple_metadata_objects_parallel(dir: &Path, mdo_type: MdoType) -> Vec<MetadataObject> {
     if !dir.exists() {
         return Vec::new();
@@ -1322,6 +1369,21 @@ mod tests {
             let ts = &cat.tabular_sections[0];
             assert_eq!(ts.name(), "ТабличнаяЧасть1");
         }
+    }
+
+    #[test]
+    fn loads_integration_service_with_receive_handler() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/designer");
+        let config = load_from_directory(path).unwrap();
+
+        let service = config
+            .find_integration_service("ОбменСообщениями")
+            .expect("ОбменСообщениями integration service not loaded");
+
+        // Two channels in the fixture; only the Receive channel binds a handler.
+        assert_eq!(service.channels().len(), 2);
+        let handlers: Vec<_> = service.receive_handlers().collect();
+        assert_eq!(handlers, vec!["ОбработатьСообщениеОбычныйПриоритет"]);
     }
 
     #[test]

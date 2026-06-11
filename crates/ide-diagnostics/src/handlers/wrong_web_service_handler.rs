@@ -104,6 +104,7 @@ mod tests {
             http_service: None,
             form: None,
             web_service: Some(Arc::new(web_service)),
+            integration_service: None,
         }
     }
 
@@ -185,6 +186,7 @@ mod tests {
             http_service: None,
             form: None,
             web_service: None,
+            integration_service: None,
         };
 
         let file_text = "Процедура Тест()\nКонецПроцедуры";

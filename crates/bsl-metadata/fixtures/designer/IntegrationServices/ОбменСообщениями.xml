@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" version="2.20">
+	<IntegrationService uuid="c512a1cd-1240-4e46-8bad-8b7b27c5c25a">
+		<Properties>
+			<Name>ОбменСообщениями</Name>
+			<Comment/>
+		</Properties>
+		<ChildObjects>
+			<IntegrationServiceChannel uuid="1ef0581c-b1d8-4115-87f1-7856f6c06bb6">
+				<Properties>
+					<Name>input_from_SM_normal_priority</Name>
+					<MessageDirection>Receive</MessageDirection>
+					<ReceiveMessageProcessing>ОбработатьСообщениеОбычныйПриоритет</ReceiveMessageProcessing>
+				</Properties>
+			</IntegrationServiceChannel>
+			<IntegrationServiceChannel uuid="b017ac62-a4a2-47bd-b963-50e0764a7d4e">
+				<Properties>
+					<Name>output_to_SM_high_priority</Name>
+					<MessageDirection>Send</MessageDirection>
+					<ReceiveMessageProcessing/>
+				</Properties>
+			</IntegrationServiceChannel>
+		</ChildObjects>
+	</IntegrationService>
+</MetaDataObject>

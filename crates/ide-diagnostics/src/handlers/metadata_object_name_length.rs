@@ -192,6 +192,7 @@ mod tests {
             register: None,
             http_service: None,
             web_service: None,
+            integration_service: None,
             form: None,
         }
     }
@@ -205,6 +206,7 @@ mod tests {
             register: None,
             http_service: None,
             web_service: None,
+            integration_service: None,
             form: None,
         }
     }
@@ -218,6 +220,7 @@ mod tests {
             register: Some(Arc::new(register)),
             http_service: None,
             web_service: None,
+            integration_service: None,
             form: None,
         }
     }

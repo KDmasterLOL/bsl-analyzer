@@ -39,6 +39,9 @@ pub fn from_hir(
         MdoType::ChartOfCharacteristicTypes
     } else if matches!(manager_lower.as_str(), "планысчетов" | "chartsofaccounts") {
         MdoType::ChartOfAccounts
+    } else if matches!(manager_lower.as_str(), "планывидоврасчета" | "chartsofcalculationtypes")
+    {
+        MdoType::ChartOfCalculationTypes
     } else {
         return None;
     };
@@ -71,6 +74,7 @@ fn build_message(
         MdoType::Catalog => "справочника",
         MdoType::ChartOfCharacteristicTypes => "плана видов характеристик",
         MdoType::ChartOfAccounts => "плана счетов",
+        MdoType::ChartOfCalculationTypes => "плана видов расчета",
         _ => "объекта",
     };
 
@@ -199,5 +203,18 @@ mod tests {
         );
         assert!(message.contains("плана счетов"));
         assert!(message.contains("Хозрасчетный"));
+    }
+
+    #[test]
+    fn test_build_message_chart_of_calculation_types() {
+        let message = build_message(
+            MdoType::ChartOfCalculationTypes,
+            "Удержания",
+            false,
+            CodeSeries::Unknown,
+        );
+        assert!(message.contains("плана видов расчета"));
+        assert!(message.contains("Удержания"));
+        assert!(message.contains("отключен контроль уникальности кода"));
     }
 }

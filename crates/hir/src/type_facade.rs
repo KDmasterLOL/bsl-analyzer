@@ -133,6 +133,10 @@ impl<'db, DB: ConfigsDatabase + TypeKernelDb> Type<'db, DB> {
             MetadataKind::ChartOfAccountsRef | MetadataKind::ChartOfAccountsObject => {
                 MdoType::ChartOfAccounts
             }
+            MetadataKind::ChartOfCharacteristicTypesRef
+            | MetadataKind::ChartOfCharacteristicTypesObject => MdoType::ChartOfCharacteristicTypes,
+            MetadataKind::ChartOfCalculationTypesRef
+            | MetadataKind::ChartOfCalculationTypesObject => MdoType::ChartOfCalculationTypes,
             MetadataKind::InformationRegisterRef => MdoType::InformationRegister,
             MetadataKind::AccumulationRegisterRef => MdoType::AccumulationRegister,
             MetadataKind::AccountingRegisterRef => MdoType::AccountingRegister,

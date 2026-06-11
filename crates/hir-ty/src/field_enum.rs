@@ -213,7 +213,8 @@ fn specialize_self_ref_ty(
         return None;
     };
     let base = facet.name.as_str().to_string();
-    let candidates = [MetadataKind::object_kind_for(mdo_type), ref_kind_for_mdo(mdo_type)];
+    let candidates =
+        [MetadataKind::object_kind_for(mdo_type), MetadataKind::ref_kind_for(mdo_type)];
     for candidate in candidates.into_iter().flatten() {
         let ru = candidate.display_label(base_db::Locale::Ru);
         let en = candidate.display_label(base_db::Locale::En);
@@ -241,19 +242,6 @@ fn fold_yo(c: char) -> char {
         'Ё' => 'Е',
         _ => c,
     }
-}
-
-fn ref_kind_for_mdo(mdo: MdoType) -> Option<MetadataKind> {
-    Some(match mdo {
-        MdoType::Catalog => MetadataKind::CatalogRef,
-        MdoType::Document => MetadataKind::DocumentRef,
-        MdoType::Task => MetadataKind::TaskRef,
-        MdoType::BusinessProcess => MetadataKind::BusinessProcessRef,
-        MdoType::ExchangePlan => MetadataKind::ExchangePlanRef,
-        MdoType::ChartOfAccounts => MetadataKind::ChartOfAccountsRef,
-        MdoType::Enum => MetadataKind::EnumRef,
-        _ => return None,
-    })
 }
 
 fn standard_attribute_names_for(mdo_type: MdoType) -> std::collections::HashSet<String> {
@@ -650,6 +638,13 @@ pub(crate) fn mdo_type_for_kind(kind: MetadataKind) -> Option<MdoType> {
         }
         MetadataKind::ChartOfAccountsRef | MetadataKind::ChartOfAccountsObject => {
             Some(MdoType::ChartOfAccounts)
+        }
+        MetadataKind::ChartOfCharacteristicTypesRef
+        | MetadataKind::ChartOfCharacteristicTypesObject => {
+            Some(MdoType::ChartOfCharacteristicTypes)
+        }
+        MetadataKind::ChartOfCalculationTypesRef | MetadataKind::ChartOfCalculationTypesObject => {
+            Some(MdoType::ChartOfCalculationTypes)
         }
         MetadataKind::InformationRegisterRecordManager
         | MetadataKind::InformationRegisterRecordSet

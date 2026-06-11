@@ -105,10 +105,68 @@ fn descriptors_from_global_function(func: &bsl_platform::GlobalFunction) -> Vec<
         Some(s) => ReturnTypeSpec::Raw(s.to_string()),
     };
 
-    if func.variants.is_empty() {
-        return vec![descriptor_from_params(&func.parameters, ret)];
+    let mut sigs = if func.variants.is_empty() {
+        vec![descriptor_from_params(&func.parameters, ret)]
+    } else {
+        func.variants.iter().map(|v| descriptor_from_params(&v.parameters, ret.clone())).collect()
+    };
+    if is_form_data_conversion_helper(&func.name, &func.english_name) {
+        complete_form_data_family_params(&mut sigs);
     }
-    func.variants.iter().map(|v| descriptor_from_params(&v.parameters, ret.clone())).collect()
+    sigs
+}
+
+/// The form-data conversion helpers accept the whole form-data container family
+/// interchangeably, yet the HBK dump documents the family inconsistently: it
+/// lists all four members on `ДанныеФормыВЗначение` but omits `ДанныеФормыДерево`
+/// on `КопироватьДанныеФормы` / `ЗначениеВДанныеФормы`. That omission is a dump
+/// artefact, not a runtime restriction — a form-data tree is a valid argument to
+/// all of them. Completing the family on exactly these platform helpers keeps
+/// the fix scoped: a user procedure documenting a parameter with a single
+/// form-data facet stays facet-strict.
+fn is_form_data_conversion_helper(name: &str, english_name: &str) -> bool {
+    const RU: [&str; 3] = ["КопироватьДанныеФормы", "ЗначениеВДанныеФормы", "ДанныеФормыВЗначение"];
+    const EN: [&str; 3] = ["CopyFormData", "ValueToFormData", "FormDataToValue"];
+    RU.contains(&name) || EN.contains(&english_name)
+}
+
+const FORM_DATA_CONTAINER_FAMILY: [&str; 4] = [
+    "ДанныеФормыСтруктураСКоллекцией",
+    "ДанныеФормыКоллекция",
+    "ДанныеФормыСтруктура",
+    "ДанныеФормыДерево",
+];
+
+fn complete_form_data_family_params(sigs: &mut [BuiltinSignature]) {
+    for sig in sigs.iter_mut() {
+        for param in sig.params.iter_mut() {
+            if let ParamTypeSpec::Raw(s) = param {
+                if let Some(full) = complete_form_data_container_family(s) {
+                    *s = full;
+                }
+            }
+        }
+    }
+}
+
+/// When a documented type is a (proper) subset of the form-data container family,
+/// return the full family as a union string; otherwise `None` (leave unrelated
+/// or already-complete params untouched). Tokens are matched whole — the dump
+/// uses canonical Cyrillic names — so `ДанныеФормыСтруктура` is never confused
+/// with `ДанныеФормыСтруктураСКоллекцией`.
+fn complete_form_data_container_family(param_type: &str) -> Option<String> {
+    let tokens: Vec<&str> =
+        param_type.split(',').map(str::trim).filter(|t| !t.is_empty()).collect();
+    if tokens.is_empty() {
+        return None;
+    }
+    let all_family = tokens.iter().all(|t| FORM_DATA_CONTAINER_FAMILY.contains(t));
+    let already_complete = tokens.contains(&"ДанныеФормыДерево");
+    if all_family && !already_complete {
+        Some(FORM_DATA_CONTAINER_FAMILY.join(", "))
+    } else {
+        None
+    }
 }
 
 pub(crate) fn descriptor_from_params(
@@ -241,6 +299,61 @@ mod tests {
     use bsl_types::facet::DateComponent;
     use bsl_types::kind::TypeKind;
     use bsl_types::testing::InMemoryDb;
+
+    #[test]
+    fn complete_form_data_family_fills_missing_tree() {
+        let full = "ДанныеФормыСтруктураСКоллекцией, ДанныеФормыКоллекция, ДанныеФормыСтруктура, ДанныеФормыДерево";
+        assert_eq!(
+            complete_form_data_container_family(
+                "ДанныеФормыСтруктураСКоллекцией, ДанныеФормыКоллекция, ДанныеФормыСтруктура"
+            )
+            .as_deref(),
+            Some(full),
+            "a family subset is completed to all four containers"
+        );
+        assert_eq!(
+            complete_form_data_container_family("ДанныеФормыКоллекция").as_deref(),
+            Some(full),
+            "a single family member completes too"
+        );
+    }
+
+    #[test]
+    fn complete_form_data_family_leaves_complete_and_unrelated_untouched() {
+        assert_eq!(
+            complete_form_data_container_family(
+                "ДанныеФормыСтруктура, ДанныеФормыКоллекция, ДанныеФормыСтруктураСКоллекцией, ДанныеФормыДерево"
+            ),
+            None,
+            "already-complete family is left as-is"
+        );
+        assert_eq!(
+            complete_form_data_container_family("ТаблицаЗначений, ДанныеФормыКоллекция"),
+            None,
+            "a union mixing a non-family member is not a pure form-data slot"
+        );
+        assert_eq!(complete_form_data_container_family("Строка"), None);
+    }
+
+    #[test]
+    fn copy_form_data_signature_admits_form_data_tree_argument() {
+        let db = InMemoryDb::new();
+        let sigs = builtin_functions()
+            .get("копироватьданныеформы")
+            .expect("КопироватьДанныеФормы builtin");
+        let sig = sigs.first().expect("at least one signature").lower(&db);
+        let owner = bsl_types::facet::MdoRefFacet::new(
+            bsl_metadata::MdoType::Report,
+            "СтатистикаФорма1".to_string(),
+        );
+        let tree = db.mk_form_data(bsl_types::facet::FormDataFacet::Tree, Some(owner));
+        for (idx, &param) in sig.params.iter().enumerate() {
+            assert!(
+                crate::subtype::is_coercible_to(&db, tree, param),
+                "КопироватьДанныеФормы param #{idx} must admit a form-data tree after family completion"
+            );
+        }
+    }
 
     #[test]
     fn lookup_is_case_insensitive_and_bilingual() {

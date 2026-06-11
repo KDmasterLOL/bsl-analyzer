@@ -262,6 +262,7 @@ mod tests {
             form: Some(Arc::new(form)),
             http_service: None,
             web_service: None,
+            integration_service: None,
         }
     }
 

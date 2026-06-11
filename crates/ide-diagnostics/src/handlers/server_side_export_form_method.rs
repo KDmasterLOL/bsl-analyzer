@@ -56,8 +56,19 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics
 }
 
+/// A method reachable on the client is not a forbidden server-only export. Besides
+/// `&НаКлиенте`, the context-free `&НаКлиентеНаСервереБезКонтекста` (and the
+/// `&НаКлиентеНаСервере` pair) compile for the client too, so an export of that kind
+/// is a legitimate client-callable form method, not a server export.
 fn has_client_annotation(annotations: &[hir::Annotation]) -> bool {
-    annotations.iter().any(|a| a.kind == AnnotationKind::AtClient)
+    annotations.iter().any(|a| {
+        matches!(
+            a.kind,
+            AnnotationKind::AtClient
+                | AnnotationKind::AtClientAtServer
+                | AnnotationKind::AtClientAtServerNoContext
+        )
+    })
 }
 
 fn make_diagnostic(range: TextRange, code: DiagnosticCode, ctx: &DiagnosticsContext) -> Diagnostic {
@@ -68,5 +79,76 @@ fn make_diagnostic(range: TextRange, code: DiagnosticCode, ctx: &DiagnosticsCont
         severity: ctx.severity(code),
         tags: ctx.tags(code),
         fixes: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::DiagnosticCode;
+    use std::sync::Arc;
+
+    fn managed_form_metadata() -> hir::ModuleMetadata {
+        let form = bsl_metadata::xml_parser::parse_form_xml(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.20"></Form>"#,
+        )
+        .unwrap();
+
+        hir::ModuleMetadata {
+            module_type: bsl_metadata::ModuleType::FormModule,
+            execution_context: None,
+            common_module: None,
+            mdo: None,
+            register: None,
+            form: Some(Arc::new(form)),
+            http_service: None,
+            web_service: None,
+            integration_service: None,
+        }
+    }
+
+    fn flagged(code_text: &str) -> Vec<crate::Diagnostic> {
+        let diagnostics = crate::test_utils::check_metadata_diagnostic(
+            managed_form_metadata(),
+            code_text,
+            |_, ctx| super::check(ctx),
+        );
+        diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::ServerSideExportFormMethod)
+            .collect()
+    }
+
+    #[test]
+    fn client_server_no_context_export_not_flagged() {
+        let code = r#"
+&НаКлиентеНаСервереБезКонтекста
+Процедура ОбщийМетод() Экспорт
+КонецПроцедуры
+"#;
+        assert!(
+            flagged(code).is_empty(),
+            "&НаКлиентеНаСервереБезКонтекста export must not be flagged"
+        );
+    }
+
+    #[test]
+    fn client_export_not_flagged() {
+        let code = r#"
+&НаКлиенте
+Процедура КлиентскийМетод() Экспорт
+КонецПроцедуры
+"#;
+        assert!(flagged(code).is_empty(), "&НаКлиенте export must not be flagged");
+    }
+
+    #[test]
+    fn server_export_still_flagged() {
+        let code = r#"
+&НаСервере
+Процедура СерверныйМетод() Экспорт
+КонецПроцедуры
+"#;
+        assert_eq!(flagged(code).len(), 1, "&НаСервере export must stay flagged");
     }
 }

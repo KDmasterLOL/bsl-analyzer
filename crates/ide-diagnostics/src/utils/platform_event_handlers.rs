@@ -33,9 +33,69 @@ const PLATFORM_EVENT_HANDLERS: &[&str] = &[
     "commandprocessing",
 ];
 
+// Application-family event handlers the platform invokes with no local call site,
+// so `UnusedLocalMethod` must exempt them — but each set is gated to the module kind
+// that actually exposes it (see the call site). The sets are scoped narrowly on
+// purpose: a name absent here is at most a residual false positive, while a name
+// exempted in a module that does NOT invoke it would mask a real unused method.
+
+/// Start/exit hooks present in every application-family module, including the
+/// non-interactive external-connection module.
+const APP_RUN_LIFECYCLE_HANDLERS: &[&str] =
+    &["приначалеработысистемы", "onstart", "призавершенииработысистемы", "onexit"];
+
+/// Interactive start/exit hooks (a cancellable "before" phase) — managed and
+/// ordinary application modules, but NOT the non-interactive external connection.
+const APP_INTERACTIVE_LIFECYCLE_HANDLERS: &[&str] =
+    &["передначаломработысистемы", "beforestart", "передзавершениемработысистемы", "beforeexit"];
+
+/// External-event hook — managed and ordinary application modules.
+const APP_EXTERNAL_EVENT_HANDLERS: &[&str] =
+    &["обработкавнешнегособытия", "externaleventprocessing"];
+
+/// Interaction-system, global-search and navigation hooks exposed ONLY by the
+/// managed application module. Russian-only: the canonical English spellings of
+/// these newer handlers are not asserted here, so English-spelled code keeps a
+/// residual FP rather than risk minting a wrong alias.
+const MANAGED_APP_UI_HANDLERS: &[&str] = &[
+    "обработкаполученияформывыборапользователейсистемывзаимодействия",
+    "приглобальномпоиске",
+    "привыборерезультатаглобальногопоиска",
+    "привыборедействиярезультатаглобальногопоиска",
+    "обработкапереходапонавигационнойссылке",
+    "приизменениидоступностиосновногосервера",
+];
+
+/// Event handlers the platform invokes in the session module.
+const SESSION_MODULE_EVENT_HANDLERS: &[&str] =
+    &["установкапараметровсеанса", "sessionparameterssetting"];
+
 pub fn is_platform_event_handler(name: &str) -> bool {
     let lower = name.to_lowercase();
     PLATFORM_EVENT_HANDLERS.contains(&lower.as_str())
+}
+
+pub fn is_managed_application_module_event_handler(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    is_ordinary_application_module_event_handler(&lower)
+        || MANAGED_APP_UI_HANDLERS.contains(&lower.as_str())
+}
+
+pub fn is_ordinary_application_module_event_handler(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    APP_RUN_LIFECYCLE_HANDLERS.contains(&lower.as_str())
+        || APP_INTERACTIVE_LIFECYCLE_HANDLERS.contains(&lower.as_str())
+        || APP_EXTERNAL_EVENT_HANDLERS.contains(&lower.as_str())
+}
+
+pub fn is_external_connection_module_event_handler(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    APP_RUN_LIFECYCLE_HANDLERS.contains(&lower.as_str())
+}
+
+pub fn is_session_module_event_handler(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    SESSION_MODULE_EVENT_HANDLERS.contains(&lower.as_str())
 }
 
 #[cfg(test)]

@@ -225,6 +225,7 @@ pub struct ModuleMetadata {
     pub form: Option<Arc<bsl_metadata::Form>>,
     pub http_service: Option<Arc<bsl_metadata::HTTPService>>,
     pub web_service: Option<Arc<bsl_metadata::WebService>>,
+    pub integration_service: Option<Arc<bsl_metadata::IntegrationService>>,
 }
 
 impl ModuleMetadata {
@@ -238,6 +239,7 @@ impl ModuleMetadata {
             form: None,
             http_service: None,
             web_service: None,
+            integration_service: None,
         }
     }
 }

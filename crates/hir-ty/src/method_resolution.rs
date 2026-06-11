@@ -91,6 +91,8 @@ fn object_kind_to_mdo(kind: hir_def::ty::MetadataKind) -> Option<bsl_metadata::M
         MetadataKind::BusinessProcessObject => MdoType::BusinessProcess,
         MetadataKind::DataProcessorObject => MdoType::DataProcessor,
         MetadataKind::ReportObject => MdoType::Report,
+        MetadataKind::ChartOfCharacteristicTypesObject => MdoType::ChartOfCharacteristicTypes,
+        MetadataKind::ChartOfCalculationTypesObject => MdoType::ChartOfCalculationTypes,
         MetadataKind::CatalogRef
         | MetadataKind::DocumentRef
         | MetadataKind::EnumRef
@@ -98,6 +100,8 @@ fn object_kind_to_mdo(kind: hir_def::ty::MetadataKind) -> Option<bsl_metadata::M
         | MetadataKind::BusinessProcessRef
         | MetadataKind::ExchangePlanRef
         | MetadataKind::ChartOfAccountsRef
+        | MetadataKind::ChartOfCharacteristicTypesRef
+        | MetadataKind::ChartOfCalculationTypesRef
         | MetadataKind::InformationRegisterRef
         | MetadataKind::AccumulationRegisterRef
         | MetadataKind::AccountingRegisterRef
@@ -136,6 +140,8 @@ fn record_set_kind_to_mdo(kind: hir_def::ty::MetadataKind) -> Option<bsl_metadat
         | MetadataKind::TaskObject
         | MetadataKind::BusinessProcessObject
         | MetadataKind::DataProcessorObject
+        | MetadataKind::ChartOfCharacteristicTypesObject
+        | MetadataKind::ChartOfCalculationTypesObject
         | MetadataKind::ReportObject => return None,
         MetadataKind::CatalogRef
         | MetadataKind::DocumentRef
@@ -144,6 +150,8 @@ fn record_set_kind_to_mdo(kind: hir_def::ty::MetadataKind) -> Option<bsl_metadat
         | MetadataKind::BusinessProcessRef
         | MetadataKind::ExchangePlanRef
         | MetadataKind::ChartOfAccountsRef
+        | MetadataKind::ChartOfCharacteristicTypesRef
+        | MetadataKind::ChartOfCalculationTypesRef
         | MetadataKind::InformationRegisterRef
         | MetadataKind::AccumulationRegisterRef
         | MetadataKind::AccountingRegisterRef

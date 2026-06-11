@@ -48,6 +48,7 @@ pub enum StandardKind {
     LineNumber,
     Recorder,
     Period,
+    ActionPeriodIsBasic,
 }
 
 impl StandardKind {
@@ -78,6 +79,7 @@ impl StandardKind {
             Self::LineNumber => "НомерСтроки",
             Self::Recorder => "Регистратор",
             Self::Period => "Период",
+            Self::ActionPeriodIsBasic => "ПериодДействияБазовый",
         }
     }
 
@@ -108,6 +110,7 @@ impl StandardKind {
             Self::LineNumber => "LineNumber",
             Self::Recorder => "Recorder",
             Self::Period => "Period",
+            Self::ActionPeriodIsBasic => "ActionPeriodIsBasic",
         }
     }
 }
@@ -121,6 +124,7 @@ pub enum PresenceCondition {
     Hierarchical,
     HasOwners,
     IsPeriodic,
+    DependsOnCalculationTypes,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,6 +138,9 @@ pub enum AttrValueKind {
     SelfRef,
     OwnerRef,
     AnyDocumentRef,
+    /// The `ОписаниеТипов` of a chart of characteristic types — its standard
+    /// `ТипЗначения` attribute.
+    TypeDescription,
     Unknown,
 }
 
@@ -324,8 +331,57 @@ static CHART_OF_CHARACTERISTIC_TYPES_OBJECT: &[StandardAttrSpec] = &[
     },
     StandardAttrSpec {
         kind: StandardKind::ValueType,
-        value: AttrValueKind::Unknown,
+        value: AttrValueKind::TypeDescription,
         condition: PresenceCondition::Always,
+        is_readonly: false,
+    },
+];
+
+// A chart of calculation types is flat (no hierarchy, no owners). Its
+// `ПериодДействияБазовый` exists only when the chart depends on calculation types;
+// the displacing/leading/base standard tabular sections, gated on the same
+// dependency, are synthesized by the XML parser, not described here.
+static CHART_OF_CALCULATION_TYPES_OBJECT: &[StandardAttrSpec] = &[
+    StandardAttrSpec {
+        kind: StandardKind::Ref,
+        value: AttrValueKind::SelfRef,
+        condition: PresenceCondition::Always,
+        is_readonly: true,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::DeletionMark,
+        value: AttrValueKind::Boolean,
+        condition: PresenceCondition::Always,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::Code,
+        value: AttrValueKind::StringCodeOrDescription,
+        condition: PresenceCondition::HasCode,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::Description,
+        value: AttrValueKind::StringCodeOrDescription,
+        condition: PresenceCondition::HasDescription,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::Predefined,
+        value: AttrValueKind::Boolean,
+        condition: PresenceCondition::Always,
+        is_readonly: true,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::PredefinedDataName,
+        value: AttrValueKind::StringUnbounded,
+        condition: PresenceCondition::Always,
+        is_readonly: true,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::ActionPeriodIsBasic,
+        value: AttrValueKind::Boolean,
+        condition: PresenceCondition::DependsOnCalculationTypes,
         is_readonly: false,
     },
 ];
@@ -605,6 +661,9 @@ pub fn standard_attributes_for(
             CHART_OF_CHARACTERISTIC_TYPES_OBJECT
         }
         (MdoTemplateKind::ChartOfAccounts, ObjectView::Object) => CHART_OF_ACCOUNTS_OBJECT,
+        (MdoTemplateKind::ChartOfCalculationTypes, ObjectView::Object) => {
+            CHART_OF_CALCULATION_TYPES_OBJECT
+        }
         (MdoTemplateKind::Document, ObjectView::Object) => DOCUMENT_OBJECT,
         (MdoTemplateKind::BusinessProcess, ObjectView::Object) => BUSINESS_PROCESS_OBJECT,
         (MdoTemplateKind::Task, ObjectView::Object) => TASK_OBJECT,
@@ -651,6 +710,7 @@ mod tests {
             StandardKind::LineNumber,
             StandardKind::Recorder,
             StandardKind::Period,
+            StandardKind::ActionPeriodIsBasic,
         ];
         for kind in all {
             assert!(!kind.russian_name().is_empty(), "{kind:?} has empty russian_name");
@@ -714,6 +774,21 @@ mod tests {
         let kinds: Vec<StandardKind> = specs.iter().map(|s| s.kind).collect();
         assert!(kinds.contains(&StandardKind::ValueType));
         assert!(kinds.contains(&StandardKind::Ref));
+    }
+
+    #[test]
+    fn chart_of_calculation_types_object_view_contains_action_period_and_no_hierarchy() {
+        let specs =
+            standard_attributes_for(MdoTemplateKind::ChartOfCalculationTypes, ObjectView::Object);
+        let kinds: Vec<StandardKind> = specs.iter().map(|s| s.kind).collect();
+        assert!(kinds.contains(&StandardKind::Ref));
+        assert!(kinds.contains(&StandardKind::Predefined));
+        let basic = specs.iter().find(|s| s.kind == StandardKind::ActionPeriodIsBasic).unwrap();
+        assert_eq!(basic.condition, PresenceCondition::DependsOnCalculationTypes);
+        assert!(
+            !kinds.contains(&StandardKind::IsFolder) && !kinds.contains(&StandardKind::Parent),
+            "charts of calculation types are flat: {kinds:?}"
+        );
     }
 
     #[test]

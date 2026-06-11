@@ -52,6 +52,9 @@ pub struct Configuration {
     #[serde(rename = "webServices", default)]
     web_services: Vec<WebService>,
 
+    #[serde(rename = "integrationServices", default)]
+    integration_services: Vec<crate::integration_service::IntegrationService>,
+
     #[serde(skip)]
     uri_to_module: HashMap<String, usize>,
 
@@ -85,6 +88,9 @@ pub struct Configuration {
     #[serde(skip)]
     name_to_web_service: HashMap<String, usize>,
 
+    #[serde(skip)]
+    name_to_integration_service: HashMap<String, usize>,
+
     /// `(mdo_type, lowercased name) -> index`, so [`Configuration::find_metadata_object`]
     /// is O(1) instead of an O(all-objects) scan that lowercased every object's
     /// (Cyrillic) name on each lookup.
@@ -115,6 +121,7 @@ impl PartialEq for Configuration {
             && self.subsystems == other.subsystems
             && self.http_services == other.http_services
             && self.web_services == other.web_services
+            && self.integration_services == other.integration_services
             && self.use_managed_form_in_ordinary_application
                 == other.use_managed_form_in_ordinary_application
             && self.use_ordinary_form_in_managed_application
@@ -145,12 +152,14 @@ impl Configuration {
             name_to_role: HashMap::new(),
             name_to_http_service: HashMap::new(),
             name_to_web_service: HashMap::new(),
+            name_to_integration_service: HashMap::new(),
             metadata_objects_by_key: HashMap::new(),
             recorders_by_register: HashMap::new(),
             use_managed_form_in_ordinary_application: false,
             use_ordinary_form_in_managed_application: false,
             http_services: Vec::new(),
             web_services: Vec::new(),
+            integration_services: Vec::new(),
         }
     }
 
@@ -223,6 +232,7 @@ impl Configuration {
         self.name_to_role.clear();
         self.name_to_http_service.clear();
         self.name_to_web_service.clear();
+        self.name_to_integration_service.clear();
         self.metadata_objects_by_key.clear();
         self.recorders_by_register.clear();
 
@@ -268,6 +278,10 @@ impl Configuration {
 
         for (idx, web_service) in self.web_services.iter().enumerate() {
             self.name_to_web_service.insert(web_service.name().to_lowercase(), idx);
+        }
+
+        for (idx, integration_service) in self.integration_services.iter().enumerate() {
+            self.name_to_integration_service.insert(integration_service.name().to_lowercase(), idx);
         }
 
         for object in &self.metadata_objects {
@@ -576,6 +590,29 @@ impl Configuration {
         let idx = self.web_services.len();
         self.name_to_web_service.insert(web_service.name().to_lowercase(), idx);
         self.web_services.push(web_service);
+    }
+
+    pub fn integration_services(&self) -> &[crate::integration_service::IntegrationService] {
+        &self.integration_services
+    }
+
+    pub fn find_integration_service(
+        &self,
+        name: &str,
+    ) -> Option<&crate::integration_service::IntegrationService> {
+        let name_lower = name.to_lowercase();
+        self.name_to_integration_service
+            .get(&name_lower)
+            .and_then(|&idx| self.integration_services.get(idx))
+    }
+
+    pub(crate) fn add_integration_service(
+        &mut self,
+        integration_service: crate::integration_service::IntegrationService,
+    ) {
+        let idx = self.integration_services.len();
+        self.name_to_integration_service.insert(integration_service.name().to_lowercase(), idx);
+        self.integration_services.push(integration_service);
     }
 }
 
