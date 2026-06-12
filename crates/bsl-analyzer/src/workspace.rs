@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     time::Instant,
 };
@@ -530,56 +530,112 @@ impl GlobalState {
             return;
         }
 
+        // One config root's discovered (stat-only) structure, before any file is
+        // read or interned.
+        struct RootDiscovery {
+            root_string: String,
+            mdos: Vec<bsl_metadata::DiscoveredMdo>,
+            defined_types: Vec<bsl_metadata::DiscoveredDefinedType>,
+            common_modules: Vec<bsl_metadata::DiscoveredCommonModule>,
+        }
+
+        // Discover every root's structure WITHOUT the vfs lock — discovery walks
+        // and stats the filesystem but never touches the vfs.
+        let discoveries: Vec<RootDiscovery> = config_paths
+            .iter()
+            .map(|(_, root_path)| {
+                let mut mdos = bsl_metadata::discover_metadata_structure(root_path);
+                mdos.extend(bsl_metadata::discover_register_structure(root_path));
+                RootDiscovery {
+                    root_string: root_path.to_string_lossy().to_string(),
+                    mdos,
+                    defined_types: bsl_metadata::discover_defined_type_structure(root_path),
+                    common_modules: bsl_metadata::discover_common_module_structure(root_path),
+                }
+            })
+            .collect();
+
+        // Gather every composing file that needs its content revision, then read
+        // and hash them in parallel OFF the vfs lock. The text itself is not
+        // retained — only `(path, revision)`. (`module_file` is BSL source owned by
+        // root(0), read elsewhere — not hashed here.) rayon is safe in this window:
+        // vfs-notify no longer parks tasks on the global pool, and bootstrap runs in
+        // `finalize` after the boot load window has closed.
+        let mut to_read: Vec<PathBuf> = Vec::new();
+        for d in &discoveries {
+            for m in &d.mdos {
+                to_read.push(m.main.clone());
+                if let Some(p) = &m.predefined {
+                    to_read.push(p.clone());
+                }
+            }
+            to_read.extend(d.defined_types.iter().map(|t| t.main.clone()));
+            to_read.extend(d.common_modules.iter().map(|c| c.main.clone()));
+        }
+        let revisions_by_path: HashMap<PathBuf, u64> = {
+            use rayon::prelude::*;
+            to_read
+                .par_iter()
+                .filter_map(|path| {
+                    let text = base_db::read_disk_text(path).ok()?;
+                    Some((path.clone(), base_db::content_revision(&text)))
+                })
+                .collect()
+        };
+
         let mut metadata_file_set = vfs::file_set::FileSet::new();
         let mut revisions: Vec<(FileId, u64)> = Vec::new();
         let mut listings: Vec<RootStructureListing> = Vec::new();
 
+        // Intern under a single short vfs.write(): allocate FileIds and grow the
+        // metadata file set. This is the only lock-held work; the expensive reads
+        // already happened above. A file whose read failed (vanished between
+        // discovery and the read pass) is absent from `revisions_by_path`, so
+        // `intern_metadata_file` returns `None` and the MDO is dropped.
         {
             let mut vfs = self.vfs.write();
-            for (_, root_path) in &config_paths {
-                let mut discovered = bsl_metadata::discover_metadata_structure(root_path);
-                discovered.extend(bsl_metadata::discover_register_structure(root_path));
-                let mut entries = Vec::with_capacity(discovered.len());
-                for d in discovered {
-                    let Some(main) = enroll_metadata_file(
+            for d in discoveries {
+                let mut entries = Vec::with_capacity(d.mdos.len());
+                for m in d.mdos {
+                    let Some(main) = intern_metadata_file(
                         &mut vfs,
-                        &d.main,
-                        true,
+                        &m.main,
+                        &revisions_by_path,
                         &mut metadata_file_set,
                         &mut revisions,
                     ) else {
                         continue;
                     };
-                    let predefined = d.predefined.as_ref().and_then(|p| {
-                        enroll_metadata_file(
+                    let predefined = m.predefined.as_ref().and_then(|p| {
+                        intern_metadata_file(
                             &mut vfs,
                             p,
-                            true,
+                            &revisions_by_path,
                             &mut metadata_file_set,
                             &mut revisions,
                         )
                     });
-                    entries.push(MdoEntry { kind: d.mdo_type, name: d.name, main, predefined });
+                    entries.push(MdoEntry { kind: m.mdo_type, name: m.name, main, predefined });
                 }
                 let mut defined_types = Vec::new();
-                for d in bsl_metadata::discover_defined_type_structure(root_path) {
-                    let Some(main) = enroll_metadata_file(
+                for t in d.defined_types {
+                    let Some(main) = intern_metadata_file(
                         &mut vfs,
-                        &d.main,
-                        true,
+                        &t.main,
+                        &revisions_by_path,
                         &mut metadata_file_set,
                         &mut revisions,
                     ) else {
                         continue;
                     };
-                    defined_types.push(DefinedTypeEntry { name: d.name, main });
+                    defined_types.push(DefinedTypeEntry { name: t.name, main });
                 }
                 let mut common_modules = Vec::new();
-                for d in bsl_metadata::discover_common_module_structure(root_path) {
-                    let Some(main) = enroll_metadata_file(
+                for c in d.common_modules {
+                    let Some(main) = intern_metadata_file(
                         &mut vfs,
-                        &d.main,
-                        true,
+                        &c.main,
+                        &revisions_by_path,
                         &mut metadata_file_set,
                         &mut revisions,
                     ) else {
@@ -591,18 +647,13 @@ impl GlobalState {
                     // interned) rather than enrolling a duplicate. `None` when the
                     // path is absent or unloaded; the reverse lookup then misses,
                     // which is correct.
-                    let module_file = d
+                    let module_file = c
                         .module_file
                         .as_ref()
                         .and_then(|p| vfs.file_id(&vfs::VfsPath::new(p.to_path_buf())));
-                    common_modules.push(CommonModuleEntry { name: d.name, main, module_file });
+                    common_modules.push(CommonModuleEntry { name: c.name, main, module_file });
                 }
-                listings.push((
-                    root_path.to_string_lossy().to_string(),
-                    entries,
-                    defined_types,
-                    common_modules,
-                ));
+                listings.push((d.root_string, entries, defined_types, common_modules));
             }
         }
 
@@ -873,31 +924,24 @@ impl GlobalState {
     }
 }
 
-/// Intern a metadata composing file's path to a stable [`FileId`] and add it to
-/// the metadata file set. When `must_read`, also read the file and record its
-/// on-disk content revision (returning `None` if the file cannot be read —
-/// discovered then vanished — so the caller drops it from the MDO); when not, the
-/// file keeps whatever revision it already has (an unchanged file on an
-/// incremental refresh). `alloc_file_id` is idempotent: an already-watched path
-/// keeps its id.
-fn enroll_metadata_file(
+/// Intern a metadata composing file (already read and hashed in the parallel pass)
+/// to a stable [`FileId`] and add it to the metadata file set, recording its
+/// pre-computed content revision. Returns `None` when the file is absent from
+/// `revisions_by_path` — it could not be read (discovered then vanished) — so the
+/// caller drops it from the MDO. `alloc_file_id` is idempotent: an already-watched
+/// path keeps its id. This runs under the vfs lock and does no I/O.
+fn intern_metadata_file(
     vfs: &mut vfs::Vfs,
     path: &Path,
-    must_read: bool,
+    revisions_by_path: &HashMap<PathBuf, u64>,
     file_set: &mut vfs::file_set::FileSet,
     revisions: &mut Vec<(FileId, u64)>,
 ) -> Option<FileId> {
+    let revision = *revisions_by_path.get(path)?;
     let vfs_path = VfsPath::new(path.to_path_buf());
-    let revision = if must_read {
-        Some(base_db::content_revision(&base_db::read_disk_text(path).ok()?))
-    } else {
-        None
-    };
     let file_id = vfs.alloc_file_id(vfs_path.clone());
     file_set.insert(file_id, vfs_path);
-    if let Some(revision) = revision {
-        revisions.push((file_id, revision));
-    }
+    revisions.push((file_id, revision));
     Some(file_id)
 }
 
