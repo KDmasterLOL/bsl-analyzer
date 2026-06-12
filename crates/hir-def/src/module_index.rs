@@ -74,6 +74,13 @@ impl ModuleIndex {
         self.common_modules.get(&name.as_str().fold_lower()).copied()
     }
 
+    /// Canonical (original-case) name of a common module, or `None` if no such module
+    /// is known. Used to give `ОбщийМодуль("имя")` a `TypeKind::CommonModule` whose name
+    /// is case-stable, so the same module never interns to two distinct types.
+    pub fn canonical_common_module_name(&self, name: &Name) -> Option<&str> {
+        self.common_modules_display.get(&name.as_str().fold_lower()).map(String::as_str)
+    }
+
     pub fn resolve_manager(&self, manager_type: ManagerType, name: &Name) -> Option<FileId> {
         self.managers.get(&(manager_type, name.as_str().fold_lower())).copied()
     }

@@ -95,6 +95,22 @@ impl ManagerFacet {
     }
 }
 
+/// A common module accessed as a value, e.g. `ОбщегоНазначения.ОбщийМодуль("Имя")`.
+/// `name` is the canonical (original-case) module name; member access resolves against
+/// the module's exported methods.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct CommonModuleFacet {
+    pub name: Name,
+    pub config_id: ConfigId,
+}
+
+impl CommonModuleFacet {
+    pub fn new(name: Name, config_id: ConfigId) -> Self {
+        Self { name, config_id }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum FormDataFacet {
     Structure,

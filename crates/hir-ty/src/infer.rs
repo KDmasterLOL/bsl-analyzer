@@ -278,11 +278,6 @@ pub struct InferenceContext<'db> {
     diagnostics: Vec<InferenceDiagnostic>,
 
     call_arg_bindings: Vec<CallArgBinding>,
-
-    /// var(lowercased) → common-module name for receivers obtained via
-    /// `ОбщегоНазначения[Клиент].ОбщийМодуль("Имя")`. Empty unless the diagnostic
-    /// rollout gate is enabled, so the lookup is a no-op by default.
-    common_module_var_bindings: FxHashMap<String, Name>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -449,11 +444,6 @@ impl<'db> InferenceContext<'db> {
             diagnostics: Vec::new(),
             call_arg_bindings: Vec::new(),
             return_expr_ids: Vec::new(),
-            common_module_var_bindings: if hir_def::common_module_ref::diagnostics_enabled() {
-                hir_def::common_module_ref::common_module_var_bindings(body)
-            } else {
-                FxHashMap::default()
-            },
         }
     }
 
@@ -484,6 +474,10 @@ impl<'db> InferenceContext<'db> {
 
     fn is_unknown(&self, id: TypeId) -> bool {
         id == self.db.unknown()
+    }
+
+    fn is_undefined(&self, id: TypeId) -> bool {
+        id == self.db.undefined()
     }
 
     pub fn finish(self) -> BodyInferenceResult {
@@ -1196,22 +1190,6 @@ impl<'db> InferenceContext<'db> {
             let base_id = ExprId::from_idx(*base);
             let method_name = field.clone();
 
-            // A receiver bound to `ОбщийМодуль("Имя")` resolves its methods against the
-            // named common module, regardless of the opaque declared return type of
-            // `ОбщийМодуль`. The map is empty unless the rollout gate is enabled.
-            if !self.common_module_var_bindings.is_empty() {
-                let bound_module = if let Expr::Path(path_name) = self.body.expr(base_id) {
-                    self.common_module_var_bindings.get(&path_name.as_str().fold_lower()).cloned()
-                } else {
-                    None
-                };
-                if let Some(module) = bound_module {
-                    let return_ty = self.infer_qualified_call(&module, &method_name, args, callee);
-                    self.expr_types.insert(callee, self.db.unknown());
-                    return return_ty;
-                }
-            }
-
             let receiver_ty = self.infer_expr(base_id);
 
             if self.is_unknown(receiver_ty) {
@@ -1234,6 +1212,12 @@ impl<'db> InferenceContext<'db> {
                 crate::this_object::coerce_to_metadata_ref_id(self.db, receiver_ty)
                     .unwrap_or(receiver_ty);
             let workspace_receiver_kind = self.db.lookup_type(workspace_receiver_ty);
+            if let TypeKind::CommonModule(facet) = &workspace_receiver_kind {
+                let module = hir_def::Name::new(&facet.name);
+                let return_ty = self.infer_qualified_call(&module, &method_name, args, callee);
+                self.expr_types.insert(callee, self.db.unknown());
+                return return_ty;
+            }
             if let TypeKind::MetadataRef(facet) = workspace_receiver_kind {
                 let kind = facet.kind;
                 let mdo_name = hir_def::Name::new(&facet.name);
@@ -1701,6 +1685,21 @@ impl<'db> InferenceContext<'db> {
                     ParamsShape::Single(resolution.signature.params.iter().copied().collect()),
                 );
 
+                // `ОбщегоНазначения.ОбщийМодуль("Имя")` returns the named common module as a
+                // value. Its own inferred return is uninformative — `Unknown` from `Вычислить`,
+                // or `Undefined` because the real БСП body has an `Иначе Модуль = Неопределено`
+                // arm that wins under flow-insensitive typing. Narrowing on either gives the
+                // receiver a `CommonModule` type for member resolution / hover / completion,
+                // without overriding a method that declares a genuinely useful return type.
+                if (self.is_unknown(resolution.return_type)
+                    || self.is_undefined(resolution.return_type))
+                    && method_name.as_str().fold_lower() == "общиймодуль"
+                {
+                    if let Some(ty) = self.common_module_type_from_args(args) {
+                        return ty;
+                    }
+                }
+
                 resolution.return_type
             }
             Err(kind) => {
@@ -1737,6 +1736,32 @@ impl<'db> InferenceContext<'db> {
                 self.db.unknown()
             }
         }
+    }
+
+    /// Type of `ОбщийМодуль("Имя")` when the single argument is a plain (non-dotted) string
+    /// literal naming a known common module: `Some(CommonModule{canonical_name})`. The dotted
+    /// form (`"Справочники.Имя"`, a manager) and unknown names return `None`.
+    fn common_module_type_from_args(&self, args: &[ExprId]) -> Option<TypeId> {
+        let [arg] = args else {
+            return None;
+        };
+        let Expr::Literal(Literal::String(literal)) = self.body.expr(*arg) else {
+            return None;
+        };
+        if literal.contains('.') {
+            return None;
+        }
+        let name = Name::new(literal);
+        // Only narrow to a module visible from this file's configuration — the same guard the
+        // resolver applies, so the type and later member resolution agree on one module rather
+        // than typing against a source-root sibling hidden in the current config.
+        if !self.get_resolver().user_common_module_exists(self.db, &name) {
+            return None;
+        }
+        let source_root_id = self.db.file_source_root_input(self.file_id).source_root_id(self.db);
+        let module_index = self.db.module_index(source_root_id);
+        let canonical = module_index.canonical_common_module_name(&name)?;
+        Some(self.db.common_module(canonical.to_string(), ConfigId::Root))
     }
 
     fn dispatch_bare_ident_field_call(

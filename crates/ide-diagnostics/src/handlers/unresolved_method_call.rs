@@ -124,17 +124,15 @@ mod tests {
         );
     }
 
-    // Common-module-by-name rollout (`BSL_COMMON_MODULE_BY_NAME`): run with the env set,
-    //   BSL_COMMON_MODULE_BY_NAME=1 cargo test -p ide-diagnostics -- --ignored common_module_by_name
-    // Two-file fixtures (the harness analyses the last file by hash order; a self-referential
-    // module name keeps it to two files, like the tests above).
+    // `Перем = ОбщегоНазначения.ОбщийМодуль("Имя")` types `Перем` as the named common module,
+    // so member calls resolve against it. Two-file fixtures (the harness analyses the last file
+    // by hash order; a self-referential module name keeps it to two files, like the tests above).
     #[test]
-    #[ignore = "gated on BSL_COMMON_MODULE_BY_NAME; run with env set"]
     fn common_module_by_name_missing_method_fires() {
         let fixture = r#"
 //- /CommonModules/ОбщегоНазначения/Ext/Module.bsl
 Функция ОбщийМодуль(Имя) Экспорт
-    Возврат Неопределено;
+    Возврат Имя;
 КонецФункции
 
 //- /test.bsl
@@ -155,12 +153,11 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "gated on BSL_COMMON_MODULE_BY_NAME; run with env set"]
     fn common_module_by_name_existing_method_silent() {
         let fixture = r#"
 //- /CommonModules/ОбщегоНазначения/Ext/Module.bsl
 Функция ОбщийМодуль(Имя) Экспорт
-    Возврат Неопределено;
+    Возврат Имя;
 КонецФункции
 
 //- /test.bsl

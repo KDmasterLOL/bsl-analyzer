@@ -3,8 +3,8 @@ use std::sync::Arc;
 use bsl_metadata::Name;
 
 use crate::facet::{
-    ArrayFacet, DateFacet, FormBindingFacet, FormDataFacet, FormElementFacet, FunctionFacet,
-    ManagerFacet, MapFacet, MdoRefFacet, MetaObjFacet, MetaRefFacet, NumberFacet,
+    ArrayFacet, CommonModuleFacet, DateFacet, FormBindingFacet, FormDataFacet, FormElementFacet,
+    FunctionFacet, ManagerFacet, MapFacet, MdoRefFacet, MetaObjFacet, MetaRefFacet, NumberFacet,
     PlatformObjectFacet, ProjectionFacet, ProjectionSource, StringFacet, StructureFacet,
     TableFacet, TableSource,
 };
@@ -189,6 +189,10 @@ pub trait Builders: TypeKernelDb {
 
     fn mk_this_manager(&self, config_id: ConfigId, owner: MdoRefFacet) -> TypeId {
         self.intern_type(TypeKind::ThisManager { config_id, owner })
+    }
+
+    fn common_module(&self, name: Name, config_id: ConfigId) -> TypeId {
+        self.intern_type(TypeKind::CommonModule(CommonModuleFacet { name, config_id }))
     }
 
     fn platform_object(&self, name: Name) -> TypeId {

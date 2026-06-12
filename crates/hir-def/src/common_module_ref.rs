@@ -115,17 +115,6 @@ pub fn common_module_var_bindings(body: &Body) -> FxHashMap<String, Name> {
         .collect()
 }
 
-/// Rollout gate for the **inference-side diagnostic** only (the call graph consumes the
-/// resolver unconditionally, since resolved edges are a pure improvement). Emitting a new
-/// `UnresolvedMethodCall` class on every workspace is a user-visible change held behind an
-/// env flag until the rollout decision is made.
-pub fn diagnostics_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("BSL_COMMON_MODULE_BY_NAME").is_ok_and(|v| !v.is_empty() && v != "0")
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

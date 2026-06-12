@@ -70,6 +70,15 @@ pub(super) fn platform_completions<DB: RootDatabase>(
 
     tracing::debug!(receiver_id = ?receiver_id, "Resolved receiver type");
 
+    // A variable typed as a common module (e.g. `М = ОбщегоНазначения.ОбщийМодуль("Имя")`)
+    // completes against that module's exported methods. The name-keyed fast path above only
+    // fires for a bare module identifier, not for such a variable.
+    if let TypeKind::CommonModule(facet) = db.lookup_type(receiver_id) {
+        if let Some(items) = complete_common_module_methods(db, &position, &facet.name) {
+            return Some(apply_prefix_filter(items, &prefix, db));
+        }
+    }
+
     if let Some(items) =
         complete_prefix_methods_for_receiver(db, receiver_id, position.file_id, position.locale)
     {
