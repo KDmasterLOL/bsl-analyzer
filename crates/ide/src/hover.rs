@@ -9,6 +9,7 @@ use hir::{
 };
 use ide_db::base_db::Locale;
 use ide_db::RootDatabase;
+use stdx::case::CaseExt;
 use symbol_info::{from_global_function, from_platform_method, render_hover_markdown, Lang};
 use syntax::{SyntaxNode, SyntaxToken, TextRange, TextSize};
 use vfs::FileId;
@@ -106,10 +107,10 @@ fn mdo_field_on_id<DB: RootDatabase>(
     receiver: TypeId,
     field_name: &str,
 ) -> Option<Field> {
-    let needle = field_name.to_lowercase();
+    let needle = field_name.fold_lower();
     HirType::from_id(db, file_id, receiver).fields().into_iter().find(|field| {
-        field.name.as_str().to_lowercase() == needle
-            || field.english_name.as_str().to_lowercase() == needle
+        field.name.as_str().fold_lower() == needle
+            || field.english_name.as_str().fold_lower() == needle
     })
 }
 

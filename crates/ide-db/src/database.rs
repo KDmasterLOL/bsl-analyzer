@@ -1,6 +1,7 @@
 use std::hash::BuildHasherDefault;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use stdx::case::CaseExt;
 
 use dashmap::DashMap;
 use rustc_hash::FxHasher;
@@ -29,6 +30,10 @@ pub struct RootDatabaseImpl {
     files: Files,
 
     workspace_configs_input: parking_lot::RwLock<Option<metadata::WorkspaceConfigsInput>>,
+
+    /// Boot gate for the whole-configuration loader; see
+    /// [`metadata::WorkspaceLoadStateInput`]. Defaults to `true` (complete).
+    workspace_load_state: parking_lot::RwLock<Option<metadata::WorkspaceLoadStateInput>>,
 
     /// Per-config-root revision inputs, keyed by the canonical root path. Shared
     /// across cloned database handles (snapshots) so every handle reads and bumps
@@ -88,6 +93,7 @@ impl Clone for RootDatabaseImpl {
             storage: self.storage.clone(),
             files: self.files.clone(),
             workspace_configs_input: parking_lot::RwLock::new(*self.workspace_configs_input.read()),
+            workspace_load_state: parking_lot::RwLock::new(*self.workspace_load_state.read()),
             config_revisions: Arc::clone(&self.config_revisions),
             metadata_listings: Arc::clone(&self.metadata_listings),
             global_config_revision: parking_lot::RwLock::new(*self.global_config_revision.read()),
@@ -108,6 +114,7 @@ impl RootDatabaseImpl {
             storage: salsa::Storage::default(),
             files: Files::new(),
             workspace_configs_input: parking_lot::RwLock::new(None),
+            workspace_load_state: parking_lot::RwLock::new(None),
             config_revisions: Arc::new(DashMap::default()),
             metadata_listings: Arc::new(DashMap::default()),
             global_config_revision: parking_lot::RwLock::new(None),
@@ -118,6 +125,8 @@ impl RootDatabaseImpl {
         };
         let input = metadata::WorkspaceConfigsInput::new(&db, Vec::new());
         *db.workspace_configs_input.write() = Some(input);
+        let load_state = metadata::WorkspaceLoadStateInput::new(&db, true);
+        *db.workspace_load_state.write() = Some(load_state);
         let global_config_revision = metadata::ConfigRevisionInput::new(&db, 0);
         *db.global_config_revision.write() = Some(global_config_revision);
         let defaults = project_model::FeaturesConfig::default();
@@ -212,6 +221,26 @@ impl RootDatabaseImpl {
 
     pub fn workspace_configs_input(&self) -> metadata::WorkspaceConfigsInput {
         self.workspace_configs()
+    }
+
+    fn workspace_load_state(&self) -> metadata::WorkspaceLoadStateInput {
+        self.workspace_load_state
+            .read()
+            .expect("workspace_load_state is initialized in RootDatabaseImpl::new")
+    }
+
+    /// Whether the host's initial workspace load has completed; see
+    /// [`metadata::WorkspaceLoadStateInput`]. Reading it inside a tracked query
+    /// records a dependency, so the finalize flip recomputes whatever resolved
+    /// against the boot-window stub.
+    pub fn workspace_load_complete(&self) -> bool {
+        self.workspace_load_state().complete(self)
+    }
+
+    pub fn set_workspace_load_complete(&mut self, complete: bool) {
+        use salsa::Setter;
+        let input = self.workspace_load_state();
+        input.set_complete(self).to(complete);
     }
 
     fn global_config_revision_input(&self) -> metadata::ConfigRevisionInput {
@@ -665,7 +694,7 @@ impl RootDatabaseImpl {
         }
 
         let file_path = vfs_helpers::get_file_path(self, module_file_id)?;
-        let file_path_lower = file_path.to_string_lossy().to_lowercase();
+        let file_path_lower = file_path.to_string_lossy().fold_lower();
         let paths = RootDatabaseImpl::all_config_paths(self);
 
         let load_at = |path: &std::path::Path| -> Arc<bsl_metadata::Configuration> {
@@ -679,12 +708,12 @@ impl RootDatabaseImpl {
 
         let find_in = |root: &std::path::Path| -> Option<Arc<bsl_metadata::CommonModule>> {
             let config = load_at(root);
-            // `root.join(uri).to_lowercase() == file_path_lower` reduces to a relative
+            // `root.join(uri).fold_lower() == file_path_lower` reduces to a relative
             // lookup: strip the (lowercased) root prefix and match the module's folded
             // root-relative URI, so the O(all-modules) per-call Cyrillic re-fold is gone.
             // The separator between root and remainder is mandatory so a sibling whose
             // name merely starts with the root (`/cfg` vs `/cfgX`) is not a false match.
-            let root_lower = root.to_string_lossy().to_lowercase();
+            let root_lower = root.to_string_lossy().fold_lower();
             let root_lower = root_lower.strip_suffix(['/', '\\']).unwrap_or(&root_lower);
             let rel = file_path_lower.strip_prefix(root_lower)?.strip_prefix(['/', '\\'])?;
             config.find_common_module_by_uri_lower(rel).cloned().map(Arc::new)
@@ -1368,6 +1397,17 @@ impl metadata::MetadataDb for RootDatabaseImpl {
         &'db self,
         path_input: metadata::ConfigurationPathInput<'db>,
     ) -> Arc<bsl_metadata::Configuration> {
+        // Boot gate: while the initial workspace load streams in, the full-config
+        // XML parse must not run — it is minutes of non-cancellable work inside a
+        // single query, against metadata the VFS has not finished delivering. An
+        // empty configuration resolves nothing, which is the correct boot-window
+        // answer; the input read records a dependency on the calling query, so
+        // the finalize flip recomputes everything resolved against this stub.
+        if !self.workspace_load_complete() {
+            tracing::debug!("workspace load incomplete; whole-config load gated to empty");
+            return Arc::new(bsl_metadata::Configuration::new("Configuration"));
+        }
+
         let Some(cache) = &self.graph_config_cache else {
             return metadata::load_configuration(self, path_input);
         };

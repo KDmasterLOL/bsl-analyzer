@@ -3,15 +3,14 @@ use std::{
     path::{Component, Path},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc,
+        Arc, OnceLock,
     },
     time::Instant,
 };
 
-use crossbeam_channel::{select, unbounded, Receiver, Sender};
+use crossbeam_channel::{bounded, select, unbounded, Receiver, Sender, TrySendError};
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use paths::{AbsPath, AbsPathBuf, Utf8PathBuf};
-use rayon::iter::{IndexedParallelIterator as _, IntoParallelIterator as _, ParallelIterator};
 use rustc_hash::FxHashSet;
 use vfs::loader::{self, LoadingProgress};
 use walkdir::WalkDir;
@@ -19,6 +18,44 @@ use walkdir::WalkDir;
 const LOADED_CHUNK_BYTES: usize = 64 * 1024 * 1024;
 
 const WATCH_ONLY_CHUNK_PATHS: usize = 4096;
+
+/// Env override for the directory-scan reader pool size (see [`reader_count`]).
+const READERS_ENV: &str = "BSL_VFS_READERS";
+
+/// Bound on paths queued to the reader pool. A path is a cheap `AbsPathBuf`; a
+/// generous queue keeps readers fed past short walk stalls without unbounded
+/// memory. The loader drains a result whenever this fills (backpressure).
+const READER_PATHS_BOUND: usize = 512;
+
+/// Bound on read results buffered back from the pool. Each is `(path, bytes)`;
+/// at ~57 KB average that caps in-flight read memory at ~15 MB plus outliers,
+/// on top of the single 64 MB chunk buffer the loader accumulates.
+const READER_RESULTS_BOUND: usize = 256;
+
+/// Number of reader threads for a directory scan: `available_parallelism`
+/// clamped to `[2, 8]`, overridable via `BSL_VFS_READERS`. These are dedicated
+/// `std`/`stdx` threads, never the global rayon pool — a pool thread parked on
+/// the bounded loader channel is a work-stealing deadlock window (see the
+/// comment in `NotifyActor::run`).
+fn reader_count() -> usize {
+    static CACHED: OnceLock<usize> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        if let Ok(raw) = std::env::var(READERS_ENV) {
+            match raw.parse::<usize>() {
+                Ok(parsed) => {
+                    let clamped = parsed.clamp(1, 32);
+                    tracing::info!(readers = clamped, raw = %raw, "Resolved BSL_VFS_READERS");
+                    return clamped;
+                }
+                Err(_) => tracing::warn!(
+                    raw = %raw,
+                    "BSL_VFS_READERS is not a valid usize; falling back to default",
+                ),
+            }
+        }
+        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2).clamp(2, 8)
+    })
+}
 
 #[derive(Debug)]
 pub struct NotifyHandle {
@@ -188,9 +225,19 @@ impl NotifyActor {
 
                         let load_start = Instant::now();
                         let shutdown: &AtomicBool = self.shutdown.as_ref();
-                        config.load.into_par_iter().enumerate().for_each(|(i, entry)| {
+                        // Entries load sequentially on this dedicated thread, NOT
+                        // on the global rayon pool. These loads block on the
+                        // bounded loader channel (backpressure against the
+                        // consumer's event loop), and a pool thread parked in such
+                        // a send is a deadlock window: a rayon wait elsewhere in
+                        // the process (e.g. the metadata loader's scope inside a
+                        // Salsa query) can steal the load task and park a thread
+                        // whose db clone that same event loop is waiting on. There
+                        // are only one or two entries (the workspace walk plus
+                        // config files), so entry-level parallelism bought nothing.
+                        for (i, entry) in config.load.into_iter().enumerate() {
                             if shutdown.load(Ordering::Relaxed) {
-                                return;
+                                break;
                             }
                             let do_watch = config.watch.contains(&i);
                             if do_watch {
@@ -241,7 +288,7 @@ impl NotifyActor {
                                 WATCH_ONLY_CHUNK_PATHS,
                                 shutdown,
                             );
-                        });
+                        }
 
                         tracing::info!(
                             n_total,
@@ -378,9 +425,54 @@ impl NotifyActor {
                 }
             }
             loader::Entry::Directories(dirs) => {
-                for root in &dirs.include {
+                // A scan-owned pool of dedicated reader threads turns the
+                // sequential per-file `read` into parallel I/O. The walk stays on
+                // this loader thread (it warms dentries and the mixed
+                // walk+read pipeline is walk-bound); only the `read` syscalls fan
+                // out. The pool is created here and joined before this arm
+                // returns, so readers never outlive their scan — a repeat
+                // `Message::Config` (processed only after this returns) and a
+                // shutdown both leave no stragglers.
+                let readers = reader_count();
+                let (paths_tx, paths_rx) = bounded::<AbsPathBuf>(READER_PATHS_BOUND);
+                let (results_tx, results_rx) =
+                    bounded::<(AbsPathBuf, Option<Vec<u8>>)>(READER_RESULTS_BOUND);
+                let mut handles = Vec::with_capacity(readers);
+                for i in 0..readers {
+                    let paths_rx = paths_rx.clone();
+                    let results_tx = results_tx.clone();
+                    let handle = stdx::thread::Builder::new(
+                        stdx::thread::ThreadIntent::Worker,
+                        format!("VfsReader{i}"),
+                    )
+                    .spawn(move || {
+                        // Read until the loader drops `paths_tx` (scan done) or the
+                        // results channel disconnects (loader gone). No other
+                        // side effects: the reader never touches the loader
+                        // channel, only this private results channel.
+                        while let Ok(path) = paths_rx.recv() {
+                            let contents = read(path.as_path());
+                            if results_tx.send((path, contents)).is_err() {
+                                break;
+                            }
+                        }
+                    })
+                    .expect("failed to spawn vfs reader thread");
+                    handles.push(handle);
+                }
+                // The loader keeps only the producing end of `paths` and the
+                // consuming end of `results`; dropping the others lets the
+                // channels disconnect once the readers exit, terminating the
+                // drain loop below.
+                drop(paths_rx);
+                drop(results_tx);
+
+                let mut submitted: usize = 0;
+                let mut delivered: usize = 0;
+
+                'walk: for root in &dirs.include {
                     if shutdown.load(Ordering::Relaxed) {
-                        return;
+                        break 'walk;
                     }
                     if do_watch {
                         watch(root.as_ref());
@@ -433,19 +525,61 @@ impl NotifyActor {
 
                     for (file, mode) in files {
                         if shutdown.load(Ordering::Relaxed) {
-                            return;
+                            break 'walk;
                         }
-                        on_file_loaded();
                         match mode {
                             loader::LoadMode::LoadContent => {
-                                let contents = read(file.as_path());
-                                push_loaded(file, contents);
+                                // Hand the path to the pool. On a full queue, the
+                                // loader (not a reader) drains one finished read —
+                                // this is the only place `push_loaded` runs, so
+                                // the blocking loader-channel send always stays on
+                                // this thread, and the in-flight memory is bounded.
+                                let mut file = file;
+                                loop {
+                                    match paths_tx.try_send(file) {
+                                        Ok(()) => {
+                                            submitted += 1;
+                                            break;
+                                        }
+                                        Err(TrySendError::Full(f)) => {
+                                            match results_rx.recv() {
+                                                Ok((path, contents)) => {
+                                                    on_file_loaded();
+                                                    push_loaded(path, contents);
+                                                    delivered += 1;
+                                                }
+                                                // Readers vanished — abandon the
+                                                // scan; the drain below joins them.
+                                                Err(_) => break 'walk,
+                                            }
+                                            file = f;
+                                        }
+                                        Err(TrySendError::Disconnected(_)) => break 'walk,
+                                    }
+                                }
                             }
                             loader::LoadMode::WatchOnly => {
+                                on_file_loaded();
                                 push_watch_only(file);
                             }
                         }
                     }
+                }
+
+                // Stop submitting and drain every in-flight read. Draining to
+                // disconnect (not to a submitted==delivered count) keeps a reader
+                // blocked on a full results channel from hanging the join on an
+                // aborted scan; once `paths_tx` is dropped the readers finish the
+                // queue, emit their last results, and exit.
+                drop(paths_tx);
+                while let Ok((path, contents)) = results_rx.recv() {
+                    on_file_loaded();
+                    push_loaded(path, contents);
+                    delivered += 1;
+                }
+                debug_assert_eq!(submitted, delivered, "every queued read must be delivered once");
+                for handle in handles {
+                    let () = handle.join();
                 }
             }
         }
@@ -718,6 +852,134 @@ mod tests {
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].len(), 1);
         assert_eq!(chunks[0][0].1, 8 * 1024);
+    }
+
+    #[test]
+    fn parallel_pool_delivers_every_file_exactly_once() {
+        // With N>1 readers, every walked file must be delivered once: no loss,
+        // no duplication, regardless of read-completion order.
+        let (_guard, dirs) = fixture(500, 64);
+        let chunks = run(dirs, 1024 * 1024);
+        let all: Vec<AbsPathBuf> = chunks.into_iter().flatten().map(|(p, _)| p).collect();
+        let unique: std::collections::HashSet<AbsPathBuf> = all.iter().cloned().collect();
+        assert_eq!(all.len(), 500, "each file must be delivered exactly once");
+        assert_eq!(unique.len(), 500, "all 500 distinct files must be delivered");
+    }
+
+    #[test]
+    fn slow_consumer_backpressure_does_not_deadlock() {
+        // A consumer that sleeps on every `send_loaded` parks the loader while
+        // readers fill the bounded results channel; the loader must keep draining
+        // and still deliver every file (backpressure smoke test).
+        let (_guard, dirs) = fixture(300, 4 * 1024);
+        let shutdown = AtomicBool::new(false);
+        let delivered = Mutex::new(0usize);
+        NotifyActor::load_entry(
+            |_| {},
+            loader::Entry::Directories(dirs),
+            false,
+            |_| {},
+            || {},
+            |files| {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                *delivered.lock().unwrap() += files.len();
+            },
+            8 * 1024,
+            |_| {},
+            WATCH_ONLY_CHUNK_PATHS,
+            &shutdown,
+        );
+        assert_eq!(*delivered.lock().unwrap(), 300, "every file delivered despite slow consumer");
+    }
+
+    #[test]
+    fn shutdown_midscan_joins_readers_without_hang() {
+        // Flipping the shutdown latch partway through the scan must terminate the
+        // walk, drain in-flight reads, and join the reader pool (reaching the
+        // assertion at all proves the join did not hang). The aborted scan
+        // suppresses the tail flush, so not all files are delivered.
+        let (_guard, dirs) = fixture(500, 64);
+        let shutdown = AtomicBool::new(false);
+        let seen = AtomicUsize::new(0);
+        let delivered = Mutex::new(0usize);
+        NotifyActor::load_entry(
+            |_| {},
+            loader::Entry::Directories(dirs),
+            false,
+            |_| {},
+            || {
+                if seen.fetch_add(1, Ordering::AcqRel) + 1 >= 10 {
+                    shutdown.store(true, Ordering::Release);
+                }
+            },
+            |files| {
+                *delivered.lock().unwrap() += files.len();
+            },
+            1024 * 1024,
+            |_| {},
+            WATCH_ONLY_CHUNK_PATHS,
+            &shutdown,
+        );
+        assert!(*delivered.lock().unwrap() <= 500);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_file_is_delivered_as_none() {
+        // A file that exists at walk time but whose bytes cannot be read (here a
+        // 0o000 file) is delivered with `None` contents, so the consumer can
+        // degrade it rather than the read being silently dropped.
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let readable = dir.path().join("ok.txt");
+        std::fs::write(&readable, b"hello").expect("write readable");
+        let blocked = dir.path().join("blocked.txt");
+        std::fs::write(&blocked, b"secret").expect("write blocked");
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000))
+            .expect("chmod 000");
+
+        // Root bypasses permission bits — if we can still read it, skip.
+        if std::fs::read(&blocked).is_ok() {
+            let _ = std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o644));
+            return;
+        }
+
+        let abs_root = AbsPathBuf::assert_utf8(dir.path().to_path_buf());
+        let dirs = loader::Directories {
+            extensions: vec!["txt".to_string()],
+            include: vec![abs_root],
+            exclude: vec![],
+            rules: Vec::new(),
+        };
+
+        let shutdown = AtomicBool::new(false);
+        let loaded: Mutex<Vec<(AbsPathBuf, Option<usize>)>> = Mutex::new(Vec::new());
+        NotifyActor::load_entry(
+            |_| {},
+            loader::Entry::Directories(dirs),
+            false,
+            |_| {},
+            || {},
+            |files| {
+                let mut g = loaded.lock().unwrap();
+                for (p, c) in files {
+                    g.push((p, c.map(|v| v.len())));
+                }
+            },
+            1024 * 1024,
+            |_| {},
+            WATCH_ONLY_CHUNK_PATHS,
+            &shutdown,
+        );
+
+        let _ = std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o644));
+
+        let loaded = loaded.into_inner().unwrap();
+        let find =
+            |name: &str| loaded.iter().find(|(p, _)| p.file_name() == Some(name)).map(|(_, c)| *c);
+        assert_eq!(find("ok.txt"), Some(Some(5)), "readable file delivers its bytes");
+        assert_eq!(find("blocked.txt"), Some(None), "unreadable file delivers None");
     }
 
     fn fixture_mixed(

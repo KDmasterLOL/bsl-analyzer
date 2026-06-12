@@ -4,6 +4,7 @@ use hir_def::{
     hir::{Expr, Stmt},
     ExprId, IdConversion, Name,
 };
+use stdx::case::CaseExt;
 
 #[derive(Debug, Clone, Copy)]
 pub enum CalleeKey<'a> {
@@ -55,11 +56,11 @@ impl EffectSummary {
     }
 
     pub fn classify_global_call(name: &str) -> Self {
-        classify_global_call_lc(&name.to_lowercase())
+        classify_global_call_lc(&name.fold_lower())
     }
 
     pub fn classify_constructor(type_name: &str) -> Self {
-        classify_constructor_lc(&type_name.to_lowercase())
+        classify_constructor_lc(&type_name.fold_lower())
     }
 }
 
@@ -113,7 +114,7 @@ where
                 let callee_expr = body.expr(ExprId::from_idx(*callee));
                 let key = match callee_expr {
                     Expr::Path(name) => {
-                        let lc_name = name.as_str().to_lowercase();
+                        let lc_name = name.as_str().fold_lower();
                         let direct = classify_global_call_lc(&lc_name);
                         if !direct.is_empty() {
                             summary.join_in_place(&direct);
@@ -138,7 +139,7 @@ where
                 }
             }
             Expr::New { type_name: Some(name), .. } => {
-                let lc_name = name.as_str().to_lowercase();
+                let lc_name = name.as_str().fold_lower();
                 let bits = classify_constructor_lc(&lc_name);
                 summary.join_in_place(&bits);
             }

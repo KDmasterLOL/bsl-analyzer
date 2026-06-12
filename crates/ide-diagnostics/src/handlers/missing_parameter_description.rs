@@ -4,6 +4,7 @@ use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::{is_dotted_type_reference, ModItem};
 use ide_db::TextRange;
 use std::collections::HashMap;
+use stdx::case::CaseExt;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -138,7 +139,7 @@ fn check_parameter_descriptions(
     let mut duplicate_docs: Vec<&str> = Vec::new();
 
     for doc in param_docs {
-        let lower_name = doc.name.to_lowercase();
+        let lower_name = doc.name.fold_lower();
         if doc_map.contains_key(&lower_name) {
             duplicate_docs.push(&doc.name);
         } else {
@@ -152,7 +153,7 @@ fn check_parameter_descriptions(
 
     for param in params {
         let param_name = param.name.to_string();
-        let lower_name = param_name.to_lowercase();
+        let lower_name = param_name.fold_lower();
 
         if doc_map.contains_key(&lower_name) {
             if !allow_short {
@@ -173,7 +174,7 @@ fn check_parameter_descriptions(
 
     let mut extra_docs: Vec<_> = param_docs
         .iter()
-        .filter(|doc| !matched_docs.contains(&doc.name.to_lowercase()))
+        .filter(|doc| !matched_docs.contains(&doc.name.fold_lower()))
         .map(|doc| doc.name.as_str())
         .collect();
 
@@ -191,7 +192,7 @@ fn check_parameter_descriptions(
 
     if !has_missing_description {
         let signature_order: Vec<String> =
-            params.iter().map(|p| p.name.to_string().to_lowercase()).collect();
+            params.iter().map(|p| p.name.to_string().fold_lower()).collect();
 
         let doc_matched_order: Vec<_> =
             doc_order.iter().filter(|n| matched_docs.contains(n)).cloned().collect();

@@ -99,8 +99,11 @@ impl<'a> SdblPositionMapper<'a> {
         line_starts: &'a [usize],
         quote_corrections: Vec<(usize, usize)>,
     ) -> Self {
-        let (bsl_literal_line, bsl_literal_col) =
-            byte_offset_to_line_col(bsl_source, u32::from(bsl_literal_range.start()));
+        let (bsl_literal_line, bsl_literal_col) = byte_offset_to_line_col_fast(
+            bsl_source,
+            line_starts,
+            u32::from(bsl_literal_range.start()),
+        );
 
         let line_starts = line_starts.to_vec();
 

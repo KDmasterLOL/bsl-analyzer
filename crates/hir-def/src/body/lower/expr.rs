@@ -1,4 +1,5 @@
 use parser_error::{ParseError, RecoveryKind};
+use stdx::case::CaseExt;
 use syntax::ast_utils::field_tail_name_token;
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
@@ -77,7 +78,7 @@ fn lower_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> ExprIdx {
                 is_call_expr_callee, is_field_access_field, is_this_form_identifier,
             };
             if is_this_form_identifier(&text)
-                && !ctx.param_names.contains(&text.to_lowercase())
+                && !ctx.param_names.contains(&text.fold_lower())
                 && !is_call_expr_callee(node)
                 && !is_field_access_field(node)
             {
@@ -458,7 +459,7 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
             }
         }
 
-        let name_lower = name.to_lowercase();
+        let name_lower = name.fold_lower();
         if (name_lower == "eval" || name_lower == "вычислить") && !ctx.is_client_only {
             ctx.diagnostics.push(BodyDiagnostic::ExecuteExternalCode { range: node.text_range() });
         }
@@ -516,7 +517,7 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
             });
         }
 
-        let name_lower = name.to_lowercase();
+        let name_lower = name.fold_lower();
         if !ctx.local_vars.contains_key(&name_lower) && !ctx.param_names.contains(&name_lower) {
             ctx.diagnostics.push(BodyDiagnostic::DeprecatedMethodCall {
                 callee: name,
@@ -560,7 +561,7 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
         if idents.len() == 2 {
             let module_name = idents[0].text();
             let method_name_str = idents[1].text();
-            let key = module_name.to_lowercase();
+            let key = module_name.fold_lower();
 
             if !ctx.local_vars.contains_key(&key) && !ctx.param_names.contains(&key) {
                 ctx.external_refs.push(crate::body::ExternalRef::QualifiedCall {
@@ -642,7 +643,7 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
             .filter(|tok| matches!(tok.kind(), SyntaxKind::IDENT | SyntaxKind::KW_EXECUTE))
             .last()
         {
-            let method_name = method_token.text().to_lowercase();
+            let method_name = method_token.text().fold_lower();
             if matches!(method_name.as_str(), "execute" | "выполнить") {
                 let receiver = match ctx.body.expr_idx(callee) {
                     Expr::Field { base, .. } => Some(*base),
@@ -712,7 +713,7 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
             .filter(|tok| tok.kind() == SyntaxKind::IDENT)
             .last()
         {
-            let method_name = method_token.text().to_lowercase();
+            let method_name = method_token.text().fold_lower();
             if matches!(method_name.as_str(), "delete" | "удалить") {
                 let receiver = match ctx.body.expr_idx(callee) {
                     Expr::Field { base, .. } => Some(*base),
@@ -741,7 +742,7 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
             .filter(|tok| tok.kind() == SyntaxKind::IDENT)
             .last()
         {
-            let method_name = method_token.text().to_lowercase();
+            let method_name = method_token.text().fold_lower();
             if matches!(method_name.as_str(), "insert" | "вставить" | "add" | "добавить")
             {
                 let receiver = match ctx.body.expr_idx(callee) {
@@ -828,7 +829,7 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
         let callee_name = actual_callee.text().to_string();
 
         let is_local = {
-            let key = callee_name.to_lowercase();
+            let key = callee_name.fold_lower();
             ctx.local_vars.contains_key(&key) || ctx.param_names.contains(&key)
         };
 
@@ -874,7 +875,7 @@ fn maybe_lower_as_qualified_call(
     match call_info {
         QualifiedCallInfo::TwoLevel { module } => {
             let is_this_object = {
-                let lower = module.to_lowercase();
+                let lower = module.fold_lower();
                 lower == "этотобъект" || lower == "thisobject"
             };
 
@@ -1085,7 +1086,7 @@ fn lower_field_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
         None
     });
     if let Some(ref base_name) = direct_base_name {
-        let lower = base_name.to_lowercase();
+        let lower = base_name.fold_lower();
         if lower == "этотобъект" || lower == "thisobject" {
             ctx.diagnostics.push(BodyDiagnostic::RedundantAccessToObject {
                 kind: RedundantAccessKind::ThisObject { prefix: base_name.clone() },
@@ -1140,7 +1141,7 @@ fn analyze_qualified_call(node: &SyntaxNode, ctx: &LoweringCtx) -> Option<Qualif
             .last()
             .map(|tok| tok.text().to_string())?;
 
-        let key = mdo_type.to_lowercase();
+        let key = mdo_type.fold_lower();
         if ctx.local_vars.contains_key(&key) || ctx.param_names.contains(&key) {
             return None;
         }
@@ -1171,7 +1172,7 @@ fn analyze_qualified_call(node: &SyntaxNode, ctx: &LoweringCtx) -> Option<Qualif
 
     let module = module_name?;
 
-    let key = module.to_lowercase();
+    let key = module.fold_lower();
     if ctx.local_vars.contains_key(&key) || ctx.param_names.contains(&key) {
         return None;
     }
@@ -1290,22 +1291,22 @@ fn is_file_system_type(name: &str) -> bool {
 }
 
 fn is_style_element_type(name: &str) -> bool {
-    let lower = name.to_lowercase();
+    let lower = name.fold_lower();
     matches!(lower.as_str(), "цвет" | "color" | "шрифт" | "font" | "рамка" | "border")
 }
 
 fn is_system_information_type(name: &str) -> bool {
-    let lower = name.to_lowercase();
+    let lower = name.fold_lower();
     matches!(lower.as_str(), "системнаяинформация" | "systeminfo")
 }
 
 fn is_unix_unavailable_type(name: &str) -> bool {
-    let lower = name.to_lowercase();
+    let lower = name.fold_lower();
     matches!(lower.as_str(), "comобъект" | "comobject" | "почта" | "mail")
 }
 
 fn is_write_log_event_method(name: &str) -> bool {
-    let lower = name.to_lowercase();
+    let lower = name.fold_lower();
     lower == "записьжурналарегистрации" || lower == "writelogevent"
 }
 
@@ -1381,7 +1382,7 @@ fn collect_arguments(arg_list: &SyntaxNode) -> Vec<Option<SyntaxNode>> {
 }
 
 fn has_error_log_level_value(arg: &SyntaxNode) -> bool {
-    let text = arg.text().to_string().to_lowercase();
+    let text = arg.text().to_string().fold_lower();
     if text.contains("уровеньжурналарегистрации") || text.contains("eventloglevel")
     {
         return text.contains("ошибка") || text.contains("error");
@@ -1390,7 +1391,7 @@ fn has_error_log_level_value(arg: &SyntaxNode) -> bool {
 }
 
 fn has_detail_error_description(arg: &SyntaxNode) -> bool {
-    let text = arg.text().to_string().to_lowercase();
+    let text = arg.text().to_string().fold_lower();
     (text.contains("подробноепредставлениеошибки") || text.contains("detailerrordescription"))
         && (text.contains("информацияобошибке") || text.contains("errorinfo"))
 }
@@ -1401,7 +1402,7 @@ fn resolve_comment_in_except_block(arg: &SyntaxNode, call_node: &SyntaxNode) -> 
     if var_name.is_empty() || !var_name.chars().all(|c| c.is_alphanumeric() || c == '_') {
         return None;
     }
-    let var_name = var_name.to_lowercase();
+    let var_name = var_name.fold_lower();
 
     let except_clause = call_node.ancestors().find(|n| n.kind() == SyntaxKind::EXCEPT_CLAUSE)?;
 
@@ -1413,9 +1414,9 @@ fn resolve_comment_in_except_block(arg: &SyntaxNode, call_node: &SyntaxNode) -> 
                 Some(n) => n,
                 None => continue,
             };
-            let lhs_name = lhs_node.text().to_string().trim().to_lowercase();
+            let lhs_name = lhs_node.text().to_string().trim().fold_lower();
             if lhs_name == var_name {
-                let rhs_text = child.text().to_string().to_lowercase();
+                let rhs_text = child.text().to_string().fold_lower();
                 let has_detail = (rhs_text.contains("подробноепредставлениеошибки")
                     || rhs_text.contains("detailerrordescription"))
                     && (rhs_text.contains("информацияобошибке") || rhs_text.contains("errorinfo"));
@@ -1451,12 +1452,12 @@ fn is_file_system_method(name: &str) -> bool {
 }
 
 fn is_form_data_to_value_method(name: &str) -> bool {
-    let lower = name.to_lowercase();
+    let lower = name.fold_lower();
     matches!(lower.as_str(), "данныеформывзначение" | "formdatatovalue")
 }
 
 fn is_get_form_method(name: &str) -> bool {
-    let lower = name.to_lowercase();
+    let lower = name.fold_lower();
     matches!(lower.as_str(), "получитьформу" | "getform")
 }
 
@@ -1479,7 +1480,7 @@ fn check_using_external_code_tools(
     let receiver_name = idents[0].text();
     let method_name = idents[1].text();
 
-    let receiver_key = receiver_name.to_lowercase();
+    let receiver_key = receiver_name.fold_lower();
     let is_local =
         ctx.local_vars.contains_key(&receiver_key) || ctx.param_names.contains(&receiver_key);
 
@@ -1493,7 +1494,7 @@ fn check_using_external_code_tools(
 }
 
 fn is_str_template_method(name: &str) -> bool {
-    let lower = name.to_lowercase();
+    let lower = name.fold_lower();
     matches!(lower.as_str(), "стршаблон" | "strtemplate")
 }
 
@@ -1629,7 +1630,7 @@ fn find_string_in_node(node: &SyntaxNode) -> Option<String> {
 }
 
 fn parse_manager_type(mdo_type: &str) -> Option<ManagerType> {
-    let lower = mdo_type.to_lowercase();
+    let lower = mdo_type.fold_lower();
     match lower.as_str() {
         "документы" | "documents" => Some(ManagerType::Documents),
         "справочники" | "catalogs" => Some(ManagerType::Catalogs),
@@ -1680,7 +1681,7 @@ fn determine_magic_number_context(token: &syntax::SyntaxToken) -> MagicNumberCon
                     .filter_map(|el| el.into_token())
                     .find(|tok| tok.kind() == SyntaxKind::IDENT)
                 {
-                    let name = type_name.text().to_lowercase();
+                    let name = type_name.text().fold_lower();
                     if name.contains("структура")
                         || name.contains("structure")
                         || name.contains("соответствие")
@@ -1708,7 +1709,7 @@ fn determine_magic_number_context(token: &syntax::SyntaxToken) -> MagicNumberCon
             SyntaxKind::CALL_STMT | SyntaxKind::CALL_EXPR => {
                 in_call = true;
                 if let Some(method_name) = find_method_name_for_magic_number(&current) {
-                    let name = method_name.to_lowercase();
+                    let name = method_name.fold_lower();
                     if name == "вставить" || name == "insert" {
                         return MagicNumberContext::InStructureInsert;
                     }

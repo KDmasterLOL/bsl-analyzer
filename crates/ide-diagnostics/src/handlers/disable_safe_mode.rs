@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use stdx::case::CaseExt;
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -75,7 +76,7 @@ fn emit_for_result(
 }
 
 fn get_message(method_name: &str) -> String {
-    let lower = method_name.to_lowercase();
+    let lower = method_name.fold_lower();
     match lower.as_str() {
         "установитьбезопасныйрежим" | "setsafemode" => {
             "Отключение безопасного режима создает уязвимость безопасности. \

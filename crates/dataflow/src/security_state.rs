@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use stdx::case::CaseExt;
 
 pub use bsl_platform::security::Category;
 
@@ -253,7 +254,7 @@ fn recognize_security_call(
     let Expr::Path(callee_name) = body.expr(ExprId::from_idx(*callee)) else {
         return None;
     };
-    let lc_name = callee_name.as_str().to_lowercase();
+    let lc_name = callee_name.as_str().fold_lower();
     let entry = registry().lookup_global_lc(&lc_name)?;
     if !matches!(entry.category, Category::PrivilegedMode | Category::SafeMode) {
         return None;

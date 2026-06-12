@@ -1,4 +1,5 @@
 use crate::completion::{CompletionItem, CompletionItemKind};
+use stdx::case::CaseExt;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SdblCompletionItem {
@@ -48,8 +49,8 @@ impl SdblCompletionItem {
         if prefix.is_empty() {
             return true;
         }
-        let prefix_lower = prefix.to_lowercase();
-        self.label.to_lowercase().starts_with(&prefix_lower)
+        let prefix_lower = prefix.fold_lower();
+        self.label.fold_lower().starts_with(&prefix_lower)
     }
 
     pub fn into_completion_item(self) -> CompletionItem {

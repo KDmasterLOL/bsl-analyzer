@@ -1,6 +1,7 @@
 use bsl_metadata::traits::MdObject;
 use bsl_metadata::CommonModule;
 use hir::ModuleMetadata;
+use stdx::case::CaseExt;
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 
@@ -72,7 +73,7 @@ pub fn check_common_module_name(
         return Vec::new();
     }
 
-    let name_lower = module.name().to_lowercase();
+    let name_lower = module.name().fold_lower();
     let contains_keyword = keywords.iter().any(|kw| name_lower.contains(kw));
 
     if contains_keyword == name_should_contain {

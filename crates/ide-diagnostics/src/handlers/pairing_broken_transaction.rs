@@ -5,6 +5,7 @@ use hir::cfg::{CfgEdgeType, CfgVertex, ControlFlowGraph, NodeIndex};
 use hir::{Body, BodySourceMap, Expr, ExprId, IdConversion, Stmt, StmtId};
 use ide_db::TextRange;
 use rustc_hash::{FxHashMap, FxHashSet};
+use stdx::case::CaseExt;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,
@@ -291,7 +292,7 @@ fn check_expr_transaction_call(
 }
 
 fn get_transaction_type(name: &str) -> Option<TransactionType> {
-    let lower = name.to_lowercase();
+    let lower = name.fold_lower();
     match lower.as_str() {
         "начатьтранзакцию" | "begintransaction" => Some(TransactionType::Begin),
         "зафиксироватьтранзакцию" | "committransaction" => {

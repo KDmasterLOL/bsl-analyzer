@@ -77,7 +77,7 @@ impl<'a> Parser<'a> {
 
     pub fn at_keyword(&self, text: &str) -> bool {
         if let Some(token) = self.tokens.get(self.pos) {
-            token.kind == TokenKind::Ident && token.text.to_lowercase() == text.to_lowercase()
+            token.kind == TokenKind::Ident && stdx::case::eq_ignore_case(&token.text, text)
         } else {
             false
         }

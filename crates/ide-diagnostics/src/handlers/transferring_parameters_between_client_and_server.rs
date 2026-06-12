@@ -4,6 +4,7 @@ use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::call_graph::{CallTarget, CallerId, EdgeKind};
 use hir::{AnnotationKind, Expr, IdConversion, Stmt};
 use rustc_hash::FxHashSet;
+use stdx::case::CaseExt;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -78,7 +79,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         let assigned_params = collect_assigned_params(body);
 
         for (param_idx, param) in by_ref_params {
-            let param_name_lower = param.name.as_str().to_lowercase();
+            let param_name_lower = param.name.as_str().fold_lower();
 
             if assigned_params.contains(&param_name_lower) {
                 continue;
@@ -146,7 +147,7 @@ fn collect_assigned_from_stmt(stmt: &Stmt, body: &hir::Body, assigned: &mut FxHa
         Stmt::Assign { target, .. } => {
             let target_id = hir::ExprId::from_idx(*target);
             if let Expr::Path(name) = body.expr(target_id) {
-                assigned.insert(name.as_str().to_lowercase());
+                assigned.insert(name.as_str().fold_lower());
             }
         }
         Stmt::If(if_stmt) => {

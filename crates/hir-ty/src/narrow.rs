@@ -3,6 +3,7 @@ use dataflow::{Lattice, Transfer};
 use hir_def::body::Body;
 use hir_def::hir::{BinaryOp, Expr, Literal, Stmt};
 use hir_def::{DefWithBodyId, ExprId, IdConversion, ModuleId, Name};
+use stdx::case::CaseExt;
 
 use bsl_types::builders::Builders;
 use bsl_types::facet::DateComponent;
@@ -406,7 +407,7 @@ fn is_array_kind(db: &dyn TypeKernelDb, id: TypeId) -> bool {
 }
 
 fn fold_name(n: &Name) -> Name {
-    Name::new(&n.as_str().to_lowercase())
+    Name::new(&n.as_str().fold_lower())
 }
 
 fn ty_difference(db: &dyn TypeKernelDb, base: TypeId, matched: TypeId) -> Box<[TypeId]> {

@@ -35,11 +35,11 @@ fn lookup_form_data_tabular_section_field(
         _ => return None,
     };
 
-    let needle = field_name.as_str().to_lowercase();
+    let needle = field_name.as_str();
     let mdo = resolver.resolve_metadata_object(mdo_type, mdo_name.as_str())?;
     let ts = mdo.tabular_sections.iter().find(|ts| {
-        ts.name().to_lowercase() == needle
-            || ts.name_en().is_some_and(|en| en.to_lowercase() == needle)
+        stdx::case::eq_ignore_case(ts.name(), needle)
+            || ts.name_en().is_some_and(|en| stdx::case::eq_ignore_case(en, needle))
     })?;
 
     let qualified = format!("{}.{}", mdo_name.as_str(), ts.name());
@@ -143,10 +143,10 @@ fn lookup_field_on_metadata_ref(
     effective_ty: TypeId,
     field_name: &Name,
 ) -> Option<FieldInfo> {
-    let needle = field_name.as_str().to_lowercase();
+    let needle = field_name.as_str();
     enumerate_fields_inner(db, resolver, effective_ty).into_iter().find(|f| {
-        f.name.as_str().to_lowercase() == needle
-            || f.name_en.as_ref().is_some_and(|en| en.as_str().to_lowercase() == needle)
+        stdx::case::eq_ignore_case(f.name.as_str(), needle)
+            || f.name_en.as_ref().is_some_and(|en| stdx::case::eq_ignore_case(en.as_str(), needle))
     })
 }
 
@@ -160,15 +160,17 @@ fn lookup_field_in_query_projection(
         TypeKind::ValueTableRow(facet) => facet.projection.clone()?,
         _ => return None,
     };
-    let needle = field_name.as_str().to_lowercase();
-    projection.fields.iter().find(|f| f.name.as_str().to_lowercase() == needle).map(|f| FieldInfo {
-        name: Name::new(f.name.as_str()),
-        name_en: None,
-        ty: f.ty,
-        value_ty: None,
-        is_readonly: true,
-        origin: crate::field_enum::FieldOrigin::UserAttribute,
-    })
+    let needle = field_name.as_str();
+    projection.fields.iter().find(|f| stdx::case::eq_ignore_case(f.name.as_str(), needle)).map(
+        |f| FieldInfo {
+            name: Name::new(f.name.as_str()),
+            name_en: None,
+            ty: f.ty,
+            value_ty: None,
+            is_readonly: true,
+            origin: crate::field_enum::FieldOrigin::UserAttribute,
+        },
+    )
 }
 
 fn lookup_field_via_platform_property(

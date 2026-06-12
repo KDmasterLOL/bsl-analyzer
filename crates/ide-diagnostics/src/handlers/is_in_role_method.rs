@@ -4,6 +4,7 @@ use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::{Expr, ExprId, IdConversion, Stmt};
 use ide_db::TextRange;
 use std::collections::HashSet;
+use stdx::case::CaseExt;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -101,7 +102,7 @@ impl<'a> IsInRoleChecker<'a> {
 
     fn handle_assignment(&mut self, target: ExprId, value: ExprId) {
         let var_name = if let Expr::Path(name) = self.body.expr(target) {
-            Some(name.as_str().to_lowercase())
+            Some(name.as_str().fold_lower())
         } else {
             None
         };
@@ -134,7 +135,7 @@ impl<'a> IsInRoleChecker<'a> {
         }
 
         if let Expr::Path(name) = self.body.expr(expr_id) {
-            let var_name = name.as_str().to_lowercase();
+            let var_name = name.as_str().fold_lower();
             if self.is_in_role_vars.contains(&var_name) && !has_protection {
                 if let Some(range) = self.source_map.expr_range(expr_id) {
                     self.diagnostics.push(create_diagnostic(range, self.code, self.ctx));
@@ -193,7 +194,7 @@ impl<'a> IsInRoleChecker<'a> {
             }
 
             Expr::Path(name) => {
-                let var_name = name.as_str().to_lowercase();
+                let var_name = name.as_str().fold_lower();
                 self.privileged_mode_vars.contains(&var_name)
             }
 
@@ -216,12 +217,12 @@ impl<'a> IsInRoleChecker<'a> {
 }
 
 fn is_is_in_role_method(name: &str) -> bool {
-    let lower = name.to_lowercase();
+    let lower = name.fold_lower();
     matches!(lower.as_str(), "рольдоступна" | "isinrole")
 }
 
 fn is_privileged_mode_method(name: &str) -> bool {
-    let lower = name.to_lowercase();
+    let lower = name.fold_lower();
     matches!(lower.as_str(), "привилегированныйрежим" | "privilegedmode")
 }
 

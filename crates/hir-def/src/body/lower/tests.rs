@@ -1,5 +1,6 @@
 use base_db::{RootQueryDb, SourceDatabase};
 use ide_db::RootDatabaseImpl;
+use stdx::case::CaseExt;
 use syntax::{SyntaxKind, SyntaxNode};
 use vfs::FileId;
 
@@ -397,7 +398,7 @@ fn recovery_lowers_bare_field_access_as_stmt_expr() {
     let base_id = match recovered_expr {
         Expr::Field { base, field } => {
             assert_eq!(
-                field.as_str().to_lowercase(),
+                field.as_str().fold_lower(),
                 "в",
                 "field name should round-trip through recovery",
             );
@@ -408,7 +409,7 @@ fn recovery_lowers_bare_field_access_as_stmt_expr() {
 
     let base_expr = result.body.expr_idx(base_id);
     match base_expr {
-        Expr::Path(name) => assert_eq!(name.as_str().to_lowercase(), "сп"),
+        Expr::Path(name) => assert_eq!(name.as_str().fold_lower(), "сп"),
         other => panic!("base should be Expr::Path, got {:?}", other),
     }
 

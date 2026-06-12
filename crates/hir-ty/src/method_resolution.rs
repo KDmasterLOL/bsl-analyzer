@@ -265,7 +265,7 @@ fn materialise_signature(db: &dyn TypeKernelDb, method_symbol: &MethodSymbol) ->
         .unwrap_or_else(|| if method_symbol.is_function { db.unknown() } else { db.undefined() });
 
     let max_args = Some(params.len() as u32);
-    FunctionSignature { params, defaults, ret, max_args }
+    FunctionSignature { params, defaults, ret, max_args, from_doc_comment: true }
 }
 
 pub(crate) fn materialise_signature_enriched(
@@ -299,6 +299,7 @@ mod tests {
             defaults: Box::new([false]),
             ret: db.number(None, None),
             max_args: Some(1),
+            from_doc_comment: true,
         };
 
         let resolution = MethodResolution::new(method_id, true, signature.clone());
@@ -318,6 +319,7 @@ mod tests {
             defaults: Box::new([]),
             ret: db.undefined(),
             max_args: Some(0),
+            from_doc_comment: true,
         };
 
         let resolution = MethodResolution::new(method_id, false, signature);

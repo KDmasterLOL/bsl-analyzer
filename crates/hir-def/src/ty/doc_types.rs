@@ -1,6 +1,7 @@
 use crate::path::QualifiedName;
 use crate::type_ref::TypeRef;
 use crate::Name;
+use stdx::case::CaseExt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MethodTypeHints {
@@ -27,7 +28,7 @@ pub fn parse_method_doc_types(doc_comment: &str) -> Option<MethodTypeHints> {
         let line = line.trim();
         let line = line.strip_prefix("//").unwrap_or(line).trim();
 
-        let line_lower = line.to_lowercase();
+        let line_lower = line.fold_lower();
 
         if is_params_header(&line_lower) {
             in_params_section = true;
@@ -168,6 +169,17 @@ fn parse_type_name(name: &str) -> TypeRef {
         return TypeRef::Unknown;
     }
 
+    // `См. Метод` / `See Method` is the 1C convention for "the type is the structure
+    // documented at that reference" — always a real type we cannot resolve cheaply.
+    // Lower to `Any` (the top type) rather than a phantom `См.Метод` nominal: a phantom
+    // resolves to `Unknown`, which the kernel drops from a union (`Неопределено | Unknown
+    // == Неопределено`), narrowing the param to the `Неопределено` default and flagging
+    // every real argument. `Any` dominates the union (`Неопределено | Any == Any`) so the
+    // param stays permissive.
+    if is_see_reference(trimmed) {
+        return TypeRef::Any;
+    }
+
     if trimmed.contains(',') {
         let members: Vec<TypeRef> = trimmed
             .split(',')
@@ -193,7 +205,7 @@ fn parse_type_name(name: &str) -> TypeRef {
         return tref;
     }
 
-    match trimmed.to_lowercase().as_str() {
+    match trimmed.fold_lower().as_str() {
         "произвольный" | "any" | "arbitrary" => return TypeRef::Any,
         _ => {}
     }
@@ -222,6 +234,12 @@ fn parse_type_name(name: &str) -> TypeRef {
     }
 }
 
+fn is_see_reference(s: &str) -> bool {
+    let s = s.trim_start();
+    let head_end = s.find([' ', '.']).unwrap_or(s.len());
+    matches!(s[..head_end].fold_lower().as_str(), "см" | "смотри" | "see")
+}
+
 fn is_identifier_like(s: &str) -> bool {
     let mut chars = s.chars();
     let Some(first) = chars.next() else {
@@ -231,8 +249,8 @@ fn is_identifier_like(s: &str) -> bool {
 }
 
 fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
-    let s_lower = s.to_lowercase();
-    let prefix_lower = prefix.to_lowercase();
+    let s_lower = s.fold_lower();
+    let prefix_lower = prefix.fold_lower();
 
     if !s_lower.starts_with(&prefix_lower) {
         return None;
@@ -745,6 +763,42 @@ mod tests {
                     "the invalid member must lower to Unknown (canonicalized away at the \
                      kernel level) instead of becoming a phantom that can never match"
                 );
+            }
+            other => panic!("expected TypeRef::Union, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_type_name_see_reference_becomes_any() {
+        assert_eq!(parse_type_name("См. НовыеПараметрыФормы"), TypeRef::Any);
+        assert_eq!(parse_type_name("см. ОбщегоНазначения.ОткрытьФорму.Параметры"), TypeRef::Any);
+        assert_eq!(parse_type_name("Смотри НовыеПараметрыФормы"), TypeRef::Any);
+        assert_eq!(parse_type_name("See SomeStructureConstructor"), TypeRef::Any);
+    }
+
+    #[test]
+    fn parse_type_name_see_marker_does_not_swallow_real_types() {
+        // A real type whose name merely starts with "См" must stay nominal.
+        assert!(matches!(parse_type_name("СметнаяСтрока"), TypeRef::Name(_)));
+        assert!(matches!(parse_type_name("Смещение"), TypeRef::Name(_)));
+    }
+
+    #[test]
+    fn param_undefined_plus_see_reference_stays_permissive() {
+        let doc = r#"
+// Параметры:
+//   ПараметрыФормы - Неопределено
+//                  - См. НовыеПараметрыФормы
+"#;
+        let hints = parse_method_doc_types(doc).unwrap();
+        assert_eq!(hints.params.len(), 1);
+        // `Неопределено | Any` canonicalises to a permissive type at the kernel level;
+        // the TypeRef union must carry the `Any` arm that drives that domination.
+        match &hints.params[0].1 {
+            TypeRef::Union(parts) => {
+                assert_eq!(parts.len(), 2);
+                assert_eq!(parts[0], TypeRef::Builtin(BuiltinTypeRef::Undefined));
+                assert_eq!(parts[1], TypeRef::Any);
             }
             other => panic!("expected TypeRef::Union, got {other:?}"),
         }

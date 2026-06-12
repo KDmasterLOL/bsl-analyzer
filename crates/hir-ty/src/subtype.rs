@@ -1,5 +1,6 @@
 use bsl_types::intern::TypeKernelDb;
 use bsl_types::kind::{MetadataKind, TypeId, TypeKind};
+use stdx::case::CaseExt;
 
 pub fn is_assignable(db: &dyn TypeKernelDb, from: TypeId, to: TypeId) -> bool {
     if from == to {
@@ -59,6 +60,20 @@ pub fn is_assignable(db: &dyn TypeKernelDb, from: TypeId, to: TypeId) -> bool {
 
     if is_platform_object_supertype_bridge(from_kind, to_kind) {
         return true;
+    }
+
+    // A specific common module is a `ОбщийМодуль` — the platform supertype of every common
+    // module, which carries no fixed interface of its own. Passing a concrete module where a
+    // `ОбщийМодуль` parameter is annotated (the SSL delegation idiom: a module handed to a
+    // client/server helper as the call source) is sound Liskov substitution.
+    if matches!(from_kind, TypeKind::CommonModule(_)) {
+        if let TypeKind::PlatformObject(facet) = to_kind {
+            if stdx::case::eq_ignore_case(&facet.name, "ОбщийМодуль")
+                || stdx::case::eq_ignore_case(&facet.name, "CommonModule")
+            {
+                return true;
+            }
+        }
     }
 
     if is_array_bridge(db, from_kind, to_kind) {
@@ -160,7 +175,7 @@ fn is_spreadsheet_area_bridge(from: &TypeKind, to: &TypeKind) -> bool {
 /// in arbitrary case; `eq_ignore_ascii_case` folds only ASCII, so Cyrillic
 /// names need the full Unicode lowercase fold.
 fn platform_name_eq_ci(actual: &str, ru: &str, en: &str) -> bool {
-    actual.eq_ignore_ascii_case(en) || actual.to_lowercase() == ru.to_lowercase()
+    actual.eq_ignore_ascii_case(en) || actual.fold_lower() == ru.fold_lower()
 }
 
 /// Vendor docs widely annotate parameters with a GENERIC platform name —
@@ -409,6 +424,19 @@ mod tests {
         let db = InMemoryDb::new();
         let f = fn_ty(&db, vec![db.number(None, None), db.string(None, false)], db.boolean());
         assert!(is_assignable(&db, f, f));
+    }
+
+    #[test]
+    fn common_module_coerces_to_platform_common_module() {
+        use bsl_types::kind::ConfigId;
+        let db = InMemoryDb::new();
+        let specific = db.common_module("ИнтеграцияЕГАИСКлиент".to_string(), ConfigId::Root);
+        let generic = db.platform_object("ОбщийМодуль".to_string());
+        // a specific common module IS a `ОбщийМодуль` (Liskov), in both subtype and arg position
+        assert!(is_assignable(&db, specific, generic));
+        assert!(is_coercible_to(&db, specific, generic));
+        // not the reverse — a generic `ОбщийМодуль` is not a specific module
+        assert!(!is_assignable(&db, generic, specific));
     }
 
     #[test]

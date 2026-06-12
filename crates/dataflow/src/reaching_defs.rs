@@ -10,6 +10,7 @@ use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use smol_str::SmolStr;
 use std::sync::Arc;
+use stdx::case::CaseExt;
 
 use crate::{Lattice, Transfer};
 
@@ -37,7 +38,7 @@ pub struct Definition {
 
 impl Definition {
     pub fn new(var_name: SmolStr, def_site: DefSite) -> Self {
-        let var_name = SmolStr::new(var_name.to_lowercase());
+        let var_name = SmolStr::new(var_name.fold_lower());
         Self { var_name, def_site }
     }
 
@@ -251,7 +252,7 @@ impl DefinitionIndex {
 
     #[inline]
     pub fn defs_for_var(&self, var_name: &str) -> &[u32] {
-        let normalized = var_name.to_lowercase();
+        let normalized = var_name.fold_lower();
         self.var_to_defs.get(normalized.as_str()).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
@@ -273,10 +274,10 @@ impl DefinitionIndex {
 
 fn extract_var_name_from_expr(expr_id: hir_def::ExprId, body: &Body) -> Option<SmolStr> {
     match body.expr(expr_id) {
-        Expr::Path(name) => Some(SmolStr::new(name.as_str().to_lowercase())),
+        Expr::Path(name) => Some(SmolStr::new(name.as_str().fold_lower())),
         Expr::Field { base, field } => {
             let base_name = extract_var_name_from_expr(hir_def::ExprId::from_idx(*base), body)?;
-            Some(SmolStr::new(format!("{}.{}", base_name, field.as_str().to_lowercase())))
+            Some(SmolStr::new(format!("{}.{}", base_name, field.as_str().fold_lower())))
         }
         Expr::Index { base, .. } => {
             extract_var_name_from_expr(hir_def::ExprId::from_idx(*base), body)

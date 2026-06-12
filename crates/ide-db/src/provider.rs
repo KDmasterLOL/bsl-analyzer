@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use stdx::case::CaseExt;
 
 use base_db::SourceRootId;
 use bsl_metadata::Configuration;
@@ -45,14 +46,14 @@ pub trait AnalysisProvider {
         use bsl_metadata::traits::Module;
 
         let file_path = self.file_path(file_id)?;
-        let file_path_lower = file_path.to_lowercase();
+        let file_path_lower = file_path.fold_lower();
         for visible in self.visible_configurations(file_id) {
             let found = visible.config.configuration.common_modules().iter().find(|m| {
                 m.uri().is_some_and(|uri| {
                     if visible.root.as_os_str().is_empty() {
-                        uri.to_lowercase() == file_path_lower
+                        uri.fold_lower() == file_path_lower
                     } else {
-                        visible.root.join(uri).to_string_lossy().to_lowercase() == file_path_lower
+                        visible.root.join(uri).to_string_lossy().fold_lower() == file_path_lower
                     }
                 })
             });

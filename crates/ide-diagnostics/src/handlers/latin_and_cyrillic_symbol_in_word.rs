@@ -2,6 +2,7 @@ use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
+use stdx::case::CaseExt;
 use syntax::SyntaxKind;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -41,7 +42,7 @@ impl Config {
 
         let exclude_words: Vec<String> = exclude_str
             .split(',')
-            .map(|s| s.trim().to_lowercase())
+            .map(|s| s.trim().fold_lower())
             .filter(|s| !s.is_empty())
             .collect();
 
@@ -121,7 +122,7 @@ fn has_mixed_scripts(text: &str) -> bool {
 }
 
 fn is_excluded(text: &str, exclude_words: &[String]) -> bool {
-    let text_lower = text.to_lowercase();
+    let text_lower = text.fold_lower();
     exclude_words.contains(&text_lower)
 }
 

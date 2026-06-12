@@ -1,12 +1,13 @@
 use crate::completion::sdbl::domain::{FieldFormatter, SdblCompletionItem};
 use crate::completion::CompletionItemKind;
 use sdbl_hir::Scope;
+use stdx::case::CaseExt;
 
 pub struct CompleteFieldsUseCase;
 
 impl CompleteFieldsUseCase {
     pub fn execute(scope: &Scope, alias: &str, prefix: &str) -> Vec<SdblCompletionItem> {
-        let prefix_lower = prefix.to_lowercase();
+        let prefix_lower = prefix.fold_lower();
 
         let columns = scope.column_completions(Some(alias));
 
@@ -23,7 +24,7 @@ impl CompleteFieldsUseCase {
                 if prefix.is_empty() {
                     true
                 } else {
-                    col.column_name.as_str().to_lowercase().starts_with(&prefix_lower)
+                    col.column_name.as_str().fold_lower().starts_with(&prefix_lower)
                 }
             })
             .map(|col| {

@@ -1,4 +1,5 @@
 use bsl_metadata::traits::MdObject;
+use stdx::case::CaseExt;
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -43,7 +44,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         .iter()
         .flat_map(|vc| vc.config.configuration.common_modules().to_vec())
         .filter(|m| m.is_privileged())
-        .map(|m| m.name().to_lowercase())
+        .map(|m| m.name().fold_lower())
         .collect();
 
     if privileged_modules.is_empty() {
@@ -55,7 +56,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     let is_current_privileged = current_module_name
         .as_ref()
-        .is_some_and(|name| privileged_modules.contains(&name.to_lowercase()));
+        .is_some_and(|name| privileged_modules.contains(&name.fold_lower()));
 
     if !validate_nested_calls && is_current_privileged {
         return Vec::new();
@@ -75,7 +76,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         }
 
         if let CallTarget::QualifiedModule { module_name, method_name } = &edge.target {
-            let module_lower = module_name.as_str().to_lowercase();
+            let module_lower = module_name.as_str().fold_lower();
 
             if !privileged_modules.contains(&module_lower) {
                 continue;
@@ -83,7 +84,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
             if !validate_nested_calls {
                 if let Some(ref current) = current_module_name {
-                    if current.to_lowercase() == module_lower {
+                    if current.fold_lower() == module_lower {
                         continue;
                     }
                 }

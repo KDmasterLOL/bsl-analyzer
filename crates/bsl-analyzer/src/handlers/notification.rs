@@ -28,6 +28,16 @@ pub fn schedule_diagnostics(state: &mut GlobalState, uri: &Url) {
         return;
     }
 
+    // A saturated task pool must not park the event loop in the bounded job
+    // queue (nor pin a db clone into a queued closure). Requeue instead — the
+    // loop bottom retries once a finishing worker frees a slot. Checked before
+    // cancelling the previous token, so an in-flight result survives the defer.
+    if !state.task_pool.pool.has_capacity() {
+        tracing::debug!(%uri, "task pool saturated; diagnostics requeued");
+        state.enqueue_pending_diagnostics(uri.clone());
+        return;
+    }
+
     if let Some(prev) = state.diagnostics_tokens.remove(uri) {
         prev.cancel();
     }
@@ -58,8 +68,9 @@ pub fn schedule_diagnostics(state: &mut GlobalState, uri: &Url) {
     let queued_at = Instant::now();
     tracing::info!(%uri, generation, vfs_done = state.vfs_done, "diagnostics scheduled");
 
+    let retry_uri = uri.clone();
     let analysis_guard = state.note_analysis_spawned();
-    state.task_pool.pool.spawn(move || {
+    let spawned = state.task_pool.pool.try_spawn(move || {
         let _analysis_guard = analysis_guard;
         let started_at = Instant::now();
         let queue_wait_ms = started_at.duration_since(queued_at).as_millis() as u64;
@@ -100,6 +111,14 @@ pub fn schedule_diagnostics(state: &mut GlobalState, uri: &Url) {
             }
         }
     });
+    if spawned.is_err() {
+        // Unreachable after the capacity check above; kept so a queue hiccup
+        // degrades to a deferred publish instead of a lost one. The dropped
+        // job's guard already posted its AnalysisJobFinished.
+        tracing::warn!(uri = %retry_uri, "task pool rejected diagnostics job; requeued");
+        state.diagnostics_tokens.remove(&retry_uri);
+        state.enqueue_pending_diagnostics(retry_uri);
+    }
 }
 
 pub fn handle_did_open(state: &mut GlobalState, params: DidOpenTextDocumentParams) -> Result<()> {
@@ -181,6 +200,14 @@ pub fn handle_did_open(state: &mut GlobalState, params: DidOpenTextDocumentParam
 }
 
 pub(crate) fn preload_dependencies(state: &mut GlobalState, file_id: vfs::FileId) {
+    // Cache warming is an optimisation: when the task pool is saturated, skip
+    // it (the analysis that needed the caches warms them itself) rather than
+    // park the event loop in the bounded job queue.
+    if !state.task_pool.pool.has_capacity() {
+        tracing::debug!(file_id = file_id.0, "task pool saturated; preload skipped");
+        return;
+    }
+
     let discover_start = Instant::now();
     let analysis = state.analysis_host.analysis();
     let deps = analysis.file_dependencies(file_id);
@@ -210,7 +237,7 @@ pub(crate) fn preload_dependencies(state: &mut GlobalState, file_id: vfs::FileId
     let queued_at = Instant::now();
 
     let analysis_guard = state.note_analysis_spawned();
-    state.task_pool.pool.spawn(move || {
+    let spawned = state.task_pool.pool.try_spawn(move || {
         let _analysis_guard = analysis_guard;
         let started_at = Instant::now();
         let queue_wait_ms = started_at.duration_since(queued_at).as_millis() as u64;
@@ -237,6 +264,12 @@ pub(crate) fn preload_dependencies(state: &mut GlobalState, file_id: vfs::FileId
         };
         Task::DependenciesPreloaded { file_id, count }
     });
+    if spawned.is_err() {
+        // Unreachable after the capacity check above; a skipped warm-up costs
+        // only latency, the demanding analysis computes the caches itself.
+        tracing::debug!(file_id = file_id.0, "task pool rejected preload job; skipped");
+        state.preload_tokens.remove(&file_id);
+    }
 }
 
 pub fn handle_did_change(
@@ -283,7 +316,7 @@ pub fn handle_did_change(
 
     tracing::debug!("Document updated successfully: {}", uri);
 
-    state.pending_diagnostics_uri = Some(uri);
+    state.enqueue_pending_diagnostics(uri);
 
     Ok(())
 }
@@ -484,6 +517,43 @@ mod tests {
         schedule_diagnostics(&mut state, &uri);
         assert_eq!(state.diagnostics_generation.get(&uri).copied(), Some(1));
         assert!(state.diagnostics_tokens.contains_key(&uri));
+    }
+
+    #[test]
+    fn did_change_enqueues_pending_diagnostics_deduplicated() {
+        let (mut state, _receiver) = create_test_state();
+
+        let uri = lsp_types::Url::parse("file:///test.bsl").unwrap();
+        handle_did_open(
+            &mut state,
+            DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: uri.clone(),
+                    language_id: "bsl".to_string(),
+                    version: 1,
+                    text: "Процедура Тест() КонецПроцедуры".to_string(),
+                },
+            },
+        )
+        .unwrap();
+        state.pending_diagnostics_uris.clear();
+
+        let change = |version| DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier { uri: uri.clone(), version },
+            content_changes: vec![TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: format!("// v{version}"),
+            }],
+        };
+        handle_did_change(&mut state, change(2)).unwrap();
+        handle_did_change(&mut state, change(3)).unwrap();
+
+        assert_eq!(
+            state.pending_diagnostics_uris,
+            vec![uri],
+            "consecutive edits of one document queue a single pending entry"
+        );
     }
 
     #[test]

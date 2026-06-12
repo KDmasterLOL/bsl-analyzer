@@ -1,5 +1,6 @@
 use la_arena::{Arena, Idx};
 use rustc_hash::FxHashMap;
+use stdx::case::CaseExt;
 use syntax::{ast, ast::AstNode, SyntaxKind, SyntaxNode};
 use text_size::TextRange;
 
@@ -123,10 +124,10 @@ impl RegionTree {
     }
 
     pub fn regions_by_name(&self, name: &str) -> Vec<RegionIdx> {
-        let name_lower = name.to_lowercase();
+        let name_lower = name.fold_lower();
         self.regions
             .iter()
-            .filter(|(_, r)| r.name.as_str().to_lowercase() == name_lower)
+            .filter(|(_, r)| r.name.as_str().fold_lower() == name_lower)
             .map(|(idx, _)| idx)
             .collect()
     }
@@ -146,7 +147,7 @@ impl RegionTree {
     pub fn is_api_region_name(name: &str) -> bool {
         const API_REGIONS: &[&str] =
             &["программныйинтерфейс", "public", "служебныйпрограммныйинтерфейс", "internal"];
-        API_REGIONS.contains(&name.to_lowercase().as_str())
+        API_REGIONS.contains(&name.fold_lower().as_str())
     }
 
     pub fn root_api_region_for_range(&self, range: TextRange) -> Option<&str> {

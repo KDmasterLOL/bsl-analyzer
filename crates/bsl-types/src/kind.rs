@@ -3,8 +3,8 @@ use std::sync::Arc;
 use bsl_metadata::{MdoType, Name};
 
 use crate::facet::{
-    ArrayFacet, DateFacet, FormBindingFacet, FormDataFacet, FormElementFacet, FunctionFacet,
-    ManagerFacet, MapFacet, MdoRefFacet, MetaObjFacet, MetaRefFacet, NumberFacet,
+    ArrayFacet, CommonModuleFacet, DateFacet, FormBindingFacet, FormDataFacet, FormElementFacet,
+    FunctionFacet, ManagerFacet, MapFacet, MdoRefFacet, MetaObjFacet, MetaRefFacet, NumberFacet,
     PlatformObjectFacet, ProjectionFacet, StringFacet, StructureFacet, TableFacet,
 };
 
@@ -415,6 +415,8 @@ pub enum TypeKind {
         config_id: ConfigId,
         owner: MdoRefFacet,
     },
+
+    CommonModule(CommonModuleFacet),
 
     PlatformObject(PlatformObjectFacet),
     ValueStorage,

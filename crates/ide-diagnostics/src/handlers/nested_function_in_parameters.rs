@@ -3,6 +3,7 @@ use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::{Body, BodySourceMap, Expr, ExprId, ExprIdx, IdConversion, Name};
 use line_index::LineIndex;
+use stdx::case::CaseExt;
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken, TextRange};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -42,7 +43,7 @@ impl Config {
 
         let allowed_method_names: Vec<String> = allowed_method_names_str
             .split(',')
-            .map(|s| s.trim().to_lowercase())
+            .map(|s| s.trim().fold_lower())
             .filter(|s| !s.is_empty())
             .collect();
 
@@ -56,7 +57,7 @@ impl Config {
     }
 
     fn is_allowed_method(&self, name: &str) -> bool {
-        let lower = name.to_lowercase();
+        let lower = name.fold_lower();
         self.allowed_method_names.iter().any(|allowed| allowed == &lower)
     }
 }

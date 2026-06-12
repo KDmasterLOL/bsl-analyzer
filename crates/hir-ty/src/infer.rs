@@ -12,6 +12,7 @@ use hir_def::ty::FunctionSignature;
 use hir_def::{sdbl_hir_for_file_query, DefWithBodyId, ExprId, MethodIdInput, Name, SdblExprId};
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
+use stdx::case::CaseExt;
 use tracing::{debug, info, trace};
 use vfs::FileId;
 
@@ -200,6 +201,7 @@ pub enum InferenceDiagnostic {
         expr: ExprId,
         expected: TypeId,
         actual: TypeId,
+        from_doc_comment: bool,
     },
 
     UnresolvedField {
@@ -244,6 +246,8 @@ pub struct CallArgBinding {
     pub args: Vec<ExprId>,
 
     pub params: ParamsShape,
+
+    pub params_from_doc_comment: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -475,6 +479,10 @@ impl<'db> InferenceContext<'db> {
         id == self.db.unknown()
     }
 
+    fn is_undefined(&self, id: TypeId) -> bool {
+        id == self.db.undefined()
+    }
+
     pub fn finish(self) -> BodyInferenceResult {
         BodyInferenceResult {
             owner: self.owner,
@@ -488,7 +496,13 @@ impl<'db> InferenceContext<'db> {
         }
     }
 
-    fn record_call_arg_binding(&mut self, call_expr: ExprId, args: &[ExprId], params: ParamsShape) {
+    fn record_call_arg_binding(
+        &mut self,
+        call_expr: ExprId,
+        args: &[ExprId],
+        params: ParamsShape,
+        params_from_doc_comment: bool,
+    ) {
         if self.body.is_recovered(call_expr) {
             return;
         }
@@ -497,6 +511,7 @@ impl<'db> InferenceContext<'db> {
             call_expr,
             args: args.to_vec(),
             params,
+            params_from_doc_comment,
         });
     }
 
@@ -506,8 +521,8 @@ impl<'db> InferenceContext<'db> {
     }
 
     fn body_declares_binding(&self, name: &hir_def::Name) -> bool {
-        let target = name.as_str().to_lowercase();
-        self.body.bindings_iter().any(|(_, b)| b.name.as_str().to_lowercase() == target)
+        let target = name.as_str().fold_lower();
+        self.body.bindings_iter().any(|(_, b)| b.name.as_str().fold_lower() == target)
     }
 
     pub fn infer_all(&mut self) {
@@ -577,7 +592,7 @@ impl<'db> InferenceContext<'db> {
                             }
                             None if existing_module_variable => {}
                             None => {
-                                let key = name.as_str().to_lowercase();
+                                let key = name.as_str().fold_lower();
                                 self.assigned_var_names.insert(key.clone());
                                 let target_id = ExprId::from_idx(*target);
                                 let unknown = self.db.unknown();
@@ -675,7 +690,7 @@ impl<'db> InferenceContext<'db> {
             Stmt::For { var, from, to, body } => {
                 self.infer_expr(ExprId::from_idx(*from));
                 self.infer_expr(ExprId::from_idx(*to));
-                let var_name = self.body.binding_idx(*var).name.as_str().to_lowercase();
+                let var_name = self.body.binding_idx(*var).name.as_str().fold_lower();
                 let number = self.db.number(None, None);
                 self.var_types.insert(var_name, number);
                 self.binding_types.insert(BindingId::from_idx(*var), number);
@@ -687,7 +702,7 @@ impl<'db> InferenceContext<'db> {
                 if let Some(elem_ty) =
                     crate::iteration_lookup::resolve_iter_element_ty(self.db, coll_ty)
                 {
-                    let var_name = self.body.binding_idx(*var).name.as_str().to_lowercase();
+                    let var_name = self.body.binding_idx(*var).name.as_str().fold_lower();
                     self.var_types.insert(var_name, elem_ty);
                     self.binding_types.insert(BindingId::from_idx(*var), elem_ty);
                 }
@@ -951,7 +966,7 @@ impl<'db> InferenceContext<'db> {
 
         let resolver = self.get_resolver();
 
-        let name_lower = name.as_str().to_lowercase();
+        let name_lower = name.as_str().fold_lower();
         if name_lower == "этотобъект" || name_lower == "thisobject" {
             if let Some(owner) = crate::this_object::resolve_this_object_owner(self.db, &resolver) {
                 trace!("resolved {} as ThisObject {{ owner: {:?} }}", name, owner);
@@ -989,7 +1004,7 @@ impl<'db> InferenceContext<'db> {
 
         let resolved = resolver.resolve_name(self.db, name);
 
-        if let Some(ty) = self.var_types.get(&name.as_str().to_lowercase()) {
+        if let Some(ty) = self.var_types.get(&name.as_str().fold_lower()) {
             trace!("resolved {} via var_types = {:?}", name, ty);
             let ty_id = *ty;
             if crate::method_lookup::receiver_needs_refinement_id(self.db, ty_id) {
@@ -1048,7 +1063,12 @@ impl<'db> InferenceContext<'db> {
 
         let workspace_owns_common_module = resolver.user_common_module_exists(self.db, name);
 
-        if !user_shadows && !body_binding_shadows && !workspace_owns_common_module {
+        // Implicit `ЭтотОбъект` members (attributes, tabular sections, record-set fields) of the
+        // current object/record-set module win over a same-named common module: in that module
+        // the bare name denotes the object's own member, not the workspace module. Resolution
+        // returns `None` outside an object/record-set module, so a plain common-module name (no
+        // colliding member) falls through to the common-module typing below.
+        if !user_shadows && !body_binding_shadows {
             if let Some(ty) =
                 crate::this_object_attr::resolve_this_object_member(self.db, &resolver, name)
             {
@@ -1057,12 +1077,33 @@ impl<'db> InferenceContext<'db> {
             }
         }
 
-        if !user_shadows && !body_binding_shadows && !workspace_owns_common_module {
+        if !user_shadows && !body_binding_shadows {
             if let Some(ty) =
                 crate::this_object_attr::resolve_this_record_set_member(self.db, &resolver, name)
             {
                 trace!("resolved {} as implicit record-set ЭтотОбъект.{} member", name, name);
                 return ty;
+            }
+        }
+
+        // A bare common-module reference (`ОбщегоНазначения`, used directly) is a value of that
+        // module's type, so member calls / hover / completion resolve against its API. Object
+        // members above already won; the remaining shadow guard mirrors
+        // `dispatch_bare_ident_field_call` (local assignment, declared binding, user
+        // method/variable, form attribute / form-self resolved earlier). A module named like a
+        // builtin global bailed to Unknown at the builtin check and is resolved by name dispatch.
+        if workspace_owns_common_module
+            && !user_shadows
+            && !body_binding_shadows
+            && !self.assigned_var_names.contains(&name.as_str().fold_lower())
+        {
+            let source_root_id =
+                self.db.file_source_root_input(self.file_id).source_root_id(self.db);
+            if let Some(canonical) =
+                self.db.module_index(source_root_id).canonical_common_module_name(name)
+            {
+                trace!("resolved {} as common module type", name);
+                return self.db.common_module(canonical.to_string(), ConfigId::Root);
             }
         }
 
@@ -1184,6 +1225,7 @@ impl<'db> InferenceContext<'db> {
         if let Expr::Field { base, field } = callee_expr {
             let base_id = ExprId::from_idx(*base);
             let method_name = field.clone();
+
             let receiver_ty = self.infer_expr(base_id);
 
             if self.is_unknown(receiver_ty) {
@@ -1206,6 +1248,41 @@ impl<'db> InferenceContext<'db> {
                 crate::this_object::coerce_to_metadata_ref_id(self.db, receiver_ty)
                     .unwrap_or(receiver_ty);
             let workspace_receiver_kind = self.db.lookup_type(workspace_receiver_ty);
+            if let TypeKind::CommonModule(facet) = &workspace_receiver_kind {
+                let module = hir_def::Name::new(&facet.name);
+                // A bare module name as receiver (not a variable that holds a module) keeps the
+                // self-qualified-access and missed-parameter diagnostics that the name dispatch
+                // emits — the handlers filter further (TwoLevel only fires when the called module
+                // is the current one). A variable is in `assigned_var_names`, so it is excluded.
+                if let Expr::Path(recv) = self.body.expr(base_id) {
+                    let recv = recv.clone();
+                    if !self.assigned_var_names.contains(&recv.as_str().fold_lower())
+                        && !self.body_declares_binding(&recv)
+                    {
+                        let arg_presence: Vec<bool> = args
+                            .iter()
+                            .map(|arg_id| !matches!(self.body.expr(*arg_id), Expr::Missing))
+                            .collect();
+                        self.push_inference_diagnostic(
+                            InferenceDiagnostic::RedundantAccessToObjectTwoLevel {
+                                expr: callee,
+                                module: module.clone(),
+                            },
+                        );
+                        self.push_inference_diagnostic(
+                            InferenceDiagnostic::MissedRequiredParameterCommonModule {
+                                expr: callee,
+                                callee: method_name.clone(),
+                                module: module.clone(),
+                                args: arg_presence,
+                            },
+                        );
+                    }
+                }
+                let return_ty = self.infer_qualified_call(&module, &method_name, args, callee);
+                self.expr_types.insert(callee, self.db.unknown());
+                return return_ty;
+            }
             if let TypeKind::MetadataRef(facet) = workspace_receiver_kind {
                 let kind = facet.kind;
                 let mdo_name = hir_def::Name::new(&facet.name);
@@ -1248,6 +1325,7 @@ impl<'db> InferenceContext<'db> {
                             ParamsShape::Single(
                                 resolution.signature.params.iter().copied().collect(),
                             ),
+                            resolution.signature.from_doc_comment,
                         );
                         self.expr_types.insert(callee, self.db.unknown());
                         return resolution.return_type;
@@ -1309,6 +1387,7 @@ impl<'db> InferenceContext<'db> {
                             ParamsShape::Single(
                                 resolution.signature.params.iter().copied().collect(),
                             ),
+                            resolution.signature.from_doc_comment,
                         );
                         self.expr_types.insert(callee, self.db.unknown());
                         return resolution.return_type;
@@ -1373,6 +1452,7 @@ impl<'db> InferenceContext<'db> {
                             ParamsShape::Single(
                                 resolution.signature.params.iter().copied().collect(),
                             ),
+                            resolution.signature.from_doc_comment,
                         );
                         self.expr_types.insert(callee, self.db.unknown());
                         return resolution.return_type;
@@ -1430,6 +1510,7 @@ impl<'db> InferenceContext<'db> {
                             flat: params.into(),
                             overloads: overloads.into(),
                         },
+                        false,
                     );
                     return_ty
                 }
@@ -1553,6 +1634,7 @@ impl<'db> InferenceContext<'db> {
                         flat: chosen.params.iter().copied().collect(),
                         overloads: overloads_arc,
                     },
+                    chosen.from_doc_comment,
                 );
                 let ret = if sigs.len() == 1 {
                     chosen.ret
@@ -1599,6 +1681,7 @@ impl<'db> InferenceContext<'db> {
                     callee,
                     args,
                     ParamsShape::Single(facet.params.iter().map(|p| p.ty).collect()),
+                    false,
                 );
 
                 facet.returns
@@ -1606,7 +1689,7 @@ impl<'db> InferenceContext<'db> {
             TypeKind::Unknown => {
                 if let Some(name) = bare_callee_name.as_ref() {
                     if !self.body_declares_binding(name)
-                        && !self.assigned_var_names.contains(&name.as_str().to_lowercase())
+                        && !self.assigned_var_names.contains(&name.as_str().fold_lower())
                     {
                         let module_id = hir_def::ModuleId::new(self.file_id);
                         let symbol_tree = self.db.symbol_tree(module_id);
@@ -1671,7 +1754,23 @@ impl<'db> InferenceContext<'db> {
                     call_expr,
                     args,
                     ParamsShape::Single(resolution.signature.params.iter().copied().collect()),
+                    resolution.signature.from_doc_comment,
                 );
+
+                // `ОбщегоНазначения.ОбщийМодуль("Имя")` returns the named common module as a
+                // value. Its own inferred return is uninformative — `Unknown` from `Вычислить`,
+                // or `Undefined` because the real БСП body has an `Иначе Модуль = Неопределено`
+                // arm that wins under flow-insensitive typing. Narrowing on either gives the
+                // receiver a `CommonModule` type for member resolution / hover / completion,
+                // without overriding a method that declares a genuinely useful return type.
+                if (self.is_unknown(resolution.return_type)
+                    || self.is_undefined(resolution.return_type))
+                    && method_name.as_str().fold_lower() == "общиймодуль"
+                {
+                    if let Some(ty) = self.common_module_type_from_args(args) {
+                        return ty;
+                    }
+                }
 
                 resolution.return_type
             }
@@ -1711,6 +1810,32 @@ impl<'db> InferenceContext<'db> {
         }
     }
 
+    /// Type of `ОбщийМодуль("Имя")` when the single argument is a plain (non-dotted) string
+    /// literal naming a known common module: `Some(CommonModule{canonical_name})`. The dotted
+    /// form (`"Справочники.Имя"`, a manager) and unknown names return `None`.
+    fn common_module_type_from_args(&self, args: &[ExprId]) -> Option<TypeId> {
+        let [arg] = args else {
+            return None;
+        };
+        let Expr::Literal(Literal::String(literal)) = self.body.expr(*arg) else {
+            return None;
+        };
+        if literal.contains('.') {
+            return None;
+        }
+        let name = Name::new(literal);
+        // Only narrow to a module visible from this file's configuration — the same guard the
+        // resolver applies, so the type and later member resolution agree on one module rather
+        // than typing against a source-root sibling hidden in the current config.
+        if !self.get_resolver().user_common_module_exists(self.db, &name) {
+            return None;
+        }
+        let source_root_id = self.db.file_source_root_input(self.file_id).source_root_id(self.db);
+        let module_index = self.db.module_index(source_root_id);
+        let canonical = module_index.canonical_common_module_name(&name)?;
+        Some(self.db.common_module(canonical.to_string(), ConfigId::Root))
+    }
+
     fn dispatch_bare_ident_field_call(
         &mut self,
         module_name: &Name,
@@ -1732,7 +1857,7 @@ impl<'db> InferenceContext<'db> {
         if self.body_declares_binding(module_name) {
             return None;
         }
-        if self.assigned_var_names.contains(&module_name.as_str().to_lowercase()) {
+        if self.assigned_var_names.contains(&module_name.as_str().fold_lower()) {
             return None;
         }
 
@@ -1858,6 +1983,7 @@ impl<'db> InferenceContext<'db> {
                     call_expr,
                     args,
                     ParamsShape::Single(resolution.signature.params.iter().copied().collect()),
+                    resolution.signature.from_doc_comment,
                 );
 
                 resolution.return_type
@@ -1896,6 +2022,7 @@ impl<'db> InferenceContext<'db> {
                         call_expr,
                         args,
                         ParamsShape::Single(res.signature.params.to_vec().into()),
+                        res.signature.from_doc_comment,
                     );
                     return res.return_ty;
                 }
@@ -1945,7 +2072,7 @@ impl<'db> InferenceContext<'db> {
         return_ty: &mut TypeId,
         params: &mut [TypeId],
     ) {
-        let lc = method_name.as_str().to_lowercase();
+        let lc = method_name.as_str().fold_lower();
         let is_get = lc == "получить" || lc == "get";
         let is_set = lc == "установить" || lc == "set";
         if !is_get && !is_set {
@@ -2272,10 +2399,11 @@ mod tests {
             expr: expr_id,
             expected: expected_ty,
             actual: actual_ty,
+            from_doc_comment: false,
         };
 
         match diag {
-            InferenceDiagnostic::TypeMismatch { expr, expected, actual } => {
+            InferenceDiagnostic::TypeMismatch { expr, expected, actual, .. } => {
                 assert_eq!(expr, expr_id);
                 assert_eq!(expected, expected_ty);
                 assert_eq!(actual, actual_ty);
@@ -2420,6 +2548,7 @@ mod tests {
             expr: make_expr(4),
             expected: db.string(None, false),
             actual: db.number(None, None),
+            from_doc_comment: false,
         });
 
         let lifted = ModuleCodeInferenceResult::from_body(body);

@@ -4,6 +4,7 @@ use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::{Expr, ExprId, IdConversion, Literal, Name, Stmt};
 use ide_db::TextRange;
 use rustc_hash::FxHashMap;
+use stdx::case::CaseExt;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,
@@ -50,7 +51,7 @@ enum ResourceType {
 
 impl ResourceType {
     fn from_name(name: &str) -> Option<Self> {
-        match name.to_lowercase().as_str() {
+        match name.fold_lower().as_str() {
             "ftpсоединение" | "ftpconnection" => Some(Self::FTPConnection),
             "httpсоединение" | "httpconnection" => Some(Self::HTTPConnection),
             "wsопределения" | "wsdefinitions" => Some(Self::WSDefinitions),
@@ -220,7 +221,7 @@ fn find_timeout_assignments(body: &hir::Body) -> FxHashMap<Name, ()> {
 }
 
 fn is_timeout_field(field: &Name) -> bool {
-    matches!(field.as_str().to_lowercase().as_str(), "таймаут" | "timeout")
+    matches!(field.as_str().fold_lower().as_str(), "таймаут" | "timeout")
 }
 
 fn extract_simple_path_idx(body: &hir::Body, expr_idx: hir::ExprIdx) -> Option<Name> {

@@ -11,10 +11,11 @@
 //! [`name_eq_ci`], never `eq_ignore_ascii_case` alone.
 
 use bsl_metadata::{FormElementKind, MdoType};
+use stdx::case::CaseExt;
 
 /// Case-insensitive match of `actual` against a `(ru, en)` canonical name pair.
 pub(crate) fn name_eq_ci(actual: &str, ru: &str, en: &str) -> bool {
-    actual.eq_ignore_ascii_case(en) || actual.to_lowercase() == ru.to_lowercase()
+    actual.eq_ignore_ascii_case(en) || actual.fold_lower() == ru.fold_lower()
 }
 
 /// Generic manager type name per metadata kind. The single definition behind both
@@ -114,7 +115,7 @@ pub(crate) const FORM_DATA_NAMES: &[(&str, &str)] = &[
 /// is documented with — keeping the compact form nominal in the lowering gate
 /// would otherwise reintroduce a false mismatch the bridge cannot clear.
 pub(crate) fn is_tabular_row_name(name: &str) -> bool {
-    let lc = name.trim().to_lowercase();
+    let lc = name.trim().fold_lower();
     lc == "строка табличной части"
         || lc == "line of a tabular section"
         || lc == "строкатабличнойчасти"
@@ -172,7 +173,7 @@ pub(crate) fn is_known_non_corpus_type_name(name: &str) -> bool {
         return true;
     }
 
-    let lc = name.to_lowercase();
+    let lc = name.fold_lower();
     // Serialisation / DOM type families the corpus enumerates only partially: a
     // platform name glues the latin XDTO / XML / DOM tag onto a Cyrillic root
     // (ТипXDTO, ФабрикаXDTO, СтрокаXML, УзелDOM, …). Requiring a Cyrillic letter

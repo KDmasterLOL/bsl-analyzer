@@ -3,6 +3,7 @@ use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::ModItem;
 use rustc_hash::FxHashSet;
+use stdx::case::CaseExt;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -55,7 +56,7 @@ fn get_reserved_words(ctx: &DiagnosticsContext) -> FxHashSet<String> {
         .get_string_array(DiagnosticCode::ReservedParameterNames, "reservedWords")
         .unwrap_or_default()
         .into_iter()
-        .map(|s| s.to_lowercase())
+        .map(|s| s.fold_lower())
         .collect()
 }
 
@@ -67,7 +68,7 @@ fn check_params(
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     for param in params {
-        let name_lower = param.name.as_str().to_lowercase();
+        let name_lower = param.name.as_str().fold_lower();
         if reserved_words.contains(&name_lower) {
             diagnostics.push(Diagnostic {
                 code,

@@ -3,6 +3,7 @@ use crate::hir::{FieldDef, Name, ResolvedTable, TableRef};
 use crate::standard_fields::{is_virtual_table_name, virtual_table_type};
 use crate::SdblType;
 use bsl_metadata::{is_standard_attribute_name, MdoType};
+use stdx::case::CaseExt;
 use syntax::ast::AstNode;
 use text_size::TextRange;
 
@@ -1028,7 +1029,7 @@ impl LoweringContext<'_> {
 
         let eds_obj = eds_obj.unwrap();
 
-        let container_type = parts[2].to_lowercase();
+        let container_type = parts[2].fold_lower();
 
         if parts.len() == 4 && (container_type == "таблица" || container_type == "table") {
             tracing::debug!(
@@ -1041,7 +1042,7 @@ impl LoweringContext<'_> {
 
         if parts.len() == 6 && (container_type == "куб" || container_type == "cube") {
             let cube_name = &parts[3];
-            let dim_table_type = parts[4].to_lowercase();
+            let dim_table_type = parts[4].fold_lower();
             let dim_table_name = &parts[5];
 
             let cube_obj = eds_obj.find_child(cube_name);
@@ -1113,7 +1114,7 @@ impl LoweringContext<'_> {
 
         match attr_type {
             AttributeType::DefinedType { name } => {
-                let key = name.to_lowercase();
+                let key = name.fold_lower();
                 if !visited.insert(key.clone()) {
                     return SdblType::DefinedType { name: name.clone(), underlying_type: None };
                 }

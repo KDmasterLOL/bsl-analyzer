@@ -1,5 +1,6 @@
+use stdx::case::CaseExt;
 pub fn canonical_alias(name: &str) -> Option<&'static str> {
-    let lower = name.to_lowercase();
+    let lower = name.fold_lower();
     Some(match lower.as_str() {
         "public" | "программныйинтерфейс" => "Public",
         "internal" | "служебныйпрограммныйинтерфейс" => "Internal",

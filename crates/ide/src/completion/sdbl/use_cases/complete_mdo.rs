@@ -1,12 +1,13 @@
 use crate::completion::sdbl::domain::{MetadataProvider, SdblCompletionItem};
 use crate::completion::CompletionItemKind;
 use bsl_metadata::MdoType;
+use stdx::case::CaseExt;
 
 pub struct CompleteMdoUseCase;
 
 impl CompleteMdoUseCase {
     pub fn execute_types(prefix: &str) -> Vec<SdblCompletionItem> {
-        let prefix_lower = prefix.to_lowercase();
+        let prefix_lower = prefix.fold_lower();
 
         let mut items = Vec::new();
 
@@ -14,11 +15,11 @@ impl CompleteMdoUseCase {
             let russian_name = mdo_type.russian_name();
             let english_name = mdo_type.english_name();
 
-            if prefix.is_empty() || russian_name.to_lowercase().starts_with(&prefix_lower) {
+            if prefix.is_empty() || russian_name.fold_lower().starts_with(&prefix_lower) {
                 items.push(SdblCompletionItem::new(russian_name, CompletionItemKind::MdoType));
             }
 
-            if prefix.is_empty() || english_name.to_lowercase().starts_with(&prefix_lower) {
+            if prefix.is_empty() || english_name.fold_lower().starts_with(&prefix_lower) {
                 items.push(SdblCompletionItem::new(english_name, CompletionItemKind::MdoType));
             }
         }
@@ -45,7 +46,7 @@ impl CompleteMdoUseCase {
             return Vec::new();
         };
 
-        let prefix_lower = prefix.to_lowercase();
+        let prefix_lower = prefix.fold_lower();
 
         let objects = Self::get_objects_by_type(&config, mdo_type);
 
@@ -55,11 +56,11 @@ impl CompleteMdoUseCase {
                 if prefix.is_empty() {
                     true
                 } else {
-                    obj.name.to_lowercase().starts_with(&prefix_lower)
+                    obj.name.fold_lower().starts_with(&prefix_lower)
                         || obj
                             .name_en
                             .as_ref()
-                            .is_some_and(|en| en.to_lowercase().starts_with(&prefix_lower))
+                            .is_some_and(|en| en.fold_lower().starts_with(&prefix_lower))
                 }
             })
             .map(|obj| {

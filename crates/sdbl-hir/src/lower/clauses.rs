@@ -1,5 +1,6 @@
 use crate::diagnostics::SdblDiagnostic;
 use crate::hir::{ExprHir, SelectHir};
+use stdx::case::CaseExt;
 use syntax::ast::AstNode;
 
 use super::context::LoweringContext;
@@ -330,7 +331,7 @@ fn simple_selected_output_ref(
         .fields
         .iter()
         .filter_map(|field| field.alias_or_name())
-        .any(|output_name| output_name.to_lowercase() == name.to_lowercase());
+        .any(|output_name| output_name.fold_lower() == name.fold_lower());
 
     matches_output.then_some(column_ref)
 }

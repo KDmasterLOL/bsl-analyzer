@@ -3,6 +3,7 @@ use crate::metadata::{DiagnosticSeverityLevel, DiagnosticType, MetadataTag};
 use crate::{DiagnosticCode, Severity};
 use base_db::{DiagnosticsConfigInput, Locale};
 use std::collections::HashMap;
+use stdx::case::CaseExt;
 
 #[derive(Debug, Clone, Default)]
 pub struct MetadataOverride {
@@ -33,7 +34,7 @@ impl EffectiveMetadata {
 }
 
 fn parse_severity(s: &str) -> Severity {
-    match s.to_lowercase().as_str() {
+    match s.fold_lower().as_str() {
         "error" => Severity::Error,
         "warning" => Severity::Warning,
         "information" | "info" => Severity::Information,

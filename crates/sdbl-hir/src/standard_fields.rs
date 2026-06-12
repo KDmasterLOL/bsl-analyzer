@@ -1,4 +1,5 @@
 use std::fmt;
+use stdx::case::CaseExt;
 
 pub const VIRTUAL_TABLES: &[(&str, &str)] = &[
     ("срезпоследних", "slicelast"),
@@ -52,12 +53,12 @@ impl fmt::Display for VirtualTableType {
 }
 
 pub fn is_virtual_table_name(name: &str) -> bool {
-    let name_lower = name.to_lowercase();
+    let name_lower = name.fold_lower();
     VIRTUAL_TABLES.iter().any(|(ru, en)| *ru == name_lower || *en == name_lower)
 }
 
 pub fn virtual_table_type(name: &str) -> Option<VirtualTableType> {
-    let name_lower = name.to_lowercase();
+    let name_lower = name.fold_lower();
     match name_lower.as_str() {
         "срезпоследних" | "slicelast" => Some(VirtualTableType::SliceLast),
         "срезпервых" | "slicefirst" => Some(VirtualTableType::SliceFirst),
@@ -92,7 +93,7 @@ pub const PERIODICITY_VALUES: &[(&str, &str)] = &[
 ];
 
 pub fn is_periodicity_value(name: &str) -> bool {
-    let name_lower = name.to_lowercase();
+    let name_lower = name.fold_lower();
     PERIODICITY_VALUES.iter().any(|(ru, en)| *ru == name_lower || *en == name_lower)
 }
 

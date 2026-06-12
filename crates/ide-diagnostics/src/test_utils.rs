@@ -1,6 +1,7 @@
 use crate::{Diagnostic, DiagnosticCode, Severity};
 use hir::DefDatabase;
 use ide_db::TextRange;
+use stdx::case::CaseExt;
 
 pub fn range_to_line_col(text: &str, range: TextRange) -> (u32, u32, u32, u32) {
     let start_offset: usize = range.start().into();
@@ -876,7 +877,7 @@ impl ConfigXmlFixtureProject {
                 declared_modules.is_empty()
                     || declared_modules
                         .iter()
-                        .any(|declared| declared.to_lowercase() == name.to_lowercase())
+                        .any(|declared| declared.fold_lower() == name.fold_lower())
             })
             .map(|(name, body)| ((*name).to_string(), (*body).to_string()))
             .collect::<Vec<_>>();

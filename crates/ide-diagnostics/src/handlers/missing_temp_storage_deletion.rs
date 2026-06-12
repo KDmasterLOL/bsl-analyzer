@@ -1,6 +1,7 @@
 use hir::cfg::CfgBuilder;
 use hir::dataflow::temp_resource::{analyze_open_resources, ResourceEvent, ResourceProvider};
 use hir::{Body, BodySourceMap, Expr, ExprId, ExprIdx, IdConversion};
+use stdx::case::CaseExt;
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -117,10 +118,10 @@ type CanonExpr = String;
 
 fn canonicalize_expr(body: &Body, expr_idx: ExprIdx) -> Option<CanonExpr> {
     match body.expr_idx(expr_idx) {
-        Expr::Path(name) => Some(format!("p:{}", name.as_str().to_lowercase())),
+        Expr::Path(name) => Some(format!("p:{}", name.as_str().fold_lower())),
         Expr::Field { base, field } => {
             let base_canon = canonicalize_expr(body, *base)?;
-            Some(format!("f:{}.{}", base_canon, field.as_str().to_lowercase()))
+            Some(format!("f:{}.{}", base_canon, field.as_str().fold_lower()))
         }
         Expr::Index { base, index } => {
             let base_canon = canonicalize_expr(body, *base)?;
@@ -140,7 +141,7 @@ fn canonicalize_expr(body: &Body, expr_idx: ExprIdx) -> Option<CanonExpr> {
             Some(format!(
                 "m:{}.{}({})",
                 receiver_canon,
-                method.as_str().to_lowercase(),
+                method.as_str().fold_lower(),
                 arg_canons.join(",")
             ))
         }
@@ -157,12 +158,12 @@ fn canonicalize_expr(body: &Body, expr_idx: ExprIdx) -> Option<CanonExpr> {
 }
 
 fn is_get_from_temp_storage(name: &str) -> bool {
-    let lower = name.to_lowercase();
+    let lower = name.fold_lower();
     lower == "получитьизвременногохранилища" || lower == "getfromtempstorage"
 }
 
 fn is_delete_from_temp_storage(name: &str) -> bool {
-    let lower = name.to_lowercase();
+    let lower = name.fold_lower();
     lower == "удалитьизвременногохранилища" || lower == "deletefromtempstorage"
 }
 

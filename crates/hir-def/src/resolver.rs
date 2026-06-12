@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use stdx::case::CaseExt;
 
 use bsl_metadata::MdObject;
 
@@ -162,7 +163,7 @@ impl Resolver {
         let mut seen = std::collections::HashSet::new();
         for cfg in db.configurations(module_id.file_id).iter() {
             for cm in cfg.configuration.common_modules() {
-                if cm.is_global() && seen.insert(cm.name().to_lowercase()) {
+                if cm.is_global() && seen.insert(cm.name().fold_lower()) {
                     names.push(Name::new(cm.name()));
                 }
             }

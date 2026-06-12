@@ -9,6 +9,57 @@ use super::RootDatabaseImpl;
 use crate::RootDatabase;
 
 #[test]
+fn workspace_load_gate_stubs_whole_config_loading() {
+    use crate::metadata::{intern_configuration_path, MetadataDb as _};
+
+    // An on-disk config root with one common module: the whole-config loader
+    // parses it when, and only when, the load gate is open.
+    let root =
+        std::env::temp_dir().join(format!("bsl_load_gate_{}_{}", std::process::id(), line!()));
+    let cm_dir = root.join("CommonModules");
+    // The whole-config loader lists module DIRECTORIES and pairs each with its
+    // sibling XML, so both must exist.
+    std::fs::create_dir_all(cm_dir.join("МойМодуль/Ext")).unwrap();
+    std::fs::write(cm_dir.join("МойМодуль/Ext/Module.bsl"), "").unwrap();
+    std::fs::write(
+        cm_dir.join("МойМодуль.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <CommonModule uuid="00000000-0000-0000-0000-000000000031">
+        <Properties><Name>МойМодуль</Name><Server>true</Server></Properties>
+    </CommonModule>
+</MetaDataObject>"#,
+    )
+    .unwrap();
+
+    let mut db = RootDatabaseImpl::new();
+    assert!(db.workspace_load_complete(), "the gate defaults to open for batch hosts");
+    let root_str = root.to_string_lossy().to_string();
+
+    db.set_workspace_load_complete(false);
+    {
+        let rev = db.config_root_revision_for_path(&root);
+        let path_input = intern_configuration_path(&db, &root_str, rev);
+        let gated = db.load_configuration(path_input);
+        assert!(
+            gated.find_common_module("МойМодуль").is_none(),
+            "a closed gate must resolve nothing instead of parsing the config"
+        );
+    }
+
+    db.set_workspace_load_complete(true);
+    let rev = db.config_root_revision_for_path(&root);
+    let path_input = intern_configuration_path(&db, &root_str, rev);
+    let loaded = db.load_configuration(path_input);
+    assert!(
+        loaded.find_common_module("МойМодуль").is_some(),
+        "reopening the gate must load the real configuration"
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
 fn parse_mdo_query_parses_catalog_from_overlay() {
     use crate::metadata::{parse_mdo_query, MdoFiles};
     use bsl_metadata::MdoType;

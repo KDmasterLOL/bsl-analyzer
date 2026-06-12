@@ -2,6 +2,7 @@ use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::{Body, BodySourceMap, Expr, ExprId, IdConversion, Name};
+use stdx::case::CaseExt;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -85,7 +86,7 @@ fn is_structure_or_fixed_structure(type_name: &Option<Name>) -> bool {
         return false;
     };
 
-    let text = name.as_str().to_lowercase();
+    let text = name.as_str().fold_lower();
     matches!(text.as_str(), "структура" | "structure" | "фиксированнаяструктура" | "fixedstructure")
 }
 

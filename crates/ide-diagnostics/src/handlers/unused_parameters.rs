@@ -5,6 +5,7 @@ use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::{Expr, ModItem};
 use ide_db::TextRange;
 use rustc_hash::FxHashSet;
+use stdx::case::CaseExt;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -36,7 +37,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     let attachable_prefixes: Vec<String> = attachable_prefixes_str
         .split(',')
-        .map(|s| s.trim().to_lowercase())
+        .map(|s| s.trim().fold_lower())
         .filter(|s| !s.is_empty())
         .collect();
 
@@ -49,16 +50,16 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut fixed_signature_handlers: FxHashSet<String> = FxHashSet::default();
     if let Some(ref form) = metadata.form {
         for handler in form.event_handlers() {
-            fixed_signature_handlers.insert(handler.handler_name.to_lowercase());
+            fixed_signature_handlers.insert(handler.handler_name.fold_lower());
         }
         for handler in form.command_handlers() {
-            fixed_signature_handlers.insert(handler.to_lowercase());
+            fixed_signature_handlers.insert(handler.fold_lower());
         }
     }
     if let Some(ref http_service) = metadata.http_service {
         for (_, method) in http_service.all_methods() {
             if !method.is_handler_empty() {
-                fixed_signature_handlers.insert(method.handler().to_lowercase());
+                fixed_signature_handlers.insert(method.handler().fold_lower());
             }
         }
     }
@@ -70,13 +71,13 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         // classify) keeps the platform-fixed signature, so its parameters are not
         // "unused". A handler resolved to another module is checked there instead.
         if matches!(reg.target, hir::NotifyTarget::ThisObject | hir::NotifyTarget::Unsupported) {
-            fixed_signature_handlers.insert(reg.callback_name.as_str().to_lowercase());
+            fixed_signature_handlers.insert(reg.callback_name.as_str().fold_lower());
         }
     }
 
     for (local_id, _) in module_bodies.iter_bodies() {
         if let Some(name) = get_method_name(&item_tree, local_id) {
-            let lower = name.to_lowercase();
+            let lower = name.fold_lower();
             if attachable_prefixes.iter().any(|prefix| lower.starts_with(prefix)) {
                 fixed_signature_handlers.insert(lower);
             }
@@ -133,7 +134,7 @@ fn check_method(
         return diagnostics;
     }
 
-    if method_name.is_some_and(|name| fixed_signature_handlers.contains(&name.to_lowercase())) {
+    if method_name.is_some_and(|name| fixed_signature_handlers.contains(&name.fold_lower())) {
         return diagnostics;
     }
 
@@ -147,7 +148,7 @@ fn check_method(
     for param_id in body.params() {
         let binding = body.binding(param_id);
         let param_name = binding.name.as_str();
-        let param_name_lower = param_name.to_lowercase();
+        let param_name_lower = param_name.fold_lower();
 
         if !used_names.contains(&param_name_lower) {
             if let Some(range) = source_map.binding_range(param_id) {
@@ -164,7 +165,7 @@ fn collect_used_identifiers(body: &hir::Body) -> FxHashSet<String> {
 
     for (_, expr) in body.exprs_iter() {
         if let Expr::Path(name) = expr {
-            used.insert(name.as_str().to_lowercase());
+            used.insert(name.as_str().fold_lower());
         }
     }
 

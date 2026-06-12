@@ -352,14 +352,6 @@ pub fn handle_semantic_tokens_full(
     )
     .entered();
 
-    if !ctx.vfs_done {
-        tracing::debug!("VFS not ready, returning empty semantic tokens");
-        return Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
-            result_id: None,
-            data: vec![],
-        })));
-    }
-
     let uri = params.text_document.uri;
 
     let file_id = ctx.file_id_for_url(&uri)?;
@@ -968,7 +960,6 @@ mod tests {
             project: state.project.clone(),
             diagnostics_config: state.diagnostics_config.clone(),
             position_encoding: state.position_encoding,
-            vfs_done: state.vfs_done,
             task_sender: state.task_pool.pool.sender.clone(),
             mem_docs: state.mem_docs.freeze(),
             file_paths: FrozenFilePaths::freeze(&state.vfs.read()),
@@ -1182,27 +1173,6 @@ mod tests {
         assert_eq!(lsp_loc.uri, target_uri);
         assert_eq!(lsp_loc.range.start, Position { line: 1, character: 4 });
         assert_eq!(lsp_loc.range.end, Position { line: 1, character: 8 });
-    }
-
-    #[test]
-    fn semantic_tokens_returns_empty_when_vfs_not_done() {
-        let state = create_test_state();
-        assert!(!state.vfs_done, "default GlobalState has vfs_done=false");
-
-        let ctx = latency_ctx(&state);
-        let params = SemanticTokensParams {
-            text_document: TextDocumentIdentifier {
-                uri: lsp_types::Url::parse("file:///anything.bsl").unwrap(),
-            },
-            work_done_progress_params: Default::default(),
-            partial_result_params: Default::default(),
-        };
-
-        let result = handle_semantic_tokens_full(ctx, params).unwrap().unwrap();
-        match result {
-            SemanticTokensResult::Tokens(tokens) => assert!(tokens.data.is_empty()),
-            SemanticTokensResult::Partial(_) => panic!("expected full empty tokens"),
-        }
     }
 
     #[test]

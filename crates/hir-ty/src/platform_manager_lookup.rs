@@ -71,6 +71,7 @@ pub(crate) fn build_resolution(
         params: params.into_boxed_slice(),
         defaults: defaults.into_boxed_slice(),
         ret: return_ty,
+        from_doc_comment: false,
     };
     PlatformMethodResolution { signature, return_ty, overloads: lower_overloads_typeid(db, method) }
 }
@@ -111,6 +112,7 @@ pub fn resolve_platform_any_metadata_ref_method(
         params: params.into_boxed_slice(),
         defaults: defaults.into_boxed_slice(),
         ret: return_ty,
+        from_doc_comment: false,
     };
     Some(PlatformMethodResolution {
         signature,
@@ -294,6 +296,7 @@ mod tests {
                 defaults: Box::new([]),
                 ret: db.number(None, None),
                 max_args: Some(0),
+                from_doc_comment: false,
             },
             return_ty: db.number(None, None),
             overloads: vec![vec![db.string(None, false)]],

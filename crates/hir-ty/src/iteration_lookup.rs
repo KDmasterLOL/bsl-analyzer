@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use stdx::case::CaseExt;
 
 use bsl_metadata::MdoType;
 use bsl_platform::PlatformData;
@@ -78,11 +79,11 @@ fn lookup_by_type_name(name: &str) -> Option<Vec<SmolStr>> {
 
 fn lookup_by_metadata_kind(kind: MetadataKind) -> Option<Vec<SmolStr>> {
     let (prefix, _) = metadata_kind_to_prefix_and_mdo(kind)?;
-    let needle = format!("{}.", prefix.to_lowercase());
+    let needle = format!("{}.", prefix.fold_lower());
     PlatformData::instance()
         .all_types()
         .iter()
-        .find(|t| t.english_name.to_lowercase().starts_with(&needle))
+        .find(|t| t.english_name.fold_lower().starts_with(&needle))
         .filter(|t| !t.iter_element_types.is_empty())
         .map(|t| t.iter_element_types.clone())
 }

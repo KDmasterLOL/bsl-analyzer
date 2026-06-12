@@ -3,6 +3,7 @@ use bsl_types::builders::Builders;
 use bsl_types::kind::{TypeId, TypeKind};
 use hir_def::{DefDatabase, DefWithBodyId, ExprId, MethodId, ModuleId};
 use hir_ty::{db::HirDatabase, ImplicitLocalInfo};
+use stdx::case::CaseExt;
 use syntax::{TextRange, TextSize};
 use vfs::FileId;
 
@@ -166,7 +167,7 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
     ) -> Option<SemanticSymbol> {
         let (owner, body, source_map) = self.body_for_range(file_id, token.text_range())?;
         let name = Name::new(token.text());
-        let name_lower = name.as_str().to_lowercase();
+        let name_lower = name.as_str().fold_lower();
 
         if let Some(binding_id) = body
             .bindings_iter()

@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use stdx::case::CaseExt;
 
 use bsl_config::VisibleConfig;
 use bsl_metadata::{AttributeType, MdoType, MetadataObject, MetadataResolver, Register};
@@ -140,7 +141,7 @@ impl ObjectResolver for ConfigsObjectResolver<'_> {
         for cfg in self.0 {
             for name in cfg.configuration.recorders_for_register(parent, register_name) {
                 let name = name.as_str();
-                if seen.insert(name.to_lowercase()) {
+                if seen.insert(name.fold_lower()) {
                     out.push(name.to_string());
                 }
             }

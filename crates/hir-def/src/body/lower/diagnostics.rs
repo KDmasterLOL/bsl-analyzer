@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use stdx::case::CaseExt;
 
 use syntax::{NodeOrToken, SyntaxKind, SyntaxNode};
 use text_size::TextRange;
@@ -58,13 +59,7 @@ pub(crate) fn check_duplicated_code_blocks(ctx: &mut LoweringCtx, branch_nodes: 
 }
 
 fn normalize_code_block(block: &SyntaxNode) -> String {
-    block
-        .text()
-        .to_string()
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .collect::<String>()
-        .to_lowercase()
+    block.text().to_string().chars().filter(|c| !c.is_whitespace()).collect::<String>().fold_lower()
 }
 
 fn count_statements(block: &SyntaxNode) -> usize {
@@ -89,7 +84,7 @@ fn count_statements(block: &SyntaxNode) -> usize {
 }
 
 pub(crate) fn is_deprecated_method(name: &str) -> bool {
-    let lower = name.to_lowercase();
+    let lower = name.fold_lower();
 
     matches!(
         lower.as_str(),
@@ -133,7 +128,7 @@ pub(crate) fn is_type_method(name: &str) -> bool {
 }
 
 pub(crate) fn is_deprecated_managed_form(type_name: &str) -> bool {
-    let lower = type_name.to_lowercase();
+    let lower = type_name.fold_lower();
     matches!(lower.as_str(), "управляемаяформа" | "managedform")
 }
 
@@ -144,7 +139,7 @@ pub(crate) fn is_safe_mode_query(name: &str) -> bool {
 }
 
 pub(crate) fn is_find_by_code_method(name: &str) -> bool {
-    let lower = name.to_lowercase();
+    let lower = name.fold_lower();
     matches!(lower.as_str(), "найтипокоду" | "findbycode")
 }
 
@@ -159,8 +154,8 @@ pub(crate) fn is_deprecated_attribute_8312(
     member: &str,
     is_call: bool,
 ) -> Option<DeprecatedKind8312> {
-    let obj_lower = object.to_lowercase();
-    let member_lower = member.to_lowercase();
+    let obj_lower = object.fold_lower();
+    let member_lower = member.fold_lower();
 
     if is_chart_plot_area(&obj_lower)
         && !is_call
@@ -323,7 +318,7 @@ pub(crate) fn check_try_number_call(node: &SyntaxNode) -> Option<TextRange> {
         return None;
     }
 
-    let name = first_child.text().to_string().to_lowercase();
+    let name = first_child.text().to_string().fold_lower();
     if name == "число" || name == "number" {
         return Some(node.text_range());
     }
@@ -732,12 +727,12 @@ const EXTERNAL_CODE_TOOLS: &[&str] = &[
 const EXTERNAL_CODE_METHODS: &[&str] = &["создать", "create", "подключить", "connect"];
 
 pub(crate) fn is_external_code_tools_name(name: &str) -> bool {
-    let lower = name.to_lowercase();
+    let lower = name.fold_lower();
     EXTERNAL_CODE_TOOLS.contains(&lower.as_str())
 }
 
 pub(crate) fn is_external_code_tools_method(name: &str) -> bool {
-    let lower = name.to_lowercase();
+    let lower = name.fold_lower();
     EXTERNAL_CODE_METHODS.contains(&lower.as_str())
 }
 
@@ -748,7 +743,7 @@ const FIND_BY_CODE: &[&str] = &["найтипокоду", "findbycode"];
 const FIND_BY_NUMBER: &[&str] = &["найтипономеру", "findbynumber"];
 
 pub(crate) fn is_find_element_method(name: &str) -> bool {
-    let lower = name.to_lowercase();
+    let lower = name.fold_lower();
     FIND_BY_DESCRIPTION.contains(&lower.as_str())
         || FIND_BY_CODE.contains(&lower.as_str())
         || FIND_BY_NUMBER.contains(&lower.as_str())
@@ -785,7 +780,7 @@ const MODAL_METHODS: &[(&str, &str, &str, &str)] = &[
 ];
 
 pub(crate) fn get_modal_method_replacement(name: &str) -> Option<&'static str> {
-    let lower = name.to_lowercase();
+    let lower = name.fold_lower();
     for &(ru, en, replacement_ru, replacement_en) in MODAL_METHODS {
         if lower == ru {
             return Some(replacement_ru);
@@ -798,7 +793,7 @@ pub(crate) fn get_modal_method_replacement(name: &str) -> Option<&'static str> {
 }
 
 pub(crate) fn is_this_form_identifier(name: &str) -> bool {
-    let lower = name.to_lowercase();
+    let lower = name.fold_lower();
     lower == "этаформа" || lower == "thisform"
 }
 
@@ -877,7 +872,7 @@ const SYNCHRONOUS_METHODS: &[(&str, &str, &str, &str)] = &[
 ];
 
 pub(crate) fn get_synchronous_call_replacement(name: &str) -> Option<&'static str> {
-    let lower = name.to_lowercase();
+    let lower = name.fold_lower();
     for &(ru, en, replacement_ru, replacement_en) in SYNCHRONOUS_METHODS {
         if lower == ru {
             return Some(replacement_ru);

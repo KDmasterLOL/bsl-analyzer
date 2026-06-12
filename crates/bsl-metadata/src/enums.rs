@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use stdx::case::CaseExt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum ReturnValueReuse {
@@ -15,7 +16,7 @@ pub enum ReturnValueReuse {
 
 impl ReturnValueReuse {
     pub fn from_name(name: &str) -> Self {
-        let name_lower = name.to_lowercase();
+        let name_lower = name.fold_lower();
         match name_lower.as_str() {
             "dontuse" | "неиспользовать" => Self::DontUse,
             "duringrequest" | "навремязапроса" => Self::DuringRequest,
@@ -99,7 +100,7 @@ pub enum FormType {
 
 impl FormType {
     pub fn from_name(name: &str) -> Self {
-        let name_lower = name.to_lowercase();
+        let name_lower = name.fold_lower();
         match name_lower.as_str() {
             "managed" | "управляемая" => Self::Managed,
             "ordinary" | "обычная" => Self::Ordinary,

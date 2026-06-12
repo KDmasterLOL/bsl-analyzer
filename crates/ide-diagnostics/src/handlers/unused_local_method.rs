@@ -4,6 +4,7 @@ use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::AnnotationKind;
 use ide_db::TextRange;
 use rustc_hash::FxHashSet;
+use stdx::case::CaseExt;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -35,7 +36,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     let attachable_prefixes: Vec<String> = attachable_prefixes_str
         .split(',')
-        .map(|s| s.trim().to_lowercase())
+        .map(|s| s.trim().fold_lower())
         .filter(|s| !s.is_empty())
         .collect();
 
@@ -57,7 +58,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     for edge in &summary.call_edges {
         if let hir::call_graph::CallTarget::Local { callee_local_id } = &edge.target {
             if let Some(method) = summary.methods.iter().find(|m| m.local_id == *callee_local_id) {
-                called_methods.insert(method.name.as_str().to_lowercase());
+                called_methods.insert(method.name.as_str().fold_lower());
             }
         }
     }
@@ -67,10 +68,10 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // slots). Like the receiver-blind MethodCall collection below, names count
     // regardless of which module the registration targets.
     for reg in &summary.notify_regs {
-        called_methods.insert(reg.callback_name.as_str().to_lowercase());
+        called_methods.insert(reg.callback_name.as_str().fold_lower());
     }
     for reg in &summary.idle_handler_regs {
-        called_methods.insert(reg.handler_name.as_str().to_lowercase());
+        called_methods.insert(reg.handler_name.as_str().fold_lower());
     }
 
     let module_bodies = ctx.module_bodies();
@@ -83,17 +84,17 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     if let Some(ref form) = metadata.form {
         for handler in form.event_handlers() {
-            called_methods.insert(handler.handler_name.to_lowercase());
+            called_methods.insert(handler.handler_name.fold_lower());
         }
         for handler in form.command_handlers() {
-            called_methods.insert(handler.to_lowercase());
+            called_methods.insert(handler.fold_lower());
         }
     }
 
     if let Some(ref http_service) = metadata.http_service {
         for (_template, method) in http_service.all_methods() {
             if !method.is_handler_empty() {
-                called_methods.insert(method.handler().to_lowercase());
+                called_methods.insert(method.handler().fold_lower());
             }
         }
     }
@@ -101,14 +102,14 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     if let Some(ref web_service) = metadata.web_service {
         for operation in web_service.operations() {
             if !operation.is_handler_empty() {
-                called_methods.insert(operation.procedure_name().to_lowercase());
+                called_methods.insert(operation.procedure_name().fold_lower());
             }
         }
     }
 
     if let Some(ref integration_service) = metadata.integration_service {
         for handler in integration_service.receive_handlers() {
-            called_methods.insert(handler.to_lowercase());
+            called_methods.insert(handler.fold_lower());
         }
     }
 
@@ -152,7 +153,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 fn collect_method_call_names(body: &hir::Body, called_methods: &mut FxHashSet<String>) {
     for (_, expr) in body.exprs_iter() {
         if let hir::Expr::MethodCall { method, .. } = expr {
-            called_methods.insert(method.as_str().to_lowercase());
+            called_methods.insert(method.as_str().fold_lower());
         }
     }
 }
@@ -177,7 +178,7 @@ fn check_method_unused(
         return None;
     }
 
-    let name_lower = name.as_str().to_lowercase();
+    let name_lower = name.as_str().fold_lower();
 
     if is_attachable_method(&name_lower, attachable_prefixes) {
         return None;

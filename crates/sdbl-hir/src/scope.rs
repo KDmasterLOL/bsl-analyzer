@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use stdx::case::CaseExt;
 
 use bsl_metadata::QueryMetadataResolver;
 use rustc_hash::FxHashMap;
@@ -79,21 +80,21 @@ impl<'a> Scope<'a> {
 
     pub fn add_table(&mut self, table: TableRef) {
         if let Some(frame) = self.frames.last_mut() {
-            let key = table.effective_name().to_lowercase();
+            let key = table.effective_name().fold_lower();
             frame.tables.insert(key, table);
         }
     }
 
     pub fn add_temp_table(&mut self, name: String, fields: Vec<FieldDef>) {
         if let Some(frame) = self.frames.last_mut() {
-            let key = name.to_lowercase();
+            let key = name.fold_lower();
             tracing::debug!(name = %name, fields = fields.len(), "Adding temporary table to scope");
             frame.temp_tables.insert(key, TempTableDef { name, fields });
         }
     }
 
     pub fn remove_temp_table(&mut self, name: &str) {
-        let name_lower = name.to_lowercase();
+        let name_lower = name.fold_lower();
         for frame in self.frames.iter_mut().rev() {
             if frame.temp_tables.remove(&name_lower).is_some() {
                 tracing::debug!(name = %name, "Removed temporary table from scope");
@@ -103,7 +104,7 @@ impl<'a> Scope<'a> {
     }
 
     pub fn find_temp_table(&self, name: &str) -> Option<&TempTableDef> {
-        let name_lower = name.to_lowercase();
+        let name_lower = name.fold_lower();
         for frame in self.frames.iter().rev() {
             if let Some(temp_table) = frame.temp_tables.get(&name_lower) {
                 tracing::debug!(name = %name, "Found temporary table in scope");
@@ -114,7 +115,7 @@ impl<'a> Scope<'a> {
     }
 
     pub fn find_table(&self, name: &str) -> Option<&TableRef> {
-        let name_lower = name.to_lowercase();
+        let name_lower = name.fold_lower();
         for frame in self.frames.iter().rev() {
             if let Some(table) = frame.tables.get(&name_lower) {
                 return Some(table);
@@ -165,11 +166,14 @@ impl<'a> Scope<'a> {
 
     pub fn find_tables_with_column(&self, column_name: &str) -> Vec<String> {
         let mut result = Vec::new();
-        let column_lower = column_name.to_lowercase();
 
         for table in self.all_tables() {
             if let Some(ref resolved) = table.metadata {
-                if resolved.fields().iter().any(|f| f.name.to_lowercase() == column_lower) {
+                if resolved
+                    .fields()
+                    .iter()
+                    .any(|f| stdx::case::eq_ignore_case(&f.name, column_name))
+                {
                     result.push(table.effective_name().to_string());
                 }
             }
@@ -479,7 +483,7 @@ impl<'a> Scope<'a> {
                 SdblType::Ref(mdo_ref) => {
                     if let Some(fields) = self.resolve_ref_fields(mdo_ref) {
                         for field in fields {
-                            if seen_names.insert(field.name.to_lowercase()) {
+                            if seen_names.insert(field.name.fold_lower()) {
                                 all_fields.push(field);
                             }
                         }
@@ -488,7 +492,7 @@ impl<'a> Scope<'a> {
                 SdblType::DefinedType { name, underlying_type } => {
                     if let Some(fields) = self.resolve_defined_type_fields(name, underlying_type) {
                         for field in fields {
-                            if seen_names.insert(field.name.to_lowercase()) {
+                            if seen_names.insert(field.name.fold_lower()) {
                                 all_fields.push(field);
                             }
                         }

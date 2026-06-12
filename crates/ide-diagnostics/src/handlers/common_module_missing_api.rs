@@ -1,6 +1,7 @@
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use stdx::case::CaseExt;
 use syntax::ast::{AstNode, FunctionDef, PreRegionDir, ProcedureDef};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -93,7 +94,7 @@ fn has_api_regions(root: &syntax::SyntaxNode) -> bool {
     root.descendants()
         .filter_map(PreRegionDir::cast)
         .filter_map(|r| r.name())
-        .any(|name| API_REGIONS.contains(&name.to_lowercase().as_str()))
+        .any(|name| API_REGIONS.contains(&name.fold_lower().as_str()))
 }
 
 #[cfg(test)]

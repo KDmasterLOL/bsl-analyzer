@@ -3,6 +3,7 @@ use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::{BinaryOp, Body, BodySourceMap, Expr, ExprId, IdConversion, Literal, UnaryOp};
 use std::collections::HashSet;
+use stdx::case::CaseExt;
 use syntax::{SyntaxKind, SyntaxNode};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -231,10 +232,10 @@ fn expr_to_string(expr_id: ExprId, body: &Body) -> String {
                 .map(|arg| expr_to_string(ExprId::from_idx(*arg), body))
                 .collect::<Vec<_>>()
                 .join(",");
-            format!("new({}({}))", type_str.to_lowercase(), args_str)
+            format!("new({}({}))", type_str.fold_lower(), args_str)
         }
         Expr::QualifiedPath(qname) => {
-            qname.segments().iter().map(|s| s.as_str().to_lowercase()).collect::<Vec<_>>().join(".")
+            qname.segments().iter().map(|s| s.as_str().fold_lower()).collect::<Vec<_>>().join(".")
         }
         Expr::MethodCall { receiver, method, args } => {
             let receiver_str = expr_to_string(ExprId::from_idx(*receiver), body);
@@ -243,7 +244,7 @@ fn expr_to_string(expr_id: ExprId, body: &Body) -> String {
                 .map(|arg| expr_to_string(ExprId::from_idx(*arg), body))
                 .collect::<Vec<_>>()
                 .join(",");
-            format!("{}.{}({})", receiver_str, method.as_str().to_lowercase(), args_str)
+            format!("{}.{}({})", receiver_str, method.as_str().fold_lower(), args_str)
         }
         Expr::Array(elements) => {
             let elements_str = elements
@@ -419,7 +420,7 @@ fn check_logical_chain_hir(
 
     for &operand_id in &operands {
         let operand_str = expr_to_string(operand_id, body);
-        let lowered = operand_str.to_lowercase().replace(' ', "");
+        let lowered = operand_str.fold_lower().replace(' ', "");
         let normalized = normalize_operand_hir(&lowered);
 
         if !seen.insert(normalized) {

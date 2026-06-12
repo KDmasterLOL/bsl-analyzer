@@ -1,4 +1,5 @@
 use crate::{SyntaxKind, SyntaxNode, SyntaxToken};
+use stdx::case::CaseExt;
 
 pub trait AstNode: Sized {
     fn can_cast(kind: SyntaxKind) -> bool;
@@ -816,7 +817,7 @@ impl AstNode for PreSymbol {
 
 impl PreSymbol {
     pub fn text(&self) -> Option<String> {
-        self.name_token().map(|token| token.text().to_lowercase())
+        self.name_token().map(|token| token.text().fold_lower())
     }
 
     pub fn name_token(&self) -> Option<SyntaxToken> {

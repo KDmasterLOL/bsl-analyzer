@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use stdx::case::CaseExt;
 
 use bsl_metadata::MdoType;
 use bsl_types::builders::Builders;
@@ -86,13 +87,12 @@ pub fn query_to_projection(
                        shadows: &mut Vec<SdblTypeShadowFacet>,
                        seen: &mut std::collections::HashSet<String>|
      -> bool {
-        let primary_key = name.as_str().to_lowercase();
-        if !seen.contains(&primary_key)
-            && !alt_keys.iter().any(|k| seen.contains(&k.to_lowercase()))
+        let primary_key = name.as_str().fold_lower();
+        if !seen.contains(&primary_key) && !alt_keys.iter().any(|k| seen.contains(&k.fold_lower()))
         {
             seen.insert(primary_key);
             for k in alt_keys {
-                seen.insert(k.to_lowercase());
+                seen.insert(k.fold_lower());
             }
             named_fields.push(ProjectionField::new(
                 name.as_str().to_string(),
@@ -165,12 +165,12 @@ fn expand_asterisk(
     qualifier: Option<&str>,
     hir: &sdbl_hir::SdblHir,
 ) -> Vec<(Name, Option<String>, TypeId, SdblTypeShadowFacet)> {
-    let qualifier_lower = qualifier.map(|q| q.to_lowercase());
+    let qualifier_lower = qualifier.map(|q| q.fold_lower());
     let mut out = Vec::new();
     for table in hir.all_tables() {
         if let Some(q_lower) = qualifier_lower.as_deref() {
-            let effective = table.effective_name().to_lowercase();
-            let full = table.full_name.to_lowercase();
+            let effective = table.effective_name().fold_lower();
+            let full = table.full_name.fold_lower();
             if effective != q_lower && full != q_lower {
                 continue;
             }

@@ -351,6 +351,9 @@ fn bootstrap_smoke(args: &SmokeArgs) -> Result<SmokeBootstrap, String> {
             loader::Message::Progress { n_done: LoadingProgress::Finished, .. } => {
                 state.process_changes(true);
                 state.init_source_root();
+                // Mirrors the server finalize: reopen the whole-config loader
+                // gate that `set_workspace_root` closed for the initial load.
+                state.analysis_host.raw_database_mut().set_workspace_load_complete(true);
                 state.bootstrap_metadata_substrate();
                 state.warm_metadata_cache();
                 state.degraded_files_count = state.skipped_bsl.len();

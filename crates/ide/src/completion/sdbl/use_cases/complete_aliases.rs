@@ -1,18 +1,19 @@
 use crate::completion::sdbl::domain::SdblCompletionItem;
 use crate::completion::CompletionItemKind;
 use sdbl_hir::Scope;
+use stdx::case::CaseExt;
 
 pub struct CompleteAliasesUseCase;
 
 impl CompleteAliasesUseCase {
     pub fn execute_table_aliases(scope: &Scope, prefix: &str) -> Vec<SdblCompletionItem> {
-        let prefix_lower = prefix.to_lowercase();
+        let prefix_lower = prefix.fold_lower();
 
         scope
             .all_tables()
             .filter_map(|table| {
                 if let Some(ref alias) = table.alias {
-                    if prefix.is_empty() || alias.to_lowercase().starts_with(&prefix_lower) {
+                    if prefix.is_empty() || alias.fold_lower().starts_with(&prefix_lower) {
                         let detail = format!("Псевдоним для {}", table.full_name);
                         let documentation = format!("Псевдоним таблицы {}", table.full_name);
 

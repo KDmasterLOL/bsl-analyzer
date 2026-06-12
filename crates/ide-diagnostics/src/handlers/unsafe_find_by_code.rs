@@ -3,6 +3,7 @@ use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use bsl_metadata::{CodeSeries, MdoType};
 use ide_db::TextRange;
+use stdx::case::CaseExt;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -29,7 +30,7 @@ pub fn from_hir(
         return None;
     }
 
-    let manager_lower = manager_name.to_lowercase();
+    let manager_lower = manager_name.fold_lower();
     let mdo_type = if matches!(manager_lower.as_str(), "справочники" | "catalogs") {
         MdoType::Catalog
     } else if matches!(

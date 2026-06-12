@@ -2,6 +2,7 @@ use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use regex::Regex;
+use stdx::case::CaseExt;
 use syntax::{NodeOrToken, SyntaxKind, SyntaxNode};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -31,7 +32,7 @@ fn check_default_tags(comment_text: &str) -> bool {
         return false;
     }
 
-    let lower = trimmed.to_lowercase();
+    let lower = trimmed.fold_lower();
 
     for tag in SIMPLE_TAGS {
         if lower.starts_with(tag) {

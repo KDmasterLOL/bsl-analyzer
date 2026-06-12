@@ -3,6 +3,7 @@ use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::{Expr, ExprId, IdConversion, Literal, MethodId, ModuleId, Stmt, StmtId};
 use ide_db::TextRange;
+use stdx::case::CaseExt;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,
@@ -21,7 +22,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 fn has_str_template_calls(text: &str) -> bool {
     const PATTERNS: &[&str] = &["стршаблон", "strtemplate"];
 
-    let text_lower = text.to_lowercase();
+    let text_lower = text.fold_lower();
     for pattern in PATTERNS {
         if text_lower.contains(pattern) {
             return true;
@@ -63,12 +64,12 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                 let (method_name, args) = match expr {
                     Expr::Call { callee, args } => {
                         if let Expr::Path(name) = body.expr(ExprId::from_idx(*callee)) {
-                            (name.as_str().to_lowercase(), args)
+                            (name.as_str().fold_lower(), args)
                         } else {
                             continue;
                         }
                     }
-                    Expr::MethodCall { method, args, .. } => (method.as_str().to_lowercase(), args),
+                    Expr::MethodCall { method, args, .. } => (method.as_str().fold_lower(), args),
                     _ => continue,
                 };
 

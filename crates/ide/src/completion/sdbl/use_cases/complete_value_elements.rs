@@ -1,6 +1,7 @@
 use crate::completion::sdbl::domain::{MetadataProvider, SdblCompletionItem};
 use crate::completion::CompletionItemKind;
 use bsl_metadata::MdoType;
+use stdx::case::CaseExt;
 
 pub struct CompleteValueElementsUseCase;
 
@@ -50,7 +51,7 @@ impl CompleteValueElementsUseCase {
     }
 
     fn empty_ref_items(prefix: &str, is_russian: bool) -> Vec<SdblCompletionItem> {
-        let prefix_lower = prefix.to_lowercase();
+        let prefix_lower = prefix.fold_lower();
         let mut items = Vec::new();
 
         if is_russian {
@@ -76,17 +77,17 @@ impl CompleteValueElementsUseCase {
         mdo: &bsl_metadata::MetadataObject,
         prefix: &str,
     ) -> Vec<SdblCompletionItem> {
-        let prefix_lower = prefix.to_lowercase();
+        let prefix_lower = prefix.fold_lower();
 
         mdo.enum_values
             .iter()
             .filter(|ev| {
                 prefix.is_empty()
-                    || ev.name.to_lowercase().starts_with(&prefix_lower)
+                    || ev.name.fold_lower().starts_with(&prefix_lower)
                     || ev
                         .name_en
                         .as_ref()
-                        .is_some_and(|en| en.to_lowercase().starts_with(&prefix_lower))
+                        .is_some_and(|en| en.fold_lower().starts_with(&prefix_lower))
             })
             .map(|ev| {
                 SdblCompletionItem::new(&ev.name, CompletionItemKind::EnumMember)
@@ -99,17 +100,17 @@ impl CompleteValueElementsUseCase {
         mdo: &bsl_metadata::MetadataObject,
         prefix: &str,
     ) -> Vec<SdblCompletionItem> {
-        let prefix_lower = prefix.to_lowercase();
+        let prefix_lower = prefix.fold_lower();
 
         mdo.predefined_items
             .iter()
             .filter(|pi| {
                 prefix.is_empty()
-                    || pi.name.to_lowercase().starts_with(&prefix_lower)
+                    || pi.name.fold_lower().starts_with(&prefix_lower)
                     || pi
                         .name_en
                         .as_ref()
-                        .is_some_and(|en| en.to_lowercase().starts_with(&prefix_lower))
+                        .is_some_and(|en| en.fold_lower().starts_with(&prefix_lower))
             })
             .map(|pi| {
                 SdblCompletionItem::new(&pi.name, CompletionItemKind::Constant).with_detail(

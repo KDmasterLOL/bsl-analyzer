@@ -1,4 +1,5 @@
 use bsl_metadata::ModuleType;
+use stdx::case::CaseExt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RegionPattern {
@@ -109,12 +110,12 @@ pub fn is_standard_region(module_type: ModuleType, name: &str) -> bool {
 }
 
 fn eq_ignore_case(a: &str, b: &str) -> bool {
-    a.to_lowercase() == b.to_lowercase()
+    stdx::case::eq_ignore_case(a, b)
 }
 
 fn strip_prefix_ignore_case<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
-    let s_lower = s.to_lowercase();
-    let prefix_lower = prefix.to_lowercase();
+    let s_lower = s.fold_lower();
+    let prefix_lower = prefix.fold_lower();
 
     if !s_lower.starts_with(&prefix_lower) {
         return None;

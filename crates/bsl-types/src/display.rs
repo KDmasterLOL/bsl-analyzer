@@ -217,6 +217,14 @@ fn render(kind: &TypeKind, ctx: &dyn DisplayCtx, db: &dyn TypeKernelDb, buf: &mu
             buf.push(':');
             render_mdo_ref(owner, ctx, buf);
         }
+        TypeKind::CommonModule(facet) => {
+            buf.push_str(match ctx.locale() {
+                Locale::Ru => "ОбщийМодуль",
+                Locale::En => "CommonModule",
+            });
+            buf.push(':');
+            buf.push_str(&facet.name);
+        }
         TypeKind::Union(members) => render_union(members.as_ref(), ctx, db, buf),
         TypeKind::Function(facet) => render_function(facet, ctx, db, buf),
         TypeKind::QueryResult(facet) => render_query_result(facet, ctx, db, buf),
@@ -776,6 +784,23 @@ mod tests {
         expect!["ThisObject:Document.ЗаказКлиента"].assert_eq(&show(&db, object, &en()));
         expect!["ЭтотМенеджер:Документ.ЗаказКлиента"].assert_eq(&show(&db, manager, &ru()));
         expect!["ThisManager:Document.ЗаказКлиента"].assert_eq(&show(&db, manager, &en()));
+    }
+
+    #[test]
+    fn common_module_renders_name_bilingually() {
+        let db = InMemoryDb::new();
+        let module = db.common_module("ОбщегоНазначения".to_string(), ConfigId::Root);
+
+        expect!["ОбщийМодуль:ОбщегоНазначения"].assert_eq(&show(&db, module, &ru()));
+        expect!["CommonModule:ОбщегоНазначения"].assert_eq(&show(&db, module, &en()));
+    }
+
+    #[test]
+    fn common_module_interns_by_canonical_name() {
+        let db = InMemoryDb::new();
+        let a = db.common_module("Утилиты".to_string(), ConfigId::Root);
+        let b = db.common_module("Утилиты".to_string(), ConfigId::Root);
+        assert_eq!(a, b, "same canonical name must intern to the same type");
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use rustc_hash::FxHashSet;
+use stdx::case::CaseExt;
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -40,16 +41,16 @@ fn build_attribute_names_to_skip(ctx: &DiagnosticsContext) -> FxHashSet<String> 
             let mut names = FxHashSet::default();
 
             for attr in &mdo.attributes {
-                names.insert(attr.name.to_lowercase());
+                names.insert(attr.name.fold_lower());
                 if let Some(ref en) = attr.name_en {
-                    names.insert(en.to_lowercase());
+                    names.insert(en.fold_lower());
                 }
             }
 
             for ts in &mdo.tabular_sections {
-                names.insert(ts.name().to_lowercase());
+                names.insert(ts.name().fold_lower());
                 if let Some(en) = ts.name_en() {
-                    names.insert(en.to_lowercase());
+                    names.insert(en.fold_lower());
                 }
             }
 
@@ -64,18 +65,18 @@ fn build_attribute_names_to_skip(ctx: &DiagnosticsContext) -> FxHashSet<String> 
             let mut names = FxHashSet::default();
 
             for dim in register.dimensions() {
-                names.insert(dim.name().to_lowercase());
+                names.insert(dim.name().fold_lower());
             }
             for res in register.resources() {
-                names.insert(res.name().to_lowercase());
+                names.insert(res.name().fold_lower());
                 if let Some(en) = res.name_en() {
-                    names.insert(en.to_lowercase());
+                    names.insert(en.fold_lower());
                 }
             }
             for attr in register.attributes() {
-                names.insert(attr.name().to_lowercase());
+                names.insert(attr.name().fold_lower());
                 if let Some(en) = attr.name_en() {
-                    names.insert(en.to_lowercase());
+                    names.insert(en.fold_lower());
                 }
             }
 
@@ -102,7 +103,7 @@ fn build_attribute_names_to_skip(ctx: &DiagnosticsContext) -> FxHashSet<String> 
 
             if let Some(form) = &metadata.form {
                 for attr_name in form.attribute_names() {
-                    names.insert(attr_name.to_lowercase());
+                    names.insert(attr_name.fold_lower());
                 }
             }
 
@@ -206,7 +207,7 @@ fn check_method_with_module_liveness(
 
     for param_id in body.params() {
         let binding = body.binding(param_id);
-        declared_vars.insert(binding.name.as_str().to_lowercase());
+        declared_vars.insert(binding.name.as_str().fold_lower());
     }
 
     let var_index = live_at_entry.var_index();
@@ -222,7 +223,7 @@ fn check_method_with_module_liveness(
             for &binding_id in bindings.iter() {
                 let binding_id_opaque = BindingId::from_idx(binding_id);
                 let binding = body.binding(binding_id_opaque);
-                declared_vars.insert(binding.name.as_str().to_lowercase());
+                declared_vars.insert(binding.name.as_str().fold_lower());
 
                 let is_unused = if let Some(idx) = var_index.get_index_by_binding(binding_id_opaque)
                 {
@@ -249,7 +250,7 @@ fn check_method_with_module_liveness(
         if let hir::Stmt::For { var, .. } = body.stmt(stmt_id) {
             let var_opaque = BindingId::from_idx(*var);
             let binding = body.binding(var_opaque);
-            declared_vars.insert(binding.name.as_str().to_lowercase());
+            declared_vars.insert(binding.name.as_str().fold_lower());
 
             let is_unused = if let Some(idx) = var_index.get_index_by_binding(var_opaque) {
                 !all_live_union.contains(idx)
@@ -269,7 +270,7 @@ fn check_method_with_module_liveness(
         if let hir::Stmt::ForEach { var, .. } = body.stmt(stmt_id) {
             let var_opaque = BindingId::from_idx(*var);
             let binding = body.binding(var_opaque);
-            declared_vars.insert(binding.name.as_str().to_lowercase());
+            declared_vars.insert(binding.name.as_str().fold_lower());
 
             let is_unused = if let Some(idx) = var_index.get_index_by_binding(var_opaque) {
                 !all_live_union.contains(idx)
@@ -292,7 +293,7 @@ fn check_method_with_module_liveness(
         if let hir::Stmt::Assign { target, .. } = body.stmt(stmt_id) {
             let target_opaque = hir::ExprId::from_idx(*target);
             if let hir::Expr::Path(name) = body.expr(target_opaque) {
-                let lowercase_name = name.as_str().to_lowercase();
+                let lowercase_name = name.as_str().fold_lower();
 
                 if !declared_vars.contains(&lowercase_name)
                     && !skip_attr_names.contains(&lowercase_name)
@@ -359,7 +360,7 @@ fn check_module_level_code(
         if let hir::Stmt::Assign { target, .. } = body.stmt(stmt_id) {
             let target_opaque = hir::ExprId::from_idx(*target);
             if let hir::Expr::Path(name) = body.expr(target_opaque) {
-                let lowercase_name = name.as_str().to_lowercase();
+                let lowercase_name = name.as_str().fold_lower();
 
                 if skip_attr_names.contains(&lowercase_name) {
                     continue;
@@ -414,7 +415,7 @@ fn check_module_var_declarations(
         if var.is_export {
             continue;
         }
-        let key = var.name.to_lowercase();
+        let key = var.name.fold_lower();
         if !all_referenced_externals.contains(&key) {
             diagnostics.push(create_diagnostic(&var.name, var.range, code, ctx));
         }

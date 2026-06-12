@@ -3,6 +3,7 @@ use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::ModuleMetadata;
 use ide_db::TextRange;
+use stdx::case::CaseExt;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,
@@ -67,24 +68,24 @@ fn collect_mdo_diagnostics(
     ctx: &DiagnosticsContext,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let parent_name_lower = parent_name.to_lowercase();
+    let parent_name_lower = parent_name.fold_lower();
 
     for attr in &mdo.attributes {
-        if attr.name.to_lowercase() == parent_name_lower {
+        if attr.name.fold_lower() == parent_name_lower {
             diagnostics.push(create_diagnostic(&attr.name, parent_name, code, ctx));
         }
     }
 
     for ts in &mdo.tabular_sections {
         let ts_name = ts.name();
-        let ts_name_lower = ts_name.to_lowercase();
+        let ts_name_lower = ts_name.fold_lower();
 
         if ts_name_lower == parent_name_lower {
             diagnostics.push(create_diagnostic(ts_name, parent_name, code, ctx));
         }
 
         for ts_attr in ts.attributes() {
-            if ts_attr.name().to_lowercase() == ts_name_lower {
+            if ts_attr.name().fold_lower() == ts_name_lower {
                 diagnostics.push(create_diagnostic(ts_attr.name(), ts_name, code, ctx));
             }
         }
@@ -98,22 +99,22 @@ fn collect_register_diagnostics(
     ctx: &DiagnosticsContext,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let parent_name_lower = parent_name.to_lowercase();
+    let parent_name_lower = parent_name.fold_lower();
 
     for dim in register.dimensions() {
-        if dim.name().to_lowercase() == parent_name_lower {
+        if dim.name().fold_lower() == parent_name_lower {
             diagnostics.push(create_diagnostic(dim.name(), parent_name, code, ctx));
         }
     }
 
     for resource in register.resources() {
-        if resource.name().to_lowercase() == parent_name_lower {
+        if resource.name().fold_lower() == parent_name_lower {
             diagnostics.push(create_diagnostic(resource.name(), parent_name, code, ctx));
         }
     }
 
     for attr in register.attributes() {
-        if attr.name().to_lowercase() == parent_name_lower {
+        if attr.name().fold_lower() == parent_name_lower {
             diagnostics.push(create_diagnostic(attr.name(), parent_name, code, ctx));
         }
     }

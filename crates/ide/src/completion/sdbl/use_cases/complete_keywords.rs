@@ -1,17 +1,18 @@
 use crate::completion::sdbl::domain::SdblCompletionItem;
 use crate::completion::CompletionItemKind;
+use stdx::case::CaseExt;
 
 pub struct CompleteKeywordsUseCase;
 
 impl CompleteKeywordsUseCase {
     pub fn execute(prefix: &str) -> Vec<SdblCompletionItem> {
         let keywords = Self::sdbl_keywords();
-        let prefix_lower = prefix.to_lowercase();
+        let prefix_lower = prefix.fold_lower();
 
         let mut items = Vec::new();
 
         for (russian, english, description) in &keywords {
-            if russian.to_lowercase().starts_with(&prefix_lower) || prefix.is_empty() {
+            if russian.fold_lower().starts_with(&prefix_lower) || prefix.is_empty() {
                 items.push(
                     SdblCompletionItem::new(*russian, CompletionItemKind::Keyword)
                         .with_detail(format!("Ключевое слово SDBL ({})", english))
@@ -19,7 +20,7 @@ impl CompleteKeywordsUseCase {
                 );
             }
 
-            if english.to_lowercase().starts_with(&prefix_lower) || prefix.is_empty() {
+            if english.fold_lower().starts_with(&prefix_lower) || prefix.is_empty() {
                 items.push(
                     SdblCompletionItem::new(*english, CompletionItemKind::Keyword)
                         .with_detail(format!("SDBL keyword ({})", russian))

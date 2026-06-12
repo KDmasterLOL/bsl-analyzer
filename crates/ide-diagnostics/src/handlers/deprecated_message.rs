@@ -2,6 +2,7 @@ use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
+use stdx::case::CaseExt;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -37,7 +38,7 @@ pub fn from_hir(name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Optio
 }
 
 fn get_message(method_name: &str) -> String {
-    let lower = method_name.to_lowercase();
+    let lower = method_name.fold_lower();
     if lower == "сообщить" {
         "Используйте \"ОбщегоНазначения.СообщитьПользователю\" вместо устаревшего \"Сообщить\""
             .to_string()

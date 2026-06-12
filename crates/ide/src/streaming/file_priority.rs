@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::sync::Arc;
+use stdx::case::CaseExt;
 
 use bsl_metadata::{CommonModule, Configuration};
 
@@ -31,7 +32,7 @@ pub fn compute_priority(path: &Path, configuration: Option<&Arc<Configuration>>)
 }
 
 fn extract_common_module_name(path: &str) -> Option<String> {
-    let lower = path.to_lowercase();
+    let lower = path.fold_lower();
 
     let (prefix, prefix_len) = if let Some(idx) = lower.find("commonmodules/") {
         (idx, "commonmodules/".len())
@@ -81,7 +82,7 @@ fn common_module_priority(module: &CommonModule) -> u8 {
 }
 
 fn module_type_priority(path: &str) -> u8 {
-    let lower = path.to_lowercase();
+    let lower = path.fold_lower();
 
     if lower.contains("/ext/managermodule.bsl") || lower.contains("/ext/модульменеджера.bsl")
     {

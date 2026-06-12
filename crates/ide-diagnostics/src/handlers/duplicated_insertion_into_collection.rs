@@ -6,6 +6,7 @@ use ide_db::TextRange;
 use rustc_hash::{FxHashMap, FxHasher};
 use smol_str::SmolStr;
 use std::hash::{Hash, Hasher};
+use stdx::case::CaseExt;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -83,7 +84,7 @@ fn is_special_value(body: &Body, expr_id: ExprId) -> bool {
         },
         Expr::Field { base, field: _ } => {
             if let Expr::Path(name) = body.expr(ExprId::from_idx(*base)) {
-                let base_lower = name.as_str().to_lowercase();
+                let base_lower = name.as_str().fold_lower();
                 base_lower == "символы" || base_lower == "chars"
             } else {
                 false
@@ -101,7 +102,7 @@ enum InsertionMethodKind {
 }
 
 fn get_insertion_method_kind(name: &Name, allow_add: bool) -> Option<InsertionMethodKind> {
-    let lower = name.as_str().to_lowercase();
+    let lower = name.as_str().fold_lower();
     match lower.as_str() {
         "вставить" | "insert" => Some(InsertionMethodKind::Insert),
         "добавить" | "add" if allow_add => Some(InsertionMethodKind::Add),
@@ -183,7 +184,7 @@ impl VariableGenerations {
     }
 
     fn get(&self, name: &str) -> usize {
-        let key: SmolStr = name.to_lowercase().into();
+        let key: SmolStr = name.fold_lower().into();
 
         let direct_gen = self.generations.get(&key).copied().unwrap_or(0);
 
@@ -191,7 +192,7 @@ impl VariableGenerations {
         let mut max_gen = direct_gen;
 
         for i in 1..parts.len() {
-            let prefix: SmolStr = parts[..i].join(".").to_lowercase().into();
+            let prefix: SmolStr = parts[..i].join(".").fold_lower().into();
             if let Some(&gen) = self.generations.get(&prefix) {
                 max_gen = max_gen.max(gen);
             }
@@ -201,12 +202,12 @@ impl VariableGenerations {
     }
 
     fn increment(&mut self, name: &str) {
-        let key: SmolStr = name.to_lowercase().into();
+        let key: SmolStr = name.fold_lower().into();
         *self.generations.entry(key).or_insert(0) += 1;
 
         let parts: Vec<&str> = name.split('.').collect();
         for i in (1..parts.len()).rev() {
-            let prefix: SmolStr = parts[..i].join(".").to_lowercase().into();
+            let prefix: SmolStr = parts[..i].join(".").fold_lower().into();
             *self.generations.entry(prefix).or_insert(0) += 1;
         }
     }
@@ -553,7 +554,7 @@ impl<'a> InsertionTracker<'a> {
 }
 
 fn is_bsl_keyword_or_literal(word: &str) -> bool {
-    let lower = word.to_lowercase();
+    let lower = word.fold_lower();
     matches!(
         lower.as_str(),
         "новый"

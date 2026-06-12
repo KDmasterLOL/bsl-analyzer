@@ -5,6 +5,7 @@ use ide_db::TextRange;
 use once_cell::sync::Lazy;
 use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
+use stdx::case::CaseExt;
 use syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};
 use text_size::TextSize;
 
@@ -208,8 +209,8 @@ impl Config {
 
     fn should_ignore(&self, word: &str) -> bool {
         if self.case_insensitive {
-            let word_lower = word.to_lowercase();
-            self.user_words_to_ignore.iter().any(|w| w.to_lowercase() == word_lower)
+            let word_lower = word.fold_lower();
+            self.user_words_to_ignore.iter().any(|w| w.fold_lower() == word_lower)
         } else {
             self.user_words_to_ignore.contains(word)
         }

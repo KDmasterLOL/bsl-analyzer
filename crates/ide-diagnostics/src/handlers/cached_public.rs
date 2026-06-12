@@ -2,6 +2,7 @@ use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use bsl_metadata::ReturnValueReuse;
+use stdx::case::CaseExt;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -80,7 +81,7 @@ fn is_cached_reuse(reuse: ReturnValueReuse) -> bool {
 }
 
 fn is_public_region(region_name: &str) -> bool {
-    let name_lower = region_name.to_lowercase();
+    let name_lower = region_name.fold_lower();
     name_lower == "public" || name_lower == "программныйинтерфейс"
 }
 

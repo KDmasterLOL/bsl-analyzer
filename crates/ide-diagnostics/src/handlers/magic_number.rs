@@ -4,6 +4,7 @@ use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::MagicNumberContext;
 use ide_db::TextRange;
 use std::collections::HashSet;
+use stdx::case::CaseExt;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -111,7 +112,7 @@ impl Config {
         );
         let excluded_constructors: HashSet<String> = excluded_constructors_str
             .split(',')
-            .map(|s| s.trim().to_lowercase())
+            .map(|s| s.trim().fold_lower())
             .filter(|s| !s.is_empty())
             .collect();
 

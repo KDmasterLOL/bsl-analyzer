@@ -16,6 +16,7 @@
 //! (`ide-db`) asserts the result is identical to the Salsa fold.
 
 use std::path::Path;
+use stdx::case::CaseExt;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -142,7 +143,7 @@ impl GraphIndex {
         let mut by_name = FxHashMap::default();
         for entry in &all {
             by_name
-                .entry(entry.name.as_str().to_lowercase())
+                .entry(entry.name.as_str().fold_lower())
                 .or_insert(MethodRef { local_id: entry.local_id, is_export: entry.is_export });
             // Pass-1 dispatch rule: module execution context wins, else annotation.
             self.node_dispatch.insert(
@@ -232,7 +233,7 @@ impl GraphIndex {
     /// Returns the same `{local_id, is_export}` the Salsa symbol tree would, so the
     /// reconstructed `MethodId` is identical.
     fn find_method(&self, target: ModuleId, name: &Name) -> Option<MethodRef> {
-        self.methods.get(&target)?.by_name.get(&name.as_str().to_lowercase()).copied()
+        self.methods.get(&target)?.by_name.get(&name.as_str().fold_lower()).copied()
     }
 
     /// Resident per-node dispatch — the same value the fold's seeded graph returns
@@ -497,7 +498,7 @@ pub fn extract_unresolved_refs(
             CallTarget::QualifiedModule { module_name, method_name } => {
                 if let Ok(target) = resolver.locate_common_module(db, module_name) {
                     if unresolved(index.find_method(target, method_name)) {
-                        out.push((target, method_name.as_str().to_lowercase()));
+                        out.push((target, method_name.as_str().fold_lower()));
                     }
                 }
             }
@@ -508,7 +509,7 @@ pub fn extract_unresolved_refs(
             } => {
                 if let Ok(target) = resolver.locate_manager_module(db, *manager_type, object_name) {
                     if unresolved(index.find_method(target, method_name)) {
-                        out.push((target, method_name.as_str().to_lowercase()));
+                        out.push((target, method_name.as_str().fold_lower()));
                     }
                 }
             }
@@ -524,7 +525,7 @@ pub fn extract_unresolved_refs(
         if let crate::call_graph::NotifyTarget::Module(module_name) = &reg.target {
             if let Ok(target) = resolver.locate_common_module(db, module_name) {
                 if unresolved(index.find_method(target, &reg.callback_name)) {
-                    out.push((target, reg.callback_name.as_str().to_lowercase()));
+                    out.push((target, reg.callback_name.as_str().fold_lower()));
                 }
             }
         }
@@ -826,7 +827,7 @@ pub fn project_batch_form_edges<DB: ConfigsDatabase + Clone + Send>(
             let mut attr_backing: FxHashMap<String, (MdoType, String)> = FxHashMap::default();
             for attr in &form.attributes {
                 let name = crate::name::Name::new(&attr.name);
-                let lower = name.as_str().to_lowercase();
+                let lower = name.as_str().fold_lower();
                 if seen_attr.insert(lower.clone()) {
                     attributes.push(name.clone());
                     if let bsl_metadata::AttributeType::Ref { mdo_type, name: obj } =
@@ -852,7 +853,7 @@ pub fn project_batch_form_edges<DB: ConfigsDatabase + Clone + Send>(
                 }
                 let mut segs = dp.split('.');
                 let Some(seg0) = segs.next() else { continue };
-                let Some((mdo, obj)) = attr_backing.get(&seg0.to_lowercase()) else { continue };
+                let Some((mdo, obj)) = attr_backing.get(&seg0.fold_lower()) else { continue };
                 let field_path: Vec<String> = segs.map(str::to_string).collect();
                 if field_path.is_empty() {
                     continue;
@@ -901,19 +902,19 @@ pub fn project_batch_form_edges<DB: ConfigsDatabase + Clone + Send>(
         // that survivor spelling, not a later same-name element's own casing.
         let mut survivor_name: FxHashMap<String, &crate::name::Name> = FxHashMap::default();
         for item in &form.items {
-            let lower = item.name.as_str().to_lowercase();
+            let lower = item.name.as_str().fold_lower();
             survivor_id.entry(lower.clone()).or_insert(item.id);
             survivor_name.entry(lower).or_insert(&item.name);
         }
         let mut seen_item = FxHashSet::default();
         for item in &form.items {
-            if !seen_item.insert(item.name.as_str().to_lowercase()) {
+            if !seen_item.insert(item.name.as_str().fold_lower()) {
                 continue;
             }
             let parent = item.parent_id.and_then(|pid| Some((pid, *id_to_name.get(&pid)?))).filter(
                 |(pid, parent_name)| {
                     !parent_name.as_str().eq_ignore_ascii_case(item.name.as_str())
-                        && survivor_id.get(&parent_name.as_str().to_lowercase()) == Some(pid)
+                        && survivor_id.get(&parent_name.as_str().fold_lower()) == Some(pid)
                 },
             );
             let parent_node = match parent {
@@ -943,7 +944,7 @@ pub fn project_batch_form_edges<DB: ConfigsDatabase + Clone + Send>(
                 },
                 BindingFrom::Item(name) => {
                     let survivor =
-                        survivor_name.get(&name.as_str().to_lowercase()).copied().unwrap_or(name);
+                        survivor_name.get(&name.as_str().fold_lower()).copied().unwrap_or(name);
                     form_item(survivor.clone())
                 }
             };
@@ -1047,7 +1048,7 @@ pub fn project_workspace_catalog_edges<DB: ConfigsDatabase>(
         a.mdo_type
             .english_name()
             .cmp(b.mdo_type.english_name())
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            .then_with(|| a.name.fold_lower().cmp(&b.name.fold_lower()))
             .then_with(|| a.name.cmp(&b.name))
     });
 
@@ -1057,7 +1058,7 @@ pub fn project_workspace_catalog_edges<DB: ConfigsDatabase>(
     let mut seen_ts_attr: FxHashSet<(MdoType, String, String, String)> = FxHashSet::default();
     for obj in &objects {
         let object_name = state.mdo_canonical.canonical(obj.mdo_type, &obj.name);
-        let key = object_name.as_str().to_lowercase();
+        let key = object_name.as_str().fold_lower();
         let mdo = GraphNode::Mdo { mdo_type: obj.mdo_type, object_name: object_name.clone() };
         // Index this object for form data-binding resolution. First-wins on each
         // lowercased name mirrors the dedup below, so the indexed (metadata-cased) name
@@ -1070,20 +1071,20 @@ pub fn project_workspace_catalog_edges<DB: ConfigsDatabase>(
             }
         });
         for attr in &obj.attrs {
-            entry.attrs.entry(attr.to_lowercase()).or_insert_with(|| crate::name::Name::new(attr));
+            entry.attrs.entry(attr.fold_lower()).or_insert_with(|| crate::name::Name::new(attr));
         }
         for (section, cols) in &obj.sections {
             let sec =
-                entry.sections.entry(section.to_lowercase()).or_insert_with(|| CatalogSection {
+                entry.sections.entry(section.fold_lower()).or_insert_with(|| CatalogSection {
                     section_name: crate::name::Name::new(section),
                     cols: FxHashMap::default(),
                 });
             for col in cols {
-                sec.cols.entry(col.to_lowercase()).or_insert_with(|| crate::name::Name::new(col));
+                sec.cols.entry(col.fold_lower()).or_insert_with(|| crate::name::Name::new(col));
             }
         }
         for attr in &obj.attrs {
-            if seen_attr.insert((obj.mdo_type, key.clone(), attr.to_lowercase())) {
+            if seen_attr.insert((obj.mdo_type, key.clone(), attr.fold_lower())) {
                 edges.push(contains_edge(
                     mdo.clone(),
                     GraphNode::Attribute {
@@ -1095,7 +1096,7 @@ pub fn project_workspace_catalog_edges<DB: ConfigsDatabase>(
             }
         }
         for (section, cols) in &obj.sections {
-            let section_lower = section.to_lowercase();
+            let section_lower = section.fold_lower();
             let ts = GraphNode::TabularSection {
                 mdo_type: obj.mdo_type,
                 object_name: object_name.clone(),
@@ -1109,7 +1110,7 @@ pub fn project_workspace_catalog_edges<DB: ConfigsDatabase>(
                     obj.mdo_type,
                     key.clone(),
                     section_lower.clone(),
-                    col.to_lowercase(),
+                    col.fold_lower(),
                 )) {
                     edges.push(contains_edge(
                         ts.clone(),
@@ -1371,7 +1372,7 @@ fn rls_condition_objects(
         return Vec::new();
     }
     // A condition that is itself a SELECT is not a boolean fragment; never splice it after `ГДЕ`.
-    let head = cond.split_whitespace().next().unwrap_or("").to_lowercase();
+    let head = cond.split_whitespace().next().unwrap_or("").fold_lower();
     if head == "выбрать" || head == "select" {
         return Vec::new();
     }
@@ -1397,7 +1398,7 @@ fn rls_condition_objects(
     for query in package.queries() {
         query.hir.collect_resolved_tables(&mut resolved);
     }
-    let parent_lower = parent_name.to_lowercase();
+    let parent_lower = parent_name.fold_lower();
     let mut out = Vec::new();
     let mut seen: FxHashSet<(MdoType, String)> = FxHashSet::default();
     for table in resolved {
@@ -1407,10 +1408,10 @@ fn rls_condition_objects(
             sdbl_hir::ResolvedTable::TempTable { .. } => continue,
         };
         // Skip the wrapper's own FROM table (the restricted object) — already linked directly.
-        if mdo_type == parent_type && name.to_lowercase() == parent_lower {
+        if mdo_type == parent_type && name.fold_lower() == parent_lower {
             continue;
         }
-        if seen.insert((mdo_type, name.to_lowercase())) {
+        if seen.insert((mdo_type, name.fold_lower())) {
             out.push((mdo_type, name));
         }
     }
@@ -1423,7 +1424,7 @@ fn strip_leading_where(condition: &str) -> &str {
     let trimmed = condition.trim();
     // Lowercase to fold case for both ASCII (`WHERE`) and Cyrillic (`ГДЕ`); lowercasing keeps the
     // byte length stable for these alphabets, so the offset is valid back in `trimmed`.
-    let lower = trimmed.to_lowercase();
+    let lower = trimmed.fold_lower();
     for kw in ["где", "where"] {
         if let Some(rest) = lower.strip_prefix(kw) {
             // Only strip a standalone keyword (followed by whitespace), not an identifier prefix.
@@ -1484,7 +1485,7 @@ pub fn project_form_binding_edges(state: &GraphBuildState) -> Vec<WorkspaceCallE
     let mut seen: FxHashSet<(GraphNode, GraphNode)> = FxHashSet::default();
     for binding in &state.form_bindings {
         let Some(entry) =
-            state.catalog_index.get(&(binding.target_mdo, binding.target_obj.to_lowercase()))
+            state.catalog_index.get(&(binding.target_mdo, binding.target_obj.fold_lower()))
         else {
             continue;
         };
@@ -1496,7 +1497,7 @@ pub fn project_form_binding_edges(state: &GraphBuildState) -> Vec<WorkspaceCallE
             },
             // `Объект.<поле>` → an object attribute.
             [field] => {
-                let Some(attr) = entry.attrs.get(&field.to_lowercase()) else { continue };
+                let Some(attr) = entry.attrs.get(&field.fold_lower()) else { continue };
                 GraphNode::Attribute {
                     mdo_type: binding.target_mdo,
                     object_name: entry.object_name.clone(),
@@ -1505,8 +1506,8 @@ pub fn project_form_binding_edges(state: &GraphBuildState) -> Vec<WorkspaceCallE
             }
             // `Объект.<ТЧ>.<колонка>` → a tabular-section column.
             [section, column] => {
-                let Some(sec) = entry.sections.get(&section.to_lowercase()) else { continue };
-                let Some(col) = sec.cols.get(&column.to_lowercase()) else { continue };
+                let Some(sec) = entry.sections.get(&section.fold_lower()) else { continue };
+                let Some(col) = sec.cols.get(&column.fold_lower()) else { continue };
                 GraphNode::TabularSectionAttribute {
                     mdo_type: binding.target_mdo,
                     object_name: entry.object_name.clone(),
