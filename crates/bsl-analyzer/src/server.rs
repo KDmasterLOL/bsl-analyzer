@@ -182,6 +182,11 @@ fn handle_loader_msg(state: &mut GlobalState, msg: vfs::loader::Message) -> Resu
                     let rss_after_load = crate::smoke::read_rss_bytes().unwrap_or(0);
 
                     state.init_source_root();
+                    // Reopen the whole-config loader gate closed at
+                    // `set_workspace_root`: the bootstrap and warm-up below run
+                    // against the now-complete workspace, and the input flip
+                    // invalidates anything resolved against the boot-window stub.
+                    state.analysis_host.raw_database_mut().set_workspace_load_complete(true);
                     state.bootstrap_metadata_substrate();
 
                     state.report_progress(
@@ -696,6 +701,8 @@ mod tests {
         let mut state = crate::global_state::GlobalState::new(sender);
         state.init_empty_source_root();
         assert!(!state.vfs_done);
+        // Model the boot window `set_workspace_root` opens on a real start.
+        state.analysis_host.raw_database_mut().set_workspace_load_complete(false);
 
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("mod.bsl");
@@ -731,6 +738,10 @@ mod tests {
         .unwrap();
 
         assert!(state.vfs_done);
+        assert!(
+            state.analysis_host.raw_database().workspace_load_complete(),
+            "the finalize must reopen the whole-config loader gate"
+        );
         assert_eq!(state.diagnostics_generation.get(&uri).copied(), Some(1));
         assert!(state.diagnostics_tokens.contains_key(&uri));
     }

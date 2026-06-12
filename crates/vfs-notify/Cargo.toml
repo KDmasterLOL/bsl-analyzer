@@ -16,7 +16,6 @@ walkdir.workspace = true
 ignore.workspace = true
 crossbeam-channel.workspace = true
 notify.workspace = true
-rayon.workspace = true
 rustc-hash.workspace = true
 
 stdx.workspace = true

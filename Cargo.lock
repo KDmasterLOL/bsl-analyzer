@@ -4633,7 +4633,6 @@ dependencies = [
  "ignore",
  "notify",
  "paths",
- "rayon",
  "rustc-hash 2.1.2",
  "stdx",
  "tempfile",

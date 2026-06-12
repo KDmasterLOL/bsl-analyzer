@@ -75,7 +75,15 @@ impl GlobalState {
                 all_paths.push((Some(name.clone()), ext_path.clone()));
             }
             self.analysis_host.request_cancellation();
-            self.analysis_host.raw_database_mut().set_all_config_paths(all_paths);
+            let db = self.analysis_host.raw_database_mut();
+            db.set_all_config_paths(all_paths);
+            // Close the whole-config loader gate for the INITIAL load only: the
+            // vfs_done finalize reopens it before the metadata bootstrap and
+            // warm-up. A live reload (config file edit) must not degrade
+            // metadata resolution for already-running analysis.
+            if !self.vfs_done {
+                db.set_workspace_load_complete(false);
+            }
         }
 
         self.update_diagnostics_config();

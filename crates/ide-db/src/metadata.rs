@@ -46,6 +46,22 @@ pub struct WorkspaceConfigsInput {
     pub paths: Vec<(Option<String>, PathBuf)>,
 }
 
+/// Whether the host's initial workspace load has completed. Defaults to `true`
+/// (batch analysis, the graph build, MCP and tests have no boot window); the
+/// LSP server sets it to `false` while the initial VFS scan streams in and back
+/// to `true` in its finalize, right before the metadata bootstrap and warm-up.
+///
+/// The whole-configuration loader consults it so that nothing computed during
+/// the boot window can trigger the full-config XML parse — minutes of
+/// non-cancellable work inside a single query, against a workspace that is not
+/// even fully on disk in the VFS yet. The flag is a Salsa input (not a plain
+/// field) so the read inside a calling query records a dependency: the finalize
+/// flip then invalidates anything that resolved against the gated stub.
+#[salsa::input(debug)]
+pub struct WorkspaceLoadStateInput {
+    pub complete: bool,
+}
+
 // Keyed by config root (base config + each extension), so the cache holds one entry
 // per root, not per file/module — its size tracks the number of configurations, which
 // is small. The cap must exceed the realistic number of extension roots: the graph

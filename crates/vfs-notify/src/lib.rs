@@ -11,7 +11,6 @@ use std::{
 use crossbeam_channel::{select, unbounded, Receiver, Sender};
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use paths::{AbsPath, AbsPathBuf, Utf8PathBuf};
-use rayon::iter::{IndexedParallelIterator as _, IntoParallelIterator as _, ParallelIterator};
 use rustc_hash::FxHashSet;
 use vfs::loader::{self, LoadingProgress};
 use walkdir::WalkDir;
@@ -188,9 +187,19 @@ impl NotifyActor {
 
                         let load_start = Instant::now();
                         let shutdown: &AtomicBool = self.shutdown.as_ref();
-                        config.load.into_par_iter().enumerate().for_each(|(i, entry)| {
+                        // Entries load sequentially on this dedicated thread, NOT
+                        // on the global rayon pool. These loads block on the
+                        // bounded loader channel (backpressure against the
+                        // consumer's event loop), and a pool thread parked in such
+                        // a send is a deadlock window: a rayon wait elsewhere in
+                        // the process (e.g. the metadata loader's scope inside a
+                        // Salsa query) can steal the load task and park a thread
+                        // whose db clone that same event loop is waiting on. There
+                        // are only one or two entries (the workspace walk plus
+                        // config files), so entry-level parallelism bought nothing.
+                        for (i, entry) in config.load.into_iter().enumerate() {
                             if shutdown.load(Ordering::Relaxed) {
-                                return;
+                                break;
                             }
                             let do_watch = config.watch.contains(&i);
                             if do_watch {
@@ -241,7 +250,7 @@ impl NotifyActor {
                                 WATCH_ONLY_CHUNK_PATHS,
                                 shutdown,
                             );
-                        });
+                        }
 
                         tracing::info!(
                             n_total,

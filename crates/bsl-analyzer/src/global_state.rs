@@ -417,6 +417,32 @@ mod vfs_race_tests {
     }
 
     #[test]
+    fn set_workspace_root_closes_load_gate_only_for_initial_load() {
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender);
+        state.init_empty_source_root();
+        assert!(state.analysis_host.raw_database().workspace_load_complete());
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        // Initial load (vfs_done = false): the gate closes until the finalize.
+        state.set_workspace_root(tmp.path().to_path_buf());
+        assert!(
+            !state.analysis_host.raw_database().workspace_load_complete(),
+            "the initial load must close the whole-config loader gate"
+        );
+
+        // A live reload (vfs_done = true) must not degrade running analysis.
+        state.vfs_done = true;
+        state.analysis_host.raw_database_mut().set_workspace_load_complete(true);
+        state.set_workspace_root(tmp.path().to_path_buf());
+        assert!(
+            state.analysis_host.raw_database().workspace_load_complete(),
+            "a live workspace reload must keep the gate open"
+        );
+    }
+
+    #[test]
     fn test_lsp_before_loader() {
         let (sender, _receiver) = crossbeam_channel::unbounded();
         let mut state = GlobalState::new(sender);
