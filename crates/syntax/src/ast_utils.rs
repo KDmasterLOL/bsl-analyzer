@@ -12,11 +12,12 @@ pub fn extract_leading_comments_at_offset(offset: usize, source_text: &str) -> O
 
     let text_before_node = &source_text[..offset];
 
-    let lines: Vec<&str> = text_before_node.lines().collect();
-
     let mut comments = Vec::new();
 
-    for line in lines.iter().rev() {
+    // Walk lines backwards from the offset; the loop stops at the first
+    // non-comment, non-blank line, so only the comment block itself is
+    // scanned, never the whole preceding text (this runs per method).
+    for line in text_before_node.rsplit('\n') {
         let trimmed = line.trim();
 
         if trimmed.starts_with("//") {
@@ -79,24 +80,16 @@ pub fn has_variable_leading_description(
 
     let text_before = &source_text[..check_from];
 
-    let lines: Vec<&str> = text_before.split('\n').collect();
-    if lines.is_empty() {
-        return false;
-    }
+    // Backwards scan from the anchor: the loop exits on the first decisive
+    // line, so the cost is bounded by the annotation/comment block, not by
+    // the length of the preceding text.
+    let mut rev_lines = text_before.rsplit('\n');
+    let last_line = rev_lines.next().unwrap_or("");
+    let trimmed_last = last_line.trim();
+    let skip_last = trimmed_last.is_empty() || trimmed_last.starts_with('&');
 
-    let start_idx = lines.len().saturating_sub(1);
-    let first_line = lines[start_idx].trim();
-    let check_start = if first_line.is_empty() || first_line.starts_with('&') {
-        if start_idx == 0 {
-            return false;
-        }
-        start_idx - 1
-    } else {
-        start_idx
-    };
-
-    for i in (0..=check_start).rev() {
-        let line = lines[i].trim();
+    for line in (!skip_last).then_some(last_line).into_iter().chain(rev_lines) {
+        let line = line.trim();
 
         if line.starts_with("//") {
             return true;
@@ -193,25 +186,16 @@ fn collect_variable_leading_comments(file_text: &str, anchor: usize) -> Option<V
     }
 
     let text_before = &file_text[..anchor];
-    let lines: Vec<&str> = text_before.split('\n').collect();
-    if lines.is_empty() {
-        return None;
-    }
 
-    let start_idx = lines.len().saturating_sub(1);
-    let first_line = lines[start_idx].trim();
-    let check_start = if first_line.is_empty() || first_line.starts_with('&') {
-        if start_idx == 0 {
-            return None;
-        }
-        start_idx - 1
-    } else {
-        start_idx
-    };
+    // Same backwards bounded scan as `has_variable_leading_description`.
+    let mut rev_lines = text_before.rsplit('\n');
+    let last_line = rev_lines.next().unwrap_or("");
+    let trimmed_last = last_line.trim();
+    let skip_last = trimmed_last.is_empty() || trimmed_last.starts_with('&');
 
     let mut comments: Vec<String> = Vec::new();
-    for i in (0..=check_start).rev() {
-        let line = lines[i].trim();
+    for line in (!skip_last).then_some(last_line).into_iter().chain(rev_lines) {
+        let line = line.trim();
 
         if let Some(rest) = line.strip_prefix("//") {
             let comment_text = rest.trim();
@@ -469,5 +453,91 @@ mod variable_comment_extractor_tests {
         let got =
             extract_variable_comments_at_offset(text, var_kw, var_end, Some(first_ann)).unwrap();
         assert_eq!(got, vec!["header".to_string(), "inter".to_string(), "tail".to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod leading_comment_scan_tests {
+    use super::{extract_leading_comments_at_offset, has_variable_leading_description};
+
+    fn off(text: &str, marker: &str) -> usize {
+        text.find(marker).unwrap_or_else(|| panic!("marker {marker:?} not found in {text:?}"))
+    }
+
+    #[test]
+    fn comment_block_above_method() {
+        let text = "// Описание.\n// Вторая строка.\nПроцедура П()";
+        let got = extract_leading_comments_at_offset(off(text, "Процедура"), text).unwrap();
+        assert_eq!(got, vec!["Описание.".to_string(), "Вторая строка.".to_string()]);
+    }
+
+    #[test]
+    fn blank_lines_inside_block_are_skipped() {
+        let text = "// первый\n\n// второй\n\nПроцедура П()";
+        let got = extract_leading_comments_at_offset(off(text, "Процедура"), text).unwrap();
+        assert_eq!(got, vec!["первый".to_string(), "второй".to_string()]);
+    }
+
+    #[test]
+    fn code_line_stops_the_scan() {
+        let text = "// далёкий\nКонецПроцедуры\n\n// ближний\nПроцедура П()";
+        let got = extract_leading_comments_at_offset(off(text, "Процедура"), text).unwrap();
+        assert_eq!(got, vec!["ближний".to_string()]);
+    }
+
+    #[test]
+    fn crlf_comments_are_trimmed() {
+        let text = "// заметка\r\nПроцедура П()";
+        let got = extract_leading_comments_at_offset(off(text, "Процедура"), text).unwrap();
+        assert_eq!(got, vec!["заметка".to_string()]);
+    }
+
+    #[test]
+    fn comment_at_file_start() {
+        let text = "// шапка\nПроцедура П()";
+        let got = extract_leading_comments_at_offset(off(text, "Процедура"), text).unwrap();
+        assert_eq!(got, vec!["шапка".to_string()]);
+    }
+
+    #[test]
+    fn no_comments_returns_none() {
+        let text = "КонецПроцедуры\nПроцедура П()";
+        assert_eq!(extract_leading_comments_at_offset(off(text, "Процедура П"), text), None);
+        assert_eq!(extract_leading_comments_at_offset(0, text), None);
+    }
+
+    #[test]
+    fn empty_marker_comments_are_dropped() {
+        let text = "//\n// текст\n//\nПроцедура П()";
+        let got = extract_leading_comments_at_offset(off(text, "Процедура"), text).unwrap();
+        assert_eq!(got, vec!["текст".to_string()]);
+    }
+
+    #[test]
+    fn offset_past_text_returns_none() {
+        assert_eq!(extract_leading_comments_at_offset(100, "короткий"), None);
+    }
+
+    #[test]
+    fn variable_description_above_annotation() {
+        let text = "// назначение\n&НаКлиенте\nПерем X;";
+        assert!(has_variable_leading_description(off(text, "Перем"), text, Some(off(text, "&"))));
+    }
+
+    #[test]
+    fn variable_without_description() {
+        let text = "КонецПроцедуры\n&НаКлиенте\nПерем X;";
+        assert!(!has_variable_leading_description(off(text, "Перем"), text, Some(off(text, "&"))));
+    }
+
+    #[test]
+    fn annotation_on_first_line_only() {
+        let text = "&НаКлиенте\nПерем X;";
+        assert!(!has_variable_leading_description(off(text, "Перем"), text, Some(0)));
+    }
+
+    #[test]
+    fn anchor_at_zero_returns_false() {
+        assert!(!has_variable_leading_description(0, "Перем X;", None));
     }
 }
