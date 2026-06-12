@@ -88,28 +88,57 @@ impl Project {
         &self.extension_paths
     }
 
+    /// Resolves the extension source roots. With no `extensions` configured this
+    /// auto-discovers the conventional `src/cfe/*` layout (mirroring how the main
+    /// configuration is found under `src/cf` without any setting); an explicit list
+    /// — entries may use a final-segment `*` glob — takes over and disables discovery.
     fn resolve_extensions(root: &Path, config: &ProjectConfig) -> Vec<(String, PathBuf)> {
+        let candidates: Vec<PathBuf> = match &config.extensions {
+            // Unset → mirror main-config zero-config discovery. An explicit list
+            // (including an empty one, i.e. opt-out) is taken as authoritative.
+            None => Self::auto_discover_extensions(root),
+            Some(list) => {
+                let mut c = Vec::new();
+                for ext_path_str in list {
+                    if ext_path_str.contains('*') {
+                        c.extend(expand_extension_glob(root, ext_path_str));
+                    } else {
+                        c.push(root.join(ext_path_str));
+                    }
+                }
+                c
+            }
+        };
+
         let mut resolved: Vec<(String, PathBuf)> = Vec::new();
         let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
-        for ext_path_str in &config.extensions {
-            let candidates = if ext_path_str.contains('*') {
-                expand_extension_glob(root, ext_path_str)
-            } else {
-                vec![root.join(ext_path_str)]
-            };
-            for path in candidates {
-                // Dedup on the real path so textual variants (`./src/cfe/Foo` and the
-                // glob-produced `src/cfe/Foo`) collapse to one source root.
-                let key = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
-                if !seen.insert(key) {
-                    continue;
-                }
-                if let Some(entry) = Self::validate_extension(ext_path_str, path) {
-                    resolved.push(entry);
-                }
+        for path in candidates {
+            // Dedup on the real path so textual variants (`./src/cfe/Foo` and the
+            // glob-produced `src/cfe/Foo`) collapse to one source root.
+            let key = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+            if !seen.insert(key) {
+                continue;
+            }
+            let label = path.to_string_lossy().into_owned();
+            if let Some(entry) = Self::validate_extension(&label, path) {
+                resolved.push(entry);
             }
         }
         resolved
+    }
+
+    /// Zero-config extension discovery: the first conventional extensions directory
+    /// that exists wins, contributing each of its immediate child directories as a
+    /// candidate (later validated for `Configuration.xml`).
+    fn auto_discover_extensions(root: &Path) -> Vec<PathBuf> {
+        for parent in ["src/cfe", "cfe"] {
+            if root.join(parent).is_dir() {
+                let found = expand_extension_glob(root, &format!("{parent}/*"));
+                tracing::info!(parent, count = found.len(), "auto-discovered extension candidates");
+                return found;
+            }
+        }
+        Vec::new()
     }
 
     fn validate_extension(ext_path_str: &str, path: PathBuf) -> Option<(String, PathBuf)> {
@@ -264,8 +293,11 @@ pub struct ProjectConfig {
     #[serde(default)]
     pub language: Option<String>,
 
+    /// Configuration extensions. `None` (unset) auto-discovers the conventional
+    /// `src/cfe/*` layout; `Some([])` is an explicit opt-out (no extensions);
+    /// a non-empty list is taken verbatim (entries may use a final-segment `*` glob).
     #[serde(default)]
-    pub extensions: Vec<String>,
+    pub extensions: Option<Vec<String>>,
 
     #[serde(default)]
     pub search: SearchConfig,
@@ -925,7 +957,7 @@ struct TomlSourceConfig {
     #[serde(default)]
     root: Option<String>,
     #[serde(default)]
-    extensions: Vec<String>,
+    extensions: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1752,7 +1784,10 @@ extensions = ["src/cfe/BMS_RU_UT", "src/cfe/YAxUnit"]
         let config: super::TomlConfig = toml::from_str(toml_str).unwrap();
         let project = ProjectConfig::from(config);
         assert_eq!(project.configuration_root.as_deref(), Some("src/cf"));
-        assert_eq!(project.extensions, vec!["src/cfe/BMS_RU_UT", "src/cfe/YAxUnit"]);
+        assert_eq!(
+            project.extensions,
+            Some(vec!["src/cfe/BMS_RU_UT".to_string(), "src/cfe/YAxUnit".to_string()])
+        );
     }
 
     #[test]
@@ -1786,7 +1821,7 @@ root = "src/cf"
         std::fs::create_dir_all(root.join("src/cfe/NotAnExtension")).unwrap();
 
         let config =
-            ProjectConfig { extensions: vec!["src/cfe/*".to_string()], ..Default::default() };
+            ProjectConfig { extensions: Some(vec!["src/cfe/*".to_string()]), ..Default::default() };
         let resolved = Project::resolve_extensions(root, &config);
 
         let names: Vec<&str> = resolved.iter().map(|(n, _)| n.as_str()).collect();
@@ -1801,7 +1836,7 @@ root = "src/cf"
         touch_extension(root, "src/cfe/YAxUnit");
 
         let config = ProjectConfig {
-            extensions: vec!["src/cfe/БУС_*".to_string()],
+            extensions: Some(vec!["src/cfe/БУС_*".to_string()]),
             ..Default::default()
         };
         let resolved = Project::resolve_extensions(root, &config);
@@ -1817,11 +1852,87 @@ root = "src/cf"
         touch_extension(root, "src/cfe/BMS_RU_UT");
 
         let config = ProjectConfig {
-            extensions: vec!["src/cfe/*".to_string(), "src/cfe/BMS_RU_UT".to_string()],
+            extensions: Some(vec!["src/cfe/*".to_string(), "src/cfe/BMS_RU_UT".to_string()]),
             ..Default::default()
         };
         let resolved = Project::resolve_extensions(root, &config);
         assert_eq!(resolved.len(), 1, "the same extension must not be added twice");
+    }
+
+    #[test]
+    fn extensions_auto_discovered_from_src_cfe_when_unset() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        touch_extension(root, "src/cfe/BMS_RU_UT");
+        touch_extension(root, "src/cfe/YAxUnit");
+        std::fs::create_dir_all(root.join("src/cfe/NotAnExtension")).unwrap();
+
+        // No `extensions` setting at all → discover every src/cfe child with Configuration.xml.
+        let config = ProjectConfig::default();
+        let resolved = Project::resolve_extensions(root, &config);
+
+        let names: Vec<&str> = resolved.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["BMS_RU_UT", "YAxUnit"]);
+    }
+
+    #[test]
+    fn extensions_auto_discovery_falls_back_to_bare_cfe() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        touch_extension(root, "cfe/SomeExt");
+
+        let resolved = Project::resolve_extensions(root, &ProjectConfig::default());
+        let names: Vec<&str> = resolved.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["SomeExt"]);
+    }
+
+    #[test]
+    fn explicit_extensions_disable_auto_discovery() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        touch_extension(root, "src/cfe/BMS_RU_UT");
+        touch_extension(root, "src/cfe/YAxUnit");
+
+        // An explicit list must win, even when it points elsewhere — no src/cfe sweep.
+        let config = ProjectConfig {
+            extensions: Some(vec!["src/cfe/YAxUnit".to_string()]),
+            ..Default::default()
+        };
+        let resolved = Project::resolve_extensions(root, &config);
+        let names: Vec<&str> = resolved.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["YAxUnit"]);
+    }
+
+    #[test]
+    fn explicit_empty_extensions_opt_out_of_discovery() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        touch_extension(root, "src/cfe/BMS_RU_UT");
+
+        // `extensions = []` is an explicit opt-out and must NOT auto-discover src/cfe.
+        let config = ProjectConfig { extensions: Some(vec![]), ..Default::default() };
+        let resolved = Project::resolve_extensions(root, &config);
+        assert!(resolved.is_empty(), "explicit empty list must disable auto-discovery");
+    }
+
+    #[test]
+    fn toml_distinguishes_unset_from_empty_extensions() {
+        let unset: super::TomlConfig = toml::from_str("[source]\nroot = \"src/cf\"\n").unwrap();
+        assert_eq!(ProjectConfig::from(unset).extensions, None, "unset → None (discovery)");
+
+        let empty: super::TomlConfig =
+            toml::from_str("[source]\nroot = \"src/cf\"\nextensions = []\n").unwrap();
+        assert_eq!(ProjectConfig::from(empty).extensions, Some(vec![]), "[] → Some([]) (opt-out)");
+    }
+
+    #[test]
+    fn no_extensions_when_no_cfe_dir() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        touch_extension(root, "src/cf"); // main config only, no extensions dir
+
+        let resolved = Project::resolve_extensions(root, &ProjectConfig::default());
+        assert!(resolved.is_empty());
     }
 
     #[test]
@@ -1833,7 +1944,8 @@ root = "src/cf"
         // Trailing slash (empty final segment) and parent-segment wildcards are
         // unsupported and must resolve nothing rather than silently misbehave.
         for pat in ["src/cfe/*/", "src/*/BMS_RU_UT"] {
-            let config = ProjectConfig { extensions: vec![pat.to_string()], ..Default::default() };
+            let config =
+                ProjectConfig { extensions: Some(vec![pat.to_string()]), ..Default::default() };
             let resolved = Project::resolve_extensions(root, &config);
             assert!(resolved.is_empty(), "pattern {pat} must resolve no extensions");
         }
@@ -1846,7 +1958,7 @@ root = "src/cf"
         touch_extension(root, "src/cfe/BMS_RU_UT");
 
         let config = ProjectConfig {
-            extensions: vec!["src/cfe/*".to_string(), "./src/cfe/BMS_RU_UT".to_string()],
+            extensions: Some(vec!["src/cfe/*".to_string(), "./src/cfe/BMS_RU_UT".to_string()]),
             ..Default::default()
         };
         let resolved = Project::resolve_extensions(root, &config);

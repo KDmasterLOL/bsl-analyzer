@@ -93,10 +93,10 @@ fn build_check_config_report(
     let _ = writeln!(
         out,
         "  Extensions:  {}",
-        if project_config.extensions.is_empty() {
-            "none".to_owned()
-        } else {
-            project_config.extensions.join(", ")
+        match &project_config.extensions {
+            None => "auto-discovery (src/cfe/*)".to_owned(),
+            Some(list) if list.is_empty() => "none".to_owned(),
+            Some(list) => list.join(", "),
         }
     );
     let _ =
