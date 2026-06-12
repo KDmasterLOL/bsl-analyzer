@@ -3,6 +3,7 @@ use crate::error::Result;
 use crate::metadata_object::{MdoType, MetadataObject};
 use crate::traits::MdObject;
 use crate::xml_parser;
+use rayon::prelude::*;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -344,7 +345,7 @@ fn load_common_modules_parallel(dir: &Path) -> Vec<crate::common_module::CommonM
     };
 
     entries
-        .into_iter()
+        .into_par_iter()
         .filter_map(|entry| {
             let module_dir = entry.path();
             if !module_dir.is_dir() {
@@ -469,7 +470,7 @@ where
         .collect();
 
     entries
-        .into_iter()
+        .into_par_iter()
         .filter_map(|entry| {
             let path = entry.path();
 
@@ -850,7 +851,7 @@ fn load_enums_parallel(dir: &Path) -> Vec<MetadataObject> {
     };
 
     entries
-        .into_iter()
+        .into_par_iter()
         .filter_map(|entry| {
             let path = entry.path();
             if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("xml") {
@@ -874,7 +875,7 @@ fn load_constants_parallel(dir: &Path) -> Vec<MetadataObject> {
     };
 
     entries
-        .into_iter()
+        .into_par_iter()
         .filter_map(|entry| {
             let path = entry.path();
             if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("xml") {
@@ -901,7 +902,7 @@ where
     };
 
     entries
-        .into_iter()
+        .into_par_iter()
         .filter_map(|entry| {
             let path = entry.path();
             if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("xml") {
@@ -943,7 +944,7 @@ fn load_event_subscriptions_parallel(
     };
 
     entries
-        .into_iter()
+        .into_par_iter()
         .filter_map(|entry| {
             let path = entry.path();
             if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("xml") {
@@ -967,7 +968,7 @@ fn load_scheduled_jobs_parallel(dir: &Path) -> Vec<crate::scheduled_job::Schedul
     };
 
     entries
-        .into_iter()
+        .into_par_iter()
         .filter_map(|entry| {
             let path = entry.path();
             if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("xml") {
@@ -991,7 +992,7 @@ fn load_roles_parallel(dir: &Path) -> Vec<crate::role::Role> {
     };
 
     entries
-        .into_iter()
+        .into_par_iter()
         .filter_map(|entry| {
             let path = entry.path();
             if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("xml") {
@@ -1031,7 +1032,7 @@ fn load_defined_types_parallel(dir: &Path) -> Vec<crate::defined_type::DefinedTy
     };
 
     entries
-        .into_iter()
+        .into_par_iter()
         .filter_map(|entry| {
             let path = entry.path();
             if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("xml") {
@@ -1055,7 +1056,7 @@ fn load_http_services_parallel(dir: &Path) -> Vec<crate::http_service::HTTPServi
     };
 
     entries
-        .into_iter()
+        .into_par_iter()
         .filter_map(|entry| {
             let service_dir = entry.path();
             if !service_dir.is_dir() {
@@ -1086,7 +1087,7 @@ fn load_web_services_parallel(dir: &Path) -> Vec<crate::web_service::WebService>
     };
 
     entries
-        .into_iter()
+        .into_par_iter()
         .filter_map(|entry| {
             let service_dir = entry.path();
             if !service_dir.is_dir() {
@@ -1119,7 +1120,7 @@ fn load_integration_services_parallel(
     };
 
     entries
-        .into_iter()
+        .into_par_iter()
         .filter_map(|entry| {
             let service_dir = entry.path();
             if !service_dir.is_dir() {
@@ -1150,7 +1151,7 @@ fn load_simple_metadata_objects_parallel(dir: &Path, mdo_type: MdoType) -> Vec<M
     };
 
     entries
-        .into_iter()
+        .into_par_iter()
         .filter_map(|entry| {
             let obj_dir = entry.path();
             if !obj_dir.is_dir() {
