@@ -14,7 +14,7 @@ impl Name {
     }
 
     pub fn eq_ignore_case(&self, other: &Name) -> bool {
-        self.0.to_lowercase() == other.0.to_lowercase()
+        stdx::case::eq_ignore_case(self.as_str(), other.as_str())
     }
 
     pub fn missing() -> Self {

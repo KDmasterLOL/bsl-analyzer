@@ -5,6 +5,7 @@ use bsl_metadata::traits::MdObject;
 use bsl_metadata::{ModuleType, ReturnValueReuse};
 use hir::RedundantAccessKind;
 use ide_db::TextRange;
+use stdx::case::CaseExt;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -137,7 +138,7 @@ fn get_plural_collection_name(
 }
 
 fn is_matching_mdo_type(mdo_type: &str, expected: (&str, &str)) -> bool {
-    let lower = mdo_type.to_lowercase();
+    let lower = mdo_type.fold_lower();
     lower == expected.0 || lower == expected.1
 }
 

@@ -2,6 +2,7 @@ use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 use std::sync::OnceLock;
+use stdx::case::CaseExt;
 use uuid::Uuid;
 
 pub type Name = String;
@@ -53,7 +54,7 @@ impl FromStr for MdoType {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
+        match s.fold_lower().as_str() {
             "справочник" | "catalog" => Ok(Self::Catalog),
             "документ" | "document" => Ok(Self::Document),
             "регистрсведений" | "informationregister" => {
@@ -167,8 +168,8 @@ impl MdoType {
     }
 
     pub fn is_russian_keyword(&self, keyword: &str) -> bool {
-        let keyword_lower = keyword.to_lowercase();
-        let russian_lower = self.russian_name().to_lowercase();
+        let keyword_lower = keyword.fold_lower();
+        let russian_lower = self.russian_name().fold_lower();
         keyword_lower == russian_lower
     }
 
@@ -198,7 +199,7 @@ impl MdoType {
     }
 
     pub fn from_plural(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
+        match s.fold_lower().as_str() {
             "документы" | "documents" => Some(Self::Document),
             "справочники" | "catalogs" => Some(Self::Catalog),
             "регистрысведений" | "informationregisters" => {
@@ -366,7 +367,7 @@ impl MdoType {
             set
         });
 
-        set.contains(&s.to_lowercase())
+        set.contains(&s.fold_lower())
     }
 }
 
@@ -599,12 +600,10 @@ pub fn is_standard_attribute_name(name: &str) -> bool {
     let names = NAMES.get_or_init(|| {
         StandardAttributeKind::ALL
             .iter()
-            .flat_map(|kind| {
-                [kind.russian_name().to_lowercase(), kind.english_name().to_lowercase()]
-            })
+            .flat_map(|kind| [kind.russian_name().fold_lower(), kind.english_name().fold_lower()])
             .collect()
     });
-    names.contains(&name.to_lowercase())
+    names.contains(&name.fold_lower())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -872,8 +871,7 @@ impl MetadataObject {
     }
 
     pub fn find_child(&self, name: &str) -> Option<&MetadataObject> {
-        let name_lower = name.to_lowercase();
-        self.children.iter().find(|child| child.name.to_lowercase() == name_lower)
+        self.children.iter().find(|child| stdx::case::eq_ignore_case(&child.name, name))
     }
 
     pub fn has_child(&self, name: &str) -> bool {
@@ -881,34 +879,30 @@ impl MetadataObject {
     }
 
     pub fn find_attribute(&self, name: &str) -> Option<&Attribute> {
-        let name_lower = name.to_lowercase();
-        self.attributes.iter().find(|attr| attr.name.to_lowercase() == name_lower)
+        self.attributes.iter().find(|attr| stdx::case::eq_ignore_case(&attr.name, name))
     }
 
     pub fn find_tabular_section(
         &self,
         name: &str,
     ) -> Option<&crate::tabular_section::TabularSection> {
-        let name_lower = name.to_lowercase();
         self.tabular_sections.iter().find(|ts| {
-            ts.name().to_lowercase() == name_lower
-                || ts.name_en().map(|en| en.to_lowercase() == name_lower).unwrap_or(false)
+            stdx::case::eq_ignore_case(ts.name(), name)
+                || ts.name_en().is_some_and(|en| stdx::case::eq_ignore_case(en, name))
         })
     }
 
     pub fn find_enum_value(&self, name: &str) -> Option<&EnumValue> {
-        let name_lower = name.to_lowercase();
         self.enum_values.iter().find(|ev| {
-            ev.name.to_lowercase() == name_lower
-                || ev.name_en.as_ref().map(|en| en.to_lowercase() == name_lower).unwrap_or(false)
+            stdx::case::eq_ignore_case(&ev.name, name)
+                || ev.name_en.as_ref().is_some_and(|en| stdx::case::eq_ignore_case(en, name))
         })
     }
 
     pub fn find_predefined_item(&self, name: &str) -> Option<&PredefinedItem> {
-        let name_lower = name.to_lowercase();
         self.predefined_items.iter().find(|pi| {
-            pi.name.to_lowercase() == name_lower
-                || pi.name_en.as_ref().map(|en| en.to_lowercase() == name_lower).unwrap_or(false)
+            stdx::case::eq_ignore_case(&pi.name, name)
+                || pi.name_en.as_ref().is_some_and(|en| stdx::case::eq_ignore_case(en, name))
         })
     }
 }

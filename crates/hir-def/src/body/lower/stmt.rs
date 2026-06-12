@@ -1,3 +1,4 @@
+use stdx::case::CaseExt;
 use syntax::{
     ast::{AstNode, PreIfDir},
     SyntaxKind, SyntaxNode,
@@ -208,7 +209,7 @@ fn lower_param(ctx: &mut LoweringCtx, param: &SyntaxNode) -> Option<BindingIdx> 
     ctx.register_param(name_token.text());
 
     if !is_val {
-        ctx.by_ref_param_names.insert(name_token.text().to_lowercase());
+        ctx.by_ref_param_names.insert(name_token.text().fold_lower());
     }
 
     let default_value = param
@@ -225,10 +226,10 @@ fn lower_param(ctx: &mut LoweringCtx, param: &SyntaxNode) -> Option<BindingIdx> 
     let binding_id = ctx.alloc_binding(binding, name_token.text_range());
 
     if is_val {
-        ctx.by_value_params.insert(name_token.text().to_lowercase(), binding_id);
+        ctx.by_value_params.insert(name_token.text().fold_lower(), binding_id);
     }
 
-    let name_lower = name_token.text().to_lowercase();
+    let name_lower = name_token.text().fold_lower();
     if name_lower == "отказ" || name_lower == "cancel" {
         ctx.cancel_params.insert(name_lower);
     }
@@ -457,7 +458,7 @@ fn lower_assign_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
         None
     };
     if let Some((ref name, range)) = target_name {
-        let key = name.as_str().to_lowercase();
+        let key = name.as_str().fold_lower();
 
         let existing_binding_kind = if ctx.local_vars.contains_key(&key) {
             Some(crate::body::ExistingBindingKind::Local)
@@ -508,7 +509,7 @@ fn lower_assign_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
     }
 
     if let Some((ref name, _)) = target_name {
-        let key = name.as_str().to_lowercase();
+        let key = name.as_str().fold_lower();
         if ctx.cancel_params.contains(&key) && !is_valid_cancel_assignment(ctx, value, &key) {
             let range = extend_range_with_semicolon(node, node.text_range());
             ctx.emit(BodyDiagnostic::UsingCancelParameter { range });
@@ -519,7 +520,7 @@ fn lower_assign_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
         use super::QueryVarType;
 
         if let Expr::New { type_name: Some(type_name), .. } = ctx.body.expr_idx(value) {
-            let type_str = type_name.as_str().to_lowercase();
+            let type_str = type_name.as_str().fold_lower();
             let query_type = match type_str.as_str() {
                 "запрос" | "query" => QueryVarType::Query,
                 "построительзапроса" | "querybuilder" => {
@@ -582,7 +583,7 @@ fn expr_contains_cancel(
 
     let expr = ctx.body.expr_idx(expr_id);
     match expr {
-        Expr::Path(name) => name.as_str().to_lowercase() == cancel_name,
+        Expr::Path(name) => name.as_str().fold_lower() == cancel_name,
         Expr::BinaryOp { lhs, rhs, .. } => {
             expr_contains_cancel(ctx, *lhs, cancel_name)
                 || expr_contains_cancel(ctx, *rhs, cancel_name)
@@ -636,7 +637,7 @@ fn lower_return_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
 }
 
 fn has_platform_type_check(condition_node: &SyntaxNode) -> bool {
-    let text = condition_node.text().to_string().to_lowercase();
+    let text = condition_node.text().to_string().fold_lower();
     text.contains("linux") || text.contains("windows") || text.contains("macos")
 }
 
@@ -1078,12 +1079,12 @@ pub(super) fn get_last_meaningful_token_range(node: &SyntaxNode) -> TextRange {
 }
 
 fn check_iterator_usage_in_body(stmt_list: &SyntaxNode, iterator_name: &str) -> bool {
-    let iterator_lower = iterator_name.to_lowercase();
+    let iterator_lower = iterator_name.fold_lower();
 
     for descendant in stmt_list.descendants_with_tokens() {
         if let Some(token) = descendant.into_token() {
             if token.kind() == SyntaxKind::IDENT
-                && token.text().to_lowercase() == iterator_lower
+                && token.text().fold_lower() == iterator_lower
                 && !is_direct_function_call(&token)
             {
                 return true;

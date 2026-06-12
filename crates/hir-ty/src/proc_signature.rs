@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use stdx::case::CaseExt;
 
 use bsl_types::builders::Builders;
 use bsl_types::intern::TypeKernelDb;
@@ -70,8 +71,8 @@ fn lower_params(
 }
 
 fn find_param_doc<'a>(docs: &'a MethodDocs, name: &Name) -> Option<&'a ParameterDoc> {
-    let needle = name.as_str().to_lowercase();
-    docs.parameters.iter().find(|p| p.name.to_lowercase() == needle)
+    let needle = name.as_str().fold_lower();
+    docs.parameters.iter().find(|p| p.name.fold_lower() == needle)
 }
 
 fn lower_one_param_doc(db: &dyn TypeKernelDb, param: &ParameterDoc) -> TypeId {

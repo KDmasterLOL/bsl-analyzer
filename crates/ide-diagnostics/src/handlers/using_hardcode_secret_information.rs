@@ -3,6 +3,7 @@ use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::{Body, BodySourceMap, Expr, ExprId, ExprIdx, IdConversion, Literal, Stmt};
 use regex::Regex;
+use stdx::case::CaseExt;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Vulnerability,
@@ -24,7 +25,7 @@ fn is_structure_or_map(type_name: &Option<hir::Name>) -> bool {
     let Some(name) = type_name else {
         return false;
     };
-    let text = name.as_str().to_lowercase();
+    let text = name.as_str().fold_lower();
     matches!(text.as_str(), "структура" | "structure" | "соответствие" | "map")
 }
 
@@ -32,12 +33,12 @@ fn is_connection(type_name: &Option<hir::Name>) -> bool {
     let Some(name) = type_name else {
         return false;
     };
-    let text = name.as_str().to_lowercase();
+    let text = name.as_str().fold_lower();
     matches!(text.as_str(), "httpсоединение" | "httpconnection" | "ftpсоединение" | "ftpconnection")
 }
 
 fn is_insert_method(method_name: &hir::Name) -> bool {
-    let text = method_name.as_str().to_lowercase();
+    let text = method_name.as_str().fold_lower();
     matches!(text.as_str(), "вставить" | "insert")
 }
 

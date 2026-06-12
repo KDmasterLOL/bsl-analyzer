@@ -1,6 +1,7 @@
 use bsl_platform::{platform_type_query, PlatformDataInner, TypeNameInput};
 use ide_db::RootDatabase;
 use rustc_hash::FxHashSet;
+use stdx::case::CaseExt;
 use syntax::{SyntaxKind, SyntaxToken};
 
 use super::{CompletionItem, CompletionItemKind, CompletionPosition};
@@ -24,7 +25,7 @@ pub(super) fn new_expr_completions<DB: RootDatabase>(
     }
 
     let data = PlatformDataInner::instance();
-    let prefix_lower = prefix.to_lowercase();
+    let prefix_lower = prefix.fold_lower();
     let mut seen = FxHashSet::default();
     let mut items = Vec::new();
 
@@ -43,8 +44,8 @@ pub(super) fn new_expr_completions<DB: RootDatabase>(
         let english = ty.english_name.to_string();
 
         if !prefix_lower.is_empty()
-            && !russian.to_lowercase().starts_with(&prefix_lower)
-            && !english.to_lowercase().starts_with(&prefix_lower)
+            && !russian.fold_lower().starts_with(&prefix_lower)
+            && !english.fold_lower().starts_with(&prefix_lower)
         {
             continue;
         }
@@ -133,7 +134,7 @@ mod tests {
         let items = analysis.completions(file_id, offset, None, crate::Locale::Ru);
         let labels = all_labels(&items);
         assert!(
-            labels.iter().all(|l| l.to_lowercase().starts_with("масс")),
+            labels.iter().all(|l| l.fold_lower().starts_with("масс")),
             "every label must match prefix Масс, got: {labels:?}"
         );
         assert!(labels.contains(&"Массив".to_string()), "Массив must be offered");

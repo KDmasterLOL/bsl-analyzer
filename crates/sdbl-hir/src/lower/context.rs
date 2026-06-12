@@ -1,4 +1,5 @@
 use bsl_metadata::QueryMetadataResolver;
+use stdx::case::CaseExt;
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
 use crate::diagnostics::SdblDiagnostic;
@@ -43,9 +44,8 @@ impl<'a> LoweringContext<'a> {
         for element in node.descendants_with_tokens() {
             if let Some(token) = element.as_token() {
                 if token.kind() == SyntaxKind::IDENT {
-                    let text_lower = token.text().to_lowercase();
-                    if text_lower == en_text.to_lowercase() || text_lower == ru_text.to_lowercase()
-                    {
+                    let text_lower = token.text().fold_lower();
+                    if text_lower == en_text.fold_lower() || text_lower == ru_text.fold_lower() {
                         self.record_token(token, category);
                         return;
                     }

@@ -1,3 +1,4 @@
+use stdx::case::CaseExt;
 use uuid::Uuid;
 
 use crate::enums::FormType;
@@ -163,8 +164,8 @@ impl Form {
     }
 
     pub fn find_element(&self, name: &str) -> Option<&FormElement> {
-        let name_lower = name.to_lowercase();
-        self.elements.iter().find(|e| e.name.to_lowercase() == name_lower)
+        let name_lower = name.fold_lower();
+        self.elements.iter().find(|e| e.name.fold_lower() == name_lower)
     }
 
     pub fn children_of(&self, parent_id: u32) -> impl Iterator<Item = &FormElement> {
@@ -192,8 +193,7 @@ impl Form {
     }
 
     pub fn find_attribute(&self, name: &str) -> Option<&FormAttribute> {
-        let name_lower = name.to_lowercase();
-        self.attributes.iter().find(|a| a.name.to_lowercase() == name_lower)
+        self.attributes.iter().find(|a| stdx::case::eq_ignore_case(&a.name, name))
     }
 
     pub fn main_attribute(&self) -> Option<&FormAttribute> {
@@ -221,9 +221,9 @@ impl Form {
     }
 
     pub fn is_handler(&self, method_name: &str) -> bool {
-        let name_lower = method_name.to_lowercase();
-        self.event_handlers.iter().any(|h| h.handler_name.to_lowercase() == name_lower)
-            || self.command_handlers.iter().any(|h| h.to_lowercase() == name_lower)
+        let name_lower = method_name.fold_lower();
+        self.event_handlers.iter().any(|h| h.handler_name.fold_lower() == name_lower)
+            || self.command_handlers.iter().any(|h| h.fold_lower() == name_lower)
     }
 }
 

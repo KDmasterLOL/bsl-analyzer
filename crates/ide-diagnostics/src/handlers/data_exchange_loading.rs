@@ -2,6 +2,7 @@ use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::{Body, Expr, ExprId, IdConversion, ModItem, Name, Stmt, StmtId};
+use stdx::case::CaseExt;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,
@@ -50,7 +51,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         .iter()
         .filter_map(|entry| {
             let (module, function) = entry.split_once('.')?;
-            Some((module.trim().to_lowercase(), function.trim().to_lowercase()))
+            Some((module.trim().fold_lower(), function.trim().fold_lower()))
         })
         .collect();
 
@@ -114,7 +115,7 @@ fn is_applicable_module(ctx: &DiagnosticsContext) -> bool {
 }
 
 fn is_monitored_procedure(name: &Name) -> bool {
-    let lower_name = name.as_str().to_lowercase();
+    let lower_name = name.as_str().fold_lower();
     MONITORED_PROCEDURES.contains(&lower_name.as_str())
 }
 
@@ -206,13 +207,13 @@ fn is_guard_wrapper_call(
     let Expr::Path(module_name) = body.expr(receiver_id) else {
         return false;
     };
-    let module_lower = module_name.as_str().to_lowercase();
-    let method_lower = method.as_str().to_lowercase();
+    let module_lower = module_name.as_str().fold_lower();
+    let method_lower = method.as_str().fold_lower();
     wrappers.iter().any(|(module, function)| *module == module_lower && *function == method_lower)
 }
 
 fn is_data_exchange_load_field(body: &Body, base_id: ExprId, field: &Name) -> bool {
-    let field_lower = field.as_str().to_lowercase();
+    let field_lower = field.as_str().fold_lower();
     if field_lower != "загрузка" && field_lower != "load" {
         return false;
     }
@@ -220,7 +221,7 @@ fn is_data_exchange_load_field(body: &Body, base_id: ExprId, field: &Name) -> bo
     let base_expr = body.expr(base_id);
     match base_expr {
         Expr::Path(base_name) => {
-            let base_lower = base_name.as_str().to_lowercase();
+            let base_lower = base_name.as_str().fold_lower();
             base_lower == "обменданными" || base_lower == "dataexchange"
         }
         _ => false,

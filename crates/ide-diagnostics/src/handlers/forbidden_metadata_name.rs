@@ -5,6 +5,7 @@ use bsl_metadata::traits::MdObject;
 use hir::ModuleMetadata;
 use once_cell::sync::Lazy;
 use rustc_hash::FxHashSet;
+use stdx::case::CaseExt;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,
@@ -98,7 +99,7 @@ static FORBIDDEN_NAMES: Lazy<FxHashSet<&'static str>> = Lazy::new(|| {
 });
 
 fn is_forbidden_name(name: &str) -> bool {
-    FORBIDDEN_NAMES.contains(name.to_lowercase().as_str())
+    FORBIDDEN_NAMES.contains(name.fold_lower().as_str())
 }
 
 fn make_diagnostic(

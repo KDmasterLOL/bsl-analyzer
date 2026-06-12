@@ -3,6 +3,7 @@ use bsl_types::builders::Builders;
 use bsl_types::intern::TypeKernelDb;
 use bsl_types::kind::TypeId;
 use hir_def::type_ref::TypeRef;
+use stdx::case::CaseExt;
 
 use super::builtin_names::bare_name_to_typeid;
 
@@ -15,7 +16,7 @@ pub fn segment_is_valid_type(s: &str) -> bool {
 
 pub fn is_arbitrary_type_name(name: &str) -> bool {
     let trimmed = name.trim();
-    trimmed.eq_ignore_ascii_case("Arbitrary") || trimmed.to_lowercase() == "произвольный"
+    trimmed.eq_ignore_ascii_case("Arbitrary") || trimmed.fold_lower() == "произвольный"
 }
 
 pub fn lower_param_type_string_typeid(db: &dyn TypeKernelDb, raw: &str) -> TypeId {

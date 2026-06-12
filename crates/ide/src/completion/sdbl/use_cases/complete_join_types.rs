@@ -1,11 +1,12 @@
 use crate::completion::sdbl::domain::SdblCompletionItem;
 use crate::completion::CompletionItemKind;
+use stdx::case::CaseExt;
 
 pub struct CompleteJoinTypesUseCase;
 
 impl CompleteJoinTypesUseCase {
     pub fn execute(prefix: &str) -> Vec<SdblCompletionItem> {
-        let prefix_lower = prefix.to_lowercase();
+        let prefix_lower = prefix.fold_lower();
 
         let join_keywords = vec![
             ("ЛЕВОЕ СОЕДИНЕНИЕ", "Левое внешнее соединение (LEFT JOIN)"),
@@ -28,7 +29,7 @@ impl CompleteJoinTypesUseCase {
 
         join_keywords
             .into_iter()
-            .filter(|(keyword, _)| keyword.to_lowercase().starts_with(&prefix_lower))
+            .filter(|(keyword, _)| keyword.fold_lower().starts_with(&prefix_lower))
             .map(|(keyword, desc)| {
                 SdblCompletionItem::new(keyword, CompletionItemKind::Keyword)
                     .with_detail(desc.to_string())

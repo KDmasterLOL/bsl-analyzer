@@ -1,6 +1,7 @@
 use crate::completion::sdbl::domain::{FieldFormatter, SdblCompletionItem};
 use crate::completion::CompletionItemKind;
 use sdbl_hir::{Scope, SdblType};
+use stdx::case::CaseExt;
 
 pub struct CompleteNestedFieldsUseCase;
 
@@ -11,7 +12,7 @@ impl CompleteNestedFieldsUseCase {
         field_chain: &[String],
         prefix: &str,
     ) -> Vec<SdblCompletionItem> {
-        let prefix_lower = prefix.to_lowercase();
+        let prefix_lower = prefix.fold_lower();
 
         tracing::info!(
             alias = %alias,
@@ -51,7 +52,7 @@ impl CompleteNestedFieldsUseCase {
                 if prefix.is_empty() {
                     true
                 } else {
-                    field.name.to_lowercase().starts_with(&prefix_lower)
+                    field.name.fold_lower().starts_with(&prefix_lower)
                 }
             })
             .map(|field| {

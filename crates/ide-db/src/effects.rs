@@ -1,4 +1,5 @@
 use std::{sync::Arc, time::Instant};
+use stdx::case::CaseExt;
 
 use base_db::FileIdInput;
 use hir::{
@@ -137,7 +138,7 @@ pub fn module_effect_summaries_query<'db>(
             db.unwind_if_revision_cancelled();
             let computed = analyze_method_effects(body, |key| match key {
                 CalleeKey::Local(name) => local_by_name
-                    .get(&name.as_str().to_lowercase())
+                    .get(&name.as_str().fold_lower())
                     .and_then(|id| summaries.get(id).copied()),
                 CalleeKey::Qualified { module, method } => {
                     resolve_qualified_callee(db, source_root_id, module, method)
@@ -274,7 +275,7 @@ pub fn module_security_state_query<'db>(
 fn build_local_name_index(summary: &ModuleCallSummary) -> FxHashMap<String, u32> {
     let mut map: FxHashMap<String, u32> = FxHashMap::default();
     for MethodSummary { local_id, name, .. } in &summary.methods {
-        map.entry(name.as_str().to_lowercase()).or_insert(*local_id);
+        map.entry(name.as_str().fold_lower()).or_insert(*local_id);
     }
     map
 }
@@ -285,7 +286,7 @@ fn build_exported_name_index(summary: &ModuleCallSummary) -> FxHashMap<String, u
         if !m.is_export {
             continue;
         }
-        map.entry(m.name.as_str().to_lowercase()).or_insert(m.local_id);
+        map.entry(m.name.as_str().fold_lower()).or_insert(m.local_id);
     }
     map
 }
@@ -302,7 +303,7 @@ fn resolve_qualified_callee(
 
     let other_call_summary = db.module_call_summary(other_module_id);
     let other_local_id = build_exported_name_index(&other_call_summary)
-        .get(&method.as_str().to_lowercase())
+        .get(&method.as_str().fold_lower())
         .copied()?;
 
     let other_input = FileIdInput::new(db, other_file_id);

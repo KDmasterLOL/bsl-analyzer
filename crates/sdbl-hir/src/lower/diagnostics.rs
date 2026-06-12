@@ -1,6 +1,7 @@
 use super::context::LoweringContext;
 use crate::diagnostics::SdblDiagnostic;
 use crate::hir::{ExprHir, JoinHir, SdblHir, TableRef};
+use stdx::case::CaseExt;
 
 impl LoweringContext<'_> {
     pub(super) fn check_joins_for_unprotected_fields(&mut self, hir: &SdblHir) {
@@ -770,7 +771,7 @@ impl LoweringContext<'_> {
         }
 
         for ref_idx in 0..parts.len() {
-            let p_lower = parts[ref_idx].to_lowercase();
+            let p_lower = parts[ref_idx].fold_lower();
             if p_lower != "ссылка" && p_lower != "reference" {
                 continue;
             }

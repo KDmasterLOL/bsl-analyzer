@@ -1,5 +1,6 @@
 use bsl_types::intern::TypeKernelDb;
 use bsl_types::kind::{MetadataKind, TypeId, TypeKind};
+use stdx::case::CaseExt;
 
 pub fn is_assignable(db: &dyn TypeKernelDb, from: TypeId, to: TypeId) -> bool {
     if from == to {
@@ -160,7 +161,7 @@ fn is_spreadsheet_area_bridge(from: &TypeKind, to: &TypeKind) -> bool {
 /// in arbitrary case; `eq_ignore_ascii_case` folds only ASCII, so Cyrillic
 /// names need the full Unicode lowercase fold.
 fn platform_name_eq_ci(actual: &str, ru: &str, en: &str) -> bool {
-    actual.eq_ignore_ascii_case(en) || actual.to_lowercase() == ru.to_lowercase()
+    actual.eq_ignore_ascii_case(en) || actual.fold_lower() == ru.fold_lower()
 }
 
 /// Vendor docs widely annotate parameters with a GENERIC platform name —

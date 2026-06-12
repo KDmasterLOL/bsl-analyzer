@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use stdx::case::CaseExt;
 
 use bsl_metadata::MdoType;
 use bsl_platform::{PlatformData, PlatformMethod};
@@ -82,14 +83,13 @@ pub struct RefineCtx<'a> {
 }
 
 fn is_sdbl_chain_method(name: &str) -> bool {
-    matches!(
-        name.to_lowercase().as_str(),
-        "выполнить" | "execute" | "выбрать" | "choose" | "выполнитьпакет" | "executebatch",
-    )
+    ["Выполнить", "Execute", "Выбрать", "Choose", "ВыполнитьПакет", "ExecuteBatch"]
+        .iter()
+        .any(|m| stdx::case::eq_ignore_case(name, m))
 }
 
 fn is_unload_method(name: &str) -> bool {
-    matches!(name.to_lowercase().as_str(), "выгрузить" | "unload")
+    stdx::case::eq_ignore_case(name, "Выгрузить") || stdx::case::eq_ignore_case(name, "Unload")
 }
 
 fn narrow_unload_return(
@@ -186,8 +186,7 @@ pub(crate) fn is_platform_name(name: &Name, ru: &str, en: &str) -> bool {
 }
 
 fn is_platform_name_str(name: &str, ru: &str, en: &str) -> bool {
-    let lower = name.to_lowercase();
-    lower == ru.to_lowercase() || lower == en.to_lowercase()
+    stdx::case::eq_ignore_case(name, ru) || stdx::case::eq_ignore_case(name, en)
 }
 
 fn is_value_table_arm_id(db: &dyn TypeKernelDb, id: TypeId) -> bool {
@@ -266,7 +265,7 @@ fn pick_chain_rewrite_id(
     recv_id: TypeId,
     method_name: &str,
 ) -> Option<(ChainTarget, TypeId)> {
-    let lower = method_name.to_lowercase();
+    let lower = method_name.fold_lower();
     match lower.as_str() {
         "выполнить" | "execute" => {
             let projection = projection_of_query_receiver_id(db, recv_id)?;
@@ -611,8 +610,8 @@ fn rewrite_form_data_collection_item_return(
 }
 
 fn is_form_data_collection_item_type_name(name: &str) -> bool {
-    let lc = name.to_lowercase();
-    lc == "данныеформыэлементколлекции" || lc == "formdatacollectionitem"
+    stdx::case::eq_ignore_case(name, "ДанныеФормыЭлементКоллекции")
+        || stdx::case::eq_ignore_case(name, "FormDataCollectionItem")
 }
 
 pub(crate) fn to_method_info(db: &dyn TypeKernelDb, method: &PlatformMethod) -> MethodInfo {
@@ -750,8 +749,7 @@ fn rewrite_row_array_for_method(
 }
 
 fn is_row_array_method(name: &str) -> bool {
-    let lc = name.to_lowercase();
-    matches!(lc.as_str(), "найтистроки" | "findrows")
+    stdx::case::eq_ignore_case(name, "НайтиСтроки") || stdx::case::eq_ignore_case(name, "FindRows")
 }
 
 #[cfg(test)]

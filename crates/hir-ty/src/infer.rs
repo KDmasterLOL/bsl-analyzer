@@ -12,6 +12,7 @@ use hir_def::ty::FunctionSignature;
 use hir_def::{sdbl_hir_for_file_query, DefWithBodyId, ExprId, MethodIdInput, Name, SdblExprId};
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
+use stdx::case::CaseExt;
 use tracing::{debug, info, trace};
 use vfs::FileId;
 
@@ -516,8 +517,8 @@ impl<'db> InferenceContext<'db> {
     }
 
     fn body_declares_binding(&self, name: &hir_def::Name) -> bool {
-        let target = name.as_str().to_lowercase();
-        self.body.bindings_iter().any(|(_, b)| b.name.as_str().to_lowercase() == target)
+        let target = name.as_str().fold_lower();
+        self.body.bindings_iter().any(|(_, b)| b.name.as_str().fold_lower() == target)
     }
 
     pub fn infer_all(&mut self) {
@@ -587,7 +588,7 @@ impl<'db> InferenceContext<'db> {
                             }
                             None if existing_module_variable => {}
                             None => {
-                                let key = name.as_str().to_lowercase();
+                                let key = name.as_str().fold_lower();
                                 self.assigned_var_names.insert(key.clone());
                                 let target_id = ExprId::from_idx(*target);
                                 let unknown = self.db.unknown();
@@ -685,7 +686,7 @@ impl<'db> InferenceContext<'db> {
             Stmt::For { var, from, to, body } => {
                 self.infer_expr(ExprId::from_idx(*from));
                 self.infer_expr(ExprId::from_idx(*to));
-                let var_name = self.body.binding_idx(*var).name.as_str().to_lowercase();
+                let var_name = self.body.binding_idx(*var).name.as_str().fold_lower();
                 let number = self.db.number(None, None);
                 self.var_types.insert(var_name, number);
                 self.binding_types.insert(BindingId::from_idx(*var), number);
@@ -697,7 +698,7 @@ impl<'db> InferenceContext<'db> {
                 if let Some(elem_ty) =
                     crate::iteration_lookup::resolve_iter_element_ty(self.db, coll_ty)
                 {
-                    let var_name = self.body.binding_idx(*var).name.as_str().to_lowercase();
+                    let var_name = self.body.binding_idx(*var).name.as_str().fold_lower();
                     self.var_types.insert(var_name, elem_ty);
                     self.binding_types.insert(BindingId::from_idx(*var), elem_ty);
                 }
@@ -961,7 +962,7 @@ impl<'db> InferenceContext<'db> {
 
         let resolver = self.get_resolver();
 
-        let name_lower = name.as_str().to_lowercase();
+        let name_lower = name.as_str().fold_lower();
         if name_lower == "этотобъект" || name_lower == "thisobject" {
             if let Some(owner) = crate::this_object::resolve_this_object_owner(self.db, &resolver) {
                 trace!("resolved {} as ThisObject {{ owner: {:?} }}", name, owner);
@@ -999,7 +1000,7 @@ impl<'db> InferenceContext<'db> {
 
         let resolved = resolver.resolve_name(self.db, name);
 
-        if let Some(ty) = self.var_types.get(&name.as_str().to_lowercase()) {
+        if let Some(ty) = self.var_types.get(&name.as_str().fold_lower()) {
             trace!("resolved {} via var_types = {:?}", name, ty);
             let ty_id = *ty;
             if crate::method_lookup::receiver_needs_refinement_id(self.db, ty_id) {
@@ -1200,7 +1201,7 @@ impl<'db> InferenceContext<'db> {
             // `ОбщийМодуль`. The map is empty unless the rollout gate is enabled.
             if !self.common_module_var_bindings.is_empty() {
                 let bound_module = if let Expr::Path(path_name) = self.body.expr(base_id) {
-                    self.common_module_var_bindings.get(&path_name.as_str().to_lowercase()).cloned()
+                    self.common_module_var_bindings.get(&path_name.as_str().fold_lower()).cloned()
                 } else {
                     None
                 };
@@ -1633,7 +1634,7 @@ impl<'db> InferenceContext<'db> {
             TypeKind::Unknown => {
                 if let Some(name) = bare_callee_name.as_ref() {
                     if !self.body_declares_binding(name)
-                        && !self.assigned_var_names.contains(&name.as_str().to_lowercase())
+                        && !self.assigned_var_names.contains(&name.as_str().fold_lower())
                     {
                         let module_id = hir_def::ModuleId::new(self.file_id);
                         let symbol_tree = self.db.symbol_tree(module_id);
@@ -1759,7 +1760,7 @@ impl<'db> InferenceContext<'db> {
         if self.body_declares_binding(module_name) {
             return None;
         }
-        if self.assigned_var_names.contains(&module_name.as_str().to_lowercase()) {
+        if self.assigned_var_names.contains(&module_name.as_str().fold_lower()) {
             return None;
         }
 
@@ -1972,7 +1973,7 @@ impl<'db> InferenceContext<'db> {
         return_ty: &mut TypeId,
         params: &mut [TypeId],
     ) {
-        let lc = method_name.as_str().to_lowercase();
+        let lc = method_name.as_str().fold_lower();
         let is_get = lc == "получить" || lc == "get";
         let is_set = lc == "установить" || lc == "set";
         if !is_get && !is_set {

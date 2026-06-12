@@ -1,6 +1,7 @@
 use crate::path::QualifiedName;
 use crate::type_ref::TypeRef;
 use crate::Name;
+use stdx::case::CaseExt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MethodTypeHints {
@@ -27,7 +28,7 @@ pub fn parse_method_doc_types(doc_comment: &str) -> Option<MethodTypeHints> {
         let line = line.trim();
         let line = line.strip_prefix("//").unwrap_or(line).trim();
 
-        let line_lower = line.to_lowercase();
+        let line_lower = line.fold_lower();
 
         if is_params_header(&line_lower) {
             in_params_section = true;
@@ -204,7 +205,7 @@ fn parse_type_name(name: &str) -> TypeRef {
         return tref;
     }
 
-    match trimmed.to_lowercase().as_str() {
+    match trimmed.fold_lower().as_str() {
         "произвольный" | "any" | "arbitrary" => return TypeRef::Any,
         _ => {}
     }
@@ -236,7 +237,7 @@ fn parse_type_name(name: &str) -> TypeRef {
 fn is_see_reference(s: &str) -> bool {
     let s = s.trim_start();
     let head_end = s.find([' ', '.']).unwrap_or(s.len());
-    matches!(s[..head_end].to_lowercase().as_str(), "см" | "смотри" | "see")
+    matches!(s[..head_end].fold_lower().as_str(), "см" | "смотри" | "see")
 }
 
 fn is_identifier_like(s: &str) -> bool {
@@ -248,8 +249,8 @@ fn is_identifier_like(s: &str) -> bool {
 }
 
 fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
-    let s_lower = s.to_lowercase();
-    let prefix_lower = prefix.to_lowercase();
+    let s_lower = s.fold_lower();
+    let prefix_lower = prefix.fold_lower();
 
     if !s_lower.starts_with(&prefix_lower) {
         return None;

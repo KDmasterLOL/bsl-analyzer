@@ -2,6 +2,7 @@ pub mod lower;
 
 use la_arena::Arena;
 use rustc_hash::{FxHashMap, FxHashSet};
+use stdx::case::CaseExt;
 use syntax::SyntaxNode;
 use text_size::TextRange;
 
@@ -712,7 +713,7 @@ pub enum ManagerType {
 
 impl ManagerType {
     pub fn from_name(name: &str) -> Option<Self> {
-        let lower = name.to_lowercase();
+        let lower = name.fold_lower();
         match lower.as_str() {
             "документы" | "documents" => Some(Self::Documents),
             "справочники" | "catalogs" => Some(Self::Catalogs),

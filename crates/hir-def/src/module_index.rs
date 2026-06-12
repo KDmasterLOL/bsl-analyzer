@@ -1,5 +1,6 @@
 use bsl_metadata::MdoType;
 use rustc_hash::FxHashMap;
+use stdx::case::CaseExt;
 use vfs::FileId;
 
 use crate::body::{ExternalRef, ManagerType};
@@ -32,7 +33,7 @@ impl ModuleIndex {
             let Some((module_type, name, file_kind)) = parse_module_path(&normalized) else {
                 continue;
             };
-            let lower = name.to_lowercase();
+            let lower = name.fold_lower();
 
             match file_kind {
                 ModuleFileKind::Common => {
@@ -70,19 +71,19 @@ impl ModuleIndex {
     }
 
     pub fn resolve_common_module(&self, name: &Name) -> Option<FileId> {
-        self.common_modules.get(&name.as_str().to_lowercase()).copied()
+        self.common_modules.get(&name.as_str().fold_lower()).copied()
     }
 
     pub fn resolve_manager(&self, manager_type: ManagerType, name: &Name) -> Option<FileId> {
-        self.managers.get(&(manager_type, name.as_str().to_lowercase())).copied()
+        self.managers.get(&(manager_type, name.as_str().fold_lower())).copied()
     }
 
     pub fn resolve_object_module(&self, mdo_type: MdoType, name: &Name) -> Option<FileId> {
-        self.object_modules.get(&(mdo_type, name.as_str().to_lowercase())).copied()
+        self.object_modules.get(&(mdo_type, name.as_str().fold_lower())).copied()
     }
 
     pub fn resolve_record_set_module(&self, mdo_type: MdoType, name: &Name) -> Option<FileId> {
-        self.record_set_modules.get(&(mdo_type, name.as_str().to_lowercase())).copied()
+        self.record_set_modules.get(&(mdo_type, name.as_str().fold_lower())).copied()
     }
 
     pub fn common_module_count(&self) -> usize {
@@ -258,7 +259,7 @@ enum ModuleFileKind {
 }
 
 fn module_path_type_from_segment(segment: &str) -> Option<ModulePathType> {
-    match segment.to_lowercase().as_str() {
+    match segment.fold_lower().as_str() {
         "commonmodules" | "общиемодули" => Some(ModulePathType::CommonModule),
         "documents" | "документы" => Some(ModulePathType::Document),
         "catalogs" | "справочники" => Some(ModulePathType::Catalog),
@@ -339,7 +340,7 @@ fn parse_module_path(path: &str) -> Option<(ModulePathType, String, ModuleFileKi
         return None;
     }
 
-    let path_lower = path.to_lowercase();
+    let path_lower = path.fold_lower();
 
     for (i, part) in parts.iter().enumerate().rev() {
         let module_type = module_path_type_from_segment(part);

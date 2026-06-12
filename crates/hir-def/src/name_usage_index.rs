@@ -2,6 +2,7 @@ use crate::{DefDatabase, Name};
 use base_db::{FileIdInput, SourceRootInput};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::Arc;
+use stdx::case::CaseExt;
 use vfs::FileId;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -47,7 +48,7 @@ impl SourceRootNameUsage {
 }
 
 pub fn normalize_name(name: &Name) -> Name {
-    Name::new(&name.as_str().to_lowercase())
+    Name::new(&name.as_str().fold_lower())
 }
 
 #[salsa::tracked(lru = 4096)]
@@ -66,7 +67,7 @@ pub fn file_name_usage_query<'db>(
         if !token.kind().is_name_token() {
             continue;
         }
-        names.insert(Name::new(&token.text().to_lowercase()));
+        names.insert(Name::new(&token.text().fold_lower()));
     }
 
     Arc::new(FileNameUsage { names })

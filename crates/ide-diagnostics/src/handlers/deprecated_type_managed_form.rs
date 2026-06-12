@@ -2,6 +2,7 @@ use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
+use stdx::case::CaseExt;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -37,7 +38,7 @@ pub fn from_hir(type_name: &str, range: TextRange, ctx: &DiagnosticsContext) -> 
 }
 
 fn get_message(arg_value: &str) -> String {
-    let lower = arg_value.to_lowercase();
+    let lower = arg_value.fold_lower();
     if lower == "управляемаяформа" {
         "Использование устаревшего типа \"УправляемаяФорма\". \
          Рекомендуется использовать \"ФормаКлиентскогоПриложения\""

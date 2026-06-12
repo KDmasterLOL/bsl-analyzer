@@ -13,6 +13,7 @@ use hir_ty::{
     enumerate_fields, is_assignable, is_ref_ty, lookup_field, lookup_method, FieldInfo, FieldOrigin,
 };
 use std::sync::Arc;
+use stdx::case::CaseExt;
 use vfs::FileId;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -185,7 +186,7 @@ impl<'db, DB: ConfigsDatabase + TypeKernelDb> Type<'db, DB> {
             for type_name in chain.iter().rev() {
                 for m in PlatformData::instance().get_type_methods(type_name) {
                     let dto = method_dto_from_platform(self.db, m);
-                    if seen.insert(dto.name.as_str().to_lowercase()) {
+                    if seen.insert(dto.name.as_str().fold_lower()) {
                         methods.push(dto);
                     }
                 }
@@ -281,9 +282,9 @@ pub fn module_implicit_field_names(
     hir_ty::module_implicit_fields(db, file_id)
         .into_iter()
         .flat_map(|info| {
-            let mut names = vec![info.name.as_str().to_lowercase()];
+            let mut names = vec![info.name.as_str().fold_lower()];
             if let Some(en) = &info.name_en {
-                names.push(en.as_str().to_lowercase());
+                names.push(en.as_str().fold_lower());
             }
             names
         })

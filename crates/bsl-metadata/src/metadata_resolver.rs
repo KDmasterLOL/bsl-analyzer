@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::sync::Arc;
+use stdx::case::CaseExt;
 
 use crate::metadata_object::AttributeType;
 use crate::{Configuration, MdoType, MetadataObject, Register};
@@ -57,7 +58,7 @@ where
 {
     let mut current = name.to_string();
     loop {
-        if !visited.insert(current.to_lowercase()) {
+        if !visited.insert(current.fold_lower()) {
             return None;
         }
         match resolver.resolve_defined_type(&current)? {

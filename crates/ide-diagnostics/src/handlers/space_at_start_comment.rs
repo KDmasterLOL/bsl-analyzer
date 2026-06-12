@@ -2,6 +2,7 @@ use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
 use line_index::TextSize;
+use stdx::case::CaseExt;
 use syntax::{NodeOrToken, SyntaxKind};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -43,11 +44,11 @@ fn matches_good_comment_pattern(text: &str, use_strict: bool) -> bool {
 }
 
 fn parse_comments_annotation(config: &str) -> Vec<String> {
-    config.split(',').map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()).collect()
+    config.split(',').map(|s| s.trim().fold_lower()).filter(|s| !s.is_empty()).collect()
 }
 
 fn is_annotation(text: &str, annotations: &[String]) -> bool {
-    let text_lower = text.to_lowercase();
+    let text_lower = text.fold_lower();
     annotations.iter().any(|ann| text_lower.starts_with(ann))
 }
 

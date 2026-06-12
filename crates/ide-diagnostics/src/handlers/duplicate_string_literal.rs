@@ -3,6 +3,7 @@ use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 use std::collections::HashMap;
+use stdx::case::CaseExt;
 use syntax::{SyntaxKind, SyntaxNode};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -82,7 +83,7 @@ impl Config {
                 ]
             })
             .iter()
-            .map(|s| s.to_lowercase())
+            .map(|s| s.fold_lower())
             .collect();
 
         tracing::debug!(
@@ -162,7 +163,7 @@ fn collect_strings(
                 continue;
             }
 
-            let key = if config.case_sensitive { text.clone() } else { text.to_lowercase() };
+            let key = if config.case_sensitive { text.clone() } else { text.fold_lower() };
 
             groups.entry(key).or_default().push((text, node.text_range()));
         }
@@ -214,7 +215,7 @@ fn is_excluded_call_argument(literal: &SyntaxNode, excluded: &[String]) -> bool 
 
     match callee_name {
         Some(name) => {
-            let lower = name.to_lowercase();
+            let lower = name.fold_lower();
             excluded.contains(&lower)
         }
         None => false,

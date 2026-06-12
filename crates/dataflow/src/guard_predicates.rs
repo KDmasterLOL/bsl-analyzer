@@ -7,6 +7,7 @@ use hir_def::{
 };
 use petgraph::graph::NodeIndex;
 use rustc_hash::FxHashSet;
+use stdx::case::CaseExt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GuardSemantics {
@@ -40,8 +41,8 @@ impl GuardRegistry {
                 );
                 continue;
             }
-            let ru_lower = p.ru.to_lowercase();
-            let en_lower = if p.en.is_empty() { String::new() } else { p.en.to_lowercase() };
+            let ru_lower = p.ru.fold_lower();
+            let en_lower = if p.en.is_empty() { String::new() } else { p.en.fold_lower() };
             if is_blocklisted_name(&ru_lower) || is_blocklisted_name(&en_lower) {
                 tracing::warn!(
                     name = %p.ru,
@@ -65,7 +66,7 @@ impl GuardRegistry {
     }
 
     pub fn matches(&self, name: &Name) -> bool {
-        let n = name.as_str().to_lowercase();
+        let n = name.as_str().fold_lower();
         self.lower_aliases.iter().any(|alias| alias == &n)
     }
 }

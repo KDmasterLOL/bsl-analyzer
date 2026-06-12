@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+stdx.workspace = true
 syntax.workspace = true
 vfs.workspace = true
 parser.workspace = true

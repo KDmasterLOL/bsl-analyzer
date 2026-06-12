@@ -2,6 +2,7 @@ use crate::completion::sdbl::domain::{FieldFormatter, MetadataProvider, SdblComp
 use crate::completion::CompletionItemKind;
 use bsl_metadata::MdoType;
 use sdbl_hir::{FieldDef, MdoRef, Scope, SdblType};
+use stdx::case::CaseExt;
 
 pub struct CompleteCastFieldsUseCase;
 
@@ -14,7 +15,7 @@ impl CompleteCastFieldsUseCase {
         field_chain: &[String],
         prefix: &str,
     ) -> Vec<SdblCompletionItem> {
-        let prefix_lower = prefix.to_lowercase();
+        let prefix_lower = prefix.fold_lower();
 
         tracing::info!(
             ?mdo_type,
@@ -59,7 +60,7 @@ impl CompleteCastFieldsUseCase {
                 if prefix.is_empty() {
                     true
                 } else {
-                    field.name.to_lowercase().starts_with(&prefix_lower)
+                    field.name.fold_lower().starts_with(&prefix_lower)
                 }
             })
             .map(|field| {
@@ -242,7 +243,7 @@ mod tests {
         );
 
         assert!(
-            items.iter().all(|i| i.label.to_lowercase().starts_with("при")),
+            items.iter().all(|i| i.label.fold_lower().starts_with("при")),
             "Expected only fields starting with 'При'"
         );
     }

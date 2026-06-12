@@ -3,6 +3,7 @@ use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::{MethodId, ModItem, RegionTree};
 use ide_db::TextRange;
+use stdx::case::CaseExt;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -98,7 +99,7 @@ fn check_method(
 }
 
 fn is_public_api_region(name: &str) -> bool {
-    let lower = name.to_lowercase();
+    let lower = name.fold_lower();
     lower == "программныйинтерфейс" || lower == "public"
 }
 

@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+stdx.workspace = true
 parser-error.workspace = true
 rowan.workspace = true
 smol_str.workspace = true

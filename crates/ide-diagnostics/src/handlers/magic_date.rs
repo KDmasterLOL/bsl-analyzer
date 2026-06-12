@@ -3,6 +3,7 @@ use crate::metadata::*;
 use crate::utils::literal_context;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use std::collections::HashSet;
+use stdx::case::CaseExt;
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -175,7 +176,7 @@ fn is_in_structure_or_correspondence_insert(token: &SyntaxToken) -> bool {
     while let Some(current) = node {
         if matches!(current.kind(), SyntaxKind::CALL_STMT | SyntaxKind::CALL_EXPR) {
             if let Some(method_name) = literal_context::find_method_name(&current) {
-                let name = method_name.to_lowercase();
+                let name = method_name.fold_lower();
                 if name == "вставить" || name == "insert" {
                     return true;
                 }
@@ -219,7 +220,7 @@ fn is_in_date_function_simple_assignment(token: &SyntaxToken) -> bool {
         .filter_map(|e| e.into_token())
         .filter(|t| t.kind() == SyntaxKind::IDENT)
         .any(|t| {
-            let name = t.text().to_lowercase();
+            let name = t.text().fold_lower();
             name == "дата" || name == "date"
         });
 

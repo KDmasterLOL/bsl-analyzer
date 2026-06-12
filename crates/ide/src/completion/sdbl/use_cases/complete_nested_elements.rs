@@ -1,6 +1,7 @@
 use crate::completion::sdbl::domain::{MetadataProvider, SdblCompletionItem};
 use crate::completion::CompletionItemKind;
 use bsl_metadata::MdoType;
+use stdx::case::CaseExt;
 
 pub struct CompleteNestedElementsUseCase;
 
@@ -44,12 +45,12 @@ impl CompleteNestedElementsUseCase {
             return Vec::new();
         };
 
-        let prefix_lower = prefix.to_lowercase();
+        let prefix_lower = prefix.fold_lower();
 
         let items: Vec<SdblCompletionItem> = object
             .tabular_sections
             .iter()
-            .filter(|ts| ts.name().to_lowercase().starts_with(&prefix_lower))
+            .filter(|ts| ts.name().fold_lower().starts_with(&prefix_lower))
             .map(|ts| {
                 let detail = format!("{}.{}.{}", mdo_type.russian_name(), object_name, ts.name());
                 let documentation =
@@ -92,11 +93,11 @@ impl CompleteNestedElementsUseCase {
 
         let virtual_tables = register.virtual_tables();
 
-        let prefix_lower = prefix.to_lowercase();
+        let prefix_lower = prefix.fold_lower();
 
         let items: Vec<SdblCompletionItem> = virtual_tables
             .into_iter()
-            .filter(|vt_name| vt_name.to_lowercase().starts_with(&prefix_lower))
+            .filter(|vt_name| vt_name.fold_lower().starts_with(&prefix_lower))
             .map(|vt_name| {
                 let detail = format!("{}.{}.{}", mdo_type.russian_name(), register_name, vt_name);
 

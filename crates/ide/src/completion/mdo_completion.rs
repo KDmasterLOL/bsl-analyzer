@@ -2,6 +2,7 @@ use bsl_metadata::MdoType;
 use bsl_platform::{manager_methods_query, TypeNameInput};
 use hir::{ManagerType, Name};
 use ide_db::RootDatabase;
+use stdx::case::CaseExt;
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
 use super::{CompletionItem, CompletionItemKind, CompletionPosition};
@@ -293,13 +294,13 @@ fn complete_predefined_items<DB: RootDatabase>(
     object_name: &str,
 ) -> Vec<CompletionItem> {
     let configs = db.get_all_configurations(file_id);
-    let name_lower = object_name.to_lowercase();
+    let name_lower = object_name.fold_lower();
 
     for (_source_name, config) in &configs {
         let mdo = config
             .metadata_objects()
             .iter()
-            .find(|obj| obj.mdo_type == mdo_type && obj.name.to_lowercase() == name_lower);
+            .find(|obj| obj.mdo_type == mdo_type && obj.name.fold_lower() == name_lower);
 
         if let Some(mdo) = mdo {
             let items: Vec<CompletionItem> = mdo

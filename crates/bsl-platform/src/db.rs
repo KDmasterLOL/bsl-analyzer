@@ -6,6 +6,7 @@ use once_cell::sync::OnceCell;
 use rustc_hash::FxHashMap;
 use smol_str::SmolStr;
 use std::sync::Arc;
+use stdx::case::CaseExt;
 
 static PLATFORM_DATA_SINGLETON: OnceCell<PlatformDataInner> = OnceCell::new();
 
@@ -59,21 +60,21 @@ impl PlatformDataInner {
         let mut xdto_counts: FxHashMap<SmolStr, u32> = FxHashMap::default();
         for ty in &types {
             if let Some(xdto) = &ty.xdto_name {
-                *xdto_counts.entry(xdto.to_lowercase().into()).or_insert(0) += 1;
+                *xdto_counts.entry(xdto.fold_lower().into()).or_insert(0) += 1;
             }
         }
 
         let mut type_en_folded: Vec<SmolStr> = Vec::with_capacity(types.len());
         for (idx, ty) in types.iter().enumerate() {
-            let ru_key: SmolStr = ty.name.to_lowercase().into();
-            let en_key: SmolStr = ty.english_name.to_lowercase().into();
+            let ru_key: SmolStr = ty.name.fold_lower().into();
+            let en_key: SmolStr = ty.english_name.fold_lower().into();
             type_en_folded.push(en_key.clone());
             types_by_name.insert(ru_key, idx);
             types_by_name.insert(en_key, idx);
             // The XDTO name is an additional, non-overriding alias: index it only
             // when unambiguous, and never let it shadow a type's own key.
             if let Some(xdto) = &ty.xdto_name {
-                let key: SmolStr = xdto.to_lowercase().into();
+                let key: SmolStr = xdto.fold_lower().into();
                 if xdto_counts.get(&key) == Some(&1) {
                     types_by_name.entry(key).or_insert(idx);
                 }
@@ -88,15 +89,15 @@ impl PlatformDataInner {
 
         let mut type_en_to_ru: FxHashMap<SmolStr, SmolStr> = FxHashMap::default();
         for ty in &types {
-            let en_key: SmolStr = ty.english_name.to_lowercase().into();
-            let ru_key: SmolStr = ty.name.to_lowercase().into();
+            let en_key: SmolStr = ty.english_name.fold_lower().into();
+            let ru_key: SmolStr = ty.name.fold_lower().into();
             type_en_to_ru.insert(en_key, ru_key);
         }
 
         for (idx, method) in methods.iter().enumerate() {
-            let en_type_key: SmolStr = method.type_name.to_lowercase().into();
-            let ru_method_key: SmolStr = method.name.to_lowercase().into();
-            let en_method_key: SmolStr = method.english_name.to_lowercase().into();
+            let en_type_key: SmolStr = method.type_name.fold_lower().into();
+            let ru_method_key: SmolStr = method.name.fold_lower().into();
+            let en_method_key: SmolStr = method.english_name.fold_lower().into();
 
             methods_by_type.entry(en_type_key.clone()).or_default().push(idx);
             methods_by_name.insert((en_type_key.clone(), ru_method_key.clone()), idx);
@@ -114,8 +115,8 @@ impl PlatformDataInner {
         let mut global_functions_by_name = FxHashMap::default();
 
         for (idx, function) in global_functions.iter().enumerate() {
-            let ru_key: SmolStr = function.name.to_lowercase().into();
-            let en_key: SmolStr = function.english_name.to_lowercase().into();
+            let ru_key: SmolStr = function.name.fold_lower().into();
+            let en_key: SmolStr = function.english_name.fold_lower().into();
 
             global_functions_by_name.insert(ru_key, idx);
             global_functions_by_name.insert(en_key, idx);
@@ -138,7 +139,7 @@ impl PlatformDataInner {
 
         let mut constructors_by_type: FxHashMap<SmolStr, Vec<usize>> = FxHashMap::default();
         for (idx, ctor) in constructors.iter().enumerate() {
-            let en_key: SmolStr = ctor.type_name.to_lowercase().into();
+            let en_key: SmolStr = ctor.type_name.fold_lower().into();
             constructors_by_type.entry(en_key.clone()).or_default().push(idx);
             if let Some(ru_key) = type_en_to_ru.get(&en_key) {
                 constructors_by_type.entry(ru_key.clone()).or_default().push(idx);
@@ -157,9 +158,9 @@ impl PlatformDataInner {
         let mut properties_by_type: FxHashMap<SmolStr, Vec<usize>> = FxHashMap::default();
         let mut manager_properties_by_prefix: FxHashMap<SmolStr, Vec<usize>> = FxHashMap::default();
         for (idx, prop) in properties.iter().enumerate() {
-            let en_type_key: SmolStr = prop.type_name.to_lowercase().into();
-            let ru_prop_key: SmolStr = prop.name.to_lowercase().into();
-            let en_prop_key: SmolStr = prop.english_name.to_lowercase().into();
+            let en_type_key: SmolStr = prop.type_name.fold_lower().into();
+            let ru_prop_key: SmolStr = prop.name.fold_lower().into();
+            let en_prop_key: SmolStr = prop.english_name.fold_lower().into();
 
             properties_by_type.entry(en_type_key.clone()).or_default().push(idx);
             if let Some((manager_prefix, _)) = en_type_key.split_once('.') {
@@ -184,8 +185,8 @@ impl PlatformDataInner {
             if prop.type_name.as_str() != GLOBAL_CONTEXT_OWNER {
                 continue;
             }
-            let ru_key: SmolStr = prop.name.to_lowercase().into();
-            let en_key: SmolStr = prop.english_name.to_lowercase().into();
+            let ru_key: SmolStr = prop.name.fold_lower().into();
+            let en_key: SmolStr = prop.english_name.fold_lower().into();
             global_properties_by_name.insert(ru_key, idx);
             global_properties_by_name.insert(en_key, idx);
         }
@@ -214,7 +215,7 @@ impl PlatformDataInner {
     }
 
     pub fn get_type(&self, name: &str) -> Option<&PlatformType> {
-        let key: SmolStr = name.to_lowercase().into();
+        let key: SmolStr = name.fold_lower().into();
         let idx = *self.types_by_name.get(&key)?;
         self.types.get(idx)
     }
@@ -224,8 +225,8 @@ impl PlatformDataInner {
     }
 
     pub fn get_method(&self, type_name: &str, method_name: &str) -> Option<&PlatformMethod> {
-        let type_key: SmolStr = type_name.to_lowercase().into();
-        let method_key: SmolStr = method_name.to_lowercase().into();
+        let type_key: SmolStr = type_name.fold_lower().into();
+        let method_key: SmolStr = method_name.fold_lower().into();
         let idx = *self.methods_by_name.get(&(type_key, method_key))?;
         self.methods.get(idx)
     }
@@ -235,7 +236,7 @@ impl PlatformDataInner {
     }
 
     pub fn get_type_methods(&self, type_name: &str) -> Vec<&PlatformMethod> {
-        let type_key: SmolStr = type_name.to_lowercase().into();
+        let type_key: SmolStr = type_name.fold_lower().into();
         let en_type_key: SmolStr = match self.types_by_name.get(&type_key) {
             Some(&idx) => self.type_en_folded[idx].clone(),
             None => type_key,
@@ -247,12 +248,12 @@ impl PlatformDataInner {
     }
 
     pub fn get_manager_methods(&self, manager_prefix: &str) -> Vec<&PlatformMethod> {
-        let prefix = format!("{}.", manager_prefix.to_lowercase());
-        self.methods.iter().filter(|m| m.type_name.to_lowercase().starts_with(&prefix)).collect()
+        let prefix = format!("{}.", manager_prefix.fold_lower());
+        self.methods.iter().filter(|m| m.type_name.fold_lower().starts_with(&prefix)).collect()
     }
 
     pub fn get_global_function(&self, name: &str) -> Option<&GlobalFunction> {
-        let key: SmolStr = name.to_lowercase().into();
+        let key: SmolStr = name.fold_lower().into();
         let idx = *self.global_functions_by_name.get(&key)?;
         self.global_functions.get(idx)
     }
@@ -268,7 +269,7 @@ impl PlatformDataInner {
     }
 
     pub fn get_constructors(&self, type_name: &str) -> Vec<&PlatformConstructor> {
-        let key: SmolStr = type_name.to_lowercase().into();
+        let key: SmolStr = type_name.fold_lower().into();
         match self.constructors_by_type.get(&key) {
             Some(indices) => indices.iter().filter_map(|&i| self.constructors.get(i)).collect(),
             None => Vec::new(),
@@ -292,14 +293,14 @@ impl PlatformDataInner {
     }
 
     pub fn get_property(&self, type_name: &str, prop_name: &str) -> Option<&PlatformProperty> {
-        let type_key: SmolStr = type_name.to_lowercase().into();
-        let prop_key: SmolStr = prop_name.to_lowercase().into();
+        let type_key: SmolStr = type_name.fold_lower().into();
+        let prop_key: SmolStr = prop_name.fold_lower().into();
         let idx = *self.properties_by_name.get(&(type_key, prop_key))?;
         self.properties.get(idx)
     }
 
     pub fn get_type_properties(&self, type_name: &str) -> Vec<&PlatformProperty> {
-        let type_key: SmolStr = type_name.to_lowercase().into();
+        let type_key: SmolStr = type_name.fold_lower().into();
         let en_type_key: SmolStr = match self.types_by_name.get(&type_key) {
             Some(&idx) => self.type_en_folded[idx].clone(),
             None => type_key,
@@ -311,7 +312,7 @@ impl PlatformDataInner {
     }
 
     pub fn get_manager_properties(&self, manager_prefix: &str) -> Vec<&PlatformProperty> {
-        let folded = manager_prefix.to_lowercase();
+        let folded = manager_prefix.fold_lower();
         // The index is keyed by the segment before the first dot; a dotted
         // prefix narrows the bucket with the original `starts_with` check.
         let (head, dotted_rest) = match folded.split_once('.') {
@@ -328,7 +329,7 @@ impl PlatformDataInner {
         indices
             .iter()
             .filter_map(|&idx| self.properties.get(idx))
-            .filter(|p| p.type_name.to_lowercase().starts_with(&full_prefix))
+            .filter(|p| p.type_name.fold_lower().starts_with(&full_prefix))
             .collect()
     }
 
@@ -337,7 +338,7 @@ impl PlatformDataInner {
     }
 
     pub fn get_global_property(&self, name: &str) -> Option<&PlatformProperty> {
-        let key: SmolStr = name.to_lowercase().into();
+        let key: SmolStr = name.fold_lower().into();
         let idx = *self.global_properties_by_name.get(&key)?;
         self.properties.get(idx)
     }
@@ -392,7 +393,7 @@ fn get_keyword_docs_static(keyword: &str) -> Option<crate::types::KeywordDocs> {
     use crate::types::{KeywordDocs, ParamDocs};
     use smol_str::SmolStr;
 
-    let keyword_lower = keyword.to_lowercase();
+    let keyword_lower = keyword.fold_lower();
 
     match keyword_lower.as_str() {
         "вызватьисключение" | "raise" => Some(KeywordDocs {
@@ -524,7 +525,7 @@ pub fn prefixed_method_query<'db>(
 }
 
 pub fn find_prefixed_method(prefix: &str, method_name: &str) -> Option<PlatformMethod> {
-    let method_lower = method_name.to_lowercase();
+    let method_lower = method_name.fold_lower();
     let data = PlatformDataInner::instance();
     data.get_manager_methods(prefix)
         .into_iter()
@@ -533,13 +534,13 @@ pub fn find_prefixed_method(prefix: &str, method_name: &str) -> Option<PlatformM
             let ru_match = docs
                 .as_ref()
                 .and_then(|d| d.syntax.split('(').next())
-                .is_some_and(|ru| ru.to_lowercase() == method_lower);
+                .is_some_and(|ru| ru.fold_lower() == method_lower);
             if ru_match {
                 return true;
             }
             let en_name =
                 m.english_name.rsplit_once('.').map(|(_, n)| n).unwrap_or(&m.english_name);
-            en_name.to_lowercase() == method_lower
+            en_name.fold_lower() == method_lower
         })
         .cloned()
 }
@@ -631,7 +632,7 @@ mod tests {
         let name = ty.name.as_str();
 
         assert!(data.get_type(name).is_some());
-        assert!(data.get_type(&name.to_lowercase()).is_some());
+        assert!(data.get_type(&name.fold_lower()).is_some());
         assert!(data.get_type(&name.to_uppercase()).is_some());
     }
 
@@ -704,7 +705,7 @@ mod tests {
         if !methods.is_empty() {
             println!("Type {} has {} methods", ty.english_name, methods.len());
             for method in &methods {
-                assert_eq!(method.type_name.to_lowercase(), ty.english_name.to_lowercase());
+                assert_eq!(method.type_name.fold_lower(), ty.english_name.fold_lower());
             }
         }
     }
@@ -778,7 +779,7 @@ mod tests {
 
         if !methods.is_empty() {
             for method in methods.iter() {
-                assert_eq!(method.type_name.to_lowercase(), "строка");
+                assert_eq!(method.type_name.fold_lower(), "строка");
             }
         }
     }
@@ -1110,7 +1111,7 @@ mod tests {
         let m = find_prefixed_method("InformationRegisterRecordSet", "Прочитать")
             .expect("Прочитать must resolve under InformationRegisterRecordSet");
         assert!(
-            m.english_name.to_lowercase().ends_with(".read"),
+            m.english_name.fold_lower().ends_with(".read"),
             "english_name must end with `.Read`, got `{}`",
             m.english_name
         );

@@ -13,6 +13,7 @@ mod tests;
 use line_index::LineIndex;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::Arc;
+use stdx::case::CaseExt;
 use syntax::{SyntaxKind, SyntaxNode};
 use text_size::TextRange;
 
@@ -152,11 +153,11 @@ impl LoweringCtx {
     }
 
     pub(crate) fn register_param(&mut self, name: &str) {
-        self.param_names.insert(name.to_lowercase());
+        self.param_names.insert(name.fold_lower());
     }
 
     pub(crate) fn register_local_var(&mut self, name: Name, range: TextRange) {
-        let key = name.as_str().to_lowercase();
+        let key = name.as_str().fold_lower();
         self.local_vars.insert(key, (name, range));
     }
 
@@ -207,11 +208,11 @@ impl LoweringCtx {
     }
 
     pub(crate) fn register_query_var(&mut self, name: String, var_type: QueryVarType) {
-        self.query_vars.insert(name.to_lowercase(), var_type);
+        self.query_vars.insert(name.fold_lower(), var_type);
     }
 
     pub(crate) fn get_query_var_type(&self, name: &str) -> Option<QueryVarType> {
-        self.query_vars.get(&name.to_lowercase()).copied()
+        self.query_vars.get(&name.fold_lower()).copied()
     }
 
     pub(crate) fn is_query_var(&self, name: &str) -> bool {
@@ -318,7 +319,7 @@ fn is_global_context_collision_8312(name: &str) -> bool {
         "bitwiseshiftright",
     ];
 
-    COLLISION_METHODS.contains(&name.to_lowercase().as_str())
+    COLLISION_METHODS.contains(&name.fold_lower().as_str())
 }
 
 fn has_no_context_annotation_method(method_node: &SyntaxNode) -> bool {
@@ -378,7 +379,7 @@ fn check_function_returns_same_primitive(ctx: &mut LoweringCtx, method_node: &Sy
         .filter_map(|el| el.into_token())
         .find(|tok| tok.kind() == SyntaxKind::IDENT)
     {
-        let name = name_token.text().to_lowercase();
+        let name = name_token.text().fold_lower();
         if name.starts_with("подключаемый_") || name.starts_with("attachable_") {
             return;
         }
@@ -480,7 +481,7 @@ pub fn lower_method_with_externals(
     if let Some(ref token) = name_token {
         let name_text = token.text();
 
-        if is_function && name_text.to_lowercase().starts_with("получить") {
+        if is_function && name_text.fold_lower().starts_with("получить") {
             ctx.emit(BodyDiagnostic::FunctionNameStartsWithGet {
                 name: name_text.to_string(),
                 range: token.text_range(),
@@ -624,7 +625,7 @@ fn collect_referenced_externals(body: &Body) -> FxHashSet<String> {
 
     for &param_id in body.params.iter() {
         let binding = &body.bindings[param_id];
-        declared.insert(binding.name.as_str().to_lowercase());
+        declared.insert(binding.name.as_str().fold_lower());
     }
 
     fn collect_declared(body: &Body, stmt_id: StmtIdx, declared: &mut FxHashSet<String>) {
@@ -632,19 +633,19 @@ fn collect_referenced_externals(body: &Body) -> FxHashSet<String> {
             Stmt::VarDecl { bindings } => {
                 for &binding_id in bindings.iter() {
                     let binding = &body.bindings[binding_id];
-                    declared.insert(binding.name.as_str().to_lowercase());
+                    declared.insert(binding.name.as_str().fold_lower());
                 }
             }
             Stmt::For { var, body: loop_body, .. } => {
                 let binding = &body.bindings[*var];
-                declared.insert(binding.name.as_str().to_lowercase());
+                declared.insert(binding.name.as_str().fold_lower());
                 for &s in loop_body.iter() {
                     collect_declared(body, s, declared);
                 }
             }
             Stmt::ForEach { var, body: loop_body, .. } => {
                 let binding = &body.bindings[*var];
-                declared.insert(binding.name.as_str().to_lowercase());
+                declared.insert(binding.name.as_str().fold_lower());
                 for &s in loop_body.iter() {
                     collect_declared(body, s, declared);
                 }
@@ -687,7 +688,7 @@ fn collect_referenced_externals(body: &Body) -> FxHashSet<String> {
 
     for (_, expr) in body.exprs.iter() {
         if let Expr::Path(name) = expr {
-            referenced.insert(name.as_str().to_lowercase());
+            referenced.insert(name.as_str().fold_lower());
         }
     }
 

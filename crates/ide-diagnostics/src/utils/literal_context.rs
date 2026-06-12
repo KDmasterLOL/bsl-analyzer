@@ -1,3 +1,4 @@
+use stdx::case::CaseExt;
 use syntax::{SyntaxKind, SyntaxToken};
 
 pub fn is_in_default_value(token: &SyntaxToken) -> bool {
@@ -62,7 +63,7 @@ pub fn is_in_structure_constructor(token: &SyntaxToken, extra_types: &[&str]) ->
             for element in current.children_with_tokens() {
                 if let Some(t) = element.as_token() {
                     if t.kind() == SyntaxKind::IDENT {
-                        let type_name = t.text().to_lowercase();
+                        let type_name = t.text().fold_lower();
                         if type_name.contains("структура")
                             || type_name.contains("structure")
                             || extra_types.iter().any(|kw| type_name.contains(kw))

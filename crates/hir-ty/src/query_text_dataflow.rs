@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use stdx::case::CaseExt;
 
 use base_db::FileIdInput;
 use bsl_types::kind::Projection;
@@ -25,7 +26,7 @@ pub(crate) fn refine_query_at_use_site(
         return None;
     };
 
-    let receiver_lower = name.as_str().to_lowercase();
+    let receiver_lower = name.as_str().fold_lower();
     let composite_ru = format!("{receiver_lower}.текст");
     let composite_en = format!("{receiver_lower}.text");
 

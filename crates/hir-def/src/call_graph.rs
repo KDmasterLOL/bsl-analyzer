@@ -1,5 +1,6 @@
 use bsl_metadata::MdoType;
 use rustc_hash::FxHashMap;
+use stdx::case::CaseExt;
 use syntax::{TextRange, TextSize};
 
 use crate::{
@@ -506,7 +507,7 @@ pub fn extract_call_summary(
     let mut local_method_ids: FxHashMap<String, u32> = FxHashMap::default();
     let mut methods = Vec::with_capacity(graph_methods.len());
     for method in &graph_methods {
-        local_method_ids.entry(method.name.as_str().to_lowercase()).or_insert(method.local_id);
+        local_method_ids.entry(method.name.as_str().fold_lower()).or_insert(method.local_id);
         methods.push(MethodSummary {
             local_id: method.local_id,
             name: method.name.clone(),
@@ -579,7 +580,7 @@ fn extract_from_body(
 
                 match callee_expr {
                     Expr::Path(name) => {
-                        let name_lower = name.as_str().to_lowercase();
+                        let name_lower = name.as_str().fold_lower();
 
                         if is_attach_idle_handler(&name_lower) {
                             if let Some(reg) = extract_idle_reg(body, caller, args, range) {
@@ -662,7 +663,7 @@ fn is_notify_description(name: &Name) -> bool {
 }
 
 fn is_notify_description_str(name: &str) -> bool {
-    let lower = name.to_lowercase();
+    let lower = name.fold_lower();
     lower == "описаниеоповещения" || lower == "notifydescription"
 }
 
@@ -680,7 +681,7 @@ fn is_register_records(expr: &Expr) -> bool {
         Expr::Field { field, .. } => field.as_str(),
         _ => return false,
     };
-    let lower = segment.to_lowercase();
+    let lower = segment.fold_lower();
     lower == "движения" || lower == "registerrecords"
 }
 
@@ -722,7 +723,7 @@ fn extract_notify_reg_at(
 ) -> Option<NotifyReg> {
     let callback_name = extract_string_literal(body, *args.get(method_idx)?)?;
     let target = match args.get(target_idx).map(|&idx| body.expr_idx(idx)) {
-        Some(Expr::Path(name)) if is_this_receiver(&name.as_str().to_lowercase()) => {
+        Some(Expr::Path(name)) if is_this_receiver(&name.as_str().fold_lower()) => {
             NotifyTarget::ThisObject
         }
         Some(Expr::Path(name)) => NotifyTarget::Module(name.clone()),
@@ -773,9 +774,9 @@ fn field_callee_to_edge(
 ) -> Option<CallEdge> {
     match body.expr_idx(field_base) {
         Expr::Path(module_name) => {
-            let module_name_lower = module_name.as_str().to_lowercase();
+            let module_name_lower = module_name.as_str().fold_lower();
             if is_this_object(&module_name_lower) {
-                let method_name_lower = field.as_str().to_lowercase();
+                let method_name_lower = field.as_str().fold_lower();
                 let target =
                     if let Some(&callee_local_id) = local_method_ids.get(&method_name_lower) {
                         CallTarget::Local { callee_local_id }

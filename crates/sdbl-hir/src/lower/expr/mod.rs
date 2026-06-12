@@ -6,6 +6,7 @@ use crate::diagnostics::SdblDiagnostic;
 use crate::hir::ExprHir;
 use crate::hir::Name;
 use crate::types::SdblType;
+use stdx::case::CaseExt;
 use text_size::TextRange;
 
 use super::context::LoweringContext;
@@ -525,7 +526,7 @@ impl LoweringContext<'_> {
                 let value_name = text.trim();
 
                 let is_empty_ref = {
-                    let lower = value_name.to_lowercase();
+                    let lower = value_name.fold_lower();
                     lower == "пустаяссылка" || lower == "emptyref"
                 };
 

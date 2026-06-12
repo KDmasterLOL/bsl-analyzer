@@ -3,6 +3,7 @@ use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::{BindingId, ExprId, IdConversion, StmtId};
 use ide_db::TextRange;
+use stdx::case::CaseExt;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -47,7 +48,7 @@ pub fn from_hir(
 
     let reaching_defs_set = reaching_defs_result.defs_before_stmt(stmt_id)?;
 
-    let param_name_lower = param_name.to_lowercase();
+    let param_name_lower = param_name.fold_lower();
 
     let param_definitions: Vec<_> =
         reaching_defs_set.iter().filter(|def| def.var_name.as_str() == param_name_lower).collect();

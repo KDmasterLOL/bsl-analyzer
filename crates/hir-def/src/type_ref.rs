@@ -1,4 +1,5 @@
 use bsl_metadata::{AttributeType, MdoType, PlatformValueType};
+use stdx::case::CaseExt;
 
 use crate::{path::QualifiedName, Name};
 
@@ -43,7 +44,7 @@ pub enum BuiltinTypeRef {
 
 impl BuiltinTypeRef {
     pub fn from_name(name: &str) -> Option<Self> {
-        match name.to_lowercase().as_str() {
+        match name.fold_lower().as_str() {
             "число" | "number" => Some(Self::Number),
             "строка" | "string" => Some(Self::String),
             "булево" | "boolean" => Some(Self::Boolean),
@@ -61,7 +62,7 @@ impl BuiltinTypeRef {
 
 impl TypeRef {
     pub fn from_bare_name(name: &str) -> Option<Self> {
-        match name.to_lowercase().as_str() {
+        match name.fold_lower().as_str() {
             "массив" | "array" => Some(TypeRef::Array(None)),
             "соответствие" | "map" => Some(TypeRef::Map(None)),
             "любаяссылка" | "anyref" => Some(TypeRef::AnyRef),

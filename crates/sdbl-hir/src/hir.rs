@@ -1,4 +1,5 @@
 use smol_str::SmolStr;
+use stdx::case::CaseExt;
 use text_size::{TextRange, TextSize};
 
 use crate::diagnostics::SdblDiagnostic;
@@ -119,7 +120,7 @@ impl SdblHir {
         let mut resolved: Vec<&ResolvedTable> = Vec::new();
         for table in self.all_tables() {
             if let Some(meta) = &table.metadata {
-                by_alias.insert(table.effective_name().to_lowercase(), meta);
+                by_alias.insert(table.effective_name().fold_lower(), meta);
                 resolved.push(meta);
             }
         }
@@ -228,7 +229,7 @@ fn resolve_column_attribute(
             attribute_of(table, f)
         }
         [alias, field, ..] => {
-            let table = by_alias.get(&alias.as_str().to_lowercase())?;
+            let table = by_alias.get(&alias.as_str().fold_lower())?;
             let f = find_attr_field(table, field.as_str())?;
             attribute_of(table, f)
         }
@@ -490,11 +491,7 @@ impl ResolvedTable {
     }
 
     pub fn find_field(&self, name: &str) -> Option<&FieldDef> {
-        let name_lower = name.to_lowercase();
-        self.fields().iter().find(|f| {
-            f.name.to_lowercase() == name_lower
-                || f.name_en.as_ref().map(|en| en.to_lowercase() == name_lower).unwrap_or(false)
-        })
+        self.fields().iter().find(|f| f.matches_name(name))
     }
 
     pub fn name(&self) -> &str {
@@ -558,9 +555,8 @@ impl FieldDef {
     }
 
     pub fn matches_name(&self, name: &str) -> bool {
-        let name_lower = name.to_lowercase();
-        self.name.to_lowercase() == name_lower
-            || self.name_en.as_ref().map(|n| n.to_lowercase() == name_lower).unwrap_or(false)
+        stdx::case::eq_ignore_case(&self.name, name)
+            || self.name_en.as_ref().is_some_and(|n| stdx::case::eq_ignore_case(n, name))
     }
 }
 

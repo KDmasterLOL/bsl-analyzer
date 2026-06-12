@@ -3,6 +3,7 @@ use bsl_types::intern::TypeKernelDb;
 use hir_def::ty::FunctionSignature;
 use rustc_hash::FxHashMap;
 use std::sync::OnceLock;
+use stdx::case::CaseExt;
 
 use crate::lower::type_string::{lower_param_type_string_typeid, lower_return_type_string_typeid};
 
@@ -82,8 +83,8 @@ impl BuiltinFunctions {
         let platform = bsl_platform::PlatformData::instance();
         for func in platform.all_global_functions() {
             let sigs = descriptors_from_global_function(func);
-            signatures.insert(func.name.to_lowercase(), sigs.clone());
-            signatures.insert(func.english_name.to_lowercase(), sigs);
+            signatures.insert(func.name.fold_lower(), sigs.clone());
+            signatures.insert(func.english_name.fold_lower(), sigs);
         }
 
         register_fallbacks(&mut signatures);
@@ -94,7 +95,7 @@ impl BuiltinFunctions {
     }
 
     pub fn get(&self, name: &str) -> Option<&[BuiltinSignature]> {
-        let name_lower = name.to_lowercase();
+        let name_lower = name.fold_lower();
         self.signatures.get(&name_lower).map(|v| v.as_slice())
     }
 }

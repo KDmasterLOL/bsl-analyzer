@@ -160,6 +160,7 @@ dependencies = [
  "parser",
  "rustc-hash 2.1.2",
  "salsa",
+ "stdx",
  "syntax",
  "tracing",
  "vfs",
@@ -362,6 +363,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smol_str",
+ "stdx",
 ]
 
 [[package]]
@@ -1026,6 +1028,7 @@ dependencies = [
  "rustc-hash 2.1.2",
  "smallvec",
  "smol_str",
+ "stdx",
  "syntax",
  "tracing",
  "vfs",
@@ -1588,6 +1591,7 @@ dependencies = [
  "sdbl-hir",
  "smallvec",
  "smol_str",
+ "stdx",
  "syntax",
  "text-size",
  "tracing",
@@ -1923,6 +1927,7 @@ dependencies = [
  "rustc-hash 2.1.2",
  "salsa",
  "sdbl-hir",
+ "stdx",
  "syntax",
  "tempfile",
  "thiserror 1.0.69",
@@ -3601,6 +3606,7 @@ dependencies = [
  "parser",
  "rustc-hash 2.1.2",
  "smol_str",
+ "stdx",
  "syntax",
  "text-size",
  "tracing",
@@ -3971,6 +3977,7 @@ dependencies = [
  "parser-error",
  "rowan",
  "smol_str",
+ "stdx",
  "text-size",
 ]
 

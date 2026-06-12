@@ -1,3 +1,4 @@
+use stdx::case::CaseExt;
 const PLATFORM_EVENT_HANDLERS: &[&str] = &[
     "передзаписью",
     "beforewrite",
@@ -71,30 +72,30 @@ const SESSION_MODULE_EVENT_HANDLERS: &[&str] =
     &["установкапараметровсеанса", "sessionparameterssetting"];
 
 pub fn is_platform_event_handler(name: &str) -> bool {
-    let lower = name.to_lowercase();
+    let lower = name.fold_lower();
     PLATFORM_EVENT_HANDLERS.contains(&lower.as_str())
 }
 
 pub fn is_managed_application_module_event_handler(name: &str) -> bool {
-    let lower = name.to_lowercase();
+    let lower = name.fold_lower();
     is_ordinary_application_module_event_handler(&lower)
         || MANAGED_APP_UI_HANDLERS.contains(&lower.as_str())
 }
 
 pub fn is_ordinary_application_module_event_handler(name: &str) -> bool {
-    let lower = name.to_lowercase();
+    let lower = name.fold_lower();
     APP_RUN_LIFECYCLE_HANDLERS.contains(&lower.as_str())
         || APP_INTERACTIVE_LIFECYCLE_HANDLERS.contains(&lower.as_str())
         || APP_EXTERNAL_EVENT_HANDLERS.contains(&lower.as_str())
 }
 
 pub fn is_external_connection_module_event_handler(name: &str) -> bool {
-    let lower = name.to_lowercase();
+    let lower = name.fold_lower();
     APP_RUN_LIFECYCLE_HANDLERS.contains(&lower.as_str())
 }
 
 pub fn is_session_module_event_handler(name: &str) -> bool {
-    let lower = name.to_lowercase();
+    let lower = name.fold_lower();
     SESSION_MODULE_EVENT_HANDLERS.contains(&lower.as_str())
 }
 

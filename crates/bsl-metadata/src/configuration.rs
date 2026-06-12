@@ -12,6 +12,7 @@ use crate::web_service::WebService;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
+use stdx::case::CaseExt;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -239,7 +240,7 @@ impl Configuration {
         for (idx, object) in self.metadata_objects.iter().enumerate() {
             // First occurrence wins, matching the replaced `.iter().find()` scan.
             self.metadata_objects_by_key
-                .entry((object.mdo_type, object.name.to_lowercase()))
+                .entry((object.mdo_type, object.name.fold_lower()))
                 .or_insert(idx);
         }
 
@@ -247,41 +248,41 @@ impl Configuration {
             if let Some(uri) = module.uri() {
                 self.uri_to_module.insert(uri.to_string(), idx);
                 // First occurrence wins, matching the replaced `.iter().find()` scan.
-                self.uri_lower_to_common_module.entry(uri.to_lowercase()).or_insert(idx);
+                self.uri_lower_to_common_module.entry(uri.fold_lower()).or_insert(idx);
             }
-            self.name_to_common_module.insert(module.name().to_lowercase(), idx);
+            self.name_to_common_module.insert(module.name().fold_lower(), idx);
         }
 
         for (idx, register) in self.registers.iter().enumerate() {
-            self.name_to_register.insert(register.name().to_lowercase(), idx);
+            self.name_to_register.insert(register.name().fold_lower(), idx);
         }
 
         for (idx, event_sub) in self.event_subscriptions.iter().enumerate() {
-            self.name_to_event_subscription.insert(event_sub.name().to_lowercase(), idx);
+            self.name_to_event_subscription.insert(event_sub.name().fold_lower(), idx);
         }
 
         for (idx, defined_type) in self.defined_types.iter().enumerate() {
-            self.name_to_defined_type.insert(defined_type.name().to_lowercase(), idx);
+            self.name_to_defined_type.insert(defined_type.name().fold_lower(), idx);
         }
 
         for (idx, scheduled_job) in self.scheduled_jobs.iter().enumerate() {
-            self.name_to_scheduled_job.insert(scheduled_job.name().to_lowercase(), idx);
+            self.name_to_scheduled_job.insert(scheduled_job.name().fold_lower(), idx);
         }
 
         for (idx, role) in self.roles.iter().enumerate() {
-            self.name_to_role.insert(role.name().to_lowercase(), idx);
+            self.name_to_role.insert(role.name().fold_lower(), idx);
         }
 
         for (idx, http_service) in self.http_services.iter().enumerate() {
-            self.name_to_http_service.insert(http_service.name().to_lowercase(), idx);
+            self.name_to_http_service.insert(http_service.name().fold_lower(), idx);
         }
 
         for (idx, web_service) in self.web_services.iter().enumerate() {
-            self.name_to_web_service.insert(web_service.name().to_lowercase(), idx);
+            self.name_to_web_service.insert(web_service.name().fold_lower(), idx);
         }
 
         for (idx, integration_service) in self.integration_services.iter().enumerate() {
-            self.name_to_integration_service.insert(integration_service.name().to_lowercase(), idx);
+            self.name_to_integration_service.insert(integration_service.name().fold_lower(), idx);
         }
 
         for object in &self.metadata_objects {
@@ -302,7 +303,7 @@ impl Configuration {
     }
 
     pub fn find_common_module(&self, name: &str) -> Option<&CommonModule> {
-        let name_lower = name.to_lowercase();
+        let name_lower = name.fold_lower();
         self.name_to_common_module.get(&name_lower).and_then(|&idx| self.common_modules.get(idx))
     }
 
@@ -332,9 +333,9 @@ impl Configuration {
         if let Some(uri) = module.uri() {
             self.uri_to_module.insert(uri.to_string(), idx);
             // First occurrence wins, matching the replaced `.iter().find()` scan.
-            self.uri_lower_to_common_module.entry(uri.to_lowercase()).or_insert(idx);
+            self.uri_lower_to_common_module.entry(uri.fold_lower()).or_insert(idx);
         }
-        self.name_to_common_module.insert(module.name().to_lowercase(), idx);
+        self.name_to_common_module.insert(module.name().fold_lower(), idx);
 
         self.common_modules.push(module);
     }
@@ -366,7 +367,7 @@ impl Configuration {
         // later same-(type,name) object (e.g. a case-only-differing extension
         // overlay) must not shadow the base object the scan would have returned.
         self.metadata_objects_by_key
-            .entry((object.mdo_type, object.name.to_lowercase()))
+            .entry((object.mdo_type, object.name.fold_lower()))
             .or_insert(idx);
         self.metadata_objects.push(object);
     }
@@ -432,7 +433,7 @@ impl Configuration {
     }
 
     pub fn has_metadata_object(&self, mdo_type: MdoType, name: &str) -> bool {
-        let name_lower = name.to_lowercase();
+        let name_lower = name.fold_lower();
 
         let result = match mdo_type {
             MdoType::InformationRegister
@@ -441,18 +442,18 @@ impl Configuration {
             | MdoType::CalculationRegister => self
                 .registers
                 .iter()
-                .any(|reg| reg.mdo_type() == mdo_type && reg.name().to_lowercase() == name_lower),
+                .any(|reg| reg.mdo_type() == mdo_type && reg.name().fold_lower() == name_lower),
             _ => self
                 .metadata_objects
                 .iter()
-                .any(|obj| obj.mdo_type == mdo_type && obj.name.to_lowercase() == name_lower),
+                .any(|obj| obj.mdo_type == mdo_type && obj.name.fold_lower() == name_lower),
         };
 
         result
     }
 
     pub fn find_metadata_object(&self, mdo_type: MdoType, name: &str) -> Option<&MetadataObject> {
-        let idx = *self.metadata_objects_by_key.get(&(mdo_type, name.to_lowercase()))?;
+        let idx = *self.metadata_objects_by_key.get(&(mdo_type, name.fold_lower()))?;
         self.metadata_objects.get(idx)
     }
 
@@ -466,7 +467,7 @@ impl Configuration {
     }
 
     pub fn find_register(&self, name: &str) -> Option<&Register> {
-        let name_lower = name.to_lowercase();
+        let name_lower = name.fold_lower();
         self.name_to_register.get(&name_lower).and_then(|&idx| self.registers.get(idx))
     }
 
@@ -475,20 +476,20 @@ impl Configuration {
         mdo_type: MdoType,
         name: &str,
     ) -> Option<&Register> {
-        let name_lower = name.to_lowercase();
+        let name_lower = name.fold_lower();
         self.name_to_register
             .get(&name_lower)
             .and_then(|&idx| self.registers.get(idx).filter(|r| r.mdo_type() == mdo_type))
     }
 
     pub fn recorders_for_register(&self, parent: MdoType, name: &str) -> &[Name] {
-        let key = (parent, name.to_lowercase());
+        let key = (parent, name.fold_lower());
         self.recorders_by_register.get(&key).map(Vec::as_slice).unwrap_or(&[])
     }
 
     pub fn add_register(&mut self, register: Register) {
         let idx = self.registers.len();
-        self.name_to_register.insert(register.name().to_lowercase(), idx);
+        self.name_to_register.insert(register.name().fold_lower(), idx);
         self.registers.push(register);
     }
 
@@ -497,7 +498,7 @@ impl Configuration {
     }
 
     pub fn find_event_subscription(&self, name: &str) -> Option<&EventSubscription> {
-        let name_lower = name.to_lowercase();
+        let name_lower = name.fold_lower();
         self.name_to_event_subscription
             .get(&name_lower)
             .and_then(|&idx| self.event_subscriptions.get(idx))
@@ -505,7 +506,7 @@ impl Configuration {
 
     pub(crate) fn add_event_subscription(&mut self, subscription: EventSubscription) {
         let idx = self.event_subscriptions.len();
-        self.name_to_event_subscription.insert(subscription.name().to_lowercase(), idx);
+        self.name_to_event_subscription.insert(subscription.name().fold_lower(), idx);
         self.event_subscriptions.push(subscription);
     }
 
@@ -522,13 +523,13 @@ impl Configuration {
     }
 
     pub fn find_defined_type(&self, name: &str) -> Option<&DefinedType> {
-        let name_lower = name.to_lowercase();
+        let name_lower = name.fold_lower();
         self.name_to_defined_type.get(&name_lower).and_then(|&idx| self.defined_types.get(idx))
     }
 
     pub fn add_defined_type(&mut self, defined_type: DefinedType) {
         let idx = self.defined_types.len();
-        self.name_to_defined_type.insert(defined_type.name().to_lowercase(), idx);
+        self.name_to_defined_type.insert(defined_type.name().fold_lower(), idx);
         self.defined_types.push(defined_type);
     }
 
@@ -537,13 +538,13 @@ impl Configuration {
     }
 
     pub fn find_scheduled_job(&self, name: &str) -> Option<&ScheduledJob> {
-        let name_lower = name.to_lowercase();
+        let name_lower = name.fold_lower();
         self.name_to_scheduled_job.get(&name_lower).and_then(|&idx| self.scheduled_jobs.get(idx))
     }
 
     pub(crate) fn add_scheduled_job(&mut self, job: ScheduledJob) {
         let idx = self.scheduled_jobs.len();
-        self.name_to_scheduled_job.insert(job.name().to_lowercase(), idx);
+        self.name_to_scheduled_job.insert(job.name().fold_lower(), idx);
         self.scheduled_jobs.push(job);
     }
 
@@ -552,13 +553,13 @@ impl Configuration {
     }
 
     pub fn find_role(&self, name: &str) -> Option<&Role> {
-        let name_lower = name.to_lowercase();
+        let name_lower = name.fold_lower();
         self.name_to_role.get(&name_lower).and_then(|&idx| self.roles.get(idx))
     }
 
     pub(crate) fn add_role(&mut self, role: Role) {
         let idx = self.roles.len();
-        self.name_to_role.insert(role.name().to_lowercase(), idx);
+        self.name_to_role.insert(role.name().fold_lower(), idx);
         self.roles.push(role);
     }
 
@@ -567,13 +568,13 @@ impl Configuration {
     }
 
     pub fn find_http_service(&self, name: &str) -> Option<&HTTPService> {
-        let name_lower = name.to_lowercase();
+        let name_lower = name.fold_lower();
         self.name_to_http_service.get(&name_lower).and_then(|&idx| self.http_services.get(idx))
     }
 
     pub(crate) fn add_http_service(&mut self, http_service: HTTPService) {
         let idx = self.http_services.len();
-        self.name_to_http_service.insert(http_service.name().to_lowercase(), idx);
+        self.name_to_http_service.insert(http_service.name().fold_lower(), idx);
         self.http_services.push(http_service);
     }
 
@@ -582,13 +583,13 @@ impl Configuration {
     }
 
     pub fn find_web_service(&self, name: &str) -> Option<&WebService> {
-        let name_lower = name.to_lowercase();
+        let name_lower = name.fold_lower();
         self.name_to_web_service.get(&name_lower).and_then(|&idx| self.web_services.get(idx))
     }
 
     pub(crate) fn add_web_service(&mut self, web_service: WebService) {
         let idx = self.web_services.len();
-        self.name_to_web_service.insert(web_service.name().to_lowercase(), idx);
+        self.name_to_web_service.insert(web_service.name().fold_lower(), idx);
         self.web_services.push(web_service);
     }
 
@@ -600,7 +601,7 @@ impl Configuration {
         &self,
         name: &str,
     ) -> Option<&crate::integration_service::IntegrationService> {
-        let name_lower = name.to_lowercase();
+        let name_lower = name.fold_lower();
         self.name_to_integration_service
             .get(&name_lower)
             .and_then(|&idx| self.integration_services.get(idx))
@@ -611,7 +612,7 @@ impl Configuration {
         integration_service: crate::integration_service::IntegrationService,
     ) {
         let idx = self.integration_services.len();
-        self.name_to_integration_service.insert(integration_service.name().to_lowercase(), idx);
+        self.name_to_integration_service.insert(integration_service.name().fold_lower(), idx);
         self.integration_services.push(integration_service);
     }
 }
@@ -625,7 +626,7 @@ fn index_document_recorders(
     }
 
     for (register_type, register_name) in object.register_records() {
-        let key = (*register_type, register_name.to_lowercase());
+        let key = (*register_type, register_name.fold_lower());
         let documents = recorders_by_register.entry(key).or_default();
         if !documents.iter().any(|name| name.eq_ignore_ascii_case(&object.name)) {
             documents.push(object.name.clone());
@@ -692,7 +693,7 @@ mod tests {
             .build();
         config.add_common_module(shadow);
 
-        let needle = "CommonModules/Первый/Ext/Module.bsl".to_lowercase();
+        let needle = "CommonModules/Первый/Ext/Module.bsl".fold_lower();
         let found = config.find_common_module_by_uri_lower(&needle);
         assert!(found.is_some(), "folded URI index must be populated via add_common_module");
         assert_eq!(found.unwrap().name(), "Первый", "first occurrence wins on URI collision");

@@ -27,6 +27,7 @@ pub mod workspace;
 pub mod workspace_index;
 
 use std::sync::Arc;
+use stdx::case::CaseExt;
 
 use base_db::SourceRootId;
 use vfs::FileId;
@@ -306,7 +307,7 @@ impl ModuleBodies {
         {
             let mut seen_names: FxHashSet<String> = FxHashSet::default();
             result.module_vars.retain(|var| {
-                let key = var.name.to_lowercase();
+                let key = var.name.fold_lower();
                 seen_names.insert(key)
             });
         }

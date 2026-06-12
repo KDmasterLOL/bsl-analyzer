@@ -1,6 +1,7 @@
 use std::hash::BuildHasherDefault;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use stdx::case::CaseExt;
 
 use dashmap::DashMap;
 use rustc_hash::FxHasher;
@@ -693,7 +694,7 @@ impl RootDatabaseImpl {
         }
 
         let file_path = vfs_helpers::get_file_path(self, module_file_id)?;
-        let file_path_lower = file_path.to_string_lossy().to_lowercase();
+        let file_path_lower = file_path.to_string_lossy().fold_lower();
         let paths = RootDatabaseImpl::all_config_paths(self);
 
         let load_at = |path: &std::path::Path| -> Arc<bsl_metadata::Configuration> {
@@ -707,12 +708,12 @@ impl RootDatabaseImpl {
 
         let find_in = |root: &std::path::Path| -> Option<Arc<bsl_metadata::CommonModule>> {
             let config = load_at(root);
-            // `root.join(uri).to_lowercase() == file_path_lower` reduces to a relative
+            // `root.join(uri).fold_lower() == file_path_lower` reduces to a relative
             // lookup: strip the (lowercased) root prefix and match the module's folded
             // root-relative URI, so the O(all-modules) per-call Cyrillic re-fold is gone.
             // The separator between root and remainder is mandatory so a sibling whose
             // name merely starts with the root (`/cfg` vs `/cfgX`) is not a false match.
-            let root_lower = root.to_string_lossy().to_lowercase();
+            let root_lower = root.to_string_lossy().fold_lower();
             let root_lower = root_lower.strip_suffix(['/', '\\']).unwrap_or(&root_lower);
             let rel = file_path_lower.strip_prefix(root_lower)?.strip_prefix(['/', '\\'])?;
             config.find_common_module_by_uri_lower(rel).cloned().map(Arc::new)

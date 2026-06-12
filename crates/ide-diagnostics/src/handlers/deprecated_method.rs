@@ -3,6 +3,7 @@ use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 use std::collections::HashMap;
+use stdx::case::CaseExt;
 
 pub const DEPRECATED_METHODS_8310: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -51,7 +52,7 @@ pub fn from_hir(name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Optio
 }
 
 fn get_diagnostic_code_and_replacement(name: &str) -> Option<(DiagnosticCode, &'static str)> {
-    let lower = name.to_lowercase();
+    let lower = name.fold_lower();
 
     if let Some(replacement) = get_8310_replacement(lower.as_str()) {
         return Some((DiagnosticCode::DeprecatedMethods8310, replacement));
@@ -131,7 +132,7 @@ fn get_8310_replacement_map() -> HashMap<&'static str, &'static str> {
 }
 
 fn get_message(method_name: &str, replacement: &str) -> String {
-    let lower = method_name.to_lowercase();
+    let lower = method_name.fold_lower();
     let is_russian = lower.chars().any(|c| c as u32 > 127);
 
     if is_russian {

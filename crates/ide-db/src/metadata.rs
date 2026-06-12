@@ -2,6 +2,7 @@ use bsl_metadata::traits::Module;
 use bsl_metadata::Configuration;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use stdx::case::CaseExt;
 
 #[salsa::interned(debug)]
 pub struct ConfigurationPathInput {
@@ -198,14 +199,14 @@ pub struct ConfigIndex {
 
 impl ConfigIndex {
     pub fn lookup(&self, kind: bsl_metadata::MdoType, name: &str) -> Option<MdoFileIds> {
-        self.by_name.get(&(kind, name.to_lowercase())).copied()
+        self.by_name.get(&(kind, name.fold_lower())).copied()
     }
 
     pub fn lookup_register_by_name(
         &self,
         name: &str,
     ) -> Option<(bsl_metadata::MdoType, MdoFileIds)> {
-        self.register_by_name.get(&name.to_lowercase()).copied()
+        self.register_by_name.get(&name.fold_lower()).copied()
     }
 
     pub fn len(&self) -> usize {
@@ -232,9 +233,9 @@ pub fn config_index(
     let mut register_by_name = std::collections::HashMap::new();
     for entry in entries.iter() {
         let ids = MdoFileIds { main: entry.main, predefined: entry.predefined };
-        by_name.insert((entry.kind, entry.name.to_lowercase()), ids);
+        by_name.insert((entry.kind, entry.name.fold_lower()), ids);
         if entry.kind.is_register() {
-            register_by_name.insert(entry.name.to_lowercase(), (entry.kind, ids));
+            register_by_name.insert(entry.name.fold_lower(), (entry.kind, ids));
         }
     }
     Arc::new(ConfigIndex { by_name, register_by_name })
@@ -352,7 +353,7 @@ pub struct DefinedTypeIndex {
 
 impl DefinedTypeIndex {
     pub fn lookup(&self, name: &str) -> Option<vfs::FileId> {
-        self.by_name.get(&name.to_lowercase()).copied()
+        self.by_name.get(&name.fold_lower()).copied()
     }
 }
 
@@ -367,7 +368,7 @@ pub fn defined_type_index(
     let entries = listing.defined_types(db);
     let mut by_name = std::collections::HashMap::with_capacity(entries.len());
     for entry in entries.iter() {
-        by_name.insert(entry.name.to_lowercase(), entry.main);
+        by_name.insert(entry.name.fold_lower(), entry.main);
     }
     Arc::new(DefinedTypeIndex { by_name })
 }
@@ -429,12 +430,12 @@ pub struct CommonModuleIndex {
 
 impl CommonModuleIndex {
     pub fn lookup(&self, name: &str) -> Option<vfs::FileId> {
-        self.by_name.get(&name.to_lowercase()).copied()
+        self.by_name.get(&name.fold_lower()).copied()
     }
 
     /// The `Ext/Module.bsl` id of the common module `name` in this root, if known.
     pub fn lookup_module_file(&self, name: &str) -> Option<vfs::FileId> {
-        self.module_file_by_name.get(&name.to_lowercase()).copied()
+        self.module_file_by_name.get(&name.fold_lower()).copied()
     }
 
     /// The lowercased name of the common module whose `Ext/Module.bsl` is
@@ -457,10 +458,10 @@ pub fn common_module_index(
     let mut by_module_file = std::collections::HashMap::new();
     let mut module_file_by_name = std::collections::HashMap::new();
     for entry in entries.iter() {
-        by_name.insert(entry.name.to_lowercase(), entry.main);
+        by_name.insert(entry.name.fold_lower(), entry.main);
         if let Some(module_file) = entry.module_file {
-            by_module_file.insert(module_file, entry.name.to_lowercase());
-            module_file_by_name.insert(entry.name.to_lowercase(), module_file);
+            by_module_file.insert(module_file, entry.name.fold_lower());
+            module_file_by_name.insert(entry.name.fold_lower(), module_file);
         }
     }
     Arc::new(CommonModuleIndex { by_name, by_module_file, module_file_by_name })
@@ -796,13 +797,13 @@ pub(crate) fn find_common_module_by_uri(
     configuration: &bsl_metadata::Configuration,
     file_path: &Path,
 ) -> Option<bsl_metadata::CommonModule> {
-    let file_uri_lower = file_path.to_string_lossy().to_lowercase();
+    let file_uri_lower = file_path.to_string_lossy().fold_lower();
 
     configuration
         .common_modules()
         .iter()
         .find(|module| match module.uri() {
-            Some(module_uri) => module_uri.to_lowercase() == file_uri_lower,
+            Some(module_uri) => module_uri.fold_lower() == file_uri_lower,
             None => false,
         })
         .cloned()

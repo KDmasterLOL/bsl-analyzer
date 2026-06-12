@@ -7,6 +7,7 @@ description = "1C:Enterprise platform types and methods database"
 license.workspace = true
 
 [dependencies]
+stdx.workspace = true
 smol_str = { workspace = true }
 rustc-hash = { workspace = true }
 once_cell = { workspace = true }

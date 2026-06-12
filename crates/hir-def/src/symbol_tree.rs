@@ -7,6 +7,7 @@ use la_arena::{Arena, Idx};
 use rustc_hash::FxHashMap;
 use smol_str::SmolStr;
 use std::sync::Arc;
+use stdx::case::CaseExt;
 use syntax::{Parse, SyntaxKind, SyntaxNode};
 use text_size::TextRange;
 
@@ -157,7 +158,7 @@ impl SymbolTree {
                         docs: None,
                         return_type_ref: None,
                     };
-                    let key: SmolStr = symbol.name.as_str().to_lowercase().into();
+                    let key: SmolStr = symbol.name.as_str().fold_lower().into();
                     let idx = methods.alloc(symbol);
                     methods_by_name.entry(key).or_default().push(idx);
                 }
@@ -175,13 +176,13 @@ impl SymbolTree {
                         docs: None,
                         return_type_ref: None,
                     };
-                    let key: SmolStr = symbol.name.as_str().to_lowercase().into();
+                    let key: SmolStr = symbol.name.as_str().fold_lower().into();
                     let idx = methods.alloc(symbol);
                     methods_by_name.entry(key).or_default().push(idx);
                 }
                 ModItem::Variable(var_idx) => {
                     let var = item_tree.variable(*var_idx);
-                    let key: SmolStr = var.name.as_str().to_lowercase().into();
+                    let key: SmolStr = var.name.as_str().fold_lower().into();
                     let variable_id = VariableId { module: module_id, local_id };
                     let symbol = VariableSymbol {
                         id: variable_id,
@@ -205,13 +206,13 @@ impl SymbolTree {
     }
 
     pub fn find_method(&self, name: &Name) -> Option<&MethodSymbol> {
-        let key = name.as_str().to_lowercase();
+        let key = name.as_str().fold_lower();
         let indices = self.methods_by_name.get(key.as_str())?;
         indices.first().map(|&idx| &self.methods[idx])
     }
 
     pub fn find_methods(&self, name: &Name) -> Vec<&MethodSymbol> {
-        let key = name.as_str().to_lowercase();
+        let key = name.as_str().fold_lower();
         self.methods_by_name
             .get(key.as_str())
             .map(|indices| indices.iter().map(|&idx| &self.methods[idx]).collect())
@@ -219,7 +220,7 @@ impl SymbolTree {
     }
 
     pub fn find_variable(&self, name: &Name) -> Option<&VariableSymbol> {
-        let key = name.as_str().to_lowercase();
+        let key = name.as_str().fold_lower();
         let indices = self.variables_by_name.get(key.as_str())?;
         indices.first().map(|&idx| &self.variables[idx])
     }
@@ -352,14 +353,14 @@ impl<'a> SymbolTreeBuilder<'a> {
     }
 
     fn add_method_symbol(&mut self, symbol: MethodSymbol) {
-        let key: SmolStr = symbol.name.as_str().to_lowercase().into();
+        let key: SmolStr = symbol.name.as_str().fold_lower().into();
         let idx = self.methods.alloc(symbol);
 
         self.methods_by_name.entry(key).or_default().push(idx);
     }
 
     fn add_variable(&mut self, local_id: u32, var: &crate::item_tree::Variable) {
-        let key: SmolStr = var.name.as_str().to_lowercase().into();
+        let key: SmolStr = var.name.as_str().fold_lower().into();
         let variable_id = VariableId { module: self.module_id, local_id };
 
         let var_node = self.var_def_nodes.get(&var.source_range);

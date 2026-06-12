@@ -2,6 +2,7 @@ pub(crate) mod builtin_names;
 pub mod type_string;
 
 use std::collections::HashSet;
+use stdx::case::CaseExt;
 
 use bsl_metadata::{resolve_defined_type_terminal, MdoType, MetadataResolver};
 use bsl_platform::PlatformData;
@@ -124,7 +125,7 @@ impl<'a> TyLoweringContext<'a> {
                 return db.unknown();
             };
             let name = qname.last().as_str();
-            let key = name.to_lowercase();
+            let key = name.fold_lower();
 
             if !visited.insert(key.clone()) {
                 return db.unknown();
@@ -169,12 +170,12 @@ fn degrade_unrecognised_annotation(db: &dyn TypeKernelDb, id: TypeId) -> TypeId 
 }
 
 fn is_defined_type_prefix(prefix: &str) -> bool {
-    let lower = prefix.to_lowercase();
+    let lower = prefix.fold_lower();
     lower == "определяемыйтип" || lower == "definedtype"
 }
 
 fn metadata_kind_from_prefix(prefix: &str) -> Option<MetadataKind> {
-    match prefix.to_lowercase().as_str() {
+    match prefix.fold_lower().as_str() {
         "catalogref" | "справочникссылка" => Some(MetadataKind::CatalogRef),
         "catalogobject" | "справочникобъект" => Some(MetadataKind::CatalogObject),
         "documentref" | "документссылка" => Some(MetadataKind::DocumentRef),
@@ -622,7 +623,7 @@ mod tests {
         fn with(entries: &[(&str, AttributeType)]) -> Self {
             let mut map = std::collections::HashMap::new();
             for (name, at) in entries {
-                map.insert(name.to_lowercase(), at.clone());
+                map.insert(name.fold_lower(), at.clone());
             }
             Self(map)
         }
@@ -630,7 +631,7 @@ mod tests {
 
     impl MetadataResolver for MockResolver {
         fn resolve_defined_type(&self, name: &str) -> Option<AttributeType> {
-            self.0.get(&name.to_lowercase()).cloned()
+            self.0.get(&name.fold_lower()).cloned()
         }
     }
 

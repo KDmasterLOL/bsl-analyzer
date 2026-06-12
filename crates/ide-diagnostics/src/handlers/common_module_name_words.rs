@@ -3,6 +3,7 @@ use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode};
 use bsl_metadata::traits::MdObject;
 use hir::ModuleMetadata;
+use stdx::case::CaseExt;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -42,9 +43,9 @@ pub fn from_metadata(
 
     let words_pattern = ctx.config.get_string(code, "words").unwrap_or(DEFAULT_WORDS);
 
-    let name_lower = module.name().to_lowercase();
+    let name_lower = module.name().fold_lower();
     for word in words_pattern.split('|') {
-        if name_lower.contains(&word.to_lowercase()) {
+        if name_lower.contains(&word.fold_lower()) {
             return vec![Diagnostic {
                 code,
                 message: "Имя общего модуля не должно содержать общих слов типа 'Процедуры', 'Функции', 'Модуль'"

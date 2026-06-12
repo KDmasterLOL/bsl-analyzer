@@ -8,6 +8,7 @@ use la_arena::RawIdx;
 use rustc_hash::FxHashMap;
 use smol_str::SmolStr;
 use std::sync::Arc;
+use stdx::case::CaseExt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VariableIndex {
@@ -23,7 +24,7 @@ impl VariableIndex {
         let mut idx_to_name = Vec::new();
 
         for (_local_id, binding) in body.bindings_iter() {
-            let lowercase: SmolStr = binding.name.as_str().to_lowercase().into();
+            let lowercase: SmolStr = binding.name.as_str().fold_lower().into();
 
             if !name_to_idx.contains_key(&lowercase) {
                 let idx = idx_to_name.len();
@@ -42,7 +43,7 @@ impl VariableIndex {
                 match body.stmt_idx(stmt_id) {
                     Stmt::Assign { target, .. } => {
                         if let Expr::Path(name) = body.expr_idx(*target) {
-                            let lowercase: SmolStr = name.as_str().to_lowercase().into();
+                            let lowercase: SmolStr = name.as_str().fold_lower().into();
                             if !name_to_idx.contains_key(&lowercase) {
                                 let idx = idx_to_name.len();
                                 name_to_idx.insert(lowercase.clone(), idx);
@@ -82,7 +83,7 @@ impl VariableIndex {
         let mut expr_idx_cache = FxHashMap::default();
         for (expr_id, expr) in body.exprs_iter() {
             if let Expr::Path(name) = expr {
-                let lowercase: SmolStr = name.as_str().to_lowercase().into();
+                let lowercase: SmolStr = name.as_str().fold_lower().into();
                 if let Some(&idx) = name_to_idx.get(&lowercase) {
                     expr_idx_cache.insert(expr_id, idx);
                 }
@@ -91,7 +92,7 @@ impl VariableIndex {
 
         let mut binding_idx_cache = FxHashMap::default();
         for (binding_id, binding) in body.bindings_iter() {
-            let lowercase: SmolStr = binding.name.as_str().to_lowercase().into();
+            let lowercase: SmolStr = binding.name.as_str().fold_lower().into();
             if let Some(&idx) = name_to_idx.get(&lowercase) {
                 binding_idx_cache.insert(binding_id, idx);
             }
@@ -101,7 +102,7 @@ impl VariableIndex {
     }
 
     pub fn get_index(&self, var_name: &str) -> Option<usize> {
-        let lowercase: SmolStr = var_name.to_lowercase().into();
+        let lowercase: SmolStr = var_name.fold_lower().into();
         self.name_to_idx.get(&lowercase).copied()
     }
 
@@ -538,7 +539,7 @@ mod tests {
         let mut idx_to_name = Vec::new();
 
         for &name in var_names {
-            let lowercase: SmolStr = name.to_lowercase().into();
+            let lowercase: SmolStr = name.fold_lower().into();
             if !name_to_idx.contains_key(&lowercase) {
                 let idx = idx_to_name.len();
                 name_to_idx.insert(lowercase.clone(), idx);

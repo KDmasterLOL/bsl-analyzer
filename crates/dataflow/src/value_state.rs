@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use stdx::case::CaseExt;
 
 use cfg::{ControlFlowGraph, NodeIndex};
 use hir_def::{
@@ -160,7 +161,7 @@ fn expect_path_name(body: &Body, expr: ExprIdx) -> Option<&Name> {
 }
 
 fn lowercase_key(name: &str) -> SmolStr {
-    SmolStr::new(name.to_lowercase())
+    SmolStr::new(name.fold_lower())
 }
 
 pub fn analyze(

@@ -7,6 +7,7 @@
 //! parallel resolvers that drift apart.
 
 use rustc_hash::{FxHashMap, FxHashSet};
+use stdx::case::CaseExt;
 
 use crate::{
     body::Body,
@@ -25,13 +26,13 @@ pub fn common_module_call_target(body: &Body, value: ExprIdx) -> Option<Name> {
     let Expr::Field { base, field } = body.expr_idx(*callee) else {
         return None;
     };
-    if field.as_str().to_lowercase() != "общиймодуль" {
+    if field.as_str().fold_lower() != "общиймодуль" {
         return None;
     }
     let Expr::Path(base_name) = body.expr_idx(*base) else {
         return None;
     };
-    let base_lower = base_name.as_str().to_lowercase();
+    let base_lower = base_name.as_str().fold_lower();
     if base_lower != "общегоназначения" && base_lower != "общегоназначенияклиент"
     {
         return None;
@@ -69,11 +70,11 @@ pub fn common_module_var_bindings(body: &Body) -> FxHashMap<String, Name> {
     // be treated as a bound module: procedure parameters and loop variables.
     let mut excluded: FxHashSet<String> = FxHashSet::default();
     for param in body.params() {
-        excluded.insert(body.binding(param).name.as_str().to_lowercase());
+        excluded.insert(body.binding(param).name.as_str().fold_lower());
     }
     for (_, stmt) in body.stmts_iter() {
         if let Stmt::For { var, .. } | Stmt::ForEach { var, .. } = stmt {
-            excluded.insert(body.binding_idx(*var).name.as_str().to_lowercase());
+            excluded.insert(body.binding_idx(*var).name.as_str().fold_lower());
         }
     }
 
@@ -85,7 +86,7 @@ pub fn common_module_var_bindings(body: &Body) -> FxHashMap<String, Name> {
         let Expr::Path(var) = body.expr_idx(*target) else {
             continue;
         };
-        let key = var.as_str().to_lowercase();
+        let key = var.as_str().fold_lower();
         if excluded.contains(&key) {
             continue;
         }
@@ -99,7 +100,7 @@ pub fn common_module_var_bindings(body: &Body) -> FxHashMap<String, Name> {
                 acc.insert(key, Binding::Module(module));
             }
             (Some(Binding::Module(prev)), Some(module)) => {
-                if prev.as_str().to_lowercase() != module.as_str().to_lowercase() {
+                if prev.as_str().fold_lower() != module.as_str().fold_lower() {
                     acc.insert(key, Binding::Poisoned);
                 }
             }

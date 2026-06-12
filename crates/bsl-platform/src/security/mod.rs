@@ -6,6 +6,7 @@ pub use types::{Category, EntryKind, Lifetime, ParamRole, Role, SecurityEntry, S
 
 use rustc_hash::FxHashMap;
 use std::sync::OnceLock;
+use stdx::case::CaseExt;
 
 static REGISTRY: OnceLock<SecurityRegistry> = OnceLock::new();
 
@@ -29,10 +30,10 @@ impl SecurityRegistry {
                 EntryKind::GlobalMethod => &mut globals,
                 EntryKind::Constructor => &mut constructors,
             };
-            let ru_key = entry.ru.to_lowercase();
+            let ru_key = entry.ru.fold_lower();
             insert_key(map, ru_key.clone(), idx);
             if !entry.en.is_empty() {
-                let en_key = entry.en.to_lowercase();
+                let en_key = entry.en.fold_lower();
                 if en_key != ru_key {
                     insert_key(map, en_key, idx);
                 }
@@ -47,12 +48,12 @@ impl SecurityRegistry {
     }
 
     pub fn lookup_global(&self, name: &str) -> Option<&'static SecurityEntry> {
-        self.lookup_global_lc(&name.to_lowercase())
+        self.lookup_global_lc(&name.fold_lower())
     }
 
     pub fn lookup_global_lc(&self, lc_name: &str) -> Option<&'static SecurityEntry> {
         debug_assert!(
-            lc_name == lc_name.to_lowercase(),
+            lc_name == lc_name.fold_lower(),
             "lookup_global_lc requires pre-lowercased input, got: {lc_name}"
         );
         if lc_name.is_empty() {
@@ -62,12 +63,12 @@ impl SecurityRegistry {
     }
 
     pub fn lookup_constructor(&self, type_name: &str) -> Option<&'static SecurityEntry> {
-        self.lookup_constructor_lc(&type_name.to_lowercase())
+        self.lookup_constructor_lc(&type_name.fold_lower())
     }
 
     pub fn lookup_constructor_lc(&self, lc_name: &str) -> Option<&'static SecurityEntry> {
         debug_assert!(
-            lc_name == lc_name.to_lowercase(),
+            lc_name == lc_name.fold_lower(),
             "lookup_constructor_lc requires pre-lowercased input, got: {lc_name}"
         );
         if lc_name.is_empty() {

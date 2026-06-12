@@ -4,6 +4,7 @@ use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::DeprecatedKind8312;
 use ide_db::TextRange;
 use std::collections::HashMap;
+use stdx::case::CaseExt;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -44,7 +45,7 @@ pub fn from_hir(
 }
 
 fn get_message_and_replacement(name: &str, kind: &DeprecatedKind8312) -> (String, String) {
-    let lower = name.to_lowercase();
+    let lower = name.fold_lower();
     let is_russian = lower.chars().any(|c| c as u32 > 127);
 
     let replacements = get_replacements();

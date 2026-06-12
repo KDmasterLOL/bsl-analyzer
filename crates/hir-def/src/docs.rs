@@ -1,6 +1,7 @@
 use crate::item_tree::ModItem;
 use crate::{DefDatabase, MethodId, VariableId};
 use std::sync::Arc;
+use stdx::case::CaseExt;
 use syntax::{
     extract_leading_comments_at_offset, extract_variable_comments_at_offset, Parse, SyntaxKind,
     SyntaxNode,
@@ -241,7 +242,7 @@ pub fn parse_variable_docs(comments: &[String]) -> Option<VariableDocs> {
         }
     }
     let has_deprecation_marker =
-        comments.iter().any(|line| is_deprecated_keyword(&line.trim().to_lowercase()));
+        comments.iter().any(|line| is_deprecated_keyword(&line.trim().fold_lower()));
     if !has_deprecation_marker {
         if let Some(last_non_empty) = comments.iter().rev().find(|c| !c.trim().is_empty()) {
             let trimmed = last_non_empty.trim();
@@ -258,7 +259,7 @@ pub fn parse_variable_docs(comments: &[String]) -> Option<VariableDocs> {
     }
 
     let deprecated_idx =
-        comments.iter().position(|line| is_deprecated_keyword(&line.trim().to_lowercase()));
+        comments.iter().position(|line| is_deprecated_keyword(&line.trim().fold_lower()));
 
     let (purpose_lines, deprecated_slice): (&[String], &[String]) = match deprecated_idx {
         Some(idx) => (&comments[..idx], &comments[idx..]),
@@ -311,7 +312,7 @@ fn parse_method_docs(comments: &[String]) -> Option<MethodDocs> {
 
     let mut section_indices = Vec::new();
     for (i, line) in comments.iter().enumerate() {
-        let lower = line.trim().to_lowercase();
+        let lower = line.trim().fold_lower();
 
         let returns_header = returns_section_header(line.trim());
         if is_parameters_keyword(&lower) {
@@ -409,7 +410,7 @@ fn has_structural_section(comments: &[String]) -> bool {
 }
 
 fn is_structural_section_line(line: &str) -> bool {
-    let lower = line.to_lowercase();
+    let lower = line.fold_lower();
     is_parameters_keyword(&lower)
         || returns_section_header(line) != ReturnsHeader::NotReturns
         || is_example_keyword(&lower)
@@ -426,7 +427,7 @@ enum ReturnsHeader {
 
 fn returns_section_header(line: &str) -> ReturnsHeader {
     let trimmed = line.trim();
-    let lower = trimmed.to_lowercase();
+    let lower = trimmed.fold_lower();
 
     for keyword in ["возвращаемое значение", "return value", "returns", "результат", "result"]
     {
@@ -515,7 +516,7 @@ fn is_deprecated_keyword(lower_line: &str) -> bool {
 }
 
 fn is_hyperlink_line(line: &str) -> bool {
-    let lower = line.to_lowercase();
+    let lower = line.fold_lower();
     lower.starts_with("см.") || lower.starts_with("see ")
 }
 
@@ -727,7 +728,7 @@ fn parse_return_type_name(type_part: &str) -> Option<(String, Option<String>)> {
 }
 
 fn parse_collection_type(type_part: &str) -> Option<(String, String)> {
-    let lower = type_part.to_lowercase();
+    let lower = type_part.fold_lower();
     let marker = " из ";
     let marker_pos = lower.find(marker)?;
     let collection_type = type_part[..marker_pos].trim();
@@ -774,7 +775,7 @@ fn is_likely_type_name(s: &str) -> bool {
         return true;
     }
 
-    let lower = s.to_lowercase();
+    let lower = s.fold_lower();
     matches!(
         lower.as_str(),
         "строка"
@@ -808,7 +809,7 @@ fn parse_simple_section(lines: &[String]) -> Vec<String> {
 }
 
 fn parse_deprecated_section(keyword_line: &str, following_lines: &[String]) -> Option<String> {
-    let lower = keyword_line.to_lowercase();
+    let lower = keyword_line.fold_lower();
 
     let after_keyword = if let Some(pos) = lower.find("устарела") {
         &keyword_line[pos + "устарела".len()..]

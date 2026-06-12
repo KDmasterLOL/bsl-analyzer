@@ -7,6 +7,7 @@ use hir::{
     Semantics, TyLoweringContext, Type as HirType, TypeId, TypeKind,
 };
 use ide_db::RootDatabase;
+use stdx::case::CaseExt;
 use symbol_info::{
     build_signature, from_platform_method, render_completion_detail, CalleeKind, CompletionDetail,
     MethodKind, SignatureSource, SymbolSignature,
@@ -90,7 +91,7 @@ pub(super) fn platform_completions<DB: RootDatabase>(
             let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
             for type_name in chain.iter().rev() {
                 for item in complete_platform_methods(db, type_name, position.locale) {
-                    if seen.insert(item.label.to_lowercase()) {
+                    if seen.insert(item.label.fold_lower()) {
                         items.push(item);
                     }
                 }
@@ -179,9 +180,9 @@ fn complete_prefix_methods_for_receiver<DB: RootDatabase>(
     let mut items: Vec<CompletionItem> =
         mdo_fields.iter().map(|f| render_mdo_field(db, f, locale)).collect();
     let mut seen: std::collections::HashSet<String> =
-        items.iter().map(|i| i.label.to_lowercase()).collect();
+        items.iter().map(|i| i.label.fold_lower()).collect();
     for p in platform_items {
-        if seen.insert(p.label.to_lowercase()) {
+        if seen.insert(p.label.fold_lower()) {
             items.push(p);
         }
     }
@@ -209,7 +210,7 @@ fn collect_platform_items_for_effective<DB: RootDatabase>(
         .filter(|t| !matches!(db.lookup_type(*t), TypeKind::Undefined | TypeKind::Null))
     {
         for item in collect_platform_items(db, arm, locale) {
-            if seen.insert(item.label.to_lowercase()) {
+            if seen.insert(item.label.fold_lower()) {
                 out.push(item);
             }
         }
@@ -321,16 +322,16 @@ fn apply_prefix_filter(
     if prefix.is_empty() {
         return items;
     }
-    let prefix_lower = prefix.to_lowercase();
+    let prefix_lower = prefix.fold_lower();
     items
         .into_iter()
         .filter(|item| {
-            let label_lc = item.label.to_lowercase();
+            let label_lc = item.label.fold_lower();
             if label_lc.starts_with(&prefix_lower) {
                 return true;
             }
             if let Some(ft) = &item.filter_text {
-                ft.split_whitespace().any(|tok| tok.to_lowercase().starts_with(&prefix_lower))
+                ft.split_whitespace().any(|tok| tok.fold_lower().starts_with(&prefix_lower))
             } else {
                 false
             }
@@ -612,9 +613,9 @@ fn complete_form_elements_collection<DB: RootDatabase>(
         form.elements.iter().map(|el| render_form_element(el, locale)).collect();
 
     let mut seen: std::collections::HashSet<String> =
-        items.iter().map(|i| i.label.to_lowercase()).collect();
+        items.iter().map(|i| i.label.fold_lower()).collect();
     for p in complete_platform_methods(db, hir::FORM_ITEMS_TYPE_RU, locale) {
-        if seen.insert(p.label.to_lowercase()) {
+        if seen.insert(p.label.fold_lower()) {
             items.push(p);
         }
     }

@@ -3,6 +3,7 @@ use hir::dataflow::temp_resource::{analyze_open_resources, ResourceEvent, Resour
 use hir::{Body, BodySourceMap, Expr, ExprId, ExprIdx, IdConversion, Stmt};
 use regex::Regex;
 use rustc_hash::{FxHashMap, FxHashSet};
+use stdx::case::CaseExt;
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -182,7 +183,7 @@ fn collect_assigned_gets(body: &Body) -> (FxHashMap<ExprIdx, AssignedGet>, FxHas
                     *value,
                     AssignedGet {
                         original_name: name.as_str().to_string(),
-                        lower_name: name.as_str().to_lowercase(),
+                        lower_name: name.as_str().fold_lower(),
                     },
                 );
             }
@@ -252,7 +253,7 @@ fn collect_referenced_vars(
 ) {
     match body.expr_idx(expr_idx) {
         Expr::Path(name) => {
-            let lower = name.as_str().to_lowercase();
+            let lower = name.as_str().fold_lower();
             if known_vars.contains(&lower) {
                 out.insert(lower);
             }
@@ -300,7 +301,7 @@ fn is_get_temp_filename_call(body: &Body, expr_idx: ExprIdx) -> bool {
 }
 
 fn is_get_temp_filename(name: &str) -> bool {
-    let lower = name.to_lowercase();
+    let lower = name.fold_lower();
     lower == "получитьимявременногофайла" || lower == "gettempfilename"
 }
 

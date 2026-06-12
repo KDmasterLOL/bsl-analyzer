@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use stdx::case::CaseExt;
 
 use bsl_metadata::MdoType;
 use bsl_platform::{GlobalFunction, PlatformDataInner};
@@ -185,7 +186,7 @@ fn push_band(
     items: Vec<CompletionItem>,
 ) {
     for mut item in items {
-        let key = item.label.to_lowercase();
+        let key = item.label.fold_lower();
         if !seen.insert(key) {
             continue;
         }
@@ -203,10 +204,10 @@ fn complete_module_self_attributes<DB: RootDatabase>(
     locale: ide_db::base_db::Locale,
 ) -> Vec<CompletionItem> {
     let _span = tracing::debug_span!("complete_module_self_attributes").entered();
-    let prefix_lower = prefix.to_lowercase();
+    let prefix_lower = prefix.fold_lower();
     hir::module_implicit_fields(db, file_id)
         .into_iter()
-        .filter(|field| field.name.as_str().to_lowercase().starts_with(&prefix_lower))
+        .filter(|field| field.name.as_str().fold_lower().starts_with(&prefix_lower))
         .map(|field| render_mdo_field(db, &field, locale))
         .collect()
 }
@@ -220,7 +221,7 @@ fn complete_local_symbols<DB: RootDatabase>(
     let _span = tracing::debug_span!("complete_local_symbols").entered();
 
     let mut completions = Vec::new();
-    let prefix_lower = prefix.to_lowercase();
+    let prefix_lower = prefix.fold_lower();
 
     let parse = db.parse(file_id);
     let root = parse.syntax_node();
@@ -244,9 +245,9 @@ fn complete_local_symbols<DB: RootDatabase>(
 
     for (name, scope_def) in scopes.all_entries_in_scope(root_scope) {
         let name_str = name.as_str();
-        seen.insert(name_str.to_lowercase());
+        seen.insert(name_str.fold_lower());
 
-        if !name_str.to_lowercase().starts_with(&prefix_lower) {
+        if !name_str.fold_lower().starts_with(&prefix_lower) {
             continue;
         }
 
@@ -366,7 +367,7 @@ fn is_expression_start_position(token: &syntax::SyntaxToken) -> bool {
 fn complete_mdo_plurals(prefix: &str) -> Vec<CompletionItem> {
     let _span = tracing::debug_span!("complete_mdo_plurals").entered();
 
-    let prefix_lower = prefix.to_lowercase();
+    let prefix_lower = prefix.fold_lower();
     let mut completions = Vec::new();
 
     for prop in PlatformDataInner::instance().all_global_properties() {
@@ -445,11 +446,11 @@ fn complete_user_common_modules<DB: RootDatabase>(
 ) -> Vec<CompletionItem> {
     let _span = tracing::debug_span!("complete_user_common_modules").entered();
 
-    let prefix_lower = prefix.to_lowercase();
+    let prefix_lower = prefix.fold_lower();
     let mut completions = Vec::new();
 
     for name in module_index_for(db, file_id).common_module_display_names() {
-        if !name.to_lowercase().starts_with(&prefix_lower) {
+        if !name.fold_lower().starts_with(&prefix_lower) {
             continue;
         }
         completions.push(CompletionItem {
@@ -489,10 +490,10 @@ fn complete_hbk_globals<DB: RootDatabase>(
 
     let mut items = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
-    let prefix_lower = prefix.to_lowercase();
+    let prefix_lower = prefix.fold_lower();
 
     for prop in data.all_global_properties() {
-        let ru_lower = prop.name.to_lowercase();
+        let ru_lower = prop.name.fold_lower();
 
         if MdoType::from_plural(prop.name.as_str()).is_some()
             || MdoType::from_plural(prop.english_name.as_str()).is_some()
@@ -517,7 +518,7 @@ fn complete_hbk_globals<DB: RootDatabase>(
 }
 
 fn matches_prefix_bilingual(ru: &str, en: &str, lower: &str) -> bool {
-    ru.to_lowercase().starts_with(lower) || en.to_lowercase().starts_with(lower)
+    ru.fold_lower().starts_with(lower) || en.fold_lower().starts_with(lower)
 }
 
 fn complete_user_defined_symbols<DB: RootDatabase>(
@@ -528,7 +529,7 @@ fn complete_user_defined_symbols<DB: RootDatabase>(
     let _span = tracing::debug_span!("complete_user_defined_symbols").entered();
 
     let mut completions = Vec::new();
-    let prefix_lower = prefix.to_lowercase();
+    let prefix_lower = prefix.fold_lower();
 
     let sema = hir::Semantics::new(db);
     let module = sema.module_from_file(file_id);
@@ -537,7 +538,7 @@ fn complete_user_defined_symbols<DB: RootDatabase>(
         let name = procedure.name();
         let name_str = name.as_str();
 
-        if !name_str.to_lowercase().starts_with(&prefix_lower) {
+        if !name_str.fold_lower().starts_with(&prefix_lower) {
             continue;
         }
 
@@ -561,7 +562,7 @@ fn complete_user_defined_symbols<DB: RootDatabase>(
         let name = function.name();
         let name_str = name.as_str();
 
-        if !name_str.to_lowercase().starts_with(&prefix_lower) {
+        if !name_str.fold_lower().starts_with(&prefix_lower) {
             continue;
         }
 
@@ -584,7 +585,7 @@ fn complete_user_defined_symbols<DB: RootDatabase>(
         let name = variable.name();
         let name_str = name.as_str();
 
-        if !name_str.to_lowercase().starts_with(&prefix_lower) {
+        if !name_str.fold_lower().starts_with(&prefix_lower) {
             continue;
         }
 
@@ -616,13 +617,13 @@ fn complete_global_functions(prefix: &str) -> Vec<CompletionItem> {
     let data = PlatformDataInner::instance();
     let all_functions = data.all_global_functions();
 
-    let prefix_lower = prefix.to_lowercase();
+    let prefix_lower = prefix.fold_lower();
 
     let matching: Vec<_> = all_functions
         .iter()
         .filter(|f| {
-            f.name.to_lowercase().starts_with(&prefix_lower)
-                || f.english_name.to_lowercase().starts_with(&prefix_lower)
+            f.name.fold_lower().starts_with(&prefix_lower)
+                || f.english_name.fold_lower().starts_with(&prefix_lower)
         })
         .collect();
 

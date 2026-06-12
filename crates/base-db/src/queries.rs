@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use stdx::case::CaseExt;
 
 use syntax::{Parse, SyntaxNode, TextRange};
 use vfs::{FileId, VfsPath};
@@ -148,7 +149,7 @@ fn collect_methods_in_regions(
 fn is_api_region(name: &str) -> bool {
     const API_REGIONS: &[&str] =
         &["программныйинтерфейс", "public", "служебныйпрограммныйинтерфейс", "internal"];
-    API_REGIONS.contains(&name.to_lowercase().as_str())
+    API_REGIONS.contains(&name.fold_lower().as_str())
 }
 
 #[salsa::tracked(lru = 256)]

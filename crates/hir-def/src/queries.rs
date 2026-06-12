@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use stdx::case::CaseExt;
 
 use base_db::FileIdInput;
 use bsl_metadata::MdoType;
@@ -333,7 +334,7 @@ fn unique_global_handler(
 /// `Method` node earlier — so the name prefix is a reliable creation signal.
 pub(crate) fn manager_edge_kind(method_name: &str) -> crate::call_graph::EdgeKind {
     use crate::call_graph::EdgeKind;
-    let lower = method_name.to_lowercase();
+    let lower = method_name.fold_lower();
     if lower.starts_with("создать") || lower.starts_with("create") {
         EdgeKind::ManagerCreates
     } else {
@@ -363,7 +364,7 @@ impl MdoCanonical {
     /// later differently-cased spelling of the same object is recorded as a variant
     /// and the first-seen spelling is returned (matching the build's first-wins rule).
     pub(crate) fn canonical(&mut self, mdo_type: MdoType, spelling: &str) -> crate::name::Name {
-        let key = (mdo_type, spelling.to_lowercase());
+        let key = (mdo_type, spelling.fold_lower());
         match self.map.get(&key) {
             Some(existing) => {
                 if existing.as_str() != spelling {
@@ -521,7 +522,7 @@ pub(crate) fn project_collected_query_edges(
     for site in &refs.sites {
         let from = &site.from;
         for (mdo_type, name) in &site.tables {
-            let name_lower = name.to_lowercase();
+            let name_lower = name.fold_lower();
             if !seen_query_ref.insert((from.clone(), *mdo_type, name_lower)) {
                 continue;
             }
@@ -538,8 +539,8 @@ pub(crate) fn project_collected_query_edges(
             if !seen_query_attr.insert((
                 from.clone(),
                 *mdo_type,
-                object.to_lowercase(),
-                attr.to_lowercase(),
+                object.fold_lower(),
+                attr.fold_lower(),
             )) {
                 continue;
             }

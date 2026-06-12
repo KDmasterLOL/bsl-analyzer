@@ -15,6 +15,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
+use stdx::case::CaseExt;
 
 use bsl_metadata::MdoType;
 use code_chunk::{base_chunk_name, ChunkKind, Chunker};
@@ -618,7 +619,7 @@ fn emit_fused_chunks(
                 reads.sort();
                 reads.dedup();
                 let ctx = GraphContext { dispatch, signature, calls, reads };
-                ctx_by_name.insert(entry.name.as_str().to_lowercase(), ctx.render());
+                ctx_by_name.insert(entry.name.as_str().fold_lower(), ctx.render());
             }
         }
 
@@ -627,7 +628,7 @@ fn emit_fused_chunks(
         for chunk in Chunker::chunk_parsed(&parse.syntax_node(), &source) {
             let graph_context = match chunk.kind {
                 ChunkKind::Procedure | ChunkKind::Function => {
-                    ctx_by_name.get(&base_chunk_name(&chunk.name).to_lowercase()).cloned()
+                    ctx_by_name.get(&base_chunk_name(&chunk.name).fold_lower()).cloned()
                 }
                 ChunkKind::ModuleHeader => None,
             };
@@ -889,7 +890,7 @@ pub fn build_workspace_graph_rows(
     let mut variants: Vec<String> = state
         .casing_variant_keys()
         .into_iter()
-        .map(|(ty, obj)| format!("{}/{}", ty.to_lowercase(), obj))
+        .map(|(ty, obj)| format!("{}/{}", ty.fold_lower(), obj))
         .collect();
     variants.sort();
     variants.dedup();
@@ -1012,7 +1013,7 @@ pub fn reproject_changed_modules(
     let mut casing_variant_objects: Vec<String> = state
         .casing_variant_keys()
         .into_iter()
-        .map(|(ty, obj)| format!("{}/{}", ty.to_lowercase(), obj))
+        .map(|(ty, obj)| format!("{}/{}", ty.fold_lower(), obj))
         .collect();
     casing_variant_objects.sort();
     casing_variant_objects.dedup();
@@ -1216,12 +1217,12 @@ impl<'a> GraphCtx<'a> {
         object: &str,
         id: &str,
     ) -> Result<GraphNode, GraphError> {
-        let object_lower = object.to_lowercase();
+        let object_lower = object.fold_lower();
         self.graph
             .nodes()
             .find(|n| {
                 matches!(n, GraphNode::Mdo { mdo_type: mt, object_name }
-                    if *mt == mdo_type && object_name.as_str().to_lowercase() == object_lower)
+                    if *mt == mdo_type && object_name.as_str().fold_lower() == object_lower)
             })
             .ok_or_else(|| GraphError::NotFound { id: id.to_string() })
     }
@@ -1235,15 +1236,15 @@ impl<'a> GraphCtx<'a> {
         attr: &str,
         id: &str,
     ) -> Result<GraphNode, GraphError> {
-        let object_lower = object.to_lowercase();
-        let attr_lower = attr.to_lowercase();
+        let object_lower = object.fold_lower();
+        let attr_lower = attr.fold_lower();
         self.graph
             .nodes()
             .find(|n| {
                 matches!(n, GraphNode::Attribute { mdo_type: mt, object_name, attr_name }
                     if *mt == mdo_type
-                        && object_name.as_str().to_lowercase() == object_lower
-                        && attr_name.as_str().to_lowercase() == attr_lower)
+                        && object_name.as_str().fold_lower() == object_lower
+                        && attr_name.as_str().fold_lower() == attr_lower)
             })
             .ok_or_else(|| GraphError::NotFound { id: id.to_string() })
     }
@@ -1256,13 +1257,13 @@ impl<'a> GraphCtx<'a> {
         form_name: &str,
         id: &str,
     ) -> Result<GraphNode, GraphError> {
-        let form_lower = form_name.to_lowercase();
+        let form_lower = form_name.fold_lower();
         self.graph
             .nodes()
             .find(|n| match n {
                 GraphNode::Form { owner: o, form_name: fname } => {
                     form_owner_matches(o.as_ref().map(|(t, n)| (*t, n.as_str())), owner)
-                        && fname.as_str().to_lowercase() == form_lower
+                        && fname.as_str().fold_lower() == form_lower
                 }
                 _ => false,
             })
@@ -1278,15 +1279,15 @@ impl<'a> GraphCtx<'a> {
         item_name: &str,
         id: &str,
     ) -> Result<GraphNode, GraphError> {
-        let form_lower = form_name.to_lowercase();
-        let item_lower = item_name.to_lowercase();
+        let form_lower = form_name.fold_lower();
+        let item_lower = item_name.fold_lower();
         self.graph
             .nodes()
             .find(|n| match n {
                 GraphNode::FormItem { owner: o, form_name: fname, item_name: iname } => {
                     form_owner_matches(o.as_ref().map(|(t, n)| (*t, n.as_str())), owner)
-                        && fname.as_str().to_lowercase() == form_lower
-                        && iname.as_str().to_lowercase() == item_lower
+                        && fname.as_str().fold_lower() == form_lower
+                        && iname.as_str().fold_lower() == item_lower
                 }
                 _ => false,
             })
@@ -1302,15 +1303,15 @@ impl<'a> GraphCtx<'a> {
         attr_name: &str,
         id: &str,
     ) -> Result<GraphNode, GraphError> {
-        let form_lower = form_name.to_lowercase();
-        let attr_lower = attr_name.to_lowercase();
+        let form_lower = form_name.fold_lower();
+        let attr_lower = attr_name.fold_lower();
         self.graph
             .nodes()
             .find(|n| match n {
                 GraphNode::FormAttribute { owner: o, form_name: fname, attr_name: aname } => {
                     form_owner_matches(o.as_ref().map(|(t, n)| (*t, n.as_str())), owner)
-                        && fname.as_str().to_lowercase() == form_lower
-                        && aname.as_str().to_lowercase() == attr_lower
+                        && fname.as_str().fold_lower() == form_lower
+                        && aname.as_str().fold_lower() == attr_lower
                 }
                 _ => false,
             })
@@ -1326,15 +1327,15 @@ impl<'a> GraphCtx<'a> {
         section: &str,
         id: &str,
     ) -> Result<GraphNode, GraphError> {
-        let object_lower = object.to_lowercase();
-        let section_lower = section.to_lowercase();
+        let object_lower = object.fold_lower();
+        let section_lower = section.fold_lower();
         self.graph
             .nodes()
             .find(|n| {
                 matches!(n, GraphNode::TabularSection { mdo_type: mt, object_name, section_name }
                     if *mt == mdo_type
-                        && object_name.as_str().to_lowercase() == object_lower
-                        && section_name.as_str().to_lowercase() == section_lower)
+                        && object_name.as_str().fold_lower() == object_lower
+                        && section_name.as_str().fold_lower() == section_lower)
             })
             .ok_or_else(|| GraphError::NotFound { id: id.to_string() })
     }
@@ -1349,17 +1350,17 @@ impl<'a> GraphCtx<'a> {
         attr: &str,
         id: &str,
     ) -> Result<GraphNode, GraphError> {
-        let object_lower = object.to_lowercase();
-        let section_lower = section.to_lowercase();
-        let attr_lower = attr.to_lowercase();
+        let object_lower = object.fold_lower();
+        let section_lower = section.fold_lower();
+        let attr_lower = attr.fold_lower();
         self.graph
             .nodes()
             .find(|n| {
                 matches!(n, GraphNode::TabularSectionAttribute { mdo_type: mt, object_name, section_name, attr_name }
                     if *mt == mdo_type
-                        && object_name.as_str().to_lowercase() == object_lower
-                        && section_name.as_str().to_lowercase() == section_lower
-                        && attr_name.as_str().to_lowercase() == attr_lower)
+                        && object_name.as_str().fold_lower() == object_lower
+                        && section_name.as_str().fold_lower() == section_lower
+                        && attr_name.as_str().fold_lower() == attr_lower)
             })
             .ok_or_else(|| GraphError::NotFound { id: id.to_string() })
     }
@@ -2092,16 +2093,16 @@ pub fn rank_resolve_candidates(
     if query.is_empty() {
         return Vec::new();
     }
-    let q_lower = query.to_lowercase();
+    let q_lower = query.fold_lower();
     let mut ranked: Vec<(u8, ResolveCandidate)> = nodes
         .filter_map(|(id, kind)| {
             let (rank, match_kind) = if id == query {
                 (0, "exact")
-            } else if id.to_lowercase() == q_lower {
+            } else if id.fold_lower() == q_lower {
                 (1, "case_insensitive")
-            } else if resolve_name_segment(&id).to_lowercase() == q_lower {
+            } else if resolve_name_segment(&id).fold_lower() == q_lower {
                 (2, "name")
-            } else if id.to_lowercase().contains(&q_lower) {
+            } else if id.fold_lower().contains(&q_lower) {
                 (3, "substring")
             } else {
                 return None;
@@ -2421,7 +2422,7 @@ pub(crate) fn edge_kind_allowed(kind: EdgeKind, filter: &[String]) -> bool {
 fn form_owner_matches(node: Option<(MdoType, &str)>, query: &Option<(MdoType, String)>) -> bool {
     match (node, query) {
         (None, None) => true,
-        (Some((nt, nn)), Some((qt, qn))) => nt == *qt && nn.to_lowercase() == qn.to_lowercase(),
+        (Some((nt, nn)), Some((qt, qn))) => nt == *qt && nn.fold_lower() == qn.fold_lower(),
         _ => false,
     }
 }

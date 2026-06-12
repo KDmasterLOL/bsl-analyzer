@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use stdx::case::CaseExt;
 
 use bsl_metadata::{AttributeType, MdoType, MetadataObject, MetadataResolver, RegisterPeriodicity};
 use bsl_platform::{
@@ -261,12 +262,12 @@ fn standard_attribute_names_for(mdo_type: MdoType) -> std::collections::HashSet<
 }
 
 fn insert_standard_kind_names(set: &mut std::collections::HashSet<String>, kind: StandardKind) {
-    set.insert(kind.russian_name().to_lowercase());
-    set.insert(kind.english_name().to_lowercase());
+    set.insert(kind.russian_name().fold_lower());
+    set.insert(kind.english_name().fold_lower());
 }
 
 fn name_in_spec(spec_names: &std::collections::HashSet<String>, ru: &str, en: &str) -> bool {
-    spec_names.contains(&ru.to_lowercase()) || spec_names.contains(&en.to_lowercase())
+    spec_names.contains(&ru.fold_lower()) || spec_names.contains(&en.fold_lower())
 }
 
 fn enumerate_mdo_fields(
@@ -457,10 +458,7 @@ fn enumerate_register_fields(
 }
 
 fn is_recorder_name(name: &str) -> bool {
-    if name.eq_ignore_ascii_case("Recorder") {
-        return true;
-    }
-    !name.is_ascii() && name.to_lowercase() == "регистратор"
+    stdx::case::eq_ignore_case(name, "Recorder") || stdx::case::eq_ignore_case(name, "Регистратор")
 }
 
 fn recorder_union_typeid(
@@ -599,8 +597,10 @@ fn enumerate_tabular_row_fields(
     let nr_name = Name::new("НомерСтроки");
     let nr_name_en = Name::new("LineNumber");
     let already_defined = out.iter().any(|f| {
-        f.name.as_str().to_lowercase() == "номерстроки"
-            || f.name_en.as_ref().is_some_and(|en| en.as_str().to_lowercase() == "linenumber")
+        stdx::case::eq_ignore_case(f.name.as_str(), "НомерСтроки")
+            || f.name_en
+                .as_ref()
+                .is_some_and(|en| stdx::case::eq_ignore_case(en.as_str(), "LineNumber"))
     });
     if !already_defined {
         if let Some(prop) = crate::platform_property_lookup::lookup_platform_property_by_type(
@@ -784,8 +784,8 @@ fn standard_attr_object_index() -> &'static std::collections::HashMap<
                     HashMap::new();
                 // First occurrence wins, matching the replaced `.iter().find()` scan.
                 for spec in standard_attributes_for(tmpl, ObjectView::Object) {
-                    by_name.entry(spec.kind.russian_name().to_lowercase()).or_insert(spec);
-                    by_name.entry(spec.kind.english_name().to_lowercase()).or_insert(spec);
+                    by_name.entry(spec.kind.russian_name().fold_lower()).or_insert(spec);
+                    by_name.entry(spec.kind.english_name().fold_lower()).or_insert(spec);
                 }
                 (tmpl, by_name)
             })
@@ -798,7 +798,7 @@ fn classify_attr(
     attr_name: &str,
 ) -> Option<&'static bsl_platform::StandardAttrSpec> {
     let tmpl = template?;
-    let needle = attr_name.to_lowercase();
+    let needle = attr_name.fold_lower();
     standard_attr_object_index().get(&tmpl)?.get(&needle).copied()
 }
 

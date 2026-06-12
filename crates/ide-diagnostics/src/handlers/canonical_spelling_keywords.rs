@@ -1,6 +1,7 @@
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
+use stdx::case::CaseExt;
 use syntax::{SyntaxKind, SyntaxToken};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -39,7 +40,7 @@ fn is_in_preprocessor(token: &SyntaxToken) -> bool {
 }
 
 fn check_preproc_symbol(actual: &str) -> Option<String> {
-    let lower = actual.to_lowercase();
+    let lower = actual.fold_lower();
     match lower.as_str() {
         "сервер" | "server" => check_keyword(actual, &["Сервер", "Server"]),
         "клиент" | "client" => check_keyword(actual, &["Клиент", "Client"]),

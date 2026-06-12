@@ -1,5 +1,6 @@
 use crate::{DiagnosticCode, DiagnosticsContext};
 use std::collections::HashSet;
+use stdx::case::CaseExt;
 use syntax::{SyntaxKind, SyntaxNode};
 
 pub const DEFAULT_DECLARED_LANGUAGES: &str = "ru";
@@ -47,7 +48,7 @@ impl NstrConfig {
 
         let declared_languages: HashSet<String> = declared_str
             .split(',')
-            .map(|s| s.trim().to_lowercase())
+            .map(|s| s.trim().fold_lower())
             .filter(|s| !s.is_empty())
             .collect();
 
@@ -79,7 +80,7 @@ pub fn extract_language_keys(text: &str) -> HashSet<String> {
                     i += 1;
                 }
                 if i < len && (chars[i] == '\'' || chars[i] == '"') {
-                    keys.insert(ident.to_lowercase());
+                    keys.insert(ident.fold_lower());
                 }
             }
         } else {
