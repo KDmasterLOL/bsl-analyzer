@@ -147,6 +147,7 @@ pub mod too_many_returns;
 pub mod transferring_parameters_between_client_and_server;
 pub mod try_number;
 pub mod type_mismatch;
+pub mod type_mismatch_by_doc_comment;
 pub mod typo;
 pub mod unary_plus_in_concatenation;
 pub mod union_all;
@@ -464,6 +465,7 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::UnresolvedMethodCall => Some(&unresolved_method_call::METADATA),
         DiagnosticCode::MismatchedArgCount => Some(&mismatched_arg_count::METADATA),
         DiagnosticCode::TypeMismatch => Some(&type_mismatch::METADATA),
+        DiagnosticCode::TypeMismatchByDocComment => Some(&type_mismatch_by_doc_comment::METADATA),
         DiagnosticCode::UnresolvedField => Some(&unresolved_field::METADATA),
         DiagnosticCode::ReadOnlyPropertyAssignment => Some(&read_only_property::METADATA),
     }

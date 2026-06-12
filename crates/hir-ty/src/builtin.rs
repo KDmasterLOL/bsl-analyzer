@@ -56,7 +56,13 @@ impl BuiltinSignature {
             ReturnTypeSpec::Undefined => db.undefined(),
             ReturnTypeSpec::Unknown => db.unknown(),
         };
-        FunctionSignature { params, defaults: self.defaults.clone(), ret, max_args: self.max_args }
+        FunctionSignature {
+            params,
+            defaults: self.defaults.clone(),
+            ret,
+            max_args: self.max_args,
+            from_doc_comment: false,
+        }
     }
 
     pub fn defaults(&self) -> &[bool] {

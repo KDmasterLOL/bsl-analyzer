@@ -6,6 +6,7 @@ pub(crate) const INFERENCE_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::UnresolvedMethodCall,
     DiagnosticCode::MismatchedArgCount,
     DiagnosticCode::TypeMismatch,
+    DiagnosticCode::TypeMismatchByDocComment,
     DiagnosticCode::UnresolvedField,
     DiagnosticCode::ReadOnlyPropertyAssignment,
     DiagnosticCode::RedundantAccessToObject,
@@ -26,7 +27,10 @@ pub fn collect_inference_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic
 }
 
 pub fn collect_arg_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    if !ctx.config.any_enabled(&[DiagnosticCode::TypeMismatch]) {
+    if !ctx
+        .config
+        .any_enabled(&[DiagnosticCode::TypeMismatch, DiagnosticCode::TypeMismatchByDocComment])
+    {
         return Vec::new();
     }
 
@@ -112,8 +116,12 @@ fn dispatch_inference_diagnostic(
                 ctx,
             )
         }
-        InferenceDiagnostic::TypeMismatch { expected, actual, .. } => {
-            handlers::type_mismatch::from_hir(*expected, *actual, range, ctx)
+        InferenceDiagnostic::TypeMismatch { expected, actual, from_doc_comment, .. } => {
+            if *from_doc_comment {
+                handlers::type_mismatch_by_doc_comment::from_hir(*expected, *actual, range, ctx)
+            } else {
+                handlers::type_mismatch::from_hir(*expected, *actual, range, ctx)
+            }
         }
         InferenceDiagnostic::UnresolvedField { receiver_ty, field_name, .. } => {
             handlers::unresolved_field::from_hir(*receiver_ty, field_name, range, ctx)

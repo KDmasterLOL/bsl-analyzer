@@ -93,10 +93,17 @@ pub fn arg_diagnostics_query(
         narrow_arg_ns += narrow_arg_start.elapsed().as_nanos();
 
         let emit_start = Instant::now();
+        let from_doc_comment = binding.params_from_doc_comment;
         match &binding.params {
-            ParamsShape::Single(params) => {
-                emit_single(db, &binding.args, &arg_types, params, &mut out, binding.owner)
-            }
+            ParamsShape::Single(params) => emit_single(
+                db,
+                &binding.args,
+                &arg_types,
+                params,
+                &mut out,
+                binding.owner,
+                from_doc_comment,
+            ),
             ParamsShape::Overloaded { flat, overloads } => emit_overloaded(
                 db,
                 &binding.args,
@@ -105,6 +112,7 @@ pub fn arg_diagnostics_query(
                 overloads,
                 &mut out,
                 binding.owner,
+                from_doc_comment,
             ),
         }
         emit_ns += emit_start.elapsed().as_nanos();
@@ -246,6 +254,7 @@ fn emit_single(
     params: &[TypeId],
     out: &mut Vec<(DefWithBodyId, InferenceDiagnostic)>,
     owner: DefWithBodyId,
+    from_doc_comment: bool,
 ) {
     for ((arg_id, &arg_ty), &param_id) in args.iter().zip(arg_types.iter()).zip(params.iter()) {
         if !crate::subtype::is_coercible_to(db, arg_ty, param_id) {
@@ -255,12 +264,16 @@ fn emit_single(
                     expr: *arg_id,
                     expected: param_id,
                     actual: arg_ty,
+                    from_doc_comment,
                 },
             ));
         }
     }
 }
 
+// A thin emit helper threading the call's data straight to the diagnostic sink; bundling the
+// arguments into a struct would only add an indirection local to this file.
+#[allow(clippy::too_many_arguments)]
 fn emit_overloaded(
     db: &dyn HirDatabase,
     args: &[ExprId],
@@ -269,9 +282,10 @@ fn emit_overloaded(
     overloads: &[Arc<[TypeId]>],
     out: &mut Vec<(DefWithBodyId, InferenceDiagnostic)>,
     owner: DefWithBodyId,
+    from_doc_comment: bool,
 ) {
     if overloads.is_empty() {
-        emit_single(db, args, arg_types, flat, out, owner);
+        emit_single(db, args, arg_types, flat, out, owner, from_doc_comment);
         return;
     }
 
@@ -293,5 +307,5 @@ fn emit_overloaded(
         .min_by_key(|params| params.len().abs_diff(args.len()))
         .map(|p| p.as_ref())
         .unwrap_or(flat);
-    emit_single(db, args, arg_types, chosen, out, owner);
+    emit_single(db, args, arg_types, chosen, out, owner, from_doc_comment);
 }

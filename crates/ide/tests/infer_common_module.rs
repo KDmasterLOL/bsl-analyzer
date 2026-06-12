@@ -156,6 +156,40 @@ fn module_fetched_and_used_inside_guard_resolves_member() {
 }
 
 #[test]
+fn bare_module_reference_is_typed_as_common_module() {
+    // M2: a bare module name used directly is a value of that module's type.
+    let fixture = format!(
+        "{RECEIVER}\n//- /test.bsl\n\
+         Процедура Тест()\n    М = ПервыйМодуль;\nКонецПроцедуры\n"
+    );
+    let (db, file_id) = setup(&fixture);
+    let ty = var_ty(&db, file_id, "м");
+    assert!(
+        matches!(db.lookup_type(ty), TypeKind::CommonModule(facet) if facet.name == "ПервыйМодуль"),
+        "bare module reference must type as CommonModule, got {:?}",
+        db.lookup_type(ty)
+    );
+}
+
+#[test]
+fn local_assignment_shadows_bare_module_name() {
+    // M2 BLOCKER-2: a local assignment to a module-shaped name (Unknown RHS) keeps the name a
+    // local variable, never a module — otherwise a use before the reassignment misresolves.
+    let fixture = format!(
+        "{RECEIVER}\n//- /test.bsl\n\
+         Процедура Тест()\n    ПервыйМодуль = Вычислить(\"Х\");\n    М = ПервыйМодуль;\nКонецПроцедуры\n"
+    );
+    let (db, file_id) = setup(&fixture);
+    if let Some(ty) = var_ty_opt(&db, file_id, "м") {
+        assert!(
+            !matches!(db.lookup_type(ty), TypeKind::CommonModule(_)),
+            "a locally-assigned module-shaped name must not type as CommonModule, got {:?}",
+            db.lookup_type(ty)
+        );
+    }
+}
+
+#[test]
 fn unknown_module_name_is_not_narrowed() {
     let fixture = format!(
         "{RECEIVER}\n//- /test.bsl\n\

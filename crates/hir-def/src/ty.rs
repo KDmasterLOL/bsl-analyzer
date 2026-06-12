@@ -115,6 +115,8 @@ pub struct FunctionSignature {
     pub ret: bsl_types::kind::TypeId,
 
     pub max_args: Option<u32>,
+
+    pub from_doc_comment: bool,
 }
 
 impl FunctionSignature {
