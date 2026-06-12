@@ -77,7 +77,7 @@ impl<'a> Parser<'a> {
 
     pub fn at_keyword(&self, text: &str) -> bool {
         if let Some(token) = self.tokens.get(self.pos) {
-            token.kind == TokenKind::Ident && token.text.to_lowercase() == text.to_lowercase()
+            token.kind == TokenKind::Ident && eq_ignore_case(&token.text, text)
         } else {
             false
         }
@@ -318,5 +318,30 @@ impl CompletedMarker {
         }
 
         Marker::at_event_pos(new_pos, self.start_token_pos)
+    }
+}
+
+/// Unicode-aware case-insensitive comparison without allocating.
+///
+/// `to_lowercase()`-based equality allocates two `String`s and folds both sides
+/// in full even when the first characters already differ; on contextual-keyword
+/// probes (which mostly miss) that cost dominates. Folding per `char` keeps the
+/// comparison allocation-free and exits on the first mismatch. ASCII pairs take
+/// the byte-wise fast path; the general branch folds per char, which handles
+/// Cyrillic correctly (`eq_ignore_ascii_case` alone would not). Unlike
+/// `str::to_lowercase` it skips context-sensitive mappings (Greek final sigma),
+/// which no BSL keyword or identifier comparison can reach.
+fn eq_ignore_case(a: &str, b: &str) -> bool {
+    if a.is_ascii() && b.is_ascii() {
+        return a.eq_ignore_ascii_case(b);
+    }
+    let mut a_chars = a.chars().flat_map(char::to_lowercase);
+    let mut b_chars = b.chars().flat_map(char::to_lowercase);
+    loop {
+        match (a_chars.next(), b_chars.next()) {
+            (None, None) => return true,
+            (Some(x), Some(y)) if x == y => {}
+            _ => return false,
+        }
     }
 }

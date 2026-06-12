@@ -34,6 +34,10 @@ pub struct PlatformDataInner {
     /// Folded English type name → indices of that type's properties. Replaces the
     /// O(all-properties) per-call `to_lowercase` scan in [`get_type_properties`].
     properties_by_type: FxHashMap<SmolStr, Vec<usize>>,
+    /// Folded first segment of a dotted type name (the manager prefix) → indices
+    /// of properties on that manager's types. Replaces the O(all-properties)
+    /// per-call `to_lowercase` scan in [`get_manager_properties`].
+    manager_properties_by_prefix: FxHashMap<SmolStr, Vec<usize>>,
     property_docs_by_id: FxHashMap<u32, usize>,
     global_properties_by_name: FxHashMap<SmolStr, usize>,
 }
@@ -151,12 +155,16 @@ impl PlatformDataInner {
 
         let mut properties_by_name = FxHashMap::default();
         let mut properties_by_type: FxHashMap<SmolStr, Vec<usize>> = FxHashMap::default();
+        let mut manager_properties_by_prefix: FxHashMap<SmolStr, Vec<usize>> = FxHashMap::default();
         for (idx, prop) in properties.iter().enumerate() {
             let en_type_key: SmolStr = prop.type_name.to_lowercase().into();
             let ru_prop_key: SmolStr = prop.name.to_lowercase().into();
             let en_prop_key: SmolStr = prop.english_name.to_lowercase().into();
 
             properties_by_type.entry(en_type_key.clone()).or_default().push(idx);
+            if let Some((manager_prefix, _)) = en_type_key.split_once('.') {
+                manager_properties_by_prefix.entry(manager_prefix.into()).or_default().push(idx);
+            }
             properties_by_name.insert((en_type_key.clone(), ru_prop_key.clone()), idx);
             properties_by_name.insert((en_type_key.clone(), en_prop_key.clone()), idx);
 
@@ -199,6 +207,7 @@ impl PlatformDataInner {
             properties,
             properties_by_name,
             properties_by_type,
+            manager_properties_by_prefix,
             property_docs_by_id,
             global_properties_by_name,
         }
@@ -302,8 +311,25 @@ impl PlatformDataInner {
     }
 
     pub fn get_manager_properties(&self, manager_prefix: &str) -> Vec<&PlatformProperty> {
-        let prefix = format!("{}.", manager_prefix.to_lowercase());
-        self.properties.iter().filter(|p| p.type_name.to_lowercase().starts_with(&prefix)).collect()
+        let folded = manager_prefix.to_lowercase();
+        // The index is keyed by the segment before the first dot; a dotted
+        // prefix narrows the bucket with the original `starts_with` check.
+        let (head, dotted_rest) = match folded.split_once('.') {
+            Some((head, _)) => (head, true),
+            None => (folded.as_str(), false),
+        };
+        let Some(indices) = self.manager_properties_by_prefix.get(head) else {
+            return Vec::new();
+        };
+        if !dotted_rest {
+            return indices.iter().filter_map(|&idx| self.properties.get(idx)).collect();
+        }
+        let full_prefix = format!("{folded}.");
+        indices
+            .iter()
+            .filter_map(|&idx| self.properties.get(idx))
+            .filter(|p| p.type_name.to_lowercase().starts_with(&full_prefix))
+            .collect()
     }
 
     pub fn all_properties(&self) -> &[PlatformProperty] {

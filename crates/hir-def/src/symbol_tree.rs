@@ -47,10 +47,28 @@ impl MethodSymbol {
         let expected_kind =
             if self.is_function { SyntaxKind::FUNCTION_DEF } else { SyntaxKind::PROCEDURE_DEF };
         let target = self.source_range;
-        parse
-            .syntax_node()
-            .descendants()
-            .find(|node| node.kind() == expected_kind && node.text_range() == target)
+        let root = parse.syntax_node();
+        if !root.text_range().contains_range(target) {
+            return None;
+        }
+        // Descend by range containment instead of scanning every descendant: the
+        // covering element of the method's full range is the method node itself,
+        // possibly below same-range wrapper nodes (climbed back off here).
+        let mut node = match root.covering_element(target) {
+            syntax::NodeOrToken::Node(n) => n,
+            syntax::NodeOrToken::Token(t) => t.parent()?,
+        };
+        let mut found = None;
+        loop {
+            if node.text_range() == target && node.kind() == expected_kind {
+                found = Some(node.clone());
+            }
+            match node.parent() {
+                Some(parent) if parent.text_range() == target => node = parent,
+                _ => break,
+            }
+        }
+        found
     }
 }
 
