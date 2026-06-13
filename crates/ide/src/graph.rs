@@ -23,9 +23,10 @@ use hir::call_graph::{EdgeKind, MethodDispatch};
 use hir::graph_index::{
     display_scope, encode_scope, form_qualified_prefix, form_scope, project_batch_call_edges,
     project_batch_form_edges, project_batch_query_edges, project_form_binding_edges,
-    project_workspace_catalog_edges, project_workspace_role_edges,
-    project_workspace_subscription_edges, project_workspace_subsystem_edges, EdgeRow,
-    GraphBuildState, GraphIndex, GraphRowEncoder, NodeRow,
+    project_workspace_catalog_edges, project_workspace_register_records_edges,
+    project_workspace_role_edges, project_workspace_subscription_edges,
+    project_workspace_subsystem_edges, EdgeRow, GraphBuildState, GraphIndex, GraphRowEncoder,
+    NodeRow,
 };
 use hir::{
     module_key_for_path, ConfigsDatabase, DefDatabase, GraphNode, MethodId, ModuleId, ModuleIndex,
@@ -887,6 +888,16 @@ pub fn build_workspace_graph_rows(
     if let Some(first) = modules.chunks(batch_size).next() {
         let db = open_batch(first);
         let edges = project_workspace_role_edges(&db, first[0].file_id, &mut state);
+        emit(&edges, &mut summary, &mut seen_aux, sink)?;
+    }
+
+    // Phase I — `register_records` edges: each document → every register it declares it posts
+    // (its `RegisterRecords` metadata). Config-level, pure metadata, sharing `state` so register
+    // names canonicalize to the same spelling as their own nodes. Full-build only, like the
+    // metadata passes above.
+    if let Some(first) = modules.chunks(batch_size).next() {
+        let db = open_batch(first);
+        let edges = project_workspace_register_records_edges(&db, first[0].file_id, &mut state);
         emit(&edges, &mut summary, &mut seen_aux, sink)?;
     }
 
@@ -2450,6 +2461,7 @@ fn edge_kind_label(kind: EdgeKind) -> &'static str {
         EdgeKind::RegisterMovement => "register_movement",
         EdgeKind::SubsystemMembership => "subsystem_membership",
         EdgeKind::RoleReference => "role_reference",
+        EdgeKind::RegisterRecords => "register_records",
     }
 }
 

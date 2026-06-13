@@ -1265,6 +1265,65 @@ fn subsystem_membership_edge(from: GraphNode, to: GraphNode) -> WorkspaceCallEdg
     }
 }
 
+/// Project register-records edges: from each document's `Mdo` node (type [`MdoType::Document`])
+/// to every register it declares it posts in its `RegisterRecords` metadata. Pure config-driven
+/// (like the subsystem and role passes), full-build only — a document metadata change is drift
+/// that forces a full rebuild, so the incremental reproject never runs this and both paths stay
+/// identical. Document and register names are canonicalized through the shared `mdo_canonical` so
+/// they coincide with the objects' own nodes from other passes.
+///
+/// This is the declared "which documents post register X" relation, sound regardless of how the
+/// posting code addresses the register (a literal `Движения.X`, a dynamic `Движения[…]` index, or
+/// a string name into `РегистрыНакопления[…]` — only the first of which `register_movement` sees).
+pub fn project_workspace_register_records_edges<DB: ConfigsDatabase>(
+    db: &DB,
+    representative: FileId,
+    state: &mut GraphBuildState,
+) -> Vec<WorkspaceCallEdge> {
+    // (document_name, register_type, register_name); gathered deterministically so
+    // canonicalization sees a load-order-independent first-seen spelling.
+    let mut records: Vec<(String, MdoType, String)> = Vec::new();
+    for visible in db.configurations(representative) {
+        for object in visible.configuration.metadata_objects() {
+            if object.mdo_type != MdoType::Document {
+                continue;
+            }
+            for (register_type, register_name) in object.register_records() {
+                records.push((object.name.clone(), *register_type, register_name.clone()));
+            }
+        }
+    }
+    records.sort();
+    records.dedup();
+
+    let mut edges = Vec::new();
+    let mut seen: FxHashSet<(GraphNode, GraphNode)> = FxHashSet::default();
+    for (doc_name, register_type, register_name) in &records {
+        let from = GraphNode::Mdo {
+            mdo_type: MdoType::Document,
+            object_name: state.mdo_canonical.canonical(MdoType::Document, doc_name),
+        };
+        let to = GraphNode::Mdo {
+            mdo_type: *register_type,
+            object_name: state.mdo_canonical.canonical(*register_type, register_name),
+        };
+        if seen.insert((from.clone(), to.clone())) {
+            edges.push(register_records_edge(from, to));
+        }
+    }
+    edges
+}
+
+fn register_records_edge(from: GraphNode, to: GraphNode) -> WorkspaceCallEdge {
+    WorkspaceCallEdge {
+        from,
+        to,
+        kind: EdgeKind::RegisterRecords,
+        provenance: EdgeProvenance::Resolved,
+        crosses_client_to_server: false,
+    }
+}
+
 /// Project role reference edges: from each role's `Mdo` node (type [`MdoType::Role`]) to every
 /// metadata object the role grants rights on. Pure config-driven (like the catalog and
 /// subsystem passes), full-build only — a `Rights.xml` change is metadata drift that forces a
@@ -1589,6 +1648,7 @@ fn edge_kind_label(kind: EdgeKind) -> &'static str {
         EdgeKind::RegisterMovement => "register_movement",
         EdgeKind::SubsystemMembership => "subsystem_membership",
         EdgeKind::RoleReference => "role_reference",
+        EdgeKind::RegisterRecords => "register_records",
     }
 }
 

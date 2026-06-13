@@ -41,7 +41,7 @@ pub fn direction_from(s: Option<&str>) -> Result<Direction, String> {
 }
 
 /// The agent-facing edge-kind labels accepted by the `edge_kinds` neighbour filter.
-const EDGE_KINDS: [&str; 12] = [
+const EDGE_KINDS: [&str; 13] = [
     "call",
     "manager_creates",
     "manager_access",
@@ -54,6 +54,7 @@ const EDGE_KINDS: [&str; 12] = [
     "register_movement",
     "subsystem_membership",
     "role_reference",
+    "register_records",
 ];
 
 /// Validate an `edge_kinds` filter: every entry must be a known edge-kind label, so a
@@ -239,21 +240,21 @@ pub fn loading(detail: Option<&str>) -> CallToolResult {
 /// independent of the on-disk SQLite cache layout in [`crate::graph_db`]).
 fn schema_json() -> Value {
     json!({
-        "schema_version": "25",
+        "schema_version": "26",
         "actions": ["overview", "schema", "status", "node", "source", "neighbors", "callers", "callees", "resolve"],
         "status": "`status` returns the graph lifecycle ({state: disabled|loading|ready|failed, and when ready: files, revision, stale, reload}) and kicks the lazy build — poll it instead of reading a flat `loading` envelope from a data action (mirrors `diagnostics status`).",
         "node_kinds": ["method", "module", "mdo", "attribute", "tabular_section", "form", "form_item", "form_attribute"],
         "node_shape": "`qualified` (russified display path) is emitted only for metadata nodes — for code nodes it would restate `module` + `name`; `addressable` is emitted only when false (absent = the id round-trips); `truncated: true` is emitted on a node whose `detail=bodies` source was cut short — or, when `source` is absent, dropped — to fit the output budget (so a short body is not mistaken for a complete one, nor a budget-dropped body for a method with no body)",
         "notes": "`node(module/<scope>)` resolves for any code module and returns a `methods` array ({id, name, is_export}) of the module's members; module membership is served on demand and is not a graph edge, so `neighbors(module/…)` stays empty",
         "resolve": "`resolve(query)` returns candidate durable ids ({id, kind, match}) for an imprecise query — wrong casing, a bare method/object name, or a partial id — so a `not_found` from `node`/`neighbors` is recoverable without guessing. `match` is exact|case_insensitive|name|substring (strongest first); the list is capped (default 20). `total` reports the distinct match count before the cap and `truncated: true` is set when the cap dropped candidates, so a frequent name (e.g. thousands of `ПриСозданииНаСервере`) is not mistaken for a complete list — refine the query, raise `limit`, or use `search_code`. It is symbol/id-oriented, NOT a natural-language search: a free-text phrase (e.g. several object/form/method words) returns no candidates — use `search_code` for semantic lookup, then pass the emitted `graph_id` here.",
-        "edge_kinds": ["call", "manager_creates", "manager_access", "query_ref", "register_movement", "contains", "data_binding", "notify_ref", "idle_handler", "event_subscription", "subsystem_membership", "role_reference"],
-        "edge_kinds_note": "All edge kinds below are kept separate from `call`, so `edge_kinds=[call]` is a pure 'who really calls whom'. String-dispatched callbacks (provenance `string_resolved`, resolved conservatively — only ЭтотОбъект/ЭтаФорма and explicit common-module handlers resolve, an unresolved receiver/handler produces no edge): `notify_ref` (Новый ОписаниеОповещения) links the registering method/module body to BOTH the success handler (ИмяПроцедуры, Модуль) and the error handler (ИмяПроцедурыОбработкиОшибки, МодульОбработкиОшибки) named by string literals; `idle_handler` (ПодключитьОбработчикОжидания) links to the named handler, resolved in the current module or, failing that, in a UNIQUE global common module exporting it (an ambiguous name exported by several global modules is left unresolved, not guessed); `event_subscription` links a `ПодпискаНаСобытие` `mdo` node to its exported handler method. The reference is modelled regardless of the target's client/server dispatch (validity is a diagnostics concern; the reference matters for rename impact either way); a handler hosted in the application module (`МодульПриложения`) is a known unmodelled case. Metadata-reference edges: `register_movement` links a document method/module that writes or reads register records via `Движения.<Регистр>.<метод>()` (Добавить/Записать/Очистить/Загрузить/Выгрузить, bare or through a receiver) to the register's `mdo` node, type resolved from configuration (provenance `inferred`); `subsystem_membership` links a subsystem `mdo` node (type `Subsystem`) to each metadata object it contains and each child subsystem, from its `Content`/`ChildObjects` (provenance `resolved`); `role_reference` links a role `mdo` node (type `Role`) to each object it grants rights on (`resolved`) plus each object named only inside an RLS `restrictionByCondition` query (`inferred`, parsed from the restriction text), while top-level reusable `restrictionTemplate` conditions are not parsed (no host object to resolve against) — a known recall gap. `neighbors(mdo/<Type>/<Object>, dir=in, edge_kinds=[subsystem_membership])` / `[role_reference]` answer 'which subsystems contain' / 'which roles grant rights on or restrict' this object.",
+        "edge_kinds": ["call", "manager_creates", "manager_access", "query_ref", "register_movement", "register_records", "contains", "data_binding", "notify_ref", "idle_handler", "event_subscription", "subsystem_membership", "role_reference"],
+        "edge_kinds_note": "All edge kinds below are kept separate from `call`, so `edge_kinds=[call]` is a pure 'who really calls whom'. String-dispatched callbacks (provenance `string_resolved`, resolved conservatively — only ЭтотОбъект/ЭтаФорма and explicit common-module handlers resolve, an unresolved receiver/handler produces no edge): `notify_ref` (Новый ОписаниеОповещения) links the registering method/module body to BOTH the success handler (ИмяПроцедуры, Модуль) and the error handler (ИмяПроцедурыОбработкиОшибки, МодульОбработкиОшибки) named by string literals; `idle_handler` (ПодключитьОбработчикОжидания) links to the named handler, resolved in the current module or, failing that, in a UNIQUE global common module exporting it (an ambiguous name exported by several global modules is left unresolved, not guessed); `event_subscription` links a `ПодпискаНаСобытие` `mdo` node to its exported handler method. The reference is modelled regardless of the target's client/server dispatch (validity is a diagnostics concern; the reference matters for rename impact either way); a handler hosted in the application module (`МодульПриложения`) is a known unmodelled case. Metadata-reference edges: `register_movement` links a document method/module that writes or reads register records via `Движения.<Регистр>.<метод>()` (Добавить/Записать/Очистить/Загрузить/Выгрузить, bare or through a receiver) to the register's `mdo` node, type resolved from configuration (provenance `inferred`); `subsystem_membership` links a subsystem `mdo` node (type `Subsystem`) to each metadata object it contains and each child subsystem, from its `Content`/`ChildObjects` (provenance `resolved`); `role_reference` links a role `mdo` node (type `Role`) to each object it grants rights on (`resolved`) plus each object named only inside an RLS `restrictionByCondition` query (`inferred`, parsed from the restriction text), while top-level reusable `restrictionTemplate` conditions are not parsed (no host object to resolve against) — a known recall gap. `register_records` links a document `mdo` node (type `Document`) to each register it declares it posts, from the document's `RegisterRecords` metadata (provenance `resolved`) — the declared post contract, sound even when the posting code addresses the register dynamically (a string name into `РегистрыНакопления[…]` or a `Движения[…]` index) which the code-level `register_movement` cannot see; it is the declared capability, not a guarantee every post writes every register. `neighbors(mdo/<Type>/<Object>, dir=in, edge_kinds=[subsystem_membership])` / `[role_reference]` / `[register_records]` answer 'which subsystems contain' / 'which roles grant rights on or restrict' / 'which documents post' this object.",
         "provenance": ["resolved", "inferred", "visibility_blocked", "unresolved", "string_resolved"],
         "provenance_note": "a fully-literal `Коллекция.Объект.Метод()` manager-module call whose exported method is found is `resolved` (the manager module is uniquely determined — as trustworthy as a qualified `Модуль.Метод()` call); `inferred` means the edge points at a metadata-object node (a platform manager method like СоздатьЭлемент, or a bare `Справочники.X` reference), not a code node.",
         "dispatch": ["client", "server"],
         "neighbors_params": {
             "provenance": "string[] — keep only edges with these provenances (empty = all)",
-            "edge_kinds": "string[] — keep only edges of these kinds (call|manager_creates|manager_access|query_ref|register_movement|contains|data_binding|notify_ref|idle_handler|event_subscription|subsystem_membership|role_reference); empty = all. Combine with provenance to isolate e.g. only query_ref+register_movement metadata impact on a register before delete/rename"
+            "edge_kinds": "string[] — keep only edges of these kinds (call|manager_creates|manager_access|query_ref|register_movement|register_records|contains|data_binding|notify_ref|idle_handler|event_subscription|subsystem_membership|role_reference); empty = all. Combine with provenance to isolate e.g. only query_ref+register_movement+register_records metadata impact on a register before delete/rename"
         },
         "neighbors_result": {
             "edges": "edge endpoints equal to the traversal root are omitted: an absent `from`/`to` means the root node (its full ref is carried once in `root`)",
@@ -417,7 +418,7 @@ mod tests {
         // The contract version must be bumped in lockstep with any response-shape change
         // (a new action, node/edge kind, or result field). The history of what each bump
         // added lives in git, not here.
-        assert_eq!(schema["schema_version"], "25");
+        assert_eq!(schema["schema_version"], "26");
         // The validating `edge_kinds` allowlist and the schema-advertised list must not drift:
         // every advertised kind except the implicit `call` umbrella must be an accepted filter,
         // and the allowlist must advertise no kind the schema omits.
@@ -489,7 +490,7 @@ mod tests {
     #[test]
     fn schema_and_loading_populate_structured_content() {
         assert_structured_mirrors_text(&schema());
-        assert_eq!(schema().structured_content.unwrap()["schema_version"], "25");
+        assert_eq!(schema().structured_content.unwrap()["schema_version"], "26");
 
         assert_structured_mirrors_text(&loading(Some("indexing")));
         let body = loading(Some("indexing")).structured_content.unwrap();

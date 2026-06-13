@@ -2210,6 +2210,74 @@ fn subsystem_membership_links_to_member_objects() {
 }
 
 #[test]
+fn document_links_to_posted_registers_via_register_records() {
+    use bsl_metadata::MdoType;
+    use hir::call_graph::{EdgeKind, EdgeProvenance, GraphNode};
+    use hir::graph_index::{project_workspace_register_records_edges, GraphBuildState};
+
+    // The designer fixture's `Документ1` declares four registers in its `RegisterRecords`.
+    let mut db = RootDatabaseImpl::new();
+    let config_path = std::path::PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../bsl-metadata/fixtures/designer"
+    ));
+    db.set_all_config_paths(vec![(None, config_path)]);
+
+    let file_id = FileId(0);
+    let mut file_set = FileSet::new();
+    file_set.insert(file_id, VfsPath::new("/Documents/Документ1/Ext/ObjectModule.bsl"));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(file_id, SourceRootId(0));
+    db.set_file_text(file_id, "Процедура Х() КонецПроцедуры");
+
+    let mut state = GraphBuildState::new();
+    let edges = project_workspace_register_records_edges(&db, file_id, &mut state);
+
+    let posts_to = |to_type: MdoType, to_name: &str| {
+        edges.iter().any(|e| {
+            e.kind == EdgeKind::RegisterRecords
+                && e.provenance == EdgeProvenance::Resolved
+                && matches!(&e.from, GraphNode::Mdo { mdo_type, object_name }
+                    if *mdo_type == MdoType::Document && object_name.as_str() == "Документ1")
+                && matches!(&e.to, GraphNode::Mdo { mdo_type, object_name }
+                    if *mdo_type == to_type && object_name.as_str() == to_name)
+        })
+    };
+    assert!(
+        posts_to(MdoType::AccumulationRegister, "РегистрНакопления1"),
+        "document → accumulation-register post edge"
+    );
+    assert!(
+        posts_to(MdoType::CalculationRegister, "РегистрРасчета1"),
+        "document → calculation-register post edge"
+    );
+    assert!(
+        posts_to(MdoType::InformationRegister, "РегистрСведений2"),
+        "document → information-register post edge"
+    );
+    assert!(
+        posts_to(MdoType::AccountingRegister, "РегистрБухгалтерии1"),
+        "document → accounting-register post edge"
+    );
+    // Every edge is a register_records edge from a document to a register node — no other
+    // shapes, and never a non-register target.
+    assert!(
+        edges.iter().all(|e| {
+            e.kind == EdgeKind::RegisterRecords
+                && matches!(&e.from, GraphNode::Mdo { mdo_type, .. } if *mdo_type == MdoType::Document)
+                && matches!(&e.to, GraphNode::Mdo { mdo_type, .. } if matches!(
+                    mdo_type,
+                    MdoType::AccumulationRegister
+                        | MdoType::InformationRegister
+                        | MdoType::AccountingRegister
+                        | MdoType::CalculationRegister
+                ))
+        }),
+        "every emitted edge is a document → register register_records edge"
+    );
+}
+
+#[test]
 fn role_links_to_object_rights_and_rls_condition_object() {
     use bsl_metadata::MdoType;
     use hir::call_graph::{EdgeKind, EdgeProvenance, GraphNode};

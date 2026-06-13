@@ -178,6 +178,13 @@ pub enum EdgeKind {
     /// impact analysis answer "which roles grant rights on / restrict this object" before
     /// deleting or renaming it.
     RoleReference,
+    /// A document declares it posts records into a register. From the document's
+    /// [`GraphNode::Mdo`] (type [`MdoType::Document`]) to the register's [`GraphNode::Mdo`].
+    /// Derived from configuration metadata (the document's `RegisterRecords`), not from code —
+    /// so it answers "which documents post this register" soundly even when the posting code
+    /// addresses the register dynamically (a string name into `РегистрыНакопления[…]` or a
+    /// `Движения[…]` index), which `register_movement` (literal `Движения.X.метод()`) cannot.
+    RegisterRecords,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
