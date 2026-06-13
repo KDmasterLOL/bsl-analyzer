@@ -129,6 +129,7 @@ pub fn node(graph: &GraphDb, id: &str, detail: GraphDetail, max_output_tokens: u
             redact_opt(&mut result.node.source);
             let mut remaining = max_output_tokens.saturating_mul(4);
             let truncated = clamp_to_budget(&mut result.node.source, &mut remaining);
+            result.node.truncated = truncated;
             let mut value = to_value(&result);
             if truncated {
                 value["budget_exhausted"] = json!(true);
@@ -150,9 +151,13 @@ pub fn neighbors(graph: &GraphDb, params: &NeighborsParams<'_>, max_output_token
             // Cumulative body budget across the root then the (centrality-ordered) nodes,
             // so a `detail=bodies` traversal stays within the output budget.
             let mut remaining = max_output_tokens.saturating_mul(4);
-            let mut truncated = clamp_to_budget(&mut result.root.source, &mut remaining);
+            let root_truncated = clamp_to_budget(&mut result.root.source, &mut remaining);
+            result.root.truncated = root_truncated;
+            let mut truncated = root_truncated;
             for node in &mut result.nodes {
-                truncated |= clamp_to_budget(&mut node.source, &mut remaining);
+                let node_truncated = clamp_to_budget(&mut node.source, &mut remaining);
+                node.truncated = node_truncated;
+                truncated |= node_truncated;
             }
             let mut value = to_value(&result);
             if truncated {
@@ -234,11 +239,11 @@ pub fn loading(detail: Option<&str>) -> CallToolResult {
 /// independent of the on-disk SQLite cache layout in [`crate::graph_db`]).
 fn schema_json() -> Value {
     json!({
-        "schema_version": "23",
+        "schema_version": "24",
         "actions": ["overview", "schema", "status", "node", "source", "neighbors", "callers", "callees", "resolve"],
         "status": "`status` returns the graph lifecycle ({state: disabled|loading|ready|failed, and when ready: files, revision, stale, reload}) and kicks the lazy build — poll it instead of reading a flat `loading` envelope from a data action (mirrors `diagnostics status`).",
         "node_kinds": ["method", "module", "mdo", "attribute", "tabular_section", "form", "form_item", "form_attribute"],
-        "node_shape": "`qualified` (russified display path) is emitted only for metadata nodes — for code nodes it would restate `module` + `name`; `addressable` is emitted only when false (absent = the id round-trips)",
+        "node_shape": "`qualified` (russified display path) is emitted only for metadata nodes — for code nodes it would restate `module` + `name`; `addressable` is emitted only when false (absent = the id round-trips); `truncated: true` is emitted on a node whose `detail=bodies` source was cut short — or, when `source` is absent, dropped — to fit the output budget (so a short body is not mistaken for a complete one, nor a budget-dropped body for a method with no body)",
         "notes": "`node(module/<scope>)` resolves for any code module and returns a `methods` array ({id, name, is_export}) of the module's members; module membership is served on demand and is not a graph edge, so `neighbors(module/…)` stays empty",
         "resolve": "`resolve(query)` returns candidate durable ids ({id, kind, match}) for an imprecise query — wrong casing, a bare method/object name, or a partial id — so a `not_found` from `node`/`neighbors` is recoverable without guessing. `match` is exact|case_insensitive|name|substring (strongest first); the list is capped (default 20). It is symbol/id-oriented, NOT a natural-language search: a free-text phrase (e.g. several object/form/method words) returns no candidates — use `search_code` for semantic lookup, then pass the emitted `graph_id` here.",
         "edge_kinds": ["call", "manager_creates", "manager_access", "query_ref", "register_movement", "contains", "data_binding", "notify_ref", "idle_handler", "event_subscription", "subsystem_membership", "role_reference"],
@@ -263,7 +268,7 @@ fn schema_json() -> Value {
             "out_total": "usize — distinct callees discovered (present for dir=out/both); a small value under dir=both means few outbound calls even when inbound callers fill the cap — refine with dir=out",
             "in_total": "usize — distinct callers discovered (present for dir=in/both)"
         },
-        "body_budget": "`node`/`neighbors` at detail=bodies cap cumulative source output at max_output_tokens (~4 chars/token; default 6000); a truncated response carries `budget_exhausted: true`. A body fully starved by the budget is omitted (its `source` field is absent), not emitted as an empty string. In `source`, an item skipped because an earlier item exhausted the budget carries `skipped_budget_exhausted: true` (distinct from a method with no body) — retry it with a larger budget or alone.",
+        "body_budget": "`node`/`neighbors` at detail=bodies cap cumulative source output at max_output_tokens (~4 chars/token; default 6000); a truncated response carries `budget_exhausted: true` on the envelope AND `truncated: true` on each affected node, so you can tell WHICH node was cut (in a `neighbors` batch) and never read a clipped body as complete. A body fully starved by the budget is omitted (its `source` field is absent) while still carrying `truncated: true`, not emitted as an empty string. In `source`, an item skipped because an earlier item exhausted the budget carries `skipped_budget_exhausted: true` (distinct from a method with no body) — retry it with a larger budget or alone.",
         "redaction": "method source/snippets emitted by `node`/`neighbors`/`source` (and search) are secret-redacted: a string literal is replaced with `***` when a sensitive marker (a credential-named identifier like `Токен`, or a key like `Вставить(\"Пароль\", …)`) precedes it in the same statement. Structural literals (field lists, type names) and localized messages are preserved. Method source served by the graph actions additionally has line endings normalized to LF (search snippets are byte-exact apart from redaction). Treat source as sanitized, not byte-exact.",
         "revision_note": "the graph `revision` is independent of the `diagnostics` tool's `generation` — they are separate subsystems with separate freshness counters and do not correlate.",
         "envelope": {
@@ -305,6 +310,35 @@ fn redact_opt(source: &mut Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clamp_to_budget_signals_truncation_and_drop() {
+        // Fits: untouched, no truncation, budget decremented.
+        let mut src = Some("abc".to_string());
+        let mut remaining = 10;
+        assert!(!clamp_to_budget(&mut src, &mut remaining));
+        assert_eq!(src.as_deref(), Some("abc"));
+        assert_eq!(remaining, 7);
+
+        // Over budget: cut to the remaining chars, flagged truncated, budget spent.
+        let mut src = Some("abcdef".to_string());
+        let mut remaining = 4;
+        assert!(clamp_to_budget(&mut src, &mut remaining));
+        assert_eq!(src.as_deref(), Some("abcd"));
+        assert_eq!(remaining, 0);
+
+        // No budget left: the body is dropped entirely (not an empty string), still flagged.
+        let mut src = Some("abc".to_string());
+        let mut remaining = 0;
+        assert!(clamp_to_budget(&mut src, &mut remaining));
+        assert_eq!(src, None);
+
+        // Absent source (non-bodies detail) consumes nothing and is not truncated.
+        let mut src: Option<String> = None;
+        let mut remaining = 5;
+        assert!(!clamp_to_budget(&mut src, &mut remaining));
+        assert_eq!(remaining, 5);
+    }
 
     #[test]
     fn detail_from_defaults_then_rejects_unknown() {
@@ -383,7 +417,7 @@ mod tests {
         // The contract version must be bumped in lockstep with any response-shape change
         // (a new action, node/edge kind, or result field). The history of what each bump
         // added lives in git, not here.
-        assert_eq!(schema["schema_version"], "23");
+        assert_eq!(schema["schema_version"], "24");
         // The validating `edge_kinds` allowlist and the schema-advertised list must not drift:
         // every advertised kind except the implicit `call` umbrella must be an accepted filter,
         // and the allowlist must advertise no kind the schema omits.
@@ -455,7 +489,7 @@ mod tests {
     #[test]
     fn schema_and_loading_populate_structured_content() {
         assert_structured_mirrors_text(&schema());
-        assert_eq!(schema().structured_content.unwrap()["schema_version"], "23");
+        assert_eq!(schema().structured_content.unwrap()["schema_version"], "24");
 
         assert_structured_mirrors_text(&loading(Some("indexing")));
         let body = loading(Some("indexing")).structured_content.unwrap();

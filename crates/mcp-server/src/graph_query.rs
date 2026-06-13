@@ -495,6 +495,7 @@ impl GraphDb {
             module: n.module.clone(),
             signature: None,
             source: None,
+            truncated: false,
             dispatch: dispatch_labels(&n.dispatch),
             is_export: n.is_export,
             // Populated by `node()` for a `module` node (the member list); a separate

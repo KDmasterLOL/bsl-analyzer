@@ -78,6 +78,13 @@ pub struct NodeRef {
     pub signature: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// The `source` (a `detail=bodies` body) was cut short — or, when `source` is
+    /// absent, dropped entirely — to stay within the output budget. Mirrors
+    /// [`SourceItem::truncated`] so a truncated body is not mistaken for a complete
+    /// one (or a dropped body for a method with no body) without reading the
+    /// envelope. Set by the serving budget pass, never at projection time.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub dispatch: Vec<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1405,6 +1412,7 @@ impl<'a> GraphCtx<'a> {
                     module: None,
                     signature: None,
                     source: None,
+                    truncated: false,
                     dispatch: Vec::new(),
                     is_export: None,
                     methods: None,
@@ -1423,6 +1431,7 @@ impl<'a> GraphCtx<'a> {
                 module: None,
                 signature: None,
                 source: None,
+                truncated: false,
                 dispatch: Vec::new(),
                 is_export: None,
                 methods: None,
@@ -1441,6 +1450,7 @@ impl<'a> GraphCtx<'a> {
                 module: None,
                 signature: None,
                 source: None,
+                truncated: false,
                 dispatch: Vec::new(),
                 is_export: None,
                 methods: None,
@@ -1459,6 +1469,7 @@ impl<'a> GraphCtx<'a> {
                 module: None,
                 signature: None,
                 source: None,
+                truncated: false,
                 dispatch: Vec::new(),
                 is_export: None,
                 methods: None,
@@ -1477,6 +1488,7 @@ impl<'a> GraphCtx<'a> {
                 module: None,
                 signature: None,
                 source: None,
+                truncated: false,
                 dispatch: Vec::new(),
                 is_export: None,
                 methods: None,
@@ -1501,6 +1513,7 @@ impl<'a> GraphCtx<'a> {
                 module: None,
                 signature: None,
                 source: None,
+                truncated: false,
                 dispatch: Vec::new(),
                 is_export: None,
                 methods: None,
@@ -1526,6 +1539,7 @@ impl<'a> GraphCtx<'a> {
             module: None,
             signature: None,
             source: None,
+            truncated: false,
             dispatch: Vec::new(),
             is_export: None,
             methods: None,
@@ -1557,6 +1571,7 @@ impl<'a> GraphCtx<'a> {
             module: module_display,
             signature: None,
             source: None,
+            truncated: false,
             dispatch,
             is_export: Some(m.is_export()),
             methods: None,
@@ -1590,6 +1605,7 @@ impl<'a> GraphCtx<'a> {
             module: display,
             signature: None,
             source: None,
+            truncated: false,
             dispatch: self
                 .graph
                 .dispatch(&GraphNode::ModuleCode(module))
