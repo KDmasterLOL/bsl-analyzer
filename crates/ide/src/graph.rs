@@ -2292,7 +2292,12 @@ pub fn classify_graph_id(id: &str) -> Result<GraphIdKind, GraphError> {
     let (is_method, rest) = match parts.first().copied() {
         Some("method") => (true, &parts[1..]),
         Some("module") => (false, &parts[1..]),
-        _ => return Err(bad("id must start with 'method/' or 'module/'")),
+        _ => {
+            return Err(bad(
+                "unknown id prefix; expected one of: method/, module/, mdo/, attribute/, \
+                 ts_attr/, tabular_section/, form/, form_attr/, form_item/",
+            ))
+        }
     };
     let (scope, method) = decode_scope(rest, is_method).ok_or_else(|| bad("malformed scope"))?;
     Ok(match method {
@@ -2648,6 +2653,16 @@ mod tests {
                 matches!(classify_graph_id(bad), Err(GraphError::BadId { .. })),
                 "{bad} must be BadId"
             );
+        }
+
+        // An unknown top-level prefix must not steer the caller toward only
+        // method/module — every accepted prefix is listed so the agent learns the
+        // full vocabulary.
+        let Err(GraphError::BadId { reason, .. }) = classify_graph_id("widget/Catalog/X") else {
+            panic!("unknown prefix must be BadId");
+        };
+        for kind in ["method/", "module/", "mdo/", "attribute/", "form/"] {
+            assert!(reason.contains(kind), "reason must mention {kind}; got: {reason}");
         }
     }
 
