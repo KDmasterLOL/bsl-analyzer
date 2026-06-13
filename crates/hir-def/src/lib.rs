@@ -395,32 +395,49 @@ impl Default for ModuleBodies {
     }
 }
 
+/// Classify a common module's effective client/server dispatch capability from its
+/// metadata flags. This is the *dispatch* model: the result is consumed only through
+/// [`call_graph::MethodDispatch::from_execution_context`], which collapses it to
+/// can-run-on-client / can-run-on-server.
+///
+/// Deliberately distinct from the richer naming-rule predicates in
+/// `ide-diagnostics::common_module_helpers` (`is_client`/`is_server`/…): those take a
+/// configuration-level `ordinary_app_support` flag and gate on the legacy
+/// `ClientOrdinaryApplication`, because they answer "what should this module be *named*".
+/// Here we answer "where does its code *run*", for which the managed-application boundary
+/// (`ClientManagedApplication` for client, `Server`/`ExternalConnection` for server) is
+/// what matters. The two never decide the same thing for the same module. Threading
+/// `ordinary_app_support` to fully unify them is a worthwhile follow-up but out of scope.
 pub fn compute_execution_context(common_module: &bsl_metadata::CommonModule) -> ExecutionContext {
+    // `ServerCall` (вызов сервера) executes on the server regardless of which client
+    // contexts may also be set, so it short-circuits. Real 1C never emits `ServerCall`
+    // alongside client flags; for malformed XML this stays on the safe (server) side.
     if common_module.is_server_call() {
         return ExecutionContext::ServerCall;
     }
 
+    // Capability model, not mutually-exclusive buckets: a module compiles into
+    // every context whose flag is set, and `ExternalConnection` is a *server-side*
+    // (non-interactive) context — not a third axis. `ClientOrdinaryApplication` (the
+    // legacy thick client) is intentionally NOT treated as client-capable: server
+    // modules like `ОбщегоНазначения` carry `ClientOrdinaryApplication=true`, so
+    // honouring it would wrongly make them client-capable. The previous `!is_external`
+    // guards collapsed the common `Server + ExternalConnection` server module to
+    // `Unknown`, which then fell back to the client-only annotation default.
     let is_server = common_module.is_server();
-    let is_client_managed = common_module.is_client_managed_application();
     let is_external = common_module.is_external_connection();
+    let runs_on_client = common_module.is_client_managed_application();
+    let runs_on_server = is_server || is_external;
 
-    if is_server && is_client_managed && !is_external {
-        return ExecutionContext::ClientServer;
+    match (runs_on_client, runs_on_server) {
+        (true, true) => ExecutionContext::ClientServer,
+        // A non-interactive server-side module: `Server` when the explicit server
+        // flag is set, otherwise external-connection-only.
+        (false, true) if is_server => ExecutionContext::Server,
+        (false, true) => ExecutionContext::ExternalConnection,
+        (true, false) => ExecutionContext::Client,
+        (false, false) => ExecutionContext::Unknown,
     }
-
-    if is_server && !is_client_managed && !is_external {
-        return ExecutionContext::Server;
-    }
-
-    if is_client_managed && !is_server && !is_external {
-        return ExecutionContext::Client;
-    }
-
-    if is_external && !is_server {
-        return ExecutionContext::ExternalConnection;
-    }
-
-    ExecutionContext::Unknown
 }
 
 pub fn lower_module_bodies(db: &dyn base_db::RootQueryDb, module_id: ModuleId) -> ModuleBodies {
@@ -507,5 +524,117 @@ mod module_bodies_order_tests {
         let from_lower_results: Vec<u32> = bodies.iter_lower_results().map(|(id, _)| id).collect();
         assert_eq!(from_iter, from_method_bodies);
         assert_eq!(from_iter, from_lower_results);
+    }
+}
+
+#[cfg(test)]
+mod execution_context_tests {
+    use super::*;
+    use crate::call_graph::MethodDispatch;
+
+    /// Flags from the named real-world shape; everything not mentioned is `false`.
+    fn cm(
+        server: bool,
+        external: bool,
+        client_managed: bool,
+        client_ordinary: bool,
+        server_call: bool,
+    ) -> bsl_metadata::CommonModule {
+        bsl_metadata::CommonModule::builder()
+            .name("Модуль")
+            .server(server)
+            .external_connection(external)
+            .client_managed_application(client_managed)
+            .client_ordinary_application(client_ordinary)
+            .server_call(server_call)
+            .build()
+    }
+
+    #[test]
+    fn server_module_with_external_connection_is_server() {
+        // The `ОбщегоНазначения` shape: Server + ExternalConnection + ClientOrdinary,
+        // no managed client. Must be server-only — the `!is_external` guard used to
+        // collapse this to `Unknown` → client-only dispatch.
+        let ctx = compute_execution_context(&cm(true, true, false, true, false));
+        assert_eq!(ctx, ExecutionContext::Server);
+        let d = MethodDispatch::from_execution_context(ctx).unwrap();
+        assert!(d.is_server_only(), "server common module must dispatch server-only");
+    }
+
+    #[test]
+    fn server_without_external_is_still_server() {
+        assert_eq!(
+            compute_execution_context(&cm(true, false, false, false, false)),
+            ExecutionContext::Server
+        );
+    }
+
+    #[test]
+    fn managed_client_and_server_is_client_server() {
+        assert_eq!(
+            compute_execution_context(&cm(true, true, true, true, false)),
+            ExecutionContext::ClientServer
+        );
+    }
+
+    #[test]
+    fn managed_client_plus_external_runs_on_both() {
+        // ExternalConnection is a server-side context, so a managed client that also
+        // compiles for external connection is client+server, not client-only.
+        assert_eq!(
+            compute_execution_context(&cm(false, true, true, false, false)),
+            ExecutionContext::ClientServer
+        );
+    }
+
+    #[test]
+    fn managed_client_only_is_client() {
+        assert_eq!(
+            compute_execution_context(&cm(false, false, true, true, false)),
+            ExecutionContext::Client
+        );
+    }
+
+    #[test]
+    fn external_connection_only_is_external() {
+        let ctx = compute_execution_context(&cm(false, true, false, false, false));
+        assert_eq!(ctx, ExecutionContext::ExternalConnection);
+        assert!(MethodDispatch::from_execution_context(ctx).unwrap().is_server_only());
+    }
+
+    #[test]
+    fn server_call_takes_precedence() {
+        assert_eq!(
+            compute_execution_context(&cm(true, false, false, false, true)),
+            ExecutionContext::ServerCall
+        );
+    }
+
+    #[test]
+    fn server_call_wins_even_with_client_flags() {
+        // Malformed/mixed shape: ServerCall must still short-circuit to server-side.
+        assert_eq!(
+            compute_execution_context(&cm(true, true, true, true, true)),
+            ExecutionContext::ServerCall
+        );
+    }
+
+    #[test]
+    fn ordinary_client_only_is_unknown_not_client() {
+        // Legacy thick-client flag alone is intentionally not client-capable in the
+        // dispatch model — it must not be classified as `Client` (which would force
+        // module-level client-only dispatch); it stays `Unknown` and defers to the
+        // per-method annotation default.
+        assert_eq!(
+            compute_execution_context(&cm(false, false, false, true, false)),
+            ExecutionContext::Unknown
+        );
+    }
+
+    #[test]
+    fn all_flags_false_is_unknown() {
+        let ctx = compute_execution_context(&cm(false, false, false, false, false));
+        assert_eq!(ctx, ExecutionContext::Unknown);
+        assert!(MethodDispatch::from_execution_context(ctx).is_none());
     }
 }
