@@ -445,8 +445,9 @@ impl GraphDb {
                 }
             }
         }
-        let candidates = ide::rank_resolve_candidates(candidates.into_iter(), query, limit);
-        Ok(ide::ResolveResult { query: query.to_string(), candidates })
+        let (candidates, total) =
+            ide::rank_resolve_candidates(candidates.into_iter(), query, limit);
+        Ok(ide::ResolveResult::new(query, candidates, total))
     }
 
     fn in_degree(&self, id: &str) -> anyhow::Result<usize> {

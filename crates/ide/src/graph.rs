@@ -1819,7 +1819,7 @@ impl<'a> GraphCtx<'a> {
     /// (wrong casing, bare method/object name, or partial id), so an agent can recover a
     /// canonical id from a `not_found` without guessing.
     fn resolve(&self, query: &str, limit: usize) -> ResolveResult {
-        let candidates = rank_resolve_candidates(
+        let (candidates, total) = rank_resolve_candidates(
             self.graph.nodes().map(|node| {
                 let (id, _) = self.encode_node(&node);
                 (id, graph_node_kind(&node))
@@ -1827,7 +1827,7 @@ impl<'a> GraphCtx<'a> {
             query,
             limit,
         );
-        ResolveResult { query: query.to_string(), candidates }
+        ResolveResult::new(query, candidates, total)
     }
 
     fn neighbors(&self, params: &NeighborsParams<'_>) -> Result<NeighborsResult, GraphError> {
@@ -2095,19 +2095,40 @@ pub struct ResolveCandidate {
 pub struct ResolveResult {
     pub query: String,
     pub candidates: Vec<ResolveCandidate>,
+    /// Total distinct candidates matched before the `limit` cap. `candidates` is the
+    /// top-`limit` slice; `total` lets an agent see that a frequent name has many more
+    /// matches than shown, instead of treating the capped list as exhaustive.
+    pub total: usize,
+    /// `true` when the cap dropped candidates (`total` exceeds `candidates.len()`), so the
+    /// shown list is a partial view — refine the query or use `search_code`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+}
+
+impl ResolveResult {
+    /// Assemble a result from the ranker output (`candidates` already capped, `total` the
+    /// pre-cap match count), deriving `truncated` from the two.
+    pub fn new(query: &str, candidates: Vec<ResolveCandidate>, total: usize) -> Self {
+        let truncated = total > candidates.len();
+        Self { query: query.to_string(), candidates, total, truncated }
+    }
 }
 
 /// Rank durable ids against an imprecise `query`, strongest match first then id-ascending,
 /// capped at `limit`. Both serve paths (in-memory [`Analysis::graph_resolve`] and SQLite)
 /// feed their full `(id, kind)` node set through this one ranker, so the candidate lists
 /// stay byte-identical regardless of scan order. An empty `query` matches nothing.
+///
+/// Returns the top-`limit` candidates together with the total number of distinct matches
+/// before the cap, so a frequent name (thousands of `ПриСозданииНаСервере`) is not silently
+/// presented as if the top 20 were the whole set.
 pub fn rank_resolve_candidates(
     nodes: impl Iterator<Item = (String, &'static str)>,
     query: &str,
     limit: usize,
-) -> Vec<ResolveCandidate> {
+) -> (Vec<ResolveCandidate>, usize) {
     if query.is_empty() {
-        return Vec::new();
+        return (Vec::new(), 0);
     }
     let q_lower = query.fold_lower();
     let mut ranked: Vec<(u8, ResolveCandidate)> = nodes
@@ -2126,9 +2147,10 @@ pub fn rank_resolve_candidates(
             Some((rank, ResolveCandidate { id, kind, match_kind }))
         })
         .collect();
+    let total = ranked.len();
     ranked.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.id.cmp(&b.1.id)));
     ranked.truncate(limit);
-    ranked.into_iter().map(|(_, c)| c).collect()
+    (ranked.into_iter().map(|(_, c)| c).collect(), total)
 }
 
 /// The agent-facing kind label for a [`GraphNode`], matching the SQLite serve path's
@@ -3240,13 +3262,13 @@ mod tests {
         };
 
         // Exact id wins outright.
-        let exact = rank_resolve_candidates(nodes(), "method/common/Сервер/Считать", 10);
+        let (exact, _) = rank_resolve_candidates(nodes(), "method/common/Сервер/Считать", 10);
         assert_eq!(exact[0].id, "method/common/Сервер/Считать");
         assert_eq!(exact[0].match_kind, "exact");
 
         // A bare name matches both case-spellings as `name` (id-ascending), ahead of the
         // `substring`-only `СчитатьВсё`.
-        let by_name = rank_resolve_candidates(nodes(), "Считать", 10);
+        let (by_name, _) = rank_resolve_candidates(nodes(), "Считать", 10);
         let labels: Vec<_> =
             by_name.iter().map(|c| (c.id.as_str(), c.match_kind, c.kind)).collect();
         assert_eq!(
@@ -3258,10 +3280,30 @@ mod tests {
             ],
         );
 
-        // The cap is honoured.
-        assert_eq!(rank_resolve_candidates(nodes(), "common", 2).len(), 2);
-        // Empty query matches nothing.
-        assert!(rank_resolve_candidates(nodes(), "", 10).is_empty());
+        // The cap is honoured, and `total` reports the pre-cap match count so the caller
+        // can tell the shown list is partial.
+        let (capped, total) = rank_resolve_candidates(nodes(), "common", 2);
+        assert_eq!(capped.len(), 2);
+        assert_eq!(total, 4, "all four ids contain 'common'");
+        let result = ResolveResult::new("common", capped, total);
+        assert!(result.truncated, "two of four shown must flag truncation");
+
+        // Under the cap, nothing is truncated.
+        let (all, total) = rank_resolve_candidates(nodes(), "common", 10);
+        assert_eq!(total, 4);
+        assert!(!ResolveResult::new("common", all, total).truncated);
+
+        // Exactly at the cap (limit == total) is the boundary: all shown, not truncated.
+        let (exact_cap, total) = rank_resolve_candidates(nodes(), "common", 4);
+        assert_eq!(exact_cap.len(), 4);
+        assert_eq!(total, 4);
+        assert!(!ResolveResult::new("common", exact_cap, total).truncated);
+
+        // Empty query matches nothing and is never truncated.
+        let (none, total) = rank_resolve_candidates(nodes(), "", 10);
+        assert!(none.is_empty());
+        assert_eq!(total, 0);
+        assert!(!ResolveResult::new("", none, total).truncated);
     }
 
     /// Forms never enter the in-memory `workspace_call_graph` (they are emitted only
