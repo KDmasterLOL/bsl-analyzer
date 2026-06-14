@@ -117,6 +117,7 @@ fn edge_kind(kind: &str) -> &'static str {
         "subsystem_membership" => "subsystem_membership",
         "role_reference" => "role_reference",
         "register_records" => "register_records",
+        "register_record_set" => "register_record_set",
         _ => "call",
     }
 }

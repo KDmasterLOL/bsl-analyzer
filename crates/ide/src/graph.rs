@@ -2462,6 +2462,7 @@ fn edge_kind_label(kind: EdgeKind) -> &'static str {
         EdgeKind::SubsystemMembership => "subsystem_membership",
         EdgeKind::RoleReference => "role_reference",
         EdgeKind::RegisterRecords => "register_records",
+        EdgeKind::RegisterRecordSet => "register_record_set",
     }
 }
 

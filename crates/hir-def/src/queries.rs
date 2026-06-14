@@ -158,7 +158,7 @@ pub fn resolved_module_summary_query<'db>(
                         object_name: object_name.clone(),
                     },
                     EdgeProvenance::Inferred,
-                    manager_edge_kind(method_name.as_str()),
+                    manager_edge_kind(*manager_type, method_name.as_str()),
                 ),
             },
             // A bare `Справочники.X` reference (no method) touches the object.
@@ -327,19 +327,36 @@ fn unique_global_handler(
     found
 }
 
-/// Classify a platform manager method into a metadata-object edge kind. Creation
-/// methods (`СоздатьЭлемент`/`СоздатьГруппу`/… or English `Create…`) produce a
-/// `ManagerCreates` edge; everything else (find/select/…) a `ManagerAccess` edge.
-/// Only platform methods reach here — user manager-module methods resolve to a
-/// `Method` node earlier — so the name prefix is a reliable creation signal.
-pub(crate) fn manager_edge_kind(method_name: &str) -> crate::call_graph::EdgeKind {
+/// Classify a platform manager method into a metadata-object edge kind. A register
+/// record-set creator (`СоздатьНаборЗаписей`/`СоздатьМенеджерЗаписи` or English
+/// `CreateRecordSet`/`CreateRecordManager`) on a register manager produces a
+/// `RegisterRecordSet` edge — register write-capable access, kept out of the generic
+/// `ManagerCreates` bucket. Other creation methods (`СоздатьЭлемент`/`СоздатьГруппу`/…
+/// or English `Create…`) produce a `ManagerCreates` edge; everything else (find/select/…)
+/// a `ManagerAccess` edge. Only platform methods reach here — user manager-module methods
+/// resolve to a `Method` node earlier — so the name prefix is a reliable creation signal.
+pub(crate) fn manager_edge_kind(
+    manager_type: crate::body::ManagerType,
+    method_name: &str,
+) -> crate::call_graph::EdgeKind {
     use crate::call_graph::EdgeKind;
     let lower = method_name.fold_lower();
-    if lower.starts_with("создать") || lower.starts_with("create") {
+    if manager_type.is_register() && is_record_set_creator(&lower) {
+        EdgeKind::RegisterRecordSet
+    } else if lower.starts_with("создать") || lower.starts_with("create") {
         EdgeKind::ManagerCreates
     } else {
         EdgeKind::ManagerAccess
     }
+}
+
+/// A register manager method that builds the record-set write engine: `СоздатьНаборЗаписей`
+/// (record set) or `СоздатьМенеджерЗаписи` (single-record manager), in either language.
+fn is_record_set_creator(method_lower: &str) -> bool {
+    matches!(
+        method_lower,
+        "создатьнаборзаписей" | "createrecordset" | "создатьменеджерзаписи" | "createrecordmanager"
+    )
 }
 
 /// Canonical-spelling map for metadata objects. BSL identifiers are

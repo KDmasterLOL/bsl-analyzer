@@ -750,6 +750,20 @@ impl ManagerType {
         }
     }
 
+    /// Whether this manager addresses a register (accumulation / information /
+    /// accounting / calculation). Registers expose the record-set engine
+    /// (`СоздатьНаборЗаписей` / `СоздатьМенеджерЗаписи`), so a literal-manager
+    /// record-set creator on one of these is a register write-capable access.
+    pub fn is_register(self) -> bool {
+        matches!(
+            self,
+            Self::InformationRegisters
+                | Self::AccumulationRegisters
+                | Self::AccountingRegisters
+                | Self::CalculationRegisters
+        )
+    }
+
     pub fn from_mdo_type(mdo_type: bsl_metadata::MdoType) -> Option<Self> {
         use bsl_metadata::MdoType;
         match mdo_type {

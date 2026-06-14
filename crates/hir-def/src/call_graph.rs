@@ -185,6 +185,19 @@ pub enum EdgeKind {
     /// addresses the register dynamically (a string name into `РегистрыНакопления[…]` or a
     /// `Движения[…]` index), which `register_movement` (literal `Движения.X.метод()`) cannot.
     RegisterRecords,
+    /// Code reaches a register's record-set engine through a literal manager creator —
+    /// `РегистрыНакопления.<X>.СоздатьНаборЗаписей()` / `СоздатьМенеджерЗаписи()` (and the
+    /// English `CreateRecordSet` / `CreateRecordManager`). From the calling
+    /// `Method`/`ModuleCode` node to the register's [`GraphNode::Mdo`], provenance `inferred`.
+    ///
+    /// This is register record-set *access*, which is write-capable: a record set is the
+    /// engine through which non-document writers (typically common modules) post registers,
+    /// but the same engine can also be read (set a filter, `Прочитать`) without writing. It
+    /// is kept distinct from `manager_creates` (which would otherwise bury these among object
+    /// `СоздатьЭлемент` creations) so an impact analysis can ask "which code touches this
+    /// register via its record-set engine" — the code-level complement to `register_records`
+    /// (declared document posts) and `register_movement` (a registrator's `Движения`).
+    RegisterRecordSet,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -841,8 +854,63 @@ fn field_callee_to_edge(
                 None
             }
         }
+        Expr::Index { base, index } => {
+            // `[получатель.]Движения[<имя>].<метод>()` — a document movement touch addressed by
+            // a dynamic index rather than a literal path segment. Same relation as the literal
+            // `Движения.<Регистр>.<метод>()` (the register's metadata type is resolved later), so
+            // it reuses `RegisterMovement`. Only a locally-literal index resolves: a string
+            // literal register name or a `Метаданные.<РегистрыКоллекция>.<X>.Имя` chain. A
+            // variable index needs value flow and is left to a later tier.
+            if is_register_records(body.expr_idx(*base)) {
+                if let Some(register_name) = extract_literal_register_name(body, *index) {
+                    return Some(CallEdge {
+                        caller,
+                        target: CallTarget::RegisterMovement { register_name },
+                        kind: EdgeKind::RegisterMovement,
+                        range,
+                    });
+                }
+            }
+            None
+        }
         _ => None,
     }
+}
+
+/// Extract a locally-literal register name from a `Движения[<expr>]` index: a string literal
+/// (`Движения["ТоварыНаСкладах"]`) or a `Метаданные.<РегистрыКоллекция>.<X>.Имя` chain
+/// (`Движения[Метаданные.РегистрыНакопления.СебестоимостьТоваров.Имя]`). Any other expression —
+/// notably a variable — yields `None`; resolving it needs value flow (a later tier).
+fn extract_literal_register_name(body: &Body, idx: ExprIdx) -> Option<Name> {
+    match body.expr_idx(idx) {
+        Expr::Literal(Literal::String(s)) => Some(Name::new(s)),
+        Expr::Field { base, field } if is_name_property(field) => {
+            let Expr::Field { base: coll_base, field: register_name } = body.expr_idx(*base) else {
+                return None;
+            };
+            let Expr::Field { base: meta_base, field: collection } = body.expr_idx(*coll_base)
+            else {
+                return None;
+            };
+            let is_register_collection =
+                ManagerType::from_name(collection.as_str()).is_some_and(ManagerType::is_register);
+            (is_register_collection && is_metadata_root(body.expr_idx(*meta_base)))
+                .then(|| register_name.clone())
+        }
+        _ => None,
+    }
+}
+
+fn is_name_property(field: &Name) -> bool {
+    let lower = field.as_str().fold_lower();
+    lower == "имя" || lower == "name"
+}
+
+fn is_metadata_root(expr: &Expr) -> bool {
+    matches!(expr, Expr::Path(name) if {
+        let lower = name.as_str().fold_lower();
+        lower == "метаданные" || lower == "metadata"
+    })
 }
 
 fn extract_string_literal(body: &Body, idx: ExprIdx) -> Option<String> {
@@ -1432,6 +1500,67 @@ EndProcedure
             .iter()
             .all(|e| !matches!(&e.target, CallTarget::RegisterMovement { .. })
                 || e.kind == EdgeKind::RegisterMovement));
+    }
+
+    #[test]
+    fn register_movement_dynamic_literal_index() {
+        // A document can address its `Движения` collection by a dynamic index instead of a
+        // literal segment. A locally-literal index resolves: a `Метаданные.…Имя` chain or a
+        // string literal. A variable index needs value flow and stays unmodelled.
+        let code = r#"
+Процедура ОбработкаПроведения(ИмяРегистра)
+    Движения[Метаданные.РегистрыНакопления.СебестоимостьТоваров.Имя].Записать();
+    Движения["Взаиморасчеты"].Очистить();
+    Движения[ИмяРегистра].Записать();
+КонецПроцедуры
+"#;
+        let summary = parse_and_extract(code);
+        let movement_registers: Vec<&str> = summary
+            .call_edges
+            .iter()
+            .filter_map(|e| match &e.target {
+                CallTarget::RegisterMovement { register_name } => Some(register_name.as_str()),
+                _ => None,
+            })
+            .collect();
+        // The literal chain and the string literal resolve; the variable index does not.
+        assert_eq!(movement_registers, ["СебестоимостьТоваров", "Взаиморасчеты"]);
+        assert!(summary
+            .call_edges
+            .iter()
+            .all(|e| !matches!(&e.target, CallTarget::RegisterMovement { .. })
+                || e.kind == EdgeKind::RegisterMovement));
+    }
+
+    #[test]
+    fn manager_edge_kind_classifies_register_record_set() {
+        use crate::queries::manager_edge_kind;
+        // Record-set creators on a register manager → RegisterRecordSet, in either language.
+        for method in ["СоздатьНаборЗаписей", "СоздатьМенеджерЗаписи", "CreateRecordSet"]
+        {
+            assert_eq!(
+                manager_edge_kind(ManagerType::AccumulationRegisters, method),
+                EdgeKind::RegisterRecordSet,
+                "{method} on a register manager is a record-set access"
+            );
+        }
+        // The same method name on a non-register manager stays a generic create.
+        assert_eq!(
+            manager_edge_kind(ManagerType::Catalogs, "СоздатьНаборЗаписей"),
+            EdgeKind::ManagerCreates
+        );
+        // Other register manager methods keep their generic create/access classification.
+        assert_eq!(
+            manager_edge_kind(
+                ManagerType::AccumulationRegisters,
+                "СоздатьМенеджерЗаписиНесуществующий"
+            ),
+            EdgeKind::ManagerCreates
+        );
+        assert_eq!(
+            manager_edge_kind(ManagerType::AccumulationRegisters, "Выбрать"),
+            EdgeKind::ManagerAccess
+        );
     }
 
     #[test]

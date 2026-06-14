@@ -342,14 +342,14 @@ pub fn resolve_module_summary_via_index(
                         None => (
                             to_mdo(),
                             EdgeProvenance::Inferred,
-                            crate::queries::manager_edge_kind(method_name.as_str()),
+                            crate::queries::manager_edge_kind(*manager_type, method_name.as_str()),
                         ),
                     },
                     // No manager module → a platform manager method.
                     Err(_) => (
                         to_mdo(),
                         EdgeProvenance::Inferred,
-                        crate::queries::manager_edge_kind(method_name.as_str()),
+                        crate::queries::manager_edge_kind(*manager_type, method_name.as_str()),
                     ),
                 }
             }
@@ -1649,6 +1649,7 @@ fn edge_kind_label(kind: EdgeKind) -> &'static str {
         EdgeKind::SubsystemMembership => "subsystem_membership",
         EdgeKind::RoleReference => "role_reference",
         EdgeKind::RegisterRecords => "register_records",
+        EdgeKind::RegisterRecordSet => "register_record_set",
     }
 }
 
