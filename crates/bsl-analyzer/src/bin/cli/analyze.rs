@@ -77,7 +77,7 @@ pub fn analyze(
     _incremental: bool,
     _changed_files: Option<Vec<PathBuf>>,
     _git_diff: Option<String>,
-    salsa: bool,
+    streaming: bool,
     workers: Option<usize>,
     format: OutputFormat,
     only_diagnostic: Option<String>,
@@ -89,19 +89,24 @@ pub fn analyze(
         None
     };
 
-    if salsa {
-        analyze_salsa(
+    if streaming {
+        tracing::warn!(
+            "The --streaming analyzer is deprecated and will be removed; Salsa is the default."
+        );
+        analyze_streaming(
             source_dir,
             workspace_dir,
             output_dir,
             config_path,
             reporters,
             quiet,
+            workers,
+            format,
             only_diagnostic,
             diff_filter,
         )
     } else {
-        analyze_streaming(
+        analyze_salsa(
             source_dir,
             workspace_dir,
             output_dir,
@@ -124,6 +129,8 @@ fn analyze_salsa(
     config_path: Option<PathBuf>,
     reporters: Vec<String>,
     quiet: bool,
+    workers: Option<usize>,
+    format: OutputFormat,
     only_diagnostic: Option<String>,
     diff_filter: Option<bsl_analyzer::diff_filter::DiffFilter>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -145,6 +152,17 @@ fn analyze_salsa(
     let _span = tracing::info_span!("cli_analyze").entered();
 
     let profiling_enabled = only_diagnostic.is_some();
+    let jsonl = matches!(format, OutputFormat::Jsonl);
+
+    // Honour `--workers` by sizing the global rayon pool before any rayon use
+    // (metadata load and the per-chunk `par_iter` both draw from it). Must run
+    // before `load_metadata`, which initialises the pool on first parallel read;
+    // best-effort because the pool can only be built once per process.
+    if let Some(w) = workers.filter(|w| *w > 0) {
+        if let Err(e) = rayon::ThreadPoolBuilder::new().num_threads(w).build_global() {
+            tracing::warn!("Failed to set worker count to {w}: {e}");
+        }
+    }
 
     tracing::info!("Analyzing project: {:?}", source_dir);
     tracing::info!("Reporters: {:?}", reporters);
@@ -253,7 +271,7 @@ fn analyze_salsa(
         rayon::current_num_threads()
     );
 
-    let progress = if !quiet {
+    let progress = if !quiet && !jsonl {
         let pb = ProgressBar::new(file_ids.len() as u64);
         pb.set_style(
             ProgressStyle::default_bar()
@@ -318,6 +336,17 @@ fn analyze_salsa(
         Err(_) => Some(700),
     };
     let num_chunks = file_ids.len().div_ceil(chunk_size);
+
+    // The JSONL contract opens with a `start` event before any analysis. Salsa
+    // emits the `file`/`done` events as a batch once the chunked run finishes
+    // (it collects and evicts per chunk rather than streaming live), so only the
+    // opener is hoisted here; content and ordering still mirror the streaming path.
+    if jsonl {
+        use ide::streaming::StartEvent;
+
+        println!("{}", serde_json::to_string(&StartEvent::new(file_ids.len()))?);
+    }
+
     for (chunk_idx, chunk) in file_ids.chunks(chunk_size).enumerate() {
         // Per-chunk timing to separate the parallel phase from the serial tail
         // (the slowest single file's straggler wait) and the single-threaded
@@ -467,6 +496,34 @@ fn analyze_salsa(
     let all_timings: Vec<FileTiming> = timings.into_iter().flatten().collect();
 
     let total_diagnostics: usize = all_diagnostics.iter().map(|f| f.diagnostics.len()).sum();
+
+    // JSONL emits one `file` event per analyzed file (clean files included),
+    // closed by `done`, mirroring the streaming `--format jsonl` contract (the
+    // `start` event was already emitted before analysis). `metrics` and per-file
+    // `error` are streaming-only inputs the salsa path does not collect, so they
+    // are omitted (the `Option` fields are skipped when serialized).
+    if jsonl {
+        use std::path::Path;
+
+        use ide::streaming::{DoneEvent, FileEvent};
+
+        let diagnostics_by_path: std::collections::HashMap<&Path, &Vec<_>> =
+            all_diagnostics.iter().map(|f| (f.path.as_path(), &f.diagnostics)).collect();
+
+        for (_, path) in &file_ids {
+            let diagnostics =
+                diagnostics_by_path.get(path.as_path()).map(|d| (*d).clone()).unwrap_or_default();
+            let file_event = FileEvent::new(path.display().to_string(), diagnostics, None, None);
+            println!("{}", serde_json::to_string(&file_event)?);
+        }
+
+        let done_event =
+            DoneEvent::new(elapsed.as_secs_f64(), file_ids.len(), total_diagnostics, 0);
+        println!("{}", serde_json::to_string(&done_event)?);
+
+        tracing::info!("JSONL analysis complete");
+        return Ok(());
+    }
 
     let analysis_results = AnalysisResults {
         files_analyzed: bsl_files.len(),

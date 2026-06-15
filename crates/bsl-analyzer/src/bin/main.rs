@@ -78,11 +78,10 @@ enum Commands {
         #[arg(long, requires = "incremental", conflicts_with = "changed_files")]
         git_diff: Option<String>,
 
-        #[arg(long, hide = true)]
+        /// DEPRECATED: run the legacy streaming analyzer instead of Salsa.
+        /// Salsa is the default; this flag and the streaming path will be removed.
+        #[arg(long)]
         streaming: bool,
-
-        #[arg(long, hide = true)]
-        salsa: bool,
 
         #[arg(long)]
         workers: Option<usize>,
@@ -230,8 +229,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             incremental,
             changed_files,
             git_diff,
-            streaming: _,
-            salsa,
+            streaming,
             workers,
             format,
             only_diagnostic,
@@ -246,7 +244,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             incremental,
             changed_files,
             git_diff,
-            salsa,
+            streaming,
             workers,
             format,
             only_diagnostic,
