@@ -95,6 +95,16 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     for reg in &summary.idle_handler_regs {
         called_methods.insert(reg.handler_name.as_str().fold_lower());
     }
+    // `Элементы.X.УстановитьДействие("Событие", "Обработчик")` binds a form element's
+    // event to a module procedure by name at runtime — the procedure has no other call
+    // site, so without this it reads as unused. Scoped to form modules: that is the only
+    // kind where `УстановитьДействие` targets a local handler, so consuming it elsewhere
+    // could mask a genuinely unused local that shares a name with some object's action.
+    if metadata.module_type == bsl_metadata::ModuleType::FormModule {
+        for reg in &summary.set_action_regs {
+            called_methods.insert(reg.handler_name.as_str().fold_lower());
+        }
+    }
 
     if let Some(ref form) = metadata.form {
         for handler in form.event_handlers() {
@@ -549,6 +559,123 @@ mod tests {
                 UnusedLocalMethod @ 8:11..8:25
                   message: Неиспользуемый локальный метод "НеИспользуемая"
                   severity: Warning"#]],
+        );
+    }
+
+    #[test]
+    fn test_set_action_handler_not_flagged() {
+        // `Элементы.X.УстановитьДействие("Событие", "Обработчик")` binds the handler by
+        // name at runtime; the procedure has no other call site and must not be flagged
+        // in a form module. The genuinely unused one must stay flagged.
+        let code = r#"
+&НаКлиенте
+Процедура УстановитьОбработчики()
+    Элементы.Валюта.УстановитьДействие("ПриИзменении", "ВалютаПриИзменении");
+КонецПроцедуры
+
+&НаКлиенте
+Процедура ВалютаПриИзменении(Элемент)
+КонецПроцедуры
+
+&НаКлиенте
+Процедура НеИспользуемая()
+КонецПроцедуры
+"#;
+
+        let metadata = hir::ModuleMetadata {
+            module_type: bsl_metadata::ModuleType::FormModule,
+            execution_context: None,
+            common_module: None,
+            mdo: None,
+            register: None,
+            form: None,
+            http_service: None,
+            web_service: None,
+            integration_service: None,
+        };
+
+        let diagnostics =
+            crate::test_utils::check_metadata_diagnostic(metadata, code, |_metadata, ctx| {
+                super::check(ctx)
+            });
+        let unused: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::UnusedLocalMethod)
+            .map(|d| d.message.clone())
+            .collect();
+
+        assert!(
+            !unused.iter().any(|m| m.contains("ВалютаПриИзменении")),
+            "SetAction-bound handler must not be flagged: {unused:?}"
+        );
+        assert!(
+            unused.iter().any(|m| m.contains("НеИспользуемая")),
+            "genuinely unused method must stay flagged: {unused:?}"
+        );
+        assert!(
+            unused.iter().any(|m| m.contains("УстановитьОбработчики")),
+            "the registering method itself is uncalled and must stay flagged: {unused:?}"
+        );
+    }
+
+    #[test]
+    fn test_set_action_handler_flagged_outside_form_module() {
+        // Outside a form module `УстановитьДействие` is some object's method, not a form
+        // event binding, so it must not exempt a same-named local in (e.g.) a common module.
+        let code = r#"
+Процедура Настроить()
+    Объект.УстановитьДействие("Событие", "Обработчик");
+КонецПроцедуры
+
+Процедура Обработчик()
+КонецПроцедуры
+"#;
+        let diags = unused_in_module(bsl_metadata::ModuleType::CommonModule, code);
+        let names: Vec<_> = diags.iter().map(|d| d.message.clone()).collect();
+        assert!(
+            names.iter().any(|m| m.contains("Обработчик")),
+            "non-form SetAction must not exempt a local: {names:?}"
+        );
+    }
+
+    #[test]
+    fn test_set_action_on_manager_receiver_flagged_in_form() {
+        // `УстановитьДействие` is not reserved. A form may call an exported manager method
+        // of that name (`Справочники.X.УстановитьДействие("Опция", "Имя")`) where the second
+        // string is data, not a handler — so a same-named dead local must stay flagged.
+        let code = r#"
+&НаСервере
+Процедура Настроить()
+    Справочники.Номенклатура.УстановитьДействие("Опция", "НеИспользуемая");
+КонецПроцедуры
+
+&НаКлиенте
+Процедура НеИспользуемая()
+КонецПроцедуры
+"#;
+        let metadata = hir::ModuleMetadata {
+            module_type: bsl_metadata::ModuleType::FormModule,
+            execution_context: None,
+            common_module: None,
+            mdo: None,
+            register: None,
+            form: None,
+            http_service: None,
+            web_service: None,
+            integration_service: None,
+        };
+        let diagnostics =
+            crate::test_utils::check_metadata_diagnostic(metadata, code, |_metadata, ctx| {
+                super::check(ctx)
+            });
+        let names: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::UnusedLocalMethod)
+            .map(|d| d.message.clone())
+            .collect();
+        assert!(
+            names.iter().any(|m| m.contains("НеИспользуемая")),
+            "manager-method SetAction must not exempt a dead local in a form: {names:?}"
         );
     }
 

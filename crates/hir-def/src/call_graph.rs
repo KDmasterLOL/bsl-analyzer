@@ -17,6 +17,7 @@ pub struct ModuleCallSummary {
     pub call_edges: Vec<CallEdge>,
     pub notify_regs: Vec<NotifyReg>,
     pub idle_handler_regs: Vec<IdleReg>,
+    pub set_action_regs: Vec<SetActionReg>,
     pub form_entries: Vec<FormEventEntry>,
 }
 
@@ -261,6 +262,18 @@ pub struct IdleReg {
     pub caller: CallerId,
     pub handler_name: Name,
     pub one_shot: bool,
+    pub range: TextRange,
+}
+
+/// An `Элементы.<Элемент>.УстановитьДействие("Событие", "Обработчик")` runtime event
+/// binding: the registering method links to the named handler in the current form
+/// module. Like [`IdleReg`]/[`NotifyReg`], the platform invokes the handler later, so it
+/// is a string-named dispatch reference, not a direct call. The handler always lives in
+/// the current module (a form element's action targets a form-module procedure).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetActionReg {
+    pub caller: CallerId,
+    pub handler_name: Name,
     pub range: TextRange,
 }
 
@@ -539,6 +552,7 @@ pub fn extract_call_summary(
     let mut call_edges = Vec::new();
     let mut notify_regs = Vec::new();
     let mut idle_handler_regs = Vec::new();
+    let mut set_action_regs = Vec::new();
 
     let mut sorted_ids: Vec<u32> = module_bodies.iter_lower_results().map(|(id, _)| id).collect();
     sorted_ids.sort_unstable();
@@ -556,6 +570,7 @@ pub fn extract_call_summary(
             &mut call_edges,
             &mut notify_regs,
             &mut idle_handler_regs,
+            &mut set_action_regs,
         );
     }
 
@@ -568,6 +583,7 @@ pub fn extract_call_summary(
             &mut call_edges,
             &mut notify_regs,
             &mut idle_handler_regs,
+            &mut set_action_regs,
         );
     }
 
@@ -579,9 +595,20 @@ pub fn extract_call_summary(
         })
         .collect();
 
-    ModuleCallSummary { methods, call_edges, notify_regs, idle_handler_regs, form_entries }
+    ModuleCallSummary {
+        methods,
+        call_edges,
+        notify_regs,
+        idle_handler_regs,
+        set_action_regs,
+        form_entries,
+    }
 }
 
+// One &mut accumulator per output list (call edges + the three string-named dispatch
+// registries) plus the read-only inputs; bundling them into a struct would only move the
+// same fields behind one more indirection.
+#[allow(clippy::too_many_arguments)]
 fn extract_from_body(
     body: &Body,
     source_map: &BodySourceMap,
@@ -590,6 +617,7 @@ fn extract_from_body(
     call_edges: &mut Vec<CallEdge>,
     notify_regs: &mut Vec<NotifyReg>,
     idle_handler_regs: &mut Vec<IdleReg>,
+    set_action_regs: &mut Vec<SetActionReg>,
 ) {
     let common_bindings = crate::common_module_ref::common_module_var_bindings(body);
     for (expr_id, expr) in body.exprs_iter() {
@@ -622,6 +650,13 @@ fn extract_from_body(
                         }
                     }
                     Expr::Field { base: field_base, field } => {
+                        if is_set_action(&field.as_str().fold_lower())
+                            && is_form_element_action_receiver(body, *field_base)
+                        {
+                            if let Some(reg) = extract_set_action_reg(body, caller, args, range) {
+                                set_action_regs.push(reg);
+                            }
+                        }
                         if let Some(edge) = field_callee_to_edge(
                             body,
                             caller,
@@ -678,6 +713,10 @@ fn is_attach_idle_handler(name_lower: &str) -> bool {
     name_lower == "подключитьобработчикожидания" || name_lower == "attachidlehandler"
 }
 
+fn is_set_action(name_lower: &str) -> bool {
+    name_lower == "установитьдействие" || name_lower == "setaction"
+}
+
 fn is_notify_description(name: &Name) -> bool {
     is_notify_description_str(name.as_str())
 }
@@ -731,6 +770,54 @@ fn extract_idle_reg(
         })
         .unwrap_or(false);
     Some(IdleReg { caller, handler_name: Name::new(&handler_name), one_shot, range })
+}
+
+/// Whether the receiver of `УстановитьДействие` plausibly denotes a form element (so the
+/// second string argument is an event-handler method name). `УстановитьДействие` is not a
+/// reserved name — a user can export a manager/object method by that spelling — so a
+/// manager access such as `Справочники.Номенклатура.УстановитьДействие("Опция", "Имя")` must
+/// NOT be read as a handler binding (its `"Имя"` is plain data).
+///
+/// Accepted: a bare path (a form element held in a variable, or `ЭтаФорма`/`ЭтотОбъект`) and
+/// any `Элементы[...]`/`Элементы.X` access. Rejected: a multi-level access rooted elsewhere
+/// (manager types like `Справочники`/`Документы`, or a qualified module). This keeps the
+/// real ERP shapes (`ЭлементФормы.УстановитьДействие`, `Элементы["Кол"+п].УстановитьДействие`,
+/// `ЭтаФорма.Элементы.X.УстановитьДействие`) while excluding manager-method calls.
+fn is_form_element_action_receiver(body: &Body, receiver: ExprIdx) -> bool {
+    match body.expr_idx(receiver) {
+        Expr::Path(_) => true,
+        Expr::Field { base, .. } | Expr::Index { base, .. } => is_form_items_rooted(body, *base),
+        _ => false,
+    }
+}
+
+/// Whether an access chain is rooted at the form-items collection (`Элементы` / `Items`).
+fn is_form_items_rooted(body: &Body, idx: ExprIdx) -> bool {
+    match body.expr_idx(idx) {
+        Expr::Path(name) => {
+            let lower = name.as_str().fold_lower();
+            lower == "элементы" || lower == "items"
+        }
+        Expr::Field { base, field } => {
+            let lower = field.as_str().fold_lower();
+            lower == "элементы" || lower == "items" || is_form_items_rooted(body, *base)
+        }
+        Expr::Index { base, .. } => is_form_items_rooted(body, *base),
+        _ => false,
+    }
+}
+
+/// `<ЭлементФормы>.УстановитьДействие("Событие", "Обработчик")` — the handler is the
+/// second argument's string literal (the first is the event name). A non-literal handler
+/// (a variable) yields nothing rather than an invented reg.
+fn extract_set_action_reg(
+    body: &Body,
+    caller: CallerId,
+    args: &[ExprIdx],
+    range: TextRange,
+) -> Option<SetActionReg> {
+    let handler_name = extract_string_literal(body, *args.get(1)?)?;
+    Some(SetActionReg { caller, handler_name: Name::new(&handler_name), range })
 }
 
 fn extract_notify_reg_at(
@@ -1606,6 +1693,94 @@ EndProcedure
         let local_edges: Vec<_> =
             summary.call_edges.iter().filter(|e| e.kind == EdgeKind::DirectLocal).collect();
         assert!(local_edges.is_empty(), "Idle handler registration should not produce a call edge");
+    }
+
+    #[test]
+    fn test_set_action_reg_extracted() {
+        let code = r#"
+&НаСервере
+Процедура ПриСозданииНаСервере(Отказ, СтандартнаяОбработка)
+    Элементы.Валюта.УстановитьДействие("ПриИзменении", "ВалютаПриИзменении");
+КонецПроцедуры
+
+&НаКлиенте
+Процедура ВалютаПриИзменении(Элемент)
+КонецПроцедуры
+"#;
+        let summary = parse_and_extract(code);
+
+        assert_eq!(summary.set_action_regs.len(), 1);
+        assert_eq!(summary.set_action_regs[0].handler_name, Name::new("ВалютаПриИзменении"));
+        assert_eq!(summary.set_action_regs[0].caller, CallerId::Method(0));
+    }
+
+    #[test]
+    fn test_set_action_via_this_form_items_extracted() {
+        let code = r#"
+&НаСервере
+Процедура ПриСозданииНаСервере(Отказ, СтандартнаяОбработка)
+    ЭтаФорма.Элементы.Валюта.УстановитьДействие("ПриИзменении", "ВалютаПриИзменении");
+КонецПроцедуры
+"#;
+        let summary = parse_and_extract(code);
+        assert_eq!(summary.set_action_regs.len(), 1);
+        assert_eq!(summary.set_action_regs[0].handler_name, Name::new("ВалютаПриИзменении"));
+    }
+
+    #[test]
+    fn test_set_action_non_literal_handler_ignored() {
+        let code = r#"
+&НаСервере
+Процедура Настроить(ИмяОбработчика)
+    Элементы.Валюта.УстановитьДействие("ПриИзменении", ИмяОбработчика);
+КонецПроцедуры
+"#;
+        let summary = parse_and_extract(code);
+        assert!(summary.set_action_regs.is_empty());
+    }
+
+    #[test]
+    fn test_set_action_on_element_variable_extracted() {
+        // Real form code holds the item in a variable (`НовыйЭлемент = Элементы.Добавить(…)`)
+        // then binds via it. УстановитьДействие is form-element-specific, so the second
+        // string argument is a handler name regardless of the receiver's syntactic shape.
+        let code = r#"
+&НаКлиенте
+Процедура ДобавитьКолонку()
+    ЭлементФормы.УстановитьДействие("ПриИзменении", "КолонкаПриИзменении");
+КонецПроцедуры
+"#;
+        let summary = parse_and_extract(code);
+        assert_eq!(summary.set_action_regs.len(), 1);
+        assert_eq!(summary.set_action_regs[0].handler_name, Name::new("КолонкаПриИзменении"));
+    }
+
+    #[test]
+    fn test_set_action_dynamic_index_receiver_extracted() {
+        let code = r#"
+&НаКлиенте
+Процедура ДобавитьКолонку(Постфикс)
+    Элементы["Количество" + Постфикс].УстановитьДействие("ПриИзменении", "КоличествоПриИзменении");
+КонецПроцедуры
+"#;
+        let summary = parse_and_extract(code);
+        assert_eq!(summary.set_action_regs.len(), 1);
+        assert_eq!(summary.set_action_regs[0].handler_name, Name::new("КоличествоПриИзменении"));
+    }
+
+    #[test]
+    fn test_set_action_on_manager_receiver_ignored() {
+        // `УстановитьДействие` is not reserved: a user can export it on a manager module.
+        // `Справочники.X.УстановитьДействие("Опция", "Имя")` is such a call, not a form
+        // binding, so its second string is data and must not be recorded as a handler.
+        let code = r#"
+&НаСервере
+Процедура Настроить()
+    Справочники.Номенклатура.УстановитьДействие("Опция", "Имя");
+КонецПроцедуры
+"#;
+        let summary = parse_and_extract(code);
+        assert!(summary.set_action_regs.is_empty());
     }
 
     #[test]
