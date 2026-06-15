@@ -215,8 +215,12 @@ fn check_method(
         declared_vars.insert(binding.name.as_str().fold_lower());
     }
 
-    for stmt_id in body.body_stmts() {
-        if let hir::Stmt::VarDecl { bindings } = body.stmt(stmt_id) {
+    // Walk the full statement arena, not just top-level statements: `Перем`
+    // declarations, loop counters and bare-assignment locals nested inside
+    // `Если`/loops/`Попытка` are just as much method locals and must be checked
+    // for being unused. The read set already spans the whole body.
+    for (_, stmt) in body.stmts_iter() {
+        if let hir::Stmt::VarDecl { bindings } = stmt {
             for &binding_id in bindings.iter() {
                 let binding_id_opaque = BindingId::from_idx(binding_id);
                 let binding = body.binding(binding_id_opaque);
@@ -236,8 +240,8 @@ fn check_method(
         }
     }
 
-    for stmt_id in body.body_stmts() {
-        if let hir::Stmt::For { var, .. } = body.stmt(stmt_id) {
+    for (_, stmt) in body.stmts_iter() {
+        if let hir::Stmt::For { var, .. } = stmt {
             let var_opaque = BindingId::from_idx(*var);
             let binding = body.binding(var_opaque);
             declared_vars.insert(binding.name.as_str().fold_lower());
@@ -250,8 +254,8 @@ fn check_method(
         }
     }
 
-    for stmt_id in body.body_stmts() {
-        if let hir::Stmt::ForEach { var, .. } = body.stmt(stmt_id) {
+    for (_, stmt) in body.stmts_iter() {
+        if let hir::Stmt::ForEach { var, .. } = stmt {
             let var_opaque = BindingId::from_idx(*var);
             let binding = body.binding(var_opaque);
             declared_vars.insert(binding.name.as_str().fold_lower());
@@ -267,8 +271,8 @@ fn check_method(
     let mut implicit_vars: rustc_hash::FxHashMap<String, (String, ide_db::TextRange)> =
         rustc_hash::FxHashMap::default();
 
-    for stmt_id in body.body_stmts() {
-        if let hir::Stmt::Assign { target, .. } = body.stmt(stmt_id) {
+    for (_, stmt) in body.stmts_iter() {
+        if let hir::Stmt::Assign { target, .. } = stmt {
             let target_opaque = hir::ExprId::from_idx(*target);
             if let hir::Expr::Path(name) = body.expr(target_opaque) {
                 let lowercase_name = name.as_str().fold_lower();
@@ -732,6 +736,27 @@ mod tests {
 КонецПроцедуры"#;
 
         check_diagnostics_snapshot_for(code, DiagnosticCode::UnusedLocalVariable, expect![[r#""#]]);
+    }
+
+    /// A bare-assignment local that is first written inside a nested block
+    /// (`Если`/loop/`Попытка`) and never read is still a dead local — the
+    /// population walk must descend into nested statements, not only top-level.
+    #[test]
+    fn test_unused_variable_nested_in_branch_is_flagged() {
+        let code = r#"Процедура Тест()
+    Если Условие() Тогда
+        ВременноеЗначение = ВычислитьЧтоТо();
+    КонецЕсли;
+КонецПроцедуры"#;
+
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnusedLocalVariable,
+            expect![[r#"
+                UnusedLocalVariable @ 3:9..3:26
+                  message: Удалите неиспользуемую переменную ВременноеЗначение
+                  severity: Warning"#]],
+        );
     }
 
     /// A module `Перем` assigned inside one procedure and read in another is a
