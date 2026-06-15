@@ -1,7 +1,5 @@
 use expect_test::{expect, Expect};
-use lexer::TokenKind;
 use parser::parse_sdbl;
-use parser_error::{ParseError, RecoveryKind};
 
 fn check(input: &str, expected: Expect) {
     let parse = parse_sdbl(input);
@@ -12,27 +10,6 @@ fn check(input: &str, expected: Expect) {
 fn check_no_errors(input: &str) {
     let parse = parse_sdbl(input);
     assert!(!parse.has_errors(), "Expected no errors, but got: {:#?}", parse.errors());
-}
-
-fn is_known_nested_subquery_alias_recovery(error: &syntax::SyntaxError) -> bool {
-    match error.structured() {
-        ParseError::Unexpected {
-            found: Some(TokenKind::RParen),
-            recovery: RecoveryKind::BumpToken,
-        } => true,
-        ParseError::Expected {
-            expected,
-            found: Some(TokenKind::Ident),
-            recovery: RecoveryKind::BumpToken,
-        } => expected.as_slice() == [TokenKind::RParen],
-        ParseError::Custom { message, recovery: RecoveryKind::RecoverySpan } => {
-            *message == "ожидался алиас источника, встречено ключевое слово"
-        }
-        ParseError::Custom { message, recovery: RecoveryKind::BumpToken } => {
-            *message == "ожидалось 'СОЕДИНЕНИЕ' / 'JOIN'"
-        }
-        _ => false,
-    }
 }
 
 #[test]
@@ -170,13 +147,11 @@ fn test_subquery_in_from() {
 
 #[test]
 fn test_subquery_nested() {
+    // `Inner`/`Outer` collide with the INNER join keyword by text but are valid
+    // aliases — keywords are not reserved as alias names.
     let input = "SELECT * FROM (SELECT * FROM (SELECT Name FROM Products) AS Inner) AS Outer";
+    check_no_errors(input);
     let parse = parse_sdbl(input);
-    assert!(
-        parse.errors().iter().all(is_known_nested_subquery_alias_recovery),
-        "Expected only PARSER-BUG-001 nested subquery alias recovery for {input:?}, got errors: {:?}",
-        parse.errors()
-    );
     let root = parse.syntax_node();
     assert_eq!(root.text().to_string(), input, "Root must cover full input");
     assert!(
@@ -4248,6 +4223,65 @@ fn test_column_dot_v_operator_token_is_field_name() {
 #[test]
 fn test_column_dot_istina_literal_token_is_field_name() {
     check_no_errors("SELECT Т.Истина FROM Справочник.Номенклатура AS Т");
+}
+
+// SDBL keywords are not reserved as alias or field names. These mirror the bsl-ls
+// behaviour and the ERP queries that previously produced false QueryParseError.
+mod keyword_names {
+    use super::*;
+
+    #[test]
+    fn source_alias_named_after_clause_keyword_parses_clean() {
+        check_no_errors("ВЫБРАТЬ * ИЗ Товары КАК Итоги");
+    }
+
+    #[test]
+    fn selected_field_alias_named_after_clause_keyword_parses_clean() {
+        check_no_errors("ВЫБРАТЬ Поле КАК Итоги ИЗ Товары");
+    }
+
+    #[test]
+    fn join_keyword_alias_parses_clean() {
+        // `Inner`/`Outer` collide with the INNER join keyword by text but are aliases.
+        check_no_errors("SELECT * FROM (SELECT 1) AS Inner");
+    }
+
+    #[test]
+    fn field_named_after_clause_keyword_same_line_parses_clean() {
+        check_no_errors("ВЫБРАТЬ Т.Итоги ИЗ Справочник.Номенклатура КАК Т");
+    }
+
+    #[test]
+    fn field_named_after_expression_keyword_same_line_parses_clean() {
+        // `Конец` (END), `Выбор` (CASE) are common field names, not reserved.
+        check_no_errors("ВЫБРАТЬ Т.Начало КАК Начало, Т.Конец КАК Конец ИЗ ОстаткиВТ КАК Т");
+        check_no_errors("ВЫБРАТЬ Т.Выбор ИЗ Справочник.Номенклатура КАК Т");
+    }
+
+    #[test]
+    fn totals_clause_still_parses_with_aggregate() {
+        // `ИТОГИ` must still drive the TOTALS clause; the implicit-alias path must
+        // not swallow it as the source alias of `Т`.
+        check_no_errors("ВЫБРАТЬ Поле КАК Поле ИЗ Т ИТОГИ СУММА(Поле) ПО Поле");
+    }
+
+    #[test]
+    fn as_followed_by_body_clause_keyword_still_recovers() {
+        // A primary clause after AS is an omitted alias, not an alias named WHERE.
+        let parse = parse_sdbl("SELECT * FROM Products AS WHERE Active = TRUE");
+        let t = format!("{:#?}", parse.syntax_node());
+        assert!(t.contains("SDBL_WHERE_CLAUSE"), "WHERE must still parse, tree:\n{t}");
+    }
+
+    #[test]
+    fn dangling_dot_before_clause_keyword_across_newline_recovers() {
+        // A trailing dot before a clause keyword on the next line must not be glued
+        // to the keyword as a field access.
+        let parse = parse_sdbl("ВЫБРАТЬ Т.\nИЗ Товары");
+        let t = format!("{:#?}", parse.syntax_node());
+        assert!(parse.has_errors(), "dangling dot must report recovery, tree:\n{t}");
+        assert!(t.contains("SDBL_FROM_CLAUSE"), "FROM must still parse, tree:\n{t}");
+    }
 }
 
 #[test]

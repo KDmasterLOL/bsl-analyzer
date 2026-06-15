@@ -1,6 +1,4 @@
-use lexer::TokenKind;
 use parser::parse_sdbl;
-use parser_error::{ParseError, RecoveryKind};
 use syntax::{
     ast::{AstNode, SdblFromClause, SdblQueryPackage},
     SyntaxKind,
@@ -23,27 +21,6 @@ fn parse_clean(input: &str) {
         "Expected clean parse for {input:?}, got errors: {:?}",
         parse.errors()
     );
-}
-
-fn is_known_nested_subquery_alias_recovery(error: &syntax::SyntaxError) -> bool {
-    match error.structured() {
-        ParseError::Unexpected {
-            found: Some(TokenKind::RParen),
-            recovery: RecoveryKind::BumpToken,
-        } => true,
-        ParseError::Expected {
-            expected,
-            found: Some(TokenKind::Ident),
-            recovery: RecoveryKind::BumpToken,
-        } => expected.as_slice() == [TokenKind::RParen],
-        ParseError::Custom { message, recovery: RecoveryKind::RecoverySpan } => {
-            *message == "ожидался алиас источника, встречено ключевое слово"
-        }
-        ParseError::Custom { message, recovery: RecoveryKind::BumpToken } => {
-            *message == "ожидалось 'СОЕДИНЕНИЕ' / 'JOIN'"
-        }
-        _ => false,
-    }
 }
 
 fn from_clause_of(input: &str) -> SdblFromClause {
@@ -119,13 +96,11 @@ fn test_from_subquery_source_bare_implicit_alias() {
 
 #[test]
 fn test_from_subquery_source_nested() {
+    // `Inner`/`Outer` collide with the INNER join keyword by text but are valid
+    // aliases — keywords are not reserved as alias names.
     let input = "SELECT * FROM (SELECT * FROM (SELECT 1) AS Inner) AS Outer";
+    parse_clean(input);
     let parse = parse_sdbl(input);
-    assert!(
-        parse.errors().iter().all(is_known_nested_subquery_alias_recovery),
-        "Expected only PARSER-BUG-001 nested subquery alias recovery for {input:?}, got errors: {:?}",
-        parse.errors()
-    );
     assert_eq!(parse.syntax_node().text().to_string(), input, "Root must cover full input");
     let t = tree(input);
     assert!(count_nodes(&t, "SDBL_DATA_SOURCE") >= 2);
