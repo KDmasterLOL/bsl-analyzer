@@ -374,6 +374,15 @@ impl ModuleHirMetrics {
     pub fn is_empty(&self) -> bool {
         self.methods.is_empty() && self.module_code.is_none()
     }
+
+    /// File-level cognitive complexity: the sum of every method's raw HIR
+    /// cognitive score. Module-level code is excluded (to stay symmetric with
+    /// [`ModuleCyclomatic::total`]), as is the per-method recursion bonus the
+    /// `CognitiveComplexity` diagnostic adds on top — this is the structural
+    /// cognitive complexity only.
+    pub fn total_cognitive(&self) -> u32 {
+        self.methods.values().map(|m| m.cognitive).sum()
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -396,6 +405,11 @@ impl ModuleCyclomatic {
 
     pub fn is_empty(&self) -> bool {
         self.methods.is_empty()
+    }
+
+    /// File-level cyclomatic complexity: the sum of every method's complexity.
+    pub fn total(&self) -> u32 {
+        self.methods.values().copied().sum()
     }
 }
 
