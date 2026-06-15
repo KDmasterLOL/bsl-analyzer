@@ -3,7 +3,7 @@ use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::{BindingId, ExprId, IdConversion, StmtId};
 use ide_db::TextRange;
-use stdx::case::CaseExt;
+use stdx::case::{eq_ignore_case, CaseExt};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -86,26 +86,241 @@ pub fn from_hir(
     None
 }
 
+/// Outcome of scanning statements in execution order looking for a read of the
+/// parameter that happens before the rewrite.
+enum Scan {
+    /// No read encountered yet; keep scanning following statements.
+    NotFound,
+    /// The parameter is read before the rewrite — the rewrite is not blind.
+    ReadFound,
+    /// Reached the rewrite statement; nothing executes after it counts as "before".
+    ReachedTarget,
+}
+
+/// A by-value parameter is only suspicious when it is overwritten *before* being
+/// read. A flat statement-arena scan misses reads that live in the header of an
+/// enclosing block (`Если Параметр = Неопределено Тогда Параметр = …`), which is
+/// the idiomatic way to compute a non-literal default. Walk the statement tree in
+/// execution order instead and stop at the rewrite itself.
 fn parameter_used_before_stmt(
     body: &hir::Body,
     target_stmt_id: StmtId,
     param_id: BindingId,
 ) -> bool {
-    for (stmt_id, _stmt) in body.stmts_iter() {
-        if stmt_id == target_stmt_id {
-            break;
-        }
+    let top_level: Vec<StmtId> = body.body_stmts().collect();
+    matches!(scan_stmts_before_target(body, &top_level, target_stmt_id, param_id), Scan::ReadFound)
+}
 
-        if is_self_assign_to_binding(body, stmt_id, param_id) {
-            continue;
-        }
-
-        if stmt_uses_binding(body, stmt_id, param_id) {
-            return true;
+fn scan_stmts_before_target(
+    body: &hir::Body,
+    stmts: &[StmtId],
+    target_stmt_id: StmtId,
+    param_id: BindingId,
+) -> Scan {
+    for &stmt_id in stmts {
+        match scan_stmt_before_target(body, stmt_id, target_stmt_id, param_id) {
+            Scan::NotFound => {}
+            other => return other,
         }
     }
+    Scan::NotFound
+}
 
-    false
+fn scan_idx_slice(
+    body: &hir::Body,
+    stmts: &[hir::StmtIdx],
+    target_stmt_id: StmtId,
+    param_id: BindingId,
+) -> Scan {
+    let ids: Vec<StmtId> = stmts.iter().map(|&idx| StmtId::from_idx(idx)).collect();
+    scan_stmts_before_target(body, &ids, target_stmt_id, param_id)
+}
+
+fn scan_stmt_before_target(
+    body: &hir::Body,
+    stmt_id: StmtId,
+    target_stmt_id: StmtId,
+    param_id: BindingId,
+) -> Scan {
+    use hir::{Expr, Stmt};
+
+    if stmt_id == target_stmt_id {
+        return Scan::ReachedTarget;
+    }
+
+    let reads =
+        |expr_idx: hir::ExprIdx| expr_uses_binding(body, ExprId::from_idx(expr_idx), param_id);
+
+    match body.stmt(stmt_id) {
+        Stmt::If(if_stmt) => scan_if_before_target(body, if_stmt, target_stmt_id, param_id),
+        Stmt::PreprocIf(preproc) => {
+            for branch in preproc.branches() {
+                match scan_idx_slice(body, branch.stmts, target_stmt_id, param_id) {
+                    Scan::NotFound => {}
+                    other => return other,
+                }
+            }
+            Scan::NotFound
+        }
+        Stmt::While { condition, body: loop_body } => {
+            if reads(*condition) {
+                return Scan::ReadFound;
+            }
+            scan_idx_slice(body, loop_body, target_stmt_id, param_id)
+        }
+        Stmt::For { from, to, body: loop_body, .. } => {
+            if reads(*from) || reads(*to) {
+                return Scan::ReadFound;
+            }
+            scan_idx_slice(body, loop_body, target_stmt_id, param_id)
+        }
+        Stmt::ForEach { collection, body: loop_body, .. } => {
+            if reads(*collection) {
+                return Scan::ReadFound;
+            }
+            scan_idx_slice(body, loop_body, target_stmt_id, param_id)
+        }
+        Stmt::Try { body: try_body, except } => {
+            match scan_idx_slice(body, try_body, target_stmt_id, param_id) {
+                Scan::NotFound => {}
+                other => return other,
+            }
+            scan_idx_slice(body, except, target_stmt_id, param_id)
+        }
+        Stmt::Assign { target, value } => {
+            // Self-assignments (`П = П`) are not meaningful use.
+            if is_self_assign_to_binding(body, stmt_id, param_id) {
+                return Scan::NotFound;
+            }
+            if reads(*value) {
+                return Scan::ReadFound;
+            }
+            // A bare write target (`П = …`) is not a read, but a member/index target
+            // (`П.Поле = …`, `П[i] = …`) reads the parameter.
+            let target_expr = body.expr(ExprId::from_idx(*target));
+            let target_is_bare_param = matches!(
+                target_expr,
+                Expr::Path(name)
+                    if eq_ignore_case(name.as_str(), body.binding(param_id).name.as_str())
+            );
+            if !target_is_bare_param && reads(*target) {
+                return Scan::ReadFound;
+            }
+            Scan::NotFound
+        }
+        _ => {
+            if stmt_uses_binding(body, stmt_id, param_id) {
+                Scan::ReadFound
+            } else {
+                Scan::NotFound
+            }
+        }
+    }
+}
+
+/// Path-sensitive scan of an `If` for a read that precedes the rewrite.
+///
+/// Reads in a guarding condition always count: every condition up to the
+/// branch that owns the rewrite is evaluated before it runs. Reads in a branch
+/// *body* only count when that body either contains the rewrite (the read
+/// precedes it on the same path) or the whole `If` precedes the rewrite (the
+/// rewrite lives in a following sibling, so the `If` fully executes first).
+/// A read in a sibling branch that is mutually exclusive with the rewrite's
+/// branch must NOT suppress the diagnostic.
+fn scan_if_before_target(
+    body: &hir::Body,
+    if_stmt: &hir::IfStmt,
+    target_stmt_id: StmtId,
+    param_id: BindingId,
+) -> Scan {
+    let reads =
+        |expr_idx: hir::ExprIdx| expr_uses_binding(body, ExprId::from_idx(expr_idx), param_id);
+
+    let target_in_if = if_contains_target(body, if_stmt, target_stmt_id);
+
+    if reads(if_stmt.condition) {
+        return Scan::ReadFound;
+    }
+    match scan_if_branch(body, &if_stmt.then_branch, target_stmt_id, param_id, target_in_if) {
+        Scan::NotFound => {}
+        other => return other,
+    }
+    for (cond, branch) in if_stmt.elsif_branches.iter() {
+        if reads(*cond) {
+            return Scan::ReadFound;
+        }
+        match scan_if_branch(body, branch, target_stmt_id, param_id, target_in_if) {
+            Scan::NotFound => {}
+            other => return other,
+        }
+    }
+    if let Some(branch) = &if_stmt.else_branch {
+        match scan_if_branch(body, branch, target_stmt_id, param_id, target_in_if) {
+            Scan::NotFound => {}
+            other => return other,
+        }
+    }
+    Scan::NotFound
+}
+
+fn scan_if_branch(
+    body: &hir::Body,
+    branch: &[hir::StmtIdx],
+    target_stmt_id: StmtId,
+    param_id: BindingId,
+    target_in_if: bool,
+) -> Scan {
+    if stmts_contain_target(body, branch, target_stmt_id) {
+        // The rewrite lives in this branch — its result is authoritative.
+        return scan_idx_slice(body, branch, target_stmt_id, param_id);
+    }
+    // The rewrite is not in this branch. A read here only counts when the whole
+    // `If` precedes the rewrite; otherwise this branch is a mutually exclusive
+    // sibling of the rewrite's branch and must be ignored.
+    match scan_idx_slice(body, branch, target_stmt_id, param_id) {
+        Scan::ReadFound if !target_in_if => Scan::ReadFound,
+        _ => Scan::NotFound,
+    }
+}
+
+fn if_contains_target(body: &hir::Body, if_stmt: &hir::IfStmt, target_stmt_id: StmtId) -> bool {
+    stmts_contain_target(body, &if_stmt.then_branch, target_stmt_id)
+        || if_stmt
+            .elsif_branches
+            .iter()
+            .any(|(_, branch)| stmts_contain_target(body, branch, target_stmt_id))
+        || if_stmt
+            .else_branch
+            .as_ref()
+            .is_some_and(|branch| stmts_contain_target(body, branch, target_stmt_id))
+}
+
+fn stmts_contain_target(body: &hir::Body, stmts: &[hir::StmtIdx], target_stmt_id: StmtId) -> bool {
+    stmts.iter().any(|&idx| stmt_contains_target(body, StmtId::from_idx(idx), target_stmt_id))
+}
+
+fn stmt_contains_target(body: &hir::Body, stmt_id: StmtId, target_stmt_id: StmtId) -> bool {
+    use hir::Stmt;
+
+    if stmt_id == target_stmt_id {
+        return true;
+    }
+    match body.stmt(stmt_id) {
+        Stmt::If(if_stmt) => if_contains_target(body, if_stmt, target_stmt_id),
+        Stmt::PreprocIf(preproc) => preproc
+            .branches()
+            .any(|branch| stmts_contain_target(body, branch.stmts, target_stmt_id)),
+        Stmt::While { body: loop_body, .. }
+        | Stmt::For { body: loop_body, .. }
+        | Stmt::ForEach { body: loop_body, .. } => {
+            stmts_contain_target(body, loop_body, target_stmt_id)
+        }
+        Stmt::Try { body: try_body, except } => {
+            stmts_contain_target(body, try_body, target_stmt_id)
+                || stmts_contain_target(body, except, target_stmt_id)
+        }
+        _ => false,
+    }
 }
 
 fn is_self_assign_to_binding(body: &hir::Body, stmt_id: StmtId, binding_id: BindingId) -> bool {
@@ -116,12 +331,12 @@ fn is_self_assign_to_binding(body: &hir::Body, stmt_id: StmtId, binding_id: Bind
         Stmt::Assign { target, value } => {
             if let Expr::Path(target_name) = body.expr(ExprId::from_idx(*target)) {
                 let binding = body.binding(binding_id);
-                if !target_name.as_str().eq_ignore_ascii_case(binding.name.as_str()) {
+                if !eq_ignore_case(target_name.as_str(), binding.name.as_str()) {
                     return false;
                 }
 
                 if let Expr::Path(value_name) = body.expr(ExprId::from_idx(*value)) {
-                    return value_name.as_str().eq_ignore_ascii_case(binding.name.as_str());
+                    return eq_ignore_case(value_name.as_str(), binding.name.as_str());
                 }
             }
             false
@@ -256,37 +471,28 @@ fn parameter_used_in_assignment_rhs(
 fn expr_uses_binding(body: &hir::Body, expr_id: ExprId, binding_id: BindingId) -> bool {
     use hir::Expr;
 
-    let expr = body.expr(expr_id);
-    match expr {
+    let uses = |idx: hir::ExprIdx| expr_uses_binding(body, ExprId::from_idx(idx), binding_id);
+
+    match body.expr(expr_id) {
         Expr::Path(name) => {
             let binding = body.binding(binding_id);
-            name.as_str().eq_ignore_ascii_case(binding.name.as_str())
+            eq_ignore_case(name.as_str(), binding.name.as_str())
         }
-        Expr::BinaryOp { lhs, rhs, .. } => {
-            expr_uses_binding(body, ExprId::from_idx(*lhs), binding_id)
-                || expr_uses_binding(body, ExprId::from_idx(*rhs), binding_id)
+        Expr::BinaryOp { lhs, rhs, .. } => uses(*lhs) || uses(*rhs),
+        Expr::UnaryOp { expr, .. } => uses(*expr),
+        Expr::Call { callee, args } => uses(*callee) || args.iter().any(|&arg| uses(arg)),
+        Expr::MethodCall { receiver, args, .. } => {
+            uses(*receiver) || args.iter().any(|&arg| uses(arg))
         }
-        Expr::Call { callee, args, .. } => {
-            expr_uses_binding(body, ExprId::from_idx(*callee), binding_id)
-                || args
-                    .iter()
-                    .any(|&arg| expr_uses_binding(body, ExprId::from_idx(arg), binding_id))
-        }
-        Expr::Index { base, index, .. } => {
-            expr_uses_binding(body, ExprId::from_idx(*base), binding_id)
-                || expr_uses_binding(body, ExprId::from_idx(*index), binding_id)
-        }
-        Expr::Field { base, .. } => expr_uses_binding(body, ExprId::from_idx(*base), binding_id),
-        Expr::New { args, .. } => {
-            args.iter().any(|&arg| expr_uses_binding(body, ExprId::from_idx(arg), binding_id))
-        }
+        Expr::Index { base, index } => uses(*base) || uses(*index),
+        Expr::Field { base, .. } => uses(*base),
+        Expr::New { args, .. } => args.iter().any(|&arg| uses(arg)),
+        Expr::Array(elements) => elements.iter().any(|&arg| uses(arg)),
         Expr::Ternary { condition, then_expr, else_expr } => {
-            expr_uses_binding(body, ExprId::from_idx(*condition), binding_id)
-                || expr_uses_binding(body, ExprId::from_idx(*then_expr), binding_id)
-                || expr_uses_binding(body, ExprId::from_idx(*else_expr), binding_id)
+            uses(*condition) || uses(*then_expr) || uses(*else_expr)
         }
-        Expr::Literal(_) | Expr::Missing => false,
-        _ => false,
+        Expr::Await { expr } => uses(*expr),
+        Expr::QualifiedPath(_) | Expr::Literal(_) | Expr::Missing => false,
     }
 }
 
@@ -348,6 +554,130 @@ mod tests {
             code,
             DiagnosticCode::RewriteMethodParameter,
             expect![[r#""#]],
+        );
+    }
+
+    #[test]
+    fn test_default_guard_idiom_no_diagnostic() {
+        let code = r#"Процедура Тест(Знач Вариант = Неопределено)
+    Если Вариант = Неопределено Тогда
+        Вариант = ТекущаяДатаСеанса(); // не ошибка - вычисление дефолта
+    КонецЕсли;
+КонецПроцедуры"#;
+
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::RewriteMethodParameter,
+            expect![[r#""#]],
+        );
+    }
+
+    #[test]
+    fn test_read_inside_call_in_condition_no_diagnostic() {
+        let code = r#"Функция Тест(Знач Значение)
+    Если Не ЗначениеЗаполнено(Значение) Тогда
+        Значение = ТекущаяДатаСеанса(); // не ошибка - прочитан в ЗначениеЗаполнено
+    КонецЕсли;
+    Возврат Значение;
+КонецФункции"#;
+
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::RewriteMethodParameter,
+            expect![[r#""#]],
+        );
+    }
+
+    #[test]
+    fn test_read_with_cyrillic_case_mismatch_no_diagnostic() {
+        // Объявление и использование различаются регистром кириллицы (н/Н):
+        // BSL регистронезависим, чтение в условии должно подавлять диагностику.
+        let code = r#"Функция Тест(Знач КодИнсп = Неопределено)
+    Если КодИНСП = Неопределено ИЛИ ПустаяСтрока(КодИНСП) Тогда
+        КодИНСП = "0000";
+    КонецЕсли;
+    Возврат КодИнсп;
+КонецФункции"#;
+
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::RewriteMethodParameter,
+            expect![[r#""#]],
+        );
+    }
+
+    #[test]
+    fn test_read_in_elsif_condition_no_diagnostic() {
+        let code = r#"Процедура Тест(Знач Режим)
+    Если Ложь Тогда
+        Возврат;
+    ИначеЕсли Режим = "А" Тогда
+        Режим = "Б"; // не ошибка - прочитан в условии ИначеЕсли
+    КонецЕсли;
+КонецПроцедуры"#;
+
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::RewriteMethodParameter,
+            expect![[r#""#]],
+        );
+    }
+
+    #[test]
+    fn test_read_in_sibling_branch_does_not_suppress() {
+        // Чтение параметра в ветке Тогда взаимоисключающе с перезаписью в
+        // ветке ИначеЕсли — оно не должно подавлять диагностику.
+        let code = r#"Процедура Тест(Знач Парам)
+    Если Условие1 Тогда
+        Значение = Парам; // другая ветка исполнения
+    ИначеЕсли Условие2 Тогда
+        Парам = 10; // ошибка - на этом пути Парам не прочитан
+    КонецЕсли;
+КонецПроцедуры"#;
+
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::RewriteMethodParameter,
+            expect![[r#"
+            RewriteMethodParameter @ 5:9..5:14
+              message: Переприсваивание параметра метода 'Парам'
+              severity: Warning"#]],
+        );
+    }
+
+    #[test]
+    fn test_read_in_preceding_sibling_if_suppresses() {
+        // Если весь оператор Если предшествует перезаписи (перезапись — следующий
+        // оператор), чтение в любой его ветке считается использованием до записи.
+        let code = r#"Процедура Тест(Знач Парам)
+    Если Условие Тогда
+        Значение = Парам;
+    КонецЕсли;
+    Парам = 10; // не ошибка - Парам прочитан в предшествующем Если
+КонецПроцедуры"#;
+
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::RewriteMethodParameter,
+            expect![[r#""#]],
+        );
+    }
+
+    #[test]
+    fn test_rewrite_after_unrelated_guard_is_flagged() {
+        let code = r#"Процедура Тест(Знач Парам)
+    Если Истина Тогда
+        Парам = 10; // ошибка - параметр нигде не прочитан до перезаписи
+    КонецЕсли;
+КонецПроцедуры"#;
+
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::RewriteMethodParameter,
+            expect![[r#"
+            RewriteMethodParameter @ 3:9..3:14
+              message: Переприсваивание параметра метода 'Парам'
+              severity: Warning"#]],
         );
     }
 

@@ -35,7 +35,8 @@ pub use hir_def::body::{
 pub use hir_def::{Body, BodyDiagnostic, BodySourceMap, ModuleBodies};
 
 pub use hir_def::hir::{
-    BinaryOp, Expr, ExprIdx, HirPreBranch, HirPreBranchKind, Literal, Stmt, UnaryOp,
+    BinaryOp, Expr, ExprIdx, HirPreBranch, HirPreBranchKind, IfStmt, Literal, Stmt, StmtIdx,
+    UnaryOp,
 };
 
 pub use hir_def::item_tree::{Annotation, AnnotationKind, Function, ModItem, Param, Procedure};
