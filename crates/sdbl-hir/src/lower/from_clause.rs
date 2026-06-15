@@ -30,7 +30,7 @@ impl LoweringContext<'_> {
 
     fn lower_data_source_in_from(&mut self, ds: &syntax::ast::SdblDataSource) -> TableRef {
         if let Some(subquery) = ds.subquery() {
-            if ds.join_clauses().next().is_some() && !subquery_has_aggregation(&subquery) {
+            if ds.join_clauses().next().is_some() {
                 self.diagnostics.push(SdblDiagnostic::JoinWithSubQuery {
                     range: subquery.syntax().text_range(),
                 });
@@ -1175,49 +1175,4 @@ impl LoweringContext<'_> {
             });
         }
     }
-}
-
-pub(super) fn subquery_has_aggregation(subquery: &syntax::ast::SdblSubquery) -> bool {
-    subquery.queries().any(|q| {
-        if q.group_by_clause().is_some() {
-            return true;
-        }
-        let Some(field_list) = q.field_list() else {
-            return false;
-        };
-        let has_aggregate = field_list.fields().any(|field| field_contains_aggregate_call(&field));
-        has_aggregate
-    })
-}
-
-fn field_contains_aggregate_call(field: &syntax::ast::SdblSelectedField) -> bool {
-    let Some(expr) = field.expression() else {
-        return false;
-    };
-    expr.descendants()
-        .filter(|n| n.kind() == syntax::SyntaxKind::SDBL_FUNCTION_CALL)
-        .any(|call| function_call_is_aggregate(&call))
-}
-
-fn function_call_is_aggregate(call: &syntax::SyntaxNode) -> bool {
-    call.children_with_tokens()
-        .filter_map(|nt| nt.into_token())
-        .find(|t| t.kind() == syntax::SyntaxKind::IDENT)
-        .is_some_and(|t| is_aggregate_name(t.text()))
-}
-
-fn is_aggregate_name(name: &str) -> bool {
-    matches!(
-        name.to_uppercase().as_str(),
-        "СУММА"
-            | "SUM"
-            | "СРЕДНЕЕ"
-            | "AVG"
-            | "МИНИМУМ"
-            | "MIN"
-            | "МАКСИМУМ"
-            | "MAX"
-            | "КОЛИЧЕСТВО"
-            | "COUNT"
-    )
 }
