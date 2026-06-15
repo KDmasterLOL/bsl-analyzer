@@ -131,16 +131,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     let module_bodies = ctx.module_bodies();
 
-    let module_liveness = ctx.module_liveness();
-    let module_cfgs = ctx.module_cfgs();
-
     for (local_id, body) in module_bodies.iter_bodies() {
-        diagnostics.extend(check_method_with_module_liveness(
+        diagnostics.extend(check_method(
             local_id,
             body,
             &module_bodies,
-            &module_liveness,
-            &module_cfgs,
             code,
             ctx,
             &skip_attr_names,
@@ -154,13 +149,44 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics
 }
 
-#[allow(clippy::too_many_arguments, reason = "skip_attr_names is part of object-module filtering")]
-fn check_method_with_module_liveness(
+/// Collects the lowercased names of every local that appears in a *read*
+/// position within `body`.
+///
+/// A bare `Expr::Path` is a read everywhere except when it is the direct target
+/// of an assignment (`Имя = …`), which is a pure write. Member- and index-base
+/// paths (`Имя.Поле = …`, `Имя[И] = …`) remain reads of `Имя`, matching how the
+/// value of `Имя` is consumed to reach the assigned location.
+///
+/// This is the correct primitive for "unused local variable": a variable is
+/// unused iff its name never appears in a read position. Block-boundary liveness
+/// cannot answer this — a name read and then reassigned inside the same block is
+/// dead at both block edges yet genuinely used.
+fn collect_read_var_names(body: &hir::Body) -> FxHashSet<String> {
+    let mut write_targets: FxHashSet<hir::ExprId> = FxHashSet::default();
+    for (_stmt_id, stmt) in body.stmts_iter() {
+        if let hir::Stmt::Assign { target, .. } = stmt {
+            let target = hir::ExprId::from_idx(*target);
+            if matches!(body.expr(target), hir::Expr::Path(_)) {
+                write_targets.insert(target);
+            }
+        }
+    }
+
+    let mut read_vars: FxHashSet<String> = FxHashSet::default();
+    for (expr_id, expr) in body.exprs_iter() {
+        if let hir::Expr::Path(name) = expr {
+            if !write_targets.contains(&expr_id) {
+                read_vars.insert(name.as_str().fold_lower());
+            }
+        }
+    }
+    read_vars
+}
+
+fn check_method(
     local_id: u32,
     body: &hir::Body,
     module_bodies: &hir::ModuleBodies,
-    module_liveness: &hir::dataflow::liveness::ModuleLiveness,
-    module_cfgs: &hir::cfg::ModuleCfgs,
     code: DiagnosticCode,
     ctx: &DiagnosticsContext,
     skip_attr_names: &FxHashSet<String>,
@@ -172,51 +198,13 @@ fn check_method_with_module_liveness(
         None => return diagnostics,
     };
 
-    let cfg = match module_cfgs.get(local_id) {
-        Some(cfg) => cfg,
-        None => {
-            tracing::warn!("No CFG found for method: local_id={}", local_id);
-            return diagnostics;
-        }
-    };
-
-    let liveness_result = match module_liveness.get(local_id) {
-        Some(result) => result,
-        None => {
-            tracing::warn!("Liveness analysis failed for method: local_id={}", local_id);
-            return diagnostics;
-        }
-    };
-
-    let entry = match cfg.entry_point() {
-        Some(e) => e,
-        None => {
-            tracing::warn!("CFG has no entry point for method: local_id={}", local_id);
-            return diagnostics;
-        }
-    };
-
-    let live_at_entry = match liveness_result.block_in(entry) {
-        Some(live) => live,
-        None => {
-            tracing::warn!("No liveness data for entry block: local_id={}", local_id);
-            return diagnostics;
-        }
-    };
+    let read_vars = collect_read_var_names(body);
 
     let mut declared_vars = rustc_hash::FxHashSet::default();
 
     for param_id in body.params() {
         let binding = body.binding(param_id);
         declared_vars.insert(binding.name.as_str().fold_lower());
-    }
-
-    let var_index = live_at_entry.var_index();
-
-    let mut all_live_union = fixedbitset::FixedBitSet::with_capacity(var_index.size());
-    for (_, in_state, out_state) in liveness_result.blocks() {
-        all_live_union.union_with(in_state.live_vars());
-        all_live_union.union_with(out_state.live_vars());
     }
 
     for stmt_id in body.body_stmts() {
@@ -226,14 +214,7 @@ fn check_method_with_module_liveness(
                 let binding = body.binding(binding_id_opaque);
                 declared_vars.insert(binding.name.as_str().fold_lower());
 
-                let is_unused = if let Some(idx) = var_index.get_index_by_binding(binding_id_opaque)
-                {
-                    !all_live_union.contains(idx)
-                } else {
-                    !live_at_entry.is_live(binding.name.as_str())
-                };
-
-                if is_unused {
+                if !read_vars.contains(&binding.name.as_str().fold_lower()) {
                     if let Some(range) = source_map.binding_range(binding_id_opaque) {
                         diagnostics.push(create_diagnostic(
                             binding.name.as_str(),
@@ -253,13 +234,7 @@ fn check_method_with_module_liveness(
             let binding = body.binding(var_opaque);
             declared_vars.insert(binding.name.as_str().fold_lower());
 
-            let is_unused = if let Some(idx) = var_index.get_index_by_binding(var_opaque) {
-                !all_live_union.contains(idx)
-            } else {
-                !live_at_entry.is_live(binding.name.as_str())
-            };
-
-            if is_unused {
+            if !read_vars.contains(&binding.name.as_str().fold_lower()) {
                 if let Some(range) = source_map.binding_range(var_opaque) {
                     diagnostics.push(create_diagnostic(binding.name.as_str(), range, code, ctx));
                 }
@@ -273,13 +248,7 @@ fn check_method_with_module_liveness(
             let binding = body.binding(var_opaque);
             declared_vars.insert(binding.name.as_str().fold_lower());
 
-            let is_unused = if let Some(idx) = var_index.get_index_by_binding(var_opaque) {
-                !all_live_union.contains(idx)
-            } else {
-                !live_at_entry.is_live(binding.name.as_str())
-            };
-
-            if is_unused {
+            if !read_vars.contains(&binding.name.as_str().fold_lower()) {
                 if let Some(range) = source_map.binding_range(var_opaque) {
                     diagnostics.push(create_diagnostic(binding.name.as_str(), range, code, ctx));
                 }
@@ -312,13 +281,7 @@ fn check_method_with_module_liveness(
     }
 
     for (lowercase_name, (original_name, range)) in implicit_vars {
-        let is_live_anywhere = if let Some(idx) = var_index.get_index(&lowercase_name) {
-            all_live_union.contains(idx)
-        } else {
-            false
-        };
-
-        if !is_live_anywhere {
+        if !read_vars.contains(&lowercase_name) {
             diagnostics.push(create_diagnostic(&original_name, range, code, ctx));
         }
     }
@@ -343,16 +306,7 @@ fn check_module_level_code(
     let body = &lower_result.body;
     let source_map = &lower_result.source_map;
 
-    let liveness_result = match ctx.module_level_liveness_analysis() {
-        Some(result) => result,
-        None => {
-            tracing::debug!(
-                file_id = ?ctx.file_id,
-                "no module-level liveness result; skipping module-level unused-variable check"
-            );
-            return diagnostics;
-        }
-    };
+    let read_vars = collect_read_var_names(body);
 
     let mut implicit_vars: rustc_hash::FxHashMap<String, (String, ide_db::TextRange)> =
         rustc_hash::FxHashMap::default();
@@ -379,11 +333,7 @@ fn check_module_level_code(
     }
 
     for (lowercase_name, (original_name, range)) in implicit_vars {
-        let is_live_anywhere = liveness_result.blocks().any(|(_, in_state, out_state)| {
-            in_state.is_live(&lowercase_name) || out_state.is_live(&lowercase_name)
-        });
-
-        if !is_live_anywhere {
+        if !read_vars.contains(&lowercase_name) {
             diagnostics.push(create_diagnostic(&original_name, range, code, ctx));
         }
     }
@@ -725,6 +675,52 @@ mod tests {
         ВыполнитьДействие();
         ЕстьЗадания = ПроверитьУсловие();
     КонецЦикла;
+КонецПроцедуры"#;
+
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UnusedLocalVariable, expect![[r#""#]]);
+    }
+
+    /// A variable read and then reassigned inside the same conditional branch is
+    /// used (the read observes the value defined before the branch). Block-level
+    /// liveness used to mark it dead because the branch block ends in the kill.
+    #[test]
+    fn test_var_read_then_reassigned_in_branch_is_used() {
+        let code = r#"Процедура Тест()
+    ПредыдущееЗначение = Неопределено;
+    Если Условие() Тогда
+        Сообщить(ПредыдущееЗначение);
+        ПредыдущееЗначение = 5;
+    КонецЕсли;
+КонецПроцедуры"#;
+
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UnusedLocalVariable, expect![[r#""#]]);
+    }
+
+    /// Same pattern inside a loop body: the value initialised before the loop is
+    /// read on the first iteration before being reassigned for the next one.
+    #[test]
+    fn test_var_read_then_reassigned_in_loop_is_used() {
+        let code = r#"Процедура Тест()
+    Предыдущее = Неопределено;
+    Для Сч = 1 По 3 Цикл
+        Сообщить(Предыдущее);
+        Предыдущее = Сч;
+    КонецЦикла;
+КонецПроцедуры"#;
+
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UnusedLocalVariable, expect![[r#""#]]);
+    }
+
+    /// A resource created, consumed through method calls, then cleared with a
+    /// trailing `= Неопределено` kill — the variable is used despite the block
+    /// ending in a dead store.
+    #[test]
+    fn test_var_used_via_method_before_trailing_kill() {
+        let code = r#"Процедура Тест()
+    ЗаписьТекста = Новый ЗаписьТекста("файл.txt");
+    ЗаписьТекста.Записать("привет");
+    ЗаписьТекста.Закрыть();
+    ЗаписьТекста = Неопределено;
 КонецПроцедуры"#;
 
         check_diagnostics_snapshot_for(code, DiagnosticCode::UnusedLocalVariable, expect![[r#""#]]);
