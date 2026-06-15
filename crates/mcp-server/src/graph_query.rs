@@ -116,6 +116,8 @@ fn edge_kind(kind: &str) -> &'static str {
         "register_movement" => "register_movement",
         "subsystem_membership" => "subsystem_membership",
         "role_reference" => "role_reference",
+        "register_records" => "register_records",
+        "register_record_set" => "register_record_set",
         _ => "call",
     }
 }
@@ -445,8 +447,9 @@ impl GraphDb {
                 }
             }
         }
-        let candidates = ide::rank_resolve_candidates(candidates.into_iter(), query, limit);
-        Ok(ide::ResolveResult { query: query.to_string(), candidates })
+        let (candidates, total) =
+            ide::rank_resolve_candidates(candidates.into_iter(), query, limit);
+        Ok(ide::ResolveResult::new(query, candidates, total))
     }
 
     fn in_degree(&self, id: &str) -> anyhow::Result<usize> {
@@ -495,6 +498,7 @@ impl GraphDb {
             module: n.module.clone(),
             signature: None,
             source: None,
+            truncated: false,
             dispatch: dispatch_labels(&n.dispatch),
             is_export: n.is_export,
             // Populated by `node()` for a `module` node (the member list); a separate

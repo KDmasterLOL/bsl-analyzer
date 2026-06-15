@@ -17,6 +17,7 @@ pub struct ModuleCallSummary {
     pub call_edges: Vec<CallEdge>,
     pub notify_regs: Vec<NotifyReg>,
     pub idle_handler_regs: Vec<IdleReg>,
+    pub set_action_regs: Vec<SetActionReg>,
     pub form_entries: Vec<FormEventEntry>,
 }
 
@@ -178,6 +179,26 @@ pub enum EdgeKind {
     /// impact analysis answer "which roles grant rights on / restrict this object" before
     /// deleting or renaming it.
     RoleReference,
+    /// A document declares it posts records into a register. From the document's
+    /// [`GraphNode::Mdo`] (type [`MdoType::Document`]) to the register's [`GraphNode::Mdo`].
+    /// Derived from configuration metadata (the document's `RegisterRecords`), not from code —
+    /// so it answers "which documents post this register" soundly even when the posting code
+    /// addresses the register dynamically (a string name into `РегистрыНакопления[…]` or a
+    /// `Движения[…]` index), which `register_movement` (literal `Движения.X.метод()`) cannot.
+    RegisterRecords,
+    /// Code reaches a register's record-set engine through a literal manager creator —
+    /// `РегистрыНакопления.<X>.СоздатьНаборЗаписей()` / `СоздатьМенеджерЗаписи()` (and the
+    /// English `CreateRecordSet` / `CreateRecordManager`). From the calling
+    /// `Method`/`ModuleCode` node to the register's [`GraphNode::Mdo`], provenance `inferred`.
+    ///
+    /// This is register record-set *access*, which is write-capable: a record set is the
+    /// engine through which non-document writers (typically common modules) post registers,
+    /// but the same engine can also be read (set a filter, `Прочитать`) without writing. It
+    /// is kept distinct from `manager_creates` (which would otherwise bury these among object
+    /// `СоздатьЭлемент` creations) so an impact analysis can ask "which code touches this
+    /// register via its record-set engine" — the code-level complement to `register_records`
+    /// (declared document posts) and `register_movement` (a registrator's `Движения`).
+    RegisterRecordSet,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -241,6 +262,18 @@ pub struct IdleReg {
     pub caller: CallerId,
     pub handler_name: Name,
     pub one_shot: bool,
+    pub range: TextRange,
+}
+
+/// An `Элементы.<Элемент>.УстановитьДействие("Событие", "Обработчик")` runtime event
+/// binding: the registering method links to the named handler in the current form
+/// module. Like [`IdleReg`]/[`NotifyReg`], the platform invokes the handler later, so it
+/// is a string-named dispatch reference, not a direct call. The handler always lives in
+/// the current module (a form element's action targets a form-module procedure).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetActionReg {
+    pub caller: CallerId,
+    pub handler_name: Name,
     pub range: TextRange,
 }
 
@@ -519,6 +552,7 @@ pub fn extract_call_summary(
     let mut call_edges = Vec::new();
     let mut notify_regs = Vec::new();
     let mut idle_handler_regs = Vec::new();
+    let mut set_action_regs = Vec::new();
 
     let mut sorted_ids: Vec<u32> = module_bodies.iter_lower_results().map(|(id, _)| id).collect();
     sorted_ids.sort_unstable();
@@ -536,6 +570,7 @@ pub fn extract_call_summary(
             &mut call_edges,
             &mut notify_regs,
             &mut idle_handler_regs,
+            &mut set_action_regs,
         );
     }
 
@@ -548,6 +583,7 @@ pub fn extract_call_summary(
             &mut call_edges,
             &mut notify_regs,
             &mut idle_handler_regs,
+            &mut set_action_regs,
         );
     }
 
@@ -559,9 +595,20 @@ pub fn extract_call_summary(
         })
         .collect();
 
-    ModuleCallSummary { methods, call_edges, notify_regs, idle_handler_regs, form_entries }
+    ModuleCallSummary {
+        methods,
+        call_edges,
+        notify_regs,
+        idle_handler_regs,
+        set_action_regs,
+        form_entries,
+    }
 }
 
+// One &mut accumulator per output list (call edges + the three string-named dispatch
+// registries) plus the read-only inputs; bundling them into a struct would only move the
+// same fields behind one more indirection.
+#[allow(clippy::too_many_arguments)]
 fn extract_from_body(
     body: &Body,
     source_map: &BodySourceMap,
@@ -570,6 +617,7 @@ fn extract_from_body(
     call_edges: &mut Vec<CallEdge>,
     notify_regs: &mut Vec<NotifyReg>,
     idle_handler_regs: &mut Vec<IdleReg>,
+    set_action_regs: &mut Vec<SetActionReg>,
 ) {
     let common_bindings = crate::common_module_ref::common_module_var_bindings(body);
     for (expr_id, expr) in body.exprs_iter() {
@@ -602,6 +650,13 @@ fn extract_from_body(
                         }
                     }
                     Expr::Field { base: field_base, field } => {
+                        if is_set_action(&field.as_str().fold_lower())
+                            && is_form_element_action_receiver(body, *field_base)
+                        {
+                            if let Some(reg) = extract_set_action_reg(body, caller, args, range) {
+                                set_action_regs.push(reg);
+                            }
+                        }
                         if let Some(edge) = field_callee_to_edge(
                             body,
                             caller,
@@ -658,6 +713,10 @@ fn is_attach_idle_handler(name_lower: &str) -> bool {
     name_lower == "подключитьобработчикожидания" || name_lower == "attachidlehandler"
 }
 
+fn is_set_action(name_lower: &str) -> bool {
+    name_lower == "установитьдействие" || name_lower == "setaction"
+}
+
 fn is_notify_description(name: &Name) -> bool {
     is_notify_description_str(name.as_str())
 }
@@ -711,6 +770,54 @@ fn extract_idle_reg(
         })
         .unwrap_or(false);
     Some(IdleReg { caller, handler_name: Name::new(&handler_name), one_shot, range })
+}
+
+/// Whether the receiver of `УстановитьДействие` plausibly denotes a form element (so the
+/// second string argument is an event-handler method name). `УстановитьДействие` is not a
+/// reserved name — a user can export a manager/object method by that spelling — so a
+/// manager access such as `Справочники.Номенклатура.УстановитьДействие("Опция", "Имя")` must
+/// NOT be read as a handler binding (its `"Имя"` is plain data).
+///
+/// Accepted: a bare path (a form element held in a variable, or `ЭтаФорма`/`ЭтотОбъект`) and
+/// any `Элементы[...]`/`Элементы.X` access. Rejected: a multi-level access rooted elsewhere
+/// (manager types like `Справочники`/`Документы`, or a qualified module). This keeps the
+/// real ERP shapes (`ЭлементФормы.УстановитьДействие`, `Элементы["Кол"+п].УстановитьДействие`,
+/// `ЭтаФорма.Элементы.X.УстановитьДействие`) while excluding manager-method calls.
+fn is_form_element_action_receiver(body: &Body, receiver: ExprIdx) -> bool {
+    match body.expr_idx(receiver) {
+        Expr::Path(_) => true,
+        Expr::Field { base, .. } | Expr::Index { base, .. } => is_form_items_rooted(body, *base),
+        _ => false,
+    }
+}
+
+/// Whether an access chain is rooted at the form-items collection (`Элементы` / `Items`).
+fn is_form_items_rooted(body: &Body, idx: ExprIdx) -> bool {
+    match body.expr_idx(idx) {
+        Expr::Path(name) => {
+            let lower = name.as_str().fold_lower();
+            lower == "элементы" || lower == "items"
+        }
+        Expr::Field { base, field } => {
+            let lower = field.as_str().fold_lower();
+            lower == "элементы" || lower == "items" || is_form_items_rooted(body, *base)
+        }
+        Expr::Index { base, .. } => is_form_items_rooted(body, *base),
+        _ => false,
+    }
+}
+
+/// `<ЭлементФормы>.УстановитьДействие("Событие", "Обработчик")` — the handler is the
+/// second argument's string literal (the first is the event name). A non-literal handler
+/// (a variable) yields nothing rather than an invented reg.
+fn extract_set_action_reg(
+    body: &Body,
+    caller: CallerId,
+    args: &[ExprIdx],
+    range: TextRange,
+) -> Option<SetActionReg> {
+    let handler_name = extract_string_literal(body, *args.get(1)?)?;
+    Some(SetActionReg { caller, handler_name: Name::new(&handler_name), range })
 }
 
 fn extract_notify_reg_at(
@@ -834,8 +941,63 @@ fn field_callee_to_edge(
                 None
             }
         }
+        Expr::Index { base, index } => {
+            // `[получатель.]Движения[<имя>].<метод>()` — a document movement touch addressed by
+            // a dynamic index rather than a literal path segment. Same relation as the literal
+            // `Движения.<Регистр>.<метод>()` (the register's metadata type is resolved later), so
+            // it reuses `RegisterMovement`. Only a locally-literal index resolves: a string
+            // literal register name or a `Метаданные.<РегистрыКоллекция>.<X>.Имя` chain. A
+            // variable index needs value flow and is left to a later tier.
+            if is_register_records(body.expr_idx(*base)) {
+                if let Some(register_name) = extract_literal_register_name(body, *index) {
+                    return Some(CallEdge {
+                        caller,
+                        target: CallTarget::RegisterMovement { register_name },
+                        kind: EdgeKind::RegisterMovement,
+                        range,
+                    });
+                }
+            }
+            None
+        }
         _ => None,
     }
+}
+
+/// Extract a locally-literal register name from a `Движения[<expr>]` index: a string literal
+/// (`Движения["ТоварыНаСкладах"]`) or a `Метаданные.<РегистрыКоллекция>.<X>.Имя` chain
+/// (`Движения[Метаданные.РегистрыНакопления.СебестоимостьТоваров.Имя]`). Any other expression —
+/// notably a variable — yields `None`; resolving it needs value flow (a later tier).
+fn extract_literal_register_name(body: &Body, idx: ExprIdx) -> Option<Name> {
+    match body.expr_idx(idx) {
+        Expr::Literal(Literal::String(s)) => Some(Name::new(s)),
+        Expr::Field { base, field } if is_name_property(field) => {
+            let Expr::Field { base: coll_base, field: register_name } = body.expr_idx(*base) else {
+                return None;
+            };
+            let Expr::Field { base: meta_base, field: collection } = body.expr_idx(*coll_base)
+            else {
+                return None;
+            };
+            let is_register_collection =
+                ManagerType::from_name(collection.as_str()).is_some_and(ManagerType::is_register);
+            (is_register_collection && is_metadata_root(body.expr_idx(*meta_base)))
+                .then(|| register_name.clone())
+        }
+        _ => None,
+    }
+}
+
+fn is_name_property(field: &Name) -> bool {
+    let lower = field.as_str().fold_lower();
+    lower == "имя" || lower == "name"
+}
+
+fn is_metadata_root(expr: &Expr) -> bool {
+    matches!(expr, Expr::Path(name) if {
+        let lower = name.as_str().fold_lower();
+        lower == "метаданные" || lower == "metadata"
+    })
 }
 
 fn extract_string_literal(body: &Body, idx: ExprIdx) -> Option<String> {
@@ -1428,6 +1590,67 @@ EndProcedure
     }
 
     #[test]
+    fn register_movement_dynamic_literal_index() {
+        // A document can address its `Движения` collection by a dynamic index instead of a
+        // literal segment. A locally-literal index resolves: a `Метаданные.…Имя` chain or a
+        // string literal. A variable index needs value flow and stays unmodelled.
+        let code = r#"
+Процедура ОбработкаПроведения(ИмяРегистра)
+    Движения[Метаданные.РегистрыНакопления.СебестоимостьТоваров.Имя].Записать();
+    Движения["Взаиморасчеты"].Очистить();
+    Движения[ИмяРегистра].Записать();
+КонецПроцедуры
+"#;
+        let summary = parse_and_extract(code);
+        let movement_registers: Vec<&str> = summary
+            .call_edges
+            .iter()
+            .filter_map(|e| match &e.target {
+                CallTarget::RegisterMovement { register_name } => Some(register_name.as_str()),
+                _ => None,
+            })
+            .collect();
+        // The literal chain and the string literal resolve; the variable index does not.
+        assert_eq!(movement_registers, ["СебестоимостьТоваров", "Взаиморасчеты"]);
+        assert!(summary
+            .call_edges
+            .iter()
+            .all(|e| !matches!(&e.target, CallTarget::RegisterMovement { .. })
+                || e.kind == EdgeKind::RegisterMovement));
+    }
+
+    #[test]
+    fn manager_edge_kind_classifies_register_record_set() {
+        use crate::queries::manager_edge_kind;
+        // Record-set creators on a register manager → RegisterRecordSet, in either language.
+        for method in ["СоздатьНаборЗаписей", "СоздатьМенеджерЗаписи", "CreateRecordSet"]
+        {
+            assert_eq!(
+                manager_edge_kind(ManagerType::AccumulationRegisters, method),
+                EdgeKind::RegisterRecordSet,
+                "{method} on a register manager is a record-set access"
+            );
+        }
+        // The same method name on a non-register manager stays a generic create.
+        assert_eq!(
+            manager_edge_kind(ManagerType::Catalogs, "СоздатьНаборЗаписей"),
+            EdgeKind::ManagerCreates
+        );
+        // Other register manager methods keep their generic create/access classification.
+        assert_eq!(
+            manager_edge_kind(
+                ManagerType::AccumulationRegisters,
+                "СоздатьМенеджерЗаписиНесуществующий"
+            ),
+            EdgeKind::ManagerCreates
+        );
+        assert_eq!(
+            manager_edge_kind(ManagerType::AccumulationRegisters, "Выбрать"),
+            EdgeKind::ManagerAccess
+        );
+    }
+
+    #[test]
     #[ignore = "known gap: a bare `Var = Движения.X` property read (no call) is not modelled \
                 — capturing the recordset into a variable needs receiver dataflow; tracked here"]
     fn register_movement_property_read_is_a_known_gap() {
@@ -1470,6 +1693,94 @@ EndProcedure
         let local_edges: Vec<_> =
             summary.call_edges.iter().filter(|e| e.kind == EdgeKind::DirectLocal).collect();
         assert!(local_edges.is_empty(), "Idle handler registration should not produce a call edge");
+    }
+
+    #[test]
+    fn test_set_action_reg_extracted() {
+        let code = r#"
+&НаСервере
+Процедура ПриСозданииНаСервере(Отказ, СтандартнаяОбработка)
+    Элементы.Валюта.УстановитьДействие("ПриИзменении", "ВалютаПриИзменении");
+КонецПроцедуры
+
+&НаКлиенте
+Процедура ВалютаПриИзменении(Элемент)
+КонецПроцедуры
+"#;
+        let summary = parse_and_extract(code);
+
+        assert_eq!(summary.set_action_regs.len(), 1);
+        assert_eq!(summary.set_action_regs[0].handler_name, Name::new("ВалютаПриИзменении"));
+        assert_eq!(summary.set_action_regs[0].caller, CallerId::Method(0));
+    }
+
+    #[test]
+    fn test_set_action_via_this_form_items_extracted() {
+        let code = r#"
+&НаСервере
+Процедура ПриСозданииНаСервере(Отказ, СтандартнаяОбработка)
+    ЭтаФорма.Элементы.Валюта.УстановитьДействие("ПриИзменении", "ВалютаПриИзменении");
+КонецПроцедуры
+"#;
+        let summary = parse_and_extract(code);
+        assert_eq!(summary.set_action_regs.len(), 1);
+        assert_eq!(summary.set_action_regs[0].handler_name, Name::new("ВалютаПриИзменении"));
+    }
+
+    #[test]
+    fn test_set_action_non_literal_handler_ignored() {
+        let code = r#"
+&НаСервере
+Процедура Настроить(ИмяОбработчика)
+    Элементы.Валюта.УстановитьДействие("ПриИзменении", ИмяОбработчика);
+КонецПроцедуры
+"#;
+        let summary = parse_and_extract(code);
+        assert!(summary.set_action_regs.is_empty());
+    }
+
+    #[test]
+    fn test_set_action_on_element_variable_extracted() {
+        // Real form code holds the item in a variable (`НовыйЭлемент = Элементы.Добавить(…)`)
+        // then binds via it. УстановитьДействие is form-element-specific, so the second
+        // string argument is a handler name regardless of the receiver's syntactic shape.
+        let code = r#"
+&НаКлиенте
+Процедура ДобавитьКолонку()
+    ЭлементФормы.УстановитьДействие("ПриИзменении", "КолонкаПриИзменении");
+КонецПроцедуры
+"#;
+        let summary = parse_and_extract(code);
+        assert_eq!(summary.set_action_regs.len(), 1);
+        assert_eq!(summary.set_action_regs[0].handler_name, Name::new("КолонкаПриИзменении"));
+    }
+
+    #[test]
+    fn test_set_action_dynamic_index_receiver_extracted() {
+        let code = r#"
+&НаКлиенте
+Процедура ДобавитьКолонку(Постфикс)
+    Элементы["Количество" + Постфикс].УстановитьДействие("ПриИзменении", "КоличествоПриИзменении");
+КонецПроцедуры
+"#;
+        let summary = parse_and_extract(code);
+        assert_eq!(summary.set_action_regs.len(), 1);
+        assert_eq!(summary.set_action_regs[0].handler_name, Name::new("КоличествоПриИзменении"));
+    }
+
+    #[test]
+    fn test_set_action_on_manager_receiver_ignored() {
+        // `УстановитьДействие` is not reserved: a user can export it on a manager module.
+        // `Справочники.X.УстановитьДействие("Опция", "Имя")` is such a call, not a form
+        // binding, so its second string is data and must not be recorded as a handler.
+        let code = r#"
+&НаСервере
+Процедура Настроить()
+    Справочники.Номенклатура.УстановитьДействие("Опция", "Имя");
+КонецПроцедуры
+"#;
+        let summary = parse_and_extract(code);
+        assert!(summary.set_action_regs.is_empty());
     }
 
     #[test]

@@ -890,3 +890,111 @@ fn parser_guard_panics_on_stuck_loop() {
         "expected STUCK diagnostic in guard panic, got: {panic_msg}"
     );
 }
+
+mod keyword_member_names {
+    use parser::parse;
+    use syntax::ast_utils::field_tail_name_token;
+    use syntax::SyntaxKind;
+
+    fn first_field_member(node: &syntax::SyntaxNode) -> Option<String> {
+        node.descendants()
+            .find(|n| n.kind() == SyntaxKind::FIELD_EXPR)
+            .and_then(|fe| field_tail_name_token(&fe))
+            .map(|tok| tok.text().to_string())
+    }
+
+    #[test]
+    fn same_line_keyword_members_parse_clean() {
+        // Real ERP patterns: BSL keywords used as member / enum-value names after '.'.
+        let input = r#"Процедура Тест()
+    ВСД.for = "id";
+    Для Каждого Ответ Из XDTOРезультат.return Цикл
+    КонецЦикла;
+    Результат = РассчитанноеУсловие(Условие.Иначе);
+    Значение = Перечисления.ТребованияКПодписаниюЭД.ИЛИ;
+    ТекущийЗапрос.Попытка = ТекущийЗапрос.Попытка + 1;
+КонецПроцедуры"#;
+        let result = parse(input);
+        assert!(!result.has_errors(), "keyword member names must parse without errors");
+        let errors: Vec<_> =
+            result.syntax_node().descendants().filter(|n| n.kind() == SyntaxKind::ERROR).collect();
+        assert!(errors.is_empty(), "no ERROR nodes expected, got: {errors:?}");
+    }
+
+    #[test]
+    fn noun_like_keyword_members_parse_clean() {
+        // Noun-like keywords are real field names in ERP and must be accepted as members.
+        let input = "Процедура Т()\n\tЕсли Не ПустаяСтрока(Выборка.Исключение) Тогда\n\t\tЭлементы.Исключение.Видимость = Ложь;\n\t\tСтрокаЗадачи.Цикл = ЗадачаXDTO.iterationNumber;\n\tКонецЕсли;\nКонецПроцедуры";
+        assert!(
+            !parse(input).has_errors(),
+            "Выборка.Исключение / Элементы.Исключение / СтрокаЗадачи.Цикл must parse clean"
+        );
+    }
+
+    #[test]
+    fn fluent_chain_keyword_member_parses_clean() {
+        // Member on the line after the receiver (dot starts the line) — common chain style.
+        let input = "Процедура Тест()\n\tЗначение = Запрос\n\t\t.Попытка;\nКонецПроцедуры";
+        assert!(!parse(input).has_errors(), "fluent-chain keyword member must parse clean");
+    }
+
+    #[test]
+    fn cross_newline_does_not_swallow_block_closer() {
+        // Dangling dot at end of line: a block-closing keyword on the next line must
+        // NOT be eaten as a member, so the enclosing block stays intact (recovery).
+        let input = "Функция A()\n\tX.\nКонецФункции\n\nФункция B()\n\tВозврат 1;\nКонецФункции\n";
+        let parse = parse(input);
+        assert!(parse.has_errors(), "dangling dot should report an error");
+        let fn_defs = parse
+            .syntax_node()
+            .descendants()
+            .filter(|n| n.kind() == SyntaxKind::FUNCTION_DEF)
+            .count();
+        assert_eq!(fn_defs, 2, "both functions must survive; КонецФункции must not be swallowed");
+    }
+
+    #[test]
+    fn keyword_member_name_is_extracted() {
+        let parse = parse("Процедура Т()\n\tВСД.for = 1;\nКонецПроцедуры");
+        let name = first_field_member(&parse.syntax_node());
+        assert_eq!(name.as_deref(), Some("for"), "keyword member text must be preserved");
+    }
+
+    #[test]
+    fn same_line_dangling_dot_recovery_is_bounded() {
+        // Any keyword after a dot is a member (BSL keywords aren't reserved as field
+        // names — real ERP code has Выборка.Исключение, СтрокаЗадачи.Цикл, etc.), so a
+        // same-line dangling dot before a control keyword does report a local error,
+        // but it must NOT cascade past the enclosing procedure.
+        let input = "Процедура Т()\n\tЕсли Объект. Тогда\n\t\tХ = 1;\n\tКонецЕсли;\nКонецПроцедуры\n\nПроцедура Вторая()\n\tВозврат;\nКонецПроцедуры";
+        let parse = parse(input);
+        assert!(parse.has_errors(), "same-line dangling dot should report an error");
+        let procs = parse
+            .syntax_node()
+            .descendants()
+            .filter(|n| n.kind() == SyntaxKind::PROCEDURE_DEF)
+            .count();
+        assert_eq!(procs, 2, "error must stay local — the second procedure must still be parsed");
+    }
+
+    #[test]
+    fn eof_after_dot_errors_cleanly() {
+        let parse = parse("Процедура Т()\n\tЗначение = Объект.\nКонецПроцедуры");
+        assert!(parse.has_errors(), "dangling dot before КонецПроцедуры must error");
+        assert!(
+            parse.syntax_node().descendants().any(|n| n.kind() == SyntaxKind::PROCEDURE_DEF),
+            "the procedure must still close (КонецПроцедуры not swallowed)"
+        );
+    }
+
+    #[test]
+    fn dangling_dot_before_declaration_still_recovers() {
+        // Orphaned-declaration guard: a dangling dot must NOT swallow the next method.
+        let input = "Результат = Объект.\nПроцедура Вторая()\nКонецПроцедуры";
+        let parse = parse(input);
+        assert!(parse.has_errors(), "dangling dot before a declaration should report an error");
+        let has_proc =
+            parse.syntax_node().descendants().any(|n| n.kind() == SyntaxKind::PROCEDURE_DEF);
+        assert!(has_proc, "the following Процедура must be recovered as a declaration, not eaten");
+    }
+}

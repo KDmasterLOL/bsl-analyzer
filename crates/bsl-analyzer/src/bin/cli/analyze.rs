@@ -66,6 +66,17 @@ impl ProfilingStats {
     }
 }
 
+/// Best-effort human-readable message from a caught panic payload.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "panic during analysis".to_string()
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn analyze(
     source_dir: PathBuf,
@@ -77,7 +88,7 @@ pub fn analyze(
     _incremental: bool,
     _changed_files: Option<Vec<PathBuf>>,
     _git_diff: Option<String>,
-    salsa: bool,
+    streaming: bool,
     workers: Option<usize>,
     format: OutputFormat,
     only_diagnostic: Option<String>,
@@ -89,19 +100,24 @@ pub fn analyze(
         None
     };
 
-    if salsa {
-        analyze_salsa(
+    if streaming {
+        tracing::warn!(
+            "The --streaming analyzer is deprecated and will be removed; Salsa is the default."
+        );
+        analyze_streaming(
             source_dir,
             workspace_dir,
             output_dir,
             config_path,
             reporters,
             quiet,
+            workers,
+            format,
             only_diagnostic,
             diff_filter,
         )
     } else {
-        analyze_streaming(
+        analyze_salsa(
             source_dir,
             workspace_dir,
             output_dir,
@@ -124,6 +140,8 @@ fn analyze_salsa(
     config_path: Option<PathBuf>,
     reporters: Vec<String>,
     quiet: bool,
+    workers: Option<usize>,
+    format: OutputFormat,
     only_diagnostic: Option<String>,
     diff_filter: Option<bsl_analyzer::diff_filter::DiffFilter>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -134,7 +152,9 @@ fn analyze_salsa(
     };
 
     use base_db::SourceDatabase;
+    use ide::streaming::FileMetrics;
     use ide::{DiagnosticsConfig, DiagnosticsContext, RootDatabaseImpl};
+    use ide_db::AnalysisProvider;
     use indicatif::{ProgressBar, ProgressStyle};
     use rayon::prelude::*;
     use vfs::FileId;
@@ -145,6 +165,17 @@ fn analyze_salsa(
     let _span = tracing::info_span!("cli_analyze").entered();
 
     let profiling_enabled = only_diagnostic.is_some();
+    let jsonl = matches!(format, OutputFormat::Jsonl);
+
+    // Honour `--workers` by sizing the global rayon pool before any rayon use
+    // (metadata load and the per-chunk `par_iter` both draw from it). Must run
+    // before `load_metadata`, which initialises the pool on first parallel read;
+    // best-effort because the pool can only be built once per process.
+    if let Some(w) = workers.filter(|w| *w > 0) {
+        if let Err(e) = rayon::ThreadPoolBuilder::new().num_threads(w).build_global() {
+            tracing::warn!("Failed to set worker count to {w}: {e}");
+        }
+    }
 
     tracing::info!("Analyzing project: {:?}", source_dir);
     tracing::info!("Reporters: {:?}", reporters);
@@ -253,7 +284,7 @@ fn analyze_salsa(
         rayon::current_num_threads()
     );
 
-    let progress = if !quiet {
+    let progress = if !quiet && !jsonl {
         let pb = ProgressBar::new(file_ids.len() as u64);
         pb.set_style(
             ProgressStyle::default_bar()
@@ -304,8 +335,20 @@ fn analyze_salsa(
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|n| *n > 0)
         .unwrap_or(500);
-    let mut results: Vec<(Option<FileAnalysis>, Option<FileTiming>)> =
-        Vec::with_capacity(file_ids.len());
+    // Only read complexity into the JSONL `metrics` field when BOTH complexity
+    // diagnostics are enabled: then both queries are warm during the chunk and
+    // reading them is a salsa cache hit (free). Requiring both (not either) is
+    // deliberate — `module_cyclomatic_query` builds CFGs, so if only the
+    // cognitive diagnostic ran the cyclomatic read would be a cold recompute.
+    // When either is off (e.g. `--only-diagnostic`, or disabled in config) the
+    // whole metrics block is skipped, keeping the run cost flat.
+    let emit_metrics = jsonl
+        && !config.is_disabled(ide::DiagnosticCode::CognitiveComplexity)
+        && !config.is_disabled(ide::DiagnosticCode::CyclomaticComplexity);
+
+    type FileResult =
+        (Option<FileAnalysis>, Option<FileTiming>, Option<FileMetrics>, Option<String>);
+    let mut results: Vec<FileResult> = Vec::with_capacity(file_ids.len());
     let report_mem = std::env::var_os("BSL_MEM_REPORT").is_some();
     let chunk_profile = std::env::var_os("BSL_CHUNK_PROFILE").is_some();
     // For modules with >= N methods, warm body inference in parallel before
@@ -318,13 +361,24 @@ fn analyze_salsa(
         Err(_) => Some(700),
     };
     let num_chunks = file_ids.len().div_ceil(chunk_size);
+
+    // The JSONL contract opens with a `start` event before any analysis. Salsa
+    // emits the `file`/`done` events as a batch once the chunked run finishes
+    // (it collects and evicts per chunk rather than streaming live), so only the
+    // opener is hoisted here; content and ordering still mirror the streaming path.
+    if jsonl {
+        use ide::streaming::StartEvent;
+
+        println!("{}", serde_json::to_string(&StartEvent::new(file_ids.len()))?);
+    }
+
     for (chunk_idx, chunk) in file_ids.chunks(chunk_size).enumerate() {
         // Per-chunk timing to separate the parallel phase from the serial tail
         // (the slowest single file's straggler wait) and the single-threaded
         // `enforce_lru` trim — the two work-starvation sources between chunks.
         let max_file_us = std::sync::atomic::AtomicU64::new(0);
         let par_start = std::time::Instant::now();
-        let mut chunk_results: Vec<(Option<FileAnalysis>, Option<FileTiming>)> = {
+        let mut chunk_results: Vec<FileResult> = {
             let config_path_input = configuration_path
                 .as_ref()
                 .map(|path| metadata::intern_configuration_path(&db, &path.to_string_lossy(), 0));
@@ -346,10 +400,35 @@ fn analyze_salsa(
                         match catch_unwind(AssertUnwindSafe(|| ide::compute_diagnostics(&ctx))) {
                             Ok(diags) => diags,
                             Err(e) => {
-                                tracing::error!("Panic analyzing {:?}: {:?}", path, e);
-                                return (None, None);
+                                let message = panic_message(e.as_ref());
+                                tracing::error!("Panic analyzing {:?}: {}", path, message);
+                                return (None, None, None, Some(message));
                             }
                         };
+
+                    // Read the already-memoised complexity for the JSONL `metrics`
+                    // field: when the complexity diagnostics are enabled they have
+                    // just run, so these queries are warm here (a salsa cache hit).
+                    // Computed before the per-chunk LRU eviction, since at the
+                    // output stage the memos are gone. `emit_metrics` is false for
+                    // non-JSONL output and when complexity is off, so neither the
+                    // reporter path nor a filtered profiling run pays anything.
+                    // Wrapped in its own panic boundary (like the diagnostics pass)
+                    // so a query panic drops only this file's metrics, not the chunk.
+                    let metrics = if emit_metrics {
+                        catch_unwind(AssertUnwindSafe(|| {
+                            let hir = provider.module_hir_metrics(*file_id);
+                            let cyclomatic = provider.module_cyclomatic(*file_id);
+                            FileMetrics {
+                                functions: hir.len(),
+                                complexity: cyclomatic.total(),
+                                cognitive_complexity: hir.total_cognitive(),
+                            }
+                        }))
+                        .ok()
+                    } else {
+                        None
+                    };
                     let elapsed = file_start.elapsed();
                     max_file_us.fetch_max(elapsed.as_micros() as u64, Ordering::Relaxed);
 
@@ -377,7 +456,14 @@ fn analyze_salsa(
                                     path,
                                     e
                                 );
-                                return (None, timing);
+                                return (
+                                    None,
+                                    timing,
+                                    metrics,
+                                    Some(format!(
+                                        "failed to read file for diagnostic conversion: {e}"
+                                    )),
+                                );
                             }
                         };
 
@@ -414,7 +500,7 @@ fn analyze_salsa(
                         None
                     };
 
-                    (file_analysis, timing)
+                    (file_analysis, timing, metrics, None)
                 })
                 .collect()
         };
@@ -462,11 +548,63 @@ fn analyze_salsa(
         report_salsa_memory(&db);
     }
 
-    let (file_analyses, timings): (Vec<_>, Vec<_>) = results.into_iter().unzip();
-    let all_diagnostics: Vec<FileAnalysis> = file_analyses.into_iter().flatten().collect();
-    let all_timings: Vec<FileTiming> = timings.into_iter().flatten().collect();
+    // Results are appended chunk-by-chunk in `file_ids` order, and rayon's
+    // indexed `par_iter().collect()` preserves within-chunk order, so
+    // `file_analyses[i]` / `metrics_list[i]` / `errors_list[i]` correspond to
+    // `file_ids[i]` — the JSONL path relies on this alignment to pair each file
+    // with its metrics and error.
+    let mut file_analyses: Vec<Option<FileAnalysis>> = Vec::with_capacity(results.len());
+    let mut all_timings: Vec<FileTiming> = Vec::new();
+    let mut metrics_list: Vec<Option<FileMetrics>> = Vec::with_capacity(results.len());
+    let mut errors_list: Vec<Option<String>> = Vec::with_capacity(results.len());
+    for (analysis, timing, metrics, error) in results {
+        file_analyses.push(analysis);
+        if let Some(timing) = timing {
+            all_timings.push(timing);
+        }
+        metrics_list.push(metrics);
+        errors_list.push(error);
+    }
 
-    let total_diagnostics: usize = all_diagnostics.iter().map(|f| f.diagnostics.len()).sum();
+    let total_diagnostics: usize =
+        file_analyses.iter().flatten().map(|f| f.diagnostics.len()).sum();
+
+    // JSONL emits one `file` event per analyzed file (clean files included),
+    // closed by `done`, mirroring the streaming `--format jsonl` contract (the
+    // `start` event was already emitted before analysis). `metrics` carries the
+    // real cyclomatic/cognitive complexity; `error` is set for files whose
+    // analysis panicked or whose text could not be read (so a crashed file is
+    // not silently reported as clean), and those are tallied into `done`'s
+    // `failed_files`.
+    if jsonl {
+        use ide::streaming::{DoneEvent, FileEvent};
+
+        let mut failed_files = 0;
+        for (i, (_, path)) in file_ids.iter().enumerate() {
+            let diagnostics =
+                file_analyses[i].as_ref().map(|f| f.diagnostics.clone()).unwrap_or_default();
+            let error = errors_list[i].clone();
+            if error.is_some() {
+                failed_files += 1;
+            }
+            let file_event = FileEvent::new(
+                path.display().to_string(),
+                diagnostics,
+                metrics_list[i].clone(),
+                error,
+            );
+            println!("{}", serde_json::to_string(&file_event)?);
+        }
+
+        let done_event =
+            DoneEvent::new(elapsed.as_secs_f64(), file_ids.len(), total_diagnostics, failed_files);
+        println!("{}", serde_json::to_string(&done_event)?);
+
+        tracing::info!("JSONL analysis complete");
+        return Ok(());
+    }
+
+    let all_diagnostics: Vec<FileAnalysis> = file_analyses.into_iter().flatten().collect();
 
     let analysis_results = AnalysisResults {
         files_analyzed: bsl_files.len(),

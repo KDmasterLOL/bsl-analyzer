@@ -377,7 +377,7 @@ mod tests {
 КонецПроцедуры"#,
             DiagnosticCode::JoinWithSubQuery,
             expect![[r#"
-                JoinWithSubQuery @ 6:27..14:16
+                JoinWithSubQuery @ 6:27..15:10
                   message: Не используйте соединение с подзапросами. Соединения с подзапросами вызывают серьезные проблемы с производительностью
                   severity: Warning"#]],
         );
@@ -400,7 +400,7 @@ mod tests {
 КонецПроцедуры"#,
             DiagnosticCode::JoinWithSubQuery,
             expect![[r#"
-                JoinWithSubQuery @ 6:27..10:16
+                JoinWithSubQuery @ 6:27..11:10
                   message: Не используйте соединение с подзапросами. Соединения с подзапросами вызывают серьезные проблемы с производительностью
                   severity: Warning"#]],
         );

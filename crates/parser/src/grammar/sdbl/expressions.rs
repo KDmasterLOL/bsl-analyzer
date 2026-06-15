@@ -621,8 +621,9 @@ fn column_or_function(p: &mut Parser) {
     p.skip_trivia();
 
     if p.at(TokenKind::Dot) {
-        while p.eat(TokenKind::Dot) {
-            p.skip_trivia();
+        while p.at(TokenKind::Dot) {
+            p.bump();
+            let crossed_newline = p.skip_trivia_crossing_newline();
 
             if p.at(TokenKind::LParen) {
                 inline_table_fields(p);
@@ -643,7 +644,17 @@ fn column_or_function(p: &mut Parser) {
                 break;
             }
 
-            if super::select::is_likely_clause_start_after_dot(p) {
+            // A keyword spelled right after a dot is a member name — SDBL keywords are
+            // not reserved as field names (`Объект.Конец`, `Объект.Выбор`, `Объект.Итоги`).
+            // Dangling-dot recovery is kept narrowly: across a newline any clause start
+            // is recovered, and on the same line only the alias separator AS/КАК — which
+            // is never a field name — breaks out instead of being swallowed.
+            let dangling_dot_recovery = if crossed_newline {
+                super::select::is_likely_clause_start_after_dot(p)
+            } else {
+                super::select::at_sdbl_keyword(p, "AS", "КАК")
+            };
+            if dangling_dot_recovery {
                 let err = p.start();
                 p.emit_error_at_marker(
                     err,
@@ -752,10 +763,13 @@ fn column_or_function(p: &mut Parser) {
         while p.at(TokenKind::Dot) {
             p.check_iteration_limit();
             p.bump();
-            p.skip_trivia();
+            let crossed_newline = p.skip_trivia_crossing_newline();
 
             if at_property_name(p) {
-                if super::select::is_clause_keyword(p) {
+                // Same-line keyword after a dot is a member name; across a newline a
+                // clause keyword is a dangling-dot recovery point. See the column-ref
+                // dot loop above.
+                if crossed_newline && super::select::is_clause_keyword(p) {
                     let err = p.start();
                     p.emit_error_at_marker(
                         err,

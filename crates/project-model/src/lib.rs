@@ -88,32 +88,150 @@ impl Project {
         &self.extension_paths
     }
 
+    /// Resolves the extension source roots. With no `extensions` configured this
+    /// auto-discovers the conventional `src/cfe/*` layout (mirroring how the main
+    /// configuration is found under `src/cf` without any setting); an explicit list
+    /// — entries may use a final-segment `*` glob — takes over and disables discovery.
     fn resolve_extensions(root: &Path, config: &ProjectConfig) -> Vec<(String, PathBuf)> {
-        config
-            .extensions
-            .iter()
-            .filter_map(|ext_path_str| {
-                let path = root.join(ext_path_str);
-                if !path.exists() {
-                    tracing::warn!(path = %path.display(), "extension path not found, skipping");
-                    return None;
+        let candidates: Vec<PathBuf> = match &config.extensions {
+            // Unset → mirror main-config zero-config discovery. An explicit list
+            // (including an empty one, i.e. opt-out) is taken as authoritative.
+            None => Self::auto_discover_extensions(root),
+            Some(list) => {
+                let mut c = Vec::new();
+                for ext_path_str in list {
+                    if ext_path_str.contains('*') {
+                        c.extend(expand_extension_glob(root, ext_path_str));
+                    } else {
+                        c.push(root.join(ext_path_str));
+                    }
                 }
-                if !path.join("Configuration.xml").exists() {
-                    tracing::warn!(
-                        path = %path.display(),
-                        "extension has no Configuration.xml, skipping"
-                    );
-                    return None;
-                }
-                let name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| ext_path_str.clone());
-                tracing::info!(name = %name, path = %path.display(), "resolved extension");
-                Some((name, path))
-            })
-            .collect()
+                c
+            }
+        };
+
+        let mut resolved: Vec<(String, PathBuf)> = Vec::new();
+        let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+        for path in candidates {
+            // Dedup on the real path so textual variants (`./src/cfe/Foo` and the
+            // glob-produced `src/cfe/Foo`) collapse to one source root.
+            let key = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+            if !seen.insert(key) {
+                continue;
+            }
+            let label = path.to_string_lossy().into_owned();
+            if let Some(entry) = Self::validate_extension(&label, path) {
+                resolved.push(entry);
+            }
+        }
+        resolved
     }
+
+    /// Zero-config extension discovery: the first conventional extensions directory
+    /// that exists wins, contributing each of its immediate child directories as a
+    /// candidate (later validated for `Configuration.xml`).
+    fn auto_discover_extensions(root: &Path) -> Vec<PathBuf> {
+        for parent in ["src/cfe", "cfe"] {
+            if root.join(parent).is_dir() {
+                let found = expand_extension_glob(root, &format!("{parent}/*"));
+                tracing::info!(parent, count = found.len(), "auto-discovered extension candidates");
+                return found;
+            }
+        }
+        Vec::new()
+    }
+
+    fn validate_extension(ext_path_str: &str, path: PathBuf) -> Option<(String, PathBuf)> {
+        if !path.exists() {
+            tracing::warn!(path = %path.display(), "extension path not found, skipping");
+            return None;
+        }
+        if !path.join("Configuration.xml").exists() {
+            tracing::warn!(
+                path = %path.display(),
+                "extension has no Configuration.xml, skipping"
+            );
+            return None;
+        }
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| ext_path_str.to_string());
+        tracing::info!(name = %name, path = %path.display(), "resolved extension");
+        Some((name, path))
+    }
+}
+
+/// Expands an `extensions` entry whose final path segment contains `*`
+/// (e.g. `src/cfe/*` or `src/cfe/БУС_*`) into every immediate child directory
+/// of the parent that matches the wildcard. The wildcard is only honoured in
+/// the last segment; results are sorted for deterministic source-root ordering.
+fn expand_extension_glob(root: &Path, pattern: &str) -> Vec<PathBuf> {
+    let normalized = pattern.replace('\\', "/");
+    let (parent_rel, name_pattern) = match normalized.rsplit_once('/') {
+        Some((parent, name)) => (parent, name),
+        None => ("", normalized.as_str()),
+    };
+    // The wildcard must live solely in the final segment. This rejects a parent
+    // wildcard (`src/*/Foo`) and a trailing slash (`src/cfe/*/` → empty final
+    // segment), both of which would otherwise fall through to a literal `read_dir`
+    // and silently resolve nothing.
+    if parent_rel.contains('*') || !name_pattern.contains('*') {
+        tracing::warn!(
+            pattern = %pattern,
+            "extension glob supports a wildcard only in the final path segment, skipping"
+        );
+        return Vec::new();
+    }
+    let parent_dir = if parent_rel.is_empty() { root.to_path_buf() } else { root.join(parent_rel) };
+    let entries = match std::fs::read_dir(&parent_dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            tracing::warn!(
+                path = %parent_dir.display(),
+                error = %e,
+                "extension glob parent directory not readable, skipping"
+            );
+            return Vec::new();
+        }
+    };
+    let mut matched: Vec<PathBuf> = entries
+        .flatten()
+        .filter(|entry| entry.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .filter(|entry| wildcard_matches(name_pattern, &entry.file_name().to_string_lossy()))
+        .map(|entry| entry.path())
+        .collect();
+    matched.sort();
+    matched
+}
+
+/// Case-insensitive single-segment wildcard match where `*` matches any run of
+/// characters (including empty). Supports multiple `*` (e.g. `*_UT`, `БУС_*`).
+fn wildcard_matches(pattern: &str, name: &str) -> bool {
+    let pat: Vec<char> = pattern.chars().flat_map(char::to_lowercase).collect();
+    let text: Vec<char> = name.chars().flat_map(char::to_lowercase).collect();
+    let (mut p, mut t) = (0usize, 0usize);
+    let (mut star, mut star_t) = (None, 0usize);
+    while t < text.len() {
+        if p < pat.len() && pat[p] == '*' {
+            star = Some(p);
+            star_t = t;
+            p += 1;
+        } else if p < pat.len() && pat[p] == text[t] {
+            p += 1;
+            t += 1;
+        } else if let Some(sp) = star {
+            p = sp + 1;
+            star_t += 1;
+            t = star_t;
+        } else {
+            return false;
+        }
+    }
+    while p < pat.len() && pat[p] == '*' {
+        p += 1;
+    }
+    p == pat.len()
 }
 
 fn search_configuration_xml(root: &Path, max_depth: usize) -> Option<PathBuf> {
@@ -175,8 +293,11 @@ pub struct ProjectConfig {
     #[serde(default)]
     pub language: Option<String>,
 
+    /// Configuration extensions. `None` (unset) auto-discovers the conventional
+    /// `src/cfe/*` layout; `Some([])` is an explicit opt-out (no extensions);
+    /// a non-empty list is taken verbatim (entries may use a final-segment `*` glob).
     #[serde(default)]
-    pub extensions: Vec<String>,
+    pub extensions: Option<Vec<String>>,
 
     #[serde(default)]
     pub search: SearchConfig,
@@ -836,7 +957,7 @@ struct TomlSourceConfig {
     #[serde(default)]
     root: Option<String>,
     #[serde(default)]
-    extensions: Vec<String>,
+    extensions: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1338,9 +1459,10 @@ mod tests {
     use super::{
         branch_pattern_matches, current_git_branch, current_git_commit,
         evaluate_workspace_baseline_support, is_publish_branch_allowed, parse_timestamp_utc,
-        resolve_postgres_url, resolve_workspace_branch_policy, FeaturesConfig, PostgresAccessMode,
-        ProjectConfig, ResolvePostgresUrlError, SearchBaselineBackend, SearchBaselinePolicyConfig,
-        SearchBaselineSupportState, SearchPostgresConfig, SearchPostgresCredentialHelperConfig,
+        resolve_postgres_url, resolve_workspace_branch_policy, wildcard_matches, FeaturesConfig,
+        PostgresAccessMode, Project, ProjectConfig, ResolvePostgresUrlError, SearchBaselineBackend,
+        SearchBaselinePolicyConfig, SearchBaselineSupportState, SearchPostgresConfig,
+        SearchPostgresCredentialHelperConfig,
     };
     use chrono::{Duration, TimeZone, Utc};
     use std::fs;
@@ -1662,7 +1784,10 @@ extensions = ["src/cfe/BMS_RU_UT", "src/cfe/YAxUnit"]
         let config: super::TomlConfig = toml::from_str(toml_str).unwrap();
         let project = ProjectConfig::from(config);
         assert_eq!(project.configuration_root.as_deref(), Some("src/cf"));
-        assert_eq!(project.extensions, vec!["src/cfe/BMS_RU_UT", "src/cfe/YAxUnit"]);
+        assert_eq!(
+            project.extensions,
+            Some(vec!["src/cfe/BMS_RU_UT".to_string(), "src/cfe/YAxUnit".to_string()])
+        );
     }
 
     #[test]
@@ -1678,6 +1803,177 @@ root = "src/cf"
             result.is_err(),
             "top-level extensions must be rejected; use [source].extensions instead"
         );
+    }
+
+    fn touch_extension(root: &std::path::Path, rel: &str) {
+        let dir = root.join(rel);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Configuration.xml"), "<xml/>").unwrap();
+    }
+
+    #[test]
+    fn extension_glob_expands_to_all_subdirs_with_configuration_xml() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        touch_extension(root, "src/cfe/BMS_RU_UT");
+        touch_extension(root, "src/cfe/YAxUnit");
+        // A cfe subdir without Configuration.xml must be skipped.
+        std::fs::create_dir_all(root.join("src/cfe/NotAnExtension")).unwrap();
+
+        let config =
+            ProjectConfig { extensions: Some(vec!["src/cfe/*".to_string()]), ..Default::default() };
+        let resolved = Project::resolve_extensions(root, &config);
+
+        let names: Vec<&str> = resolved.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["BMS_RU_UT", "YAxUnit"]);
+    }
+
+    #[test]
+    fn extension_glob_honours_prefix_wildcard() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        touch_extension(root, "src/cfe/БУС_ОбменДанными");
+        touch_extension(root, "src/cfe/YAxUnit");
+
+        let config = ProjectConfig {
+            extensions: Some(vec!["src/cfe/БУС_*".to_string()]),
+            ..Default::default()
+        };
+        let resolved = Project::resolve_extensions(root, &config);
+
+        let names: Vec<&str> = resolved.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["БУС_ОбменДанными"]);
+    }
+
+    #[test]
+    fn extension_glob_and_explicit_paths_dedup() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        touch_extension(root, "src/cfe/BMS_RU_UT");
+
+        let config = ProjectConfig {
+            extensions: Some(vec!["src/cfe/*".to_string(), "src/cfe/BMS_RU_UT".to_string()]),
+            ..Default::default()
+        };
+        let resolved = Project::resolve_extensions(root, &config);
+        assert_eq!(resolved.len(), 1, "the same extension must not be added twice");
+    }
+
+    #[test]
+    fn extensions_auto_discovered_from_src_cfe_when_unset() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        touch_extension(root, "src/cfe/BMS_RU_UT");
+        touch_extension(root, "src/cfe/YAxUnit");
+        std::fs::create_dir_all(root.join("src/cfe/NotAnExtension")).unwrap();
+
+        // No `extensions` setting at all → discover every src/cfe child with Configuration.xml.
+        let config = ProjectConfig::default();
+        let resolved = Project::resolve_extensions(root, &config);
+
+        let names: Vec<&str> = resolved.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["BMS_RU_UT", "YAxUnit"]);
+    }
+
+    #[test]
+    fn extensions_auto_discovery_falls_back_to_bare_cfe() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        touch_extension(root, "cfe/SomeExt");
+
+        let resolved = Project::resolve_extensions(root, &ProjectConfig::default());
+        let names: Vec<&str> = resolved.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["SomeExt"]);
+    }
+
+    #[test]
+    fn explicit_extensions_disable_auto_discovery() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        touch_extension(root, "src/cfe/BMS_RU_UT");
+        touch_extension(root, "src/cfe/YAxUnit");
+
+        // An explicit list must win, even when it points elsewhere — no src/cfe sweep.
+        let config = ProjectConfig {
+            extensions: Some(vec!["src/cfe/YAxUnit".to_string()]),
+            ..Default::default()
+        };
+        let resolved = Project::resolve_extensions(root, &config);
+        let names: Vec<&str> = resolved.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["YAxUnit"]);
+    }
+
+    #[test]
+    fn explicit_empty_extensions_opt_out_of_discovery() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        touch_extension(root, "src/cfe/BMS_RU_UT");
+
+        // `extensions = []` is an explicit opt-out and must NOT auto-discover src/cfe.
+        let config = ProjectConfig { extensions: Some(vec![]), ..Default::default() };
+        let resolved = Project::resolve_extensions(root, &config);
+        assert!(resolved.is_empty(), "explicit empty list must disable auto-discovery");
+    }
+
+    #[test]
+    fn toml_distinguishes_unset_from_empty_extensions() {
+        let unset: super::TomlConfig = toml::from_str("[source]\nroot = \"src/cf\"\n").unwrap();
+        assert_eq!(ProjectConfig::from(unset).extensions, None, "unset → None (discovery)");
+
+        let empty: super::TomlConfig =
+            toml::from_str("[source]\nroot = \"src/cf\"\nextensions = []\n").unwrap();
+        assert_eq!(ProjectConfig::from(empty).extensions, Some(vec![]), "[] → Some([]) (opt-out)");
+    }
+
+    #[test]
+    fn no_extensions_when_no_cfe_dir() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        touch_extension(root, "src/cf"); // main config only, no extensions dir
+
+        let resolved = Project::resolve_extensions(root, &ProjectConfig::default());
+        assert!(resolved.is_empty());
+    }
+
+    #[test]
+    fn extension_glob_rejects_wildcard_outside_final_segment() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        touch_extension(root, "src/cfe/BMS_RU_UT");
+
+        // Trailing slash (empty final segment) and parent-segment wildcards are
+        // unsupported and must resolve nothing rather than silently misbehave.
+        for pat in ["src/cfe/*/", "src/*/BMS_RU_UT"] {
+            let config =
+                ProjectConfig { extensions: Some(vec![pat.to_string()]), ..Default::default() };
+            let resolved = Project::resolve_extensions(root, &config);
+            assert!(resolved.is_empty(), "pattern {pat} must resolve no extensions");
+        }
+    }
+
+    #[test]
+    fn extension_glob_dedups_dot_slash_against_glob() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        touch_extension(root, "src/cfe/BMS_RU_UT");
+
+        let config = ProjectConfig {
+            extensions: Some(vec!["src/cfe/*".to_string(), "./src/cfe/BMS_RU_UT".to_string()]),
+            ..Default::default()
+        };
+        let resolved = Project::resolve_extensions(root, &config);
+        assert_eq!(resolved.len(), 1, "`./`-prefixed literal must dedup against the glob result");
+    }
+
+    #[test]
+    fn wildcard_matches_basic_cases() {
+        assert!(wildcard_matches("*", "anything"));
+        assert!(wildcard_matches("БУС_*", "БУС_ОбщегоНазначения"));
+        assert!(wildcard_matches("*_UT", "BMS_RU_UT"));
+        assert!(wildcard_matches("a*b*c", "axxbyyc"));
+        assert!(wildcard_matches("bms_ru_ut", "BMS_RU_UT")); // case-insensitive
+        assert!(!wildcard_matches("БУС_*", "YAxUnit"));
+        assert!(!wildcard_matches("a*b", "axxc"));
     }
 
     #[test]

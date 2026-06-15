@@ -271,7 +271,9 @@ fn selected_field_alias(p: &mut Parser) {
     eat_sdbl_keyword(p, "AS", "КАК");
     p.skip_trivia();
 
-    if is_clause_keyword(p) {
+    // SDBL keywords are not reserved as alias names: `КАК Итоги`, `AS Inner` are
+    // valid field aliases. See `source_alias` for the rationale.
+    if is_body_clause_keyword(p) {
         let err = p.start();
         p.emit_error_at_marker(
             err,
@@ -422,7 +424,11 @@ fn source_alias(p: &mut Parser) {
     eat_sdbl_keyword(p, "AS", "КАК");
     p.skip_trivia();
 
-    if is_clause_keyword(p) {
+    // SDBL keywords are not reserved as alias names: `КАК Итоги`, `AS Inner` are
+    // valid source aliases, recognised here because clause keywords are matched by
+    // text on `Ident` tokens. Only a primary body clause after AS signals an omitted
+    // alias and is left for its clause parser.
+    if is_body_clause_keyword(p) {
         let err = p.start();
         p.emit_error_at_marker(
             err,
@@ -614,6 +620,22 @@ pub(super) fn is_likely_clause_start_after_dot(p: &Parser) -> bool {
 
 pub(super) fn is_query_starter_or_combiner_keyword(p: &Parser) -> bool {
     at_sdbl_keyword(p, "SELECT", "ВЫБРАТЬ") || at_sdbl_keyword(p, "UNION", "ОБЪЕДИНИТЬ")
+}
+
+// Primary clause keywords that begin a new query section. When one of these
+// appears where an alias is expected the alias was almost certainly omitted, so
+// the alias parser leaves the keyword for its clause instead of swallowing it.
+// `ИТОГИ`, join keywords and `ПО`/`ДЛЯ`/`ИНДЕКСИРОВАТЬ` are excluded: they are
+// valid alias names (`КАК Итоги`, `AS Inner`) and not reserved.
+pub(super) fn is_body_clause_keyword(p: &Parser) -> bool {
+    at_sdbl_keyword(p, "SELECT", "ВЫБРАТЬ")
+        || at_sdbl_keyword(p, "FROM", "ИЗ")
+        || at_sdbl_keyword(p, "WHERE", "ГДЕ")
+        || at_sdbl_keyword(p, "GROUP", "СГРУППИРОВАТЬ")
+        || at_sdbl_keyword(p, "HAVING", "ИМЕЮЩИЕ")
+        || at_sdbl_keyword(p, "ORDER", "УПОРЯДОЧИТЬ")
+        || at_sdbl_keyword(p, "UNION", "ОБЪЕДИНИТЬ")
+        || at_sdbl_keyword(p, "INTO", "ПОМЕСТИТЬ")
 }
 
 fn group_by_clause(p: &mut Parser) {

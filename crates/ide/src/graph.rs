@@ -23,9 +23,10 @@ use hir::call_graph::{EdgeKind, MethodDispatch};
 use hir::graph_index::{
     display_scope, encode_scope, form_qualified_prefix, form_scope, project_batch_call_edges,
     project_batch_form_edges, project_batch_query_edges, project_form_binding_edges,
-    project_workspace_catalog_edges, project_workspace_role_edges,
-    project_workspace_subscription_edges, project_workspace_subsystem_edges, EdgeRow,
-    GraphBuildState, GraphIndex, GraphRowEncoder, NodeRow,
+    project_workspace_catalog_edges, project_workspace_register_records_edges,
+    project_workspace_role_edges, project_workspace_subscription_edges,
+    project_workspace_subsystem_edges, EdgeRow, GraphBuildState, GraphIndex, GraphRowEncoder,
+    NodeRow,
 };
 use hir::{
     module_key_for_path, ConfigsDatabase, DefDatabase, GraphNode, MethodId, ModuleId, ModuleIndex,
@@ -78,6 +79,13 @@ pub struct NodeRef {
     pub signature: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// The `source` (a `detail=bodies` body) was cut short — or, when `source` is
+    /// absent, dropped entirely — to stay within the output budget. Mirrors
+    /// [`SourceItem::truncated`] so a truncated body is not mistaken for a complete
+    /// one (or a dropped body for a method with no body) without reading the
+    /// envelope. Set by the serving budget pass, never at projection time.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub dispatch: Vec<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -883,6 +891,16 @@ pub fn build_workspace_graph_rows(
         emit(&edges, &mut summary, &mut seen_aux, sink)?;
     }
 
+    // Phase I — `register_records` edges: each document → every register it declares it posts
+    // (its `RegisterRecords` metadata). Config-level, pure metadata, sharing `state` so register
+    // names canonicalize to the same spelling as their own nodes. Full-build only, like the
+    // metadata passes above.
+    if let Some(first) = modules.chunks(batch_size).next() {
+        let db = open_batch(first);
+        let edges = project_workspace_register_records_edges(&db, first[0].file_id, &mut state);
+        emit(&edges, &mut summary, &mut seen_aux, sink)?;
+    }
+
     // After both passes the canonicalization state knows every object's spelling(s);
     // record the inconsistently-cased ones for the incremental fast-path gate. Sorted
     // so the persisted set is deterministic across builds (the raw `FxHashSet` order
@@ -1405,6 +1423,7 @@ impl<'a> GraphCtx<'a> {
                     module: None,
                     signature: None,
                     source: None,
+                    truncated: false,
                     dispatch: Vec::new(),
                     is_export: None,
                     methods: None,
@@ -1423,6 +1442,7 @@ impl<'a> GraphCtx<'a> {
                 module: None,
                 signature: None,
                 source: None,
+                truncated: false,
                 dispatch: Vec::new(),
                 is_export: None,
                 methods: None,
@@ -1441,6 +1461,7 @@ impl<'a> GraphCtx<'a> {
                 module: None,
                 signature: None,
                 source: None,
+                truncated: false,
                 dispatch: Vec::new(),
                 is_export: None,
                 methods: None,
@@ -1459,6 +1480,7 @@ impl<'a> GraphCtx<'a> {
                 module: None,
                 signature: None,
                 source: None,
+                truncated: false,
                 dispatch: Vec::new(),
                 is_export: None,
                 methods: None,
@@ -1477,6 +1499,7 @@ impl<'a> GraphCtx<'a> {
                 module: None,
                 signature: None,
                 source: None,
+                truncated: false,
                 dispatch: Vec::new(),
                 is_export: None,
                 methods: None,
@@ -1501,6 +1524,7 @@ impl<'a> GraphCtx<'a> {
                 module: None,
                 signature: None,
                 source: None,
+                truncated: false,
                 dispatch: Vec::new(),
                 is_export: None,
                 methods: None,
@@ -1526,6 +1550,7 @@ impl<'a> GraphCtx<'a> {
             module: None,
             signature: None,
             source: None,
+            truncated: false,
             dispatch: Vec::new(),
             is_export: None,
             methods: None,
@@ -1557,6 +1582,7 @@ impl<'a> GraphCtx<'a> {
             module: module_display,
             signature: None,
             source: None,
+            truncated: false,
             dispatch,
             is_export: Some(m.is_export()),
             methods: None,
@@ -1590,6 +1616,7 @@ impl<'a> GraphCtx<'a> {
             module: display,
             signature: None,
             source: None,
+            truncated: false,
             dispatch: self
                 .graph
                 .dispatch(&GraphNode::ModuleCode(module))
@@ -1803,7 +1830,7 @@ impl<'a> GraphCtx<'a> {
     /// (wrong casing, bare method/object name, or partial id), so an agent can recover a
     /// canonical id from a `not_found` without guessing.
     fn resolve(&self, query: &str, limit: usize) -> ResolveResult {
-        let candidates = rank_resolve_candidates(
+        let (candidates, total) = rank_resolve_candidates(
             self.graph.nodes().map(|node| {
                 let (id, _) = self.encode_node(&node);
                 (id, graph_node_kind(&node))
@@ -1811,7 +1838,7 @@ impl<'a> GraphCtx<'a> {
             query,
             limit,
         );
-        ResolveResult { query: query.to_string(), candidates }
+        ResolveResult::new(query, candidates, total)
     }
 
     fn neighbors(&self, params: &NeighborsParams<'_>) -> Result<NeighborsResult, GraphError> {
@@ -2079,19 +2106,40 @@ pub struct ResolveCandidate {
 pub struct ResolveResult {
     pub query: String,
     pub candidates: Vec<ResolveCandidate>,
+    /// Total distinct candidates matched before the `limit` cap. `candidates` is the
+    /// top-`limit` slice; `total` lets an agent see that a frequent name has many more
+    /// matches than shown, instead of treating the capped list as exhaustive.
+    pub total: usize,
+    /// `true` when the cap dropped candidates (`total` exceeds `candidates.len()`), so the
+    /// shown list is a partial view — refine the query or use `search_code`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+}
+
+impl ResolveResult {
+    /// Assemble a result from the ranker output (`candidates` already capped, `total` the
+    /// pre-cap match count), deriving `truncated` from the two.
+    pub fn new(query: &str, candidates: Vec<ResolveCandidate>, total: usize) -> Self {
+        let truncated = total > candidates.len();
+        Self { query: query.to_string(), candidates, total, truncated }
+    }
 }
 
 /// Rank durable ids against an imprecise `query`, strongest match first then id-ascending,
 /// capped at `limit`. Both serve paths (in-memory [`Analysis::graph_resolve`] and SQLite)
 /// feed their full `(id, kind)` node set through this one ranker, so the candidate lists
 /// stay byte-identical regardless of scan order. An empty `query` matches nothing.
+///
+/// Returns the top-`limit` candidates together with the total number of distinct matches
+/// before the cap, so a frequent name (thousands of `ПриСозданииНаСервере`) is not silently
+/// presented as if the top 20 were the whole set.
 pub fn rank_resolve_candidates(
     nodes: impl Iterator<Item = (String, &'static str)>,
     query: &str,
     limit: usize,
-) -> Vec<ResolveCandidate> {
+) -> (Vec<ResolveCandidate>, usize) {
     if query.is_empty() {
-        return Vec::new();
+        return (Vec::new(), 0);
     }
     let q_lower = query.fold_lower();
     let mut ranked: Vec<(u8, ResolveCandidate)> = nodes
@@ -2110,9 +2158,10 @@ pub fn rank_resolve_candidates(
             Some((rank, ResolveCandidate { id, kind, match_kind }))
         })
         .collect();
+    let total = ranked.len();
     ranked.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.id.cmp(&b.1.id)));
     ranked.truncate(limit);
-    ranked.into_iter().map(|(_, c)| c).collect()
+    (ranked.into_iter().map(|(_, c)| c).collect(), total)
 }
 
 /// The agent-facing kind label for a [`GraphNode`], matching the SQLite serve path's
@@ -2292,7 +2341,12 @@ pub fn classify_graph_id(id: &str) -> Result<GraphIdKind, GraphError> {
     let (is_method, rest) = match parts.first().copied() {
         Some("method") => (true, &parts[1..]),
         Some("module") => (false, &parts[1..]),
-        _ => return Err(bad("id must start with 'method/' or 'module/'")),
+        _ => {
+            return Err(bad(
+                "unknown id prefix; expected one of: method/, module/, mdo/, attribute/, \
+                 ts_attr/, tabular_section/, form/, form_attr/, form_item/",
+            ))
+        }
     };
     let (scope, method) = decode_scope(rest, is_method).ok_or_else(|| bad("malformed scope"))?;
     Ok(match method {
@@ -2407,6 +2461,8 @@ fn edge_kind_label(kind: EdgeKind) -> &'static str {
         EdgeKind::RegisterMovement => "register_movement",
         EdgeKind::SubsystemMembership => "subsystem_membership",
         EdgeKind::RoleReference => "role_reference",
+        EdgeKind::RegisterRecords => "register_records",
+        EdgeKind::RegisterRecordSet => "register_record_set",
     }
 }
 
@@ -2648,6 +2704,16 @@ mod tests {
                 matches!(classify_graph_id(bad), Err(GraphError::BadId { .. })),
                 "{bad} must be BadId"
             );
+        }
+
+        // An unknown top-level prefix must not steer the caller toward only
+        // method/module — every accepted prefix is listed so the agent learns the
+        // full vocabulary.
+        let Err(GraphError::BadId { reason, .. }) = classify_graph_id("widget/Catalog/X") else {
+            panic!("unknown prefix must be BadId");
+        };
+        for kind in ["method/", "module/", "mdo/", "attribute/", "form/"] {
+            assert!(reason.contains(kind), "reason must mention {kind}; got: {reason}");
         }
     }
 
@@ -3209,13 +3275,13 @@ mod tests {
         };
 
         // Exact id wins outright.
-        let exact = rank_resolve_candidates(nodes(), "method/common/Сервер/Считать", 10);
+        let (exact, _) = rank_resolve_candidates(nodes(), "method/common/Сервер/Считать", 10);
         assert_eq!(exact[0].id, "method/common/Сервер/Считать");
         assert_eq!(exact[0].match_kind, "exact");
 
         // A bare name matches both case-spellings as `name` (id-ascending), ahead of the
         // `substring`-only `СчитатьВсё`.
-        let by_name = rank_resolve_candidates(nodes(), "Считать", 10);
+        let (by_name, _) = rank_resolve_candidates(nodes(), "Считать", 10);
         let labels: Vec<_> =
             by_name.iter().map(|c| (c.id.as_str(), c.match_kind, c.kind)).collect();
         assert_eq!(
@@ -3227,10 +3293,30 @@ mod tests {
             ],
         );
 
-        // The cap is honoured.
-        assert_eq!(rank_resolve_candidates(nodes(), "common", 2).len(), 2);
-        // Empty query matches nothing.
-        assert!(rank_resolve_candidates(nodes(), "", 10).is_empty());
+        // The cap is honoured, and `total` reports the pre-cap match count so the caller
+        // can tell the shown list is partial.
+        let (capped, total) = rank_resolve_candidates(nodes(), "common", 2);
+        assert_eq!(capped.len(), 2);
+        assert_eq!(total, 4, "all four ids contain 'common'");
+        let result = ResolveResult::new("common", capped, total);
+        assert!(result.truncated, "two of four shown must flag truncation");
+
+        // Under the cap, nothing is truncated.
+        let (all, total) = rank_resolve_candidates(nodes(), "common", 10);
+        assert_eq!(total, 4);
+        assert!(!ResolveResult::new("common", all, total).truncated);
+
+        // Exactly at the cap (limit == total) is the boundary: all shown, not truncated.
+        let (exact_cap, total) = rank_resolve_candidates(nodes(), "common", 4);
+        assert_eq!(exact_cap.len(), 4);
+        assert_eq!(total, 4);
+        assert!(!ResolveResult::new("common", exact_cap, total).truncated);
+
+        // Empty query matches nothing and is never truncated.
+        let (none, total) = rank_resolve_candidates(nodes(), "", 10);
+        assert!(none.is_empty());
+        assert_eq!(total, 0);
+        assert!(!ResolveResult::new("", none, total).truncated);
     }
 
     /// Forms never enter the in-memory `workspace_call_graph` (they are emitted only

@@ -28,6 +28,9 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
+const MANAGED_FORM_TYPE_NAME: &str = "ФормаКлиентскогоПриложения";
+const ORDINARY_FORM_TYPE_NAME: &str = "Форма";
+
 fn build_attribute_names_to_skip(ctx: &DiagnosticsContext) -> FxHashSet<String> {
     let metadata = ctx.module_metadata();
 
@@ -83,23 +86,21 @@ fn build_attribute_names_to_skip(ctx: &DiagnosticsContext) -> FxHashSet<String> 
             names
         }
         bsl_metadata::ModuleType::FormModule => {
-            const STANDARD_FORM_PROPERTIES: &[&str] = &[
-                "заголовок",
-                "title",
-                "автозаголовок",
-                "autotitle",
-                "модифицированность",
-                "modified",
-                "толькопросмотр",
-                "readonly",
-                "ключсохраненияположенияокна",
-                "windowoptionskey",
-                "ключназначенияиспользования",
-                "purposeusekey",
-            ];
-
-            let mut names: FxHashSet<String> =
-                STANDARD_FORM_PROPERTIES.iter().map(|s| (*s).to_string()).collect();
+            // A bare name matching a form standard property (ТекущийЭлемент,
+            // КлючУникальности, Доступность, …) refers to the form context, not a
+            // local — assigning one is a side effect on the form, never a dead
+            // store. Enumerate the full platform contract rather than a
+            // hand-maintained subset, picking the contract that matches the form
+            // kind; absent metadata defaults to the managed form (the superset).
+            let form_type_name = match metadata.form.as_ref() {
+                Some(form) if !form.is_managed() => ORDINARY_FORM_TYPE_NAME,
+                _ => MANAGED_FORM_TYPE_NAME,
+            };
+            let mut names: FxHashSet<String> = bsl_platform::PlatformDataInner::instance()
+                .get_type_properties(form_type_name)
+                .into_iter()
+                .flat_map(|prop| [prop.name.fold_lower(), prop.english_name.fold_lower()])
+                .collect();
 
             if let Some(form) = &metadata.form {
                 for attr_name in form.attribute_names() {
@@ -1070,6 +1071,33 @@ mod tests {
             unused_diags.len(),
             0,
             "Standard form property 'Заголовок' should not be flagged as unused in FormModule, got: {:?}",
+            unused_diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_writable_form_property_not_flagged_in_form_module() {
+        use crate::test_utils::check_metadata_diagnostic;
+
+        let metadata = make_form_module_metadata(vec![]);
+
+        // ТекущийЭлемент / КлючУникальности / Доступность are writable managed-form
+        // standard properties absent from the legacy hand-maintained subset.
+        let code = r#"&НаКлиенте
+Процедура УстановитьФокус(Команда)
+    ТекущийЭлемент = Элементы.Поле;
+    КлючУникальности = ДополнительныеПараметры.Ключ;
+    Доступность = Истина;
+КонецПроцедуры"#;
+
+        let diagnostics = check_metadata_diagnostic(metadata, code, |_meta, ctx| super::check(ctx));
+        let unused_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
+
+        assert_eq!(
+            unused_diags.len(),
+            0,
+            "Writable standard form properties must not be flagged as unused, got: {:?}",
             unused_diags.iter().map(|d| &d.message).collect::<Vec<_>>()
         );
     }

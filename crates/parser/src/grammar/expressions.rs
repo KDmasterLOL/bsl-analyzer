@@ -4,7 +4,11 @@ use crate::event::NodeKind;
 use crate::parser::{CompletedMarker, Parser};
 use crate::token_set::TokenSet;
 
-const PROPERTY_NAME_TOKENS: TokenSet = TokenSet::new(&[
+// Keywords accepted as a member name when the name is on a *new* line after the
+// dot. There the construct is ambiguous with a dangling dot before a fresh
+// statement, so we stay conservative and never swallow block-structuring
+// keywords (КонецФункции, Функция, …) — that would destroy error recovery.
+const CROSS_LINE_PROPERTY_NAME_TOKENS: TokenSet = TokenSet::new(&[
     TokenKind::Ident,
     TokenKind::KwProcedure,
     TokenKind::KwFunction,
@@ -179,7 +183,18 @@ fn postfix_expr_with_call_info(p: &mut Parser) -> bool {
                 p.bump();
                 let crossed_newline = p.skip_trivia_crossing_newline();
                 let is_orphaned_declaration = crossed_newline && p.at_declaration_start();
-                if p.at_ts(PROPERTY_NAME_TOKENS) && !is_orphaned_declaration {
+                // On the same line `expr.keyword` is unambiguously a member access —
+                // BSL keywords are not reserved as property/field/enum-value names
+                // (ВСД.for, XDTO.return, Условие.Иначе, Перечисления.X.ИЛИ). Across a
+                // newline the construct is ambiguous with a dangling dot before a new
+                // statement, so we keep the conservative whitelist to preserve in-method
+                // error recovery (do not swallow КонецФункции/Функция/… as a member).
+                let at_property_name = if crossed_newline {
+                    p.at_ts(CROSS_LINE_PROPERTY_NAME_TOKENS)
+                } else {
+                    p.at(TokenKind::Ident) || p.current().is_some_and(TokenKind::is_keyword)
+                };
+                if at_property_name && !is_orphaned_declaration {
                     p.bump();
                     lhs = m.complete(p, NodeKind::FieldExpr);
                     is_valid_statement = false;
