@@ -1,6 +1,7 @@
 use crate::body::Body;
 use crate::hir::{Expr, ExprIdx, Stmt, StmtIdx};
 use bsl_platform::security::{registry, Category};
+use stdx::case::CaseExt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CatchBodyClass {
@@ -116,7 +117,18 @@ fn recovery_kind(body: &Body, expr_id: ExprIdx) -> RecoveryKind {
         Category::Transaction => RecoveryKind::Rollback,
         _ => RecoveryKind::None,
     };
-    let lookup = |name: &str| reg.lookup_global(name).map(classify).unwrap_or(RecoveryKind::None);
+    let lookup = |name: &str| {
+        if let Some(kind) = reg.lookup_global(name).map(classify) {
+            if kind != RecoveryKind::None {
+                return kind;
+            }
+        }
+        if name_is_error_report_sink(name) {
+            RecoveryKind::Log
+        } else {
+            RecoveryKind::None
+        }
+    };
     match body.expr_idx(expr_id) {
         Expr::Call { callee, .. } => match body.expr_idx(*callee) {
             Expr::Path(name) => lookup(name.as_str()),
@@ -126,6 +138,35 @@ fn recovery_kind(body: &Body, expr_id: ExprIdx) -> RecoveryKind {
         Expr::MethodCall { method, .. } => lookup(method.as_str()),
         _ => RecoveryKind::None,
     }
+}
+
+/// Recognizes user/BSP error-reporting helpers by name: a recording or
+/// notifying verb combined with an error/log/problem/warning noun
+/// (`ЗаписатьОшибкуВЖурналРегистрации`, `ДобавитьСообщениеДляЖурналаРегистрации`,
+/// `СообщитьОПроблеме`, `ПоказатьПредупреждение`, …).
+///
+/// The platform security registry only knows global logging primitives, but the
+/// bulk of BSP/application handlers report through such named helpers. Pure
+/// formatters and getters (`ПодробноеПредставлениеОшибки`, `ОписаниеОшибки`,
+/// `ИнформацияОбОшибке`) carry the noun but no recording verb, so they are not
+/// treated as logging and a handler that only formats the error stays `Silent`.
+fn name_is_error_report_sink(name: &str) -> bool {
+    const VERBS: &[&str] = &[
+        "запис",     // Записать… / Запись…
+        "добав",     // ДобавитьОшибку / ДобавитьСообщение…
+        "зафиксир",  // ЗафиксироватьОшибку
+        "зарегистр", // ЗарегистрироватьОшибку
+        "регистрац", // РегистрацияОшибки
+        "вывест",    // ВывестиОшибку
+        "показа",    // ПоказатьОшибку / ПоказатьПредупреждение
+        "сообщи",    // СообщитьОбОшибке / СообщитьОПроблеме (но не `Сообщение…`)
+        "оповест",   // Оповестить…
+        "сохран",    // СохранитьОшибкуВЖурнал
+    ];
+    const NOUNS: &[&str] = &["ошибк", "журнал", "проблем", "предупрежд"];
+
+    let lower = name.fold_lower();
+    VERBS.iter().any(|verb| lower.contains(verb)) && NOUNS.iter().any(|noun| lower.contains(noun))
 }
 
 #[cfg(test)]
@@ -445,5 +486,110 @@ mod tests {
         );
         let except = first_try_except(&body);
         assert_eq!(classify_catch_body(&body, except), CatchBodyClass::Silent);
+    }
+
+    #[test]
+    fn named_log_helper_is_logs_only() {
+        for callee in [
+            "ЗаписатьОшибкуВЖурналРегистрации",
+            "ДобавитьСообщениеДляЖурналаРегистрации",
+            "СообщитьОПроблеме",
+            "ПоказатьПредупреждение",
+            "ОбработкаОшибок.ЗаписатьОшибку",
+        ] {
+            let code = format!(
+                r#"
+Процедура Тест()
+    Попытка
+        Действие();
+    Исключение
+        {callee}(ИнформацияОбОшибке());
+    КонецПопытки;
+КонецПроцедуры
+"#
+            );
+            let body = parse_lower(&code);
+            let except = first_try_except(&body);
+            assert_eq!(
+                classify_catch_body(&body, except),
+                CatchBodyClass::LogsOnly,
+                "callee `{callee}` should be recognized as logging"
+            );
+        }
+    }
+
+    #[test]
+    fn error_formatter_only_stays_silent() {
+        // A getter/formatter carries the error noun but no recording verb: the
+        // handler still does nothing with the formatted error.
+        let body = parse_lower(
+            r#"
+Процедура Тест()
+    Попытка
+        Действие();
+    Исключение
+        ПодробноеПредставлениеОшибки(ИнформацияОбОшибке());
+    КонецПопытки;
+КонецПроцедуры
+"#,
+        );
+        let except = first_try_except(&body);
+        assert_eq!(classify_catch_body(&body, except), CatchBodyClass::Silent);
+    }
+
+    #[test]
+    fn error_message_constructor_statement_stays_silent() {
+        // `Сообщение…` is a noun (constructor/getter), not the `Сообщить` verb:
+        // a bare constructor statement still does nothing with the error.
+        let body = parse_lower(
+            r#"
+Процедура Тест()
+    Попытка
+        Действие();
+    Исключение
+        СообщениеОбОшибке(ИнформацияОбОшибке());
+    КонецПопытки;
+КонецПроцедуры
+"#,
+        );
+        let except = first_try_except(&body);
+        assert_eq!(classify_catch_body(&body, except), CatchBodyClass::Silent);
+    }
+
+    #[test]
+    fn error_accumulator_helper_is_logs_only() {
+        // The `СписокОшибок`/`ДобавитьОшибкуПользователю` pattern is the standard
+        // BSP way to surface collected errors, so it counts as reporting.
+        let body = parse_lower(
+            r#"
+Процедура Тест()
+    Попытка
+        Действие();
+    Исключение
+        ДобавитьОшибкуПользователю(СписокОшибок, "Поле", ОписаниеОшибки(), Неопределено);
+    КонецПопытки;
+КонецПроцедуры
+"#,
+        );
+        let except = first_try_except(&body);
+        assert_eq!(classify_catch_body(&body, except), CatchBodyClass::LogsOnly);
+    }
+
+    #[test]
+    fn rollback_plus_named_log_is_mixed() {
+        let body = parse_lower(
+            r#"
+Процедура Тест()
+    Попытка
+        Действие();
+    Исключение
+        ОтменитьТранзакцию();
+        ЗаписатьОшибкуВЖурналРегистрации(ИнформацияОбОшибке());
+    КонецПопытки;
+КонецПроцедуры
+"#,
+        );
+        let except = first_try_except(&body);
+        assert_eq!(classify_catch_body(&body, except), CatchBodyClass::Mixed);
     }
 }

@@ -18,18 +18,24 @@ EndTry;
 
 As a rule, such a design hides a real problem, which is subsequently impossible to diagnose.
 
-The current implementation classifies the `Exception` body (Track 2 Phase D
-§2.2) and fires for three cases:
+The current implementation classifies the `Exception` body and fires for
+three cases:
 
 - the block is empty (no statements);
 - the block silently swallows the failure — it has statements, but none of
-  them re-raise (`Raise` / `ВызватьИсключение`) or call a logging API from
-  the platform registry (`Message`, `WriteLogEvent`, `Сообщить`,
-  `ЗаписьЖурналаРегистрации`);
+  them re-raise (`Raise` / `ВызватьИсключение`) or report the error;
 - the block only rolls back the transaction (`RollbackTransaction` /
   `ОтменитьТранзакцию`) without recording or propagating the failure —
   this case emits a rollback-specific message recommending to add a log
   call or `Raise`.
+
+Reporting covers both the platform logging API (`Message`, `WriteLogEvent`,
+`Сообщить`, `ЗаписьЖурналаРегистрации`) and application/BSP helpers
+recognized by name: a record-or-notify verb together with an error noun —
+`ЗаписатьОшибкуВЖурналРегистрации`, `ДобавитьСообщениеДляЖурналаРегистрации`,
+`СообщитьОбОшибке`, `ShowMessageBox`, etc. Pure formatters
+(`ПодробноеПредставлениеОшибки`, `ErrorDescription`) do not count as
+reporting: a block that only formats the error stays "silent".
 
 Proper recovery paths — re-raise, logging, or a combination — do not
 trigger the diagnostic.
