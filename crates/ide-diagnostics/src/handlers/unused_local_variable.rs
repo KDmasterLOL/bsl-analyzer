@@ -131,6 +131,14 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     let module_bodies = ctx.module_bodies();
 
+    // Module `Перем` variables are not method locals. Assigning one inside a
+    // procedure or in module-level init code is a write to the module variable,
+    // not a dead store — its unused-ness (and the export exemption) is owned by
+    // check_module_var_declarations, which sees reads across every body.
+    for var in module_bodies.module_vars() {
+        skip_attr_names.insert(var.name.fold_lower());
+    }
+
     for (local_id, body) in module_bodies.iter_bodies() {
         diagnostics.extend(check_method(
             local_id,
@@ -721,6 +729,25 @@ mod tests {
     ЗаписьТекста.Записать("привет");
     ЗаписьТекста.Закрыть();
     ЗаписьТекста = Неопределено;
+КонецПроцедуры"#;
+
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UnusedLocalVariable, expect![[r#""#]]);
+    }
+
+    /// A module `Перем` assigned inside one procedure and read in another is a
+    /// module variable, not a dead local — the assignment must not be flagged.
+    /// Its unused-ness is owned by the module-variable check, which sees reads
+    /// across all bodies.
+    #[test]
+    fn test_module_var_assigned_in_procedure_is_not_local() {
+        let code = r#"Перем КонтекстКлиент;
+
+Процедура Инициализировать() Экспорт
+    КонтекстКлиент = ПолучитьКонтекст();
+КонецПроцедуры
+
+Процедура Использовать() Экспорт
+    КонтекстКлиент.Выполнить();
 КонецПроцедуры"#;
 
         check_diagnostics_snapshot_for(code, DiagnosticCode::UnusedLocalVariable, expect![[r#""#]]);
