@@ -208,6 +208,11 @@ fn check_method(
 
     let read_vars = collect_read_var_names(body);
 
+    // A `Для Сч = … По …` counter is syntactically mandatory and cannot simply
+    // be "removed", so a project may opt out of reporting unused numeric loop
+    // counters. Defaults to reporting them (parity with bsl-language-server).
+    let analyze_for_counters = ctx.config.get_bool(code, "analyzeForLoopVariables").unwrap_or(true);
+
     let mut declared_vars = rustc_hash::FxHashSet::default();
 
     for param_id in body.params() {
@@ -246,7 +251,7 @@ fn check_method(
             let binding = body.binding(var_opaque);
             declared_vars.insert(binding.name.as_str().fold_lower());
 
-            if !read_vars.contains(&binding.name.as_str().fold_lower()) {
+            if analyze_for_counters && !read_vars.contains(&binding.name.as_str().fold_lower()) {
                 if let Some(range) = source_map.binding_range(var_opaque) {
                     diagnostics.push(create_diagnostic(binding.name.as_str(), range, code, ctx));
                 }
@@ -736,6 +741,44 @@ mod tests {
 КонецПроцедуры"#;
 
         check_diagnostics_snapshot_for(code, DiagnosticCode::UnusedLocalVariable, expect![[r#""#]]);
+    }
+
+    /// `analyzeForLoopVariables = false` suppresses unused `Для` counters
+    /// (which cannot be removed) while leaving every other unused-local report
+    /// intact; the default still reports them.
+    #[test]
+    fn test_unused_for_counter_respects_opt_out() {
+        use crate::test_utils::check_ast_diagnostic_with_config;
+        use crate::DiagnosticsConfig;
+
+        let code = r#"Процедура Тест()
+    Для Сч = 1 По 3 Цикл
+        Сообщить("итерация");
+    КонецЦикла;
+КонецПроцедуры"#;
+
+        let default_diags = check_ast_diagnostic_with_config(
+            code,
+            DiagnosticsConfig::all_enabled(),
+            crate::diagnostics,
+        );
+        assert!(
+            default_diags
+                .iter()
+                .any(|d| d.code == DiagnosticCode::UnusedLocalVariable && d.message.contains("Сч")),
+            "an unused Для counter must be reported by default"
+        );
+
+        let mut config = DiagnosticsConfig::all_enabled();
+        config.parameters.insert(
+            DiagnosticCode::UnusedLocalVariable,
+            serde_json::json!({ "analyzeForLoopVariables": false }),
+        );
+        let opt_out_diags = check_ast_diagnostic_with_config(code, config, crate::diagnostics);
+        assert!(
+            !opt_out_diags.iter().any(|d| d.code == DiagnosticCode::UnusedLocalVariable),
+            "analyzeForLoopVariables=false must suppress the unused Для counter"
+        );
     }
 
     /// A bare-assignment local that is first written inside a nested block
