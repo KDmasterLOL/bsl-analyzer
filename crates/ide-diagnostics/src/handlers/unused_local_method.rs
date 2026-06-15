@@ -56,30 +56,44 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut called_methods: FxHashSet<String> = FxHashSet::default();
 
     for edge in &summary.call_edges {
-        if let hir::call_graph::CallTarget::Local { callee_local_id } = &edge.target {
-            if let Some(method) = summary.methods.iter().find(|m| m.local_id == *callee_local_id) {
-                called_methods.insert(method.name.as_str().fold_lower());
+        match &edge.target {
+            hir::call_graph::CallTarget::Local { callee_local_id } => {
+                if let Some(method) =
+                    summary.methods.iter().find(|m| m.local_id == *callee_local_id)
+                {
+                    called_methods.insert(method.name.as_str().fold_lower());
+                }
             }
+            // The method segment of a member call counts as a use regardless of
+            // the receiver. The BSP "Свойства" subsystem re-arms a form's local
+            // callback by name through a common-module wrapper —
+            // `УправлениеСвойствамиКлиент.ОбновитьЗависимостиДополнительныхРеквизитов(Форма)`
+            // ultimately runs `Форма.ПодключитьОбработчикОжидания("ОбновитьЗависимости…")`
+            // — so the local procedure sharing that name is reachable even
+            // though the module contains no bare call to it. Matching by name is
+            // the only signal available without cross-module flow.
+            hir::call_graph::CallTarget::QualifiedModule { method_name, .. }
+            | hir::call_graph::CallTarget::ThisObjectMethod { method_name } => {
+                called_methods.insert(method_name.as_str().fold_lower());
+            }
+            hir::call_graph::CallTarget::ManagerAccess {
+                method_name: Some(method_name), ..
+            } => {
+                called_methods.insert(method_name.as_str().fold_lower());
+            }
+            hir::call_graph::CallTarget::ManagerAccess { method_name: None, .. }
+            | hir::call_graph::CallTarget::RegisterMovement { .. }
+            | hir::call_graph::CallTarget::Unresolved => {}
         }
     }
 
     // The platform invokes these by the registered string name:
-    // ПодключитьОбработчикОжидания and Новый ОписаниеОповещения (both handler
-    // slots). Like the receiver-blind MethodCall collection below, names count
-    // regardless of which module the registration targets.
+    // ПодключитьОбработчикОжидания and Новый ОписаниеОповещения (both handler slots).
     for reg in &summary.notify_regs {
         called_methods.insert(reg.callback_name.as_str().fold_lower());
     }
     for reg in &summary.idle_handler_regs {
         called_methods.insert(reg.handler_name.as_str().fold_lower());
-    }
-
-    let module_bodies = ctx.module_bodies();
-    for (_, body) in module_bodies.iter_bodies() {
-        collect_method_call_names(body, &mut called_methods);
-    }
-    if let Some(module_code) = module_bodies.module_code_result() {
-        collect_method_call_names(&module_code.body, &mut called_methods);
     }
 
     if let Some(ref form) = metadata.form {
@@ -148,14 +162,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     }
 
     diagnostics
-}
-
-fn collect_method_call_names(body: &hir::Body, called_methods: &mut FxHashSet<String>) {
-    for (_, expr) in body.exprs_iter() {
-        if let hir::Expr::MethodCall { method, .. } = expr {
-            called_methods.insert(method.as_str().fold_lower());
-        }
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -517,6 +523,54 @@ mod tests {
               severity: Warning"#]],
         );
         assert!(unused_diags[0].message.contains("Главная"));
+    }
+
+    #[test]
+    fn test_callback_used_via_qualified_call_not_flagged() {
+        // BSP "Свойства" pattern: the form's local no-arg callback is re-armed by
+        // name from a common-module wrapper that shares its name. No bare call to
+        // the local procedure exists, only the qualified `Модуль.Имя(...)` call, so
+        // the method segment of a member call must count as a use.
+        let code = r#"
+&НаКлиенте
+Процедура ОбновитьЗависимостиДополнительныхРеквизитов()
+    УправлениеСвойствамиКлиент.ОбновитьЗависимостиДополнительныхРеквизитов(ЭтотОбъект);
+КонецПроцедуры
+
+&НаКлиенте
+Процедура НеИспользуемая()
+КонецПроцедуры
+"#;
+
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnusedLocalMethod,
+            expect![[r#"
+                UnusedLocalMethod @ 8:11..8:25
+                  message: Неиспользуемый локальный метод "НеИспользуемая"
+                  severity: Warning"#]],
+        );
+    }
+
+    #[test]
+    fn test_member_call_name_collision_suppresses_local() {
+        // Documents an intentional precision tradeoff. The method segment of a
+        // member call is counted receiver-blind, so a dead local `Очистить()`
+        // is treated as used once any `Получатель.Очистить()` appears. This
+        // mirrors bsl-language-server's name-based reachability and is the price
+        // of catching the BSP callback pattern without cross-module flow.
+        let code = r#"
+Процедура Очистить()
+КонецПроцедуры
+
+Процедура Главная(Массив)
+    Массив.Очистить();
+КонецПроцедуры
+
+Главная(Неопределено);
+"#;
+
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UnusedLocalMethod, expect![[r#""#]]);
     }
 
     #[test]
