@@ -4326,3 +4326,117 @@ fn test_column_dot_vybor_case_keyword_does_not_swallow_case_frame() {
         parse.syntax_node()
     );
 }
+
+// Query-language extension blocks `{...}` (customizable sections for dynamic
+// lists / DCS) must not break parsing of the surrounding query.
+#[test]
+fn test_query_extension_where_block_no_errors() {
+    check_no_errors(
+        "ВЫБРАТЬ Т.Ссылка ИЗ Справочник.Товары КАК Т \
+         ГДЕ Т.Цена > 0 \
+         {ГДЕ (Т.Номенклатура В (&Номенклатура))} \
+         УПОРЯДОЧИТЬ ПО Т.Ссылка",
+    );
+}
+
+#[test]
+fn test_query_extension_select_block_no_errors() {
+    check_no_errors(
+        "ВЫБРАТЬ Т.Ссылка КАК Ссылка ИЗ Справочник.Товары КАК Т \
+         {ВЫБРАТЬ Т.Ссылка, Т.Наименование}",
+    );
+}
+
+#[test]
+fn test_query_extension_where_inside_join_subquery_no_errors() {
+    check_no_errors(
+        "ВЫБРАТЬ Зак.Ссылка \
+         ИЗ Документ.Заказ КАК Зак \
+         ЛЕВОЕ СОЕДИНЕНИЕ (\
+            ВЫБРАТЬ Ост.Регистратор КАК Регистратор \
+            ИЗ РегистрНакопления.Остатки КАК Ост \
+            ГДЕ Ост.Тип = ЗНАЧЕНИЕ(Перечисление.Типы.А) \
+            {ГДЕ (Ост.Организация В (&Организация))} \
+            СГРУППИРОВАТЬ ПО Ост.Регистратор\
+         ) КАК Итоги \
+         ПО Зак.Ссылка = Итоги.Регистратор",
+    );
+}
+
+#[test]
+fn test_query_extension_nested_braces_no_errors() {
+    check_no_errors("ВЫБРАТЬ Т.Ссылка ИЗ Справочник.Товары КАК Т {ГДЕ {Вложенный} Т.Поле}");
+}
+
+#[test]
+fn test_query_extension_trailing_order_block_no_errors() {
+    check_no_errors(
+        "ВЫБРАТЬ Т.Ссылка ИЗ Справочник.Товары КАК Т \
+         УПОРЯДОЧИТЬ ПО Т.Ссылка \
+         {УПОРЯДОЧИТЬ ПО Т.Наименование}",
+    );
+}
+
+#[test]
+fn test_query_extension_produces_extension_node() {
+    let parse = parse_sdbl("ВЫБРАТЬ Т.Ссылка ИЗ Справочник.Товары КАК Т {ГДЕ Т.Поле}");
+    assert!(!parse.has_errors(), "unexpected errors: {:#?}", parse.errors());
+    let tree = format!("{:#?}", parse.syntax_node());
+    assert!(
+        tree.contains("SDBL_QUERY_EXTENSION"),
+        "expected SDBL_QUERY_EXTENSION node, tree:\n{tree}"
+    );
+}
+
+#[test]
+fn test_query_extension_after_field_list_before_from_no_errors() {
+    check_no_errors(
+        "ВЫБРАТЬ Т.Поле1, Т.Поле2 \
+         {ВЫБРАТЬ Т.Поле3, Т.Поле4} \
+         ИЗ Справочник.Таблица КАК Т \
+         ГДЕ Т.Поле1 > 0 \
+         {ГДЕ Т.Поле2}",
+    );
+}
+
+#[test]
+fn test_query_extension_between_source_and_join_no_errors() {
+    check_no_errors(
+        "ВЫБРАТЬ Т.Поле \
+         ИЗ Справочник.Т1 КАК Т \
+         {ГДЕ Т.Поле} \
+         ЛЕВОЕ СОЕДИНЕНИЕ Справочник.Т2 КАК У \
+         ПО Т.Поле = У.Поле",
+    );
+}
+
+#[test]
+fn test_query_extension_unbalanced_brace_is_tolerated() {
+    // Unbalanced `{` (typically a runtime-concatenated query fragment such as
+    // `"… {ВЫБРАТЬ" + Поля`) is consumed rather than reported, so it does not
+    // produce a false QueryParseError on the surrounding code.
+    let parse = parse_sdbl("ВЫБРАТЬ Т.Поле ИЗ Справочник.Т КАК Т {ГДЕ Т.Поле");
+    assert!(!parse.has_errors(), "unbalanced extension brace should be tolerated");
+}
+
+#[test]
+fn test_query_extension_inside_virtual_table_args_no_errors() {
+    check_no_errors(
+        "ВЫБРАТЬ Т.Номенклатура \
+         ИЗ РегистрНакопления.ТоварыНаСкладах.Остатки(\
+            &Период, \
+            Номенклатура В (ВЫБРАТЬ С.Ссылка ИЗ Справочник.Номенклатура КАК С) \
+            И &Отбор \
+            {(Номенклатура).* КАК Ном, (Склад).*}\
+         ) КАК Т \
+         ГДЕ Т.КоличествоОстаток > 0",
+    );
+}
+
+#[test]
+fn test_query_extension_as_first_virtual_table_arg_no_errors() {
+    check_no_errors(
+        "ВЫБРАТЬ Т.Номенклатура \
+         ИЗ РегистрНакопления.ТоварыНаСкладах.Остатки({(Номенклатура).*}) КАК Т",
+    );
+}

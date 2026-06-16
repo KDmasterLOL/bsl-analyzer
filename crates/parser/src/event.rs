@@ -77,6 +77,7 @@ pub enum NodeKind {
     SdblSubquery,
     SdblUnionClause,
     SdblQuery,
+    SdblQueryExtension,
     SdblLimitations,
     SdblTopClause,
     SdblSelectClause,

@@ -171,7 +171,7 @@ fn query(p: &mut Parser) {
 
     selected_fields(p);
 
-    p.skip_trivia();
+    eat_query_extensions(p);
     if at_sdbl_keyword(p, "INTO", "ПОМЕСТИТЬ") {
         into_clause(p);
     }
@@ -208,6 +208,7 @@ fn selected_field(p: &mut Parser) {
             || (is_identifier_token(p) && !is_clause_keyword(p))
             || p.at(TokenKind::Comma)
             || p.at(TokenKind::Semicolon)
+            || p.at(TokenKind::LBrace)
             || is_clause_keyword(p)
             || p.at_end();
 
@@ -351,10 +352,10 @@ fn data_source(p: &mut Parser) {
         source_alias(p);
     }
 
-    p.skip_trivia();
+    eat_query_extensions(p);
     while is_join_keyword(p) {
         join_clause(p);
-        p.skip_trivia();
+        eat_query_extensions(p);
     }
 
     m.complete(p, NodeKind::SdblDataSource);
@@ -509,6 +510,11 @@ fn select_tail_clauses(p: &mut Parser) {
     loop {
         p.skip_trivia();
 
+        if p.at(TokenKind::LBrace) {
+            query_extension(p);
+            continue;
+        }
+
         if !parsed_autoorder && at_sdbl_keyword(p, "AUTOORDER", "АВТОУПОРЯДОЧИВАНИЕ")
         {
             autoorder_clause(p);
@@ -533,40 +539,91 @@ fn select_tail_clauses(p: &mut Parser) {
 }
 
 fn query_body_clauses(p: &mut Parser) {
-    p.skip_trivia();
+    eat_query_extensions(p);
     if at_sdbl_keyword(p, "FROM", "ИЗ") {
         from_clause(p);
     }
 
-    p.skip_trivia();
+    eat_query_extensions(p);
     if at_sdbl_keyword(p, "WHERE", "ГДЕ") {
         where_clause(p);
     }
 
-    p.skip_trivia();
+    eat_query_extensions(p);
     if at_sdbl_keyword(p, "GROUP", "СГРУППИРОВАТЬ") {
         group_by_clause(p);
     }
 
-    p.skip_trivia();
+    eat_query_extensions(p);
     if at_sdbl_keyword(p, "HAVING", "ИМЕЮЩИЕ") {
         having_clause(p);
     }
 
-    p.skip_trivia();
+    eat_query_extensions(p);
     if at_sdbl_keyword(p, "FOR", "ДЛЯ") {
         for_update_clause(p);
     }
 
-    p.skip_trivia();
+    eat_query_extensions(p);
     if at_sdbl_keyword(p, "INDEX", "ИНДЕКСИРОВАТЬ") {
         index_by_clause(p);
     }
 
-    p.skip_trivia();
+    eat_query_extensions(p);
     if at_sdbl_keyword(p, "ORDER", "УПОРЯДОЧИТЬ") {
         order_by_clause(p);
     }
+
+    eat_query_extensions(p);
+}
+
+/// Consumes any run of `{…}` query-language extension blocks at the current
+/// position. These braces mark sections a user may customize at runtime
+/// (`{ГДЕ …}`, `{ВЫБРАТЬ …}`, `{УПОРЯДОЧИТЬ ПО …}`); their inner text is taken
+/// verbatim so the surrounding query still parses and keeps its diagnostics.
+pub(super) fn eat_query_extensions(p: &mut Parser) {
+    p.skip_trivia();
+    while p.at(TokenKind::LBrace) {
+        query_extension(p);
+        p.skip_trivia();
+    }
+}
+
+fn query_extension(p: &mut Parser) {
+    let m = p.start();
+    p.bump(); // consume '{'
+
+    let mut depth = 1i32;
+    loop {
+        p.check_iteration_limit();
+
+        if p.at_end() {
+            break;
+        }
+
+        if p.at(TokenKind::LBrace) {
+            depth += 1;
+            p.bump();
+            continue;
+        }
+
+        if p.at(TokenKind::RBrace) {
+            depth -= 1;
+            p.bump();
+            if depth == 0 {
+                break;
+            }
+            continue;
+        }
+
+        p.bump();
+    }
+
+    // An unbalanced `{` is tolerated rather than reported: the dominant source
+    // of such fragments is queries assembled at runtime by string
+    // concatenation (`"… {ВЫБРАТЬ" + Поля + "} …"`), where the static literal
+    // legitimately ends mid-extension. Flagging those would be a false positive.
+    m.complete(p, NodeKind::SdblQueryExtension);
 }
 
 fn where_clause(p: &mut Parser) {
@@ -950,7 +1007,7 @@ fn virtual_table_args(p: &mut Parser) {
         return;
     }
     p.bump();
-    p.skip_trivia();
+    eat_query_extensions(p);
 
     if p.at(TokenKind::RParen) {
         p.expect(TokenKind::RParen);
@@ -959,7 +1016,7 @@ fn virtual_table_args(p: &mut Parser) {
 
     if super::expressions::is_expression_start(p) && !p.at(TokenKind::Comma) {
         super::expressions::expression(p);
-        p.skip_trivia();
+        eat_query_extensions(p);
         if !p.at(TokenKind::Comma) && !p.at(TokenKind::RParen) {
             recover_to_delimiter_vt(p);
         }
@@ -970,7 +1027,7 @@ fn virtual_table_args(p: &mut Parser) {
 
     while p.eat(TokenKind::Comma) {
         p.check_iteration_limit();
-        p.skip_trivia();
+        eat_query_extensions(p);
 
         let empty_slot = p.at(TokenKind::Comma)
             || p.at(TokenKind::RParen)
@@ -985,7 +1042,7 @@ fn virtual_table_args(p: &mut Parser) {
         }
 
         super::expressions::expression(p);
-        p.skip_trivia();
+        eat_query_extensions(p);
         if !p.at(TokenKind::Comma) && !p.at(TokenKind::RParen) {
             recover_to_delimiter_vt(p);
         }
