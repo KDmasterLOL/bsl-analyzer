@@ -100,6 +100,8 @@ pub enum SyntaxKind {
 
     L_PAREN,
     R_PAREN,
+    L_BRACE,
+    R_BRACE,
     L_BRACKET,
     R_BRACKET,
     DOT,
@@ -241,6 +243,8 @@ pub enum SyntaxKind {
     SDBL_TOTALS_BY,
 
     SDBL_DROP_QUERY,
+
+    SDBL_QUERY_EXTENSION,
 
     SDBL_MISSING_ARG,
 

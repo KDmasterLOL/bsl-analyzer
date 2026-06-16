@@ -62,10 +62,27 @@ fn recover_to_delimiter(p: &mut Parser) {
     let err = p.start();
     let mut consumed_any = false;
     let mut paren_depth = 0i32;
+    let mut brace_depth = 0i32;
     let mut nested_query_starts: Vec<i32> = Vec::new();
 
     loop {
         p.check_iteration_limit();
+
+        if p.at(TokenKind::LBrace) {
+            brace_depth += 1;
+            p.bump();
+            consumed_any = true;
+            continue;
+        }
+
+        if p.at(TokenKind::RBrace) {
+            if brace_depth > 0 {
+                brace_depth -= 1;
+            }
+            p.bump();
+            consumed_any = true;
+            continue;
+        }
 
         if p.at(TokenKind::LParen) {
             paren_depth += 1;
@@ -96,7 +113,7 @@ fn recover_to_delimiter(p: &mut Parser) {
 
         let inside_nested_query = !nested_query_starts.is_empty();
 
-        if super::select::is_clause_keyword(p) {
+        if brace_depth == 0 && super::select::is_clause_keyword(p) {
             let stop = if paren_depth == 0 {
                 true
             } else if inside_nested_query {
@@ -109,7 +126,10 @@ fn recover_to_delimiter(p: &mut Parser) {
             }
         }
 
-        if paren_depth == 0 && (p.at(TokenKind::Comma) || p.at(TokenKind::Semicolon)) {
+        if paren_depth == 0
+            && brace_depth == 0
+            && (p.at(TokenKind::Comma) || p.at(TokenKind::Semicolon))
+        {
             break;
         }
 

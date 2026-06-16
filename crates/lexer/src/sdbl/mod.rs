@@ -20,6 +20,12 @@ pub enum SdblTokenKind {
     #[token(")")]
     RParen,
 
+    #[token("{")]
+    LBrace,
+
+    #[token("}")]
+    RBrace,
+
     #[token(".")]
     Dot,
 

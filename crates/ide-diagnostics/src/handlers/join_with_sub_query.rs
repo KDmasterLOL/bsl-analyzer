@@ -119,27 +119,27 @@ mod tests {
             code,
             DiagnosticCode::JoinWithSubQuery,
             expect![[r#"
-            JoinWithSubQuery @ 6:23..7:6
-              message: Не используйте соединение с подзапросами. Соединения с подзапросами вызывают серьезные проблемы с производительностью
-              severity: Warning
-            JoinWithSubQuery @ 17:6..18:6
-              message: Не используйте соединение с подзапросами. Соединения с подзапросами вызывают серьезные проблемы с производительностью
-              severity: Warning
-            JoinWithSubQuery @ 28:6..29:6
-              message: Не используйте соединение с подзапросами. Соединения с подзапросами вызывают серьезные проблемы с производительностью
-              severity: Warning
-            JoinWithSubQuery @ 37:11..37:117
-              message: Не используйте соединение с подзапросами. Соединения с подзапросами вызывают серьезные проблемы с производительностью
-              severity: Warning
-            JoinWithSubQuery @ 39:6..40:6
-              message: Не используйте соединение с подзапросами. Соединения с подзапросами вызывают серьезные проблемы с производительностью
-              severity: Warning
-            JoinWithSubQuery @ 49:9..49:121
-              message: Не используйте соединение с подзапросами. Соединения с подзапросами вызывают серьезные проблемы с производительностью
-              severity: Warning
-            JoinWithSubQuery @ 60:9..61:30
-              message: Не используйте соединение с подзапросами. Соединения с подзапросами вызывают серьезные проблемы с производительностью
-              severity: Warning"#]],
+                JoinWithSubQuery @ 6:24..6:119
+                  message: Не используйте соединение с подзапросами. Соединения с подзапросами вызывают серьезные проблемы с производительностью
+                  severity: Warning
+                JoinWithSubQuery @ 17:7..17:118
+                  message: Не используйте соединение с подзапросами. Соединения с подзапросами вызывают серьезные проблемы с производительностью
+                  severity: Warning
+                JoinWithSubQuery @ 28:7..28:86
+                  message: Не используйте соединение с подзапросами. Соединения с подзапросами вызывают серьезные проблемы с производительностью
+                  severity: Warning
+                JoinWithSubQuery @ 37:11..37:117
+                  message: Не используйте соединение с подзапросами. Соединения с подзапросами вызывают серьезные проблемы с производительностью
+                  severity: Warning
+                JoinWithSubQuery @ 39:7..39:120
+                  message: Не используйте соединение с подзапросами. Соединения с подзапросами вызывают серьезные проблемы с производительностью
+                  severity: Warning
+                JoinWithSubQuery @ 49:9..49:121
+                  message: Не используйте соединение с подзапросами. Соединения с подзапросами вызывают серьезные проблемы с производительностью
+                  severity: Warning
+                JoinWithSubQuery @ 60:9..61:30
+                  message: Не используйте соединение с подзапросами. Соединения с подзапросами вызывают серьезные проблемы с производительностью
+                  severity: Warning"#]],
         );
     }
 
@@ -154,9 +154,9 @@ mod tests {
             code,
             DiagnosticCode::JoinWithSubQuery,
             expect![[r#"
-            JoinWithSubQuery @ 3:48..3:72
-              message: Не используйте соединение с подзапросами. Соединения с подзапросами вызывают серьезные проблемы с производительностью
-              severity: Warning"#]],
+                JoinWithSubQuery @ 3:49..3:64
+                  message: Не используйте соединение с подзапросами. Соединения с подзапросами вызывают серьезные проблемы с производительностью
+                  severity: Warning"#]],
         );
     }
 
@@ -191,9 +191,9 @@ mod tests {
             code,
             DiagnosticCode::JoinWithSubQuery,
             expect![[r#"
-            JoinWithSubQuery @ 3:49..3:73
-              message: Не используйте соединение с подзапросами. Соединения с подзапросами вызывают серьезные проблемы с производительностью
-              severity: Warning"#]],
+                JoinWithSubQuery @ 3:50..3:65
+                  message: Не используйте соединение с подзапросами. Соединения с подзапросами вызывают серьезные проблемы с производительностью
+                  severity: Warning"#]],
         );
     }
 
@@ -208,9 +208,9 @@ mod tests {
             code,
             DiagnosticCode::JoinWithSubQuery,
             expect![[r#"
-            JoinWithSubQuery @ 3:53..3:71
-              message: Не используйте соединение с подзапросами. Соединения с подзапросами вызывают серьезные проблемы с производительностью
-              severity: Warning"#]],
+                JoinWithSubQuery @ 3:54..3:69
+                  message: Не используйте соединение с подзапросами. Соединения с подзапросами вызывают серьезные проблемы с производительностью
+                  severity: Warning"#]],
         );
     }
 
@@ -245,81 +245,116 @@ mod tests {
             code,
             DiagnosticCode::JoinWithSubQuery,
             expect![[r#"
-            JoinWithSubQuery @ 4:11..4:87
-              message: Не используйте соединение с подзапросами. Соединения с подзапросами вызывают серьезные проблемы с производительностью
-              severity: Warning
-            JoinWithSubQuery @ 5:6..6:6
-              message: Не используйте соединение с подзапросами. Соединения с подзапросами вызывают серьезные проблемы с производительностью
-              severity: Warning"#]],
+                JoinWithSubQuery @ 4:11..4:87
+                  message: Не используйте соединение с подзапросами. Соединения с подзапросами вызывают серьезные проблемы с производительностью
+                  severity: Warning
+                JoinWithSubQuery @ 5:7..5:83
+                  message: Не используйте соединение с подзапросами. Соединения с подзапросами вызывают серьезные проблемы с производительностью
+                  severity: Warning"#]],
         );
     }
 
     #[test]
-    fn test_join_with_sum_subquery_exempted() {
+    fn test_join_with_sum_subquery_emits() {
         let code = r#"
 Процедура Тест()
     Запрос = "ВЫБРАТЬ T1.Ссылка ИЗ Документ.Заказ КАК T1
-              ЛЕВОЕ СОЕДИНЕНИЕ (ВЫБРАТЬ Регистратор, СУММА(Сумма) КАК Итог
-                                ИЗ РегистрНакопления.Х
-                                СГРУППИРОВАТЬ ПО Регистратор) КАК Агрегат
-              ПО T1.Ссылка = Агрегат.Регистратор";
+              |ЛЕВОЕ СОЕДИНЕНИЕ (ВЫБРАТЬ Регистратор, СУММА(Сумма) КАК Итог
+              |ИЗ РегистрНакопления.Х
+              |СГРУППИРОВАТЬ ПО Регистратор) КАК Агрегат
+              |ПО T1.Ссылка = Агрегат.Регистратор";
 КонецПроцедуры
 "#;
-        check_diagnostics_snapshot_for(code, DiagnosticCode::JoinWithSubQuery, expect![[r#""#]]);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::JoinWithSubQuery,
+            expect![[r#"
+                JoinWithSubQuery @ 4:34..6:44
+                  message: Не используйте соединение с подзапросами. Соединения с подзапросами вызывают серьезные проблемы с производительностью
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
-    fn test_join_with_count_english_subquery_exempted() {
+    fn test_join_with_count_english_subquery_emits() {
         let code = r#"
 Процедура Тест()
     Запрос = "SELECT * FROM Catalog.Products AS P
-              LEFT JOIN (SELECT COUNT(*) AS Total FROM Catalog.Suppliers) AS Counts
-              ON 1 = 1";
+              |LEFT JOIN (SELECT COUNT(*) AS Total FROM Catalog.Suppliers) AS Counts
+              |ON 1 = 1";
 КонецПроцедуры
 "#;
-        check_diagnostics_snapshot_for(code, DiagnosticCode::JoinWithSubQuery, expect![[r#""#]]);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::JoinWithSubQuery,
+            expect![[r#"
+                JoinWithSubQuery @ 4:27..4:74
+                  message: Не используйте соединение с подзапросами. Соединения с подзапросами вызывают серьезные проблемы с производительностью
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
-    fn test_join_with_group_by_only_subquery_exempted() {
+    fn test_join_with_group_by_only_subquery_emits() {
         let code = r#"
 Процедура Тест()
     Запрос = "ВЫБРАТЬ T1.Ссылка ИЗ Документ.Заказ КАК T1
-              ЛЕВОЕ СОЕДИНЕНИЕ (ВЫБРАТЬ Регистратор ИЗ РегистрНакопления.Х
-                                СГРУППИРОВАТЬ ПО Регистратор) КАК Группы
-              ПО T1.Ссылка = Группы.Регистратор";
+              |ЛЕВОЕ СОЕДИНЕНИЕ (ВЫБРАТЬ Регистратор ИЗ РегистрНакопления.Х
+              |СГРУППИРОВАТЬ ПО Регистратор) КАК Группы
+              |ПО T1.Ссылка = Группы.Регистратор";
 КонецПроцедуры
 "#;
-        check_diagnostics_snapshot_for(code, DiagnosticCode::JoinWithSubQuery, expect![[r#""#]]);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::JoinWithSubQuery,
+            expect![[r#"
+                JoinWithSubQuery @ 4:34..5:44
+                  message: Не используйте соединение с подзапросами. Соединения с подзапросами вызывают серьезные проблемы с производительностью
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
-    fn test_join_with_nested_isnull_around_sum_exempted() {
+    fn test_join_with_nested_isnull_around_sum_emits() {
         let code = r#"
 Процедура Тест()
     Запрос = "ВЫБРАТЬ T1.Ссылка ИЗ Документ.Заказ КАК T1
-              ЛЕВОЕ СОЕДИНЕНИЕ (ВЫБРАТЬ Регистратор, ЕСТЬNULL(СУММА(Сумма), 0) КАК Итог
-                                ИЗ РегистрНакопления.Х
-                                СГРУППИРОВАТЬ ПО Регистратор) КАК Агрегат
-              ПО T1.Ссылка = Агрегат.Регистратор";
+              |ЛЕВОЕ СОЕДИНЕНИЕ (ВЫБРАТЬ Регистратор, ЕСТЬNULL(СУММА(Сумма), 0) КАК Итог
+              |ИЗ РегистрНакопления.Х
+              |СГРУППИРОВАТЬ ПО Регистратор) КАК Агрегат
+              |ПО T1.Ссылка = Агрегат.Регистратор";
 КонецПроцедуры
 "#;
-        check_diagnostics_snapshot_for(code, DiagnosticCode::JoinWithSubQuery, expect![[r#""#]]);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::JoinWithSubQuery,
+            expect![[r#"
+                JoinWithSubQuery @ 4:34..6:44
+                  message: Не используйте соединение с подзапросами. Соединения с подзапросами вызывают серьезные проблемы с производительностью
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
-    fn test_from_aggregating_subquery_with_join_exempted() {
+    fn test_from_aggregating_subquery_with_join_emits() {
         let code = r#"
 Процедура Тест()
     Запрос = "ВЫБРАТЬ Агрегат.Регистратор
-              ИЗ (ВЫБРАТЬ Регистратор, СУММА(Сумма) КАК Итог
-                  ИЗ РегистрНакопления.Х
-                  СГРУППИРОВАТЬ ПО Регистратор) КАК Агрегат
-              ЛЕВОЕ СОЕДИНЕНИЕ Документ.Заказ КАК T2
-              ПО Агрегат.Регистратор = T2.Ссылка";
+              |ИЗ (ВЫБРАТЬ Регистратор, СУММА(Сумма) КАК Итог
+              |ИЗ РегистрНакопления.Х
+              |СГРУППИРОВАТЬ ПО Регистратор) КАК Агрегат
+              |ЛЕВОЕ СОЕДИНЕНИЕ Документ.Заказ КАК T2
+              |ПО Агрегат.Регистратор = T2.Ссылка";
 КонецПроцедуры
 "#;
-        check_diagnostics_snapshot_for(code, DiagnosticCode::JoinWithSubQuery, expect![[r#""#]]);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::JoinWithSubQuery,
+            expect![[r#"
+                JoinWithSubQuery @ 4:20..6:44
+                  message: Не используйте соединение с подзапросами. Соединения с подзапросами вызывают серьезные проблемы с производительностью
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -333,9 +368,9 @@ mod tests {
             code,
             DiagnosticCode::JoinWithSubQuery,
             expect![[r#"
-            JoinWithSubQuery @ 3:48..3:76
-              message: Не используйте соединение с подзапросами. Соединения с подзапросами вызывают серьезные проблемы с производительностью
-              severity: Warning"#]],
+                JoinWithSubQuery @ 3:49..3:68
+                  message: Не используйте соединение с подзапросами. Соединения с подзапросами вызывают серьезные проблемы с производительностью
+                  severity: Warning"#]],
         );
     }
 
@@ -350,14 +385,14 @@ mod tests {
             code,
             DiagnosticCode::JoinWithSubQuery,
             expect![[r#"
-            JoinWithSubQuery @ 3:42..3:78
-              message: Не используйте соединение с подзапросами. Соединения с подзапросами вызывают серьезные проблемы с производительностью
-              severity: Warning"#]],
+                JoinWithSubQuery @ 3:43..3:71
+                  message: Не используйте соединение с подзапросами. Соединения с подзапросами вызывают серьезные проблемы с производительностью
+                  severity: Warning"#]],
         );
     }
 
     #[test]
-    fn track3_join_with_nested_inner_aggregation_currently_emits_snapshot() {
+    fn join_with_nested_inner_aggregation_emits() {
         check_diagnostics_snapshot_for(
             r#"Процедура Тест()
     Запрос = Новый Запрос;
@@ -377,14 +412,14 @@ mod tests {
 КонецПроцедуры"#,
             DiagnosticCode::JoinWithSubQuery,
             expect![[r#"
-                JoinWithSubQuery @ 6:27..15:10
+                JoinWithSubQuery @ 7:13..14:10
                   message: Не используйте соединение с подзапросами. Соединения с подзапросами вызывают серьезные проблемы с производительностью
                   severity: Warning"#]],
         );
     }
 
     #[test]
-    fn track3_join_with_having_only_aggregation_currently_emits_snapshot() {
+    fn join_with_having_only_aggregation_emits() {
         check_diagnostics_snapshot_for(
             r#"Процедура Тест()
     Запрос = Новый Запрос;
@@ -400,14 +435,14 @@ mod tests {
 КонецПроцедуры"#,
             DiagnosticCode::JoinWithSubQuery,
             expect![[r#"
-                JoinWithSubQuery @ 6:27..11:10
+                JoinWithSubQuery @ 7:13..10:10
                   message: Не используйте соединение с подзапросами. Соединения с подзапросами вызывают серьезные проблемы с производительностью
                   severity: Warning"#]],
         );
     }
 
     #[test]
-    fn track3_join_with_totals_subquery_currently_emits_snapshot() {
+    fn join_with_totals_subquery_emits() {
         check_diagnostics_snapshot_for(
             r#"Процедура Тест()
     Запрос = Новый Запрос;
@@ -424,7 +459,7 @@ mod tests {
 КонецПроцедуры"#,
             DiagnosticCode::JoinWithSubQuery,
             expect![[r#"
-                JoinWithSubQuery @ 6:27..10:24
+                JoinWithSubQuery @ 7:13..10:13
                   message: Не используйте соединение с подзапросами. Соединения с подзапросами вызывают серьезные проблемы с производительностью
                   severity: Warning"#]],
         );

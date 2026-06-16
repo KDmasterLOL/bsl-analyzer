@@ -96,10 +96,9 @@ impl LoweringContext<'_> {
 
         let table = if let Some(ds) = join.data_source() {
             if let Some(subquery) = ds.subquery() {
-                if !super::from_clause::subquery_has_aggregation(&subquery) {
-                    self.diagnostics
-                        .push(SdblDiagnostic::JoinWithSubQuery { range: ds.syntax().text_range() });
-                }
+                self.diagnostics.push(SdblDiagnostic::JoinWithSubQuery {
+                    range: subquery.syntax().text_range(),
+                });
             }
 
             self.lower_data_source(&ds)

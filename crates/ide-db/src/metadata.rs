@@ -1,4 +1,3 @@
-use bsl_metadata::traits::Module;
 use bsl_metadata::Configuration;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -793,20 +792,26 @@ impl ModuleOwner {
     }
 }
 
-pub(crate) fn find_common_module_by_uri(
+pub(crate) fn find_common_module_by_path(
     configuration: &bsl_metadata::Configuration,
     file_path: &Path,
 ) -> Option<bsl_metadata::CommonModule> {
-    let file_uri_lower = file_path.to_string_lossy().fold_lower();
+    // The configuration stores each common module's `uri` relative to the config root
+    // (`CommonModules/<Имя>/Ext/Module.bsl`), while the analyzed `file_path` is absolute
+    // (or scan-relative). Matching the two by full-string equality never holds, so the
+    // module's metadata stayed `None` and every metadata diagnostic over it was silent.
+    // Resolve by the name segment instead, the way the service matchers above already do.
+    //
+    // The segment after `CommonModules/` is the module's directory name, which 1C keeps
+    // identical to the metadata `<Name>` (the designer enforces it) — so `find_common_module`
+    // (keyed on the parsed name) resolves it. `rposition` takes the module-level
+    // `CommonModules`, not an accidental one in the workspace prefix above the config root.
+    let file_str = file_path.to_string_lossy().replace('\\', "/");
+    let parts: Vec<&str> = file_str.split('/').collect();
+    let cm_idx = parts.iter().rposition(|&p| p == "CommonModules")?;
+    let name = parts.get(cm_idx + 1)?;
 
-    configuration
-        .common_modules()
-        .iter()
-        .find(|module| match module.uri() {
-            Some(module_uri) => module_uri.fold_lower() == file_uri_lower,
-            None => false,
-        })
-        .cloned()
+    configuration.find_common_module(name).cloned()
 }
 
 pub(crate) fn load_form_from_path(file_path: &Path) -> Option<Arc<bsl_metadata::Form>> {
@@ -856,7 +861,7 @@ pub fn build_module_metadata(
     if let Some(config) = configuration {
         match module_type {
             bsl_metadata::ModuleType::CommonModule => {
-                if let Some(cm) = find_common_module_by_uri(config, file_path) {
+                if let Some(cm) = find_common_module_by_path(config, file_path) {
                     execution_context = Some(hir::compute_execution_context(&cm));
                     common_module = Some(Arc::new(cm));
                 }
@@ -1300,6 +1305,28 @@ mod tests {
             metadata.integration_service.as_ref().expect("integration service should be populated");
         let handlers: Vec<_> = service.receive_handlers().collect();
         assert_eq!(handlers, vec!["ОбработатьСообщениеОбычныйПриоритет"]);
+    }
+
+    #[test]
+    fn test_build_module_metadata_populates_common_module_from_absolute_path() {
+        // The config stores common-module `uri` relative to the config root, but analysis
+        // passes an absolute path. Resolution must still find the module (by name segment),
+        // otherwise every common-module metadata diagnostic stays silent.
+        let fixture_root = std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../bsl-metadata/fixtures/designer"
+        ));
+        let config = bsl_metadata::load_from_directory(&fixture_root).unwrap();
+
+        let bsl_path = fixture_root.join("CommonModules/КлиентскийОбщийМодуль/Ext/Module.bsl");
+        let metadata = build_module_metadata(&bsl_path, Some(&config));
+
+        assert_eq!(metadata.module_type, bsl_metadata::ModuleType::CommonModule);
+        use bsl_metadata::traits::MdObject;
+        let cm = metadata.common_module.as_ref().expect("common module should be populated");
+        assert_eq!(cm.name(), "КлиентскийОбщийМодуль");
+        assert!(cm.is_client_managed_application(), "client flag must be parsed through");
+        assert!(metadata.execution_context.is_some(), "execution context must be derived");
     }
 
     #[test]

@@ -71,6 +71,7 @@ pub fn node_kind_to_syntax(kind: NodeKind) -> syntax::SyntaxKind {
         NodeKind::SdblSubquery => SK::SDBL_SUBQUERY,
         NodeKind::SdblUnionClause => SK::SDBL_UNION_CLAUSE,
         NodeKind::SdblQuery => SK::SDBL_QUERY,
+        NodeKind::SdblQueryExtension => SK::SDBL_QUERY_EXTENSION,
         NodeKind::SdblLimitations => SK::SDBL_LIMITATIONS,
         NodeKind::SdblTopClause => SK::SDBL_TOP_CLAUSE,
         NodeKind::SdblSelectClause => SK::SDBL_SELECT_CLAUSE,
@@ -209,6 +210,8 @@ pub fn token_kind_to_syntax(kind: TokenKind) -> syntax::SyntaxKind {
 
         TokenKind::LParen => SK::L_PAREN,
         TokenKind::RParen => SK::R_PAREN,
+        TokenKind::LBrace => SK::L_BRACE,
+        TokenKind::RBrace => SK::R_BRACE,
         TokenKind::LBracket => SK::L_BRACKET,
         TokenKind::RBracket => SK::R_BRACKET,
         TokenKind::Dot => SK::DOT,

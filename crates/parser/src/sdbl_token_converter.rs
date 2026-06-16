@@ -150,6 +150,8 @@ fn convert_sdbl_token_kind(kind: SdblTokenKind) -> TokenKind {
 
         S::LParen => T::LParen,
         S::RParen => T::RParen,
+        S::LBrace => T::LBrace,
+        S::RBrace => T::RBrace,
         S::Dot => T::Dot,
         S::Comma => T::Comma,
         S::Semicolon => T::Semicolon,

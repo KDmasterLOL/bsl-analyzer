@@ -43,8 +43,10 @@ The current implementation is narrower and more precise than a simple textual sc
 
 - it only checks by-value parameters (`Val` / `Знач`);
 - it uses reaching definitions to verify that the assignment still sees only the original parameter definition;
-- it suppresses diagnostics when the parameter is used in the right-hand side or in an earlier meaningful statement;
+- it suppresses diagnostics when the parameter is read in the right-hand side or in any statement that executes before the rewrite — including the condition of an enclosing `If`/`While`/loop header (the `If Param = Undefined Then Param = …` default-initialization idiom is *not* reported);
 - self-assignments like `Param = Param` are skipped and do not count as meaningful use.
+
+Parameter names are compared case-insensitively, including Cyrillic letters.
 
 ## Sources
 
