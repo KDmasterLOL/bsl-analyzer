@@ -2050,7 +2050,7 @@ fn prepare_semantic_rows_for_files(
         .collect::<HashMap<_, _>>();
     let items_query = format!(
         "SELECT foi.file_object_id, foi.ordinal, foi.symbol_name, foi.kind,
-                foi.line_start, foi.line_end, co.text
+                foi.line_start, foi.line_end, foi.graph_context, co.text
          FROM {} foi
          JOIN {} co ON co.content_hash = foi.content_hash
          WHERE foi.file_object_id = ANY($1)
@@ -2068,10 +2068,12 @@ fn prepare_semantic_rows_for_files(
         let Some((collection, path)) = file_meta.get(&file_object_id) else {
             continue;
         };
-        let embedding_key = semantic_key_for_document(
+        let graph_context: Option<String> = row.get("graph_context");
+        let embedding_key = crate::document::semantic_key_from_parts(
             path,
             row.get("kind"),
             row.get("symbol_name"),
+            graph_context.as_deref().unwrap_or(""),
             row.get("text"),
         );
         if seen_keys.insert(embedding_key.clone()) {
@@ -2281,6 +2283,20 @@ fn fingerprint_file_documents(documents: &[IndexedDocument]) -> String {
         hasher.update(document.content_hash.as_bytes());
         hasher.update(&[0]);
         hasher.update(document.text.as_bytes());
+        hasher.update(&[0]);
+        // graph_context is folded into the embedding text (and thus the embedding
+        // key), so a context-only change must invalidate file-object reuse — else
+        // the reused row keeps stale context and its recomputed key no longer
+        // matches the freshly stored embedding.
+        match document.graph_context.as_deref() {
+            Some(context) => {
+                hasher.update(&[1]);
+                hasher.update(context.as_bytes());
+            }
+            None => {
+                hasher.update(&[0]);
+            }
+        }
         hasher.update(&[0xff]);
     }
     hasher.finalize().to_hex().to_string()
@@ -2712,6 +2728,7 @@ fn collect_active_embedding_keys(
         "SELECT sf.path,
                 foi.kind,
                 foi.symbol_name,
+                foi.graph_context,
                 co.text
          FROM {} sf
          JOIN {} foi ON foi.file_object_id = sf.file_object_id
@@ -2863,19 +2880,18 @@ fn snapshot_ancestry_ids(
 }
 
 fn semantic_key_for_semantic_row(row: Row) -> String {
-    let payload = format!(
-        "Path: {}\nKind: {}\nSymbol: {}\n{}",
-        row.get::<_, String>("path"),
-        row.get::<_, String>("kind"),
-        row.get::<_, String>("symbol_name"),
-        row.get::<_, String>("text"),
-    );
-    blake3::hash(payload.as_bytes()).to_hex().to_string()
-}
-
-fn semantic_key_for_document(path: &str, kind: &str, symbol_name: &str, text: &str) -> String {
-    let payload = format!("Path: {path}\nKind: {kind}\nSymbol: {symbol_name}\n{text}");
-    blake3::hash(payload.as_bytes()).to_hex().to_string()
+    let path: String = row.get("path");
+    let kind: String = row.get("kind");
+    let symbol_name: String = row.get("symbol_name");
+    let graph_context: Option<String> = row.get("graph_context");
+    let text: String = row.get("text");
+    crate::document::semantic_key_from_parts(
+        &path,
+        &kind,
+        &symbol_name,
+        graph_context.as_deref().unwrap_or(""),
+        &text,
+    )
 }
 
 fn query_string_column(
