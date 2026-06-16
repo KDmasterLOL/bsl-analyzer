@@ -13,6 +13,12 @@ unclosed transactions and orphaned `CommitTransaction()` /
 The implementation also supports a local safety limit, `maxTransactionLevel`,
 to avoid pathological traversal depth.
 
+The analysis correlates simple flag conditions: when `BeginTransaction()` and
+its matching `CommitTransaction()` / `RollbackTransaction()` are guarded by the
+same condition (e.g. `If LocalTransaction Then …`), infeasible paths where the
+flag would be both true and false are dropped, so no false positive is raised.
+Correlation applies only to stable variables that are assigned at most once.
+
 ## Examples
 
 Correct:
