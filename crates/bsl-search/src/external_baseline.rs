@@ -212,6 +212,22 @@ impl ExternalBaselineAdapter {
         }
     }
 
+    pub fn ensure_embedding_identity(
+        &self,
+        model_id: &str,
+        dimension: usize,
+    ) -> Result<(), SearchError> {
+        match self {
+            Self::Postgres(adapter) => adapter.ensure_embedding_identity(model_id, dimension),
+        }
+    }
+
+    pub fn read_embedding_identity(&self) -> Result<Option<(String, usize)>, SearchError> {
+        match self {
+            Self::Postgres(adapter) => adapter.read_embedding_identity(),
+        }
+    }
+
     pub fn list_embedding_models(
         &self,
         model_id: Option<&str>,
@@ -344,6 +360,14 @@ impl EmbeddingStore for ExternalBaselineAdapter {
         embeddings: &[(String, Vec<f32>)],
     ) -> Result<BaselineEmbeddingStats, SearchError> {
         ExternalBaselineAdapter::store_embeddings(self, model_id, dimension, embeddings)
+    }
+
+    fn ensure_embedding_identity(
+        &self,
+        model_id: &str,
+        dimension: usize,
+    ) -> Result<(), SearchError> {
+        ExternalBaselineAdapter::ensure_embedding_identity(self, model_id, dimension)
     }
 }
 

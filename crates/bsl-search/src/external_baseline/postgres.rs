@@ -19,6 +19,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 const SCHEMA_METADATA_TABLE: &str = "_schema_metadata_";
+const EMBEDDING_MODEL_SETTING: &str = "embedding_model";
+const EMBEDDING_DIMENSION_SETTING: &str = "embedding_dimension";
 const REQUIRED_STORAGE_TABLES: &[&str] = &[
     SCHEMA_METADATA_TABLE,
     "snapshots",
@@ -201,6 +203,86 @@ impl PostgresBaselineAdapter {
             ),
             &[&schema_version],
         )?;
+        Ok(())
+    }
+
+    pub fn read_embedding_identity(&self) -> Result<Option<(String, usize)>, SearchError> {
+        let mut client = self.connect()?;
+        let model = client
+            .query_opt(
+                &format!(
+                    "SELECT value FROM {} WHERE setting = $1 LIMIT 1",
+                    self.table(SCHEMA_METADATA_TABLE)
+                ),
+                &[&EMBEDDING_MODEL_SETTING],
+            )?
+            .map(|row| row.get::<_, String>(0));
+        let dimension = client
+            .query_opt(
+                &format!(
+                    "SELECT value::INTEGER FROM {} WHERE setting = $1 LIMIT 1",
+                    self.table(SCHEMA_METADATA_TABLE)
+                ),
+                &[&EMBEDDING_DIMENSION_SETTING],
+            )?
+            .map(|row| row.get::<_, i32>(0));
+        match (model, dimension) {
+            (Some(model), Some(dimension)) => Ok(Some((model, dimension as usize))),
+            _ => Ok(None),
+        }
+    }
+
+    pub fn ensure_embedding_identity(
+        &self,
+        model_id: &str,
+        dimension: usize,
+    ) -> Result<(), SearchError> {
+        let mut client = self.connect()?;
+        let mut tx = client.transaction()?;
+        // Claim the identity if unset, atomically. `DO NOTHING` (not `DO UPDATE`) means
+        // the first writer wins; a concurrent first publish blocks on the row lock and,
+        // once the winner commits, its own insert becomes a no-op. The read-back below
+        // therefore reflects the single committed identity for every writer, so two racing
+        // first publishes with different models can't both succeed.
+        let claim = format!(
+            "INSERT INTO {} (setting, value)
+             VALUES ($1, $2)
+             ON CONFLICT (setting) DO NOTHING",
+            self.table(SCHEMA_METADATA_TABLE)
+        );
+        tx.execute(&claim, &[&EMBEDDING_MODEL_SETTING, &model_id])?;
+        tx.execute(&claim, &[&EMBEDDING_DIMENSION_SETTING, &dimension.to_string()])?;
+
+        let recorded_model: String = tx
+            .query_one(
+                &format!(
+                    "SELECT value FROM {} WHERE setting = $1",
+                    self.table(SCHEMA_METADATA_TABLE)
+                ),
+                &[&EMBEDDING_MODEL_SETTING],
+            )?
+            .get(0);
+        let recorded_dimension: i32 = tx
+            .query_one(
+                &format!(
+                    "SELECT value::INTEGER FROM {} WHERE setting = $1",
+                    self.table(SCHEMA_METADATA_TABLE)
+                ),
+                &[&EMBEDDING_DIMENSION_SETTING],
+            )?
+            .get(0);
+        tx.commit()?;
+
+        let recorded_dimension = recorded_dimension as usize;
+        if recorded_model != model_id || recorded_dimension != dimension {
+            let schema = &self.schema;
+            return Err(SearchError::ExternalBaseline(format!(
+                "embedding identity mismatch for schema '{schema}': baseline uses \
+                 model '{recorded_model}' (dim {recorded_dimension}); refusing to publish with \
+                 model '{model_id}' (dim {dimension}). A shared baseline must use one \
+                 embedding model."
+            )));
+        }
         Ok(())
     }
 
@@ -2050,7 +2132,7 @@ fn prepare_semantic_rows_for_files(
         .collect::<HashMap<_, _>>();
     let items_query = format!(
         "SELECT foi.file_object_id, foi.ordinal, foi.symbol_name, foi.kind,
-                foi.line_start, foi.line_end, co.text
+                foi.line_start, foi.line_end, foi.graph_context, co.text
          FROM {} foi
          JOIN {} co ON co.content_hash = foi.content_hash
          WHERE foi.file_object_id = ANY($1)
@@ -2068,10 +2150,12 @@ fn prepare_semantic_rows_for_files(
         let Some((collection, path)) = file_meta.get(&file_object_id) else {
             continue;
         };
-        let embedding_key = semantic_key_for_document(
+        let graph_context: Option<String> = row.get("graph_context");
+        let embedding_key = crate::document::semantic_key_from_parts(
             path,
             row.get("kind"),
             row.get("symbol_name"),
+            graph_context.as_deref().unwrap_or(""),
             row.get("text"),
         );
         if seen_keys.insert(embedding_key.clone()) {
@@ -2281,6 +2365,20 @@ fn fingerprint_file_documents(documents: &[IndexedDocument]) -> String {
         hasher.update(document.content_hash.as_bytes());
         hasher.update(&[0]);
         hasher.update(document.text.as_bytes());
+        hasher.update(&[0]);
+        // graph_context is folded into the embedding text (and thus the embedding
+        // key), so a context-only change must invalidate file-object reuse — else
+        // the reused row keeps stale context and its recomputed key no longer
+        // matches the freshly stored embedding.
+        match document.graph_context.as_deref() {
+            Some(context) => {
+                hasher.update(&[1]);
+                hasher.update(context.as_bytes());
+            }
+            None => {
+                hasher.update(&[0]);
+            }
+        }
         hasher.update(&[0xff]);
     }
     hasher.finalize().to_hex().to_string()
@@ -2712,6 +2810,7 @@ fn collect_active_embedding_keys(
         "SELECT sf.path,
                 foi.kind,
                 foi.symbol_name,
+                foi.graph_context,
                 co.text
          FROM {} sf
          JOIN {} foi ON foi.file_object_id = sf.file_object_id
@@ -2863,19 +2962,18 @@ fn snapshot_ancestry_ids(
 }
 
 fn semantic_key_for_semantic_row(row: Row) -> String {
-    let payload = format!(
-        "Path: {}\nKind: {}\nSymbol: {}\n{}",
-        row.get::<_, String>("path"),
-        row.get::<_, String>("kind"),
-        row.get::<_, String>("symbol_name"),
-        row.get::<_, String>("text"),
-    );
-    blake3::hash(payload.as_bytes()).to_hex().to_string()
-}
-
-fn semantic_key_for_document(path: &str, kind: &str, symbol_name: &str, text: &str) -> String {
-    let payload = format!("Path: {path}\nKind: {kind}\nSymbol: {symbol_name}\n{text}");
-    blake3::hash(payload.as_bytes()).to_hex().to_string()
+    let path: String = row.get("path");
+    let kind: String = row.get("kind");
+    let symbol_name: String = row.get("symbol_name");
+    let graph_context: Option<String> = row.get("graph_context");
+    let text: String = row.get("text");
+    crate::document::semantic_key_from_parts(
+        &path,
+        &kind,
+        &symbol_name,
+        graph_context.as_deref().unwrap_or(""),
+        &text,
+    )
 }
 
 fn query_string_column(

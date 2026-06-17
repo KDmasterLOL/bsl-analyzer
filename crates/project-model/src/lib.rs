@@ -515,11 +515,32 @@ pub struct SearchBaselineConfig {
     #[serde(default)]
     pub postgres: SearchPostgresConfig,
 
+    #[serde(default)]
+    pub embedding: SearchEmbeddingConfig,
+
     #[serde(default, alias = "workspace_code")]
     pub workspace_code: SearchBaselineTargetConfig,
 
     #[serde(default)]
     pub reference: SearchBaselineTargetConfig,
+}
+
+/// Declares the embedding identity (model + dimension) of a shared search
+/// baseline so it is pinned in committed config rather than per-developer env.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchEmbeddingConfig {
+    #[serde(default)]
+    pub model: Option<String>,
+
+    #[serde(default)]
+    pub dimension: Option<usize>,
+
+    #[serde(default)]
+    pub provider: Option<String>,
+
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
@@ -973,6 +994,8 @@ struct TomlSearchBaselineConfig {
     #[serde(default)]
     postgres: TomlSearchPostgresConfig,
     #[serde(default)]
+    embedding: SearchEmbeddingConfig,
+    #[serde(default)]
     workspace_code: SearchBaselineTargetConfig,
     #[serde(default)]
     reference: SearchBaselineTargetConfig,
@@ -1031,6 +1054,7 @@ impl From<TomlConfig> for ProjectConfig {
                             args: pg.credential_helper.args,
                         },
                     },
+                    embedding: toml.search.baseline.embedding,
                     workspace_code: toml.search.baseline.workspace_code,
                     reference: toml.search.baseline.reference,
                 },

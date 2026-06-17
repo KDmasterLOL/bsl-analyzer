@@ -45,15 +45,26 @@ enum SemanticUnavailable {
     RuntimeFailed,
     BaselineNotReady,
     BaselineRequired,
+    /// The reader's configured embedding model/dimension differs from what the shared baseline
+    /// was indexed with, so its query vectors cannot be compared against the stored ones. The
+    /// carried string names both identities and the env/config knobs to reconcile them.
+    IdentityMismatch(String),
 }
 
 impl SemanticUnavailable {
-    fn note(&self) -> &'static str {
+    fn note(&self) -> String {
         match self {
-            Self::NotConfigured => "semantic skipped: not configured (set EMBEDDING_URL)",
-            Self::RuntimeFailed => "semantic skipped: runtime initialization failed",
-            Self::BaselineNotReady => "semantic skipped: PostgreSQL baseline semantic not ready",
-            Self::BaselineRequired => "semantic skipped: requires PostgreSQL baseline serving",
+            Self::NotConfigured => {
+                "semantic skipped: not configured (set EMBEDDING_URL)".to_owned()
+            }
+            Self::RuntimeFailed => "semantic skipped: runtime initialization failed".to_owned(),
+            Self::BaselineNotReady => {
+                "semantic skipped: PostgreSQL baseline semantic not ready".to_owned()
+            }
+            Self::BaselineRequired => {
+                "semantic skipped: requires PostgreSQL baseline serving".to_owned()
+            }
+            Self::IdentityMismatch(message) => message.clone(),
         }
     }
 }
@@ -285,6 +296,35 @@ fn semantic_code_hits(
     }
 
     if let Some(source) = external_baseline {
+        // Best-effort identity gate: the reader's query vectors are only comparable against the
+        // baseline's stored vectors if both were produced by the same embedding model/dimension.
+        // On a mismatch, name the exact reason (and the knobs to fix it) instead of silently
+        // returning lexical-only. A baseline with no recorded identity, or a read error, falls
+        // through to the existing behavior rather than hard-failing.
+        match source.embedding_identity() {
+            Ok(Some((baseline_model, baseline_dim))) => {
+                let reader_model = engine.embedding_model().unwrap_or("unset");
+                let reader_dim = engine.embedding_dimension();
+                if reader_model != baseline_model || reader_dim != Some(baseline_dim) {
+                    let reader_dim =
+                        reader_dim.map(|dim| dim.to_string()).unwrap_or_else(|| "unset".to_owned());
+                    let msg = format!(
+                        "semantic skipped: this baseline was indexed with model '{baseline_model}' \
+                         (dim {baseline_dim}), but the reader is configured with model \
+                         '{reader_model}' (dim {reader_dim}); set EMBEDDING_MODEL/EMBEDDING_DIM \
+                         (or [search.baseline.embedding] in bsl-analyzer.toml) to match and restart"
+                    );
+                    return Ok(CodeHits::Unavailable(SemanticUnavailable::IdentityMismatch(msg)));
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::debug!(
+                    "failed to read baseline embedding identity for validation: {error}"
+                );
+            }
+        }
+
         match try_direct_semantic_code(engine, &source, query, limit) {
             DirectResult::Found(hits) => {
                 let workspace_root = engine.workspace_root().map(Path::to_path_buf);
@@ -428,7 +468,7 @@ pub fn hybrid_code(
         // them to one generic note.
         CodeHits::Pending(message) => (fuse_smart(&lex_hits, &[], query, limit), Some(message)),
         CodeHits::Unavailable(reason) => {
-            (fuse_smart(&lex_hits, &[], query, limit), Some(reason.note().to_owned()))
+            (fuse_smart(&lex_hits, &[], query, limit), Some(reason.note()))
         }
     };
     hits.truncate(limit);
@@ -784,8 +824,8 @@ pub fn search_docs(
 
     if !engine.has_semantic() {
         return Err(McpError::invalid_params(
-            "Semantic search not available. Set EMBEDDING_URL environment variable \
-             and restart. Use find_docs for text search instead.",
+            "Semantic search not available. Set EMBEDDING_URL and EMBEDDING_MODEL \
+             environment variables and restart. Use find_docs for text search instead.",
             None,
         ));
     }
@@ -2252,6 +2292,19 @@ mod tests {
         assert!(text.contains("ПроверитьИНН"), "{text}");
         // ...with a trailing note explaining semantic was skipped (after the hit lines).
         assert!(text.contains("-- semantic skipped: runtime initialization failed --"), "{text}");
+    }
+
+    #[test]
+    fn identity_mismatch_note_surfaces_the_carried_actionable_message() {
+        // End-to-end mismatch coverage requires a live Postgres baseline with a recorded
+        // `_schema_metadata_` identity, which is left to integration; here we pin that the
+        // dynamic variant round-trips its carried, caller-facing message verbatim.
+        let message = "semantic skipped: this baseline was indexed with model 'a' (dim 768), \
+                       but the reader is configured with model 'b' (dim 1024); set \
+                       EMBEDDING_MODEL/EMBEDDING_DIM (or [search.baseline.embedding] in \
+                       bsl-analyzer.toml) to match and restart";
+        let reason = SemanticUnavailable::IdentityMismatch(message.to_owned());
+        assert_eq!(reason.note(), message);
     }
 
     #[test]

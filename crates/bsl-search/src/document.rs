@@ -20,16 +20,47 @@ pub struct Document {
 /// sits between the header and the body so the vector sees behaviour before syntax;
 /// `render()` upstream already newline-terminates each line.
 pub fn semantic_text_for_indexed_document(document: &IndexedDocument) -> String {
-    let module_path = crate::context::file_path_to_module_path(&document.path);
-    let graph_context = document.graph_context.as_deref().unwrap_or("");
-    format!(
-        "Module: {}\nKind: {}\nSymbol: {}\n{}{}",
-        module_path, document.kind, document.symbol_name, graph_context, document.text
+    semantic_text_from_parts(
+        &document.path,
+        &document.kind,
+        &document.symbol_name,
+        document.graph_context.as_deref().unwrap_or(""),
+        &document.text,
     )
 }
 
 pub fn semantic_key_for_indexed_document(document: &IndexedDocument) -> String {
     blake3::hash(semantic_text_for_indexed_document(document).as_bytes()).to_hex().to_string()
+}
+
+/// The single source of truth for the embedding-text layout, expressed over a
+/// chunk's raw parts. Both the indexing path (via
+/// [`semantic_text_for_indexed_document`]) and the central serving-side key
+/// recomputation read through this so the blake3 key matches on both ends — the
+/// `rel_path` is folded into the BSL-native module path exactly once, here.
+pub fn semantic_text_from_parts(
+    rel_path: &str,
+    kind: &str,
+    symbol_name: &str,
+    graph_context: &str,
+    text: &str,
+) -> String {
+    let module_path = crate::context::file_path_to_module_path(rel_path);
+    format!("Module: {module_path}\nKind: {kind}\nSymbol: {symbol_name}\n{graph_context}{text}")
+}
+
+pub fn semantic_key_from_parts(
+    rel_path: &str,
+    kind: &str,
+    symbol_name: &str,
+    graph_context: &str,
+    text: &str,
+) -> String {
+    blake3::hash(
+        semantic_text_from_parts(rel_path, kind, symbol_name, graph_context, text).as_bytes(),
+    )
+    .to_hex()
+    .to_string()
 }
 
 /// Build the `IndexedDocument` for one code chunk — the single construction point

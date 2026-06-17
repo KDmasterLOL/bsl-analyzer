@@ -33,18 +33,24 @@ pub(super) fn build_adapter(
     Ok(bsl_search::ExternalBaselineAdapter::new(config)?)
 }
 
-pub(super) fn embedder_config_from_env() -> Option<bsl_search::EmbedderConfig> {
-    let base_url = env::var("EMBEDDING_URL").ok()?;
-    let model =
-        env::var("EMBEDDING_MODEL").unwrap_or_else(|_| "Qwen/Qwen3-Embedding-0.6B".to_owned());
-    let dim = env::var("EMBEDDING_DIM").ok().and_then(|value| value.parse().ok()).or(Some(1024));
+pub(super) fn embedder_config(
+    project: &project_model::Project,
+) -> Option<bsl_search::EmbedderConfig> {
+    let emb = &project.config.search.baseline.embedding;
+
+    let model = emb.model.clone().or_else(|| env::var("EMBEDDING_MODEL").ok())?;
+    let base_url = env::var("EMBEDDING_URL").ok().or_else(|| emb.url.clone())?;
+    let dim = emb
+        .dimension
+        .or_else(|| env::var("EMBEDDING_DIM").ok().and_then(|value| value.parse().ok()))
+        .or(Some(1024));
 
     Some(bsl_search::EmbedderConfig {
         base_url,
         model,
         dim,
         api_key: env::var("EMBEDDING_API_KEY").ok(),
-        provider: env::var("EMBEDDING_PROVIDER").ok(),
+        provider: emb.provider.clone().or_else(|| env::var("EMBEDDING_PROVIDER").ok()),
     })
 }
 

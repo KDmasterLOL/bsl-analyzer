@@ -101,6 +101,9 @@ enum BaselineServiceRequest {
         snapshot_id: String,
         reply: mpsc::Sender<Result<WorkspaceBaselineManifest, bsl_search::SearchError>>,
     },
+    EmbeddingIdentity {
+        reply: mpsc::Sender<Result<Option<(String, usize)>, bsl_search::SearchError>>,
+    },
     Shutdown {
         reply: mpsc::Sender<()>,
     },
@@ -370,6 +373,9 @@ impl ExternalBaselineService {
                     let result = source.load_baseline_manifest(&snapshot_id);
                     let _ = reply.send(result);
                 }
+                BaselineServiceRequest::EmbeddingIdentity { reply } => {
+                    let _ = reply.send(source.embedding_identity());
+                }
                 BaselineServiceRequest::Shutdown { reply } => {
                     let _ = reply.send(());
                     break;
@@ -496,6 +502,10 @@ impl ExternalBaselineService {
         })?
     }
 
+    pub fn embedding_identity(&self) -> Result<Option<(String, usize)>, bsl_search::SearchError> {
+        self.request(|reply| BaselineServiceRequest::EmbeddingIdentity { reply })?
+    }
+
     pub(crate) fn corpus(&self) -> CorpusId {
         self.corpus.clone()
     }
@@ -597,12 +607,21 @@ struct RefreshContext {
     schema_keys: Vec<String>,
 }
 
+/// A baseline's recorded embedding identity: model name and vector dimension.
+type EmbeddingIdentity = (String, usize);
+
+/// Memoized embedding identity keyed by `refresh_generation`. Outer `Option` = not yet
+/// populated; inner `Option` = the recorded identity (`None` when the baseline has none).
+type EmbeddingIdentityCache = StdMutex<Option<(usize, Option<EmbeddingIdentity>)>>;
+
 #[derive(Debug)]
 pub(crate) struct RefreshableExternalBaselineSource {
     inner: StdRwLock<ExternalBaselineSource>,
     context: RefreshContext,
     refresh_generation: AtomicUsize,
     refresh_lock: StdMutex<()>,
+    /// Invalidated by `refresh_inner` whenever credentials are refreshed (the generation bumps).
+    embedding_identity_cache: EmbeddingIdentityCache,
 }
 
 impl RefreshableExternalBaselineSource {
@@ -625,6 +644,7 @@ impl RefreshableExternalBaselineSource {
             context,
             refresh_generation: AtomicUsize::new(0),
             refresh_lock: StdMutex::new(()),
+            embedding_identity_cache: StdMutex::new(None),
         })
     }
 
@@ -649,6 +669,7 @@ impl RefreshableExternalBaselineSource {
             inner,
             context,
             refresh_generation: AtomicUsize::new(0),
+            embedding_identity_cache: StdMutex::new(None),
             refresh_lock: StdMutex::new(()),
         })
     }
@@ -671,6 +692,7 @@ impl RefreshableExternalBaselineSource {
             inner,
             context,
             refresh_generation: AtomicUsize::new(0),
+            embedding_identity_cache: StdMutex::new(None),
             refresh_lock: StdMutex::new(()),
         })
     }
@@ -902,6 +924,28 @@ impl RefreshableExternalBaselineSource {
     pub(crate) fn _schema_for_status(&self) -> String {
         let reader = self.inner.read().expect("baseline source lock poisoned");
         reader.adapter.config().schema.clone().unwrap_or_else(|| "bsl_search".to_owned())
+    }
+
+    fn embedding_identity(&self) -> Result<Option<(String, usize)>, bsl_search::SearchError> {
+        // The identity is immutable for a baseline, so memoize it and re-read only after a
+        // refresh swaps the adapter (keyed by `refresh_generation`). This keeps the per-query
+        // semantic path off the DB. A read error is not cached, so a transient failure recovers
+        // on the next call. `refresh_inner` only takes `inner.write()` (never this cache lock),
+        // so there is no lock-ordering cycle with the read lock taken below.
+        let generation = self.refresh_generation.load(Ordering::Acquire);
+        let mut cache =
+            self.embedding_identity_cache.lock().expect("embedding identity cache poisoned");
+        if let Some((cached_generation, value)) = cache.as_ref() {
+            if *cached_generation == generation {
+                return Ok(value.clone());
+            }
+        }
+        let value = {
+            let reader = self.inner.read().expect("baseline source lock poisoned");
+            reader.adapter.read_embedding_identity()?
+        };
+        *cache = Some((generation, value.clone()));
+        Ok(value)
     }
 }
 
@@ -1628,6 +1672,7 @@ mod tests {
                             snapshot_id: Some("reference:0.1.104".to_owned()),
                             ..SearchBaselineTargetConfig::default()
                         },
+                        ..SearchBaselineConfig::default()
                     },
                 },
                 ..ProjectConfig::default()
