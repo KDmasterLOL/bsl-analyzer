@@ -322,6 +322,8 @@ fn check_call_expr(
 
     let method_name = match body.expr(callee) {
         Expr::Path(name) => name.as_str(),
+        Expr::Field { field, .. } => field.as_str(),
+        Expr::QualifiedPath(path) => path.last().as_str(),
         _ => "метод",
     };
 
@@ -691,13 +693,13 @@ mod tests {
 
         expect![[r#"
             NestedFunctionInParameters @ 2:23..2:31
-              message: Убрать инициализацию параметров метода 'метод' вложенными методами
+              message: Убрать инициализацию параметров метода 'Вставить' вложенными методами
               severity: Information
             NestedFunctionInParameters @ 4:12..4:20
               message: Убрать инициализацию параметров конструктора 'Картинка' вложенными методами
               severity: Information
             NestedFunctionInParameters @ 52:73..52:95
-              message: Убрать инициализацию параметров метода 'метод' вложенными методами
+              message: Убрать инициализацию параметров метода 'ПолучитьСсылкуНаОбъект' вложенными методами
               severity: Information"#]]
         .assert_eq(&format_diags(FIXTURE, &diagnostics));
     }
@@ -713,7 +715,7 @@ mod tests {
 
         expect![[r#"
             NestedFunctionInParameters @ 2:23..2:31
-              message: Убрать инициализацию параметров метода 'метод' вложенными методами
+              message: Убрать инициализацию параметров метода 'Вставить' вложенными методами
               severity: Information
             NestedFunctionInParameters @ 4:12..4:20
               message: Убрать инициализацию параметров конструктора 'Картинка' вложенными методами
@@ -725,7 +727,7 @@ mod tests {
               message: Убрать инициализацию параметров метода 'Сообщить' вложенными методами
               severity: Information
             NestedFunctionInParameters @ 14:36..14:43
-              message: Убрать инициализацию параметров метода 'метод' вложенными методами
+              message: Убрать инициализацию параметров метода 'Метод21' вложенными методами
               severity: Information
             NestedFunctionInParameters @ 18:23..18:32
               message: Убрать инициализацию параметров конструктора 'Структура' вложенными методами
@@ -734,10 +736,10 @@ mod tests {
               message: Убрать инициализацию параметров конструктора 'Новый' вложенными методами
               severity: Information
             NestedFunctionInParameters @ 48:73..48:95
-              message: Убрать инициализацию параметров метода 'метод' вложенными методами
+              message: Убрать инициализацию параметров метода 'ПолучитьСсылкуНаОбъект' вложенными методами
               severity: Information
             NestedFunctionInParameters @ 52:73..52:95
-              message: Убрать инициализацию параметров метода 'метод' вложенными методами
+              message: Убрать инициализацию параметров метода 'ПолучитьСсылкуНаОбъект' вложенными методами
               severity: Information
             NestedFunctionInParameters @ 57:5..57:29
               message: Убрать инициализацию параметров метода 'ЗаписьЖурналаРегистрации' вложенными методами
@@ -746,7 +748,7 @@ mod tests {
               message: Убрать инициализацию параметров метода 'Метод' вложенными методами
               severity: Information
             NestedFunctionInParameters @ 80:25..80:44
-              message: Убрать инициализацию параметров метода 'метод' вложенными методами
+              message: Убрать инициализацию параметров метода 'RecalculateAccruals' вложенными методами
               severity: Information"#]].assert_eq(&format_diags(FIXTURE, &diagnostics));
     }
 
@@ -764,7 +766,7 @@ mod tests {
 
         expect![[r#"
             NestedFunctionInParameters @ 2:23..2:31
-              message: Убрать инициализацию параметров метода 'метод' вложенными методами
+              message: Убрать инициализацию параметров метода 'Вставить' вложенными методами
               severity: Information
             NestedFunctionInParameters @ 4:12..4:20
               message: Убрать инициализацию параметров конструктора 'Картинка' вложенными методами
@@ -776,7 +778,7 @@ mod tests {
               message: Убрать инициализацию параметров метода 'Сообщить' вложенными методами
               severity: Information
             NestedFunctionInParameters @ 14:36..14:43
-              message: Убрать инициализацию параметров метода 'метод' вложенными методами
+              message: Убрать инициализацию параметров метода 'Метод21' вложенными методами
               severity: Information
             NestedFunctionInParameters @ 18:23..18:32
               message: Убрать инициализацию параметров конструктора 'Структура' вложенными методами
@@ -785,10 +787,10 @@ mod tests {
               message: Убрать инициализацию параметров конструктора 'Новый' вложенными методами
               severity: Information
             NestedFunctionInParameters @ 48:73..48:95
-              message: Убрать инициализацию параметров метода 'метод' вложенными методами
+              message: Убрать инициализацию параметров метода 'ПолучитьСсылкуНаОбъект' вложенными методами
               severity: Information
             NestedFunctionInParameters @ 52:73..52:95
-              message: Убрать инициализацию параметров метода 'метод' вложенными методами
+              message: Убрать инициализацию параметров метода 'ПолучитьСсылкуНаОбъект' вложенными методами
               severity: Information
             NestedFunctionInParameters @ 57:5..57:29
               message: Убрать инициализацию параметров метода 'ЗаписьЖурналаРегистрации' вложенными методами
@@ -797,7 +799,7 @@ mod tests {
               message: Убрать инициализацию параметров метода 'Метод' вложенными методами
               severity: Information
             NestedFunctionInParameters @ 80:25..80:44
-              message: Убрать инициализацию параметров метода 'метод' вложенными методами
+              message: Убрать инициализацию параметров метода 'RecalculateAccruals' вложенными методами
               severity: Information
             NestedFunctionInParameters @ 83:12..83:27
               message: Убрать инициализацию параметров метода 'PredefinedValue' вложенными методами
