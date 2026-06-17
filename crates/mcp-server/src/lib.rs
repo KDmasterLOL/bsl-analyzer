@@ -284,6 +284,12 @@ impl McpServer {
                 let progress = self.state.index_progress().clone();
                 let semantic_runtime = self.state.semantic_runtime();
                 let workspace_search_mode = self.state.workspace_search_mode();
+                let overlay_warmup = self
+                    .state
+                    .overlay_warmup()
+                    .lock()
+                    .map(|guard| guard.clone())
+                    .unwrap_or(crate::state::OverlayWarmupState::Pending);
                 let configured_baseline = self.state.configured_baseline();
                 let external_baseline = self.state.external_baseline();
                 tokio::task::spawn_blocking(move || {
@@ -292,6 +298,7 @@ impl McpServer {
                         &progress,
                         &semantic_runtime,
                         workspace_search_mode,
+                        overlay_warmup,
                         configured_baseline,
                         external_baseline,
                     )
@@ -791,12 +798,16 @@ impl McpServer {
                 let semantic_runtime = self.state.semantic_runtime();
                 let configured_baseline = self.state.configured_baseline();
                 let external_baseline = self.state.external_baseline();
+                // The reference/shared path runs no overlay warmup, so its state is always
+                // `Pending`; the Summary block words this profile as a reference docs index.
+                let overlay_warmup = crate::state::OverlayWarmupState::Pending;
                 tokio::task::spawn_blocking(move || {
                     tools::search::search_status(
                         &engine,
                         &progress,
                         &semantic_runtime,
                         WorkspaceSearchMode::SqliteLocal,
+                        overlay_warmup,
                         configured_baseline,
                         external_baseline,
                     )

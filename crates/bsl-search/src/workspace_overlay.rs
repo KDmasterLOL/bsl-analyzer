@@ -84,6 +84,12 @@ impl RefreshPlan {
         self.entries.is_empty() && self.hidden_paths.is_empty()
     }
 
+    /// Number of locally-changed files this plan re-embeds. Reported in `search status` so an
+    /// agent can see how much of the overlay differed from the baseline.
+    pub fn overlay_file_count(&self) -> usize {
+        self.entries.len()
+    }
+
     /// Every chunk `content_hash` referenced by the planned entries. The caller uses this to pull
     /// warm-reused vectors into the published embedding set so Phase C builds complete vectors.
     pub fn planned_content_hashes(&self) -> impl Iterator<Item = &String> {
