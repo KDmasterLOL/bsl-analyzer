@@ -49,6 +49,10 @@ enum SemanticUnavailable {
     /// was indexed with, so its query vectors cannot be compared against the stored ones. The
     /// carried string names both identities and the env/config knobs to reconcile them.
     IdentityMismatch(String),
+    /// Embedding the query failed at request time (timeout, network, or upstream error). The
+    /// embedder is configured but did not answer for this query, so semantic cannot serve it;
+    /// lexical results stand on their own and the carried detail explains the transient cause.
+    EmbedderUnavailable(String),
 }
 
 impl SemanticUnavailable {
@@ -65,6 +69,9 @@ impl SemanticUnavailable {
                 "semantic skipped: requires PostgreSQL baseline serving".to_owned()
             }
             Self::IdentityMismatch(message) => message.clone(),
+            Self::EmbedderUnavailable(detail) => {
+                format!("semantic skipped: embedder unavailable ({detail})")
+            }
         }
     }
 }
@@ -345,11 +352,20 @@ fn semantic_code_hits(
         return Ok(CodeHits::Unavailable(SemanticUnavailable::BaselineRequired));
     }
 
-    let hits = engine
-        .search(query, limit, Some("code"))
-        .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?;
     let workspace_root = engine.workspace_root().map(Path::to_path_buf);
-    Ok(CodeHits::Ready { hits, workspace_root })
+    match engine.search(query, limit, Some("code")) {
+        Ok(hits) => Ok(CodeHits::Ready { hits, workspace_root }),
+        // The query embed is a request-time call to a remote embedder on the hot path of every
+        // search. When it times out or transiently fails, degrade to the lexical hits the caller
+        // already has rather than failing the whole tool, mirroring the external-baseline path
+        // (`try_direct_semantic_code` treats an embed failure as `Unavailable`). A non-embedder
+        // error means the local index itself is broken, which is worth surfacing as a hard error.
+        Err(SearchError::Embedder(detail)) => {
+            warn!("local semantic: query embed failed, degrading to lexical: {detail}");
+            Ok(CodeHits::Unavailable(SemanticUnavailable::EmbedderUnavailable(detail)))
+        }
+        Err(e) => Err(McpError::internal_error(format!("search error: {e}"), None)),
+    }
 }
 
 /// Append live indexing progress to a "still building" message so the failed `search_code`
@@ -1609,9 +1625,9 @@ mod tests {
     use crate::baseline::RefreshableExternalBaselineSource;
     use crate::state::WorkspaceSearchMode;
     use bsl_search::{
-        lexical_hits_for_resolved_view, BaselineRef, CorpusId, Document, FusedHit, IndexProgress,
-        IndexedDocument, LexicalHit, Modality, ResolvedView, SearchEngine, SearchError,
-        SemanticHit,
+        lexical_hits_for_resolved_view, BaselineRef, CorpusId, Document, EmbedderConfig, FusedHit,
+        IndexProgress, IndexedDocument, LexicalHit, Modality, ResolvedView, SearchConfig,
+        SearchEngine, SearchError, SemanticHit,
     };
     use project_model::{
         ResolvedWorkspaceBaselineSupport, SearchBaselineSupportState, SearchPostgresConfig,
@@ -2231,6 +2247,43 @@ mod tests {
         // While the background embedding pass fills the published-but-empty index, semantic
         // degrades to lexical via Pending instead of searching the empty index.
         assert!(matches!(outcome, CodeHits::Pending(_)));
+    }
+
+    #[test]
+    fn semantic_core_degrades_to_lexical_when_query_embed_fails() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("workspace-search.db");
+        // The engine has semantic configured, but the embedder points at a closed port so the
+        // request-time query embed fails fast (connection refused) — standing in for a remote
+        // embedder timeout on the hot path of a SqliteLocal search.
+        let config = SearchConfig {
+            embedder: EmbedderConfig {
+                base_url: "http://127.0.0.1:1".to_owned(),
+                model: "test-model".to_owned(),
+                dim: Some(8),
+                api_key: None,
+                provider: None,
+            },
+            ..SearchConfig::default()
+        };
+        let engine = Arc::new(Mutex::new(Some(SearchEngine::new(&db_path, config).unwrap())));
+        let outcome = semantic_code_hits(
+            &engine,
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::Ready)),
+            WorkspaceSearchMode::SqliteLocal,
+            None,
+            None,
+            "обработка проведения документа",
+            10,
+        )
+        .unwrap();
+
+        // A request-time embed failure is a soft shortfall the hybrid path degrades past (lexical
+        // hits still serve), not a hard tool error.
+        assert!(matches!(
+            outcome,
+            CodeHits::Unavailable(SemanticUnavailable::EmbedderUnavailable(_))
+        ));
     }
 
     #[test]
