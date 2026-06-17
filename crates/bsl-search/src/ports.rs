@@ -45,6 +45,18 @@ pub trait EmbeddingStore {
         dimension: usize,
         embeddings: &[(String, Vec<f32>)],
     ) -> Result<BaselineEmbeddingStats, SearchError>;
+
+    /// Pin or validate this baseline's embedding identity (model + dimension).
+    /// The first semantic publish records it; later publishes must match, so a
+    /// shared baseline can never mix vectors from different models. Default no-op
+    /// for stores not shared across writers (the local sqlite index).
+    fn ensure_embedding_identity(
+        &self,
+        _model_id: &str,
+        _dimension: usize,
+    ) -> Result<(), SearchError> {
+        Ok(())
+    }
 }
 
 pub trait SnapshotCatalog {

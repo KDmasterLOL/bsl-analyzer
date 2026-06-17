@@ -19,6 +19,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 const SCHEMA_METADATA_TABLE: &str = "_schema_metadata_";
+const EMBEDDING_MODEL_SETTING: &str = "embedding_model";
+const EMBEDDING_DIMENSION_SETTING: &str = "embedding_dimension";
 const REQUIRED_STORAGE_TABLES: &[&str] = &[
     SCHEMA_METADATA_TABLE,
     "snapshots",
@@ -201,6 +203,86 @@ impl PostgresBaselineAdapter {
             ),
             &[&schema_version],
         )?;
+        Ok(())
+    }
+
+    pub fn read_embedding_identity(&self) -> Result<Option<(String, usize)>, SearchError> {
+        let mut client = self.connect()?;
+        let model = client
+            .query_opt(
+                &format!(
+                    "SELECT value FROM {} WHERE setting = $1 LIMIT 1",
+                    self.table(SCHEMA_METADATA_TABLE)
+                ),
+                &[&EMBEDDING_MODEL_SETTING],
+            )?
+            .map(|row| row.get::<_, String>(0));
+        let dimension = client
+            .query_opt(
+                &format!(
+                    "SELECT value::INTEGER FROM {} WHERE setting = $1 LIMIT 1",
+                    self.table(SCHEMA_METADATA_TABLE)
+                ),
+                &[&EMBEDDING_DIMENSION_SETTING],
+            )?
+            .map(|row| row.get::<_, i32>(0));
+        match (model, dimension) {
+            (Some(model), Some(dimension)) => Ok(Some((model, dimension as usize))),
+            _ => Ok(None),
+        }
+    }
+
+    pub fn ensure_embedding_identity(
+        &self,
+        model_id: &str,
+        dimension: usize,
+    ) -> Result<(), SearchError> {
+        let mut client = self.connect()?;
+        let mut tx = client.transaction()?;
+        // Claim the identity if unset, atomically. `DO NOTHING` (not `DO UPDATE`) means
+        // the first writer wins; a concurrent first publish blocks on the row lock and,
+        // once the winner commits, its own insert becomes a no-op. The read-back below
+        // therefore reflects the single committed identity for every writer, so two racing
+        // first publishes with different models can't both succeed.
+        let claim = format!(
+            "INSERT INTO {} (setting, value)
+             VALUES ($1, $2)
+             ON CONFLICT (setting) DO NOTHING",
+            self.table(SCHEMA_METADATA_TABLE)
+        );
+        tx.execute(&claim, &[&EMBEDDING_MODEL_SETTING, &model_id])?;
+        tx.execute(&claim, &[&EMBEDDING_DIMENSION_SETTING, &dimension.to_string()])?;
+
+        let recorded_model: String = tx
+            .query_one(
+                &format!(
+                    "SELECT value FROM {} WHERE setting = $1",
+                    self.table(SCHEMA_METADATA_TABLE)
+                ),
+                &[&EMBEDDING_MODEL_SETTING],
+            )?
+            .get(0);
+        let recorded_dimension: i32 = tx
+            .query_one(
+                &format!(
+                    "SELECT value::INTEGER FROM {} WHERE setting = $1",
+                    self.table(SCHEMA_METADATA_TABLE)
+                ),
+                &[&EMBEDDING_DIMENSION_SETTING],
+            )?
+            .get(0);
+        tx.commit()?;
+
+        let recorded_dimension = recorded_dimension as usize;
+        if recorded_model != model_id || recorded_dimension != dimension {
+            let schema = &self.schema;
+            return Err(SearchError::ExternalBaseline(format!(
+                "embedding identity mismatch for schema '{schema}': baseline uses \
+                 model '{recorded_model}' (dim {recorded_dimension}); refusing to publish with \
+                 model '{model_id}' (dim {dimension}). A shared baseline must use one \
+                 embedding model."
+            )));
+        }
         Ok(())
     }
 

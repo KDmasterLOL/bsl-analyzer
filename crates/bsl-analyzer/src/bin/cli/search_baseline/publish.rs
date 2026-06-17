@@ -98,7 +98,7 @@ pub(super) fn run(args: SearchBaselinePublishArgs) -> Result<(), Box<dyn Error +
         SnapshotPublishMetadata { branch: branch.clone(), commit: commit.clone() };
 
     eprintln!("[3/5] Publishing snapshot ({} chunks)...", indexed_documents.len());
-    let embedder = postgres::embedder_config_from_env().map(Embedder::new);
+    let embedder = postgres::embedder_config(&project).map(Embedder::new);
     let has_embedder = embedder.is_some();
     let embedding_progress = |event: EmbeddingProgress| match event {
         EmbeddingProgress::Plan { total_unique, cached, to_compute } => {

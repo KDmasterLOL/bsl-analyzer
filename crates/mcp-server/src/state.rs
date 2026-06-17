@@ -570,8 +570,9 @@ impl SharedState {
 
     fn embedding_config() -> Option<bsl_search::SearchConfig> {
         let base_url = std::env::var("EMBEDDING_URL").ok()?;
-        let model = std::env::var("EMBEDDING_MODEL")
-            .unwrap_or_else(|_| "Qwen/Qwen3-Embedding-0.6B".to_owned());
+        // The model must be declared explicitly: a wrong default would silently mix
+        // vectors from different models into one index. Unset means FTS-only.
+        let model = std::env::var("EMBEDDING_MODEL").ok()?;
         let dim: usize =
             std::env::var("EMBEDDING_DIM").ok().and_then(|s| s.parse().ok()).unwrap_or(1024);
         let concurrency: usize =

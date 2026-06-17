@@ -784,8 +784,8 @@ pub fn search_docs(
 
     if !engine.has_semantic() {
         return Err(McpError::invalid_params(
-            "Semantic search not available. Set EMBEDDING_URL environment variable \
-             and restart. Use find_docs for text search instead.",
+            "Semantic search not available. Set EMBEDDING_URL and EMBEDDING_MODEL \
+             environment variables and restart. Use find_docs for text search instead.",
             None,
         ));
     }

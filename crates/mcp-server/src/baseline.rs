@@ -1628,6 +1628,7 @@ mod tests {
                             snapshot_id: Some("reference:0.1.104".to_owned()),
                             ..SearchBaselineTargetConfig::default()
                         },
+                        ..SearchBaselineConfig::default()
                     },
                 },
                 ..ProjectConfig::default()

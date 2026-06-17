@@ -90,6 +90,7 @@ impl SharedEmbeddingPublisher {
     {
         let dimension = embedder.dimension();
         let model_id = embedder.model_id().to_owned();
+        store.ensure_embedding_identity(&model_id, dimension)?;
         if documents.is_empty() {
             if let Some(on_progress) = progress {
                 on_progress(EmbeddingProgress::Plan { total_unique: 0, cached: 0, to_compute: 0 });
@@ -428,6 +429,49 @@ mod tests {
         let mut batch_sizes = store.stored_batches.lock().unwrap().clone();
         batch_sizes.sort_unstable();
         assert_eq!(batch_sizes, vec![2, 2]);
+    }
+
+    #[derive(Clone, Default)]
+    struct RejectingIdentityStore {
+        inner: FakeEmbeddingStore,
+    }
+
+    impl EmbeddingStore for RejectingIdentityStore {
+        fn load_embeddings(
+            &self,
+            embedding_keys: &[String],
+            model_id: &str,
+            dimension: usize,
+        ) -> Result<HashMap<String, Vec<f32>>, SearchError> {
+            self.inner.load_embeddings(embedding_keys, model_id, dimension)
+        }
+
+        fn store_embeddings(
+            &self,
+            model_id: &str,
+            dimension: usize,
+            embeddings: &[(String, Vec<f32>)],
+        ) -> Result<BaselineEmbeddingStats, SearchError> {
+            self.inner.store_embeddings(model_id, dimension, embeddings)
+        }
+
+        fn ensure_embedding_identity(
+            &self,
+            _model_id: &str,
+            _dimension: usize,
+        ) -> Result<(), SearchError> {
+            Err(SearchError::ExternalBaseline("boom".into()))
+        }
+    }
+
+    #[test]
+    fn shared_embedding_publisher_propagates_identity_mismatch() {
+        let store = RejectingIdentityStore::default();
+        let documents = vec![indexed_document("path/1.bsl", "one")];
+        let publisher = SharedEmbeddingPublisher::new(EmbeddingExecutionPolicy::default());
+        let result = publisher.publish(&store, &FakeEmbedder::default(), &documents, None);
+        assert!(matches!(result, Err(SearchError::ExternalBaseline(message)) if message == "boom"));
+        assert!(store.inner.stored_batches.lock().unwrap().is_empty());
     }
 
     #[test]
