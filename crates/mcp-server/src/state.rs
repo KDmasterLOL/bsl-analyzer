@@ -342,26 +342,7 @@ impl SharedState {
                         .spawn(move || {
                             let _warmup_guard = warmup_guard;
                             tracing::info!("workspace overlay semantic warmup started");
-                            let result = match search_engine.lock() {
-                                Ok(guard) => match guard.as_ref() {
-                                    Some(engine) => engine.prime_workspace_overlay(),
-                                    None => return,
-                                },
-                                Err(e) => {
-                                    tracing::warn!("overlay warmup: engine lock error: {e}");
-                                    return;
-                                }
-                            };
-                            match result {
-                                Ok(()) => {
-                                    tracing::info!("workspace overlay semantic warmup complete");
-                                }
-                                Err(error) => {
-                                    tracing::warn!(
-                                        "workspace overlay semantic warmup failed: {error}"
-                                    );
-                                }
-                            }
+                            Self::run_overlay_warmup(&search_engine);
                             Self::set_semantic_runtime_status(
                                 &semantic_runtime,
                                 SemanticRuntimeStatus::Ready,
@@ -680,6 +661,114 @@ impl SharedState {
         engine.set_workspace_baseline_hash_mode(hash_mode);
         if watcher_ready.load(Ordering::SeqCst) {
             engine.enable_workspace_watcher_mode();
+        }
+    }
+
+    /// Drive the PostgresRemoteOverlay warmup without ever holding the engine lock across the
+    /// multi-minute remote embed. Three phases: a brief lock to clone what the standalone prime
+    /// needs (db path, embedder config, workspace root, warm embedding cache, graph provider); a
+    /// lock-free plan+embed against a reopened standalone store; a brief lock to publish the
+    /// merged result atomically. While the embed runs, concurrent `search_code` / `search_status`
+    /// keep the lock free.
+    fn run_overlay_warmup(search_engine: &SharedSearchEngine) {
+        let cloned = match search_engine.lock() {
+            Ok(guard) => match guard.as_ref() {
+                Some(engine) => {
+                    let Some(embedder_config) = engine.embedder_config() else {
+                        tracing::debug!("overlay warmup: no embedder configured; skipping");
+                        return;
+                    };
+                    let Some(workspace_root) = engine.workspace_root().map(Path::to_path_buf)
+                    else {
+                        tracing::debug!("overlay warmup: no workspace root; skipping");
+                        return;
+                    };
+                    let warm_cache = match engine.workspace_overlay_embedding_cache_snapshot() {
+                        Ok(cache) => cache,
+                        Err(error) => {
+                            tracing::warn!(
+                                "overlay warmup: failed to snapshot warm cache: {error}"
+                            );
+                            return;
+                        }
+                    };
+                    // Captured here, under the same lock as the warm cache and before the lock-free
+                    // embed: the publish below clears only these, so a watcher edit landing mid-embed
+                    // stays dirty and is re-embedded by a later refresh instead of being lost.
+                    let dirty_before = match engine.workspace_overlay_dirty_paths_snapshot() {
+                        Ok(dirty) => dirty,
+                        Err(error) => {
+                            tracing::warn!(
+                                "overlay warmup: failed to snapshot dirty paths: {error}"
+                            );
+                            return;
+                        }
+                    };
+                    Some((
+                        engine.db_path().to_path_buf(),
+                        embedder_config,
+                        workspace_root,
+                        warm_cache,
+                        engine.graph_context_provider(),
+                        dirty_before,
+                    ))
+                }
+                None => None,
+            },
+            Err(e) => {
+                tracing::warn!("overlay warmup: engine lock error: {e}");
+                return;
+            }
+        };
+        let Some((
+            db_path,
+            embedder_config,
+            workspace_root,
+            warm_cache,
+            graph_provider,
+            dirty_before,
+        )) = cloned
+        else {
+            return;
+        };
+
+        // Lock-free: plan against a reopened standalone store and embed the missing chunks. The
+        // engine mutex is NOT held here, so search/status stay responsive during the remote embed.
+        let primed = SearchEngine::prime_workspace_overlay_standalone(
+            &db_path,
+            embedder_config,
+            &workspace_root,
+            warm_cache,
+            graph_provider,
+        );
+        let (plan, new_embeddings) = match primed {
+            Ok(result) => result,
+            Err(error) => {
+                tracing::warn!("workspace overlay semantic warmup failed: {error}");
+                return;
+            }
+        };
+
+        // Brief lock to publish the merged result atomically.
+        match search_engine.lock() {
+            Ok(guard) => match guard.as_ref() {
+                Some(engine) => {
+                    match engine.publish_workspace_overlay(plan, new_embeddings, &dirty_before) {
+                        Ok(()) => {
+                            tracing::info!("workspace overlay semantic warmup complete");
+                        }
+                        Err(error) => {
+                            tracing::warn!("overlay warmup: publish failed: {error}");
+                        }
+                    }
+                }
+                None => {
+                    tracing::warn!("overlay warmup: engine gone before publish");
+                }
+            },
+            Err(e) => {
+                tracing::warn!("overlay warmup: engine lock error at publish: {e}");
+            }
         }
     }
 

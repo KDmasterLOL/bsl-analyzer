@@ -65,6 +65,12 @@ impl Embedder {
         &self.config.model
     }
 
+    /// A clone of this embedder's configuration, so a caller can rebuild a standalone embedder
+    /// (e.g. the off-lock overlay warmup) without reaching into private fields.
+    pub fn config(&self) -> EmbedderConfig {
+        self.config.clone()
+    }
+
     const MAX_RETRIES: u32 = 10;
 
     pub fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, SearchError> {

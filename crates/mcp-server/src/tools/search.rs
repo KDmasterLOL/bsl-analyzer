@@ -917,6 +917,30 @@ pub fn search_status(
     configured_baseline: Option<ConfiguredBaselineStatus>,
     external_baseline: Option<Arc<ExternalBaselineService>>,
 ) -> Result<CallToolResult, McpError> {
+    // The 30s cap mirrors `try_acquire_engine`: status degrades to a "busy" note rather than
+    // hanging to the MCP client timeout when a long operation holds the engine.
+    search_status_with_cap(
+        engine,
+        progress,
+        semantic_runtime,
+        workspace_search_mode,
+        configured_baseline,
+        external_baseline,
+        std::time::Duration::from_secs(30),
+    )
+}
+
+/// The status body, parameterized over the engine-acquire cap so tests can drive the timeout
+/// (busy) branch without a 30-second sleep. Production goes through [`search_status`].
+fn search_status_with_cap(
+    engine: &Arc<Mutex<Option<SearchEngine>>>,
+    progress: &Arc<IndexProgress>,
+    semantic_runtime: &Arc<Mutex<SemanticRuntimeStatus>>,
+    workspace_search_mode: WorkspaceSearchMode,
+    configured_baseline: Option<ConfiguredBaselineStatus>,
+    external_baseline: Option<Arc<ExternalBaselineService>>,
+    engine_acquire_cap: std::time::Duration,
+) -> Result<CallToolResult, McpError> {
     let mut out = String::new();
 
     if let Some(configured_baseline) = configured_baseline.as_ref() {
@@ -947,10 +971,21 @@ pub fn search_status(
         .lock()
         .map_err(|e| McpError::internal_error(format!("semantic runtime lock error: {e}"), None))?
         .clone();
-    let guard =
-        engine.lock().map_err(|e| McpError::internal_error(format!("lock error: {e}"), None))?;
+    // Cap the wait so status never hangs to the MCP client timeout while the overlay warmup or a
+    // peer search holds the engine. On a genuine stall we still report the baseline + runtime
+    // sections (which need no engine lock) and note the local index as busy.
+    let guard = match acquire_engine_within(
+        engine,
+        engine_acquire_cap,
+        std::time::Duration::from_millis(25),
+    ) {
+        Ok(g) => Some(g),
+        Err(AcquireFailure::Poisoned) => return Err(engine_lock_poisoned_error()),
+        Err(AcquireFailure::TimedOut) => None,
+    };
+    let engine_busy = guard.is_none();
 
-    if let Some(engine) = guard.as_ref() {
+    if let Some(engine) = guard.as_ref().and_then(|g| g.as_ref()) {
         let files = engine.file_count().unwrap_or(0);
         let chunks = engine.chunk_count().unwrap_or(0);
         let vectors = engine.vector_count();
@@ -1122,6 +1157,8 @@ pub fn search_status(
             );
             let _ = writeln!(out, "  Pending dirty paths: {}", overlay.pending_dirty_paths);
         }
+    } else if engine_busy {
+        let _ = writeln!(out, "Local index: busy (overlay syncing)");
     } else {
         let _ = writeln!(out, "Search index: building (background initialization in progress)");
     }
@@ -1147,7 +1184,7 @@ pub fn search_status(
                 }
                 match external_baseline.corpus() {
                     bsl_search::CorpusId::WorkspaceCode => {
-                        if let Some(engine) = guard.as_ref() {
+                        if let Some(engine) = guard.as_ref().and_then(|g| g.as_ref()) {
                             match external_baseline.resolve_workspace_view(engine) {
                                 Ok(Some(view)) => {
                                     let resolved_files: HashSet<&str> = view
@@ -1229,7 +1266,9 @@ pub fn search_status(
     // Live counters are shown ONLY while `active` (a build is genuinely counting); an
     // inactive build object can hold stale totals from a finished/failed attempt (it is
     // never reset()), so we report a phase line instead of misleading numbers.
-    let index_building = guard.as_ref().is_none();
+    // Genuinely building = we hold the lock but the engine is not yet published. A busy timeout
+    // (no guard) is reported separately above as "Local index: busy", not as initializing.
+    let index_building = guard.as_ref().is_some_and(|g| g.is_none());
     if progress.is_active() {
         let total = progress.total_chunks.load(Ordering::Relaxed);
         let done = progress.done_chunks.load(Ordering::Relaxed);
@@ -2653,6 +2692,57 @@ mod tests {
         );
         assert!(matches!(outcome, Err(super::AcquireFailure::Poisoned)));
         assert!(started.elapsed() < Duration::from_secs(1), "poison must not block on the cap");
+    }
+
+    #[test]
+    fn search_status_returns_promptly_with_busy_note_when_engine_lock_is_held() {
+        use std::sync::Barrier;
+        use std::time::{Duration, Instant};
+
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("bsl-search.db");
+        let engine = Arc::new(Mutex::new(Some(SearchEngine::fts_only(&db_path).unwrap())));
+
+        // A peer thread holds the engine lock for the whole call, as the overlay warmup's publish
+        // (or a slow embed) would. `search_status` must not block to the MCP client timeout: with
+        // a short acquire cap it gives up on the local snapshot, emits the lock-free baseline
+        // section plus a busy note, and returns well within the cap-plus-margin window.
+        let gate = Arc::new(Barrier::new(2));
+        let holder = {
+            let engine = Arc::clone(&engine);
+            let gate = Arc::clone(&gate);
+            std::thread::spawn(move || {
+                let held = engine.lock().unwrap();
+                gate.wait();
+                std::thread::sleep(Duration::from_millis(300));
+                drop(held);
+            })
+        };
+        gate.wait();
+
+        let started = Instant::now();
+        let status = super::search_status_with_cap(
+            &engine,
+            &Arc::new(IndexProgress::default()),
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::OverlaySyncing)),
+            WorkspaceSearchMode::PostgresRemoteOverlay,
+            Some(ConfiguredBaselineStatus {
+                backend: "postgres",
+                selection: "branch main".to_owned(),
+                issue: None,
+                support: None,
+            }),
+            None,
+            Duration::from_millis(40),
+        )
+        .unwrap();
+        let elapsed = started.elapsed();
+        holder.join().unwrap();
+
+        assert!(elapsed < Duration::from_secs(2), "status must not hang on the lock: {elapsed:?}");
+        let text = status.content[0].raw.as_text().expect("text content").text.as_str();
+        assert!(text.contains("Configured baseline:"), "baseline section present: {text}");
+        assert!(text.contains("Local index: busy (overlay syncing)"), "busy note present: {text}");
     }
 
     #[test]
