@@ -1123,12 +1123,14 @@ impl SearchEngine {
 
         // Include the warm-reused vectors for the plan's chunks in the published set so Phase C
         // builds complete vectors regardless of the live cache's state (it may be empty on a
-        // fresh engine). `content_hash` is value stable, so this is a no-op merge for chunks the
-        // live cache already holds.
-        for content_hash in plan.planned_content_hashes() {
-            if !new_embeddings.contains_key(content_hash) {
-                if let Some(embedding) = warm_embeddings.get(content_hash) {
-                    new_embeddings.insert(content_hash.clone(), embedding.clone());
+        // fresh engine). The embedding key is value stable, so this is a no-op merge for chunks
+        // the live cache already holds.
+        for embedding_key in plan.planned_embedding_keys() {
+            if let std::collections::hash_map::Entry::Vacant(slot) =
+                new_embeddings.entry(embedding_key)
+            {
+                if let Some(embedding) = warm_embeddings.get(slot.key()) {
+                    slot.insert(embedding.clone());
                 }
             }
         }
@@ -1136,7 +1138,7 @@ impl SearchEngine {
         Ok((plan, new_embeddings))
     }
 
-    /// Phase B: embed the plan's missing `content_hash -> input` pairs in batches off any lock,
+    /// Phase B: embed the plan's missing `embedding_key -> input` pairs in batches off any lock,
     /// persisting each batch's vectors to the standalone `store` as it lands so a mid-pass crash
     /// keeps the progress already paid for.
     fn embed_missing_overlay_chunks(
@@ -1157,9 +1159,9 @@ impl SearchEngine {
             let embeddings = embedder.embed_batch_interactive(&inputs)?;
 
             let mut batch_persist = HashMap::with_capacity(batch.len());
-            for ((content_hash, _), embedding) in batch.iter().zip(embeddings) {
-                batch_persist.insert((*content_hash).clone(), embedding.clone());
-                new_embeddings.insert((*content_hash).clone(), embedding);
+            for ((embedding_key, _), embedding) in batch.iter().zip(embeddings) {
+                batch_persist.insert((*embedding_key).clone(), embedding.clone());
+                new_embeddings.insert((*embedding_key).clone(), embedding);
             }
             // Persist to the standalone store (NOT the live engine) so partial progress survives
             // a mid-pass failure. The shared live cache is touched only once, in Phase C.

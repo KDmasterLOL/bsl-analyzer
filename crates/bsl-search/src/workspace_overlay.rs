@@ -69,13 +69,13 @@ pub struct RefreshPlan {
     entries: Vec<(String, PlannedEntry)>,
     hidden_paths: HashSet<String>,
     updated_persisted: HashMap<String, crate::store::PersistedFingerprint>,
-    /// Distinct `content_hash -> embedding input` pairs that have no warm-cache vector; these are
-    /// the inputs Phase B embeds.
+    /// Distinct `embedding_key -> embedding input` pairs that have no warm-cache vector; these are
+    /// the inputs Phase B embeds. The key is the hash of the embedding input (the semantic key).
     missing_embeddings: HashMap<String, String>,
 }
 
 impl RefreshPlan {
-    /// The distinct `(content_hash, embedding_input)` pairs Phase B must embed.
+    /// The distinct `(embedding_key, embedding_input)` pairs Phase B must embed.
     pub fn missing_embeddings(&self) -> &HashMap<String, String> {
         &self.missing_embeddings
     }
@@ -90,12 +90,14 @@ impl RefreshPlan {
         self.entries.len()
     }
 
-    /// Every chunk `content_hash` referenced by the planned entries. The caller uses this to pull
-    /// warm-reused vectors into the published embedding set so Phase C builds complete vectors.
-    pub fn planned_content_hashes(&self) -> impl Iterator<Item = &String> {
-        self.entries
-            .iter()
-            .flat_map(|(_, entry)| entry.lexical_documents.iter().map(|doc| &doc.content_hash))
+    /// Every overlay embedding key referenced by the planned entries. The caller uses this to pull
+    /// warm-reused vectors into the published embedding set so Phase C builds complete vectors. The
+    /// key is the hash of each chunk's embedding input (the semantic key), matching how the cache
+    /// is keyed in [`build_overlay_vectors`].
+    pub fn planned_embedding_keys(&self) -> impl Iterator<Item = String> + '_ {
+        self.entries.iter().flat_map(|(_, entry)| {
+            entry.embedding_inputs.iter().map(|input| overlay_embedding_key(input))
+        })
     }
 }
 
@@ -651,11 +653,10 @@ impl WorkspaceOverlayCache {
 
             let (lexical_documents, embedding_inputs) =
                 build_overlay_documents(&file.rel_path, &content, graph_context);
-            for (document, input) in lexical_documents.iter().zip(&embedding_inputs) {
-                if !warm_embeddings.contains_key(&document.content_hash) {
-                    missing_embeddings
-                        .entry(document.content_hash.clone())
-                        .or_insert_with(|| input.clone());
+            for input in &embedding_inputs {
+                let key = overlay_embedding_key(input);
+                if !warm_embeddings.contains_key(&key) {
+                    missing_embeddings.entry(key).or_insert_with(|| input.clone());
                 }
             }
 
@@ -693,8 +694,8 @@ impl WorkspaceOverlayCache {
     /// Merges `new_embeddings` (Phase B output) into `embedding_cache`, assembles each planned
     /// entry's vectors from the merged cache, swaps `entries`/`hidden_paths` in one shot (so a
     /// concurrent reader never sees a half-embedded file), then persists the fingerprint and
-    /// embedding caches once. The merge is last-writer-wins on `content_hash`, which is value
-    /// stable because identical content yields an identical embedding.
+    /// embedding caches once. The merge is last-writer-wins on the embedding key, which is value
+    /// stable because identical embedding input yields an identical embedding.
     pub fn publish_plan(
         &mut self,
         plan: RefreshPlan,
@@ -703,8 +704,8 @@ impl WorkspaceOverlayCache {
         embedder: Option<&Embedder>,
         store: &Store,
     ) -> Result<(), SearchError> {
-        for (content_hash, embedding) in new_embeddings {
-            self.embedding_cache.insert(content_hash, embedding);
+        for (embedding_key, embedding) in new_embeddings {
+            self.embedding_cache.insert(embedding_key, embedding);
         }
 
         let mut entries = HashMap::with_capacity(plan.entries.len());
@@ -1121,6 +1122,14 @@ pub(crate) fn fingerprint_overlay_documents(
     hasher.finalize().to_hex().to_string()
 }
 
+/// The overlay embedding cache key: the blake3 hash of the exact text that gets embedded. This is
+/// the same value as [`crate::document::semantic_key_for_indexed_document`] computed from the
+/// document's embedding input, so the overlay reuses vectors by the same identity the baseline and
+/// the main chunk index use, rather than by raw chunk text.
+fn overlay_embedding_key(embedding_input: &str) -> String {
+    blake3::hash(embedding_input.as_bytes()).to_hex().to_string()
+}
+
 fn build_overlay_documents(
     rel_path: &str,
     content: &str,
@@ -1160,8 +1169,14 @@ fn build_overlay_vectors(
     let mut missing_indexes = Vec::new();
     let mut missing_inputs = Vec::new();
 
-    for (idx, document) in documents.iter().enumerate() {
-        if let Some(embedding) = embedding_cache.get(&document.content_hash) {
+    // Key the embedding cache by the hash of the exact text that is embedded (the semantic
+    // embedding input), not by the raw chunk-text `content_hash`. Two chunks with identical bodies
+    // but different module / symbol / kind / graph context produce different embedding inputs, so
+    // they must map to different vectors; keying by `content_hash` would collapse them onto one
+    // (and serve a stale vector when only the graph context changed).
+    for (idx, _document) in documents.iter().enumerate() {
+        let key = overlay_embedding_key(&embedding_inputs[idx]);
+        if let Some(embedding) = embedding_cache.get(&key) {
             vectors[idx] = Some(embedding.clone());
         } else {
             missing_indexes.push(idx);
@@ -1177,7 +1192,8 @@ fn build_overlay_vectors(
             // embed; the hot interactive query path never reaches here (it passes `None`).
             let embeddings = embedder.embed_batch_interactive(batch_inputs)?;
             for (idx, embedding) in batch_indexes.iter().copied().zip(embeddings) {
-                embedding_cache.insert(documents[idx].content_hash.clone(), embedding.clone());
+                let key = overlay_embedding_key(&embedding_inputs[idx]);
+                embedding_cache.insert(key, embedding.clone());
                 vectors[idx] = Some(embedding);
             }
         }
@@ -1309,10 +1325,10 @@ mod tests {
 
         let missing = plan.missing_embeddings();
         assert_eq!(missing.len(), 1, "the one changed chunk needs embedding");
-        let content_hash = missing.keys().next().unwrap().clone();
+        let embedding_key = missing.keys().next().unwrap().clone();
 
         let mut new_embeddings = HashMap::new();
-        new_embeddings.insert(content_hash, vec![0.1_f32, 0.2, 0.3]);
+        new_embeddings.insert(embedding_key, vec![0.1_f32, 0.2, 0.3]);
 
         let mut cache = WorkspaceOverlayCache::default();
         cache.publish_plan(plan, new_embeddings, &HashMap::new(), None, &store).unwrap();
@@ -1321,6 +1337,62 @@ mod tests {
         assert_eq!(overlay.lexical_documents.len(), 1);
         assert_eq!(overlay.vector_documents.len(), 1, "the embedded chunk now has a vector");
         assert_eq!(overlay.vector_documents[0].embedding, vec![0.1, 0.2, 0.3]);
+    }
+
+    #[test]
+    fn chunks_with_same_text_but_different_module_get_distinct_vectors() {
+        // Two files at different module paths hold a byte-identical procedure body. Their raw chunk
+        // text (and thus the legacy `content_hash`) is the same, but the embedded text differs (it
+        // folds in the module path), so the overlay must key the embedding cache by the embedding
+        // input. Keying by raw-text identity would collapse them onto one shared vector.
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let body = "Процедура Делать()\nКонецПроцедуры";
+        let dir_a = workspace.join("CommonModules").join("МодульА").join("Ext");
+        let dir_b = workspace.join("CommonModules").join("МодульБ").join("Ext");
+        fs::create_dir_all(&dir_a).unwrap();
+        fs::create_dir_all(&dir_b).unwrap();
+        fs::write(dir_a.join("Module.bsl"), body).unwrap();
+        fs::write(dir_b.join("Module.bsl"), body).unwrap();
+
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let mut manifest = HashMap::new();
+        manifest.insert(
+            "CommonModules/МодульА/Ext/Module.bsl".to_owned(),
+            "different-fingerprint".to_owned(),
+        );
+        manifest.insert(
+            "CommonModules/МодульБ/Ext/Module.bsl".to_owned(),
+            "different-fingerprint".to_owned(),
+        );
+
+        let warm = HashMap::new();
+        let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
+            &manifest, workspace, &store, &warm, None,
+        )
+        .unwrap();
+
+        // The two chunks share raw text but have distinct embedding inputs, so the plan reports two
+        // distinct embedding keys (the bug would report a single collapsed key).
+        let missing = plan.missing_embeddings();
+        assert_eq!(missing.len(), 2, "same-text chunks in different modules must not collapse");
+
+        // Give each key its own vector; publishing must attach the right vector to each chunk.
+        let mut new_embeddings = HashMap::new();
+        let mut keys: Vec<String> = missing.keys().cloned().collect();
+        keys.sort();
+        new_embeddings.insert(keys[0].clone(), vec![1.0_f32, 0.0, 0.0]);
+        new_embeddings.insert(keys[1].clone(), vec![0.0_f32, 1.0, 0.0]);
+
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.publish_plan(plan, new_embeddings, &HashMap::new(), None, &store).unwrap();
+
+        let overlay = cache.snapshot();
+        assert_eq!(overlay.vector_documents.len(), 2, "each chunk keeps its own vector");
+        let mut embeddings: Vec<Vec<f32>> =
+            overlay.vector_documents.iter().map(|doc| doc.embedding.clone()).collect();
+        embeddings.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(embeddings, vec![vec![0.0, 1.0, 0.0], vec![1.0, 0.0, 0.0]]);
     }
 
     #[test]
