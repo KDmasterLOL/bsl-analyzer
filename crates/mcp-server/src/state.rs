@@ -1366,6 +1366,10 @@ mod tests {
     fn workspace_external_failure_with_embeddings_fails_closed_without_hybrid_warmup() {
         let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         let _embedding_url = EnvVarGuard::set("EMBEDDING_URL", "http://127.0.0.1:9/v1");
+        // A configured embedder now requires an explicit model (no silent default), so set
+        // one here; otherwise the ambient env decides whether the engine is semantic, which
+        // is what made this test pass locally but fail in CI.
+        let _embedding_model = EnvVarGuard::set("EMBEDDING_MODEL", "test-model");
 
         let dir = tempdir().unwrap();
         let workspace = dir.path();
@@ -1425,6 +1429,10 @@ mod tests {
         // the point is that init must NOT run the synchronous embed here. It writes the
         // FTS chunks and defers embedding, so init returns promptly with work pending.
         let _embedding_url = EnvVarGuard::set("EMBEDDING_URL", "http://127.0.0.1:9/v1");
+        // A configured embedder now requires an explicit model (no silent default), so set
+        // one here; otherwise the ambient env decides whether the engine is semantic, which
+        // is what made this test pass locally but fail in CI.
+        let _embedding_model = EnvVarGuard::set("EMBEDDING_MODEL", "test-model");
 
         let dir = tempdir().unwrap();
         let workspace = dir.path();
