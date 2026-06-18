@@ -1184,6 +1184,148 @@ fn metadata_xml_change_invalidates_only_its_config_root() {
     );
 }
 
+/// End-to-end proof of the `&ИзменениеИКонтроль` effective merge: code inside a
+/// `#Вставка` is analyzed against the EFFECTIVE module (base text with the marked
+/// body spliced in), so a call to a base-module sibling resolves — no false
+/// `UnresolvedMethodCall` — while a genuinely missing method is still flagged,
+/// which proves the inserted code is really inferred rather than silently dropped.
+#[test]
+fn infer_effective_resolves_base_sibling_in_insertion() {
+    let temp = tempfile::tempdir().unwrap();
+    let main_root = temp.path().join("src/cf");
+    let ext_root = temp.path().join("src/cfe/X");
+    std::fs::create_dir_all(&main_root).unwrap();
+    std::fs::create_dir_all(&ext_root).unwrap();
+
+    let mut db = RootDatabaseImpl::new();
+    db.set_all_config_paths(vec![
+        (None, main_root.clone()),
+        (Some("X".to_string()), ext_root.clone()),
+    ]);
+
+    let main_file = FileId(0);
+    let ext_file = FileId(1);
+    let mut file_set = FileSet::new();
+    let main_path = main_root.join("CommonModules/М/Ext/Module.bsl");
+    let ext_path = ext_root.join("CommonModules/М/Ext/Module.bsl");
+    file_set.insert(main_file, VfsPath::new(main_path.to_string_lossy().as_ref()));
+    file_set.insert(ext_file, VfsPath::new(ext_path.to_string_lossy().as_ref()));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(main_file, SourceRootId(0));
+    db.set_file_source_root(ext_file, SourceRootId(0));
+
+    db.set_file_text(
+        main_file,
+        "Функция Сосед() Экспорт\n\tВозврат 1;\nКонецФункции\n\
+         \n\
+         Функция Цель() Экспорт\n\tВозврат 0;\nКонецФункции",
+    );
+    db.set_file_text(
+        ext_file,
+        "&ИзменениеИКонтроль(\"Цель\")\n\
+         Функция Расш1_Цель()\n\
+         #Вставка\n\
+         \tЗначение1 = Сосед();\n\
+         \tЗначение2 = НетТакого();\n\
+         #КонецВставки\n\
+         \tВозврат 0;\n\
+         КонецФункции",
+    );
+
+    let eid = hir::EffectiveModuleId::new(&db, main_file, ext_file);
+    let result = hir::infer_effective(&db, eid);
+
+    // `var_types` is keyed by the fold-lowered local name and only records non-unknown
+    // RHS types. The base sibling `Сосед()` returns `1`, so `Значение1` must be typed
+    // as Число — and that number type can ONLY come from resolving `Сосед()` against
+    // the effective module's base sibling (no platform global is named `Сосед`). The
+    // missing `НетТакого()` leaves `Значение2` absent, proving the inserted code is
+    // genuinely inferred rather than dropped.
+    use bsl_types::builders::Builders;
+    use stdx::case::CaseExt;
+    let number = db.number(None, None);
+
+    assert_eq!(
+        result.var_types.get(&"Значение1".fold_lower()).copied(),
+        Some(number),
+        "base sibling `Сосед()` (returns 1) called from `#Вставка` must resolve via the \
+         effective module and type `Значение1` as Число; var_types = {:?}",
+        result.var_types.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        !result.var_types.contains_key(&"Значение2".fold_lower()),
+        "a missing method `НетТакого()` must stay unresolved (target untyped), proving \
+         the inserted code is genuinely inferred, not dropped; var_types = {:?}",
+        result.var_types.keys().collect::<Vec<_>>()
+    );
+}
+
+/// [high] #2 regression: a `&ИзменениеИКонтроль` method's return type is inferred from
+/// its CHANGED body, and a sibling that calls it in the effective module must see that
+/// changed return — not the base body's. Base `Цель` returns a string; the extension
+/// deletes that and inserts `Возврат 42`, so the effective `Цель` returns Число, and the
+/// (verbatim-copied) caller's `Знач = Цель()` must type as Число. Without the two-pass
+/// effective-return threading this would read the base string return.
+#[test]
+fn infer_effective_uses_changed_method_return_for_sibling_call() {
+    let temp = tempfile::tempdir().unwrap();
+    let main_root = temp.path().join("src/cf");
+    let ext_root = temp.path().join("src/cfe/X");
+    std::fs::create_dir_all(&main_root).unwrap();
+    std::fs::create_dir_all(&ext_root).unwrap();
+
+    let mut db = RootDatabaseImpl::new();
+    db.set_all_config_paths(vec![
+        (None, main_root.clone()),
+        (Some("X".to_string()), ext_root.clone()),
+    ]);
+
+    let main_file = FileId(0);
+    let ext_file = FileId(1);
+    let mut file_set = FileSet::new();
+    let main_path = main_root.join("CommonModules/М/Ext/Module.bsl");
+    let ext_path = ext_root.join("CommonModules/М/Ext/Module.bsl");
+    file_set.insert(main_file, VfsPath::new(main_path.to_string_lossy().as_ref()));
+    file_set.insert(ext_file, VfsPath::new(ext_path.to_string_lossy().as_ref()));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(main_file, SourceRootId(0));
+    db.set_file_source_root(ext_file, SourceRootId(0));
+
+    db.set_file_text(
+        main_file,
+        "Функция Цель() Экспорт\n\tВозврат \"строка\";\nКонецФункции\n\
+         \n\
+         Функция Вызывающий() Экспорт\n\tРез = Цель();\n\tВозврат Рез;\nКонецФункции",
+    );
+    db.set_file_text(
+        ext_file,
+        "&ИзменениеИКонтроль(\"Цель\")\n\
+         Функция Расш1_Цель()\n\
+         #Удаление\n\
+         \tВозврат \"строка\";\n\
+         #КонецУдаления\n\
+         #Вставка\n\
+         \tВозврат 42;\n\
+         #КонецВставки\n\
+         КонецФункции",
+    );
+
+    let eid = hir::EffectiveModuleId::new(&db, main_file, ext_file);
+    let result = hir::infer_effective(&db, eid);
+
+    use bsl_types::builders::Builders;
+    use stdx::case::CaseExt;
+    let number = db.number(None, None);
+
+    assert_eq!(
+        result.var_types.get(&"Рез".fold_lower()).copied(),
+        Some(number),
+        "the changed `Цель` returns Число (Возврат 42), so the sibling's `Знач = Цель()` \
+         must type as Число via effective-return threading; var_types = {:?}",
+        result.var_types
+    );
+}
+
 #[test]
 fn test_sdbl_hir_in_file_basic() {
     let mut db = RootDatabaseImpl::new();

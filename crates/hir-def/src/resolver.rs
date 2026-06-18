@@ -5,6 +5,7 @@ use bsl_metadata::MdObject;
 
 use crate::configs::ConfigsDatabase;
 use crate::scope::{ExprScopes, ScopeId};
+use crate::symbol_tree::SymbolTree;
 use crate::{DefDatabase, MethodId, ModuleId, Name, PathResolution, QualifiedName, VariableId};
 
 pub struct Resolver {
@@ -14,9 +15,20 @@ pub struct Resolver {
 
 #[doc(hidden)]
 pub enum Scope {
-    ModuleScope(ModuleId),
+    /// The enclosing module. `local_symbols` overrides same-module method/variable
+    /// resolution with an explicit symbol tree (the *effective* module of an
+    /// `&ИзменениеИКонтроль` extension); `None` resolves through
+    /// `db.symbol_tree(module_id)` exactly as before — the byte-identical default for
+    /// every ordinary module.
+    ModuleScope {
+        module_id: ModuleId,
+        local_symbols: Option<Arc<SymbolTree>>,
+    },
 
-    ExprScope { scopes: Arc<ExprScopes>, scope_id: ScopeId },
+    ExprScope {
+        scopes: Arc<ExprScopes>,
+        scope_id: ScopeId,
+    },
 
     WorkspaceScope,
 
@@ -25,16 +37,43 @@ pub enum Scope {
 
 impl Resolver {
     pub fn for_module(module_id: ModuleId) -> Self {
-        Resolver { scopes: vec![Scope::ModuleScope(module_id)] }
+        Resolver { scopes: vec![Scope::ModuleScope { module_id, local_symbols: None }] }
     }
 
     pub fn with_workspace_scope(module_id: ModuleId) -> Self {
-        Resolver { scopes: vec![Scope::WorkspaceScope, Scope::ModuleScope(module_id)] }
+        Resolver {
+            scopes: vec![
+                Scope::WorkspaceScope,
+                Scope::ModuleScope { module_id, local_symbols: None },
+            ],
+        }
     }
 
     pub fn with_builtins_and_workspace(module_id: ModuleId) -> Self {
         Resolver {
-            scopes: vec![Scope::Builtins, Scope::WorkspaceScope, Scope::ModuleScope(module_id)],
+            scopes: vec![
+                Scope::Builtins,
+                Scope::WorkspaceScope,
+                Scope::ModuleScope { module_id, local_symbols: None },
+            ],
+        }
+    }
+
+    /// Like [`Self::with_builtins_and_workspace`], but same-module method/variable
+    /// lookups resolve against `local_symbols` (the effective module's symbol tree)
+    /// instead of `db.symbol_tree(module_id)`. Cross-module / metadata resolution still
+    /// keys on `module_id.file_id`, which is the base file — correct, because the
+    /// effective module *is* the base module with the extension's edits applied.
+    pub fn with_builtins_and_workspace_effective(
+        module_id: ModuleId,
+        local_symbols: Arc<SymbolTree>,
+    ) -> Self {
+        Resolver {
+            scopes: vec![
+                Scope::Builtins,
+                Scope::WorkspaceScope,
+                Scope::ModuleScope { module_id, local_symbols: Some(local_symbols) },
+            ],
         }
     }
 
@@ -73,8 +112,20 @@ impl Resolver {
 
     pub fn module_id(&self) -> Option<ModuleId> {
         for scope in &self.scopes {
-            if let Scope::ModuleScope(module_id) = scope {
+            if let Scope::ModuleScope { module_id, .. } = scope {
                 return Some(*module_id);
+            }
+        }
+        None
+    }
+
+    /// The effective module's symbol tree, when this resolver was built with one
+    /// ([`Self::with_builtins_and_workspace_effective`]). `None` for every ordinary
+    /// module, in which case same-module lookups fall back to `db.symbol_tree`.
+    fn module_local_symbols(&self) -> Option<&Arc<SymbolTree>> {
+        for scope in &self.scopes {
+            if let Scope::ModuleScope { local_symbols, .. } = scope {
+                return local_symbols.as_ref();
             }
         }
         None
@@ -93,17 +144,21 @@ impl Resolver {
     }
 
     pub fn resolve_module_method(&self, db: &dyn DefDatabase, name: &Name) -> Option<MethodId> {
+        if let Some(symbols) = self.module_local_symbols() {
+            return symbols.find_method(name).map(|m| m.id);
+        }
         let module_id = self.module_id()?;
         let symbol_tree = db.symbol_tree(module_id);
-        let method = symbol_tree.find_method(name)?;
-        Some(method.id)
+        symbol_tree.find_method(name).map(|m| m.id)
     }
 
     pub fn resolve_module_variable(&self, db: &dyn DefDatabase, name: &Name) -> Option<VariableId> {
+        if let Some(symbols) = self.module_local_symbols() {
+            return symbols.find_variable(name).map(|v| v.id);
+        }
         let module_id = self.module_id()?;
         let symbol_tree = db.symbol_tree(module_id);
-        let variable = symbol_tree.find_variable(name)?;
-        Some(variable.id)
+        symbol_tree.find_variable(name).map(|v| v.id)
     }
 
     pub fn user_common_module_exists(&self, db: &dyn ConfigsDatabase, module_name: &Name) -> bool {

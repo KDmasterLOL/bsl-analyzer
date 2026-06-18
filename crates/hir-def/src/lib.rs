@@ -5,6 +5,8 @@ pub mod common_module_ref;
 pub mod conditional_tree;
 pub mod configs;
 pub mod docs;
+pub mod effective_module;
+pub mod extension_merge;
 pub mod graph_index;
 pub mod hir;
 pub mod item_tree;
@@ -267,6 +269,20 @@ impl ModuleBodies {
     pub fn from_parse(parse: &syntax::Parse<syntax::SyntaxNode>, module_id: ModuleId) -> Self {
         let root = parse.syntax_node();
         Self::lower_from_root(&root, module_id, None)
+    }
+
+    /// Like [`Self::from_parse`] but with a line index built from `source_text`, so
+    /// line-dependent lowering (method size, complexity metrics) matches the
+    /// disk-backed [`lower_module_bodies`] path. Used when the parse comes from
+    /// assembled text that has no `file_id` to read through `db.file_text`.
+    pub fn from_parse_with_text(
+        parse: &syntax::Parse<syntax::SyntaxNode>,
+        module_id: ModuleId,
+        source_text: &str,
+    ) -> Self {
+        let root = parse.syntax_node();
+        let line_index = std::sync::Arc::new(line_index::LineIndex::new(source_text));
+        Self::lower_from_root(&root, module_id, Some(line_index))
     }
 
     fn lower_from_root(

@@ -146,11 +146,20 @@ pub use hir_def::{
 
 pub use bsl_config::VisibleConfig;
 pub use bsl_types::facet::{FormBindingFacet, FormBindingTargetFacet, MdoRefFacet};
+pub use hir_def::effective_module::{
+    effective_module_text, item_tree_effective, module_bodies_effective, parse_effective,
+    symbol_tree_effective, EffectiveModule, EffectiveModuleId,
+};
+pub use hir_def::extension_merge::{
+    extract_change_and_validate, pair_base_module_path, Origin, Segment,
+};
 pub use hir_def::ConfigsDatabase;
 pub use hir_ty::arg_diagnostics::arg_diagnostics_query;
 pub use hir_ty::db::HirDatabase;
 pub use hir_ty::form_self::{is_form_self_property_name, FORM_TYPE_NAME};
-pub use hir_ty::infer::{infer_module_code_query, infer_owner, infer_query, type_of_expr_query};
+pub use hir_ty::infer::{
+    infer_effective, infer_module_code_query, infer_owner, infer_query, type_of_expr_query,
+};
 pub use hir_ty::method_graph::{infer_method_query, method_return_type_query};
 pub use hir_ty::method_resolution::{resolve_qualified_call, MethodResolution};
 pub use hir_ty::narrow::{narrow_or_base, narrow_query, narrowed_type_at, NarrowState};

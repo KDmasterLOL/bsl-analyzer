@@ -15,10 +15,21 @@ use crate::{
     RootDatabase,
 };
 
+/// Routes the seven local per-module queries (`parse` / `file_text` / `item_tree` /
+/// `symbol_tree` / `module_bodies` / `infer` / `line_index`) of the extension file to the
+/// spliced `&ИзменениеИКонтроль` effective module, so the diagnostics inference pass sees a
+/// coherent merged source map. Everything else stays on the base/extension context.
+#[derive(Clone, Copy)]
+struct EffectiveRoute<'db> {
+    eid: hir::EffectiveModuleId<'db>,
+    ext_file: FileId,
+}
+
 pub struct SalsaProvider<'db> {
     db: &'db dyn RootDatabase,
     configuration_path_input: Option<ConfigurationPathInput<'db>>,
     file_set: Option<&'db vfs::file_set::FileSet>,
+    effective: Option<EffectiveRoute<'db>>,
 }
 
 impl<'db> SalsaProvider<'db> {
@@ -26,7 +37,7 @@ impl<'db> SalsaProvider<'db> {
         db: &'db dyn RootDatabase,
         configuration_path_input: Option<ConfigurationPathInput<'db>>,
     ) -> Self {
-        Self { db, configuration_path_input, file_set: None }
+        Self { db, configuration_path_input, file_set: None, effective: None }
     }
 
     pub fn with_file_set(
@@ -34,11 +45,24 @@ impl<'db> SalsaProvider<'db> {
         configuration_path_input: Option<ConfigurationPathInput<'db>>,
         file_set: Option<&'db vfs::file_set::FileSet>,
     ) -> Self {
-        Self { db, configuration_path_input, file_set }
+        Self { db, configuration_path_input, file_set, effective: None }
+    }
+
+    /// Route the extension file's local queries to its effective `&ИзменениеИКонтроль`
+    /// module. Used only by the diagnostics inference pass; all other consumers keep the
+    /// default (no-op) provider so behaviour is byte-identical for ordinary modules.
+    pub fn with_effective(mut self, eid: hir::EffectiveModuleId<'db>, ext_file: FileId) -> Self {
+        self.effective = Some(EffectiveRoute { eid, ext_file });
+        self
     }
 
     pub fn db(&self) -> &'db dyn RootDatabase {
         self.db
+    }
+
+    /// The effective id when `file_id` is the routed extension file.
+    fn effective_for(&self, file_id: FileId) -> Option<hir::EffectiveModuleId<'db>> {
+        self.effective.filter(|r| r.ext_file == file_id).map(|r| r.eid)
     }
 }
 
@@ -131,27 +155,45 @@ impl AnalysisProvider for SalsaProvider<'_> {
     }
 
     fn parse(&self, file_id: FileId) -> Parse<SyntaxNode> {
-        self.db.parse(file_id)
+        match self.effective_for(file_id) {
+            Some(eid) => hir::parse_effective(self.db, eid),
+            None => self.db.parse(file_id),
+        }
     }
 
     fn file_text(&self, file_id: FileId) -> String {
-        self.db.file_text(file_id).to_string()
+        match self.effective_for(file_id).and_then(|eid| hir::effective_module_text(self.db, eid)) {
+            Some(em) => em.text.to_string(),
+            None => self.db.file_text(file_id).to_string(),
+        }
     }
 
     fn item_tree(&self, file_id: FileId) -> Arc<ItemTree> {
-        self.db.item_tree(file_id)
+        match self.effective_for(file_id) {
+            Some(eid) => hir::item_tree_effective(self.db, eid),
+            None => self.db.item_tree(file_id),
+        }
     }
 
     fn symbol_tree(&self, module_id: ModuleId) -> Arc<SymbolTree> {
-        self.db.symbol_tree(module_id)
+        match self.effective_for(module_id.file_id) {
+            Some(eid) => hir::symbol_tree_effective(self.db, eid),
+            None => self.db.symbol_tree(module_id),
+        }
     }
 
     fn module_bodies(&self, module_id: ModuleId) -> Arc<ModuleBodies> {
-        self.db.module_bodies(module_id)
+        match self.effective_for(module_id.file_id) {
+            Some(eid) => hir::module_bodies_effective(self.db, eid),
+            None => self.db.module_bodies(module_id),
+        }
     }
 
     fn infer(&self, file_id: FileId) -> Arc<InferenceResult> {
-        HirDatabase::infer(self.db, file_id)
+        match self.effective_for(file_id) {
+            Some(eid) => hir::infer_effective(self.db, eid),
+            None => HirDatabase::infer(self.db, file_id),
+        }
     }
 
     fn arg_diagnostics(&self, file_id: FileId) -> Arc<Vec<(DefWithBodyId, InferenceDiagnostic)>> {
@@ -167,6 +209,11 @@ impl AnalysisProvider for SalsaProvider<'_> {
     }
 
     fn line_index(&self, file_id: FileId) -> Arc<line_index::LineIndex> {
+        if let Some(em) =
+            self.effective_for(file_id).and_then(|eid| hir::effective_module_text(self.db, eid))
+        {
+            return Arc::new(line_index::LineIndex::new(&em.text));
+        }
         let input = FileIdInput::new(self.db, file_id);
         self.db.line_index(input)
     }

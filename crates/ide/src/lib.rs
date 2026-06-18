@@ -32,10 +32,11 @@ pub use ide_assists::{Assist, AssistId, SourceChange};
 pub use ide_db::base_db::Locale;
 pub use ide_db::{GraphConfigCache, RootDatabase, RootDatabaseImpl, SymbolKind, TextRange};
 pub use ide_diagnostics::{
-    all_diagnostic_codes, diagnostics as compute_diagnostics, docs, file_diagnostics_query,
-    get_metadata, CleanCodeAttribute, Diagnostic, DiagnosticCode, DiagnosticOutput,
-    DiagnosticSeverityLevel, DiagnosticTag, DiagnosticType, DiagnosticsConfig, DiagnosticsContext,
-    Fix, ImpactSeverity, MetadataTag, Severity, SoftwareQuality,
+    all_diagnostic_codes, apply_extension_merge, diagnostics as compute_diagnostics, docs,
+    file_diagnostics, file_diagnostics_query, get_metadata, CleanCodeAttribute, Diagnostic,
+    DiagnosticCode, DiagnosticOutput, DiagnosticSeverityLevel, DiagnosticTag, DiagnosticType,
+    DiagnosticsConfig, DiagnosticsContext, Fix, ImpactSeverity, MetadataTag, Severity,
+    SoftwareQuality,
 };
 pub use signature_help::{ParameterInfo, SignatureHelp};
 pub use syntax_highlighting::{highlight, HighlightResult, HlMod, HlRange, HlTag};
@@ -64,10 +65,7 @@ impl Analysis {
     }
 
     pub fn diagnostics(&self, file_id: FileId, config: &DiagnosticsConfig) -> Vec<Diagnostic> {
-        let config_path_input = ide_db::configuration_path_for_file(&self.db, file_id);
-        let provider = ide_db::SalsaProvider::new(&self.db, config_path_input);
-        let ctx = ide_diagnostics::DiagnosticsContext::new(config, file_id, &provider);
-        ide_diagnostics::diagnostics(&ctx)
+        ide_diagnostics::file_diagnostics(&self.db, file_id, config)
     }
 
     pub fn goto_definition(&self, file_id: FileId, offset: u32) -> Option<NavigationTarget> {
