@@ -2965,3 +2965,45 @@ fn calculation_register_main_table_is_modeled() {
         "unknown calc-register field must fire"
     );
 }
+
+#[test]
+fn nested_ref_navigation_resolves_final_attribute_type() {
+    use bsl_metadata::{Attribute, AttributeType, MdoType, MetadataObject};
+
+    let mut config = bsl_metadata::Configuration::new("TestConfig");
+
+    // Document whose attribute carries the date we ultimately want.
+    let mut order = MetadataObject::new(MdoType::Document, "ЗаказПоставщику");
+    order.add_attribute(Attribute {
+        name: "ДатаПоступления".to_string(),
+        name_en: Some("ReceiptDate".to_string()),
+        attr_type: AttributeType::Date,
+    });
+    config.add_metadata_object(order);
+
+    // Catalog whose attribute is a reference to that document.
+    let mut catalog = MetadataObject::new(MdoType::Catalog, "СертификатыНоменклатуры");
+    catalog.add_attribute(Attribute {
+        name: "ЗаказПоставщику".to_string(),
+        name_en: Some("PurchaseOrder".to_string()),
+        attr_type: AttributeType::Ref {
+            mdo_type: MdoType::Document,
+            name: "ЗаказПоставщику".to_string(),
+        },
+    });
+    config.add_metadata_object(catalog);
+
+    let code = "ВЫБРАТЬ Серт.ЗаказПоставщику.ДатаПоступления КАК ДатаПоступления \
+                ИЗ Справочник.СертификатыНоменклатуры КАК Серт";
+    let ast = parser::parse_sdbl(code);
+    let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(config)));
+    let hir = single_query_hir(&package);
+
+    assert_eq!(hir.select.fields.len(), 1);
+    assert_eq!(
+        hir.select.fields[0].ty,
+        crate::SdblType::Date,
+        "dotted navigation Серт.ЗаказПоставщику.ДатаПоступления must resolve to Date, \
+         not the intermediate document reference"
+    );
+}

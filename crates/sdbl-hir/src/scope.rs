@@ -315,6 +315,14 @@ impl<'a> Scope<'a> {
 
             current_type = field.ty.clone();
 
+            // The navigation `match` below only prepares `current_fields` for the
+            // next hop. On the terminal field there is no next hop: return its
+            // type directly so primitive attributes (Дата, Строка, …) surface
+            // instead of collapsing to Unknown via the non-navigable `_` arm.
+            if i + 1 == field_chain.len() {
+                return current_type;
+            }
+
             match &current_type {
                 SdblType::Ref(mdo_ref) => {
                     tracing::info!(

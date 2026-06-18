@@ -81,7 +81,21 @@ impl LoweringContext<'_> {
             (None, parts[0].as_str())
         };
 
-        let ty = self.scope.resolve_column_type(table_alias_str, column_name_str);
+        let mut ty = self.scope.resolve_column_type(table_alias_str, column_name_str);
+
+        // `Алиас.Поле.ПодПоле…`: navigate through reference-typed fields so the
+        // projected column carries the final attribute type, not the reference
+        // type stopped at the first hop. The first hop above stays authoritative
+        // for field-existence diagnostics; nested resolution only refines `ty`.
+        if parts.len() >= 3 {
+            if let Some(alias) = table_alias_str {
+                let chain: Vec<String> = parts[1..].iter().map(|n| n.to_string()).collect();
+                let nested = self.scope.resolve_nested_field_type(alias, &chain);
+                if !nested.is_unknown_or_error() {
+                    ty = nested;
+                }
+            }
+        }
 
         tracing::debug!(
             text = %text,
