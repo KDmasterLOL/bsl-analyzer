@@ -1,5 +1,5 @@
 //! End-to-end broker mechanics: one backend serves many sessions, a second launch
-//! defers to the live owner (bind-wins), and the backend exits after idle.
+//! defers to the live owner (bind-wins), and the backend dies with its owner session.
 //!
 //! Uses the lightweight `reference` profile so no heavy workspace build is needed,
 //! and points the per-user runtime dir at a tempdir so the socket is isolated.
@@ -41,29 +41,29 @@ async fn connect_within(key: &BackendKey, budget: Duration) -> TokioStream {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn one_backend_serves_many_sessions_then_idles_out() {
+async fn backend_dies_with_its_owner_session_and_drops_the_rest() {
     // No `set_var` here: it races with other tests' `getenv` (a glibc env data race)
     // and would corrupt the resolved socket path. A unique source dir already gives a
     // unique socket name under the real runtime dir, so no isolation env is needed.
     let src = TempDir::new().unwrap();
     let key = key_for(&src);
 
-    // Budgets are generous because this binary runs alongside the heavy workspace
-    // concurrency test, so binding/connecting can lag under CPU contention. The idle
-    // window must exceed connection latency, or the backend would idle-exit before the
-    // clients connect (the daemon starts its idle clock at startup).
-    let idle = Duration::from_secs(15);
-    let owner = tokio::spawn(broker::daemon::run(|| Ok(reference_server()), key_for(&src), idle));
+    // Generous orphan grace so the backend never orphan-exits before clients connect.
+    // Once an owner is claimed the grace is irrelevant — lifetime becomes owner-driven.
+    let grace = Duration::from_secs(30);
+    let backend =
+        tokio::spawn(broker::daemon::run(|| Ok(reference_server()), key_for(&src), grace));
 
-    // Two concurrent client sessions, each doing a full MCP initialize handshake
-    // through the one backend.
+    // Two concurrent client sessions through the one backend. The first to complete its
+    // initialize handshake (c1) sends bytes first and so becomes the owner; c2 is a
+    // dependent session.
     let s1 = connect_within(&key, Duration::from_secs(25)).await;
+    let c1 = ().serve(s1).await.expect("owner client initialized");
     let s2 = connect(&key).await.expect("second session connects");
-    let c1 = ().serve(s1).await.expect("client 1 initialized");
-    let c2 = ().serve(s2).await.expect("client 2 initialized");
+    let c2 = ().serve(s2).await.expect("dependent client initialized");
 
-    assert!(c1.peer_info().is_some(), "session 1 saw server info");
-    assert!(c2.peer_info().is_some(), "session 2 saw server info");
+    assert!(c1.peer_info().is_some(), "owner session saw server info");
+    assert!(c2.peer_info().is_some(), "dependent session saw server info");
     let tools = c1.list_all_tools().await.expect("list tools");
     assert!(
         tools.iter().any(|t| t.name == "search"),
@@ -72,8 +72,8 @@ async fn one_backend_serves_many_sessions_then_idles_out() {
     );
 
     // Bind-wins: a second launch for the same key must defer to the live owner and
-    // return promptly (the Ok(None) path), NOT block as a second owner for its idle
-    // window.
+    // return promptly (the Ok(None) path), NOT block as a second owner. Its liveness
+    // probe connects without sending data, so it must not be mistaken for the owner.
     let second =
         broker::daemon::run(|| Ok(reference_server()), key_for(&src), Duration::from_secs(60));
     tokio::time::timeout(Duration::from_secs(15), second)
@@ -81,12 +81,28 @@ async fn one_backend_serves_many_sessions_then_idles_out() {
         .expect("second launch returns promptly (defers to live owner)")
         .expect("second launch ok");
 
-    // Close both sessions; the now-idle owner must exit within a couple idle windows.
+    // Close the OWNER session only: the backend must shut down, even though c2 is still
+    // open. Dropping the listener and c2's socket then ends the backend task.
     c1.cancel().await.ok();
-    c2.cancel().await.ok();
-    let exited = tokio::time::timeout(Duration::from_secs(40), owner).await;
-    assert!(exited.is_ok(), "backend exited after going idle");
-    exited.unwrap().expect("owner task joined").expect("owner run ok");
+    let exited = tokio::time::timeout(Duration::from_secs(20), backend).await;
+    assert!(exited.is_ok(), "backend shut down when its owner left");
+    exited.unwrap().expect("backend task joined").expect("backend run ok");
+
+    // The dependent session was dropped by the backend shutdown: a call on it must not
+    // succeed (its socket was closed under it), proving the cascade reached c2. In
+    // production the daemon process exits and the OS closes every FD at once, so the EOF
+    // is immediate; here the runtime stays alive and only the explicit abort severs c2,
+    // which under load may not be polled instantly — so a generous timeout stands in for
+    // that delayed EOF. Either a transport error or no response means c2 is unusable; a
+    // successful call would mean it is still being served, which must not happen.
+    let mut args = serde_json::Map::new();
+    args.insert("action".to_owned(), serde_json::Value::String("status".to_owned()));
+    let call = c2.call_tool(CallToolRequestParams::new("search").with_arguments(args));
+    let after = tokio::time::timeout(Duration::from_secs(10), call).await;
+    assert!(
+        !matches!(after, Ok(Ok(_))),
+        "dependent session must be severed once the backend is gone, got: {after:?}"
+    );
 }
 
 /// Regression: while the first backend is still doing its (slow) build, a second
