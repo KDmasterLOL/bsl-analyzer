@@ -400,6 +400,69 @@ mod tests {
         );
     }
 
+    fn code_attr_type(mdo: &crate::metadata_object::MetadataObject) -> &AttributeType {
+        mdo.attributes
+            .iter()
+            .find(|a| a.name == "Код")
+            .map(|a| &a.attr_type)
+            .expect("catalog must expose the Код standard attribute")
+    }
+
+    #[test]
+    fn catalog_numeric_code_type_is_typed_as_number() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20">
+    <Catalog uuid="d11b89e1-90a2-47e7-b43f-7f231ec64b30">
+        <Properties>
+            <Name>ИнтервалыМониторинга</Name>
+            <CodeLength>5</CodeLength>
+            <DescriptionLength>50</DescriptionLength>
+            <CodeType>Number</CodeType>
+        </Properties>
+    </Catalog>
+</MetaDataObject>"#;
+        let mdo = parse_catalog_xml(xml).unwrap();
+        assert_eq!(code_attr_type(&mdo), &AttributeType::Number { precision: 5, scale: 0 });
+    }
+
+    #[test]
+    fn catalog_default_code_type_is_string() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20">
+    <Catalog uuid="d11b89e1-90a2-47e7-b43f-7f231ec64b31">
+        <Properties>
+            <Name>Контрагенты</Name>
+            <CodeLength>9</CodeLength>
+            <DescriptionLength>50</DescriptionLength>
+            <CodeType>String</CodeType>
+        </Properties>
+    </Catalog>
+</MetaDataObject>"#;
+        let mdo = parse_catalog_xml(xml).unwrap();
+        assert_eq!(code_attr_type(&mdo), &AttributeType::String { length: Some(9) });
+    }
+
+    #[test]
+    fn document_numeric_number_type_is_typed_as_number() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20">
+    <Document uuid="9de71b46-e9bf-4b0b-8f3c-4abcd6a385de">
+        <Properties>
+            <Name>ЗаказКлиента</Name>
+            <NumberLength>11</NumberLength>
+            <NumberType>Number</NumberType>
+        </Properties>
+    </Document>
+</MetaDataObject>"#;
+        let mdo = parse_document_xml(xml).unwrap();
+        let number = mdo
+            .attributes
+            .iter()
+            .find(|a| a.name == "Номер")
+            .expect("document must expose the Номер standard attribute");
+        assert_eq!(number.attr_type, AttributeType::Number { precision: 11, scale: 0 });
+    }
+
     #[test]
     fn parse_document_xml_reads_root_uuid() {
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
