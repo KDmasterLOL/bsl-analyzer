@@ -25,6 +25,7 @@ pub mod sdbl_cache;
 pub mod symbol_tree;
 pub mod ty;
 pub mod type_ref;
+pub mod weaving;
 pub mod workspace;
 pub mod workspace_index;
 

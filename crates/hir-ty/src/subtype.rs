@@ -253,6 +253,16 @@ fn is_platform_object_supertype_bridge(from: &TypeKind, to: &TypeKind) -> bool {
     else {
         return false;
     };
+    // The platform dump qualifies a concrete variant of a family with a colon —
+    // `ОбъектМетаданных: HTTPСервис`, `ОбъектМетаданных: Документ`, … (e.g. every member of
+    // the `Метаданные.НайтиПоТипу` return union). Such a phantom IS the generic family it
+    // qualifies, so it is assignable to the bare `ОбъектМетаданных` a doc comment annotates.
+    // One direction only — the bare generic carries no colon and never matches as `from`.
+    if let Some((prefix, _specific)) = from_facet.name.split_once(':') {
+        if stdx::case::eq_ignore_case(&to_facet.name, prefix.trim()) {
+            return true;
+        }
+    }
     const SUPERTYPES: &[(&str, &str, &str, &str)] = &[(
         "ФормаКлиентскогоПриложения",
         "ClientApplicationForm",
@@ -1123,5 +1133,25 @@ mod tests {
         // Either is interchangeable with the bare type, both directions.
         assert!(is_assignable(&db, a, bare));
         assert!(is_assignable(&db, bare, a));
+    }
+
+    #[test]
+    fn colon_qualified_platform_phantom_is_assignable_to_its_generic() {
+        // `Метаданные.НайтиПоТипу` returns a union of `ОбъектМетаданных: <variant>` phantoms;
+        // each IS an `ОбъектМетаданных` (the bare name a doc comment annotates), but not the
+        // reverse, and not a different generic.
+        let db = InMemoryDb::new();
+        let specific = db.platform_object("ОбъектМетаданных: HTTPСервис".to_string());
+        let generic = db.platform_object("ОбъектМетаданных".to_string());
+        assert!(is_assignable(&db, specific, generic), "specific variant IS the generic");
+        assert!(!is_assignable(&db, generic, specific), "generic is NOT a specific variant");
+        assert!(
+            !is_assignable(
+                &db,
+                specific,
+                db.platform_object("ОбъектМетаданныхСправочник".to_string())
+            ),
+            "the colon prefix must match the generic exactly, not merely share a stem"
+        );
     }
 }

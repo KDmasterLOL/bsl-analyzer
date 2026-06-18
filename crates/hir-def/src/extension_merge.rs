@@ -84,14 +84,23 @@ pub fn extract_change_and_validate(method: &SyntaxNode) -> Option<ChangeControl>
 }
 
 fn change_and_validate_target(method: &SyntaxNode) -> Option<String> {
-    let annotation = method.children().filter_map(ast::Annotation::cast).find(|ann| {
-        ann.kind_token().map(|t| t.kind()) == Some(SyntaxKind::ANN_CHANGE_AND_VALIDATE)
-    })?;
+    annotation_first_string_arg(method, SyntaxKind::ANN_CHANGE_AND_VALIDATE)
+}
 
-    // The target must be the first parameter's own string literal. Search only
-    // the parameter's DIRECT tokens — a nested annotation value (e.g.
-    // `&ИзменениеИКонтроль(&Foo("M"))`) keeps its string deeper, so it yields no
-    // direct STRING and is correctly rejected (degrade to no-merge).
+/// The unquoted first string argument of `method`'s annotation of kind `kind`, e.g. the
+/// `"M"` of `&ИзменениеИКонтроль("M")` or `&Вместо("M")`.
+///
+/// The target must be the first parameter's own string literal. Only the parameter's DIRECT
+/// tokens are searched — a nested annotation value (e.g. `&Вместо(&Foo("M"))`) keeps its
+/// string deeper, so it yields no direct STRING and is correctly rejected (degrade to
+/// no-weave / no-merge). Returns `None` when the annotation, its first param, or that param's
+/// string literal is absent.
+pub(crate) fn annotation_first_string_arg(method: &SyntaxNode, kind: SyntaxKind) -> Option<String> {
+    let annotation = method
+        .children()
+        .filter_map(ast::Annotation::cast)
+        .find(|ann| ann.kind_token().map(|t| t.kind()) == Some(kind))?;
+
     let first_param = annotation
         .syntax()
         .children()
@@ -107,7 +116,7 @@ fn change_and_validate_target(method: &SyntaxNode) -> Option<String> {
     Some(unquote_bsl_string(string.text()))
 }
 
-fn unquote_bsl_string(raw: &str) -> String {
+pub(crate) fn unquote_bsl_string(raw: &str) -> String {
     raw.strip_prefix('"').and_then(|s| s.strip_suffix('"')).unwrap_or(raw).replace("\"\"", "\"")
 }
 

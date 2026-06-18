@@ -33,7 +33,7 @@ pub use streaming::{
 pub use hir::{all_sdbl_in_file_query, sdbl_hir_for_file_query};
 pub use queries::{
     configuration_path_for_file, effective_target, line_index_query, liveness_analysis_query,
-    method_cfg_query, module_metadata_query, reaching_definitions_query,
+    method_cfg_query, module_metadata_query, reaching_definitions_query, weaving_target,
 };
 
 pub use effects::{

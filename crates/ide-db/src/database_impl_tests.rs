@@ -2556,3 +2556,164 @@ fn event_subscription_with_missing_handler_yields_no_edge() {
         "an unresolved handler must not produce an edge"
     );
 }
+
+/// Proof of the weaving inference fallback: a `&Вместо` interceptor in an extension
+/// module calls a base-module function `БазХелпер` (which returns 1) and assigns its
+/// result. Inferred via `infer_weaving` the call resolves through the base sibling
+/// fallback, so the assigned variable types as Число; standalone inference of the same
+/// extension module — which has no base sibling in scope — cannot resolve the call, so the
+/// variable stays untyped. The difference proves the base fallback is what resolves it.
+#[test]
+fn infer_weaving_resolves_base_sibling() {
+    use crate::weaving_target;
+    use hir::HirDatabase;
+
+    let temp = tempfile::tempdir().unwrap();
+    let main_root = temp.path().join("src/cf");
+    let ext_root = temp.path().join("src/cfe/X");
+    std::fs::create_dir_all(&main_root).unwrap();
+    std::fs::create_dir_all(&ext_root).unwrap();
+
+    let mut db = RootDatabaseImpl::new();
+    db.set_all_config_paths(vec![
+        (None, main_root.clone()),
+        (Some("X".to_string()), ext_root.clone()),
+    ]);
+
+    let main_file = FileId(0);
+    let ext_file = FileId(1);
+    let mut file_set = FileSet::new();
+    let main_path = main_root.join("CommonModules/М/Ext/Module.bsl");
+    let ext_path = ext_root.join("CommonModules/М/Ext/Module.bsl");
+    file_set.insert(main_file, VfsPath::new(main_path.to_string_lossy().as_ref()));
+    file_set.insert(ext_file, VfsPath::new(ext_path.to_string_lossy().as_ref()));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(main_file, SourceRootId(0));
+    db.set_file_source_root(ext_file, SourceRootId(0));
+
+    db.set_file_text(main_file, "Функция БазХелпер() Экспорт\n\tВозврат 1;\nКонецФункции");
+    db.set_file_text(
+        ext_file,
+        "&Вместо(\"М\")\n\
+         Процедура Расш_М()\n\
+         \tЗначение = БазХелпер();\n\
+         КонецПроцедуры",
+    );
+
+    use bsl_types::builders::Builders;
+    use stdx::case::CaseExt;
+    let number = db.number(None, None);
+    let key = "Значение".fold_lower();
+
+    // Standalone: the extension module alone has no `БазХелпер` sibling, so the call does
+    // not resolve and `Значение` stays untyped.
+    let standalone = HirDatabase::infer(&db, ext_file);
+    assert!(
+        !standalone.var_types.contains_key(&key),
+        "baseline: standalone inference cannot resolve the base call, so `Значение` is \
+         untyped; var_types = {:?}",
+        standalone.var_types.keys().collect::<Vec<_>>()
+    );
+
+    // Weaving: the base module is a same-module sibling fallback → `БазХелпер()` resolves
+    // and `Значение` types as Число (the base function returns 1).
+    let wid = weaving_target(&db, ext_file).expect("ext module pairs to a base");
+    let woven = hir::infer_weaving(&db, wid);
+    assert_eq!(
+        woven.var_types.get(&key).copied(),
+        Some(number),
+        "weaving inference must resolve the base function `БазХелпер()` via the base \
+         fallback and type `Значение` as Число; var_types = {:?}",
+        woven.var_types.keys().collect::<Vec<_>>()
+    );
+}
+
+/// Proof of `ПродолжитьВызов` return typing under weaving: a `&Вместо("М")` interceptor in an
+/// extension module calls `ПродолжитьВызов()` — which re-enters the original base function `М`
+/// (returns 1) — and assigns its result. Inferred via `infer_weaving` the call types as the base
+/// method's return, so the assigned variable types as Число. Without the `&Вместо` proceed
+/// wiring `ПродолжитьВызов` would carry only the platform global's generic (non-Число) return.
+#[test]
+fn infer_weaving_types_proceed_with_call_return() {
+    use crate::weaving_target;
+
+    let temp = tempfile::tempdir().unwrap();
+    let main_root = temp.path().join("src/cf");
+    let ext_root = temp.path().join("src/cfe/X");
+    std::fs::create_dir_all(&main_root).unwrap();
+    std::fs::create_dir_all(&ext_root).unwrap();
+
+    let mut db = RootDatabaseImpl::new();
+    db.set_all_config_paths(vec![
+        (None, main_root.clone()),
+        (Some("X".to_string()), ext_root.clone()),
+    ]);
+
+    let main_file = FileId(0);
+    let ext_file = FileId(1);
+    let mut file_set = FileSet::new();
+    let main_path = main_root.join("CommonModules/М/Ext/Module.bsl");
+    let ext_path = ext_root.join("CommonModules/М/Ext/Module.bsl");
+    file_set.insert(main_file, VfsPath::new(main_path.to_string_lossy().as_ref()));
+    file_set.insert(ext_file, VfsPath::new(ext_path.to_string_lossy().as_ref()));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(main_file, SourceRootId(0));
+    db.set_file_source_root(ext_file, SourceRootId(0));
+
+    db.set_file_text(main_file, "Функция М() Экспорт\n\tВозврат 1;\nКонецФункции");
+    db.set_file_text(
+        ext_file,
+        "&Вместо(\"М\")\n\
+         Функция Расш_М()\n\
+         \tРез = ПродолжитьВызов();\n\
+         \tВозврат Рез;\n\
+         КонецФункции",
+    );
+
+    use bsl_types::builders::Builders;
+    use stdx::case::CaseExt;
+    let number = db.number(None, None);
+    let key = "Рез".fold_lower();
+
+    let wid = weaving_target(&db, ext_file).expect("ext module pairs to a base");
+    let woven = hir::infer_weaving(&db, wid);
+    assert_eq!(
+        woven.var_types.get(&key).copied(),
+        Some(number),
+        "weaving inference must type `ПродолжитьВызов()` in a &Вместо interceptor as the base \
+         method `М`'s return (Число); var_types = {:?}",
+        woven.var_types.keys().collect::<Vec<_>>()
+    );
+}
+
+/// A base-configuration file has no base counterpart to pair against, so `weaving_target`
+/// returns `None` (the base does not weave onto itself).
+#[test]
+fn weaving_target_none_for_base_file() {
+    use crate::weaving_target;
+
+    let temp = tempfile::tempdir().unwrap();
+    let main_root = temp.path().join("src/cf");
+    let ext_root = temp.path().join("src/cfe/X");
+    std::fs::create_dir_all(&main_root).unwrap();
+    std::fs::create_dir_all(&ext_root).unwrap();
+
+    let mut db = RootDatabaseImpl::new();
+    db.set_all_config_paths(vec![
+        (None, main_root.clone()),
+        (Some("X".to_string()), ext_root.clone()),
+    ]);
+
+    let main_file = FileId(0);
+    let mut file_set = FileSet::new();
+    let main_path = main_root.join("CommonModules/М/Ext/Module.bsl");
+    file_set.insert(main_file, VfsPath::new(main_path.to_string_lossy().as_ref()));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(main_file, SourceRootId(0));
+    db.set_file_text(main_file, "Функция БазХелпер() Экспорт\n\tВозврат 1;\nКонецФункции");
+
+    assert!(
+        weaving_target(&db, main_file).is_none(),
+        "a base-configuration file has no base counterpart to weave onto"
+    );
+}

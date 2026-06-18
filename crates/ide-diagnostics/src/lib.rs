@@ -114,9 +114,13 @@ pub fn file_diagnostics(
     apply_extension_merge(db, file_id, config, config_path_input, None, standalone)
 }
 
-/// Augment a file's already-computed standalone diagnostics with the `&ИзменениеИКонтроль`
-/// effective merge, when `file_id` is an extension module that pairs to a base with a usable
-/// change-and-validate splice. For every other file this returns `standalone` unchanged.
+/// Augment a file's already-computed standalone diagnostics with the configuration-extension
+/// merge, when `file_id` is an extension module paired to a base. Two complementary base-aware
+/// passes supersede the standalone (base-blind) inference diagnostics: the *weaving* pass
+/// re-infers the extension's own bodies with the base module as a same-module sibling fallback
+/// (`&Вместо`/`&Перед`/`&После` interceptors and helpers), and the *effective* pass splices
+/// `&ИзменениеИКонтроль` `#Вставка` code into the base and remaps its diagnostics back. For
+/// every other file this returns `standalone` unchanged.
 ///
 /// Factored out of [`file_diagnostics`] so the batch CLI (which builds its provider
 /// `with_file_set` and a run-global configuration path) can reuse the exact same merge while
@@ -131,32 +135,68 @@ pub fn apply_extension_merge<'db>(
     file_set: Option<&'db vfs::file_set::FileSet>,
     mut standalone: Vec<Diagnostic>,
 ) -> Vec<Diagnostic> {
-    let Some(eid) = ide_db::effective_target(db, file_id) else {
-        return standalone;
-    };
-    let Some(effmod) = hir::effective_module_text(db, eid) else {
-        return standalone;
-    };
+    let weaving = ide_db::weaving_target(db, file_id);
+    let effective = ide_db::effective_target(db, file_id)
+        .and_then(|eid| hir::effective_module_text(db, eid).map(|effmod| (eid, effmod)));
 
-    // Effective pass: ONLY the inference collector, which reads exclusively `infer` +
-    // `module_bodies` (both routed effective on this provider → one coherent source map).
-    // The full runner is deliberately NOT used: its other collectors (arg/cfg/dataflow/
-    // sdbl/metrics) read standalone-keyed queries that would mix source maps.
-    let eff_provider = ide_db::SalsaProvider::with_file_set(db, config_path_input, file_set)
-        .with_effective(eid, file_id);
-    let eff_ctx = DiagnosticsContext::new(config, file_id, &eff_provider);
-    let eff_inference = hir_inference_dispatch::collect_inference_diagnostics(&eff_ctx);
-    let kept_effective = effective::remap_inserted(eff_inference, &effmod.segments);
+    // Ordinary module (and any extension file with no resolvable base): byte-identical to the
+    // standalone pass.
+    if weaving.is_none() && effective.is_none() {
+        return standalone;
+    }
 
-    // Drop standalone inference-class diagnostics inside change-and-validate bodies: their
-    // copied-base statements reference base siblings the standalone ext file cannot see.
-    let cav_bodies = effective::cav_body_ranges(&db.parse(file_id).syntax_node());
-    standalone.retain(|d| {
-        !(hir_inference_dispatch::INFERENCE_DIAGNOSTICS.contains(&d.code)
-            && effective::range_inside_any(d.range, &cav_bodies))
+    let root = db.parse(file_id).syntax_node();
+    // `&ИзменениеИКонтроль` method bodies: copied-base statements reference base siblings;
+    // owned by the effective pass (remapped to `#Вставка`), so excluded from the weaving pass.
+    let cav_bodies = effective::cav_body_ranges(&root);
+
+    // Strip the standalone INFERENCE-origin diagnostics by IDENTITY, recomputed on the same
+    // provider the caller used. Removing by identity — not by `DiagnosticCode` — is essential:
+    // some codes (e.g. `RedundantAccessToObject`, emitted both by the syntactic `ЭтотОбъект.X`
+    // lowering check AND by the inference two-level check) also reach this list from non-
+    // inference collectors, and those must survive. The base-aware passes below republish only
+    // the inference layer.
+    let std_provider = ide_db::SalsaProvider::with_file_set(db, config_path_input, file_set);
+    let std_ctx = DiagnosticsContext::new(config, file_id, &std_provider);
+    let mut std_inference =
+        safe_collect("merge:standalone_inference", || collect_inference_diagnostics(&std_ctx));
+    standalone.retain(|d| match std_inference.iter().position(|s| s == d) {
+        Some(pos) => {
+            std_inference.swap_remove(pos);
+            false
+        }
+        None => true,
     });
 
-    standalone.extend(kept_effective);
+    // Weaving pass: re-infer the extension's own bodies with the paired base module as a
+    // same-module sibling fallback. `infer_weaving` is equivalent to standalone inference
+    // except where a base sibling resolves — `weaving_base` feeds only purely-additive
+    // resolution sites (resolver `base_fallback` + the bare-call site), so every difference is
+    // a legitimate base-sibling resolution and its downstream type cascade, never a spurious
+    // one. Adopt it everywhere except change-and-validate bodies (the effective pass owns
+    // those). Only the inference collector runs (reads `infer` + `module_bodies`, both
+    // ext-native here → one coherent source map).
+    if let Some(wid) = weaving {
+        let w_provider = ide_db::SalsaProvider::with_file_set(db, config_path_input, file_set)
+            .with_weaving(wid, file_id);
+        let w_ctx = DiagnosticsContext::new(config, file_id, &w_provider);
+        let mut w_inference =
+            safe_collect("merge:weaving_inference", || collect_inference_diagnostics(&w_ctx));
+        w_inference.retain(|d| !effective::range_inside_any(d.range, &cav_bodies));
+        standalone.extend(w_inference);
+    }
+
+    // Effective pass: the `&ИзменениеИКонтроль` `#Вставка` code spliced into the base module,
+    // its diagnostics remapped from effective-text coordinates back to the extension source.
+    if let Some((eid, effmod)) = effective {
+        let eff_provider = ide_db::SalsaProvider::with_file_set(db, config_path_input, file_set)
+            .with_effective(eid, file_id);
+        let eff_ctx = DiagnosticsContext::new(config, file_id, &eff_provider);
+        let eff_inference =
+            safe_collect("merge:effective_inference", || collect_inference_diagnostics(&eff_ctx));
+        standalone.extend(effective::remap_inserted(eff_inference, &effmod.segments));
+    }
+
     deduplicate_diagnostics(&mut standalone);
     standalone
 }

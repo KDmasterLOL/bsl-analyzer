@@ -25,11 +25,22 @@ struct EffectiveRoute<'db> {
     ext_file: FileId,
 }
 
+/// Routes the extension file's `infer` query to weaving inference (base module as
+/// same-module sibling fallback), so the diagnostics pass over a `&Вместо` / `&Перед` /
+/// `&После` module sees the base methods it targets. Unlike [`EffectiveRoute`] there is
+/// no text splice, so only `infer` is routed; parse / symbol-tree stay the ext file's.
+#[derive(Clone, Copy)]
+struct WeavingRoute<'db> {
+    wid: hir::WeavingModuleId<'db>,
+    ext_file: FileId,
+}
+
 pub struct SalsaProvider<'db> {
     db: &'db dyn RootDatabase,
     configuration_path_input: Option<ConfigurationPathInput<'db>>,
     file_set: Option<&'db vfs::file_set::FileSet>,
     effective: Option<EffectiveRoute<'db>>,
+    weaving: Option<WeavingRoute<'db>>,
 }
 
 impl<'db> SalsaProvider<'db> {
@@ -37,7 +48,7 @@ impl<'db> SalsaProvider<'db> {
         db: &'db dyn RootDatabase,
         configuration_path_input: Option<ConfigurationPathInput<'db>>,
     ) -> Self {
-        Self { db, configuration_path_input, file_set: None, effective: None }
+        Self { db, configuration_path_input, file_set: None, effective: None, weaving: None }
     }
 
     pub fn with_file_set(
@@ -45,7 +56,7 @@ impl<'db> SalsaProvider<'db> {
         configuration_path_input: Option<ConfigurationPathInput<'db>>,
         file_set: Option<&'db vfs::file_set::FileSet>,
     ) -> Self {
-        Self { db, configuration_path_input, file_set, effective: None }
+        Self { db, configuration_path_input, file_set, effective: None, weaving: None }
     }
 
     /// Route the extension file's local queries to its effective `&ИзменениеИКонтроль`
@@ -56,6 +67,14 @@ impl<'db> SalsaProvider<'db> {
         self
     }
 
+    /// Route the extension file's `infer` query to its weaving inference. Used only by the
+    /// diagnostics inference pass; all other consumers keep the default provider so
+    /// behaviour is byte-identical for ordinary modules.
+    pub fn with_weaving(mut self, wid: hir::WeavingModuleId<'db>, ext_file: FileId) -> Self {
+        self.weaving = Some(WeavingRoute { wid, ext_file });
+        self
+    }
+
     pub fn db(&self) -> &'db dyn RootDatabase {
         self.db
     }
@@ -63,6 +82,11 @@ impl<'db> SalsaProvider<'db> {
     /// The effective id when `file_id` is the routed extension file.
     fn effective_for(&self, file_id: FileId) -> Option<hir::EffectiveModuleId<'db>> {
         self.effective.filter(|r| r.ext_file == file_id).map(|r| r.eid)
+    }
+
+    /// The weaving id when `file_id` is the routed extension file.
+    fn weaving_for(&self, file_id: FileId) -> Option<hir::WeavingModuleId<'db>> {
+        self.weaving.filter(|r| r.ext_file == file_id).map(|r| r.wid)
     }
 }
 
@@ -190,10 +214,16 @@ impl AnalysisProvider for SalsaProvider<'_> {
     }
 
     fn infer(&self, file_id: FileId) -> Arc<InferenceResult> {
-        match self.effective_for(file_id) {
-            Some(eid) => hir::infer_effective(self.db, eid),
-            None => HirDatabase::infer(self.db, file_id),
+        // Effective `&ИзменениеИКонтроль` routing takes precedence over weaving when both
+        // somehow match (they are set on separate provider instances, so this ordering is
+        // only defensive).
+        if let Some(eid) = self.effective_for(file_id) {
+            return hir::infer_effective(self.db, eid);
         }
+        if let Some(wid) = self.weaving_for(file_id) {
+            return hir::infer_weaving(self.db, wid);
+        }
+        HirDatabase::infer(self.db, file_id)
     }
 
     fn arg_diagnostics(&self, file_id: FileId) -> Arc<Vec<(DefWithBodyId, InferenceDiagnostic)>> {

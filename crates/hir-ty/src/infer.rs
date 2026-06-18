@@ -283,6 +283,20 @@ pub struct InferenceContext<'db> {
     /// pass → byte-identical default behavior.
     local_effective_returns: Option<Arc<FxHashMap<u32, TypeId>>>,
 
+    /// Paired base module of a configuration-*extension* module, present only when
+    /// inferring an extension module's OWN bodies under weaving (`&Вместо`/`&Перед`/
+    /// `&После`). A bare same-module call/variable that misses in the extension's own
+    /// symbols retries against this base module (the extension shadows the base). `None`
+    /// for ordinary and effective modules → byte-identical default resolution.
+    weaving_base: Option<hir_def::ModuleId>,
+
+    /// Return type a bare `ПродолжитьВызов(...)` / `ProceedWithCall(...)` call yields in this
+    /// body, present only when inferring a `&Вместо` (Around) interceptor under weaving. The
+    /// call invokes the original base method `M`, so its result is `M`'s return type, not the
+    /// platform global `ПродолжитьВызов`'s generic return. `None` for ordinary, effective,
+    /// `&Перед`/`&После`, and module-code bodies → byte-identical platform-default typing.
+    proceed_return: Option<TypeId>,
+
     owner: DefWithBodyId,
 
     body: Arc<Body>,
@@ -460,6 +474,8 @@ impl<'db> InferenceContext<'db> {
             context_file_id: file_id,
             local_symbols: None,
             local_effective_returns: None,
+            weaving_base: None,
+            proceed_return: None,
             owner,
             body: Arc::clone(body),
             var_types: FxHashMap::default(),
@@ -498,11 +514,35 @@ impl<'db> InferenceContext<'db> {
         ctx
     }
 
+    /// Inference over an extension module's OWN bodies under *weaving* (`&Вместо` /
+    /// `&Перед` / `&После`): `context_file_id` stays the extension file (configuration /
+    /// metadata resolution must key on the ext file), while bare same-module lookups that
+    /// miss in the extension's own symbols fall back to `base_module`. Identical to
+    /// [`Self::new`] apart from that fallback, threaded through [`Self::get_resolver`].
+    pub fn new_weaving(
+        db: &'db dyn HirDatabase,
+        ext_file_id: FileId,
+        base_module: hir_def::ModuleId,
+        owner: DefWithBodyId,
+        body: &Arc<Body>,
+    ) -> Self {
+        let mut ctx = Self::new(db, ext_file_id, owner, body);
+        ctx.weaving_base = Some(base_module);
+        ctx
+    }
+
     /// Second-pass effective inference: supply the effective return types of the module's
     /// own methods so bare same-module calls to changed methods resolve their *changed*
     /// body's return. See [`Self::local_effective_returns`].
     pub fn set_local_effective_returns(&mut self, returns: Arc<FxHashMap<u32, TypeId>>) {
         self.local_effective_returns = Some(returns);
+    }
+
+    /// Weaving inference of a `&Вместо` interceptor: supply the base method's return type so a
+    /// bare `ПродолжитьВызов(...)` in this body types as the original method's result rather
+    /// than the platform global's generic return. See [`Self::proceed_return`].
+    pub fn set_proceed_return(&mut self, ty: TypeId) {
+        self.proceed_return = Some(ty);
     }
 
     /// In effective inference, prefer a LOCAL method's CHANGED-body return over the value
@@ -587,7 +627,10 @@ impl<'db> InferenceContext<'db> {
             Some(symbols) => {
                 Resolver::with_builtins_and_workspace_effective(module_id, Arc::clone(symbols))
             }
-            None => Resolver::with_builtins_and_workspace(module_id),
+            None => match self.weaving_base {
+                Some(base) => Resolver::with_builtins_and_workspace_weaving(module_id, base),
+                None => Resolver::with_builtins_and_workspace(module_id),
+            },
         }
     }
 
@@ -1712,11 +1755,21 @@ impl<'db> InferenceContext<'db> {
                     },
                     chosen.from_doc_comment,
                 );
-                let ret = if sigs.len() == 1 {
+                let mut ret = if sigs.len() == 1 {
                     chosen.ret
                 } else {
                     self.db.union(sigs.iter().map(|s| s.ret).collect())
                 };
+                // Weaving `&Вместо`: a bare `ПродолжитьВызов(...)` invokes the original base
+                // method, so its result is that method's return type, not the platform global's
+                // generic return. Applied after arity validation above so the existing arg-count
+                // diagnostics and the hir-def `WrongUseFunctionProceedWithCall` lowering are
+                // untouched. `proceed_return` is `None` in every other context → no change.
+                if let Some(proceed_ty) = self.proceed_return {
+                    if is_proceed_with_call_name(&name) {
+                        ret = proceed_ty;
+                    }
+                }
                 self.expr_types.insert(callee, self.db.unknown());
                 return ret;
             }
@@ -1774,7 +1827,15 @@ impl<'db> InferenceContext<'db> {
                                 self.db.symbol_tree(module_id)
                             }
                         };
-                        if let Some(method) = symbol_tree.find_method(name) {
+                        // Weaving: a `&Вместо`/`&Перед`/`&После` interceptor calling a base
+                        // sibling that the extension does not define falls back to the paired
+                        // base module's symbols (the extension shadows the base). The base tree
+                        // is bound here so the borrowed method outlives the lookup.
+                        let base_tree = self.weaving_base.map(|base| self.db.symbol_tree(base));
+                        let resolved_method = symbol_tree.find_method(name).or_else(|| {
+                            base_tree.as_ref().and_then(|base_tree| base_tree.find_method(name))
+                        });
+                        if let Some(method) = resolved_method {
                             // In effective (`&ИзменениеИКонтроль`) inference, prefer the
                             // CHANGED body's return over the base-keyed query, so inserted
                             // code that consumes a changed sibling's result types correctly.
@@ -2434,6 +2495,105 @@ pub fn infer_effective<'db>(
             &Arc::new(body.clone()),
         );
         ctx.set_local_effective_returns(Arc::clone(&effective_returns));
+        ctx.infer_all();
+        fold_body(&mut result, &ctx.finish());
+    }
+
+    Arc::new(result)
+}
+
+/// Whether a bare call name is the platform `ПродолжитьВызов` / `ProceedWithCall` global, the
+/// call that re-enters the original base method from a `&Вместо` interceptor. Mirrors the
+/// recognition in `hir_def::body::lower::expr` (which is private there), folding the name to
+/// lower so the bilingual case-insensitive spellings match.
+fn is_proceed_with_call_name(name: &Name) -> bool {
+    matches!(name.as_str().fold_lower().as_str(), "продолжитьвызов" | "proceedwithcall")
+}
+
+/// Inference over an extension module's OWN bodies under *weaving* (`&Вместо` /
+/// `&Перед` / `&После`). Unlike [`infer_effective`] there is no text splice: the
+/// extension module keeps its native text and is inferred through
+/// [`InferenceContext::new_weaving`], so a bare same-module call that targets a base
+/// method resolves via the base fallback (no spurious `UnresolvedMethodCall`) while
+/// configuration / metadata context stays the extension file. Single pass — the
+/// changed-return threading of effective inference is a later increment.
+#[salsa::tracked(lru = 256, heap_size = heap_estimate::inference_result_heap)]
+pub fn infer_weaving<'db>(
+    db: &'db dyn HirDatabase,
+    wid: hir_def::weaving::WeavingModuleId<'db>,
+) -> Arc<InferenceResult> {
+    let ext_file = wid.ext_file(db);
+    let base_file = wid.base_file(db);
+    let _p = tracing::info_span!("infer_weaving", ?ext_file, ?base_file).entered();
+
+    let base_module = hir_def::ModuleId::new(base_file);
+    let ext_module = hir_def::ModuleId::new(ext_file);
+    let module_bodies = db.module_bodies(ext_module);
+
+    // A `&Вместо("M")` interceptor's body may call `ПродолжитьВызов(...)` to re-enter the
+    // original base method `M`; that call's result is `M`'s return type. Pre-compute, per ext
+    // method `local_id`, the base target's return so the body loop below can thread it into
+    // inference. `&Перед`/`&После` carry no `ПродолжитьВызов`, so they are skipped; an
+    // uninformative base return (Unknown/Undefined) is dropped to preserve the platform default.
+    let ext_symbols = db.symbol_tree(ext_module);
+    let base_symbols = db.symbol_tree(base_module);
+    let ext_parse = db.parse(ext_file);
+    let mut proceed_returns: FxHashMap<u32, TypeId> = FxHashMap::default();
+    for method in ext_symbols.methods() {
+        let Some(node) = method.syntax_node(&ext_parse) else {
+            continue;
+        };
+        let Some(interception) = hir_def::weaving::interceptor_target(&node) else {
+            continue;
+        };
+        if interception.kind != hir_def::weaving::InterceptionKind::Around {
+            continue;
+        }
+        let Some(base_method) = base_symbols.find_method(&Name::new(&interception.target)) else {
+            continue;
+        };
+        let base_input = hir_def::MethodIdInput::new(db, base_method.id);
+        let ret = crate::method_graph::method_return_type_query(db, base_input);
+        if ret != db.unknown() && ret != db.undefined() {
+            proceed_returns.insert(method.id.local_id, ret);
+        }
+    }
+
+    let mut result = InferenceResult::default();
+
+    let fold_body = |result: &mut InferenceResult, body_result: &BodyInferenceResult| {
+        let owner = body_result.owner;
+        result.expr_types_by_body.insert(owner, body_result.expr_types.clone());
+        result.binding_types_by_body.insert(owner, body_result.binding_types.clone());
+        result.var_types.extend(body_result.var_types.iter().map(|(k, v)| (k.clone(), *v)));
+        result.implicit_locals_by_body.insert(owner, body_result.implicit_locals.clone());
+        result.diagnostics.extend(body_result.diagnostics.iter().map(|d| (owner, d.clone())));
+        result.call_arg_bindings.extend(body_result.call_arg_bindings.iter().cloned());
+    };
+
+    if let Some(body) = module_bodies.module_code() {
+        let mut ctx = InferenceContext::new_weaving(
+            db,
+            ext_file,
+            base_module,
+            DefWithBodyId::ModuleCode,
+            &Arc::new(body.clone()),
+        );
+        ctx.infer_all();
+        fold_body(&mut result, &ctx.finish());
+    }
+
+    for (local_id, body) in module_bodies.iter_bodies() {
+        let mut ctx = InferenceContext::new_weaving(
+            db,
+            ext_file,
+            base_module,
+            DefWithBodyId::Method(local_id),
+            &Arc::new(body.clone()),
+        );
+        if let Some(ret) = proceed_returns.get(&local_id) {
+            ctx.set_proceed_return(*ret);
+        }
         ctx.infer_all();
         fold_body(&mut result, &ctx.finish());
     }

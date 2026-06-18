@@ -20,9 +20,18 @@ pub enum Scope {
     /// `&ИзменениеИКонтроль` extension); `None` resolves through
     /// `db.symbol_tree(module_id)` exactly as before — the byte-identical default for
     /// every ordinary module.
+    ///
+    /// `base_fallback` is the paired base module of a configuration-*extension* module
+    /// (weaving, Phase 3): same-module method/variable lookups that miss in `module_id`'s
+    /// own symbols retry against the base module's symbols, so an interceptor or new
+    /// extension method that calls a base-module sibling resolves. The extension's own
+    /// symbols are tried FIRST (extension shadows base); the fallback only fills misses, so
+    /// it can never turn a resolved name unresolved. Mutually exclusive with `local_symbols`
+    /// (the `&ИзменениеИКонтроль` effective module already contains the merged base body).
     ModuleScope {
         module_id: ModuleId,
         local_symbols: Option<Arc<SymbolTree>>,
+        base_fallback: Option<ModuleId>,
     },
 
     ExprScope {
@@ -37,14 +46,20 @@ pub enum Scope {
 
 impl Resolver {
     pub fn for_module(module_id: ModuleId) -> Self {
-        Resolver { scopes: vec![Scope::ModuleScope { module_id, local_symbols: None }] }
+        Resolver {
+            scopes: vec![Scope::ModuleScope {
+                module_id,
+                local_symbols: None,
+                base_fallback: None,
+            }],
+        }
     }
 
     pub fn with_workspace_scope(module_id: ModuleId) -> Self {
         Resolver {
             scopes: vec![
                 Scope::WorkspaceScope,
-                Scope::ModuleScope { module_id, local_symbols: None },
+                Scope::ModuleScope { module_id, local_symbols: None, base_fallback: None },
             ],
         }
     }
@@ -54,7 +69,7 @@ impl Resolver {
             scopes: vec![
                 Scope::Builtins,
                 Scope::WorkspaceScope,
-                Scope::ModuleScope { module_id, local_symbols: None },
+                Scope::ModuleScope { module_id, local_symbols: None, base_fallback: None },
             ],
         }
     }
@@ -72,7 +87,34 @@ impl Resolver {
             scopes: vec![
                 Scope::Builtins,
                 Scope::WorkspaceScope,
-                Scope::ModuleScope { module_id, local_symbols: Some(local_symbols) },
+                Scope::ModuleScope {
+                    module_id,
+                    local_symbols: Some(local_symbols),
+                    base_fallback: None,
+                },
+            ],
+        }
+    }
+
+    /// Like [`Self::with_builtins_and_workspace`], but same-module method/variable lookups
+    /// that miss in `module_id`'s own symbols retry against `base_module_id` — the paired
+    /// base module of a configuration-extension module (weaving, Phase 3). `module_id` stays
+    /// the extension file (so configuration / metadata / cross-module resolution keys on the
+    /// extension's own `file_id`, which is correct); only the bare same-module sibling lookup
+    /// gains the base fallback. The extension shadows the base (own symbols tried first).
+    pub fn with_builtins_and_workspace_weaving(
+        module_id: ModuleId,
+        base_module_id: ModuleId,
+    ) -> Self {
+        Resolver {
+            scopes: vec![
+                Scope::Builtins,
+                Scope::WorkspaceScope,
+                Scope::ModuleScope {
+                    module_id,
+                    local_symbols: None,
+                    base_fallback: Some(base_module_id),
+                },
             ],
         }
     }
@@ -131,6 +173,18 @@ impl Resolver {
         None
     }
 
+    /// The paired base module to retry same-module sibling lookups against, when this
+    /// resolver was built for a configuration-extension module
+    /// ([`Self::with_builtins_and_workspace_weaving`]). `None` for every other module.
+    fn module_base_fallback(&self) -> Option<ModuleId> {
+        for scope in &self.scopes {
+            if let Scope::ModuleScope { base_fallback, .. } = scope {
+                return *base_fallback;
+            }
+        }
+        None
+    }
+
     pub fn resolve_local(&self, name: &Name) -> Option<ResolvedLocal> {
         for scope in self.scopes.iter().rev() {
             if let Scope::ExprScope { scopes, scope_id } = scope {
@@ -148,8 +202,14 @@ impl Resolver {
             return symbols.find_method(name).map(|m| m.id);
         }
         let module_id = self.module_id()?;
-        let symbol_tree = db.symbol_tree(module_id);
-        symbol_tree.find_method(name).map(|m| m.id)
+        if let Some(m) = db.symbol_tree(module_id).find_method(name) {
+            return Some(m.id);
+        }
+        // Weaving: an extension method calling a base-module sibling resolves against the
+        // paired base module. The returned `MethodId` carries the base module, so downstream
+        // type inference uses the base method's real signature.
+        let base = self.module_base_fallback()?;
+        db.symbol_tree(base).find_method(name).map(|m| m.id)
     }
 
     pub fn resolve_module_variable(&self, db: &dyn DefDatabase, name: &Name) -> Option<VariableId> {
@@ -157,8 +217,11 @@ impl Resolver {
             return symbols.find_variable(name).map(|v| v.id);
         }
         let module_id = self.module_id()?;
-        let symbol_tree = db.symbol_tree(module_id);
-        symbol_tree.find_variable(name).map(|v| v.id)
+        if let Some(v) = db.symbol_tree(module_id).find_variable(name) {
+            return Some(v.id);
+        }
+        let base = self.module_base_fallback()?;
+        db.symbol_tree(base).find_variable(name).map(|v| v.id)
     }
 
     pub fn user_common_module_exists(&self, db: &dyn ConfigsDatabase, module_name: &Name) -> bool {
