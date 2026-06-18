@@ -101,47 +101,46 @@ pub fn method_regions_query<'db>(
     let root = parse.syntax_node();
 
     let mut map = HashMap::new();
-    collect_methods_in_regions(&root, &mut Vec::new(), &mut map);
+    collect_methods_in_regions(&root, &mut map);
 
     tracing::debug!(count = map.len(), "Collected methods in API regions");
 
     Arc::new(map)
 }
 
-fn collect_methods_in_regions(
-    node: &SyntaxNode,
-    region_stack: &mut Vec<String>,
-    map: &mut HashMap<TextRange, String>,
-) {
+fn collect_methods_in_regions(root: &SyntaxNode, map: &mut HashMap<TextRange, String>) {
     use syntax::{
         ast::{self, AstNode},
         SyntaxKind,
     };
 
-    for child in node.children() {
-        match child.kind() {
+    // Region directives are flat markers; pair them with a running stack in
+    // source order (preorder descendants), exactly like `hir-def::region_tree`.
+    // A method's enclosing region is the one open at the method's start, so its
+    // own interior (method-local) markers come later and do not affect it. A
+    // region whose end marker sits inside a method body is closed there too, so
+    // it cannot bleed into subsequent methods.
+    let mut region_stack: Vec<String> = Vec::new();
+
+    for node in root.descendants() {
+        match node.kind() {
             SyntaxKind::PRE_REGION_DIR => {
-                if let Some(region) = ast::PreRegionDir::cast(child.clone()) {
-                    if region.is_start() {
-                        if let Some(name) = region.name() {
-                            region_stack.push(name);
-                            collect_methods_in_regions(region.syntax(), region_stack, map);
-                            region_stack.pop();
-                        }
+                if let Some(region) = ast::PreRegionDir::cast(node.clone()) {
+                    if region.is_end() {
+                        region_stack.pop();
+                    } else {
+                        region_stack.push(region.name().unwrap_or_default());
                     }
                 }
             }
             SyntaxKind::PROCEDURE_DEF | SyntaxKind::FUNCTION_DEF => {
                 if let Some(root_region) = region_stack.first() {
                     if is_api_region(root_region) {
-                        let range = child.text_range();
-                        map.insert(range, root_region.clone());
+                        map.insert(node.text_range(), root_region.clone());
                     }
                 }
             }
-            _ => {
-                collect_methods_in_regions(&child, region_stack, map);
-            }
+            _ => {}
         }
     }
 }

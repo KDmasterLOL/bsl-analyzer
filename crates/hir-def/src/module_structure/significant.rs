@@ -24,13 +24,10 @@ fn meaningful_core(kind: SyntaxKind) -> bool {
 }
 
 pub fn is_significant_for_code_out_of_region(node: &SyntaxNode) -> bool {
-    if meaningful_core(node.kind()) {
-        return true;
-    }
-    if node.kind() == SyntaxKind::PRE_REGION_DIR {
-        return node.descendants().any(|n| meaningful_core(n.kind()));
-    }
-    false
+    // Region directives are flat folding markers; any code that used to live
+    // inside a region container is now a direct sibling and is matched here on
+    // its own kind.
+    meaningful_core(node.kind())
 }
 
 pub fn is_significant_for_region_emptiness(kind: SyntaxKind) -> bool {
@@ -102,23 +99,30 @@ mod tests {
     }
 
     #[test]
-    fn code_out_of_region_descends_into_pre_region_dir() {
+    fn flat_region_marker_is_not_significant() {
+        // The marker is a flat leaf; the code inside the region is a sibling.
         let src = "#Область Х\nПерем Y;\n#КонецОбласти\n";
-        let node = first_kind(src, SyntaxKind::PRE_REGION_DIR);
-        assert!(is_significant_for_code_out_of_region(&node));
+        let marker = first_kind(src, SyntaxKind::PRE_REGION_DIR);
+        assert!(!is_significant_for_code_out_of_region(&marker));
+
+        let var = first_kind(src, SyntaxKind::VAR_DEF);
+        assert!(is_significant_for_code_out_of_region(&var));
     }
 
     #[test]
-    fn empty_pre_region_dir_is_not_significant() {
+    fn empty_pre_region_dir_marker_is_not_significant() {
         let src = "#Область Х\n#КонецОбласти\n";
-        let node = first_kind(src, SyntaxKind::PRE_REGION_DIR);
-        assert!(!is_significant_for_code_out_of_region(&node));
+        let marker = first_kind(src, SyntaxKind::PRE_REGION_DIR);
+        assert!(!is_significant_for_code_out_of_region(&marker));
     }
 
     #[test]
-    fn pre_region_dir_containing_only_raise_is_not_significant() {
-        let src = "#Область Х\nВызватьИсключение \"X\";\n#КонецОбласти\n";
-        let node = first_kind(src, SyntaxKind::PRE_REGION_DIR);
-        assert!(!is_significant_for_code_out_of_region(&node));
+    fn raise_stmt_is_not_code_out_of_region_significant() {
+        // ВызватьИсключение is meaningful for region-emptiness but is not a
+        // "code out of region" element.
+        let src = "Вызватьисключение \"X\";\n";
+        let raise = first_kind(src, SyntaxKind::RAISE_STMT);
+        assert!(!is_significant_for_code_out_of_region(&raise));
+        assert!(is_significant_for_region_emptiness(raise.kind()));
     }
 }

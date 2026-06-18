@@ -558,6 +558,17 @@ fn compute_method_size_lines(method_node: &SyntaxNode, line_index: Option<&LineI
     total_span.saturating_sub(4) as u32
 }
 
+fn is_compound_block_stmt(node: &SyntaxNode) -> bool {
+    matches!(
+        node.kind(),
+        SyntaxKind::IF_STMT
+            | SyntaxKind::WHILE_STMT
+            | SyntaxKind::FOR_STMT
+            | SyntaxKind::FOR_EACH_STMT
+            | SyntaxKind::TRY_STMT
+    )
+}
+
 pub fn lower_module_code(root: &SyntaxNode, line_index: Option<Arc<LineIndex>>) -> LowerResult {
     let mut ctx = LoweringCtx::new(false);
 
@@ -575,12 +586,8 @@ pub fn lower_module_code(root: &SyntaxNode, line_index: Option<Arc<LineIndex>>) 
             }
             continue;
         }
-        if node.kind() == SyntaxKind::PRE_REGION_DIR {
-            let (region_stmts, _region_terminates) = preproc::lower_region_stmts(&mut ctx, &node);
-            stmts.extend(region_stmts);
-            continue;
-        }
-
+        // Flat region markers are skipped; module-level code that used to live
+        // inside a region container is now a direct sibling here.
         if !control_flow::is_statement_node(&node) {
             continue;
         }
@@ -592,7 +599,10 @@ pub fn lower_module_code(root: &SyntaxNode, line_index: Option<Arc<LineIndex>>) 
         if let Some(stmt_id) = stmt::lower_stmt(&mut ctx, &node) {
             stmts.push(stmt_id);
 
-            if !stmt::should_skip_one_statement_per_line(&node) {
+            // A compound block statement shares its header line with its first
+            // body statement, which is tracked during lowering; tracking the
+            // header too would double-count it as a second statement on the line.
+            if !stmt::should_skip_one_statement_per_line(&node) && !is_compound_block_stmt(&node) {
                 ctx.track_statement_line(node.text_range());
             }
 

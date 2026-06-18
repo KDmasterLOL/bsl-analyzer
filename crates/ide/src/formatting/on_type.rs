@@ -119,7 +119,6 @@ fn calculate_indent_for_line(root: &SyntaxNode, line_start: TextSize, line: &str
                 | SyntaxKind::FOR_STMT
                 | SyntaxKind::FOR_EACH_STMT
                 | SyntaxKind::TRY_STMT
-                | SyntaxKind::PRE_REGION_DIR
                 | SyntaxKind::PRE_IF_DIR
                 | SyntaxKind::ELSIF_CLAUSE
                 | SyntaxKind::ELSE_CLAUSE

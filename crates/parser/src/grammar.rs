@@ -40,6 +40,19 @@ fn annotated_item(p: &mut Parser) {
         p.skip_trivia();
     }
 
+    // Region directives are flat folding markers and may sit between an
+    // annotation and the declaration it applies to (e.g. `&НаКлиенте #Область X
+    // <newline> Перем Y;`). Consume them here so the annotation still binds to
+    // the following Procedure/Function/Var instead of derailing the parse.
+    while matches!(p.current(), Some(TokenKind::PreRegion) | Some(TokenKind::PreEndRegion)) {
+        p.check_iteration_limit();
+        match p.current() {
+            Some(TokenKind::PreRegion) => preprocessor_region(p),
+            _ => preprocessor_end_region(p),
+        }
+        p.skip_trivia();
+    }
+
     match p.current() {
         Some(TokenKind::KwAsync) => match p.nth_non_trivia(0) {
             Some(TokenKind::KwProcedure) => {
@@ -95,6 +108,7 @@ pub fn source_file(p: &mut Parser) {
             Some(TokenKind::KwFunction) => items::function_def(p),
             Some(TokenKind::KwVar) => items::var_declaration(p),
             Some(TokenKind::PreRegion) => preprocessor_region(p),
+            Some(TokenKind::PreEndRegion) => preprocessor_end_region(p),
             Some(TokenKind::PreIf) => preprocessor_if(p),
             Some(TokenKind::PreDelete) => preprocessor_delete(p),
             Some(TokenKind::PreInsert) => preprocessor_insert(p),
@@ -121,6 +135,14 @@ pub fn source_file(p: &mut Parser) {
     m.complete(p, NodeKind::SourceFile);
 }
 
+/// `#Область Имя` is a flat folding marker, not a container.
+///
+/// 1C region directives are preprocessor markers stripped before compilation;
+/// they may interleave with control flow without nesting (e.g. `#КонецОбласти`
+/// inside an `Если` body before `КонецЕсли`). A container node cannot represent
+/// such overlapping ranges in a full-fidelity tree, so each `#Область` and each
+/// `#КонецОбласти` is its own leaf node. Region nesting is reconstructed
+/// post-hoc by pairing start/end markers (see `hir-def::region_tree`).
 pub(super) fn preprocessor_region(p: &mut Parser) {
     let m = p.start();
     p.bump();
@@ -130,47 +152,13 @@ pub(super) fn preprocessor_region(p: &mut Parser) {
         p.bump();
     }
 
-    while !p.at_end() && !p.at(TokenKind::PreEndRegion) {
-        p.check_iteration_limit();
-        p.skip_trivia();
-        if p.at_end() || p.at(TokenKind::PreEndRegion) {
-            break;
-        }
+    m.complete(p, NodeKind::PreRegionDir);
+}
 
-        match p.current() {
-            Some(TokenKind::KwAsync) => match p.nth_non_trivia(0) {
-                Some(TokenKind::KwProcedure) => items::procedure_def(p),
-                Some(TokenKind::KwFunction) => items::function_def(p),
-                _ => p.error_unexpected(),
-            },
-            Some(TokenKind::KwProcedure) => items::procedure_def(p),
-            Some(TokenKind::KwFunction) => items::function_def(p),
-            Some(TokenKind::KwVar) => items::var_declaration(p),
-            Some(TokenKind::PreRegion) => preprocessor_region(p),
-            Some(TokenKind::PreIf) => preprocessor_if(p),
-            Some(TokenKind::PreDelete) => preprocessor_delete(p),
-            Some(TokenKind::PreInsert) => preprocessor_insert(p),
-            Some(TokenKind::AnnAtClient)
-            | Some(TokenKind::AnnAtServer)
-            | Some(TokenKind::AnnAtServerNoContext)
-            | Some(TokenKind::AnnAtClientAtServer)
-            | Some(TokenKind::AnnAtClientAtServerNoContext) => {
-                annotated_item(p);
-            }
-            Some(TokenKind::AnnBefore)
-            | Some(TokenKind::AnnAfter)
-            | Some(TokenKind::AnnAround)
-            | Some(TokenKind::AnnChangeAndValidate)
-            | Some(TokenKind::AnnCustom) => {
-                annotated_item(p);
-            }
-            _ => {
-                statements::statement(p);
-            }
-        }
-    }
-
-    p.eat(TokenKind::PreEndRegion);
+/// `#КонецОбласти` is a flat folding marker. See [`preprocessor_region`].
+pub(super) fn preprocessor_end_region(p: &mut Parser) {
+    let m = p.start();
+    p.bump();
     m.complete(p, NodeKind::PreRegionDir);
 }
 
@@ -241,6 +229,7 @@ fn preproc_content(p: &mut Parser) {
             Some(TokenKind::KwFunction) => items::function_def(p),
             Some(TokenKind::KwVar) => items::var_declaration(p),
             Some(TokenKind::PreRegion) => preprocessor_region(p),
+            Some(TokenKind::PreEndRegion) => preprocessor_end_region(p),
             Some(TokenKind::PreIf) => preprocessor_if(p),
             Some(TokenKind::PreDelete) => preprocessor_delete(p),
             Some(TokenKind::PreInsert) => preprocessor_insert(p),

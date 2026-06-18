@@ -59,6 +59,7 @@ pub fn statement(p: &mut Parser) {
         Some(TokenKind::KwRemoveHandler) => remove_handler_stmt(p),
         Some(TokenKind::KwVar) => super::items::var_declaration(p),
         Some(TokenKind::PreRegion) => super::preprocessor_region(p),
+        Some(TokenKind::PreEndRegion) => super::preprocessor_end_region(p),
         Some(TokenKind::PreIf) => super::preprocessor_if(p),
         Some(TokenKind::PreDelete) => super::preprocessor_delete(p),
         Some(TokenKind::PreInsert) => super::preprocessor_insert(p),
