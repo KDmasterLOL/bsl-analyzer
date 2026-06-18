@@ -13,7 +13,9 @@ use super::helpers::{
 pub(crate) struct MdoProperties {
     pub name: String,
     pub code_length: Option<u32>,
+    pub code_type: Option<String>,
     pub number_length: Option<u32>,
+    pub number_type: Option<String>,
     pub description_length: Option<u32>,
     pub hierarchical: bool,
     pub owners: Vec<String>,
@@ -27,7 +29,9 @@ impl MdoProperties {
     pub(crate) fn from_node(props_node: roxmltree::Node<'_, '_>) -> Self {
         let name = child_text(props_node, "Name").unwrap_or("").to_string();
         let code_length = child_u32(props_node, "CodeLength");
+        let code_type = child_text(props_node, "CodeType").map(|s| s.to_string());
         let number_length = child_u32(props_node, "NumberLength");
+        let number_type = child_text(props_node, "NumberType").map(|s| s.to_string());
         let description_length = child_u32(props_node, "DescriptionLength");
         let hierarchical = child_bool(props_node, "Hierarchical");
         let check_unique = child_bool(props_node, "CheckUnique");
@@ -51,7 +55,9 @@ impl MdoProperties {
         MdoProperties {
             name,
             code_length,
+            code_type,
             number_length,
+            number_type,
             description_length,
             hierarchical,
             owners,
@@ -85,6 +91,18 @@ fn condition_satisfied(cond: PresenceCondition, p: &MdoProperties) -> bool {
     }
 }
 
+/// `CodeType` / `NumberType` carry the localized-agnostic platform token `Number`
+/// (the alternative being `String`, the default).
+fn is_numeric_kind(kind: Option<&str>) -> bool {
+    kind == Some("Number")
+}
+
+/// An integer code/number has no fractional part; its digit count is the precision.
+fn numeric_attr_type(length: Option<u32>) -> AttributeType {
+    let precision = length.unwrap_or(0).min(u8::MAX as u32) as u8;
+    AttributeType::Number { precision, scale: 0 }
+}
+
 fn build_attr_type(spec: &StandardAttrSpec, p: &MdoProperties, mdo_type: MdoType) -> AttributeType {
     match spec.value {
         AttrValueKind::Boolean => AttributeType::Boolean,
@@ -95,9 +113,22 @@ fn build_attr_type(spec: &StandardAttrSpec, p: &MdoProperties, mdo_type: MdoType
                 StandardKind::Description => p.description_length,
                 _ => None,
             };
-            AttributeType::String { length }
+            // A catalog's `Код` is `Строка` by default, but `CodeType = Number` makes it a
+            // `Число` — `ЧислоПрописью(Объект.Код, …)` is well-typed only in that case.
+            if spec.kind == StandardKind::Code && is_numeric_kind(p.code_type.as_deref()) {
+                numeric_attr_type(length)
+            } else {
+                AttributeType::String { length }
+            }
         }
-        AttrValueKind::StringNumber => AttributeType::String { length: p.number_length },
+        // A document's `Номер` follows `NumberType` the same way `Код` follows `CodeType`.
+        AttrValueKind::StringNumber => {
+            if is_numeric_kind(p.number_type.as_deref()) {
+                numeric_attr_type(p.number_length)
+            } else {
+                AttributeType::String { length: p.number_length }
+            }
+        }
         AttrValueKind::StringUnbounded => AttributeType::String { length: None },
         AttrValueKind::NumberLineNumber => AttributeType::Number { precision: 10, scale: 0 },
         AttrValueKind::SelfRef => AttributeType::Ref { mdo_type, name: p.name.clone() },
