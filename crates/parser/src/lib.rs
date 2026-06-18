@@ -85,6 +85,29 @@ mod tests {
         assert!(!parse.has_errors());
     }
 
+    fn assert_parses(code: &str) {
+        let parse = parse(code);
+        if parse.has_errors() {
+            for e in parse.errors() {
+                eprintln!("parse error: {e:?}");
+            }
+            panic!("valid 1C code must parse without errors:\n{code}");
+        }
+    }
+
+    // Date literals carry optional separators and a time component; assignments
+    // using them must parse cleanly (see lexer `Date` token).
+
+    #[test]
+    fn iso_datetime_literal_assignment_parses() {
+        assert_parses("Процедура П()\n\tВремяНачала = '0001-01-01 09:00:00';\nКонецПроцедуры\n");
+    }
+
+    #[test]
+    fn digits_spaced_time_literal_assignment_parses() {
+        assert_parses("Процедура П()\n\tВремяНачала = '00010101 22:00';\nКонецПроцедуры\n");
+    }
+
     #[test]
     #[ignore]
     fn test_event_balance_large_file() {
