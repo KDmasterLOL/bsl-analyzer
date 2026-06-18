@@ -130,6 +130,60 @@ fn test_lower_if_stmt() {
 }
 
 #[test]
+fn statements_inside_region_are_lowered() {
+    // Flat region markers must not swallow the statements between them.
+    let method = parse_method(
+        "Процедура Тест()
+            #Область Р
+            А = 1;
+            Б = 2;
+            #КонецОбласти
+        КонецПроцедуры",
+    );
+    let result = lower_method(&method, false);
+
+    assert_eq!(result.body.body_stmts.len(), 2, "both assignments must reach the HIR body");
+    for &id in result.body.body_stmts.iter() {
+        assert!(matches!(result.body.stmt_idx(id), Stmt::Assign { .. }));
+    }
+}
+
+#[test]
+fn region_crossing_if_keeps_if_in_hir() {
+    let method = parse_method(
+        "Процедура Тест()
+            #Область Р
+            Если Истина Тогда
+                А = 1;
+            #КонецОбласти
+            КонецЕсли;
+        КонецПроцедуры",
+    );
+    let result = lower_method(&method, false);
+
+    assert_eq!(result.body.body_stmts.len(), 1);
+    assert!(matches!(result.body.stmt_idx(result.body.body_stmts[0]), Stmt::If { .. }));
+}
+
+#[test]
+fn function_return_inside_region_is_seen() {
+    // A trailing region marker after Возврат must not hide the return.
+    let method = parse_method(
+        "Функция Тест()
+            #Область Р
+            Возврат 1;
+            #КонецОбласти
+        КонецФункции",
+    );
+    let result = lower_method(&method, true);
+
+    assert!(!result
+        .diagnostics
+        .iter()
+        .any(|d| matches!(d, BodyDiagnostic::FunctionShouldHaveReturn { .. })));
+}
+
+#[test]
 fn test_sdbl_collected_in_hir() {
     let method = parse_method(
         r#"

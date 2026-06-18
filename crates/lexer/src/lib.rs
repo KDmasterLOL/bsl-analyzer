@@ -287,10 +287,13 @@ pub enum TokenKind {
     #[regex(r#"\|([^"\n\r]|"")*"#, priority = 2)]
     StringPart,
 
-    #[regex(r"'[0-9]{8,14}'")]
-    #[regex(r"'[0-9]{4}-[0-9]{2}-[0-9]{2}'")]
-    #[regex(r"'[0-9]{4}\.[0-9]{2}\.[0-9]{2}( [0-9]{2}:[0-9]{2}\.[0-9]{2})?'")]
-    #[regex(r"'[0-9]{4},[0-9]{2},[0-9]{2}'")]
+    // In BSL single quotes delimit date literals exclusively. The 1C platform
+    // lexes them liberally: digits with optional separators (`- . , :` and
+    // space) in any of the date/datetime forms (`'YYYYMMDDHHMMSS'`,
+    // `'YYYY-MM-DD HH:MM:SS'`, `'YYYY.MM.DD HH:MM:SS'`, ...), and the empty
+    // literal `''` denotes the blank date. Recognise the token shape here;
+    // validating the actual date value belongs to a diagnostic, not the lexer.
+    #[regex(r"'[0-9.,: -]*'")]
     Date,
 
     #[regex(r"[_\p{L}][_\p{L}0-9]*", priority = 1)]
@@ -491,6 +494,39 @@ mod tests {
     fn test_datetime_literal() {
         let tokens = tokenize("'20240101120000'");
         assert_eq!(tokens[0].kind, TokenKind::Date);
+    }
+
+    #[test]
+    fn test_iso_datetime_literal() {
+        let tokens = tokenize("'0001-01-01 09:00:00'");
+        assert_eq!(tokens[0].kind, TokenKind::Date);
+        assert_eq!(tokens.len(), 1);
+    }
+
+    #[test]
+    fn test_digits_with_spaced_time_literal() {
+        let tokens = tokenize("'00010101 22:00'");
+        assert_eq!(tokens[0].kind, TokenKind::Date);
+        assert_eq!(tokens.len(), 1);
+    }
+
+    #[test]
+    fn test_empty_date_literal() {
+        let tokens = tokenize("''");
+        assert_eq!(tokens[0].kind, TokenKind::Date);
+    }
+
+    #[test]
+    fn test_date_literal_adjacent_to_operator() {
+        let tokens = tokenize("'00010101'+1");
+        let kinds: Vec<_> = tokens.iter().map(|t| t.kind).collect();
+        assert_eq!(kinds, vec![TokenKind::Date, TokenKind::Plus, TokenKind::Decimal]);
+    }
+
+    #[test]
+    fn test_apostrophe_inside_multiline_string_is_not_date() {
+        let tokens = tokenize("\"a\n|'text'\"");
+        assert!(tokens.iter().all(|t| t.kind != TokenKind::Date));
     }
 
     #[test]

@@ -175,6 +175,18 @@ mod tests {
     }
 
     #[test]
+    fn test_region_marker_crossing_if_is_stable() {
+        // A region whose #КонецОбласти sits inside the Если body (crossing the
+        // control-flow boundary) must format without corrupting the code:
+        // idempotent and still parses cleanly.
+        let code = "Процедура П()\n#Область Р\nЕсли А Тогда\nБ = 1;\n#КонецОбласти\nКонецЕсли;\nКонецПроцедуры";
+        let once = format(code);
+        let twice = format(&once);
+        assert_eq!(once, twice, "formatting must be idempotent");
+        assert!(!parser::parse(&once).has_errors(), "formatted output must still parse");
+    }
+
+    #[test]
     fn test_trim_trailing_whitespace() {
         let code = "Процедура Тест()   \nКонецПроцедуры  ";
         let formatted = format(code);

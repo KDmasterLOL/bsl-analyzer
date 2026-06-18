@@ -1,5 +1,5 @@
 use crate::baseline::{ConfiguredBaselineStatus, ExternalBaselineService, ExternalBaselineState};
-use crate::state::{SemanticRuntimeStatus, WorkspaceSearchMode};
+use crate::state::{OverlayWarmupState, SemanticRuntimeStatus, WorkspaceSearchMode};
 use crate::tools::response::structured;
 use bsl_search::{
     fuse_smart, lexical_hits_for_resolved_view, merge_context_for_collection, merge_lexical,
@@ -49,6 +49,10 @@ enum SemanticUnavailable {
     /// was indexed with, so its query vectors cannot be compared against the stored ones. The
     /// carried string names both identities and the env/config knobs to reconcile them.
     IdentityMismatch(String),
+    /// Embedding the query failed at request time (timeout, network, or upstream error). The
+    /// embedder is configured but did not answer for this query, so semantic cannot serve it;
+    /// lexical results stand on their own and the carried detail explains the transient cause.
+    EmbedderUnavailable(String),
 }
 
 impl SemanticUnavailable {
@@ -65,6 +69,9 @@ impl SemanticUnavailable {
                 "semantic skipped: requires PostgreSQL baseline serving".to_owned()
             }
             Self::IdentityMismatch(message) => message.clone(),
+            Self::EmbedderUnavailable(detail) => {
+                format!("semantic skipped: embedder unavailable ({detail})")
+            }
         }
     }
 }
@@ -345,11 +352,20 @@ fn semantic_code_hits(
         return Ok(CodeHits::Unavailable(SemanticUnavailable::BaselineRequired));
     }
 
-    let hits = engine
-        .search(query, limit, Some("code"))
-        .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?;
     let workspace_root = engine.workspace_root().map(Path::to_path_buf);
-    Ok(CodeHits::Ready { hits, workspace_root })
+    match engine.search(query, limit, Some("code")) {
+        Ok(hits) => Ok(CodeHits::Ready { hits, workspace_root }),
+        // The query embed is a request-time call to a remote embedder on the hot path of every
+        // search. When it times out or transiently fails, degrade to the lexical hits the caller
+        // already has rather than failing the whole tool, mirroring the external-baseline path
+        // (`try_direct_semantic_code` treats an embed failure as `Unavailable`). A non-embedder
+        // error means the local index itself is broken, which is worth surfacing as a hard error.
+        Err(SearchError::Embedder(detail)) => {
+            warn!("local semantic: query embed failed, degrading to lexical: {detail}");
+            Ok(CodeHits::Unavailable(SemanticUnavailable::EmbedderUnavailable(detail)))
+        }
+        Err(e) => Err(McpError::internal_error(format!("search error: {e}"), None)),
+    }
 }
 
 /// Append live indexing progress to a "still building" message so the failed `search_code`
@@ -898,10 +914,84 @@ pub fn search_status(
     progress: &Arc<IndexProgress>,
     semantic_runtime: &Arc<Mutex<SemanticRuntimeStatus>>,
     workspace_search_mode: WorkspaceSearchMode,
+    overlay_warmup: OverlayWarmupState,
     configured_baseline: Option<ConfiguredBaselineStatus>,
     external_baseline: Option<Arc<ExternalBaselineService>>,
 ) -> Result<CallToolResult, McpError> {
+    // The 30s cap mirrors `try_acquire_engine`: status degrades to a "busy" note rather than
+    // hanging to the MCP client timeout when a long operation holds the engine.
+    search_status_with_cap(
+        engine,
+        progress,
+        semantic_runtime,
+        workspace_search_mode,
+        overlay_warmup,
+        configured_baseline,
+        external_baseline,
+        std::time::Duration::from_secs(30),
+    )
+}
+
+/// The status body, parameterized over the engine-acquire cap so tests can drive the timeout
+/// (busy) branch without a 30-second sleep. Production goes through [`search_status`].
+// Each argument is a distinct status input (engine, progress, runtime status, mode, warmup
+// outcome, baselines) plus the test-only acquire cap; bundling them into a context struct would
+// only rename the same fields, so the one-over-limit arity is accepted here.
+#[allow(clippy::too_many_arguments)]
+fn search_status_with_cap(
+    engine: &Arc<Mutex<Option<SearchEngine>>>,
+    progress: &Arc<IndexProgress>,
+    semantic_runtime: &Arc<Mutex<SemanticRuntimeStatus>>,
+    workspace_search_mode: WorkspaceSearchMode,
+    overlay_warmup: OverlayWarmupState,
+    configured_baseline: Option<ConfiguredBaselineStatus>,
+    external_baseline: Option<Arc<ExternalBaselineService>>,
+    engine_acquire_cap: std::time::Duration,
+) -> Result<CallToolResult, McpError> {
     let mut out = String::new();
+
+    let semantic_runtime = semantic_runtime
+        .lock()
+        .map_err(|e| McpError::internal_error(format!("semantic runtime lock error: {e}"), None))?
+        .clone();
+    // Cap the wait so status never hangs to the MCP client timeout while the overlay warmup or a
+    // peer search holds the engine. On a genuine stall we still report the baseline + runtime
+    // sections (which need no engine lock) and note the local index as busy.
+    let guard = match acquire_engine_within(
+        engine,
+        engine_acquire_cap,
+        std::time::Duration::from_millis(25),
+    ) {
+        Ok(g) => Some(g),
+        Err(AcquireFailure::Poisoned) => return Err(engine_lock_poisoned_error()),
+        Err(AcquireFailure::TimedOut) => None,
+    };
+    let engine_busy = guard.is_none();
+    // Drive the summary's lexical-availability claim off the real engine state: "ready" only when
+    // the engine is published and not held, so status never tells the agent the local index is
+    // live while it is still building or a long operation holds the lock.
+    let engine_state = if engine_busy {
+        SummaryEngineState::Busy
+    } else if guard.as_ref().is_some_and(|g| g.as_ref().is_some()) {
+        SummaryEngineState::Ready
+    } else {
+        SummaryEngineState::Building
+    };
+
+    // Prepend a plain-language summary an agent can act on directly: the detailed field list
+    // below is precise but hard to interpret, and a bare `Ready` + empty overlay is ambiguous
+    // between "no local diffs" and "warmup failed". Synthesized from the runtime status, the
+    // workspace mode, the overlay warmup outcome, the engine readiness, and whether a published
+    // baseline is present.
+    write_summary_block(
+        &mut out,
+        &semantic_runtime,
+        &workspace_search_mode,
+        &overlay_warmup,
+        configured_baseline.as_ref(),
+        external_baseline.as_ref(),
+        engine_state,
+    );
 
     if let Some(configured_baseline) = configured_baseline.as_ref() {
         let _ = writeln!(out, "Configured baseline:");
@@ -927,14 +1017,7 @@ pub fn search_status(
         let _ = writeln!(out);
     }
 
-    let semantic_runtime = semantic_runtime
-        .lock()
-        .map_err(|e| McpError::internal_error(format!("semantic runtime lock error: {e}"), None))?
-        .clone();
-    let guard =
-        engine.lock().map_err(|e| McpError::internal_error(format!("lock error: {e}"), None))?;
-
-    if let Some(engine) = guard.as_ref() {
+    if let Some(engine) = guard.as_ref().and_then(|g| g.as_ref()) {
         let files = engine.file_count().unwrap_or(0);
         let chunks = engine.chunk_count().unwrap_or(0);
         let vectors = engine.vector_count();
@@ -1106,6 +1189,8 @@ pub fn search_status(
             );
             let _ = writeln!(out, "  Pending dirty paths: {}", overlay.pending_dirty_paths);
         }
+    } else if engine_busy {
+        let _ = writeln!(out, "Local index: busy (overlay syncing)");
     } else {
         let _ = writeln!(out, "Search index: building (background initialization in progress)");
     }
@@ -1131,7 +1216,7 @@ pub fn search_status(
                 }
                 match external_baseline.corpus() {
                     bsl_search::CorpusId::WorkspaceCode => {
-                        if let Some(engine) = guard.as_ref() {
+                        if let Some(engine) = guard.as_ref().and_then(|g| g.as_ref()) {
                             match external_baseline.resolve_workspace_view(engine) {
                                 Ok(Some(view)) => {
                                     let resolved_files: HashSet<&str> = view
@@ -1213,7 +1298,9 @@ pub fn search_status(
     // Live counters are shown ONLY while `active` (a build is genuinely counting); an
     // inactive build object can hold stale totals from a finished/failed attempt (it is
     // never reset()), so we report a phase line instead of misleading numbers.
-    let index_building = guard.as_ref().is_none();
+    // Genuinely building = we hold the lock but the engine is not yet published. A busy timeout
+    // (no guard) is reported separately above as "Local index: busy", not as initializing.
+    let index_building = guard.as_ref().is_some_and(|g| g.is_none());
     if progress.is_active() {
         let total = progress.total_chunks.load(Ordering::Relaxed);
         let done = progress.done_chunks.load(Ordering::Relaxed);
@@ -1594,6 +1681,113 @@ fn format_baseline_ref(baseline: &bsl_search::BaselineRef) -> String {
     format!("latest {}", baseline.corpus.as_str())
 }
 
+/// Write the plain-language Summary block an LLM agent reads first. It states, in three to four
+/// short lines: what the working tree of lexical search reflects, where semantic ([S]) results
+/// come from, and the overlay warmup outcome (so "no local diffs" is never confused with a failed
+/// warmup). All ASCII so the output stays portable across terminals.
+/// Engine readiness for the summary's lexical-availability line, derived from the (capped) engine
+/// acquire: `Ready` only when the engine is published and the lock was obtained, so status never
+/// claims the local index is live while it is still building or a long operation holds the lock.
+enum SummaryEngineState {
+    Ready,
+    Busy,
+    Building,
+}
+
+fn write_summary_block(
+    out: &mut String,
+    semantic_runtime: &SemanticRuntimeStatus,
+    workspace_search_mode: &WorkspaceSearchMode,
+    overlay_warmup: &OverlayWarmupState,
+    configured_baseline: Option<&ConfiguredBaselineStatus>,
+    external_baseline: Option<&Arc<ExternalBaselineService>>,
+    engine_state: SummaryEngineState,
+) {
+    // Reference profile = an external docs baseline (no local workspace code overlay). Its wording
+    // differs: it indexes reference docs, not a working tree, and has no local overlay to (re)build.
+    let is_reference = external_baseline
+        .is_some_and(|source| matches!(source.corpus(), bsl_search::CorpusId::Reference));
+    let has_baseline = external_baseline.is_some();
+    let is_overlay_mode =
+        matches!(workspace_search_mode, WorkspaceSearchMode::PostgresRemoteOverlay);
+
+    let _ = writeln!(out, "Summary:");
+
+    let lexical_line = match engine_state {
+        SummaryEngineState::Busy => {
+            "temporarily unavailable - a background operation holds the index; retry shortly."
+        }
+        SummaryEngineState::Building => "index still building; not ready yet.",
+        SummaryEngineState::Ready if is_reference => {
+            "reference docs index (platform documentation)."
+        }
+        SummaryEngineState::Ready => {
+            "reflects the current working tree (baseline committed code + live local edits via the file watcher)."
+        }
+    };
+    let _ = writeln!(out, "  Lexical search: {lexical_line}");
+
+    let baseline_selection =
+        configured_baseline.map(|b| b.selection.as_str()).unwrap_or("configured");
+    let semantic_line = match (semantic_runtime, workspace_search_mode) {
+        (SemanticRuntimeStatus::Disabled, _) => "not configured (set EMBEDDING_URL).".to_owned(),
+        (SemanticRuntimeStatus::Failed(_), _) => {
+            "baseline available; semantic runtime reported a failure (see below).".to_owned()
+        }
+        (SemanticRuntimeStatus::OverlaySyncing, _) => {
+            "baseline available; local overlay still syncing.".to_owned()
+        }
+        (SemanticRuntimeStatus::Indexing, _) => {
+            "local semantic index building in background.".to_owned()
+        }
+        (SemanticRuntimeStatus::Ready, WorkspaceSearchMode::PostgresRemoteOverlay) => {
+            format!("served from the {baseline_selection} baseline (published index).")
+        }
+        (SemanticRuntimeStatus::Ready, WorkspaceSearchMode::SqliteLocal) => {
+            if has_baseline {
+                format!("served from the {baseline_selection} baseline (published index).")
+            } else {
+                "local semantic index.".to_owned()
+            }
+        }
+    };
+    let _ = writeln!(out, "  Semantic ([S]) search: {semantic_line}");
+
+    // The local overlay (and its startup-rebuild note) only exist in PostgresRemoteOverlay mode.
+    // For SqliteLocal / reference profiles there is no remote baseline to overlay, so `Pending`
+    // there is the permanent initial value, not an in-progress sync - omit the line entirely.
+    if is_overlay_mode {
+        // `OverlaySyncing` lives in the runtime status, not the warmup outcome; surface it here so
+        // the line is never stale-`Pending` while the runtime says the sync is in flight.
+        let overlay_line = if matches!(semantic_runtime, SemanticRuntimeStatus::OverlaySyncing) {
+            "building (indexing local diffs against the baseline)...".to_owned()
+        } else {
+            match overlay_warmup {
+                OverlayWarmupState::Pending => {
+                    "building (indexing local diffs against the baseline)...".to_owned()
+                }
+                OverlayWarmupState::NoLocalDiffs => {
+                    "none needed - working tree matches the baseline, so [S] comes entirely from the baseline.".to_owned()
+                }
+                OverlayWarmupState::Synced { overlay_files, embedded } => format!(
+                    "{overlay_files} locally-changed file(s) indexed ({embedded} chunks); their [S] reflects local edits."
+                ),
+                OverlayWarmupState::Failed(reason) => format!(
+                    "not built (warmup failed: {reason}); [S] still served by the baseline. Restart MCP to retry overlay embedding."
+                ),
+                OverlayWarmupState::Skipped(reason) => format!("disabled ({reason})."),
+            }
+        };
+        let _ = writeln!(out, "  Local overlay semantic: {overlay_line}");
+        let _ = writeln!(
+            out,
+            "  Note: local-only edits are searchable lexically immediately; their semantic index is (re)built at MCP startup."
+        );
+    }
+
+    let _ = writeln!(out);
+}
+
 fn shorten_fingerprint(fingerprint: &str) -> &str {
     fingerprint.get(..12).unwrap_or(fingerprint)
 }
@@ -1607,11 +1801,11 @@ mod tests {
         ExternalBaselineService, SemanticRuntimeStatus, SemanticUnavailable,
     };
     use crate::baseline::RefreshableExternalBaselineSource;
-    use crate::state::WorkspaceSearchMode;
+    use crate::state::{OverlayWarmupState, WorkspaceSearchMode};
     use bsl_search::{
-        lexical_hits_for_resolved_view, BaselineRef, CorpusId, Document, FusedHit, IndexProgress,
-        IndexedDocument, LexicalHit, Modality, ResolvedView, SearchEngine, SearchError,
-        SemanticHit,
+        lexical_hits_for_resolved_view, BaselineRef, CorpusId, Document, EmbedderConfig, FusedHit,
+        IndexProgress, IndexedDocument, LexicalHit, Modality, ResolvedView, SearchConfig,
+        SearchEngine, SearchError, SemanticHit,
     };
     use project_model::{
         ResolvedWorkspaceBaselineSupport, SearchBaselineSupportState, SearchPostgresConfig,
@@ -1911,6 +2105,7 @@ mod tests {
             &Arc::new(IndexProgress::default()),
             &Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
             WorkspaceSearchMode::SqliteLocal,
+            OverlayWarmupState::Pending,
             Some(ConfiguredBaselineStatus {
                 backend: "sqlite",
                 selection: "local workspace index".to_owned(),
@@ -1950,6 +2145,7 @@ mod tests {
             &Arc::new(IndexProgress::default()),
             &Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
             WorkspaceSearchMode::PostgresRemoteOverlay,
+            OverlayWarmupState::Pending,
             Some(ConfiguredBaselineStatus {
                 backend: "postgres",
                 selection: "branch main".to_owned(),
@@ -1992,6 +2188,7 @@ mod tests {
             &Arc::new(IndexProgress::default()),
             &Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
             WorkspaceSearchMode::SqliteLocal,
+            OverlayWarmupState::Pending,
             Some(ConfiguredBaselineStatus {
                 backend: "sqlite",
                 selection: "local reference index".to_owned(),
@@ -2234,6 +2431,43 @@ mod tests {
     }
 
     #[test]
+    fn semantic_core_degrades_to_lexical_when_query_embed_fails() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("workspace-search.db");
+        // The engine has semantic configured, but the embedder points at a closed port so the
+        // request-time query embed fails fast (connection refused) — standing in for a remote
+        // embedder timeout on the hot path of a SqliteLocal search.
+        let config = SearchConfig {
+            embedder: EmbedderConfig {
+                base_url: "http://127.0.0.1:1".to_owned(),
+                model: "test-model".to_owned(),
+                dim: Some(8),
+                api_key: None,
+                provider: None,
+            },
+            ..SearchConfig::default()
+        };
+        let engine = Arc::new(Mutex::new(Some(SearchEngine::new(&db_path, config).unwrap())));
+        let outcome = semantic_code_hits(
+            &engine,
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::Ready)),
+            WorkspaceSearchMode::SqliteLocal,
+            None,
+            None,
+            "обработка проведения документа",
+            10,
+        )
+        .unwrap();
+
+        // A request-time embed failure is a soft shortfall the hybrid path degrades past (lexical
+        // hits still serve), not a hard tool error.
+        assert!(matches!(
+            outcome,
+            CodeHits::Unavailable(SemanticUnavailable::EmbedderUnavailable(_))
+        ));
+    }
+
+    #[test]
     fn hybrid_serves_lexical_while_semantic_indexing() {
         let dir = tempdir().unwrap();
         let workspace = dir.path();
@@ -2387,6 +2621,7 @@ mod tests {
             &progress,
             &Arc::new(Mutex::new(SemanticRuntimeStatus::OverlaySyncing)),
             WorkspaceSearchMode::PostgresRemoteOverlay,
+            OverlayWarmupState::Pending,
             Some(ConfiguredBaselineStatus {
                 backend: "postgres",
                 selection: "branch develop".to_owned(),
@@ -2411,6 +2646,63 @@ mod tests {
     }
 
     #[test]
+    fn search_status_summary_block_is_self_explanatory() {
+        // The overlay/semantic summary lines are driven by the runtime and warmup state, not the
+        // engine snapshot, so a `None` engine is enough to exercise them. They must let an agent
+        // tell "no local diffs" from "warmup failed" and read back the synced file/chunk counts,
+        // without parsing the detailed field list below.
+        let postgres_baseline = || {
+            Some(ConfiguredBaselineStatus {
+                backend: "postgres",
+                selection: "branch develop".to_owned(),
+                issue: None,
+                support: None,
+            })
+        };
+        let run = |warmup: OverlayWarmupState| {
+            search_status(
+                &Arc::new(Mutex::new(None)),
+                &Arc::new(IndexProgress::default()),
+                &Arc::new(Mutex::new(SemanticRuntimeStatus::Ready)),
+                WorkspaceSearchMode::PostgresRemoteOverlay,
+                warmup,
+                postgres_baseline(),
+                None,
+            )
+            .unwrap()
+            .content[0]
+                .raw
+                .as_text()
+                .expect("text content")
+                .text
+                .clone()
+        };
+
+        let no_diffs = run(OverlayWarmupState::NoLocalDiffs);
+        assert!(no_diffs.starts_with("Summary:"), "summary must lead the output: {no_diffs}");
+        assert!(
+            no_diffs.contains("served from the branch develop baseline (published index)."),
+            "ready+postgres must name the baseline: {no_diffs}"
+        );
+        assert!(
+            no_diffs.contains("working tree matches the baseline"),
+            "NoLocalDiffs must explain [S] comes from the baseline: {no_diffs}"
+        );
+
+        let failed = run(OverlayWarmupState::Failed("embedder timeout: global".to_owned()));
+        assert!(
+            failed.contains("warmup failed: embedder timeout: global"),
+            "Failed must surface the reason: {failed}"
+        );
+
+        let synced = run(OverlayWarmupState::Synced { overlay_files: 2, embedded: 5 });
+        assert!(
+            synced.contains("2 locally-changed file(s) indexed (5 chunks)"),
+            "Synced must report file/chunk counts: {synced}"
+        );
+    }
+
+    #[test]
     fn search_status_emits_progress_signal_while_building() {
         // Engine not built yet (guard is None) and no active re-index: the status must carry
         // an honest progress signal — a "pending" phase line — never a bare "building" line a
@@ -2424,6 +2716,7 @@ mod tests {
             &progress,
             &Arc::new(Mutex::new(SemanticRuntimeStatus::Ready)),
             WorkspaceSearchMode::SqliteLocal,
+            OverlayWarmupState::Pending,
             None,
             None,
         )
@@ -2600,6 +2893,68 @@ mod tests {
         );
         assert!(matches!(outcome, Err(super::AcquireFailure::Poisoned)));
         assert!(started.elapsed() < Duration::from_secs(1), "poison must not block on the cap");
+    }
+
+    #[test]
+    fn search_status_returns_promptly_with_busy_note_when_engine_lock_is_held() {
+        use std::sync::Barrier;
+        use std::time::{Duration, Instant};
+
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("bsl-search.db");
+        let engine = Arc::new(Mutex::new(Some(SearchEngine::fts_only(&db_path).unwrap())));
+
+        // A peer thread holds the engine lock for the whole call, as the overlay warmup's publish
+        // (or a slow embed) would. `search_status` must not block to the MCP client timeout: with
+        // a short acquire cap it gives up on the local snapshot, emits the lock-free baseline
+        // section plus a busy note, and returns well within the cap-plus-margin window.
+        let gate = Arc::new(Barrier::new(2));
+        let holder = {
+            let engine = Arc::clone(&engine);
+            let gate = Arc::clone(&gate);
+            std::thread::spawn(move || {
+                let held = engine.lock().unwrap();
+                gate.wait();
+                std::thread::sleep(Duration::from_millis(300));
+                drop(held);
+            })
+        };
+        gate.wait();
+
+        let started = Instant::now();
+        let status = super::search_status_with_cap(
+            &engine,
+            &Arc::new(IndexProgress::default()),
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::OverlaySyncing)),
+            WorkspaceSearchMode::PostgresRemoteOverlay,
+            OverlayWarmupState::Pending,
+            Some(ConfiguredBaselineStatus {
+                backend: "postgres",
+                selection: "branch main".to_owned(),
+                issue: None,
+                support: None,
+            }),
+            None,
+            Duration::from_millis(40),
+        )
+        .unwrap();
+        let elapsed = started.elapsed();
+        holder.join().unwrap();
+
+        assert!(elapsed < Duration::from_secs(2), "status must not hang on the lock: {elapsed:?}");
+        let text = status.content[0].raw.as_text().expect("text content").text.as_str();
+        assert!(text.contains("Configured baseline:"), "baseline section present: {text}");
+        assert!(text.contains("Local index: busy (overlay syncing)"), "busy note present: {text}");
+        // The summary must not claim the index is live while the lock is held: with the engine
+        // busy, the lexical line degrades rather than asserting "reflects the current working tree".
+        assert!(
+            text.contains("Lexical search: temporarily unavailable"),
+            "summary lexical line reflects busy engine: {text}"
+        );
+        assert!(
+            !text.contains("Lexical search: reflects the current working tree"),
+            "summary must not claim the working tree is live while busy: {text}"
+        );
     }
 
     #[test]

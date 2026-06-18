@@ -1,11 +1,9 @@
 use syntax::{SyntaxKind, SyntaxNode};
 use text_size::TextRange;
 
-use crate::hir::{PreprocIfStmt, Stmt, StmtIdx};
+use crate::hir::{PreprocIfStmt, Stmt};
 
-use super::control_flow::{
-    if_all_branches_terminate, is_control_flow_terminator, is_statement_node, stmt_list_terminates,
-};
+use super::control_flow::is_statement_node;
 use super::stmt::lower_stmt;
 use super::LoweringCtx;
 
@@ -62,41 +60,6 @@ fn get_directive_header_range(node: &SyntaxNode) -> TextRange {
     }
 }
 
-pub(crate) fn lower_region_stmts(
-    ctx: &mut LoweringCtx,
-    region_node: &SyntaxNode,
-) -> (Vec<StmtIdx>, bool) {
-    let mut stmts: Vec<StmtIdx> = Vec::new();
-
-    for child in region_node.children() {
-        if child.kind() == SyntaxKind::PRE_IF_DIR {
-            if let Some(stmt) = lower_preproc_if(ctx, &child) {
-                let stmt_id = ctx.alloc_stmt(stmt, child.text_range());
-                stmts.push(stmt_id);
-            }
-            continue;
-        }
-
-        if child.kind() == SyntaxKind::PRE_REGION_DIR {
-            let (nested_stmts, _nested_terminates) = lower_region_stmts(ctx, &child);
-            stmts.extend(nested_stmts);
-            continue;
-        }
-
-        if !is_statement_node(&child) {
-            continue;
-        }
-
-        if let Some(stmt_id) = lower_stmt(ctx, &child) {
-            stmts.push(stmt_id);
-        }
-    }
-
-    let terminates = preproc_region_terminates(region_node);
-
-    (stmts, terminates)
-}
-
 fn lower_preproc_branch_stmts(
     ctx: &mut LoweringCtx,
     branch_node: &SyntaxNode,
@@ -121,12 +84,7 @@ fn lower_preproc_branch_stmts(
             continue;
         }
 
-        if child.kind() == SyntaxKind::PRE_REGION_DIR {
-            let (region_stmts, _region_terminates) = lower_region_stmts(ctx, &child);
-            stmts.extend(region_stmts);
-            continue;
-        }
-
+        // Flat region markers are skipped; their statements are siblings here.
         if !is_statement_node(&child) {
             continue;
         }
@@ -137,76 +95,4 @@ fn lower_preproc_branch_stmts(
     }
 
     stmts
-}
-
-pub(crate) fn preproc_if_all_branches_terminate(node: &SyntaxNode) -> bool {
-    let has_else = node.children().any(|n| n.kind() == SyntaxKind::PRE_ELSE_CLAUSE);
-    if !has_else {
-        return false;
-    }
-
-    if !preproc_branch_terminates(node) {
-        return false;
-    }
-
-    for elsif in node.children().filter(|n| n.kind() == SyntaxKind::PRE_ELSIF_CLAUSE) {
-        if !preproc_branch_terminates(&elsif) {
-            return false;
-        }
-    }
-
-    let else_clause = node.children().find(|n| n.kind() == SyntaxKind::PRE_ELSE_CLAUSE);
-    if let Some(else_node) = else_clause {
-        if !preproc_branch_terminates(&else_node) {
-            return false;
-        }
-    }
-
-    true
-}
-
-fn preproc_branch_terminates(branch: &SyntaxNode) -> bool {
-    let last = branch
-        .children()
-        .filter(|n| {
-            is_statement_node(n)
-                || n.kind() == SyntaxKind::PRE_IF_DIR
-                || n.kind() == SyntaxKind::PRE_REGION_DIR
-                || n.kind() == SyntaxKind::STMT_LIST
-        })
-        .last();
-
-    match last {
-        Some(node) if node.kind() == SyntaxKind::STMT_LIST => stmt_list_terminates(&node),
-        Some(node) if is_control_flow_terminator(&node) => true,
-        Some(node) if node.kind() == SyntaxKind::IF_STMT => if_all_branches_terminate(&node),
-        Some(node) if node.kind() == SyntaxKind::PRE_REGION_DIR => preproc_region_terminates(&node),
-        Some(node) if node.kind() == SyntaxKind::PRE_IF_DIR => {
-            preproc_if_all_branches_terminate(&node)
-        }
-        _ => false,
-    }
-}
-
-pub(crate) fn preproc_region_terminates(region: &SyntaxNode) -> bool {
-    let last = region
-        .children()
-        .filter(|n| {
-            is_statement_node(n)
-                || n.kind() == SyntaxKind::PRE_IF_DIR
-                || n.kind() == SyntaxKind::PRE_REGION_DIR
-                || n.kind() == SyntaxKind::STMT_LIST
-        })
-        .last();
-
-    match last {
-        Some(node) if node.kind() == SyntaxKind::STMT_LIST => stmt_list_terminates(&node),
-        Some(node) if is_control_flow_terminator(&node) => true,
-        Some(node) if node.kind() == SyntaxKind::IF_STMT => if_all_branches_terminate(&node),
-        Some(node) if node.kind() == SyntaxKind::PRE_REGION_DIR => preproc_region_terminates(&node),
-        Some(node) if node.kind() == SyntaxKind::PRE_IF_DIR => {
-            preproc_if_all_branches_terminate(&node)
-        }
-        _ => false,
-    }
 }

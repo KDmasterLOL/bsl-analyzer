@@ -98,6 +98,31 @@ mod tests {
     }
 
     #[test]
+    fn module_level_oneline_compound_with_sibling() {
+        // A compound block statement header is not counted as a statement on its
+        // line (its body statements are tracked instead). Здесь у Если нет тела
+        // на этой строке, поэтому одиночный соседний вызов не помечается - это
+        // осознанный недо-репорт ради отсутствия двойного счёта однострочного
+        // составного оператора (см. is_compound_block_stmt).
+        let code = "Если Истина Тогда КонецЕсли; Вызов();";
+        check_diagnostics_snapshot_for(code, DiagnosticCode::OneStatementPerLine, expect![""]);
+    }
+
+    #[test]
+    fn module_level_oneline_compound_body_still_flagged() {
+        // The body statements crowding one line are still flagged.
+        let code = "Если Истина Тогда А = 1; Б = 2; КонецЕсли;";
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::OneStatementPerLine,
+            expect![[r#"
+                OneStatementPerLine @ 1:26..1:31
+                  message: Несколько операторов в одной строке
+                  severity: Information"#]],
+        );
+    }
+
+    #[test]
     fn test_no_multiple_statements() {
         let code = r#"
 Процедура Тест()

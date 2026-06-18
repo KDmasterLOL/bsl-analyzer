@@ -185,7 +185,7 @@ mod tests {
             code,
             DiagnosticCode::CodeBlockBeforeSub,
             expect![[r#"
-                CodeBlockBeforeSub @ 4:1..6:14
+                CodeBlockBeforeSub @ 4:1..5:14
                   message: Обнаружен блок кода перед объявлением процедур и функций
                   severity: Blocker"#]],
         );
@@ -368,7 +368,7 @@ EndProcedure
 КонецПроцедуры"#,
             DiagnosticCode::CodeBlockBeforeSub,
             expect![[r#"
-                CodeBlockBeforeSub @ 2:1..8:14
+                CodeBlockBeforeSub @ 2:1..2:28
                   message: Обнаружен блок кода перед объявлением процедур и функций
                   severity: Blocker"#]],
         );

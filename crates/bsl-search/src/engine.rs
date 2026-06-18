@@ -9,7 +9,7 @@ use crate::resolver::{InMemoryResolvedViewResolver, ResolvedView};
 use crate::store::Store;
 use crate::workspace_overlay::{
     lexical_hits, normalized_file_hash_for_indexed_documents, semantic_hits, BaselineHashMode,
-    WorkspaceOverlayCache, WorkspaceOverlayIndex, WorkspaceOverlayStats,
+    RefreshMode, RefreshPlan, WorkspaceOverlayCache, WorkspaceOverlayIndex, WorkspaceOverlayStats,
 };
 use crate::{
     semantic_key_for_indexed_document, semantic_text_for_indexed_document,
@@ -1024,12 +1024,184 @@ impl SearchEngine {
         Ok(Some(cache.stats()))
     }
 
+    /// In-engine overlay prime that may embed inline (holds the engine lock for its duration).
+    /// Reserved for the no-baseline / local paths and tests; the PostgresRemoteOverlay warmup must
+    /// NOT use this (it would serialize all search behind a multi-minute embed) and instead drives
+    /// the lock-free [`Self::prime_workspace_overlay_standalone`] + [`Self::publish_workspace_overlay`].
     pub fn prime_workspace_overlay(&self) -> Result<(), SearchError> {
         if self.workspace_root.is_none() {
             return Ok(());
         }
-        let _ = self.workspace_overlay_snapshot(self.embedder.as_ref())?;
+        let _ = self.workspace_overlay_snapshot(RefreshMode::Embed)?;
         Ok(())
+    }
+
+    /// The embedder configuration of this engine, if semantic search is configured. The warmup
+    /// thread clones this under a brief lock so it can build a standalone embedder for the
+    /// lock-free embedding pass.
+    pub fn embedder_config(&self) -> Option<EmbedderConfig> {
+        self.embedder.as_ref().map(Embedder::config)
+    }
+
+    /// The path of this engine's SQLite database, for reopening a standalone connection off-lock.
+    pub fn db_path(&self) -> &Path {
+        self.store.db_path()
+    }
+
+    /// The injected graph-context provider, cloned for the standalone overlay prime so its
+    /// embeddings are graph-enriched exactly like an in-engine refresh.
+    pub fn graph_context_provider(&self) -> Option<Arc<dyn crate::ports::GraphContextProvider>> {
+        self.graph_context_provider.clone()
+    }
+
+    /// A read-only clone of the overlay embedding cache, for the warmup's lock-free Phase B start.
+    pub fn workspace_overlay_embedding_cache_snapshot(
+        &self,
+    ) -> Result<HashMap<String, Vec<f32>>, SearchError> {
+        let cache = self
+            .workspace_overlay_cache
+            .lock()
+            .map_err(|e| SearchError::Index(format!("workspace overlay cache lock error: {e}")))?;
+        Ok(cache.embedding_cache_snapshot())
+    }
+
+    /// Phase A + B of the lock-free overlay warmup: plan the manifest-driven refresh against a
+    /// freshly reopened standalone [`Store`] (Phase A, read-only), then embed the missing chunks
+    /// via the remote embedder with no engine/inner lock held (Phase B). Returns the plan and the
+    /// embeddings it produced for [`Self::publish_workspace_overlay`] (Phase C) to merge in.
+    ///
+    /// `Store` is `!Sync`, so this opens its own connection from `db_path` rather than borrowing
+    /// the live engine's store. Newly embedded vectors are persisted to that standalone store at
+    /// the end of Phase B so a crash mid-warmup does not throw away embedding work already paid
+    /// for; Phase C persists the merged live cache once more.
+    pub fn prime_workspace_overlay_standalone(
+        db_path: &Path,
+        embedder_config: EmbedderConfig,
+        workspace_root: &Path,
+        warm_embeddings: HashMap<String, Vec<f32>>,
+        graph_provider: Option<Arc<dyn crate::ports::GraphContextProvider>>,
+    ) -> Result<(RefreshPlan, HashMap<String, Vec<f32>>), SearchError> {
+        let batch_size = EmbeddingExecutionPolicy::default().batch_size();
+        let store = Store::open(db_path)?;
+        let embedder = Embedder::new(embedder_config);
+
+        // Seed the warm cache from the persisted overlay embedding cache so a restart reuses
+        // vectors already paid for instead of re-embedding everything.
+        let mut warm_embeddings = warm_embeddings;
+        if warm_embeddings.is_empty() {
+            match store.load_overlay_embedding_cache(embedder.model(), embedder.dim()) {
+                Ok(cached) if !cached.is_empty() => {
+                    info!(
+                        model_id = embedder.model(),
+                        dim = embedder.dim(),
+                        cached_embeddings = cached.len(),
+                        "loaded persisted overlay embedding cache for standalone prime"
+                    );
+                    warm_embeddings = cached;
+                }
+                _ => {}
+            }
+        }
+
+        let manifest_fingerprints =
+            store.load_baseline_manifest_fingerprints("code")?.unwrap_or_default();
+
+        let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
+            &manifest_fingerprints,
+            workspace_root,
+            &store,
+            &warm_embeddings,
+            graph_provider.as_deref(),
+        )?;
+
+        let mut new_embeddings = Self::embed_missing_overlay_chunks(
+            &store,
+            &embedder,
+            plan.missing_embeddings(),
+            batch_size,
+        )?;
+
+        // Include the warm-reused vectors for the plan's chunks in the published set so Phase C
+        // builds complete vectors regardless of the live cache's state (it may be empty on a
+        // fresh engine). The embedding key is value stable, so this is a no-op merge for chunks
+        // the live cache already holds.
+        for embedding_key in plan.planned_embedding_keys() {
+            if let std::collections::hash_map::Entry::Vacant(slot) =
+                new_embeddings.entry(embedding_key)
+            {
+                if let Some(embedding) = warm_embeddings.get(slot.key()) {
+                    slot.insert(embedding.clone());
+                }
+            }
+        }
+
+        Ok((plan, new_embeddings))
+    }
+
+    /// Phase B: embed the plan's missing `embedding_key -> input` pairs in batches off any lock,
+    /// persisting each batch's vectors to the standalone `store` as it lands so a mid-pass crash
+    /// keeps the progress already paid for.
+    fn embed_missing_overlay_chunks(
+        store: &Store,
+        embedder: &Embedder,
+        missing: &HashMap<String, String>,
+        batch_size: usize,
+    ) -> Result<HashMap<String, Vec<f32>>, SearchError> {
+        if missing.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let pairs: Vec<(&String, &String)> = missing.iter().collect();
+        let mut new_embeddings = HashMap::with_capacity(missing.len());
+
+        for batch in pairs.chunks(batch_size.max(1)) {
+            let inputs: Vec<&str> = batch.iter().map(|(_, input)| input.as_str()).collect();
+            let embeddings = embedder.embed_batch_interactive(&inputs)?;
+
+            let mut batch_persist = HashMap::with_capacity(batch.len());
+            for ((embedding_key, _), embedding) in batch.iter().zip(embeddings) {
+                batch_persist.insert((*embedding_key).clone(), embedding.clone());
+                new_embeddings.insert((*embedding_key).clone(), embedding);
+            }
+            // Persist to the standalone store (NOT the live engine) so partial progress survives
+            // a mid-pass failure. The shared live cache is touched only once, in Phase C.
+            if let Err(error) =
+                store.save_overlay_embedding_cache(embedder.model(), embedder.dim(), &batch_persist)
+            {
+                tracing::warn!("failed to persist overlay embedding batch: {error}");
+            }
+        }
+
+        Ok(new_embeddings)
+    }
+
+    /// Phase C: merge the plan and Phase-B embeddings into the live overlay cache under a brief
+    /// inner-cache lock, swapping the entry/hidden-path set atomically so a concurrent reader
+    /// never sees a half-embedded file. Never holds the lock across an embed.
+    pub fn publish_workspace_overlay(
+        &self,
+        plan: RefreshPlan,
+        new_embeddings: HashMap<String, Vec<f32>>,
+        dirty_before: &HashMap<String, u64>,
+    ) -> Result<(), SearchError> {
+        let mut cache = self
+            .workspace_overlay_cache
+            .lock()
+            .map_err(|e| SearchError::Index(format!("workspace overlay cache lock error: {e}")))?;
+        cache.publish_plan(plan, new_embeddings, dirty_before, self.embedder.as_ref(), &self.store)
+    }
+
+    /// Snapshot the overlay dirty-path set (path -> mark sequence). Taken under the cache lock
+    /// before the warmup's lock-free embed pass so [`Self::publish_workspace_overlay`] clears only
+    /// the flags that pass supersedes, never one the watcher re-marked while the embed was in flight.
+    pub fn workspace_overlay_dirty_paths_snapshot(
+        &self,
+    ) -> Result<HashMap<String, u64>, SearchError> {
+        let cache = self
+            .workspace_overlay_cache
+            .lock()
+            .map_err(|e| SearchError::Index(format!("workspace overlay cache lock error: {e}")))?;
+        Ok(cache.dirty_paths_snapshot())
     }
 
     pub fn workspace_overlay_lexical_hits(
@@ -1040,7 +1212,7 @@ impl SearchEngine {
         if self.workspace_root.is_none() {
             return Ok((Vec::new(), HashSet::new()));
         }
-        let overlay = self.workspace_overlay_snapshot(None)?;
+        let overlay = self.workspace_overlay_snapshot(RefreshMode::ReuseOnly)?;
         if overlay.is_empty() {
             return Ok((Vec::new(), HashSet::new()));
         }
@@ -1059,7 +1231,11 @@ impl SearchEngine {
         let Some(embedder) = &self.embedder else {
             return Ok((Vec::new(), HashSet::new()));
         };
-        let overlay = self.workspace_overlay_snapshot(Some(embedder))?;
+        // ReuseOnly: the refresh attaches only already-cached overlay vectors and never embeds
+        // inline on this hot, lock-held query path. Chunks lacking a cached vector contribute no
+        // overlay semantic hit this turn (they remain lexical); the background warmup is the only
+        // place that embeds overlay chunks. The embedder is still used below for the query vector.
+        let overlay = self.workspace_overlay_snapshot(RefreshMode::ReuseOnly)?;
         if overlay.is_empty() {
             return Ok((Vec::new(), HashSet::new()));
         }
@@ -1090,7 +1266,7 @@ impl SearchEngine {
             return Ok(None);
         }
 
-        let overlay = self.workspace_overlay_snapshot(None)?;
+        let overlay = self.workspace_overlay_snapshot(RefreshMode::ReuseOnly)?;
         let mut overlay = overlay.overlay;
         overlay.baseline = baseline.clone();
         let service =
@@ -1108,7 +1284,7 @@ impl SearchEngine {
             return Ok(None);
         }
 
-        let overlay = self.workspace_overlay_snapshot(None)?;
+        let overlay = self.workspace_overlay_snapshot(RefreshMode::ReuseOnly)?;
         let mut overlay = overlay.overlay;
         overlay.baseline = baseline.clone();
 
@@ -1185,7 +1361,8 @@ impl SearchEngine {
             return Ok(None);
         };
 
-        let overlay = self.workspace_overlay_snapshot(Some(embedder))?;
+        // ReuseOnly: reuse cached overlay vectors only, never embed inline under the engine lock.
+        let overlay = self.workspace_overlay_snapshot(RefreshMode::ReuseOnly)?;
         if overlay.is_empty() {
             return Ok(None);
         }
@@ -1256,7 +1433,7 @@ impl SearchEngine {
         };
 
         let _ = workspace_root;
-        let overlay = self.workspace_overlay_snapshot(None)?;
+        let overlay = self.workspace_overlay_snapshot(RefreshMode::ReuseOnly)?;
         if overlay.is_empty() {
             return Ok(None);
         }
@@ -1269,14 +1446,25 @@ impl SearchEngine {
         Ok(Some(combined))
     }
 
+    /// Refresh and snapshot the workspace overlay.
+    ///
+    /// `mode` selects how chunks without a cached vector are treated: [`RefreshMode::ReuseOnly`]
+    /// (every interactive query) reuses only cached vectors and never embeds inline under the
+    /// engine lock; [`RefreshMode::Embed`] (the background warmup) may embed missing vectors.
+    /// In [`RefreshMode::Embed`] the engine's own embedder is supplied; in [`RefreshMode::ReuseOnly`]
+    /// no embedder is passed down, so the refresh stays off the network.
     fn workspace_overlay_snapshot(
         &self,
-        embedder: Option<&Embedder>,
+        mode: RefreshMode,
     ) -> Result<WorkspaceOverlayIndex, SearchError> {
         let workspace_root = self
             .workspace_root
             .as_ref()
             .ok_or_else(|| SearchError::Index("workspace root is not configured".to_owned()))?;
+        let embedder = match mode {
+            RefreshMode::Embed => self.embedder.as_ref(),
+            RefreshMode::ReuseOnly => None,
+        };
         let mut cache = self
             .workspace_overlay_cache
             .lock()
@@ -1785,5 +1973,64 @@ mod tests {
         let hits = engine.text_search("ОбновленаЧерезWatcher", 10, Some("code")).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].symbol_name, "ОбновленаЧерезWatcher");
+    }
+
+    #[test]
+    fn interactive_overlay_semantic_does_not_embed_overlay_chunks_when_vectors_absent() {
+        use crate::embedder::EmbedderConfig;
+        use std::time::{Duration, Instant};
+
+        // An overlay engine wired to an unreachable embedder. The interactive overlay refresh is
+        // ReuseOnly: with no cached vectors it must NOT embed the changed file's chunks inline
+        // (that would hit the dead embedder and stall the lock-held query). The overlay still
+        // refreshes lexically, and the call returns promptly rather than blocking on an embed.
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("CommonModule.bsl");
+        fs::write(&file, "Процедура ЛокальнаяПравка()\nКонецПроцедуры").unwrap();
+
+        let db_path = workspace.join("bsl-search.db");
+        let config = crate::SearchConfig {
+            embedder: EmbedderConfig {
+                base_url: "http://127.0.0.1:1".to_owned(),
+                model: "test-model".to_owned(),
+                dim: Some(3),
+                api_key: None,
+                provider: None,
+            },
+            execution: crate::EmbeddingExecutionPolicy::default(),
+        };
+        let mut engine = SearchEngine::semantic_overlay_only(&db_path, config).unwrap();
+        engine.set_workspace_root(workspace);
+        engine
+            .store()
+            .save_baseline_manifest(&crate::WorkspaceBaselineManifest {
+                snapshot_id: "snap-1".to_owned(),
+                snapshot_fingerprint: Some("fp-1".to_owned()),
+                files: vec![crate::BaselineManifestFile {
+                    collection: "code".to_owned(),
+                    path: "CommonModule.bsl".to_owned(),
+                    file_fingerprint: "different-fingerprint".to_owned(),
+                    document_count: 1,
+                    file_object_id: "obj-1".to_owned(),
+                }],
+            })
+            .unwrap();
+
+        // Lexical overlay still sees the change without any embedding round-trip.
+        let (lexical, _hidden) =
+            engine.workspace_overlay_lexical_hits("ЛокальнаяПравка", 10).unwrap();
+        assert_eq!(lexical.len(), 1);
+
+        // The semantic overlay query embeds only the QUERY (fast connection-refused on a dead
+        // endpoint), never the overlay chunks. Either way it returns quickly; it must not stall
+        // trying to embed the uncached chunk. The result is allowed to be an error (query embed
+        // failed), but it must come back fast.
+        let started = Instant::now();
+        let _ = engine.workspace_overlay_semantic_hits("ЛокальнаяПравка", 10);
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "ReuseOnly query must not block on inline overlay embedding"
+        );
     }
 }

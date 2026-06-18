@@ -163,74 +163,90 @@ impl RegionTree {
     }
 }
 
+/// A region marker still waiting for its matching `#КонецОбласти`.
+///
+/// `idx` is `None` for an unnamed `#Область` (not emitted into the tree, but
+/// still tracked so its matching end pops correctly).
+struct OpenRegion {
+    idx: Option<RegionIdx>,
+    start: SyntaxNode,
+}
+
 struct RegionTreeBuilder {
     tree: RegionTree,
-    parent_stack: Vec<RegionIdx>,
-    procedure_depth: u32,
+    stack: Vec<OpenRegion>,
+    /// Sorted start offsets of nodes that count as region content, used to
+    /// decide region emptiness without relying on a container node.
+    significant_starts: Vec<u32>,
+    eof: text_size::TextSize,
 }
 
 impl RegionTreeBuilder {
-    fn new() -> Self {
-        Self { tree: RegionTree::new(), parent_stack: Vec::new(), procedure_depth: 0 }
-    }
+    fn build(root: &SyntaxNode) -> RegionTree {
+        let mut significant_starts: Vec<u32> = root
+            .descendants()
+            .filter(|n| {
+                crate::module_structure::significant::is_significant_for_region_emptiness(n.kind())
+            })
+            .map(|n| significant_content_start(&n).into())
+            .collect();
+        significant_starts.sort_unstable();
 
-    fn build(mut self, root: &SyntaxNode) -> RegionTree {
-        self.descend(root);
-        self.tree
-    }
+        let mut builder = RegionTreeBuilder {
+            tree: RegionTree::new(),
+            stack: Vec::new(),
+            significant_starts,
+            eof: root.text_range().end(),
+        };
 
-    fn descend(&mut self, node: &SyntaxNode) {
-        for child in node.children() {
-            match child.kind() {
-                SyntaxKind::PRE_REGION_DIR => {
-                    self.process_region(&child);
-                }
-                SyntaxKind::PROCEDURE_DEF | SyntaxKind::FUNCTION_DEF => {
-                    self.procedure_depth += 1;
-                    self.descend(&child);
-                    self.procedure_depth -= 1;
-                }
-                _ => {
-                    self.descend(&child);
-                }
+        // Region directives are flat markers. Visit them in source order and
+        // pair start/end via a stack, independent of syntactic nesting; this is
+        // what lets a region overlap a control-flow block.
+        let mut markers: Vec<SyntaxNode> =
+            root.descendants().filter(|n| n.kind() == SyntaxKind::PRE_REGION_DIR).collect();
+        markers.sort_by_key(|n| n.text_range().start());
+
+        for marker in &markers {
+            let Some(dir) = ast::PreRegionDir::cast(marker.clone()) else { continue };
+            if dir.is_end() {
+                builder.close_region(marker);
+            } else {
+                builder.open_region(marker, &dir);
             }
         }
+
+        builder.finish_unpaired();
+        builder.tree
     }
 
-    fn process_region(&mut self, node: &SyntaxNode) {
-        let region_ast = match ast::PreRegionDir::cast(node.clone()) {
-            Some(r) => r,
-            None => return,
-        };
-
-        let name = match region_ast.name() {
+    fn open_region(&mut self, node: &SyntaxNode, dir: &ast::PreRegionDir) {
+        let name = match dir.name() {
             Some(n) if !n.is_empty() => Name::new(&n),
-            _ => return,
+            _ => {
+                self.stack.push(OpenRegion { idx: None, start: node.clone() });
+                return;
+            }
         };
 
-        let range = node.text_range();
+        let parent = self.stack.iter().rev().find_map(|o| o.idx);
+        let depth = self.stack.iter().filter(|o| o.idx.is_some()).count() as u32;
         let directive_range = first_line_range(node);
-
-        let name_range = self.find_name_range(node, &name);
-
-        let parent = self.parent_stack.last().copied();
-        let depth = self.parent_stack.len() as u32;
-
-        let is_empty = is_region_node_empty(node);
+        let name_range = find_name_range(node, &name);
+        let is_method_local = enclosing_method_body_end(node).is_some();
 
         let region_idx = self.tree.regions.alloc(RegionData {
             name,
-            range,
+            range: node.text_range(),
             directive_range,
             name_range,
             parent,
             children: Vec::new(),
             depth,
-            is_method_local: self.procedure_depth > 0,
-            is_empty,
+            is_method_local,
+            is_empty: true,
         });
 
-        self.tree.position_map.insert(range.start().into(), region_idx);
+        self.tree.position_map.insert(node.text_range().start().into(), region_idx);
 
         if let Some(parent_idx) = parent {
             self.tree.regions[parent_idx].children.push(region_idx);
@@ -238,26 +254,104 @@ impl RegionTreeBuilder {
             self.tree.root_regions.push(region_idx);
         }
 
-        self.parent_stack.push(region_idx);
-        self.descend(node);
-        self.parent_stack.pop();
+        self.stack.push(OpenRegion { idx: Some(region_idx), start: node.clone() });
     }
 
-    fn find_name_range(&self, node: &SyntaxNode, name: &Name) -> TextRange {
-        for token in node.children_with_tokens().filter_map(|e| e.into_token()) {
-            if token.kind() == SyntaxKind::IDENT || token.kind() == SyntaxKind::PRE_REGION {
-                let text = token.text();
-                if text.starts_with('#') {
-                    continue;
-                }
-                if text.trim() == name.as_str() {
-                    return token.text_range();
-                }
+    fn close_region(&mut self, end_node: &SyntaxNode) {
+        // Unpaired `#КонецОбласти` (empty stack) is ignored.
+        let Some(open) = self.stack.pop() else { return };
+        if let Some(idx) = open.idx {
+            let range =
+                TextRange::new(open.start.text_range().start(), end_node.text_range().end());
+            self.tree.regions[idx].range = range;
+            self.tree.regions[idx].is_empty =
+                !self.has_significant_in(self.tree.regions[idx].directive_range.end(), range.end());
+        }
+    }
+
+    fn finish_unpaired(&mut self) {
+        // Unpaired `#Область`: extend to EOF, or to the end of the enclosing
+        // method for a method-local region.
+        while let Some(open) = self.stack.pop() {
+            if let Some(idx) = open.idx {
+                let end = enclosing_method_body_end(&open.start).unwrap_or(self.eof);
+                let range = TextRange::new(
+                    open.start.text_range().start(),
+                    end.max(open.start.text_range().end()),
+                );
+                self.tree.regions[idx].range = range;
+                self.tree.regions[idx].is_empty = !self
+                    .has_significant_in(self.tree.regions[idx].directive_range.end(), range.end());
             }
         }
-
-        first_line_range(node)
     }
+
+    fn has_significant_in(&self, lo: text_size::TextSize, hi: text_size::TextSize) -> bool {
+        if hi <= lo {
+            return false;
+        }
+        let lo_u: u32 = lo.into();
+        let hi_u: u32 = hi.into();
+        let first = self.significant_starts.partition_point(|&o| o < lo_u);
+        self.significant_starts.get(first).is_some_and(|&o| o < hi_u)
+    }
+}
+
+/// End offset of the enclosing method, but only when the marker sits inside the
+/// method's *body* (reached through a `STMT_LIST`). A marker that is merely a
+/// direct child of a `PROCEDURE_DEF`/`FUNCTION_DEF` — e.g. a region directive
+/// between an annotation and the `Процедура` keyword — is module-level, not
+/// method-local.
+fn enclosing_method_body_end(node: &SyntaxNode) -> Option<text_size::TextSize> {
+    let mut saw_stmt_list = false;
+    for ancestor in node.ancestors().skip(1) {
+        match ancestor.kind() {
+            SyntaxKind::STMT_LIST => saw_stmt_list = true,
+            SyntaxKind::PROCEDURE_DEF | SyntaxKind::FUNCTION_DEF => {
+                return saw_stmt_list.then(|| ancestor.text_range().end());
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Start offset of a significant node's actual content, skipping any leading
+/// annotations, compiler directives, and region markers. A declaration like
+/// `&НаКлиенте #Область X <newline> Перем Y;` parses with the directive and the
+/// region marker as leading children of the `VAR_DEF`, so the node's own start
+/// is before the region; the content (`Перем`) is what determines whether the
+/// region is empty.
+fn significant_content_start(node: &SyntaxNode) -> text_size::TextSize {
+    for element in node.children_with_tokens() {
+        match element.kind() {
+            SyntaxKind::WHITESPACE
+            | SyntaxKind::NEWLINE
+            | SyntaxKind::COMMENT
+            | SyntaxKind::BOM
+            | SyntaxKind::COMPILER_DIRECTIVE
+            | SyntaxKind::ANNOTATION
+            | SyntaxKind::PRE_REGION_DIR => continue,
+            _ => return element.text_range().start(),
+        }
+    }
+    node.text_range().start()
+}
+
+fn find_name_range(node: &SyntaxNode, name: &Name) -> TextRange {
+    for token in node.children_with_tokens().filter_map(|e| e.into_token()) {
+        if token.kind() == SyntaxKind::IDENT || token.kind() == SyntaxKind::PRE_REGION {
+            let text = token.text();
+            if text.starts_with('#') {
+                continue;
+            }
+            if text.trim() == name.as_str() {
+                return token.text_range();
+            }
+        }
+    }
+
+    first_line_range(node)
 }
 
 fn first_line_range(node: &SyntaxNode) -> TextRange {
@@ -269,24 +363,8 @@ fn first_line_range(node: &SyntaxNode) -> TextRange {
     )
 }
 
-fn is_region_node_empty(region_node: &SyntaxNode) -> bool {
-    for child in region_node.children() {
-        if is_meaningful_region_content(&child) {
-            return false;
-        }
-        if child.kind() == SyntaxKind::PRE_REGION_DIR && !is_region_node_empty(&child) {
-            return false;
-        }
-    }
-    true
-}
-
-fn is_meaningful_region_content(node: &SyntaxNode) -> bool {
-    crate::module_structure::significant::is_significant_for_region_emptiness(node.kind())
-}
-
 pub fn lower_regions(root: &SyntaxNode) -> RegionTree {
-    RegionTreeBuilder::new().build(root)
+    RegionTreeBuilder::build(root)
 }
 
 #[salsa::tracked(lru = 256)]
@@ -672,6 +750,89 @@ EndProcedure
         let region = tree.region(tree.root_regions()[0]);
         assert!(region.is_method_local);
         assert_eq!(tree.module_level_regions().count(), 0);
+    }
+
+    #[test]
+    fn region_crossing_if_boundary_is_captured() {
+        // Region opens before `Если` and closes inside its body, before
+        // `КонецЕсли` - the ranges overlap without nesting.
+        let code = "Процедура П()\n\t#Область Р\n\tЕсли Истина Тогда\n\t\tА = 1;\n\t#КонецОбласти\n\tКонецЕсли;\nКонецПроцедуры\n";
+        let tree = parse_and_lower(code);
+        assert_eq!(tree.len(), 1, "the crossing region must be captured");
+
+        let region = tree.region(tree.root_regions()[0]);
+        assert_eq!(region.name.as_str(), "Р");
+        assert!(region.is_method_local);
+        assert!(!region.is_empty, "region spans the `А = 1;` assignment");
+
+        let start = code.find("#Область").unwrap() as u32;
+        let end = code.find("#КонецОбласти").unwrap() as u32 + "#КонецОбласти".len() as u32;
+        assert_eq!(region.range, TextRange::new(start.into(), end.into()));
+    }
+
+    #[test]
+    fn region_markers_between_branch_and_elsif() {
+        let code = "Процедура П()\n\t#Область Р1\n\tЕсли А Тогда\n\t\tБ = 1;\n\t#КонецОбласти\n\t#Область Р2\n\tИначеЕсли В Тогда\n\t\tГ = 2;\n\tКонецЕсли;\n\t#КонецОбласти\nКонецПроцедуры\n";
+        let tree = parse_and_lower(code);
+        assert_eq!(tree.len(), 2);
+        let names = tree.root_region_names();
+        assert!(names.contains(&"Р1"));
+        assert!(names.contains(&"Р2"));
+    }
+
+    #[test]
+    fn unpaired_start_extends_to_method_end() {
+        let code = "Процедура П()\n\t#Область Р\n\tА = 1;\nКонецПроцедуры\n";
+        let tree = parse_and_lower(code);
+        assert_eq!(tree.len(), 1);
+        let region = tree.region(tree.root_regions()[0]);
+        assert!(region.is_method_local);
+        let proc_end = code.find("КонецПроцедуры").unwrap() as u32 + "КонецПроцедуры".len() as u32;
+        assert_eq!(region.range.end(), proc_end.into());
+    }
+
+    #[test]
+    fn unpaired_start_module_level_extends_to_eof() {
+        let code = "#Область Р\nПроцедура П()\nКонецПроцедуры\n";
+        let tree = parse_and_lower(code);
+        assert_eq!(tree.len(), 1);
+        let region = tree.region(tree.root_regions()[0]);
+        assert!(!region.is_method_local);
+        assert_eq!(region.range.end(), text_size::TextSize::from(code.len() as u32));
+    }
+
+    #[test]
+    fn unpaired_end_is_ignored() {
+        let code = "Процедура П()\nКонецПроцедуры\n#КонецОбласти\n";
+        let tree = parse_and_lower(code);
+        assert!(tree.is_empty(), "a lone #КонецОбласти emits no region");
+    }
+
+    #[test]
+    fn region_between_directive_and_var_is_module_level_and_nonempty() {
+        // The region marker is a leading child of the VAR_DEF (the def spans from
+        // the &НаКлиенте annotation), yet the region is module-level and contains
+        // the Перем declaration.
+        let code = "&НаКлиенте\n#Область ОписаниеПеременных\n\nПерем П;\n#КонецОбласти\n";
+        let tree = parse_and_lower(code);
+        assert_eq!(tree.len(), 1);
+        let region = tree.region(tree.root_regions()[0]);
+        assert_eq!(region.name.as_str(), "ОписаниеПеременных");
+        assert!(!region.is_method_local, "region opened at module level");
+        assert!(!region.is_empty, "region contains the Перем declaration");
+    }
+
+    #[test]
+    fn region_between_directive_and_procedure_is_module_level() {
+        // Region marker is a leading child of the PROCEDURE_DEF but precedes the
+        // body, so it is module-level, not method-local.
+        let code =
+            "&НаСервере\n#Область Р\nПроцедура Тест() Экспорт\nКонецПроцедуры\n#КонецОбласти\n";
+        let tree = parse_and_lower(code);
+        assert_eq!(tree.len(), 1);
+        let region = tree.region(tree.root_regions()[0]);
+        assert!(!region.is_method_local, "region precedes the procedure body");
+        assert!(!region.is_empty, "region contains the procedure");
     }
 
     #[test]

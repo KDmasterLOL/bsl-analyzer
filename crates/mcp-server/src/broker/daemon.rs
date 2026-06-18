@@ -3,19 +3,31 @@
 //! Binds the per-project rendezvous *before* building the heavy [`SharedState`], so
 //! a process that loses the launch race exits without ever starting a competing
 //! build against the same per-project databases. The winner builds once and serves
-//! every connecting proxy from it, then exits after an idle window with no
-//! connections, releasing the analysis state.
+//! every connecting proxy from it.
+//!
+//! Lifetime is tied to an **owner**: the first session that actually sends MCP traffic
+//! becomes the owner, and the backend shuts down the moment that owner session ends —
+//! for any reason (clean disconnect, crash, SIGKILL: the kernel closes the owner's
+//! socket on process death, so the backend sees EOF either way). Shutdown drops every
+//! other session, so each connected proxy gets EOF and exits in turn — no orphaned
+//! backend, no lingering proxies. An orphan grace covers only the degenerate case where
+//! an owner never establishes (e.g. the launching proxy died before its first request).
 //!
 //! [`SharedState`]: crate::SharedState
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::io;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use interprocess::local_socket::tokio::prelude::*;
 use interprocess::local_socket::tokio::Listener as TokioListener;
 use interprocess::local_socket::tokio::Stream as TokioStream;
 use interprocess::local_socket::ListenerOptions;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::sync::Notify;
 use tokio::time::{interval, Instant, MissedTickBehavior};
 
 use crate::broker::name::{backend_name, BackendKey};
@@ -30,9 +42,13 @@ const MAX_PARKED_DURING_BUILD: usize = 128;
 /// bind, so the expensive state construction (which spawns background builds
 /// touching the project DBs) never runs in a race loser.
 ///
-/// Returns `Ok(())` both when this process served as the backend and exited on
-/// idle, and when another live backend already owned the name (nothing to do).
-pub async fn run<F>(build: F, key: BackendKey, idle: Duration) -> anyhow::Result<()>
+/// `orphan_grace` bounds how long a backend with no owner and no active connections
+/// waits before giving up — it does **not** keep a warm backend alive after its owner
+/// leaves (that is owner-driven and immediate).
+///
+/// Returns `Ok(())` both when this process served as the backend and exited, and when
+/// another live backend already owned the name (nothing to do).
+pub async fn run<F>(build: F, key: BackendKey, orphan_grace: Duration) -> anyhow::Result<()>
 where
     F: FnOnce() -> anyhow::Result<McpServer> + Send + 'static,
 {
@@ -76,7 +92,7 @@ where
     let guard = server.clone();
     // Flush/persist resident state on the way out (success or failure), mirroring
     // the stdio path, before the process exits.
-    let result = serve(server, listener, parked, idle).await;
+    let result = serve(server, listener, parked, orphan_grace).await;
     guard.shutdown();
     result
 }
@@ -85,61 +101,77 @@ async fn serve(
     server: McpServer,
     listener: TokioListener,
     parked: Vec<TokioStream>,
-    idle: Duration,
+    orphan_grace: Duration,
 ) -> anyhow::Result<()> {
     tracing::info!(
         pid = std::process::id(),
-        idle_secs = idle.as_secs(),
+        orphan_grace_secs = orphan_grace.as_secs(),
         parked = parked.len(),
         "broker backend listening"
     );
 
-    // `active` counts in-flight sessions. The backend exits once it has had no active
-    // session continuously for `idle`. `idle_since` marks when the current idle stretch
-    // began (set at startup since there are no connections yet, cleared on any accept,
-    // (re)started once a poll observes zero active sessions). Polling at a fraction of
-    // `idle` makes the exit land ~`idle` after the last disconnect, not up to 2×.
+    // `active` counts in-flight sessions. `owner_claimed` flips once the first real
+    // session (one that sends data) takes ownership; from then on the backend lives
+    // exactly as long as that owner session, and `shutdown` is fired when it ends.
     let active = Arc::new(AtomicU64::new(0));
-    let mut idle_since = Some(Instant::now());
+    let owner_claimed = Arc::new(AtomicBool::new(false));
+    let shutdown = Arc::new(Notify::new());
     let mut served = 0u64;
+    // Live session tasks. On shutdown we abort them (and drop the listener) so every
+    // connected proxy is severed deterministically — the cascade is an explicit teardown,
+    // not a side effect of the process happening to exit afterwards.
+    let mut sessions: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
     // Serve the connections that arrived during the build first.
     for conn in parked {
-        idle_since = None;
         served += 1;
-        spawn_session(&server, &active, conn, served);
+        sessions.push(spawn_session(&server, &active, &owner_claimed, &shutdown, conn, served));
     }
 
-    let poll = (idle / 4).clamp(Duration::from_millis(100), Duration::from_secs(15));
+    // The orphan timer only guards the no-owner-ever window; once an owner claims the
+    // backend it is disabled and shutdown is owner-driven. `orphan_since` marks when the
+    // current owner-less, connection-less stretch began. Poll at a fraction of the grace
+    // so the exit lands ~`orphan_grace` after the daemon goes quiet, not up to 2×.
+    let poll = (orphan_grace / 4).clamp(Duration::from_millis(100), Duration::from_secs(15));
+    let mut orphan_since = Some(Instant::now());
     let mut ticker = interval(poll);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     ticker.tick().await; // consume the immediate first tick
 
     loop {
         tokio::select! {
+            // The owner session ended: tear the backend down. Dropping the listener and
+            // every other session socket gives each connected proxy an EOF, so they exit
+            // in turn.
+            _ = shutdown.notified() => {
+                tracing::info!("owner session ended; shutting down backend");
+                break;
+            }
             accepted = listener.accept() => {
                 let conn = accepted?;
                 if !peer_authorized(&conn) {
                     tracing::warn!("rejected backend connection from an unauthorized peer");
                     continue;
                 }
-                idle_since = None; // activity resets the idle clock
                 served += 1;
-                spawn_session(&server, &active, conn, served);
+                sessions.push(spawn_session(&server, &active, &owner_claimed, &shutdown, conn, served));
             }
             _ = ticker.tick() => {
-                // The backend is "busy" while a client is connected OR a long background
-                // index/embedding pass is still running. Idle-exiting mid-embed would kill
-                // the pass and waste the work already paid for, so the timer only counts
-                // down once both are quiet.
-                if active.load(Ordering::SeqCst) != 0 || server.background_work_active() {
-                    idle_since = None;
+                // Reap finished session handles so the bookkeeping vector can't grow without
+                // bound across a long-lived owner's many short dependent sessions.
+                sessions.retain(|h| !h.is_finished());
+                // Once an owner is in charge the orphan guard never applies — the only exit
+                // path is that owner leaving (handled above). Before then, exit if nothing
+                // has connected for the grace, so a backend launched by a proxy that died
+                // before its first request doesn't linger.
+                if owner_claimed.load(Ordering::SeqCst) || active.load(Ordering::SeqCst) != 0 {
+                    orphan_since = None;
                 } else {
-                    let since = *idle_since.get_or_insert_with(Instant::now);
-                    if since.elapsed() >= idle {
+                    let since = *orphan_since.get_or_insert_with(Instant::now);
+                    if since.elapsed() >= orphan_grace {
                         tracing::info!(
-                            idle_secs = idle.as_secs(),
-                            "no connections or background work for the idle window; shutting down backend"
+                            orphan_grace_secs = orphan_grace.as_secs(),
+                            "no owner established within the orphan grace; shutting down backend"
                         );
                         break;
                     }
@@ -148,26 +180,127 @@ async fn serve(
         }
     }
 
+    // Teardown cascade: stop accepting and sever every still-connected session, so each
+    // proxy gets an EOF and exits. Aborting a session task drops its socket; dropping the
+    // listener frees the rendezvous name.
+    drop(listener);
+    for handle in &sessions {
+        handle.abort();
+    }
+
     Ok(())
 }
 
 /// Serve one accepted connection on its own task. The [`ActiveGuard`] decrements the
-/// active-session count on drop, so a panicking session can never strand the count and
-/// keep the backend alive forever.
-fn spawn_session(server: &McpServer, active: &Arc<AtomicU64>, conn: TokioStream, served: u64) {
+/// active-session count on drop, so a panicking session can never strand the count.
+///
+/// The connection is wrapped so the first byte the peer sends claims ownership (atomically,
+/// first-claim-wins). When the session that won ownership ends, it fires `shutdown` — the
+/// single trigger that takes the backend down. Returns the task handle so the serve loop
+/// can abort it during the shutdown cascade.
+///
+/// Ownership contract: the owner is the **first session the backend observes sending data**,
+/// not the first raw connection (which could be a liveness probe that sends nothing). In the
+/// real proxy topology this is unambiguously the launching client: its connection is first in
+/// the `parked` list and is spawned before the accept loop, so it polls its first byte — the
+/// eagerly-sent `initialize` — before any later client, which connects only after the backend
+/// already exists and is owned. Concurrent cold-starts by multiple real clients are the only
+/// case where which one wins is scheduler-dependent; any of them leaving then tears the
+/// backend down, which is the intended "backend dies with its owner" behavior regardless.
+fn spawn_session(
+    server: &McpServer,
+    active: &Arc<AtomicU64>,
+    owner_claimed: &Arc<AtomicBool>,
+    shutdown: &Arc<Notify>,
+    conn: TokioStream,
+    served: u64,
+) -> tokio::task::JoinHandle<()> {
     let guard = ActiveGuard::new(Arc::clone(active));
     tracing::debug!(active = active.load(Ordering::SeqCst), served, "broker accepted a session");
     let session = server.clone();
+    let owner_claimed = Arc::clone(owner_claimed);
+    let shutdown = Arc::clone(shutdown);
     tokio::spawn(async move {
         let _guard = guard;
-        if let Err(e) = serve_stream(session, conn).await {
+        let is_owner = Arc::new(AtomicBool::new(false));
+        let probe = OwnerProbe::new(conn, {
+            let owner_claimed = Arc::clone(&owner_claimed);
+            let is_owner = Arc::clone(&is_owner);
+            // First byte on this connection: claim ownership if nobody has. A liveness
+            // probe connects and closes without sending, so it never reaches here.
+            move || {
+                if owner_claimed
+                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    is_owner.store(true, Ordering::SeqCst);
+                }
+            }
+        });
+        if let Err(e) = serve_stream(session, probe).await {
             tracing::warn!(error = %e, "broker session ended with error");
         }
-    });
+        if is_owner.load(Ordering::SeqCst) {
+            shutdown.notify_one();
+        }
+    })
 }
 
-/// Decrements the active-session count on drop (including unwind), so the idle
-/// accounting stays correct even if a session task panics.
+/// Wraps a backend connection and fires a one-shot callback the first time the peer
+/// sends any data. A liveness probe connects and closes without writing, so it never
+/// fires — only a real MCP session (which sends `initialize` immediately) does. This is
+/// what lets ownership be claimed by the first *real* session rather than the first
+/// raw connection.
+struct OwnerProbe<S> {
+    inner: S,
+    on_first_byte: Option<Box<dyn FnOnce() + Send>>,
+}
+
+impl<S> OwnerProbe<S> {
+    fn new(inner: S, on_first_byte: impl FnOnce() + Send + 'static) -> Self {
+        Self { inner, on_first_byte: Some(Box::new(on_first_byte)) }
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for OwnerProbe<S> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let before = buf.filled().len();
+        let poll = Pin::new(&mut self.inner).poll_read(cx, buf);
+        if let Poll::Ready(Ok(())) = &poll {
+            if buf.filled().len() > before {
+                if let Some(cb) = self.on_first_byte.take() {
+                    cb();
+                }
+            }
+        }
+        poll
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for OwnerProbe<S> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+/// Decrements the active-session count on drop (including unwind), so the accounting
+/// stays correct even if a session task panics.
 struct ActiveGuard(Arc<AtomicU64>);
 
 impl ActiveGuard {

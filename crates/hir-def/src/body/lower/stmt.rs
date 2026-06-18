@@ -18,7 +18,7 @@ use super::diagnostics::{
     is_global_rollback_transaction_call, is_inside_try_body,
 };
 use super::expr::{exprs_are_equal, lower_expr_node};
-use super::preproc::{lower_preproc_if, lower_region_stmts};
+use super::preproc::lower_preproc_if;
 use super::LoweringCtx;
 
 fn find_if_then_range(if_stmt: &SyntaxNode) -> TextRange {
@@ -272,12 +272,7 @@ pub(super) fn lower_stmt_list_with_unreachable(
             }
             continue;
         }
-        if child.kind() == SyntaxKind::PRE_REGION_DIR {
-            let (region_stmts, _region_terminates) = lower_region_stmts(ctx, &child);
-            stmts.extend(region_stmts);
-            continue;
-        }
-
+        // Flat region markers are skipped; their statements are siblings here.
         if !is_statement_node(&child) {
             continue;
         }

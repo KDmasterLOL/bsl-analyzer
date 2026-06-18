@@ -316,17 +316,50 @@ impl Store {
             );
 
             -- Persisted overlay embedding cache: avoids re-embedding
-            -- unchanged overlay chunks on MCP server restart.
+            -- unchanged overlay chunks on MCP server restart. Keyed by the
+            -- embedding key (hash of the embedded text), not raw chunk text.
             CREATE TABLE IF NOT EXISTS overlay_embedding_cache (
-                content_hash TEXT NOT NULL PRIMARY KEY,
-                model_id     TEXT NOT NULL,
-                dimension    INTEGER NOT NULL,
-                embedding    BLOB NOT NULL
+                embedding_key TEXT NOT NULL PRIMARY KEY,
+                model_id      TEXT NOT NULL,
+                dimension     INTEGER NOT NULL,
+                embedding     BLOB NOT NULL
             );
             ",
         )?;
 
+        Self::migrate_overlay_embedding_cache_key(conn)?;
+
         Self::create_embedding_generation_triggers(conn)?;
+
+        Ok(())
+    }
+
+    /// Drop and recreate `overlay_embedding_cache` when it still has the legacy `content_hash`
+    /// column. The cache used to be keyed by the hash of the raw chunk text; it is now keyed by the
+    /// embedding key (the hash of the actual embedded text, which folds in module / symbol / kind /
+    /// graph context). The two keys never collide, so old rows could never be reused under the new
+    /// keying anyway. Dropping them is safe: the cache is rebuilt on miss by re-embedding, so this
+    /// only costs the next warmup a re-embed of the affected chunks.
+    fn migrate_overlay_embedding_cache_key(conn: &Connection) -> Result<(), SearchError> {
+        let has_legacy_column = conn
+            .prepare("PRAGMA table_info(overlay_embedding_cache)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(Result::ok)
+            .any(|column| column == "content_hash");
+
+        if has_legacy_column {
+            conn.execute_batch(
+                "
+                DROP TABLE overlay_embedding_cache;
+                CREATE TABLE overlay_embedding_cache (
+                    embedding_key TEXT NOT NULL PRIMARY KEY,
+                    model_id      TEXT NOT NULL,
+                    dimension     INTEGER NOT NULL,
+                    embedding     BLOB NOT NULL
+                );
+                ",
+            )?;
+        }
 
         Ok(())
     }
@@ -1482,7 +1515,7 @@ impl Store {
     ) -> Result<HashMap<String, Vec<f32>>, SearchError> {
         let dimension = dimension as i64;
         let mut stmt = self.conn.prepare(
-            "SELECT content_hash, embedding
+            "SELECT embedding_key, embedding
              FROM overlay_embedding_cache
              WHERE model_id = ?1 AND dimension = ?2",
         )?;
@@ -1514,12 +1547,12 @@ impl Store {
         let dimension = dimension as i64;
         let mut stmt = self.conn.prepare(
             "INSERT OR REPLACE INTO overlay_embedding_cache
-             (content_hash, model_id, dimension, embedding)
+             (embedding_key, model_id, dimension, embedding)
              VALUES (?1, ?2, ?3, ?4)",
         )?;
-        for (hash, embedding) in entries {
+        for (embedding_key, embedding) in entries {
             let blob: Vec<u8> = embedding.iter().flat_map(|v| v.to_le_bytes()).collect();
-            stmt.execute(params![hash, model_id, dimension, blob])?;
+            stmt.execute(params![embedding_key, model_id, dimension, blob])?;
         }
         Ok(())
     }

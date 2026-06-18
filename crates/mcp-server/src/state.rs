@@ -38,6 +38,9 @@ pub struct SharedState {
     search_engine: SharedSearchEngine,
     index_progress: Arc<IndexProgress>,
     semantic_runtime: Arc<Mutex<SemanticRuntimeStatus>>,
+    /// Outcome of the startup overlay warmup, so `search status` can distinguish "no local
+    /// diffs" from "warmup failed" instead of leaving a bare `Ready` ambiguous.
+    overlay_warmup: Arc<Mutex<OverlayWarmupState>>,
     workspace_search_mode: WorkspaceSearchMode,
     external_baseline: Option<Arc<ExternalBaselineService>>,
     configured_baseline: Option<ConfiguredBaselineStatus>,
@@ -73,6 +76,26 @@ impl Drop for BackgroundWorkGuard {
 pub(crate) enum WorkspaceSearchMode {
     SqliteLocal,
     PostgresRemoteOverlay,
+}
+
+/// Outcome of the one-shot PostgresRemoteOverlay warmup that embeds local working-tree diffs
+/// against the published baseline at startup. Tracked separately from [`SemanticRuntimeStatus`]
+/// so `search status` can tell "no local diffs" (semantic is fully baseline-served, nothing to
+/// build) apart from "warmup failed" (baseline still serves, but local edits are NOT in the
+/// semantic index): a bare `Ready` + empty overlay is ambiguous between the two.
+#[derive(Debug, Clone)]
+pub(crate) enum OverlayWarmupState {
+    /// Not started, in progress, or a non-overlay mode where no warmup runs.
+    Pending,
+    /// Warmup did not run: no embedder configured or no workspace root.
+    Skipped(String),
+    /// Completed; nothing in the working tree differed from the baseline.
+    NoLocalDiffs,
+    /// Completed; embedded `embedded` chunks across `overlay_files` locally-changed files.
+    Synced { overlay_files: usize, embedded: usize },
+    /// Prime or publish failed. The baseline semantic index still serves; local edits are not
+    /// reflected semantically until the next MCP restart retries the warmup.
+    Failed(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,6 +144,7 @@ impl SharedState {
         let search_engine: SharedSearchEngine = Arc::new(Mutex::new(None));
         let index_progress = IndexProgress::new();
         let semantic_runtime = Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled));
+        let overlay_warmup = Arc::new(Mutex::new(OverlayWarmupState::Pending));
         let background_indexers = Arc::new(AtomicUsize::new(0));
         let watcher_ready = Arc::new(AtomicBool::new(false));
         let baseline_runtime = BaselineRuntime::workspace(Some(&project.root), &project.config);
@@ -145,6 +169,7 @@ impl SharedState {
             Arc::clone(&search_engine),
             Arc::clone(&index_progress),
             Arc::clone(&semantic_runtime),
+            Arc::clone(&overlay_warmup),
             Arc::clone(&background_indexers),
             source_dir.clone(),
             Arc::clone(&watcher_ready),
@@ -193,6 +218,7 @@ impl SharedState {
             search_engine,
             index_progress,
             semantic_runtime,
+            overlay_warmup,
             workspace_search_mode,
             external_baseline: baseline_runtime.external_baseline,
             configured_baseline: Some(baseline_runtime.configured_baseline),
@@ -211,6 +237,7 @@ impl SharedState {
         search_engine: SharedSearchEngine,
         index_progress: Arc<IndexProgress>,
         semantic_runtime: Arc<Mutex<SemanticRuntimeStatus>>,
+        overlay_warmup: Arc<Mutex<OverlayWarmupState>>,
         background_indexers: Arc<AtomicUsize>,
         workspace_root: PathBuf,
         watcher_ready: Arc<AtomicBool>,
@@ -336,32 +363,16 @@ impl SharedState {
                     );
                     let search_engine = Arc::clone(&search_engine);
                     let semantic_runtime = Arc::clone(&semantic_runtime);
+                    let overlay_warmup = Arc::clone(&overlay_warmup);
                     let warmup_guard = BackgroundWorkGuard::new(&background_indexers);
                     std::thread::Builder::new()
                         .name("bsl-search-overlay-warmup".to_owned())
                         .spawn(move || {
                             let _warmup_guard = warmup_guard;
                             tracing::info!("workspace overlay semantic warmup started");
-                            let result = match search_engine.lock() {
-                                Ok(guard) => match guard.as_ref() {
-                                    Some(engine) => engine.prime_workspace_overlay(),
-                                    None => return,
-                                },
-                                Err(e) => {
-                                    tracing::warn!("overlay warmup: engine lock error: {e}");
-                                    return;
-                                }
-                            };
-                            match result {
-                                Ok(()) => {
-                                    tracing::info!("workspace overlay semantic warmup complete");
-                                }
-                                Err(error) => {
-                                    tracing::warn!(
-                                        "workspace overlay semantic warmup failed: {error}"
-                                    );
-                                }
-                            }
+                            Self::run_overlay_warmup(&search_engine, &overlay_warmup);
+                            // Semantic stays available via the baseline even when the overlay
+                            // warmup failed; the detailed warmup outcome lives in `overlay_warmup`.
                             Self::set_semantic_runtime_status(
                                 &semantic_runtime,
                                 SemanticRuntimeStatus::Ready,
@@ -426,6 +437,7 @@ impl SharedState {
             search_engine,
             index_progress,
             semantic_runtime,
+            overlay_warmup: Arc::new(Mutex::new(OverlayWarmupState::Pending)),
             workspace_search_mode: WorkspaceSearchMode::SqliteLocal,
             external_baseline: baseline_runtime.external_baseline,
             configured_baseline: Some(baseline_runtime.configured_baseline),
@@ -446,6 +458,7 @@ impl SharedState {
             search_engine: Arc::new(Mutex::new(None)),
             index_progress: IndexProgress::new(),
             semantic_runtime: Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
+            overlay_warmup: Arc::new(Mutex::new(OverlayWarmupState::Pending)),
             workspace_search_mode: WorkspaceSearchMode::SqliteLocal,
             external_baseline: None,
             configured_baseline: None,
@@ -547,6 +560,10 @@ impl SharedState {
 
     pub(crate) fn semantic_runtime(&self) -> Arc<Mutex<SemanticRuntimeStatus>> {
         Arc::clone(&self.semantic_runtime)
+    }
+
+    pub(crate) fn overlay_warmup(&self) -> Arc<Mutex<OverlayWarmupState>> {
+        Arc::clone(&self.overlay_warmup)
     }
 
     pub(crate) fn workspace_search_mode(&self) -> WorkspaceSearchMode {
@@ -680,6 +697,179 @@ impl SharedState {
         engine.set_workspace_baseline_hash_mode(hash_mode);
         if watcher_ready.load(Ordering::SeqCst) {
             engine.enable_workspace_watcher_mode();
+        }
+    }
+
+    /// Drive the PostgresRemoteOverlay warmup without ever holding the engine lock across the
+    /// multi-minute remote embed. Three phases: a brief lock to clone what the standalone prime
+    /// needs (db path, embedder config, workspace root, warm embedding cache, graph provider); a
+    /// lock-free plan+embed against a reopened standalone store; a brief lock to publish the
+    /// merged result atomically. While the embed runs, concurrent `search_code` / `search_status`
+    /// keep the lock free.
+    fn run_overlay_warmup(
+        search_engine: &SharedSearchEngine,
+        overlay_warmup: &Arc<Mutex<OverlayWarmupState>>,
+    ) {
+        let cloned = match search_engine.lock() {
+            Ok(guard) => match guard.as_ref() {
+                Some(engine) => {
+                    let Some(embedder_config) = engine.embedder_config() else {
+                        tracing::debug!("overlay warmup: no embedder configured; skipping");
+                        Self::set_overlay_warmup_state(
+                            overlay_warmup,
+                            OverlayWarmupState::Skipped("no embedder configured".to_owned()),
+                        );
+                        return;
+                    };
+                    let Some(workspace_root) = engine.workspace_root().map(Path::to_path_buf)
+                    else {
+                        tracing::debug!("overlay warmup: no workspace root; skipping");
+                        Self::set_overlay_warmup_state(
+                            overlay_warmup,
+                            OverlayWarmupState::Skipped("no workspace root".to_owned()),
+                        );
+                        return;
+                    };
+                    let warm_cache = match engine.workspace_overlay_embedding_cache_snapshot() {
+                        Ok(cache) => cache,
+                        Err(error) => {
+                            tracing::warn!(
+                                "overlay warmup: failed to snapshot warm cache: {error}"
+                            );
+                            Self::set_overlay_warmup_state(
+                                overlay_warmup,
+                                OverlayWarmupState::Failed(error.to_string()),
+                            );
+                            return;
+                        }
+                    };
+                    // Captured here, under the same lock as the warm cache and before the lock-free
+                    // embed: the publish below clears only these, so a watcher edit landing mid-embed
+                    // stays dirty and is re-embedded by a later refresh instead of being lost.
+                    let dirty_before = match engine.workspace_overlay_dirty_paths_snapshot() {
+                        Ok(dirty) => dirty,
+                        Err(error) => {
+                            tracing::warn!(
+                                "overlay warmup: failed to snapshot dirty paths: {error}"
+                            );
+                            Self::set_overlay_warmup_state(
+                                overlay_warmup,
+                                OverlayWarmupState::Failed(error.to_string()),
+                            );
+                            return;
+                        }
+                    };
+                    Some((
+                        engine.db_path().to_path_buf(),
+                        embedder_config,
+                        workspace_root,
+                        warm_cache,
+                        engine.graph_context_provider(),
+                        dirty_before,
+                    ))
+                }
+                None => None,
+            },
+            Err(e) => {
+                tracing::warn!("overlay warmup: engine lock error: {e}");
+                Self::set_overlay_warmup_state(
+                    overlay_warmup,
+                    OverlayWarmupState::Failed(format!("engine lock error: {e}")),
+                );
+                return;
+            }
+        };
+        let Some((
+            db_path,
+            embedder_config,
+            workspace_root,
+            warm_cache,
+            graph_provider,
+            dirty_before,
+        )) = cloned
+        else {
+            // Engine was published earlier but is gone now (e.g. shutdown raced the warmup).
+            Self::set_overlay_warmup_state(
+                overlay_warmup,
+                OverlayWarmupState::Skipped("engine unavailable".to_owned()),
+            );
+            return;
+        };
+
+        // Lock-free: plan against a reopened standalone store and embed the missing chunks. The
+        // engine mutex is NOT held here, so search/status stay responsive during the remote embed.
+        let primed = SearchEngine::prime_workspace_overlay_standalone(
+            &db_path,
+            embedder_config,
+            &workspace_root,
+            warm_cache,
+            graph_provider,
+        );
+        let (plan, new_embeddings) = match primed {
+            Ok(result) => result,
+            Err(error) => {
+                tracing::warn!("workspace overlay semantic warmup failed: {error}");
+                Self::set_overlay_warmup_state(
+                    overlay_warmup,
+                    OverlayWarmupState::Failed(error.to_string()),
+                );
+                return;
+            }
+        };
+
+        // Capture plan stats BEFORE `plan`/`new_embeddings` are consumed by the publish below, so
+        // the warmup outcome can report how many local files were embedded (and how many chunks).
+        let plan_empty = plan.is_empty();
+        let overlay_files = plan.overlay_file_count();
+        let embedded = new_embeddings.len();
+
+        // Brief lock to publish the merged result atomically.
+        match search_engine.lock() {
+            Ok(guard) => match guard.as_ref() {
+                Some(engine) => {
+                    match engine.publish_workspace_overlay(plan, new_embeddings, &dirty_before) {
+                        Ok(()) => {
+                            tracing::info!("workspace overlay semantic warmup complete");
+                            let outcome = if plan_empty {
+                                OverlayWarmupState::NoLocalDiffs
+                            } else {
+                                OverlayWarmupState::Synced { overlay_files, embedded }
+                            };
+                            Self::set_overlay_warmup_state(overlay_warmup, outcome);
+                        }
+                        Err(error) => {
+                            tracing::warn!("overlay warmup: publish failed: {error}");
+                            Self::set_overlay_warmup_state(
+                                overlay_warmup,
+                                OverlayWarmupState::Failed(error.to_string()),
+                            );
+                        }
+                    }
+                }
+                None => {
+                    tracing::warn!("overlay warmup: engine gone before publish");
+                    Self::set_overlay_warmup_state(
+                        overlay_warmup,
+                        OverlayWarmupState::Skipped("engine unavailable".to_owned()),
+                    );
+                }
+            },
+            Err(e) => {
+                tracing::warn!("overlay warmup: engine lock error at publish: {e}");
+                Self::set_overlay_warmup_state(
+                    overlay_warmup,
+                    OverlayWarmupState::Failed(format!("engine lock error: {e}")),
+                );
+            }
+        }
+    }
+
+    fn set_overlay_warmup_state(
+        overlay_warmup: &Arc<Mutex<OverlayWarmupState>>,
+        state: OverlayWarmupState,
+    ) {
+        if let Ok(mut guard) = overlay_warmup.lock() {
+            *guard = state;
         }
     }
 
@@ -1144,6 +1334,7 @@ impl SharedState {
                 Arc::clone(&self.search_engine),
                 Arc::clone(&self.index_progress),
                 Arc::clone(&self.semantic_runtime),
+                Arc::clone(&self.overlay_warmup),
                 Arc::clone(&self.background_indexers),
                 root,
                 watcher_ready,
