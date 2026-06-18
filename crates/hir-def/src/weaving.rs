@@ -13,6 +13,7 @@
 use syntax::{SyntaxKind, SyntaxNode};
 
 use crate::extension_merge::annotation_first_string_arg;
+use crate::symbol_tree::MethodSymbol;
 
 /// Interned identity of a *weaving* extension module: the (ext, base) file pair whose
 /// own bodies are inferred with the base module as a same-module sibling fallback.
@@ -64,6 +65,63 @@ pub fn interceptor_target(method: &SyntaxNode) -> Option<Interception> {
     KINDS.into_iter().find_map(|(ann_kind, kind)| {
         annotation_first_string_arg(method, ann_kind).map(|target| Interception { kind, target })
     })
+}
+
+/// A way an interceptor method's signature diverges from the base method it weaves onto.
+///
+/// 1C requires every weaving method to declare the same parameter list as the extended
+/// method "up to the `Знач` keyword" and, for a `&Вместо` replacement, the same
+/// procedure/function kind (an extended *function* may only be replaced, and the
+/// replacement must itself be a function). Parameter values are shared across the whole
+/// chain at runtime, so an arity or by-value divergence is a genuine applicability defect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignatureMismatch {
+    /// The interceptor declares a different number of parameters than the base method.
+    ParamCount { base: usize, interceptor: usize },
+    /// Positional parameter `index` (0-based) differs in its by-value (`Знач`) flag.
+    /// `param` is the interceptor's name for that position; `base_is_val` is the base
+    /// method's declaration.
+    ByVal { index: usize, param: String, base_is_val: bool },
+    /// A `&Вместо` interceptor's procedure/function kind differs from the base method.
+    /// `base_is_function` is the base method's kind (the kind the interceptor must match).
+    MethodKind { base_is_function: bool },
+}
+
+/// Compare a weaving interceptor's signature against the base method it targets, returning
+/// the first divergence (if any) in the order: method kind (`&Вместо` only) → parameter
+/// count → first by-value flag difference. Returns `None` when the signatures are
+/// equivalent for the purposes of extension applicability.
+///
+/// The procedure/function check applies only to [`InterceptionKind::Around`]: `&Перед` /
+/// `&После` carry their own platform constraints (an extended function cannot use them at
+/// all), which are out of scope here — only the parameter shape is validated for those.
+pub fn signature_mismatch(
+    kind: InterceptionKind,
+    interceptor: &MethodSymbol,
+    base: &MethodSymbol,
+) -> Option<SignatureMismatch> {
+    if kind == InterceptionKind::Around && interceptor.is_function != base.is_function {
+        return Some(SignatureMismatch::MethodKind { base_is_function: base.is_function });
+    }
+
+    if interceptor.params.len() != base.params.len() {
+        return Some(SignatureMismatch::ParamCount {
+            base: base.params.len(),
+            interceptor: interceptor.params.len(),
+        });
+    }
+
+    for (index, (ip, bp)) in interceptor.params.iter().zip(base.params.iter()).enumerate() {
+        if ip.is_val != bp.is_val {
+            return Some(SignatureMismatch::ByVal {
+                index,
+                param: ip.name.as_str().to_owned(),
+                base_is_val: bp.is_val,
+            });
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]
@@ -144,5 +202,87 @@ mod tests {
     fn missing_target_string_is_rejected() {
         let m = method_node("&Вместо()\nПроцедура Расш1_М()\nКонецПроцедуры");
         assert_eq!(interceptor_target(&m), None);
+    }
+
+    fn method(is_function: bool, params: &[(&str, bool)]) -> MethodSymbol {
+        use crate::name::Name;
+        use crate::symbol_tree::ParamSymbol;
+        use crate::{MethodId, ModuleId};
+        MethodSymbol {
+            id: MethodId { module: ModuleId::new(vfs::FileId(0)), local_id: 0 },
+            name: Name::new("m"),
+            is_function,
+            is_export: false,
+            params: params
+                .iter()
+                .map(|(n, is_val)| ParamSymbol {
+                    name: Name::new(n),
+                    is_val: *is_val,
+                    has_default: false,
+                    type_ref: None,
+                })
+                .collect(),
+            annotations: Vec::new(),
+            source_range: syntax::TextRange::empty(0.into()),
+            docs: None,
+            return_type_ref: None,
+        }
+    }
+
+    #[test]
+    fn identical_signature_has_no_mismatch() {
+        let base = method(false, &[("А", false), ("Б", true)]);
+        let ext = method(false, &[("Парам1", false), ("Парам2", true)]);
+        assert_eq!(signature_mismatch(InterceptionKind::Around, &ext, &base), None);
+    }
+
+    #[test]
+    fn param_count_divergence_is_reported() {
+        let base = method(false, &[("А", false)]);
+        let ext = method(false, &[("А", false), ("Б", false)]);
+        assert_eq!(
+            signature_mismatch(InterceptionKind::Before, &ext, &base),
+            Some(SignatureMismatch::ParamCount { base: 1, interceptor: 2 })
+        );
+    }
+
+    #[test]
+    fn by_val_divergence_is_reported_with_position() {
+        let base = method(false, &[("А", false), ("Б", false)]);
+        let ext = method(false, &[("А", false), ("Б", true)]);
+        assert_eq!(
+            signature_mismatch(InterceptionKind::After, &ext, &base),
+            Some(SignatureMismatch::ByVal { index: 1, param: "Б".into(), base_is_val: false })
+        );
+    }
+
+    #[test]
+    fn around_kind_divergence_is_reported() {
+        // base is a function, interceptor is a procedure → must match for &Вместо.
+        let base = method(true, &[]);
+        let ext = method(false, &[]);
+        assert_eq!(
+            signature_mismatch(InterceptionKind::Around, &ext, &base),
+            Some(SignatureMismatch::MethodKind { base_is_function: true })
+        );
+    }
+
+    #[test]
+    fn proc_func_kind_is_ignored_for_before_after() {
+        // `&Перед`/`&После` do not carry the kind constraint here; only param shape.
+        let base = method(true, &[("А", false)]);
+        let ext = method(false, &[("А", false)]);
+        assert_eq!(signature_mismatch(InterceptionKind::Before, &ext, &base), None);
+        assert_eq!(signature_mismatch(InterceptionKind::After, &ext, &base), None);
+    }
+
+    #[test]
+    fn kind_divergence_takes_priority_over_param_count() {
+        let base = method(true, &[("А", false)]);
+        let ext = method(false, &[]);
+        assert_eq!(
+            signature_mismatch(InterceptionKind::Around, &ext, &base),
+            Some(SignatureMismatch::MethodKind { base_is_function: true })
+        );
     }
 }

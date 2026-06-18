@@ -21,6 +21,15 @@ const BASE: &str = "Функция Сосед() Экспорт\n\tВозврат
 // (resolvable only through the merge) and a genuinely missing method.
 const EXT: &str = "&ИзменениеИКонтроль(\"Цель\")\nФункция Расш1_Цель()\n#Вставка\n\tЗначение1 = Сосед();\n\tЗначение2 = НетТакого();\n#КонецВставки\n\tВозврат 0;\nКонецФункции";
 
+// Weaving signature check: base has a two-parameter procedure and a one-parameter
+// by-value function the extension can intercept.
+const SIG_BASE: &str = "Процедура ПриЗаписи(Отказ, Параметры) Экспорт\nКонецПроцедуры\n\nФункция Вычислить(Знач А) Экспорт\n\tВозврат А;\nКонецФункции";
+// `&Перед` interceptor drops a parameter (one instead of two) → applicability defect.
+const SIG_EXT_BAD: &str = "&Перед(\"ПриЗаписи\")\nПроцедура Расш1_ПриЗаписи(Отказ)\nКонецПроцедуры";
+// `&Вместо` interceptor mirrors the function signature exactly, including `Знач`.
+const SIG_EXT_GOOD: &str =
+    "&Вместо(\"Вычислить\")\nФункция Расш1_Вычислить(Знач А)\n\tВозврат А;\nКонецФункции";
+
 struct Fixture {
     analysis: Analysis,
     main_file: FileId,
@@ -28,6 +37,10 @@ struct Fixture {
 }
 
 fn setup() -> Fixture {
+    setup_with(BASE, EXT)
+}
+
+fn setup_with(base: &str, ext: &str) -> Fixture {
     let temp = tempfile::tempdir().unwrap();
     let main_root = temp.path().join("src/cf");
     let ext_root = temp.path().join("src/cfe/X");
@@ -51,8 +64,8 @@ fn setup() -> Fixture {
     db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
     db.set_file_source_root(main_file, SourceRootId(0));
     db.set_file_source_root(ext_file, SourceRootId(0));
-    db.set_file_text(main_file, BASE);
-    db.set_file_text(ext_file, EXT);
+    db.set_file_text(main_file, base);
+    db.set_file_text(ext_file, ext);
 
     Fixture { analysis: Analysis::from_database(db), main_file, ext_file }
 }
@@ -104,6 +117,38 @@ fn extension_diagnostics_are_a_stable_superset_without_spurious_inference() {
     assert!(
         !diags.iter().any(|d| d.code == ide::DiagnosticCode::UnresolvedMethodCall),
         "no spurious UnresolvedMethodCall must be published for the merged body; got {:?}",
+        diags.iter().map(|d| (d.code, d.range)).collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn weaving_interceptor_signature_mismatch_is_reported() {
+    let fx = setup_with(SIG_BASE, SIG_EXT_BAD);
+    let diags = fx.analysis.diagnostics(fx.ext_file, &DiagnosticsConfig::all_enabled());
+
+    assert!(
+        diags.iter().any(|d| d.code == ide::DiagnosticCode::WeavingSignatureMismatch),
+        "a &Перед interceptor declaring fewer parameters than the base method must be \
+         reported; got {:?}",
+        diags.iter().map(|d| d.code).collect::<Vec<_>>(),
+    );
+    // The base config file itself never pairs for weaving, so it carries no such diagnostic.
+    let base_diags = fx.analysis.diagnostics(fx.main_file, &DiagnosticsConfig::all_enabled());
+    assert!(
+        !base_diags.iter().any(|d| d.code == ide::DiagnosticCode::WeavingSignatureMismatch),
+        "the base module must not produce a weaving signature diagnostic",
+    );
+}
+
+#[test]
+fn weaving_interceptor_matching_signature_is_clean() {
+    let fx = setup_with(SIG_BASE, SIG_EXT_GOOD);
+    let diags = fx.analysis.diagnostics(fx.ext_file, &DiagnosticsConfig::all_enabled());
+
+    assert!(
+        !diags.iter().any(|d| d.code == ide::DiagnosticCode::WeavingSignatureMismatch),
+        "a &Вместо interceptor whose signature matches the base function (including Знач) must \
+         not be flagged; got {:?}",
         diags.iter().map(|d| (d.code, d.range)).collect::<Vec<_>>(),
     );
 }

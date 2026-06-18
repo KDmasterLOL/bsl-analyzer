@@ -124,6 +124,12 @@ const DATAFLOW_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::NumberOfOptionalParams,
 ];
 
+/// Diagnostics that require the configuration-extension merge context (a base module paired
+/// to the analyzed extension file) and therefore run from `apply_extension_merge` rather than
+/// the standalone collector pass. Listed here so the coverage invariant accounts for them.
+pub(crate) const WEAVING_DIAGNOSTICS: &[DiagnosticCode] =
+    &[DiagnosticCode::WeavingSignatureMismatch];
+
 pub fn run_diagnostic<F>(
     name: &'static str,
     ctx: &DiagnosticsContext,
@@ -596,6 +602,7 @@ mod tests {
             ("HIR_DIAGNOSTICS", crate::hir_dispatch::HIR_DIAGNOSTICS),
             ("METADATA_DIAGNOSTICS", crate::metadata_dispatch::METADATA_DIAGNOSTICS),
             ("INFERENCE_DIAGNOSTICS", crate::hir_inference_dispatch::INFERENCE_DIAGNOSTICS),
+            ("WEAVING_DIAGNOSTICS", WEAVING_DIAGNOSTICS),
         ];
 
         let mut code_to_arrays: HashMap<DiagnosticCode, Vec<&str>> = HashMap::new();

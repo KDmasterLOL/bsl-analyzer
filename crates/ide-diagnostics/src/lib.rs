@@ -184,6 +184,17 @@ pub fn apply_extension_merge<'db>(
             safe_collect("merge:weaving_inference", || collect_inference_diagnostics(&w_ctx));
         w_inference.retain(|d| !effective::range_inside_any(d.range, &cav_bodies));
         standalone.extend(w_inference);
+
+        // Structural applicability check: every `&Вместо`/`&Перед`/`&После` interceptor must
+        // declare the same signature as the base method it weaves onto. Independent of the
+        // overlay resolver — compares the extension's own symbols against the base module's.
+        if config.any_enabled(runner::WEAVING_DIAGNOSTICS) {
+            let base_module = hir::ModuleId::new(wid.base_file(db));
+            let base_symbols = std_ctx.symbol_tree_for(base_module);
+            standalone.extend(safe_collect("merge:weaving_signature", || {
+                handlers::weaving_signature_mismatch::check(&std_ctx, &base_symbols)
+            }));
+        }
     }
 
     // Effective pass: the `&ИзменениеИКонтроль` `#Вставка` code spliced into the base module,

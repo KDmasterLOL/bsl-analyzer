@@ -168,6 +168,7 @@ pub enum DiagnosticCode {
     SetPrivilegedMode,
     TransferringParametersBetweenClientAndServer,
     UnsafeFindByCode,
+    WeavingSignatureMismatch,
 
     UnresolvedMethodCall,
     MismatchedArgCount,
