@@ -319,25 +319,37 @@ fn parse_method_docs(comments: &[String]) -> Option<MethodDocs> {
     }
 
     let mut section_indices = Vec::new();
+    let mut in_parameters = false;
+    let mut prev_blank = false;
     for (i, line) in comments.iter().enumerate() {
-        let lower = line.trim().fold_lower();
+        let trimmed = line.trim();
+        let lower = trimmed.fold_lower();
 
-        let returns_header = returns_section_header(line.trim());
+        let returns_header = returns_section_header(trimmed);
         if is_parameters_keyword(&lower) {
+            in_parameters = true;
             section_indices.push(SectionMarker::new(i, Section::Parameters, None));
-        } else if returns_header != ReturnsHeader::NotReturns {
+        } else if returns_header != ReturnsHeader::NotReturns
+            && !is_parameter_named_like_returns(in_parameters, prev_blank, &lower, trimmed)
+        {
+            in_parameters = false;
             let inline_payload = match returns_header {
                 ReturnsHeader::WithPayload(payload) => Some(payload),
                 _ => None,
             };
             section_indices.push(SectionMarker::new(i, Section::Returns, inline_payload));
         } else if is_example_keyword(&lower) {
+            in_parameters = false;
             section_indices.push(SectionMarker::new(i, Section::Examples, None));
         } else if is_call_options_keyword(&lower) {
+            in_parameters = false;
             section_indices.push(SectionMarker::new(i, Section::CallOptions, None));
         } else if is_deprecated_keyword(&lower) {
+            in_parameters = false;
             section_indices.push(SectionMarker::new(i, Section::Deprecated, None));
         }
+
+        prev_blank = trimmed.is_empty();
     }
 
     let purpose_end = section_indices.first().map(|marker| marker.index).unwrap_or(comments.len());
@@ -459,6 +471,24 @@ fn returns_section_header(line: &str) -> ReturnsHeader {
 
 fn is_ambiguous_returns_keyword(keyword: &str) -> bool {
     matches!(keyword, "результат" | "result")
+}
+
+/// Inside the parameters section, a line whose name is the ambiguous returns keyword
+/// `Результат`/`Result` but which is shaped like a parameter entry (`Результат - Тип -
+/// описание`) is a parameter, not the start of a Returns section. Without this guard such
+/// a line would truncate the parameter list and make the parameters after it look
+/// undocumented. A real returns header (`Результат:`) is not a parameter line and is
+/// unaffected.
+fn is_parameter_named_like_returns(
+    in_parameters: bool,
+    prev_blank: bool,
+    lower: &str,
+    line: &str,
+) -> bool {
+    in_parameters
+        && !prev_blank
+        && (lower.starts_with("результат") || lower.starts_with("result"))
+        && parse_parameter_line(line).is_some()
 }
 
 fn payload_looks_like_type_section(payload: &str) -> bool {
@@ -1422,6 +1452,64 @@ mod tests {
         assert!(purpose.contains("Первая строка"));
         assert!(purpose.contains("Вторая строка"));
         assert!(purpose.contains("Третья строка"));
+    }
+
+    #[test]
+    fn test_parameter_named_result_not_treated_as_returns_section() {
+        // A parameter named `Результат` inside the parameters section must not be parsed
+        // as a Returns header; otherwise the parameters after it look undocumented.
+        let comments = vec![
+            "Записывает оценку.".to_string(),
+            "".to_string(),
+            "Параметры:".to_string(),
+            "  ИмяЗадачи - Строка - имя задачи.".to_string(),
+            "  Результат - Структура - результат поиска.".to_string(),
+            "  Оценка - Структура - оценка.".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        let names: Vec<_> = docs.parameters.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["ИмяЗадачи", "Результат", "Оценка"]);
+        assert!(docs.returned_value.is_empty());
+    }
+
+    #[test]
+    fn test_result_with_type_outside_parameters_is_returns() {
+        // Without a parameters section, `Результат - Тип` is still a Returns section.
+        let comments = vec![
+            "Проверяет условие.".to_string(),
+            "".to_string(),
+            "Результат - Булево - истина, если условие выполнено.".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert!(docs.parameters.is_empty());
+        assert_eq!(docs.returned_value.len(), 1);
+        assert_eq!(docs.returned_value[0].name, "Булево");
+    }
+
+    #[test]
+    fn test_result_block_after_blank_line_is_returns_not_parameter() {
+        // A blank line ends the parameter list, so a following `Результат - Тип` block is
+        // the Returns section (no explicit `Возвращаемое значение:` header) and must not
+        // be absorbed as an extra parameter.
+        let comments = vec![
+            "Определяет, является ли организация юридическим лицом.".to_string(),
+            "".to_string(),
+            "Параметры:".to_string(),
+            "  Организация - СправочникСсылка.Организации - организация.".to_string(),
+            "".to_string(),
+            "Результат - Булево - Истина, если это юридическое лицо.".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert_eq!(docs.parameters.len(), 1);
+        assert_eq!(docs.parameters[0].name, "Организация");
+        assert_eq!(docs.returned_value.len(), 1);
+        assert_eq!(docs.returned_value[0].name, "Булево");
     }
 
     #[test]
