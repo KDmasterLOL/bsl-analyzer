@@ -35,6 +35,13 @@ const SIG_EXT_GOOD: &str =
 const SIG_EXT_FUNC_AFTER: &str =
     "&После(\"Вычислить\")\nПроцедура Расш1_Вычислить()\nКонецПроцедуры";
 
+// `ПродолжитьВызов` re-enters the base method, so its argument count must be valid for it.
+const PROCEED_BASE: &str = "Функция Вычислить(Знач А, Б) Экспорт\n\tВозврат А;\nКонецФункции";
+// Interceptor signature matches the base (two params), but `ПродолжитьВызов` passes only one.
+const PROCEED_EXT_BAD: &str = "&Вместо(\"Вычислить\")\nФункция Расш1_Вычислить(Знач А, Б)\n\tВозврат ПродолжитьВызов(А);\nКонецФункции";
+// `ПродолжитьВызов` passes both parameters → a valid call to the base method.
+const PROCEED_EXT_GOOD: &str = "&Вместо(\"Вычислить\")\nФункция Расш1_Вычислить(Знач А, Б)\n\tВозврат ПродолжитьВызов(А, Б);\nКонецФункции";
+
 struct Fixture {
     analysis: Analysis,
     main_file: FileId,
@@ -174,6 +181,33 @@ fn weaving_before_after_on_function_is_not_applicable() {
     assert!(
         !diags.iter().any(|d| d.code == ide::DiagnosticCode::WeavingSignatureMismatch),
         "an inapplicable annotation must suppress the signature diagnostic; got {:?}",
+        diags.iter().map(|d| (d.code, d.range)).collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn proceed_with_call_wrong_arg_count_is_reported() {
+    let fx = setup_with(PROCEED_BASE, PROCEED_EXT_BAD);
+    let diags = fx.analysis.diagnostics(fx.ext_file, &DiagnosticsConfig::all_enabled());
+
+    // The only call in the interceptor is `ПродолжитьВызов(А)`; it re-enters the two-parameter
+    // base method with one argument → a mismatched argument count.
+    assert!(
+        diags.iter().any(|d| d.code == ide::DiagnosticCode::MismatchedArgCount),
+        "ПродолжитьВызов passing too few arguments for the base method must be reported; got {:?}",
+        diags.iter().map(|d| d.code).collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn proceed_with_call_matching_arg_count_is_clean() {
+    let fx = setup_with(PROCEED_BASE, PROCEED_EXT_GOOD);
+    let diags = fx.analysis.diagnostics(fx.ext_file, &DiagnosticsConfig::all_enabled());
+
+    assert!(
+        !diags.iter().any(|d| d.code == ide::DiagnosticCode::MismatchedArgCount),
+        "ПродолжитьВызов passing the base method's full argument list must not be flagged; \
+         got {:?}",
         diags.iter().map(|d| (d.code, d.range)).collect::<Vec<_>>(),
     );
 }

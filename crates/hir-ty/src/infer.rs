@@ -297,6 +297,13 @@ pub struct InferenceContext<'db> {
     /// `&Перед`/`&После`, and module-code bodies → byte-identical platform-default typing.
     proceed_return: Option<TypeId>,
 
+    /// Arity `(required_count, total_count)` of the base method a bare `ПродолжитьВызов(...)`
+    /// re-enters, present only when inferring a `&Вместо` (Around) interceptor under weaving.
+    /// The call must pass a valid argument count for the base method; unlike
+    /// [`Self::proceed_return`] this is set whenever the base method resolves (a procedure base
+    /// has no informative return but its arity is still checked). `None` everywhere else.
+    proceed_arity: Option<(usize, usize)>,
+
     owner: DefWithBodyId,
 
     body: Arc<Body>,
@@ -476,6 +483,7 @@ impl<'db> InferenceContext<'db> {
             local_effective_returns: None,
             weaving_base: None,
             proceed_return: None,
+            proceed_arity: None,
             owner,
             body: Arc::clone(body),
             var_types: FxHashMap::default(),
@@ -543,6 +551,13 @@ impl<'db> InferenceContext<'db> {
     /// than the platform global's generic return. See [`Self::proceed_return`].
     pub fn set_proceed_return(&mut self, ty: TypeId) {
         self.proceed_return = Some(ty);
+    }
+
+    /// Weaving inference of a `&Вместо` interceptor: supply the base method's arity so a bare
+    /// `ПродолжитьВызов(...)` in this body is validated as a call to that method (it re-enters
+    /// it). See [`Self::proceed_arity`].
+    pub fn set_proceed_arity(&mut self, required_count: usize, total_count: usize) {
+        self.proceed_arity = Some((required_count, total_count));
     }
 
     /// In effective inference, prefer a LOCAL method's CHANGED-body return over the value
@@ -1761,13 +1776,26 @@ impl<'db> InferenceContext<'db> {
                     self.db.union(sigs.iter().map(|s| s.ret).collect())
                 };
                 // Weaving `&Вместо`: a bare `ПродолжитьВызов(...)` invokes the original base
-                // method, so its result is that method's return type, not the platform global's
-                // generic return. Applied after arity validation above so the existing arg-count
-                // diagnostics and the hir-def `WrongUseFunctionProceedWithCall` lowering are
-                // untouched. `proceed_return` is `None` in every other context → no change.
-                if let Some(proceed_ty) = self.proceed_return {
-                    if is_proceed_with_call_name(&name) {
+                // method, so (a) its result is that method's return type, not the platform
+                // global's generic return, and (b) it must pass a valid argument count for that
+                // method — the platform global is variadic, so the arity check above never fires
+                // and the base-method arity is enforced here instead. Both apply only inside a
+                // `&Вместо` interceptor (`proceed_*` are `None` everywhere else → no change).
+                if is_proceed_with_call_name(&name) {
+                    if let Some(proceed_ty) = self.proceed_return {
                         ret = proceed_ty;
+                    }
+                    if let Some((required, total)) = self.proceed_arity {
+                        if args.len() < required || args.len() > total {
+                            self.push_inference_diagnostic(
+                                InferenceDiagnostic::MismatchedArgCount {
+                                    call_expr: callee,
+                                    required_count: required,
+                                    total_count: total,
+                                    found: args.len(),
+                                },
+                            );
+                        }
                     }
                 }
                 self.expr_types.insert(callee, self.db.unknown());
@@ -2437,13 +2465,44 @@ pub fn infer_effective<'db>(
     let module_bodies = hir_def::effective_module::module_bodies_effective(db, eid);
     let symbol_tree = hir_def::effective_module::symbol_tree_effective(db, eid);
 
-    // Pass 1: infer each method body once to capture its EFFECTIVE return type. A bare
+    // Only the `&ИзменениеИКонтроль` methods actually differ from the base module; every other
+    // body is copied verbatim. A copied body's diagnostics are dropped by the orchestrator's
+    // `#Вставка` remap, and its effective return equals the base return (identical body +
+    // base-keyed sibling resolution), so `effective_returns` would hold exactly the value the
+    // base fallback already yields for it. Restricting both passes to the changed methods is
+    // therefore output-identical, while avoiding a re-inference of the whole — often large —
+    // base module twice per extension file (the dominant cost on heavily-extended configs).
+    let changed_ids: rustc_hash::FxHashSet<u32> = {
+        let ext_parse = db.parse(eid.ext_file(db));
+        let changed_targets: rustc_hash::FxHashSet<String> = ext_parse
+            .syntax_node()
+            .children()
+            .filter(|n| {
+                matches!(
+                    n.kind(),
+                    syntax::SyntaxKind::PROCEDURE_DEF | syntax::SyntaxKind::FUNCTION_DEF
+                )
+            })
+            .filter_map(|m| hir_def::extension_merge::extract_change_and_validate(&m))
+            .map(|cc| cc.target.fold_lower())
+            .collect();
+        symbol_tree
+            .methods()
+            .filter(|m| changed_targets.contains(&m.name.as_str().fold_lower()))
+            .map(|m| m.id.local_id)
+            .collect()
+    };
+
+    // Pass 1: infer each CHANGED method body once to capture its EFFECTIVE return type. A bare
     // same-module call to a `&ИзменениеИКонтроль` target must see its changed body's
     // return, not the base body's. Module code has no return, so only methods contribute.
     // This resolves one level of method→method return dependency; deeper chains keep the
     // base inference's same pragmatic bound (no panic, no infinite loop).
     let mut effective_returns: FxHashMap<u32, TypeId> = FxHashMap::default();
     for (local_id, body) in module_bodies.iter_bodies() {
+        if !changed_ids.contains(&local_id) {
+            continue;
+        }
         let mut ctx = InferenceContext::new_effective(
             db,
             base_file,
@@ -2487,6 +2546,9 @@ pub fn infer_effective<'db>(
     }
 
     for (local_id, body) in module_bodies.iter_bodies() {
+        if !changed_ids.contains(&local_id) {
+            continue;
+        }
         let mut ctx = InferenceContext::new_effective(
             db,
             base_file,
@@ -2531,14 +2593,17 @@ pub fn infer_weaving<'db>(
     let module_bodies = db.module_bodies(ext_module);
 
     // A `&Вместо("M")` interceptor's body may call `ПродолжитьВызов(...)` to re-enter the
-    // original base method `M`; that call's result is `M`'s return type. Pre-compute, per ext
-    // method `local_id`, the base target's return so the body loop below can thread it into
-    // inference. `&Перед`/`&После` carry no `ПродолжитьВызов`, so they are skipped; an
-    // uninformative base return (Unknown/Undefined) is dropped to preserve the platform default.
+    // original base method `M`. Pre-compute, per ext method `local_id`: (a) `M`'s return type so
+    // the call types as `M`'s result, and (b) `M`'s arity `(required, total)` so the call is
+    // validated as a call to `M`. `&Перед`/`&После` carry no `ПродолжитьВызов`, so they are
+    // skipped. The return is dropped when uninformative (Unknown/Undefined) to preserve the
+    // platform default, but the arity is kept whenever `M` resolves — a procedure base has no
+    // informative return yet its arguments still need checking.
     let ext_symbols = db.symbol_tree(ext_module);
     let base_symbols = db.symbol_tree(base_module);
     let ext_parse = db.parse(ext_file);
     let mut proceed_returns: FxHashMap<u32, TypeId> = FxHashMap::default();
+    let mut proceed_arities: FxHashMap<u32, (usize, usize)> = FxHashMap::default();
     for method in ext_symbols.methods() {
         let Some(node) = method.syntax_node(&ext_parse) else {
             continue;
@@ -2552,6 +2617,12 @@ pub fn infer_weaving<'db>(
         let Some(base_method) = base_symbols.find_method(&Name::new(&interception.target)) else {
             continue;
         };
+        // `required` mirrors `FunctionSignature::required_count`: one past the last
+        // non-defaulted parameter (defaults are trailing in well-formed BSL).
+        let total = base_method.params.len();
+        let required = base_method.params.iter().rposition(|p| !p.has_default).map_or(0, |i| i + 1);
+        proceed_arities.insert(method.id.local_id, (required, total));
+
         let base_input = hir_def::MethodIdInput::new(db, base_method.id);
         let ret = crate::method_graph::method_return_type_query(db, base_input);
         if ret != db.unknown() && ret != db.undefined() {
@@ -2593,6 +2664,9 @@ pub fn infer_weaving<'db>(
         );
         if let Some(ret) = proceed_returns.get(&local_id) {
             ctx.set_proceed_return(*ret);
+        }
+        if let Some(&(required, total)) = proceed_arities.get(&local_id) {
+            ctx.set_proceed_arity(required, total);
         }
         ctx.infer_all();
         fold_body(&mut result, &ctx.finish());

@@ -1291,11 +1291,15 @@ fn infer_effective_uses_changed_method_return_for_sibling_call() {
     db.set_file_source_root(main_file, SourceRootId(0));
     db.set_file_source_root(ext_file, SourceRootId(0));
 
+    // The caller is ALSO a change-and-validate method: `infer_effective` materialises only the
+    // changed methods (a copied-base body's inference is never published — its diagnostics are
+    // dropped by the `#Вставка` remap and the extension file shows only the changed methods), so
+    // the sibling that observes the changed return must itself be one of them.
     db.set_file_text(
         main_file,
         "Функция Цель() Экспорт\n\tВозврат \"строка\";\nКонецФункции\n\
          \n\
-         Функция Вызывающий() Экспорт\n\tРез = Цель();\n\tВозврат Рез;\nКонецФункции",
+         Функция Вызывающий() Экспорт\n\tВозврат 1;\nКонецФункции",
     );
     db.set_file_text(
         ext_file,
@@ -1306,6 +1310,17 @@ fn infer_effective_uses_changed_method_return_for_sibling_call() {
          #КонецУдаления\n\
          #Вставка\n\
          \tВозврат 42;\n\
+         #КонецВставки\n\
+         КонецФункции\n\
+         \n\
+         &ИзменениеИКонтроль(\"Вызывающий\")\n\
+         Функция Расш1_Вызывающий()\n\
+         #Удаление\n\
+         \tВозврат 1;\n\
+         #КонецУдаления\n\
+         #Вставка\n\
+         \tРез = Цель();\n\
+         \tВозврат Рез;\n\
          #КонецВставки\n\
          КонецФункции",
     );
@@ -1320,7 +1335,7 @@ fn infer_effective_uses_changed_method_return_for_sibling_call() {
     assert_eq!(
         result.var_types.get(&"Рез".fold_lower()).copied(),
         Some(number),
-        "the changed `Цель` returns Число (Возврат 42), so the sibling's `Знач = Цель()` \
+        "the changed `Цель` returns Число (Возврат 42), so the changed sibling's `Рез = Цель()` \
          must type as Число via effective-return threading; var_types = {:?}",
         result.var_types
     );

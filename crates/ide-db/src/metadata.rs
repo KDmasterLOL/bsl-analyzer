@@ -95,6 +95,25 @@ pub fn load_configuration<'db>(
     Arc::new(config)
 }
 
+/// The base configuration merged with one extension's overlay, memoised per
+/// (base, extension) path pair. `Configuration::merged_with_extension` deep-clones the
+/// whole base configuration, so without this every metadata lookup of every extension
+/// file re-cloned the entire configuration — the dominant cost when analysing a
+/// heavily-extended project. Keyed on the two path inputs (which carry the config-root
+/// revisions), so the merge runs once per extension and re-runs only when a config
+/// actually changes. The result is identical to the inline merge, just shared.
+#[salsa::tracked(lru = 1024)]
+pub fn merged_configuration<'db>(
+    db: &'db dyn salsa::Database,
+    main_input: ConfigurationPathInput<'db>,
+    extension_input: ConfigurationPathInput<'db>,
+) -> Arc<Configuration> {
+    let _span = tracing::info_span!("merged_configuration").entered();
+    let main = load_configuration(db, main_input);
+    let extension = load_configuration(db, extension_input);
+    Arc::new(main.merged_with_extension(&extension))
+}
+
 /// The composing files of a single metadata object: the main `<Name>.xml` and an
 /// optional `Ext/Predefined.xml`, plus the kind that selects the parser. Interned
 /// so [`parse_mdo_query`] keys on the file identities; the per-file content
