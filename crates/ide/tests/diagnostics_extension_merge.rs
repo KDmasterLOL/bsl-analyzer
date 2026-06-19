@@ -177,3 +177,33 @@ fn weaving_before_after_on_function_is_not_applicable() {
         diags.iter().map(|d| (d.code, d.range)).collect::<Vec<_>>(),
     );
 }
+
+#[test]
+fn goto_definition_on_weaving_annotation_jumps_to_base_method() {
+    let fx = setup_with(SIG_BASE, SIG_EXT_GOOD);
+    // Cursor on the `Вычислить` name inside the `&Вместо("...")` annotation string (its first
+    // occurrence in the ext text is the annotation argument, before the prefixed method name).
+    let offset = SIG_EXT_GOOD.find("Вычислить").expect("annotation target present") as u32;
+
+    let target = fx
+        .analysis
+        .goto_definition(fx.ext_file, offset)
+        .expect("goto-definition must resolve the annotation target to the base method");
+    assert_eq!(target.file_id, fx.main_file, "must navigate to the base module file");
+    assert_eq!(target.name, "Вычислить");
+}
+
+#[test]
+fn goto_definition_on_change_and_validate_annotation_jumps_to_base_method() {
+    // `&ИзменениеИКонтроль("Цель")` is not a weaving interceptor but still names a base method;
+    // goto-definition resolves it through the same path.
+    let fx = setup();
+    let offset = EXT.find("Цель").expect("annotation target present") as u32;
+
+    let target = fx
+        .analysis
+        .goto_definition(fx.ext_file, offset)
+        .expect("goto-definition must resolve the change-and-validate target to the base method");
+    assert_eq!(target.file_id, fx.main_file, "must navigate to the base module file");
+    assert_eq!(target.name, "Цель");
+}

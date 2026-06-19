@@ -151,7 +151,7 @@ pub use hir_def::effective_module::{
     symbol_tree_effective, EffectiveModule, EffectiveModuleId,
 };
 pub use hir_def::extension_merge::{
-    extract_change_and_validate, pair_base_module_path, Origin, Segment,
+    extract_change_and_validate, pair_base_module_path, unquote_bsl_string, Origin, Segment,
 };
 pub use hir_def::weaving::{
     interception_applicable, interceptor_target, signature_mismatch, Interception,

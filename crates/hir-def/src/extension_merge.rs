@@ -116,7 +116,9 @@ pub(crate) fn annotation_first_string_arg(method: &SyntaxNode, kind: SyntaxKind)
     Some(unquote_bsl_string(string.text()))
 }
 
-pub(crate) fn unquote_bsl_string(raw: &str) -> String {
+/// Strip the surrounding quotes of a BSL string literal and collapse the doubled `""` escape.
+/// Public so goto-definition can read the base method name written in an extension annotation.
+pub fn unquote_bsl_string(raw: &str) -> String {
     raw.strip_prefix('"').and_then(|s| s.strip_suffix('"')).unwrap_or(raw).replace("\"\"", "\"")
 }
 
