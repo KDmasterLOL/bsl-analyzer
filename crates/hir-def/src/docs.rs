@@ -54,6 +54,14 @@ impl MethodDocs {
         self.link.is_some()
     }
 
+    /// A `См.` / `See` cross-reference in the method's free-text description (purpose).
+    /// bsl-ls treats such a reference as documentation of the whole method and does not
+    /// demand a parameter section. References inside parameter lines are excluded, since
+    /// those describe individual parameters rather than the method as a whole.
+    pub fn has_see_reference(&self) -> bool {
+        self.purpose.as_deref().is_some_and(contains_see_reference)
+    }
+
     pub fn is_deprecated(&self) -> bool {
         self.deprecation.is_some()
     }
@@ -518,6 +526,32 @@ fn is_deprecated_keyword(lower_line: &str) -> bool {
 fn is_hyperlink_line(line: &str) -> bool {
     let lower = line.fold_lower();
     lower.starts_with("см.") || lower.starts_with("see ")
+}
+
+/// Whether the text contains a `См.` / `See` cross-reference (not only at the start of a
+/// line), e.g. `Продолжение процедуры (см. выше)`. Mirrors bsl-ls, which parses such
+/// references as documentation links. A Russian `см.` must sit on a word boundary and be
+/// followed by a reference word, so the unit abbreviation `5 см.` is not mistaken for a
+/// link. The English form keeps bsl-ls's line-start `see ` pattern to avoid matching the
+/// common verb mid-sentence.
+fn contains_see_reference(text: &str) -> bool {
+    const MARKER: &str = "см.";
+    let lower = text.fold_lower();
+
+    for (idx, _) in lower.match_indices(MARKER) {
+        let before = &lower[..idx];
+        // Part of a longer word (e.g. a compound) — not the "См." abbreviation.
+        let preceded_by_letter = matches!(before.chars().next_back(), Some(c) if c.is_alphabetic());
+        // A unit abbreviation such as `5 см.` is preceded by a number, not a link.
+        let preceded_by_number =
+            matches!(before.trim_end().chars().next_back(), Some(c) if c.is_numeric());
+        let followed_by_word = matches!(lower[idx + MARKER.len()..].trim_start().chars().next(), Some(c) if c.is_alphabetic());
+        if !preceded_by_letter && !preceded_by_number && followed_by_word {
+            return true;
+        }
+    }
+
+    lower.lines().any(|line| line.trim_start().starts_with("see "))
 }
 
 fn parse_parameters(lines: &[String]) -> Vec<ParameterDoc> {
@@ -1447,6 +1481,57 @@ mod tests {
         );
         assert_eq!(docs.parameters[0].types[0].name, "Число");
         assert_eq!(docs.parameters[1].name, "Другой");
+    }
+
+    #[test]
+    fn test_method_docs_detects_inline_see_reference() {
+        let comments = vec!["Продолжение процедуры (см. выше).".to_string()];
+        let docs = parse_method_docs(&comments).unwrap();
+        assert!(docs.has_see_reference());
+        assert!(!docs.is_hyperlink(), "a mid-line см. is not a whole-doc hyperlink");
+    }
+
+    #[test]
+    fn test_method_docs_no_false_see_reference() {
+        let comments = vec!["Возвращает обработанное значение без ссылок.".to_string()];
+        let docs = parse_method_docs(&comments).unwrap();
+        assert!(!docs.has_see_reference());
+    }
+
+    #[test]
+    fn test_centimeter_abbreviation_is_not_see_reference() {
+        let comments = vec!["Ширина поля равна 5 см. по умолчанию.".to_string()];
+        let docs = parse_method_docs(&comments).unwrap();
+        assert!(!docs.has_see_reference(), "the unit abbreviation '5 см.' is not a link");
+    }
+
+    #[test]
+    fn test_see_reference_with_method_target() {
+        let comments = vec!["Обрабатывает данные (см. ОбщийМодуль.Метод).".to_string()];
+        let docs = parse_method_docs(&comments).unwrap();
+        assert!(docs.has_see_reference());
+    }
+
+    #[test]
+    fn test_english_see_verb_midsentence_is_not_reference() {
+        let comments = vec!["You can see that this works.".to_string()];
+        let docs = parse_method_docs(&comments).unwrap();
+        assert!(!docs.has_see_reference());
+    }
+
+    #[test]
+    fn test_see_reference_inside_parameter_line_is_not_method_link() {
+        let comments = vec![
+            "Устанавливает состояние.".to_string(),
+            "".to_string(),
+            "Параметры:".to_string(),
+            "  Состояние - см. СостояниеЗапроса.".to_string(),
+        ];
+        let docs = parse_method_docs(&comments).unwrap();
+        assert!(
+            !docs.has_see_reference(),
+            "a см. reference inside a parameter line is not a method-level link"
+        );
     }
 
     #[test]

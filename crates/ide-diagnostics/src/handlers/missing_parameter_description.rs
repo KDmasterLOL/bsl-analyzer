@@ -97,7 +97,9 @@ fn check_method(
     }
 
     if !params.is_empty() && param_docs.is_empty() {
-        if is_export {
+        // A `См.`/`See` cross-reference documents the method as a whole; bsl-ls does not
+        // require a parameter section in that case.
+        if is_export && !docs.has_see_reference() {
             diagnostics.push(create_diagnostic(
                 name_range,
                 "Необходимо добавить описание всех параметров метода",
@@ -342,6 +344,16 @@ mod tests {
                 MissingParameterDescription @ 2:11..2:37
                   message: Необходимо добавить описание всех параметров метода
                   severity: Warning"#]],
+        );
+    }
+
+    #[test]
+    fn test_export_method_with_inline_see_reference_does_not_require_parameters() {
+        let code = "// Продолжение процедуры (см. выше).\nПроцедура СохранитьЗавершение(Результат, Параметры) Экспорт\nКонецПроцедуры";
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingParameterDescription,
+            expect![[r#""#]],
         );
     }
 
