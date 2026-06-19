@@ -1,7 +1,6 @@
-use crate::{diagnostics, Diagnostic, DiagnosticsConfig, DiagnosticsContext};
+use crate::{file_diagnostics, Diagnostic, DiagnosticsConfig};
 use base_db::{DiagnosticsConfigId, FileIdInput};
 use ide_db::RootDatabase;
-use ide_db::SalsaProvider;
 use std::sync::Arc;
 
 #[salsa::tracked(lru = 256)]
@@ -17,16 +16,9 @@ pub fn file_diagnostics_query<'db>(
 
     let _span = tracing::info_span!("file_diagnostics_query", file_id = file_id.0,).entered();
 
-    let setup_start = std::time::Instant::now();
-    let config_path_input = ide_db::configuration_path_for_file(db, file_id);
-    let provider = SalsaProvider::new(db, config_path_input);
-    let ctx = DiagnosticsContext::new(&config, file_id, &provider);
-    let setup_ms = setup_start.elapsed().as_millis() as u64;
-
-    let diagnostics = diagnostics(&ctx);
+    let diagnostics = file_diagnostics(db, file_id, &config);
     tracing::info!(
         file_id = file_id.0,
-        setup_ms,
         diagnostic_count = diagnostics.len(),
         elapsed_ms = total_start.elapsed().as_millis() as u64,
         "file diagnostics query complete",

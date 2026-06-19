@@ -636,6 +636,16 @@ fn has_platform_type_check(condition_node: &SyntaxNode) -> bool {
     text.contains("linux") || text.contains("windows") || text.contains("macos")
 }
 
+/// A `#Вставка` / `#Удаление` directive region carries extension code whose body is kept as raw
+/// tokens in the standalone parse and is materialized only by the configuration merge. A branch
+/// holding such a region is therefore not an empty code block, even though it lowers to no
+/// statements on its own.
+fn has_extension_directive(stmt_list: &SyntaxNode) -> bool {
+    stmt_list
+        .children()
+        .any(|n| matches!(n.kind(), SyntaxKind::PRE_INSERT_DIR | SyntaxKind::PRE_DELETE_DIR))
+}
+
 fn lower_if_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
     let mut children = node.children().peekable();
 
@@ -656,7 +666,9 @@ fn lower_if_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
     let then_stmt_list = children.next().filter(|n| n.kind() == SyntaxKind::STMT_LIST);
     let then_branch = then_stmt_list.as_ref().map(|n| lower_stmt_list(ctx, n)).unwrap_or_default();
 
-    if then_branch.is_empty() && then_stmt_list.is_some() {
+    if then_branch.is_empty()
+        && then_stmt_list.as_ref().is_some_and(|list| !has_extension_directive(list))
+    {
         let range = find_if_then_range(node);
         ctx.emit(BodyDiagnostic::EmptyCodeBlock { range });
     }
@@ -675,7 +687,9 @@ fn lower_if_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
             let stmt_list_node = elsif_children.find(|n| n.kind() == SyntaxKind::STMT_LIST);
             let body = stmt_list_node.as_ref().map(|n| lower_stmt_list(ctx, n)).unwrap_or_default();
 
-            if body.is_empty() && stmt_list_node.is_some() {
+            if body.is_empty()
+                && stmt_list_node.as_ref().is_some_and(|list| !has_extension_directive(list))
+            {
                 let range = find_elsif_then_range(&elsif);
                 ctx.emit(BodyDiagnostic::EmptyCodeBlock { range });
             }
@@ -693,7 +707,7 @@ fn lower_if_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
             else_clause.children().find(|n| n.kind() == SyntaxKind::STMT_LIST).map(|n| {
                 let stmts = lower_stmt_list(ctx, &n);
 
-                if stmts.is_empty() {
+                if stmts.is_empty() && !has_extension_directive(&n) {
                     let range = find_else_range(&else_clause);
                     ctx.emit(BodyDiagnostic::EmptyCodeBlock { range });
                 }
@@ -742,7 +756,7 @@ fn lower_while_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
         .map(|n| {
             let stmts = lower_stmt_list(ctx, &n);
 
-            if stmts.is_empty() {
+            if stmts.is_empty() && !has_extension_directive(&n) {
                 let range = find_while_do_range(node);
                 ctx.emit(BodyDiagnostic::EmptyCodeBlock { range });
             }
@@ -793,7 +807,7 @@ fn lower_for_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
         .map(|n| {
             let stmts = lower_stmt_list(ctx, &n);
 
-            if stmts.is_empty() {
+            if stmts.is_empty() && !has_extension_directive(&n) {
                 let range = find_for_do_range(node);
                 ctx.emit(BodyDiagnostic::EmptyCodeBlock { range });
             }
@@ -849,7 +863,7 @@ fn lower_for_each_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt>
         .map(|n| {
             let stmts = lower_stmt_list(ctx, &n);
 
-            if stmts.is_empty() {
+            if stmts.is_empty() && !has_extension_directive(&n) {
                 let range = find_foreach_do_range(node);
                 ctx.emit(BodyDiagnostic::EmptyCodeBlock { range });
             }

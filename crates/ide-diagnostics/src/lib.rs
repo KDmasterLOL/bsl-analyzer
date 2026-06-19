@@ -2,6 +2,7 @@ mod code;
 mod config;
 mod context;
 pub mod docs;
+mod effective;
 mod hir_dispatch;
 mod hir_inference_dispatch;
 mod metadata;
@@ -90,6 +91,128 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     deduplicate_diagnostics(&mut result);
 
     result
+}
+
+/// File diagnostics with `&ИзменениеИКонтроль` extension merging applied.
+///
+/// Runs the ordinary standalone pass, then — only for an extension module that pairs to a
+/// base with a usable change-and-validate splice — adds the inference diagnostics computed
+/// against the spliced effective module, remapped to the `#Вставка` ranges the author
+/// wrote. Copied-base inference false positives inside change-and-validate bodies (which
+/// reference base-module siblings absent from the standalone ext file) are suppressed.
+///
+/// For every ordinary module — and every extension file without a usable change — this is
+/// byte-identical to the standalone `diagnostics` pass (`effective_target` returns `None`).
+pub fn file_diagnostics(
+    db: &dyn ide_db::RootDatabase,
+    file_id: vfs::FileId,
+    config: &DiagnosticsConfig,
+) -> Vec<Diagnostic> {
+    let config_path_input = ide_db::configuration_path_for_file(db, file_id);
+    let provider = ide_db::SalsaProvider::new(db, config_path_input);
+    let standalone = diagnostics(&DiagnosticsContext::new(config, file_id, &provider));
+    apply_extension_merge(db, file_id, config, config_path_input, None, standalone)
+}
+
+/// Augment a file's already-computed standalone diagnostics with the configuration-extension
+/// merge, when `file_id` is an extension module paired to a base. Two complementary base-aware
+/// passes supersede the standalone (base-blind) inference diagnostics: the *weaving* pass
+/// re-infers the extension's own bodies with the base module as a same-module sibling fallback
+/// (`&Вместо`/`&Перед`/`&После` interceptors and helpers), and the *effective* pass splices
+/// `&ИзменениеИКонтроль` `#Вставка` code into the base and remaps its diagnostics back. For
+/// every other file this returns `standalone` unchanged.
+///
+/// Factored out of [`file_diagnostics`] so the batch CLI (which builds its provider
+/// `with_file_set` and a run-global configuration path) can reuse the exact same merge while
+/// keeping its own standalone provider construction — pass the same `config_path_input` and
+/// `file_set` the standalone pass used so the effective pass resolves metadata/cross-module
+/// context identically.
+pub fn apply_extension_merge<'db>(
+    db: &'db dyn ide_db::RootDatabase,
+    file_id: vfs::FileId,
+    config: &DiagnosticsConfig,
+    config_path_input: Option<ide_db::metadata::ConfigurationPathInput<'db>>,
+    file_set: Option<&'db vfs::file_set::FileSet>,
+    mut standalone: Vec<Diagnostic>,
+) -> Vec<Diagnostic> {
+    let weaving = ide_db::weaving_target(db, file_id);
+    let effective = ide_db::effective_target(db, file_id)
+        .and_then(|eid| hir::effective_module_text(db, eid).map(|effmod| (eid, effmod)));
+
+    // Ordinary module (and any extension file with no resolvable base): byte-identical to the
+    // standalone pass.
+    if weaving.is_none() && effective.is_none() {
+        return standalone;
+    }
+
+    let root = db.parse(file_id).syntax_node();
+    // `&ИзменениеИКонтроль` method bodies: copied-base statements reference base siblings;
+    // owned by the effective pass (remapped to `#Вставка`), so excluded from the weaving pass.
+    let cav_bodies = effective::cav_body_ranges(&root);
+
+    // Strip the standalone INFERENCE-origin diagnostics by IDENTITY, recomputed on the same
+    // provider the caller used. Removing by identity — not by `DiagnosticCode` — is essential:
+    // some codes (e.g. `RedundantAccessToObject`, emitted both by the syntactic `ЭтотОбъект.X`
+    // lowering check AND by the inference two-level check) also reach this list from non-
+    // inference collectors, and those must survive. The base-aware passes below republish only
+    // the inference layer.
+    let std_provider = ide_db::SalsaProvider::with_file_set(db, config_path_input, file_set);
+    let std_ctx = DiagnosticsContext::new(config, file_id, &std_provider);
+    let mut std_inference =
+        safe_collect("merge:standalone_inference", || collect_inference_diagnostics(&std_ctx));
+    standalone.retain(|d| match std_inference.iter().position(|s| s == d) {
+        Some(pos) => {
+            std_inference.swap_remove(pos);
+            false
+        }
+        None => true,
+    });
+
+    // Weaving pass: re-infer the extension's own bodies with the paired base module as a
+    // same-module sibling fallback. `infer_weaving` is equivalent to standalone inference
+    // except where a base sibling resolves — `weaving_base` feeds only purely-additive
+    // resolution sites (resolver `base_fallback` + the bare-call site), so every difference is
+    // a legitimate base-sibling resolution and its downstream type cascade, never a spurious
+    // one. Adopt it everywhere except change-and-validate bodies (the effective pass owns
+    // those). Only the inference collector runs (reads `infer` + `module_bodies`, both
+    // ext-native here → one coherent source map).
+    if let Some(wid) = weaving {
+        let w_provider = ide_db::SalsaProvider::with_file_set(db, config_path_input, file_set)
+            .with_weaving(wid, file_id);
+        let w_ctx = DiagnosticsContext::new(config, file_id, &w_provider);
+        let mut w_inference =
+            safe_collect("merge:weaving_inference", || collect_inference_diagnostics(&w_ctx));
+        w_inference.retain(|d| !effective::range_inside_any(d.range, &cav_bodies));
+        standalone.extend(w_inference);
+
+        // Structural applicability check: every `&Вместо`/`&Перед`/`&После` interceptor must
+        // declare the same signature as the base method it weaves onto. Independent of the
+        // overlay resolver — compares the extension's own symbols against the base module's.
+        if config.any_enabled(runner::WEAVING_DIAGNOSTICS) {
+            let base_module = hir::ModuleId::new(wid.base_file(db));
+            let base_symbols = std_ctx.symbol_tree_for(base_module);
+            standalone.extend(safe_collect("merge:weaving_signature", || {
+                handlers::weaving_signature_mismatch::check(&std_ctx, &base_symbols)
+            }));
+            standalone.extend(safe_collect("merge:weaving_annotation", || {
+                handlers::weaving_annotation_not_applicable::check(&std_ctx, &base_symbols)
+            }));
+        }
+    }
+
+    // Effective pass: the `&ИзменениеИКонтроль` `#Вставка` code spliced into the base module,
+    // its diagnostics remapped from effective-text coordinates back to the extension source.
+    if let Some((eid, effmod)) = effective {
+        let eff_provider = ide_db::SalsaProvider::with_file_set(db, config_path_input, file_set)
+            .with_effective(eid, file_id);
+        let eff_ctx = DiagnosticsContext::new(config, file_id, &eff_provider);
+        let eff_inference =
+            safe_collect("merge:effective_inference", || collect_inference_diagnostics(&eff_ctx));
+        standalone.extend(effective::remap_inserted(eff_inference, &effmod.segments));
+    }
+
+    deduplicate_diagnostics(&mut standalone);
+    standalone
 }
 
 fn safe_collect(name: &str, f: impl FnOnce() -> Vec<Diagnostic>) -> Vec<Diagnostic> {

@@ -23,6 +23,62 @@ pub fn configuration_path_for_file<'db>(
     ))
 }
 
+/// The effective `&ИзменениеИКонтроль` module identity for an extension module file, or
+/// `None` when the file is not an extension module, has no resolvable base counterpart, or
+/// carries no usable change-and-validate splice (in which case ordinary analysis applies).
+///
+/// Pairing is path-structural via [`hir::pair_base_module_path`] over `all_config_paths`
+/// (base root is the unlabelled entry); the candidate base path is resolved to a `FileId`
+/// in the extension file's own source root. The final gate is
+/// [`hir::effective_module_text`] being `Some`, so callers can construct an
+/// `EffectiveModuleId` from the result and trust it routes to merged data rather than
+/// silently re-deriving the base module under an effective key.
+pub fn effective_target<'db>(
+    db: &'db dyn RootDatabase,
+    ext_file: vfs::FileId,
+) -> Option<hir::EffectiveModuleId<'db>> {
+    let ext_path = crate::vfs_helpers::get_file_path(db, ext_file)?;
+    let roots = db.all_config_paths();
+    let base_path = hir::pair_base_module_path(&roots, &ext_path)?;
+
+    let source_root = db.file_source_root_input(ext_file).source_root_id(db);
+    let vfs_path = vfs::VfsPath::new(base_path.to_string_lossy().into_owned());
+    let base_file = db.resolve_vfs_path(source_root, &vfs_path)?;
+
+    let eid = hir::EffectiveModuleId::new(db, base_file, ext_file);
+    hir::effective_module_text(db, eid)?;
+    Some(eid)
+}
+
+/// The *weaving* module identity for an extension module file, or `None` when the file
+/// has no resolvable base counterpart. Unlike [`effective_target`] this does NOT require
+/// an `&ИзменениеИКонтроль` splice: weaving (`&Вместо` / `&Перед` / `&После`) applies to
+/// any extension module paired to an existing base, so the only gate is that a distinct
+/// base file resolves.
+///
+/// Pairing is path-structural via [`hir::pair_base_module_path`] over `all_config_paths`
+/// (base root is the unlabelled entry); the candidate base path is resolved to a `FileId`
+/// in the extension file's own source root. Returns `None` when the resolved base file is
+/// the extension file itself (no cross-module fallback to add).
+pub fn weaving_target<'db>(
+    db: &'db dyn RootDatabase,
+    ext_file: vfs::FileId,
+) -> Option<hir::WeavingModuleId<'db>> {
+    let ext_path = crate::vfs_helpers::get_file_path(db, ext_file)?;
+    let roots = db.all_config_paths();
+    let base_path = hir::pair_base_module_path(&roots, &ext_path)?;
+
+    let source_root = db.file_source_root_input(ext_file).source_root_id(db);
+    let vfs_path = vfs::VfsPath::new(base_path.to_string_lossy().into_owned());
+    let base_file = db.resolve_vfs_path(source_root, &vfs_path)?;
+
+    if base_file == ext_file {
+        return None;
+    }
+
+    Some(hir::WeavingModuleId::new(db, ext_file, base_file))
+}
+
 #[salsa::tracked(lru = 128)]
 pub fn module_metadata_query<'db>(
     db: &'db dyn RootDatabase,

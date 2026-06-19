@@ -1,6 +1,6 @@
-use hir::{Definition, SemanticSymbol, SemanticSymbolKind, Semantics};
+use hir::{Definition, ModuleId, SemanticSymbol, SemanticSymbolKind, Semantics};
 use ide_db::RootDatabase;
-use syntax::TextSize;
+use syntax::{ast, ast::AstNode, SyntaxKind, TextSize};
 use vfs::FileId;
 
 use crate::{NavigationTarget, SymbolKind};
@@ -14,8 +14,56 @@ pub fn goto_definition<DB: RootDatabase>(
         tracing::info_span!("goto_definition", ?file_id, offset = u32::from(offset)).entered();
 
     let sema = Semantics::new(db);
-    let symbol = sema.symbol_at(file_id, offset)?;
-    semantic_symbol_to_navigation_target(db, &symbol)
+    if let Some(symbol) = sema.symbol_at(file_id, offset) {
+        if let Some(nav) = semantic_symbol_to_navigation_target(db, &symbol) {
+            return Some(nav);
+        }
+    }
+
+    // Fallback: the cursor is on the base method name inside a configuration-extension
+    // annotation (`&Вместо`/`&Перед`/`&После`/`&ИзменениеИКонтроль`), which carries no
+    // semantic symbol — jump to that method in the paired base module.
+    goto_extension_annotation_target(db, file_id, offset)
+}
+
+/// Resolve goto-definition when `offset` sits on the method-name string of a
+/// configuration-extension annotation. The name resolves to the extended method in the base
+/// module paired with this extension file; returns `None` for every other position.
+fn goto_extension_annotation_target<DB: RootDatabase>(
+    db: &DB,
+    file_id: FileId,
+    offset: TextSize,
+) -> Option<NavigationTarget> {
+    const ANNOTATION_KINDS: [SyntaxKind; 4] = [
+        SyntaxKind::ANN_AROUND,
+        SyntaxKind::ANN_BEFORE,
+        SyntaxKind::ANN_AFTER,
+        SyntaxKind::ANN_CHANGE_AND_VALIDATE,
+    ];
+
+    let root = db.parse(file_id).syntax_node();
+    // The target name is a string literal; only trigger when the cursor is on that token.
+    let token = root.token_at_offset(offset).find(|t| t.kind() == SyntaxKind::STRING)?;
+    let annotation = token.parent_ancestors().find_map(ast::Annotation::cast)?;
+    if !ANNOTATION_KINDS.contains(&annotation.kind_token()?.kind()) {
+        return None;
+    }
+
+    // Resolve the method named by the literal directly under the cursor — not by re-scanning
+    // the method's annotations — so an in-progress edit with several annotations still jumps to
+    // exactly what the cursor is on.
+    let target_name = hir::unquote_bsl_string(token.text());
+
+    let base_file = ide_db::weaving_target(db, file_id)?.base_file(db);
+    let base_symbols = db.symbol_tree(ModuleId::new(base_file));
+    let base_method = base_symbols.find_method(&hir::Name::new(&target_name))?;
+
+    Some(NavigationTarget {
+        file_id: base_file,
+        range: base_method.source_range,
+        name: base_method.name.as_str().to_string(),
+        kind: if base_method.is_function { SymbolKind::Function } else { SymbolKind::Procedure },
+    })
 }
 
 fn semantic_symbol_to_navigation_target<DB: RootDatabase>(

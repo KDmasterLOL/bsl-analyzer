@@ -43,6 +43,44 @@ fn test_lower_function_without_return() {
 }
 
 #[test]
+fn test_if_branch_with_extension_directives_is_not_empty() {
+    let method = parse_method(
+        "Процедура Тест()
+            Если Условие Тогда
+                #Удаление
+                А = 1;
+                #КонецУдаления
+                #Вставка
+                Б = 2;
+                #КонецВставки
+            КонецЕсли;
+        КонецПроцедуры",
+    );
+    let result = lower_method(&method, false);
+
+    assert!(
+        !result.diagnostics.iter().any(|d| matches!(d, BodyDiagnostic::EmptyCodeBlock { .. })),
+        "an Если branch holding #Вставка/#Удаление directives is not an empty code block"
+    );
+}
+
+#[test]
+fn test_genuinely_empty_if_branch_is_still_flagged() {
+    let method = parse_method(
+        "Процедура Тест()
+            Если Условие Тогда
+            КонецЕсли;
+        КонецПроцедуры",
+    );
+    let result = lower_method(&method, false);
+
+    assert!(
+        result.diagnostics.iter().any(|d| matches!(d, BodyDiagnostic::EmptyCodeBlock { .. })),
+        "a branch with no statements and no extension directives is still an empty code block"
+    );
+}
+
+#[test]
 fn test_lower_function_with_return() {
     let method = parse_method(
         "Функция Тест()

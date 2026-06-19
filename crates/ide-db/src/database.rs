@@ -1159,11 +1159,23 @@ impl hir::ConfigsDatabase for RootDatabaseImpl {
             .max_by_key(|(_, path)| path.as_os_str().len())
             .map(|(_, path)| path);
 
+        let input_for = |path: &std::path::Path| -> metadata::ConfigurationPathInput<'_> {
+            metadata::intern_configuration_path(
+                self,
+                &path.to_string_lossy(),
+                self.config_root_revision_for_path(path),
+            )
+        };
+
         match (main_path, extension_path) {
             (Some(main_path), Some(extension_path)) => {
-                let main = load_at(main_path);
-                let extension = load_at(extension_path);
-                Some(Arc::new(main.merged_with_extension(&extension)))
+                // Route through the memoised merge so the deep clone of the whole base
+                // configuration runs once per extension, not on every metadata lookup.
+                Some(metadata::merged_configuration(
+                    self,
+                    input_for(main_path),
+                    input_for(extension_path),
+                ))
             }
             (Some(main_path), None) => Some(load_at(main_path)),
             (None, Some(extension_path)) => Some(load_at(extension_path)),

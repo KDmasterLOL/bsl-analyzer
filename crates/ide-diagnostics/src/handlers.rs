@@ -179,6 +179,8 @@ pub mod using_service_tag;
 pub mod using_synchronous_calls;
 pub mod using_this_form;
 pub mod virtual_table_call_without_parameters;
+pub mod weaving_annotation_not_applicable;
+pub mod weaving_signature_mismatch;
 pub mod wrong_data_path_for_form_elements;
 pub mod wrong_http_service_handler;
 pub mod wrong_use_function_proceed_with_call;
@@ -416,6 +418,10 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
             Some(&transferring_parameters_between_client_and_server::METADATA)
         }
         DiagnosticCode::UnsafeFindByCode => Some(&unsafe_find_by_code::METADATA),
+        DiagnosticCode::WeavingAnnotationNotApplicable => {
+            Some(&weaving_annotation_not_applicable::METADATA)
+        }
+        DiagnosticCode::WeavingSignatureMismatch => Some(&weaving_signature_mismatch::METADATA),
 
         DiagnosticCode::DataExchangeLoading => Some(&data_exchange_loading::METADATA),
         DiagnosticCode::ExecuteExternalCode => Some(&execute_external_code::METADATA),

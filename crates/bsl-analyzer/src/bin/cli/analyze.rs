@@ -211,6 +211,19 @@ fn analyze_salsa(
     tracing::info!("Creating database");
     let mut db = RootDatabaseImpl::default();
 
+    // Register the base + extension configuration roots so per-file resolution — and the
+    // `&ИзменениеИКонтроль` effective merge (`effective_target` → `pair_base_module_path`) —
+    // can pair an extension module to its base. Mirrors the LSP workspace loader; without
+    // this `all_config_paths` is empty and extension merging silently never activates.
+    {
+        let mut config_paths: Vec<(Option<String>, PathBuf)> =
+            vec![(None, project.source_path().to_path_buf())];
+        for (name, ext_path) in project.extension_paths() {
+            config_paths.push((Some(name.clone()), ext_path.clone()));
+        }
+        db.set_all_config_paths(config_paths);
+    }
+
     tracing::info!("Finding BSL files in {:?}", source_roots);
     let mut bsl_files = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -396,15 +409,27 @@ fn analyze_salsa(
                     let ctx = DiagnosticsContext::new(&config, *file_id, &provider);
 
                     let file_start = std::time::Instant::now();
-                    let diagnostics =
-                        match catch_unwind(AssertUnwindSafe(|| ide::compute_diagnostics(&ctx))) {
-                            Ok(diags) => diags,
-                            Err(e) => {
-                                let message = panic_message(e.as_ref());
-                                tracing::error!("Panic analyzing {:?}: {}", path, message);
-                                return (None, None, None, Some(message));
-                            }
-                        };
+                    // Standalone pass, then the `&ИзменениеИКонтроль` effective merge — both
+                    // reuse the run-global `config_path_input` + `file_set` so the effective
+                    // pass resolves metadata/cross-module context exactly as the standalone one.
+                    let diagnostics = match catch_unwind(AssertUnwindSafe(|| {
+                        let standalone = ide::compute_diagnostics(&ctx);
+                        ide::apply_extension_merge(
+                            db_snapshot,
+                            *file_id,
+                            &config,
+                            config_path_input,
+                            Some(&file_set_arc),
+                            standalone,
+                        )
+                    })) {
+                        Ok(diags) => diags,
+                        Err(e) => {
+                            let message = panic_message(e.as_ref());
+                            tracing::error!("Panic analyzing {:?}: {}", path, message);
+                            return (None, None, None, Some(message));
+                        }
+                    };
 
                     // Read the already-memoised complexity for the JSONL `metrics`
                     // field: when the complexity diagnostics are enabled they have

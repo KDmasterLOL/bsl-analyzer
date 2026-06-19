@@ -34,6 +34,14 @@ const IDENTIFIER_AWARE_CODES: &[DiagnosticCode] = &[
 ];
 
 const EXCLUSIONS_DOCUMENTED: &[(DiagnosticCode, &str)] = &[
+    (
+        DiagnosticCode::WeavingSignatureMismatch,
+        "structural signature comparison across an ext/base module pair; no identifier lookup",
+    ),
+    (
+        DiagnosticCode::WeavingAnnotationNotApplicable,
+        "structural annotation/method-kind check across an ext/base module pair; no identifier lookup",
+    ),
     (DiagnosticCode::ParseError, "structural parser diagnostic; no identifier recognition"),
     (
         DiagnosticCode::CanonicalSpellingKeywords,
@@ -587,7 +595,7 @@ EndProcedure"#,
 #[test]
 fn bilingual_inventory_has_expected_size() {
     let all = all_codes();
-    assert_eq!(all.len(), 188, "update the Track 3 Phase E inventory when DiagnosticCode changes");
+    assert_eq!(all.len(), 190, "update the Track 3 Phase E inventory when DiagnosticCode changes");
 }
 
 #[test]
