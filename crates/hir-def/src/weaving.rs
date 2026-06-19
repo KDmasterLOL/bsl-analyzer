@@ -93,8 +93,9 @@ pub enum SignatureMismatch {
 /// equivalent for the purposes of extension applicability.
 ///
 /// The procedure/function check applies only to [`InterceptionKind::Around`]: `&Перед` /
-/// `&После` carry their own platform constraints (an extended function cannot use them at
-/// all), which are out of scope here — only the parameter shape is validated for those.
+/// `&После` on an extended *function* are rejected wholesale by
+/// [`interception_applicable`] (a separate applicability rule), so here only the parameter
+/// shape is validated for those kinds.
 pub fn signature_mismatch(
     kind: InterceptionKind,
     interceptor: &MethodSymbol,
@@ -122,6 +123,17 @@ pub fn signature_mismatch(
     }
 
     None
+}
+
+/// Whether a weaving interception of `kind` may target `base` at all. 1C allows an extended
+/// *function* to be extended only with `&Вместо` (`&Перед` / `&После` are unavailable for
+/// functions); every interception of a *procedure* is allowed. Returns `false` only for the
+/// inapplicable `&Перед` / `&После`-on-a-function combination.
+///
+/// This is a precondition for [`signature_mismatch`]: when the annotation itself cannot apply
+/// to the base method, comparing parameter shapes is moot.
+pub fn interception_applicable(kind: InterceptionKind, base: &MethodSymbol) -> bool {
+    !(base.is_function && matches!(kind, InterceptionKind::Before | InterceptionKind::After))
 }
 
 #[cfg(test)]
@@ -284,5 +296,26 @@ mod tests {
             signature_mismatch(InterceptionKind::Around, &ext, &base),
             Some(SignatureMismatch::MethodKind { base_is_function: true })
         );
+    }
+
+    #[test]
+    fn before_after_on_a_function_is_not_applicable() {
+        let base = method(true, &[]);
+        assert!(!interception_applicable(InterceptionKind::Before, &base));
+        assert!(!interception_applicable(InterceptionKind::After, &base));
+    }
+
+    #[test]
+    fn around_on_a_function_is_applicable() {
+        let base = method(true, &[]);
+        assert!(interception_applicable(InterceptionKind::Around, &base));
+    }
+
+    #[test]
+    fn any_interception_of_a_procedure_is_applicable() {
+        let base = method(false, &[]);
+        assert!(interception_applicable(InterceptionKind::Around, &base));
+        assert!(interception_applicable(InterceptionKind::Before, &base));
+        assert!(interception_applicable(InterceptionKind::After, &base));
     }
 }

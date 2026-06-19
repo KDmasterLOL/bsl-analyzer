@@ -29,6 +29,11 @@ const SIG_EXT_BAD: &str = "&Перед(\"ПриЗаписи\")\nПроцедур
 // `&Вместо` interceptor mirrors the function signature exactly, including `Знач`.
 const SIG_EXT_GOOD: &str =
     "&Вместо(\"Вычислить\")\nФункция Расш1_Вычислить(Знач А)\n\tВозврат А;\nКонецФункции";
+// `&После` on the base *function* `Вычислить` is not applicable at all (functions accept
+// only `&Вместо`); the deliberate parameter-count divergence must NOT also surface as a
+// signature mismatch — the applicability error owns the report.
+const SIG_EXT_FUNC_AFTER: &str =
+    "&После(\"Вычислить\")\nПроцедура Расш1_Вычислить()\nКонецПроцедуры";
 
 struct Fixture {
     analysis: Analysis,
@@ -149,6 +154,26 @@ fn weaving_interceptor_matching_signature_is_clean() {
         !diags.iter().any(|d| d.code == ide::DiagnosticCode::WeavingSignatureMismatch),
         "a &Вместо interceptor whose signature matches the base function (including Знач) must \
          not be flagged; got {:?}",
+        diags.iter().map(|d| (d.code, d.range)).collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn weaving_before_after_on_function_is_not_applicable() {
+    let fx = setup_with(SIG_BASE, SIG_EXT_FUNC_AFTER);
+    let diags = fx.analysis.diagnostics(fx.ext_file, &DiagnosticsConfig::all_enabled());
+
+    assert!(
+        diags.iter().any(|d| d.code == ide::DiagnosticCode::WeavingAnnotationNotApplicable),
+        "a &После interceptor targeting a base function must be reported as not applicable; \
+         got {:?}",
+        diags.iter().map(|d| d.code).collect::<Vec<_>>(),
+    );
+    // The applicability error owns the report — the parameter-count divergence must not also
+    // surface as a signature mismatch on the same method.
+    assert!(
+        !diags.iter().any(|d| d.code == ide::DiagnosticCode::WeavingSignatureMismatch),
+        "an inapplicable annotation must suppress the signature diagnostic; got {:?}",
         diags.iter().map(|d| (d.code, d.range)).collect::<Vec<_>>(),
     );
 }

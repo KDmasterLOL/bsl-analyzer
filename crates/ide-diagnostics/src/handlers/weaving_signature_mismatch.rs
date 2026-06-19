@@ -44,6 +44,12 @@ pub fn check(ctx: &DiagnosticsContext, base_symbols: &SymbolTree) -> Vec<Diagnos
         else {
             continue;
         };
+        // When the annotation cannot apply to the base at all (`&Перед`/`&После` on a
+        // function), `WeavingAnnotationNotApplicable` owns the report and the signature
+        // comparison is moot — skip it here to avoid a second diagnostic on the same method.
+        if !hir::interception_applicable(interception.kind, base_method) {
+            continue;
+        }
         let Some(mismatch) = hir::signature_mismatch(interception.kind, method, base_method) else {
             continue;
         };

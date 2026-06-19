@@ -154,8 +154,8 @@ pub use hir_def::extension_merge::{
     extract_change_and_validate, pair_base_module_path, Origin, Segment,
 };
 pub use hir_def::weaving::{
-    interceptor_target, signature_mismatch, Interception, InterceptionKind, SignatureMismatch,
-    WeavingModuleId,
+    interception_applicable, interceptor_target, signature_mismatch, Interception,
+    InterceptionKind, SignatureMismatch, WeavingModuleId,
 };
 pub use hir_def::ConfigsDatabase;
 pub use hir_ty::arg_diagnostics::arg_diagnostics_query;

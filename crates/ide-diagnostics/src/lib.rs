@@ -194,6 +194,9 @@ pub fn apply_extension_merge<'db>(
             standalone.extend(safe_collect("merge:weaving_signature", || {
                 handlers::weaving_signature_mismatch::check(&std_ctx, &base_symbols)
             }));
+            standalone.extend(safe_collect("merge:weaving_annotation", || {
+                handlers::weaving_annotation_not_applicable::check(&std_ctx, &base_symbols)
+            }));
         }
     }
 

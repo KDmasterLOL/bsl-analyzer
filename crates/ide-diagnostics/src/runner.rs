@@ -128,7 +128,7 @@ const DATAFLOW_DIAGNOSTICS: &[DiagnosticCode] = &[
 /// to the analyzed extension file) and therefore run from `apply_extension_merge` rather than
 /// the standalone collector pass. Listed here so the coverage invariant accounts for them.
 pub(crate) const WEAVING_DIAGNOSTICS: &[DiagnosticCode] =
-    &[DiagnosticCode::WeavingSignatureMismatch];
+    &[DiagnosticCode::WeavingSignatureMismatch, DiagnosticCode::WeavingAnnotationNotApplicable];
 
 pub fn run_diagnostic<F>(
     name: &'static str,
