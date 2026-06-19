@@ -45,6 +45,7 @@ pub fn from_hir(
         MagicNumberContext::InSimpleAssignment => return None,
         MagicNumberContext::InTernaryBranch => return None,
         MagicNumberContext::InRoundPrecision => return None,
+        MagicNumberContext::InForLoopBoundary => return None,
         MagicNumberContext::InArrayIndex => {
             if config.allow_magic_indexes {
                 return None;
@@ -546,6 +547,78 @@ mod tests {
             MagicNumber @ 6:17..6:19
               message: Магическое число 12. Замените число на константу с понятным названием.
               severity: Information"#]],
+        );
+    }
+
+    #[test]
+    fn test_for_loop_boundary_excluded() {
+        // The numeric init (`= 2`) and bound (`По 38`) of a For loop are boundaries,
+        // not magic numbers; a magic number in the loop body is still flagged.
+        let code = r"
+Процедура Тест()
+    Для Сч = 2 По 38 Цикл
+        Значение = Сч * 555;
+    КонецЦикла;
+КонецПроцедуры
+        ";
+        let all = check_hir_diagnostic(code);
+        check_magic_number_snapshot(
+            code,
+            all,
+            expect![[r#"
+                MagicNumber @ 4:25..4:28
+                  message: Магическое число 555. Замените число на константу с понятным названием.
+                  severity: Information"#]],
+        );
+    }
+
+    #[test]
+    fn test_for_loop_compound_boundary_still_flagged() {
+        // A magic number inside a compound boundary expression is not a bare boundary
+        // literal and stays flagged, matching bsl-ls.
+        let code = r"
+Процедура Тест()
+    Для Сч = 0 По Граница * 10 Цикл
+    КонецЦикла;
+КонецПроцедуры
+        ";
+        let all = check_hir_diagnostic(code);
+        check_magic_number_snapshot(
+            code,
+            all,
+            expect![[r#"
+                MagicNumber @ 3:29..3:31
+                  message: Магическое число 10. Замените число на константу с понятным названием.
+                  severity: Information"#]],
+        );
+    }
+
+    #[test]
+    fn test_for_loop_boundary_edge_cases_match_bsl_ls() {
+        // Verified against bsl-language-server 1.0.0: a negated literal (`По -5`) and a
+        // parenthesized literal (`По (38)`) are pure-numeric boundaries and are NOT
+        // flagged, while a non-trivial numeric expression (`По 2 + 3`) IS flagged.
+        let code = r"
+Процедура Тест()
+    Для а = 0 По -5 Цикл
+    КонецЦикла;
+    Для б = 0 По (38) Цикл
+    КонецЦикла;
+    Для в = 0 По 2 + 3 Цикл
+    КонецЦикла;
+КонецПроцедуры
+        ";
+        let all = check_hir_diagnostic(code);
+        check_magic_number_snapshot(
+            code,
+            all,
+            expect![[r#"
+                MagicNumber @ 7:18..7:19
+                  message: Магическое число 2. Замените число на константу с понятным названием.
+                  severity: Information
+                MagicNumber @ 7:22..7:23
+                  message: Магическое число 3. Замените число на константу с понятным названием.
+                  severity: Information"#]],
         );
     }
 
