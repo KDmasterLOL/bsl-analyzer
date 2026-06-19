@@ -154,7 +154,7 @@ fn check_token_canonical(token: &SyntaxToken) -> Option<String> {
         SyntaxKind::PRE_REGION => check_keyword(actual, &["#Область", "#Region"]),
         SyntaxKind::PRE_END_REGION => check_keyword(actual, &["#КонецОбласти", "#EndRegion"]),
         SyntaxKind::PRE_USE => check_keyword(actual, &["#Использовать", "#Use"]),
-        SyntaxKind::PRE_INSERT => check_keyword(actual, &["#Вставить", "#Insert"]),
+        SyntaxKind::PRE_INSERT => check_keyword(actual, &["#Вставка", "#Insert"]),
 
         SyntaxKind::ANN_AT_CLIENT => check_keyword(actual, &["&НаКлиенте", "&AtClient"]),
         SyntaxKind::ANN_AT_SERVER => check_keyword(actual, &["&НаСервере", "&AtServer"]),
@@ -236,6 +236,35 @@ mod tests {
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         assert_eq!(diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn test_canonical_insert_directive_not_flagged() {
+        // `#Вставка` / `#КонецВставки` are the canonical configuration-extension directives;
+        // they must NOT be flagged as a misspelling of a non-existent `#Вставить`.
+        let code = "Процедура Тест()\n#Вставка\n\tА = 1;\n#КонецВставки\nКонецПроцедуры";
+
+        let config = DiagnosticsConfig::default();
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+
+        assert!(
+            !diagnostics.iter().any(|d| d.code == DiagnosticCode::CanonicalSpellingKeywords),
+            "canonical `#Вставка` must not be flagged; got {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn test_lowercase_insert_directive_flagged() {
+        // Lowercase `#вставка` is non-canonical and is still flagged.
+        let code = "Процедура Тест()\n#вставка\n\tА = 1;\n#КонецВставки\nКонецПроцедуры";
+
+        let config = DiagnosticsConfig::default();
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+
+        assert!(
+            diagnostics.iter().any(|d| d.code == DiagnosticCode::CanonicalSpellingKeywords),
+            "lowercase `#вставка` should be flagged; got {diagnostics:?}"
+        );
     }
 
     #[test]

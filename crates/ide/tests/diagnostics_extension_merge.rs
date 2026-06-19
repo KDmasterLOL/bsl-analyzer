@@ -18,8 +18,11 @@ use vfs::{FileId, FileSet, VfsPath};
 
 const BASE: &str = "Функция Сосед() Экспорт\n\tВозврат 1;\nКонецФункции\n\nФункция Цель() Экспорт\n\tВозврат 0;\nКонецФункции";
 // `Цель` is rewritten by the extension; its `#Вставка` calls the base sibling `Сосед`
-// (resolvable only through the merge) and a genuinely missing method.
-const EXT: &str = "&ИзменениеИКонтроль(\"Цель\")\nФункция Расш1_Цель()\n#Вставка\n\tЗначение1 = Сосед();\n\tЗначение2 = НетТакого();\n#КонецВставки\n\tВозврат 0;\nКонецФункции";
+// (resolvable only through the merge) and a genuinely missing method. The copied-base tail
+// uses a deliberately lowercase `возврат` so a standalone style diagnostic is present to
+// prove it survives the merge orchestrator (the `#Вставка`/`#КонецВставки` directives are
+// themselves canonical and must NOT be flagged).
+const EXT: &str = "&ИзменениеИКонтроль(\"Цель\")\nФункция Расш1_Цель()\n#Вставка\n\tЗначение1 = Сосед();\n\tЗначение2 = НетТакого();\n#КонецВставки\n\tвозврат 0;\nКонецФункции";
 
 // Weaving signature check: base has a two-parameter procedure and a one-parameter
 // by-value function the extension can intercept.
@@ -114,7 +117,7 @@ fn extension_diagnostics_are_a_stable_superset_without_spurious_inference() {
     let diags = fx.analysis.diagnostics(fx.ext_file, &DiagnosticsConfig::all_enabled());
 
     // The orchestrator runs (standalone + effective passes) and publishes the standalone
-    // style/metadata diagnostics — here the non-canonical `#Вставка` keyword.
+    // style/metadata diagnostics — here the non-canonical lowercase `возврат` keyword.
     assert!(
         diags.iter().any(|d| d.code == ide::DiagnosticCode::CanonicalSpellingKeywords),
         "standalone style diagnostics must survive the orchestrator; got {:?}",
