@@ -553,6 +553,21 @@ fn parse_parameters(lines: &[String]) -> Vec<ParameterDoc> {
             }
         }
 
+        // A multi-line union type may continue on the next line without a leading
+        // `-`, e.g. `Письмо - Спр.Входящее,` then `Спр.Исходящее - текст`. A dotted
+        // type reference is never a valid parameter name, so attach it to the current
+        // parameter instead of registering a phantom parameter "not in the signature".
+        if current_param.is_some() {
+            if let Some((type_name, description)) = parse_type_line(trimmed) {
+                if is_dotted_type_reference(&type_name) {
+                    if let Some((_, types)) = &mut current_param {
+                        types.push(TypeDoc::simple(type_name, description));
+                    }
+                    continue;
+                }
+            }
+        }
+
         if let Some((param_name, types)) = parse_parameter_line(trimmed) {
             if let Some((name, types)) = current_param.take() {
                 parameters.push(ParameterDoc { name, types });
@@ -569,7 +584,10 @@ fn parse_parameters(lines: &[String]) -> Vec<ParameterDoc> {
 }
 
 fn parse_parameter_line(line: &str) -> Option<(String, Vec<TypeDoc>)> {
-    let parts: Vec<&str> = line.splitn(3, " - ").collect();
+    // Tabs are frequently used to align the separator (`Имя\t\t- Тип`); the split
+    // below only recognizes a space-flanked dash, so normalize tabs to spaces first.
+    let normalized = line.replace('\t', " ");
+    let parts: Vec<&str> = normalized.splitn(3, " - ").collect();
 
     if parts.len() < 2 {
         return None;
@@ -674,7 +692,10 @@ fn parse_returns(lines: &[String]) -> Vec<TypeDoc> {
 }
 
 fn parse_type_line(line: &str) -> Option<(String, Option<String>)> {
-    let trimmed = line.trim();
+    // Mirror parse_parameter_line: tabs frequently flank the `-` separator on type
+    // (continuation) lines; normalize them so the separator is recognized.
+    let normalized = line.replace('\t', " ");
+    let trimmed = normalized.trim();
 
     if trimmed.starts_with('*') {
         return None;
@@ -1426,6 +1447,83 @@ mod tests {
         );
         assert_eq!(docs.parameters[0].types[0].name, "Число");
         assert_eq!(docs.parameters[1].name, "Другой");
+    }
+
+    #[test]
+    fn test_parse_parameter_tab_separated_separator() {
+        // The first parameter aligns the `-` with tabs (no space before the dash);
+        // it must still be recognized as a described parameter.
+        let comments = vec![
+            "Проверяет условия триггера.".to_string(),
+            "".to_string(),
+            "Параметры:".to_string(),
+            "  ДанныеТриггера\t\t\t- Структура, см. ОбщийМодуль.Структура".to_string(),
+            "  ОбъектПроверки\t - Ссылка - объект".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert_eq!(docs.parameters.len(), 2);
+        assert_eq!(docs.parameters[0].name, "ДанныеТриггера");
+        assert_eq!(docs.parameters[0].types[0].name, "Структура");
+        assert_eq!(docs.parameters[1].name, "ОбъектПроверки");
+    }
+
+    #[test]
+    fn test_parse_parameter_bare_dotted_union_continuation_not_phantom() {
+        // A union type continued on the next line without a leading `-`: the dotted
+        // type must attach to `Письмо`, not become a phantom parameter.
+        let comments = vec![
+            "Обрабатывает письмо.".to_string(),
+            "".to_string(),
+            "Параметры:".to_string(),
+            "  Письмо - ДокументСсылка.ЭлектронноеПисьмоВходящее,".to_string(),
+            "           ДокументСсылка.ЭлектронноеПисьмоИсходящее - письмо для оценки.".to_string(),
+            "  ТекстHTML - Строка - обрабатываемый текст.".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert_eq!(docs.parameters.len(), 2, "no phantom parameter from union continuation");
+        assert_eq!(docs.parameters[0].name, "Письмо");
+        assert!(
+            docs.parameters[0]
+                .types
+                .iter()
+                .any(|t| t.name == "ДокументСсылка.ЭлектронноеПисьмоИсходящее"),
+            "continuation type must attach to Письмо, got: {:?}",
+            docs.parameters[0].types
+        );
+        assert_eq!(docs.parameters[1].name, "ТекстHTML");
+    }
+
+    #[test]
+    fn test_parse_parameter_dotted_union_continuation_with_tab_dash() {
+        // The continuation's inline description is separated by a tab-flanked dash;
+        // it must still attach to `Письмо` and not spawn a phantom parameter.
+        let comments = vec![
+            "Обрабатывает письмо.".to_string(),
+            "".to_string(),
+            "Параметры:".to_string(),
+            "  Письмо - ДокументСсылка.ЭлектронноеПисьмоВходящее,".to_string(),
+            "           ДокументСсылка.ЭлектронноеПисьмоИсходящее\t-\tписьмо для оценки"
+                .to_string(),
+            "  ТекстHTML - Строка - текст".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert_eq!(docs.parameters.len(), 2, "no phantom parameter from tab-dash continuation");
+        assert_eq!(docs.parameters[0].name, "Письмо");
+        assert!(
+            docs.parameters[0]
+                .types
+                .iter()
+                .any(|t| t.name == "ДокументСсылка.ЭлектронноеПисьмоИсходящее"),
+            "continuation type must attach to Письмо, got: {:?}",
+            docs.parameters[0].types
+        );
+        assert_eq!(docs.parameters[1].name, "ТекстHTML");
     }
 
     #[test]
