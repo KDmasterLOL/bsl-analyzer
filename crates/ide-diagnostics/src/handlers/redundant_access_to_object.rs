@@ -54,21 +54,36 @@ pub fn from_hir(
             }
             Some(create_diagnostic(range, code, ctx))
         }
-        RedundantAccessKind::TwoLevel { module } => {
-            if metadata.module_type != ModuleType::CommonModule {
-                return None;
-            }
-            let cm = metadata.common_module.as_ref()?;
+        RedundantAccessKind::TwoLevel { module } => match metadata.module_type {
+            ModuleType::CommonModule => {
+                let cm = metadata.common_module.as_ref()?;
 
-            if cm.return_values_reuse() != ReturnValueReuse::DontUse {
-                return None;
-            }
+                if cm.return_values_reuse() != ReturnValueReuse::DontUse {
+                    return None;
+                }
 
-            if !module.eq_ignore_ascii_case(cm.name()) {
-                return None;
+                if !module.eq_ignore_ascii_case(cm.name()) {
+                    return None;
+                }
+                Some(create_diagnostic(range, code, ctx))
             }
-            Some(create_diagnostic(range, code, ctx))
-        }
+            ModuleType::ManagerModule => {
+                let mdo = metadata.mdo.as_ref()?;
+
+                // Objects reached through a collection prefix (`Справочники.X`,
+                // `Документы.X`, registers) are reported by the three-level rule;
+                // here only the bare-name forms (data processors, reports, …) apply.
+                if is_collection_prefixed_mdo_type(mdo.mdo_type) {
+                    return None;
+                }
+
+                if !module.eq_ignore_ascii_case(&mdo.name) {
+                    return None;
+                }
+                Some(create_diagnostic(range, code, ctx))
+            }
+            _ => None,
+        },
         RedundantAccessKind::ThreeLevel { mdo_type, mdo_name } => {
             if metadata.module_type != ModuleType::ManagerModule {
                 return None;
@@ -142,6 +157,23 @@ fn is_matching_mdo_type(mdo_type: &str, expected: (&str, &str)) -> bool {
     lower == expected.0 || lower == expected.1
 }
 
+/// Metadata kinds reached through a collection prefix (`Справочники.X`,
+/// `Документы.X`, the register collections). Their redundant self-access is
+/// handled by the three-level rule; everything else (data processors, reports,
+/// charts, business processes, …) is referenced by its bare object name.
+fn is_collection_prefixed_mdo_type(mdo_type: bsl_metadata::MdoType) -> bool {
+    use bsl_metadata::MdoType;
+    matches!(
+        mdo_type,
+        MdoType::Catalog
+            | MdoType::Document
+            | MdoType::AccountingRegister
+            | MdoType::AccumulationRegister
+            | MdoType::CalculationRegister
+            | MdoType::InformationRegister
+    )
+}
+
 fn get_check_object_module(ctx: &DiagnosticsContext) -> bool {
     ctx.config
         .get_bool(DiagnosticCode::RedundantAccessToObject, "checkObjectModule")
@@ -211,6 +243,52 @@ mod tests {
               message: Избыточное обращение к объекту
               severity: Hint"#]]
         .assert_eq(&format_diags(code, &redundant_diags));
+    }
+
+    fn manager_metadata(mdo_type: bsl_metadata::MdoType, name: &str) -> hir::ModuleMetadata {
+        let mut metadata = crate::test_utils::make_non_common_module_metadata(
+            bsl_metadata::ModuleType::ManagerModule,
+        );
+        metadata.mdo = Some(std::sync::Arc::new(bsl_metadata::MetadataObject::new(mdo_type, name)));
+        metadata
+    }
+
+    fn fires_two_level(metadata: hir::ModuleMetadata, module: &str) -> bool {
+        let module = module.to_string();
+        let diagnostics =
+            crate::test_utils::check_metadata_diagnostic(metadata, "", move |_m, ctx| {
+                let kind = hir::RedundantAccessKind::TwoLevel { module: module.clone() };
+                super::from_hir(&kind, ide_db::TextRange::new(0.into(), 1.into()), ctx)
+                    .into_iter()
+                    .collect()
+            });
+        !diagnostics.is_empty()
+    }
+
+    #[test]
+    fn test_manager_bare_self_reference_flagged_for_data_processor() {
+        assert!(fires_two_level(
+            manager_metadata(bsl_metadata::MdoType::DataProcessor, "ТестоваяОбработка"),
+            "ТестоваяОбработка",
+        ));
+    }
+
+    #[test]
+    fn test_manager_bare_reference_to_other_object_not_flagged() {
+        assert!(!fires_two_level(
+            manager_metadata(bsl_metadata::MdoType::DataProcessor, "ТестоваяОбработка"),
+            "ДругаяОбработка",
+        ));
+    }
+
+    #[test]
+    fn test_manager_bare_self_reference_skipped_for_collection_type() {
+        // Catalogs/Documents/registers are reached through a collection prefix and
+        // are handled by the three-level rule, not the bare-name form.
+        assert!(!fires_two_level(
+            manager_metadata(bsl_metadata::MdoType::Catalog, "Номенклатура"),
+            "Номенклатура",
+        ));
     }
 
     #[test]

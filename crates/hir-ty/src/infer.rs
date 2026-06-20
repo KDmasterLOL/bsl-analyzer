@@ -2081,6 +2081,41 @@ impl<'db> InferenceContext<'db> {
             return Some(self.infer_qualified_call(module_name, method_name, args, call_expr));
         }
 
+        // A manager module that calls one of its own methods through the object's
+        // own name (`ОбъектМетаданных.Метод()` for objects accessed without a
+        // collection prefix, e.g. data processors and reports) is a redundant
+        // self-qualified access — the method is reachable directly. The handler
+        // confirms the name is this module's own and that the metadata kind is one
+        // accessed without a collection prefix.
+        if let Some((mdo_type, self_name)) =
+            crate::this_object::resolve_this_manager_owner(self.db, &resolver)
+        {
+            if module_name.as_str().eq_ignore_ascii_case(self_name.as_str()) {
+                self.push_inference_diagnostic(
+                    InferenceDiagnostic::RedundantAccessToObjectTwoLevel {
+                        expr: call_expr,
+                        module: module_name.clone(),
+                    },
+                );
+                // Resolve the call as the equivalent collection-qualified call so the
+                // method is still validated (a misspelled self-method keeps its
+                // unresolved-call diagnostic) and the return type stays precise.
+                if let Some(plural) = mdo_type_to_plural(mdo_type) {
+                    return Some(self.infer_three_level_call(
+                        &Name::new(plural),
+                        &self_name,
+                        method_name,
+                        args,
+                        call_expr,
+                    ));
+                }
+                for arg in args {
+                    self.infer_expr(*arg);
+                }
+                return Some(self.db.unknown());
+            }
+        }
+
         match crate::platform_global_lookup::try_resolve_platform_global_member(
             self.db,
             module_name,
