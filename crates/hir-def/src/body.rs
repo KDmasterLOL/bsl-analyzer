@@ -655,6 +655,7 @@ pub enum MagicNumberContext {
     InMethodCall,
     InTernaryBranch,
     InRoundPrecision,
+    InForLoopBoundary,
     Other,
 }
 

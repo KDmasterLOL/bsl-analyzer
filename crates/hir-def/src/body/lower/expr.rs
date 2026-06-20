@@ -1658,6 +1658,7 @@ fn check_find_element_first_arg(args: &[ExprIdx], ctx: &LoweringCtx) -> bool {
 
 fn determine_magic_number_context(token: &syntax::SyntaxToken) -> MagicNumberContext {
     let mut node = token.parent();
+    let mut prev: Option<SyntaxNode> = None;
 
     let mut in_binary_expr = false;
     let mut in_arg_list = false;
@@ -1727,12 +1728,31 @@ fn determine_magic_number_context(token: &syntax::SyntaxToken) -> MagicNumberCon
             SyntaxKind::RETURN_STMT => {
                 return MagicNumberContext::InReturn;
             }
+            // The init (`= N`) and bound (`По N`) of a For loop are boundaries, not magic
+            // — but only when the number is a standalone literal. A number in a compound
+            // boundary expression (`По Массив.ВГраница() - 5`) or a call stays magic,
+            // matching bsl-ls. The init/bound expressions precede the `Цикл` (KW_DO)
+            // keyword; numbers in the loop body sit after it and keep their own context.
+            SyntaxKind::FOR_STMT if !in_binary_expr && !in_call && !in_arg_list => {
+                let do_kw = current
+                    .children_with_tokens()
+                    .filter_map(|el| el.into_token())
+                    .find(|t| t.kind() == SyntaxKind::KW_DO);
+                let in_header = match (&do_kw, &prev) {
+                    (Some(kw), Some(child)) => child.text_range().end() <= kw.text_range().start(),
+                    _ => false,
+                };
+                if in_header {
+                    return MagicNumberContext::InForLoopBoundary;
+                }
+            }
             SyntaxKind::FUNCTION_DEF | SyntaxKind::PROCEDURE_DEF => {
                 break;
             }
             _ => {}
         }
         node = current.parent();
+        prev = Some(current);
     }
 
     if in_assign {

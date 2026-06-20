@@ -2,6 +2,7 @@ use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
+use lexer::{tokenize, Token, TokenKind};
 use syntax::{NodeOrToken, SyntaxKind, SyntaxNode, SyntaxToken};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -55,20 +56,17 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     let parse = ctx.parse();
     let root = parse.syntax_node();
-
     let file_text = ctx.file_text();
 
     let comment_tokens = collect_comment_tokens(&root);
-
     let comment_groups = group_consecutive_comments(comment_tokens, &file_text);
 
     for group in comment_groups {
-        if is_comment_group_code(&group, &config) {
-            let code_range = code_tokens_range(&group, &config);
+        if is_commented_code(&group, &config) {
             diagnostics.push(Diagnostic {
                 code: DiagnosticCode::CommentedCode,
                 message: message_ru(),
-                range: code_range.unwrap_or(group.range),
+                range: group.range,
                 severity: ctx.severity(code),
                 tags: ctx.tags(code),
                 fixes: Vec::new(),
@@ -115,16 +113,10 @@ fn group_consecutive_comments(tokens: Vec<SyntaxToken>, file_text: &str) -> Vec<
         let curr_offset = u32::from(curr_token.text_range().start()) as usize;
         let curr_line = get_line(curr_offset);
 
-        let is_consecutive = curr_line == prev_line + 1;
-
-        if is_consecutive {
+        if curr_line == prev_line + 1 {
             current_tokens.push(curr_token.clone());
         } else {
-            let range = TextRange::new(
-                current_tokens.first().unwrap().text_range().start(),
-                current_tokens.last().unwrap().text_range().end(),
-            );
-            groups.push(CommentGroup { range, tokens: current_tokens });
+            groups.push(finish_group(current_tokens));
             current_tokens = vec![curr_token.clone()];
         }
 
@@ -132,109 +124,121 @@ fn group_consecutive_comments(tokens: Vec<SyntaxToken>, file_text: &str) -> Vec<
     }
 
     if !current_tokens.is_empty() {
-        let range = TextRange::new(
-            current_tokens.first().unwrap().text_range().start(),
-            current_tokens.last().unwrap().text_range().end(),
-        );
-        groups.push(CommentGroup { range, tokens: current_tokens });
+        groups.push(finish_group(current_tokens));
     }
 
     groups
 }
 
-fn code_tokens_range(group: &CommentGroup, config: &Config) -> Option<TextRange> {
-    let first = group.tokens.iter().position(|t| is_code_like(t.text(), config))?;
-    let last = group.tokens.iter().rposition(|t| is_code_like(t.text(), config))?;
-    Some(TextRange::new(
-        group.tokens[first].text_range().start(),
-        group.tokens[last].text_range().end(),
-    ))
+fn finish_group(tokens: Vec<SyntaxToken>) -> CommentGroup {
+    let range = TextRange::new(
+        tokens.first().unwrap().text_range().start(),
+        tokens.last().unwrap().text_range().end(),
+    );
+    CommentGroup { range, tokens }
 }
 
-fn is_method_documentation(group: &CommentGroup) -> bool {
-    let has_param_marker = group.tokens.iter().any(|token| {
-        let text = token.text();
-        let trimmed = text.trim_start_matches("//").trim();
-        trimmed.starts_with("Параметры:")
-            || trimmed.starts_with("Parameters:")
-            || trimmed.starts_with("Возвращаемое значение:")
-            || trimmed.starts_with("Returns:")
-            || trimmed.starts_with("Return value:")
-    });
-
-    if has_param_marker {
-        return true;
-    }
-
-    if let Some(first_token) = group.tokens.first() {
-        let text = first_token.text();
-        let trimmed = text.trim_start_matches("//").trim();
-        let descriptive_starts = [
-            "Получает",
-            "Добавляет",
-            "Возвращает",
-            "Устанавливает",
-            "Проверяет",
-            "Формирует",
-            "Создает",
-            "Выполняет",
-            "Определяет",
-            "Заполняет",
-            "Обрабатывает",
-            "Удаляет",
-            "Gets",
-            "Adds",
-            "Returns",
-            "Sets",
-            "Checks",
-            "Creates",
-            "Performs",
-            "Processes",
-        ];
-
-        for start in &descriptive_starts {
-            if trimmed.starts_with(start) && group.tokens.len() > 3 {
-                return true;
-            }
-        }
-    }
-
-    false
+/// Strips the leading `//` markers from a single comment token's text.
+fn comment_body(token: &SyntaxToken) -> &str {
+    token.text().trim_start_matches('/')
 }
 
-fn is_comment_group_code(group: &CommentGroup, config: &Config) -> bool {
+fn message_ru() -> String {
+    "Программные модули не должны иметь закомментированных фрагментов кода".to_string()
+}
+
+/// Decides whether a group of consecutive `//` comments is commented-out BSL
+/// code (as opposed to prose, structured documentation, or data).
+///
+/// A group is flagged when at least one of its lines has the syntactic shape of
+/// a BSL statement and the group does not carry a recognised documentation
+/// marker. Reporting the whole group range keeps a single finding aligned with
+/// the block a developer would delete.
+fn is_commented_code(group: &CommentGroup, config: &Config) -> bool {
     if group.tokens.is_empty() {
         return false;
     }
 
-    let has_code = group.tokens.iter().any(|token| is_code_like(token.text(), config));
-
-    if !has_code {
+    // Documentation blocks (`Параметры:`, `Возвращаемое значение:`, …) describe
+    // an API; the structured parameter lines below such markers frequently end
+    // in `;` and read like code without being executable.
+    if is_documentation_block(group) {
         return false;
     }
 
-    if is_method_documentation(group) {
-        let has_procedure_or_function = group.tokens.iter().any(|token| {
-            let text = token.text();
-            let trimmed = text.trim_start_matches("//").trim();
-            trimmed.starts_with("Процедура ")
-                || trimmed.starts_with("Функция ")
-                || trimmed.starts_with("Procedure ")
-                || trimmed.starts_with("Function ")
-        });
+    // A group whose first non-empty line is structured data (XML/HTML/JSON) and
+    // where data lines form the majority is a commented-out data block, not
+    // commented-out code.  The first-line guard prevents a group that opens with
+    // a real assignment and continues with HTML fragments from being suppressed.
+    if group_is_commented_data(group) {
+        return false;
+    }
 
-        if !has_procedure_or_function {
-            return false;
-        }
+    // The SQL text-block continuation prefix (`|`) only marks code when the same
+    // group also opens a real query (`ВЫБРАТЬ`, `SELECT`, …); a lone `| прозаичный
+    // хвост` is just a boxed comment, not a commented-out query.
+    let group_has_query = group.tokens.iter().any(|token| line_opens_query(comment_body(token)));
+
+    group.tokens.iter().any(|token| line_is_code(comment_body(token), config, group_has_query))
+}
+
+const DOC_MARKERS: &[&str] = &[
+    "параметры:",
+    "возвращаемое значение:",
+    "возвращаемоезначение:",
+    "пример:",
+    "описание:",
+    "parameters:",
+    "returns:",
+    "return value:",
+    "example:",
+    "description:",
+];
+
+fn is_documentation_block(group: &CommentGroup) -> bool {
+    group.tokens.iter().any(|token| {
+        let lowered = comment_body(token).trim().to_lowercase();
+        DOC_MARKERS.iter().any(|marker| lowered.starts_with(marker))
+    })
+}
+
+/// True when a group is a commented-out data block (XML, HTML, JSON) rather
+/// than commented-out code.  Two conditions must both hold:
+///   1. The first non-empty comment line is itself data (so a group that opens
+///      with a real statement and continues with HTML fragments is not skipped).
+///   2. Data lines form a strict majority (> half) of all non-empty lines.
+fn group_is_commented_data(group: &CommentGroup) -> bool {
+    let bodies: Vec<&str> =
+        group.tokens.iter().map(|t| comment_body(t).trim()).filter(|s| !s.is_empty()).collect();
+
+    if bodies.is_empty() {
+        return false;
+    }
+
+    if !looks_like_commented_data(bodies[0]) {
+        return false;
+    }
+
+    let data_count = bodies.iter().filter(|s| looks_like_commented_data(s)).count();
+    if data_count * 2 <= bodies.len() {
+        return false;
+    }
+
+    // A group that contains any line ending with `;` has at least one genuine
+    // BSL statement in it, so it must not be suppressed wholesale.  Data
+    // blocks (XML, HTML, JSON, BNF) never end lines with a semicolon.
+    if bodies.iter().any(|s| s.ends_with(';')) {
+        return false;
     }
 
     true
 }
 
-fn is_code_like(comment_text: &str, config: &Config) -> bool {
-    let trimmed = comment_text.trim_start_matches("//").trim();
-
-    if trimmed.is_empty() || trimmed.starts_with('/') {
+/// Classifies a single comment line (body already stripped of `//`) as having
+/// the syntactic shape of a BSL statement.
+fn line_is_code(body: &str, config: &Config, group_has_query: bool) -> bool {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
         return false;
     }
 
@@ -244,266 +248,393 @@ fn is_code_like(comment_text: &str, config: &Config) -> bool {
         }
     }
 
-    let doc_markers = [
-        "Параметры:",
-        "Возвращаемое значение:",
-        "Пример:",
-        "Описание:",
-        "Parameters:",
-        "Returns:",
-        "Example:",
-        "Description:",
-    ];
-    for marker in &doc_markers {
-        if trimmed.starts_with(marker) || trimmed.contains(marker) {
-            return false;
-        }
-    }
-
-    let descriptive_starts = [
-        "Получает",
-        "Возвращает",
-        "Устанавливает",
-        "Проверяет",
-        "Формирует",
-        "Создает",
-        "Выполняет",
-        "Определяет",
-        "Заполняет",
-        "Обрабатывает",
-        "Gets",
-        "Returns",
-        "Sets",
-        "Checks",
-        "Creates",
-        "Performs",
-    ];
-    for start in &descriptive_starts {
-        if trimmed.starts_with(start) {
-            return false;
-        }
-    }
-
-    if has_consecutive_identifiers(trimmed) {
+    let lowered = trimmed.to_lowercase();
+    if DOC_MARKERS.iter().any(|marker| lowered.starts_with(marker)) {
         return false;
     }
 
-    let mut score = 0;
-
-    let has_assignment = trimmed.contains(" = ") || trimmed.contains('=');
-    let has_semicolon = trimmed.ends_with(';');
-
-    if has_assignment {
-        score += 1;
+    // High-precision prose veto: natural-language text routinely places two bare
+    // nouns next to each other ("тип свойства", "выбора группы"), which real BSL
+    // never does — there is always a `.`, `(`, `,`, `=`, or operator between two
+    // names. This runs before any keyword signal so a sentence that merely starts
+    // with `Если`/`Попытка`/`Возврат` cannot be mistaken for a statement.
+    //
+    // Tokenize once here and thread the slice into the downstream helpers so the
+    // lexer is not invoked multiple times for the same text.
+    let toks = code_tokens(trimmed);
+    if has_two_adjacent_idents(&toks) {
+        return false;
     }
 
-    if has_semicolon {
-        score += 2;
+    // Commented-out data (JSON objects, HTML/markup) is not commented-out code.
+    // Keyed on markup/JSON shape, not on the bare `<`/`>` characters, so a real
+    // comparison such as `ТипЗнч(...) <> Тип(...)` is still recognised as code.
+    if looks_like_commented_data(trimmed) {
+        return false;
     }
 
-    let keywords = [
-        "Функция",
-        "Процедура",
-        "Если",
-        "Тогда",
-        "Иначе",
-        "Для",
-        "Пока",
-        "Цикл",
-        "Возврат",
-        "КонецФункции",
-        "КонецПроцедуры",
-        "КонецЕсли",
-        "КонецЦикла",
-        "Перем",
-        "Новый",
-        "функция",
-        "процедура",
-        "если",
-        "тогда",
-        "возврат",
-    ];
-
-    let mut has_keyword = false;
-    for keyword in &keywords {
-        if trimmed.contains(keyword) {
-            score += 1;
-            has_keyword = true;
-            break;
-        }
-    }
-
-    if trimmed.contains("Конец") {
-        score += 2;
-    }
-
-    if has_keyword && trimmed.split_whitespace().count() >= 2 {
-        score += 1;
-    }
-
-    if trimmed.contains('(') && trimmed.contains(')') {
-        score += 1;
-    }
-
-    if trimmed.contains('.') && (trimmed.contains('(') || trimmed.contains('=')) {
-        score += 1;
-    }
-
-    let has_identifier = trimmed.chars().next().map(|c| c.is_alphabetic()).unwrap_or(false);
-    if has_identifier && (trimmed.contains('=') || trimmed.contains('(')) {
-        score += 1;
-    }
-
-    score >= 4
+    strong_statement(trimmed, &toks, group_has_query)
 }
 
-fn has_consecutive_identifiers(text: &str) -> bool {
-    let keywords = [
-        "Функция",
-        "функция",
-        "Процедура",
-        "процедура",
-        "Если",
-        "если",
-        "Тогда",
-        "тогда",
-        "Иначе",
-        "иначе",
-        "Для",
-        "для",
-        "Каждого",
-        "каждого",
-        "Из",
-        "из",
-        "По",
-        "по",
-        "Пока",
-        "пока",
-        "Цикл",
-        "цикл",
-        "Возврат",
-        "возврат",
-        "Перейти",
-        "перейти",
-        "Прервать",
-        "прервать",
-        "Продолжить",
-        "продолжить",
-        "КонецФункции",
-        "конецфункции",
-        "КонецПроцедуры",
-        "конецпроцедуры",
-        "КонецЕсли",
-        "конецесли",
-        "КонецЦикла",
-        "конеццикла",
-        "Перем",
-        "перем",
-        "Новый",
-        "новый",
-        "Знач",
-        "знач",
-        "И",
-        "и",
-        "ИЛИ",
-        "или",
-        "НЕ",
-        "не",
-        "Истина",
-        "истина",
-        "Ложь",
-        "ложь",
-        "Function",
-        "function",
-        "Procedure",
-        "procedure",
-        "If",
-        "if",
-        "Then",
-        "then",
-        "Else",
-        "else",
-        "ElsIf",
-        "elsif",
-        "For",
-        "for",
-        "Each",
-        "each",
-        "In",
-        "in",
-        "To",
-        "to",
-        "While",
-        "while",
-        "Do",
-        "do",
-        "Return",
-        "return",
-        "Goto",
-        "goto",
-        "Break",
-        "break",
-        "Continue",
-        "continue",
-        "EndFunction",
-        "endfunction",
-        "EndProcedure",
-        "endprocedure",
-        "EndIf",
-        "endif",
-        "EndDo",
-        "enddo",
-        "Var",
-        "var",
-        "New",
-        "new",
-        "Val",
-        "val",
-        "And",
-        "and",
-        "Or",
-        "or",
-        "Not",
-        "not",
-        "True",
-        "true",
-        "False",
-        "false",
-    ];
+/// True when two consecutive non-trivia tokens are both bare identifiers (each is
+/// `Ident`, i.e. neither a keyword nor punctuation/operator/number/string). This
+/// is the natural-language prose signature.
+fn has_two_adjacent_idents(toks: &[Token]) -> bool {
+    toks.windows(2).any(|w| w[0].kind == TokenKind::Ident && w[1].kind == TokenKind::Ident)
+}
 
-    let separators =
-        ['=', ';', '(', ')', '[', ']', '{', '}', ',', '.', ':', '+', '-', '*', '/', '<', '>', '!'];
+/// True when the (uncommented) line is data rather than BSL: a JSON object/array
+/// fragment or an HTML/XML/markup tag. Conservative on purpose — it keys on
+/// markup shape so BSL using `<`/`>` as comparison operators is never suppressed.
+fn looks_like_commented_data(trimmed: &str) -> bool {
+    let body = trimmed.trim_start_matches('|').trim_start();
+    let first = body.chars().next();
 
-    let mut prev_was_identifier = false;
+    // JSON object/array braces, or a `"key": value` pair.
+    if matches!(first, Some('{') | Some('}')) {
+        return true;
+    }
+    if is_json_pair(body) {
+        return true;
+    }
 
-    for word in text.split_whitespace() {
-        if word.chars().any(|c| separators.contains(&c)) {
-            prev_was_identifier = false;
-            continue;
+    // Opening/closing markup tag: `<tag`, `</tag`, `<?xml`, `<!DOCTYPE`,
+    // `<Формула>` (Cyrillic).  A BSL statement never begins with `<`, so any
+    // `<` followed by `/`, `?`, `!`, or any Unicode letter is data.
+    if first == Some('<') {
+        let after = body[1..].trim_start();
+        let name = after.trim_start_matches('/');
+        if let Some(c) = name.chars().next() {
+            if c == '?' || c == '!' || c.is_alphabetic() {
+                return true;
+            }
         }
-
-        if keywords.contains(&word) {
-            prev_was_identifier = false;
-            continue;
-        }
-
-        if word.chars().all(|c| c.is_numeric() || c == '.' || c == ',') {
-            prev_was_identifier = false;
-            continue;
-        }
-
-        if prev_was_identifier {
-            return true;
-        }
-
-        prev_was_identifier = word.chars().next().map(|c| c.is_alphabetic()).unwrap_or(false);
     }
 
     false
 }
 
-fn message_ru() -> String {
-    "Программные модули не должны иметь закомментированных фрагментов кода".to_string()
+/// Recognises a JSON member line of the form `"name": value`.
+fn is_json_pair(body: &str) -> bool {
+    let bytes = body.as_bytes();
+    if bytes.first() != Some(&b'"') {
+        return false;
+    }
+    let mut idx = 1;
+    while idx < bytes.len() && bytes[idx] != b'"' {
+        idx += 1;
+    }
+    if idx >= bytes.len() {
+        return false;
+    }
+    body[idx + 1..].trim_start().starts_with(':')
+}
+
+const QUERY_KW: &[&str] = &[
+    "выбрать",
+    "select",
+    "из",
+    "from",
+    "где",
+    "where",
+    "сгруппировать",
+    "group",
+    "упорядочить",
+    "order",
+    "объединить",
+    "union",
+    "имеющие",
+    "having",
+];
+
+/// True when a `|`-prefixed text-block line opens a BSL query (`ВЫБРАТЬ`, …),
+/// marking the surrounding block as a commented-out query rather than a boxed
+/// prose comment.
+fn line_opens_query(body: &str) -> bool {
+    let trimmed = body.trim();
+    let Some(rest) = trimmed.strip_prefix('|') else {
+        return false;
+    };
+    let lowered = rest.trim_start().to_lowercase();
+    QUERY_KW.iter().any(|kw| {
+        lowered
+            .strip_prefix(kw)
+            .is_some_and(|tail| tail.is_empty() || tail.starts_with(|c: char| c.is_whitespace()))
+    })
+}
+
+/// Returns the non-whitespace BSL tokens of a comment line.
+fn code_tokens(text: &str) -> Vec<Token> {
+    tokenize(text).into_iter().filter(|t| t.kind != TokenKind::Whitespace).collect()
+}
+
+fn ends_with(text: &str, ch: char) -> bool {
+    text.trim_end().ends_with(ch)
+}
+
+/// A bare member reference (`Имя`, `Модуль.Метод`, `Объект.Метод()`) is a name
+/// mention in prose, not an executable statement.
+fn is_bare_reference(toks: &[Token]) -> bool {
+    if toks.is_empty() {
+        return false;
+    }
+    let mut i = 0;
+    if toks[i].kind != TokenKind::Ident {
+        return false;
+    }
+    i += 1;
+    while i + 1 < toks.len()
+        && toks[i].kind == TokenKind::Dot
+        && toks[i + 1].kind == TokenKind::Ident
+    {
+        i += 2;
+    }
+    if i + 1 < toks.len()
+        && toks[i].kind == TokenKind::LParen
+        && toks[i + 1].kind == TokenKind::RParen
+    {
+        i += 2;
+    }
+    if i < toks.len() && toks[i].kind == TokenKind::Dot {
+        i += 1;
+    }
+    i == toks.len()
+}
+
+/// Detects `Идент … = …` assignment, returning the index of the `=` token.
+/// Rejects comparison (`<=`, `>=`, `<>`, `==`) and arrow (`=>`) shapes.
+/// The token before `=` must be an identifier, `)`, or `]` — a numeric literal
+/// cannot be an assignment target in BSL.
+fn assignment_index(toks: &[Token]) -> Option<usize> {
+    for idx in 1..toks.len().saturating_sub(1) {
+        if toks[idx].kind != TokenKind::Eq {
+            continue;
+        }
+        let prev = toks[idx - 1].kind;
+        let next = toks[idx + 1].kind;
+        if matches!(prev, TokenKind::Lt | TokenKind::Gt | TokenKind::Eq | TokenKind::Exclamation) {
+            continue;
+        }
+        if matches!(next, TokenKind::Eq | TokenKind::Gt) {
+            continue;
+        }
+        if matches!(prev, TokenKind::Ident | TokenKind::RParen | TokenKind::RBracket) {
+            return Some(idx);
+        }
+    }
+    None
+}
+
+/// `Идент . Идент (` — a qualified method call.
+fn has_member_call(toks: &[Token]) -> bool {
+    toks.windows(4).any(|w| {
+        w[0].kind == TokenKind::Ident
+            && w[1].kind == TokenKind::Dot
+            && w[2].kind == TokenKind::Ident
+            && w[3].kind == TokenKind::LParen
+    })
+}
+
+const DECL_KW: &[TokenKind] = &[TokenKind::KwProcedure, TokenKind::KwFunction];
+const END_KW: &[TokenKind] = &[
+    TokenKind::KwEndProcedure,
+    TokenKind::KwEndFunction,
+    TokenKind::KwEndIf,
+    TokenKind::KwEndDo,
+    TokenKind::KwEndTry,
+];
+const SIMPLE_STMT_KW: &[TokenKind] = &[
+    TokenKind::KwReturn,
+    TokenKind::KwContinue,
+    TokenKind::KwBreak,
+    TokenKind::KwGoto,
+    TokenKind::KwTry,
+    TokenKind::KwExcept,
+    TokenKind::KwVar,
+    TokenKind::KwRaise,
+];
+const COND_KW: &[TokenKind] = &[TokenKind::KwIf, TokenKind::KwFor, TokenKind::KwWhile];
+const PAIR_KW: &[TokenKind] = &[TokenKind::KwThen, TokenKind::KwDo];
+
+fn has_code_operator(text: &str) -> bool {
+    text.chars().any(|c| matches!(c, '=' | '+' | '*' | '/'))
+}
+
+/// True when a line carries an unambiguous statement structure: an assignment,
+/// a declaration with parameters, a block keyword, a paired conditional/loop, a
+/// terminated call, or a query-language continuation.
+///
+/// `toks` is the pre-computed non-whitespace token slice for `trimmed`,
+/// produced once by `line_is_code` to avoid redundant lexer invocations.
+fn strong_statement(trimmed: &str, toks: &[Token], group_has_query: bool) -> bool {
+    // SQL/query string continuation lines begin with the `|` text-block prefix,
+    // but only count when the surrounding block actually opens a query — a lone
+    // `| прозаичный хвост` is a boxed comment, not commented-out SQL.
+    if trimmed.starts_with('|') {
+        return group_has_query;
+    }
+
+    if toks.is_empty() {
+        return false;
+    }
+
+    // A trailing `Dot` token is sentence punctuation, not member-access syntax:
+    // real member access always has an identifier after the dot, so a dot that
+    // is the last token cannot be part of an expression.  Strip it before the
+    // structural tests so `М = Менеджер.` is not treated as an assignment whose
+    // RHS contains a Dot (which would otherwise trigger `rhs_is_code`).
+    let toks = if toks.last().map(|t| t.kind) == Some(TokenKind::Dot) {
+        &toks[..toks.len() - 1]
+    } else {
+        toks
+    };
+
+    // The Dot strip above can leave toks empty (e.g. a comment body of just
+    // `.` or `..`).  Nothing to classify — not code.
+    if toks.is_empty() {
+        return false;
+    }
+
+    if is_bare_reference(toks) {
+        return false;
+    }
+
+    let ends_period = ends_with(trimmed, '.');
+    let ends_semi = ends_with(trimmed, ';');
+    let opens = trimmed.matches('(').count();
+    let closes = trimmed.matches(')').count();
+    let has_string = toks.iter().any(|t| t.kind == TokenKind::String);
+
+    if let Some(idx) = assignment_index(toks) {
+        let rhs = &toks[idx + 1..];
+        let rhs_is_code = rhs.iter().any(|t| {
+            matches!(
+                t.kind,
+                TokenKind::Decimal
+                    | TokenKind::Float
+                    | TokenKind::String
+                    | TokenKind::LParen
+                    | TokenKind::Dot
+                    | TokenKind::Plus
+                    | TokenKind::Star
+                    | TokenKind::Slash
+                    | TokenKind::Semicolon
+                    | TokenKind::RParen
+            ) || t.kind.is_keyword()
+        });
+        if ends_semi || rhs_is_code || opens > 0 {
+            return true;
+        }
+        // A bare `X = Y` where the RHS is a lone identifier is ambiguous: it
+        // could be genuine commented code or a prose equation ("Параметр =
+        // Прочтена"). Reject it unless it ends with `;`, has code in the RHS,
+        // or has open parens — all of which are handled above. A period-
+        // terminated line is already excluded by `ends_period`; non-period bare
+        // assignments also lack enough signal to distinguish code from prose.
+        return false;
+    }
+
+    let first = toks[0].kind;
+    if DECL_KW.contains(&first) {
+        return opens > 0;
+    }
+    if END_KW.contains(&first) {
+        return true;
+    }
+    if SIMPLE_STMT_KW.contains(&first) {
+        // `Попытка`/`Исключение` as standalone keywords (`toks.len() == 1`) are
+        // unambiguous block delimiters; with following words they could be prose
+        // ("Попытка №1.", "Исключение для пользователя.") so they fall through
+        // to the shared gate below like all other simple statement keywords.
+        if ends_semi || opens > 0 || has_code_operator(trimmed) {
+            return true;
+        }
+        if toks.len() == 1 {
+            return true;
+        }
+    }
+
+    if ends_semi && opens > 0 {
+        return true;
+    }
+
+    // `Идент.Метод(` is a call statement, but `Если Х Тогда`-style conditionals
+    // also appear verbatim in prose ("Если …, тогда …"); guard those soft
+    // signals so a full sentence ending in a period is never treated as code.
+    let prose = ends_period || is_prose(trimmed, toks);
+
+    if has_member_call(toks) && !prose {
+        return true;
+    }
+
+    let has_pair = toks.iter().any(|t| PAIR_KW.contains(&t.kind));
+    let has_cond = toks.iter().any(|t| COND_KW.contains(&t.kind));
+    if has_pair && has_cond && !prose {
+        return true;
+    }
+
+    if opens > 0 && !prose {
+        let comma_in_parens = comma_inside_parens(trimmed);
+        if (comma_in_parens || has_string) && (ends_semi || opens > closes) {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn comma_inside_parens(text: &str) -> bool {
+    let mut depth = 0i32;
+    for ch in text.chars() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth > 0 => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// True when a line reads like natural-language prose: a run of mostly Cyrillic
+/// words with almost no code operators. A member call or a real operator-bearing
+/// expression disqualifies prose, but an isolated quoted word inside a sentence
+/// (`… реквизит "Партнер" …`) does not.
+///
+/// `toks` is the pre-computed non-whitespace token slice for `trimmed`, reused
+/// from `line_is_code` to avoid a redundant lexer call.
+fn is_prose(trimmed: &str, toks: &[Token]) -> bool {
+    let body = trimmed.trim_start_matches(['+', '-']).trim_start();
+    // When the leading markers were stripped the token slice may cover more
+    // text than `body`; re-tokenize only the stripped body for the word counts
+    // so that a leading `+` operator is not mistaken for a code operator.
+    let body_toks = if body.len() == trimmed.len() {
+        // no leading markers — reuse the slice already computed
+        std::borrow::Cow::Borrowed(toks)
+    } else {
+        std::borrow::Cow::Owned(code_tokens(body))
+    };
+    if has_member_call(&body_toks) {
+        return false;
+    }
+    let words =
+        body_toks.iter().filter(|t| t.kind == TokenKind::Ident || t.kind.is_keyword()).count();
+    let cyrillic_words = body_toks
+        .iter()
+        .filter(|t| {
+            (t.kind == TokenKind::Ident || t.kind.is_keyword())
+                && t.text.chars().next().is_some_and(is_cyrillic)
+        })
+        .count();
+    let code_ops = body
+        .chars()
+        .filter(|c| matches!(c, '=' | '(' | ')' | '[' | ']' | ';' | '+' | '*' | '/' | '%'))
+        .count();
+    words >= 4 && code_ops < 2 && cyrillic_words >= 3
+}
+
+fn is_cyrillic(c: char) -> bool {
+    ('\u{0400}'..='\u{04FF}').contains(&c)
 }
 
 #[cfg(test)]
@@ -512,6 +643,7 @@ mod tests {
     use crate::test_utils::{check_ast_diagnostic, format_diags};
     use crate::DiagnosticCode;
     use expect_test::expect;
+
     #[test]
     fn test_no_diagnostic_for_regular_comments() {
         let code = r#"Функция Тест()
@@ -564,7 +696,7 @@ mod tests {
 ////КонецПроцедуры"#;
         let diagnostics = check_ast_diagnostic(code, check);
         expect![[r#"
-            CommentedCode @ 1:1..3:29
+            CommentedCode @ 1:1..5:19
               message: Программные модули не должны иметь закомментированных фрагментов кода
               severity: Information"#]]
         .assert_eq(&format_diags(code, &diagnostics));
@@ -583,7 +715,7 @@ mod tests {
     }
 
     #[test]
-    fn test_range_excludes_wrapping_descriptive_comments() {
+    fn test_range_covers_whole_group_with_header() {
         let code = r#"Процедура Тест()
     // ++ Проверяем одинаковые значения
     //Таблица = Источник;
@@ -597,7 +729,287 @@ mod tests {
 
         let diagnostics = check_ast_diagnostic(code, check);
         expect![[r#"
-            CommentedCode @ 3:5..8:22
+            CommentedCode @ 2:5..9:25
+              message: Программные модули не должны иметь закомментированных фрагментов кода
+              severity: Information"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
+    fn test_method_documentation_not_flagged() {
+        let code = r#"// Получает данные из хранилища.
+//
+// Параметры:
+//  Ключ - Строка - ключ значения;
+//
+// Возвращаемое значение:
+//  Произвольный - сохранённое значение.
+Процедура Тест(Ключ)
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
+    fn test_header_attached_to_method_is_flagged() {
+        // A commented-out assignment directly above a method declaration is
+        // genuine commented code and must be flagged regardless of proximity.
+        let code = r#"// Записать = Истина;
+&НаСервере
+Процедура Тест()
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        expect![[r#"
+            CommentedCode @ 1:1..1:22
+              message: Программные модули не должны иметь закомментированных фрагментов кода
+              severity: Information"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
+    fn test_prose_not_flagged() {
+        let code = r#"Процедура Тест()
+    // Если количество напоминаний больше максимального, создаём одно общее напоминание.
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
+    fn test_marker_comment_not_flagged() {
+        let code = r#"Процедура Тест()
+    // +CRM
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
+    fn test_method_reference_not_flagged() {
+        let code = r#"Процедура Тест()
+    // ИнициализироватьЭлементУсловногоОформления()
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
+    fn test_floating_commented_procedure_flagged() {
+        let code = r#"Процедура Реальная()
+    //Процедура Старая()
+    //    ПодготовитьДанные();
+    //КонецПроцедуры
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        expect![[r#"
+            CommentedCode @ 2:5..4:21
+              message: Программные модули не должны иметь закомментированных фрагментов кода
+              severity: Information"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
+    fn test_prose_with_leading_keyword_not_flagged() {
+        let code = r#"Процедура Тест()
+    // Попытка определить тип свойства приемника.
+    // Исключение выбора группы Все внешние пользователи в качестве родителя.
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
+    fn test_member_assignment_flagged() {
+        let code = r#"Процедура Тест()
+    // Действие.Ширина = 3;
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        expect![[r#"
+            CommentedCode @ 2:5..2:28
+              message: Программные модули не должны иметь закомментированных фрагментов кода
+              severity: Information"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
+    fn test_real_conditional_still_flagged() {
+        let code = r#"Процедура Тест()
+    // Если ПолучитьФункциональнуюОпцию("CRM_Опция") Тогда
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        expect![[r#"
+            CommentedCode @ 2:5..2:59
+              message: Программные модули не должны иметь закомментированных фрагментов кода
+              severity: Information"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
+    fn test_json_data_not_flagged() {
+        let code = r#"Процедура Тест()
+    // { "login": "User" }
+    // "password": "secret",
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
+    fn test_html_markup_not_flagged() {
+        let code = r#"Процедура Тест()
+    // <p style="color: red">Текст</p>
+    // <div id="main">
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
+    fn test_comparison_operator_not_treated_as_markup() {
+        let code = r#"Процедура Тест()
+    // Если ТипЗнч(Х) <> Тип("Строка") Тогда
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        expect![[r#"
+            CommentedCode @ 2:5..2:45
+              message: Программные модули не должны иметь закомментированных фрагментов кода
+              severity: Information"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
+    fn test_lone_bar_comment_not_flagged() {
+        let code = r#"Процедура Тест()
+    // | это просто оформление в рамке
+    // | ещё одна строка примечания
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
+    fn test_bar_query_block_flagged() {
+        let code = r#"Процедура Тест()
+    // |ВЫБРАТЬ
+    // |	Таблица.Ссылка КАК Ссылка
+    // |ИЗ
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        expect![[r#"
+            CommentedCode @ 2:5..4:11
+              message: Программные модули не должны иметь закомментированных фрагментов кода
+              severity: Information"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
+    fn test_trailing_plus_marker_not_flagged() {
+        let code = r#"Процедура Тест()
+    // + 1 неделя
+    // ++ PVS Внедрение CRM
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    // ── FIX A: numeric literal cannot be an assignment target ──────────────
+    #[test]
+    fn test_number_lhs_not_flagged() {
+        let code = r#"Процедура Тест()
+    // 7776000 = 60 * 60 * 24 * 90.
+    // 50*1024*1024 = 50 Мб
+    // 3%3=0, 4%3=1, 5%3=2
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    // ── FIX B: Попытка/Исключение with following words is prose ────────────
+    #[test]
+    fn test_try_except_prose_not_flagged() {
+        let code = r#"Процедура Тест()
+    // Попытка №1.
+    // Исключение для пользователя.
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
+    fn test_bare_try_still_flagged() {
+        let code = r#"Процедура Тест()
+    // Попытка
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        expect![[r#"
+            CommentedCode @ 2:5..2:15
+              message: Программные модули не должны иметь закомментированных фрагментов кода
+              severity: Information"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    // ── FIX C: XML/SOAP/BNF blocks are commented data, not code ───────────
+    #[test]
+    fn test_xml_block_not_flagged() {
+        let code = r#"Процедура Тест()
+    // <?xml version="1.0" encoding="utf-8"?>
+    // <soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+    //   <soap:Body>
+    //   </soap:Body>
+    // </soap:Envelope>
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
+    fn test_cyrillic_tag_not_flagged() {
+        let code = r#"Процедура Тест()
+    // <Формула> ::= "(" <Формула> ")" <Остаток>
+    // <Терм> ::= число
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
+    fn test_code_before_html_still_flagged() {
+        // Group opens with a real assignment — must not be suppressed by the
+        // data-majority guard even though continuation lines are HTML.
+        let code = r#"Процедура Тест()
+    //ИсторияВыполнения = ИсторияВыполнения + ?(ИсторияВыполнения = "","","
+    // |<P>
+    // |<HR>
+    //|<P></P>");
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        expect![[r#"
+            CommentedCode @ 2:5..5:18
+              message: Программные модули не должны иметь закомментированных фрагментов кода
+              severity: Information"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    // ── FIX D: trailing sentence dot is not member-access ─────────────────
+    #[test]
+    fn test_trailing_dot_legend_not_flagged() {
+        let code = r#"Процедура Тест()
+    // М = Менеджер.
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
+    fn test_real_member_assign_still_flagged() {
+        // The dot here is NOT final — it separates Объект and Реквизит — so the
+        // trailing-dot strip must not remove it.
+        let code = r#"Процедура Тест()
+    // Сумма = Объект.Реквизит;
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        expect![[r#"
+            CommentedCode @ 2:5..2:32
               message: Программные модули не должны иметь закомментированных фрагментов кода
               severity: Information"#]]
         .assert_eq(&format_diags(code, &diagnostics));
@@ -617,5 +1029,26 @@ mod tests {
         );
         let diagnostics = crate::test_utils::check_ast_diagnostic_with_config(code, config, check);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
+    fn test_dot_only_comment_not_flagged() {
+        // A comment body of just `.` or `..` must not panic and must not be flagged.
+        let code = "Процедура Тест()\n    // .\n    // ..\nКонецПроцедуры";
+        let diagnostics = crate::test_utils::check_ast_diagnostic(code, check);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
+    fn test_data_group_with_statement_still_flagged() {
+        // A group that looks like data (XML tags) but contains a genuine BSL
+        // statement ending in `;` must not be suppressed by group_is_commented_data.
+        let code = "Процедура Тест()\n    // <Root>\n    // Сообщить(\"Привет\");\n    // </Root>\nКонецПроцедуры";
+        let diagnostics = crate::test_utils::check_ast_diagnostic(code, check);
+        // The group contains a `;`-terminated statement so it must be flagged.
+        assert!(
+            !diagnostics.is_empty(),
+            "expected CommentedCode to fire when a group contains a BSL statement"
+        );
     }
 }

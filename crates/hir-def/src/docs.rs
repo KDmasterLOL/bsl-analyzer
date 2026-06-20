@@ -54,6 +54,14 @@ impl MethodDocs {
         self.link.is_some()
     }
 
+    /// A `См.` / `See` cross-reference in the method's free-text description (purpose).
+    /// bsl-ls treats such a reference as documentation of the whole method and does not
+    /// demand a parameter section. References inside parameter lines are excluded, since
+    /// those describe individual parameters rather than the method as a whole.
+    pub fn has_see_reference(&self) -> bool {
+        self.purpose.as_deref().is_some_and(contains_see_reference)
+    }
+
     pub fn is_deprecated(&self) -> bool {
         self.deprecation.is_some()
     }
@@ -311,25 +319,37 @@ fn parse_method_docs(comments: &[String]) -> Option<MethodDocs> {
     }
 
     let mut section_indices = Vec::new();
+    let mut in_parameters = false;
+    let mut prev_blank = false;
     for (i, line) in comments.iter().enumerate() {
-        let lower = line.trim().fold_lower();
+        let trimmed = line.trim();
+        let lower = trimmed.fold_lower();
 
-        let returns_header = returns_section_header(line.trim());
+        let returns_header = returns_section_header(trimmed);
         if is_parameters_keyword(&lower) {
+            in_parameters = true;
             section_indices.push(SectionMarker::new(i, Section::Parameters, None));
-        } else if returns_header != ReturnsHeader::NotReturns {
+        } else if returns_header != ReturnsHeader::NotReturns
+            && !is_parameter_named_like_returns(in_parameters, prev_blank, &lower, trimmed)
+        {
+            in_parameters = false;
             let inline_payload = match returns_header {
                 ReturnsHeader::WithPayload(payload) => Some(payload),
                 _ => None,
             };
             section_indices.push(SectionMarker::new(i, Section::Returns, inline_payload));
         } else if is_example_keyword(&lower) {
+            in_parameters = false;
             section_indices.push(SectionMarker::new(i, Section::Examples, None));
         } else if is_call_options_keyword(&lower) {
+            in_parameters = false;
             section_indices.push(SectionMarker::new(i, Section::CallOptions, None));
         } else if is_deprecated_keyword(&lower) {
+            in_parameters = false;
             section_indices.push(SectionMarker::new(i, Section::Deprecated, None));
         }
+
+        prev_blank = trimmed.is_empty();
     }
 
     let purpose_end = section_indices.first().map(|marker| marker.index).unwrap_or(comments.len());
@@ -453,6 +473,24 @@ fn is_ambiguous_returns_keyword(keyword: &str) -> bool {
     matches!(keyword, "результат" | "result")
 }
 
+/// Inside the parameters section, a line whose name is the ambiguous returns keyword
+/// `Результат`/`Result` but which is shaped like a parameter entry (`Результат - Тип -
+/// описание`) is a parameter, not the start of a Returns section. Without this guard such
+/// a line would truncate the parameter list and make the parameters after it look
+/// undocumented. A real returns header (`Результат:`) is not a parameter line and is
+/// unaffected.
+fn is_parameter_named_like_returns(
+    in_parameters: bool,
+    prev_blank: bool,
+    lower: &str,
+    line: &str,
+) -> bool {
+    in_parameters
+        && !prev_blank
+        && (lower.starts_with("результат") || lower.starts_with("result"))
+        && parse_parameter_line(line).is_some()
+}
+
 fn payload_looks_like_type_section(payload: &str) -> bool {
     let stripped = payload.trim_end_matches(['.', ',', ';', ':', '!', '?']).trim();
     if stripped.is_empty() {
@@ -504,11 +542,19 @@ fn returns_header_from_payload(payload: &str) -> ReturnsHeader {
 }
 
 fn is_example_keyword(lower_line: &str) -> bool {
-    lower_line.contains("пример:") || lower_line.contains("example:")
+    // Anchored at the line start: a section header is a standalone line. Using `contains`
+    // would misread the common Russian word `Например:` ("for example"), which contains
+    // `пример:`, as an Examples header and truncate the preceding section.
+    let line = lower_line.trim_start();
+    line.starts_with("пример:")
+        || line.starts_with("примеры:")
+        || line.starts_with("example:")
+        || line.starts_with("examples:")
 }
 
 fn is_call_options_keyword(lower_line: &str) -> bool {
-    lower_line.contains("варианты вызова:") || lower_line.contains("call options:")
+    let line = lower_line.trim_start();
+    line.starts_with("варианты вызова:") || line.starts_with("call options:")
 }
 
 fn is_deprecated_keyword(lower_line: &str) -> bool {
@@ -518,6 +564,32 @@ fn is_deprecated_keyword(lower_line: &str) -> bool {
 fn is_hyperlink_line(line: &str) -> bool {
     let lower = line.fold_lower();
     lower.starts_with("см.") || lower.starts_with("see ")
+}
+
+/// Whether the text contains a `См.` / `See` cross-reference (not only at the start of a
+/// line), e.g. `Продолжение процедуры (см. выше)`. Mirrors bsl-ls, which parses such
+/// references as documentation links. A Russian `см.` must sit on a word boundary and be
+/// followed by a reference word, so the unit abbreviation `5 см.` is not mistaken for a
+/// link. The English form keeps bsl-ls's line-start `see ` pattern to avoid matching the
+/// common verb mid-sentence.
+fn contains_see_reference(text: &str) -> bool {
+    const MARKER: &str = "см.";
+    let lower = text.fold_lower();
+
+    for (idx, _) in lower.match_indices(MARKER) {
+        let before = &lower[..idx];
+        // Part of a longer word (e.g. a compound) — not the "См." abbreviation.
+        let preceded_by_letter = matches!(before.chars().next_back(), Some(c) if c.is_alphabetic());
+        // A unit abbreviation such as `5 см.` is preceded by a number, not a link.
+        let preceded_by_number =
+            matches!(before.trim_end().chars().next_back(), Some(c) if c.is_numeric());
+        let followed_by_word = matches!(lower[idx + MARKER.len()..].trim_start().chars().next(), Some(c) if c.is_alphabetic());
+        if !preceded_by_letter && !preceded_by_number && followed_by_word {
+            return true;
+        }
+    }
+
+    lower.lines().any(|line| line.trim_start().starts_with("see "))
 }
 
 fn parse_parameters(lines: &[String]) -> Vec<ParameterDoc> {
@@ -553,6 +625,21 @@ fn parse_parameters(lines: &[String]) -> Vec<ParameterDoc> {
             }
         }
 
+        // A multi-line union type may continue on the next line without a leading
+        // `-`, e.g. `Письмо - Спр.Входящее,` then `Спр.Исходящее - текст`. A dotted
+        // type reference is never a valid parameter name, so attach it to the current
+        // parameter instead of registering a phantom parameter "not in the signature".
+        if current_param.is_some() {
+            if let Some((type_name, description)) = parse_type_line(trimmed) {
+                if is_dotted_type_reference(&type_name) {
+                    if let Some((_, types)) = &mut current_param {
+                        types.push(TypeDoc::simple(type_name, description));
+                    }
+                    continue;
+                }
+            }
+        }
+
         if let Some((param_name, types)) = parse_parameter_line(trimmed) {
             if let Some((name, types)) = current_param.take() {
                 parameters.push(ParameterDoc { name, types });
@@ -569,7 +656,10 @@ fn parse_parameters(lines: &[String]) -> Vec<ParameterDoc> {
 }
 
 fn parse_parameter_line(line: &str) -> Option<(String, Vec<TypeDoc>)> {
-    let parts: Vec<&str> = line.splitn(3, " - ").collect();
+    // Tabs are frequently used to align the separator (`Имя\t\t- Тип`); the split
+    // below only recognizes a space-flanked dash, so normalize tabs to spaces first.
+    let normalized = line.replace('\t', " ");
+    let parts: Vec<&str> = normalized.splitn(3, " - ").collect();
 
     if parts.len() < 2 {
         return None;
@@ -653,6 +743,18 @@ fn parse_returns(lines: &[String]) -> Vec<TypeDoc> {
             continue;
         }
 
+        if let Some(mut union) = parse_return_type_union(trimmed) {
+            if let Some(type_doc) = current_type.take() {
+                types.push(type_doc);
+            }
+            // Keep the last union member open so `*` sub-fields attach to it
+            // (the structure/collection type in a union is conventionally last).
+            let last = union.pop();
+            types.extend(union);
+            current_type = last;
+            continue;
+        }
+
         if let Some((type_name, description)) = parse_type_line(trimmed) {
             if let Some(type_doc) = current_type.take() {
                 types.push(type_doc);
@@ -674,7 +776,10 @@ fn parse_returns(lines: &[String]) -> Vec<TypeDoc> {
 }
 
 fn parse_type_line(line: &str) -> Option<(String, Option<String>)> {
-    let trimmed = line.trim();
+    // Mirror parse_parameter_line: tabs frequently flank the `-` separator on type
+    // (continuation) lines; normalize them so the separator is recognized.
+    let normalized = line.replace('\t', " ");
+    let trimmed = normalized.trim();
 
     if trimmed.starts_with('*') {
         return None;
@@ -687,13 +792,59 @@ fn parse_type_line(line: &str) -> Option<(String, Option<String>)> {
 
     if let Some((type_part, description)) = split_type_description(type_line) {
         let (type_name, type_description) = parse_return_type_name(type_part)?;
-        return Some((
-            type_name,
-            merge_type_descriptions(type_description, Some(description.to_string())),
-        ));
+        let explicit = (!description.is_empty()).then(|| description.to_string());
+        return Some((type_name, merge_type_descriptions(type_description, explicit)));
     }
 
     parse_return_type_name(type_line)
+}
+
+/// Parse a return-type line declaring a comma-separated union
+/// (`Тип1, Тип2 - описание`, `СправочникСсылка.X, Неопределено`). Mirrors the
+/// parameter side's union split so a documented union return value is not seen
+/// as an empty Returns section. Returns one `TypeDoc` per member sharing the
+/// line's description, or `None` when the line is not a comma union of plausible
+/// types (so prose like `Строка, содержащая имя` is rejected, not misparsed).
+fn parse_return_type_union(line: &str) -> Option<Vec<TypeDoc>> {
+    let normalized = line.replace('\t', " ");
+    let trimmed = normalized.trim();
+
+    if trimmed.starts_with('*') {
+        return None;
+    }
+
+    let type_line = trimmed.strip_prefix('-').map(str::trim).unwrap_or(trimmed);
+
+    let (type_part, description) = match split_type_description(type_line) {
+        Some((type_part, description)) => {
+            (type_part, (!description.is_empty()).then(|| description.to_string()))
+        }
+        None => (type_line, None),
+    };
+
+    if !type_part.contains(',') {
+        return None;
+    }
+
+    let mut members = Vec::new();
+    for member in type_part.split(',') {
+        let member = member.trim();
+        // A leading/trailing/double comma yields an empty member: the union is
+        // malformed, so reject the whole line rather than silently accepting a
+        // partial type list that would suppress the diagnostic.
+        if member.is_empty() {
+            return None;
+        }
+        let (type_name, member_description) = parse_return_type_name(member)?;
+        let description = merge_type_descriptions(member_description, description.clone());
+        members.push(TypeDoc::simple(type_name, description));
+    }
+
+    if members.len() < 2 {
+        return None;
+    }
+
+    Some(members)
 }
 
 fn split_type_description(line: &str) -> Option<(&str, &str)> {
@@ -703,6 +854,24 @@ fn split_type_description(line: &str) -> Option<(&str, &str)> {
                 line[..separator_pos].trim(),
                 line[separator_pos + separator.len()..].trim(),
             ));
+        }
+    }
+
+    // Tolerate a dash separator missing one of its surrounding spaces: a
+    // dangling `Тип -` (description omitted), `Тип -описание` (no space after)
+    // or `Тип- описание` (no space before). Require whitespace on at least one
+    // side so a hyphenated compound name (`COM-класс`) is NOT split. Pick the
+    // earliest such dash so the type, which always comes first, stays intact.
+    let space_dash = line.find(" -").map(|pos| pos + 1);
+    let dash_space = line.find("- ");
+    let dash_pos = match (space_dash, dash_space) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
+    if let Some(dash_pos) = dash_pos {
+        let type_part = line[..dash_pos].trim();
+        if !type_part.is_empty() {
+            return Some((type_part, line[dash_pos + 1..].trim()));
         }
     }
 
@@ -966,6 +1135,158 @@ mod tests {
         assert_eq!(docs.returned_value.len(), 2);
         assert_eq!(docs.returned_value[0].name, "Дата");
         assert_eq!(docs.returned_value[1].name, "Неопределено");
+    }
+
+    #[test]
+    fn test_parse_return_comma_union_dash_bullet() {
+        let comments = vec![
+            "Функция возвращает статус работы для нового клиента.".to_string(),
+            "".to_string(),
+            "Возвращаемое значение:".to_string(),
+            "  - СправочникСсылка.CRM_СтатусыРаботыСКлиентом, Неопределено".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert_eq!(docs.returned_value.len(), 2);
+        assert_eq!(docs.returned_value[0].name, "СправочникСсылка.CRM_СтатусыРаботыСКлиентом");
+        assert_eq!(docs.returned_value[1].name, "Неопределено");
+    }
+
+    #[test]
+    fn test_parse_return_comma_union_with_description() {
+        let comments = vec![
+            "Добавляет команду.".to_string(),
+            "".to_string(),
+            "Возвращаемое значение:".to_string(),
+            "  СтрокаТаблицыЗначений, Неопределено - описание добавленной команды.".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert_eq!(docs.returned_value.len(), 2);
+        assert_eq!(docs.returned_value[0].name, "СтрокаТаблицыЗначений");
+        assert_eq!(docs.returned_value[1].name, "Неопределено");
+        assert_eq!(
+            docs.returned_value[1].description,
+            Some("описание добавленной команды.".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_return_comma_union_no_space_with_fields() {
+        let comments = vec![
+            "Возвращает аудио данные.".to_string(),
+            "".to_string(),
+            "Возвращаемое значение:".to_string(),
+            "  Неопределено,Структура - Аудио данные:".to_string(),
+            "   *ИмяФайла - Строка - Имя файла.".to_string(),
+            "   *Размер - Число - Размер в байтах.".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert_eq!(docs.returned_value.len(), 2);
+        assert_eq!(docs.returned_value[0].name, "Неопределено");
+        assert_eq!(docs.returned_value[1].name, "Структура");
+        // `*` fields attach to the last union member (the structure).
+        assert_eq!(docs.returned_value[1].parameters.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_return_comma_prose_is_not_a_union() {
+        let comments = vec![
+            "Возвращает имя.".to_string(),
+            "".to_string(),
+            "Возвращаемое значение:".to_string(),
+            "  Строка, содержащая имя пользователя".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        // Prose with a comma must not be split into phantom types; the line is
+        // not a union of plausible type names.
+        assert!(docs.returned_value.iter().all(|t| t.name != "содержащая имя пользователя"));
+    }
+
+    #[test]
+    fn test_parse_return_dangling_dash_no_description() {
+        let comments = vec![
+            "Возвращает действие.".to_string(),
+            "".to_string(),
+            "Возвращаемое значение:".to_string(),
+            "  Строка -".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert_eq!(docs.returned_value.len(), 1);
+        assert_eq!(docs.returned_value[0].name, "Строка");
+        assert_eq!(docs.returned_value[0].description, None);
+    }
+
+    #[test]
+    fn test_parse_return_union_with_dangling_dash() {
+        let comments = vec![
+            "Получить задание.".to_string(),
+            "".to_string(),
+            "Возвращаемое значение:".to_string(),
+            "  ФоновоеЗадание, Неопределено -".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert_eq!(docs.returned_value.len(), 2);
+        assert_eq!(docs.returned_value[0].name, "ФоновоеЗадание");
+        assert_eq!(docs.returned_value[1].name, "Неопределено");
+    }
+
+    #[test]
+    fn test_parse_return_dash_without_surrounding_spaces() {
+        let comments = vec![
+            "Версия пакета.".to_string(),
+            "".to_string(),
+            "Возвращаемое значение:".to_string(),
+            "  Строка -версия пакета.".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert_eq!(docs.returned_value.len(), 1);
+        assert_eq!(docs.returned_value[0].name, "Строка");
+        assert_eq!(docs.returned_value[0].description, Some("версия пакета.".to_string()));
+    }
+
+    #[test]
+    fn test_parse_return_dash_without_space_before() {
+        let comments = vec![
+            "Проверка.".to_string(),
+            "".to_string(),
+            "Возвращаемое значение:".to_string(),
+            "  Булево- результат проверки.".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert_eq!(docs.returned_value.len(), 1);
+        assert_eq!(docs.returned_value[0].name, "Булево");
+        assert_eq!(docs.returned_value[0].description, Some("результат проверки.".to_string()));
+    }
+
+    #[test]
+    fn test_parse_return_hyphenated_type_name_not_split() {
+        let comments = vec![
+            "Возвращает класс.".to_string(),
+            "".to_string(),
+            "Возвращаемое значение:".to_string(),
+            "  COM-класс".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        // A glued hyphen (no surrounding space) is part of a compound name, not
+        // a separator: it must not be split into a phantom "COM" type.
+        assert!(docs.returned_value.iter().all(|t| t.name != "COM"));
     }
 
     #[test]
@@ -1370,6 +1691,99 @@ mod tests {
     }
 
     #[test]
+    fn test_parameter_named_result_not_treated_as_returns_section() {
+        // A parameter named `Результат` inside the parameters section must not be parsed
+        // as a Returns header; otherwise the parameters after it look undocumented.
+        let comments = vec![
+            "Записывает оценку.".to_string(),
+            "".to_string(),
+            "Параметры:".to_string(),
+            "  ИмяЗадачи - Строка - имя задачи.".to_string(),
+            "  Результат - Структура - результат поиска.".to_string(),
+            "  Оценка - Структура - оценка.".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        let names: Vec<_> = docs.parameters.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["ИмяЗадачи", "Результат", "Оценка"]);
+        assert!(docs.returned_value.is_empty());
+    }
+
+    #[test]
+    fn test_result_with_type_outside_parameters_is_returns() {
+        // Without a parameters section, `Результат - Тип` is still a Returns section.
+        let comments = vec![
+            "Проверяет условие.".to_string(),
+            "".to_string(),
+            "Результат - Булево - истина, если условие выполнено.".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert!(docs.parameters.is_empty());
+        assert_eq!(docs.returned_value.len(), 1);
+        assert_eq!(docs.returned_value[0].name, "Булево");
+    }
+
+    #[test]
+    fn test_naprimer_in_description_does_not_truncate_parameters() {
+        // `Например:` ("for example") contains `пример:` but is not an Examples header;
+        // it must not end the parameters section and drop the parameters after it.
+        let comments = vec![
+            "Проверяет данные.".to_string(),
+            "".to_string(),
+            "Параметры:".to_string(),
+            "  ПолноеИмя - Строка - имя объекта метаданных.".to_string(),
+            "             Например: \"Документ.ПриходнаяНакладная\".".to_string(),
+            "  Идентификатор - Ссылка - ссылка на элемент данных.".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        let names: Vec<_> = docs.parameters.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["ПолноеИмя", "Идентификатор"]);
+        assert!(docs.examples.is_empty());
+    }
+
+    #[test]
+    fn test_example_header_still_detected() {
+        let comments = vec![
+            "Делает что-то.".to_string(),
+            "".to_string(),
+            "Пример:".to_string(),
+            "  Функция(Параметр);".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert_eq!(docs.examples.len(), 1);
+        assert!(docs.examples[0].contains("Функция(Параметр)"));
+    }
+
+    #[test]
+    fn test_result_block_after_blank_line_is_returns_not_parameter() {
+        // A blank line ends the parameter list, so a following `Результат - Тип` block is
+        // the Returns section (no explicit `Возвращаемое значение:` header) and must not
+        // be absorbed as an extra parameter.
+        let comments = vec![
+            "Определяет, является ли организация юридическим лицом.".to_string(),
+            "".to_string(),
+            "Параметры:".to_string(),
+            "  Организация - СправочникСсылка.Организации - организация.".to_string(),
+            "".to_string(),
+            "Результат - Булево - Истина, если это юридическое лицо.".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert_eq!(docs.parameters.len(), 1);
+        assert_eq!(docs.parameters[0].name, "Организация");
+        assert_eq!(docs.returned_value.len(), 1);
+        assert_eq!(docs.returned_value[0].name, "Булево");
+    }
+
+    #[test]
     fn test_parse_parameters_with_multiline_union_types() {
         let comments = vec![
             "Возвращает значения реквизита.".to_string(),
@@ -1426,6 +1840,134 @@ mod tests {
         );
         assert_eq!(docs.parameters[0].types[0].name, "Число");
         assert_eq!(docs.parameters[1].name, "Другой");
+    }
+
+    #[test]
+    fn test_method_docs_detects_inline_see_reference() {
+        let comments = vec!["Продолжение процедуры (см. выше).".to_string()];
+        let docs = parse_method_docs(&comments).unwrap();
+        assert!(docs.has_see_reference());
+        assert!(!docs.is_hyperlink(), "a mid-line см. is not a whole-doc hyperlink");
+    }
+
+    #[test]
+    fn test_method_docs_no_false_see_reference() {
+        let comments = vec!["Возвращает обработанное значение без ссылок.".to_string()];
+        let docs = parse_method_docs(&comments).unwrap();
+        assert!(!docs.has_see_reference());
+    }
+
+    #[test]
+    fn test_centimeter_abbreviation_is_not_see_reference() {
+        let comments = vec!["Ширина поля равна 5 см. по умолчанию.".to_string()];
+        let docs = parse_method_docs(&comments).unwrap();
+        assert!(!docs.has_see_reference(), "the unit abbreviation '5 см.' is not a link");
+    }
+
+    #[test]
+    fn test_see_reference_with_method_target() {
+        let comments = vec!["Обрабатывает данные (см. ОбщийМодуль.Метод).".to_string()];
+        let docs = parse_method_docs(&comments).unwrap();
+        assert!(docs.has_see_reference());
+    }
+
+    #[test]
+    fn test_english_see_verb_midsentence_is_not_reference() {
+        let comments = vec!["You can see that this works.".to_string()];
+        let docs = parse_method_docs(&comments).unwrap();
+        assert!(!docs.has_see_reference());
+    }
+
+    #[test]
+    fn test_see_reference_inside_parameter_line_is_not_method_link() {
+        let comments = vec![
+            "Устанавливает состояние.".to_string(),
+            "".to_string(),
+            "Параметры:".to_string(),
+            "  Состояние - см. СостояниеЗапроса.".to_string(),
+        ];
+        let docs = parse_method_docs(&comments).unwrap();
+        assert!(
+            !docs.has_see_reference(),
+            "a см. reference inside a parameter line is not a method-level link"
+        );
+    }
+
+    #[test]
+    fn test_parse_parameter_tab_separated_separator() {
+        // The first parameter aligns the `-` with tabs (no space before the dash);
+        // it must still be recognized as a described parameter.
+        let comments = vec![
+            "Проверяет условия триггера.".to_string(),
+            "".to_string(),
+            "Параметры:".to_string(),
+            "  ДанныеТриггера\t\t\t- Структура, см. ОбщийМодуль.Структура".to_string(),
+            "  ОбъектПроверки\t - Ссылка - объект".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert_eq!(docs.parameters.len(), 2);
+        assert_eq!(docs.parameters[0].name, "ДанныеТриггера");
+        assert_eq!(docs.parameters[0].types[0].name, "Структура");
+        assert_eq!(docs.parameters[1].name, "ОбъектПроверки");
+    }
+
+    #[test]
+    fn test_parse_parameter_bare_dotted_union_continuation_not_phantom() {
+        // A union type continued on the next line without a leading `-`: the dotted
+        // type must attach to `Письмо`, not become a phantom parameter.
+        let comments = vec![
+            "Обрабатывает письмо.".to_string(),
+            "".to_string(),
+            "Параметры:".to_string(),
+            "  Письмо - ДокументСсылка.ЭлектронноеПисьмоВходящее,".to_string(),
+            "           ДокументСсылка.ЭлектронноеПисьмоИсходящее - письмо для оценки.".to_string(),
+            "  ТекстHTML - Строка - обрабатываемый текст.".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert_eq!(docs.parameters.len(), 2, "no phantom parameter from union continuation");
+        assert_eq!(docs.parameters[0].name, "Письмо");
+        assert!(
+            docs.parameters[0]
+                .types
+                .iter()
+                .any(|t| t.name == "ДокументСсылка.ЭлектронноеПисьмоИсходящее"),
+            "continuation type must attach to Письмо, got: {:?}",
+            docs.parameters[0].types
+        );
+        assert_eq!(docs.parameters[1].name, "ТекстHTML");
+    }
+
+    #[test]
+    fn test_parse_parameter_dotted_union_continuation_with_tab_dash() {
+        // The continuation's inline description is separated by a tab-flanked dash;
+        // it must still attach to `Письмо` and not spawn a phantom parameter.
+        let comments = vec![
+            "Обрабатывает письмо.".to_string(),
+            "".to_string(),
+            "Параметры:".to_string(),
+            "  Письмо - ДокументСсылка.ЭлектронноеПисьмоВходящее,".to_string(),
+            "           ДокументСсылка.ЭлектронноеПисьмоИсходящее\t-\tписьмо для оценки"
+                .to_string(),
+            "  ТекстHTML - Строка - текст".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert_eq!(docs.parameters.len(), 2, "no phantom parameter from tab-dash continuation");
+        assert_eq!(docs.parameters[0].name, "Письмо");
+        assert!(
+            docs.parameters[0]
+                .types
+                .iter()
+                .any(|t| t.name == "ДокументСсылка.ЭлектронноеПисьмоИсходящее"),
+            "continuation type must attach to Письмо, got: {:?}",
+            docs.parameters[0].types
+        );
+        assert_eq!(docs.parameters[1].name, "ТекстHTML");
     }
 
     #[test]

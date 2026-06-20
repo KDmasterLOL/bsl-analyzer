@@ -33,6 +33,14 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     let mut diagnostics = Vec::new();
     check_node(&root, &region_tree, code, ctx, &mut diagnostics);
+
+    // A module with no module-level regions is a single structural problem:
+    // report it once, on the first out-of-region element, instead of nagging
+    // on every module-level statement, variable and method.
+    if region_tree.module_level_regions().next().is_none() {
+        diagnostics.truncate(1);
+    }
+
     diagnostics
 }
 
@@ -296,21 +304,27 @@ mod tests {
             expect![[r#"
                 CodeOutOfRegion @ 5:1..5:11
                   message: Переменная находится вне области (#Область/#Region). Весь код модуля должен быть организован в области для лучшей структуры.
-                  severity: Hint
-                CodeOutOfRegion @ 6:1..6:16
-                  message: Переменная находится вне области (#Область/#Region). Весь код модуля должен быть организован в области для лучшей структуры.
-                  severity: Hint
-                CodeOutOfRegion @ 8:9..8:20
-                  message: Функция находится вне области (#Область/#Region). Весь код модуля должен быть организован в области для лучшей структуры.
-                  severity: Hint
-                CodeOutOfRegion @ 12:11..12:22
+                  severity: Hint"#]],
+        );
+    }
+
+    #[test]
+    fn test_region_less_module_collapses_to_single_finding() {
+        let code = "Процедура Первая()\n\
+КонецПроцедуры\n\
+\n\
+Процедура Вторая()\n\
+КонецПроцедуры\n\
+\n\
+Функция Третья()\n\
+    Возврат 1;\n\
+КонецФункции";
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::CodeOutOfRegion,
+            expect![[r#"
+                CodeOutOfRegion @ 1:11..1:17
                   message: Процедура находится вне области (#Область/#Region). Весь код модуля должен быть организован в области для лучшей структуры.
-                  severity: Hint
-                CodeOutOfRegion @ 20:1..20:10
-                  message: Элемент кода находится вне области (#Область/#Region). Весь код модуля должен быть организован в области для лучшей структуры.
-                  severity: Hint
-                CodeOutOfRegion @ 22:1..22:32
-                  message: Элемент кода находится вне области (#Область/#Region). Весь код модуля должен быть организован в области для лучшей структуры.
                   severity: Hint"#]],
         );
     }

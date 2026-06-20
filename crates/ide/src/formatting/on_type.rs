@@ -62,16 +62,19 @@ fn on_newline_typed(
 ) -> Option<OnTypeResult> {
     let text = root.text().to_string();
 
-    let newline_pos = u32::from(offset).saturating_sub(1);
-    if newline_pos == 0 {
+    // The cursor sits on the freshly created line; locate where that line begins.
+    let new_line_start = find_line_start(&text, offset);
+    if new_line_start == TextSize::from(0) {
+        // No preceding line to derive indentation from.
         return None;
     }
 
-    let prev_line_end = TextSize::from(newline_pos);
+    // The previous line is the one terminated by the newline that was just typed.
+    let prev_line_end = new_line_start - TextSize::from(1);
     let prev_line_start = find_line_start(&text, prev_line_end);
 
     let prev_start = u32::from(prev_line_start) as usize;
-    let prev_end = newline_pos as usize;
+    let prev_end = u32::from(prev_line_end) as usize;
     let prev_line = &text[prev_start..prev_end.min(text.len())];
 
     let mut indent_level = calculate_indent_for_line(root, prev_line_start, prev_line);
@@ -84,8 +87,30 @@ fn on_newline_typed(
 
     let expected_indent = config.indent_for_level(indent_level);
 
+    // Replace whatever leading whitespace the editor already inserted on the new
+    // line instead of appending to it. A pure insertion stacks on top of the
+    // editor's own auto-indent (e.g. Zed), producing runaway indentation; an
+    // idempotent replace keeps exactly one correct indent regardless of the
+    // client's behaviour.
+    let new_line_start_usize = u32::from(new_line_start) as usize;
+    let existing_ws_len: usize = text[new_line_start_usize..]
+        .chars()
+        .take_while(|&c| c == ' ' || c == '\t')
+        .map(char::len_utf8)
+        .sum();
+    let existing_ws = &text[new_line_start_usize..new_line_start_usize + existing_ws_len];
+
+    if existing_ws == expected_indent {
+        return None;
+    }
+
+    let ws_end = new_line_start + TextSize::from(existing_ws_len as u32);
+
     Some(OnTypeResult {
-        edits: vec![TextEdit { range: TextRange::new(offset, offset), new_text: expected_indent }],
+        edits: vec![TextEdit {
+            range: TextRange::new(new_line_start, ws_end),
+            new_text: expected_indent,
+        }],
     })
 }
 
@@ -182,5 +207,67 @@ mod tests {
         assert!(check("EndProcedure"));
         assert!(check("КонецЕсли;"));
         assert!(!check("А = 1;"));
+    }
+
+    fn run_newline(src: &str, cursor: usize, config: &FormattingConfig) -> Option<OnTypeResult> {
+        let parsed = parser::parse(src);
+        let root = parsed.syntax_node();
+        on_newline_typed(&root, TextSize::from(cursor as u32), config)
+    }
+
+    fn apply(src: &str, edit: &TextEdit) -> String {
+        let start = u32::from(edit.range.start()) as usize;
+        let end = u32::from(edit.range.end()) as usize;
+        format!("{}{}{}", &src[..start], edit.new_text, &src[end..])
+    }
+
+    #[test]
+    fn newline_replaces_existing_indent_instead_of_appending() {
+        let cfg = FormattingConfig::with_spaces(4);
+        // The editor has already stacked an over-deep indent onto the new line.
+        let src = "Процедура Тест()\n    А = 1;\n            \nКонецПроцедуры";
+        let ws_start = src.find("            \n").unwrap();
+        let cursor = ws_start + 12;
+
+        let res = run_newline(src, cursor, &cfg).expect("an edit is expected");
+        assert_eq!(res.edits.len(), 1);
+        // The edit must span the editor-inserted whitespace, not be a zero-width
+        // insertion at the cursor (which would stack on top of it).
+        assert_eq!(res.edits[0].range.start(), TextSize::from(ws_start as u32));
+        assert_eq!(res.edits[0].range.end(), TextSize::from(cursor as u32));
+    }
+
+    #[test]
+    fn newline_is_idempotent() {
+        let cfg = FormattingConfig::with_spaces(4);
+        let src = "Процедура Тест()\n    А = 1;\n            \nКонецПроцедуры";
+        let ws_start = src.find("            \n").unwrap();
+        let cursor = ws_start + 12;
+
+        let res = run_newline(src, cursor, &cfg).expect("an edit is expected");
+        let fixed = apply(src, &res.edits[0]);
+        let new_cursor = ws_start + res.edits[0].new_text.len();
+        // Re-running on the corrected text is a no-op — no runaway indentation.
+        assert!(run_newline(&fixed, new_cursor, &cfg).is_none());
+    }
+
+    #[test]
+    fn newline_indents_deeper_after_block_start() {
+        let cfg = FormattingConfig::with_spaces(4);
+
+        let plain = "Процедура Тест()\n    А = 1;\n\nКонецПроцедуры";
+        let p_cursor = plain.find("1;\n\n").unwrap() + "1;\n".len();
+        let plain_indent =
+            run_newline(plain, p_cursor, &cfg).map(|r| r.edits[0].new_text.len()).unwrap_or(0);
+
+        let block = "Процедура Тест()\n    Если Истина Тогда\n\n    КонецЕсли;\nКонецПроцедуры";
+        let b_cursor = block.find("Тогда\n\n").unwrap() + "Тогда\n".len();
+        let block_indent =
+            run_newline(block, b_cursor, &cfg).map(|r| r.edits[0].new_text.len()).unwrap_or(0);
+
+        assert!(
+            block_indent > plain_indent,
+            "block start should indent deeper: {block_indent} vs {plain_indent}"
+        );
     }
 }

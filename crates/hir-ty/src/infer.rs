@@ -323,6 +323,13 @@ pub struct InferenceContext<'db> {
     diagnostics: Vec<InferenceDiagnostic>,
 
     call_arg_bindings: Vec<CallArgBinding>,
+
+    /// Lazily-built lookup of unqualified-callable exports of the GLOBAL common modules
+    /// visible to this body: lowercased method name → owning `MethodId` (first global
+    /// module wins on a name collision). Built once per inference run on first bare-call
+    /// miss and reused, so a global-util-heavy body does not re-enumerate global modules
+    /// per call. `None` until first consulted. See [`Self::global_export_map`].
+    global_exports: Option<Arc<FxHashMap<String, hir_def::MethodId>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -494,6 +501,7 @@ impl<'db> InferenceContext<'db> {
             diagnostics: Vec::new(),
             call_arg_bindings: Vec::new(),
             return_expr_ids: Vec::new(),
+            global_exports: None,
         }
     }
 
@@ -578,6 +586,84 @@ impl<'db> InferenceContext<'db> {
             }
         }
         resolved
+    }
+
+    /// Lazily build (and cache) the unqualified-export lookup of the global common
+    /// modules visible to this body. See [`Self::global_exports`].
+    fn global_export_map(&mut self) -> Arc<FxHashMap<String, hir_def::MethodId>> {
+        if let Some(map) = &self.global_exports {
+            return Arc::clone(map);
+        }
+        let resolver = self.get_resolver();
+        let mut map: FxHashMap<String, hir_def::MethodId> = FxHashMap::default();
+        for (_module, method_name, method_id) in resolver.global_common_module_exports(self.db) {
+            map.entry(method_name.as_str().fold_lower()).or_insert(method_id);
+        }
+        let arc = Arc::new(map);
+        self.global_exports = Some(Arc::clone(&arc));
+        arc
+    }
+
+    /// Whether `name` is a method of the current module (or, under weaving, its paired
+    /// base) — a same-module method takes precedence over the global context, so the
+    /// bare global-export path must defer to it. Mirrors the same-module lookup the
+    /// `TypeKind::Unknown` call arm performs.
+    fn bare_module_method_exists(&self, name: &Name) -> bool {
+        let symbol_tree = match &self.local_symbols {
+            Some(symbols) => Arc::clone(symbols),
+            None => self.db.symbol_tree(hir_def::ModuleId::new(self.context_file_id)),
+        };
+        if symbol_tree.find_method(name).is_some() {
+            return true;
+        }
+        self.weaving_base.is_some_and(|base| self.db.symbol_tree(base).find_method(name).is_some())
+    }
+
+    /// Resolve a bare `Имя(...)` call against the exported methods of the visible global
+    /// common modules. Returns the call's result type when `name` is such an export,
+    /// running the full call contract — argument-count validation and parameter bindings —
+    /// exactly as a qualified `Модуль.Имя(...)` call would, but without the qualified-only
+    /// `RedundantAccessToObjectTwoLevel` lint (there is no redundant receiver to flag).
+    fn resolve_bare_global_export(
+        &mut self,
+        name: &Name,
+        args: &[ExprId],
+        callee: ExprId,
+    ) -> Option<TypeId> {
+        let method_id = self.global_export_map().get(&name.as_str().fold_lower()).copied()?;
+
+        for arg in args {
+            self.infer_expr(*arg);
+        }
+
+        let symbol_tree = self.db.symbol_tree(method_id.module);
+        let method_symbol = symbol_tree.find_method_by_id(method_id)?;
+        let signature = crate::method_resolution::materialise_signature_enriched(
+            self.db,
+            method_id,
+            method_symbol,
+        );
+
+        let total = signature.params.len();
+        let required = signature.required_count();
+        if args.len() < required || args.len() > total {
+            self.push_inference_diagnostic(InferenceDiagnostic::MismatchedArgCount {
+                call_expr: callee,
+                required_count: required,
+                total_count: total,
+                found: args.len(),
+            });
+        }
+
+        self.record_call_arg_binding(
+            callee,
+            args,
+            ParamsShape::Single(signature.params.iter().copied().collect()),
+            signature.from_doc_comment,
+        );
+
+        self.expr_types.insert(callee, self.db.unknown());
+        Some(self.effective_local_return(method_id, signature.ret))
     }
 
     fn push_inference_diagnostic(&mut self, diag: InferenceDiagnostic) {
@@ -1688,7 +1774,27 @@ impl<'db> InferenceContext<'db> {
             return result;
         }
 
-        if let Expr::Path(name) = callee_expr {
+        let bare_callee_name: Option<hir_def::Name> = match callee_expr {
+            Expr::Path(n) => Some(n.clone()),
+            _ => None,
+        };
+
+        // A global common module's exported method is callable unqualified — it extends
+        // the global context, so it shadows a same-named platform global function. A
+        // same-module method (checked here) still wins, keeping Local → Module → Global-CM
+        // → Platform precedence.
+        if let Some(name) = &bare_callee_name {
+            if !self.body_declares_binding(name)
+                && !self.assigned_var_names.contains(&name.as_str().fold_lower())
+                && !self.bare_module_method_exists(name)
+            {
+                if let Some(ret) = self.resolve_bare_global_export(name, args, callee) {
+                    return ret;
+                }
+            }
+        }
+
+        if let Some(name) = &bare_callee_name {
             let name = name.clone();
             if let Some(sigs) = builtin::builtin_functions().get(name.as_str()) {
                 debug_assert!(
@@ -1802,11 +1908,6 @@ impl<'db> InferenceContext<'db> {
                 return ret;
             }
         }
-
-        let bare_callee_name: Option<hir_def::Name> = match callee_expr {
-            Expr::Path(n) => Some(n.clone()),
-            _ => None,
-        };
 
         let callee_ty = self.infer_expr(callee);
 
@@ -2079,6 +2180,41 @@ impl<'db> InferenceContext<'db> {
             );
 
             return Some(self.infer_qualified_call(module_name, method_name, args, call_expr));
+        }
+
+        // A manager module that calls one of its own methods through the object's
+        // own name (`ОбъектМетаданных.Метод()` for objects accessed without a
+        // collection prefix, e.g. data processors and reports) is a redundant
+        // self-qualified access — the method is reachable directly. The handler
+        // confirms the name is this module's own and that the metadata kind is one
+        // accessed without a collection prefix.
+        if let Some((mdo_type, self_name)) =
+            crate::this_object::resolve_this_manager_owner(self.db, &resolver)
+        {
+            if module_name.as_str().eq_ignore_ascii_case(self_name.as_str()) {
+                self.push_inference_diagnostic(
+                    InferenceDiagnostic::RedundantAccessToObjectTwoLevel {
+                        expr: call_expr,
+                        module: module_name.clone(),
+                    },
+                );
+                // Resolve the call as the equivalent collection-qualified call so the
+                // method is still validated (a misspelled self-method keeps its
+                // unresolved-call diagnostic) and the return type stays precise.
+                if let Some(plural) = mdo_type_to_plural(mdo_type) {
+                    return Some(self.infer_three_level_call(
+                        &Name::new(plural),
+                        &self_name,
+                        method_name,
+                        args,
+                        call_expr,
+                    ));
+                }
+                for arg in args {
+                    self.infer_expr(*arg);
+                }
+                return Some(self.db.unknown());
+            }
         }
 
         match crate::platform_global_lookup::try_resolve_platform_global_member(

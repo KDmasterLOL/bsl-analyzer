@@ -890,6 +890,46 @@ impl GlobalState {
             );
         }
 
+        // Eager-warm the global context: a global common module extends the global context,
+        // so its exported methods are callable unqualified. Building their symbol trees here —
+        // through the SAME visibility-correct resolver path completion, hover and inference
+        // take — means the first unqualified-call completion hits a warm cache instead of
+        // parsing those modules on the keystroke. Cost is tiny (tens of ms, ~1 MB): global
+        // modules are deliberately thin.
+        {
+            use base_db::{SourceDatabase, SourceRootId};
+            use hir::{ConfigsDatabase, ModuleId, Resolver};
+
+            // Any config-covered workspace file anchors the resolver's configuration
+            // visibility; the global module set is configuration-wide, not file-specific.
+            let anchor = db
+                .source_root_input(SourceRootId(0))
+                .root(db)
+                .iter()
+                .find(|&file_id| db.file_has_visible_config(file_id));
+
+            if let Some(anchor) = anchor {
+                let warm_start = Instant::now();
+                let rss_before = crate::smoke::read_rss_bytes().unwrap_or(0);
+
+                // The helper builds each global module's symbol tree to collect its exports —
+                // calling it is the warm-up; the returned list only feeds the metrics below.
+                let exports = Resolver::with_workspace_scope(ModuleId::new(anchor))
+                    .global_common_module_exports(db);
+                let modules: std::collections::HashSet<String> =
+                    exports.iter().map(|(module, _, _)| module.as_str().to_lowercase()).collect();
+
+                let rss_after = crate::smoke::read_rss_bytes().unwrap_or(0);
+                tracing::info!(
+                    global_modules = modules.len(),
+                    exported_methods = exports.len(),
+                    elapsed_ms = warm_start.elapsed().as_millis() as u64,
+                    rss_delta_mb = rss_after.saturating_sub(rss_before) / 1_048_576,
+                    "global common modules warmed",
+                );
+            }
+        }
+
         tracing::info!(
             elapsed_ms = start.elapsed().as_millis() as u64,
             "warm_metadata_cache complete",

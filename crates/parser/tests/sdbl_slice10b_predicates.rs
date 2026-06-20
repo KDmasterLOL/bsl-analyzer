@@ -115,6 +115,21 @@ fn test_slice10b_in_hierarchy_english() {
 }
 
 #[test]
+fn test_slice10b_in_hierarchy_with_subquery() {
+    let root = parse_no_errors(
+        "ВЫБРАТЬ * ИЗ Т ГДЕ Поле В ИЕРАРХИИ (ВЫБРАТЬ Ссылка ИЗ Справочник.Подразделения)",
+    );
+    assert!(
+        count_kind(&root, SyntaxKind::SDBL_IN_HIERARCHY_EXPR) >= 1,
+        "В ИЕРАРХИИ with subquery must emit SdblInHierarchyExpr"
+    );
+    assert!(
+        count_kind(&root, SyntaxKind::SDBL_SUBQUERY) >= 1,
+        "В ИЕРАРХИИ with subquery must produce SdblSubquery"
+    );
+}
+
+#[test]
 fn test_slice10b_is_null_russian_canonical() {
     let root = parse_no_errors("ВЫБРАТЬ * ИЗ Т ГДЕ Поле ЕСТЬ NULL");
     assert!(count_kind(&root, SyntaxKind::SDBL_IS_NULL_EXPR) >= 1);
