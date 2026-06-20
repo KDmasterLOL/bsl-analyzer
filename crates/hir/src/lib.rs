@@ -420,6 +420,18 @@ impl<'db, DB: ConfigsDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
             return None;
         }
 
+        let module_id = ModuleId::new(file_id);
+        let resolver = hir_def::resolver::Resolver::for_module(module_id);
+
+        // A global common module export extends the global context and so shadows a
+        // same-named platform global. Resolved before builtins to keep Local → Module →
+        // Global-CM → Platform consistent with name inference and signature help; the helper
+        // gates on nearer scopes (local/parameter, same-module method/variable) missing.
+        if let Some(def) = self.global_export_definition(file_id, token) {
+            tracing::debug!(?def, "resolved as global common module export");
+            return Some(def);
+        }
+
         if let Some(def) = self.try_resolve_builtin(token_text) {
             tracing::debug!(?def, "resolved as builtin");
             return Some(def);
@@ -437,9 +449,6 @@ impl<'db, DB: ConfigsDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
             }
         }
 
-        let module_id = ModuleId::new(file_id);
-        let resolver = hir_def::resolver::Resolver::for_module(module_id);
-
         if let Some(method_id) = resolver.resolve_module_method(self.db, &name) {
             tracing::debug!(?method_id, "resolved as module method");
             return Some(Definition::Method(method_id));
@@ -452,6 +461,34 @@ impl<'db, DB: ConfigsDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
 
         tracing::debug!("unresolved identifier: {}", token_text);
         None
+    }
+
+    /// Resolve a bare identifier to an exported method of a GLOBAL common module — callable
+    /// unqualified because a global common module extends the global context. Returns `None`
+    /// when a nearer scope owns the name (a local/parameter, or a same-module method or
+    /// variable), so the global context only fills the gap below module scope. Shared by the
+    /// free-name and definition resolvers so goto/hover/refs and inference agree on precedence.
+    pub(crate) fn global_export_definition(
+        &self,
+        file_id: FileId,
+        token: &syntax::SyntaxToken,
+    ) -> Option<crate::definition::Definition> {
+        let name = Name::new(token.text());
+        let module_id = ModuleId::new(file_id);
+        let resolver = hir_def::resolver::Resolver::for_module(module_id);
+
+        let shadowed = self.resolve_local_to_definition(file_id, token).is_some()
+            || resolver.resolve_module_method(self.db, &name).is_some()
+            || resolver.resolve_module_variable(self.db, &name).is_some();
+        if shadowed {
+            return None;
+        }
+
+        hir_def::resolver::Resolver::with_workspace_scope(module_id)
+            .global_common_module_exports(self.db)
+            .into_iter()
+            .find(|(_, method_name, _)| method_name.eq_ignore_case(&name))
+            .map(|(_, _, method_id)| crate::definition::Definition::Method(method_id))
     }
 
     fn try_resolve_qualified_name_for_token(

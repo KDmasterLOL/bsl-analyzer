@@ -113,13 +113,30 @@ pub fn resolve_callee_at<DB: RootDatabase>(
         ));
     }
 
+    // An unqualified call may target an exported method of a GLOBAL common module, which
+    // extends the global context and so shadows a platform global function. A same-module
+    // method still wins (checked first), keeping Local → Module → Global-CM → Platform.
+    let module_id = ModuleId::new(file_id);
+    let name = Name::new(&callee_name);
+    if Resolver::for_module(module_id).resolve_module_method(db, &name).is_none() {
+        let ws_resolver = Resolver::with_workspace_scope(module_id);
+        if let Some((module_name, _, _)) = ws_resolver
+            .global_common_module_exports(db)
+            .into_iter()
+            .find(|(_, method_name, _)| method_name.eq_ignore_case(&name))
+        {
+            return Some((
+                CalleeKind::CommonModuleMethod { module: module_name, method: name },
+                active,
+            ));
+        }
+    }
+
     if global_function_query(db, TypeNameInput::new(db, callee_name.clone())).is_some() {
         return Some((CalleeKind::GlobalFunction { name: callee_name.into() }, active));
     }
 
-    let module_id = ModuleId::new(file_id);
     let resolver = Resolver::for_module(module_id);
-    let name = Name::new(&callee_name);
     if resolver.resolve_module_method(db, &name).is_some() {
         return Some((CalleeKind::LocalMethod { module_id, method: name }, active));
     }

@@ -289,6 +289,49 @@ impl Resolver {
         names
     }
 
+    /// Exported methods of the configuration's GLOBAL common modules — those callable
+    /// without a module qualifier because a global common module extends the global
+    /// context. Each entry is `(module_name, method_name, method_id)`.
+    ///
+    /// Both the global flag and the module body are taken from the module *effective* for
+    /// this file: candidate names come from [`Self::global_common_module_names`], but each
+    /// is confirmed global via [`ConfigsDatabase::resolve_common_module`] (base composed
+    /// with the file's own extension, extension winning) before its body is located through
+    /// [`Self::locate_common_module`] — the same visibility-correct path a qualified
+    /// `Модуль.Метод()` call takes. So a bare call resolves to exactly the target the
+    /// qualified form would, and an extension that turns a base-global module non-global
+    /// (or vice versa) is honoured rather than leaking the base flag.
+    ///
+    /// Order is deterministic: global modules in configuration-iteration order, methods in
+    /// symbol-tree order. Callers that need a single winner for a name keep the FIRST
+    /// occurrence (a name exported by two global modules is a configuration-level ambiguity
+    /// 1C itself forbids; we pick deterministically rather than guess).
+    pub fn global_common_module_exports(
+        &self,
+        db: &dyn ConfigsDatabase,
+    ) -> Vec<(Name, Name, MethodId)> {
+        let Some(self_module) = self.module_id() else {
+            return Vec::new();
+        };
+        let mut exports = Vec::new();
+        for module_name in self.global_common_module_names(db) {
+            let effective_is_global = db
+                .resolve_common_module(self_module.file_id, module_name.as_str())
+                .is_some_and(|cm| cm.is_global());
+            if !effective_is_global {
+                continue;
+            }
+            let Ok(module_id) = self.locate_common_module(db, &module_name) else {
+                continue;
+            };
+            let symbol_tree = db.symbol_tree(module_id);
+            for method in symbol_tree.exported_methods() {
+                exports.push((module_name.clone(), method.name.clone(), method.id));
+            }
+        }
+        exports
+    }
+
     pub fn resolve_assignment_target(
         &self,
         db: &dyn ConfigsDatabase,

@@ -436,7 +436,7 @@ fn complete_common_module_methods(
     Some(items)
 }
 
-fn render_common_module_method(
+pub(super) fn render_common_module_method(
     db: &dyn RootDatabase,
     file_id: FileId,
     module_name: &Name,

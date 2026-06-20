@@ -89,6 +89,13 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
         file_id: FileId,
         token: &syntax::SyntaxToken,
     ) -> Option<SemanticSymbol> {
+        // A global common module export shadows a same-named platform global, but a local or
+        // same-module symbol wins — the helper gates on those. Checked before the builtin
+        // short-circuit so Local → Module → Global-CM → Platform holds for goto/hover/refs too.
+        if let Some(definition) = self.global_export_definition(file_id, token) {
+            return Some(symbol_from_definition(self.db, definition, None));
+        }
+
         if let Some(definition) = self.try_resolve_builtin(token.text()) {
             return Some(symbol_from_definition(self.db, definition, None));
         }

@@ -164,6 +164,13 @@ fn complete_top_level<DB: RootDatabase>(
         &mut out,
         &mut seen,
         with_sort_text,
+        "24_",
+        complete_global_module_exports(db, file_id, prefix),
+    );
+    push_band(
+        &mut out,
+        &mut seen,
+        with_sort_text,
         "25_",
         complete_hbk_globals(db, file_id, prefix, locale),
     );
@@ -474,6 +481,39 @@ fn module_index_for<DB: RootDatabase>(
 ) -> std::sync::Arc<hir::ModuleIndex> {
     let source_root_id = db.file_source_root_input(file_id).source_root_id(db);
     db.module_index(source_root_id)
+}
+
+/// Exported methods of the GLOBAL common modules, offered unqualified because a global
+/// common module extends the global context. Placed in a band before the platform globals
+/// so a global export shadows a same-named platform function (matching name resolution).
+fn complete_global_module_exports<DB: RootDatabase>(
+    db: &DB,
+    file_id: vfs::FileId,
+    prefix: &str,
+) -> Vec<CompletionItem> {
+    let _span = tracing::debug_span!("complete_global_module_exports").entered();
+
+    let module_id = hir::ModuleId::new(file_id);
+    let resolver = hir::Resolver::with_workspace_scope(module_id);
+    let prefix_lower = prefix.fold_lower();
+
+    let mut items = Vec::new();
+    for (module_name, method_name, method_id) in resolver.global_common_module_exports(db) {
+        if !method_name.as_str().fold_lower().starts_with(&prefix_lower) {
+            continue;
+        }
+        let symbol_tree = db.symbol_tree(method_id.module);
+        let Some(method) = symbol_tree.find_method_by_id(method_id) else {
+            continue;
+        };
+        items.push(super::platform_completion::render_common_module_method(
+            db,
+            file_id,
+            &module_name,
+            method,
+        ));
+    }
+    items
 }
 
 fn complete_hbk_globals<DB: RootDatabase>(
