@@ -542,11 +542,19 @@ fn returns_header_from_payload(payload: &str) -> ReturnsHeader {
 }
 
 fn is_example_keyword(lower_line: &str) -> bool {
-    lower_line.contains("пример:") || lower_line.contains("example:")
+    // Anchored at the line start: a section header is a standalone line. Using `contains`
+    // would misread the common Russian word `Например:` ("for example"), which contains
+    // `пример:`, as an Examples header and truncate the preceding section.
+    let line = lower_line.trim_start();
+    line.starts_with("пример:")
+        || line.starts_with("примеры:")
+        || line.starts_with("example:")
+        || line.starts_with("examples:")
 }
 
 fn is_call_options_keyword(lower_line: &str) -> bool {
-    lower_line.contains("варианты вызова:") || lower_line.contains("call options:")
+    let line = lower_line.trim_start();
+    line.starts_with("варианты вызова:") || line.starts_with("call options:")
 }
 
 fn is_deprecated_keyword(lower_line: &str) -> bool {
@@ -1488,6 +1496,41 @@ mod tests {
         assert!(docs.parameters.is_empty());
         assert_eq!(docs.returned_value.len(), 1);
         assert_eq!(docs.returned_value[0].name, "Булево");
+    }
+
+    #[test]
+    fn test_naprimer_in_description_does_not_truncate_parameters() {
+        // `Например:` ("for example") contains `пример:` but is not an Examples header;
+        // it must not end the parameters section and drop the parameters after it.
+        let comments = vec![
+            "Проверяет данные.".to_string(),
+            "".to_string(),
+            "Параметры:".to_string(),
+            "  ПолноеИмя - Строка - имя объекта метаданных.".to_string(),
+            "             Например: \"Документ.ПриходнаяНакладная\".".to_string(),
+            "  Идентификатор - Ссылка - ссылка на элемент данных.".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        let names: Vec<_> = docs.parameters.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["ПолноеИмя", "Идентификатор"]);
+        assert!(docs.examples.is_empty());
+    }
+
+    #[test]
+    fn test_example_header_still_detected() {
+        let comments = vec![
+            "Делает что-то.".to_string(),
+            "".to_string(),
+            "Пример:".to_string(),
+            "  Функция(Параметр);".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert_eq!(docs.examples.len(), 1);
+        assert!(docs.examples[0].contains("Функция(Параметр)"));
     }
 
     #[test]
