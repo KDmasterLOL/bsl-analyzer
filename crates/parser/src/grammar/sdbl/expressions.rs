@@ -458,7 +458,11 @@ fn predicate_expr(p: &mut Parser) {
             }
             p.skip_trivia();
 
-            expression(p);
+            if p.at_keyword("SELECT") || p.at_keyword("ВЫБРАТЬ") {
+                super::select::subquery(p);
+            } else {
+                expression(p);
+            }
 
             p.skip_trivia();
             p.expect(TokenKind::RParen);

@@ -180,6 +180,8 @@ impl LoweringContext<'_> {
     }
 
     pub(super) fn lower_in_hierarchy_expr(&mut self, node: &syntax::SyntaxNode) -> ExprHir {
+        use crate::hir::InValues;
+
         let mut children = node.children();
         let expr = children
             .next()
@@ -202,11 +204,36 @@ impl LoweringContext<'_> {
             crate::source_map::TokenCategory::SpecialKeyword,
         );
 
-        let root_expr = children
-            .next()
-            .map(|n| self.lower_expr(&n))
-            .unwrap_or_else(|| ExprHir::Missing { range: node.text_range() });
+        let Some(root_node) = children.next() else {
+            return ExprHir::BinaryOp {
+                lhs: Box::new(expr),
+                op: crate::hir::BinaryOp::Eq,
+                rhs: Box::new(ExprHir::Missing { range: node.text_range() }),
+                ty: SdblType::Boolean,
+                range: node.text_range(),
+            };
+        };
 
+        // A hierarchy root given as a subquery must be lowered through the
+        // subquery path so its tables and fields resolve and nested diagnostics
+        // surface; the resolution walks only descend into `In`/`Subquery`.
+        if matches!(
+            root_node.kind(),
+            syntax::SyntaxKind::SDBL_SUBQUERY_EXPR
+                | syntax::SyntaxKind::SDBL_SELECT_QUERY
+                | syntax::SyntaxKind::SDBL_SUBQUERY
+        ) {
+            let subquery_hir = self.lower_in_subquery(&root_node);
+            return ExprHir::In {
+                expr: Box::new(expr),
+                negated: false,
+                values: InValues::Subquery(Box::new(subquery_hir)),
+                ty: SdblType::Boolean,
+                range: node.text_range(),
+            };
+        }
+
+        let root_expr = self.lower_expr(&root_node);
         ExprHir::BinaryOp {
             lhs: Box::new(expr),
             op: crate::hir::BinaryOp::Eq,
