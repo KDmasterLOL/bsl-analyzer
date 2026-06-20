@@ -743,6 +743,18 @@ fn parse_returns(lines: &[String]) -> Vec<TypeDoc> {
             continue;
         }
 
+        if let Some(mut union) = parse_return_type_union(trimmed) {
+            if let Some(type_doc) = current_type.take() {
+                types.push(type_doc);
+            }
+            // Keep the last union member open so `*` sub-fields attach to it
+            // (the structure/collection type in a union is conventionally last).
+            let last = union.pop();
+            types.extend(union);
+            current_type = last;
+            continue;
+        }
+
         if let Some((type_name, description)) = parse_type_line(trimmed) {
             if let Some(type_doc) = current_type.take() {
                 types.push(type_doc);
@@ -780,13 +792,59 @@ fn parse_type_line(line: &str) -> Option<(String, Option<String>)> {
 
     if let Some((type_part, description)) = split_type_description(type_line) {
         let (type_name, type_description) = parse_return_type_name(type_part)?;
-        return Some((
-            type_name,
-            merge_type_descriptions(type_description, Some(description.to_string())),
-        ));
+        let explicit = (!description.is_empty()).then(|| description.to_string());
+        return Some((type_name, merge_type_descriptions(type_description, explicit)));
     }
 
     parse_return_type_name(type_line)
+}
+
+/// Parse a return-type line declaring a comma-separated union
+/// (`Тип1, Тип2 - описание`, `СправочникСсылка.X, Неопределено`). Mirrors the
+/// parameter side's union split so a documented union return value is not seen
+/// as an empty Returns section. Returns one `TypeDoc` per member sharing the
+/// line's description, or `None` when the line is not a comma union of plausible
+/// types (so prose like `Строка, содержащая имя` is rejected, not misparsed).
+fn parse_return_type_union(line: &str) -> Option<Vec<TypeDoc>> {
+    let normalized = line.replace('\t', " ");
+    let trimmed = normalized.trim();
+
+    if trimmed.starts_with('*') {
+        return None;
+    }
+
+    let type_line = trimmed.strip_prefix('-').map(str::trim).unwrap_or(trimmed);
+
+    let (type_part, description) = match split_type_description(type_line) {
+        Some((type_part, description)) => {
+            (type_part, (!description.is_empty()).then(|| description.to_string()))
+        }
+        None => (type_line, None),
+    };
+
+    if !type_part.contains(',') {
+        return None;
+    }
+
+    let mut members = Vec::new();
+    for member in type_part.split(',') {
+        let member = member.trim();
+        // A leading/trailing/double comma yields an empty member: the union is
+        // malformed, so reject the whole line rather than silently accepting a
+        // partial type list that would suppress the diagnostic.
+        if member.is_empty() {
+            return None;
+        }
+        let (type_name, member_description) = parse_return_type_name(member)?;
+        let description = merge_type_descriptions(member_description, description.clone());
+        members.push(TypeDoc::simple(type_name, description));
+    }
+
+    if members.len() < 2 {
+        return None;
+    }
+
+    Some(members)
 }
 
 fn split_type_description(line: &str) -> Option<(&str, &str)> {
@@ -796,6 +854,24 @@ fn split_type_description(line: &str) -> Option<(&str, &str)> {
                 line[..separator_pos].trim(),
                 line[separator_pos + separator.len()..].trim(),
             ));
+        }
+    }
+
+    // Tolerate a dash separator missing one of its surrounding spaces: a
+    // dangling `Тип -` (description omitted), `Тип -описание` (no space after)
+    // or `Тип- описание` (no space before). Require whitespace on at least one
+    // side so a hyphenated compound name (`COM-класс`) is NOT split. Pick the
+    // earliest such dash so the type, which always comes first, stays intact.
+    let space_dash = line.find(" -").map(|pos| pos + 1);
+    let dash_space = line.find("- ");
+    let dash_pos = match (space_dash, dash_space) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
+    if let Some(dash_pos) = dash_pos {
+        let type_part = line[..dash_pos].trim();
+        if !type_part.is_empty() {
+            return Some((type_part, line[dash_pos + 1..].trim()));
         }
     }
 
@@ -1059,6 +1135,158 @@ mod tests {
         assert_eq!(docs.returned_value.len(), 2);
         assert_eq!(docs.returned_value[0].name, "Дата");
         assert_eq!(docs.returned_value[1].name, "Неопределено");
+    }
+
+    #[test]
+    fn test_parse_return_comma_union_dash_bullet() {
+        let comments = vec![
+            "Функция возвращает статус работы для нового клиента.".to_string(),
+            "".to_string(),
+            "Возвращаемое значение:".to_string(),
+            "  - СправочникСсылка.CRM_СтатусыРаботыСКлиентом, Неопределено".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert_eq!(docs.returned_value.len(), 2);
+        assert_eq!(docs.returned_value[0].name, "СправочникСсылка.CRM_СтатусыРаботыСКлиентом");
+        assert_eq!(docs.returned_value[1].name, "Неопределено");
+    }
+
+    #[test]
+    fn test_parse_return_comma_union_with_description() {
+        let comments = vec![
+            "Добавляет команду.".to_string(),
+            "".to_string(),
+            "Возвращаемое значение:".to_string(),
+            "  СтрокаТаблицыЗначений, Неопределено - описание добавленной команды.".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert_eq!(docs.returned_value.len(), 2);
+        assert_eq!(docs.returned_value[0].name, "СтрокаТаблицыЗначений");
+        assert_eq!(docs.returned_value[1].name, "Неопределено");
+        assert_eq!(
+            docs.returned_value[1].description,
+            Some("описание добавленной команды.".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_return_comma_union_no_space_with_fields() {
+        let comments = vec![
+            "Возвращает аудио данные.".to_string(),
+            "".to_string(),
+            "Возвращаемое значение:".to_string(),
+            "  Неопределено,Структура - Аудио данные:".to_string(),
+            "   *ИмяФайла - Строка - Имя файла.".to_string(),
+            "   *Размер - Число - Размер в байтах.".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert_eq!(docs.returned_value.len(), 2);
+        assert_eq!(docs.returned_value[0].name, "Неопределено");
+        assert_eq!(docs.returned_value[1].name, "Структура");
+        // `*` fields attach to the last union member (the structure).
+        assert_eq!(docs.returned_value[1].parameters.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_return_comma_prose_is_not_a_union() {
+        let comments = vec![
+            "Возвращает имя.".to_string(),
+            "".to_string(),
+            "Возвращаемое значение:".to_string(),
+            "  Строка, содержащая имя пользователя".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        // Prose with a comma must not be split into phantom types; the line is
+        // not a union of plausible type names.
+        assert!(docs.returned_value.iter().all(|t| t.name != "содержащая имя пользователя"));
+    }
+
+    #[test]
+    fn test_parse_return_dangling_dash_no_description() {
+        let comments = vec![
+            "Возвращает действие.".to_string(),
+            "".to_string(),
+            "Возвращаемое значение:".to_string(),
+            "  Строка -".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert_eq!(docs.returned_value.len(), 1);
+        assert_eq!(docs.returned_value[0].name, "Строка");
+        assert_eq!(docs.returned_value[0].description, None);
+    }
+
+    #[test]
+    fn test_parse_return_union_with_dangling_dash() {
+        let comments = vec![
+            "Получить задание.".to_string(),
+            "".to_string(),
+            "Возвращаемое значение:".to_string(),
+            "  ФоновоеЗадание, Неопределено -".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert_eq!(docs.returned_value.len(), 2);
+        assert_eq!(docs.returned_value[0].name, "ФоновоеЗадание");
+        assert_eq!(docs.returned_value[1].name, "Неопределено");
+    }
+
+    #[test]
+    fn test_parse_return_dash_without_surrounding_spaces() {
+        let comments = vec![
+            "Версия пакета.".to_string(),
+            "".to_string(),
+            "Возвращаемое значение:".to_string(),
+            "  Строка -версия пакета.".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert_eq!(docs.returned_value.len(), 1);
+        assert_eq!(docs.returned_value[0].name, "Строка");
+        assert_eq!(docs.returned_value[0].description, Some("версия пакета.".to_string()));
+    }
+
+    #[test]
+    fn test_parse_return_dash_without_space_before() {
+        let comments = vec![
+            "Проверка.".to_string(),
+            "".to_string(),
+            "Возвращаемое значение:".to_string(),
+            "  Булево- результат проверки.".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert_eq!(docs.returned_value.len(), 1);
+        assert_eq!(docs.returned_value[0].name, "Булево");
+        assert_eq!(docs.returned_value[0].description, Some("результат проверки.".to_string()));
+    }
+
+    #[test]
+    fn test_parse_return_hyphenated_type_name_not_split() {
+        let comments = vec![
+            "Возвращает класс.".to_string(),
+            "".to_string(),
+            "Возвращаемое значение:".to_string(),
+            "  COM-класс".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        // A glued hyphen (no surrounding space) is part of a compound name, not
+        // a separator: it must not be split into a phantom "COM" type.
+        assert!(docs.returned_value.iter().all(|t| t.name != "COM"));
     }
 
     #[test]
