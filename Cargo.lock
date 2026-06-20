@@ -1948,6 +1948,7 @@ dependencies = [
  "hir",
  "ide-db",
  "itertools 0.12.1",
+ "lexer",
  "line-index",
  "once_cell",
  "parser",
