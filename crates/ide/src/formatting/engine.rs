@@ -245,6 +245,30 @@ mod tests {
     }
 
     #[test]
+    fn test_range_formatting_preserves_multiline_call_continuation() {
+        // The closing line of a call whose arguments span several physical lines
+        // is hand-aligned, not at a statement boundary; range-formatting it must
+        // produce no edit so the on-type `;` path can rely on that.
+        let code = "Процедура П()\n\tКоэф = Модуль.Метод(Валюта,\n\t\t\t\tВалютаРегл,\n\t\t\t\t\t\tДата());\nКонецПроцедуры";
+        let parsed = parser::parse(code);
+        let root = parsed.syntax_node();
+        let config = FormattingConfig::default();
+
+        let close_line_start = code.find("\t\t\t\t\t\tДата());").unwrap() as u32;
+        let range = TextRange::new(
+            TextSize::from(close_line_start),
+            TextSize::from(close_line_start + "\t\t\t\t\t\tДата());".len() as u32),
+        );
+        let result = format_range(&root, range, &config);
+
+        assert!(
+            result.edits.iter().all(|e| !e.new_text.contains("Дата")),
+            "continuation line must not be reflowed: {:?}",
+            result.edits
+        );
+    }
+
+    #[test]
     fn test_compute_line_ranges() {
         let ranges = compute_line_ranges("line0\nline1\nline2");
         assert_eq!(ranges.len(), 3);

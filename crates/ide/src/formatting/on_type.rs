@@ -1,10 +1,8 @@
-use syntax::{SyntaxKind, SyntaxNode, SyntaxToken, TextRange, TextSize};
+use syntax::{SyntaxKind, SyntaxNode, TextRange, TextSize, TokenAtOffset};
 
 use super::config::FormattingConfig;
-use super::engine::TextEdit;
-use super::line_tokens::{
-    analyze_line_tokens, is_line_block_end, is_line_block_start, is_line_middle_keyword,
-};
+use super::engine::{format_range, TextEdit};
+use super::ir;
 
 #[derive(Debug, Clone)]
 pub struct OnTypeResult {
@@ -24,46 +22,58 @@ pub fn on_char_typed(
     }
 }
 
+/// Typing `;` completes a statement, so reformat that statement with the same
+/// engine the document/range formatter uses — there is no second indentation
+/// model. The engine expresses a line's indent as an edit on the gap that begins
+/// on the *previous* line; emitting that verbatim mid-typing would disturb the
+/// preceding line or blank lines above, so each edit is projected onto the
+/// current line before being returned (see `clip_edit_to_line`).
 fn on_semicolon_typed(
     root: &SyntaxNode,
     offset: TextSize,
     config: &FormattingConfig,
 ) -> Option<OnTypeResult> {
+    // Only react to a real statement-terminating semicolon. A ';' typed inside a
+    // string literal or a comment is ordinary text — reformatting that line would
+    // mangle the literal or rewrite spacing the user is still editing.
+    if !typed_token_is_semicolon(root, offset) {
+        return None;
+    }
+
     let text = root.text().to_string();
-
     let line_start = find_line_start(&text, offset);
+    let line_end = find_line_end(&text, offset);
 
-    // Leave continuation lines of a multi-line statement alone: re-indenting the
-    // line that merely closes a call whose arguments span several physical lines
-    // would collapse the caller's hand-aligned layout.
-    let cur_line = line_of_offset(&text, line_start);
-    if line_is_statement_continuation(root, line_start, cur_line, &text) {
-        return None;
-    }
+    let result = format_range(root, TextRange::new(offset, offset), config);
 
-    let line_end = offset;
+    let edits: Vec<TextEdit> = result
+        .edits
+        .into_iter()
+        .filter_map(|edit| clip_edit_to_line(&text, edit, line_start, line_end))
+        .filter(|edit| !is_noop(&text, edit))
+        .collect();
 
-    let line_start_usize = u32::from(line_start) as usize;
-    let line_end_usize = u32::from(line_end) as usize;
-    let line = &text[line_start_usize..line_end_usize.min(text.len())];
-
-    let indent_level = calculate_indent_for_line(root, line_start, line);
-    let expected_indent = config.indent_for_level(indent_level);
-
-    let current_indent = get_line_indent(line);
-
-    if current_indent == expected_indent {
-        return None;
-    }
-
-    let trimmed = line.trim_start();
-    let new_line = format!("{}{}", expected_indent, trimmed);
-
-    Some(OnTypeResult {
-        edits: vec![TextEdit { range: TextRange::new(line_start, line_end), new_text: new_line }],
-    })
+    (!edits.is_empty()).then_some(OnTypeResult { edits })
 }
 
+/// True when the character just typed at `offset` is a statement-terminating
+/// `;` token, as opposed to a `;` that is part of a string literal or comment.
+fn typed_token_is_semicolon(root: &SyntaxNode, offset: TextSize) -> bool {
+    let token = match root.token_at_offset(offset) {
+        TokenAtOffset::None => return false,
+        TokenAtOffset::Single(t) => t,
+        TokenAtOffset::Between(left, _) => left,
+    };
+    token.kind() == SyntaxKind::SEMICOLON
+}
+
+/// Pressing Enter creates a line the formatter cannot reindent — it has no atom
+/// to anchor on, and the engine deliberately preserves the trailing gap. Predict
+/// its indent from the same structural primitive the engine uses, then replace
+/// whatever leading whitespace the editor already inserted. Replacing (rather
+/// than inserting at the cursor) keeps the edit idempotent: a pure insertion
+/// stacks on top of the client's own auto-indent (e.g. Zed) and grows without
+/// bound.
 fn on_newline_typed(
     root: &SyntaxNode,
     offset: TextSize,
@@ -71,36 +81,15 @@ fn on_newline_typed(
 ) -> Option<OnTypeResult> {
     let text = root.text().to_string();
 
-    // The cursor sits on the freshly created line; locate where that line begins.
     let new_line_start = find_line_start(&text, offset);
     if new_line_start == TextSize::from(0) {
         // No preceding line to derive indentation from.
         return None;
     }
 
-    // The previous line is the one terminated by the newline that was just typed.
-    let prev_line_end = new_line_start - TextSize::from(1);
-    let prev_line_start = find_line_start(&text, prev_line_end);
+    let level = ir::open_block_depth_at(root, new_line_start);
+    let expected_indent = config.indent_for_level(level);
 
-    let prev_start = u32::from(prev_line_start) as usize;
-    let prev_end = u32::from(prev_line_end) as usize;
-    let prev_line = &text[prev_start..prev_end.min(text.len())];
-
-    let mut indent_level = calculate_indent_for_line(root, prev_line_start, prev_line);
-
-    let tokens = analyze_line_tokens(prev_line.trim());
-
-    if is_line_block_start(&tokens) && !is_line_block_end(&tokens) {
-        indent_level += 1;
-    }
-
-    let expected_indent = config.indent_for_level(indent_level);
-
-    // Replace whatever leading whitespace the editor already inserted on the new
-    // line instead of appending to it. A pure insertion stacks on top of the
-    // editor's own auto-indent (e.g. Zed), producing runaway indentation; an
-    // idempotent replace keeps exactly one correct indent regardless of the
-    // client's behaviour.
     let new_line_start_usize = u32::from(new_line_start) as usize;
     let existing_ws_len: usize = text[new_line_start_usize..]
         .chars()
@@ -114,13 +103,58 @@ fn on_newline_typed(
     }
 
     let ws_end = new_line_start + TextSize::from(existing_ws_len as u32);
-
     Some(OnTypeResult {
         edits: vec![TextEdit {
             range: TextRange::new(new_line_start, ws_end),
             new_text: expected_indent,
         }],
     })
+}
+
+/// Restrict a formatter edit to the single line `[line_start, line_end]`.
+///
+/// - Edits wholly above the line are dropped.
+/// - Edits that reach *below* the line (e.g. a multi-line string literal the
+///   engine would re-flow) are dropped: on-type must never reformat other lines
+///   while the user is mid-statement.
+/// - Edits already contained in the line are kept as-is (inline spacing).
+/// - The indent edit straddles the upper boundary only — its original span is
+///   pure whitespace (the gap reaching back to the previous line's last token)
+///   and it ends at this line's first atom. It is trimmed to its on-line tail:
+///   the text after its final newline, which is exactly this line's indentation.
+///   A straddling edit whose original span contains content (a multi-line literal
+///   re-flow anchored on an earlier line) is dropped, not clipped.
+fn clip_edit_to_line(
+    text: &str,
+    edit: TextEdit,
+    line_start: TextSize,
+    line_end: TextSize,
+) -> Option<TextEdit> {
+    if edit.range.end() <= line_start || edit.range.end() > line_end {
+        return None;
+    }
+    if edit.range.start() >= line_start {
+        return Some(edit);
+    }
+    let start = u32::from(edit.range.start()) as usize;
+    let end = u32::from(edit.range.end()) as usize;
+    if !text[start..end].chars().all(|c| c.is_whitespace()) {
+        return None;
+    }
+    let on_line = match edit.new_text.rfind('\n') {
+        Some(pos) => edit.new_text[pos + 1..].to_string(),
+        None => edit.new_text,
+    };
+    Some(TextEdit { range: TextRange::new(line_start, edit.range.end()), new_text: on_line })
+}
+
+/// True when applying `edit` would not change the text — clipping can leave an
+/// edit that replaces a span with the identical content (e.g. the indent was
+/// already correct and only an off-line change was dropped).
+fn is_noop(text: &str, edit: &TextEdit) -> bool {
+    let start = u32::from(edit.range.start()) as usize;
+    let end = (u32::from(edit.range.end()) as usize).min(text.len());
+    text.get(start..end) == Some(edit.new_text.as_str())
 }
 
 fn find_line_start(text: &str, offset: TextSize) -> TextSize {
@@ -133,137 +167,43 @@ fn find_line_start(text: &str, offset: TextSize) -> TextSize {
     }
 }
 
-fn get_line_indent(line: &str) -> String {
-    let trimmed = line.trim_start();
-    let indent_len = line.len() - trimmed.len();
-    line[..indent_len].to_string()
-}
-
-fn calculate_indent_for_line(root: &SyntaxNode, line_start: TextSize, line: &str) -> u32 {
-    let text = root.text().to_string();
-    let cur_line = line_of_offset(&text, line_start);
-
-    // Anchor on the first meaningful token of the line so the ancestor walk
-    // reflects the line's real nesting rather than where leading whitespace
-    // happens to attach in the tree.
-    let anchor = first_meaningful_token(root, line_start);
-
-    let mut indent = 0u32;
-
-    if let Some(parent) = anchor.and_then(|t| t.parent()) {
-        for node in parent.ancestors() {
-            if !is_indent_block(node.kind()) {
-                continue;
-            }
-
-            // A block adds a level only to lines strictly inside its body: its
-            // opening keyword and its closing keyword sit on the block's own
-            // boundary lines and keep the surrounding indent. Clause nodes
-            // (else / elsif / except) are intentionally not counted — their
-            // parent IF/TRY already supplies the single level, so counting both
-            // would double-indent the branch.
-            let start_line = line_of_offset(&text, node.text_range().start());
-            // Bound the body by the block's own closing keyword line. While the
-            // user is still typing top-down the closer doesn't exist yet, so the
-            // block stays open to EOF and its body lines must still be indented —
-            // otherwise pressing Enter inside an unterminated procedure would snap
-            // the new line to column 0.
-            let end_line = node
-                .children_with_tokens()
-                .filter_map(|e| e.into_token())
-                .find(|t| is_block_close_keyword(t.kind()))
-                .map(|t| line_of_offset(&text, t.text_range().start()))
-                .unwrap_or(usize::MAX);
-
-            if start_line < cur_line && cur_line < end_line {
-                indent += 1;
-            }
-        }
+/// End of the line containing `offset` — the position of the next newline, or the
+/// end of the text. Used to bound on-type edits to a single line.
+fn find_line_end(text: &str, offset: TextSize) -> TextSize {
+    let offset_usize = (u32::from(offset) as usize).min(text.len());
+    match text[offset_usize..].find('\n') {
+        Some(pos) => TextSize::from((offset_usize + pos) as u32),
+        None => TextSize::from(text.len() as u32),
     }
-
-    // Branch keywords (Иначе / ИначеЕсли / Исключение) are written one level
-    // out from their branch body even though they sit inside the block.
-    if is_line_middle_keyword(&analyze_line_tokens(line.trim())) {
-        indent = indent.saturating_sub(1);
-    }
-
-    indent
-}
-
-fn is_indent_block(kind: SyntaxKind) -> bool {
-    matches!(
-        kind,
-        SyntaxKind::PROCEDURE_DEF
-            | SyntaxKind::FUNCTION_DEF
-            | SyntaxKind::IF_STMT
-            | SyntaxKind::WHILE_STMT
-            | SyntaxKind::FOR_STMT
-            | SyntaxKind::FOR_EACH_STMT
-            | SyntaxKind::TRY_STMT
-            | SyntaxKind::PRE_IF_DIR
-    )
-}
-
-fn is_block_close_keyword(kind: SyntaxKind) -> bool {
-    matches!(
-        kind,
-        SyntaxKind::KW_END_PROCEDURE
-            | SyntaxKind::KW_END_FUNCTION
-            | SyntaxKind::KW_END_IF
-            | SyntaxKind::KW_END_DO
-            | SyntaxKind::KW_END_TRY
-            | SyntaxKind::PRE_END_IF
-    )
-}
-
-fn line_of_offset(text: &str, offset: TextSize) -> usize {
-    let off = (u32::from(offset) as usize).min(text.len());
-    text.as_bytes()[..off].iter().filter(|&&b| b == b'\n').count()
-}
-
-/// First non-trivia token at or after `offset`, used to anchor structural
-/// reasoning on the line's real content rather than its leading whitespace.
-fn first_meaningful_token(root: &SyntaxNode, offset: TextSize) -> Option<SyntaxToken> {
-    std::iter::successors(root.token_at_offset(offset).right_biased(), |t| t.next_token())
-        .find(|t| !t.kind().is_trivia())
-}
-
-/// True when the line at `line_start` continues a statement that began on an
-/// earlier line (e.g. the closing line of a call whose arguments are spread
-/// across several lines). Such lines own their layout and must not be
-/// re-indented on `;`.
-fn line_is_statement_continuation(
-    root: &SyntaxNode,
-    line_start: TextSize,
-    cur_line: usize,
-    text: &str,
-) -> bool {
-    let Some(parent) = first_meaningful_token(root, line_start).and_then(|t| t.parent()) else {
-        return false;
-    };
-
-    for node in parent.ancestors() {
-        if node.parent().map(|p| p.kind()) != Some(SyntaxKind::STMT_LIST) {
-            continue;
-        }
-
-        // Structural block statements own a closing keyword line (КонецЕсли; …)
-        // that should still be re-indented to its block level, so never treat
-        // them as continuations — only simple statements with a multi-line
-        // expression body qualify.
-        if is_indent_block(node.kind()) {
-            return false;
-        }
-
-        return line_of_offset(text, node.text_range().start()) < cur_line;
-    }
-
-    false
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parse(src: &str) -> SyntaxNode {
+        parser::parse(src).syntax_node()
+    }
+
+    fn apply_all(src: &str, edits: &[TextEdit]) -> String {
+        let mut sorted = edits.to_vec();
+        sorted.sort_by_key(|e| e.range.start());
+        let mut out = String::new();
+        let mut last = 0usize;
+        for edit in &sorted {
+            let start = u32::from(edit.range.start()) as usize;
+            let end = u32::from(edit.range.end()) as usize;
+            out.push_str(&src[last..start]);
+            out.push_str(&edit.new_text);
+            last = end;
+        }
+        out.push_str(&src[last..]);
+        out
+    }
+
+    fn line_with(text: &str, trimmed: &str) -> String {
+        text.lines().find(|l| l.trim() == trimmed).unwrap_or("").to_string()
+    }
 
     #[test]
     fn test_find_line_start() {
@@ -274,32 +214,18 @@ mod tests {
         assert_eq!(find_line_start(text, TextSize::from(14)), TextSize::from(12));
     }
 
-    #[test]
-    fn test_get_line_indent() {
-        assert_eq!(get_line_indent("  hello"), "  ");
-        assert_eq!(get_line_indent("\thello"), "\t");
-        assert_eq!(get_line_indent("hello"), "");
-        assert_eq!(get_line_indent("\t\thello"), "\t\t");
+    // --- `;` (statement completion) ------------------------------------------
+
+    fn run_semicolon(src: &str, cursor: usize, config: &FormattingConfig) -> Option<OnTypeResult> {
+        on_semicolon_typed(&parse(src), TextSize::from(cursor as u32), config)
     }
 
-    #[test]
-    fn test_is_line_starts_block() {
-        let check = |s: &str| is_line_block_start(&analyze_line_tokens(s));
-        assert!(check("Если А Тогда"));
-        assert!(check("If A Then"));
-        assert!(check("Процедура Тест()"));
-        assert!(check("Попытка"));
-        assert!(!check("А = 1;"));
+    fn semicolon_after(src: &str, line: &str, cfg: &FormattingConfig) -> Option<OnTypeResult> {
+        let cursor = src.find(line).unwrap() + line.len();
+        run_semicolon(src, cursor, cfg)
     }
 
-    #[test]
-    fn test_is_line_ends_block() {
-        let check = |s: &str| is_line_block_end(&analyze_line_tokens(s));
-        assert!(check("КонецПроцедуры"));
-        assert!(check("EndProcedure"));
-        assert!(check("КонецЕсли;"));
-        assert!(!check("А = 1;"));
-    }
+    const IF_ELSIF_ELSE: &str = "Процедура П()\n\tЕсли У Тогда\n\t\tА = 1;\n\tИначеЕсли В Тогда\n\t\tБ = 2;\n\tИначе\n\t\tВ = 3;\n\tКонецЕсли;\nКонецПроцедуры";
 
     #[test]
     fn semicolon_after_multiline_call_keeps_block_indent() {
@@ -310,7 +236,8 @@ mod tests {
         let src = "Процедура П()\n\tКоэф = Модуль.Метод(Валюта,\n\t\t\t\tВалютаРегл,\n\t\t\t\t\t\tДата());\n\t\t\tСтр = Новый Структура;\nКонецПроцедуры";
         let res =
             semicolon_after(src, "Стр = Новый Структура;", &cfg).expect("an edit is expected");
-        assert_eq!(res.edits[0].new_text, "\tСтр = Новый Структура;");
+        let fixed = apply_all(src, &res.edits);
+        assert_eq!(line_with(&fixed, "Стр = Новый Структура;"), "\tСтр = Новый Структура;");
     }
 
     #[test]
@@ -324,25 +251,13 @@ mod tests {
 
     #[test]
     fn semicolon_still_fixes_overindented_block_close() {
-        // The continuation guard must not swallow a structural closing line:
-        // an over-indented КонецЕсли; is still pulled back to its block level.
+        // The clip must not swallow a structural closing line: an over-indented
+        // КонецЕсли; is still pulled back to its block level.
         let cfg = FormattingConfig::default();
         let src = "Процедура П()\n\tЕсли У Тогда\n\t\tА = 1;\n\t\t\tКонецЕсли;\nКонецПроцедуры";
         let res = semicolon_after(src, "КонецЕсли;", &cfg).expect("an edit is expected");
-        assert_eq!(res.edits[0].new_text, "\tКонецЕсли;");
-    }
-
-    fn run_semicolon(src: &str, cursor: usize, config: &FormattingConfig) -> Option<OnTypeResult> {
-        let parsed = parser::parse(src);
-        let root = parsed.syntax_node();
-        on_semicolon_typed(&root, TextSize::from(cursor as u32), config)
-    }
-
-    const IF_ELSIF_ELSE: &str = "Процедура П()\n\tЕсли У Тогда\n\t\tА = 1;\n\tИначеЕсли В Тогда\n\t\tБ = 2;\n\tИначе\n\t\tВ = 3;\n\tКонецЕсли;\nКонецПроцедуры";
-
-    fn semicolon_after(src: &str, line: &str, cfg: &FormattingConfig) -> Option<OnTypeResult> {
-        let cursor = src.find(line).unwrap() + line.len();
-        run_semicolon(src, cursor, cfg)
+        let fixed = apply_all(src, &res.edits);
+        assert_eq!(line_with(&fixed, "КонецЕсли;"), "\tКонецЕсли;");
     }
 
     #[test]
@@ -353,8 +268,7 @@ mod tests {
         assert!(semicolon_after(IF_ELSIF_ELSE, "\t\tА = 1;", &cfg).is_none());
         assert!(semicolon_after(IF_ELSIF_ELSE, "\t\tБ = 2;", &cfg).is_none());
         assert!(semicolon_after(IF_ELSIF_ELSE, "\t\tВ = 3;", &cfg).is_none());
-        // The closing keyword line is the case the user hit: it must stay one
-        // level out, not jump deeper.
+        // The closing keyword line must stay one level out, not jump deeper.
         assert!(semicolon_after(IF_ELSIF_ELSE, "\tКонецЕсли;", &cfg).is_none());
     }
 
@@ -364,7 +278,8 @@ mod tests {
         // Editor left the else-branch statement two levels too deep.
         let src = "Процедура П()\n\tЕсли У Тогда\n\t\tА = 1;\n\tИначе\n\t\t\t\tБ = 2;\n\tКонецЕсли;\nКонецПроцедуры";
         let res = semicolon_after(src, "\t\t\t\tБ = 2;", &cfg).expect("an edit is expected");
-        assert_eq!(res.edits[0].new_text, "\t\tБ = 2;");
+        let fixed = apply_all(src, &res.edits);
+        assert_eq!(line_with(&fixed, "Б = 2;"), "\t\tБ = 2;");
     }
 
     #[test]
@@ -376,17 +291,96 @@ mod tests {
 
     #[test]
     fn semicolon_closing_line_with_trailing_blank_line_stays_put() {
-        // Trailing trivia (the blank line after КонецЕсли;) must not be mistaken
-        // for the block's footer: the closing line stays one level out.
+        // A trailing blank line after КонецЕсли; must not be touched: the closing
+        // line stays one level out and no edit reaches the blank line below.
         let cfg = FormattingConfig::default();
         let src = "Процедура П()\n\tЕсли У Тогда\n\t\tА = 1;\n\tКонецЕсли;\n\nКонецПроцедуры";
         assert!(semicolon_after(src, "\tКонецЕсли;", &cfg).is_none());
     }
 
+    #[test]
+    fn semicolon_normalizes_inline_spacing() {
+        // Completing a statement reformats it with the engine, so loose spacing is
+        // tightened — the on-type path is no longer a separate indentation model.
+        let cfg = FormattingConfig::default();
+        let src = "Процедура П()\n\tА=1;\nКонецПроцедуры";
+        let res = semicolon_after(src, "А=1;", &cfg).expect("an edit is expected");
+        let fixed = apply_all(src, &res.edits);
+        assert_eq!(line_with(&fixed, "А = 1;"), "\tА = 1;");
+    }
+
+    #[test]
+    fn semicolon_inside_string_literal_is_ignored() {
+        // A ';' typed inside a string is ordinary text, not a statement
+        // terminator: the line must not be reformatted. The surrounding code is
+        // intentionally misformatted (no spaces around '='), so without the guard
+        // format_range WOULD return a spacing edit — the guard is load-bearing.
+        let cfg = FormattingConfig::default();
+        let src = "Процедура П()\n\tТекст=\"a;b\";\nКонецПроцедуры";
+        let cursor = src.find("a;b").unwrap() + 2; // just past the in-string ';'
+        assert!(run_semicolon(src, cursor, &cfg).is_none());
+    }
+
+    #[test]
+    fn semicolon_inside_comment_is_ignored() {
+        // The comment lacks the canonical space after '//', so without the guard
+        // format_range would emit a comment-normalization edit on this line.
+        let cfg = FormattingConfig::default();
+        let src = "Процедура П()\n\t//коммент; ещё\nКонецПроцедуры";
+        let cursor = src.find("коммент;").unwrap() + "коммент;".len();
+        assert!(run_semicolon(src, cursor, &cfg).is_none());
+    }
+
+    #[test]
+    fn semicolon_after_multiline_string_does_not_corrupt_literal() {
+        // The engine may re-flow a multi-line literal anchored on an earlier line;
+        // on-type must drop that edit, never project the literal's tail onto the
+        // current line as if it were indentation.
+        let cfg = FormattingConfig::default();
+        let src = "Процедура П()\n\tТекст =\n\"ВЫБРАТЬ\n|\tПоле\";\nКонецПроцедуры";
+        if let Some(res) = semicolon_after(src, "|\tПоле\";", &cfg) {
+            for edit in &res.edits {
+                assert!(
+                    !edit.new_text.contains("Поле") && !edit.new_text.contains("ВЫБРАТЬ"),
+                    "literal content leaked into an on-type edit: {edit:?}"
+                );
+            }
+            let fixed = apply_all(src, &res.edits);
+            assert!(fixed.contains("\"ВЫБРАТЬ\n|\tПоле\""), "literal must stay intact: {fixed:?}");
+        }
+    }
+
+    #[test]
+    fn newline_prediction_for_closer_line_uses_outer_level() {
+        // A closer beginning exactly at the predicted line sits at the block's
+        // outer level, not its body level — the strict `>` boundary in
+        // block_is_open_at.
+        let cfg = FormattingConfig::default();
+        let src = "Процедура П()\n\tЕсли У Тогда\n\t\tА = 1;\nКонецЕсли;\nКонецПроцедуры";
+        let offset = src.find("КонецЕсли;").unwrap();
+        let res = run_newline(src, offset, &cfg).expect("an edit is expected");
+        assert_eq!(res.edits[0].new_text, "\t");
+    }
+
+    #[test]
+    fn semicolon_never_edits_lines_above_current() {
+        // The clip guarantees the previous line is never disturbed mid-typing.
+        let cfg = FormattingConfig::default();
+        let src = "Процедура П()\n\tА = 1;\n\t\t\tБ = 2;\nКонецПроцедуры";
+        let res = semicolon_after(src, "Б = 2;", &cfg).expect("an edit is expected");
+        for edit in &res.edits {
+            let start = u32::from(edit.range.start()) as usize;
+            assert!(
+                start >= src.find("Б = 2;").unwrap() - 3,
+                "edit at {start} reaches above the current line"
+            );
+        }
+    }
+
+    // --- Enter (new-line indent prediction) ----------------------------------
+
     fn run_newline(src: &str, cursor: usize, config: &FormattingConfig) -> Option<OnTypeResult> {
-        let parsed = parser::parse(src);
-        let root = parsed.syntax_node();
-        on_newline_typed(&root, TextSize::from(cursor as u32), config)
+        on_newline_typed(&parse(src), TextSize::from(cursor as u32), config)
     }
 
     fn apply(src: &str, edit: &TextEdit) -> String {
@@ -409,6 +403,7 @@ mod tests {
         // insertion at the cursor (which would stack on top of it).
         assert_eq!(res.edits[0].range.start(), TextSize::from(ws_start as u32));
         assert_eq!(res.edits[0].range.end(), TextSize::from(cursor as u32));
+        assert_eq!(res.edits[0].new_text, "    ");
     }
 
     #[test]
@@ -449,6 +444,26 @@ mod tests {
         let src = "Процедура П()\n\tЕсли У Тогда\n";
         let res = run_newline(src, src.len(), &cfg).expect("an edit is expected");
         assert_eq!(res.edits[0].new_text, "\t\t");
+    }
+
+    #[test]
+    fn newline_after_else_keyword_opens_branch_body() {
+        // The branch body of Иначе sits one level in from the keyword, even though
+        // ELSE_CLAUSE is not itself a block-defining node.
+        let cfg = FormattingConfig::default();
+        let src = "Процедура П()\n\tЕсли У Тогда\n\t\tА = 1;\n\tИначе\n";
+        let res = run_newline(src, src.len(), &cfg).expect("an edit is expected");
+        assert_eq!(res.edits[0].new_text, "\t\t");
+    }
+
+    #[test]
+    fn newline_after_block_close_returns_to_outer_level() {
+        // Once КонецЕсли; closes the inner block, the next line drops back to the
+        // procedure body level.
+        let cfg = FormattingConfig::default();
+        let src = "Процедура П()\n\tЕсли У Тогда\n\t\tА = 1;\n\tКонецЕсли;\n";
+        let res = run_newline(src, src.len(), &cfg).expect("an edit is expected");
+        assert_eq!(res.edits[0].new_text, "\t");
     }
 
     #[test]
