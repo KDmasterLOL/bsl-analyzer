@@ -163,13 +163,17 @@ fn calculate_indent_for_line(root: &SyntaxNode, line_start: TextSize, line: &str
             // parent IF/TRY already supplies the single level, so counting both
             // would double-indent the branch.
             let start_line = line_of_offset(&text, node.text_range().start());
-            // Use the last *non-trivia* token: trailing whitespace/newline may be
-            // attached inside the node and would otherwise push end_line past the
-            // real footer keyword, wrongly counting the footer line as interior.
-            let end_line = std::iter::successors(node.last_token(), |t| t.prev_token())
-                .find(|t| !t.kind().is_trivia())
+            // Bound the body by the block's own closing keyword line. While the
+            // user is still typing top-down the closer doesn't exist yet, so the
+            // block stays open to EOF and its body lines must still be indented —
+            // otherwise pressing Enter inside an unterminated procedure would snap
+            // the new line to column 0.
+            let end_line = node
+                .children_with_tokens()
+                .filter_map(|e| e.into_token())
+                .find(|t| is_block_close_keyword(t.kind()))
                 .map(|t| line_of_offset(&text, t.text_range().start()))
-                .unwrap_or(start_line);
+                .unwrap_or(usize::MAX);
 
             if start_line < cur_line && cur_line < end_line {
                 indent += 1;
@@ -197,6 +201,18 @@ fn is_indent_block(kind: SyntaxKind) -> bool {
             | SyntaxKind::FOR_EACH_STMT
             | SyntaxKind::TRY_STMT
             | SyntaxKind::PRE_IF_DIR
+    )
+}
+
+fn is_block_close_keyword(kind: SyntaxKind) -> bool {
+    matches!(
+        kind,
+        SyntaxKind::KW_END_PROCEDURE
+            | SyntaxKind::KW_END_FUNCTION
+            | SyntaxKind::KW_END_IF
+            | SyntaxKind::KW_END_DO
+            | SyntaxKind::KW_END_TRY
+            | SyntaxKind::PRE_END_IF
     )
 }
 
@@ -407,6 +423,32 @@ mod tests {
         let new_cursor = ws_start + res.edits[0].new_text.len();
         // Re-running on the corrected text is a no-op — no runaway indentation.
         assert!(run_newline(&fixed, new_cursor, &cfg).is_none());
+    }
+
+    #[test]
+    fn newline_inside_unterminated_procedure_indents_to_body() {
+        // While typing top-down the procedure has no КонецПроцедуры yet; Enter
+        // must still indent the new line into the body, not snap it to column 0.
+        let cfg = FormattingConfig::default();
+        let src = "Процедура П()\n\tА = 1;\n";
+        let res = run_newline(src, src.len(), &cfg).expect("an edit is expected");
+        assert_eq!(res.edits[0].new_text, "\t");
+    }
+
+    #[test]
+    fn newline_inside_unterminated_nested_blocks_indents_to_body() {
+        let cfg = FormattingConfig::default();
+        let src = "Процедура П()\n\tЕсли У Тогда\n\t\tА = 1;\n";
+        let res = run_newline(src, src.len(), &cfg).expect("an edit is expected");
+        assert_eq!(res.edits[0].new_text, "\t\t");
+    }
+
+    #[test]
+    fn newline_after_unterminated_if_header_opens_body() {
+        let cfg = FormattingConfig::default();
+        let src = "Процедура П()\n\tЕсли У Тогда\n";
+        let res = run_newline(src, src.len(), &cfg).expect("an edit is expected");
+        assert_eq!(res.edits[0].new_text, "\t\t");
     }
 
     #[test]
