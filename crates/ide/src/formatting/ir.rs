@@ -1,4 +1,6 @@
-use syntax::{NodeOrToken, SyntaxKind, SyntaxNode, TextRange, TextSize, WalkEvent};
+use syntax::{
+    NodeOrToken, SyntaxKind, SyntaxNode, SyntaxToken, TextRange, TextSize, TokenAtOffset, WalkEvent,
+};
 
 use super::FormattingConfig;
 
@@ -310,7 +312,12 @@ fn count_newlines(s: &str) -> u32 {
     s.bytes().filter(|&b| b == b'\n').count() as u32
 }
 
-fn is_block_defining(kind: SyntaxKind) -> bool {
+/// Syntax nodes that introduce one indentation level for their body. This is the
+/// single source of truth for structural indentation depth, shared by the
+/// formatter policy (`block_depth`) and on-type indenting
+/// (`open_block_depth_at`). Preprocessor regions are intentionally excluded — the
+/// formatter does not indent inside `#Область`/`#Если`.
+pub(crate) fn is_block_defining(kind: SyntaxKind) -> bool {
     matches!(
         kind,
         SyntaxKind::PROCEDURE_DEF
@@ -321,6 +328,61 @@ fn is_block_defining(kind: SyntaxKind) -> bool {
             | SyntaxKind::FOR_EACH_STMT
             | SyntaxKind::TRY_STMT
     )
+}
+
+/// The keyword that closes a block-defining node, present as a direct child
+/// token of that node. Used to tell whether a block is still open at an offset.
+fn is_block_close_keyword(kind: SyntaxKind) -> bool {
+    matches!(
+        kind,
+        SyntaxKind::KW_END_PROCEDURE
+            | SyntaxKind::KW_END_FUNCTION
+            | SyntaxKind::KW_END_IF
+            | SyntaxKind::KW_END_DO
+            | SyntaxKind::KW_END_TRY
+    )
+}
+
+/// Indentation level of a line whose first content is at `offset`, derived purely
+/// from structure: the number of block-defining ancestors of the token just
+/// before `offset` that are still open there. A block is open when its closing
+/// keyword is missing (the user is still typing top-down) or lies strictly after
+/// `offset`. This predicts the indent of a freshly inserted line where the
+/// formatter has no atom to anchor on, while sharing `is_block_defining` with the
+/// full formatter so the two paths cannot diverge.
+pub(crate) fn open_block_depth_at(root: &SyntaxNode, offset: TextSize) -> u32 {
+    let Some(parent) = meaningful_token_before(root, offset).and_then(|t| t.parent()) else {
+        return 0;
+    };
+    parent
+        .ancestors()
+        .filter(|n| is_block_defining(n.kind()))
+        .filter(|n| block_is_open_at(n, offset))
+        .count() as u32
+}
+
+fn block_is_open_at(node: &SyntaxNode, offset: TextSize) -> bool {
+    node.children_with_tokens()
+        .filter_map(|e| e.into_token())
+        .find(|t| is_block_close_keyword(t.kind()))
+        // A closer that begins at exactly `offset` belongs to the line being
+        // indented (it is that line's own КонецX), so the block it terminates is
+        // already closed for that line — it must sit at the outer level, not the
+        // body level. Hence strictly-after, not at-or-after.
+        .is_none_or(|t| t.text_range().start() > offset)
+}
+
+/// Last non-trivia token at or before `offset`. Handles the `Between` boundary
+/// (cursor sitting exactly between two tokens, e.g. at column 0 of a new line)
+/// by taking the left token, then skips over all trivia — whitespace, newlines
+/// and comments — to reach real content on a preceding line.
+fn meaningful_token_before(root: &SyntaxNode, offset: TextSize) -> Option<SyntaxToken> {
+    let start = match root.token_at_offset(offset) {
+        TokenAtOffset::None => return None,
+        TokenAtOffset::Single(t) => t,
+        TokenAtOffset::Between(left, _) => left,
+    };
+    std::iter::successors(Some(start), |t| t.prev_token()).find(|t| !t.kind().is_trivia())
 }
 
 fn is_block_boundary_keyword(kind: SyntaxKind) -> bool {
