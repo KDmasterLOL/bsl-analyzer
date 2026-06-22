@@ -164,8 +164,8 @@ fn run_mcp_serve(args: McpServeArgs) -> Result<(), Box<dyn Error + Send + Sync>>
 ///   (dropping extra flags) and does not propagate its `env` block — so the activation
 ///   has to live in the binary's own default, not the client config.
 /// - With no override, unix defaults to the broker (validated there); Windows stays on
-///   direct stdio. Explicit broker/daemon activation is rejected on Windows until the
-///   named-pipe transport installs an explicit security descriptor.
+///   direct stdio, while explicit broker/daemon activation is allowed and protected by
+///   the broker's named-pipe security descriptor.
 fn resolve_serve_mode(
     flag: McpServeMode,
     profile: mcp_server::McpProfile,
@@ -174,9 +174,7 @@ fn resolve_serve_mode(
         broker_override: env_broker_override(),
         unix_default_broker: cfg!(unix),
     };
-    let mode = resolve_serve_mode_with_override(flag, profile, context);
-    ensure_serve_mode_supported(mode, cfg!(windows))?;
-    Ok(mode)
+    Ok(resolve_serve_mode_with_override(flag, profile, context))
 }
 
 #[derive(Clone, Copy)]
@@ -206,16 +204,6 @@ fn resolve_serve_mode_with_override(
     } else {
         McpServeMode::Stdio
     }
-}
-
-fn ensure_serve_mode_supported(mode: McpServeMode, windows: bool) -> Result<(), io::Error> {
-    if windows && matches!(mode, McpServeMode::Broker | McpServeMode::Daemon) {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "MCP broker/daemon modes are not supported on Windows until the named-pipe transport installs an explicit security descriptor; use --mode stdio",
-        ));
-    }
-    Ok(())
 }
 
 /// `BSL_MCP_BROKER` parsed as an explicit tristate: `Some(true|false)` for a recognized
@@ -627,10 +615,7 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ensure_serve_mode_supported, resolve_serve_mode_with_override, McpServeMode,
-        ServeModeContext,
-    };
+    use super::{resolve_serve_mode_with_override, McpServeMode, ServeModeContext};
 
     #[test]
     fn workspace_profile_defaults_to_stdio_when_unix_default_is_false() {
@@ -674,28 +659,5 @@ mod tests {
         );
 
         assert!(matches!(mode, McpServeMode::Stdio));
-    }
-
-    #[test]
-    fn windows_guard_allows_stdio() {
-        assert!(ensure_serve_mode_supported(McpServeMode::Stdio, true).is_ok());
-    }
-
-    #[test]
-    fn windows_guard_rejects_broker() {
-        let error = ensure_serve_mode_supported(McpServeMode::Broker, true)
-            .expect_err("windows broker must fail fast");
-
-        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
-        assert!(error.to_string().contains("security descriptor"));
-    }
-
-    #[test]
-    fn windows_guard_rejects_daemon() {
-        let error = ensure_serve_mode_supported(McpServeMode::Daemon, true)
-            .expect_err("windows daemon must fail fast");
-
-        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
-        assert!(error.to_string().contains("security descriptor"));
     }
 }
