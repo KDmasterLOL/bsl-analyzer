@@ -228,6 +228,20 @@ mod tests {
     const IF_ELSIF_ELSE: &str = "Процедура П()\n\tЕсли У Тогда\n\t\tА = 1;\n\tИначеЕсли В Тогда\n\t\tБ = 2;\n\tИначе\n\t\tВ = 3;\n\tКонецЕсли;\nКонецПроцедуры";
 
     #[test]
+    fn semicolon_fixes_overindent_after_bare_multiline_call_nested() {
+        // Reported case: a bare (non-assignment) call whose arguments are aligned
+        // deep to the open paren, followed by an over-indented next statement
+        // inside Если. Typing ';' must pull that statement back to its block
+        // level, not leave it at the editor's deep auto-indent.
+        let cfg = FormattingConfig::with_spaces(4);
+        let src = "Процедура Тест()\n    Если Условие Тогда\n        Модуль.Метод(ЭтотОбъект,\n                                Товары,\n                                Дата);\n            Стр = Новый Структура;\n    КонецЕсли;\nКонецПроцедуры";
+        let res =
+            semicolon_after(src, "Стр = Новый Структура;", &cfg).expect("an edit is expected");
+        let fixed = apply_all(src, &res.edits);
+        assert_eq!(line_with(&fixed, "Стр = Новый Структура;"), "        Стр = Новый Структура;");
+    }
+
+    #[test]
     fn semicolon_after_multiline_call_keeps_block_indent() {
         // A statement following a call whose arguments span several physical
         // lines must indent to its block level, not inherit the call's deep
