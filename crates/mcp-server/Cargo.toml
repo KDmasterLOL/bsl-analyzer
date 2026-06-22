@@ -55,6 +55,10 @@ interprocess = { version = "2.4.2", features = ["tokio"] }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[target.'cfg(windows)'.dependencies]
+widestring = "1.0"
+win-security-identifier = "0.1.1"
+
 [dev-dependencies]
 expect-test.workspace = true
 tempfile.workspace = true

@@ -10,5 +10,6 @@
 pub mod daemon;
 mod name;
 pub mod proxy;
+pub(crate) mod security;
 
 pub use name::{backend_name, embedding_config_fingerprint, BackendKey};
