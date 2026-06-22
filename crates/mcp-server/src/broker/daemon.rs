@@ -31,6 +31,8 @@ use tokio::sync::Notify;
 use tokio::time::{interval, Instant, MissedTickBehavior};
 
 use crate::broker::name::{backend_name, BackendKey};
+#[cfg(windows)]
+use crate::broker::security::pipe_security_descriptor_for_current_user;
 use crate::{serve_stream, McpServer};
 
 /// Cap on connections held while the resident state builds. The listener keeps draining
@@ -52,8 +54,6 @@ pub async fn run<F>(build: F, key: BackendKey, orphan_grace: Duration) -> anyhow
 where
     F: FnOnce() -> anyhow::Result<McpServer> + Send + 'static,
 {
-    ensure_daemon_supported(cfg!(windows))?;
-
     let Some(listener) = bind(&key).await? else {
         tracing::info!("backend already serving this project; nothing to do");
         return Ok(());
@@ -97,16 +97,6 @@ where
     let result = serve(server, listener, parked, orphan_grace).await;
     guard.shutdown();
     result
-}
-
-fn ensure_daemon_supported(windows: bool) -> io::Result<()> {
-    if windows {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "MCP broker daemon is not supported on Windows until the named-pipe transport installs an explicit security descriptor",
-        ));
-    }
-    Ok(())
 }
 
 async fn serve(
@@ -341,7 +331,7 @@ impl Drop for ActiveGuard {
 /// named pipe instance vanishes with its owner, so a stale name just means the pipe is
 /// already gone and we rebind directly.
 async fn bind(key: &BackendKey) -> anyhow::Result<Option<TokioListener>> {
-    match ListenerOptions::new().name(backend_name(key)?).create_tokio() {
+    match listener_options(key)?.create_tokio() {
         Ok(listener) => Ok(Some(listener)),
         Err(e) if is_name_in_use(&e) => {
             if probe_live(key).await? {
@@ -352,7 +342,7 @@ async fn bind(key: &BackendKey) -> anyhow::Result<Option<TokioListener>> {
                 let path = key.socket_path()?;
                 tracing::info!(path = %path.display(), "reclaiming stale backend socket");
                 let _ = std::fs::remove_file(&path);
-                match ListenerOptions::new().name(backend_name(key)?).create_tokio() {
+                match listener_options(key)?.create_tokio() {
                     Ok(listener) => Ok(Some(listener)),
                     Err(e2) if is_name_in_use(&e2) => {
                         // A concurrent cold-starter rebound first; defer to it.
@@ -370,7 +360,7 @@ async fn bind(key: &BackendKey) -> anyhow::Result<Option<TokioListener>> {
                 // No file to unlink: a non-live probe means the previous pipe owner is
                 // gone, so the name is free. Rebind once; if a concurrent starter won the
                 // race, defer to it rather than erroring.
-                match ListenerOptions::new().name(backend_name(key)?).create_tokio() {
+                match listener_options(key)?.create_tokio() {
                     Ok(listener) => Ok(Some(listener)),
                     Err(e2) if is_name_in_use(&e2) => {
                         if probe_live(key).await? {
@@ -384,6 +374,20 @@ async fn bind(key: &BackendKey) -> anyhow::Result<Option<TokioListener>> {
             }
         }
         Err(e) => Err(e.into()),
+    }
+}
+
+fn listener_options(key: &BackendKey) -> io::Result<ListenerOptions<'static>> {
+    let options = ListenerOptions::new().name(backend_name(key)?);
+    #[cfg(windows)]
+    {
+        use interprocess::os::windows::local_socket::ListenerOptionsExt;
+
+        return Ok(options.security_descriptor(pipe_security_descriptor_for_current_user()?));
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(options)
     }
 }
 
@@ -446,27 +450,9 @@ fn peer_authorized(conn: &TokioStream) -> bool {
     }
 }
 
-/// Non-unix transports do not provide peer credentials. The daemon is blocked on
-/// Windows before binding until named-pipe security is explicit.
+/// Non-unix transports do not provide peer credentials. On Windows the named-pipe
+/// listener is created with an explicit current-user-only security descriptor.
 #[cfg(not(unix))]
 fn peer_authorized(_conn: &TokioStream) -> bool {
     true
-}
-
-#[cfg(test)]
-mod tests {
-    use super::ensure_daemon_supported;
-
-    #[test]
-    fn daemon_guard_allows_non_windows() {
-        assert!(ensure_daemon_supported(false).is_ok());
-    }
-
-    #[test]
-    fn daemon_guard_rejects_windows() {
-        let error = ensure_daemon_supported(true).expect_err("windows daemon must fail fast");
-
-        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
-        assert!(error.to_string().contains("security descriptor"));
-    }
 }

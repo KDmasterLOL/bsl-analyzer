@@ -52,9 +52,9 @@ impl BackendKey {
         hex[..32].to_owned()
     }
 
-    /// Filesystem path of the unix-domain socket for this backend. Windows would
-    /// derive its named-pipe name from the same [`digest`](Self::digest), but broker
-    /// entrypoints reject Windows until pipe security is explicit.
+    /// Filesystem path of the unix-domain socket for this backend. Windows derives
+    /// its named-pipe name from the same [`digest`](Self::digest) and applies an
+    /// explicit current-user-only security descriptor when binding.
     ///
     /// On unix the result is checked against the `sockaddr_un.sun_path` budget so a
     /// long runtime/temp directory surfaces here as `InvalidInput` rather than a
@@ -261,8 +261,8 @@ pub fn embedding_config_fingerprint() -> u64 {
 /// Cross-platform rendezvous name for a backend.
 ///
 /// Unix uses the filesystem socket path ([`BackendKey::socket_path`]) so we own
-/// stale-file recovery. Windows would use a namespaced named pipe derived from the
-/// same digest, but broker entrypoints reject Windows until pipe security is explicit.
+/// stale-file recovery. Windows uses a namespaced named pipe derived from the
+/// same digest, with pipe security applied by the daemon listener.
 pub fn backend_name(key: &BackendKey) -> io::Result<interprocess::local_socket::Name<'static>> {
     #[cfg(unix)]
     {
