@@ -105,9 +105,9 @@ bsl-analyzer mcp install \
 ## Ручной запуск серверов
 
 Если нужно сначала проверить профиль локально, можно запустить его вручную.
-На Windows поддерживаемый транспорт MCP — прямой `stdio`. Режимы
-`--mode broker` и `--mode daemon` там намеренно отключены, пока transport
-через named pipe не задаёт явный security descriptor.
+На Windows по умолчанию используется прямой `stdio`; явные `--mode broker` и
+`--mode daemon` тоже доступны и создают named pipe с security descriptor,
+ограниченным текущим пользователем.
 
 Глобальный профиль справки:
 

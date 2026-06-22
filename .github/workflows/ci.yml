@@ -22,10 +22,8 @@ jobs:
       - run: cargo clippy --all-targets --all-features
       - run: cargo test --all --no-fail-fast
 
-  # Windows MCP uses stdio; broker/daemon modes fail fast until the named-pipe
-  # transport installs an explicit security descriptor.
   windows-mcp:
-    name: Windows MCP stdio + broker guards
+    name: Windows MCP stdio + secure broker
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -35,5 +33,5 @@ jobs:
         run: cargo build -p bsl-analyzer --bin bsl-analyzer-app
       - name: CLI MCP mode guard tests
         run: cargo test -p bsl-analyzer --bin bsl-analyzer-app mcp::tests
-      - name: Broker daemon guard tests
-        run: cargo test -p mcp-server broker::daemon::tests
+      - name: Broker runtime tests
+        run: cargo test -p mcp-server --test broker
