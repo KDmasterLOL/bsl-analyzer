@@ -11,6 +11,7 @@ target/
 
 # Claude Code / OMC
 .omc/
+.omo/
 .claude/
 
 # OS

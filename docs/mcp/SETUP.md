@@ -140,6 +140,10 @@ bsl-analyzer mcp install --target all --preset recommended --source-dir .
 `recommended` ставит `reference` глобально (user) и `workspace` для текущего проекта
 (project). Клиенты, scope'ы, флаги `--dry-run`/`--force` — в [`README.md`](README.md).
 
+На Windows MCP запускается через стандартный `stdio` transport. Оптимизация
+`--mode broker`/`--mode daemon` доступна только на Unix-платформах; Windows named-pipe
+broker будет включён отдельно после добавления явного security descriptor.
+
 ### Проверка: в `command` должен стоять путь лаунчера
 
 Запущенный через лаунчер, `mcp install` сам записывает в `command` путь **лаунчера**

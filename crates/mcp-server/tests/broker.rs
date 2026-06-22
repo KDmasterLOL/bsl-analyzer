@@ -7,8 +7,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(unix)]
 use interprocess::local_socket::tokio::prelude::*;
+#[cfg(unix)]
 use interprocess::local_socket::tokio::Stream as TokioStream;
+#[cfg(unix)]
 use mcp_server::broker::{self, BackendKey};
 use mcp_server::{serve_stream, McpProfile, McpServer, SharedState};
 use rmcp::model::CallToolRequestParams;
@@ -19,16 +22,19 @@ fn reference_server() -> McpServer {
     McpServer::new(McpProfile::Reference, SharedState::reference(None))
 }
 
+#[cfg(unix)]
 fn key_for(src: &TempDir) -> BackendKey {
     // Profile here only names the socket; the served profile is the passed server.
     BackendKey::new(src.path(), McpProfile::Workspace, 0)
 }
 
+#[cfg(unix)]
 async fn connect(key: &BackendKey) -> std::io::Result<TokioStream> {
     let name = broker::backend_name(key)?;
     TokioStream::connect(name).await
 }
 
+#[cfg(unix)]
 async fn connect_within(key: &BackendKey, budget: Duration) -> TokioStream {
     let deadline = tokio::time::Instant::now() + budget;
     loop {
@@ -41,6 +47,7 @@ async fn connect_within(key: &BackendKey, budget: Duration) -> TokioStream {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[cfg(unix)]
 async fn backend_dies_with_its_owner_session_and_drops_the_rest() {
     // No `set_var` here: it races with other tests' `getenv` (a glibc env data race)
     // and would corrupt the resolved socket path. A unique source dir already gives a
@@ -110,6 +117,7 @@ async fn backend_dies_with_its_owner_session_and_drops_the_rest() {
 /// accepting backend must not look stale. And a client that connects mid-build must be
 /// parked and served once the build completes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[cfg(unix)]
 async fn second_launch_defers_while_first_is_still_building() {
     let src = TempDir::new().unwrap();
     let key = key_for(&src);

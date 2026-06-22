@@ -22,16 +22,18 @@ jobs:
       - run: cargo clippy --all-targets --all-features
       - run: cargo test --all --no-fail-fast
 
-  # The broker's named-pipe transport and Windows detached-spawn paths only exist
-  # under cfg(windows); this job is the native compile + runtime gate for them.
-  windows-broker:
-    name: Windows broker (named pipe)
+  # Windows MCP uses stdio; broker/daemon modes fail fast until the named-pipe
+  # transport installs an explicit security descriptor.
+  windows-mcp:
+    name: Windows MCP stdio + broker guards
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Build binary (compiles the Windows broker cfg paths)
+      - name: Build binary
         run: cargo build -p bsl-analyzer --bin bsl-analyzer-app
-      - name: Broker tests (named-pipe transport, reuse, idle, concurrency)
-        run: cargo test -p mcp-server --test broker
+      - name: CLI MCP mode guard tests
+        run: cargo test -p bsl-analyzer --bin bsl-analyzer-app mcp::tests
+      - name: Broker daemon guard tests
+        run: cargo test -p mcp-server broker::daemon::tests

@@ -52,9 +52,9 @@ impl BackendKey {
         hex[..32].to_owned()
     }
 
-    /// Filesystem path of the unix-domain socket for this backend. The Windows
-    /// named-pipe name is derived from the same [`digest`](Self::digest) and is
-    /// wired separately; this path form is the unix rendezvous point.
+    /// Filesystem path of the unix-domain socket for this backend. Windows would
+    /// derive its named-pipe name from the same [`digest`](Self::digest), but broker
+    /// entrypoints reject Windows until pipe security is explicit.
     ///
     /// On unix the result is checked against the `sockaddr_un.sun_path` budget so a
     /// long runtime/temp directory surfaces here as `InvalidInput` rather than a
@@ -261,8 +261,8 @@ pub fn embedding_config_fingerprint() -> u64 {
 /// Cross-platform rendezvous name for a backend.
 ///
 /// Unix uses the filesystem socket path ([`BackendKey::socket_path`]) so we own
-/// stale-file recovery; Windows uses a namespaced named pipe derived from the same
-/// digest — the kernel frees it on owner death, so there is no stale state.
+/// stale-file recovery. Windows would use a namespaced named pipe derived from the
+/// same digest, but broker entrypoints reject Windows until pipe security is explicit.
 pub fn backend_name(key: &BackendKey) -> io::Result<interprocess::local_socket::Name<'static>> {
     #[cfg(unix)]
     {
@@ -272,7 +272,6 @@ pub fn backend_name(key: &BackendKey) -> io::Result<interprocess::local_socket::
     #[cfg(windows)]
     {
         use interprocess::local_socket::{GenericNamespaced, ToNsName};
-        // Ensure the per-user runtime dir exists too, so the ACL story matches unix.
         let _ = runtime_socket_dir();
         format!("bsl-mcp-{}.sock", key.digest()).to_ns_name::<GenericNamespaced>()
     }

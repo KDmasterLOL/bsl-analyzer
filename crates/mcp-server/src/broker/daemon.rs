@@ -52,6 +52,8 @@ pub async fn run<F>(build: F, key: BackendKey, orphan_grace: Duration) -> anyhow
 where
     F: FnOnce() -> anyhow::Result<McpServer> + Send + 'static,
 {
+    ensure_daemon_supported(cfg!(windows))?;
+
     let Some(listener) = bind(&key).await? else {
         tracing::info!("backend already serving this project; nothing to do");
         return Ok(());
@@ -95,6 +97,16 @@ where
     let result = serve(server, listener, parked, orphan_grace).await;
     guard.shutdown();
     result
+}
+
+fn ensure_daemon_supported(windows: bool) -> io::Result<()> {
+    if windows {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "MCP broker daemon is not supported on Windows until the named-pipe transport installs an explicit security descriptor",
+        ));
+    }
+    Ok(())
 }
 
 async fn serve(
@@ -434,9 +446,27 @@ fn peer_authorized(conn: &TokioStream) -> bool {
     }
 }
 
-/// On Windows the named pipe's default ACL restricts it to the creating user's
-/// session, so connection-time uid checking is not applicable here.
+/// Non-unix transports do not provide peer credentials. The daemon is blocked on
+/// Windows before binding until named-pipe security is explicit.
 #[cfg(not(unix))]
 fn peer_authorized(_conn: &TokioStream) -> bool {
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_daemon_supported;
+
+    #[test]
+    fn daemon_guard_allows_non_windows() {
+        assert!(ensure_daemon_supported(false).is_ok());
+    }
+
+    #[test]
+    fn daemon_guard_rejects_windows() {
+        let error = ensure_daemon_supported(true).expect_err("windows daemon must fail fast");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+        assert!(error.to_string().contains("security descriptor"));
+    }
 }
