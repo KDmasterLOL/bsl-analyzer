@@ -108,7 +108,7 @@ fn completion_after_dot_on_common_module_lists_exported_methods() {
 }
 
 #[test]
-fn completion_in_procedure_body_without_qualifier_is_empty_today() {
+fn completion_in_procedure_body_offers_keyword_templates() {
     let items = complete(
         r#"//- /test.bsl
 Процедура Тест()
@@ -117,11 +117,78 @@ fn completion_in_procedure_body_without_qualifier_is_empty_today() {
 "#,
     );
 
+    assert!(!items.is_empty(), "unqualified `Есл` must offer keyword/templates");
+
+    // The `Если … Тогда … КонецЕсли` template must be offered as a snippet.
+    let if_template =
+        items.iter().find(|i| i.kind == CompletionItemKind::Snippet && i.label.starts_with("Если"));
     assert!(
-        items.is_empty(),
-        "baseline: completion without qualifier is currently empty; got: {:?}",
+        if_template.is_some(),
+        "`Если` block template must be offered; got: {:?}",
         items.iter().map(|i| &i.label).collect::<Vec<_>>()
     );
+    assert!(
+        if_template.unwrap().insert_text.contains("КонецЕсли"),
+        "the template must expand to a full block with `КонецЕсли`"
+    );
+
+    // The contiguous gate keeps scattered platform matches (`П-е-...-с-л`) out of
+    // the list for a short prefix.
+    assert!(
+        !has_label(&items, "Перечисления"),
+        "scattered platform match must not flood a short-prefix list; got: {:?}",
+        items.iter().map(|i| &i.label).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn completion_ranks_exact_prefix_above_fuzzy_via_sort_text() {
+    // `Найти` is an exact prefix of `НайтиПоКоду`/`НайтиПоНаименованию` and a
+    // scattered match for other names; the exact-prefix hits must sort first.
+    let items = complete(
+        r#"//- /test.bsl
+Процедура Тест()
+    НайтиЗначение = 1;
+    Найт$0
+КонецПроцедуры
+"#,
+    );
+    let ranked: Vec<(&str, &str)> = items
+        .iter()
+        .filter_map(|i| i.sort_text.as_deref().map(|s| (i.label.as_str(), s)))
+        .collect();
+    assert!(!ranked.is_empty(), "every unqualified item must carry a sort_text");
+    // `НайтиЗначение` is a local in scope and an exact prefix → tier 0 + locals band.
+    let local = ranked.iter().find(|(l, _)| *l == "НайтиЗначение");
+    assert!(local.is_some(), "the in-scope local must be offered; got {:?}", ranked);
+    assert!(
+        local.unwrap().1.starts_with('0'),
+        "exact-prefix local must be in the best quality tier (sort_text starts with 0); got {:?}",
+        local.unwrap()
+    );
+}
+
+#[test]
+fn completion_english_prefix_ranks_metadata_plural_in_top_tier() {
+    // Typing the English name `Docu` admits `Документы` via its English alias; it
+    // must be ranked by that match's real quality (tier 0), not sunk to Fuzzy by
+    // scoring the Russian label.
+    let items = complete(
+        r#"//- /test.bsl
+Процедура Тест()
+    Docu$0
+КонецПроцедуры
+"#,
+    );
+    // Platform data may be unavailable in some environments; only assert when the
+    // metadata plural is actually offered.
+    if let Some(item) = items.iter().find(|i| i.label == "Документы") {
+        let sort_text = item.sort_text.as_deref().expect("offered item must carry sort_text");
+        assert!(
+            sort_text.starts_with('0'),
+            "English prefix `Docu` must rank `Документы` in the top quality tier; got {sort_text:?}"
+        );
+    }
 }
 
 #[test]

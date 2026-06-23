@@ -208,17 +208,17 @@ fn completion_sort_text_bands_stable() {
 КонецПроцедуры
 "#,
     );
-    let mut bands: Vec<&str> = items
-        .iter()
-        .filter_map(|i| i.sort_text.as_deref())
-        .map(|s| s.split('_').next().unwrap_or(""))
-        .collect();
-    bands.sort();
-    bands.dedup();
-    for band in &bands {
+    // sort_text layout: <tier digit><band 2 digits>_<freq><score><label>.
+    for s in items.iter().filter_map(|i| i.sort_text.as_deref()) {
+        let tier = s.chars().next().unwrap_or(' ');
         assert!(
-            matches!(*band, "00" | "10" | "15" | "20" | "25" | "30"),
-            "unexpected band prefix {band:?}"
+            ('0'..='3').contains(&tier),
+            "sort_text must start with a quality tier 0..3; got {s:?}"
+        );
+        let band = s.get(1..).and_then(|rest| rest.split('_').next()).unwrap_or("");
+        assert!(
+            matches!(band, "00" | "10" | "15" | "18" | "20" | "24" | "25" | "30"),
+            "unexpected band {band:?} in sort_text {s:?}"
         );
     }
 }

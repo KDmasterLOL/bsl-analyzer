@@ -1,8 +1,10 @@
 mod bsl_completion;
+mod fuzzy;
 mod mdo_completion;
 mod new_expr_completion;
 mod platform_completion;
 mod sdbl;
+mod templates;
 
 use ide_db::base_db::Locale;
 use ide_db::RootDatabase;
@@ -64,6 +66,7 @@ pub enum CompletionItemKind {
     Constant,
     EnumMember,
     Constructor,
+    Snippet,
 }
 
 pub fn completions<DB: RootDatabase>(db: &DB, position: CompletionPosition) -> Vec<CompletionItem> {

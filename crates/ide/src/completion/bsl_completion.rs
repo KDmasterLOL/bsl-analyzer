@@ -7,9 +7,11 @@ use either::Either;
 use hir::{DefWithBodyId, ExprScopes, ScopeDef};
 use ide_db::base_db::Locale;
 use ide_db::{RootDatabase, TextRange};
+use rustc_hash::FxHashMap;
 use syntax::{ast::AstNode, SyntaxKind};
 
-use super::{CompletionItem, CompletionItemKind, CompletionPosition};
+use super::fuzzy::{MatchResult, MatchTier, PrefixMatcher};
+use super::{templates, CompletionItem, CompletionItemKind, CompletionPosition};
 use crate::completion::platform_completion::{render_mdo_field, render_platform_property};
 
 pub(super) fn bsl_completions<DB: RootDatabase>(
@@ -86,13 +88,17 @@ pub(super) fn bsl_completions<DB: RootDatabase>(
 
         if token.kind().is_keyword() {
             let (detail, documentation) = get_keyword_info(token_text);
+            // The cursor sits on a fully-typed keyword: an exact self-match, so
+            // rank it in the best tier within the template/keyword band to keep
+            // the composite-sort-key contract uniform across all items.
+            let exact = MatchResult { tier: MatchTier::Prefix, score: u16::MAX };
             let keyword_item = CompletionItem {
                 label: token_text.to_string(),
                 detail: Some(detail),
                 kind: CompletionItemKind::Keyword,
                 insert_text: token_text.to_string(),
                 documentation: Some(documentation),
-                sort_text: None,
+                sort_text: Some(sort_key(exact, TEMPLATE_BAND, '1', token_text)),
                 filter_text: None,
                 source: None,
             };
@@ -105,7 +111,6 @@ pub(super) fn bsl_completions<DB: RootDatabase>(
             position.offset,
             prefix,
             position.locale,
-            false,
         ));
 
         tracing::info!(count = completions.len(), "Returning BSL completions");
@@ -115,7 +120,7 @@ pub(super) fn bsl_completions<DB: RootDatabase>(
     if is_expression_start_position(&token) {
         tracing::info!(token_kind = ?token.kind(), "Expression start position - completing with empty prefix");
         let completions =
-            complete_top_level(db, position.file_id, position.offset, "", position.locale, true);
+            complete_top_level(db, position.file_id, position.offset, "", position.locale);
 
         tracing::info!(count = completions.len(), "Returning BSL completions (trigger position)");
         return Some(completions);
@@ -125,70 +130,75 @@ pub(super) fn bsl_completions<DB: RootDatabase>(
     None
 }
 
+/// Band prefix for code templates / keywords: below the user's own symbols
+/// (locals, module members) but above metadata and platform globals, so the
+/// constructs you reach for sit near the top without burying your own names.
+const TEMPLATE_BAND: &str = "18_";
+
 fn complete_top_level<DB: RootDatabase>(
     db: &DB,
     file_id: vfs::FileId,
     offset: syntax::TextSize,
     prefix: &str,
     locale: Locale,
-    with_sort_text: bool,
 ) -> Vec<CompletionItem> {
     let _span = tracing::debug_span!("complete_top_level").entered();
+
+    let mut matcher = PrefixMatcher::new(prefix);
+    let freq = build_frequency(db, file_id);
+    let in_method = cursor_in_method(db, file_id, offset);
 
     let mut out = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
 
-    push_band(
-        &mut out,
-        &mut seen,
-        with_sort_text,
-        "00_",
-        complete_local_symbols(db, file_id, offset, prefix),
-    );
-    push_band(
-        &mut out,
-        &mut seen,
-        with_sort_text,
-        "10_",
-        complete_user_defined_symbols(db, file_id, prefix),
-    );
-    push_band(
-        &mut out,
-        &mut seen,
-        with_sort_text,
-        "15_",
-        complete_module_self_attributes(db, file_id, prefix, locale),
-    );
-    push_band(&mut out, &mut seen, with_sort_text, "20_", complete_mdo_plurals(prefix));
-    push_band(
-        &mut out,
-        &mut seen,
-        with_sort_text,
-        "24_",
-        complete_global_module_exports(db, file_id, prefix),
-    );
-    push_band(
-        &mut out,
-        &mut seen,
-        with_sort_text,
-        "25_",
-        complete_hbk_globals(db, file_id, prefix, locale),
-    );
-    push_band(
-        &mut out,
-        &mut seen,
-        with_sort_text,
-        "30_",
-        complete_user_common_modules(db, file_id, prefix),
-    );
+    let locals = complete_local_symbols(db, file_id, offset, &matcher);
+    push_band(&mut out, &mut seen, &mut matcher, &freq, "00_", locals);
+    let user = complete_user_defined_symbols(db, file_id, &matcher);
+    push_band(&mut out, &mut seen, &mut matcher, &freq, "10_", user);
+    let self_attrs = complete_module_self_attributes(db, file_id, &matcher, locale);
+    push_band(&mut out, &mut seen, &mut matcher, &freq, "15_", self_attrs);
+    let plurals = complete_mdo_plurals(&matcher);
+    push_band(&mut out, &mut seen, &mut matcher, &freq, "20_", plurals);
+    let exports = complete_global_module_exports(db, file_id, &matcher);
+    push_band(&mut out, &mut seen, &mut matcher, &freq, "24_", exports);
+    let globals = complete_hbk_globals(db, file_id, &matcher, locale);
+    push_band(&mut out, &mut seen, &mut matcher, &freq, "25_", globals);
+    let modules = complete_user_common_modules(db, file_id, &matcher);
+    push_band(&mut out, &mut seen, &mut matcher, &freq, "30_", modules);
+
+    for scored in templates::complete_templates(&mut matcher, in_method) {
+        let mut item = scored.item;
+        if !seen.insert(item.label.fold_lower()) {
+            continue;
+        }
+        item.sort_text = Some(sort_key(scored.result, TEMPLATE_BAND, '1', &item.label));
+        out.push(item);
+    }
 
     out
+}
+
+/// Compose the LSP `sort_text`, mirroring RDT1C's
+/// `ПремияФильтра ↓, Рейтинг ↓, частота, слово` ordering: match quality first,
+/// then the candidate's band (≈ usefulness), then how often the name occurs in
+/// the current file, then the raw match score, then the name itself. All numeric
+/// fields are fixed-width so the client's lexicographic ascending sort is exact.
+fn sort_key(result: MatchResult, band: &str, freq: char, label: &str) -> String {
+    format!(
+        "{}{}{}{:05}{}",
+        result.tier as u8,
+        band,
+        freq,
+        u16::MAX - result.score,
+        label.fold_lower(),
+    )
 }
 
 fn push_band(
     out: &mut Vec<CompletionItem>,
     seen: &mut HashSet<String>,
-    with_sort_text: bool,
+    matcher: &mut PrefixMatcher,
+    freq: &FxHashMap<String, u32>,
     band_prefix: &str,
     items: Vec<CompletionItem>,
 ) {
@@ -197,24 +207,102 @@ fn push_band(
         if !seen.insert(key) {
             continue;
         }
-        if with_sort_text {
-            item.sort_text = Some(format!("{band_prefix}{}", item.label));
-        }
+        let result = best_match(matcher, &item);
+        item.sort_text =
+            Some(sort_key(result, band_prefix, freq_bucket(freq, &item.label), &item.label));
         out.push(item);
+    }
+}
+
+/// Score a candidate by its label and any bilingual aliases carried in
+/// `filter_text` (platform/metadata items store `"<ru> <en>"`), keeping the best
+/// tier. Without this, an English-typed prefix that admitted an item by its
+/// English name would be scored against the Russian label, score `None`, and
+/// sink to the worst tier.
+fn best_match(matcher: &mut PrefixMatcher, item: &CompletionItem) -> MatchResult {
+    let mut best = matcher.score(&item.label);
+    if let Some(filter) = &item.filter_text {
+        // Score the whole bilingual string first: the admission gate matches the
+        // typed text as a contiguous substring of the full RU or EN name, which
+        // may span a space (multi-word names like "Форма загрузки" / "Load
+        // form"). Scoring the whole string guarantees such an admitted item is
+        // never mis-scored down to Fuzzy. Then score individual tokens, which can
+        // earn the tighter Prefix tier when a single word starts with the input.
+        best = fold_best(matcher, best, filter);
+        for alias in filter.split_whitespace() {
+            best = fold_best(matcher, best, alias);
+        }
+    }
+    best.unwrap_or(MatchResult { tier: MatchTier::Fuzzy, score: 0 })
+}
+
+/// Keep whichever of `best`/`score(text)` is the stronger match: lower tier
+/// wins; on an equal tier, the higher raw score wins.
+fn fold_best(
+    matcher: &mut PrefixMatcher,
+    best: Option<MatchResult>,
+    text: &str,
+) -> Option<MatchResult> {
+    let Some(candidate) = matcher.score(text) else {
+        return best;
+    };
+    match best {
+        Some(current)
+            if current.tier < candidate.tier
+                || (current.tier == candidate.tier && current.score >= candidate.score) =>
+        {
+            Some(current)
+        }
+        _ => Some(candidate),
+    }
+}
+
+/// Count identifier occurrences in the current file as a cheap "used here"
+/// signal (RDT1C boosts words frequent in the current code).
+fn build_frequency<DB: RootDatabase>(db: &DB, file_id: vfs::FileId) -> FxHashMap<String, u32> {
+    let parse = db.parse(file_id);
+    let mut freq: FxHashMap<String, u32> = FxHashMap::default();
+    for element in parse.syntax_node().descendants_with_tokens() {
+        if let Some(token) = element.as_token() {
+            if token.kind() == SyntaxKind::IDENT {
+                *freq.entry(token.text().fold_lower()).or_insert(0) += 1;
+            }
+        }
+    }
+    freq
+}
+
+fn freq_bucket(freq: &FxHashMap<String, u32>, label: &str) -> char {
+    match freq.get(&label.fold_lower()).copied().unwrap_or(0) {
+        0 => '2',
+        1..=2 => '1',
+        _ => '0',
+    }
+}
+
+fn cursor_in_method<DB: RootDatabase>(
+    db: &DB,
+    file_id: vfs::FileId,
+    offset: syntax::TextSize,
+) -> bool {
+    let parse = db.parse(file_id);
+    let root = parse.syntax_node();
+    match root.token_at_offset(offset).right_biased() {
+        Some(token) => find_method_for_token(&token).is_some(),
+        None => false,
     }
 }
 
 fn complete_module_self_attributes<DB: RootDatabase>(
     db: &DB,
     file_id: vfs::FileId,
-    prefix: &str,
+    matcher: &PrefixMatcher,
     locale: ide_db::base_db::Locale,
 ) -> Vec<CompletionItem> {
     let _span = tracing::debug_span!("complete_module_self_attributes").entered();
-    let prefix_lower = prefix.fold_lower();
     hir::module_implicit_fields(db, file_id)
         .into_iter()
-        .filter(|field| field.name.as_str().fold_lower().starts_with(&prefix_lower))
+        .filter(|field| matcher.admits(field.name.as_str()))
         .map(|field| render_mdo_field(db, &field, locale))
         .collect()
 }
@@ -223,12 +311,11 @@ fn complete_local_symbols<DB: RootDatabase>(
     db: &DB,
     file_id: vfs::FileId,
     offset: syntax::TextSize,
-    prefix: &str,
+    matcher: &PrefixMatcher,
 ) -> Vec<CompletionItem> {
     let _span = tracing::debug_span!("complete_local_symbols").entered();
 
     let mut completions = Vec::new();
-    let prefix_lower = prefix.fold_lower();
 
     let parse = db.parse(file_id);
     let root = parse.syntax_node();
@@ -254,7 +341,7 @@ fn complete_local_symbols<DB: RootDatabase>(
         let name_str = name.as_str();
         seen.insert(name_str.fold_lower());
 
-        if !name_str.fold_lower().starts_with(&prefix_lower) {
+        if !matcher.admits(name_str) {
             continue;
         }
 
@@ -283,7 +370,7 @@ fn complete_local_symbols<DB: RootDatabase>(
                 if seen.contains(lower) {
                     continue;
                 }
-                if !lower.starts_with(&prefix_lower) {
+                if !matcher.admits(lower) {
                     seen.insert(lower.clone());
                     continue;
                 }
@@ -305,7 +392,6 @@ fn complete_local_symbols<DB: RootDatabase>(
 
     tracing::debug!(
         count = completions.len(),
-        prefix = ?prefix,
         method_range = ?method_range,
         "Completed local symbols"
     );
@@ -371,10 +457,9 @@ fn is_expression_start_position(token: &syntax::SyntaxToken) -> bool {
     }
 }
 
-fn complete_mdo_plurals(prefix: &str) -> Vec<CompletionItem> {
+fn complete_mdo_plurals(matcher: &PrefixMatcher) -> Vec<CompletionItem> {
     let _span = tracing::debug_span!("complete_mdo_plurals").entered();
 
-    let prefix_lower = prefix.fold_lower();
     let mut completions = Vec::new();
 
     for prop in PlatformDataInner::instance().all_global_properties() {
@@ -383,7 +468,7 @@ fn complete_mdo_plurals(prefix: &str) -> Vec<CompletionItem> {
         else {
             continue;
         };
-        if !matches_prefix_bilingual(&prop.name, &prop.english_name, &prefix_lower) {
+        if !matcher.admits_contiguous_bilingual(&prop.name, &prop.english_name) {
             continue;
         }
         completions.push(render_mdo_plural_with_hbk(mdo_type, prop));
@@ -449,15 +534,14 @@ fn compose_mdo_plural_documentation(
 fn complete_user_common_modules<DB: RootDatabase>(
     db: &DB,
     file_id: vfs::FileId,
-    prefix: &str,
+    matcher: &PrefixMatcher,
 ) -> Vec<CompletionItem> {
     let _span = tracing::debug_span!("complete_user_common_modules").entered();
 
-    let prefix_lower = prefix.fold_lower();
     let mut completions = Vec::new();
 
     for name in module_index_for(db, file_id).common_module_display_names() {
-        if !name.fold_lower().starts_with(&prefix_lower) {
+        if !matcher.admits(name) {
             continue;
         }
         completions.push(CompletionItem {
@@ -489,17 +573,16 @@ fn module_index_for<DB: RootDatabase>(
 fn complete_global_module_exports<DB: RootDatabase>(
     db: &DB,
     file_id: vfs::FileId,
-    prefix: &str,
+    matcher: &PrefixMatcher,
 ) -> Vec<CompletionItem> {
     let _span = tracing::debug_span!("complete_global_module_exports").entered();
 
     let module_id = hir::ModuleId::new(file_id);
     let resolver = hir::Resolver::with_workspace_scope(module_id);
-    let prefix_lower = prefix.fold_lower();
 
     let mut items = Vec::new();
     for (module_name, method_name, method_id) in resolver.global_common_module_exports(db) {
-        if !method_name.as_str().fold_lower().starts_with(&prefix_lower) {
+        if !matcher.admits(method_name.as_str()) {
             continue;
         }
         let symbol_tree = db.symbol_tree(method_id.module);
@@ -519,7 +602,7 @@ fn complete_global_module_exports<DB: RootDatabase>(
 fn complete_hbk_globals<DB: RootDatabase>(
     db: &DB,
     file_id: vfs::FileId,
-    prefix: &str,
+    matcher: &PrefixMatcher,
     locale: Locale,
 ) -> Vec<CompletionItem> {
     let _span = tracing::debug_span!("complete_hbk_globals").entered();
@@ -530,7 +613,6 @@ fn complete_hbk_globals<DB: RootDatabase>(
 
     let mut items = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
-    let prefix_lower = prefix.fold_lower();
 
     for prop in data.all_global_properties() {
         let ru_lower = prop.name.fold_lower();
@@ -543,7 +625,7 @@ fn complete_hbk_globals<DB: RootDatabase>(
         if resolver.user_common_module_exists(db, &hir::Name::new(&prop.name)) {
             continue;
         }
-        if !matches_prefix_bilingual(&prop.name, &prop.english_name, &prefix_lower) {
+        if !matcher.admits_contiguous_bilingual(&prop.name, &prop.english_name) {
             continue;
         }
         if !seen.insert(ru_lower) {
@@ -553,23 +635,18 @@ fn complete_hbk_globals<DB: RootDatabase>(
         items.push(render_platform_property(prop, locale));
     }
 
-    items.extend(complete_global_functions(prefix));
+    items.extend(complete_global_functions(matcher));
     items
-}
-
-fn matches_prefix_bilingual(ru: &str, en: &str, lower: &str) -> bool {
-    ru.fold_lower().starts_with(lower) || en.fold_lower().starts_with(lower)
 }
 
 fn complete_user_defined_symbols<DB: RootDatabase>(
     db: &DB,
     file_id: vfs::FileId,
-    prefix: &str,
+    matcher: &PrefixMatcher,
 ) -> Vec<CompletionItem> {
     let _span = tracing::debug_span!("complete_user_defined_symbols").entered();
 
     let mut completions = Vec::new();
-    let prefix_lower = prefix.fold_lower();
 
     let sema = hir::Semantics::new(db);
     let module = sema.module_from_file(file_id);
@@ -578,7 +655,7 @@ fn complete_user_defined_symbols<DB: RootDatabase>(
         let name = procedure.name();
         let name_str = name.as_str();
 
-        if !name_str.fold_lower().starts_with(&prefix_lower) {
+        if !matcher.admits(name_str) {
             continue;
         }
 
@@ -602,7 +679,7 @@ fn complete_user_defined_symbols<DB: RootDatabase>(
         let name = function.name();
         let name_str = name.as_str();
 
-        if !name_str.fold_lower().starts_with(&prefix_lower) {
+        if !matcher.admits(name_str) {
             continue;
         }
 
@@ -625,7 +702,7 @@ fn complete_user_defined_symbols<DB: RootDatabase>(
         let name = variable.name();
         let name_str = name.as_str();
 
-        if !name_str.fold_lower().starts_with(&prefix_lower) {
+        if !matcher.admits(name_str) {
             continue;
         }
 
@@ -644,33 +721,23 @@ fn complete_user_defined_symbols<DB: RootDatabase>(
         }
     }
 
-    tracing::debug!(
-        count = completions.len(),
-        prefix = ?prefix,
-        "Completed user-defined symbols"
-    );
+    tracing::debug!(count = completions.len(), "Completed user-defined symbols");
 
     completions
 }
 
-fn complete_global_functions(prefix: &str) -> Vec<CompletionItem> {
+fn complete_global_functions(matcher: &PrefixMatcher) -> Vec<CompletionItem> {
     let data = PlatformDataInner::instance();
     let all_functions = data.all_global_functions();
 
-    let prefix_lower = prefix.fold_lower();
-
     let matching: Vec<_> = all_functions
         .iter()
-        .filter(|f| {
-            f.name.fold_lower().starts_with(&prefix_lower)
-                || f.english_name.fold_lower().starts_with(&prefix_lower)
-        })
+        .filter(|f| matcher.admits_contiguous_bilingual(&f.name, &f.english_name))
         .collect();
 
     tracing::debug!(
         total_functions = all_functions.len(),
         matching_count = matching.len(),
-        prefix = ?prefix,
         "Filtered global functions"
     );
 
@@ -721,6 +788,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn best_match_scores_whole_multiword_alias_not_only_tokens() {
+        // A prefix that spans a space inside the EN name: admitted by the
+        // contiguous gate, so it must be scored (not Fuzzy) via the whole alias.
+        let mut matcher = PrefixMatcher::new("Load f");
+        let mut item = CompletionItem::simple(
+            "ФормаЗагрузки".into(),
+            CompletionItemKind::Property,
+            "x".into(),
+        );
+        item.filter_text = Some("Форма загрузки Load form".into());
+        let result = best_match(&mut matcher, &item);
+        assert!(
+            result.tier < MatchTier::Fuzzy,
+            "multi-word EN alias must score above Fuzzy; got {:?}",
+            result.tier
+        );
+    }
+
+    #[test]
+    fn best_match_prefers_token_prefix_over_whole_string() {
+        // Single-word EN token starting with the input must win the Prefix tier.
+        let mut matcher = PrefixMatcher::new("Docu");
+        let mut item =
+            CompletionItem::simple("Документы".into(), CompletionItemKind::MdoType, "x".into());
+        item.filter_text = Some("Документы Documents".into());
+        let result = best_match(&mut matcher, &item);
+        assert_eq!(result.tier, MatchTier::Prefix);
+    }
+
+    #[test]
     fn test_complete_global_functions_with_prefix() {
         use bsl_platform::PlatformDataInner;
 
@@ -730,7 +827,7 @@ mod tests {
             return;
         }
 
-        let items = complete_global_functions("Начать");
+        let items = complete_global_functions(&PrefixMatcher::new("Начать"));
 
         println!("Found {} completions for 'Начать'", items.len());
         assert!(!items.is_empty(), "Should find functions starting with 'Начать'");
@@ -753,9 +850,9 @@ mod tests {
             return;
         }
 
-        let items_lower = complete_global_functions("начать");
-        let items_upper = complete_global_functions("НАЧАТЬ");
-        let items_mixed = complete_global_functions("Начать");
+        let items_lower = complete_global_functions(&PrefixMatcher::new("начать"));
+        let items_upper = complete_global_functions(&PrefixMatcher::new("НАЧАТЬ"));
+        let items_mixed = complete_global_functions(&PrefixMatcher::new("Начать"));
 
         assert_eq!(items_lower.len(), items_upper.len());
         assert_eq!(items_lower.len(), items_mixed.len());
@@ -816,7 +913,7 @@ mod tests {
 
         db.set_file_text(file_id, source);
 
-        let items = complete_user_defined_symbols(&db, file_id, "Моя");
+        let items = complete_user_defined_symbols(&db, file_id, &PrefixMatcher::new("Моя"));
 
         println!("Found {} items for prefix 'Моя'", items.len());
         for item in &items {
@@ -871,9 +968,9 @@ mod tests {
 
         db.set_file_text(file_id, source);
 
-        let items_lower = complete_user_defined_symbols(&db, file_id, "тест");
-        let items_upper = complete_user_defined_symbols(&db, file_id, "ТЕСТ");
-        let items_mixed = complete_user_defined_symbols(&db, file_id, "Тест");
+        let items_lower = complete_user_defined_symbols(&db, file_id, &PrefixMatcher::new("тест"));
+        let items_upper = complete_user_defined_symbols(&db, file_id, &PrefixMatcher::new("ТЕСТ"));
+        let items_mixed = complete_user_defined_symbols(&db, file_id, &PrefixMatcher::new("Тест"));
 
         assert_eq!(items_lower.len(), 1);
         assert_eq!(items_upper.len(), 1);
@@ -907,7 +1004,7 @@ mod tests {
 
         db.set_file_text(file_id, source);
 
-        let items = complete_mdo_plurals("Справ");
+        let items = complete_mdo_plurals(&PrefixMatcher::new("Справ"));
         let _ = (&db, file_id);
 
         println!("Found {} MDO items for prefix 'Справ'", items.len());
@@ -945,7 +1042,7 @@ mod tests {
 
         db.set_file_text(file_id, source);
 
-        let items = complete_mdo_plurals("Docu");
+        let items = complete_mdo_plurals(&PrefixMatcher::new("Docu"));
         let _ = (&db, file_id);
 
         println!("Found {} MDO items for prefix 'Docu'", items.len());
@@ -984,7 +1081,7 @@ mod tests {
         let offset = source.find("Мо").expect("Should find 'Мо' in source");
         let offset = syntax::TextSize::from(offset as u32);
 
-        let items = complete_local_symbols(&db, file_id, offset, "Мо");
+        let items = complete_local_symbols(&db, file_id, offset, &PrefixMatcher::new("Мо"));
 
         println!("Found {} local items for prefix 'Мо'", items.len());
         for item in &items {
@@ -1025,7 +1122,7 @@ mod tests {
         let offset = source.find("Перв").expect("Should find 'Перв' in source");
         let offset = syntax::TextSize::from(offset as u32);
 
-        let items = complete_local_symbols(&db, file_id, offset, "Перв");
+        let items = complete_local_symbols(&db, file_id, offset, &PrefixMatcher::new("Перв"));
 
         println!("Found {} local items for prefix 'Перв'", items.len());
         for item in &items {
@@ -1067,7 +1164,7 @@ mod tests {
         let offset = source.find("// Empty prefix").expect("Should find comment") + 20;
         let offset = syntax::TextSize::from(offset as u32);
 
-        let items = complete_local_symbols(&db, file_id, offset, "");
+        let items = complete_local_symbols(&db, file_id, offset, &PrefixMatcher::new(""));
 
         println!("Found {} total local items", items.len());
         for item in &items {
@@ -1109,7 +1206,7 @@ mod tests {
 
         let offset = syntax::TextSize::from(source.find("ВременнаяПеременная").unwrap() as u32);
 
-        let items = complete_local_symbols(&db, file_id, offset, "");
+        let items = complete_local_symbols(&db, file_id, offset, &PrefixMatcher::new(""));
 
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         println!("Found local symbols: {:?}", labels);
@@ -1144,7 +1241,12 @@ mod tests {
         db.set_file_source_root(file_id, SourceRootId(0));
         db.set_file_text(file_id, source);
 
-        let items = complete_module_self_attributes(&db, file_id, "", ide_db::base_db::Locale::Ru);
+        let items = complete_module_self_attributes(
+            &db,
+            file_id,
+            &PrefixMatcher::new(""),
+            ide_db::base_db::Locale::Ru,
+        );
         assert!(items.is_empty(), "non-self file must not surface implicit attributes");
     }
 }
