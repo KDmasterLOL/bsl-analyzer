@@ -163,24 +163,27 @@ fn run_mcp_serve(args: McpServeArgs) -> Result<(), Box<dyn Error + Send + Sync>>
 ///   reaches Codex: Codex imports a project's `.mcp.json` but reconstructs the argv
 ///   (dropping extra flags) and does not propagate its `env` block — so the activation
 ///   has to live in the binary's own default, not the client config.
-/// - With no override, unix defaults to the broker (validated there); Windows stays on
-///   direct stdio, while explicit broker/daemon activation is allowed and protected by
-///   the broker's named-pipe security descriptor.
+/// - With no override, the heavy `workspace` profile defaults to the broker on every
+///   platform. Windows is now included: the named-pipe transport carries an explicit
+///   current-user security descriptor, verifies the backend's identity (defeating pipe
+///   squatting), and tears the backend down on client disconnect. `BSL_MCP_BROKER=0`
+///   forces plain stdio anywhere.
 fn resolve_serve_mode(
     flag: McpServeMode,
     profile: mcp_server::McpProfile,
 ) -> Result<McpServeMode, io::Error> {
-    let context = ServeModeContext {
-        broker_override: env_broker_override(),
-        unix_default_broker: cfg!(unix),
-    };
+    let context =
+        ServeModeContext { broker_override: env_broker_override(), platform_default_broker: true };
     Ok(resolve_serve_mode_with_override(flag, profile, context))
 }
 
 #[derive(Clone, Copy)]
 struct ServeModeContext {
     broker_override: Option<bool>,
-    unix_default_broker: bool,
+    /// Whether this platform defaults the workspace profile to the broker. Injected so
+    /// the precedence (`--mode` flag → env override → profile → platform) stays
+    /// unit-testable; production passes `true` on every platform.
+    platform_default_broker: bool,
 }
 
 fn resolve_serve_mode_with_override(
@@ -199,7 +202,7 @@ fn resolve_serve_mode_with_override(
         Some(false) => return McpServeMode::Stdio,
         None => {}
     }
-    if context.unix_default_broker {
+    if context.platform_default_broker {
         McpServeMode::Broker
     } else {
         McpServeMode::Stdio
@@ -618,33 +621,49 @@ mod tests {
     use super::{resolve_serve_mode_with_override, McpServeMode, ServeModeContext};
 
     #[test]
-    fn workspace_profile_defaults_to_stdio_when_unix_default_is_false() {
+    fn workspace_profile_defaults_to_broker() {
+        // Production passes `platform_default_broker: true` on every platform, so the
+        // workspace profile with no override resolves to the broker everywhere.
         let mode = resolve_serve_mode_with_override(
             McpServeMode::Stdio,
             mcp_server::McpProfile::Workspace,
-            ServeModeContext { broker_override: None, unix_default_broker: false },
-        );
-
-        assert!(matches!(mode, McpServeMode::Stdio));
-    }
-
-    #[test]
-    fn workspace_profile_defaults_to_broker_when_unix_default_is_true() {
-        let mode = resolve_serve_mode_with_override(
-            McpServeMode::Stdio,
-            mcp_server::McpProfile::Workspace,
-            ServeModeContext { broker_override: None, unix_default_broker: true },
+            ServeModeContext { broker_override: None, platform_default_broker: true },
         );
 
         assert!(matches!(mode, McpServeMode::Broker));
     }
 
     #[test]
-    fn broker_env_override_wins_on_any_platform() {
+    fn workspace_profile_defaults_to_stdio_when_platform_default_is_off() {
+        // The platform default is an injected seam; with it off, the workspace profile
+        // stays on stdio. No production platform sets this today, but the precedence
+        // must remain correct if one ever does.
         let mode = resolve_serve_mode_with_override(
             McpServeMode::Stdio,
             mcp_server::McpProfile::Workspace,
-            ServeModeContext { broker_override: Some(true), unix_default_broker: false },
+            ServeModeContext { broker_override: None, platform_default_broker: false },
+        );
+
+        assert!(matches!(mode, McpServeMode::Stdio));
+    }
+
+    #[test]
+    fn broker_env_override_off_forces_stdio_even_when_platform_defaults_to_broker() {
+        let mode = resolve_serve_mode_with_override(
+            McpServeMode::Stdio,
+            mcp_server::McpProfile::Workspace,
+            ServeModeContext { broker_override: Some(false), platform_default_broker: true },
+        );
+
+        assert!(matches!(mode, McpServeMode::Stdio));
+    }
+
+    #[test]
+    fn broker_env_override_on_forces_broker_even_when_platform_default_is_off() {
+        let mode = resolve_serve_mode_with_override(
+            McpServeMode::Stdio,
+            mcp_server::McpProfile::Workspace,
+            ServeModeContext { broker_override: Some(true), platform_default_broker: false },
         );
 
         assert!(matches!(mode, McpServeMode::Broker));
@@ -655,9 +674,22 @@ mod tests {
         let mode = resolve_serve_mode_with_override(
             McpServeMode::Stdio,
             mcp_server::McpProfile::Reference,
-            ServeModeContext { broker_override: Some(true), unix_default_broker: true },
+            ServeModeContext { broker_override: Some(true), platform_default_broker: true },
         );
 
         assert!(matches!(mode, McpServeMode::Stdio));
+    }
+
+    #[test]
+    fn explicit_mode_flag_wins_over_defaults() {
+        // The re-exec'd daemon passes `--mode daemon`; an explicit flag must survive
+        // regardless of profile or platform default.
+        let mode = resolve_serve_mode_with_override(
+            McpServeMode::Daemon,
+            mcp_server::McpProfile::Workspace,
+            ServeModeContext { broker_override: Some(false), platform_default_broker: false },
+        );
+
+        assert!(matches!(mode, McpServeMode::Daemon));
     }
 }
