@@ -248,47 +248,11 @@ fn push_band<DB: RootDatabase>(
     }
 }
 
-/// Score a candidate by its label and any bilingual aliases carried in
-/// `filter_text` (platform/metadata items store `"<ru> <en>"`), keeping the best
-/// tier. Without this, an English-typed prefix that admitted an item by its
-/// English name would be scored against the Russian label, score `None`, and
-/// sink to the worst tier.
+/// Score a candidate by its label and bilingual aliases; the pre-gated unqualified
+/// candidates always match, so fall back to the worst tier only defensively.
 fn best_match(matcher: &mut PrefixMatcher, item: &CompletionItem) -> MatchResult {
-    let mut best = matcher.score(&item.label);
-    if let Some(filter) = &item.filter_text {
-        // Score the whole bilingual string first: the admission gate matches the
-        // typed text as a contiguous substring of the full RU or EN name, which
-        // may span a space (multi-word names like "Форма загрузки" / "Load
-        // form"). Scoring the whole string guarantees such an admitted item is
-        // never mis-scored down to Fuzzy. Then score individual tokens, which can
-        // earn the tighter Prefix tier when a single word starts with the input.
-        best = fold_best(matcher, best, filter);
-        for alias in filter.split_whitespace() {
-            best = fold_best(matcher, best, alias);
-        }
-    }
-    best.unwrap_or(MatchResult { tier: MatchTier::Fuzzy, score: 0 })
-}
-
-/// Keep whichever of `best`/`score(text)` is the stronger match: lower tier
-/// wins; on an equal tier, the higher raw score wins.
-fn fold_best(
-    matcher: &mut PrefixMatcher,
-    best: Option<MatchResult>,
-    text: &str,
-) -> Option<MatchResult> {
-    let Some(candidate) = matcher.score(text) else {
-        return best;
-    };
-    match best {
-        Some(current)
-            if current.tier < candidate.tier
-                || (current.tier == candidate.tier && current.score >= candidate.score) =>
-        {
-            Some(current)
-        }
-        _ => Some(candidate),
-    }
+    super::fuzzy::score_item(matcher, &item.label, item.filter_text.as_deref())
+        .unwrap_or(MatchResult { tier: MatchTier::Fuzzy, score: 0 })
 }
 
 /// Count identifier occurrences in the current file as a cheap "used here"

@@ -118,6 +118,48 @@ impl PrefixMatcher {
     }
 }
 
+/// Score a completion candidate by its label and any bilingual aliases carried in
+/// `filter_text` (platform/metadata items store `"<ru> <en>"`, possibly multi-word),
+/// keeping the best tier. The whole `filter_text` is scored first so a contiguous
+/// match that spans a space is never missed; individual tokens are scored too so a
+/// single word starting with the input still earns the tighter [`MatchTier::Prefix`].
+/// `None` when the typed text matches neither the label nor any alias.
+pub(super) fn score_item(
+    matcher: &mut PrefixMatcher,
+    label: &str,
+    filter_text: Option<&str>,
+) -> Option<MatchResult> {
+    let mut best = matcher.score(label);
+    if let Some(filter) = filter_text {
+        best = fold_best(matcher, best, filter);
+        for alias in filter.split_whitespace() {
+            best = fold_best(matcher, best, alias);
+        }
+    }
+    best
+}
+
+/// Keep whichever of `best`/`score(text)` is the stronger match: lower tier wins;
+/// on an equal tier, the higher raw score wins.
+fn fold_best(
+    matcher: &mut PrefixMatcher,
+    best: Option<MatchResult>,
+    text: &str,
+) -> Option<MatchResult> {
+    let Some(candidate) = matcher.score(text) else {
+        return best;
+    };
+    match best {
+        Some(current)
+            if current.tier < candidate.tier
+                || (current.tier == candidate.tier && current.score >= candidate.score) =>
+        {
+            Some(current)
+        }
+        _ => Some(candidate),
+    }
+}
+
 /// Derive the quality tier from the matched character positions in the original
 /// (case-preserving) candidate.
 fn classify_tier(candidate: &str, indices: &[u32]) -> MatchTier {

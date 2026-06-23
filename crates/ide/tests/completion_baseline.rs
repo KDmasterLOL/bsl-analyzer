@@ -286,17 +286,81 @@ fn completion_after_dot_on_array_variable_typed_prefix_full_ident() {
 "#,
     );
 
-    assert!(!items.is_empty(), "methods starting with `В` must be offered after `Сп.В`");
+    assert!(!items.is_empty(), "methods matching `В` must be offered after `Сп.В`");
     let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+    // Member completion is now fuzzy: a prefix hit like `Вставить` must be offered
+    // and ranked in the best quality tier (sort_text starts with `0`).
+    let vstavit = items
+        .iter()
+        .find(|i| i.label == "Вставить")
+        .unwrap_or_else(|| panic!("`Вставить` must be offered after `Сп.В`; got: {labels:?}"));
     assert!(
-        labels.iter().all(|l| l.to_lowercase().starts_with('в')),
-        "every label must start with `В`; got: {:?}",
-        labels
+        vstavit.sort_text.as_deref().is_some_and(|s| s.starts_with('0')),
+        "prefix hit `Вставить` must be top quality tier; got {:?}",
+        vstavit.sort_text
+    );
+}
+
+#[test]
+fn completion_after_dot_member_substring_is_offered_below_prefix() {
+    // `чест` is an interior substring of `Количество`, not a prefix — member
+    // matching is now fuzzy, so it is offered, but ranked below the prefix tier.
+    let items = complete(
+        r#"//- /test.bsl
+Процедура Тест()
+    Сп = Новый Массив;
+    Сп.чест$0
+КонецПроцедуры
+"#,
+    );
+    let kol = items.iter().find(|i| i.label == "Количество").unwrap_or_else(|| {
+        panic!(
+            "substring match `Количество` for `чест` must be offered; got: {:?}",
+            items.iter().map(|i| &i.label).collect::<Vec<_>>()
+        )
+    });
+    assert!(
+        !kol.sort_text.as_deref().unwrap_or("").starts_with('0'),
+        "interior substring hit must not be in the prefix tier; got {:?}",
+        kol.sort_text
+    );
+}
+
+#[test]
+fn completion_after_dot_on_common_module_typed_prefix_is_ranked() {
+    // A typed prefix on a bare common module routes through the same fuzzy/quality
+    // funnel: the exported prefix hit is offered in the top tier, the non-exported
+    // method stays excluded.
+    let items = complete(
+        r#"//- /CommonModules/ОбщегоНазначения/Ext/Module.bsl
+Функция ПолучитьЗначение() Экспорт
+    Возврат 1;
+КонецФункции
+
+Функция ВнутреннийМетод()
+    Возврат 0;
+КонецФункции
+
+//- /test.bsl
+Процедура Тест()
+    Результат = ОбщегоНазначения.Пол$0
+КонецПроцедуры
+"#,
+    );
+    let got = items.iter().find(|i| i.label == "ПолучитьЗначение").unwrap_or_else(|| {
+        panic!(
+            "exported method must pass through the fuzzy funnel; got: {:?}",
+            items.iter().map(|i| &i.label).collect::<Vec<_>>()
+        )
+    });
+    assert!(
+        got.sort_text.as_deref().is_some_and(|s| s.starts_with('0')),
+        "prefix hit `ПолучитьЗначение` must be top quality tier; got {:?}",
+        got.sort_text
     );
     assert!(
-        has_label(&items, "Вставить"),
-        "`Вставить` must be offered after `Сп.В`; got: {:?}",
-        labels
+        !has_label(&items, "ВнутреннийМетод"),
+        "non-exported method must remain excluded after the dot"
     );
 }
 

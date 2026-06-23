@@ -138,11 +138,17 @@ fn completion_after_dot_on_new_value_table_with_prefix() {
 
     let ls = labels(&items);
     assert!(!items.is_empty(), "ТЗ.Доб — at least `Добавить` must remain; got empty");
+    // Fuzzy member matching: `Добавить` (prefix hit) must be offered and ranked in
+    // the best quality tier (sort_text starts with `0`).
+    let dobavit = items
+        .iter()
+        .find(|i| i.label == "Добавить")
+        .unwrap_or_else(|| panic!("`Добавить` must be in the filtered set; got: {ls:?}"));
     assert!(
-        ls.iter().all(|l| l.to_lowercase().starts_with("доб")),
-        "every label must start with `Доб`; got: {ls:?}"
+        dobavit.sort_text.as_deref().is_some_and(|s| s.starts_with('0')),
+        "prefix hit `Добавить` must be top quality tier; got {:?}",
+        dobavit.sort_text
     );
-    assert!(has_label(&items, "Добавить"), "`Добавить` must be in the filtered set; got: {ls:?}");
 }
 
 #[test]
