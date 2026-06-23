@@ -60,6 +60,12 @@ fn items_matching<'a>(items: &'a [CompletionItem], label: &str) -> Vec<&'a Compl
     items.iter().filter(|i| i.label == label).collect()
 }
 
+/// The context-type-match digit of an item's sort_text (`{tier}{band 2}_{typematch}…`).
+/// `'0'` = matches the expected type, `'1'` = does not / unknown.
+fn typematch_digit(items: &[CompletionItem], label: &str) -> Option<char> {
+    items.iter().find(|i| i.label == label)?.sort_text.as_deref()?.chars().nth(4)
+}
+
 #[test]
 fn completion_after_dot_on_common_module_lists_exported_methods() {
     let items = complete(
@@ -222,6 +228,157 @@ fn completion_context_type_boost_floats_matching_local() {
         "String local must not match `Число`; got {string:?}"
     );
     assert!(num < string, "type-matching local must sort first; got {num:?} vs {string:?}");
+}
+
+#[test]
+fn completion_assignment_rhs_boosts_matching_local() {
+    // RHS of `Сумма = …` expects the type of `Сумма` (Число). The Число local is
+    // boosted, the Строка local is not.
+    let items = complete(
+        r#"//- /test.bsl
+Процедура Тест()
+    Сумма = 0;
+    Строка1 = "x";
+    Сумма = С$0
+КонецПроцедуры
+"#,
+    );
+    assert_eq!(
+        typematch_digit(&items, "Сумма"),
+        Some('0'),
+        "Сумма (Число) must match assignment LHS type"
+    );
+    assert_eq!(typematch_digit(&items, "Строка1"), Some('1'), "Строка1 (Строка) must not match");
+}
+
+#[test]
+fn completion_return_boosts_matching_local_in_function() {
+    // The function returns Число (via `Возврат ЗначЧисло`), so `Возврат Зн…`
+    // expects Число → the Число local outranks the Строка local.
+    let items = complete(
+        r#"//- /test.bsl
+Функция Вычислить()
+    ЗначЧисло = 5;
+    ЗначСтрока = "строка";
+    Возврат ЗначЧисло;
+    Возврат Зн$0
+КонецФункции
+"#,
+    );
+    assert_eq!(
+        typematch_digit(&items, "ЗначЧисло"),
+        Some('0'),
+        "ЗначЧисло (Число) must match the return type"
+    );
+    assert_eq!(
+        typematch_digit(&items, "ЗначСтрока"),
+        Some('1'),
+        "ЗначСтрока (Строка) must not match"
+    );
+}
+
+#[test]
+fn completion_function_candidate_boosted_by_inferred_return_type() {
+    // A user function whose inferred return type matches the expected type is
+    // boosted — no doc-comments involved.
+    let items = complete(
+        r#"//- /test.bsl
+Функция ДайЧисло()
+    Возврат 100;
+КонецФункции
+
+Процедура Тест()
+    Сумма = 0;
+    Сумма = Дай$0
+КонецПроцедуры
+"#,
+    );
+    assert_eq!(
+        typematch_digit(&items, "ДайЧисло"),
+        Some('0'),
+        "function returning Число must be boosted in a Число context"
+    );
+}
+
+#[test]
+fn completion_unresolved_call_arg_does_not_leak_outer_context() {
+    // Cursor is in the argument of an unresolved call. The assignment's expected
+    // type must NOT leak into the argument slot, so the Число local is not boosted.
+    let items = complete(
+        r#"//- /test.bsl
+Процедура Тест()
+    Сумма = 0;
+    Сумма = НетТакойФункции(С$0)
+КонецПроцедуры
+"#,
+    );
+    assert_eq!(
+        typematch_digit(&items, "Сумма"),
+        Some('1'),
+        "outer assignment type must not leak into an unresolved call's argument"
+    );
+}
+
+#[test]
+fn completion_constructor_arg_does_not_leak_outer_context() {
+    // Cursor is in a constructor argument (`Новый Тип(…)`). Constructor arg types
+    // are not computed, and the outer assignment type must NOT leak in, so the
+    // Число local is not boosted.
+    let items = complete(
+        r#"//- /test.bsl
+Процедура Тест()
+    Сумма = 0;
+    Сумма = Новый Массив(Сум$0)
+КонецПроцедуры
+"#,
+    );
+    assert_eq!(
+        typematch_digit(&items, "Сумма"),
+        Some('1'),
+        "outer assignment type must not leak into a constructor argument"
+    );
+}
+
+#[test]
+fn completion_return_in_procedure_does_not_boost() {
+    // A procedure has no return value type, so `Возврат …` in a procedure must not
+    // boost anything.
+    let items = complete(
+        r#"//- /test.bsl
+Процедура Тест()
+    ЗначЧисло = 5;
+    Возврат Зн$0
+КонецПроцедуры
+"#,
+    );
+    assert_eq!(
+        typematch_digit(&items, "ЗначЧисло"),
+        Some('1'),
+        "return inside a procedure must not produce a type boost"
+    );
+}
+
+#[test]
+fn completion_empty_prefix_does_not_type_functions() {
+    // With an empty prefix the expected type is known but function return types are
+    // not computed (perf guard), so the function candidate stays unboosted.
+    let items = complete(
+        r#"//- /test.bsl
+Функция ДайЧисло()
+    Возврат 100;
+КонецФункции
+
+Процедура Тест()
+    Сумма = 0;
+    Сумма = $0
+КонецПроцедуры
+"#,
+    );
+    assert_eq!(
+        typematch_digit(&items, "ДайЧисло"),
+        Some('1'),
+        "function return types must not be computed on an empty prefix"
+    );
 }
 
 #[test]

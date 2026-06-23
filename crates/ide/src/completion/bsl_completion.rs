@@ -147,16 +147,19 @@ fn complete_top_level<DB: RootDatabase>(
     let mut matcher = PrefixMatcher::new(prefix);
     let freq = build_frequency(db, file_id);
     let in_method = cursor_in_method(db, file_id, offset);
-    // Expected parameter type(s) when completing a call argument — used to float
-    // type-matching candidates up (RDT1C's biggest rating factor). Empty otherwise.
-    let expected = hir::Semantics::new(db).expected_arg_types_at(file_id, offset);
+    // Expected type(s) at the cursor (call argument, assignment RHS, or return) —
+    // used to float type-matching candidates up (RDT1C's biggest rating factor).
+    let expected = hir::Semantics::new(db).expected_types_at(file_id, offset);
+    // Computing a function's return type to type it as a candidate is only worth
+    // it when there is an expected type and the prefix narrows the list.
+    let want_fn_types = !expected.is_empty() && !prefix.is_empty();
 
     let mut out = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
 
     let locals = complete_local_symbols(db, file_id, offset, &matcher);
     push_band(&mut out, &mut seen, &mut matcher, db, &freq, &expected, "00_", locals);
-    let user = untyped(complete_user_defined_symbols(db, file_id, &matcher));
+    let user = complete_user_defined_symbols(db, file_id, &matcher, want_fn_types);
     push_band(&mut out, &mut seen, &mut matcher, db, &freq, &expected, "10_", user);
     let self_attrs = untyped(complete_module_self_attributes(db, file_id, &matcher, locale));
     push_band(&mut out, &mut seen, &mut matcher, db, &freq, &expected, "15_", self_attrs);
@@ -647,10 +650,11 @@ fn complete_user_defined_symbols<DB: RootDatabase>(
     db: &DB,
     file_id: vfs::FileId,
     matcher: &PrefixMatcher,
-) -> Vec<CompletionItem> {
+    want_fn_types: bool,
+) -> Vec<Candidate> {
     let _span = tracing::debug_span!("complete_user_defined_symbols").entered();
 
-    let mut completions = Vec::new();
+    let mut completions: Vec<Candidate> = Vec::new();
 
     let sema = hir::Semantics::new(db);
     let module = sema.module_from_file(file_id);
@@ -663,20 +667,26 @@ fn complete_user_defined_symbols<DB: RootDatabase>(
             continue;
         }
 
-        let is_export = procedure.is_export();
-        let detail =
-            if is_export { "Процедура Экспорт" } else { "Процедура" };
+        let detail = if procedure.is_export() {
+            "Процедура Экспорт"
+        } else {
+            "Процедура"
+        };
 
-        completions.push(CompletionItem {
-            label: name_str.to_string(),
-            detail: Some(detail.to_string()),
-            kind: CompletionItemKind::Function,
-            insert_text: format!("{}()$0", name_str),
-            documentation: None,
-            sort_text: None,
-            filter_text: None,
-            source: None,
-        });
+        // A procedure has no value type, so it never carries the type boost.
+        completions.push((
+            CompletionItem {
+                label: name_str.to_string(),
+                detail: Some(detail.to_string()),
+                kind: CompletionItemKind::Function,
+                insert_text: format!("{}()$0", name_str),
+                documentation: None,
+                sort_text: None,
+                filter_text: None,
+                source: None,
+            },
+            None,
+        ));
     }
 
     for function in module.functions() {
@@ -687,19 +697,32 @@ fn complete_user_defined_symbols<DB: RootDatabase>(
             continue;
         }
 
-        let is_export = function.is_export();
-        let detail = if is_export { "Функция Экспорт" } else { "Функция" };
+        let detail =
+            if function.is_export() { "Функция Экспорт" } else { "Функция" };
 
-        completions.push(CompletionItem {
-            label: name_str.to_string(),
-            detail: Some(detail.to_string()),
-            kind: CompletionItemKind::Function,
-            insert_text: format!("{}()$0", name_str),
-            documentation: None,
-            sort_text: None,
-            filter_text: None,
-            source: None,
-        });
+        // The name completes a call, so the candidate's value type is the
+        // function's inferred return type. Only computed when an expected type and
+        // a typed prefix make it worthwhile (return-type inference is not free).
+        let type_id = if want_fn_types {
+            let ret = hir::method_return_type(db, function.id());
+            (!matches!(db.lookup_type(ret), hir::TypeKind::Unknown)).then_some(ret)
+        } else {
+            None
+        };
+
+        completions.push((
+            CompletionItem {
+                label: name_str.to_string(),
+                detail: Some(detail.to_string()),
+                kind: CompletionItemKind::Function,
+                insert_text: format!("{}()$0", name_str),
+                documentation: None,
+                sort_text: None,
+                filter_text: None,
+                source: None,
+            },
+            type_id,
+        ));
     }
 
     for variable in module.variables() {
@@ -710,19 +733,25 @@ fn complete_user_defined_symbols<DB: RootDatabase>(
             continue;
         }
 
-        let is_export = variable.is_export();
-        let detail =
-            if is_export { "Переменная Экспорт" } else { "Переменная" };
+        let detail = if variable.is_export() {
+            "Переменная Экспорт"
+        } else {
+            "Переменная"
+        };
 
-        completions.push(CompletionItem::simple(
-            name_str.to_string(),
-            CompletionItemKind::Field,
-            name_str.to_string(),
+        completions.push((
+            CompletionItem {
+                label: name_str.to_string(),
+                detail: Some(detail.to_string()),
+                kind: CompletionItemKind::Field,
+                insert_text: name_str.to_string(),
+                documentation: None,
+                sort_text: None,
+                filter_text: None,
+                source: None,
+            },
+            None,
         ));
-
-        if let Some(item) = completions.last_mut() {
-            item.detail = Some(detail.to_string());
-        }
     }
 
     tracing::debug!(count = completions.len(), "Completed user-defined symbols");
@@ -917,7 +946,10 @@ mod tests {
 
         db.set_file_text(file_id, source);
 
-        let items = complete_user_defined_symbols(&db, file_id, &PrefixMatcher::new("Моя"));
+        let items = complete_user_defined_symbols(&db, file_id, &PrefixMatcher::new("Моя"), false)
+            .into_iter()
+            .map(|(i, _)| i)
+            .collect::<Vec<_>>();
 
         println!("Found {} items for prefix 'Моя'", items.len());
         for item in &items {
@@ -972,9 +1004,21 @@ mod tests {
 
         db.set_file_text(file_id, source);
 
-        let items_lower = complete_user_defined_symbols(&db, file_id, &PrefixMatcher::new("тест"));
-        let items_upper = complete_user_defined_symbols(&db, file_id, &PrefixMatcher::new("ТЕСТ"));
-        let items_mixed = complete_user_defined_symbols(&db, file_id, &PrefixMatcher::new("Тест"));
+        let items_lower =
+            complete_user_defined_symbols(&db, file_id, &PrefixMatcher::new("тест"), false)
+                .into_iter()
+                .map(|(i, _)| i)
+                .collect::<Vec<_>>();
+        let items_upper =
+            complete_user_defined_symbols(&db, file_id, &PrefixMatcher::new("ТЕСТ"), false)
+                .into_iter()
+                .map(|(i, _)| i)
+                .collect::<Vec<_>>();
+        let items_mixed =
+            complete_user_defined_symbols(&db, file_id, &PrefixMatcher::new("Тест"), false)
+                .into_iter()
+                .map(|(i, _)| i)
+                .collect::<Vec<_>>();
 
         assert_eq!(items_lower.len(), 1);
         assert_eq!(items_upper.len(), 1);
