@@ -32,6 +32,17 @@ const RESPAWN_INTERVAL: Duration = Duration::from_secs(3);
 /// bound across many backend generations.
 const MAX_LOG_BYTES: u64 = 4 * 1024 * 1024;
 
+/// Windows-only: how long to keep draining backend→client after the client closes
+/// stdin before dropping the connection outright. Windows named pipes have no
+/// half-close — `AsyncWrite::shutdown` is a no-op there — so the backend never
+/// observes the client leaving via the stdin-EOF half-close, and both sides would
+/// wait on each other forever. After stdin closes we drain for at most this long,
+/// then drop the stream; closing the pipe handle is the disconnect the backend reads
+/// as the end of its owner session. The unix path keeps draining to backend EOF (the
+/// half-close delivers it), so this bound never applies there.
+#[cfg(windows)]
+const STDIN_CLOSED_DRAIN_GRACE: Duration = Duration::from_secs(2);
+
 /// Outcome of a proxy attempt, separating a pre-session connect failure from a
 /// mid-session relay failure — they need different handling by the caller.
 pub enum ProxyOutcome {
@@ -160,25 +171,65 @@ fn reap(children: &mut Vec<Child>) {
 }
 
 /// Relay bytes both ways. The backend→client direction is authoritative: it is
-/// drained to EOF and flushed before returning, so a final response is never
-/// truncated by the client closing stdin first. The stdin→backend pump runs
-/// concurrently and half-closes the write side on stdin EOF so the backend sees the
-/// session end.
+/// drained and flushed before returning, so a final response is not truncated by the
+/// client closing stdin first. The stdin→backend pump runs concurrently and half-closes
+/// the write side on stdin EOF.
+///
+/// On unix that half-close delivers EOF to the backend, which ends its owner session and
+/// closes; the relay then drains to backend EOF — a slow final response is never cut off.
+///
+/// Windows named pipes have no half-close (`AsyncWrite::shutdown` is a no-op), so the
+/// backend never sees that EOF. There the relay drains until the backend closes or,
+/// once stdin has closed, a bounded grace elapses, then returns — dropping the stream
+/// closes the pipe handle, the disconnect the backend reads as the end of its owner
+/// session.
 async fn relay_stdio(stream: TokioStream) -> anyhow::Result<()> {
     let (mut from_backend, mut to_backend) = stream.split();
 
+    let (stdin_closed_tx, stdin_closed_rx) = tokio::sync::oneshot::channel();
     let pump_in = tokio::spawn(async move {
         let mut stdin = tokio::io::stdin();
         let _ = tokio::io::copy(&mut stdin, &mut to_backend).await;
         let _ = to_backend.shutdown().await;
+        let _ = stdin_closed_tx.send(());
     });
 
     let mut stdout = tokio::io::stdout();
-    let copied = tokio::io::copy(&mut from_backend, &mut stdout).await;
+
+    // Unix: the half-close delivers EOF to the backend, which ends its owner session
+    // and closes; draining to backend EOF is correct and never truncates a slow final
+    // response.
+    #[cfg(not(windows))]
+    let copied = {
+        drop(stdin_closed_rx);
+        tokio::io::copy(&mut from_backend, &mut stdout).await
+    };
+
+    // Windows: named pipes have no half-close, so the backend never sees the stdin-EOF
+    // and `copy_fut` would never complete on its own. Drain until either the backend
+    // closes or, once the client has closed stdin, the grace elapses — then return so
+    // the dropped stream closes the handle and ends the backend's owner session.
+    // Scoped so `copy_fut`'s borrow of `stdout` is released before the flush below.
+    #[cfg(windows)]
+    let copied = {
+        let copy_fut = tokio::io::copy(&mut from_backend, &mut stdout);
+        tokio::pin!(copy_fut);
+        tokio::select! {
+            copied = &mut copy_fut => copied,
+            _ = stdin_closed_rx => {
+                match tokio::time::timeout(STDIN_CLOSED_DRAIN_GRACE, &mut copy_fut).await {
+                    Ok(copied) => copied,
+                    Err(_) => {
+                        tracing::debug!("stdin closed; draining grace elapsed, closing backend pipe");
+                        Ok(0)
+                    }
+                }
+            }
+        }
+    };
+
     let _ = stdout.flush().await;
 
-    // Backend closed (after seeing our EOF, or on its own): the stdin pump is now
-    // irrelevant.
     pump_in.abort();
     copied?;
     Ok(())
