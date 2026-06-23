@@ -720,6 +720,7 @@ fn convert_completion_kind(kind: ide::CompletionItemKind) -> CompletionItemKind 
         ide::CompletionItemKind::Constant => CompletionItemKind::CONSTANT,
         ide::CompletionItemKind::EnumMember => CompletionItemKind::ENUM_MEMBER,
         ide::CompletionItemKind::Constructor => CompletionItemKind::CONSTRUCTOR,
+        ide::CompletionItemKind::Snippet => CompletionItemKind::SNIPPET,
     }
 }
 

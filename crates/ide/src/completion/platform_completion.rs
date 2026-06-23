@@ -15,6 +15,7 @@ use symbol_info::{
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 use vfs::FileId;
 
+use super::fuzzy::{MatchTier, PrefixMatcher};
 use super::{CompletionItem, CompletionItemKind, CompletionPosition};
 
 pub(super) fn platform_completions<DB: RootDatabase>(
@@ -37,7 +38,7 @@ pub(super) fn platform_completions<DB: RootDatabase>(
     if let Some(receiver_name) = extract_receiver_ident(&receiver_expr) {
         tracing::debug!(receiver_name = %receiver_name, "Trying CommonModule fast path");
         if let Some(items) = complete_common_module_methods(db, &position, &receiver_name) {
-            return Some(items);
+            return Some(apply_prefix_filter(items, &prefix, db));
         }
     }
 
@@ -323,6 +324,12 @@ fn resolve_dot_anchor(
     Some((dot, prefix))
 }
 
+/// Filter and rank after-dot member completions for the typed prefix. Matching is
+/// fuzzy (prefix / sub-word boundary / substring), and the match quality is
+/// prepended to each item's existing per-source `sort_text` band so quality
+/// dominates while the original ordering (form-element band, field origin, …) is
+/// preserved as the secondary key. Scattered (non-contiguous) matches are dropped
+/// to keep large receivers (unions, wide forms/projections) from flooding.
 fn apply_prefix_filter(
     items: Vec<CompletionItem>,
     prefix: &str,
@@ -331,19 +338,18 @@ fn apply_prefix_filter(
     if prefix.is_empty() {
         return items;
     }
-    let prefix_lower = prefix.fold_lower();
+    let mut matcher = PrefixMatcher::new(prefix);
     items
         .into_iter()
-        .filter(|item| {
-            let label_lc = item.label.fold_lower();
-            if label_lc.starts_with(&prefix_lower) {
-                return true;
+        .filter_map(|mut item| {
+            let result =
+                super::fuzzy::score_item(&mut matcher, &item.label, item.filter_text.as_deref())?;
+            if result.tier == MatchTier::Fuzzy {
+                return None;
             }
-            if let Some(ft) = &item.filter_text {
-                ft.split_whitespace().any(|tok| tok.fold_lower().starts_with(&prefix_lower))
-            } else {
-                false
-            }
+            let existing = item.sort_text.take().unwrap_or_else(|| item.label.fold_lower());
+            item.sort_text = Some(format!("{}{}", result.tier as u8, existing));
+            Some(item)
         })
         .collect()
 }

@@ -32,6 +32,7 @@ thiserror.workspace = true
 rayon.workspace = true
 either = "1.9"
 rustc-hash = "2.1"
+nucleo-matcher.workspace = true
 
 [dev-dependencies]
 expect-test.workspace = true

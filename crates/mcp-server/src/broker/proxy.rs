@@ -32,6 +32,17 @@ const RESPAWN_INTERVAL: Duration = Duration::from_secs(3);
 /// bound across many backend generations.
 const MAX_LOG_BYTES: u64 = 4 * 1024 * 1024;
 
+/// Windows-only: how long to keep draining backend→client after the client closes
+/// stdin before dropping the connection outright. Windows named pipes have no
+/// half-close — `AsyncWrite::shutdown` is a no-op there — so the backend never
+/// observes the client leaving via the stdin-EOF half-close, and both sides would
+/// wait on each other forever. After stdin closes we drain for at most this long,
+/// then drop the stream; closing the pipe handle is the disconnect the backend reads
+/// as the end of its owner session. The unix path keeps draining to backend EOF (the
+/// half-close delivers it), so this bound never applies there.
+#[cfg(windows)]
+const STDIN_CLOSED_DRAIN_GRACE: Duration = Duration::from_secs(2);
+
 /// Outcome of a proxy attempt, separating a pre-session connect failure from a
 /// mid-session relay failure — they need different handling by the caller.
 pub enum ProxyOutcome {
@@ -64,8 +75,26 @@ async fn connect_with_launch(
     key: &BackendKey,
     mut daemon_cmd: Command,
 ) -> anyhow::Result<TokioStream> {
+    // Initial direct connect.
+    //
+    // On Unix the per-user runtime dir is the trust boundary (mode 0700, owner
+    // checked), so a connect succeeding against a socket in that dir proves the
+    // peer is ours — return the stream directly.
+    //
+    // On Windows the deterministic pipe name can be raced by a hostile local
+    // user pre-creating the pipe with their own DACL, so any successful connect
+    // must pass the same `verify_pipe_server_trusted` gate used by the polling
+    // loop below. A trusted already-running backend is reused; an unverified
+    // pipe is dropped and we fall through to launch + verify our own child.
+    #[cfg(unix)]
     if let Ok(stream) = TokioStream::connect(backend_name(key)?).await {
         return Ok(stream);
+    }
+    #[cfg(windows)]
+    if let Ok(stream) = TokioStream::connect(backend_name(key)?).await {
+        if let Some(trusted) = verify_or_drop_peer(stream) {
+            return Ok(trusted);
+        }
     }
 
     // No backend yet: launch one detached, then poll-connect. If the backend never
@@ -78,28 +107,59 @@ async fn connect_with_launch(
     let mut next_respawn = Instant::now() + RESPAWN_INTERVAL;
     let mut delay = Duration::from_millis(25);
     loop {
-        match TokioStream::connect(backend_name(key)?).await {
+        let last_err = match TokioStream::connect(backend_name(key)?).await {
             Ok(stream) => {
-                reap(&mut children);
-                return Ok(stream);
-            }
-            Err(e) => {
-                if Instant::now() >= deadline {
+                if let Some(trusted) = verify_or_drop_peer(stream) {
                     reap(&mut children);
-                    return Err(anyhow::anyhow!(
-                        "broker backend did not become reachable within {}s: {e}",
-                        LAUNCH_TIMEOUT.as_secs()
-                    ));
+                    return Ok(trusted);
                 }
-                if Instant::now() >= next_respawn {
-                    reap(&mut children);
-                    children.push(spawn_detached(key, &mut daemon_cmd)?);
-                    next_respawn = Instant::now() + RESPAWN_INTERVAL;
-                }
-                tokio::time::sleep(delay).await;
-                delay = (delay * 2).min(Duration::from_millis(500));
+                // Windows: the pre-existing pipe did not pass the trust gate.
+                // Keep polling — our own launched backend may win the bind on a
+                // later attempt; surface the last real connect error on timeout.
+                None
             }
+            Err(e) => Some(e),
+        };
+        if Instant::now() >= deadline {
+            reap(&mut children);
+            let detail = last_err
+                .map(|e| format!("{e}"))
+                .unwrap_or_else(|| "all successful connects were from unverified pipes".to_owned());
+            return Err(anyhow::anyhow!(
+                "broker backend did not become reachable within {}s: {detail}",
+                LAUNCH_TIMEOUT.as_secs()
+            ));
         }
+        if Instant::now() >= next_respawn {
+            reap(&mut children);
+            children.push(spawn_detached(key, &mut daemon_cmd)?);
+            next_respawn = Instant::now() + RESPAWN_INTERVAL;
+        }
+        tokio::time::sleep(delay).await;
+        delay = (delay * 2).min(Duration::from_millis(500));
+    }
+}
+
+/// Verify a connected peer is a trusted backend, returning the stream if
+/// trusted or `None` if it must be dropped.
+///
+/// On Unix the runtime dir + DACL is the trust boundary, so any successful
+/// connect is accepted unchanged. On Windows the deterministic pipe name is
+/// raceable, so `security::verify_pipe_server_trusted` introspects the server
+/// PID's image path and owner SID via `sysinfo` and compares them against the
+/// current process — the same gate used by `daemon::probe_live`. No
+/// project-local `unsafe`, no handwritten Win32 FFI.
+#[cfg(unix)]
+fn verify_or_drop_peer(stream: TokioStream) -> Option<TokioStream> {
+    Some(stream)
+}
+
+#[cfg(windows)]
+fn verify_or_drop_peer(stream: TokioStream) -> Option<TokioStream> {
+    if crate::broker::security::verify_pipe_server_trusted(&stream) {
+        Some(stream)
+    } else {
+        None
     }
 }
 
@@ -110,26 +170,78 @@ fn reap(children: &mut Vec<Child>) {
     children.retain_mut(|child| matches!(child.try_wait(), Ok(None)));
 }
 
-/// Relay bytes both ways. The backend→client direction is authoritative: it is
-/// drained to EOF and flushed before returning, so a final response is never
-/// truncated by the client closing stdin first. The stdin→backend pump runs
-/// concurrently and half-closes the write side on stdin EOF so the backend sees the
-/// session end.
+/// Relay the client's stdio to the backend: the production entry point, a thin wrapper
+/// over [`relay`] with the process's own `stdin`/`stdout` as the client side.
 async fn relay_stdio(stream: TokioStream) -> anyhow::Result<()> {
+    relay(tokio::io::stdin(), tokio::io::stdout(), stream).await
+}
+
+/// Relay bytes both ways between a client (`client_in`/`client_out`) and the backend
+/// `stream`. The backend→client direction is authoritative: it is drained and flushed
+/// before returning, so a final response is not truncated by the client closing its
+/// input first. The client→backend pump runs concurrently and half-closes the write
+/// side on input EOF.
+///
+/// On unix that half-close delivers EOF to the backend, which ends its owner session and
+/// closes; the relay then drains to backend EOF — a slow final response is never cut off.
+///
+/// Windows named pipes have no half-close (`AsyncWrite::shutdown` is a no-op), so the
+/// backend never sees that EOF. There the relay drains until the backend closes or,
+/// once the client input has closed, a bounded grace elapses, then returns — dropping
+/// the stream closes the pipe handle, the disconnect the backend reads as the end of its
+/// owner session.
+///
+/// Split out from [`relay_stdio`] (which binds it to process stdio) so the teardown
+/// behavior can be exercised by tests with in-memory client streams.
+pub async fn relay<R, W>(client_in: R, mut client_out: W, stream: TokioStream) -> anyhow::Result<()>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+    W: tokio::io::AsyncWrite + Unpin,
+{
     let (mut from_backend, mut to_backend) = stream.split();
 
+    let (input_closed_tx, input_closed_rx) = tokio::sync::oneshot::channel();
     let pump_in = tokio::spawn(async move {
-        let mut stdin = tokio::io::stdin();
-        let _ = tokio::io::copy(&mut stdin, &mut to_backend).await;
+        let mut client_in = client_in;
+        let _ = tokio::io::copy(&mut client_in, &mut to_backend).await;
         let _ = to_backend.shutdown().await;
+        let _ = input_closed_tx.send(());
     });
 
-    let mut stdout = tokio::io::stdout();
-    let copied = tokio::io::copy(&mut from_backend, &mut stdout).await;
-    let _ = stdout.flush().await;
+    // Unix: the half-close delivers EOF to the backend, which ends its owner session
+    // and closes; draining to backend EOF is correct and never truncates a slow final
+    // response.
+    #[cfg(not(windows))]
+    let copied = {
+        drop(input_closed_rx);
+        tokio::io::copy(&mut from_backend, &mut client_out).await
+    };
 
-    // Backend closed (after seeing our EOF, or on its own): the stdin pump is now
-    // irrelevant.
+    // Windows: named pipes have no half-close, so the backend never sees the input EOF
+    // and `copy_fut` would never complete on its own. Drain until either the backend
+    // closes or, once the client input has closed, the grace elapses — then return so
+    // the dropped stream closes the handle and ends the backend's owner session.
+    // Scoped so `copy_fut`'s borrow of `client_out` is released before the flush below.
+    #[cfg(windows)]
+    let copied = {
+        let copy_fut = tokio::io::copy(&mut from_backend, &mut client_out);
+        tokio::pin!(copy_fut);
+        tokio::select! {
+            copied = &mut copy_fut => copied,
+            _ = input_closed_rx => {
+                match tokio::time::timeout(STDIN_CLOSED_DRAIN_GRACE, &mut copy_fut).await {
+                    Ok(copied) => copied,
+                    Err(_) => {
+                        tracing::debug!("client closed input; drain grace elapsed, closing backend pipe");
+                        Ok(0)
+                    }
+                }
+            }
+        }
+    };
+
+    let _ = client_out.flush().await;
+
     pump_in.abort();
     copied?;
     Ok(())

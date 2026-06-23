@@ -669,6 +669,138 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
         None
     }
 
+    /// Expected type(s) at a completion position, used to boost candidates whose
+    /// type matches. Resolves the most specific context: a call argument, then an
+    /// assignment right-hand side, then a `Возврат` value. `Unknown` types are
+    /// dropped so a candidate is never boosted on a bogus expectation.
+    ///
+    /// When the cursor is syntactically inside a call argument list, only the
+    /// call-argument expectation is used (possibly empty) — assignment/return are
+    /// not consulted, so an unresolved callee never leaks the outer context into
+    /// its argument slot.
+    pub fn expected_types_at(&self, file_id: FileId, offset: TextSize) -> Vec<TypeId> {
+        let parse = self.db.parse(file_id);
+        let root = parse.syntax_node();
+
+        // Any argument list (call OR constructor) blocks the assignment/return
+        // fallthrough — an unresolved callee/constructor must not leak the outer
+        // expected type into its argument slot. `expected_arg_types_at` yields the
+        // real parameter types for resolved calls and empty for constructors.
+        let raw = if in_arg_list(&root, offset) {
+            self.expected_arg_types_at(file_id, offset)
+        } else if let Some(ty) = self.expected_assignment_type_at(file_id, offset) {
+            vec![ty]
+        } else if let Some(ty) = self.expected_return_type_at(file_id, offset) {
+            vec![ty]
+        } else {
+            Vec::new()
+        };
+
+        raw.into_iter()
+            .filter(|ty| !matches!(self.db.lookup_type(*ty), TypeKind::Unknown))
+            .collect()
+    }
+
+    /// Expected type of an assignment right-hand side = the type of the assignment
+    /// target. `None` unless the cursor sits past the `=` of an `ASSIGN_STMT`.
+    fn expected_assignment_type_at(&self, file_id: FileId, offset: TextSize) -> Option<TypeId> {
+        let parse = self.db.parse(file_id);
+        let root = parse.syntax_node();
+        let token = root.token_at_offset(offset).left_biased()?;
+        let assign =
+            token.parent_ancestors().find(|n| n.kind() == syntax::SyntaxKind::ASSIGN_STMT)?;
+        let eq = assign.children_with_tokens().find(|c| c.kind() == syntax::SyntaxKind::EQ)?;
+        if offset < eq.text_range().end() {
+            return None;
+        }
+        let target = assign.children().next()?;
+        Some(self.type_of_expr(file_id, &target))
+    }
+
+    /// Expected type of a `Возврат` value = the enclosing function's inferred
+    /// return type. `None` outside a `RETURN_STMT` or inside a procedure.
+    fn expected_return_type_at(&self, file_id: FileId, offset: TextSize) -> Option<TypeId> {
+        let parse = self.db.parse(file_id);
+        let root = parse.syntax_node();
+        let token = root.token_at_offset(offset).left_biased()?;
+        token.parent_ancestors().find(|n| n.kind() == syntax::SyntaxKind::RETURN_STMT)?;
+
+        let method_id = self.enclosing_method_id(file_id, offset)?;
+        if !Method::new(self.db, method_id).is_function() {
+            return None;
+        }
+        Some(method_return_type(self.db, method_id))
+    }
+
+    /// The `MethodId` of the procedure/function whose source range contains
+    /// `offset` (BSL has no nested methods, so at most one matches).
+    fn enclosing_method_id(&self, file_id: FileId, offset: TextSize) -> Option<MethodId> {
+        let tree = self.db.item_tree(file_id);
+        let module_id = ModuleId::new(file_id);
+        for (idx, item) in tree.top_level_items().iter().enumerate() {
+            let range = match item {
+                hir_def::item_tree::ModItem::Procedure(p) => tree.procedure(*p).source_range,
+                hir_def::item_tree::ModItem::Function(f) => tree.function(*f).source_range,
+                _ => continue,
+            };
+            if range.contains(offset) {
+                return Some(MethodId { module: module_id, local_id: idx as u32 });
+            }
+        }
+        None
+    }
+
+    /// Expected parameter type(s) at a call-argument completion position.
+    ///
+    /// Locates the innermost call argument list around `offset` and the active
+    /// argument index by counting commas (robust to the empty/trailing slot the
+    /// cursor sits in while typing, which has no lowered expression of its own),
+    /// maps the call to its recorded argument bindings, and returns the parameter
+    /// type(s) at that index. Several types are returned for overloaded calls — a
+    /// candidate is a match if assignable to any of them. Empty when the cursor is
+    /// not inside a resolvable call argument.
+    fn expected_arg_types_at(&self, file_id: FileId, offset: TextSize) -> Vec<TypeId> {
+        let parse = self.db.parse(file_id);
+        let Some((callee, active)) = call_arg_at_offset(&parse.syntax_node(), offset) else {
+            return Vec::new();
+        };
+        let callee_range = callee.text_range();
+
+        let module_id = ModuleId::new(file_id);
+        let module_bodies = self.db.module_bodies(module_id);
+
+        let mut found: Option<(DefWithBodyId, ExprId)> = None;
+        if let Some(result) = module_bodies.module_code_result() {
+            if let Some(expr_id) = result.source_map.expr_at_range(callee_range) {
+                found = Some((DefWithBodyId::ModuleCode, expr_id));
+            }
+        }
+        if found.is_none() {
+            for (local_id, _body, source_map) in module_bodies.method_bodies() {
+                if let Some(expr_id) = source_map.expr_at_range(callee_range) {
+                    found = Some((DefWithBodyId::Method(local_id), expr_id));
+                    break;
+                }
+            }
+        }
+        let Some((owner, callee_id)) = found else {
+            return Vec::new();
+        };
+
+        let routed = infer_owner(self.db, file_id, owner);
+        let Some(binding) = routed.call_arg_bindings().iter().find(|b| b.call_expr == callee_id)
+        else {
+            return Vec::new();
+        };
+
+        match &binding.params {
+            ParamsShape::Single(params) => params.get(active).copied().into_iter().collect(),
+            ParamsShape::Overloaded { overloads, .. } => {
+                overloads.iter().filter_map(|o| o.get(active).copied()).collect()
+            }
+        }
+    }
+
     pub fn resolve_method_call_to_definition(
         &self,
         file_id: FileId,
@@ -691,6 +823,77 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
 
         Some(Definition::BuiltinMethodHandle { handle: resolution.handle, method_name })
     }
+}
+
+/// True if a value of type `from` may be passed where `to` is expected.
+pub fn type_assignable<DB: HirDatabase>(db: &DB, from: TypeId, to: TypeId) -> bool {
+    hir_ty::is_assignable(db, from, to)
+}
+
+/// The inferred return type of a method (union of its `Возврат` expression types).
+pub fn method_return_type<DB: HirDatabase>(db: &DB, method_id: MethodId) -> TypeId {
+    method_return_type_query(db, MethodIdInput::new(db, method_id))
+}
+
+/// Whether `offset` sits inside any argument list — a call's or a constructor's
+/// (`NEW_EXPR`). Used to stop the assignment/return fallthrough so an unresolved
+/// callee never inherits the outer context's expected type in its argument slot.
+fn in_arg_list(root: &syntax::SyntaxNode, offset: TextSize) -> bool {
+    use syntax::{SyntaxKind, TokenAtOffset};
+
+    let token = match root.token_at_offset(offset) {
+        TokenAtOffset::None => return false,
+        TokenAtOffset::Single(t) => t,
+        TokenAtOffset::Between(left, right) => {
+            if left.parent_ancestors().any(|n| n.kind() == SyntaxKind::ARG_LIST) {
+                left
+            } else {
+                right
+            }
+        }
+    };
+    token.parent_ancestors().any(|n| n.kind() == SyntaxKind::ARG_LIST)
+}
+
+/// Find the innermost call argument list around `offset` and return the call's
+/// callee expression node plus the active (zero-based) argument index. The index
+/// is derived by counting commas before the cursor, so it is correct even when
+/// the cursor sits in an empty or trailing argument slot that has no expression.
+/// The callee node (not the whole call) is returned because argument bindings are
+/// keyed by the callee expression.
+fn call_arg_at_offset(
+    root: &syntax::SyntaxNode,
+    offset: TextSize,
+) -> Option<(syntax::SyntaxNode, usize)> {
+    use syntax::{SyntaxKind, TokenAtOffset};
+
+    let token = match root.token_at_offset(offset) {
+        TokenAtOffset::None => return None,
+        TokenAtOffset::Single(t) => t,
+        TokenAtOffset::Between(left, right) => {
+            if left.parent_ancestors().any(|n| n.kind() == SyntaxKind::ARG_LIST) {
+                left
+            } else {
+                right
+            }
+        }
+    };
+
+    let arg_list = token.parent_ancestors().find(|node| node.kind() == SyntaxKind::ARG_LIST)?;
+    let call_expr = arg_list.parent().filter(|p| p.kind() == SyntaxKind::CALL_EXPR)?;
+    let callee = call_expr.children().next()?;
+
+    let mut active = 0usize;
+    for child in arg_list.children_with_tokens() {
+        if child.text_range().start() >= offset {
+            break;
+        }
+        if child.kind() == SyntaxKind::COMMA {
+            active += 1;
+        }
+    }
+
+    Some((callee, active))
 }
 
 fn field_name_receiver(token: &syntax::SyntaxToken) -> Option<syntax::SyntaxNode> {

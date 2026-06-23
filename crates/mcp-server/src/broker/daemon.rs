@@ -31,6 +31,8 @@ use tokio::sync::Notify;
 use tokio::time::{interval, Instant, MissedTickBehavior};
 
 use crate::broker::name::{backend_name, BackendKey};
+#[cfg(windows)]
+use crate::broker::security::pipe_security_descriptor_for_current_user;
 use crate::{serve_stream, McpServer};
 
 /// Cap on connections held while the resident state builds. The listener keeps draining
@@ -329,7 +331,7 @@ impl Drop for ActiveGuard {
 /// named pipe instance vanishes with its owner, so a stale name just means the pipe is
 /// already gone and we rebind directly.
 async fn bind(key: &BackendKey) -> anyhow::Result<Option<TokioListener>> {
-    match ListenerOptions::new().name(backend_name(key)?).create_tokio() {
+    match listener_options(key)?.create_tokio() {
         Ok(listener) => Ok(Some(listener)),
         Err(e) if is_name_in_use(&e) => {
             if probe_live(key).await? {
@@ -340,7 +342,7 @@ async fn bind(key: &BackendKey) -> anyhow::Result<Option<TokioListener>> {
                 let path = key.socket_path()?;
                 tracing::info!(path = %path.display(), "reclaiming stale backend socket");
                 let _ = std::fs::remove_file(&path);
-                match ListenerOptions::new().name(backend_name(key)?).create_tokio() {
+                match listener_options(key)?.create_tokio() {
                     Ok(listener) => Ok(Some(listener)),
                     Err(e2) if is_name_in_use(&e2) => {
                         // A concurrent cold-starter rebound first; defer to it.
@@ -358,7 +360,7 @@ async fn bind(key: &BackendKey) -> anyhow::Result<Option<TokioListener>> {
                 // No file to unlink: a non-live probe means the previous pipe owner is
                 // gone, so the name is free. Rebind once; if a concurrent starter won the
                 // race, defer to it rather than erroring.
-                match ListenerOptions::new().name(backend_name(key)?).create_tokio() {
+                match listener_options(key)?.create_tokio() {
                     Ok(listener) => Ok(Some(listener)),
                     Err(e2) if is_name_in_use(&e2) => {
                         if probe_live(key).await? {
@@ -372,6 +374,20 @@ async fn bind(key: &BackendKey) -> anyhow::Result<Option<TokioListener>> {
             }
         }
         Err(e) => Err(e.into()),
+    }
+}
+
+fn listener_options(key: &BackendKey) -> io::Result<ListenerOptions<'static>> {
+    let options = ListenerOptions::new().name(backend_name(key)?);
+    #[cfg(windows)]
+    {
+        use interprocess::os::windows::local_socket::ListenerOptionsExt;
+
+        return Ok(options.security_descriptor(pipe_security_descriptor_for_current_user()?));
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(options)
     }
 }
 
@@ -396,9 +412,41 @@ fn is_name_in_use(e: &std::io::Error) -> bool {
 /// Is a backend actually accepting on this name? A successful connect proves a live
 /// listener (queued in its backlog even mid-build); a refused/not-found connect
 /// means the name is stale.
+///
+/// On Windows the connect succeeding does not by itself prove the listener is a
+/// backend we trust: the pipe name is deterministic and a hostile local user
+/// can pre-create it with their own DACL. After a successful connect we
+/// therefore call `security::verify_pipe_server_trusted`, which checks the
+/// server PID's image path and owner SID via `sysinfo` (no project-local
+/// unsafe, no handwritten Win32 FFI). A trusted live backend returns `true`
+/// (defer to it); an unverified pipe returns `false` so the caller attempts a
+/// fresh rebind — and if that rebind loses too (the squatter still holds the
+/// name) `bind` returns Err and the launching proxy falls back to in-process
+/// stdio.
 async fn probe_live(key: &BackendKey) -> anyhow::Result<bool> {
     match TokioStream::connect(backend_name(key)?).await {
-        Ok(_) => Ok(true),
+        Ok(control) => {
+            // The probe connection is never used to exchange MCP bytes; it is
+            // just a liveness + identity check. Drop it deterministically.
+            #[cfg(windows)]
+            {
+                let trusted = crate::broker::security::verify_pipe_server_trusted(&control);
+                drop(control);
+                if trusted {
+                    Ok(true)
+                } else {
+                    tracing::info!(
+                        "windows named pipe held by an unverified server; treating as unavailable"
+                    );
+                    Ok(false)
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                drop(control);
+                Ok(true)
+            }
+        }
         // Only a clearly-absent listener counts as stale. Any other (transient) connect
         // error is treated as live, so we never unlink+rebind a backend that is actually
         // up — the conservative choice for the reclaim decision.
@@ -411,6 +459,19 @@ async fn probe_live(key: &BackendKey) -> anyhow::Result<bool> {
             Ok(false)
         }
         Err(e) => {
+            #[cfg(windows)]
+            {
+                const ERROR_ACCESS_DENIED: i32 = 5;
+                if e.kind() == std::io::ErrorKind::PermissionDenied
+                    || e.raw_os_error() == Some(ERROR_ACCESS_DENIED)
+                {
+                    tracing::info!(
+                        error = %e,
+                        "windows named-pipe probe was denied; treating existing server as untrusted"
+                    );
+                    return Ok(false);
+                }
+            }
             tracing::warn!(error = %e, "liveness probe inconclusive; assuming the backend is live");
             Ok(true)
         }
@@ -434,8 +495,8 @@ fn peer_authorized(conn: &TokioStream) -> bool {
     }
 }
 
-/// On Windows the named pipe's default ACL restricts it to the creating user's
-/// session, so connection-time uid checking is not applicable here.
+/// Non-unix transports do not provide peer credentials. On Windows the named-pipe
+/// listener is created with an explicit current-user-only security descriptor.
 #[cfg(not(unix))]
 fn peer_authorized(_conn: &TokioStream) -> bool {
     true

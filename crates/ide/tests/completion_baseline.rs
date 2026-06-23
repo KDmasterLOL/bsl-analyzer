@@ -60,6 +60,12 @@ fn items_matching<'a>(items: &'a [CompletionItem], label: &str) -> Vec<&'a Compl
     items.iter().filter(|i| i.label == label).collect()
 }
 
+/// The context-type-match digit of an item's sort_text (`{tier}{band 2}_{typematch}…`).
+/// `'0'` = matches the expected type, `'1'` = does not / unknown.
+fn typematch_digit(items: &[CompletionItem], label: &str) -> Option<char> {
+    items.iter().find(|i| i.label == label)?.sort_text.as_deref()?.chars().nth(4)
+}
+
 #[test]
 fn completion_after_dot_on_common_module_lists_exported_methods() {
     let items = complete(
@@ -108,7 +114,7 @@ fn completion_after_dot_on_common_module_lists_exported_methods() {
 }
 
 #[test]
-fn completion_in_procedure_body_without_qualifier_is_empty_today() {
+fn completion_in_procedure_body_offers_keyword_templates() {
     let items = complete(
         r#"//- /test.bsl
 Процедура Тест()
@@ -117,10 +123,261 @@ fn completion_in_procedure_body_without_qualifier_is_empty_today() {
 "#,
     );
 
+    assert!(!items.is_empty(), "unqualified `Есл` must offer keyword/templates");
+
+    // The `Если … Тогда … КонецЕсли` template must be offered as a snippet.
+    let if_template =
+        items.iter().find(|i| i.kind == CompletionItemKind::Snippet && i.label.starts_with("Если"));
     assert!(
-        items.is_empty(),
-        "baseline: completion without qualifier is currently empty; got: {:?}",
+        if_template.is_some(),
+        "`Если` block template must be offered; got: {:?}",
         items.iter().map(|i| &i.label).collect::<Vec<_>>()
+    );
+    assert!(
+        if_template.unwrap().insert_text.contains("КонецЕсли"),
+        "the template must expand to a full block with `КонецЕсли`"
+    );
+
+    // The contiguous gate keeps scattered platform matches (`П-е-...-с-л`) out of
+    // the list for a short prefix.
+    assert!(
+        !has_label(&items, "Перечисления"),
+        "scattered platform match must not flood a short-prefix list; got: {:?}",
+        items.iter().map(|i| &i.label).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn completion_ranks_exact_prefix_above_fuzzy_via_sort_text() {
+    // `Найти` is an exact prefix of `НайтиПоКоду`/`НайтиПоНаименованию` and a
+    // scattered match for other names; the exact-prefix hits must sort first.
+    let items = complete(
+        r#"//- /test.bsl
+Процедура Тест()
+    НайтиЗначение = 1;
+    Найт$0
+КонецПроцедуры
+"#,
+    );
+    let ranked: Vec<(&str, &str)> = items
+        .iter()
+        .filter_map(|i| i.sort_text.as_deref().map(|s| (i.label.as_str(), s)))
+        .collect();
+    assert!(!ranked.is_empty(), "every unqualified item must carry a sort_text");
+    // `НайтиЗначение` is a local in scope and an exact prefix → tier 0 + locals band.
+    let local = ranked.iter().find(|(l, _)| *l == "НайтиЗначение");
+    assert!(local.is_some(), "the in-scope local must be offered; got {:?}", ranked);
+    assert!(
+        local.unwrap().1.starts_with('0'),
+        "exact-prefix local must be in the best quality tier (sort_text starts with 0); got {:?}",
+        local.unwrap()
+    );
+}
+
+#[test]
+fn completion_english_prefix_ranks_metadata_plural_in_top_tier() {
+    // Typing the English name `Docu` admits `Документы` via its English alias; it
+    // must be ranked by that match's real quality (tier 0), not sunk to Fuzzy by
+    // scoring the Russian label.
+    let items = complete(
+        r#"//- /test.bsl
+Процедура Тест()
+    Docu$0
+КонецПроцедуры
+"#,
+    );
+    // Platform data may be unavailable in some environments; only assert when the
+    // metadata plural is actually offered.
+    if let Some(item) = items.iter().find(|i| i.label == "Документы") {
+        let sort_text = item.sort_text.as_deref().expect("offered item must carry sort_text");
+        assert!(
+            sort_text.starts_with('0'),
+            "English prefix `Docu` must rank `Документы` in the top quality tier; got {sort_text:?}"
+        );
+    }
+}
+
+#[test]
+fn completion_context_type_boost_floats_matching_local() {
+    // `Цел` expects a `Число` argument. The Number-typed local must float above the
+    // String-typed one even though it sorts later alphabetically — only the
+    // context-type boost can produce that order.
+    let items = complete(
+        r#"//- /test.bsl
+Процедура Тест()
+    ПарамС = "строка";
+    ПарамЧ = 123;
+    Цел(Парам$0)
+КонецПроцедуры
+"#,
+    );
+    let sort_of =
+        |label: &str| items.iter().find(|i| i.label == label).and_then(|i| i.sort_text.clone());
+    let num = sort_of("ПарамЧ").expect("Number local must be offered");
+    let string = sort_of("ПарамС").expect("String local must be offered");
+
+    // typematch digit sits at index 4: `{tier}{band 2}_{typematch}…`.
+    assert_eq!(
+        num.chars().nth(4),
+        Some('0'),
+        "Number local must match expected `Число`; got {num:?}"
+    );
+    assert_eq!(
+        string.chars().nth(4),
+        Some('1'),
+        "String local must not match `Число`; got {string:?}"
+    );
+    assert!(num < string, "type-matching local must sort first; got {num:?} vs {string:?}");
+}
+
+#[test]
+fn completion_assignment_rhs_boosts_matching_local() {
+    // RHS of `Сумма = …` expects the type of `Сумма` (Число). The Число local is
+    // boosted, the Строка local is not.
+    let items = complete(
+        r#"//- /test.bsl
+Процедура Тест()
+    Сумма = 0;
+    Строка1 = "x";
+    Сумма = С$0
+КонецПроцедуры
+"#,
+    );
+    assert_eq!(
+        typematch_digit(&items, "Сумма"),
+        Some('0'),
+        "Сумма (Число) must match assignment LHS type"
+    );
+    assert_eq!(typematch_digit(&items, "Строка1"), Some('1'), "Строка1 (Строка) must not match");
+}
+
+#[test]
+fn completion_return_boosts_matching_local_in_function() {
+    // The function returns Число (via `Возврат ЗначЧисло`), so `Возврат Зн…`
+    // expects Число → the Число local outranks the Строка local.
+    let items = complete(
+        r#"//- /test.bsl
+Функция Вычислить()
+    ЗначЧисло = 5;
+    ЗначСтрока = "строка";
+    Возврат ЗначЧисло;
+    Возврат Зн$0
+КонецФункции
+"#,
+    );
+    assert_eq!(
+        typematch_digit(&items, "ЗначЧисло"),
+        Some('0'),
+        "ЗначЧисло (Число) must match the return type"
+    );
+    assert_eq!(
+        typematch_digit(&items, "ЗначСтрока"),
+        Some('1'),
+        "ЗначСтрока (Строка) must not match"
+    );
+}
+
+#[test]
+fn completion_function_candidate_boosted_by_inferred_return_type() {
+    // A user function whose inferred return type matches the expected type is
+    // boosted — no doc-comments involved.
+    let items = complete(
+        r#"//- /test.bsl
+Функция ДайЧисло()
+    Возврат 100;
+КонецФункции
+
+Процедура Тест()
+    Сумма = 0;
+    Сумма = Дай$0
+КонецПроцедуры
+"#,
+    );
+    assert_eq!(
+        typematch_digit(&items, "ДайЧисло"),
+        Some('0'),
+        "function returning Число must be boosted in a Число context"
+    );
+}
+
+#[test]
+fn completion_unresolved_call_arg_does_not_leak_outer_context() {
+    // Cursor is in the argument of an unresolved call. The assignment's expected
+    // type must NOT leak into the argument slot, so the Число local is not boosted.
+    let items = complete(
+        r#"//- /test.bsl
+Процедура Тест()
+    Сумма = 0;
+    Сумма = НетТакойФункции(С$0)
+КонецПроцедуры
+"#,
+    );
+    assert_eq!(
+        typematch_digit(&items, "Сумма"),
+        Some('1'),
+        "outer assignment type must not leak into an unresolved call's argument"
+    );
+}
+
+#[test]
+fn completion_constructor_arg_does_not_leak_outer_context() {
+    // Cursor is in a constructor argument (`Новый Тип(…)`). Constructor arg types
+    // are not computed, and the outer assignment type must NOT leak in, so the
+    // Число local is not boosted.
+    let items = complete(
+        r#"//- /test.bsl
+Процедура Тест()
+    Сумма = 0;
+    Сумма = Новый Массив(Сум$0)
+КонецПроцедуры
+"#,
+    );
+    assert_eq!(
+        typematch_digit(&items, "Сумма"),
+        Some('1'),
+        "outer assignment type must not leak into a constructor argument"
+    );
+}
+
+#[test]
+fn completion_return_in_procedure_does_not_boost() {
+    // A procedure has no return value type, so `Возврат …` in a procedure must not
+    // boost anything.
+    let items = complete(
+        r#"//- /test.bsl
+Процедура Тест()
+    ЗначЧисло = 5;
+    Возврат Зн$0
+КонецПроцедуры
+"#,
+    );
+    assert_eq!(
+        typematch_digit(&items, "ЗначЧисло"),
+        Some('1'),
+        "return inside a procedure must not produce a type boost"
+    );
+}
+
+#[test]
+fn completion_empty_prefix_does_not_type_functions() {
+    // With an empty prefix the expected type is known but function return types are
+    // not computed (perf guard), so the function candidate stays unboosted.
+    let items = complete(
+        r#"//- /test.bsl
+Функция ДайЧисло()
+    Возврат 100;
+КонецФункции
+
+Процедура Тест()
+    Сумма = 0;
+    Сумма = $0
+КонецПроцедуры
+"#,
+    );
+    assert_eq!(
+        typematch_digit(&items, "ДайЧисло"),
+        Some('1'),
+        "function return types must not be computed on an empty prefix"
     );
 }
 
@@ -186,17 +443,81 @@ fn completion_after_dot_on_array_variable_typed_prefix_full_ident() {
 "#,
     );
 
-    assert!(!items.is_empty(), "methods starting with `В` must be offered after `Сп.В`");
+    assert!(!items.is_empty(), "methods matching `В` must be offered after `Сп.В`");
     let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+    // Member completion is now fuzzy: a prefix hit like `Вставить` must be offered
+    // and ranked in the best quality tier (sort_text starts with `0`).
+    let vstavit = items
+        .iter()
+        .find(|i| i.label == "Вставить")
+        .unwrap_or_else(|| panic!("`Вставить` must be offered after `Сп.В`; got: {labels:?}"));
     assert!(
-        labels.iter().all(|l| l.to_lowercase().starts_with('в')),
-        "every label must start with `В`; got: {:?}",
-        labels
+        vstavit.sort_text.as_deref().is_some_and(|s| s.starts_with('0')),
+        "prefix hit `Вставить` must be top quality tier; got {:?}",
+        vstavit.sort_text
+    );
+}
+
+#[test]
+fn completion_after_dot_member_substring_is_offered_below_prefix() {
+    // `чест` is an interior substring of `Количество`, not a prefix — member
+    // matching is now fuzzy, so it is offered, but ranked below the prefix tier.
+    let items = complete(
+        r#"//- /test.bsl
+Процедура Тест()
+    Сп = Новый Массив;
+    Сп.чест$0
+КонецПроцедуры
+"#,
+    );
+    let kol = items.iter().find(|i| i.label == "Количество").unwrap_or_else(|| {
+        panic!(
+            "substring match `Количество` for `чест` must be offered; got: {:?}",
+            items.iter().map(|i| &i.label).collect::<Vec<_>>()
+        )
+    });
+    assert!(
+        !kol.sort_text.as_deref().unwrap_or("").starts_with('0'),
+        "interior substring hit must not be in the prefix tier; got {:?}",
+        kol.sort_text
+    );
+}
+
+#[test]
+fn completion_after_dot_on_common_module_typed_prefix_is_ranked() {
+    // A typed prefix on a bare common module routes through the same fuzzy/quality
+    // funnel: the exported prefix hit is offered in the top tier, the non-exported
+    // method stays excluded.
+    let items = complete(
+        r#"//- /CommonModules/ОбщегоНазначения/Ext/Module.bsl
+Функция ПолучитьЗначение() Экспорт
+    Возврат 1;
+КонецФункции
+
+Функция ВнутреннийМетод()
+    Возврат 0;
+КонецФункции
+
+//- /test.bsl
+Процедура Тест()
+    Результат = ОбщегоНазначения.Пол$0
+КонецПроцедуры
+"#,
+    );
+    let got = items.iter().find(|i| i.label == "ПолучитьЗначение").unwrap_or_else(|| {
+        panic!(
+            "exported method must pass through the fuzzy funnel; got: {:?}",
+            items.iter().map(|i| &i.label).collect::<Vec<_>>()
+        )
+    });
+    assert!(
+        got.sort_text.as_deref().is_some_and(|s| s.starts_with('0')),
+        "prefix hit `ПолучитьЗначение` must be top quality tier; got {:?}",
+        got.sort_text
     );
     assert!(
-        has_label(&items, "Вставить"),
-        "`Вставить` must be offered after `Сп.В`; got: {:?}",
-        labels
+        !has_label(&items, "ВнутреннийМетод"),
+        "non-exported method must remain excluded after the dot"
     );
 }
 

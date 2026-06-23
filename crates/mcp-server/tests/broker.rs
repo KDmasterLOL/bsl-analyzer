@@ -7,8 +7,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(any(unix, windows))]
 use interprocess::local_socket::tokio::prelude::*;
+#[cfg(any(unix, windows))]
 use interprocess::local_socket::tokio::Stream as TokioStream;
+#[cfg(any(unix, windows))]
 use mcp_server::broker::{self, BackendKey};
 use mcp_server::{serve_stream, McpProfile, McpServer, SharedState};
 use rmcp::model::CallToolRequestParams;
@@ -19,16 +22,19 @@ fn reference_server() -> McpServer {
     McpServer::new(McpProfile::Reference, SharedState::reference(None))
 }
 
+#[cfg(any(unix, windows))]
 fn key_for(src: &TempDir) -> BackendKey {
     // Profile here only names the socket; the served profile is the passed server.
     BackendKey::new(src.path(), McpProfile::Workspace, 0)
 }
 
+#[cfg(any(unix, windows))]
 async fn connect(key: &BackendKey) -> std::io::Result<TokioStream> {
     let name = broker::backend_name(key)?;
     TokioStream::connect(name).await
 }
 
+#[cfg(any(unix, windows))]
 async fn connect_within(key: &BackendKey, budget: Duration) -> TokioStream {
     let deadline = tokio::time::Instant::now() + budget;
     loop {
@@ -41,6 +47,7 @@ async fn connect_within(key: &BackendKey, budget: Duration) -> TokioStream {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[cfg(any(unix, windows))]
 async fn backend_dies_with_its_owner_session_and_drops_the_rest() {
     // No `set_var` here: it races with other tests' `getenv` (a glibc env data race)
     // and would corrupt the resolved socket path. A unique source dir already gives a
@@ -110,6 +117,7 @@ async fn backend_dies_with_its_owner_session_and_drops_the_rest() {
 /// accepting backend must not look stale. And a client that connects mid-build must be
 /// parked and served once the build completes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[cfg(any(unix, windows))]
 async fn second_launch_defers_while_first_is_still_building() {
     let src = TempDir::new().unwrap();
     let key = key_for(&src);
@@ -142,6 +150,53 @@ async fn second_launch_defers_while_first_is_still_building() {
     assert!(client.peer_info().is_some(), "parked session saw server info");
     client.cancel().await.ok();
     first.abort();
+}
+
+/// Regression for the Windows teardown bug: when the client closes its input (stdin
+/// EOF in production), the proxy relay must end and the backend's owner session must
+/// tear down. On unix the stdin-EOF half-close delivers the backend an EOF promptly; on
+/// Windows named pipes have no half-close, so the relay must bound its drain and drop
+/// the connection to end the session. Without that bound the Windows relay would wait on
+/// a backend that never closes and this test would hang until the timeout.
+///
+/// Drives the real [`broker::proxy::relay`] with in-memory client streams (standing in
+/// for stdio) between an rmcp client and a live backend, exactly as `relay_stdio` wires
+/// process stdio in production.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[cfg(any(unix, windows))]
+async fn client_closing_input_tears_down_the_backend() {
+    let src = TempDir::new().unwrap();
+    let key = key_for(&src);
+
+    let grace = Duration::from_secs(30);
+    let backend =
+        tokio::spawn(broker::daemon::run(|| Ok(reference_server()), key_for(&src), grace));
+
+    // The backend connection the proxy relays to.
+    let backend_stream = connect_within(&key, Duration::from_secs(25)).await;
+
+    // In-memory stand-in for the proxy's stdio: the rmcp client drives `client_side`,
+    // the relay pumps between `relay_side` and the backend just like `relay_stdio`.
+    let (client_side, relay_side) = tokio::io::duplex(1024 * 1024);
+    let (relay_in, relay_out) = tokio::io::split(relay_side);
+    let relay = tokio::spawn(broker::proxy::relay(relay_in, relay_out, backend_stream));
+
+    // A real MCP session over the relay: sends `initialize`, claiming ownership of the
+    // backend, and proves the relay is wired both ways.
+    let client = ().serve(client_side).await.expect("client initialized through the relay");
+    assert!(client.peer_info().is_some(), "session saw server info through the relay");
+
+    // Client closes its end (production: the MCP client closes the proxy's stdin). The
+    // relay must finish and the backend must shut down with its owner.
+    client.cancel().await.ok();
+
+    let relayed = tokio::time::timeout(Duration::from_secs(20), relay).await;
+    assert!(relayed.is_ok(), "relay returned after the client closed its input (no hang)");
+    relayed.unwrap().expect("relay task joined").expect("relay ok");
+
+    let exited = tokio::time::timeout(Duration::from_secs(20), backend).await;
+    assert!(exited.is_ok(), "backend shut down after the client closed its input");
+    exited.unwrap().expect("backend task joined").expect("backend run ok");
 }
 
 /// M3 concurrency: many sessions sharing one workspace backend must serve in
