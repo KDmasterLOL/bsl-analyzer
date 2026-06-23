@@ -170,57 +170,69 @@ fn reap(children: &mut Vec<Child>) {
     children.retain_mut(|child| matches!(child.try_wait(), Ok(None)));
 }
 
-/// Relay bytes both ways. The backend→client direction is authoritative: it is
-/// drained and flushed before returning, so a final response is not truncated by the
-/// client closing stdin first. The stdin→backend pump runs concurrently and half-closes
-/// the write side on stdin EOF.
+/// Relay the client's stdio to the backend: the production entry point, a thin wrapper
+/// over [`relay`] with the process's own `stdin`/`stdout` as the client side.
+async fn relay_stdio(stream: TokioStream) -> anyhow::Result<()> {
+    relay(tokio::io::stdin(), tokio::io::stdout(), stream).await
+}
+
+/// Relay bytes both ways between a client (`client_in`/`client_out`) and the backend
+/// `stream`. The backend→client direction is authoritative: it is drained and flushed
+/// before returning, so a final response is not truncated by the client closing its
+/// input first. The client→backend pump runs concurrently and half-closes the write
+/// side on input EOF.
 ///
 /// On unix that half-close delivers EOF to the backend, which ends its owner session and
 /// closes; the relay then drains to backend EOF — a slow final response is never cut off.
 ///
 /// Windows named pipes have no half-close (`AsyncWrite::shutdown` is a no-op), so the
 /// backend never sees that EOF. There the relay drains until the backend closes or,
-/// once stdin has closed, a bounded grace elapses, then returns — dropping the stream
-/// closes the pipe handle, the disconnect the backend reads as the end of its owner
-/// session.
-async fn relay_stdio(stream: TokioStream) -> anyhow::Result<()> {
+/// once the client input has closed, a bounded grace elapses, then returns — dropping
+/// the stream closes the pipe handle, the disconnect the backend reads as the end of its
+/// owner session.
+///
+/// Split out from [`relay_stdio`] (which binds it to process stdio) so the teardown
+/// behavior can be exercised by tests with in-memory client streams.
+pub async fn relay<R, W>(client_in: R, mut client_out: W, stream: TokioStream) -> anyhow::Result<()>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+    W: tokio::io::AsyncWrite + Unpin,
+{
     let (mut from_backend, mut to_backend) = stream.split();
 
-    let (stdin_closed_tx, stdin_closed_rx) = tokio::sync::oneshot::channel();
+    let (input_closed_tx, input_closed_rx) = tokio::sync::oneshot::channel();
     let pump_in = tokio::spawn(async move {
-        let mut stdin = tokio::io::stdin();
-        let _ = tokio::io::copy(&mut stdin, &mut to_backend).await;
+        let mut client_in = client_in;
+        let _ = tokio::io::copy(&mut client_in, &mut to_backend).await;
         let _ = to_backend.shutdown().await;
-        let _ = stdin_closed_tx.send(());
+        let _ = input_closed_tx.send(());
     });
-
-    let mut stdout = tokio::io::stdout();
 
     // Unix: the half-close delivers EOF to the backend, which ends its owner session
     // and closes; draining to backend EOF is correct and never truncates a slow final
     // response.
     #[cfg(not(windows))]
     let copied = {
-        drop(stdin_closed_rx);
-        tokio::io::copy(&mut from_backend, &mut stdout).await
+        drop(input_closed_rx);
+        tokio::io::copy(&mut from_backend, &mut client_out).await
     };
 
-    // Windows: named pipes have no half-close, so the backend never sees the stdin-EOF
+    // Windows: named pipes have no half-close, so the backend never sees the input EOF
     // and `copy_fut` would never complete on its own. Drain until either the backend
-    // closes or, once the client has closed stdin, the grace elapses — then return so
+    // closes or, once the client input has closed, the grace elapses — then return so
     // the dropped stream closes the handle and ends the backend's owner session.
-    // Scoped so `copy_fut`'s borrow of `stdout` is released before the flush below.
+    // Scoped so `copy_fut`'s borrow of `client_out` is released before the flush below.
     #[cfg(windows)]
     let copied = {
-        let copy_fut = tokio::io::copy(&mut from_backend, &mut stdout);
+        let copy_fut = tokio::io::copy(&mut from_backend, &mut client_out);
         tokio::pin!(copy_fut);
         tokio::select! {
             copied = &mut copy_fut => copied,
-            _ = stdin_closed_rx => {
+            _ = input_closed_rx => {
                 match tokio::time::timeout(STDIN_CLOSED_DRAIN_GRACE, &mut copy_fut).await {
                     Ok(copied) => copied,
                     Err(_) => {
-                        tracing::debug!("stdin closed; draining grace elapsed, closing backend pipe");
+                        tracing::debug!("client closed input; drain grace elapsed, closing backend pipe");
                         Ok(0)
                     }
                 }
@@ -228,7 +240,7 @@ async fn relay_stdio(stream: TokioStream) -> anyhow::Result<()> {
         }
     };
 
-    let _ = stdout.flush().await;
+    let _ = client_out.flush().await;
 
     pump_in.abort();
     copied?;
