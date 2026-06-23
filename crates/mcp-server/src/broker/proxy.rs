@@ -64,8 +64,26 @@ async fn connect_with_launch(
     key: &BackendKey,
     mut daemon_cmd: Command,
 ) -> anyhow::Result<TokioStream> {
+    // Initial direct connect.
+    //
+    // On Unix the per-user runtime dir is the trust boundary (mode 0700, owner
+    // checked), so a connect succeeding against a socket in that dir proves the
+    // peer is ours — return the stream directly.
+    //
+    // On Windows the deterministic pipe name can be raced by a hostile local
+    // user pre-creating the pipe with their own DACL, so any successful connect
+    // must pass the same `verify_pipe_server_trusted` gate used by the polling
+    // loop below. A trusted already-running backend is reused; an unverified
+    // pipe is dropped and we fall through to launch + verify our own child.
+    #[cfg(unix)]
     if let Ok(stream) = TokioStream::connect(backend_name(key)?).await {
         return Ok(stream);
+    }
+    #[cfg(windows)]
+    if let Ok(stream) = TokioStream::connect(backend_name(key)?).await {
+        if let Some(trusted) = verify_or_drop_peer(stream) {
+            return Ok(trusted);
+        }
     }
 
     // No backend yet: launch one detached, then poll-connect. If the backend never
@@ -78,28 +96,59 @@ async fn connect_with_launch(
     let mut next_respawn = Instant::now() + RESPAWN_INTERVAL;
     let mut delay = Duration::from_millis(25);
     loop {
-        match TokioStream::connect(backend_name(key)?).await {
+        let last_err = match TokioStream::connect(backend_name(key)?).await {
             Ok(stream) => {
-                reap(&mut children);
-                return Ok(stream);
-            }
-            Err(e) => {
-                if Instant::now() >= deadline {
+                if let Some(trusted) = verify_or_drop_peer(stream) {
                     reap(&mut children);
-                    return Err(anyhow::anyhow!(
-                        "broker backend did not become reachable within {}s: {e}",
-                        LAUNCH_TIMEOUT.as_secs()
-                    ));
+                    return Ok(trusted);
                 }
-                if Instant::now() >= next_respawn {
-                    reap(&mut children);
-                    children.push(spawn_detached(key, &mut daemon_cmd)?);
-                    next_respawn = Instant::now() + RESPAWN_INTERVAL;
-                }
-                tokio::time::sleep(delay).await;
-                delay = (delay * 2).min(Duration::from_millis(500));
+                // Windows: the pre-existing pipe did not pass the trust gate.
+                // Keep polling — our own launched backend may win the bind on a
+                // later attempt; surface the last real connect error on timeout.
+                None
             }
+            Err(e) => Some(e),
+        };
+        if Instant::now() >= deadline {
+            reap(&mut children);
+            let detail = last_err
+                .map(|e| format!("{e}"))
+                .unwrap_or_else(|| "all successful connects were from unverified pipes".to_owned());
+            return Err(anyhow::anyhow!(
+                "broker backend did not become reachable within {}s: {detail}",
+                LAUNCH_TIMEOUT.as_secs()
+            ));
         }
+        if Instant::now() >= next_respawn {
+            reap(&mut children);
+            children.push(spawn_detached(key, &mut daemon_cmd)?);
+            next_respawn = Instant::now() + RESPAWN_INTERVAL;
+        }
+        tokio::time::sleep(delay).await;
+        delay = (delay * 2).min(Duration::from_millis(500));
+    }
+}
+
+/// Verify a connected peer is a trusted backend, returning the stream if
+/// trusted or `None` if it must be dropped.
+///
+/// On Unix the runtime dir + DACL is the trust boundary, so any successful
+/// connect is accepted unchanged. On Windows the deterministic pipe name is
+/// raceable, so `security::verify_pipe_server_trusted` introspects the server
+/// PID's image path and owner SID via `sysinfo` and compares them against the
+/// current process — the same gate used by `daemon::probe_live`. No
+/// project-local `unsafe`, no handwritten Win32 FFI.
+#[cfg(unix)]
+fn verify_or_drop_peer(stream: TokioStream) -> Option<TokioStream> {
+    Some(stream)
+}
+
+#[cfg(windows)]
+fn verify_or_drop_peer(stream: TokioStream) -> Option<TokioStream> {
+    if crate::broker::security::verify_pipe_server_trusted(&stream) {
+        Some(stream)
+    } else {
+        None
     }
 }
 

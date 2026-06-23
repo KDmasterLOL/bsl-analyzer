@@ -58,6 +58,11 @@ libc = "0.2"
 [target.'cfg(windows)'.dependencies]
 widestring = "1.0"
 win-security-identifier = "0.1.1"
+# Safe introspection of a connected named-pipe server: lets us read the
+# server PID's image path and owner SID without project-local unsafe or
+# handwritten Win32 FFI. `system` feature is Process/System/Users only —
+# no CPU/disk/network components pulled in.
+sysinfo = { version = "0.37", default-features = false, features = ["system"] }
 
 [dev-dependencies]
 expect-test.workspace = true

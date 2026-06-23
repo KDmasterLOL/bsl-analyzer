@@ -412,9 +412,41 @@ fn is_name_in_use(e: &std::io::Error) -> bool {
 /// Is a backend actually accepting on this name? A successful connect proves a live
 /// listener (queued in its backlog even mid-build); a refused/not-found connect
 /// means the name is stale.
+///
+/// On Windows the connect succeeding does not by itself prove the listener is a
+/// backend we trust: the pipe name is deterministic and a hostile local user
+/// can pre-create it with their own DACL. After a successful connect we
+/// therefore call `security::verify_pipe_server_trusted`, which checks the
+/// server PID's image path and owner SID via `sysinfo` (no project-local
+/// unsafe, no handwritten Win32 FFI). A trusted live backend returns `true`
+/// (defer to it); an unverified pipe returns `false` so the caller attempts a
+/// fresh rebind — and if that rebind loses too (the squatter still holds the
+/// name) `bind` returns Err and the launching proxy falls back to in-process
+/// stdio.
 async fn probe_live(key: &BackendKey) -> anyhow::Result<bool> {
     match TokioStream::connect(backend_name(key)?).await {
-        Ok(_) => Ok(true),
+        Ok(control) => {
+            // The probe connection is never used to exchange MCP bytes; it is
+            // just a liveness + identity check. Drop it deterministically.
+            #[cfg(windows)]
+            {
+                let trusted = crate::broker::security::verify_pipe_server_trusted(&control);
+                drop(control);
+                if trusted {
+                    Ok(true)
+                } else {
+                    tracing::info!(
+                        "windows named pipe held by an unverified server; treating as unavailable"
+                    );
+                    Ok(false)
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                drop(control);
+                Ok(true)
+            }
+        }
         // Only a clearly-absent listener counts as stale. Any other (transient) connect
         // error is treated as live, so we never unlink+rebind a backend that is actually
         // up — the conservative choice for the reclaim decision.
@@ -427,6 +459,19 @@ async fn probe_live(key: &BackendKey) -> anyhow::Result<bool> {
             Ok(false)
         }
         Err(e) => {
+            #[cfg(windows)]
+            {
+                const ERROR_ACCESS_DENIED: i32 = 5;
+                if e.kind() == std::io::ErrorKind::PermissionDenied
+                    || e.raw_os_error() == Some(ERROR_ACCESS_DENIED)
+                {
+                    tracing::info!(
+                        error = %e,
+                        "windows named-pipe probe was denied; treating existing server as untrusted"
+                    );
+                    return Ok(false);
+                }
+            }
             tracing::warn!(error = %e, "liveness probe inconclusive; assuming the backend is live");
             Ok(true)
         }
