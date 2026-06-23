@@ -98,7 +98,7 @@ pub(super) fn bsl_completions<DB: RootDatabase>(
                 kind: CompletionItemKind::Keyword,
                 insert_text: token_text.to_string(),
                 documentation: Some(documentation),
-                sort_text: Some(sort_key(exact, TEMPLATE_BAND, '1', token_text)),
+                sort_text: Some(sort_key(exact, TEMPLATE_BAND, '1', '1', token_text)),
                 filter_text: None,
                 source: None,
             };
@@ -147,35 +147,59 @@ fn complete_top_level<DB: RootDatabase>(
     let mut matcher = PrefixMatcher::new(prefix);
     let freq = build_frequency(db, file_id);
     let in_method = cursor_in_method(db, file_id, offset);
+    // Expected parameter type(s) when completing a call argument — used to float
+    // type-matching candidates up (RDT1C's biggest rating factor). Empty otherwise.
+    let expected = hir::Semantics::new(db).expected_arg_types_at(file_id, offset);
 
     let mut out = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
 
     let locals = complete_local_symbols(db, file_id, offset, &matcher);
-    push_band(&mut out, &mut seen, &mut matcher, &freq, "00_", locals);
-    let user = complete_user_defined_symbols(db, file_id, &matcher);
-    push_band(&mut out, &mut seen, &mut matcher, &freq, "10_", user);
-    let self_attrs = complete_module_self_attributes(db, file_id, &matcher, locale);
-    push_band(&mut out, &mut seen, &mut matcher, &freq, "15_", self_attrs);
-    let plurals = complete_mdo_plurals(&matcher);
-    push_band(&mut out, &mut seen, &mut matcher, &freq, "20_", plurals);
-    let exports = complete_global_module_exports(db, file_id, &matcher);
-    push_band(&mut out, &mut seen, &mut matcher, &freq, "24_", exports);
-    let globals = complete_hbk_globals(db, file_id, &matcher, locale);
-    push_band(&mut out, &mut seen, &mut matcher, &freq, "25_", globals);
-    let modules = complete_user_common_modules(db, file_id, &matcher);
-    push_band(&mut out, &mut seen, &mut matcher, &freq, "30_", modules);
+    push_band(&mut out, &mut seen, &mut matcher, db, &freq, &expected, "00_", locals);
+    let user = untyped(complete_user_defined_symbols(db, file_id, &matcher));
+    push_band(&mut out, &mut seen, &mut matcher, db, &freq, &expected, "10_", user);
+    let self_attrs = untyped(complete_module_self_attributes(db, file_id, &matcher, locale));
+    push_band(&mut out, &mut seen, &mut matcher, db, &freq, &expected, "15_", self_attrs);
+    let plurals = untyped(complete_mdo_plurals(&matcher));
+    push_band(&mut out, &mut seen, &mut matcher, db, &freq, &expected, "20_", plurals);
+    let exports = untyped(complete_global_module_exports(db, file_id, &matcher));
+    push_band(&mut out, &mut seen, &mut matcher, db, &freq, &expected, "24_", exports);
+    let globals = untyped(complete_hbk_globals(db, file_id, &matcher, locale));
+    push_band(&mut out, &mut seen, &mut matcher, db, &freq, &expected, "25_", globals);
+    let modules = untyped(complete_user_common_modules(db, file_id, &matcher));
+    push_band(&mut out, &mut seen, &mut matcher, db, &freq, &expected, "30_", modules);
 
     for scored in templates::complete_templates(&mut matcher, in_method) {
         let mut item = scored.item;
         if !seen.insert(item.label.fold_lower()) {
             continue;
         }
-        item.sort_text = Some(sort_key(scored.result, TEMPLATE_BAND, '1', &item.label));
+        item.sort_text = Some(sort_key(scored.result, TEMPLATE_BAND, '1', '1', &item.label));
         out.push(item);
     }
 
     out
+}
+
+/// Candidate type carried alongside a completion item so the central ranking can
+/// apply the context-type boost. `None` for bands whose types we don't compute.
+type Candidate = (CompletionItem, Option<hir::TypeId>);
+
+fn untyped(items: Vec<CompletionItem>) -> Vec<Candidate> {
+    items.into_iter().map(|item| (item, None)).collect()
+}
+
+/// `'0'` when the candidate's type is assignable to an expected argument type
+/// (sorts ahead of `'1'`), else `'1'`. Neutral when there is no expected type.
+fn type_match_digit<DB: RootDatabase>(
+    db: &DB,
+    type_id: Option<hir::TypeId>,
+    expected: &[hir::TypeId],
+) -> char {
+    match type_id {
+        Some(tid) if expected.iter().any(|&want| hir::type_assignable(db, tid, want)) => '0',
+        _ => '1',
+    }
 }
 
 /// Compose the LSP `sort_text`, mirroring RDT1C's
@@ -183,33 +207,43 @@ fn complete_top_level<DB: RootDatabase>(
 /// then the candidate's band (≈ usefulness), then how often the name occurs in
 /// the current file, then the raw match score, then the name itself. All numeric
 /// fields are fixed-width so the client's lexicographic ascending sort is exact.
-fn sort_key(result: MatchResult, band: &str, freq: char, label: &str) -> String {
+fn sort_key(result: MatchResult, band: &str, typematch: char, freq: char, label: &str) -> String {
     format!(
-        "{}{}{}{:05}{}",
+        "{}{}{}{}{:05}{}",
         result.tier as u8,
         band,
+        typematch,
         freq,
         u16::MAX - result.score,
         label.fold_lower(),
     )
 }
 
-fn push_band(
+#[allow(clippy::too_many_arguments)]
+fn push_band<DB: RootDatabase>(
     out: &mut Vec<CompletionItem>,
     seen: &mut HashSet<String>,
     matcher: &mut PrefixMatcher,
+    db: &DB,
     freq: &FxHashMap<String, u32>,
+    expected: &[hir::TypeId],
     band_prefix: &str,
-    items: Vec<CompletionItem>,
+    items: Vec<Candidate>,
 ) {
-    for mut item in items {
+    for (mut item, type_id) in items {
         let key = item.label.fold_lower();
         if !seen.insert(key) {
             continue;
         }
         let result = best_match(matcher, &item);
-        item.sort_text =
-            Some(sort_key(result, band_prefix, freq_bucket(freq, &item.label), &item.label));
+        let typematch = type_match_digit(db, type_id, expected);
+        item.sort_text = Some(sort_key(
+            result,
+            band_prefix,
+            typematch,
+            freq_bucket(freq, &item.label),
+            &item.label,
+        ));
         out.push(item);
     }
 }
@@ -312,10 +346,10 @@ fn complete_local_symbols<DB: RootDatabase>(
     file_id: vfs::FileId,
     offset: syntax::TextSize,
     matcher: &PrefixMatcher,
-) -> Vec<CompletionItem> {
+) -> Vec<Candidate> {
     let _span = tracing::debug_span!("complete_local_symbols").entered();
 
-    let mut completions = Vec::new();
+    let mut completions: Vec<Candidate> = Vec::new();
 
     let parse = db.parse(file_id);
     let root = parse.syntax_node();
@@ -350,16 +384,19 @@ fn complete_local_symbols<DB: RootDatabase>(
             ScopeDef::LocalVariable => (CompletionItemKind::Field, "Локальная переменная"),
         };
 
-        completions.push(CompletionItem {
-            label: name_str.to_string(),
-            detail: Some(detail.to_string()),
-            kind,
-            insert_text: name_str.to_string(),
-            documentation: None,
-            sort_text: None,
-            filter_text: None,
-            source: None,
-        });
+        completions.push((
+            CompletionItem {
+                label: name_str.to_string(),
+                detail: Some(detail.to_string()),
+                kind,
+                insert_text: name_str.to_string(),
+                documentation: None,
+                sort_text: None,
+                filter_text: None,
+                source: None,
+            },
+            None,
+        ));
     }
 
     if let Some(owner) = owner_for_method_range(db, file_id, method_range) {
@@ -376,16 +413,19 @@ fn complete_local_symbols<DB: RootDatabase>(
                 }
                 seen.insert(lower.clone());
                 let text = info.name.as_str().to_string();
-                completions.push(CompletionItem {
-                    label: text.clone(),
-                    detail: Some("Переменная".to_string()),
-                    kind: CompletionItemKind::Field,
-                    insert_text: text,
-                    documentation: None,
-                    sort_text: None,
-                    filter_text: None,
-                    source: None,
-                });
+                completions.push((
+                    CompletionItem {
+                        label: text.clone(),
+                        detail: Some("Переменная".to_string()),
+                        kind: CompletionItemKind::Field,
+                        insert_text: text,
+                        documentation: None,
+                        sort_text: None,
+                        filter_text: None,
+                        source: None,
+                    },
+                    Some(info.ty),
+                ));
             }
         }
     }
@@ -1081,7 +1121,10 @@ mod tests {
         let offset = source.find("Мо").expect("Should find 'Мо' in source");
         let offset = syntax::TextSize::from(offset as u32);
 
-        let items = complete_local_symbols(&db, file_id, offset, &PrefixMatcher::new("Мо"));
+        let items: Vec<_> = complete_local_symbols(&db, file_id, offset, &PrefixMatcher::new("Мо"))
+            .into_iter()
+            .map(|(i, _)| i)
+            .collect();
 
         println!("Found {} local items for prefix 'Мо'", items.len());
         for item in &items {
@@ -1122,7 +1165,11 @@ mod tests {
         let offset = source.find("Перв").expect("Should find 'Перв' in source");
         let offset = syntax::TextSize::from(offset as u32);
 
-        let items = complete_local_symbols(&db, file_id, offset, &PrefixMatcher::new("Перв"));
+        let items: Vec<_> =
+            complete_local_symbols(&db, file_id, offset, &PrefixMatcher::new("Перв"))
+                .into_iter()
+                .map(|(i, _)| i)
+                .collect();
 
         println!("Found {} local items for prefix 'Перв'", items.len());
         for item in &items {
@@ -1164,7 +1211,10 @@ mod tests {
         let offset = source.find("// Empty prefix").expect("Should find comment") + 20;
         let offset = syntax::TextSize::from(offset as u32);
 
-        let items = complete_local_symbols(&db, file_id, offset, &PrefixMatcher::new(""));
+        let items: Vec<_> = complete_local_symbols(&db, file_id, offset, &PrefixMatcher::new(""))
+            .into_iter()
+            .map(|(i, _)| i)
+            .collect();
 
         println!("Found {} total local items", items.len());
         for item in &items {
@@ -1206,7 +1256,10 @@ mod tests {
 
         let offset = syntax::TextSize::from(source.find("ВременнаяПеременная").unwrap() as u32);
 
-        let items = complete_local_symbols(&db, file_id, offset, &PrefixMatcher::new(""));
+        let items: Vec<_> = complete_local_symbols(&db, file_id, offset, &PrefixMatcher::new(""))
+            .into_iter()
+            .map(|(i, _)| i)
+            .collect();
 
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         println!("Found local symbols: {:?}", labels);

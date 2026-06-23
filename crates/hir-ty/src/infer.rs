@@ -458,6 +458,13 @@ impl InferOwnerResult {
             InferOwnerResult::ModuleCode(r) => &r.binding_types,
         }
     }
+
+    pub fn call_arg_bindings(&self) -> &[CallArgBinding] {
+        match self {
+            InferOwnerResult::Method(r) => &r.call_arg_bindings,
+            InferOwnerResult::ModuleCode(r) => &r.call_arg_bindings,
+        }
+    }
 }
 
 pub fn infer_owner(

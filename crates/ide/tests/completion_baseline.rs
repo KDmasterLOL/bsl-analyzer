@@ -192,6 +192,39 @@ fn completion_english_prefix_ranks_metadata_plural_in_top_tier() {
 }
 
 #[test]
+fn completion_context_type_boost_floats_matching_local() {
+    // `Цел` expects a `Число` argument. The Number-typed local must float above the
+    // String-typed one even though it sorts later alphabetically — only the
+    // context-type boost can produce that order.
+    let items = complete(
+        r#"//- /test.bsl
+Процедура Тест()
+    ПарамС = "строка";
+    ПарамЧ = 123;
+    Цел(Парам$0)
+КонецПроцедуры
+"#,
+    );
+    let sort_of =
+        |label: &str| items.iter().find(|i| i.label == label).and_then(|i| i.sort_text.clone());
+    let num = sort_of("ПарамЧ").expect("Number local must be offered");
+    let string = sort_of("ПарамС").expect("String local must be offered");
+
+    // typematch digit sits at index 4: `{tier}{band 2}_{typematch}…`.
+    assert_eq!(
+        num.chars().nth(4),
+        Some('0'),
+        "Number local must match expected `Число`; got {num:?}"
+    );
+    assert_eq!(
+        string.chars().nth(4),
+        Some('1'),
+        "String local must not match `Число`; got {string:?}"
+    );
+    assert!(num < string, "type-matching local must sort first; got {num:?} vs {string:?}");
+}
+
+#[test]
 fn completion_after_dot_on_new_array_type() {
     let items = complete(
         r#"//- /test.bsl
