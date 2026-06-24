@@ -34,8 +34,8 @@ pub fn main_loop(connection: Connection) -> Result<()> {
     );
 
     let position_encoding = PositionEncoding::negotiate(&initialize_params.capabilities);
-    let supports_insert_text_mode_as_is =
-        client_supports_insert_text_mode_as_is(&initialize_params.capabilities);
+    let supports_insert_text_mode_adjust_indentation =
+        client_supports_insert_text_mode_adjust_indentation(&initialize_params.capabilities);
 
     let server_capabilities = server_capabilities(position_encoding);
 
@@ -63,7 +63,8 @@ pub fn main_loop(connection: Connection) -> Result<()> {
 
     let mut state = GlobalState::new(connection.sender);
     state.position_encoding = position_encoding;
-    state.supports_insert_text_mode_as_is = supports_insert_text_mode_as_is;
+    state.supports_insert_text_mode_adjust_indentation =
+        supports_insert_text_mode_adjust_indentation;
 
     state.init_empty_source_root();
 
@@ -91,16 +92,19 @@ pub fn main_loop(connection: Connection) -> Result<()> {
     Ok(())
 }
 
-/// Whether the client advertised `InsertTextMode::AS_IS` in its completion-item
-/// capabilities. Used to suppress client-side re-indentation of completion
-/// snippets that are already indented server-side.
-fn client_supports_insert_text_mode_as_is(caps: &lsp_types::ClientCapabilities) -> bool {
+/// Whether the client advertised `InsertTextMode::ADJUST_INDENTATION` in its
+/// completion-item capabilities. Used to ask the client to indent multi-line
+/// snippet continuation lines to the cursor column (the snippet bodies carry
+/// only relative nesting).
+fn client_supports_insert_text_mode_adjust_indentation(
+    caps: &lsp_types::ClientCapabilities,
+) -> bool {
     caps.text_document
         .as_ref()
         .and_then(|td| td.completion.as_ref())
         .and_then(|c| c.completion_item.as_ref())
         .and_then(|ci| ci.insert_text_mode_support.as_ref())
-        .is_some_and(|s| s.value_set.contains(&lsp_types::InsertTextMode::AS_IS))
+        .is_some_and(|s| s.value_set.contains(&lsp_types::InsertTextMode::ADJUST_INDENTATION))
 }
 
 fn extract_workspace_root(params: &InitializeParams) -> Option<PathBuf> {

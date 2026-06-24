@@ -94,29 +94,8 @@ impl Analysis {
         workspace_root: Option<PathBuf>,
         locale: Locale,
     ) -> Vec<CompletionItem> {
-        self.completions_with_snippet_indent(file_id, offset, workspace_root, locale, true)
-    }
-
-    /// Like [`Analysis::completions`], but lets the caller decide whether
-    /// multi-line snippet bodies are pre-indented server-side. Enable for clients
-    /// that honor `InsertTextMode::AS_IS`; disable for clients that re-indent
-    /// completions themselves, which then receive raw relative-tab snippets.
-    pub fn completions_with_snippet_indent(
-        &self,
-        file_id: FileId,
-        offset: u32,
-        workspace_root: Option<PathBuf>,
-        locale: Locale,
-        self_indent_snippets: bool,
-    ) -> Vec<CompletionItem> {
         let offset = TextSize::from(offset);
-        let position = completion::CompletionPosition {
-            file_id,
-            offset,
-            workspace_root,
-            locale,
-            self_indent_snippets,
-        };
+        let position = completion::CompletionPosition { file_id, offset, workspace_root, locale };
         completion::completions(&self.db, position)
     }
 

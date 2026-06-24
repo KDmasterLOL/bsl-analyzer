@@ -837,7 +837,6 @@ mod tests {
             offset,
             workspace_root: None,
             locale: ide_db::base_db::Locale::Ru,
-            self_indent_snippets: true,
         };
 
         let items = platform_completions(&db, position);
@@ -913,7 +912,6 @@ mod tests {
             offset,
             workspace_root: None,
             locale: ide_db::base_db::Locale::Ru,
-            self_indent_snippets: true,
         };
 
         let items = platform_completions(&db, position).expect(

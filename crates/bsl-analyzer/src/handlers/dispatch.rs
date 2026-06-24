@@ -124,7 +124,9 @@ impl RequestDispatcher<'_> {
             project: self.global_state.project.clone(),
             diagnostics_config: self.global_state.diagnostics_config().clone(),
             position_encoding: self.global_state.position_encoding,
-            supports_insert_text_mode_as_is: self.global_state.supports_insert_text_mode_as_is,
+            supports_insert_text_mode_adjust_indentation: self
+                .global_state
+                .supports_insert_text_mode_adjust_indentation,
             task_sender: self.global_state.task_pool.pool.sender.clone(),
             mem_docs: self.global_state.mem_docs.freeze(),
             file_paths: FrozenFilePaths::freeze(&self.global_state.vfs.read()),

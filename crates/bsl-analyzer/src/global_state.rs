@@ -92,9 +92,10 @@ pub struct GlobalState {
 
     pub(crate) lsp_locale: Option<Locale>,
     pub position_encoding: PositionEncoding,
-    /// Negotiated at `initialize`: whether the client honors `InsertTextMode`,
-    /// so completion snippets may opt out of client-side re-indentation.
-    pub supports_insert_text_mode_as_is: bool,
+    /// Negotiated at `initialize`: whether the client honors
+    /// `InsertTextMode::ADJUST_INDENTATION`, so completion snippet continuation
+    /// lines can be indented to the cursor column by the client.
+    pub supports_insert_text_mode_adjust_indentation: bool,
     /// Per-URI publish generation. Each scheduled diagnostics computation gets the
     /// next generation for ITS uri; a completed task publishes only if it is still
     /// the latest for that uri. Keyed per-uri (not a single global counter) so
@@ -185,7 +186,7 @@ impl GlobalState {
             ),
             lsp_locale: None,
             position_encoding: PositionEncoding::default(),
-            supports_insert_text_mode_as_is: false,
+            supports_insert_text_mode_adjust_indentation: false,
             diagnostics_generation: HashMap::new(),
             pending_diagnostics_uris: Vec::new(),
             diagnostics_tokens: HashMap::new(),
