@@ -52,6 +52,11 @@ fn complete(fixture: &str) -> Vec<CompletionItem> {
     analysis.completions(file_id, offset, None, ide::Locale::Ru)
 }
 
+fn complete_raw_snippets(fixture: &str) -> Vec<CompletionItem> {
+    let (analysis, file_id, offset) = setup(fixture);
+    analysis.completions_with_snippet_indent(file_id, offset, None, ide::Locale::Ru, false)
+}
+
 fn has_label(items: &[CompletionItem], label: &str) -> bool {
     items.iter().any(|i| i.label == label)
 }
@@ -137,6 +142,17 @@ fn completion_in_procedure_body_offers_keyword_templates() {
         if_template.unwrap().insert_text.contains("КонецЕсли"),
         "the template must expand to a full block with `КонецЕсли`"
     );
+    // Continuation lines must carry the cursor line's indentation (4 spaces here),
+    // not be flushed to column 0 — clients like Zed don't re-indent snippets.
+    let body = &if_template.unwrap().insert_text;
+    assert!(
+        body.contains("\n    КонецЕсли"),
+        "block footer must keep the cursor-line indent; got: {body:?}"
+    );
+    assert!(
+        !body.contains("\nКонецЕсли"),
+        "block footer must not be flushed to column 0; got: {body:?}"
+    );
 
     // The contiguous gate keeps scattered platform matches (`П-е-...-с-л`) out of
     // the list for a short prefix.
@@ -144,6 +160,33 @@ fn completion_in_procedure_body_offers_keyword_templates() {
         !has_label(&items, "Перечисления"),
         "scattered platform match must not flood a short-prefix list; got: {:?}",
         items.iter().map(|i| &i.label).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn completion_template_keeps_raw_tabs_for_reindenting_clients() {
+    // Clients that re-indent completion snippets themselves (no `AS_IS` support)
+    // must receive the raw relative-tab body, not server-baked indentation.
+    let items = complete_raw_snippets(
+        r#"//- /test.bsl
+Процедура Тест()
+    Есл$0
+КонецПроцедуры
+"#,
+    );
+    let if_template = items
+        .iter()
+        .find(|i| i.kind == CompletionItemKind::Snippet && i.label.starts_with("Если"))
+        .expect("`Если` block template must be offered");
+    assert!(
+        if_template.insert_text.contains("\nКонецЕсли"),
+        "raw snippet must keep its relative (un-baked) layout; got: {:?}",
+        if_template.insert_text
+    );
+    assert!(
+        if_template.insert_text.contains("\n\t"),
+        "raw snippet must keep tab-based relative nesting; got: {:?}",
+        if_template.insert_text
     );
 }
 

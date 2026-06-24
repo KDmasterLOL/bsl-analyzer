@@ -71,6 +71,9 @@ pub struct LatencyRequestContext {
     pub project: Option<Project>,
     pub diagnostics_config: DiagnosticsConfigInput,
     pub position_encoding: PositionEncoding,
+    /// Whether the client advertised support for `InsertTextMode::AS_IS`, so the
+    /// completion handler may suppress client-side re-indentation of snippets.
+    pub supports_insert_text_mode_as_is: bool,
     pub task_sender: Sender<Task>,
     pub mem_docs: FrozenMemDocs,
     pub file_paths: FrozenFilePaths,

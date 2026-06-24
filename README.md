@@ -188,7 +188,7 @@ bsl-analyzer (LSP/CLI/MCP)
 - [rust-analyzer](https://github.com/rust-lang/rust-analyzer) — архитектурный референс: Salsa, Rowan, слойная организация `syntax → hir-def → hir-ty → ide`, подход к инкрементальной компиляции и LSP-фичам. Бóльшая часть структуры крейтов в `bsl-analyzer` следует именно этому образцу.
 - [bsl-language-server](https://github.com/1c-syntax/bsl-language-server) — статический анализатор BSL (Java, LGPL-3.0); источник формализации диагностических правил и стандартов качества кода 1С.
 - [1c-syntax](https://github.com/1c-syntax) — сообщество разработчиков инструментов для 1С.
-- [RDT1C](https://github.com/tormozit/RDT1C) — «Инструменты разработчика» для 1С; использован как референс для модуля `naparnik`.
+- [RDT1C](https://github.com/tormozit/RDT1C) — «Инструменты разработчика» для 1С; использован как референс для модуля `naparnik`, а также для модели ранжирования автодополнения (приоритет fuzzy-качества над категорией, контекстный буст по типу) и реестра шаблонов кода.
 
 ## Лицензия
 
