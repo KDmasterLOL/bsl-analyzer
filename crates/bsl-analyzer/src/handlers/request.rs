@@ -322,11 +322,15 @@ pub fn handle_completion(
         };
     tracing::debug!("Converted position to offset: {:?}", offset);
 
-    let items = ctx.analysis.completions(
+    // Snippets are pre-indented server-side only for clients that honor
+    // `InsertTextMode::AS_IS`; others get raw snippets and re-indent themselves.
+    let as_is_supported = ctx.supports_insert_text_mode_as_is;
+    let items = ctx.analysis.completions_with_snippet_indent(
         file_id,
         offset.into(),
         ctx.workspace_root.clone(),
         ctx.diagnostics_config.locale,
+        as_is_supported,
     );
     tracing::debug!("IDE API returned {} completion items", items.len());
 
@@ -335,7 +339,8 @@ pub fn handle_completion(
         return Ok(None);
     }
 
-    let lsp_items: Vec<CompletionItem> = items.into_iter().map(convert_completion_item).collect();
+    let lsp_items: Vec<CompletionItem> =
+        items.into_iter().map(|item| convert_completion_item(item, as_is_supported)).collect();
     tracing::debug!("Converted to {} LSP items, returning CompletionResponse", lsp_items.len());
 
     Ok(Some(CompletionResponse::Array(lsp_items)))
@@ -686,8 +691,17 @@ fn folding_range_lines(line_index: &LineIndex, range: ide::TextRange) -> Option<
     (end_line > start_line).then_some((start_line, end_line))
 }
 
-fn convert_completion_item(item: ide::CompletionItem) -> CompletionItem {
+fn convert_completion_item(item: ide::CompletionItem, as_is_supported: bool) -> CompletionItem {
     let has_snippet = item.insert_text.contains('$');
+    // Multi-line snippets are indented server-side (the IDE layer bakes the
+    // cursor's indentation into continuation lines). Tell clients that honor
+    // `insertTextMode` not to re-indent on top of that, which would double the
+    // leading whitespace. Single-line snippets and plain text are unaffected.
+    let insert_text_mode = if as_is_supported && has_snippet && item.insert_text.contains('\n') {
+        Some(lsp_types::InsertTextMode::AS_IS)
+    } else {
+        None
+    };
     CompletionItem {
         label: item.label,
         detail: item.detail,
@@ -698,6 +712,7 @@ fn convert_completion_item(item: ide::CompletionItem) -> CompletionItem {
         } else {
             None
         },
+        insert_text_mode,
         documentation: item.documentation.map(lsp_types::Documentation::String),
         sort_text: item.sort_text,
         filter_text: item.filter_text,
@@ -961,6 +976,7 @@ mod tests {
             project: state.project.clone(),
             diagnostics_config: state.diagnostics_config.clone(),
             position_encoding: state.position_encoding,
+            supports_insert_text_mode_as_is: state.supports_insert_text_mode_as_is,
             task_sender: state.task_pool.pool.sender.clone(),
             mem_docs: state.mem_docs.freeze(),
             file_paths: FrozenFilePaths::freeze(&state.vfs.read()),
