@@ -1,8 +1,12 @@
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use bsl_platform::deprecation::{DeprecationEntry, LifecycleGroup};
 use ide_db::TextRange;
-use stdx::case::CaseExt;
+
+use super::deprecated_platform_facts::{
+    canonical_name_for, global_function_fact, is_russian_alias, replacement_for_name,
+};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -25,7 +29,8 @@ pub fn from_hir(name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Optio
         return None;
     }
 
-    let message = get_message(name);
+    let fact = global_function_fact(name, LifecycleGroup::StringSearch)?;
+    let message = get_message(name, fact)?;
 
     Some(Diagnostic {
         code,
@@ -37,12 +42,13 @@ pub fn from_hir(name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Optio
     })
 }
 
-fn get_message(method_name: &str) -> String {
-    let lower = method_name.fold_lower();
-    if lower == "найти" {
-        "Используйте \"СтрНайти\" вместо устаревшего \"Найти\"".to_string()
+fn get_message(method_name: &str, fact: &DeprecationEntry) -> Option<String> {
+    let replacement = replacement_for_name(fact, method_name)?;
+    let deprecated = canonical_name_for(fact, method_name)?;
+    if is_russian_alias(fact, method_name) {
+        Some(format!("Используйте \"{}\" вместо устаревшего \"{}\"", replacement, deprecated))
     } else {
-        "Use \"StrFind\" instead of deprecated \"Find\"".to_string()
+        Some(format!("Use \"{}\" instead of deprecated \"{}\"", replacement, deprecated))
     }
 }
 

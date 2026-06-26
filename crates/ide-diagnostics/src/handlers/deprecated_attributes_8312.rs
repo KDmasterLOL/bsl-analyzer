@@ -3,8 +3,9 @@ use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::DeprecatedKind8312;
 use ide_db::TextRange;
-use std::collections::HashMap;
 use stdx::case::CaseExt;
+
+use super::deprecated_platform_facts::deprecated_8312_replacement;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -48,8 +49,7 @@ fn get_message_and_replacement(name: &str, kind: &DeprecatedKind8312) -> (String
     let lower = name.fold_lower();
     let is_russian = lower.chars().any(|c| c as u32 > 127);
 
-    let replacements = get_replacements();
-    let replacement = replacements.get(&lower).unwrap_or(&"").to_string();
+    let replacement = deprecated_8312_replacement(name, *kind);
 
     let message = match kind {
         DeprecatedKind8312::Attribute => {
@@ -89,81 +89,7 @@ fn get_message_and_replacement(name: &str, kind: &DeprecatedKind8312) -> (String
         }
     };
 
-    (message, replacement)
-}
-
-fn get_replacements() -> HashMap<String, &'static str> {
-    let mut map = HashMap::new();
-
-    map.insert("отображатьшкалу".to_string(), "ОтображатьШкалы");
-    map.insert("showscale".to_string(), "ShowScales");
-    map.insert("линиишкалы".to_string(), "ЛинииШкал");
-    map.insert("цветшкалы".to_string(), "ЦветШкал");
-    map.insert("отображатьподписишкалысерий".to_string(), "ШкалаСерий.ПоложениеПодписейШкалы");
-    map.insert("showseriesscalelabels".to_string(), "SeriesScale.ScaleLabelLocation");
-    map.insert("отображатьподписишкалыточек".to_string(), "ШкалаТочек.ПоложениеПодписейШкалы");
-    map.insert("showpointsscalelabels".to_string(), "PointsScale.ScaleLabelLocation");
-    map.insert(
-        "отображатьподписишкалызначений".to_string(),
-        "ШкалаЗначений.ПоложениеПодписейШкалы",
-    );
-    map.insert("showvaluesscalelabels".to_string(), "ValuesScale.ScaleLabelLocation");
-    map.insert("отображатьлиниизначенийшкалы".to_string(), "ШкалаЗначений.ОтображениеЛинийСетки");
-    map.insert("showscalevaluelines".to_string(), "ValuesScale.GridLinesShowMode");
-    map.insert("форматшкалызначений".to_string(), "ШкалаЗначений.ФорматПодписей");
-    map.insert("valuescaleformat".to_string(), "ValuesScale.LabelFormat");
-    map.insert("ориентацияметок".to_string(), "ШкалаТочек.ОриентацияПодписей");
-    map.insert("labelsorientation".to_string(), "PointsScale.LabelOrientation");
-
-    map.insert("отображатьлегенду".to_string(), "одно из свойств ОбластьЛегендыДиаграммы, ОбластьЛегендыДиаграммыГанта или ОбластьЛегендыСводнойДиаграммы");
-    map.insert(
-        "showlegend".to_string(),
-        "one of the properties of ChartLegendArea, GanttChartLegendArea or PivotChartLegendArea",
-    );
-    map.insert("отображатьзаголовок".to_string(), "одно из свойств ОбластьЗаголовкаДиаграммы, ОбластьЗаголовкаДиаграммыГанта или ОбластьЗаголовкаСводнойДиаграммы");
-    map.insert(
-        "showtitle".to_string(),
-        "one of the properties of ChartTitleArea, GanttChartTitleArea or PivotChartTitleArea",
-    );
-
-    map.insert("палитрацветов".to_string(), "ОписаниеПалитрыЦветов.ПалитраЦветов");
-    map.insert("colorpalette".to_string(), "ColorPaletteDescription.ColorPalette");
-    map.insert(
-        "цветначалаградиентнойпалитры".to_string(),
-        "ОписаниеПалитрыЦветов.ЦветНачалаГрадиентнойПалитры",
-    );
-    map.insert(
-        "gradientpalettestartcolor".to_string(),
-        "ColorPaletteDescription.GradientPaletteStartColor",
-    );
-    map.insert(
-        "цветконцаградиентнойпалитры".to_string(),
-        "ОписаниеПалитрыЦветов.ЦветКонцаГрадиентнойПалитры",
-    );
-    map.insert(
-        "gradientpaletteendcolor".to_string(),
-        "ColorPaletteDescription.GradientPaletteEndColor",
-    );
-    map.insert(
-        "максимальноеколичествоцветовградиентнойпалитры".to_string(),
-        "ОписаниеПалитрыЦветов.МаксимальноеКоличествоЦветовГрадиентнойПалитры",
-    );
-    map.insert(
-        "gradientpalettemaxcolors".to_string(),
-        "ColorPaletteDescription.GradientPaletteMaxColors",
-    );
-
-    map.insert("получитьпалитру".to_string(), "ОписаниеПалитрыЦветов.ПолучитьПалитру");
-    map.insert("getpalette".to_string(), "ColorPaletteDescription.GetPalette");
-    map.insert("установитьпалитру".to_string(), "ОписаниеПалитрыЦветов.УстановитьПалитру");
-    map.insert("setpalette".to_string(), "ColorPaletteDescription.SetPalette");
-
-    map.insert("ориентацияметокдиаграммы".to_string(), "ОриентацияПодписейДиаграммы");
-
-    map.insert("горизонтальная".to_string(), "ГоризонтальнаяВсегда");
-    map.insert("horizontal".to_string(), "AlwaysHorizontal");
-
-    map
+    (message, replacement.to_string())
 }
 
 #[cfg(test)]

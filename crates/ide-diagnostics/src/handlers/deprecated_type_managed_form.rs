@@ -1,8 +1,12 @@
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use bsl_platform::deprecation::DeprecationEntry;
 use ide_db::TextRange;
-use stdx::case::CaseExt;
+
+use super::deprecated_platform_facts::{
+    canonical_name_for, is_russian_alias, managed_form_type_fact, replacement_for_name,
+};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -25,7 +29,8 @@ pub fn from_hir(type_name: &str, range: TextRange, ctx: &DiagnosticsContext) -> 
         return None;
     }
 
-    let message = get_message(type_name);
+    let fact = managed_form_type_fact(type_name)?;
+    let message = get_message(type_name, fact)?;
 
     Some(Diagnostic {
         code,
@@ -37,16 +42,19 @@ pub fn from_hir(type_name: &str, range: TextRange, ctx: &DiagnosticsContext) -> 
     })
 }
 
-fn get_message(arg_value: &str) -> String {
-    let lower = arg_value.fold_lower();
-    if lower == "управляемаяформа" {
-        "Использование устаревшего типа \"УправляемаяФорма\". \
-         Рекомендуется использовать \"ФормаКлиентскогоПриложения\""
-            .to_string()
+fn get_message(arg_value: &str, fact: &DeprecationEntry) -> Option<String> {
+    let replacement = replacement_for_name(fact, arg_value)?;
+    let deprecated = canonical_name_for(fact, arg_value)?;
+    if is_russian_alias(fact, arg_value) {
+        Some(format!(
+            "Использование устаревшего типа \"{}\". Рекомендуется использовать \"{}\"",
+            deprecated, replacement
+        ))
     } else {
-        "Usage of deprecated type \"ManagedForm\". \
-         Recommended to use \"ClientApplicationForm\""
-            .to_string()
+        Some(format!(
+            "Usage of deprecated type \"{}\". Recommended to use \"{}\"",
+            deprecated, replacement
+        ))
     }
 }
 

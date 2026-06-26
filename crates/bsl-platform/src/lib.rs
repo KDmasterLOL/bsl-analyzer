@@ -1,4 +1,6 @@
+pub mod capability;
 mod db;
+pub mod deprecation;
 pub mod security;
 pub mod standard_mdo_attributes;
 mod types;

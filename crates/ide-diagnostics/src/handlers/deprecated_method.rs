@@ -1,9 +1,11 @@
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use bsl_platform::deprecation::DeprecationEntry;
 use ide_db::TextRange;
-use std::collections::HashMap;
 use stdx::case::CaseExt;
+
+use super::deprecated_platform_facts::{deprecated_method_fact, replacement_for_name};
 
 pub const DEPRECATED_METHODS_8310: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -52,83 +54,12 @@ pub fn from_hir(name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Optio
 }
 
 fn get_diagnostic_code_and_replacement(name: &str) -> Option<(DiagnosticCode, &'static str)> {
-    let lower = name.fold_lower();
-
-    if let Some(replacement) = get_8310_replacement(lower.as_str()) {
-        return Some((DiagnosticCode::DeprecatedMethods8310, replacement));
-    }
-
-    if let Some(replacement) = get_8317_replacement(lower.as_str()) {
-        return Some((DiagnosticCode::DeprecatedMethods8317, replacement));
-    }
-
-    None
+    let (code, entry) = deprecated_method_fact(name)?;
+    Some((code, replacement_for_method(entry, name)?))
 }
 
-fn get_8310_replacement(method_lower: &str) -> Option<&'static str> {
-    let map = get_8310_replacement_map();
-    map.get(method_lower).copied()
-}
-
-fn get_8317_replacement(method_lower: &str) -> Option<&'static str> {
-    match method_lower {
-        "краткоепредставлениеошибки" => {
-            Some("МенеджерОбработкиОшибок.КраткоеПредставлениеОшибки")
-        }
-        "подробноепредставлениеошибки" => {
-            Some("МенеджерОбработкиОшибок.ПодробноеПредставлениеОшибки")
-        }
-        "показатьинформациюобошибке" => {
-            Some("МенеджерОбработкиОшибок.ПоказатьИнформациюОбОшибке")
-        }
-        "brieferrorrepresentation" => Some("ErrorProcessingManager.BriefErrorRepresentation"),
-        "detailederrorrepresentation" => Some("ErrorProcessingManager.DetailedErrorRepresentation"),
-        "showerrorinformation" => Some("ErrorProcessingManager.ShowErrorInformation"),
-        "получитьформу" => Some("ОткрытьФорму"),
-        "getform" => Some("OpenForm"),
-        _ => None,
-    }
-}
-
-fn get_8310_replacement_map() -> HashMap<&'static str, &'static str> {
-    let mut map = HashMap::new();
-
-    map.insert(
-        "установитькраткийзаголовокприложения",
-        "КлиентскоеПриложение.УстановитьКраткийЗаголовок",
-    );
-    map.insert(
-        "получитькраткийзаголовокприложения",
-        "КлиентскоеПриложение.ПолучитьКраткийЗаголовок",
-    );
-    map.insert(
-        "установитьзаголовокклиентскогоприложения",
-        "КлиентскоеПриложение.УстановитьЗаголовок",
-    );
-    map.insert("получитьзаголовокклиентскогоприложения", "КлиентскоеПриложение.ПолучитьЗаголовок");
-    map.insert(
-        "текущийвариантосновногошрифтаклиентскогоприложения",
-        "КлиентскоеПриложение.ТекущийВариантОсновногоШрифта",
-    );
-    map.insert(
-        "текущийвариантинтерфейсаклиентскогоприложения",
-        "КлиентскоеПриложение.ТекущийВариантИнтерфейса",
-    );
-
-    map.insert("setshortapplicationcaption", "ClientApplication.SetShortCaption");
-    map.insert("getshortapplicationcaption", "ClientApplication.GetShortCaption");
-    map.insert("setclientapplicationcaption", "ClientApplication.SetCaption");
-    map.insert("getclientapplicationcaption", "ClientApplication.GetCaption");
-    map.insert(
-        "clientapplicationbasefontcurrentvariant",
-        "ClientApplication.CurrentBaseFontVariant",
-    );
-    map.insert(
-        "clientapplicationinterfacecurrentvariant",
-        "ClientApplication.CurrentInterfaceVariant",
-    );
-
-    map
+fn replacement_for_method(entry: &DeprecationEntry, name: &str) -> Option<&'static str> {
+    replacement_for_name(entry, name)
 }
 
 fn get_message(method_name: &str, replacement: &str) -> String {

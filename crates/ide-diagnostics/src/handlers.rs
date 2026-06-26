@@ -36,6 +36,7 @@ pub mod deprecated_find;
 pub mod deprecated_message;
 pub mod deprecated_method;
 pub mod deprecated_method_call;
+mod deprecated_platform_facts;
 pub mod deprecated_type_managed_form;
 pub mod disable_safe_mode;
 pub mod double_negatives;
