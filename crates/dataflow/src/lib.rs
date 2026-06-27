@@ -16,6 +16,24 @@ use std::sync::Arc;
 
 pub const DEFAULT_MAX_ITERATIONS: usize = 10000;
 
+/// Heap bytes of a `Vec`/`Box<[T]>` backing store holding `len` elements, counted
+/// at element granularity (spare capacity ignored). Shared by the crate's
+/// `estimated_heap` Salsa `memory_usage` estimators.
+pub(crate) fn vec_bytes<T>(len: usize) -> usize {
+    len * std::mem::size_of::<T>()
+}
+
+/// Approximate live bytes of an `FxHashMap`/hashbrown table with `len` entries of
+/// `(K, V)`: one control byte plus the `(K, V)` slot per bucket, bucket count grown
+/// to the next power of two above `len / (7/8)`.
+pub(crate) fn map_table_bytes<K, V>(len: usize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let cap = (len * 8 / 7 + 1).checked_next_power_of_two().unwrap_or(len);
+    cap.saturating_mul(std::mem::size_of::<K>() + std::mem::size_of::<V>() + 1)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     Forward,
@@ -446,6 +464,25 @@ impl<L: Lattice> DataflowResult<L> {
         self.block_in.iter().filter_map(move |(idx, in_state)| {
             self.block_out.get(idx).map(|out_state| (*idx, in_state, out_state))
         })
+    }
+
+    /// Approximate live heap bytes for Salsa's `memory_usage` report: the two
+    /// per-block lattice maps (`block_in`/`block_out`) and the owned [`Body`] clone.
+    /// `value_heap` supplies the heap owned by each lattice value (e.g. a bitset's
+    /// words) — the generic `L` cannot report it here. The shared `Arc<ControlFlowGraph>`
+    /// is counted as the pointer only (its payload is owned by `module_cfgs`), so it
+    /// is omitted.
+    pub fn estimated_heap_with(&self, value_heap: impl Fn(&L) -> usize) -> usize {
+        let mut bytes = map_table_bytes::<NodeIndex, L>(self.block_in.len());
+        for v in self.block_in.values() {
+            bytes += value_heap(v);
+        }
+        bytes += map_table_bytes::<NodeIndex, L>(self.block_out.len());
+        for v in self.block_out.values() {
+            bytes += value_heap(v);
+        }
+        bytes += self.body.estimated_heap();
+        bytes
     }
 }
 

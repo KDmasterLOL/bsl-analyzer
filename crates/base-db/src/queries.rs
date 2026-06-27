@@ -34,7 +34,35 @@ pub fn decode_disk_bytes(bytes: &[u8]) -> Option<String> {
     std::str::from_utf8(bytes).ok().map(str::to_owned)
 }
 
-#[salsa::tracked(lru = 512)]
+/// Heap-size estimators for Salsa's `memory_usage` introspection.
+pub(crate) mod heap_estimate {
+    use std::mem::{size_of, size_of_val};
+    use syntax::{NodeOrToken, Parse, SyntaxNode};
+
+    /// Rough live bytes of a parse result's rowan green tree, walked once.
+    ///
+    /// Green nodes expose no byte API, so we sum each token's owned text plus a
+    /// small fixed per-element bookkeeping cost (child-slot + kind/len). Green
+    /// nodes are interned and shared across identical subtrees, so this
+    /// **over-counts** deduplicated structure — an acceptable rough upper bound.
+    pub(crate) fn parse_heap(parse: &Parse<SyntaxNode>) -> usize {
+        // Two `usize`s per element approximate rowan's child-slot pointer plus
+        // its packed kind/text-len header.
+        const PER_ELEMENT: usize = size_of::<usize>() * 2;
+
+        let mut bytes = 0usize;
+        for element in parse.syntax_node().descendants_with_tokens() {
+            bytes += PER_ELEMENT;
+            if let NodeOrToken::Token(token) = element {
+                bytes += token.text().len();
+            }
+        }
+        bytes += size_of_val(parse.errors());
+        bytes
+    }
+}
+
+#[salsa::tracked(lru = 512, heap_size = crate::queries::heap_estimate::parse_heap)]
 pub fn parse_query<'db>(db: &'db dyn SourceDatabase, input: FileIdInput<'db>) -> Parse<SyntaxNode> {
     let _span = tracing::info_span!("parse").entered();
 

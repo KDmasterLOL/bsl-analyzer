@@ -406,7 +406,29 @@ pub fn lower_conditionals(root: &SyntaxNode) -> ConditionalTree {
     ConditionalTreeBuilder::new().build(root)
 }
 
-#[salsa::tracked(lru = 256)]
+/// Approximate live heap bytes for Salsa's `memory_usage` report: the conditional
+/// arena (one [`ConditionalData`] per node plus each node's `condition_text` string
+/// and its `children`/`siblings` vectors), the `root_conditionals` vector, and the
+/// `position_map` table.
+fn conditional_tree_heap(v: &std::sync::Arc<ConditionalTree>) -> usize {
+    use crate::heap_estimate::{map_table_bytes, vec_bytes};
+
+    let t = &**v;
+    let mut bytes = std::mem::size_of::<ConditionalTree>();
+    bytes += vec_bytes::<ConditionalData>(t.conditionals.len());
+    for (_, data) in t.conditionals.iter() {
+        if let Some(text) = &data.condition_text {
+            bytes += text.capacity();
+        }
+        bytes += vec_bytes::<ConditionalIdx>(data.children.len());
+        bytes += vec_bytes::<ConditionalIdx>(data.siblings.len());
+    }
+    bytes += vec_bytes::<ConditionalIdx>(t.root_conditionals.len());
+    bytes += map_table_bytes::<u32, ConditionalIdx>(t.position_map.len());
+    bytes
+}
+
+#[salsa::tracked(lru = 256, heap_size = conditional_tree_heap)]
 pub fn conditional_tree_query<'db>(
     db: &'db dyn base_db::RootQueryDb,
     file_id_input: base_db::FileIdInput<'db>,

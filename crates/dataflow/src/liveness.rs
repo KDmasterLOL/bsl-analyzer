@@ -151,6 +151,14 @@ impl Liveness {
         self.var_index.get_index(var_name).map(|idx| self.live_vars.contains(idx)).unwrap_or(false)
     }
 
+    /// Approximate live heap bytes for Salsa's `memory_usage` report: the
+    /// `live_vars` bitset words (`ceil(bits / 8)`). The shared `Arc<VariableIndex>`
+    /// is counted as the pointer only — its payload is shared across every program
+    /// point of the method — so it is omitted here.
+    pub fn estimated_heap(&self) -> usize {
+        self.live_vars.len().div_ceil(8)
+    }
+
     #[inline]
     pub fn is_live_by_idx(&self, idx: usize) -> bool {
         self.live_vars.contains(idx)
@@ -528,6 +536,26 @@ impl ModuleLiveness {
     pub fn is_empty(&self) -> bool {
         self.results.is_empty()
     }
+
+    /// Approximate live heap bytes for Salsa's `memory_usage` report: the per-method
+    /// results table plus each owned [`DataflowResult<Liveness>`]. `ModuleLiveness`
+    /// is the owning store; the per-method `liveness_analysis` accessor query returns
+    /// clones of these same `Arc`s and reports zero to avoid double counting.
+    pub fn estimated_heap(&self) -> usize {
+        let mut bytes = crate::map_table_bytes::<
+            u32,
+            std::sync::Arc<crate::DataflowResult<Liveness>>,
+        >(self.results.len());
+        for result in self.results.values() {
+            bytes += liveness_result_heap(result);
+        }
+        bytes
+    }
+}
+
+/// Heap of a single liveness [`DataflowResult`], summing per-block bitset words.
+pub fn liveness_result_heap(result: &crate::DataflowResult<Liveness>) -> usize {
+    result.estimated_heap_with(|l| l.estimated_heap())
 }
 
 #[cfg(test)]

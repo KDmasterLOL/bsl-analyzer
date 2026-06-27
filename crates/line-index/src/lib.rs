@@ -30,6 +30,13 @@ impl LineIndex {
         (self.newlines.len() + 1) as u32
     }
 
+    /// Approximate live heap bytes for Salsa's `memory_usage` report: the boxed
+    /// `newlines` slice (one `TextSize` per `\n` in the file). The `len` field is
+    /// inline and owns no heap.
+    pub fn estimated_heap(&self) -> usize {
+        self.newlines.len() * std::mem::size_of::<TextSize>()
+    }
+
     pub fn line_col(&self, offset: TextSize) -> LineCol {
         self.try_line_col(offset)
             .unwrap_or_else(|| panic!("offset {:?} exceeds text length {:?}", offset, self.len))

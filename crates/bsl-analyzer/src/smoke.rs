@@ -18,6 +18,7 @@ pub enum Scenario {
     FirstPaint,
     Hover,
     Deps,
+    Session,
 }
 
 impl Scenario {
@@ -27,9 +28,10 @@ impl Scenario {
             "first_paint" | "first-paint" | "firstpaint" => Ok(Scenario::FirstPaint),
             "hover" => Ok(Scenario::Hover),
             "deps" => Ok(Scenario::Deps),
-            other => {
-                Err(format!("unknown scenario `{other}` (valid: boot, first_paint, hover, deps)"))
-            }
+            "session" => Ok(Scenario::Session),
+            other => Err(format!(
+                "unknown scenario `{other}` (valid: boot, first_paint, hover, deps, session)"
+            )),
         }
     }
 
@@ -39,11 +41,12 @@ impl Scenario {
             Scenario::FirstPaint => "first_paint",
             Scenario::Hover => "hover",
             Scenario::Deps => "deps",
+            Scenario::Session => "session",
         }
     }
 
     pub fn all() -> &'static [Scenario] {
-        &[Scenario::Boot, Scenario::FirstPaint, Scenario::Hover, Scenario::Deps]
+        &[Scenario::Boot, Scenario::FirstPaint, Scenario::Hover, Scenario::Deps, Scenario::Session]
     }
 }
 
@@ -103,6 +106,7 @@ pub struct SmokeReport {
     pub first_paint: Option<FirstPaintResult>,
     pub hover: Option<HoverResult>,
     pub deps: Option<DepsResult>,
+    pub session: Option<SessionResult>,
     pub violations: Vec<BudgetViolation>,
 }
 
@@ -151,6 +155,25 @@ pub struct DepsResult {
     pub roots_sampled: usize,
     pub cold_ms_p50: u64,
     pub cold_ms_p95: u64,
+}
+
+/// Salsa working-set memory measurement under a simulated editing session.
+/// `rss_*_bytes` bracket the live cache: `boot` is the structural floor (VFS text
+/// and metadata, before any file opens), `warm` is the peak after the open files'
+/// features are computed, and `post_trim` is after `enforce_lru` plus clearing the
+/// parser green-node cache. The drop from `warm` to `post_trim` is the
+/// salsa-reclaimable footprint; the gap from `boot` to `post_trim` is what survives
+/// the trim. `ingredient_counts` is the top-N salsa ingredients by live entry count
+/// at the peak, so a heavy intermediate query whose LRU did not trim (resident count
+/// far above the open-file method count) is visible directly. The detailed
+/// per-ingredient tables go to stderr via [`crate::mem_report`].
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct SessionResult {
+    pub open_files: usize,
+    pub rss_boot_bytes: Option<u64>,
+    pub rss_warm_bytes: Option<u64>,
+    pub rss_post_trim_bytes: Option<u64>,
+    pub ingredient_counts: Vec<(String, usize)>,
 }
 
 pub fn read_rss_bytes() -> Option<u64> {
@@ -246,6 +269,18 @@ pub fn run(args: SmokeArgs) -> SmokeReport {
                     });
                 }
             },
+            Scenario::Session => match run_session(&args) {
+                Ok(sess) => report.session = Some(sess),
+                Err(e) => {
+                    tracing::error!(error = %e, "smoke[session]: failed");
+                    report.violations.push(BudgetViolation {
+                        scenario: "session".to_string(),
+                        metric: "run_error".to_string(),
+                        observed: 0,
+                        budget: 0,
+                    });
+                }
+            },
         }
     }
 
@@ -292,6 +327,22 @@ fn emit_text_report(report: &SmokeReport) {
             "smoke[deps]: roots={} p50={}ms p95={}ms",
             dp.roots_sampled, dp.cold_ms_p50, dp.cold_ms_p95,
         );
+    }
+    if let Some(sess) = &report.session {
+        let mb = |b: Option<u64>| {
+            b.map(|v| format!("{:.1}MB", v as f64 / (1024.0 * 1024.0)))
+                .unwrap_or_else(|| "n/a".to_string())
+        };
+        eprintln!(
+            "smoke[session]: open_files={} rss_boot={} rss_peak={} rss_post_trim={}",
+            sess.open_files,
+            mb(sess.rss_boot_bytes),
+            mb(sess.rss_warm_bytes),
+            mb(sess.rss_post_trim_bytes),
+        );
+        for (name, count) in &sess.ingredient_counts {
+            eprintln!("  - {name:<46} count={count}");
+        }
     }
     if !report.violations.is_empty() {
         eprintln!("smoke: {} budget violation(s):", report.violations.len());
@@ -669,6 +720,137 @@ fn percentile(sorted: &[u64], p: usize) -> u64 {
     }
     let idx = (sorted.len() * p / 100).min(sorted.len() - 1);
     sorted[idx]
+}
+
+/// How many files the simulated session "opens" and analyzes — a realistic
+/// editor working set, far below the corpus size, so a heavy intermediate
+/// query that retains the *whole* corpus stands out against this baseline.
+const SESSION_OPEN_FILES: usize = 40;
+const SESSION_HOVER_PER_FILE: usize = 3;
+const SESSION_TOP_INGREDIENTS: usize = 16;
+
+/// A working set of up to `n` BSL files spread evenly across the corpus (stride
+/// sampling over the sorted path list), so the session touches diverse modules
+/// and exercises cross-module resolution rather than one clustered subsystem.
+fn pick_session_working_set(state: &GlobalState, n: usize) -> Vec<vfs::FileId> {
+    let db = state.analysis_host.raw_database();
+    let source_root_input = db.source_root_input(base_db::SourceRootId(0));
+    let source_root = source_root_input.root(db);
+    let file_set = source_root.file_set();
+
+    let mut paths: Vec<(String, vfs::FileId)> = file_set
+        .iter()
+        .filter_map(|fid| {
+            let vfs_path = file_set.path_for_file(&fid)?;
+            let std_path = vfs_path.as_path();
+            if !project_model::is_bsl_source_path(std_path) {
+                return None;
+            }
+            db.try_file_revision_input(fid)?;
+            Some((std_path.to_string_lossy().into_owned(), fid))
+        })
+        .collect();
+    paths.sort();
+
+    if paths.is_empty() {
+        return Vec::new();
+    }
+    if paths.len() <= n {
+        return paths.into_iter().map(|(_, f)| f).collect();
+    }
+    let stride = paths.len() / n;
+    (0..n).map(|i| paths[i * stride].1).collect()
+}
+
+/// Simulate an LSP working set and attribute its memory. Boots the real config
+/// (`rss_boot` = structural floor: VFS text + metadata), "opens" a spread of
+/// files and computes their LSP features (semantic tokens, symbols, diagnostics,
+/// hover) to fill the derived caches (`infer_method`, `method_body`, symbol/item
+/// trees, parse green trees) including cross-module pulls (`rss_peak`). Then it
+/// trims every salsa memo to its LRU cap and clears the parser's green-node arena
+/// (`rss_post_trim`). `peak − post_trim` is the salsa-reclaimable footprint —
+/// including ingredients with no `heap_size` hook, which the byte report misses;
+/// `post_trim − boot` is what survives the trim. Prints both per-ingredient
+/// tables to stderr; [`SessionResult`] carries the RSS points and peak counts.
+fn run_session(args: &SmokeArgs) -> Result<SessionResult, String> {
+    let mut ctx = bootstrap_smoke(args)?;
+
+    // RSS right after boot, before any file is opened: the structural floor (all
+    // file texts in the VFS + the loaded metadata configuration). Anything above
+    // this at steady state was produced by the session's analysis.
+    let rss_boot_bytes = read_rss_bytes();
+
+    let open_target = std::env::var("BSL_SMOKE_SESSION_FILES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(SESSION_OPEN_FILES);
+    let files = pick_session_working_set(&ctx.state, open_target);
+    if files.is_empty() {
+        return Err("session: no resident BSL files in workspace".to_string());
+    }
+
+    let cfg = ide::DiagnosticsConfig::default();
+    let locale = ide::Locale::default();
+
+    // Open + first-paint each working-set file: this is the demand that fills the
+    // intermediate caches we are evaluating.
+    for fid in &files {
+        if let Some(url) = url_for_file_id(&ctx.state, *fid) {
+            let text = ctx.state.analysis_host.analysis().file_text(*fid);
+            ctx.state.mem_docs.insert(url, text, 1);
+        }
+        let offsets = pick_hover_offsets(&ctx.state, *fid, SESSION_HOVER_PER_FILE);
+        let a = ctx.state.analysis_host.analysis();
+        let _ = a.highlight(*fid);
+        let _ = a.document_symbols(*fid);
+        let _ = a.diagnostics(*fid, &cfg);
+        for offset in offsets {
+            let _ = a.hover(*fid, offset, locale);
+        }
+    }
+
+    // Peak working set: every open file's features computed, nothing evicted yet.
+    let rss_warm_bytes = read_rss_bytes();
+    let ingredient_counts = {
+        let db = ctx.state.analysis_host.raw_database();
+        crate::mem_report::print_salsa_memory_report(
+            db,
+            "session post-warm / peak (working set populated)",
+        );
+        crate::mem_report::salsa_memory_rows(db)
+            .into_iter()
+            .take(SESSION_TOP_INGREDIENTS)
+            .map(|(name, count, ..)| (name.to_string(), count))
+            .collect()
+    };
+
+    // Attribution test: force salsa to trim every memo to its LRU cap and release
+    // the parser's shared green-node arena (which salsa does not own), then close
+    // the open documents. Whatever RSS drops here was salsa-side derived state
+    // (green trees, item/symbol trees, bodies, inference) — including the part the
+    // heap report cannot see, because those ingredients carry no `heap_size` hook
+    // so their Arc payloads never show up in `salsa-tracked` bytes. If RSS instead
+    // stays high, the cost is structural (boot text + metadata), not the cache.
+    for uri in ctx.state.mem_docs.uris() {
+        ctx.state.mem_docs.remove(&uri);
+    }
+    ctx.state.analysis_host.raw_database_mut().enforce_lru();
+    syntax::clear_shared_node_cache();
+    rayon::broadcast(|_| syntax::clear_shared_node_cache());
+    let rss_post_trim_bytes = read_rss_bytes();
+    crate::mem_report::print_salsa_memory_report(
+        ctx.state.analysis_host.raw_database(),
+        "session post-trim (enforce_lru + green-node cache cleared)",
+    );
+
+    Ok(SessionResult {
+        open_files: files.len(),
+        rss_boot_bytes,
+        rss_warm_bytes,
+        rss_post_trim_bytes,
+        ingredient_counts,
+    })
 }
 
 fn check_boot_budgets(boot: &BootResult, budgets: &Budgets, out: &mut Vec<BudgetViolation>) {

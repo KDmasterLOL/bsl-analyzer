@@ -16,6 +16,7 @@ pub mod locale;
 pub mod lsp;
 pub mod mcp_install;
 pub mod mem_docs;
+pub mod mem_report;
 pub mod reporters;
 pub mod server;
 pub mod smoke;

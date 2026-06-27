@@ -85,6 +85,30 @@ impl ControlFlowGraph {
         self.exit_point
     }
 
+    /// Approximate live heap bytes of this graph for Salsa's `memory_usage`
+    /// report. Counts petgraph's node/edge backbone (a `Vec<Node>` and a
+    /// `Vec<Edge>`, each element a weight plus four `u32` index links) at element
+    /// granularity, plus the only vertex-owned heap: a basic block's `Vec<StmtId>`.
+    /// The `Exit`/branch/loop vertices own no extra heap; `LabelVertex`'s `Name`
+    /// is a small inlined `SmolStr` and is ignored. Spare capacity is not counted,
+    /// so the figure tracks live content within a small factor.
+    pub fn estimated_heap(&self) -> usize {
+        use std::mem::size_of;
+
+        // petgraph `Node<N, u32>` = weight + `[EdgeIndex; 2]` (8 bytes);
+        // `Edge<E, u32>` = weight + `[EdgeIndex; 2]` + `[NodeIndex; 2]` (16 bytes).
+        let mut bytes = self.graph.node_count() * (size_of::<CfgVertex>() + 8);
+        bytes += self.graph.edge_count() * (size_of::<CfgEdgeType>() + 16);
+
+        for vertex in self.graph.node_weights() {
+            if let CfgVertex::BasicBlock(block) = vertex {
+                bytes += block.len() * size_of::<cfg_types::StmtId>();
+            }
+        }
+
+        bytes
+    }
+
     pub fn vertex(&self, index: NodeIndex) -> Option<&CfgVertex> {
         self.graph.node_weight(index)
     }

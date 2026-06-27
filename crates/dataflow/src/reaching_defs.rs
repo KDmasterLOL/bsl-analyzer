@@ -360,6 +360,13 @@ impl ReachingDefs {
         self.bits.is_clear()
     }
 
+    /// Approximate live heap bytes for Salsa's `memory_usage` report: the `bits`
+    /// bitset words (`ceil(bits / 8)`). The shared `Arc<DefinitionIndex>` is counted
+    /// as the pointer only (shared across the method's program points), so omitted.
+    pub fn estimated_heap(&self) -> usize {
+        self.bits.len().div_ceil(8)
+    }
+
     #[inline]
     pub fn bits(&self) -> &FixedBitSet {
         &self.bits
@@ -515,6 +522,31 @@ impl ReachingDefsResult {
     pub fn defs_at_block(&self, block_idx: petgraph::graph::NodeIndex) -> Option<&ReachingDefs> {
         self.block_in.get(&block_idx)
     }
+
+    /// Approximate live heap bytes for Salsa's `memory_usage` report: the four
+    /// per-block hashbrown tables (including each `ReachingDefs` bitset and the
+    /// `block_stmts` index vectors) plus the owned [`Body`] clone. Shared
+    /// `Arc<DefinitionIndex>` payloads behind each `ReachingDefs` are counted as the
+    /// pointer only.
+    pub fn estimated_heap(&self) -> usize {
+        use petgraph::graph::NodeIndex;
+
+        let mut bytes = crate::map_table_bytes::<NodeIndex, ReachingDefs>(self.block_in.len());
+        for v in self.block_in.values() {
+            bytes += v.estimated_heap();
+        }
+        bytes += crate::map_table_bytes::<NodeIndex, ReachingDefs>(self.block_out.len());
+        for v in self.block_out.values() {
+            bytes += v.estimated_heap();
+        }
+        bytes += crate::map_table_bytes::<hir_def::StmtId, NodeIndex>(self.stmt_to_block.len());
+        bytes += crate::map_table_bytes::<NodeIndex, Vec<la_arena::RawIdx>>(self.block_stmts.len());
+        for stmts in self.block_stmts.values() {
+            bytes += crate::vec_bytes::<la_arena::RawIdx>(stmts.len());
+        }
+        bytes += self.body.estimated_heap();
+        bytes
+    }
 }
 
 impl Transfer<ReachingDefs> for ReachingDefsTransfer {
@@ -582,6 +614,19 @@ impl ModuleReachingDefs {
 
     pub fn is_empty(&self) -> bool {
         self.results.is_empty()
+    }
+
+    /// Approximate live heap bytes for Salsa's `memory_usage` report: the per-method
+    /// results table plus each owned [`ReachingDefsResult`]. `ModuleReachingDefs` is
+    /// the owning store; the per-method `reaching_definitions` accessor query returns
+    /// clones of these same `Arc`s and reports zero to avoid double counting.
+    pub fn estimated_heap(&self) -> usize {
+        let mut bytes =
+            crate::map_table_bytes::<u32, std::sync::Arc<ReachingDefsResult>>(self.results.len());
+        for result in self.results.values() {
+            bytes += result.estimated_heap();
+        }
+        bytes
     }
 }
 

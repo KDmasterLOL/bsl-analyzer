@@ -51,7 +51,19 @@ pub fn normalize_name(name: &Name) -> Name {
     Name::new(&name.as_str().fold_lower())
 }
 
-#[salsa::tracked(lru = 4096)]
+/// Approximate live heap bytes for Salsa's `memory_usage` report: the `names`
+/// hashbrown set plus each name's non-inlined `SmolStr` payload.
+fn file_name_usage_heap(v: &Arc<FileNameUsage>) -> usize {
+    use crate::heap_estimate::{map_table_bytes, name_bytes};
+
+    let mut bytes = map_table_bytes::<Name, ()>(v.names.len());
+    for name in &v.names {
+        bytes += name_bytes(name);
+    }
+    bytes
+}
+
+#[salsa::tracked(lru = 4096, heap_size = file_name_usage_heap)]
 pub fn file_name_usage_query<'db>(
     db: &'db dyn DefDatabase,
     file_id_input: FileIdInput<'db>,

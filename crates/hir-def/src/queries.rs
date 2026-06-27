@@ -20,11 +20,95 @@ pub use crate::region_tree::region_tree_query;
 pub use crate::symbol_tree::symbol_tree_query;
 pub use crate::workspace_index::workspace_index_query;
 
+/// `heap_size` estimators wired into Salsa's `memory_usage` report. Each returns an
+/// approximate live-heap byte count for the query's memoised output: hashbrown
+/// table capacity is derived from length (load factor 7/8), owned `String`/`Vec`
+/// payloads are summed, and `Name`s contribute their non-inlined `SmolStr` length.
+/// Over-approximate by design — the goal is a per-ingredient memory map.
+mod heap_estimate {
+    use super::*;
+    use crate::call_graph::{CallTarget, ModuleCallSummary};
+    use crate::heap_estimate::{name_bytes, vec_bytes};
+
+    pub(super) fn module_data_heap(v: &Arc<ModuleData>) -> usize {
+        let d = &**v;
+        std::mem::size_of::<ModuleData>()
+            + d.name.as_ref().map_or(0, name_bytes)
+            + vec_bytes::<crate::MethodId>(d.procedures.len())
+            + vec_bytes::<crate::MethodId>(d.functions.len())
+            + vec_bytes::<crate::VariableId>(d.variables.len())
+    }
+
+    pub(super) fn module_bodies_heap(v: &Arc<ModuleBodies>) -> usize {
+        v.estimated_heap()
+    }
+
+    fn call_target_name_heap(target: &CallTarget) -> usize {
+        match target {
+            CallTarget::QualifiedModule { module_name, method_name } => {
+                name_bytes(module_name) + name_bytes(method_name)
+            }
+            CallTarget::ManagerAccess { object_name, method_name, .. } => {
+                name_bytes(object_name) + method_name.as_ref().map_or(0, name_bytes)
+            }
+            CallTarget::ThisObjectMethod { method_name } => name_bytes(method_name),
+            CallTarget::RegisterMovement { register_name } => name_bytes(register_name),
+            CallTarget::Local { .. } | CallTarget::Unresolved => 0,
+        }
+    }
+
+    pub(super) fn module_call_summary_heap(v: &Arc<ModuleCallSummary>) -> usize {
+        use crate::call_graph::{
+            CallEdge, FormEventEntry, IdleReg, MethodSummary, NotifyReg, NotifyTarget, SetActionReg,
+        };
+
+        let s = &**v;
+        let mut bytes = std::mem::size_of::<ModuleCallSummary>();
+
+        bytes += vec_bytes::<MethodSummary>(s.methods.len());
+        for m in &s.methods {
+            bytes += name_bytes(&m.name);
+        }
+        bytes += vec_bytes::<CallEdge>(s.call_edges.len());
+        for e in &s.call_edges {
+            bytes += call_target_name_heap(&e.target);
+        }
+        bytes += vec_bytes::<NotifyReg>(s.notify_regs.len());
+        for r in &s.notify_regs {
+            bytes += name_bytes(&r.callback_name);
+            if let NotifyTarget::Module(name) = &r.target {
+                bytes += name_bytes(name);
+            }
+        }
+        bytes += vec_bytes::<IdleReg>(s.idle_handler_regs.len());
+        for r in &s.idle_handler_regs {
+            bytes += name_bytes(&r.handler_name);
+        }
+        bytes += vec_bytes::<SetActionReg>(s.set_action_regs.len());
+        for r in &s.set_action_regs {
+            bytes += name_bytes(&r.handler_name);
+        }
+        bytes += vec_bytes::<FormEventEntry>(s.form_entries.len());
+        for f in &s.form_entries {
+            bytes += f.event_type.capacity() + name_bytes(&f.handler_name);
+        }
+        bytes
+    }
+
+    pub(super) fn file_external_refs_heap(v: &Arc<Vec<ExternalRef>>) -> usize {
+        let mut bytes = vec_bytes::<ExternalRef>(v.len());
+        for ext in v.iter() {
+            bytes += crate::external_ref_name_heap(ext);
+        }
+        bytes
+    }
+}
+
 // Condensed per-module data (built from item_tree, no green-tree pin): on the
 // cross-module resolution path. High cap keeps it across chunk-boundary LRU trims
 // so a later chunk doesn't re-derive it. (`module_bodies` below stays low — it is
 // the heavy lowered HIR, needed only while a module's own file is analyzed.)
-#[salsa::tracked(lru = 32768)]
+#[salsa::tracked(lru = 32768, heap_size = heap_estimate::module_data_heap)]
 pub fn module_data_query<'db>(
     db: &'db dyn DefDatabase,
     file_id_input: FileIdInput<'db>,
@@ -36,7 +120,7 @@ pub fn module_data_query<'db>(
     Arc::new(ModuleData::from_item_tree(module_id, tree))
 }
 
-#[salsa::tracked(lru = 128)]
+#[salsa::tracked(lru = 128, heap_size = heap_estimate::module_bodies_heap)]
 pub fn module_bodies_query<'db>(
     db: &'db dyn DefDatabase,
     file_id_input: FileIdInput<'db>,
@@ -65,7 +149,7 @@ pub fn workspace_symbols_query(
     Arc::new(crate::workspace::workspace_symbols(db, &files))
 }
 
-#[salsa::tracked(lru = 256)]
+#[salsa::tracked(lru = 256, heap_size = heap_estimate::module_call_summary_heap)]
 pub fn module_call_summary_query<'db>(
     db: &'db dyn DefDatabase,
     file_id_input: FileIdInput<'db>,
@@ -767,7 +851,7 @@ pub fn workspace_call_graph_query(
     Arc::new(graph)
 }
 
-#[salsa::tracked(lru = 512)]
+#[salsa::tracked(lru = 512, heap_size = heap_estimate::file_external_refs_heap)]
 pub fn file_external_refs_query<'db>(
     db: &'db dyn DefDatabase,
     file_id_input: FileIdInput<'db>,

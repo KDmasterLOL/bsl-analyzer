@@ -51,6 +51,22 @@ impl ValueOverlay {
         }
     }
 
+    /// Approximate live heap bytes for Salsa's `memory_usage` report: the
+    /// `Reachable` overlay's hashbrown table plus any non-inlined `SmolStr` keys.
+    /// `KnownValue` is `Copy` and owns no heap.
+    pub fn estimated_heap(&self) -> usize {
+        let Inner::Reachable(map) = &self.0 else {
+            return 0;
+        };
+        let mut bytes = crate::map_table_bytes::<SmolStr, KnownValue>(map.len());
+        for key in map.keys() {
+            if key.len() > 22 {
+                bytes += key.len();
+            }
+        }
+        bytes
+    }
+
     pub fn is_reachable(&self) -> bool {
         matches!(self.0, Inner::Reachable(_))
     }
