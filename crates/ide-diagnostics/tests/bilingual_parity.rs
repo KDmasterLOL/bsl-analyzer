@@ -155,26 +155,8 @@ const EXCLUSIONS_DOCUMENTED: &[(DiagnosticCode, &str)] = &[
     (DiagnosticCode::SeveralCompilerDirectives, "directive structure diagnostic"),
     (DiagnosticCode::StyleElementConstructors, "known bug: message embeds style type names"),
     (
-        DiagnosticCode::DeprecatedCurrentDate,
-        "known bug: RU and EN messages intentionally differ today",
-    ),
-    (DiagnosticCode::DeprecatedFind, "known bug: RU and EN messages intentionally differ today"),
-    (DiagnosticCode::DeprecatedMessage, "known bug: RU and EN messages intentionally differ today"),
-    (
-        DiagnosticCode::DeprecatedTypeManagedForm,
-        "known bug: type-name message is language-specific",
-    ),
-    (
-        DiagnosticCode::DeprecatedMethods8310,
-        "known bug: message embeds the deprecated method and replacement names",
-    ),
-    (
-        DiagnosticCode::DeprecatedMethods8317,
-        "known bug: message embeds the deprecated method and replacement names",
-    ),
-    (
-        DiagnosticCode::DeprecatedAttributes8312,
-        "known bug: message embeds deprecated attribute/method/enum names",
+        DiagnosticCode::DeprecatedPlatformApi,
+        "known bug: message embeds deprecated platform API names and replacements",
     ),
     (
         DiagnosticCode::DeprecatedMethodCall,
@@ -595,7 +577,7 @@ EndProcedure"#,
 #[test]
 fn bilingual_inventory_has_expected_size() {
     let all = all_codes();
-    assert_eq!(all.len(), 190, "update the Track 3 Phase E inventory when DiagnosticCode changes");
+    assert_eq!(all.len(), 184, "update the Track 3 Phase E inventory when DiagnosticCode changes");
 }
 
 #[test]

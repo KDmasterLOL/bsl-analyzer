@@ -616,6 +616,7 @@ mod tests {
             DiagnosticCode::IncorrectUseOfStrTemplate,
             DiagnosticCode::RedundantAccessToObject,
             DiagnosticCode::MissedRequiredParameter,
+            DiagnosticCode::DeprecatedPlatformApi,
         ];
 
         let mut duplicates = Vec::new();

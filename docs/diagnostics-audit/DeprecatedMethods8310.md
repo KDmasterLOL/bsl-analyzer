@@ -1,8 +1,12 @@
 # DeprecatedMethods8310
 
-Статус: `done`, `needs-code-work`
+Статус: `historical`, `folded-into-DeprecatedPlatformApi`
 
 Дата разбора: 2026-05-07
+
+Примечание 2026-06-27: историческая карточка. Public diagnostic code
+`DeprecatedMethods8310` удален и свернут в активную диагностику
+`DeprecatedPlatformApi`.
 
 ## Суть правила
 
@@ -50,4 +54,3 @@ calls. Внешний код оставить для compatibility mode `8.3.10`
 
 Хороший кандидат на data-driven refactor: сейчас таблица маленькая, но уже
 дублирует общий deprecated mechanism.
-

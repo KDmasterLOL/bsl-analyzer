@@ -4,6 +4,11 @@
 
 `DeprecatedTypeManagedForm` is a good candidate for `MIT OR Apache-2.0`.
 
+Historical note (2026-06-27): public diagnostic code
+`DeprecatedTypeManagedForm` is no longer active; it is folded into
+`DeprecatedPlatformApi`. This file is retained as legal provenance history for
+the folded implementation.
+
 The rule follows from a platform-level rename of a built-in type name. It does not depend on a unique diagnostic idea from `bsl-language-server`.
 
 The current implementation in `bsl-analyzer` is local:

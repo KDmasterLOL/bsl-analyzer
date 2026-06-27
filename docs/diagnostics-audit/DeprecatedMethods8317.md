@@ -1,8 +1,12 @@
 # DeprecatedMethods8317
 
-Статус: `done`, `needs-code-work`
+Статус: `historical`, `folded-into-DeprecatedPlatformApi`
 
 Дата разбора: 2026-05-07
+
+Примечание 2026-06-27: историческая карточка. Public diagnostic code
+`DeprecatedMethods8317` удален и свернут в активную диагностику
+`DeprecatedPlatformApi`.
 
 ## Суть правила
 
@@ -52,4 +56,3 @@
 
 Правило полезное, но есть риск дублирования вокруг `ПолучитьФорму`. Нужен
 приоритет deprecated API diagnostics.
-

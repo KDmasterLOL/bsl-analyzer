@@ -1,8 +1,12 @@
 # DeprecatedMessage
 
-Статус: `done`, `needs-code-work`
+Статус: `historical`, `folded-into-DeprecatedPlatformApi`
 
 Дата разбора: 2026-05-07
+
+Примечание 2026-06-27: историческая карточка. Public diagnostic code
+`DeprecatedMessage` удален и свернут в активную диагностику
+`DeprecatedPlatformApi`.
 
 ## Суть правила
 
@@ -47,4 +51,3 @@ path, logging path. Минимум - несколько suggested alternatives �
 ## Вывод
 
 Detection хорошая, но remediation слишком упрощенная.
-

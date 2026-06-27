@@ -4,6 +4,10 @@
 
 Candidate for `MIT OR Apache-2.0`, with one caveat.
 
+Historical note (2026-06-27): public diagnostic code `DeprecatedMethods8317`
+is no longer active; it is folded into `DeprecatedPlatformApi`. This file is
+retained as legal provenance history for the folded implementation.
+
 ## Why this rule exists
 
 This diagnostic is grounded primarily in public platform change documentation

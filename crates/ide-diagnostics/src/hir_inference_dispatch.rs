@@ -9,6 +9,7 @@ pub(crate) const INFERENCE_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::TypeMismatchByDocComment,
     DiagnosticCode::UnresolvedField,
     DiagnosticCode::ReadOnlyPropertyAssignment,
+    DiagnosticCode::DeprecatedPlatformApi,
     DiagnosticCode::RedundantAccessToObject,
     DiagnosticCode::MissedRequiredParameter,
 ];
@@ -83,6 +84,7 @@ fn diagnostic_expr(diag: &InferenceDiagnostic) -> ExprId {
         InferenceDiagnostic::TypeMismatch { expr, .. } => *expr,
         InferenceDiagnostic::UnresolvedField { expr, .. } => *expr,
         InferenceDiagnostic::ReadOnlyPropertyAssignment { lhs, .. } => *lhs,
+        InferenceDiagnostic::DeprecatedPlatformMember { expr, .. } => *expr,
         InferenceDiagnostic::RedundantAccessToObjectTwoLevel { expr, .. } => *expr,
         InferenceDiagnostic::MissedRequiredParameterCommonModule { expr, .. } => *expr,
     }
@@ -129,6 +131,18 @@ fn dispatch_inference_diagnostic(
         InferenceDiagnostic::ReadOnlyPropertyAssignment { receiver_ty, field_name, .. } => {
             handlers::read_only_property::from_hir(*receiver_ty, field_name, range, ctx)
         }
+        InferenceDiagnostic::DeprecatedPlatformMember {
+            type_name,
+            member_name,
+            is_property,
+            ..
+        } => handlers::deprecated_platform_api::from_hir(
+            type_name,
+            member_name,
+            *is_property,
+            range,
+            ctx,
+        ),
         InferenceDiagnostic::RedundantAccessToObjectTwoLevel { module, .. } => {
             let kind = RedundantAccessKind::TwoLevel { module: module.as_str().to_string() };
             handlers::redundant_access_to_object::from_hir(&kind, range, ctx)

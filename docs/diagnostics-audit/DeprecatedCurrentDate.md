@@ -1,8 +1,12 @@
 # DeprecatedCurrentDate
 
-Статус: `done`, `needs-code-work`
+Статус: `historical`, `folded-into-DeprecatedPlatformApi`
 
 Дата разбора: 2026-05-07
+
+Примечание 2026-06-27: историческая карточка. Public diagnostic code
+`DeprecatedCurrentDate` удален и свернут в активную диагностику
+`DeprecatedPlatformApi`.
 
 ## Суть правила
 
@@ -50,4 +54,3 @@ replacement и quick-fix.
 
 Реализация аккуратно исключает method calls, но нуждается в auto-fix и общем
 deprecated API registry.
-

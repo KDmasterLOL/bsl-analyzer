@@ -1,8 +1,12 @@
 # DeprecatedTypeManagedForm
 
-Статус: `done`, `needs-code-work`
+Статус: `historical`, `folded-into-DeprecatedPlatformApi`
 
 Дата разбора: 2026-05-07
+
+Примечание 2026-06-27: историческая карточка. Public diagnostic code
+`DeprecatedTypeManagedForm` удален и свернут в активную диагностику
+`DeprecatedPlatformApi`.
 
 ## Суть правила
 
@@ -49,4 +53,3 @@ deprecated type names.
 
 Реализация точная для literal case и хорошо покрыта. Следующий шаг -
 quick-fix и registry.
-

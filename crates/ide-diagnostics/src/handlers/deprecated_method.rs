@@ -1,5 +1,3 @@
-use crate::define_metadata;
-use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use bsl_platform::deprecation::DeprecationEntry;
 use ide_db::TextRange;
@@ -7,37 +5,10 @@ use stdx::case::CaseExt;
 
 use super::deprecated_platform_facts::{deprecated_method_fact, replacement_for_name};
 
-pub const DEPRECATED_METHODS_8310: DiagnosticMetadata = define_metadata! {
-    diagnostic_type: DiagnosticType::CodeSmell,
-    severity: DiagnosticSeverityLevel::Info,
-    scope: DiagnosticScope::Bsl,
-    modules: &[],
-    minutes_to_fix: 1,
-    activated_by_default: true,
-    compatibility_mode: DiagnosticCompatibilityMode::CompatibilityMode8_3_10,
-    tags: &[MetadataTag::Deprecated],
-    can_locate_on_project: false,
-    extra_min_for_complexity: 0.0,
-    lsp_severity_override: "",
-};
-pub const DEPRECATED_METHODS_8317: DiagnosticMetadata = define_metadata! {
-    diagnostic_type: DiagnosticType::CodeSmell,
-    severity: DiagnosticSeverityLevel::Info,
-    scope: DiagnosticScope::Bsl,
-    modules: &[],
-    minutes_to_fix: 5,
-    activated_by_default: true,
-    compatibility_mode: DiagnosticCompatibilityMode::CompatibilityMode8_3_17,
-    tags: &[MetadataTag::Deprecated],
-    can_locate_on_project: false,
-    extra_min_for_complexity: 0.0,
-    lsp_severity_override: "",
-};
-
 pub fn from_hir(name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     let (code, replacement) = get_diagnostic_code_and_replacement(name)?;
 
-    if ctx.config.is_disabled(code) {
+    if ctx.is_disabled_with_metadata(code) {
         return None;
     }
 
@@ -54,8 +25,8 @@ pub fn from_hir(name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Optio
 }
 
 fn get_diagnostic_code_and_replacement(name: &str) -> Option<(DiagnosticCode, &'static str)> {
-    let (code, entry) = deprecated_method_fact(name)?;
-    Some((code, replacement_for_method(entry, name)?))
+    let entry = deprecated_method_fact(name)?;
+    Some((DiagnosticCode::DeprecatedPlatformApi, replacement_for_method(entry, name)?))
 }
 
 fn replacement_for_method(entry: &DeprecationEntry, name: &str) -> Option<&'static str> {
@@ -88,13 +59,13 @@ mod tests {
         let diagnostics = check_hir_diagnostic(code);
         let deprecated_diags: Vec<_> = diagnostics
             .into_iter()
-            .filter(|d| d.code == DiagnosticCode::DeprecatedMethods8310)
+            .filter(|d| d.code == DiagnosticCode::DeprecatedPlatformApi)
             .collect();
 
         expect![[r#"
-            DeprecatedMethods8310 @ 3:5..3:54
+            DeprecatedPlatformApi @ 3:5..3:54
               message: Метод "УстановитьКраткийЗаголовокПриложения" устарел. Следует использовать "КлиентскоеПриложение.УстановитьКраткийЗаголовок".
-              severity: Hint"#]].assert_eq(&format_diags(code, &deprecated_diags));
+              severity: Warning"#]].assert_eq(&format_diags(code, &deprecated_diags));
         assert!(deprecated_diags[0].message.contains("КлиентскоеПриложение"));
     }
 
@@ -108,13 +79,13 @@ EndProcedure
         let diagnostics = check_hir_diagnostic(code);
         let deprecated_diags: Vec<_> = diagnostics
             .into_iter()
-            .filter(|d| d.code == DiagnosticCode::DeprecatedMethods8310)
+            .filter(|d| d.code == DiagnosticCode::DeprecatedPlatformApi)
             .collect();
 
         expect![[r#"
-            DeprecatedMethods8310 @ 3:15..3:43
+            DeprecatedPlatformApi @ 3:15..3:43
               message: Method "GetShortApplicationCaption" is deprecated. You should use "ClientApplication.GetShortCaption".
-              severity: Hint"#]].assert_eq(&format_diags(code, &deprecated_diags));
+              severity: Warning"#]].assert_eq(&format_diags(code, &deprecated_diags));
         assert!(deprecated_diags[0].message.contains("ClientApplication"));
     }
 
@@ -128,13 +99,13 @@ EndProcedure
         let diagnostics = check_hir_diagnostic(code);
         let deprecated_diags: Vec<_> = diagnostics
             .into_iter()
-            .filter(|d| d.code == DiagnosticCode::DeprecatedMethods8317)
+            .filter(|d| d.code == DiagnosticCode::DeprecatedPlatformApi)
             .collect();
 
         expect![[r#"
-            DeprecatedMethods8317 @ 3:16..3:64
+            DeprecatedPlatformApi @ 3:16..3:64
               message: Метод "КраткоеПредставлениеОшибки" устарел. Следует использовать "МенеджерОбработкиОшибок.КраткоеПредставлениеОшибки".
-              severity: Hint"#]].assert_eq(&format_diags(code, &deprecated_diags));
+              severity: Warning"#]].assert_eq(&format_diags(code, &deprecated_diags));
         let message = &deprecated_diags[0].message;
         assert!(message.contains("МенеджерОбработкиОшибок"));
     }
@@ -150,10 +121,7 @@ EndProcedure
         let diagnostics = check_hir_diagnostic(code);
         let deprecated_diags: Vec<_> = diagnostics
             .into_iter()
-            .filter(|d| {
-                d.code == DiagnosticCode::DeprecatedMethods8310
-                    || d.code == DiagnosticCode::DeprecatedMethods8317
-            })
+            .filter(|d| d.code == DiagnosticCode::DeprecatedPlatformApi)
             .collect();
 
         expect![[r#""#]].assert_eq(&format_diags(code, &deprecated_diags));

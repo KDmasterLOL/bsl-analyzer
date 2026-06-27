@@ -4,8 +4,6 @@ use bsl_platform::deprecation::{
 use hir::DeprecatedKind8312;
 use stdx::case::CaseExt;
 
-use crate::DiagnosticCode;
-
 pub(crate) fn global_function_fact(
     name: &str,
     group: LifecycleGroup,
@@ -34,21 +32,15 @@ pub(crate) fn managed_form_type_fact(name: &str) -> Option<&'static DeprecationE
     }
 }
 
-pub(crate) fn deprecated_method_fact(
-    name: &str,
-) -> Option<(DiagnosticCode, &'static DeprecationEntry)> {
+pub(crate) fn deprecated_method_fact(name: &str) -> Option<&'static DeprecationEntry> {
     let entry = deprecation::registry().lookup(Lookup::global_method(name))?;
     if entry.element_kind != ElementKind::GlobalMethod || entry.display != DisplayKind::Method {
         return None;
     }
 
     match entry.compatibility {
-        CompatibilityBucket::CompatibilityMode8_3_10 => {
-            Some((DiagnosticCode::DeprecatedMethods8310, entry))
-        }
-        CompatibilityBucket::CompatibilityMode8_3_17 => {
-            Some((DiagnosticCode::DeprecatedMethods8317, entry))
-        }
+        CompatibilityBucket::CompatibilityMode8_3_10
+        | CompatibilityBucket::CompatibilityMode8_3_17 => Some(entry),
         CompatibilityBucket::Any
         | CompatibilityBucket::CompatibilityMode8_3_6
         | CompatibilityBucket::CompatibilityMode8_3_12

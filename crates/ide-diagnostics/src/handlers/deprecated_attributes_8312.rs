@@ -1,5 +1,3 @@
-use crate::define_metadata;
-use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::DeprecatedKind8312;
 use ide_db::TextRange;
@@ -7,27 +5,13 @@ use stdx::case::CaseExt;
 
 use super::deprecated_platform_facts::deprecated_8312_replacement;
 
-pub const METADATA: DiagnosticMetadata = define_metadata! {
-    diagnostic_type: DiagnosticType::CodeSmell,
-    severity: DiagnosticSeverityLevel::Info,
-    scope: DiagnosticScope::Bsl,
-    modules: &[],
-    minutes_to_fix: 1,
-    activated_by_default: true,
-    compatibility_mode: DiagnosticCompatibilityMode::CompatibilityMode8_3_12,
-    tags: &[MetadataTag::Deprecated],
-    can_locate_on_project: false,
-    extra_min_for_complexity: 0.0,
-    lsp_severity_override: "",
-};
-
 pub fn from_hir(
     name: &str,
     kind: DeprecatedKind8312,
     range: TextRange,
     ctx: &DiagnosticsContext,
 ) -> Option<Diagnostic> {
-    let code = DiagnosticCode::DeprecatedAttributes8312;
+    let code = DiagnosticCode::DeprecatedPlatformApi;
 
     if ctx.is_disabled_with_metadata(code) {
         return None;
@@ -113,15 +97,15 @@ mod tests {
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
             .into_iter()
-            .filter(|d| d.code == DiagnosticCode::DeprecatedAttributes8312)
+            .filter(|d| d.code == DiagnosticCode::DeprecatedPlatformApi)
             .collect();
         expect![[r#"
-            DeprecatedAttributes8312 @ 3:32..3:47
+            DeprecatedPlatformApi @ 3:32..3:47
               message: Атрибут "ОтображатьШкалу" устарел. Используйте: ОтображатьШкалы
-              severity: Hint
-            DeprecatedAttributes8312 @ 4:32..4:47
+              severity: Warning
+            DeprecatedPlatformApi @ 4:32..4:47
               message: Атрибут "ОриентацияМеток" устарел. Используйте: ШкалаТочек.ОриентацияПодписей
-              severity: Hint"#]]
+              severity: Warning"#]]
         .assert_eq(&format_diags(code, &diags));
     }
 
@@ -136,15 +120,15 @@ EndProcedure
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
             .into_iter()
-            .filter(|d| d.code == DiagnosticCode::DeprecatedAttributes8312)
+            .filter(|d| d.code == DiagnosticCode::DeprecatedPlatformApi)
             .collect();
         expect![[r#"
-            DeprecatedAttributes8312 @ 3:19..3:28
+            DeprecatedPlatformApi @ 3:19..3:28
               message: Attribute "ShowScale" is deprecated. Используйте: ShowScales
-              severity: Hint
-            DeprecatedAttributes8312 @ 4:19..4:40
+              severity: Warning
+            DeprecatedPlatformApi @ 4:19..4:40
               message: Attribute "ShowSeriesScaleLabels" is deprecated. Используйте: SeriesScale.ScaleLabelLocation
-              severity: Hint"#]].assert_eq(&format_diags(code, &diags));
+              severity: Warning"#]].assert_eq(&format_diags(code, &diags));
     }
 
     #[test]
@@ -159,18 +143,18 @@ EndProcedure
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
             .into_iter()
-            .filter(|d| d.code == DiagnosticCode::DeprecatedAttributes8312)
+            .filter(|d| d.code == DiagnosticCode::DeprecatedPlatformApi)
             .collect();
         expect![[r#"
-            DeprecatedAttributes8312 @ 3:15..3:32
+            DeprecatedPlatformApi @ 3:15..3:32
               message: Атрибут "ОтображатьЛегенду" устарел. Используйте: одно из свойств ОбластьЛегендыДиаграммы, ОбластьЛегендыДиаграммыГанта или ОбластьЛегендыСводнойДиаграммы
-              severity: Hint
-            DeprecatedAttributes8312 @ 4:20..4:39
+              severity: Warning
+            DeprecatedPlatformApi @ 4:20..4:39
               message: Атрибут "ОтображатьЗаголовок" устарел. Используйте: одно из свойств ОбластьЗаголовкаДиаграммы, ОбластьЗаголовкаДиаграммыГанта или ОбластьЗаголовкаСводнойДиаграммы
-              severity: Hint
-            DeprecatedAttributes8312 @ 5:15..5:28
+              severity: Warning
+            DeprecatedPlatformApi @ 5:15..5:28
               message: Атрибут "ПалитраЦветов" устарел. Используйте: ОписаниеПалитрыЦветов.ПалитраЦветов
-              severity: Hint"#]].assert_eq(&format_diags(code, &diags));
+              severity: Warning"#]].assert_eq(&format_diags(code, &diags));
     }
 
     #[test]
@@ -184,15 +168,15 @@ EndProcedure
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
             .into_iter()
-            .filter(|d| d.code == DiagnosticCode::DeprecatedAttributes8312)
+            .filter(|d| d.code == DiagnosticCode::DeprecatedPlatformApi)
             .collect();
         expect![[r#"
-            DeprecatedAttributes8312 @ 3:22..3:37
+            DeprecatedPlatformApi @ 3:22..3:37
               message: Метод "ПолучитьПалитру" устарел. Используйте: ОписаниеПалитрыЦветов.ПолучитьПалитру
-              severity: Hint
-            DeprecatedAttributes8312 @ 4:15..4:32
+              severity: Warning
+            DeprecatedPlatformApi @ 4:15..4:32
               message: Метод "УстановитьПалитру" устарел. Используйте: ОписаниеПалитрыЦветов.УстановитьПалитру
-              severity: Hint"#]].assert_eq(&format_diags(code, &diags));
+              severity: Warning"#]].assert_eq(&format_diags(code, &diags));
     }
 
     #[test]
@@ -205,12 +189,12 @@ EndProcedure
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
             .into_iter()
-            .filter(|d| d.code == DiagnosticCode::DeprecatedAttributes8312)
+            .filter(|d| d.code == DiagnosticCode::DeprecatedPlatformApi)
             .collect();
         expect![[r#"
-            DeprecatedAttributes8312 @ 3:5..3:30
+            DeprecatedPlatformApi @ 3:5..3:30
               message: Глобальный метод "ОчиститьЖурналРегистрации" устарел. Используйте:
-              severity: Hint"#]]
+              severity: Warning"#]]
         .assert_eq(&format_diags_trim_trailing(code, &diags));
     }
 
@@ -224,12 +208,12 @@ EndProcedure
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
             .into_iter()
-            .filter(|d| d.code == DiagnosticCode::DeprecatedAttributes8312)
+            .filter(|d| d.code == DiagnosticCode::DeprecatedPlatformApi)
             .collect();
         expect![[r#"
-            DeprecatedAttributes8312 @ 3:5..3:18
+            DeprecatedPlatformApi @ 3:5..3:18
               message: Global method "ClearEventLog" is deprecated. Используйте:
-              severity: Hint"#]]
+              severity: Warning"#]]
         .assert_eq(&format_diags_trim_trailing(code, &diags));
     }
 
@@ -243,12 +227,12 @@ EndProcedure
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
             .into_iter()
-            .filter(|d| d.code == DiagnosticCode::DeprecatedAttributes8312)
+            .filter(|d| d.code == DiagnosticCode::DeprecatedPlatformApi)
             .collect();
         expect![[r#"
-            DeprecatedAttributes8312 @ 3:43..3:47
+            DeprecatedPlatformApi @ 3:43..3:47
               message: Имя перечисления "Авто" устарело. Используйте:
-              severity: Hint"#]]
+              severity: Warning"#]]
         .assert_eq(&format_diags_trim_trailing(code, &diags));
     }
 
@@ -262,12 +246,12 @@ EndProcedure
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
             .into_iter()
-            .filter(|d| d.code == DiagnosticCode::DeprecatedAttributes8312)
+            .filter(|d| d.code == DiagnosticCode::DeprecatedPlatformApi)
             .collect();
         expect![[r#"
-            DeprecatedAttributes8312 @ 3:56..3:70
+            DeprecatedPlatformApi @ 3:56..3:70
               message: Значение перечисления "Горизонтальная" устарело. Используйте: ГоризонтальнаяВсегда
-              severity: Hint"#]].assert_eq(&format_diags(code, &diags));
+              severity: Warning"#]].assert_eq(&format_diags(code, &diags));
     }
 
     #[test]
@@ -286,36 +270,36 @@ EndProcedure
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
             .into_iter()
-            .filter(|d| d.code == DiagnosticCode::DeprecatedAttributes8312)
+            .filter(|d| d.code == DiagnosticCode::DeprecatedPlatformApi)
             .collect();
         expect![[r#"
-            DeprecatedAttributes8312 @ 2:39..2:54
+            DeprecatedPlatformApi @ 2:39..2:54
               message: Атрибут "ОтображатьШкалу" устарел. Используйте: ОтображатьШкалы
-              severity: Hint
-            DeprecatedAttributes8312 @ 3:32..3:42
+              severity: Warning
+            DeprecatedPlatformApi @ 3:32..3:42
               message: Атрибут "ЛинииШкалы" устарел. Используйте: ЛинииШкал
-              severity: Hint
-            DeprecatedAttributes8312 @ 4:32..4:41
+              severity: Warning
+            DeprecatedPlatformApi @ 4:32..4:41
               message: Атрибут "ЦветШкалы" устарел. Используйте: ЦветШкал
-              severity: Hint
-            DeprecatedAttributes8312 @ 5:32..5:59
+              severity: Warning
+            DeprecatedPlatformApi @ 5:32..5:59
               message: Атрибут "ОтображатьПодписиШкалыСерий" устарел. Используйте: ШкалаСерий.ПоложениеПодписейШкалы
-              severity: Hint
-            DeprecatedAttributes8312 @ 6:32..6:59
+              severity: Warning
+            DeprecatedPlatformApi @ 6:32..6:59
               message: Атрибут "ОтображатьПодписиШкалыТочек" устарел. Используйте: ШкалаТочек.ПоложениеПодписейШкалы
-              severity: Hint
-            DeprecatedAttributes8312 @ 7:32..7:62
+              severity: Warning
+            DeprecatedPlatformApi @ 7:32..7:62
               message: Атрибут "ОтображатьПодписиШкалыЗначений" устарел. Используйте: ШкалаЗначений.ПоложениеПодписейШкалы
-              severity: Hint
-            DeprecatedAttributes8312 @ 8:32..8:60
+              severity: Warning
+            DeprecatedPlatformApi @ 8:32..8:60
               message: Атрибут "ОтображатьЛинииЗначенийШкалы" устарел. Используйте: ШкалаЗначений.ОтображениеЛинийСетки
-              severity: Hint
-            DeprecatedAttributes8312 @ 9:32..9:51
+              severity: Warning
+            DeprecatedPlatformApi @ 9:32..9:51
               message: Атрибут "ФорматШкалыЗначений" устарел. Используйте: ШкалаЗначений.ФорматПодписей
-              severity: Hint
-            DeprecatedAttributes8312 @ 10:32..10:47
+              severity: Warning
+            DeprecatedPlatformApi @ 10:32..10:47
               message: Атрибут "ОриентацияМеток" устарел. Используйте: ШкалаТочек.ОриентацияПодписей
-              severity: Hint"#]].assert_eq(&format_diags(code, &diags));
+              severity: Warning"#]].assert_eq(&format_diags(code, &diags));
     }
 
     #[test]
@@ -332,30 +316,30 @@ EndProcedure"#;
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
             .into_iter()
-            .filter(|d| d.code == DiagnosticCode::DeprecatedAttributes8312)
+            .filter(|d| d.code == DiagnosticCode::DeprecatedPlatformApi)
             .collect();
         expect![[r#"
-            DeprecatedAttributes8312 @ 2:19..2:28
+            DeprecatedPlatformApi @ 2:19..2:28
               message: Attribute "ShowScale" is deprecated. Используйте: ShowScales
-              severity: Hint
-            DeprecatedAttributes8312 @ 3:19..3:40
+              severity: Warning
+            DeprecatedPlatformApi @ 3:19..3:40
               message: Attribute "ShowSeriesScaleLabels" is deprecated. Используйте: SeriesScale.ScaleLabelLocation
-              severity: Hint
-            DeprecatedAttributes8312 @ 4:19..4:40
+              severity: Warning
+            DeprecatedPlatformApi @ 4:19..4:40
               message: Attribute "ShowPointsScaleLabels" is deprecated. Используйте: PointsScale.ScaleLabelLocation
-              severity: Hint
-            DeprecatedAttributes8312 @ 5:19..5:40
+              severity: Warning
+            DeprecatedPlatformApi @ 5:19..5:40
               message: Attribute "ShowValuesScaleLabels" is deprecated. Используйте: ValuesScale.ScaleLabelLocation
-              severity: Hint
-            DeprecatedAttributes8312 @ 6:19..6:38
+              severity: Warning
+            DeprecatedPlatformApi @ 6:19..6:38
               message: Attribute "ShowScaleValueLines" is deprecated. Используйте: ValuesScale.GridLinesShowMode
-              severity: Hint
-            DeprecatedAttributes8312 @ 7:19..7:35
+              severity: Warning
+            DeprecatedPlatformApi @ 7:19..7:35
               message: Attribute "ValueScaleFormat" is deprecated. Используйте: ValuesScale.LabelFormat
-              severity: Hint
-            DeprecatedAttributes8312 @ 8:19..8:36
+              severity: Warning
+            DeprecatedPlatformApi @ 8:19..8:36
               message: Attribute "LabelsOrientation" is deprecated. Используйте: PointsScale.LabelOrientation
-              severity: Hint"#]].assert_eq(&format_diags(code, &diags));
+              severity: Warning"#]].assert_eq(&format_diags(code, &diags));
     }
 
     #[test]
@@ -371,27 +355,27 @@ EndProcedure"#;
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
             .into_iter()
-            .filter(|d| d.code == DiagnosticCode::DeprecatedAttributes8312)
+            .filter(|d| d.code == DiagnosticCode::DeprecatedPlatformApi)
             .collect();
         expect![[r#"
-            DeprecatedAttributes8312 @ 2:15..2:32
+            DeprecatedPlatformApi @ 2:15..2:32
               message: Атрибут "ОтображатьЛегенду" устарел. Используйте: одно из свойств ОбластьЛегендыДиаграммы, ОбластьЛегендыДиаграммыГанта или ОбластьЛегендыСводнойДиаграммы
-              severity: Hint
-            DeprecatedAttributes8312 @ 3:15..3:34
+              severity: Warning
+            DeprecatedPlatformApi @ 3:15..3:34
               message: Атрибут "ОтображатьЗаголовок" устарел. Используйте: одно из свойств ОбластьЗаголовкаДиаграммы, ОбластьЗаголовкаДиаграммыГанта или ОбластьЗаголовкаСводнойДиаграммы
-              severity: Hint
-            DeprecatedAttributes8312 @ 4:20..4:37
+              severity: Warning
+            DeprecatedPlatformApi @ 4:20..4:37
               message: Атрибут "ОтображатьЛегенду" устарел. Используйте: одно из свойств ОбластьЛегендыДиаграммы, ОбластьЛегендыДиаграммыГанта или ОбластьЛегендыСводнойДиаграммы
-              severity: Hint
-            DeprecatedAttributes8312 @ 5:20..5:39
+              severity: Warning
+            DeprecatedPlatformApi @ 5:20..5:39
               message: Атрибут "ОтображатьЗаголовок" устарел. Используйте: одно из свойств ОбластьЗаголовкаДиаграммы, ОбластьЗаголовкаДиаграммыГанта или ОбластьЗаголовкаСводнойДиаграммы
-              severity: Hint
-            DeprecatedAttributes8312 @ 6:22..6:39
+              severity: Warning
+            DeprecatedPlatformApi @ 6:22..6:39
               message: Атрибут "ОтображатьЛегенду" устарел. Используйте: одно из свойств ОбластьЛегендыДиаграммы, ОбластьЛегендыДиаграммыГанта или ОбластьЛегендыСводнойДиаграммы
-              severity: Hint
-            DeprecatedAttributes8312 @ 7:22..7:41
+              severity: Warning
+            DeprecatedPlatformApi @ 7:22..7:41
               message: Атрибут "ОтображатьЗаголовок" устарел. Используйте: одно из свойств ОбластьЗаголовкаДиаграммы, ОбластьЗаголовкаДиаграммыГанта или ОбластьЗаголовкаСводнойДиаграммы
-              severity: Hint"#]].assert_eq(&format_diags(code, &diags));
+              severity: Warning"#]].assert_eq(&format_diags(code, &diags));
     }
 
     #[test]
@@ -405,21 +389,21 @@ EndProcedure"#;
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
             .into_iter()
-            .filter(|d| d.code == DiagnosticCode::DeprecatedAttributes8312)
+            .filter(|d| d.code == DiagnosticCode::DeprecatedPlatformApi)
             .collect();
         expect![[r#"
-            DeprecatedAttributes8312 @ 2:15..2:28
+            DeprecatedPlatformApi @ 2:15..2:28
               message: Атрибут "ПалитраЦветов" устарел. Используйте: ОписаниеПалитрыЦветов.ПалитраЦветов
-              severity: Hint
-            DeprecatedAttributes8312 @ 3:15..3:43
+              severity: Warning
+            DeprecatedPlatformApi @ 3:15..3:43
               message: Атрибут "ЦветНачалаГрадиентнойПалитры" устарел. Используйте: ОписаниеПалитрыЦветов.ЦветНачалаГрадиентнойПалитры
-              severity: Hint
-            DeprecatedAttributes8312 @ 4:15..4:42
+              severity: Warning
+            DeprecatedPlatformApi @ 4:15..4:42
               message: Атрибут "ЦветКонцаГрадиентнойПалитры" устарел. Используйте: ОписаниеПалитрыЦветов.ЦветКонцаГрадиентнойПалитры
-              severity: Hint
-            DeprecatedAttributes8312 @ 5:15..5:61
+              severity: Warning
+            DeprecatedPlatformApi @ 5:15..5:61
               message: Атрибут "МаксимальноеКоличествоЦветовГрадиентнойПалитры" устарел. Используйте: ОписаниеПалитрыЦветов.МаксимальноеКоличествоЦветовГрадиентнойПалитры
-              severity: Hint"#]].assert_eq(&format_diags(code, &diags));
+              severity: Warning"#]].assert_eq(&format_diags(code, &diags));
     }
 
     #[test]
@@ -435,27 +419,27 @@ EndProcedure"#;
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
             .into_iter()
-            .filter(|d| d.code == DiagnosticCode::DeprecatedAttributes8312)
+            .filter(|d| d.code == DiagnosticCode::DeprecatedPlatformApi)
             .collect();
         expect![[r#"
-            DeprecatedAttributes8312 @ 2:11..2:21
+            DeprecatedPlatformApi @ 2:11..2:21
               message: Attribute "ShowLegend" is deprecated. Используйте: one of the properties of ChartLegendArea, GanttChartLegendArea or PivotChartLegendArea
-              severity: Hint
-            DeprecatedAttributes8312 @ 3:16..3:26
+              severity: Warning
+            DeprecatedPlatformApi @ 3:16..3:26
               message: Attribute "ShowLegend" is deprecated. Используйте: one of the properties of ChartLegendArea, GanttChartLegendArea or PivotChartLegendArea
-              severity: Hint
-            DeprecatedAttributes8312 @ 4:16..4:26
+              severity: Warning
+            DeprecatedPlatformApi @ 4:16..4:26
               message: Attribute "ShowLegend" is deprecated. Используйте: one of the properties of ChartLegendArea, GanttChartLegendArea or PivotChartLegendArea
-              severity: Hint
-            DeprecatedAttributes8312 @ 5:11..5:20
+              severity: Warning
+            DeprecatedPlatformApi @ 5:11..5:20
               message: Attribute "ShowTitle" is deprecated. Используйте: one of the properties of ChartTitleArea, GanttChartTitleArea or PivotChartTitleArea
-              severity: Hint
-            DeprecatedAttributes8312 @ 6:16..6:25
+              severity: Warning
+            DeprecatedPlatformApi @ 6:16..6:25
               message: Attribute "ShowTitle" is deprecated. Используйте: one of the properties of ChartTitleArea, GanttChartTitleArea or PivotChartTitleArea
-              severity: Hint
-            DeprecatedAttributes8312 @ 7:16..7:25
+              severity: Warning
+            DeprecatedPlatformApi @ 7:16..7:25
               message: Attribute "ShowTitle" is deprecated. Используйте: one of the properties of ChartTitleArea, GanttChartTitleArea or PivotChartTitleArea
-              severity: Hint"#]].assert_eq(&format_diags(code, &diags));
+              severity: Warning"#]].assert_eq(&format_diags(code, &diags));
     }
 
     #[test]
@@ -469,21 +453,21 @@ EndProcedure"#;
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
             .into_iter()
-            .filter(|d| d.code == DiagnosticCode::DeprecatedAttributes8312)
+            .filter(|d| d.code == DiagnosticCode::DeprecatedPlatformApi)
             .collect();
         expect![[r#"
-            DeprecatedAttributes8312 @ 2:11..2:23
+            DeprecatedPlatformApi @ 2:11..2:23
               message: Attribute "ColorPalette" is deprecated. Используйте: ColorPaletteDescription.ColorPalette
-              severity: Hint
-            DeprecatedAttributes8312 @ 3:11..3:36
+              severity: Warning
+            DeprecatedPlatformApi @ 3:11..3:36
               message: Attribute "GradientPaletteStartColor" is deprecated. Используйте: ColorPaletteDescription.GradientPaletteStartColor
-              severity: Hint
-            DeprecatedAttributes8312 @ 4:11..4:34
+              severity: Warning
+            DeprecatedPlatformApi @ 4:11..4:34
               message: Attribute "GradientPaletteEndColor" is deprecated. Используйте: ColorPaletteDescription.GradientPaletteEndColor
-              severity: Hint
-            DeprecatedAttributes8312 @ 5:11..5:35
+              severity: Warning
+            DeprecatedPlatformApi @ 5:11..5:35
               message: Attribute "GradientPaletteMaxColors" is deprecated. Используйте: ColorPaletteDescription.GradientPaletteMaxColors
-              severity: Hint"#]].assert_eq(&format_diags(code, &diags));
+              severity: Warning"#]].assert_eq(&format_diags(code, &diags));
     }
 
     #[test]
@@ -495,15 +479,15 @@ EndProcedure"#;
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
             .into_iter()
-            .filter(|d| d.code == DiagnosticCode::DeprecatedAttributes8312)
+            .filter(|d| d.code == DiagnosticCode::DeprecatedPlatformApi)
             .collect();
         expect![[r#"
-            DeprecatedAttributes8312 @ 2:11..2:21
+            DeprecatedPlatformApi @ 2:11..2:21
               message: Method "GetPalette" is deprecated. Используйте: ColorPaletteDescription.GetPalette
-              severity: Hint
-            DeprecatedAttributes8312 @ 3:11..3:21
+              severity: Warning
+            DeprecatedPlatformApi @ 3:11..3:21
               message: Method "SetPalette" is deprecated. Используйте: ColorPaletteDescription.SetPalette
-              severity: Hint"#]].assert_eq(&format_diags(code, &diags));
+              severity: Warning"#]].assert_eq(&format_diags(code, &diags));
     }
 
     #[test]
@@ -514,12 +498,12 @@ EndProcedure"#;
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
             .into_iter()
-            .filter(|d| d.code == DiagnosticCode::DeprecatedAttributes8312)
+            .filter(|d| d.code == DiagnosticCode::DeprecatedPlatformApi)
             .collect();
         expect![[r#"
-            DeprecatedAttributes8312 @ 2:43..2:47
+            DeprecatedPlatformApi @ 2:43..2:47
               message: Имя перечисления "Авто" устарело. Используйте:
-              severity: Hint"#]]
+              severity: Warning"#]]
         .assert_eq(&format_diags_trim_trailing(code, &diags));
     }
 
@@ -531,12 +515,12 @@ EndProcedure"#;
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
             .into_iter()
-            .filter(|d| d.code == DiagnosticCode::DeprecatedAttributes8312)
+            .filter(|d| d.code == DiagnosticCode::DeprecatedPlatformApi)
             .collect();
         expect![[r#"
-            DeprecatedAttributes8312 @ 2:56..2:70
+            DeprecatedPlatformApi @ 2:56..2:70
               message: Значение перечисления "Горизонтальная" устарело. Используйте: ГоризонтальнаяВсегда
-              severity: Hint"#]].assert_eq(&format_diags(code, &diags));
+              severity: Warning"#]].assert_eq(&format_diags(code, &diags));
     }
 
     #[test]
@@ -547,12 +531,12 @@ EndProcedure"#;
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
             .into_iter()
-            .filter(|d| d.code == DiagnosticCode::DeprecatedAttributes8312)
+            .filter(|d| d.code == DiagnosticCode::DeprecatedPlatformApi)
             .collect();
         expect![[r#"
-            DeprecatedAttributes8312 @ 2:32..2:42
+            DeprecatedPlatformApi @ 2:32..2:42
               message: Enum value "Horizontal" is deprecated. Используйте: AlwaysHorizontal
-              severity: Hint"#]]
+              severity: Warning"#]]
         .assert_eq(&format_diags(code, &diags));
     }
 }

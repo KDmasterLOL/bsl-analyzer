@@ -31,7 +31,7 @@ case-insensitive, multiple calls и negative с `ОткрытьФорму`.
 
 - `ПолучитьФорму` не всегда заменяется на `ОткрытьФорму`: иногда нужен объект
   формы до открытия.
-- Пересекается с `DeprecatedMethods8317`, где `ПолучитьФорму` тоже есть в
+- Пересекается с `DeprecatedPlatformApi`, где `ПолучитьФорму` тоже есть в
   deprecated replacement map.
 - Нет context-aware suggestions и quick-fix.
 
@@ -42,11 +42,10 @@ replacement.
 
 ## Возможное объединение
 
-Нужно решить дублирование с `DeprecatedMethods8317`: либо suppress по
+Нужно решить дублирование с `DeprecatedPlatformApi`: либо suppress по
 приоритету, либо один registry item порождает один diagnostic code.
 
 ## Вывод
 
 Детектор широкий и хорошо покрыт, но remediation может быть неверной без
 контекста. Дублирование с deprecated rule требует решения.
-

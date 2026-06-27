@@ -24,6 +24,10 @@ const CHILD_FORM_ITEMS_GROUP: OwnerType = OwnerType {
     ru: "ГруппировкаПодчиненныхЭлементовФормы",
     en: "ChildFormItemsGroup",
 };
+const HTTP_CONNECTION: OwnerType =
+    OwnerType { ru: "HTTPСоединение", en: "HTTPConnection" };
+const INTERNET_PROXY: OwnerType =
+    OwnerType { ru: "ИнтернетПрокси", en: "InternetProxy" };
 
 macro_rules! replacement {
     ($ru:literal, $en:literal) => {
@@ -132,6 +136,21 @@ macro_rules! method {
             $replacement,
             CompatibilityMode8_3_12,
             DisplayKind::Method
+        )
+    };
+}
+
+macro_rules! property {
+    ($owner:expr, $ru:literal, $en:literal, $replacement:expr) => {
+        entry!(
+            $ru,
+            $en,
+            ElementKind::Property,
+            Some($owner),
+            ApplicationInterface,
+            $replacement,
+            CompatibilityMode8_3_17,
+            DisplayKind::Property
         )
     };
 }
@@ -274,6 +293,18 @@ pub const ENTRIES: &[DeprecationEntry] = &[
         replacement!("ОткрытьФорму", "OpenForm"),
         CompatibilityMode8_3_17
     ),
+    entry!(
+        "Получить",
+        "Get",
+        ElementKind::Method,
+        Some(HTTP_CONNECTION),
+        ApplicationInterface,
+        replacement!("ПолучитьАсинх", "GetAsync"),
+        CompatibilityMode8_3_17,
+        DisplayKind::Method
+    ),
+    property!(INTERNET_PROXY, "Пароль", "Password", replacement!("Пароль", "Password")),
+    property!(INTERNET_PROXY, "Пользователь", "User", replacement!("Пользователь", "User")),
     attribute!(CHART_PLOT_AREA, "ОтображатьШкалу", "ShowScale", replacement!("ОтображатьШкалы", "ShowScales")),
     attribute!(CHART_PLOT_AREA, "ЛинииШкалы", "", replacement!("ЛинииШкал", "")),
     attribute!(CHART_PLOT_AREA, "ЦветШкалы", "", replacement!("ЦветШкал", "")),

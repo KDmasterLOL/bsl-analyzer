@@ -131,7 +131,7 @@ fn deprecation_registry_covers_8317_error_processing_and_get_form_methods() {
         .iter()
         .filter(|entry| entry.compatibility == CompatibilityBucket::CompatibilityMode8_3_17)
         .count();
-    assert_eq!(entries, 4);
+    assert_eq!(entries, 7);
 }
 
 #[test]
@@ -215,7 +215,7 @@ fn deprecation_registry_groups_cover_current_platform_deprecated_families() {
     assert!(groups.contains(&LifecycleGroup::ChartPresentation));
     assert!(groups.contains(&LifecycleGroup::EventLog));
 
-    assert_eq!(registry().entries().len(), 51);
+    assert_eq!(registry().entries().len(), 54);
 }
 
 #[test]

@@ -37,14 +37,8 @@
 - [x] [DataExchangeLoading](DataExchangeLoading.md) — done, needs-code-work
 - [x] [DeletingCollectionItem](DeletingCollectionItem.md) — done, needs-code-work
 - [x] [DenyIncompleteValues](DenyIncompleteValues.md) — done, needs-code-work
-- [x] [DeprecatedAttributes8312](DeprecatedAttributes8312.md) — done, needs-code-work
-- [x] [DeprecatedCurrentDate](DeprecatedCurrentDate.md) — done, needs-code-work
-- [x] [DeprecatedFind](DeprecatedFind.md) — done, needs-code-work
-- [x] [DeprecatedMessage](DeprecatedMessage.md) — done, needs-code-work
 - [x] [DeprecatedMethodCall](DeprecatedMethodCall.md) — done, needs-code-work
-- [x] [DeprecatedMethods8310](DeprecatedMethods8310.md) — done, needs-code-work
-- [x] [DeprecatedMethods8317](DeprecatedMethods8317.md) — done, needs-code-work
-- [x] [DeprecatedTypeManagedForm](DeprecatedTypeManagedForm.md) — done, needs-code-work
+- [x] [DeprecatedPlatformApi](DeprecatedPlatformApi.md) — done, folded-platform-deprecations
 - [x] [DisableSafeMode](DisableSafeMode.md) — done, needs-code-work
 - [x] [DoubleNegatives](DoubleNegatives.md) — done, needs-code-work
 - [x] [DuplicateRegion](DuplicateRegion.md) — done, needs-code-work

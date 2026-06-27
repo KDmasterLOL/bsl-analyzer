@@ -36,6 +36,7 @@ pub mod deprecated_find;
 pub mod deprecated_message;
 pub mod deprecated_method;
 pub mod deprecated_method_call;
+pub mod deprecated_platform_api;
 mod deprecated_platform_facts;
 pub mod deprecated_type_managed_form;
 pub mod disable_safe_mode;
@@ -326,13 +327,7 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::SelfInsertion => Some(&self_insertion::METADATA),
         DiagnosticCode::SeveralCompilerDirectives => Some(&several_compiler_directives::METADATA),
         DiagnosticCode::StyleElementConstructors => Some(&style_element_constructors::METADATA),
-        DiagnosticCode::DeprecatedCurrentDate => Some(&deprecated_current_date::METADATA),
-        DiagnosticCode::DeprecatedFind => Some(&deprecated_find::METADATA),
-        DiagnosticCode::DeprecatedMessage => Some(&deprecated_message::METADATA),
-        DiagnosticCode::DeprecatedTypeManagedForm => Some(&deprecated_type_managed_form::METADATA),
-        DiagnosticCode::DeprecatedMethods8310 => Some(&deprecated_method::DEPRECATED_METHODS_8310),
-        DiagnosticCode::DeprecatedMethods8317 => Some(&deprecated_method::DEPRECATED_METHODS_8317),
-        DiagnosticCode::DeprecatedAttributes8312 => Some(&deprecated_attributes_8312::METADATA),
+        DiagnosticCode::DeprecatedPlatformApi => Some(&deprecated_platform_api::METADATA),
         DiagnosticCode::DeprecatedMethodCall => Some(&deprecated_method_call::METADATA),
         DiagnosticCode::DisableSafeMode => Some(&disable_safe_mode::METADATA),
         DiagnosticCode::ExternalAppStarting => Some(&external_app_starting::METADATA),

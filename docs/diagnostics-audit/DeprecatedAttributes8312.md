@@ -1,8 +1,12 @@
 # DeprecatedAttributes8312
 
-Статус: `done`, `needs-code-work`
+Статус: `historical`, `folded-into-DeprecatedPlatformApi`
 
 Дата разбора: 2026-05-07
+
+Примечание 2026-06-27: историческая карточка. Public diagnostic code
+`DeprecatedAttributes8312` удален и свернут в активную диагностику
+`DeprecatedPlatformApi`.
 
 ## Суть правила
 
@@ -56,4 +60,3 @@ attributes, methods, enum names/values и negative cases.
 
 Правило функционально широкое, но список API живет изолированно. Главный долг -
 единый registry устаревших API.
-

@@ -50,11 +50,8 @@ DIAGNOSTICS=(
     DataExchangeLoading
     DeletingCollectionItem
     DenyIncompleteValues
-    DeprecatedCurrentDate
-    DeprecatedFind
-    DeprecatedMessage
     DeprecatedMethodCall
-    DeprecatedTypeManagedForm
+    DeprecatedPlatformApi
     DisableSafeMode
     DoubleNegatives
     DuplicatedInsertionIntoCollection

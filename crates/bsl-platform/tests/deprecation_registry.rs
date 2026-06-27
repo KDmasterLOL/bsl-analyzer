@@ -1,5 +1,5 @@
 use bsl_platform::deprecation::{
-    CompatibilityBucket, DeprecationEntry, DeprecationRegistry, DisplayKind, ElementKind,
+    registry, CompatibilityBucket, DeprecationEntry, DeprecationRegistry, DisplayKind, ElementKind,
     LifecycleGroup, Lookup, OwnerType, Replacement,
 };
 use std::collections::HashSet;
@@ -115,6 +115,56 @@ fn deprecation_bilingual_lookup_folds_name_and_owner_aliases() {
         .lookup_lc(Lookup::new(ElementKind::Method, Some(&owner_lc), &name_lc))
         .expect("folded owned method lookup");
     assert!(std::ptr::eq(by_ru, by_lc));
+}
+
+#[test]
+fn deprecation_registry_contains_owner_qualified_http_connection_get() {
+    let reg = registry();
+
+    let by_ru = reg
+        .lookup(Lookup::method("HTTPСоединение", "Получить"))
+        .expect("RU owned HTTPConnection.Get lookup");
+    let by_en = reg
+        .lookup(Lookup::method("HTTPConnection", "Get"))
+        .expect("EN owned HTTPConnection.Get lookup");
+
+    assert!(std::ptr::eq(by_ru, by_en));
+    assert_eq!(by_ru.element_kind, ElementKind::Method);
+    assert_eq!(by_ru.owner, Some(OwnerType { ru: "HTTPСоединение", en: "HTTPConnection" }));
+    assert_eq!(by_ru.display, DisplayKind::Method);
+    assert_eq!(by_ru.replacement, Some(Replacement { ru: "ПолучитьАсинх", en: "GetAsync" }));
+    assert_eq!(by_ru.compatibility, CompatibilityBucket::CompatibilityMode8_3_17);
+}
+
+#[test]
+fn deprecation_registry_contains_owner_qualified_internet_proxy_credentials() {
+    let reg = registry();
+
+    let password_ru = reg
+        .lookup(Lookup::property("ИнтернетПрокси", "Пароль"))
+        .expect("RU owned InternetProxy.Password lookup");
+    let password_en = reg
+        .lookup(Lookup::property("InternetProxy", "Password"))
+        .expect("EN owned InternetProxy.Password lookup");
+    let user_ru = reg
+        .lookup(Lookup::property("ИнтернетПрокси", "Пользователь"))
+        .expect("RU owned InternetProxy.User lookup");
+    let user_en = reg
+        .lookup(Lookup::property("InternetProxy", "User"))
+        .expect("EN owned InternetProxy.User lookup");
+
+    assert!(std::ptr::eq(password_ru, password_en));
+    assert!(std::ptr::eq(user_ru, user_en));
+    assert_eq!(password_ru.element_kind, ElementKind::Property);
+    assert_eq!(password_ru.owner, Some(OwnerType { ru: "ИнтернетПрокси", en: "InternetProxy" }));
+    assert_eq!(password_ru.display, DisplayKind::Property);
+    assert_eq!(password_ru.replacement, Some(Replacement { ru: "Пароль", en: "Password" }));
+    assert_eq!(password_ru.compatibility, CompatibilityBucket::CompatibilityMode8_3_17);
+    assert_eq!(user_ru.element_kind, ElementKind::Property);
+    assert_eq!(user_ru.owner, Some(OwnerType { ru: "ИнтернетПрокси", en: "InternetProxy" }));
+    assert_eq!(user_ru.display, DisplayKind::Property);
+    assert_eq!(user_ru.replacement, Some(Replacement { ru: "Пользователь", en: "User" }));
+    assert_eq!(user_ru.compatibility, CompatibilityBucket::CompatibilityMode8_3_17);
 }
 
 #[test]

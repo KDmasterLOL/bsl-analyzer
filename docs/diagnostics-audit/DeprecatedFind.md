@@ -1,8 +1,12 @@
 # DeprecatedFind
 
-Статус: `done`, `needs-code-work`
+Статус: `historical`, `folded-into-DeprecatedPlatformApi`
 
 Дата разбора: 2026-05-07
+
+Примечание 2026-06-27: историческая карточка. Public diagnostic code
+`DeprecatedFind` удален и свернут в активную диагностику
+`DeprecatedPlatformApi`.
 
 ## Суть правила
 
@@ -48,4 +52,3 @@ types известны - `СтрНайти`, иначе generic warning.
 
 Правило точное по форме вызова, но рекомендация без type info может быть
 слишком уверенной.
-

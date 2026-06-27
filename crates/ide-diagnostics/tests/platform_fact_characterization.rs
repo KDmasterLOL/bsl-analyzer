@@ -4,15 +4,7 @@ use ide_db::{RootDatabaseImpl, SalsaProvider};
 use ide_diagnostics::{Diagnostic, DiagnosticCode, DiagnosticsConfig, DiagnosticsContext};
 use test_fixture::Fixture;
 
-const PLATFORM_DEPRECATED_CODES: &[DiagnosticCode] = &[
-    DiagnosticCode::DeprecatedCurrentDate,
-    DiagnosticCode::DeprecatedFind,
-    DiagnosticCode::DeprecatedMessage,
-    DiagnosticCode::DeprecatedTypeManagedForm,
-    DiagnosticCode::DeprecatedMethods8310,
-    DiagnosticCode::DeprecatedMethods8317,
-    DiagnosticCode::DeprecatedAttributes8312,
-];
+const PLATFORM_DEPRECATED_CODES: &[DiagnosticCode] = &[DiagnosticCode::DeprecatedPlatformApi];
 
 #[test]
 fn deprecated_platform_diagnostic_families_match_current_replacements() {
@@ -32,30 +24,30 @@ fn deprecated_platform_diagnostic_families_match_current_replacements() {
         source,
         PLATFORM_DEPRECATED_CODES,
         expect![[r#"
-            DeprecatedCurrentDate @ 2:12..2:23
+            DeprecatedPlatformApi @ 2:12..2:23
               message: Используйте "ТекущаяДатаСеанса" вместо устаревшего "ТекущаяДата"
-              severity: Major
-            DeprecatedFind @ 3:15..3:19
+              severity: Warning
+            DeprecatedPlatformApi @ 3:15..3:19
               message: Use "StrFind" instead of deprecated "Find"
-              severity: Information
-            DeprecatedMessage @ 4:5..4:12
+              severity: Warning
+            DeprecatedPlatformApi @ 4:5..4:12
               message: Use "CommonUse.MessageToUser" instead of deprecated "Message"
-              severity: Information
-            DeprecatedMethods8310 @ 5:21..5:49
+              severity: Warning
+            DeprecatedPlatformApi @ 5:21..5:49
               message: Method "GetShortApplicationCaption" is deprecated. You should use "ClientApplication.GetShortCaption".
-              severity: Hint
-            DeprecatedMethods8317 @ 6:16..6:62
+              severity: Warning
+            DeprecatedPlatformApi @ 6:16..6:62
               message: Method "BriefErrorRepresentation" is deprecated. You should use "ErrorProcessingManager.BriefErrorRepresentation".
-              severity: Hint
-            DeprecatedMethods8317 @ 7:13..7:29
+              severity: Warning
+            DeprecatedPlatformApi @ 7:13..7:29
               message: Method "GetForm" is deprecated. You should use "OpenForm".
-              severity: Hint
-            DeprecatedTypeManagedForm @ 8:31..8:44
+              severity: Warning
+            DeprecatedPlatformApi @ 8:31..8:44
               message: Usage of deprecated type "ManagedForm". Recommended to use "ClientApplicationForm"
-              severity: Hint
-            DeprecatedAttributes8312 @ 10:19..10:28
+              severity: Warning
+            DeprecatedPlatformApi @ 10:19..10:28
               message: Attribute "ShowScale" is deprecated. Используйте: ShowScales
-              severity: Hint"#]],
+              severity: Warning"#]],
     );
 }
 
@@ -94,14 +86,14 @@ fn get_form_keeps_deprecated_and_get_form_diagnostics() {
 
     check_deprecated_platform_snapshot(
         source,
-        &[DiagnosticCode::DeprecatedMethods8317, DiagnosticCode::GetFormMethod],
+        &[DiagnosticCode::DeprecatedPlatformApi, DiagnosticCode::GetFormMethod],
         expect![[r#"
             GetFormMethod @ 2:13..2:20
               message: Использование метода 'GetForm' приводит к ошибкам. Используйте 'ОткрытьФорму()' вместо него
               severity: Major
-            DeprecatedMethods8317 @ 2:13..2:29
+            DeprecatedPlatformApi @ 2:13..2:29
               message: Method "GetForm" is deprecated. You should use "OpenForm".
-              severity: Hint"#]],
+              severity: Warning"#]],
     );
 }
 

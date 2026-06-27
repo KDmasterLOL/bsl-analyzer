@@ -1625,6 +1625,7 @@ dependencies = [
  "hir-def",
  "intern",
  "la-arena",
+ "once_cell",
  "rustc-hash 2.1.2",
  "salsa",
  "sdbl-hir",

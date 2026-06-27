@@ -4,6 +4,10 @@
 
 Candidate for `MIT OR Apache-2.0`.
 
+Historical note (2026-06-27): public diagnostic code `DeprecatedMessage` is no
+longer active; it is folded into `DeprecatedPlatformApi`. This file is retained
+as legal provenance history for the folded implementation.
+
 ## Why this rule exists
 
 This diagnostic is grounded in published 1C guidance about user notifications.
