@@ -227,12 +227,7 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
 
         tracing::debug!("Forward dataflow analysis converged in {} iterations", iterations);
 
-        Some(DataflowResult {
-            block_in: self.block_in,
-            block_out: self.block_out,
-            cfg: self.cfg,
-            body: self.body,
-        })
+        Some(DataflowResult { block_in: self.block_in, block_out: self.block_out, cfg: self.cfg })
     }
 
     fn solve_backward(mut self) -> Option<DataflowResult<L>> {
@@ -356,12 +351,7 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
             );
         }
 
-        Some(DataflowResult {
-            block_in: self.block_in,
-            block_out: self.block_out,
-            cfg: self.cfg,
-            body: self.body,
-        })
+        Some(DataflowResult { block_in: self.block_in, block_out: self.block_out, cfg: self.cfg })
     }
 
     fn transfer_block(&self, block_idx: NodeIndex, in_state: &L) -> L {
@@ -439,8 +429,6 @@ pub struct DataflowResult<L: Lattice> {
     block_out: FxHashMap<NodeIndex, L>,
 
     cfg: Arc<ControlFlowGraph>,
-
-    body: Body,
 }
 
 impl<L: Lattice> DataflowResult<L> {
@@ -456,10 +444,6 @@ impl<L: Lattice> DataflowResult<L> {
         &self.cfg
     }
 
-    pub fn body(&self) -> &Body {
-        &self.body
-    }
-
     pub fn blocks(&self) -> impl Iterator<Item = (NodeIndex, &L, &L)> {
         self.block_in.iter().filter_map(move |(idx, in_state)| {
             self.block_out.get(idx).map(|out_state| (*idx, in_state, out_state))
@@ -467,11 +451,11 @@ impl<L: Lattice> DataflowResult<L> {
     }
 
     /// Approximate live heap bytes for Salsa's `memory_usage` report: the two
-    /// per-block lattice maps (`block_in`/`block_out`) and the owned [`Body`] clone.
-    /// `value_heap` supplies the heap owned by each lattice value (e.g. a bitset's
-    /// words) — the generic `L` cannot report it here. The shared `Arc<ControlFlowGraph>`
-    /// is counted as the pointer only (its payload is owned by `module_cfgs`), so it
-    /// is omitted.
+    /// per-block lattice maps (`block_in`/`block_out`). `value_heap` supplies the
+    /// heap owned by each lattice value (e.g. a bitset's words) — the generic `L`
+    /// cannot report it here. The shared `Arc<ControlFlowGraph>` is counted as the
+    /// pointer only (its payload is owned by `module_cfgs`), so it is omitted; the
+    /// HIR `Body` is not retained here (callers re-source it from `module_bodies`).
     pub fn estimated_heap_with(&self, value_heap: impl Fn(&L) -> usize) -> usize {
         let mut bytes = map_table_bytes::<NodeIndex, L>(self.block_in.len());
         for v in self.block_in.values() {
@@ -481,7 +465,6 @@ impl<L: Lattice> DataflowResult<L> {
         for v in self.block_out.values() {
             bytes += value_heap(v);
         }
-        bytes += self.body.estimated_heap();
         bytes
     }
 }

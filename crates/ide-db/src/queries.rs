@@ -303,7 +303,10 @@ pub fn module_reaching_definitions_query<'db>(
         solver.set_initial_state(initial_defs);
 
         if let Some(dataflow_result) = solver.solve() {
-            let result = hir::dataflow::reaching_defs::ReachingDefsResult::new(dataflow_result);
+            let result = hir::dataflow::reaching_defs::ReachingDefsResult::new(
+                dataflow_result,
+                body.clone(),
+            );
             results.insert(local_id, Arc::new(result));
         }
     }

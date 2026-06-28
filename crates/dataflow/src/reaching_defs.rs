@@ -440,7 +440,7 @@ pub struct ReachingDefsResult {
 }
 
 impl ReachingDefsResult {
-    pub fn new(dataflow: crate::DataflowResult<ReachingDefs>) -> Self {
+    pub fn new(dataflow: crate::DataflowResult<ReachingDefs>, body: Body) -> Self {
         use cfg::CfgVertex;
 
         let mut stmt_to_block = rustc_hash::FxHashMap::default();
@@ -467,7 +467,7 @@ impl ReachingDefsResult {
             block_out.insert(block_idx, out_state.clone());
         }
 
-        Self { block_in, block_out, stmt_to_block, block_stmts, body: dataflow.body().clone() }
+        Self { block_in, block_out, stmt_to_block, block_stmts, body }
     }
 
     pub fn defs_before_stmt(&self, stmt_id: hir_def::StmtId) -> Option<&ReachingDefs> {
