@@ -551,6 +551,7 @@ fn analyze_salsa(
         db.enforce_lru();
         syntax::clear_shared_node_cache();
         rayon::broadcast(|_| syntax::clear_shared_node_cache());
+        profile::purge_allocator();
         if chunk_profile {
             eprintln!(
                 "chunk {:>3}/{}: files={} par={:.2}s straggler_max={:.2}s evict={:.2}s",

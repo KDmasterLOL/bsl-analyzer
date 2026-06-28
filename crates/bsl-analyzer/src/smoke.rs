@@ -838,6 +838,12 @@ fn run_session(args: &SmokeArgs) -> Result<SessionResult, String> {
     ctx.state.analysis_host.raw_database_mut().enforce_lru();
     syntax::clear_shared_node_cache();
     rayon::broadcast(|_| syntax::clear_shared_node_cache());
+    profile::purge_allocator();
+    // With a jemalloc background thread the purge is serviced asynchronously, so
+    // an immediate RSS read races the page return. Let it settle (also past the
+    // bounded dirty-decay interval) so `post_trim` reflects the steady-state
+    // reclaimable footprint rather than an in-flight snapshot.
+    std::thread::sleep(std::time::Duration::from_secs(2));
     let rss_post_trim_bytes = read_rss_bytes();
     crate::mem_report::print_salsa_memory_report(
         ctx.state.analysis_host.raw_database(),

@@ -3025,6 +3025,7 @@ dependencies = [
  "libc",
  "perf-event",
  "tikv-jemalloc-ctl",
+ "tikv-jemalloc-sys",
 ]
 
 [[package]]
