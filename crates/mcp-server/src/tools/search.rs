@@ -155,7 +155,7 @@ fn lexical_code_hits(
 ) -> Result<CodeHits, McpError> {
     ensure_workspace_search_allowed(configured_baseline)?;
     ensure_workspace_baseline_runtime_ready(
-        workspace_search_mode,
+        workspace_search_mode.clone(),
         configured_baseline,
         external_baseline.as_ref(),
     )?;
@@ -193,31 +193,56 @@ fn lexical_code_hits(
 
     let hits = if let Some(source) = external_baseline {
         match guard.as_ref() {
-            Some(engine) => match try_direct_lexical_code(engine, &source, query, limit) {
-                DirectResult::Found(hits) => hits,
-                DirectResult::Terminal(error) => {
-                    return Err(external_baseline_mcp_error(&error));
-                }
-                DirectResult::Unavailable => match source.resolve_workspace_view(engine) {
-                    Ok(Some(view)) => {
-                        lexical_hits_for_resolved_view(&view, query, limit, Some("code"))
+            Some(engine) => {
+                let direct_start = std::time::Instant::now();
+                let direct = try_direct_lexical_code(engine, &source, query, limit);
+                tracing::debug!(
+                    elapsed_ms = direct_start.elapsed().as_millis() as u64,
+                    query_len = query.len(),
+                    "search.code: try_direct_lexical_code"
+                );
+                match direct {
+                    DirectResult::Found(hits) => hits,
+                    DirectResult::Terminal(error) => {
+                        return Err(external_baseline_mcp_error(&error));
                     }
-                    Ok(None) => engine.text_search(query, limit, Some("code")).map_err(|e| {
-                        McpError::internal_error(format!("search error: {e}"), None)
-                    })?,
-                    Err(error) => {
-                        if error.is_terminal() {
-                            return Err(external_baseline_mcp_error(&error));
+                    // Direct baseline serving is unavailable (snapshot, overlay, or a transient
+                    // serving-table absence). Do NOT fall back to `resolve_workspace_view`:
+                    // that loads the whole baseline corpus under the engine lock and stalls
+                    // search past the client timeout on a large remote overlay.
+                    //
+                    // In PostgresRemoteOverlay mode the local store has no baseline rows, so
+                    // local `text_search` would silently return overlay-only or empty results
+                    // while the real corpus is unreachable — a misleading "no matches found"
+                    // instead of an honest transient state. Surface it as Pending so the caller
+                    // retries.
+                    //
+                    // In SqliteLocal mode the local store IS the full corpus, so `text_search`
+                    // is the correct bounded answer.
+                    DirectResult::Unavailable => {
+                        if matches!(
+                            workspace_search_mode,
+                            WorkspaceSearchMode::PostgresRemoteOverlay
+                        ) {
+                            return Ok(CodeHits::Pending(
+                                "Baseline lexical serving is temporarily unavailable; \
+                                 please retry shortly."
+                                    .to_owned(),
+                            ));
                         }
-                        warn!(
-                            "failed to resolve external baseline view for lexical search: {error}"
-                        );
-                        engine.text_search(query, limit, Some("code")).map_err(|e| {
+                        let fallback_start = std::time::Instant::now();
+                        let hits = engine.text_search(query, limit, Some("code")).map_err(|e| {
                             McpError::internal_error(format!("search error: {e}"), None)
-                        })?
+                        })?;
+                        tracing::debug!(
+                            elapsed_ms = fallback_start.elapsed().as_millis() as u64,
+                            query_len = query.len(),
+                            "search.code: lexical fallback text_search (baseline unavailable)"
+                        );
+                        hits
                     }
-                },
-            },
+                }
+            }
             None => match try_direct_lexical_code_no_overlay(&source, query, limit) {
                 DirectResult::Found(hits) => hits,
                 DirectResult::Terminal(error) => {
@@ -372,7 +397,12 @@ fn semantic_code_hits(
     // (it would be wasted, and the caller would receive EmbedderUnavailable instead of the
     // correct BaselineNotReady). `resolve_direct_semantic` uses the model_id/dim captured above.
     let resolved_baseline: Option<DirectResolve> = if let Some(ref source) = external_baseline {
+        let resolve_start = std::time::Instant::now();
         let r = resolve_direct_semantic(source, model_id.as_deref(), dim);
+        tracing::debug!(
+            elapsed_ms = resolve_start.elapsed().as_millis() as u64,
+            "search.code: resolve_direct_semantic"
+        );
         match r {
             DirectResolve::Terminal(e) => return Err(external_baseline_mcp_error(&e)),
             DirectResolve::Unavailable => {
@@ -393,7 +423,14 @@ fn semantic_code_hits(
     };
 
     // Embed lock-free now that readiness is confirmed (either baseline Ready or local path).
-    let query_embedding = match embedder.embed(query) {
+    let embed_start = std::time::Instant::now();
+    let embed_result = embedder.embed(query);
+    tracing::debug!(
+        elapsed_ms = embed_start.elapsed().as_millis() as u64,
+        query_len = query.len(),
+        "search.code: embedder.embed (off-lock)"
+    );
+    let query_embedding = match embed_result {
         Ok(vector) => vector,
         // The query embed is a request-time call to a remote embedder on the hot path of every
         // search. When it times out or transiently fails, degrade to the lexical hits the caller
@@ -431,7 +468,14 @@ fn semantic_code_hits(
         // `external_baseline` is still live (the Arc was not consumed); borrow the service for
         // the search call.
         let source = external_baseline.as_ref().expect("resolved_baseline=Some implies Some");
-        match run_direct_semantic(engine, source, &snapshot, mid, d, &query_embedding, limit) {
+        let direct_start = std::time::Instant::now();
+        let direct =
+            run_direct_semantic(engine, source, &snapshot, mid, d, &query_embedding, limit);
+        tracing::debug!(
+            elapsed_ms = direct_start.elapsed().as_millis() as u64,
+            "search.code: run_direct_semantic (under lock)"
+        );
+        match direct {
             DirectResult::Found(hits) => {
                 return Ok(CodeHits::Ready { hits, workspace_root });
             }
@@ -1079,6 +1123,9 @@ fn search_status_with_cap(
         Err(AcquireFailure::Poisoned) => return Err(engine_lock_poisoned_error()),
         Err(AcquireFailure::TimedOut) => None,
     };
+    // Measure how long the engine lock is held across the status build so a future stall is
+    // diagnosable from `BSL_LOG=debug` alone (the release binary cannot be stack-traced).
+    let guard_held_start = std::time::Instant::now();
     let engine_busy = guard.is_none();
     // Drive the summary's lexical-availability claim off the real engine state: "ready" only when
     // the engine is published and not held, so status never tells the agent the local index is
@@ -1131,13 +1178,28 @@ fn search_status_with_cap(
     }
 
     if let Some(engine) = guard.as_ref().and_then(|g| g.as_ref()) {
+        let counts_start = std::time::Instant::now();
         let files = engine.file_count().unwrap_or(0);
         let chunks = engine.chunk_count().unwrap_or(0);
         let vectors = engine.vector_count();
         let semantic = engine.has_semantic();
+        tracing::debug!(
+            elapsed_ms = counts_start.elapsed().as_millis() as u64,
+            "search.status: engine counts (file/chunk/vector/semantic)"
+        );
 
+        let embed_code_start = std::time::Instant::now();
         let code_vectors = engine.embedding_count_by_collection("code").unwrap_or(0);
+        tracing::debug!(
+            elapsed_ms = embed_code_start.elapsed().as_millis() as u64,
+            "search.status: embedding_count_by_collection code"
+        );
+        let embed_platform_start = std::time::Instant::now();
         let platform_vectors = engine.embedding_count_by_collection("platform").unwrap_or(0);
+        tracing::debug!(
+            elapsed_ms = embed_platform_start.elapsed().as_millis() as u64,
+            "search.status: embedding_count_by_collection platform"
+        );
 
         let search_state = match &semantic_runtime {
             SemanticRuntimeStatus::Failed(_) => "ready (semantic runtime failed)",
@@ -1199,17 +1261,32 @@ fn search_status_with_cap(
         let _ = writeln!(out, "  Semantic: {semantic_status}");
         let _ = writeln!(out, "  FTS:      {}", if chunks > 0 { "available" } else { "empty" });
         let _ = writeln!(out, "  Collections: code, platform");
+        let overlay_stats_start = std::time::Instant::now();
         let workspace_overlay = engine
             .workspace_overlay_stats()
             .map_err(|e| McpError::internal_error(format!("overlay status error: {e}"), None))?;
+        tracing::debug!(
+            elapsed_ms = overlay_stats_start.elapsed().as_millis() as u64,
+            "search.status: workspace_overlay_stats"
+        );
         if let Some(source) = external_baseline.as_ref() {
             match source.corpus() {
                 bsl_search::CorpusId::WorkspaceCode => {
-                    let code_lexical_source = match source.resolve_workspace_view(engine) {
+                    // Choosing the display label only needs to know whether a baseline snapshot
+                    // resolves — not its documents. `resolve_snapshot` is a metadata-only actor
+                    // round-trip, whereas `resolve_workspace_view` loads the entire baseline
+                    // corpus (hundreds of thousands of documents) under the engine lock, which
+                    // stalls `status` past the client timeout on a large remote overlay.
+                    let display_start = std::time::Instant::now();
+                    let code_lexical_source = match source.resolve_snapshot() {
                         Ok(Some(_)) => "external baseline + local overlay",
                         Ok(None) => "local sqlite + local overlay",
                         Err(_) => "local sqlite + local overlay",
                     };
+                    tracing::debug!(
+                        elapsed_ms = display_start.elapsed().as_millis() as u64,
+                        "search.status: resolve_snapshot display check"
+                    );
                     let _ = writeln!(out, "  Code lexical source: {code_lexical_source}");
                     let code_semantic_source =
                         match (&semantic_runtime, workspace_search_mode.clone()) {
@@ -1244,7 +1321,10 @@ fn search_status_with_cap(
                     let _ = writeln!(out, "  Code semantic source: {code_semantic_source}");
                 }
                 bsl_search::CorpusId::Reference => {
-                    let docs_lexical_source = match source.resolve_reference_view() {
+                    // Metadata-only check: `resolve_reference_view` loads all reference docs,
+                    // which is expensive under the engine lock. A snapshot resolve is enough
+                    // to decide the display label.
+                    let docs_lexical_source = match source.resolve_snapshot() {
                         Ok(Some(_)) => "external baseline",
                         Ok(None) => "local sqlite",
                         Err(_) => "local sqlite",
@@ -1275,9 +1355,15 @@ fn search_status_with_cap(
         }
 
         if let Some(overlay) = workspace_overlay {
-            if let Some(view) = engine.resolve_workspace_code_view().map_err(|e| {
+            let resolve_local_start = std::time::Instant::now();
+            let local_view = engine.resolve_workspace_code_view().map_err(|e| {
                 McpError::internal_error(format!("resolved workspace view error: {e}"), None)
-            })? {
+            })?;
+            tracing::debug!(
+                elapsed_ms = resolve_local_start.elapsed().as_millis() as u64,
+                "search.status: resolve_workspace_code_view (local store)"
+            );
+            if let Some(view) = local_view {
                 let files: HashSet<&str> =
                     view.documents().iter().map(|document| document.path.as_str()).collect();
                 let _ = writeln!(out);
@@ -1309,7 +1395,12 @@ fn search_status_with_cap(
     }
 
     if let Some(external_baseline) = external_baseline {
+        let probe_start = std::time::Instant::now();
         let status = external_baseline.probe_status();
+        tracing::debug!(
+            elapsed_ms = probe_start.elapsed().as_millis() as u64,
+            "search.status: external probe_status"
+        );
         let _ = writeln!(out);
         let _ = writeln!(out, "External baseline: configured");
         let _ = writeln!(out, "  Backend:  {}", status.backend);
@@ -1329,32 +1420,23 @@ fn search_status_with_cap(
                 }
                 match external_baseline.corpus() {
                     bsl_search::CorpusId::WorkspaceCode => {
-                        if let Some(engine) = guard.as_ref().and_then(|g| g.as_ref()) {
-                            match external_baseline.resolve_workspace_view(engine) {
-                                Ok(Some(view)) => {
-                                    let resolved_files: HashSet<&str> = view
-                                        .documents()
-                                        .iter()
-                                        .map(|document| document.path.as_str())
-                                        .collect();
-                                    let _ = writeln!(out, "  Resolved view: ready");
-                                    let _ =
-                                        writeln!(out, "  Resolved files: {}", resolved_files.len());
-                                    let _ = writeln!(
-                                        out,
-                                        "  Resolved chunks: {}",
-                                        view.documents().len()
-                                    );
-                                }
-                                Ok(None) => {
-                                    let _ = writeln!(out, "  Resolved view: unavailable");
-                                }
-                                Err(error) => {
-                                    let _ = writeln!(out, "  Resolved view: error");
-                                    let _ = writeln!(out, "  Resolved error: {}", error);
-                                }
-                            }
-                        }
+                        // A metadata-only check: do NOT load the baseline corpus here. The
+                        // baseline file/chunk counts are already printed above, and the local
+                        // overlay deltas appear in the `Workspace overlay` section, so the
+                        // post-merge resolved counts are redundant and not worth a full
+                        // document load under the engine lock (it stalls `status` past the
+                        // client timeout on a large remote overlay).
+                        let ext_resolve_start = std::time::Instant::now();
+                        let resolved_view = match external_baseline.resolve_snapshot() {
+                            Ok(Some(_)) => "ready",
+                            Ok(None) => "unavailable",
+                            Err(_) => "error",
+                        };
+                        tracing::debug!(
+                            elapsed_ms = ext_resolve_start.elapsed().as_millis() as u64,
+                            "search.status: external resolve_snapshot"
+                        );
+                        let _ = writeln!(out, "  Resolved view: {resolved_view}");
                     }
                     bsl_search::CorpusId::Reference => {
                         if let Some(local_fingerprint) =
@@ -1372,26 +1454,16 @@ fn search_status_with_cap(
                                 shorten_fingerprint(&local_fingerprint)
                             );
                         }
-                        match external_baseline.resolve_reference_view() {
-                            Ok(Some(view)) => {
-                                let resolved_files: HashSet<&str> = view
-                                    .documents()
-                                    .iter()
-                                    .map(|document| document.path.as_str())
-                                    .collect();
-                                let _ = writeln!(out, "  Resolved view: ready");
-                                let _ = writeln!(out, "  Resolved files: {}", resolved_files.len());
-                                let _ =
-                                    writeln!(out, "  Resolved chunks: {}", view.documents().len());
-                            }
-                            Ok(None) => {
-                                let _ = writeln!(out, "  Resolved view: unavailable");
-                            }
-                            Err(error) => {
-                                let _ = writeln!(out, "  Resolved view: error");
-                                let _ = writeln!(out, "  Resolved error: {}", error);
-                            }
-                        }
+                        // Metadata-only check: do NOT load the reference corpus here.
+                        // The baseline file/chunk counts are already printed above, so the
+                        // post-resolve counts are redundant and not worth a full document
+                        // load under the engine lock.
+                        let resolved_view = match external_baseline.resolve_snapshot() {
+                            Ok(Some(_)) => "ready",
+                            Ok(None) => "unavailable",
+                            Err(_) => "error",
+                        };
+                        let _ = writeln!(out, "  Resolved view: {resolved_view}");
                     }
                     bsl_search::CorpusId::Custom(_) => {}
                 }
@@ -1436,6 +1508,13 @@ fn search_status_with_cap(
         "Note: code snippets are secret-redacted (credential-like values shown as ***); \
          treat snippet text as sanitized, not byte-exact."
     );
+
+    if !engine_busy {
+        tracing::debug!(
+            elapsed_ms = guard_held_start.elapsed().as_millis() as u64,
+            "search.status: total time holding engine guard"
+        );
+    }
 
     Ok(CallToolResult::success(vec![Content::text(out)]))
 }

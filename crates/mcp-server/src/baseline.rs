@@ -1,7 +1,7 @@
 use bsl_platform::PlatformDataInner;
 use bsl_search::{
     fingerprint_documents, BaselineRef, CorpusId, Document, ExternalBaselineAdapter,
-    ExternalBaselineBackend, ExternalBaselineConfig, IndexedDocument, ResolvedView, SearchEngine,
+    ExternalBaselineBackend, ExternalBaselineConfig, IndexedDocument, ResolvedView,
     SnapshotCatalog, SnapshotContentStore, WorkspaceBaselineManifest,
 };
 use project_model::{
@@ -12,7 +12,6 @@ use project_model::{
     SearchPostgresConfig,
 };
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::env;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -86,11 +85,6 @@ enum BaselineServiceRequest {
         collection: Option<String>,
         limit: usize,
         reply: mpsc::Sender<Result<Vec<bsl_search::SemanticHit>, bsl_search::SearchError>>,
-    },
-    LoadWorkspaceSnapshotDocuments {
-        model_id: Option<String>,
-        dimension: Option<usize>,
-        reply: mpsc::Sender<Result<Option<BaselineSnapshotDocuments>, bsl_search::SearchError>>,
     },
     LoadReferenceSnapshotDocuments {
         model_id: Option<String>,
@@ -351,15 +345,6 @@ impl ExternalBaselineService {
                     );
                     let _ = reply.send(result);
                 }
-                BaselineServiceRequest::LoadWorkspaceSnapshotDocuments {
-                    model_id,
-                    dimension,
-                    reply,
-                } => {
-                    let result =
-                        source.load_workspace_snapshot_documents(model_id.as_deref(), dimension);
-                    let _ = reply.send(result);
-                }
                 BaselineServiceRequest::LoadReferenceSnapshotDocuments {
                     model_id,
                     dimension,
@@ -447,17 +432,6 @@ impl ExternalBaselineService {
         )
     }
 
-    pub(crate) fn resolve_workspace_view(
-        &self,
-        engine: &SearchEngine,
-    ) -> Result<Option<ResolvedView>, bsl_search::SearchError> {
-        let Some(snapshot) = self.load_workspace_snapshot_documents(None, None)? else {
-            return Ok(None);
-        };
-        let baseline = BaselineRef::for_snapshot(self.corpus.clone(), snapshot.snapshot_id);
-        engine.resolve_workspace_code_view_from_documents(baseline, snapshot.documents)
-    }
-
     pub(crate) fn resolve_reference_view(
         &self,
     ) -> Result<Option<ResolvedView>, bsl_search::SearchError> {
@@ -466,18 +440,6 @@ impl ExternalBaselineService {
         };
         let baseline = BaselineRef::for_snapshot(self.corpus.clone(), snapshot.snapshot_id);
         Ok(Some(ResolvedView::new(baseline, snapshot.documents)))
-    }
-
-    pub(crate) fn load_workspace_snapshot_documents(
-        &self,
-        model_id: Option<&str>,
-        dimension: Option<usize>,
-    ) -> Result<Option<BaselineSnapshotDocuments>, bsl_search::SearchError> {
-        self.request(|reply| BaselineServiceRequest::LoadWorkspaceSnapshotDocuments {
-            model_id: model_id.map(ToOwned::to_owned),
-            dimension,
-            reply,
-        })?
     }
 
     pub(crate) fn load_reference_snapshot_documents(
@@ -871,14 +833,6 @@ impl RefreshableExternalBaselineSource {
         }
     }
 
-    pub(crate) fn load_workspace_snapshot_documents(
-        &self,
-        model_id: Option<&str>,
-        dimension: Option<usize>,
-    ) -> Result<Option<BaselineSnapshotDocuments>, bsl_search::SearchError> {
-        self.delegate(|source| source.load_workspace_snapshot_documents(model_id, dimension))
-    }
-
     pub(crate) fn load_reference_snapshot_documents(
         &self,
         model_id: Option<&str>,
@@ -1080,9 +1034,26 @@ impl ExternalBaselineSource {
 
         match self.resolve_snapshot()? {
             Some((resolved_baseline, snapshot)) => {
-                let documents = self.adapter.load_snapshot_documents(&snapshot)?;
-                let files: HashSet<&str> =
-                    documents.iter().map(|document| document.path.as_str()).collect();
+                // Counts only — do NOT load the serving rows. `load_snapshot_documents` pulls the
+                // entire baseline corpus from Postgres (~228K rows) just to count it, which on
+                // the status path runs under the engine lock and stalls `search status` past the
+                // client timeout. `snapshot_details` returns aggregated counts from
+                // snapshot/file-object metadata (O(files), not O(serving rows)) instead.
+                let snapshot_id_str = snapshot.id.0.clone();
+                let (documents, files) = match self.adapter.snapshot_details(&snapshot_id_str)? {
+                    Some(details) => (details.snapshot.documents, details.snapshot.files),
+                    None => {
+                        // The snapshot resolved above but its detail row was not found —
+                        // a brief metadata race. Report 0/0 (counts unavailable, not an empty
+                        // baseline) rather than failing the whole status call.
+                        tracing::warn!(
+                            snapshot_id = %snapshot_id_str,
+                            "probe_status: snapshot_details returned None for a resolved snapshot; \
+                             reporting counts as 0 (metadata race)"
+                        );
+                        (0, 0)
+                    }
+                };
                 Ok(ExternalBaselineStatus {
                     backend,
                     schema,
@@ -1091,8 +1062,8 @@ impl ExternalBaselineSource {
                     state: ExternalBaselineState::Ready {
                         snapshot_id: snapshot.id.0,
                         fingerprint: snapshot.fingerprint,
-                        documents: documents.len(),
-                        files: files.len(),
+                        documents,
+                        files,
                     },
                 })
             }
@@ -1111,17 +1082,6 @@ impl ExternalBaselineSource {
         snapshot_id: &str,
     ) -> Result<Option<bsl_search::BaselineSnapshotDetails>, bsl_search::SearchError> {
         self.adapter.snapshot_details(snapshot_id)
-    }
-
-    pub(crate) fn load_workspace_snapshot_documents(
-        &self,
-        model_id: Option<&str>,
-        dimension: Option<usize>,
-    ) -> Result<Option<BaselineSnapshotDocuments>, bsl_search::SearchError> {
-        if !matches!(self.corpus(), CorpusId::WorkspaceCode) {
-            return Ok(None);
-        }
-        self.load_snapshot_documents(model_id, dimension)
     }
 
     pub(crate) fn load_reference_snapshot_documents(
