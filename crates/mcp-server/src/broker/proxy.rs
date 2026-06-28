@@ -38,7 +38,7 @@ const MAX_LOG_BYTES: u64 = 4 * 1024 * 1024;
 /// observes the client leaving via the stdin-EOF half-close, and both sides would
 /// wait on each other forever. After stdin closes we drain for at most this long,
 /// then drop the stream; closing the pipe handle is the disconnect the backend reads
-/// as the end of its owner session. The unix path keeps draining to backend EOF (the
+/// as the end of that session. The unix path keeps draining to backend EOF (the
 /// half-close delivers it), so this bound never applies there.
 #[cfg(windows)]
 const STDIN_CLOSED_DRAIN_GRACE: Duration = Duration::from_secs(2);
@@ -182,14 +182,16 @@ async fn relay_stdio(stream: TokioStream) -> anyhow::Result<()> {
 /// input first. The client→backend pump runs concurrently and half-closes the write
 /// side on input EOF.
 ///
-/// On unix that half-close delivers EOF to the backend, which ends its owner session and
-/// closes; the relay then drains to backend EOF — a slow final response is never cut off.
+/// On unix that half-close delivers EOF to the backend, ending this session there; the
+/// backend closes its side of the connection, so the relay drains to backend EOF — a slow
+/// final response is never cut off. The backend process itself stays warm for the next
+/// client.
 ///
 /// Windows named pipes have no half-close (`AsyncWrite::shutdown` is a no-op), so the
 /// backend never sees that EOF. There the relay drains until the backend closes or,
 /// once the client input has closed, a bounded grace elapses, then returns — dropping
-/// the stream closes the pipe handle, the disconnect the backend reads as the end of its
-/// owner session.
+/// the stream closes the pipe handle, the disconnect the backend reads as the end of
+/// this session.
 ///
 /// Split out from [`relay_stdio`] (which binds it to process stdio) so the teardown
 /// behavior can be exercised by tests with in-memory client streams.
@@ -208,9 +210,9 @@ where
         let _ = input_closed_tx.send(());
     });
 
-    // Unix: the half-close delivers EOF to the backend, which ends its owner session
-    // and closes; draining to backend EOF is correct and never truncates a slow final
-    // response.
+    // Unix: the half-close delivers EOF to the backend, which ends this session and
+    // closes its side; draining to backend EOF is correct and never truncates a slow
+    // final response.
     #[cfg(not(windows))]
     let copied = {
         drop(input_closed_rx);
@@ -220,7 +222,7 @@ where
     // Windows: named pipes have no half-close, so the backend never sees the input EOF
     // and `copy_fut` would never complete on its own. Drain until either the backend
     // closes or, once the client input has closed, the grace elapses — then return so
-    // the dropped stream closes the handle and ends the backend's owner session.
+    // the dropped stream closes the handle and ends this backend session.
     // Scoped so `copy_fut`'s borrow of `client_out` is released before the flush below.
     #[cfg(windows)]
     let copied = {
