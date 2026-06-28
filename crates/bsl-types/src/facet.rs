@@ -203,7 +203,16 @@ pub struct MapFacet {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct StructureFacet {
+    /// Key names in field order. Kept for back-compat and name-only display; always derivable
+    /// from [`Self::fields`] when that is present.
     pub keys: Option<Arc<[Name]>>,
+    /// Typed field projection: `None` = untyped structure (keys unknown), `Some` = keys inferred
+    /// from a literal `Новый Структура` / `.Вставить` construction (this plan) or a doc-comment.
+    pub fields: Option<Arc<Projection>>,
+    /// Soft marker recording where the fields came from (`BslLiteral` / `DocComment`). Load-bearing
+    /// only as a future guard so inferred (possibly incomplete) structures are never turned into a
+    /// hard diagnostic. Stage 1 emits no diagnostics.
+    pub origin: Option<TypeOrigin>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

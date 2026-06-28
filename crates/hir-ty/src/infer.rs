@@ -355,6 +355,12 @@ pub struct InferenceContext<'db> {
     /// miss and reused, so a global-util-heavy body does not re-enumerate global modules
     /// per call. `None` until first consulted. See [`Self::global_export_map`].
     global_exports: Option<Arc<FxHashMap<String, hir_def::MethodId>>>,
+
+    /// Per-body literal `Структура` shapes (keys built via `Новый Структура` / `.Вставить`), keyed
+    /// by lowercased local name. Collected once at the start of [`Self::infer_all`] and used to
+    /// enrich a structure local's type with its keys on each read. Empty for bodies with no such
+    /// construction → byte-identical default typing. See [`crate::structure_keys`].
+    structure_shapes: FxHashMap<String, crate::structure_keys::StructureShape>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -534,6 +540,7 @@ impl<'db> InferenceContext<'db> {
             call_arg_bindings: Vec::new(),
             return_expr_ids: Vec::new(),
             global_exports: None,
+            structure_shapes: FxHashMap::default(),
         }
     }
 
@@ -815,6 +822,8 @@ impl<'db> InferenceContext<'db> {
 
     pub fn infer_all(&mut self) {
         let _p = tracing::debug_span!("infer_all").entered();
+
+        self.structure_shapes = crate::structure_keys::collect_structure_shapes(&self.body);
 
         let stmts: Vec<StmtIdx> = self.body.body_stmts_typed().to_vec();
         self.infer_stmts(&stmts);
@@ -1314,6 +1323,20 @@ impl<'db> InferenceContext<'db> {
         if let Some(ty) = self.var_types.get(&name.as_str().fold_lower()) {
             trace!("resolved {} via var_types = {:?}", name, ty);
             let ty_id = *ty;
+            // Structure-literal key enrichment: a local typed as a `Структура` gets its collected
+            // literal keys (and value types known up to this read) surfaced for completion/hover.
+            // Soft — never feeds a diagnostic.
+            if matches!(self.db.lookup_type(ty_id), TypeKind::Structure(_)) {
+                let key = name.as_str().fold_lower();
+                if let Some(rich) = crate::structure_keys::materialize(
+                    self.db,
+                    &self.structure_shapes,
+                    &self.expr_types,
+                    &key,
+                ) {
+                    return rich;
+                }
+            }
             if crate::method_lookup::receiver_needs_refinement_id(self.db, ty_id) {
                 if let Some(projections) = crate::query_text_dataflow::refine_query_at_use_site(
                     self.db,

@@ -79,6 +79,65 @@ fn projection_fields_surface_in_enumerate_fields() {
     }
 }
 
+#[test]
+fn structure_literal_keys_surface_in_enumerate_fields() {
+    let fixture = r#"//- /test.bsl
+Функция Построить()
+    Пар = Новый Структура("Город, Индекс");
+    Пар.Вставить("Улица");
+    Возврат Пар;
+КонецФункции
+
+Функция Тест()
+    Стр = Построить();
+    Возврат Стр;
+КонецФункции
+"#;
+    let (db, file_id) = setup(fixture);
+    // The enriched typed structure flows out of `Построить()` and is stored on the caller's local.
+    let ty = var_ty(&db, file_id, "стр").expect("стр must be inferred");
+    let fields = Type::from_id(&db, file_id, ty).fields();
+    let names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+    for key in ["Город", "Индекс", "Улица"] {
+        assert!(
+            names.contains(&key),
+            "enumerate_fields must include literal key `{key}`, got {names:?}"
+        );
+    }
+    for f in fields.iter().filter(|f| matches!(f.name.as_str(), "Город" | "Индекс" | "Улица"))
+    {
+        assert!(!f.is_readonly, "structure key `{}` must be mutable", f.name.as_str());
+    }
+}
+
+#[test]
+fn structure_key_reseed_after_insert_uses_source_order_last_wins() {
+    // `Цена` is written by an insert (Число) and then by a later re-seed (Строка). Source order
+    // must win, so the value type is the re-seed's Строка — not the earlier insert's Число.
+    let fixture = r#"//- /test.bsl
+Функция Построить()
+    Стр = Новый Структура;
+    Стр.Вставить("Цена", 5);
+    Стр = Новый Структура("Цена", "x");
+    Возврат Стр;
+КонецФункции
+
+Функция Тест()
+    Р = Построить();
+    Возврат Р;
+КонецФункции
+"#;
+    let (db, file_id) = setup(fixture);
+    let ty = var_ty(&db, file_id, "р").expect("р must be inferred");
+    let fields = Type::from_id(&db, file_id, ty).fields();
+    let price = fields.iter().find(|f| f.name.as_str() == "Цена").expect("key `Цена` present");
+    assert_eq!(
+        price.ty,
+        db.string(None, false),
+        "later re-seed (Строка) must win over the earlier insert (Число)",
+    );
+}
+
 fn hover_baseline_setup(fixture_text: &str) -> (Analysis, FileId, u32) {
     let abs_idx = fixture_text.find("$0").expect("fixture must contain $0 cursor marker");
     let prefix = &fixture_text[..abs_idx];
@@ -131,6 +190,32 @@ fn extract_fields_line(markup: &str) -> String {
 fn complete(fixture: &str) -> Vec<CompletionItem> {
     let (analysis, file_id, offset) = hover_baseline_setup(fixture);
     analysis.completions(file_id, offset, None, ide::Locale::Ru)
+}
+
+#[test]
+fn hover_on_literal_structure_lists_keys_as_typed_fields() {
+    let (analysis, file_id, offset) = hover_baseline_setup(
+        r#"//- /test.bsl
+Функция Построить()
+    Пар = Новый Структура("Город, Индекс", "Москва", 101);
+    Возврат Пар;
+КонецФункции
+
+Функция Тест()
+    Стр = Построить();
+    Возврат Ст$0р;
+КонецФункции
+"#,
+    );
+    let hover =
+        analysis.hover(file_id, offset, ide::Locale::Ru).expect("hover must produce a result");
+    let fields = extract_fields_line(&hover.markup);
+    assert!(
+        fields.contains("Город"),
+        "hover fields block must list structure key `Город`; got markup:\n{}",
+        hover.markup
+    );
+    assert!(fields.contains("Индекс"), "hover fields block must list key `Индекс`; got: {fields}");
 }
 
 #[test]

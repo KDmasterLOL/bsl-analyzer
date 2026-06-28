@@ -127,9 +127,13 @@ pub(crate) fn enumerate_fields_inner(
 }
 
 fn enumerate_projection_fields(db: &dyn TypeKernelDb, ty: TypeId) -> Option<Vec<FieldInfo>> {
-    let projection = match db.lookup_type(ty) {
-        TypeKind::QueryResultSelection(facet) => facet.projection.clone()?,
-        TypeKind::ValueTableRow(facet) => facet.projection.clone()?,
+    // Structures are mutable, query/value-table projections are read-only at the cursor.
+    let (projection, is_readonly) = match db.lookup_type(ty) {
+        TypeKind::QueryResultSelection(facet) => (facet.projection.clone()?, true),
+        TypeKind::ValueTableRow(facet) => (facet.projection.clone()?, true),
+        TypeKind::Structure(facet) => {
+            (crate::structure_keys::structure_projection_fields(facet)?, false)
+        }
         _ => return None,
     };
     let fields = projection
@@ -140,7 +144,7 @@ fn enumerate_projection_fields(db: &dyn TypeKernelDb, ty: TypeId) -> Option<Vec<
             name_en: None,
             ty: f.ty,
             value_ty: None,
-            is_readonly: true,
+            is_readonly,
             origin: FieldOrigin::UserAttribute,
         })
         .collect();

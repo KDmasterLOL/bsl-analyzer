@@ -536,9 +536,6 @@ fn completion_after_dot_on_local_from_pure_self_recursion_yields_no_items() {
 }
 
 #[test]
-#[ignore = "Structure key tracking not implemented — Ty::Structure has no payload \
-            for known keys; constructor literal `Новый Структура(\"k1, k2\")` and \
-            `.Вставить(\"k3\")` mutations are not propagated. Tech-debt pin."]
 fn completion_after_dot_on_structure_returned_from_fn_lists_keys_and_methods() {
     let items = complete(
         r#"//- /test.bsl
@@ -569,6 +566,74 @@ fn completion_after_dot_on_structure_returned_from_fn_lists_keys_and_methods() {
             "Structure key `{key}` must be offered alongside methods; got: {ls:?}"
         );
     }
+}
+
+#[test]
+fn completion_after_dot_on_same_body_structure_lists_constructor_and_insert_keys() {
+    let items = complete(
+        r#"//- /test.bsl
+Процедура Тест()
+    Стр = Новый Структура("Таймаут, Адрес");
+    Стр.Вставить("Шифрование");
+    Стр.$0
+КонецПроцедуры
+"#,
+    );
+
+    let ls = labels(&items);
+    for key in ["Таймаут", "Адрес", "Шифрование"] {
+        assert!(
+            has_label(&items, key),
+            "literal structure key `{key}` must be offered in the same body; got: {ls:?}"
+        );
+    }
+    for method in ["Вставить", "Свойство"] {
+        assert!(
+            has_label(&items, method),
+            "platform Structure method `{method}` must remain alongside keys; got: {ls:?}"
+        );
+    }
+}
+
+#[test]
+fn completion_after_dot_on_nested_structure_value_lists_inner_keys() {
+    let items = complete(
+        r#"//- /test.bsl
+Процедура Тест()
+    С = Новый Структура;
+    С.Вставить("Адрес", Новый Структура("Город, Улица"));
+    С.Адрес.$0
+КонецПроцедуры
+"#,
+    );
+
+    let ls = labels(&items);
+    for key in ["Город", "Улица"] {
+        assert!(
+            has_label(&items, key),
+            "nested structure key `{key}` must be offered after `С.Адрес.`; got: {ls:?}"
+        );
+    }
+}
+
+#[test]
+fn completion_non_literal_key_does_not_break_known_keys() {
+    let items = complete(
+        r#"//- /test.bsl
+Процедура Тест(ИмяКлюча)
+    Стр = Новый Структура("Известный");
+    Стр.Вставить(ИмяКлюча, 1);
+    Стр.$0
+КонецПроцедуры
+"#,
+    );
+
+    let ls = labels(&items);
+    assert!(
+        has_label(&items, "Известный"),
+        "a non-literal `.Вставить(ИмяКлюча, …)` must not drop the known key; got: {ls:?}"
+    );
+    assert!(has_label(&items, "Вставить"), "platform methods must remain; got: {ls:?}");
 }
 
 #[test]

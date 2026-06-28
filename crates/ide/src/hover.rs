@@ -551,6 +551,18 @@ fn ty_info_markup<DB: RootDatabase>(db: &DB, id: TypeId, locale: Locale) -> Opti
         return Some(block);
     }
 
+    // A literal-keyed structure renders its keys as a typed fields block; a keyless structure falls
+    // through to the plain type label (byte-identical to before).
+    if let TypeKind::Structure(facet) = kind {
+        if facet.fields.is_some() {
+            let mut block = format!("**Тип:** {}\n\n", kernel_type_label(db, id, locale, false));
+            if let Some(fields_block) = projection_fields_markup(db, id, locale) {
+                block.push_str(&fields_block);
+            }
+            return Some(block);
+        }
+    }
+
     Some(format!("**Тип:** {}\n\n", kernel_type_label(db, id, locale, false)))
 }
 
@@ -562,6 +574,7 @@ fn projection_fields_markup<DB: RootDatabase>(
     let projection = match db.lookup_type(id) {
         TypeKind::QueryResultSelection(facet) => facet.projection.as_ref(),
         TypeKind::ValueTable(facet) | TypeKind::ValueTableRow(facet) => facet.projection.as_ref(),
+        TypeKind::Structure(facet) => facet.fields.as_ref(),
         _ => return None,
     }?;
     if projection.fields.is_empty() {

@@ -319,6 +319,7 @@ pub enum ProjectionOrigin {
     SdblQuery,
     FormAttribute,
     ValueTableLiteral,
+    StructureLiteral,
     Unknown,
 }
 
@@ -329,6 +330,7 @@ pub enum ProjectionFieldSource {
     Cast,
     Aggregate,
     Derived,
+    StructureLiteral,
     Unknown,
 }
 

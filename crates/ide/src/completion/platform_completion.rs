@@ -587,6 +587,9 @@ fn projection_column_items<DB: RootDatabase>(
     let projection = match db.lookup_type(receiver) {
         TypeKind::QueryResultSelection(facet) => facet.projection.clone(),
         TypeKind::ValueTable(facet) | TypeKind::ValueTableRow(facet) => facet.projection.clone(),
+        // Literal-structure keys are emitted before the platform `Структура` methods (the caller
+        // appends `complete_platform_methods` after these), so users see both keys and methods.
+        TypeKind::Structure(facet) => facet.fields.clone(),
         _ => None,
     };
     let Some(projection) = projection else { return Vec::new() };

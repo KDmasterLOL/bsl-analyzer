@@ -85,6 +85,21 @@ fn lookup_field_inner(
     let effective_ty =
         crate::this_object::coerce_to_metadata_ref_id(db, projected_ty).unwrap_or(projected_ty);
 
+    if let TypeKind::Structure(facet) = db.lookup_type(effective_ty) {
+        // Permissive: a known literal key types to its value; an unknown key yields no field and
+        // (crucially) no `UnresolvedField` — structure field access stays soft.
+        return crate::structure_keys::structure_projection_field(facet, field_name.as_str()).map(
+            |ty| FieldInfo {
+                name: Name::new(field_name.as_str()),
+                name_en: None,
+                ty,
+                value_ty: None,
+                is_readonly: false,
+                origin: crate::field_enum::FieldOrigin::UserAttribute,
+            },
+        );
+    }
+
     match db.lookup_type(effective_ty) {
         TypeKind::Union(arms) => {
             let arms = arms.to_vec();
