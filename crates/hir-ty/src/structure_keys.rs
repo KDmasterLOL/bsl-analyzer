@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use stdx::case::{eq_ignore_case, CaseExt};
 
 use bsl_types::builders::Builders;
@@ -31,11 +31,14 @@ const MAX_NEST_DEPTH: usize = 4;
 
 /// Where a structure key's value comes from. Resolved to a `TypeId` only at materialisation time —
 /// an `ExprId` must never reach the interned [`Projection`].
-enum ValueSource {
+pub(crate) enum ValueSource {
     /// The value is itself a literal `Новый Структура(...)` whose shape we collected.
     Literal(StructureShape),
     /// The value is an arbitrary expression; its type is taken from the inference cache if available.
     Expr(ExprId),
+    /// A type already resolved elsewhere — used by Stage 2 to inject a callee summary's field types
+    /// (an interned `TypeId`, never an `ExprId`).
+    Resolved(TypeId),
     /// No value, or a non-literal we do not type (key still surfaced).
     Unknown,
 }
@@ -56,7 +59,7 @@ pub(crate) struct StructureShape {
 }
 
 impl StructureShape {
-    fn upsert(&mut self, name: &str, source: ValueSource) {
+    pub(crate) fn upsert(&mut self, name: &str, source: ValueSource) {
         if let Some(existing) = self.fields.iter_mut().find(|f| eq_ignore_case(&f.name, name)) {
             existing.source = source;
         } else {
@@ -71,40 +74,93 @@ impl StructureShape {
     }
 }
 
-/// Collect, per local name (lowercased), the structure shape it is built with in this body.
+/// What seeds the tracked roots of a structure-shape collection.
+#[derive(Clone, Copy)]
+pub(crate) enum SeedRoots<'a> {
+    /// Stage 1: roots are locals assigned a `Новый Структура` literal in this body.
+    NewLiterals,
+    /// Stage 2: roots are the (by-reference) parameter names — pre-tracked even though they are not
+    /// constructed here; only `.Вставить` and forwarding contribute their keys.
+    ParamNames(&'a [String]),
+}
+
+/// Collect, per local/param name (lowercased), the structure shape built in this body.
 ///
 /// A single pass in statement (≈ source) order, so a seed assignment and a `.Вставить` writing the
-/// same key interleave correctly: the last write in the body wins. An insert before its local is
-/// ever constructed is ignored (you cannot insert into an unconstructed structure).
-pub(crate) fn collect_structure_shapes(body: &Body) -> FxHashMap<String, StructureShape> {
+/// same key interleave correctly: the last write in the body wins. An insert before its root is
+/// tracked is ignored (you cannot insert into an unconstructed structure).
+pub(crate) fn collect_structure_shapes(
+    body: &Body,
+    seed_roots: SeedRoots,
+    forwarder: Option<&crate::structure_param_keys::Forwarder>,
+) -> FxHashMap<String, StructureShape> {
     let mut shapes: FxHashMap<String, StructureShape> = FxHashMap::default();
+    // Roots that may no longer be extended: a by-reference param that has been reassigned keeps the
+    // keys accumulated while it still aliased the caller, but ignores later inserts/forwards.
+    let mut frozen: FxHashSet<String> = FxHashSet::default();
 
+    if let SeedRoots::ParamNames(names) = seed_roots {
+        for name in names {
+            shapes.entry(name.clone()).or_default();
+        }
+    }
+
+    // One pass in statement (≈ source) order. Seeds, `.Вставить` inserts, and interprocedural
+    // forwarding all interleave here, so a root is only ever extended after it is live and the last
+    // write to a key wins.
     for (_id, stmt) in body.stmts_iter() {
         match stmt {
-            // Seed: `Local = Новый Структура(...)`.
             Stmt::Assign { target, value } => {
-                let Expr::Path(name) = body.expr_idx(*target) else { continue };
-                let Some(shape) = constructor_shape_of(body, ExprId::from_idx(*value), 0) else {
-                    continue;
-                };
-                shapes.entry(name.as_str().fold_lower()).or_default().merge(shape);
+                // Seed: `Local = Новый Структура(...)` — Stage-1 (`NewLiterals`) only; a constructor
+                // assignment to a parameter is a reassignment that breaks aliasing (handled below).
+                if matches!(seed_roots, SeedRoots::NewLiterals) {
+                    if let Expr::Path(name) = body.expr_idx(*target) {
+                        if let Some(shape) = constructor_shape_of(body, ExprId::from_idx(*value), 0)
+                        {
+                            shapes.entry(name.as_str().fold_lower()).or_default().merge(shape);
+                            continue;
+                        }
+                    }
+                }
+                // The RHS may forward a tracked root to a helper (`Х = Заполнить(С)`), including a
+                // by-ref param filled during the call (`П = F(П)`) — those keys reach the caller
+                // before the reassignment completes, so fold BEFORE freezing the root below.
+                if let Some(fw) = forwarder {
+                    fw.fold_call(body, &mut shapes, &frozen, body.expr_idx(*value));
+                }
+                // Stage 2: reassigning a tracked parameter breaks its aliasing with the caller's
+                // argument. Freeze it in source order — keys inserted earlier still reach the
+                // caller, but later inserts into the fresh value do not.
+                if matches!(seed_roots, SeedRoots::ParamNames(_)) {
+                    if let Expr::Path(name) = body.expr_idx(*target) {
+                        let key = name.as_str().fold_lower();
+                        if shapes.contains_key(&key) {
+                            frozen.insert(key);
+                        }
+                    }
+                }
             }
-            // Insert: `Receiver.Вставить("Ключ", Значение)` on an already-tracked root.
             Stmt::Expr(expr_idx) => {
-                let Some((receiver, method, args)) = as_method_call(body, body.expr_idx(*expr_idx))
-                else {
-                    continue;
-                };
-                if !is_insert_method(method) {
-                    continue;
+                let call = body.expr_idx(*expr_idx);
+                // Insert: `Receiver.Вставить("Ключ", Значение)` on an already-tracked root.
+                if let Some((receiver, method, args)) = as_method_call(body, call) {
+                    if is_insert_method(method) {
+                        if let Some((root, path)) = receiver_root_path(body, receiver, 0) {
+                            if shapes.contains_key(&root) && !frozen.contains(&root) {
+                                let root_shape =
+                                    shapes.get_mut(&root).expect("checked contains_key");
+                                if let Some(target_shape) = navigate_mut(root_shape, &path) {
+                                    apply_insert(body, target_shape, args);
+                                }
+                            }
+                        }
+                        continue;
+                    }
                 }
-                let Some((root, path)) = receiver_root_path(body, receiver, 0) else { continue };
-                if !shapes.contains_key(&root) {
-                    continue;
+                // A non-insert call statement may forward a tracked root to a helper (`Заполнить(С)`).
+                if let Some(fw) = forwarder {
+                    fw.fold_call(body, &mut shapes, &frozen, call);
                 }
-                let root_shape = shapes.get_mut(&root).expect("checked contains_key");
-                let Some(target_shape) = navigate_mut(root_shape, &path) else { continue };
-                apply_insert(body, target_shape, args);
             }
             _ => {}
         }
@@ -141,10 +197,8 @@ pub(crate) fn materialize(
 ) -> Option<TypeId> {
     let shape = shapes.get(local_lower)?;
     // No known keys → keep the plain untyped structure (unchanged display/behaviour).
-    if shape.fields.is_empty() {
-        return None;
-    }
-    Some(materialize_shape(db, expr_types, shape, 0))
+    let projection = shape_to_projection(db, expr_types, shape, 0)?;
+    Some(db.structure_typed(projection, TypeOrigin::BslLiteral))
 }
 
 /// The value type of a structure field (`facet.fields`), matched case-insensitively. `None` if the
@@ -159,31 +213,37 @@ pub(crate) fn structure_projection_fields(facet: &StructureFacet) -> Option<Arc<
     facet.fields.clone()
 }
 
-fn materialize_shape(
+/// Build a shape's typed projection, or `None` if it has no keys (or the depth cap is hit). Shared
+/// by Stage-1 local materialisation and the Stage-2 summary's per-param projections.
+pub(crate) fn shape_to_projection(
     db: &dyn HirDatabase,
     expr_types: &FxHashMap<ExprId, TypeId>,
     shape: &StructureShape,
     depth: usize,
-) -> TypeId {
+) -> Option<Arc<Projection>> {
     if depth > MAX_NEST_DEPTH || shape.fields.is_empty() {
-        return db.structure(None);
+        return None;
     }
     let fields: Vec<ProjectionField> = shape
         .fields
         .iter()
         .map(|f| {
             let ty = match &f.source {
-                ValueSource::Literal(child) => materialize_shape(db, expr_types, child, depth + 1),
+                ValueSource::Literal(child) => {
+                    match shape_to_projection(db, expr_types, child, depth + 1) {
+                        Some(p) => db.structure_typed(p, TypeOrigin::BslLiteral),
+                        None => db.structure(None),
+                    }
+                }
                 // Never infer ahead of the read site: only use an already-cached value type.
                 ValueSource::Expr(e) => expr_types.get(e).copied().unwrap_or_else(|| db.unknown()),
+                ValueSource::Resolved(t) => *t,
                 ValueSource::Unknown => db.unknown(),
             };
             ProjectionField::new(f.name.clone(), ty, ProjectionFieldSource::StructureLiteral)
         })
         .collect();
-    let projection =
-        Arc::new(Projection::new(fields.into(), ProjectionOrigin::StructureLiteral, None));
-    db.structure_typed(projection, TypeOrigin::BslLiteral)
+    Some(Arc::new(Projection::new(fields.into(), ProjectionOrigin::StructureLiteral, None)))
 }
 
 /// The shape of a `Новый Структура(...)` constructor expression, or `None` if `expr` is not one.

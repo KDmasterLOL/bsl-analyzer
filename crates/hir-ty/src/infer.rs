@@ -823,7 +823,22 @@ impl<'db> InferenceContext<'db> {
     pub fn infer_all(&mut self) {
         let _p = tracing::debug_span!("infer_all").entered();
 
-        self.structure_shapes = crate::structure_keys::collect_structure_shapes(&self.body);
+        self.structure_shapes = {
+            // Stage 2 interprocedural forwarding is ordinary-modules only — effective
+            // (`&ИзменениеИКонтроль`) and weaving inference use separate symbol contexts and are
+            // out of scope, so no forwarder is built there (byte-identical Stage-1 behaviour).
+            let ordinary = self.local_symbols.is_none() && self.weaving_base.is_none();
+            let resolver = self.get_resolver();
+            let module = hir_def::ModuleId::new(self.context_file_id);
+            let forwarder = ordinary.then(|| {
+                crate::structure_param_keys::Forwarder::new(self.db, &resolver, module, &self.body)
+            });
+            crate::structure_keys::collect_structure_shapes(
+                &self.body,
+                crate::structure_keys::SeedRoots::NewLiterals,
+                forwarder.as_ref(),
+            )
+        };
 
         let stmts: Vec<StmtIdx> = self.body.body_stmts_typed().to_vec();
         self.infer_stmts(&stmts);
