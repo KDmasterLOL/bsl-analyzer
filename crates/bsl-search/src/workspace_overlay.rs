@@ -179,6 +179,12 @@ impl WorkspaceOverlayCache {
         self.dirty_paths.insert(rel_path.into(), self.dirty_seq);
     }
 
+    /// `allow_cold_scan` gates the only expensive operation here: a cold full-tree scan + read +
+    /// chunk of every workspace file (`full_refresh_from_manifest`). The background warmup
+    /// (`RefreshMode::Embed`) passes `true`; every interactive query/status path passes `false`
+    /// so it stays O(cached) under the engine lock and answers from the Postgres baseline until the
+    /// warmup (or the watcher's incremental path) populates the overlay. Without this gate a single
+    /// query on an unwarmed overlay would block for minutes walking the whole tree.
     pub fn refresh_with_manifest(
         &mut self,
         manifest_fingerprints: &HashMap<String, String>,
@@ -186,16 +192,31 @@ impl WorkspaceOverlayCache {
         embedder: Option<&Embedder>,
         batch_size: usize,
         store: &Store,
+        allow_cold_scan: bool,
     ) -> Result<(), SearchError> {
-        if !self.initialized || !self.watcher_mode {
-            self.full_refresh_from_manifest(
-                manifest_fingerprints,
-                workspace_root,
-                embedder,
-                batch_size,
-                store,
-            )?;
-        } else if !self.dirty_paths.is_empty() {
+        if allow_cold_scan {
+            if !self.initialized || !self.watcher_mode {
+                self.full_refresh_from_manifest(
+                    manifest_fingerprints,
+                    workspace_root,
+                    embedder,
+                    batch_size,
+                    store,
+                )?;
+            } else if !self.dirty_paths.is_empty() {
+                self.refresh_dirty_paths_from_manifest(
+                    manifest_fingerprints,
+                    workspace_root,
+                    embedder,
+                    batch_size,
+                )?;
+            }
+            self.initialized = true;
+        } else if self.initialized && !self.dirty_paths.is_empty() {
+            // ReuseOnly: never cold-scan. An already-populated cache still applies the cheap
+            // watcher-marked dirty-path refresh, but a `!watcher_mode` (polling) cache must NOT
+            // re-run the full scan. An uninitialized cache stays empty (and `initialized` stays
+            // false) so the next warmup/watcher pass still builds it.
             self.refresh_dirty_paths_from_manifest(
                 manifest_fingerprints,
                 workspace_root,
@@ -203,10 +224,13 @@ impl WorkspaceOverlayCache {
                 batch_size,
             )?;
         }
-        self.initialized = true;
         Ok(())
     }
 
+    /// `allow_cold_scan` gates the cold full-tree scan + read + chunk (`full_refresh`). See
+    /// [`Self::refresh_with_manifest`] for the rationale: only the background warmup
+    /// (`RefreshMode::Embed`) may pay that cost; interactive query/status paths pass `false` and
+    /// stay O(cached).
     pub fn refresh(
         &mut self,
         store: &Store,
@@ -214,12 +238,35 @@ impl WorkspaceOverlayCache {
         embedder: Option<&Embedder>,
         batch_size: usize,
         hash_mode: BaselineHashMode,
+        allow_cold_scan: bool,
     ) -> Result<(), SearchError> {
-        let baseline_files: HashMap<String, Vec<u8>> =
-            store.all_files_in_collection("code")?.into_iter().collect();
-        if !self.initialized || !self.watcher_mode {
-            self.full_refresh(&baseline_files, workspace_root, embedder, batch_size, hash_mode)?;
-        } else if !self.dirty_paths.is_empty() {
+        if allow_cold_scan {
+            let baseline_files: HashMap<String, Vec<u8>> =
+                store.all_files_in_collection("code")?.into_iter().collect();
+            if !self.initialized || !self.watcher_mode {
+                self.full_refresh(
+                    &baseline_files,
+                    workspace_root,
+                    embedder,
+                    batch_size,
+                    hash_mode,
+                )?;
+            } else if !self.dirty_paths.is_empty() {
+                self.refresh_dirty_paths(
+                    &baseline_files,
+                    workspace_root,
+                    embedder,
+                    batch_size,
+                    hash_mode,
+                )?;
+            }
+            self.initialized = true;
+        } else if self.initialized && !self.dirty_paths.is_empty() {
+            // ReuseOnly: never cold-scan. Only the cheap dirty-path refresh on an already-populated
+            // cache; a `!watcher_mode` (polling) cache must NOT re-run the full scan, and an
+            // uninitialized cache stays empty for the warmup/watcher to build later.
+            let baseline_files: HashMap<String, Vec<u8>> =
+                store.all_files_in_collection("code")?.into_iter().collect();
             self.refresh_dirty_paths(
                 &baseline_files,
                 workspace_root,
@@ -228,7 +275,6 @@ impl WorkspaceOverlayCache {
                 hash_mode,
             )?;
         }
-        self.initialized = true;
         Ok(())
     }
 
@@ -1295,7 +1341,7 @@ mod tests {
         manifest.insert("A.bsl".to_owned(), "different-fingerprint".to_owned());
 
         let mut cache = WorkspaceOverlayCache::default();
-        cache.refresh_with_manifest(&manifest, workspace, None, 32, &store).unwrap();
+        cache.refresh_with_manifest(&manifest, workspace, None, 32, &store, true).unwrap();
 
         let overlay = cache.snapshot();
         assert_eq!(overlay.lexical_documents.len(), 1);
@@ -1452,7 +1498,7 @@ mod tests {
         fs::remove_file(&file_b).unwrap();
 
         let mut cache = WorkspaceOverlayCache::default();
-        cache.refresh(&store, workspace, None, 32, BaselineHashMode::RawFileBytes).unwrap();
+        cache.refresh(&store, workspace, None, 32, BaselineHashMode::RawFileBytes, true).unwrap();
         let overlay = cache.snapshot();
 
         assert!(overlay.hidden_paths.contains("A.bsl"));
@@ -1471,7 +1517,7 @@ mod tests {
         let db_path = workspace.join("search.db");
         let store = Store::open(&db_path).unwrap();
         let mut cache = WorkspaceOverlayCache::default();
-        cache.refresh(&store, workspace, None, 32, BaselineHashMode::RawFileBytes).unwrap();
+        cache.refresh(&store, workspace, None, 32, BaselineHashMode::RawFileBytes, true).unwrap();
         let overlay = cache.snapshot();
 
         let hits = lexical_hits(&overlay, "НоваяПроцедура123", 10);
@@ -1489,16 +1535,16 @@ mod tests {
         let db_path = workspace.join("search.db");
         let store = Store::open(&db_path).unwrap();
         let mut cache = WorkspaceOverlayCache::default();
-        cache.refresh(&store, workspace, None, 32, BaselineHashMode::RawFileBytes).unwrap();
+        cache.refresh(&store, workspace, None, 32, BaselineHashMode::RawFileBytes, true).unwrap();
         let first = cache.snapshot();
         assert_eq!(first.lexical_documents[0].symbol_name, "ВерсияОдин111");
 
-        cache.refresh(&store, workspace, None, 32, BaselineHashMode::RawFileBytes).unwrap();
+        cache.refresh(&store, workspace, None, 32, BaselineHashMode::RawFileBytes, true).unwrap();
         let second = cache.snapshot();
         assert_eq!(second.lexical_documents[0].symbol_name, "ВерсияОдин111");
 
         fs::write(&file, "Процедура ВерсияДва222222()\nКонецПроцедуры").unwrap();
-        cache.refresh(&store, workspace, None, 32, BaselineHashMode::RawFileBytes).unwrap();
+        cache.refresh(&store, workspace, None, 32, BaselineHashMode::RawFileBytes, true).unwrap();
         let third = cache.snapshot();
         assert_eq!(third.lexical_documents[0].symbol_name, "ВерсияДва222222");
     }
@@ -1525,7 +1571,7 @@ mod tests {
         fs::remove_file(&file_b).unwrap();
 
         let mut cache = WorkspaceOverlayCache::default();
-        cache.refresh(&store, workspace, None, 32, BaselineHashMode::RawFileBytes).unwrap();
+        cache.refresh(&store, workspace, None, 32, BaselineHashMode::RawFileBytes, true).unwrap();
 
         assert_eq!(
             cache.stats(),
@@ -1557,12 +1603,12 @@ mod tests {
 
         let mut cache = WorkspaceOverlayCache::default();
         cache.enable_watcher_mode();
-        cache.refresh(&store, workspace, None, 32, BaselineHashMode::RawFileBytes).unwrap();
+        cache.refresh(&store, workspace, None, 32, BaselineHashMode::RawFileBytes, true).unwrap();
         assert_eq!(cache.stats().overlay_files, 0);
 
         fs::write(&file, "Процедура ИзWatcher()\nКонецПроцедуры").unwrap();
         cache.mark_dirty_path("A.bsl");
-        cache.refresh(&store, workspace, None, 32, BaselineHashMode::RawFileBytes).unwrap();
+        cache.refresh(&store, workspace, None, 32, BaselineHashMode::RawFileBytes, true).unwrap();
 
         let overlay = cache.snapshot();
         assert_eq!(overlay.lexical_documents.len(), 1);
@@ -1581,7 +1627,7 @@ mod tests {
         let store = Store::open(&workspace.join("search.db")).unwrap();
         let mut cache = WorkspaceOverlayCache::default();
         let manifest: HashMap<String, String> = HashMap::new();
-        cache.refresh_with_manifest(&manifest, workspace, None, 32, &store).unwrap();
+        cache.refresh_with_manifest(&manifest, workspace, None, 32, &store, true).unwrap();
 
         let overlay = cache.snapshot();
         assert_eq!(overlay.lexical_documents.len(), 1);
@@ -1603,7 +1649,7 @@ mod tests {
 
         let store = Store::open(&workspace.join("search.db")).unwrap();
         let mut cache = WorkspaceOverlayCache::default();
-        cache.refresh_with_manifest(&manifest, workspace, None, 32, &store).unwrap();
+        cache.refresh_with_manifest(&manifest, workspace, None, 32, &store, true).unwrap();
 
         let overlay = cache.snapshot();
         assert_eq!(overlay.lexical_documents.len(), 0);
@@ -1622,7 +1668,7 @@ mod tests {
 
         let store = Store::open(&workspace.join("search.db")).unwrap();
         let mut cache = WorkspaceOverlayCache::default();
-        cache.refresh_with_manifest(&manifest, workspace, None, 32, &store).unwrap();
+        cache.refresh_with_manifest(&manifest, workspace, None, 32, &store, true).unwrap();
 
         let overlay = cache.snapshot();
         assert_eq!(overlay.lexical_documents.len(), 1);
@@ -1641,12 +1687,91 @@ mod tests {
 
         let store = Store::open(&workspace.join("search.db")).unwrap();
         let mut cache = WorkspaceOverlayCache::default();
-        cache.refresh_with_manifest(&manifest, workspace, None, 32, &store).unwrap();
+        cache.refresh_with_manifest(&manifest, workspace, None, 32, &store, true).unwrap();
 
         let overlay = cache.snapshot();
         assert_eq!(overlay.lexical_documents.len(), 0);
         assert_eq!(overlay.hidden_paths.len(), 2);
         assert!(overlay.hidden_paths.contains("A.bsl"));
         assert!(overlay.hidden_paths.contains("B.bsl"));
+    }
+
+    #[test]
+    fn reuse_only_never_cold_scans_an_uninitialized_cache() {
+        // A fresh cache (initialized=false, watcher_mode=false) holding files that DIVERGE from the
+        // baseline. A `ReuseOnly` (allow_cold_scan=false) refresh must NOT walk the tree: if it did,
+        // the divergent file would surface as an overlay entry. So the snapshot stays empty and the
+        // cache stays uninitialized — the warmup/watcher is what builds it. The SAME cache with
+        // allow_cold_scan=true then DOES scan and populate, proving the gate is the only difference.
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("A.bsl");
+        fs::write(&file, "Процедура Локальная()\nКонецПроцедуры").unwrap();
+
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let mut manifest = HashMap::new();
+        manifest.insert("A.bsl".to_owned(), "different-fingerprint".to_owned());
+
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.refresh_with_manifest(&manifest, workspace, None, 32, &store, false).unwrap();
+
+        let overlay = cache.snapshot();
+        assert!(
+            overlay.lexical_documents.is_empty(),
+            "ReuseOnly over an uninitialized cache must not cold-scan present files"
+        );
+        assert_eq!(cache.stats().overlay_files, 0);
+
+        // The gate is the only difference: a cold-scan-allowed refresh of the same cache populates.
+        cache.refresh_with_manifest(&manifest, workspace, None, 32, &store, true).unwrap();
+        let overlay = cache.snapshot();
+        assert_eq!(overlay.lexical_documents.len(), 1);
+        assert_eq!(overlay.lexical_documents[0].symbol_name, "Локальная");
+    }
+
+    #[test]
+    fn reuse_only_skips_full_scan_but_applies_dirty_paths_in_polling_mode() {
+        // An already-initialized cache in polling mode (watcher_mode=false). A ReuseOnly refresh
+        // must NOT re-run the full scan just because it is polling: with no dirty paths the overlay
+        // is unchanged, even after a new on-disk file appears that a cold scan would have picked up.
+        // A marked dirty path IS still applied (the cheap incremental arm).
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file_a = workspace.join("A.bsl");
+        fs::write(&file_a, "Процедура ИзменённаяА()\nКонецПроцедуры").unwrap();
+
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let mut manifest = HashMap::new();
+        manifest.insert("A.bsl".to_owned(), "different-fingerprint".to_owned());
+        manifest.insert("B.bsl".to_owned(), "different-fingerprint".to_owned());
+
+        // Populate the cache once via the cold-scan path so it is initialized.
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.refresh_with_manifest(&manifest, workspace, None, 32, &store, true).unwrap();
+        assert_eq!(cache.snapshot().lexical_documents.len(), 1, "A.bsl is the only overlay entry");
+        assert!(!cache.stats().watcher_mode, "polling mode for this scenario");
+
+        // A new baseline-divergent file appears on disk. A ReuseOnly refresh with NO dirty paths
+        // must leave the overlay untouched (no full rescan) — B.bsl stays absent.
+        let file_b = workspace.join("B.bsl");
+        fs::write(&file_b, "Процедура НоваяБ()\nКонецПроцедуры").unwrap();
+        cache.refresh_with_manifest(&manifest, workspace, None, 32, &store, false).unwrap();
+        let overlay = cache.snapshot();
+        assert_eq!(
+            overlay.lexical_documents.len(),
+            1,
+            "polling ReuseOnly must not re-scan the tree"
+        );
+        assert_eq!(overlay.lexical_documents[0].symbol_name, "ИзменённаяА");
+
+        // A marked dirty path IS still picked up by the cheap incremental arm.
+        cache.mark_dirty_path("B.bsl");
+        cache.refresh_with_manifest(&manifest, workspace, None, 32, &store, false).unwrap();
+        let overlay = cache.snapshot();
+        assert_eq!(overlay.lexical_documents.len(), 2, "the dirty path is applied incrementally");
+        let mut names: Vec<String> =
+            overlay.lexical_documents.iter().map(|doc| doc.symbol_name.clone()).collect();
+        names.sort();
+        assert_eq!(names, vec!["ИзменённаяА".to_owned(), "НоваяБ".to_owned()]);
     }
 }

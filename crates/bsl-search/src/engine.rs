@@ -1002,6 +1002,8 @@ impl SearchEngine {
             .workspace_overlay_cache
             .lock()
             .map_err(|e| SearchError::Index(format!("workspace overlay cache lock error: {e}")))?;
+        // `search status` is a read-only display; it must never trigger the cold full-tree scan,
+        // so it uses the same non-cold-scan path as interactive queries.
         if let Some(manifest_fingerprints) =
             self.store.load_baseline_manifest_fingerprints("code")?
         {
@@ -1011,6 +1013,7 @@ impl SearchEngine {
                 None,
                 self.batch_size,
                 &self.store,
+                false,
             )?;
         } else {
             cache.refresh(
@@ -1019,6 +1022,7 @@ impl SearchEngine {
                 None,
                 self.batch_size,
                 self.workspace_baseline_hash_mode,
+                false,
             )?;
         }
         Ok(Some(cache.stats()))
@@ -1554,6 +1558,9 @@ impl SearchEngine {
             RefreshMode::Embed => self.embedder.as_ref(),
             RefreshMode::ReuseOnly => None,
         };
+        // Only the background warmup (Embed) may pay for a cold full-tree scan under the lock.
+        // Interactive query paths (ReuseOnly) must stay O(cached) — see `WorkspaceOverlayCache::refresh`.
+        let allow_cold_scan = matches!(mode, RefreshMode::Embed);
         let mut cache = self
             .workspace_overlay_cache
             .lock()
@@ -1567,6 +1574,7 @@ impl SearchEngine {
                 embedder,
                 self.batch_size,
                 &self.store,
+                allow_cold_scan,
             )?;
         } else {
             cache.refresh(
@@ -1575,6 +1583,7 @@ impl SearchEngine {
                 embedder,
                 self.batch_size,
                 self.workspace_baseline_hash_mode,
+                allow_cold_scan,
             )?;
         }
         Ok(cache.snapshot())
@@ -1808,6 +1817,9 @@ mod tests {
 
         fs::write(&file, "Процедура НоваяПроцедура()\nКонецПроцедуры").unwrap();
 
+        // The warmup (Embed) builds the overlay; interactive queries (ReuseOnly) never cold-scan.
+        engine.prime_workspace_overlay().unwrap();
+
         let hits = engine.text_search("НоваяПроцедура", 10, Some("code")).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].symbol_name, "НоваяПроцедура");
@@ -1863,6 +1875,9 @@ mod tests {
 
         fs::remove_file(&file).unwrap();
 
+        // The warmup (Embed) builds the overlay; interactive queries (ReuseOnly) never cold-scan.
+        engine.prime_workspace_overlay().unwrap();
+
         let hits = engine.text_search("УдаляемаяПроцедура", 10, Some("code")).unwrap();
         assert!(hits.is_empty());
     }
@@ -1880,6 +1895,9 @@ mod tests {
         engine.set_workspace_root(workspace);
 
         fs::write(&file, "Процедура НоваяПроцедура()\nКонецПроцедуры").unwrap();
+
+        // The warmup (Embed) builds the overlay; `search status` (ReuseOnly) never cold-scans.
+        engine.prime_workspace_overlay().unwrap();
 
         let stats = engine.workspace_overlay_stats().unwrap().unwrap();
         assert_eq!(stats.overlay_files, 1);
@@ -1904,6 +1922,9 @@ mod tests {
 
         fs::write(&changed, "Процедура НоваяПроцедура()\nКонецПроцедуры").unwrap();
 
+        // The warmup (Embed) builds the overlay; the resolved view reads it via ReuseOnly.
+        engine.prime_workspace_overlay().unwrap();
+
         let view = engine.resolve_workspace_code_view().unwrap().unwrap();
         let symbols: HashSet<&str> =
             view.documents().iter().map(|document| document.symbol_name.as_str()).collect();
@@ -1926,6 +1947,9 @@ mod tests {
         engine.set_workspace_root(workspace);
 
         fs::write(&changed, "Процедура OverlayВерсия()\nКонецПроцедуры").unwrap();
+
+        // The warmup (Embed) builds the overlay; the resolved view reads it via ReuseOnly.
+        engine.prime_workspace_overlay().unwrap();
 
         let baseline = BaselineRef::for_snapshot(CorpusId::WorkspaceCode, "external-main");
         let snapshot = Snapshot::new("external-main", CorpusId::WorkspaceCode);
@@ -2032,6 +2056,9 @@ mod tests {
             })
             .unwrap();
 
+        // The warmup (Embed) builds the overlay; interactive queries (ReuseOnly) never cold-scan.
+        engine.prime_workspace_overlay().unwrap();
+
         let (hits, hidden_paths) =
             engine.workspace_overlay_lexical_hits("ЛокальнаяПроцедура", 10).unwrap();
         assert_eq!(hits.len(), 1);
@@ -2051,6 +2078,9 @@ mod tests {
         engine.index_directory_fts(workspace).unwrap();
         engine.set_workspace_root(workspace);
         engine.enable_workspace_watcher_mode();
+        // The warmup (Embed) initializes the overlay; afterwards the watcher's dirty-path marks are
+        // applied incrementally on the next ReuseOnly query without any cold full-tree scan.
+        engine.prime_workspace_overlay().unwrap();
 
         let initial = engine.workspace_overlay_stats().unwrap().unwrap();
         assert!(initial.watcher_mode);
@@ -2158,6 +2188,26 @@ mod tests {
                     file_object_id: "obj-1".to_owned(),
                 }],
             })
+            .unwrap();
+
+        // Populate the overlay lexically the way the lock-free warmup does — plan the refresh and
+        // publish it with NO embeddings (the embed step failed against the dead endpoint). This is
+        // the exact failed-semantic-warmup state the fix targets: the overlay carries lexical docs
+        // but no vectors, and interactive queries must answer from it without ever cold-scanning or
+        // embedding inline.
+        let manifest =
+            engine.store().load_baseline_manifest_fingerprints("code").unwrap().unwrap_or_default();
+        let plan =
+            crate::workspace_overlay::WorkspaceOverlayCache::plan_full_refresh_from_manifest(
+                &manifest,
+                workspace,
+                engine.store(),
+                &std::collections::HashMap::new(),
+                None,
+            )
+            .unwrap();
+        engine
+            .publish_workspace_overlay(plan, std::collections::HashMap::new(), &HashMap::new())
             .unwrap();
 
         // Lexical overlay still sees the change without any embedding round-trip.
