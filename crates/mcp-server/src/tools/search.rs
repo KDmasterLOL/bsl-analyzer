@@ -277,64 +277,162 @@ fn semantic_code_hits(
             ));
         }
     };
-    if guard.is_none() {
+    {
+        let Some(engine) = guard.as_ref() else {
+            return Ok(CodeHits::Pending(
+                "Search index is being built, please try again in a moment.".to_owned(),
+            ));
+        };
+
+        if let SemanticRuntimeStatus::Failed(_) = semantic_runtime {
+            return Ok(CodeHits::Unavailable(SemanticUnavailable::RuntimeFailed));
+        }
+
+        // The fused engine is published before its vectors exist. Degrade to lexical until
+        // the background pass swaps in a populated index, rather than searching the empty
+        // one and reporting a silent zero.
+        if let SemanticRuntimeStatus::Indexing = semantic_runtime {
+            return Ok(CodeHits::Pending(
+                "RAG semantic index is still building; lexical search is available in the meantime."
+                    .to_owned(),
+            ));
+        }
+
+        if !engine.has_semantic() {
+            return Ok(CodeHits::Unavailable(SemanticUnavailable::NotConfigured));
+        }
+
+        // Best-effort identity gate, kept under the guard and *before* the embed: the reader's
+        // query vectors are only comparable against the baseline's stored vectors if both were
+        // produced by the same embedding model/dimension. A mismatch means the embed could never
+        // match, so checking it here (cheap) avoids paying for a wasted ~1.4s query embed. On a
+        // mismatch, name the exact reason (and the knobs to fix it) instead of silently returning
+        // lexical-only. A baseline with no recorded identity, or a read error, falls through to the
+        // existing behavior rather than hard-failing.
+        if let Some(source) = external_baseline.as_ref() {
+            match source.embedding_identity() {
+                Ok(Some((baseline_model, baseline_dim))) => {
+                    let reader_model = engine.embedding_model().unwrap_or("unset");
+                    let reader_dim = engine.embedding_dimension();
+                    if reader_model != baseline_model || reader_dim != Some(baseline_dim) {
+                        let reader_dim = reader_dim
+                            .map(|dim| dim.to_string())
+                            .unwrap_or_else(|| "unset".to_owned());
+                        let msg = format!(
+                            "semantic skipped: this baseline was indexed with model \
+                             '{baseline_model}' (dim {baseline_dim}), but the reader is configured \
+                             with model '{reader_model}' (dim {reader_dim}); set \
+                             EMBEDDING_MODEL/EMBEDDING_DIM (or [search.baseline.embedding] in \
+                             bsl-analyzer.toml) to match and restart"
+                        );
+                        return Ok(CodeHits::Unavailable(SemanticUnavailable::IdentityMismatch(
+                            msg,
+                        )));
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::debug!(
+                        "failed to read baseline embedding identity for validation: {error}"
+                    );
+                }
+            }
+        }
+    }
+
+    // Capture everything needed from the engine while holding the guard, then drop it so the
+    // ~1.4s embed does not serialize every concurrent search on the single engine Mutex.
+    // `model_id` and `dim` are captured here so `resolve_direct_semantic` (called lock-free
+    // below) can gate baseline readiness without re-acquiring the engine.
+    //
+    // These captures cannot go stale across the unlocked embed window: the engine's embedding
+    // identity (embedder/model/dimension) is fixed for the life of the process — built once from
+    // the startup env config and never reconfigured. The only runtime mutation under the engine
+    // lock is `set_vector_index` (the background pass swapping in the populated index, built from
+    // the same config), which preserves model and dimension. So the captured embedder/model_id/dim
+    // stay consistent with the engine the second guard sees. (If a model-reconfiguration path is
+    // ever added, re-validate identity under the second guard.)
+    let (embedder, workspace_root, model_id, dim) = {
+        let engine = guard.as_ref().expect("checked is_none above");
+        (
+            engine.embedder_clone(),
+            engine.workspace_root().map(Path::to_path_buf),
+            engine.embedding_model().map(str::to_owned),
+            engine.embedding_dimension(),
+        )
+    };
+    drop(guard);
+
+    let Some(embedder) = embedder else {
+        return Ok(CodeHits::Unavailable(SemanticUnavailable::NotConfigured));
+    };
+
+    // Resolve external baseline readiness BEFORE embedding. The snapshot actor round-trip is
+    // cheap and needs no engine lock; the embed (~1.4s) must not fire on a not-ready baseline
+    // (it would be wasted, and the caller would receive EmbedderUnavailable instead of the
+    // correct BaselineNotReady). `resolve_direct_semantic` uses the model_id/dim captured above.
+    let resolved_baseline: Option<DirectResolve> = if let Some(ref source) = external_baseline {
+        let r = resolve_direct_semantic(source, model_id.as_deref(), dim);
+        match r {
+            DirectResolve::Terminal(e) => return Err(external_baseline_mcp_error(&e)),
+            DirectResolve::Unavailable => {
+                // Baseline not ready: the PostgresRemoteOverlay mode has no local fallback.
+                if matches!(workspace_search_mode, WorkspaceSearchMode::PostgresRemoteOverlay) {
+                    return Ok(CodeHits::Unavailable(SemanticUnavailable::BaselineNotReady));
+                }
+                None // Non-Postgres: continue to the local path without embedding for baseline.
+            }
+            r @ DirectResolve::Ready { .. } => Some(r),
+        }
+    } else {
+        // No external baseline: PostgresRemoteOverlay requires one.
+        if matches!(workspace_search_mode, WorkspaceSearchMode::PostgresRemoteOverlay) {
+            return Ok(CodeHits::Unavailable(SemanticUnavailable::BaselineRequired));
+        }
+        None
+    };
+
+    // Embed lock-free now that readiness is confirmed (either baseline Ready or local path).
+    let query_embedding = match embedder.embed(query) {
+        Ok(vector) => vector,
+        // The query embed is a request-time call to a remote embedder on the hot path of every
+        // search. When it times out or transiently fails, degrade to the lexical hits the caller
+        // already has rather than failing the whole tool. A non-embedder error means something
+        // structural is broken, which is worth surfacing as a hard error.
+        Err(SearchError::Embedder(detail)) => {
+            warn!("semantic: query embed failed, degrading to lexical: {detail}");
+            return Ok(CodeHits::Unavailable(SemanticUnavailable::EmbedderUnavailable(detail)));
+        }
+        Err(e) => return Err(McpError::internal_error(format!("search error: {e}"), None)),
+    };
+
+    // Re-acquire the lock for the now-fast search. The engine may have changed while unlocked, so
+    // re-check the readiness conditions that gate a semantic search.
+    let guard = match try_acquire_engine(engine) {
+        Ok(g) => g,
+        Err(AcquireFailure::Poisoned) => return Err(engine_lock_poisoned_error()),
+        Err(AcquireFailure::TimedOut) => {
+            return Ok(CodeHits::Pending(
+                "Semantic search is busy (a long operation is holding the index). Lexical search is available in the meantime."
+                    .to_owned(),
+            ));
+        }
+    };
+    let Some(engine) = guard.as_ref() else {
         return Ok(CodeHits::Pending(
             "Search index is being built, please try again in a moment.".to_owned(),
         ));
-    }
-    let engine = guard.as_ref().expect("checked above");
-
-    if let SemanticRuntimeStatus::Failed(_) = semantic_runtime {
-        return Ok(CodeHits::Unavailable(SemanticUnavailable::RuntimeFailed));
-    }
-
-    // The fused engine is published before its vectors exist. Degrade to lexical until
-    // the background pass swaps in a populated index, rather than searching the empty
-    // one and reporting a silent zero.
-    if let SemanticRuntimeStatus::Indexing = semantic_runtime {
-        return Ok(CodeHits::Pending(
-            "RAG semantic index is still building; lexical search is available in the meantime."
-                .to_owned(),
-        ));
-    }
-
+    };
     if !engine.has_semantic() {
         return Ok(CodeHits::Unavailable(SemanticUnavailable::NotConfigured));
     }
 
-    if let Some(source) = external_baseline {
-        // Best-effort identity gate: the reader's query vectors are only comparable against the
-        // baseline's stored vectors if both were produced by the same embedding model/dimension.
-        // On a mismatch, name the exact reason (and the knobs to fix it) instead of silently
-        // returning lexical-only. A baseline with no recorded identity, or a read error, falls
-        // through to the existing behavior rather than hard-failing.
-        match source.embedding_identity() {
-            Ok(Some((baseline_model, baseline_dim))) => {
-                let reader_model = engine.embedding_model().unwrap_or("unset");
-                let reader_dim = engine.embedding_dimension();
-                if reader_model != baseline_model || reader_dim != Some(baseline_dim) {
-                    let reader_dim =
-                        reader_dim.map(|dim| dim.to_string()).unwrap_or_else(|| "unset".to_owned());
-                    let msg = format!(
-                        "semantic skipped: this baseline was indexed with model '{baseline_model}' \
-                         (dim {baseline_dim}), but the reader is configured with model \
-                         '{reader_model}' (dim {reader_dim}); set EMBEDDING_MODEL/EMBEDDING_DIM \
-                         (or [search.baseline.embedding] in bsl-analyzer.toml) to match and restart"
-                    );
-                    return Ok(CodeHits::Unavailable(SemanticUnavailable::IdentityMismatch(msg)));
-                }
-            }
-            Ok(None) => {}
-            Err(error) => {
-                tracing::debug!(
-                    "failed to read baseline embedding identity for validation: {error}"
-                );
-            }
-        }
-
-        match try_direct_semantic_code(engine, &source, query, limit) {
+    if let Some(DirectResolve::Ready { snapshot, model_id: ref mid, dim: d }) = resolved_baseline {
+        // `external_baseline` is still live (the Arc was not consumed); borrow the service for
+        // the search call.
+        let source = external_baseline.as_ref().expect("resolved_baseline=Some implies Some");
+        match run_direct_semantic(engine, source, &snapshot, mid, d, &query_embedding, limit) {
             DirectResult::Found(hits) => {
-                let workspace_root = engine.workspace_root().map(Path::to_path_buf);
                 return Ok(CodeHits::Ready { hits, workspace_root });
             }
             DirectResult::Terminal(error) => {
@@ -344,6 +442,7 @@ fn semantic_code_hits(
                 if matches!(workspace_search_mode, WorkspaceSearchMode::PostgresRemoteOverlay) {
                     return Ok(CodeHits::Unavailable(SemanticUnavailable::BaselineNotReady));
                 }
+                // Non-Postgres: fall through to local search.
             }
         }
     }
@@ -352,18 +451,8 @@ fn semantic_code_hits(
         return Ok(CodeHits::Unavailable(SemanticUnavailable::BaselineRequired));
     }
 
-    let workspace_root = engine.workspace_root().map(Path::to_path_buf);
-    match engine.search(query, limit, Some("code")) {
+    match engine.search_with_embedding(&query_embedding, limit, Some("code")) {
         Ok(hits) => Ok(CodeHits::Ready { hits, workspace_root }),
-        // The query embed is a request-time call to a remote embedder on the hot path of every
-        // search. When it times out or transiently fails, degrade to the lexical hits the caller
-        // already has rather than failing the whole tool, mirroring the external-baseline path
-        // (`try_direct_semantic_code` treats an embed failure as `Unavailable`). A non-embedder
-        // error means the local index itself is broken, which is worth surfacing as a hard error.
-        Err(SearchError::Embedder(detail)) => {
-            warn!("local semantic: query embed failed, degrading to lexical: {detail}");
-            Ok(CodeHits::Unavailable(SemanticUnavailable::EmbedderUnavailable(detail)))
-        }
         Err(e) => Err(McpError::internal_error(format!("search error: {e}"), None)),
     }
 }
@@ -575,50 +664,74 @@ fn try_direct_lexical_code(
     })
 }
 
-fn try_direct_semantic_code(
-    engine: &SearchEngine,
+/// Outcome of the lock-free baseline readiness check that runs before the query embed.
+enum DirectResolve {
+    /// The baseline is reachable and has a snapshot; carry the ids needed for the search.
+    Ready { snapshot: bsl_search::Snapshot, model_id: String, dim: usize },
+    /// The baseline is not ready or the engine has no embedding model/dim.
+    Unavailable,
+    /// A terminal error from the baseline actor (network/auth failure that retrying cannot fix).
+    Terminal(bsl_search::SearchError),
+}
+
+/// Check whether the external baseline can serve a semantic search — without embedding the query.
+///
+/// Called lock-free, between the two engine-guard acquisitions in `semantic_code_hits`, so a
+/// not-ready baseline aborts before the ~1.4s query embed fires.
+fn resolve_direct_semantic(
     source: &ExternalBaselineService,
-    query: &str,
-    limit: usize,
-) -> DirectResult {
+    model_id: Option<&str>,
+    dim: Option<usize>,
+) -> DirectResolve {
     let snapshot = match source.resolve_snapshot() {
         Ok(Some((_, s))) => s,
-        Ok(None) => return DirectResult::Unavailable,
+        Ok(None) => return DirectResolve::Unavailable,
         Err(e) => {
             if e.is_terminal() {
                 warn!("direct semantic: terminal snapshot resolution error: {e}");
-                return DirectResult::Terminal(e);
+                return DirectResolve::Terminal(e);
             }
             warn!("direct semantic: snapshot resolution failed: {e}");
-            return DirectResult::Unavailable;
+            return DirectResolve::Unavailable;
         }
     };
-    let query_embedding = match engine.embed_query(query) {
-        Ok(e) => e,
-        Err(e) => {
-            warn!("direct semantic: embed_query failed: {e}");
-            return DirectResult::Unavailable;
-        }
+    let Some(model_id) = model_id else {
+        return DirectResolve::Unavailable;
     };
-    let Some(model_id) = engine.embedding_model() else {
-        return DirectResult::Unavailable;
+    let Some(dim) = dim else {
+        return DirectResolve::Unavailable;
     };
-    let Some(dim) = engine.embedding_dimension() else {
-        return DirectResult::Unavailable;
-    };
-    let (overlay_hits, hidden_paths) = match engine.workspace_overlay_semantic_hits(query, limit) {
-        Ok(r) => r,
-        Err(e) => {
-            warn!("direct semantic: overlay query failed: {e}");
-            return DirectResult::Unavailable;
-        }
-    };
+    DirectResolve::Ready { snapshot, model_id: model_id.to_owned(), dim }
+}
+
+/// Execute the external baseline semantic search with a precomputed query vector.
+///
+/// Called under the engine lock after [`resolve_direct_semantic`] confirmed readiness and the
+/// embed completed. The snapshot and model identity were resolved in the lock-free phase and are
+/// passed in directly; no second `resolve_snapshot` call is made.
+fn run_direct_semantic(
+    engine: &SearchEngine,
+    source: &ExternalBaselineService,
+    snapshot: &bsl_search::Snapshot,
+    model_id: &str,
+    dim: usize,
+    query_embedding: &[f32],
+    limit: usize,
+) -> DirectResult {
+    let (overlay_hits, hidden_paths) =
+        match engine.workspace_overlay_semantic_hits_with_embedding(query_embedding, limit) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("direct semantic: overlay query failed: {e}");
+                return DirectResult::Unavailable;
+            }
+        };
     let overlay_semantic: Vec<SemanticHit> =
         overlay_hits.iter().map(SearchHit::to_semantic).collect();
     merge_direct_semantic_with_refill(&overlay_semantic, &hidden_paths, limit, |fetch_limit| {
         source.semantic_search(
             snapshot.id.0.as_str(),
-            &query_embedding,
+            query_embedding,
             model_id,
             dim,
             Some("code"),

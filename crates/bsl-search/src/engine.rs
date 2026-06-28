@@ -1244,6 +1244,27 @@ impl SearchEngine {
         Ok((hits, overlay.hidden_paths.clone()))
     }
 
+    /// Overlay semantic hits from a caller-supplied query vector (embedded off the engine lock),
+    /// so the direct/Postgres path embeds once instead of re-embedding here.
+    pub fn workspace_overlay_semantic_hits_with_embedding(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<(Vec<SearchHit>, HashSet<String>), SearchError> {
+        if self.workspace_root.is_none() {
+            return Ok((Vec::new(), HashSet::new()));
+        }
+        if self.embedder.is_none() {
+            return Ok((Vec::new(), HashSet::new()));
+        }
+        let overlay = self.workspace_overlay_snapshot(RefreshMode::ReuseOnly)?;
+        if overlay.is_empty() {
+            return Ok((Vec::new(), HashSet::new()));
+        }
+        let hits = semantic_hits(&overlay, query_embedding, limit);
+        Ok((hits, overlay.hidden_paths.clone()))
+    }
+
     pub fn resolve_workspace_code_view(&self) -> Result<Option<ResolvedView>, SearchError> {
         self.resolve_workspace_code_view_with(
             BaselineRef::for_snapshot(CorpusId::WorkspaceCode, "local-workspace-baseline"),
@@ -1306,6 +1327,31 @@ impl SearchEngine {
         self.search_persisted(query, limit, collection)
     }
 
+    /// Clone the configured embedder (rebuilds its HTTP agents from config), so the request path
+    /// can embed the query *without* holding the engine lock. `None` when semantic is unconfigured.
+    pub fn embedder_clone(&self) -> Option<Embedder> {
+        self.embedder.clone()
+    }
+
+    /// Run a code search from a query vector embedded by the caller (off the engine lock), instead
+    /// of embedding inline. Mirrors [`SearchEngine::search`] minus the embed step.
+    pub fn search_with_embedding(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+        collection: Option<&str>,
+    ) -> Result<Vec<SearchHit>, SearchError> {
+        if collection == Some("code") {
+            if let Some(overlay_hits) =
+                self.search_with_workspace_overlay_embedding(query_embedding, limit)?
+            {
+                return Ok(overlay_hits);
+            }
+        }
+
+        self.search_persisted_with_embedding(query_embedding, limit, collection)
+    }
+
     fn search_persisted(
         &self,
         query: &str,
@@ -1318,16 +1364,29 @@ impl SearchEngine {
             )
         })?;
         let query_embedding = embedder.embed(query)?;
+        self.search_persisted_with_embedding(&query_embedding, limit, collection)
+    }
 
+    /// The persisted-search body after the query has already been embedded, so callers that
+    /// embed once (the overlay merge, the lock-free request path) need not embed again.
+    fn search_persisted_with_embedding(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+        collection: Option<&str>,
+    ) -> Result<Vec<SearchHit>, SearchError> {
         let fetch_limit = if collection.is_some() { limit * 3 } else { limit };
-        let results = self.index.search(&query_embedding, fetch_limit)?;
+        let results = self.index.search(query_embedding, fetch_limit)?;
+
+        let ids: Vec<i64> = results.iter().map(|result| result.chunk_id).collect();
+        let infos = self.store.chunks_by_ids(&ids)?;
 
         let mut hits = Vec::with_capacity(limit);
         for result in results {
             if hits.len() >= limit {
                 break;
             }
-            if let Some(info) = self.store.chunk_by_id(result.chunk_id)? {
+            if let Some(info) = infos.get(&result.chunk_id).cloned() {
                 if let Some(coll) = collection {
                     if info.collection != coll {
                         continue;
@@ -1360,6 +1419,33 @@ impl SearchEngine {
         let Some(embedder) = &self.embedder else {
             return Ok(None);
         };
+        // ReuseOnly: reuse cached overlay vectors only, never embed inline under the engine lock.
+        // Snapshot before embedding so an empty overlay returns `None` without paying for a query
+        // embed the persisted fallback would only repeat.
+        let overlay = self.workspace_overlay_snapshot(RefreshMode::ReuseOnly)?;
+        if overlay.is_empty() {
+            return Ok(None);
+        }
+        let query_embedding = embedder.embed(query)?;
+        let mut combined =
+            self.search_persisted_with_embedding(&query_embedding, limit * 3, Some("code"))?;
+        combined.retain(|hit| !overlay.hidden_paths.contains(&hit.file_path));
+        combined.extend(semantic_hits(&overlay, &query_embedding, limit));
+        combined.sort_by(|lhs, rhs| rhs.score.total_cmp(&lhs.score));
+        combined.truncate(limit);
+        Ok(Some(combined))
+    }
+
+    /// The overlay-merged code search after the query has already been embedded, so the request
+    /// path can embed once off the engine lock and the persisted fetch never re-embeds.
+    fn search_with_workspace_overlay_embedding(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Option<Vec<SearchHit>>, SearchError> {
+        if self.workspace_root.is_none() {
+            return Ok(None);
+        }
 
         // ReuseOnly: reuse cached overlay vectors only, never embed inline under the engine lock.
         let overlay = self.workspace_overlay_snapshot(RefreshMode::ReuseOnly)?;
@@ -1367,10 +1453,10 @@ impl SearchEngine {
             return Ok(None);
         }
 
-        let query_embedding = embedder.embed(query)?;
-        let mut combined = self.search_persisted(query, limit * 3, Some("code"))?;
+        let mut combined =
+            self.search_persisted_with_embedding(query_embedding, limit * 3, Some("code"))?;
         combined.retain(|hit| !overlay.hidden_paths.contains(&hit.file_path));
-        combined.extend(semantic_hits(&overlay, &query_embedding, limit));
+        combined.extend(semantic_hits(&overlay, query_embedding, limit));
         combined.sort_by(|lhs, rhs| rhs.score.total_cmp(&lhs.score));
         combined.truncate(limit);
         Ok(Some(combined))
@@ -1399,9 +1485,12 @@ impl SearchEngine {
     ) -> Result<Vec<SearchHit>, SearchError> {
         let results = self.store.text_search(query, limit, collection)?;
 
+        let ids: Vec<i64> = results.iter().map(|result| result.chunk_id).collect();
+        let infos = self.store.chunks_by_ids(&ids)?;
+
         let mut hits = Vec::with_capacity(results.len());
         for result in results {
-            if let Some(info) = self.store.chunk_by_id(result.chunk_id)? {
+            if let Some(info) = infos.get(&result.chunk_id).cloned() {
                 // FTS5 bm25 `rank` is negative and *smaller is better*. Map it to a [0,1) score
                 // that *increases* with relevance so any later descending re-sort (the overlay
                 // merge in `text_search_with_workspace_overlay`) keeps the strongest match first
@@ -1973,6 +2062,60 @@ mod tests {
         let hits = engine.text_search("ОбновленаЧерезWatcher", 10, Some("code")).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].symbol_name, "ОбновленаЧерезWatcher");
+    }
+
+    #[test]
+    fn search_with_embedding_uses_precomputed_vector_without_network() {
+        use crate::embedder::EmbedderConfig;
+        use crate::{Chunk, ChunkKind, Store};
+
+        // Populate a file-backed store with two chunks carrying distinct stored vectors, so the
+        // engine builds a real vector index from them. The embedder points at an unreachable URL:
+        // the embedding-free search paths must never call it, so the query resolves offline.
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("bsl-search.db");
+
+        let chunk = |name: &str| Chunk {
+            kind: ChunkKind::Procedure,
+            name: name.to_owned(),
+            is_export: true,
+            annotations: vec![],
+            line_start: 0,
+            line_end: 1,
+            text: format!("Процедура {name}()\nКонецПроцедуры"),
+        };
+        let vec_a = vec![1.0f32, 0.0, 0.0];
+        let vec_b = vec![0.0f32, 1.0, 0.0];
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            store
+                .reindex_file("a.bsl", b"ha", &[chunk("Альфа")], Some(std::slice::from_ref(&vec_a)))
+                .unwrap();
+            store
+                .reindex_file("b.bsl", b"hb", &[chunk("Бета")], Some(std::slice::from_ref(&vec_b)))
+                .unwrap();
+        }
+
+        let config = crate::SearchConfig {
+            embedder: EmbedderConfig {
+                base_url: "http://127.0.0.1:1".to_owned(),
+                model: "test-model".to_owned(),
+                dim: Some(3),
+                api_key: None,
+                provider: None,
+            },
+            execution: crate::EmbeddingExecutionPolicy::default(),
+        };
+        let engine = SearchEngine::new(&db_path, config).unwrap();
+
+        // Querying with chunk A's own vector ranks A first; with B's vector, B first. This
+        // exercises `search_with_embedding` -> `search_persisted_with_embedding` (the batched
+        // `chunks_by_ids` lookup) end to end with no embed round-trip.
+        let hits_a = engine.search_with_embedding(&vec_a, 5, None).unwrap();
+        assert_eq!(hits_a.first().map(|h| h.symbol_name.as_str()), Some("Альфа"));
+
+        let hits_b = engine.search_with_embedding(&vec_b, 5, None).unwrap();
+        assert_eq!(hits_b.first().map(|h| h.symbol_name.as_str()), Some("Бета"));
     }
 
     #[test]
