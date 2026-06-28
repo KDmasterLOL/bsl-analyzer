@@ -463,7 +463,7 @@ pub(crate) fn symbol_tree_heap(v: &Arc<SymbolTree>) -> usize {
 // Condensed per-module symbol list (no green-tree pin): on the cross-module call
 // resolution path. High cap keeps it across chunk-boundary LRU trims so a later
 // chunk resolving a call into this module doesn't re-derive it (re-parse + lower).
-#[salsa::tracked(lru = 32768, heap_size = crate::symbol_tree::symbol_tree_heap)]
+#[salsa::tracked(lru = 2048, heap_size = crate::symbol_tree::symbol_tree_heap)]
 pub fn symbol_tree_query<'db>(
     db: &'db dyn crate::DefDatabase,
     file_id_input: base_db::FileIdInput<'db>,

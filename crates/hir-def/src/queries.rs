@@ -108,7 +108,7 @@ mod heap_estimate {
 // cross-module resolution path. High cap keeps it across chunk-boundary LRU trims
 // so a later chunk doesn't re-derive it. (`module_bodies` below stays low — it is
 // the heavy lowered HIR, needed only while a module's own file is analyzed.)
-#[salsa::tracked(lru = 32768, heap_size = heap_estimate::module_data_heap)]
+#[salsa::tracked(lru = 2048, heap_size = heap_estimate::module_data_heap)]
 pub fn module_data_query<'db>(
     db: &'db dyn DefDatabase,
     file_id_input: FileIdInput<'db>,
