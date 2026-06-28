@@ -659,6 +659,7 @@ mod metadata_tests {
             DiagnosticCode::MissingTempStorageDeletion,
             DiagnosticCode::TernaryOperatorUsage,
             DiagnosticCode::TooManyReturns,
+            DiagnosticCode::TypeMismatchByDocComment,
         ];
 
         for code in disabled_codes {

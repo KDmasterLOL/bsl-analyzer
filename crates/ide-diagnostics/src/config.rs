@@ -105,6 +105,7 @@ impl DiagnosticsConfig {
             DiagnosticCode::MissingTempStorageDeletion,
             DiagnosticCode::TernaryOperatorUsage,
             DiagnosticCode::TooManyReturns,
+            DiagnosticCode::TypeMismatchByDocComment,
             DiagnosticCode::UseSystemInformation,
             DiagnosticCode::UsingLikeInQuery,
         ] {

@@ -9,6 +9,8 @@ Doc-comment type annotations are written by hand and are frequently incomplete, 
 
 The corresponding high-confidence cases — where the expected type comes from the platform, metadata, or corpus — are reported by `TypeMismatch` at its normal severity.
 
+This diagnostic is **disabled by default** because of its low confidence; enable it explicitly in the project configuration if you want these hints.
+
 ## Examples
 
 ```bsl

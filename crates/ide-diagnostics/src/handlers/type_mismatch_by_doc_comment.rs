@@ -10,7 +10,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     scope: DiagnosticScope::All,
     modules: &[],
     minutes_to_fix: 5,
-    activated_by_default: true,
+    activated_by_default: false,
     compatibility_mode: DiagnosticCompatibilityMode::Undefined,
     tags: &[MetadataTag::Suspicious, MetadataTag::Unpredictable],
     can_locate_on_project: false,
