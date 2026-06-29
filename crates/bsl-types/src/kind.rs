@@ -65,6 +65,86 @@ pub enum MetadataKind {
     TabularSectionRow { parent: MdoType },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum MetadataReferenceKind {
+    Role,
+    EventSubscription,
+    ScheduledJob,
+    HttpService,
+    WebService,
+    Subsystem,
+}
+
+impl MetadataReferenceKind {
+    pub const ALL: &'static [Self] = &[
+        Self::Role,
+        Self::EventSubscription,
+        Self::ScheduledJob,
+        Self::HttpService,
+        Self::WebService,
+        Self::Subsystem,
+    ];
+
+    pub fn from_plural(s: &str) -> Option<Self> {
+        let lower = s.to_lowercase().replace('ё', "е");
+        match lower.as_str() {
+            "роли" | "roles" => Some(Self::Role),
+            "подпискинасобытия" | "eventsubscriptions" => {
+                Some(Self::EventSubscription)
+            }
+            "регламентныезадания" | "scheduledjobs" => Some(Self::ScheduledJob),
+            "httpсервисы" | "httpservices" => Some(Self::HttpService),
+            "webсервисы" | "webservices" => Some(Self::WebService),
+            "подсистемы" | "subsystems" => Some(Self::Subsystem),
+            _ => None,
+        }
+    }
+
+    pub const fn russian_singular(self) -> &'static str {
+        match self {
+            Self::Role => "Роль",
+            Self::EventSubscription => "ПодпискаНаСобытие",
+            Self::ScheduledJob => "РегламентноеЗадание",
+            Self::HttpService => "HTTPСервис",
+            Self::WebService => "WebСервис",
+            Self::Subsystem => "Подсистема",
+        }
+    }
+
+    pub const fn english_singular(self) -> &'static str {
+        match self {
+            Self::Role => "Role",
+            Self::EventSubscription => "EventSubscription",
+            Self::ScheduledJob => "ScheduledJob",
+            Self::HttpService => "HTTPService",
+            Self::WebService => "WebService",
+            Self::Subsystem => "Subsystem",
+        }
+    }
+
+    pub const fn russian_plural(self) -> &'static str {
+        match self {
+            Self::Role => "Роли",
+            Self::EventSubscription => "ПодпискиНаСобытия",
+            Self::ScheduledJob => "РегламентныеЗадания",
+            Self::HttpService => "HTTPСервисы",
+            Self::WebService => "WebСервисы",
+            Self::Subsystem => "Подсистемы",
+        }
+    }
+
+    pub const fn english_plural(self) -> &'static str {
+        match self {
+            Self::Role => "Roles",
+            Self::EventSubscription => "EventSubscriptions",
+            Self::ScheduledJob => "ScheduledJobs",
+            Self::HttpService => "HTTPServices",
+            Self::WebService => "WebServices",
+            Self::Subsystem => "Subsystems",
+        }
+    }
+}
+
 impl MetadataKind {
     pub fn object_kind_for(mdo_type: MdoType) -> Option<Self> {
         match mdo_type {
@@ -369,6 +449,11 @@ pub enum TypeKind {
     MetadataRef(MetaRefFacet),
     AnyMetadataRef {
         mdo_type: MdoType,
+    },
+    MetadataReferenceCollection(MetadataReferenceKind),
+    MetadataReference {
+        kind: MetadataReferenceKind,
+        name: Name,
     },
     AnyRef,
     MetadataObject(MetaObjFacet),

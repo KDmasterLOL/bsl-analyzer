@@ -3,7 +3,7 @@ pub use crate::field_enum::FieldInfo;
 use bsl_types::builders::Builders;
 use bsl_types::facet::FormDataFacet;
 use bsl_types::intern::TypeKernelDb;
-use bsl_types::kind::{MetadataKind, TypeId, TypeKind};
+use bsl_types::kind::{MetadataKind, MetadataReferenceKind, TypeId, TypeKind};
 use bsl_types::testing::RootConfigCtx;
 use hir_def::Name;
 
@@ -85,6 +85,14 @@ fn lookup_field_inner(
     let effective_ty =
         crate::this_object::coerce_to_metadata_ref_id(db, projected_ty).unwrap_or(projected_ty);
 
+    if let Some(info) = lookup_configuration_metadata_field(db, effective_ty, field_name) {
+        return Some(info);
+    }
+
+    if let TypeKind::MetadataReferenceCollection(kind) = db.lookup_type(effective_ty) {
+        return lookup_metadata_reference_member(db, resolver, *kind, field_name);
+    }
+
     if let TypeKind::Structure(facet) = db.lookup_type(effective_ty) {
         // Permissive: a known literal key resolves; an unknown key yields no field and (crucially)
         // no `UnresolvedField` — structure field access stays soft.
@@ -124,6 +132,54 @@ fn lookup_field_inner(
         return Some(refined);
     }
     lookup_field_via_platform_property(db, receiver, field_name)
+}
+
+fn lookup_configuration_metadata_field(
+    db: &dyn TypeKernelDb,
+    receiver: TypeId,
+    field_name: &Name,
+) -> Option<FieldInfo> {
+    if !is_configuration_metadata_root(db, receiver) {
+        return None;
+    }
+
+    // Cold (non-manager) kinds only. Manager plurals (`Метаданные.Справочники`) name a
+    // collection of metadata-DESCRIPTION objects (`ОбъектМетаданных`), not the
+    // `СправочникМенеджер`, so they must keep falling through to platform-property
+    // resolution rather than being typed as a manager collection here.
+    let kind = MetadataReferenceKind::from_plural(field_name.as_str())?;
+    Some(FieldInfo {
+        name: Name::new(kind.russian_plural()),
+        name_en: Some(Name::new(kind.english_plural())),
+        ty: db.metadata_reference_collection(kind),
+        value_ty: None,
+        is_readonly: true,
+        origin: crate::field_enum::FieldOrigin::MetadataReference,
+    })
+}
+
+fn is_configuration_metadata_root(db: &dyn TypeKernelDb, receiver: TypeId) -> bool {
+    let TypeKind::PlatformObject(facet) = db.lookup_type(receiver) else {
+        return false;
+    };
+    matches!(facet.name.as_str(), "ОбъектМетаданныхКонфигурация" | "ConfigurationMetadataObject")
+}
+
+fn lookup_metadata_reference_member(
+    db: &dyn TypeKernelDb,
+    resolver: &dyn MetadataResolution,
+    kind: MetadataReferenceKind,
+    field_name: &Name,
+) -> Option<FieldInfo> {
+    let name = resolver.resolve_metadata_reference(kind, field_name.as_str())?;
+    Some(FieldInfo {
+        ty: db.metadata_reference(kind, name.as_str().to_string()),
+        name,
+        name_en: None,
+        value_ty: None,
+        is_readonly: true,
+        origin: crate::field_enum::FieldOrigin::MetadataReference,
+    })
 }
 
 fn lookup_field_in_union_intersection(

@@ -1,7 +1,12 @@
-use hir::{Definition, ModuleId, SemanticSymbol, SemanticSymbolKind, Semantics};
-use ide_db::RootDatabase;
-use syntax::{ast, ast::AstNode, SyntaxKind, TextSize};
-use vfs::FileId;
+use std::path::PathBuf;
+
+use hir::{
+    Definition, MetadataReferenceKind, ModuleId, SemanticSymbol, SemanticSymbolKind, Semantics,
+    TypeKind,
+};
+use ide_db::{base_db::METADATA_SOURCE_ROOT, RootDatabase};
+use syntax::{ast, ast::AstNode, SyntaxKind, TextRange, TextSize};
+use vfs::{FileId, VfsPath};
 
 use crate::{NavigationTarget, SymbolKind};
 
@@ -18,12 +23,142 @@ pub fn goto_definition<DB: RootDatabase>(
         if let Some(nav) = semantic_symbol_to_navigation_target(db, &symbol) {
             return Some(nav);
         }
+        if let Some(ty) = symbol.ty {
+            if let Some(nav) = metadata_reference_to_navigation_target(db, file_id, ty) {
+                return Some(nav);
+            }
+        }
     }
 
     // Fallback: the cursor is on the base method name inside a configuration-extension
     // annotation (`&Вместо`/`&Перед`/`&После`/`&ИзменениеИКонтроль`), which carries no
     // semantic symbol — jump to that method in the paired base module.
     goto_extension_annotation_target(db, file_id, offset)
+}
+
+fn metadata_reference_to_navigation_target<DB: RootDatabase>(
+    db: &DB,
+    from_file_id: FileId,
+    ty: hir::TypeId,
+) -> Option<NavigationTarget> {
+    let TypeKind::MetadataReference { kind, name } = db.lookup_type(ty) else {
+        return None;
+    };
+    let file_id = resolve_metadata_reference_xml_file(db, from_file_id, *kind, name.as_str())?;
+    let range = metadata_reference_name_range(db, file_id, name.as_str())?;
+    Some(NavigationTarget { file_id, range, name: name.clone(), kind: SymbolKind::Variable })
+}
+
+fn resolve_metadata_reference_xml_file<DB: RootDatabase>(
+    db: &DB,
+    from_file_id: FileId,
+    kind: MetadataReferenceKind,
+    name: &str,
+) -> Option<FileId> {
+    let candidates = metadata_reference_xml_relative_paths(db, from_file_id, kind, name);
+    let source_root_id = db.file_source_root_input(from_file_id).source_root_id(db);
+    for relative in &candidates {
+        for (_config_name, config_root) in db.all_config_paths() {
+            let candidate = VfsPath::from(config_root.join(relative));
+            for (idx, candidate_source_root) in
+                [source_root_id, METADATA_SOURCE_ROOT].into_iter().enumerate()
+            {
+                if idx == 1 && candidate_source_root == source_root_id {
+                    continue;
+                }
+                if let Some(file_id) = db.resolve_vfs_path(candidate_source_root, &candidate) {
+                    return Some(file_id);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn metadata_reference_xml_relative_paths<DB: RootDatabase>(
+    db: &DB,
+    from_file_id: FileId,
+    kind: MetadataReferenceKind,
+    name: &str,
+) -> Vec<PathBuf> {
+    let flat = |dir: &str| PathBuf::from(dir).join(format!("{name}.xml"));
+    match kind {
+        MetadataReferenceKind::Role => vec![flat("Roles")],
+        MetadataReferenceKind::EventSubscription => vec![flat("EventSubscriptions")],
+        MetadataReferenceKind::ScheduledJob => vec![flat("ScheduledJobs")],
+        MetadataReferenceKind::HttpService => vec![flat("HTTPServices")],
+        MetadataReferenceKind::WebService => vec![flat("WebServices")],
+        // Subsystems nest on disk as `<Parent>/Subsystems/<Child>.xml`; the parent chain is
+        // recorded in each subsystem's `child_subsystems`, so reconstruct the nested path and
+        // keep the flat top-level path as a fallback.
+        MetadataReferenceKind::Subsystem => {
+            let mut candidates = Vec::new();
+            if let Some(config) = db.merged_visible_configuration(from_file_id) {
+                if let Some(nested) = subsystem_xml_relative_path(config.subsystems(), name) {
+                    candidates.push(nested);
+                }
+            }
+            candidates.push(flat("Subsystems"));
+            candidates
+        }
+    }
+}
+
+/// Reconstruct the on-disk relative path of a (possibly nested) subsystem from the flat
+/// subsystem list, where each subsystem records its direct children by name.
+fn subsystem_xml_relative_path(
+    subsystems: &[bsl_metadata::Subsystem],
+    name: &str,
+) -> Option<PathBuf> {
+    use std::collections::HashMap;
+    use stdx::case::CaseExt;
+
+    let target = subsystems.iter().find(|s| s.name().fold_lower() == name.fold_lower())?;
+    let parent_of: HashMap<String, &str> = subsystems
+        .iter()
+        .flat_map(|parent| {
+            parent.child_subsystems().iter().map(move |child| (child.fold_lower(), parent.name()))
+        })
+        .collect();
+
+    let mut chain = vec![target.name()];
+    let mut current = target.name();
+    while let Some(parent) = parent_of.get(&current.fold_lower()) {
+        if chain.iter().any(|n| n.fold_lower() == parent.fold_lower()) {
+            break; // defensive: a malformed cyclic parent chain must not loop forever
+        }
+        chain.push(parent);
+        current = parent;
+    }
+    chain.reverse();
+
+    let mut path = PathBuf::new();
+    for ancestor in &chain[..chain.len() - 1] {
+        path.push("Subsystems");
+        path.push(ancestor);
+    }
+    path.push("Subsystems");
+    path.push(format!("{}.xml", chain[chain.len() - 1]));
+    Some(path)
+}
+
+fn metadata_reference_name_range<DB: RootDatabase>(
+    db: &DB,
+    file_id: FileId,
+    name: &str,
+) -> Option<TextRange> {
+    let text = db.file_text(file_id);
+    // Bind to the `<Name>…</Name>` element so a bare substring search cannot land on a
+    // longer sibling name (`Роль1` inside `Роль10`) or on the name echoed in a `<Synonym>`.
+    let (start, end) = text.match_indices(name).find_map(|(idx, matched)| {
+        let end = idx.checked_add(matched.len())?;
+        let before = text.get(..idx)?.trim_end();
+        let after = text.get(end..)?.trim_start();
+        (before.ends_with("<Name>") && after.starts_with("</Name>")).then_some((idx, end))
+    })?;
+    let start = u32::try_from(start).ok()?;
+    let end = u32::try_from(end).ok()?;
+    Some(TextRange::new(TextSize::from(start), TextSize::from(end)))
 }
 
 /// Resolve goto-definition when `offset` sits on the method-name string of a
@@ -737,5 +872,43 @@ mod tests {
         let nav = result.unwrap();
         assert_eq!(nav.file_id, manager_file);
         assert_eq!(nav.name, "МетодМенеджера");
+    }
+
+    #[test]
+    fn subsystem_path_is_flat_for_top_level() {
+        use bsl_metadata::Subsystem;
+        let subsystems = vec![Subsystem::new("Продажи")];
+        assert_eq!(
+            subsystem_xml_relative_path(&subsystems, "Продажи"),
+            Some(PathBuf::from("Subsystems").join("Продажи.xml")),
+        );
+    }
+
+    #[test]
+    fn subsystem_path_is_nested_for_child_subsystems() {
+        use bsl_metadata::Subsystem;
+        let subsystems = vec![
+            Subsystem::new("Продажи").with_child_subsystems(vec!["Опт".to_string()]),
+            Subsystem::new("Опт").with_child_subsystems(vec!["Регионы".to_string()]),
+            Subsystem::new("Регионы"),
+        ];
+        assert_eq!(
+            subsystem_xml_relative_path(&subsystems, "Регионы"),
+            Some(
+                PathBuf::from("Subsystems")
+                    .join("Продажи")
+                    .join("Subsystems")
+                    .join("Опт")
+                    .join("Subsystems")
+                    .join("Регионы.xml")
+            ),
+        );
+    }
+
+    #[test]
+    fn subsystem_path_none_for_unknown_name() {
+        use bsl_metadata::Subsystem;
+        let subsystems = vec![Subsystem::new("Продажи")];
+        assert_eq!(subsystem_xml_relative_path(&subsystems, "НетТакой"), None);
     }
 }

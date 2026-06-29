@@ -153,30 +153,44 @@ fn complete_prefix_methods_for_receiver<DB: RootDatabase>(
 ) -> Option<Vec<CompletionItem>> {
     let effective = coerce_to_metadata_ref_id(db, receiver).unwrap_or(receiver);
 
-    let (is_manager, is_metadata_ref, is_union_with_metadata_ref, is_form_data_with_underlying) =
-        match db.lookup_type(effective) {
-            TypeKind::ObjectManager(_) | TypeKind::ManagerCollection(_) => {
-                (true, false, false, false)
-            }
-            TypeKind::MetadataRef(_) | TypeKind::MetadataObject(_) => (false, true, false, false),
-            TypeKind::Union(arms) => {
-                let has_ref = arms.iter().any(|a| {
-                    matches!(
-                        db.lookup_type(*a),
-                        TypeKind::MetadataRef(_) | TypeKind::MetadataObject(_)
-                    )
-                });
-                (false, false, has_ref, false)
-            }
-            TypeKind::FormData { underlying: Some(_), .. } => (false, false, false, true),
-            _ => (false, false, false, false),
-        };
+    let (
+        is_manager,
+        is_metadata_ref,
+        is_metadata_ref_collection,
+        is_union_with_metadata_ref,
+        is_form_data_with_underlying,
+    ) = match db.lookup_type(effective) {
+        TypeKind::ObjectManager(_) | TypeKind::ManagerCollection(_) => {
+            (true, false, false, false, false)
+        }
+        TypeKind::MetadataRef(_) | TypeKind::MetadataObject(_) => {
+            (false, true, false, false, false)
+        }
+        TypeKind::MetadataReferenceCollection(_) => (false, false, true, false, false),
+        TypeKind::Union(arms) => {
+            let has_ref = arms.iter().any(|a| {
+                matches!(
+                    db.lookup_type(*a),
+                    TypeKind::MetadataRef(_)
+                        | TypeKind::MetadataObject(_)
+                        | TypeKind::MetadataReferenceCollection(_)
+                )
+            });
+            (false, false, false, has_ref, false)
+        }
+        TypeKind::FormData { underlying: Some(_), .. } => (false, false, false, false, true),
+        _ => (false, false, false, false, false),
+    };
 
     if is_manager {
         return collect_platform_items_or_none(db, effective, locale);
     }
 
-    if !is_metadata_ref && !is_union_with_metadata_ref && !is_form_data_with_underlying {
+    if !is_metadata_ref
+        && !is_metadata_ref_collection
+        && !is_union_with_metadata_ref
+        && !is_form_data_with_underlying
+    {
         return None;
     }
 
@@ -730,6 +744,7 @@ fn sort_key_for_origin(origin: HirFieldOrigin) -> &'static str {
         HirFieldOrigin::RegisterDimension
         | HirFieldOrigin::RegisterResource
         | HirFieldOrigin::RegisterAttribute => "50_",
+        HirFieldOrigin::MetadataReference => "55_",
         HirFieldOrigin::PlatformProperty => "60_",
     }
 }

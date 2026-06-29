@@ -1,6 +1,8 @@
 use bsl_metadata::MdoType;
-use bsl_platform::{manager_methods_query, TypeNameInput};
-use hir::{ManagerType, Name};
+use bsl_platform::{
+    manager_methods_query, type_methods_query, type_properties_query, TypeNameInput,
+};
+use hir::{ManagerType, MetadataReferenceKind, Name, Semantics, TypeKind};
 use ide_db::RootDatabase;
 use stdx::case::CaseExt;
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
@@ -22,13 +24,38 @@ pub(super) fn mdo_completions<DB: RootDatabase>(
     tracing::debug!(?context, "MDO completion context detected");
 
     match context {
-        MdoContext::CollectionDot { mdo_type } => {
+        MdoContext::MetadataRoot { metadata_expr } => {
+            if !metadata_root_is_available(db, position.file_id, &metadata_expr) {
+                return None;
+            }
+            let items = complete_metadata_root_collections(db, position.locale);
+            if !items.is_empty() {
+                return Some(items);
+            }
+        }
+        MdoContext::MetadataCollection { metadata_expr, collection } => {
+            if !metadata_root_is_available(db, position.file_id, &metadata_expr) {
+                return None;
+            }
+            let items = match collection {
+                MetadataCollectionKind::Manager(mdo_type) => {
+                    complete_mdo_objects(db, position.file_id, mdo_type)
+                }
+                MetadataCollectionKind::Reference(kind) => {
+                    complete_metadata_reference_objects(db, position.file_id, kind)
+                }
+            };
+            if !items.is_empty() {
+                return Some(items);
+            }
+        }
+        MdoContext::Collection { mdo_type } => {
             let items = complete_mdo_objects(db, position.file_id, mdo_type);
             if !items.is_empty() {
                 return Some(items);
             }
         }
-        MdoContext::ObjectDot { mdo_type, object_name } => {
+        MdoContext::Object { mdo_type, object_name } => {
             let mut items = Vec::new();
 
             if let Some(prefix) = mdo_type.manager_type_prefix() {
@@ -55,8 +82,16 @@ pub(super) fn mdo_completions<DB: RootDatabase>(
 
 #[derive(Debug)]
 enum MdoContext {
-    CollectionDot { mdo_type: MdoType },
-    ObjectDot { mdo_type: MdoType, object_name: String },
+    MetadataRoot { metadata_expr: SyntaxNode },
+    MetadataCollection { metadata_expr: SyntaxNode, collection: MetadataCollectionKind },
+    Collection { mdo_type: MdoType },
+    Object { mdo_type: MdoType, object_name: String },
+}
+
+#[derive(Debug, Clone, Copy)]
+enum MetadataCollectionKind {
+    Manager(MdoType),
+    Reference(MetadataReferenceKind),
 }
 
 fn detect_mdo_context(token: &SyntaxToken) -> Option<MdoContext> {
@@ -75,15 +110,26 @@ fn detect_from_dot(dot_token: &SyntaxToken) -> Option<MdoContext> {
     let receiver = find_receiver_before_dot(dot_token)?;
 
     if let Some(ident_text) = get_single_ident(&receiver) {
+        if is_metadata_root_name(&ident_text) {
+            return Some(MdoContext::MetadataRoot { metadata_expr: receiver });
+        }
         if let Some(mdo_type) = MdoType::from_plural(&ident_text) {
-            return Some(MdoContext::CollectionDot { mdo_type });
+            return Some(MdoContext::Collection { mdo_type });
         }
     }
 
     if receiver.kind() == SyntaxKind::FIELD_EXPR {
-        if let Some((base_text, object_name)) = get_field_expr_parts(&receiver) {
+        if let Some((base, base_text, object_name)) = get_field_expr_parts(&receiver) {
+            if is_metadata_root_name(&base_text) {
+                if let Some(collection) = metadata_collection_from_plural(&object_name) {
+                    return Some(MdoContext::MetadataCollection {
+                        metadata_expr: base,
+                        collection,
+                    });
+                }
+            }
             if let Some(mdo_type) = MdoType::from_plural(&base_text) {
-                return Some(MdoContext::ObjectDot { mdo_type, object_name });
+                return Some(MdoContext::Object { mdo_type, object_name });
             }
         }
     }
@@ -110,15 +156,26 @@ fn detect_from_ident_after_dot(ident_token: &SyntaxToken) -> Option<MdoContext> 
     let base = field_expr.children().next()?;
 
     if let Some(base_text) = get_single_ident(&base) {
+        if is_metadata_root_name(&base_text) {
+            return Some(MdoContext::MetadataRoot { metadata_expr: base });
+        }
         if let Some(mdo_type) = MdoType::from_plural(&base_text) {
-            return Some(MdoContext::CollectionDot { mdo_type });
+            return Some(MdoContext::Collection { mdo_type });
         }
     }
 
     if base.kind() == SyntaxKind::FIELD_EXPR {
-        if let Some((base_text, object_name)) = get_field_expr_parts(&base) {
+        if let Some((metadata_base, base_text, object_name)) = get_field_expr_parts(&base) {
+            if is_metadata_root_name(&base_text) {
+                if let Some(collection) = metadata_collection_from_plural(&object_name) {
+                    return Some(MdoContext::MetadataCollection {
+                        metadata_expr: metadata_base,
+                        collection,
+                    });
+                }
+            }
             if let Some(mdo_type) = MdoType::from_plural(&base_text) {
-                return Some(MdoContext::ObjectDot { mdo_type, object_name });
+                return Some(MdoContext::Object { mdo_type, object_name });
             }
         }
     }
@@ -161,7 +218,7 @@ fn get_single_ident(node: &SyntaxNode) -> Option<String> {
     }
 }
 
-fn get_field_expr_parts(node: &SyntaxNode) -> Option<(String, String)> {
+fn get_field_expr_parts(node: &SyntaxNode) -> Option<(SyntaxNode, String, String)> {
     let base = node.children().next()?;
     let base_text = get_single_ident(&base)?;
 
@@ -171,7 +228,32 @@ fn get_field_expr_parts(node: &SyntaxNode) -> Option<(String, String)> {
         .filter(|t| t.kind().is_name_token())
         .last()?;
 
-    Some((base_text, field_token.text().to_string()))
+    Some((base, base_text, field_token.text().to_string()))
+}
+
+fn is_metadata_root_name(text: &str) -> bool {
+    matches!(text.fold_lower().as_str(), "метаданные" | "metadata")
+}
+
+fn metadata_collection_from_plural(text: &str) -> Option<MetadataCollectionKind> {
+    if let Some(kind) = MetadataReferenceKind::from_plural(text) {
+        return Some(MetadataCollectionKind::Reference(kind));
+    }
+    let mdo_type = MdoType::from_plural(text)?;
+    mdo_type.manager_type_prefix().map(|_| MetadataCollectionKind::Manager(mdo_type))
+}
+
+fn metadata_root_is_available<DB: RootDatabase>(
+    db: &DB,
+    file_id: vfs::FileId,
+    metadata_expr: &SyntaxNode,
+) -> bool {
+    let sema = Semantics::new(db);
+    let ty = sema.type_of_expr(file_id, metadata_expr);
+    let TypeKind::PlatformObject(facet) = db.lookup_type(ty) else {
+        return false;
+    };
+    matches!(facet.name.as_str(), "ОбъектМетаданныхКонфигурация" | "ConfigurationMetadataObject")
 }
 
 fn complete_mdo_objects<DB: RootDatabase>(
@@ -218,6 +300,123 @@ fn complete_mdo_objects<DB: RootDatabase>(
 
     tracing::debug!(count = items.len(), "MDO objects found");
     items
+}
+
+fn complete_metadata_root_collections<DB: RootDatabase>(
+    db: &DB,
+    locale: ide_db::base_db::Locale,
+) -> Vec<CompletionItem> {
+    let type_name = "ОбъектМетаданныхКонфигурация";
+    let methods_input = TypeNameInput::new(db, type_name.to_string());
+    let mut items: Vec<CompletionItem> = type_methods_query(db, methods_input)
+        .iter()
+        .map(super::platform_completion::render_platform_method)
+        .collect();
+    let props_input = TypeNameInput::new(db, type_name.to_string());
+    items.extend(type_properties_query(db, props_input).iter().map(|prop| {
+        if let Some(kind) = MetadataReferenceKind::from_plural(prop.name.as_str())
+            .or_else(|| MetadataReferenceKind::from_plural(prop.english_name.as_str()))
+        {
+            render_metadata_reference_collection(kind, Some(prop))
+        } else if let Some(mdo_type) = MdoType::from_plural(prop.name.as_str())
+            .or_else(|| MdoType::from_plural(prop.english_name.as_str()))
+            .filter(|mdo_type| mdo_type.manager_type_prefix().is_some())
+        {
+            render_manager_collection(mdo_type, Some(prop))
+        } else {
+            super::platform_completion::render_platform_property(prop, locale)
+        }
+    }));
+    items
+}
+
+fn render_manager_collection(
+    mdo_type: MdoType,
+    prop: Option<&bsl_platform::PlatformProperty>,
+) -> CompletionItem {
+    let label =
+        prop.map_or_else(|| mdo_type.russian_name().to_string(), |prop| prop.name.to_string());
+    let filter_text = prop.map(|prop| format!("{} {}", prop.name, prop.english_name));
+    CompletionItem {
+        label: label.clone(),
+        detail: Some(format!("Коллекция метаданных ({})", mdo_type.russian_name())),
+        kind: CompletionItemKind::MdoType,
+        insert_text: label,
+        documentation: None,
+        sort_text: None,
+        filter_text,
+        source: None,
+    }
+}
+
+fn render_metadata_reference_collection(
+    kind: MetadataReferenceKind,
+    prop: Option<&bsl_platform::PlatformProperty>,
+) -> CompletionItem {
+    let label =
+        prop.map_or_else(|| kind.russian_plural().to_string(), |prop| prop.name.to_string());
+    let filter_text = prop
+        .map(|prop| format!("{} {}", prop.name, prop.english_name))
+        .or_else(|| Some(format!("{} {}", kind.russian_plural(), kind.english_plural())));
+    CompletionItem {
+        label: label.clone(),
+        detail: Some(format!("Коллекция метаданных ({})", kind.russian_singular())),
+        kind: CompletionItemKind::MdoType,
+        insert_text: label,
+        documentation: None,
+        sort_text: None,
+        filter_text,
+        source: None,
+    }
+}
+
+fn complete_metadata_reference_objects<DB: RootDatabase>(
+    db: &DB,
+    file_id: vfs::FileId,
+    kind: MetadataReferenceKind,
+) -> Vec<CompletionItem> {
+    let Some(config) = db.merged_visible_configuration(file_id) else {
+        return Vec::new();
+    };
+    metadata_reference_names(&config, kind)
+        .into_iter()
+        .map(|name| CompletionItem {
+            label: name.clone(),
+            detail: Some(kind.russian_singular().to_string()),
+            kind: CompletionItemKind::MdoObject,
+            insert_text: name,
+            documentation: None,
+            sort_text: None,
+            filter_text: None,
+            source: None,
+        })
+        .collect()
+}
+
+fn metadata_reference_names(
+    config: &bsl_metadata::Configuration,
+    kind: MetadataReferenceKind,
+) -> Vec<String> {
+    match kind {
+        MetadataReferenceKind::Role => {
+            config.roles().iter().map(|item| item.name().to_string()).collect()
+        }
+        MetadataReferenceKind::EventSubscription => {
+            config.event_subscriptions().iter().map(|item| item.name().to_string()).collect()
+        }
+        MetadataReferenceKind::ScheduledJob => {
+            config.scheduled_jobs().iter().map(|item| item.name().to_string()).collect()
+        }
+        MetadataReferenceKind::HttpService => {
+            config.http_services().iter().map(|item| item.name().to_string()).collect()
+        }
+        MetadataReferenceKind::WebService => {
+            config.web_services().iter().map(|item| item.name().to_string()).collect()
+        }
+        MetadataReferenceKind::Subsystem => {
+            config.subsystems().iter().map(|item| item.name().to_string()).collect()
+        }
+    }
 }
 
 fn complete_manager_methods<DB: RootDatabase>(
