@@ -5,29 +5,32 @@
 //! construction site, passing a tracked structure local *whole* to such a method folds the callee's
 //! summary into the local, so keys added inside helpers / child methods surface at the call site.
 //!
-//! Light syntactic analysis (body walk + call resolution), NOT full inference — this keeps cycles
-//! confined to `summary ↔ summary` (one salsa query, one cycle handler), exactly like
-//! [`crate::method_graph::method_return_type_query`]. Soft: completion/hover only, never a
-//! diagnostic. Ordinary modules only (effective/weaving inference is out of scope).
+//! Light syntactic analysis (body walk + call resolution), NOT full inference, and recursion is
+//! handled with an explicit visited set rather than a salsa fixpoint. That keeps
+//! [`structure_param_keys_query`] acyclic in salsa, so [`crate::infer`] — itself a fixpoint query —
+//! can read it without coupling two fixpoints (which fails to converge). Soft: completion/hover
+//! only, never a diagnostic. Ordinary modules only (effective/weaving inference is out of scope).
 
-use std::cell::OnceCell;
+use std::cell::{OnceCell, RefCell};
 use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use stdx::case::{eq_ignore_case, CaseExt};
+use stdx::case::CaseExt;
 
-use bsl_types::builders::Builders;
-use bsl_types::kind::{Projection, ProjectionField, ProjectionOrigin, TypeId};
+use bsl_types::kind::Projection;
 use hir_def::body::Body;
 use hir_def::hir::{Expr, Stmt};
 use hir_def::resolver::Resolver;
 use hir_def::{MethodId, MethodIdInput, ModuleId};
 
 use crate::db::HirDatabase;
-use crate::method_resolution::{resolve_qualified_call, resolve_three_level_call};
 use crate::structure_keys::{
     collect_structure_shapes, shape_to_projection, SeedRoots, StructureShape, ValueSource,
 };
+
+/// Bounds the interprocedural forwarding DFS (helper → child helper → …). Beyond it a deeper
+/// helper's keys are not pulled in (the visited set already breaks recursion; this is a backstop).
+const MAX_SUMMARY_DEPTH: usize = 16;
 
 /// Per-parameter inserted-key projections for one method. An absent index = no keys inserted or
 /// forwarded for that parameter.
@@ -36,11 +39,10 @@ pub struct StructureParamSummary {
     pub per_param: FxHashMap<u32, Arc<Projection>>,
 }
 
-#[salsa::tracked(
-    lru = 262144,
-    cycle_fn = structure_param_keys_cycle,
-    cycle_initial = structure_param_keys_initial,
-)]
+/// Memoised per-method summary. Acyclic in salsa: it never calls itself as a query — transitive
+/// forwarding is resolved by [`compute_summary`]'s manual visited-set recursion — so a caller that
+/// is itself a fixpoint query (inference) reads a stable value.
+#[salsa::tracked(lru = 262144)]
 pub fn structure_param_keys_query<'db>(
     db: &'db dyn HirDatabase,
     method: MethodIdInput<'db>,
@@ -53,25 +55,44 @@ pub fn structure_param_keys_query<'db>(
     )
     .entered();
 
-    let body = db.method_body(method);
+    let visited = RefCell::new(FxHashSet::default());
+    Arc::new(compute_summary(db, mid, &visited, 0))
+}
+
+/// Compute a method's per-parameter summary, recursing into forwarded callees with `visited` to
+/// break (mutual) recursion. A method already on the path contributes nothing further — the union
+/// of the keys reachable without re-entry, which is the fixpoint.
+fn compute_summary(
+    db: &dyn HirDatabase,
+    mid: MethodId,
+    visited: &RefCell<FxHashSet<MethodId>>,
+    depth: usize,
+) -> StructureParamSummary {
+    if depth > MAX_SUMMARY_DEPTH || !visited.borrow_mut().insert(mid) {
+        return StructureParamSummary::default();
+    }
+
+    let body = db.method_body(MethodIdInput::new(db, mid));
     let symbol_tree = db.symbol_tree(mid.module);
     let Some(msym) = symbol_tree.find_method_by_id(mid) else {
-        return Arc::new(StructureParamSummary::default());
+        return StructureParamSummary::default();
     };
 
     // By-reference params are tracked roots; `Знач` params are a caller-invisible copy (skip).
     let byref: Vec<String> =
         msym.params.iter().filter(|p| !p.is_val).map(|p| p.name.as_str().fold_lower()).collect();
     if byref.is_empty() {
-        return Arc::new(StructureParamSummary::default());
+        return StructureParamSummary::default();
     }
 
-    // Params are live from method entry, so forwarding interleaves correctly in statement order.
+    // Forwarded callees are summarised by recursing here (NOT via the salsa query), so the whole
+    // transitive summary is one acyclic query. Params are live from method entry, so forwarding
+    // interleaves correctly in the collector's source-ordered pass.
     let resolver = Resolver::with_builtins_and_workspace(mid.module);
-    let forwarder = Forwarder::new(db, &resolver, mid.module, &body);
+    let summarize = |callee: MethodId| Arc::new(compute_summary(db, callee, visited, depth + 1));
+    let forwarder = Forwarder::new(db, &resolver, mid.module, &body, &summarize);
     let shapes = collect_structure_shapes(&body, SeedRoots::ParamNames(&byref), Some(&forwarder));
 
-    let no_expr_types = FxHashMap::default();
     let mut per_param: FxHashMap<u32, Arc<Projection>> = FxHashMap::default();
     for (i, param) in msym.params.iter().enumerate() {
         if param.is_val {
@@ -79,90 +100,19 @@ pub fn structure_param_keys_query<'db>(
         }
         let name = param.name.as_str().fold_lower();
         if let Some(shape) = shapes.get(&name) {
-            if let Some(projection) = shape_to_projection(db, &no_expr_types, shape, 0) {
+            if let Some(projection) = shape_to_projection(db, shape, 0) {
                 per_param.insert(i as u32, projection);
             }
         }
     }
 
-    Arc::new(StructureParamSummary { per_param })
-}
-
-#[allow(
-    clippy::needless_lifetimes,
-    reason = "Salsa callback signature requires explicit lifetimes"
-)]
-pub fn structure_param_keys_initial<'db>(
-    _db: &'db dyn HirDatabase,
-    _id: salsa::Id,
-    _method: MethodIdInput<'db>,
-) -> Arc<StructureParamSummary> {
-    Arc::new(StructureParamSummary::default())
-}
-
-#[allow(
-    clippy::needless_lifetimes,
-    reason = "Salsa callback signature requires explicit lifetimes"
-)]
-pub fn structure_param_keys_cycle<'db>(
-    db: &'db dyn HirDatabase,
-    _cycle: &salsa::Cycle,
-    last_provisional: &Arc<StructureParamSummary>,
-    value: Arc<StructureParamSummary>,
-    _method: MethodIdInput<'db>,
-) -> Arc<StructureParamSummary> {
-    join_summaries(db, last_provisional, &value)
-}
-
-/// Order-independent lattice join on the product lattice (pointwise per parameter): field set =
-/// union by folded name; on a name collision the type is `db.union` with `Unknown` as bottom — never
-/// last-value-wins, which would downgrade a known type and break monotonicity. The merged field
-/// order is canonicalised so the interned projection (and thus the salsa value) is independent of
-/// join order, which the cycle fixpoint requires to converge.
-fn join_summaries(
-    db: &dyn HirDatabase,
-    a: &StructureParamSummary,
-    b: &StructureParamSummary,
-) -> Arc<StructureParamSummary> {
-    let mut per_param = a.per_param.clone();
-    for (idx, proj_b) in &b.per_param {
-        per_param
-            .entry(*idx)
-            .and_modify(|proj_a| *proj_a = merge_projections(db, proj_a, proj_b))
-            .or_insert_with(|| Arc::clone(proj_b));
-    }
-    Arc::new(StructureParamSummary { per_param })
-}
-
-fn merge_projections(db: &dyn HirDatabase, a: &Projection, b: &Projection) -> Arc<Projection> {
-    let mut fields: Vec<ProjectionField> = a.fields.to_vec();
-    for fb in b.fields.iter() {
-        if let Some(fa) = fields.iter_mut().find(|f| eq_ignore_case(&f.name, &fb.name)) {
-            fa.ty = join_ty(db, fa.ty, fb.ty);
-        } else {
-            fields.push(fb.clone());
-        }
-    }
-    // Canonical order: the join must be commutative at the interned-representation level.
-    fields.sort_by_key(|f| f.name.fold_lower());
-    Arc::new(Projection::new(fields.into(), ProjectionOrigin::StructureLiteral, None))
-}
-
-fn join_ty(db: &dyn HirDatabase, a: TypeId, b: TypeId) -> TypeId {
-    let unknown = db.unknown();
-    if a == unknown {
-        b
-    } else if b == unknown || a == b {
-        a
-    } else {
-        db.union(vec![a, b])
-    }
+    StructureParamSummary { per_param }
 }
 
 /// Resolves forwarded calls within one body and folds callee summaries into tracked structure
 /// shapes. Built once per body; resolution caches (shadowing locals, global exports) are computed at
-/// most once. Shared by the Stage-1 construction-site fold (in `infer`) and the Stage-2 summary's
-/// parameter forwarding — both drive it through the collector's source-ordered statement pass.
+/// most once. Shared by the Stage-1 construction-site fold (in `infer`, summarising callees via the
+/// memoised query) and the Stage-2 summary's own forwarding (recursing via `compute_summary`).
 pub(crate) struct Forwarder<'a> {
     db: &'a dyn HirDatabase,
     resolver: &'a Resolver,
@@ -172,6 +122,9 @@ pub(crate) struct Forwarder<'a> {
     shadowing_locals: FxHashSet<String>,
     /// Lazily-built lowercased method-name → `MethodId` of the visible global common modules.
     global_methods: OnceCell<FxHashMap<String, MethodId>>,
+    /// Produces a callee's summary — the memoised query (construction site) or recursive
+    /// `compute_summary` (within a summary).
+    summarize: &'a dyn Fn(MethodId) -> Arc<StructureParamSummary>,
 }
 
 impl<'a> Forwarder<'a> {
@@ -180,6 +133,7 @@ impl<'a> Forwarder<'a> {
         resolver: &'a Resolver,
         module: ModuleId,
         body: &Body,
+        summarize: &'a dyn Fn(MethodId) -> Arc<StructureParamSummary>,
     ) -> Self {
         let mut shadowing_locals = FxHashSet::default();
         for (_, binding) in body.bindings_iter() {
@@ -192,11 +146,11 @@ impl<'a> Forwarder<'a> {
                 }
             }
         }
-        Self { db, resolver, module, shadowing_locals, global_methods: OnceCell::new() }
+        Self { db, resolver, module, shadowing_locals, global_methods: OnceCell::new(), summarize }
     }
 
     /// Fold a single call's callee summary into the tracked roots it is passed (whole). A no-op
-    /// unless `call` is a resolvable call passing at least one tracked structure root.
+    /// unless `call` is a resolvable call passing at least one tracked, still-live structure root.
     pub(crate) fn fold_call(
         &self,
         body: &Body,
@@ -223,7 +177,7 @@ impl<'a> Forwarder<'a> {
         }
 
         let Some(callee_mid) = self.resolve_callee(body, body.expr_idx(*callee)) else { return };
-        let summary = structure_param_keys_query(self.db, MethodIdInput::new(self.db, callee_mid));
+        let summary = (self.summarize)(callee_mid);
         if summary.per_param.is_empty() {
             return;
         }
@@ -247,6 +201,8 @@ impl<'a> Forwarder<'a> {
     /// Resolve a call's callee to a `MethodId` using only syntactic forms (no inferred receiver):
     /// same-module bare, global common-module bare, common-module `Модуль.F`, three-level
     /// `Справочники.X.F`. A bare name shadowed by a local/param is not a method call → `None`.
+    /// Uses raw resolver lookups (method id only) — never the `resolve_*_call` wrappers, which
+    /// materialise signatures via inference.
     fn resolve_callee(&self, body: &Body, callee: &Expr) -> Option<MethodId> {
         match callee {
             Expr::Path(name) => {
@@ -261,20 +217,17 @@ impl<'a> Forwarder<'a> {
             }
             Expr::Field { base, field } => {
                 let Expr::Path(module_name) = body.expr_idx(*base) else { return None };
-                resolve_qualified_call(self.db, module_name, field, self.resolver)
+                self.resolver
+                    .resolve_qualified_method(self.db, module_name, field)
                     .ok()
                     .map(|r| r.method_id)
             }
             Expr::QualifiedPath(qname) => match qname.segments() {
-                [mdo_type, mdo_name, method_name] => resolve_three_level_call(
-                    self.db,
-                    mdo_type,
-                    mdo_name,
-                    method_name,
-                    self.resolver,
-                )
-                .ok()
-                .map(|r| r.method_id),
+                [mdo_type, mdo_name, method_name] => self
+                    .resolver
+                    .resolve_three_level_method(self.db, mdo_type, mdo_name, method_name)
+                    .ok()
+                    .map(|r| r.method_id),
                 _ => None,
             },
             _ => None,

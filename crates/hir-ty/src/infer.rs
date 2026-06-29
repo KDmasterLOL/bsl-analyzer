@@ -823,21 +823,34 @@ impl<'db> InferenceContext<'db> {
     pub fn infer_all(&mut self) {
         let _p = tracing::debug_span!("infer_all").entered();
 
-        self.structure_shapes = {
+        self.structure_shapes = if !crate::structure_keys::body_constructs_structure(&self.body) {
+            // No `Новый Структура` in this body → no tracked root → skip collection and the Stage-2
+            // forwarder entirely (keeps the feature off the hot path for most bodies).
+            FxHashMap::default()
+        } else {
+            use crate::structure_keys::{collect_structure_shapes, SeedRoots};
             // Stage 2 interprocedural forwarding is ordinary-modules only — effective
             // (`&ИзменениеИКонтроль`) and weaving inference use separate symbol contexts and are
             // out of scope, so no forwarder is built there (byte-identical Stage-1 behaviour).
             let ordinary = self.local_symbols.is_none() && self.weaving_base.is_none();
-            let resolver = self.get_resolver();
-            let module = hir_def::ModuleId::new(self.context_file_id);
-            let forwarder = ordinary.then(|| {
-                crate::structure_param_keys::Forwarder::new(self.db, &resolver, module, &self.body)
-            });
-            crate::structure_keys::collect_structure_shapes(
-                &self.body,
-                crate::structure_keys::SeedRoots::NewLiterals,
-                forwarder.as_ref(),
-            )
+            if ordinary {
+                let resolver = self.get_resolver();
+                let module = hir_def::ModuleId::new(self.context_file_id);
+                // Callee summaries come from the memoised (acyclic) query, so reading them here does
+                // not couple inference's fixpoint with a second one.
+                let summarize = |mid: hir_def::MethodId| {
+                    crate::structure_param_keys::structure_param_keys_query(
+                        self.db,
+                        hir_def::MethodIdInput::new(self.db, mid),
+                    )
+                };
+                let forwarder = crate::structure_param_keys::Forwarder::new(
+                    self.db, &resolver, module, &self.body, &summarize,
+                );
+                collect_structure_shapes(&self.body, SeedRoots::NewLiterals, Some(&forwarder))
+            } else {
+                collect_structure_shapes(&self.body, SeedRoots::NewLiterals, None)
+            }
         };
 
         let stmts: Vec<StmtIdx> = self.body.body_stmts_typed().to_vec();
@@ -1343,12 +1356,9 @@ impl<'db> InferenceContext<'db> {
             // Soft — never feeds a diagnostic.
             if matches!(self.db.lookup_type(ty_id), TypeKind::Structure(_)) {
                 let key = name.as_str().fold_lower();
-                if let Some(rich) = crate::structure_keys::materialize(
-                    self.db,
-                    &self.structure_shapes,
-                    &self.expr_types,
-                    &key,
-                ) {
+                if let Some(rich) =
+                    crate::structure_keys::materialize(self.db, &self.structure_shapes, &key)
+                {
                     return rich;
                 }
             }

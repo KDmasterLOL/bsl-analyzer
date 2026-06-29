@@ -29,18 +29,32 @@ use crate::db::HirDatabase;
 /// the materialiser. Beyond it a nested value degrades to an untyped structure.
 const MAX_NEST_DEPTH: usize = 4;
 
-/// Where a structure key's value comes from. Resolved to a `TypeId` only at materialisation time —
-/// an `ExprId` must never reach the interned [`Projection`].
+/// Where a structure key's value type comes from. Deliberately depends only on syntax (Phase 0) and
+/// already-stable types — NEVER on the inference cache (`expr_types`). A structure used as a
+/// method's return value flows into `method_return_type`'s fixpoint; if its interned type shifted
+/// with provisional value types across cycle iterations, that fixpoint would never converge. So a
+/// non-literal value contributes only its key *name* (`Unknown` type), not its inferred type.
 pub(crate) enum ValueSource {
     /// The value is itself a literal `Новый Структура(...)` whose shape we collected.
     Literal(StructureShape),
-    /// The value is an arbitrary expression; its type is taken from the inference cache if available.
-    Expr(ExprId),
+    /// The value is a scalar literal — typed directly and stably.
+    Scalar(ScalarKind),
     /// A type already resolved elsewhere — used by Stage 2 to inject a callee summary's field types
-    /// (an interned `TypeId`, never an `ExprId`).
+    /// (an interned `TypeId`, never an `ExprId`; the summary itself is computed stably).
     Resolved(TypeId),
-    /// No value, or a non-literal we do not type (key still surfaced).
+    /// No value, or a non-literal expression whose type we do not pin (key still surfaced).
     Unknown,
+}
+
+/// Scalar literal kinds we can type without consulting inference.
+#[derive(Clone, Copy)]
+pub(crate) enum ScalarKind {
+    String,
+    Number,
+    Boolean,
+    Date,
+    Null,
+    Undefined,
 }
 
 struct StructField {
@@ -192,12 +206,11 @@ fn as_method_call<'b>(
 pub(crate) fn materialize(
     db: &dyn HirDatabase,
     shapes: &FxHashMap<String, StructureShape>,
-    expr_types: &FxHashMap<ExprId, TypeId>,
     local_lower: &str,
 ) -> Option<TypeId> {
     let shape = shapes.get(local_lower)?;
     // No known keys → keep the plain untyped structure (unchanged display/behaviour).
-    let projection = shape_to_projection(db, expr_types, shape, 0)?;
+    let projection = shape_to_projection(db, shape, 0)?;
     Some(db.structure_typed(projection, TypeOrigin::BslLiteral))
 }
 
@@ -217,7 +230,6 @@ pub(crate) fn structure_projection_fields(facet: &StructureFacet) -> Option<Arc<
 /// by Stage-1 local materialisation and the Stage-2 summary's per-param projections.
 pub(crate) fn shape_to_projection(
     db: &dyn HirDatabase,
-    expr_types: &FxHashMap<ExprId, TypeId>,
     shape: &StructureShape,
     depth: usize,
 ) -> Option<Arc<Projection>> {
@@ -229,14 +241,11 @@ pub(crate) fn shape_to_projection(
         .iter()
         .map(|f| {
             let ty = match &f.source {
-                ValueSource::Literal(child) => {
-                    match shape_to_projection(db, expr_types, child, depth + 1) {
-                        Some(p) => db.structure_typed(p, TypeOrigin::BslLiteral),
-                        None => db.structure(None),
-                    }
-                }
-                // Never infer ahead of the read site: only use an already-cached value type.
-                ValueSource::Expr(e) => expr_types.get(e).copied().unwrap_or_else(|| db.unknown()),
+                ValueSource::Literal(child) => match shape_to_projection(db, child, depth + 1) {
+                    Some(p) => db.structure_typed(p, TypeOrigin::BslLiteral),
+                    None => db.structure(None),
+                },
+                ValueSource::Scalar(kind) => scalar_type(db, *kind),
                 ValueSource::Resolved(t) => *t,
                 ValueSource::Unknown => db.unknown(),
             };
@@ -244,6 +253,17 @@ pub(crate) fn shape_to_projection(
         })
         .collect();
     Some(Arc::new(Projection::new(fields.into(), ProjectionOrigin::StructureLiteral, None)))
+}
+
+fn scalar_type(db: &dyn HirDatabase, kind: ScalarKind) -> TypeId {
+    match kind {
+        ScalarKind::String => db.string(None, false),
+        ScalarKind::Number => db.number(None, None),
+        ScalarKind::Boolean => db.boolean(),
+        ScalarKind::Date => db.date(bsl_types::facet::DateComponent::DateTime),
+        ScalarKind::Null => db.null(),
+        ScalarKind::Undefined => db.undefined(),
+    }
 }
 
 /// The shape of a `Новый Структура(...)` constructor expression, or `None` if `expr` is not one.
@@ -274,9 +294,21 @@ fn constructor_shape_of(body: &Body, expr: ExprId, depth: usize) -> Option<Struc
 
 /// Classify a value expression: a nested literal structure, or an opaque expression.
 fn value_source_of(body: &Body, expr: ExprId, depth: usize) -> ValueSource {
-    match constructor_shape_of(body, expr, depth + 1) {
-        Some(nested) => ValueSource::Literal(nested),
-        None => ValueSource::Expr(expr),
+    if let Some(nested) = constructor_shape_of(body, expr, depth + 1) {
+        return ValueSource::Literal(nested);
+    }
+    match body.expr(expr) {
+        Expr::Literal(lit) => match lit {
+            Literal::String(_) => ValueSource::Scalar(ScalarKind::String),
+            Literal::Number(_) => ValueSource::Scalar(ScalarKind::Number),
+            Literal::Bool(_) => ValueSource::Scalar(ScalarKind::Boolean),
+            Literal::Date(_) => ValueSource::Scalar(ScalarKind::Date),
+            Literal::Null => ValueSource::Scalar(ScalarKind::Null),
+            Literal::Undefined => ValueSource::Scalar(ScalarKind::Undefined),
+        },
+        // A non-literal value (variable, call, …): surface the key name but do not pin a type, so
+        // the structure's interned type stays stable across inference iterations.
+        _ => ValueSource::Unknown,
     }
 }
 
@@ -330,6 +362,15 @@ fn navigate_mut<'a>(
 
 fn is_structure_name(name: &hir_def::Name) -> bool {
     crate::method_lookup::is_platform_name(name, "Структура", "Structure")
+}
+
+/// Cheap gate: does this body construct a `Структура` literal at all? If not, there is no tracked
+/// root, so the whole collection (and the Stage-2 forwarder) can be skipped — the common case for
+/// most bodies, keeping the feature off the hot inference path.
+pub(crate) fn body_constructs_structure(body: &Body) -> bool {
+    body.exprs_iter().any(|(_, expr)| {
+        matches!(expr, Expr::New { type_name: Some(name), .. } if is_structure_name(name))
+    })
 }
 
 fn is_insert_method(name: &hir_def::Name) -> bool {

@@ -27,6 +27,14 @@ pub fn is_assignable(db: &dyn TypeKernelDb, from: TypeId, to: TypeId) -> bool {
         return parts.iter().any(|p| is_assignable(db, from, *p));
     }
 
+    // Any structure is assignable to any structure annotation regardless of inferred keys: BSL
+    // structures are dynamic dictionaries, so a key set is a soft completion aid, never a subtyping
+    // constraint. (Without this, an inferred `Структура(k1, k2)` would not match a plain `Структура`
+    // parameter — they are distinct interned types — manufacturing TypeMismatch false positives.)
+    if matches!(from_kind, TypeKind::Structure(_)) && matches!(to_kind, TypeKind::Structure(_)) {
+        return true;
+    }
+
     if matches!(from_kind, TypeKind::Null) && is_ref_kind(to_kind) {
         return true;
     }
