@@ -230,29 +230,41 @@ impl McpServer {
         let p = params.0;
         match p.action.as_str() {
             "info" => {
-                let config =
-                    self.state.configuration().await.ok_or_else(|| {
+                let (config, extensions) =
+                    self.state.fresh_configuration(false).await.ok_or_else(|| {
                         McpError::invalid_params("Configuration not loaded", None)
                     })?;
-                let extensions = self.state.extensions().await;
                 tools::metadata::get_configuration_info(&config, &extensions)
             }
             "tree" => {
-                let config =
-                    self.state.configuration().await.ok_or_else(|| {
+                let (config, extensions) =
+                    self.state.fresh_configuration(false).await.ok_or_else(|| {
                         McpError::invalid_params("Configuration not loaded", None)
                     })?;
-                let extensions = self.state.extensions().await;
                 tools::metadata::get_metadata_tree(&config, &extensions, p.filter)
             }
             "object" => {
-                let config =
-                    self.state.configuration().await.ok_or_else(|| {
-                        McpError::invalid_params("Configuration not loaded", None)
-                    })?;
                 let object_type = require(p.object_type, "object_type", "object")?;
                 let object_name = require(p.object_name, "object_name", "object")?;
-                tools::metadata::get_object_structure(&config, &object_type, &object_name)
+                let (config, _) =
+                    self.state.fresh_configuration(false).await.ok_or_else(|| {
+                        McpError::invalid_params("Configuration not loaded", None)
+                    })?;
+                match tools::metadata::get_object_structure(&config, &object_type, &object_name) {
+                    Ok(result) => Ok(result),
+                    // A miss for a VALID object type may be an object added since the last
+                    // throttled scan: force one fresh drift check and retry. A bad object
+                    // type is returned as-is — reloading cannot fix it, and it must not force
+                    // a scan (which would let a loop of bad calls hammer the filesystem).
+                    Err(_) if object_type.parse::<bsl_metadata::MdoType>().is_ok() => {
+                        let (config, _) =
+                            self.state.fresh_configuration(true).await.ok_or_else(|| {
+                                McpError::invalid_params("Configuration not loaded", None)
+                            })?;
+                        tools::metadata::get_object_structure(&config, &object_type, &object_name)
+                    }
+                    Err(e) => Err(e),
+                }
             }
             "form" => {
                 // `object_name` is required for an object's forms but not for `CommonForm`

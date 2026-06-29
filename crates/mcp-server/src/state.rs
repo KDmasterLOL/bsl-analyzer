@@ -8,13 +8,14 @@ use notify::{
     Config as NotifyConfig, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
 };
 use onec_client::Client as OnecClient;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use std::{
     env,
     path::{Path, PathBuf},
 };
-use tokio::sync::RwLock;
 
 /// The search engine behind a mutex. It MUST stay a `Mutex` (not an `RwLock`): the engine
 /// owns a `rusqlite::Connection`, which is `Send` but `!Sync` — its internal statement cache
@@ -26,8 +27,10 @@ pub(crate) type SharedSearchEngine = Arc<Mutex<Option<SearchEngine>>>;
 
 #[derive(Clone)]
 pub struct SharedState {
-    configuration: Arc<RwLock<Option<Configuration>>>,
-    extensions: Arc<RwLock<Vec<(String, Configuration)>>>,
+    /// Drift-aware metadata configuration snapshot (workspace profile only; `None` for
+    /// the reference/shared profiles). Behind a blocking `Mutex` because a reload is
+    /// synchronous I/O, run off the async path via `spawn_blocking`.
+    metadata_cache: Option<Arc<Mutex<MetadataCache>>>,
     workspace_root: Option<PathBuf>,
     /// The configuration root (the `Configuration.xml`-bearing directory, e.g. `src/cf`),
     /// which may be nested under `workspace_root`. File-tree lookups such as
@@ -129,6 +132,86 @@ struct PendingEmbed {
     config: bsl_search::SearchConfig,
 }
 
+/// Minimum time between on-disk drift scans on the metadata read path, mirroring the
+/// graph/diagnostics throttle so an agent firing `metadata` calls in a loop cannot turn
+/// each into a full stat-walk of the workspace.
+const METADATA_DRIFT_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Floor between *forced* scans (a `metadata object` miss bypasses the throttle to catch
+/// a just-added object), so a burst of lookups for a genuinely-absent object still cannot
+/// re-scan more than a few times per second.
+const METADATA_FORCE_FLOOR: Duration = Duration::from_millis(250);
+
+/// The served metadata configuration plus the inputs needed to keep it fresh. The MCP
+/// `metadata` tool serves a whole [`Configuration`] (not the per-MDO Salsa substrate), so
+/// freshness here is a pull-on-request reload of that snapshot — mirroring the graph and
+/// diagnostics drift model — rather than Salsa invalidation. A stat-scan of the workspace
+/// reloads base + extensions only when a metadata `.xml` actually changed (added object,
+/// edit, or removal), so the daemon reflects a branch switch without a restart.
+struct MetadataCache {
+    config: Option<Configuration>,
+    extensions: Vec<(String, Configuration)>,
+    /// Configuration root (`Configuration.xml`-bearing dir) reloaded for the base config.
+    main_path: PathBuf,
+    /// Extension configuration roots, reloaded independently of the base.
+    ext_paths: Vec<(String, PathBuf)>,
+    /// Workspace root walked by the drift scan — spans base AND extensions, so an
+    /// extension's XML edit is noticed too.
+    scan_root: PathBuf,
+    last_scan: Option<Instant>,
+    /// Per-file fingerprints from the last scan, the `classify_changes` baseline.
+    stored_fp: HashMap<String, u64>,
+    /// Whether the most recent scan actually reloaded (found metadata drift). Gates the
+    /// forced miss-retry: once a forced scan comes up empty, the next force waits the full
+    /// interval instead of the 250ms floor, so a loop of absent-object lookups cannot
+    /// stat-walk the workspace several times a second.
+    last_scan_reloaded: bool,
+}
+
+impl MetadataCache {
+    /// Re-stat the workspace and, if any metadata `.xml` changed since the last scan,
+    /// reload the base and extension configurations. Throttled by `METADATA_DRIFT_INTERVAL`
+    /// (or `METADATA_FORCE_FLOOR` when `force`, used on a not-found retry). A `.bsl`-only
+    /// change is ignored: it cannot alter the metadata structure this tool serves.
+    fn refresh(&mut self, force: bool) {
+        // Force only buys the short floor right after a scan that DID reload (e.g. several
+        // objects added in a burst); once a forced scan comes up empty it reverts to the
+        // full interval, so repeated lookups of a genuinely-absent object cannot keep
+        // forcing a workspace stat-walk every 250ms.
+        let floor = if force && self.last_scan_reloaded {
+            METADATA_FORCE_FLOOR
+        } else {
+            METADATA_DRIFT_INTERVAL
+        };
+        if self.last_scan.is_some_and(|last| last.elapsed() < floor) {
+            return;
+        }
+
+        let current = crate::graph::scan_file_stats(&self.scan_root);
+        let diff = crate::graph::classify_changes(&self.stored_fp, &current);
+        self.stored_fp = current.iter().map(|s| (s.path.clone(), s.fingerprint())).collect();
+        self.last_scan = Some(Instant::now());
+
+        let reloaded = !diff.is_empty() && diff.touches_metadata();
+        self.last_scan_reloaded = reloaded;
+        if !reloaded {
+            return;
+        }
+
+        match bsl_metadata::load_from_directory(&self.main_path) {
+            Ok(config) => self.config = Some(config),
+            Err(e) => tracing::warn!(path = ?self.main_path, "metadata reload failed: {e}"),
+        }
+        self.extensions = self
+            .ext_paths
+            .iter()
+            .filter_map(|(name, path)| {
+                bsl_metadata::load_from_directory(path).ok().map(|c| (name.clone(), c))
+            })
+            .collect();
+    }
+}
+
 impl SharedState {
     pub fn workspace(source_dir: PathBuf) -> Self {
         let project = project_model::Project::new(&source_dir);
@@ -208,9 +291,28 @@ impl SharedState {
 
         let diagnostics = DiagnosticsState::for_workspace(source_dir.clone());
 
+        // Seed the drift baseline from the boot state so the first metadata call only
+        // reloads if the workspace actually changed since startup.
+        let metadata_cache = {
+            let initial_stats = crate::graph::scan_file_stats(&source_dir);
+            let stored_fp: HashMap<String, u64> =
+                initial_stats.iter().map(|s| (s.path.clone(), s.fingerprint())).collect();
+            Arc::new(Mutex::new(MetadataCache {
+                config: configuration,
+                extensions,
+                main_path: config_path.to_path_buf(),
+                ext_paths: project.extension_paths().to_vec(),
+                scan_root: source_dir.clone(),
+                last_scan: Some(Instant::now()),
+                stored_fp,
+                // The boot eager-load counts as a reload, so a first forced miss-retry is
+                // allowed the short floor.
+                last_scan_reloaded: true,
+            }))
+        };
+
         Self {
-            configuration: Arc::new(RwLock::new(configuration)),
-            extensions: Arc::new(RwLock::new(extensions)),
+            metadata_cache: Some(metadata_cache),
             workspace_root: Some(source_dir),
             source_root: Some(source_root),
             onec_client: None,
@@ -428,8 +530,7 @@ impl SharedState {
         }
 
         Self {
-            configuration: Arc::new(RwLock::new(None)),
-            extensions: Arc::new(RwLock::new(Vec::new())),
+            metadata_cache: None,
             workspace_root: None,
             source_root: None,
             onec_client: None,
@@ -449,8 +550,7 @@ impl SharedState {
 
     pub fn shared() -> Self {
         Self {
-            configuration: Arc::new(RwLock::new(None)),
-            extensions: Arc::new(RwLock::new(Vec::new())),
+            metadata_cache: None,
             workspace_root: None,
             source_root: None,
             onec_client: None,
@@ -484,45 +584,27 @@ impl SharedState {
         self.onec_client.as_ref()
     }
 
-    pub async fn update_configuration(&self, config: Configuration) {
-        *self.configuration.write().await = Some(config);
-    }
-
-    pub fn update_configuration_blocking(&self, config: Configuration) {
-        *self.configuration.blocking_write() = Some(config);
-    }
-
     pub fn set_workspace_root(&mut self, root: PathBuf) {
         self.workspace_root = Some(root);
     }
 
-    pub async fn configuration(&self) -> Option<Configuration> {
-        self.configuration.read().await.clone()
-    }
-
-    pub async fn with_configuration<F, R>(&self, f: F) -> Option<R>
-    where
-        F: FnOnce(&Configuration) -> R,
-    {
-        let guard = self.configuration.read().await;
-        guard.as_ref().map(f)
-    }
-
-    pub fn configuration_arc(&self) -> Option<std::sync::Arc<Configuration>> {
-        let guard = self.configuration.blocking_read();
-        guard.as_ref().map(|c| std::sync::Arc::new(c.clone()))
-    }
-
-    pub async fn extensions(&self) -> Vec<(String, Configuration)> {
-        self.extensions.read().await.clone()
-    }
-
-    pub async fn with_extensions<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(&[(String, Configuration)]) -> R,
-    {
-        let guard = self.extensions.read().await;
-        f(&guard)
+    /// The current metadata configuration and its extensions, reloaded from disk if the
+    /// workspace drifted since the last check (throttled). `force` bypasses the throttle on
+    /// a not-found retry, to catch a just-added object. `None` outside the workspace
+    /// profile. The reload is synchronous I/O, so it runs on a blocking thread.
+    pub async fn fresh_configuration(
+        &self,
+        force: bool,
+    ) -> Option<(Configuration, Vec<(String, Configuration)>)> {
+        let cache = self.metadata_cache.clone()?;
+        tokio::task::spawn_blocking(move || {
+            let mut cache = cache.lock().expect("metadata cache mutex poisoned");
+            cache.refresh(force);
+            cache.config.clone().map(|config| (config, cache.extensions.clone()))
+        })
+        .await
+        .ok()
+        .flatten()
     }
 
     pub fn workspace_root(&self) -> Option<&PathBuf> {
@@ -1498,6 +1580,88 @@ mod tests {
         }));
         assert!(unwound.is_err(), "the task panicked");
         assert_eq!(counter.load(Ordering::SeqCst), 0, "the hold was released on unwind");
+    }
+
+    #[test]
+    fn metadata_cache_reloads_base_config_on_xml_drift() {
+        use super::MetadataCache;
+        use bsl_metadata::MdoType;
+
+        fn catalog_xml(name: &str, uuid: &str) -> String {
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Catalog uuid="{uuid}">
+        <Properties><Name>{name}</Name><CodeLength>9</CodeLength></Properties>
+    </Catalog>
+</MetaDataObject>"#
+            )
+        }
+
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        let catalogs = root.join("Catalogs");
+        fs::create_dir_all(&catalogs).unwrap();
+        fs::write(
+            catalogs.join("Справочник1.xml"),
+            catalog_xml("Справочник1", "00000000-0000-0000-0000-000000000001"),
+        )
+        .unwrap();
+
+        // Seed the cache from the pre-add state (only Справочник1 on disk).
+        let initial = crate::graph::scan_file_stats(root);
+        let stored_fp = initial.iter().map(|s| (s.path.clone(), s.fingerprint())).collect();
+        let mut cache = MetadataCache {
+            config: bsl_metadata::load_from_directory(root).ok(),
+            extensions: Vec::new(),
+            main_path: root.to_path_buf(),
+            ext_paths: Vec::new(),
+            scan_root: root.to_path_buf(),
+            // `None` so the first refresh always scans — exercises drift without sleeping
+            // out the throttle.
+            last_scan: None,
+            stored_fp,
+            last_scan_reloaded: true,
+        };
+        let has = |cache: &MetadataCache, name: &str| {
+            cache.config.as_ref().unwrap().find_metadata_object(MdoType::Catalog, name).is_some()
+        };
+        assert!(!has(&cache, "Товары"), "Товары absent before the add");
+
+        // A new catalog appears on disk: the drift scan reloads the base config, so the
+        // daemon reflects it with no restart (the original branch-switch bug).
+        fs::write(
+            catalogs.join("Товары.xml"),
+            catalog_xml("Товары", "00000000-0000-0000-0000-000000000002"),
+        )
+        .unwrap();
+        cache.refresh(false);
+        assert!(has(&cache, "Товары"), "Товары resolves after the drift reload");
+
+        // Throttle: a change within the interval is NOT observed by a non-forced scan
+        // (the reload above set `last_scan`), bounding the stat-walk cost on big configs.
+        fs::write(
+            catalogs.join("Услуги.xml"),
+            catalog_xml("Услуги", "00000000-0000-0000-0000-000000000003"),
+        )
+        .unwrap();
+        cache.refresh(false);
+        assert!(
+            !has(&cache, "Услуги"),
+            "throttled: a change within the interval is not yet reloaded"
+        );
+
+        // Storm guard: once a forced scan came up empty (`last_scan_reloaded = false`), a
+        // subsequent forced refresh within the interval reverts to the full throttle and
+        // does NOT re-scan — so repeated lookups of an absent object cannot hammer the FS.
+        cache.last_scan = Some(std::time::Instant::now());
+        cache.last_scan_reloaded = false;
+        cache.refresh(true);
+        assert!(
+            !has(&cache, "Услуги"),
+            "forced retry throttled after a fruitless force (no FS hammer)"
+        );
     }
 
     #[test]
