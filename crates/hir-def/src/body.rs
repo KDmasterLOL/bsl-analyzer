@@ -2,6 +2,7 @@ pub mod lower;
 
 use la_arena::Arena;
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::sync::Arc;
 use stdx::case::CaseExt;
 use syntax::SyntaxNode;
 use text_size::TextRange;
@@ -78,6 +79,13 @@ impl Body {
 
     pub fn binding_idx(&self, id: BindingIdx) -> &Binding {
         &self.bindings[id]
+    }
+
+    /// Approximate live heap bytes of this body for Salsa's `memory_usage`
+    /// report — see [`body_heap`]. Exposed for downstream crates (dataflow) whose
+    /// memoised results own a cloned [`Body`].
+    pub fn estimated_heap(&self) -> usize {
+        body_heap(self)
     }
 
     pub fn expr_count(&self) -> usize {
@@ -304,6 +312,125 @@ impl BodySourceMap {
     pub fn binding_at_range(&self, range: TextRange) -> Option<BindingId> {
         self.range_to_binding.get(&range).copied()
     }
+}
+
+/// Rough live bytes of a lowered [`Body`] for Salsa's `memory_usage`
+/// introspection: the expr/stmt/binding arenas plus every owned payload they
+/// point at — names, string/date literals, boxed argument and branch index
+/// lists — and the body-level index boxes, SDBL side table, and recovered set.
+/// Element-count granularity (spare arena/box capacity is ignored), so the
+/// figure tracks live content within a small factor.
+pub(crate) fn body_heap(body: &Body) -> usize {
+    use std::mem::size_of;
+
+    use crate::heap_estimate::{map_table_bytes, name_bytes, vec_bytes};
+    use crate::hir::{Expr, IfStmt, Literal, PreprocIfStmt};
+
+    let mut bytes = size_of::<Body>();
+
+    // Arena backing stores: one element slot per allocated node.
+    bytes += vec_bytes::<Expr>(body.exprs.len());
+    bytes += vec_bytes::<Stmt>(body.stmts.len());
+    bytes += vec_bytes::<Binding>(body.bindings.len());
+
+    // Body-level boxed index lists and side tables.
+    bytes += vec_bytes::<BindingIdx>(body.params.len());
+    bytes += vec_bytes::<StmtIdx>(body.body_stmts.len());
+    bytes += vec_bytes::<(ExprIdx, syntax::SdblQueryInfo)>(body.sdbl_exprs.len());
+    bytes += map_table_bytes::<ExprIdx, ()>(body.recovered_exprs.len());
+
+    for binding in body.bindings.values() {
+        bytes += name_bytes(&binding.name);
+    }
+
+    // Per-expression owned heap: names, string/date literals, boxed argument
+    // lists, and the qualified-path box. Index-only variants own nothing extra.
+    for expr in body.exprs.values() {
+        bytes += match expr {
+            Expr::Literal(Literal::String(s)) | Expr::Literal(Literal::Date(s)) => s.capacity(),
+            Expr::Path(name) => name_bytes(name),
+            Expr::QualifiedPath(_) => size_of::<crate::path::QualifiedName>(),
+            Expr::Field { field, .. } => name_bytes(field),
+            Expr::MethodCall { method, args, .. } => {
+                name_bytes(method) + vec_bytes::<ExprIdx>(args.len())
+            }
+            Expr::New { type_name, args } => {
+                type_name.as_ref().map_or(0, name_bytes) + vec_bytes::<ExprIdx>(args.len())
+            }
+            Expr::Call { args, .. } | Expr::Array(args) => vec_bytes::<ExprIdx>(args.len()),
+            _ => 0,
+        };
+    }
+
+    // Per-statement owned heap: the boxed branch/loop index lists and the
+    // separately-allocated `If`/`PreprocIf` nodes (the arena element holds only
+    // a `Box` pointer to them).
+    for stmt in body.stmts.values() {
+        bytes += match stmt {
+            Stmt::VarDecl { bindings } => vec_bytes::<BindingIdx>(bindings.len()),
+            Stmt::If(if_stmt) => {
+                size_of::<IfStmt>()
+                    + vec_bytes::<StmtIdx>(if_stmt.then_branch.len())
+                    + vec_bytes::<(ExprIdx, Box<[StmtIdx]>)>(if_stmt.elsif_branches.len())
+                    + if_stmt
+                        .elsif_branches
+                        .iter()
+                        .map(|(_, branch)| vec_bytes::<StmtIdx>(branch.len()))
+                        .sum::<usize>()
+                    + if_stmt.else_branch.as_ref().map_or(0, |b| vec_bytes::<StmtIdx>(b.len()))
+            }
+            Stmt::PreprocIf(pre) => {
+                size_of::<PreprocIfStmt>()
+                    + vec_bytes::<StmtIdx>(pre.then_branch.len())
+                    + vec_bytes::<(TextRange, TextRange, Box<[StmtIdx]>)>(pre.elsif_branches.len())
+                    + pre
+                        .elsif_branches
+                        .iter()
+                        .map(|branch| vec_bytes::<StmtIdx>(branch.2.len()))
+                        .sum::<usize>()
+                    + pre.else_branch.as_ref().map_or(0, |b| vec_bytes::<StmtIdx>(b.len()))
+            }
+            Stmt::While { body, .. } | Stmt::For { body, .. } | Stmt::ForEach { body, .. } => {
+                vec_bytes::<StmtIdx>(body.len())
+            }
+            Stmt::Try { body, except } => {
+                vec_bytes::<StmtIdx>(body.len()) + vec_bytes::<StmtIdx>(except.len())
+            }
+            Stmt::Goto(name) | Stmt::Label(name) => name_bytes(name),
+            _ => 0,
+        };
+    }
+
+    bytes
+}
+
+/// Rough live bytes of a [`BodySourceMap`]: the three id-keyed range vectors and
+/// the three range-keyed lookup maps. Used together with [`body_heap`] to size
+/// the `method_body_with_source_map` memo.
+pub(crate) fn source_map_heap(map: &BodySourceMap) -> usize {
+    use std::mem::size_of;
+
+    use crate::heap_estimate::{map_table_bytes, vec_bytes};
+
+    size_of::<BodySourceMap>()
+        + vec_bytes::<Option<TextRange>>(map.expr_ranges.len())
+        + vec_bytes::<Option<TextRange>>(map.stmt_ranges.len())
+        + vec_bytes::<Option<TextRange>>(map.binding_ranges.len())
+        + map_table_bytes::<TextRange, ExprId>(map.range_to_expr.len())
+        + map_table_bytes::<TextRange, StmtId>(map.range_to_stmt.len())
+        + map_table_bytes::<TextRange, BindingId>(map.range_to_binding.len())
+}
+
+/// `heap_size` hook for `method_body_query` (returns `Arc<Body>`).
+pub(crate) fn body_arc_heap(v: &Arc<Body>) -> usize {
+    body_heap(v)
+}
+
+/// `heap_size` hook for `method_body_with_source_map_query`
+/// (returns `Arc<(Body, BodySourceMap)>`).
+pub(crate) fn body_with_source_map_heap(v: &Arc<(Body, BodySourceMap)>) -> usize {
+    let (body, source_map) = &**v;
+    body_heap(body) + source_map_heap(source_map)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

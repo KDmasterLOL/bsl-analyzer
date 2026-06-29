@@ -49,7 +49,26 @@ pub type SdblInFile = Vec<(SdblExprId, syntax::SdblQueryInfo)>;
 
 pub type SdblHirEntries = Arc<Vec<(SdblExprId, Arc<sdbl_hir::SdblPackage>)>>;
 
-#[salsa::tracked(lru = 128)]
+/// Approximate live heap bytes for Salsa's `memory_usage` report: the entries
+/// vector backbone. The per-entry `SdblQueryInfo` (which pins a slice of the green
+/// SDBL AST) is not deeply traversed, so this under-counts the AST payload; the
+/// lowered HIR is accounted instead by [`sdbl_hir_for_file_heap`].
+fn all_sdbl_in_file_heap(v: &Arc<SdblInFile>) -> usize {
+    crate::heap_estimate::vec_bytes::<(SdblExprId, syntax::SdblQueryInfo)>(v.len())
+}
+
+/// Approximate live heap bytes for Salsa's `memory_usage` report: the entries
+/// vector plus each uniquely-owned [`sdbl_hir::SdblPackage`]'s estimated heap.
+fn sdbl_hir_for_file_heap(v: &SdblHirEntries) -> usize {
+    let mut bytes =
+        crate::heap_estimate::vec_bytes::<(SdblExprId, Arc<sdbl_hir::SdblPackage>)>(v.len());
+    for (_, package) in v.iter() {
+        bytes += package.estimated_heap();
+    }
+    bytes
+}
+
+#[salsa::tracked(lru = 128, heap_size = all_sdbl_in_file_heap)]
 pub fn all_sdbl_in_file_query<'db>(
     db: &'db dyn DefDatabase,
     file_id_input: FileIdInput<'db>,
@@ -81,7 +100,7 @@ pub fn all_sdbl_in_file_query<'db>(
     Arc::new(result)
 }
 
-#[salsa::tracked(lru = 64)]
+#[salsa::tracked(lru = 64, heap_size = sdbl_hir_for_file_heap)]
 pub fn sdbl_hir_for_file_query<'db>(
     db: &'db dyn ConfigsDatabase,
     file_id_input: FileIdInput<'db>,

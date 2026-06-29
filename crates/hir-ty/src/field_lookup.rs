@@ -85,6 +85,30 @@ fn lookup_field_inner(
     let effective_ty =
         crate::this_object::coerce_to_metadata_ref_id(db, projected_ty).unwrap_or(projected_ty);
 
+    if let TypeKind::Structure(facet) = db.lookup_type(effective_ty) {
+        // Permissive: a known literal key resolves; an unknown key yields no field and (crucially)
+        // no `UnresolvedField` — structure field access stays soft.
+        let field_ty =
+            crate::structure_keys::structure_projection_field(facet, field_name.as_str())?;
+        // SOFT: only a *nested structure* type is surfaced (so `С.Адрес.` can chain). Scalar / leaf
+        // value types are hidden as `Unknown`, because field-access inference feeds `TypeMismatch`
+        // — letting a heuristic key value type through would manufacture false positives. Keys and
+        // their display types still live on the facet for completion/hover.
+        let ty = if matches!(db.lookup_type(field_ty), TypeKind::Structure(_)) {
+            field_ty
+        } else {
+            db.unknown()
+        };
+        return Some(FieldInfo {
+            name: Name::new(field_name.as_str()),
+            name_en: None,
+            ty,
+            value_ty: None,
+            is_readonly: false,
+            origin: crate::field_enum::FieldOrigin::UserAttribute,
+        });
+    }
+
     match db.lookup_type(effective_ty) {
         TypeKind::Union(arms) => {
             let arms = arms.to_vec();

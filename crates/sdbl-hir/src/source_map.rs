@@ -130,6 +130,48 @@ impl SdblSourceMap {
         }
     }
 
+    /// Approximate live heap bytes for Salsa's `memory_usage` report: the fourteen
+    /// per-category `Vec<TokenInfo>` backing stores (one element each, plus any
+    /// non-inlined `SmolStr` token text) and the `range_to_category` hashbrown
+    /// table. Spare capacity is ignored, so the figure tracks live content within a
+    /// small factor.
+    pub fn estimated_heap(&self) -> usize {
+        use std::mem::size_of;
+
+        let token_vecs: [&Vec<TokenInfo>; 14] = [
+            &self.clause_keywords,
+            &self.operators,
+            &self.special_keywords,
+            &self.join_keywords,
+            &self.modifiers,
+            &self.aggregate_functions,
+            &self.builtin_functions,
+            &self.mdo_types,
+            &self.table_names,
+            &self.unresolved_table_names,
+            &self.table_aliases,
+            &self.field_names,
+            &self.unresolved_field_names,
+            &self.field_aliases,
+        ];
+
+        let mut bytes = 0;
+        for vec in token_vecs {
+            bytes += vec.len() * size_of::<TokenInfo>();
+            for token in vec {
+                bytes += smol_str_heap(&token.text);
+            }
+        }
+
+        let len = self.range_to_category.len();
+        if len != 0 {
+            let cap = (len * 8 / 7 + 1).checked_next_power_of_two().unwrap_or(len);
+            bytes += cap * (size_of::<TextRange>() + size_of::<TokenCategory>() + 1);
+        }
+
+        bytes
+    }
+
     pub(crate) fn finalize(&mut self) {
         self.clause_keywords.sort_by_key(|t| t.range.start());
         self.operators.sort_by_key(|t| t.range.start());
@@ -144,6 +186,17 @@ impl SdblSourceMap {
         self.field_names.sort_by_key(|t| t.range.start());
         self.unresolved_field_names.sort_by_key(|t| t.range.start());
         self.field_aliases.sort_by_key(|t| t.range.start());
+    }
+}
+
+/// Heap bytes owned by a `SmolStr`: zero while it fits inline (≤ 22 bytes),
+/// its full length otherwise.
+fn smol_str_heap(s: &SmolStr) -> usize {
+    let len = s.len();
+    if len > 22 {
+        len
+    } else {
+        0
     }
 }
 

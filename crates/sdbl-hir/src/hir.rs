@@ -970,6 +970,19 @@ impl SdblPackage {
         &self.queries
     }
 
+    /// Approximate live heap bytes for Salsa's `memory_usage` report. Counts the
+    /// `queries` vector backbone and the per-query [`SdblSourceMap`], which holds a
+    /// `TokenInfo` for every classified token in the query and therefore scales
+    /// with query size. The recursive `SdblHir` clause/expression tree owned inside
+    /// each query is *not* deeply traversed — it is approximated by the source map,
+    /// which it parallels — so this under-counts deeply-nested queries by a small
+    /// factor.
+    pub fn estimated_heap(&self) -> usize {
+        let mut bytes = self.queries.len() * std::mem::size_of::<SdblQuery>();
+        bytes += self.source_map.estimated_heap();
+        bytes
+    }
+
     pub fn all_diagnostics(&self) -> impl Iterator<Item = &crate::diagnostics::SdblDiagnostic> {
         let mut all = Vec::new();
         for q in &self.queries {

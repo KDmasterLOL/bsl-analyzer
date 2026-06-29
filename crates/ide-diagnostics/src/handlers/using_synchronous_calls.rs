@@ -1,6 +1,8 @@
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use hir::call_graph::MethodDispatch;
+use hir::MethodId;
 use ide_db::TextRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -17,10 +19,15 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-pub fn from_hir(
-    method_name: &str,
-    replacement: &str,
-    range: TextRange,
+pub(crate) struct SyncCallCandidate<'a> {
+    pub(crate) method_id: &'a MethodId,
+    pub(crate) method_name: &'a str,
+    pub(crate) replacement: &'a str,
+    pub(crate) range: TextRange,
+}
+
+pub(crate) fn from_hir(
+    candidate: SyncCallCandidate<'_>,
     ctx: &DiagnosticsContext,
 ) -> Option<Diagnostic> {
     let code = DiagnosticCode::UsingSynchronousCalls;
@@ -29,26 +36,83 @@ pub fn from_hir(
         return None;
     }
 
+    if is_server_only_method(candidate.method_id, ctx) {
+        return None;
+    }
+
     let message = format!(
         "Вместо синхронного вызова \"{}\" необходимо использовать \"{}\"",
-        method_name, replacement
+        candidate.method_name, candidate.replacement
     );
 
     Some(Diagnostic {
         code,
         message,
         severity: ctx.severity(code),
-        range,
+        range: candidate.range,
         tags: ctx.tags(code),
         fixes: vec![],
     })
 }
 
+fn is_server_only_method(method_id: &MethodId, ctx: &DiagnosticsContext) -> bool {
+    effective_dispatch(method_id, ctx).is_some_and(|dispatch| dispatch.is_server_only())
+}
+
+fn effective_dispatch(method_id: &MethodId, ctx: &DiagnosticsContext) -> Option<MethodDispatch> {
+    let module_dispatch =
+        ctx.module_metadata().execution_context.and_then(MethodDispatch::from_execution_context);
+    if module_dispatch.is_some() {
+        return module_dispatch;
+    }
+
+    ctx.call_summary(method_id.module)
+        .methods
+        .iter()
+        .find(|method| method.local_id == method_id.local_id)
+        .map(|method| method.dispatch)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::check_diagnostics_snapshot_for;
+    use crate::test_utils::{
+        check_diagnostics_snapshot_for, check_metadata_diagnostic, format_diags,
+        make_common_module_metadata_with_ctx,
+    };
     use expect_test::expect;
+
+    const RUN_APP_CALL: &str = r#"Процедура Выполнить()
+    ЗапуститьПриложение("app.exe");
+КонецПроцедуры
+"#;
+
+    fn check_common_module_context(
+        execution_context: hir::ExecutionContext,
+        expected: expect_test::Expect,
+    ) {
+        check_common_module_code_context(execution_context, RUN_APP_CALL, expected);
+    }
+
+    fn check_common_module_code_context(
+        execution_context: hir::ExecutionContext,
+        code: &str,
+        expected: expect_test::Expect,
+    ) {
+        let metadata = make_common_module_metadata_with_ctx(
+            bsl_metadata::CommonModule::builder().name("ОбщийМодуль").build(),
+            execution_context,
+        );
+        let diagnostics = check_metadata_diagnostic(metadata, code, |_metadata, ctx| {
+            crate::diagnostics(ctx)
+                .into_iter()
+                .filter(|diag| diag.code == DiagnosticCode::UsingSynchronousCalls)
+                .collect()
+        });
+
+        expected.assert_eq(&format_diags(code, &diagnostics));
+    }
+
     #[test]
     fn test_sync_question() {
         let code = r#"Процедура ТестВопрос()
@@ -586,6 +650,43 @@ mod tests {
     }
 
     #[test]
+    fn test_synchronous_calls_in_server_common_module_context() {
+        check_common_module_context(hir::ExecutionContext::Server, expect![[r#""#]]);
+    }
+
+    #[test]
+    fn test_synchronous_calls_in_server_call_common_module_context() {
+        check_common_module_context(hir::ExecutionContext::ServerCall, expect![[r#""#]]);
+    }
+
+    #[test]
+    fn test_synchronous_calls_in_external_connection_common_module_context() {
+        check_common_module_context(hir::ExecutionContext::ExternalConnection, expect![[r#""#]]);
+    }
+
+    #[test]
+    fn test_synchronous_calls_in_client_common_module_context() {
+        check_common_module_context(
+            hir::ExecutionContext::Client,
+            expect![[r#"
+            UsingSynchronousCalls @ 2:5..2:35
+              message: Вместо синхронного вызова "ЗапуститьПриложение" необходимо использовать "НачатьЗапускПриложения"
+              severity: Warning"#]],
+        );
+    }
+
+    #[test]
+    fn test_synchronous_calls_in_client_server_common_module_context() {
+        check_common_module_context(
+            hir::ExecutionContext::ClientServer,
+            expect![[r#"
+            UsingSynchronousCalls @ 2:5..2:35
+              message: Вместо синхронного вызова "ЗапуститьПриложение" необходимо использовать "НачатьЗапускПриложения"
+              severity: Warning"#]],
+        );
+    }
+
+    #[test]
     fn test_synchronous_calls_in_server_context() {
         let code = r#"
 &НаСервере
@@ -608,6 +709,16 @@ EndProcedure
             DiagnosticCode::UsingSynchronousCalls,
             expect![[r#""#]],
         );
+    }
+
+    #[test]
+    fn test_delete_files_fact_not_reported_in_server_common_module_context() {
+        let code = r#"Procedure Выполнить()
+    DeleteFiles("C:\temp\a.txt");
+EndProcedure
+"#;
+
+        check_common_module_code_context(hir::ExecutionContext::Server, code, expect![[r#""#]]);
     }
 
     #[test]

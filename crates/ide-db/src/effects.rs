@@ -90,12 +90,57 @@ impl ModuleSecurityState {
     pub fn is_empty(&self) -> bool {
         self.methods.is_empty() && self.module_level.is_none()
     }
+
+    /// Approximate live heap bytes for Salsa's `memory_usage` report: the per-method
+    /// results table plus each uniquely-owned [`DataflowResult<SecurityModeState>`]
+    /// (its block-state maps, owned `Body` clone, and per-block `ValueOverlay`).
+    pub fn estimated_heap(&self) -> usize {
+        use crate::queries::heap_estimate::map_table_bytes;
+
+        let result_heap =
+            |r: &DataflowResult<SecurityModeState>| r.estimated_heap_with(|s| s.estimated_heap());
+        let mut bytes =
+            map_table_bytes::<u32, Arc<DataflowResult<SecurityModeState>>>(self.methods.len());
+        for r in self.methods.values() {
+            bytes += result_heap(r);
+        }
+        if let Some(r) = &self.module_level {
+            bytes += result_heap(r);
+        }
+        bytes
+    }
+}
+
+/// `heap_size` estimators for the effect/security memos — see
+/// [`crate::queries::heap_estimate`] for the shared approximation rationale.
+mod heap_estimate {
+    use super::{EffectSummary, ModuleEffectSummaries, ModuleSecurityState};
+    use crate::queries::heap_estimate::map_table_bytes;
+    use std::sync::Arc;
+
+    pub(super) fn module_effect_summaries_heap(v: &Arc<ModuleEffectSummaries>) -> usize {
+        // Each `Arc<EffectSummary>` heap-allocates a small `Copy` struct; count the
+        // table backbone plus one payload per entry.
+        let len = v.len();
+        map_table_bytes::<u32, Arc<EffectSummary>>(len) + len * std::mem::size_of::<EffectSummary>()
+    }
+
+    /// A `method_effect_summary` result is a clone of an `Arc` owned by
+    /// `module_effect_summaries`; report only the shared pointer.
+    pub(super) fn shared_effect_summary_heap(_v: &Arc<EffectSummary>) -> usize {
+        0
+    }
+
+    pub(super) fn module_security_state_heap(v: &Arc<ModuleSecurityState>) -> usize {
+        v.estimated_heap()
+    }
 }
 
 #[salsa::tracked(
     lru = 128,
     cycle_fn = module_effect_summaries_cycle,
     cycle_initial = module_effect_summaries_initial,
+    heap_size = heap_estimate::module_effect_summaries_heap,
 )]
 pub fn module_effect_summaries_query<'db>(
     db: &'db dyn RootDatabase,
@@ -190,7 +235,7 @@ pub fn module_effect_summaries_cycle<'db>(
     Arc::new(last_provisional.as_ref().join(value.as_ref()))
 }
 
-#[salsa::tracked(lru = 256)]
+#[salsa::tracked(lru = 256, heap_size = heap_estimate::shared_effect_summary_heap)]
 pub fn method_effect_summary_query<'db>(
     db: &'db dyn RootDatabase,
     method_id_input: hir::MethodIdInput<'db>,
@@ -203,7 +248,7 @@ pub fn method_effect_summary_query<'db>(
     summaries.get(method_id.local_id).unwrap_or_else(|| Arc::new(EffectSummary::EMPTY))
 }
 
-#[salsa::tracked(lru = 128)]
+#[salsa::tracked(lru = 128, heap_size = heap_estimate::module_security_state_heap)]
 pub fn module_security_state_query<'db>(
     db: &'db dyn RootDatabase,
     file_id_input: FileIdInput<'db>,

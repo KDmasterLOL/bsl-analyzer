@@ -18,10 +18,6 @@ pub struct CompletionPosition {
     pub offset: TextSize,
     pub workspace_root: Option<PathBuf>,
     pub locale: Locale,
-    /// Bake the cursor indentation into multi-line snippet bodies. Enabled for
-    /// clients that honor `InsertTextMode::AS_IS`; disabled for clients that
-    /// re-indent completion snippets themselves (they get raw relative tabs).
-    pub self_indent_snippets: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

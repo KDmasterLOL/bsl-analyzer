@@ -207,16 +207,8 @@ pub(super) struct Scored {
 
 /// Build template and keyword completions for the given typed prefix and
 /// context. `in_method` is true when the cursor sits inside a procedure/function
-/// body. `indent`, when `Some((base_indent, indent_unit))`, bakes the cursor's
-/// indentation into snippet continuation lines so they land correctly even in
-/// clients that don't re-indent multi-line completion snippets (see
-/// [`reindent_snippet`]); when `None` the raw relative-tab snippet is emitted for
-/// clients that re-indent completions themselves.
-pub(super) fn complete_templates(
-    matcher: &mut PrefixMatcher,
-    in_method: bool,
-    indent: Option<(&str, &str)>,
-) -> Vec<Scored> {
+/// body.
+pub(super) fn complete_templates(matcher: &mut PrefixMatcher, in_method: bool) -> Vec<Scored> {
     let mut out = Vec::new();
 
     for tmpl in TEMPLATES {
@@ -231,7 +223,6 @@ pub(super) fn complete_templates(
                     tmpl.snippet_ru,
                     tmpl.trigger_ru,
                     tmpl.trigger_en,
-                    indent,
                 ),
                 result,
             });
@@ -248,7 +239,6 @@ pub(super) fn complete_templates(
                     tmpl.snippet_en,
                     tmpl.trigger_ru,
                     tmpl.trigger_en,
-                    indent,
                 ),
                 result,
             });
@@ -273,53 +263,12 @@ pub(super) fn complete_templates(
     out
 }
 
-/// Re-render a snippet body so every continuation line carries the cursor line's
-/// indentation. Lines are authored with leading tabs standing for nesting levels;
-/// each level becomes `base_indent` (the column the snippet starts at) plus one
-/// `indent_unit` per level. The first line is left untouched — the cursor already
-/// sits at its indent in the document. Blank lines stay blank to avoid trailing
-/// whitespace. This makes the snippet self-indenting regardless of whether the
-/// LSP client re-indents multi-line completion snippets (Zed does not).
-fn reindent_snippet(snippet: &str, base_indent: &str, indent_unit: &str) -> String {
-    let mut out = String::with_capacity(snippet.len());
-    for (i, line) in snippet.split('\n').enumerate() {
-        if i > 0 {
-            out.push('\n');
-        }
-        if i == 0 {
-            out.push_str(line);
-            continue;
-        }
-        let levels = line.bytes().take_while(|b| *b == b'\t').count();
-        let rest = &line[levels..];
-        if rest.is_empty() {
-            continue;
-        }
-        out.push_str(base_indent);
-        for _ in 0..levels {
-            out.push_str(indent_unit);
-        }
-        out.push_str(rest);
-    }
-    out
-}
-
-fn template_item(
-    label: &str,
-    snippet: &str,
-    trigger_ru: &str,
-    trigger_en: &str,
-    indent: Option<(&str, &str)>,
-) -> CompletionItem {
-    let insert_text = match indent {
-        Some((base_indent, indent_unit)) => reindent_snippet(snippet, base_indent, indent_unit),
-        None => snippet.to_string(),
-    };
+fn template_item(label: &str, snippet: &str, trigger_ru: &str, trigger_en: &str) -> CompletionItem {
     CompletionItem {
         label: label.to_string(),
         detail: Some("Шаблон кода".to_string()),
         kind: CompletionItemKind::Snippet,
-        insert_text,
+        insert_text: snippet.to_string(),
         documentation: None,
         sort_text: None,
         // Let the client filter by either trigger word regardless of which
@@ -339,58 +288,5 @@ fn keyword_item(text: &str, alias: &str) -> CompletionItem {
         sort_text: None,
         filter_text: Some(format!("{text} {alias}")),
         source: None,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::reindent_snippet;
-
-    #[test]
-    fn first_line_is_left_untouched() {
-        // The cursor already sits at its indentation; only continuation lines get
-        // the base indent prepended.
-        let got = reindent_snippet("Если ${1:Условие} Тогда\n\t$0\nКонецЕсли;", "\t\t", "\t");
-        assert_eq!(got, "Если ${1:Условие} Тогда\n\t\t\t$0\n\t\tКонецЕсли;");
-    }
-
-    #[test]
-    fn multi_level_transaction_block_indents_each_line() {
-        let snippet =
-            "НачатьТранзакцию();\nПопытка\n\t$0\n\tЗафиксироватьТранзакцию();\nИсключение\n\tОтменитьТранзакцию();\n\tВызватьИсключение;\nКонецПопытки;";
-        let got = reindent_snippet(snippet, "    ", "    ");
-        assert_eq!(
-            got,
-            "НачатьТранзакцию();\n    Попытка\n        $0\n        ЗафиксироватьТранзакцию();\n    Исключение\n        ОтменитьТранзакцию();\n        ВызватьИсключение;\n    КонецПопытки;"
-        );
-    }
-
-    #[test]
-    fn blank_lines_stay_blank_without_trailing_whitespace() {
-        let got = reindent_snippet("#Область ${1:Имя}\n\n$0\n\n#КонецОбласти", "\t", "\t");
-        assert_eq!(got, "#Область ${1:Имя}\n\n\t$0\n\n\t#КонецОбласти");
-    }
-
-    #[test]
-    fn empty_base_indent_keeps_relative_nesting() {
-        let got = reindent_snippet("Пока ${1:Условие} Цикл\n\t$0\nКонецЦикла;", "", "\t");
-        assert_eq!(got, "Пока ${1:Условие} Цикл\n\t$0\nКонецЦикла;");
-    }
-
-    #[test]
-    fn placeholder_default_after_indent_is_preserved() {
-        // Indentation tabs precede the placeholder; the `${1:..}` payload is part
-        // of `rest` and must survive untouched. `Исключение`/`КонецПопытки` are
-        // level-0 continuation lines: they take the base indent so they align
-        // with the first line sitting at the cursor column.
-        let got = reindent_snippet(
-            "Попытка\n\t$0\nИсключение\n\t${1:ВызватьИсключение;}\nКонецПопытки;",
-            "\t",
-            "  ",
-        );
-        assert_eq!(
-            got,
-            "Попытка\n\t  $0\n\tИсключение\n\t  ${1:ВызватьИсключение;}\n\tКонецПопытки;"
-        );
     }
 }

@@ -322,15 +322,11 @@ pub fn handle_completion(
         };
     tracing::debug!("Converted position to offset: {:?}", offset);
 
-    // Snippets are pre-indented server-side only for clients that honor
-    // `InsertTextMode::AS_IS`; others get raw snippets and re-indent themselves.
-    let as_is_supported = ctx.supports_insert_text_mode_as_is;
-    let items = ctx.analysis.completions_with_snippet_indent(
+    let items = ctx.analysis.completions(
         file_id,
         offset.into(),
         ctx.workspace_root.clone(),
         ctx.diagnostics_config.locale,
-        as_is_supported,
     );
     tracing::debug!("IDE API returned {} completion items", items.len());
 
@@ -339,8 +335,12 @@ pub fn handle_completion(
         return Ok(None);
     }
 
+    // Multi-line snippet bodies carry only relative (tab) nesting; ask clients
+    // that honor `InsertTextMode` to indent the continuation lines to the cursor
+    // column. Clients without the capability re-indent by their own default.
+    let adjust_indentation = ctx.supports_insert_text_mode_adjust_indentation;
     let lsp_items: Vec<CompletionItem> =
-        items.into_iter().map(|item| convert_completion_item(item, as_is_supported)).collect();
+        items.into_iter().map(|item| convert_completion_item(item, adjust_indentation)).collect();
     tracing::debug!("Converted to {} LSP items, returning CompletionResponse", lsp_items.len());
 
     Ok(Some(CompletionResponse::Array(lsp_items)))
@@ -691,14 +691,14 @@ fn folding_range_lines(line_index: &LineIndex, range: ide::TextRange) -> Option<
     (end_line > start_line).then_some((start_line, end_line))
 }
 
-fn convert_completion_item(item: ide::CompletionItem, as_is_supported: bool) -> CompletionItem {
+fn convert_completion_item(item: ide::CompletionItem, adjust_indentation: bool) -> CompletionItem {
     let has_snippet = item.insert_text.contains('$');
-    // Multi-line snippets are indented server-side (the IDE layer bakes the
-    // cursor's indentation into continuation lines). Tell clients that honor
-    // `insertTextMode` not to re-indent on top of that, which would double the
-    // leading whitespace. Single-line snippets and plain text are unaffected.
-    let insert_text_mode = if as_is_supported && has_snippet && item.insert_text.contains('\n') {
-        Some(lsp_types::InsertTextMode::AS_IS)
+    // Multi-line snippet bodies carry only relative (tab) nesting. Ask capable
+    // clients to adjust the continuation lines' leading whitespace to the cursor
+    // column so the block isn't flushed to column 0. Single-line snippets and
+    // plain text need no adjustment.
+    let insert_text_mode = if adjust_indentation && has_snippet && item.insert_text.contains('\n') {
+        Some(lsp_types::InsertTextMode::ADJUST_INDENTATION)
     } else {
         None
     };
@@ -964,6 +964,40 @@ mod tests {
     use crate::frozen_context::{FrozenFilePaths, LatencyRequestContext};
     use crate::global_state::GlobalState;
 
+    fn snippet_item(insert_text: &str) -> ide::CompletionItem {
+        ide::CompletionItem {
+            label: "Если".into(),
+            detail: None,
+            kind: ide::CompletionItemKind::Snippet,
+            insert_text: insert_text.into(),
+            documentation: None,
+            sort_text: None,
+            filter_text: None,
+            source: None,
+        }
+    }
+
+    #[test]
+    fn multiline_snippet_requests_adjust_indentation_when_supported() {
+        let item =
+            convert_completion_item(snippet_item("Если ${1:Усл} Тогда\n\t$0\nКонецЕсли;"), true);
+        assert_eq!(item.insert_text_format, Some(lsp_types::InsertTextFormat::SNIPPET));
+        assert_eq!(item.insert_text_mode, Some(lsp_types::InsertTextMode::ADJUST_INDENTATION));
+    }
+
+    #[test]
+    fn multiline_snippet_omits_mode_when_unsupported() {
+        let item =
+            convert_completion_item(snippet_item("Если ${1:Усл} Тогда\n\t$0\nКонецЕсли;"), false);
+        assert_eq!(item.insert_text_mode, None);
+    }
+
+    #[test]
+    fn single_line_snippet_never_sets_mode() {
+        let item = convert_completion_item(snippet_item("ВызватьИсключение;$0"), true);
+        assert_eq!(item.insert_text_mode, None);
+    }
+
     fn create_test_state() -> GlobalState {
         let (sender, _receiver) = unbounded();
         GlobalState::new(sender)
@@ -976,7 +1010,8 @@ mod tests {
             project: state.project.clone(),
             diagnostics_config: state.diagnostics_config.clone(),
             position_encoding: state.position_encoding,
-            supports_insert_text_mode_as_is: state.supports_insert_text_mode_as_is,
+            supports_insert_text_mode_adjust_indentation: state
+                .supports_insert_text_mode_adjust_indentation,
             task_sender: state.task_pool.pool.sender.clone(),
             mem_docs: state.mem_docs.freeze(),
             file_paths: FrozenFilePaths::freeze(&state.vfs.read()),

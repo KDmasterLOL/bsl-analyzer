@@ -1,4 +1,5 @@
 use base_db::FileIdInput;
+use bsl_platform::deprecation::{self, ElementKind, Lookup};
 use bsl_types::builders::Builders;
 use bsl_types::facet::{ArgArity, DateComponent, FormDataFacet, MdoRefFacet, ProjectionSource};
 use bsl_types::intern::TypeKernelDb;
@@ -12,7 +13,8 @@ use hir_def::resolver::Resolver;
 use hir_def::symbol_tree::SymbolTree;
 use hir_def::ty::FunctionSignature;
 use hir_def::{sdbl_hir_for_file_query, DefWithBodyId, ExprId, MethodIdInput, Name, SdblExprId};
-use rustc_hash::FxHashMap;
+use once_cell::sync::Lazy;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::Arc;
 use stdx::case::CaseExt;
 use tracing::{debug, info, trace};
@@ -23,6 +25,22 @@ use crate::db::HirDatabase;
 use crate::lower::TyLoweringContext;
 use crate::method_resolution;
 use crate::platform_manager_lookup::{resolve_platform_manager_method, PlatformMethodResolution};
+
+static DEPRECATED_PLATFORM_MEMBER_OWNERS: Lazy<FxHashSet<String>> = Lazy::new(|| {
+    let mut owners = FxHashSet::default();
+    for entry in deprecation::registry().entries() {
+        if !matches!(entry.element_kind, ElementKind::Method | ElementKind::Property) {
+            continue;
+        }
+        if let Some(owner) = entry.owner {
+            owners.insert(owner.ru.fold_lower());
+            if !owner.en.is_empty() {
+                owners.insert(owner.en.fold_lower());
+            }
+        }
+    }
+    owners
+});
 
 /// Heap-size estimators wired into salsa's `heap_size` hook (the `salsa_unstable`
 /// memory report). salsa's default reports only the fixed slot stack size — the
@@ -218,6 +236,13 @@ pub enum InferenceDiagnostic {
         field_name: Name,
     },
 
+    DeprecatedPlatformMember {
+        expr: ExprId,
+        type_name: Name,
+        member_name: Name,
+        is_property: bool,
+    },
+
     RedundantAccessToObjectTwoLevel {
         expr: ExprId,
         module: Name,
@@ -330,6 +355,12 @@ pub struct InferenceContext<'db> {
     /// miss and reused, so a global-util-heavy body does not re-enumerate global modules
     /// per call. `None` until first consulted. See [`Self::global_export_map`].
     global_exports: Option<Arc<FxHashMap<String, hir_def::MethodId>>>,
+
+    /// Per-body literal `Структура` shapes (keys built via `Новый Структура` / `.Вставить`), keyed
+    /// by lowercased local name. Collected once at the start of [`Self::infer_all`] and used to
+    /// enrich a structure local's type with its keys on each read. Empty for bodies with no such
+    /// construction → byte-identical default typing. See [`crate::structure_keys`].
+    structure_shapes: FxHashMap<String, crate::structure_keys::StructureShape>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -509,6 +540,7 @@ impl<'db> InferenceContext<'db> {
             call_arg_bindings: Vec::new(),
             return_expr_ids: Vec::new(),
             global_exports: None,
+            structure_shapes: FxHashMap::default(),
         }
     }
 
@@ -680,6 +712,7 @@ impl<'db> InferenceContext<'db> {
             InferenceDiagnostic::TypeMismatch { expr, .. } => *expr,
             InferenceDiagnostic::UnresolvedField { expr, .. } => *expr,
             InferenceDiagnostic::ReadOnlyPropertyAssignment { lhs, .. } => *lhs,
+            InferenceDiagnostic::DeprecatedPlatformMember { expr, .. } => *expr,
             InferenceDiagnostic::RedundantAccessToObjectTwoLevel { expr, .. } => *expr,
             InferenceDiagnostic::MissedRequiredParameterCommonModule { expr, .. } => *expr,
         };
@@ -695,6 +728,46 @@ impl<'db> InferenceContext<'db> {
 
     fn is_undefined(&self, id: TypeId) -> bool {
         id == self.db.undefined()
+    }
+
+    fn exact_platform_owner(&self, ty: TypeId) -> Option<Name> {
+        let TypeKind::PlatformObject(facet) = self.db.lookup_type(ty) else {
+            return None;
+        };
+        Some(Name::new(facet.name.as_str()))
+    }
+
+    fn push_deprecated_platform_member_diagnostic(
+        &mut self,
+        expr: ExprId,
+        receiver_ty: TypeId,
+        member_name: &Name,
+        is_property: bool,
+    ) {
+        let Some(type_name) = self.exact_platform_owner(receiver_ty) else {
+            return;
+        };
+
+        let owner_key = type_name.as_str().fold_lower();
+        if !DEPRECATED_PLATFORM_MEMBER_OWNERS.contains(owner_key.as_str()) {
+            return;
+        }
+
+        let lookup = if is_property {
+            Lookup::property(type_name.as_str(), member_name.as_str())
+        } else {
+            Lookup::method(type_name.as_str(), member_name.as_str())
+        };
+        if deprecation::registry().lookup(lookup).is_none() {
+            return;
+        }
+
+        self.push_inference_diagnostic(InferenceDiagnostic::DeprecatedPlatformMember {
+            expr,
+            type_name,
+            member_name: member_name.clone(),
+            is_property,
+        });
     }
 
     pub fn finish(self) -> BodyInferenceResult {
@@ -750,6 +823,36 @@ impl<'db> InferenceContext<'db> {
     pub fn infer_all(&mut self) {
         let _p = tracing::debug_span!("infer_all").entered();
 
+        self.structure_shapes = if !crate::structure_keys::body_constructs_structure(&self.body) {
+            // No `Новый Структура` in this body → no tracked root → skip collection and the Stage-2
+            // forwarder entirely (keeps the feature off the hot path for most bodies).
+            FxHashMap::default()
+        } else {
+            use crate::structure_keys::{collect_structure_shapes, SeedRoots};
+            // Stage 2 interprocedural forwarding is ordinary-modules only — effective
+            // (`&ИзменениеИКонтроль`) and weaving inference use separate symbol contexts and are
+            // out of scope, so no forwarder is built there (byte-identical Stage-1 behaviour).
+            let ordinary = self.local_symbols.is_none() && self.weaving_base.is_none();
+            if ordinary {
+                let resolver = self.get_resolver();
+                let module = hir_def::ModuleId::new(self.context_file_id);
+                // Callee summaries come from the memoised (acyclic) query, so reading them here does
+                // not couple inference's fixpoint with a second one.
+                let summarize = |mid: hir_def::MethodId| {
+                    crate::structure_param_keys::structure_param_keys_query(
+                        self.db,
+                        hir_def::MethodIdInput::new(self.db, mid),
+                    )
+                };
+                let forwarder = crate::structure_param_keys::Forwarder::new(
+                    self.db, &resolver, module, &self.body, &summarize,
+                );
+                collect_structure_shapes(&self.body, SeedRoots::NewLiterals, Some(&forwarder))
+            } else {
+                collect_structure_shapes(&self.body, SeedRoots::NewLiterals, None)
+            }
+        };
+
         let stmts: Vec<StmtIdx> = self.body.body_stmts_typed().to_vec();
         self.infer_stmts(&stmts);
 
@@ -777,6 +880,8 @@ impl<'db> InferenceContext<'db> {
         match &stmt {
             Stmt::Assign { target, value } => {
                 let value_ty = self.infer_expr(ExprId::from_idx(*value));
+                let target_id = ExprId::from_idx(*target);
+                let mut infer_target = true;
 
                 let target_expr = self.body.expr_idx(*target).clone();
                 match &target_expr {
@@ -816,7 +921,6 @@ impl<'db> InferenceContext<'db> {
                             None => {
                                 let key = name.as_str().fold_lower();
                                 self.assigned_var_names.insert(key.clone());
-                                let target_id = ExprId::from_idx(*target);
                                 let unknown = self.db.unknown();
                                 self.implicit_locals
                                     .entry(key.clone())
@@ -851,33 +955,48 @@ impl<'db> InferenceContext<'db> {
                             self.context_file_id,
                         );
                         let resolver = self.get_resolver();
-                        let info = crate::form_items::lookup_form_item_field(
+                        if let Some(info) = crate::form_items::lookup_form_item_field(
                             self.db, &resolver, base_ty, field,
-                        )
-                        .or_else(|| {
-                            crate::field_lookup::lookup_field(
-                                self.db,
-                                &obj_resolver,
-                                base_ty,
-                                field,
-                            )
-                        });
-                        if let Some(info) = info {
+                        ) {
                             if info.is_readonly {
                                 self.push_inference_diagnostic(
                                     InferenceDiagnostic::ReadOnlyPropertyAssignment {
-                                        lhs: ExprId::from_idx(*target),
+                                        lhs: target_id,
                                         receiver_ty: base_ty,
                                         field_name: field.clone(),
                                     },
                                 );
                             }
+                            self.expr_types.insert(target_id, info.ty);
+                            infer_target = false;
+                        } else if let Some(info) = crate::field_lookup::lookup_field(
+                            self.db,
+                            &obj_resolver,
+                            base_ty,
+                            field,
+                        ) {
+                            self.push_deprecated_platform_member_diagnostic(
+                                target_id, base_ty, field, true,
+                            );
+                            if info.is_readonly {
+                                self.push_inference_diagnostic(
+                                    InferenceDiagnostic::ReadOnlyPropertyAssignment {
+                                        lhs: target_id,
+                                        receiver_ty: base_ty,
+                                        field_name: field.clone(),
+                                    },
+                                );
+                            }
+                            self.expr_types.insert(target_id, info.ty);
+                            infer_target = false;
                         }
                     }
                     _ => {}
                 }
 
-                self.infer_expr(ExprId::from_idx(*target));
+                if infer_target {
+                    self.infer_expr(target_id);
+                }
             }
 
             Stmt::Expr(expr_idx) => {
@@ -1069,6 +1188,7 @@ impl<'db> InferenceContext<'db> {
                 } else if let Some(info) =
                     crate::field_lookup::lookup_field(self.db, &obj_resolver, base_ty, field)
                 {
+                    self.push_deprecated_platform_member_diagnostic(expr_id, base_ty, field, true);
                     info.ty
                 } else if let Some(info) = crate::manager_lookup::lookup_manager_field(
                     self.db,
@@ -1231,6 +1351,17 @@ impl<'db> InferenceContext<'db> {
         if let Some(ty) = self.var_types.get(&name.as_str().fold_lower()) {
             trace!("resolved {} via var_types = {:?}", name, ty);
             let ty_id = *ty;
+            // Structure-literal key enrichment: a local typed as a `Структура` gets its collected
+            // literal keys (and value types known up to this read) surfaced for completion/hover.
+            // Soft — never feeds a diagnostic.
+            if matches!(self.db.lookup_type(ty_id), TypeKind::Structure(_)) {
+                let key = name.as_str().fold_lower();
+                if let Some(rich) =
+                    crate::structure_keys::materialize(self.db, &self.structure_shapes, &key)
+                {
+                    return rich;
+                }
+            }
             if crate::method_lookup::receiver_needs_refinement_id(self.db, ty_id) {
                 if let Some(projections) = crate::query_text_dataflow::refine_query_at_use_site(
                     self.db,
@@ -1714,6 +1845,12 @@ impl<'db> InferenceContext<'db> {
                 Some(&refine_ctx),
             ) {
                 Some(info) => {
+                    self.push_deprecated_platform_member_diagnostic(
+                        callee,
+                        receiver_ty,
+                        &method_name,
+                        false,
+                    );
                     let mut return_ty = info.return_ty;
                     let mut params: Vec<TypeId> = info.params.to_vec();
                     let overloads: Vec<Arc<[TypeId]>> =

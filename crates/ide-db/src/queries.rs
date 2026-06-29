@@ -10,6 +10,112 @@ use crate::{
 
 pub use crate::metadata::load_configuration;
 
+/// `heap_size` estimators wired into Salsa's `memory_usage` report. Each returns an
+/// approximate live-heap byte count for the query's memoised output (hashbrown
+/// table capacity derived from length at load factor 7/8, owned `Vec` payloads
+/// summed). Accessor queries that return a clone of an `Arc` already owned by a
+/// module-level query report zero, so the shared payload is counted exactly once.
+pub(crate) mod heap_estimate {
+    use std::sync::Arc;
+
+    use super::{ModuleCyclomatic, ModuleHirMetrics};
+
+    /// Heap of a `Vec` backing store holding `len` elements (spare capacity ignored).
+    pub(crate) fn vec_bytes<T>(len: usize) -> usize {
+        len * std::mem::size_of::<T>()
+    }
+
+    /// Approximate live bytes of an `FxHashMap`/hashbrown table with `len` entries
+    /// of `(K, V)`: one control byte plus the `(K, V)` slot per bucket, bucket count
+    /// grown to the next power of two above `len / (7/8)`.
+    pub(crate) fn map_table_bytes<K, V>(len: usize) -> usize {
+        if len == 0 {
+            return 0;
+        }
+        let cap = (len * 8 / 7 + 1).checked_next_power_of_two().unwrap_or(len);
+        cap.saturating_mul(std::mem::size_of::<K>() + std::mem::size_of::<V>() + 1)
+    }
+
+    pub(super) fn module_cfgs_heap(v: &Arc<hir::cfg::ModuleCfgs>) -> usize {
+        v.estimated_heap()
+    }
+
+    /// A `method_cfg` result is a clone of an `Arc` owned by `module_cfgs`, so its
+    /// payload is already counted there; report only the (already-counted) pointer.
+    pub(super) fn shared_cfg_heap(_v: &Arc<hir::cfg::ControlFlowGraph>) -> usize {
+        0
+    }
+
+    /// Module-level CFG is uniquely owned by its query (not part of `module_cfgs`).
+    pub(super) fn module_level_cfg_heap(v: &Arc<hir::cfg::ControlFlowGraph>) -> usize {
+        v.estimated_heap()
+    }
+
+    pub(super) fn module_reaching_definitions_heap(
+        v: &Arc<hir::dataflow::reaching_defs::ModuleReachingDefs>,
+    ) -> usize {
+        v.estimated_heap()
+    }
+
+    pub(super) fn module_liveness_heap(v: &Arc<hir::dataflow::liveness::ModuleLiveness>) -> usize {
+        v.estimated_heap()
+    }
+
+    pub(super) fn module_path_terminates_heap(
+        v: &Arc<hir::dataflow::path_terminates::ModulePathTerminates>,
+    ) -> usize {
+        v.estimated_heap()
+    }
+
+    /// A `reaching_definitions` accessor result is a clone of an `Arc` owned by
+    /// `module_reaching_definitions`; report only the shared pointer.
+    pub(super) fn shared_reaching_defs_heap(
+        _v: &Option<Arc<hir::dataflow::reaching_defs::ReachingDefsResult>>,
+    ) -> usize {
+        0
+    }
+
+    /// A `liveness_analysis` accessor result is a clone of an `Arc` owned by
+    /// `module_liveness_analysis`; report only the shared pointer.
+    pub(super) fn shared_liveness_heap(
+        _v: &Option<Arc<hir::dataflow::DataflowResult<hir::dataflow::liveness::Liveness>>>,
+    ) -> usize {
+        0
+    }
+
+    /// Module-level liveness is uniquely owned by its query.
+    pub(super) fn module_level_liveness_heap(
+        v: &Option<Arc<hir::dataflow::DataflowResult<hir::dataflow::liveness::Liveness>>>,
+    ) -> usize {
+        v.as_ref().map_or(0, |a| hir::dataflow::liveness::liveness_result_heap(a))
+    }
+
+    pub(super) fn line_index_heap(v: &Arc<line_index::LineIndex>) -> usize {
+        v.estimated_heap()
+    }
+
+    pub(super) fn module_hir_metrics_heap(v: &Arc<ModuleHirMetrics>) -> usize {
+        let m = &**v;
+        let metrics_heap = |hm: &hir::metrics::HirMethodMetrics| {
+            vec_bytes::<hir::metrics::ConditionMetrics>(hm.if_conditions.len())
+                + vec_bytes::<hir::metrics::NestingLeafMetrics>(hm.nesting_leaves.len())
+        };
+        let mut bytes =
+            map_table_bytes::<u32, Arc<hir::metrics::HirMethodMetrics>>(m.methods.len());
+        for hm in m.methods.values() {
+            bytes += std::mem::size_of::<hir::metrics::HirMethodMetrics>() + metrics_heap(hm);
+        }
+        if let Some(hm) = &m.module_code {
+            bytes += std::mem::size_of::<hir::metrics::HirMethodMetrics>() + metrics_heap(hm);
+        }
+        bytes
+    }
+
+    pub(super) fn module_cyclomatic_heap(v: &Arc<ModuleCyclomatic>) -> usize {
+        map_table_bytes::<u32, u32>(v.methods.len())
+    }
+}
+
 pub fn configuration_path_for_file<'db>(
     db: &'db dyn RootDatabase,
     file_id: vfs::FileId,
@@ -104,7 +210,7 @@ pub fn module_metadata_query<'db>(
     Arc::new(crate::metadata::build_module_metadata(&file_path, configuration.as_deref()))
 }
 
-#[salsa::tracked(lru = 128)]
+#[salsa::tracked(lru = 128, heap_size = heap_estimate::module_cfgs_heap)]
 pub fn module_cfgs_query<'db>(
     db: &'db dyn RootDatabase,
     file_id_input: base_db::FileIdInput<'db>,
@@ -130,7 +236,7 @@ pub fn module_cfgs_query<'db>(
     Arc::new(hir::cfg::ModuleCfgs::new(cfgs))
 }
 
-#[salsa::tracked(lru = 256)]
+#[salsa::tracked(lru = 256, heap_size = heap_estimate::shared_cfg_heap)]
 pub fn method_cfg_query<'db>(
     db: &'db dyn RootDatabase,
     method_id_input: hir::MethodIdInput<'db>,
@@ -149,7 +255,7 @@ pub fn method_cfg_query<'db>(
     })
 }
 
-#[salsa::tracked(lru = 128)]
+#[salsa::tracked(lru = 128, heap_size = heap_estimate::module_reaching_definitions_heap)]
 pub fn module_reaching_definitions_query<'db>(
     db: &'db dyn RootDatabase,
     file_id_input: base_db::FileIdInput<'db>,
@@ -197,7 +303,10 @@ pub fn module_reaching_definitions_query<'db>(
         solver.set_initial_state(initial_defs);
 
         if let Some(dataflow_result) = solver.solve() {
-            let result = hir::dataflow::reaching_defs::ReachingDefsResult::new(dataflow_result);
+            let result = hir::dataflow::reaching_defs::ReachingDefsResult::new(
+                dataflow_result,
+                body.clone(),
+            );
             results.insert(local_id, Arc::new(result));
         }
     }
@@ -206,7 +315,7 @@ pub fn module_reaching_definitions_query<'db>(
     Arc::new(hir::dataflow::reaching_defs::ModuleReachingDefs::new(results))
 }
 
-#[salsa::tracked(lru = 128)]
+#[salsa::tracked(lru = 128, heap_size = heap_estimate::module_path_terminates_heap)]
 pub fn module_path_terminates_query<'db>(
     db: &'db dyn RootDatabase,
     file_id_input: base_db::FileIdInput<'db>,
@@ -242,7 +351,7 @@ pub fn module_path_terminates_query<'db>(
     Arc::new(hir::dataflow::path_terminates::ModulePathTerminates::new(results))
 }
 
-#[salsa::tracked(lru = 256)]
+#[salsa::tracked(lru = 256, heap_size = heap_estimate::shared_reaching_defs_heap)]
 pub fn reaching_definitions_query<'db>(
     db: &'db dyn RootDatabase,
     method_id_input: hir::MethodIdInput<'db>,
@@ -259,7 +368,7 @@ pub fn reaching_definitions_query<'db>(
     module_reaching_defs.get(method_id.local_id).cloned()
 }
 
-#[salsa::tracked(lru = 128)]
+#[salsa::tracked(lru = 128, heap_size = heap_estimate::module_liveness_heap)]
 pub fn module_liveness_analysis_query<'db>(
     db: &'db dyn RootDatabase,
     file_id_input: base_db::FileIdInput<'db>,
@@ -316,7 +425,7 @@ pub fn module_liveness_analysis_query<'db>(
     Arc::new(hir::dataflow::liveness::ModuleLiveness::new(results))
 }
 
-#[salsa::tracked(lru = 256)]
+#[salsa::tracked(lru = 256, heap_size = heap_estimate::shared_liveness_heap)]
 pub fn liveness_analysis_query<'db>(
     db: &'db dyn RootDatabase,
     method_id_input: hir::MethodIdInput<'db>,
@@ -332,7 +441,7 @@ pub fn liveness_analysis_query<'db>(
     module_liveness.get(method_id.local_id).cloned()
 }
 
-#[salsa::tracked(lru = 128)]
+#[salsa::tracked(lru = 128, heap_size = heap_estimate::module_level_cfg_heap)]
 pub fn module_level_cfg_query<'db>(
     db: &'db dyn RootDatabase,
     file_id_input: base_db::FileIdInput<'db>,
@@ -357,7 +466,7 @@ pub fn module_level_cfg_query<'db>(
     Arc::new(cfg)
 }
 
-#[salsa::tracked(lru = 128)]
+#[salsa::tracked(lru = 128, heap_size = heap_estimate::module_level_liveness_heap)]
 pub fn module_level_liveness_analysis_query<'db>(
     db: &'db dyn RootDatabase,
     file_id_input: base_db::FileIdInput<'db>,
@@ -388,7 +497,7 @@ pub fn module_level_liveness_analysis_query<'db>(
     Some(Arc::new(dataflow_result))
 }
 
-#[salsa::tracked(lru = 256)]
+#[salsa::tracked(lru = 256, heap_size = heap_estimate::line_index_heap)]
 pub fn line_index_query<'db>(
     db: &'db dyn RootDatabase,
     file_id_input: FileIdInput<'db>,
@@ -469,7 +578,7 @@ impl ModuleCyclomatic {
     }
 }
 
-#[salsa::tracked(lru = 128)]
+#[salsa::tracked(lru = 128, heap_size = heap_estimate::module_hir_metrics_heap)]
 pub fn module_hir_metrics_query<'db>(
     db: &'db dyn RootDatabase,
     file_id_input: FileIdInput<'db>,
@@ -514,7 +623,7 @@ pub fn method_hir_metrics_query<'db>(
         .unwrap_or_else(|| Arc::new(hir::metrics::HirMethodMetrics::default()))
 }
 
-#[salsa::tracked(lru = 128)]
+#[salsa::tracked(lru = 128, heap_size = heap_estimate::module_cyclomatic_heap)]
 pub fn module_cyclomatic_query<'db>(
     db: &'db dyn RootDatabase,
     file_id_input: FileIdInput<'db>,

@@ -1,5 +1,6 @@
 //! End-to-end broker mechanics: one backend serves many sessions, a second launch
-//! defers to the live owner (bind-wins), and the backend dies with its owner session.
+//! defers to the live backend (bind-wins), the backend stays warm across client
+//! disconnects, and it idles out on its own after its grace.
 //!
 //! Uses the lightweight `reference` profile so no heavy workspace build is needed,
 //! and points the per-user runtime dir at a tempdir so the socket is isolated.
@@ -48,68 +49,118 @@ async fn connect_within(key: &BackendKey, budget: Duration) -> TokioStream {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[cfg(any(unix, windows))]
-async fn backend_dies_with_its_owner_session_and_drops_the_rest() {
+async fn backend_survives_client_disconnect_and_stays_reusable() {
     // No `set_var` here: it races with other tests' `getenv` (a glibc env data race)
     // and would corrupt the resolved socket path. A unique source dir already gives a
     // unique socket name under the real runtime dir, so no isolation env is needed.
     let src = TempDir::new().unwrap();
     let key = key_for(&src);
 
-    // Generous orphan grace so the backend never orphan-exits before clients connect.
-    // Once an owner is claimed the grace is irrelevant — lifetime becomes owner-driven.
+    // Long graces so nothing idles out mid-test: this asserts survival, not exit.
     let grace = Duration::from_secs(30);
-    let backend =
-        tokio::spawn(broker::daemon::run(|| Ok(reference_server()), key_for(&src), grace));
+    let idle_ttl = Duration::from_secs(30);
+    let backend = tokio::spawn(broker::daemon::run(
+        || Ok(reference_server()),
+        key_for(&src),
+        grace,
+        idle_ttl,
+    ));
 
-    // Two concurrent client sessions through the one backend. The first to complete its
-    // initialize handshake (c1) sends bytes first and so becomes the owner; c2 is a
-    // dependent session.
+    // Two concurrent client sessions through the one backend.
     let s1 = connect_within(&key, Duration::from_secs(25)).await;
-    let c1 = ().serve(s1).await.expect("owner client initialized");
+    let c1 = ().serve(s1).await.expect("first client initialized");
     let s2 = connect(&key).await.expect("second session connects");
-    let c2 = ().serve(s2).await.expect("dependent client initialized");
+    let c2 = ().serve(s2).await.expect("second client initialized");
 
-    assert!(c1.peer_info().is_some(), "owner session saw server info");
-    assert!(c2.peer_info().is_some(), "dependent session saw server info");
-    let tools = c1.list_all_tools().await.expect("list tools");
-    assert!(
-        tools.iter().any(|t| t.name == "search"),
-        "reference backend exposes its tools: {:?}",
-        tools.iter().map(|t| &t.name).collect::<Vec<_>>()
-    );
+    assert!(c1.peer_info().is_some(), "first session saw server info");
+    assert!(c2.peer_info().is_some(), "second session saw server info");
 
-    // Bind-wins: a second launch for the same key must defer to the live owner and
-    // return promptly (the Ok(None) path), NOT block as a second owner. Its liveness
-    // probe connects without sending data, so it must not be mistaken for the owner.
-    let second =
-        broker::daemon::run(|| Ok(reference_server()), key_for(&src), Duration::from_secs(60));
-    tokio::time::timeout(Duration::from_secs(15), second)
-        .await
-        .expect("second launch returns promptly (defers to live owner)")
-        .expect("second launch ok");
-
-    // Close the OWNER session only: the backend must shut down, even though c2 is still
-    // open. Dropping the listener and c2's socket then ends the backend task.
+    // Close the first session. Under the old owner-coupled lifetime this tore the whole
+    // backend down and severed every other session; now the backend must stay warm and
+    // keep serving c2.
     c1.cancel().await.ok();
-    let exited = tokio::time::timeout(Duration::from_secs(20), backend).await;
-    assert!(exited.is_ok(), "backend shut down when its owner left");
-    exited.unwrap().expect("backend task joined").expect("backend run ok");
 
-    // The dependent session was dropped by the backend shutdown: a call on it must not
-    // succeed (its socket was closed under it), proving the cascade reached c2. In
-    // production the daemon process exits and the OS closes every FD at once, so the EOF
-    // is immediate; here the runtime stays alive and only the explicit abort severs c2,
-    // which under load may not be polled instantly — so a generous timeout stands in for
-    // that delayed EOF. Either a transport error or no response means c2 is unusable; a
-    // successful call would mean it is still being served, which must not happen.
+    // c2 must still work after its peer left — the backend did not tear down.
     let mut args = serde_json::Map::new();
     args.insert("action".to_owned(), serde_json::Value::String("status".to_owned()));
     let call = c2.call_tool(CallToolRequestParams::new("search").with_arguments(args));
-    let after = tokio::time::timeout(Duration::from_secs(10), call).await;
+    let after = tokio::time::timeout(Duration::from_secs(15), call).await;
     assert!(
-        !matches!(after, Ok(Ok(_))),
-        "dependent session must be severed once the backend is gone, got: {after:?}"
+        matches!(after, Ok(Ok(_))),
+        "surviving session must still be served after a peer disconnects, got: {after:?}"
     );
+
+    // A fresh client connecting after the first left reuses the warm backend — the whole
+    // point of the broker, and what the owner-coupled lifetime broke for reconnecting
+    // editors.
+    let s3 = connect_within(&key, Duration::from_secs(10)).await;
+    let c3 = ().serve(s3).await.expect("reconnecting client reuses the warm backend");
+    assert!(c3.peer_info().is_some(), "reconnecting session saw server info");
+
+    c2.cancel().await.ok();
+    c3.cancel().await.ok();
+    backend.abort();
+}
+
+/// Once a backend has served real traffic, it stays warm only for `idle_ttl` after its
+/// last session leaves, then exits on its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[cfg(any(unix, windows))]
+async fn backend_idles_out_after_ttl() {
+    let src = TempDir::new().unwrap();
+    let key = key_for(&src);
+
+    // Long orphan grace (so a never-used exit can't be the cause) but a short idle TTL.
+    let grace = Duration::from_secs(30);
+    let idle_ttl = Duration::from_millis(500);
+    let backend = tokio::spawn(broker::daemon::run(
+        || Ok(reference_server()),
+        key_for(&src),
+        grace,
+        idle_ttl,
+    ));
+
+    let s = connect_within(&key, Duration::from_secs(25)).await;
+    let c = ().serve(s).await.expect("client initialized");
+    assert!(c.peer_info().is_some(), "session saw server info");
+
+    // Disconnect: `warmed` is set (initialize was sent), so the backend exits after the
+    // short idle TTL, not after the much longer orphan grace.
+    c.cancel().await.ok();
+    let exited = tokio::time::timeout(Duration::from_secs(20), backend).await;
+    assert!(exited.is_ok(), "warm backend idled out after its TTL once the last client left");
+    exited.unwrap().expect("backend task joined").expect("backend run ok");
+}
+
+/// Regression: a connection that never sends MCP traffic (a liveness probe, or a proxy
+/// that died before its first request) must NOT promote the backend to the long idle TTL.
+/// Such a never-used backend exits via the short orphan grace instead.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[cfg(any(unix, windows))]
+async fn silent_connection_does_not_warm_the_backend() {
+    let src = TempDir::new().unwrap();
+    let key = key_for(&src);
+
+    // Short orphan grace, long idle TTL: if a silent connect wrongly warmed the backend it
+    // would linger for the idle TTL and trip the timeout below.
+    let grace = Duration::from_secs(3);
+    let idle_ttl = Duration::from_secs(60);
+    let backend = tokio::spawn(broker::daemon::run(
+        || Ok(reference_server()),
+        key_for(&src),
+        grace,
+        idle_ttl,
+    ));
+
+    // Connect and drop without sending a byte — the daemon accepts a session that carries
+    // no MCP traffic, exactly like `probe_live`.
+    let probe = connect_within(&key, Duration::from_secs(25)).await;
+    drop(probe);
+
+    // Must exit on the orphan grace (~3s), well before the 60s idle TTL.
+    let exited = tokio::time::timeout(Duration::from_secs(20), backend).await;
+    assert!(exited.is_ok(), "never-used backend must exit via the short orphan grace");
+    exited.unwrap().expect("backend task joined").expect("backend run ok");
 }
 
 /// Regression: while the first backend is still doing its (slow) build, a second
@@ -128,18 +179,26 @@ async fn second_launch_defers_while_first_is_still_building() {
         std::thread::sleep(Duration::from_secs(2));
         Ok(reference_server())
     };
-    let first =
-        tokio::spawn(broker::daemon::run(slow_build, key_for(&src), Duration::from_secs(15)));
+    let first = tokio::spawn(broker::daemon::run(
+        slow_build,
+        key_for(&src),
+        Duration::from_secs(15),
+        Duration::from_secs(15),
+    ));
 
     // A client connects during the build — the connect must succeed (backlog drained),
     // proving the socket is live (not stealable).
     let stream = connect_within(&key, Duration::from_secs(10)).await;
 
     // A second launch for the same key, while the first is still building, must defer
-    // promptly. If it stole the socket it would become a second owner and block on its
-    // own serve loop until idle (15s), tripping this timeout.
-    let second =
-        broker::daemon::run(|| Ok(reference_server()), key_for(&src), Duration::from_secs(15));
+    // promptly. If it stole the socket it would serve its own loop and block until idle,
+    // tripping this timeout.
+    let second = broker::daemon::run(
+        || Ok(reference_server()),
+        key_for(&src),
+        Duration::from_secs(15),
+        Duration::from_secs(15),
+    );
     tokio::time::timeout(Duration::from_secs(8), second)
         .await
         .expect("second launch defers while the first is building (no socket steal)")
@@ -153,24 +212,32 @@ async fn second_launch_defers_while_first_is_still_building() {
 }
 
 /// Regression for the Windows teardown bug: when the client closes its input (stdin
-/// EOF in production), the proxy relay must end and the backend's owner session must
-/// tear down. On unix the stdin-EOF half-close delivers the backend an EOF promptly; on
-/// Windows named pipes have no half-close, so the relay must bound its drain and drop
-/// the connection to end the session. Without that bound the Windows relay would wait on
-/// a backend that never closes and this test would hang until the timeout.
+/// EOF in production), the proxy relay must end and the backend session must tear down.
+/// On unix the stdin-EOF half-close delivers the backend an EOF promptly; on Windows
+/// named pipes have no half-close, so the relay must bound its drain and drop the
+/// connection to end the session. Without that bound the Windows relay would wait on a
+/// backend that never closes and this test would hang until the timeout. With the session
+/// gone the warm backend then idles out (a short idle TTL here makes that observable).
 ///
 /// Drives the real [`broker::proxy::relay`] with in-memory client streams (standing in
 /// for stdio) between an rmcp client and a live backend, exactly as `relay_stdio` wires
 /// process stdio in production.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[cfg(any(unix, windows))]
-async fn client_closing_input_tears_down_the_backend() {
+async fn client_closing_input_ends_session_and_backend_idles_out() {
     let src = TempDir::new().unwrap();
     let key = key_for(&src);
 
+    // Long orphan grace so the backend stays up through connect; short idle TTL so it
+    // exits promptly once the warmed session ends.
     let grace = Duration::from_secs(30);
-    let backend =
-        tokio::spawn(broker::daemon::run(|| Ok(reference_server()), key_for(&src), grace));
+    let idle_ttl = Duration::from_secs(1);
+    let backend = tokio::spawn(broker::daemon::run(
+        || Ok(reference_server()),
+        key_for(&src),
+        grace,
+        idle_ttl,
+    ));
 
     // The backend connection the proxy relays to.
     let backend_stream = connect_within(&key, Duration::from_secs(25)).await;
@@ -181,22 +248,69 @@ async fn client_closing_input_tears_down_the_backend() {
     let (relay_in, relay_out) = tokio::io::split(relay_side);
     let relay = tokio::spawn(broker::proxy::relay(relay_in, relay_out, backend_stream));
 
-    // A real MCP session over the relay: sends `initialize`, claiming ownership of the
-    // backend, and proves the relay is wired both ways.
+    // A real MCP session over the relay: sends `initialize` (warming the backend) and
+    // proves the relay is wired both ways.
     let client = ().serve(client_side).await.expect("client initialized through the relay");
     assert!(client.peer_info().is_some(), "session saw server info through the relay");
 
     // Client closes its end (production: the MCP client closes the proxy's stdin). The
-    // relay must finish and the backend must shut down with its owner.
+    // relay must finish without hanging.
     client.cancel().await.ok();
 
     let relayed = tokio::time::timeout(Duration::from_secs(20), relay).await;
     assert!(relayed.is_ok(), "relay returned after the client closed its input (no hang)");
     relayed.unwrap().expect("relay task joined").expect("relay ok");
 
+    // The session is gone; the warm backend idles out after its TTL.
     let exited = tokio::time::timeout(Duration::from_secs(20), backend).await;
-    assert!(exited.is_ok(), "backend shut down after the client closed its input");
+    assert!(exited.is_ok(), "backend idled out after the last session ended");
     exited.unwrap().expect("backend task joined").expect("backend run ok");
+}
+
+/// Regression for the accept-vs-idle-expiry race: a client whose `connect` succeeds must
+/// always be served, even if it lands exactly as the idle timer fires. The biased select
+/// in the serve loop guarantees a backlogged connection is accepted before a simultaneous
+/// idle tick can drop it — the proxy treats its successful connect as non-retryable.
+/// Hammered around the idle boundary, every successful connect must complete its
+/// initialize handshake; a backend that has already idled out merely refuses the connect
+/// (retryable) and is relaunched.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[cfg(any(unix, windows))]
+async fn successful_connect_is_always_served_at_idle_boundary() {
+    let src = TempDir::new().unwrap();
+    let key = key_for(&src);
+
+    let grace = Duration::from_secs(30);
+    let idle_ttl = Duration::from_millis(200);
+    let launch = || {
+        tokio::spawn(broker::daemon::run(|| Ok(reference_server()), key_for(&src), grace, idle_ttl))
+    };
+    let mut backend = launch();
+
+    for _ in 0..30 {
+        // Sleep to around the idle boundary so the next connect races a possible expiry.
+        tokio::time::sleep(idle_ttl).await;
+        match connect(&key).await {
+            // The connect succeeded → the connection is in the backlog → the backend MUST
+            // serve it. A connection dropped on a racing expiry would fail this handshake.
+            Ok(stream) => {
+                let client = tokio::time::timeout(Duration::from_secs(10), ().serve(stream))
+                    .await
+                    .expect("serve did not hang")
+                    .expect("a connect that succeeded must be served");
+                assert!(client.peer_info().is_some(), "session saw server info");
+                client.cancel().await.ok();
+            }
+            // The backend idled out before this connect — expected and retryable. Relaunch
+            // so later iterations keep exercising the boundary.
+            Err(_) => {
+                if backend.is_finished() {
+                    backend = launch();
+                }
+            }
+        }
+    }
+    backend.abort();
 }
 
 /// M3 concurrency: many sessions sharing one workspace backend must serve in

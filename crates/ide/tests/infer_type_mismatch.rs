@@ -717,3 +717,29 @@ fn bare_identifier_matching_global_function_is_not_function_typed() {
         mismatches(&db, file_id)
     );
 }
+
+#[test]
+fn type_mismatch_silent_on_keyed_structure_to_structure_param() {
+    // Regression: literal-key inference types `С` as `Структура(Ключ1, Ключ2)`, a distinct interned
+    // type from the param's plain `Структура`. Structure keys are a soft completion aid, never a
+    // subtyping constraint, so this must NOT fire a TypeMismatch (found via ERP: ×3.6 FP blowup).
+    let fixture = r#"
+//- /CommonModules/ПервыйОбщийМодуль/Ext/Module.bsl
+// Параметры:
+//   П - Структура - параметры соединения
+Функция Привет(П) Экспорт
+    Возврат "привет";
+КонецФункции
+
+//- /test.bsl
+Процедура Тест()
+    С = Новый Структура("Ключ1, Ключ2");
+    А = ПервыйОбщийМодуль.Привет(С);
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    assert!(
+        mismatches(&db, file_id).is_empty(),
+        "a keyed literal structure must satisfy a `Структура` parameter without a TypeMismatch"
+    );
+}

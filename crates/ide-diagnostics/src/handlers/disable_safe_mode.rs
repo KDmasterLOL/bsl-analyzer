@@ -33,14 +33,21 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let module_bodies = ctx.module_bodies();
 
     let mut diagnostics = Vec::new();
-    for (local_id, _body) in module_bodies.iter_bodies() {
+    for (local_id, body) in module_bodies.iter_bodies() {
         let Some(result) = module_security.get(local_id) else { continue };
         let Some(source_map) = module_bodies.source_map(local_id) else { continue };
-        emit_for_result(&result, source_map, code, ctx, &mut diagnostics);
+        emit_for_result(&result, body, source_map, code, ctx, &mut diagnostics);
     }
     if let Some(result) = module_security.module_level() {
         if let Some(lower_result) = module_bodies.module_code_result() {
-            emit_for_result(&result, &lower_result.source_map, code, ctx, &mut diagnostics);
+            emit_for_result(
+                &result,
+                &lower_result.body,
+                &lower_result.source_map,
+                code,
+                ctx,
+                &mut diagnostics,
+            );
         }
     }
     diagnostics.sort_by_key(|d| (d.range.start(), d.range.end()));
@@ -49,13 +56,13 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 fn emit_for_result(
     result: &hir::dataflow::DataflowResult<hir::dataflow::security_state::SecurityModeState>,
+    body: &hir::Body,
     source_map: &hir::BodySourceMap,
     code: DiagnosticCode,
     ctx: &DiagnosticsContext,
     out: &mut Vec<Diagnostic>,
 ) {
-    let body = result.body();
-    for event in open_events(result) {
+    for event in open_events(result, body) {
         if !matches!(event.category, Category::SafeMode) {
             continue;
         }

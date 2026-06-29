@@ -89,6 +89,13 @@ impl PathTerminatesResult {
     pub fn cfg(&self) -> &ControlFlowGraph {
         self.inner.cfg()
     }
+
+    /// Approximate live heap bytes for Salsa's `memory_usage` report. The lattice
+    /// value `MayFallthrough` is `Copy` and owns no heap, so only the block-state
+    /// maps' backbone and the owned [`Body`] clone contribute.
+    pub fn estimated_heap(&self) -> usize {
+        self.inner.estimated_heap_with(|_| 0)
+    }
 }
 
 pub fn analyze_path_terminates(
@@ -142,6 +149,17 @@ impl ModulePathTerminates {
 
     pub fn is_empty(&self) -> bool {
         self.results.is_empty()
+    }
+
+    /// Approximate live heap bytes for Salsa's `memory_usage` report: the per-method
+    /// results table plus each owned [`PathTerminatesResult`].
+    pub fn estimated_heap(&self) -> usize {
+        let mut bytes =
+            crate::map_table_bytes::<u32, Arc<PathTerminatesResult>>(self.results.len());
+        for result in self.results.values() {
+            bytes += result.estimated_heap();
+        }
+        bytes
     }
 }
 

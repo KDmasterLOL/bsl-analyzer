@@ -101,7 +101,7 @@ pub fn method_return_type_cycle<'db>(
 // read directly for its `expr_types`/diagnostics. A future direct consumer of a
 // provisional result would observe the empty sentinel and must not assume otherwise.
 #[salsa::tracked(
-    lru = 16384,
+    lru = 8192,
     heap_size = crate::infer::heap_estimate::body_inference_result_heap,
     cycle_fn = infer_method_cycle,
     cycle_initial = infer_method_initial,

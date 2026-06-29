@@ -155,7 +155,7 @@ fn lexical_code_hits(
 ) -> Result<CodeHits, McpError> {
     ensure_workspace_search_allowed(configured_baseline)?;
     ensure_workspace_baseline_runtime_ready(
-        workspace_search_mode,
+        workspace_search_mode.clone(),
         configured_baseline,
         external_baseline.as_ref(),
     )?;
@@ -193,31 +193,56 @@ fn lexical_code_hits(
 
     let hits = if let Some(source) = external_baseline {
         match guard.as_ref() {
-            Some(engine) => match try_direct_lexical_code(engine, &source, query, limit) {
-                DirectResult::Found(hits) => hits,
-                DirectResult::Terminal(error) => {
-                    return Err(external_baseline_mcp_error(&error));
-                }
-                DirectResult::Unavailable => match source.resolve_workspace_view(engine) {
-                    Ok(Some(view)) => {
-                        lexical_hits_for_resolved_view(&view, query, limit, Some("code"))
+            Some(engine) => {
+                let direct_start = std::time::Instant::now();
+                let direct = try_direct_lexical_code(engine, &source, query, limit);
+                tracing::debug!(
+                    elapsed_ms = direct_start.elapsed().as_millis() as u64,
+                    query_len = query.len(),
+                    "search.code: try_direct_lexical_code"
+                );
+                match direct {
+                    DirectResult::Found(hits) => hits,
+                    DirectResult::Terminal(error) => {
+                        return Err(external_baseline_mcp_error(&error));
                     }
-                    Ok(None) => engine.text_search(query, limit, Some("code")).map_err(|e| {
-                        McpError::internal_error(format!("search error: {e}"), None)
-                    })?,
-                    Err(error) => {
-                        if error.is_terminal() {
-                            return Err(external_baseline_mcp_error(&error));
+                    // Direct baseline serving is unavailable (snapshot, overlay, or a transient
+                    // serving-table absence). Do NOT fall back to `resolve_workspace_view`:
+                    // that loads the whole baseline corpus under the engine lock and stalls
+                    // search past the client timeout on a large remote overlay.
+                    //
+                    // In PostgresRemoteOverlay mode the local store has no baseline rows, so
+                    // local `text_search` would silently return overlay-only or empty results
+                    // while the real corpus is unreachable — a misleading "no matches found"
+                    // instead of an honest transient state. Surface it as Pending so the caller
+                    // retries.
+                    //
+                    // In SqliteLocal mode the local store IS the full corpus, so `text_search`
+                    // is the correct bounded answer.
+                    DirectResult::Unavailable => {
+                        if matches!(
+                            workspace_search_mode,
+                            WorkspaceSearchMode::PostgresRemoteOverlay
+                        ) {
+                            return Ok(CodeHits::Pending(
+                                "Baseline lexical serving is temporarily unavailable; \
+                                 please retry shortly."
+                                    .to_owned(),
+                            ));
                         }
-                        warn!(
-                            "failed to resolve external baseline view for lexical search: {error}"
-                        );
-                        engine.text_search(query, limit, Some("code")).map_err(|e| {
+                        let fallback_start = std::time::Instant::now();
+                        let hits = engine.text_search(query, limit, Some("code")).map_err(|e| {
                             McpError::internal_error(format!("search error: {e}"), None)
-                        })?
+                        })?;
+                        tracing::debug!(
+                            elapsed_ms = fallback_start.elapsed().as_millis() as u64,
+                            query_len = query.len(),
+                            "search.code: lexical fallback text_search (baseline unavailable)"
+                        );
+                        hits
                     }
-                },
-            },
+                }
+            }
             None => match try_direct_lexical_code_no_overlay(&source, query, limit) {
                 DirectResult::Found(hits) => hits,
                 DirectResult::Terminal(error) => {
@@ -277,64 +302,181 @@ fn semantic_code_hits(
             ));
         }
     };
-    if guard.is_none() {
+    {
+        let Some(engine) = guard.as_ref() else {
+            return Ok(CodeHits::Pending(
+                "Search index is being built, please try again in a moment.".to_owned(),
+            ));
+        };
+
+        if let SemanticRuntimeStatus::Failed(_) = semantic_runtime {
+            return Ok(CodeHits::Unavailable(SemanticUnavailable::RuntimeFailed));
+        }
+
+        // The fused engine is published before its vectors exist. Degrade to lexical until
+        // the background pass swaps in a populated index, rather than searching the empty
+        // one and reporting a silent zero.
+        if let SemanticRuntimeStatus::Indexing = semantic_runtime {
+            return Ok(CodeHits::Pending(
+                "RAG semantic index is still building; lexical search is available in the meantime."
+                    .to_owned(),
+            ));
+        }
+
+        if !engine.has_semantic() {
+            return Ok(CodeHits::Unavailable(SemanticUnavailable::NotConfigured));
+        }
+
+        // Best-effort identity gate, kept under the guard and *before* the embed: the reader's
+        // query vectors are only comparable against the baseline's stored vectors if both were
+        // produced by the same embedding model/dimension. A mismatch means the embed could never
+        // match, so checking it here (cheap) avoids paying for a wasted ~1.4s query embed. On a
+        // mismatch, name the exact reason (and the knobs to fix it) instead of silently returning
+        // lexical-only. A baseline with no recorded identity, or a read error, falls through to the
+        // existing behavior rather than hard-failing.
+        if let Some(source) = external_baseline.as_ref() {
+            match source.embedding_identity() {
+                Ok(Some((baseline_model, baseline_dim))) => {
+                    let reader_model = engine.embedding_model().unwrap_or("unset");
+                    let reader_dim = engine.embedding_dimension();
+                    if reader_model != baseline_model || reader_dim != Some(baseline_dim) {
+                        let reader_dim = reader_dim
+                            .map(|dim| dim.to_string())
+                            .unwrap_or_else(|| "unset".to_owned());
+                        let msg = format!(
+                            "semantic skipped: this baseline was indexed with model \
+                             '{baseline_model}' (dim {baseline_dim}), but the reader is configured \
+                             with model '{reader_model}' (dim {reader_dim}); set \
+                             EMBEDDING_MODEL/EMBEDDING_DIM (or [search.baseline.embedding] in \
+                             bsl-analyzer.toml) to match and restart"
+                        );
+                        return Ok(CodeHits::Unavailable(SemanticUnavailable::IdentityMismatch(
+                            msg,
+                        )));
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::debug!(
+                        "failed to read baseline embedding identity for validation: {error}"
+                    );
+                }
+            }
+        }
+    }
+
+    // Capture everything needed from the engine while holding the guard, then drop it so the
+    // ~1.4s embed does not serialize every concurrent search on the single engine Mutex.
+    // `model_id` and `dim` are captured here so `resolve_direct_semantic` (called lock-free
+    // below) can gate baseline readiness without re-acquiring the engine.
+    //
+    // These captures cannot go stale across the unlocked embed window: the engine's embedding
+    // identity (embedder/model/dimension) is fixed for the life of the process — built once from
+    // the startup env config and never reconfigured. The only runtime mutation under the engine
+    // lock is `set_vector_index` (the background pass swapping in the populated index, built from
+    // the same config), which preserves model and dimension. So the captured embedder/model_id/dim
+    // stay consistent with the engine the second guard sees. (If a model-reconfiguration path is
+    // ever added, re-validate identity under the second guard.)
+    let (embedder, workspace_root, model_id, dim) = {
+        let engine = guard.as_ref().expect("checked is_none above");
+        (
+            engine.embedder_clone(),
+            engine.workspace_root().map(Path::to_path_buf),
+            engine.embedding_model().map(str::to_owned),
+            engine.embedding_dimension(),
+        )
+    };
+    drop(guard);
+
+    let Some(embedder) = embedder else {
+        return Ok(CodeHits::Unavailable(SemanticUnavailable::NotConfigured));
+    };
+
+    // Resolve external baseline readiness BEFORE embedding. The snapshot actor round-trip is
+    // cheap and needs no engine lock; the embed (~1.4s) must not fire on a not-ready baseline
+    // (it would be wasted, and the caller would receive EmbedderUnavailable instead of the
+    // correct BaselineNotReady). `resolve_direct_semantic` uses the model_id/dim captured above.
+    let resolved_baseline: Option<DirectResolve> = if let Some(ref source) = external_baseline {
+        let resolve_start = std::time::Instant::now();
+        let r = resolve_direct_semantic(source, model_id.as_deref(), dim);
+        tracing::debug!(
+            elapsed_ms = resolve_start.elapsed().as_millis() as u64,
+            "search.code: resolve_direct_semantic"
+        );
+        match r {
+            DirectResolve::Terminal(e) => return Err(external_baseline_mcp_error(&e)),
+            DirectResolve::Unavailable => {
+                // Baseline not ready: the PostgresRemoteOverlay mode has no local fallback.
+                if matches!(workspace_search_mode, WorkspaceSearchMode::PostgresRemoteOverlay) {
+                    return Ok(CodeHits::Unavailable(SemanticUnavailable::BaselineNotReady));
+                }
+                None // Non-Postgres: continue to the local path without embedding for baseline.
+            }
+            r @ DirectResolve::Ready { .. } => Some(r),
+        }
+    } else {
+        // No external baseline: PostgresRemoteOverlay requires one.
+        if matches!(workspace_search_mode, WorkspaceSearchMode::PostgresRemoteOverlay) {
+            return Ok(CodeHits::Unavailable(SemanticUnavailable::BaselineRequired));
+        }
+        None
+    };
+
+    // Embed lock-free now that readiness is confirmed (either baseline Ready or local path).
+    let embed_start = std::time::Instant::now();
+    let embed_result = embedder.embed(query);
+    tracing::debug!(
+        elapsed_ms = embed_start.elapsed().as_millis() as u64,
+        query_len = query.len(),
+        "search.code: embedder.embed (off-lock)"
+    );
+    let query_embedding = match embed_result {
+        Ok(vector) => vector,
+        // The query embed is a request-time call to a remote embedder on the hot path of every
+        // search. When it times out or transiently fails, degrade to the lexical hits the caller
+        // already has rather than failing the whole tool. A non-embedder error means something
+        // structural is broken, which is worth surfacing as a hard error.
+        Err(SearchError::Embedder(detail)) => {
+            warn!("semantic: query embed failed, degrading to lexical: {detail}");
+            return Ok(CodeHits::Unavailable(SemanticUnavailable::EmbedderUnavailable(detail)));
+        }
+        Err(e) => return Err(McpError::internal_error(format!("search error: {e}"), None)),
+    };
+
+    // Re-acquire the lock for the now-fast search. The engine may have changed while unlocked, so
+    // re-check the readiness conditions that gate a semantic search.
+    let guard = match try_acquire_engine(engine) {
+        Ok(g) => g,
+        Err(AcquireFailure::Poisoned) => return Err(engine_lock_poisoned_error()),
+        Err(AcquireFailure::TimedOut) => {
+            return Ok(CodeHits::Pending(
+                "Semantic search is busy (a long operation is holding the index). Lexical search is available in the meantime."
+                    .to_owned(),
+            ));
+        }
+    };
+    let Some(engine) = guard.as_ref() else {
         return Ok(CodeHits::Pending(
             "Search index is being built, please try again in a moment.".to_owned(),
         ));
-    }
-    let engine = guard.as_ref().expect("checked above");
-
-    if let SemanticRuntimeStatus::Failed(_) = semantic_runtime {
-        return Ok(CodeHits::Unavailable(SemanticUnavailable::RuntimeFailed));
-    }
-
-    // The fused engine is published before its vectors exist. Degrade to lexical until
-    // the background pass swaps in a populated index, rather than searching the empty
-    // one and reporting a silent zero.
-    if let SemanticRuntimeStatus::Indexing = semantic_runtime {
-        return Ok(CodeHits::Pending(
-            "RAG semantic index is still building; lexical search is available in the meantime."
-                .to_owned(),
-        ));
-    }
-
+    };
     if !engine.has_semantic() {
         return Ok(CodeHits::Unavailable(SemanticUnavailable::NotConfigured));
     }
 
-    if let Some(source) = external_baseline {
-        // Best-effort identity gate: the reader's query vectors are only comparable against the
-        // baseline's stored vectors if both were produced by the same embedding model/dimension.
-        // On a mismatch, name the exact reason (and the knobs to fix it) instead of silently
-        // returning lexical-only. A baseline with no recorded identity, or a read error, falls
-        // through to the existing behavior rather than hard-failing.
-        match source.embedding_identity() {
-            Ok(Some((baseline_model, baseline_dim))) => {
-                let reader_model = engine.embedding_model().unwrap_or("unset");
-                let reader_dim = engine.embedding_dimension();
-                if reader_model != baseline_model || reader_dim != Some(baseline_dim) {
-                    let reader_dim =
-                        reader_dim.map(|dim| dim.to_string()).unwrap_or_else(|| "unset".to_owned());
-                    let msg = format!(
-                        "semantic skipped: this baseline was indexed with model '{baseline_model}' \
-                         (dim {baseline_dim}), but the reader is configured with model \
-                         '{reader_model}' (dim {reader_dim}); set EMBEDDING_MODEL/EMBEDDING_DIM \
-                         (or [search.baseline.embedding] in bsl-analyzer.toml) to match and restart"
-                    );
-                    return Ok(CodeHits::Unavailable(SemanticUnavailable::IdentityMismatch(msg)));
-                }
-            }
-            Ok(None) => {}
-            Err(error) => {
-                tracing::debug!(
-                    "failed to read baseline embedding identity for validation: {error}"
-                );
-            }
-        }
-
-        match try_direct_semantic_code(engine, &source, query, limit) {
+    if let Some(DirectResolve::Ready { snapshot, model_id: ref mid, dim: d }) = resolved_baseline {
+        // `external_baseline` is still live (the Arc was not consumed); borrow the service for
+        // the search call.
+        let source = external_baseline.as_ref().expect("resolved_baseline=Some implies Some");
+        let direct_start = std::time::Instant::now();
+        let direct =
+            run_direct_semantic(engine, source, &snapshot, mid, d, &query_embedding, limit);
+        tracing::debug!(
+            elapsed_ms = direct_start.elapsed().as_millis() as u64,
+            "search.code: run_direct_semantic (under lock)"
+        );
+        match direct {
             DirectResult::Found(hits) => {
-                let workspace_root = engine.workspace_root().map(Path::to_path_buf);
                 return Ok(CodeHits::Ready { hits, workspace_root });
             }
             DirectResult::Terminal(error) => {
@@ -344,6 +486,7 @@ fn semantic_code_hits(
                 if matches!(workspace_search_mode, WorkspaceSearchMode::PostgresRemoteOverlay) {
                     return Ok(CodeHits::Unavailable(SemanticUnavailable::BaselineNotReady));
                 }
+                // Non-Postgres: fall through to local search.
             }
         }
     }
@@ -352,18 +495,8 @@ fn semantic_code_hits(
         return Ok(CodeHits::Unavailable(SemanticUnavailable::BaselineRequired));
     }
 
-    let workspace_root = engine.workspace_root().map(Path::to_path_buf);
-    match engine.search(query, limit, Some("code")) {
+    match engine.search_with_embedding(&query_embedding, limit, Some("code")) {
         Ok(hits) => Ok(CodeHits::Ready { hits, workspace_root }),
-        // The query embed is a request-time call to a remote embedder on the hot path of every
-        // search. When it times out or transiently fails, degrade to the lexical hits the caller
-        // already has rather than failing the whole tool, mirroring the external-baseline path
-        // (`try_direct_semantic_code` treats an embed failure as `Unavailable`). A non-embedder
-        // error means the local index itself is broken, which is worth surfacing as a hard error.
-        Err(SearchError::Embedder(detail)) => {
-            warn!("local semantic: query embed failed, degrading to lexical: {detail}");
-            Ok(CodeHits::Unavailable(SemanticUnavailable::EmbedderUnavailable(detail)))
-        }
         Err(e) => Err(McpError::internal_error(format!("search error: {e}"), None)),
     }
 }
@@ -575,50 +708,74 @@ fn try_direct_lexical_code(
     })
 }
 
-fn try_direct_semantic_code(
-    engine: &SearchEngine,
+/// Outcome of the lock-free baseline readiness check that runs before the query embed.
+enum DirectResolve {
+    /// The baseline is reachable and has a snapshot; carry the ids needed for the search.
+    Ready { snapshot: bsl_search::Snapshot, model_id: String, dim: usize },
+    /// The baseline is not ready or the engine has no embedding model/dim.
+    Unavailable,
+    /// A terminal error from the baseline actor (network/auth failure that retrying cannot fix).
+    Terminal(bsl_search::SearchError),
+}
+
+/// Check whether the external baseline can serve a semantic search — without embedding the query.
+///
+/// Called lock-free, between the two engine-guard acquisitions in `semantic_code_hits`, so a
+/// not-ready baseline aborts before the ~1.4s query embed fires.
+fn resolve_direct_semantic(
     source: &ExternalBaselineService,
-    query: &str,
-    limit: usize,
-) -> DirectResult {
+    model_id: Option<&str>,
+    dim: Option<usize>,
+) -> DirectResolve {
     let snapshot = match source.resolve_snapshot() {
         Ok(Some((_, s))) => s,
-        Ok(None) => return DirectResult::Unavailable,
+        Ok(None) => return DirectResolve::Unavailable,
         Err(e) => {
             if e.is_terminal() {
                 warn!("direct semantic: terminal snapshot resolution error: {e}");
-                return DirectResult::Terminal(e);
+                return DirectResolve::Terminal(e);
             }
             warn!("direct semantic: snapshot resolution failed: {e}");
-            return DirectResult::Unavailable;
+            return DirectResolve::Unavailable;
         }
     };
-    let query_embedding = match engine.embed_query(query) {
-        Ok(e) => e,
-        Err(e) => {
-            warn!("direct semantic: embed_query failed: {e}");
-            return DirectResult::Unavailable;
-        }
+    let Some(model_id) = model_id else {
+        return DirectResolve::Unavailable;
     };
-    let Some(model_id) = engine.embedding_model() else {
-        return DirectResult::Unavailable;
+    let Some(dim) = dim else {
+        return DirectResolve::Unavailable;
     };
-    let Some(dim) = engine.embedding_dimension() else {
-        return DirectResult::Unavailable;
-    };
-    let (overlay_hits, hidden_paths) = match engine.workspace_overlay_semantic_hits(query, limit) {
-        Ok(r) => r,
-        Err(e) => {
-            warn!("direct semantic: overlay query failed: {e}");
-            return DirectResult::Unavailable;
-        }
-    };
+    DirectResolve::Ready { snapshot, model_id: model_id.to_owned(), dim }
+}
+
+/// Execute the external baseline semantic search with a precomputed query vector.
+///
+/// Called under the engine lock after [`resolve_direct_semantic`] confirmed readiness and the
+/// embed completed. The snapshot and model identity were resolved in the lock-free phase and are
+/// passed in directly; no second `resolve_snapshot` call is made.
+fn run_direct_semantic(
+    engine: &SearchEngine,
+    source: &ExternalBaselineService,
+    snapshot: &bsl_search::Snapshot,
+    model_id: &str,
+    dim: usize,
+    query_embedding: &[f32],
+    limit: usize,
+) -> DirectResult {
+    let (overlay_hits, hidden_paths) =
+        match engine.workspace_overlay_semantic_hits_with_embedding(query_embedding, limit) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("direct semantic: overlay query failed: {e}");
+                return DirectResult::Unavailable;
+            }
+        };
     let overlay_semantic: Vec<SemanticHit> =
         overlay_hits.iter().map(SearchHit::to_semantic).collect();
     merge_direct_semantic_with_refill(&overlay_semantic, &hidden_paths, limit, |fetch_limit| {
         source.semantic_search(
             snapshot.id.0.as_str(),
-            &query_embedding,
+            query_embedding,
             model_id,
             dim,
             Some("code"),
@@ -966,6 +1123,9 @@ fn search_status_with_cap(
         Err(AcquireFailure::Poisoned) => return Err(engine_lock_poisoned_error()),
         Err(AcquireFailure::TimedOut) => None,
     };
+    // Measure how long the engine lock is held across the status build so a future stall is
+    // diagnosable from `BSL_LOG=debug` alone (the release binary cannot be stack-traced).
+    let guard_held_start = std::time::Instant::now();
     let engine_busy = guard.is_none();
     // Drive the summary's lexical-availability claim off the real engine state: "ready" only when
     // the engine is published and not held, so status never tells the agent the local index is
@@ -1018,13 +1178,28 @@ fn search_status_with_cap(
     }
 
     if let Some(engine) = guard.as_ref().and_then(|g| g.as_ref()) {
+        let counts_start = std::time::Instant::now();
         let files = engine.file_count().unwrap_or(0);
         let chunks = engine.chunk_count().unwrap_or(0);
         let vectors = engine.vector_count();
         let semantic = engine.has_semantic();
+        tracing::debug!(
+            elapsed_ms = counts_start.elapsed().as_millis() as u64,
+            "search.status: engine counts (file/chunk/vector/semantic)"
+        );
 
+        let embed_code_start = std::time::Instant::now();
         let code_vectors = engine.embedding_count_by_collection("code").unwrap_or(0);
+        tracing::debug!(
+            elapsed_ms = embed_code_start.elapsed().as_millis() as u64,
+            "search.status: embedding_count_by_collection code"
+        );
+        let embed_platform_start = std::time::Instant::now();
         let platform_vectors = engine.embedding_count_by_collection("platform").unwrap_or(0);
+        tracing::debug!(
+            elapsed_ms = embed_platform_start.elapsed().as_millis() as u64,
+            "search.status: embedding_count_by_collection platform"
+        );
 
         let search_state = match &semantic_runtime {
             SemanticRuntimeStatus::Failed(_) => "ready (semantic runtime failed)",
@@ -1086,17 +1261,32 @@ fn search_status_with_cap(
         let _ = writeln!(out, "  Semantic: {semantic_status}");
         let _ = writeln!(out, "  FTS:      {}", if chunks > 0 { "available" } else { "empty" });
         let _ = writeln!(out, "  Collections: code, platform");
+        let overlay_stats_start = std::time::Instant::now();
         let workspace_overlay = engine
             .workspace_overlay_stats()
             .map_err(|e| McpError::internal_error(format!("overlay status error: {e}"), None))?;
+        tracing::debug!(
+            elapsed_ms = overlay_stats_start.elapsed().as_millis() as u64,
+            "search.status: workspace_overlay_stats"
+        );
         if let Some(source) = external_baseline.as_ref() {
             match source.corpus() {
                 bsl_search::CorpusId::WorkspaceCode => {
-                    let code_lexical_source = match source.resolve_workspace_view(engine) {
+                    // Choosing the display label only needs to know whether a baseline snapshot
+                    // resolves — not its documents. `resolve_snapshot` is a metadata-only actor
+                    // round-trip, whereas `resolve_workspace_view` loads the entire baseline
+                    // corpus (hundreds of thousands of documents) under the engine lock, which
+                    // stalls `status` past the client timeout on a large remote overlay.
+                    let display_start = std::time::Instant::now();
+                    let code_lexical_source = match source.resolve_snapshot() {
                         Ok(Some(_)) => "external baseline + local overlay",
                         Ok(None) => "local sqlite + local overlay",
                         Err(_) => "local sqlite + local overlay",
                     };
+                    tracing::debug!(
+                        elapsed_ms = display_start.elapsed().as_millis() as u64,
+                        "search.status: resolve_snapshot display check"
+                    );
                     let _ = writeln!(out, "  Code lexical source: {code_lexical_source}");
                     let code_semantic_source =
                         match (&semantic_runtime, workspace_search_mode.clone()) {
@@ -1131,7 +1321,10 @@ fn search_status_with_cap(
                     let _ = writeln!(out, "  Code semantic source: {code_semantic_source}");
                 }
                 bsl_search::CorpusId::Reference => {
-                    let docs_lexical_source = match source.resolve_reference_view() {
+                    // Metadata-only check: `resolve_reference_view` loads all reference docs,
+                    // which is expensive under the engine lock. A snapshot resolve is enough
+                    // to decide the display label.
+                    let docs_lexical_source = match source.resolve_snapshot() {
                         Ok(Some(_)) => "external baseline",
                         Ok(None) => "local sqlite",
                         Err(_) => "local sqlite",
@@ -1162,9 +1355,15 @@ fn search_status_with_cap(
         }
 
         if let Some(overlay) = workspace_overlay {
-            if let Some(view) = engine.resolve_workspace_code_view().map_err(|e| {
+            let resolve_local_start = std::time::Instant::now();
+            let local_view = engine.resolve_workspace_code_view().map_err(|e| {
                 McpError::internal_error(format!("resolved workspace view error: {e}"), None)
-            })? {
+            })?;
+            tracing::debug!(
+                elapsed_ms = resolve_local_start.elapsed().as_millis() as u64,
+                "search.status: resolve_workspace_code_view (local store)"
+            );
+            if let Some(view) = local_view {
                 let files: HashSet<&str> =
                     view.documents().iter().map(|document| document.path.as_str()).collect();
                 let _ = writeln!(out);
@@ -1196,7 +1395,12 @@ fn search_status_with_cap(
     }
 
     if let Some(external_baseline) = external_baseline {
+        let probe_start = std::time::Instant::now();
         let status = external_baseline.probe_status();
+        tracing::debug!(
+            elapsed_ms = probe_start.elapsed().as_millis() as u64,
+            "search.status: external probe_status"
+        );
         let _ = writeln!(out);
         let _ = writeln!(out, "External baseline: configured");
         let _ = writeln!(out, "  Backend:  {}", status.backend);
@@ -1216,32 +1420,23 @@ fn search_status_with_cap(
                 }
                 match external_baseline.corpus() {
                     bsl_search::CorpusId::WorkspaceCode => {
-                        if let Some(engine) = guard.as_ref().and_then(|g| g.as_ref()) {
-                            match external_baseline.resolve_workspace_view(engine) {
-                                Ok(Some(view)) => {
-                                    let resolved_files: HashSet<&str> = view
-                                        .documents()
-                                        .iter()
-                                        .map(|document| document.path.as_str())
-                                        .collect();
-                                    let _ = writeln!(out, "  Resolved view: ready");
-                                    let _ =
-                                        writeln!(out, "  Resolved files: {}", resolved_files.len());
-                                    let _ = writeln!(
-                                        out,
-                                        "  Resolved chunks: {}",
-                                        view.documents().len()
-                                    );
-                                }
-                                Ok(None) => {
-                                    let _ = writeln!(out, "  Resolved view: unavailable");
-                                }
-                                Err(error) => {
-                                    let _ = writeln!(out, "  Resolved view: error");
-                                    let _ = writeln!(out, "  Resolved error: {}", error);
-                                }
-                            }
-                        }
+                        // A metadata-only check: do NOT load the baseline corpus here. The
+                        // baseline file/chunk counts are already printed above, and the local
+                        // overlay deltas appear in the `Workspace overlay` section, so the
+                        // post-merge resolved counts are redundant and not worth a full
+                        // document load under the engine lock (it stalls `status` past the
+                        // client timeout on a large remote overlay).
+                        let ext_resolve_start = std::time::Instant::now();
+                        let resolved_view = match external_baseline.resolve_snapshot() {
+                            Ok(Some(_)) => "ready",
+                            Ok(None) => "unavailable",
+                            Err(_) => "error",
+                        };
+                        tracing::debug!(
+                            elapsed_ms = ext_resolve_start.elapsed().as_millis() as u64,
+                            "search.status: external resolve_snapshot"
+                        );
+                        let _ = writeln!(out, "  Resolved view: {resolved_view}");
                     }
                     bsl_search::CorpusId::Reference => {
                         if let Some(local_fingerprint) =
@@ -1259,26 +1454,16 @@ fn search_status_with_cap(
                                 shorten_fingerprint(&local_fingerprint)
                             );
                         }
-                        match external_baseline.resolve_reference_view() {
-                            Ok(Some(view)) => {
-                                let resolved_files: HashSet<&str> = view
-                                    .documents()
-                                    .iter()
-                                    .map(|document| document.path.as_str())
-                                    .collect();
-                                let _ = writeln!(out, "  Resolved view: ready");
-                                let _ = writeln!(out, "  Resolved files: {}", resolved_files.len());
-                                let _ =
-                                    writeln!(out, "  Resolved chunks: {}", view.documents().len());
-                            }
-                            Ok(None) => {
-                                let _ = writeln!(out, "  Resolved view: unavailable");
-                            }
-                            Err(error) => {
-                                let _ = writeln!(out, "  Resolved view: error");
-                                let _ = writeln!(out, "  Resolved error: {}", error);
-                            }
-                        }
+                        // Metadata-only check: do NOT load the reference corpus here.
+                        // The baseline file/chunk counts are already printed above, so the
+                        // post-resolve counts are redundant and not worth a full document
+                        // load under the engine lock.
+                        let resolved_view = match external_baseline.resolve_snapshot() {
+                            Ok(Some(_)) => "ready",
+                            Ok(None) => "unavailable",
+                            Err(_) => "error",
+                        };
+                        let _ = writeln!(out, "  Resolved view: {resolved_view}");
                     }
                     bsl_search::CorpusId::Custom(_) => {}
                 }
@@ -1323,6 +1508,13 @@ fn search_status_with_cap(
         "Note: code snippets are secret-redacted (credential-like values shown as ***); \
          treat snippet text as sanitized, not byte-exact."
     );
+
+    if !engine_busy {
+        tracing::debug!(
+            elapsed_ms = guard_held_start.elapsed().as_millis() as u64,
+            "search.status: total time holding engine guard"
+        );
+    }
 
     Ok(CallToolResult::success(vec![Content::text(out)]))
 }

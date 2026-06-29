@@ -418,10 +418,52 @@ impl From<&Param> for ParamSymbol {
     }
 }
 
+/// Rough live bytes of a [`SymbolTree`] for Salsa's `memory_usage` introspection:
+/// the method/variable arenas with each symbol's name, param-symbol vec and
+/// annotation vec, plus the two name-index maps and their `SmolStr` keys.
+/// `docs` (`Option<Arc<…Docs>>`) counts only as the inline `Arc` pointer already
+/// in the arena element — the pointee is shared, so its heap is not re-attributed
+/// here. Nested `TypeRef` payloads inside params are likewise left at their
+/// inline size; both keep the estimate simple at the cost of a mild undercount.
+pub(crate) fn symbol_tree_heap(v: &Arc<SymbolTree>) -> usize {
+    use crate::heap_estimate::{map_table_bytes, name_bytes, smol_str_bytes, vec_bytes};
+
+    let tree = &**v;
+    let mut bytes = std::mem::size_of::<SymbolTree>();
+
+    bytes += vec_bytes::<MethodSymbol>(tree.methods.len());
+    for method in tree.methods.values() {
+        bytes += name_bytes(&method.name);
+        bytes += vec_bytes::<ParamSymbol>(method.params.len());
+        for param in &method.params {
+            bytes += name_bytes(&param.name);
+        }
+        bytes += vec_bytes::<Annotation>(method.annotations.len());
+    }
+
+    bytes += vec_bytes::<VariableSymbol>(tree.variables.len());
+    for variable in tree.variables.values() {
+        bytes += name_bytes(&variable.name);
+        bytes += vec_bytes::<Annotation>(variable.annotations.len());
+    }
+
+    bytes += map_table_bytes::<SmolStr, Vec<Idx<MethodSymbol>>>(tree.methods_by_name.len());
+    for (key, idxs) in &tree.methods_by_name {
+        bytes += smol_str_bytes(key.len()) + vec_bytes::<Idx<MethodSymbol>>(idxs.len());
+    }
+
+    bytes += map_table_bytes::<SmolStr, Vec<Idx<VariableSymbol>>>(tree.variables_by_name.len());
+    for (key, idxs) in &tree.variables_by_name {
+        bytes += smol_str_bytes(key.len()) + vec_bytes::<Idx<VariableSymbol>>(idxs.len());
+    }
+
+    bytes
+}
+
 // Condensed per-module symbol list (no green-tree pin): on the cross-module call
 // resolution path. High cap keeps it across chunk-boundary LRU trims so a later
 // chunk resolving a call into this module doesn't re-derive it (re-parse + lower).
-#[salsa::tracked(lru = 32768)]
+#[salsa::tracked(lru = 2048, heap_size = crate::symbol_tree::symbol_tree_heap)]
 pub fn symbol_tree_query<'db>(
     db: &'db dyn crate::DefDatabase,
     file_id_input: base_db::FileIdInput<'db>,

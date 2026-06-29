@@ -1,6 +1,6 @@
 use hir::{
-    narrow_query, narrowed_type_at, Builders, DefDatabase, DefWithBodyId, ExprId, IdConversion,
-    ModuleId, Name, Semantics, Type,
+    narrow_query, narrowed_type_at, Body, Builders, DefDatabase, DefWithBodyId, ExprId,
+    IdConversion, ModuleId, Name, Semantics, Type,
 };
 use ide_db::base_db::{RootQueryDb, SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
@@ -43,6 +43,18 @@ fn expr_id_at_range(db: &RootDatabaseImpl, file_id: FileId, range: TextRange) ->
         .method_bodies()
         .find_map(|(_local_id, _body, source_map)| source_map.expr_at_range(range));
     found.unwrap_or_else(|| panic!("BodySourceMap has no expression at range {:?}", range))
+}
+
+fn body_of(db: &RootDatabaseImpl, file_id: FileId, owner: DefWithBodyId) -> Body {
+    let module_bodies = db.module_bodies(ModuleId::new(file_id));
+    match owner {
+        DefWithBodyId::Method(local_id) => {
+            module_bodies.body(local_id).expect("method body lowered").clone()
+        }
+        DefWithBodyId::ModuleCode => {
+            module_bodies.module_code().expect("module-level body lowered").clone()
+        }
+    }
 }
 
 fn nth_ident_expr_at_distinct_position(root: &SyntaxNode, ident: &str, nth: usize) -> SyntaxNode {
@@ -98,7 +110,13 @@ fn narrowed_type_at_then_body_returns_narrowed_ty() {
 
     let result = narrow_query(&db, file_id, owner).expect("narrow_query must converge");
     assert_eq!(
-        narrowed_type_at(&db, &result, expr_id.to_idx(), &Name::new("Х")),
+        narrowed_type_at(
+            &db,
+            &result,
+            &body_of(&db, file_id, owner),
+            expr_id.to_idx(),
+            &Name::new("Х")
+        ),
         Some(db.string(None, false)),
         "then-body `Х` must observe the narrowed Ty::String (True-edge overlay)"
     );
@@ -132,7 +150,13 @@ fn narrowed_type_at_guard_receiver_returns_pre_narrow_reaching_ty() {
 
     let result = narrow_query(&db, file_id, owner).expect("narrow_query must converge");
     assert_eq!(
-        narrowed_type_at(&db, &result, expr_id.to_idx(), &Name::new("Х")),
+        narrowed_type_at(
+            &db,
+            &result,
+            &body_of(&db, file_id, owner),
+            expr_id.to_idx(),
+            &Name::new("Х")
+        ),
         Some(db.number(None, None)),
         "guard-receiver `Х` observes the pre-narrow reaching type (Number from `Х = 42`), \
          not the narrowed one (String)"
@@ -167,7 +191,13 @@ fn narrowed_type_at_after_one_sided_if_on_parameter_drops() {
 
     let result = narrow_query(&db, file_id, owner).expect("narrow_query must converge");
     assert_eq!(
-        narrowed_type_at(&db, &result, expr_id.to_idx(), &Name::new("Х")),
+        narrowed_type_at(
+            &db,
+            &result,
+            &body_of(&db, file_id, owner),
+            expr_id.to_idx(),
+            &Name::new("Х")
+        ),
         None,
         "post-КонецЕсли `Х` must drop the one-sided narrowing (entry only in True branch)"
     );
@@ -217,7 +247,13 @@ fn narrow_is_case_insensitive_across_guard_and_hover() {
 
     let result = narrow_query(&db, file_id, owner).expect("narrow_query must converge");
     assert_eq!(
-        narrowed_type_at(&db, &result, expr_id.to_idx(), &Name::new("Х")),
+        narrowed_type_at(
+            &db,
+            &result,
+            &body_of(&db, file_id, owner),
+            expr_id.to_idx(),
+            &Name::new("Х")
+        ),
         Some(db.string(None, false)),
         "mixed-case guard receiver (`х`) must narrow the uppercase reference (`Х`)"
     );
@@ -254,7 +290,13 @@ fn narrow_query_handles_module_code_body() {
     let result = narrow_query(&db, file_id, DefWithBodyId::ModuleCode)
         .expect("narrow_query must converge for ModuleCode");
     assert_eq!(
-        narrowed_type_at(&db, &result, expr_id.to_idx(), &Name::new("Х")),
+        narrowed_type_at(
+            &db,
+            &result,
+            &body_of(&db, file_id, DefWithBodyId::ModuleCode),
+            expr_id.to_idx(),
+            &Name::new("Х"),
+        ),
         Some(db.string(None, false)),
         "module-code narrowing must reach the then-body Х"
     );
@@ -290,7 +332,13 @@ fn narrowed_type_at_else_body_inherits_reaching_when_complement_degrades() {
 
     let result = narrow_query(&db, file_id, owner).expect("narrow_query must converge");
     assert_eq!(
-        narrowed_type_at(&db, &result, expr_id.to_idx(), &Name::new("Х")),
+        narrowed_type_at(
+            &db,
+            &result,
+            &body_of(&db, file_id, owner),
+            expr_id.to_idx(),
+            &Name::new("Х")
+        ),
         Some(db.number(None, None)),
         "else-body Х inherits the Conditional-IN reaching type when the complement is Unknown"
     );
@@ -449,7 +497,13 @@ fn narrowed_type_at_after_terminating_undefined_guard_keeps_complement() {
 
     let result = narrow_query(&db, file_id, owner).expect("narrow_query must converge");
     assert_eq!(
-        narrowed_type_at(&db, &result, expr_id.to_idx(), &Name::new("Х")),
+        narrowed_type_at(
+            &db,
+            &result,
+            &body_of(&db, file_id, owner),
+            expr_id.to_idx(),
+            &Name::new("Х")
+        ),
         Some(db.number(None, None)),
         "after `Если Х = Неопределено Тогда Возврат` the then-branch terminates, so the \
          inverted guard must survive the merge: `Х` is Number, not Number|Неопределено"
@@ -482,7 +536,13 @@ fn narrowed_type_at_after_non_terminating_undefined_guard_drops() {
 
     let result = narrow_query(&db, file_id, owner).expect("narrow_query must converge");
     assert_eq!(
-        narrowed_type_at(&db, &result, expr_id.to_idx(), &Name::new("Х")),
+        narrowed_type_at(
+            &db,
+            &result,
+            &body_of(&db, file_id, owner),
+            expr_id.to_idx(),
+            &Name::new("Х")
+        ),
         Some(db.union(vec![db.number(None, None), db.undefined()])),
         "a non-terminating then-branch reaches the merge, so both arms survive: \
          the tracked set equals the base union — no effective narrowing"
@@ -515,7 +575,13 @@ fn narrowed_type_at_after_terminating_raise_guard_keeps_complement() {
 
     let result = narrow_query(&db, file_id, owner).expect("narrow_query must converge");
     assert_eq!(
-        narrowed_type_at(&db, &result, expr_id.to_idx(), &Name::new("Х")),
+        narrowed_type_at(
+            &db,
+            &result,
+            &body_of(&db, file_id, owner),
+            expr_id.to_idx(),
+            &Name::new("Х")
+        ),
         Some(db.number(None, None)),
         "ВызватьИсключение terminates the then-branch the same way Возврат does"
     );

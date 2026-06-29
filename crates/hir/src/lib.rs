@@ -84,7 +84,8 @@ pub mod dataflow {
 
     pub mod liveness {
         pub use ::dataflow::liveness::{
-            liveness_analysis_direct, Liveness, LivenessTransfer, ModuleLiveness, VariableIndex,
+            liveness_analysis_direct, liveness_result_heap, Liveness, LivenessTransfer,
+            ModuleLiveness, VariableIndex,
         };
     }
 

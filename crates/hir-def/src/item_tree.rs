@@ -149,10 +149,50 @@ pub enum AnnotationKind {
     ChangeAndValidate,
 }
 
+/// Rough live bytes of an [`ItemTree`] for Salsa's `memory_usage` introspection:
+/// the three item arenas plus each item's per-name `SmolStr` payload and its
+/// boxed param/annotation slices. `Annotation`/`ModItem` are `Copy` and carry no
+/// further heap, so the arena/slice element counts capture them fully.
+pub(crate) fn item_tree_heap(v: &Arc<ItemTree>) -> usize {
+    use crate::heap_estimate::{name_bytes, vec_bytes};
+
+    let tree = &**v;
+    let mut bytes = std::mem::size_of::<ItemTree>();
+    bytes += vec_bytes::<ModItem>(tree.top_level.len());
+
+    bytes += vec_bytes::<Procedure>(tree.procedures.len());
+    for proc in tree.procedures.values() {
+        bytes += name_bytes(&proc.name);
+        bytes += vec_bytes::<Param>(proc.params.len());
+        for param in proc.params.iter() {
+            bytes += name_bytes(&param.name);
+        }
+        bytes += vec_bytes::<Annotation>(proc.annotations.len());
+    }
+
+    bytes += vec_bytes::<Function>(tree.functions.len());
+    for func in tree.functions.values() {
+        bytes += name_bytes(&func.name);
+        bytes += vec_bytes::<Param>(func.params.len());
+        for param in func.params.iter() {
+            bytes += name_bytes(&param.name);
+        }
+        bytes += vec_bytes::<Annotation>(func.annotations.len());
+    }
+
+    bytes += vec_bytes::<Variable>(tree.variables.len());
+    for var in tree.variables.values() {
+        bytes += name_bytes(&var.name);
+        bytes += vec_bytes::<Annotation>(var.annotations.len());
+    }
+
+    bytes
+}
+
 // Condensed module item index (no green-tree pin): feeds symbol/name resolution
 // across modules. High cap keeps it across chunk-boundary LRU trims so a later
 // chunk doesn't re-lower it from a re-parse.
-#[salsa::tracked(lru = 32768)]
+#[salsa::tracked(lru = 2048, heap_size = crate::item_tree::item_tree_heap)]
 pub fn item_tree_query<'db>(
     db: &'db dyn base_db::RootQueryDb,
     file_id_input: base_db::FileIdInput<'db>,

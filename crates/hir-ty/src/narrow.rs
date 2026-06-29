@@ -572,10 +572,10 @@ fn build_base_types_for_body(
 pub fn narrowed_type_at<DB: TypeKernelDb + ?Sized>(
     db: &DB,
     result: &dataflow::DataflowResult<NarrowState>,
+    body: &Body,
     expr_idx: ExprIdx,
     name: &Name,
 ) -> Option<TypeId> {
-    let body = result.body();
     let cfg = result.cfg();
 
     let node = containing_vertex(body, cfg, expr_idx)?;
@@ -603,7 +603,7 @@ pub fn narrow_or_base<DB: HirDatabase + ?Sized>(
     let Some(result) = db.narrow(file_id, owner) else {
         return base;
     };
-    narrowed_type_at(db, &result, expr_id.to_idx(), name).unwrap_or(base)
+    narrowed_type_at(db, &result, body, expr_id.to_idx(), name).unwrap_or(base)
 }
 
 fn containing_vertex(
@@ -2010,6 +2010,7 @@ mod tests {
     struct NarrowProbe {
         db: InMemoryDb,
         result: dataflow::DataflowResult<NarrowState>,
+        body: Body,
         then_body_path: ExprIdx,
         else_body_path: Option<ExprIdx>,
     }
@@ -2041,8 +2042,9 @@ mod tests {
         b.set_top_level(vec![if_stmt]);
 
         let body = b.body.clone();
-        let result = narrow_body(&db, body, bases).expect("narrowing analysis must converge");
-        NarrowProbe { db, result, then_body_path, else_body_path: Some(else_body_path) }
+        let result =
+            narrow_body(&db, body.clone(), bases).expect("narrowing analysis must converge");
+        NarrowProbe { db, result, body, then_body_path, else_body_path: Some(else_body_path) }
     }
 
     fn build_probe_if_then_only() -> NarrowProbe {
@@ -2065,9 +2067,9 @@ mod tests {
         b.set_top_level(vec![if_stmt]);
 
         let body = b.body.clone();
-        let result =
-            narrow_body(&db, body, FxHashMap::default()).expect("narrowing analysis must converge");
-        NarrowProbe { db, result, then_body_path, else_body_path: None }
+        let result = narrow_body(&db, body.clone(), FxHashMap::default())
+            .expect("narrowing analysis must converge");
+        NarrowProbe { db, result, body, then_body_path, else_body_path: None }
     }
 
     #[test]
@@ -2099,13 +2101,13 @@ mod tests {
             narrow_body(&db, body, FxHashMap::default()).expect("narrowing analysis must converge");
 
         assert_eq!(
-            narrowed_type_at(&db, &result, receiver, &Name::new("Х")),
+            narrowed_type_at(&db, &result, &b.body,receiver, &Name::new("Х")),
             Some(db.number(None, None)),
             "receiver must see pre-narrow overlay (Х → Number from prior assign), NOT the post-narrow String from the guard"
         );
 
         assert_eq!(
-            narrowed_type_at(&db, &result, then_rhs, &Name::new("Х")),
+            narrowed_type_at(&db, &result, &b.body, then_rhs, &Name::new("Х")),
             Some(db.string(None, false)),
             "then-body Х must see the guard's narrowing to Строка"
         );
@@ -2116,7 +2118,13 @@ mod tests {
         let probe = build_probe_if_then_else(|_| FxHashMap::default());
         let expected = probe.db.string(None, false);
         assert_eq!(
-            narrowed_type_at(&probe.db, &probe.result, probe.then_body_path, &Name::new("Х")),
+            narrowed_type_at(
+                &probe.db,
+                &probe.result,
+                &probe.body,
+                probe.then_body_path,
+                &Name::new("Х")
+            ),
             Some(expected),
             "then-body Х must carry the TrueBranch narrowing Х → Строка"
         );
@@ -2134,7 +2142,7 @@ mod tests {
         });
         let else_expr = probe.else_body_path.expect("else branch is present");
         assert_eq!(
-            narrowed_type_at(&probe.db, &probe.result, else_expr, &Name::new("Х")),
+            narrowed_type_at(&probe.db, &probe.result, &probe.body,else_expr, &Name::new("Х")),
             Some(probe.db.number(None, None)),
             "else-body Х must carry the FalseBranch complement Union(Number,String) \\ String = Number"
         );
@@ -2144,7 +2152,13 @@ mod tests {
     fn narrowed_type_at_untouched_var_returns_none() {
         let probe = build_probe_if_then_else(|_| FxHashMap::default());
         assert_eq!(
-            narrowed_type_at(&probe.db, &probe.result, probe.then_body_path, &Name::new("Y")),
+            narrowed_type_at(
+                &probe.db,
+                &probe.result,
+                &probe.body,
+                probe.then_body_path,
+                &Name::new("Y")
+            ),
             None,
             "unrelated variable Y must not pick up any narrowing"
         );
@@ -2174,7 +2188,7 @@ mod tests {
         let probe = build_probe_if_then_else(|_| FxHashMap::default());
         let stray_expr = Idx::<Expr>::from_raw(RawIdx::from(u32::MAX - 1));
         assert_eq!(
-            narrowed_type_at(&probe.db, &probe.result, stray_expr, &Name::new("Х")),
+            narrowed_type_at(&probe.db, &probe.result, &probe.body, stray_expr, &Name::new("Х")),
             None,
             "expression not reachable from any CFG vertex must return None"
         );
@@ -2221,13 +2235,13 @@ mod tests {
         let result = narrow_body(&db, body, bases).expect("narrowing analysis must converge");
 
         assert_eq!(
-            narrowed_type_at(&db, &result, elsif_receiver, &Name::new("Х")),
+            narrowed_type_at(&db, &result, &b.body,elsif_receiver, &Name::new("Х")),
             Some(db.number(None, None)),
             "elsif-condition receiver must see the FalseBranch-complement from the first Conditional (Number), not its own elsif narrowing target (Дата)"
         );
 
         assert_eq!(
-            narrowed_type_at(&db, &result, elsif_rhs, &Name::new("Х")),
+            narrowed_type_at(&db, &result, &b.body, elsif_rhs, &Name::new("Х")),
             Some(db.date(DateComponent::DateTime)),
             "elsif then-body Х must see the TrueBranch narrowing to Дата"
         );
@@ -2262,13 +2276,13 @@ mod tests {
             narrow_body(&db, body, FxHashMap::default()).expect("narrowing analysis must converge");
 
         assert_eq!(
-            narrowed_type_at(&db, &result, receiver, &Name::new("Х")),
+            narrowed_type_at(&db, &result, &b.body,receiver, &Name::new("Х")),
             Some(db.union(vec![db.number(None, None), db.string(None, false)])),
             "while-condition receiver must see the merged pre-narrow overlay Union(Number, String), not either side in isolation"
         );
 
         assert_eq!(
-            narrowed_type_at(&db, &result, body_rhs, &Name::new("Х")),
+            narrowed_type_at(&db, &result, &b.body, body_rhs, &Name::new("Х")),
             Some(db.string(None, false)),
             "while-body Х must see the TrueBranch narrowing to Строка"
         );

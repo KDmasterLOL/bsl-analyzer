@@ -11,7 +11,7 @@ use crate::facet::{
 use crate::intern::TypeKernelDb;
 use crate::kind::{
     ConfigId, MetadataKind, Projection, ProjectionField, ProjectionFieldSource, ProjectionOrigin,
-    TypeId, TypeKind,
+    TypeId, TypeKind, TypeOrigin,
 };
 
 pub trait ConfigCtx {
@@ -74,7 +74,19 @@ pub trait Builders: TypeKernelDb {
     }
 
     fn structure(&self, keys: Option<Arc<[Name]>>) -> TypeId {
-        self.intern_type(TypeKind::Structure(StructureFacet { keys }))
+        self.intern_type(TypeKind::Structure(StructureFacet { keys, fields: None, origin: None }))
+    }
+
+    /// A structure whose keys/value-types are known (inferred from a literal `Новый Структура` /
+    /// `.Вставить` construction, or from a doc-comment). `keys` is derived from the projection's
+    /// field order so name-only consumers keep working.
+    fn structure_typed(&self, projection: Arc<Projection>, origin: TypeOrigin) -> TypeId {
+        let keys: Arc<[Name]> = projection.fields.iter().map(|f| f.name.clone()).collect();
+        self.intern_type(TypeKind::Structure(StructureFacet {
+            keys: Some(keys),
+            fields: Some(projection),
+            origin: Some(origin),
+        }))
     }
 
     fn value_table(&self, projection: Option<Arc<Projection>>, source: TableSource) -> TypeId {
@@ -287,6 +299,58 @@ mod tests {
         assert_ne!(a, c);
         let d = db.string(Some(50), true);
         assert_ne!(a, d);
+    }
+
+    #[test]
+    fn builder_structure_keyless_has_no_fields() {
+        let db = InMemoryDb::new();
+        let a = db.structure(None);
+        let kind = db.lookup_type(a);
+        let TypeKind::Structure(facet) = &kind else { panic!("not a structure") };
+        assert!(facet.keys.is_none());
+        assert!(facet.fields.is_none());
+        assert!(facet.origin.is_none());
+    }
+
+    #[test]
+    fn builder_structure_typed_round_trips_and_interns() {
+        let db = InMemoryDb::new();
+        let str_ty = db.string(None, false);
+        let num_ty = db.number(None, None);
+        let mk = || {
+            Arc::new(Projection::new(
+                Arc::from([
+                    ProjectionField::new(
+                        "Город".to_string(),
+                        str_ty,
+                        ProjectionFieldSource::StructureLiteral,
+                    ),
+                    ProjectionField::new(
+                        "Индекс".to_string(),
+                        num_ty,
+                        ProjectionFieldSource::StructureLiteral,
+                    ),
+                ]),
+                ProjectionOrigin::StructureLiteral,
+                None,
+            ))
+        };
+        let a = db.structure_typed(mk(), TypeOrigin::BslLiteral);
+        let b = db.structure_typed(mk(), TypeOrigin::BslLiteral);
+        assert_eq!(a, b, "equal projections must intern to the same TypeId");
+        assert_ne!(a, db.structure(None), "typed structure differs from untyped");
+
+        let kind = db.lookup_type(a);
+        let TypeKind::Structure(facet) = &kind else { panic!("not a structure") };
+        let fields = facet.fields.as_ref().expect("typed structure has fields");
+        assert_eq!(fields.fields.len(), 2);
+        assert_eq!(fields.fields[0].name, "Город");
+        assert_eq!(fields.fields[0].ty, str_ty);
+        assert_eq!(fields.fields[1].ty, num_ty);
+        assert_eq!(facet.origin, Some(TypeOrigin::BslLiteral));
+        // `keys` is derived from field order for name-only consumers.
+        let keys = facet.keys.as_ref().expect("typed structure derives keys");
+        assert_eq!(keys.as_ref(), &["Город".to_string(), "Индекс".to_string()]);
     }
 
     #[test]

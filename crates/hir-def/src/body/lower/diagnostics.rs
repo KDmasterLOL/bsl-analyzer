@@ -1,12 +1,18 @@
 use std::collections::HashSet;
 use stdx::case::CaseExt;
 
+use bsl_platform::capability::{Category as CapabilityCategory, EntryKind as CapabilityEntryKind};
+use bsl_platform::deprecation::{
+    self, CompatibilityBucket as DeprecationCompatibility, DeprecationEntry,
+    DisplayKind as DeprecationDisplay, ElementKind as DeprecationElement,
+    LifecycleGroup as DeprecationGroup, Lookup as DeprecationLookup,
+};
 use syntax::{NodeOrToken, SyntaxKind, SyntaxNode};
 use text_size::TextRange;
 
 use crate::body::BodyDiagnostic;
 
-use super::platform_helpers::{is_any_global_function, is_global_function};
+use super::platform_helpers::is_global_function;
 use super::LoweringCtx;
 
 pub(crate) fn check_duplicated_code_blocks(ctx: &mut LoweringCtx, branch_nodes: &[SyntaxNode]) {
@@ -84,43 +90,22 @@ fn count_statements(block: &SyntaxNode) -> usize {
 }
 
 pub(crate) fn is_deprecated_method(name: &str) -> bool {
-    let lower = name.fold_lower();
-
-    matches!(
-        lower.as_str(),
-        "установитькраткийзаголовокприложения"
-            | "получитькраткийзаголовокприложения"
-            | "установитьзаголовокклиентскогоприложения"
-            | "получитьзаголовокклиентскогоприложения"
-            | "текущийвариантосновногошрифтаклиентскогоприложения"
-            | "текущийвариантинтерфейсаклиентскогоприложения"
-            | "setshortapplicationcaption"
-            | "getshortapplicationcaption"
-            | "setclientapplicationcaption"
-            | "getclientapplicationcaption"
-            | "clientapplicationbasefontcurrentvariant"
-            | "clientapplicationinterfacecurrentvariant"
-            | "краткоепредставлениеошибки"
-            | "подробноепредставлениеошибки"
-            | "показатьинформациюобошибке"
-            | "brieferrorrepresentation"
-            | "detailederrorrepresentation"
-            | "showerrorinformation"
-            | "получитьформу"
-            | "getform"
-    )
+    lookup_global_deprecation(name).is_some_and(is_deprecated_method_fact)
 }
 
 pub(crate) fn is_deprecated_current_date(name: &str) -> bool {
-    is_global_function(name, "CurrentDate")
+    lookup_global_deprecation(name)
+        .is_some_and(|entry| is_deprecated_function_fact(entry, DeprecationGroup::DateTime))
 }
 
 pub(crate) fn is_deprecated_find(name: &str) -> bool {
-    is_global_function(name, "Find")
+    lookup_global_deprecation(name)
+        .is_some_and(|entry| is_deprecated_function_fact(entry, DeprecationGroup::StringSearch))
 }
 
 pub(crate) fn is_deprecated_message(name: &str) -> bool {
-    is_global_function(name, "Message")
+    lookup_global_deprecation(name)
+        .is_some_and(|entry| is_deprecated_function_fact(entry, DeprecationGroup::UserNotification))
 }
 
 pub(crate) fn is_type_method(name: &str) -> bool {
@@ -128,8 +113,12 @@ pub(crate) fn is_type_method(name: &str) -> bool {
 }
 
 pub(crate) fn is_deprecated_managed_form(type_name: &str) -> bool {
-    let lower = type_name.fold_lower();
-    matches!(lower.as_str(), "управляемаяформа" | "managedform")
+    deprecation::registry().lookup(DeprecationLookup::type_(type_name)).is_some_and(|entry| {
+        entry.element_kind == DeprecationElement::Type
+            && entry.group == DeprecationGroup::ManagedForm
+            && entry.compatibility == DeprecationCompatibility::CompatibilityMode8_3_14
+            && entry.display == DeprecationDisplay::Type
+    })
 }
 
 pub(crate) fn is_safe_mode_query(name: &str) -> bool {
@@ -144,7 +133,13 @@ pub(crate) fn is_find_by_code_method(name: &str) -> bool {
 }
 
 pub(crate) fn is_temp_files_dir(name: &str) -> bool {
-    is_global_function(name, "TempFilesDir")
+    bsl_platform::capability::registry()
+        .lookup(
+            CapabilityCategory::TemporaryFilesDirectory,
+            CapabilityEntryKind::GlobalMethod,
+            name,
+        )
+        .is_some()
 }
 
 use crate::body::DeprecatedKind8312;
@@ -154,34 +149,33 @@ pub(crate) fn is_deprecated_attribute_8312(
     member: &str,
     is_call: bool,
 ) -> Option<DeprecatedKind8312> {
-    let obj_lower = object.fold_lower();
-    let member_lower = member.fold_lower();
-
-    if is_chart_plot_area(&obj_lower)
-        && !is_call
-        && is_chart_plot_area_deprecated_attr(&member_lower)
+    if !is_call
+        && lookup_owned_deprecation(DeprecationElement::Attribute, object, member)
+            .is_some_and(is_deprecated_8312_fact)
     {
         return Some(DeprecatedKind8312::Attribute);
     }
 
-    if is_chart(&obj_lower) {
-        if is_call {
-            if is_chart_deprecated_method(&member_lower) {
-                return Some(DeprecatedKind8312::Method);
-            }
-        } else if is_chart_deprecated_attr(&member_lower) {
-            return Some(DeprecatedKind8312::Attribute);
-        }
+    if is_call
+        && lookup_owned_deprecation(DeprecationElement::Method, object, member)
+            .is_some_and(is_deprecated_8312_fact)
+    {
+        return Some(DeprecatedKind8312::Method);
     }
 
-    if is_child_form_items_group(&obj_lower)
-        && !is_call
-        && is_child_form_items_group_deprecated_attr(&member_lower)
+    if !is_call
+        && lookup_owned_deprecation(DeprecationElement::EnumValue, object, member)
+            .is_some_and(is_deprecated_8312_fact)
     {
         return Some(DeprecatedKind8312::EnumValue);
     }
 
-    if is_chart_labels_orientation(&obj_lower) {
+    if lookup_owned_deprecation(DeprecationElement::EnumName, object, member)
+        .is_some_and(is_deprecated_8312_fact)
+        || deprecation::registry()
+            .lookup(DeprecationLookup::new(DeprecationElement::EnumName, None, object))
+            .is_some_and(is_deprecated_8312_fact)
+    {
         return Some(DeprecatedKind8312::EnumName);
     }
 
@@ -189,74 +183,41 @@ pub(crate) fn is_deprecated_attribute_8312(
 }
 
 pub(crate) fn is_deprecated_global_method_8312(name: &str) -> bool {
-    is_global_function(name, "ClearEventLog")
+    lookup_global_deprecation(name).is_some_and(|entry| {
+        is_deprecated_8312_fact(entry) && entry.display == DeprecationDisplay::GlobalMethod
+    })
 }
 
-fn is_chart_plot_area(name: &str) -> bool {
-    name == "областьпостроениядиаграммы" || name == "chartplotarea"
+fn lookup_global_deprecation(name: &str) -> Option<&'static DeprecationEntry> {
+    deprecation::registry().lookup(DeprecationLookup::global_method(name))
 }
 
-fn is_chart(name: &str) -> bool {
-    matches!(
-        name,
-        "диаграмма" | "chart" | "диаграммаганта" | "ganttchart" | "своднаядиаграмма" | "pivotchart"
-    )
+fn lookup_owned_deprecation(
+    element_kind: DeprecationElement,
+    owner: &str,
+    name: &str,
+) -> Option<&'static DeprecationEntry> {
+    deprecation::registry().lookup(DeprecationLookup::new(element_kind, Some(owner), name))
 }
 
-fn is_child_form_items_group(name: &str) -> bool {
-    name == "группировкаподчиненныхэлементовформы" || name == "childformitemsgroup"
+fn is_deprecated_method_fact(entry: &DeprecationEntry) -> bool {
+    entry.element_kind == DeprecationElement::GlobalMethod
+        && entry.display == DeprecationDisplay::Method
+        && matches!(
+            entry.compatibility,
+            DeprecationCompatibility::CompatibilityMode8_3_10
+                | DeprecationCompatibility::CompatibilityMode8_3_17
+        )
 }
 
-fn is_chart_labels_orientation(name: &str) -> bool {
-    name == "ориентацияметокдиаграммы"
+fn is_deprecated_function_fact(entry: &DeprecationEntry, group: DeprecationGroup) -> bool {
+    entry.element_kind == DeprecationElement::GlobalMethod
+        && entry.display == DeprecationDisplay::Function
+        && entry.group == group
 }
 
-fn is_chart_plot_area_deprecated_attr(name: &str) -> bool {
-    matches!(
-        name,
-        "отображатьшкалу"
-            | "showscale"
-            | "линиишкалы"
-            | "цветшкалы"
-            | "отображатьподписишкалысерий"
-            | "showseriesscalelabels"
-            | "отображатьподписишкалыточек"
-            | "showpointsscalelabels"
-            | "отображатьподписишкалызначений"
-            | "showvaluesscalelabels"
-            | "отображатьлиниизначенийшкалы"
-            | "showscalevaluelines"
-            | "форматшкалызначений"
-            | "valuescaleformat"
-            | "ориентацияметок"
-            | "labelsorientation"
-    )
-}
-
-fn is_chart_deprecated_attr(name: &str) -> bool {
-    matches!(
-        name,
-        "отображатьлегенду"
-            | "showlegend"
-            | "отображатьзаголовок"
-            | "showtitle"
-            | "палитрацветов"
-            | "colorpalette"
-            | "цветначалаградиентнойпалитры"
-            | "gradientpalettestartcolor"
-            | "цветконцаградиентнойпалитры"
-            | "gradientpaletteendcolor"
-            | "максимальноеколичествоцветовградиентнойпалитры"
-            | "gradientpalettemaxcolors"
-    )
-}
-
-fn is_child_form_items_group_deprecated_attr(name: &str) -> bool {
-    name == "горизонтальная" || name == "horizontal"
-}
-
-fn is_chart_deprecated_method(name: &str) -> bool {
-    matches!(name, "получитьпалитру" | "getpalette" | "установитьпалитру" | "setpalette")
+fn is_deprecated_8312_fact(entry: &DeprecationEntry) -> bool {
+    entry.compatibility == DeprecationCompatibility::CompatibilityMode8_3_12
 }
 
 pub(crate) fn is_global_begin_transaction_call(node: &SyntaxNode) -> bool {
@@ -473,36 +434,9 @@ pub(crate) fn check_rollback_transaction_in_try(try_stmt: &SyntaxNode) -> Vec<Sy
     violations
 }
 
-const ASYNC_ENGLISH_NAMES: &[&str] = &[
-    "ShowQueryBox",
-    "ShowValue",
-    "ShowMessageBox",
-    "ShowInputDate",
-    "ShowInputValue",
-    "ShowInputString",
-    "ShowInputNumber",
-    "BeginInstallAddIn",
-    "BeginInstallFileSystemExtension",
-    "BeginInstallCryptoExtension",
-    "BeginAttachingCryptoExtension",
-    "BeginAttachingFileSystemExtension",
-    "BeginPutFile",
-    "BeginCopyingFile",
-    "BeginMovingFile",
-    "BeginFindingFiles",
-    "BeginDeletingFiles",
-    "BeginCreatingDirectory",
-    "BeginGettingTempFilesDir",
-    "BeginGettingDocumentsDir",
-    "BeginGettingUserDataWorkDir",
-    "BeginGettingFiles",
-    "BeginPuttingFiles",
-    "BeginRequestingUserPermission",
-    "BeginRunningApplication",
-];
-
 fn is_async_method(name: &str) -> bool {
-    is_any_global_function(name, ASYNC_ENGLISH_NAMES)
+    let lower = name.fold_lower();
+    lookup_global_capability_lc(CapabilityCategory::AsyncCall, &lower).is_some()
 }
 
 pub(crate) fn check_code_after_async_call(ctx: &mut LoweringCtx, call_stmts: &[SyntaxNode]) {
@@ -749,47 +683,8 @@ pub(crate) fn is_find_element_method(name: &str) -> bool {
         || FIND_BY_NUMBER.contains(&lower.as_str())
 }
 
-const MODAL_METHODS: &[(&str, &str, &str, &str)] = &[
-    ("вопрос", "doquerybox", "ПоказатьВопрос", "ShowQueryBox"),
-    ("открытьформумодально", "openformmodal", "ОткрытьФорму", "OpenForm"),
-    ("открытьзначение", "openvalue", "ПоказатьЗначение", "ShowValue"),
-    ("предупреждение", "domessagebox", "ПоказатьПредупреждение", "ShowMessageBox"),
-    ("ввестидату", "inputdate", "ПоказатьВводДаты", "ShowInputDate"),
-    ("ввестизначение", "inputvalue", "ПоказатьВводЗначения", "ShowInputValue"),
-    ("ввестистроку", "inputstring", "ПоказатьВводСтроки", "ShowInputString"),
-    ("ввестичисло", "inputnumber", "ПоказатьВводЧисла", "ShowInputNumber"),
-    (
-        "установитьвнешнююкомпоненту",
-        "installaddin",
-        "НачатьУстановкуВнешнейКомпоненты",
-        "BeginInstallAddIn",
-    ),
-    (
-        "установитьрасширениеработысфайлами",
-        "installfilesystemextension",
-        "НачатьУстановкуРасширенияРаботыСФайлами",
-        "BeginInstallFileSystemExtension",
-    ),
-    (
-        "установитьрасширениеработыскриптографией",
-        "installcryptoextension",
-        "НачатьУстановкуРасширенияРаботыСКриптографией",
-        "BeginInstallCryptoExtension",
-    ),
-    ("поместитьфайл", "putfile", "НачатьПомещениеФайла", "BeginPutFile"),
-];
-
 pub(crate) fn get_modal_method_replacement(name: &str) -> Option<&'static str> {
-    let lower = name.fold_lower();
-    for &(ru, en, replacement_ru, replacement_en) in MODAL_METHODS {
-        if lower == ru {
-            return Some(replacement_ru);
-        }
-        if lower == en {
-            return Some(replacement_en);
-        }
-    }
-    None
+    get_capability_replacement(name, CapabilityCategory::ModalWindow)
 }
 
 pub(crate) fn is_this_form_identifier(name: &str) -> bool {
@@ -797,91 +692,34 @@ pub(crate) fn is_this_form_identifier(name: &str) -> bool {
     lower == "этаформа" || lower == "thisform"
 }
 
-const SYNCHRONOUS_METHODS: &[(&str, &str, &str, &str)] = &[
-    ("вопрос", "doquerybox", "ПоказатьВопрос", "ShowQueryBox"),
-    ("открытьформумодально", "openformmodal", "ОткрытьФорму", "OpenForm"),
-    ("открытьзначение", "openvalue", "ПоказатьЗначение", "ShowValue"),
-    ("предупреждение", "domessagebox", "ПоказатьПредупреждение", "ShowMessageBox"),
-    ("ввестидату", "inputdate", "ПоказатьВводДаты", "ShowInputDate"),
-    ("ввестизначение", "inputvalue", "ПоказатьВводЗначения", "ShowInputValue"),
-    ("ввестистроку", "inputstring", "ПоказатьВводСтроки", "ShowInputString"),
-    ("ввестичисло", "inputnumber", "ПоказатьВводЧисла", "ShowInputNumber"),
-    (
-        "установитьвнешнююкомпоненту",
-        "installaddin",
-        "НачатьУстановкуВнешнейКомпоненты",
-        "BeginInstallAddIn",
-    ),
-    (
-        "установитьрасширениеработысфайлами",
-        "installfilesystemextension",
-        "НачатьУстановкуРасширенияРаботыСФайлами",
-        "BeginInstallFileSystemExtension",
-    ),
-    (
-        "установитьрасширениеработыскриптографией",
-        "installcryptoextension",
-        "НачатьУстановкуРасширенияРаботыСКриптографией",
-        "BeginInstallCryptoExtension",
-    ),
-    (
-        "подключитьрасширениеработыскриптографией",
-        "attachcryptoextension",
-        "НачатьПодключениеРасширенияРаботыСКриптографией",
-        "BeginAttachingCryptoExtension",
-    ),
-    (
-        "подключитьрасширениеработысфайлами",
-        "attachfilesystemextension",
-        "НачатьПодключениеРасширенияРаботыСФайлами",
-        "BeginAttachingFileSystemExtension",
-    ),
-    ("поместитьфайл", "putfile", "НачатьПомещениеФайла", "BeginPutFile"),
-    ("копироватьфайл", "filecopy", "НачатьКопированиеФайла", "BeginCopyingFile"),
-    ("переместитьфайл", "movefile", "НачатьПеремещениеФайла", "BeginMovingFile"),
-    ("найтифайлы", "findfiles", "НачатьПоискФайлов", "BeginFindingFiles"),
-    ("удалитьфайлы", "deletefiles", "НачатьУдалениеФайлов", "BeginDeletingFiles"),
-    ("создатькаталог", "createdirectory", "НачатьСозданиеКаталога", "BeginCreatingDirectory"),
-    (
-        "каталогвременныхфайлов",
-        "tempfilesdir",
-        "НачатьПолучениеКаталогаВременныхФайлов",
-        "BeginGettingTempFilesDir",
-    ),
-    (
-        "каталогдокументов",
-        "documentsdir",
-        "НачатьПолучениеКаталогаДокументов",
-        "BeginGettingDocumentsDir",
-    ),
-    (
-        "рабочийкаталогданныхпользователя",
-        "userdataworkdir",
-        "НачатьПолучениеРабочегоКаталогаДанныхПользователя",
-        "BeginGettingUserDataWorkDir",
-    ),
-    ("получитьфайлы", "getfiles", "НачатьПолучениеФайлов", "BeginGettingFiles"),
-    ("поместитьфайлы", "putfiles", "НачатьПомещениеФайлов", "BeginPuttingFiles"),
-    (
-        "запроситьразрешениепользователя",
-        "requestuserpermission",
-        "НачатьЗапросРазрешенияПользователя",
-        "BeginRequestingUserPermission",
-    ),
-    ("запуститьприложение", "runapp", "НачатьЗапускПриложения", "BeginRunningApplication"),
-];
-
 pub(crate) fn get_synchronous_call_replacement(name: &str) -> Option<&'static str> {
+    get_capability_replacement(name, CapabilityCategory::SynchronousCall)
+}
+
+fn get_capability_replacement(name: &str, category: CapabilityCategory) -> Option<&'static str> {
     let lower = name.fold_lower();
-    for &(ru, en, replacement_ru, replacement_en) in SYNCHRONOUS_METHODS {
-        if lower == ru {
-            return Some(replacement_ru);
-        }
-        if lower == en {
-            return Some(replacement_en);
-        }
+    let entry = lookup_global_capability_lc(category, &lower)?;
+    let replacement = entry.replacement?;
+
+    if lower == entry.ru.fold_lower() {
+        return Some(replacement.ru);
     }
+    if lower == entry.en.fold_lower() {
+        return Some(replacement.en);
+    }
+
     None
+}
+
+fn lookup_global_capability_lc(
+    category: CapabilityCategory,
+    lc_name: &str,
+) -> Option<&'static bsl_platform::capability::CapabilityEntry> {
+    bsl_platform::capability::registry().lookup_lc(
+        category,
+        CapabilityEntryKind::GlobalMethod,
+        lc_name,
+    )
 }
 
 pub(crate) fn is_call_expr_callee(node: &SyntaxNode) -> bool {

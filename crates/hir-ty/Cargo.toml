@@ -24,6 +24,7 @@ vfs = { path = "../vfs" }
 
 salsa.workspace = true
 rustc-hash.workspace = true
+once_cell.workspace = true
 la-arena.workspace = true
 tracing.workspace = true
 smol_str.workspace = true

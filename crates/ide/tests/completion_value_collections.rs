@@ -536,9 +536,6 @@ fn completion_after_dot_on_local_from_pure_self_recursion_yields_no_items() {
 }
 
 #[test]
-#[ignore = "Structure key tracking not implemented — Ty::Structure has no payload \
-            for known keys; constructor literal `Новый Структура(\"k1, k2\")` and \
-            `.Вставить(\"k3\")` mutations are not propagated. Tech-debt pin."]
 fn completion_after_dot_on_structure_returned_from_fn_lists_keys_and_methods() {
     let items = complete(
         r#"//- /test.bsl
@@ -569,6 +566,74 @@ fn completion_after_dot_on_structure_returned_from_fn_lists_keys_and_methods() {
             "Structure key `{key}` must be offered alongside methods; got: {ls:?}"
         );
     }
+}
+
+#[test]
+fn completion_after_dot_on_same_body_structure_lists_constructor_and_insert_keys() {
+    let items = complete(
+        r#"//- /test.bsl
+Процедура Тест()
+    Стр = Новый Структура("Таймаут, Адрес");
+    Стр.Вставить("Шифрование");
+    Стр.$0
+КонецПроцедуры
+"#,
+    );
+
+    let ls = labels(&items);
+    for key in ["Таймаут", "Адрес", "Шифрование"] {
+        assert!(
+            has_label(&items, key),
+            "literal structure key `{key}` must be offered in the same body; got: {ls:?}"
+        );
+    }
+    for method in ["Вставить", "Свойство"] {
+        assert!(
+            has_label(&items, method),
+            "platform Structure method `{method}` must remain alongside keys; got: {ls:?}"
+        );
+    }
+}
+
+#[test]
+fn completion_after_dot_on_nested_structure_value_lists_inner_keys() {
+    let items = complete(
+        r#"//- /test.bsl
+Процедура Тест()
+    С = Новый Структура;
+    С.Вставить("Адрес", Новый Структура("Город, Улица"));
+    С.Адрес.$0
+КонецПроцедуры
+"#,
+    );
+
+    let ls = labels(&items);
+    for key in ["Город", "Улица"] {
+        assert!(
+            has_label(&items, key),
+            "nested structure key `{key}` must be offered after `С.Адрес.`; got: {ls:?}"
+        );
+    }
+}
+
+#[test]
+fn completion_non_literal_key_does_not_break_known_keys() {
+    let items = complete(
+        r#"//- /test.bsl
+Процедура Тест(ИмяКлюча)
+    Стр = Новый Структура("Известный");
+    Стр.Вставить(ИмяКлюча, 1);
+    Стр.$0
+КонецПроцедуры
+"#,
+    );
+
+    let ls = labels(&items);
+    assert!(
+        has_label(&items, "Известный"),
+        "a non-literal `.Вставить(ИмяКлюча, …)` must not drop the known key; got: {ls:?}"
+    );
+    assert!(has_label(&items, "Вставить"), "platform methods must remain; got: {ls:?}");
 }
 
 #[test]
@@ -695,4 +760,222 @@ fn completion_after_chained_dot_on_value_table_columns() {
             "ValueTableColumnCollection member `{expected}` must be offered; got: {ls:?}"
         );
     }
+}
+
+// ---- Stage 2: interprocedural keys (helpers / child methods) ----
+
+#[test]
+fn completion_keys_from_same_module_helper() {
+    let items = complete(
+        r#"//- /test.bsl
+Процедура ЗаполнитьЛокально(С)
+    С.Вставить("Дата");
+    С.Вставить("Номер");
+КонецПроцедуры
+
+Процедура Тест()
+    С = Новый Структура;
+    ЗаполнитьЛокально(С);
+    С.$0
+КонецПроцедуры
+"#,
+    );
+
+    let ls = labels(&items);
+    for key in ["Дата", "Номер"] {
+        assert!(
+            has_label(&items, key),
+            "key `{key}` inserted by a same-module helper must surface; got: {ls:?}"
+        );
+    }
+    assert!(has_label(&items, "Вставить"), "platform methods must remain; got: {ls:?}");
+}
+
+#[test]
+fn completion_keys_from_two_hop_child_helper() {
+    let items = complete(
+        r#"//- /test.bsl
+Процедура Внутренний(П)
+    П.Вставить("Товары");
+КонецПроцедуры
+
+Процедура Внешний(П)
+    Внутренний(П);
+КонецПроцедуры
+
+Процедура Тест()
+    С = Новый Структура;
+    Внешний(С);
+    С.$0
+КонецПроцедуры
+"#,
+    );
+
+    let ls = labels(&items);
+    assert!(
+        has_label(&items, "Товары"),
+        "key inserted by a child helper (Внешний→Внутренний) must propagate; got: {ls:?}"
+    );
+}
+
+#[test]
+fn completion_byval_param_keys_not_propagated() {
+    let items = complete(
+        r#"//- /test.bsl
+Процедура ЗаполнитьКопию(Знач П)
+    П.Вставить("Эфемерный");
+КонецПроцедуры
+
+Процедура Тест()
+    С = Новый Структура("Реальный");
+    ЗаполнитьКопию(С);
+    С.$0
+КонецПроцедуры
+"#,
+    );
+
+    let ls = labels(&items);
+    assert!(has_label(&items, "Реальный"), "literal key must remain; got: {ls:?}");
+    assert!(
+        !has_label(&items, "Эфемерный"),
+        "a key inserted into a `Знач` (by-value copy) param must NOT reach the caller; got: {ls:?}"
+    );
+}
+
+#[test]
+fn completion_keys_from_common_module_helper() {
+    let items = complete(
+        r#"//- /CommonModules/Util/Ext/Module.bsl
+Процедура Заполнить(П) Экспорт
+    П.Вставить("ИзМодуля");
+КонецПроцедуры
+
+//- /test.bsl
+Процедура Тест()
+    С = Новый Структура;
+    Util.Заполнить(С);
+    С.$0
+КонецПроцедуры
+"#,
+    );
+
+    let ls = labels(&items);
+    assert!(
+        has_label(&items, "ИзМодуля"),
+        "key inserted by a common-module helper `Util.Заполнить` must propagate; got: {ls:?}"
+    );
+}
+
+#[test]
+fn completion_nested_literal_key_from_helper() {
+    let items = complete(
+        r#"//- /test.bsl
+Процедура Заполнить(П)
+    П.Вставить("Адрес", Новый Структура("Город, Улица"));
+КонецПроцедуры
+
+Процедура Тест()
+    С = Новый Структура;
+    Заполнить(С);
+    С.Адрес.$0
+КонецПроцедуры
+"#,
+    );
+
+    let ls = labels(&items);
+    for key in ["Город", "Улица"] {
+        assert!(
+            has_label(&items, key),
+            "nested structure key `{key}` inserted by a helper must surface after `С.Адрес.`; got: {ls:?}"
+        );
+    }
+}
+
+#[test]
+fn completion_mutual_recursion_helpers_terminate_with_key_union() {
+    let items = complete(
+        r#"//- /test.bsl
+Процедура F(П)
+    П.Вставить("A");
+    G(П);
+КонецПроцедуры
+
+Процедура G(П)
+    П.Вставить("B");
+    F(П);
+КонецПроцедуры
+
+Процедура Тест()
+    С = Новый Структура;
+    F(С);
+    С.$0
+КонецПроцедуры
+"#,
+    );
+
+    let ls = labels(&items);
+    for key in ["A", "B"] {
+        assert!(
+            has_label(&items, key),
+            "mutual-recursion helpers must terminate and union keys; got: {ls:?}"
+        );
+    }
+}
+
+#[test]
+fn completion_forward_before_construction_is_ignored() {
+    // The helper call precedes the construction of `С`, so its keys must NOT be folded in (the
+    // forwarding fold is source-order aware); the later literal key still shows.
+    let items = complete(
+        r#"//- /test.bsl
+Процедура Заполнить(П)
+    П.Вставить("Призрак");
+КонецПроцедуры
+
+Процедура Тест()
+    Заполнить(С);
+    С = Новый Структура;
+    С.Вставить("Реальный");
+    С.$0
+КонецПроцедуры
+"#,
+    );
+
+    let ls = labels(&items);
+    assert!(has_label(&items, "Реальный"), "literal key after construction must show; got: {ls:?}");
+    assert!(
+        !has_label(&items, "Призрак"),
+        "a helper call BEFORE construction must not contribute keys; got: {ls:?}"
+    );
+}
+
+#[test]
+fn completion_byref_param_reassigned_kills_later_inserts() {
+    // `Ранний` is inserted while `П` still aliases the caller's argument, so it reaches `С`. After
+    // `П = Новый Структура` the parameter is a fresh local, so `Поздний` must NOT reach the caller.
+    let items = complete(
+        r#"//- /test.bsl
+Процедура Заполнить(П)
+    П.Вставить("Ранний");
+    П = Новый Структура;
+    П.Вставить("Поздний");
+КонецПроцедуры
+
+Процедура Тест()
+    С = Новый Структура;
+    Заполнить(С);
+    С.$0
+КонецПроцедуры
+"#,
+    );
+
+    let ls = labels(&items);
+    assert!(
+        has_label(&items, "Ранний"),
+        "a key inserted before the param is reassigned must reach the caller; got: {ls:?}"
+    );
+    assert!(
+        !has_label(&items, "Поздний"),
+        "a key inserted after the by-ref param is reassigned must NOT reach the caller; got: {ls:?}"
+    );
 }

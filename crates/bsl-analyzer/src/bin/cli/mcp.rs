@@ -19,11 +19,12 @@ pub struct McpServeArgs {
 
     /// Connection mode. `stdio` (default) serves one client directly. `broker`
     /// connects to a shared per-project backend (launching it if absent) and relays
-    /// — so many clients/reviews reuse one heavy process. The backend lives exactly as
-    /// long as its owner (the first connecting client): when the owner disconnects the
-    /// backend shuts down and every other connected client is dropped with it. `daemon`
-    /// *is* that backend and is launched internally by a broker proxy; it is not meant
-    /// to be run directly.
+    /// — so many clients/reviews reuse one heavy process. The backend stays warm across
+    /// client disconnects and reconnects, then idles out on its own once no client has
+    /// used it for the idle TTL (`BSL_MCP_IDLE_TTL_SECS`, default 300s); a backend that
+    /// never served any traffic gives up after a short orphan grace
+    /// (`BSL_MCP_ORPHAN_GRACE_SECS`, default 30s). `daemon` *is* that backend and is
+    /// launched internally by a broker proxy; it is not meant to be run directly.
     #[arg(long = "mode", value_enum, default_value = "stdio")]
     mode: McpServeMode,
 
@@ -165,9 +166,9 @@ fn run_mcp_serve(args: McpServeArgs) -> Result<(), Box<dyn Error + Send + Sync>>
 ///   has to live in the binary's own default, not the client config.
 /// - With no override, the heavy `workspace` profile defaults to the broker on every
 ///   platform. Windows is now included: the named-pipe transport carries an explicit
-///   current-user security descriptor, verifies the backend's identity (defeating pipe
-///   squatting), and tears the backend down on client disconnect. `BSL_MCP_BROKER=0`
-///   forces plain stdio anywhere.
+///   current-user security descriptor and verifies the backend's identity (defeating pipe
+///   squatting). The backend stays warm across client reconnects and idles out on its own.
+///   `BSL_MCP_BROKER=0` forces plain stdio anywhere.
 fn resolve_serve_mode(
     flag: McpServeMode,
     profile: mcp_server::McpProfile,
@@ -311,7 +312,12 @@ fn run_mcp_daemon(
 
     tracing::info!("Starting MCP broker backend (daemon)");
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
-    let result = rt.block_on(mcp_server::broker::daemon::run(build, key, broker_orphan_grace()));
+    let result = rt.block_on(mcp_server::broker::daemon::run(
+        build,
+        key,
+        broker_orphan_grace(),
+        broker_idle_ttl(),
+    ));
     drop(rt);
     result?;
     Ok(())
@@ -335,18 +341,29 @@ fn require_workspace_broker(
     })
 }
 
-/// Grace window for a backend that has no *owner* yet and no live connections. The
-/// backend's real lifetime is owner-driven — it shuts down the instant its owner (the
-/// first connecting client) disconnects — so this only bounds the degenerate case where
-/// an owner never establishes (e.g. the launching proxy died before its first request),
-/// preventing an orphaned backend from lingering. Default 30s; override via
-/// `BSL_MCP_ORPHAN_GRACE_SECS` (legacy `BSL_MCP_IDLE_SECS` still honored).
+/// Grace window for a backend that has never served real MCP traffic and has no live
+/// connections — the launching proxy died before its first request, or only liveness
+/// probes connected. It bounds how long such a never-used backend lingers before giving
+/// up; a backend that *has* served traffic uses the longer [`broker_idle_ttl`] instead.
+/// Default 30s; override via `BSL_MCP_ORPHAN_GRACE_SECS`.
 fn broker_orphan_grace() -> Duration {
-    let secs = env::var("BSL_MCP_ORPHAN_GRACE_SECS")
+    let secs =
+        env::var("BSL_MCP_ORPHAN_GRACE_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(30);
+    Duration::from_secs(secs)
+}
+
+/// How long a backend that has served real MCP traffic stays warm after its last session
+/// disconnects, so an editor that restarts or cycles its MCP link (opencode, Zed, …)
+/// reconnects to the resident state instead of paying the multi-second cold rebuild.
+/// Default 300s (5min), kept modest because a warm workspace backend is memory-heavy and
+/// each project keeps its own; override via `BSL_MCP_IDLE_TTL_SECS` (legacy
+/// `BSL_MCP_IDLE_SECS` still honored).
+fn broker_idle_ttl() -> Duration {
+    let secs = env::var("BSL_MCP_IDLE_TTL_SECS")
         .or_else(|_| env::var("BSL_MCP_IDLE_SECS"))
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(30);
+        .unwrap_or(300);
     Duration::from_secs(secs)
 }
 

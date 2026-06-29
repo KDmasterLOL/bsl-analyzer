@@ -1,3 +1,4 @@
+use bsl_platform::capability::{Category as CapabilityCategory, EntryKind as CapabilityEntryKind};
 use parser_error::{ParseError, RecoveryKind};
 use stdx::case::CaseExt;
 use syntax::ast_utils::field_tail_name_token;
@@ -488,12 +489,12 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
                 .push(BodyDiagnostic::FileSystemAccess { range: actual_callee.text_range() });
         }
 
-        if is_form_data_to_value_method(&name) && !ctx.has_no_context_annotation {
+        if is_form_data_to_value_global_method(&name) && !ctx.has_no_context_annotation {
             ctx.diagnostics
                 .push(BodyDiagnostic::FormDataToValue { range: actual_callee.text_range() });
         }
 
-        if is_get_form_method(&name) {
+        if is_get_form_global_method(&name) {
             ctx.diagnostics.push(BodyDiagnostic::GetFormMethod {
                 method_name: name.clone(),
                 range: actual_callee.text_range(),
@@ -536,14 +537,12 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
         }
 
         use super::diagnostics::get_synchronous_call_replacement;
-        if !ctx.is_server_method {
-            if let Some(replacement) = get_synchronous_call_replacement(&name_lower) {
-                ctx.diagnostics.push(BodyDiagnostic::UsingSynchronousCalls {
-                    method_name: actual_callee.text().to_string(),
-                    replacement: replacement.to_string(),
-                    range: node.text_range(),
-                });
-            }
+        if let Some(replacement) = get_synchronous_call_replacement(&name_lower) {
+            ctx.diagnostics.push(BodyDiagnostic::UsingSynchronousCalls {
+                method_name: actual_callee.text().to_string(),
+                replacement: replacement.to_string(),
+                range: node.text_range(),
+            });
         }
     } else if actual_callee.kind() == SyntaxKind::FIELD_EXPR {
         let idents: Vec<_> = actual_callee
@@ -1296,13 +1295,11 @@ fn is_style_element_type(name: &str) -> bool {
 }
 
 fn is_system_information_type(name: &str) -> bool {
-    let lower = name.fold_lower();
-    matches!(lower.as_str(), "системнаяинформация" | "systeminfo")
+    has_capability_entry(name, CapabilityCategory::SystemInformation, CapabilityEntryKind::Type)
 }
 
 fn is_unix_unavailable_type(name: &str) -> bool {
-    let lower = name.fold_lower();
-    matches!(lower.as_str(), "comобъект" | "comobject" | "почта" | "mail")
+    has_capability_entry(name, CapabilityCategory::UnixUnavailableObject, CapabilityEntryKind::Type)
 }
 
 fn is_write_log_event_method(name: &str) -> bool {
@@ -1452,13 +1449,31 @@ fn is_file_system_method(name: &str) -> bool {
 }
 
 fn is_form_data_to_value_method(name: &str) -> bool {
-    let lower = name.fold_lower();
-    matches!(lower.as_str(), "данныеформывзначение" | "formdatatovalue")
+    has_capability_entry(name, CapabilityCategory::FormDataToValue, CapabilityEntryKind::Method)
 }
 
 fn is_get_form_method(name: &str) -> bool {
-    let lower = name.fold_lower();
-    matches!(lower.as_str(), "получитьформу" | "getform")
+    has_capability_entry(name, CapabilityCategory::GetForm, CapabilityEntryKind::Method)
+}
+
+fn is_form_data_to_value_global_method(name: &str) -> bool {
+    has_capability_entry(
+        name,
+        CapabilityCategory::FormDataToValue,
+        CapabilityEntryKind::GlobalMethod,
+    )
+}
+
+fn is_get_form_global_method(name: &str) -> bool {
+    has_capability_entry(name, CapabilityCategory::GetForm, CapabilityEntryKind::GlobalMethod)
+}
+
+fn has_capability_entry(
+    name: &str,
+    category: CapabilityCategory,
+    kind: CapabilityEntryKind,
+) -> bool {
+    bsl_platform::capability::registry().lookup(category, kind, name).is_some()
 }
 
 fn is_proceed_with_call_method(name_lower: &str) -> bool {

@@ -8,6 +8,7 @@ pub mod docs;
 pub mod effective_module;
 pub mod extension_merge;
 pub mod graph_index;
+pub(crate) mod heap_estimate;
 pub mod hir;
 pub mod item_tree;
 pub mod method_body;
@@ -403,6 +404,63 @@ impl ModuleBodies {
 
     pub fn module_vars(&self) -> &[ModuleVarDecl] {
         &self.module_vars
+    }
+
+    /// Approximate live heap bytes for Salsa's `memory_usage` report. This is the
+    /// heavy lowered-HIR memo: it sums each per-method (and module-level)
+    /// [`body::Body`] and its source map, the diagnostics and external-ref side
+    /// tables, the `IndexMap` backbone, and the module-var declarations. The
+    /// `BodyDiagnostic` enum's owned `String` payloads are counted at element
+    /// granularity only (the variant strings are not summed), a small undercount.
+    pub fn estimated_heap(&self) -> usize {
+        use crate::heap_estimate::{map_table_bytes, vec_bytes};
+
+        let lower_result_heap = |r: &body::LowerResult| {
+            let mut b =
+                crate::body::body_heap(&r.body) + crate::body::source_map_heap(&r.source_map);
+            b += vec_bytes::<BodyDiagnostic>(r.diagnostics.len());
+            b += map_table_bytes::<String, ()>(r.referenced_externals.len());
+            for s in &r.referenced_externals {
+                b += s.capacity();
+            }
+            b += vec_bytes::<body::ExternalRef>(r.external_refs.len());
+            for ext in &r.external_refs {
+                b += external_ref_name_heap(ext);
+            }
+            b
+        };
+
+        // `IndexMap` backbone: a `Vec` of entries plus a hashbrown index table.
+        let mut bytes = vec_bytes::<(u32, body::LowerResult)>(self.bodies.len());
+        bytes += map_table_bytes::<u32, usize>(self.bodies.len());
+        for r in self.bodies.values() {
+            bytes += lower_result_heap(r);
+        }
+
+        bytes += vec_bytes::<(MethodId, BodyDiagnostic)>(self.all_diagnostics.len());
+        bytes += vec_bytes::<ModuleVarDecl>(self.module_vars.len());
+        for var in &self.module_vars {
+            bytes += var.name.capacity();
+        }
+        if let Some(module_code) = &self.module_code {
+            bytes += lower_result_heap(module_code);
+        }
+
+        bytes
+    }
+}
+
+/// Heap bytes owned by an [`body::ExternalRef`]'s `Name` fields (their `SmolStr`
+/// payloads when not inlined).
+fn external_ref_name_heap(ext: &body::ExternalRef) -> usize {
+    use crate::heap_estimate::name_bytes;
+    match ext {
+        body::ExternalRef::QualifiedCall { receiver, method, .. } => {
+            name_bytes(receiver) + name_bytes(method)
+        }
+        body::ExternalRef::ManagerAccess { object_name, method, .. } => {
+            name_bytes(object_name) + method.as_ref().map_or(0, name_bytes)
+        }
     }
 }
 

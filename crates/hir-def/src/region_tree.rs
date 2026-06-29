@@ -367,7 +367,25 @@ pub fn lower_regions(root: &SyntaxNode) -> RegionTree {
     RegionTreeBuilder::build(root)
 }
 
-#[salsa::tracked(lru = 256)]
+/// Approximate live heap bytes for Salsa's `memory_usage` report: the region arena
+/// (one [`RegionData`] per region plus each region's `children` vector and `name`'s
+/// non-inlined `SmolStr`), the `root_regions` vector, and the `position_map` table.
+fn region_tree_heap(v: &std::sync::Arc<RegionTree>) -> usize {
+    use crate::heap_estimate::{map_table_bytes, name_bytes, vec_bytes};
+
+    let t = &**v;
+    let mut bytes = std::mem::size_of::<RegionTree>();
+    bytes += vec_bytes::<RegionData>(t.regions.len());
+    for (_, region) in t.regions.iter() {
+        bytes += name_bytes(&region.name);
+        bytes += vec_bytes::<RegionIdx>(region.children.len());
+    }
+    bytes += vec_bytes::<RegionIdx>(t.root_regions.len());
+    bytes += map_table_bytes::<u32, RegionIdx>(t.position_map.len());
+    bytes
+}
+
+#[salsa::tracked(lru = 256, heap_size = region_tree_heap)]
 pub fn region_tree_query<'db>(
     db: &'db dyn base_db::RootQueryDb,
     file_id_input: base_db::FileIdInput<'db>,

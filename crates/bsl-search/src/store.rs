@@ -812,6 +812,55 @@ impl Store {
         Ok(info)
     }
 
+    /// Fetch metadata for many chunks in one round-trip, keyed by id.
+    ///
+    /// The per-result `chunk_by_id` loop after a vector/FTS search issues one SELECT per hit; on a
+    /// wide fetch window that N+1 dominates the query latency. Batching collapses it to a single
+    /// `IN (...)` query. SQLite caps bound parameters (`SQLITE_MAX_VARIABLE_NUMBER`, 999 on older
+    /// builds), so the id list is chunked under that cap and the partial maps merged.
+    pub fn chunks_by_ids(
+        &self,
+        ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, ChunkInfo>, SearchError> {
+        const MAX_VARS: usize = 900;
+        let mut out = std::collections::HashMap::with_capacity(ids.len());
+        if ids.is_empty() {
+            return Ok(out);
+        }
+        for batch in ids.chunks(MAX_VARS) {
+            let placeholders = std::iter::repeat_n("?", batch.len()).collect::<Vec<_>>().join(",");
+            let sql = format!(
+                "SELECT c.id, c.kind, c.symbol_name, c.line_start, c.line_end, c.text,
+                        c.annotations, c.is_export, f.path, f.collection
+                 FROM chunks c
+                 JOIN files f ON f.id = c.file_id
+                 WHERE c.id IN ({placeholders})"
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(batch.iter()), |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    ChunkInfo {
+                        file_path: row.get(8)?,
+                        collection: row.get(9)?,
+                        kind: row.get(1)?,
+                        symbol_name: row.get(2)?,
+                        line_start: row.get(3)?,
+                        line_end: row.get(4)?,
+                        text: row.get(5)?,
+                        annotations: row.get::<_, Option<String>>(6)?,
+                        is_export: row.get::<_, i32>(7)? != 0,
+                    },
+                ))
+            })?;
+            for row in rows {
+                let (id, info) = row?;
+                out.insert(id, info);
+            }
+        }
+        Ok(out)
+    }
+
     pub fn all_files(&self) -> Result<Vec<(String, Vec<u8>)>, SearchError> {
         let mut stmt = self.conn.prepare("SELECT path, hash FROM files")?;
         let rows =
@@ -1905,6 +1954,57 @@ mod tests {
         assert_eq!(info.kind, "procedure");
         assert!(info.is_export);
         assert_eq!(info.annotations.as_deref(), Some("НаСервере"));
+    }
+
+    #[test]
+    fn chunks_by_ids_matches_individual_lookups() {
+        let mut store = Store::in_memory().unwrap();
+        let hash = blake3::hash(b"test");
+        store
+            .reindex_file(
+                "path/to/module.bsl",
+                hash.as_bytes(),
+                &[sample_chunk("Альфа"), sample_chunk("Бета"), sample_chunk("Гамма")],
+                None,
+            )
+            .unwrap();
+
+        let all_ids: Vec<i64> = {
+            let mut stmt = store.conn.prepare("SELECT id FROM chunks ORDER BY id").unwrap();
+            let rows = stmt.query_map([], |r| r.get::<_, i64>(0)).unwrap();
+            rows.map(Result::unwrap).collect()
+        };
+        assert_eq!(all_ids.len(), 3);
+
+        // Empty ids → empty map, no query.
+        assert!(store.chunks_by_ids(&[]).unwrap().is_empty());
+
+        // A subset, requested out of order, must equal the per-id lookups.
+        let subset = vec![all_ids[2], all_ids[0]];
+        let batch = store.chunks_by_ids(&subset).unwrap();
+        assert_eq!(batch.len(), 2);
+        for id in &subset {
+            let one = store.chunk_by_id(*id).unwrap().unwrap();
+            let many = batch.get(id).unwrap();
+            assert_eq!(many.file_path, one.file_path);
+            assert_eq!(many.symbol_name, one.symbol_name);
+            assert_eq!(many.kind, one.kind);
+            assert_eq!(many.collection, one.collection);
+            assert_eq!(many.line_start, one.line_start);
+            assert_eq!(many.line_end, one.line_end);
+            assert_eq!(many.text, one.text);
+            assert_eq!(many.annotations, one.annotations);
+            assert_eq!(many.is_export, one.is_export);
+        }
+        // The id not requested is absent.
+        assert!(!batch.contains_key(&all_ids[1]));
+
+        // A missing id is simply absent from the map (no error).
+        let mut missing = all_ids.clone();
+        missing.push(999_999);
+        let full = store.chunks_by_ids(&missing).unwrap();
+        assert_eq!(full.len(), 3);
+        assert!(!full.contains_key(&999_999));
     }
 
     #[test]

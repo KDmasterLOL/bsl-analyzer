@@ -2,6 +2,40 @@
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+// jemalloc tuning. Without a background purge thread jemalloc retains freed
+// pages as dirty extents and idle RSS stays pinned at the analysis-burst
+// high-water mark (measured ~5.7GB resident vs ~0.7GB live on ERP). A background
+// thread plus a bounded dirty decay returns those pages to the OS so idle RSS
+// tracks live memory. `dirty_decay_ms` is non-zero to keep page reuse cheap on
+// hot allocation paths; `muzzy_decay_ms:0` returns muzzy pages promptly.
+// `background_thread` is only enabled on linux-gnu, where jemalloc supports it.
+#[cfg(not(target_os = "windows"))]
+const MALLOC_CONF_BYTES: &[u8] = {
+    #[cfg(all(target_os = "linux", not(target_env = "musl")))]
+    {
+        b"background_thread:true,dirty_decay_ms:1000,muzzy_decay_ms:0\0"
+    }
+    #[cfg(not(all(target_os = "linux", not(target_env = "musl"))))]
+    {
+        b"dirty_decay_ms:1000,muzzy_decay_ms:0\0"
+    }
+};
+
+// jemalloc reads the `malloc_conf` symbol as a C `const char *`. It must be a
+// thin pointer (`Option<&c_char>`), not a `&[u8]` fat slice; the union converts
+// `&u8 -> &c_char` in const context. `tikv-jemallocator` links it prefixed.
+#[cfg(not(target_os = "windows"))]
+union MallocConfPtr {
+    bytes: &'static u8,
+    cchar: &'static core::ffi::c_char,
+}
+
+#[cfg(not(target_os = "windows"))]
+#[allow(non_upper_case_globals)]
+#[export_name = "_rjem_malloc_conf"]
+pub static malloc_conf: Option<&'static core::ffi::c_char> =
+    Some(unsafe { MallocConfPtr { bytes: &MALLOC_CONF_BYTES[0] }.cchar });
+
 mod cli;
 
 use std::{env, error::Error, fs, path::PathBuf};

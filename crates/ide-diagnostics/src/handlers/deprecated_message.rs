@@ -1,31 +1,20 @@
-use crate::define_metadata;
-use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use bsl_platform::deprecation::{DeprecationEntry, LifecycleGroup};
 use ide_db::TextRange;
-use stdx::case::CaseExt;
 
-pub const METADATA: DiagnosticMetadata = define_metadata! {
-    diagnostic_type: DiagnosticType::CodeSmell,
-    severity: DiagnosticSeverityLevel::Minor,
-    scope: DiagnosticScope::Bsl,
-    modules: &[],
-    minutes_to_fix: 2,
-    activated_by_default: true,
-    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
-    tags: &[MetadataTag::Standard, MetadataTag::Deprecated],
-    can_locate_on_project: false,
-    extra_min_for_complexity: 0.0,
-    lsp_severity_override: "",
+use super::deprecated_platform_facts::{
+    canonical_name_for, global_function_fact, is_russian_alias, replacement_for_name,
 };
 
 pub fn from_hir(name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    let code = DiagnosticCode::DeprecatedMessage;
+    let code = DiagnosticCode::DeprecatedPlatformApi;
 
     if ctx.is_disabled_with_metadata(code) {
         return None;
     }
 
-    let message = get_message(name);
+    let fact = global_function_fact(name, LifecycleGroup::UserNotification)?;
+    let message = get_message(name, fact)?;
 
     Some(Diagnostic {
         code,
@@ -37,13 +26,13 @@ pub fn from_hir(name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Optio
     })
 }
 
-fn get_message(method_name: &str) -> String {
-    let lower = method_name.fold_lower();
-    if lower == "сообщить" {
-        "Используйте \"ОбщегоНазначения.СообщитьПользователю\" вместо устаревшего \"Сообщить\""
-            .to_string()
+fn get_message(method_name: &str, fact: &DeprecationEntry) -> Option<String> {
+    let replacement = replacement_for_name(fact, method_name)?;
+    let deprecated = canonical_name_for(fact, method_name)?;
+    if is_russian_alias(fact, method_name) {
+        Some(format!("Используйте \"{}\" вместо устаревшего \"{}\"", replacement, deprecated))
     } else {
-        "Use \"CommonUse.MessageToUser\" instead of deprecated \"Message\"".to_string()
+        Some(format!("Use \"{}\" instead of deprecated \"{}\"", replacement, deprecated))
     }
 }
 
@@ -63,14 +52,14 @@ mod tests {
         let diagnostics = check_hir_diagnostic(code);
         let deprecated_diags: Vec<_> = diagnostics
             .into_iter()
-            .filter(|d| d.code == DiagnosticCode::DeprecatedMessage)
+            .filter(|d| d.code == DiagnosticCode::DeprecatedPlatformApi)
             .collect();
 
         expect![[r#"
-            DeprecatedMessage @ 3:5..3:13
+            DeprecatedPlatformApi @ 3:5..3:13
               message: Используйте "ОбщегоНазначения.СообщитьПользователю" вместо устаревшего "Сообщить"
-              severity: Information"#]].assert_eq(&format_diags(code, &deprecated_diags));
-        assert_eq!(deprecated_diags[0].severity, Severity::Information);
+              severity: Warning"#]].assert_eq(&format_diags(code, &deprecated_diags));
+        assert_eq!(deprecated_diags[0].severity, Severity::Warning);
         assert!(deprecated_diags[0].message.contains("СообщитьПользователю"));
     }
 
@@ -84,13 +73,13 @@ EndProcedure
         let diagnostics = check_hir_diagnostic(code);
         let deprecated_diags: Vec<_> = diagnostics
             .into_iter()
-            .filter(|d| d.code == DiagnosticCode::DeprecatedMessage)
+            .filter(|d| d.code == DiagnosticCode::DeprecatedPlatformApi)
             .collect();
 
         expect![[r#"
-            DeprecatedMessage @ 3:5..3:12
+            DeprecatedPlatformApi @ 3:5..3:12
               message: Use "CommonUse.MessageToUser" instead of deprecated "Message"
-              severity: Information"#]]
+              severity: Warning"#]]
         .assert_eq(&format_diags(code, &deprecated_diags));
         assert!(deprecated_diags[0].message.contains("MessageToUser"));
     }
@@ -105,7 +94,7 @@ EndProcedure
         let diagnostics = check_hir_diagnostic(code);
         let deprecated_diags: Vec<_> = diagnostics
             .into_iter()
-            .filter(|d| d.code == DiagnosticCode::DeprecatedMessage)
+            .filter(|d| d.code == DiagnosticCode::DeprecatedPlatformApi)
             .collect();
 
         expect![[r#""#]].assert_eq(&format_diags(code, &deprecated_diags));
@@ -124,22 +113,22 @@ EndProcedure
         let diagnostics = check_hir_diagnostic(code);
         let deprecated_diags: Vec<_> = diagnostics
             .into_iter()
-            .filter(|d| d.code == DiagnosticCode::DeprecatedMessage)
+            .filter(|d| d.code == DiagnosticCode::DeprecatedPlatformApi)
             .collect();
 
         expect![[r#"
-            DeprecatedMessage @ 3:5..3:13
+            DeprecatedPlatformApi @ 3:5..3:13
               message: Используйте "ОбщегоНазначения.СообщитьПользователю" вместо устаревшего "Сообщить"
-              severity: Information
-            DeprecatedMessage @ 4:5..4:13
+              severity: Warning
+            DeprecatedPlatformApi @ 4:5..4:13
               message: Используйте "ОбщегоНазначения.СообщитьПользователю" вместо устаревшего "Сообщить"
-              severity: Information
-            DeprecatedMessage @ 5:5..5:13
+              severity: Warning
+            DeprecatedPlatformApi @ 5:5..5:13
               message: Используйте "ОбщегоНазначения.СообщитьПользователю" вместо устаревшего "Сообщить"
-              severity: Information
-            DeprecatedMessage @ 6:5..6:13
+              severity: Warning
+            DeprecatedPlatformApi @ 6:5..6:13
               message: Используйте "ОбщегоНазначения.СообщитьПользователю" вместо устаревшего "Сообщить"
-              severity: Information"#]].assert_eq(&format_diags(code, &deprecated_diags));
+              severity: Warning"#]].assert_eq(&format_diags(code, &deprecated_diags));
     }
 
     #[test]
@@ -155,12 +144,12 @@ EndProcedure
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
             .into_iter()
-            .filter(|d| d.code == DiagnosticCode::DeprecatedMessage)
+            .filter(|d| d.code == DiagnosticCode::DeprecatedPlatformApi)
             .collect();
         expect![[r#"
-            DeprecatedMessage @ 4:9..4:16
+            DeprecatedPlatformApi @ 4:9..4:16
               message: Use "CommonUse.MessageToUser" instead of deprecated "Message"
-              severity: Information"#]]
+              severity: Warning"#]]
         .assert_eq(&format_diags(code, &diags));
         assert!(diags[0].message.contains("MessageToUser"));
     }
@@ -175,12 +164,12 @@ EndProcedure
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
             .into_iter()
-            .filter(|d| d.code == DiagnosticCode::DeprecatedMessage)
+            .filter(|d| d.code == DiagnosticCode::DeprecatedPlatformApi)
             .collect();
         expect![[r#"
-            DeprecatedMessage @ 2:1..2:9
+            DeprecatedPlatformApi @ 2:1..2:9
               message: Используйте "ОбщегоНазначения.СообщитьПользователю" вместо устаревшего "Сообщить"
-              severity: Information"#]].assert_eq(&format_diags(code, &diags));
+              severity: Warning"#]].assert_eq(&format_diags(code, &diags));
         assert!(diags[0].message.contains("СообщитьПользователю"));
     }
 }

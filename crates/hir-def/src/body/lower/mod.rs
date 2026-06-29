@@ -61,8 +61,6 @@ pub(crate) struct LoweringCtx {
 
     pub(crate) is_instead_method: bool,
 
-    pub(crate) is_server_method: bool,
-
     pub(crate) in_platform_guard: bool,
 
     pub(crate) in_except_block: bool,
@@ -102,7 +100,6 @@ impl LoweringCtx {
             current_method_name: None,
             return_statements: Vec::new(),
             is_instead_method: false,
-            is_server_method: false,
             in_platform_guard: false,
             in_except_block: false,
             except_has_raise: false,
@@ -356,21 +353,6 @@ fn is_around_annotation_method(method_node: &SyntaxNode) -> bool {
     })
 }
 
-fn is_server_method(method_node: &SyntaxNode) -> bool {
-    let annotations: Vec<_> = method_node
-        .children()
-        .filter(|child| {
-            matches!(child.kind(), SyntaxKind::ANNOTATION | SyntaxKind::COMPILER_DIRECTIVE)
-        })
-        .collect();
-
-    annotations.iter().any(|ann| {
-        ann.descendants_with_tokens().filter_map(|el| el.into_token()).any(|token| {
-            matches!(token.kind(), SyntaxKind::ANN_AT_SERVER | SyntaxKind::ANN_AT_SERVER_NO_CONTEXT)
-        })
-    })
-}
-
 fn check_function_returns_same_primitive(ctx: &mut LoweringCtx, method_node: &SyntaxNode) {
     use crate::hir::{Expr, Literal, Stmt};
 
@@ -445,7 +427,6 @@ pub fn lower_method_with_externals(
     ctx.is_client_only = is_client_only_method(method_node);
     ctx.has_no_context_annotation = has_no_context_annotation_method(method_node);
     ctx.is_instead_method = is_around_annotation_method(method_node);
-    ctx.is_server_method = is_server_method(method_node);
 
     let name_token =
         method_node.children_with_tokens().filter_map(|el| el.into_token()).find(|tok| {

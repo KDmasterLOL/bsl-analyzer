@@ -67,6 +67,7 @@ zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 tikv-jemallocator.workspace = true
+profile = { workspace = true, features = ["jemalloc"] }
 
 [build-dependencies]
 zip = { version = "8", default-features = false, features = ["deflate"] }

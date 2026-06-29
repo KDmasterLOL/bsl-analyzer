@@ -592,8 +592,18 @@ impl SharedState {
         let model = std::env::var("EMBEDDING_MODEL").ok()?;
         let dim: usize =
             std::env::var("EMBEDDING_DIM").ok().and_then(|s| s.parse().ok()).unwrap_or(1024);
-        let concurrency: usize =
-            std::env::var("EMBEDDING_CONCURRENCY").ok().and_then(|s| s.parse().ok()).unwrap_or(10);
+        // Background index/embedding workers otherwise saturate every core and starve interactive
+        // `search_code` for tens of seconds during the one-time build. Default to leaving two cores
+        // free for queries; an explicit EMBEDDING_CONCURRENCY still wins (operators who want max
+        // build throughput set it).
+        let concurrency: usize = std::env::var("EMBEDDING_CONCURRENCY")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| {
+                std::thread::available_parallelism()
+                    .map(|n| n.get().saturating_sub(2).max(2))
+                    .unwrap_or(4)
+            });
 
         Some(bsl_search::SearchConfig {
             embedder: bsl_search::EmbedderConfig {

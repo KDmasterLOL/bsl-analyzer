@@ -237,7 +237,7 @@ fn narrow_arg(
     let Expr::Path(name) = body.expr(expr_id) else {
         return base;
     };
-    narrowed_type_at(db, result, expr_id.to_idx(), name).unwrap_or(base)
+    narrowed_type_at(db, result, body, expr_id.to_idx(), name).unwrap_or(base)
 }
 
 fn resolve_body(module_bodies: &hir_def::ModuleBodies, owner: DefWithBodyId) -> Option<&Body> {

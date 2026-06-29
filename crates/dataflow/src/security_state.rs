@@ -133,6 +133,16 @@ impl SecurityModeState {
         Self(Inner::Reachable { counters: SecurityCounters::ENTRY, overlay: ValueOverlay::empty() })
     }
 
+    /// Approximate live heap bytes for Salsa's `memory_usage` report: only a
+    /// `Reachable` state's `ValueOverlay` owns heap; the `SecurityCounters` are
+    /// `Copy`.
+    pub fn estimated_heap(&self) -> usize {
+        match &self.0 {
+            Inner::Unreachable => 0,
+            Inner::Reachable { overlay, .. } => overlay.estimated_heap(),
+        }
+    }
+
     pub fn counters(&self) -> Option<&SecurityCounters> {
         match &self.0 {
             Inner::Unreachable => None,
@@ -301,8 +311,7 @@ pub struct OpenEvent {
     pub stmt: Option<StmtId>,
 }
 
-pub fn open_events(result: &DataflowResult<SecurityModeState>) -> Vec<OpenEvent> {
-    let body = result.body();
+pub fn open_events(result: &DataflowResult<SecurityModeState>, body: &Body) -> Vec<OpenEvent> {
     let mut events = Vec::new();
     let mut calls_buf: Vec<ExprId> = Vec::new();
     for (vertex_idx, vertex) in result.cfg().vertices() {

@@ -111,7 +111,6 @@ pub(super) fn bsl_completions<DB: RootDatabase>(
             position.offset,
             prefix,
             position.locale,
-            position.self_indent_snippets,
         ));
 
         tracing::info!(count = completions.len(), "Returning BSL completions");
@@ -120,14 +119,8 @@ pub(super) fn bsl_completions<DB: RootDatabase>(
 
     if is_expression_start_position(&token) {
         tracing::info!(token_kind = ?token.kind(), "Expression start position - completing with empty prefix");
-        let completions = complete_top_level(
-            db,
-            position.file_id,
-            position.offset,
-            "",
-            position.locale,
-            position.self_indent_snippets,
-        );
+        let completions =
+            complete_top_level(db, position.file_id, position.offset, "", position.locale);
 
         tracing::info!(count = completions.len(), "Returning BSL completions (trigger position)");
         return Some(completions);
@@ -148,7 +141,6 @@ fn complete_top_level<DB: RootDatabase>(
     offset: syntax::TextSize,
     prefix: &str,
     locale: Locale,
-    self_indent_snippets: bool,
 ) -> Vec<CompletionItem> {
     let _span = tracing::debug_span!("complete_top_level").entered();
 
@@ -180,11 +172,7 @@ fn complete_top_level<DB: RootDatabase>(
     let modules = untyped(complete_user_common_modules(db, file_id, &matcher));
     push_band(&mut out, &mut seen, &mut matcher, db, &freq, &expected, "30_", modules);
 
-    // Pre-indent snippet bodies only for clients that won't re-indent them
-    // themselves; otherwise emit the raw relative-tab snippet.
-    let indent = self_indent_snippets.then(|| snippet_indent(db, file_id, offset));
-    let indent = indent.as_ref().map(|(base, unit)| (base.as_str(), unit.as_str()));
-    for scored in templates::complete_templates(&mut matcher, in_method, indent) {
+    for scored in templates::complete_templates(&mut matcher, in_method) {
         let mut item = scored.item;
         if !seen.insert(item.label.fold_lower()) {
             continue;
@@ -303,66 +291,6 @@ fn cursor_in_method<DB: RootDatabase>(
     match root.token_at_offset(offset).right_biased() {
         Some(token) => find_method_for_token(&token).is_some(),
         None => false,
-    }
-}
-
-/// Indentation context for code-template snippets: the leading whitespace of the
-/// cursor's line (the column a snippet starts at) and the document's per-level
-/// indentation unit. Continuation lines of a snippet are rendered against these
-/// so they keep their nesting regardless of client re-indent behavior.
-fn snippet_indent<DB: RootDatabase>(
-    db: &DB,
-    file_id: vfs::FileId,
-    offset: syntax::TextSize,
-) -> (String, String) {
-    let text = db.file_text(file_id);
-    let text: &str = &text;
-    let off = usize::from(offset).min(text.len());
-    let line_start = text[..off].rfind('\n').map_or(0, |i| i + 1);
-    // Indentation up to the cursor — the column the snippet starts at. The typed
-    // prefix is non-whitespace, so `take_while` stops at the indentation's end.
-    let base_indent: String =
-        text[line_start..off].chars().take_while(|c| *c == ' ' || *c == '\t').collect();
-    // The cursor line is the strongest signal for the nesting unit; fall back to a
-    // document-wide majority when it carries no indentation of its own.
-    let indent_unit =
-        if base_indent.contains('\t') { "\t".to_string() } else { detect_indent_unit(text) };
-    (base_indent, indent_unit)
-}
-
-/// Infer the document's per-level indentation unit. Lines are classified as
-/// tab-led or space-led; the majority wins (ties and empty files default to a
-/// tab, matching the formatter default and 1C convention). A single stray
-/// tab-indented line therefore cannot hijack a space-indented file. Indentation
-/// is file-uniform in practice, so the scan is bounded — by indented lines seen
-/// and by total lines walked — to keep this off the completion hot path.
-fn detect_indent_unit(text: &str) -> String {
-    const SAMPLE: usize = 64;
-    const MAX_SCAN: usize = 2000;
-    let mut tab_lines = 0usize;
-    let mut space_lines = 0usize;
-    let mut min_spaces: Option<usize> = None;
-    for line in text.lines().take(MAX_SCAN) {
-        let trimmed = line.trim_start();
-        if trimmed.len() == line.len() {
-            continue;
-        }
-        let ws = &line[..line.len() - trimmed.len()];
-        if ws.starts_with('\t') {
-            tab_lines += 1;
-        } else {
-            space_lines += 1;
-            let n = ws.len();
-            min_spaces = Some(min_spaces.map_or(n, |m| m.min(n)));
-        }
-        if tab_lines + space_lines >= SAMPLE {
-            break;
-        }
-    }
-    if space_lines > tab_lines {
-        " ".repeat(min_spaces.unwrap_or(4))
-    } else {
-        "\t".to_string()
     }
 }
 
@@ -891,48 +819,6 @@ fn get_keyword_info(keyword: &str) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn detect_indent_unit_defaults_to_tab_on_empty_or_tabbed() {
-        assert_eq!(detect_indent_unit(""), "\t");
-        assert_eq!(detect_indent_unit("Процедура Т()\n\tА = 1;\nКонецПроцедуры"), "\t");
-    }
-
-    #[test]
-    fn detect_indent_unit_picks_space_width_for_space_files() {
-        assert_eq!(detect_indent_unit("Процедура Т()\n    А = 1;\nКонецПроцедуры"), "    ");
-        // Smallest positive run wins (nested deeper line must not inflate the unit).
-        assert_eq!(detect_indent_unit("Если Х Тогда\n  А = 1;\n    Б = 2;\nКонецЕсли"), "  ");
-    }
-
-    #[test]
-    fn detect_indent_unit_majority_beats_a_stray_tab_line() {
-        let text = "Процедура Т()\n    А = 1;\n    Б = 2;\n\tВ = 3;\nКонецПроцедуры";
-        assert_eq!(detect_indent_unit(text), "    ");
-    }
-
-    #[test]
-    fn snippet_indent_reads_cursor_line_indent_with_cyrillic() {
-        use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
-        use ide_db::RootDatabaseImpl;
-        use vfs::{FileId, FileSet, VfsPath};
-
-        let source = "Процедура ПроверкаЗначения()\n\t\tПоп\nКонецПроцедуры\n";
-        let mut db = RootDatabaseImpl::default();
-        let file_id = FileId(0);
-        let mut file_set = FileSet::default();
-        file_set.insert(file_id, VfsPath::new("/test.bsl"));
-        db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
-        db.set_file_source_root(file_id, SourceRootId(0));
-        db.set_file_text(file_id, source);
-
-        // Cursor right after the Cyrillic `Поп` on the two-tab-indented line.
-        let offset =
-            syntax::TextSize::from(source.find("Поп").unwrap() as u32 + "Поп".len() as u32);
-        let (base, unit) = snippet_indent(&db, file_id, offset);
-        assert_eq!(base, "\t\t");
-        assert_eq!(unit, "\t");
-    }
 
     #[test]
     fn best_match_scores_whole_multiword_alias_not_only_tokens() {

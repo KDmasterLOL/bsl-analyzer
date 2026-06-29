@@ -1,31 +1,20 @@
-use crate::define_metadata;
-use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use bsl_platform::deprecation::{DeprecationEntry, LifecycleGroup};
 use ide_db::TextRange;
-use stdx::case::CaseExt;
 
-pub const METADATA: DiagnosticMetadata = define_metadata! {
-    diagnostic_type: DiagnosticType::CodeSmell,
-    severity: DiagnosticSeverityLevel::Minor,
-    scope: DiagnosticScope::Bsl,
-    modules: &[],
-    minutes_to_fix: 2,
-    activated_by_default: true,
-    compatibility_mode: DiagnosticCompatibilityMode::CompatibilityMode8_3_6,
-    tags: &[MetadataTag::Deprecated],
-    can_locate_on_project: false,
-    extra_min_for_complexity: 0.0,
-    lsp_severity_override: "",
+use super::deprecated_platform_facts::{
+    canonical_name_for, global_function_fact, is_russian_alias, replacement_for_name,
 };
 
 pub fn from_hir(name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    let code = DiagnosticCode::DeprecatedFind;
+    let code = DiagnosticCode::DeprecatedPlatformApi;
 
     if ctx.is_disabled_with_metadata(code) {
         return None;
     }
 
-    let message = get_message(name);
+    let fact = global_function_fact(name, LifecycleGroup::StringSearch)?;
+    let message = get_message(name, fact)?;
 
     Some(Diagnostic {
         code,
@@ -37,12 +26,13 @@ pub fn from_hir(name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Optio
     })
 }
 
-fn get_message(method_name: &str) -> String {
-    let lower = method_name.fold_lower();
-    if lower == "найти" {
-        "Используйте \"СтрНайти\" вместо устаревшего \"Найти\"".to_string()
+fn get_message(method_name: &str, fact: &DeprecationEntry) -> Option<String> {
+    let replacement = replacement_for_name(fact, method_name)?;
+    let deprecated = canonical_name_for(fact, method_name)?;
+    if is_russian_alias(fact, method_name) {
+        Some(format!("Используйте \"{}\" вместо устаревшего \"{}\"", replacement, deprecated))
     } else {
-        "Use \"StrFind\" instead of deprecated \"Find\"".to_string()
+        Some(format!("Use \"{}\" instead of deprecated \"{}\"", replacement, deprecated))
     }
 }
 
@@ -60,15 +50,17 @@ mod tests {
 КонецПроцедуры
 "#;
         let diagnostics = check_hir_diagnostic(code);
-        let deprecated_diags: Vec<_> =
-            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::DeprecatedFind).collect();
+        let deprecated_diags: Vec<_> = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::DeprecatedPlatformApi)
+            .collect();
 
         expect![[r#"
-            DeprecatedFind @ 3:15..3:20
+            DeprecatedPlatformApi @ 3:15..3:20
               message: Используйте "СтрНайти" вместо устаревшего "Найти"
-              severity: Information"#]]
+              severity: Warning"#]]
         .assert_eq(&format_diags(code, &deprecated_diags));
-        assert_eq!(deprecated_diags[0].severity, Severity::Information);
+        assert_eq!(deprecated_diags[0].severity, Severity::Warning);
         assert!(deprecated_diags[0].message.contains("СтрНайти"));
     }
 
@@ -80,13 +72,15 @@ Procedure Test()
 EndProcedure
 "#;
         let diagnostics = check_hir_diagnostic(code);
-        let deprecated_diags: Vec<_> =
-            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::DeprecatedFind).collect();
+        let deprecated_diags: Vec<_> = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::DeprecatedPlatformApi)
+            .collect();
 
         expect![[r#"
-            DeprecatedFind @ 3:16..3:20
+            DeprecatedPlatformApi @ 3:16..3:20
               message: Use "StrFind" instead of deprecated "Find"
-              severity: Information"#]]
+              severity: Warning"#]]
         .assert_eq(&format_diags(code, &deprecated_diags));
         assert!(deprecated_diags[0].message.contains("StrFind"));
     }
@@ -99,8 +93,10 @@ EndProcedure
 КонецПроцедуры
 "#;
         let diagnostics = check_hir_diagnostic(code);
-        let deprecated_diags: Vec<_> =
-            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::DeprecatedFind).collect();
+        let deprecated_diags: Vec<_> = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::DeprecatedPlatformApi)
+            .collect();
 
         expect![[r#""#]].assert_eq(&format_diags(code, &deprecated_diags));
     }
@@ -116,22 +112,24 @@ EndProcedure
 КонецПроцедуры
 "#;
         let diagnostics = check_hir_diagnostic(code);
-        let deprecated_diags: Vec<_> =
-            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::DeprecatedFind).collect();
+        let deprecated_diags: Vec<_> = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::DeprecatedPlatformApi)
+            .collect();
 
         expect![[r#"
-            DeprecatedFind @ 3:12..3:17
+            DeprecatedPlatformApi @ 3:12..3:17
               message: Используйте "СтрНайти" вместо устаревшего "Найти"
-              severity: Information
-            DeprecatedFind @ 4:12..4:17
+              severity: Warning
+            DeprecatedPlatformApi @ 4:12..4:17
               message: Используйте "СтрНайти" вместо устаревшего "Найти"
-              severity: Information
-            DeprecatedFind @ 5:12..5:17
+              severity: Warning
+            DeprecatedPlatformApi @ 5:12..5:17
               message: Используйте "СтрНайти" вместо устаревшего "Найти"
-              severity: Information
-            DeprecatedFind @ 6:12..6:17
+              severity: Warning
+            DeprecatedPlatformApi @ 6:12..6:17
               message: Используйте "СтрНайти" вместо устаревшего "Найти"
-              severity: Information"#]]
+              severity: Warning"#]]
         .assert_eq(&format_diags(code, &deprecated_diags));
     }
 
@@ -141,7 +139,7 @@ EndProcedure
 Процедура А()
 
    Если НайтИ(Сотрудник.Имя, "Борис") > 0 Тогда
-       Сообщить(Сотрудник.Имя + " таб. №" + Сотрудник.Код);
+       Представление = Сотрудник.Имя + " таб. №" + Сотрудник.Код;
    КонецЕсли;
 
 КонецПроцедуры
@@ -149,15 +147,17 @@ EndProcedure
 If FinD("A", "B") Then
 EndIf;"#;
         let diagnostics = check_hir_diagnostic(code);
-        let deprecated_diags: Vec<_> =
-            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::DeprecatedFind).collect();
+        let deprecated_diags: Vec<_> = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::DeprecatedPlatformApi)
+            .collect();
         expect![[r#"
-            DeprecatedFind @ 4:9..4:14
+            DeprecatedPlatformApi @ 4:9..4:14
               message: Используйте "СтрНайти" вместо устаревшего "Найти"
-              severity: Information
-            DeprecatedFind @ 10:4..10:8
+              severity: Warning
+            DeprecatedPlatformApi @ 10:4..10:8
               message: Use "StrFind" instead of deprecated "Find"
-              severity: Information"#]]
+              severity: Warning"#]]
         .assert_eq(&format_diags(code, &deprecated_diags));
     }
 }

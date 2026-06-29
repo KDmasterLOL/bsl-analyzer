@@ -1,31 +1,20 @@
-use crate::define_metadata;
-use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use bsl_platform::deprecation::{DeprecationEntry, LifecycleGroup};
 use ide_db::TextRange;
-use stdx::case::CaseExt;
 
-pub const METADATA: DiagnosticMetadata = define_metadata! {
-    diagnostic_type: DiagnosticType::Error,
-    severity: DiagnosticSeverityLevel::Major,
-    scope: DiagnosticScope::Bsl,
-    modules: &[],
-    minutes_to_fix: 5,
-    activated_by_default: true,
-    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
-    tags: &[MetadataTag::Standard, MetadataTag::Deprecated, MetadataTag::Unpredictable],
-    can_locate_on_project: false,
-    extra_min_for_complexity: 0.0,
-    lsp_severity_override: "",
+use super::deprecated_platform_facts::{
+    canonical_name_for, global_function_fact, is_russian_alias, replacement_for_name,
 };
 
 pub fn from_hir(name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    let code = DiagnosticCode::DeprecatedCurrentDate;
+    let code = DiagnosticCode::DeprecatedPlatformApi;
 
     if ctx.is_disabled_with_metadata(code) {
         return None;
     }
 
-    let message = get_message(name);
+    let fact = global_function_fact(name, LifecycleGroup::DateTime)?;
+    let message = get_message(name, fact)?;
 
     Some(Diagnostic {
         code,
@@ -37,12 +26,13 @@ pub fn from_hir(name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Optio
     })
 }
 
-fn get_message(method_name: &str) -> String {
-    let lower = method_name.fold_lower();
-    if lower == "текущаядата" {
-        "Используйте \"ТекущаяДатаСеанса\" вместо устаревшего \"ТекущаяДата\"".to_string()
+fn get_message(method_name: &str, fact: &DeprecationEntry) -> Option<String> {
+    let replacement = replacement_for_name(fact, method_name)?;
+    let deprecated = canonical_name_for(fact, method_name)?;
+    if is_russian_alias(fact, method_name) {
+        Some(format!("Используйте \"{}\" вместо устаревшего \"{}\"", replacement, deprecated))
     } else {
-        "Use \"CurrentSessionDate\" instead of deprecated \"CurrentDate\"".to_string()
+        Some(format!("Use \"{}\" instead of deprecated \"{}\"", replacement, deprecated))
     }
 }
 
@@ -62,15 +52,15 @@ mod tests {
         let diagnostics = check_hir_diagnostic(code);
         let deprecated_diags: Vec<_> = diagnostics
             .into_iter()
-            .filter(|d| d.code == DiagnosticCode::DeprecatedCurrentDate)
+            .filter(|d| d.code == DiagnosticCode::DeprecatedPlatformApi)
             .collect();
 
         expect![[r#"
-            DeprecatedCurrentDate @ 3:12..3:23
+            DeprecatedPlatformApi @ 3:12..3:23
               message: Используйте "ТекущаяДатаСеанса" вместо устаревшего "ТекущаяДата"
-              severity: Major"#]]
+              severity: Warning"#]]
         .assert_eq(&format_diags(code, &deprecated_diags));
-        assert_eq!(deprecated_diags[0].severity, Severity::Major);
+        assert_eq!(deprecated_diags[0].severity, Severity::Warning);
         assert!(deprecated_diags[0].message.contains("ТекущаяДатаСеанса"));
     }
 
@@ -84,13 +74,13 @@ EndProcedure
         let diagnostics = check_hir_diagnostic(code);
         let deprecated_diags: Vec<_> = diagnostics
             .into_iter()
-            .filter(|d| d.code == DiagnosticCode::DeprecatedCurrentDate)
+            .filter(|d| d.code == DiagnosticCode::DeprecatedPlatformApi)
             .collect();
 
         expect![[r#"
-            DeprecatedCurrentDate @ 3:12..3:23
+            DeprecatedPlatformApi @ 3:12..3:23
               message: Use "CurrentSessionDate" instead of deprecated "CurrentDate"
-              severity: Major"#]]
+              severity: Warning"#]]
         .assert_eq(&format_diags(code, &deprecated_diags));
         assert!(deprecated_diags[0].message.contains("CurrentSessionDate"));
     }
@@ -105,7 +95,7 @@ EndProcedure
         let diagnostics = check_hir_diagnostic(code);
         let deprecated_diags: Vec<_> = diagnostics
             .into_iter()
-            .filter(|d| d.code == DiagnosticCode::DeprecatedCurrentDate)
+            .filter(|d| d.code == DiagnosticCode::DeprecatedPlatformApi)
             .collect();
 
         expect![[r#""#]].assert_eq(&format_diags(code, &deprecated_diags));
@@ -123,19 +113,19 @@ EndProcedure
         let diagnostics = check_hir_diagnostic(code);
         let deprecated_diags: Vec<_> = diagnostics
             .into_iter()
-            .filter(|d| d.code == DiagnosticCode::DeprecatedCurrentDate)
+            .filter(|d| d.code == DiagnosticCode::DeprecatedPlatformApi)
             .collect();
 
         expect![[r#"
-            DeprecatedCurrentDate @ 3:13..3:24
+            DeprecatedPlatformApi @ 3:13..3:24
               message: Используйте "ТекущаяДатаСеанса" вместо устаревшего "ТекущаяДата"
-              severity: Major
-            DeprecatedCurrentDate @ 4:13..4:24
+              severity: Warning
+            DeprecatedPlatformApi @ 4:13..4:24
               message: Используйте "ТекущаяДатаСеанса" вместо устаревшего "ТекущаяДата"
-              severity: Major
-            DeprecatedCurrentDate @ 5:13..5:24
+              severity: Warning
+            DeprecatedPlatformApi @ 5:13..5:24
               message: Используйте "ТекущаяДатаСеанса" вместо устаревшего "ТекущаяДата"
-              severity: Major"#]]
+              severity: Warning"#]]
         .assert_eq(&format_diags(code, &deprecated_diags));
     }
 
@@ -157,15 +147,15 @@ EndProcedure"#;
         let diagnostics = check_hir_diagnostic(code);
         let deprecated_diags: Vec<_> = diagnostics
             .into_iter()
-            .filter(|d| d.code == DiagnosticCode::DeprecatedCurrentDate)
+            .filter(|d| d.code == DiagnosticCode::DeprecatedPlatformApi)
             .collect();
         expect![[r#"
-            DeprecatedCurrentDate @ 3:20..3:31
+            DeprecatedPlatformApi @ 3:20..3:31
               message: Используйте "ТекущаяДатаСеанса" вместо устаревшего "ТекущаяДата"
-              severity: Major
-            DeprecatedCurrentDate @ 12:17..12:28
+              severity: Warning
+            DeprecatedPlatformApi @ 12:17..12:28
               message: Use "CurrentSessionDate" instead of deprecated "CurrentDate"
-              severity: Major"#]]
+              severity: Warning"#]]
         .assert_eq(&format_diags(code, &deprecated_diags));
     }
 }
