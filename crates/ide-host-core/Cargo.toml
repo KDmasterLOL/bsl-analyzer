@@ -10,8 +10,11 @@ doctest = false
 
 [dependencies]
 ide.workspace = true
+ide-db.workspace = true
 base-db.workspace = true
+bsl-metadata.workspace = true
 vfs.workspace = true
+rayon.workspace = true
 salsa.workspace = true
 tracing.workspace = true
 

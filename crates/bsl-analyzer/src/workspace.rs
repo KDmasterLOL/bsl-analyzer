@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     path::{Path, PathBuf},
     time::Instant,
 };
@@ -10,15 +10,17 @@ use vfs::{loader, FileId, VfsPath};
 
 use crate::global_state::GlobalState;
 
-/// One config root's discovered structure listing as built during bootstrap /
-/// refresh: the root path plus its MDOs, defined types, and common modules, ready
-/// to hand to `RootDatabaseImpl::set_metadata_listing`.
-type RootStructureListing = (
-    String,
-    Vec<ide_db::metadata::MdoEntry>,
-    Vec<ide_db::metadata::DefinedTypeEntry>,
-    Vec<ide_db::metadata::CommonModuleEntry>,
-);
+/// Adapts the LSP server's `parking_lot`-locked VFS to the lock-neutral
+/// [`ide_host_core::VfsWrite`] the shared metadata policy expects, keeping the lock
+/// flavour out of `ide-host-core` (the MCP server locks its VFS differently).
+struct LspVfs<'a>(&'a std::sync::Arc<parking_lot::RwLock<vfs::Vfs>>);
+
+impl ide_host_core::VfsWrite for LspVfs<'_> {
+    fn with_write<R>(&self, f: impl FnOnce(&mut vfs::Vfs) -> R) -> R {
+        let mut guard = self.0.write();
+        f(&mut guard)
+    }
+}
 
 /// What a [`GlobalState::process_changes`] batch did, so the caller can decide
 /// whether already-open documents need re-analysis and re-publishing.
@@ -511,337 +513,22 @@ impl GlobalState {
         );
     }
 
-    /// Build the metadata Salsa substrate from the filesystem: for each config
-    /// root, discover its content-parsed MDOs, intern their composing files as
-    /// versioned VFS inputs in the dedicated metadata root(1), record each file's
-    /// on-disk content revision (text read on demand, not retained), and set the
-    /// per-root structure listing that `resolve_metadata_object` reads. The walk is
-    /// filesystem-authoritative (it does not enumerate VFS WatchOnly entries);
-    /// `alloc_file_id` is idempotent, so it reuses the FileId already interned for a
-    /// watched path. Runs after `init_source_root` and re-runs on reload.
+    /// Build the metadata Salsa substrate from the filesystem for every config root.
+    /// Thin delegation to the shared [`ide_host_core::AnalysisHost`] policy; this
+    /// frontend only supplies its VFS. Runs after `init_source_root` and re-runs on
+    /// reload.
     pub fn bootstrap_metadata_substrate(&mut self) {
-        use base_db::{SourceDatabase, SourceRoot, METADATA_SOURCE_ROOT};
-        use ide_db::metadata::{CommonModuleEntry, DefinedTypeEntry, MdoEntry};
-
-        let start = Instant::now();
-
-        let config_paths = self.analysis_host.raw_database().all_config_paths();
-        if config_paths.is_empty() {
-            return;
-        }
-
-        // One config root's discovered (stat-only) structure, before any file is
-        // read or interned.
-        struct RootDiscovery {
-            root_string: String,
-            mdos: Vec<bsl_metadata::DiscoveredMdo>,
-            defined_types: Vec<bsl_metadata::DiscoveredDefinedType>,
-            common_modules: Vec<bsl_metadata::DiscoveredCommonModule>,
-        }
-
-        // Discover every root's structure WITHOUT the vfs lock — discovery walks
-        // and stats the filesystem but never touches the vfs.
-        let discoveries: Vec<RootDiscovery> = config_paths
-            .iter()
-            .map(|(_, root_path)| {
-                let mut mdos = bsl_metadata::discover_metadata_structure(root_path);
-                mdos.extend(bsl_metadata::discover_register_structure(root_path));
-                RootDiscovery {
-                    root_string: root_path.to_string_lossy().to_string(),
-                    mdos,
-                    defined_types: bsl_metadata::discover_defined_type_structure(root_path),
-                    common_modules: bsl_metadata::discover_common_module_structure(root_path),
-                }
-            })
-            .collect();
-
-        // Gather every composing file that needs its content revision, then read
-        // and hash them in parallel OFF the vfs lock. The text itself is not
-        // retained — only `(path, revision)`. (`module_file` is BSL source owned by
-        // root(0), read elsewhere — not hashed here.) rayon is safe in this window:
-        // vfs-notify no longer parks tasks on the global pool, and bootstrap runs in
-        // `finalize` after the boot load window has closed.
-        let mut to_read: Vec<PathBuf> = Vec::new();
-        for d in &discoveries {
-            for m in &d.mdos {
-                to_read.push(m.main.clone());
-                if let Some(p) = &m.predefined {
-                    to_read.push(p.clone());
-                }
-            }
-            to_read.extend(d.defined_types.iter().map(|t| t.main.clone()));
-            to_read.extend(d.common_modules.iter().map(|c| c.main.clone()));
-        }
-        let revisions_by_path: HashMap<PathBuf, u64> = {
-            use rayon::prelude::*;
-            to_read
-                .par_iter()
-                .filter_map(|path| {
-                    let text = base_db::read_disk_text(path).ok()?;
-                    Some((path.clone(), base_db::content_revision(&text)))
-                })
-                .collect()
-        };
-
-        let mut metadata_file_set = vfs::file_set::FileSet::new();
-        let mut revisions: Vec<(FileId, u64)> = Vec::new();
-        let mut listings: Vec<RootStructureListing> = Vec::new();
-
-        // Intern under a single short vfs.write(): allocate FileIds and grow the
-        // metadata file set. This is the only lock-held work; the expensive reads
-        // already happened above. A file whose read failed (vanished between
-        // discovery and the read pass) is absent from `revisions_by_path`, so
-        // `intern_metadata_file` returns `None` and the MDO is dropped.
-        {
-            let mut vfs = self.vfs.write();
-            for d in discoveries {
-                let mut entries = Vec::with_capacity(d.mdos.len());
-                for m in d.mdos {
-                    let Some(main) = intern_metadata_file(
-                        &mut vfs,
-                        &m.main,
-                        &revisions_by_path,
-                        &mut metadata_file_set,
-                        &mut revisions,
-                    ) else {
-                        continue;
-                    };
-                    let predefined = m.predefined.as_ref().and_then(|p| {
-                        intern_metadata_file(
-                            &mut vfs,
-                            p,
-                            &revisions_by_path,
-                            &mut metadata_file_set,
-                            &mut revisions,
-                        )
-                    });
-                    entries.push(MdoEntry { kind: m.mdo_type, name: m.name, main, predefined });
-                }
-                let mut defined_types = Vec::new();
-                for t in d.defined_types {
-                    let Some(main) = intern_metadata_file(
-                        &mut vfs,
-                        &t.main,
-                        &revisions_by_path,
-                        &mut metadata_file_set,
-                        &mut revisions,
-                    ) else {
-                        continue;
-                    };
-                    defined_types.push(DefinedTypeEntry { name: t.name, main });
-                }
-                let mut common_modules = Vec::new();
-                for c in d.common_modules {
-                    let Some(main) = intern_metadata_file(
-                        &mut vfs,
-                        &c.main,
-                        &revisions_by_path,
-                        &mut metadata_file_set,
-                        &mut revisions,
-                    ) else {
-                        continue;
-                    };
-                    // The module's `Ext/Module.bsl` is BSL source owned by root(0),
-                    // not a metadata file — look up the analyzer's existing FileId for
-                    // it (bootstrap runs after `init_source_root`, so it is already
-                    // interned) rather than enrolling a duplicate. `None` when the
-                    // path is absent or unloaded; the reverse lookup then misses,
-                    // which is correct.
-                    let module_file = c
-                        .module_file
-                        .as_ref()
-                        .and_then(|p| vfs.file_id(&vfs::VfsPath::new(p.to_path_buf())));
-                    common_modules.push(CommonModuleEntry { name: c.name, main, module_file });
-                }
-                listings.push((d.root_string, entries, defined_types, common_modules));
-            }
-        }
-
-        let mdo_count: usize = listings.iter().map(|(_, e, _, _)| e.len()).sum();
-        let file_count = revisions.len();
-
-        let db = self.analysis_host.raw_database_mut();
-        db.set_source_root(METADATA_SOURCE_ROOT, SourceRoot::new_local(metadata_file_set));
-        for (fid, _) in &revisions {
-            db.set_file_source_root(*fid, METADATA_SOURCE_ROOT);
-        }
-        for (fid, revision) in &revisions {
-            db.set_file_revision_from_disk(*fid, *revision);
-        }
-        for (root, entries, defined_types, common_modules) in listings {
-            db.set_metadata_listing(&root, entries, defined_types, common_modules);
-        }
-
-        tracing::info!(
-            mdo_count,
-            file_count,
-            elapsed_ms = start.elapsed().as_millis() as u64,
-            "bootstrapped metadata substrate",
-        );
+        let vfs = LspVfs(&self.vfs);
+        self.analysis_host.bootstrap_metadata_substrate(&vfs);
     }
 
-    /// Incrementally refresh the metadata substrate for the config roots that own
-    /// any of `changed_paths` (a post-boot metadata WatchOnly batch: content edits,
-    /// adds, removes, renames). Re-discovers each affected root's structure
-    /// (stat-only, no content read), then:
-    /// - reads on disk **only** the changed or brand-new composing files, bumping
-    ///   their revision so `parse_mdo_query` re-parses just those MDOs; unchanged
-    ///   MDOs keep their revision and stay memoised;
-    /// - augments root(1) with any new composing files (removed files linger
-    ///   harmlessly — nothing in a listing references them);
-    /// - re-sets a root's structure listing **only** when its entries actually
-    ///   changed (add / remove / rename), so a pure content edit does not churn
-    ///   `config_index`.
-    ///
-    /// Vanished mains drop out of the re-discovered structure (and so out of the
-    /// listing), tombstoning them: `resolve_metadata_object` then returns `None`.
-    /// Runs after the boot bootstrap (root(1) already exists). Returns whether any
-    /// substrate input actually changed, so callers can gate a diagnostics refresh.
+    /// Incrementally refresh the metadata substrate for the config roots owning any
+    /// of `changed_paths`. Thin delegation to the shared
+    /// [`ide_host_core::AnalysisHost`] policy; returns whether any substrate input
+    /// actually changed, so callers can gate a diagnostics refresh.
     pub fn refresh_metadata_substrate(&mut self, changed_paths: &[PathBuf]) -> bool {
-        use base_db::{SourceDatabase, SourceRoot, METADATA_SOURCE_ROOT};
-        use ide_db::metadata::{CommonModuleEntry, DefinedTypeEntry, MdoEntry};
-
-        if changed_paths.is_empty() {
-            return false;
-        }
-
-        let config_paths = self.analysis_host.raw_database().all_config_paths();
-        let mut affected: Vec<PathBuf> = Vec::new();
-        for (_, root) in &config_paths {
-            if !affected.iter().any(|r| r == root)
-                && changed_paths.iter().any(|p| p.starts_with(root))
-            {
-                affected.push(root.clone());
-            }
-        }
-        if affected.is_empty() {
-            return false;
-        }
-
-        let changed_set: HashSet<&Path> = changed_paths.iter().map(|p| p.as_path()).collect();
-
-        let mut metadata_file_set = {
-            let db = self.analysis_host.raw_database();
-            db.source_root_input(METADATA_SOURCE_ROOT).root(db).file_set().clone()
-        };
-        let files_before = metadata_file_set.len();
-
-        let mut new_file_ids: Vec<FileId> = Vec::new();
-        let mut revisions: Vec<(FileId, u64)> = Vec::new();
-        let mut listings: Vec<RootStructureListing> = Vec::new();
-
-        {
-            let mut vfs = self.vfs.write();
-            for root in &affected {
-                let mut discovered = bsl_metadata::discover_metadata_structure(root);
-                discovered.extend(bsl_metadata::discover_register_structure(root));
-                let mut entries = Vec::with_capacity(discovered.len());
-                for d in discovered {
-                    let Some(main) = enroll_refresh(
-                        &mut vfs,
-                        &d.main,
-                        &changed_set,
-                        &mut metadata_file_set,
-                        &mut new_file_ids,
-                        &mut revisions,
-                    ) else {
-                        continue;
-                    };
-                    let predefined = d.predefined.as_ref().and_then(|p| {
-                        enroll_refresh(
-                            &mut vfs,
-                            p,
-                            &changed_set,
-                            &mut metadata_file_set,
-                            &mut new_file_ids,
-                            &mut revisions,
-                        )
-                    });
-                    entries.push(MdoEntry { kind: d.mdo_type, name: d.name, main, predefined });
-                }
-                let mut defined_types = Vec::new();
-                for d in bsl_metadata::discover_defined_type_structure(root) {
-                    let Some(main) = enroll_refresh(
-                        &mut vfs,
-                        &d.main,
-                        &changed_set,
-                        &mut metadata_file_set,
-                        &mut new_file_ids,
-                        &mut revisions,
-                    ) else {
-                        continue;
-                    };
-                    defined_types.push(DefinedTypeEntry { name: d.name, main });
-                }
-                let mut common_modules = Vec::new();
-                for d in bsl_metadata::discover_common_module_structure(root) {
-                    let Some(main) = enroll_refresh(
-                        &mut vfs,
-                        &d.main,
-                        &changed_set,
-                        &mut metadata_file_set,
-                        &mut new_file_ids,
-                        &mut revisions,
-                    ) else {
-                        continue;
-                    };
-                    // The module's `Ext/Module.bsl` is BSL source owned by root(0),
-                    // not a metadata file — reuse the analyzer's existing FileId for
-                    // it rather than enrolling a duplicate (see `bootstrap_metadata_substrate`).
-                    let module_file = d
-                        .module_file
-                        .as_ref()
-                        .and_then(|p| vfs.file_id(&vfs::VfsPath::new(p.to_path_buf())));
-                    common_modules.push(CommonModuleEntry { name: d.name, main, module_file });
-                }
-                listings.push((
-                    root.to_string_lossy().to_string(),
-                    entries,
-                    defined_types,
-                    common_modules,
-                ));
-            }
-        }
-
-        let reread = revisions.len();
-        let added = new_file_ids.len();
-
-        let db = self.analysis_host.raw_database_mut();
-        let mut changed = false;
-        if metadata_file_set.len() != files_before {
-            db.set_source_root(METADATA_SOURCE_ROOT, SourceRoot::new_local(metadata_file_set));
-            changed = true;
-        }
-        for fid in &new_file_ids {
-            db.set_file_source_root(*fid, METADATA_SOURCE_ROOT);
-        }
-        for (fid, revision) in &revisions {
-            db.set_file_revision_from_disk(*fid, *revision);
-            changed = true;
-        }
-        for (root, entries, defined_types, common_modules) in listings {
-            let structure_changed = match db.metadata_listing(&root) {
-                Some(input) => {
-                    *input.entries(db) != entries
-                        || *input.defined_types(db) != defined_types
-                        || *input.common_modules(db) != common_modules
-                }
-                None => true,
-            };
-            if structure_changed {
-                db.set_metadata_listing(&root, entries, defined_types, common_modules);
-                changed = true;
-            }
-        }
-
-        tracing::debug!(
-            roots = affected.len(),
-            reread,
-            added,
-            changed,
-            "refreshed metadata substrate incrementally",
-        );
-        changed
+        let vfs = LspVfs(&self.vfs);
+        self.analysis_host.refresh_metadata_substrate(&vfs, changed_paths)
     }
 
     pub fn warm_metadata_cache(&mut self) {
@@ -961,58 +648,6 @@ impl GlobalState {
 
         Url::from_file_path(std_path)
             .map_err(|_| anyhow!("Failed to convert path to URL: {:?}", std_path))
-    }
-}
-
-/// Intern a metadata composing file (already read and hashed in the parallel pass)
-/// to a stable [`FileId`] and add it to the metadata file set, recording its
-/// pre-computed content revision. Returns `None` when the file is absent from
-/// `revisions_by_path` — it could not be read (discovered then vanished) — so the
-/// caller drops it from the MDO. `alloc_file_id` is idempotent: an already-watched
-/// path keeps its id. This runs under the vfs lock and does no I/O.
-fn intern_metadata_file(
-    vfs: &mut vfs::Vfs,
-    path: &Path,
-    revisions_by_path: &HashMap<PathBuf, u64>,
-    file_set: &mut vfs::file_set::FileSet,
-    revisions: &mut Vec<(FileId, u64)>,
-) -> Option<FileId> {
-    let revision = *revisions_by_path.get(path)?;
-    let vfs_path = VfsPath::new(path.to_path_buf());
-    let file_id = vfs.alloc_file_id(vfs_path.clone());
-    file_set.insert(file_id, vfs_path);
-    revisions.push((file_id, revision));
-    Some(file_id)
-}
-
-/// Enroll a composing file during an incremental refresh: intern it, ensure it is
-/// in the metadata file set, and (re)read its revision only if it changed or is
-/// brand-new — an unchanged, already-enrolled file keeps its boot revision and is
-/// not read. A newly added file is recorded in `new_file_ids` so the caller maps
-/// its source root. Returns `None` only when a changed/new file cannot be read
-/// (vanished), so the caller drops that MDO.
-fn enroll_refresh(
-    vfs: &mut vfs::Vfs,
-    path: &Path,
-    changed: &HashSet<&Path>,
-    file_set: &mut vfs::file_set::FileSet,
-    new_file_ids: &mut Vec<FileId>,
-    revisions: &mut Vec<(FileId, u64)>,
-) -> Option<FileId> {
-    let vfs_path = VfsPath::new(path.to_path_buf());
-    let is_new = file_set.file_for_path(&vfs_path).is_none();
-
-    if changed.contains(path) || is_new {
-        let revision = base_db::content_revision(&base_db::read_disk_text(path).ok()?);
-        let file_id = vfs.alloc_file_id(vfs_path.clone());
-        file_set.insert(file_id, vfs_path);
-        if is_new {
-            new_file_ids.push(file_id);
-        }
-        revisions.push((file_id, revision));
-        Some(file_id)
-    } else {
-        file_set.file_for_path(&vfs_path).copied()
     }
 }
 

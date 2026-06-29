@@ -1988,7 +1988,10 @@ name = "ide-host-core"
 version = "0.2.50"
 dependencies = [
  "base-db",
+ "bsl-metadata",
  "ide",
+ "ide-db",
+ "rayon",
  "salsa",
  "tempfile",
  "tracing",
