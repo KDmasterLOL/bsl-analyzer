@@ -181,6 +181,15 @@ pub struct CommonModuleEntry {
     pub module_file: Option<vfs::FileId>,
 }
 
+/// One discovered event subscription in a config root's *structure* listing: its
+/// name and the [`vfs::FileId`] of its main XML. Event subscriptions are global
+/// flat metadata objects, keyed by name, so they ride a dedicated listing field.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct EventSubscriptionEntry {
+    pub name: String,
+    pub main: vfs::FileId,
+}
+
 /// The per-config-root *structure* input: the MDOs and defined types that exist in
 /// one config root (base config or one extension). Set out-of-query by the
 /// bootstrap; re-set only when the directory structure changes. Keeping it per-root
@@ -194,6 +203,7 @@ pub struct MetadataListingInput {
     pub entries: Arc<Vec<MdoEntry>>,
     pub defined_types: Arc<Vec<DefinedTypeEntry>>,
     pub common_modules: Arc<Vec<CommonModuleEntry>>,
+    pub event_subscriptions: Arc<Vec<EventSubscriptionEntry>>,
 }
 
 /// The composing-file identities for one MDO, as held in a [`ConfigIndex`].
@@ -519,6 +529,75 @@ pub fn resolve_common_module_by_file(
     let main = index.lookup(name)?;
     let file = CommonModuleFile::new(db, main);
     parse_common_module_query(db, file)
+}
+
+/// The main XML file of a single event subscription, interned so
+/// [`parse_event_subscription_query`] keys on the file identity; its content
+/// revision drives invalidation, so editing one subscription re-parses only it.
+#[salsa::interned(debug)]
+pub struct EventSubscriptionFile<'db> {
+    pub main: vfs::FileId,
+}
+
+/// Parse one event subscription from its main XML, read through the versioned VFS.
+/// Backdates on unchanged metadata.
+#[salsa::tracked(lru = 8192)]
+pub fn parse_event_subscription_query(
+    db: &dyn base_db::SourceDatabase,
+    file: EventSubscriptionFile<'_>,
+) -> Option<Arc<bsl_metadata::EventSubscription>> {
+    let _span = tracing::info_span!("parse_event_subscription").entered();
+
+    let main_text = db.file_text(file.main(db));
+    bsl_metadata::parse_event_subscription_from_text(&main_text).map(Arc::new)
+}
+
+/// A config root's event-subscription lookup, derived from its
+/// [`MetadataListingInput`]'s `event_subscriptions` field. Tracked on that field
+/// alone, so a content edit leaves it memoised and unrelated MDO structure changes
+/// do not invalidate it.
+#[derive(Default, PartialEq, Eq, Debug)]
+pub struct EventSubscriptionIndex {
+    by_name: std::collections::HashMap<String, vfs::FileId>,
+}
+
+impl EventSubscriptionIndex {
+    pub fn lookup(&self, name: &str) -> Option<vfs::FileId> {
+        self.by_name.get(&name.fold_lower()).copied()
+    }
+}
+
+/// Build a config root's event-subscription name lookup from its structure listing.
+#[salsa::tracked]
+pub fn event_subscription_index(
+    db: &dyn base_db::SourceDatabase,
+    listing: MetadataListingInput,
+) -> Arc<EventSubscriptionIndex> {
+    let _span = tracing::info_span!("event_subscription_index").entered();
+
+    let entries = listing.event_subscriptions(db);
+    let mut by_name = std::collections::HashMap::with_capacity(entries.len());
+    for entry in entries.iter() {
+        by_name.insert(entry.name.fold_lower(), entry.main);
+    }
+    Arc::new(EventSubscriptionIndex { by_name })
+}
+
+/// Resolve a single event subscription's metadata by name within one config root,
+/// at per-event-subscription Salsa granularity. Extension overlay across roots is
+/// composed by callers (an extension replaces the subscription wholesale).
+#[salsa::tracked]
+pub fn resolve_event_subscription(
+    db: &dyn base_db::SourceDatabase,
+    listing: MetadataListingInput,
+    name: String,
+) -> Option<Arc<bsl_metadata::EventSubscription>> {
+    let _span = tracing::info_span!("resolve_event_subscription").entered();
+
+    let index = event_subscription_index(db, listing);
+    let main = index.lookup(&name)?;
+    let file = EventSubscriptionFile::new(db, main);
+    parse_event_subscription_query(db, file)
 }
 
 #[salsa::db]

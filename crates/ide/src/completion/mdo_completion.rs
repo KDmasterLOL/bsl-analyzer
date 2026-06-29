@@ -375,10 +375,15 @@ fn complete_metadata_reference_objects<DB: RootDatabase>(
     file_id: vfs::FileId,
     kind: MetadataReferenceKind,
 ) -> Vec<CompletionItem> {
-    let Some(config) = db.merged_visible_configuration(file_id) else {
-        return Vec::new();
+    let names = if kind == MetadataReferenceKind::EventSubscription {
+        db.event_subscription_names(file_id)
+    } else {
+        let Some(config) = db.merged_visible_configuration(file_id) else {
+            return Vec::new();
+        };
+        metadata_reference_names(&config, kind)
     };
-    metadata_reference_names(&config, kind)
+    names
         .into_iter()
         .map(|name| CompletionItem {
             label: name.clone(),
@@ -401,9 +406,7 @@ fn metadata_reference_names(
         MetadataReferenceKind::Role => {
             config.roles().iter().map(|item| item.name().to_string()).collect()
         }
-        MetadataReferenceKind::EventSubscription => {
-            config.event_subscriptions().iter().map(|item| item.name().to_string()).collect()
-        }
+        MetadataReferenceKind::EventSubscription => Vec::new(),
         MetadataReferenceKind::ScheduledJob => {
             config.scheduled_jobs().iter().map(|item| item.name().to_string()).collect()
         }

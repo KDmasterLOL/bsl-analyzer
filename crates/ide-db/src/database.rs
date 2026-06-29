@@ -401,17 +401,20 @@ impl RootDatabaseImpl {
         entries: Vec<metadata::MdoEntry>,
         defined_types: Vec<metadata::DefinedTypeEntry>,
         common_modules: Vec<metadata::CommonModuleEntry>,
+        event_subscriptions: Vec<metadata::EventSubscriptionEntry>,
     ) {
         use salsa::Setter;
         let key = metadata::canonicalize_configuration_path(root);
         let entries = Arc::new(entries);
         let defined_types = Arc::new(defined_types);
         let common_modules = Arc::new(common_modules);
+        let event_subscriptions = Arc::new(event_subscriptions);
         match self.metadata_listings.get(&key).map(|e| *e.value()) {
             Some(input) => {
                 input.set_entries(self).to(entries);
                 input.set_defined_types(self).to(defined_types);
                 input.set_common_modules(self).to(common_modules);
+                input.set_event_subscriptions(self).to(event_subscriptions);
             }
             None => {
                 let input = metadata::MetadataListingInput::new(
@@ -419,6 +422,7 @@ impl RootDatabaseImpl {
                     entries,
                     defined_types,
                     common_modules,
+                    event_subscriptions,
                 );
                 self.metadata_listings.insert(key, input);
             }
@@ -670,6 +674,103 @@ impl RootDatabaseImpl {
             .map(|(_, path)| path);
 
         extension_path.and_then(|p| find_in(p)).or_else(|| main_path.and_then(|p| find_in(p)))
+    }
+
+    /// The event-subscription counterpart of [`resolve_common_module_for_file`]:
+    /// resolve a subscription by name visible to `file_id`. Event subscriptions are
+    /// flat one-file metadata. `Configuration::merge_extension_overlay` does not
+    /// merge subscriptions today, so the bootstrapped path intentionally resolves
+    /// from the main listing only to match the merged whole-config lookup.
+    pub fn resolve_event_subscription_for_file(
+        &self,
+        file_id: FileId,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::EventSubscription>> {
+        let (main_listing, _ext_listing, bootstrapped) =
+            self.metadata_listings_for_file(file_id)?;
+
+        if !bootstrapped {
+            use hir::ConfigsDatabase;
+            return self
+                .merged_visible_configuration(file_id)?
+                .find_event_subscription(name)
+                .cloned()
+                .map(Arc::new);
+        }
+
+        main_listing.and_then(|l| metadata::resolve_event_subscription(self, l, name.to_string()))
+    }
+
+    pub fn event_subscription_names_for_file(&self, file_id: FileId) -> Vec<String> {
+        let Some((main_listing, _ext_listing, bootstrapped)) =
+            self.metadata_listings_for_file(file_id)
+        else {
+            return Vec::new();
+        };
+
+        if !bootstrapped {
+            use hir::ConfigsDatabase;
+            return self
+                .merged_visible_configuration(file_id)
+                .map(|config| {
+                    config
+                        .event_subscriptions()
+                        .iter()
+                        .map(|subscription| subscription.name().to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
+        }
+
+        let mut out = Vec::new();
+        for listing in [main_listing].into_iter().flatten() {
+            for entry in listing.event_subscriptions(self).iter() {
+                out.push(entry.name.clone());
+            }
+        }
+        out
+    }
+
+    pub fn enumerate_event_subscriptions_for_file(
+        &self,
+        file_id: FileId,
+    ) -> Vec<Arc<bsl_metadata::EventSubscription>> {
+        let paths = RootDatabaseImpl::all_config_paths(self);
+        if !paths.is_empty() {
+            let mut listings = Vec::with_capacity(paths.len());
+            for (_, path) in &paths {
+                let Some(listing) = self.metadata_listing(&path.to_string_lossy()) else {
+                    listings.clear();
+                    break;
+                };
+                listings.push(listing);
+            }
+            if !listings.is_empty() {
+                let mut out = Vec::new();
+                for listing in listings {
+                    let names: Vec<String> = listing
+                        .event_subscriptions(self)
+                        .iter()
+                        .map(|entry| entry.name.clone())
+                        .collect();
+                    for name in names {
+                        if let Some(subscription) =
+                            metadata::resolve_event_subscription(self, listing, name)
+                        {
+                            out.push(subscription);
+                        }
+                    }
+                }
+                return out;
+            }
+        }
+
+        RootDatabase::get_all_configurations(self, file_id)
+            .into_iter()
+            .flat_map(|(_, config)| {
+                config.event_subscriptions().iter().cloned().map(Arc::new).collect::<Vec<_>>()
+            })
+            .collect()
     }
 
     /// Resolve the common module that owns the `Ext/Module.bsl` whose id is
@@ -1087,6 +1188,25 @@ impl hir::ConfigsDatabase for RootDatabaseImpl {
         name: &str,
     ) -> Option<Arc<bsl_metadata::CommonModule>> {
         RootDatabaseImpl::resolve_common_module_for_file(self, file_id, name)
+    }
+
+    fn resolve_event_subscription(
+        &self,
+        file_id: FileId,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::EventSubscription>> {
+        RootDatabaseImpl::resolve_event_subscription_for_file(self, file_id, name)
+    }
+
+    fn event_subscription_names(&self, file_id: FileId) -> Vec<String> {
+        RootDatabaseImpl::event_subscription_names_for_file(self, file_id)
+    }
+
+    fn enumerate_event_subscriptions(
+        &self,
+        file_id: FileId,
+    ) -> Vec<Arc<bsl_metadata::EventSubscription>> {
+        RootDatabaseImpl::enumerate_event_subscriptions_for_file(self, file_id)
     }
 
     fn has_config_root(&self, file_id: FileId) -> bool {

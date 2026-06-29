@@ -136,6 +136,7 @@ fn resolve_metadata_object_isolates_content_and_structure() {
         }]),
         Arc::new(Vec::new()),
         Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
     );
     assert_eq!(config_index(&db, listing).len(), 1);
 
@@ -226,6 +227,7 @@ fn resolve_register_by_name_resolves_via_listing_substrate() {
         }]),
         Arc::new(Vec::new()),
         Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
     );
 
     let reg = resolve_register_by_name(&db, listing, "РегистрСведений1".to_string())
@@ -282,6 +284,7 @@ fn resolve_defined_type_isolates_content_and_structure() {
         Arc::new(vec![DefinedTypeEntry {
             name: "ДенежнаяСумма".to_string(), main: f1
         }]),
+        Arc::new(Vec::new()),
         Arc::new(Vec::new()),
     );
     assert_eq!(defined_type_index(&db, listing).lookup("денежнаясумма"), Some(f1));
@@ -350,6 +353,7 @@ fn resolve_common_module_by_name_and_by_body_file() {
             main: xml_file,
             module_file: Some(bsl_file),
         }]),
+        Arc::new(Vec::new()),
     );
 
     // The by-name lookup, the body-file-by-name lookup, and the by-body reverse
@@ -390,6 +394,191 @@ fn resolve_common_module_by_name_and_by_body_file() {
     listing.set_common_modules(&mut db).to(Arc::new(Vec::new()));
     assert!(resolve_common_module(&db, listing, "ОбщегоНазначения".to_string()).is_none());
     assert!(resolve_common_module_by_file(&db, listing, bsl_file).is_none());
+}
+
+#[test]
+fn resolve_event_subscription_isolates_content_and_structure() {
+    use crate::metadata::{
+        event_subscription_index, resolve_event_subscription, EventSubscriptionEntry,
+        MetadataListingInput,
+    };
+    use salsa::Setter;
+
+    fn event_subscription_xml(name: &str, event: &str, handler: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <EventSubscription uuid="00000000-0000-0000-0000-000000000051">
+        <Properties>
+            <Name>{name}</Name>
+            <Source><Type>CatalogRef.Номенклатура</Type></Source>
+            <Event>{event}</Event>
+            <Handler>{handler}</Handler>
+        </Properties>
+    </EventSubscription>
+</MetaDataObject>"#
+        )
+    }
+
+    let mut db = RootDatabaseImpl::new();
+    let before_file = FileId(0);
+    let after_file = FileId(1);
+
+    let mut file_set = FileSet::new();
+    file_set.insert(before_file, VfsPath::new("/EventSubscriptions/ПередЗаписью.xml"));
+    file_set.insert(after_file, VfsPath::new("/EventSubscriptions/ПослеЗаписи.xml"));
+    db.set_source_root(SourceRootId(1), SourceRoot::new_local(file_set));
+    db.set_file_source_root(before_file, SourceRootId(1));
+    db.set_file_source_root(after_file, SourceRootId(1));
+    db.set_file_text(
+        before_file,
+        &event_subscription_xml(
+            "ПередЗаписью",
+            "BeforeWrite",
+            "CommonModule.ПодпискиНаСобытия.ПередЗаписью",
+        ),
+    );
+    db.set_file_text(
+        after_file,
+        &event_subscription_xml(
+            "ПослеЗаписи",
+            "AfterWrite",
+            "CommonModule.ПодпискиНаСобытия.ПослеЗаписи",
+        ),
+    );
+
+    let listing = MetadataListingInput::new(
+        &db,
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+        Arc::new(vec![EventSubscriptionEntry {
+            name: "ПередЗаписью".to_string(),
+            main: before_file,
+        }]),
+    );
+    assert_eq!(event_subscription_index(&db, listing).lookup("передзаписью"), Some(before_file));
+
+    let before = resolve_event_subscription(&db, listing, "ПередЗаписью".to_string())
+        .expect("ПередЗаписью resolves");
+    assert_eq!(before.name(), "ПередЗаписью");
+    assert_eq!(before.event(), "BeforeWrite");
+    assert_eq!(before.handler_string(), "CommonModule.ПодпискиНаСобытия.ПередЗаписью");
+
+    assert!(resolve_event_subscription(&db, listing, "передзаписью".to_string()).is_some());
+    assert!(resolve_event_subscription(&db, listing, "ПослеЗаписи".to_string()).is_none());
+
+    let before_again =
+        resolve_event_subscription(&db, listing, "ПередЗаписью".to_string()).unwrap();
+    assert!(Arc::ptr_eq(&before, &before_again), "unchanged resolution must memoise");
+
+    listing.set_event_subscriptions(&mut db).to(Arc::new(vec![
+        EventSubscriptionEntry { name: "ПередЗаписью".to_string(), main: before_file },
+        EventSubscriptionEntry { name: "ПослеЗаписи".to_string(), main: after_file },
+    ]));
+    let after = resolve_event_subscription(&db, listing, "ПослеЗаписи".to_string())
+        .expect("ПослеЗаписи resolves after being added to the structure");
+    assert_eq!(after.handler_string(), "CommonModule.ПодпискиНаСобытия.ПослеЗаписи");
+
+    let before_before_edit =
+        resolve_event_subscription(&db, listing, "ПередЗаписью".to_string()).unwrap();
+    db.set_file_text(
+        after_file,
+        &event_subscription_xml(
+            "ПослеЗаписи",
+            "AfterWrite",
+            "CommonModule.ПодпискиНаСобытия.ПослеЗаписиПовторно",
+        ),
+    );
+    let after_edited = resolve_event_subscription(&db, listing, "ПослеЗаписи".to_string()).unwrap();
+    assert_eq!(
+        after_edited.handler_string(),
+        "CommonModule.ПодпискиНаСобытия.ПослеЗаписиПовторно",
+        "content edit must re-parse the edited subscription"
+    );
+    let before_after_edit =
+        resolve_event_subscription(&db, listing, "ПередЗаписью".to_string()).unwrap();
+    assert!(
+        Arc::ptr_eq(&before_before_edit, &before_after_edit),
+        "a content edit to one event subscription must not re-resolve a sibling"
+    );
+
+    listing.set_event_subscriptions(&mut db).to(Arc::new(Vec::new()));
+    assert!(resolve_event_subscription(&db, listing, "ПередЗаписью".to_string()).is_none());
+    assert!(resolve_event_subscription(&db, listing, "ПослеЗаписи".to_string()).is_none());
+}
+
+#[test]
+fn resolve_event_subscription_for_file_uses_bootstrapped_listing() {
+    use crate::metadata::EventSubscriptionEntry;
+
+    fn event_subscription_xml(name: &str, event: &str, handler: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <EventSubscription uuid="00000000-0000-0000-0000-000000000052">
+        <Properties>
+            <Name>{name}</Name>
+            <Source><Type>CatalogRef.Номенклатура</Type></Source>
+            <Event>{event}</Event>
+            <Handler>{handler}</Handler>
+        </Properties>
+    </EventSubscription>
+</MetaDataObject>"#
+        )
+    }
+
+    let root = std::env::temp_dir().join(format!(
+        "bsl_event_subscription_for_file_{}_{}",
+        std::process::id(),
+        line!()
+    ));
+    let subscription_path = root.join("EventSubscriptions/ПередЗаписью.xml");
+    std::fs::create_dir_all(subscription_path.parent().unwrap()).unwrap();
+
+    let mut db = RootDatabaseImpl::new();
+    let subscription_file = FileId(0);
+    let module_file = FileId(1);
+    let module_path = root.join("EventSubscriptionConsumer.bsl");
+
+    let mut file_set = FileSet::new();
+    file_set.insert(subscription_file, VfsPath::new(subscription_path.to_string_lossy().as_ref()));
+    file_set.insert(module_file, VfsPath::new(module_path.to_string_lossy().as_ref()));
+    db.set_source_root(SourceRootId(1), SourceRoot::new_local(file_set));
+    db.set_file_source_root(subscription_file, SourceRootId(1));
+    db.set_file_source_root(module_file, SourceRootId(1));
+    db.set_file_text(
+        subscription_file,
+        &event_subscription_xml(
+            "ПередЗаписью",
+            "BeforeWrite",
+            "CommonModule.ПодпискиНаСобытия.ПередЗаписью",
+        ),
+    );
+    db.set_file_text(module_file, "Процедура Т() КонецПроцедуры");
+
+    db.set_all_config_paths(vec![(None, root.clone())]);
+    db.set_metadata_listing(
+        &root.to_string_lossy(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        vec![EventSubscriptionEntry {
+            name: "ПередЗаписью".to_string(), main: subscription_file
+        }],
+    );
+
+    let resolved = db
+        .resolve_event_subscription_for_file(module_file, "ПередЗаписью")
+        .expect("event subscription resolves through the bootstrapped per-kind substrate");
+    assert_eq!(resolved.name(), "ПередЗаписью");
+    assert_eq!(resolved.event(), "BeforeWrite");
+    assert!(
+        db.resolve_event_subscription_for_file(module_file, "НетТакойПодписки").is_none(),
+        "unknown event subscription name must not resolve"
+    );
+
+    std::fs::remove_dir_all(&root).ok();
 }
 
 #[test]

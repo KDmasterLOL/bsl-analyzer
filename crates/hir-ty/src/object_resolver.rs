@@ -76,11 +76,27 @@ impl<D: ConfigsDatabase + ?Sized> ObjectResolver for DbObjectResolver<'_, D> {
     }
 
     fn resolve_metadata_reference(&self, kind: MetadataReferenceKind, name: &str) -> Option<Name> {
+        if kind == MetadataReferenceKind::EventSubscription {
+            return self
+                .db
+                .resolve_event_subscription(self.file_id, name)
+                .map(|subscription| Name::new(subscription.name()));
+        }
+
         let config = self.db.merged_visible_configuration(self.file_id)?;
         metadata_reference_name(&config, kind, name)
     }
 
     fn metadata_reference_members(&self, kind: MetadataReferenceKind) -> Vec<Name> {
+        if kind == MetadataReferenceKind::EventSubscription {
+            return self
+                .db
+                .event_subscription_names(self.file_id)
+                .into_iter()
+                .map(|name| Name::new(&name))
+                .collect();
+        }
+
         self.db
             .merged_visible_configuration(self.file_id)
             .map(|config| metadata_reference_names(&config, kind))

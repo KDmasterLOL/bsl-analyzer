@@ -805,6 +805,109 @@ mod vfs_race_tests {
     }
 
     #[test]
+    fn resolve_event_subscription_for_file_matches_merged_visible_configuration() {
+        use base_db::{SourceDatabase, SourceRoot, BSL_SOURCE_ROOT};
+        use hir::ConfigsDatabase;
+
+        fn event_subscription_xml(name: &str, event: &str, handler: &str) -> String {
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <EventSubscription uuid="00000000-0000-0000-0000-000000000061">
+        <Properties>
+            <Name>{name}</Name>
+            <Source><Type>CatalogRef.Номенклатура</Type></Source>
+            <Event>{event}</Event>
+            <Handler>{handler}</Handler>
+        </Properties>
+    </EventSubscription>
+</MetaDataObject>"#
+            )
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "bsl_event_subscription_parity_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let main_root = root.join("src/cf");
+        let ext_root = root.join("src/cfe/X");
+        std::fs::create_dir_all(main_root.join("EventSubscriptions")).unwrap();
+        std::fs::create_dir_all(ext_root.join("EventSubscriptions")).unwrap();
+        std::fs::create_dir_all(&ext_root).unwrap();
+        std::fs::write(main_root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        std::fs::write(ext_root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        std::fs::write(
+            main_root.join("EventSubscriptions/ПередЗаписью.xml"),
+            event_subscription_xml(
+                "ПередЗаписью",
+                "BeforeWrite",
+                "CommonModule.ПодпискиНаСобытия.ПередЗаписью",
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            ext_root.join("EventSubscriptions/ПередЗаписью.xml"),
+            event_subscription_xml(
+                "ПередЗаписью",
+                "BeforeWriteExtension",
+                "CommonModule.РасширениеПодписки.ПередЗаписью",
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            ext_root.join("EventSubscriptions/ТолькоРасширение.xml"),
+            event_subscription_xml(
+                "ТолькоРасширение",
+                "AfterWrite",
+                "CommonModule.РасширениеПодписки.ТолькоРасширение",
+            ),
+        )
+        .unwrap();
+
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender);
+        state.init_empty_source_root();
+        state.analysis_host.raw_database_mut().set_all_config_paths(vec![
+            (None, main_root.clone()),
+            (Some("X".to_string()), ext_root.clone()),
+        ]);
+        state.bootstrap_metadata_substrate();
+
+        let bsl_path = ext_root.join("EventSubscriptionConsumer.bsl");
+        let bsl_vfs_path = vfs::VfsPath::new(bsl_path.to_string_lossy().as_ref());
+        let file_id = state.vfs.write().alloc_file_id(bsl_vfs_path.clone());
+        let mut file_set = vfs::file_set::FileSet::new();
+        file_set.insert(file_id, bsl_vfs_path);
+        let db = state.analysis_host.raw_database_mut();
+        db.set_source_root(BSL_SOURCE_ROOT, SourceRoot::new_local(file_set));
+        db.set_file_source_root(file_id, BSL_SOURCE_ROOT);
+        db.set_file_text(file_id, "Процедура Т() КонецПроцедуры");
+
+        let db = state.analysis_host.raw_database();
+        let per_kind = db
+            .resolve_event_subscription_for_file(file_id, "ПередЗаписью")
+            .expect("per-kind resolve finds the event subscription visible to the file");
+        let whole = db.merged_visible_configuration(file_id).expect("merged config loads");
+        let from_whole = whole
+            .find_event_subscription("ПередЗаписью")
+            .expect("merged config has the event subscription");
+
+        assert_eq!(
+            &*per_kind, from_whole,
+            "per-kind event-subscription resolve must equal the merged whole-config lookup"
+        );
+        assert_eq!(per_kind.event(), "BeforeWrite");
+        assert!(
+            db.resolve_event_subscription_for_file(file_id, "ТолькоРасширение").is_none(),
+            "extension-only event subscriptions stay invisible until merged whole-config supports them"
+        );
+        assert_eq!(db.event_subscription_names(file_id), vec!["ПередЗаписью".to_string()]);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn bootstrapped_common_module_resolves_by_name_and_by_body_file() {
         use base_db::{SourceDatabase, SourceRoot, BSL_SOURCE_ROOT};
         use bsl_metadata::traits::MdObject;

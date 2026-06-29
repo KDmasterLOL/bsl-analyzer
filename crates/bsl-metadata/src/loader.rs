@@ -752,6 +752,16 @@ pub struct DiscoveredDefinedType {
     pub main: PathBuf,
 }
 
+/// One discovered event subscription in a config root's *structure* listing: its
+/// name and the main XML path. Event subscriptions are flat loose XML files under
+/// `EventSubscriptions/`, so they get a dedicated one-file discovery struct rather
+/// than riding [`DiscoveredMdo`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredEventSubscription {
+    pub name: String,
+    pub main: PathBuf,
+}
+
 /// Walk one config root and list its defined types by structure only (name + main
 /// XML path), the defined-type counterpart of [`discover_register_structure`].
 /// Defined types are stored as loose `<name>.xml` under `DefinedTypes/` and parsed
@@ -775,6 +785,29 @@ pub fn discover_defined_type_structure(root: &Path) -> Vec<DiscoveredDefinedType
     }
     // Stable order so a structure listing built from this compares equal across
     // watch events on an unchanged filesystem (see `discover_metadata_structure`).
+    out.sort_by(|a, b| (a.name.fold_lower(), &a.main).cmp(&(b.name.fold_lower(), &b.main)));
+    out
+}
+
+/// Walk one config root and list its event subscriptions by structure only (name +
+/// main XML path), the event-subscription counterpart of
+/// [`discover_defined_type_structure`].
+pub fn discover_event_subscription_structure(root: &Path) -> Vec<DiscoveredEventSubscription> {
+    let dir = root.join("EventSubscriptions");
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut out = Vec::new();
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("xml") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+        out.push(DiscoveredEventSubscription { name: stem.to_string(), main: path });
+    }
     out.sort_by(|a, b| (a.name.fold_lower(), &a.main).cmp(&(b.name.fold_lower(), &b.main)));
     out
 }
@@ -838,6 +871,15 @@ pub fn parse_common_module_from_text(main_xml: &str) -> Option<crate::common_mod
 /// reading the text through the versioned VFS.
 pub fn parse_defined_type_from_text(main_xml: &str) -> Option<crate::defined_type::DefinedType> {
     xml_parser::parse_defined_type_xml(main_xml).ok()
+}
+
+/// Parse one event subscription from its main XML text. The event-subscription
+/// counterpart of [`parse_defined_type_from_text`]; the per-event-subscription Salsa
+/// query calls it after reading the text through the versioned VFS.
+pub fn parse_event_subscription_from_text(
+    main_xml: &str,
+) -> Option<crate::event_subscription::EventSubscription> {
+    xml_parser::parse_event_subscription_xml(main_xml).ok()
 }
 
 fn load_enums_parallel(dir: &Path) -> Vec<MetadataObject> {
@@ -1277,6 +1319,63 @@ mod tests {
 
         assert_eq!(discovered, from_load, "defined-type discovery must match the directory loader",);
         assert!(discovered.contains("ДенежнаяСумма"), "fixture sanity");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn discover_event_subscription_structure_finds_loose_xml_stably() {
+        use std::collections::BTreeSet;
+
+        let root = std::env::temp_dir().join(format!(
+            "bsl_discover_event_subscription_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let dir = root.join("EventSubscriptions");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let xml = |name: &str, event: &str| {
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <EventSubscription uuid="00000000-0000-0000-0000-000000000041">
+        <Properties>
+            <Name>{name}</Name>
+            <Source><Type>CatalogRef.Номенклатура</Type></Source>
+            <Event>{event}</Event>
+            <Handler>CommonModule.ПодпискиНаСобытия.Обработать</Handler>
+        </Properties>
+    </EventSubscription>
+</MetaDataObject>"#
+            )
+        };
+
+        std::fs::write(dir.join("ПослеЗаписи.xml"), xml("ПослеЗаписи", "AfterWrite")).unwrap();
+        std::fs::write(dir.join("ПередЗаписью.xml"), xml("ПередЗаписью", "BeforeWrite")).unwrap();
+
+        let first = discover_event_subscription_structure(&root);
+        let second = discover_event_subscription_structure(&root);
+
+        assert_eq!(first, second, "event-subscription discovery order must be stable");
+        assert!(
+            first.iter().all(|subscription| subscription.main.starts_with(&dir)),
+            "discovery must point at loose EventSubscriptions/*.xml files"
+        );
+
+        let discovered: BTreeSet<String> = first.into_iter().map(|d| d.name).collect();
+        let config = load_from_directory(&root).unwrap();
+        let from_load: BTreeSet<String> = config
+            .event_subscriptions()
+            .iter()
+            .map(|subscription| subscription.name().to_string())
+            .collect();
+
+        assert_eq!(
+            discovered, from_load,
+            "event-subscription discovery must match the directory loader"
+        );
+        assert!(discovered.contains("ПередЗаписью"), "fixture sanity");
 
         std::fs::remove_dir_all(&root).ok();
     }

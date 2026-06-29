@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use bsl_metadata::{AttributeType, Configuration, MdoType, MetadataObject, Register};
+use bsl_metadata::{
+    AttributeType, Configuration, EventSubscription, MdoType, MetadataObject, Register,
+};
 use vfs::FileId;
 
 use crate::DefDatabase;
@@ -59,6 +61,24 @@ pub trait ConfigsDatabase: DefDatabase {
         file_id: FileId,
         name: &str,
     ) -> Option<Arc<bsl_metadata::CommonModule>>;
+
+    /// Resolve the event subscription `name` visible to `file_id` at
+    /// per-event-subscription Salsa granularity: base + the file's own extension
+    /// (extension priority). Depending on this records a dependency on just that
+    /// subscription when the substrate is bootstrapped.
+    fn resolve_event_subscription(
+        &self,
+        file_id: FileId,
+        name: &str,
+    ) -> Option<Arc<EventSubscription>>;
+
+    /// Names of event subscriptions visible to `file_id`, for completion/member
+    /// enumeration. File-scoped like [`resolve_event_subscription`].
+    fn event_subscription_names(&self, file_id: FileId) -> Vec<String>;
+
+    /// Explicit project/config enumeration for graph-style consumers that need the
+    /// subscription handler metadata, not just a single hot lookup.
+    fn enumerate_event_subscriptions(&self, file_id: FileId) -> Vec<Arc<EventSubscription>>;
 
     /// Whether `file_id` belongs to a configured project (has at least one visible
     /// config root). In the workspace path this reads only the config-paths input,

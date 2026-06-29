@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use base_db::{content_revision, read_disk_text, SourceDatabase, SourceRoot, METADATA_SOURCE_ROOT};
-use ide_db::metadata::{CommonModuleEntry, DefinedTypeEntry, MdoEntry};
+use ide_db::metadata::{CommonModuleEntry, DefinedTypeEntry, EventSubscriptionEntry, MdoEntry};
 use vfs::{file_set::FileSet, FileId, Vfs, VfsPath};
 
 use crate::AnalysisHost;
@@ -30,7 +30,13 @@ pub trait VfsWrite {
 /// One config root's discovered structure listing as built during bootstrap /
 /// refresh: the root path plus its MDOs, defined types, and common modules, ready
 /// to hand to `RootDatabaseImpl::set_metadata_listing`.
-type RootStructureListing = (String, Vec<MdoEntry>, Vec<DefinedTypeEntry>, Vec<CommonModuleEntry>);
+type RootStructureListing = (
+    String,
+    Vec<MdoEntry>,
+    Vec<DefinedTypeEntry>,
+    Vec<CommonModuleEntry>,
+    Vec<EventSubscriptionEntry>,
+);
 
 impl AnalysisHost {
     /// Build the metadata substrate for every config root the database knows about.
@@ -51,6 +57,7 @@ impl AnalysisHost {
             mdos: Vec<bsl_metadata::DiscoveredMdo>,
             defined_types: Vec<bsl_metadata::DiscoveredDefinedType>,
             common_modules: Vec<bsl_metadata::DiscoveredCommonModule>,
+            event_subscriptions: Vec<bsl_metadata::DiscoveredEventSubscription>,
         }
 
         // Discover every root's structure WITHOUT the vfs lock — discovery walks
@@ -65,6 +72,9 @@ impl AnalysisHost {
                     mdos,
                     defined_types: bsl_metadata::discover_defined_type_structure(root_path),
                     common_modules: bsl_metadata::discover_common_module_structure(root_path),
+                    event_subscriptions: bsl_metadata::discover_event_subscription_structure(
+                        root_path,
+                    ),
                 }
             })
             .collect();
@@ -83,6 +93,7 @@ impl AnalysisHost {
             }
             to_read.extend(d.defined_types.iter().map(|t| t.main.clone()));
             to_read.extend(d.common_modules.iter().map(|c| c.main.clone()));
+            to_read.extend(d.event_subscriptions.iter().map(|s| s.main.clone()));
         }
         let revisions_by_path: HashMap<PathBuf, u64> = {
             use rayon::prelude::*;
@@ -163,11 +174,30 @@ impl AnalysisHost {
                         .and_then(|p| vfs.file_id(&VfsPath::new(p.to_path_buf())));
                     common_modules.push(CommonModuleEntry { name: c.name, main, module_file });
                 }
-                listings.push((d.root_string, entries, defined_types, common_modules));
+                let mut event_subscriptions = Vec::new();
+                for s in d.event_subscriptions {
+                    let Some(main) = intern_metadata_file(
+                        vfs,
+                        &s.main,
+                        &revisions_by_path,
+                        &mut metadata_file_set,
+                        &mut revisions,
+                    ) else {
+                        continue;
+                    };
+                    event_subscriptions.push(EventSubscriptionEntry { name: s.name, main });
+                }
+                listings.push((
+                    d.root_string,
+                    entries,
+                    defined_types,
+                    common_modules,
+                    event_subscriptions,
+                ));
             }
         });
 
-        let mdo_count: usize = listings.iter().map(|(_, e, _, _)| e.len()).sum();
+        let mdo_count: usize = listings.iter().map(|(_, e, _, _, _)| e.len()).sum();
         let file_count = revisions.len();
 
         let db = self.raw_database_mut();
@@ -178,8 +208,14 @@ impl AnalysisHost {
         for (fid, revision) in &revisions {
             db.set_file_revision_from_disk(*fid, *revision);
         }
-        for (root, entries, defined_types, common_modules) in listings {
-            db.set_metadata_listing(&root, entries, defined_types, common_modules);
+        for (root, entries, defined_types, common_modules, event_subscriptions) in listings {
+            db.set_metadata_listing(
+                &root,
+                entries,
+                defined_types,
+                common_modules,
+                event_subscriptions,
+            );
         }
 
         tracing::info!(
@@ -304,11 +340,26 @@ impl AnalysisHost {
                         .and_then(|p| vfs.file_id(&VfsPath::new(p.to_path_buf())));
                     common_modules.push(CommonModuleEntry { name: d.name, main, module_file });
                 }
+                let mut event_subscriptions = Vec::new();
+                for d in bsl_metadata::discover_event_subscription_structure(root) {
+                    let Some(main) = enroll_refresh(
+                        vfs,
+                        &d.main,
+                        &changed_set,
+                        &mut metadata_file_set,
+                        &mut new_file_ids,
+                        &mut revisions,
+                    ) else {
+                        continue;
+                    };
+                    event_subscriptions.push(EventSubscriptionEntry { name: d.name, main });
+                }
                 listings.push((
                     root.to_string_lossy().to_string(),
                     entries,
                     defined_types,
                     common_modules,
+                    event_subscriptions,
                 ));
             }
         });
@@ -329,17 +380,24 @@ impl AnalysisHost {
             db.set_file_revision_from_disk(*fid, *revision);
             changed = true;
         }
-        for (root, entries, defined_types, common_modules) in listings {
+        for (root, entries, defined_types, common_modules, event_subscriptions) in listings {
             let structure_changed = match db.metadata_listing(&root) {
                 Some(input) => {
                     *input.entries(db) != entries
                         || *input.defined_types(db) != defined_types
                         || *input.common_modules(db) != common_modules
+                        || *input.event_subscriptions(db) != event_subscriptions
                 }
                 None => true,
             };
             if structure_changed {
-                db.set_metadata_listing(&root, entries, defined_types, common_modules);
+                db.set_metadata_listing(
+                    &root,
+                    entries,
+                    defined_types,
+                    common_modules,
+                    event_subscriptions,
+                );
                 changed = true;
             }
         }

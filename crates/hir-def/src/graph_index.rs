@@ -1153,18 +1153,16 @@ pub fn project_workspace_subscription_edges<DB: ConfigsDatabase>(
     // Collect (subscription, handler module, handler method) deterministically so the
     // shared canonicalization sees a load-order-independent first-seen spelling.
     let mut subs: Vec<(String, crate::name::Name, crate::name::Name)> = Vec::new();
-    for visible in db.configurations(representative) {
-        for sub in visible.configuration.event_subscriptions() {
-            let Some(handler) = sub.parse_handler() else { continue };
-            if handler.method_name.is_empty() {
-                continue;
-            }
-            subs.push((
-                sub.name().to_string(),
-                crate::name::Name::new(&handler.module_name),
-                crate::name::Name::new(&handler.method_name),
-            ));
+    for sub in db.enumerate_event_subscriptions(representative) {
+        let Some(handler) = sub.parse_handler() else { continue };
+        if handler.method_name.is_empty() {
+            continue;
         }
+        subs.push((
+            sub.name().to_string(),
+            crate::name::Name::new(&handler.module_name),
+            crate::name::Name::new(&handler.method_name),
+        ));
     }
     subs.sort();
     subs.dedup();

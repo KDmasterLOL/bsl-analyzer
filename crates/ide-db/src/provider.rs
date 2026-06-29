@@ -102,6 +102,42 @@ pub trait AnalysisProvider {
             .map(Arc::new)
     }
 
+    /// The event subscription `name` visible to `file_id`. The default scans the
+    /// provider's visible configurations; the salsa-backed provider overrides it
+    /// with the per-event-subscription accessor.
+    fn resolve_event_subscription(
+        &self,
+        file_id: FileId,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::EventSubscription>> {
+        self.visible_configurations(file_id)
+            .into_iter()
+            .find_map(|visible| visible.config.configuration.find_event_subscription(name).cloned())
+            .map(Arc::new)
+    }
+
+    /// Main-configuration EventSubscription enumeration for diagnostics that scan
+    /// declared subscriptions while preserving the existing main-only behavior.
+    fn main_event_subscriptions(
+        &self,
+        file_id: FileId,
+    ) -> Vec<Arc<bsl_metadata::EventSubscription>> {
+        self.visible_configurations(file_id)
+            .into_iter()
+            .find(|visible| visible.config.name.is_none())
+            .map(|visible| {
+                visible
+                    .config
+                    .configuration
+                    .event_subscriptions()
+                    .iter()
+                    .cloned()
+                    .map(Arc::new)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// The `Ext/Module.bsl` body file id(s) of the common module `name` visible to
     /// `file_id`, for diagnostics that validate the module body (handler method
     /// existence/export, required parameters). The default resolves bodies by
