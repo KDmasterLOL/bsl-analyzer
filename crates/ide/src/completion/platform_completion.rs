@@ -386,20 +386,21 @@ fn find_receiver_expr(dot_token: &SyntaxToken) -> Option<SyntaxNode> {
     None
 }
 
+/// A common-module name qualifies only when the whole receiver is a *bare*
+/// identifier. A call/field/index chain such as `Module.Method().` or `Foo.Bar`
+/// shares the same leading ident token, but its value is the chain's result, not
+/// the module — those must resolve by type, so this returns `None` for them.
 fn extract_receiver_ident(node: &SyntaxNode) -> Option<String> {
-    match node.kind() {
-        SyntaxKind::IDENT | SyntaxKind::EXPR => {
-            let token = node.first_token()?;
-            if token.kind() == SyntaxKind::IDENT {
-                return Some(token.text().to_string());
-            }
-            None
-        }
-        _ => {
-            let token = node.first_token().filter(|t| t.kind() == SyntaxKind::IDENT)?;
-            Some(token.text().to_string())
+    let mut ident: Option<String> = None;
+    for element in node.descendants_with_tokens() {
+        let Some(token) = element.as_token() else { continue };
+        match token.kind() {
+            SyntaxKind::WHITESPACE => continue,
+            SyntaxKind::IDENT if ident.is_none() => ident = Some(token.text().to_string()),
+            _ => return None,
         }
     }
+    ident
 }
 
 fn complete_common_module_methods(
