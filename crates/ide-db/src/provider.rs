@@ -116,6 +116,16 @@ pub trait AnalysisProvider {
             .map(Arc::new)
     }
 
+    /// The role `name` visible to `file_id`. The default scans the provider's
+    /// visible configurations; the salsa-backed provider overrides it with the
+    /// typed substrate.
+    fn resolve_role(&self, file_id: FileId, name: &str) -> Option<Arc<bsl_metadata::Role>> {
+        self.visible_configurations(file_id)
+            .into_iter()
+            .find_map(|visible| visible.config.configuration.find_role(name).cloned())
+            .map(Arc::new)
+    }
+
     /// Main-configuration EventSubscription enumeration for diagnostics that scan
     /// declared subscriptions while preserving the existing main-only behavior.
     fn main_event_subscriptions(
@@ -130,6 +140,57 @@ pub trait AnalysisProvider {
                     .config
                     .configuration
                     .event_subscriptions()
+                    .iter()
+                    .cloned()
+                    .map(Arc::new)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Main-configuration Role enumeration for diagnostics that scan declared
+    /// roles while preserving the existing main-only behavior. The method name
+    /// signals main-only semantics: extensions do not merge roles today, so this
+    /// is intentionally restricted to the main configuration rather than the
+    /// file's full visible set.
+    fn main_roles(&self, file_id: FileId) -> Vec<Arc<bsl_metadata::Role>> {
+        self.visible_configurations(file_id)
+            .into_iter()
+            .find(|visible| visible.config.name.is_none())
+            .map(|visible| {
+                visible.config.configuration.roles().iter().cloned().map(Arc::new).collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The scheduled job `name` visible to `file_id`. The default scans the
+    /// provider's visible configurations; the salsa-backed provider overrides it
+    /// with the per-scheduled-job accessor.
+    fn resolve_scheduled_job(
+        &self,
+        file_id: FileId,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::ScheduledJob>> {
+        self.visible_configurations(file_id)
+            .into_iter()
+            .find_map(|visible| visible.config.configuration.find_scheduled_job(name).cloned())
+            .map(Arc::new)
+    }
+
+    /// Main-configuration ScheduledJob enumeration for diagnostics that scan
+    /// declared jobs while preserving the existing main-only behavior. The
+    /// method name signals main-only semantics: extensions do not merge
+    /// scheduled jobs today, so this is intentionally restricted to the main
+    /// configuration rather than the file's full visible set.
+    fn main_scheduled_jobs(&self, file_id: FileId) -> Vec<Arc<bsl_metadata::ScheduledJob>> {
+        self.visible_configurations(file_id)
+            .into_iter()
+            .find(|visible| visible.config.name.is_none())
+            .map(|visible| {
+                visible
+                    .config
+                    .configuration
+                    .scheduled_jobs()
                     .iter()
                     .cloned()
                     .map(Arc::new)

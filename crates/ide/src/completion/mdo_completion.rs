@@ -375,13 +375,18 @@ fn complete_metadata_reference_objects<DB: RootDatabase>(
     file_id: vfs::FileId,
     kind: MetadataReferenceKind,
 ) -> Vec<CompletionItem> {
-    let names = if kind == MetadataReferenceKind::EventSubscription {
-        db.event_subscription_names(file_id)
-    } else {
-        let Some(config) = db.merged_visible_configuration(file_id) else {
-            return Vec::new();
-        };
-        metadata_reference_names(&config, kind)
+    let names = match kind {
+        MetadataReferenceKind::Role => db.role_names(file_id),
+        MetadataReferenceKind::EventSubscription => db.event_subscription_names(file_id),
+        MetadataReferenceKind::ScheduledJob => db.scheduled_job_names(file_id),
+        MetadataReferenceKind::HttpService => db.http_service_names(file_id),
+        MetadataReferenceKind::WebService => db.web_service_names(file_id),
+        _ => {
+            let Some(config) = db.merged_visible_configuration(file_id) else {
+                return Vec::new();
+            };
+            metadata_reference_names(&config, kind)
+        }
     };
     names
         .into_iter()
@@ -403,13 +408,9 @@ fn metadata_reference_names(
     kind: MetadataReferenceKind,
 ) -> Vec<String> {
     match kind {
-        MetadataReferenceKind::Role => {
-            config.roles().iter().map(|item| item.name().to_string()).collect()
-        }
+        MetadataReferenceKind::Role => Vec::new(),
         MetadataReferenceKind::EventSubscription => Vec::new(),
-        MetadataReferenceKind::ScheduledJob => {
-            config.scheduled_jobs().iter().map(|item| item.name().to_string()).collect()
-        }
+        MetadataReferenceKind::ScheduledJob => Vec::new(),
         MetadataReferenceKind::HttpService => {
             config.http_services().iter().map(|item| item.name().to_string()).collect()
         }

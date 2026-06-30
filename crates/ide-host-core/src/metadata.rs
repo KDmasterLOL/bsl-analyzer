@@ -13,7 +13,11 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use base_db::{content_revision, read_disk_text, SourceDatabase, SourceRoot, METADATA_SOURCE_ROOT};
-use ide_db::metadata::{CommonModuleEntry, DefinedTypeEntry, EventSubscriptionEntry, MdoEntry};
+use ide_db::metadata::{
+    CommonModuleEntry, DefinedTypeEntry, EventSubscriptionEntry, HTTPServiceEntry,
+    IntegrationServiceEntry, MdoEntry, MetadataListingData, RoleEntry, ScheduledJobEntry,
+    WebServiceEntry,
+};
 use vfs::{file_set::FileSet, FileId, Vfs, VfsPath};
 
 use crate::AnalysisHost;
@@ -27,16 +31,10 @@ pub trait VfsWrite {
     fn with_write<R>(&self, f: impl FnOnce(&mut Vfs) -> R) -> R;
 }
 
-/// One config root's discovered structure listing as built during bootstrap /
-/// refresh: the root path plus its MDOs, defined types, and common modules, ready
-/// to hand to `RootDatabaseImpl::set_metadata_listing`.
-type RootStructureListing = (
-    String,
-    Vec<MdoEntry>,
-    Vec<DefinedTypeEntry>,
-    Vec<CommonModuleEntry>,
-    Vec<EventSubscriptionEntry>,
-);
+struct RootStructureListing {
+    root: String,
+    data: MetadataListingData,
+}
 
 impl AnalysisHost {
     /// Build the metadata substrate for every config root the database knows about.
@@ -58,6 +56,11 @@ impl AnalysisHost {
             defined_types: Vec<bsl_metadata::DiscoveredDefinedType>,
             common_modules: Vec<bsl_metadata::DiscoveredCommonModule>,
             event_subscriptions: Vec<bsl_metadata::DiscoveredEventSubscription>,
+            scheduled_jobs: Vec<bsl_metadata::DiscoveredScheduledJob>,
+            roles: Vec<bsl_metadata::DiscoveredRole>,
+            http_services: Vec<bsl_metadata::DiscoveredHTTPService>,
+            web_services: Vec<bsl_metadata::DiscoveredWebService>,
+            integration_services: Vec<bsl_metadata::DiscoveredIntegrationService>,
         }
 
         // Discover every root's structure WITHOUT the vfs lock — discovery walks
@@ -73,6 +76,13 @@ impl AnalysisHost {
                     defined_types: bsl_metadata::discover_defined_type_structure(root_path),
                     common_modules: bsl_metadata::discover_common_module_structure(root_path),
                     event_subscriptions: bsl_metadata::discover_event_subscription_structure(
+                        root_path,
+                    ),
+                    scheduled_jobs: bsl_metadata::discover_scheduled_job_structure(root_path),
+                    roles: bsl_metadata::discover_role_structure(root_path),
+                    http_services: bsl_metadata::discover_http_service_structure(root_path),
+                    web_services: bsl_metadata::discover_web_service_structure(root_path),
+                    integration_services: bsl_metadata::discover_integration_service_structure(
                         root_path,
                     ),
                 }
@@ -94,6 +104,16 @@ impl AnalysisHost {
             to_read.extend(d.defined_types.iter().map(|t| t.main.clone()));
             to_read.extend(d.common_modules.iter().map(|c| c.main.clone()));
             to_read.extend(d.event_subscriptions.iter().map(|s| s.main.clone()));
+            to_read.extend(d.scheduled_jobs.iter().map(|j| j.main.clone()));
+            to_read.extend(d.http_services.iter().map(|s| s.main.clone()));
+            to_read.extend(d.web_services.iter().map(|s| s.main.clone()));
+            to_read.extend(d.integration_services.iter().map(|s| s.main.clone()));
+            for role in &d.roles {
+                to_read.push(role.main.clone());
+                if let Some(rights) = &role.rights {
+                    to_read.push(rights.clone());
+                }
+            }
         }
         let revisions_by_path: HashMap<PathBuf, u64> = {
             use rayon::prelude::*;
@@ -187,17 +207,114 @@ impl AnalysisHost {
                     };
                     event_subscriptions.push(EventSubscriptionEntry { name: s.name, main });
                 }
-                listings.push((
-                    d.root_string,
-                    entries,
-                    defined_types,
-                    common_modules,
-                    event_subscriptions,
-                ));
+                let mut scheduled_jobs = Vec::new();
+                for j in d.scheduled_jobs {
+                    let Some(main) = intern_metadata_file(
+                        vfs,
+                        &j.main,
+                        &revisions_by_path,
+                        &mut metadata_file_set,
+                        &mut revisions,
+                    ) else {
+                        continue;
+                    };
+                    scheduled_jobs.push(ScheduledJobEntry { name: j.name, main });
+                }
+                let mut roles = Vec::new();
+                for role in d.roles {
+                    let Some(main) = intern_metadata_file(
+                        vfs,
+                        &role.main,
+                        &revisions_by_path,
+                        &mut metadata_file_set,
+                        &mut revisions,
+                    ) else {
+                        continue;
+                    };
+                    let rights = role.rights.as_ref().and_then(|p| {
+                        intern_metadata_file(
+                            vfs,
+                            p,
+                            &revisions_by_path,
+                            &mut metadata_file_set,
+                            &mut revisions,
+                        )
+                    });
+                    roles.push(RoleEntry { name: role.name, main, rights });
+                }
+                let mut http_services = Vec::new();
+                for service in d.http_services {
+                    let Some(main) = intern_metadata_file(
+                        vfs,
+                        &service.main,
+                        &revisions_by_path,
+                        &mut metadata_file_set,
+                        &mut revisions,
+                    ) else {
+                        continue;
+                    };
+                    let module_file = service
+                        .module_file
+                        .as_ref()
+                        .and_then(|p| vfs.file_id(&VfsPath::new(p.to_path_buf())));
+                    http_services.push(HTTPServiceEntry { name: service.name, main, module_file });
+                }
+                let mut web_services = Vec::new();
+                for service in d.web_services {
+                    let Some(main) = intern_metadata_file(
+                        vfs,
+                        &service.main,
+                        &revisions_by_path,
+                        &mut metadata_file_set,
+                        &mut revisions,
+                    ) else {
+                        continue;
+                    };
+                    let module_file = service
+                        .module_file
+                        .as_ref()
+                        .and_then(|p| vfs.file_id(&VfsPath::new(p.to_path_buf())));
+                    web_services.push(WebServiceEntry { name: service.name, main, module_file });
+                }
+                let mut integration_services = Vec::new();
+                for service in d.integration_services {
+                    let Some(main) = intern_metadata_file(
+                        vfs,
+                        &service.main,
+                        &revisions_by_path,
+                        &mut metadata_file_set,
+                        &mut revisions,
+                    ) else {
+                        continue;
+                    };
+                    let module_file = service
+                        .module_file
+                        .as_ref()
+                        .and_then(|p| vfs.file_id(&VfsPath::new(p.to_path_buf())));
+                    integration_services.push(IntegrationServiceEntry {
+                        name: service.name,
+                        main,
+                        module_file,
+                    });
+                }
+                listings.push(RootStructureListing {
+                    root: d.root_string,
+                    data: MetadataListingData {
+                        entries,
+                        defined_types,
+                        common_modules,
+                        event_subscriptions,
+                        scheduled_jobs,
+                        roles,
+                        http_services,
+                        web_services,
+                        integration_services,
+                    },
+                });
             }
         });
 
-        let mdo_count: usize = listings.iter().map(|(_, e, _, _, _)| e.len()).sum();
+        let mdo_count: usize = listings.iter().map(|listing| listing.data.entries.len()).sum();
         let file_count = revisions.len();
 
         let db = self.raw_database_mut();
@@ -208,14 +325,8 @@ impl AnalysisHost {
         for (fid, revision) in &revisions {
             db.set_file_revision_from_disk(*fid, *revision);
         }
-        for (root, entries, defined_types, common_modules, event_subscriptions) in listings {
-            db.set_metadata_listing(
-                &root,
-                entries,
-                defined_types,
-                common_modules,
-                event_subscriptions,
-            );
+        for listing in listings {
+            db.set_metadata_listing(&listing.root, listing.data);
         }
 
         tracing::info!(
@@ -354,13 +465,116 @@ impl AnalysisHost {
                     };
                     event_subscriptions.push(EventSubscriptionEntry { name: d.name, main });
                 }
-                listings.push((
-                    root.to_string_lossy().to_string(),
-                    entries,
-                    defined_types,
-                    common_modules,
-                    event_subscriptions,
-                ));
+                let mut scheduled_jobs = Vec::new();
+                for d in bsl_metadata::discover_scheduled_job_structure(root) {
+                    let Some(main) = enroll_refresh(
+                        vfs,
+                        &d.main,
+                        &changed_set,
+                        &mut metadata_file_set,
+                        &mut new_file_ids,
+                        &mut revisions,
+                    ) else {
+                        continue;
+                    };
+                    scheduled_jobs.push(ScheduledJobEntry { name: d.name, main });
+                }
+                let mut roles = Vec::new();
+                for d in bsl_metadata::discover_role_structure(root) {
+                    let Some(main) = enroll_refresh(
+                        vfs,
+                        &d.main,
+                        &changed_set,
+                        &mut metadata_file_set,
+                        &mut new_file_ids,
+                        &mut revisions,
+                    ) else {
+                        continue;
+                    };
+                    let rights = d.rights.as_ref().and_then(|p| {
+                        enroll_refresh(
+                            vfs,
+                            p,
+                            &changed_set,
+                            &mut metadata_file_set,
+                            &mut new_file_ids,
+                            &mut revisions,
+                        )
+                    });
+                    roles.push(RoleEntry { name: d.name, main, rights });
+                }
+                let mut http_services = Vec::new();
+                for d in bsl_metadata::discover_http_service_structure(root) {
+                    let Some(main) = enroll_refresh(
+                        vfs,
+                        &d.main,
+                        &changed_set,
+                        &mut metadata_file_set,
+                        &mut new_file_ids,
+                        &mut revisions,
+                    ) else {
+                        continue;
+                    };
+                    let module_file = d
+                        .module_file
+                        .as_ref()
+                        .and_then(|p| vfs.file_id(&VfsPath::new(p.to_path_buf())));
+                    http_services.push(HTTPServiceEntry { name: d.name, main, module_file });
+                }
+                let mut web_services = Vec::new();
+                for d in bsl_metadata::discover_web_service_structure(root) {
+                    let Some(main) = enroll_refresh(
+                        vfs,
+                        &d.main,
+                        &changed_set,
+                        &mut metadata_file_set,
+                        &mut new_file_ids,
+                        &mut revisions,
+                    ) else {
+                        continue;
+                    };
+                    let module_file = d
+                        .module_file
+                        .as_ref()
+                        .and_then(|p| vfs.file_id(&VfsPath::new(p.to_path_buf())));
+                    web_services.push(WebServiceEntry { name: d.name, main, module_file });
+                }
+                let mut integration_services = Vec::new();
+                for d in bsl_metadata::discover_integration_service_structure(root) {
+                    let Some(main) = enroll_refresh(
+                        vfs,
+                        &d.main,
+                        &changed_set,
+                        &mut metadata_file_set,
+                        &mut new_file_ids,
+                        &mut revisions,
+                    ) else {
+                        continue;
+                    };
+                    let module_file = d
+                        .module_file
+                        .as_ref()
+                        .and_then(|p| vfs.file_id(&VfsPath::new(p.to_path_buf())));
+                    integration_services.push(IntegrationServiceEntry {
+                        name: d.name,
+                        main,
+                        module_file,
+                    });
+                }
+                listings.push(RootStructureListing {
+                    root: root.to_string_lossy().to_string(),
+                    data: MetadataListingData {
+                        entries,
+                        defined_types,
+                        common_modules,
+                        event_subscriptions,
+                        scheduled_jobs,
+                        roles,
+                        http_services,
+                        web_services,
+                        integration_services,
+                    },
+                });
             }
         });
 
@@ -380,24 +594,24 @@ impl AnalysisHost {
             db.set_file_revision_from_disk(*fid, *revision);
             changed = true;
         }
-        for (root, entries, defined_types, common_modules, event_subscriptions) in listings {
-            let structure_changed = match db.metadata_listing(&root) {
+        for listing in listings {
+            let data = &listing.data;
+            let structure_changed = match db.metadata_listing(&listing.root) {
                 Some(input) => {
-                    *input.entries(db) != entries
-                        || *input.defined_types(db) != defined_types
-                        || *input.common_modules(db) != common_modules
-                        || *input.event_subscriptions(db) != event_subscriptions
+                    input.entries(db).as_ref() != &data.entries
+                        || input.defined_types(db).as_ref() != &data.defined_types
+                        || input.common_modules(db).as_ref() != &data.common_modules
+                        || input.event_subscriptions(db).as_ref() != &data.event_subscriptions
+                        || input.scheduled_jobs(db).as_ref() != &data.scheduled_jobs
+                        || input.roles(db).as_ref() != &data.roles
+                        || input.http_services(db).as_ref() != &data.http_services
+                        || input.web_services(db).as_ref() != &data.web_services
+                        || input.integration_services(db).as_ref() != &data.integration_services
                 }
                 None => true,
             };
             if structure_changed {
-                db.set_metadata_listing(
-                    &root,
-                    entries,
-                    defined_types,
-                    common_modules,
-                    event_subscriptions,
-                );
+                db.set_metadata_listing(&listing.root, listing.data);
                 changed = true;
             }
         }
@@ -556,6 +770,119 @@ mod tests {
         std::fs::remove_file(catalogs.join("Товары.xml")).unwrap();
         assert!(host.refresh_metadata_substrate(&vfs, &[catalogs.join("Товары.xml")]));
         assert!(resolve(&host, "Товары").is_none(), "removed catalog resolves to None");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn refresh_role_rights_is_incremental_and_tracks_structure_on_bare_host() {
+        use base_db::{SourceDatabase, SourceRoot, BSL_SOURCE_ROOT};
+        use ide_db::metadata::{resolve_role, RoleEntry};
+
+        fn role_xml(name: &str) -> String {
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Role uuid="00000000-0000-0000-0000-000000000081">
+        <Properties>
+            <Name>{name}</Name>
+            <Synonym/>
+            <Comment/>
+        </Properties>
+    </Role>
+</MetaDataObject>"#
+            )
+        }
+
+        fn rights_xml(set_for_new_objects: bool, object_name: &str, condition: &str) -> String {
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<Rights xmlns="http://v8.1c.ru/8.2/roles" version="2.10">
+    <setForNewObjects>{set_for_new_objects}</setForNewObjects>
+    <setForAttributesByDefault>false</setForAttributesByDefault>
+    <independentRightsOfChildObjects>false</independentRightsOfChildObjects>
+    <object>
+        <name>{object_name}</name>
+        <right>
+            <name>Read</name>
+            <value>true</value>
+            <restrictionByCondition>
+                <condition>{condition}</condition>
+            </restrictionByCondition>
+        </right>
+    </object>
+</Rights>"#
+            )
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "ihc_role_refresh_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let roles = root.join("Roles");
+        std::fs::create_dir_all(roles.join("ТестоваяРоль/Ext")).unwrap();
+        std::fs::write(roles.join("ТестоваяРоль.xml"), role_xml("ТестоваяРоль")).unwrap();
+        let rights_path = roles.join("ТестоваяРоль/Ext/Rights.xml");
+        std::fs::write(
+            &rights_path,
+            rights_xml(
+                false,
+                "Catalog.Контрагенты",
+                "Контрагенты.Ссылка В (ВЫБРАТЬ Ссылка ИЗ Справочник.Организации)",
+            ),
+        )
+        .unwrap();
+        let _: Option<RoleEntry> = None;
+
+        let mut host = AnalysisHost::default();
+        host.raw_database_mut().set_all_config_paths(vec![(None, root.clone())]);
+        let vfs = TestVfs(RefCell::new(Vfs::default()));
+        host.bootstrap_metadata_substrate(&vfs);
+
+        let consumer_path = root.join("RoleConsumer.bsl");
+        let consumer_vfs_path = VfsPath::new(consumer_path.to_string_lossy().as_ref());
+        let consumer_file = vfs.with_write(|vfs| vfs.alloc_file_id(consumer_vfs_path.clone()));
+        let mut file_set = FileSet::new();
+        file_set.insert(consumer_file, consumer_vfs_path);
+        let db = host.raw_database_mut();
+        db.set_source_root(BSL_SOURCE_ROOT, SourceRoot::new_local(file_set));
+        db.set_file_source_root(consumer_file, BSL_SOURCE_ROOT);
+        db.set_file_text(consumer_file, "Процедура Т() КонецПроцедуры");
+
+        let db = host.raw_database();
+        let root_key = root.to_string_lossy().to_string();
+        let listing = db.metadata_listing(&root_key).expect("listing set for the config root");
+        let resolved_before = resolve_role(db, listing, "ТестоваяРоль".to_string())
+            .expect("role resolves through the bootstrapped listing");
+        assert!(!resolved_before.data().set_for_new_objects());
+        assert_eq!(resolved_before.data().objects().len(), 1);
+        assert_eq!(resolved_before.data().objects()[0].name, "Контрагенты");
+
+        std::fs::write(
+            &rights_path,
+            rights_xml(
+                true,
+                "Catalog.Контрагенты",
+                "Контрагенты.Ссылка В (ВЫБРАТЬ Ссылка ИЗ Справочник.ФизическиеЛица)",
+            ),
+        )
+        .unwrap();
+        assert!(host.refresh_metadata_substrate(&vfs, std::slice::from_ref(&rights_path)));
+
+        let resolved_after = resolve_role(
+            host.raw_database(),
+            host.raw_database()
+                .metadata_listing(&root_key)
+                .expect("listing stays available after refresh"),
+            "ТестоваяРоль".to_string(),
+        )
+        .expect("role re-resolves after the rights edit");
+        assert!(resolved_after.data().set_for_new_objects());
+        assert_eq!(
+            resolved_after.data().objects()[0].restrictions,
+            vec!["Контрагенты.Ссылка В (ВЫБРАТЬ Ссылка ИЗ Справочник.ФизическиеЛица)".to_string()]
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }

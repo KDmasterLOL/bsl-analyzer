@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use bsl_metadata::{
-    AttributeType, Configuration, EventSubscription, MdoType, MetadataObject, Register,
+    AttributeType, Configuration, EventSubscription, HTTPService, MdoType, MetadataObject,
+    Register, Role, ScheduledJob, WebService,
 };
 use vfs::FileId;
 
@@ -79,6 +80,50 @@ pub trait ConfigsDatabase: DefDatabase {
     /// Explicit project/config enumeration for graph-style consumers that need the
     /// subscription handler metadata, not just a single hot lookup.
     fn enumerate_event_subscriptions(&self, file_id: FileId) -> Vec<Arc<EventSubscription>>;
+
+    /// Resolve the role `name` visible to `file_id` at per-role Salsa granularity.
+    /// This follows the same main-listing single-name parity as [`role_names`]:
+    /// a single-name lookup resolves against the roles recorded for the file's
+    /// main listing, while graph-style callers that need every root should use
+    /// [`enumerate_roles`].
+    fn resolve_role(&self, file_id: FileId, name: &str) -> Option<Arc<Role>>;
+
+    /// Names of roles visible to `file_id`, for completion/member enumeration.
+    /// File-scoped like [`resolve_role`], and likewise tied to the main listing.
+    fn role_names(&self, file_id: FileId) -> Vec<String>;
+
+    /// Explicit project/config enumeration for graph-style consumers that need
+    /// every listed role object, not just main-listing names.
+    fn enumerate_roles(&self, file_id: FileId) -> Vec<Arc<Role>>;
+
+    /// Resolve the scheduled job `name` visible to `file_id` at per-scheduled-job
+    /// Salsa granularity. File-scoped like [`resolve_event_subscription`], but
+    /// Wave 2b resolves from the main listing only: `Configuration`'s extension
+    /// overlay does not merge scheduled jobs today, so the bootstrapped path
+    /// intentionally matches the merged whole-config lookup by ignoring the
+    /// file's own extension root for the per-name resolution. The scheduled-job
+    /// counterpart of [`resolve_event_subscription`].
+    fn resolve_scheduled_job(&self, file_id: FileId, name: &str) -> Option<Arc<ScheduledJob>>;
+
+    /// Names of scheduled jobs visible to `file_id`, for completion/member
+    /// enumeration. File-scoped like [`resolve_scheduled_job`].
+    fn scheduled_job_names(&self, file_id: FileId) -> Vec<String>;
+
+    /// Resolve the HTTP service `name` visible to `file_id` at per-service Salsa
+    /// granularity. Wave 2d keeps main-listing parity with the current whole-config
+    /// service surface.
+    fn resolve_http_service(&self, file_id: FileId, name: &str) -> Option<Arc<HTTPService>>;
+
+    /// Names of HTTP services visible to `file_id`, for completion/member enumeration.
+    fn http_service_names(&self, file_id: FileId) -> Vec<String>;
+
+    /// Resolve the Web service `name` visible to `file_id` at per-service Salsa
+    /// granularity. Wave 2d keeps main-listing parity with the current whole-config
+    /// service surface.
+    fn resolve_web_service(&self, file_id: FileId, name: &str) -> Option<Arc<WebService>>;
+
+    /// Names of Web services visible to `file_id`, for completion/member enumeration.
+    fn web_service_names(&self, file_id: FileId) -> Vec<String>;
 
     /// Whether `file_id` belongs to a configured project (has at least one visible
     /// config root). In the workspace path this reads only the config-paths input,

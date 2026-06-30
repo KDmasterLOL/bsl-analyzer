@@ -44,11 +44,16 @@ pub use integration_service::{
 };
 pub use loader::{
     discover_common_module_structure, discover_defined_type_structure,
-    discover_event_subscription_structure, discover_metadata_structure,
-    discover_register_structure, load_from_directory, parse_common_module_from_text,
-    parse_defined_type_from_text, parse_event_subscription_from_text,
-    parse_metadata_object_from_texts, parse_register_from_text, DiscoveredCommonModule,
-    DiscoveredDefinedType, DiscoveredEventSubscription, DiscoveredMdo,
+    discover_event_subscription_structure, discover_http_service_structure,
+    discover_integration_service_structure, discover_metadata_structure,
+    discover_register_structure, discover_role_structure, discover_scheduled_job_structure,
+    discover_web_service_structure, load_from_directory, parse_common_module_from_text,
+    parse_defined_type_from_text, parse_event_subscription_from_text, parse_http_service_from_text,
+    parse_integration_service_from_text, parse_metadata_object_from_texts,
+    parse_register_from_text, parse_role_from_texts, parse_scheduled_job_from_text,
+    parse_web_service_from_text, DiscoveredCommonModule, DiscoveredDefinedType,
+    DiscoveredEventSubscription, DiscoveredHTTPService, DiscoveredIntegrationService,
+    DiscoveredMdo, DiscoveredRole, DiscoveredScheduledJob, DiscoveredWebService,
 };
 pub use metadata_object::{
     is_standard_attribute_name, Attribute, AttributeType, MdoType, MetadataObject, Name,

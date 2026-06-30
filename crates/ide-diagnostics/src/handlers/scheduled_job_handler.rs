@@ -31,16 +31,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    let configuration = match ctx.main_configuration() {
-        Some(config) => config,
-        None => return Vec::new(),
-    };
-
     let mut diagnostics = Vec::new();
     let mut handler_usage: FxHashMap<String, Vec<String>> = FxHashMap::default();
 
-    for job in configuration.scheduled_jobs() {
-        check_scheduled_job(ctx, job, code, &mut diagnostics, &mut handler_usage);
+    for job in ctx.main_scheduled_jobs() {
+        check_scheduled_job(ctx, &job, code, &mut diagnostics, &mut handler_usage);
     }
 
     check_duplicate_handlers(ctx, &handler_usage, code, &mut diagnostics);
@@ -409,6 +404,39 @@ mod tests {
             ScheduledJobHandler @ 1:1..1:10
               message: Укажите существующий обработчик вместо несуществующего "ПервыйОбщийМодуль.НесуществующийМетод" у регламентного задания "РегламентноеЗаданиеНесуществующийМетод"
               severity: Critical"#]].assert_eq(&format_diags(&file_content, &diagnostics));
+    }
+
+    #[test]
+    fn test_scheduled_job_handler_uses_main_scheduled_jobs_surface() {
+        let fixtures_dir =
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer");
+
+        let mut db = RootDatabaseImpl::new();
+
+        let vfs_path = VfsPath::new(format!("{}/Ext/SessionModule.bsl", fixtures_dir));
+
+        let mut file_set = FileSet::default();
+        let file_id = FileId(0);
+        file_set.insert(file_id, vfs_path.clone());
+
+        let source_root_id = SourceRootId(0);
+        let source_root = SourceRoot::new_local(file_set);
+
+        db.set_source_root(source_root_id, source_root);
+        db.set_file_source_root(file_id, source_root_id);
+        db.set_file_text(file_id, "Процедура Тест()\nКонецПроцедуры");
+
+        let provider = ide_db::SalsaProvider::new(&db, None);
+        let config = DiagnosticsConfig::default();
+        let ctx = DiagnosticsContext::new(&config, file_id, &provider);
+
+        let job_names: Vec<_> =
+            ctx.main_scheduled_jobs().into_iter().map(|job| job.name().to_string()).collect();
+
+        assert!(
+            job_names.contains(&"РегламентноеЗадание1".to_string()),
+            "main_scheduled_jobs must enumerate scheduled jobs from the main config"
+        );
     }
 
     #[test]

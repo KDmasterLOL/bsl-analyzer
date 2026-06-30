@@ -908,6 +908,348 @@ mod vfs_race_tests {
     }
 
     #[test]
+    fn resolve_scheduled_job_for_file_matches_merged_visible_configuration() {
+        use base_db::{SourceDatabase, SourceRoot, BSL_SOURCE_ROOT};
+        use hir::ConfigsDatabase;
+
+        fn scheduled_job_xml(name: &str, method_name: &str) -> String {
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <ScheduledJob uuid="00000000-0000-0000-0000-000000000073">
+        <Properties>
+            <Name>{name}</Name>
+            <MethodName>{method_name}</MethodName>
+            <Use>true</Use>
+            <Predefined>false</Predefined>
+        </Properties>
+    </ScheduledJob>
+</MetaDataObject>"#
+            )
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "bsl_scheduled_job_parity_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let main_root = root.join("src/cf");
+        let ext_root = root.join("src/cfe/X");
+        std::fs::create_dir_all(main_root.join("ScheduledJobs")).unwrap();
+        std::fs::create_dir_all(ext_root.join("ScheduledJobs")).unwrap();
+        std::fs::create_dir_all(&ext_root).unwrap();
+        std::fs::write(main_root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        std::fs::write(ext_root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        std::fs::write(
+            main_root.join("ScheduledJobs/РегламентноеЗадание1.xml"),
+            scheduled_job_xml(
+                "РегламентноеЗадание1",
+                "CommonModule.ПервыйОбщийМодуль.НеУстаревшаяПроцедура",
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            ext_root.join("ScheduledJobs/РегламентноеЗадание1.xml"),
+            scheduled_job_xml(
+                "РегламентноеЗадание1",
+                "CommonModule.РасширениеПодписки.НеУстаревшаяПроцедура",
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            ext_root.join("ScheduledJobs/ТолькоРасширение.xml"),
+            scheduled_job_xml(
+                "ТолькоРасширение",
+                "CommonModule.РасширениеПодписки.ТолькоРасширение",
+            ),
+        )
+        .unwrap();
+
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender);
+        state.init_empty_source_root();
+        state.analysis_host.raw_database_mut().set_all_config_paths(vec![
+            (None, main_root.clone()),
+            (Some("X".to_string()), ext_root.clone()),
+        ]);
+        state.bootstrap_metadata_substrate();
+
+        let bsl_path = ext_root.join("ScheduledJobConsumer.bsl");
+        let bsl_vfs_path = vfs::VfsPath::new(bsl_path.to_string_lossy().as_ref());
+        let file_id = state.vfs.write().alloc_file_id(bsl_vfs_path.clone());
+        let mut file_set = vfs::file_set::FileSet::new();
+        file_set.insert(file_id, bsl_vfs_path);
+        let db = state.analysis_host.raw_database_mut();
+        db.set_source_root(BSL_SOURCE_ROOT, SourceRoot::new_local(file_set));
+        db.set_file_source_root(file_id, BSL_SOURCE_ROOT);
+        db.set_file_text(file_id, "Процедура Т() КонецПроцедуры");
+
+        let db = state.analysis_host.raw_database();
+        let per_kind = db
+            .resolve_scheduled_job_for_file(file_id, "РегламентноеЗадание1")
+            .expect("per-kind resolve finds the scheduled job visible to the file");
+        let whole = db.merged_visible_configuration(file_id).expect("merged config loads");
+        let from_whole = whole
+            .find_scheduled_job("РегламентноеЗадание1")
+            .expect("merged config has the scheduled job");
+
+        assert_eq!(
+            &*per_kind, from_whole,
+            "per-kind scheduled-job resolve must equal the merged whole-config lookup"
+        );
+        assert_eq!(per_kind.method_name(), "CommonModule.ПервыйОбщийМодуль.НеУстаревшаяПроцедура");
+        assert!(
+            db.resolve_scheduled_job_for_file(file_id, "ТолькоРасширение").is_none(),
+            "extension-only scheduled jobs stay invisible until merged whole-config supports them"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn resolve_role_for_file_matches_merged_visible_configuration() {
+        use base_db::{SourceDatabase, SourceRoot, BSL_SOURCE_ROOT};
+        use hir::ConfigsDatabase;
+
+        fn role_xml(name: &str) -> String {
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Role uuid="00000000-0000-0000-0000-000000000082">
+        <Properties>
+            <Name>{name}</Name>
+            <Synonym/>
+            <Comment/>
+        </Properties>
+    </Role>
+</MetaDataObject>"#
+            )
+        }
+
+        fn rights_xml(set_for_new_objects: bool, object_name: &str, condition: &str) -> String {
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<Rights xmlns="http://v8.1c.ru/8.2/roles" version="2.10">
+    <setForNewObjects>{set_for_new_objects}</setForNewObjects>
+    <setForAttributesByDefault>false</setForAttributesByDefault>
+    <independentRightsOfChildObjects>false</independentRightsOfChildObjects>
+    <object>
+        <name>{object_name}</name>
+        <right>
+            <name>Read</name>
+            <value>true</value>
+            <restrictionByCondition>
+                <condition>{condition}</condition>
+            </restrictionByCondition>
+        </right>
+    </object>
+</Rights>"#
+            )
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "bsl_role_parity_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let main_root = root.join("src/cf");
+        let ext_root = root.join("src/cfe/X");
+        std::fs::create_dir_all(main_root.join("Roles/ТестоваяРоль/Ext")).unwrap();
+        std::fs::create_dir_all(ext_root.join("Roles/ТестоваяРоль/Ext")).unwrap();
+        std::fs::create_dir_all(ext_root.join("Roles/ТолькоРасширение/Ext")).unwrap();
+        std::fs::create_dir_all(&ext_root).unwrap();
+        std::fs::write(main_root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        std::fs::write(ext_root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        std::fs::write(main_root.join("Roles/ТестоваяРоль.xml"), role_xml("ТестоваяРоль")).unwrap();
+        std::fs::write(
+            main_root.join("Roles/ТестоваяРоль/Ext/Rights.xml"),
+            rights_xml(
+                false,
+                "Catalog.Контрагенты",
+                "Контрагенты.Ссылка В (ВЫБРАТЬ Ссылка ИЗ Справочник.Организации)",
+            ),
+        )
+        .unwrap();
+        std::fs::write(ext_root.join("Roles/ТестоваяРоль.xml"), role_xml("ТестоваяРоль")).unwrap();
+        std::fs::write(
+            ext_root.join("Roles/ТестоваяРоль/Ext/Rights.xml"),
+            rights_xml(
+                false,
+                "Catalog.Контрагенты",
+                "Контрагенты.Ссылка В (ВЫБРАТЬ Ссылка ИЗ Справочник.ФизическиеЛица)",
+            ),
+        )
+        .unwrap();
+        std::fs::write(ext_root.join("Roles/ТолькоРасширение.xml"), role_xml("ТолькоРасширение"))
+            .unwrap();
+        std::fs::write(
+            ext_root.join("Roles/ТолькоРасширение/Ext/Rights.xml"),
+            rights_xml(false, "Catalog.Контрагенты", "Контрагенты.Код = \"01\""),
+        )
+        .unwrap();
+
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender);
+        state.init_empty_source_root();
+        state.analysis_host.raw_database_mut().set_all_config_paths(vec![
+            (None, main_root.clone()),
+            (Some("X".to_string()), ext_root.clone()),
+        ]);
+        state.bootstrap_metadata_substrate();
+
+        let bsl_path = ext_root.join("RoleConsumer.bsl");
+        let bsl_vfs_path = vfs::VfsPath::new(bsl_path.to_string_lossy().as_ref());
+        let file_id = state.vfs.write().alloc_file_id(bsl_vfs_path.clone());
+        let mut file_set = vfs::file_set::FileSet::new();
+        file_set.insert(file_id, bsl_vfs_path);
+        let db = state.analysis_host.raw_database_mut();
+        db.set_source_root(BSL_SOURCE_ROOT, SourceRoot::new_local(file_set));
+        db.set_file_source_root(file_id, BSL_SOURCE_ROOT);
+        db.set_file_text(file_id, "Процедура Т() КонецПроцедуры");
+
+        let db = state.analysis_host.raw_database();
+        let per_kind = db
+            .resolve_role_for_file(file_id, "ТестоваяРоль")
+            .expect("role resolves through the bootstrapped per-kind substrate");
+        let whole = db.merged_visible_configuration(file_id).expect("merged config loads");
+        let from_whole = whole.find_role("ТестоваяРоль").expect("merged config has the role");
+
+        assert_eq!(
+            &*per_kind, from_whole,
+            "per-kind role resolve must equal the merged whole-config lookup"
+        );
+        assert_eq!(per_kind.data().objects()[0].name, "Контрагенты");
+        assert!(
+            db.resolve_role_for_file(file_id, "ТолькоРасширение").is_none(),
+            "extension-only roles stay invisible until merged whole-config supports them"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn rights_xml_edit_updates_role_parity() {
+        use base_db::{SourceDatabase, SourceRoot, BSL_SOURCE_ROOT};
+        use hir::ConfigsDatabase;
+
+        fn role_xml(name: &str) -> String {
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Role uuid="00000000-0000-0000-0000-000000000083">
+        <Properties>
+            <Name>{name}</Name>
+            <Synonym/>
+            <Comment/>
+        </Properties>
+    </Role>
+</MetaDataObject>"#
+            )
+        }
+
+        fn rights_xml(set_for_new_objects: bool, object_name: &str, condition: &str) -> String {
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<Rights xmlns="http://v8.1c.ru/8.2/roles" version="2.10">
+    <setForNewObjects>{set_for_new_objects}</setForNewObjects>
+    <setForAttributesByDefault>false</setForAttributesByDefault>
+    <independentRightsOfChildObjects>false</independentRightsOfChildObjects>
+    <object>
+        <name>{object_name}</name>
+        <right>
+            <name>Read</name>
+            <value>true</value>
+            <restrictionByCondition>
+                <condition>{condition}</condition>
+            </restrictionByCondition>
+        </right>
+    </object>
+</Rights>"#
+            )
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "bsl_role_rights_refresh_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let main_root = root.join("src/cf");
+        let ext_root = root.join("src/cfe/X");
+        std::fs::create_dir_all(main_root.join("Roles/ТестоваяРоль/Ext")).unwrap();
+        std::fs::create_dir_all(&ext_root).unwrap();
+        std::fs::write(main_root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        std::fs::write(ext_root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        std::fs::write(main_root.join("Roles/ТестоваяРоль.xml"), role_xml("ТестоваяРоль")).unwrap();
+        let rights_path = main_root.join("Roles/ТестоваяРоль/Ext/Rights.xml");
+        std::fs::write(
+            &rights_path,
+            rights_xml(
+                false,
+                "Catalog.Контрагенты",
+                "Контрагенты.Ссылка В (ВЫБРАТЬ Ссылка ИЗ Справочник.Организации)",
+            ),
+        )
+        .unwrap();
+
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender);
+        state.init_empty_source_root();
+        state.analysis_host.raw_database_mut().set_all_config_paths(vec![
+            (None, main_root.clone()),
+            (Some("X".to_string()), ext_root.clone()),
+        ]);
+        state.bootstrap_metadata_substrate();
+
+        let bsl_path = ext_root.join("RoleConsumer.bsl");
+        let bsl_vfs_path = vfs::VfsPath::new(bsl_path.to_string_lossy().as_ref());
+        let file_id = state.vfs.write().alloc_file_id(bsl_vfs_path.clone());
+        let mut file_set = vfs::file_set::FileSet::new();
+        file_set.insert(file_id, bsl_vfs_path);
+        let db = state.analysis_host.raw_database_mut();
+        db.set_source_root(BSL_SOURCE_ROOT, SourceRoot::new_local(file_set));
+        db.set_file_source_root(file_id, BSL_SOURCE_ROOT);
+        db.set_file_text(file_id, "Процедура Т() КонецПроцедуры");
+
+        let db = state.analysis_host.raw_database();
+        let resolved_before = db
+            .resolve_role_for_file(file_id, "ТестоваяРоль")
+            .expect("role resolves before the rights edit");
+        assert!(!resolved_before.data().set_for_new_objects());
+
+        std::fs::write(
+            &rights_path,
+            rights_xml(
+                true,
+                "Catalog.Контрагенты",
+                "Контрагенты.Ссылка В (ВЫБРАТЬ Ссылка ИЗ Справочник.ФизическиеЛица)",
+            ),
+        )
+        .unwrap();
+        assert!(state.refresh_metadata_substrate(std::slice::from_ref(&rights_path)));
+
+        let resolved_after = state
+            .analysis_host
+            .raw_database()
+            .resolve_role_for_file(file_id, "ТестоваяРоль")
+            .expect("role re-resolves after the rights edit");
+        let whole = state
+            .analysis_host
+            .raw_database()
+            .merged_visible_configuration(file_id)
+            .expect("merged config loads");
+        let from_whole = whole.find_role("ТестоваяРоль").expect("merged config has the role");
+
+        assert_eq!(&*resolved_after, from_whole, "role parity must stay aligned after refresh");
+        assert!(resolved_after.data().set_for_new_objects());
+        assert_eq!(
+            resolved_after.data().objects()[0].restrictions,
+            vec!["Контрагенты.Ссылка В (ВЫБРАТЬ Ссылка ИЗ Справочник.ФизическиеЛица)".to_string()]
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn bootstrapped_common_module_resolves_by_name_and_by_body_file() {
         use base_db::{SourceDatabase, SourceRoot, BSL_SOURCE_ROOT};
         use bsl_metadata::traits::MdObject;
@@ -1449,5 +1791,511 @@ mod vfs_race_tests {
         assert!(!state.analysis_progress_active);
 
         assert_eq!(progress_kinds(&receiver), vec!["begin".to_owned(), "end".to_owned()]);
+    }
+
+    #[test]
+    fn resolve_http_service_for_file_matches_merged_visible_configuration() {
+        use base_db::{SourceDatabase, SourceRoot, BSL_SOURCE_ROOT};
+        use hir::ConfigsDatabase;
+
+        fn http_service_xml(name: &str, root_url: &str) -> String {
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <HTTPService uuid="4797cd39-952d-4e4d-9685-014e4d5a8e{root_url_pad}">
+        <Properties>
+            <Name>{name}</Name>
+            <RootURL>{root_url}</RootURL>
+        </Properties>
+        <ChildObjects>
+            <URLTemplate uuid="7124b2c7-d38e-40b9-a934-e6eb9de99340">
+                <Properties>
+                    <Name>URLTemplate1</Name>
+                    <Template>/storage/{{Storage}}/{{ID}}</Template>
+                </Properties>
+                <ChildObjects>
+                    <Method uuid="605f52a9-e95b-4900-9e41-449d7da01348">
+                        <Properties>
+                            <Name>GET</Name>
+                            <HTTPMethod>GET</HTTPMethod>
+                            <Handler>{handler_get}</Handler>
+                        </Properties>
+                    </Method>
+                </ChildObjects>
+            </URLTemplate>
+        </ChildObjects>
+    </HTTPService>
+</MetaDataObject>"#,
+                root_url_pad = if root_url == "http" { "e25" } else { "e26" },
+                handler_get = if root_url == "http" { "URLTemplate1GET" } else { "ExtensionGET" }
+            )
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "bsl_http_service_parity_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let main_root = root.join("src/cf");
+        let ext_root = root.join("src/cfe/X");
+        std::fs::create_dir_all(main_root.join("HTTPServices/МойСервис")).unwrap();
+        std::fs::create_dir_all(ext_root.join("HTTPServices/МойСервис")).unwrap();
+        std::fs::create_dir_all(ext_root.join("HTTPServices/ТолькоРасширение")).unwrap();
+        std::fs::create_dir_all(&ext_root).unwrap();
+        std::fs::write(main_root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        std::fs::write(ext_root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        std::fs::write(
+            main_root.join("HTTPServices/МойСервис.xml"),
+            http_service_xml("МойСервис", "http"),
+        )
+        .unwrap();
+        std::fs::write(
+            ext_root.join("HTTPServices/МойСервис.xml"),
+            http_service_xml("МойСервис", "ext"),
+        )
+        .unwrap();
+        std::fs::write(
+            ext_root.join("HTTPServices/ТолькоРасширение.xml"),
+            http_service_xml("ТолькоРасширение", "x"),
+        )
+        .unwrap();
+
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender);
+        state.init_empty_source_root();
+        state.analysis_host.raw_database_mut().set_all_config_paths(vec![
+            (None, main_root.clone()),
+            (Some("X".to_string()), ext_root.clone()),
+        ]);
+        state.bootstrap_metadata_substrate();
+
+        let bsl_path = ext_root.join("HTTPServiceConsumer.bsl");
+        let bsl_vfs_path = vfs::VfsPath::new(bsl_path.to_string_lossy().as_ref());
+        let file_id = state.vfs.write().alloc_file_id(bsl_vfs_path.clone());
+        let mut file_set = vfs::file_set::FileSet::new();
+        file_set.insert(file_id, bsl_vfs_path);
+        let db = state.analysis_host.raw_database_mut();
+        db.set_source_root(BSL_SOURCE_ROOT, SourceRoot::new_local(file_set));
+        db.set_file_source_root(file_id, BSL_SOURCE_ROOT);
+        db.set_file_text(file_id, "Процедура Т() КонецПроцедуры");
+
+        let db = state.analysis_host.raw_database();
+        let per_kind = db
+            .resolve_http_service_for_file(file_id, "МойСервис")
+            .expect("HTTP service resolves through the bootstrapped per-kind substrate");
+        let whole = db.merged_visible_configuration(file_id).expect("merged config loads");
+        let from_whole =
+            whole.find_http_service("МойСервис").expect("merged config has the HTTP service");
+
+        assert_eq!(
+            &*per_kind, from_whole,
+            "per-kind HTTP-service resolve must equal the merged whole-config lookup"
+        );
+        assert_eq!(per_kind.url_templates()[0].methods()[0].handler(), "URLTemplate1GET");
+        assert!(
+            db.resolve_http_service_for_file(file_id, "ТолькоРасширение").is_none(),
+            "extension-only HTTP services stay invisible until merged whole-config supports them"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn resolve_web_service_for_file_matches_merged_visible_configuration() {
+        use base_db::{SourceDatabase, SourceRoot, BSL_SOURCE_ROOT};
+        use hir::ConfigsDatabase;
+
+        fn web_service_xml(name: &str, namespace: &str, procedure: &str) -> String {
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <WebService uuid="0b4a4c9c-76e9-455c-9471-249051a83{proc_pad}">
+        <Properties>
+            <Name>{name}</Name>
+            <Namespace>{namespace}</Namespace>
+        </Properties>
+        <ChildObjects>
+            <Operation uuid="bc99d837-aee6-40ee-8940-3a81dddf477c">
+                <Properties>
+                    <Name>Операция1</Name>
+                    <ProcedureName>{procedure}</ProcedureName>
+                </Properties>
+                <ChildObjects/>
+            </Operation>
+        </ChildObjects>
+    </WebService>
+</MetaDataObject>"#,
+                proc_pad = if procedure.is_empty() { "0d" } else { "1d" }
+            )
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "bsl_web_service_parity_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let main_root = root.join("src/cf");
+        let ext_root = root.join("src/cfe/X");
+        std::fs::create_dir_all(main_root.join("WebServices/МойСервис")).unwrap();
+        std::fs::create_dir_all(ext_root.join("WebServices/МойСервис")).unwrap();
+        std::fs::create_dir_all(ext_root.join("WebServices/ТолькоРасширение")).unwrap();
+        std::fs::create_dir_all(&ext_root).unwrap();
+        std::fs::write(main_root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        std::fs::write(ext_root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        std::fs::write(
+            main_root.join("WebServices/МойСервис.xml"),
+            web_service_xml("МойСервис", "main.com", "Операция1"),
+        )
+        .unwrap();
+        std::fs::write(
+            ext_root.join("WebServices/МойСервис.xml"),
+            web_service_xml("МойСервис", "ext.com", "Операция1Расширение"),
+        )
+        .unwrap();
+        std::fs::write(
+            ext_root.join("WebServices/ТолькоРасширение.xml"),
+            web_service_xml("ТолькоРасширение", "x.com", ""),
+        )
+        .unwrap();
+
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender);
+        state.init_empty_source_root();
+        state.analysis_host.raw_database_mut().set_all_config_paths(vec![
+            (None, main_root.clone()),
+            (Some("X".to_string()), ext_root.clone()),
+        ]);
+        state.bootstrap_metadata_substrate();
+
+        let bsl_path = ext_root.join("WebServiceConsumer.bsl");
+        let bsl_vfs_path = vfs::VfsPath::new(bsl_path.to_string_lossy().as_ref());
+        let file_id = state.vfs.write().alloc_file_id(bsl_vfs_path.clone());
+        let mut file_set = vfs::file_set::FileSet::new();
+        file_set.insert(file_id, bsl_vfs_path);
+        let db = state.analysis_host.raw_database_mut();
+        db.set_source_root(BSL_SOURCE_ROOT, SourceRoot::new_local(file_set));
+        db.set_file_source_root(file_id, BSL_SOURCE_ROOT);
+        db.set_file_text(file_id, "Процедура Т() КонецПроцедуры");
+
+        let db = state.analysis_host.raw_database();
+        let per_kind = db
+            .resolve_web_service_for_file(file_id, "МойСервис")
+            .expect("web service resolves through the bootstrapped per-kind substrate");
+        let whole = db.merged_visible_configuration(file_id).expect("merged config loads");
+        let from_whole =
+            whole.find_web_service("МойСервис").expect("merged config has the web service");
+
+        assert_eq!(
+            &*per_kind, from_whole,
+            "per-kind web-service resolve must equal the merged whole-config lookup"
+        );
+        assert_eq!(per_kind.namespace(), "main.com");
+        assert_eq!(per_kind.operations()[0].procedure_name(), "Операция1");
+        assert!(
+            db.resolve_web_service_for_file(file_id, "ТолькоРасширение").is_none(),
+            "extension-only web services stay invisible until merged whole-config supports them"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn resolve_integration_service_for_file_matches_merged_visible_configuration() {
+        use base_db::{SourceDatabase, SourceRoot, BSL_SOURCE_ROOT};
+        use hir::ConfigsDatabase;
+
+        fn integration_service_xml(name: &str, handler: &str) -> String {
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20">
+    <IntegrationService uuid="c512a1cd-1240-4e46-8bad-8b7b27c5c{handler_pad}">
+        <Properties>
+            <Name>{name}</Name>
+        </Properties>
+        <ChildObjects>
+            <IntegrationServiceChannel uuid="1ef0581c-b1d8-4115-87f1-7856f6c06bb6">
+                <Properties>
+                    <Name>input_normal</Name>
+                    <MessageDirection>Receive</MessageDirection>
+                    <ReceiveMessageProcessing>{handler}</ReceiveMessageProcessing>
+                </Properties>
+            </IntegrationServiceChannel>
+        </ChildObjects>
+    </IntegrationService>
+</MetaDataObject>"#,
+                handler_pad = if handler.is_empty() { "25a" } else { "26a" }
+            )
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "bsl_integration_service_parity_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let main_root = root.join("src/cf");
+        let ext_root = root.join("src/cfe/X");
+        std::fs::create_dir_all(main_root.join("IntegrationServices/ОбменСообщениями")).unwrap();
+        std::fs::create_dir_all(ext_root.join("IntegrationServices/ОбменСообщениями")).unwrap();
+        std::fs::create_dir_all(ext_root.join("IntegrationServices/ТолькоРасширение")).unwrap();
+        std::fs::create_dir_all(&ext_root).unwrap();
+        std::fs::write(main_root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        std::fs::write(ext_root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        std::fs::write(
+            main_root.join("IntegrationServices/ОбменСообщениями.xml"),
+            integration_service_xml("ОбменСообщениями", "ОбработатьСообщениеОбычныйПриоритет"),
+        )
+        .unwrap();
+        std::fs::write(
+            ext_root.join("IntegrationServices/ОбменСообщениями.xml"),
+            integration_service_xml("ОбменСообщениями", "ОбработатьСообщениеРасширение"),
+        )
+        .unwrap();
+        std::fs::write(
+            ext_root.join("IntegrationServices/ТолькоРасширение.xml"),
+            integration_service_xml("ТолькоРасширение", ""),
+        )
+        .unwrap();
+
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender);
+        state.init_empty_source_root();
+        state.analysis_host.raw_database_mut().set_all_config_paths(vec![
+            (None, main_root.clone()),
+            (Some("X".to_string()), ext_root.clone()),
+        ]);
+        state.bootstrap_metadata_substrate();
+
+        let bsl_path = ext_root.join("IntegrationServiceConsumer.bsl");
+        let bsl_vfs_path = vfs::VfsPath::new(bsl_path.to_string_lossy().as_ref());
+        let file_id = state.vfs.write().alloc_file_id(bsl_vfs_path.clone());
+        let mut file_set = vfs::file_set::FileSet::new();
+        file_set.insert(file_id, bsl_vfs_path);
+        let db = state.analysis_host.raw_database_mut();
+        db.set_source_root(BSL_SOURCE_ROOT, SourceRoot::new_local(file_set));
+        db.set_file_source_root(file_id, BSL_SOURCE_ROOT);
+        db.set_file_text(file_id, "Процедура Т() КонецПроцедуры");
+
+        let db = state.analysis_host.raw_database();
+        let per_kind = db
+            .resolve_integration_service_for_file(file_id, "ОбменСообщениями")
+            .expect("integration service resolves through the bootstrapped per-kind substrate");
+        let whole = db.merged_visible_configuration(file_id).expect("merged config loads");
+        let from_whole = whole
+            .find_integration_service("ОбменСообщениями")
+            .expect("merged config has the integration service");
+
+        assert_eq!(
+            &*per_kind, from_whole,
+            "per-kind integration-service resolve must equal the merged whole-config lookup"
+        );
+        assert_eq!(
+            per_kind.channels()[0].receive_message_processing(),
+            "ОбработатьСообщениеОбычныйПриоритет"
+        );
+        assert!(
+            db.resolve_integration_service_for_file(file_id, "ТолькоРасширение").is_none(),
+            "extension-only integration services stay invisible until merged whole-config supports them"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn service_module_file_lookup_matches_path_side_path_for_http_web_integration() {
+        use base_db::{SourceDatabase, SourceRoot, BSL_SOURCE_ROOT};
+
+        let root = std::env::temp_dir().join(format!(
+            "bsl_service_module_file_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let cf = root.join("src/cf");
+        std::fs::create_dir_all(cf.join("Configuration.xml").parent().unwrap()).unwrap();
+        std::fs::write(cf.join("Configuration.xml"), "<Configuration/>").unwrap();
+
+        let write_service = |plural: &str, name: &str, body: &str| {
+            std::fs::create_dir_all(cf.join(format!("{plural}/{name}/Ext"))).unwrap();
+            std::fs::write(cf.join(format!("{plural}/{name}.xml")), body).unwrap();
+            std::fs::write(
+                cf.join(format!("{plural}/{name}/Ext/Module.bsl")),
+                "Процедура Т() КонецПроцедуры",
+            )
+            .unwrap();
+        };
+        write_service(
+            "HTTPServices",
+            "HTTPСервис1",
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <HTTPService uuid="4797cd39-952d-4e4d-9685-014e4d5a8e25">
+        <Properties><Name>HTTPСервис1</Name><RootURL>http</RootURL></Properties>
+    </HTTPService>
+</MetaDataObject>"#,
+        );
+        write_service(
+            "WebServices",
+            "WebСервис1",
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <WebService uuid="0b4a4c9c-76e9-455c-9471-249051a8301d">
+        <Properties><Name>WebСервис1</Name><Namespace>test.com</Namespace></Properties>
+    </WebService>
+</MetaDataObject>"#,
+        );
+        write_service(
+            "IntegrationServices",
+            "ОбменСообщениями",
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20">
+    <IntegrationService uuid="c512a1cd-1240-4e46-8bad-8b7b27c5c25a">
+        <Properties><Name>ОбменСообщениями</Name></Properties>
+    </IntegrationService>
+</MetaDataObject>"#,
+        );
+
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender);
+        state.init_empty_source_root();
+
+        let mut intern_module = |rel: &str| -> vfs::FileId {
+            let path = cf.join(rel);
+            let vp = vfs::VfsPath::new(path.to_string_lossy().as_ref());
+            let fid = state.vfs.write().alloc_file_id(vp.clone());
+            let db = state.analysis_host.raw_database_mut();
+            let sr = db.source_root_input(BSL_SOURCE_ROOT).root(db);
+            let mut fs = sr.file_set().clone();
+            fs.insert(fid, vp);
+            db.set_source_root(BSL_SOURCE_ROOT, SourceRoot::new_local(fs));
+            db.set_file_source_root(fid, BSL_SOURCE_ROOT);
+            db.set_file_text(fid, "Процедура Т() КонецПроцедуры");
+            fid
+        };
+        let http_module = intern_module("HTTPServices/HTTPСервис1/Ext/Module.bsl");
+        let web_module = intern_module("WebServices/WebСервис1/Ext/Module.bsl");
+        let isvc_module = intern_module("IntegrationServices/ОбменСообщениями/Ext/Module.bsl");
+
+        state.analysis_host.raw_database_mut().set_all_config_paths(vec![(None, cf.clone())]);
+        state.bootstrap_metadata_substrate();
+
+        let db = state.analysis_host.raw_database();
+        let http = db
+            .http_service_for_file_id(http_module)
+            .expect("HTTPServices/<Name>/Ext/Module.bsl reverse-resolves to its HTTP service");
+        assert_eq!(http.name(), "HTTPСервис1");
+        let web = db
+            .web_service_for_file_id(web_module)
+            .expect("WebServices/<Name>/Ext/Module.bsl reverse-resolves to its web service");
+        assert_eq!(web.name(), "WebСервис1");
+        let isvc = db.integration_service_for_file_id(isvc_module).expect(
+            "IntegrationServices/<Name>/Ext/Module.bsl reverse-resolves to its integration service",
+        );
+        assert_eq!(isvc.name(), "ОбменСообщениями");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn http_service_xml_edit_re_parses_only_the_edited_service() {
+        use base_db::{SourceDatabase, SourceRoot, BSL_SOURCE_ROOT};
+
+        fn http_service_xml(name: &str, root_url: &str, handler: &str) -> String {
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <HTTPService uuid="4797cd39-952d-4e4d-9685-014e4d5a8e25">
+        <Properties>
+            <Name>{name}</Name>
+            <RootURL>{root_url}</RootURL>
+        </Properties>
+        <ChildObjects>
+            <URLTemplate uuid="7124b2c7-d38e-40b9-a934-e6eb9de99340">
+                <Properties><Name>URLTemplate1</Name><Template>/storage</Template></Properties>
+                <ChildObjects>
+                    <Method uuid="605f52a9-e95b-4900-9e41-449d7da01348">
+                        <Properties>
+                            <Name>GET</Name>
+                            <HTTPMethod>GET</HTTPMethod>
+                            <Handler>{handler}</Handler>
+                        </Properties>
+                    </Method>
+                </ChildObjects>
+            </URLTemplate>
+        </ChildObjects>
+    </HTTPService>
+</MetaDataObject>"#
+            )
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "bsl_http_service_refresh_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let main_root = root.join("src/cf");
+        let ext_root = root.join("src/cfe/X");
+        std::fs::create_dir_all(&main_root).unwrap();
+        std::fs::create_dir_all(&ext_root).unwrap();
+        std::fs::write(main_root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        std::fs::write(ext_root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        let before_path = main_root.join("HTTPServices/СервисА.xml");
+        let after_path = main_root.join("HTTPServices/СервисБ.xml");
+        std::fs::create_dir_all(main_root.join("HTTPServices")).unwrap();
+        std::fs::write(&before_path, http_service_xml("СервисА", "a", "HandlerA")).unwrap();
+        std::fs::write(&after_path, http_service_xml("СервисБ", "b", "HandlerB")).unwrap();
+
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender);
+        state.init_empty_source_root();
+        state.analysis_host.raw_database_mut().set_all_config_paths(vec![
+            (None, main_root.clone()),
+            (Some("X".to_string()), ext_root.clone()),
+        ]);
+        state.bootstrap_metadata_substrate();
+
+        let bsl_path = ext_root.join("HTTPServiceConsumer.bsl");
+        let bsl_vfs_path = vfs::VfsPath::new(bsl_path.to_string_lossy().as_ref());
+        let file_id = state.vfs.write().alloc_file_id(bsl_vfs_path.clone());
+        let mut file_set = vfs::file_set::FileSet::new();
+        file_set.insert(file_id, bsl_vfs_path);
+        let db = state.analysis_host.raw_database_mut();
+        db.set_source_root(BSL_SOURCE_ROOT, SourceRoot::new_local(file_set));
+        db.set_file_source_root(file_id, BSL_SOURCE_ROOT);
+        db.set_file_text(file_id, "Процедура Т() КонецПроцедуры");
+
+        let db = state.analysis_host.raw_database();
+        let a_before = db
+            .resolve_http_service_for_file(file_id, "СервисА")
+            .expect("СервисА resolves before the edit");
+        let b_before = db
+            .resolve_http_service_for_file(file_id, "СервисБ")
+            .expect("СервисБ resolves before the edit");
+        assert_eq!(a_before.url_templates()[0].methods()[0].handler(), "HandlerA");
+
+        std::fs::write(&after_path, http_service_xml("СервисБ", "b", "HandlerBReparse")).unwrap();
+        assert!(state.refresh_metadata_substrate(std::slice::from_ref(&after_path)));
+
+        let b_after = state
+            .analysis_host
+            .raw_database()
+            .resolve_http_service_for_file(file_id, "СервисБ")
+            .expect("СервисБ re-resolves after the edit");
+        assert_eq!(
+            b_after.url_templates()[0].methods()[0].handler(),
+            "HandlerBReparse",
+            "edited HTTP service must re-parse through per-service granularity"
+        );
+        assert!(!Arc::ptr_eq(&b_before, &b_after), "СервисБ re-parses after its XML changed");
+
+        let a_after = state
+            .analysis_host
+            .raw_database()
+            .resolve_http_service_for_file(file_id, "СервисА")
+            .expect("СервисА still resolves after the sibling edit");
+        assert!(
+            Arc::ptr_eq(&a_before, &a_after),
+            "a content edit to СервисБ must not re-resolve the sibling СервисА"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
     }
 }

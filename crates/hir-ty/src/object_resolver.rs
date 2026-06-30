@@ -76,11 +76,35 @@ impl<D: ConfigsDatabase + ?Sized> ObjectResolver for DbObjectResolver<'_, D> {
     }
 
     fn resolve_metadata_reference(&self, kind: MetadataReferenceKind, name: &str) -> Option<Name> {
-        if kind == MetadataReferenceKind::EventSubscription {
-            return self
-                .db
-                .resolve_event_subscription(self.file_id, name)
-                .map(|subscription| Name::new(subscription.name()));
+        match kind {
+            MetadataReferenceKind::Role => {
+                return self.db.resolve_role(self.file_id, name).map(|role| Name::new(role.name()));
+            }
+            MetadataReferenceKind::EventSubscription => {
+                return self
+                    .db
+                    .resolve_event_subscription(self.file_id, name)
+                    .map(|subscription| Name::new(subscription.name()));
+            }
+            MetadataReferenceKind::ScheduledJob => {
+                return self
+                    .db
+                    .resolve_scheduled_job(self.file_id, name)
+                    .map(|job| Name::new(job.name()));
+            }
+            MetadataReferenceKind::HttpService => {
+                return self
+                    .db
+                    .resolve_http_service(self.file_id, name)
+                    .map(|service| Name::new(service.name()));
+            }
+            MetadataReferenceKind::WebService => {
+                return self
+                    .db
+                    .resolve_web_service(self.file_id, name)
+                    .map(|service| Name::new(service.name()));
+            }
+            _ => {}
         }
 
         let config = self.db.merged_visible_configuration(self.file_id)?;
@@ -88,13 +112,48 @@ impl<D: ConfigsDatabase + ?Sized> ObjectResolver for DbObjectResolver<'_, D> {
     }
 
     fn metadata_reference_members(&self, kind: MetadataReferenceKind) -> Vec<Name> {
-        if kind == MetadataReferenceKind::EventSubscription {
-            return self
-                .db
-                .event_subscription_names(self.file_id)
-                .into_iter()
-                .map(|name| Name::new(&name))
-                .collect();
+        match kind {
+            MetadataReferenceKind::Role => {
+                return self
+                    .db
+                    .role_names(self.file_id)
+                    .into_iter()
+                    .map(|name| Name::new(&name))
+                    .collect();
+            }
+            MetadataReferenceKind::EventSubscription => {
+                return self
+                    .db
+                    .event_subscription_names(self.file_id)
+                    .into_iter()
+                    .map(|name| Name::new(&name))
+                    .collect();
+            }
+            MetadataReferenceKind::ScheduledJob => {
+                return self
+                    .db
+                    .scheduled_job_names(self.file_id)
+                    .into_iter()
+                    .map(|name| Name::new(&name))
+                    .collect();
+            }
+            MetadataReferenceKind::HttpService => {
+                return self
+                    .db
+                    .http_service_names(self.file_id)
+                    .into_iter()
+                    .map(|name| Name::new(&name))
+                    .collect();
+            }
+            MetadataReferenceKind::WebService => {
+                return self
+                    .db
+                    .web_service_names(self.file_id)
+                    .into_iter()
+                    .map(|name| Name::new(&name))
+                    .collect();
+            }
+            _ => {}
         }
 
         self.db

@@ -395,26 +395,40 @@ impl RootDatabaseImpl {
     /// outside any tracked query. On reload it updates the existing input in place
     /// so previously recorded `config_index`/`resolve_metadata_object` dependencies
     /// stay valid and re-derive from the new structure.
-    pub fn set_metadata_listing(
-        &mut self,
-        root: &str,
-        entries: Vec<metadata::MdoEntry>,
-        defined_types: Vec<metadata::DefinedTypeEntry>,
-        common_modules: Vec<metadata::CommonModuleEntry>,
-        event_subscriptions: Vec<metadata::EventSubscriptionEntry>,
-    ) {
+    pub fn set_metadata_listing(&mut self, root: &str, listing: metadata::MetadataListingData) {
         use salsa::Setter;
         let key = metadata::canonicalize_configuration_path(root);
+        let metadata::MetadataListingData {
+            entries,
+            defined_types,
+            common_modules,
+            event_subscriptions,
+            scheduled_jobs,
+            roles,
+            http_services,
+            web_services,
+            integration_services,
+        } = listing;
         let entries = Arc::new(entries);
         let defined_types = Arc::new(defined_types);
         let common_modules = Arc::new(common_modules);
         let event_subscriptions = Arc::new(event_subscriptions);
+        let scheduled_jobs = Arc::new(scheduled_jobs);
+        let roles = Arc::new(roles);
+        let http_services = Arc::new(http_services);
+        let web_services = Arc::new(web_services);
+        let integration_services = Arc::new(integration_services);
         match self.metadata_listings.get(&key).map(|e| *e.value()) {
             Some(input) => {
                 input.set_entries(self).to(entries);
                 input.set_defined_types(self).to(defined_types);
                 input.set_common_modules(self).to(common_modules);
                 input.set_event_subscriptions(self).to(event_subscriptions);
+                input.set_scheduled_jobs(self).to(scheduled_jobs);
+                input.set_roles(self).to(roles);
+                input.set_http_services(self).to(http_services);
+                input.set_web_services(self).to(web_services);
+                input.set_integration_services(self).to(integration_services);
             }
             None => {
                 let input = metadata::MetadataListingInput::new(
@@ -423,6 +437,11 @@ impl RootDatabaseImpl {
                     defined_types,
                     common_modules,
                     event_subscriptions,
+                    scheduled_jobs,
+                    roles,
+                    http_services,
+                    web_services,
+                    integration_services,
                 );
                 self.metadata_listings.insert(key, input);
             }
@@ -676,6 +695,122 @@ impl RootDatabaseImpl {
         extension_path.and_then(|p| find_in(p)).or_else(|| main_path.and_then(|p| find_in(p)))
     }
 
+    pub fn resolve_http_service_for_file(
+        &self,
+        file_id: FileId,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::HTTPService>> {
+        let (main_listing, _ext_listing, bootstrapped) =
+            self.metadata_listings_for_file(file_id)?;
+
+        if !bootstrapped {
+            use hir::ConfigsDatabase;
+            return self
+                .merged_visible_configuration(file_id)?
+                .find_http_service(name)
+                .cloned()
+                .map(Arc::new);
+        }
+
+        main_listing.and_then(|l| metadata::resolve_http_service(self, l, name.to_string()))
+    }
+
+    pub fn resolve_web_service_for_file(
+        &self,
+        file_id: FileId,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::WebService>> {
+        let (main_listing, _ext_listing, bootstrapped) =
+            self.metadata_listings_for_file(file_id)?;
+
+        if !bootstrapped {
+            use hir::ConfigsDatabase;
+            return self
+                .merged_visible_configuration(file_id)?
+                .find_web_service(name)
+                .cloned()
+                .map(Arc::new);
+        }
+
+        main_listing.and_then(|l| metadata::resolve_web_service(self, l, name.to_string()))
+    }
+
+    pub fn http_service_names_for_file(&self, file_id: FileId) -> Vec<String> {
+        let Some((main_listing, _ext_listing, bootstrapped)) =
+            self.metadata_listings_for_file(file_id)
+        else {
+            return Vec::new();
+        };
+
+        if !bootstrapped {
+            use hir::ConfigsDatabase;
+            return self
+                .merged_visible_configuration(file_id)
+                .map(|config| {
+                    config
+                        .http_services()
+                        .iter()
+                        .map(|service| service.name().to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
+        }
+
+        let mut out = Vec::new();
+        for listing in [main_listing].into_iter().flatten() {
+            for entry in listing.http_services(self).iter() {
+                out.push(entry.name.clone());
+            }
+        }
+        out
+    }
+
+    pub fn web_service_names_for_file(&self, file_id: FileId) -> Vec<String> {
+        let Some((main_listing, _ext_listing, bootstrapped)) =
+            self.metadata_listings_for_file(file_id)
+        else {
+            return Vec::new();
+        };
+
+        if !bootstrapped {
+            use hir::ConfigsDatabase;
+            return self
+                .merged_visible_configuration(file_id)
+                .map(|config| {
+                    config.web_services().iter().map(|service| service.name().to_string()).collect()
+                })
+                .unwrap_or_default();
+        }
+
+        let mut out = Vec::new();
+        for listing in [main_listing].into_iter().flatten() {
+            for entry in listing.web_services(self).iter() {
+                out.push(entry.name.clone());
+            }
+        }
+        out
+    }
+
+    pub fn resolve_integration_service_for_file(
+        &self,
+        file_id: FileId,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::IntegrationService>> {
+        let (main_listing, _ext_listing, bootstrapped) =
+            self.metadata_listings_for_file(file_id)?;
+
+        if !bootstrapped {
+            use hir::ConfigsDatabase;
+            return self
+                .merged_visible_configuration(file_id)?
+                .find_integration_service(name)
+                .cloned()
+                .map(Arc::new);
+        }
+
+        main_listing.and_then(|l| metadata::resolve_integration_service(self, l, name.to_string()))
+    }
+
     /// The event-subscription counterpart of [`resolve_common_module_for_file`]:
     /// resolve a subscription by name visible to `file_id`. Event subscriptions are
     /// flat one-file metadata. `Configuration::merge_extension_overlay` does not
@@ -773,6 +908,134 @@ impl RootDatabaseImpl {
             .collect()
     }
 
+    /// Resolve the scheduled job `name` visible to `file_id` at per-scheduled-job
+    /// granularity. Scheduled jobs are flat one-file metadata. The scheduled-job
+    /// counterpart of [`resolve_event_subscription_for_file`]; the bootstrapped
+    /// path reads the main listing only to match the merged whole-config lookup.
+    pub fn resolve_scheduled_job_for_file(
+        &self,
+        file_id: FileId,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::ScheduledJob>> {
+        let (main_listing, _ext_listing, bootstrapped) =
+            self.metadata_listings_for_file(file_id)?;
+
+        if !bootstrapped {
+            use hir::ConfigsDatabase;
+            return self
+                .merged_visible_configuration(file_id)?
+                .find_scheduled_job(name)
+                .cloned()
+                .map(Arc::new);
+        }
+
+        main_listing.and_then(|l| metadata::resolve_scheduled_job(self, l, name.to_string()))
+    }
+
+    pub fn scheduled_job_names_for_file(&self, file_id: FileId) -> Vec<String> {
+        let Some((main_listing, _ext_listing, bootstrapped)) =
+            self.metadata_listings_for_file(file_id)
+        else {
+            return Vec::new();
+        };
+
+        if !bootstrapped {
+            use hir::ConfigsDatabase;
+            return self
+                .merged_visible_configuration(file_id)
+                .map(|config| {
+                    config.scheduled_jobs().iter().map(|job| job.name().to_string()).collect()
+                })
+                .unwrap_or_default();
+        }
+
+        let mut out = Vec::new();
+        for listing in [main_listing].into_iter().flatten() {
+            for entry in listing.scheduled_jobs(self).iter() {
+                out.push(entry.name.clone());
+            }
+        }
+        out
+    }
+
+    pub fn resolve_role_for_file(
+        &self,
+        file_id: FileId,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::Role>> {
+        let (main_listing, _ext_listing, bootstrapped) =
+            self.metadata_listings_for_file(file_id)?;
+
+        if !bootstrapped {
+            use hir::ConfigsDatabase;
+            return self
+                .merged_visible_configuration(file_id)?
+                .find_role(name)
+                .cloned()
+                .map(Arc::new);
+        }
+
+        main_listing.and_then(|l| metadata::resolve_role(self, l, name.to_string()))
+    }
+
+    pub fn role_names_for_file(&self, file_id: FileId) -> Vec<String> {
+        let Some((main_listing, _ext_listing, bootstrapped)) =
+            self.metadata_listings_for_file(file_id)
+        else {
+            return Vec::new();
+        };
+
+        if !bootstrapped {
+            use hir::ConfigsDatabase;
+            return self
+                .merged_visible_configuration(file_id)
+                .map(|config| config.roles().iter().map(|role| role.name().to_string()).collect())
+                .unwrap_or_default();
+        }
+
+        let mut out = Vec::new();
+        for listing in [main_listing].into_iter().flatten() {
+            for entry in listing.roles(self).iter() {
+                out.push(entry.name.clone());
+            }
+        }
+        out
+    }
+
+    pub fn enumerate_roles_for_file(&self, file_id: FileId) -> Vec<Arc<bsl_metadata::Role>> {
+        let paths = RootDatabaseImpl::all_config_paths(self);
+        if !paths.is_empty() {
+            let mut listings = Vec::with_capacity(paths.len());
+            for (_, path) in &paths {
+                let Some(listing) = self.metadata_listing(&path.to_string_lossy()) else {
+                    listings.clear();
+                    break;
+                };
+                listings.push(listing);
+            }
+            if !listings.is_empty() {
+                let mut out = Vec::new();
+                for listing in listings {
+                    let names: Vec<String> =
+                        listing.roles(self).iter().map(|entry| entry.name.clone()).collect();
+                    for name in names {
+                        if let Some(role) = metadata::resolve_role(self, listing, name) {
+                            out.push(role);
+                        }
+                    }
+                }
+                return out;
+            }
+        }
+
+        RootDatabase::get_all_configurations(self, file_id)
+            .into_iter()
+            .flat_map(|(_, config)| {
+                config.roles().iter().cloned().map(Arc::new).collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
     /// Resolve the common module that owns the `Ext/Module.bsl` whose id is
     /// `module_file_id` (typically the file currently being analysed), composing the
     /// roots visible to it. Answers "is this `.bsl` a common module's source, and if
@@ -833,6 +1096,69 @@ impl RootDatabaseImpl {
             .map(|(_, path)| path);
 
         main_path.and_then(|p| find_in(p)).or_else(|| extension_path.and_then(|p| find_in(p)))
+    }
+
+    pub fn http_service_for_file_id(
+        &self,
+        module_file_id: FileId,
+    ) -> Option<Arc<bsl_metadata::HTTPService>> {
+        let (main_listing, ext_listing, bootstrapped) =
+            self.metadata_listings_for_file(module_file_id)?;
+
+        if bootstrapped {
+            let resolve_in = |listing: Option<metadata::MetadataListingInput>| {
+                listing
+                    .and_then(|l| metadata::resolve_http_service_by_file(self, l, module_file_id))
+            };
+            return resolve_in(ext_listing).or_else(|| resolve_in(main_listing));
+        }
+
+        use hir::ConfigsDatabase;
+        let file_path = vfs_helpers::get_file_path(self, module_file_id)?;
+        self.merged_visible_configuration(module_file_id)
+            .and_then(|config| metadata::find_http_service_by_path(&config, &file_path))
+    }
+
+    pub fn web_service_for_file_id(
+        &self,
+        module_file_id: FileId,
+    ) -> Option<Arc<bsl_metadata::WebService>> {
+        let (main_listing, ext_listing, bootstrapped) =
+            self.metadata_listings_for_file(module_file_id)?;
+
+        if bootstrapped {
+            let resolve_in = |listing: Option<metadata::MetadataListingInput>| {
+                listing.and_then(|l| metadata::resolve_web_service_by_file(self, l, module_file_id))
+            };
+            return resolve_in(ext_listing).or_else(|| resolve_in(main_listing));
+        }
+
+        use hir::ConfigsDatabase;
+        let file_path = vfs_helpers::get_file_path(self, module_file_id)?;
+        self.merged_visible_configuration(module_file_id)
+            .and_then(|config| metadata::find_web_service_by_path(&config, &file_path))
+    }
+
+    pub fn integration_service_for_file_id(
+        &self,
+        module_file_id: FileId,
+    ) -> Option<Arc<bsl_metadata::IntegrationService>> {
+        let (main_listing, ext_listing, bootstrapped) =
+            self.metadata_listings_for_file(module_file_id)?;
+
+        if bootstrapped {
+            let resolve_in = |listing: Option<metadata::MetadataListingInput>| {
+                listing.and_then(|l| {
+                    metadata::resolve_integration_service_by_file(self, l, module_file_id)
+                })
+            };
+            return resolve_in(ext_listing).or_else(|| resolve_in(main_listing));
+        }
+
+        use hir::ConfigsDatabase;
+        let file_path = vfs_helpers::get_file_path(self, module_file_id)?;
+        self.merged_visible_configuration(module_file_id)
+            .and_then(|config| metadata::find_integration_service_by_path(&config, &file_path))
     }
 
     /// The `Ext/Module.bsl` body file id(s) of the common module `name` visible to
@@ -1198,6 +1524,18 @@ impl hir::ConfigsDatabase for RootDatabaseImpl {
         RootDatabaseImpl::resolve_event_subscription_for_file(self, file_id, name)
     }
 
+    fn resolve_role(&self, file_id: FileId, name: &str) -> Option<Arc<bsl_metadata::Role>> {
+        RootDatabaseImpl::resolve_role_for_file(self, file_id, name)
+    }
+
+    fn role_names(&self, file_id: FileId) -> Vec<String> {
+        RootDatabaseImpl::role_names_for_file(self, file_id)
+    }
+
+    fn enumerate_roles(&self, file_id: FileId) -> Vec<Arc<bsl_metadata::Role>> {
+        RootDatabaseImpl::enumerate_roles_for_file(self, file_id)
+    }
+
     fn event_subscription_names(&self, file_id: FileId) -> Vec<String> {
         RootDatabaseImpl::event_subscription_names_for_file(self, file_id)
     }
@@ -1207,6 +1545,42 @@ impl hir::ConfigsDatabase for RootDatabaseImpl {
         file_id: FileId,
     ) -> Vec<Arc<bsl_metadata::EventSubscription>> {
         RootDatabaseImpl::enumerate_event_subscriptions_for_file(self, file_id)
+    }
+
+    fn resolve_scheduled_job(
+        &self,
+        file_id: FileId,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::ScheduledJob>> {
+        RootDatabaseImpl::resolve_scheduled_job_for_file(self, file_id, name)
+    }
+
+    fn scheduled_job_names(&self, file_id: FileId) -> Vec<String> {
+        RootDatabaseImpl::scheduled_job_names_for_file(self, file_id)
+    }
+
+    fn resolve_http_service(
+        &self,
+        file_id: FileId,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::HTTPService>> {
+        RootDatabaseImpl::resolve_http_service_for_file(self, file_id, name)
+    }
+
+    fn http_service_names(&self, file_id: FileId) -> Vec<String> {
+        RootDatabaseImpl::http_service_names_for_file(self, file_id)
+    }
+
+    fn resolve_web_service(
+        &self,
+        file_id: FileId,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::WebService>> {
+        RootDatabaseImpl::resolve_web_service_for_file(self, file_id, name)
+    }
+
+    fn web_service_names(&self, file_id: FileId) -> Vec<String> {
+        RootDatabaseImpl::web_service_names_for_file(self, file_id)
     }
 
     fn has_config_root(&self, file_id: FileId) -> bool {
@@ -1426,6 +1800,27 @@ impl RootDatabase for RootDatabaseImpl {
         module_file_id: FileId,
     ) -> Option<Arc<bsl_metadata::CommonModule>> {
         RootDatabaseImpl::common_module_for_file_id(self, module_file_id)
+    }
+
+    fn http_service_for_file_id(
+        &self,
+        module_file_id: FileId,
+    ) -> Option<Arc<bsl_metadata::HTTPService>> {
+        RootDatabaseImpl::http_service_for_file_id(self, module_file_id)
+    }
+
+    fn web_service_for_file_id(
+        &self,
+        module_file_id: FileId,
+    ) -> Option<Arc<bsl_metadata::WebService>> {
+        RootDatabaseImpl::web_service_for_file_id(self, module_file_id)
+    }
+
+    fn integration_service_for_file_id(
+        &self,
+        module_file_id: FileId,
+    ) -> Option<Arc<bsl_metadata::IntegrationService>> {
+        RootDatabaseImpl::integration_service_for_file_id(self, module_file_id)
     }
 
     fn resolve_common_module_files(&self, file_id: FileId, name: &str) -> Vec<FileId> {

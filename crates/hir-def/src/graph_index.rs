@@ -1346,18 +1346,16 @@ pub fn project_workspace_role_edges<DB: ConfigsDatabase>(
     let mut direct: Vec<(String, MdoType, String)> = Vec::new();
     // (role_name, parent_type, parent_name, condition)
     let mut rls: Vec<(String, MdoType, String, String)> = Vec::new();
-    for visible in db.configurations(representative) {
-        for role in visible.configuration.roles() {
-            for obj in role.objects() {
-                direct.push((role.name().to_string(), obj.mdo_type, obj.name.clone()));
-                for condition in &obj.restrictions {
-                    rls.push((
-                        role.name().to_string(),
-                        obj.mdo_type,
-                        obj.name.clone(),
-                        condition.clone(),
-                    ));
-                }
+    for role in db.enumerate_roles(representative) {
+        for obj in role.objects() {
+            direct.push((role.name().to_string(), obj.mdo_type, obj.name.clone()));
+            for condition in &obj.restrictions {
+                rls.push((
+                    role.name().to_string(),
+                    obj.mdo_type,
+                    obj.name.clone(),
+                    condition.clone(),
+                ));
             }
         }
     }

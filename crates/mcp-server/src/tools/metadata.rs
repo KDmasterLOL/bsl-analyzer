@@ -6,6 +6,36 @@ use rmcp::ErrorData as McpError;
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServiceKind {
+    Http,
+    Web,
+    Integration,
+}
+
+fn parse_service_kind(raw: &str) -> Option<ServiceKind> {
+    match raw.to_lowercase().as_str() {
+        "httpservice" | "httpservices" | "httpсервис" | "httpсервисы" => {
+            Some(ServiceKind::Http)
+        }
+        "webservice" | "webservices" | "webсервис" | "webсервисы" => {
+            Some(ServiceKind::Web)
+        }
+        "integrationservice" | "integrationservices" | "сервисинтеграции" | "сервисыинтеграции" => {
+            Some(ServiceKind::Integration)
+        }
+        _ => None,
+    }
+}
+
+fn dash(s: &str) -> &str {
+    if s.is_empty() {
+        "—"
+    } else {
+        s
+    }
+}
+
 pub fn get_metadata_tree(
     config: &Configuration,
     extensions: &[(String, Configuration)],
@@ -73,6 +103,11 @@ fn format_summary_tree(config: &Configuration) -> Result<CallToolResult, McpErro
     let web_services = config.web_services().len();
     if web_services > 0 {
         categories.insert("WebСервис", web_services);
+    }
+
+    let integration_services = config.integration_services().len();
+    if integration_services > 0 {
+        categories.insert("СервисИнтеграции", integration_services);
     }
 
     let total: usize = categories.values().sum();
@@ -159,6 +194,12 @@ fn format_filtered_tree(
     }
 
     if !found {
+        if let Some(kind) = parse_service_kind(category) {
+            found = format_service_listing(config, kind, &mut out);
+        }
+    }
+
+    if !found {
         match category.to_lowercase().as_str() {
             "общиемодули" | "общиймодуль" | "commonmodule" | "commonmodules" =>
             {
@@ -240,11 +281,53 @@ fn format_common_module_flags(m: &bsl_metadata::CommonModule) -> String {
     }
 }
 
+fn format_service_listing(config: &Configuration, kind: ServiceKind, out: &mut String) -> bool {
+    match kind {
+        ServiceKind::Http => {
+            let services = config.http_services();
+            if services.is_empty() {
+                return false;
+            }
+            let _ = writeln!(out, "# HTTPСервисы ({})\n", services.len());
+            for service in services {
+                let _ = writeln!(out, "- {}", service.name());
+            }
+            true
+        }
+        ServiceKind::Web => {
+            let services = config.web_services();
+            if services.is_empty() {
+                return false;
+            }
+            let _ = writeln!(out, "# WebСервисы ({})\n", services.len());
+            for service in services {
+                let _ = writeln!(out, "- {}", service.name());
+            }
+            true
+        }
+        ServiceKind::Integration => {
+            let services = config.integration_services();
+            if services.is_empty() {
+                return false;
+            }
+            let _ = writeln!(out, "# СервисыИнтеграции ({})\n", services.len());
+            for service in services {
+                let _ = writeln!(out, "- {}", service.name());
+            }
+            true
+        }
+    }
+}
+
 pub fn get_object_structure(
     config: &Configuration,
     object_type: &str,
     object_name: &str,
 ) -> Result<CallToolResult, McpError> {
+    if let Some(kind) = parse_service_kind(object_type) {
+        return get_service_structure(config, kind, object_name);
+    }
+
     let mdo_type: MdoType =
         object_type.parse().map_err(|e: String| McpError::invalid_params(e, None))?;
 
@@ -278,14 +361,43 @@ pub fn get_object_structure(
     ))
 }
 
-fn format_event_subscription_structure(sub: &bsl_metadata::EventSubscription) -> String {
-    fn dash(s: &str) -> &str {
-        if s.is_empty() {
-            "—"
-        } else {
-            s
-        }
+fn get_service_structure(
+    config: &Configuration,
+    kind: ServiceKind,
+    object_name: &str,
+) -> Result<CallToolResult, McpError> {
+    match kind {
+        ServiceKind::Http => match config.find_http_service(object_name) {
+            Some(service) => Ok(CallToolResult::success(vec![Content::text(
+                format_http_service_structure(service),
+            )])),
+            None => Err(McpError::invalid_params(
+                format!("HTTPService.{object_name} не найден в конфигурации"),
+                None,
+            )),
+        },
+        ServiceKind::Web => match config.find_web_service(object_name) {
+            Some(service) => Ok(CallToolResult::success(vec![Content::text(
+                format_web_service_structure(service),
+            )])),
+            None => Err(McpError::invalid_params(
+                format!("WebService.{object_name} не найден в конфигурации"),
+                None,
+            )),
+        },
+        ServiceKind::Integration => match config.find_integration_service(object_name) {
+            Some(service) => Ok(CallToolResult::success(vec![Content::text(
+                format_integration_service_structure(service),
+            )])),
+            None => Err(McpError::invalid_params(
+                format!("IntegrationService.{object_name} не найден в конфигурации"),
+                None,
+            )),
+        },
     }
+}
+
+fn format_event_subscription_structure(sub: &bsl_metadata::EventSubscription) -> String {
     let mut out = format!("# ПодпискаНаСобытие.{}\n\n", sub.name());
     writeln!(out, "- Источник: {}", dash(sub.source())).ok();
     writeln!(out, "- Событие: {}", dash(sub.event())).ok();
@@ -294,6 +406,92 @@ fn format_event_subscription_structure(sub: &bsl_metadata::EventSubscription) ->
         writeln!(out, "  - Модуль: {}", handler.module_name).ok();
         writeln!(out, "  - Метод: {}", handler.method_name).ok();
     }
+    out
+}
+
+fn format_http_service_structure(service: &bsl_metadata::HTTPService) -> String {
+    let mut out = format!("# HTTPService.{}\n\n", service.name());
+    let _ = writeln!(out, "- RootURL: {}", dash(service.root_url()));
+    if let Some(uri) = service.uri() {
+        let _ = writeln!(out, "- Модуль: {uri}");
+    }
+
+    let templates = service.url_templates();
+    if !templates.is_empty() {
+        let _ = writeln!(out, "\n## URLTemplates ({})\n", templates.len());
+        for template in templates {
+            let _ = writeln!(out, "### {}", template.name());
+            let _ = writeln!(out, "- URLTemplate: {}", dash(template.template()));
+            let methods = template.methods();
+            if !methods.is_empty() {
+                let _ = writeln!(out, "\n| Метод | HTTPMethod | Обработчик |");
+                let _ = writeln!(out, "|-------|------------|------------|");
+                for method in methods {
+                    let _ = writeln!(
+                        out,
+                        "| {} | {} | {} |",
+                        method.name(),
+                        dash(method.http_method()),
+                        dash(method.handler())
+                    );
+                }
+            }
+            out.push('\n');
+        }
+    }
+
+    out
+}
+
+fn format_web_service_structure(service: &bsl_metadata::WebService) -> String {
+    let mut out = format!("# WebService.{}\n\n", service.name());
+    let _ = writeln!(out, "- Namespace: {}", dash(service.namespace()));
+    if let Some(uri) = service.uri() {
+        let _ = writeln!(out, "- Модуль: {uri}");
+    }
+
+    let operations = service.operations();
+    if !operations.is_empty() {
+        let _ = writeln!(out, "\n## Операции ({})\n", operations.len());
+        let _ = writeln!(out, "| Операция | Обработчик | Параметры |");
+        let _ = writeln!(out, "|----------|------------|-----------|");
+        for operation in operations {
+            let parameters = operation
+                .parameters()
+                .iter()
+                .map(bsl_metadata::WebServiceParameter::name)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = writeln!(
+                out,
+                "| {} | {} | {} |",
+                operation.name(),
+                dash(operation.procedure_name()),
+                dash(&parameters)
+            );
+        }
+    }
+
+    out
+}
+
+fn format_integration_service_structure(service: &bsl_metadata::IntegrationService) -> String {
+    let mut out = format!("# IntegrationService.{}\n\n", service.name());
+    let channels = service.channels();
+    if !channels.is_empty() {
+        let _ = writeln!(out, "## Каналы ({})\n", channels.len());
+        let _ = writeln!(out, "| Канал | ReceiveMessageProcessing |");
+        let _ = writeln!(out, "|-------|--------------------------|");
+        for channel in channels {
+            let _ = writeln!(
+                out,
+                "| {} | {} |",
+                channel.name(),
+                dash(channel.receive_message_processing())
+            );
+        }
+    }
+
     out
 }
 
@@ -421,7 +619,8 @@ pub fn get_configuration_info(
         + config.scheduled_jobs().len()
         + config.roles().len()
         + config.http_services().len()
-        + config.web_services().len();
+        + config.web_services().len()
+        + config.integration_services().len();
 
     let mut out = format!("# Конфигурация: {}\n\n", config.name());
     let _ = writeln!(out, "- UUID: {}", config.uuid());
@@ -435,6 +634,7 @@ pub fn get_configuration_info(
     let _ = writeln!(out, "- Роли: {}", config.roles().len());
     let _ = writeln!(out, "- HTTP-сервисы: {}", config.http_services().len());
     let _ = writeln!(out, "- Web-сервисы: {}", config.web_services().len());
+    let _ = writeln!(out, "- Сервисы интеграции: {}", config.integration_services().len());
 
     if !extensions.is_empty() {
         let _ = writeln!(out, "\n## Расширения ({})\n", extensions.len());
@@ -899,5 +1099,116 @@ mod tests {
         );
 
         assert!(result.is_err(), "should fail for missing form");
+    }
+
+    // ===== Wave 2d: explicit service enumerate/object/config-info =====
+    //
+    // These pin the contract that the MCP metadata tools enumerate HTTP/Web/Integration
+    // services as explicit category listings and produce structured object dumps, instead
+    // of forcing the agent through the hot typed config resolver. They RED-fail until
+    // `format_filtered_tree` grows HTTP/Web/Integration-service branches and
+    // `get_object_structure` recognises the service MDO types.
+
+    #[test]
+    fn metadata_tree_filter_lists_http_services_explicitly() {
+        let config = fixture_config();
+        let result = get_metadata_tree(&config, &[], Some("HTTPСервис".into())).unwrap();
+        let text = extract_text(&result);
+
+        assert!(text.contains("HTTPСервис1"), "filter must enumerate http services: {text}");
+        assert!(
+            text.contains("HTTP") && text.contains("Сервис"),
+            "filter must label the http-service category explicitly: {text}"
+        );
+    }
+
+    #[test]
+    fn metadata_tree_filter_lists_web_services_explicitly() {
+        let config = fixture_config();
+        let result = get_metadata_tree(&config, &[], Some("WebСервис".into())).unwrap();
+        let text = extract_text(&result);
+
+        assert!(text.contains("WebСервис1"), "filter must enumerate web services: {text}");
+    }
+
+    #[test]
+    fn metadata_tree_filter_lists_integration_services_explicitly() {
+        // IntegrationService is deliberately absent from `MetadataReferenceKind` (no
+        // `Метаданные.СервисыИнтеграции` plural), but the MCP enumeration surface must
+        // still list integration services as a discrete category for agent discovery.
+        let config = fixture_config();
+        let result = get_metadata_tree(&config, &[], Some("СервисИнтеграции".into())).unwrap();
+        let text = extract_text(&result);
+
+        assert!(
+            text.contains("ОбменСообщениями"),
+            "filter must enumerate integration services: {text}"
+        );
+    }
+
+    #[test]
+    fn object_structure_dumps_http_service_explicitly() {
+        let config = fixture_config();
+        let result = get_object_structure(&config, "HTTPService", "HTTPСервис1").unwrap();
+        let text = extract_text(&result);
+
+        assert!(
+            text.contains("HTTPService.HTTPСервис1") || text.contains("HTTPСервис1"),
+            "object structure must name the http service: {text}"
+        );
+        assert!(
+            text.contains("URLTemplate") || text.contains("Метод") || text.contains("RootURL"),
+            "object structure must dump http-service shape (templates/methods/root): {text}"
+        );
+    }
+
+    #[test]
+    fn object_structure_dumps_web_service_explicitly() {
+        let config = fixture_config();
+        let result = get_object_structure(&config, "WebService", "WebСервис1").unwrap();
+        let text = extract_text(&result);
+
+        assert!(
+            text.contains("WebService.WebСервис1") || text.contains("WebСервис1"),
+            "object structure must name the web service: {text}"
+        );
+        assert!(
+            text.contains("Операция") || text.contains("Namespace"),
+            "object structure must dump web-service shape (operations/namespace): {text}"
+        );
+    }
+
+    #[test]
+    fn object_structure_dumps_integration_service_explicitly() {
+        let config = fixture_config();
+        let result =
+            get_object_structure(&config, "IntegrationService", "ОбменСообщениями").unwrap();
+        let text = extract_text(&result);
+
+        assert!(
+            text.contains("IntegrationService.ОбменСообщениями")
+                || text.contains("ОбменСообщениями"),
+            "object structure must name the integration service: {text}"
+        );
+        assert!(
+            text.contains("Канал") || text.contains("Channel"),
+            "object structure must dump integration-service channels: {text}"
+        );
+    }
+
+    #[test]
+    fn configuration_info_reports_http_and_web_service_counts_explicitly() {
+        let config = fixture_config();
+        let result = get_configuration_info(&config, &[]).unwrap();
+        let text = extract_text(&result);
+
+        assert!(
+            text.contains("HTTP-сервисы:") && !text.contains("HTTP-сервисы: 0"),
+            "configuration info must report non-zero http-service count: {text}"
+        );
+        assert!(
+            text.contains("Web-сервисы:") && !text.contains("Web-сервисы: 0"),
+            "configuration info must report non-zero web-service count: {text}"
+        );
     }
 }

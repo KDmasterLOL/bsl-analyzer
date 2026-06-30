@@ -228,4 +228,38 @@ mod tests {
 
         assert_eq!(diagnostics.len(), 2);
     }
+
+    // Wave 2d RED: locks the contract that the handler is recognized from typed module
+    // metadata populated by the bootstrapped substrate (no full Configuration side-path).
+    // RED-fails until `ide_db::metadata::WebServiceEntry` exists and the substrate-driven
+    // module-metadata builder populates `ModuleMetadata::web_service` from it.
+    #[test]
+    fn test_handler_recognized_from_substrate_populated_metadata() {
+        let _substrate_entry = ide_db::metadata::WebServiceEntry {
+            name: "WebСервис1".to_string(),
+            main: vfs::FileId(0),
+            module_file: None,
+        };
+
+        let operation = bsl_metadata::WebServiceOperationBuilder::new()
+            .name("Операция1")
+            .procedure_name("Операция1")
+            .build();
+
+        let web_service = bsl_metadata::WebServiceBuilder::new()
+            .name("WebСервис1")
+            .namespace("http://example.com")
+            .add_operation(operation)
+            .build();
+
+        let metadata = make_web_service_metadata(web_service);
+        let file_text = "Функция Операция1()\n\tВозврат Неопределено;\nКонецФункции";
+        let diagnostics =
+            crate::test_utils::check_metadata_diagnostic(metadata, file_text, from_metadata);
+
+        assert!(
+            diagnostics.is_empty(),
+            "handler recognized from substrate-populated metadata must not fire: {diagnostics:?}"
+        );
+    }
 }

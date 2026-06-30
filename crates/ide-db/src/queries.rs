@@ -207,7 +207,23 @@ pub fn module_metadata_query<'db>(
     // database has no cache attached and falls through to the salsa query.
     let configuration = db.get_configuration(file_id);
 
-    Arc::new(crate::metadata::build_module_metadata(&file_path, configuration.as_deref()))
+    let mut metadata = crate::metadata::build_module_metadata(&file_path, configuration.as_deref());
+    match metadata.module_type {
+        bsl_metadata::ModuleType::HTTPServiceModule if metadata.http_service.is_none() => {
+            metadata.http_service = db.http_service_for_file_id(file_id);
+        }
+        bsl_metadata::ModuleType::WebServiceModule if metadata.web_service.is_none() => {
+            metadata.web_service = db.web_service_for_file_id(file_id);
+        }
+        bsl_metadata::ModuleType::IntegrationServiceModule
+            if metadata.integration_service.is_none() =>
+        {
+            metadata.integration_service = db.integration_service_for_file_id(file_id);
+        }
+        _ => {}
+    }
+
+    Arc::new(metadata)
 }
 
 #[salsa::tracked(lru = 128, heap_size = heap_estimate::module_cfgs_heap)]

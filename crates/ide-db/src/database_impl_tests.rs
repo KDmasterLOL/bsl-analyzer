@@ -6,6 +6,7 @@ use vfs::FileId;
 use vfs::{file_set::FileSet, VfsPath};
 
 use super::RootDatabaseImpl;
+use crate::metadata::MetadataListingData;
 use crate::RootDatabase;
 
 #[test]
@@ -137,6 +138,11 @@ fn resolve_metadata_object_isolates_content_and_structure() {
         Arc::new(Vec::new()),
         Arc::new(Vec::new()),
         Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
     );
     assert_eq!(config_index(&db, listing).len(), 1);
 
@@ -228,6 +234,11 @@ fn resolve_register_by_name_resolves_via_listing_substrate() {
         Arc::new(Vec::new()),
         Arc::new(Vec::new()),
         Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
     );
 
     let reg = resolve_register_by_name(&db, listing, "РегистрСведений1".to_string())
@@ -284,6 +295,11 @@ fn resolve_defined_type_isolates_content_and_structure() {
         Arc::new(vec![DefinedTypeEntry {
             name: "ДенежнаяСумма".to_string(), main: f1
         }]),
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
         Arc::new(Vec::new()),
         Arc::new(Vec::new()),
     );
@@ -353,6 +369,11 @@ fn resolve_common_module_by_name_and_by_body_file() {
             main: xml_file,
             module_file: Some(bsl_file),
         }]),
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
         Arc::new(Vec::new()),
     );
 
@@ -456,6 +477,11 @@ fn resolve_event_subscription_isolates_content_and_structure() {
             name: "ПередЗаписью".to_string(),
             main: before_file,
         }]),
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
     );
     assert_eq!(event_subscription_index(&db, listing).lookup("передзаписью"), Some(before_file));
 
@@ -560,12 +586,20 @@ fn resolve_event_subscription_for_file_uses_bootstrapped_listing() {
     db.set_all_config_paths(vec![(None, root.clone())]);
     db.set_metadata_listing(
         &root.to_string_lossy(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        vec![EventSubscriptionEntry {
-            name: "ПередЗаписью".to_string(), main: subscription_file
-        }],
+        MetadataListingData {
+            entries: Vec::new(),
+            defined_types: Vec::new(),
+            common_modules: Vec::new(),
+            event_subscriptions: vec![EventSubscriptionEntry {
+                name: "ПередЗаписью".to_string(),
+                main: subscription_file,
+            }],
+            scheduled_jobs: Vec::new(),
+            roles: Vec::new(),
+            http_services: Vec::new(),
+            web_services: Vec::new(),
+            integration_services: Vec::new(),
+        },
     );
 
     let resolved = db
@@ -576,6 +610,659 @@ fn resolve_event_subscription_for_file_uses_bootstrapped_listing() {
     assert!(
         db.resolve_event_subscription_for_file(module_file, "НетТакойПодписки").is_none(),
         "unknown event subscription name must not resolve"
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn resolve_scheduled_job_isolates_content_and_structure() {
+    use crate::metadata::{
+        resolve_scheduled_job, scheduled_job_index, MetadataListingInput, ScheduledJobEntry,
+    };
+    use salsa::Setter;
+
+    fn scheduled_job_xml(name: &str, method_name: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <ScheduledJob uuid="00000000-0000-0000-0000-000000000071">
+        <Properties>
+            <Name>{name}</Name>
+            <MethodName>{method_name}</MethodName>
+            <Use>true</Use>
+            <Predefined>false</Predefined>
+        </Properties>
+    </ScheduledJob>
+</MetaDataObject>"#
+        )
+    }
+
+    let mut db = RootDatabaseImpl::new();
+    let before_file = FileId(0);
+    let after_file = FileId(1);
+
+    let mut file_set = FileSet::new();
+    file_set.insert(before_file, VfsPath::new("/ScheduledJobs/РегламентноеЗадание1.xml"));
+    file_set.insert(after_file, VfsPath::new("/ScheduledJobs/РегламентноеЗадание2.xml"));
+    db.set_source_root(SourceRootId(1), SourceRoot::new_local(file_set));
+    db.set_file_source_root(before_file, SourceRootId(1));
+    db.set_file_source_root(after_file, SourceRootId(1));
+    db.set_file_text(
+        before_file,
+        &scheduled_job_xml(
+            "РегламентноеЗадание1",
+            "CommonModule.ПервыйОбщийМодуль.НеУстаревшаяПроцедура",
+        ),
+    );
+    db.set_file_text(
+        after_file,
+        &scheduled_job_xml(
+            "РегламентноеЗадание2",
+            "CommonModule.ПервыйОбщийМодуль.НеУстаревшаяПроцедура",
+        ),
+    );
+
+    let listing = MetadataListingInput::new(
+        &db,
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+        Arc::new(vec![ScheduledJobEntry {
+            name: "РегламентноеЗадание1".to_string(),
+            main: before_file,
+        }]),
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+    );
+    assert_eq!(scheduled_job_index(&db, listing).lookup("регламентноезадание1"), Some(before_file));
+
+    let before = resolve_scheduled_job(&db, listing, "РегламентноеЗадание1".to_string())
+        .expect("РегламентноеЗадание1 resolves");
+    assert_eq!(before.name(), "РегламентноеЗадание1");
+    assert_eq!(before.method_name(), "CommonModule.ПервыйОбщийМодуль.НеУстаревшаяПроцедура");
+
+    assert!(resolve_scheduled_job(&db, listing, "регламентноезадание1".to_string()).is_some());
+    assert!(resolve_scheduled_job(&db, listing, "РегламентноеЗадание2".to_string()).is_none());
+
+    let before_again =
+        resolve_scheduled_job(&db, listing, "РегламентноеЗадание1".to_string()).unwrap();
+    assert!(Arc::ptr_eq(&before, &before_again), "unchanged resolution must memoise");
+
+    listing.set_scheduled_jobs(&mut db).to(Arc::new(vec![
+        ScheduledJobEntry {
+            name: "РегламентноеЗадание1".to_string(), main: before_file
+        },
+        ScheduledJobEntry {
+            name: "РегламентноеЗадание2".to_string(), main: after_file
+        },
+    ]));
+    let after = resolve_scheduled_job(&db, listing, "РегламентноеЗадание2".to_string())
+        .expect("РегламентноеЗадание2 resolves after being added to the structure");
+    assert_eq!(after.method_name(), "CommonModule.ПервыйОбщийМодуль.НеУстаревшаяПроцедура");
+
+    let before_before_edit =
+        resolve_scheduled_job(&db, listing, "РегламентноеЗадание1".to_string()).unwrap();
+    db.set_file_text(
+        after_file,
+        &scheduled_job_xml(
+            "РегламентноеЗадание2",
+            "CommonModule.ПервыйОбщийМодуль.НеУстаревшаяПроцедураПовторно",
+        ),
+    );
+    let after_edited =
+        resolve_scheduled_job(&db, listing, "РегламентноеЗадание2".to_string()).unwrap();
+    assert_eq!(
+        after_edited.method_name(),
+        "CommonModule.ПервыйОбщийМодуль.НеУстаревшаяПроцедураПовторно",
+        "content edit must re-parse the edited scheduled job"
+    );
+    let before_after_edit =
+        resolve_scheduled_job(&db, listing, "РегламентноеЗадание1".to_string()).unwrap();
+    assert!(
+        Arc::ptr_eq(&before_before_edit, &before_after_edit),
+        "a content edit to one scheduled job must not re-resolve a sibling"
+    );
+
+    listing.set_scheduled_jobs(&mut db).to(Arc::new(Vec::new()));
+    assert!(resolve_scheduled_job(&db, listing, "РегламентноеЗадание1".to_string()).is_none());
+    assert!(resolve_scheduled_job(&db, listing, "РегламентноеЗадание2".to_string()).is_none());
+}
+
+#[test]
+fn resolve_scheduled_job_for_file_uses_bootstrapped_listing() {
+    use crate::metadata::ScheduledJobEntry;
+
+    fn scheduled_job_xml(name: &str, method_name: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <ScheduledJob uuid="00000000-0000-0000-0000-000000000072">
+        <Properties>
+            <Name>{name}</Name>
+            <MethodName>{method_name}</MethodName>
+            <Use>true</Use>
+            <Predefined>false</Predefined>
+        </Properties>
+    </ScheduledJob>
+</MetaDataObject>"#
+        )
+    }
+
+    let root = std::env::temp_dir().join(format!(
+        "bsl_scheduled_job_for_file_{}_{}",
+        std::process::id(),
+        line!()
+    ));
+    let job_path = root.join("ScheduledJobs/РегламентноеЗадание1.xml");
+    std::fs::create_dir_all(job_path.parent().unwrap()).unwrap();
+
+    let mut db = RootDatabaseImpl::new();
+    let job_file = FileId(0);
+    let module_file = FileId(1);
+    let module_path = root.join("ScheduledJobConsumer.bsl");
+
+    let mut file_set = FileSet::new();
+    file_set.insert(job_file, VfsPath::new(job_path.to_string_lossy().as_ref()));
+    file_set.insert(module_file, VfsPath::new(module_path.to_string_lossy().as_ref()));
+    db.set_source_root(SourceRootId(1), SourceRoot::new_local(file_set));
+    db.set_file_source_root(job_file, SourceRootId(1));
+    db.set_file_source_root(module_file, SourceRootId(1));
+    db.set_file_text(
+        job_file,
+        &scheduled_job_xml(
+            "РегламентноеЗадание1",
+            "CommonModule.ПервыйОбщийМодуль.НеУстаревшаяПроцедура",
+        ),
+    );
+    db.set_file_text(module_file, "Процедура Т() КонецПроцедуры");
+
+    db.set_all_config_paths(vec![(None, root.clone())]);
+    db.set_metadata_listing(
+        &root.to_string_lossy(),
+        MetadataListingData {
+            entries: Vec::new(),
+            defined_types: Vec::new(),
+            common_modules: Vec::new(),
+            event_subscriptions: Vec::new(),
+            scheduled_jobs: vec![ScheduledJobEntry {
+                name: "РегламентноеЗадание1".to_string(),
+                main: job_file,
+            }],
+            roles: Vec::new(),
+            http_services: Vec::new(),
+            web_services: Vec::new(),
+            integration_services: Vec::new(),
+        },
+    );
+
+    let resolved = db
+        .resolve_scheduled_job_for_file(module_file, "РегламентноеЗадание1")
+        .expect("scheduled job resolves through the bootstrapped per-kind substrate");
+    assert_eq!(resolved.name(), "РегламентноеЗадание1");
+    assert_eq!(resolved.method_name(), "CommonModule.ПервыйОбщийМодуль.НеУстаревшаяПроцедура");
+    assert!(
+        db.resolve_scheduled_job_for_file(module_file, "НетТакогоРегламентногоЗадания").is_none(),
+        "unknown scheduled job name must not resolve"
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn resolve_role_isolates_main_and_rights_content() {
+    use crate::metadata::{resolve_role, role_index, MetadataListingInput, RoleEntry};
+    use salsa::Setter;
+
+    fn role_xml(name: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Role uuid="00000000-0000-0000-0000-000000000081">
+        <Properties>
+            <Name>{name}</Name>
+            <Synonym/>
+            <Comment/>
+        </Properties>
+    </Role>
+</MetaDataObject>"#
+        )
+    }
+
+    fn rights_xml(set_for_new_objects: bool, object_name: &str, condition: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<Rights xmlns="http://v8.1c.ru/8.2/roles" version="2.10">
+    <setForNewObjects>{set_for_new_objects}</setForNewObjects>
+    <setForAttributesByDefault>false</setForAttributesByDefault>
+    <independentRightsOfChildObjects>false</independentRightsOfChildObjects>
+    <object>
+        <name>{object_name}</name>
+        <right>
+            <name>Read</name>
+            <value>true</value>
+            <restrictionByCondition>
+                <condition>{condition}</condition>
+            </restrictionByCondition>
+        </right>
+    </object>
+</Rights>"#
+        )
+    }
+
+    let mut db = RootDatabaseImpl::new();
+    let role1_main = FileId(0);
+    let role1_rights = FileId(1);
+    let role2_main = FileId(2);
+    let role2_rights = FileId(3);
+
+    let mut file_set = FileSet::new();
+    file_set.insert(role1_main, VfsPath::new("/Roles/ТестоваяРоль.xml"));
+    file_set.insert(role1_rights, VfsPath::new("/Roles/ТестоваяРоль/Ext/Rights.xml"));
+    file_set.insert(role2_main, VfsPath::new("/Roles/СоседняяРоль.xml"));
+    file_set.insert(role2_rights, VfsPath::new("/Roles/СоседняяРоль/Ext/Rights.xml"));
+    db.set_source_root(SourceRootId(1), SourceRoot::new_local(file_set));
+    db.set_file_source_root(role1_main, SourceRootId(1));
+    db.set_file_source_root(role1_rights, SourceRootId(1));
+    db.set_file_source_root(role2_main, SourceRootId(1));
+    db.set_file_source_root(role2_rights, SourceRootId(1));
+
+    db.set_file_text(role1_main, &role_xml("ТестоваяРоль"));
+    db.set_file_text(
+        role1_rights,
+        &rights_xml(
+            false,
+            "Catalog.Контрагенты",
+            "Контрагенты.Ссылка В (ВЫБРАТЬ Ссылка ИЗ Справочник.Организации)",
+        ),
+    );
+    db.set_file_text(role2_main, &role_xml("СоседняяРоль"));
+    db.set_file_text(
+        role2_rights,
+        &rights_xml(false, "Catalog.Организации", "Организации.Код = \"01\""),
+    );
+
+    let listing = MetadataListingInput::new(
+        &db,
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+        Arc::new(vec![
+            RoleEntry {
+                name: "ТестоваяРоль".to_string(),
+                main: role1_main,
+                rights: Some(role1_rights),
+            },
+            RoleEntry {
+                name: "СоседняяРоль".to_string(),
+                main: role2_main,
+                rights: Some(role2_rights),
+            },
+        ]),
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+    );
+
+    let files = role_index(&db, listing)
+        .lookup("тестоваяроль")
+        .expect("role index resolves main and rights files");
+    assert_eq!(files.main, role1_main);
+    assert_eq!(files.rights, Some(role1_rights));
+
+    let role1 =
+        resolve_role(&db, listing, "ТестоваяРоль".to_string()).expect("ТестоваяРоль resolves");
+    assert_eq!(role1.name(), "ТестоваяРоль");
+    assert!(!role1.data().set_for_new_objects());
+    assert_eq!(role1.data().objects().len(), 1);
+    assert_eq!(role1.data().objects()[0].name, "Контрагенты");
+    assert_eq!(
+        role1.data().objects()[0].restrictions,
+        vec!["Контрагенты.Ссылка В (ВЫБРАТЬ Ссылка ИЗ Справочник.Организации)".to_string()]
+    );
+
+    let role2 = resolve_role(&db, listing, "СоседняяРоль".to_string()).expect("role resolves");
+    assert_eq!(role2.name(), "СоседняяРоль");
+
+    let role1_again = resolve_role(&db, listing, "ТестоваяРоль".to_string()).unwrap();
+    assert!(Arc::ptr_eq(&role1, &role1_again), "unchanged resolution must memoise");
+
+    db.set_file_text(
+        role1_rights,
+        &rights_xml(
+            true,
+            "Catalog.Контрагенты",
+            "Контрагенты.Ссылка В (ВЫБРАТЬ Ссылка ИЗ Справочник.ФизическиеЛица)",
+        ),
+    );
+    let role1_rights_edited = resolve_role(&db, listing, "ТестоваяРоль".to_string()).unwrap();
+    assert!(role1_rights_edited.data().set_for_new_objects());
+    assert_eq!(
+        role1_rights_edited.data().objects()[0].restrictions,
+        vec!["Контрагенты.Ссылка В (ВЫБРАТЬ Ссылка ИЗ Справочник.ФизическиеЛица)".to_string()]
+    );
+    let role2_after_rights_edit = resolve_role(&db, listing, "СоседняяРоль".to_string()).unwrap();
+    assert!(
+        Arc::ptr_eq(&role2, &role2_after_rights_edit),
+        "a rights edit to one role must not re-resolve a sibling"
+    );
+
+    db.set_file_text(role1_main, &role_xml("ТестоваяРольПереименованная"));
+    let role1_main_edited = resolve_role(&db, listing, "ТестоваяРоль".to_string()).unwrap();
+    assert_eq!(role1_main_edited.name(), "ТестоваяРольПереименованная");
+
+    listing.set_roles(&mut db).to(Arc::new(Vec::new()));
+    assert!(resolve_role(&db, listing, "ТестоваяРоль".to_string()).is_none());
+}
+
+#[test]
+fn resolve_role_for_file_uses_bootstrapped_listing() {
+    use crate::metadata::RoleEntry;
+
+    fn role_xml(name: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Role uuid="00000000-0000-0000-0000-000000000082">
+        <Properties>
+            <Name>{name}</Name>
+            <Synonym/>
+            <Comment/>
+        </Properties>
+    </Role>
+</MetaDataObject>"#
+        )
+    }
+
+    fn rights_xml() -> &'static str {
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<Rights xmlns="http://v8.1c.ru/8.2/roles" version="2.10">
+    <setForNewObjects>true</setForNewObjects>
+    <object>
+        <name>Catalog.Контрагенты</name>
+        <right>
+            <name>Read</name>
+            <value>true</value>
+            <restrictionByCondition>
+                <condition>Контрагенты.Ссылка В (ВЫБРАТЬ Ссылка ИЗ Справочник.Организации)</condition>
+            </restrictionByCondition>
+        </right>
+    </object>
+</Rights>"#
+    }
+
+    let root =
+        std::env::temp_dir().join(format!("bsl_role_for_file_{}_{}", std::process::id(), line!()));
+    let role_path = root.join("Roles/ТестоваяРоль.xml");
+    std::fs::create_dir_all(role_path.parent().unwrap()).unwrap();
+
+    let mut db = RootDatabaseImpl::new();
+    let role_main = FileId(0);
+    let role_rights = FileId(1);
+    let consumer_file = FileId(2);
+    let consumer_path = root.join("RoleConsumer.bsl");
+
+    let mut file_set = FileSet::new();
+    file_set.insert(role_main, VfsPath::new(role_path.to_string_lossy().as_ref()));
+    file_set.insert(
+        role_rights,
+        VfsPath::new(root.join("Roles/ТестоваяРоль/Ext/Rights.xml").to_string_lossy().as_ref()),
+    );
+    file_set.insert(consumer_file, VfsPath::new(consumer_path.to_string_lossy().as_ref()));
+    db.set_source_root(SourceRootId(1), SourceRoot::new_local(file_set));
+    db.set_file_source_root(role_main, SourceRootId(1));
+    db.set_file_source_root(role_rights, SourceRootId(1));
+    db.set_file_source_root(consumer_file, SourceRootId(1));
+    db.set_file_text(role_main, &role_xml("ТестоваяРоль"));
+    db.set_file_text(role_rights, rights_xml());
+    db.set_file_text(consumer_file, "Процедура Т() КонецПроцедуры");
+
+    db.set_all_config_paths(vec![(None, root.clone())]);
+    db.set_metadata_listing(
+        &root.to_string_lossy(),
+        MetadataListingData {
+            entries: Vec::new(),
+            defined_types: Vec::new(),
+            common_modules: Vec::new(),
+            event_subscriptions: Vec::new(),
+            scheduled_jobs: Vec::new(),
+            roles: vec![RoleEntry {
+                name: "ТестоваяРоль".to_string(),
+                main: role_main,
+                rights: Some(role_rights),
+            }],
+            http_services: Vec::new(),
+            web_services: Vec::new(),
+            integration_services: Vec::new(),
+        },
+    );
+
+    let resolved = db
+        .resolve_role_for_file(consumer_file, "ТестоваяРоль")
+        .expect("role resolves through the bootstrapped per-kind substrate");
+    assert_eq!(resolved.name(), "ТестоваяРоль");
+    assert!(
+        db.resolve_role_for_file(consumer_file, "НетТакойРоли").is_none(),
+        "unknown role name must not resolve"
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn role_links_to_object_rights_and_rls_condition_object_from_listed_substrate() {
+    use crate::metadata::RoleEntry;
+    use bsl_metadata::MdoType;
+    use hir::call_graph::{EdgeKind, EdgeProvenance, GraphNode};
+    use hir::graph_index::{project_workspace_role_edges, GraphBuildState};
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("src/cf");
+    std::fs::create_dir_all(root.join("Catalogs")).unwrap();
+    std::fs::create_dir_all(root.join("Roles/ТестоваяРоль/Ext")).unwrap();
+    std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+
+    let catalog = |name: &str| {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Catalog uuid="00000000-0000-0000-0000-0000000000{:02}">
+        <Properties><Name>{name}</Name></Properties>
+    </Catalog>
+</MetaDataObject>"#,
+            name.len()
+        )
+    };
+    std::fs::write(root.join("Catalogs/Контрагенты.xml"), catalog("Контрагенты")).unwrap();
+    std::fs::write(root.join("Catalogs/Организации.xml"), catalog("Организации")).unwrap();
+
+    let role_main = FileId(2000);
+    let role_rights = FileId(2001);
+    let consumer_file = FileId(2002);
+
+    let mut db = RootDatabaseImpl::new();
+    let mut file_set = FileSet::new();
+    file_set.insert(
+        role_main,
+        VfsPath::new(root.join("Roles/ТестоваяРоль.xml").to_string_lossy().as_ref()),
+    );
+    file_set.insert(
+        role_rights,
+        VfsPath::new(root.join("Roles/ТестоваяРоль/Ext/Rights.xml").to_string_lossy().as_ref()),
+    );
+    file_set.insert(
+        consumer_file,
+        VfsPath::new(root.join("RoleConsumer.bsl").to_string_lossy().as_ref()),
+    );
+    db.set_source_root(SourceRootId(1), SourceRoot::new_local(file_set));
+    db.set_file_source_root(role_main, SourceRootId(1));
+    db.set_file_source_root(role_rights, SourceRootId(1));
+    db.set_file_source_root(consumer_file, SourceRootId(1));
+    db.set_file_text(
+        role_main,
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Role uuid="00000000-0000-0000-0000-0000000000aa">
+        <Properties><Name>ТестоваяРоль</Name></Properties>
+    </Role>
+</MetaDataObject>"#,
+    );
+    db.set_file_text(
+        role_rights,
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<Rights xmlns="http://v8.1c.ru/8.2/roles" version="2.10">
+    <setForNewObjects>false</setForNewObjects>
+    <object>
+        <name>Catalog.Контрагенты</name>
+        <right>
+            <name>Read</name>
+            <value>true</value>
+            <restrictionByCondition>
+                <condition>Контрагенты.Ссылка В (ВЫБРАТЬ Ссылка ИЗ Справочник.Организации)</condition>
+            </restrictionByCondition>
+        </right>
+    </object>
+</Rights>"#,
+    );
+    db.set_file_text(consumer_file, "Процедура Т() КонецПроцедуры");
+
+    db.set_all_config_paths(vec![(None, root.clone())]);
+    db.set_metadata_listing(
+        &root.to_string_lossy(),
+        MetadataListingData {
+            entries: Vec::new(),
+            defined_types: Vec::new(),
+            common_modules: Vec::new(),
+            event_subscriptions: Vec::new(),
+            scheduled_jobs: Vec::new(),
+            roles: vec![RoleEntry {
+                name: "ТестоваяРоль".to_string(),
+                main: role_main,
+                rights: Some(role_rights),
+            }],
+            http_services: Vec::new(),
+            web_services: Vec::new(),
+            integration_services: Vec::new(),
+        },
+    );
+
+    let mut state = GraphBuildState::new();
+    let edges = project_workspace_role_edges(&db, consumer_file, &mut state);
+
+    let role_edge = |to_name: &str, prov: EdgeProvenance| {
+        edges.iter().any(|e| {
+            e.kind == EdgeKind::RoleReference
+                && e.provenance == prov
+                && matches!(&e.from, GraphNode::Mdo { mdo_type, object_name }
+                    if *mdo_type == MdoType::Role && object_name.as_str() == "ТестоваяРоль")
+                && matches!(&e.to, GraphNode::Mdo { mdo_type, object_name }
+                    if *mdo_type == MdoType::Catalog && object_name.as_str() == to_name)
+        })
+    };
+
+    assert!(
+        role_edge("Контрагенты", EdgeProvenance::Resolved),
+        "listed role substrate must still produce direct role → object edges"
+    );
+    assert!(
+        role_edge("Организации", EdgeProvenance::Inferred),
+        "listed role substrate must still produce inferred RLS condition edges"
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn role_names_for_file_uses_bootstrapped_listing() {
+    use crate::metadata::RoleEntry;
+
+    fn role_xml(name: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Role uuid="00000000-0000-0000-0000-000000000083">
+        <Properties>
+            <Name>{name}</Name>
+            <Synonym/>
+            <Comment/>
+        </Properties>
+    </Role>
+</MetaDataObject>"#
+        )
+    }
+
+    fn rights_xml() -> &'static str {
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<Rights xmlns="http://v8.1c.ru/8.2/roles" version="2.10">
+    <setForNewObjects>false</setForNewObjects>
+    <object>
+        <name>Catalog.Контрагенты</name>
+        <right><name>Read</name><value>true</value></right>
+    </object>
+</Rights>"#
+    }
+
+    let root = std::env::temp_dir().join(format!(
+        "bsl_role_names_for_file_{}_{}",
+        std::process::id(),
+        line!()
+    ));
+    let role_path = root.join("Roles/ТестоваяРоль.xml");
+    std::fs::create_dir_all(role_path.parent().unwrap()).unwrap();
+
+    let mut db = RootDatabaseImpl::new();
+    let role_main = FileId(0);
+    let role_rights = FileId(1);
+    let consumer_file = FileId(2);
+    let consumer_path = root.join("RoleConsumer.bsl");
+
+    let mut file_set = FileSet::new();
+    file_set.insert(role_main, VfsPath::new(role_path.to_string_lossy().as_ref()));
+    file_set.insert(
+        role_rights,
+        VfsPath::new(root.join("Roles/ТестоваяРоль/Ext/Rights.xml").to_string_lossy().as_ref()),
+    );
+    file_set.insert(consumer_file, VfsPath::new(consumer_path.to_string_lossy().as_ref()));
+    db.set_source_root(SourceRootId(1), SourceRoot::new_local(file_set));
+    db.set_file_source_root(role_main, SourceRootId(1));
+    db.set_file_source_root(role_rights, SourceRootId(1));
+    db.set_file_source_root(consumer_file, SourceRootId(1));
+    db.set_file_text(role_main, &role_xml("ТестоваяРоль"));
+    db.set_file_text(role_rights, rights_xml());
+    db.set_file_text(consumer_file, "Процедура Т() КонецПроцедуры");
+
+    db.set_all_config_paths(vec![(None, root.clone())]);
+    db.set_metadata_listing(
+        &root.to_string_lossy(),
+        MetadataListingData {
+            entries: Vec::new(),
+            defined_types: Vec::new(),
+            common_modules: Vec::new(),
+            event_subscriptions: Vec::new(),
+            scheduled_jobs: Vec::new(),
+            roles: vec![RoleEntry {
+                name: "ТестоваяРоль".to_string(),
+                main: role_main,
+                rights: Some(role_rights),
+            }],
+            http_services: Vec::new(),
+            web_services: Vec::new(),
+            integration_services: Vec::new(),
+        },
+    );
+
+    assert_eq!(db.role_names_for_file(consumer_file), vec!["ТестоваяРоль".to_string()]);
+    assert_eq!(
+        db.enumerate_roles_for_file(consumer_file)
+            .iter()
+            .map(|role| role.name().to_string())
+            .collect::<Vec<_>>(),
+        vec!["ТестоваяРоль".to_string()]
     );
 
     std::fs::remove_dir_all(&root).ok();
@@ -2920,4 +3607,265 @@ fn weaving_target_none_for_base_file() {
         weaving_target(&db, main_file).is_none(),
         "a base-configuration file has no base counterpart to weave onto"
     );
+}
+
+#[test]
+fn parse_http_service_query_reads_nested_methods() {
+    use crate::metadata::{parse_http_service_query, HTTPServiceFile};
+
+    fn http_service_xml(name: &str, root_url: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <HTTPService uuid="4797cd39-952d-4e4d-9685-014e4d5a8e25">
+        <Properties>
+            <Name>{name}</Name>
+            <RootURL>{root_url}</RootURL>
+        </Properties>
+        <ChildObjects>
+            <URLTemplate uuid="7124b2c7-d38e-40b9-a934-e6eb9de99340">
+                <Properties>
+                    <Name>URLTemplate1</Name>
+                    <Template>/storage/{{Storage}}/{{ID}}</Template>
+                </Properties>
+                <ChildObjects>
+                    <Method uuid="605f52a9-e95b-4900-9e41-449d7da01348">
+                        <Properties>
+                            <Name>GET</Name>
+                            <HTTPMethod>GET</HTTPMethod>
+                            <Handler>URLTemplate1GET</Handler>
+                        </Properties>
+                    </Method>
+                    <Method uuid="462355c3-a1d9-488b-91ea-979f880f910f">
+                        <Properties>
+                            <Name>POST</Name>
+                            <HTTPMethod>POST</HTTPMethod>
+                            <Handler>URLTemplate1POST</Handler>
+                        </Properties>
+                    </Method>
+                </ChildObjects>
+            </URLTemplate>
+        </ChildObjects>
+    </HTTPService>
+</MetaDataObject>"#
+        )
+    }
+
+    let mut db = RootDatabaseImpl::new();
+    let main_file = FileId(0);
+
+    let mut file_set = FileSet::new();
+    file_set.insert(main_file, VfsPath::new("/HTTPServices/МойHTTPСервис.xml"));
+    db.set_source_root(SourceRootId(1), SourceRoot::new_local(file_set));
+    db.set_file_source_root(main_file, SourceRootId(1));
+    db.set_file_text(main_file, &http_service_xml("МойHTTPСервис", "http"));
+
+    let file = HTTPServiceFile::new(&db, main_file);
+    let service =
+        parse_http_service_query(&db, file).expect("HTTP service parses via per-service query");
+    assert_eq!(service.name(), "МойHTTPСервис");
+    assert_eq!(service.root_url(), "http");
+    assert_eq!(service.url_templates().len(), 1);
+
+    let template = &service.url_templates()[0];
+    assert_eq!(template.name(), "URLTemplate1");
+    assert_eq!(template.methods().len(), 2);
+    assert_eq!(template.methods()[0].handler(), "URLTemplate1GET");
+    assert_eq!(template.methods()[1].handler(), "URLTemplate1POST");
+
+    let again = parse_http_service_query(&db, file).expect("HTTP service parses again");
+    assert!(Arc::ptr_eq(&service, &again), "parse_http_service_query should memoise");
+}
+
+#[test]
+fn parse_web_service_query_reads_operations() {
+    use crate::metadata::{parse_web_service_query, WebServiceFile};
+
+    fn web_service_xml(name: &str, namespace: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <WebService uuid="0b4a4c9c-76e9-455c-9471-249051a8301d">
+        <Properties>
+            <Name>{name}</Name>
+            <Namespace>{namespace}</Namespace>
+        </Properties>
+        <ChildObjects>
+            <Operation uuid="bc99d837-aee6-40ee-8940-3a81dddf477c">
+                <Properties>
+                    <Name>Операция1</Name>
+                    <ProcedureName>Операция1</ProcedureName>
+                </Properties>
+                <ChildObjects/>
+            </Operation>
+            <Operation uuid="bc09d837-aee6-40ee-8940-3a81dddf477c">
+                <Properties>
+                    <Name>ОперацияБезОбработчика</Name>
+                    <ProcedureName/>
+                </Properties>
+                <ChildObjects/>
+            </Operation>
+        </ChildObjects>
+    </WebService>
+</MetaDataObject>"#
+        )
+    }
+
+    let mut db = RootDatabaseImpl::new();
+    let main_file = FileId(0);
+
+    let mut file_set = FileSet::new();
+    file_set.insert(main_file, VfsPath::new("/WebServices/МойWebСервис.xml"));
+    db.set_source_root(SourceRootId(1), SourceRoot::new_local(file_set));
+    db.set_file_source_root(main_file, SourceRootId(1));
+    db.set_file_text(main_file, &web_service_xml("МойWebСервис", "test.com"));
+
+    let file = WebServiceFile::new(&db, main_file);
+    let service =
+        parse_web_service_query(&db, file).expect("web service parses via per-service query");
+    assert_eq!(service.name(), "МойWebСервис");
+    assert_eq!(service.namespace(), "test.com");
+    assert_eq!(service.operations().len(), 2);
+
+    let op = &service.operations()[0];
+    assert_eq!(op.name(), "Операция1");
+    assert_eq!(op.procedure_name(), "Операция1");
+
+    let empty_op = &service.operations()[1];
+    assert_eq!(empty_op.name(), "ОперацияБезОбработчика");
+    assert!(empty_op.is_handler_empty(), "operation with empty ProcedureName has no handler");
+
+    let again = parse_web_service_query(&db, file).expect("web service parses again");
+    assert!(Arc::ptr_eq(&service, &again), "parse_web_service_query should memoise");
+}
+
+#[test]
+fn parse_integration_service_query_reads_channels() {
+    use crate::metadata::{parse_integration_service_query, IntegrationServiceFile};
+
+    fn integration_service_xml(name: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20">
+    <IntegrationService uuid="c512a1cd-1240-4e46-8bad-8b7b27c5c25a">
+        <Properties>
+            <Name>{name}</Name>
+        </Properties>
+        <ChildObjects>
+            <IntegrationServiceChannel uuid="1ef0581c-b1d8-4115-87f1-7856f6c06bb6">
+                <Properties>
+                    <Name>input_from_SM_normal_priority</Name>
+                    <MessageDirection>Receive</MessageDirection>
+                    <ReceiveMessageProcessing>ОбработатьСообщениеОбычныйПриоритет</ReceiveMessageProcessing>
+                </Properties>
+            </IntegrationServiceChannel>
+            <IntegrationServiceChannel uuid="b017ac62-a4a2-47bd-b963-50e0764a7d4e">
+                <Properties>
+                    <Name>output_to_SM_high_priority</Name>
+                    <MessageDirection>Send</MessageDirection>
+                    <ReceiveMessageProcessing/>
+                </Properties>
+            </IntegrationServiceChannel>
+        </ChildObjects>
+    </IntegrationService>
+</MetaDataObject>"#
+        )
+    }
+
+    let mut db = RootDatabaseImpl::new();
+    let main_file = FileId(0);
+
+    let mut file_set = FileSet::new();
+    file_set.insert(main_file, VfsPath::new("/IntegrationServices/ОбменСообщениями.xml"));
+    db.set_source_root(SourceRootId(1), SourceRoot::new_local(file_set));
+    db.set_file_source_root(main_file, SourceRootId(1));
+    db.set_file_text(main_file, &integration_service_xml("ОбменСообщениями"));
+
+    let file = IntegrationServiceFile::new(&db, main_file);
+    let service = parse_integration_service_query(&db, file)
+        .expect("integration service parses via per-service query");
+    assert_eq!(service.name(), "ОбменСообщениями");
+    assert_eq!(service.channels().len(), 2);
+
+    let handlers: Vec<&str> = service.receive_handlers().collect();
+    assert_eq!(handlers, vec!["ОбработатьСообщениеОбычныйПриоритет"]);
+    assert_eq!(service.channels()[0].name(), "input_from_SM_normal_priority");
+    assert_eq!(service.channels()[1].receive_message_processing(), "");
+
+    let again =
+        parse_integration_service_query(&db, file).expect("integration service parses again");
+    assert!(Arc::ptr_eq(&service, &again), "parse_integration_service_query should memoise");
+}
+
+#[test]
+fn service_indexes_are_case_insensitive_and_track_module_file() {
+    use crate::metadata::{
+        http_service_index, integration_service_index, web_service_index, HTTPServiceEntry,
+        IntegrationServiceEntry, MetadataListingInput, WebServiceEntry,
+    };
+    use salsa::Setter;
+
+    let mut db = RootDatabaseImpl::new();
+    let http_main = FileId(0);
+    let http_module = FileId(1);
+    let web_main = FileId(2);
+    let web_module = FileId(3);
+    let isvc_main = FileId(4);
+    let isvc_module = FileId(5);
+
+    let mut file_set = FileSet::new();
+    file_set.insert(http_main, VfsPath::new("/HTTPServices/Сервис1.xml"));
+    file_set.insert(http_module, VfsPath::new("/HTTPServices/Сервис1/Ext/Module.bsl"));
+    file_set.insert(web_main, VfsPath::new("/WebServices/Сервис2.xml"));
+    file_set.insert(web_module, VfsPath::new("/WebServices/Сервис2/Ext/Module.bsl"));
+    file_set.insert(isvc_main, VfsPath::new("/IntegrationServices/Сервис3.xml"));
+    file_set.insert(isvc_module, VfsPath::new("/IntegrationServices/Сервис3/Ext/Module.bsl"));
+    db.set_source_root(SourceRootId(1), SourceRoot::new_local(file_set));
+    for fid in [http_main, http_module, web_main, web_module, isvc_main, isvc_module] {
+        db.set_file_source_root(fid, SourceRootId(1));
+    }
+    db.set_file_text(http_main, "<MetaDataObject/>");
+    db.set_file_text(web_main, "<MetaDataObject/>");
+    db.set_file_text(isvc_main, "<MetaDataObject/>");
+
+    let listing = MetadataListingInput::new(
+        &db,
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+    );
+    listing.set_http_services(&mut db).to(Arc::new(vec![HTTPServiceEntry {
+        name: "Сервис1".to_string(),
+        main: http_main,
+        module_file: Some(http_module),
+    }]));
+    listing.set_web_services(&mut db).to(Arc::new(vec![WebServiceEntry {
+        name: "Сервис2".to_string(),
+        main: web_main,
+        module_file: Some(web_module),
+    }]));
+    listing.set_integration_services(&mut db).to(Arc::new(vec![IntegrationServiceEntry {
+        name: "Сервис3".to_string(),
+        main: isvc_main,
+        module_file: Some(isvc_module),
+    }]));
+
+    let http_idx = http_service_index(&db, listing);
+    assert_eq!(http_idx.lookup("сервис1"), Some(http_main));
+    assert_eq!(http_idx.lookup_module_file("Сервис1"), Some(http_module));
+    assert!(http_idx.lookup_module_file("НетТакогоСервиса").is_none());
+
+    let web_idx = web_service_index(&db, listing);
+    assert_eq!(web_idx.lookup("СЕРВИС2"), Some(web_main));
+    assert_eq!(web_idx.lookup_module_file("сервис2"), Some(web_module));
+
+    let isvc_idx = integration_service_index(&db, listing);
+    assert_eq!(isvc_idx.lookup("сервис3"), Some(isvc_main));
+    assert_eq!(isvc_idx.lookup_module_file("СЕРВИС3"), Some(isvc_module));
 }
