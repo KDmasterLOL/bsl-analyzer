@@ -694,6 +694,20 @@ fn intern_metadata_file(
     Some(file_id)
 }
 
+/// Whether `path` is in the caller's `changed` set. The set may hold *canonicalised*
+/// paths (a consumer that derives its change list from a `canonicalize`d disk scan),
+/// while `path` is a discovery join (`root` + relative) that does NOT resolve a symlink
+/// *inside* the tree. So on a direct miss, retry against the canonicalised path — else a
+/// changed file under a symlinked subdirectory would keep its stale revision and never
+/// re-parse. The syscall runs only on a miss, so an already-canonical caller (the LSP)
+/// never pays it.
+fn is_changed(changed: &HashSet<&Path>, path: &Path) -> bool {
+    if changed.contains(path) {
+        return true;
+    }
+    matches!(path.canonicalize(), Ok(canonical) if changed.contains(canonical.as_path()))
+}
+
 /// Enroll a composing file during an incremental refresh: intern it, ensure it is
 /// in the metadata file set, and (re)read its revision only if it changed or is
 /// brand-new — an unchanged, already-enrolled file keeps its boot revision and is
@@ -711,7 +725,7 @@ fn enroll_refresh(
     let vfs_path = VfsPath::new(path.to_path_buf());
     let is_new = file_set.file_for_path(&vfs_path).is_none();
 
-    if changed.contains(path) || is_new {
+    if is_changed(changed, path) || is_new {
         let revision = content_revision(&read_disk_text(path).ok()?);
         let file_id = vfs.alloc_file_id(vfs_path.clone());
         file_set.insert(file_id, vfs_path);

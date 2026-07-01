@@ -19,11 +19,11 @@
 //! clones the Salsa `Storage`) and the clone never leaves the calling thread.
 //!
 //! Freshness is pull-on-request, mirroring the graph: each read cheaply re-checks the
-//! workspace on disk (throttled), applies an incremental `set_file_text` for changed
-//! `.bsl` bodies, and falls back to a full rebuild for structural drift (added /
-//! removed files, any `.xml`, or an analyzer config-file change). An idle sweeper
-//! drops the resident db after a quiet period so a standalone `mcp serve` reclaims the
-//! memory after a burst.
+//! workspace on disk (throttled). A changed `.bsl` body is re-keyed with `set_file_text`
+//! and any `.xml` add/remove/edit point-refreshes the metadata substrate — both in place
+//! under the resident mutex. Only a non-`.xml` file add/remove or an analyzer config-file
+//! change falls back to a full off-thread rebuild. An idle sweeper drops the resident db
+//! after a quiet period so a standalone `mcp serve` reclaims the memory after a burst.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -113,9 +113,7 @@ pub(crate) struct DiagnosticsResident {
     /// The VFS pre-seeded with the resident's `.bsl` FileIds and grown by the metadata
     /// bootstrap with the metadata-XML ids. Kept alongside the db so a drift-driven
     /// substrate refresh can intern new composing files onto the same id space without
-    /// rebuilding it. Not read on the current diagnostics path — only the refresh path,
-    /// which shares this db, consumes it — so it is retained for that consumer.
-    #[allow(dead_code)]
+    /// rebuilding it.
     vfs: ResidentVfs,
     /// Canonical-path string → FileId for every resident `.bsl`.
     by_path: HashMap<String, FileId>,
@@ -499,9 +497,11 @@ impl DiagnosticsState {
         lock_recover(&self.inner).generation
     }
 
-    /// Detect and handle on-disk drift since the last build/apply. Incremental for
-    /// `.bsl`-body-only changes (`set_file_text` under the write lock); a full rebuild
-    /// off-thread for structural drift. Throttled and a no-op unless Ready.
+    /// Detect and handle on-disk drift since the last build/apply. Reconciled in place
+    /// (under the resident mutex) for `.bsl` body edits and any `.xml` add/remove/edit —
+    /// the latter through a metadata-substrate point-refresh. Only a non-`.xml` add/remove
+    /// or an analyzer-config change forces a full off-thread rebuild. Throttled and a
+    /// no-op unless Ready.
     fn poll_drift(&self) {
         let Some(root) = self.workspace_root.clone() else {
             return;
@@ -525,29 +525,50 @@ impl DiagnosticsState {
             return;
         }
 
-        // Structural drift (added/removed/.xml/config) forces a full rebuild; a `.bsl`
-        // body-only change applies incrementally.
-        let structural = config_changed
-            || !changes.added.is_empty()
-            || !changes.removed.is_empty()
-            || changes.modified.iter().any(|p| p.ends_with(".xml"));
+        // A non-XML add/remove moves the file universe (a new or vanished `.bsl`), and an
+        // analyzer-config edit can change the extension set — neither is expressible as a
+        // substrate point-refresh, so both force a full rebuild. Everything else (any
+        // `.xml` add/remove/edit, plus `.bsl` body edits) is reconciled in place.
+        let full_rebuild = config_changed
+            || changes.added.iter().any(|p| !p.ends_with(".xml"))
+            || changes.removed.iter().any(|p| !p.ends_with(".xml"));
 
-        if structural {
+        if full_rebuild {
             self.kick_full_reload();
-        } else {
-            self.apply_incremental(&changes.modified, &scan);
+            return;
         }
+
+        // XML drift spans all three buckets: an added/removed object is a structural
+        // listing change, an edited one a content change — the substrate refresh handles
+        // all of them by re-discovery + re-read of changed/new composing files.
+        let xml_paths: Vec<PathBuf> = changes
+            .added
+            .iter()
+            .chain(&changes.removed)
+            .chain(&changes.modified)
+            .filter(|p| p.ends_with(".xml"))
+            .map(PathBuf::from)
+            .collect();
+        let modified_bsl: Vec<String> =
+            changes.modified.iter().filter(|p| !p.ends_with(".xml")).cloned().collect();
+        self.apply_metadata_and_body_drift(&xml_paths, &modified_bsl, &scan);
     }
 
-    /// Re-key each modified `.bsl` to its on-disk content revision, re-reading from disk.
-    /// Disk-backed (not an overlay) so the edited file's text stays LRU-evictable like the
-    /// rest of the resident, mirroring the load path. The entire resolve→read→set→record
-    /// sequence runs under ONE lock hold, so a concurrent full rebuild (which also takes
-    /// the lock) cannot swap the resident mid-apply and make us record a stale revision. A
-    /// modified path with no resident FileId is a structural change: we bail to a full
-    /// rebuild (after dropping the lock). Idempotent against a racing apply, and bumps the
-    /// generation only when content actually moved.
-    fn apply_incremental(&self, modified: &[String], scan: &OwnedScan) {
+    /// Reconcile metadata-only structural drift in place, without a whole-db rebuild:
+    /// point-refresh the metadata substrate for the drifted `.xml` (re-discovering the
+    /// affected roots and re-reading only changed/new composing files) and re-key the
+    /// drifted `.bsl` bodies to their on-disk revision. Everything runs under ONE hold of
+    /// the resident mutex — the same discipline as a body-only apply — so a concurrent
+    /// full rebuild (which also takes the lock) can never swap the resident mid-apply. A
+    /// modified `.bsl` with no resident FileId means the file universe moved, so we bail
+    /// to a full rebuild. The drift baseline is rebased to `scan` once reconciled, and the
+    /// generation is bumped only when a Salsa input actually moved.
+    fn apply_metadata_and_body_drift(
+        &self,
+        xml_paths: &[PathBuf],
+        modified_bsl: &[String],
+        scan: &OwnedScan,
+    ) {
         use ide_host_core::{set_file_text_source, FileTextSource};
 
         let new_fp: HashMap<&str, u64> =
@@ -556,40 +577,103 @@ impl DiagnosticsState {
         let mut needs_rebuild = false;
         {
             let mut inner = lock_recover(&self.inner);
-            // A full rebuild already in flight will publish a fresh resident; defer to
-            // it rather than mutating a resident that is about to be replaced.
+            // A full rebuild already in flight will publish a fresh resident; defer to it
+            // rather than mutating a resident that is about to be replaced.
             if inner.reload == ReloadState::Running {
+                return;
+            }
+            // Another caller may have reconciled this exact scan already (both passed the
+            // throttle, then serialised here); bail so we neither re-walk the roots nor
+            // double-bump the generation.
+            if classify_changes(&inner.stats, &scan.stats).is_empty()
+                && inner.config_fp == scan.config_fp
+            {
                 return;
             }
             let Inner { resident: Some(resident), stats, generation, .. } = &mut *inner else {
                 return;
             };
-            let mut applied = 0usize;
-            for path in modified {
-                let Some(&fp) = new_fp.get(path.as_str()) else { continue };
-                if stats.get(path).copied() == Some(fp) {
-                    continue; // already applied (e.g. by a racing caller)
+
+            // Pre-classification: an XML path resolving outside every registered config
+            // root is drift the point-refresh cannot express. `refresh_metadata_substrate`
+            // gates its re-discovery on `changed.starts_with(root)`, so such a path
+            // silently no-ops there — and the baseline rebase below would then forget the
+            // change forever. It arises when a metadata subtree is a symlink whose
+            // canonical (scan) path resolves outside the root. Bail to a full rebuild
+            // WITHOUT rebasing the baseline; a full rebuild re-reads through the discovery
+            // joins, symlinks and all. (`all_config_paths` roots are canonicalised at build.)
+            let config_roots = resident.db.all_config_paths();
+            let xml_outside_roots =
+                xml_paths.iter().any(|p| !config_roots.iter().any(|(_, root)| p.starts_with(root)));
+
+            if xml_outside_roots {
+                needs_rebuild = true;
+            } else {
+                // Metadata XML drift is two independent invalidations, both under this lock.
+                // (1) Point-refresh the per-MDO substrate: re-discover the owning roots and
+                // re-read only the changed/new composing files `discover_*` enrolls.
+                // (2) Bump each owning root's config revision UNCONDITIONALLY. `refresh`
+                // reports movement only for enrolled composing files, but a non-enrolled
+                // `.xml` a whole-config `load_from_directory` would re-read (`Configuration.xml`,
+                // form/template/command descriptors) must still invalidate the coarse
+                // Channel-2 `load_configuration` memo — a cheap revision counter, recomputed
+                // lazily and only if consumed. Any `.xml` drift is observable movement.
+                let mut moved = false;
+                if !xml_paths.is_empty() {
+                    ide_host_core::refresh_metadata_substrate(
+                        &mut resident.db,
+                        &resident.vfs,
+                        xml_paths,
+                    );
+                    resident.db.bump_config_for_paths(xml_paths.iter().map(|p| p.as_path()));
+                    moved = true;
                 }
-                let Some(&file_id) = resident.by_path.get(path) else {
-                    needs_rebuild = true; // a modified path we never indexed → structural
-                    break;
-                };
-                match base_db::read_disk_text(Path::new(path)) {
-                    Ok(text) => {
-                        set_file_text_source(&mut resident.db, file_id, FileTextSource::Disk(&text))
+
+                // `.bsl` bodies: disk-backed re-key, mirroring the body-only apply. A body
+                // already at its on-disk fingerprint (a racing caller beat us) is skipped.
+                for path in modified_bsl {
+                    let Some(&fp) = new_fp.get(path.as_str()) else { continue };
+                    if stats.get(path).copied() == Some(fp) {
+                        continue;
                     }
-                    // Unreadable now: an empty overlay so a later query yields `""`
-                    // instead of panicking on the disk re-read, matching the load path.
-                    Err(_) => {
-                        set_file_text_source(&mut resident.db, file_id, FileTextSource::Tombstone)
+                    let Some(&file_id) = resident.by_path.get(path) else {
+                        needs_rebuild = true; // a modified `.bsl` we never indexed → structural
+                        break;
+                    };
+                    match base_db::read_disk_text(Path::new(path)) {
+                        Ok(text) => set_file_text_source(
+                            &mut resident.db,
+                            file_id,
+                            FileTextSource::Disk(&text),
+                        ),
+                        // Unreadable now: an empty overlay so a later query yields `""`
+                        // instead of panicking on the disk re-read, matching the load path.
+                        Err(_) => set_file_text_source(
+                            &mut resident.db,
+                            file_id,
+                            FileTextSource::Tombstone,
+                        ),
+                    }
+                    moved = true;
+                }
+
+                if !needs_rebuild {
+                    // Advance the drift baseline to the scan we reconciled against: every
+                    // applied body and every XML add/remove/edit is now reflected in the
+                    // resident, so its state equals `scan`. Rebasing even when nothing moved
+                    // (a pure mtime touch with unchanged content) stops us re-scanning it
+                    // every window.
+                    *stats = scan.stats.iter().map(|s| (s.path.clone(), s.fingerprint())).collect();
+                    if moved {
+                        *generation += 1;
+                        tracing::info!(
+                            xml = xml_paths.len(),
+                            bodies = modified_bsl.len(),
+                            generation = *generation,
+                            "diagnostics metadata drift refresh",
+                        );
                     }
                 }
-                stats.insert(path.clone(), fp);
-                applied += 1;
-            }
-            if applied > 0 && !needs_rebuild {
-                *generation += 1;
-                tracing::info!(applied, generation = *generation, "diagnostics incremental reload");
             }
         }
         if needs_rebuild {
@@ -897,7 +981,9 @@ mod tests {
         fs::write(path, text).unwrap();
     }
 
-    fn write_common_module(root: &Path, name: &str, server: bool, body: &str) {
+    /// Write only a common module's descriptor XML (not its `Ext/Module.bsl`), so a test
+    /// can flip a metadata property as pure `.xml` drift without touching the body.
+    fn write_common_module_xml(root: &Path, name: &str, server: bool) {
         let client = !server;
         let xml = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -919,6 +1005,10 @@ mod tests {
             id = name.len(),
         );
         write(root, &format!("CommonModules/{name}.xml"), &xml);
+    }
+
+    fn write_common_module(root: &Path, name: &str, server: bool, body: &str) {
+        write_common_module_xml(root, name, server);
         write(root, &format!("CommonModules/{name}/Ext/Module.bsl"), body);
     }
 
@@ -1376,5 +1466,333 @@ mod tests {
             }
             _ => panic!("expected Ready outcome from a loaded db"),
         }
+    }
+
+    fn write_catalog(root: &Path, name: &str, code_length: u32) {
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Catalog uuid="00000000-0000-0000-0000-0000000000{id:02}">
+        <Properties><Name>{name}</Name><CodeLength>{code_length}</CodeLength></Properties>
+    </Catalog>
+</MetaDataObject>"#,
+            id = name.len(),
+        );
+        write(root, &format!("Catalogs/{name}.xml"), &xml);
+    }
+
+    /// Whether the catalog `Товары` resolves through the substrate, anchored at the
+    /// common module's `.bsl` (a file with a valid config root).
+    fn catalog_resolves(state: &DiagnosticsState, module: &Path) -> bool {
+        let out = state.read(|resident, _| {
+            let fid = resident.file_id_for(module).expect("module resolves to a FileId");
+            resident
+                .db
+                .resolve_metadata_object_for_file(fid, bsl_metadata::MdoType::Catalog, "Товары")
+                .is_some()
+        });
+        match out {
+            ResidentOutcome::Ready(v, _) => v,
+            _ => panic!("expected Ready outcome"),
+        }
+    }
+
+    /// The module file's diagnostics as sorted debug strings, for comparing an in-place
+    /// point-refresh against a cold build over the same tree.
+    fn module_diag_fingerprint(state: &DiagnosticsState, module: &Path) -> Vec<String> {
+        let out = state.read(|resident, _| {
+            let fid = resident.file_id_for(module).expect("module resolves to a FileId");
+            let analysis = resident.analysis();
+            let mut lines: Vec<String> = analysis
+                .diagnostics(fid, resident.config())
+                .iter()
+                .map(|d| format!("{d:?}"))
+                .collect();
+            lines.sort();
+            lines
+        });
+        match out {
+            ResidentOutcome::Ready(v, _) => v,
+            _ => panic!("expected Ready outcome"),
+        }
+    }
+
+    /// Adding a metadata `.xml` point-refreshes the substrate in place: the new object
+    /// resolves without a full db rebuild (no reload kicked), and the generation bumps.
+    #[test]
+    fn xml_add_point_refreshes_substrate_without_full_rebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let mut state = DiagnosticsState::for_workspace(root.to_path_buf());
+        state.drift_interval = Duration::from_millis(0);
+        state.ensure_loading();
+        wait_ready(&state);
+        let gen0 = state.generation();
+
+        let module = module_path(root, "Сервер");
+        assert!(!catalog_resolves(&state, &module), "catalog absent before the add");
+
+        std::thread::sleep(Duration::from_millis(10));
+        write_catalog(root, "Товары", 9);
+
+        assert!(catalog_resolves(&state, &module), "added catalog resolves after point-refresh");
+        assert_eq!(
+            state.status_report().reload,
+            "none",
+            "no full rebuild was kicked for an XML add"
+        );
+        assert!(state.generation() > gen0, "the point-refresh bumps the generation");
+        assert!(matches!(state.status(), DiagnosticsStatus::Ready { .. }), "stays Ready, no churn");
+    }
+
+    /// Removing a metadata `.xml` tombstones the object through a point-refresh — it no
+    /// longer resolves — with no full rebuild.
+    #[test]
+    fn xml_remove_point_refreshes_substrate_without_full_rebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        write_catalog(root, "Товары", 9);
+
+        let mut state = DiagnosticsState::for_workspace(root.to_path_buf());
+        state.drift_interval = Duration::from_millis(0);
+        state.ensure_loading();
+        wait_ready(&state);
+        let gen0 = state.generation();
+
+        let module = module_path(root, "Сервер");
+        assert!(catalog_resolves(&state, &module), "catalog present before the remove");
+
+        std::thread::sleep(Duration::from_millis(10));
+        std::fs::remove_file(root.join("Catalogs/Товары.xml")).unwrap();
+
+        assert!(
+            !catalog_resolves(&state, &module),
+            "removed catalog tombstoned after point-refresh"
+        );
+        assert_eq!(
+            state.status_report().reload,
+            "none",
+            "no full rebuild was kicked for an XML remove"
+        );
+        assert!(state.generation() > gen0, "the point-refresh bumps the generation");
+    }
+
+    /// Editing a metadata `.xml` re-reads only that object; the resident stays in place
+    /// (no full rebuild) and its diagnostics equal a cold build over the mutated tree.
+    #[test]
+    fn xml_edit_point_refreshes_and_matches_fresh_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        write_catalog(root, "Товары", 9);
+
+        let mut state = DiagnosticsState::for_workspace(root.to_path_buf());
+        state.drift_interval = Duration::from_millis(0);
+        state.ensure_loading();
+        wait_ready(&state);
+        let gen0 = state.generation();
+
+        let module = module_path(root, "Сервер");
+        std::thread::sleep(Duration::from_millis(10));
+        write_catalog(root, "Товары", 12); // content edit → the object's revision moves
+
+        // A read triggers the synchronous point-refresh.
+        let _ = state.read(|_, _| ());
+        assert_eq!(
+            state.status_report().reload,
+            "none",
+            "no full rebuild was kicked for an XML edit"
+        );
+        assert!(state.generation() > gen0, "the edit is detected and applied in place");
+
+        // A cold resident over the same on-disk tree must agree diagnostic-for-diagnostic.
+        let fresh = DiagnosticsState::for_workspace(root.to_path_buf());
+        fresh.ensure_loading();
+        wait_ready(&fresh);
+        assert_eq!(
+            module_diag_fingerprint(&state, &module),
+            module_diag_fingerprint(&fresh, &module),
+            "point-refreshed diagnostics must equal a cold build over the mutated tree"
+        );
+    }
+
+    /// An analyzer-config edit is NOT a metadata point-refresh: it still forces a full
+    /// rebuild, re-deriving the effective config (something only a rebuild does). Proven
+    /// by the resident picking up the flipped `Typo` setting after the edit.
+    #[test]
+    fn analyzer_config_edit_still_full_rebuilds() {
+        use ide::DiagnosticCode;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        write(root, "bsl-analyzer.toml", "[diagnostics.parameters]\nTypo = false\n");
+
+        let mut state = DiagnosticsState::for_workspace(root.to_path_buf());
+        state.drift_interval = Duration::from_millis(0);
+        state.ensure_loading();
+        wait_ready(&state);
+        let disabled0 = state.read(|r, _| r.config().is_disabled(DiagnosticCode::Typo));
+        assert!(matches!(disabled0, ResidentOutcome::Ready(true, _)), "initial toml disables Typo");
+
+        std::thread::sleep(Duration::from_millis(10));
+        write(root, "bsl-analyzer.toml", "[diagnostics.parameters]\nTypo = true\n");
+
+        // The reload runs off-thread; poll until the re-derived config lands.
+        let mut reloaded = false;
+        for _ in 0..200 {
+            if let ResidentOutcome::Ready(false, _) =
+                state.read(|r, _| r.config().is_disabled(DiagnosticCode::Typo))
+            {
+                reloaded = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(reloaded, "a config edit full-rebuilds and re-derives the effective config");
+    }
+
+    /// A metadata `.xml` that `discover_*` does NOT enroll as a composing file
+    /// (`Configuration.xml` here — a whole-config `load_from_directory` would re-read it)
+    /// must still invalidate the coarse Channel-2 `load_configuration` memo via an
+    /// unconditional config-revision bump, without a full rebuild. Observed directly
+    /// through the config-root revision the `load_configuration` query keys on.
+    #[test]
+    fn non_enrolled_xml_edit_bumps_channel2_without_full_rebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        write(root, "Configuration.xml", "<Configuration><Name>Конфа</Name></Configuration>");
+
+        let mut state = DiagnosticsState::for_workspace(root.to_path_buf());
+        state.drift_interval = Duration::from_millis(0);
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let module = module_path(root, "Сервер");
+        let rev0 = state.read(|r, _| r.db.config_root_revision_for_path(&module));
+        let ResidentOutcome::Ready(rev0, _) = rev0 else { panic!("expected Ready") };
+
+        std::thread::sleep(Duration::from_millis(10));
+        write(root, "Configuration.xml", "<Configuration><Name>Другая</Name></Configuration>");
+
+        // A read triggers the synchronous point-refresh; the non-enrolled edit still bumps
+        // the config revision even though no per-MDO composing file moved.
+        let rev1 = state.read(|r, _| r.db.config_root_revision_for_path(&module));
+        let ResidentOutcome::Ready(rev1, _) = rev1 else { panic!("expected Ready") };
+
+        assert_eq!(
+            state.status_report().reload,
+            "none",
+            "a non-enrolled XML edit is a point-refresh, not a full rebuild"
+        );
+        assert!(rev1 > rev0, "the config-root revision the Channel-2 memo keys on must bump");
+    }
+
+    /// A common module's server flag, resolved through the substrate back-link.
+    #[cfg(unix)]
+    fn module_is_server(state: &DiagnosticsState, module: &Path) -> Option<bool> {
+        let out = state.read(|r, _| {
+            let fid = r.file_id_for(module)?;
+            Some(r.db.common_module_for_file_id(fid)?.is_server())
+        });
+        match out {
+            ResidentOutcome::Ready(v, _) => v,
+            _ => panic!("expected Ready outcome"),
+        }
+    }
+
+    /// A metadata subtree that is a symlink to a directory OUTSIDE the config root: the
+    /// canonical (scan) path of its XML resolves outside the root, so the point-refresh
+    /// cannot express the drift. Editing such an XML must still reach the resident — the
+    /// pre-classification routes it to a full rebuild instead of silently forgetting it.
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_subtree_outside_root_xml_edit_is_not_lost() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        let root = base.join("ws");
+        std::fs::create_dir_all(&root).unwrap();
+        // Real common-module content lives OUTSIDE the workspace root, reached only via a
+        // symlinked `CommonModules` directory.
+        let real = base.join("real");
+        write_common_module(&real, "Сервер", true, "&НаСервере\nФункция Ч() Экспорт КонецФункции");
+        std::os::unix::fs::symlink(real.join("CommonModules"), root.join("CommonModules")).unwrap();
+
+        let mut state = DiagnosticsState::for_workspace(root.clone());
+        state.drift_interval = Duration::from_millis(0);
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let module = root.join("CommonModules/Сервер/Ext/Module.bsl");
+        assert_eq!(module_is_server(&state, &module), Some(true), "starts server-side");
+
+        // Flip Server→false via the descriptor XML only (no body edit). Its canonical path
+        // is outside the root, so the point-refresh cannot own it.
+        std::thread::sleep(Duration::from_millis(10));
+        write_common_module_xml(&real, "Сервер", false);
+
+        // The full rebuild is async; poll until the edit lands.
+        let mut flipped = false;
+        for _ in 0..300 {
+            let _ = state.read(|_, _| ());
+            if module_is_server(&state, &module) == Some(false) {
+                flipped = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(flipped, "an XML edit under a symlinked-outside subtree must not be lost");
+    }
+
+    /// A metadata subtree that is a symlink to another directory INSIDE the config root:
+    /// the canonical path stays under the root (so the point-refresh owns it), but the
+    /// discovery join keeps the symlink unresolved. Editing the XML must re-read the file
+    /// in place (via `enroll_refresh`'s canonicalise-on-miss) — a point-refresh, not a
+    /// full rebuild.
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_subtree_inside_root_xml_edit_point_refreshes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // Real modules live under `root/RealCM`; `root/CommonModules` is a symlink to it —
+        // both inside the root, so canonical paths stay under the root.
+        let realcm = root.join("RealCM");
+        std::fs::create_dir_all(&realcm).unwrap();
+        write_common_module(
+            &realcm,
+            "Сервер",
+            true,
+            "&НаСервере\nФункция Ч() Экспорт КонецФункции",
+        );
+        std::os::unix::fs::symlink(realcm.join("CommonModules"), root.join("CommonModules"))
+            .unwrap();
+
+        let mut state = DiagnosticsState::for_workspace(root.to_path_buf());
+        state.drift_interval = Duration::from_millis(0);
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let module = root.join("CommonModules/Сервер/Ext/Module.bsl");
+        assert_eq!(module_is_server(&state, &module), Some(true), "starts server-side");
+
+        std::thread::sleep(Duration::from_millis(10));
+        write_common_module_xml(&realcm, "Сервер", false);
+
+        // A read triggers the synchronous point-refresh; no full rebuild.
+        let _ = state.read(|_, _| ());
+        assert_eq!(
+            state.status_report().reload,
+            "none",
+            "an in-root symlinked XML edit is a point-refresh, not a full rebuild"
+        );
+        assert_eq!(
+            module_is_server(&state, &module),
+            Some(false),
+            "enroll_refresh must re-read the edited XML through the canonicalise-on-miss path"
+        );
     }
 }
