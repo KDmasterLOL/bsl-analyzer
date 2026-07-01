@@ -20,6 +20,23 @@ pub fn is_assignable(db: &dyn TypeKernelDb, from: TypeId, to: TypeId) -> bool {
         return true;
     }
 
+    // Cold-kind metadata references (`Метаданные.Роли.X`, `.РегламентныеЗадания.X`, `.HTTPСервисы.X`,
+    // …) are a soft, navigation-only inference. Before this type existed the expression was
+    // `Unknown`, which assigns freely; keep them Unknown-like for assignability so a cold-kind
+    // reference passed where a metadata object is expected (e.g.
+    // `РегламентныеЗадания.НайтиПредопределенное(Метаданные.РегламентныеЗадания.X)`) never
+    // manufactures a TypeMismatch. They ARE metadata objects; a precise per-kind lattice for the
+    // non-manager kinds is deliberately out of scope for this soft surface.
+    if matches!(
+        from_kind,
+        TypeKind::MetadataReference { .. } | TypeKind::MetadataReferenceCollection(_)
+    ) || matches!(
+        to_kind,
+        TypeKind::MetadataReference { .. } | TypeKind::MetadataReferenceCollection(_)
+    ) {
+        return true;
+    }
+
     if let TypeKind::Union(parts) = from_kind {
         return parts.iter().all(|p| is_assignable(db, *p, to));
     }
@@ -435,6 +452,27 @@ mod tests {
 
     fn metadata_ref_id(db: &dyn TypeKernelDb, kind: MetadataKind, name: &str) -> TypeId {
         db.metadata_ref(kind, name.to_string(), &bsl_types::testing::RootConfigCtx)
+    }
+
+    #[test]
+    fn cold_kind_metadata_reference_is_soft_assignable() {
+        use bsl_types::kind::MetadataReferenceKind;
+        let db = InMemoryDb::default();
+
+        let job = db.metadata_reference(MetadataReferenceKind::ScheduledJob, "X".into());
+        let roles = db.metadata_reference_collection(MetadataReferenceKind::Role);
+        let any_meta = db.any_metadata_ref(bsl_metadata::MdoType::Catalog);
+        let cat_ref = metadata_ref_id(&db, MetadataKind::CatalogRef, "Контрагенты");
+        let string = db.string(None, false);
+
+        // A cold-kind reference passed where a metadata object is expected must not manufacture a
+        // TypeMismatch (the real ERP shape: a scheduled-job/service reference into a platform call).
+        assert!(is_assignable(&db, job, any_meta), "cold ref ≤ AnyMetadataRef");
+        assert!(is_assignable(&db, job, cat_ref), "cold ref ≤ MetadataRef family");
+        assert!(is_assignable(&db, roles, any_meta), "cold collection ≤ AnyMetadataRef");
+        // Unknown-like on both sides: it never drives a mismatch, matching pre-Wave-1 behavior.
+        assert!(is_assignable(&db, job, string), "cold ref stays soft (Unknown-like)");
+        assert!(is_assignable(&db, cat_ref, job), "soft on the to-side too");
     }
 
     #[test]
