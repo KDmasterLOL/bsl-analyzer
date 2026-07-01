@@ -20,6 +20,8 @@ use ide_db::metadata::{
 };
 use vfs::{file_set::FileSet, FileId, Vfs, VfsPath};
 
+use ide::RootDatabaseImpl;
+
 use crate::AnalysisHost;
 
 /// A lock-flavour-neutral handle to the consumer's VFS. The metadata policy does its
@@ -36,628 +38,639 @@ struct RootStructureListing {
     data: MetadataListingData,
 }
 
-impl AnalysisHost {
-    /// Build the metadata substrate for every config root the database knows about.
-    /// `alloc_file_id` is idempotent, so it reuses the FileId already interned for a
-    /// watched path. Runs after the source root is initialised and re-runs on reload.
-    pub fn bootstrap_metadata_substrate(&mut self, vfs: &impl VfsWrite) {
-        let start = Instant::now();
+/// Build the metadata substrate for every config root the database knows about.
+/// `alloc_file_id` is idempotent, so it reuses the FileId already interned for a
+/// watched path. Runs after the source root is initialised and re-runs on reload.
+///
+/// Free function over a raw database so a consumer that owns a bare
+/// [`RootDatabaseImpl`] (the MCP diagnostics resident) can share the exact policy
+/// [`AnalysisHost`] runs, without wrapping its db in an `AnalysisHost`.
+pub fn bootstrap_metadata_substrate(db: &mut RootDatabaseImpl, vfs: &impl VfsWrite) {
+    let start = Instant::now();
 
-        let config_paths = self.raw_database().all_config_paths();
-        if config_paths.is_empty() {
-            return;
-        }
-
-        // One config root's discovered (stat-only) structure, before any file is
-        // read or interned.
-        struct RootDiscovery {
-            root_string: String,
-            mdos: Vec<bsl_metadata::DiscoveredMdo>,
-            defined_types: Vec<bsl_metadata::DiscoveredDefinedType>,
-            common_modules: Vec<bsl_metadata::DiscoveredCommonModule>,
-            event_subscriptions: Vec<bsl_metadata::DiscoveredEventSubscription>,
-            scheduled_jobs: Vec<bsl_metadata::DiscoveredScheduledJob>,
-            roles: Vec<bsl_metadata::DiscoveredRole>,
-            http_services: Vec<bsl_metadata::DiscoveredHTTPService>,
-            web_services: Vec<bsl_metadata::DiscoveredWebService>,
-            integration_services: Vec<bsl_metadata::DiscoveredIntegrationService>,
-            subsystems: Vec<bsl_metadata::DiscoveredSubsystem>,
-        }
-
-        // Discover every root's structure WITHOUT the vfs lock — discovery walks
-        // and stats the filesystem but never touches the vfs.
-        let discoveries: Vec<RootDiscovery> = config_paths
-            .iter()
-            .map(|(_, root_path)| {
-                let mut mdos = bsl_metadata::discover_metadata_structure(root_path);
-                mdos.extend(bsl_metadata::discover_register_structure(root_path));
-                RootDiscovery {
-                    root_string: root_path.to_string_lossy().to_string(),
-                    mdos,
-                    defined_types: bsl_metadata::discover_defined_type_structure(root_path),
-                    common_modules: bsl_metadata::discover_common_module_structure(root_path),
-                    event_subscriptions: bsl_metadata::discover_event_subscription_structure(
-                        root_path,
-                    ),
-                    scheduled_jobs: bsl_metadata::discover_scheduled_job_structure(root_path),
-                    roles: bsl_metadata::discover_role_structure(root_path),
-                    http_services: bsl_metadata::discover_http_service_structure(root_path),
-                    web_services: bsl_metadata::discover_web_service_structure(root_path),
-                    integration_services: bsl_metadata::discover_integration_service_structure(
-                        root_path,
-                    ),
-                    subsystems: bsl_metadata::discover_subsystem_structure(root_path),
-                }
-            })
-            .collect();
-
-        // Gather every composing file that needs its content revision, then read
-        // and hash them in parallel OFF the vfs lock. The text itself is not
-        // retained — only `(path, revision)`. (`module_file` is BSL source owned by
-        // root(0), read elsewhere — not hashed here.)
-        let mut to_read: Vec<PathBuf> = Vec::new();
-        for d in &discoveries {
-            for m in &d.mdos {
-                to_read.push(m.main.clone());
-                if let Some(p) = &m.predefined {
-                    to_read.push(p.clone());
-                }
-            }
-            to_read.extend(d.defined_types.iter().map(|t| t.main.clone()));
-            to_read.extend(d.common_modules.iter().map(|c| c.main.clone()));
-            to_read.extend(d.event_subscriptions.iter().map(|s| s.main.clone()));
-            to_read.extend(d.scheduled_jobs.iter().map(|j| j.main.clone()));
-            to_read.extend(d.http_services.iter().map(|s| s.main.clone()));
-            to_read.extend(d.web_services.iter().map(|s| s.main.clone()));
-            to_read.extend(d.integration_services.iter().map(|s| s.main.clone()));
-            to_read.extend(d.subsystems.iter().map(|s| s.main.clone()));
-            for role in &d.roles {
-                to_read.push(role.main.clone());
-                if let Some(rights) = &role.rights {
-                    to_read.push(rights.clone());
-                }
-            }
-        }
-        let revisions_by_path: HashMap<PathBuf, u64> = {
-            use rayon::prelude::*;
-            to_read
-                .par_iter()
-                .filter_map(|path| {
-                    let text = read_disk_text(path).ok()?;
-                    Some((path.clone(), content_revision(&text)))
-                })
-                .collect()
-        };
-
-        let mut metadata_file_set = FileSet::new();
-        let mut revisions: Vec<(FileId, u64)> = Vec::new();
-        let mut listings: Vec<RootStructureListing> = Vec::new();
-
-        // Intern under a single short vfs write: allocate FileIds and grow the
-        // metadata file set. This is the only lock-held work; the expensive reads
-        // already happened above. A file whose read failed (vanished between
-        // discovery and the read pass) is absent from `revisions_by_path`, so
-        // `intern_metadata_file` returns `None` and the MDO is dropped.
-        vfs.with_write(|vfs| {
-            for d in discoveries {
-                let mut entries = Vec::with_capacity(d.mdos.len());
-                for m in d.mdos {
-                    let Some(main) = intern_metadata_file(
-                        vfs,
-                        &m.main,
-                        &revisions_by_path,
-                        &mut metadata_file_set,
-                        &mut revisions,
-                    ) else {
-                        continue;
-                    };
-                    let predefined = m.predefined.as_ref().and_then(|p| {
-                        intern_metadata_file(
-                            vfs,
-                            p,
-                            &revisions_by_path,
-                            &mut metadata_file_set,
-                            &mut revisions,
-                        )
-                    });
-                    entries.push(MdoEntry { kind: m.mdo_type, name: m.name, main, predefined });
-                }
-                let mut defined_types = Vec::new();
-                for t in d.defined_types {
-                    let Some(main) = intern_metadata_file(
-                        vfs,
-                        &t.main,
-                        &revisions_by_path,
-                        &mut metadata_file_set,
-                        &mut revisions,
-                    ) else {
-                        continue;
-                    };
-                    defined_types.push(DefinedTypeEntry { name: t.name, main });
-                }
-                let mut common_modules = Vec::new();
-                for c in d.common_modules {
-                    let Some(main) = intern_metadata_file(
-                        vfs,
-                        &c.main,
-                        &revisions_by_path,
-                        &mut metadata_file_set,
-                        &mut revisions,
-                    ) else {
-                        continue;
-                    };
-                    // The module's `Ext/Module.bsl` is BSL source owned by root(0),
-                    // not a metadata file — look up the analyzer's existing FileId for
-                    // it (bootstrap runs after the source root is interned) rather than
-                    // enrolling a duplicate. `None` when the path is absent or unloaded;
-                    // the reverse lookup then misses, which is correct.
-                    let module_file = c
-                        .module_file
-                        .as_ref()
-                        .and_then(|p| vfs.file_id(&VfsPath::new(p.to_path_buf())));
-                    common_modules.push(CommonModuleEntry { name: c.name, main, module_file });
-                }
-                let mut event_subscriptions = Vec::new();
-                for s in d.event_subscriptions {
-                    let Some(main) = intern_metadata_file(
-                        vfs,
-                        &s.main,
-                        &revisions_by_path,
-                        &mut metadata_file_set,
-                        &mut revisions,
-                    ) else {
-                        continue;
-                    };
-                    event_subscriptions.push(EventSubscriptionEntry { name: s.name, main });
-                }
-                let mut scheduled_jobs = Vec::new();
-                for j in d.scheduled_jobs {
-                    let Some(main) = intern_metadata_file(
-                        vfs,
-                        &j.main,
-                        &revisions_by_path,
-                        &mut metadata_file_set,
-                        &mut revisions,
-                    ) else {
-                        continue;
-                    };
-                    scheduled_jobs.push(ScheduledJobEntry { name: j.name, main });
-                }
-                let mut roles = Vec::new();
-                for role in d.roles {
-                    let Some(main) = intern_metadata_file(
-                        vfs,
-                        &role.main,
-                        &revisions_by_path,
-                        &mut metadata_file_set,
-                        &mut revisions,
-                    ) else {
-                        continue;
-                    };
-                    let rights = role.rights.as_ref().and_then(|p| {
-                        intern_metadata_file(
-                            vfs,
-                            p,
-                            &revisions_by_path,
-                            &mut metadata_file_set,
-                            &mut revisions,
-                        )
-                    });
-                    roles.push(RoleEntry { name: role.name, main, rights });
-                }
-                let mut http_services = Vec::new();
-                for service in d.http_services {
-                    let Some(main) = intern_metadata_file(
-                        vfs,
-                        &service.main,
-                        &revisions_by_path,
-                        &mut metadata_file_set,
-                        &mut revisions,
-                    ) else {
-                        continue;
-                    };
-                    let module_file = service
-                        .module_file
-                        .as_ref()
-                        .and_then(|p| vfs.file_id(&VfsPath::new(p.to_path_buf())));
-                    http_services.push(HTTPServiceEntry { name: service.name, main, module_file });
-                }
-                let mut web_services = Vec::new();
-                for service in d.web_services {
-                    let Some(main) = intern_metadata_file(
-                        vfs,
-                        &service.main,
-                        &revisions_by_path,
-                        &mut metadata_file_set,
-                        &mut revisions,
-                    ) else {
-                        continue;
-                    };
-                    let module_file = service
-                        .module_file
-                        .as_ref()
-                        .and_then(|p| vfs.file_id(&VfsPath::new(p.to_path_buf())));
-                    web_services.push(WebServiceEntry { name: service.name, main, module_file });
-                }
-                let mut integration_services = Vec::new();
-                for service in d.integration_services {
-                    let Some(main) = intern_metadata_file(
-                        vfs,
-                        &service.main,
-                        &revisions_by_path,
-                        &mut metadata_file_set,
-                        &mut revisions,
-                    ) else {
-                        continue;
-                    };
-                    let module_file = service
-                        .module_file
-                        .as_ref()
-                        .and_then(|p| vfs.file_id(&VfsPath::new(p.to_path_buf())));
-                    integration_services.push(IntegrationServiceEntry {
-                        name: service.name,
-                        main,
-                        module_file,
-                    });
-                }
-                let mut subsystems = Vec::new();
-                for subsystem in d.subsystems {
-                    let Some(main) = intern_metadata_file(
-                        vfs,
-                        &subsystem.main,
-                        &revisions_by_path,
-                        &mut metadata_file_set,
-                        &mut revisions,
-                    ) else {
-                        continue;
-                    };
-                    subsystems.push(SubsystemEntry { name: subsystem.name, main });
-                }
-                listings.push(RootStructureListing {
-                    root: d.root_string,
-                    data: MetadataListingData {
-                        entries,
-                        defined_types,
-                        common_modules,
-                        event_subscriptions,
-                        scheduled_jobs,
-                        roles,
-                        http_services,
-                        web_services,
-                        integration_services,
-                        subsystems,
-                    },
-                });
-            }
-        });
-
-        let mdo_count: usize = listings.iter().map(|listing| listing.data.entries.len()).sum();
-        let file_count = revisions.len();
-
-        let db = self.raw_database_mut();
-        db.set_source_root(METADATA_SOURCE_ROOT, SourceRoot::new_local(metadata_file_set));
-        for (fid, _) in &revisions {
-            db.set_file_source_root(*fid, METADATA_SOURCE_ROOT);
-        }
-        for (fid, revision) in &revisions {
-            db.set_file_revision_from_disk(*fid, *revision);
-        }
-        for listing in listings {
-            db.set_metadata_listing(&listing.root, listing.data);
-        }
-
-        tracing::info!(
-            mdo_count,
-            file_count,
-            elapsed_ms = start.elapsed().as_millis() as u64,
-            "bootstrapped metadata substrate",
-        );
+    let config_paths = db.all_config_paths();
+    if config_paths.is_empty() {
+        return;
     }
 
-    /// Incrementally refresh the metadata substrate for the config roots that own
-    /// any of `changed_paths` (a post-boot metadata batch: content edits, adds,
-    /// removes, renames). Re-discovers each affected root's structure (stat-only, no
-    /// content read), then:
-    /// - reads on disk **only** the changed or brand-new composing files, bumping
-    ///   their revision so `parse_mdo_query` re-parses just those MDOs; unchanged
-    ///   MDOs keep their revision and stay memoised;
-    /// - augments root(1) with any new composing files (removed files linger
-    ///   harmlessly — nothing in a listing references them);
-    /// - re-sets a root's structure listing **only** when its entries actually
-    ///   changed (add / remove / rename), so a pure content edit does not churn
-    ///   `config_index`.
-    ///
-    /// Vanished mains drop out of the re-discovered structure (and so out of the
-    /// listing), tombstoning them: `resolve_metadata_object` then returns `None`.
-    /// Runs after the boot bootstrap (root(1) already exists). Returns whether any
-    /// substrate input actually changed, so callers can gate a diagnostics refresh.
+    // One config root's discovered (stat-only) structure, before any file is
+    // read or interned.
+    struct RootDiscovery {
+        root_string: String,
+        mdos: Vec<bsl_metadata::DiscoveredMdo>,
+        defined_types: Vec<bsl_metadata::DiscoveredDefinedType>,
+        common_modules: Vec<bsl_metadata::DiscoveredCommonModule>,
+        event_subscriptions: Vec<bsl_metadata::DiscoveredEventSubscription>,
+        scheduled_jobs: Vec<bsl_metadata::DiscoveredScheduledJob>,
+        roles: Vec<bsl_metadata::DiscoveredRole>,
+        http_services: Vec<bsl_metadata::DiscoveredHTTPService>,
+        web_services: Vec<bsl_metadata::DiscoveredWebService>,
+        integration_services: Vec<bsl_metadata::DiscoveredIntegrationService>,
+        subsystems: Vec<bsl_metadata::DiscoveredSubsystem>,
+    }
+
+    // Discover every root's structure WITHOUT the vfs lock — discovery walks
+    // and stats the filesystem but never touches the vfs.
+    let discoveries: Vec<RootDiscovery> = config_paths
+        .iter()
+        .map(|(_, root_path)| {
+            let mut mdos = bsl_metadata::discover_metadata_structure(root_path);
+            mdos.extend(bsl_metadata::discover_register_structure(root_path));
+            RootDiscovery {
+                root_string: root_path.to_string_lossy().to_string(),
+                mdos,
+                defined_types: bsl_metadata::discover_defined_type_structure(root_path),
+                common_modules: bsl_metadata::discover_common_module_structure(root_path),
+                event_subscriptions: bsl_metadata::discover_event_subscription_structure(root_path),
+                scheduled_jobs: bsl_metadata::discover_scheduled_job_structure(root_path),
+                roles: bsl_metadata::discover_role_structure(root_path),
+                http_services: bsl_metadata::discover_http_service_structure(root_path),
+                web_services: bsl_metadata::discover_web_service_structure(root_path),
+                integration_services: bsl_metadata::discover_integration_service_structure(
+                    root_path,
+                ),
+                subsystems: bsl_metadata::discover_subsystem_structure(root_path),
+            }
+        })
+        .collect();
+
+    // Gather every composing file that needs its content revision, then read
+    // and hash them in parallel OFF the vfs lock. The text itself is not
+    // retained — only `(path, revision)`. (`module_file` is BSL source owned by
+    // root(0), read elsewhere — not hashed here.)
+    let mut to_read: Vec<PathBuf> = Vec::new();
+    for d in &discoveries {
+        for m in &d.mdos {
+            to_read.push(m.main.clone());
+            if let Some(p) = &m.predefined {
+                to_read.push(p.clone());
+            }
+        }
+        to_read.extend(d.defined_types.iter().map(|t| t.main.clone()));
+        to_read.extend(d.common_modules.iter().map(|c| c.main.clone()));
+        to_read.extend(d.event_subscriptions.iter().map(|s| s.main.clone()));
+        to_read.extend(d.scheduled_jobs.iter().map(|j| j.main.clone()));
+        to_read.extend(d.http_services.iter().map(|s| s.main.clone()));
+        to_read.extend(d.web_services.iter().map(|s| s.main.clone()));
+        to_read.extend(d.integration_services.iter().map(|s| s.main.clone()));
+        to_read.extend(d.subsystems.iter().map(|s| s.main.clone()));
+        for role in &d.roles {
+            to_read.push(role.main.clone());
+            if let Some(rights) = &role.rights {
+                to_read.push(rights.clone());
+            }
+        }
+    }
+    let revisions_by_path: HashMap<PathBuf, u64> = {
+        use rayon::prelude::*;
+        to_read
+            .par_iter()
+            .filter_map(|path| {
+                let text = read_disk_text(path).ok()?;
+                Some((path.clone(), content_revision(&text)))
+            })
+            .collect()
+    };
+
+    let mut metadata_file_set = FileSet::new();
+    let mut revisions: Vec<(FileId, u64)> = Vec::new();
+    let mut listings: Vec<RootStructureListing> = Vec::new();
+
+    // Intern under a single short vfs write: allocate FileIds and grow the
+    // metadata file set. This is the only lock-held work; the expensive reads
+    // already happened above. A file whose read failed (vanished between
+    // discovery and the read pass) is absent from `revisions_by_path`, so
+    // `intern_metadata_file` returns `None` and the MDO is dropped.
+    vfs.with_write(|vfs| {
+        for d in discoveries {
+            let mut entries = Vec::with_capacity(d.mdos.len());
+            for m in d.mdos {
+                let Some(main) = intern_metadata_file(
+                    vfs,
+                    &m.main,
+                    &revisions_by_path,
+                    &mut metadata_file_set,
+                    &mut revisions,
+                ) else {
+                    continue;
+                };
+                let predefined = m.predefined.as_ref().and_then(|p| {
+                    intern_metadata_file(
+                        vfs,
+                        p,
+                        &revisions_by_path,
+                        &mut metadata_file_set,
+                        &mut revisions,
+                    )
+                });
+                entries.push(MdoEntry { kind: m.mdo_type, name: m.name, main, predefined });
+            }
+            let mut defined_types = Vec::new();
+            for t in d.defined_types {
+                let Some(main) = intern_metadata_file(
+                    vfs,
+                    &t.main,
+                    &revisions_by_path,
+                    &mut metadata_file_set,
+                    &mut revisions,
+                ) else {
+                    continue;
+                };
+                defined_types.push(DefinedTypeEntry { name: t.name, main });
+            }
+            let mut common_modules = Vec::new();
+            for c in d.common_modules {
+                let Some(main) = intern_metadata_file(
+                    vfs,
+                    &c.main,
+                    &revisions_by_path,
+                    &mut metadata_file_set,
+                    &mut revisions,
+                ) else {
+                    continue;
+                };
+                // The module's `Ext/Module.bsl` is BSL source owned by root(0),
+                // not a metadata file — look up the analyzer's existing FileId for
+                // it (bootstrap runs after the source root is interned) rather than
+                // enrolling a duplicate. `None` when the path is absent or unloaded;
+                // the reverse lookup then misses, which is correct.
+                let module_file = c.module_file.as_ref().and_then(|p| module_file_id(vfs, p));
+                common_modules.push(CommonModuleEntry { name: c.name, main, module_file });
+            }
+            let mut event_subscriptions = Vec::new();
+            for s in d.event_subscriptions {
+                let Some(main) = intern_metadata_file(
+                    vfs,
+                    &s.main,
+                    &revisions_by_path,
+                    &mut metadata_file_set,
+                    &mut revisions,
+                ) else {
+                    continue;
+                };
+                event_subscriptions.push(EventSubscriptionEntry { name: s.name, main });
+            }
+            let mut scheduled_jobs = Vec::new();
+            for j in d.scheduled_jobs {
+                let Some(main) = intern_metadata_file(
+                    vfs,
+                    &j.main,
+                    &revisions_by_path,
+                    &mut metadata_file_set,
+                    &mut revisions,
+                ) else {
+                    continue;
+                };
+                scheduled_jobs.push(ScheduledJobEntry { name: j.name, main });
+            }
+            let mut roles = Vec::new();
+            for role in d.roles {
+                let Some(main) = intern_metadata_file(
+                    vfs,
+                    &role.main,
+                    &revisions_by_path,
+                    &mut metadata_file_set,
+                    &mut revisions,
+                ) else {
+                    continue;
+                };
+                let rights = role.rights.as_ref().and_then(|p| {
+                    intern_metadata_file(
+                        vfs,
+                        p,
+                        &revisions_by_path,
+                        &mut metadata_file_set,
+                        &mut revisions,
+                    )
+                });
+                roles.push(RoleEntry { name: role.name, main, rights });
+            }
+            let mut http_services = Vec::new();
+            for service in d.http_services {
+                let Some(main) = intern_metadata_file(
+                    vfs,
+                    &service.main,
+                    &revisions_by_path,
+                    &mut metadata_file_set,
+                    &mut revisions,
+                ) else {
+                    continue;
+                };
+                let module_file = service.module_file.as_ref().and_then(|p| module_file_id(vfs, p));
+                http_services.push(HTTPServiceEntry { name: service.name, main, module_file });
+            }
+            let mut web_services = Vec::new();
+            for service in d.web_services {
+                let Some(main) = intern_metadata_file(
+                    vfs,
+                    &service.main,
+                    &revisions_by_path,
+                    &mut metadata_file_set,
+                    &mut revisions,
+                ) else {
+                    continue;
+                };
+                let module_file = service.module_file.as_ref().and_then(|p| module_file_id(vfs, p));
+                web_services.push(WebServiceEntry { name: service.name, main, module_file });
+            }
+            let mut integration_services = Vec::new();
+            for service in d.integration_services {
+                let Some(main) = intern_metadata_file(
+                    vfs,
+                    &service.main,
+                    &revisions_by_path,
+                    &mut metadata_file_set,
+                    &mut revisions,
+                ) else {
+                    continue;
+                };
+                let module_file = service.module_file.as_ref().and_then(|p| module_file_id(vfs, p));
+                integration_services.push(IntegrationServiceEntry {
+                    name: service.name,
+                    main,
+                    module_file,
+                });
+            }
+            let mut subsystems = Vec::new();
+            for subsystem in d.subsystems {
+                let Some(main) = intern_metadata_file(
+                    vfs,
+                    &subsystem.main,
+                    &revisions_by_path,
+                    &mut metadata_file_set,
+                    &mut revisions,
+                ) else {
+                    continue;
+                };
+                subsystems.push(SubsystemEntry { name: subsystem.name, main });
+            }
+            listings.push(RootStructureListing {
+                root: d.root_string,
+                data: MetadataListingData {
+                    entries,
+                    defined_types,
+                    common_modules,
+                    event_subscriptions,
+                    scheduled_jobs,
+                    roles,
+                    http_services,
+                    web_services,
+                    integration_services,
+                    subsystems,
+                },
+            });
+        }
+    });
+
+    let mdo_count: usize = listings.iter().map(|listing| listing.data.entries.len()).sum();
+    let file_count = revisions.len();
+
+    db.set_source_root(METADATA_SOURCE_ROOT, SourceRoot::new_local(metadata_file_set));
+    for (fid, _) in &revisions {
+        db.set_file_source_root(*fid, METADATA_SOURCE_ROOT);
+    }
+    for (fid, revision) in &revisions {
+        db.set_file_revision_from_disk(*fid, *revision);
+    }
+    for listing in listings {
+        db.set_metadata_listing(&listing.root, listing.data);
+    }
+
+    tracing::info!(
+        mdo_count,
+        file_count,
+        elapsed_ms = start.elapsed().as_millis() as u64,
+        "bootstrapped metadata substrate",
+    );
+}
+
+/// Incrementally refresh the metadata substrate for the config roots that own
+/// any of `changed_paths` (a post-boot metadata batch: content edits, adds,
+/// removes, renames). Re-discovers each affected root's structure (stat-only, no
+/// content read), then:
+/// - reads on disk **only** the changed or brand-new composing files, bumping
+///   their revision so `parse_mdo_query` re-parses just those MDOs; unchanged
+///   MDOs keep their revision and stay memoised;
+/// - augments root(1) with any new composing files (removed files linger
+///   harmlessly — nothing in a listing references them);
+/// - re-sets a root's structure listing **only** when its entries actually
+///   changed (add / remove / rename), so a pure content edit does not churn
+///   `config_index`.
+///
+/// Vanished mains drop out of the re-discovered structure (and so out of the
+/// listing), tombstoning them: `resolve_metadata_object` then returns `None`.
+/// Runs after the boot bootstrap (root(1) already exists). Returns whether any
+/// substrate input actually changed, so callers can gate a diagnostics refresh.
+pub fn refresh_metadata_substrate(
+    db: &mut RootDatabaseImpl,
+    vfs: &impl VfsWrite,
+    changed_paths: &[PathBuf],
+) -> bool {
+    if changed_paths.is_empty() {
+        return false;
+    }
+
+    let config_paths = db.all_config_paths();
+    let mut affected: Vec<PathBuf> = Vec::new();
+    for (_, root) in &config_paths {
+        if !affected.iter().any(|r| r == root) && changed_paths.iter().any(|p| p.starts_with(root))
+        {
+            affected.push(root.clone());
+        }
+    }
+    if affected.is_empty() {
+        return false;
+    }
+
+    let changed_set: HashSet<&Path> = changed_paths.iter().map(|p| p.as_path()).collect();
+
+    let mut metadata_file_set = {
+        let db = &*db;
+        db.source_root_input(METADATA_SOURCE_ROOT).root(db).file_set().clone()
+    };
+    let files_before = metadata_file_set.len();
+
+    let mut new_file_ids: Vec<FileId> = Vec::new();
+    let mut revisions: Vec<(FileId, u64)> = Vec::new();
+    let mut listings: Vec<RootStructureListing> = Vec::new();
+
+    vfs.with_write(|vfs| {
+        for root in &affected {
+            let mut discovered = bsl_metadata::discover_metadata_structure(root);
+            discovered.extend(bsl_metadata::discover_register_structure(root));
+            let mut entries = Vec::with_capacity(discovered.len());
+            for d in discovered {
+                let Some(main) = enroll_refresh(
+                    vfs,
+                    &d.main,
+                    &changed_set,
+                    &mut metadata_file_set,
+                    &mut new_file_ids,
+                    &mut revisions,
+                ) else {
+                    continue;
+                };
+                let predefined = d.predefined.as_ref().and_then(|p| {
+                    enroll_refresh(
+                        vfs,
+                        p,
+                        &changed_set,
+                        &mut metadata_file_set,
+                        &mut new_file_ids,
+                        &mut revisions,
+                    )
+                });
+                entries.push(MdoEntry { kind: d.mdo_type, name: d.name, main, predefined });
+            }
+            let mut defined_types = Vec::new();
+            for d in bsl_metadata::discover_defined_type_structure(root) {
+                let Some(main) = enroll_refresh(
+                    vfs,
+                    &d.main,
+                    &changed_set,
+                    &mut metadata_file_set,
+                    &mut new_file_ids,
+                    &mut revisions,
+                ) else {
+                    continue;
+                };
+                defined_types.push(DefinedTypeEntry { name: d.name, main });
+            }
+            let mut common_modules = Vec::new();
+            for d in bsl_metadata::discover_common_module_structure(root) {
+                let Some(main) = enroll_refresh(
+                    vfs,
+                    &d.main,
+                    &changed_set,
+                    &mut metadata_file_set,
+                    &mut new_file_ids,
+                    &mut revisions,
+                ) else {
+                    continue;
+                };
+                // The module's `Ext/Module.bsl` is BSL source owned by root(0),
+                // not a metadata file — reuse the analyzer's existing FileId for
+                // it rather than enrolling a duplicate (see `bootstrap_metadata_substrate`).
+                let module_file = d.module_file.as_ref().and_then(|p| module_file_id(vfs, p));
+                common_modules.push(CommonModuleEntry { name: d.name, main, module_file });
+            }
+            let mut event_subscriptions = Vec::new();
+            for d in bsl_metadata::discover_event_subscription_structure(root) {
+                let Some(main) = enroll_refresh(
+                    vfs,
+                    &d.main,
+                    &changed_set,
+                    &mut metadata_file_set,
+                    &mut new_file_ids,
+                    &mut revisions,
+                ) else {
+                    continue;
+                };
+                event_subscriptions.push(EventSubscriptionEntry { name: d.name, main });
+            }
+            let mut scheduled_jobs = Vec::new();
+            for d in bsl_metadata::discover_scheduled_job_structure(root) {
+                let Some(main) = enroll_refresh(
+                    vfs,
+                    &d.main,
+                    &changed_set,
+                    &mut metadata_file_set,
+                    &mut new_file_ids,
+                    &mut revisions,
+                ) else {
+                    continue;
+                };
+                scheduled_jobs.push(ScheduledJobEntry { name: d.name, main });
+            }
+            let mut roles = Vec::new();
+            for d in bsl_metadata::discover_role_structure(root) {
+                let Some(main) = enroll_refresh(
+                    vfs,
+                    &d.main,
+                    &changed_set,
+                    &mut metadata_file_set,
+                    &mut new_file_ids,
+                    &mut revisions,
+                ) else {
+                    continue;
+                };
+                let rights = d.rights.as_ref().and_then(|p| {
+                    enroll_refresh(
+                        vfs,
+                        p,
+                        &changed_set,
+                        &mut metadata_file_set,
+                        &mut new_file_ids,
+                        &mut revisions,
+                    )
+                });
+                roles.push(RoleEntry { name: d.name, main, rights });
+            }
+            let mut http_services = Vec::new();
+            for d in bsl_metadata::discover_http_service_structure(root) {
+                let Some(main) = enroll_refresh(
+                    vfs,
+                    &d.main,
+                    &changed_set,
+                    &mut metadata_file_set,
+                    &mut new_file_ids,
+                    &mut revisions,
+                ) else {
+                    continue;
+                };
+                let module_file = d.module_file.as_ref().and_then(|p| module_file_id(vfs, p));
+                http_services.push(HTTPServiceEntry { name: d.name, main, module_file });
+            }
+            let mut web_services = Vec::new();
+            for d in bsl_metadata::discover_web_service_structure(root) {
+                let Some(main) = enroll_refresh(
+                    vfs,
+                    &d.main,
+                    &changed_set,
+                    &mut metadata_file_set,
+                    &mut new_file_ids,
+                    &mut revisions,
+                ) else {
+                    continue;
+                };
+                let module_file = d.module_file.as_ref().and_then(|p| module_file_id(vfs, p));
+                web_services.push(WebServiceEntry { name: d.name, main, module_file });
+            }
+            let mut integration_services = Vec::new();
+            for d in bsl_metadata::discover_integration_service_structure(root) {
+                let Some(main) = enroll_refresh(
+                    vfs,
+                    &d.main,
+                    &changed_set,
+                    &mut metadata_file_set,
+                    &mut new_file_ids,
+                    &mut revisions,
+                ) else {
+                    continue;
+                };
+                let module_file = d.module_file.as_ref().and_then(|p| module_file_id(vfs, p));
+                integration_services.push(IntegrationServiceEntry {
+                    name: d.name,
+                    main,
+                    module_file,
+                });
+            }
+            let mut subsystems = Vec::new();
+            for d in bsl_metadata::discover_subsystem_structure(root) {
+                let Some(main) = enroll_refresh(
+                    vfs,
+                    &d.main,
+                    &changed_set,
+                    &mut metadata_file_set,
+                    &mut new_file_ids,
+                    &mut revisions,
+                ) else {
+                    continue;
+                };
+                subsystems.push(SubsystemEntry { name: d.name, main });
+            }
+            listings.push(RootStructureListing {
+                root: root.to_string_lossy().to_string(),
+                data: MetadataListingData {
+                    entries,
+                    defined_types,
+                    common_modules,
+                    event_subscriptions,
+                    scheduled_jobs,
+                    roles,
+                    http_services,
+                    web_services,
+                    integration_services,
+                    subsystems,
+                },
+            });
+        }
+    });
+
+    let reread = revisions.len();
+    let added = new_file_ids.len();
+
+    let mut changed = false;
+    if metadata_file_set.len() != files_before {
+        db.set_source_root(METADATA_SOURCE_ROOT, SourceRoot::new_local(metadata_file_set));
+        changed = true;
+    }
+    for fid in &new_file_ids {
+        db.set_file_source_root(*fid, METADATA_SOURCE_ROOT);
+    }
+    for (fid, revision) in &revisions {
+        db.set_file_revision_from_disk(*fid, *revision);
+        changed = true;
+    }
+    for listing in listings {
+        let data = &listing.data;
+        let structure_changed = match db.metadata_listing(&listing.root) {
+            Some(input) => {
+                input.entries(db).as_ref() != &data.entries
+                    || input.defined_types(db).as_ref() != &data.defined_types
+                    || input.common_modules(db).as_ref() != &data.common_modules
+                    || input.event_subscriptions(db).as_ref() != &data.event_subscriptions
+                    || input.scheduled_jobs(db).as_ref() != &data.scheduled_jobs
+                    || input.roles(db).as_ref() != &data.roles
+                    || input.http_services(db).as_ref() != &data.http_services
+                    || input.web_services(db).as_ref() != &data.web_services
+                    || input.integration_services(db).as_ref() != &data.integration_services
+                    || input.subsystems(db).as_ref() != &data.subsystems
+            }
+            None => true,
+        };
+        if structure_changed {
+            db.set_metadata_listing(&listing.root, listing.data);
+            changed = true;
+        }
+    }
+
+    tracing::debug!(
+        roots = affected.len(),
+        reread,
+        added,
+        changed,
+        "refreshed metadata substrate incrementally",
+    );
+    changed
+}
+
+impl AnalysisHost {
+    /// Build the metadata substrate for every config root the database knows about.
+    /// Thin wrapper over the free [`bootstrap_metadata_substrate`]; the LSP and CLI
+    /// drive the shared policy through this, supplying only their VFS.
+    pub fn bootstrap_metadata_substrate(&mut self, vfs: &impl VfsWrite) {
+        bootstrap_metadata_substrate(self.raw_database_mut(), vfs);
+    }
+
+    /// Incrementally refresh the metadata substrate for the config roots owning any
+    /// of `changed_paths`. Thin wrapper over the free [`refresh_metadata_substrate`];
+    /// returns whether any substrate input actually changed.
     pub fn refresh_metadata_substrate(
         &mut self,
         vfs: &impl VfsWrite,
         changed_paths: &[PathBuf],
     ) -> bool {
-        if changed_paths.is_empty() {
-            return false;
-        }
-
-        let config_paths = self.raw_database().all_config_paths();
-        let mut affected: Vec<PathBuf> = Vec::new();
-        for (_, root) in &config_paths {
-            if !affected.iter().any(|r| r == root)
-                && changed_paths.iter().any(|p| p.starts_with(root))
-            {
-                affected.push(root.clone());
-            }
-        }
-        if affected.is_empty() {
-            return false;
-        }
-
-        let changed_set: HashSet<&Path> = changed_paths.iter().map(|p| p.as_path()).collect();
-
-        let mut metadata_file_set = {
-            let db = self.raw_database();
-            db.source_root_input(METADATA_SOURCE_ROOT).root(db).file_set().clone()
-        };
-        let files_before = metadata_file_set.len();
-
-        let mut new_file_ids: Vec<FileId> = Vec::new();
-        let mut revisions: Vec<(FileId, u64)> = Vec::new();
-        let mut listings: Vec<RootStructureListing> = Vec::new();
-
-        vfs.with_write(|vfs| {
-            for root in &affected {
-                let mut discovered = bsl_metadata::discover_metadata_structure(root);
-                discovered.extend(bsl_metadata::discover_register_structure(root));
-                let mut entries = Vec::with_capacity(discovered.len());
-                for d in discovered {
-                    let Some(main) = enroll_refresh(
-                        vfs,
-                        &d.main,
-                        &changed_set,
-                        &mut metadata_file_set,
-                        &mut new_file_ids,
-                        &mut revisions,
-                    ) else {
-                        continue;
-                    };
-                    let predefined = d.predefined.as_ref().and_then(|p| {
-                        enroll_refresh(
-                            vfs,
-                            p,
-                            &changed_set,
-                            &mut metadata_file_set,
-                            &mut new_file_ids,
-                            &mut revisions,
-                        )
-                    });
-                    entries.push(MdoEntry { kind: d.mdo_type, name: d.name, main, predefined });
-                }
-                let mut defined_types = Vec::new();
-                for d in bsl_metadata::discover_defined_type_structure(root) {
-                    let Some(main) = enroll_refresh(
-                        vfs,
-                        &d.main,
-                        &changed_set,
-                        &mut metadata_file_set,
-                        &mut new_file_ids,
-                        &mut revisions,
-                    ) else {
-                        continue;
-                    };
-                    defined_types.push(DefinedTypeEntry { name: d.name, main });
-                }
-                let mut common_modules = Vec::new();
-                for d in bsl_metadata::discover_common_module_structure(root) {
-                    let Some(main) = enroll_refresh(
-                        vfs,
-                        &d.main,
-                        &changed_set,
-                        &mut metadata_file_set,
-                        &mut new_file_ids,
-                        &mut revisions,
-                    ) else {
-                        continue;
-                    };
-                    // The module's `Ext/Module.bsl` is BSL source owned by root(0),
-                    // not a metadata file — reuse the analyzer's existing FileId for
-                    // it rather than enrolling a duplicate (see `bootstrap_metadata_substrate`).
-                    let module_file = d
-                        .module_file
-                        .as_ref()
-                        .and_then(|p| vfs.file_id(&VfsPath::new(p.to_path_buf())));
-                    common_modules.push(CommonModuleEntry { name: d.name, main, module_file });
-                }
-                let mut event_subscriptions = Vec::new();
-                for d in bsl_metadata::discover_event_subscription_structure(root) {
-                    let Some(main) = enroll_refresh(
-                        vfs,
-                        &d.main,
-                        &changed_set,
-                        &mut metadata_file_set,
-                        &mut new_file_ids,
-                        &mut revisions,
-                    ) else {
-                        continue;
-                    };
-                    event_subscriptions.push(EventSubscriptionEntry { name: d.name, main });
-                }
-                let mut scheduled_jobs = Vec::new();
-                for d in bsl_metadata::discover_scheduled_job_structure(root) {
-                    let Some(main) = enroll_refresh(
-                        vfs,
-                        &d.main,
-                        &changed_set,
-                        &mut metadata_file_set,
-                        &mut new_file_ids,
-                        &mut revisions,
-                    ) else {
-                        continue;
-                    };
-                    scheduled_jobs.push(ScheduledJobEntry { name: d.name, main });
-                }
-                let mut roles = Vec::new();
-                for d in bsl_metadata::discover_role_structure(root) {
-                    let Some(main) = enroll_refresh(
-                        vfs,
-                        &d.main,
-                        &changed_set,
-                        &mut metadata_file_set,
-                        &mut new_file_ids,
-                        &mut revisions,
-                    ) else {
-                        continue;
-                    };
-                    let rights = d.rights.as_ref().and_then(|p| {
-                        enroll_refresh(
-                            vfs,
-                            p,
-                            &changed_set,
-                            &mut metadata_file_set,
-                            &mut new_file_ids,
-                            &mut revisions,
-                        )
-                    });
-                    roles.push(RoleEntry { name: d.name, main, rights });
-                }
-                let mut http_services = Vec::new();
-                for d in bsl_metadata::discover_http_service_structure(root) {
-                    let Some(main) = enroll_refresh(
-                        vfs,
-                        &d.main,
-                        &changed_set,
-                        &mut metadata_file_set,
-                        &mut new_file_ids,
-                        &mut revisions,
-                    ) else {
-                        continue;
-                    };
-                    let module_file = d
-                        .module_file
-                        .as_ref()
-                        .and_then(|p| vfs.file_id(&VfsPath::new(p.to_path_buf())));
-                    http_services.push(HTTPServiceEntry { name: d.name, main, module_file });
-                }
-                let mut web_services = Vec::new();
-                for d in bsl_metadata::discover_web_service_structure(root) {
-                    let Some(main) = enroll_refresh(
-                        vfs,
-                        &d.main,
-                        &changed_set,
-                        &mut metadata_file_set,
-                        &mut new_file_ids,
-                        &mut revisions,
-                    ) else {
-                        continue;
-                    };
-                    let module_file = d
-                        .module_file
-                        .as_ref()
-                        .and_then(|p| vfs.file_id(&VfsPath::new(p.to_path_buf())));
-                    web_services.push(WebServiceEntry { name: d.name, main, module_file });
-                }
-                let mut integration_services = Vec::new();
-                for d in bsl_metadata::discover_integration_service_structure(root) {
-                    let Some(main) = enroll_refresh(
-                        vfs,
-                        &d.main,
-                        &changed_set,
-                        &mut metadata_file_set,
-                        &mut new_file_ids,
-                        &mut revisions,
-                    ) else {
-                        continue;
-                    };
-                    let module_file = d
-                        .module_file
-                        .as_ref()
-                        .and_then(|p| vfs.file_id(&VfsPath::new(p.to_path_buf())));
-                    integration_services.push(IntegrationServiceEntry {
-                        name: d.name,
-                        main,
-                        module_file,
-                    });
-                }
-                let mut subsystems = Vec::new();
-                for d in bsl_metadata::discover_subsystem_structure(root) {
-                    let Some(main) = enroll_refresh(
-                        vfs,
-                        &d.main,
-                        &changed_set,
-                        &mut metadata_file_set,
-                        &mut new_file_ids,
-                        &mut revisions,
-                    ) else {
-                        continue;
-                    };
-                    subsystems.push(SubsystemEntry { name: d.name, main });
-                }
-                listings.push(RootStructureListing {
-                    root: root.to_string_lossy().to_string(),
-                    data: MetadataListingData {
-                        entries,
-                        defined_types,
-                        common_modules,
-                        event_subscriptions,
-                        scheduled_jobs,
-                        roles,
-                        http_services,
-                        web_services,
-                        integration_services,
-                        subsystems,
-                    },
-                });
-            }
-        });
-
-        let reread = revisions.len();
-        let added = new_file_ids.len();
-
-        let db = self.raw_database_mut();
-        let mut changed = false;
-        if metadata_file_set.len() != files_before {
-            db.set_source_root(METADATA_SOURCE_ROOT, SourceRoot::new_local(metadata_file_set));
-            changed = true;
-        }
-        for fid in &new_file_ids {
-            db.set_file_source_root(*fid, METADATA_SOURCE_ROOT);
-        }
-        for (fid, revision) in &revisions {
-            db.set_file_revision_from_disk(*fid, *revision);
-            changed = true;
-        }
-        for listing in listings {
-            let data = &listing.data;
-            let structure_changed = match db.metadata_listing(&listing.root) {
-                Some(input) => {
-                    input.entries(db).as_ref() != &data.entries
-                        || input.defined_types(db).as_ref() != &data.defined_types
-                        || input.common_modules(db).as_ref() != &data.common_modules
-                        || input.event_subscriptions(db).as_ref() != &data.event_subscriptions
-                        || input.scheduled_jobs(db).as_ref() != &data.scheduled_jobs
-                        || input.roles(db).as_ref() != &data.roles
-                        || input.http_services(db).as_ref() != &data.http_services
-                        || input.web_services(db).as_ref() != &data.web_services
-                        || input.integration_services(db).as_ref() != &data.integration_services
-                        || input.subsystems(db).as_ref() != &data.subsystems
-                }
-                None => true,
-            };
-            if structure_changed {
-                db.set_metadata_listing(&listing.root, listing.data);
-                changed = true;
-            }
-        }
-
-        tracing::debug!(
-            roots = affected.len(),
-            reread,
-            added,
-            changed,
-            "refreshed metadata substrate incrementally",
-        );
-        changed
+        refresh_metadata_substrate(self.raw_database_mut(), vfs, changed_paths)
     }
+}
+
+/// Resolve a module's `Ext/Module.bsl` path to the FileId already interned for it,
+/// so the metadata reverse index points at the consumer's own source id.
+///
+/// A consumer may seed its VFS with *canonicalised* file paths (the MCP resident
+/// interns the `canonicalize`d paths its `.bsl` enumeration produced). The caller here
+/// composes `root.join(relative)`, which does NOT resolve a symlink *inside* the tree
+/// (e.g. a symlinked `CommonModules` directory). So a direct lookup can miss even
+/// though the file is interned under its real path — retry once with the path
+/// canonicalised. The syscall stays off the common case: it runs only on a miss, so
+/// an already-canonical VFS (the LSP) never pays for it and its behaviour is unchanged.
+fn module_file_id(vfs: &Vfs, path: &Path) -> Option<FileId> {
+    if let Some(id) = vfs.file_id(&VfsPath::new(path.to_path_buf())) {
+        return Some(id);
+    }
+    let canonical = path.canonicalize().ok()?;
+    vfs.file_id(&VfsPath::new(canonical))
 }
 
 /// Intern a metadata composing file (already read and hashed in the parallel pass)

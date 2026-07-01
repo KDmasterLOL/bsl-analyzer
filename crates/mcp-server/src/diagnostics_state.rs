@@ -25,6 +25,7 @@
 //! drops the resident db after a quiet period so a standalone `mcp serve` reclaims the
 //! memory after a burst.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -32,7 +33,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ide::{Analysis, RootDatabaseImpl};
-use vfs::FileId;
+use vfs::{FileId, Vfs, VfsPath};
 
 use crate::graph::{
     build_source_root, classify_changes, db_for_files_lazy, enumerate_bsl_files, scan_file_stats,
@@ -91,11 +92,31 @@ impl ReloadState {
     }
 }
 
+/// Adapts the resident's owned [`Vfs`] to the lock-neutral [`ide_host_core::VfsWrite`]
+/// the shared metadata policy expects. The resident is only ever touched while the
+/// caller holds the state mutex (the db is `!Sync`), so a single-threaded `RefCell`
+/// gives the interning critical section its interior mutability without a second lock —
+/// the same discipline the LSP's `parking_lot`-locked adapter has, minus the lock.
+struct ResidentVfs(RefCell<Vfs>);
+
+impl ide_host_core::VfsWrite for ResidentVfs {
+    fn with_write<R>(&self, f: impl FnOnce(&mut Vfs) -> R) -> R {
+        f(&mut self.0.borrow_mut())
+    }
+}
+
 /// The built resident database plus the path→FileId index needed to resolve a request
-/// path to the Salsa input it set. Held behind the [`RwLock`]; reads borrow it, a
+/// path to the Salsa input it set. Held behind the [`Mutex`]; reads borrow it, a
 /// reload mutates `db` in place.
 pub(crate) struct DiagnosticsResident {
     db: RootDatabaseImpl,
+    /// The VFS pre-seeded with the resident's `.bsl` FileIds and grown by the metadata
+    /// bootstrap with the metadata-XML ids. Kept alongside the db so a drift-driven
+    /// substrate refresh can intern new composing files onto the same id space without
+    /// rebuilding it. Not read on the current diagnostics path — only the refresh path,
+    /// which shares this db, consumes it — so it is retained for that consumer.
+    #[allow(dead_code)]
+    vfs: ResidentVfs,
     /// Canonical-path string → FileId for every resident `.bsl`.
     by_path: HashMap<String, FileId>,
     /// The project's effective diagnostics settings, loaded from `bsl-analyzer.toml` /
@@ -690,7 +711,15 @@ impl DiagnosticsState {
         // `[diagnostics]` settings + locale become the resident's effective config, so
         // `file`/`workspace` honour the same project rules as LSP and CLI.
         let project = project_model::Project::new(root);
-        let config_paths = crate::graph::project_config_paths(&project);
+        // Canonicalise the config roots so a module back-link the metadata substrate
+        // resolves (`root.join("CommonModules/X/Ext/Module.bsl")`) matches the
+        // canonical `.bsl` path `enumerate_bsl_files` produced — otherwise the reverse
+        // lookup would miss and silently drop the back-link on a symlinked workspace.
+        let config_paths: Vec<(Option<String>, PathBuf)> =
+            crate::graph::project_config_paths(&project)
+                .into_iter()
+                .map(|(label, path)| (label, path.canonicalize().unwrap_or(path)))
+                .collect();
         let config = ide::DiagnosticsConfig::from_project_json(
             &project.config.diagnostics,
             project.config.output.resolve_locale().unwrap_or_default(),
@@ -700,7 +729,28 @@ impl DiagnosticsState {
         // whole-workspace resident is not pinned as salsa inputs (which OOMs on a large
         // config). `file_text_query` re-reads on demand under its LRU cap — the same
         // model the LSP server and CLI `analyze` use.
-        let db = db_for_files_lazy(&source_root, &files, &config_paths, None);
+        let mut db = db_for_files_lazy(&source_root, &files, &config_paths, None);
+
+        // Pre-seed the VFS with the SAME FileIds the source root uses for each `.bsl`,
+        // in enumerate order, so the interner assigns id `i` to `files[i]`. The metadata
+        // bootstrap resolves common-module / service module back-links through
+        // `vfs.file_id(<Module.bsl>)`; without these ids present it drops them silently.
+        // Bootstrap then allocates only the metadata-XML ids on top of this id space.
+        let vfs = ResidentVfs(RefCell::new(Vfs::default()));
+        {
+            let mut guard = vfs.0.borrow_mut();
+            for (file_id, path) in &files {
+                let allocated = guard.alloc_file_id(VfsPath::new(path.clone()));
+                // A hard check, not `debug_assert`: this is a one-time O(n) pass at
+                // resident build (not a hot path), and a release-mode misalignment
+                // would silently scatter every metadata back-link with no signal.
+                assert_eq!(
+                    allocated, *file_id,
+                    "resident VFS must mirror enumerate_bsl_files ids for back-link resolution",
+                );
+            }
+        }
+        ide_host_core::bootstrap_metadata_substrate(&mut db, &vfs);
 
         let mut by_path = HashMap::with_capacity(files.len());
         for (file_id, path) in &files {
@@ -716,7 +766,7 @@ impl DiagnosticsState {
         let config_fp = config_fingerprint(root);
 
         Ok((
-            DiagnosticsResident { db, by_path, config, workspace_root: root.to_path_buf() },
+            DiagnosticsResident { db, vfs, by_path, config, workspace_root: root.to_path_buf() },
             stats,
             config_fp,
         ))
@@ -1233,5 +1283,98 @@ mod tests {
         assert_eq!(report.state, "failed");
         assert!(report.error.as_deref().unwrap().contains("boom"));
         assert!(report.elapsed_ms.is_none(), "loading_since cleared on failure");
+    }
+
+    /// The resident's metadata substrate resolves a common module's `Ext/Module.bsl`
+    /// back to the SAME FileId the resident indexed for it. This guards the seeding
+    /// invariant: the VFS is pre-seeded with the resident's `.bsl` ids before the
+    /// bootstrap interns the metadata XML on top, so the reverse index carries the
+    /// resident's own id. Were the ids unseeded, the bootstrap would drop the back-link
+    /// and `common_module_for_file_id` would return `None`.
+    #[test]
+    fn resident_substrate_backlinks_common_module_to_its_own_file_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let state = DiagnosticsState::for_workspace(root.to_path_buf());
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let module = module_path(root, "Сервер");
+        // Derive the config-root key the same way `build_resident` does, so the listing
+        // lookup uses the exact (canonicalised) root string the bootstrap keyed by.
+        let project = project_model::Project::new(root);
+        let config_root = project
+            .source_path()
+            .canonicalize()
+            .unwrap_or_else(|_| project.source_path().to_path_buf());
+        let root_key = config_root.to_string_lossy().into_owned();
+
+        let out = state.read(|resident, _gen| {
+            let file_id = resident.file_id_for(&module).expect("module .bsl resolves to a FileId");
+            // The listing present ⇒ the substrate is bootstrapped for the root, so
+            // `common_module_for_file_id` takes the substrate branch (no URI fallback).
+            let listing_present = resident.db.metadata_listing(&root_key).is_some();
+            let resolved = resident.db.common_module_for_file_id(file_id).is_some();
+            (listing_present, resolved)
+        });
+        match out {
+            ResidentOutcome::Ready((listing_present, resolved), _) => {
+                assert!(
+                    listing_present,
+                    "the metadata substrate must be bootstrapped for the config root"
+                );
+                assert!(
+                    resolved,
+                    "the substrate must resolve the common module through the resident's own id"
+                );
+            }
+            _ => panic!("expected Ready outcome from a loaded db"),
+        }
+    }
+
+    /// A symlink *inside* the config tree (here a symlinked `CommonModules` directory)
+    /// must not drop the common module's back-link. `enumerate_bsl_files` follows the
+    /// symlink and canonicalises the `.bsl` to its real path (what the VFS is seeded
+    /// with), while the metadata discovery composes `root.join("CommonModules/…")`,
+    /// which keeps the symlink unresolved. Without the canonicalising fallback in the
+    /// back-link lookup the two paths diverge, the reverse index misses, and — since the
+    /// substrate is bootstrapped, so no URI fallback runs — `common_module_for_file_id`
+    /// returns `None`, a regression versus the pre-substrate behaviour.
+    #[cfg(unix)]
+    #[test]
+    fn resident_substrate_backlinks_common_module_through_symlinked_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        let root = base.join("ws");
+        std::fs::create_dir_all(&root).unwrap();
+        // Real common-module content lives OUTSIDE the workspace root; the workspace
+        // reaches it only through a symlinked `CommonModules` directory.
+        let real = base.join("real");
+        write_common_module(&real, "Сервер", true, "&НаСервере\nФункция Ч() Экспорт КонецФункции");
+        std::os::unix::fs::symlink(real.join("CommonModules"), root.join("CommonModules")).unwrap();
+
+        let state = DiagnosticsState::for_workspace(root.clone());
+        state.ensure_loading();
+        wait_ready(&state);
+
+        // The request path uses the symlinked location; `file_id_for` canonicalises it
+        // to the same real id the resident indexed.
+        let module = root.join("CommonModules/Сервер/Ext/Module.bsl");
+        let out = state.read(|resident, _gen| {
+            let file_id = resident.file_id_for(&module).expect("module .bsl resolves to a FileId");
+            resident.db.common_module_for_file_id(file_id).is_some()
+        });
+        match out {
+            ResidentOutcome::Ready(resolved, _) => {
+                assert!(
+                    resolved,
+                    "back-link must resolve through a symlinked config subtree via the \
+                     canonicalising fallback"
+                );
+            }
+            _ => panic!("expected Ready outcome from a loaded db"),
+        }
     }
 }
