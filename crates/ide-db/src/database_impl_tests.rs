@@ -3883,6 +3883,138 @@ fn service_indexes_are_case_insensitive_and_track_module_file() {
     assert_eq!(isvc_idx.lookup_module_file("СЕРВИС3"), Some(isvc_module));
 }
 
+#[test]
+fn module_metadata_http_service_late_module_file_registration_falls_back_to_whole_config() {
+    use crate::metadata::HTTPServiceEntry;
+
+    fn http_service_xml(name: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <HTTPService uuid="00000000-0000-0000-0000-000000000071">
+        <Properties><Name>{name}</Name><RootURL>api</RootURL></Properties>
+        <ChildObjects/>
+    </HTTPService>
+</MetaDataObject>"#
+        )
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("cf");
+    let service_name = "OrdersApi";
+    let service_path = root.join(format!("HTTPServices/{service_name}.xml"));
+    let module_path = root.join(format!("HTTPServices/{service_name}/Ext/Module.bsl"));
+    std::fs::create_dir_all(module_path.parent().unwrap()).unwrap();
+    std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+    std::fs::write(&service_path, http_service_xml(service_name)).unwrap();
+    std::fs::write(&module_path, "Процедура GET() КонецПроцедуры").unwrap();
+
+    let mut db = RootDatabaseImpl::new();
+    db.set_all_config_paths(vec![(None, root.clone())]);
+
+    let service_file = FileId(0);
+    let module_file = FileId(1);
+    let mut file_set = FileSet::new();
+    file_set.insert(service_file, VfsPath::new(service_path.to_string_lossy().as_ref()));
+    db.set_source_root(SourceRootId(1), SourceRoot::new_local(file_set.clone()));
+    db.set_file_source_root(service_file, SourceRootId(1));
+    db.set_file_text(service_file, &http_service_xml(service_name));
+    db.set_metadata_listing(
+        &root.to_string_lossy(),
+        MetadataListingData {
+            entries: Vec::new(),
+            defined_types: Vec::new(),
+            common_modules: Vec::new(),
+            event_subscriptions: Vec::new(),
+            scheduled_jobs: Vec::new(),
+            roles: Vec::new(),
+            http_services: vec![HTTPServiceEntry {
+                name: service_name.to_string(),
+                main: service_file,
+                module_file: None,
+            }],
+            web_services: Vec::new(),
+            integration_services: Vec::new(),
+            subsystems: Vec::new(),
+        },
+    );
+
+    file_set.insert(module_file, VfsPath::new(module_path.to_string_lossy().as_ref()));
+    db.set_source_root(SourceRootId(1), SourceRoot::new_local(file_set));
+    db.set_file_source_root(module_file, SourceRootId(1));
+    db.set_file_text(module_file, "Процедура GET() КонецПроцедуры");
+
+    let metadata = db.module_metadata(ModuleId::new(module_file));
+    assert_eq!(metadata.module_type, bsl_metadata::ModuleType::HTTPServiceModule);
+    assert_eq!(metadata.http_service.as_ref().map(|service| service.name()), Some(service_name));
+}
+
+#[test]
+fn module_metadata_web_service_late_module_file_registration_falls_back_to_whole_config() {
+    use crate::metadata::WebServiceEntry;
+
+    fn web_service_xml(name: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <WebService uuid="00000000-0000-0000-0000-000000000072">
+        <Properties><Name>{name}</Name><Namespace>urn:test</Namespace></Properties>
+        <ChildObjects/>
+    </WebService>
+</MetaDataObject>"#
+        )
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("cf");
+    let service_name = "OrdersSoap";
+    let service_path = root.join(format!("WebServices/{service_name}.xml"));
+    let module_path = root.join(format!("WebServices/{service_name}/Ext/Module.bsl"));
+    std::fs::create_dir_all(module_path.parent().unwrap()).unwrap();
+    std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+    std::fs::write(&service_path, web_service_xml(service_name)).unwrap();
+    std::fs::write(&module_path, "Процедура Операция1() КонецПроцедуры").unwrap();
+
+    let mut db = RootDatabaseImpl::new();
+    db.set_all_config_paths(vec![(None, root.clone())]);
+
+    let service_file = FileId(0);
+    let module_file = FileId(1);
+    let mut file_set = FileSet::new();
+    file_set.insert(service_file, VfsPath::new(service_path.to_string_lossy().as_ref()));
+    db.set_source_root(SourceRootId(1), SourceRoot::new_local(file_set.clone()));
+    db.set_file_source_root(service_file, SourceRootId(1));
+    db.set_file_text(service_file, &web_service_xml(service_name));
+    db.set_metadata_listing(
+        &root.to_string_lossy(),
+        MetadataListingData {
+            entries: Vec::new(),
+            defined_types: Vec::new(),
+            common_modules: Vec::new(),
+            event_subscriptions: Vec::new(),
+            scheduled_jobs: Vec::new(),
+            roles: Vec::new(),
+            http_services: Vec::new(),
+            web_services: vec![WebServiceEntry {
+                name: service_name.to_string(),
+                main: service_file,
+                module_file: None,
+            }],
+            integration_services: Vec::new(),
+            subsystems: Vec::new(),
+        },
+    );
+
+    file_set.insert(module_file, VfsPath::new(module_path.to_string_lossy().as_ref()));
+    db.set_source_root(SourceRootId(1), SourceRoot::new_local(file_set));
+    db.set_file_source_root(module_file, SourceRootId(1));
+    db.set_file_text(module_file, "Процедура Операция1() КонецПроцедуры");
+
+    let metadata = db.module_metadata(ModuleId::new(module_file));
+    assert_eq!(metadata.module_type, bsl_metadata::ModuleType::WebServiceModule);
+    assert_eq!(metadata.web_service.as_ref().map(|service| service.name()), Some(service_name));
+}
+
 /// Wave 2e: a Subsystem entry in the typed substrate must resolve
 /// case-insensitively — the same fold_lower contract the other typed indexes
 /// (roles, scheduled jobs, services) already enforce. Red until

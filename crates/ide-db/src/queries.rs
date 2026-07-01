@@ -201,26 +201,36 @@ pub fn module_metadata_query<'db>(
         }
     };
 
+    let mut metadata = crate::metadata::build_module_metadata(&file_path, None);
+
+    match metadata.module_type {
+        bsl_metadata::ModuleType::HTTPServiceModule => {
+            if let Some(http_service) = db.http_service_for_file_id(file_id) {
+                metadata.http_service = Some(http_service);
+                return Arc::new(metadata);
+            }
+        }
+        bsl_metadata::ModuleType::WebServiceModule => {
+            if let Some(web_service) = db.web_service_for_file_id(file_id) {
+                metadata.web_service = Some(web_service);
+                return Arc::new(metadata);
+            }
+        }
+        _ => {}
+    }
+
     // Resolve via `get_configuration` (an object-safe `RootDatabase` method) rather
     // than the free `load_configuration` query, so the build-scoped config cache is
     // consulted and the configuration is not reloaded per batch database. The LSP
     // database has no cache attached and falls through to the salsa query.
     let configuration = db.get_configuration(file_id);
 
-    let mut metadata = crate::metadata::build_module_metadata(&file_path, configuration.as_deref());
-    match metadata.module_type {
-        bsl_metadata::ModuleType::HTTPServiceModule if metadata.http_service.is_none() => {
-            metadata.http_service = db.http_service_for_file_id(file_id);
-        }
-        bsl_metadata::ModuleType::WebServiceModule if metadata.web_service.is_none() => {
-            metadata.web_service = db.web_service_for_file_id(file_id);
-        }
-        bsl_metadata::ModuleType::IntegrationServiceModule
-            if metadata.integration_service.is_none() =>
-        {
-            metadata.integration_service = db.integration_service_for_file_id(file_id);
-        }
-        _ => {}
+    metadata = crate::metadata::build_module_metadata(&file_path, configuration.as_deref());
+
+    if matches!(metadata.module_type, bsl_metadata::ModuleType::IntegrationServiceModule)
+        && metadata.integration_service.is_none()
+    {
+        metadata.integration_service = db.integration_service_for_file_id(file_id);
     }
 
     Arc::new(metadata)

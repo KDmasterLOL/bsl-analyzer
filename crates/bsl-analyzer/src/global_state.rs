@@ -2299,6 +2299,205 @@ mod vfs_race_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    #[test]
+    fn module_metadata_for_http_service_module_survives_sibling_http_service_edit() {
+        use base_db::{SourceDatabase, SourceRoot, BSL_SOURCE_ROOT};
+        use hir::{DefDatabase, ModuleId};
+
+        fn http_service_xml(name: &str, root_url: &str, handler: &str) -> String {
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <HTTPService uuid="4797cd39-952d-4e4d-9685-014e4d5a8e25">
+        <Properties>
+            <Name>{name}</Name>
+            <RootURL>{root_url}</RootURL>
+        </Properties>
+        <ChildObjects>
+            <URLTemplate uuid="7124b2c7-d38e-40b9-a934-e6eb9de99340">
+                <Properties><Name>URLTemplate1</Name><Template>/storage</Template></Properties>
+                <ChildObjects>
+                    <Method uuid="605f52a9-e95b-4900-9e41-449d7da01348">
+                        <Properties>
+                            <Name>GET</Name>
+                            <HTTPMethod>GET</HTTPMethod>
+                            <Handler>{handler}</Handler>
+                        </Properties>
+                    </Method>
+                </ChildObjects>
+            </URLTemplate>
+        </ChildObjects>
+    </HTTPService>
+</MetaDataObject>"#
+            )
+        }
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let main_root = root.path().join("src/cf");
+        let services_dir = main_root.join("HTTPServices");
+        let service_a_module_path = services_dir.join("СервисА/Ext/Module.bsl");
+        std::fs::create_dir_all(service_a_module_path.parent().unwrap()).unwrap();
+        std::fs::write(main_root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        let service_a_xml = services_dir.join("СервисА.xml");
+        let service_b_xml = services_dir.join("СервисБ.xml");
+        std::fs::write(&service_a_xml, http_service_xml("СервисА", "service-a", "HandlerA"))
+            .unwrap();
+        std::fs::write(&service_b_xml, http_service_xml("СервисБ", "service-b", "HandlerB"))
+            .unwrap();
+        std::fs::write(&service_a_module_path, "Процедура HandlerA() КонецПроцедуры").unwrap();
+
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender);
+        state.init_empty_source_root();
+
+        let service_a_vfs_path =
+            vfs::VfsPath::new(service_a_module_path.to_string_lossy().as_ref());
+        let service_a_module_file = state.vfs.write().alloc_file_id(service_a_vfs_path.clone());
+        let mut file_set = vfs::file_set::FileSet::new();
+        file_set.insert(service_a_module_file, service_a_vfs_path);
+        let db = state.analysis_host.raw_database_mut();
+        db.set_source_root(BSL_SOURCE_ROOT, SourceRoot::new_local(file_set));
+        db.set_file_source_root(service_a_module_file, BSL_SOURCE_ROOT);
+        db.set_file_text(service_a_module_file, "Процедура HandlerA() КонецПроцедуры");
+        db.set_all_config_paths(vec![(None, main_root.clone())]);
+        state.bootstrap_metadata_substrate();
+
+        let service_a_module_id = ModuleId::new(service_a_module_file);
+        let before_http_service = {
+            let metadata = state.analysis_host.raw_database().module_metadata(service_a_module_id);
+            assert_eq!(metadata.module_type, bsl_metadata::ModuleType::HTTPServiceModule);
+            let http_service = metadata
+                .http_service
+                .clone()
+                .expect("HTTP service module metadata resolves before the sibling edit");
+            assert_eq!(http_service.name(), "СервисА");
+            assert_eq!(http_service.url_templates()[0].methods()[0].handler(), "HandlerA");
+            http_service
+        };
+
+        std::fs::write(
+            &service_b_xml,
+            http_service_xml("СервисБ", "service-b-edited", "HandlerBEdited"),
+        )
+        .unwrap();
+        state.analysis_host.raw_database_mut().bump_config_for_path(&service_b_xml);
+        assert!(state.refresh_metadata_substrate(std::slice::from_ref(&service_b_xml)));
+
+        let after_http_service = {
+            let metadata = state.analysis_host.raw_database().module_metadata(service_a_module_id);
+            assert_eq!(metadata.module_type, bsl_metadata::ModuleType::HTTPServiceModule);
+            let http_service = metadata
+                .http_service
+                .clone()
+                .expect("HTTP service module metadata still resolves after the sibling edit");
+            assert_eq!(http_service.name(), "СервисА");
+            assert_eq!(http_service.url_templates()[0].methods()[0].handler(), "HandlerA");
+            http_service
+        };
+
+        assert!(
+            Arc::ptr_eq(&before_http_service, &after_http_service),
+            "editing СервисБ must not re-clone module metadata for sibling HTTP service СервисА"
+        );
+    }
+
+    #[test]
+    fn module_metadata_for_web_service_module_survives_sibling_web_service_edit() {
+        use base_db::{SourceDatabase, SourceRoot, BSL_SOURCE_ROOT};
+        use hir::{DefDatabase, ModuleId};
+
+        fn web_service_xml(name: &str, namespace: &str, procedure: &str) -> String {
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <WebService uuid="0b4a4c9c-76e9-455c-9471-249051a8301d">
+        <Properties>
+            <Name>{name}</Name>
+            <Namespace>{namespace}</Namespace>
+        </Properties>
+        <ChildObjects>
+            <Operation uuid="bc99d837-aee6-40ee-8940-3a81dddf477c">
+                <Properties>
+                    <Name>Операция1</Name>
+                    <ProcedureName>{procedure}</ProcedureName>
+                </Properties>
+                <ChildObjects/>
+            </Operation>
+        </ChildObjects>
+    </WebService>
+</MetaDataObject>"#
+            )
+        }
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let main_root = root.path().join("src/cf");
+        let services_dir = main_root.join("WebServices");
+        let service_a_module_path = services_dir.join("СервисА/Ext/Module.bsl");
+        std::fs::create_dir_all(service_a_module_path.parent().unwrap()).unwrap();
+        std::fs::write(main_root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        let service_a_xml = services_dir.join("СервисА.xml");
+        let service_b_xml = services_dir.join("СервисБ.xml");
+        std::fs::write(&service_a_xml, web_service_xml("СервисА", "a.example", "ProcedureA"))
+            .unwrap();
+        std::fs::write(&service_b_xml, web_service_xml("СервисБ", "b.example", "ProcedureB"))
+            .unwrap();
+        std::fs::write(&service_a_module_path, "Процедура ProcedureA() КонецПроцедуры").unwrap();
+
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender);
+        state.init_empty_source_root();
+
+        let service_a_vfs_path =
+            vfs::VfsPath::new(service_a_module_path.to_string_lossy().as_ref());
+        let service_a_module_file = state.vfs.write().alloc_file_id(service_a_vfs_path.clone());
+        let mut file_set = vfs::file_set::FileSet::new();
+        file_set.insert(service_a_module_file, service_a_vfs_path);
+        let db = state.analysis_host.raw_database_mut();
+        db.set_source_root(BSL_SOURCE_ROOT, SourceRoot::new_local(file_set));
+        db.set_file_source_root(service_a_module_file, BSL_SOURCE_ROOT);
+        db.set_file_text(service_a_module_file, "Процедура ProcedureA() КонецПроцедуры");
+        db.set_all_config_paths(vec![(None, main_root.clone())]);
+        state.bootstrap_metadata_substrate();
+
+        let service_a_module_id = ModuleId::new(service_a_module_file);
+        let before_web_service = {
+            let metadata = state.analysis_host.raw_database().module_metadata(service_a_module_id);
+            assert_eq!(metadata.module_type, bsl_metadata::ModuleType::WebServiceModule);
+            let web_service = metadata
+                .web_service
+                .clone()
+                .expect("web service module metadata resolves before the sibling edit");
+            assert_eq!(web_service.name(), "СервисА");
+            assert_eq!(web_service.operations()[0].procedure_name(), "ProcedureA");
+            web_service
+        };
+
+        std::fs::write(
+            &service_b_xml,
+            web_service_xml("СервисБ", "b-edited.example", "ProcedureBEdited"),
+        )
+        .unwrap();
+        state.analysis_host.raw_database_mut().bump_config_for_path(&service_b_xml);
+        assert!(state.refresh_metadata_substrate(std::slice::from_ref(&service_b_xml)));
+
+        let after_web_service = {
+            let metadata = state.analysis_host.raw_database().module_metadata(service_a_module_id);
+            assert_eq!(metadata.module_type, bsl_metadata::ModuleType::WebServiceModule);
+            let web_service = metadata
+                .web_service
+                .clone()
+                .expect("web service module metadata still resolves after the sibling edit");
+            assert_eq!(web_service.name(), "СервисА");
+            assert_eq!(web_service.operations()[0].procedure_name(), "ProcedureA");
+            web_service
+        };
+
+        assert!(
+            Arc::ptr_eq(&before_web_service, &after_web_service),
+            "editing СервисБ must not re-clone module metadata for sibling web service СервисА"
+        );
+    }
+
     /// Wave 2e: `resolve_subsystem_for_file` must match the merged whole-config
     /// lookup for a base + own-extension overlay, including a same-name merge
     /// (base content + extension-added content land in one subsystem). An
