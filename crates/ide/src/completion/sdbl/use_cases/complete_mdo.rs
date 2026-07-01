@@ -151,7 +151,8 @@ mod tests {
     fn test_complete_mdo_types_no_prefix() {
         let items = CompleteMdoUseCase::execute_types("");
 
-        assert!(items.len() >= 40);
+        // Every enumerated type yields a Russian and an English label when no prefix filters.
+        assert_eq!(items.len(), MdoType::all().len() * 2);
 
         assert!(items.iter().any(|i| i.label == "Справочник"));
         assert!(items.iter().any(|i| i.label == "Catalog"));

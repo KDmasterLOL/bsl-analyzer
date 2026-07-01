@@ -912,9 +912,7 @@ impl ManagerType {
             MdoType::ExchangePlan => Some(Self::ExchangePlans),
             MdoType::ExternalDataSource => Some(Self::ExternalDataSources),
             MdoType::Constant => Some(Self::Constants),
-            MdoType::Cube
-            | MdoType::DimensionTable
-            | MdoType::CommonModule
+            MdoType::CommonModule
             | MdoType::EventSubscription
             | MdoType::Subsystem
             | MdoType::Role => None,

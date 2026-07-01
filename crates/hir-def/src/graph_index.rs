@@ -1362,7 +1362,13 @@ pub fn project_workspace_role_edges<DB: ConfigsDatabase>(
     rls.sort();
     rls.dedup();
 
-    let merged = db.merged_visible_configuration(representative);
+    // Direct object rights resolve entirely from the enumerated roles above. The whole
+    // configuration is needed only as the SDBL lowering universe for RLS restriction
+    // queries, which may reference *any* metadata object — a per-object resolver cannot
+    // bound what a condition names. Roles without restrictions never touch it, so the
+    // coarse dependency is taken only when a restriction is actually present.
+    let merged =
+        if rls.is_empty() { None } else { db.merged_visible_configuration(representative) };
 
     let mut edges = Vec::new();
     let mut seen: FxHashSet<(GraphNode, GraphNode)> = FxHashSet::default();
