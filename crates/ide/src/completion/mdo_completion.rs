@@ -381,12 +381,7 @@ fn complete_metadata_reference_objects<DB: RootDatabase>(
         MetadataReferenceKind::ScheduledJob => db.scheduled_job_names(file_id),
         MetadataReferenceKind::HttpService => db.http_service_names(file_id),
         MetadataReferenceKind::WebService => db.web_service_names(file_id),
-        _ => {
-            let Some(config) = db.merged_visible_configuration(file_id) else {
-                return Vec::new();
-            };
-            metadata_reference_names(&config, kind)
-        }
+        MetadataReferenceKind::Subsystem => db.subsystem_names(file_id),
     };
     names
         .into_iter()
@@ -401,26 +396,6 @@ fn complete_metadata_reference_objects<DB: RootDatabase>(
             source: None,
         })
         .collect()
-}
-
-fn metadata_reference_names(
-    config: &bsl_metadata::Configuration,
-    kind: MetadataReferenceKind,
-) -> Vec<String> {
-    match kind {
-        MetadataReferenceKind::Role => Vec::new(),
-        MetadataReferenceKind::EventSubscription => Vec::new(),
-        MetadataReferenceKind::ScheduledJob => Vec::new(),
-        MetadataReferenceKind::HttpService => {
-            config.http_services().iter().map(|item| item.name().to_string()).collect()
-        }
-        MetadataReferenceKind::WebService => {
-            config.web_services().iter().map(|item| item.name().to_string()).collect()
-        }
-        MetadataReferenceKind::Subsystem => {
-            config.subsystems().iter().map(|item| item.name().to_string()).collect()
-        }
-    }
 }
 
 fn complete_manager_methods<DB: RootDatabase>(
@@ -528,4 +503,82 @@ fn complete_predefined_items<DB: RootDatabase>(
     }
 
     Vec::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ide_db::{
+        base_db::{SourceDatabase, SourceRoot, SourceRootId},
+        metadata::{MetadataListingData, SubsystemEntry},
+        RootDatabaseImpl,
+    };
+    use vfs::{file_set::FileSet, FileId, VfsPath};
+
+    fn subsystem_xml(name: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+    <Subsystem uuid="00000000-0000-0000-0000-000000000094">
+        <Properties>
+            <Name>{name}</Name>
+            <Content/>
+        </Properties>
+        <ChildObjects/>
+    </Subsystem>
+</MetaDataObject>"#
+        )
+    }
+
+    #[test]
+    fn complete_metadata_reference_subsystems_use_listed_substrate() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("cf");
+        let subsystem_path = root.join("Subsystems/МояПодсистема.xml");
+        std::fs::create_dir_all(subsystem_path.parent().unwrap()).unwrap();
+        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+
+        let subsystem_file = FileId(20);
+        let consumer_file = FileId(21);
+        let consumer_path = root.join("CompletionConsumer.bsl");
+
+        let mut db = RootDatabaseImpl::new();
+        let mut file_set = FileSet::new();
+        file_set.insert(subsystem_file, VfsPath::new(subsystem_path.to_string_lossy().as_ref()));
+        file_set.insert(consumer_file, VfsPath::new(consumer_path.to_string_lossy().as_ref()));
+        db.set_source_root(SourceRootId(1), SourceRoot::new_local(file_set));
+        db.set_file_source_root(subsystem_file, SourceRootId(1));
+        db.set_file_source_root(consumer_file, SourceRootId(1));
+        db.set_file_text(subsystem_file, &subsystem_xml("МояПодсистема"));
+        db.set_file_text(consumer_file, "Процедура Т() КонецПроцедуры");
+
+        db.set_all_config_paths(vec![(None, root.clone())]);
+        db.set_metadata_listing(
+            &root.to_string_lossy(),
+            MetadataListingData {
+                entries: Vec::new(),
+                defined_types: Vec::new(),
+                common_modules: Vec::new(),
+                event_subscriptions: Vec::new(),
+                scheduled_jobs: Vec::new(),
+                roles: Vec::new(),
+                http_services: Vec::new(),
+                web_services: Vec::new(),
+                integration_services: Vec::new(),
+                subsystems: vec![SubsystemEntry {
+                    name: "МояПодсистема".to_string(),
+                    main: subsystem_file,
+                }],
+            },
+        );
+
+        let items = complete_metadata_reference_objects(
+            &db,
+            consumer_file,
+            MetadataReferenceKind::Subsystem,
+        );
+        let labels: Vec<String> = items.into_iter().map(|item| item.label).collect();
+
+        assert_eq!(labels, vec!["МояПодсистема".to_string()]);
+    }
 }

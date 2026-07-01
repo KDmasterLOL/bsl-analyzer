@@ -1931,6 +1931,7 @@ dependencies = [
  "elsa",
  "expect-test",
  "hir",
+ "hir-ty",
  "indexmap",
  "line-index",
  "parking_lot",

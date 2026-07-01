@@ -4133,3 +4133,122 @@ fn subsystem_membership_from_listed_substrate() {
         "child subsystem membership must produce a subsystem→subsystem edge"
     );
 }
+
+#[test]
+fn subsystem_reference_resolver_uses_listed_substrate() {
+    use crate::metadata::SubsystemEntry;
+    use hir::MetadataReferenceKind;
+    use hir_ty::{DbObjectResolver, ObjectResolver};
+
+    fn subsystem_xml(name: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+    <Subsystem uuid="00000000-0000-0000-0000-000000000093">
+        <Properties>
+            <Name>{name}</Name>
+            <Content/>
+        </Properties>
+        <ChildObjects/>
+    </Subsystem>
+</MetaDataObject>"#
+        )
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("cf");
+    let ext_root = root.join("ext");
+    let subsystem_path = root.join("Subsystems/МояПодсистема.xml");
+    let ext_subsystem_path = ext_root.join("Subsystems/МояПодсистема.xml");
+    let ext_only_path = ext_root.join("Subsystems/ТолькоРасширение.xml");
+    std::fs::create_dir_all(subsystem_path.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(ext_subsystem_path.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(ext_only_path.parent().unwrap()).unwrap();
+    std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+
+    let subsystem_file = FileId(110);
+    let ext_subsystem_file = FileId(111);
+    let ext_only_file = FileId(112);
+    let consumer_file = FileId(113);
+    let consumer_path = ext_root.join("SubsystemConsumer.bsl");
+
+    let mut db = RootDatabaseImpl::new();
+    let mut file_set = FileSet::new();
+    file_set.insert(subsystem_file, VfsPath::new(subsystem_path.to_string_lossy().as_ref()));
+    file_set
+        .insert(ext_subsystem_file, VfsPath::new(ext_subsystem_path.to_string_lossy().as_ref()));
+    file_set.insert(ext_only_file, VfsPath::new(ext_only_path.to_string_lossy().as_ref()));
+    file_set.insert(consumer_file, VfsPath::new(consumer_path.to_string_lossy().as_ref()));
+    db.set_source_root(SourceRootId(1), SourceRoot::new_local(file_set));
+    db.set_file_source_root(subsystem_file, SourceRootId(1));
+    db.set_file_source_root(ext_subsystem_file, SourceRootId(1));
+    db.set_file_source_root(ext_only_file, SourceRootId(1));
+    db.set_file_source_root(consumer_file, SourceRootId(1));
+    db.set_file_text(subsystem_file, &subsystem_xml("МояПодсистема"));
+    db.set_file_text(ext_subsystem_file, &subsystem_xml("МояПодсистема"));
+    db.set_file_text(ext_only_file, &subsystem_xml("ТолькоРасширение"));
+    db.set_file_text(consumer_file, "Процедура Т() КонецПроцедуры");
+
+    db.set_all_config_paths(vec![
+        (None, root.clone()),
+        (Some("Ext".to_string()), ext_root.clone()),
+    ]);
+    db.set_metadata_listing(
+        &root.to_string_lossy(),
+        MetadataListingData {
+            entries: Vec::new(),
+            defined_types: Vec::new(),
+            common_modules: Vec::new(),
+            event_subscriptions: Vec::new(),
+            scheduled_jobs: Vec::new(),
+            roles: Vec::new(),
+            http_services: Vec::new(),
+            web_services: Vec::new(),
+            integration_services: Vec::new(),
+            subsystems: vec![SubsystemEntry {
+                name: "МояПодсистема".to_string(),
+                main: subsystem_file,
+            }],
+        },
+    );
+    db.set_metadata_listing(
+        &ext_root.to_string_lossy(),
+        MetadataListingData {
+            entries: Vec::new(),
+            defined_types: Vec::new(),
+            common_modules: Vec::new(),
+            event_subscriptions: Vec::new(),
+            scheduled_jobs: Vec::new(),
+            roles: Vec::new(),
+            http_services: Vec::new(),
+            web_services: Vec::new(),
+            integration_services: Vec::new(),
+            subsystems: vec![
+                SubsystemEntry {
+                    name: "МояПодсистема".to_string(), main: ext_subsystem_file
+                },
+                SubsystemEntry {
+                    name: "ТолькоРасширение".to_string(), main: ext_only_file
+                },
+            ],
+        },
+    );
+
+    let resolver = DbObjectResolver::new(&db, consumer_file);
+    let resolved = resolver
+        .resolve_metadata_reference(MetadataReferenceKind::Subsystem, "МояПодсистема")
+        .expect("listed subsystem reference must resolve without whole Configuration data");
+    assert_eq!(resolved.as_str(), "МояПодсистема");
+
+    let ext_only_resolved = resolver
+        .resolve_metadata_reference(MetadataReferenceKind::Subsystem, "ТолькоРасширение")
+        .expect("extension-only subsystem reference must resolve without whole Configuration data");
+    assert_eq!(ext_only_resolved.as_str(), "ТолькоРасширение");
+
+    let names = db.subsystem_names_for_file(consumer_file);
+    assert_eq!(names, vec!["МояПодсистема".to_string(), "ТолькоРасширение".to_string()]);
+
+    let members = resolver.metadata_reference_members(MetadataReferenceKind::Subsystem);
+    let member_names: Vec<String> = members.iter().map(|name| name.as_str().to_string()).collect();
+    assert_eq!(member_names, vec!["МояПодсистема".to_string(), "ТолькоРасширение".to_string()]);
+}

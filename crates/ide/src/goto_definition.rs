@@ -93,10 +93,16 @@ fn metadata_reference_xml_relative_paths<DB: RootDatabase>(
         // keep the flat top-level path as a fallback.
         MetadataReferenceKind::Subsystem => {
             let mut candidates = Vec::new();
-            if let Some(config) = db.merged_visible_configuration(from_file_id) {
-                if let Some(nested) = subsystem_xml_relative_path(config.subsystems(), name) {
-                    candidates.push(nested);
-                }
+            let subsystems = db
+                .subsystem_names(from_file_id)
+                .into_iter()
+                .filter_map(|subsystem_name| db.resolve_subsystem(from_file_id, &subsystem_name))
+                .collect::<Vec<_>>();
+            if let Some(nested) = subsystem_xml_relative_path(
+                subsystems.iter().map(|subsystem| subsystem.as_ref()),
+                name,
+            ) {
+                candidates.push(nested);
             }
             candidates.push(flat("Subsystems"));
             candidates
@@ -106,13 +112,14 @@ fn metadata_reference_xml_relative_paths<DB: RootDatabase>(
 
 /// Reconstruct the on-disk relative path of a (possibly nested) subsystem from the flat
 /// subsystem list, where each subsystem records its direct children by name.
-fn subsystem_xml_relative_path(
-    subsystems: &[bsl_metadata::Subsystem],
+fn subsystem_xml_relative_path<'a>(
+    subsystems: impl IntoIterator<Item = &'a bsl_metadata::Subsystem>,
     name: &str,
 ) -> Option<PathBuf> {
     use std::collections::HashMap;
     use stdx::case::CaseExt;
 
+    let subsystems = subsystems.into_iter().collect::<Vec<_>>();
     let target = subsystems.iter().find(|s| s.name().fold_lower() == name.fold_lower())?;
     let parent_of: HashMap<String, &str> = subsystems
         .iter()
@@ -910,5 +917,99 @@ mod tests {
         use bsl_metadata::Subsystem;
         let subsystems = vec![Subsystem::new("Продажи")];
         assert_eq!(subsystem_xml_relative_path(&subsystems, "НетТакой"), None);
+    }
+
+    #[test]
+    fn metadata_reference_subsystem_goto_uses_listed_substrate() {
+        use ide_db::metadata::{MetadataListingData, SubsystemEntry};
+
+        fn subsystem_xml(name: &str, children: &[&str]) -> String {
+            let child_tags = children
+                .iter()
+                .map(|child| format!("        <Subsystem>{child}</Subsystem>"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let children_block = if child_tags.is_empty() {
+                String::new()
+            } else {
+                format!("\n{child_tags}\n        ")
+            };
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+    <Subsystem uuid="00000000-0000-0000-0000-000000000095">
+        <Properties>
+            <Name>{name}</Name>
+            <Content/>
+        </Properties>
+        <ChildObjects>{children_block}</ChildObjects>
+    </Subsystem>
+</MetaDataObject>"#
+            )
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("cf");
+        let parent_path = root.join("Subsystems/Родитель.xml");
+        let child_path = root.join("Subsystems/Родитель/Subsystems/Дочерняя.xml");
+        std::fs::create_dir_all(parent_path.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(child_path.parent().unwrap()).unwrap();
+        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+
+        let parent_file = FileId(30);
+        let child_file = FileId(31);
+        let consumer_file = FileId(32);
+        let consumer_path = root.join("GotoConsumer.bsl");
+
+        let mut db = RootDatabaseImpl::new();
+        let mut file_set = FileSet::new();
+        file_set.insert(parent_file, VfsPath::new(parent_path.to_string_lossy().as_ref()));
+        file_set.insert(child_file, VfsPath::new(child_path.to_string_lossy().as_ref()));
+        file_set.insert(consumer_file, VfsPath::new(consumer_path.to_string_lossy().as_ref()));
+        db.set_source_root(SourceRootId(1), SourceRoot::new_local(file_set));
+        db.set_file_source_root(parent_file, SourceRootId(1));
+        db.set_file_source_root(child_file, SourceRootId(1));
+        db.set_file_source_root(consumer_file, SourceRootId(1));
+        db.set_file_text(parent_file, &subsystem_xml("Родитель", &["Дочерняя"]));
+        db.set_file_text(child_file, &subsystem_xml("Дочерняя", &[]));
+        db.set_file_text(consumer_file, "Процедура Т() КонецПроцедуры");
+
+        db.set_all_config_paths(vec![(None, root.clone())]);
+        db.set_metadata_listing(
+            &root.to_string_lossy(),
+            MetadataListingData {
+                entries: Vec::new(),
+                defined_types: Vec::new(),
+                common_modules: Vec::new(),
+                event_subscriptions: Vec::new(),
+                scheduled_jobs: Vec::new(),
+                roles: Vec::new(),
+                http_services: Vec::new(),
+                web_services: Vec::new(),
+                integration_services: Vec::new(),
+                subsystems: vec![
+                    SubsystemEntry { name: "Родитель".to_string(), main: parent_file },
+                    SubsystemEntry { name: "Дочерняя".to_string(), main: child_file },
+                ],
+            },
+        );
+
+        let paths = metadata_reference_xml_relative_paths(
+            &db,
+            consumer_file,
+            MetadataReferenceKind::Subsystem,
+            "Дочерняя",
+        );
+
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("Subsystems")
+                    .join("Родитель")
+                    .join("Subsystems")
+                    .join("Дочерняя.xml"),
+                PathBuf::from("Subsystems").join("Дочерняя.xml"),
+            ]
+        );
     }
 }

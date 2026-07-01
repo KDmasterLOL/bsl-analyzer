@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::hash::BuildHasherDefault;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1099,9 +1100,13 @@ impl RootDatabaseImpl {
         }
 
         let mut out = Vec::new();
+        let mut seen = HashSet::new();
         for listing in [main_listing, ext_listing].into_iter().flatten() {
             for entry in listing.subsystems(self).iter() {
-                out.push(entry.name.clone());
+                let name = entry.name.clone();
+                if seen.insert(name.fold_lower()) {
+                    out.push(name);
+                }
             }
         }
         out
