@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use stdx::case::CaseExt;
 
 use crate::metadata_object::{MdoType, Name};
 
@@ -44,15 +45,16 @@ impl Subsystem {
 
     /// Merge another subsystem's members and child subsystems into this one — an extension
     /// overlay that adds to a base subsystem of the same name. New entries are appended;
-    /// duplicates are skipped (child names case-insensitively, like other name matching).
     pub fn merge_from(&mut self, other: &Subsystem) {
         for entry in &other.content {
-            if !self.content.contains(entry) {
+            if !self.content.iter().any(|existing| {
+                existing.0 == entry.0 && existing.1.fold_lower() == entry.1.fold_lower()
+            }) {
                 self.content.push(entry.clone());
             }
         }
         for child in &other.child_subsystems {
-            if !self.child_subsystems.iter().any(|c| c.eq_ignore_ascii_case(child)) {
+            if !self.child_subsystems.iter().any(|c| c.fold_lower() == child.fold_lower()) {
                 self.child_subsystems.push(child.clone());
             }
         }

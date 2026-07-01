@@ -143,6 +143,7 @@ fn resolve_metadata_object_isolates_content_and_structure() {
         Arc::new(Vec::new()),
         Arc::new(Vec::new()),
         Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
     );
     assert_eq!(config_index(&db, listing).len(), 1);
 
@@ -239,6 +240,7 @@ fn resolve_register_by_name_resolves_via_listing_substrate() {
         Arc::new(Vec::new()),
         Arc::new(Vec::new()),
         Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
     );
 
     let reg = resolve_register_by_name(&db, listing, "РегистрСведений1".to_string())
@@ -295,6 +297,7 @@ fn resolve_defined_type_isolates_content_and_structure() {
         Arc::new(vec![DefinedTypeEntry {
             name: "ДенежнаяСумма".to_string(), main: f1
         }]),
+        Arc::new(Vec::new()),
         Arc::new(Vec::new()),
         Arc::new(Vec::new()),
         Arc::new(Vec::new()),
@@ -369,6 +372,7 @@ fn resolve_common_module_by_name_and_by_body_file() {
             main: xml_file,
             module_file: Some(bsl_file),
         }]),
+        Arc::new(Vec::new()),
         Arc::new(Vec::new()),
         Arc::new(Vec::new()),
         Arc::new(Vec::new()),
@@ -477,6 +481,7 @@ fn resolve_event_subscription_isolates_content_and_structure() {
             name: "ПередЗаписью".to_string(),
             main: before_file,
         }]),
+        Arc::new(Vec::new()),
         Arc::new(Vec::new()),
         Arc::new(Vec::new()),
         Arc::new(Vec::new()),
@@ -599,6 +604,7 @@ fn resolve_event_subscription_for_file_uses_bootstrapped_listing() {
             http_services: Vec::new(),
             web_services: Vec::new(),
             integration_services: Vec::new(),
+            subsystems: Vec::new(),
         },
     );
 
@@ -673,6 +679,7 @@ fn resolve_scheduled_job_isolates_content_and_structure() {
             name: "РегламентноеЗадание1".to_string(),
             main: before_file,
         }]),
+        Arc::new(Vec::new()),
         Arc::new(Vec::new()),
         Arc::new(Vec::new()),
         Arc::new(Vec::new()),
@@ -796,6 +803,7 @@ fn resolve_scheduled_job_for_file_uses_bootstrapped_listing() {
             http_services: Vec::new(),
             web_services: Vec::new(),
             integration_services: Vec::new(),
+            subsystems: Vec::new(),
         },
     );
 
@@ -904,6 +912,7 @@ fn resolve_role_isolates_main_and_rights_content() {
                 rights: Some(role2_rights),
             },
         ]),
+        Arc::new(Vec::new()),
         Arc::new(Vec::new()),
         Arc::new(Vec::new()),
         Arc::new(Vec::new()),
@@ -1039,6 +1048,7 @@ fn resolve_role_for_file_uses_bootstrapped_listing() {
             http_services: Vec::new(),
             web_services: Vec::new(),
             integration_services: Vec::new(),
+            subsystems: Vec::new(),
         },
     );
 
@@ -1148,6 +1158,7 @@ fn role_links_to_object_rights_and_rls_condition_object_from_listed_substrate() 
             http_services: Vec::new(),
             web_services: Vec::new(),
             integration_services: Vec::new(),
+            subsystems: Vec::new(),
         },
     );
 
@@ -1253,6 +1264,7 @@ fn role_names_for_file_uses_bootstrapped_listing() {
             http_services: Vec::new(),
             web_services: Vec::new(),
             integration_services: Vec::new(),
+            subsystems: Vec::new(),
         },
     );
 
@@ -3839,6 +3851,7 @@ fn service_indexes_are_case_insensitive_and_track_module_file() {
         Arc::new(Vec::new()),
         Arc::new(Vec::new()),
         Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
     );
     listing.set_http_services(&mut db).to(Arc::new(vec![HTTPServiceEntry {
         name: "Сервис1".to_string(),
@@ -3868,4 +3881,255 @@ fn service_indexes_are_case_insensitive_and_track_module_file() {
     let isvc_idx = integration_service_index(&db, listing);
     assert_eq!(isvc_idx.lookup("сервис3"), Some(isvc_main));
     assert_eq!(isvc_idx.lookup_module_file("СЕРВИС3"), Some(isvc_module));
+}
+
+/// Wave 2e: a Subsystem entry in the typed substrate must resolve
+/// case-insensitively — the same fold_lower contract the other typed indexes
+/// (roles, scheduled jobs, services) already enforce. Red until
+/// `SubsystemEntry`, the `subsystems` listing field, and
+/// `resolve_subsystem_for_file` / `enumerate_subsystems_for_file` exist.
+#[test]
+fn subsystem_index_is_case_insensitive() {
+    use crate::metadata::SubsystemEntry;
+
+    fn subsystem_xml(name: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+    <Subsystem uuid="00000000-0000-0000-0000-000000000091">
+        <Properties>
+            <Name>{name}</Name>
+        </Properties>
+    </Subsystem>
+</MetaDataObject>"#
+        )
+    }
+
+    let root =
+        std::env::temp_dir().join(format!("bsl_subsystem_case_{}_{}", std::process::id(), line!()));
+    let sub_path = root.join("Subsystems/МояПодсистема.xml");
+    std::fs::create_dir_all(sub_path.parent().unwrap()).unwrap();
+
+    let mut db = RootDatabaseImpl::new();
+    let sub_main = FileId(0);
+    let consumer_file = FileId(1);
+    let consumer_path = root.join("SubsystemConsumer.bsl");
+
+    let mut file_set = FileSet::new();
+    file_set.insert(sub_main, VfsPath::new(sub_path.to_string_lossy().as_ref()));
+    file_set.insert(consumer_file, VfsPath::new(consumer_path.to_string_lossy().as_ref()));
+    db.set_source_root(SourceRootId(1), SourceRoot::new_local(file_set));
+    db.set_file_source_root(sub_main, SourceRootId(1));
+    db.set_file_source_root(consumer_file, SourceRootId(1));
+    db.set_file_text(sub_main, &subsystem_xml("МояПодсистема"));
+    db.set_file_text(consumer_file, "Процедура Т() КонецПроцедуры");
+
+    db.set_all_config_paths(vec![(None, root.clone())]);
+    db.set_metadata_listing(
+        &root.to_string_lossy(),
+        MetadataListingData {
+            entries: Vec::new(),
+            defined_types: Vec::new(),
+            common_modules: Vec::new(),
+            event_subscriptions: Vec::new(),
+            scheduled_jobs: Vec::new(),
+            roles: Vec::new(),
+            http_services: Vec::new(),
+            web_services: Vec::new(),
+            integration_services: Vec::new(),
+            subsystems: vec![SubsystemEntry {
+                name: "МояПодсистема".to_string(), main: sub_main
+            }],
+        },
+    );
+
+    // The declared name is `МояПодсистема`; BSL identifiers are case-insensitive,
+    // so every spelling must resolve to the same parsed subsystem (pointer-equal,
+    // proving a single parse, not a re-parse per casing).
+    let canonical = db
+        .resolve_subsystem_for_file(consumer_file, "МояПодсистема")
+        .expect("canonical spelling resolves through the bootstrapped substrate");
+    assert_eq!(canonical.name(), "МояПодсистема");
+    let lower = db
+        .resolve_subsystem_for_file(consumer_file, "мояподсистема")
+        .expect("lower-case spelling resolves case-insensitively");
+    assert!(
+        Arc::ptr_eq(&canonical, &lower),
+        "lower-case lookup must return the same parsed subsystem"
+    );
+    let upper = db
+        .resolve_subsystem_for_file(consumer_file, "МОЯПОДСИСТЕМА")
+        .expect("upper-case spelling resolves case-insensitively");
+    assert!(
+        Arc::ptr_eq(&canonical, &upper),
+        "upper-case lookup must return the same parsed subsystem"
+    );
+    assert!(
+        db.resolve_subsystem_for_file(consumer_file, "НетТакойПодсистемы").is_none(),
+        "unknown subsystem name must not resolve"
+    );
+
+    let enumerated: Vec<String> = db
+        .enumerate_subsystems_for_file(consumer_file)
+        .iter()
+        .map(|sub| sub.name().to_string())
+        .collect();
+    assert_eq!(enumerated, vec!["МояПодсистема".to_string()]);
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// Wave 2e: the graph consumer `project_workspace_subsystem_edges` must consume
+/// the listed Subsystem substrate (not `db.configurations(representative)`) and
+/// emit membership edges for base content, extension-added content (overlay
+/// merge of a same-named subsystem), and child subsystem membership. The on-disk
+/// `Configuration.xml` stubs carry no subsystems, so the only possible source of
+/// these edges is the substrate. Red until the `subsystems` listing field,
+/// `SubsystemEntry`, and the `enumerate_subsystems` consumer migration exist.
+/// The pre-existing `subsystem_membership_links_to_member_objects` fallback
+/// (whole-config path) is intentionally left untouched.
+#[test]
+fn subsystem_membership_from_listed_substrate() {
+    use crate::metadata::SubsystemEntry;
+    use bsl_metadata::MdoType;
+    use hir::call_graph::{EdgeKind, EdgeProvenance, GraphNode};
+    use hir::graph_index::{project_workspace_subsystem_edges, GraphBuildState};
+
+    fn subsystem_xml(name: &str, content: &[&str], children: &[&str]) -> String {
+        let items = content
+            .iter()
+            .map(|c| format!("        <xr:Item xsi:type=\"xr:MDObjectRef\">{c}</xr:Item>"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let child_tags = children
+            .iter()
+            .map(|c| format!("        <Subsystem>{c}</Subsystem>"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let items_block =
+            if items.is_empty() { String::new() } else { format!("\n{items}\n            ") };
+        let children_block =
+            if child_tags.is_empty() { String::new() } else { format!("\n{child_tags}\n        ") };
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+    <Subsystem uuid="00000000-0000-0000-0000-000000000092">
+        <Properties>
+            <Name>{name}</Name>
+            <Content>{items_block}</Content>
+        </Properties>
+        <ChildObjects>{children_block}</ChildObjects>
+    </Subsystem>
+</MetaDataObject>"#
+        )
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let main_root = temp.path().join("cf");
+    let ext_root = temp.path().join("cfe/X");
+    std::fs::create_dir_all(main_root.join("Subsystems")).unwrap();
+    std::fs::create_dir_all(ext_root.join("Subsystems")).unwrap();
+    // Stub configurations with NO subsystems: `db.configurations()` must not be
+    // the source of any subsystem edge. The only source is the substrate below.
+    std::fs::write(main_root.join("Configuration.xml"), "<Configuration/>").unwrap();
+    std::fs::write(ext_root.join("Configuration.xml"), "<Configuration/>").unwrap();
+
+    let base_sub_main = FileId(100);
+    let ext_sub_main = FileId(101);
+    let consumer_file = FileId(102);
+
+    let mut db = RootDatabaseImpl::new();
+    let mut file_set = FileSet::new();
+    file_set.insert(
+        base_sub_main,
+        VfsPath::new(main_root.join("Subsystems/МояПодсистема.xml").to_string_lossy().as_ref()),
+    );
+    file_set.insert(
+        ext_sub_main,
+        VfsPath::new(ext_root.join("Subsystems/МояПодсистема.xml").to_string_lossy().as_ref()),
+    );
+    file_set.insert(
+        consumer_file,
+        VfsPath::new(main_root.join("SubsystemConsumer.bsl").to_string_lossy().as_ref()),
+    );
+    db.set_source_root(SourceRootId(1), SourceRoot::new_local(file_set));
+    db.set_file_source_root(base_sub_main, SourceRootId(1));
+    db.set_file_source_root(ext_sub_main, SourceRootId(1));
+    db.set_file_source_root(consumer_file, SourceRootId(1));
+    // Base subsystem owns `Catalog.Товары` and a child subsystem `Дочерняя`.
+    db.set_file_text(
+        base_sub_main,
+        &subsystem_xml("МояПодсистема", &["Catalog.Товары"], &["Дочерняя"]),
+    );
+    // Extension overlay for the SAME subsystem name: adds `Catalog.Услуги`.
+    db.set_file_text(ext_sub_main, &subsystem_xml("МояПодсистема", &["Catalog.Услуги"], &[]));
+    db.set_file_text(consumer_file, "Процедура Т() КонецПроцедуры");
+
+    db.set_all_config_paths(vec![
+        (None, main_root.clone()),
+        (Some("X".to_string()), ext_root.clone()),
+    ]);
+    db.set_metadata_listing(
+        &main_root.to_string_lossy(),
+        MetadataListingData {
+            entries: Vec::new(),
+            defined_types: Vec::new(),
+            common_modules: Vec::new(),
+            event_subscriptions: Vec::new(),
+            scheduled_jobs: Vec::new(),
+            roles: Vec::new(),
+            http_services: Vec::new(),
+            web_services: Vec::new(),
+            integration_services: Vec::new(),
+            subsystems: vec![SubsystemEntry {
+                name: "МояПодсистема".to_string(),
+                main: base_sub_main,
+            }],
+        },
+    );
+    db.set_metadata_listing(
+        &ext_root.to_string_lossy(),
+        MetadataListingData {
+            entries: Vec::new(),
+            defined_types: Vec::new(),
+            common_modules: Vec::new(),
+            event_subscriptions: Vec::new(),
+            scheduled_jobs: Vec::new(),
+            roles: Vec::new(),
+            http_services: Vec::new(),
+            web_services: Vec::new(),
+            integration_services: Vec::new(),
+            subsystems: vec![SubsystemEntry {
+                name: "МояПодсистема".to_string(),
+                main: ext_sub_main,
+            }],
+        },
+    );
+
+    let mut state = GraphBuildState::new();
+    let edges = project_workspace_subsystem_edges(&db, consumer_file, &mut state);
+
+    let membership_to = |to_type: MdoType, to_name: &str| {
+        edges.iter().any(|e| {
+            e.kind == EdgeKind::SubsystemMembership
+                && e.provenance == EdgeProvenance::Resolved
+                && matches!(&e.from, GraphNode::Mdo { mdo_type, object_name }
+                    if *mdo_type == MdoType::Subsystem && object_name.as_str() == "МояПодсистема")
+                && matches!(&e.to, GraphNode::Mdo { mdo_type, object_name }
+                    if *mdo_type == to_type && object_name.as_str() == to_name)
+        })
+    };
+
+    assert!(
+        membership_to(MdoType::Catalog, "Товары"),
+        "base subsystem content must produce a membership edge from the listed substrate"
+    );
+    assert!(
+        membership_to(MdoType::Catalog, "Услуги"),
+        "extension-added content must produce a membership edge after the overlay merge"
+    );
+    assert!(
+        membership_to(MdoType::Subsystem, "Дочерняя"),
+        "child subsystem membership must produce a subsystem→subsystem edge"
+    );
 }

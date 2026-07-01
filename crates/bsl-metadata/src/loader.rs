@@ -855,6 +855,38 @@ pub fn discover_scheduled_job_structure(root: &Path) -> Vec<DiscoveredScheduledJ
     out
 }
 
+pub fn discover_subsystem_structure(root: &Path) -> Vec<DiscoveredSubsystem> {
+    let mut out = Vec::new();
+    collect_subsystem_structure(&root.join("Subsystems"), &mut out);
+    out.sort_by(|a, b| (a.name.fold_lower(), &a.main).cmp(&(b.name.fold_lower(), &b.main)));
+    out
+}
+
+fn collect_subsystem_structure(dir: &Path, out: &mut Vec<DiscoveredSubsystem>) {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+
+        for entry in entries.filter_map(|e| e.ok()) {
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(_) => continue,
+            };
+
+            let path = entry.path();
+            if file_type.is_file() && path.extension().and_then(|e| e.to_str()) == Some("xml") {
+                let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+                out.push(DiscoveredSubsystem { name: stem.to_string(), main: path });
+            } else if file_type.is_dir() {
+                stack.push(path.join("Subsystems"));
+            }
+        }
+    }
+}
+
 /// One discovered common module in a config root's *structure* listing: its name,
 /// its metadata XML path, and the path of its `Ext/Module.bsl` if present. Common
 /// modules carry only metadata (flags + name), so they get a dedicated discovery
@@ -866,6 +898,12 @@ pub struct DiscoveredCommonModule {
     pub name: String,
     pub main: PathBuf,
     pub module_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredSubsystem {
+    pub name: String,
+    pub main: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1023,6 +1061,10 @@ pub fn parse_event_subscription_from_text(
 /// after reading the text through the versioned VFS.
 pub fn parse_scheduled_job_from_text(main_xml: &str) -> Option<crate::scheduled_job::ScheduledJob> {
     xml_parser::parse_scheduled_job_xml(main_xml).ok()
+}
+
+pub fn parse_subsystem_from_text(main_xml: &str) -> Option<crate::subsystem::Subsystem> {
+    xml_parser::parse_subsystem_xml(main_xml).ok()
 }
 
 pub fn parse_http_service_from_text(
@@ -1477,6 +1519,114 @@ mod tests {
             discovered.contains(&(MdoType::Catalog, "Справочник1".to_string())),
             "fixture sanity: Справочник1 catalog is present"
         );
+    }
+
+    #[test]
+    fn discover_subsystem_structure_is_deterministic_and_matches_directory_load_set() {
+        let root = std::env::temp_dir().join(format!(
+            "bsl_discover_subsystems_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let subsystems_dir = root.join("Subsystems");
+        let parent_dir = subsystems_dir.join("Группа").join("Subsystems");
+        std::fs::create_dir_all(&parent_dir).unwrap();
+
+        let subsystem_xml = |name: &str, child: Option<&str>| {
+            let child_block = child
+                .map(|child| format!("<ChildObjects><Subsystem>{child}</Subsystem></ChildObjects>"))
+                .unwrap_or_default();
+            format!(
+                concat!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+                    "<MetaDataObject xmlns=\"http://v8.1c.ru/8.3/MDClasses\" version=\"2.10\">",
+                    "  <Subsystem uuid=\"00000000-0000-0000-0000-000000000041\">",
+                    "    <Properties><Name>{}</Name></Properties>",
+                    "    {}",
+                    "  </Subsystem>",
+                    "</MetaDataObject>"
+                ),
+                name, child_block,
+            )
+        };
+
+        std::fs::write(
+            subsystems_dir.join("Группа.xml"),
+            subsystem_xml("Группа", Some("Дочерняя")),
+        )
+        .unwrap();
+        std::fs::write(parent_dir.join("Дочерняя.xml"), subsystem_xml("Дочерняя", None)).unwrap();
+        std::fs::write(subsystems_dir.join("Бета.xml"), subsystem_xml("Бета", None)).unwrap();
+        std::fs::write(subsystems_dir.join("Альфа.xml"), subsystem_xml("Альфа", None)).unwrap();
+
+        let discovered = discover_subsystem_structure(&root);
+        let discovered_names: Vec<_> =
+            discovered.iter().map(|subsystem| subsystem.name.clone()).collect();
+
+        assert_eq!(
+            discovered_names,
+            ["Альфа", "Бета", "Группа", "Дочерняя"],
+            "typed subsystem discovery should be stable across recursive directory walks"
+        );
+
+        let config = load_from_directory(&root).unwrap();
+        let discovered_set: std::collections::BTreeSet<_> =
+            discovered.iter().map(|subsystem| subsystem.name.clone()).collect();
+        let loaded_set: std::collections::BTreeSet<_> =
+            config.subsystems().iter().map(|subsystem| subsystem.name().to_string()).collect();
+        assert_eq!(discovered_set, loaded_set, "typed discovery should keep load parity by set");
+
+        let parent = discovered
+            .iter()
+            .find(|subsystem| subsystem.name == "Группа")
+            .expect("parent subsystem");
+        let child = discovered
+            .iter()
+            .find(|subsystem| subsystem.name == "Дочерняя")
+            .expect("child subsystem");
+        assert!(parent.main.ends_with("Subsystems/Группа.xml"));
+        assert!(child.main.ends_with("Subsystems/Группа/Subsystems/Дочерняя.xml"));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_subsystem_structure_ignores_symlink_directory_cycles() {
+        let root = std::env::temp_dir().join(format!(
+            "bsl_discover_subsystems_symlink_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let subsystems_dir = root.join("Subsystems");
+        let child_dir = subsystems_dir.join("Группа").join("Subsystems");
+        std::fs::create_dir_all(&child_dir).unwrap();
+
+        let subsystem_xml = |name: &str| {
+            format!(
+                concat!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+                    "<MetaDataObject xmlns=\"http://v8.1c.ru/8.3/MDClasses\" version=\"2.10\">",
+                    "  <Subsystem uuid=\"00000000-0000-0000-0000-000000000041\">",
+                    "    <Properties><Name>{}</Name></Properties>",
+                    "  </Subsystem>",
+                    "</MetaDataObject>"
+                ),
+                name,
+            )
+        };
+
+        std::fs::write(subsystems_dir.join("Альфа.xml"), subsystem_xml("Альфа")).unwrap();
+        std::fs::write(child_dir.join("Дочерняя.xml"), subsystem_xml("Дочерняя")).unwrap();
+        std::os::unix::fs::symlink(&subsystems_dir, child_dir.join("Subsystems")).unwrap();
+
+        let discovered = discover_subsystem_structure(&root);
+        let discovered_names: Vec<_> =
+            discovered.into_iter().map(|subsystem| subsystem.name).collect();
+
+        assert_eq!(discovered_names, ["Альфа", "Дочерняя"]);
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

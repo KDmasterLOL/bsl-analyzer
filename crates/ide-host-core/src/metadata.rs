@@ -16,7 +16,7 @@ use base_db::{content_revision, read_disk_text, SourceDatabase, SourceRoot, META
 use ide_db::metadata::{
     CommonModuleEntry, DefinedTypeEntry, EventSubscriptionEntry, HTTPServiceEntry,
     IntegrationServiceEntry, MdoEntry, MetadataListingData, RoleEntry, ScheduledJobEntry,
-    WebServiceEntry,
+    SubsystemEntry, WebServiceEntry,
 };
 use vfs::{file_set::FileSet, FileId, Vfs, VfsPath};
 
@@ -61,6 +61,7 @@ impl AnalysisHost {
             http_services: Vec<bsl_metadata::DiscoveredHTTPService>,
             web_services: Vec<bsl_metadata::DiscoveredWebService>,
             integration_services: Vec<bsl_metadata::DiscoveredIntegrationService>,
+            subsystems: Vec<bsl_metadata::DiscoveredSubsystem>,
         }
 
         // Discover every root's structure WITHOUT the vfs lock — discovery walks
@@ -85,6 +86,7 @@ impl AnalysisHost {
                     integration_services: bsl_metadata::discover_integration_service_structure(
                         root_path,
                     ),
+                    subsystems: bsl_metadata::discover_subsystem_structure(root_path),
                 }
             })
             .collect();
@@ -108,6 +110,7 @@ impl AnalysisHost {
             to_read.extend(d.http_services.iter().map(|s| s.main.clone()));
             to_read.extend(d.web_services.iter().map(|s| s.main.clone()));
             to_read.extend(d.integration_services.iter().map(|s| s.main.clone()));
+            to_read.extend(d.subsystems.iter().map(|s| s.main.clone()));
             for role in &d.roles {
                 to_read.push(role.main.clone());
                 if let Some(rights) = &role.rights {
@@ -297,6 +300,19 @@ impl AnalysisHost {
                         module_file,
                     });
                 }
+                let mut subsystems = Vec::new();
+                for subsystem in d.subsystems {
+                    let Some(main) = intern_metadata_file(
+                        vfs,
+                        &subsystem.main,
+                        &revisions_by_path,
+                        &mut metadata_file_set,
+                        &mut revisions,
+                    ) else {
+                        continue;
+                    };
+                    subsystems.push(SubsystemEntry { name: subsystem.name, main });
+                }
                 listings.push(RootStructureListing {
                     root: d.root_string,
                     data: MetadataListingData {
@@ -309,6 +325,7 @@ impl AnalysisHost {
                         http_services,
                         web_services,
                         integration_services,
+                        subsystems,
                     },
                 });
             }
@@ -561,6 +578,20 @@ impl AnalysisHost {
                         module_file,
                     });
                 }
+                let mut subsystems = Vec::new();
+                for d in bsl_metadata::discover_subsystem_structure(root) {
+                    let Some(main) = enroll_refresh(
+                        vfs,
+                        &d.main,
+                        &changed_set,
+                        &mut metadata_file_set,
+                        &mut new_file_ids,
+                        &mut revisions,
+                    ) else {
+                        continue;
+                    };
+                    subsystems.push(SubsystemEntry { name: d.name, main });
+                }
                 listings.push(RootStructureListing {
                     root: root.to_string_lossy().to_string(),
                     data: MetadataListingData {
@@ -573,6 +604,7 @@ impl AnalysisHost {
                         http_services,
                         web_services,
                         integration_services,
+                        subsystems,
                     },
                 });
             }
@@ -607,6 +639,7 @@ impl AnalysisHost {
                         || input.http_services(db).as_ref() != &data.http_services
                         || input.web_services(db).as_ref() != &data.web_services
                         || input.integration_services(db).as_ref() != &data.integration_services
+                        || input.subsystems(db).as_ref() != &data.subsystems
                 }
                 None => true,
             };
@@ -882,6 +915,92 @@ mod tests {
         assert_eq!(
             resolved_after.data().objects()[0].restrictions,
             vec!["Контрагенты.Ссылка В (ВЫБРАТЬ Ссылка ИЗ Справочник.ФизическиеЛица)".to_string()]
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Wave 2e: the host bootstrap and incremental refresh must track recursively
+    /// discovered subsystem XML (a nested child under
+    /// `Subsystems/<Name>/Subsystems/`) through the metadata substrate — adding a
+    /// new subsystem file surfaces it, removing one tombstones it, and an
+    /// untouched sibling is not churned. Red until the substrate carries a
+    /// `subsystems` listing field and `bootstrap`/`refresh` discover subsystems.
+    #[test]
+    fn refresh_subsystem_structure_tracks_recursive_add_and_remove_on_bare_host() {
+        fn subsystem_xml(name: &str) -> String {
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+    <Subsystem uuid="00000000-0000-0000-0000-000000000093">
+        <Properties>
+            <Name>{name}</Name>
+        </Properties>
+    </Subsystem>
+</MetaDataObject>"#
+            )
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "ihc_subsystem_refresh_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let subsystems = root.join("Subsystems");
+        let nested = subsystems.join("Корневая/Subsystems");
+        std::fs::create_dir_all(&nested).unwrap();
+        let root_xml = subsystems.join("Корневая.xml");
+        let child_xml = nested.join("Дочерняя.xml");
+        std::fs::write(&root_xml, subsystem_xml("Корневая")).unwrap();
+        std::fs::write(&child_xml, subsystem_xml("Дочерняя")).unwrap();
+
+        let mut host = AnalysisHost::default();
+        host.raw_database_mut().set_all_config_paths(vec![(None, root.clone())]);
+        let vfs = TestVfs(RefCell::new(Vfs::default()));
+        host.bootstrap_metadata_substrate(&vfs);
+
+        let root_key = root.to_string_lossy().to_string();
+        let subsystem_names = |host: &AnalysisHost| -> Vec<String> {
+            let db = host.raw_database();
+            let listing = db.metadata_listing(&root_key).expect("listing set for the config root");
+            listing.subsystems(db).iter().map(|entry| entry.name.clone()).collect()
+        };
+
+        let after_bootstrap = subsystem_names(&host);
+        assert!(
+            after_bootstrap.iter().any(|n| n == "Корневая"),
+            "root subsystem discovered by the bootstrap"
+        );
+        assert!(
+            after_bootstrap.iter().any(|n| n == "Дочерняя"),
+            "nested child subsystem discovered through recursive structure walk"
+        );
+
+        let new_xml = subsystems.join("Новая.xml");
+        std::fs::write(&new_xml, subsystem_xml("Новая")).unwrap();
+        assert!(
+            host.refresh_metadata_substrate(&vfs, std::slice::from_ref(&new_xml)),
+            "refresh must pick up the new subsystem XML"
+        );
+        let after_add = subsystem_names(&host);
+        assert!(
+            after_add.iter().any(|n| n == "Новая"),
+            "newly added subsystem appears in the substrate after refresh"
+        );
+
+        std::fs::remove_file(&child_xml).unwrap();
+        assert!(
+            host.refresh_metadata_substrate(&vfs, std::slice::from_ref(&child_xml)),
+            "refresh must pick up the removed subsystem XML"
+        );
+        let after_remove = subsystem_names(&host);
+        assert!(
+            !after_remove.iter().any(|n| n == "Дочерняя"),
+            "removed nested subsystem disappears from the substrate"
+        );
+        assert!(
+            after_remove.iter().any(|n| n == "Корневая"),
+            "untouched parent subsystem stays after the child removal"
         );
 
         std::fs::remove_dir_all(&root).ok();

@@ -146,6 +146,7 @@ fn setup_with_role_substrate(fixture_text: &str) -> (Analysis, FileId, u32) {
             http_services: Vec::new(),
             web_services: Vec::new(),
             integration_services: Vec::new(),
+            subsystems: Vec::new(),
         },
     );
 
@@ -243,6 +244,7 @@ fn setup_with_http_service_substrate(fixture_text: &str) -> (Analysis, FileId, u
             }],
             web_services: Vec::new(),
             integration_services: Vec::new(),
+            subsystems: Vec::new(),
         },
     );
 
@@ -304,6 +306,7 @@ fn setup_with_web_service_substrate(fixture_text: &str) -> (Analysis, FileId, u3
                 module_file: Some(test_file),
             }],
             integration_services: Vec::new(),
+            subsystems: Vec::new(),
         },
     );
 
@@ -369,6 +372,7 @@ fn setup_with_integration_service_substrate(fixture_text: &str) -> (Analysis, Fi
                 main: INTEGRATION_SERVICE_XML_FILE_ID,
                 module_file: Some(test_file),
             }],
+            subsystems: Vec::new(),
         },
     );
 
@@ -423,6 +427,7 @@ fn setup_with_scheduled_job_xml(
             http_services: Vec::new(),
             web_services: Vec::new(),
             integration_services: Vec::new(),
+            subsystems: Vec::new(),
         },
     );
 

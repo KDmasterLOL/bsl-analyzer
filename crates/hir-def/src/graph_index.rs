@@ -1206,14 +1206,12 @@ pub fn project_workspace_subsystem_edges<DB: ConfigsDatabase>(
     // first-seen spelling.
     let mut members: Vec<(String, MdoType, String)> = Vec::new();
     let mut children: Vec<(String, String)> = Vec::new();
-    for visible in db.configurations(representative) {
-        for subsystem in visible.configuration.subsystems() {
-            for (mdo_type, member_name) in subsystem.content() {
-                members.push((subsystem.name().to_string(), *mdo_type, member_name.clone()));
-            }
-            for child in subsystem.child_subsystems() {
-                children.push((subsystem.name().to_string(), child.clone()));
-            }
+    for subsystem in db.enumerate_subsystems(representative) {
+        for (mdo_type, member_name) in subsystem.content() {
+            members.push((subsystem.name().to_string(), *mdo_type, member_name.clone()));
+        }
+        for child in subsystem.child_subsystems() {
+            children.push((subsystem.name().to_string(), child.clone()));
         }
     }
     members.sort();

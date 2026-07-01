@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use bsl_metadata::{
     AttributeType, Configuration, EventSubscription, HTTPService, MdoType, MetadataObject,
-    Register, Role, ScheduledJob, WebService,
+    Register, Role, ScheduledJob, Subsystem, WebService,
 };
 use vfs::FileId;
 
@@ -124,6 +124,27 @@ pub trait ConfigsDatabase: DefDatabase {
 
     /// Names of Web services visible to `file_id`, for completion/member enumeration.
     fn web_service_names(&self, file_id: FileId) -> Vec<String>;
+
+    /// Resolve the subsystem `name` visible to `file_id` at per-subsystem Salsa
+    /// granularity. The subsystem counterpart of [`resolve_scheduled_job`]; the
+    /// bootstrapped path composes the main listing with the file's own extension
+    /// listing, merging a same-name extension into the base via
+    /// [`Subsystem::merge_from`] and resolving an extension-only subsystem from
+    /// the extension listing. When the substrate is not bootstrapped, falls back
+    /// to the merged whole-config subsystem lookup.
+    fn resolve_subsystem(&self, file_id: FileId, name: &str) -> Option<Arc<Subsystem>>;
+
+    /// Names of subsystems visible to `file_id`, for completion/member enumeration.
+    /// File-scoped like [`resolve_subsystem`].
+    fn subsystem_names(&self, file_id: FileId) -> Vec<String>;
+
+    /// Explicit project/config enumeration for graph-style consumers that need
+    /// every listed subsystem, not just a single hot lookup. The subsystem
+    /// counterpart of [`enumerate_roles`]: prefers all configured listings when
+    /// all are bootstrapped, merging same-name subsystems deterministically (base
+    /// first, then extension order); falls back to the whole-config enumeration
+    /// only behind this explicit enumeration API.
+    fn enumerate_subsystems(&self, file_id: FileId) -> Vec<Arc<Subsystem>>;
 
     /// Whether `file_id` belongs to a configured project (has at least one visible
     /// config root). In the workspace path this reads only the config-paths input,

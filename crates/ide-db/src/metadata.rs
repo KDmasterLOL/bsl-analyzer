@@ -238,6 +238,16 @@ pub struct IntegrationServiceEntry {
     pub module_file: Option<vfs::FileId>,
 }
 
+/// One discovered subsystem in a config root's *structure* listing: its name and
+/// the [`vfs::FileId`] of its main XML (`Subsystems/<Name>.xml`). Subsystems are
+/// global flat metadata objects, keyed by name, so they ride a dedicated listing
+/// field — the subsystem counterpart of [`ScheduledJobEntry`].
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct SubsystemEntry {
+    pub name: String,
+    pub main: vfs::FileId,
+}
+
 /// One config root's discovered metadata listing, grouped for the database setter
 /// while keeping each metadata family typed separately.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
@@ -251,6 +261,7 @@ pub struct MetadataListingData {
     pub http_services: Vec<HTTPServiceEntry>,
     pub web_services: Vec<WebServiceEntry>,
     pub integration_services: Vec<IntegrationServiceEntry>,
+    pub subsystems: Vec<SubsystemEntry>,
 }
 
 /// The per-config-root *structure* input: the MDOs and defined types that exist in
@@ -272,6 +283,7 @@ pub struct MetadataListingInput {
     pub http_services: Arc<Vec<HTTPServiceEntry>>,
     pub web_services: Arc<Vec<WebServiceEntry>>,
     pub integration_services: Arc<Vec<IntegrationServiceEntry>>,
+    pub subsystems: Arc<Vec<SubsystemEntry>>,
 }
 
 /// The composing-file identities for one MDO, as held in a [`ConfigIndex`].
@@ -1077,6 +1089,79 @@ pub fn resolve_role(
     let ids = index.lookup(&name)?;
     let files = RoleFiles::new(db, ids.main, ids.rights);
     parse_role_query(db, files)
+}
+
+/// The main XML file of a single subsystem, interned so
+/// [`parse_subsystem_query`] keys on the file identity; its content revision
+/// drives invalidation, so editing one subsystem re-parses only it. The
+/// subsystem counterpart of [`ScheduledJobFile`].
+#[salsa::interned(debug)]
+pub struct SubsystemFile<'db> {
+    pub main: vfs::FileId,
+}
+
+/// Parse one subsystem from its main XML, read through the versioned VFS. The
+/// subsystem counterpart of [`parse_scheduled_job_query`]; backdates on
+/// unchanged metadata.
+#[salsa::tracked(lru = 8192)]
+pub fn parse_subsystem_query(
+    db: &dyn base_db::SourceDatabase,
+    file: SubsystemFile<'_>,
+) -> Option<Arc<bsl_metadata::Subsystem>> {
+    let _span = tracing::info_span!("parse_subsystem").entered();
+
+    let main_text = db.file_text(file.main(db));
+    bsl_metadata::parse_subsystem_from_text(&main_text).map(Arc::new)
+}
+
+/// A config root's subsystem lookup, derived from its [`MetadataListingInput`]'s
+/// `subsystems` field. Tracked on that field alone, so a content edit leaves it
+/// memoised and unrelated MDO structure changes do not invalidate it. The
+/// subsystem counterpart of [`ScheduledJobIndex`].
+#[derive(Default, PartialEq, Eq, Debug)]
+pub struct SubsystemIndex {
+    by_name: std::collections::HashMap<String, vfs::FileId>,
+}
+
+impl SubsystemIndex {
+    pub fn lookup(&self, name: &str) -> Option<vfs::FileId> {
+        self.by_name.get(&name.fold_lower()).copied()
+    }
+}
+
+/// Build a config root's subsystem name lookup from its structure listing.
+#[salsa::tracked]
+pub fn subsystem_index(
+    db: &dyn base_db::SourceDatabase,
+    listing: MetadataListingInput,
+) -> Arc<SubsystemIndex> {
+    let _span = tracing::info_span!("subsystem_index").entered();
+
+    let entries = listing.subsystems(db);
+    let mut by_name = std::collections::HashMap::with_capacity(entries.len());
+    for entry in entries.iter() {
+        by_name.insert(entry.name.fold_lower(), entry.main);
+    }
+    Arc::new(SubsystemIndex { by_name })
+}
+
+/// Resolve a single subsystem's metadata by name within one config root, at
+/// per-subsystem Salsa granularity. The subsystem counterpart of
+/// [`resolve_scheduled_job`]; extension overlay across roots is composed by
+/// callers (an extension adds to a same-name base via
+/// [`bsl_metadata::Subsystem::merge_from`]).
+#[salsa::tracked]
+pub fn resolve_subsystem(
+    db: &dyn base_db::SourceDatabase,
+    listing: MetadataListingInput,
+    name: String,
+) -> Option<Arc<bsl_metadata::Subsystem>> {
+    let _span = tracing::info_span!("resolve_subsystem").entered();
+
+    let index = subsystem_index(db, listing);
+    let main = index.lookup(&name)?;
+    let file = SubsystemFile::new(db, main);
+    parse_subsystem_query(db, file)
 }
 
 #[salsa::db]

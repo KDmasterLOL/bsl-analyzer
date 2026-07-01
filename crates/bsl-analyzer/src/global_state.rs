@@ -2298,4 +2298,123 @@ mod vfs_race_tests {
 
         std::fs::remove_dir_all(&root).ok();
     }
+
+    /// Wave 2e: `resolve_subsystem_for_file` must match the merged whole-config
+    /// lookup for a base + own-extension overlay, including a same-name merge
+    /// (base content + extension-added content land in one subsystem). An
+    /// extension-only subsystem is preserved by `merge_extension_overlay` (added
+    /// when no base namesake exists), so it must resolve and match the merged
+    /// whole-config entry too. Red until `resolve_subsystem_for_file` exists.
+    #[test]
+    fn resolve_subsystem_for_file_matches_merged_visible_configuration() {
+        use base_db::{SourceDatabase, SourceRoot, BSL_SOURCE_ROOT};
+        use hir::ConfigsDatabase;
+
+        fn subsystem_xml(name: &str, content: &[&str]) -> String {
+            let items = content
+                .iter()
+                .map(|c| format!("        <xr:Item xsi:type=\"xr:MDObjectRef\">{c}</xr:Item>"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let items_block =
+                if items.is_empty() { String::new() } else { format!("\n{items}\n            ") };
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+    <Subsystem uuid="00000000-0000-0000-0000-000000000094">
+        <Properties>
+            <Name>{name}</Name>
+            <Content>{items_block}</Content>
+        </Properties>
+    </Subsystem>
+</MetaDataObject>"#
+            )
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "bsl_subsystem_parity_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let main_root = root.join("src/cf");
+        let ext_root = root.join("src/cfe/X");
+        std::fs::create_dir_all(main_root.join("Subsystems")).unwrap();
+        std::fs::create_dir_all(ext_root.join("Subsystems")).unwrap();
+        std::fs::write(main_root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        std::fs::write(ext_root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        std::fs::write(
+            main_root.join("Subsystems/МояПодсистема.xml"),
+            subsystem_xml("МояПодсистема", &["Catalog.Товары"]),
+        )
+        .unwrap();
+        std::fs::write(
+            ext_root.join("Subsystems/МояПодсистема.xml"),
+            subsystem_xml("МояПодсистема", &["Catalog.Услуги"]),
+        )
+        .unwrap();
+        std::fs::write(
+            ext_root.join("Subsystems/ТолькоРасширение.xml"),
+            subsystem_xml("ТолькоРасширение", &["Catalog.Услуги"]),
+        )
+        .unwrap();
+
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender);
+        state.init_empty_source_root();
+        state.analysis_host.raw_database_mut().set_all_config_paths(vec![
+            (None, main_root.clone()),
+            (Some("X".to_string()), ext_root.clone()),
+        ]);
+        state.bootstrap_metadata_substrate();
+
+        let bsl_path = ext_root.join("SubsystemConsumer.bsl");
+        let bsl_vfs_path = vfs::VfsPath::new(bsl_path.to_string_lossy().as_ref());
+        let file_id = state.vfs.write().alloc_file_id(bsl_vfs_path.clone());
+        let mut file_set = vfs::file_set::FileSet::new();
+        file_set.insert(file_id, bsl_vfs_path);
+        let db = state.analysis_host.raw_database_mut();
+        db.set_source_root(BSL_SOURCE_ROOT, SourceRoot::new_local(file_set));
+        db.set_file_source_root(file_id, BSL_SOURCE_ROOT);
+        db.set_file_text(file_id, "Процедура Т() КонецПроцедуры");
+
+        let db = state.analysis_host.raw_database();
+        let per_kind = db
+            .resolve_subsystem_for_file(file_id, "МояПодсистема")
+            .expect("per-kind resolve finds the subsystem visible to the file");
+        let whole = db.merged_visible_configuration(file_id).expect("merged config loads");
+        let from_whole = whole
+            .subsystems()
+            .iter()
+            .find(|s| s.name() == "МояПодсистема")
+            .expect("merged config has the subsystem");
+
+        assert_eq!(
+            &*per_kind, from_whole,
+            "per-kind subsystem resolve must equal the merged whole-config lookup"
+        );
+        let content_names: Vec<String> =
+            per_kind.content().iter().map(|(_, name)| name.to_string()).collect();
+        assert!(
+            content_names.iter().any(|n| n == "Товары"),
+            "base subsystem content survives the overlay merge"
+        );
+        assert!(
+            content_names.iter().any(|n| n == "Услуги"),
+            "extension-added content merges into the same-named subsystem"
+        );
+        let ext_only_per_kind = db
+            .resolve_subsystem_for_file(file_id, "ТолькоРасширение")
+            .expect("extension-only subsystem is preserved by the overlay and resolves");
+        let ext_only_from_whole = whole
+            .subsystems()
+            .iter()
+            .find(|s| s.name() == "ТолькоРасширение")
+            .expect("merged config preserves the extension-only subsystem");
+        assert_eq!(
+            &*ext_only_per_kind, ext_only_from_whole,
+            "extension-only subsystem resolve must equal the merged whole-config lookup"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
 }

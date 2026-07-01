@@ -408,6 +408,7 @@ impl RootDatabaseImpl {
             http_services,
             web_services,
             integration_services,
+            subsystems,
         } = listing;
         let entries = Arc::new(entries);
         let defined_types = Arc::new(defined_types);
@@ -418,6 +419,7 @@ impl RootDatabaseImpl {
         let http_services = Arc::new(http_services);
         let web_services = Arc::new(web_services);
         let integration_services = Arc::new(integration_services);
+        let subsystems = Arc::new(subsystems);
         match self.metadata_listings.get(&key).map(|e| *e.value()) {
             Some(input) => {
                 input.set_entries(self).to(entries);
@@ -429,6 +431,7 @@ impl RootDatabaseImpl {
                 input.set_http_services(self).to(http_services);
                 input.set_web_services(self).to(web_services);
                 input.set_integration_services(self).to(integration_services);
+                input.set_subsystems(self).to(subsystems);
             }
             None => {
                 let input = metadata::MetadataListingInput::new(
@@ -442,6 +445,7 @@ impl RootDatabaseImpl {
                     http_services,
                     web_services,
                     integration_services,
+                    subsystems,
                 );
                 self.metadata_listings.insert(key, input);
             }
@@ -1036,6 +1040,130 @@ impl RootDatabaseImpl {
             .collect()
     }
 
+    /// Resolve the subsystem `name` visible to `file_id` at per-subsystem Salsa
+    /// granularity. The subsystem counterpart of
+    /// [`resolve_scheduled_job_for_file`]; the bootstrapped path composes the main
+    /// listing with the file's own extension listing, merging a same-name
+    /// extension into the base via [`bsl_metadata::Subsystem::merge_from`] and
+    /// resolving an extension-only subsystem from the extension listing. When the
+    /// substrate is not bootstrapped, falls back to the merged whole-config
+    /// subsystem lookup.
+    pub fn resolve_subsystem_for_file(
+        &self,
+        file_id: FileId,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::Subsystem>> {
+        let (main_listing, ext_listing, bootstrapped) = self.metadata_listings_for_file(file_id)?;
+
+        if !bootstrapped {
+            use hir::ConfigsDatabase;
+            return self
+                .merged_visible_configuration(file_id)?
+                .subsystems()
+                .iter()
+                .find(|s| s.name().fold_lower() == name.fold_lower())
+                .cloned()
+                .map(Arc::new);
+        }
+
+        let resolve_in = |listing: Option<metadata::MetadataListingInput>| {
+            listing.and_then(|l| metadata::resolve_subsystem(self, l, name.to_string()))
+        };
+        match (resolve_in(main_listing), resolve_in(ext_listing)) {
+            (Some(main), Some(ext)) => {
+                let mut merged = (*main).clone();
+                merged.merge_from(&ext);
+                Some(Arc::new(merged))
+            }
+            (Some(main), None) => Some(main),
+            (None, Some(ext)) => Some(ext),
+            (None, None) => None,
+        }
+    }
+
+    pub fn subsystem_names_for_file(&self, file_id: FileId) -> Vec<String> {
+        let Some((main_listing, ext_listing, bootstrapped)) =
+            self.metadata_listings_for_file(file_id)
+        else {
+            return Vec::new();
+        };
+
+        if !bootstrapped {
+            use hir::ConfigsDatabase;
+            return self
+                .merged_visible_configuration(file_id)
+                .map(|config| {
+                    config.subsystems().iter().map(|sub| sub.name().to_string()).collect()
+                })
+                .unwrap_or_default();
+        }
+
+        let mut out = Vec::new();
+        for listing in [main_listing, ext_listing].into_iter().flatten() {
+            for entry in listing.subsystems(self).iter() {
+                out.push(entry.name.clone());
+            }
+        }
+        out
+    }
+
+    /// Explicit project/config enumeration for graph-style consumers that need
+    /// every listed subsystem, not just a single hot lookup. The subsystem
+    /// counterpart of [`enumerate_roles_for_file`]: prefers all configured
+    /// listings when all are bootstrapped, merging same-name subsystems
+    /// deterministically (base first, then extension order); falls back to
+    /// [`RootDatabase::get_all_configurations`] only behind this enumeration API.
+    pub fn enumerate_subsystems_for_file(
+        &self,
+        file_id: FileId,
+    ) -> Vec<Arc<bsl_metadata::Subsystem>> {
+        let paths = RootDatabaseImpl::all_config_paths(self);
+        if !paths.is_empty() {
+            let mut listings = Vec::with_capacity(paths.len());
+            for (_, path) in &paths {
+                let Some(listing) = self.metadata_listing(&path.to_string_lossy()) else {
+                    listings.clear();
+                    break;
+                };
+                listings.push(listing);
+            }
+            if !listings.is_empty() {
+                let mut acc: std::collections::HashMap<String, Arc<bsl_metadata::Subsystem>> =
+                    std::collections::HashMap::new();
+                let mut order: Vec<String> = Vec::new();
+                for listing in listings {
+                    let names: Vec<String> =
+                        listing.subsystems(self).iter().map(|entry| entry.name.clone()).collect();
+                    for name in names {
+                        if let Some(sub) = metadata::resolve_subsystem(self, listing, name.clone())
+                        {
+                            let key = name.fold_lower();
+                            match acc.get_mut(&key) {
+                                Some(existing) => {
+                                    let mut merged = (**existing).clone();
+                                    merged.merge_from(&sub);
+                                    *existing = Arc::new(merged);
+                                }
+                                None => {
+                                    order.push(key.clone());
+                                    acc.insert(key, sub);
+                                }
+                            }
+                        }
+                    }
+                }
+                return order.into_iter().filter_map(|key| acc.remove(&key)).collect();
+            }
+        }
+
+        RootDatabase::get_all_configurations(self, file_id)
+            .into_iter()
+            .flat_map(|(_, config)| {
+                config.subsystems().iter().cloned().map(Arc::new).collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
     /// Resolve the common module that owns the `Ext/Module.bsl` whose id is
     /// `module_file_id` (typically the file currently being analysed), composing the
     /// roots visible to it. Answers "is this `.bsl` a common module's source, and if
@@ -1581,6 +1709,22 @@ impl hir::ConfigsDatabase for RootDatabaseImpl {
 
     fn web_service_names(&self, file_id: FileId) -> Vec<String> {
         RootDatabaseImpl::web_service_names_for_file(self, file_id)
+    }
+
+    fn resolve_subsystem(
+        &self,
+        file_id: FileId,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::Subsystem>> {
+        RootDatabaseImpl::resolve_subsystem_for_file(self, file_id, name)
+    }
+
+    fn subsystem_names(&self, file_id: FileId) -> Vec<String> {
+        RootDatabaseImpl::subsystem_names_for_file(self, file_id)
+    }
+
+    fn enumerate_subsystems(&self, file_id: FileId) -> Vec<Arc<bsl_metadata::Subsystem>> {
+        RootDatabaseImpl::enumerate_subsystems_for_file(self, file_id)
     }
 
     fn has_config_root(&self, file_id: FileId) -> bool {

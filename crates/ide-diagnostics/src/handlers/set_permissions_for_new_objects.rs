@@ -213,6 +213,7 @@ mod tests {
                 http_services: Vec::new(),
                 web_services: Vec::new(),
                 integration_services: Vec::new(),
+                subsystems: Vec::new(),
             },
         );
 
