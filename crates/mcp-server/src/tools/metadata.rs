@@ -319,6 +319,11 @@ fn format_service_listing(config: &Configuration, kind: ServiceKind, out: &mut S
     }
 }
 
+/// The whole-`Configuration` object formatter. Production resolves objects from the
+/// resident substrate via [`object_from_db`] (sharing the `format_*` renderers below);
+/// this variant is retained as the fixture-driven contract test for that formatting, so
+/// it is test-only.
+#[cfg(test)]
 pub fn get_object_structure(
     config: &Configuration,
     object_type: &str,
@@ -361,6 +366,7 @@ pub fn get_object_structure(
     ))
 }
 
+#[cfg(test)]
 fn get_service_structure(
     config: &Configuration,
     kind: ServiceKind,
@@ -828,6 +834,132 @@ fn format_extension_summary(name: &str, config: &Configuration) -> String {
     out
 }
 
+/// Whether the `object` action can resolve `object_type`, mirroring [`object_from_db`]'s
+/// dispatch order: a service kind (`parse_service_kind`) FIRST, then an [`MdoType`]. The
+/// force-rescan miss-retry gate uses this so it cannot drift from what the resolver
+/// actually accepts — `MdoType::from_str` has NO service variants, so gating on it alone
+/// would never retry a just-added HTTP/Web/Integration service (they'd stay "not found"
+/// until the next periodic drift poll, unlike catalogs/registers/subscriptions).
+pub(crate) fn is_resolvable_object_type(object_type: &str) -> bool {
+    parse_service_kind(object_type).is_some() || object_type.parse::<MdoType>().is_ok()
+}
+
+/// The `metadata object` action reading the resident host: resolve the object across the
+/// base configuration and every extension (a point-lookup on the per-MDO substrate, never
+/// a whole-config load) and format it. The db counterpart of [`get_object_structure`];
+/// they share the `format_*` renderers. Extension-merged visibility, so an object defined
+/// only in an extension is found (wider than the retired base-only read).
+pub fn object_from_db(
+    db: &ide::RootDatabaseImpl,
+    object_type: &str,
+    object_name: &str,
+) -> Result<CallToolResult, McpError> {
+    if let Some(kind) = parse_service_kind(object_type) {
+        return service_from_db(db, kind, object_name);
+    }
+
+    let mdo_type: MdoType =
+        object_type.parse().map_err(|e: String| McpError::invalid_params(e, None))?;
+
+    if mdo_type == MdoType::EventSubscription {
+        return match db.resolve_event_subscription_across_roots(object_name) {
+            Some(sub) => Ok(CallToolResult::success(vec![Content::text(
+                format_event_subscription_structure(&sub),
+            )])),
+            None => Err(McpError::invalid_params(
+                format!("ПодпискаНаСобытие.{object_name} не найдена в конфигурации"),
+                None,
+            )),
+        };
+    }
+
+    if let Some(obj) = db.resolve_metadata_object_across_roots(mdo_type, object_name) {
+        return Ok(CallToolResult::success(vec![Content::text(format_metadata_object_structure(
+            &obj, mdo_type,
+        ))]));
+    }
+
+    if let Some(reg) = db.resolve_register_across_roots(mdo_type, object_name) {
+        return Ok(CallToolResult::success(vec![Content::text(format_register_structure(&reg))]));
+    }
+
+    Err(McpError::invalid_params(
+        format!("Объект {}.{} не найден в конфигурации", mdo_type.russian_name(), object_name),
+        None,
+    ))
+}
+
+fn service_from_db(
+    db: &ide::RootDatabaseImpl,
+    kind: ServiceKind,
+    object_name: &str,
+) -> Result<CallToolResult, McpError> {
+    match kind {
+        ServiceKind::Http => match db.resolve_http_service_across_roots(object_name) {
+            Some(service) => Ok(CallToolResult::success(vec![Content::text(
+                format_http_service_structure(&service),
+            )])),
+            None => Err(McpError::invalid_params(
+                format!("HTTPService.{object_name} не найден в конфигурации"),
+                None,
+            )),
+        },
+        ServiceKind::Web => match db.resolve_web_service_across_roots(object_name) {
+            Some(service) => Ok(CallToolResult::success(vec![Content::text(
+                format_web_service_structure(&service),
+            )])),
+            None => Err(McpError::invalid_params(
+                format!("WebService.{object_name} не найден в конфигурации"),
+                None,
+            )),
+        },
+        ServiceKind::Integration => {
+            match db.resolve_integration_service_across_roots(object_name) {
+                Some(service) => Ok(CallToolResult::success(vec![Content::text(
+                    format_integration_service_structure(&service),
+                )])),
+                None => Err(McpError::invalid_params(
+                    format!("IntegrationService.{object_name} не найден в конфигурации"),
+                    None,
+                )),
+            }
+        }
+    }
+}
+
+/// The base configuration plus each extension's, sourced from the resident db's Channel-2
+/// `load_configuration` query (Salsa-cached, invalidated by metadata drift). The `tree`
+/// and `info` enumeration payload — which inherently needs whole-config counts — after
+/// the `MetadataCache` retirement. `object` never calls this (it stays on the substrate).
+pub fn configs_from_db(
+    db: &ide::RootDatabaseImpl,
+) -> (Configuration, Vec<(String, Configuration)>) {
+    let paths = db.all_config_paths();
+    let base = paths
+        .iter()
+        .find(|(label, _)| label.is_none())
+        .map(|(_, p)| (*db.configuration_for_root(p)).clone())
+        .unwrap_or_else(|| Configuration::new("Configuration"));
+    let extensions = paths
+        .iter()
+        .filter_map(|(label, p)| {
+            label.as_ref().map(|name| (name.clone(), (*db.configuration_for_root(p)).clone()))
+        })
+        .collect();
+    (base, extensions)
+}
+
+/// A "still loading, retry shortly" envelope for a metadata call issued while the resident
+/// db is building (or rebuilding after an idle eviction). Never a hard "not loaded" error —
+/// the resident always eventually becomes ready.
+pub fn loading(report: &crate::diagnostics_state::StatusReport) -> CallToolResult {
+    let mut msg = String::from("Метаданные загружаются, повторите запрос через несколько секунд.");
+    if let Some(ms) = report.elapsed_ms {
+        let _ = write!(msg, " (идёт загрузка, {ms} мс)");
+    }
+    CallToolResult::success(vec![Content::text(msg)])
+}
+
 #[cfg(test)]
 fn fixture_config() -> Configuration {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer");
@@ -1209,6 +1341,35 @@ mod tests {
         assert!(
             text.contains("Web-сервисы:") && !text.contains("Web-сервисы: 0"),
             "configuration info must report non-zero web-service count: {text}"
+        );
+    }
+
+    /// The force-rescan retry gate predicate must accept every type `object_from_db` can
+    /// dispatch — including HTTP/Web/Integration services, which are NOT `MdoType` variants
+    /// (they route through `parse_service_kind`). Gating on `MdoType::from_str` alone (the
+    /// bug) would classify a service miss as non-retryable, so a just-added service would
+    /// never force a re-scan.
+    #[test]
+    fn is_resolvable_object_type_covers_services_not_in_mdotype() {
+        for t in
+            ["HTTPService", "WebService", "IntegrationService", "httpсервис", "сервисинтеграции"]
+        {
+            assert!(
+                t.parse::<MdoType>().is_err(),
+                "{t} is deliberately not an MdoType — this is what the old gate missed",
+            );
+            assert!(
+                is_resolvable_object_type(t),
+                "{t} must be resolvable (dispatched via parse_service_kind)",
+            );
+        }
+        for t in ["Catalog", "InformationRegister", "ПодпискаНаСобытие", "Справочник"]
+        {
+            assert!(is_resolvable_object_type(t), "{t} (an MdoType) must stay resolvable");
+        }
+        assert!(
+            !is_resolvable_object_type("НеизвестныйТип"),
+            "a genuinely unknown type must not be classified resolvable (no wasted force-scan)",
         );
     }
 }

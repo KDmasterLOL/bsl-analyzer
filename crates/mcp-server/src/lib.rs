@@ -227,61 +227,112 @@ impl McpServer {
         &self,
         params: Parameters<MetadataParams>,
     ) -> Result<CallToolResult, McpError> {
+        use crate::diagnostics_state::{DiagnosticsStatus, ResidentOutcome};
+
         let p = params.0;
-        match p.action.as_str() {
-            "info" => {
-                let (config, extensions) =
-                    self.state.fresh_configuration(false).await.ok_or_else(|| {
-                        McpError::invalid_params("Configuration not loaded", None)
-                    })?;
-                tools::metadata::get_configuration_info(&config, &extensions)
+
+        // `form` reads managed-form XML straight off the configuration source root — data
+        // the metadata substrate does not carry — so it needs neither the resident db nor
+        // a loaded configuration, and stays available while the resident is building or
+        // evicted. `source_root` survives the `MetadataCache` retirement for exactly this.
+        if p.action == "form" {
+            let object_type = require(p.object_type, "object_type", "form")?;
+            return tools::metadata::get_form_structure(
+                self.state.source_root().map(|p| p.as_path()),
+                &object_type,
+                p.object_name.as_deref(),
+                p.form_name.as_deref(),
+            );
+        }
+
+        // `info`/`tree`/`object` read the resident analysis host. Trigger the build if idle
+        // or idle-evicted and, while it is not ready, return a "loading, retry" envelope —
+        // never a hard "not loaded" error, so an evicted resident degrades to slow, not
+        // wrong. Reference/shared profiles have no resident and stay "not configured".
+        let diag = self.state.diagnostics().clone();
+        diag.ensure_loading();
+        match diag.status() {
+            DiagnosticsStatus::Disabled => {
+                return Err(McpError::invalid_params(
+                    "metadata is only available in the workspace profile",
+                    None,
+                ))
             }
-            "tree" => {
-                let (config, extensions) =
-                    self.state.fresh_configuration(false).await.ok_or_else(|| {
-                        McpError::invalid_params("Configuration not loaded", None)
-                    })?;
-                tools::metadata::get_metadata_tree(&config, &extensions, p.filter)
+            DiagnosticsStatus::Failed(msg) => {
+                return Err(McpError::internal_error(
+                    format!("metadata database load failed: {msg}"),
+                    None,
+                ))
             }
-            "object" => {
-                let object_type = require(p.object_type, "object_type", "object")?;
-                let object_name = require(p.object_name, "object_name", "object")?;
-                let (config, _) =
-                    self.state.fresh_configuration(false).await.ok_or_else(|| {
-                        McpError::invalid_params("Configuration not loaded", None)
-                    })?;
-                match tools::metadata::get_object_structure(&config, &object_type, &object_name) {
-                    Ok(result) => Ok(result),
-                    // A miss for a VALID object type may be an object added since the last
-                    // throttled scan: force one fresh drift check and retry. A bad object
-                    // type is returned as-is — reloading cannot fix it, and it must not force
-                    // a scan (which would let a loop of bad calls hammer the filesystem).
-                    Err(_) if object_type.parse::<bsl_metadata::MdoType>().is_ok() => {
-                        let (config, _) =
-                            self.state.fresh_configuration(true).await.ok_or_else(|| {
-                                McpError::invalid_params("Configuration not loaded", None)
-                            })?;
-                        tools::metadata::get_object_structure(&config, &object_type, &object_name)
+            DiagnosticsStatus::Idle | DiagnosticsStatus::Loading => {
+                return Ok(tools::metadata::loading(&diag.status_report()))
+            }
+            DiagnosticsStatus::Ready { .. } => {}
+        }
+
+        let action = p.action.clone();
+        let filter = p.filter.clone();
+        let object_type = p.object_type.clone();
+        let object_name = p.object_name.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let read = |diag: &crate::diagnostics_state::DiagnosticsState| {
+                diag.read(|resident, _generation| {
+                    let db = resident.db();
+                    match action.as_str() {
+                        "info" => {
+                            let (config, extensions) = tools::metadata::configs_from_db(db);
+                            tools::metadata::get_configuration_info(&config, &extensions)
+                        }
+                        "tree" => {
+                            let (config, extensions) = tools::metadata::configs_from_db(db);
+                            tools::metadata::get_metadata_tree(&config, &extensions, filter.clone())
+                        }
+                        "object" => {
+                            let object_type =
+                                require(object_type.clone(), "object_type", "object")?;
+                            let object_name =
+                                require(object_name.clone(), "object_name", "object")?;
+                            tools::metadata::object_from_db(db, &object_type, &object_name)
+                        }
+                        other => Err(McpError::invalid_params(
+                            format!("Unknown action '{other}'. Expected: info, tree, object, form"),
+                            None,
+                        )),
                     }
-                    Err(e) => Err(e),
+                })
+            };
+
+            let mut outcome = read(&diag);
+            // A miss for a VALID object type may be an object added since the last throttled
+            // drift scan: force ONE storm-guarded re-scan and retry. A bad object type is
+            // returned as-is (reloading cannot fix it, and it must not force a scan).
+            if action == "object" {
+                if let ResidentOutcome::Ready(Err(_), _) = &outcome {
+                    let valid_type = object_type
+                        .as_deref()
+                        .is_some_and(tools::metadata::is_resolvable_object_type);
+                    if valid_type {
+                        diag.force_rescan();
+                        outcome = read(&diag);
+                    }
                 }
             }
-            "form" => {
-                // `object_name` is required for an object's forms but not for `CommonForm`
-                // (a top-level form), so the requirement is enforced inside get_form_structure.
-                let object_type = require(p.object_type, "object_type", "form")?;
-                tools::metadata::get_form_structure(
-                    self.state.source_root().map(|p| p.as_path()),
-                    &object_type,
-                    p.object_name.as_deref(),
-                    p.form_name.as_deref(),
-                )
+
+            match outcome {
+                ResidentOutcome::Ready(result, _freshness) => result,
+                ResidentOutcome::Loading => Ok(tools::metadata::loading(&diag.status_report())),
+                ResidentOutcome::Disabled => Err(McpError::invalid_params(
+                    "metadata is only available in the workspace profile",
+                    None,
+                )),
+                ResidentOutcome::Failed(msg) => {
+                    Err(McpError::internal_error(format!("metadata database: {msg}"), None))
+                }
             }
-            other => Err(McpError::invalid_params(
-                format!("Unknown action '{other}'. Expected: info, tree, object, form"),
-                None,
-            )),
-        }
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
     }
 
     #[tool(name = "search", annotations(read_only_hint = true))]

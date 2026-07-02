@@ -379,6 +379,11 @@ impl RootDatabaseImpl {
         }
     }
 
+    /// Set the workspace config roots. Exactly ONE entry must carry the `None` label
+    /// (the base configuration); every other entry is an extension with a `Some(name)`
+    /// label. Consumers that split base from extensions (e.g.
+    /// [`Self::ordered_config_roots`], `metadata_listings_for_file`) rely on this: two
+    /// `None` entries would silently be treated as two bases, and zero would drop the base.
     pub fn set_all_config_paths(&mut self, paths: Vec<(Option<String>, std::path::PathBuf)>) {
         use salsa::Setter;
         for (_, path) in &paths {
@@ -1167,6 +1172,148 @@ impl RootDatabaseImpl {
                 config.subsystems().iter().cloned().map(Arc::new).collect::<Vec<_>>()
             })
             .collect()
+    }
+
+    /// Config-root path strings in visibility precedence: the base configuration first,
+    /// then each extension. Order is load-bearing for the `*_across_roots` resolvers —
+    /// the base is an object's authoritative definition and extensions overlay it.
+    fn ordered_config_roots(&self) -> Vec<String> {
+        let paths = RootDatabaseImpl::all_config_paths(self);
+        debug_assert!(
+            paths.iter().filter(|(label, _)| label.is_none()).count() <= 1,
+            "all_config_paths must carry at most one None-labelled base root",
+        );
+        let mut roots = Vec::with_capacity(paths.len());
+        roots.extend(
+            paths
+                .iter()
+                .filter(|(label, _)| label.is_none())
+                .map(|(_, p)| p.to_string_lossy().into_owned()),
+        );
+        roots.extend(
+            paths
+                .iter()
+                .filter(|(label, _)| label.is_some())
+                .map(|(_, p)| p.to_string_lossy().into_owned()),
+        );
+        roots
+    }
+
+    /// Resolve a metadata object visible anywhere in the configuration — base plus every
+    /// extension — composing base with each extension's overlay via
+    /// [`bsl_metadata::MetadataObject::apply_extension_overlay`]. The root-scoped
+    /// counterpart of [`Self::resolve_metadata_object_for_file`] for a consumer that has
+    /// NO file anchor (the MCP `metadata object` tool): visibility is the whole-config
+    /// "designer view", not one file's root. Deliberately wider than a base-only read —
+    /// an object defined only in an extension is found.
+    pub fn resolve_metadata_object_across_roots(
+        &self,
+        mdo_type: bsl_metadata::MdoType,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::MetadataObject>> {
+        let mut acc: Option<bsl_metadata::MetadataObject> = None;
+        for root in self.ordered_config_roots() {
+            let Some(listing) = self.metadata_listing(&root) else { continue };
+            if let Some(found) =
+                metadata::resolve_metadata_object(self, listing, mdo_type, name.to_string())
+            {
+                match &mut acc {
+                    None => acc = Some((*found).clone()),
+                    Some(base) => base.apply_extension_overlay(&found),
+                }
+            }
+        }
+        acc.map(Arc::new)
+    }
+
+    /// The register counterpart of [`Self::resolve_metadata_object_across_roots`]:
+    /// resolve a register by kind + name across base and every extension, folding each
+    /// extension's overlay via [`bsl_metadata::Register::apply_extension_overlay`].
+    pub fn resolve_register_across_roots(
+        &self,
+        mdo_type: bsl_metadata::MdoType,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::Register>> {
+        let mut acc: Option<bsl_metadata::Register> = None;
+        for root in self.ordered_config_roots() {
+            let Some(listing) = self.metadata_listing(&root) else { continue };
+            if let Some(found) =
+                metadata::resolve_register(self, listing, mdo_type, name.to_string())
+            {
+                match &mut acc {
+                    None => acc = Some((*found).clone()),
+                    Some(base) => base.apply_extension_overlay(&found),
+                }
+            }
+        }
+        acc.map(Arc::new)
+    }
+
+    /// Resolve an event subscription by name across base + every extension. Event
+    /// subscriptions carry no extension-overlay merge (mirroring
+    /// [`Self::resolve_event_subscription_for_file`], which reads the main listing only),
+    /// so this returns the first match in precedence order — base wins, an
+    /// extension-only subscription is still surfaced.
+    pub fn resolve_event_subscription_across_roots(
+        &self,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::EventSubscription>> {
+        self.ordered_config_roots().iter().find_map(|root| {
+            let listing = self.metadata_listing(root)?;
+            metadata::resolve_event_subscription(self, listing, name.to_string())
+        })
+    }
+
+    /// Resolve an HTTP service by name across base + every extension (first match in
+    /// precedence order; services carry no overlay merge, matching
+    /// [`Self::resolve_http_service_for_file`]).
+    pub fn resolve_http_service_across_roots(
+        &self,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::HTTPService>> {
+        self.ordered_config_roots().iter().find_map(|root| {
+            let listing = self.metadata_listing(root)?;
+            metadata::resolve_http_service(self, listing, name.to_string())
+        })
+    }
+
+    /// Resolve a Web service by name across base + every extension (first match; no
+    /// overlay merge, matching [`Self::resolve_web_service_for_file`]).
+    pub fn resolve_web_service_across_roots(
+        &self,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::WebService>> {
+        self.ordered_config_roots().iter().find_map(|root| {
+            let listing = self.metadata_listing(root)?;
+            metadata::resolve_web_service(self, listing, name.to_string())
+        })
+    }
+
+    /// Resolve an integration service by name across base + every extension (first
+    /// match; no overlay merge, matching [`Self::resolve_integration_service_for_file`]).
+    pub fn resolve_integration_service_across_roots(
+        &self,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::IntegrationService>> {
+        self.ordered_config_roots().iter().find_map(|root| {
+            let listing = self.metadata_listing(root)?;
+            metadata::resolve_integration_service(self, listing, name.to_string())
+        })
+    }
+
+    /// The whole [`bsl_metadata::Configuration`] for one config root, via the cached
+    /// `load_configuration` Salsa query (Channel-2). This IS a full `load_from_directory`
+    /// when it recomputes, so it is for the rare configuration-header reads
+    /// (`name`/`uuid`, extension names/counts) the per-MDO listing does not carry — never
+    /// the hot `object` point-lookup. Invalidated by `bump_config_for_paths`, so a
+    /// metadata drift re-parses it lazily on the next header read.
+    pub fn configuration_for_root(&self, root: &Path) -> Arc<bsl_metadata::Configuration> {
+        let path_input = metadata::intern_configuration_path(
+            self,
+            &root.to_string_lossy(),
+            self.config_root_revision_for_path(root),
+        );
+        self.load_configuration(path_input)
     }
 
     /// Resolve the common module that owns the `Ext/Module.bsl` whose id is

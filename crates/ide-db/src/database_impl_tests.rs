@@ -4384,3 +4384,360 @@ fn subsystem_reference_resolver_uses_listed_substrate() {
     let member_names: Vec<String> = members.iter().map(|name| name.as_str().to_string()).collect();
     assert_eq!(member_names, vec!["МояПодсистема".to_string(), "ТолькоРасширение".to_string()]);
 }
+
+/// A structure listing with every kind empty, so a test fills only the fields it needs
+/// via struct-update syntax (`MetadataListingData { entries: …, ..empty_listing_data() }`).
+fn empty_listing_data() -> MetadataListingData {
+    MetadataListingData {
+        entries: Vec::new(),
+        defined_types: Vec::new(),
+        common_modules: Vec::new(),
+        event_subscriptions: Vec::new(),
+        scheduled_jobs: Vec::new(),
+        roles: Vec::new(),
+        http_services: Vec::new(),
+        web_services: Vec::new(),
+        integration_services: Vec::new(),
+        subsystems: Vec::new(),
+    }
+}
+
+/// The root-scoped `object`-tool resolver merges base + every extension with no file
+/// anchor: a base-only object resolves, an extension-only object resolves (the deliberate
+/// widening over today's base-only read), and an object present in both is base composed
+/// with the extension overlay — proven by the extension contributing the `Code` standard
+/// attribute (from its `CodeLength`) that the base lacks.
+#[test]
+fn resolve_metadata_object_across_roots_merges_base_and_extension() {
+    use crate::metadata::MdoEntry;
+    use bsl_metadata::MdoType;
+
+    fn catalog_xml(name: &str, uuid: &str, code_length: Option<u32>) -> String {
+        let code = code_length.map(|c| format!("<CodeLength>{c}</CodeLength>")).unwrap_or_default();
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Catalog uuid="{uuid}">
+        <Properties><Name>{name}</Name>{code}</Properties>
+    </Catalog>
+</MetaDataObject>"#
+        )
+    }
+
+    let base_only = FileId(0);
+    let base_shared = FileId(1);
+    let ext_only = FileId(2);
+    let ext_shared = FileId(3);
+
+    let mut db = RootDatabaseImpl::new();
+    let mut file_set = FileSet::new();
+    file_set.insert(base_only, VfsPath::new("/base/Catalogs/ТолькоБаза.xml"));
+    file_set.insert(base_shared, VfsPath::new("/base/Catalogs/Общий.xml"));
+    file_set.insert(ext_only, VfsPath::new("/ext/Catalogs/ТолькоРасш.xml"));
+    file_set.insert(ext_shared, VfsPath::new("/ext/Catalogs/Общий.xml"));
+    db.set_source_root(SourceRootId(1), SourceRoot::new_local(file_set));
+    for f in [base_only, base_shared, ext_only, ext_shared] {
+        db.set_file_source_root(f, SourceRootId(1));
+    }
+    db.set_file_text(
+        base_only,
+        &catalog_xml("ТолькоБаза", "00000000-0000-0000-0000-000000000001", None),
+    );
+    db.set_file_text(
+        base_shared,
+        &catalog_xml("Общий", "00000000-0000-0000-0000-000000000002", None),
+    );
+    db.set_file_text(
+        ext_only,
+        &catalog_xml("ТолькоРасш", "00000000-0000-0000-0000-000000000003", None),
+    );
+    db.set_file_text(
+        ext_shared,
+        &catalog_xml("Общий", "00000000-0000-0000-0000-000000000004", Some(9)),
+    );
+
+    let cat = |name: &str, main| MdoEntry {
+        kind: MdoType::Catalog,
+        name: name.to_string(),
+        main,
+        predefined: None,
+    };
+    db.set_all_config_paths(vec![
+        (None, std::path::PathBuf::from("/base")),
+        (Some("Расш".to_string()), std::path::PathBuf::from("/ext")),
+    ]);
+    db.set_metadata_listing(
+        "/base",
+        MetadataListingData {
+            entries: vec![cat("ТолькоБаза", base_only), cat("Общий", base_shared)],
+            ..empty_listing_data()
+        },
+    );
+    db.set_metadata_listing(
+        "/ext",
+        MetadataListingData {
+            entries: vec![cat("ТолькоРасш", ext_only), cat("Общий", ext_shared)],
+            ..empty_listing_data()
+        },
+    );
+
+    assert_eq!(
+        db.resolve_metadata_object_across_roots(MdoType::Catalog, "ТолькоБаза").unwrap().name,
+        "ТолькоБаза",
+        "base-only object resolves",
+    );
+    assert_eq!(
+        db.resolve_metadata_object_across_roots(MdoType::Catalog, "ТолькоРасш").unwrap().name,
+        "ТолькоРасш",
+        "extension-only object resolves — the widening over today's base-only read",
+    );
+    let merged = db
+        .resolve_metadata_object_across_roots(MdoType::Catalog, "Общий")
+        .expect("shared object resolves");
+    assert!(
+        merged.attributes.iter().any(|a| a.name_en.as_deref() == Some("Code")),
+        "the extension overlay must contribute the Code attribute the base lacked: {:?}",
+        merged.attributes.iter().map(|a| a.name.clone()).collect::<Vec<_>>(),
+    );
+    assert!(
+        db.resolve_metadata_object_across_roots(MdoType::Catalog, "НетТакого").is_none(),
+        "an absent object resolves to None",
+    );
+}
+
+/// A register kind reached through the root-scoped resolver: an extension-only register is
+/// found (base listing empty), confirming registers participate in the base + extension
+/// scan just like objects.
+#[test]
+fn resolve_register_across_roots_finds_extension_register() {
+    use crate::metadata::MdoEntry;
+    use bsl_metadata::MdoType;
+
+    let reg_file = FileId(0);
+    let mut db = RootDatabaseImpl::new();
+    let mut file_set = FileSet::new();
+    file_set.insert(reg_file, VfsPath::new("/ext/InformationRegisters/РегистрСведений1.xml"));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(reg_file, SourceRootId(0));
+    db.set_file_text(
+        reg_file,
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../bsl-metadata/fixtures/designer/InformationRegisters/РегистрСведений1.xml"
+        )),
+    );
+
+    db.set_all_config_paths(vec![
+        (None, std::path::PathBuf::from("/base")),
+        (Some("Расш".to_string()), std::path::PathBuf::from("/ext")),
+    ]);
+    db.set_metadata_listing("/base", empty_listing_data());
+    db.set_metadata_listing(
+        "/ext",
+        MetadataListingData {
+            entries: vec![MdoEntry {
+                kind: MdoType::InformationRegister,
+                name: "РегистрСведений1".to_string(),
+                main: reg_file,
+                predefined: None,
+            }],
+            ..empty_listing_data()
+        },
+    );
+
+    let reg = db
+        .resolve_register_across_roots(MdoType::InformationRegister, "РегистрСведений1")
+        .expect("extension-only register resolves across roots");
+    assert_eq!(reg.name(), "РегистрСведений1");
+    assert_eq!(reg.mdo_type(), MdoType::InformationRegister);
+    assert!(
+        db.resolve_register_across_roots(MdoType::InformationRegister, "НетТакого").is_none(),
+        "an absent register resolves to None",
+    );
+}
+
+/// A cold kind (event subscription, which carries no extension overlay) through the
+/// root-scoped resolver: base and extension-only subscriptions both resolve, base taking
+/// precedence on a name collision.
+#[test]
+fn resolve_event_subscription_across_roots_surfaces_base_and_extension() {
+    use crate::metadata::EventSubscriptionEntry;
+
+    fn sub_xml(name: &str, event: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <EventSubscription uuid="00000000-0000-0000-0000-000000000052">
+        <Properties>
+            <Name>{name}</Name>
+            <Source><Type>CatalogRef.Номенклатура</Type></Source>
+            <Event>{event}</Event>
+            <Handler>CommonModule.Подписки.{name}</Handler>
+        </Properties>
+    </EventSubscription>
+</MetaDataObject>"#
+        )
+    }
+
+    let base_sub = FileId(0);
+    let ext_sub = FileId(1);
+    let mut db = RootDatabaseImpl::new();
+    let mut file_set = FileSet::new();
+    file_set.insert(base_sub, VfsPath::new("/base/EventSubscriptions/ПодпискаБаза.xml"));
+    file_set.insert(ext_sub, VfsPath::new("/ext/EventSubscriptions/ПодпискаРасш.xml"));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(base_sub, SourceRootId(0));
+    db.set_file_source_root(ext_sub, SourceRootId(0));
+    db.set_file_text(base_sub, &sub_xml("ПодпискаБаза", "BeforeWrite"));
+    db.set_file_text(ext_sub, &sub_xml("ПодпискаРасш", "OnWrite"));
+
+    db.set_all_config_paths(vec![
+        (None, std::path::PathBuf::from("/base")),
+        (Some("Расш".to_string()), std::path::PathBuf::from("/ext")),
+    ]);
+    db.set_metadata_listing(
+        "/base",
+        MetadataListingData {
+            event_subscriptions: vec![EventSubscriptionEntry {
+                name: "ПодпискаБаза".to_string(),
+                main: base_sub,
+            }],
+            ..empty_listing_data()
+        },
+    );
+    db.set_metadata_listing(
+        "/ext",
+        MetadataListingData {
+            event_subscriptions: vec![EventSubscriptionEntry {
+                name: "ПодпискаРасш".to_string(),
+                main: ext_sub,
+            }],
+            ..empty_listing_data()
+        },
+    );
+
+    let base = db
+        .resolve_event_subscription_across_roots("ПодпискаБаза")
+        .expect("base subscription resolves");
+    assert_eq!(base.event(), "BeforeWrite");
+    let ext = db
+        .resolve_event_subscription_across_roots("ПодпискаРасш")
+        .expect("extension-only subscription resolves");
+    assert_eq!(ext.event(), "OnWrite");
+    assert!(
+        db.resolve_event_subscription_across_roots("НетТакой").is_none(),
+        "an absent subscription resolves to None",
+    );
+}
+
+/// The register overlay-fold branch: a register present in BOTH base and an extension is
+/// base composed with the extension overlay — the extension contributes a dimension the
+/// base lacked (via `Register::apply_extension_overlay`), not just a base-only read.
+#[test]
+fn resolve_register_across_roots_folds_extension_overlay() {
+    use crate::metadata::MdoEntry;
+    use bsl_metadata::MdoType;
+
+    let base_reg = FileId(0);
+    let ext_reg = FileId(1);
+    let mut db = RootDatabaseImpl::new();
+    let mut file_set = FileSet::new();
+    file_set.insert(base_reg, VfsPath::new("/base/InformationRegisters/РегистрСведений1.xml"));
+    file_set.insert(ext_reg, VfsPath::new("/ext/InformationRegisters/РегистрСведений1.xml"));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(base_reg, SourceRootId(0));
+    db.set_file_source_root(ext_reg, SourceRootId(0));
+    // Base register carries no dimension.
+    db.set_file_text(
+        base_reg,
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <InformationRegister uuid="59f8d329-f39c-4999-b470-ae9fc74511ac">
+        <Properties><Name>РегистрСведений1</Name></Properties>
+    </InformationRegister>
+</MetaDataObject>"#,
+    );
+    // The extension's copy of the register adds the Справочник1 dimension (real fixture).
+    db.set_file_text(
+        ext_reg,
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../bsl-metadata/fixtures/designer/InformationRegisters/РегистрСведений1.xml"
+        )),
+    );
+
+    let entry = |main| MdoEntry {
+        kind: MdoType::InformationRegister,
+        name: "РегистрСведений1".to_string(),
+        main,
+        predefined: None,
+    };
+    db.set_all_config_paths(vec![
+        (None, std::path::PathBuf::from("/base")),
+        (Some("Расш".to_string()), std::path::PathBuf::from("/ext")),
+    ]);
+    db.set_metadata_listing(
+        "/base",
+        MetadataListingData { entries: vec![entry(base_reg)], ..empty_listing_data() },
+    );
+    db.set_metadata_listing(
+        "/ext",
+        MetadataListingData { entries: vec![entry(ext_reg)], ..empty_listing_data() },
+    );
+
+    let merged = db
+        .resolve_register_across_roots(MdoType::InformationRegister, "РегистрСведений1")
+        .expect("register resolves across roots");
+    assert!(
+        merged.dimensions().iter().any(|d| d.name() == "Справочник1"),
+        "the extension overlay must contribute the dimension the base lacked: {:?}",
+        merged.dimensions().iter().map(|d| d.name().to_string()).collect::<Vec<_>>(),
+    );
+}
+
+/// The Channel-2 configuration accessor (`info`/`tree` payload source): it loads the
+/// whole configuration via `load_configuration`, and — because that query keys on the
+/// config-root revision — re-reads after `bump_config_for_paths` (the same invalidation a
+/// metadata drift fires). Asserted through object enumeration, the real header/tree
+/// payload; `load_from_directory` does NOT read the config name/uuid (they default), so
+/// this does not assert those.
+#[test]
+fn configuration_for_root_reads_objects_and_rereads_after_bump() {
+    use bsl_metadata::MdoType;
+
+    fn catalog_xml(name: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Catalog uuid="00000000-0000-0000-0000-000000000001">
+        <Properties><Name>{name}</Name><CodeLength>9</CodeLength></Properties>
+    </Catalog>
+</MetaDataObject>"#
+        )
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("Catalogs")).unwrap();
+    std::fs::write(root.join("Catalogs/Товары.xml"), catalog_xml("Товары")).unwrap();
+
+    let mut db = RootDatabaseImpl::new();
+    db.set_all_config_paths(vec![(None, root.to_path_buf())]);
+
+    let cfg = db.configuration_for_root(root);
+    assert!(
+        cfg.find_metadata_object(MdoType::Catalog, "Товары").is_some(),
+        "configuration reads objects through load_configuration",
+    );
+    let before = cfg.metadata_objects().len();
+
+    // Add an object and bump the root's config revision; the cached query must re-run.
+    std::fs::write(root.join("Catalogs/Услуги.xml"), catalog_xml("Услуги")).unwrap();
+    db.bump_config_for_paths(std::iter::once(root));
+    let cfg2 = db.configuration_for_root(root);
+    assert!(
+        cfg2.find_metadata_object(MdoType::Catalog, "Услуги").is_some(),
+        "configuration re-reads after bump_config_for_paths invalidates the config revision",
+    );
+    assert!(cfg2.metadata_objects().len() > before, "the added object is visible after re-read");
+}

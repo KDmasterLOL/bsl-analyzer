@@ -49,6 +49,11 @@ const DRIFT_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 /// standalone server reclaims the ~2.8 GB after a burst. The next call rebuilds.
 const IDLE_EVICTION: Duration = Duration::from_secs(600);
 
+/// The shortest interval a forced re-scan (a `metadata object` miss retry) may bypass the
+/// drift throttle. Bounds how fast a loop of genuinely-absent lookups can stat-walk the
+/// workspace, mirroring the retired `MetadataCache`'s force floor.
+const FORCE_RESCAN_FLOOR: Duration = Duration::from_millis(250);
+
 /// How often the idle sweeper wakes to check the last-access time.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -153,6 +158,14 @@ impl DiagnosticsResident {
     /// (memo/LRU cache), and is dropped before the read guard is released.
     pub(crate) fn analysis(&self) -> Analysis {
         Analysis::from_database(self.db.clone())
+    }
+
+    /// The resident Salsa database, for the `metadata` tool's root-scoped metadata
+    /// reads (`resolve_*_across_roots` point-lookups and the Channel-2
+    /// `configuration_for_root` header/enumeration). Borrowed under the state lock, so
+    /// the borrow cannot outlive the read and a reload can never alias it.
+    pub(crate) fn db(&self) -> &RootDatabaseImpl {
+        &self.db
     }
 
     pub(crate) fn file_count(&self) -> usize {
@@ -854,6 +867,19 @@ impl DiagnosticsState {
             stats,
             config_fp,
         ))
+    }
+
+    /// Drop the throttled scan cache so the next [`Self::read`] re-scans immediately, even
+    /// inside the drift window. Used when a `metadata object` lookup misses, in case the
+    /// object was added since the last scan. Storm-guarded: it only drops the cache when
+    /// the last scan is older than [`FORCE_RESCAN_FLOOR`], so a loop of genuinely-absent
+    /// lookups cannot stat-walk the workspace faster than that floor (the D2 discipline).
+    pub(crate) fn force_rescan(&self) {
+        let mut cache = lock_recover(&self.scan);
+        let stale = cache.as_ref().is_none_or(|c| c.at.elapsed() >= FORCE_RESCAN_FLOOR);
+        if stale {
+            *cache = None;
+        }
     }
 
     /// The throttled disk scan: at most one walk per drift interval, its result shared
@@ -1793,6 +1819,107 @@ mod tests {
             module_is_server(&state, &module),
             Some(false),
             "enroll_refresh must re-read the edited XML through the canonicalise-on-miss path"
+        );
+    }
+
+    /// The `metadata object` tool path (`object_from_db` over the resident substrate) sees
+    /// a newly-added catalog through the point-refresh — no full db rebuild, generation
+    /// bumped — and never loads the whole configuration (the resolver is substrate-only).
+    #[test]
+    fn metadata_object_finds_added_catalog_without_full_rebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let mut state = DiagnosticsState::for_workspace(root.to_path_buf());
+        state.drift_interval = Duration::from_millis(0);
+        state.ensure_loading();
+        wait_ready(&state);
+        let gen0 = state.generation();
+
+        let found = |state: &DiagnosticsState| {
+            let out = state.read(|r, _| {
+                crate::tools::metadata::object_from_db(r.db(), "Catalog", "Товары").is_ok()
+            });
+            match out {
+                ResidentOutcome::Ready(v, _) => v,
+                _ => panic!("expected Ready"),
+            }
+        };
+
+        assert!(!found(&state), "catalog absent before the add");
+
+        std::thread::sleep(Duration::from_millis(10));
+        write_catalog(root, "Товары", 9);
+
+        assert!(found(&state), "the metadata object tool finds the added catalog");
+        assert_eq!(state.status_report().reload, "none", "no full db rebuild for an object add");
+        assert!(state.generation() > gen0, "the point-refresh bumped the generation");
+    }
+
+    /// The idle-eviction contract for metadata reads: after the resident is evicted, a read
+    /// re-triggers the build and degrades to a "loading" outcome (or Ready once rebuilt) —
+    /// NEVER a hard `Disabled`/`Failed` error. The tool maps `Loading` to a retry envelope.
+    #[test]
+    fn metadata_read_after_eviction_is_loading_not_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let mut state = DiagnosticsState::for_workspace(root.to_path_buf());
+        state.eviction_after = Duration::from_millis(50);
+        state.ensure_loading();
+        wait_ready(&state);
+
+        for _ in 0..300 {
+            if state.status() == DiagnosticsStatus::Idle {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(state.status(), DiagnosticsStatus::Idle, "resident evicted after idle");
+
+        // A metadata read after eviction: re-trigger the build and read. It is Loading (still
+        // rebuilding) or Ready (rebuilt fast) — the tool turns Loading into a retry envelope,
+        // never surfacing a hard "not loaded" error.
+        state.ensure_loading();
+        let out = state
+            .read(|r, _| crate::tools::metadata::object_from_db(r.db(), "Catalog", "X").is_ok());
+        assert!(
+            matches!(out, ResidentOutcome::Loading | ResidentOutcome::Ready(_, _)),
+            "an evicted metadata read must be loading or ready, never a hard error",
+        );
+    }
+
+    /// The `metadata object` miss retry drops the throttle cache to force a re-scan, but
+    /// only when the last scan is older than [`FORCE_RESCAN_FLOOR`] — so a loop of
+    /// genuinely-absent lookups cannot stat-walk the workspace faster than that floor
+    /// (the retired MetadataCache's storm guard). Exercised with a synthetic past
+    /// `Instant`, so it is deterministic and needs no real sleep.
+    #[test]
+    fn force_rescan_is_storm_guarded_by_the_floor() {
+        let state = DiagnosticsState::for_workspace(std::env::temp_dir());
+
+        // A fresh scan (just now) must NOT be force-cleared — the storm guard.
+        *lock_recover(&state.scan) =
+            Some(ScanCache { at: Instant::now(), stats: Vec::new(), config_fp: 0 });
+        state.force_rescan();
+        assert!(
+            lock_recover(&state.scan).is_some(),
+            "a scan within the floor is kept, so repeated misses cannot hammer the FS",
+        );
+
+        // A scan older than the floor IS cleared, so the next read re-scans and can pick up
+        // a just-added object.
+        let stale_at = Instant::now()
+            .checked_sub(FORCE_RESCAN_FLOOR + Duration::from_millis(50))
+            .expect("a valid past instant");
+        *lock_recover(&state.scan) =
+            Some(ScanCache { at: stale_at, stats: Vec::new(), config_fp: 0 });
+        state.force_rescan();
+        assert!(
+            lock_recover(&state.scan).is_none(),
+            "a scan older than the floor is force-cleared so the retry re-scans",
         );
     }
 }
