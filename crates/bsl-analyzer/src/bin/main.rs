@@ -228,13 +228,20 @@ enum Commands {
 fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let cli = Cli::parse();
 
-    let log_file = env::var("BSL_LOG_FILE").ok().map(PathBuf::from);
+    let (log_file, append_log) = match env::var("BSL_LOG_FILE").ok().map(PathBuf::from) {
+        Some(file) => (Some(file), false),
+        None => match &cli.command {
+            Some(Commands::Mcp { command }) => (command.default_daemon_log_file(), true),
+            _ => (None, false),
+        },
+    };
 
     let profile_filter = cli.profile.clone().or_else(|| env::var("BSL_PROFILE").ok());
     let json_profile_filter =
         cli.profile_json.clone().or_else(|| env::var("BSL_PROFILE_JSON").ok());
 
-    if let Err(e) = setup_logging(log_file.clone(), profile_filter, json_profile_filter) {
+    if let Err(e) = setup_logging(log_file.clone(), append_log, profile_filter, json_profile_filter)
+    {
         eprintln!("Failed to setup logging: {}", e);
         if let Some(ref path) = log_file {
             let _ = fs::write(path, format!("ERROR: Failed to setup logging: {}\n", e));
@@ -242,6 +249,12 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         return Err(e.into());
     }
 
+    if append_log && log_file.is_some() {
+        // Appended daemon logs concatenate runs; the separator must survive the
+        // default filter (`warn` + the `bsl_graph` diagnosis trail), so it rides
+        // the `bsl_graph` target rather than plain info.
+        tracing::info!(target: "bsl_graph", pid = std::process::id(), "log session started");
+    }
     tracing::info!("BSL Analyzer starting (pid: {})", std::process::id());
     tracing::info!("Working directory: {:?}", env::current_dir().ok());
     tracing::info!("Command line args: {:?}", env::args().collect::<Vec<_>>());

@@ -2241,6 +2241,16 @@ impl metadata::MetadataDb for RootDatabaseImpl {
         // Miss: load (the build warms each root sequentially before its parallel
         // region, so concurrent first-loads of the same root do not occur; a rare
         // duplicate load would only repeat pure work, never corrupt the result).
+        // A miss under an exclusive-pool job means the warm-up failed to cover this
+        // root and the internally-parallel loader is about to run on the build pool
+        // — record which root slipped through before the loader's own check fires.
+        if stdx::par_guard::no_nested_parallelism() {
+            tracing::error!(
+                path = %key.display(),
+                "graph config cache miss inside a no-nested-parallelism job; \
+                 the pre-pool warm-up did not cover this config root"
+            );
+        }
         let config = metadata::load_configuration(self, path_input);
         cache.insert(key, Arc::clone(&config));
         config

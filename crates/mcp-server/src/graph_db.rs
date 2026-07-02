@@ -15,10 +15,12 @@
 //! emits, so ids an agent holds survive the in-memory → SQLite switch.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use ide::graph_index::{EdgeRow, NodeRow};
-use ide::{GraphBuildSummary, ModuleId, RootDatabaseImpl};
+use ide::{GraphBuildSummary, GraphBuildTicker, ModuleId, RootDatabaseImpl};
 use rusqlite::{params, Connection, OptionalExtension};
 use rustc_hash::FxHashMap;
 use vfs::FileId;
@@ -347,6 +349,153 @@ pub fn build_graph_database_fused(
     build_graph_database_inner(workspace_root, out_path, batch_size, meta, Some(chunk_sink))
 }
 
+/// Default seconds without build progress before the watchdog reports a stall.
+const GRAPH_STALL_REPORT_SECS: u64 = 600;
+
+/// Monitor thread for a running graph build. A deadlock in the build's parallel
+/// region freezes the process silently — alive, zero CPU, zero disk growth — so
+/// the watchdog turns that into an actionable `error!` record: how long the build
+/// has been stuck, at which phase/batch, and every thread's kernel state. It
+/// re-reports once per stall interval while the stall lasts.
+///
+/// `BSL_GRAPH_STALL_SECS` overrides the reporting threshold;
+/// `BSL_GRAPH_STALL_ABORT=1` additionally aborts the process on the first report
+/// (for supervised deployments where a restart beats a wedged daemon). The
+/// watchdog only observes — by default a stalled build is left running so it can
+/// still be inspected with a debugger.
+struct BuildWatchdog {
+    stop: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for BuildWatchdog {
+    fn drop(&mut self) {
+        let (lock, signal) = &*self.stop;
+        *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        signal.notify_all();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn spawn_build_watchdog(ticker: Arc<GraphBuildTicker>) -> BuildWatchdog {
+    let stop = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let stop_pair = Arc::clone(&stop);
+    // Misconfiguration must be loud: an operator reproducing a wedged build relies
+    // on these knobs actually being in effect, and a silent fallback costs them a
+    // multi-hour cold-build cycle.
+    let threshold_secs = match std::env::var("BSL_GRAPH_STALL_SECS") {
+        Ok(value) => match value.parse::<u64>() {
+            Ok(secs) if secs > 0 => secs,
+            _ => {
+                tracing::warn!(
+                    value = %value,
+                    default_secs = GRAPH_STALL_REPORT_SECS,
+                    "invalid BSL_GRAPH_STALL_SECS (want a positive integer); using the default"
+                );
+                GRAPH_STALL_REPORT_SECS
+            }
+        },
+        Err(_) => GRAPH_STALL_REPORT_SECS,
+    };
+    let abort_on_stall = match std::env::var("BSL_GRAPH_STALL_ABORT") {
+        Ok(value) => match value.to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "" | "0" | "false" | "no" | "off" => false,
+            _ => {
+                tracing::warn!(
+                    value = %value,
+                    "unrecognized BSL_GRAPH_STALL_ABORT (want 1/true/yes/on); abort disabled"
+                );
+                false
+            }
+        },
+        Err(_) => false,
+    };
+    tracing::info!(
+        target: "bsl_graph",
+        threshold_secs,
+        abort_on_stall,
+        "graph build watchdog armed"
+    );
+    let spawned =
+        std::thread::Builder::new().name("bsl-graph-watchdog".to_owned()).spawn(move || {
+            let (lock, signal) = &*stop_pair;
+            let mut reported_episodes = 0;
+            let mut stopped = lock.lock().unwrap_or_else(|e| e.into_inner());
+            while !*stopped {
+                // Condvar wait instead of a plain sleep so dropping the watchdog
+                // (every build teardown, including tests) returns immediately
+                // rather than after the current poll tick.
+                let (guard, _) = signal
+                    .wait_timeout(stopped, Duration::from_secs(1))
+                    .unwrap_or_else(|e| e.into_inner());
+                stopped = guard;
+                if *stopped {
+                    break;
+                }
+                let stalled_ms = ticker.ms_since_progress();
+                let episodes = stalled_ms / (threshold_secs * 1000);
+                if episodes == 0 {
+                    reported_episodes = 0;
+                } else if episodes > reported_episodes {
+                    reported_episodes = episodes;
+                    tracing::error!(
+                        stalled_secs = stalled_ms / 1000,
+                        position = %ticker.position(),
+                        threads = %thread_state_summary(),
+                        "graph build has made no progress; its parallel region may be deadlocked"
+                    );
+                    if abort_on_stall {
+                        tracing::error!("BSL_GRAPH_STALL_ABORT=1: aborting the stalled process");
+                        std::process::abort();
+                    }
+                }
+            }
+        });
+    let handle = match spawned {
+        Ok(handle) => Some(handle),
+        Err(e) => {
+            tracing::warn!("could not spawn graph build watchdog: {e}");
+            None
+        }
+    };
+    BuildWatchdog { stop, handle }
+}
+
+/// One compact `name:state:wchan` entry per OS thread of this process — the same
+/// facts a by-hand `/proc` inspection collects, captured at the moment of a stall.
+#[cfg(target_os = "linux")]
+fn thread_state_summary() -> String {
+    let Ok(tasks) = std::fs::read_dir("/proc/self/task") else {
+        return "unavailable".to_owned();
+    };
+    let mut entries: Vec<String> = Vec::new();
+    for task in tasks.flatten() {
+        let read = |name: &str| {
+            std::fs::read_to_string(task.path().join(name)).unwrap_or_default().trim().to_owned()
+        };
+        let comm = read("comm");
+        let wchan = read("wchan");
+        // The state field follows the parenthesised comm, which may itself
+        // contain spaces — split after the closing paren, not on raw whitespace.
+        let stat = read("stat");
+        let state = stat
+            .rsplit_once(')')
+            .and_then(|(_, rest)| rest.split_whitespace().next())
+            .unwrap_or("?")
+            .to_owned();
+        entries.push(format!("{comm}:{state}:{wchan}"));
+    }
+    entries.join(" ")
+}
+
+#[cfg(not(target_os = "linux"))]
+fn thread_state_summary() -> String {
+    "unavailable on this platform".to_owned()
+}
+
 fn build_graph_database_inner(
     workspace_root: &Path,
     out_path: &Path,
@@ -375,6 +524,12 @@ fn build_graph_database_inner(
     // snapshot — see `ide_db`'s `GraphConfigCache`.
     let config_cache = std::sync::Arc::new(ide::GraphConfigCache::default());
 
+    // Heartbeat + stall watchdog for the whole build (index, edge passes, fused
+    // chunking): kept alive until after `finalize`, so a wedge anywhere in the
+    // pipeline gets reported rather than freezing silently.
+    let ticker = Arc::new(GraphBuildTicker::default());
+    let _watchdog = spawn_build_watchdog(Arc::clone(&ticker));
+
     // Scope the closures so their borrows end before `finalize`. `open_batch`
     // loads only the batch's texts (sharing the resident source root + config);
     // `sink` persists the freshly-encoded rows (the sole `&mut writer` borrow).
@@ -399,6 +554,7 @@ fn build_graph_database_inner(
             &mut open_batch,
             &mut sink,
             chunk_sink,
+            Some(&ticker),
         )
         .map_err(|e| anyhow::anyhow!("{e}"))?
     };
@@ -685,6 +841,11 @@ pub fn update_graph_database_bodies(
         db_for_files(&source_root, &batch_files, &config_paths, Some(&config_cache))
     };
 
+    // The reprojection's index pass runs the same guarded batch runners as a full
+    // build, so it gets the same heartbeat + stall watchdog.
+    let ticker = Arc::new(GraphBuildTicker::default());
+    let _watchdog = spawn_build_watchdog(Arc::clone(&ticker));
+
     let rows = ide::reproject_changed_modules(
         &all_modules,
         &changed_modules,
@@ -692,6 +853,7 @@ pub fn update_graph_database_bodies(
         Some(workspace_root),
         batch_size,
         &mut open_batch,
+        Some(&ticker),
     )
     .map_err(|e| anyhow::anyhow!("{e}"))?;
 

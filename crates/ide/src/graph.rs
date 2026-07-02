@@ -656,6 +656,89 @@ fn emit_fused_chunks(
     fused.emit_chunks(&rows)
 }
 
+/// Materialise the per-root metadata memos a batch database will need BEFORE its
+/// parallel region consumes it, one module per config root present in the batch.
+///
+/// The pre-pool warm-up inside the batch runners covers `batch.first()` only, so
+/// the first module of an *extension* root otherwise computes
+/// `merged_configuration` — a whole-config deep clone — inside a pool worker
+/// while every sibling worker parks on that memo: the widest cross-thread
+/// blocking window the build has. Warming on the caller's thread closes it. Only
+/// roots actually represented in `batch_files` are touched, so batches without
+/// extension modules pay nothing.
+pub fn warm_batch_config_roots(
+    db: &RootDatabaseImpl,
+    batch_files: &[(FileId, std::path::PathBuf)],
+    config_paths: &[(Option<String>, std::path::PathBuf)],
+) {
+    for (_, root) in config_paths {
+        // Batch file paths are canonicalized by the workspace scan; config roots
+        // come from the project config verbatim (relative, symlinked, or
+        // verbatim-prefixed on Windows). Canonicalize the root before the prefix
+        // test or an extension root silently never matches — and its merge memo
+        // would still materialise inside the pool.
+        let root = root.canonicalize().unwrap_or_else(|_| root.clone());
+        if let Some((file_id, _)) = batch_files.iter().find(|(_, path)| path.starts_with(&root)) {
+            let _ = db.module_metadata(ModuleId::new(*file_id));
+        }
+    }
+}
+
+/// Live position of a streaming graph build, shared with an external watchdog.
+///
+/// A deadlocked parallel region leaves the process alive but silent — no log
+/// line, no CPU, no disk growth — so the only way to notice (and to say WHERE
+/// it stopped) is a heartbeat the build stamps as it moves. The build calls
+/// [`note`](Self::note) at every phase/batch boundary; a monitor thread reads
+/// [`ms_since_progress`](Self::ms_since_progress) and dumps
+/// [`position`](Self::position) when the build stops advancing.
+pub struct GraphBuildTicker {
+    started: std::time::Instant,
+    /// Milliseconds from `started` at the last `note`, atomically readable.
+    last_progress_ms: std::sync::atomic::AtomicU64,
+    position: std::sync::Mutex<String>,
+}
+
+impl Default for GraphBuildTicker {
+    fn default() -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            last_progress_ms: std::sync::atomic::AtomicU64::new(0),
+            position: std::sync::Mutex::new("created".to_owned()),
+        }
+    }
+}
+
+impl GraphBuildTicker {
+    /// Record forward progress: the build is entering `batch` (0-based) of
+    /// `total` in `phase`, whose first module is `first_path` (empty when the
+    /// phase has no per-batch granularity). Also emits the heartbeat trace line
+    /// (target `bsl_graph`), so the on-disk log reconstructs the build timeline.
+    pub fn note(&self, phase: &str, batch: usize, total: usize, first_path: &str) {
+        let elapsed = self.started.elapsed().as_millis() as u64;
+        self.last_progress_ms.store(elapsed, std::sync::atomic::Ordering::Relaxed);
+        let label = if total > 0 {
+            format!("{phase} batch {}/{total} (first: {first_path})", batch + 1)
+        } else {
+            phase.to_owned()
+        };
+        tracing::info!(target: "bsl_graph", elapsed_ms = elapsed, "graph build: {label}");
+        *self.position.lock().unwrap() = label;
+    }
+
+    /// Milliseconds since the last [`note`](Self::note).
+    pub fn ms_since_progress(&self) -> u64 {
+        let elapsed = self.started.elapsed().as_millis() as u64;
+        let last = self.last_progress_ms.load(std::sync::atomic::Ordering::Relaxed);
+        elapsed.saturating_sub(last)
+    }
+
+    /// Human-readable last recorded position (phase + batch + first module).
+    pub fn position(&self) -> String {
+        self.position.lock().unwrap().clone()
+    }
+}
+
 /// Project the whole-workspace call graph into durable node/edge rows in bounded
 /// batches, streaming each batch to `sink` rather than materialising the full
 /// graph in memory. The compact [`GraphIndex`] (a per-module method table) is
@@ -670,6 +753,12 @@ fn emit_fused_chunks(
 /// `modules` is every module in the workspace, in a stable order; `paths` maps
 /// every file id to its path for id encoding. `batch_size` modules are loaded and
 /// projected per batch; a value of 0 is treated as 1.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each argument is a distinct borrowed channel of the streaming build \
+              (inputs, batch opener, row/chunk sinks, progress); a bundling struct \
+              would carry the same lifetimes one level deeper for no clarity gain"
+)]
 pub fn build_workspace_graph_rows(
     modules: &[ModuleId],
     paths: &FxHashMap<FileId, String>,
@@ -678,8 +767,24 @@ pub fn build_workspace_graph_rows(
     open_batch: &mut BatchDbOpener<'_>,
     sink: &mut GraphRowSink<'_>,
     mut fused: Option<&mut dyn FusedChunkSink>,
+    ticker: Option<&GraphBuildTicker>,
 ) -> Result<GraphBuildSummary, Box<dyn std::error::Error + Send + Sync>> {
     let batch_size = batch_size.max(1);
+    let batches_total = modules.len().div_ceil(batch_size);
+    // Heartbeat at every phase/batch boundary: which batch is entered and its first
+    // module's path. Enough to localise a stalled build to one batch of modules.
+    let note = |phase: &str, batch_idx: usize, batch: &[ModuleId]| {
+        if let Some(ticker) = ticker {
+            let first =
+                batch.first().and_then(|m| paths.get(&m.file_id)).map_or("", String::as_str);
+            ticker.note(phase, batch_idx, batches_total, first);
+        }
+    };
+    let mark = |phase: &str| {
+        if let Some(ticker) = ticker {
+            ticker.note(phase, 0, 0, "");
+        }
+    };
 
     // A dedicated thread pool for this build's intra-batch parallelism. Each build
     // gets its own pool so concurrent builds never share a worker thread: Salsa
@@ -704,7 +809,8 @@ pub fn build_workspace_graph_rows(
     // Build the index batch-by-batch: it must cover every resolution target, but
     // only one batch's item trees are resident while it is assembled.
     let mut index = GraphIndex::new();
-    for batch in modules.chunks(batch_size) {
+    for (i, batch) in modules.chunks(batch_size).enumerate() {
+        note("index", i, batch);
         let db = open_batch(batch);
         index.add_batch(&pool, &db, batch);
         clear_node_caches();
@@ -723,6 +829,7 @@ pub fn build_workspace_graph_rows(
     // Phase A — every method node (the fold's dispatch-seeded set), including
     // isolated methods that no edge references. No database needed: the index and
     // path map carry every fact. Flushed in batches of node rows.
+    mark("method_nodes");
     let mut node_batch: Vec<NodeRow> = Vec::with_capacity(batch_size);
     for method in index.method_nodes() {
         node_batch.push(encoder.node_row(&GraphNode::Method(method)));
@@ -787,7 +894,8 @@ pub fn build_workspace_graph_rows(
     let mut method_edge_facts: FxHashMap<MethodId, MethodEdgeFacts> = FxHashMap::default();
 
     let mut unresolved_calls: Vec<(String, String, String)> = Vec::new();
-    for batch in modules.chunks(batch_size) {
+    for (i, batch) in modules.chunks(batch_size).enumerate() {
+        note("call_edges", i, batch);
         let db = open_batch(batch);
         let proj = project_batch_call_edges(&pool, &db, batch, &index, &mut state);
         if fused.is_some() {
@@ -801,7 +909,8 @@ pub fn build_workspace_graph_rows(
         }
         clear_node_caches();
     }
-    for batch in modules.chunks(batch_size) {
+    for (i, batch) in modules.chunks(batch_size).enumerate() {
+        note("query_edges", i, batch);
         let db = open_batch(batch);
         let edges = project_batch_query_edges(&pool, &db, batch, &mut state);
         if fused.is_some() {
@@ -829,7 +938,8 @@ pub fn build_workspace_graph_rows(
     // materialised by `emit`. Full-build only — the incremental reprojection never
     // runs it (form structure lives in form XML, so any form-structure change is a
     // metadata drift that already forces a full rebuild).
-    for batch in modules.chunks(batch_size) {
+    for (i, batch) in modules.chunks(batch_size).enumerate() {
+        note("form_edges", i, batch);
         let db = open_batch(batch);
         let edges = project_batch_form_edges(&pool, &db, batch, paths, &mut state);
         emit(&edges, &mut summary, &mut seen_aux, sink)?;
@@ -845,6 +955,7 @@ pub fn build_workspace_graph_rows(
     // scope), reusing one batch database for its config access. Full-build only — the
     // catalog is stable under body edits, so the incremental path never re-derives it.
     if let Some(first) = modules.chunks(batch_size).next() {
+        mark("catalog_edges");
         let db = open_batch(first);
         let edges = project_workspace_catalog_edges(&db, first[0].file_id, &mut state);
         emit(&edges, &mut summary, &mut seen_aux, sink)?;
@@ -856,6 +967,7 @@ pub fn build_workspace_graph_rows(
     // database), driver thread, after the catalog so every target node exists (the
     // binding pass gates on the catalog index, so no edge dangles). Full-build only,
     // like the form/catalog passes it joins.
+    mark("binding_edges");
     let binding_edges = project_form_binding_edges(&state);
     emit(&binding_edges, &mut summary, &mut seen_aux, sink)?;
 
@@ -866,6 +978,7 @@ pub fn build_workspace_graph_rows(
     // could invalidate the edge moves the handler module's signature hash, forcing a full
     // rebuild rather than a body-only reproject.
     if let Some(first) = modules.chunks(batch_size).next() {
+        mark("subscription_edges");
         let db = open_batch(first);
         let edges = project_workspace_subscription_edges(&db, first[0].file_id, &index, &mut state);
         emit(&edges, &mut summary, &mut seen_aux, sink)?;
@@ -876,6 +989,7 @@ pub fn build_workspace_graph_rows(
     // canonicalize to the same spelling as their own nodes from the catalog pass.
     // Full-build only, like the metadata passes above.
     if let Some(first) = modules.chunks(batch_size).next() {
+        mark("subsystem_edges");
         let db = open_batch(first);
         let edges = project_workspace_subsystem_edges(&db, first[0].file_id, &mut state);
         emit(&edges, &mut summary, &mut seen_aux, sink)?;
@@ -886,6 +1000,7 @@ pub fn build_workspace_graph_rows(
     // `inferred`). Config-level, pure metadata, sharing `state` so object names canonicalize to
     // the same spelling as their own nodes. Full-build only, like the metadata passes above.
     if let Some(first) = modules.chunks(batch_size).next() {
+        mark("role_edges");
         let db = open_batch(first);
         let edges = project_workspace_role_edges(&db, first[0].file_id, &mut state);
         emit(&edges, &mut summary, &mut seen_aux, sink)?;
@@ -896,6 +1011,7 @@ pub fn build_workspace_graph_rows(
     // names canonicalize to the same spelling as their own nodes. Full-build only, like the
     // metadata passes above.
     if let Some(first) = modules.chunks(batch_size).next() {
+        mark("register_records_edges");
         let db = open_batch(first);
         let edges = project_workspace_register_records_edges(&db, first[0].file_id, &mut state);
         emit(&edges, &mut summary, &mut seen_aux, sink)?;
@@ -914,6 +1030,7 @@ pub fn build_workspace_graph_rows(
     variants.dedup();
     summary.casing_variant_objects = variants;
 
+    mark("done");
     Ok(summary)
 }
 
@@ -967,9 +1084,18 @@ pub fn reproject_changed_modules(
     workspace_root: Option<&Path>,
     batch_size: usize,
     open_batch: &mut BatchDbOpener<'_>,
+    ticker: Option<&GraphBuildTicker>,
 ) -> Result<ReprojectedRows, Box<dyn std::error::Error + Send + Sync>> {
     let batch_size = batch_size.max(1);
     let pool = rayon::ThreadPoolBuilder::new().build()?;
+    let batches_total = all_modules.len().div_ceil(batch_size);
+    let note = |phase: &str, batch_idx: usize, batch: &[ModuleId]| {
+        if let Some(ticker) = ticker {
+            let first =
+                batch.first().and_then(|m| paths.get(&m.file_id)).map_or("", String::as_str);
+            ticker.note(phase, batch_idx, batches_total, first);
+        }
+    };
 
     // See `build_workspace_graph_rows`: the parser's thread-local green-node cache never
     // evicts, so without clearing it between batches every parsed tree's green storage
@@ -981,8 +1107,11 @@ pub fn reproject_changed_modules(
 
     // Full index over every module: a changed module's qualified/manager call into an
     // unchanged module must still resolve, so the index cannot be limited to `changed`.
+    // The same batch runners as the full build → the same stall class; hence the
+    // same heartbeat.
     let mut index = GraphIndex::new();
-    for batch in all_modules.chunks(batch_size) {
+    for (i, batch) in all_modules.chunks(batch_size).enumerate() {
+        note("reproject_index", i, batch);
         let db = open_batch(batch);
         index.add_batch(&pool, &db, batch);
         clear_node_caches();
@@ -1003,6 +1132,7 @@ pub fn reproject_changed_modules(
     // The resulting aux spellings are first-seen WITHIN the changed set, which the
     // caller overrides against the store for objects an unchanged module already owns;
     // a genuinely new object is owned by the changed set in both paths.
+    note("reproject_edges", 0, changed);
     let db = open_batch(changed);
     let mut state = GraphBuildState::new();
     let call_proj = project_batch_call_edges(&pool, &db, changed, &index, &mut state);
@@ -2498,6 +2628,29 @@ fn clamp_source(src: String, max_chars: usize) -> (String, bool) {
         end -= 1;
     }
     (src[..end].to_string(), true)
+}
+
+#[cfg(test)]
+mod ticker_tests {
+    use super::GraphBuildTicker;
+
+    #[test]
+    fn note_stamps_position_and_resets_stall_clock() {
+        let ticker = GraphBuildTicker::default();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        ticker.note("call_edges", 4, 59, "src/cfe/Ext/CommonModules/М/Ext/Module.bsl");
+        assert!(ticker.ms_since_progress() < 25);
+        let position = ticker.position();
+        assert!(position.contains("call_edges batch 5/59"), "{position}");
+        assert!(position.contains("Module.bsl"), "{position}");
+    }
+
+    #[test]
+    fn phase_without_batches_keeps_bare_label() {
+        let ticker = GraphBuildTicker::default();
+        ticker.note("catalog_edges", 0, 0, "");
+        assert_eq!(ticker.position(), "catalog_edges");
+    }
 }
 
 #[cfg(test)]

@@ -708,7 +708,18 @@ where
     }
 
     let seed = db.clone();
-    pool.install(move || batch.par_iter().map_with(seed, |db, &module| f(&*db, module)).collect())
+    pool.install(move || {
+        batch
+            .par_iter()
+            .map_with(seed, |db, &module| {
+                // Mark the job so internally-parallel entry points (the metadata
+                // loader) can detect that the warm-up above failed to keep them off
+                // this pool, instead of deadlocking silently.
+                let _guard = stdx::par_guard::enter_no_nested_parallelism();
+                f(&*db, module)
+            })
+            .collect()
+    })
 }
 
 /// A batch's SDBL `query_ref` edges. Run across every batch only after

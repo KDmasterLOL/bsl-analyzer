@@ -1616,6 +1616,7 @@ pub(crate) fn db_for_files(
         }
     }
     db.set_all_config_paths(config_paths.to_vec());
+    ide::warm_batch_config_roots(&db, batch_files, config_paths);
     db
 }
 
