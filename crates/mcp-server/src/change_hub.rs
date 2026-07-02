@@ -63,6 +63,9 @@ pub(crate) enum DegradeReason {
     /// Extending the recursive watch to a newly-created subtree failed, so that
     /// subtree may be blind to further changes until a reconcile re-covers it.
     RewatchFailed,
+    /// A consumer's periodic reconcile scan found drift the event stream never
+    /// delivered — evidence the backend is lossy, so fall back to scanning.
+    ReconcileMiss,
     /// More than the cap piled up undrained, or the callback channel overflowed:
     /// detail was dropped and a full reconcile scan is needed.
     Overflow,
@@ -75,6 +78,21 @@ pub(crate) enum DegradeReason {
 pub(crate) enum Health {
     Healthy,
     Degraded(DegradeReason),
+}
+
+impl Health {
+    /// A stable label for status reporting.
+    pub(crate) fn label(&self) -> &'static str {
+        match self {
+            Health::Healthy => "healthy",
+            Health::Degraded(DegradeReason::WatcherSetup) => "degraded:watcher-setup",
+            Health::Degraded(DegradeReason::RuntimeError) => "degraded:runtime-error",
+            Health::Degraded(DegradeReason::UnknownEvent) => "degraded:unknown-event",
+            Health::Degraded(DegradeReason::RewatchFailed) => "degraded:rewatch-failed",
+            Health::Degraded(DegradeReason::ReconcileMiss) => "degraded:reconcile-miss",
+            Health::Degraded(DegradeReason::Overflow) => "degraded:overflow",
+        }
+    }
 }
 
 /// One accumulated change. Carries both the canonical key (matching the scan
@@ -457,15 +475,17 @@ pub(crate) struct WorkspaceChangeHub {
 }
 
 impl WorkspaceChangeHub {
-    /// Spawn the hub. Returns immediately: the recursive watch is armed on the hub
-    /// thread (walking a large tree must not block daemon startup). Use
-    /// [`Self::wait_until_watching`] or [`Self::is_watching`] to observe setup
-    /// completion; [`Self::health`] reports `Degraded(WatcherSetup)` if it failed.
-    pub(crate) fn start(root: PathBuf) -> Self {
-        Self::start_with_capacity(root, DEFAULT_CAPACITY)
+    /// Spawn the hub over one or more roots (the drift-scan universe: the config source
+    /// root plus each extension root). Returns immediately — each root is watched
+    /// recursively on the hub thread (walking large trees must not block daemon startup).
+    /// Nested roots are de-duplicated so a subtree is not double-watched. Use
+    /// [`Self::wait_until_watching`] / [`Self::is_watching`] to observe setup completion;
+    /// [`Self::health`] reports `Degraded(WatcherSetup)` if no root could be watched.
+    pub(crate) fn start(roots: Vec<PathBuf>) -> Self {
+        Self::start_with_capacity(roots, DEFAULT_CAPACITY)
     }
 
-    fn start_with_capacity(root: PathBuf, cap: usize) -> Self {
+    fn start_with_capacity(roots: Vec<PathBuf>, cap: usize) -> Self {
         let inner = Arc::new(HubInner {
             acc: Mutex::new(Accumulator::new(cap)),
             wake: Condvar::new(),
@@ -476,7 +496,7 @@ impl WorkspaceChangeHub {
         let thread_inner = Arc::clone(&inner);
         std::thread::Builder::new()
             .name("bsl-workspace-change-hub".to_owned())
-            .spawn(move || run_hub_thread(thread_inner, root))
+            .spawn(move || run_hub_thread(thread_inner, roots))
             .ok();
 
         Self { inner }
@@ -501,17 +521,21 @@ impl WorkspaceChangeHub {
         self.inner.lock_acc().drain(cursor.id)
     }
 
-    // Health and the events-seen counter are the hub's observability surface. They
-    // are consumed by `status_report` once the diagnostics sink lands; exposing
-    // them now keeps the hub's contract complete and unit-testable in isolation.
-    #[allow(dead_code)]
     pub(crate) fn health(&self) -> Health {
         self.inner.lock_acc().health()
     }
 
-    #[allow(dead_code)]
     pub(crate) fn events_seen(&self) -> u64 {
         self.inner.lock_acc().events_seen
+    }
+
+    /// Ask every live cursor to reconcile: used by a consumer whose periodic scan
+    /// found drift the event stream never delivered (a lossy backend). Recoverable
+    /// like any other transient miss — health clears once all cursors acknowledge.
+    /// Entries are kept; the caller applies the drift it already found.
+    pub(crate) fn degrade_external(&self) {
+        self.inner.lock_acc().enter_rescan(false, DegradeReason::ReconcileMiss);
+        self.inner.wake.notify_all();
     }
 
     /// Whether the watch is armed. False means setup is still in flight or failed.
@@ -584,10 +608,36 @@ impl WorkspaceChangeHub {
     }
 }
 
-/// Arm the recursive watch and pump events until the daemon exits. Runs on its own
-/// thread so `start` returns without blocking on the initial (potentially huge)
-/// directory walk.
-fn run_hub_thread(inner: Arc<HubInner>, root: PathBuf) {
+/// Reduce a set of watch roots to the minimal cover: drop any root nested under another
+/// so a subtree is not watched twice (which some backends would report as duplicate
+/// events). Comparison is by canonical path; the RAW path is what gets watched, so event
+/// paths keep the spelling consumers strip against (the search sink strips the non-canonical
+/// source root).
+fn dedup_nested_roots(roots: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut pairs: Vec<(PathBuf, PathBuf)> = roots
+        .into_iter()
+        .map(|raw| (raw.canonicalize().unwrap_or_else(|_| raw.clone()), raw))
+        .collect();
+    // Sort by canonical path so a parent sorts before its descendants; dedup exact repeats.
+    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    pairs.dedup_by(|a, b| a.0 == b.0);
+
+    let mut kept_canonical: Vec<PathBuf> = Vec::new();
+    let mut kept_raw: Vec<PathBuf> = Vec::new();
+    for (canonical, raw) in pairs {
+        if kept_canonical.iter().any(|k| canonical.starts_with(k)) {
+            continue;
+        }
+        kept_canonical.push(canonical);
+        kept_raw.push(raw);
+    }
+    kept_raw
+}
+
+/// Arm the recursive watch over every root and pump events until the daemon exits. Runs on
+/// its own thread so `start` returns without blocking on the initial (potentially huge)
+/// directory walks.
+fn run_hub_thread(inner: Arc<HubInner>, roots: Vec<PathBuf>) {
     let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Event, notify::Error>>(CHANNEL_BOUND);
 
     let callback_inner = Arc::clone(&inner);
@@ -605,19 +655,32 @@ fn run_hub_thread(inner: Arc<HubInner>, root: PathBuf) {
     let mut watcher = match watcher {
         Ok(watcher) => watcher,
         Err(error) => {
-            tracing::warn!(?root, "workspace change hub failed to create watcher: {error}");
+            tracing::warn!("workspace change hub failed to create watcher: {error}");
             inner.mark_setup_failed();
             return;
         }
     };
 
-    if let Err(error) = watcher.watch(&root, RecursiveMode::Recursive) {
-        tracing::warn!(?root, "workspace change hub failed to watch root: {error}");
+    let roots = dedup_nested_roots(roots);
+    let mut watched_any = false;
+    for root in &roots {
+        match watcher.watch(root, RecursiveMode::Recursive) {
+            Ok(()) => {
+                watched_any = true;
+                tracing::info!(?root, "workspace change hub watching root");
+            }
+            // A single unwatchable root (a missing extension dir, an inotify-limit) leaves
+            // that subtree to the reconciler rather than failing the whole hub.
+            Err(error) => {
+                tracing::warn!(?root, "workspace change hub failed to watch root: {error}")
+            }
+        }
+    }
+    if !watched_any {
         inner.mark_setup_failed();
         return;
     }
     inner.mark_watching();
-    tracing::info!(?root, "workspace change hub watching");
 
     for res in rx {
         inner.drain_channel_overflow();
@@ -817,7 +880,8 @@ mod tests {
 
     #[test]
     fn health_flips_on_setup_error_for_invalid_root() {
-        let hub = WorkspaceChangeHub::start(PathBuf::from("/definitely/not/a/real/path/xyzzy"));
+        let hub =
+            WorkspaceChangeHub::start(vec![PathBuf::from("/definitely/not/a/real/path/xyzzy")]);
         assert!(!hub.wait_until_watching(Duration::from_secs(5)));
         assert_eq!(hub.health(), Health::Degraded(DegradeReason::WatcherSetup));
         assert!(!hub.is_watching());
@@ -828,7 +892,7 @@ mod tests {
         let dir = tempdir().unwrap();
         // `start` returns immediately; the watch arms on the hub thread. Poll for it
         // rather than asserting synchronously.
-        let hub = WorkspaceChangeHub::start(dir.path().to_path_buf());
+        let hub = WorkspaceChangeHub::start(vec![dir.path().to_path_buf()]);
         assert!(hub.wait_until_watching(Duration::from_secs(5)), "setup settles to watching");
         assert!(hub.is_watching());
         assert_eq!(hub.health(), Health::Healthy);
@@ -837,7 +901,7 @@ mod tests {
     #[test]
     fn health_flips_on_unknown_event_kind() {
         let dir = tempdir().unwrap();
-        let hub = WorkspaceChangeHub::start(dir.path().to_path_buf());
+        let hub = WorkspaceChangeHub::start(vec![dir.path().to_path_buf()]);
         assert!(hub.wait_until_watching(Duration::from_secs(5)));
         assert_eq!(hub.health(), Health::Healthy);
         hub.ingest_for_test(change_event(EventKind::Other, dir.path().join("x")));
@@ -847,7 +911,7 @@ mod tests {
     #[test]
     fn runtime_error_flips_health() {
         let dir = tempdir().unwrap();
-        let hub = WorkspaceChangeHub::start(dir.path().to_path_buf());
+        let hub = WorkspaceChangeHub::start(vec![dir.path().to_path_buf()]);
         assert!(hub.wait_until_watching(Duration::from_secs(5)));
         hub.ingest_for_test(Err(notify::Error::generic("boom")));
         assert_eq!(hub.health(), Health::Degraded(DegradeReason::RuntimeError));
@@ -856,7 +920,7 @@ mod tests {
     #[test]
     fn rewatch_failure_degrades_and_recovers_through_rescan() {
         let dir = tempdir().unwrap();
-        let hub = WorkspaceChangeHub::start(dir.path().to_path_buf());
+        let hub = WorkspaceChangeHub::start(vec![dir.path().to_path_buf()]);
         assert!(hub.wait_until_watching(Duration::from_secs(5)));
         let cursor = hub.subscribe();
 
@@ -875,7 +939,7 @@ mod tests {
     fn access_events_are_ignored_without_degrading() {
         use notify::event::AccessKind;
         let dir = tempdir().unwrap();
-        let hub = WorkspaceChangeHub::start(dir.path().to_path_buf());
+        let hub = WorkspaceChangeHub::start(vec![dir.path().to_path_buf()]);
         assert!(hub.wait_until_watching(Duration::from_secs(5)));
         hub.ingest_for_test(change_event(
             EventKind::Access(AccessKind::Read),
@@ -890,7 +954,7 @@ mod tests {
         let toml = dir.path().join("bsl-analyzer.toml");
         std::fs::write(&toml, "[source]\nroot = \".\"\n").unwrap();
 
-        let hub = WorkspaceChangeHub::start(dir.path().to_path_buf());
+        let hub = WorkspaceChangeHub::start(vec![dir.path().to_path_buf()]);
         assert!(hub.wait_until_watching(Duration::from_secs(5)));
         let cursor = hub.subscribe();
         hub.ingest_for_test(change_event(EventKind::Modify(ModifyKind::Any), toml.clone()));
@@ -905,7 +969,7 @@ mod tests {
     #[test]
     fn events_seen_counts_every_raw_event() {
         let dir = tempdir().unwrap();
-        let hub = WorkspaceChangeHub::start(dir.path().to_path_buf());
+        let hub = WorkspaceChangeHub::start(vec![dir.path().to_path_buf()]);
         assert!(hub.wait_until_watching(Duration::from_secs(5)));
         assert_eq!(hub.events_seen(), 0);
         hub.ingest_for_test(change_event(
@@ -926,7 +990,7 @@ mod tests {
     #[test]
     fn nested_directory_creation_is_observed() {
         let dir = tempdir().unwrap();
-        let hub = WorkspaceChangeHub::start(dir.path().to_path_buf());
+        let hub = WorkspaceChangeHub::start(vec![dir.path().to_path_buf()]);
         assert!(hub.wait_until_watching(Duration::from_secs(5)));
         let cursor = hub.subscribe();
 
@@ -947,5 +1011,54 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         assert!(seen, "a file under a freshly-created subdirectory must be captured");
+    }
+
+    /// The hub watches EVERY root it is given (the config source root plus each extension
+    /// root), so drift in a disjoint extension tree is event-delivered, not left to a scan.
+    #[test]
+    fn watches_all_roots() {
+        let a = tempdir().unwrap();
+        let b = tempdir().unwrap();
+        let hub = WorkspaceChangeHub::start(vec![a.path().to_path_buf(), b.path().to_path_buf()]);
+        assert!(hub.wait_until_watching(Duration::from_secs(5)));
+        let cursor = hub.subscribe();
+
+        std::thread::sleep(Duration::from_millis(100));
+        // A change in the SECOND root must be observed.
+        let file = b.path().join("Ext.bsl");
+        std::fs::write(&file, "Процедура П()\nКонецПроцедуры").unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut seen = false;
+        while Instant::now() < deadline {
+            let batch = hub.drain(cursor);
+            if batch.entries.iter().any(|e| e.raw == file) {
+                seen = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(seen, "a change in a secondary watch root must be captured");
+    }
+
+    /// Nested roots collapse to their common ancestor so a subtree is never double-watched
+    /// (which some backends would report as duplicate events), regardless of input order.
+    #[test]
+    fn dedup_nested_roots_drops_subtrees() {
+        let dir = tempdir().unwrap();
+        let parent = dir.path().join("parent");
+        let child = parent.join("sub");
+        let sibling = dir.path().join("sibling");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+
+        let kept = dedup_nested_roots(vec![parent.clone(), child.clone(), sibling.clone()]);
+        assert!(kept.iter().any(|r| r == &parent), "the ancestor is kept");
+        assert!(kept.iter().any(|r| r == &sibling), "a disjoint root is kept");
+        assert!(!kept.iter().any(|r| r == &child), "a nested root is dropped");
+
+        // Order-independent: the child listed first is still dropped.
+        let kept2 = dedup_nested_roots(vec![child, parent.clone()]);
+        assert_eq!(kept2, vec![parent]);
     }
 }

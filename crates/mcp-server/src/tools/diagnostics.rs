@@ -128,6 +128,13 @@ pub fn status(report: &StatusReport) -> CallToolResult {
     if let Some(err) = &report.error {
         body["error"] = json!(err);
     }
+    if let Some(watch) = &report.watch {
+        body["watch"] = json!({
+            "mode": watch.mode,
+            "health": watch.health,
+            "events_seen": watch.events_seen,
+        });
+    }
     structured(body)
 }
 

@@ -748,6 +748,24 @@ impl FileStat {
     }
 }
 
+/// The drift fingerprint of a single file on disk, matching the per-file value
+/// [`scan_file_stats`] produces, or `None` if it is absent or not a regular file.
+/// Lets the event-driven drift path re-stat only the changed paths instead of
+/// walking the whole workspace — events are hints, this stat is the truth.
+pub(crate) fn file_fingerprint(path: &Path) -> Option<u64> {
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    Some(FileStat { path: String::new(), mtime, len: meta.len() }.fingerprint())
+}
+
 /// Stat every graph-relevant file (`.bsl` sources + `.xml` metadata descriptors)
 /// under the scan roots, once. Covers both extensions because graph resolution
 /// depends on configuration visibility registered from the metadata, not only on

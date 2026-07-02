@@ -28,16 +28,17 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ide::{Analysis, RootDatabaseImpl};
 use vfs::{FileId, Vfs, VfsPath};
 
+use crate::change_hub::{ChangeEntry, ChangeKind, Health, SinkCursor, WorkspaceChangeHub};
 use crate::graph::{
-    build_source_root, classify_changes, db_for_files_lazy, enumerate_bsl_files, scan_file_stats,
-    FileStat,
+    build_source_root, classify_changes, db_for_files_lazy, enumerate_bsl_files, file_fingerprint,
+    scan_file_stats, FileStat, WorkspaceDiff,
 };
 
 /// Minimum time between on-disk drift scans, mirroring the graph's throttle. A scan
@@ -56,6 +57,32 @@ const FORCE_RESCAN_FLOOR: Duration = Duration::from_millis(250);
 
 /// How often the idle sweeper wakes to check the last-access time.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
+
+/// How often the reconciler runs a full scan to catch any drift the change hub's
+/// event stream failed to deliver (a lossy backend). This is the worst-case
+/// staleness bound when the watcher silently misses an event; the healthy path is
+/// sub-second. Overridable via `BSL_MCP_RECONCILE_SECS` for tests and tuning.
+const RECONCILE_INTERVAL: Duration = Duration::from_secs(90);
+
+/// Floor for the reconcile interval: a smaller value would busy-loop the sweeper thread
+/// running full scans. `0` and unparseable inputs fall back to the default rather than
+/// clamping, so a mistyped env var does not silently pin the scan rate at the floor.
+const MIN_RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
+
+fn reconcile_interval() -> Duration {
+    clamp_reconcile_interval(
+        std::env::var("BSL_MCP_RECONCILE_SECS").ok().and_then(|s| s.parse::<u64>().ok()),
+    )
+}
+
+/// Turn a parsed `BSL_MCP_RECONCILE_SECS` value into an interval: `0` or absent/garbage
+/// (`None`) → the default; anything else is clamped up to [`MIN_RECONCILE_INTERVAL`].
+fn clamp_reconcile_interval(secs: Option<u64>) -> Duration {
+    match secs {
+        Some(0) | None => RECONCILE_INTERVAL,
+        Some(secs) => Duration::from_secs(secs).max(MIN_RECONCILE_INTERVAL),
+    }
+}
 
 /// The analyzer configuration files whose change forces a full rebuild: they can alter
 /// the project structure (e.g. the extension set), which changes the db's config paths
@@ -330,6 +357,19 @@ pub(crate) struct StatusReport {
     pub error: Option<String>,
     /// Milliseconds since the current `loading` build started (`None` unless loading).
     pub elapsed_ms: Option<u64>,
+    /// The workspace change-hub view, when this profile has one. Lets an agent tell
+    /// event-driven freshness from a scan fallback.
+    pub watch: Option<WatchReport>,
+}
+
+/// The change hub's contribution to the diagnostics status: whether drift is
+/// served event-driven or via the scan fallback, its health, and how many raw
+/// filesystem events it has observed.
+pub(crate) struct WatchReport {
+    pub health: &'static str,
+    pub events_seen: u64,
+    /// `event-driven` while healthy, `scan-fallback` while degraded.
+    pub mode: &'static str,
 }
 
 /// Handle to the workspace diagnostics database. Cheap to clone (shared `Arc`s).
@@ -344,7 +384,31 @@ pub(crate) struct DiagnosticsState {
     workspace_root: Option<PathBuf>,
     drift_interval: Duration,
     eviction_after: Duration,
+    /// The daemon's filesystem change hub, when this profile has one. Drift is served
+    /// event-driven (drain-on-read) while the hub is healthy, falling back to the
+    /// throttled scan otherwise. `None` for reference/shared profiles and tests, which
+    /// keep the pure scan path.
+    change_hub: Option<WorkspaceChangeHub>,
+    /// This state's cursor into the hub. Subscribed when a resident is (re)built and
+    /// dropped on eviction, so an idle diagnostics profile never pins the accumulator.
+    hub_cursor: Arc<Mutex<Option<SinkCursor>>>,
+    /// Set by [`Self::force_rescan`]: forces the next poll onto the scan path even when
+    /// the hub is healthy (the `metadata object` miss escape hatch).
+    force_scan: Arc<AtomicBool>,
+    /// When the reconciler last ran a watchdog scan.
+    last_reconcile: Arc<Mutex<Instant>>,
+    reconcile_interval: Duration,
+    /// Count of actual workspace walks (not cache hits), so a test can assert the
+    /// event-driven hot path performs no scan.
+    scan_count: Arc<AtomicUsize>,
+    /// One-shot test seam fired between the reconciler's first drain and its scan.
+    #[cfg(test)]
+    reconcile_probe: ReconcileProbe,
 }
+
+/// A one-shot callback the reconciler fires between its first drain and its scan.
+#[cfg(test)]
+type ReconcileProbe = Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>;
 
 impl DiagnosticsState {
     /// A disabled handle (reference / shared profiles).
@@ -375,7 +439,22 @@ impl DiagnosticsState {
             workspace_root,
             drift_interval: DRIFT_CHECK_INTERVAL,
             eviction_after: IDLE_EVICTION,
+            change_hub: None,
+            hub_cursor: Arc::new(Mutex::new(None)),
+            force_scan: Arc::new(AtomicBool::new(false)),
+            last_reconcile: Arc::new(Mutex::new(Instant::now())),
+            reconcile_interval: reconcile_interval(),
+            scan_count: Arc::new(AtomicUsize::new(0)),
+            #[cfg(test)]
+            reconcile_probe: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Attach the daemon's change hub so drift is served event-driven (drain-on-read)
+    /// while the watcher is healthy, with the scan as the reconcile/fallback oracle.
+    pub(crate) fn with_change_hub(mut self, hub: WorkspaceChangeHub) -> Self {
+        self.change_hub = Some(hub);
+        self
     }
 
     pub(crate) fn status(&self) -> DiagnosticsStatus {
@@ -405,6 +484,18 @@ impl DiagnosticsState {
             DiagnosticsStatus::Failed(msg) => Some(msg.clone()),
             _ => None,
         };
+        let watch = self.change_hub.as_ref().map(|hub| {
+            let health = hub.health();
+            WatchReport {
+                mode: if matches!(health, Health::Healthy) {
+                    "event-driven"
+                } else {
+                    "scan-fallback"
+                },
+                health: health.label(),
+                events_seen: hub.events_seen(),
+            }
+        });
         StatusReport {
             state,
             generation: inner.generation,
@@ -412,6 +503,7 @@ impl DiagnosticsState {
             reload: inner.reload.label(),
             error,
             elapsed_ms: inner.loading_since.map(|t| t.elapsed().as_millis() as u64),
+            watch,
         }
     }
 
@@ -478,7 +570,13 @@ impl DiagnosticsState {
         // from one consistent resident state. Without this, a reload finishing between
         // the read and a separate freshness sample could report `stale: false` for an
         // already-superseded generation.
-        let scan = if matches!(self.status(), DiagnosticsStatus::Ready { .. }) {
+        // When the hub is healthy, `poll_drift` above has already reconciled the resident
+        // to disk through the drain path, so freshness needs no scan — staleness reduces
+        // to an in-flight reload. Only fall back to a freshness scan with no hub or a
+        // degraded one (the scan path), keeping the healthy hot path free of a walk.
+        let hub_healthy =
+            matches!(&self.change_hub, Some(hub) if matches!(hub.health(), Health::Healthy));
+        let scan = if matches!(self.status(), DiagnosticsStatus::Ready { .. }) && !hub_healthy {
             self.workspace_root.as_deref().and_then(|root| self.throttled_scan(root))
         } else {
             None
@@ -510,6 +608,37 @@ impl DiagnosticsState {
         lock_recover(&self.inner).generation
     }
 
+    /// Number of actual workspace walks performed (cache misses), for asserting the
+    /// event-driven hot path does no scanning.
+    #[cfg(test)]
+    fn scan_count(&self) -> usize {
+        self.scan_count.load(Ordering::SeqCst)
+    }
+
+    /// Whether a hub cursor is currently held (dropped on eviction).
+    #[cfg(test)]
+    fn has_hub_cursor(&self) -> bool {
+        lock_recover(&self.hub_cursor).is_some()
+    }
+
+    /// Drain this state's cursor and throw the entries away, advancing past them without
+    /// applying — simulating a lossy sink so the reconciler has an undelivered change to
+    /// catch.
+    #[cfg(test)]
+    fn drain_and_discard_cursor(&self) {
+        let cursor = *lock_recover(&self.hub_cursor);
+        if let (Some(hub), Some(cursor)) = (&self.change_hub, cursor) {
+            let batch = hub.drain(cursor);
+            *lock_recover(&self.hub_cursor) = Some(batch.cursor);
+        }
+    }
+
+    /// Arm the one-shot reconciler probe (fired between its first drain and its scan).
+    #[cfg(test)]
+    fn set_reconcile_probe(&self, f: impl FnOnce() + Send + 'static) {
+        *lock_recover(&self.reconcile_probe) = Some(Box::new(f));
+    }
+
     /// Detect and handle on-disk drift since the last build/apply. Reconciled in place
     /// (under the resident mutex) for `.bsl` body edits and any `.xml` add/remove/edit —
     /// the latter through a metadata-substrate point-refresh. Only a non-`.xml` add/remove
@@ -522,20 +651,56 @@ impl DiagnosticsState {
         if !matches!(self.status(), DiagnosticsStatus::Ready { .. }) {
             return;
         }
-        let Some(scan) = self.throttled_scan(&root) else {
+
+        // The `metadata object` miss escape hatch forces a scan regardless of hub health.
+        if self.force_scan.swap(false, Ordering::SeqCst) {
+            self.poll_drift_via_scan(&root);
             return;
+        }
+
+        // Healthy hub → event-driven drain (O(change), no scan on the hot path).
+        // No hub, or a degraded one, → today's throttled scan-on-read (parity).
+        match &self.change_hub {
+            Some(hub) if matches!(hub.health(), Health::Healthy) => {
+                self.poll_drift_via_drain(hub, &root);
+            }
+            _ => {
+                self.poll_drift_via_scan(&root);
+            }
+        }
+    }
+
+    /// The throttled full-scan drift path: at most one workspace walk per drift window,
+    /// diffed against the last-applied stats and reconciled through the same rules the
+    /// hub-driven path feeds. Returns whether any drift was found (so the reconciler can
+    /// tell a lossy-backend miss from an in-sync workspace). This is the parity path used
+    /// when there is no hub or the hub is degraded.
+    fn poll_drift_via_scan(&self, root: &Path) -> bool {
+        let Some(scan) = self.throttled_scan(root) else {
+            return false;
         };
 
         // Diff under a short read lock against the last-applied stats.
-        let diff = {
+        let (changes, config_changed) = {
             let inner = lock_recover(&self.inner);
             let stored: HashMap<String, u64> = inner.stats.clone();
-            let config_changed = inner.config_fp != scan.config_fp;
-            (classify_changes(&stored, &scan.stats), config_changed)
+            (classify_changes(&stored, &scan.stats), inner.config_fp != scan.config_fp)
         };
-        let (changes, config_changed) = diff;
+        self.apply_scan_drift(&changes, config_changed, &scan)
+    }
+
+    /// Apply already-classified full-scan drift: a full rebuild for structural/config
+    /// drift, else an in-place metadata + body apply. Returns whether any drift was
+    /// handled. Shared by the scan path and the reconciler (which classifies once, then
+    /// re-checks late-delivered events before deciding to degrade).
+    fn apply_scan_drift(
+        &self,
+        changes: &WorkspaceDiff,
+        config_changed: bool,
+        scan: &OwnedScan,
+    ) -> bool {
         if changes.is_empty() && !config_changed {
-            return;
+            return false;
         }
 
         // A non-XML add/remove moves the file universe (a new or vanished `.bsl`), and an
@@ -548,7 +713,7 @@ impl DiagnosticsState {
 
         if full_rebuild {
             self.kick_full_reload();
-            return;
+            return true;
         }
 
         // XML drift spans all three buckets: an added/removed object is a structural
@@ -564,7 +729,179 @@ impl DiagnosticsState {
             .collect();
         let modified_bsl: Vec<String> =
             changes.modified.iter().filter(|p| !p.ends_with(".xml")).cloned().collect();
-        self.apply_metadata_and_body_drift(&xml_paths, &modified_bsl, &scan);
+        self.apply_metadata_and_body_drift(&xml_paths, &modified_bsl, scan);
+        true
+    }
+
+    /// The event-driven drift path: drain this state's cursor and reconcile only the
+    /// changed paths. Empty drain → nothing to do (crucially, NO scan on the hot path).
+    /// A hub overflow (`rescan_required`) → fall back to the full scan, today's path.
+    fn poll_drift_via_drain(&self, hub: &WorkspaceChangeHub, root: &Path) {
+        // A full rebuild in flight will publish a fresh resident whose baseline scan already
+        // reflects disk, and `apply_drained_resident` defers to it (bails on `Running`).
+        // Draining now would advance the cursor past events the apply then drops — the
+        // resident would miss the whole rebuild window. Leave them pending: the reload
+        // re-subscribes a fresh cursor at its start, and the next poll after it finishes
+        // drains that window onto the new resident. Mirrors the scan path, which bails
+        // without rebasing its baseline so the drift is re-detected.
+        if lock_recover(&self.inner).reload == ReloadState::Running {
+            return;
+        }
+        let Some(cursor) = *lock_recover(&self.hub_cursor) else {
+            // Ready but no cursor yet (a read racing the build's subscribe): reconcile via
+            // scan this once; the next poll uses the cursor.
+            self.poll_drift_via_scan(root);
+            return;
+        };
+        let batch = hub.drain(cursor);
+        *lock_recover(&self.hub_cursor) = Some(batch.cursor);
+        if batch.rescan_required {
+            self.poll_drift_via_scan(root);
+            return;
+        }
+        if batch.entries.is_empty() {
+            return;
+        }
+        self.apply_drained_entries(&batch.entries);
+    }
+
+    /// Reconcile the paths a drain reported. Events are hints, stats are truth: each path
+    /// is re-stat'd and classified through the SAME fingerprint diff the scan uses, then
+    /// fed the identical downstream — a full rebuild for structural/config drift, else an
+    /// in-place metadata + body apply. Only the affected paths are stat'd, never the tree.
+    fn apply_drained_entries(&self, entries: &[ChangeEntry]) {
+        let baseline: HashMap<String, u64> = lock_recover(&self.inner).stats.clone();
+        // The analyzer config files fingerprinted by `config_fingerprint` — canonicalised
+        // to match the drained key spelling. Only a file at THIS exact location is config
+        // drift; an identically-named file elsewhere in the tree is not (parity with the
+        // scan path, which fingerprints only `root.join(name)`).
+        let config_paths = self.config_file_paths();
+
+        let mut xml_paths: Vec<PathBuf> = Vec::new();
+        let mut modified_bsl: Vec<String> = Vec::new();
+        let mut removed_keys: Vec<String> = Vec::new();
+        let mut new_fp: HashMap<String, u64> = HashMap::new();
+        let mut structural = false;
+        let mut config_changed = false;
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        for entry in entries {
+            // A vanished directory subtree expands into removed descendants the drain
+            // could not enumerate — structural, so let a full scan/rebuild sort it out.
+            if entry.kind == ChangeKind::SubtreeRemoved {
+                structural = true;
+                continue;
+            }
+            if config_paths.contains(&entry.canonical) {
+                config_changed = true;
+                continue;
+            }
+            // `canonical` already carries the scan-universe key spelling.
+            let key = entry.canonical.to_string_lossy().into_owned();
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            let is_xml = key.ends_with(".xml");
+            let is_bsl = key.ends_with(".bsl");
+            if !is_xml && !is_bsl {
+                continue;
+            }
+            match file_fingerprint(&entry.canonical) {
+                Some(fp) => match baseline.get(&key) {
+                    Some(&old) if old == fp => {}
+                    Some(_) => {
+                        if is_xml {
+                            xml_paths.push(PathBuf::from(&key));
+                        } else {
+                            modified_bsl.push(key.clone());
+                        }
+                        new_fp.insert(key, fp);
+                    }
+                    None => {
+                        // A brand-new `.xml` is a substrate re-discovery; a brand-new `.bsl`
+                        // moves the file universe → structural.
+                        if is_xml {
+                            xml_paths.push(PathBuf::from(&key));
+                            new_fp.insert(key, fp);
+                        } else {
+                            structural = true;
+                        }
+                    }
+                },
+                None => {
+                    if baseline.contains_key(&key) {
+                        if is_xml {
+                            xml_paths.push(PathBuf::from(&key));
+                            removed_keys.push(key);
+                        } else {
+                            structural = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        if config_changed || structural {
+            self.kick_full_reload();
+            return;
+        }
+        if xml_paths.is_empty() && modified_bsl.is_empty() {
+            return;
+        }
+        self.apply_drained_resident(&xml_paths, &modified_bsl, &removed_keys, &new_fp);
+    }
+
+    /// Apply already-classified event-driven drift to the resident and advance the drift
+    /// baseline incrementally (only the drained paths change). Shares the exact resident
+    /// mutation — substrate point-refresh + body re-key + `Running`-guard — with the scan
+    /// path via [`apply_resident_changes`]; only the stats update differs (delta vs full
+    /// rebase), because the drain has no whole-workspace scan to rebase onto.
+    fn apply_drained_resident(
+        &self,
+        xml_paths: &[PathBuf],
+        modified_bsl: &[String],
+        removed_keys: &[String],
+        new_fp: &HashMap<String, u64>,
+    ) {
+        let mut needs_rebuild = false;
+        {
+            let mut inner = lock_recover(&self.inner);
+            if inner.reload == ReloadState::Running {
+                return;
+            }
+            let Inner { resident: Some(resident), stats, generation, .. } = &mut *inner else {
+                return;
+            };
+            let (rebuild, moved) = apply_resident_changes(
+                resident,
+                xml_paths,
+                modified_bsl,
+                |p| new_fp.get(p).copied(),
+                stats,
+            );
+            if rebuild {
+                needs_rebuild = true;
+            } else {
+                for (key, fp) in new_fp {
+                    stats.insert(key.clone(), *fp);
+                }
+                for key in removed_keys {
+                    stats.remove(key);
+                }
+                if moved {
+                    *generation += 1;
+                    tracing::info!(
+                        xml = xml_paths.len(),
+                        bodies = modified_bsl.len(),
+                        generation = *generation,
+                        "diagnostics event-driven drift refresh",
+                    );
+                }
+            }
+        }
+        if needs_rebuild {
+            self.kick_full_reload();
+        }
     }
 
     /// Reconcile metadata-only structural drift in place, without a whole-db rebuild:
@@ -582,8 +919,6 @@ impl DiagnosticsState {
         modified_bsl: &[String],
         scan: &OwnedScan,
     ) {
-        use ide_host_core::{set_file_text_source, FileTextSource};
-
         let new_fp: HashMap<&str, u64> =
             scan.stats.iter().map(|s| (s.path.as_str(), s.fingerprint())).collect();
 
@@ -606,86 +941,30 @@ impl DiagnosticsState {
             let Inner { resident: Some(resident), stats, generation, .. } = &mut *inner else {
                 return;
             };
-
-            // Pre-classification: an XML path resolving outside every registered config
-            // root is drift the point-refresh cannot express. `refresh_metadata_substrate`
-            // gates its re-discovery on `changed.starts_with(root)`, so such a path
-            // silently no-ops there — and the baseline rebase below would then forget the
-            // change forever. It arises when a metadata subtree is a symlink whose
-            // canonical (scan) path resolves outside the root. Bail to a full rebuild
-            // WITHOUT rebasing the baseline; a full rebuild re-reads through the discovery
-            // joins, symlinks and all. (`all_config_paths` roots are canonicalised at build.)
-            let config_roots = resident.db.all_config_paths();
-            let xml_outside_roots =
-                xml_paths.iter().any(|p| !config_roots.iter().any(|(_, root)| p.starts_with(root)));
-
-            if xml_outside_roots {
+            let (rebuild, moved) = apply_resident_changes(
+                resident,
+                xml_paths,
+                modified_bsl,
+                |p| new_fp.get(p).copied(),
+                stats,
+            );
+            if rebuild {
                 needs_rebuild = true;
             } else {
-                // Metadata XML drift is two independent invalidations, both under this lock.
-                // (1) Point-refresh the per-MDO substrate: re-discover the owning roots and
-                // re-read only the changed/new composing files `discover_*` enrolls.
-                // (2) Bump each owning root's config revision UNCONDITIONALLY. `refresh`
-                // reports movement only for enrolled composing files, but a non-enrolled
-                // `.xml` a whole-config `load_from_directory` would re-read (`Configuration.xml`,
-                // form/template/command descriptors) must still invalidate the coarse
-                // Channel-2 `load_configuration` memo — a cheap revision counter, recomputed
-                // lazily and only if consumed. Any `.xml` drift is observable movement.
-                let mut moved = false;
-                if !xml_paths.is_empty() {
-                    ide_host_core::refresh_metadata_substrate(
-                        &mut resident.db,
-                        &resident.vfs,
-                        xml_paths,
+                // Advance the drift baseline to the scan we reconciled against: every
+                // applied body and every XML add/remove/edit is now reflected in the
+                // resident, so its state equals `scan`. Rebasing even when nothing moved
+                // (a pure mtime touch with unchanged content) stops us re-scanning it
+                // every window.
+                *stats = scan.stats.iter().map(|s| (s.path.clone(), s.fingerprint())).collect();
+                if moved {
+                    *generation += 1;
+                    tracing::info!(
+                        xml = xml_paths.len(),
+                        bodies = modified_bsl.len(),
+                        generation = *generation,
+                        "diagnostics metadata drift refresh",
                     );
-                    resident.db.bump_config_for_paths(xml_paths.iter().map(|p| p.as_path()));
-                    moved = true;
-                }
-
-                // `.bsl` bodies: disk-backed re-key, mirroring the body-only apply. A body
-                // already at its on-disk fingerprint (a racing caller beat us) is skipped.
-                for path in modified_bsl {
-                    let Some(&fp) = new_fp.get(path.as_str()) else { continue };
-                    if stats.get(path).copied() == Some(fp) {
-                        continue;
-                    }
-                    let Some(&file_id) = resident.by_path.get(path) else {
-                        needs_rebuild = true; // a modified `.bsl` we never indexed → structural
-                        break;
-                    };
-                    match base_db::read_disk_text(Path::new(path)) {
-                        Ok(text) => set_file_text_source(
-                            &mut resident.db,
-                            file_id,
-                            FileTextSource::Disk(&text),
-                        ),
-                        // Unreadable now: an empty overlay so a later query yields `""`
-                        // instead of panicking on the disk re-read, matching the load path.
-                        Err(_) => set_file_text_source(
-                            &mut resident.db,
-                            file_id,
-                            FileTextSource::Tombstone,
-                        ),
-                    }
-                    moved = true;
-                }
-
-                if !needs_rebuild {
-                    // Advance the drift baseline to the scan we reconciled against: every
-                    // applied body and every XML add/remove/edit is now reflected in the
-                    // resident, so its state equals `scan`. Rebasing even when nothing moved
-                    // (a pure mtime touch with unchanged content) stops us re-scanning it
-                    // every window.
-                    *stats = scan.stats.iter().map(|s| (s.path.clone(), s.fingerprint())).collect();
-                    if moved {
-                        *generation += 1;
-                        tracing::info!(
-                            xml = xml_paths.len(),
-                            bodies = modified_bsl.len(),
-                            generation = *generation,
-                            "diagnostics metadata drift refresh",
-                        );
-                    }
                 }
             }
         }
@@ -722,6 +1001,10 @@ impl DiagnosticsState {
         let Some(root) = self.workspace_root.clone() else {
             return;
         };
+        // Snapshot the hub cursor at build start: the build's baseline scan captures the
+        // disk as of now, so only events landing after this point need replaying onto the
+        // published resident.
+        self.resubscribe_cursor();
         tracing::info!(?root, "diagnostics resident db build started");
         match Self::catch_build(|| Self::build_resident(&root)) {
             Ok((resident, stats, config_fp)) => {
@@ -755,6 +1038,9 @@ impl DiagnosticsState {
         let Some(root) = self.workspace_root.clone() else {
             return;
         };
+        // Fresh cursor snapshot at rebuild start; events during the rebuild replay onto
+        // the new resident, events before it are covered by the rebuild's baseline scan.
+        self.resubscribe_cursor();
         match Self::catch_build(|| Self::build_resident(&root)) {
             Ok((resident, stats, config_fp)) => {
                 let files = resident.file_count();
@@ -879,6 +1165,158 @@ impl DiagnosticsState {
         let stale = cache.as_ref().is_none_or(|c| c.at.elapsed() >= FORCE_RESCAN_FLOOR);
         if stale {
             *cache = None;
+            // Route the next poll through the scan even when the hub is healthy: the
+            // event path would not re-observe an object the caller thinks it just added.
+            self.force_scan.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// (Re)subscribe this state's hub cursor, dropping any prior one. Called at the start
+    /// of a (re)build so the fresh cursor is snapshotted at that moment: events BEFORE the
+    /// build are captured by the build's own baseline scan, events DURING/AFTER it stay
+    /// pending and apply to the freshly-published resident.
+    fn resubscribe_cursor(&self) {
+        let Some(hub) = &self.change_hub else {
+            return;
+        };
+        let mut slot = lock_recover(&self.hub_cursor);
+        if let Some(old) = slot.take() {
+            hub.unsubscribe(old);
+        }
+        *slot = Some(hub.subscribe());
+    }
+
+    /// The canonical paths of the analyzer config files at the workspace root — the exact
+    /// set [`config_fingerprint`] folds. A drained path counts as config drift only if it
+    /// is one of these, matching the scan path (which fingerprints only `root.join(name)`)
+    /// so an identically-named file elsewhere in the tree is not a spurious rebuild trigger.
+    fn config_file_paths(&self) -> std::collections::HashSet<PathBuf> {
+        let Some(root) = self.workspace_root.as_deref() else {
+            return std::collections::HashSet::new();
+        };
+        CONFIG_FILES
+            .iter()
+            .map(|name| {
+                let path = root.join(name);
+                path.canonicalize().unwrap_or(path)
+            })
+            .collect()
+    }
+
+    /// Drop this state's hub cursor so an evicted (or never-built) resident does not pin
+    /// the accumulator against reclamation.
+    fn drop_cursor(&self) {
+        let Some(hub) = &self.change_hub else {
+            return;
+        };
+        let mut slot = lock_recover(&self.hub_cursor);
+        if let Some(old) = slot.take() {
+            hub.unsubscribe(old);
+        }
+    }
+
+    /// Drain this state's cursor once, apply the delivered changes, and return the set of
+    /// canonical paths the drain reported (empty when there is no cursor). A hub overflow
+    /// (`rescan_required`) reconciles via a full scan and reports no paths. The path set
+    /// lets the reconciler tell a late-but-delivered edit from a genuinely-missed one.
+    fn drain_delivered_paths(
+        &self,
+        hub: &WorkspaceChangeHub,
+        root: &Path,
+    ) -> std::collections::HashSet<String> {
+        let cursor = *lock_recover(&self.hub_cursor);
+        let Some(cursor) = cursor else {
+            return std::collections::HashSet::new();
+        };
+        let batch = hub.drain(cursor);
+        *lock_recover(&self.hub_cursor) = Some(batch.cursor);
+        if batch.rescan_required {
+            self.poll_drift_via_scan(root);
+            return std::collections::HashSet::new();
+        }
+        let delivered: std::collections::HashSet<String> =
+            batch.entries.iter().map(|e| e.canonical.to_string_lossy().into_owned()).collect();
+        if !batch.entries.is_empty() {
+            self.apply_drained_entries(&batch.entries);
+        }
+        delivered
+    }
+
+    /// The reconciler/watchdog: a periodic full scan that catches any drift the hub's
+    /// event stream failed to deliver (a lossy backend). Runs on the idle sweeper thread.
+    /// Applies everything the hub delivered, then scans for the residue; a change that a
+    /// second drain shows was merely late (delivered DURING the scan, not missed) does not
+    /// degrade — only genuinely-undelivered file drift does.
+    fn reconcile_tick(&self) {
+        let Some(root) = self.workspace_root.clone() else {
+            return;
+        };
+        let Some(hub) = self.change_hub.clone() else {
+            return;
+        };
+        if !matches!(self.status(), DiagnosticsStatus::Ready { .. }) {
+            return;
+        }
+
+        // 1. Apply everything the hub delivered so far. Draining also clears this cursor's
+        //    reconcile flag, so a degraded hub recovers once the scan below is clean. The
+        //    delivered paths are remembered so they are not later mistaken for a miss.
+        let mut delivered = self.drain_delivered_paths(&hub, &root);
+
+        // A delivered structural change kicked a full rebuild that will re-baseline the
+        // whole workspace and re-subscribe a fresh cursor; nothing more to reconcile here.
+        if lock_recover(&self.inner).reload == ReloadState::Running {
+            return;
+        }
+
+        #[cfg(test)]
+        self.fire_reconcile_probe();
+
+        // 2. Fresh scan: classify the drift the events did not cover (do not apply yet).
+        *lock_recover(&self.scan) = None;
+        let Some(scan) = self.throttled_scan(&root) else {
+            return;
+        };
+        let (changes, config_changed) = {
+            let inner = lock_recover(&self.inner);
+            (classify_changes(&inner.stats, &scan.stats), inner.config_fp != scan.config_fp)
+        };
+        if changes.is_empty() && !config_changed {
+            return;
+        }
+
+        // 3. A legitimate edit may have landed AFTER step 1's drain but DURING the scan
+        //    above. Drain once more: the paths it now delivers were merely late, not missed.
+        delivered.extend(self.drain_delivered_paths(&hub, &root));
+
+        // 4. Apply the residual drift (the just-delivered paths now match and are skipped).
+        self.apply_scan_drift(&changes, config_changed, &scan);
+
+        // 5. Degrade only if a FILE change (bsl/xml) was genuinely undelivered. Config drift
+        //    is already fully rebuilt above and is expected to reach the reconciler in nested
+        //    layouts (the config file sits above the watched root), so it is not a miss.
+        let missed = changes
+            .added
+            .iter()
+            .chain(&changes.removed)
+            .chain(&changes.modified)
+            .any(|p| !delivered.contains(p));
+        if missed {
+            tracing::warn!(
+                "diagnostics reconciler found drift the change hub did not deliver; \
+                 degrading to scan-on-read until the watcher recovers"
+            );
+            hub.degrade_external();
+        }
+    }
+
+    /// A one-shot test seam fired between the reconciler's first drain and its scan, so a
+    /// test can inject an edit that lands DURING the scan window (delivered, not missed).
+    #[cfg(test)]
+    fn fire_reconcile_probe(&self) {
+        let probe = lock_recover(&self.reconcile_probe).take();
+        if let Some(probe) = probe {
+            probe();
         }
     }
 
@@ -891,6 +1329,7 @@ impl DiagnosticsState {
                 return Some(OwnedScan { stats: c.stats.clone(), config_fp: c.config_fp });
             }
         }
+        self.scan_count.fetch_add(1, Ordering::SeqCst);
         let stats = scan_file_stats(root);
         let config_fp = config_fingerprint(root);
         *cache = Some(ScanCache { at: Instant::now(), stats: stats.clone(), config_fp });
@@ -905,10 +1344,23 @@ impl DiagnosticsState {
     fn spawn_sweeper(&self) {
         let state = self.clone();
         let _ = std::thread::Builder::new().name("bsl-diag-sweep".to_owned()).spawn(move || loop {
-            std::thread::sleep(SWEEP_INTERVAL.min(state.eviction_after));
+            std::thread::sleep(
+                SWEEP_INTERVAL.min(state.eviction_after).min(state.reconcile_interval),
+            );
             if state.shutdown.load(Ordering::SeqCst) {
                 return;
             }
+
+            // Watchdog: catch drift the hub's event stream may have missed. Runs on this
+            // existing thread (no new one), independent of eviction, at its own cadence.
+            if state.change_hub.is_some()
+                && lock_recover(&state.last_reconcile).elapsed() >= state.reconcile_interval
+                && matches!(state.status(), DiagnosticsStatus::Ready { .. })
+            {
+                *lock_recover(&state.last_reconcile) = Instant::now();
+                state.reconcile_tick();
+            }
+
             if !matches!(state.status(), DiagnosticsStatus::Ready { .. }) {
                 continue;
             }
@@ -929,6 +1381,8 @@ impl DiagnosticsState {
             inner.status = DiagnosticsStatus::Idle;
             drop(inner);
             *lock_recover(&state.scan) = None;
+            // Release the hub cursor: an evicted resident must not pin the accumulator.
+            state.drop_cursor();
             tracing::info!("diagnostics resident db evicted after idle period");
         });
     }
@@ -989,6 +1443,70 @@ fn config_fingerprint(root: &Path) -> u64 {
     let mut hasher = DefaultHasher::new();
     entries.hash(&mut hasher);
     hasher.finish()
+}
+
+/// Apply drifted XML metadata + modified BSL bodies to the resident under an
+/// already-held lock, shared by the scan and event-driven drift paths so both mutate
+/// the resident identically. Returns `(needs_rebuild, moved)`: a full rebuild is
+/// needed when an XML path resolves outside every config root (a symlink the
+/// point-refresh cannot express) or a modified `.bsl` has no resident FileId (the file
+/// universe moved); `moved` is whether any Salsa input actually changed. `fp_of` yields
+/// the on-disk fingerprint of a `modified_bsl` path so an already-current body is
+/// skipped. The caller owns the drift-baseline update (full rebase vs incremental).
+fn apply_resident_changes(
+    resident: &mut DiagnosticsResident,
+    xml_paths: &[PathBuf],
+    modified_bsl: &[String],
+    fp_of: impl Fn(&str) -> Option<u64>,
+    stats: &HashMap<String, u64>,
+) -> (bool, bool) {
+    use ide_host_core::{set_file_text_source, FileTextSource};
+
+    // Pre-classification: an XML path resolving outside every registered config root is
+    // drift the point-refresh cannot express — `refresh_metadata_substrate` gates its
+    // re-discovery on `changed.starts_with(root)`, so it would silently no-op. Bail to a
+    // full rebuild, which re-reads through the discovery joins, symlinks and all.
+    let config_roots = resident.db.all_config_paths();
+    let xml_outside_roots =
+        xml_paths.iter().any(|p| !config_roots.iter().any(|(_, root)| p.starts_with(root)));
+    if xml_outside_roots {
+        return (true, false);
+    }
+
+    let mut moved = false;
+    // Metadata XML drift is two independent invalidations. (1) Point-refresh the per-MDO
+    // substrate: re-discover the owning roots and re-read only the changed/new composing
+    // files. (2) Bump each owning root's config revision UNCONDITIONALLY so a non-enrolled
+    // `.xml` (`Configuration.xml`, form/template descriptors) a whole-config load would
+    // re-read still invalidates the coarse Channel-2 memo. Any `.xml` drift is movement.
+    if !xml_paths.is_empty() {
+        ide_host_core::refresh_metadata_substrate(&mut resident.db, &resident.vfs, xml_paths);
+        resident.db.bump_config_for_paths(xml_paths.iter().map(|p| p.as_path()));
+        moved = true;
+    }
+
+    // `.bsl` bodies: disk-backed re-key. A body already at its on-disk fingerprint (a
+    // racing caller beat us) is skipped.
+    for path in modified_bsl {
+        let Some(fp) = fp_of(path) else { continue };
+        if stats.get(path).copied() == Some(fp) {
+            continue;
+        }
+        let Some(&file_id) = resident.by_path.get(path) else {
+            return (true, moved); // a modified `.bsl` we never indexed → structural
+        };
+        match base_db::read_disk_text(Path::new(path)) {
+            Ok(text) => {
+                set_file_text_source(&mut resident.db, file_id, FileTextSource::Disk(&text))
+            }
+            // Unreadable now: an empty overlay so a later query yields `""` instead of
+            // panicking on the disk re-read, matching the load path.
+            Err(_) => set_file_text_source(&mut resident.db, file_id, FileTextSource::Tombstone),
+        }
+        moved = true;
+    }
+
+    (false, moved)
 }
 
 fn lock_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -1921,5 +2439,500 @@ mod tests {
             lock_recover(&state.scan).is_none(),
             "a scan older than the floor is force-cleared so the retry re-scans",
         );
+    }
+
+    // --- Event-driven drift (W2): the change hub feeds a drain-on-read path. ---
+
+    /// A workspace state wired to a real change hub over `root`, with the scan throttle
+    /// disabled so the fallback path is exercised without waiting.
+    fn state_with_hub(root: &Path) -> (DiagnosticsState, WorkspaceChangeHub) {
+        let hub = WorkspaceChangeHub::start(vec![root.to_path_buf()]);
+        assert!(hub.wait_until_watching(Duration::from_secs(5)), "the hub must arm");
+        let mut state =
+            DiagnosticsState::for_workspace(root.to_path_buf()).with_change_hub(hub.clone());
+        state.drift_interval = Duration::from_millis(0);
+        (state, hub)
+    }
+
+    /// Read the generation without triggering drift handling (a plain `generation()` would
+    /// `poll_drift` and apply the change we are trying to observe out-of-band).
+    fn raw_generation(state: &DiagnosticsState) -> u64 {
+        lock_recover(&state.inner).generation
+    }
+
+    /// Poll `read` until the generation advances past `gen0`, returning whether it did.
+    fn wait_for_apply(state: &DiagnosticsState, gen0: u64) -> bool {
+        for _ in 0..300 {
+            let _ = state.read(|_, _| ());
+            if raw_generation(state) > gen0 {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+
+    /// Poll the hub through `cursor` until an entry whose path contains `needle` is drained.
+    fn wait_for_delivery(hub: &WorkspaceChangeHub, cursor: &mut SinkCursor, needle: &str) -> bool {
+        for _ in 0..300 {
+            let batch = hub.drain(*cursor);
+            *cursor = batch.cursor;
+            if batch.entries.iter().any(|e| e.raw.to_string_lossy().contains(needle)) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+
+    /// A `.bsl` body edit reaches the resident through the hub drain, and the healthy hot
+    /// path performs NO workspace scan — the whole point of the event-driven path.
+    #[test]
+    fn event_driven_body_edit_lands_via_drain_without_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let (state, _hub) = state_with_hub(root);
+        state.ensure_loading();
+        wait_ready(&state);
+        assert_eq!(state.scan_count(), 0, "the cold build does not go through the throttled scan");
+
+        let gen0 = raw_generation(&state);
+        std::thread::sleep(Duration::from_millis(10));
+        fs::write(
+            module_path(root, "Сервер"),
+            "&НаСервере\nФункция Считать() Экспорт Возврат 1; КонецФункции\n",
+        )
+        .unwrap();
+
+        assert!(wait_for_apply(&state, gen0), "the body edit must be applied via drain");
+        assert_eq!(state.scan_count(), 0, "the event-driven hot path performs no scan");
+
+        let text = state.read(|resident, _| {
+            let fid = resident.file_id_for(&module_path(root, "Сервер")).unwrap();
+            resident.analysis().file_text(fid)
+        });
+        match text {
+            ResidentOutcome::Ready(t, _) => {
+                assert!(t.contains("Возврат 1"), "edited text resident")
+            }
+            _ => panic!("expected Ready"),
+        }
+    }
+
+    /// A metadata `.xml` edit is delivered through the drain and point-refreshes the
+    /// substrate in place (no full rebuild), again with no scan on the hot path.
+    #[test]
+    fn event_driven_xml_edit_lands_via_drain() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let (state, _hub) = state_with_hub(root);
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let gen0 = raw_generation(&state);
+        std::thread::sleep(Duration::from_millis(10));
+        // Flip the common module's server flag: a pure `.xml` edit (no body change).
+        write_common_module_xml(root, "Сервер", false);
+
+        assert!(wait_for_apply(&state, gen0), "the xml edit must be applied via drain");
+        assert_eq!(
+            state.status_report().reload,
+            "none",
+            "an xml edit is a point-refresh, not a full rebuild"
+        );
+        assert_eq!(state.scan_count(), 0, "the event-driven hot path performs no scan");
+    }
+
+    /// A degraded hub falls back to exactly today's throttled scan path: the edit is still
+    /// applied, but through a scan (parity with the pre-hub behaviour).
+    #[test]
+    fn degraded_hub_reconciles_via_scan_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let (state, hub) = state_with_hub(root);
+        state.ensure_loading();
+        wait_ready(&state);
+        // Force the scan fallback.
+        hub.degrade_external();
+        assert!(matches!(hub.health(), Health::Degraded(_)));
+
+        let gen0 = raw_generation(&state);
+        std::thread::sleep(Duration::from_millis(10));
+        fs::write(
+            module_path(root, "Сервер"),
+            "&НаСервере\nФункция Считать() Экспорт Возврат 2; КонецФункции\n",
+        )
+        .unwrap();
+
+        assert!(wait_for_apply(&state, gen0), "a degraded hub still applies the edit via scan");
+        assert!(state.scan_count() > 0, "the degraded path uses the scan, matching today");
+    }
+
+    /// The reconciler/watchdog: a change the event stream failed to deliver (simulated by
+    /// draining the cursor without applying) is caught by the periodic scan, which applies
+    /// the drift AND degrades the hub so reads revert to scanning until it recovers.
+    #[test]
+    fn reconciler_catches_undelivered_drift_and_degrades() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let (state, hub) = state_with_hub(root);
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let mut observer = hub.subscribe();
+        std::thread::sleep(Duration::from_millis(10));
+        fs::write(
+            module_path(root, "Сервер"),
+            "&НаСервере\nФункция Считать() Экспорт Возврат 3; КонецФункции\n",
+        )
+        .unwrap();
+        // Confirm the hub delivered the change (so the diagnostics cursor has it too)...
+        assert!(wait_for_delivery(&hub, &mut observer, "Module.bsl"), "hub delivered the edit");
+        // ...then simulate a lossy sink dropping it: consume the cursor without applying.
+        state.drain_and_discard_cursor();
+
+        let gen0 = raw_generation(&state);
+        assert_eq!(hub.health(), Health::Healthy, "still healthy before the reconcile");
+        state.reconcile_tick();
+
+        assert!(raw_generation(&state) > gen0, "the reconciler applied the missed drift");
+        assert_eq!(
+            hub.health().label(),
+            "degraded:reconcile-miss",
+            "a delivered-but-undrained miss degrades the hub to the scan fallback",
+        );
+    }
+
+    /// An analyzer-config edit delivered through the drain is structural: it forces a full
+    /// rebuild that re-derives the effective config, exactly like the scan path.
+    #[test]
+    fn event_driven_config_edit_full_rebuilds() {
+        use ide::DiagnosticCode;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        write(root, "bsl-analyzer.toml", "[diagnostics.parameters]\nTypo = false\n");
+
+        let (state, _hub) = state_with_hub(root);
+        state.ensure_loading();
+        wait_ready(&state);
+        let disabled0 = state.read(|r, _| r.config().is_disabled(DiagnosticCode::Typo));
+        assert!(matches!(disabled0, ResidentOutcome::Ready(true, _)), "initial toml disables Typo");
+
+        std::thread::sleep(Duration::from_millis(10));
+        write(root, "bsl-analyzer.toml", "[diagnostics.parameters]\nTypo = true\n");
+
+        let mut reloaded = false;
+        for _ in 0..300 {
+            if let ResidentOutcome::Ready(false, _) =
+                state.read(|r, _| r.config().is_disabled(DiagnosticCode::Typo))
+            {
+                reloaded = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(reloaded, "a config edit via drain full-rebuilds and re-derives the config");
+    }
+
+    /// After a full rebuild the cursor is re-subscribed, so a change landing AFTER the
+    /// rebuild is applied to the fresh resident (the drain path survives a rebuild).
+    #[test]
+    fn events_after_rebuild_apply_to_the_new_resident() {
+        use ide::DiagnosticCode;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        write(root, "bsl-analyzer.toml", "[diagnostics.parameters]\nTypo = false\n");
+
+        let (state, _hub) = state_with_hub(root);
+        state.ensure_loading();
+        wait_ready(&state);
+
+        // Force a full rebuild via a config edit and wait for the fresh resident.
+        std::thread::sleep(Duration::from_millis(10));
+        write(root, "bsl-analyzer.toml", "[diagnostics.parameters]\nTypo = true\n");
+        let mut reloaded = false;
+        for _ in 0..300 {
+            if let ResidentOutcome::Ready(false, _) =
+                state.read(|r, _| r.config().is_disabled(DiagnosticCode::Typo))
+            {
+                reloaded = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(reloaded, "the config rebuild completed");
+
+        // A body edit AFTER the rebuild must reach the freshly-built resident via drain.
+        let gen0 = raw_generation(&state);
+        std::thread::sleep(Duration::from_millis(10));
+        fs::write(
+            module_path(root, "Сервер"),
+            "&НаСервере\nФункция Считать() Экспорт Возврат 42; КонецФункции\n",
+        )
+        .unwrap();
+        assert!(wait_for_apply(&state, gen0), "post-rebuild edits apply to the new resident");
+        let text = state.read(|r, _| {
+            let fid = r.file_id_for(&module_path(root, "Сервер")).unwrap();
+            r.analysis().file_text(fid)
+        });
+        match text {
+            ResidentOutcome::Ready(t, _) => {
+                assert!(t.contains("Возврат 42"), "new resident edited")
+            }
+            _ => panic!("expected Ready"),
+        }
+    }
+
+    /// Idle eviction releases the hub cursor so an evicted resident does not pin the
+    /// accumulator against reclamation.
+    #[test]
+    fn eviction_releases_hub_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let (mut state, _hub) = state_with_hub(root);
+        state.eviction_after = Duration::from_millis(50);
+        state.ensure_loading();
+        wait_ready(&state);
+        assert!(state.has_hub_cursor(), "a built resident holds a cursor");
+
+        for _ in 0..300 {
+            if state.status() == DiagnosticsStatus::Idle {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(state.status(), DiagnosticsStatus::Idle, "resident evicted after idle");
+        assert!(!state.has_hub_cursor(), "eviction drops the cursor");
+    }
+
+    /// `status_report` surfaces the hub view so an agent can tell an event-driven serve
+    /// from a scan fallback.
+    #[test]
+    fn status_report_exposes_watch_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let (state, hub) = state_with_hub(root);
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let watch = state.status_report().watch.expect("a hub-backed profile reports watch");
+        assert_eq!(watch.mode, "event-driven");
+        assert_eq!(watch.health, "healthy");
+
+        hub.degrade_external();
+        let watch = state.status_report().watch.expect("watch report present");
+        assert_eq!(watch.mode, "scan-fallback", "a degraded hub reports the scan fallback");
+    }
+
+    /// An edit that lands WHILE a full rebuild is in flight must not be dropped: the drain
+    /// leaves it pending (rather than draining-then-bailing on the reload) and applies it to
+    /// the fresh resident once the rebuild finishes — without waiting for the reconciler.
+    /// With the old drain-before-reload-check order this test fails (the edit is lost).
+    #[test]
+    fn edit_during_rebuild_applies_after_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let (state, hub) = state_with_hub(root);
+        state.ensure_loading();
+        wait_ready(&state);
+
+        // Simulate a full rebuild in flight.
+        lock_recover(&state.inner).reload = ReloadState::Running;
+
+        let mut observer = hub.subscribe();
+        std::thread::sleep(Duration::from_millis(10));
+        fs::write(
+            module_path(root, "Сервер"),
+            "&НаСервере\nФункция Считать() Экспорт Возврат 11; КонецФункции\n",
+        )
+        .unwrap();
+        assert!(wait_for_delivery(&hub, &mut observer, "Module.bsl"), "hub delivered the edit");
+
+        // A read during the rebuild must NOT drain/apply (else the edit is lost).
+        let gen0 = raw_generation(&state);
+        let _ = state.read(|_, _| ());
+        assert_eq!(raw_generation(&state), gen0, "no apply while a rebuild is in flight");
+
+        // The rebuild finishes.
+        lock_recover(&state.inner).reload = ReloadState::Idle;
+
+        // The still-pending edit now applies to the (current) resident on the next read.
+        assert!(wait_for_apply(&state, gen0), "the pending edit applies once the rebuild ends");
+        let text = state.read(|r, _| {
+            let fid = r.file_id_for(&module_path(root, "Сервер")).unwrap();
+            r.analysis().file_text(fid)
+        });
+        match text {
+            ResidentOutcome::Ready(t, _) => assert!(t.contains("Возврат 11"), "edit applied"),
+            _ => panic!("expected Ready"),
+        }
+    }
+
+    /// A legitimate edit that lands DURING the reconciler's scan (delivered to the cursor,
+    /// just after its first drain) must NOT be counted as a lossy-backend miss: the second
+    /// drain covers it, so the hub stays Healthy. With the old single-drain reconciler this
+    /// fails (the scan sees drift and degrades).
+    #[test]
+    fn reconciler_does_not_degrade_a_late_delivered_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let (state, hub) = state_with_hub(root);
+        state.ensure_loading();
+        wait_ready(&state);
+
+        // The probe fires between the reconciler's first drain and its scan: it writes the
+        // edit and waits for the hub to deliver it into the accumulator (so the diagnostics
+        // cursor holds it for the reconciler's second drain).
+        let probe_root = root.to_path_buf();
+        let probe_hub = hub.clone();
+        state.set_reconcile_probe(move || {
+            fs::write(
+                probe_root.join("CommonModules/Сервер/Ext/Module.bsl"),
+                "&НаСервере\nФункция Считать() Экспорт Возврат 13; КонецФункции\n",
+            )
+            .unwrap();
+            let mut obs = probe_hub.subscribe();
+            for _ in 0..300 {
+                let batch = probe_hub.drain(obs);
+                obs = batch.cursor;
+                if batch.entries.iter().any(|e| e.raw.to_string_lossy().contains("Module.bsl")) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+
+        let gen0 = raw_generation(&state);
+        state.reconcile_tick();
+
+        assert!(raw_generation(&state) > gen0, "the late edit is still applied");
+        assert_eq!(
+            hub.health(),
+            Health::Healthy,
+            "an edit delivered during the scan is not a miss and must not degrade",
+        );
+    }
+
+    /// A `bsl-analyzer.toml` in a SUBDIRECTORY is not the analyzer config (which lives at the
+    /// workspace root): the drain must ignore it, matching the scan path's `config_fingerprint`
+    /// which only fingerprints `root.join(name)`. A subtree toml edit is not a rebuild trigger.
+    #[test]
+    fn subdir_config_file_is_not_config_drift() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        // A toml deep in the tree, NOT the root analyzer config.
+        write(root, "CommonModules/Сервер/bsl-analyzer.toml", "[diagnostics]\n");
+
+        let (state, _hub) = state_with_hub(root);
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let subdir_toml = root.join("CommonModules/Сервер/bsl-analyzer.toml");
+        let canonical = subdir_toml.canonicalize().unwrap_or(subdir_toml);
+        let entry = ChangeEntry {
+            canonical: canonical.clone(),
+            raw: canonical,
+            kind: ChangeKind::MaybeChanged,
+            seq: 1,
+        };
+
+        let gen0 = raw_generation(&state);
+        // Feeding the subdir toml as drift must NOT kick a full rebuild.
+        state.apply_drained_entries(&[entry]);
+        assert_eq!(
+            state.status_report().reload,
+            "none",
+            "a toml outside the workspace root is not analyzer-config drift",
+        );
+        assert_eq!(raw_generation(&state), gen0, "no structural rebuild for a subtree toml");
+    }
+
+    /// A `.bsl` edit in an EXTENSION root (disjoint from the config source root) is delivered
+    /// through the drain, because the hub watches every scan root — not just the source one.
+    /// Without extension coverage this drift would be invisible until the 90s reconciler.
+    #[test]
+    fn extension_root_edit_lands_via_drain() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        // Nested layout: config source under `src/cf`, an extension auto-discovered under
+        // `src/cfe/*` (both need a `Configuration.xml` to be recognised).
+        let cf = root.join("src/cf");
+        fs::create_dir_all(&cf).unwrap();
+        fs::write(cf.join("Configuration.xml"), "<Configuration/>").unwrap();
+        write_common_module(&cf, "Сервер", true, "&НаСервере\nФункция Ч() Экспорт КонецФункции");
+        let ext = root.join("src/cfe/Расш");
+        fs::create_dir_all(&ext).unwrap();
+        fs::write(ext.join("Configuration.xml"), "<Configuration/>").unwrap();
+        write_common_module(
+            &ext,
+            "РасшМодуль",
+            true,
+            "&НаСервере\nФункция Р() Экспорт КонецФункции",
+        );
+
+        // Build the hub over the SAME roots the scan sees (source + extensions), as production does.
+        let project = project_model::Project::new(root);
+        let mut roots = vec![project.source_path().to_path_buf()];
+        roots.extend(project.extension_paths().iter().map(|(_, p)| p.clone()));
+        assert!(roots.len() >= 2, "the extension root must be discovered: {roots:?}");
+        let hub = WorkspaceChangeHub::start(roots);
+        assert!(hub.wait_until_watching(Duration::from_secs(5)), "the hub must arm");
+
+        let mut state =
+            DiagnosticsState::for_workspace(root.to_path_buf()).with_change_hub(hub.clone());
+        state.drift_interval = Duration::from_millis(0);
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let ext_module = ext.join("CommonModules/РасшМодуль/Ext/Module.bsl");
+        let resident = state.read(|r, _| r.file_id_for(&ext_module).is_some());
+        assert!(
+            matches!(resident, ResidentOutcome::Ready(true, _)),
+            "the extension module must be resident",
+        );
+
+        let gen0 = raw_generation(&state);
+        std::thread::sleep(Duration::from_millis(10));
+        fs::write(&ext_module, "&НаСервере\nФункция Р() Экспорт Возврат 9; КонецФункции\n")
+            .unwrap();
+
+        assert!(wait_for_apply(&state, gen0), "an extension-root edit is delivered via drain");
+        assert_eq!(state.scan_count(), 0, "the event-driven path performs no scan");
+    }
+
+    /// `BSL_MCP_RECONCILE_SECS` clamping: `0` and garbage fall back to the default; small
+    /// positive values are floored so the sweeper cannot busy-loop; valid values pass through.
+    #[test]
+    fn reconcile_interval_clamps_bad_env() {
+        assert_eq!(clamp_reconcile_interval(None), RECONCILE_INTERVAL, "unset/garbage → default");
+        assert_eq!(clamp_reconcile_interval(Some(0)), RECONCILE_INTERVAL, "zero → default");
+        assert_eq!(clamp_reconcile_interval(Some(1)), MIN_RECONCILE_INTERVAL, "floored");
+        assert_eq!(clamp_reconcile_interval(Some(4)), MIN_RECONCILE_INTERVAL, "floored");
+        assert_eq!(clamp_reconcile_interval(Some(5)), Duration::from_secs(5), "at the floor");
+        assert_eq!(clamp_reconcile_interval(Some(120)), Duration::from_secs(120), "passthrough");
+        // Unparseable env text becomes `None` before clamping.
+        assert_eq!("nonsense".parse::<u64>().ok(), None);
     }
 }
